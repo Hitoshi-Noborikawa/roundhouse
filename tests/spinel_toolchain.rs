@@ -153,6 +153,8 @@ mod engine_mount;
 fn literal_isolated_engine_mount_dispatches_on_native_http() {
     engine_mount::spinel_http_witness();
 }
+#[path = "support/cable_actions.rs"]
+mod cable_actions;
 
 #[test]
 #[ignore = "requires the Spinel toolchain, run in its CI lane"]
@@ -236,6 +238,17 @@ puts "rails health contract passed"
     assert!(run.stdout.contains("rails health contract passed"));
     let main = std::fs::read_to_string(run.emitted.join("main.rb")).expect("main.rb");
     assert!(main.contains("when :rails_health then Rails::HealthController.new"), "{main}");
+}
+
+/// The native half of `emit_and_run::a_cable_action_runs_with_rails_rules`:
+/// the same channels and frames through the generated
+/// `ActionCable::Channel.perform` arms, which no fixture reaches.
+#[test]
+#[ignore = "requires the Spinel toolchain, run in its CI lane"]
+fn a_cable_action_runs_with_rails_rules_natively() {
+    let run = cable_actions::overlay().run_spinel(&cable_actions::spinel_script());
+    run.assert_passes();
+    assert_eq!(run.stdout, cable_actions::EXPECTED, "stderr:\n{}", run.stderr);
 }
 
 fn scratch_dir(tag: &str) -> PathBuf {
