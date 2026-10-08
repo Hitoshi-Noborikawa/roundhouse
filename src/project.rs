@@ -3926,10 +3926,14 @@ fn cable_action_call(method: &crate::dialect::MethodDef) -> CableActionCall {
 /// `public_send`. A strict target has neither, so the same set is
 /// worked out here, per channel, from the ingested classes:
 ///
-/// - the channel's own public methods, then its mixins (last included
-///   first) and its app ancestors' with theirs, Ruby's lookup order -
-///   the first definition of a name decides, so a subclass that makes
-///   an inherited method private takes it out;
+/// - the channel's own public methods, then its mixins and its app
+///   ancestors' with theirs, in Ruby's lookup order - modules a
+///   `config/initializers/` file prepends or includes (`app.module_mixins`)
+///   take their place in it - and the first definition of a name decides,
+///   so a subclass that makes an inherited method private takes it out;
+/// - a method the channel class itself defines publicly stays an action
+///   even when a prepended module makes it private, as in Rails; its arm
+///   raises the NoMethodError `public_send` raises there;
 /// - an inherited name `Channel::Base` also answers is not an action
 ///   (`CABLE_BASE_PUBLIC_METHODS`); the methods this pipeline writes
 ///   into channels never are (`CABLE_SYNTHESIZED_METHODS`).
@@ -3942,12 +3946,21 @@ fn cable_action_call(method: &crate::dialect::MethodDef) -> CableActionCall {
 /// The CRuby overlay does not read this: it has reflection, and runs
 /// Rails' own algorithm in its `Channel::Base#perform_action`.
 fn apply_cable_actions(files: &mut [(String, String)], app: &App) {
+    use crate::app::MixinKind;
     use crate::dialect::{MethodReceiver, MethodVisibility};
     const HEAD: &str = "    # >>> generated: cable-actions\n";
     const TAIL: &str = "    # <<< generated: cable-actions\n";
     const ROOT: &str = "ActionCable::Channel::Base";
 
     let class_named = |name: &str| app.library_classes.iter().find(|lc| lc.name.0.as_str() == name);
+    // `X.include M` / `X.prepend M` from config/initializers, in registration order.
+    let initializer_mixins = |target: &str, kind: MixinKind| -> Vec<&crate::dialect::LibraryClass> {
+        app.module_mixins
+            .iter()
+            .filter(|m| m.kind == kind && m.target.as_str().trim_start_matches("::") == target)
+            .filter_map(|m| class_named(m.module.as_str().trim_start_matches("::")))
+            .collect()
+    };
 
     // (depth, name) for every class descending from Base: the same
     // transitive descent `apply_cable_channels` does, keeping the depth.
@@ -3975,8 +3988,10 @@ fn apply_cable_actions(files: &mut [(String, String)], app: &App) {
     let mut generated = String::from(HEAD);
     generated.push_str("    def self.perform(channel, action, data)\n");
     for &(_, channel) in &channels {
-        // Ruby's lookup order: the class, its mixins (last included
-        // first), then the parent and its mixins, up to Base.
+        // Ruby's lookup order, up to Base: for each class, the modules an
+        // initializer prepends onto it (newest first), the class, the
+        // modules an initializer includes into it (newest first, so ahead of
+        // the class body's), its own `include`s (last first); then the parent.
         let mut order: Vec<(&crate::dialect::LibraryClass, bool)> = Vec::new();
         let mut current = class_named(channel);
         let mut own = true;
@@ -3984,7 +3999,14 @@ fn apply_cable_actions(files: &mut [(String, String)], app: &App) {
             if lc.name.0.as_str() == ROOT {
                 break;
             }
+            let class = lc.name.0.as_str();
+            for module in initializer_mixins(class, MixinKind::Prepend).into_iter().rev() {
+                order.push((module, false));
+            }
             order.push((lc, own));
+            for module in initializer_mixins(class, MixinKind::Include).into_iter().rev() {
+                order.push((module, false));
+            }
             for include in lc.includes.iter().rev() {
                 if let Some(module) = class_named(include.0.as_str()) {
                     order.push((module, false));
@@ -3994,36 +4016,59 @@ fn apply_cable_actions(files: &mut [(String, String)], app: &App) {
             current = lc.parent.as_ref().and_then(|p| class_named(p.0.as_str()));
         }
 
-        let mut seen: Vec<&str> = Vec::new();
-        let mut arms = String::new();
+        // The definition each name resolves to (the first in that order),
+        // and the names the channel class itself defines publicly: Rails
+        // adds those to `action_methods` even when a prepended module
+        // shadows them, and `public_send` then meets the shadowing method.
+        let mut effective: Vec<(&str, &crate::dialect::MethodDef, bool)> = Vec::new();
+        let mut own_public: Vec<&str> = Vec::new();
         for (lc, own) in order {
             for method in &lc.methods {
                 let name = method.name.as_str();
-                if method.receiver != MethodReceiver::Instance || seen.contains(&name) {
+                if method.receiver != MethodReceiver::Instance {
                     continue;
                 }
-                seen.push(name);
-                if method.visibility != MethodVisibility::Public
-                    || method.unsupported_formals.is_some()
-                    || CABLE_SYNTHESIZED_METHODS.contains(&name)
-                    || (!own && CABLE_BASE_PUBLIC_METHODS.contains(&name))
-                {
+                if own && method.visibility == MethodVisibility::Public {
+                    own_public.push(name);
+                }
+                if !effective.iter().any(|(n, _, _)| *n == name) {
+                    effective.push((name, method, own));
+                }
+            }
+        }
+
+        let mut arms = String::new();
+        for (name, method, own) in effective {
+            if CABLE_SYNTHESIZED_METHODS.contains(&name) {
+                continue;
+            }
+            let call = if method.visibility == MethodVisibility::Public {
+                let base_name = !own && !own_public.contains(&name) && CABLE_BASE_PUBLIC_METHODS.contains(&name);
+                if method.unsupported_formals.is_some() || base_name {
                     continue;
                 }
-                let call = match cable_action_call(method) {
+                match cable_action_call(method) {
                     CableActionCall::WithData => format!("channel.{name}(data)"),
                     CableActionCall::Bare => format!("channel.{name}"),
                     // The message is built from a count and identifiers only,
                     // so it needs no escaping inside the double quotes.
                     CableActionCall::Raises(message) => format!("raise ArgumentError, \"{message}\""),
-                };
-                arms.push_str(&format!(
-                    "        if action == \"{name}\"\n\
-                     \x20         {call}\n\
-                     \x20         return true\n\
-                     \x20       end\n",
-                ));
-            }
+                }
+            } else if own_public.contains(&name) {
+                // Rails: an action (the class defines it publicly) whose call
+                // `public_send` refuses, since a prepended module made it
+                // private or protected.
+                let kind = if method.visibility == MethodVisibility::Private { "private" } else { "protected" };
+                format!("raise NoMethodError, \"{kind} method '{name}' called for an instance of {channel}\"")
+            } else {
+                continue;
+            };
+            arms.push_str(&format!(
+                "        if action == \"{name}\"\n\
+                 \x20         {call}\n\
+                 \x20         return true\n\
+                 \x20       end\n",
+            ));
         }
         // An arm even with no actions in it: a channel that made every
         // inherited action private must not fall through to its parent's arm.
