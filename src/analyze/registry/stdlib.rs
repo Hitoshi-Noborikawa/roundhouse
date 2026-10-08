@@ -492,11 +492,12 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
     ]);
 
     // `FileUtils` — a default gem / spinel's `packages/fileutils`.
-    // `mkdir_p` answers the directories it was given, `cp` nil (both checked
-    // against CRuby and Spinel, tests/support/stdlib_rnp.rs).
+    // `mkdir_p` answers the directories it was given; `cp` nil for one source
+    // and the source Array for several (CRuby 4.0.5). Both checked against
+    // CRuby and Spinel (tests/support/stdlib_rnp.rs).
     register_stdlib_class(classes, "FileUtils", &[
         ("mkdir_p", Ty::Array { elem: Box::new(Ty::Str) }), ("makedirs", Ty::Untyped),
-        ("cp", Ty::Nil),
+        ("cp", Ty::Union { variants: vec![Ty::Nil, Ty::Array { elem: Box::new(Ty::Str) }] }),
         ("rm_rf", Ty::Untyped), ("rm_f", Ty::Untyped),
         ("remove_entry", Ty::Nil), ("touch", Ty::Untyped),
     ], &[]);
