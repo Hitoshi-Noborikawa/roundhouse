@@ -94,6 +94,10 @@ fn custom_data_factories_run_natively() {
     run.assert_passes();
     assert!(run.stdout.contains("custom Data factory contract passed"));
 }
+#[path = "support/stdlib_rnp.rs"]
+mod stdlib_rnp_contract;
+#[path = "spinel_toolchain/stdlib_rnp.rs"]
+mod stdlib_rnp;
 
 /// The native counterpart of the generic emitted-Ruby regression test.
 #[test]

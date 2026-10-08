@@ -492,8 +492,11 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
     ]);
 
     // `FileUtils` — a default gem / spinel's `packages/fileutils`.
+    // `mkdir_p` answers the directories it was given, `cp` nil (both checked
+    // against CRuby and Spinel, tests/support/stdlib_rnp.rs).
     register_stdlib_class(classes, "FileUtils", &[
-        ("mkdir_p", Ty::Untyped), ("makedirs", Ty::Untyped),
+        ("mkdir_p", Ty::Array { elem: Box::new(Ty::Str) }), ("makedirs", Ty::Untyped),
+        ("cp", Ty::Nil),
         ("rm_rf", Ty::Untyped), ("rm_f", Ty::Untyped),
         ("remove_entry", Ty::Nil), ("touch", Ty::Untyped),
     ], &[]);
@@ -672,6 +675,9 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
         // long to encode. rqrcode_core's classes on the ruby family, the
         // spinel-rqrcode package's (same names, same raise) on spinel.
         "RQRCodeCore::QRCodeRunTimeError", "RQRCodeCore::QRCodeArgumentError",
+        // `rescue CSV::MalformedCSVError` around `CSV.parse` (csv is loaded
+        // by the emitted require, on Spinel by its csv package).
+        "CSV::MalformedCSVError",
     ] {
         register_stdlib_class(classes, exc, &[], &exception_surface);
     }
@@ -865,6 +871,23 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
     // Exception is `Timeout::Error` above. CRuby loads via BUNDLED
     // `require "timeout"`; Spinel gets `runtime/ruby/timeout.rb`.
     register_stdlib_class(classes, "Timeout", &[], &[]);
+// GC / OpenSSL::HMAC / Enumerator::Product / Enumerator::Lazy (and
+// FileUtils' `mkdir_p` / `cp`, in its registration above), as an API reaches
+// for them: `GC.start` between batches, an HMAC
+// signature of a webhook payload, `Enumerator::Product.new(*lists)` over
+// route segments, and `is_a?(Enumerator::Lazy)` in a serializer. Only
+// the calls checked against CRuby and Spinel are registered
+// (tests/support/stdlib_rnp.rs); another FileUtils call stays a dispatch
+// error rather than a guess. Each library is loaded by its emitted
+// require; on Spinel by its fileutils / openssl package.
+register_stdlib_class(classes, "GC", &[("start", Ty::Nil)], &[]);
+register_stdlib_class(classes, "OpenSSL::HMAC", &[("digest", Ty::Str), ("hexdigest", Ty::Str)], &[]);
+let product = Ty::Class { id: ClassId(Symbol::from("Enumerator::Product")), args: vec![] };
+register_stdlib_class(classes, "Enumerator::Product", &[("new", product)], &[
+    ("to_a", Ty::Array { elem: Box::new(Ty::Array { elem: Box::new(Ty::Untyped) }) }),
+    ("size", Ty::Int),
+]);
+register_stdlib_class(classes, "Enumerator::Lazy", &[], &[]);
     // JSON dispatch is already intrinsic in BodyTyper and the emitters;
     // a source-backed reference must also recognize its exact namespace.
     register_stdlib_class(classes, "JSON", &[], &[]);
