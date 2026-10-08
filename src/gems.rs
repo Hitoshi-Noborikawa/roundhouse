@@ -309,6 +309,7 @@ const FATES: &[(&str, GemFate)] = &[
     ("geared_pagination", GemFate::Modeled), // registry/controllers: set_page_and_extract_portion_from
     ("htmlentities", GemFate::Modeled), // catalog/gems: HTMLEntities
     ("image_processing", GemFate::Modeled), // active_storage variants seam
+    ("inertia_rails", GemFate::Modeled), // ingest/inertia: render inertia:, inertia_share; runtime action_controller/inertia
     ("invisible_captcha", GemFate::Modeled), // before_action + spam? on subtitle honeypot only
     ("kaminari", GemFate::Modeled),    // Relation#page / per / paginate
     ("mail", GemFate::Modeled),        // catalog/gems: Mail::Address; ActionMailer
@@ -750,6 +751,7 @@ BUNDLED WITH
         assert_eq!(fate_of("rubocop-rails"), GemFate::Infrastructure);
         assert_eq!(fate_of("opentelemetry-instrumentation-pg"), GemFate::Infrastructure);
         assert_eq!(fate_of("never-heard-of-it"), GemFate::Unknown);
+        assert_eq!(fate_of("inertia_rails"), GemFate::Modeled);
         assert_eq!(namespace_of("front_matter_parser"), "FrontMatterParser");
         assert_eq!(namespace_of("aws-sdk-s3"), "Aws");
         assert_eq!(namespace_of("rubyzip"), "Zip");
