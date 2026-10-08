@@ -59,6 +59,8 @@ pub struct App {
     pub importmap: Option<Importmap>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub inertia: Option<InertiaConfig>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vite_manifest: Option<ViteManifest>,
     /// Logical stylesheet names discovered in `app/assets/stylesheets/`
     /// + `app/assets/builds/` (file stems without `.css`). When the
     /// ERB uses `stylesheet_link_tag :app, ...`, Rails with Propshaft
@@ -603,9 +605,6 @@ impl MixinKind {
     }
 }
 
-/// A Rails-style importmap: one `<name>` → `<path>` entry per
-/// pin, in declaration order (Rails preserves order for
-/// modulepreload link emission).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Default)]
 pub struct InertiaConfig {
     pub version: String,
@@ -614,6 +613,23 @@ pub struct InertiaConfig {
     pub use_script_element_for_initial_page: bool,
 }
 
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Default)]
+pub struct ViteManifest {
+    pub public_dir: String,
+    pub digest: String,
+    pub chunks: std::collections::BTreeMap<String, ViteChunk>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Default)]
+pub struct ViteChunk {
+    pub file: String,
+    pub css: Vec<String>,
+    pub imports: Vec<String>,
+}
+
+/// A Rails-style importmap: one `<name>` → `<path>` entry per
+/// pin, in declaration order (Rails preserves order for
+/// modulepreload link emission).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Default)]
 pub struct Importmap {
     pub pins: Vec<ImportmapPin>,
@@ -731,6 +747,7 @@ impl App {
             seeds: None,
             importmap: None,
             inertia: None,
+            vite_manifest: None,
             stylesheets: Vec::new(),
             rbs_signatures: HashMap::new(),
             rbs_includes: HashMap::new(),
