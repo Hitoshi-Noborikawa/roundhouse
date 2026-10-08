@@ -38,6 +38,10 @@ mod dry_struct;
 mod data_factory;
 #[path = "support/rails_root_join.rs"]
 mod rails_root_join;
+#[path = "support/cable_actions.rs"]
+mod cable_actions_contract;
+#[path = "emit_and_run/cable_actions.rs"]
+mod cable_actions;
 #[path = "support/cable_broadcast_json.rs"]
 mod cable_broadcast_json_contract;
 #[path = "emit_and_run/cable_broadcast_json.rs"]
@@ -1618,8 +1622,6 @@ fn dynamic_engine_route_targets_keep_their_source_boundary() {
 
 #[path = "emit_and_run/integer_query_exists.rs"]
 mod integer_query_exists;
-#[path = "support/cable_actions.rs"]
-mod cable_actions;
 
 #[test]
 fn critic_corrections_preserve_class_objects_reflection_and_operators() {
@@ -12854,15 +12856,3 @@ puts "PASS friendly oracle"
 }
 #[path = "emit_and_run/acts_as_votable.rs"]
 mod acts_as_votable;
-/// A client's `subscription.perform(action, data)` runs the channel's
-/// action with Rails' own rules (#71 item 6): which methods are actions,
-/// which get `data`, `receive` as the default, JSON `false` kept false,
-/// and nothing for a private or unknown name or a rejected subscription.
-/// The CRuby overlay's half; `spinel_toolchain` runs the same contract
-/// natively through the generated dispatch.
-#[test]
-fn a_cable_action_runs_with_rails_rules() {
-    let run = cable_actions::overlay().run_ruby(&cable_actions::ruby_script());
-    run.assert_passes();
-    assert_eq!(run.stdout, cable_actions::EXPECTED, "stderr:\n{}", run.stderr);
-}
