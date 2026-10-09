@@ -145,6 +145,11 @@ fn ingest_library_classes_impl(
         out.extend(data_block_classes(module.body(), &owner, file)?);
         out.extend(structs.into_iter().map(|(_, s)| s));
     }
+    if out.is_empty() {
+        if let Some(lc) = file_data_class(&root, file) {
+            return Ok(vec![lc]);
+        }
+    }
     // Constants written at FILE level, outside any class — lobsters'
     // `search_parser.rb` opens with `MYISAM_STOPWORDS = %w[…]` and the
     // parser's `rule(:stopword)` reads it. Ruby puts these on Object,
@@ -251,6 +256,70 @@ fn data_block_classes(
         });
     }
     Ok(out)
+}
+
+/// The class that a file with the one statement `X = Data.define(:a,
+/// :b)` creates. This is the Zeitwerk shape of a value class: Ruby
+/// creates the class when it assigns the constant, so it is a library
+/// class, not a file-level constant that is hoisted into another class.
+/// Only distinct literal Symbol members and no block are admitted.
+/// Other factories stay unresolved constants.
+fn file_data_class(root: &ruby_prism::Node<'_>, file: &str) -> Option<LibraryClass> {
+    let (name, call) = file_data_factory(root)?;
+    let members = data_members(&call)?;
+    Some(LibraryClass {
+        name: ClassId(Symbol::from(name)),
+        is_module: false,
+        parent: None,
+        parent_span: Span::synthetic(),
+        includes: Vec::new(),
+        methods: Vec::new(),
+        nullable_columns: Vec::new(),
+        origin: Some(crate::dialect::LibraryClassOrigin::DataDefine {
+            members,
+            span: super::util::node_span(&call.as_node(), file),
+        }),
+        constants: Vec::new(),
+        unknown_calls: Vec::new(),
+        class_ivar_initializers: Vec::new(),
+    })
+}
+
+/// The constant name and the `Data.define` call of a file whose only
+/// statement is `X = Data.define(…)` without a block.
+fn file_data_factory<'pr>(
+    root: &ruby_prism::Node<'pr>,
+) -> Option<(String, ruby_prism::CallNode<'pr>)> {
+    let statements = root.as_program_node()?.statements().body();
+    let mut iter = statements.iter();
+    let (Some(statement), None) = (iter.next(), iter.next()) else {
+        return None;
+    };
+    let write = statement.as_constant_write_node()?;
+    let call = write.value().as_call_node()?;
+    if call.name().as_slice() != b"define" || call.block().is_some() {
+        return None;
+    }
+    if constant_path_of(&call.receiver()?)? != ["Data"] {
+        return None;
+    }
+    Some((constant_id_str(&write.name()).to_string(), call))
+}
+
+/// The members of a `Data.define` call when each one is a distinct
+/// Symbol literal.
+fn data_members(call: &ruby_prism::CallNode<'_>) -> Option<Vec<Symbol>> {
+    let mut members = Vec::new();
+    if let Some(args) = call.arguments() {
+        for arg in args.arguments().iter() {
+            let member = Symbol::from(symbol_value(&arg)?);
+            if members.contains(&member) {
+                return None;
+            }
+            members.push(member);
+        }
+    }
+    Some(members)
 }
 
 /// `NAME = <expr>` statements at the top level of a file, in source
@@ -3301,6 +3370,11 @@ pub fn classify_class_file(source: &[u8], bases: &ModelBases) -> Option<ClassKin
         // module — `module Admin; class User < ApplicationRecord` — is
         // still found above and classified Model.)
         if !find_all_modules_with_scope(&root).is_empty() {
+            return Some(ClassKind::LibraryClass);
+        }
+        // `Breadcrumb = Data.define(:name, :path)`: the file declares a
+        // value class, not a model (see `file_data_class`).
+        if file_data_factory(&root).is_some_and(|(_, call)| data_members(&call).is_some()) {
             return Some(ClassKind::LibraryClass);
         }
         return None;

@@ -2128,9 +2128,26 @@ impl Analyzer {
         }
         entries.extend(nested);
 
+        // An admitted file-level `X = Data.define(…)` has no constant
+        // value in the IR: its library class is the value. Each round
+        // starts with it, so a constant built from the class
+        // (`HOME = Breadcrumb.new(…)`) can read it.
+        let data_classes: Vec<(DeclarationId, Ty)> = app
+            .library_classes
+            .iter()
+            .filter_map(|lc| {
+                let span = lc.data_define()?.1;
+                let ty = self.data_factories.get(&span)?;
+                Some((
+                    rubydex::model::ids::declaration_id_from_lookup_name(lc.name.0.as_str()),
+                    ty.clone(),
+                ))
+            })
+            .collect();
         let mut map: HashMap<Symbol, Ty> = HashMap::new();
         let mut ambiguous: std::collections::HashSet<Symbol> = std::collections::HashSet::new();
-        let mut resolved: IdentityHashMap<DeclarationId, Ty> = IdentityHashMap::default();
+        let seeded = || -> IdentityHashMap<DeclarationId, Ty> { data_classes.iter().cloned().collect() };
+        let mut resolved = seeded();
         // Each round can type one more link of a `B = A` chain, so n
         // values need at most n + 1 rounds when no value changes after
         // it is typed. A cycle (`A = B`, `B = A`) never types and stays
@@ -2138,7 +2155,7 @@ impl Analyzer {
         // that change on each round.
         for _ in 0..=entries.len() {
             let mut next: HashMap<Symbol, Ty> = HashMap::new();
-            let mut next_resolved: IdentityHashMap<DeclarationId, Ty> = IdentityHashMap::default();
+            let mut next_resolved = seeded();
             let shared = body::ConstScope::global(map.clone());
             let typer = BodyTyper::new(&self.classes)
                 .with_inquirers(&self.inquirers)

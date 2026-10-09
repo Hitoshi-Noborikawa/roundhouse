@@ -91,11 +91,19 @@ fn render_class(lc: &LibraryClass, classes: &[LibraryClass]) -> String {
         let pad = "  ".repeat(depth - 1);
         match lc.parent.as_ref() {
             Some(p) => writeln!(s, "{pad}class {last} < {}", p.0.as_str()).unwrap(),
+            None if lc.data_define().is_some() => writeln!(s, "{pad}class {last} < ::Data").unwrap(),
             None => writeln!(s, "{pad}class {last}").unwrap(),
         }
     }
 
     let body_pad = "  ".repeat(depth);
+
+    if let Some((members, _)) = lc.data_define() {
+        writeln!(s, "{body_pad}def self.new: (*untyped, **untyped) -> instance").unwrap();
+        for member in members {
+            writeln!(s, "{body_pad}def `{}`: () -> untyped", member.as_str()).unwrap();
+        }
+    }
 
     for inc in &lc.includes {
         writeln!(s, "{body_pad}include {}", inc.0.as_str()).unwrap();

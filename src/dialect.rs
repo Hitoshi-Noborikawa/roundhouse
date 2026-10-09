@@ -1001,6 +1001,15 @@ pub struct LibraryClass {
 }
 
 impl LibraryClass {
+    /// The members and the `Data.define` span of a class that a
+    /// file-level `X = Data.define(…)` creates.
+    pub fn data_define(&self) -> Option<(&[Symbol], Span)> {
+        match &self.origin {
+            Some(LibraryClassOrigin::DataDefine { members, span }) => Some((members, *span)),
+            _ => None,
+        }
+    }
+
     /// Direct source `@ivar` / compound `@ivar` writes — the shapes that
     /// need source-ordered emission. Synthetic `mattr_*` / `cattr_*` `@@`
     /// seeds and other framework initialization stay on the partitioned
@@ -1105,6 +1114,15 @@ pub enum LibraryClassOrigin {
     /// A `Dry::Validation::Contract` given its `call`, a `Dry::Schema`
     /// constant's class, or what they share (`ingest::dry_validation`).
     DryValidation,
+    /// The class a file-level `X = Data.define(:a, :b)` creates, in a
+    /// file that declares nothing else. `members` are the literal
+    /// Symbol members in declaration order; `span` is the
+    /// `Data.define` call. Ruby and Spinel emit the factory again;
+    /// other targets have no Data representation and reject it.
+    DataDefine {
+        members: Vec<Symbol>,
+        span: Span,
+    },
 }
 
 /// A graphql-ruby object type (a class descending from

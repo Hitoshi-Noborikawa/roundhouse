@@ -7135,6 +7135,22 @@ fn emit_library_class_decl_inner(
             }
         }
     };
+    // A file-level `X = Data.define(…)` assigns the class once, and the
+    // body reopens it. A block would not do: a `class` in a block body
+    // belongs to the enclosing scope, not to the Data class.
+    if let Some((members, _)) = lc.data_define() {
+        let members: Vec<String> = members
+            .iter()
+            .map(|member| {
+                super::emit_expr(&Expr::new(
+                    Span::synthetic(),
+                    ExprNode::Lit { value: Literal::Sym { value: member.clone() } },
+                ))
+            })
+            .collect();
+        writeln!(s, "{name} = Data.define({})
+", members.join(", ")).unwrap();
+    }
     open_header(&mut s);
 
     for require in &nested_include_requires {
