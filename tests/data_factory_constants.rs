@@ -851,9 +851,9 @@ fn a_top_level_data_factory_file_registers_its_class() {
 }
 
 #[test]
-fn top_level_files_outside_the_blockless_data_define_shape_are_not_admitted() {
+fn top_level_files_outside_the_data_define_shape_are_not_admitted() {
     for source in [
-        "Weird = Data.define(:a) do\n  def doubled = a * 2\nend\n",
+        "Weird = Data.define(:a) do |klass|\n  def doubled = a * 2\nend\n",
         "Weird = Data.members(:a)\n",
         "Weird = Other.define(:a)\n",
     ] {
@@ -867,6 +867,59 @@ fn top_level_files_outside_the_blockless_data_define_shape_are_not_admitted() {
             "{source:?} was admitted as a Data class"
         );
     }
+}
+
+fn ingest_block(body: &str, reader: &str) -> Result<roundhouse::App, roundhouse::ingest::IngestError> {
+    let tree: HashMap<PathBuf, Vec<u8>> = [
+        (
+            PathBuf::from("app/models/timeframe.rb"),
+            format!("Timeframe = Data.define(:id, :label_text) do\n{body}end\n").into_bytes(),
+        ),
+        (
+            PathBuf::from("app/models/timeframe_report.rb"),
+            format!("class TimeframeReport\n  def self.read = {reader}\nend\n").into_bytes(),
+        ),
+    ]
+    .into_iter()
+    .collect();
+    roundhouse::ingest::ingest_app_from_tree(tree)
+}
+
+fn errors(app: &mut roundhouse::App) -> Vec<roundhouse::diagnostic::Diagnostic> {
+    roundhouse::session::analyze_and_lower(app);
+    roundhouse::analyze::diagnose(app)
+        .into_iter()
+        .filter(|diagnostic| diagnostic.severity == roundhouse::diagnostic::Severity::Error)
+        .collect()
+}
+
+#[test]
+fn a_data_define_block_is_the_body_of_its_class() {
+    let body = "  OPTIONS = { \"all\" => \"All time\" }.freeze\n\n  def self.find(id) = new(id, nil)\n  def label_text = OPTIONS.fetch(id)\n";
+    let mut app = ingest_block(body, "[OPTIONS.size, Timeframe.find(\"all\").label_text]").expect("ingest");
+    let class = app.library_classes.iter().find(|lc| lc.name.0.as_str() == "Timeframe").unwrap();
+    assert_eq!(class.constants.len(), 1, "{:?}", class.constants);
+    assert_eq!(class.methods.len(), 2, "{:?}", class.methods);
+    let errors = errors(&mut app);
+    assert!(errors.is_empty(), "{errors:?}");
+}
+
+#[test]
+fn a_data_define_block_constant_is_not_a_constant_of_the_class() {
+    let mut app = ingest_block("  OPTIONS = {}.freeze\n", "Timeframe::OPTIONS.size").expect("ingest");
+    let errors = errors(&mut app);
+    assert_eq!(errors.len(), 1, "{errors:?}");
+    assert!(format!("{:?}", errors[0].kind).contains("Timeframe::OPTIONS"), "{errors:?}");
+}
+
+#[test]
+fn a_class_inside_a_data_define_block_is_rejected() {
+    let Err(roundhouse::ingest::IngestError::Unsupported { message, .. }) =
+        ingest_block("  class Inner\n  end\n", "Timeframe")
+    else {
+        panic!("a class in a Data.define block was admitted");
+    };
+    assert!(message.contains("Data.define block"), "{message}");
 }
 
 #[test]

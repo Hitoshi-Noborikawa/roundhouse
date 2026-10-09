@@ -100,7 +100,12 @@ fn render_class(lc: &LibraryClass, classes: &[LibraryClass]) -> String {
 
     if let Some((members, _)) = lc.data_define() {
         writeln!(s, "{body_pad}def self.new: (*untyped, **untyped) -> instance").unwrap();
-        for member in members {
+        // A `def` in the `Data.define` block replaces the reader, and RBS
+        // rejects a second declaration of one method.
+        let defined = |member: &crate::ident::Symbol| {
+            lc.methods.iter().any(|m| m.receiver == MethodReceiver::Instance && m.name == *member)
+        };
+        for member in members.iter().filter(|member| !defined(member)) {
             writeln!(s, "{body_pad}def `{}`: () -> untyped", member.as_str()).unwrap();
         }
     }

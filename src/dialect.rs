@@ -1117,7 +1117,10 @@ pub enum LibraryClassOrigin {
     /// The class a file-level `X = Data.define(:a, :b)` creates, in a
     /// file that declares nothing else. `members` are the literal
     /// Symbol members in declaration order; `span` is the
-    /// `Data.define` call. Ruby and Spinel emit the factory again;
+    /// `Data.define` call. The statements of a `do … end` block are the
+    /// class body, and its constants are the class's `constants`. Ruby
+    /// runs the block with `self` as the class, but with the top level
+    /// as its lexical scope. Ruby and Spinel emit the factory again;
     /// other targets have no Data representation and reject it.
     DataDefine {
         members: Vec<Symbol>,

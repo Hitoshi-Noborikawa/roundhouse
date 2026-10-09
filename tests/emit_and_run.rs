@@ -15105,3 +15105,75 @@ fn a_top_level_data_factory_file_runs_natively() {
         .run_spinel(TOP_LEVEL_DATA_FACTORY)
         .assert_passes();
 }
+
+fn data_define_block_app() -> emit_and_run::Overlay {
+    emit_and_run::real_blog()
+        .write("app/models/timeframe_limits.rb", "module TimeframeLimits\n  TIMEFRAME_LIMIT = 5\nend\n")
+        .write("app/models/timeframe.rb", r##"Timeframe = Data.define(:id, :label_text) do
+  include TimeframeLimits
+
+  TIMEFRAME_OPTIONS = { "this_year" => "This year", "all_time" => "All time" }.freeze
+  TIMEFRAME_LIMIT = 10
+  DEFAULT_TIMEFRAME = new("all_time", nil)
+  @current = DEFAULT_TIMEFRAME
+
+  def self.find(id) = new(id, TIMEFRAME_OPTIONS.fetch(id))
+  def self.current = @current
+  def limit = TIMEFRAME_LIMIT
+
+  def label = "#{label_text}!"
+  def label_text = TIMEFRAME_OPTIONS.fetch(id)
+
+  private
+
+  def secret = "hidden"
+end
+"##)
+        .write("app/models/timeframe_report.rb", "class TimeframeReport\n  def self.option_count = TIMEFRAME_OPTIONS.size\nend\n")
+        .write("app/controllers/data_probe_controller.rb", r#"class DataProbeController < ApplicationController
+  def index
+    @label = Timeframe.find("this_year").label
+    @default = DEFAULT_TIMEFRAME.id
+    @current = Timeframe.current.id
+    @limit = Timeframe.find("this_year").limit
+    @count = TimeframeReport.option_count
+  end
+end
+"#)
+}
+
+const DATA_DEFINE_BLOCK: &str = r#"
+raise "class method lost" unless Timeframe.find("this_year").label == "This year!"
+raise "reader override lost" unless Timeframe.new("all_time", "ignored").label_text == "All time"
+raise "constant built with new lost" unless DEFAULT_TIMEFRAME.is_a?(Timeframe) && DEFAULT_TIMEFRAME.id == "all_time"
+raise "constant read from another file lost" unless TimeframeReport.option_count == 2
+raise "class state lost its constant" unless Timeframe.current.equal?(DEFAULT_TIMEFRAME)
+raise "a mixin constant shadowed the block's constant" unless Timeframe.find("this_year").limit == 10
+raise "private method exposed" if Timeframe.new("all_time", nil).respond_to?(:secret)
+puts "Data.define block passed"
+"#;
+
+#[test]
+fn a_data_define_block_is_the_class_body_and_executes() {
+    let run = data_define_block_app().run_ruby(&format!(r#"{DATA_DEFINE_BLOCK}
+raise "not a Data class" unless Timeframe.superclass == Data && Timeframe.members == [:id, :label_text]
+raise "block constant not on Object" unless Object.const_defined?(:TIMEFRAME_OPTIONS, false)
+raise "block constant on the Data class" if Timeframe.const_defined?(:TIMEFRAME_OPTIONS, false)
+"#));
+    run.assert_passes();
+    let sidecar = std::fs::read_to_string(run.emitted.join("sig/app/models/timeframe.rbs")).unwrap();
+    let signatures = roundhouse::rbs::parse_app_signatures(&sidecar).expect("emitted RBS parses");
+    let timeframe = &signatures[&roundhouse::ident::ClassId(roundhouse::ident::Symbol::from("Timeframe"))];
+    for method in ["new", "id", "label_text", "find", "label"] {
+        assert!(timeframe.contains_key(&roundhouse::ident::Symbol::from(method)), "{sidecar}");
+    }
+    assert_eq!(sidecar.matches("def label_text").count(), 1, "{sidecar}");
+}
+
+#[test]
+#[ignore = "requires the native Spinel compiler"]
+fn a_data_define_block_runs_natively() {
+    data_define_block_app()
+        .run_spinel(DATA_DEFINE_BLOCK)
+        .assert_passes();
+}
