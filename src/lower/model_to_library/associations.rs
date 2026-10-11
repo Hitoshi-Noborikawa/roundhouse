@@ -1599,6 +1599,29 @@ fn synth_polymorphic_reader(
     }
 }
 
+/// `case scrutinee when Target then <arm(Target)> … end` over a polymorphic
+/// belongs_to's resolved implementor set. The class-pattern `when` keeps the
+/// type string a compile-time constant per arm (no `.class.name`), and an
+/// STI subclass instance lands in its implementor's arm — so what the writer
+/// stores and what a `where(assoc: record)` condition compares to are the
+/// same value by construction. Shared by `synth_polymorphic_writer` and the
+/// polymorphic condition lowering in `scope_chain`.
+pub(crate) fn polymorphic_type_switch(
+    scrutinee: Expr,
+    targets: &[ClassId],
+    arm_body: impl Fn(&ClassId) -> Expr,
+) -> Expr {
+    let arms: Vec<crate::expr::Arm> = targets
+        .iter()
+        .map(|t| crate::expr::Arm {
+            pattern: crate::expr::Pattern::Expr { expr: class_const(t) },
+            guard: None,
+            body: arm_body(t),
+        })
+        .collect();
+    Expr::new(Span::synthetic(), ExprNode::Case { scrutinee, arms })
+}
+
 fn synth_polymorphic_writer(
     owner: &ClassId,
     name: &Symbol,
@@ -1662,18 +1685,9 @@ fn synth_polymorphic_writer(
             parenthesized: false,
         },
     );
-    let type_arms: Vec<crate::expr::Arm> = targets
-        .iter()
-        .map(|t| crate::expr::Arm {
-            pattern: crate::expr::Pattern::Expr { expr: class_const(t) },
-            guard: None,
-            body: assign(&type_col, lit_str(t.0.as_str())),
-        })
-        .collect();
-    let type_switch = Expr::new(
-        Span::synthetic(),
-        ExprNode::Case { scrutinee: var_ref(value.clone()), arms: type_arms },
-    );
+    let type_switch = polymorphic_type_switch(var_ref(value.clone()), targets, |t| {
+        assign(&type_col, lit_str(t.0.as_str()))
+    });
     let body = Expr::new(
         Span::synthetic(),
         ExprNode::If {

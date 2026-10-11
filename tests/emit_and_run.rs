@@ -12555,3 +12555,5 @@ puts "PASS friendly oracle"
         )
         .assert_passes();
 }
+#[path = "emit_and_run/acts_as_votable.rs"]
+mod acts_as_votable;
