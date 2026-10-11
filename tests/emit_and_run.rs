@@ -15177,3 +15177,58 @@ fn a_data_define_block_runs_natively() {
         .run_spinel(DATA_DEFINE_BLOCK)
         .assert_passes();
 }
+
+fn qualified_data_define_app() -> emit_and_run::Overlay {
+    emit_and_run::real_blog()
+        .write("app/models/article/summary.rb", r##"Article::Summary = Data.define(:article) do
+  ARTICLE_SUMMARY_PREFIX = "Summary of "
+
+  def self.for(article) = new(article)
+
+  def text = "#{ARTICLE_SUMMARY_PREFIX}#{article.title}"
+end
+"##)
+        .write("app/models/reports/line.rb", "Reports::Line = Data.define(:label, :amount)\n")
+        .write("app/models/formatting.rb", "module Formatting\n  def format_count = \"top\"\nend\n")
+        .write("app/models/reports/formatting.rb", "module Reports\n  module Formatting\n    def format_count = \"nested\"\n  end\nend\n")
+        .write("app/models/reports/total.rb", "Reports::Total = Data.define(:amount) do\n  include Formatting\nend\n")
+        .write("app/models/catalog.rb", "class Catalog\n  def self.size = 1\nend\n")
+        .write("app/models/catalog/entry.rb", "Catalog::Entry = Data.define(:name)\n")
+        .write("app/controllers/data_probe_controller.rb", r#"class DataProbeController < ApplicationController
+  def index
+    @summary = Article::Summary.for(Article.new(title: "Hello")).text
+    @line = Reports::Line.new("articles", 2).amount
+    @total = Reports::Total.new(2).format_count
+    @entry = Catalog::Entry.new("first").name
+  end
+end
+"#)
+}
+
+const QUALIFIED_DATA_DEFINE: &str = r#"
+raise "a class namespace lost its Data class" unless Article::Summary.for(Article.new(title: "Hello")).text == "Summary of Hello"
+raise "a module namespace lost its Data class" unless Reports::Line.new("articles", 2).amount == 2
+raise "the include did not resolve from the top level" unless Reports::Total.new(2).format_count == "top"
+raise "a library class namespace lost its Data class" unless Catalog::Entry.new("first").name == "first" && Catalog.size == 1
+puts "qualified Data.define passed"
+"#;
+
+#[test]
+fn a_qualified_data_define_file_executes_in_its_namespace() {
+    qualified_data_define_app()
+        .run_ruby(&format!(r#"{QUALIFIED_DATA_DEFINE}
+raise "not a Data class" unless Article::Summary.superclass == Data && Reports::Line.superclass == Data
+raise "the class left its namespace" if Object.const_defined?(:Summary, false) || Object.const_defined?(:Line, false)
+raise "the namespace class lost its superclass" unless Article.superclass == ApplicationRecord
+raise "block constant not on Object" unless Object.const_defined?(:ARTICLE_SUMMARY_PREFIX, false)
+"#))
+        .assert_passes();
+}
+
+#[test]
+#[ignore = "requires the native Spinel compiler"]
+fn a_qualified_data_define_file_runs_natively() {
+    qualified_data_define_app()
+        .run_spinel(QUALIFIED_DATA_DEFINE)
+        .assert_passes();
+}

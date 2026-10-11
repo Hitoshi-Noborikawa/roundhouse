@@ -307,8 +307,8 @@ fn file_data_class(root: &ruby_prism::Node<'_>, file: &str) -> IngestResult<Opti
 }
 
 /// The constant name and the `Data.define` call of a file whose only
-/// statement is `X = Data.define(…)`, with no block or with a `do … end`
-/// block that takes no parameters.
+/// statement is `X = Data.define(…)` or `A::X = Data.define(…)`, with no
+/// block or with a `do … end` block that takes no parameters.
 fn file_data_factory<'pr>(
     root: &ruby_prism::Node<'pr>,
 ) -> Option<(String, ruby_prism::CallNode<'pr>)> {
@@ -317,8 +317,14 @@ fn file_data_factory<'pr>(
     let (Some(statement), None) = (iter.next(), iter.next()) else {
         return None;
     };
-    let write = statement.as_constant_write_node()?;
-    let call = write.value().as_call_node()?;
+    let (name, value) = match statement.as_constant_write_node() {
+        Some(write) => (constant_id_str(&write.name()).to_string(), write.value()),
+        None => {
+            let write = statement.as_constant_path_write_node()?;
+            (static_constant_path(&write.target().as_node())?.join("::"), write.value())
+        }
+    };
+    let call = value.as_call_node()?;
     if call.name().as_slice() != b"define" {
         return None;
     }
@@ -330,7 +336,23 @@ fn file_data_factory<'pr>(
     if constant_path_of(&call.receiver()?)? != ["Data"] {
         return None;
     }
-    Some((constant_id_str(&write.name()).to_string(), call))
+    Some((name, call))
+}
+
+/// The segments of a constant path in which every part is a constant.
+/// `constant_path_of` drops a part that is not one, so it would read
+/// `record::X` as `X`.
+fn static_constant_path(node: &ruby_prism::Node<'_>) -> Option<Vec<String>> {
+    if let Some(read) = node.as_constant_read_node() {
+        return Some(vec![constant_id_str(&read.name()).to_string()]);
+    }
+    let path = node.as_constant_path_node()?;
+    let mut segments = match path.parent() {
+        Some(parent) => static_constant_path(&parent)?,
+        None => Vec::new(),
+    };
+    segments.push(constant_id_str(&path.name()?).to_string());
+    Some(segments)
 }
 
 /// The members of a `Data.define` call when each one is a distinct

@@ -855,6 +855,7 @@ fn top_level_files_outside_the_data_define_shape_are_not_admitted() {
     for source in [
         "Weird = Data.define(:a) do |klass|\n  def doubled = a * 2\nend\n",
         "Weird = Data.members(:a)\n",
+        "record::Weird = Data.define(:a)\n",
         "Weird = Other.define(:a)\n",
     ] {
         let tree: HashMap<PathBuf, Vec<u8>> =
@@ -900,6 +901,25 @@ fn a_data_define_block_is_the_body_of_its_class() {
     let class = app.library_classes.iter().find(|lc| lc.name.0.as_str() == "Timeframe").unwrap();
     assert_eq!(class.constants.len(), 1, "{:?}", class.constants);
     assert_eq!(class.methods.len(), 2, "{:?}", class.methods);
+    let errors = errors(&mut app);
+    assert!(errors.is_empty(), "{errors:?}");
+}
+
+#[test]
+fn a_qualified_data_factory_file_registers_the_qualified_class() {
+    let tree: HashMap<PathBuf, Vec<u8>> = [
+        (PathBuf::from("app/models/reports/line.rb"), b"Reports::Line = Data.define(:label, :count)\n".to_vec()),
+        (
+            PathBuf::from("app/models/line_report.rb"),
+            b"class LineReport\n  def self.count = Reports::Line.new(\"a\", 2).count\nend\n".to_vec(),
+        ),
+    ]
+    .into_iter()
+    .collect();
+    let mut app = roundhouse::ingest::ingest_app_from_tree(tree).expect("ingest");
+    let id = ClassId(Symbol::from("Reports::Line"));
+    let class = app.library_classes.iter().find(|lc| lc.name == id).expect("Reports::Line");
+    assert!(class.data_define().is_some(), "{:?}", class.origin);
     let errors = errors(&mut app);
     assert!(errors.is_empty(), "{errors:?}");
 }

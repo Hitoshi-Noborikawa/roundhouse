@@ -7110,7 +7110,24 @@ fn emit_library_class_decl_inner(
         }
     };
 
-    let open_header = |s: &mut String| {
+    // A file-level `X = Data.define(…)` assigns the class once, inside
+    // the namespace of `X`, and the body reopens it. A block would not
+    // do: a `class` in a block body belongs to the enclosing scope, not
+    // to the Data class.
+    let data_factory = lc.data_define().map(|(members, _)| {
+        let members: Vec<String> = members
+            .iter()
+            .map(|member| {
+                super::emit_expr(&Expr::new(
+                    Span::synthetic(),
+                    ExprNode::Lit { value: Literal::Sym { value: member.clone() } },
+                ))
+            })
+            .collect();
+        format!("Data.define({})", members.join(", "))
+    });
+    // A split reopens the class later in the file, without the factory.
+    let open_header = |s: &mut String, factory: Option<&str>| {
         if lc.is_module {
             // Modules don't take a parent; ingest already enforces this.
             for (i, seg) in segments.iter().enumerate() {
@@ -7128,6 +7145,9 @@ fn emit_library_class_decl_inner(
             }
             let last = segments[depth - 1];
             let pad = "  ".repeat(depth - 1);
+            if let Some(factory) = factory {
+                writeln!(s, "{pad}{last} = {factory}\n").unwrap();
+            }
             match lc.parent.as_ref() {
                 Some(p) => {
                     let parent = lexically_qualified(p.0.as_str(), &segments[..depth - 1], app);
@@ -7137,10 +7157,6 @@ fn emit_library_class_decl_inner(
             }
         }
     };
-    // A file-level `X = Data.define(…)` assigns the class once, and the
-    // body reopens it. A block would not do: a `class` in a block body
-    // belongs to the enclosing scope, not to the Data class.
-    //
     // The source block has the top level as its lexical scope. Ruby puts
     // its constants on `Object`, and its methods read constants from
     // there, not through the class and its mixins. `::NAME` writes and
@@ -7148,6 +7164,7 @@ fn emit_library_class_decl_inner(
     // would not do here either: Spinel runs the statements of a block
     // with `self` as `main`, not as the class.
     let data_block = lc.data_define().is_some();
+    let scope = if data_block { "::" } else { "" };
     let top_level = |expr: &Expr| {
         let mut expr = expr.clone();
         if data_block {
@@ -7155,20 +7172,14 @@ fn emit_library_class_decl_inner(
         }
         expr
     };
-    if let Some((members, _)) = lc.data_define() {
-        let members: Vec<String> = members
-            .iter()
-            .map(|member| {
-                super::emit_expr(&Expr::new(
-                    Span::synthetic(),
-                    ExprNode::Lit { value: Literal::Sym { value: member.clone() } },
-                ))
-            })
-            .collect();
-        writeln!(s, "{name} = Data.define({})
-", members.join(", ")).unwrap();
-    }
-    open_header(&mut s);
+    let include_name = |inc: &ClassId| {
+        if data_block {
+            format!("::{}", inc.0.as_str())
+        } else {
+            lexically_qualified(inc.0.as_str(), &segments, app)
+        }
+    };
+    open_header(&mut s, data_factory.as_deref());
 
     for require in &nested_include_requires {
         writeln!(s, "{body_pad}require_relative {require:?}").unwrap();
@@ -7197,7 +7208,7 @@ fn emit_library_class_decl_inner(
         if positioned.iter().any(|(_, p)| *p == inc) {
             continue;
         }
-        writeln!(s, "{body_pad}include {}", lexically_qualified(inc.0.as_str(), &segments, app)).unwrap();
+        writeln!(s, "{body_pad}include {}", include_name(inc)).unwrap();
     }
     if lc.includes.len() > positioned.len() && !lc.methods.is_empty() {
         writeln!(s).unwrap();
@@ -7216,7 +7227,6 @@ fn emit_library_class_decl_inner(
     let render_constants = |s: &mut String, which: &[usize]| {
         for &i in which {
             let (cname, value) = &lc.constants[i];
-            let scope = if data_block { "::" } else { "" };
             let rendered = super::emit_expr(&top_level(value));
             if let Some(factory) = app.library_classes.iter().find(|class| {
                 matches!(class.origin, Some(LibraryClassOrigin::DataFactory { declaration_span })
@@ -7304,7 +7314,7 @@ fn emit_library_class_decl_inner(
             writeln!(s, "require_relative {r:?}").unwrap();
         }
         writeln!(s).unwrap();
-        open_header(&mut s);
+        open_header(&mut s, None);
         start = *at;
     }
     render_body(&mut s, &body[start..]);
@@ -7367,14 +7377,14 @@ fn emit_library_class_decl_inner(
             }
             first = false;
             for (_, inc) in positioned.iter().filter(|(at, _)| *at == index) {
-                writeln!(s, "{body_pad}include {}", lexically_qualified(inc.0.as_str(), &segments, app)).unwrap();
+                writeln!(s, "{body_pad}include {}", include_name(inc)).unwrap();
                 writeln!(s).unwrap();
             }
             render_method(&mut s, m);
         }
         for (_, inc) in positioned.iter().filter(|(at, _)| *at >= lc.methods.len()) {
             writeln!(s).unwrap();
-            writeln!(s, "{body_pad}include {}", lexically_qualified(inc.0.as_str(), &segments, app)).unwrap();
+            writeln!(s, "{body_pad}include {}", include_name(inc)).unwrap();
         }
     }
 

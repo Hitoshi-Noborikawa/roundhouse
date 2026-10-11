@@ -5749,7 +5749,9 @@ fn qualify_relative_includes(app: &mut App) {
         .filter_map(|lc| Some((lc.name.0.as_str().to_string(), lc.parent.clone()?)))
         .collect();
     let join = |path: &[crate::ident::Symbol]| path.iter().map(|s| s.as_str()).collect::<Vec<_>>().join("::");
-    for lc in &mut app.library_classes {
+    // A `Data.define` block resolves constants from the top level, so
+    // its includes are already absolute.
+    for lc in app.library_classes.iter_mut().filter(|lc| lc.data_define().is_none()) {
         let owner = lc.name.0.as_str().to_string();
         for inc in &mut lc.includes {
             let path: Vec<crate::ident::Symbol> =
