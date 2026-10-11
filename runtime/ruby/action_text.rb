@@ -2120,8 +2120,14 @@ module ActionText
     # `content_helper.rb`: the sanitizer's own tags plus the attachment
     # element and the two a gallery renders into.
     def self.allowed_tags
-      SafeListSanitizer.allowed_tags + [Attachment.tag_name, "figure", "figcaption"]
+      SafeListSanitizer.allowed_tags + [Attachment.tag_name, "figure", "figcaption"] + app_allowed_tags
     end
+
+    # >>> generated: content-helper-tags
+    def self.app_allowed_tags
+      []
+    end
+    # <<< generated: content-helper-tags
 
     # `sanitize_action_text_content`: the rendered fragment through the
     # safe-list sanitizer under Action Text's two allow-lists.

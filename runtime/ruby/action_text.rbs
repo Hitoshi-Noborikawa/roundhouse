@@ -202,6 +202,7 @@ module ActionText
     def self.app_allowed_attributes: () -> Array[String]
     def self.sanitizer: () -> ActionText::SafeListSanitizer
     def self.allowed_tags: () -> Array[String]
+    def self.app_allowed_tags: () -> Array[String]
     def self.sanitize_action_text_content: (String html) -> String
   end
 
