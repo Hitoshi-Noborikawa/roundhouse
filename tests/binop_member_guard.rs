@@ -188,8 +188,11 @@ fn a_reader_redefined_by_an_included_concern_does_not_narrow() {
         );
         assert_eq!(found.len(), 1, "include {inc} ({}): {found:?}", concerns[file].0);
     }
+    // Same nullable shape as the concern `def score` cases above: a
+    // non-nil `1.0` alias would type as Float and never raise
+    // IncompatibleBinop, which would not exercise the override guard.
     let found = binops(&format!(
-        "class Thing < ApplicationRecord\n  def other_score\n    1.0\n  end\n  alias_method :score, :other_score\n{KEEP}\nend\n"
+        "class Thing < ApplicationRecord\n  def other_score\n    rand < 0.5 ? nil : 1.0\n  end\n  alias_method :score, :other_score\n{KEEP}\nend\n"
     ));
     assert_eq!(found.len(), 1, "alias_method: {found:?}");
     // The control: an included concern that does not touch the reader still narrows.
