@@ -181,3 +181,92 @@ fn literal_scope_shapes_still_apply_correctly() {
         except_array[0]
     );
 }
+
+/// Same gap, reached through a concern's `included do` block instead of
+/// a plain controller body: `ingest_concern_filters` (`library_class.rs`)
+/// runs `parse_filter_call` over every statement inside `included do
+/// ... end` and used to hand its `Err` straight to `survey::record`,
+/// which is a no-op outside survey mode — so in strict mode the
+/// unreadable scope silently vanished (as if the `before_action` were
+/// never there) instead of failing ingest the way the same call written
+/// directly in the controller does.
+fn concern_tree(included_do_body: &str) -> HashMap<PathBuf, Vec<u8>> {
+    let concern = format!(
+        "module Guarded\n  extend ActiveSupport::Concern\n\n  included do\n{included_do_body}\n  end\nend\n"
+    );
+    let controller = "class WidgetsController < ApplicationController\n  include Guarded\n\n  def index\n    head :ok\n  end\n\n  def show\n    head :ok\n  end\n\n  def reject\n    head :unauthorized\n  end\nend\n".to_string();
+    [
+        ("db/schema.rb".to_string(), "ActiveRecord::Schema.define do\nend\n".to_string()),
+        (
+            "config/routes.rb".to_string(),
+            "Rails.application.routes.draw do\n  get \"/widgets\" => \"widgets#index\"\n  get \"/widgets/:id\" => \"widgets#show\"\nend\n".to_string(),
+        ),
+        (
+            "app/controllers/application_controller.rb".to_string(),
+            "class ApplicationController < ActionController::Base\nend\n".to_string(),
+        ),
+        ("app/controllers/concerns/guarded.rb".to_string(), concern),
+        ("app/controllers/widgets_controller.rb".to_string(), controller),
+    ]
+    .into_iter()
+    .map(|(p, c)| (PathBuf::from(p), c.into_bytes()))
+    .collect()
+}
+
+fn concern_strict_error(included_do_body: &str) -> String {
+    match ingest_app_from_tree(concern_tree(included_do_body)) {
+        Ok(_) => {
+            panic!("strict ingest accepted a non-literal only:/except: inside a concern's included do:\n{included_do_body}")
+        }
+        Err(err) => err.to_string(),
+    }
+}
+
+fn concern_survey_gaps(included_do_body: &str) -> Vec<String> {
+    roundhouse::ingest::survey::activate();
+    let _ =
+        ingest_app_from_tree(concern_tree(included_do_body)).expect("survey ingest tolerates gaps");
+    roundhouse::ingest::survey::drain().iter().map(|g| format!("{g:?}")).collect()
+}
+
+#[test]
+fn a_non_literal_only_inside_a_concerns_included_do_is_refused() {
+    let body = "    before_action :reject, only: some_method\n";
+    let err = concern_strict_error(body);
+    assert!(
+        err.contains("`before_action` `only:` is not a literal Symbol/String or an array of them"),
+        "{body}\n=> {err}"
+    );
+
+    let gaps = concern_survey_gaps(body);
+    assert_eq!(
+        gaps.len(),
+        1,
+        "expected exactly one recorded gap for the concern's unreadable scope, got:\n{gaps:#?}"
+    );
+    assert!(
+        gaps[0].contains("`before_action` `only:` is not a literal Symbol/String"),
+        "{body}\n=> {gaps:#?}"
+    );
+}
+
+#[test]
+fn a_non_literal_except_inside_a_concerns_included_do_is_refused_the_same_way() {
+    let body = "    before_action :reject, except: some_method\n";
+    let err = concern_strict_error(body);
+    assert!(
+        err.contains("`before_action` `except:` is not a literal Symbol/String or an array of them"),
+        "{body}\n=> {err}"
+    );
+
+    let gaps = concern_survey_gaps(body);
+    assert_eq!(
+        gaps.len(),
+        1,
+        "expected exactly one recorded gap for the concern's unreadable scope, got:\n{gaps:#?}"
+    );
+    assert!(
+        gaps[0].contains("`before_action` `except:` is not a literal Symbol/String"),
+        "{body}\n=> {gaps:#?}"
+    );
+}

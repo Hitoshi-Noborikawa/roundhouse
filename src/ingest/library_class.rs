@@ -3595,7 +3595,7 @@ fn framework_shadow_scopes(
 pub fn ingest_concern_filters(
     source: &[u8],
     file: &str,
-) -> Vec<(ClassId, Vec<crate::dialect::Filter>)> {
+) -> super::IngestResult<Vec<(ClassId, Vec<crate::dialect::Filter>)>> {
     let result = super::prism::parse_silent(source);
     let root = result.node();
     let mut out = Vec::new();
@@ -3620,12 +3620,10 @@ pub fn ingest_concern_filters(
                     // `parse_filter_call` itself only returns `Err` for a
                     // non-literal `only:`/`except:` (refused rather than
                     // silently applied to every action — that function's
-                    // doc comment); this scan has no strict/survey split
-                    // of its own (every other unrecognized shape here is
-                    // `survey::record`ed unconditionally, a no-op outside
-                    // survey mode), so this follows the same convention
-                    // rather than introducing a new one.
-                    Err(err) => super::survey::record(&err),
+                    // doc comment). Strict mode must fail ingest the same
+                    // way a controller's own `only:`/`except:` would;
+                    // survey mode records the gap and keeps scanning.
+                    Err(err) => super::survey::continue_or_fail(err)?,
                     Ok(None) => {
                         if let Some(f) = block_form_concern_filter(&inner, file) {
                             filters.push(f);
@@ -3652,7 +3650,7 @@ pub fn ingest_concern_filters(
             out.push((id, filters));
         }
     }
-    out
+    Ok(out)
 }
 
 /// `protect_from_forgery` / `skip_forgery_protection`, receiverless.

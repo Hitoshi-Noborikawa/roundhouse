@@ -530,8 +530,11 @@ pub fn ingest_app_with_vfs<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResult
                         // carry `included do` declarations that belong
                         // to every includer: filters (controller-side)
                         // and model DSL (associations/scopes).
-                        app.concern_filters
-                            .extend(ingest_concern_filters(&source, &path_str));
+                        if let Some(concern_filters) =
+                            unwrap_or_record(ingest_concern_filters(&source, &path_str))?
+                        {
+                            app.concern_filters.extend(concern_filters);
+                        }
                         let (concern_items, concern_enum_decls) =
                             ingest_concern_model_items_with_constants(
                                 &source, &path_str, &enum_constants,
@@ -1304,8 +1307,11 @@ end
                         unwrap_or_record(ingest_library_classes(&source, &path_str))?
                     {
                         app.library_classes.extend(classes);
-                        app.concern_filters
-                            .extend(ingest_concern_filters(&source, &path_str));
+                        if let Some(concern_filters) =
+                            unwrap_or_record(ingest_concern_filters(&source, &path_str))?
+                        {
+                            app.concern_filters.extend(concern_filters);
+                        }
                         let (concern_items, concern_enum_decls) =
                             ingest_concern_model_items_with_constants(
                                 &source, &path_str, &enum_constants,
