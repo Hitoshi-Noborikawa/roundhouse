@@ -8771,14 +8771,21 @@ fn extract_inertia_config(source: &[u8], file: &str) -> Option<crate::app::Inert
         if !matches!(constant_text(&recv, &src).as_deref(), Some("InertiaRails" | "::InertiaRails")) {
             continue;
         }
-        let Some(block) = call.block().and_then(|b| b.as_block_node()) else { continue };
-        let Some(param) = block
-            .parameters()
-            .and_then(|p| p.as_block_parameters_node())
-            .and_then(|p| p.parameters())
-            .and_then(|p| p.requireds().iter().next())
-            .and_then(|p| p.as_required_parameter_node())
-        else {
+        let named = call.block().and_then(|b| b.as_block_node()).and_then(|block| {
+            let param = block
+                .parameters()
+                .and_then(|p| p.as_block_parameters_node())
+                .and_then(|p| p.parameters())
+                .and_then(|p| p.requireds().iter().next())
+                .and_then(|p| p.as_required_parameter_node())?;
+            Some((block, param))
+        });
+        let Some((block, param)) = named else {
+            survey::record(&IngestError::Unsupported {
+                file: file.to_string(),
+                message: "InertiaRails.configure: a configuration without a block that names its parameter (`do |config|`) is not read; its options are not applied".to_string(),
+            });
+            found = Some(crate::app::InertiaConfig::default());
             continue;
         };
         let param = super::util::constant_id_str(&param.name());

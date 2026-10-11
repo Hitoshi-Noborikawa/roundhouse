@@ -5368,3 +5368,19 @@ fn an_inertia_configure_block_with_rescue_is_a_survey_gap() {
         "{gaps:#?}"
     );
 }
+
+#[test]
+fn an_inertia_configure_block_without_a_named_parameter_is_a_survey_gap() {
+    for initializer in [
+        "InertiaRails.configure { it.version = \"v1\" }\n",
+        "InertiaRails.configure { _1.version = \"v1\" }\n",
+    ] {
+        let mut files = INERTIA_APP.to_vec();
+        files.push(("config/initializers/inertia_rails.rb", initializer));
+        let (_, gaps) = inertia_check(&files);
+        assert!(
+            gaps.iter().any(|g| g.contains("InertiaRails.configure: a configuration without a block that names its parameter")),
+            "{initializer}: {gaps:#?}"
+        );
+    }
+}
