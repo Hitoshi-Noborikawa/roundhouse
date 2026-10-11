@@ -1665,7 +1665,9 @@ end
         }
     }
 
-    app.inertia = super::inertia::load_inertia_config(vfs, dir)?;
+    app.vite_manifest = super::vite::read_manifest(vfs, dir);
+    let vite_digest = app.vite_manifest.as_ref().map(|m| m.digest.clone());
+    app.inertia = super::inertia::load_inertia_config(vfs, dir, vite_digest.as_deref())?;
 
     // Every app source is registered by here. Rubydex resolves a
     // SNAPSHOT on another thread while the passes below run, and those
@@ -1967,6 +1969,7 @@ end
     super::invisible_captcha::lower_invisible_captcha(&mut app);
     super::impersonates::lower_impersonates(&mut app);
     super::inertia::lower_inertia(&mut app);
+    super::vite::lower_vite_tags(&mut app);
     // The real drain, now that every pass re-ingesting synthesized
     // Ruby has run. A synthesized `"<label>"` re-ingest never takes a
     // slot (`sources::register` refuses a label starting with `<`), so

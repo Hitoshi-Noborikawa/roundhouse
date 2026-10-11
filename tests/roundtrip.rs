@@ -154,6 +154,7 @@ fn tiny_blog_round_trips() {
         seeds: None,
         importmap: None,
         inertia: None,
+        vite_manifest: None,
         stylesheets: vec![],
         rbs_signatures: std::collections::HashMap::new(),
         gem_lock: None,
