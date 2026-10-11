@@ -631,10 +631,10 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
     // `ActiveModel::Type::Boolean.new.cast(v)`: nil for a blank value, else the boolean.
     // `ActiveSupport::TimeZone` is `runtime/ruby/active_support_ext.rb`'s port; `[]` is typed in dispatch, by its argument.
     {
-        let zone = || Ty::Class { id: ClassId(Symbol::from("ActiveSupport::TimeZone")), args: vec![] };
+        let zone = || Ty::Class { id: ClassId(Symbol::from("ActiveSupport::TimeZone")), args: vec![].into() };
         register_stdlib_class(classes, "ActiveSupport::TimeZone", &[
-            ("all", Ty::Array { elem: Box::new(zone()) }),
-            ("lookup", Ty::Union { variants: vec![zone(), Ty::Nil] }),
+            ("all", Ty::Array { elem: std::sync::Arc::new(zone()) }),
+            ("lookup", Ty::Union { variants: vec![zone(), Ty::Nil].into() }),
         ], &[
             ("name", Ty::Str), ("utc_offset", Ty::Int), ("formatted_offset", Ty::Str),
             ("to_s", Ty::Str), ("now", Ty::Time),

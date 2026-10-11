@@ -1443,7 +1443,7 @@ impl<'a> BodyTyper<'a> {
                         [name] if matches!(name.ty.as_ref(), Some(Ty::Str | Ty::Var { .. }))
                             || matches!(name.ty.as_ref(), Some(Ty::Union { variants }) if variants.iter().all(|t| matches!(t, Ty::Str | Ty::Nil))) =>
                         {
-                            Ty::Union { variants: vec![Ty::Class { id: id.clone(), args: vec![] }, Ty::Nil] }
+                            Ty::Union { variants: vec![Ty::Class { id: id.clone(), args: vec![].into() }, Ty::Nil].into() }
                         }
                         _ => unknown(),
                     };
