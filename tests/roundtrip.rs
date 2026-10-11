@@ -158,6 +158,7 @@ fn tiny_blog_round_trips() {
         stylesheets: vec![],
         rbs_signatures: std::collections::HashMap::new(),
         gem_lock: None,
+        loaded_frameworks: None,
         gem_boundary: Default::default(),
         content_helper_allowed_attributes: Vec::new(),
         helper_method_index: std::collections::HashMap::new(),
