@@ -28,7 +28,7 @@ mod enum_raw_input;
 mod body;
 mod class_configuration;
 mod data;
-pub(crate) use body::string_answers;
+pub(crate) use body::{indexed_pluck, string_answers};
 pub(crate) use body::ConstResolverTask;
 pub use body::PreparedConstResolver;
 pub mod async_color;
@@ -55,6 +55,7 @@ mod dirty_retype;
 mod typing_mode;
 mod inferred_types;
 pub mod inquiry;
+pub mod indifferent;
 pub use inferred_types::inferred_types;
 pub use inquiry::inquirer_methods;
 pub use diagnostics::{diagnose, diagnose_with_coverage};
@@ -69,15 +70,15 @@ use render::{
 pub(crate) use body::union_of;
 pub use preload::{missing_preload_report, PreloadCoverage};
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use rubydex::model::identity_maps::IdentityHashMap;
 use rubydex::model::ids::DeclarationId;
 
 use crate::adapter::{DatabaseAdapter, SqliteAdapter};
 use crate::App;
 use crate::dialect::{
-    Action, Controller, ControllerBodyItem, Filter, FilterKind, LayoutDecl, MethodDef, MethodReceiver,
-    Model, ModelBodyItem, RenderTarget,
+    Action, Controller, ControllerBodyItem, Filter, FilterKind, LayoutDecl, LibraryClassOrigin,
+    MethodDef, MethodReceiver, Model, ModelBodyItem, RenderTarget,
 };
 use crate::effect::EffectSet;
 use crate::expr::{Expr, ExprNode, LValue, Literal};
@@ -121,6 +122,8 @@ pub struct Analyzer {
     /// [`inquiry::is_inquiry_predicate`] needs to answer
     /// `content_type.attachment?` as Bool on a `Str` receiver.
     inquirers: std::collections::HashSet<Symbol>,
+    /// The app's translations, for `t` / `I18n.t` (see `crate::i18n`).
+    i18n: crate::i18n::Catalog,
     /// Per-(controller, method) ivar bindings AS REFINED by Phase B,
     /// carried across fixpoint rounds.
     ///
@@ -144,6 +147,9 @@ pub struct Analyzer {
     typed_constants: IdentityHashMap<DeclarationId, Ty>,
     /// Literal Data constants on library classes, keyed by source span.
     data_factories: HashMap<crate::span::Span, Ty>,
+    /// Registered Data factories that use the generated initializer, so
+    /// `.new` call-site types do not manufacture a source `initialize`.
+    data_factories_without_custom_initialize: HashSet<ClassId>,
     /// The controller/mailer→view channel as the last production
     /// typing pass harvested it. See [`ViewSeeds`].
     view_seeds: Option<ViewSeeds>,
@@ -295,10 +301,6 @@ impl Analyzer {
             cls.class_methods.insert(Symbol::from("connection_pool"), Ty::Untyped);
             cls.class_methods.insert(Symbol::from("establish_connection"), Ty::Untyped);
             cls.class_methods.insert(Symbol::from("table_name"), Ty::Str);
-            // `Model.human_attribute_name(:col)` — the ActiveModel
-            // translation entry point every form label and table header
-            // goes through. Returns the humanized/localized String.
-            cls.class_methods.insert(Symbol::from("human_attribute_name"), Ty::Str);
             cls.class_methods.insert(Symbol::from("primary_key"), Ty::Str);
             // Arel entry points: `Model.arel_table` is an `Arel::Table`
             // (`table[:col]` → attribute → predicate node); `Model.arel`
@@ -982,6 +984,25 @@ impl Analyzer {
                 info.app_declared = true;
             }
         }
+        let by_name: HashMap<&ClassId, &crate::dialect::LibraryClass> =
+            app.library_classes.iter().map(|lc| (&lc.name, lc)).collect();
+        for lc in &app.library_classes {
+            let mut current = Some(lc);
+            for _ in 0..32 {
+                let Some(class) = current else { break };
+                if matches!(class.origin, Some(crate::dialect::LibraryClassOrigin::StructSuperclass { .. })) {
+                    if let Some(info) = classes.get_mut(&lc.name) {
+                        info.positional_struct = true;
+                    }
+                    break;
+                }
+                // Not the struct's constructor any more: a subclass's own `initialize` (campfire's `Sound::Image`) decides what `new` takes.
+                if class.methods.iter().any(|m| m.name.as_str() == "initialize" && m.receiver == crate::dialect::MethodReceiver::Instance) {
+                    break;
+                }
+                current = class.parent.as_ref().and_then(|p| by_name.get(p).copied());
+            }
+        }
         // Not wholly the app's: declaring a constant an unmodeled gem defines reopens it.
         if let Some(census) = app.gem_lock.as_ref().map(crate::gems::GemCensus::of) {
             for (id, info) in classes.iter_mut() {
@@ -1047,6 +1068,15 @@ impl Analyzer {
 
         let const_resolver = app.const_resolver.for_sources(&app.sources);
         let data_factories = data::register(app, &const_resolver, &mut classes);
+        let data_factories_without_custom_initialize = app
+            .library_classes
+            .iter()
+            .filter(|class| {
+                matches!(class.origin, Some(LibraryClassOrigin::DataFactory { .. }))
+                    && !class.methods.iter().any(|method| method.name.as_str() == "initialize")
+            })
+            .map(|class| class.name.clone())
+            .collect();
 
         Self {
             classes,
@@ -1061,10 +1091,12 @@ impl Analyzer {
             host_folded: HashMap::new(),
             refined_action_bindings: HashMap::new(),
             inquirers: inquiry::inquirer_methods(app),
+            i18n: app.i18n.clone(),
             const_resolver,
             source_indexed: !app.sources.is_empty(),
             typed_constants: IdentityHashMap::default(),
             data_factories,
+            data_factories_without_custom_initialize,
             view_seeds: None,
             callers_by_target: HashMap::new(),
             controller_action_meta_cache: HashMap::new(),
@@ -1078,6 +1110,7 @@ impl Analyzer {
     fn body_typer(&self) -> BodyTyper<'_> {
         let typer = BodyTyper::new(&self.classes)
             .with_inquirers(&self.inquirers)
+            .with_i18n(&self.i18n)
             .with_typed_constants(&self.typed_constants)
             .with_data_factories(&self.data_factories);
         if self.source_indexed { typer.with_const_resolver(self.const_resolver.clone()) } else { typer }
@@ -1692,6 +1725,7 @@ impl Analyzer {
                 constants: Default::default(),
                 annotate_self_dispatch: false,
                 in_view: false, class_side: false, claimed_macro_template: false, instance_body: false,
+                view_name: None,
             };
             self.body_typer().analyze_expr(&mut helper.body, &ctx);
         }
@@ -1910,6 +1944,7 @@ impl Analyzer {
                     constants: shared.clone(),
                     annotate_self_dispatch: false,
                     in_view: false, class_side: false, claimed_macro_template: false, instance_body: false,
+                    view_name: None,
                 };
                 let ty = typer.analyze_expr(value, &ctx);
                 if matches!(ty, Ty::Var { .. }) {
@@ -2178,7 +2213,7 @@ impl Analyzer {
                 local_bindings: HashMap::new(),
                 class_objects: Default::default(),
                 constants: global_constants.clone(),
-                annotate_self_dispatch: false, in_view: false, class_side: false, claimed_macro_template: false, instance_body: false,
+                annotate_self_dispatch: false, in_view: false, view_name: None, class_side: false, claimed_macro_template: false, instance_body: false,
             };
             for item in model.body.iter_mut() {
                 if let ModelBodyItem::Unknown { expr, .. } = item {
@@ -2194,7 +2229,7 @@ impl Analyzer {
                 local_bindings: HashMap::new(),
                 class_objects: Default::default(),
                 constants: class_constants.clone(),
-                annotate_self_dispatch: false, in_view: false, class_side: false, claimed_macro_template: false, instance_body: false,
+                annotate_self_dispatch: false, in_view: false, view_name: None, class_side: false, claimed_macro_template: false, instance_body: false,
             };
 
             // Pass A: type every method body with only `@attributes`
@@ -2254,7 +2289,7 @@ impl Analyzer {
                     local_bindings: HashMap::new(),
                     class_objects: Default::default(),
                     constants: class_constants.clone(),
-                    annotate_self_dispatch: false, in_view: false, class_side: false, claimed_macro_template: false, instance_body: false,
+                    annotate_self_dispatch: false, in_view: false, view_name: None, class_side: false, claimed_macro_template: false, instance_body: false,
                 };
 
                 for scope in model.scopes_mut() {
@@ -2302,7 +2337,7 @@ impl Analyzer {
                 local_bindings: HashMap::new(),
                 class_objects: Default::default(),
                 constants: global_constants.clone(),
-                annotate_self_dispatch: false, in_view: false, class_side: false, claimed_macro_template: false, instance_body: false,
+                annotate_self_dispatch: false, in_view: false, view_name: None, class_side: false, claimed_macro_template: false, instance_body: false,
             };
             if retype {
                 for item in controller.body.iter_mut() {
@@ -2322,7 +2357,7 @@ impl Analyzer {
                 local_bindings: HashMap::new(),
                 class_objects: Default::default(),
                 constants: class_constants.clone(),
-                annotate_self_dispatch: false, in_view: false, class_side: false, claimed_macro_template: false, instance_body: false,
+                annotate_self_dispatch: false, in_view: false, view_name: None, class_side: false, claimed_macro_template: false, instance_body: false,
             };
 
             // Snapshot this controller's own segment of the filter chain
@@ -2896,7 +2931,7 @@ impl Analyzer {
                             local_bindings: HashMap::new(),
                             class_objects: Default::default(),
                             constants: meta.class_constants.clone(),
-                            annotate_self_dispatch: false, in_view: false, class_side: false, claimed_macro_template: false, instance_body: false,
+                            annotate_self_dispatch: false, in_view: false, view_name: None, class_side: false, claimed_macro_template: false, instance_body: false,
                         };
                         // Seed helper-method params from the inferred-params
                         // table too, so `period(query)`'s body resolves on
@@ -3419,6 +3454,7 @@ impl Analyzer {
                         constants: class_constants.clone(),
                         annotate_self_dispatch: false,
                         in_view: false, class_side: false, claimed_macro_template: false, instance_body: false,
+                        view_name: None,
                     };
                     let origin = app
                         .concern_spliced_actions
@@ -3598,7 +3634,7 @@ impl Analyzer {
                 ivar_bindings: HashMap::new(),
                 local_bindings: HashMap::new(),
                 class_objects: Default::default(),
-                constants: Default::default(), annotate_self_dispatch: false, in_view: false, class_side: false, claimed_macro_template: false, instance_body: false,
+                constants: Default::default(), annotate_self_dispatch: false, in_view: false, view_name: None, class_side: false, claimed_macro_template: false, instance_body: false,
             };
 
             if retype {
@@ -3742,7 +3778,7 @@ impl Analyzer {
                     ivar_bindings: reseeded,
                     local_bindings: HashMap::new(),
                     class_objects: Default::default(),
-                    constants: Default::default(), annotate_self_dispatch: false, in_view: false, class_side: false, claimed_macro_template: false, instance_body: false,
+                    constants: Default::default(), annotate_self_dispatch: false, in_view: false, view_name: None, class_side: false, claimed_macro_template: false, instance_body: false,
                 };
                 for method in &mut lc.methods {
                     let mctx = self.seed_method_params(&reseeded_ctx, &lc_name, method, true);
@@ -3802,6 +3838,7 @@ impl Analyzer {
             });
             view_ctx.constants = global_constants.clone();
             view_ctx.ivar_bindings = ivars;
+            view_ctx.view_name = Some(name.clone());
             if let Some(row) = mailer_params_by_view.get(name) {
                 view_ctx.local_bindings.insert(Symbol::from("params"), row.clone());
             }
@@ -4033,6 +4070,7 @@ impl Analyzer {
             }
             let mut view_ctx = Ctx::default();
             view_ctx.in_view = true; // `yield` here renders to a String
+            view_ctx.view_name = Some(view.name.clone());
             // The view body types against the ActionView context, so
             // implicit-self helper calls (`form_with`, …) dispatch there.
             view_ctx.self_ty = Some(Ty::Class {
@@ -6015,7 +6053,9 @@ impl Analyzer {
                     let record_initialize = method.as_str() == "new"
                         && recv.as_ref().is_some_and(|r| matches!(&*r.node, ExprNode::Const { .. }));
                     for class_id in recv_classes {
-                        if record_initialize {
+                        if record_initialize
+                            && !self.data_factories_without_custom_initialize.contains(&class_id)
+                        {
                             out.push((
                                 class_id.clone(),
                                 Symbol::from("initialize"),

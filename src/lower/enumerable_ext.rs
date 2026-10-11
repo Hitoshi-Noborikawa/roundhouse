@@ -132,6 +132,9 @@ pub(crate) fn rewrite_node(expr: &mut Expr) -> bool {
         *parenthesized = true;
         return true;
     }
+    if method.as_str() == "pluck" && block.is_none() {
+        return ground_indexed_pluck(expr);
+    }
     let wants_block = match method.as_str() {
         "index_by" => true,
         "many?" => block.is_some(),
@@ -164,9 +167,17 @@ pub(crate) fn rewrite_node(expr: &mut Expr) -> bool {
     // which is what `many?` without a block asks, so the call becomes
     // `size > 1`. On the Relation half that loads the rows rather than
     // counting them — the rows the partial iterates next anyway.
+    //
+    // A plain Array takes the same `size > 1`. An association read the
+    // analyzer types `Array[Model]` is a Relation on spinel at run time
+    // (campfire's direct-room settings, `@room.users.many?`), and since
+    // spinel 269b6abe seeds the module function's `Array[Object]`
+    // parameter it refuses that Relation; `size` is answered by both.
     if method.as_str() == "many?"
         && block.is_none()
-        && is_relation_or_array_union(receiver.ty.as_ref())
+        && (is_relation_or_array_union(receiver.ty.as_ref())
+            || is_relation(receiver.ty.as_ref())
+            || matches!(receiver.ty.as_ref(), Some(Ty::Array { .. })))
     {
         let receiver = recv.take().expect("checked above");
         let mut size = Expr::new(
@@ -236,6 +247,62 @@ pub(crate) fn rewrite_node(expr: &mut Expr) -> bool {
     if method.as_str() == "squish!" {
         expr.ty = Some(Ty::Str);
     }
+    true
+}
+
+/// Not a reader call per key, as `lower::assoc_pluck` writes for records:
+/// a Hash answers a key only through `[]`, which is what ActiveSupport's
+/// `pluck` sends to every element.
+fn ground_indexed_pluck(expr: &mut Expr) -> bool {
+    let span = expr.span;
+    let ExprNode::Send { recv: Some(recv), method, args, .. } = &*expr.node else {
+        return false;
+    };
+    let Some(Ty::Array { elem }) = &recv.ty else { return false };
+    if crate::analyze::indexed_pluck(method, elem, args).is_none() {
+        return false;
+    }
+    let var = Symbol::from("__pluck");
+    let mut element = Expr::new(span, ExprNode::Var { id: crate::ident::VarId(0), name: var.clone() });
+    element.ty = Some((**elem).clone());
+    let mut value = Expr::new(
+        span,
+        ExprNode::Send {
+            recv: Some(element),
+            method: Symbol::from("[]"),
+            args: args.clone(),
+            block: None,
+            parenthesized: false,
+        },
+    );
+    value.ty = match &expr.ty {
+        Some(Ty::Array { elem }) => Some((**elem).clone()),
+        _ => None,
+    };
+    let block = Expr::new(
+        span,
+        ExprNode::Lambda {
+            extra_params: Vec::new(),
+            params: vec![var],
+            rest_param: None,
+            block_param: None,
+            body: value,
+            block_style: crate::expr::BlockStyle::Brace,
+        },
+    );
+    let recv = recv.clone();
+    let ty = expr.ty.clone();
+    *expr = Expr::new(
+        span,
+        ExprNode::Send {
+            recv: Some(recv),
+            method: Symbol::from("map"),
+            args: vec![],
+            block: Some(block),
+            parenthesized: false,
+        },
+    );
+    expr.ty = ty;
     true
 }
 
@@ -565,14 +632,16 @@ mod tests {
         assert_eq!(e.ty, Some(Ty::Bool));
     }
 
-    /// A plain Array still takes the module function.
+    /// A plain Array is a size test too: an association typed
+    /// `Array[Model]` is a Relation on spinel, which the module
+    /// function's `Array[Object]` parameter refuses.
     #[test]
-    fn many_on_an_array_grounds_to_the_module_function() {
+    fn many_on_an_array_is_a_size_test() {
         let mut e = many_on(array_of_users());
         rewrite(&mut e);
-        assert_eq!(method_of(&e), "many?");
-        let ExprNode::Send { recv: Some(r), .. } = &*e.node else { panic!() };
-        assert!(matches!(&*r.node, ExprNode::Const { path } if path[0].as_str() == "ActiveSupport"));
+        assert_eq!(method_of(&e), ">");
+        let ExprNode::Send { recv: Some(size), .. } = &*e.node else { panic!() };
+        assert_eq!(method_of(size), "size");
     }
 
     #[test]
@@ -623,6 +692,21 @@ mod tests {
         );
         assert_eq!(args.len(), 1);
         assert_eq!(e.ty, Some(Ty::Str));
+    }
+
+    /// campfire `rooms/directs/edit`: `@room.users.many?` is a Relation.
+    /// Grounding to `size > 1` keeps Spinel from passing it into
+    /// `ActiveSupport.many?`'s Array slot.
+    #[test]
+    fn many_on_a_relation_is_a_size_test() {
+        let mut e = many_on(Ty::Relation {
+            of: crate::ident::ClassId(Symbol::from("User")),
+        });
+        rewrite(&mut e);
+        assert_eq!(method_of(&e), ">");
+        let ExprNode::Send { recv: Some(size), .. } = &*e.node else { panic!() };
+        assert_eq!(method_of(size), "size");
+        assert_eq!(e.ty, Some(Ty::Bool));
     }
 
     /// A union with a variant that has no `size` (nil) is left alone.

@@ -26,6 +26,9 @@ use super::util::{
 };
 use super::{IngestError, IngestResult};
 
+/// Ingest the first class declaration, or return `None` if there is none.
+/// Custom Data blocks require plural ingestion because their lifted methods
+/// belong to additional library classes; reject them rather than lose that IR.
 pub fn ingest_library_class(
     source: &[u8],
     file: &str,
@@ -36,6 +39,14 @@ pub fn ingest_library_class(
     let Some(class) = find_first_class(&root) else {
         return Ok(None);
     };
+    if class.body().is_some_and(|body| flatten_statements(body).iter()
+        .any(|statement| super::data_factory::declaration(statement).is_some()))
+    {
+        return Err(IngestError::Unsupported {
+            file: file.into(),
+            message: "Data.define blocks require plural library-class ingestion".into(),
+        });
+    }
     Ok(Some(library_class_from_node(&class, file)?))
 }
 
@@ -71,6 +82,7 @@ pub fn ingest_library_classes(
         let owner = lc.name.clone();
         let structs = struct_constant_classes(&owner, class.body(), file)?;
         lc.constants.retain(|(name, _)| !structs.iter().any(|(s, _)| s == name));
+        out.extend(super::data_factory::collect(class.body(), &owner, file)?);
         out.push(lc);
         out.extend(data_block_classes(class.body(), &owner, file)?);
         // Not before the owner: the struct is named under it, so the owner has to exist first.
@@ -90,6 +102,7 @@ pub fn ingest_library_classes(
         let owner = lc.name.clone();
         let structs = struct_constant_classes(&owner, module.body(), file)?;
         lc.constants.retain(|(name, _)| !structs.iter().any(|(s, _)| s == name));
+        out.extend(super::data_factory::collect(module.body(), &owner, file)?);
         out.push(lc);
         out.extend(data_block_classes(module.body(), &owner, file)?);
         out.extend(structs.into_iter().map(|(_, s)| s));
@@ -174,6 +187,12 @@ fn data_block_classes(
     for stmt in flatten_statements(body) {
         let Some(cw) = stmt.as_constant_write_node() else { continue };
         let Some(block) = data_define_block(&cw.value()) else { continue };
+        // The custom factory pass retains these methods with Data-specific
+        // origin metadata and validation. Do not create a second generic
+        // class for the same declaration.
+        if super::data_factory::declaration(&stmt).is_some() {
+            continue;
+        }
         let name = ClassId(Symbol::from(format!("{}::{}", owner.0.as_str(), constant_id_str(&cw.name()))));
         let DeclBody { includes, methods, constants, unknown_calls, class_initializers, class_attributes: _ } =
             walk_decl_body(block.body(), &name, file, DeclBodyMode::Instance)?;
@@ -266,9 +285,23 @@ pub fn ingest_rails_application_singleton_methods(
                 message: "Rails application singleton class-variable initialization is not modeled".into(),
             });
         }
-        out.extend(body.methods);
+        // Rubydex records no constant references inside a singleton
+        // class opened on an expression, so its constants carry no
+        // source answer to require.
+        let mut methods = body.methods;
+        for method in &mut methods {
+            mark_unindexed_const_refs(&mut method.body);
+        }
+        out.extend(methods);
     }
     Ok(out)
+}
+
+fn mark_unindexed_const_refs(expr: &mut crate::expr::Expr) {
+    if matches!(&*expr.node, crate::expr::ExprNode::Const { .. }) {
+        expr.decisions |= crate::expr::UNINDEXED_SCOPE_CONST_REF;
+    }
+    expr.node.for_each_child_mut(&mut mark_unindexed_const_refs);
 }
 
 /// Build a LibraryClass for a class declaration, prepending the
@@ -1420,10 +1453,19 @@ impl DeclBody {
             .class_initializers
             .iter()
             .any(|expr| !expr.span.is_synthetic());
+        // Constants and `@@` initializers whose values are all literals
+        // cannot observe one another, so emitting them in a different order
+        // than the source wrote them changes nothing (lobsters' `Twitter`:
+        // `@@CONSUMER_KEY = nil` beside `MAX_TWEET_LEN = 280`).
+        let order_independent = self.constants.iter().all(|(_, value)| is_literal_value(value))
+            && self.class_initializers.iter().all(|expr| match &*expr.node {
+                ExprNode::Assign { value, .. } => is_literal_value(value),
+                _ => false,
+            });
         if has_source_ordered_init
             && (!self.unknown_calls.is_empty()
-                || !self.constants.is_empty()
-                || !self.includes.is_empty())
+                || !self.includes.is_empty()
+                || (!self.constants.is_empty() && !order_independent))
         {
             return Err(IngestError::Unsupported {
                 file: file.into(),
@@ -1431,6 +1473,17 @@ impl DeclBody {
             });
         }
         Ok(())
+    }
+}
+
+/// A literal (or an array/hash of literals): a value that reads no other
+/// constant or class variable, so its place in the class body is free.
+fn is_literal_value(e: &Expr) -> bool {
+    match &*e.node {
+        ExprNode::Lit { .. } => true,
+        ExprNode::Array { elements, .. } => elements.iter().all(is_literal_value),
+        ExprNode::Hash { entries, .. } => entries.iter().all(|(k, v)| is_literal_value(k) && is_literal_value(v)),
+        _ => false,
     }
 }
 
@@ -1685,6 +1738,9 @@ fn walk_decl_body<'pr>(
     walk_decl_body_with_visibility(body, owner, file, mode, &visibility)
 }
 
+/// Collect a declaration's methods, constants, and supported DSL expansions
+/// using its resolved visibility. Custom Data constants retain only their call
+/// heads here; the factory collector owns lifting and validating their blocks.
 fn walk_decl_body_with_visibility<'pr>(
     body: Option<ruby_prism::Node<'pr>>,
     owner: &ClassId,
@@ -1799,14 +1855,11 @@ fn walk_decl_body_with_visibility<'pr>(
                 continue;
             }
             let name = Symbol::from(constant_id_str(&cw.name()));
-            let mut value = ingest_expr(&cw.value(), file)?;
-            // The block's `def`s are `data_block_classes`' class; the
-            // factory the constant holds is the block-less call.
-            if data_define_block(&cw.value()).is_some() {
-                if let ExprNode::Send { block, .. } = &mut *value.node {
-                    *block = None;
-                }
-            }
+            let value = if let Some(call) = super::data_factory::declaration(&stmt) {
+                super::data_factory::head(&call, file)?
+            } else {
+                ingest_expr(&cw.value(), file)?
+            };
             out.constants.push((name, value));
             continue;
         }
@@ -2670,10 +2723,24 @@ pub(crate) fn synth_attr_writer(owner: &ClassId, name: &Symbol, receiver: Method
     }
 }
 
+/// Ingest a method with the ordinary library keyword-flattening policy.
+/// Callers that need to retain the keyword contract use the explicit variant.
 pub(super) fn ingest_library_method(
     def: &ruby_prism::DefNode<'_>,
     owner: &ClassId,
     file: &str,
+) -> IngestResult<crate::dialect::MethodDef> {
+    ingest_library_method_with_keywords(def, owner, file, false)
+}
+
+/// Ingest a library method, optionally retaining keyword parameters even where
+/// ordinary library ingestion would flatten them. Data initializers require this
+/// to preserve Ruby's keyword binding and forwarding through `super`.
+pub(super) fn ingest_library_method_with_keywords(
+    def: &ruby_prism::DefNode<'_>,
+    owner: &ClassId,
+    file: &str,
+    preserve_keywords: bool,
 ) -> IngestResult<crate::dialect::MethodDef> {
     use crate::dialect::{MethodDef, MethodReceiver};
 
@@ -2747,7 +2814,7 @@ pub(super) fn ingest_library_method(
         // both flattenings are MARKED below: `lower::kwrest_forward`
         // repairs the call, and the marks are the only record that
         // these slots were not positional in the source.
-        let keeps_keywords = params.iter().any(|p| p.rest)
+        let keeps_keywords = preserve_keywords || params.iter().any(|p| p.rest)
             // Nameless `**` must keep the adjacent keyword group too:
             // a flattened optional would otherwise bind its default
             // while the keyword disappears into this rest slot.
@@ -3682,6 +3749,12 @@ const CONCERN_MODEL_MACROS: &[&str] = &[
     "typed_store",
     "broadcasts_to",
     "delegate",
+    // Devise's scope declaration: `devise :database_authenticatable, …`
+    // in a concern's `included do` (Jumpstart's `User::Authenticatable`)
+    // makes every includer a Devise scope exactly as a direct call in
+    // the model body does; `analyze::registry::controllers` reads it
+    // off `model.body` for `current_<scope>` and friends.
+    "devise",
     // `included do include Other end` runs on the includer: spliced
     // after the includer's own `include` line, `Other` sits ahead of
     // this concern in the lookup order, as in Ruby.
