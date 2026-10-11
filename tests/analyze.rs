@@ -5384,3 +5384,25 @@ fn an_inertia_configure_block_without_a_named_parameter_is_a_survey_gap() {
         );
     }
 }
+
+#[test]
+fn inertia_configure_blocks_add_to_one_configuration() {
+    let mut files = INERTIA_APP.to_vec();
+    files.push((
+        "config/initializers/inertia_a.rb",
+        "InertiaRails.configure do |config|\n  config.version = \"v1\"\nend\n\nInertiaRails.configure do |config|\n  config.always_include_errors_hash = true\nend\n",
+    ));
+    files.push((
+        "config/initializers/inertia_b.rb",
+        "InertiaRails.configure do |config|\n  config.encrypt_history = true\nend\n",
+    ));
+    let tree: std::collections::HashMap<std::path::PathBuf, Vec<u8>> = files
+        .iter()
+        .map(|(p, c)| (std::path::PathBuf::from(p), c.as_bytes().to_vec()))
+        .collect();
+    let app = roundhouse::ingest::ingest_app_from_tree(tree).expect("ingest tree");
+    let config = app.inertia.expect("an Inertia configuration");
+    assert_eq!(config.version, "v1");
+    assert!(config.always_include_errors_hash);
+    assert!(config.encrypt_history);
+}

@@ -1589,12 +1589,13 @@ end
 
     {
         let init_dir = dir.join("config/initializers");
+        let mut inertia = crate::app::InertiaConfig::default();
         if vfs.is_dir(&init_dir) {
             for entry in read_rb_files(vfs, &init_dir)? {
                 if let Ok(bytes) = vfs.read(&entry) {
                     let file = entry.display().to_string();
-                    if let Some(config) = extract_inertia_config(&bytes, &file) {
-                        app.inertia = Some(config);
+                    if extract_inertia_config(&bytes, &file, &mut inertia) {
+                        app.inertia = Some(inertia.clone());
                     }
                 }
             }
@@ -8753,15 +8754,15 @@ fn wrap_parameters_format_includes_json(rest: &str) -> bool {
 /// A non-literal value is a survey gap rather than an evaluated guess:
 /// the emitted app would otherwise run with the gem's default and no
 /// diagnostic would say so.
-fn extract_inertia_config(source: &[u8], file: &str) -> Option<crate::app::InertiaConfig> {
+fn extract_inertia_config(source: &[u8], file: &str, config: &mut crate::app::InertiaConfig) -> bool {
     let src = String::from_utf8_lossy(source);
     if !src.contains("InertiaRails") {
-        return None;
+        return false;
     }
     let result = super::prism::parse(source, file);
     let root = result.node();
-    let program = root.as_program_node()?;
-    let mut found = None;
+    let Some(program) = root.as_program_node() else { return false };
+    let mut found = false;
     for stmt in initializer_statements(&program) {
         let Some(call) = stmt.as_call_node() else { continue };
         if super::util::constant_id_str(&call.name()) != "configure" {
@@ -8785,24 +8786,20 @@ fn extract_inertia_config(source: &[u8], file: &str) -> Option<crate::app::Inert
                 file: file.to_string(),
                 message: "InertiaRails.configure: a configuration without a block that names its parameter (`do |config|`) is not read; its options are not applied".to_string(),
             });
-            found = Some(crate::app::InertiaConfig::default());
+            found = true;
             continue;
         };
         let param = super::util::constant_id_str(&param.name());
-        let mut config = crate::app::InertiaConfig::default();
-        let Some(body) = block.body() else {
-            found = Some(config);
-            continue;
-        };
+        found = true;
+        let Some(body) = block.body() else { continue };
         // Not read even partially: the main statements' assignments hold
         // only if nothing raises, and the rescue clauses' only if something
         // does, so neither is the configuration on its own.
         let Some(body) = body.as_statements_node() else {
             survey::record(&IngestError::Unsupported {
                 file: file.to_string(),
-                message: "InertiaRails.configure: a block with `rescue` or `ensure` is not read; the emitted app uses the gem's defaults".to_string(),
+                message: "InertiaRails.configure: a block with `rescue` or `ensure` is not read; its options are not applied".to_string(),
             });
-            found = Some(config);
             continue;
         };
         for inner in body.body().iter() {
@@ -8854,7 +8851,6 @@ fn extract_inertia_config(source: &[u8], file: &str) -> Option<crate::app::Inert
                 _ => gap("option not modeled"),
             }
         }
-        found = Some(config);
     }
     found
 }
