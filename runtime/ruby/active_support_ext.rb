@@ -954,21 +954,6 @@ module ActiveSupport
     zone.nil? ? nil : zone.name
   end
 
-  class TimeZone
-    attr_reader :name
-
-    def self.[](name)
-      ActiveSupport.find_zone!(name)
-      new(name)
-    rescue ArgumentError
-      nil
-    end
-
-    def initialize(name)
-      @name = name
-    end
-  end
-
   # Not Rails' subscriber list: nothing in the runtime subscribes, so a report goes to the log.
   class ErrorReporter
     def report(error, handled: true, severity: nil, context: {}, source: nil)

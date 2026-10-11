@@ -38,11 +38,6 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
     classes.insert(ClassId(Symbol::from("Rails")), rails_cls);
     register_stdlib_class(classes, error_reporter.0.as_str(), &[], &[("report", Ty::Nil)]);
 
-    let time_zone = Ty::Class { id: ClassId(Symbol::from("ActiveSupport::TimeZone")), args: vec![] };
-    register_stdlib_class(classes, "ActiveSupport::TimeZone", &[
-        ("[]", Ty::Union { variants: vec![time_zone, Ty::Nil] }),
-    ], &[("name", Ty::Str)]);
-
     // GlobalID mint + Locator — unsigned `param`/`uri`/`signed` and the
     // locate / locate_signed class methods. Return types for locate*
     // with a literal `only:` are refined in `body/send.rs` to the named

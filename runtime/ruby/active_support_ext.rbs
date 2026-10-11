@@ -126,12 +126,6 @@ module ActiveSupport
   def self.present_db: (Time? t) -> Time?
   def self.in_time_zone: (Time t, String? zone) -> Time
   def self.zone_name: (TimeZone? zone) -> String?
-  class TimeZone
-    @name: String
-    def self.[]: (String name) -> TimeZone?
-    def initialize: (String name) -> void
-    def name: () -> String
-  end
   class ErrorReporter
     def report: (::Exception error, ?handled: bool, ?severity: Symbol?, ?context: Hash[Symbol, untyped], ?source: String?) -> nil
   end
