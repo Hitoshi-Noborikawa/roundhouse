@@ -1023,7 +1023,13 @@ fn every_runtime_method_body_concretely_typed() {
     // Hash/Array value the way `deep_dup` does (+23).
     // MEASURED 491 on 2026-10-11 (#818): AssociationReflection `#klass` /
     // `#macro` presence stubs answer nil until synthesized (+2).
-    const CEILING: usize = 491;
+    // MEASURED 697 on 2026-10-11: `active_support_reporters.rb` (EventReporter,
+    // ErrorReporter, ParameterFilter, ExecutionContext) adds 201, the rest of
+    // the +206 comes with it. What they hold is caller-defined: the subscriber a
+    // reporter calls, an event payload and its filter, an error context
+    // (`deep_dup` walks it the way the indifferent hash's conversions do),
+    // and the value a `handle` / `record` block answers.
+    const CEILING: usize = 697;
     assert!(
         total_gradual <= CEILING,
         "{total_gradual} Ty::Untyped sites exceeds ceiling of {CEILING}",
