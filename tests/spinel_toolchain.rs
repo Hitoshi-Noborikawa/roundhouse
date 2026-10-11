@@ -81,6 +81,8 @@ mod campfire_caches;
 mod ordinalize;
 #[path = "spinel_toolchain/params_helper_no_permit.rs"]
 mod params_helper_no_permit;
+#[path = "spinel_toolchain/rails_parity.rs"]
+mod rails_parity;
 
 /// Compile and execute the shared custom Data factory contract with Spinel;
 /// successful Ruby emission alone does not establish native target support.
