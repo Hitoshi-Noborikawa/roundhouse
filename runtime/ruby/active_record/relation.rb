@@ -1567,7 +1567,8 @@ module ActiveRecord
       end
       raise ArgumentError, "wrong number of arguments (given #{conditions.length}, expected 0..1)" if conditions.length > 1
       id = conditions[0]
-      return false if id.nil?
+      # Rails' `return false if !conditions` — only nil/false are falsy.
+      return false if id.nil? || id == false
       own_lists
       # Popped for the same reason `find` and `find_by` pop: a terminal
       # that answered a question must not narrow the relation it was

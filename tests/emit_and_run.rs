@@ -11680,6 +11680,10 @@ fn belongs_to_primary_key_option_names_the_key_the_foreign_key_holds() {
              price.save!\n\
              joined = Price.for_product_named(\"B\")\n\
              raise \"join: #{joined}\" unless joined == 1\n\
+             ok = Price.new(product_uuid: \"u-a\", cents: 1)\n\
+             raise \"valid? must find by uuid: #{ok.errors.full_messages}\" unless ok.valid?\n\
+             missing = Price.new(product_uuid: \"u-missing\", cents: 1)\n\
+             raise \"valid? must reject missing uuid\" if missing.valid?\n\
              puts \"belongs_to primary_key passed\"\n",
         )
         .assert_passes();

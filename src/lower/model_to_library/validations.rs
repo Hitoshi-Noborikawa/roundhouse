@@ -514,8 +514,11 @@ fn inline_belongs_to_check(
         ExprNode::Const { path: vec![target.0.clone()] },
     );
     let exists_call = match lookup_pk {
-        // `Target.exists?(uuid: @fk)`: the conditions form, which the
-        // `exists_conditions` lowering turns into `where(..).exists?`.
+        // `Target.exists?(uuid: @fk)`. Model_to_library synthesis runs
+        // after the post-analyze `exists_conditions` rewrite, so that
+        // pass never sees this send; arel (`build_exists_kwargs`) in
+        // `lower_models_inner` turns the kwargs form into a SELECT 1
+        // probe when the PK column is on the schema.
         Some(pk) => {
             let conditions = Expr::new(
                 Span::synthetic(),
