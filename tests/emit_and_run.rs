@@ -325,6 +325,62 @@ fn extrema_run_on_a_model_and_its_has_many_reader() {
     assert!(run.stdout.contains("extrema passed"));
 }
 
+/// A guard on a nullable column read narrows the later reads of that column
+/// on the same record: `a.score && a.score >= 0.5` compares a Float, and the
+/// emitted program keeps exactly the rows whose score is set and high enough.
+fn guarded_column_app() -> emit_and_run::Overlay {
+    emit_and_run::real_blog()
+        .edit("db/schema.rb", "t.text \"body\"\n    t.datetime \"created_at\", null: false\n    t.datetime \"updated_at\", null: false\n  end\n\n  create_table \"comments\"", "t.text \"body\"\n    t.float \"score\"\n    t.datetime \"created_at\", null: false\n    t.datetime \"updated_at\", null: false\n  end\n\n  create_table \"comments\"")
+        .edit(
+            "app/models/article.rb",
+            "  validates :title, presence: true\n",
+            "  validates :title, presence: true
+
+  def self.confident
+    Article.all.select { |a| a.score && a.score >= 0.5 }.map { |a| a.title }
+  end
+
+  def self.unconfident
+    Article.all.select { |a| a.score.nil? || a.score < 0.5 }.map { |a| a.title }
+  end
+
+  def self.branch_score(a)
+    if a.score
+      a.score + 1.0
+    else
+      -1.0
+    end
+  end
+
+  def self.ternary_score(a)
+    a.score ? a.score * 2 : 0.0
+  end
+",
+        )
+}
+
+#[test]
+fn a_guarded_nullable_column_read_runs() {
+    let script = r#"Article.delete_all
+Article.create!(title: "high", body: "A sufficiently long body.", score: 0.9)
+Article.create!(title: "edge", body: "A sufficiently long body.", score: 0.5)
+Article.create!(title: "low", body: "A sufficiently long body.", score: 0.1)
+Article.create!(title: "none", body: "A sufficiently long body.")
+got = Article.confident.sort
+raise "confident: #{got.inspect}" unless got == ["edge", "high"]
+got = Article.unconfident.sort
+raise "unconfident: #{got.inspect}" unless got == ["low", "none"]
+raise "branch nil" unless Article.branch_score(Article.find_by(title: "none")) == -1.0
+raise "branch set" unless Article.branch_score(Article.find_by(title: "high")) == 1.9
+raise "ternary nil" unless Article.ternary_score(Article.find_by(title: "none")) == 0.0
+raise "ternary set" unless Article.ternary_score(Article.find_by(title: "low")) == 0.2
+puts "guarded column passed"
+"#;
+    let run = guarded_column_app().run_ruby(script);
+    run.assert_passes();
+    assert!(run.stdout.contains("guarded column passed"));
+}
+
 /// With a date column the Date package loads and an aggregate over it
 /// answers a Date, on Spinel as on CRuby.
 #[test]
