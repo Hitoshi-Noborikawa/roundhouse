@@ -56,8 +56,72 @@ fn literal_text(e: &Expr) -> Option<String> {
     match &*e.node {
         ExprNode::Lit { value: Literal::Str { value } } => Some(value.clone()),
         ExprNode::Lit { value: Literal::Sym { value } } => Some(value.as_str().to_string()),
+        ExprNode::StringInterp { parts } => parts
+            .iter()
+            .map(|p| match p {
+                InterpPart::Text { value } => Some(value.clone()),
+                InterpPart::Expr { expr } => interpolated_text(expr),
+            })
+            .collect(),
         _ => None,
     }
+}
+
+/// What `#{expr}` renders for a literal `expr`.
+fn interpolated_text(e: &Expr) -> Option<String> {
+    match &*e.node {
+        ExprNode::Lit { value: Literal::Nil } => Some(String::new()),
+        ExprNode::Lit { value: Literal::Int { value } } => Some(value.to_string()),
+        _ => literal_text(e),
+    }
+}
+
+/// A key that picks between literals by a condition (`c ? "a" : "b"`,
+/// or `"x.#{c ? 'a' : 'b'}"`): the condition, and the arguments with
+/// the key each way it can go.
+pub(crate) fn split_key(args: &[Expr]) -> Option<(Expr, Vec<Expr>, Vec<Expr>)> {
+    let key = args.first()?;
+    let with_key = |k: Expr| std::iter::once(k).chain(args[1..].iter().cloned()).collect::<Vec<_>>();
+    let (cond, then_key, else_key) = match &*key.node {
+        ExprNode::If { cond, then_branch, else_branch } => (cond.clone(), then_branch.clone(), else_branch.clone()),
+        ExprNode::StringInterp { parts } => {
+            let at = parts.iter().position(|p| match p {
+                InterpPart::Expr { expr } => interpolated_text(expr).is_none(),
+                InterpPart::Text { .. } => false,
+            })?;
+            let InterpPart::Expr { expr } = &parts[at] else { unreachable!() };
+            let ExprNode::If { cond, then_branch, else_branch } = &*expr.node else { return None };
+            let swap = |branch: &Expr| {
+                let mut parts = parts.clone();
+                parts[at] = InterpPart::Expr { expr: branch.clone() };
+                Expr::new(key.span, ExprNode::StringInterp { parts })
+            };
+            (cond.clone(), swap(then_branch), swap(else_branch))
+        }
+        _ => return None,
+    };
+    Some((cond, with_key(then_key), with_key(else_key)))
+}
+
+/// Whether every key a translate call can look up resolves; `None` when
+/// this is not a translate call.
+pub(crate) fn resolves(
+    catalog: &Catalog,
+    recv: Option<&Expr>,
+    method: &str,
+    args: &[Expr],
+    block: Option<&Expr>,
+    in_view: bool,
+    view: Option<&str>,
+) -> Option<Result<(), String>> {
+    let parsed = parse(recv, method, args, block, in_view, view)?;
+    Some(match (parsed, split_key(args)) {
+        (Ok(call), _) => catalog.resolve(&call.lookup).map(|_| ()),
+        (Err(_), Some((_, then_args, else_args))) if block.is_none() => [then_args, else_args]
+            .iter()
+            .try_for_each(|a| resolves(catalog, recv, method, a, block, in_view, view).expect("still a translate call")),
+        (Err(reason), _) => Err(reason),
+    })
 }
 
 fn parse_args(args: &[Expr], view: Option<&str>) -> Result<Call, String> {
@@ -134,7 +198,22 @@ pub fn apply_i18n_translate_lowering(app: &mut App) {
 fn rewrite(expr: &mut Expr, catalog: &Catalog, in_view: bool, view: Option<&str>) {
     expr.node.for_each_child_mut(&mut |c| rewrite(c, catalog, in_view, view));
     let ExprNode::Send { recv, method, args, block, .. } = &*expr.node else { return };
-    let Some(Ok(mut call)) = parse(recv.as_ref(), method.as_str(), args, block.as_ref(), in_view, view) else { return };
+    let Some(parsed) = parse(recv.as_ref(), method.as_str(), args, block.as_ref(), in_view, view) else { return };
+    let Ok(mut call) = parsed else {
+        let resolved = resolves(catalog, recv.as_ref(), method.as_str(), args, block.as_ref(), in_view, view);
+        let Some((cond, then_args, else_args)) = split_key(args).filter(|_| matches!(resolved, Some(Ok(())))) else { return };
+        let branch = |args: Vec<Expr>| {
+            let mut e = expr.clone();
+            if let ExprNode::Send { args: a, .. } = &mut *e.node {
+                *a = args;
+            }
+            rewrite(&mut e, catalog, in_view, view);
+            e
+        };
+        let (then_branch, else_branch) = (branch(then_args), branch(else_args));
+        *expr = typed(Expr::new(expr.span, ExprNode::If { cond, then_branch, else_branch }));
+        return;
+    };
     let Ok(translation) = catalog.resolve(&call.lookup) else { return };
     let span = expr.span;
     let html = in_view && crate::i18n::is_html_safe_key(&call.lookup.key);

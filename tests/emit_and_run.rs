@@ -824,7 +824,7 @@ fn translate_app() -> emit_and_run::Overlay {
     emit_and_run::real_blog()
         .write(
             "config/locales/en.yml",
-            "en:\n  hello: \"Hello world\"\n  greet: \"Hi %{name}\"\n  inbox:\n    zero: \"No messages\"\n    one: \"1 message\"\n    other: \"%{count} messages\"\n  shop:\n    title: \"Store\"\n  intro_html: \"<b>Hi</b> %{name}\"\n  pct: \"100%% sure %%{x} %{name}\"\n  tally_html:\n    one: \"<b>one</b>\"\n    other: \"<b>%{count}</b> items\"\n  articles:\n    index:\n      heading: \"All the articles\"\n",
+            "en:\n  hello: \"Hello world\"\n  greet: \"Hi %{name}\"\n  inbox:\n    zero: \"No messages\"\n    one: \"1 message\"\n    other: \"%{count} messages\"\n  shop:\n    title: \"Store\"\n  intro_html: \"<b>Hi</b> %{name}\"\n  pct: \"100%% sure %%{x} %{name}\"\n  mood:\n    happy: \"Glad\"\n    sad: \"Down %{name}\"\n  tally_html:\n    one: \"<b>one</b>\"\n    other: \"<b>%{count}</b> items\"\n  articles:\n    index:\n      heading: \"All the articles\"\n",
         )
         .edit(
             "app/models/article.rb",
@@ -857,6 +857,10 @@ fn translate_app() -> emit_and_run::Overlay {
 
   def self.percents
     [I18n.t(\"pct\", name: \"N\", x: \"X\"), I18n.t(\"greet\")]
+  end
+
+  def self.moods(flag)
+    [I18n.t(\"mood.#{flag ? 'happy' : 'sad'}\", name: \"Al\"), I18n.t(flag ? :hello : \"shop.title\")]
   end
 
   def self.unread_option(calls)
@@ -896,6 +900,8 @@ counted = Article.counted_inbox(calls)
 raise "counted: #{counted}" unless counted == "1 message"
 raise "count evaluated #{calls.size} times" unless calls.size == 1
 raise "percents: #{Article.percents.inspect}" unless Article.percents == ["100% sure %{x} N", "Hi %{name}"]
+raise "moods: #{Article.moods(true).inspect}" unless Article.moods(true) == ["Glad", "Hello world"]
+raise "moods: #{Article.moods(false).inspect}" unless Article.moods(false) == ["Down Al", "Store"]
 calls = []
 raise "unread: #{calls.inspect}" unless Article.unread_option(calls) == "Hello world" && calls == [1]
 raise "read before write: #{Article.read_before_write}" unless Article.read_before_write == "Hi before"
@@ -921,18 +927,18 @@ fn template_t_answers_the_locale() {
     translate_app().run_test("test/controllers/translations_controller_test.rb").assert_passes();
 }
 
-/// A key the locale lacks, one computed at run time, or a call with a
-/// block stays an error.
+/// A key the locale lacks, one computed at run time (including one
+/// branch of a conditional key), or a call with a block stays an error.
 #[test]
 fn unresolvable_translations_stay_errors() {
     let (_emitted, errors) = emit_and_run::real_blog()
         .edit(
             "app/models/article.rb",
             "  validates :title, presence: true\n",
-            "  validates :title, presence: true\n\n  def self.missing\n    I18n.t(\"no.such.key\")\n  end\n\n  def self.dynamic(key)\n    I18n.t(key)\n  end\n\n  def self.blocked\n    I18n.t(\"hello\") { |text| text }\n  end\n",
+            "  validates :title, presence: true\n\n  def self.missing\n    I18n.t(\"no.such.key\")\n  end\n\n  def self.dynamic(key)\n    I18n.t(key)\n  end\n\n  def self.blocked\n    I18n.t(\"hello\") { |text| text }\n  end\n\n  def self.one_branch_missing(flag)\n    I18n.t(\"shop.#{flag ? 'title' : 'nope'}\")\n  end\n",
         )
         .emit(roundhouse::project::BuildTarget::Ruby);
-    assert_eq!(errors.iter().filter(|e| e.contains("I18n not supported")).count(), 3, "{errors:?}");
+    assert_eq!(errors.iter().filter(|e| e.contains("I18n not supported")).count(), 4, "{errors:?}");
 }
 
 /// `errors[:field]` cannot tell fields apart when `errors.format` puts
