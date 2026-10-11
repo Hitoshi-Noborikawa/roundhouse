@@ -175,20 +175,21 @@ module ActiveRecord
     end
 
     # `where(hash)` / `where("raw sql")` / `where("a = ? AND b = ?", x, y)`.
+    # A hash of seedable equality predicates also feeds `scope_for_create`
+    # (Rails' `where_values_hash`), so `rel.where(account_id: 7).
+    # find_or_initialize_by(name: "A")` builds a record carrying
+    # `account_id`. Non-seedable values (arrays, ranges, nested hashes,
+    # relations, qualified keys) filter only.
     def where(condition = nil, *args)
+      merge_seedable_scope(condition) if condition.is_a?(Hash)
       add_condition(condition, args, false)
       self
     end
 
     # An association's scope: `where(fk => owner.id)` that ALSO presets
-    # what a `create` through this relation writes.
-    #
-    # Rails derives both from the same place — a relation's equality
-    # conditions filter reads (`where_values_hash`) and seed writes
-    # (`scope_for_create`), which is why `user.sessions.create!(…)`
-    # comes back with `user_id` set without anybody naming it. Only the
-    # compiler's association seed calls this, so the ordinary `where`
-    # stays a pure filter and pays nothing for the extra bookkeeping.
+    # what a `create` through this relation writes. The compiler's
+    # association seed uses this so the FK is recorded even when the
+    # ordinary `where` path would refuse it as non-seedable.
     def where_scope(condition)
       @scope_attributes = condition
       add_condition(condition, [], false)
@@ -201,8 +202,21 @@ module ActiveRecord
       @scope_attributes
     end
 
+    # Equality predicates from `where(hash)` that a new record can carry.
+    # Later keys win. Arrays / ranges / nested hashes / relations and
+    # qualified `table.col` keys are filters only.
+    def merge_seedable_scope(hash)
+      own_lists
+      hash.each do |key, val|
+        next if val.is_a?(Hash) || val.is_a?(Array) || val.is_a?(Relation) || val.is_a?(Range)
+        name = key.is_a?(Symbol) ? key.to_s : key.to_s
+        next if name.include?(".")
+        @scope_attributes = @scope_attributes.merge({ name.to_sym => val })
+      end
+    end
+
     # `where.not(...)` is lowered to `not(...)` on the relation: negate the
-    # condition back onto this relation.
+    # condition back onto this relation. Negated predicates never seed.
     def not(condition = nil, *args)
       add_condition(condition, args, true)
       self

@@ -474,6 +474,39 @@ end
 /// statement the lowering inlines; the model class answers it as Rails'
 /// `all.find_or_initialize_by`: the found row, else an unsaved record
 /// carrying the conditions.
+/// Ordinary `where(hash)` seeds `scope_for_create` for the runtime
+/// `find_or_*` path (not only association `where_scope`). Held in a
+/// local so statement-position first_or_create lowering does not inline
+/// it away.
+#[test]
+fn ordinary_where_seeds_find_or_initialize_by_at_runtime() {
+    emit_and_run::real_blog()
+        .write(
+            "app/models/comment.rb",
+            r#"
+class Comment < ApplicationRecord
+  belongs_to :article
+
+  def self.build_under(article_id, commenter)
+    rel = where(article_id: article_id)
+    rel.find_or_initialize_by(commenter: commenter)
+  end
+end
+"#,
+        )
+        .run_ruby(
+            r#"
+article = Article.create!(title: "Owner", body: "A sufficiently long body")
+built = Comment.build_under(article.id, "Seeded")
+raise "where seed lost: #{built.article_id.inspect}" unless built.article_id == article.id
+raise "explicit condition lost" unless built.commenter == "Seeded"
+raise "must be unsaved" if built.persisted?
+puts "PASS where seeds find_or_initialize_by"
+"#,
+        )
+        .assert_passes();
+}
+
 #[test]
 fn a_receiverless_find_or_initialize_by_operand_finds_or_builds() {
     emit_and_run::real_blog()

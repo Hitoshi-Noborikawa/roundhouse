@@ -69,6 +69,7 @@ module ActiveRecord
     @scope_attributes: Hash[Symbol, untyped]
     def where_scope: (Hash[Symbol, untyped] condition) -> Relation
     def scope_attributes: () -> Hash[Symbol, untyped]
+    def merge_seedable_scope: (Hash[String | Symbol, untyped] hash) -> void
     def not: (?(Hash[String | Symbol, untyped] | String | nil) condition, *untyped args) -> Relation
     def excluding: (*untyped records) -> Relation
     def without: (*untyped records) -> Relation

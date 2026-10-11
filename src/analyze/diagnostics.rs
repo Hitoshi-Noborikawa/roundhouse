@@ -221,13 +221,61 @@ pub struct UnknownReceiverSend {
 /// A receiver whose type names a class the registry does not hold
 /// (`#: (Missing::AccessControl)`) is unknown, not known: there is no
 /// method table to check it against.
+/// True when `method` is registered on the receiver's class (either
+/// side), walking parents and includes. A registered method that returns
+/// `Ty::Var` still counts as resolved for the unknown-receiver ledger.
+fn method_registered_on(
+    classes: &HashMap<ClassId, ClassInfo>,
+    ty: Option<&Ty>,
+    method: &Symbol,
+) -> bool {
+    match ty {
+        Some(Ty::Union { variants }) => {
+            !variants.is_empty()
+                && variants
+                    .iter()
+                    .all(|v| method_registered_on(classes, Some(v), method))
+        }
+        Some(Ty::Class { id, .. }) => {
+            let mut current = Some(id);
+            for _ in 0..32 {
+                let Some(cid) = current else { break };
+                let Some(class) = classes.get(cid) else { break };
+                if class.instance_methods.contains_key(method)
+                    || class.class_methods.contains_key(method)
+                {
+                    return true;
+                }
+                if class
+                    .includes
+                    .iter()
+                    .any(|m| classes.get(m).is_some_and(|inc| {
+                        inc.instance_methods.contains_key(method)
+                            || inc.class_methods.contains_key(method)
+                    }))
+                {
+                    return true;
+                }
+                current = class.parent.as_ref();
+            }
+            false
+        }
+        _ => false,
+    }
+}
+
 pub fn unknown_receiver_sends(app: &App, classes: &HashMap<ClassId, ClassInfo>) -> Vec<UnknownReceiverSend> {
     fn visit(expr: &Expr, classes: &HashMap<ClassId, ClassInfo>, out: &mut Vec<UnknownReceiverSend>) {
         if let ExprNode::Send { recv: Some(r), method, .. } = &*expr.node {
             let gradual = matches!(r.ty, Some(Ty::Untyped));
             let unknown = is_unknown_ty(r.ty.as_ref())
                 || matches!(&r.ty, Some(Ty::Class { id, .. }) if !classes.contains_key(id));
-            let known_receiver = !gradual && !unknown && is_unknown_ty(expr.ty.as_ref());
+            // Dispatch evidence, not return shape: a known method that
+            // answers `Ty::Var` is still checked.
+            let known_receiver = !gradual
+                && !unknown
+                && is_unknown_ty(expr.ty.as_ref())
+                && !method_registered_on(classes, r.ty.as_ref(), method);
             if (gradual || known_receiver || unknown)
                 && expr.diagnostic.is_none()
                 && !expr.span.is_synthetic()
