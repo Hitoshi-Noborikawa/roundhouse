@@ -328,10 +328,19 @@ module ActiveRecord
       order_sql(fragment)
     end
 
+    # Rails requires at least one argument to the public `reorder` API.
+    # Aggregate calculations need to discard ordering internally; keep this
+    # operation distinct from the public, argument-requiring `reorder` API.
+    def clear_ordering
+      @orders = []
+      self
+    end
+
     # `reorder(*parts)` — Rails' "replace the ordering": drop every term
     # gathered so far, then order by these. Same in-memory resort as
     # `order` when the records are already loaded.
     def reorder(*parts)
+      raise ArgumentError, "The method .reorder() must contain arguments." if parts.empty?
       @orders = []
       order(*parts)
     end
@@ -1368,7 +1377,7 @@ module ActiveRecord
       projection = "#{function}(#{@table}.#{ActiveRecord.adapter.quote_column_name(column)}) AS value"
       projection = "#{@select_sql}, #{projection}" if @havings.length > 0 && !@select_sql.nil?
       scoped.select(projection)
-      scoped.reorder
+      scoped.clear_ordering
       rows = ActiveRecord.adapter.select_rows(scoped.to_sql)
       return nil if rows.length == 0
       value = rows[0]["value"]
@@ -1391,7 +1400,7 @@ module ActiveRecord
       scoped = spawn
       selects.unshift(@select_sql) if @havings.length > 0 && !@select_sql.nil?
       scoped.select(selects.join(", "))
-      scoped.reorder
+      scoped.clear_ordering
       rows = ActiveRecord.adapter.select_rows(scoped.to_sql)
       grouped = {}
       rows.each do |row|
