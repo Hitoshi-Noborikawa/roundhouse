@@ -353,7 +353,6 @@ fn untyped_subexpressions_baseline() {
     // All nine are the nested branch's new `Db.exec` SAVEPOINT / RELEASE /
     // ROLLBACK TO calls (and the `if`/`unless` arms holding them) plus the
     // `depth` read in the savepoint name, unmodeled here like the others.
-<<<<<<< HEAD
     // `Model.find_or_initialize_by` / `find_or_create_by` / `find_or_create_by!`
     // and Relation's `find_or_initialize_by` / `find_or_create_by!`:
     // 578 -> 592, MEASURED over that commit. The new sites are the new
@@ -361,13 +360,10 @@ fn untyped_subexpressions_baseline() {
     // finders'; the RBS-paired probe stays at zero residual.
     // Meta-PR #802 (exists? arity / where-seed / related Relation arms):
     // 592 -> 603, MEASURED on tip 86936194's CI unit shard.
+    // #818 AssociationReflection + `reflect_on_association`: +5 on clean
+    // main (578 -> 583); absorbed under the #802 tip ceiling until
+    // remount remeasure.
     const CEILING: usize = 603;
-=======
-    // #818 AssociationReflection + `reflect_on_association`: 578 -> 583,
-    // MEASURED — initialize ivar writes and the name/assoc loop under
-    // raw inference (no RBS on this probe).
-    const CEILING: usize = 583;
->>>>>>> rubys/main
     assert!(
         all_untyped.len() <= CEILING,
         "{} untyped sub-expressions on spinel-blog runtime — exceeds ceiling of {CEILING}.\n\
