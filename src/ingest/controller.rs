@@ -15,7 +15,7 @@ use super::expr::ingest_expr;
 use super::util::{
     class_name_path, collect_comments, constant_id_str, constant_path_of, drain_comments_before,
     find_all_classes_with_nesting, flatten_statements, source_has_blank_line,
-    symbol_list_style, symbol_list_value, symbol_value,
+    symbol_list_style, symbol_list_value, symbol_or_string_value, symbol_value,
 };
 use super::{IngestError, IngestResult};
 
@@ -182,23 +182,50 @@ pub(super) fn ingest_controller_with_nesting(
             // symbol; expand to one `Filter` body item each so every target's
             // ivar assignments seed the actions it guards (the single-target
             // parse only ever captured the first symbol). Block-form filters
-            // (`before_action { ... }`, no symbol target) return `None` here,
-            // fall through to `Unknown`, and round-trip verbatim — analyze
-            // harvests their ivars separately.
-            if let Some(filters) = parse_filter_call(&stmt, file) {
-                for (i, filter) in filters.into_iter().enumerate() {
-                    body_items.push(ControllerBodyItem::Filter {
-                        filter,
-                        leading_comments: if i == 0 {
-                            std::mem::take(&mut leading)
-                        } else {
-                            Vec::new()
-                        },
-                        leading_blank_line: i == 0 && leading_blank,
-                    });
+            // (`before_action { ... }`, no symbol target) return `Ok(None)`
+            // here, fall through to `Unknown`, and round-trip verbatim —
+            // analyze harvests their ivars separately. A non-literal `only:`/
+            // `except:` is `Err` instead — a located gap (survey) or a strict
+            // error, round-tripped as `Unknown` on the gap path rather than
+            // silently applied to every action (`parse_filter_call`'s doc
+            // comment).
+            match parse_filter_call(&stmt, file) {
+                Ok(Some(filters)) => {
+                    for (i, filter) in filters.into_iter().enumerate() {
+                        body_items.push(ControllerBodyItem::Filter {
+                            filter,
+                            leading_comments: if i == 0 {
+                                std::mem::take(&mut leading)
+                            } else {
+                                Vec::new()
+                            },
+                            leading_blank_line: i == 0 && leading_blank,
+                        });
+                    }
+                    prev_end = Some(stmt.location().end_offset());
+                    continue;
                 }
-                prev_end = Some(stmt.location().end_offset());
-                continue;
+                Ok(None) => {}
+                Err(err) if super::survey::is_active() => {
+                    super::survey::record(&err);
+                    let expr = match ingest_expr(&stmt, file) {
+                        Ok(expr) => expr,
+                        Err(err2) if super::survey::is_active() => {
+                            super::survey::record(&err2);
+                            prev_end = Some(stmt.location().end_offset());
+                            continue;
+                        }
+                        Err(err2) => return Err(err2),
+                    };
+                    body_items.push(ControllerBodyItem::Unknown {
+                        expr,
+                        leading_comments: std::mem::take(&mut leading),
+                        leading_blank_line: leading_blank,
+                    });
+                    prev_end = Some(stmt.location().end_offset());
+                    continue;
+                }
+                Err(err) => return Err(err),
             }
             // Block-form `around_action(...) { |controller, block| ... }`
             // — `parse_filter_call` only recognizes a Symbol target, so a
@@ -681,6 +708,38 @@ fn ingest_controller_body_item(
     })
 }
 
+/// Whether `node` is a scope value [`Filter.only`](crate::dialect::Filter)/
+/// `.except` can actually hold: a literal Symbol or String (Rails reads
+/// either the same way — `only: "show"` scopes identically to `only:
+/// :show`), or an array of only those. A non-literal (a method call, a
+/// constant, a splat, …) can't be read statically: `symbol_list_value`
+/// would quietly return an empty list for one, and an empty `only`/
+/// `except` means "every action" to `before_filter_applies` — the
+/// opposite of refusing a scope this can't read. Rails itself calls the
+/// method and scopes to whatever IT returns; applying the filter to
+/// every action instead is a silent, broader claim than the source
+/// made, which fails open for a `skip_before_action` (CSRF or
+/// authentication gets skipped on actions Rails would still protect).
+fn is_recognized_scope_value(node: &Node<'_>) -> bool {
+    if let Some(arr) = node.as_array_node() {
+        return arr.elements().iter().all(|el| symbol_or_string_value(&el).is_some());
+    }
+    symbol_or_string_value(node).is_some()
+}
+
+/// A `only:`/`except:` value `is_recognized_scope_value` declined —
+/// named the same way every other `IngestError::Unsupported` in this
+/// module is, just without `with_options`'s shared prefix (this fires
+/// for a plain filter call too, not only a composed one).
+fn scope_gap(file: &str, macro_name: &str, key: &str) -> IngestError {
+    IngestError::Unsupported {
+        file: file.into(),
+        message: format!(
+            "`{macro_name}` `{key}:` is not a literal Symbol/String or an array of them; the filter is refused rather than silently applied to every action"
+        ),
+    }
+}
+
 /// Recognize a controller filter declaration (`before_action`,
 /// `around_action`, `after_action`, `skip_before_action`) and return one
 /// [`Filter`] per leading symbol target, all sharing the call's `only:` /
@@ -690,19 +749,26 @@ fn ingest_controller_body_item(
 /// the first, hiding their ivar assignments from analyze and their calls
 /// from the emitted dispatch chain.
 ///
-/// Returns `None` for non-filter calls and for filter calls with no symbol
-/// target — notably the block form `before_action { ... }`, which has no
-/// named method to reference. Those fall through to `Unknown`, round-trip
-/// verbatim, and have their ivars harvested directly during analyze.
+/// Returns `Ok(None)` for non-filter calls and for filter calls with no
+/// symbol target — notably the block form `before_action { ... }`, which
+/// has no named method to reference. Those fall through to `Unknown`,
+/// round-trip verbatim, and have their ivars harvested directly during
+/// analyze.
+///
+/// Returns `Err` only for an `only:`/`except:` value
+/// `is_recognized_scope_value` declines — never silently, since an
+/// unreadable scope would otherwise read as "every action" (see that
+/// function's doc comment). Every other unmodeled shape still falls
+/// through to `Ok(None)`, unchanged.
 pub(super) fn parse_filter_call(
     stmt: &Node<'_>,
     file: &str,
-) -> Option<Vec<crate::dialect::Filter>> {
+) -> IngestResult<Option<Vec<crate::dialect::Filter>>> {
     use crate::dialect::{Filter, FilterKind};
 
-    let call = stmt.as_call_node()?;
+    let Some(call) = stmt.as_call_node() else { return Ok(None) };
     if call.receiver().is_some() {
-        return None;
+        return Ok(None);
     }
     let macro_name = constant_id_str(&call.name());
     if macro_name == "protect_from_forgery" || macro_name == "skip_forgery_protection" {
@@ -715,7 +781,7 @@ pub(super) fn parse_filter_call(
         "skip_before_action" => FilterKind::Skip,
         "skip_around_action" => FilterKind::SkipAround,
         "skip_after_action" => FilterKind::SkipAfter,
-        _ => return None,
+        _ => return Ok(None),
     };
     // Rails moves a `prepend_before_action` callback to the head of the
     // WHOLE chain, ahead of inherited filters too — see `Filter::prepend`.
@@ -724,7 +790,7 @@ pub(super) fn parse_filter_call(
     // stay unrecognized rather than risk a wrong-order claim.
     let prepend = macro_name == "prepend_before_action";
 
-    let args = call.arguments()?;
+    let Some(args) = call.arguments() else { return Ok(None) };
 
     let mut targets: Vec<(Symbol, Span)> = Vec::new();
     let mut only: Vec<Symbol> = Vec::new();
@@ -756,10 +822,16 @@ pub(super) fn parse_filter_call(
             let value = assoc.value();
             match key.as_str() {
                 "only" => {
+                    if !is_recognized_scope_value(&value) {
+                        return Err(scope_gap(file, macro_name, "only"));
+                    }
                     only = symbol_list_value(&value);
                     only_style = symbol_list_style(&value);
                 }
                 "except" => {
+                    if !is_recognized_scope_value(&value) {
+                        return Err(scope_gap(file, macro_name, "except"));
+                    }
                     except = symbol_list_value(&value);
                     except_style = symbol_list_style(&value);
                 }
@@ -779,10 +851,10 @@ pub(super) fn parse_filter_call(
     }
 
     if targets.is_empty() {
-        return None;
+        return Ok(None);
     }
 
-    Some(
+    Ok(Some(
         targets
             .into_iter()
             .map(|(target, target_span)| Filter {
@@ -802,7 +874,7 @@ pub(super) fn parse_filter_call(
                 prepend,
             })
             .collect(),
-    )
+    ))
 }
 
 /// The framework method both forgery macros name. Rails defines them as
@@ -836,14 +908,19 @@ pub const VERIFY_AUTHENTICITY_TOKEN: &str = "verify_authenticity_token";
 /// (`:exception` 422, `:null_session` empty session, `:reset_session`
 /// wipe). This runtime has one handler — 422 — so every known strategy
 /// registers the same before/skip filter. A `prepend:` or custom
-/// `store:` still returns `None` (unrecognized-macro survey).
+/// `store:` still returns `Ok(None)` (unrecognized-macro survey). An
+/// `only:`/`except:` `is_recognized_scope_value` declines returns `Err`
+/// instead — skipping CSRF verification on every action instead of just
+/// the ones the source named would be the fail-open direction's worst
+/// case, so this refuses rather than guesses.
 fn parse_forgery_macro(
     call: &ruby_prism::CallNode<'_>,
     protect: bool,
     file: &str,
-) -> Option<Vec<crate::dialect::Filter>> {
+) -> IngestResult<Option<Vec<crate::dialect::Filter>>> {
     use crate::dialect::{Filter, FilterKind};
 
+    let macro_name = if protect { "protect_from_forgery" } else { "skip_forgery_protection" };
     let mut only: Vec<Symbol> = Vec::new();
     let mut except: Vec<Symbol> = Vec::new();
     let mut only_style = crate::expr::ArrayStyle::default();
@@ -855,10 +932,10 @@ fn parse_forgery_macro(
     let mut known_with = true;
 
     for arg in call.arguments().iter().flat_map(|a| a.arguments().iter()) {
-        let kh = arg.as_keyword_hash_node()?;
+        let Some(kh) = arg.as_keyword_hash_node() else { return Ok(None) };
         for el in kh.elements().iter() {
-            let assoc = el.as_assoc_node()?;
-            let key = symbol_value(&assoc.key())?;
+            let Some(assoc) = el.as_assoc_node() else { return Ok(None) };
+            let Some(key) = symbol_value(&assoc.key()) else { return Ok(None) };
             let value = assoc.value();
             match key.as_str() {
                 "with" if protect => {
@@ -868,10 +945,16 @@ fn parse_forgery_macro(
                     );
                 }
                 "only" => {
+                    if !is_recognized_scope_value(&value) {
+                        return Err(scope_gap(file, macro_name, "only"));
+                    }
                     only = symbol_list_value(&value);
                     only_style = symbol_list_style(&value);
                 }
                 "except" => {
+                    if !is_recognized_scope_value(&value) {
+                        return Err(scope_gap(file, macro_name, "except"));
+                    }
                     except = symbol_list_value(&value);
                     except_style = symbol_list_style(&value);
                 }
@@ -879,14 +962,14 @@ fn parse_forgery_macro(
                     if_cond = symbol_value(&value).map(|s| Symbol::from(s.as_str()));
                     if_cond_expr = lambda_body_expr(&value, file);
                     if if_cond.is_none() && if_cond_expr.is_none() {
-                        return None;
+                        return Ok(None);
                     }
                 }
                 "unless" => {
                     unless_cond = symbol_value(&value).map(|s| Symbol::from(s.as_str()));
                     unless_cond_expr = lambda_body_expr(&value, file);
                     if unless_cond.is_none() && unless_cond_expr.is_none() {
-                        return None;
+                        return Ok(None);
                     }
                 }
                 // `skip_forgery_protection`'s own default; nothing to model.
@@ -899,19 +982,19 @@ fn parse_forgery_macro(
                         symbol_value(&value).as_deref(),
                         Some("header_only" | "header_or_legacy_token")
                     ) {
-                        return None;
+                        return Ok(None);
                     }
                 }
-                _ => return None,
+                _ => return Ok(None),
             }
         }
     }
     if protect && !known_with {
-        return None;
+        return Ok(None);
     }
 
     let loc = call.message_loc().unwrap_or_else(|| call.location());
-    Some(vec![Filter {
+    Ok(Some(vec![Filter {
         kind: if protect { FilterKind::Before } else { FilterKind::Skip },
         target: Symbol::from(VERIFY_AUTHENTICITY_TOKEN),
         target_span: Span {
@@ -930,7 +1013,7 @@ fn parse_forgery_macro(
         unless_cond_expr,
         block: None,
         prepend: false,
-    }])
+    }]))
 }
 
 /// `with_options`, receiverless, no receiver qualification — the shape
@@ -1203,8 +1286,13 @@ fn ingest_with_options_filter_call(
         }
     }
 
+    // `parse_filter_call`'s `Err` (a merged `only:`/`except:` that is not
+    // a literal Symbol/String or an array of them) propagates with `?`
+    // like every other decline in this function — refusing the WHOLE
+    // with_options statement, not just this one call, same ALL-OR-NOTHING
+    // reasoning as the rest of `ingest_controller_with_options`.
     let walk = |stmt: Node<'_>| -> IngestResult<Vec<ControllerBodyItem>> {
-        match parse_filter_call(&stmt, file) {
+        match parse_filter_call(&stmt, file)? {
             Some(filters) => Ok(filters
                 .into_iter()
                 .map(|filter| ControllerBodyItem::Filter {

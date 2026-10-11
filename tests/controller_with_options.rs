@@ -240,6 +240,41 @@ fn unmodeled_with_options_shapes_are_declined() {
     }
 }
 
+/// A non-literal `only:`/`except:` reaching `parse_filter_call` through
+/// a with_options merge — composed either because the call itself wrote
+/// it, or because the outer `with_options` hash supplied it and the
+/// splice carried it into the call's own trailing hash — declines the
+/// WHOLE with_options statement. `parse_filter_call`'s own refusal
+/// doesn't carry the `with_options:` prefix (it fires for a plain call
+/// too), so this checks the specific message directly rather than
+/// reusing `unmodeled_with_options_shapes_are_declined`'s `with_options:`
+/// filter.
+#[test]
+fn a_non_literal_scope_composed_through_with_options_is_declined() {
+    for body in [
+        "  with_options unless: :signed_in? do\n    before_action :x, only: some_method\n  end\n\n  def x\n  end\n",
+        "  with_options unless: :signed_in? do\n    before_action :x, except: SOME_CONST\n  end\n\n  def x\n  end\n",
+        "  with_options only: some_method do\n    before_action :x\n  end\n\n  def x\n  end\n",
+    ] {
+        let err = strict_error(body);
+        assert!(
+            err.contains("is not a literal Symbol/String or an array of them"),
+            "{body}\n=> {err}"
+        );
+        let gaps = survey_gaps(body);
+        let scope_gaps: Vec<&String> =
+            gaps.iter().filter(|g| g.contains("is not a literal Symbol/String")).collect();
+        assert_eq!(scope_gaps.len(), 1, "exactly one scope gap: {body}\n=> {gaps:#?}");
+        assert!(
+            !gaps.iter().any(|g| {
+                g.contains("controller class-body macro not recognized")
+                    || g.contains("controller class-body block not recognized")
+            }),
+            "declined with_options must not ALSO fall to a generic bucket: {gaps:#?}"
+        );
+    }
+}
+
 /// The emitted `process_action` guards the filter with BOTH conditions
 /// — the merged `unless:` and the filter's own `if:` — rather than
 /// dropping either. (Public filter targets: a controller with exactly

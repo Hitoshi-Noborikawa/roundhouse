@@ -3615,24 +3615,36 @@ pub fn ingest_concern_filters(
             let Some(block) = call.block().and_then(|b| b.as_block_node()) else { continue };
             let Some(block_body) = block.body() else { continue };
             for inner in flatten_statements(block_body) {
-                if let Some(fs) = super::controller::parse_filter_call(&inner, file) {
-                    filters.extend(fs);
-                } else if let Some(f) = block_form_concern_filter(&inner, file) {
-                    filters.push(f);
-                } else if let Some(name) = forgery_macro_name(&inner) {
-                    // A forgery declaration `parse_filter_call` does not
-                    // model (`prepend:`, a custom `store:`, an unknown
-                    // `with:`) changes how every
-                    // includer checks requests. The `included` block is
-                    // otherwise dropped, so it would vanish without a
-                    // trace where the same line in a controller is a
-                    // survey gap; name it the same way.
-                    super::survey::record(&super::IngestError::Unsupported {
-                        file: file.to_string(),
-                        message: format!(
-                            "controller concern macro not recognized: `{name}` (its effect is dropped from the output)"
-                        ),
-                    });
+                match super::controller::parse_filter_call(&inner, file) {
+                    Ok(Some(fs)) => filters.extend(fs),
+                    // `parse_filter_call` itself only returns `Err` for a
+                    // non-literal `only:`/`except:` (refused rather than
+                    // silently applied to every action — that function's
+                    // doc comment); this scan has no strict/survey split
+                    // of its own (every other unrecognized shape here is
+                    // `survey::record`ed unconditionally, a no-op outside
+                    // survey mode), so this follows the same convention
+                    // rather than introducing a new one.
+                    Err(err) => super::survey::record(&err),
+                    Ok(None) => {
+                        if let Some(f) = block_form_concern_filter(&inner, file) {
+                            filters.push(f);
+                        } else if let Some(name) = forgery_macro_name(&inner) {
+                            // A forgery declaration `parse_filter_call` does not
+                            // model (`prepend:`, a custom `store:`, an unknown
+                            // `with:`) changes how every
+                            // includer checks requests. The `included` block is
+                            // otherwise dropped, so it would vanish without a
+                            // trace where the same line in a controller is a
+                            // survey gap; name it the same way.
+                            super::survey::record(&super::IngestError::Unsupported {
+                                file: file.to_string(),
+                                message: format!(
+                                    "controller concern macro not recognized: `{name}` (its effect is dropped from the output)"
+                                ),
+                            });
+                        }
+                    }
                 }
             }
         }
