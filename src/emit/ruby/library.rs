@@ -2666,6 +2666,15 @@ pub(crate) fn apply_helper_lowering(lcs: &mut [LibraryClass], app: &App) {
         .collect();
     let helper_ivars = helper_read_ivars(app);
     let view_ivars = view_assigned_ivars(app);
+    // Instance-method names the app defines anywhere that collide with a
+    // framework view helper; only these need the ancestry lookup above.
+    let app_framework_helper_names: BTreeSet<String> = app
+        .models
+        .iter()
+        .flat_map(|m| m.methods().map(|d| d.name.as_str().to_string()).collect::<Vec<_>>())
+        .chain(app.library_classes.iter().flat_map(|c| c.methods.iter().map(|d| d.name.as_str().to_string())))
+        .filter(|n| is_framework_view_helper(n))
+        .collect();
     for lc in lcs.iter_mut() {
         // CONTROLLERS in the index provide `helper_method`s to views:
         // only the call-site rewrite applies to them — their methods
@@ -2683,8 +2692,19 @@ pub(crate) fn apply_helper_lowering(lcs: &mut [LibraryClass], app: &App) {
         // The class's own method names shadow the helper index inside its
         // bodies — a bare call to one of them is a self-dispatch, never a
         // cross-module helper reference.
-        let own_methods: std::collections::HashSet<Symbol> =
+        let mut own_methods: std::collections::HashSet<Symbol> =
             lc.methods.iter().map(|m| m.name.clone()).collect();
+        // A framework-helper name the app defines on a SUPERCLASS or in an
+        // INCLUDED module (`ApplicationRecord#dom_class`, a concern's
+        // `number_to_currency`) is the same self-dispatch: qualifying it to
+        // `ViewHelpers` would call a different method than analysis kept.
+        // Resolved by the analyzer's own ancestry walk.
+        own_methods.extend(
+            app_framework_helper_names
+                .iter()
+                .filter(|n| crate::analyze::source_instance_method(app, &lc.name, n))
+                .map(|n| Symbol::from(n.as_str())),
+        );
         for m in &mut lc.methods {
             // A helper module's own methods become module-functions so the
             // rewritten `Module.method` call has a real target — Rails mixed

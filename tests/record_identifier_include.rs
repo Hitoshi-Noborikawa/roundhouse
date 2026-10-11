@@ -106,3 +106,56 @@ puts "record identifier passed"
     run.assert_passes();
     assert!(run.stdout.contains("record identifier passed"));
 }
+
+/// An app-defined `dom_class` / `dom_id` on a superclass or in an included
+/// module is the method a bare call reaches; emission must not redirect it
+/// to `ActionView::ViewHelpers`.
+#[test]
+fn record_identifier_app_method_on_a_superclass_wins_over_the_helper() {
+    let run = emit_and_run::real_blog()
+        .edit(
+            "app/models/application_record.rb",
+            "primary_abstract_class\n",
+            "primary_abstract_class\n\n  def dom_class(record)\n    \"custom\"\n  end\n",
+        )
+        .edit(
+            "app/models/article.rb",
+            "  validates :title, presence: true\n",
+            "  validates :title, presence: true\n\n  def row_class\n    dom_class(self)\n  end\n",
+        )
+        .run_ruby(
+            r#"a = Article.new
+raise "got #{a.row_class.inspect}" unless a.row_class == "custom"
+puts "superclass dom_class passed"
+"#,
+        );
+    run.assert_passes();
+    assert!(run.stdout.contains("superclass dom_class passed"));
+}
+
+#[test]
+fn record_identifier_app_method_in_an_included_module_wins_over_the_helper() {
+    let run = emit_and_run::real_blog()
+        .write(
+            "app/models/concerns/labeled.rb",
+            "module Labeled\n  def dom_id(record)\n    \"labeled\"\n  end\nend\n",
+        )
+        .edit(
+            "app/models/article.rb",
+            "  validates :title, presence: true\n",
+            "  include Labeled\n\n  validates :title, presence: true\n\n  def row_id\n    dom_id(self)\n  end\n",
+        )
+        .write(
+            "app/models/row_presenter.rb",
+            "class RowPresenter\n  include Labeled\n\n  def row(article)\n    dom_id(article)\n  end\nend\n",
+        )
+        .run_ruby(
+            r#"a = Article.new
+raise "model #{a.row_id.inspect}" unless a.row_id == "labeled"
+raise "plain #{RowPresenter.new.row(a).inspect}" unless RowPresenter.new.row(a) == "labeled"
+puts "module dom_id passed"
+"#,
+        );
+    run.assert_passes();
+    assert!(run.stdout.contains("module dom_id passed"));
+}
