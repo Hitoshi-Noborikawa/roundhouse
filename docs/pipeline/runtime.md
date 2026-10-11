@@ -2425,7 +2425,11 @@ Three gaps remain, all on spinel's side:
   (`I18n.locale =`, `with_locale`) is not modeled. Translation is answered
   at compile time from the default locale (`src/i18n`): `t` / `I18n.t`
   with a literal key, attribute names, validation messages and form
-  labels. A key computed at run time, or one the locale lacks, is an
+  labels. A key the locale lacks answers as Rails does in the running
+  environment: `Translation missing: en.key`, a template's
+  `translation_missing` span, or `I18n::MissingTranslationData` where
+  `config.i18n.raise_on_missing_translations` is set (`:strict` and a
+  value computed at boot stay errors). A key computed at run time is an
   error rather than a guess. A `Rails::Engine` gem's `config/locales`
   load before the app's, read where Bundler installed the gem
   (`BUNDLE_PATH`, `GEM_HOME`, `GEM_PATH`), so an uninstalled gem's keys

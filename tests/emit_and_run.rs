@@ -863,6 +863,10 @@ fn translate_app() -> emit_and_run::Overlay {
     [I18n.t(\"mood.#{flag ? 'happy' : 'sad'}\", name: \"Al\"), I18n.t(flag ? :hello : \"shop.title\")]
   end
 
+  def self.missing_text(flag)
+    [I18n.t(\"no.such.key\", name: \"x\"), I18n.t(\"shop.#{flag ? 'title' : 'nope'}\")]
+  end
+
   def self.unread_option(calls)
     I18n.t(\"hello\", unused: (calls << 1).size)
   end
@@ -880,11 +884,11 @@ fn translate_app() -> emit_and_run::Overlay {
         .edit(
             "app/views/articles/index.html.erb",
             "<h1",
-            "<p id=\"lazy\"><%= t(\".heading\") %></p><p id=\"inbox\"><%= t(\"inbox\", count: @articles.size) %></p><p id=\"intro\"><%= t(\"intro_html\", name: \"<i>\") %></p><p id=\"tally\"><%= t(\"tally_html\", count: \"<s>\") %></p>\n<h1",
+            "<p id=\"lazy\"><%= t(\".heading\") %></p><p id=\"inbox\"><%= t(\"inbox\", count: @articles.size) %></p><p id=\"intro\"><%= t(\"intro_html\", name: \"<i>\") %></p><p id=\"tally\"><%= t(\"tally_html\", count: \"<s>\") %></p><p id=\"missing\"><%= t(\"no.such_key\", name: \"<b>\", count: 2) %></p><p id=\"lazy-missing\"><%= t(\".missing_heading\") %></p>\n<h1",
         )
         .write(
             "test/controllers/translations_controller_test.rb",
-            "require \"test_helper\"\n\nclass TranslationsControllerTest < ActionDispatch::IntegrationTest\n  test \"templates translate\" do\n    get articles_url\n    assert_includes response.body, \"<p id=\\\"lazy\\\">All the articles</p>\"\n    assert_includes response.body, \" messages</p>\"\n    assert_includes response.body, \"<p id=\\\"intro\\\"><b>Hi</b> &lt;i&gt;</p>\"\n    assert_includes response.body, \"<p id=\\\"tally\\\"><b>&lt;s&gt;</b> items</p>\"\n  end\nend\n",
+            "require \"test_helper\"\n\nclass TranslationsControllerTest < ActionDispatch::IntegrationTest\n  test \"templates translate\" do\n    get articles_url\n    assert_includes response.body, \"<p id=\\\"lazy\\\">All the articles</p>\"\n    assert_includes response.body, \" messages</p>\"\n    assert_includes response.body, \"<p id=\\\"intro\\\"><b>Hi</b> &lt;i&gt;</p>\"\n    assert_includes response.body, \"<p id=\\\"tally\\\"><b>&lt;s&gt;</b> items</p>\"\n    assert_includes response.body, \"<p id=\\\"missing\\\"><span class=\\\"translation_missing\\\" title=\\\"translation missing: en.no.such_key, name: &amp;lt;b&amp;gt;, count: 2\\\">Such Key</span></p>\"\n    assert_includes response.body, \"<p id=\\\"lazy-missing\\\"><span class=\\\"translation_missing\\\" title=\\\"translation missing: en.articles.index.missing_heading\\\">Missing Heading</span></p>\"\n  end\nend\n",
         )
 }
 
@@ -902,6 +906,7 @@ raise "count evaluated #{calls.size} times" unless calls.size == 1
 raise "percents: #{Article.percents.inspect}" unless Article.percents == ["100% sure %{x} N", "Hi %{name}"]
 raise "moods: #{Article.moods(true).inspect}" unless Article.moods(true) == ["Glad", "Hello world"]
 raise "moods: #{Article.moods(false).inspect}" unless Article.moods(false) == ["Down Al", "Store"]
+raise "missing: #{Article.missing_text(false).inspect}" unless Article.missing_text(false) == ["Translation missing: en.no.such.key", "Translation missing: en.shop.nope"]
 calls = []
 raise "unread: #{calls.inspect}" unless Article.unread_option(calls) == "Hello world" && calls == [1]
 raise "read before write: #{Article.read_before_write}" unless Article.read_before_write == "Hi before"
@@ -952,18 +957,41 @@ fn an_engine_gem_s_locales_answer_beneath_the_app_s() {
         .assert_passes();
 }
 
-/// A key the locale lacks, one computed at run time (including one
-/// branch of a conditional key), or a call with a block stays an error.
+/// `raise_on_missing_translations` in the running environment's file
+/// makes a missing key raise `I18n::MissingTranslationData`.
+#[test]
+fn a_missing_translation_raises_where_the_environment_says_so() {
+    translate_app()
+        .edit(
+            "config/environments/development.rb",
+            "  # config.i18n.raise_on_missing_translations = true",
+            "  config.i18n.raise_on_missing_translations = true",
+        )
+        .run_ruby("begin\n  Article.missing_text(true)\n  raise \"no raise\"\nrescue I18n::MissingTranslationData => e\n  raise e.message unless e.message == \"Translation missing: en.no.such.key\"\nend\nraise \"found\" unless Article.scoped_title == \"Store\"\nputs \"raise passed\"\n")
+        .assert_passes();
+}
+
+/// A key computed at run time, a missing key with only key defaults, a
+/// `:strict` setting, or a call with a block stays an error.
 #[test]
 fn unresolvable_translations_stay_errors() {
     let (_emitted, errors) = emit_and_run::real_blog()
         .edit(
             "app/models/article.rb",
             "  validates :title, presence: true\n",
-            "  validates :title, presence: true\n\n  def self.missing\n    I18n.t(\"no.such.key\")\n  end\n\n  def self.dynamic(key)\n    I18n.t(key)\n  end\n\n  def self.blocked\n    I18n.t(\"hello\") { |text| text }\n  end\n\n  def self.one_branch_missing(flag)\n    I18n.t(\"shop.#{flag ? 'title' : 'nope'}\")\n  end\n",
+            "  validates :title, presence: true\n\n  def self.missing\n    I18n.t(\"no.such.key\", default: :also_missing)\n  end\n\n  def self.dynamic(key)\n    I18n.t(key)\n  end\n\n  def self.blocked\n    I18n.t(\"hello\") { |text| text }\n  end\n",
         )
         .emit(roundhouse::project::BuildTarget::Ruby);
-    assert_eq!(errors.iter().filter(|e| e.contains("I18n not supported")).count(), 4, "{errors:?}");
+    assert_eq!(errors.iter().filter(|e| e.contains("I18n not supported")).count(), 3, "{errors:?}");
+    let (_emitted, errors) = emit_and_run::real_blog()
+        .edit(
+            "config/environments/test.rb",
+            "  # config.i18n.raise_on_missing_translations = true",
+            "  config.i18n.raise_on_missing_translations = :strict",
+        )
+        .edit("app/models/article.rb", "  validates :title, presence: true\n", "  validates :title, presence: true\n\n  def self.missing\n    I18n.t(\"no.such.key\")\n  end\n")
+        .emit(roundhouse::project::BuildTarget::Ruby);
+    assert!(errors.iter().any(|e| e.contains(":strict")), "{errors:?}");
 }
 
 /// `errors[:field]` cannot tell fields apart when `errors.format` puts

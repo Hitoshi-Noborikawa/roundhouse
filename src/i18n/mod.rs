@@ -29,6 +29,23 @@ pub struct Catalog {
     pub locale: String,
     /// Dotted key (`activerecord.attributes.user.email`) → string leaf.
     pub entries: BTreeMap<String, String>,
+    /// What a translation the locale lacks does, per environment.
+    #[serde(default)]
+    pub missing: MissingPolicy,
+}
+
+/// `config.i18n.raise_on_missing_translations`: Rails answers a missing
+/// translation with text unless the running environment sets it, and
+/// then raises `I18n::MissingTranslationData`.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct MissingPolicy {
+    /// `config/application.rb`'s value, Rails' `false` when unset.
+    pub raises: bool,
+    /// The environments whose own file sets the other value.
+    pub flipped: Vec<String>,
+    /// Why the setting cannot be read at compile time (`:strict`, or a
+    /// value computed at boot); a missing translation then stays an error.
+    pub unknown: Option<String>,
 }
 
 /// One piece of an interpolated message: text known at compile time, or
@@ -64,7 +81,7 @@ impl Catalog {
     /// between Rails' English and the app's.
     pub fn load_with_gems(locale: &str, gems: &[(String, String)], files: &mut Vec<(String, String)>) -> (Catalog, Vec<(String, String)>) {
         files.sort_by(|a, b| a.0.cmp(&b.0));
-        let mut catalog = Catalog { locale: locale.to_string(), entries: BTreeMap::new() };
+        let mut catalog = Catalog { locale: locale.to_string(), ..Default::default() };
         let mut problems = Vec::new();
         let rails = RAILS_EN.iter().map(|(name, src)| (name.to_string(), src.to_string()));
         for (path, source) in rails.collect::<Vec<_>>().iter().chain(gems.iter()).chain(files.iter()) {
@@ -133,7 +150,7 @@ impl Catalog {
             .filter(|(k, _)| prefixes.iter().any(|p| k.starts_with(p.as_str())))
             .map(|(k, v)| (k.clone(), v.clone()))
             .collect();
-        Catalog { locale: self.locale.clone(), entries }
+        Catalog { locale: self.locale.clone(), entries, ..Default::default() }
     }
 
     /// `Model.human_attribute_name(attr)`: the first of
@@ -303,6 +320,9 @@ pub enum Fallback {
 pub enum Translation {
     One(String),
     Plural { zero: Option<String>, one: String, other: String },
+    /// No entry and no `default:`: Rails' missing-translation answer for
+    /// `key`, with the locale in front (`en.shop.title`).
+    Missing { key: String },
 }
 
 impl Catalog {
@@ -333,10 +353,19 @@ impl Catalog {
             Ok(key) => self.entry(key, call.counted),
             Err(text) => Some(Translation::One(text.clone())),
         });
-        let translation = found.ok_or_else(|| format!("translation missing: {}.{}", self.locale, full(&call.key).unwrap_or_default()))?;
+        let missing = format!("{}.{}", self.locale, full(&call.key).unwrap_or_default());
+        let translation = match found {
+            Some(t) => t,
+            None if call.defaults.is_empty() && self.missing.unknown.is_none() => return Ok(Translation::Missing { key: missing }),
+            None => {
+                let why = self.missing.unknown.as_deref().map(|u| format!(" ({u})")).unwrap_or_default();
+                return Err(format!("translation missing: {missing}{why}"));
+            }
+        };
         let templates: Vec<&String> = match &translation {
             Translation::One(t) => vec![t],
             Translation::Plural { zero, one, other } => zero.iter().chain([one, other]).collect(),
+            Translation::Missing { .. } => Vec::new(),
         };
         if !call.interpolates() {
             return Ok(translation);
@@ -730,7 +759,10 @@ mod tests {
         );
         assert!(c.resolve(&Translate { values: vec!["other".into()], ..t("greet") }).is_err());
         assert!(c.resolve(&Translate { values: vec!["name".into()], ..t("greet") }).is_ok());
-        assert!(c.resolve(&t("nope")).is_err());
+        assert_eq!(c.resolve(&t("nope")), Ok(Translation::Missing { key: "en.nope".into() }));
+        assert!(c.resolve(&Translate { defaults: vec![Fallback::Key("also_nope".into())], ..t("nope") }).is_err());
+        let unknown = Catalog { missing: MissingPolicy { unknown: Some("`:strict`".into()), ..Default::default() }, ..c.clone() };
+        assert!(unknown.resolve(&t("nope")).is_err());
         assert!(c.resolve(&t(".title")).is_err());
     }
 

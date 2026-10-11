@@ -1699,6 +1699,7 @@ end
         survey::record(&IngestError::Unsupported { file, message: format!("locale file not loaded: {problem}") });
     }
     app.i18n = catalog;
+    app.i18n.missing = missing_policy(vfs, dir);
     crate::i18n::stamp_models(&mut app);
 
     // `sig/**/*.rbs` — user-authored RBS sidecars for app code the
@@ -9304,6 +9305,42 @@ fn default_locale<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> String {
         .and_then(|rest| rest.strip_prefix('='))
         .and_then(|v| locale_literal(v.trim()))
         .unwrap_or_else(|| "en".to_string())
+}
+
+/// `config.i18n.raise_on_missing_translations` from `config/application.rb`
+/// and each `config/environments/<env>.rb`.
+fn missing_policy<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> crate::i18n::MissingPolicy {
+    let setting = |path: &Path| -> Option<Result<bool, String>> {
+        let source = vfs.read_to_string(path).ok()?;
+        source.lines().map(str::trim).filter(|l| !l.starts_with('#')).find_map(|l| {
+            let value = l.strip_prefix("config.i18n.raise_on_missing_translations")?.trim().strip_prefix('=')?;
+            let value = value.split('#').next().unwrap_or("").trim();
+            Some(match value {
+                "true" => Ok(true),
+                "false" | "nil" => Ok(false),
+                ":strict" => Err("`raise_on_missing_translations = :strict` also raises from ActiveModel, which is not modeled".to_string()),
+                _ => Err(format!("`raise_on_missing_translations = {value}` is computed at boot")),
+            })
+        })
+    };
+    let mut policy = crate::i18n::MissingPolicy::default();
+    match setting(&dir.join("config/application.rb")) {
+        Some(Ok(raises)) => policy.raises = raises,
+        Some(Err(why)) => policy.unknown = Some(why),
+        None => {}
+    }
+    let envs_dir = dir.join("config/environments");
+    let mut envs = if vfs.is_dir(&envs_dir) { vfs.read_dir(&envs_dir).unwrap_or_default() } else { Vec::new() };
+    envs.sort();
+    for path in envs {
+        let Some(env) = path.file_stem().and_then(|s| s.to_str()).filter(|_| path.extension().is_some_and(|e| e == "rb")) else { continue };
+        match setting(&path) {
+            Some(Ok(raises)) if raises != policy.raises => policy.flipped.push(env.to_string()),
+            Some(Err(why)) => policy.unknown = Some(why),
+            _ => {}
+        }
+    }
+    policy
 }
 
 /// `:fr`, `:"pt-BR"`, `"fr"` or `'fr'` at the start of `value`, ignoring what follows it.

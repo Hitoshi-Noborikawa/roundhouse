@@ -5,11 +5,13 @@
 //! `.key`), literal `scope:` / `default:`, and interpolation values that
 //! are any expression. `count:` keeps the choice between plural forms
 //! for run time. A template's `_html` key renders unescaped with its
-//! values escaped, as `HtmlSafeTranslation` does. Anything else (a
-//! dynamic key, `locale:`, a key the locale lacks, whose answer Rails
-//! makes per environment by `raise_on_missing_translations`) is an error
-//! in analyze, since no runtime carries the locale table; only what
-//! `parse` and `Catalog::resolve` accept is typed, and only that folds.
+//! values escaped, as `HtmlSafeTranslation` does. A key the locale lacks
+//! answers as Rails does in the running environment
+//! (`raise_on_missing_translations`, read per environment at ingest).
+//! Anything else (a dynamic key, `locale:`, a missing key with only key
+//! defaults, a setting not readable at compile time) is an error in
+//! analyze; only what `parse` and `Catalog::resolve` accept is typed,
+//! and only that folds.
 
 use crate::app::App;
 use crate::expr::{Expr, ExprNode, InterpPart, LValue, Literal};
@@ -216,7 +218,7 @@ fn rewrite(expr: &mut Expr, catalog: &Catalog, in_view: bool, view: Option<&str>
     };
     let Ok(translation) = catalog.resolve(&call.lookup) else { return };
     let span = expr.span;
-    let html = in_view && crate::i18n::is_html_safe_key(&call.lookup.key);
+    let html = in_view && (crate::i18n::is_html_safe_key(&call.lookup.key) || matches!(translation, Translation::Missing { .. }));
     let bound = bind_options(&mut call, &translation, span);
     let render = |template: &str| interpolate(span, template, &call, html);
     let mut folded = match (translation, &call.count) {
@@ -242,6 +244,7 @@ fn rewrite(expr: &mut Expr, catalog: &Catalog, in_view: bool, view: Option<&str>
             }
         }
         (Translation::Plural { .. }, None) => return,
+        (Translation::Missing { key }, _) => missing(span, &key, &call, in_view, &catalog.missing),
     };
     folded.ty = Some(Ty::Str);
     if !bound.is_empty() {
@@ -257,6 +260,40 @@ fn rewrite(expr: &mut Expr, catalog: &Catalog, in_view: bool, view: Option<&str>
         }));
     }
     *expr = folded;
+}
+
+/// `I18n.missing_translation(key, raises)`, or in a template the debug
+/// span Action View renders, titled with the call's options in order.
+fn missing(span: Span, key: &str, call: &Call, in_view: bool, policy: &crate::i18n::MissingPolicy) -> Expr {
+    let lit = |value: String| typed(Expr::new(span, ExprNode::Lit { value: Literal::Str { value } }));
+    let send = |recv: &str, method: &str, args: Vec<Expr>| Expr::new(span, ExprNode::Send {
+        recv: Some(Expr::new(span, ExprNode::Const { path: vec![Symbol::from(recv)] })),
+        method: Symbol::from(method),
+        args,
+        block: None,
+        parenthesized: true,
+    });
+    let mut raises = send("I18n", "missing_raises", vec![
+        Expr::new(span, ExprNode::Lit { value: Literal::Bool { value: policy.raises } }),
+        lit(policy.flipped.join(",")),
+    ]);
+    raises.ty = Some(Ty::Bool);
+    if !in_view {
+        return typed(send("I18n", "missing_translation", vec![lit(key.to_string()), raises]));
+    }
+    let mut parts = Vec::new();
+    for name in &call.order {
+        let value = match name.as_str() {
+            "count" => call.count.clone(),
+            _ => call.values.iter().find(|(n, _)| n == name).map(|(_, v)| v.clone()),
+        };
+        if let Some(value) = value {
+            parts.push(InterpPart::Text { value: format!(", {name}: ") });
+            parts.push(InterpPart::Expr { expr: escaped(span, value) });
+        }
+    }
+    let details = if parts.is_empty() { lit(String::new()) } else { typed(Expr::new(span, ExprNode::StringInterp { parts })) };
+    typed(send("I18n", "missing_translation_tag", vec![lit(key.to_string()), details, raises]))
 }
 
 fn typed(mut e: Expr) -> Expr {
