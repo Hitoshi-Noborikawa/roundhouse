@@ -3562,10 +3562,13 @@ fn rewrite_helper_calls(
     // not the modified string) are deliberately excluded.
     let bang_rewrite: Option<Symbol> =
         if let ExprNode::Send { recv: Some(r), method, block: None, .. } = &*expr.node {
-            // A reserved-word local (`class:`) is not assignable, so it
-            // keeps the bang call.
+            // A reserved-word local (`class:`) or a numbered parameter
+            // (`_1`) is not assignable, so it keeps the bang call.
             let is_lv = match &*r.node {
-                ExprNode::Var { name, .. } => !crate::naming::is_reserved_local(name.as_str()),
+                ExprNode::Var { name, .. } => {
+                    !crate::naming::is_reserved_local(name.as_str())
+                        && !crate::naming::is_numbered_param(name.as_str())
+                }
                 ExprNode::Ivar { .. } => true,
                 _ => false,
             };
@@ -7399,6 +7402,13 @@ fn require_path_for_parent(parent: &ClassId, app: &App) -> Option<String> {
 /// stands in for every stubbed gem, so all their roots anchor there.
 /// On a ruby-family tree `project.rs` rewrites that file into the
 /// guarded-require block, and the same anchor loads the real gems.
+///
+/// `OpenTelemetry` is the one name here that is not a stubbed GEM — its
+/// façade never stands aside for a real `opentelemetry-api`/`-sdk` (see
+/// `runtime/ruby/open_telemetry_facade.rb`) — but it is still hosted off
+/// this same anchor file (`gem_facades.rb`'s own `require_relative`, and
+/// the per-flavor rewrite's matching one), so a body naming it resolves
+/// the same way.
 fn is_gem_facade_root(root: &str) -> bool {
     matches!(
         root,
@@ -7409,6 +7419,7 @@ fn is_gem_facade_root(root: &str) -> bool {
             | "BCrypt"
             | "RQRCode"
             | "SVG"
+            | "OpenTelemetry"
     )
 }
 

@@ -154,6 +154,10 @@ module Rails
     def staging?
       @name == "staging"
     end
+
+    def to_s
+      @name
+    end
   end
 
   # `Rails.cache`, in two halves.

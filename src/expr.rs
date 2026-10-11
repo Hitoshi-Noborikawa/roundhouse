@@ -40,6 +40,22 @@ pub const RESOLVED_DATA_FACTORY: u64 = 1 << 3;
 /// strong-params lowering reads this to know which refusal to apply.
 pub const FROM_PARAMS_EXPECT: u64 = 1 << 8;
 
+/// A statement whose value the enclosing sequence discards (not its tail).
+pub const DISCARDED_VALUE: u64 = 1 << 9;
+
+/// A `Preloader.new(records:, associations:).call` the analyzer admitted:
+/// discarded, over one model's records. Only this one lowers.
+pub const ADMITTED_PRELOADER_CALL: u64 = 1 << 10;
+
+/// A written constant inside a body Rubydex does not index (the
+/// `class << Rails.application` settings block): the file is in the
+/// snapshot, but no reference was recorded at this span, so the absence
+/// is not evidence of an indexing defect.
+pub const UNINDEXED_SCOPE_CONST_REF: u64 = 1 << 11;
+
+/// The `defaults.merge(hash)` ingest wrote for `hash.reverse_merge(defaults)`.
+pub const REVERSE_MERGE: u64 = 1 << 12;
+
 /// Cross-target intent annotation for canonical Ruby idioms whose
 /// optimal emit shape differs per target. Set by the lowerer when it
 /// synthesizes a pattern it knows the target-specific name for (and by
