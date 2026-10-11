@@ -644,6 +644,10 @@ const RUST_RUNTIME: &[RuntimeEntry] = &[
             // `ActionController::masked_authenticity_token`. The
             // namespace struct lives in action_controller_base.rs.
             ("ActionController", "action_controller_base"),
+            // `word_wrap` rejects non-positive widths via
+            // `raise ArgumentError, "…"`.
+            ("raise", "errors_ext"),
+            ("ArgumentError", "errors_ext"),
         ],
         prelude: NO_PRELUDE,
         extra_roots: NO_EXTRA_ROOTS,

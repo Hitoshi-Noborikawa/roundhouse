@@ -358,7 +358,9 @@ fn untyped_subexpressions_baseline() {
     // 578 -> 592, MEASURED over that commit. The new sites are the new
     // methods' own reads, typed here without their RBS like the other
     // finders'; the RBS-paired probe stays at zero residual.
-    const CEILING: usize = 592;
+    // Meta-PR #802 (exists? arity / where-seed / related Relation arms):
+    // 592 -> 603, MEASURED on tip 86936194's CI unit shard.
+    const CEILING: usize = 603;
     assert!(
         all_untyped.len() <= CEILING,
         "{} untyped sub-expressions on spinel-blog runtime — exceeds ceiling of {CEILING}.\n\

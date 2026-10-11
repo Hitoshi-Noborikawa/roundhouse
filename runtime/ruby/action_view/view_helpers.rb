@@ -361,18 +361,103 @@ module ActionView
     end
 
     # Rails 8.1.4's ActionView::TextHelper#word_wrap for positive widths.
-    # The regexp wraps at whitespace/newline boundaries and deliberately
-    # leaves an unbroken word longer than `line_width` intact. Rails'
-    # zero/negative-width behavior is inconsistent (RegexpError or nil),
-    # so reject those values rather than weakening this helper's String
-    # return contract.
+    # Wraps at whitespace/newline boundaries and leaves an unbroken word
+    # longer than `line_width` intact. Rails' zero/negative-width behavior
+    # is inconsistent (RegexpError or nil), so reject those values rather
+    # than weakening this helper's String return contract.
+    #
+    # Implemented without Regexp so Rust (and other strict targets) can
+    # emit the body — the Rails reference uses a dynamic `/(.{1,w})…/`
+    # pattern that has no Regexp::new bridge on those targets yet.
     def self.word_wrap(text, line_width: 80, break_sequence: "\n")
       raise ArgumentError, "line_width must be positive" if line_width <= 0
       return +"" if text.empty?
 
-      pattern = /(.{1,#{line_width}})(?:[^\S\n]+\n?|\n*\Z|\n)|\n/
-      escaped_break_sequence = break_sequence.split("\\", -1).join("\\\\")
-      text.gsub(pattern, "\\1#{escaped_break_sequence}").chomp(break_sequence)
+      out = +""
+      i = 0
+      n = text.length
+      while i < n
+        if text[i] == "\n"
+          out << break_sequence
+          i += 1
+          next
+        end
+        max_end = i + line_width
+        max_end = n if max_end > n
+        best_j = nil
+        best_next = nil
+        j = i + 1
+        while j <= max_end
+          k = j
+          if k >= n
+            best_j = j
+            best_next = n
+          elsif text[k] == "\n"
+            rest_only_newlines = true
+            r = k
+            while r < n
+              if text[r] != "\n"
+                rest_only_newlines = false
+                break
+              end
+              r += 1
+            end
+            best_j = j
+            best_next = rest_only_newlines ? n : k + 1
+          else
+            # Rails' `[^\S\n]` — whitespace that is not a newline.
+            ch_ws = text[k]
+            is_ws = ch_ws == " " || ch_ws == "\t" || ch_ws == "\r" || ch_ws == "\f" || ch_ws == "\v"
+            if is_ws
+              while k < n
+                w = text[k]
+                break unless w == " " || w == "\t" || w == "\r" || w == "\f" || w == "\v"
+                k += 1
+              end
+              k += 1 if k < n && text[k] == "\n"
+              best_j = j
+              best_next = k
+            end
+          end
+          j += 1
+        end
+        if best_j.nil?
+          j = i
+          while j < n
+            w = text[j]
+            break if w == "\n" || w == " " || w == "\t" || w == "\r" || w == "\f" || w == "\v"
+            j += 1
+          end
+          j = i + 1 if j == i
+          out << text[i...j]
+          k = j
+          if k < n
+            w = text[k]
+            if w == " " || w == "\t" || w == "\r" || w == "\f" || w == "\v"
+              while k < n
+                w = text[k]
+                break unless w == " " || w == "\t" || w == "\r" || w == "\f" || w == "\v"
+                k += 1
+              end
+              k += 1 if k < n && text[k] == "\n"
+              out << break_sequence
+              i = k
+            elsif w == "\n"
+              out << break_sequence
+              i = k + 1
+            else
+              i = j
+            end
+          else
+            i = j
+          end
+        else
+          out << text[i...best_j]
+          out << break_sequence
+          i = best_next
+        end
+      end
+      out.chomp(break_sequence)
     end
   
     # ── DOM helpers ──────────────────────────────────────────────────
