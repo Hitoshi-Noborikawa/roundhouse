@@ -19,6 +19,7 @@ mod alba;
 mod graphql_ruby;
 pub(crate) mod class_attribute;
 mod class_configuration;
+mod dry_struct;
 pub mod allow_browser;
 pub mod app;
 mod concern_accessors;
@@ -62,6 +63,7 @@ pub mod survey;
 pub mod test;
 pub mod util;
 pub mod view;
+pub mod vite;
 mod visibility;
 
 pub use app::{ingest_app, ingest_app_from_tree, ingest_app_with_vfs};

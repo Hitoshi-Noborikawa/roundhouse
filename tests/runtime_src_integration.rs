@@ -1023,7 +1023,10 @@ fn every_runtime_method_body_concretely_typed() {
     // Hash/Array value the way `deep_dup` does (+23).
     // MEASURED 491 on 2026-10-11 (#818): AssociationReflection `#klass` /
     // `#macro` presence stubs answer nil until synthesized (+2).
-    const CEILING: usize = 491;
+    // MEASURED 496 on 2026-10-11 (#802/#833): portable `word_wrap` helpers
+    // (`word_wrap_ws_next` / `word_wrap_hard_*`) add String-index sites
+    // typed gradually (+5 in action_view/view_helpers.rb).
+    const CEILING: usize = 496;
     assert!(
         total_gradual <= CEILING,
         "{total_gradual} Ty::Untyped sites exceeds ceiling of {CEILING}",
