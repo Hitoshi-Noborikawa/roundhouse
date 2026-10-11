@@ -74,6 +74,9 @@ module ActiveRecord
       @skip_preloading = false
       @records = nil
       @scope_attributes = {}
+      @where_columns = {}
+      @opaque_wheres = false
+      @hash_columns = []
       @from = nil
       @ctes = []
       @shared_lists = false
@@ -262,6 +265,7 @@ module ActiveRecord
       mine = @wheres.length > 0 ? @wheres.join(" AND ") : "1=1"
       other_wheres = other.where_clauses
       theirs = other_wheres.length > 0 ? other_wheres.join(" AND ") : "1=1"
+      @opaque_wheres = true
       @wheres = ["((#{mine}) OR (#{theirs}))"]
       self
     end
@@ -274,14 +278,63 @@ module ActiveRecord
       own_lists
       @records = nil
       return false if condition.nil?
+      @hash_columns = []
       sql = if condition.is_a?(Hash)
         hash_conditions(condition)
       else
         substitute_binds(condition.to_s, args)
       end
       return false if sql == ""
-      @wheres << (negate ? "NOT (#{sql})" : "(#{sql})")
+      clause = negate ? "NOT (#{sql})" : "(#{sql})"
+      @wheres << clause
+      @where_columns[clause] = @hash_columns if @hash_columns.length > 0
       true
+    end
+
+    # Hash-built WHERE clauses record the columns they constrain in
+    # `@where_columns`, keyed by the clause text (a pure function of the
+    # condition, so the table is a set of facts every clone may share),
+    # so `unscope(where:)` can take them back out. A nested
+    # `table => { col => v }` hash is recorded as `"table."`, which no
+    # bare `unscope(where: :col)` target matches.
+    # Rails' `unscope(where: :col)` / `unscope(where: [:a, :b])`: drop
+    # every hash-built condition on those columns, keep the rest. Only
+    # the `where:` form exists here, and a clause built from one hash
+    # naming several columns cannot be split, so that case raises
+    # instead of dropping the other columns' conditions. Raw-SQL
+    # clauses are never touched, as in Rails.
+    def unscope(where: nil)
+      own_lists
+      @records = nil
+      if @opaque_wheres
+        raise NotImplementedError, "unscope(where:) after merge or or: the merged conditions are not attributed to columns here, so they would silently survive"
+      end
+      targets = []
+      if where.is_a?(Symbol)
+        targets << where.to_s
+      elsif where.is_a?(Array)
+        i = 0
+        while i < where.length
+          targets << where[i].to_s
+          i += 1
+        end
+      end
+      kept = []
+      @wheres.each do |clause|
+        cols = @where_columns[clause] || []
+        hit = false
+        j = 0
+        while j < cols.length
+          hit = true if targets.include?(cols[j])
+          j += 1
+        end
+        if hit && cols.length > 1
+          raise ArgumentError, "unscope(where:) cannot split the multi-column condition #{clause}"
+        end
+        kept << clause unless hit
+      end
+      @wheres = kept
+      self
     end
 
     # `order` on a LOADED relation sorts the loaded records in memory
@@ -825,7 +878,10 @@ module ActiveRecord
     def merge(other)
       own_lists
       @records = nil
-      other.where_clauses.each { |w| @wheres << w }
+      other.where_clauses.each do |w|
+        @wheres << w
+        @opaque_wheres = true
+      end
       self
     end
 
@@ -2292,9 +2348,11 @@ module ActiveRecord
         if val.is_a?(Hash)
           val.each do |col, v|
             parts << column_predicate("#{key}.#{col}", v)
+            @hash_columns << "#{key}."
           end
         else
           parts << column_predicate(key.to_s, val)
+          @hash_columns << key.to_s
         end
       end
       parts.join(" AND ")
