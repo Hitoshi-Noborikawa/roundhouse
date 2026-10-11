@@ -114,6 +114,83 @@ fn source_reload_override_is_not_wrapped() {
 }
 
 #[test]
+fn namespaced_parent_reload_override_is_not_wrapped() {
+    // `< Base` inside `module Admin` writes the parent as `Base`; the
+    // emitter must resolve it to `Admin::Base` before deciding whether
+    // to interpose a self-returning forwarder.
+    let (emitted, errors) = example()
+        .write(
+            "app/models/admin/base.rb",
+            "module Admin\n  class Base < ApplicationRecord\n    primary_abstract_class\n    def reload\n      ::Widget.create!(name: 'parent override')\n    end\n  end\nend\n",
+        )
+        .write(
+            "app/models/admin/widget.rb",
+            "module Admin\n  class Widget < Base\n  end\nend\n",
+        )
+        .emit(roundhouse::project::BuildTarget::Ruby);
+    assert!(errors.is_empty(), "{errors:?}");
+    let src = std::fs::read_to_string(emitted.join("app/models/admin/widget.rb")).unwrap();
+    assert!(
+        !src.contains("def reload"),
+        "parent override was discarded by an unresolved Base walk:\n{src}"
+    );
+    let output = emit_and_run::ruby()
+        .args(["-e", r#"
+require File.expand_path('main', Dir.pwd)
+Main.configure_default_adapter!
+widget = Admin::Widget.create!(name: 'original')
+reloaded = widget.reload
+raise 'parent reload result was discarded' unless reloaded.name == 'parent override'
+raise if reloaded.equal?(widget)
+"#])
+        .current_dir(&emitted)
+        .env("BLOG_DB", ":memory:")
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+}
+
+#[test]
+fn source_reload_override_return_is_not_seeded_as_self() {
+    // Analyzer must not seed Widget#reload as Widget when ApplicationRecord
+    // overrides it to return another type — BodyTyper would prefer the seed.
+    let (emitted, errors) = emit_and_run::empty_app()
+        .write(
+            "db/schema.rb",
+            "ActiveRecord::Schema.define do\n  create_table :widgets do |t|\n    t.string :name\n  end\n  create_table :others do |t|\n    t.string :name\n  end\nend\n",
+        )
+        .write(
+            "app/models/application_record.rb",
+            "class ApplicationRecord < ActiveRecord::Base\n  primary_abstract_class\n  def reload\n    Other.create!(name: 'override')\n  end\nend\n",
+        )
+        .write("app/models/widget.rb", "class Widget < ApplicationRecord\nend\n")
+        .write(
+            "app/models/other.rb",
+            "class Other < ApplicationRecord\n  def tag\n    'other'\n  end\nend\n",
+        )
+        .write(
+            "app/models/probe.rb",
+            "class Probe\n  def from_reload(id)\n    Widget.find(id).reload.tag\n  end\nend\n",
+        )
+        .write("app/controllers/application_controller.rb", "class ApplicationController < ActionController::API\nend\n")
+        .write("config/routes.rb", "Rails.application.routes.draw do\nend\n")
+        .emit(roundhouse::project::BuildTarget::Ruby);
+    assert!(errors.is_empty(), "{errors:?}");
+    let probe = ["sig/app/models/probe.rbs", "app/models/probe.rbs"]
+        .iter()
+        .find_map(|path| std::fs::read_to_string(emitted.join(path)).ok())
+        .expect("probe.rbs");
+    // If reload were seeded as Widget, `.tag` would not resolve (Widget has
+    // no `tag`) and the probe signature would stay untyped/error.
+    assert!(
+        probe.lines().any(|line| {
+            line.trim_start().starts_with("def from_reload:") && line.contains("-> String")
+        }),
+        "reload override return was hidden by a self seed:\n{probe}"
+    );
+}
+
+#[test]
 fn relative_concern_reload_override_is_not_wrapped() {
     let source = r#"
 module Admin

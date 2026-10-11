@@ -80,7 +80,9 @@ fn record_return_overridden(app: &App, classes: &HashMap<ClassId, ()>, class: &C
             && (m.name.as_str() == method || (method == "lock!" && m.name.as_str() == "reload"));
         if let Some(model) = app.models.iter().find(|m| m.name == id) {
             if model.methods().any(relevant) { return true; }
-            pending.extend(model.parent.iter().cloned());
+            // Parents are written relative to the subclass (`< Base` inside
+            // `module Admin`); resolve them the same way includes already are.
+            pending.extend(model.parent.iter().map(resolve));
             for item in &model.body {
                 let crate::dialect::ModelBodyItem::Unknown { expr, .. } = item else { continue };
                 let ExprNode::Send { recv: None, method, args, .. } = &*expr.node else { continue };
@@ -95,7 +97,7 @@ fn record_return_overridden(app: &App, classes: &HashMap<ClassId, ()>, class: &C
         }
         if let Some(lc) = app.library_classes.iter().find(|lc| lc.name == id) {
             if lc.methods.iter().any(relevant) { return true; }
-            pending.extend(lc.parent.iter().cloned());
+            pending.extend(lc.parent.iter().map(resolve));
             pending.extend(lc.includes.iter().map(resolve));
         }
     }

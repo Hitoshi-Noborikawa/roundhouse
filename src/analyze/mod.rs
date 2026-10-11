@@ -710,7 +710,25 @@ impl Analyzer {
                 // The shared runtime types these as `() -> Base`, but in Rails
                 // `reload` and `lock!` answer `self`: keep the receiver's own
                 // class so its model methods still resolve on the result.
+                // Skip that seed when a parent or include defines the method
+                // (or, for `lock!`, `reload` — Rails' `lock!` calls `reload`):
+                // BodyTyper prefers the model's own table, so a self seed
+                // would hide the source override's harvested return.
                 let ret = if matches!(entry.name, "reload" | "lock!") {
+                    let inherited = |name: &str| {
+                        model
+                            .parent
+                            .as_ref()
+                            .is_some_and(|parent| source_instance_method(app, parent, name))
+                            || model_includes(model)
+                                .iter()
+                                .any(|include| source_instance_method(app, include, name))
+                    };
+                    if inherited(entry.name)
+                        || (entry.name == "lock!" && inherited("reload"))
+                    {
+                        continue;
+                    }
                     self_ty.clone()
                 } else {
                     instantiate(kind)
