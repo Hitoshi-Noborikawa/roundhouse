@@ -1268,7 +1268,9 @@ impl Analyzer {
                     let name = id.0.as_str().to_string();
                     // `::A::B` is never a lexical neighbour.
                     let rooted = path.first().is_some_and(|head| head.as_str().is_empty());
-                    let known = self.classes.contains_key(&id)
+                    let segs: Vec<&str> = path.iter().map(|s| s.as_str()).filter(|s| !s.is_empty()).collect();
+                    let known = crate::ingest::util::is_view_helper_marker_include(&segs)
+                        || self.classes.contains_key(&id)
                         || (!rooted && body::lexical_class(&id, model.name.0.as_str(), &self.classes).is_some())
                         || body::RUBY_TOP_LEVEL.contains(&name.as_str());
                     (!known).then_some(name)

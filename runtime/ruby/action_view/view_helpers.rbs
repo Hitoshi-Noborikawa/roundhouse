@@ -137,6 +137,7 @@ module ActionView
     # previous `record_dom_prefix(record)` helper that called
     # `record.class.name.downcase` (runtime introspection).
     def self.dom_id: (ActiveRecord::Base record, ?Symbol? suffix) -> String
+    def self.dom_class: (ActiveRecord::Base record, ?Symbol? prefix) -> String
   
     # ── HTML element helpers ────────────────────────────────────────
     # `text` is the link/button label — typed String (was untyped).

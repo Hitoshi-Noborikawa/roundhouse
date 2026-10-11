@@ -1789,6 +1789,20 @@ impl<'a> BodyTyper<'a> {
                         receiver.decisions |= crate::expr::RESOLVED_OPERATOR_RECEIVER;
                     }
                 }
+                // `include ActionView::RecordIdentifier` is a marker include
+                // (dropped at ingest); emit qualifies only the BARE
+                // `dom_id` / `dom_class` to `ViewHelpers`, so only the bare
+                // call types String. An explicit receiver (`x.dom_id(a)`)
+                // has nothing to run and stays unresolved.
+                if recv.is_none()
+                    && matches!(method.as_str(), "dom_id" | "dom_class")
+                    && (1..=2).contains(&args.len())
+                    && block.is_none()
+                    && matches!(dispatched, Ty::Var { .. })
+                    && !self.app_defines(ctx.self_ty.as_ref(), method)
+                {
+                    return Ty::Str;
+                }
                 // Kernel.Array is a container even for scalar params.
                 // App methods (including inherited/included overrides)
                 // have already dispatched above and must win.
