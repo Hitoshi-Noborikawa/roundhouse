@@ -6436,6 +6436,23 @@ fn emit_library_class_decl_inner(
     let self_anchor = out_path.with_extension("").to_string_lossy().into_owned();
     let mut s = String::new();
 
+    let external_includes = crate::gems::statically_resolved_external_includes(app);
+    let mut emitted_external_require = false;
+    for included in &lc.includes {
+        let detail = format!("{} includes unresolved {}", lc.name.0, included.0);
+        if external_include_is_enabled(&detail)
+            && let Some(features) = external_includes.get(&detail)
+        {
+            for feature in features {
+                writeln!(s, "require {feature:?}").unwrap();
+                emitted_external_require = true;
+            }
+        }
+    }
+    if emitted_external_require {
+        writeln!(s).unwrap();
+    }
+
     // A constant whose initializer runs this class's own methods at load
     // time (see `partition_deferred_constants`) drags those method
     // bodies' constant refs into LOAD time with it — `Sound::BUILTIN`
@@ -6915,7 +6932,11 @@ fn emit_library_class_decl_inner(
     // `replays_foreign_class_body`. After the constants (a captured
     // call may reference one) and before the methods.
     if replays_foreign_class_body(lc, app) {
-        for call in &lc.unknown_calls {
+        let calls = lc
+            .unknown_calls
+            .iter()
+            .filter(|call| !is_preserved_external_include(call, &external_includes));
+        for call in calls {
             for line in super::emit_expr(call).lines() {
                 if line.is_empty() {
                     writeln!(s).unwrap();
@@ -6924,12 +6945,19 @@ fn emit_library_class_decl_inner(
                 }
             }
         }
-        if !lc.unknown_calls.is_empty() && !lc.methods.is_empty() {
+        if lc
+            .unknown_calls
+            .iter()
+            .any(|call| !is_preserved_external_include(call, &external_includes))
+            && !lc.methods.is_empty()
+        {
             writeln!(s).unwrap();
         }
     } else {
         for call in &lc.unknown_calls {
-            report_dropped_class_body_call(lc, call);
+            if !is_preserved_external_include(call, &external_includes) {
+                report_dropped_class_body_call(lc, call);
+            }
         }
     }
 
@@ -7247,6 +7275,30 @@ fn report_dropped_class_body_call(lc: &LibraryClass, call: &Expr) {
             lc.name.0.as_str(),
         ),
     ));
+}
+
+fn is_preserved_external_include(
+    call: &Expr,
+    resolved: &std::collections::BTreeMap<String, Vec<String>>,
+) -> bool {
+    matches!(
+        &call.diagnostic,
+        Some(crate::diagnostic::DiagnosticKind::Unsupported {
+            construct,
+            detail,
+            ..
+        }) if construct.as_str() == "include"
+            && resolved.contains_key(detail)
+            && external_include_is_enabled(detail)
+    )
+}
+
+fn external_include_is_enabled(detail: &str) -> bool {
+    let Some(module) = detail.split(" includes unresolved ").nth(1) else {
+        return false;
+    };
+    let namespace = module.split("::").next().unwrap_or(module);
+    super::expr::external_gem_namespace_is_enabled(namespace)
 }
 
 /// Is this name one of the app's own CLASSES (not a module)? Namespace

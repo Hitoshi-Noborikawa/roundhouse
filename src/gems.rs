@@ -595,6 +595,93 @@ pub fn gem_owning_constant<'a>(census: &'a GemCensus, constant_path: &str) -> Op
     (owners.len() == 1).then(|| owners[0])
 }
 
+/// Literal external-gem includes whose defining file also has a matching
+/// top-level `require`. The lockfile identifies the gem and source names its
+/// feature; other unresolved includes remain unsupported.
+pub fn statically_resolved_external_includes(
+    app: &crate::App,
+) -> std::collections::BTreeMap<String, Vec<String>> {
+    let Some(lock) = app.gem_lock.as_ref() else {
+        return Default::default();
+    };
+    let census = GemCensus::of(lock);
+    let mut resolved = std::collections::BTreeMap::new();
+    for class in &app.library_classes {
+        let source = class
+            .parent_span
+            .file
+            .0
+            .checked_sub(1)
+            .and_then(|index| app.sources.get(index as usize))
+            .or_else(|| {
+                class.methods.iter().find_map(|method| {
+                    method
+                        .name_span
+                        .file
+                        .0
+                        .checked_sub(1)
+                        .and_then(|index| app.sources.get(index as usize))
+                })
+            });
+        let Some(source) = source else { continue };
+        for included in &class.includes {
+            let Some(gem) = gem_owning_constant(&census, included.0.as_str()) else {
+                continue;
+            };
+            let gem_name = gem.to_ascii_lowercase();
+            let namespace = namespace_of(gem).to_ascii_lowercase();
+            let requires: Vec<String> = source
+                .text
+                .lines()
+                .filter_map(literal_top_level_require)
+                .filter(|feature| {
+                    feature
+                        .split('/')
+                        .next()
+                        .is_some_and(|head| head == namespace || head == gem_name)
+                })
+                .collect();
+            if !requires.is_empty() {
+                resolved.insert(
+                    format!("{} includes unresolved {}", class.name.0, included.0),
+                    requires,
+                );
+            }
+        }
+    }
+    resolved
+}
+
+/// Namespaces owned by unknown gems that are pinned in this app's lockfile.
+/// Ruby project emission uses these only when it also wires the exact gems.
+pub fn locked_external_gem_namespaces(app: &crate::App) -> std::collections::BTreeSet<String> {
+    let Some(lock) = app.gem_lock.as_ref() else {
+        return Default::default();
+    };
+    GemCensus::of(lock)
+        .unknown()
+        .map(|gem| namespace_of(&gem.name))
+        .collect()
+}
+
+fn literal_top_level_require(line: &str) -> Option<String> {
+    if line.starts_with(char::is_whitespace) || !line.starts_with("require ") {
+        return None;
+    }
+    let argument = line["require ".len()..].trim();
+    let quote = argument.chars().next()?;
+    if !matches!(quote, '\'' | '"') {
+        return None;
+    }
+    let end = argument[1..].find(quote)? + 1;
+    let trailing = argument[end + 1..].trim();
+    if !trailing.is_empty() && !trailing.starts_with('#') {
+        return None;
+    }
+    let feature = &argument[1..end];
+    (!feature.is_empty() && !feature.contains('#')).then(|| feature.to_string())
+}
+
 /// All candidates in the best namespace-matching tier. Full/irregular
 /// names beat dashed-prefix guesses (`Alba`: alba, not alba-inertia).
 pub fn gems_owning_constant<'a>(census: &'a GemCensus, constant_path: &str) -> Vec<&'a str> {

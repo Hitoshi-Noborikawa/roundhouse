@@ -369,6 +369,26 @@ fn run_transpile(
     };
     analyze_diags.extend(lower_diags);
 
+    // CRuby can carry an external include only when the lockfile uniquely
+    // identifies its gem and the defining source has a matching literal
+    // top-level require. Keep check's source diagnostic and all strict-target
+    // refusals unchanged.
+    if target == BuildTarget::Ruby {
+        let supported_includes = roundhouse::gems::statically_resolved_external_includes(&app);
+        let external_namespaces = roundhouse::gems::locked_external_gem_namespaces(&app);
+        analyze_diags.retain(|diagnostic| match &diagnostic.kind {
+            roundhouse::diagnostic::DiagnosticKind::Unsupported {
+                construct, detail, ..
+            } if construct.as_str() == "include" => !supported_includes.contains_key(detail),
+            roundhouse::diagnostic::DiagnosticKind::Unsupported {
+                construct, detail, ..
+            } if construct.as_str() == "constant" => !external_namespaces
+                .iter()
+                .any(|namespace| detail.contains(&format!("{namespace}::"))),
+            _ => true,
+        });
+    }
+
     // A residue whose own text says the construct is "unsupported at
     // strict-target emit" has to fail the emit it predicts that for.
     // The ledger runs once, target-agnostically, inside the shared

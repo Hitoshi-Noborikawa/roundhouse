@@ -1570,6 +1570,20 @@ pub fn target_files(
         }
         return Ok(ensure_readme(files, target));
     }
+    if target == BuildTarget::Ruby {
+        let namespaces = crate::gems::locked_external_gem_namespaces(app);
+        return crate::emit::ruby::with_external_gem_namespaces(&namespaces, || {
+            target_files_inner(app, fixture, target)
+        });
+    }
+    target_files_inner(app, fixture, target)
+}
+
+fn target_files_inner(
+    app: &App,
+    fixture: &Path,
+    target: BuildTarget,
+) -> Result<Vec<(String, String)>, String> {
     let without_health;
     let app = match without_rails_health_controller(app, target) {
         Some(trimmed) => {
@@ -3169,6 +3183,7 @@ fn ruby_family_runtime_files(
     apply_cable_strip(&mut files, app)?;
     apply_makefile_test_list_stems(&mut files, &test_stems);
     apply_runtime_gem_wiring(&mut files);
+    apply_locked_external_gem_wiring(&mut files, app);
     // AGAIN, on purpose, and this time PERFORMING them. `spinel_files`
     // appended a commented-out block to the spinel tree's boot.rb (that
     // target cannot perform a mixin — see `apply_module_mixins`), and the
@@ -6458,6 +6473,67 @@ fn apply_runtime_gem_wiring(files: &mut Vec<(String, String)>) {
             gemfile.push_str(&block);
         }
     }
+}
+
+/// Carry direct, unmodeled gems that the emitted CRuby app actually names.
+/// The source lockfile is the version authority; source constants are the
+/// demand signal. Remove the scaffold lock so Bundler can resolve those pins.
+fn apply_locked_external_gem_wiring(files: &mut Vec<(String, String)>, app: &App) {
+    let Some(lock) = app.gem_lock.as_ref() else {
+        return;
+    };
+    let census = crate::gems::GemCensus::of(lock);
+    let needed: Vec<_> = census
+        .unknown()
+        .filter(|gem| {
+            let namespace = crate::gems::namespace_of(&gem.name);
+            files.iter().any(|(path, content)| {
+                (path.starts_with("app/") || path.starts_with("lib/"))
+                    && path.ends_with(".rb")
+                    && names_constant(content, &namespace)
+            })
+        })
+        .cloned()
+        .collect();
+    if needed.is_empty() {
+        return;
+    }
+    let Some((_, gemfile)) = files.iter_mut().find(|(path, _)| path == "Gemfile") else {
+        return;
+    };
+    let mut eager_requires = Vec::new();
+    for gem in needed {
+        let namespace = crate::gems::namespace_of(&gem.name).to_ascii_lowercase();
+        if namespace == gem.name {
+            eager_requires.push(gem.name.clone());
+        }
+        if gemfile.contains(&format!("gem {:?}", gem.name)) {
+            continue;
+        }
+        let version = gem
+            .version
+            .as_deref()
+            .map(|version| format!(", \"= {version}\""))
+            .unwrap_or_default();
+        if !gemfile.ends_with('\n') {
+            gemfile.push('\n');
+        }
+        gemfile.push_str(&format!(
+            "\n# Required by emitted application constants.\ngem {:?}{version}\n",
+            gem.name
+        ));
+    }
+    if let Some((_, boot)) = files.iter_mut().find(|(path, _)| path == "boot.rb") {
+        let requires = eager_requires
+            .iter()
+            .filter(|feature| !boot.contains(&format!("require {feature:?}")))
+            .map(|feature| format!("require {feature:?}\n"))
+            .collect::<String>();
+        if !requires.is_empty() {
+            boot.insert_str(0, &format!("{requires}\n"));
+        }
+    }
+    files.retain(|(path, _)| path != "Gemfile.lock");
 }
 
 /// The prebuilt JS bundles that arrive from a gem rather than from the
