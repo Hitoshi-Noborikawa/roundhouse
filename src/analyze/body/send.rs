@@ -509,7 +509,7 @@ impl<'a> BodyTyper<'a> {
         // `then` yields the fulfilled value, which no signature names, so
         // its parameters stay unbound.
         if matches!(method.as_str(), "then" | "yield_self" | "tap") {
-            if self.owns_operator(Some(recv_ty), method, false) {
+            if self.owns_operator(Some(recv_ty), method, class_object_receiver) {
                 return None;
             }
             return Some(vec![recv_ty.clone()]);
@@ -1189,7 +1189,7 @@ impl<'a> BodyTyper<'a> {
         // parameters unbound for it.
         if matches!(method.as_str(), "then" | "yield_self")
             && recv_ty.is_some()
-            && !self.owns_operator(recv_ty, method, false)
+            && !self.owns_operator(recv_ty, method, !instance_receiver)
         {
             return block_ret.cloned().unwrap_or(Ty::Untyped);
         }
@@ -2861,12 +2861,22 @@ pub(super) fn array_method(method: &Symbol, elem: &Ty, block_ret: Option<&Ty>) -
         // `partition { … }` → `[matching, rest]`: two same-element
         // Arrays, so an Array of Array-of-elem. Rails' own
         // `users.partition(&:administrator?)` destructures it.
-        // `each_slice(n)` / `each_cons(n)` yield same-element sub-arrays.
-        // Chained as an enumerator (`ids.each_slice(500).flat_map { |batch| … }`),
-        // the value is those batches.
-        "partition" | "each_slice" | "each_cons" => Ty::Array {
+        "partition" => Ty::Array {
             elem: Box::new(Ty::Array { elem: Box::new(elem.clone()) }),
         },
+        // `each_slice(n)` / `each_cons(n)` yield same-element sub-arrays
+        // when chained as an enumerator (`ids.each_slice(500).flat_map
+        // { |batch| … }`). With a block, MRI returns the receiver — not
+        // the batch array — so keep the block form out of that branch.
+        "each_slice" | "each_cons" => {
+            if block_ret.is_some() {
+                Ty::Array { elem: Box::new(elem.clone()) }
+            } else {
+                Ty::Array {
+                    elem: Box::new(Ty::Array { elem: Box::new(elem.clone()) }),
+                }
+            }
+        }
         // `each`, predicates, and shape-preserving transforms keep elem.
         // `flatten` (no depth): nested Arrays unwrap, and a Relation
         // element contributes its RECORDS — Ruby splices anything with

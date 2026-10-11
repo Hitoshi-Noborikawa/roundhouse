@@ -62,6 +62,7 @@ end
 
 #[test]
 fn process_clocks_run_in_emitted_ruby() {
+    // Emit lands ActiveSupport::TestCase bodies under test/models/.
     clock_app().run_test("test/models/clock_test.rb").assert_passes();
 }
 

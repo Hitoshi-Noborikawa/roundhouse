@@ -119,7 +119,9 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
         ("ago", time_ty()), ("until", time_ty()), ("from_now", time_ty()), ("since", time_ty()),
         ("to_i", Ty::Int), ("seconds", Ty::Int), ("to_f", Ty::Float), ("to_s", Ty::Str),
         ("==", Ty::Bool), ("<", Ty::Bool), ("<=", Ty::Bool), (">", Ty::Bool), (">=", Ty::Bool),
-        ("<=>", Ty::Int),
+        // Integer `<=>` answers nil for an incomparable operand; Duration
+        // forwards there after unwrapping another Duration.
+        ("<=>", Ty::Union { variants: vec![Ty::Int, Ty::Nil] }),
     ]);
 
     // Date instances are date-only values, including constructors and

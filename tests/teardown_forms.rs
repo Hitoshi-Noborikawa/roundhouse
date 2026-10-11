@@ -26,3 +26,9 @@ fn a_teardown_block_argument_is_refused_by_name() {
     let err = ingest("  teardown(&:close_files)\n\n  test \"a\" do\n    assert true\n  end").unwrap_err();
     assert!(err.contains("test teardown not modeled"), "{err}");
 }
+
+#[test]
+fn self_teardown_is_refused_rather_than_dropped() {
+    let err = ingest("  self.teardown do\n    cleanup\n  end\n\n  test \"a\" do\n    assert true\n  end").unwrap_err();
+    assert!(err.contains("test teardown not modeled"), "{err}");
+}

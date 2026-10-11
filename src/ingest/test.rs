@@ -240,18 +240,32 @@ fn ingest_test_class(
     // passed or failed, after the class's own `def teardown` and in
     // reverse of the order they were declared. The harness calls the
     // test's `teardown` after each test the same way, so the blocks
-    // become that method.
+    // become that method. An early `return` in `def teardown` must not
+    // skip the blocks — wrap the method body in `ensure` so they run.
     if !teardowns.is_empty() {
-        let mut exprs: Vec<Expr> = Vec::new();
+        let blocks = Expr::new(
+            Span::synthetic(),
+            ExprNode::Seq {
+                exprs: teardowns.into_iter().rev().collect(),
+            },
+        );
         let own = helpers.iter().position(|m| m.name.as_str() == "teardown");
-        let name_span = match own.map(|i| helpers.remove(i)) {
-            Some(m) => {
-                exprs.push(m.body);
-                m.name_span
-            }
-            None => Span::synthetic(),
+        let (name_span, body) = match own.map(|i| helpers.remove(i)) {
+            Some(m) => (
+                m.name_span,
+                Expr::new(
+                    Span::synthetic(),
+                    ExprNode::BeginRescue {
+                        body: m.body,
+                        rescues: Vec::new(),
+                        else_branch: None,
+                        ensure: Some(blocks),
+                        implicit: true,
+                    },
+                ),
+            ),
+            None => (Span::synthetic(), blocks),
         };
-        exprs.extend(teardowns.into_iter().rev());
         helpers.push(MethodDef {
             name_span,
             name: Symbol::from("teardown"),
@@ -260,7 +274,7 @@ fn ingest_test_class(
             params: Vec::new(),
             unsupported_formals: None,
             has_anonymous_block: false,
-            body: Expr::new(Span::synthetic(), ExprNode::Seq { exprs }),
+            body,
             signature: None,
             effects: crate::effect::EffectSet::default(),
             enclosing_class: Some(name.0.clone()),
@@ -524,12 +538,24 @@ fn ingest_setup_declaration(
 }
 
 /// `teardown do … end`: the block's body. Any other `teardown` call
-/// (`teardown :close_files`, a block argument) is refused by name: it
-/// would otherwise fall to the unrecognized-statement drop below and
-/// its cleanup would silently never run.
+/// (`teardown :close_files`, a block argument, `self.teardown do`) is
+/// refused by name: it would otherwise fall to the unrecognized-statement
+/// drop below and its cleanup would silently never run.
 fn ingest_teardown_block(stmt: &Node<'_>, file: &str) -> IngestResult<Option<Expr>> {
     let Some(call) = stmt.as_call_node() else { return Ok(None) };
-    if call.receiver().is_some() || constant_id_str(&call.name()) != "teardown" {
+    if constant_id_str(&call.name()) != "teardown" {
+        return Ok(None);
+    }
+    // Receiverless `teardown do` is the ActiveSupport form. `self.teardown
+    // do` is the same callback in some suites; refuse it rather than drop.
+    if let Some(recv) = call.receiver() {
+        let is_self = recv.as_self_node().is_some();
+        if is_self {
+            return Err(IngestError::Unsupported {
+                file: file.into(),
+                message: "test teardown not modeled: only receiverless `teardown do … end` runs after each test".into(),
+            });
+        }
         return Ok(None);
     }
     let block = call.block().and_then(|b| b.as_block_node());

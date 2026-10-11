@@ -1565,6 +1565,7 @@ module ActiveRecord
         return r.length > 0 unless r.nil?
         return probe_existence(1) > 0
       end
+      raise ArgumentError, "wrong number of arguments (given #{conditions.length}, expected 0..1)" if conditions.length > 1
       id = conditions[0]
       return false if id.nil?
       own_lists
