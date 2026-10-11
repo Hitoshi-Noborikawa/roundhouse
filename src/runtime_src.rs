@@ -361,7 +361,11 @@ fn type_of_const_literal(node: &Node<'_>) -> Option<Ty> {
             args: vec![],
         });
     }
-    None
+    // A scalar literal (`SALT = "active_record/signed_id"`) types as
+    // itself. Without this a runtime class's scalar constant had no table
+    // entry, so an app read of it resolved to the runtime declaration with
+    // no type and was refused as an unsupported constant.
+    type_of_literal_node(node)
 }
 
 fn type_of_literal_node(node: &Node<'_>) -> Option<Ty> {

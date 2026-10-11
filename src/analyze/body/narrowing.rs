@@ -242,6 +242,8 @@ fn var_key(e: &Expr, probe: &Probe) -> Option<VarKey> {
         }
         ExprNode::Var { name, .. } => Some(VarKey::Local(name.clone())),
         ExprNode::Ivar { name } => Some(VarKey::Ivar(name.clone())),
+        // `(x = value).nil?` tests what it just bound to `x`.
+        ExprNode::Assign { target: LValue::Var { name, .. }, .. } => Some(VarKey::Local(name.clone())),
         // Bareword implicit-self read — view-partial lowering emits
         // param references as `Send { recv: None, method: <name>,
         // args: [], block: None }`, the same shape `compute` (body/
