@@ -2007,6 +2007,7 @@ end
     // (campfire's `ContentFilters::EDITOR_FORMATTING_ATTRIBUTES`) that
     // are resolved to their literal here.
     app.content_helper_allowed_attributes = content_helper_attribute_additions(vfs, dir, &app);
+    app.content_helper_allowed_tags = content_helper_tag_additions(vfs, dir, &app);
     fold_concern_enums_into_models(&mut app, &concern_enums);
     // Include each base's Concern maps, and retain a child's own maps
     // (direct or Concern-declared) before filling inherited columns.
@@ -7987,9 +7988,48 @@ fn extract_module_mixins(source: &[u8], file: &str) -> Vec<crate::app::ModuleMix
 ///   constant holding one. Anything else is a survey gap — the addition
 ///   is a computation this does not evaluate — rather than a guess.
 ///
-/// (`allowed_tags` has the same shape and is not read: nothing in the
-/// runtime consults Action Text's tag list.)
 fn content_helper_attribute_additions<V: Vfs + ?Sized>(vfs: &V, dir: &Path, app: &App) -> Vec<String> {
+    let mut out = content_helper_allow_list_additions(
+        vfs,
+        dir,
+        app,
+        "allowed_attributes=",
+        &["allowed_attributes", "sanitizer_allowed_attributes"],
+        "allowed_attributes",
+    );
+    if app.gem_lock.as_ref().is_some_and(|l| l.has("lexxy")) {
+        for n in ["controls", "poster", "data-language", "style", "value", "start"] {
+            if !out.iter().any(|x| x == n) {
+                out.push(n.to_string());
+            }
+        }
+    }
+    out
+}
+
+/// Same shape as attributes: campfire unions
+/// `ContentFilters::EDITOR_FORMATTING_TAGS` into `allowed_tags` at boot.
+/// Sanitize-on-render consults this list, so the additions must land in
+/// the emitted runtime (unlike the prior storage-only path).
+fn content_helper_tag_additions<V: Vfs + ?Sized>(vfs: &V, dir: &Path, app: &App) -> Vec<String> {
+    content_helper_allow_list_additions(
+        vfs,
+        dir,
+        app,
+        "allowed_tags=",
+        &["allowed_tags", "sanitizer_allowed_tags"],
+        "allowed_tags",
+    )
+}
+
+fn content_helper_allow_list_additions<V: Vfs + ?Sized>(
+    vfs: &V,
+    dir: &Path,
+    app: &App,
+    assignment: &str,
+    base_methods: &[&str],
+    field: &str,
+) -> Vec<String> {
     use crate::expr::{ExprNode, Literal};
 
     let mut out: Vec<String> = Vec::new();
@@ -8000,15 +8040,6 @@ fn content_helper_attribute_additions<V: Vfs + ?Sized>(vfs: &V, dir: &Path, app:
             }
         }
     };
-    if app.gem_lock.as_ref().is_some_and(|l| l.has("lexxy")) {
-        add(
-            ["controls", "poster", "data-language", "style", "value", "start"]
-                .iter()
-                .map(|s| s.to_string())
-                .collect(),
-            &mut out,
-        );
-    }
 
     fn string_list(e: &crate::expr::Expr) -> Option<Vec<String>> {
         let ExprNode::Array { elements, .. } = &*e.node else { return None };
@@ -8022,13 +8053,13 @@ fn content_helper_attribute_additions<V: Vfs + ?Sized>(vfs: &V, dir: &Path, app:
     }
     // The current value or the framework defaults — what the runtime's
     // own list already is.
-    fn is_base(e: &crate::expr::Expr) -> bool {
+    fn is_base(e: &crate::expr::Expr, base_methods: &[&str]) -> bool {
         match &*e.node {
-            ExprNode::Send { method, .. } => {
-                matches!(method.as_str(), "allowed_attributes" | "sanitizer_allowed_attributes")
+            ExprNode::Send { method, .. } => base_methods.iter().any(|m| method.as_str() == *m),
+            ExprNode::BoolOp { left, right, .. } => {
+                is_base(left, base_methods) && is_base(right, base_methods)
             }
-            ExprNode::BoolOp { left, right, .. } => is_base(left) && is_base(right),
-            ExprNode::Seq { exprs } if exprs.len() == 1 => is_base(&exprs[0]),
+            ExprNode::Seq { exprs } if exprs.len() == 1 => is_base(&exprs[0], base_methods),
             _ => false,
         }
     }
@@ -8072,7 +8103,7 @@ fn content_helper_attribute_additions<V: Vfs + ?Sized>(vfs: &V, dir: &Path, app:
         let Some(program) = root.as_program_node() else { continue };
         for stmt in initializer_statements(&program) {
             let Some(call) = stmt.as_call_node() else { continue };
-            if super::util::constant_id_str(&call.name()) != "allowed_attributes=" {
+            if super::util::constant_id_str(&call.name()) != assignment {
                 continue;
             }
             let Some(recv) = call.receiver() else { continue };
@@ -8086,14 +8117,16 @@ fn content_helper_attribute_additions<V: Vfs + ?Sized>(vfs: &V, dir: &Path, app:
             let mut ops = Vec::new();
             operands(&value, &mut ops);
             for op in ops {
-                if is_base(op) {
+                if is_base(op, base_methods) {
                     continue;
                 }
                 match resolve(op) {
                     Some(list) => add(list, &mut out),
                     None => survey::record(&IngestError::Unsupported {
                         file: file.clone(),
-                        message: "ActionText::ContentHelper.allowed_attributes addition is not a literal list or a constant holding one; the attributes it adds are not allowed by the emitted sanitizer".to_string(),
+                        message: format!(
+                            "ActionText::ContentHelper.{field} addition is not a literal list or a constant holding one; the {field} it adds are not allowed by the emitted sanitizer"
+                        ),
                     }),
                 }
             }

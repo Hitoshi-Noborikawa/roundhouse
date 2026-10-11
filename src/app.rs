@@ -115,6 +115,13 @@ pub struct App {
     /// the runtime's generated `ContentHelper.app_allowed_attributes`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub content_helper_allowed_attributes: Vec<String>,
+    /// Tags the app adds the same way — `allowed_tags=` in a
+    /// `to_prepare` / initializer (campfire's
+    /// `ContentFilters::EDITOR_FORMATTING_TAGS`). Rendered into
+    /// `ContentHelper.app_allowed_tags`. Needed once sanitize runs on
+    /// render: without it, editor markup (`s`/`u`/table) is stripped.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub content_helper_allowed_tags: Vec<String>,
     /// Call-site-unified parameter types, written by the analyzer's
     /// fixpoint (`unify_params_from_call_sites`) as its last act and
     /// read by lowerings that build method signatures — the controller
@@ -767,6 +774,7 @@ impl App {
             loaded_frameworks: None,
             gem_boundary: Default::default(),
             content_helper_allowed_attributes: Vec::new(),
+            content_helper_allowed_tags: Vec::new(),
             inferred_method_params: HashMap::new(),
             helper_method_index: HashMap::new(),
             view_visible_controller_methods: BTreeSet::new(),

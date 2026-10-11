@@ -3494,6 +3494,35 @@ fn apply_content_helper_attributes(files: &mut [(String, String)], app: &App) {
     }
 }
 
+/// `ActionText::ContentHelper.app_allowed_tags` — editor tags the app
+/// unions into ActionText's sanitizer at boot (campfire's
+/// `EDITOR_FORMATTING_TAGS`). Same generated-hook shape as attributes.
+fn apply_content_helper_tags(files: &mut [(String, String)], app: &App) {
+    const HEAD: &str = "    # >>> generated: content-helper-tags\n";
+    const TAIL: &str = "    # <<< generated: content-helper-tags\n";
+    if app.content_helper_allowed_tags.is_empty() {
+        return;
+    }
+    let list = app
+        .content_helper_allowed_tags
+        .iter()
+        .map(|a| format!("{a:?}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let body = format!("{HEAD}    def self.app_allowed_tags\n      [{list}]\n    end\n{TAIL}");
+    for (path, content) in files.iter_mut() {
+        if !path.ends_with("runtime/action_text.rb") {
+            continue;
+        }
+        if let Some(start) = content.find(HEAD) {
+            if let Some(rel_end) = content[start..].find(TAIL) {
+                let end = start + rel_end + TAIL.len();
+                content.replace_range(start..end, &body);
+            }
+        }
+    }
+}
+
 fn apply_content_layout(files: &mut [(String, String)], app: &App) {
     const HEAD: &str = "    # >>> generated: content-layout\n";
     const TAIL: &str = "    # <<< generated: content-layout\n";
@@ -3515,7 +3544,7 @@ fn apply_content_layout(files: &mut [(String, String)], app: &App) {
     // emit wrote `…boxes.</div>` without it.
     let layout = format!(
         "{HEAD}    def rendered_html\n      \
-         Views::Layouts::ActionText::Contents.content(render_attachments + \"\\n\")\n    end\n{TAIL}"
+         Views::Layouts::ActionText::Contents.content(render_action_text_content + \"\\n\")\n    end\n{TAIL}"
     );
 
     // Two kinds of arm, in the order campfire's own `from_node` reopen
@@ -5820,6 +5849,7 @@ fn spinel_files(app: &App, fixture: &Path) -> Result<(Vec<(String, String)>, Vec
     apply_cable_channels(&mut files, app);
     apply_content_layout(&mut files, app);
     apply_content_helper_attributes(&mut files, app);
+    apply_content_helper_tags(&mut files, app);
     // The `only:`-as-finder specializations, also in the shared base:
     // `runtime/global_id_locator.rb` is ONE file that both the spinel
     // tree and the ruby overlay require, and the rewrite that names
@@ -9690,7 +9720,7 @@ mod tests {
         // the layout yields.
         assert!(
             out.contains(
-                "    def rendered_html\n      Views::Layouts::ActionText::Contents.content(render_attachments + \"\\n\")\n    end\n"
+                "    def rendered_html\n      Views::Layouts::ActionText::Contents.content(render_action_text_content + \"\\n\")\n    end\n"
             ),
             "generated dispatch not written:\n{out}"
         );
