@@ -2074,6 +2074,33 @@ end
 }
 
 #[test]
+fn array_fetch_types_as_the_element_its_default_or_its_block() {
+    // `fetch(i)` answers the element or raises IndexError; a default or
+    // a block answers a miss. `(first_list + second_list).fetch(0).options`
+    // reads the fetched element.
+    let app = app_from_files(&[
+        (
+            "app/models/application_record.rb",
+            "class ApplicationRecord < ActiveRecord::Base\nend\n",
+        ),
+        (
+            "app/models/thing.rb",
+            r#"class Thing < ApplicationRecord
+  def compute
+    nums = [5, 6, 7]
+    [nums.fetch(0).succ, nums.fetch(9, 0).succ, nums.fetch(9) { 0 }.succ]
+  end
+end
+"#,
+        ),
+    ]);
+    let failures = send_dispatch_failures(&app);
+    for m in ["fetch", "succ"] {
+        assert!(!failures.iter().any(|f| f == m), "`{m}` should resolve; failures = {failures:?}");
+    }
+}
+
+#[test]
 fn create_view_columns_register_with_real_schema_types() {
     // A model backed by a SQL `create_view` gets its columns from the
     // SELECT `AS <alias>` list. A direct `table.column` projection
@@ -2307,6 +2334,39 @@ end
         ),
     ]);
     assert_eq!(errors_of(&app), vec!["no known method `pluck` on Array[untyped]".to_string()]);
+}
+
+#[test]
+fn concurrent_map_types_without_errors() {
+    let app = app_from_files(&[
+        (
+            "app/models/application_record.rb",
+            "class ApplicationRecord < ActiveRecord::Base\nend\n",
+        ),
+        ("db/schema.rb", widget_schema()),
+        (
+            "app/models/widget.rb",
+            r#"class Widget < ApplicationRecord
+  LOCKS = Concurrent::Map.new
+
+  def self.lock_for(id) = LOCKS.compute_if_absent(id) { Mutex.new }
+  def self.forget_locks = LOCKS.clear
+
+  class << self
+    def remember(id, at) = seen[id] = at
+    def seen_at(id) = seen[id]
+
+    private
+
+    def seen
+      @seen ||= Concurrent::Map.new
+    end
+  end
+end
+"#,
+        ),
+    ]);
+    assert_eq!(errors_of(&app), Vec::<String>::new());
 }
 
 #[test]
@@ -5450,4 +5510,46 @@ fn inertia_configure_blocks_add_to_one_configuration() {
     assert_eq!(config.version, "v1");
     assert!(config.always_include_errors_hash);
     assert!(config.encrypt_history);
+}
+
+fn vite_check(files: &[(&str, &str)]) -> (Vec<String>, Vec<String>) {
+    let tree: std::collections::HashMap<std::path::PathBuf, Vec<u8>> = files
+        .iter()
+        .map(|(p, c)| (std::path::PathBuf::from(p), c.as_bytes().to_vec()))
+        .collect();
+    roundhouse::ingest::survey::activate();
+    let mut app = roundhouse::ingest::ingest_app_from_tree(tree).expect("ingest tree");
+    let gaps = roundhouse::ingest::survey::drain().iter().map(|g| format!("{g:?}")).collect();
+    Analyzer::new(&app).analyze(&mut app);
+    let messages = diagnose(&app).into_iter().map(|d| d.message).collect();
+    (messages, gaps)
+}
+
+const VITE_LAYOUT: (&str, &str) = (
+    "app/views/layouts/application.html.erb",
+    "<html><head><%= vite_client_tag %><%= vite_react_refresh_tag %><%= vite_javascript_tag \"application\" %><%= inertia_ssr_head %></head><body><%= yield %></body></html>\n",
+);
+
+const VITE_MANIFEST: (&str, &str) = (
+    "public/vite/.vite/manifest.json",
+    r#"{"entrypoints/application.js": {"file": "assets/application-abc.js", "isEntry": true}}"#,
+);
+
+#[test]
+fn vite_tag_helpers_resolve_from_the_manifest_without_diagnostics() {
+    let (messages, gaps) = vite_check(&[VITE_LAYOUT, VITE_MANIFEST]);
+    assert!(messages.iter().all(|m| !m.contains("vite_") && !m.contains("inertia_ssr_head")), "{messages:#?}");
+    assert!(gaps.is_empty(), "{gaps:#?}");
+}
+
+#[test]
+fn a_vite_tag_without_a_manifest_entry_is_a_survey_gap() {
+    let (_, gaps) = vite_check(&[VITE_LAYOUT]);
+    assert!(gaps.iter().any(|g| g.contains("`vite_javascript_tag`: no Vite build manifest")), "{gaps:#?}");
+    let other_entry = ("public/vite/.vite/manifest.json", r#"{"entrypoints/admin.js": {"file": "assets/admin-1.js"}}"#);
+    let (_, gaps) = vite_check(&[VITE_LAYOUT, other_entry]);
+    assert!(
+        gaps.iter().any(|g| g.contains("entry `entrypoints/application.js` is not in the Vite manifest")),
+        "{gaps:#?}"
+    );
 }
