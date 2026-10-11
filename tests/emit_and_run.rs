@@ -10175,6 +10175,41 @@ fn record_ivar_set_overlay() -> emit_and_run::Overlay {
         )
 }
 
+/// Rich text is SANITIZED when it renders, as Rails' `ActionText::Content
+/// #to_s` does: the content partial is `render_action_text_content`,
+/// which runs `sanitize_action_text_content` over the rendered
+/// fragment. The stored HTML is whatever the editor (or an attacker
+/// posting the form directly) sent, so serving it as stored is a
+/// stored XSS on every page that renders `<%= record.rich_text %>`.
+fn rich_text_app() -> emit_and_run::Overlay {
+    emit_and_run::real_blog()
+        .edit(
+            "app/models/article.rb",
+            "  has_many :comments, dependent: :destroy\n",
+            "  has_many :comments, dependent: :destroy\n  has_rich_text :content\n",
+        )
+        .edit(
+            "db/schema.rb",
+            "  add_foreign_key \"comments\", \"articles\"\n",
+            "  create_table \"action_text_rich_texts\", force: :cascade do |t|\n    \
+             t.string \"name\", null: false\n    \
+             t.text \"body\"\n    \
+             t.string \"record_type\", null: false\n    \
+             t.bigint \"record_id\", null: false\n    \
+             t.datetime \"created_at\", null: false\n    \
+             t.datetime \"updated_at\", null: false\n  \
+             end\n\n  \
+             add_foreign_key \"comments\", \"articles\"\n",
+        )
+        .edit(
+            "app/views/articles/show.html.erb",
+            "  <h1 class=\"font-bold text-4xl\"><%= @article.title %></h1>\n",
+            "  <h1 class=\"font-bold text-4xl\"><%= @article.title %></h1>\n  \
+             <section id=\"rich\"><%= @article.content %></section>\n",
+        )
+}
+
+
 #[test]
 fn instance_variable_set_and_view_assigned_layout_ivar_run() {
     record_ivar_set_overlay()
@@ -10804,6 +10839,34 @@ end
 "#,
         )
         .run_test("test/controllers/timed_articles_controller_test.rb")
+        .assert_passes();
+}
+
+#[test]
+fn rich_text_renders_sanitized() {
+    rich_text_app()
+        .write(
+            "test/controllers/rich_text_sanitize_controller_test.rb",
+            r#"require "test_helper"
+
+class RichTextSanitizeControllerTest < ActionDispatch::IntegrationTest
+  test "stored rich text is sanitized on render" do
+    article = Article.create!(title: "Rich", body: "Body text here",
+      content: %(<p>kept <b>bold</b></p><script>alert(1)</script><img src="x" onerror="alert(2)"><a href="javascript:alert(3)">link</a><iframe src="https://evil.example"></iframe><svg onload="alert(4)"></svg>))
+    get article_url(article)
+    assert_response :success
+    rich = response.body[/<section id="rich">.*?<\/section>/m].to_s
+    assert_includes rich, "<p>kept <b>bold</b></p>"
+    assert_not_includes rich, "<script"
+    assert_not_includes rich, "onerror"
+    assert_not_includes rich, "javascript:"
+    assert_not_includes rich, "<iframe"
+    assert_not_includes rich, "onload="
+  end
+end
+"#,
+        )
+        .run_test("test/controllers/rich_text_sanitize_controller_test.rb")
         .assert_passes();
 }
 
@@ -12086,6 +12149,24 @@ end
 "#,
         )
         .run_test("test/controllers/inertia_articles_controller_test.rb")
+        .assert_passes();
+}
+
+/// The same boundary on the native lane, which sanitizes with the shared
+/// runtime's safe-list scanner rather than the rails-html-sanitizer gem.
+#[test]
+#[ignore = "requires the Spinel toolchain"]
+fn rich_text_renders_sanitized_on_spinel() {
+    rich_text_app()
+        .run_spinel(
+            r#"html = ActionText::Content.new(%(<p>kept <b>bold</b></p><script>alert(1)</script><img src="x" onerror="alert(2)"><a href="javascript:alert(3)">link</a>)).to_s
+raise "lost the allowed markup: #{html}" unless html.include?("<p>kept <b>bold</b></p>")
+raise "script survived: #{html}" if html.include?("<script")
+raise "event handler survived: #{html}" if html.include?("onerror")
+raise "javascript: URL survived: #{html}" if html.include?("javascript:")
+puts "rich text sanitized"
+"#,
+        )
         .assert_passes();
 }
 
