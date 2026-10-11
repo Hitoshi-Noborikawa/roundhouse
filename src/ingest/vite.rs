@@ -89,11 +89,22 @@ pub fn read_manifest<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> Option<ViteManifes
             });
             return None;
         };
-        let imports = entry
-            .get("imports")
-            .and_then(|v| v.as_array())
-            .map(|a| a.iter().filter_map(|s| s.as_str().map(str::to_string)).collect())
-            .unwrap_or_default();
+        // `imports` are manifest keys (not asset paths) — require strings
+        // but do not run `safe_asset_segment`. Non-strings are a malformed
+        // manifest; survey instead of silently dropping the entry.
+        let imports: Option<Vec<String>> = match entry.get("imports").and_then(|v| v.as_array()) {
+            None => Some(Vec::new()),
+            Some(a) => a.iter().map(|s| s.as_str().map(str::to_string)).collect(),
+        };
+        let Some(imports) = imports else {
+            survey::record(&IngestError::Unsupported {
+                file: path.display().to_string(),
+                message: format!(
+                    "Vite manifest entry `{name}` has a non-string `imports` value"
+                ),
+            });
+            return None;
+        };
         chunks.insert(
             name.clone(),
             ViteChunk {
