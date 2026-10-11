@@ -26,7 +26,7 @@ use super::jbuilder::ingest_jbuilder;
 use super::library_class::{
     ClassKind, ConcernClassMethodSpans, ConcernEnumDecl, classify_class_file,
     ingest_concern_class_method_spans, ingest_concern_filters,
-    ingest_concern_model_items_with_constants,
+    ingest_concern_included_redefs, ingest_concern_model_items_with_constants,
     ingest_helper_method_names, ingest_library_classes, ingest_rails_application_singleton_methods,
 };
 use super::model::ingest_model_with_enum_constants;
@@ -540,6 +540,9 @@ pub fn ingest_app_with_vfs<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResult
                                     ingest_concern_model_items_with_constants(
                                         &source, &path_str, &enum_constants,
                                     );
+                                for (id, name) in ingest_concern_included_redefs(&source, &path_str) {
+                                    app.concern_included_redefs.entry(id).or_default().push(name);
+                                }
                                 app.concern_model_items.extend(concern_items.into_iter().filter(
                                     |(id, _)| nested.iter().any(|class| class.name == *id),
                                 ));
@@ -565,12 +568,18 @@ pub fn ingest_app_with_vfs<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResult
                         // carry `included do` declarations that belong
                         // to every includer: filters (controller-side)
                         // and model DSL (associations/scopes).
-                        app.concern_filters
-                            .extend(ingest_concern_filters(&source, &path_str));
+                        if let Some(concern_filters) =
+                            unwrap_or_record(ingest_concern_filters(&source, &path_str))?
+                        {
+                            app.concern_filters.extend(concern_filters);
+                        }
                         let (concern_items, concern_enum_decls) =
                             ingest_concern_model_items_with_constants(
                                 &source, &path_str, &enum_constants,
                             );
+                        for (id, name) in ingest_concern_included_redefs(&source, &path_str) {
+                            app.concern_included_redefs.entry(id).or_default().push(name);
+                        }
                         app.concern_model_items.extend(concern_items);
                         app.view_visible_controller_methods
                             .extend(ingest_helper_method_names(&source));
@@ -690,6 +699,9 @@ pub fn ingest_app_with_vfs<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResult
                                 ingest_concern_model_items_with_constants(
                                     &source, &path_str, &enum_constants,
                                 );
+                            for (id, name) in ingest_concern_included_redefs(&source, &path_str) {
+                                app.concern_included_redefs.entry(id).or_default().push(name);
+                            }
                             app.concern_model_items.extend(concern_items.into_iter().filter(
                                 |(id, _)| nested.iter().any(|class| class.name == *id),
                             ));
@@ -1339,12 +1351,18 @@ end
                         unwrap_or_record(ingest_library_classes(&source, &path_str))?
                     {
                         app.library_classes.extend(classes);
-                        app.concern_filters
-                            .extend(ingest_concern_filters(&source, &path_str));
+                        if let Some(concern_filters) =
+                            unwrap_or_record(ingest_concern_filters(&source, &path_str))?
+                        {
+                            app.concern_filters.extend(concern_filters);
+                        }
                         let (concern_items, concern_enum_decls) =
                             ingest_concern_model_items_with_constants(
                                 &source, &path_str, &enum_constants,
                             );
+                        for (id, name) in ingest_concern_included_redefs(&source, &path_str) {
+                            app.concern_included_redefs.entry(id).or_default().push(name);
+                        }
                         app.concern_model_items.extend(concern_items);
                         app.view_visible_controller_methods
                             .extend(ingest_helper_method_names(&source));
@@ -3155,6 +3173,15 @@ const CONSUMED_CONTROLLER_MACROS: &[&str] = &[
     // this generic one — see those functions' doc comments.
     "alias_method",
     "undef_method",
+    // `with_options(kw) do … end` — `ingest::controller::
+    // ingest_controller_with_options` claims every one of these at
+    // ingest time, before this scan ever runs: composed, it folds into
+    // the `Filter`/other body items its block held and never becomes an
+    // `Unknown` at all; declined, it stays `Unknown` WITH its own
+    // specific "with_options: …" gap already recorded (ALL-OR-NOTHING —
+    // see that function's doc comment). Either way this generic bucket
+    // (and the block-shaped one just below) would only double it.
+    "with_options",
 ];
 
 /// `using SomeRefinement` — Ruby's block-scoped monkey-patch
@@ -3311,8 +3338,22 @@ fn report_unrecognized_controller_macros(app: &App) {
                 });
                 continue;
             }
+            // Two more causes that already recorded their OWN specific
+            // gap for this exact method name — this generic bucket must
+            // not ALSO flag the call, which would double it.
+            // `stored_options_init`'s writer/reader split is one; a
+            // macro whose body held a BLOCK-FORM
+            // `around_action` that `controller::around_block_filter`
+            // recognized but refused (`app::expand_macro_filters`'
+            // `AroundRefusal`) is the other — the same exemption a
+            // hand-written `around_action { ... }` refusal already gets
+            // just above (`NAMED_CLAIMED_CONTROLLER_BLOCKS`), extended
+            // to the macro path, which reaches this blockless-call
+            // branch instead (the block lives in the macro's OWN body,
+            // not on this call site).
             if survey::recorded().iter().any(|gap| {
-                gap.contains("class configuration") && gap.contains(method.as_str())
+                (gap.contains("class configuration") || gap.contains("holds an around_action block that"))
+                    && gap.contains(method.as_str())
             }) {
                 continue;
             }
@@ -3429,6 +3470,16 @@ fn expand_class_body_macros(app: &mut App) -> IngestResult<()> {
             .filter_map(|(name, definitions)| (definitions > 1).then_some(name))
             .collect();
         shadowed_macros.extend(inherited_class_methods[&controller.name].iter().cloned());
+        // Shared with this controller's own hand-written block-form
+        // `around_action` pass (`ingest::controller::
+        // ingest_controller_with_nesting`), which always runs first:
+        // same owner-ident encoding, and a starting sequence number
+        // picked up AFTER whatever it already placed, so a macro's own
+        // block-form `around_action` never synthesizes the same method
+        // name as a hand-written one on this controller.
+        let around_block_owner_ident = super::controller::around_block_owner_ident(&controller.name);
+        let mut around_block_seq =
+            super::controller::next_around_block_seq(&controller.body, &around_block_owner_ident);
         let mut expanded: Vec<ControllerBodyItem> = Vec::new();
         for item in std::mem::take(&mut controller.body) {
             let ControllerBodyItem::Unknown { expr, leading_comments, leading_blank_line } = &item
@@ -3523,7 +3574,13 @@ fn expand_class_body_macros(app: &mut App) -> IngestResult<()> {
             };
             let param_names: Vec<crate::Symbol> =
                 macro_def.params.iter().map(|p| p.name.clone()).collect();
-            match expand_macro_filters(&body, &module, &param_names) {
+            match expand_macro_filters(
+                &body,
+                &module,
+                &param_names,
+                &around_block_owner_ident,
+                &mut around_block_seq,
+            ) {
                 Ok(items) => {
                     let mut comments = leading_comments.clone();
                     let mut blank = *leading_blank_line;
@@ -3551,6 +3608,25 @@ fn expand_class_body_macros(app: &mut App) -> IngestResult<()> {
                                     expr,
                                     leading_comments: std::mem::take(&mut comments),
                                     leading_blank_line: std::mem::take(&mut blank),
+                                });
+                            }
+                            // A block-form `around_action` the macro body
+                            // wraps — already fully lowered (synthesized
+                            // method, named `Around` filter) by
+                            // `controller::around_block_filter` itself,
+                            // unlike `Block` above: registered on THIS
+                            // controller (where the macro is called), same
+                            // as a hand-written one would be.
+                            MacroFilterItem::Around(filter, action) => {
+                                expanded.push(ControllerBodyItem::Filter {
+                                    filter,
+                                    leading_comments: std::mem::take(&mut comments),
+                                    leading_blank_line: std::mem::take(&mut blank),
+                                });
+                                expanded.push(ControllerBodyItem::Action {
+                                    action,
+                                    leading_comments: Vec::new(),
+                                    leading_blank_line: false,
                                 });
                             }
                         }
@@ -3583,6 +3659,23 @@ fn expand_class_body_macros(app: &mut App) -> IngestResult<()> {
                     } else {
                         return Err(err);
                     }
+                }
+                // A block-form `around_action` `controller::
+                // around_block_filter` recognized but refused — same
+                // always-record-and-keep-whole shape as `NotFilterDsl`
+                // just below (this macro call is one gap, not a hard
+                // ingest failure), but with that function's own specific
+                // reason instead of the generic message.
+                Err(MacroExpansionRefusal::AroundRefusal(reason)) => {
+                    survey::record(&IngestError::Unsupported {
+                        file: format!("{}", controller.name.0.as_str()),
+                        message: format!(
+                            "class-body macro not expanded: `{}` from {} holds an around_action block that {reason}",
+                            method.as_str(),
+                            module.0.as_str()
+                        ),
+                    });
+                    expanded.push(item);
                 }
                 Err(MacroExpansionRefusal::NotFilterDsl) => {
                     survey::record(&IngestError::Unsupported {
@@ -4292,6 +4385,16 @@ fn filter_from_send(
 enum MacroFilterItem {
     Filter(crate::dialect::Filter),
     Block(crate::expr::Expr),
+    /// A block-form `around_action` the macro body wraps, already fully
+    /// lowered by `controller::around_block_filter` — a named `Around`
+    /// filter plus the synthesized method it dispatches to. Unlike
+    /// `Block` (which rides the SAME later path a hand-written
+    /// `before_action { ... }` does, via `lambda_filter_target`),
+    /// `around_action`'s own lowering has no such shared path to defer
+    /// to: `is_lambda_filter_macro` excludes it on purpose (see that
+    /// function's doc comment), so this crate's one around-action
+    /// lowering is called here directly instead of being duplicated.
+    Around(crate::dialect::Filter, crate::dialect::Action),
 }
 
 /// Every statement of a (parameter-substituted) macro body, expanded to a
@@ -4356,6 +4459,14 @@ enum MacroExpansionRefusal {
     /// parameter, …) — those stay `NotFilterDsl`, same as before this
     /// variant existed.
     NextRestructure { method: crate::Symbol },
+    /// A block-form `around_action` statement `controller::
+    /// around_block_filter` recognized but refused — the continuation
+    /// used for something other than a bare `.call`, 3+ block params, or
+    /// an unrepresentable option. Carries that function's own `reason`
+    /// string verbatim, the same specific wording a hand-written
+    /// `around_action { ... }` refusal already surfaces, rather than
+    /// folding it into `NotFilterDsl`'s generic message.
+    AroundRefusal(String),
     /// Every other refusal this function already had: an unreducible
     /// local, a statement that's neither Symbol-target nor block-form
     /// filter DSL, one after the filter, or no filter at all.
@@ -4366,6 +4477,8 @@ fn expand_macro_filters(
     body: &crate::expr::Expr,
     module: &crate::ident::ClassId,
     param_names: &[crate::Symbol],
+    owner_ident: &str,
+    around_seq: &mut u32,
 ) -> Result<Vec<MacroFilterItem>, MacroExpansionRefusal> {
     use crate::expr::{ExprNode, LValue};
 
@@ -4456,6 +4569,36 @@ fn expand_macro_filters(
                 && super::controller::next_restructure_refusal(candidate)
             {
                 return Err(MacroExpansionRefusal::NextRestructure { method: method.clone() });
+            }
+            // `around_action`'s block form is excluded from `is_lambda_
+            // filter_macro` on purpose (see its doc comment): a
+            // before/after block inlines as a plain conditional
+            // statement, but an around has to run the rest of the
+            // filter chain from inside its own body, which that path
+            // can't express. `controller::around_block_filter` is the
+            // ONE lowering for that shape, reused here rather than
+            // duplicated — same refusals, same synthesized-method
+            // machinery, just reached through a macro's (already
+            // parameter-substituted) body instead of a controller's own
+            // source. `raw_text: None`: this statement came from the
+            // macro's IR, not from source text in THIS file, so the one
+            // check that reads source text (the `.()` sugar spelling —
+            // see `around_block_filter`'s doc comment) is skipped.
+            if method.as_str() == "around_action" {
+                match super::controller::around_block_filter(candidate, None, owner_ident, around_seq)
+                {
+                    Some(Ok((filter, action))) => {
+                        out.push(MacroFilterItem::Around(filter, action));
+                        seen_filter = true;
+                        continue;
+                    }
+                    Some(Err(reason)) => return Err(MacroExpansionRefusal::AroundRefusal(reason)),
+                    // Not actually this shape (shouldn't happen given the
+                    // `method.as_str() == "around_action"` check above) —
+                    // fall through to the generic refusal rather than
+                    // silently drop the statement.
+                    None => return Err(MacroExpansionRefusal::NotFilterDsl),
+                }
             }
         }
         if let Some(block) = block_filter_from_macro_stmt(candidate) {

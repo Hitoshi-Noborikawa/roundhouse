@@ -179,6 +179,10 @@ pub struct ClassInfo {
     pub table: Option<crate::ident::TableRef>,
     /// Instance-state shape (columns + attr_accessor).
     pub attributes: Row,
+    /// Attributes of `attributes` that the app's own `def` replaces. A
+    /// `def confidence` computes whatever it likes, so two reads of it need
+    /// not agree and a guard on one says nothing about the other.
+    pub overridden_attributes: std::collections::HashSet<Symbol>,
     /// Methods callable on the class itself: `Post.all`, `Post.find(id)`.
     pub class_methods: HashMap<Symbol, Ty>,
     /// Source declares its own class-side `new`, whose result need not be self.
@@ -600,6 +604,34 @@ impl<'a> BodyTyper<'a> {
             let Some(info) = self.classes.get(&cur) else { break };
             if let Some(ty) = info.attributes.fields.get(name) {
                 return Some(info.instance_methods.get(name).unwrap_or(ty).clone());
+            }
+            cursor = info.parent.clone();
+        }
+        None
+    }
+
+    /// The type of `local.attr` when that read is a stable attribute read:
+    /// `local` is bound to a record class, and `attr` is a schema column (or
+    /// `attr_accessor`) of it or of an ancestor, with no `def attr` of the
+    /// app's own along the way. Such a read is a plain state read, so two
+    /// reads with no write between them see the same value and a guard on
+    /// one speaks for the other. A user-defined `attr` may compute anything,
+    /// so it never qualifies.
+    fn member_attribute_ty(&self, local: &Symbol, attr: &Symbol, ctx: &Ctx) -> Option<Ty> {
+        let Some(Ty::Class { id, .. }) = ctx.local_bindings.get(local) else {
+            return None;
+        };
+        let mut cursor = Some(id.clone());
+        // Bounded: a parent link that cycles must not hang the typer.
+        for _ in 0..16 {
+            let cur = cursor?;
+            let info = self.classes.get(&cur)?;
+            if info.overridden_attributes.contains(attr) {
+                return None;
+            }
+            if let Some(field) = info.attributes.fields.get(attr) {
+                let ty = info.instance_methods.get(attr).unwrap_or(field);
+                return Some(ty.clone());
             }
             cursor = info.parent.clone();
         }
@@ -1108,16 +1140,21 @@ impl<'a> BodyTyper<'a> {
                 let mut seeded = ctx.clone();
                 collect_var_assignments_into(left, &mut seeded.local_bindings);
                 self.propagate_match_bindings(left, &mut seeded, true);
-                let pred = narrowing::extract_narrowing_with(left, &|n| self.self_attribute_ty(n, ctx));
-                let right_ctx = match (&pred, &*op) {
+                let reader = |n: &Symbol| self.self_attribute_ty(n, ctx);
+                let member = |l: &Symbol, a: &Symbol| self.member_attribute_ty(l, a, &seeded);
+                let pred = narrowing::extract_narrowing_with(left, &narrowing::Probe { reader: &reader, member: &member });
+                let mut right_ctx = match (&pred, &*op) {
                     (Some(p), crate::expr::BoolOpKind::And) => {
                         narrowing::apply_narrowing(&seeded, p, true)
                     }
                     (Some(p), crate::expr::BoolOpKind::Or) => {
                         narrowing::apply_narrowing(&seeded, p, false)
                     }
-                    _ => seeded,
+                    _ => seeded.clone(),
                 };
+                // A narrowed `x.attr` stays valid only while `x` is not
+                // rebound or written through between the guard and the use.
+                narrowing::drop_unstable_members(&mut right_ctx, &[&*left, &*right]);
                 let rt = self.analyze_expr(right, &right_ctx);
                 // Short-circuit: the result is either left (if it
                 // determined the short-circuit) or right — a union
@@ -1291,6 +1328,18 @@ impl<'a> BodyTyper<'a> {
                 if recv.is_none() && args.is_empty() && block.is_none() {
                     if let Some(ty) = ctx.local_bindings.get(method) {
                         return ty.clone();
+                    }
+                }
+                // `x.attr` under a guard that proved it non-nil (see
+                // `narrowing::VarKey::Member`): the same read, typed from the guard.
+                if args.is_empty() && block.is_none() {
+                    if let Some(r) = recv.as_mut() {
+                        if let ExprNode::Var { name, .. } = &*r.node {
+                            if let Some(ty) = ctx.local_bindings.get(&narrowing::member_key(name, method)).cloned() {
+                                self.analyze_expr(r, ctx);
+                                return ty;
+                            }
+                        }
                     }
                 }
                 // Bare-name Kernel calls (no explicit receiver). `require`,
@@ -1909,7 +1958,6 @@ impl<'a> BodyTyper<'a> {
 
             ExprNode::If { cond, then_branch, else_branch } => {
                 self.analyze_expr(cond, ctx);
-                let pred = narrowing::extract_narrowing_with(cond, &|n| self.self_attribute_ty(n, ctx));
                 // Var assignments inside `cond` (e.g.
                 // `if (user = User.find_by(...)) && user.is_active?`)
                 // must flow into both branches: the assignment
@@ -1928,15 +1976,20 @@ impl<'a> BodyTyper<'a> {
                     base.local_bindings.insert(k.clone(), v.clone());
                 }
                 self.propagate_match_bindings(cond, &mut base, true);
-                let then_ctx = match &pred {
+                let reader = |n: &Symbol| self.self_attribute_ty(n, ctx);
+                let member = |l: &Symbol, a: &Symbol| self.member_attribute_ty(l, a, &base);
+                let pred = narrowing::extract_narrowing_with(cond, &narrowing::Probe { reader: &reader, member: &member });
+                let mut then_ctx = match &pred {
                     Some(p) => narrowing::apply_narrowing(&base, p, true),
                     None => base.clone(),
                 };
+                narrowing::drop_unstable_members(&mut then_ctx, &[&*cond, &*then_branch]);
                 let t = self.analyze_expr(then_branch, &then_ctx);
-                let else_ctx = match &pred {
+                let mut else_ctx = match &pred {
                     Some(p) => narrowing::apply_narrowing(&base, p, false),
-                    None => base,
+                    None => base.clone(),
                 };
+                narrowing::drop_unstable_members(&mut else_ctx, &[&*cond, &*else_branch]);
                 let e = self.analyze_expr(else_branch, &else_ctx);
                 union_of(t, e)
             }
@@ -2454,7 +2507,7 @@ impl<'a> BodyTyper<'a> {
                             _ => false,
                         };
                         if then_diverges && else_empty {
-                            if let Some(pred) = narrowing::extract_narrowing_with(cond, &|n| self.self_attribute_ty(n, ctx)) {
+                            if let Some(pred) = narrowing::extract_narrowing_with(cond, &narrowing::Probe::without_members(&|n| self.self_attribute_ty(n, ctx))) {
                                 local_ctx = narrowing::apply_narrowing(&local_ctx, &pred, false);
                             }
                         }
@@ -2469,7 +2522,7 @@ impl<'a> BodyTyper<'a> {
                         };
                         let else_diverges = matches!(else_branch.ty.as_ref(), Some(Ty::Bottom));
                         if else_diverges && then_empty {
-                            if let Some(pred) = narrowing::extract_narrowing_with(cond, &|n| self.self_attribute_ty(n, ctx)) {
+                            if let Some(pred) = narrowing::extract_narrowing_with(cond, &narrowing::Probe::without_members(&|n| self.self_attribute_ty(n, ctx))) {
                                 local_ctx = narrowing::apply_narrowing(&local_ctx, &pred, true);
                             }
                         }
