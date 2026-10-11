@@ -363,13 +363,19 @@ fn untyped_subexpressions_baseline() {
     // #818 AssociationReflection + `reflect_on_association`: 578 -> 583,
     // MEASURED — initialize ivar writes and the name/assoc loop under
     // raw inference (no RBS on this probe).
+    // `Model.find_or_initialize_by` / `find_or_create_by` / `find_or_create_by!`
+    // and Relation's `find_or_initialize_by` / `find_or_create_by!`:
+    // 578 -> 592, MEASURED over that commit.
+    // Meta-PR #802 (exists? arity / where-seed / related Relation arms):
+    // 592 -> 603, MEASURED on tip 86936194's CI unit shard.
+    // Remount remeasure after #818 merge: 603 -> 608.
 
     // This uncalled API adds 27 nodes without its String parameter RBS.
     // Keep the existing-method ceiling and RBS-aware typing gates intact.
     const LIKE_CEILING: usize = 27;
     let existing_untyped = all_untyped.len() - like_untyped;
     eprintln!("inference-only ledger: existing={existing_untyped}, sanitize_sql_like={like_untyped}");
-    const CEILING: usize = 583;
+    const CEILING: usize = 608;
     assert!(
         existing_untyped <= CEILING && like_untyped <= LIKE_CEILING,
         "{} untyped sub-expressions on spinel-blog runtime — exceeds ledger: \
