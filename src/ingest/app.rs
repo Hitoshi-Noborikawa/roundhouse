@@ -27,7 +27,8 @@ use super::library_class::{
     ClassKind, ConcernClassMethodSpans, ConcernEnumDecl, classify_class_file,
     ingest_concern_class_method_spans, ingest_concern_filters,
     ingest_concern_included_redefs, ingest_concern_model_items_with_constants,
-    ingest_helper_method_names, ingest_library_classes, ingest_rails_application_singleton_methods,
+    ingest_helper_method_names, ingest_library_classes, ingest_nested_library_classes,
+    ingest_rails_application_singleton_methods,
 };
 use super::model::ingest_model_with_enum_constants;
 use super::routes::{EngineRouteSource, RouteHelperSource, ingest_routes_with_engines};
@@ -562,7 +563,7 @@ pub fn ingest_app_with_vfs<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResult
                             let outer = model.name.clone();
                             app.models.push(model);
                             if let Some(classes) =
-                                unwrap_or_record(ingest_library_classes(&source, &path_str))?
+                                unwrap_or_record(ingest_nested_library_classes(&source, &path_str))?
                             {
                                 let nested = nested_under(&outer, classes);
                                 let (concern_items, concern_enum_decls) =
