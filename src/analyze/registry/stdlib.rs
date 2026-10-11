@@ -574,8 +574,8 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
         "ThreadError", "ClosedQueueError",
         // CRuby's bundled libraries and Spinel's uri/net/json packages
         // recognize these exception names; emitted requires load them.
-        "URI::InvalidURIError", "Net::OpenTimeout", "Net::ReadTimeout",
-        "OpenSSL::OpenSSLError", "JSON::ParserError", "JSON::GeneratorError",
+        "URI::Error", "URI::InvalidURIError", "Net::OpenTimeout", "Net::ReadTimeout",
+        "SocketError", "OpenSSL::OpenSSLError", "JSON::ParserError", "JSON::GeneratorError",
         // Campfire tip: `rescue SystemCallError` / `OpenSSL::SSL::SSLError`
         // on pooled web-push connections; `rescue Vips::Error` beside
         // ActiveStorage::PreviewError when drawing attachment variants.
@@ -611,11 +611,15 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
         ("ActiveRecord::SoleRecordExceeded", None),
         // Not `ActiveRecord::Base`: no instance surface is registered there, so `e.record.errors` would still fail.
         ("ActiveRecord::RecordInvalid", Some(("record", Ty::Untyped))),
+        ("ActiveRecord::RecordNotSaved", Some(("record", Ty::Untyped))),
+        ("ActiveRecord::ReadOnlyRecord", None),
         // Names overlap `project::RUBY_FAMILY_RUNTIME_CONSTANTS` (emit
         // ledger). Keep extras here — inference needs the readers.
         ("ActionController::ParameterMissing", Some(("param", Ty::Str))),
         ("ActionController::UnpermittedParameters", None),
         ("ActionController::UnknownFormat", None),
+        ("ActionController::BadRequest", None),
+        ("ActionController::InvalidAuthenticityToken", None),
         ("ActionController::RoutingError", Some(("failures", Ty::Array { elem: Box::new(Ty::Str) }))),
         ("AbstractController::ActionNotFound", None),
     ] {
@@ -625,9 +629,27 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
         register_stdlib_class(classes, exc, &[], &methods);
     }
     // `ActiveModel::Type::Boolean.new.cast(v)`: nil for a blank value, else the boolean.
-    register_stdlib_class(classes, "ActiveModel::Type::Boolean", &[], &[
-        ("cast", Ty::Union { variants: vec![Ty::Bool, Ty::Nil] }),
-    ]);
+    // `ActiveSupport::TimeZone` is `runtime/ruby/active_support_ext.rb`'s port; `[]` is typed in dispatch, by its argument.
+    {
+        let zone = || Ty::Class { id: ClassId(Symbol::from("ActiveSupport::TimeZone")), args: vec![] };
+        register_stdlib_class(classes, "ActiveSupport::TimeZone", &[
+            ("all", Ty::Array { elem: Box::new(zone()) }),
+            ("lookup", Ty::Union { variants: vec![zone(), Ty::Nil] }),
+        ], &[
+            ("name", Ty::Str), ("utc_offset", Ty::Int), ("formatted_offset", Ty::Str),
+            ("to_s", Ty::Str), ("now", Ty::Time),
+        ]);
+    }
+    register_stdlib_class(classes, crate::analyze::indifferent::CLASS, &[], &[]);
+    // Not answered here beyond `new`: the dispatch arm for `ActiveSupport::StringInquirer` types its predicates and String surface.
+    register_stdlib_class(classes, "ActiveSupport::StringInquirer", &[("new", Ty::Str)], &[]);
+    // `ActiveRecord::Type::Boolean` is a subclass with the same casting; `deserialize` casts the same way for a boolean.
+    for name in ["ActiveModel::Type::Boolean", "ActiveRecord::Type::Boolean"] {
+        register_stdlib_class(classes, name, &[], &[
+            ("cast", Ty::Union { variants: vec![Ty::Bool, Ty::Nil] }),
+            ("deserialize", Ty::Union { variants: vec![Ty::Bool, Ty::Nil] }),
+        ]);
+    }
     // Not a typed store: a thread-local slot holds whatever the caller put there, so `[]` answers untyped.
     // `new` / `pass` / `kill` / `join` — `runtime/ruby/timeout.rb`'s wall-clock
     // port (Spinel lane) starts a worker and kills it past the deadline.

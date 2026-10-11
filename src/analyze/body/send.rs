@@ -351,6 +351,10 @@ impl<'a> BodyTyper<'a> {
             let array = Ty::Array { elem: Box::new(Ty::Int) };
             return self.block_ctx_for(outer, Some(&array), method, args, class_object_receiver, block);
         }
+        if let Some(value) = recv_ty.and_then(crate::analyze::indifferent::value_of) {
+            let hash = Ty::Hash { key: Box::new(Ty::Str), value: Box::new(value.clone()) };
+            return self.block_ctx_for(outer, Some(&hash), method, args, class_object_receiver, block);
+        }
         let mut new_ctx = outer.clone();
         // Required parameters come first, so the extra ones (optional,
         // keyword, keyword rest) leave their positions alone; the Lambda
@@ -1436,6 +1440,32 @@ impl<'a> BodyTyper<'a> {
                 if id.0.as_str() == "BigDecimal" {
                     return bigdecimal_method(method, call_args).unwrap_or_else(unknown);
                 }
+                if id.0.as_str() == crate::analyze::indifferent::CLASS {
+                    // Not `instance_receiver`: the bare `HashWithIndifferentAccess` alias is not marked a resolved class reference.
+                    let answer = if let Some(value) = args.first().cloned() {
+                        crate::analyze::indifferent::method_ty(&value, method.as_str(), call_args, block_ret, block_ret.is_some(), |m| {
+                            hash_method(&Symbol::from(m), &Ty::Str, &value, block_ret, call_args)
+                        })
+                    } else {
+                        match (method.as_str(), call_args) {
+                            ("new", []) => Some(crate::analyze::indifferent::of(Ty::Untyped)),
+                            ("new", [hash]) if block_ret.is_none() && crate::analyze::indifferent::constructor_args(call_args) => hash.ty.as_ref().and_then(crate::analyze::indifferent::from),
+                            _ => None,
+                        }
+                    };
+                    return answer.unwrap_or_else(unknown);
+                }
+                // Not Rails' numeric or TZInfo lookups: only a zone NAME reaches the runtime port's `lookup`.
+                if id.0.as_str() == "ActiveSupport::TimeZone" && method.as_str() == "[]" {
+                    return match call_args {
+                        [name] if matches!(name.ty.as_ref(), Some(Ty::Str | Ty::Var { .. }))
+                            || matches!(name.ty.as_ref(), Some(Ty::Union { variants }) if variants.iter().all(|t| matches!(t, Ty::Str | Ty::Nil))) =>
+                        {
+                            Ty::Union { variants: vec![Ty::Class { id: id.clone(), args: vec![] }, Ty::Nil] }
+                        }
+                        _ => unknown(),
+                    };
+                }
                 if id.0.as_str() == "Jbuilder" {
                     return match method.as_str() {
                         "array!" => Ty::Array { elem: Box::new(Ty::Untyped) },
@@ -1667,6 +1697,10 @@ impl<'a> BodyTyper<'a> {
                 // inquiry; everything else dispatches as a String
                 // (`==`/interpolation/`upcase`/`to_sym` all work).
                 if id.0.as_str() == "ActiveSupport::StringInquirer" {
+                    // Not an inquirer instance: `lower::inquiry` reads `new(x)` as `x`, the String it compares.
+                    if method.as_str() == "new" && call_args.len() == 1 {
+                        return Ty::Str;
+                    }
                     if method.as_str().ends_with('?') {
                         return Ty::Bool;
                     }
@@ -2090,6 +2124,10 @@ impl<'a> BodyTyper<'a> {
             // uses. Unmodeled methods fall back to `unknown()` (an
             // inference gap) rather than the parent-chain walk — `Time`
             // has no user-defined ancestors in this corpus.
+            // Not Rails' `formatted_offset(colon, alternate_utc_string)`: only the bare form lowers.
+            Some(Ty::Time) if method.as_str() == "formatted_offset" => {
+                if args.is_empty() { Ty::Str } else { unknown() }
+            }
             Some(Ty::Time) => time_method(method).unwrap_or_else(unknown),
             Some(Ty::Date) => date_method(method, args).unwrap_or_else(unknown),
             // `Integer#in_time_zone` lowers only for ≤1 arg (invariant 6).
@@ -2408,7 +2446,7 @@ pub(super) fn time_method(method: &Symbol) -> Option<Ty> {
         // Integer components / epoch seconds / spaceship.
         "to_i" | "tv_sec" | "tv_usec" | "tv_nsec" | "year" | "month" | "mon"
         | "day" | "mday" | "hour" | "min" | "sec" | "usec" | "nsec"
-        | "wday" | "yday" | "<=>" => Ty::Int,
+        | "wday" | "yday" | "<=>" | "utc_offset" | "gmt_offset" | "gmtoff" => Ty::Int,
         "to_f" => Ty::Float,
         // Predicates / comparisons that read as method calls.
         // `==`/`!=` are handled by `universal_method` (checked before
@@ -3090,8 +3128,13 @@ pub(super) fn hash_method(
             key: Box::new(Ty::Sym),
             value: Box::new(value.clone()),
         },
+        "with_indifferent_access" if args.is_empty() => crate::analyze::indifferent::from(&Ty::Hash {
+            key: Box::new(key.clone()),
+            value: Box::new(value.clone()),
+        })
+        .unwrap_or_else(unknown),
         "stringify_keys" | "deep_stringify_keys" | "stringify_keys!"
-        | "deep_stringify_keys!" | "with_indifferent_access" => Ty::Hash {
+        | "deep_stringify_keys!" => Ty::Hash {
             key: Box::new(Ty::Str),
             value: Box::new(value.clone()),
         },
