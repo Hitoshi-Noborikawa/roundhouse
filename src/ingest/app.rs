@@ -3061,6 +3061,15 @@ const CONSUMED_CONTROLLER_MACROS: &[&str] = &[
     // this generic one — see those functions' doc comments.
     "alias_method",
     "undef_method",
+    // `with_options(kw) do … end` — `ingest::controller::
+    // ingest_controller_with_options` claims every one of these at
+    // ingest time, before this scan ever runs: composed, it folds into
+    // the `Filter`/other body items its block held and never becomes an
+    // `Unknown` at all; declined, it stays `Unknown` WITH its own
+    // specific "with_options: …" gap already recorded (ALL-OR-NOTHING —
+    // see that function's doc comment). Either way this generic bucket
+    // (and the block-shaped one just below) would only double it.
+    "with_options",
 ];
 
 /// `using SomeRefinement` — Ruby's block-scoped monkey-patch

@@ -274,6 +274,57 @@ pub(super) fn ingest_controller_with_nesting(
                     }
                 }
             }
+            // `with_options unless: :signed_in? do before_action …; end` —
+            // composed the same way `config/routes.rb`'s `with_options`
+            // is: every receiverless, block-free call inside gets the
+            // options merged into its own (the call's keys win), then is
+            // ingested as if it had been spelled that way. ALL-OR-NOTHING,
+            // same reasoning `expand_class_body_macros` documents for a
+            // concern macro's own body: a with_options block with one
+            // statement this can't compose stays `Unknown`, WHOLE, and
+            // round-trips verbatim — partially composing it would drop
+            // just that one statement's filter silently, the very bug
+            // this fix exists for, so a decline anywhere inside declines
+            // the whole statement rather than the one call. Recorded as a
+            // located survey gap, never a silent drop — see
+            // `ingest_controller_with_options`. `with_options` is in
+            // `CONSUMED_CONTROLLER_MACROS` so a declined block doesn't
+            // ALSO earn the generic "class-body block not recognized"
+            // gap on top of this one's specific reason.
+            if is_with_options_call(&stmt) {
+                let call = stmt.as_call_node().expect("is_with_options_call checked");
+                let expr = match ingest_expr(&stmt, file) {
+                    Ok(expr) => expr,
+                    Err(err) if super::survey::is_active() => {
+                        super::survey::record(&err);
+                        prev_end = Some(stmt.location().end_offset());
+                        continue;
+                    }
+                    Err(err) => return Err(err),
+                };
+                match ingest_controller_with_options(&call, &[], file) {
+                    Ok(items) => {
+                        for (i, mut item) in items.into_iter().enumerate() {
+                            if i == 0 {
+                                *item.leading_comments_mut() = std::mem::take(&mut leading);
+                                item.set_leading_blank_line(leading_blank);
+                            }
+                            body_items.push(item);
+                        }
+                    }
+                    Err(err) if super::survey::is_active() => {
+                        super::survey::record(&err);
+                        body_items.push(ControllerBodyItem::Unknown {
+                            expr,
+                            leading_comments: std::mem::take(&mut leading),
+                            leading_blank_line: leading_blank,
+                        });
+                    }
+                    Err(err) => return Err(err),
+                }
+                prev_end = Some(stmt.location().end_offset());
+                continue;
+            }
             // Class-side methods: `def self.x`, and every `def` in a
             // `class << self`. They are methods of the controller CLASS,
             // not actions — read as actions (as a `def self.x` used to
@@ -880,6 +931,323 @@ fn parse_forgery_macro(
         block: None,
         prepend: false,
     }])
+}
+
+/// `with_options`, receiverless, no receiver qualification — the shape
+/// `ingest_controller_with_options` composes. Checked ahead of time so
+/// the caller can get the `CallNode` back out without re-matching.
+fn is_with_options_call(stmt: &Node<'_>) -> bool {
+    stmt.as_call_node()
+        .is_some_and(|call| call.receiver().is_none() && constant_id_str(&call.name()) == "with_options")
+}
+
+/// One option a controller-body `with_options` block hands to the calls
+/// inside it: the symbol key, the source of its `key: value` pair,
+/// whether the value is a hash literal (the one case `deep_merge` would
+/// combine), and — for an `if:`/`unless:` key only — whether the value is
+/// a shape [`Filter`](crate::dialect::Filter) can carry (a Symbol or a
+/// lambda/proc). Anything else under `if:`/`unless:` (an Array, say)
+/// would reach `parse_filter_call` and have its condition silently
+/// dropped, so it is checked here instead and declined.
+#[derive(Clone)]
+struct MergedFilterOption {
+    key: String,
+    source: String,
+    hash_value: bool,
+    cond_ok: bool,
+}
+
+fn with_options_gap(file: &str, detail: &str) -> IngestError {
+    IngestError::Unsupported {
+        file: file.into(),
+        message: format!("with_options: {detail}"),
+    }
+}
+
+/// Whether `node` is a shape `Filter.if_cond`/`unless_cond` (Symbol) or
+/// `.if_cond_expr`/`.unless_cond_expr` (lambda/proc body) can hold —
+/// the same two spellings `parse_filter_call` itself recognizes for
+/// `if:`/`unless:` (see `lambda_body_expr`).
+fn is_recognized_cond_value(node: &Node<'_>) -> bool {
+    if node.as_symbol_node().is_some() || node.as_lambda_node().is_some() {
+        return true;
+    }
+    node.as_call_node().is_some_and(|call| {
+        matches!(constant_id_str(&call.name()), "proc" | "lambda") && call.block().is_some()
+    })
+}
+
+/// The `key: value` pairs of a literal option hash, or `None` when the
+/// hash splats (`**opts`): its keys are then unknown. A non-symbol key is
+/// `None` under `symbol_keys_only`, and otherwise skipped (a call's own
+/// string-keyed pair never collides with a merged symbol key).
+fn literal_filter_option_pairs(
+    node: &Node<'_>,
+    symbol_keys_only: bool,
+) -> Option<Vec<MergedFilterOption>> {
+    let elements = if let Some(hash) = node.as_keyword_hash_node() {
+        hash.elements()
+    } else {
+        node.as_hash_node()?.elements()
+    };
+    let mut pairs = Vec::new();
+    for element in elements.iter() {
+        let assoc = element.as_assoc_node()?;
+        let Some(key) = symbol_value(&assoc.key()) else {
+            if symbol_keys_only {
+                return None;
+            }
+            continue;
+        };
+        let location = assoc.location();
+        let value = assoc.value();
+        pairs.push(MergedFilterOption {
+            cond_ok: !matches!(key.as_str(), "if" | "unless") || is_recognized_cond_value(&value),
+            key,
+            source: String::from_utf8_lossy(location.as_slice()).into_owned(),
+            hash_value: value.as_hash_node().is_some() || value.as_keyword_hash_node().is_some(),
+        });
+    }
+    Some(pairs)
+}
+
+/// `inner` deep-merged over `outer`, as `Hash#deep_merge` orders it: an
+/// inner key replaces the outer one in place, new keys follow. Two hash
+/// values under one key would be merged key by key; that is declined
+/// rather than guessed — same semantics `config/routes.rb`'s
+/// `with_options` composes under (`ingest/routes.rs`).
+fn deep_merge_filter_options(
+    outer: &[MergedFilterOption],
+    inner: Vec<MergedFilterOption>,
+    file: &str,
+) -> IngestResult<Vec<MergedFilterOption>> {
+    let mut merged = outer.to_vec();
+    for option in inner {
+        match merged.iter_mut().find(|o| o.key == option.key) {
+            Some(existing) if existing.hash_value && option.hash_value => {
+                return Err(with_options_gap(
+                    file,
+                    &format!("deep-merging two hashes under `{}:` is not composed", option.key),
+                ));
+            }
+            Some(existing) => *existing = option,
+            None => merged.push(option),
+        }
+    }
+    Ok(merged)
+}
+
+/// `with_options unless: :signed_in? do before_action :reject_paging, if:
+/// :paging? … end` — ActiveSupport's `Object#with_options`. A block
+/// without parameters is `instance_eval`ed on an `OptionMerger`, which
+/// deep-merges the options into the trailing hash of every call it
+/// receives (the call's own keys win) or appends them as keywords when
+/// there is none. Replayed here exactly as `config/routes.rb`'s
+/// `with_options` is (`ingest_with_options` in `ingest/routes.rs`): each
+/// call is re-read with the merged options written into its source,
+/// keeping its byte offsets, and ingested as if it had been spelled that
+/// way — a filter macro through `parse_filter_call`, anything else
+/// through the general controller body item dispatch.
+///
+/// Declined as a located gap (never a silent drop): a block parameter
+/// (`do |o|`), a non-literal or splatted option hash, a child call with
+/// its own block (the block's closure still sees the merger as `self`,
+/// so Rails merges the options into the calls nested in it too — a
+/// fan-out this replay does not model), a receiver-qualified call or a
+/// non-call statement, and a merged `if:`/`unless:` whose value is
+/// neither a Symbol nor a lambda/proc. Nested `with_options` compose.
+///
+/// ALL-OR-NOTHING: unlike `config/routes.rb`'s `with_options` (which
+/// drops just the one route it can't compose and keeps the rest), a
+/// decline anywhere inside — including a nested `with_options` — fails
+/// every statement in THIS call's block, propagated with `?` rather than
+/// caught and skipped per statement. A controller filter that silently
+/// lost its guard because a SIBLING statement in the same block was
+/// unsupported would be the #785 bug again, one level down; the caller
+/// (`ingest_controller_with_nesting`) is the one place this bubbles up
+/// to and turns into a single gap plus a single whole-statement
+/// `Unknown` round-trip — matching `expand_class_body_macros`'s own
+/// ALL-OR-NOTHING reasoning for a concern macro's body.
+fn ingest_controller_with_options(
+    call: &ruby_prism::CallNode<'_>,
+    outer: &[MergedFilterOption],
+    file: &str,
+) -> IngestResult<Vec<ControllerBodyItem>> {
+    let Some(block) = call.block().and_then(|b| b.as_block_node()) else {
+        return Err(with_options_gap(file, "only the block form is composed"));
+    };
+    if block.parameters().is_some() {
+        return Err(with_options_gap(
+            file,
+            "a block with a parameter (`|options|`) is not composed",
+        ));
+    }
+    let args: Vec<Node<'_>> = call
+        .arguments()
+        .map(|a| a.arguments().iter().collect())
+        .unwrap_or_default();
+    let [options] = args.as_slice() else {
+        return Err(with_options_gap(file, "expects exactly one literal option hash"));
+    };
+    let Some(own) = literal_filter_option_pairs(options, true) else {
+        return Err(with_options_gap(
+            file,
+            "options must be a literal hash with symbol keys and no splat",
+        ));
+    };
+    let merged = deep_merge_filter_options(outer, own, file)?;
+    let Some(body) = block.body() else { return Ok(Vec::new()) };
+
+    let mut items = Vec::new();
+    for stmt in flatten_statements(body) {
+        let inner = match stmt.as_call_node() {
+            Some(inner)
+                if inner.receiver().is_none()
+                    && constant_id_str(&inner.name()) == "with_options" =>
+            {
+                ingest_controller_with_options(&inner, &merged, file)?
+            }
+            Some(inner) if inner.receiver().is_none() && inner.block().is_none() => {
+                ingest_with_options_filter_call(&inner, &merged, file)?
+            }
+            Some(inner) if inner.receiver().is_none() => {
+                return Err(with_options_gap(
+                    file,
+                    &format!(
+                        "`{}` with a block is not composed (Rails merges the options into its nested calls too)",
+                        constant_id_str(&inner.name())
+                    ),
+                ));
+            }
+            _ => {
+                return Err(with_options_gap(
+                    file,
+                    "only receiverless calls inside the block are composed",
+                ));
+            }
+        };
+        items.extend(inner);
+    }
+    Ok(items)
+}
+
+/// One call inside a controller-body `with_options` block, re-read with
+/// `options` merged into its trailing hash, then ingested as if it had
+/// been spelled that way — a filter macro through `parse_filter_call`
+/// first (the common case), falling back to the general controller body
+/// item dispatch otherwise (a lambda-target filter, `rescue_from`,
+/// `helper_method`, …).
+fn ingest_with_options_filter_call(
+    call: &ruby_prism::CallNode<'_>,
+    options: &[MergedFilterOption],
+    file: &str,
+) -> IngestResult<Vec<ControllerBodyItem>> {
+    let args: Vec<Node<'_>> = call
+        .arguments()
+        .map(|a| a.arguments().iter().collect())
+        .unwrap_or_default();
+    if let [only] = args.as_slice() {
+        if only.as_lambda_node().is_some() {
+            return Err(with_options_gap(
+                file,
+                "a call whose only argument is a lambda is not composed",
+            ));
+        }
+    }
+    // A braced positional hash (`before_action :a, { if: :b }`) is not
+    // read as options by `parse_filter_call`, so merging into it would
+    // claim a condition that never reaches the filter.
+    if args.last().is_some_and(|a| a.as_hash_node().is_some()) {
+        return Err(with_options_gap(file, "a positional option hash is not composed"));
+    }
+    let trailing = args.last().filter(|a| a.as_keyword_hash_node().is_some());
+    let own = match trailing {
+        Some(hash) => match literal_filter_option_pairs(hash, false) {
+            Some(pairs) => pairs,
+            None => {
+                return Err(with_options_gap(
+                    file,
+                    "a call whose options splat (`**opts`) is not composed",
+                ));
+            }
+        },
+        None => Vec::new(),
+    };
+    let mut added: Vec<&MergedFilterOption> = Vec::new();
+    for option in options {
+        match own.iter().find(|o| o.key == option.key) {
+            Some(existing) if existing.hash_value && option.hash_value => {
+                return Err(with_options_gap(
+                    file,
+                    &format!("deep-merging two hashes under `{}:` is not composed", option.key),
+                ));
+            }
+            Some(_) => {}
+            None => added.push(option),
+        }
+    }
+    // Reject rather than silently drop a merged `if:`/`unless:` guard
+    // `Filter` cannot carry (an Array, say) — checked over the FINAL
+    // per-call set (the call's own values already took precedence
+    // above), so an outer condition the call's own options shadow never
+    // raises.
+    for option in own.iter().chain(added.iter().copied()) {
+        if matches!(option.key.as_str(), "if" | "unless") && !option.cond_ok {
+            return Err(with_options_gap(
+                file,
+                &format!(
+                    "a merged `{}:` that is not a Symbol or a lambda/proc is not composed",
+                    option.key
+                ),
+            ));
+        }
+    }
+
+    let walk = |stmt: Node<'_>| -> IngestResult<Vec<ControllerBodyItem>> {
+        match parse_filter_call(&stmt, file) {
+            Some(filters) => Ok(filters
+                .into_iter()
+                .map(|filter| ControllerBodyItem::Filter {
+                    filter,
+                    leading_comments: Vec::new(),
+                    leading_blank_line: false,
+                })
+                .collect()),
+            None => Ok(vec![ingest_controller_body_item(&stmt, file, Vec::new())?]),
+        }
+    };
+    if added.is_empty() {
+        return walk(call.as_node());
+    }
+    let added_src = added.iter().map(|o| o.source.as_str()).collect::<Vec<_>>().join(", ");
+    let (offset, text) = match args.last() {
+        Some(last) => (last.location().end_offset(), format!(", {added_src}")),
+        None => match call.closing_loc() {
+            Some(close) => (close.start_offset(), added_src),
+            None => match call.message_loc() {
+                Some(name) => (name.end_offset(), format!(" {added_src}")),
+                None => return Err(with_options_gap(file, "call has no name to merge into")),
+            },
+        },
+    };
+    let location = call.location();
+    let start = location.start_offset();
+    let original = location.as_slice();
+    // Pad to the call's own offset so diagnostics still point into the
+    // controller file; only what follows the insertion point shifts.
+    let mut source = vec![b' '; start];
+    source.extend_from_slice(&original[..offset - start]);
+    source.extend_from_slice(text.as_bytes());
+    source.extend_from_slice(&original[offset - start..]);
+    let result = super::prism::parse(&source, file);
+    let root = result.node();
+    let Some(stmt) = root
+        .as_program_node()
+        .and_then(|p| p.statements().body().iter().next())
+    else {
+        return Err(with_options_gap(file, "merged call did not re-parse"));
+    };
+    walk(stmt)
 }
 
 /// Body expression of a lambda/proc-form filter guard (`-> { … }` /
