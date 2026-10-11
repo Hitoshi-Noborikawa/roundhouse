@@ -113,40 +113,86 @@ impl OwnerIndex {
         Self { parents, includes, children, includers, defined }
     }
 
-    /// The definition a call on `side` of `class` reaches, in Ruby's
-    /// order: the class, the modules it includes (last included first),
-    /// then the superclass. `None` when that definition took no
-    /// flattened keywords, or no library class defines the name.
-    fn lookup(&self, class: &str, side: Side, method: &Symbol) -> Option<&Vec<Slot>> {
-        let mut current = class.to_string();
-        let mut seen = HashSet::new();
-        while seen.insert(current.clone()) {
-            if let Some(found) = self.own_or_included(&current, side, method) {
-                return found;
+    /// `class`'s ancestors on `side`, in Ruby's method lookup order: the
+    /// class, then each included module (last included first) followed
+    /// by that module's own includes, recursively, then the superclass
+    /// chain. Class-side lookup does not go through `include`. A name met
+    /// twice is kept at every position, so `resolve` can see the
+    /// ambiguity rather than guess which one Ruby's de-duplication keeps.
+    fn ancestors(&self, class: &str, side: Side) -> Result<Vec<String>, ()> {
+        fn with_includes(
+            index: &OwnerIndex,
+            module: &str,
+            side: Side,
+            path: &mut Vec<String>,
+            out: &mut Vec<String>,
+        ) -> Result<(), ()> {
+            if path.iter().any(|p| p == module) {
+                return Err(());
             }
-            current = self.parents.get(&current)?.clone();
+            out.push(module.to_string());
+            if side == Side::Instance {
+                path.push(module.to_string());
+                for m in index.includes.get(module).into_iter().flatten().rev() {
+                    with_includes(index, m, side, path, out)?;
+                }
+                path.pop();
+            }
+            Ok(())
         }
-        None
+        let mut out = Vec::new();
+        let mut current = Some(class.to_string());
+        let mut chain = HashSet::new();
+        while let Some(c) = current {
+            if !chain.insert(c.clone()) {
+                return Err(());
+            }
+            with_includes(self, &c, side, &mut Vec::new(), &mut out)?;
+            current = self.parents.get(&c).cloned();
+        }
+        Ok(out)
     }
 
-    /// `class`'s own definition, else an included module's.
-    fn own_or_included(&self, class: &str, side: Side, method: &Symbol) -> Option<Option<&Vec<Slot>>> {
-        if let Some(found) = self.defined.get(&(class.to_string(), side, method.clone())) {
-            return Some(found.as_ref());
+    /// The definition a call on `side` of `class` reaches.
+    fn resolve(&self, class: &str, side: Side, method: &Symbol) -> Resolved<'_> {
+        let Ok(ancestors) = self.ancestors(class, side) else {
+            return Resolved::Ambiguous;
+        };
+        let key = |c: &String| (c.clone(), side, method.clone());
+        let Some(first) = ancestors.iter().position(|c| self.defined.contains_key(&key(c))) else {
+            return Resolved::Missing;
+        };
+        // A module reachable at two positions in the chain: Ruby keeps
+        // one, and which one decides the binding when it defines the name.
+        let mut seen = HashSet::new();
+        if ancestors
+            .iter()
+            .filter(|c| !seen.insert(*c))
+            .any(|c| self.defined.contains_key(&key(c)))
+        {
+            return Resolved::Ambiguous;
         }
-        if side != Side::Instance {
-            return None;
+        match self.defined.get(&key(&ancestors[first])) {
+            Some(Some(slots)) => Resolved::Flattened(slots),
+            _ => Resolved::Unflattened,
         }
-        self.includes.get(class)?.iter().rev().find_map(|m| {
-            self.defined
-                .get(&(m.clone(), side, method.clone()))
-                .map(Option::as_ref)
-        })
+    }
+
+    /// The flattened slots a call on `side` of `class` reaches: `Ok(None)`
+    /// for a definition that took no flattened keywords (or none known),
+    /// `Err` when the lookup cannot be resolved statically.
+    pub(super) fn lookup(&self, class: &str, side: Side, method: &Symbol) -> Result<Option<&Vec<Slot>>, ()> {
+        match self.resolve(class, side, method) {
+            Resolved::Flattened(slots) => Ok(Some(slots)),
+            Resolved::Unflattened | Resolved::Missing => Ok(None),
+            Resolved::Ambiguous => Err(()),
+        }
     }
 
     /// The definition `method` resolves to on every class or module that
     /// can be `self` in `class`'s body: its subclasses and its includers,
-    /// and theirs, transitively.
+    /// and theirs, transitively, each resolved through its own full
+    /// ancestry. `None` stands for one that cannot be respelled.
     fn overrides(&self, class: &str, side: Side, method: &Symbol) -> Vec<Option<&Vec<Slot>>> {
         let below = |c: &str| {
             let mut next = self.children.get(c).cloned().unwrap_or_default();
@@ -162,13 +208,22 @@ impl OwnerIndex {
             if !seen.insert(c.clone()) {
                 continue;
             }
-            if let Some(found) = self.own_or_included(&c, side, method) {
-                out.push(found);
+            match self.resolve(&c, side, method) {
+                Resolved::Flattened(slots) => out.push(Some(slots)),
+                Resolved::Unflattened | Resolved::Ambiguous => out.push(None),
+                Resolved::Missing => {}
             }
             stack.extend(below(&c));
         }
         out
     }
+}
+
+enum Resolved<'a> {
+    Flattened(&'a Vec<Slot>),
+    Unflattened,
+    Missing,
+    Ambiguous,
 }
 
 /// `name` as written inside `owner`, resolved against the library
@@ -240,9 +295,12 @@ pub(super) fn refuse_library_class_splats(
         e.node.for_each_child(&mut |c| walk(c, owner, side, index, diagnostics));
         let ExprNode::Send { recv, method, args, .. } = &*e.node else { return };
         let Some(side) = owner_side(recv, side) else { return };
-        if let Some(slots) = index.lookup(owner, side, method)
-            && super::splat_into_flattened(args, slots)
-        {
+        let refused = match index.lookup(owner, side, method) {
+            Ok(Some(slots)) => super::splat_into_flattened(args, slots),
+            Ok(None) => false,
+            Err(()) => super::carries_splat(args),
+        };
+        if refused {
             super::refuse(e.span, super::SPLAT_REFUSAL, diagnostics);
         }
     }
@@ -275,6 +333,8 @@ pub(super) fn rewrite_library_classes(
 
 const SEND_METHODS: &[&str] = &["send", "public_send", "__send__"];
 
+const AMBIGUOUS: &str = "the method this call reaches cannot be resolved statically (an include cycle, or a module reachable twice that defines it), so its keyword slots are not known";
+
 fn rewrite(
     e: &mut Expr,
     owner: &str,
@@ -299,13 +359,20 @@ fn rewrite_node(
     };
     let Some(side) = owner_side(recv, side) else { return };
     if SEND_METHODS.contains(&method.as_str()) {
-        refuse_send(span, args, |name| index.lookup(owner, side, name), diagnostics);
+        refuse_send(span, args, |name| !matches!(index.lookup(owner, side, name), Ok(None)), diagnostics);
         return;
     }
     if !super::carries_keywords(args) {
         return;
     }
-    let Some(slots) = index.lookup(owner, side, method) else { return };
+    let slots = match index.lookup(owner, side, method) {
+        Ok(Some(slots)) => slots,
+        Ok(None) => return,
+        Err(()) => {
+            super::refuse(span, AMBIGUOUS, diagnostics);
+            return;
+        }
+    };
     let mut respelled = args.clone();
     if let Err(reason) = super::respell(&mut respelled, slots, true) {
         super::refuse(span, reason, diagnostics);
@@ -331,10 +398,10 @@ fn rewrite_node(
 /// flattened: the dispatch is dynamic, so the call is not moved; it is
 /// refused when the name is a literal naming such a method, which is
 /// the one case where it is known to bind wrongly.
-pub(super) fn refuse_send<'a>(
+pub(super) fn refuse_send(
     span: crate::span::Span,
     args: &[Expr],
-    lookup: impl Fn(&Symbol) -> Option<&'a Vec<Slot>>,
+    flattened: impl Fn(&Symbol) -> bool,
     diagnostics: &mut Vec<crate::diagnostic::Diagnostic>,
 ) {
     let Some(first) = args.first() else { return };
@@ -344,7 +411,7 @@ pub(super) fn refuse_send<'a>(
     if !super::carries_keywords(&args[1..]) {
         return;
     }
-    if lookup(name).is_some() {
+    if flattened(name) {
         super::refuse(
             span,
             "keywords passed through `send` to a method whose optional keywords are positional slots",

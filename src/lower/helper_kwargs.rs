@@ -211,7 +211,7 @@ fn rewrite_class_calls_node(
         .collect::<Vec<_>>()
         .join("::");
     if SEND_METHODS.contains(&method.as_str()) {
-        owned::refuse_send(e.span, args, |name| params.get(&(class.clone(), name.clone())), diagnostics);
+        owned::refuse_send(e.span, args, |name| params.contains_key(&(class.clone(), name.clone())), diagnostics);
         return;
     }
     let Some(slots) = params.get(&(class.clone(), method.clone())) else {
@@ -271,9 +271,8 @@ fn refuse_typed_splats(
     }
 }
 
-/// A `**` argument aimed at flattened optional keywords with no
-/// flattened `**rest` beside them.
-fn splat_into_flattened(args: &[Expr], slots: &[Slot]) -> bool {
+/// Whether a call passes a `**` bundle.
+fn carries_splat(args: &[Expr]) -> bool {
     args.iter().any(|arg| {
         matches!(
             &*arg.node,
@@ -281,7 +280,13 @@ fn splat_into_flattened(args: &[Expr], slots: &[Slot]) -> bool {
                 | ExprNode::ForwardKeywords
                 | ExprNode::ForwardKeywordsWithPairs { .. }
         )
-    }) && slots.iter().any(|s| s.from_keyword)
+    })
+}
+
+/// A `**` argument aimed at flattened optional keywords with no
+/// flattened `**rest` beside them.
+fn splat_into_flattened(args: &[Expr], slots: &[Slot]) -> bool {
+    carries_splat(args) && slots.iter().any(|s| s.from_keyword)
         && !slots.iter().any(|s| s.from_kwrest)
 }
 

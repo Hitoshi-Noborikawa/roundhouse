@@ -310,3 +310,45 @@ end
         "not refused; errors: {errors:#?}"
     );
 }
+
+/// Ruby resolves `field` through each included module's own includes:
+/// `Gadget.ancestors` is `[Gadget, Inner, Patch, Fields]`, so `self.field`
+/// in `Fields#add` on a `Gadget` reaches `Patch#field`, which `Inner`
+/// brings in without defining it. Its slots differ, so the call is
+/// refused rather than moved into `Fields#field`'s slots.
+#[test]
+fn a_nested_include_redefinition_with_other_slots_is_refused() {
+    const FIELDS: &str = r##"module Kwlab
+  module Fields
+    def field(name, type = nil, null: true, description: nil)
+      [name, type, null, description]
+    end
+
+    def add(name)
+      field(name, description: "module")
+    end
+  end
+end
+"##;
+    const PATCH: &str = r##"module Kwlab
+  module Patch
+    def field(name, description: nil, null: true)
+      [name, description, null]
+    end
+  end
+end
+"##;
+    const INNER: &str =
+        "module Kwlab\n  module Inner\n    include Patch\n\n    def marker\n      :inner\n    end\n  end\nend\n";
+    const GADGET: &str = "module Kwlab\n  class Gadget\n    include Fields\n    include Inner\n  end\nend\n";
+    let (_emitted, errors) = emit_and_run::real_blog()
+        .write("app/lib/kwlab/fields.rb", FIELDS)
+        .write("app/lib/kwlab/patch.rb", PATCH)
+        .write("app/lib/kwlab/inner.rb", INNER)
+        .write("app/lib/kwlab/gadget.rb", GADGET)
+        .emit(BuildTarget::Ruby);
+    assert!(
+        errors.iter().any(|e| e.contains("a subclass or includer redefines this method")),
+        "not refused; errors: {errors:#?}"
+    );
+}

@@ -417,7 +417,7 @@ fn rewrite_instance_call(
         super::owned::refuse_send(
             expr.span,
             args,
-            |name| params.slots.get(&(class_id.clone(), name.clone())),
+            |name| params.slots.contains_key(&(class_id.clone(), name.clone())),
             diagnostics,
         );
         return;
