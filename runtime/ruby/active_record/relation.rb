@@ -175,20 +175,21 @@ module ActiveRecord
     end
 
     # `where(hash)` / `where("raw sql")` / `where("a = ? AND b = ?", x, y)`.
+    # A hash of seedable equality predicates also feeds `scope_for_create`
+    # (Rails' `where_values_hash`), so `rel.where(account_id: 7).
+    # find_or_initialize_by(name: "A")` builds a record carrying
+    # `account_id`. Non-seedable values (arrays, ranges, nested hashes,
+    # relations, qualified keys) filter only.
     def where(condition = nil, *args)
+      merge_seedable_scope(condition) if condition.is_a?(Hash)
       add_condition(condition, args, false)
       self
     end
 
     # An association's scope: `where(fk => owner.id)` that ALSO presets
-    # what a `create` through this relation writes.
-    #
-    # Rails derives both from the same place — a relation's equality
-    # conditions filter reads (`where_values_hash`) and seed writes
-    # (`scope_for_create`), which is why `user.sessions.create!(…)`
-    # comes back with `user_id` set without anybody naming it. Only the
-    # compiler's association seed calls this, so the ordinary `where`
-    # stays a pure filter and pays nothing for the extra bookkeeping.
+    # what a `create` through this relation writes. The compiler's
+    # association seed uses this so the FK is recorded even when the
+    # ordinary `where` path would refuse it as non-seedable.
     def where_scope(condition)
       @scope_attributes = condition
       add_condition(condition, [], false)
@@ -201,8 +202,21 @@ module ActiveRecord
       @scope_attributes
     end
 
+    # Equality predicates from `where(hash)` that a new record can carry.
+    # Later keys win. Arrays / ranges / nested hashes / relations and
+    # qualified `table.col` keys are filters only.
+    def merge_seedable_scope(hash)
+      own_lists
+      hash.each do |key, val|
+        next if val.is_a?(Hash) || val.is_a?(Array) || val.is_a?(Relation) || val.is_a?(Range)
+        name = key.is_a?(Symbol) ? key.to_s : key.to_s
+        next if name.include?(".")
+        @scope_attributes = @scope_attributes.merge({ name.to_sym => val })
+      end
+    end
+
     # `where.not(...)` is lowered to `not(...)` on the relation: negate the
-    # condition back onto this relation.
+    # condition back onto this relation. Negated predicates never seed.
     def not(condition = nil, *args)
       add_condition(condition, args, true)
       self
@@ -1555,13 +1569,20 @@ module ActiveRecord
 
     # Hash conditions share where's predicate builder; scalar conditions
     # select the primary key. Unloaded: exists_sql (SELECT 1 LIMIT 1).
-    def exists?(id = nil)
+    # No argument asks for any row; `exists?(nil)` is false, as Rails'
+    # `return false if !conditions`. The argument is a splat so "absent"
+    # and `nil` stay distinct without an untyped default.
+    def exists?(*conditions)
+      raise ArgumentError, "wrong number of arguments (given #{conditions.length}, expected 0..1)" if conditions.length > 1
       return false if @limit == 0
-      if id.nil?
+      if conditions.empty?
         r = @records
         return r.length > 0 unless r.nil?
         return probe_existence(1) > 0
       end
+      id = conditions[0]
+      # Rails' `return false if !conditions` — only nil/false are falsy.
+      return false if id.nil? || id == false
       own_lists
       # Popped for the same reason `find` and `find_by` pop: a terminal
       # that answered a question must not narrow the relation it was
@@ -2002,6 +2023,26 @@ module ActiveRecord
       created = @model.new(scope_attributes.merge(conditions))
       created.save
       created
+    end
+
+    # Rails' `find_or_create_by!`: `find_by(attributes) ||
+    # create!(attributes)`. A block is the lowering's statement form
+    # (`lower::first_or_create`); the runtime method takes none.
+    def find_or_create_by!(conditions)
+      record = find_by(conditions)
+      return record if !record.nil?
+      created = @model.new(scope_attributes.merge(conditions))
+      created.save!
+      created
+    end
+
+    # Rails' `find_or_initialize_by`: `find_by(attributes) ||
+    # new(attributes)`, the new record unsaved and carrying the
+    # relation's scope attributes and the given ones.
+    def find_or_initialize_by(conditions)
+      record = find_by(conditions)
+      return record if !record.nil?
+      @model.new(scope_attributes.merge(conditions))
     end
 
     # ---- SQL composition --------------------------------------------

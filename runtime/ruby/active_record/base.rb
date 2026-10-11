@@ -160,15 +160,15 @@ module ActiveRecord
 
       # Catalog also types `.klass` / `.macro`; presence-only callers get
       # nil rather than a NameError until those halves are synthesized.
-      # Read-tail locals: strict targets drop a bare `nil` method body.
+      # Bare `nil` (return-tail untyped) — not `result = nil; result`,
+      # which rust emits as `Option`/`None` against a Value return
+      # (issue #832). Same shape as `request_for_csrf`.
       def klass
-        result = nil
-        result
+        nil
       end
 
       def macro
-        result = nil
-        result
+        nil
       end
     end
   end
@@ -391,16 +391,23 @@ module ActiveRecord
     # `_association_names`; `counter_cache:` is unmodeled so every hit
     # answers `counter_cache_column == nil` (honest for campfire's
     # trigger-backed `messages_count`, which is not an AR counter cache).
+    # Index recursion — not `each`+`return` — so rust/kotlin/swift do
+    # not lower the match into a for_each closure that cannot return
+    # the outer Option (issue #832).
     def self.reflect_on_association(name)
-      needle = name.to_s
-      _association_names.each do |assoc|
-        if assoc.to_s == needle
-          return ActiveRecord::Reflection::AssociationReflection.new(assoc, nil)
-        end
+      reflect_on_association_at(name.to_s, 0)
+    end
+
+    def self.reflect_on_association_at(needle, i)
+      names = _association_names
+      if i >= names.length
+        return nil
       end
-      # Read-tail: strict targets drop a bare `nil` method body.
-      result = nil
-      result
+      assoc = names[i]
+      if assoc.to_s == needle
+        return ActiveRecord::Reflection::AssociationReflection.new(assoc, nil)
+      end
+      reflect_on_association_at(needle, i + 1)
     end
 
     # Finder casting runs in connection.rb (Relation is ruby-family

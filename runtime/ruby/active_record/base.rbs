@@ -127,6 +127,7 @@ module ActiveRecord
     def self.primary_key: () -> String
     def self._association_names: () -> Array[Symbol]
     def self.reflect_on_association: (Symbol | String name) -> ActiveRecord::Reflection::AssociationReflection?
+    def self.reflect_on_association_at: (String needle, Integer i) -> ActiveRecord::Reflection::AssociationReflection?
     def self._cast_primary_key: (Integer | String id) -> (Integer | String | nil)
     def self._string_primary_key: () -> bool
     def self.schema_columns: () -> Array[Symbol]

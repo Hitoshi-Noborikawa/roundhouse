@@ -83,7 +83,7 @@ fn errors_full_message_on_a_computed_receiver_is_refused() {
 
 #[test]
 fn non_nil_assertions_require_runtime_support() {
-    refuses("T.must(1) + 1", "non-nil assertion");
+    // `T.must` lowers to sorbet's check (tests/sorbet_must_runs.rs).
     refuses("T.must_because(1) { \"present\" }", "non-nil assertion");
     refuses("1.not_nil!", "not_nil!");
 }

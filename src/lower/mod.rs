@@ -111,6 +111,7 @@ pub mod relation_ivar_materialize;
 pub mod records_to_relation_arg;
 pub mod save_without_validation;
 pub mod defined_ivar_memo;
+pub mod defined_const_fold;
 pub mod controller_class_render;
 pub mod dirty_predicate_kwargs;
 pub mod job_test_only;
@@ -297,6 +298,11 @@ pub(crate) fn residue_diagnostic(
 /// checked by a `debug_assert!` on entry to the pipeline and by the
 /// `post_analyze_pass_order_is_sound` unit test.
 const POST_ANALYZE_PASS_ORDER: &[(&str, &[&str])] = &[
+    // `defined?(Const)` → "constant" / nil when the tree, the lockfile
+    // and config/application.rb decide it, with the guard's dead branch
+    // pruned. First, so every later pass (and the spinel refusal of a
+    // runtime `defined?`) sees only the code that can run.
+    ("defined_const_fold", &[]),
     // Deletes every class extending a Rails base the runtime does not
     // port (`ApplicationMailbox < ActionMailbox::Base`) before any pass
     // ledgers residue for a body that is not going to emit.
@@ -765,16 +771,24 @@ pub fn apply_post_analyze_lowerings(
     // assert. `push` calls sit adjacent to each pass call below.
     #[cfg(debug_assertions)]
     let mut executed: Vec<&str> = Vec::new();
+    // With ROUNDHOUSE_TIMINGS each pass also prints its time since the
+    // previous one (a fused group's members after its phase line read ~0).
     #[cfg(debug_assertions)]
     macro_rules! ran {
-        ($name:expr) => {
-            executed.push($name)
-        };
+        ($name:expr) => {{
+            executed.push($name);
+            crate::timings::lap(format_args!("post-analyze pass: {}", $name));
+        }};
     }
     #[cfg(not(debug_assertions))]
     macro_rules! ran {
-        ($name:expr) => {};
+        ($name:expr) => {
+            crate::timings::lap(format_args!("post-analyze pass: {}", $name))
+        };
     }
+    crate::timings::lap_start();
+    defined_const_fold::apply_defined_const_fold(app);
+    ran!("defined_const_fold");
     let mut diags = unported_rails_subclasses::apply_unported_rails_subclass_drop(app);
     ran!("unported_rails_subclasses");
     spliced_concern_bodies::apply_spliced_concern_body_prune(app);
@@ -1523,7 +1537,7 @@ pub use routes_to_library::{
     lower_routes_to_dispatch_functions, lower_routes_to_library_functions,
     url_options_helper_name,
 };
-pub use schema_to_library::lower_schema_to_library_functions;
+pub use schema_to_library::{lower_schema_module_functions, lower_schema_to_library_functions};
 pub use seeds_to_library::lower_seeds_to_library_functions;
 pub use test_module_to_library::{
     lower_test_module_to_library_class, lower_test_modules_to_library_classes,
