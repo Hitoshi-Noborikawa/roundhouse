@@ -10832,7 +10832,15 @@ class TimedArticlesControllerTest < ActionDispatch::IntegrationTest
     assert_equal 1.5, (2.seconds - 0.5).to_f
     assert_equal 1.5, (2.seconds - 0.5.seconds).to_f
     assert_operator 1.second, :<, 2
+  end
+end
+"#,
+        )
+        .run_test("test/controllers/timed_articles_controller_test.rb")
+        .assert_passes();
+}
 
+#[test]
 fn rich_text_renders_sanitized() {
     rich_text_app()
         .write(
@@ -12139,8 +12147,6 @@ end
 "#,
         )
         .run_test("test/controllers/inertia_articles_controller_test.rb")
-
-        .run_test("test/controllers/rich_text_sanitize_controller_test.rb")
         .assert_passes();
 }
 
