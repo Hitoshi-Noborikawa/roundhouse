@@ -57,6 +57,7 @@ use crate::expr::{Expr, ExprNode, Literal};
 use crate::ident::Symbol;
 
 mod constructor;
+mod owned;
 use constructor::InstanceCallParams;
 
 pub(super) fn lexical_refinement_calls(app: &App) -> std::collections::HashSet<crate::span::Span> {
@@ -73,6 +74,7 @@ pub fn apply_helper_kwarg_positional_lowering(app: &mut App) -> Vec<crate::diagn
     let constructor_names = super::forwarding::constructor_names(app, &constructors);
     let instance_params = InstanceCallParams::new(app, constructors, &constructor_names);
     let class_params = library_class_call_params(app);
+    owned::rewrite_library_classes(app, &mut diagnostics);
     let _ = super::forwarding::apply_with_plans(app, &plans, &constructor_names);
     super::for_each_hook_body(app, &mut |expr| {
         constructor::refuse_keyword_splats(expr, &instance_params, &mut diagnostics);
@@ -110,6 +112,10 @@ pub fn apply_helper_kwarg_positional_lowering(app: &mut App) -> Vec<crate::diagn
         }
     }
     super::kwsplat::restore_kwrest_in_test_helpers(app);
+    // One call can be reached by the owner-relative walk and by the
+    // typed-receiver one; it is one refusal.
+    let mut seen = std::collections::HashSet::new();
+    diagnostics.retain(|d| !is_flattened_refusal(d) || seen.insert(d.span));
     let params = helper_param_names(app);
     if params.is_empty() {
         return diagnostics;
@@ -204,10 +210,56 @@ fn rewrite_class_calls_node(
         .map(|s| s.as_str())
         .collect::<Vec<_>>()
         .join("::");
+    if SEND_METHODS.contains(&method.as_str()) {
+        owned::refuse_send(e.span, args, |name| params.get(&(class.clone(), name.clone())), diagnostics);
+        return;
+    }
     let Some(slots) = params.get(&(class.clone(), method.clone())) else {
         return;
     };
-    respell(args, slots, true);
+    if let Err(reason) = respell(args, slots, true) {
+        refuse(e.span, reason, diagnostics);
+    }
+}
+
+const SEND_METHODS: &[&str] = &["send", "public_send", "__send__"];
+
+/// The gap a call to a flattened keyword group is refused with, when its
+/// keywords cannot be moved into the positional slots: emitted as
+/// written, Ruby would bind the keyword Hash to the first slot.
+const FLATTENED_KEYWORD_ARGUMENTS: &str = "flattened keyword arguments";
+
+fn is_flattened_refusal(d: &crate::diagnostic::Diagnostic) -> bool {
+    matches!(
+        &d.kind,
+        crate::diagnostic::DiagnosticKind::Unsupported { construct, .. }
+            if construct.as_str() == FLATTENED_KEYWORD_ARGUMENTS
+    )
+}
+
+fn refuse(
+    span: crate::span::Span,
+    reason: &str,
+    diagnostics: &mut Vec<crate::diagnostic::Diagnostic>,
+) {
+    diagnostics.push(crate::diagnostic::Diagnostic::unsupported(
+        span,
+        None,
+        FLATTENED_KEYWORD_ARGUMENTS,
+        reason,
+    ));
+}
+
+/// Whether a call passes keywords at all: a literal keyword list, a
+/// `**` splat, or a forwarded `**`.
+fn carries_keywords(args: &[Expr]) -> bool {
+    args.iter().any(|arg| match &*arg.node {
+        ExprNode::KeywordSplat { .. }
+        | ExprNode::ForwardKeywords
+        | ExprNode::ForwardKeywordsWithPairs { .. } => true,
+        ExprNode::Hash { entries, kwargs: true } => !entries.is_empty(),
+        _ => false,
+    })
 }
 
 /// The same repair for an INSTANCE method called on a receiver the
@@ -341,27 +393,35 @@ fn rewrite_calls(e: &mut Expr, params: &HashMap<Symbol, Vec<Slot>>) {
     let Some(slots) = params.get(method) else {
         return;
     };
-    respell(args, slots, false);
+    let _ = respell(args, slots, false);
 }
 
 /// Move a call's trailing keywords into the positional slots they
 /// name. `keyword_slots_only` limits the names to slots ingest
 /// flattened from keywords.
-fn respell(args: &mut Vec<Expr>, slots: &[Slot], keyword_slots_only: bool) {
-    let Some(last) = args.last() else { return };
+///
+/// `Err` names why the keywords cannot be moved. A helper call
+/// (`keyword_slots_only` false) treats that as "not this rule's call"
+/// and leaves it alone, because a helper's genuine trailing options Hash
+/// (`link_to_room(room, id: …)` against `attributes = {}`) is the same
+/// shape. Against slots ingest flattened from keywords, there is no such
+/// reading: the source could only have meant the keywords, so the caller
+/// refuses the call rather than emit it binding the Hash to a slot.
+fn respell(args: &mut Vec<Expr>, slots: &[Slot], keyword_slots_only: bool) -> Result<(), &'static str> {
+    let Some(last) = args.last() else { return Ok(()) };
     let ExprNode::Hash {
         entries,
         kwargs: true,
     } = &*last.node
     else {
-        return;
+        return Ok(());
     };
     if entries.is_empty() {
-        return;
+        return Ok(());
     }
     // Every key must be a Symbol naming a parameter this call has not
     // already filled positionally. Anything else and the call means
-    // something this pass cannot prove, so it is left alone.
+    // something this pass cannot prove.
     let filled = args.len() - 1;
     let mut supplied: Vec<(usize, Expr)> = Vec::new();
     for (k, v) in entries {
@@ -369,16 +429,16 @@ fn respell(args: &mut Vec<Expr>, slots: &[Slot], keyword_slots_only: bool) {
             value: Literal::Sym { value },
         } = &*k.node
         else {
-            return;
+            return Err("a keyword key that is not a literal symbol cannot be matched to a positional slot");
         };
         let Some(pos) = slots.iter().position(|s| s.name == *value) else {
-            return;
+            return Err("a keyword names no parameter of the method");
         };
         if keyword_slots_only && !slots[pos].from_keyword {
-            return;
+            return Err("a keyword names a positional parameter");
         }
         if pos < filled {
-            return;
+            return Err("a positional argument already fills a keyword's slot");
         }
         supplied.push((pos, v.clone()));
     }
@@ -399,15 +459,16 @@ fn respell(args: &mut Vec<Expr>, slots: &[Slot], keyword_slots_only: bool) {
             }
         }
         let Some(default) = slots[pos].default.as_ref() else {
-            return;
+            return Err("a skipped slot before a passed keyword has no default to fill it");
         };
         if !is_context_free(default) {
-            return;
+            return Err("a skipped keyword's default is not a literal or constant, so it cannot be evaluated at the call site");
         }
         moved.push(default.clone());
     }
     args.pop();
     args.extend(moved);
+    Ok(())
 }
 
 /// An expression that evaluates to the same thing wherever it is
