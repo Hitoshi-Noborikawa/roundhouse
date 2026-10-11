@@ -1703,11 +1703,10 @@ impl<'a> BodyTyper<'a> {
                     let elem = args[0].ty.as_ref().and_then(kernel_array_elem);
                     return Ty::Array { elem: Box::new(elem.unwrap_or_else(unknown)) };
                 }
-                if let Some(call) = crate::lower::i18n_translate::parse(
-                    recv.as_ref(), method.as_str(), args, block.as_ref(), ctx.in_view, ctx.view_name.as_ref().map(|v| v.as_str()),
+                let catalog = self.i18n.map_or(crate::i18n::Catalog::rails_default(), |c| c.or_rails_default());
+                if let Some(resolved) = crate::lower::i18n_translate::resolves(
+                    catalog, recv.as_ref(), method.as_str(), args, block.as_ref(), ctx.in_view, ctx.view_name.as_ref().map(|v| v.as_str()),
                 ) {
-                    let catalog = self.i18n.map_or(crate::i18n::Catalog::rails_default(), |c| c.or_rails_default());
-                    let resolved = call.and_then(|c| catalog.resolve(&c.lookup).map(|_| ()));
                     if let Err(reason) = resolved {
                         if expr.diagnostic.is_none() {
                             expr.diagnostic = Some(crate::diagnostic::DiagnosticKind::Unsupported {
