@@ -242,6 +242,15 @@ fn ingest_test_class(
     // test's `teardown` after each test the same way, so the blocks
     // become that method. An early `return` in `def teardown` must not
     // skip the blocks — wrap the method body in `ensure` so they run.
+    //
+    // Always `super` in a trailing ensure: TestBase's teardown runs
+    // `mocha_verify` / stub-slot verifies (see `patch_stub_lifecycle`).
+    // A subclass `def teardown` that omits `super` leaves Mocha expects
+    // installed, and the next test fails with "unexpected invocation"
+    // (campfire's CachedResponsesTest after this ingest landed).
+    // Method-level `ensure` (`implicit: true`) is the outer shape; the
+    // nested `begin/ensure` around the blocks is explicit so `super`
+    // still runs when a block raises.
     if !teardowns.is_empty() {
         let blocks = Expr::new(
             Span::synthetic(),
@@ -249,22 +258,66 @@ fn ingest_test_class(
                 exprs: teardowns.into_iter().rev().collect(),
             },
         );
+        let super_call = || {
+            Expr::new(
+                Span::synthetic(),
+                ExprNode::Super { args: Some(Vec::new()) },
+            )
+        };
         let own = helpers.iter().position(|m| m.name.as_str() == "teardown");
         let (name_span, body) = match own.map(|i| helpers.remove(i)) {
-            Some(m) => (
-                m.name_span,
+            Some(m) => {
+                // def teardown
+                //   own
+                // ensure
+                //   begin
+                //     blocks
+                //   ensure
+                //     super()
+                //   end
+                // end
+                let blocks_then_super = Expr::new(
+                    Span::synthetic(),
+                    ExprNode::BeginRescue {
+                        body: blocks,
+                        rescues: Vec::new(),
+                        else_branch: None,
+                        ensure: Some(super_call()),
+                        implicit: false,
+                    },
+                );
+                (
+                    m.name_span,
+                    Expr::new(
+                        Span::synthetic(),
+                        ExprNode::BeginRescue {
+                            body: m.body,
+                            rescues: Vec::new(),
+                            else_branch: None,
+                            ensure: Some(blocks_then_super),
+                            implicit: true,
+                        },
+                    ),
+                )
+            }
+            None => (
+                Span::synthetic(),
+                // def teardown
+                //   blocks
+                // ensure
+                //   super()
+                // end
                 Expr::new(
                     Span::synthetic(),
                     ExprNode::BeginRescue {
-                        body: m.body,
+                        body: blocks,
                         rescues: Vec::new(),
                         else_branch: None,
-                        ensure: Some(blocks),
+                        ensure: Some(super_call()),
                         implicit: true,
                     },
                 ),
             ),
-            None => (Span::synthetic(), blocks),
         };
         helpers.push(MethodDef {
             name_span,

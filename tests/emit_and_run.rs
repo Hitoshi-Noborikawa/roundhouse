@@ -11549,6 +11549,37 @@ end
         .assert_passes();
 }
 
+/// A subclass `teardown do` must still reach TestBase's mocha_verify.
+/// Without `super`, an `expects(...).never` from test A stays installed
+/// and test B fails with "unexpected invocation" (campfire CachedResponses).
+#[test]
+fn teardown_do_emits_super_so_mocha_verify_still_runs() {
+    let (emitted, errors) = bare_test_app()
+        .write("app/.keep", "")
+        .write(
+            "test/models/teardown_super_test.rb",
+            r#"require "test_helper"
+
+class TeardownSuperTest < ActiveSupport::TestCase
+  teardown do
+    cleanup
+  end
+
+  test "a" do
+    assert true
+  end
+end
+"#,
+        )
+        .emit(roundhouse::project::BuildTarget::Ruby);
+    assert!(errors.is_empty(), "{errors:?}");
+    let src = std::fs::read_to_string(emitted.join("test/models/teardown_super_test.rb")).unwrap();
+    assert!(
+        src.contains("def teardown") && src.contains("super()"),
+        "teardown do must call super for mocha_verify:\n{src}"
+    );
+}
+
 /// One test file whose teardown prints how many times the block's
 /// effect (`Widget.hit`) ran, so a failing run shows where it stopped.
 fn destructured_block_app(name: &str, members: &str) -> emit_and_run::Overlay {
