@@ -198,3 +198,7 @@ pub fn reverse_merged(defaults: &Ty, hash: &Ty) -> Option<Ty> {
     let other = merged_value(defaults)?;
     Some(of(super::body::union_of(other, value.clone())))
 }
+
+pub fn constructor_args(args: &[Expr]) -> bool {
+    args.len() <= 1 && !args.iter().any(|a| matches!(&*a.node, ExprNode::Splat { .. } | ExprNode::KeywordSplat { .. }))
+}

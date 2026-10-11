@@ -41,7 +41,7 @@ fn rewrite_node(span: Span, decisions: u64, node: &mut ExprNode) -> Option<Expr>
         *recv = from_hash(span, defaults);
         return None;
     }
-    if method.as_str() == "new" && is_class_const(recv) && block.is_none() {
+    if method.as_str() == "new" && is_class_const(recv) && block.is_none() && indifferent::constructor_args(args) {
         return match args.as_slice() {
             [] => Some(Expr::new(span, ExprNode::Hash { entries: vec![], kwargs: false })),
             [hash] => Some(from_hash(span, hash.clone())),

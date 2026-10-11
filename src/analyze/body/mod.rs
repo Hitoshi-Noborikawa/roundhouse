@@ -1301,6 +1301,8 @@ impl<'a> BodyTyper<'a> {
                     None => ctx.self_ty.clone(),
                 };
                 if method.as_str() == "new"
+                    && block.is_none()
+                    && crate::analyze::indifferent::constructor_args(args)
                     && let Some(r) = recv.as_mut()
                     && matches!(&*r.node, ExprNode::Const { .. })
                     && matches!(&r.ty, Some(Ty::Class { id, args }) if args.is_empty() && id.0.as_str() == crate::analyze::indifferent::CLASS)
