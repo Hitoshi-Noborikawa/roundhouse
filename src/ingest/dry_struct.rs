@@ -272,8 +272,8 @@ pub(super) fn lower_dry_structs(app: &mut App, sources: &[crate::span::SourceFil
         }
         let Some((mut methods, generated)) = built.remove(&name) else { continue };
         lc.unknown_calls.retain(|call| !is_struct_declaration(call));
-        // Constants holding dry types stay while anything is left on the
-        // gem, which may name them; they go app-wide below once nothing is.
+        // Dry-type constants are stripped app-wide below once the Class-safe
+        // shell is emitted; keep generated non-type constants (shared defaults).
         lc.constants.extend(generated);
         lc.origin = Some(crate::dialect::LibraryClassOrigin::DryStruct);
         methods.append(&mut lc.methods);
@@ -291,41 +291,45 @@ pub(super) fn lower_dry_structs(app: &mut App, sources: &[crate::span::SourceFil
     // only `Error` makes the Ruby emitter open `module Struct`, and
     // `class X < Dry::Struct` then TypeErrors. The shell carries no
     // `attribute` methods; refused class-body DSL is not replayed onto a
-    // modeled parent (`replays_foreign_class_body`). Types cleanup is only
-    // safe once nothing remains on dry-types.
+    // modeled parent (`replays_foreign_class_body`).
+    //
+    // With that shell, nothing left on dry-types can run: refused subclasses
+    // do not replay gem DSL, and lowered bodies bake coercions into
+    // `initialize`. Refused files may still `require_relative` a `Types`
+    // module (Const refs in dropped calls), so dry-type constants must be
+    // stripped whenever the shell is emitted — otherwise
+    // `Types.Constructor` / `Types::Coercible::…` crash the boot of the
+    // whole `models.rb` load, including lowered siblings.
     if any {
         app.library_classes.extend(error_classes());
-        if refused_roots.is_empty() {
-            // Nothing left needs dry-types, and the `Types` modules are not
-            // emitted: a constant still building a type would fail the load.
-            // The `Types` modules' own constants that build no type, an alias
-            // of one (`ALIAS = Types::LABEL`) included: round by round.
-            let mut plain: HashSet<String> = HashSet::new();
-            loop {
-                let found: Vec<String> = app
-                    .library_classes
-                    .iter()
-                    .filter(|lc| types_modules.iter().any(|(m, _)| m == lc.name.0.as_str()))
-                    .flat_map(|lc| {
-                        let holder = lc.name.0.as_str();
-                        lc.constants
-                            .iter()
-                            .map(move |(n, v)| (format!("{holder}::{}", n.as_str()), v, holder))
-                    })
-                    .filter(|(full, v, holder)| {
-                        !plain.contains(full) && !holds_dry_type(v, holder, &types_modules, &names, &plain)
-                    })
-                    .map(|(full, _, _)| full)
-                    .collect();
-                if found.is_empty() {
-                    break;
-                }
-                plain.extend(found);
+        // Keep plain value constants / aliases (`LABEL`, `ALIAS = Types::LABEL`);
+        // drop anything that still builds a dry type. Round by round so an
+        // alias of a plain constant survives after the type constants go.
+        let mut plain: HashSet<String> = HashSet::new();
+        loop {
+            let found: Vec<String> = app
+                .library_classes
+                .iter()
+                .filter(|lc| types_modules.iter().any(|(m, _)| m == lc.name.0.as_str()))
+                .flat_map(|lc| {
+                    let holder = lc.name.0.as_str();
+                    lc.constants
+                        .iter()
+                        .map(move |(n, v)| (format!("{holder}::{}", n.as_str()), v, holder))
+                })
+                .filter(|(full, v, holder)| {
+                    !plain.contains(full) && !holds_dry_type(v, holder, &types_modules, &names, &plain)
+                })
+                .map(|(full, _, _)| full)
+                .collect();
+            if found.is_empty() {
+                break;
             }
-            for lc in &mut app.library_classes {
-                let holder = lc.name.0.as_str().to_string();
-                lc.constants.retain(|(_, value)| !holds_dry_type(value, &holder, &types_modules, &names, &plain));
-            }
+            plain.extend(found);
+        }
+        for lc in &mut app.library_classes {
+            let holder = lc.name.0.as_str().to_string();
+            lc.constants.retain(|(_, value)| !holds_dry_type(value, &holder, &types_modules, &names, &plain));
         }
     }
 }

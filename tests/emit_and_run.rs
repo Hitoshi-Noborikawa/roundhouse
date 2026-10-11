@@ -1902,9 +1902,13 @@ fn dry_struct_hierarchy_is_lowered_whole_or_not_at_all() {
     assert_eq!(class("Shop::Other").parent.as_ref().map(|p| p.0.as_str()), Some("Dry::Struct"));
     // ... also when it names it through a constant holding a type.
     assert_eq!(class("Shop::Piece").parent.as_ref().map(|p| p.0.as_str()), Some("Dry::Struct"));
-    // A lowered class keeps its type constants while the gem stays: a
-    // refused class may name them.
-    assert!(class("Shop::Kept").constants.iter().any(|(n, _)| n.as_str() == "CODE"), "type constant dropped");
+    // Class-safe shell: dry-type constants are stripped even under partial
+    // refusal — refused siblings still require Types modules, and residual
+    // `Types.Constructor` / `Coercible` would crash the boot.
+    assert!(
+        class("Shop::Kept").constants.iter().all(|(n, _)| n.as_str() != "CODE"),
+        "dry-type constant kept under Class-safe shell"
+    );
     // Unmodeled class DSL refuses rather than being dropped.
     assert_eq!(class("Shop::Bulk").parent.as_ref().map(|p| p.0.as_str()), Some("Dry::Struct"));
     // `Types::String` in a subclass may be the parent's nominal `Types`,
@@ -1971,6 +1975,39 @@ puts "dry-struct partial-refusal Error contract passed"
         );
     run.assert_passes();
     assert!(run.stdout.contains("dry-struct partial-refusal Error contract passed"));
+}
+
+/// Production-shaped partial refusal: full dry_struct overlay (Types with
+/// `Constructor` / dry-type constants) plus one refused `attributes(...)`
+/// sibling. Class-safe shell must strip those residuals so `models.rb`
+/// boots and lowered structs still construct / raise `Dry::Struct::Error`.
+#[test]
+fn dry_struct_prod_shape_partial_refusal_boots() {
+    let run = dry_struct::ruby_overlay()
+        .write(
+            "lib/shop/bulk.rb",
+            "module Shop\n  class Bulk < Dry::Struct\n    attributes(id: ::Shop::Types::Coercible::String)\n  end\nend\n",
+        )
+        .run_ruby(
+            r#"
+raise "Dry::Struct must be a Class" unless Dry::Struct.is_a?(Class)
+raise "Error missing" unless defined?(Dry::Struct::Error)
+raise "Bulk must subclass Dry::Struct" unless Shop::Bulk < Dry::Struct
+raise "plain Types value dropped" unless Shop::Kinds::LABEL == "shop"
+begin
+  Shop::Refund.new({})
+  raise "missing id should raise"
+rescue Dry::Struct::Error
+end
+r = Shop::Refund.new(id: "1", amount: "10", paid: true)
+raise "Refund failed" unless r.id == "1" && r.amount == 10 && r.paid == true
+d = Shop::Delivery.new(to: { city: "NYC" }, volume: "hi")
+raise "Loud coercion lost" unless d.volume == "HI"
+puts "dry-struct prod-shape partial-refusal boot passed"
+"#,
+        );
+    run.assert_passes();
+    assert!(run.stdout.contains("dry-struct prod-shape partial-refusal boot passed"));
 }
 
 /// A Concern macro that writes a `class_attribute` runs when the
