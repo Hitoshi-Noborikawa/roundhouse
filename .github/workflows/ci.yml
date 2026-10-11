@@ -558,17 +558,10 @@ jobs:
       # ruby-vips — pairs with libvips42 above; without the gem the vips
       # loader test dies on `cannot load such file -- vips`.
       #
-<<<<<<< HEAD
-      # markly — `tests/emit_and_run.rs::markly_flag_constants_resolve_and_render_through_the_real_gem`
-      # (tip 2d5bbec9) runs the emitted CRuby tree against the real gem.
-      # gem_facades guarded-requires markly and swallows LoadError, so
-      # without the gem the pin fails as `uninitialized constant …::Markly`.
-=======
       # markly — `tests/emit_and_run.rs` renders through the real gem on the
       # CRuby tree (Markly's flag constants, lobsters' Markdowner); without
       # it the emitted tree's guarded require loads nothing and the test
       # fails with NameError on Markly.
->>>>>>> upstream/main
       - name: Install gems used by emitted Ruby and Campfire harness tests
         run: |
           gem install --no-document rails-html-sanitizer sqlite3 bcrypt rack ruby-vips markly
