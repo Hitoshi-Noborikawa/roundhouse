@@ -30,6 +30,8 @@ mod params_wrapper;
 mod class_configuration;
 #[path = "support/runtime_block_signature.rs"]
 mod runtime_block_signature;
+#[path = "support/dry_struct.rs"]
+mod dry_struct;
 #[path = "support/data_factory.rs"]
 mod data_factory;
 #[path = "support/rails_root_join.rs"]
@@ -1790,6 +1792,222 @@ fn finite_concern_class_configuration_runs_without_replaying_rails() {
         run.assert_passes();
         assert!(run.stdout.contains("finite class configuration contract passed"));
     }
+}
+
+/// `Dry::Struct` classes construct, coerce and refuse as dry-struct does,
+/// with no dry-struct in the emitted tree.
+#[test]
+fn dry_struct_classes_run_lowered() {
+    let run = dry_struct::ruby_overlay().run_ruby(&format!(
+        "{}\n{}\n{}",
+        dry_struct::ASSERTIONS,
+        dry_struct::STAMP_ASSERTIONS,
+        dry_struct::CLOCK_ASSERTIONS
+    ));
+    run.assert_passes();
+    assert!(run.stdout.contains("dry-struct contract passed"));
+    assert!(run.stdout.contains("dry-struct stamp contract passed"));
+    assert!(run.stdout.contains("dry-struct clock contract passed"));
+}
+
+/// Spinel's tree has its own `Date` and `BigDecimal()`, but no
+/// `DateTime`, `Time.parse` or `BigDecimal.interpret_loosely`: a lowered
+/// struct using those is reported for it, not emitted to fail when first
+/// reached, and one using only the former is not.
+#[test]
+fn dry_struct_stdlib_coercions_are_reported_for_spinel() {
+    let (emitted, errors) = dry_struct::overlay().emit(roundhouse::project::BuildTarget::Spinel);
+    assert!(errors.iter().all(|e| !e.contains("Dry::Struct")), "{errors:#?}");
+    // ... and the struct emitted with its date and decimal coercions.
+    let stamp = std::fs::read_to_string(emitted.join("app/models/shop/stamp.rb")).expect("emitted Shop::Stamp");
+    for coercion in ["::Date.parse(", "is_a?(::Date)", "BigDecimal("] {
+        assert!(stamp.contains(coercion), "{coercion} not emitted:\n{stamp}");
+    }
+    let (_emitted, errors) = dry_struct::clock_overlay(dry_struct::overlay())
+        .emit(roundhouse::project::BuildTarget::Spinel);
+    for what in ["`DateTime`", "`Time.parse`", "`BigDecimal.interpret_loosely`"] {
+        assert!(errors.iter().any(|e| e.contains(what)), "{what} not reported: {errors:#?}");
+    }
+    // A shared default is a class constant, scanned like the methods.
+    let (_emitted, errors) = dry_struct::overlay()
+        .write(
+            "lib/shop/since.rb",
+            "module Shop\n  class Since < Dry::Struct\n    attribute? :at, ::Shop::Types::Any.default(Time.parse(\"2026-01-01\"))\n  end\nend\n",
+        )
+        .emit(roundhouse::project::BuildTarget::Spinel);
+    assert!(errors.iter().any(|e| e.contains("`Time.parse`")), "default not scanned: {errors:#?}");
+    // An app's own `interpret_loosely` is not BigDecimal's.
+    let (_emitted, errors) = dry_struct::overlay()
+        .write(
+            "lib/shop/loose.rb",
+            "module Shop\n  class Loose < Dry::Struct\n    attribute :v, ::Shop::Types::Any.constructor { |v| v.interpret_loosely }\n  end\nend\n",
+        )
+        .emit(roundhouse::project::BuildTarget::Spinel);
+    assert!(errors.iter().all(|e| !e.contains("interpret_loosely")), "{errors:#?}");
+}
+
+/// A struct the lowering cannot read keeps its whole `Dry::Struct`
+/// hierarchy as it was: a lowered parent under an unlowered child would
+/// leave `attribute` calls on a plain class, and the stand-in
+/// `Dry::Struct` would end the child's ancestry at a class without them.
+#[test]
+fn dry_struct_hierarchy_is_lowered_whole_or_not_at_all() {
+    let tree = [
+        ("lib/shop/types.rb", "module Shop\n  module Types\n    include Dry.Types()\n  end\nend\n"),
+        ("lib/shop/base.rb", "module Shop\n  class Base < Dry::Struct\n  end\nend\n"),
+        ("lib/shop/good.rb", "module Shop\n  class Good < Base\n    attribute :id, ::Shop::Types::Coercible::String\n  end\nend\n"),
+        (
+            "lib/shop/bad.rb",
+            "module Shop\n  class Bad < Base\n    PIECES = ::Shop::Types::Array.of(::Shop::Piece)\n    attribute :amount, ::Shop::Types::Strict::String.constrained(min_size: 1)\n    attribute :other, Other\n    attribute :pieces, PIECES\n    attribute :inner do\n      attribute :n, ::Shop::Types::Coercible::Integer\n    end\n  end\nend\n",
+        ),
+        ("lib/shop/other.rb", "module Shop\n  class Other < Dry::Struct\n    attribute :id, ::Shop::Types::Coercible::String\n  end\nend\n"),
+        (
+            "lib/shop/kept.rb",
+            "module Shop\n  class Kept < Dry::Struct\n    CODE = ::Shop::Types::Coercible::String\n    attribute :id, CODE\n  end\nend\n",
+        ),
+        ("lib/shop/piece.rb", "module Shop\n  class Piece < Dry::Struct\n    attribute :id, ::Shop::Types::Coercible::String\n  end\nend\n"),
+        ("lib/shop/bulk.rb", "module Shop\n  class Bulk < Dry::Struct\n    attributes(id: ::Shop::Types::Coercible::String)\n  end\nend\n"),
+        ("lib/types.rb", "module Types\n  include Dry.Types()\nend\n"),
+        (
+            "lib/legacy.rb",
+            "class Legacy < Dry::Struct\n  module Types\n    include Dry.Types(default: :nominal)\n  end\nend\n\nclass LegacyChild < Legacy\n  attribute :id, Types::String\nend\n",
+        ),
+        ("config/routes.rb", "Rails.application.routes.draw do\nend\n"),
+    ]
+    .into_iter()
+    .map(|(p, s)| (std::path::PathBuf::from(p), s.as_bytes().to_vec()))
+    .collect();
+    roundhouse::ingest::survey::activate();
+    let app = roundhouse::ingest::ingest_app_from_tree(tree).expect("ingest");
+    let class = |name: &str| app.library_classes.iter().find(|lc| lc.name.0.as_str() == name).expect(name);
+    assert_eq!(class("Shop::Base").parent.as_ref().map(|p| p.0.as_str()), Some("Dry::Struct"));
+    assert!(class("Shop::Good").methods.iter().all(|m| m.name.as_str() != "id"), "sibling lowered");
+    assert!(class("Shop::Good").unknown_calls.iter().any(|c| roundhouse::emit::ruby::emit_expr(c).starts_with("attribute")));
+    // Empty `class Dry::Struct` + `Error` so nest emit stays Class-safe
+    // while some hierarchies remain unlowered; the shell has no methods.
+    let dry_struct = class("Dry::Struct");
+    assert!(!dry_struct.is_module, "Dry::Struct shell must be a class");
+    assert!(dry_struct.methods.is_empty(), "Dry::Struct shell grew methods");
+    assert!(
+        app.library_classes.iter().any(|lc| lc.name.0.as_str() == "Dry::Struct::Error"),
+        "Error stand-in missing while Kept lowered"
+    );
+    assert!(class("Shop::Kept").methods.iter().any(|m| m.name.as_str() == "id"), "Kept not lowered");
+    // The nested struct goes with its refused owner, which names it as a
+    // type on the gem.
+    assert_eq!(class("Shop::Bad::Inner").parent.as_ref().map(|p| p.0.as_str()), Some("Dry::Struct"));
+    assert!(class("Shop::Bad::Inner").methods.iter().all(|m| m.name.as_str() != "n"), "nested lowered");
+    // A struct a refused class names as a type stays one, in its own
+    // hierarchy too.
+    assert_eq!(class("Shop::Other").parent.as_ref().map(|p| p.0.as_str()), Some("Dry::Struct"));
+    // ... also when it names it through a constant holding a type.
+    assert_eq!(class("Shop::Piece").parent.as_ref().map(|p| p.0.as_str()), Some("Dry::Struct"));
+    // Class-safe shell: dry-type constants are stripped even under partial
+    // refusal — refused siblings still require Types modules, and residual
+    // `Types.Constructor` / `Coercible` would crash the boot.
+    assert!(
+        class("Shop::Kept").constants.iter().all(|(n, _)| n.as_str() != "CODE"),
+        "dry-type constant kept under Class-safe shell"
+    );
+    // Unmodeled class DSL refuses rather than being dropped.
+    assert_eq!(class("Shop::Bulk").parent.as_ref().map(|p| p.0.as_str()), Some("Dry::Struct"));
+    // `Types::String` in a subclass may be the parent's nominal `Types`,
+    // which Ruby finds before the strict top-level one: refused.
+    assert!(class("LegacyChild").methods.iter().all(|m| m.name.as_str() != "id"), "inherited Types guessed");
+}
+
+/// `class << self; prepend …` wraps `attribute`; lowering would drop the
+/// override. Refuse the class instead.
+#[test]
+fn dry_struct_singleton_prepend_refuses_lowering() {
+    let tree = [
+        ("lib/shop/types.rb", "module Shop\n  module Types\n    include Dry.Types()\n  end\nend\n"),
+        (
+            "lib/shop/strict.rb",
+            "module Shop\n  module StrictAttribute\n    def attribute(name, type = nil, **opts, &block)\n      super\n    end\n  end\n\n  class Strict < Dry::Struct\n    class << self\n      prepend StrictAttribute\n    end\n    attribute :id, ::Shop::Types::Coercible::String\n  end\nend\n",
+        ),
+        ("config/routes.rb", "Rails.application.routes.draw do\nend\n"),
+    ]
+    .into_iter()
+    .map(|(p, s)| (std::path::PathBuf::from(p), s.as_bytes().to_vec()))
+    .collect();
+    roundhouse::ingest::survey::activate();
+    let app = roundhouse::ingest::ingest_app_from_tree(tree).expect("ingest");
+    let strict = app.library_classes.iter().find(|lc| lc.name.0.as_str() == "Shop::Strict").expect("Shop::Strict");
+    assert_eq!(strict.parent.as_ref().map(|p| p.0.as_str()), Some("Dry::Struct"));
+    assert!(strict.origin.is_none(), "prepend override was silently lowered");
+    assert!(strict.methods.iter().all(|m| m.name.as_str() != "id"), "reader synthesized despite prepend");
+}
+
+/// Mixed refusal emits empty `class Dry::Struct` + `Error` so a lowered
+/// sibling can raise it and a refused sibling still subclasses a Class.
+#[test]
+fn dry_struct_error_standin_with_partial_refusal() {
+    // Minimal tree: full dry_struct::overlay leaves Types constants that
+    // cannot emit while any hierarchy stays on the gem.
+    let run = emit_and_run::real_blog()
+        .write(
+            "lib/shop/types.rb",
+            "module Shop\n  module Types\n    include Dry.Types()\n  end\nend\n",
+        )
+        .write(
+            "lib/shop/bulk.rb",
+            "module Shop\n  class Bulk < Dry::Struct\n    attributes(id: ::Shop::Types::Coercible::String)\n  end\nend\n",
+        )
+        .write(
+            "lib/shop/kept.rb",
+            "module Shop\n  class Kept < Dry::Struct\n    attribute :id, ::Shop::Types::Coercible::String\n  end\nend\n",
+        )
+        .run_ruby(
+            r#"
+raise "Dry::Struct must be a Class" unless Dry::Struct.is_a?(Class)
+raise "Error missing" unless defined?(Dry::Struct::Error)
+raise "Bulk must subclass Dry::Struct" unless Shop::Bulk < Dry::Struct
+begin
+  Shop::Kept.new({})
+  raise "missing id should raise"
+rescue Dry::Struct::Error
+end
+ok = Shop::Kept.new(id: "1")
+raise "Kept failed" unless ok.id == "1"
+puts "dry-struct partial-refusal Error contract passed"
+"#,
+        );
+    run.assert_passes();
+    assert!(run.stdout.contains("dry-struct partial-refusal Error contract passed"));
+}
+
+/// Production-shaped partial refusal: full dry_struct overlay (Types with
+/// `Constructor` / dry-type constants) plus one refused `attributes(...)`
+/// sibling. Class-safe shell must strip those residuals so `models.rb`
+/// boots and lowered structs still construct / raise `Dry::Struct::Error`.
+#[test]
+fn dry_struct_prod_shape_partial_refusal_boots() {
+    let run = dry_struct::ruby_overlay()
+        .write(
+            "lib/shop/bulk.rb",
+            "module Shop\n  class Bulk < Dry::Struct\n    attributes(id: ::Shop::Types::Coercible::String)\n  end\nend\n",
+        )
+        .run_ruby(
+            r#"
+raise "Dry::Struct must be a Class" unless Dry::Struct.is_a?(Class)
+raise "Error missing" unless defined?(Dry::Struct::Error)
+raise "Bulk must subclass Dry::Struct" unless Shop::Bulk < Dry::Struct
+raise "plain Types value dropped" unless Shop::Kinds::LABEL == "shop"
+begin
+  Shop::Refund.new({})
+  raise "missing id should raise"
+rescue Dry::Struct::Error
+end
+r = Shop::Refund.new(id: "1", amount: "10", paid: true)
+raise "Refund failed" unless r.id == "1" && r.amount == 10 && r.paid == true
+d = Shop::Delivery.new(to: { city: "NYC" }, volume: "hi")
+raise "Loud coercion lost" unless d.volume == "HI"
+puts "dry-struct prod-shape partial-refusal boot passed"
+"#,
+        );
+    run.assert_passes();
+    assert!(run.stdout.contains("dry-struct prod-shape partial-refusal boot passed"));
 }
 
 /// A Concern macro that writes a `class_attribute` runs when the
