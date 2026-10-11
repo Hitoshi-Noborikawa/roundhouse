@@ -1248,6 +1248,15 @@ pub(super) fn emit_send_base(
             return format!("!({})", emit_expr(r));
         }
     }
+    // `equal?` is object identity. Crystal's predicate is
+    // `Reference#same?(other)`, not a two-argument function.
+    if method.as_str() == "equal?" && args.len() == 1 {
+        if let Some(r) = recv {
+            let recv_s = emit_expr(r);
+            let recv_s = if needs_recv_parens(r) { format!("({recv_s})") } else { recv_s };
+            return format!("{recv_s}.same?({})", args_s[0]);
+        }
+    }
     // Cross-target nil-safe Hash read: Ruby `h.fetch(key, nil)` returns
     // the value or nil for missing key. Crystal's `Hash#fetch(K, V)`
     // works for Hash recv — but the same source file may be reached
@@ -1843,5 +1852,34 @@ fn emit_pattern(p: &Pattern) -> String {
             }
             format!("{{ {} }}", parts.join(", "))
         }
+    }
+}
+
+#[cfg(test)]
+mod equal_identity_tests {
+    use super::*;
+    use crate::expr::{Expr, ExprNode};
+    use crate::ident::{Symbol, VarId};
+    use crate::span::Span;
+
+    #[test]
+    fn equal_is_same() {
+        let send = Expr::new(
+            Span::synthetic(),
+            ExprNode::Send {
+                recv: Some(Expr::new(
+                    Span::synthetic(),
+                    ExprNode::Var { id: VarId(0), name: Symbol::from("store") },
+                )),
+                method: Symbol::from("equal?"),
+                args: vec![Expr::new(
+                    Span::synthetic(),
+                    ExprNode::Var { id: VarId(0), name: Symbol::from("result") },
+                )],
+                block: None,
+                parenthesized: true,
+            },
+        );
+        assert_eq!(emit_expr(&send), "store.same?(result)");
     }
 }
