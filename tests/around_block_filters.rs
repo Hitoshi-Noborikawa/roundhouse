@@ -520,8 +520,82 @@ end
         parent_name, child_name,
         "a parent and child controller's own block-form arounds must not collide"
     );
-    assert!(parent_name.contains("application_controller"), "{parent_name}");
-    assert!(child_name.contains("widgets_controller"), "{child_name}");
+    assert!(parent_name.contains("ApplicationController"), "{parent_name}");
+    assert!(child_name.contains("WidgetsController"), "{child_name}");
+}
+
+// A namespaced controller and a flat one whose names underscore the same
+// way (`Admin::WidgetsController` and `AdminWidgetsController` both give
+// `admin_widgets_controller`) must not share a synthesized name either:
+// when one inherits from the other, the collision is the same override.
+#[test]
+fn a_namespaced_controller_and_a_same_named_flat_parent_synthesize_different_names() {
+    let files: Vec<(&str, &str)> = vec![
+        (
+            "app/controllers/application_controller.rb",
+            "class ApplicationController < ActionController::Base\nend\n",
+        ),
+        (
+            "app/controllers/admin_widgets_controller.rb",
+            r#"class AdminWidgetsController < ApplicationController
+  around_action do |_controller, block|
+    response.headers['X-Order'] = (response.headers['X-Order'] || '') + 'P'
+    block.call
+  end
+
+  def index
+  end
+end
+"#,
+        ),
+        (
+            "app/controllers/admin/widgets_controller.rb",
+            r#"module Admin
+  class WidgetsController < ::AdminWidgetsController
+    around_action do |_controller, block|
+      response.headers['X-Order'] = (response.headers['X-Order'] || '') + 'C'
+      block.call
+    end
+
+    def index
+    end
+  end
+end
+"#,
+        ),
+        (
+            "config/routes.rb",
+            "Rails.application.routes.draw do\n  resources :admin_widgets, only: [:index]\n  namespace :admin do\n    resources :widgets, only: [:index]\n  end\nend\n",
+        ),
+    ];
+    let tree: HashMap<PathBuf, Vec<u8>> =
+        files.into_iter().map(|(p, c)| (PathBuf::from(p), c.as_bytes().to_vec())).collect();
+    survey::activate();
+    let app = ingest_app_from_tree(tree).expect("ingest");
+    let gaps = survey::drain();
+    assert!(!has_gap(&gaps, "around_action"), "{gaps:?}");
+
+    let synthesized_name = |controller_name: &str| -> String {
+        let c = app
+            .controllers
+            .iter()
+            .find(|c| c.name.0.as_str() == controller_name)
+            .unwrap_or_else(|| panic!("{controller_name} ingested: {:?}", app.controllers.iter().map(|c| c.name.0.as_str()).collect::<Vec<_>>()));
+        c.body
+            .iter()
+            .find_map(|item| match item {
+                ControllerBodyItem::Action { action, .. }
+                    if action.name.as_str().starts_with("__rh_around_") =>
+                {
+                    Some(action.name.as_str().to_string())
+                }
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("{controller_name} has a synthesized around method: {:?}", c.body))
+    };
+    let flat = synthesized_name("AdminWidgetsController");
+    let namespaced = synthesized_name("Admin::WidgetsController");
+    assert_ne!(flat, namespaced, "a namespaced controller must not collide with a same-underscored flat parent");
 }
 
 #[test]

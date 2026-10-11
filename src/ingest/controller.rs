@@ -141,7 +141,18 @@ pub(super) fn ingest_controller_with_nesting(
     // synthesized method is an ordinary Ruby method, and the child's
     // would otherwise override the parent's instead of coexisting
     // alongside it through inheritance.
-    let around_block_owner_ident = crate::naming::underscore(owner.0.as_str()).replace('/', "_");
+    // Each `::` segment is kept as written (case included) and prefixed
+    // with its own length, so the encoding is one-to-one: neither
+    // `Admin::WidgetsController` (`5Admin_17WidgetsController`) vs a flat
+    // `AdminWidgetsController` (`22AdminWidgetsController`), nor two names
+    // that only underscore alike (`HTMLParser`, `HtmlParser`), can share it.
+    let around_block_owner_ident = owner
+        .0
+        .as_str()
+        .split("::")
+        .map(|seg| format!("{}{seg}", seg.len()))
+        .collect::<Vec<_>>()
+        .join("_");
     let mut layout = LayoutDecl::Inherit;
     // Deterministic per-controller numbering for `around_block_filter`'s
     // synthesized method names — bumped once per successfully LOWERED
