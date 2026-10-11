@@ -2576,7 +2576,9 @@ fn swift_reference_equal(r: &Expr) -> bool {
             | Ty::Nil
             | Ty::Time,
         ) => false,
-        _ => true,
+        // Absent or `Untyped` is `Any?` in Swift, and `===` does not
+        // typecheck on that. Only a proven class reference qualifies.
+        _ => false,
     }
 }
 
@@ -2740,7 +2742,7 @@ fn emit_send(
     // (value type) and stays a call.
     if method == "equal?" && args.len() == 1 {
         if let Some(r) = recv {
-            if swift_reference_equal(r) {
+            if swift_reference_equal(r) && swift_reference_equal(&args[0]) {
                 return format!("(({}) === ({}))", emit_expr(r), args_s[0]);
             }
         }
@@ -3180,15 +3182,26 @@ mod equal_identity_tests {
         )
     }
 
-    #[test]
-    fn equal_on_a_class_is_reference_identity() {
-        let mut recv = var("store");
+    fn header_store(name: &str) -> Expr {
+        let mut recv = var(name);
         recv.ty = Some(Ty::Class {
             id: ClassId(Symbol::from("ActionController::HeaderStore")),
             args: vec![],
         });
-        let out = emit_expr(&send(recv, "equal?", var("result")));
+        recv
+    }
+
+    #[test]
+    fn equal_on_a_class_is_reference_identity() {
+        let out = emit_expr(&send(header_store("store"), "equal?", header_store("result")));
         assert_eq!(out, "((store) === (result))");
+    }
+
+    #[test]
+    fn equal_on_an_untyped_operand_stays_a_call() {
+        let out = emit_expr(&send(header_store("store"), "equal?", var("result")));
+        assert!(out.contains("equalPred"), "{out}");
+        assert!(!out.contains("==="), "{out}");
     }
 
     #[test]
