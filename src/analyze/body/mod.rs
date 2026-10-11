@@ -380,6 +380,31 @@ impl<'a> BodyTyper<'a> {
 
     /// Whether `self`'s class, its includes or its ancestors register
     /// `method` — an app definition, whatever type it answered.
+    /// [`Self::app_defines`] for one side: an instance body is shadowed by
+    /// instance methods (own, included, inherited), a class-method body by
+    /// class-side ones only, since a class object cannot dispatch an
+    /// instance method.
+    fn app_defines_on_side(&self, self_ty: Option<&Ty>, method: &Symbol, instance: bool) -> bool {
+        let Some(Ty::Class { id, .. }) = self_ty else { return false };
+        let mut stack = vec![id];
+        let mut seen = std::collections::HashSet::new();
+        while let Some(cid) = stack.pop() {
+            if !seen.insert(cid) {
+                continue;
+            }
+            let Some(cls) = self.classes.get(cid) else { continue };
+            let table = if instance { &cls.instance_methods } else { &cls.class_methods };
+            if table.contains_key(method) {
+                return true;
+            }
+            if instance {
+                stack.extend(cls.includes.iter());
+            }
+            stack.extend(cls.parent.iter());
+        }
+        false
+    }
+
     fn app_defines(&self, self_ty: Option<&Ty>, method: &Symbol) -> bool {
         let Some(Ty::Class { id, .. }) = self_ty else { return false };
         let mut stack = vec![id];
@@ -1799,7 +1824,7 @@ impl<'a> BodyTyper<'a> {
                     && (1..=2).contains(&args.len())
                     && block.is_none()
                     && matches!(dispatched, Ty::Var { .. })
-                    && !self.app_defines(ctx.self_ty.as_ref(), method)
+                    && !self.app_defines_on_side(ctx.self_ty.as_ref(), method, ctx.instance_body)
                 {
                     return Ty::Str;
                 }

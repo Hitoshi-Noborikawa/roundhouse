@@ -159,3 +159,51 @@ puts "module dom_id passed"
     run.assert_passes();
     assert!(run.stdout.contains("module dom_id passed"));
 }
+
+/// Shadowing is per receiver side: an inherited INSTANCE `dom_class` does
+/// not capture a bare call inside a CLASS method (the class object cannot
+/// dispatch it), so that call still reaches the shared helper.
+#[test]
+fn record_identifier_inherited_instance_method_does_not_shadow_a_class_method_call() {
+    let run = emit_and_run::real_blog()
+        .edit(
+            "app/models/application_record.rb",
+            "primary_abstract_class\n",
+            "primary_abstract_class\n\n  def dom_class(record)\n    \"custom\"\n  end\n",
+        )
+        .edit(
+            "app/models/article.rb",
+            "  validates :title, presence: true\n",
+            "  validates :title, presence: true\n\n  def self.klass_for(article)\n    dom_class(article)\n  end\n\n  def instance_klass\n    dom_class(self)\n  end\n",
+        )
+        .run_ruby(
+            r#"a = Article.new
+raise "class side #{Article.klass_for(a).inspect}" unless Article.klass_for(a) == "article"
+raise "instance side #{a.instance_klass.inspect}" unless a.instance_klass == "custom"
+puts "class side helper passed"
+"#,
+        );
+    run.assert_passes();
+    assert!(run.stdout.contains("class side helper passed"));
+}
+
+/// A class-side app `dom_id` shadows a bare call in a class method, while
+/// an instance body with no instance `dom_id` still gets the helper.
+#[test]
+fn record_identifier_class_method_dom_id_shadows_a_class_method_call() {
+    let run = emit_and_run::real_blog()
+        .edit(
+            "app/models/article.rb",
+            "  validates :title, presence: true\n",
+            "  validates :title, presence: true\n\n  def self.dom_id(record)\n    \"classside\"\n  end\n\n  def self.pick(article)\n    dom_id(article)\n  end\n\n  def row_id\n    dom_id(self)\n  end\n",
+        )
+        .run_ruby(
+            r#"a = Article.new
+raise "class #{Article.pick(a).inspect}" unless Article.pick(a) == "classside"
+raise "instance #{a.row_id.inspect}" unless a.row_id == "new_article"
+puts "class dom_id passed"
+"#,
+        );
+    run.assert_passes();
+    assert!(run.stdout.contains("class dom_id passed"));
+}
