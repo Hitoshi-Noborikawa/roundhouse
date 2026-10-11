@@ -2429,7 +2429,12 @@ Three gaps remain, all on spinel's side:
   environment: `Translation missing: en.key`, a template's
   `translation_missing` span, or `I18n::MissingTranslationData` where
   `config.i18n.raise_on_missing_translations` is set (`:strict` and a
-  value computed at boot stay errors). A key computed at run time is an
+  value computed at boot stay errors). A key with run-time text after a
+  literal prefix (`t("statuses.#{v}")`) folds every translation under
+  the prefix into a `case` on the normalized key, falling back to the
+  missing answer or `default:`. Where such a key names a subtree, Rails
+  answers a Hash; here it raises `NotImplementedError`. A key with no
+  literal prefix, or one reaching more than 400 translations, is an
   error rather than a guess. A `Rails::Engine` gem's `config/locales`
   load before the app's, read where Bundler installed the gem
   (`BUNDLE_PATH`, `GEM_HOME`, `GEM_PATH`), so an uninstalled gem's keys

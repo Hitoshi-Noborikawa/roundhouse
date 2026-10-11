@@ -27,6 +27,20 @@ module I18n
     flipped.split(",").include?(env) ? !raises : raises
   end
 
+  # A run-time key as `I18n.normalize_keys` reads it: dot-separated,
+  # empty segments dropped (`"a..b."` is `a.b`).
+  def self.normalize_key(key)
+    out = []
+    key.split(".").each { |part| out << part unless part.empty? }
+    out.join(".")
+  end
+
+  # A run-time key that names a subtree, which `I18n.t` answers as a
+  # Hash; no folded translation carries one.
+  def self.subtree_translation(key)
+    raise NotImplementedError, "I18n.t(\"#{key}\") answers a Hash of translations, which is not supported"
+  end
+
   # `I18n.t`'s answer for `key` (`en.shop.title`): I18n's default
   # handler returns the message, `raise_on_missing_translations` raises it.
   def self.missing_translation(key, raises)

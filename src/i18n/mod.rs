@@ -301,6 +301,22 @@ pub struct Translate {
 }
 
 impl Translate {
+    /// `key` as I18n normalizes it for this call: a view's lazy `.key`
+    /// expanded from the template's path, then `scope:` in front.
+    pub fn full_key(call: &Translate, key: &str) -> Result<String, String> {
+        let key = match key.strip_prefix('.') {
+            Some(rest) => {
+                let view = call.view.as_deref().ok_or("a lazy key outside a template")?;
+                format!("{}.{rest}", view.replace("/_", ".").replace('/', "."))
+            }
+            None => key.to_string(),
+        };
+        Ok(match &call.scope {
+            Some(scope) => format!("{scope}.{key}"),
+            None => key,
+        })
+    }
+
     /// I18n interpolates only when the call passes a value, so with none
     /// `%{x}` and `%%` stay as written.
     pub fn interpolates(&self) -> bool {
@@ -329,25 +345,18 @@ impl Catalog {
     /// Resolve `call` as I18n's simple backend does, or say why it
     /// cannot be answered at compile time.
     pub fn resolve(&self, call: &Translate) -> Result<Translation, String> {
-        let full = |key: &str| -> Result<String, String> {
-            let key = match key.strip_prefix('.') {
-                Some(rest) => {
-                    let view = call.view.as_deref().ok_or("a lazy key outside a template")?;
-                    format!("{}.{rest}", view.replace("/_", ".").replace('/', "."))
-                }
-                None => key.to_string(),
-            };
-            Ok(match &call.scope {
-                Some(scope) => format!("{scope}.{key}"),
-                None => key,
-            })
-        };
+        let full = |key: &str| Translate::full_key(call, key);
         let mut candidates: Vec<Result<String, String>> = vec![Ok(full(&call.key)?)];
         for default in &call.defaults {
             candidates.push(match default {
                 Fallback::Key(k) => Ok(full(k)?),
                 Fallback::Text(t) => Err(t.clone()),
             });
+        }
+        for key in candidates.iter().flatten() {
+            if self.entry(key, call.counted).is_none() && self.is_subtree(key) {
+                return Err(format!("`{key}` names a subtree, which I18n answers as a Hash"));
+            }
         }
         let found = candidates.iter().find_map(|c| match c {
             Ok(key) => self.entry(key, call.counted),
@@ -380,6 +389,46 @@ impl Catalog {
             }
         }
         Ok(translation)
+    }
+
+    /// Whether `key` has entries beneath it.
+    pub fn is_subtree(&self, key: &str) -> bool {
+        let below = format!("{key}.");
+        self.entries.range(below.clone()..).next().is_some_and(|(k, _)| k.starts_with(&below))
+    }
+
+    /// The keys a call can reach when its key is `base` (already scoped
+    /// and expanded) followed by text known only at run time and ending
+    /// in `tail`: the translations to fold, and the subtrees Rails would
+    /// answer as a Hash. Supersets are harmless, since the run-time key
+    /// is compared to each exactly.
+    pub fn reach(&self, base: &str, tail: &str, counted: bool) -> (Vec<String>, Vec<String>) {
+        let tail = tail.trim_matches('.');
+        let stem = base.trim_end_matches('.');
+        let under = |k: &str| k.starts_with(base) || k == stem;
+        let mut nodes: Vec<String> = Vec::new();
+        for key in self.entries.keys().filter(|k| under(k)) {
+            let mut node = key.as_str();
+            nodes.push(node.to_string());
+            while let Some((parent, _)) = node.rsplit_once('.') {
+                if !under(parent) {
+                    break;
+                }
+                nodes.push(parent.to_string());
+                node = parent;
+            }
+        }
+        nodes.sort();
+        nodes.dedup();
+        let (mut keys, mut subtrees) = (Vec::new(), Vec::new());
+        for node in nodes {
+            match self.entry(&node, counted) {
+                Some(_) if node.ends_with(tail) => keys.push(node),
+                Some(_) => {}
+                None => subtrees.push(node),
+            }
+        }
+        (keys, subtrees)
     }
 
     fn entry(&self, key: &str, counted: bool) -> Option<Translation> {
@@ -788,6 +837,21 @@ mod tests {
         let (_, problems) = Catalog::load("en", &mut files);
         assert_eq!(problems.len(), 1);
         assert_eq!(problems[0].0, "config/locales/bad.yml");
+    }
+
+    #[test]
+    fn a_run_time_key_reaches_the_translations_under_its_prefix() {
+        let c = catalog(&[(
+            "config/locales/en.yml",
+            "en:\n  vis:\n    public: Everyone\n    group:\n      staff: Staff\n    inbox:\n      one: \"1\"\n      other: \"%{count}\"\n  visitor: Guest\n",
+        )]);
+        let (keys, subtrees) = c.reach("vis.", "", false);
+        assert_eq!(keys, vec!["vis.group.staff", "vis.inbox.one", "vis.inbox.other", "vis.public"]);
+        assert_eq!(subtrees, vec!["vis", "vis.group", "vis.inbox"]);
+        let (keys, subtrees) = c.reach("vis.", "", true);
+        assert!(keys.contains(&"vis.inbox".to_string()) && !subtrees.contains(&"vis.inbox".to_string()));
+        assert_eq!(c.reach("vis.", ".staff", false).0, vec!["vis.group.staff"]);
+        assert!(c.resolve(&Translate { key: "vis.group".into(), ..Default::default() }).is_err());
     }
 
     #[test]

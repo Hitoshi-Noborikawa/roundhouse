@@ -824,7 +824,7 @@ fn translate_app() -> emit_and_run::Overlay {
     emit_and_run::real_blog()
         .write(
             "config/locales/en.yml",
-            "en:\n  hello: \"Hello world\"\n  greet: \"Hi %{name}\"\n  inbox:\n    zero: \"No messages\"\n    one: \"1 message\"\n    other: \"%{count} messages\"\n  shop:\n    title: \"Store\"\n  intro_html: \"<b>Hi</b> %{name}\"\n  pct: \"100%% sure %%{x} %{name}\"\n  mood:\n    happy: \"Glad\"\n    sad: \"Down %{name}\"\n  tally_html:\n    one: \"<b>one</b>\"\n    other: \"<b>%{count}</b> items\"\n  articles:\n    index:\n      heading: \"All the articles\"\n",
+            "en:\n  hello: \"Hello world\"\n  greet: \"Hi %{name}\"\n  inbox:\n    zero: \"No messages\"\n    one: \"1 message\"\n    other: \"%{count} messages\"\n  shop:\n    title: \"Store\"\n  intro_html: \"<b>Hi</b> %{name}\"\n  pct: \"100%% sure %%{x} %{name}\"\n  mood:\n    happy: \"Glad\"\n    sad: \"Down %{name}\"\n  visibility:\n    public: \"Everyone\"\n    private: \"Only me\"\n    notice_html: \"<b>Note</b> %{name}\"\n  box:\n    inbox:\n      one: \"1 letter\"\n      other: \"%{count} letters\"\n  tally_html:\n    one: \"<b>one</b>\"\n    other: \"<b>%{count}</b> items\"\n  articles:\n    index:\n      heading: \"All the articles\"\n",
         )
         .edit(
             "app/models/article.rb",
@@ -863,6 +863,18 @@ fn translate_app() -> emit_and_run::Overlay {
     [I18n.t(\"mood.#{flag ? 'happy' : 'sad'}\", name: \"Al\"), I18n.t(flag ? :hello : \"shop.title\")]
   end
 
+  def self.visibility(v)
+    I18n.t(\"visibility.#{v}\")
+  end
+
+  def self.visibility_or(v)
+    I18n.t(\"visibility.#{v}\", default: \"Unknown\")
+  end
+
+  def self.letters(box, n)
+    I18n.t(\"box.#{box}\", count: n)
+  end
+
   def self.missing_text(flag)
     [I18n.t(\"no.such.key\", name: \"x\"), I18n.t(\"shop.#{flag ? 'title' : 'nope'}\")]
   end
@@ -884,11 +896,11 @@ fn translate_app() -> emit_and_run::Overlay {
         .edit(
             "app/views/articles/index.html.erb",
             "<h1",
-            "<p id=\"lazy\"><%= t(\".heading\") %></p><p id=\"inbox\"><%= t(\"inbox\", count: @articles.size) %></p><p id=\"intro\"><%= t(\"intro_html\", name: \"<i>\") %></p><p id=\"tally\"><%= t(\"tally_html\", count: \"<s>\") %></p><p id=\"missing\"><%= t(\"no.such_key\", name: \"<b>\", count: 2) %></p><p id=\"lazy-missing\"><%= t(\".missing_heading\") %></p>\n<h1",
+            "<p id=\"lazy\"><%= t(\".heading\") %></p><p id=\"inbox\"><%= t(\"inbox\", count: @articles.size) %></p><p id=\"intro\"><%= t(\"intro_html\", name: \"<i>\") %></p><p id=\"tally\"><%= t(\"tally_html\", count: \"<s>\") %></p><p id=\"missing\"><%= t(\"no.such_key\", name: \"<b>\", count: 2) %></p><p id=\"lazy-missing\"><%= t(\".missing_heading\") %></p><% [\"notice_html\", \"public\", \"nope\"].each do |k| %><p class=\"vis\"><%= t(\"visibility.#{k}\", name: \"<i>\") %></p><% end %>\n<h1",
         )
         .write(
             "test/controllers/translations_controller_test.rb",
-            "require \"test_helper\"\n\nclass TranslationsControllerTest < ActionDispatch::IntegrationTest\n  test \"templates translate\" do\n    get articles_url\n    assert_includes response.body, \"<p id=\\\"lazy\\\">All the articles</p>\"\n    assert_includes response.body, \" messages</p>\"\n    assert_includes response.body, \"<p id=\\\"intro\\\"><b>Hi</b> &lt;i&gt;</p>\"\n    assert_includes response.body, \"<p id=\\\"tally\\\"><b>&lt;s&gt;</b> items</p>\"\n    assert_includes response.body, \"<p id=\\\"missing\\\"><span class=\\\"translation_missing\\\" title=\\\"translation missing: en.no.such_key, name: &amp;lt;b&amp;gt;, count: 2\\\">Such Key</span></p>\"\n    assert_includes response.body, \"<p id=\\\"lazy-missing\\\"><span class=\\\"translation_missing\\\" title=\\\"translation missing: en.articles.index.missing_heading\\\">Missing Heading</span></p>\"\n  end\nend\n",
+            "require \"test_helper\"\n\nclass TranslationsControllerTest < ActionDispatch::IntegrationTest\n  test \"templates translate\" do\n    get articles_url\n    assert_includes response.body, \"<p id=\\\"lazy\\\">All the articles</p>\"\n    assert_includes response.body, \" messages</p>\"\n    assert_includes response.body, \"<p id=\\\"intro\\\"><b>Hi</b> &lt;i&gt;</p>\"\n    assert_includes response.body, \"<p id=\\\"tally\\\"><b>&lt;s&gt;</b> items</p>\"\n    assert_includes response.body, \"<p id=\\\"missing\\\"><span class=\\\"translation_missing\\\" title=\\\"translation missing: en.no.such_key, name: &amp;lt;b&amp;gt;, count: 2\\\">Such Key</span></p>\"\n    assert_includes response.body, \"<p class=\\\"vis\\\"><b>Note</b> &lt;i&gt;</p><p class=\\\"vis\\\">Everyone</p><p class=\\\"vis\\\"><span class=\\\"translation_missing\\\" title=\\\"translation missing: en.visibility.nope, name: &amp;lt;i&amp;gt;\\\">Nope</span></p>\"\n    assert_includes response.body, \"<p id=\\\"lazy-missing\\\"><span class=\\\"translation_missing\\\" title=\\\"translation missing: en.articles.index.missing_heading\\\">Missing Heading</span></p>\"\n  end\nend\n",
         )
 }
 
@@ -906,6 +918,15 @@ raise "count evaluated #{calls.size} times" unless calls.size == 1
 raise "percents: #{Article.percents.inspect}" unless Article.percents == ["100% sure %{x} N", "Hi %{name}"]
 raise "moods: #{Article.moods(true).inspect}" unless Article.moods(true) == ["Glad", "Hello world"]
 raise "moods: #{Article.moods(false).inspect}" unless Article.moods(false) == ["Down Al", "Store"]
+raise "visibility: #{Article.visibility("private")}" unless [Article.visibility("public"), Article.visibility("private")] == ["Everyone", "Only me"]
+raise "visibility missing: #{Article.visibility("nope")}" unless Article.visibility("nope") == "Translation missing: en.visibility.nope"
+raise "visibility default: #{Article.visibility_or("nope")}" unless Article.visibility_or("nope") == "Unknown" && Article.visibility_or("public") == "Everyone"
+raise "letters: #{Article.letters("inbox", 2)}" unless Article.letters("inbox", 2) == "2 letters" && Article.letters("inbox", 1) == "1 letter"
+begin
+  Article.visibility("")
+  raise "subtree did not raise"
+rescue NotImplementedError
+end
 raise "missing: #{Article.missing_text(false).inspect}" unless Article.missing_text(false) == ["Translation missing: en.no.such.key", "Translation missing: en.shop.nope"]
 calls = []
 raise "unread: #{calls.inspect}" unless Article.unread_option(calls) == "Hello world" && calls == [1]
