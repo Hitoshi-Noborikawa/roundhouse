@@ -71,6 +71,8 @@ mod campfire_caches_contract;
 mod campfire_caches;
 #[path = "spinel_toolchain/ordinalize.rs"]
 mod ordinalize;
+#[path = "spinel_toolchain/params_helper_no_permit.rs"]
+mod params_helper_no_permit;
 
 /// Compile and execute the shared custom Data factory contract with Spinel;
 /// successful Ruby emission alone does not establish native target support.

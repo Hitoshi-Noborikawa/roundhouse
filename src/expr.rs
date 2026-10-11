@@ -79,6 +79,9 @@ pub const SELF_BINDING: u64 = 1 << 14;
 /// which `Ty` alone does not tell apart from an instance.
 pub const SELF_BINDING_CLASS_OBJECT: u64 = 1 << 15;
 
+/// The `defaults.merge(hash)` ingest wrote for `hash.reverse_merge(defaults)`.
+pub const REVERSE_MERGE: u64 = 1 << 16;
+
 /// Whether `expr` is a [`SELF_BINDING`] cast.
 pub fn is_self_binding(expr: &Expr) -> bool {
     expr.decisions & SELF_BINDING != 0
