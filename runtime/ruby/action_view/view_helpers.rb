@@ -367,96 +367,121 @@ module ActionView
     # than weakening this helper's String return contract.
     #
     # Portable subset for strict-target emit: no Regexp, no `break`/`next`
-    # (TS), character access via `s[i, 1]` / `s[i, n]` (Rust), concat with
-    # `+` (owned String), sentinel `-1` instead of nil.
+    # (TS), no nested `while` (Elixir while→recursion is single-loop only),
+    # character access via `s[i, 1]` / `s[i, n]` (Rust), concat with `+`
+    # (owned String). Outer scan and break search are explicit recursion.
     def self.word_wrap(text, line_width: 80, break_sequence: "\n")
       raise ArgumentError, "line_width must be positive" if line_width <= 0
       return "" if text.empty?
+      word_wrap_finish(
+        word_wrap_scan(text, line_width, break_sequence, "", 0, text.length),
+        break_sequence
+      )
+    end
 
-      out = ""
-      i = 0
-      n = text.length
-      while i < n
-        ch = text[i, 1]
-        if ch == "\n"
-          out = out + break_sequence
-          i = i + 1
+    def self.word_wrap_finish(out, break_sequence)
+      bl = break_sequence.length
+      if bl > 0 && out.length >= bl && out[out.length - bl, bl] == break_sequence
+        out[0, out.length - bl]
+      else
+        out
+      end
+    end
+
+    def self.word_wrap_scan(text, line_width, break_sequence, out, i, n)
+      return out if i >= n
+      ch = text[i, 1]
+      if ch == "\n"
+        word_wrap_scan(text, line_width, break_sequence, out + break_sequence, i + 1, n)
+      else
+        max_end = i + line_width
+        max_end = n if max_end > n
+        pair = word_wrap_find_break(text, i + 1, max_end, n, -1, -1)
+        best_j = pair[0]
+        best_next = pair[1]
+        if best_j < 0
+          word_wrap_hard(text, line_width, break_sequence, out, i, n)
         else
-          max_end = i + line_width
-          max_end = n if max_end > n
-          best_j = -1
-          best_next = -1
-          j = i + 1
-          while j <= max_end
-            k = j
-            if k >= n
-              best_j = j
-              best_next = n
-            else
-              ch_k = text[k, 1]
-              if ch_k == "\n"
-                r = k
-                while r < n && text[r, 1] == "\n"
-                  r = r + 1
-                end
-                best_j = j
-                best_next = r >= n ? n : k + 1
-              else
-                is_ws = ch_k == " " || ch_k == "\t" || ch_k == "\r" || ch_k == "\f" || ch_k == "\v"
-                if is_ws
-                  while k < n && (text[k, 1] == " " || text[k, 1] == "\t" || text[k, 1] == "\r" || text[k, 1] == "\f" || text[k, 1] == "\v")
-                    k = k + 1
-                  end
-                  k = k + 1 if k < n && text[k, 1] == "\n"
-                  best_j = j
-                  best_next = k
-                end
-              end
-            end
-            j = j + 1
-          end
-          if best_j < 0
-            j = i
-            while j < n && text[j, 1] != "\n" && text[j, 1] != " " && text[j, 1] != "\t" && text[j, 1] != "\r" && text[j, 1] != "\f" && text[j, 1] != "\v"
-              j = j + 1
-            end
-            j = i + 1 if j == i
-            out = out + text[i, j - i]
-            k = j
-            if k < n
-              w = text[k, 1]
-              if w == " " || w == "\t" || w == "\r" || w == "\f" || w == "\v"
-                while k < n && (text[k, 1] == " " || text[k, 1] == "\t" || text[k, 1] == "\r" || text[k, 1] == "\f" || text[k, 1] == "\v")
-                  k = k + 1
-                end
-                k = k + 1 if k < n && text[k, 1] == "\n"
-                out = out + break_sequence
-                i = k
-              else
-                if w == "\n"
-                  out = out + break_sequence
-                  i = k + 1
-                else
-                  i = j
-                end
-              end
-            else
-              i = j
-            end
+          word_wrap_scan(
+            text,
+            line_width,
+            break_sequence,
+            out + text[i, best_j - i] + break_sequence,
+            best_next,
+            n
+          )
+        end
+      end
+    end
+
+    def self.word_wrap_find_break(text, j, max_end, n, best_j, best_next)
+      return [best_j, best_next] if j > max_end
+      k = j
+      if k >= n
+        word_wrap_find_break(text, j + 1, max_end, n, j, n)
+      else
+        ch_k = text[k, 1]
+        if ch_k == "\n"
+          r = word_wrap_skip_nl(text, k, n)
+          bn = k + 1
+          bn = n if r >= n
+          word_wrap_find_break(text, j + 1, max_end, n, j, bn)
+        else
+          is_ws = ch_k == " " || ch_k == "\t" || ch_k == "\r" || ch_k == "\f" || ch_k == "\v"
+          if is_ws
+            k2 = word_wrap_skip_ws(text, k, n)
+            k2 = k2 + 1 if k2 < n && text[k2, 1] == "\n"
+            word_wrap_find_break(text, j + 1, max_end, n, j, k2)
           else
-            out = out + text[i, best_j - i]
-            out = out + break_sequence
-            i = best_next
+            word_wrap_find_break(text, j + 1, max_end, n, best_j, best_next)
           end
         end
       end
-      bl = break_sequence.length
-      if bl > 0 && out.length >= bl && out[out.length - bl, bl] == break_sequence
-        out = out[0, out.length - bl]
-      end
-      out
     end
-  
+
+    def self.word_wrap_skip_nl(text, r, n)
+      return r if r >= n
+      return r if text[r, 1] != "\n"
+      word_wrap_skip_nl(text, r + 1, n)
+    end
+
+    def self.word_wrap_skip_ws(text, k, n)
+      return k if k >= n
+      w = text[k, 1]
+      return k unless w == " " || w == "\t" || w == "\r" || w == "\f" || w == "\v"
+      word_wrap_skip_ws(text, k + 1, n)
+    end
+
+    def self.word_wrap_word_end(text, j, n)
+      return j if j >= n
+      w = text[j, 1]
+      return j if w == "\n" || w == " " || w == "\t" || w == "\r" || w == "\f" || w == "\v"
+      word_wrap_word_end(text, j + 1, n)
+    end
+
+    def self.word_wrap_hard(text, line_width, break_sequence, out, i, n)
+      j = word_wrap_word_end(text, i, n)
+      j = i + 1 if j == i
+      out2 = out + text[i, j - i]
+      k = j
+      if k < n
+        w = text[k, 1]
+        if w == " " || w == "\t" || w == "\r" || w == "\f" || w == "\v"
+          k2 = word_wrap_skip_ws(text, k, n)
+          k2 = k2 + 1 if k2 < n && text[k2, 1] == "\n"
+          word_wrap_scan(text, line_width, break_sequence, out2 + break_sequence, k2, n)
+        else
+          if w == "\n"
+            word_wrap_scan(text, line_width, break_sequence, out2 + break_sequence, k + 1, n)
+          else
+            word_wrap_scan(text, line_width, break_sequence, out2, j, n)
+          end
+        end
+      else
+        word_wrap_scan(text, line_width, break_sequence, out2, j, n)
+      end
+    end
+
     # ── DOM helpers ──────────────────────────────────────────────────
 
     # Monomorphic: param typed `ActiveRecord::Base`. Was previously a

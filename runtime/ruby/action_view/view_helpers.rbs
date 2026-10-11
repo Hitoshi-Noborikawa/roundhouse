@@ -69,6 +69,34 @@ module ActionView
       ?line_width: Integer,
       ?break_sequence: String
     ) -> String
+    def self.word_wrap_finish: (String out, String break_sequence) -> String
+    def self.word_wrap_scan: (
+      String text,
+      Integer line_width,
+      String break_sequence,
+      String out,
+      Integer i,
+      Integer n
+    ) -> String
+    def self.word_wrap_find_break: (
+      String text,
+      Integer j,
+      Integer max_end,
+      Integer n,
+      Integer best_j,
+      Integer best_next
+    ) -> Array[Integer]
+    def self.word_wrap_skip_nl: (String text, Integer r, Integer n) -> Integer
+    def self.word_wrap_skip_ws: (String text, Integer k, Integer n) -> Integer
+    def self.word_wrap_word_end: (String text, Integer j, Integer n) -> Integer
+    def self.word_wrap_hard: (
+      String text,
+      Integer line_width,
+      String break_sequence,
+      String out,
+      Integer i,
+      Integer n
+    ) -> String
   
     # ── DOM helpers ─────────────────────────────────────────────────
     # Monomorphic record-shape: dom_id takes an ActiveRecord::Base

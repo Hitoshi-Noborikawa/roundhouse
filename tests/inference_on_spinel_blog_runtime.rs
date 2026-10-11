@@ -361,9 +361,8 @@ fn untyped_subexpressions_baseline() {
     // Meta-PR #802 (exists? arity / where-seed / related Relation arms):
     // 592 -> 603, MEASURED on tip 86936194's CI unit shard.
     // #818 AssociationReflection + `reflect_on_association`: +5 on clean
-    // main (578 -> 583); absorbed under the #802 tip ceiling until
-    // remount remeasure.
-    const CEILING: usize = 603;
+    // main (578 -> 583). Remount remeasure after #818 merge: 603 -> 608.
+    const CEILING: usize = 608;
     assert!(
         all_untyped.len() <= CEILING,
         "{} untyped sub-expressions on spinel-blog runtime — exceeds ceiling of {CEILING}.\n\
