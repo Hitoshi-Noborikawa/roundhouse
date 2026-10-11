@@ -18,6 +18,14 @@ fn app() -> emit_and_run::Overlay {
     Rails.error.report(error, handled: true)
   end
 
+  def self.report_unhandled(error)
+    Rails.error.report(error, handled: false)
+  end
+
+  def self.report_info(error)
+    Rails.error.report(error, handled: true, severity: :info)
+  end
+
   def self.option_labels(options)
     Array(options).pluck(\"label\")
   end
@@ -47,15 +55,19 @@ puts "time zone lookup passed"
 }
 
 #[test]
-fn rails_error_report_logs_in_emitted_ruby() {
+fn rails_error_report_logs_at_its_severity_in_emitted_ruby() {
     let run = app().run_ruby(
-        r#"raise "report returns nil" unless Article.report(RuntimeError.new("boom")).nil?
+        r#"raise "report returns nil" unless Article.report(RuntimeError.new("handled")).nil?
+Article.report_unhandled(RuntimeError.new("unhandled"))
+Article.report_info(RuntimeError.new("info"))
 puts "error report passed"
 "#,
     );
     run.assert_passes();
     assert!(run.stdout.contains("error report passed"));
-    assert!(run.stderr.contains("ERROR RuntimeError: boom"), "{}", run.stderr);
+    for line in ["WARN RuntimeError: handled", "ERROR RuntimeError: unhandled", "INFO RuntimeError: info"] {
+        assert!(run.stderr.contains(line), "{line}: {}", run.stderr);
+    }
 }
 
 #[test]

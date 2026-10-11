@@ -838,7 +838,15 @@ module ActiveSupport
   # Not Rails' subscriber list: nothing in the runtime subscribes, so a report goes to the log.
   class ErrorReporter
     def report(error, handled: true, severity: nil, context: {}, source: nil)
-      Rails.logger.error("#{error.class}: #{error.message}")
+      message = "#{error.class}: #{error.message}"
+      case severity || (handled ? :warning : :error)
+      when :info
+        Rails.logger.info(message)
+      when :warning
+        Rails.logger.warn(message)
+      else
+        Rails.logger.error(message)
+      end
       nil
     end
   end
