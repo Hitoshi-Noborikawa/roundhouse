@@ -38,6 +38,7 @@ module ActionController
     def inertia_request?: () -> bool
     def inertia_header: (String name) -> String
     def inertia_begin: (String component, String version, bool encrypt_history, bool always_include_errors_hash) -> nil
+    def inertia_stale_version?: (String version) -> bool
     def inertia_errors_json: (String json) -> nil
     def inertia_url: () -> String
     def render_inertia_json: (?status: Symbol) -> nil

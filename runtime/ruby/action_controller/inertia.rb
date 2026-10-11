@@ -184,6 +184,7 @@ module ActionController
                  inertia_header("HTTP_X_INERTIA_PARTIAL_COMPONENT"),
                  inertia_header("HTTP_X_INERTIA_PARTIAL_DATA"),
                  inertia_header("HTTP_X_INERTIA_PARTIAL_EXCEPT"))
+      return nil if inertia_stale_version?(version)
       stored = session["inertia_errors"]
       if !stored.nil?
         session.delete("inertia_errors")
@@ -194,6 +195,12 @@ module ActionController
         page.prop_json("errors", "{}")
       end
       nil
+    end
+
+    def inertia_stale_version?(version)
+      req = request
+      return false if req.nil?
+      req.get? && req.inertia? && inertia_header("HTTP_X_INERTIA_VERSION") != version
     end
 
     # JSON text rather than the Hash: the session cookie stores each
@@ -213,7 +220,7 @@ module ActionController
       page = inertia_page
       headers["Vary"] = "X-Inertia"
       req = request
-      if !req.nil? && req.get? && inertia_header("HTTP_X_INERTIA_VERSION") != page.version
+      if !req.nil? && inertia_stale_version?(page.version)
         headers["X-Inertia-Location"] = req.original_url
         head(:conflict)
         return nil

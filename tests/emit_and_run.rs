@@ -11589,6 +11589,14 @@ class InertiaArticlesControllerTest < ActionDispatch::IntegrationTest
     assert_equal({}, response.parsed_body["props"]["errors"])
   end
 
+  test "a stale version keeps the stored errors for the full-page reload" do
+    patch "/inertia_articles", params: { title: "" }, headers: INERTIA
+    get "/inertia_articles", headers: { "X-Inertia" => "true", "X-Inertia-Version" => "v0" }
+    assert_response 409
+    get "/inertia_articles"
+    assert_includes response.body, %("props":{"errors":{"title":["can't be blank"]},)
+  end
+
   test "a PATCH outside Inertia keeps its 302" do
     patch "/inertia_articles", params: { title: "ok" }
     assert_response 302
