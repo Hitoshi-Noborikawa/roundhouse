@@ -197,7 +197,7 @@ use crate::models::*;
 #[allow(unused_imports)]
 use crate::views::*;
 #[allow(unused_imports)]
-use crate::errors_ext::{raise, NotImplementedError, RecordNotFound, RecordInvalid};
+use crate::errors_ext::{raise, ArgumentError, NotImplementedError, RecordNotFound, RecordInvalid};
 ";
 
 const MODEL_IMPORTS: &str = "\
