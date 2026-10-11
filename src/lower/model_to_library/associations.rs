@@ -1610,8 +1610,9 @@ pub(crate) fn polymorphic_type_switch(
     scrutinee: Expr,
     targets: &[ClassId],
     arm_body: impl Fn(&ClassId) -> Expr,
+    otherwise: Option<Expr>,
 ) -> Expr {
-    let arms: Vec<crate::expr::Arm> = targets
+    let mut arms: Vec<crate::expr::Arm> = targets
         .iter()
         .map(|t| crate::expr::Arm {
             pattern: crate::expr::Pattern::Expr { expr: class_const(t) },
@@ -1619,6 +1620,9 @@ pub(crate) fn polymorphic_type_switch(
             body: arm_body(t),
         })
         .collect();
+    if let Some(body) = otherwise {
+        arms.push(crate::expr::Arm { pattern: crate::expr::Pattern::Wildcard, guard: None, body });
+    }
     Expr::new(Span::synthetic(), ExprNode::Case { scrutinee, arms })
 }
 
@@ -1687,7 +1691,7 @@ fn synth_polymorphic_writer(
     );
     let type_switch = polymorphic_type_switch(var_ref(value.clone()), targets, |t| {
         assign(&type_col, lit_str(t.0.as_str()))
-    });
+    }, None);
     let body = Expr::new(
         Span::synthetic(),
         ExprNode::If {

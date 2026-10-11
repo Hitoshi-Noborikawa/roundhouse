@@ -3010,6 +3010,10 @@ fn join_spec_sql(model: &ClassId, spec: &Expr, kind: &str, ctx: &Ctx) -> Option<
     }
 }
 
+/// The `<name>_type` value a polymorphic condition uses for a record that is
+/// none of the association's implementors: matches no stored row.
+const POLYMORPHIC_NO_TYPE: &str = "<not a polymorphic type>";
+
 fn lower_relation_args(
     model: &ClassId,
     method: &Symbol,
@@ -3101,6 +3105,17 @@ fn lower_relation_args(
                                     v.clone(),
                                     targets,
                                     |t| syn(span, ExprNode::Lit { value: Literal::Str { value: t.0.as_str().to_string() } }),
+                                    // A value that is none of the implementors can
+                                    // match no row (Rails compares to its
+                                    // `polymorphic_name`, which no stored row has).
+                                    // The writer stores a class name, or `""` for
+                                    // nil; this sentinel is neither — `<` and a
+                                    // space cannot appear in a constant name — so
+                                    // it can collide with nothing, and it is not
+                                    // nil, so it is not `IS NULL` either.
+                                    Some(syn(span, ExprNode::Lit {
+                                        value: Literal::Str { value: POLYMORPHIC_NO_TYPE.to_string() },
+                                    })),
                                 );
                                 type_conditions.push((
                                     syn(span, ExprNode::Lit { value: Literal::Sym { value: type_col.clone() } }),
@@ -4820,6 +4835,20 @@ mod tests {
         let reg = polymorphic_fixture(vec![ClassId(Symbol::from("Message"))]);
         let keys: Vec<String> = where_record(var("message"), &reg).into_iter().map(|(k, _)| k).collect();
         assert_eq!(keys, ["record_id", "record_type"]);
+        // The type switch has an otherwise-arm no stored row can match, so a
+        // value that is none of the implementors finds nothing (not `IS NULL`).
+        let (scopes, models) = (ScopeRegistry::new(), HashSet::new());
+        let ctx = ctx_with(&scopes, &models, &reg);
+        let mut args = vec![hash_arg(vec![(sym_lit("record"), var("message"))])];
+        lower_relation_args(&ClassId(Symbol::from("ActionText::RichText")), &Symbol::from("where"), &mut args, &ctx);
+        let ExprNode::Hash { entries, .. } = &*args[0].node else { panic!("hash") };
+        let ExprNode::Case { arms, .. } = &*entries[1].1.node else { panic!("case") };
+        assert_eq!(arms.len(), 2);
+        assert!(matches!(arms[1].pattern, crate::expr::Pattern::Wildcard));
+        assert!(matches!(
+            &*arms[1].body.node,
+            ExprNode::Lit { value: Literal::Str { value } } if value == POLYMORPHIC_NO_TYPE
+        ));
         // A non-simple value cannot be read twice: id-only, as before.
         let call = Expr::new(
             span(),

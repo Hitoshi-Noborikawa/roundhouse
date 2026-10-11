@@ -137,6 +137,8 @@ class VotesTest < ActiveSupport::TestCase
     assert_equal true, @a1.unliked_by(admin)
     assert_equal 0, ActsAsVotable::Vote.where(voter: admin).count
     assert_equal 1, ActsAsVotable::Vote.where(voter: @r1).count
+    # a record of a class that is not a voter finds no rows, not "any type"
+    assert_equal 0, ActsAsVotable::Vote.where(voter: @a1).count
   end
 
   test "a nil voter condition is IS NULL on both columns, like the plain belongs_to path" do

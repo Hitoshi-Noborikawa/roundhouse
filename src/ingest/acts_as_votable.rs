@@ -549,13 +549,32 @@ pub(crate) fn expand_acts_as_votable(app: &mut crate::App) -> IngestResult<()> {
         };
         let votable = macro_calls(&app.models[mi], "acts_as_votable");
         if let Some((first, args)) = votable.first() {
-            let strategy = match votable_strategy(args) {
+            // One expansion stands for every call, so the calls must agree:
+            // identical repeats collapse, differing options are refused
+            // rather than silently keeping the first call's.
+            let mut strategies = votable.iter().map(|(_, a)| votable_strategy(a));
+            let strategy = match strategies.next().unwrap_or_else(|| votable_strategy(args)) {
                 Ok(s) => s,
                 Err(why) => {
                     refuse(why)?;
                     continue;
                 }
             };
+            let mut differing = false;
+            for other in strategies {
+                match other {
+                    Ok(o) if o == strategy => {}
+                    Ok(_) => differing = true,
+                    Err(why) => {
+                        refuse(why)?;
+                        differing = true;
+                    }
+                }
+            }
+            if differing {
+                refuse("`acts_as_votable` is called more than once with different options".into())?;
+                continue;
+            }
             let cols = app
                 .schema
                 .tables
@@ -570,7 +589,7 @@ pub(crate) fn expand_acts_as_votable(app: &mut crate::App) -> IngestResult<()> {
         }
         let voter = macro_calls(&app.models[mi], "acts_as_voter");
         if let Some((first, args)) = voter.first() {
-            if !args.is_empty() {
+            if voter.iter().any(|(_, a)| !a.is_empty()) || !args.is_empty() {
                 refuse("`acts_as_voter` takes no arguments here".into())?;
                 continue;
             }

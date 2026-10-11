@@ -167,3 +167,34 @@ fn an_unmodeled_strategy_is_refused() {
     };
     assert!(msg.contains("cacheable_strategy"), "{msg}");
 }
+
+#[test]
+fn repeated_macros_with_different_options_are_refused_and_identical_ones_collapse() {
+    let differing = ARTICLE.replace(
+        "  acts_as_votable\n",
+        "  acts_as_votable\n  acts_as_votable cacheable_strategy: :update_columns\n",
+    );
+    let err = ingest_app_from_tree(tree(
+        Some(LOCK),
+        &schema(true),
+        &[("application_record", APPLICATION_RECORD), ("article", &differing)],
+    ))
+    .err()
+    .expect("refused");
+    assert!(err.to_string().contains("different options"), "{err}");
+
+    let same = ARTICLE.replace("  acts_as_votable\n", "  acts_as_votable\n  acts_as_votable\n");
+    let app = ingest_app_from_tree(tree(
+        Some(LOCK),
+        &schema(true),
+        &[("application_record", APPLICATION_RECORD), ("article", &same)],
+    ))
+    .expect("identical repeats are one expansion");
+    let article = app.models.iter().find(|m| m.name.0.as_str() == "Article").unwrap();
+    let n = article
+        .body
+        .iter()
+        .filter(|i| matches!(i, ModelBodyItem::Association { assoc, .. } if assoc.name().as_str() == "votes_for"))
+        .count();
+    assert_eq!(n, 1);
+}
