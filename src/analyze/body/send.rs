@@ -2639,7 +2639,12 @@ fn array_find(method: &Symbol, args: &[crate::expr::Expr], block_ret: Option<&Ty
 /// Must match `lower::enumerable_ext::ground_indexed_pluck` — typing a
 /// `pluck` the lowerer leaves alone is invariant 6 (silent NoMethodError).
 pub(crate) fn indexed_pluck(method: &Symbol, elem: &Ty, args: &[crate::expr::Expr]) -> Option<Ty> {
-    if method.as_str() != "pluck" || args.len() != 1 {
+    // Not any key expression: the lowerer copies the key into the `map`
+    // block, so a computed key would run once per element.
+    let [key] = args else { return None };
+    if method.as_str() != "pluck"
+        || !matches!(&*key.node, ExprNode::Lit { .. } | ExprNode::Var { .. })
+    {
         return None;
     }
     let value = match elem {

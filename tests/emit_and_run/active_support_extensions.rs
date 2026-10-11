@@ -21,6 +21,10 @@ fn app() -> emit_and_run::Overlay {
   def self.option_labels(options)
     Array(options).pluck(\"label\")
   end
+
+  def self.option_values(options, key)
+    Array(options).pluck(key)
+  end
 ",
     )
 }
@@ -60,6 +64,7 @@ fn array_pluck_reads_each_hash_in_emitted_ruby() {
         r#"labels = Article.option_labels([{ "label" => "a" }, { "label" => "b" }, {}])
 raise "labels: #{labels.inspect}" unless labels == ["a", "b", nil]
 raise "nil options" unless Article.option_labels(nil) == []
+raise "local key" unless Article.option_values([{ id: 1 }, { id: 2 }], :id) == [1, 2]
 puts "array pluck passed"
 "#,
     );

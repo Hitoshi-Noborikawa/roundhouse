@@ -2290,6 +2290,26 @@ end
 }
 
 #[test]
+fn array_pluck_with_a_computed_key_stays_an_error() {
+    let app = app_from_files(&[
+        (
+            "app/models/application_record.rb",
+            "class ApplicationRecord < ActiveRecord::Base\nend\n",
+        ),
+        ("db/schema.rb", widget_schema()),
+        (
+            "app/models/widget.rb",
+            r#"class Widget < ApplicationRecord
+  def self.labels(options) = Array(options).pluck(label_key)
+  def self.label_key = "label"
+end
+"#,
+        ),
+    ]);
+    assert_eq!(errors_of(&app), vec!["no known method `pluck` on Array[untyped]".to_string()]);
+}
+
+#[test]
 fn rails_env_is_a_string_inquirer() {
     // `Rails.env` is an ActiveSupport::StringInquirer: `development?` /
     // `production?` (any `<word>?`) resolve to Bool via method_missing,
