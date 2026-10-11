@@ -3816,6 +3816,61 @@ pub(super) fn included_has_accessor(body: ruby_prism::Node<'_>, owner: &ClassId,
     })
 }
 
+/// Instance methods a concern's `included do` block (re)defines on every
+/// includer: `def x`, `alias_method :x, ...`, `define_method :x`,
+/// `attr_reader/attr_accessor :x`. The block's other statements become
+/// `concern_model_items`; its `def`s are dropped there (they stay with the
+/// module), so the analyzer learns which names they replace from here.
+pub(in crate::ingest) fn ingest_concern_included_redefs(source: &[u8], file: &str) -> Vec<(ClassId, Symbol)> {
+    let _ = file;
+    let result = super::prism::parse_silent(source);
+    let root = result.node();
+    let mut out = Vec::new();
+    for (scope, module) in find_all_modules_with_scope(&root) {
+        let Some(name_path) = module_name_path(&module) else { continue };
+        let mut full_path: Vec<String> = scope.clone();
+        full_path.extend(name_path);
+        let id = ClassId(Symbol::from(full_path.join("::")));
+        let Some(body) = module.body() else { continue };
+        for stmt in flatten_statements(body) {
+            let Some(call) = stmt.as_call_node() else { continue };
+            if call.receiver().is_some() || constant_id_str(&call.name()) != "included" {
+                continue;
+            }
+            let Some(block_body) = call.block().and_then(|b| b.as_block_node()).and_then(|b| b.body()) else {
+                continue;
+            };
+            let mut stmts = Vec::new();
+            walk_dsl_stmts(block_body, &mut stmts);
+            for inner in stmts {
+                if let Some(def) = inner.as_def_node() {
+                    if def.receiver().is_none() {
+                        out.push((id.clone(), Symbol::from(constant_id_str(&def.name()))));
+                    }
+                    continue;
+                }
+                let Some(c) = inner.as_call_node() else { continue };
+                if c.receiver().is_some() {
+                    continue;
+                }
+                let name = constant_id_str(&c.name());
+                if !matches!(name, "alias_method" | "define_method" | "attr_reader" | "attr_accessor") {
+                    continue;
+                }
+                let take = if name.starts_with("attr_") { usize::MAX } else { 1 };
+                if let Some(args) = c.arguments() {
+                    for arg in args.arguments().iter().take(take) {
+                        if let Some(sym) = arg.as_symbol_node() {
+                            out.push((id.clone(), Symbol::from(String::from_utf8_lossy(sym.unescaped()).as_ref())));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    out
+}
+
 pub fn ingest_concern_model_items(source: &[u8], file: &str) -> ConcernModelItems {
     ingest_concern_model_items_with_constants(source, file, &super::model::EnumConstants::default())
 }

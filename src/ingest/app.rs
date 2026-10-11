@@ -26,7 +26,7 @@ use super::jbuilder::ingest_jbuilder;
 use super::library_class::{
     ClassKind, ConcernClassMethodSpans, ConcernEnumDecl, classify_class_file,
     ingest_concern_class_method_spans, ingest_concern_filters,
-    ingest_concern_model_items_with_constants,
+    ingest_concern_included_redefs, ingest_concern_model_items_with_constants,
     ingest_helper_method_names, ingest_library_classes, ingest_rails_application_singleton_methods,
 };
 use super::model::ingest_model_with_enum_constants;
@@ -505,6 +505,9 @@ pub fn ingest_app_with_vfs<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResult
                                     ingest_concern_model_items_with_constants(
                                         &source, &path_str, &enum_constants,
                                     );
+                                for (id, name) in ingest_concern_included_redefs(&source, &path_str) {
+                                    app.concern_included_redefs.entry(id).or_default().push(name);
+                                }
                                 app.concern_model_items.extend(concern_items.into_iter().filter(
                                     |(id, _)| nested.iter().any(|class| class.name == *id),
                                 ));
@@ -536,6 +539,9 @@ pub fn ingest_app_with_vfs<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResult
                             ingest_concern_model_items_with_constants(
                                 &source, &path_str, &enum_constants,
                             );
+                        for (id, name) in ingest_concern_included_redefs(&source, &path_str) {
+                            app.concern_included_redefs.entry(id).or_default().push(name);
+                        }
                         app.concern_model_items.extend(concern_items);
                         app.view_visible_controller_methods
                             .extend(ingest_helper_method_names(&source));
@@ -655,6 +661,9 @@ pub fn ingest_app_with_vfs<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResult
                                 ingest_concern_model_items_with_constants(
                                     &source, &path_str, &enum_constants,
                                 );
+                            for (id, name) in ingest_concern_included_redefs(&source, &path_str) {
+                                app.concern_included_redefs.entry(id).or_default().push(name);
+                            }
                             app.concern_model_items.extend(concern_items.into_iter().filter(
                                 |(id, _)| nested.iter().any(|class| class.name == *id),
                             ));
@@ -1310,6 +1319,9 @@ end
                             ingest_concern_model_items_with_constants(
                                 &source, &path_str, &enum_constants,
                             );
+                        for (id, name) in ingest_concern_included_redefs(&source, &path_str) {
+                            app.concern_included_redefs.entry(id).or_default().push(name);
+                        }
                         app.concern_model_items.extend(concern_items);
                         app.view_visible_controller_methods
                             .extend(ingest_helper_method_names(&source));

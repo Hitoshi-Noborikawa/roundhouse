@@ -380,6 +380,12 @@ pub struct App {
     /// item provenance) can follow when emission needs it.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub concern_model_items: HashMap<ClassId, Vec<ModelBodyItem>>,
+    /// Instance-method names a concern's `included do` block (re)defines
+    /// (`def x`, `alias_method :x, ...`, `define_method`, `attr_*`), keyed by
+    /// module. Those statements are not carried as `concern_model_items`, so
+    /// this is the only record that an includer's reader `x` is replaced.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub concern_included_redefs: HashMap<ClassId, Vec<Symbol>>,
     /// Classes that were `ActiveSupport::CurrentAttributes` subclasses
     /// before `ingest::current_attributes` flattened them. Recorded
     /// because that pass CLEARS the parent — nothing downstream could
@@ -760,6 +766,7 @@ impl App {
             concern_spliced_actions: HashMap::new(),
             concern_spliced_class_methods: HashMap::new(),
             concern_model_items: HashMap::new(),
+            concern_included_redefs: HashMap::new(),
             current_attribute_classes: Vec::new(),
             render_edges: HashMap::new(),
             view_feeders: HashMap::new(),
