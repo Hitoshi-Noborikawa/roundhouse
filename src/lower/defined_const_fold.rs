@@ -123,16 +123,59 @@ const GEM_CONSTANTS: &[(&str, &[&str])] = &[
     ),
 ];
 
+/// The unconditional `require "…"` strings of `config/application.rb`:
+/// direct statements of the program and of the bodies of top-level
+/// `module`/`class` declarations, which run at load. A require under an
+/// `if`/`unless`/`case`/`begin`/loop/block/`def` is not counted. `None`
+/// when the file does not parse, or a counted `require` has an argument
+/// that is not a plain string literal (cannot be classified).
+fn unconditional_requires(source: &str) -> Option<Vec<String>> {
+    use ruby_prism::Node;
+    fn statements<'pr>(node: Node<'pr>) -> Vec<Node<'pr>> {
+        match node.as_statements_node() {
+            Some(s) => s.body().iter().collect(),
+            None => vec![node],
+        }
+    }
+    fn collect(stmts: Vec<Node<'_>>, depth: usize, out: &mut Vec<String>) -> Option<()> {
+        for stmt in stmts {
+            if let Some(call) = stmt.as_call_node() {
+                if call.receiver().is_none() && call.name().as_slice() == b"require" {
+                    let args = call.arguments()?;
+                    let args: Vec<_> = args.arguments().iter().collect();
+                    let [arg] = args.as_slice() else { return None };
+                    let lit = arg.as_string_node()?;
+                    out.push(String::from_utf8_lossy(lit.unescaped()).into_owned());
+                }
+            } else if depth < 2 {
+                // Top-level `module X` / `class Application` bodies run
+                // unconditionally when the file loads.
+                if let Some(m) = stmt.as_module_node() {
+                    collect(m.body().map(statements).unwrap_or_default(), depth + 1, out)?;
+                } else if let Some(c) = stmt.as_class_node() {
+                    collect(c.body().map(statements).unwrap_or_default(), depth + 1, out)?;
+                }
+            }
+        }
+        Some(())
+    }
+    let result = ruby_prism::parse(source.as_bytes());
+    if result.errors().next().is_some() {
+        return None;
+    }
+    let program = result.node().as_program_node()?;
+    let mut out = Vec::new();
+    collect(program.statements().body().iter().collect(), 0, &mut out)?;
+    Some(out)
+}
+
 /// The framework roots `config/application.rb` loads. `None` when the
-/// file requires no `rails` at all (not a Rails app, or unreadable).
+/// file requires no `rails` at all (not a Rails app, or unreadable), or
+/// cannot be read reliably (see [`unconditional_requires`]); then no
+/// framework constant folds TRUE.
 pub fn loaded_frameworks(source: &str) -> Option<Vec<String>> {
-    let requires: Vec<&str> = source
-        .lines()
-        .map(str::trim)
-        .filter(|l| !l.starts_with('#'))
-        .filter_map(|l| l.strip_prefix("require "))
-        .map(|r| r.trim().trim_matches(|c| c == '"' || c == '\'' || c == '(' || c == ')'))
-        .collect();
+    let requires = unconditional_requires(source)?;
+    let requires: Vec<&str> = requires.iter().map(String::as_str).collect();
     let all = requires.contains(&"rails/all");
     if !all && !requires.contains(&"rails") && !requires.iter().any(|r| r.ends_with("/railtie") || r.ends_with("/engine")) {
         return None;
