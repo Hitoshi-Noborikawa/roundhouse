@@ -136,9 +136,8 @@ fn emit_node(n: &ExprNode) -> String {
         ExprNode::Let { name, value, body, .. } => {
             format!("{name} = {}\n{}", emit_expr(value), emit_expr(body))
         }
-        ExprNode::Lambda { params, rest_param, block_param, body, .. } => {
-            let mut ps: Vec<String> = params.iter().map(|p| p.to_string()).collect();
-            if let Some(r) = rest_param { ps.push(format!("*{r}")); }
+        ExprNode::Lambda { params, rest_param, extra_params, block_param, body, .. } => {
+            let mut ps = lambda_params(params, extra_params, rest_param.as_ref());
             if let Some(b) = block_param { ps.push(format!("&{b}")); }
             if ps.is_empty() {
                 format!("-> {{ {} }}", emit_expr(body))
@@ -164,7 +163,16 @@ fn emit_node(n: &ExprNode) -> String {
             if let Some(b) = block { format!("{base} {{ {} }}", emit_expr(b)) } else { base }
         }
         ExprNode::Send { recv, method, args, block, parenthesized } => {
-            let base = emit_send_base(recv.as_ref(), method, args, *parenthesized);
+            // A brace block binds to the nearest call: after paren-less
+            // arguments it is the last argument's block (`f a, b { }` is
+            // `f(a, b { })`) or a syntax error (`f a, k: 1 { }`). The
+            // call's own `{ }` block (`field :name, :string,
+            // &:upcase`, ingested as `{ |x| x.upcase }`) takes the
+            // arguments in parentheses.
+            let brace = block.as_ref().is_some_and(|b| {
+                matches!(&*b.node, ExprNode::Lambda { block_style: crate::expr::BlockStyle::Brace, .. })
+            });
+            let base = emit_send_base(recv.as_ref(), method, args, *parenthesized || (brace && !args.is_empty()));
             match block {
                 None => base,
                 Some(b) => emit_do_block(&base, b),
@@ -361,7 +369,17 @@ fn emit_node(n: &ExprNode) -> String {
         },
         ExprNode::Retry => "retry".to_string(),
         ExprNode::Redo => "redo".to_string(),
-        ExprNode::Splat { value } => format!("*{}", emit_expr(value)),
+        // `*(handles unless ready)`: bare, a modifier operand ends the
+        // element (`[*handles unless ready, x]` does not parse) or binds
+        // the whole enclosing statement; a command operand takes the
+        // following elements as its arguments.
+        ExprNode::Splat { value } => {
+            if renders_open_ended(value) {
+                format!("*({})", emit_expr(value))
+            } else {
+                format!("*{}", emit_arg(value))
+            }
+        }
         ExprNode::ForwardArgs => "...".to_string(),
         ExprNode::ForwardKeywords => "**".to_string(),
         ExprNode::ForwardKeywordsWithPairs { entries } => {
@@ -684,6 +702,11 @@ fn emit_bool_op_operand(
         ExprNode::Seq { exprs } if exprs.len() > 1 => {
             return format!("({s})");
         }
+        // `..`/`...` bind looser than `&&`/`||`: `r || a..b` is
+        // `(r || a)..b`.
+        ExprNode::Range { .. } => {
+            return format!("({s})");
+        }
         // A CONDITIONAL AS AN OPERAND, same argument one construct over.
         // The modifier form binds looser than every boolean operator, so
         // `x.m if c || fallback` re-parses as `x.m if (c || fallback)` —
@@ -856,7 +879,10 @@ fn is_simple_ident(s: &str) -> bool {
 /// and `f((g a: 1 do ... end))` parses identically everywhere.
 /// Everything else passes through unchanged.
 fn emit_arg(e: &Expr) -> String {
-    if renders_as_trailing_modifier(e) || renders_as_command_with_block(e) || is_multi_seq(e) {
+    // A multiple assignment is a statement unless parenthesized: `if a, b
+    // = pair` does not parse, and as an argument its comma splits it.
+    let multi_assign = matches!(&*e.node, ExprNode::MultiAssign { .. });
+    if renders_as_trailing_modifier(e) || renders_as_command_with_block(e) || is_multi_seq(e) || multi_assign {
         format!("({})", emit_expr(e))
     } else {
         emit_expr(e)
@@ -1264,7 +1290,7 @@ fn emit_local_read(name: &str) -> String {
 /// Ruby reserved words. A method whose name collides with one (the
 /// callable cases are `class` / `then`; the rest can't be implicit either)
 /// must keep an explicit receiver — a bare keyword doesn't parse as a call.
-fn is_ruby_keyword(m: &str) -> bool {
+pub(crate) fn is_ruby_keyword(m: &str) -> bool {
     matches!(
         m,
         "__ENCODING__" | "__LINE__" | "__FILE__" | "BEGIN" | "END" | "alias" | "and" | "begin"
@@ -1300,6 +1326,11 @@ fn binop_of(e: &Expr) -> Option<&str> {
         // re-parses as `hrc = (HatRequest.count > 0)`, the local becoming
         // the comparison.
         ExprNode::Assign { .. } | ExprNode::OpAssign { .. } | ExprNode::MultiAssign { .. } => Some("="),
+        // A range binds looser than every infix operator and `||`/`&&`:
+        // `out << (start...limit)` written bare is `(out << start)...limit`,
+        // which pushes the Integer (and `ruby -w` flags the range as
+        // void), and `(a..b) == r` bare is `a..(b == r)`.
+        ExprNode::Range { .. } => Some(".."),
         _ => None,
     }
 }
@@ -1316,11 +1347,12 @@ fn binop_prec(op: &str) -> u8 {
         "&" => 55,
         "|" | "^" => 50,
         ">" | ">=" | "<" | "<=" => 40,
-        "==" | "!=" | "<=>" | "=~" | "===" => 30,
+        "==" | "!=" | "<=>" | "=~" | "!~" | "===" => 30,
         // Below every infix operator above; `&&` binds tighter than `||`,
         // and the `and`/`or` word forms are the loosest of all.
         "&&" => 26,
         "||" => 25,
+        ".." => 22,
         "=" => 15,
         "and" => 11,
         "or" => 10,
@@ -1375,12 +1407,39 @@ fn is_setter_method(m: &str) -> bool {
     true
 }
 
+/// A lambda or block signature in Ruby order: required, optional
+/// (`size = 18`), `*rest`, keywords (`key:`, `limit: 10`), `**opts` (or
+/// a bare `**`). Every name the body reads has to be bound here; one
+/// left out raises `NameError` when the emitted program runs.
+fn lambda_params(params: &[Symbol], extra_params: &[crate::dialect::Param], rest_param: Option<&Symbol>) -> Vec<String> {
+    let mut ps: Vec<String> = params.iter().map(|p| p.to_string()).collect();
+    for p in extra_params.iter().filter(|p| !p.keyword) {
+        match &p.default {
+            Some(d) => ps.push(format!("{} = {}", p.name, emit_expr(d))),
+            None => ps.push(p.name.to_string()),
+        }
+    }
+    if let Some(r) = rest_param {
+        ps.push(format!("*{r}"));
+    }
+    for p in extra_params.iter().filter(|p| p.keyword && !p.rest) {
+        match &p.default {
+            Some(d) => ps.push(format!("{}: {}", p.name, emit_expr(d))),
+            None => ps.push(format!("{}:", p.name)),
+        }
+    }
+    for p in extra_params.iter().filter(|p| p.keyword && p.rest) {
+        ps.push(format!("**{}", p.name));
+    }
+    ps
+}
+
 /// Emit a `Send + block` in plain Ruby form. Honors the Lambda's
 /// `block_style` to pick `{ … }` vs `do … end`. `{ }` emits a single-line
 /// body; `do … end` spans multiple lines when the body has newlines.
 pub(super) fn emit_do_block(base: &str, block: &Expr) -> String {
     use crate::expr::BlockStyle;
-    let ExprNode::Lambda { params, rest_param, body, block_style, .. } = &*block.node else {
+    let ExprNode::Lambda { params, rest_param, extra_params, body, block_style, .. } = &*block.node else {
         // A non-Lambda block expression is a Proc FORWARD (`&block` —
         // ingest lowers the block-pass arg to a bare Var in the block
         // slot). Rendering it as a literal `{ block }` block made the
@@ -1404,10 +1463,7 @@ pub(super) fn emit_do_block(base: &str, block: &Expr) -> String {
     // The splat has to survive to the emitted source: the body reads
     // `args`, and an emitted module answers a bare name from its own
     // functions when no local binds it.
-    let mut ps: Vec<String> = params.iter().map(|p| p.to_string()).collect();
-    if let Some(r) = rest_param {
-        ps.push(format!("*{r}"));
-    }
+    let ps = lambda_params(params, extra_params, rest_param.as_ref());
     let params_str = if ps.is_empty() {
         String::new()
     } else {
@@ -1878,7 +1934,7 @@ mod tests {
         // modifier-if wrap above.
         let block = Expr::new(
             Span::default(),
-            ExprNode::Lambda { rest_param: None,
+            ExprNode::Lambda { extra_params: Vec::new(), rest_param: None,
                 params: vec![],
                 block_param: None,
                 body: lit_sym("body"),

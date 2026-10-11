@@ -424,6 +424,8 @@ fn actions_without_db_calls_stay_pure() {
         opt_params: vec![],
         kw_params: vec![],
         kwrest_param: None,
+        rest_param: None,
+        anonymous_formal: None,
         block_param: None,
         body: empty_body,
         renders: RenderTarget::Inferred,
@@ -759,6 +761,8 @@ fn analyze_action_body(body: roundhouse::expr::Expr) -> roundhouse::expr::Expr {
         opt_params: vec![],
         kw_params: vec![],
         kwrest_param: None,
+        rest_param: None,
+        anonymous_formal: None,
         block_param: None,
         body,
         renders: RenderTarget::Inferred,
@@ -844,7 +848,7 @@ fn array_each_block_param_types_as_element() {
     );
     let block = Expr::new(
         Span::synthetic(),
-        ExprNode::Lambda { rest_param: None,
+        ExprNode::Lambda { extra_params: Vec::new(), rest_param: None,
             params: vec![Symbol::from("n")],
             block_param: None,
             body: block_body,
@@ -896,7 +900,7 @@ fn hash_each_block_binds_key_and_value() {
     );
     let block = Expr::new(
         Span::synthetic(),
-        ExprNode::Lambda { rest_param: None,
+        ExprNode::Lambda { extra_params: Vec::new(), rest_param: None,
             params: vec![Symbol::from("k"), Symbol::from("v")],
             block_param: None,
             body: block_body,
@@ -1837,9 +1841,12 @@ fn set_enumerable_and_operator_surface_resolves() {
     b = [2, 3].to_set
     picked = a.select { |x| x > 1 }
     found = a.find { |x| x > 1 }
+    membership = b.include?(2)
     both = (a | b) - b + [4]
     b.subtract([3])
-    [a.any?, a.intersect?(b), a.exclude?(9), [1].exclude?(2), picked, found, both, a.max]
+    [
+      a.any?, membership, a.intersect?(b), a.exclude?(9), [1].exclude?(2), picked, found, both, a.max
+    ]
   end
 end
 "#,
@@ -1848,7 +1855,8 @@ end
 
     let failures = send_dispatch_failures(&app);
     for m in [
-        "[]", "to_set", "select", "find", "|", "-", "+", "subtract", "any?", "intersect?",
+        "[]", "to_set", "select", "find", "include?", "|", "-", "+", "subtract", "any?",
+        "intersect?",
         "exclude?", "max",
     ] {
         assert!(

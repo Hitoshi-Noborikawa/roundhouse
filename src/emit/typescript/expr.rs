@@ -2981,7 +2981,19 @@ fn js_send_inner(
     // Juntos's ActiveModel::Errors and similar collection APIs).
     if method == "<<" && recv.is_some() && args.len() == 1 {
         let r = recv.unwrap();
-        if let Some(recv_ty) = &r.ty {
+        // An ivar reads as `T | nil` (unset before `initialize` runs);
+        // the append still targets `T`.
+        let recv_ty = r.ty.as_ref().map(|t| match t {
+            Ty::Union { variants } => {
+                let non_nil: Vec<&Ty> = variants.iter().filter(|v| !matches!(v, Ty::Nil)).collect();
+                match non_nil.as_slice() {
+                    [only @ Ty::Array { .. }] => *only,
+                    _ => t,
+                }
+            }
+            _ => t,
+        });
+        if let Some(recv_ty) = recv_ty {
             match recv_ty {
                 Ty::Class { .. } => {
                     return Js::method_call(span, js_expr(r), "add", vec![js_expr(&args[0])]);
@@ -3617,7 +3629,7 @@ mod async_hof_tests {
     fn synth_lambda(params: Vec<&str>, body: Expr) -> Expr {
         Expr::new(
             Span::synthetic(),
-            ExprNode::Lambda { rest_param: None,
+            ExprNode::Lambda { extra_params: Vec::new(), rest_param: None,
                 params: params.into_iter().map(Symbol::from).collect(),
                 block_param: None,
                 body,

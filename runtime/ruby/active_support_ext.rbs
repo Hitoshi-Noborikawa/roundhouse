@@ -1,8 +1,10 @@
 module ActiveSupport
   module JSON
-    def self.encode: (Hash[untyped, untyped] value) -> String
-    def self.encode_scalar: (untyped item) -> String
+    def self.encode: (untyped value) -> String
+    def self.decode: (String text) -> untyped
+    def self.jsonable: (untyped value) -> untyped
   end
+  def self.deep_dup: (untyped value) -> untyped
   def self.blank?: (untyped value) -> bool
 
   def self.present?: (untyped value) -> bool
@@ -21,20 +23,18 @@ module ActiveSupport
     end
   end
   def self.index_by: (untyped list) { (untyped) -> untyped } -> Hash[untyped, untyped]
-  # `untyped`, not `Array[untyped]`: the body reads `length` and
-  # nothing else, and campfire calls it on an ASSOCIATION —
-  # `many?(room.users)` hands it a Relation. A container element type
-  # on a parameter is a claim about the argument's REPRESENTATION, and
-  # spinel acts on it: the Relation was coerced to `sp_PolyArray *` at
-  # the call. Same over-claim `Relation#preloaded`'s `records` carried
-  # (5592abe8); `index_by` above already says `untyped` for the same
-  # reason.
-  def self.many?: (untyped list) -> bool
+  # The lowerer routes Array receivers here, Relation receivers to
+  # `size > 1` (campfire `@room.users.many?`), and Array/Relation unions
+  # the same way. An Array contract cannot coerce an association into
+  # Spinel's poly-array representation because those sites never reach
+  # this helper.
+  def self.many?: (Array[Object] list) ?{ (Object item) -> Object } -> bool
   def self.to_sentence: (Array[untyped] list, String words_connector, String two_words_connector, String last_word_connector) -> String
   def self.symbolize_keys: (Hash[String, untyped] hash) -> Hash[Symbol, untyped]
   def self.stringify_keys: (Hash[Symbol, untyped] hash) -> Hash[String, untyped]
   def self.cast_boolean: (untyped value) -> bool?
   def self.squish: (String text) -> String
+  def self.squish!: (String text) -> String
   # `untyped`, and this one was learned the hard way: it said
   # `Array[untyped]` for a day, on the reasoning that the only receiver
   # is a channel's `streams`, a plain Array. It is — an
@@ -68,6 +68,7 @@ module ActiveSupport
   def self.noon: (Time t) -> Time
   def self.beginning_of_week: (Time t, ?Integer start) -> Time
   def self.end_of_week: (Time t, ?Integer start) -> Time
+  def self.float_decimal_text: (Float f) -> String
   def self.next_week: (Time t) -> Time
   def self.prev_week: (Time t) -> Time
   def self.beginning_of_month: (Time t) -> Time
@@ -86,13 +87,28 @@ module ActiveSupport
   ZONE_NAMES: Hash[String, String]
   class TimeZoneData
     def name: () -> String
-    def initialize: (String name, Array[Integer] transitions, Array[Integer] offsets, Integer initial_offset, Array[Integer] rule) -> void
+    def initialize: (String name, Array[Integer] transitions, Array[Integer] offsets, Integer initial_offset, Array[Integer] rule, Array[bool] dsts) -> void
     def offset_at: (Integer epoch) -> Integer
+    def base_offset_at: (Integer epoch) -> Integer
     def rule_or: (Integer epoch, Integer fallback) -> Integer
   end
   def self.rule_instant: (Integer year, Integer month, Integer week, Integer wday, Integer secs) -> Integer
   def self.be32: (Array[Integer] b, Integer i) -> Integer
   def self.find_zone!: (String? zone) -> TimeZoneData
+  def self.rails_zone_names: () -> Array[String]
+  def self.formatted_offset: (Time t) -> String
+  def self.seconds_to_utc_offset: (Integer seconds) -> String
+  class TimeZone
+    def name: () -> String
+    def initialize: (String name, TimeZoneData data) -> void
+    def self.lookup: (String? name) -> TimeZone?
+    def self.all: () -> Array[TimeZone]
+    def compare: (TimeZone other) -> Integer
+    def utc_offset: () -> Integer
+    def formatted_offset: () -> String
+    def to_s: () -> String
+    def now: () -> Time
+  end
   def self.parse_tz_rule: (String spec) -> Array[Integer]
   def self.posix_seconds: (String text) -> Integer
   def self.current_zone: () -> TimeZoneData?

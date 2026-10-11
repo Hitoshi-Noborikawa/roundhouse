@@ -103,16 +103,16 @@ pub(crate) fn rewrite_node(expr: &mut Expr) -> bool {
         }
         return false;
     }
-    // `index_by` takes the block and `many?` refuses one — the bare
-    // call is the form Rails' counter-and-`any?` body reduces to a
-    // length test, and the block form counts MATCHES instead, which is
-    // a different question no corpus app asks.
+    // `many?` accepts either form: its block counts matching elements,
+    // while its bare form counts all elements. Keep the block attached
+    // when grounding it to the shared runtime helper.
     if method.as_str() == "wrap" {
         return ground_array_wrap(expr);
     }
     let wants_block = match method.as_str() {
         "index_by" => true,
-        "many?" | "to_sentence" | "sole" | "squish" => false,
+        "many?" => block.is_some(),
+        "to_sentence" | "sole" | "squish" | "squish!" => false,
         _ => return false,
     };
     // `to_sentence` takes Rails' three connector options; the module
@@ -141,7 +141,18 @@ pub(crate) fn rewrite_node(expr: &mut Expr) -> bool {
     // which is what `many?` without a block asks, so the call becomes
     // `size > 1`. On the Relation half that loads the rows rather than
     // counting them — the rows the partial iterates next anyway.
-    if method.as_str() == "many?" && is_relation_or_array_union(receiver.ty.as_ref()) {
+    //
+    // A plain Array takes the same `size > 1`. An association read the
+    // analyzer types `Array[Model]` is a Relation on spinel at run time
+    // (campfire's direct-room settings, `@room.users.many?`), and since
+    // spinel 269b6abe seeds the module function's `Array[Object]`
+    // parameter it refuses that Relation; `size` is answered by both.
+    if method.as_str() == "many?"
+        && block.is_none()
+        && (is_relation_or_array_union(receiver.ty.as_ref())
+            || is_relation(receiver.ty.as_ref())
+            || matches!(receiver.ty.as_ref(), Some(Ty::Array { .. })))
+    {
         let receiver = recv.take().expect("checked above");
         let mut size = Expr::new(
             span,
@@ -187,7 +198,9 @@ pub(crate) fn rewrite_node(expr: &mut Expr) -> bool {
     // goes — and it is the only one of these whose name a model could
     // plausibly define itself, which is the second reason to gate on
     // the analyzer's answer rather than on the spelling.
-    if method.as_str() == "squish" && !matches!(receiver.ty.as_ref(), Some(Ty::Str)) {
+    if matches!(method.as_str(), "squish" | "squish!")
+        && !matches!(receiver.ty.as_ref(), Some(Ty::Str))
+    {
         return false;
     }
     let receiver = recv.take().expect("checked above");
@@ -205,6 +218,9 @@ pub(crate) fn rewrite_node(expr: &mut Expr) -> bool {
         }));
     }
     *parenthesized = true;
+    if method.as_str() == "squish!" {
+        expr.ty = Some(Ty::Str);
+    }
     true
 }
 
@@ -467,14 +483,81 @@ mod tests {
         assert_eq!(e.ty, Some(Ty::Bool));
     }
 
-    /// A plain Array still takes the module function.
+    /// A plain Array is a size test too: an association typed
+    /// `Array[Model]` is a Relation on spinel, which the module
+    /// function's `Array[Object]` parameter refuses.
     #[test]
-    fn many_on_an_array_grounds_to_the_module_function() {
+    fn many_on_an_array_is_a_size_test() {
         let mut e = many_on(array_of_users());
         rewrite(&mut e);
-        assert_eq!(method_of(&e), "many?");
-        let ExprNode::Send { recv: Some(r), .. } = &*e.node else { panic!() };
-        assert!(matches!(&*r.node, ExprNode::Const { path } if path[0].as_str() == "ActiveSupport"));
+        assert_eq!(method_of(&e), ">");
+        let ExprNode::Send { recv: Some(size), .. } = &*e.node else { panic!() };
+        assert_eq!(method_of(size), "size");
+    }
+
+    #[test]
+    fn many_with_a_block_grounds_without_dropping_the_block() {
+        let mut e = many_on(array_of_users());
+        let ExprNode::Send { block, .. } = &mut *e.node else {
+            panic!()
+        };
+        *block = Some(Expr::new(
+            Span::synthetic(),
+            ExprNode::Lit {
+                value: crate::expr::Literal::Bool { value: true },
+            },
+        ));
+        rewrite(&mut e);
+        let ExprNode::Send {
+            recv: Some(r),
+            block: Some(_),
+            ..
+        } = &*e.node
+        else {
+            panic!()
+        };
+        assert!(
+            matches!(&*r.node, ExprNode::Const { path } if path[0].as_str() == "ActiveSupport")
+        );
+    }
+
+    #[test]
+    fn squish_bang_grounds_and_uses_its_non_nil_rails_return_type() {
+        let mut e = many_on(Ty::Str);
+        let ExprNode::Send { method, .. } = &mut *e.node else {
+            panic!()
+        };
+        *method = Symbol::from("squish!");
+        rewrite(&mut e);
+        let ExprNode::Send {
+            recv: Some(r),
+            args,
+            ..
+        } = &*e.node
+        else {
+            panic!()
+        };
+        assert_eq!(method_of(&e), "squish!");
+        assert!(
+            matches!(&*r.node, ExprNode::Const { path } if path[0].as_str() == "ActiveSupport")
+        );
+        assert_eq!(args.len(), 1);
+        assert_eq!(e.ty, Some(Ty::Str));
+    }
+
+    /// campfire `rooms/directs/edit`: `@room.users.many?` is a Relation.
+    /// Grounding to `size > 1` keeps Spinel from passing it into
+    /// `ActiveSupport.many?`'s Array slot.
+    #[test]
+    fn many_on_a_relation_is_a_size_test() {
+        let mut e = many_on(Ty::Relation {
+            of: crate::ident::ClassId(Symbol::from("User")),
+        });
+        rewrite(&mut e);
+        assert_eq!(method_of(&e), ">");
+        let ExprNode::Send { recv: Some(size), .. } = &*e.node else { panic!() };
+        assert_eq!(method_of(size), "size");
+        assert_eq!(e.ty, Some(Ty::Bool));
     }
 
     /// A union with a variant that has no `size` (nil) is left alone.

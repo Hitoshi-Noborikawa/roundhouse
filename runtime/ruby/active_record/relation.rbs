@@ -186,6 +186,7 @@ module ActiveRecord
     def index_by: () { (Base) -> untyped } -> Hash[untyped, Base]
     def find_each: () { (Base) -> void } -> Relation
     def find_in_batches: () { (Array[Base]) -> void } -> Relation
+    def in_batches: (?of: Integer, ?order: Symbol?) ?{ (Relation) -> void } -> Relation
     # `map`/`collect` return `untyped`, NOT `Array[untyped]`: the result's
     # element type is whatever the BLOCK returns, which this RBS has no
     # type variable to say. `Array[untyped]` is a seed spinel TRUSTS, so
@@ -208,6 +209,13 @@ module ActiveRecord
     def last_n: (Integer | Float | String n) -> Array[Base]
     def count: () -> Integer
     def sum: (String | Symbol expr) -> Float
+    def minimum: (String | Symbol expr) -> untyped
+    def maximum: (String | Symbol expr) -> untyped
+    private def extreme: (String | Symbol expr, String function) -> untyped
+    private def grouped_extreme: (String column, String function) -> Hash[untyped, untyped]
+    private def schema_group_column: (String group) -> Symbol?
+    private def cast_schema_value: (untyped value, Symbol column) -> untyped
+    private def cast_schema_date: (untyped value) -> untyped
     def group_count: () -> Hash[untyped, Integer]
     def empty?: () -> bool
     def any?: () -> bool
