@@ -269,7 +269,44 @@ end
         .write("app/lib/kwlab/gadget.rb", SUB)
         .emit(BuildTarget::Ruby);
     assert!(
-        errors.iter().any(|e| e.contains("a subclass redefines this method")),
+        errors.iter().any(|e| e.contains("a subclass or includer redefines this method")),
+        "not refused; errors: {errors:#?}"
+    );
+}
+
+/// The same through an included module: a call in the module's body
+/// reaches the includer's own `field` first, so a different slot
+/// layout there is refused too.
+#[test]
+fn an_includer_redefinition_with_other_slots_is_refused() {
+    const FIELDS: &str = r##"module Kwlab
+  module Fields
+    def field(name, type = nil, null: true, description: nil)
+      [name, type, null, description]
+    end
+
+    def add(name)
+      field(name, description: "module")
+    end
+  end
+end
+"##;
+    const GADGET: &str = r##"module Kwlab
+  class Gadget
+    include Fields
+
+    def field(name, description: nil, null: true)
+      [name, description, null]
+    end
+  end
+end
+"##;
+    let (_emitted, errors) = emit_and_run::real_blog()
+        .write("app/lib/kwlab/fields.rb", FIELDS)
+        .write("app/lib/kwlab/gadget.rb", GADGET)
+        .emit(BuildTarget::Ruby);
+    assert!(
+        errors.iter().any(|e| e.contains("a subclass or includer redefines this method")),
         "not refused; errors: {errors:#?}"
     );
 }

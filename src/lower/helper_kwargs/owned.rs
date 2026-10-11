@@ -49,6 +49,10 @@ pub(super) struct OwnerIndex {
     parents: HashMap<String, String>,
     includes: HashMap<String, Vec<String>>,
     children: HashMap<String, Vec<String>>,
+    /// Module → the classes and modules that include it. An includer's
+    /// own definition comes before the module's in Ruby's lookup, so it
+    /// is an override the module's body can reach through `self`.
+    includers: HashMap<String, Vec<String>>,
     /// Every method a library class defines, flattened or not, with its
     /// slots when it is flattened (`None` when it cannot be respelled).
     defined: HashMap<(String, Side, Symbol), Option<Vec<Slot>>>,
@@ -74,7 +78,7 @@ impl OwnerIndex {
         let names: HashSet<String> =
             app.library_classes.iter().map(|c| c.name.0.as_str().to_string()).collect();
         let mut parents = HashMap::new();
-        let mut includes = HashMap::new();
+        let mut includes: HashMap<String, Vec<String>> = HashMap::new();
         let mut children: HashMap<String, Vec<String>> = HashMap::new();
         let mut defined = HashMap::new();
         for lc in &app.library_classes {
@@ -100,7 +104,13 @@ impl OwnerIndex {
                 );
             }
         }
-        Self { parents, includes, children, defined }
+        let mut includers: HashMap<String, Vec<String>> = HashMap::new();
+        for (includer, modules) in &includes {
+            for m in modules {
+                includers.entry(m.clone()).or_default().push(includer.clone());
+            }
+        }
+        Self { parents, includes, children, includers, defined }
     }
 
     /// The definition a call on `side` of `class` reaches, in Ruby's
@@ -134,10 +144,19 @@ impl OwnerIndex {
         })
     }
 
-    /// Every redefinition of `method` below `class` (transitively).
+    /// The definition `method` resolves to on every class or module that
+    /// can be `self` in `class`'s body: its subclasses and its includers,
+    /// and theirs, transitively.
     fn overrides(&self, class: &str, side: Side, method: &Symbol) -> Vec<Option<&Vec<Slot>>> {
+        let below = |c: &str| {
+            let mut next = self.children.get(c).cloned().unwrap_or_default();
+            if side == Side::Instance {
+                next.extend(self.includers.get(c).cloned().unwrap_or_default());
+            }
+            next
+        };
         let mut out = Vec::new();
-        let mut stack: Vec<String> = self.children.get(class).cloned().unwrap_or_default();
+        let mut stack: Vec<String> = below(class);
         let mut seen = HashSet::new();
         while let Some(c) = stack.pop() {
             if !seen.insert(c.clone()) {
@@ -146,7 +165,7 @@ impl OwnerIndex {
             if let Some(found) = self.own_or_included(&c, side, method) {
                 out.push(found);
             }
-            stack.extend(self.children.get(&c).cloned().unwrap_or_default());
+            stack.extend(below(&c));
         }
         out
     }
@@ -299,7 +318,7 @@ fn rewrite_node(
         if !agrees {
             super::refuse(
                 span,
-                "a subclass redefines this method with different keyword slots, so no one positional order binds for every receiver",
+                "a subclass or includer redefines this method with different keyword slots, so no one positional order binds for every receiver",
                 diagnostics,
             );
             return;
