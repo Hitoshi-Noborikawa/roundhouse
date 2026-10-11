@@ -50,17 +50,10 @@ module Base64
   end
 
   # RFC 4648 §4 decode — inverse of strict_encode64. Skips "=" padding
-  # and any non-alphabet byte. Accumulates 6 bits per input byte into a
+  # and any non-alphabet byte. Accumulates 6 bits per input char into a
   # bit buffer, emitting one byte per 8 accumulated bits. Added for the
   # Action Cable glue's signed_stream_name decode (the encode side is
   # turbo_stream_from). Returns the decoded String.
-  #
-  # Reads bytes and maps each one by range. Looking every character up
-  # in ALPHABET compared a one-character String with up to 64 others,
-  # each fetched by index (an allocation on CRuby, a call into the
-  # String runtime on spinel), and this runs on every request that
-  # verifies a signed cookie. A non-ASCII character is now several
-  # bytes, each outside the alphabet, so it is skipped as it was.
   def self.strict_decode64(s)
     out = +""
     acc = 0
@@ -68,20 +61,8 @@ module Base64
     i = 0
     n = s.bytesize
     while i < n
-      c = s.getbyte(i)
+      val = byte_value(s.getbyte(i))
       i = i + 1
-      val = -1
-      if c >= 65 && c <= 90        # A-Z
-        val = c - 65
-      elsif c >= 97 && c <= 122    # a-z
-        val = c - 71
-      elsif c >= 48 && c <= 57     # 0-9
-        val = c + 4
-      elsif c == 43                # +
-        val = 62
-      elsif c == 47                # /
-        val = 63
-      end
       if val < 0
         next   # padding "=" or stray byte
       end
@@ -98,6 +79,20 @@ module Base64
       end
     end
     out
+  end
+
+  # The 6-bit value of one base64 alphabet byte, or -1 for anything
+  # outside the alphabet (padding / separators). Arithmetic on the byte,
+  # not a scan of ALPHABET: the scan made decoding 64 comparisons per
+  # character, and since the session cookie is signed every request
+  # decodes it — the lobsters ruby lane spent a third of its time here.
+  def self.byte_value(b)
+    return b - 65 if b >= 65 && b <= 90   # A-Z
+    return b - 71 if b >= 97 && b <= 122  # a-z
+    return b + 4 if b >= 48 && b <= 57    # 0-9
+    return 62 if b == 43                  # +
+    return 63 if b == 47                  # /
+    -1
   end
 
   # RFC 4648 §5 — the URL-safe alphabet is the standard one with `+` and

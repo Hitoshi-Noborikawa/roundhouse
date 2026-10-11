@@ -166,6 +166,10 @@ pub enum ReturnKind {
     /// another Hash shape enters the catalog, generalize to a
     /// `HashOf(PrimKind, PrimKind)` variant.
     HashSymStr,
+    /// Returns `Hash<Str, untyped>`. Example:
+    /// `#attributes_before_type_cast` — each column's raw stored value,
+    /// String-keyed as Rails keys it.
+    HashStrUntyped,
     /// Returns `Array<Sym>`. Example: `.schema_column_names` on
     /// an ActiveRecord class — the schema column list the lowerer
     /// will emit per-model once `Base`'s `attr_accessor` override
@@ -964,6 +968,13 @@ pub const AR_CATALOG: &[CatalogedMethod] = &[
         return_kind: Some(ReturnKind::HashSymStr),
     },
     CatalogedMethod {
+        name: "attributes_before_type_cast",
+        receiver: ReceiverContext::Instance,
+        effect: EffectClass::Pure,
+        chain: ChainKind::NotApplicable,
+        return_kind: Some(ReturnKind::HashStrUntyped),
+    },
+    CatalogedMethod {
         name: "errors",
         receiver: ReceiverContext::Instance,
         effect: EffectClass::Pure,
@@ -1573,10 +1584,10 @@ pub const AR_CATALOG: &[CatalogedMethod] = &[
         chain: ChainKind::Terminal,
         return_kind: Some(ReturnKind::Int),
     },
-    // sum/average/minimum/maximum approximate as Int — the same
-    // deliberate approximation the send.rs arm makes (float
-    // sums/averages are rare in controller code). The Class-context
-    // entries leave these None; here the arm is the spec.
+    // sum/average approximate as Int — the same deliberate approximation
+    // the send.rs arm makes (float sums/averages are rare in controller
+    // code). Extrema are schema-indexed at the call site; a catalog-wide
+    // Int would mis-type Date, Time, String, and grouped results.
     CatalogedMethod {
         name: "sum",
         receiver: ReceiverContext::Relation,
@@ -1596,14 +1607,14 @@ pub const AR_CATALOG: &[CatalogedMethod] = &[
         receiver: ReceiverContext::Relation,
         effect: EffectClass::DbRead,
         chain: ChainKind::Terminal,
-        return_kind: Some(ReturnKind::Int),
+        return_kind: None,
     },
     CatalogedMethod {
         name: "maximum",
         receiver: ReceiverContext::Relation,
         effect: EffectClass::DbRead,
         chain: ChainKind::Terminal,
-        return_kind: Some(ReturnKind::Int),
+        return_kind: None,
     },
     CatalogedMethod {
         name: "exists?",
@@ -2078,6 +2089,11 @@ mod tests {
             let entry = lookup(m, ReceiverContext::Relation)
                 .unwrap_or_else(|| panic!("no Relation entry for `{m}`"));
             assert_eq!(entry.return_kind, Some(kind), "wrong return_kind for `{m}`");
+        }
+        for method in ["minimum", "maximum"] {
+            let entry = lookup(method, ReceiverContext::Relation)
+                .unwrap_or_else(|| panic!("no Relation entry for `{method}`"));
+            assert_eq!(entry.return_kind, None, "`{method}` is schema-indexed at its call site");
         }
     }
 

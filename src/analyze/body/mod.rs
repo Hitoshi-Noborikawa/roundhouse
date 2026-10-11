@@ -59,7 +59,7 @@ use const_resolution::ResolvedConstant;
 mod narrowing;
 mod send;
 pub(crate) use send::PARAM_VALUE;
-pub(crate) use send::string_answers;
+pub(crate) use send::{indexed_pluck, string_answers};
 
 /// Typed constants for generated expressions without Ruby source spans.
 /// The class's constants shadow the shared app registry. Source-backed
@@ -143,6 +143,8 @@ pub struct Ctx {
     /// it `String` instead of the generic `Untyped`. Off elsewhere, where a
     /// block's return type isn't tracked through the method signature.
     pub in_view: bool,
+    /// The template being typed (`articles/_form`), for a lazy `t(".key")`.
+    pub view_name: Option<Symbol>,
     /// Set while typing the body of a class-side method (`def self.x`,
     /// `class << self; def x`). `self` there is the class object, so an
     /// implicit-self `new` answers "an instance of whichever class
@@ -172,6 +174,10 @@ pub struct ClassInfo {
     pub table: Option<crate::ident::TableRef>,
     /// Instance-state shape (columns + attr_accessor).
     pub attributes: Row,
+    /// Attributes of `attributes` that the app's own `def` replaces. A
+    /// `def confidence` computes whatever it likes, so two reads of it need
+    /// not agree and a guard on one says nothing about the other.
+    pub overridden_attributes: std::collections::HashSet<Symbol>,
     /// Methods callable on the class itself: `Post.all`, `Post.find(id)`.
     pub class_methods: HashMap<Symbol, Ty>,
     /// Source declares its own class-side `new`, whose result need not be self.
@@ -246,6 +252,9 @@ pub struct ClassInfo {
     /// which is the same two hops the emit-time flattening reads
     /// (`room.memberships.grant_to(u)` → `room.memberships_grant_to(u)`).
     pub assoc_extensions: HashMap<(Symbol, Symbol), Ty>,
+    /// has_many readers without `through:` — the ones `lower::scope_chain`
+    /// roots onto a relation, so a relation terminal on them runs as SQL.
+    pub direct_has_many: std::collections::HashSet<Symbol>,
     /// Modules mixed in via `include` (e.g. a controller's
     /// `include IntervalHelper`). A mixed-in module's instance methods
     /// become instance methods of the includer, so dispatch consults
@@ -269,6 +278,7 @@ pub struct ClassInfo {
     /// lookup (the lexical scope, then the ancestors), never by its last
     /// segment alone.
     pub app_declared: bool,
+    pub positional_struct: bool,
 }
 
 impl ClassInfo {
@@ -339,6 +349,8 @@ pub struct BodyTyper<'a> {
     /// [`crate::analyze::inquiry`]); empty for the bare constructor,
     /// which the runtime-source typer and tests use.
     inquirers: Option<&'a std::collections::HashSet<Symbol>>,
+    /// The app's translations; Rails' English when absent.
+    i18n: Option<&'a crate::i18n::Catalog>,
 }
 
 impl<'a> BodyTyper<'a> {
@@ -382,7 +394,12 @@ impl<'a> BodyTyper<'a> {
     }
 
     pub fn new(classes: &'a HashMap<ClassId, ClassInfo>) -> Self {
-        Self { classes, const_resolver: None, typed_constants: None, data_factories: None, inquirers: None }
+        Self { classes, const_resolver: None, typed_constants: None, data_factories: None, inquirers: None, i18n: None }
+    }
+
+    pub(crate) fn with_i18n(mut self, catalog: &'a crate::i18n::Catalog) -> Self {
+        self.i18n = Some(catalog);
+        self
     }
 
     /// Share the analyzer's immutable source index across typing passes.
@@ -583,6 +600,34 @@ impl<'a> BodyTyper<'a> {
         None
     }
 
+    /// The type of `local.attr` when that read is a stable attribute read:
+    /// `local` is bound to a record class, and `attr` is a schema column (or
+    /// `attr_accessor`) of it or of an ancestor, with no `def attr` of the
+    /// app's own along the way. Such a read is a plain state read, so two
+    /// reads with no write between them see the same value and a guard on
+    /// one speaks for the other. A user-defined `attr` may compute anything,
+    /// so it never qualifies.
+    fn member_attribute_ty(&self, local: &Symbol, attr: &Symbol, ctx: &Ctx) -> Option<Ty> {
+        let Some(Ty::Class { id, .. }) = ctx.local_bindings.get(local) else {
+            return None;
+        };
+        let mut cursor = Some(id.clone());
+        // Bounded: a parent link that cycles must not hang the typer.
+        for _ in 0..16 {
+            let cur = cursor?;
+            let info = self.classes.get(&cur)?;
+            if info.overridden_attributes.contains(attr) {
+                return None;
+            }
+            if let Some(field) = info.attributes.fields.get(attr) {
+                let ty = info.instance_methods.get(attr).unwrap_or(field);
+                return Some(ty.clone());
+            }
+            cursor = info.parent.clone();
+        }
+        None
+    }
+
     /// Identity evidence for Module protocol, independent of nominal instance type.
     fn is_class_object(&self, expr: &Expr, ctx: &Ctx) -> bool {
         match &*expr.node {
@@ -676,7 +721,12 @@ impl<'a> BodyTyper<'a> {
                 // Never search by suffix or borrow another scope's
                 // same-named declaration: only the exact written class.
                 let exact_modeled_class = |path: &[Symbol]| {
-                    let id = written_class_id(path);
+                    let id = match path {
+                        [name] | [_, name] if name.as_str() == "HashWithIndifferentAccess" && (path.len() == 1 || path[0].as_str().is_empty()) => {
+                            crate::ident::ClassId(Symbol::from(crate::analyze::indifferent::CLASS))
+                        }
+                        _ => written_class_id(path),
+                    };
                     if let Some((name, owner)) = path.split_last() {
                         if !owner.is_empty() {
                             if let Some(info) = self.classes().get(&written_class_id(owner)) {
@@ -742,18 +792,31 @@ impl<'a> BodyTyper<'a> {
                         if !keep_bare_splice {
                             qualify_resolved_path(path, name);
                         }
-                        self.typed_constants
+                        let value = self.typed_constants
                             .and_then(|values| values.get(declaration))
                             .cloned()
-                            .or_else(|| runtime.as_ref().map(|ty| (**ty).clone()))
-                            .unwrap_or_else(unknown)
+                            .or_else(|| runtime.as_ref().map(|ty| (**ty).clone()));
+                        let id: crate::ident::ClassId = (**name).clone();
+                        match value {
+                            Some(ty) => ty,
+                            // Not left unknown: ingest turned `Result = Struct.new(…)` into the class it defines.
+                            None if self.classes().get(&id).is_some_and(|c| c.app_declared) => {
+                                expr.decisions |= crate::expr::RESOLVED_CLASS_REF;
+                                Ty::Class { id, args: vec![] }
+                            }
+                            None => unknown(),
+                        }
                     }
                     // An unresolved source reference may still name an
                     // exact modeled external class (for example Time).
                     Some(None) => exact_modeled_class(path),
                     // A borrowed span is not evidence of a written constant
                     // only when the producer marked its generated origin.
-                    None if indexed_source && generated => exact_modeled_class(path),
+                    None if indexed_source
+                        && (generated || expr.decisions & crate::expr::UNINDEXED_SCOPE_CONST_REF != 0) =>
+                    {
+                        exact_modeled_class(path)
+                    }
                     None if indexed_source => unknown(),
                     // Views and generated IR have no Rubydex answer. A
                     // bare name can use the app's bare-name values. A
@@ -780,6 +843,14 @@ impl<'a> BodyTyper<'a> {
                         value.unwrap_or_else(|| Ty::Class { id: written_class_id(path), args: vec![] })
                     }
                 };
+                // Not a class the emitted program has: the indifferent hash is a plain Hash there, so only its `new` is supported.
+                if matches!(&ty, Ty::Class { id, args } if args.is_empty() && id.0.as_str() == crate::analyze::indifferent::CLASS) {
+                    expr.diagnostic = Some(crate::diagnostic::DiagnosticKind::Unsupported {
+                        target: None,
+                        construct: Symbol::from("constant"),
+                        detail: written_class_id(path).0.as_str().to_string(),
+                    });
+                }
                 if indexed_source && matches!(ty, Ty::Var { .. }) {
                     expr.diagnostic = Some(crate::diagnostic::DiagnosticKind::Unsupported {
                         target: None,
@@ -1010,16 +1081,21 @@ impl<'a> BodyTyper<'a> {
                 let mut seeded = ctx.clone();
                 collect_var_assignments_into(left, &mut seeded.local_bindings);
                 self.propagate_match_bindings(left, &mut seeded, true);
-                let pred = narrowing::extract_narrowing_with(left, &|n| self.self_attribute_ty(n, ctx));
-                let right_ctx = match (&pred, &*op) {
+                let reader = |n: &Symbol| self.self_attribute_ty(n, ctx);
+                let member = |l: &Symbol, a: &Symbol| self.member_attribute_ty(l, a, &seeded);
+                let pred = narrowing::extract_narrowing_with(left, &narrowing::Probe { reader: &reader, member: &member });
+                let mut right_ctx = match (&pred, &*op) {
                     (Some(p), crate::expr::BoolOpKind::And) => {
                         narrowing::apply_narrowing(&seeded, p, true)
                     }
                     (Some(p), crate::expr::BoolOpKind::Or) => {
                         narrowing::apply_narrowing(&seeded, p, false)
                     }
-                    _ => seeded,
+                    _ => seeded.clone(),
                 };
+                // A narrowed `x.attr` stays valid only while `x` is not
+                // rebound or written through between the guard and the use.
+                narrowing::drop_unstable_members(&mut right_ctx, &[&*left, &*right]);
                 let rt = self.analyze_expr(right, &right_ctx);
                 // Short-circuit: the result is either left (if it
                 // determined the short-circuit) or right — a union
@@ -1195,6 +1271,18 @@ impl<'a> BodyTyper<'a> {
                         return ty.clone();
                     }
                 }
+                // `x.attr` under a guard that proved it non-nil (see
+                // `narrowing::VarKey::Member`): the same read, typed from the guard.
+                if args.is_empty() && block.is_none() {
+                    if let Some(r) = recv.as_mut() {
+                        if let ExprNode::Var { name, .. } = &*r.node {
+                            if let Some(ty) = ctx.local_bindings.get(&narrowing::member_key(name, method)).cloned() {
+                                self.analyze_expr(r, ctx);
+                                return ty;
+                            }
+                        }
+                    }
+                }
                 // Bare-name Kernel calls (no explicit receiver). `require`,
                 // `require_relative`, etc. — Ruby treats these as private
                 // module methods, but the body-typer otherwise resolves
@@ -1261,6 +1349,25 @@ impl<'a> BodyTyper<'a> {
                     Some(r) => Some(self.analyze_expr(r, ctx)),
                     None => ctx.self_ty.clone(),
                 };
+                if method.as_str() == "new"
+                    && block.is_none()
+                    && crate::analyze::indifferent::constructor_args(args)
+                    && let Some(r) = recv.as_mut()
+                    && matches!(&*r.node, ExprNode::Const { .. })
+                    && matches!(&r.ty, Some(Ty::Class { id, args }) if args.is_empty() && id.0.as_str() == crate::analyze::indifferent::CLASS)
+                {
+                    r.diagnostic = None;
+                }
+                // Not a value: Rails' `call` answers the loaders, which `preload_associations` does not.
+                if method.as_str() == "call" && args.is_empty() && block.is_none()
+                    && expr.decisions & crate::expr::DISCARDED_VALUE != 0
+                    && let Some(r) = recv.as_mut()
+                    && crate::lower::preloader::preloader_new(r, |id| self.classes().get(id).is_some_and(|c| c.table.is_some())).is_some()
+                {
+                    crate::lower::preloader::clear_refusals(r);
+                    expr.decisions |= crate::expr::ADMITTED_PRELOADER_CALL;
+                    return Ty::Nil;
+                }
                 // Inside the class-side method, the instance a class-side
                 // `new` built (`Ty::SelfInstance`, see below) answers the
                 // methods of the class the `def` sits in: the receiving
@@ -1395,6 +1502,39 @@ impl<'a> BodyTyper<'a> {
                     });
                     return unknown();
                 }
+                let unsupported_deep_merge = match method.as_str() {
+                    "deep_merge" if block.is_some() => Some((
+                        "Hash#deep_merge conflict block",
+                        "only the no-block Rails deep_merge form is supported",
+                    )),
+                    "deep_merge!" => Some((
+                        "Hash#deep_merge!",
+                        "the mutating deep_merge! form is unsupported",
+                    )),
+                    "deep_merge" if args.len() != 1 => Some((
+                        "Hash#deep_merge arity",
+                        "exactly one Hash argument is supported",
+                    )),
+                    "deep_merge"
+                        if !matches!(args.first().and_then(|arg| arg.ty.as_ref()), Some(Ty::Hash { .. })) =>
+                    {
+                        Some((
+                            "Hash#deep_merge argument",
+                            "the supported no-block form requires a statically typed Hash argument",
+                        ))
+                    }
+                    _ => None,
+                };
+                if let Some((construct, detail)) = unsupported_deep_merge
+                    && matches!(recv_ty, Some(Ty::Hash { .. }))
+                {
+                    expr.diagnostic = Some(crate::diagnostic::DiagnosticKind::Unsupported {
+                        target: None,
+                        construct: Symbol::from(construct),
+                        detail: detail.into(),
+                    });
+                    return unknown();
+                }
                 // Force `parenthesized: true` when dispatch resolves
                 // to a `Method`-kind on a registered class. The TS
                 // emitter's bare-recv-Send fallback omits parens when
@@ -1509,6 +1649,15 @@ impl<'a> BodyTyper<'a> {
                 ) {
                     return t;
                 }
+                if let Some(t) = self.relation_extreme_ty(
+                    recv.as_ref(),
+                    recv_ty.as_ref(),
+                    method,
+                    args,
+                    ctx.instance_body.then_some(ctx.self_ty.as_ref()).flatten(),
+                ) {
+                    return t;
+                }
                 if let Some(t) =
                     self.column_attribute_access_ty(recv_ty.as_ref(), method, args)
                 {
@@ -1532,10 +1681,28 @@ impl<'a> BodyTyper<'a> {
                 {
                     return t;
                 }
+                if expr.decisions & crate::expr::REVERSE_MERGE != 0
+                    && let (Some(defaults), [hash]) = (recv_ty.as_ref(), args.as_slice())
+                    && let Some(ty) = hash.ty.as_ref().and_then(|h| crate::analyze::indifferent::reverse_merged(defaults, h))
+                {
+                    return ty;
+                }
                 let instance_receiver = recv.as_ref().map_or(ctx.instance_body, |r| self.is_instance(r, ctx))
                     && recv_ty.as_ref().is_some_and(instance_shaped);
                 let dispatched =
                     self.dispatch_on(recv_ty.as_ref(), method, block_ret.as_ref(), args, instance_receiver);
+                // Not left to the positional constructor: since Ruby 3.2 a Struct takes keywords too, which it would bind to its first member.
+                if method.as_str() == "new"
+                    && expr.diagnostic.is_none()
+                    && matches!(args.last().map(|a| &*a.node), Some(ExprNode::Hash { kwargs: true, .. }))
+                    && matches!(recv_ty.as_ref(), Some(Ty::Class { id, .. }) if self.classes.get(id).is_some_and(|c| c.positional_struct))
+                {
+                    expr.diagnostic = Some(crate::diagnostic::DiagnosticKind::Unsupported {
+                        target: None,
+                        construct: Symbol::from("Struct keyword construction"),
+                        detail: "a `Struct.new(...)` superclass is built positionally; keyword arguments would land in its first member".to_string(),
+                    });
+                }
                 // `PTY.spawn(..., &maybe)` when `maybe` is nilable: Ruby
                 // may take the block (nil) or not (tuple). Presence was
                 // left absent above so other methods keep their no-block
@@ -1568,6 +1735,14 @@ impl<'a> BodyTyper<'a> {
                 // have already dispatched above and must win.
                 // RBS declares it `(untyped) -> Array[untyped]`; the
                 // argument says more.
+                // Not a Float argument: CRuby's `BigDecimal(Float)` needs a precision and spinel's package has none.
+                if recv.is_none() && method.as_str() == "BigDecimal" && args.len() == 1 && block.is_none()
+                    && matches!(dispatched, Ty::Var { .. } | Ty::Untyped)
+                    && matches!(args[0].ty.as_ref(), Some(Ty::Str | Ty::Int))
+                    && !self.app_defines(ctx.self_ty.as_ref(), method)
+                {
+                    return send::bigdecimal();
+                }
                 if recv.is_none() && method.as_str() == "Array" && args.len() == 1
                     && block.is_none()
                     && (matches!(dispatched, Ty::Var { .. })
@@ -1576,6 +1751,56 @@ impl<'a> BodyTyper<'a> {
                 {
                     let elem = args[0].ty.as_ref().and_then(kernel_array_elem);
                     return Ty::Array { elem: Box::new(elem.unwrap_or_else(unknown)) };
+                }
+                let catalog = self.i18n.map_or(crate::i18n::Catalog::rails_default(), |c| c.or_rails_default());
+                if let Some(resolved) = crate::lower::i18n_translate::resolves(
+                    catalog, recv.as_ref(), method.as_str(), args, block.as_ref(), ctx.in_view, ctx.view_name.as_ref().map(|v| v.as_str()),
+                ) {
+                    if let Err(reason) = resolved {
+                        if expr.diagnostic.is_none() {
+                            expr.diagnostic = Some(crate::diagnostic::DiagnosticKind::Unsupported {
+                                target: None,
+                                construct: Symbol::from("I18n"),
+                                detail: format!("`{method}` cannot be resolved from the app's locale: {reason}"),
+                            });
+                        }
+                    }
+                    return Ty::Str;
+                }
+                if method.as_str() == "[]"
+                    && matches!(recv_ty.as_ref(), Some(Ty::Class { id, .. }) if id.0.as_str() == "ActiveModel::Errors")
+                    && expr.diagnostic.is_none()
+                {
+                    let catalog = self.i18n.map_or(crate::i18n::Catalog::rails_default(), |c| c.or_rails_default());
+                    if let Some(reason) = crate::i18n::errors_index_refusal(catalog.errors_format()) {
+                        expr.diagnostic = Some(crate::diagnostic::DiagnosticKind::Unsupported {
+                            target: None,
+                            construct: Symbol::from("ActiveModel::Errors"),
+                            detail: format!("`errors[:field]` cannot pick a field's messages: {reason}"),
+                        });
+                    }
+                }
+                if method.as_str() == "human_attribute_name"
+                    && matches!(dispatched, Ty::Var { .. } | Ty::Untyped)
+                    && crate::lower::human_attribute_name::literal_attribute(args).is_some()
+                    && match recv.as_ref() {
+                        Some(r) => crate::lower::human_attribute_name::receiver_model(r),
+                        None if ctx.class_side => match ctx.self_ty.as_ref() {
+                            Some(Ty::Class { id, .. }) => Some(id.clone()),
+                            _ => None,
+                        },
+                        None => None,
+                    }
+                    .is_some_and(|id| self.classes.get(&id).is_some_and(|c| c.table.is_some()))
+                {
+                    return Ty::Str;
+                }
+                if method.as_str() == "full_message"
+                    && matches!(dispatched, Ty::Var { .. } | Ty::Untyped)
+                    && matches!(recv_ty.as_ref(), Some(Ty::Class { id, .. }) if id.0.as_str() == "ActiveModel::Errors")
+                    && crate::lower::errors_add::full_message_bakes(recv.as_ref(), args, block.as_ref())
+                {
+                    return Ty::Str;
                 }
                 // What every object and every module answers, when the
                 // receiver's own table did not. App analyzer only.
@@ -1632,6 +1857,15 @@ impl<'a> BodyTyper<'a> {
                         // Not refused again on a receiver the constant refusal already accounts for.
                         _ if matches!(recv_ty, None | Some(Ty::Var { .. } | Ty::Untyped))
                             && recv.as_ref().is_some_and(|r| rooted_in_refused_constant(r)) => None,
+                        // Grounded, so not a gap: `presence_in(<Array[String]>)` is
+                        // `ActiveSupport.presence_in` (lower::presence_in), and a
+                        // zero-arg `to_query` on a Hash, or on a receiver inference
+                        // could not type, is `ActiveSupport.to_query` (lower::symbolize_keys).
+                        // A list inference cannot prove is an Array[String], or a
+                        // `to_query(key)` (the Object/Array/nil form), still refuse.
+                        _ if method.as_str() == "presence_in" && args.len() == 1 && block.is_none() && is_string_array(args[0].ty.as_ref()) => None,
+                        _ if method.as_str() == "to_query" && args.is_empty() && block.is_none()
+                            && matches!(recv_ty, None | Some(Ty::Var { .. } | Ty::Untyped | Ty::Hash { .. })) => None,
                         _ if matches!(method.as_str(), "to_query" | "instance_values" | "acts_like?" | "presence_in" | "as_json" | "with_options" | "pretty_inspect") => Some("Object extension"),
                         _ => None,
                     };
@@ -1657,7 +1891,6 @@ impl<'a> BodyTyper<'a> {
 
             ExprNode::If { cond, then_branch, else_branch } => {
                 self.analyze_expr(cond, ctx);
-                let pred = narrowing::extract_narrowing_with(cond, &|n| self.self_attribute_ty(n, ctx));
                 // Var assignments inside `cond` (e.g.
                 // `if (user = User.find_by(...)) && user.is_active?`)
                 // must flow into both branches: the assignment
@@ -1676,15 +1909,20 @@ impl<'a> BodyTyper<'a> {
                     base.local_bindings.insert(k.clone(), v.clone());
                 }
                 self.propagate_match_bindings(cond, &mut base, true);
-                let then_ctx = match &pred {
+                let reader = |n: &Symbol| self.self_attribute_ty(n, ctx);
+                let member = |l: &Symbol, a: &Symbol| self.member_attribute_ty(l, a, &base);
+                let pred = narrowing::extract_narrowing_with(cond, &narrowing::Probe { reader: &reader, member: &member });
+                let mut then_ctx = match &pred {
                     Some(p) => narrowing::apply_narrowing(&base, p, true),
                     None => base.clone(),
                 };
+                narrowing::drop_unstable_members(&mut then_ctx, &[&*cond, &*then_branch]);
                 let t = self.analyze_expr(then_branch, &then_ctx);
-                let else_ctx = match &pred {
+                let mut else_ctx = match &pred {
                     Some(p) => narrowing::apply_narrowing(&base, p, false),
-                    None => base,
+                    None => base.clone(),
                 };
+                narrowing::drop_unstable_members(&mut else_ctx, &[&*cond, &*else_branch]);
                 let e = self.analyze_expr(else_branch, &else_ctx);
                 union_of(t, e)
             }
@@ -1797,7 +2035,11 @@ impl<'a> BodyTyper<'a> {
                         }
                         _ => false,
                     };
+                    let tail = i + 1 == exprs.len();
                     let e = &mut exprs[i];
+                    if !tail {
+                        e.decisions |= crate::expr::DISCARDED_VALUE;
+                    }
                     if !matches!(&*e.node, ExprNode::Assign { target: LValue::Var { .. }, .. }) {
                         forget_class_object_writes(e, &mut local_ctx);
                     }
@@ -2185,7 +2427,7 @@ impl<'a> BodyTyper<'a> {
                             _ => false,
                         };
                         if then_diverges && else_empty {
-                            if let Some(pred) = narrowing::extract_narrowing_with(cond, &|n| self.self_attribute_ty(n, ctx)) {
+                            if let Some(pred) = narrowing::extract_narrowing_with(cond, &narrowing::Probe::without_members(&|n| self.self_attribute_ty(n, ctx))) {
                                 local_ctx = narrowing::apply_narrowing(&local_ctx, &pred, false);
                             }
                         }
@@ -2200,7 +2442,7 @@ impl<'a> BodyTyper<'a> {
                         };
                         let else_diverges = matches!(else_branch.ty.as_ref(), Some(Ty::Bottom));
                         if else_diverges && then_empty {
-                            if let Some(pred) = narrowing::extract_narrowing_with(cond, &|n| self.self_attribute_ty(n, ctx)) {
+                            if let Some(pred) = narrowing::extract_narrowing_with(cond, &narrowing::Probe::without_members(&|n| self.self_attribute_ty(n, ctx))) {
                                 local_ctx = narrowing::apply_narrowing(&local_ctx, &pred, true);
                             }
                         }
@@ -4879,3 +5121,8 @@ pub(super) const RUBY_TOP_LEVEL: &[&str] = &[
     "Socket", "StringIO", "Struct", "Tempfile", "Thread", "Time", "Timeout", "URI", "YAML",
     "Zlib",
 ];
+
+/// `Array[String]` — what `ActiveSupport.presence_in(value, list)` declares for its list.
+fn is_string_array(ty: Option<&Ty>) -> bool {
+    matches!(ty, Some(Ty::Array { elem }) if **elem == Ty::Str)
+}

@@ -56,6 +56,14 @@ pub enum BuildTarget {
     /// emits from the INGEST-shape App (`bin/roundhouse` skips
     /// `analyze_and_lower` for it) — see `emit::roda`.
     Roda,
+    /// Rails → Ruby as a partial evaluator: specialize what the analysis
+    /// can resolve, leave the rest as residual Ruby running on the real
+    /// gems (Rails included). Stage 0 is the identity — the residue is
+    /// the whole app, walked verbatim — so the gate (`tests/futamura.rs`:
+    /// the app's own Rails suite, run against the output) exists before
+    /// the first specialization does. Like `Roda`, skips
+    /// `analyze_and_lower` in `bin/roundhouse`.
+    Futamura,
     Crystal,
     Elixir,
     Go,
@@ -105,6 +113,12 @@ impl BuildTarget {
         BuildTarget::TypescriptWorker,
     ];
 
+    /// Targets the `--site` build archives beyond [`Self::ALL`]: they
+    /// get a browse archive, but sit outside the per-target test
+    /// matrices that iterate `ALL` (futamura's gate is the app's own
+    /// Rails suite, `tests/futamura.rs`).
+    pub const SITE_ONLY: &'static [BuildTarget] = &[BuildTarget::Futamura];
+
     /// Targets valid for `--target LANG` (transpile to directory).
     /// Excludes `Blog` (source-only) — `--target blog` would mean
     /// "copy the input to the output," which is a `cp -r`, not a
@@ -114,6 +128,7 @@ impl BuildTarget {
         BuildTarget::Ruby,
         BuildTarget::Jruby,
         BuildTarget::Roda,
+        BuildTarget::Futamura,
         BuildTarget::Crystal,
         BuildTarget::Elixir,
         BuildTarget::Go,
@@ -135,6 +150,7 @@ impl BuildTarget {
             BuildTarget::Ruby => "ruby",
             BuildTarget::Jruby => "jruby",
             BuildTarget::Roda => "roda",
+            BuildTarget::Futamura => "futamura",
             BuildTarget::Crystal => "crystal",
             BuildTarget::Elixir => "elixir",
             BuildTarget::Go => "go",
@@ -161,9 +177,10 @@ impl BuildTarget {
     /// "unsupported at strict-target emit" a WARNING on one side of
     /// this predicate and an ERROR on the other (issue #76).
     ///
-    /// `Roda` converts to real Sequel datasets and skips the lowerings
+    /// `Roda` converts to real Sequel datasets and `Futamura` leaves an
+    /// unfolded chain on real ActiveRecord; both skip the lowerings
     /// entirely (`bin/roundhouse`), so no residue is ever raised
-    /// against it; `Blog` is the source fixture walked verbatim.
+    /// against them; `Blog` is the source fixture walked verbatim.
     /// Matched exhaustively on purpose — a new target has to answer
     /// this question rather than inherit an answer.
     pub fn has_runtime_relation(self) -> bool {
@@ -172,7 +189,8 @@ impl BuildTarget {
             | BuildTarget::Spinel
             | BuildTarget::Ruby
             | BuildTarget::Jruby
-            | BuildTarget::Roda => true,
+            | BuildTarget::Roda
+            | BuildTarget::Futamura => true,
             BuildTarget::Crystal
             | BuildTarget::Elixir
             | BuildTarget::Go
@@ -195,6 +213,9 @@ impl BuildTarget {
     fn supports_generated_column_insert_returning(self) -> bool {
         match self {
             BuildTarget::Ruby | BuildTarget::Jruby | BuildTarget::Spinel => true,
+            // Real Rails persists generated columns itself; `target_files`
+            // returns the verbatim tree before this question is asked.
+            BuildTarget::Futamura => true,
             BuildTarget::Blog
             | BuildTarget::Roda
             | BuildTarget::Crystal
@@ -291,6 +312,20 @@ pub fn target_readme(target: BuildTarget) -> String {
              sidecars to the compiler itself, so no seeding is needed:\n\
              ```sh\n\
              spin test\n\
+             ```\n"
+        }
+        BuildTarget::Futamura => {
+            "Rails → Ruby as a partial evaluator: what Roundhouse can \
+             resolve statically is specialized, and everything else stays \
+             residual Ruby running on the app's real gems, Rails included. \
+             This is stage 0, the identity: the residue is the whole app, \
+             so the tree is the Rails source unchanged (dotfiles and binary \
+             files are not carried yet). Build, run and test it as the Rails \
+             app it is:\n\n\
+             ```sh\n\
+             bundle install\n\
+             bin/rails db:prepare\n\
+             bin/rails test\n\
              ```\n"
         }
         BuildTarget::Roda => {
@@ -593,7 +628,7 @@ pub fn target_readme(target: BuildTarget) -> String {
         // The Roda conversion serves through rackup (default :9292) and
         // has no Action Cable surface — its README body already carries
         // the run instructions.
-        BuildTarget::Roda => "",
+        BuildTarget::Roda | BuildTarget::Futamura => "",
         _ => {
             "Running it serves the blog on http://localhost:3000 \
              (set `PORT` to override), with live Turbo Stream \
@@ -984,6 +1019,8 @@ fn target_emits_app_library_classes(target: BuildTarget) -> bool {
             | BuildTarget::Spinel
             | BuildTarget::Typescript
             | BuildTarget::TypescriptWorker
+            // Carries every class verbatim (it returns before this check).
+            | BuildTarget::Futamura
         // Roda omitted: spike emit does not walk `app.library_classes`.
     )
 }
@@ -1511,6 +1548,28 @@ pub fn target_files(
     fixture: &Path,
     target: BuildTarget,
 ) -> Result<Vec<(String, String)>, String> {
+    // Stage 0 of the specializer: the identity. Nothing is specialized
+    // yet, so none of the trimming or refusals below apply — every construct is
+    // residue, and the residue runs on Rails.
+    if target == BuildTarget::Futamura {
+        let mut files = futamura_files(fixture)?;
+        let report = emit::futamura::specialize(app, &mut files)?;
+        eprintln!(
+            "roundhouse: futamura: specialized {} query site(s); {} left to Rails{}",
+            report.specialized.len(),
+            report.residue.len(),
+            if std::env::var_os("ROUNDHOUSE_FUTAMURA_LEDGER").is_some() { "" } else { " (ROUNDHOUSE_FUTAMURA_LEDGER=1 lists them)" },
+        );
+        if std::env::var_os("ROUNDHOUSE_FUTAMURA_LEDGER").is_some() {
+            for s in &report.specialized {
+                eprintln!("  specialized {s}");
+            }
+            for r in &report.residue {
+                eprintln!("  residue     {r}");
+            }
+        }
+        return Ok(ensure_readme(files, target));
+    }
     let without_health;
     let app = match without_rails_health_controller(app, target) {
         Some(trimmed) => {
@@ -1673,6 +1732,7 @@ pub fn target_files(
     }
     let files = crate::timings::phase(format_args!("emit {}: assemble", target.as_str()), || match target {
         BuildTarget::Blog => blog_files(fixture),
+        BuildTarget::Futamura => futamura_files(fixture),
         BuildTarget::Spinel => spinel_files_with_source_markers(app, fixture).and_then(|(mut files, _)| {
             spinel_relation_model_handle(&mut files)?;
             spin_shape(files)
@@ -2066,6 +2126,33 @@ fn collect_asset_files(root: &Path, dir: &Path, out: &mut Vec<(String, String)>)
     }
 }
 
+/// Give each emitted file the executable bits its source counterpart
+/// has. Only the Futamura target needs it: its tree IS the source app,
+/// whose `bin/rails` and friends must still run. Every other target
+/// documents its run step as `ruby main.rb`-shaped commands.
+pub fn copy_exec_bits(src: &Path, files: &[(String, String)], dest: &Path) -> Result<(), String> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        for (rel, _) in files {
+            let Ok(meta) = fs::metadata(src.join(rel)) else { continue };
+            let exec = meta.permissions().mode() & 0o111;
+            if exec == 0 {
+                continue;
+            }
+            let path = dest.join(rel);
+            let mut perms = fs::metadata(&path)
+                .map_err(|e| format!("stat {}: {e}", path.display()))?
+                .permissions();
+            perms.set_mode(perms.mode() | exec);
+            fs::set_permissions(&path, perms).map_err(|e| format!("chmod {}: {e}", path.display()))?;
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = (src, files, dest);
+    Ok(())
+}
+
 /// Write `files` to `dest` — each entry's path is taken relative to
 /// `dest`, parent dirs created as needed. Used by the `--target LANG`
 /// mode of the `roundhouse` binary. Identical files are left untouched
@@ -2138,6 +2225,50 @@ pub fn sort_files(files: Vec<EmittedFile>) -> Vec<(String, String)> {
 fn blog_files(fixture: &Path) -> Result<Vec<(String, String)>, String> {
     let mut files: Vec<(String, String)> = Vec::new();
     walk_ruby(fixture, fixture, &mut files)?;
+    files.sort_by(|a, b| a.0.cmp(&b.0));
+    Ok(files)
+}
+
+/// Stage-0 Futamura tree: the app as source control holds it. Unlike
+/// [`blog_files`] it keeps dotfiles (`.ruby-version` decides which Ruby
+/// runs the residue) and the `.keep` files that hold Rails' empty
+/// directories open. What it leaves out is run-time state, named by
+/// the paths a generated Rails app's `.gitignore` excludes. Binary
+/// files travel separately, as `App::binary_assets`.
+fn futamura_files(app_root: &Path) -> Result<Vec<(String, String)>, String> {
+    const UNWALKED: [&str; 2] = [".git", "node_modules"];
+    const STATE: [&str; 5] = ["log/", "tmp/", "storage/", "app/assets/builds/", "public/assets/"];
+    let generated_state = |rel: &str| {
+        (STATE.iter().any(|dir| rel.starts_with(dir)) && !rel.ends_with("/.keep"))
+            || rel.starts_with(".bundle")
+            || rel == "config/master.key"
+    };
+    fn walk(root: &Path, dir: &Path, out: &mut Vec<(String, PathBuf)>) -> Result<(), String> {
+        for entry in fs::read_dir(dir).map_err(|e| format!("read {}: {e}", dir.display()))? {
+            let entry = entry.map_err(|e| format!("read entry: {e}"))?;
+            let path = entry.path();
+            let rel = path
+                .strip_prefix(root)
+                .map_err(|e| format!("strip prefix: {e}"))?
+                .to_string_lossy()
+                .replace('\\', "/");
+            if entry.file_type().map_err(|e| format!("stat: {e}"))?.is_dir() {
+                if !UNWALKED.contains(&rel.as_str()) {
+                    walk(root, &path, out)?;
+                }
+            } else {
+                out.push((rel, path));
+            }
+        }
+        Ok(())
+    }
+    let mut paths = Vec::new();
+    walk(app_root, app_root, &mut paths)?;
+    let mut files: Vec<(String, String)> = paths
+        .into_iter()
+        .filter(|(rel, _)| !generated_state(rel))
+        .filter_map(|(rel, path)| fs::read_to_string(&path).ok().map(|content| (rel, content)))
+        .collect();
     files.sort_by(|a, b| a.0.cmp(&b.0));
     Ok(files)
 }
@@ -2579,6 +2710,18 @@ module HttpStub
     WebMock.reset! if defined?(WebMock)
     nil
   end
+
+  def self.disable
+    require "webmock"
+    WebMock.disable!
+    nil
+  end
+
+  def self.enable
+    require "webmock"
+    WebMock.enable!
+    nil
+  end
 end
 "##;
 
@@ -2671,6 +2814,33 @@ fn ruby_family_runtime_files(
                         # The port at runtime/ruby/typeid.rb exists for the targets\n\
                         # that have no gem to load.\n\
                         require \"typeid\"\n"
+                .to_string();
+        }
+        // `SQLite3::Database`: the sqlite3 gem the CRuby tree's Db shim
+        // already loads. JRuby has no sqlite3 gem (its Db shim is JDBC),
+        // so there the constant is refused at emit
+        // (`unavailable_class_module_construct`) and the file is empty.
+        if path == "runtime/sqlite3_database.rb" {
+            *content = if flavor == RubyFlavor::JRuby {
+                "# SQLite3::Database is not available on JRuby: the sqlite3 gem is\n\
+                 # CRuby's, and this tree's Db shim is JDBC. A program naming it is\n\
+                 # refused at emit — see `project::unavailable_class_module_construct`.\n"
+                    .to_string()
+            } else {
+                "# The sqlite3 gem's own SQLite3::Database — see\n\
+                 # `project::ruby_runtime_files`. The port at\n\
+                 # runtime/spinel/sqlite3_database.rb is spinel's, over the FFI.\n\
+                 require \"sqlite3\"\n"
+                    .to_string()
+            };
+        }
+        // `Rack::Utils`: the rack gem the overlay's Puma already loads,
+        // under the port's require path.
+        if path == "runtime/rack_utils.rb" {
+            *content = "# The rack gem's own Rack::Utils — see `project::ruby_runtime_files`.\n\
+                        # The port at runtime/ruby/rack_utils.rb exists for the targets\n\
+                        # that have no rack to load.\n\
+                        require \"rack/utils\"\n"
                 .to_string();
         }
         if path == "runtime/zlib.rb" {
@@ -2914,6 +3084,7 @@ fn ruby_family_runtime_files(
              # commonmark-java Markly shim — from the same list, minus that\n\
              # one name.)\n\
              require_relative \"module_delegate\"\n\
+             require_relative \"open_telemetry_facade\"\n\
              {}{}",
             gem_require_block(&[]),
             WEB_PUSH_STUB_REOPEN
@@ -2937,6 +3108,7 @@ fn ruby_family_runtime_files(
                  # than carrying a second copy.\n\
                  {}\
                  require_relative \"module_delegate\"\n\
+                 require_relative \"open_telemetry_facade\"\n\
                  {}{}",
                 markly_require,
                 gem_require_block(&["markly"]),
@@ -3466,6 +3638,55 @@ fn apply_cable_channels(files: &mut [(String, String)], app: &App) {
 ///
 /// A SPAN REPLACE between two markers, not a match on today's text —
 /// same reason `apply_cable_connection` gives.
+/// `ActiveRecord::Base.instantiate_named` (runtime/spinel/
+/// active_record_db_config.rb): one arm per model, by the name
+/// `record.class.name` answers for it, and an STI subclass name the
+/// base hydrates. See `lower::record_snapshot`.
+fn apply_instantiate_named(files: &mut [(String, String)], app: &App) {
+    const HEAD: &str = "      # >>> generated: instantiate-named\n";
+    const TAIL: &str = "      # <<< generated: instantiate-named\n";
+    let mut arms: Vec<(String, String)> = Vec::new();
+    for model in &app.models {
+        // Only a class with a table has rows to snapshot, and only it has
+        // `instantiate`: an ActiveModel class (campfire's
+        // `Opengraph::Location`) or the abstract `ApplicationRecord` in
+        // the list was a call to a method nothing defines — spinel
+        // refused the whole build over it.
+        if !app.schema.tables.contains_key(&model.table.0) {
+            continue;
+        }
+        let name = model.name.0.as_str().to_string();
+        arms.push((name.clone(), name.clone()));
+        for sub in &model.sti_subclass_names {
+            if !app.models.iter().any(|m| m.name == *sub) {
+                arms.push((sub.0.as_str().to_string(), name.clone()));
+            }
+        }
+    }
+    // No models, no arms: the default body (a NameError) stays.
+    if arms.is_empty() {
+        return;
+    }
+    let mut generated = String::from(HEAD);
+    generated.push_str("      case name\n");
+    for (name, class) in &arms {
+        generated.push_str(&format!(
+            "      when {name:?} then {class}.instantiate(attributes)\n"
+        ));
+    }
+    generated.push_str("      else raise NameError, \"uninitialized constant #{name}\"\n      end\n");
+    generated.push_str(TAIL);
+    for (path, content) in files.iter_mut() {
+        if !path.ends_with("active_record_db_config.rb") {
+            continue;
+        }
+        let Some(start) = content.find(HEAD) else { continue };
+        let Some(rel_end) = content[start..].find(TAIL) else { continue };
+        let end = start + rel_end + TAIL.len();
+        content.replace_range(start..end, &generated);
+    }
+}
+
 fn apply_global_id_locate(files: &mut [(String, String)], app: &App) {
     const HEAD: &str = "    # >>> generated: global-id-locate\n";
     const TAIL: &str = "    # <<< generated: global-id-locate\n";
@@ -4387,6 +4608,8 @@ pub const RUBY_FAMILY_RUNTIME_CONSTANTS: &[&str] = &[
     "ActionController::ParameterMissing",
     "ActionController::UnpermittedParameters",
     "ActionController::UnknownFormat",
+    "ActionController::BadRequest",
+    "ActionController::InvalidAuthenticityToken",
     "ActionController::RoutingError",
     "AbstractController::ActionNotFound",
     "ActionView::MissingTemplate",
@@ -4419,22 +4642,93 @@ fn unavailable_class_module_construct(name: &str, target: &str) -> Option<&'stat
     }
     let bundled = matches!(
         name,
-        "URI::HTTP" | "URI::HTTPS" | "URI::InvalidURIError" | "Net::OpenTimeout" | "Net::ReadTimeout"
+        "URI::HTTP" | "URI::HTTPS" | "URI::Error" | "URI::InvalidURIError" | "Net::OpenTimeout" | "Net::ReadTimeout"
+        | "SocketError"
         | "Net::HTTPRedirection" | "Net::HTTPOK" | "StringIO" | "OpenSSL::OpenSSLError"
         | "Rails::HTML5::SafeListSanitizer" | "JSON" | "JSON::ParserError"
         | "Struct" | "Mutex" | "Queue" | "SizedQueue"
         | "Thread::Queue" | "Thread::SizedQueue" | "Thread::Mutex"
         | "ThreadError" | "ClosedQueueError" | "Comparable" | "Enumerable"
-        | "JSON::GeneratorError");
+        | "JSON::GeneratorError"
+        // Ported for spinel (`runtime/ruby/rack_utils.rb`), the gem's own on
+        // the ruby family; no strict target loads either.
+        | "Rack::Utils"
+        // `runtime/ruby/active_support_ext.rb` ships to the ruby family
+        // and spinel only.
+        | "ActiveSupport::JSON"
+        // The sqlite3 gem on the ruby family, `runtime/spinel/
+        // sqlite3_database.rb` over the FFI on spinel; `FileUtils` is a
+        // default gem / `packages/fileutils`; the Rails classes come
+        // with `runtime/spinel/active_record_db_config.rb`.
+        | "SQLite3::Database" | "SQLite3::Exception" | "SQLite3::CantOpenException"
+        | "SQLite3::BusyException" | "SQLite3::SQLException"
+        | "FileUtils" | "ActiveRecord::ConnectionAdapters::SQLite3Adapter"
+        // runtime/spinel/active_support_cache.rb.
+        | "ActiveSupport::Cache" | "ActiveSupport::Cache::MemoryStore"
+        // rqrcode_core's / spinel-rqrcode's.
+        | "RQRCodeCore::QRCodeRunTimeError" | "RQRCodeCore::QRCodeArgumentError");
     if !bundled {
         return None;
     }
-    // Nokogiri does not supply HTML5 on JRuby. The other bundled
-    // values remain available there.
-    if target == "jruby" && name != "Rails::HTML5::SafeListSanitizer" {
+    // Nokogiri does not supply HTML5 on JRuby, and the sqlite3 gem does
+    // not run there. The other bundled values remain available.
+    if target == "jruby" && name != "Rails::HTML5::SafeListSanitizer" && !name.starts_with("SQLite3::") {
         return None;
     }
     Some("bundled_constant")
+}
+
+/// Class methods of a stdlib class whose shared port (`runtime/ruby/`)
+/// stops short of them: Ruby's own library serves them on the ruby
+/// family and spinel's package on spinel, while a strict target's port
+/// has no body to call. `Zlib.gzip` needs a deflate the CRC-32 port
+/// (`runtime/ruby/zlib.rb`) does not have. A Rails class method served
+/// only by a ruby-family/spinel runtime file is gated the same way.
+const RUBY_SPINEL_ONLY_METHODS: &[(&str, &str)] = &[
+    ("Zlib", "gzip"),
+    // Answered from the Db shim (`runtime/spinel/
+    // active_record_db_config.rb`); a strict target's Db glue has none.
+    ("ActiveRecord::Base", "connection_db_config"),
+    ("ActiveRecord::Base", "connection_pool"),
+    // `lower::record_snapshot`'s closed-world `constantize` — the
+    // generated `case` lives in the same ruby-family/spinel file.
+    ("ActiveRecord::Base", "instantiate_named"),
+];
+
+/// Instance methods only the ruby family and spinel can answer: a model's
+/// `attributes_before_type_cast` is a Hash of every column's raw stored
+/// value, one value type per column, which a strict target's Hash cannot
+/// hold.
+const RUBY_SPINEL_ONLY_INSTANCE_METHODS: &[&str] = &["attributes_before_type_cast"];
+
+/// True only for an application model instance (including nullable model
+/// unions) that does not define its own method with this spelling.
+fn is_unported_model_instance_method(
+    recv: &crate::expr::Expr,
+    method: &str,
+    app: &App,
+) -> bool {
+    fn model_ids(ty: &crate::ty::Ty, out: &mut Vec<crate::ident::ClassId>) {
+        match ty {
+            crate::ty::Ty::Class { id, .. } => out.push(id.clone()),
+            crate::ty::Ty::Union { variants } => {
+                for variant in variants {
+                    model_ids(variant, out);
+                }
+            }
+            _ => {}
+        }
+    }
+    if matches!(&*recv.node, crate::expr::ExprNode::Const { .. }) {
+        return false;
+    }
+    let Some(ty) = &recv.ty else { return false };
+    let mut ids = Vec::new();
+    model_ids(ty, &mut ids);
+    ids.iter().any(|id| {
+        app.models.iter().any(|model| model.name == *id)
+            && !crate::analyze::source_instance_method(app, id, method)
+        })
 }
 
 /// True when the app already defines `id` as a class/module value, so
@@ -4507,6 +4801,36 @@ fn report_unsupported_bundled_constants(app: &App, target: BuildTarget) {
         if matches!(&*expr.node, crate::expr::ExprNode::Const { .. }) {
             if let Some(crate::ty::Ty::Class { id, .. }) = &expr.ty {
                 report_unavailable_class_value(app, target, id.0.as_str(), expr.span);
+            }
+        }
+        if let crate::expr::ExprNode::Send { recv: Some(recv), method, .. } = &*expr.node
+            && target != "spinel"
+            && target != "jruby"
+            && !expr.span.is_synthetic()
+            && RUBY_SPINEL_ONLY_INSTANCE_METHODS.contains(&method.as_str())
+            && is_unported_model_instance_method(recv, method.as_str(), app)
+        {
+            emit::diagnostics::report_unsupported(
+                expr.span,
+                target,
+                "bundled_method",
+                format!("#{method} is only available on the ruby family and spinel"),
+            );
+        }
+        if let crate::expr::ExprNode::Send { recv: Some(recv), method, .. } = &*expr.node
+            && target != "spinel"
+            && target != "jruby"
+            && !expr.span.is_synthetic()
+            && let crate::expr::ExprNode::Const { path } = &*recv.node
+        {
+            let owner = path.iter().map(|s| s.as_str()).filter(|s| !s.is_empty()).collect::<Vec<_>>().join("::");
+            if RUBY_SPINEL_ONLY_METHODS.contains(&(owner.as_str(), method.as_str())) {
+                emit::diagnostics::report_unsupported(
+                    expr.span,
+                    target,
+                    "bundled_method",
+                    format!("{owner}.{method} is only available on the ruby family and spinel"),
+                );
             }
         }
         // A mapped JSON call does not emit a Ruby module object. Skip
@@ -4896,6 +5220,14 @@ fn spinel_files(app: &App, fixture: &Path) -> Result<(Vec<(String, String)>, Vec
         files.push(("sig/runtime/request_forgery_protection.rbs".to_string(), rbs));
     }
 
+    // Rails 8.1.4 ActionController::Head's options-hash implementation
+    // is only emitted for the Ruby family and Spinel, not strict targets.
+    {
+        let rbs = crate::runtime_files::read_to_string("runtime/spinel/action_controller_head.rbs")
+            .map_err(|e| format!("read runtime/spinel/action_controller_head.rbs: {e}"))?;
+        files.push(("sig/runtime/action_controller_head.rbs".to_string(), rbs));
+    }
+
     // HTTP Token/Basic auth sidecar — the ActionController::Base reopen in
     // runtime/http_authentication.rb (ruby family only). It types the
     // block parameters the helpers yield, which the app's blocks compare.
@@ -5040,6 +5372,14 @@ fn spinel_files(app: &App, fixture: &Path) -> Result<(Vec<(String, String)>, Vec
         // spin_shape replaces it with `require "nokogiri"` (spinel-nokogiri)
         // when the app names Nokogiri.
         "nokogiri_facade",
+        // OpenTelemetry's non-recording-span stub — never swapped for a
+        // real gem (see the file's own header); still its own file, same
+        // whole-file-grain reasoning. `gem_facades.rb`'s own
+        // `require_relative` anchors it for Spinel; the CRuby/JRuby
+        // rewrite below (which replaces that file's content outright)
+        // carries its own matching `require_relative` so it is never
+        // dropped there.
+        "open_telemetry_facade",
         "inflector",
         "inflector_ext",
         "json_builder",
@@ -5047,7 +5387,12 @@ fn spinel_files(app: &App, fixture: &Path) -> Result<(Vec<(String, String)>, Vec
         // scaffold (strict targets literalize controller_name/path).
         // Listed before active_support_ext so require_relative resolves.
         "active_support_inflections",
+        "active_support_number_helper",
+        "active_support_number_helper_mixin",
+        "action_view_number_helper",
+        "action_view_number_helper_mixin",
         "active_support_ext",
+        "hash_deep_merge",
         "security_utils",
         "params",
         "action_text",
@@ -5059,6 +5404,10 @@ fn spinel_files(app: &App, fixture: &Path) -> Result<(Vec<(String, String)>, Vec
         // ruby family reaches Ruby's own through a bare `require`, so
         // this one only has to exist where that does not.
         "ipaddr",
+        // rack's `Utils.q_values` / `select_best_encoding`, ported for
+        // spinel (no rack gem to load); the ruby family swaps it for
+        // `require "rack/utils"` below, as ipaddr and zlib are swapped.
+        "rack_utils",
         // Ruby's `Logger` plus the two ActiveSupport wrappers in front
         // of it. Same arrangement as ipaddr, with one difference the
         // file's header gives: NOT swapped for Ruby's own on the
@@ -5105,6 +5454,10 @@ fn spinel_files(app: &App, fixture: &Path) -> Result<(Vec<(String, String)>, Vec
         // previewer capture. Port for Spinel; CRuby/JRuby swap to the
         // default gem below. BUNDLED also lists Timeout → "timeout".
         "timeout",
+        // `I18n.locale` / `default_locale` — the locale campfire folds
+        // into its cache keys. Rails' default, `:en`; setting one is
+        // not modeled (see the file's header).
+        "i18n_locale",
     ] {
         let rb = format!("runtime/ruby/{stem}.rb");
         let content = crate::runtime_files::read_to_string(&rb)?;
@@ -5276,6 +5629,7 @@ fn spinel_files(app: &App, fixture: &Path) -> Result<(Vec<(String, String)>, Vec
     // chosen. Generating on only one lane would leave the other calling
     // a method nothing defined.
     apply_global_id_locate(&mut files, app);
+    apply_instantiate_named(&mut files, app);
     apply_attachable_locate(&mut files, app);
     apply_views_aggregator(&mut files);
     apply_models_aggregator(&mut files);
@@ -5574,10 +5928,22 @@ fn apply_test_gem_wiring(files: &mut Vec<(String, String)>) {
     // One require, in the helper every test file loads — the place the
     // app put it.
     if let Some((_, helper)) = files.iter_mut().find(|(p, _)| p == "test/test_helper.rb") {
-        for (_, entry) in &needed {
+        for (gem, entry) in &needed {
             let line = format!("require {entry:?}");
-            if !helper.contains(&line) {
-                helper.insert_str(0, &format!("{line}\n"));
+            if helper.contains(&line) {
+                continue;
+            }
+            // WebMock AFTER the app has loaded, as Rails' test_helper
+            // orders it (`config/environment`, then `webmock/minitest`):
+            // the gem swaps `Net::HTTP` for its own subclass while it is
+            // enabled, so an app class that subclasses `Net::HTTP` at
+            // load (campfire's `WebPush::Connections::HTTP`) would
+            // otherwise inherit WebMock's, and once a test disables
+            // WebMock to reach a real server its `start` breaks.
+            const BOOT: &str = "require_relative \"../boot\"\n";
+            match helper.find(BOOT) {
+                Some(at) if *gem == "webmock" => helper.insert_str(at + BOOT.len(), &format!("{line}\n")),
+                _ => helper.insert_str(0, &format!("{line}\n")),
             }
         }
         let with_mocha = needed.iter().any(|(gem, _)| *gem == "mocha");
@@ -5677,6 +6043,7 @@ const GEM_REQUIRES: &[&str] = &[
     "parslet",
     "typeid",
     "rqrcode",
+    "rqrcode_core",
     "SVG/Graph/TimeSeries",
     "sentry-ruby",
     "rails-html-sanitizer",
@@ -5960,7 +6327,7 @@ fn apply_runtime_gem_wiring(files: &mut Vec<(String, String)>) {
     // (constant an emitted body names, gem that defines it). Only gems
     // whose absence is a RUNTIME error belong here — the list is the
     // façade's, not a survey of what an app might like.
-    const RUNTIME_GEMS: [(Marker, &str); 15] = [
+    const RUNTIME_GEMS: [(Marker, &str); 16] = [
         (Marker::Constant("BCrypt"), "bcrypt"),
         (Marker::Constant("HTMLEntities"), "htmlentities"),
         (Marker::Constant("ROTP"), "rotp"),
@@ -5970,6 +6337,7 @@ fn apply_runtime_gem_wiring(files: &mut Vec<(String, String)>) {
         (Marker::Constant("Parslet"), "parslet"),
         (Marker::Constant("TypeID"), "typeid"),
         (Marker::Constant("RQRCode"), "rqrcode"),
+        (Marker::Constant("RQRCodeCore"), "rqrcode_core"),
         // campfire's web push builds one `Net::HTTP::Persistent` pool
         // per process (`WebPush::Pool`), and the gem went undeclared
         // exactly as bcrypt did — the façade names the constant and
@@ -6627,7 +6995,13 @@ fn names_constant(src: &str, konst: &str) -> bool {
                     b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'_' | b':');
             let tail = at + konst.len();
             let tail_ok = matches!(b.get(tail), Some(b'.' | b'[' | b'('))
-                || (b.get(tail) == Some(&b':') && b.get(tail + 1) == Some(&b':'));
+                || (b.get(tail) == Some(&b':') && b.get(tail + 1) == Some(&b':'))
+                // Only right after the keyword or a rescue-list comma: `raise "Timeout waiting"` names no constant.
+                || (matches!(b.get(tail), None | Some(b',' | b' ')) && {
+                    let before = line[..at].trim_start();
+                    before == "rescue " || before == "raise "
+                        || (before.starts_with("rescue ") && before.trim_end().ends_with(','))
+                });
             if head_ok && tail_ok {
                 return true;
             }
@@ -6727,7 +7101,7 @@ fn apply_bundled_gem_wiring(files: &mut [(String, String)]) {
 /// Constant → bundled library that provides it. One table, read by
 /// both the pass that writes the requires and the gate that checks a
 /// tree for missing ones — a second copy is how the rule drifts.
-const BUNDLED: [(&str, &str); 17] = [
+const BUNDLED: [(&str, &str); 19] = [
     // INERT in our trees, and deliberately: `runtime/spinel/base64.rb`
     // defines `Base64` without requiring the library, which the second
     // condition below reads as "the program defines it" and drops the
@@ -6778,6 +7152,9 @@ const BUNDLED: [(&str, &str); 17] = [
     // TimeLimitedVideoPreviewer#capture. Default gem on CRuby/JRuby;
     // Spinel takes `runtime/ruby/timeout.rb` via spinel_files.
     ("Timeout", "timeout"),
+    // `rescue SocketError` — the socket extension's class, loaded by Rails
+    // before the app; spinel's runtime defines it without a package.
+    ("SocketError", "socket"),
     // `Shellwords.escape`: a default gem that a booted Rails 8.1 app has
     // already loaded, so apps call it without a require. INERT on our
     // trees: `runtime/spinel/shellwords.rb` defines the module (no
@@ -6789,6 +7166,10 @@ const BUNDLED: [(&str, &str); 17] = [
     // it), but an app file reaches the tree without its requires.
     // Spinel takes `packages/pty`.
     ("PTY", "pty"),
+    // `FileUtils.mkdir_p` / `remove_entry` — campfire's WAL checkpointer
+    // makes its lock directory. A default gem on CRuby/JRuby (Rails has
+    // loaded it); spinel takes `packages/fileutils`.
+    ("FileUtils", "fileutils"),
 ];
 
 /// Every gap in a tree, as `(file index, require line)`. One walk,
@@ -7740,7 +8121,9 @@ pub fn build_site(fixture: &Path, out: &Path) -> Result<(), String> {
         .map_err(|e| format!("mkdir {}: {e}", out.display()))?;
 
     // Archive generation cleans browse/, so copy its viewer assets afterwards.
-    build_archives(fixture, out, BuildTarget::ALL)?;
+    let targets: Vec<BuildTarget> =
+        BuildTarget::ALL.iter().chain(BuildTarget::SITE_ONLY).copied().collect();
+    build_archives(fixture, out, &targets)?;
     copy_site_assets(out)?;
     copy_create_blog(out)?;
     crate::guide::render_site(out)?;
@@ -7758,13 +8141,24 @@ pub fn build_archives(fixture: &Path, out: &Path, targets: &[BuildTarget]) -> Re
     fs::create_dir_all(&browse).map_err(|e| format!("mkdir {}: {e}", browse.display()))?;
     let mut app =
         ingest_app(fixture).map_err(|e| format!("ingest {}: {e}", fixture.display()))?;
+    // Futamura needs the types but none of the lowerings, same split as
+    // the single-target driver (`bin/roundhouse`).
+    let analyzed = targets.contains(&BuildTarget::Futamura).then(|| {
+        let mut app = app.clone();
+        crate::analyze::Analyzer::new(&app).analyze(&mut app);
+        app
+    });
     // Analyze + the same post-analyze shared lowerings as the
     // single-target driver; the site build has no diagnostic surface,
     // so the residue is dropped.
     let _ = crate::session::analyze_and_lower(&mut app);
 
     for target in targets {
-        let files = target_files(&app, fixture, *target)?;
+        let app = match (target, &analyzed) {
+            (BuildTarget::Futamura, Some(analyzed)) => analyzed,
+            _ => &app,
+        };
+        let files = target_files(app, fixture, *target)?;
         let name = target.as_str();
 
         let json_path = out.join("browse").join(format!("{name}.json"));
@@ -7923,6 +8317,71 @@ fn walk_ruby(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_bare_exception_class_is_named_only_in_rescue_or_raise_position() {
+        assert!(names_constant("  rescue SocketError => e\n", "SocketError"));
+        assert!(names_constant("  rescue Timeout::Error, SocketError\n", "SocketError"));
+        assert!(names_constant("  rescue Timeout::Error,SocketError\n", "SocketError"));
+        assert!(names_constant("  raise SocketError, \"down\"\n", "SocketError"));
+        assert!(names_constant("  raise SocketError\n", "SocketError"));
+        assert!(!names_constant("  raise \"Timeout waiting for pool tasks\"\n", "Timeout"));
+        assert!(!names_constant("  rescue => e # SocketError here\n", "SocketError"));
+        assert!(!names_constant("  raise Error, \"SocketError down\"\n", "SocketError"));
+    }
+
+    #[test]
+    fn bundled_instance_method_gate_is_scoped_to_model_receivers() {
+        use crate::expr::{Expr, ExprNode};
+        use crate::ident::{ClassId, Symbol};
+        use crate::span::Span;
+        use crate::ty::Ty;
+
+        let tree = [
+            ("app/models/article.rb", "class Article < ApplicationRecord; end\n"),
+            ("app/models/custom.rb", "class Custom < ApplicationRecord\n  def attributes_before_type_cast; {}; end\nend\n"),
+            ("app/models/parent.rb", "class Parent < ApplicationRecord\n  def attributes_before_type_cast; {}; end\nend\n"),
+            ("app/models/child.rb", "class Child < Parent; end\n"),
+            ("app/models/concerns/raw_values.rb", "module RawValues\n  def attributes_before_type_cast; {}; end\nend\n"),
+            ("app/models/included.rb", "class Included < ApplicationRecord\n  include RawValues\nend\n"),
+            ("app/services/probe.rb", "class Probe; end\n"),
+        ].into_iter().map(|(path, text)| (PathBuf::from(path), text.as_bytes().to_vec())).collect();
+        let mut app = crate::ingest::ingest_app_from_tree(tree).unwrap();
+        let mut empty_reopen = app.library_classes.iter()
+            .find(|class| class.name.0.as_str() == "RawValues")
+            .unwrap().clone();
+        empty_reopen.methods.clear();
+        app.library_classes.insert(0, empty_reopen);
+        let receiver = |node, ty| {
+            let mut expr = Expr::new(Span::synthetic(), node);
+            expr.ty = Some(ty);
+            expr
+        };
+        let receiver_for = |name: &str| {
+            receiver(ExprNode::Var {
+                id: crate::ident::VarId(0),
+                name: Symbol::new("receiver"),
+            }, Ty::Class { id: ClassId(Symbol::new(name)), args: vec![] })
+        };
+
+        assert!(is_unported_model_instance_method(&receiver_for("Article"), "attributes_before_type_cast", &app));
+        assert!(!is_unported_model_instance_method(&receiver_for("Probe"), "attributes_before_type_cast", &app));
+        assert!(!is_unported_model_instance_method(&receiver_for("Custom"), "attributes_before_type_cast", &app));
+        assert!(!is_unported_model_instance_method(&receiver_for("Child"), "attributes_before_type_cast", &app));
+        assert!(!is_unported_model_instance_method(&receiver_for("Included"), "attributes_before_type_cast", &app));
+        assert!(is_unported_model_instance_method(
+            &receiver(ExprNode::Var { id: crate::ident::VarId(0), name: Symbol::new("receiver") },
+                Ty::Union { variants: vec![Ty::Class { id: ClassId(Symbol::new("Article")), args: vec![] }, Ty::Nil] }),
+            "attributes_before_type_cast",
+            &app,
+        ));
+        assert!(!is_unported_model_instance_method(
+            &receiver(ExprNode::Const { path: vec![Symbol::new("Article")] },
+                Ty::Class { id: ClassId(Symbol::new("Article")), args: vec![] }),
+            "attributes_before_type_cast",
+            &app,
+        ));
+    }
 
     #[test]
     fn bundled_constant_gate_covers_auxiliary_emitted_roots() {

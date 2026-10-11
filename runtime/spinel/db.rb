@@ -67,6 +67,8 @@ module SQL
   # open_v2 flags: READWRITE | CREATE | URI. The first two are what plain
   # `sqlite3_open` uses, so a non-URI path opens identically either way.
   ffi_const :OPEN_URI_RWC, 70
+  # READONLY | URI, for `SQLite3::Database.new(path, readonly: true)`.
+  ffi_const :OPEN_URI_READONLY, 65
 
   ffi_func :sqlite3_open,              [:str, :ptr],                          :int
   # `sqlite3_open` honors a `file:` URI only on a build compiled with
@@ -129,6 +131,10 @@ module SQL
   # non-zero in autocommit — the "is a transaction open?" probe the
   # request read snapshot and the write permit ask before acting.
   ffi_func :sqlite3_get_autocommit,    [:ptr],                                :int
+  # `SQLite3::Database` (runtime/spinel/sqlite3_database.rb): a busy
+  # timeout per connection, and 64-bit integer columns.
+  ffi_func :sqlite3_busy_timeout,      [:ptr, :int],                          :int
+  ffi_func :sqlite3_column_int64,      [:ptr, :int],                          :long
 
   # Out-params — sqlite3_open writes the db handle here, prepare_v2
   # writes the stmt handle. 8 bytes is enough for a 64-bit pointer.
@@ -140,6 +146,10 @@ module SQL
   # The background checkpointer's own connection, opened from its thread
   # after the pool exists — its own buffer for the same reason as seed_out.
   ffi_buffer :ckpt_out, 8
+  # `SQLite3::Database`'s own out-params, so an app's connection never
+  # writes into a buffer the pool reads.
+  ffi_buffer :sq_db_out, 8
+  ffi_buffer :sq_stmt_out, 8
   ffi_read_ptr :read_ptr, 0
 end
 
@@ -324,19 +334,26 @@ class QcEntry
   end
 
   def cell_kind(row, i)
-    @kinds[row * @ncols + i]
+    v = @kinds[row * @ncols + i]
+    # Spinel tip (ea683750+): Array[Integer]#[] is Integer? (sp_oint).
+    # Coalesce so qc_int / column_int stay plain Integer and
+    # `_adapter_count` does not unify to sp_oint against sp_poly_count_val.
+    v.nil? ? 0 : v
   end
 
   def cell_int(row, i)
-    @ints[row * @ncols + i]
+    v = @ints[row * @ncols + i]
+    v.nil? ? 0 : v
   end
 
   def cell_float(row, i)
-    @floats[row * @ncols + i]
+    v = @floats[row * @ncols + i]
+    v.nil? ? 0.0 : v
   end
 
   def cell_text(row, i)
-    @texts[row * @ncols + i]
+    v = @texts[row * @ncols + i]
+    v.nil? ? "" : v
   end
 end
 
@@ -1286,6 +1303,24 @@ module Db
     @prepare_lock
   end
 
+  # `ActiveRecord::Base.connection_db_config` answers from these
+  # (runtime/spinel/active_record_db_config.rb): the database this
+  # process configured, the adapter name Rails would report for it, and
+  # whether the holder is inside a transaction of its own — the request
+  # read snapshot is the shim's, not the app's, so it does not count.
+  def self.database_path
+    @db_path
+  end
+
+  def self.adapter_name
+    "sqlite3"
+  end
+
+  def self.transaction_open?
+    conn = current_conn
+    conn.in_txn? && conn.snap != 2
+  end
+
   def self.current_conn
     c = Thread.current[:db_conn]
     return c if !c.nil?
@@ -1331,7 +1366,15 @@ module Db
     # outside any lease pinned (`pin_transaction`), keeps the thread's
     # connection. A second lease would rebind it and, on release, unbind
     # (and roll back) the outer holder's.
-    return yield if !Thread.current[:db_conn].nil?
+    #
+    # Do not write `return yield if …`: Spinel tip (ea683750+) inlines that
+    # form at each call site and, when the block raises, emits
+    # `sp_oint_arg(({ raise…; 0; }))` — an int where sp_oint is required.
+    # Binding the yield result first keeps the early-return path well-typed.
+    unless Thread.current[:db_conn].nil?
+      result = yield
+      return result
+    end
     pool = pool_for_thread
     idx = pool.lease
     conn = pool.conn(idx)

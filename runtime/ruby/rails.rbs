@@ -9,6 +9,7 @@ module Rails
   def self.cache: () -> Cache
   def self.logger: () -> Rails::Logger
   def self.log_line: (String line) -> void
+  def self.error: () -> ActiveSupport::ErrorReporter
   def self.application: () -> Application
 
   class AppPath
@@ -29,6 +30,7 @@ module Rails
     def production?: () -> bool
     def test?: () -> bool
     def staging?: () -> bool
+    def to_s: () -> String
   end
 
   class Cache
@@ -62,11 +64,14 @@ module Rails
   class Application
     def session_cookie_key: () -> String
     def forgery_protection_verification_strategy: () -> String
+    def token_fields_omitted: () -> bool
     def global_id_app: () -> String
     def secret_key_base: () -> String
     def domain: () -> String
     def protocol: () -> String
     def credentials: () -> Hash[Symbol, untyped]
+    ENV_CONFIG: Hash[String, Symbol?]
+    def env_config: () -> Hash[String, Symbol?]
     def config_time_zone: () -> String
     def active_storage_excluded_content_types: () -> Array[String]
     def active_storage_video_preview_arguments: () -> String

@@ -140,6 +140,39 @@ module ActiveRecord
     lo
   end
 
+  # Thin reflection surface for `Model.reflect_on_association(:name)`.
+  # Campfire asks `counter_cache_column` (nil when the belongs_to did not
+  # declare `counter_cache:`). Deeper Rails reflection stays unmodeled.
+  module Reflection
+    class AssociationReflection
+      def initialize(name, counter_cache_column)
+        @name = name
+        @counter_cache_column = counter_cache_column
+      end
+
+      def name
+        @name
+      end
+
+      def counter_cache_column
+        @counter_cache_column
+      end
+
+      # Catalog also types `.klass` / `.macro`; presence-only callers get
+      # nil rather than a NameError until those halves are synthesized.
+      # Read-tail locals: strict targets drop a bare `nil` method body.
+      def klass
+        result = nil
+        result
+      end
+
+      def macro
+        result = nil
+        result
+      end
+    end
+  end
+
   # Base class for all models. Designed to contain *zero* metaprogramming:
   # subclasses provide their own `attributes`, `[]`, `[]=`, `update`, and
   # `initialize`-from-attrs methods (typically by writing them out per
@@ -287,6 +320,29 @@ module ActiveRecord
       "id"
     end
 
+    # Association names this model declares — overridden by the model
+    # lowerer (`_association_names`). Empty on Base so an unknown model
+    # answers `reflect_on_association` with nil the way Rails does.
+    def self._association_names
+      []
+    end
+
+    # Rails' `Model.reflect_on_association(:name)`. Looks the name up in
+    # `_association_names`; `counter_cache:` is unmodeled so every hit
+    # answers `counter_cache_column == nil` (honest for campfire's
+    # trigger-backed `messages_count`, which is not an AR counter cache).
+    def self.reflect_on_association(name)
+      needle = name.to_s
+      _association_names.each do |assoc|
+        if assoc.to_s == needle
+          return ActiveRecord::Reflection::AssociationReflection.new(assoc, nil)
+        end
+      end
+      # Read-tail: strict targets drop a bare `nil` method body.
+      result = nil
+      result
+    end
+
     # Finder casting runs in connection.rb (Relation is ruby-family
     # only). Keep the typed contract here without transpiling a union
     # receiver's conversion into strict targets.
@@ -308,6 +364,14 @@ module ActiveRecord
     end
 
     def self.schema_date_columns
+      []
+    end
+
+    def self.schema_boolean_columns
+      []
+    end
+
+    def self.schema_decimal_columns
       []
     end
 
@@ -415,6 +479,7 @@ module ActiveRecord
       raise NotImplementedError, "_adapter_insert: subclasses must override"
     end
     def _adapter_update; end
+    def _adapter_touch; end
     def _adapter_delete; end
 
     def self._adapter_count
@@ -877,6 +942,17 @@ module ActiveRecord
       changes.key?(name)
     end
 
+    # Rails' `changed?` / `has_changes_to_save?`: any column pending.
+    # campfire's `RecordCache` snapshots only records with none.
+    def changed?
+      changes = changes_to_save
+      !changes.empty?
+    end
+
+    def has_changes_to_save?
+      changed?
+    end
+
     def attribute_was(name)
       changes = changes_to_save
       changes[name]
@@ -923,7 +999,8 @@ module ActiveRecord
     # That lowering is `lower::column_ops` for an implicit-self call
     # (campfire's `Membership#connected`) and `lower::update_kwargs` for
     # an explicit receiver (lobsters' `@user&.touch(:last_read_newest_
-    # story)`); both reach this method with the column already written.
+    # story)`); both reach `touch_written` below with the column
+    # already written.
     #
     # `after_touch` FIRES, and that is load-bearing rather than
     # cosmetic: it is the only thing that makes `belongs_to … touch:
@@ -933,7 +1010,24 @@ module ActiveRecord
     # cascade stops one level short and a room's `updated_at` never
     # moves. (Rails also fires the commit callbacks here; this runtime
     # still does not, and that half of the divergence stands.)
+    #
+    # The bare form writes `updated_at` ALONE (`_adapter_touch`), as
+    # Rails' `touch` does. Writing the whole row put back every column
+    # the record had loaded, and a column the database keeps behind the
+    # record — campfire's trigger-maintained `rooms.messages_count`,
+    # reached by a message's `belongs_to :room, touch: true` — took the
+    # stale value.
     def touch
+      fill_timestamps(false)
+      _adapter_touch
+      after_touch
+      true
+    end
+
+    # `touch` after a call-site column write (`touch :connected_at`,
+    # `increment!(:connections, touch: true)`): the whole row, so the
+    # assigned column is written with the timestamp.
+    def touch_written
       fill_timestamps(false)
       _adapter_update
       after_touch

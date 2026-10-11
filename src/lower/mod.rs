@@ -40,6 +40,7 @@ pub mod library_extras;
 pub mod model_to_library;
 pub mod routes;
 pub mod routes_to_library;
+pub mod segment_pattern;
 pub mod scope_chain;
 pub mod schema_to_library;
 pub mod seeds_to_library;
@@ -50,6 +51,7 @@ pub mod active_model_model;
 pub mod enumerable_ext;
 mod fused;
 pub mod time_calendar;
+pub mod indifferent_access;
 pub mod boolean_cast;
 pub mod where_range_split;
 pub mod params_merge;
@@ -77,12 +79,15 @@ pub mod class_body_new;
 pub mod mocha;
 pub mod webmock;
 pub mod global_id_locate;
+pub mod record_snapshot;
 pub mod array_ordinal;
 pub mod each_with_index;
 pub mod sti_is_a;
 pub mod dead_default;
 pub mod errors_add;
 pub mod errors_full_messages;
+pub mod human_attribute_name;
+pub mod i18n_translate;
 pub mod assoc_attr_key;
 pub mod attachable;
 pub mod attachables_grep;
@@ -94,6 +99,9 @@ pub mod as_json_writer;
 pub mod as_json_super;
 pub mod parameterize;
 pub mod random_formatter;
+pub mod bigdecimal;
+pub mod range_enumerable;
+pub mod preloader;
 pub mod to_json;
 pub mod number_to_fs;
 pub mod string_inflections;
@@ -167,6 +175,7 @@ pub mod generated_write_guard;
 pub mod signed_id;
 pub(crate) mod secure_token;
 pub mod rich_text;
+pub mod known_super_forwarding;
 pub mod plain_text_attr;
 pub mod capture_inline;
 pub mod partial_qualify;
@@ -300,13 +309,18 @@ const POST_ANALYZE_PASS_ORDER: &[(&str, &[&str])] = &[
     // ledger residue for (or rewrite inside) code that cannot run.
     ("bool_fold", &[]),
     ("association_new", &["bool_fold"]),
+    // Refuses `**h` into flattened optional keywords while the splat is
+    // still a `KeywordSplat`; `forwarding_keywords` erases it to `h`.
+    ("flattened_keyword_splats", &["bool_fold"]),
     // Preserve native full destinations; ordinary keyword producers
     // rejoin the legacy projection before any argument-rewriting pass.
-    ("forwarding_keywords", &["bool_fold"]),
+    ("forwarding_keywords", &["bool_fold", "flattened_keyword_splats"]),
     // Reads the analyzer's nested request-params types before any pass rewrites the controller bodies that carry them.
     ("params_residue", &["bool_fold"]),
     // After the ledger, which reads the calls this rewrites; before the controller lowering turns `params` into `@params`.
     ("params_permit", &["params_residue"]),
+    // Before the fused rewrites, which key on the plain Hash type this pass leaves on an indifferent hash.
+    ("indifferent_access", &[]),
     // Independent send rewrites: one fused tree walk in
     // `fused::apply_fused_independent_rewrites`. Grouped here so the
     // executed-pass assert stays a straight list match.
@@ -317,6 +331,9 @@ const POST_ANALYZE_PASS_ORDER: &[(&str, &[&str])] = &[
     ("number_to_fs", &[]),
     ("string_inflections", &[]),
     ("to_json", &[]),
+    ("preloader", &[]),
+    ("bigdecimal", &[]),
+    ("range_enumerable", &[]),
     ("csv_generate", &[]),
     ("presence_in", &[]),
     ("enumerable_ext", &[]),
@@ -376,6 +393,10 @@ const POST_ANALYZE_PASS_ORDER: &[(&str, &[&str])] = &[
     // (`attribute_aliases` keys on `read_attribute`). Extra test
     // constant / inner-class surfaces stay try_guard-only.
     ("try_guard", &[]),
+    // `Model.instantiate(attrs)` / `name.constantize.instantiate(attrs)` —
+    // Rails' raw-attribute rebuild. Keys on `instantiate` and nothing
+    // another pass produces.
+    ("record_snapshot", &[]),
     // After time_calendar (fused earlier): `t.all_month` becomes the Range literal this splits out.
     // Stays sequential: rewrite plus a diagnostic walk that tracks
     // `where`/`find_by` condition position. Fusing the rewrite would
@@ -570,6 +591,8 @@ const POST_ANALYZE_PASS_ORDER: &[(&str, &[&str])] = &[
     // the same body has already baked its humanized prefix — the
     // projection this pass emits reads that text.
     ("errors_index", &["errors_add"]),
+    ("human_attribute_name", &[]),
+    ("i18n_translate", &[]),
     ("create_block", &["secure_password_super"]),
     // `<params>.merge(k: v)` written a method away from the permit
     // chain → `Model.from_params(p)` + per-key setters, hoisted above
@@ -760,12 +783,18 @@ pub fn apply_post_analyze_lowerings(
     ran!("bool_fold");
     association_new::apply_association_new_lowering(app);
     ran!("association_new");
+    // Before the first `forwarding::apply` erases `**h` into a
+    // positional `h`, after which `f(x, **h)` and `f(x, h)` are one tree.
+    diags.extend(helper_kwargs::refuse_flattened_keyword_splats(app));
+    ran!("flattened_keyword_splats");
     diags.extend(forwarding::apply(app));
     ran!("forwarding_keywords");
     diags.extend(params_residue::apply_params_residue_ledger(app));
     ran!("params_residue");
     params_permit::apply_params_permit_lowering(app);
     ran!("params_permit");
+    indifferent_access::apply_indifferent_access_lowering(app);
+    ran!("indifferent_access");
     crate::timings::phase("post-analyze: fused send rewrites", || {
         fused::apply_fused_independent_rewrites(app);
     });
@@ -776,6 +805,9 @@ pub fn apply_post_analyze_lowerings(
     ran!("number_to_fs");
     ran!("string_inflections");
     ran!("to_json");
+    ran!("preloader");
+    ran!("bigdecimal");
+    ran!("range_enumerable");
     ran!("csv_generate");
     ran!("presence_in");
     ran!("enumerable_ext");
@@ -820,6 +852,8 @@ pub fn apply_post_analyze_lowerings(
     ran!("global_id_locate");
     ran!("assoc_pluck");
     ran!("try_guard");
+    record_snapshot::apply_record_snapshot_lowering(app);
+    ran!("record_snapshot");
     diags.extend(where_range_split::apply_where_range_split(app));
     ran!("where_range_split");
     sti_scope::apply_sti_scope_lowering(app);
@@ -922,6 +956,10 @@ pub fn apply_post_analyze_lowerings(
     ran!("errors_add");
     diags.extend(errors_index::apply_errors_index_lowering(app));
     ran!("errors_index");
+    human_attribute_name::apply_human_attribute_name_lowering(app);
+    ran!("human_attribute_name");
+    i18n_translate::apply_i18n_translate_lowering(app);
+    ran!("i18n_translate");
     diags.extend(create_block::apply_create_block_inline(app));
     ran!("create_block");
     diags.extend(params_merge::apply_params_merge_lowering(app));
