@@ -9,6 +9,10 @@
 mod emit_and_run;
 #[path = "support/class_attribute.rs"]
 mod class_attribute;
+#[path = "support/array_excluding.rs"]
+mod array_excluding;
+#[path = "emit_and_run/array_excluding.rs"]
+mod array_excluding_runs;
 #[path = "emit_and_run/integer_query_find_by.rs"]
 mod integer_query_find_by;
 #[path = "support/lambda_signatures.rs"]
@@ -10491,6 +10495,22 @@ article = Article.create!(title: "Loaded title", body: "A sufficiently long arti
 comment = Comment.create!(article: article, commenter: "Reader", body: "Comment body")
 got = LoadedProbe.flags(Comment.find(comment.id))
 raise "association(:article).loaded? answered #{got.inspect}" unless got == [false, true]
+"#)
+        .assert_passes();
+}
+
+/// Campfire's messages_count test: `Message.reflect_on_association(:room)`
+/// and `assert_not reflection.counter_cache_column` (trigger-backed count,
+/// not an AR `counter_cache:`).
+#[test]
+fn reflect_on_association_answers_without_counter_cache() {
+    emit_and_run::real_blog()
+        .run_ruby(r#"
+reflection = Comment.reflect_on_association(:article)
+raise "missing reflection" if reflection.nil?
+raise "expected Symbol name, got #{reflection.name.inspect}" unless reflection.name == :article
+raise "counter_cache_column should be nil, got #{reflection.counter_cache_column.inspect}" unless reflection.counter_cache_column.nil?
+raise "unknown assoc should be nil" unless Comment.reflect_on_association(:missing).nil?
 "#)
         .assert_passes();
 }
