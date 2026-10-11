@@ -414,6 +414,13 @@ pub enum Association {
         /// blockless common case.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         extension: Vec<MethodDef>,
+        /// `primary_key: :source_id` — the OWNER column the foreign key
+        /// matches (Rails' `join_primary_key`). `None` means the owner's
+        /// own key, `id`. Every reader of this association must go
+        /// through [`Association::owner_key`]; falling back to `id`
+        /// silently returns the wrong rows.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        primary_key: Option<Symbol>,
     },
     HasOne {
         name: Symbol,
@@ -423,6 +430,12 @@ pub enum Association {
         #[serde(default, skip_serializing_if = "is_false")]
         foreign_key_explicit: bool,
         dependent: Dependent,
+        /// `has_one :x, through: :y`. Recorded so consumers that would
+        /// treat the association as a direct query can see it is not;
+        /// the reader is still direct (a pre-existing gap), so anything
+        /// that cannot be right for it must refuse.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        through: Option<Symbol>,
         /// See `HasMany::as_interface`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         as_interface: Option<Symbol>,
@@ -436,6 +449,13 @@ pub enum Association {
         /// `after_save` that stamps the FK (and `as:` type) then saves.
         #[serde(default, skip_serializing_if = "is_false")]
         autosave: bool,
+        /// `primary_key: :source_id` — the OWNER column the foreign key
+        /// matches (Rails' `join_primary_key`). `None` means the owner's
+        /// own key, `id`. Every reader of this association must go
+        /// through [`Association::owner_key`]; falling back to `id`
+        /// silently returns the wrong rows.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        primary_key: Option<Symbol>,
     },
     HasAndBelongsToMany {
         name: Symbol,
@@ -452,6 +472,25 @@ impl Association {
             | Association::HasOne { name, .. }
             | Association::HasAndBelongsToMany { name, .. } => name,
         }
+    }
+
+    /// The declared `primary_key:` option, if any. For `has_one` /
+    /// `has_many` it names the OWNER column the foreign key matches;
+    /// for `belongs_to` it names the TARGET column the foreign key
+    /// matches. `None` means `id` (or the table's key) in both cases.
+    pub fn declared_primary_key(&self) -> Option<&Symbol> {
+        match self {
+            Association::BelongsTo { primary_key, .. }
+            | Association::HasMany { primary_key, .. }
+            | Association::HasOne { primary_key, .. } => primary_key.as_ref(),
+            Association::HasAndBelongsToMany { .. } => None,
+        }
+    }
+
+    /// The owner-side column a `has_one` / `has_many` foreign key
+    /// matches: the declared `primary_key:` or `id`.
+    pub fn owner_key(&self) -> Symbol {
+        self.declared_primary_key().cloned().unwrap_or_else(|| Symbol::from("id"))
     }
 }
 
