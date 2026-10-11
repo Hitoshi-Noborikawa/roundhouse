@@ -9,6 +9,7 @@ module Rails
   def self.cache: () -> Cache
   def self.logger: () -> Rails::Logger
   def self.log_line: (String line) -> void
+  def self.error: () -> ActiveSupport::ErrorReporter
   def self.application: () -> Application
 
   class AppPath
@@ -29,6 +30,7 @@ module Rails
     def production?: () -> bool
     def test?: () -> bool
     def staging?: () -> bool
+    def to_s: () -> String
   end
 
   class Cache

@@ -285,9 +285,23 @@ pub fn ingest_rails_application_singleton_methods(
                 message: "Rails application singleton class-variable initialization is not modeled".into(),
             });
         }
-        out.extend(body.methods);
+        // Rubydex records no constant references inside a singleton
+        // class opened on an expression, so its constants carry no
+        // source answer to require.
+        let mut methods = body.methods;
+        for method in &mut methods {
+            mark_unindexed_const_refs(&mut method.body);
+        }
+        out.extend(methods);
     }
     Ok(out)
+}
+
+fn mark_unindexed_const_refs(expr: &mut crate::expr::Expr) {
+    if matches!(&*expr.node, crate::expr::ExprNode::Const { .. }) {
+        expr.decisions |= crate::expr::UNINDEXED_SCOPE_CONST_REF;
+    }
+    expr.node.for_each_child_mut(&mut mark_unindexed_const_refs);
 }
 
 /// Build a LibraryClass for a class declaration, prepending the
@@ -1439,10 +1453,19 @@ impl DeclBody {
             .class_initializers
             .iter()
             .any(|expr| !expr.span.is_synthetic());
+        // Constants and `@@` initializers whose values are all literals
+        // cannot observe one another, so emitting them in a different order
+        // than the source wrote them changes nothing (lobsters' `Twitter`:
+        // `@@CONSUMER_KEY = nil` beside `MAX_TWEET_LEN = 280`).
+        let order_independent = self.constants.iter().all(|(_, value)| is_literal_value(value))
+            && self.class_initializers.iter().all(|expr| match &*expr.node {
+                ExprNode::Assign { value, .. } => is_literal_value(value),
+                _ => false,
+            });
         if has_source_ordered_init
             && (!self.unknown_calls.is_empty()
-                || !self.constants.is_empty()
-                || !self.includes.is_empty())
+                || !self.includes.is_empty()
+                || (!self.constants.is_empty() && !order_independent))
         {
             return Err(IngestError::Unsupported {
                 file: file.into(),
@@ -1450,6 +1473,17 @@ impl DeclBody {
             });
         }
         Ok(())
+    }
+}
+
+/// A literal (or an array/hash of literals): a value that reads no other
+/// constant or class variable, so its place in the class body is free.
+fn is_literal_value(e: &Expr) -> bool {
+    match &*e.node {
+        ExprNode::Lit { .. } => true,
+        ExprNode::Array { elements, .. } => elements.iter().all(is_literal_value),
+        ExprNode::Hash { entries, .. } => entries.iter().all(|(k, v)| is_literal_value(k) && is_literal_value(v)),
+        _ => false,
     }
 }
 
@@ -3715,6 +3749,12 @@ const CONCERN_MODEL_MACROS: &[&str] = &[
     "typed_store",
     "broadcasts_to",
     "delegate",
+    // Devise's scope declaration: `devise :database_authenticatable, …`
+    // in a concern's `included do` (Jumpstart's `User::Authenticatable`)
+    // makes every includer a Devise scope exactly as a direct call in
+    // the model body does; `analyze::registry::controllers` reads it
+    // off `model.body` for `current_<scope>` and friends.
+    "devise",
     // `included do include Other end` runs on the includer: spliced
     // after the includer's own `include` line, `Other` sits ahead of
     // this concern in the lookup order, as in Ruby.
