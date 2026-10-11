@@ -49,21 +49,28 @@ fn enum_alias_in_a_model_body_records_no_gap_and_keeps_the_alias() {
     .expect("the enum alias must not fail strict ingest");
 
     let model = app.models.iter().find(|m| m.name.0.as_str() == "Widget").expect("Widget model");
-    let enabled = model
-        .body
+    // The alias itself is recorded as a typed body item at ingest, not
+    // resolved yet — resolution moved to lowering (see
+    // `ModelBodyItem::Alias`'s own doc). What this test is actually
+    // about — the SECOND, redundant library walk no longer treats the
+    // alias as a hard error — holds regardless: ingest above already
+    // succeeded.
+    assert!(
+        model.body.iter().any(|item| matches!(item,
+            ModelBodyItem::Alias { new, old, .. } if new.as_str() == "enabled?" && old.as_str() == "accepted?")),
+        "{:?}", model.body
+    );
+    let lowered =
+        roundhouse::lower::lower_model_to_library_class(model, &app.schema);
+    let enabled = lowered
+        .methods
         .iter()
-        .find_map(|item| match item {
-            ModelBodyItem::Method { method, .. } if method.name.as_str() == "enabled?" => Some(method),
-            _ => None,
-        })
-        .expect("the alias must still produce an `enabled?` method");
-    let accepted = model
-        .body
+        .find(|method| method.name.as_str() == "enabled?")
+        .expect("the alias must still produce an `enabled?` method once lowered");
+    let accepted = lowered
+        .methods
         .iter()
-        .find_map(|item| match item {
-            ModelBodyItem::Method { method, .. } if method.name.as_str() == "accepted?" => Some(method),
-            _ => None,
-        })
+        .find(|method| method.name.as_str() == "accepted?")
         .expect("the enum predicate `accepted?` must exist");
     assert_eq!(
         format!("{:?}", enabled.body), format!("{:?}", accepted.body),

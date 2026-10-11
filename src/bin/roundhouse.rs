@@ -443,6 +443,26 @@ fn run_transpile(
             None => project::target_files(&app, input, target),
         });
 
+    // Same attribution pass as `analyze_diags` above, run again here:
+    // model-to-library lowering (where an unresolved `alias` is caught,
+    // `lower::model_to_library::resolve_model_aliases`) runs a SECOND
+    // time inside `target_files` itself, to build the actual emitted
+    // method bodies — `analyze_and_lower`'s own lowering pass above
+    // isn't wrapped in `emit::diagnostics::scope`, so a push from
+    // there is silently dropped, and this is the first (and only)
+    // place such a diagnostic is ever collected. Without this second
+    // call, `--survey` (no `--allow-unsupported`) still hard-failed on
+    // an unresolved alias — the Error severity from `diags` alone
+    // gates the exit code below — and it never reached the gap
+    // ledger, which undercounted the app's real gap total.
+    if survey {
+        roundhouse::analyze::attribution::attribute_analysis_gaps(
+            &mut diags,
+            &app,
+            &mut survey_gaps,
+        );
+    }
+
     // Prism syntax errors recorded during ingest join the emit-gap
     // inventory: same `Diagnostic` shape, same print/policy/gate
     // treatment. They lead the list — earliest phase, and usually the

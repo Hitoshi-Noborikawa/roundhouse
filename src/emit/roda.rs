@@ -364,6 +364,14 @@ fn model_for(model: &Model) -> String {
                     lines.push(format!("  {l}").trim_end().to_string());
                 }
             }
+            // Roda converts from the ingest-shape IR directly (no
+            // typed lowering pass, see the module doc), so it never
+            // sees a RESOLVED alias — just re-emit the keyword form
+            // verbatim. Sequel models are ordinary Ruby classes, so
+            // Ruby's own `alias` still does the right thing here.
+            ModelBodyItem::Alias { new, old, .. } => {
+                lines.push(format!("  alias {new} {old}"));
+            }
             ModelBodyItem::Unknown { expr, .. } => {
                 for l in emit_expr(expr).lines() {
                     lines.push(format!("  # ROUNDHOUSE-TODO: unconverted: {l}"));

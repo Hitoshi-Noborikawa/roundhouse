@@ -1238,11 +1238,26 @@ fn build_methods_with_finder_inputs(
     // here too (`url` / `filename` / `content_type`).
     crate::lower::attachment_model::push_attachment_record_methods(&mut methods, model);
     crate::lower::attached::push_attached_methods(&mut methods, model);
+    // Snapshot BEFORE push_user_methods: an association reader or
+    // `attr_accessor` pair's PRISTINE synthesized body, for
+    // `resolve_model_aliases` below. `push_user_methods` mutates
+    // `methods` in place when a later hand-written `def` overrides
+    // one of these (last-def-wins) — exactly the collapse snapshot
+    // semantics needs to see THROUGH, not after.
+    let pre_user_methods = methods.clone();
     push_user_methods(&mut methods, model);
     // friendly_id — `friendly`, its configuration and the slug
     // `to_param`. After the user methods (their own wins), before the
     // `to_param` default below.
     crate::lower::friendly_id::push_friendly_methods(&mut methods, model);
+    // AFTER push_user_methods and every other synthesizer above it
+    // (friendly_id included): resolving `alias new old` needs to see
+    // the full method surface (columns, associations, attr_accessor,
+    // attribute, hand-written defs, enum methods, friendly_id's
+    // `friendly`) to tell a real gap from a false one. See
+    // `resolve_model_aliases`'s own doc for the snapshot semantics and
+    // the Rails-grounded per-source matrix.
+    resolve_model_aliases(model, &mut methods, &pre_user_methods, schema);
     push_dom_prefix_method(&mut methods, model);
     // AFTER push_user_methods, unlike the macros above: its skip guard
     // reads the accumulated list, so a model's own `to_param` (already
@@ -1366,6 +1381,256 @@ fn push_user_methods(methods: &mut Vec<MethodDef>, model: &Model) {
         methods.push(method.clone());
         selected_source_methods.insert(method.name_span);
     }
+}
+
+/// Resolve this model's `alias new old` body items (`ModelBodyItem::Alias`)
+/// against the fully synthesized method surface, in source order, and
+/// splice each resolved copy into `methods`. Unresolved aliases are
+/// refused with an `Error`-severity diagnostic (survey mode demotes it
+/// to a gap — see `attribute_analysis_gaps`'s `alias_target_unresolved`
+/// branch), exactly like today's ingest-time refusal did.
+///
+/// **Snapshot semantics are mandatory**: `old` is read as defined AT
+/// THE ALIAS LINE, not as finally defined. A hand-written `def` or an
+/// enum-generated method (both land in `model.body` as
+/// `ModelBodyItem::Method`, in source order) is tracked precisely: a
+/// later redefinition of `old` doesn't change what the alias copied,
+/// and `old` declared only after the alias doesn't resolve at all. A
+/// column / association / `attr_accessor` / `attribute` name is
+/// resolved against its one synthesized definition regardless of
+/// position — Rails apps declare each of those exactly once per
+/// model, and this corpus has no counterexample, so order tracking
+/// for them isn't implemented.
+///
+/// **Per-source Rails ground truth** (checked against Rails 8.1 at
+/// class-body time, in-memory sqlite ActiveRecord — see the PR
+/// description for the transcript):
+///   - hand-written `def` / enum method: resolves (already true
+///     before this function existed).
+///   - `belongs_to` / `has_one` reader: resolves — Rails defines the
+///     reader when the macro runs, same as a `def`.
+///   - `attr_accessor` / `attr_reader` / `attr_writer`: resolves.
+///   - ActiveModel::Attributes `attribute`: resolves in Rails, but
+///     roundhouse doesn't synthesize a method for it yet (separate,
+///     undone work) — so there's nothing in `methods` to find, and it
+///     stays a gap, unchanged from today.
+///   - a plain AR column reader: Rails itself raises `NameError`
+///     here — ActiveRecord generates attribute methods lazily, which
+///     is why `alias_attribute` exists. Refused with a gap that names
+///     `alias_attribute` instead.
+///   - an ActiveRecord::Base-inherited method (`destroy!`, `save!`,
+///     …): resolves as a synthesized one-line forwarder, but ONLY
+///     when the model's own body doesn't redefine `old` (concern
+///     method bodies aren't visible to this lowering, so a concern
+///     override can't be checked — best-effort, documented).
+///   - a method from an included concern: resolves in Rails, but NOT
+///     here — only a concern's `included do` DSL reaches `model.body`
+///     (`App::concern_model_items`); its plain `def`s stay on the
+///     concern's own `LibraryClass`, which this function never sees.
+///     Stays a gap, unchanged from today. Doesn't appear in the
+///     corpus this was grounded against.
+fn resolve_model_aliases(
+    model: &Model,
+    methods: &mut Vec<MethodDef>,
+    pre_user_methods: &[MethodDef],
+    schema: &Schema,
+) {
+    use crate::dialect::ModelBodyItem;
+
+    if !model.body.iter().any(|item| matches!(item, ModelBodyItem::Alias { .. })) {
+        return;
+    }
+
+    let table = schema.tables.get(&model.table.0);
+    // Every name declared SOMEWHERE in the body via a category this
+    // function can see — a hand-written `def` / enum method, a
+    // `belongs_to`/`has_one` reader, or an `attr_accessor`/`attr_reader`/
+    // `attr_writer` — regardless of position. A name in this set is
+    // "pending" once `live` (below) doesn't have it yet: it WILL be
+    // defined, just not at this point in the body, so an alias here
+    // must refuse rather than fall through to the inherited-method
+    // forwarder (which would be synthesizing a forwarder for a name
+    // that is, in fact, about to become a plain local method).
+    let mut declared_anywhere: HashSet<Symbol> = HashSet::new();
+    for item in &model.body {
+        match item {
+            ModelBodyItem::Method { method, .. } if method.receiver == MethodReceiver::Instance => {
+                declared_anywhere.insert(method.name.clone());
+            }
+            ModelBodyItem::Association { assoc, .. } => {
+                declared_anywhere.insert(assoc.name().clone());
+            }
+            ModelBodyItem::Unknown { expr, .. } => {
+                declared_anywhere.extend(attr_accessor_arg_names(expr));
+            }
+            _ => {}
+        }
+    }
+    // Body-order snapshot: `live[name]` is what `name` resolves to AT
+    // THE CURRENT POSITION, updated as each defining item is reached.
+    // A hand-written `def`/enum method carries its own body; an
+    // association reader or `attr_accessor` pair is looked up in
+    // `pre_user_methods` — the PRISTINE synthesized copy, from before
+    // any hand-written override collapsed it in the real `methods`
+    // (Rails apps declare each of those exactly once per model, so
+    // that one synthesized copy is what's live from here on, until a
+    // later hand-written redefinition — tracked by the arm below —
+    // changes it again).
+    let mut live: HashMap<Symbol, MethodDef> = HashMap::new();
+
+    for item in &model.body {
+        match item {
+            ModelBodyItem::Method { method, .. } if method.receiver == MethodReceiver::Instance => {
+                live.insert(method.name.clone(), method.clone());
+            }
+            ModelBodyItem::Association { assoc, .. } => {
+                let name = assoc.name();
+                if let Some(m) =
+                    pre_user_methods.iter().find(|m| m.name == *name && m.receiver == MethodReceiver::Instance)
+                {
+                    live.insert(name.clone(), m.clone());
+                }
+            }
+            ModelBodyItem::Unknown { expr, .. } => {
+                for name in attr_accessor_arg_names(expr) {
+                    if let Some(m) = pre_user_methods
+                        .iter()
+                        .find(|m| m.name == name && m.receiver == MethodReceiver::Instance)
+                    {
+                        live.insert(name, m.clone());
+                    }
+                }
+            }
+            ModelBodyItem::Alias { new, old, span, .. } => {
+                let resolved = if let Some(m) = live.get(old) {
+                    Some(m.clone())
+                } else if declared_anywhere.contains(old) {
+                    // Declared later in the body — not live yet, and
+                    // resolving against the eventual definition would
+                    // break snapshot semantics, so this is a refusal
+                    // (the `None` arm below), not a fallback.
+                    None
+                } else if table.is_some_and(|t| t.columns.iter().any(|c| c.name == *old)) {
+                    // A plain AR column reader — Rails itself raises
+                    // NameError here (attribute methods are generated
+                    // lazily), so this never resolves; the `None` arm
+                    // below names `alias_attribute` instead.
+                    None
+                } else {
+                    inherited_forwarder(model, old)
+                };
+                match resolved {
+                    Some(mut copy) => {
+                        copy.name = new.clone();
+                        copy.name_span = Span::synthetic();
+                        if let Some(idx) = methods
+                            .iter()
+                            .position(|m| m.name == *new && m.receiver == MethodReceiver::Instance)
+                        {
+                            methods[idx] = copy.clone();
+                        } else {
+                            methods.push(copy.clone());
+                        }
+                        live.insert(new.clone(), copy);
+                    }
+                    None => {
+                        push_alias_target_unresolved_gap(*span, model, old, new, table);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// The symbol names an `attr_accessor` / `attr_reader` / `attr_writer`
+/// call declares, when `expr` is one (direct literal-Symbol arguments
+/// only — the splat/constant forms `push_attr_accessor_methods`
+/// handles separately aren't needed here: missing one of those just
+/// means `resolve_model_aliases` falls through to a refusal instead
+/// of a resolution, never to a WRONG one).
+fn attr_accessor_arg_names(expr: &Expr) -> Vec<Symbol> {
+    let ExprNode::Send { recv: None, method, args, block: None, .. } = &*expr.node else {
+        return Vec::new();
+    };
+    if !matches!(method.as_str(), "attr_accessor" | "attr_reader" | "attr_writer") {
+        return Vec::new();
+    }
+    args.iter()
+        .filter_map(|a| match &*a.node {
+            ExprNode::Lit { value: Literal::Sym { value } } => Some(value.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+/// A forwarder for `old` when it's a known ActiveRecord::Base instance
+/// method (`destroy!`, `save!`, `touch`, …) the model's own body
+/// doesn't redefine. See `resolve_model_aliases`'s doc for why concern
+/// redefinitions can't be checked here.
+fn inherited_forwarder(model: &Model, old: &Symbol) -> Option<MethodDef> {
+    crate::catalog::lookup(old.as_str(), crate::catalog::ReceiverContext::Instance)?;
+    if model_defines_instance_method(model, old) {
+        return None;
+    }
+    Some(MethodDef {
+        name: old.clone(), // the caller renames to `new`
+        receiver: MethodReceiver::Instance,
+        visibility: crate::dialect::MethodVisibility::Public,
+        params: Vec::new(),
+        unsupported_formals: None,
+        has_anonymous_block: false,
+        block_param: None,
+        name_span: Span::synthetic(),
+        body: Expr::new(
+            Span::synthetic(),
+            ExprNode::Send {
+                recv: None,
+                method: old.clone(),
+                args: Vec::new(),
+                block: None,
+                parenthesized: false,
+            },
+        ),
+        signature: None,
+        effects: crate::effect::EffectSet::default(),
+        enclosing_class: Some(model.name.0.clone()),
+        kind: AccessorKind::Method,
+        is_async: false,
+        mutates_self: true,
+    })
+}
+
+/// Refuse an alias roundhouse can't resolve — same shape as any other
+/// unsupported construct (`Error` severity; survey mode's
+/// `attribute_analysis_gaps` demotes it to a gap). `construct` is
+/// `alias_target_unresolved` so that demotion can find it by name.
+fn push_alias_target_unresolved_gap(
+    span: Span,
+    model: &Model,
+    old: &Symbol,
+    new: &Symbol,
+    table: Option<&Table>,
+) {
+    let is_column = table.is_some_and(|t| t.columns.iter().any(|c| c.name == *old));
+    let detail = if is_column {
+        format!(
+            "alias {new} {old} names a column — Rails raises NameError here too \
+             (attribute methods are generated lazily); use `alias_attribute :{new}, :{old}` instead"
+        )
+    } else {
+        format!(
+            "alias {new} {old} on {}: {old} is not defined (not a hand-written method, \
+             enum method, association, attr_accessor, or inherited ActiveRecord method)",
+            model.name.0
+        )
+    };
+    crate::emit::diagnostics::push(crate::diagnostic::Diagnostic::unsupported(
+        span,
+        None,
+        "alias_target_unresolved",
+        detail,
+    ));
 }
 
 pub(crate) fn push_scope_methods(
