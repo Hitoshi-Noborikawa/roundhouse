@@ -11238,3 +11238,71 @@ raise "the cached copy is the caller's object" if again.equal?(body)
         .assert_passes();
 }
 
+
+/// A runtime façade's scalar constants (`Markly::SMART = 0` in
+/// runtime/ruby/gem_facades.rb) used to carry no type: the constant table
+/// typed Hash/Array/`.new` values only, so after the Rubydex integration an
+/// app's `Markly::SMART` reference became a refusal stub and lobsters'
+/// `Markdowner` raised at render. On the CRuby tree Markly is the real gem.
+#[test]
+fn markly_flag_constants_resolve_and_render_through_the_real_gem() {
+    let run = emit_and_run::empty_app()
+        .write("Gemfile", "source \"https://rubygems.org\"\ngem \"rails\"\ngem \"markly\"\n")
+        .write(
+            "app/controllers/application_controller.rb",
+            "class ApplicationController < ActionController::Base\nend\n",
+        )
+        .write(
+            "app/models/application_record.rb",
+            "class ApplicationRecord < ActiveRecord::Base\n  self.abstract_class = true\nend\n",
+        )
+        .write(
+            "lib/markdown_renderer.rb",
+            "class MarkdownRenderer\n  def self.render(text)\n    root = Markly.parse(text, flags: Markly::SMART, extensions: [:strikethrough])\n    root.to_html(flags: Markly::DEFAULT, extensions: [:strikethrough])\n  end\nend\n",
+        )
+        .write(
+            "db/schema.rb",
+            "ActiveRecord::Schema[8.1].define(version: 2026_01_01_000000) do\n  create_table \"widgets\", force: :cascade do |t|\n    t.string \"name\"\n  end\nend\n",
+        )
+        .run_ruby(
+            r#"html = MarkdownRenderer.render("**bold** ~~gone~~")
+raise "Markly render: #{html.inspect}" unless html.include?("<strong>bold</strong>") && html.include?("<del>gone</del>")
+"#,
+        );
+    run.assert_passes();
+}
+
+/// A class body that initializes `@@` variables beside constants was
+/// refused whole at ingest ("requires source ordering"), because the
+/// emitter does not keep their relative order. When every constant and
+/// every initializer is a literal neither can observe the other, so the
+/// order is free. Lobsters' `Twitter` (`@@CONSUMER_KEY = nil`,
+/// `MAX_TWEET_LEN = 280`) disappeared from the tree, and /settings raised.
+#[test]
+fn literal_class_variables_beside_literal_constants_ingest() {
+    let run = emit_and_run::empty_app()
+        .write(
+            "app/controllers/application_controller.rb",
+            "class ApplicationController < ActionController::Base\nend\n",
+        )
+        .write(
+            "app/models/application_record.rb",
+            "class ApplicationRecord < ActiveRecord::Base\n  self.abstract_class = true\nend\n",
+        )
+        .write(
+            "lib/poster.rb",
+            "class Poster\n  cattr_accessor :CONSUMER_KEY\n\n  @@CONSUMER_KEY = nil\n\n  MAX_LEN = 280\n  SHORT_LEN = 23\n\n  def self.enabled?\n    self.CONSUMER_KEY.present?\n  end\n\n  def self.room\n    MAX_LEN - SHORT_LEN\n  end\nend\n",
+        )
+        .write(
+            "db/schema.rb",
+            "ActiveRecord::Schema[8.1].define(version: 2026_01_01_000000) do\n  create_table \"widgets\", force: :cascade do |t|\n    t.string \"name\"\n  end\nend\n",
+        )
+        .run_ruby(
+            r#"raise "enabled? must start false" if Poster.enabled?
+raise "constants: #{Poster.room}" unless Poster.room == 257
+Poster.CONSUMER_KEY = "key"
+raise "enabled? must follow the class variable" unless Poster.enabled?
+"#,
+        );
+    run.assert_passes();
+}

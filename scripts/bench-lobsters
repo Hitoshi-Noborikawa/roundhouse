@@ -1324,6 +1324,11 @@ mkdir -p "$OUT_DIR"
 # ── emit ─────────────────────────────────────────────────────────────
 if (( SKIP_EMIT == 0 )) || [[ ! -f "$OUT_TREE/main.rb" ]]; then
     step "transpiling lobsters (--target $EMIT_TARGET --allow-unsupported)"
+    # Emit into an empty tree: writing a tree never deletes, so a file a
+    # previous emit wrote and this one no longer does (lobsters' twitter.rb,
+    # 10-11) would linger and mask the gap. Not the JRuby tree, which also
+    # holds the jars bin/fetch-jars downloads into it.
+    if [[ "$RUNTIME" == cruby ]]; then rm -rf "$OUT_TREE"; fi
     # cargo run rebuilds the compiler when sources changed, so the dev
     # loop never replays against a stale binary. Survey-mode warnings
     # are the expected torrent — keep them in emit.log, not the console.
