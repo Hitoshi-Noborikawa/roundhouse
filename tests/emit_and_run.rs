@@ -11306,3 +11306,39 @@ raise "enabled? must follow the class variable" unless Poster.enabled?
         );
     run.assert_passes();
 }
+
+/// `recv.try(:m)` narrows to the classes that define `m`, and a model
+/// defines every column reader without spelling it as a `def`. Counting
+/// only `def`s made lobsters' `@user.try(:username)` narrow to `ModNote`
+/// (whose `delegate :username` is a method) and answer nil for every
+/// `User`: a logged-in page rendered `data-username=''`.
+#[test]
+fn try_answers_a_column_reader_beside_a_class_that_defines_the_method() {
+    let run = emit_and_run::empty_app()
+        .write(
+            "app/controllers/application_controller.rb",
+            "class ApplicationController < ActionController::Base\nend\n",
+        )
+        .write(
+            "app/models/application_record.rb",
+            "class ApplicationRecord < ActiveRecord::Base\n  self.abstract_class = true\nend\n",
+        )
+        .write("app/models/widget.rb", "class Widget < ApplicationRecord\nend\n")
+        .write("lib/note.rb", "class Note\n  def name\n    \"note\"\n  end\nend\n")
+        .write(
+            "lib/presenter.rb",
+            "class Presenter\n  def self.label(obj)\n    obj.try(:name)\n  end\nend\n",
+        )
+        .write(
+            "db/schema.rb",
+            "ActiveRecord::Schema[8.1].define(version: 2026_01_01_000000) do\n  create_table \"widgets\", force: :cascade do |t|\n    t.string \"name\"\n  end\nend\n",
+        )
+        .run_ruby(
+            r#"w = Widget.new(name: "gizmo")
+raise "column reader: #{Presenter.label(w).inspect}" unless Presenter.label(w) == "gizmo"
+raise "defined method: #{Presenter.label(Note.new).inspect}" unless Presenter.label(Note.new) == "note"
+raise "nil receiver" unless Presenter.label(nil).nil?
+"#,
+        );
+    run.assert_passes();
+}
