@@ -5339,3 +5339,18 @@ fn render_inertia_with_a_computed_component_is_a_survey_gap() {
         "{gaps:#?}"
     );
 }
+
+#[test]
+fn an_inertia_share_that_is_not_lowered_is_one_survey_gap() {
+    for share in [
+        "  inertia_share do\n    { widgetCount: Widget.count }\n  end\n",
+        "  inertia_share widgetCount: -> { Widget.count }, if: :signed_in?\n",
+    ] {
+        let mut files = INERTIA_APP.to_vec();
+        let source = format!("class ApplicationController < ActionController::Base\n{share}end\n");
+        files[4] = ("app/controllers/application_controller.rb", source.as_str());
+        let (_, gaps) = inertia_check(&files);
+        assert_eq!(gaps.len(), 1, "{share}: {gaps:#?}");
+        assert!(gaps[0].contains("`inertia_share` with a block"), "{share}: {gaps:#?}");
+    }
+}

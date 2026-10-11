@@ -73,7 +73,15 @@ fn expand_shares(app: &mut App) -> Vec<(ClassId, Vec<Symbol>)> {
         let mut consumed: Vec<usize> = Vec::new();
         for (i, item) in controller.body.iter().enumerate() {
             let ControllerBodyItem::Unknown { expr, .. } = item else { continue };
-            let Some(props) = share_props(expr) else { continue };
+            let Some(props) = share_props(expr) else {
+                if is_inertia_share(expr) {
+                    record_gap(
+                        expr.span,
+                        "`inertia_share` with a block, `if:`/`unless:`/`only:`/`except:`, a non-literal key or an InertiaRails prop type other than `optional`/`defer` is not lowered; its shared props are dropped from the output",
+                    );
+                }
+                continue;
+            };
             let name = if methods.is_empty() { base.clone() } else { format!("{base}_{}", methods.len() + 1) };
             sources.push_str(&share_method_source(&name, &props));
             methods.push(Symbol::from(name.as_str()));
@@ -119,6 +127,10 @@ fn share_props(call: &Expr) -> Option<Vec<Prop>> {
         props.push(Prop { key, kind, group, value });
     }
     Some(props)
+}
+
+fn is_inertia_share(call: &Expr) -> bool {
+    matches!(&*call.node, ExprNode::Send { recv: None, method, .. } if method.as_str() == "inertia_share")
 }
 
 fn share_method_source(name: &str, props: &[Prop]) -> String {

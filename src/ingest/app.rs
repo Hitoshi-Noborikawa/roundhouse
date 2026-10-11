@@ -3026,6 +3026,10 @@ const CONSUMED_CONTROLLER_MACROS: &[&str] = &[
     // `ingest::allow_browser`'s module doc. A per-target decision, not
     // a coverage gap.
     "allow_browser",
+    // `ingest::inertia` records its own survey gap, with the reason, for
+    // an `inertia_share` it cannot lower; the generic gap would count it
+    // a second time without the reason.
+    "inertia_share",
     // Conditional GET: the runtime answers every request fresh, a
     // decision recorded in docs/pipeline/runtime.md ("Conditional GET
     // is ALWAYS FRESH"), so the importmap ETag macro has nothing to do.
