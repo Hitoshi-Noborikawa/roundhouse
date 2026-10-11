@@ -143,6 +143,7 @@ pub mod symbolize_keys;
 pub mod enum_mapping_keys;
 pub mod exists_conditions;
 pub mod destroy_by;
+pub mod assoc_primary_key;
 pub mod has_one_builder;
 pub mod inquiry;
 pub mod byte_size;

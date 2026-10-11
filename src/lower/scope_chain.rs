@@ -1226,6 +1226,14 @@ pub struct AssocRegistry {
     /// Declining leaves the pre-existing NoMethodError-on-Array, which is
     /// loud and locatable. Wrong rows are neither.
     has_many_unseedable: std::collections::HashSet<(ClassId, Symbol)>,
+    /// `(model, has_many name)` -> the OWNER column the foreign key
+    /// matches, for every has_many declaring `primary_key:` (absent
+    /// means `id`). The seed's `where(fk => owner.<key>)` and the
+    /// constructors' preset foreign key read it, so a has_many keyed on
+    /// a non-id column seeds the rows Rails would. The by-NAME rung has
+    /// no owner to ask, so a name that is keyed anywhere is declined
+    /// there (`is_unseedable`).
+    has_many_owner_key: HashMap<(ClassId, Symbol), Symbol>,
     /// `(association name, extension method)` for every `has_many :x do
     /// def m … end end` in the app. The model lowerer FLATTENS those onto
     /// the owner as `<assoc>_<method>` instance methods
@@ -1295,8 +1303,19 @@ impl AssocRegistry {
     fn is_unseedable(&self, owner: Option<&ClassId>, assoc: &Symbol) -> bool {
         match owner {
             Some(m) => self.has_many_unseedable.contains(&(m.clone(), assoc.clone())),
-            None => self.has_many_unseedable.iter().any(|(_, a)| a == assoc),
+            None => {
+                self.has_many_unseedable.iter().any(|(_, a)| a == assoc)
+                    || self.has_many_owner_key.keys().any(|(_, a)| a == assoc)
+            }
         }
+    }
+    /// The owner column `model.<assoc>`'s foreign key matches
+    /// (`primary_key:`), `id` when undeclared.
+    fn has_many_owner_key(&self, model: Option<&ClassId>, assoc: &Symbol) -> Symbol {
+        model
+            .and_then(|m| self.has_many_owner_key.get(&(m.clone(), assoc.clone())))
+            .cloned()
+            .unwrap_or_else(|| Symbol::from("id"))
     }
 }
 
@@ -1424,6 +1443,11 @@ pub fn build_assoc_registry(models: &[Model]) -> AssocRegistry {
                     for x in extension {
                         reg.assoc_extension.insert((name.clone(), x.name.clone()));
                     }
+                    let owner_key = a.owner_key();
+                    if owner_key.as_str() != "id" {
+                        reg.has_many_owner_key
+                            .insert((m.name.clone(), name.clone()), owner_key.clone());
+                    }
                     if as_interface.is_some()
                         || scope.as_ref().is_some_and(|s| !scope_is_row_preserving(s))
                     {
@@ -1432,7 +1456,7 @@ pub fn build_assoc_registry(models: &[Model]) -> AssocRegistry {
                     let t = reg.table_for(target);
                     reg.join_tails.insert(
                         (m.name.clone(), name.clone()),
-                        format!("{t} ON {t}.{foreign_key} = {own}.id"),
+                        format!("{t} ON {t}.{foreign_key} = {own}.{owner_key}"),
                     );
                     reg.has_many_fk.insert(
                         (m.name.clone(), name.clone()),
@@ -1445,7 +1469,7 @@ pub fn build_assoc_registry(models: &[Model]) -> AssocRegistry {
                     if name.as_str() != t {
                         reg.aliased_join_tails.insert(
                             (m.name.clone(), name.clone()),
-                            format!("{t} {name} ON {name}.{foreign_key} = {own}.id"),
+                            format!("{t} {name} ON {name}.{foreign_key} = {own}.{owner_key}"),
                         );
                     }
                     let entry = (target.clone(), foreign_key.clone());
@@ -1459,10 +1483,11 @@ pub fn build_assoc_registry(models: &[Model]) -> AssocRegistry {
                         .or_insert(Some(entry));
                 }
                 Association::HasOne { name, target, foreign_key, .. } => {
+                    let owner_key = a.owner_key();
                     let t = reg.table_for(target);
                     reg.join_tails.insert(
                         (m.name.clone(), name.clone()),
-                        format!("{t} ON {t}.{foreign_key} = {own}.id"),
+                        format!("{t} ON {t}.{foreign_key} = {own}.{owner_key}"),
                     );
                     reg.assoc_table
                         .insert((m.name.clone(), name.clone()), Symbol::from(t.as_str()));
@@ -1471,7 +1496,7 @@ pub fn build_assoc_registry(models: &[Model]) -> AssocRegistry {
                     if name.as_str() != t {
                         reg.aliased_join_tails.insert(
                             (m.name.clone(), name.clone()),
-                            format!("{t} {name} ON {name}.{foreign_key} = {own}.id"),
+                            format!("{t} {name} ON {name}.{foreign_key} = {own}.{owner_key}"),
                         );
                     }
                 }
@@ -1483,6 +1508,11 @@ pub fn build_assoc_registry(models: &[Model]) -> AssocRegistry {
                 // target class supplies the source fk (survives `source:`
                 // renames, which ingest folds into `target`).
                 Association::HasMany { name, target, through: Some(thr_name), .. } => {
+                    // A keyed hop is refused at synthesis; no join tail
+                    // is better than one that joins on `id`.
+                    if super::assoc_primary_key::unsupported_reason(m, models, a).is_some() {
+                        continue;
+                    }
                     let Some(Association::HasMany { target: thr_target, foreign_key: thr_fk, .. }) =
                         m.associations().find(|a| {
                             matches!(a, Association::HasMany { name, .. } if name == thr_name)
@@ -2633,12 +2663,12 @@ fn assoc_owner_seed(
     // and is checked against every declarer.
     assoc_read_target(owner, aname, ctx.models, ctx.assocs)
         .filter(|(owner_model, _, _)| !ctx.assocs.is_unseedable(owner_model.as_ref(), aname))
-        .map(|(_, target, fk)| {
+        .map(|(owner_model, target, fk)| {
             let owner_id = syn(
                 span,
                 ExprNode::Send {
                     recv: Some(owner.clone()),
-                    method: Symbol::from("id"),
+                    method: ctx.assocs.has_many_owner_key(owner_model.as_ref(), aname),
                     args: vec![],
                     block: None,
                     parenthesized: false,
@@ -3761,7 +3791,8 @@ fn rewrite_send(expr: &mut Expr, ctx: &Ctx, locals: &mut Locals) -> Option<Class
                             }
                             ctx.assocs.has_many_fk(&self_model, aname).cloned().map(
                                 |(target, fk)| {
-                                    (target, fk, syn(span, ExprNode::Ivar { name: Symbol::from("id") }))
+                                    let key = ctx.assocs.has_many_owner_key(Some(&self_model), aname);
+                                    (target, fk, syn(span, ExprNode::Ivar { name: key }))
                                 },
                             )
                         }),
@@ -3902,6 +3933,18 @@ fn rewrite_send(expr: &mut Expr, ctx: &Ctx, locals: &mut Locals) -> Option<Class
                         // the foreign key as `scope_attributes` too.
                         let assoc_cm = ctx.assoc_class_method_params(&target, &method);
                         if is_scope || is_chain || is_term || assoc_cm.is_some() {
+                            // An owner key other than `id` can be NULL, and
+                            // `where(fk: nil)` would match the child rows
+                            // whose fk is NULL. Rails never matches a nil
+                            // owner key, so the seed excludes them.
+                            let keyed_guard = !matches!(
+                                &*owner_id.node,
+                                ExprNode::Ivar { name } if name.as_str() == "id"
+                            ) && !matches!(
+                                &*owner_id.node,
+                                ExprNode::Send { method, .. } if method.as_str() == "id"
+                            );
+                            let guard_sql = format!("{} IS NOT NULL", fk.as_str());
                             let fk_hash = syn(
                                 span,
                                 ExprNode::Hash {
@@ -3927,6 +3970,23 @@ fn rewrite_send(expr: &mut Expr, ctx: &Ctx, locals: &mut Locals) -> Option<Class
                                     parenthesized: true,
                                 },
                             );
+                            if keyed_guard {
+                                seed = syn(
+                                    span,
+                                    ExprNode::Send {
+                                        recv: Some(seed),
+                                        method: Symbol::from("where"),
+                                        args: vec![syn(
+                                            span,
+                                            ExprNode::Lit {
+                                                value: Literal::Str { value: guard_sql },
+                                            },
+                                        )],
+                                        block: None,
+                                        parenthesized: true,
+                                    },
+                                );
+                            }
                             // The seed REPLACES `<owner>.<assoc>`, and with
                             // it the reader's eager-load cache: a scope
                             // reached through a preloaded association
