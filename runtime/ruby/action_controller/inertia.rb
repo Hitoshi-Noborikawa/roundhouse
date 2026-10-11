@@ -67,19 +67,12 @@ module ActionController
       requested?(key)
     end
 
-    def shared_eager?(key)
+    # Shared props are registered separately from the evaluate? guards so
+    # share synthesis and page props share one eager?/optional?/deferred?
+    # surface (predicates stay non-mutating aside from deferred bookkeeping).
+    def mark_shared(key)
       @shared_keys << key unless @shared_keys.include?(key)
-      eager?(key)
-    end
-
-    def shared_optional?(key)
-      @shared_keys << key unless @shared_keys.include?(key)
-      optional?(key)
-    end
-
-    def shared_deferred?(key, group)
-      @shared_keys << key unless @shared_keys.include?(key)
-      deferred?(key, group)
+      nil
     end
 
     def prop_json(key, json)
@@ -188,10 +181,10 @@ module ActionController
       stored = session["inertia_errors"]
       if !stored.nil?
         session.delete("inertia_errors")
-        page.shared_eager?("errors")
+        page.mark_shared("errors")
         page.prop_json("errors", stored.to_s)
       elsif always_include_errors_hash
-        page.shared_eager?("errors")
+        page.mark_shared("errors")
         page.prop_json("errors", "{}")
       end
       nil

@@ -574,20 +574,52 @@ pub(crate) fn param_value_ty(nilable: bool) -> Ty {
 /// cannot compile an untyped parameter.
 fn register_inertia(classes: &mut HashMap<ClassId, ClassInfo>, app_ctrl: &mut ClassInfo) {
     const RBS: &str = include_str!("../../../runtime/ruby/action_controller/inertia.rbs");
-    let Ok(parsed) = crate::rbs::parse_app_signatures(RBS) else { return };
+    let parsed = crate::rbs::parse_app_signatures(RBS)
+        .expect("ActionController::InertiaPage RBS must parse");
     let page_id = ClassId(Symbol::from("ActionController::InertiaPage"));
-    let mut page = ClassInfo::default();
+    let page = classes.entry(page_id.clone()).or_default();
     if let Some(methods) = parsed.get(&page_id) {
         for (name, ty) in methods {
             page.instance_methods.insert(name.clone(), ty.clone());
         }
     }
-    page.instance_methods.insert(Symbol::from("prop"), Ty::Nil);
-    classes.entry(page_id).or_insert(page);
+    // Phantom until controller_to_library rewrites to `prop_json`.
+    page.instance_methods.insert(
+        Symbol::from("prop"),
+        Ty::Fn {
+            params: vec![
+                crate::ty::Param {
+                    name: Symbol::from("key"),
+                    ty: Ty::Str,
+                    kind: crate::ty::ParamKind::Required,
+                },
+                crate::ty::Param {
+                    name: Symbol::from("value"),
+                    ty: Ty::Untyped,
+                    kind: crate::ty::ParamKind::Required,
+                },
+            ],
+            block: None,
+            ret: Box::new(Ty::Nil),
+            effects: crate::effect::EffectSet::default(),
+        },
+    );
     if let Some(methods) = parsed.get(&ClassId(Symbol::from("ActionController::Base"))) {
         for (name, ty) in methods {
             app_ctrl.class_methods.insert(name.clone(), ty.clone());
         }
     }
-    app_ctrl.class_methods.insert(Symbol::from("inertia_errors"), Ty::Nil);
+    app_ctrl.class_methods.insert(
+        Symbol::from("inertia_errors"),
+        Ty::Fn {
+            params: vec![crate::ty::Param {
+                name: Symbol::from("errors"),
+                ty: Ty::Untyped,
+                kind: crate::ty::ParamKind::Required,
+            }],
+            block: None,
+            ret: Box::new(Ty::Nil),
+            effects: crate::effect::EffectSet::default(),
+        },
+    );
 }

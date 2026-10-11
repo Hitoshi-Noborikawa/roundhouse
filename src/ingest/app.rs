@@ -1587,20 +1587,7 @@ end
         }
     }
 
-    {
-        let init_dir = dir.join("config/initializers");
-        let mut inertia = crate::app::InertiaConfig::default();
-        if vfs.is_dir(&init_dir) {
-            for entry in read_rb_files(vfs, &init_dir)? {
-                if let Ok(bytes) = vfs.read(&entry) {
-                    let file = entry.display().to_string();
-                    if extract_inertia_config(&bytes, &file, &mut inertia) {
-                        app.inertia = Some(inertia.clone());
-                    }
-                }
-            }
-        }
-    }
+    app.inertia = super::inertia::load_inertia_config(vfs, dir)?;
 
     // Every app source is registered by here. Rubydex resolves a
     // SNAPSHOT on another thread while the passes below run, and those
@@ -7884,7 +7871,7 @@ fn layouts_link_all_stylesheets<V: Vfs + ?Sized>(vfs: &V, dir: &Path, roots: &[P
 /// block, flattened into one list. One level of unwrapping is enough:
 /// nesting a second config block inside the first is not a shape
 /// Rails apps write, and guessing at it would be inventing a need.
-fn initializer_statements<'a>(program: &ruby_prism::ProgramNode<'a>) -> Vec<Node<'a>> {
+pub(super) fn initializer_statements<'a>(program: &ruby_prism::ProgramNode<'a>) -> Vec<Node<'a>> {
     let mut stmts: Vec<Node> = Vec::new();
     for stmt in program.statements().body().iter() {
         let mut unwrapped = false;
@@ -7981,7 +7968,7 @@ fn extract_initializer_filters(source: &[u8], file: &str) -> Vec<crate::app::Ini
 /// (`Foo`, `Turbo::StreamsChannel`), or None for anything else. Read as
 /// TEXT rather than resolved: the receiver may name a class this tree
 /// does not define, and reporting that gap needs the app's spelling.
-fn constant_text(node: &Node, src: &str) -> Option<String> {
+pub(super) fn constant_text(node: &Node, src: &str) -> Option<String> {
     if node.as_constant_read_node().is_none() && node.as_constant_path_node().is_none() {
         return None;
     }
@@ -8770,110 +8757,6 @@ fn wrap_parameters_format_includes_json(rest: &str) -> bool {
     rest.split(|c: char| matches!(c, ',' | '[' | ']' | '(' | ')' | ' ' | '\t'))
         .map(|tok| tok.trim().trim_matches(|c| c == '"' || c == '\''))
         .any(|tok| tok == ":json" || tok == "json")
-}
-
-/// A non-literal value is a survey gap rather than an evaluated guess:
-/// the emitted app would otherwise run with the gem's default and no
-/// diagnostic would say so.
-fn extract_inertia_config(source: &[u8], file: &str, config: &mut crate::app::InertiaConfig) -> bool {
-    let src = String::from_utf8_lossy(source);
-    if !src.contains("InertiaRails") {
-        return false;
-    }
-    let result = super::prism::parse(source, file);
-    let root = result.node();
-    let Some(program) = root.as_program_node() else { return false };
-    let mut found = false;
-    for stmt in initializer_statements(&program) {
-        let Some(call) = stmt.as_call_node() else { continue };
-        if super::util::constant_id_str(&call.name()) != "configure" {
-            continue;
-        }
-        let Some(recv) = call.receiver() else { continue };
-        if !matches!(constant_text(&recv, &src).as_deref(), Some("InertiaRails" | "::InertiaRails")) {
-            continue;
-        }
-        let named = call.block().and_then(|b| b.as_block_node()).and_then(|block| {
-            let param = block
-                .parameters()
-                .and_then(|p| p.as_block_parameters_node())
-                .and_then(|p| p.parameters())
-                .and_then(|p| p.requireds().iter().next())
-                .and_then(|p| p.as_required_parameter_node())?;
-            Some((block, param))
-        });
-        let Some((block, param)) = named else {
-            survey::record(&IngestError::Unsupported {
-                file: file.to_string(),
-                message: "InertiaRails.configure: a configuration without a block that names its parameter (`do |config|`) is not read; its options are not applied".to_string(),
-            });
-            found = true;
-            continue;
-        };
-        let param = super::util::constant_id_str(&param.name());
-        found = true;
-        let Some(body) = block.body() else { continue };
-        // Not read even partially: the main statements' assignments hold
-        // only if nothing raises, and the rescue clauses' only if something
-        // does, so neither is the configuration on its own.
-        let Some(body) = body.as_statements_node() else {
-            survey::record(&IngestError::Unsupported {
-                file: file.to_string(),
-                message: "InertiaRails.configure: a block with `rescue` or `ensure` is not read; its options are not applied".to_string(),
-            });
-            continue;
-        };
-        for inner in body.body().iter() {
-            let loc = inner.location();
-            let text = &src[loc.start_offset()..loc.end_offset()];
-            let gap = |why: &str| {
-                survey::record(&IngestError::Unsupported {
-                    file: file.to_string(),
-                    message: format!("InertiaRails.configure: {why} (`{text}`); the emitted app uses the gem's default"),
-                });
-            };
-            let Some(assign) = inner.as_call_node() else {
-                gap("not an option assignment");
-                continue;
-            };
-            let on_param = assign
-                .receiver()
-                .and_then(|r| r.as_local_variable_read_node())
-                .is_some_and(|r| super::util::constant_id_str(&r.name()) == param);
-            let name = super::util::constant_id_str(&assign.name()).to_string();
-            let args: Vec<_> = assign.arguments().map(|a| a.arguments().iter().collect()).unwrap_or_default();
-            let (true, Some(option), [value]) = (on_param, name.strip_suffix('='), args.as_slice()) else {
-                gap("not an option assignment");
-                continue;
-            };
-            let boolean = if value.as_true_node().is_some() {
-                Some(true)
-            } else if value.as_false_node().is_some() {
-                Some(false)
-            } else {
-                None
-            };
-            match (option, boolean) {
-                ("encrypt_history", Some(b)) => config.encrypt_history = b,
-                ("always_include_errors_hash", Some(b)) => config.always_include_errors_hash = b,
-                ("use_script_element_for_initial_page", Some(b)) => {
-                    config.use_script_element_for_initial_page = b
-                }
-                // Accepted rather than reported: it names the attribute of
-                // SSR head tags, and without SSR nothing on the server reads it.
-                ("use_data_inertia_head_attribute", Some(_)) => {}
-                ("version", _) => {
-                    if let Some(s) = value.as_string_node() {
-                        config.version = String::from_utf8_lossy(s.unescaped()).into_owned();
-                    } else {
-                        gap("version is not a String literal");
-                    }
-                }
-                _ => gap("option not modeled"),
-            }
-        }
-    }
-    found
 }
 
 fn extract_config_time_zone(source: &[u8]) -> Option<String> {

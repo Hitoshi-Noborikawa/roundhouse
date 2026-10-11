@@ -5292,6 +5292,7 @@ end
   def index
     render inertia: "widgets/index", props: {
       widgets: Widget.all.map { |widget| { name: widget.name } },
+      names: -> { Widget.pluck(:name) },
       firstName: InertiaRails.optional { Widget.first&.name },
       total: InertiaRails.defer { Widget.count },
       inertiaVisit: request.inertia?

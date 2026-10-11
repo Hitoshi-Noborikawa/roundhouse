@@ -11536,7 +11536,11 @@ fn render_inertia_answers_html_and_json_visits() {
             "app/controllers/pages_controller.rb",
             r#"class PagesController < ApplicationController
   def show
-    render inertia: "pages/show", props: { title: "Hello </script>", count: Article.count }
+    render inertia: "pages/show", props: {
+      title: "Hello </script>",
+      count: -> { Article.count },
+      label: -> { "eager-lambda" }
+    }
   end
 end
 "#,
@@ -11549,7 +11553,7 @@ class PagesControllerTest < ActionDispatch::IntegrationTest
   test "a first visit renders the page object inside the layout" do
     get "/pages/show"
     assert_response :success
-    page = %({"component":"pages/show","props":{"title":"Hello \\u003c/script\\u003e","count":#{Article.count}},) +
+    page = %({"component":"pages/show","props":{"title":"Hello \\u003c/script\\u003e","count":#{Article.count},"label":"eager-lambda"},) +
       %("url":"/pages/show","version":null,"encryptHistory":false,"clearHistory":false})
     assert_includes response.body, %(<script data-page="app" type="application/json">#{page}</script>\n<div id="app"></div>)
     assert_includes response.body, "<title>Real Blog</title>"
@@ -11563,7 +11567,10 @@ class PagesControllerTest < ActionDispatch::IntegrationTest
     assert_equal "X-Inertia", response.headers["vary"]
     page = response.parsed_body
     assert_equal "pages/show", page["component"]
-    assert_equal({ "title" => "Hello </script>", "count" => Article.count }, page["props"])
+    assert_equal(
+      { "title" => "Hello </script>", "count" => Article.count, "label" => "eager-lambda" },
+      page["props"]
+    )
     assert_equal "/pages/show", page["url"]
   end
 end

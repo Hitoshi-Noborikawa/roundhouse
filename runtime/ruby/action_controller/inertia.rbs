@@ -20,9 +20,7 @@ module ActionController
     def eager?: (String key) -> bool
     def optional?: (String key) -> bool
     def deferred?: (String key, String group) -> bool
-    def shared_eager?: (String key) -> bool
-    def shared_optional?: (String key) -> bool
-    def shared_deferred?: (String key, String group) -> bool
+    def mark_shared: (String key) -> nil
     def prop_json: (String key, String json) -> nil
     def page_json: (String url, String? notice, String? alert) -> String
     def flash_json: (String? notice, String? alert) -> String
