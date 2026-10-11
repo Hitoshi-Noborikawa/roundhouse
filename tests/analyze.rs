@@ -5354,3 +5354,17 @@ fn an_inertia_share_that_is_not_lowered_is_one_survey_gap() {
         assert!(gaps[0].contains("`inertia_share` with a block"), "{share}: {gaps:#?}");
     }
 }
+
+#[test]
+fn an_inertia_configure_block_with_rescue_is_a_survey_gap() {
+    let mut files = INERTIA_APP.to_vec();
+    files.push((
+        "config/initializers/inertia_rails.rb",
+        "InertiaRails.configure do |config|\n  config.version = \"v1\"\nrescue NameError\n  config.version = \"v0\"\nend\n",
+    ));
+    let (_, gaps) = inertia_check(&files);
+    assert!(
+        gaps.iter().any(|g| g.contains("InertiaRails.configure: a block with `rescue` or `ensure` is not read")),
+        "{gaps:#?}"
+    );
+}

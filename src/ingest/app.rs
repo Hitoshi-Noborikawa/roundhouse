@@ -8783,7 +8783,18 @@ fn extract_inertia_config(source: &[u8], file: &str) -> Option<crate::app::Inert
         };
         let param = super::util::constant_id_str(&param.name());
         let mut config = crate::app::InertiaConfig::default();
-        let Some(body) = block.body().and_then(|b| b.as_statements_node()) else {
+        let Some(body) = block.body() else {
+            found = Some(config);
+            continue;
+        };
+        // Not read even partially: the main statements' assignments hold
+        // only if nothing raises, and the rescue clauses' only if something
+        // does, so neither is the configuration on its own.
+        let Some(body) = body.as_statements_node() else {
+            survey::record(&IngestError::Unsupported {
+                file: file.to_string(),
+                message: "InertiaRails.configure: a block with `rescue` or `ensure` is not read; the emitted app uses the gem's defaults".to_string(),
+            });
             found = Some(config);
             continue;
         };
