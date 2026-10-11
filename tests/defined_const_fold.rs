@@ -201,6 +201,9 @@ fn only_unconditional_requires_load_a_framework() {
     // Top level, and inside the top-level module/class bodies: loaded.
     assert!(has(&format!("{base}require \"active_storage/engine\"\n"), "ActiveStorage"));
     assert!(has(&format!("{base}module Shop\n  class Application\n    require \"active_storage/engine\"\n  end\nend\n"), "ActiveStorage"));
+    // The parenthesized call form is the same call.
+    assert!(has("require(\"rails/all\")\n", "ActiveStorage"));
+    assert!(has(&format!("{base}require(\"active_storage/engine\")\n"), "ActiveStorage"));
     // Under a conditional, a def, a block or a rescue: not loaded.
     for nested in [
         "if ENV[\"X\"]\n  require \"active_storage/engine\"\nend\n",
