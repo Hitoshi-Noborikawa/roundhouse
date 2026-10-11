@@ -3536,7 +3536,7 @@ jobs:
             # page, and without its summary.json here the mirrored page drops
             # the AOT bars, the spinel parity badge and the AOT toolchain
             # provenance — a quieter page that reads as a complete one.
-            for lane in rails rails-int rails-jruby ruby ruby-int jruby spinel; do
+            for lane in rails rails-int rails-jruby ruby ruby-int jruby spinel futamura; do
               mkdir -p "_site/bench/lobsters/$lane"
               for f in summary.json rails.json env.json summary.md; do
                 fetch "$BENCH_URL/$lane/$f" "_site/bench/lobsters/$lane/$f" || true
