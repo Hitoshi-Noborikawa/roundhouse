@@ -8414,10 +8414,10 @@ enum PreloadKind {
     /// (fk column on the owner, target class, target table)
     BelongsTo { fk: String, target: String, table: String },
     /// (fk column on the target, target class)
-    HasMany { fk: String, target: String },
+    HasMany { fk: String, owner_key: String, target: String },
     /// `has_one` — same FK-on-target batch as has_many, installing one
     /// record (or nil) per owner through the single-record preload setter.
-    HasOne { fk: String, target: String },
+    HasOne { fk: String, owner_key: String, target: String },
     /// Batched form of the through-reader join:
     /// `SELECT <t>.*, <thr>.<thr_fk> AS __src FROM <t> JOIN <thr> ON
     /// <thr>.<src_fk> = <t>.id WHERE <thr>.<thr_fk> IN (...)`.
@@ -8451,6 +8451,11 @@ fn preload_targets(model: &crate::dialect::Model, app: &App) -> Vec<(String, Pre
     let model_exists = |id: &ClassId| app.models.iter().any(|m| &m.name == id);
     let mut out = Vec::new();
     for assoc in model.associations() {
+        // A refused association (`assoc_primary_key`) has no reader to
+        // preload into.
+        if crate::lower::assoc_primary_key::unsupported_reason(model, &app.models, assoc).is_some() {
+            continue;
+        }
         match assoc {
             Association::BelongsTo { name, target, foreign_key, .. } => {
                 let Some(target_model) = app.models.iter().find(|m| &m.name == target) else {
@@ -8479,6 +8484,7 @@ fn preload_targets(model: &crate::dialect::Model, app: &App) -> Vec<(String, Pre
                     name.as_str().to_string(),
                     PreloadKind::HasMany {
                         fk: foreign_key.as_str().to_string(),
+                        owner_key: assoc.owner_key().as_str().to_string(),
                         target: target.0.as_str().to_string(),
                     },
                 ));
@@ -8497,6 +8503,7 @@ fn preload_targets(model: &crate::dialect::Model, app: &App) -> Vec<(String, Pre
                     name.as_str().to_string(),
                     PreloadKind::HasOne {
                         fk: foreign_key.as_str().to_string(),
+                        owner_key: assoc.owner_key().as_str().to_string(),
                         target: target.0.as_str().to_string(),
                     },
                 ));
@@ -8602,6 +8609,18 @@ fn preload_targets(model: &crate::dialect::Model, app: &App) -> Vec<(String, Pre
     out
 }
 
+/// The statements gathering the owners' keys into `ids` for a batch
+/// preload. `id` is never nil; any other `primary_key:` column can be,
+/// and a nil key matches no child (Rails skips it too), so it is
+/// skipped rather than sent as `IS NULL`.
+fn collect_owner_keys(owner_key: &str) -> String {
+    if owner_key == "id" {
+        "    ids << r.id".to_string()
+    } else {
+        format!("    v = r.{owner_key}\n    ids << v unless v.nil?")
+    }
+}
+
 /// Extract the string literal from an assoc-scope lambda body of the
 /// exact shape `order("...")` (lobsters `has_many :tags, -> { order
 ///('tags.is_media desc, tags.tag') }, through: :taggings`).
@@ -8660,14 +8679,15 @@ end
 "#
                 );
             }
-            PreloadKind::HasMany { fk, target } => {
+            PreloadKind::HasMany { fk, owner_key, target } => {
+                let collect_keys = collect_owner_keys(owner_key);
                 let _ = write!(
                     src,
                     r#"
 def self._preload_batch_{name}(records)
   ids = []
   records.each do |r|
-    ids << r.id
+{collect_keys}
   end
   loaded = []
   if ids.length > 0
@@ -8680,21 +8700,22 @@ def self._preload_batch_{name}(records)
     grouped[k] << rec
   end
   records.each do |r|
-    r._preload_{name}(grouped[r.id] || [])
+    r._preload_{name}(grouped[r.{owner_key}] || [])
   end
   loaded
 end
 "#
                 );
             }
-            PreloadKind::HasOne { fk, target } => {
+            PreloadKind::HasOne { fk, owner_key, target } => {
+                let collect_keys = collect_owner_keys(owner_key);
                 let _ = write!(
                     src,
                     r#"
 def self._preload_batch_{name}(records)
   ids = []
   records.each do |r|
-    ids << r.id
+{collect_keys}
   end
   by_id = {{}}
   loaded = []
@@ -8706,7 +8727,7 @@ def self._preload_batch_{name}(records)
     by_id[k] = rec if by_id[k].nil?
   end
   records.each do |r|
-    r._preload_{name}(by_id[r.id])
+    r._preload_{name}(by_id[r.{owner_key}])
   end
   loaded
 end
