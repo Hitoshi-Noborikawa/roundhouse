@@ -54,6 +54,18 @@ BASE = [
 # must not fail the Ruby PR floor.
 PUBLICATION = [*BASE, "compare", "browser-smoke-typescript"]
 CORE = ["spinel-build", "spinel-toolchain", "spinel-compare"]
+JRUBY_BIND_INPUTS = {
+    "tests/param_binds_jruby.rb",
+    "tests/support/jdbc_value_semantics.rb",
+    "tests/support/jdbc_cleanup_failures.rb",
+    "tests/param_binds_runtime.rb",
+    "tests/param_binds_nil.rb",
+    "tests/param_binds_values.rs",
+    "tests/param_binds_values.rb",
+    "tests/param_binds_cleanup.rs",
+    "tests/param_binds_cleanup.rb",
+    "runtime/spinel/test/statement_cache_cases.rb",
+}
 PARAM_BIND_TESTS = ["param_binds", "param_binds_values", "param_binds_planner", "param_binds_cleanup"]
 SPINEL_TESTS = [
     "date_columns_spinel",
@@ -71,6 +83,10 @@ SPINEL_TESTS = [
     "postgres_json_types_spinel",
     "pessimistic_locking",
     "not_found_parity_spinel",
+    "spinel_transaction_connection",
+    "routes_segment_pattern_spinel",
+    "open_telemetry_stub_spinel",
+    "around_block_filter_spinel",
 ]
 # Inputs of the PostgreSQL Db gate (tests/spinel_pg_db.rs): the shim, its
 # RBS, the contract and time parsing it compiles with, and the cases.
@@ -199,8 +215,8 @@ def focus_plan(extras=(), jruby=False, spinel=False):
     """BASE plus selected focus lanes; path ownership suppressed.
 
     Focused extras / jruby / CORE Spinel are merge-gate required for the
-    fix round. Unrelated extras, WASM, rust/ts compare, Writebook, and the
-    heavy Spinel11 Campfire suite stay off.
+    fix round. Unrelated extras, WASM, rust/ts compare, and the heavy
+    Spinel11 Campfire suite stay off.
     """
     extra = [t for t in EXTRA_COMPARE_TARGETS if t in extras]
     jobs = list(BASE)
@@ -265,6 +281,13 @@ def native_coverage(path):
     suites = set()
     if path.startswith("runtime/ruby/") and path.endswith((".rb", ".rbs")):
         suites.add("framework_tests_spinel")
+    # `Model.transaction` (rollback, nesting, savepoints) lives here; its
+    # gate compiles it with the real_blog fixture.
+    if path in {
+        "runtime/ruby/active_record/connection.rb",
+        "runtime/ruby/active_record/connection.rbs",
+    }:
+        suites.add("spinel_transaction_connection")
     focused = re.fullmatch(r"tests/([^/]+)\.(?:rs|rb)", path)
     if focused and focused[1] in SPINEL_TESTS:
         suites.add(focused[1])
@@ -444,25 +467,18 @@ def select(
         )
     targets, smoke = set(), set()
     jobs_selected, spinel_tests = set(), set()
-    wasm = site = spinel = writebook = False
+    wasm = site = spinel = False
     reasons = []
     for path in paths:
         if path == "src/project.rs" and project_scope in PROJECT_BUILDERS.values():
             targets.update(("ruby", "jruby"))
             smoke.update(("ruby", "jruby"))
-            writebook = True
             if project_scope == "ruby-family":
                 spinel = True
                 jobs_selected.update(SPINEL11)
                 spinel_tests.update(SPINEL_TESTS)
             reasons.append(f"{path}: proven {project_scope} assembly bodies only")
             continue
-        if path in {
-            "tests/support/jdbc_cleanup_failures.rb",
-            "runtime/spinel/test/statement_cache_cases.rb",
-        }:
-            targets.add("jruby")
-            reasons.append(f"{path}: JDBC statement lifecycle")
         match = re.match(r"(?:src/emit/|runtime/)([^/.]+)(?:[/.]|$)", path)
         test = re.match(
             r"tests/(?:framework_tests_)?([a-z]+)_toolchain\.rs$|tests/framework_tests_([a-z]+)\.rs$",
@@ -475,6 +491,9 @@ def select(
             if test
             else None
         )
+        if path in JRUBY_BIND_INPUTS:
+            targets.add("jruby")
+            reasons.append(f"{path}: JDBC bind contract")
         native, interpreter_only, owned_tests = native_coverage(path)
         spinel_tests.update(owned_tests)
         if native or owned_tests:
@@ -537,12 +556,10 @@ def select(
         if archive_jobs:
             spinel = True
             jobs_selected.update(archive_jobs)
-        if path in {"tests/writebook.rs", "tests/fixtures/writebook-inventory.json"}:
-            writebook = True
     if full:
         targets.update(TARGETS)
         smoke.update(TARGETS)
-        wasm = site = spinel = writebook = True
+        wasm = site = spinel = True
         reasons.append("full validation requested")
         jobs_selected.update(SPINEL11)
         if campfire_latest:
@@ -579,9 +596,9 @@ def select(
         jobs.append("build-site")
     if "build-site" in jobs or {"build-site", "campfire-archive-build"} & jobs_selected:
         jobs_selected.add("archive-results")
-    jobs.extend(j for j in [*SPINEL11, "archive-results", "campfire-latest"] if j in jobs_selected)
-    if writebook:
-        jobs.append("writebook-inventory")
+    jobs.extend(
+        j for j in [*SPINEL11, "archive-results", "campfire-latest"] if j in jobs_selected
+    )
     if publish:
         if not full:
             raise ValueError("publication requires full validation mode")
@@ -620,7 +637,7 @@ def finish(
     smoke_extra = list(smoke_extra or [])
     compare = list(compare or [])
     archives = (
-        ["blog", "spinel", *TARGETS, "typescript-worker"]
+        ["blog", "spinel", *TARGETS, "typescript-worker", "futamura"]
         if site
         else [
             *smoke,

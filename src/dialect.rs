@@ -114,9 +114,25 @@ pub struct Model {
     /// `Rooms::Open` rows say `rooms_open`, not `room`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub sti_subclass_names: Vec<ClassId>,
+
+    /// The catalog entries this model's messages can reach, its i18n
+    /// scope and lookup keys; stamped by `i18n::stamp_models`. Default
+    /// (no app locale) answers Rails' own English.
+    #[serde(default, skip_serializing_if = "crate::i18n::ModelI18n::is_default")]
+    pub i18n: crate::i18n::ModelI18n,
 }
 
 impl Model {
+    /// Rails' `human_attribute_name(attr)` for this model.
+    pub fn human_attribute_name(&self, attr: &str) -> String {
+        self.i18n.human_attribute_name(attr)
+    }
+
+    /// `errors.full_message(attr, message)` as Rails builds it for this model.
+    pub fn full_message(&self, attr: &str, message: &str) -> String {
+        self.i18n.full_message(attr, message)
+    }
+
     pub fn associations(&self) -> impl Iterator<Item = &Association> {
         self.body.iter().filter_map(|item| match item {
             ModelBodyItem::Association { assoc, .. } => Some(assoc),
@@ -692,6 +708,11 @@ pub enum UnsupportedFormal {
     Destructured,
     AnonymousRest,
     NoKeywords,
+    /// Required positionals after a positional rest (`def f(*a, b)`) on
+    /// a method a concern splices into a controller. The controller's
+    /// action record has no slot after the rest, so the splice would
+    /// move them in front of it.
+    ControllerPosts,
 }
 
 impl UnsupportedFormal {
@@ -700,6 +721,7 @@ impl UnsupportedFormal {
             Self::Destructured => "destructured positional parameters are not retained",
             Self::AnonymousRest => "anonymous positional rest is not retained",
             Self::NoKeywords => "the no-keywords constraint is not retained",
+            Self::ControllerPosts => "required parameters after a positional rest on a method spliced into a controller are not retained",
         }
     }
 }
@@ -938,6 +960,12 @@ impl LibraryClass {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "template", rename_all = "snake_case")]
 pub enum LibraryClassOrigin {
+    /// Methods lifted from a constant-assigned `Data.define` block. The call span
+    /// links this class to its owner's constant so emission restores the block
+    /// without changing its declaration order or lexical scope.
+    DataFactory {
+        declaration_span: Span,
+    },
     /// Validated Alba source declarations expanded to ordinary methods before
     /// inference. Analysis checks each constructor site, not a joined type
     /// alone. This remains a source library class, not a model/params sibling.
@@ -968,6 +996,12 @@ pub enum LibraryClassOrigin {
     StructSuperclass {
         owner: Symbol,
         members: Vec<Symbol>,
+    },
+    /// The class a `X = Struct.new(:a, :b)` constant in a class or
+    /// module body defines, named `<owner>::X`.
+    StructConstant {
+        members: Vec<Symbol>,
+        keyword_init: bool,
     },
 }
 
@@ -1463,6 +1497,16 @@ pub struct Action {
     /// the positional `params`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub block_param: Option<Symbol>,
+    /// The positional rest (`def f(*keys)`), after the optionals. An
+    /// anonymous `*` the body never forwards binds a generated name (see
+    /// `ingest::forwarding`); one it forwards is refused at ingest.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rest_param: Option<Symbol>,
+    /// Anonymous keyword forwarding (`def f(**)`) or full forwarding
+    /// (`def f(...)`). Neither binds a local; the body forwards it as
+    /// `ExprNode::ForwardKeywords` / `ExprNode::ForwardArgs`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub anonymous_formal: Option<AnonymousFormal>,
     /// Span of the action's name token in its `def` header — see
     /// [`MethodDef::name_span`].
     #[serde(default, skip_serializing_if = "Span::is_synthetic")]
@@ -1470,6 +1514,58 @@ pub struct Action {
     pub body: Expr,
     pub renders: RenderTarget,
     pub effects: EffectSet,
+}
+
+impl Action {
+    /// The `def`'s formals as `MethodDef` params, in Ruby's declaration
+    /// order: required, optional, `*rest`, keywords, `**rest`, then the
+    /// anonymous `**` / `...`. THE ONE PLACE the controller lowering, the
+    /// call-site shape and the forwarding checks read an action's
+    /// signature from, so the three agree.
+    pub fn formal_params(&self) -> Vec<Param> {
+        let mut params: Vec<Param> =
+            self.params.fields.keys().map(|n| Param::positional(n.clone())).collect();
+        for (n, default) in &self.opt_params {
+            params.push(Param::with_default(n.clone(), default.clone()));
+        }
+        if let Some(n) = &self.rest_param {
+            params.push(Param::rest(n.clone()));
+        }
+        for (n, default) in &self.kw_params {
+            params.push(Param::keyword(n.clone(), default.clone()));
+        }
+        if let Some(n) = &self.kwrest_param {
+            let mut p = Param::keyword(n.clone(), None);
+            p.rest = true;
+            params.push(p);
+        }
+        params.extend(self.anonymous_formal.map(AnonymousFormal::into_param));
+        params
+    }
+}
+
+/// A nameless declaration in a `def`'s keyword-rest slot.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AnonymousFormal {
+    /// `def f(...)`.
+    Forwarding,
+    /// `def f(**)`.
+    KeywordRest,
+}
+
+impl AnonymousFormal {
+    pub fn into_param(self) -> Param {
+        match self {
+            Self::Forwarding => Param::forwarding(),
+            Self::KeywordRest => {
+                // Empty is a nameless declaration, never a legal binding.
+                let mut param = Param::keyword("".into(), None);
+                param.rest = true;
+                param
+            }
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -1660,6 +1756,17 @@ pub enum RouteSpec {
         /// (`PartsController`) still come from `name`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         path: Option<String>,
+        /// Per-param regex restrictions inherited from an enclosing
+        /// `constraints(id: /.../) do … end` block (propagated at
+        /// ingest; see `merge_outer_constraints`). Applies to whichever
+        /// standard action's path carries the matching param name — in
+        /// practice `id`, so `show`/`edit`/`update`/`destroy` but not
+        /// `index`/`new`/`create`. Rails also accepts a `resources
+        /// :x, constraints: { id: /.../ }` kwarg directly; that inline
+        /// spelling is not parsed yet (a separate, pre-existing gap),
+        /// only the block form this field carries.
+        #[serde(default, skip_serializing_if = "IndexMap::is_empty")]
+        constraints: IndexMap<Symbol, String>,
     },
     /// `namespace :admin do … end` / `scope … do … end` — a routing
     /// scope wrapping nested entries. `namespace :x` is `scope` with
@@ -1894,6 +2001,30 @@ pub struct Fixture {
     /// `_fixture: model_class:` — the class the rows load, for a set
     /// whose path doesn't name it. `None` derives it from `path`.
     pub model_class: Option<Symbol>,
+    /// Rows written as one `<%= ActiveStorage::FixtureSet.blob(filename:
+    /// …) %>` tag rather than label → fields. Rails renders that call to
+    /// the blob's whole row as JSON, after reading the file from
+    /// `test/fixtures/files`, measuring it and uploading it to the
+    /// service. Each label here also has an (empty) entry in `records`,
+    /// so its position, and so its id, is the one Rails' file order
+    /// gives it.
+    #[serde(default)]
+    pub file_blobs: IndexMap<Symbol, FixtureFileBlob>,
+}
+
+/// `ActiveStorage::FixtureSet.blob(filename: "reading.webp", service_name:
+/// "test")`: the arguments, which are all a row needs. The rest of the
+/// row (key, size, checksum, the detected content type) comes from the
+/// file when the fixture loads, as it does in Rails.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct FixtureFileBlob {
+    /// The file under `test/fixtures/files`, and the blob's `filename`.
+    pub filename: String,
+    /// `service_name:`, when the call passes one.
+    pub service_name: Option<String>,
+    /// `content_type:`, when the call passes one; it overrides the
+    /// detected type, as Rails' `assign_attributes` after `unfurl` does.
+    pub content_type: Option<String>,
 }
 
 impl Fixture {

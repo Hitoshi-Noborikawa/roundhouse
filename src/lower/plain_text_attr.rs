@@ -148,6 +148,7 @@ pub fn synthesize_record_model(app: &mut App) {
     }];
     app.models.push(Model {
         sti_subclass_names: Vec::new(),
+        i18n: Default::default(),
         name: class,
         parent: Some(ClassId(Symbol::from("ApplicationRecord"))),
         parent_span: Default::default(),
@@ -411,7 +412,7 @@ fn each_destroy(rows: Expr) -> Expr {
     let var = Symbol::from("row");
     let block = Expr::new(
         Span::synthetic(),
-        ExprNode::Lambda {
+        ExprNode::Lambda { extra_params: Vec::new(),
             params: vec![var.clone()],
             rest_param: None,
             block_param: None,

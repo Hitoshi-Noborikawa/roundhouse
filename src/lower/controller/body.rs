@@ -149,7 +149,7 @@ fn unwrap_respond_to_inner(expr: &Expr, with_format_dispatch: bool, breadth: For
             left: recurse(left),
             right: recurse(right),
         },
-        ExprNode::Lambda { rest_param, params, block_param, body, block_style } => ExprNode::Lambda { rest_param: rest_param.clone(),
+        ExprNode::Lambda { rest_param, extra_params, params, block_param, body, block_style } => ExprNode::Lambda { rest_param: rest_param.clone(), extra_params: extra_params.clone(),
             params: params.clone(),
             block_param: block_param.clone(),
             body: recurse(body),
@@ -997,8 +997,15 @@ pub fn implicit_render_statement(
 /// had just written. The response was a 204 with an empty body, and the
 /// test failed decoding it: "buffer is not in a known format", which
 /// names the image library and nothing about the terminal.
-const RESPONSE_TERMINALS: &[&str] =
-    &["render", "redirect_to", "redirect_back_or_to", "head", "send_data", "send_file"];
+const RESPONSE_TERMINALS: &[&str] = &[
+    "render",
+    "redirect_to",
+    "redirect_back_or_to",
+    "head",
+    "send_data",
+    "send_file",
+    "render_inertia_json",
+];
 
 /// Rails' HTTP auth helpers that render the 401 challenge when the
 /// credentials are missing or refused. They MIGHT respond, so a filter

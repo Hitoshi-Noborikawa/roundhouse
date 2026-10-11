@@ -25,6 +25,7 @@
 //! the synthesized `MethodDef`.
 
 mod broadcasts;
+mod inertia;
 mod process_action;
 pub mod params;
 pub mod params_wrapper;
@@ -54,8 +55,8 @@ use self::process_action::{
 use self::rewrites::{
     rewrite_assoc_through_parent_typed, rewrite_destroy_bang,
     rewrite_model_new_to_from_params, rewrite_update_to_typed_variant, rewrite_params,
-    rewrite_redirect_to, rewrite_render_location_kwarg, rewrite_render_to_views,
-    rewrite_route_helpers,
+    rewrite_redirect_to, rewrite_response_location_kwarg, rewrite_render_to_views,
+    rewrite_controller_route_helpers,
 };
 use self::util::{ivars_in_scope, method_name_for_action, views_module_name};
 
@@ -1202,9 +1203,18 @@ fn build_methods(
     // inlining — drop them from the emitted methods. Filter targets
     // that are also called from action bodies (e.g., `_params`
     // helpers — actually those don't appear in before_filters, but
-    // be defensive) stay.
-    let filter_target_names: std::collections::HashSet<&Symbol> =
-        before_filters.iter().map(|f| &f.target).collect();
+    // be defensive) stay. A guarded filter (`if:`/`unless:`) is never
+    // inlined (`inline_before_filters` skips it; see
+    // `filter_is_guarded`) — its target is still called by name from
+    // the preamble, so it's excluded here even when another,
+    // unguarded, before_action on the same controller also names it.
+    let guarded_target_names: std::collections::HashSet<&Symbol> =
+        before_filters.iter().filter(|f| filter_is_guarded(f)).map(|f| &f.target).collect();
+    let filter_target_names: std::collections::HashSet<&Symbol> = before_filters
+        .iter()
+        .map(|f| &f.target)
+        .filter(|t| !guarded_target_names.contains(*t))
+        .collect();
     // A subclassed controller keeps its filter targets: descendants
     // inherit the before_action and their preambles call the target
     // BY NAME (`default_periods` in ModNotesController's dispatcher,
@@ -1573,6 +1583,17 @@ fn filter_applies(f: &Filter, action_name: &Symbol) -> bool {
     }
 }
 
+/// Does `f` carry an `if:`/`unless:` guard (Symbol- or lambda-form)?
+/// A guarded filter is runtime-conditional on something the splice site
+/// can't evaluate, so it can't be spliced into an action body wholesale
+/// — see the comment on `inline_before_filters`.
+fn filter_is_guarded(f: &Filter) -> bool {
+    f.if_cond.is_some()
+        || f.unless_cond.is_some()
+        || f.if_cond_expr.is_some()
+        || f.unless_cond_expr.is_some()
+}
+
 /// May this controller's own filters be inlined into its action bodies
 /// at all?
 ///
@@ -1610,7 +1631,11 @@ fn own_filter_inlining_is_ordered(controller: &Controller, privs: &[Action]) -> 
     let own_priv = |target: &Symbol| privs.iter().any(|a| &a.name == target);
     let mut seen_inlinable = false;
     for f in controller.filters().filter(|f| matches!(f.kind, FilterKind::Before)) {
-        if own_priv(&f.target) {
+        // A guarded own-private filter is never inlined (see
+        // `filter_is_guarded`) — it stays in the preamble exactly like
+        // an ancestor-target filter, so it doesn't count as "inlinable"
+        // for this ordering check either.
+        if own_priv(&f.target) && !filter_is_guarded(f) {
             seen_inlinable = true;
         } else if seen_inlinable {
             return false;
@@ -1623,6 +1648,16 @@ fn own_filter_inlining_is_ordered(controller: &Controller, privs: &[Action]) -> 
 /// filter target's body prepended to the action body. A filter
 /// applies when its `only:` includes the action name, or its
 /// `except:` doesn't, or it has neither (unconditional).
+///
+/// A guarded filter (`if:`/`unless:`) is skipped here regardless —
+/// splicing its target's body straight into the action body would run
+/// it unconditionally, which is a correctness bug, not just a missed
+/// optimization: `before_action :reject_paging, if: :paging?` answered
+/// 401 for every request, paged or not, and the harmful direction is
+/// just as real (`if: :public?` on a cache-header filter would mark
+/// every response publicly cacheable). A guarded filter is left for
+/// `build_filter_preamble`, which already turns `if:`/`unless:` into a
+/// runtime condition (`cond_from_guards`) around the dispatch call.
 ///
 /// A prepended body that can render/redirect/head is followed by
 /// `return if performed?`, exactly as the preamble does for the filters
@@ -1639,7 +1674,7 @@ fn inline_before_filters(
     let action_name = &action.name;
     let mut prepended: Vec<Expr> = Vec::new();
     for f in filters {
-        if !filter_applies(f, action_name) {
+        if !filter_applies(f, action_name) || filter_is_guarded(f) {
             continue;
         }
         // Look up the filter's target action by name in privs.
@@ -1862,7 +1897,11 @@ fn build_filter_preamble(
                 ControllerBodyItem::Filter { filter, .. }
                     if matches!(filter.kind, FilterKind::Before) =>
                 {
-                    if is_own && own_privs_inlined && own_priv_targets.contains(&filter.target) {
+                    if is_own
+                        && own_privs_inlined
+                        && own_priv_targets.contains(&filter.target)
+                        && !filter_is_guarded(filter)
+                    {
                         continue; // inlined into action bodies upstream
                     }
                     push_call(filter, if filter.prepend { &mut prepends } else { &mut preamble });
@@ -2542,7 +2581,7 @@ fn collect_rescue_handlers(
                     )
                 }
                 (None, Some(b)) => match &*b.node {
-                    ExprNode::Lambda { params, body, .. } => {
+                    ExprNode::Lambda { params, extra_params, body, .. } if extra_params.is_empty() => {
                         // A block parameter names the exception; rewrite
                         // the reads to the rescue binding rather than
                         // renaming the binding, which would collide with
@@ -2634,37 +2673,18 @@ fn action_to_method(
     deferred_out: &mut std::collections::HashMap<Symbol, Expr>,
 ) -> MethodDef {
     let method_name = method_name_for_action(a.name.as_str());
-    // Required positionals first, then optional positionals with their
-    // defaults — so `def get_from_cache(opts = {})` round-trips instead of
-    // emitting `def get_from_cache` and crashing the body that reads `opts`.
-    let mut params: Vec<Param> = a
-        .params
-        .fields
-        .iter()
-        .map(|(n, _)| Param::positional(n.clone()))
-        .collect();
-    for (n, default) in &a.opt_params {
-        params.push(Param::with_default(n.clone(), default.clone()));
-    }
-    // Then the keyword params. The call sites in this very controller
-    // pass them by name, so emitting the `def` without them left every
-    // such helper raising `ArgumentError` the first time its action
-    // ran — the same failure the optional positionals above were added
-    // for, one parameter kind over.
+    // Required positionals, optionals (so `def get_from_cache(opts = {})`
+    // round-trips instead of emitting `def get_from_cache` and crashing
+    // the body that reads `opts`), `*rest`, the keywords, `**rest`, and
+    // the anonymous `**` / `...` — `Action::formal_params`. The call sites
+    // in this very controller pass all of them, so a `def` without one
+    // raises `ArgumentError` the first time its action runs.
     //
-    // Carried, not converted: ruby has keyword arguments, and turning
-    // them into positionals would lose the two things that make them
-    // keywords — any order, and skipping an optional one. A target
-    // that cannot express them says so instead (see the emit).
-    for (n, default) in &a.kw_params {
-        params.push(Param::keyword(n.clone(), default.clone()));
-    }
-    // `**rest` last, the only position Ruby accepts it in.
-    if let Some(n) = &a.kwrest_param {
-        let mut p = Param::keyword(n.clone(), None);
-        p.rest = true;
-        params.push(p);
-    }
+    // Keywords are carried, not converted: ruby has keyword arguments,
+    // and turning them into positionals would lose the two things that
+    // make them keywords — any order, and skipping an optional one. A
+    // target that cannot express a kind says so instead (see the emit).
+    let params: Vec<Param> = a.formal_params();
     // Order matters: turbo_stream is tested before json, so an action
     // with both templates picks the one the request actually asked for.
     let mut variants: Vec<&str> = Vec::new();
@@ -2751,10 +2771,14 @@ fn action_to_method(
         if let Some(spec) = spec {
             Ty::Class { id: spec.class_id.clone(), args: vec![] }
         } else {
-            // Fallback for helpers whose permit list we didn't recognize
-            // (campfire's `role_params` builds a bare Hash) — stays
-            // typed-coarse rather than panicking.
-            Ty::Hash { key: Box::new(Ty::Sym), value: Box::new(Ty::Untyped) }
+            // No recognized permit list: the `_params` suffix is a naming
+            // convention, not a contract. A guard filter named
+            // `check_kind_params` can answer `nil` or a `head(...)` result,
+            // not a Hash — pinning Hash[Symbol, untyped] here is the same
+            // mistake the blanket-Nil pin above was (issue #810). Untyped
+            // lets the compiler infer from the body instead; campfire's
+            // `role_params`, which builds a bare Hash, still infers Hash.
+            Ty::Untyped
         }
     } else if is_public {
         // Routed actions terminate in render/redirect → Nil.
@@ -2914,9 +2938,10 @@ fn mark_param_kinds(sig: Ty, params: &[Param]) -> Ty {
 ///    object; model constructors expect a plain Hash.
 /// 10. `rewrite_destroy_bang` — `<recv>.destroy!` → `<recv>.destroy`.
 ///    Spinel's runtime model has only one destroy variant.
-/// 11. `rewrite_route_helpers` — bare `<x>_path` → `RouteHelpers.<x>_path`
-///    (covers `articles_path` and the like that appear outside
-///    redirect_to's first arg).
+/// 11. `rewrite_controller_route_helpers` — bare `<x>_path` →
+///    `RouteHelpers.<x>_path` (covers `articles_path` and the like that
+///    appear outside redirect_to's first arg), and `<x>_url` →
+///    `url_from_path(RouteHelpers.<x>_path)`, the absolute URL.
 ///
 /// Run in this order because each pass leaves the IR in a shape the
 /// next pass expects: render-views needs the synthesized symbol-form
@@ -3043,14 +3068,12 @@ fn lower_action_body(
         )
     };
 
-    // Render `location: @ivar` kwarg → `RouteHelpers.<x>_path(@x.id)`
-    // — Rails' POST-201 idiom (`render :show, status: :created,
-    // location: @article`) passes a record where the runtime's render
-    // wants a path string. Same polymorphic transform as
-    // `rewrite_redirect_to`, just on the kwarg position rather than
-    // the first positional arg.
-    let with_render = rewrite_render_location_kwarg(&with_render);
-    let with_params = rewrite_params(&with_render);
+    // `location: @ivar` in render/head →
+    // `RouteHelpers.<x>_path(@x.id)`, matching the documented Rails
+    // polymorphic location form without runtime class dispatch.
+    let with_response_location = rewrite_response_location_kwarg(&with_render);
+    let with_response_location = inertia::encode_inertia_values(&with_response_location);
+    let with_params = rewrite_params(&with_response_location);
     // After bare `params.expect(...)` / `params.require(:r).permit(...)`
     // canonicalize via `rewrite_params`, replace each permit chain with
     // the typed factory `<Resource>Params.from_raw(@params)`. The
@@ -3079,7 +3102,8 @@ fn lower_action_body(
     // project_arel_compile_time_first.md.
     let with_destroy = rewrite_destroy_bang(&with_assoc);
     let with_destroy = rewrites::rewrite_request_format(&with_destroy);
-    let with_routes = rewrite_route_helpers(&with_destroy, shadows, route_id_segments);
+    let with_routes =
+        rewrite_controller_route_helpers(&with_destroy, shadows, route_id_segments);
     // Some rewrites (rewrite_assoc_through_parent in particular)
     // produce nested Seqs — `Seq { ..., Seq { stmts }, ... }`. The
     // body-typer's Seq walker only propagates ivar bindings from
@@ -3152,7 +3176,7 @@ fn flatten_seqs(expr: &Expr) -> Expr {
                 args: args.iter().map(flatten).collect(),
                 block: block.as_ref().map(flatten),
             },
-            ExprNode::Lambda { rest_param, params, block_param, body, block_style } => ExprNode::Lambda { rest_param: rest_param.clone(),
+            ExprNode::Lambda { rest_param, extra_params, params, block_param, body, block_style } => ExprNode::Lambda { rest_param: rest_param.clone(), extra_params: extra_params.clone(),
                 params: params.clone(),
                 block_param: block_param.clone(),
                 body: flatten(body),

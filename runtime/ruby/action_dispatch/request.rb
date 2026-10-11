@@ -12,6 +12,8 @@
 # action_dispatch require chain): the CRuby tree keeps its overlay
 # Request (CGI-env-backed, runtime/action_dispatch_request.rb) and must
 # not blend the two shapes.
+require_relative "headers"
+
 module ActionDispatch
   # `request.body` — the raw body as Rails hands it back: an IO, not the
   # String. campfire's bot endpoints read it the way Rails documents
@@ -131,6 +133,12 @@ module ActionDispatch
     # query string or the path captures. ParamsWrapper copies from these
     # (`Params.wrap`); the dispatcher fills them.
     attr_accessor :request_parameters
+    # Rails' `query_parameters`: the QUERY STRING's params alone, nested
+    # by the dispatcher's own parser (`ParamBuilder` on the spinel lane,
+    # which fills it; the CRuby overlay twin parses `query_string` on
+    # read). A reader, not a re-parse here: this file is shared with
+    # every target and names neither parser.
+    attr_accessor :query_parameters
 
     def initialize
       @remote_ip = "127.0.0.1"
@@ -145,6 +153,7 @@ module ActionDispatch
       @body_io = nil
       @env = {}
       @request_parameters = {}
+      @query_parameters = {}
       # `@params` too, and for a reason `@env` shows: `Request.for`
       # COPIES into both (`params.each { |k, v| r.params[k] = v }`),
       # which READS the slot before anything writes it. Unset, that read
@@ -172,6 +181,11 @@ module ActionDispatch
     # other keys rack reads (`:expire_after`, `:renew`, …) are consumed
     # by a cookie-store middleware we don't run, and a write of one
     # refuses at the type rather than being silently ignored.
+    # `request.headers["Accept-Encoding"]` — see `Http::Headers`.
+    def headers
+      ActionDispatch::Http::Headers.new(@env)
+    end
+
     def session_options
       @session_options
     end
@@ -230,6 +244,10 @@ module ActionDispatch
       @env.fetch("HTTP_X_REQUESTED_WITH", "").to_s == "XMLHttpRequest"
     end
 
+    def inertia?
+      @env.fetch("HTTP_X_INERTIA", "").to_s != ""
+    end
+
     def fullpath
       if @query_string == ""
         @path
@@ -252,8 +270,11 @@ module ActionDispatch
     # an https page, and the browser blocked the fetch.
     def ssl?
       return true if @env.fetch("HTTPS", "").to_s == "on"
-      forwarded = @env.fetch("HTTP_X_FORWARDED_PROTO", "").to_s
-      forwarded.split(",").first.to_s.strip.downcase == "https"
+      forwarded = @env.fetch("HTTP_X_FORWARDED_PROTO", "").to_s.split(",").first.to_s.strip.downcase
+      return forwarded == "https" unless forwarded.empty?
+      # No proxy header: the scheme Rack itself reports, the one key the
+      # Rack spec requires (`Rack::Request#scheme`'s last resort).
+      @env.fetch("rack.url_scheme", "").to_s.downcase == "https"
     end
 
     # Rails' `request.optional_port`: the port, unless it is the
@@ -276,8 +297,13 @@ module ActionDispatch
     end
 
     # Scheme + host, no path — what Rails builds absolute URLs from.
+    # The scheme's standard port is dropped (`host_with_port` writes no
+    # `:443` over TLS or `:80` without it), so the CSRF check compares
+    # it with an Origin the way a browser serializes one.
     def base_url
-      protocol + @host
+      default = ssl? ? ":443" : ":80"
+      host = @host.end_with?(default) ? @host[0, @host.length - default.length].to_s : @host
+      protocol + host
     end
 
     # Absolute URL of this request. Feed templates interpolate it as

@@ -54,6 +54,13 @@ class ActionDispatchRequestTest < Minitest::Test
     assert_equal "127.0.0.1", r.remote_ip
   end
 
+  def test_headers_fetch_distinguishes_missing_default_from_nil_default
+    headers = ActionDispatch::Http::Headers.new({})
+    assert_raises(KeyError) { headers.fetch("X-Required") }
+    assert_nil headers.fetch("X-Optional", nil)
+    assert_equal "fallback", headers.fetch("X-Optional", "fallback")
+  end
+
   # The scheme every absolute URL is built with. Behind a proxy that
   # terminated TLS (Fly, a load balancer) the connection is plain http
   # and only `X-Forwarded-Proto` says the page is https; answering http
@@ -90,5 +97,14 @@ class ActionDispatchRequestTest < Minitest::Test
   def test_the_first_forwarded_scheme_is_the_clients
     assert ActionDispatch::Request.for({ "HTTP_X_FORWARDED_PROTO" => "https, http" }).ssl?
     assert ActionDispatch::Request.for({ "HTTPS" => "on" }).ssl?
+  end
+
+  # Rack requires `rack.url_scheme`; the other TLS keys are optional. A
+  # proxy header, when present, still outranks it, as in Rack::Request.
+  def test_rack_url_scheme_is_the_last_word_on_tls
+    assert ActionDispatch::Request.for({ "rack.url_scheme" => "https" }).ssl?
+    refute ActionDispatch::Request.for({ "rack.url_scheme" => "http" }).ssl?
+    refute ActionDispatch::Request.for({}).ssl?
+    refute ActionDispatch::Request.for({ "rack.url_scheme" => "https", "HTTP_X_FORWARDED_PROTO" => "http" }).ssl?
   end
 end
