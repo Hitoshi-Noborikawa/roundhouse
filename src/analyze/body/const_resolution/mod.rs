@@ -4,6 +4,8 @@
 //! Roundhouse retains source-position answers and keys inferred values
 //! by Rubydex declaration IDs.
 
+mod hoist;
+
 use std::collections::{HashMap, HashSet, hash_map::Entry};
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::sync::{Arc, OnceLock};
@@ -24,6 +26,7 @@ use rubydex::resolution::Resolver;
 use crate::ident::{ClassId, Symbol};
 use crate::span::{FileId, SourceFile, Span};
 use crate::ty::Ty;
+use hoist::{hoisted_name, nested_namespaces_index, runtime_value_types};
 
 // Rubydex's minimal built-ins stop at Object/Module/Class. Classes
 // without value Consts live in `CORE_RBS_BASE`; value Consts are one
@@ -339,23 +342,6 @@ fn is_runtime_declaration(graph: &Graph, declaration: &Declaration) -> bool {
     })
 }
 
-/// The name a declaration answers to once ingest has hoisted it.
-///
-/// Rubydex names what `class << self` declares by its singleton class:
-/// `Gate::<Gate>::ERR`. Every Roundhouse walk replays such a
-/// constant in the enclosing body (`singleton_class::SingletonBody::
-/// class_body`, `library_class::walk_decl_body`), so emitted code defines
-/// it as `Gate::ERR`. Qualifying a reference with the singleton
-/// segment emitted `Gate::<Gate>::ERR`, which is not Ruby.
-fn hoisted_name(name: &str) -> std::borrow::Cow<'_, str> {
-    if !name.contains('<') {
-        return std::borrow::Cow::Borrowed(name);
-    }
-    std::borrow::Cow::Owned(
-        name.split("::").filter(|segment| !segment.starts_with('<')).collect::<Vec<_>>().join("::"),
-    )
-}
-
 fn resolved_namespace(graph: &Graph, name: NameId) -> Option<&Declaration> {
     let id = graph.name_id_to_declaration_id(name)?;
     let id = graph.resolve_alias(id).unwrap_or(*id);
@@ -380,35 +366,6 @@ fn is_assigned_value(graph: &Graph, declaration: &Declaration) -> bool {
     assigned
 }
 
-/// Literal runtime values come from the same embedded implementations
-/// the name graph indexes. Keep their full owners, not suffix aliases,
-/// and share types between references instead of copying their trees.
-fn runtime_value_types() -> &'static HashMap<String, Arc<Ty>> {
-    static VALUES: std::sync::OnceLock<HashMap<String, Arc<Ty>>> = std::sync::OnceLock::new();
-    VALUES.get_or_init(|| {
-        let mut values: HashMap<String, Arc<Ty>> = HashMap::new();
-        let mut ambiguous = std::collections::HashSet::new();
-        for (_, text) in crate::runtime_files::ruby_sources() {
-            let (_, owners) = crate::runtime_src::parse_module_constant_tables(text, true);
-            for (owner, constants) in owners {
-                for (name, ty) in constants {
-                    let name = format!("{}::{}", owner.0.as_str(), name.as_str());
-                    if ambiguous.contains(&name) {
-                        continue;
-                    }
-                    if values.get(&name).is_some_and(|previous| **previous != ty) {
-                        values.remove(&name);
-                        ambiguous.insert(name);
-                    } else {
-                        values.insert(name, Arc::new(ty));
-                    }
-                }
-            }
-        }
-        values
-    })
-}
-
 impl ConstResolver {
     /// Index real Ruby app sources with their original 1-based file IDs.
     pub(crate) fn from_app_sources(sources: &[SourceFile]) -> Self {
@@ -421,14 +378,7 @@ impl ConstResolver {
         let mut declared: Vec<&str> = files.iter().flatten().flat_map(|file| file.class_definitions.iter().map(|name| name.as_ref())).collect();
         declared.sort_unstable();
         declared.dedup();
-        let mut nested_namespaces: HashMap<Box<str>, Vec<Box<str>>> = HashMap::default();
-        for name in &declared {
-            for (at, _) in name.match_indices("::") {
-                if declared.binary_search(&&name[..at]).is_ok() {
-                    nested_namespaces.entry(Box::from(&name[..at])).or_default().push(Box::from(*name));
-                }
-            }
-        }
+        let nested_namespaces = nested_namespaces_index(&declared);
         Self { files, nested_namespaces, source_fingerprint: source_fingerprint(sources) }
     }
 
