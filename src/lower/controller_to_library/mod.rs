@@ -2770,10 +2770,14 @@ fn action_to_method(
         if let Some(spec) = spec {
             Ty::Class { id: spec.class_id.clone(), args: vec![] }
         } else {
-            // Fallback for helpers whose permit list we didn't recognize
-            // (campfire's `role_params` builds a bare Hash) — stays
-            // typed-coarse rather than panicking.
-            Ty::Hash { key: Box::new(Ty::Sym), value: Box::new(Ty::Untyped) }
+            // No recognized permit list: the `_params` suffix is a naming
+            // convention, not a contract. A guard filter named
+            // `check_kind_params` can answer `nil` or a `head(...)` result,
+            // not a Hash — pinning Hash[Symbol, untyped] here is the same
+            // mistake the blanket-Nil pin above was (issue #810). Untyped
+            // lets the compiler infer from the body instead; campfire's
+            // `role_params`, which builds a bare Hash, still infers Hash.
+            Ty::Untyped
         }
     } else if is_public {
         // Routed actions terminate in render/redirect → Nil.
