@@ -530,8 +530,11 @@ pub fn ingest_app_with_vfs<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResult
                         // carry `included do` declarations that belong
                         // to every includer: filters (controller-side)
                         // and model DSL (associations/scopes).
-                        app.concern_filters
-                            .extend(ingest_concern_filters(&source, &path_str));
+                        if let Some(concern_filters) =
+                            unwrap_or_record(ingest_concern_filters(&source, &path_str))?
+                        {
+                            app.concern_filters.extend(concern_filters);
+                        }
                         let (concern_items, concern_enum_decls) =
                             ingest_concern_model_items_with_constants(
                                 &source, &path_str, &enum_constants,
@@ -1304,8 +1307,11 @@ end
                         unwrap_or_record(ingest_library_classes(&source, &path_str))?
                     {
                         app.library_classes.extend(classes);
-                        app.concern_filters
-                            .extend(ingest_concern_filters(&source, &path_str));
+                        if let Some(concern_filters) =
+                            unwrap_or_record(ingest_concern_filters(&source, &path_str))?
+                        {
+                            app.concern_filters.extend(concern_filters);
+                        }
                         let (concern_items, concern_enum_decls) =
                             ingest_concern_model_items_with_constants(
                                 &source, &path_str, &enum_constants,
@@ -3073,6 +3079,15 @@ const CONSUMED_CONTROLLER_MACROS: &[&str] = &[
     // this generic one — see those functions' doc comments.
     "alias_method",
     "undef_method",
+    // `with_options(kw) do … end` — `ingest::controller::
+    // ingest_controller_with_options` claims every one of these at
+    // ingest time, before this scan ever runs: composed, it folds into
+    // the `Filter`/other body items its block held and never becomes an
+    // `Unknown` at all; declined, it stays `Unknown` WITH its own
+    // specific "with_options: …" gap already recorded (ALL-OR-NOTHING —
+    // see that function's doc comment). Either way this generic bucket
+    // (and the block-shaped one just below) would only double it.
+    "with_options",
 ];
 
 /// `using SomeRefinement` — Ruby's block-scoped monkey-patch

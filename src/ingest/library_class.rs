@@ -3595,7 +3595,7 @@ fn framework_shadow_scopes(
 pub fn ingest_concern_filters(
     source: &[u8],
     file: &str,
-) -> Vec<(ClassId, Vec<crate::dialect::Filter>)> {
+) -> super::IngestResult<Vec<(ClassId, Vec<crate::dialect::Filter>)>> {
     let result = super::prism::parse_silent(source);
     let root = result.node();
     let mut out = Vec::new();
@@ -3615,24 +3615,34 @@ pub fn ingest_concern_filters(
             let Some(block) = call.block().and_then(|b| b.as_block_node()) else { continue };
             let Some(block_body) = block.body() else { continue };
             for inner in flatten_statements(block_body) {
-                if let Some(fs) = super::controller::parse_filter_call(&inner, file) {
-                    filters.extend(fs);
-                } else if let Some(f) = block_form_concern_filter(&inner, file) {
-                    filters.push(f);
-                } else if let Some(name) = forgery_macro_name(&inner) {
-                    // A forgery declaration `parse_filter_call` does not
-                    // model (`prepend:`, a custom `store:`, an unknown
-                    // `with:`) changes how every
-                    // includer checks requests. The `included` block is
-                    // otherwise dropped, so it would vanish without a
-                    // trace where the same line in a controller is a
-                    // survey gap; name it the same way.
-                    super::survey::record(&super::IngestError::Unsupported {
-                        file: file.to_string(),
-                        message: format!(
-                            "controller concern macro not recognized: `{name}` (its effect is dropped from the output)"
-                        ),
-                    });
+                match super::controller::parse_filter_call(&inner, file) {
+                    Ok(Some(fs)) => filters.extend(fs),
+                    // `parse_filter_call` itself only returns `Err` for a
+                    // non-literal `only:`/`except:` (refused rather than
+                    // silently applied to every action — that function's
+                    // doc comment). Strict mode must fail ingest the same
+                    // way a controller's own `only:`/`except:` would;
+                    // survey mode records the gap and keeps scanning.
+                    Err(err) => super::survey::continue_or_fail(err)?,
+                    Ok(None) => {
+                        if let Some(f) = block_form_concern_filter(&inner, file) {
+                            filters.push(f);
+                        } else if let Some(name) = forgery_macro_name(&inner) {
+                            // A forgery declaration `parse_filter_call` does not
+                            // model (`prepend:`, a custom `store:`, an unknown
+                            // `with:`) changes how every
+                            // includer checks requests. The `included` block is
+                            // otherwise dropped, so it would vanish without a
+                            // trace where the same line in a controller is a
+                            // survey gap; name it the same way.
+                            super::survey::record(&super::IngestError::Unsupported {
+                                file: file.to_string(),
+                                message: format!(
+                                    "controller concern macro not recognized: `{name}` (its effect is dropped from the output)"
+                                ),
+                            });
+                        }
+                    }
                 }
             }
         }
@@ -3640,7 +3650,7 @@ pub fn ingest_concern_filters(
             out.push((id, filters));
         }
     }
-    out
+    Ok(out)
 }
 
 /// `protect_from_forgery` / `skip_forgery_protection`, receiverless.
