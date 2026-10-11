@@ -353,13 +353,7 @@ fn untyped_subexpressions_baseline() {
     // All nine are the nested branch's new `Db.exec` SAVEPOINT / RELEASE /
     // ROLLBACK TO calls (and the `if`/`unless` arms holding them) plus the
     // `depth` read in the savepoint name, unmodeled here like the others.
-    // Spinel tip (ea683750+) `_adapter_count` nil-check before `.count`
-    // (sp_oint vs sp_poly_count_val): 578 -> 580, MEASURED by reverting the
-    // `adapter = …; if adapter.nil? then 0 else adapter.count(…) end` body
-    // to the one-line `ActiveRecord.adapter.count(table_name)`. The two new
-    // sites are the else-arm send and its `adapter` receiver — untyped here
-    // like every other poly adapter call in this probe.
-    const CEILING: usize = 580;
+    const CEILING: usize = 578;
     assert!(
         all_untyped.len() <= CEILING,
         "{} untyped sub-expressions on spinel-blog runtime — exceeds ceiling of {CEILING}.\n\

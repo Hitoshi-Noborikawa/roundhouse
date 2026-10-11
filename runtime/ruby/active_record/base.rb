@@ -427,16 +427,7 @@ module ActiveRecord
     def _adapter_delete; end
 
     def self._adapter_count
-      # Nil-check before `.count`: Spinel tip (ea683750+) types a call on
-      # nilable `ActiveRecord.adapter` as Integer? (sp_oint) while
-      # `sp_poly_count_val` still returns sp_int — C compile fails. A
-      # definite adapter keeps the method Integer-plain.
-      adapter = ActiveRecord.adapter
-      if adapter.nil?
-        0
-      else
-        adapter.count(table_name)
-      end
+      ActiveRecord.adapter.count(table_name)
     end
 
     # Unscoped non-emptiness. Level-3 models override with SELECT 1 LIMIT 1;
