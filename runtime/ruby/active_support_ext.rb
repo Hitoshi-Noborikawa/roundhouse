@@ -839,13 +839,16 @@ module ActiveSupport
   class ErrorReporter
     def report(error, handled: true, severity: nil, context: {}, source: nil)
       message = "#{error.class}: #{error.message}"
-      case severity || (handled ? :warning : :error)
+      level = severity || (handled ? :warning : :error)
+      case level
       when :info
         Rails.logger.info(message)
       when :warning
         Rails.logger.warn(message)
-      else
+      when :error
         Rails.logger.error(message)
+      else
+        raise ArgumentError, "severity must be one of :error, :warning, :info, got: #{level.inspect}"
       end
       nil
     end

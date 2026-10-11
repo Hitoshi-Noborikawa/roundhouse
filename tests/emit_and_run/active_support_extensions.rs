@@ -26,6 +26,10 @@ fn app() -> emit_and_run::Overlay {
     Rails.error.report(error, handled: true, severity: :info)
   end
 
+  def self.report_debug(error)
+    Rails.error.report(error, handled: true, severity: :debug)
+  end
+
   def self.option_labels(options)
     Array(options).pluck(\"label\")
   end
@@ -60,6 +64,12 @@ fn rails_error_report_logs_at_its_severity_in_emitted_ruby() {
         r#"raise "report returns nil" unless Article.report(RuntimeError.new("handled")).nil?
 Article.report_unhandled(RuntimeError.new("unhandled"))
 Article.report_info(RuntimeError.new("info"))
+begin
+  Article.report_debug(RuntimeError.new("debug"))
+  raise "debug severity was accepted"
+rescue ArgumentError => e
+  raise "message: #{e.message}" unless e.message == "severity must be one of :error, :warning, :info, got: :debug"
+end
 puts "error report passed"
 "#,
     );
