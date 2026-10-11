@@ -19,10 +19,12 @@
 # ONLY THE SURFACE THE APP AND ITS SUITE REACH IS PORTED — `post`,
 # `shutdown`, `kill`, `wait_for_termination`, `completed_task_count`
 # and the size readers — plus `CyclicBarrier#wait` for the
-# race-condition test. The gem's tuning knobs (`idletime`, the
-# fallback policies other than `:abort`, `min_threads` pre-spawn) are
-# accepted where a caller passes them and do nothing: a worker here is
-# a green thread parked on a Queue, which costs nothing to keep.
+# race-condition test, and `Map`'s `[]` / `[]=` / `compute_if_absent` /
+# `clear` (Mutex+Hash; not the gem's lock-free table). The gem's tuning
+# knobs (`idletime`, the fallback policies other than `:abort`,
+# `min_threads` pre-spawn) are accepted where a caller passes them and
+# do nothing: a worker here is a green thread parked on a Queue, which
+# costs nothing to keep.
 #
 # Semantics kept from the gem, because the suite observes them:
 # * A task posted when no worker is idle and the pool is under
