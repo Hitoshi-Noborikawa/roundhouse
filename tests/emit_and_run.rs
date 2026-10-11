@@ -1881,9 +1881,11 @@ fn dry_struct_hierarchy_is_lowered_whole_or_not_at_all() {
     assert_eq!(class("Shop::Base").parent.as_ref().map(|p| p.0.as_str()), Some("Dry::Struct"));
     assert!(class("Shop::Good").methods.iter().all(|m| m.name.as_str() != "id"), "sibling lowered");
     assert!(class("Shop::Good").unknown_calls.iter().any(|c| roundhouse::emit::ruby::emit_expr(c).starts_with("attribute")));
-    // Empty `Dry::Struct` shell stays unknown while anything remains on
-    // the gem; `Error` still lands so lowered constructors can raise it.
-    assert!(app.library_classes.iter().all(|lc| lc.name.0.as_str() != "Dry::Struct"), "stand-in added");
+    // Empty `class Dry::Struct` + `Error` so nest emit stays Class-safe
+    // while some hierarchies remain unlowered; the shell has no methods.
+    let dry_struct = class("Dry::Struct");
+    assert!(!dry_struct.is_module, "Dry::Struct shell must be a class");
+    assert!(dry_struct.methods.is_empty(), "Dry::Struct shell grew methods");
     assert!(
         app.library_classes.iter().any(|lc| lc.name.0.as_str() == "Dry::Struct::Error"),
         "Error stand-in missing while Kept lowered"
@@ -1931,42 +1933,42 @@ fn dry_struct_singleton_prepend_refuses_lowering() {
     assert!(strict.methods.iter().all(|m| m.name.as_str() != "id"), "reader synthesized despite prepend");
 }
 
-/// Mixed refusal still emits `Dry::Struct::Error` (without the empty
-/// `Dry::Struct` shell) so a lowered sibling can raise it. Types stay
-/// while the gem does, so this pin is ingest-shaped like the hierarchy
-/// test — the all-lowered ruby contract already exercises the raise.
+/// Mixed refusal emits empty `class Dry::Struct` + `Error` so a lowered
+/// sibling can raise it and a refused sibling still subclasses a Class.
 #[test]
 fn dry_struct_error_standin_with_partial_refusal() {
-    let tree = [
-        ("lib/shop/types.rb", "module Shop\n  module Types\n    include Dry.Types()\n  end\nend\n"),
-        (
+    // Minimal tree: full dry_struct::overlay leaves Types constants that
+    // cannot emit while any hierarchy stays on the gem.
+    let run = emit_and_run::real_blog()
+        .write(
+            "lib/shop/types.rb",
+            "module Shop\n  module Types\n    include Dry.Types()\n  end\nend\n",
+        )
+        .write(
             "lib/shop/bulk.rb",
             "module Shop\n  class Bulk < Dry::Struct\n    attributes(id: ::Shop::Types::Coercible::String)\n  end\nend\n",
-        ),
-        (
+        )
+        .write(
             "lib/shop/kept.rb",
             "module Shop\n  class Kept < Dry::Struct\n    attribute :id, ::Shop::Types::Coercible::String\n  end\nend\n",
-        ),
-        ("config/routes.rb", "Rails.application.routes.draw do\nend\n"),
-    ]
-    .into_iter()
-    .map(|(p, s)| (std::path::PathBuf::from(p), s.as_bytes().to_vec()))
-    .collect();
-    roundhouse::ingest::survey::activate();
-    let app = roundhouse::ingest::ingest_app_from_tree(tree).expect("ingest");
-    assert!(
-        app.library_classes.iter().any(|lc| lc.name.0.as_str() == "Dry::Struct::Error"),
-        "Error stand-in missing under partial refusal"
-    );
-    assert!(
-        app.library_classes.iter().all(|lc| lc.name.0.as_str() != "Dry::Struct"),
-        "Dry::Struct shell must stay unknown while Bulk remains on the gem"
-    );
-    let kept = app.library_classes.iter().find(|lc| lc.name.0.as_str() == "Shop::Kept").expect("Kept");
-    assert_eq!(kept.origin, Some(roundhouse::dialect::LibraryClassOrigin::DryStruct));
-    assert!(kept.methods.iter().any(|m| m.name.as_str() == "initialize"));
-    let bulk = app.library_classes.iter().find(|lc| lc.name.0.as_str() == "Shop::Bulk").expect("Bulk");
-    assert_eq!(bulk.parent.as_ref().map(|p| p.0.as_str()), Some("Dry::Struct"));
+        )
+        .run_ruby(
+            r#"
+raise "Dry::Struct must be a Class" unless Dry::Struct.is_a?(Class)
+raise "Error missing" unless defined?(Dry::Struct::Error)
+raise "Bulk must subclass Dry::Struct" unless Shop::Bulk < Dry::Struct
+begin
+  Shop::Kept.new({})
+  raise "missing id should raise"
+rescue Dry::Struct::Error
+end
+ok = Shop::Kept.new(id: "1")
+raise "Kept failed" unless ok.id == "1"
+puts "dry-struct partial-refusal Error contract passed"
+"#,
+        );
+    run.assert_passes();
+    assert!(run.stdout.contains("dry-struct partial-refusal Error contract passed"));
 }
 
 /// A Concern macro that writes a `class_attribute` runs when the

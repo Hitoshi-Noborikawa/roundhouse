@@ -284,15 +284,18 @@ pub(super) fn lower_dry_structs(app: &mut App, sources: &[crate::span::SourceFil
         lc.parent = parent_of[&name].clone().map(|p| crate::ident::ClassId(Symbol::from(p.as_str())));
         any = true;
     }
-    // Lowered constructors raise / rescue `Dry::Struct::Error`. Emit that
-    // stand-in whenever anything lowered — including when some hierarchies
-    // stay on the gem. The empty `Dry::Struct` shell must not land in that
-    // partial-refusal case: refused subclasses would resolve to a known
-    // class with no `attribute`, and the gap would become missing-method
-    // noise. Types cleanup is only safe once nothing remains on dry-types.
+    // Lowered constructors raise / rescue `Dry::Struct::Error`. Emit the
+    // stand-in (empty `class Dry::Struct` + nested `Error`) whenever
+    // anything lowered — including when some hierarchies stay unlowered.
+    // The empty class shell is load-critical under partial refusal: nesting
+    // only `Error` makes the Ruby emitter open `module Struct`, and
+    // `class X < Dry::Struct` then TypeErrors. The shell carries no
+    // `attribute` methods; refused class-body DSL is not replayed onto a
+    // modeled parent (`replays_foreign_class_body`). Types cleanup is only
+    // safe once nothing remains on dry-types.
     if any {
+        app.library_classes.extend(error_classes());
         if refused_roots.is_empty() {
-            app.library_classes.extend(error_classes());
             // Nothing left needs dry-types, and the `Types` modules are not
             // emitted: a constant still building a type would fail the load.
             // The `Types` modules' own constants that build no type, an alias
@@ -323,8 +326,6 @@ pub(super) fn lower_dry_structs(app: &mut App, sources: &[crate::span::SourceFil
                 let holder = lc.name.0.as_str().to_string();
                 lc.constants.retain(|(_, value)| !holds_dry_type(value, &holder, &types_modules, &names, &plain));
             }
-        } else {
-            app.library_classes.extend(error_class_only());
         }
     }
 }
@@ -558,22 +559,15 @@ fn effective_transform(
     None
 }
 
-/// `Dry::Struct::Error`, which the lowered constructors raise and an
-/// application may rescue. Nothing else of dry-struct is left.
+/// Empty `Dry::Struct` plus nested `Error`, which the lowered
+/// constructors raise and an application may rescue. Nothing else of
+/// dry-struct is left. The empty class (not module) shell is required so
+/// nest emit opens `class Struct` and refused `class X < Dry::Struct`
+/// keeps Class ancestry.
 fn error_classes() -> Vec<LibraryClass> {
     let source = "module Dry\n  class Struct\n    class Error < TypeError\n    end\n  end\nend\n";
     crate::ingest::ingest_library_classes(source.as_bytes(), "<dry_struct>")
         .expect("the Dry::Struct::Error stand-in parses")
-}
-
-/// Just `Dry::Struct::Error` — for the partial-refusal case where the
-/// empty `Dry::Struct` shell must stay unknown so unlowered subclasses
-/// keep gem ancestry for `attribute`.
-fn error_class_only() -> Vec<LibraryClass> {
-    error_classes()
-        .into_iter()
-        .filter(|lc| lc.name.0.as_str() == "Dry::Struct::Error")
-        .collect()
 }
 
 /// A `Types` module and what its bare names (`Types::String`) mean:
