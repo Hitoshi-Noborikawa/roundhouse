@@ -1664,13 +1664,19 @@ impl<'a> BodyTyper<'a> {
                     return Ty::Class { id: id.clone(), args: args.clone() };
                 }
                 // The built-in containers' own `[]` builds one from its
-                // arguments: `Array[String]` and `Hash[pairs]`.
+                // arguments: `Array[String]` and `Hash[pairs]`. Keys and
+                // values stay Untyped — a fresh `unknown()` Var unions
+                // with Nil on `Hash#[]` and folds `present?` to false
+                // (campfire Opengraph::Metadata#valid_image_content_type).
                 if method.as_str() == "[]" {
                     match id.0.as_str() {
                         "Hash" => {
-                            return Ty::Hash { key: Box::new(unknown()), value: Box::new(unknown()) };
+                            return Ty::Hash {
+                                key: Box::new(Ty::Untyped),
+                                value: Box::new(Ty::Untyped),
+                            };
                         }
-                        "Array" => return Ty::Array { elem: Box::new(unknown()) },
+                        "Array" => return Ty::Array { elem: Box::new(Ty::Untyped) },
                         _ => {}
                     }
                 }

@@ -192,8 +192,11 @@ module Rails
       end
     end
 
+    # Hash-key equality is Env-only. `==` stays String-like for
+    # `Rails.env == "test"`, but `eql?` must match `hash` (name only)
+    # so a String-keyed map does not treat Env as interchangeable.
     def eql?(other)
-      self == other
+      other.is_a?(Env) && @name == other.to_s
     end
 
     def hash

@@ -8,7 +8,8 @@
 use ruby_prism::Node;
 
 use crate::dialect::{MethodDef, Test, TestModule};
-use crate::expr::{Expr, ExprNode};
+use crate::expr::{Expr, ExprNode, LValue, Literal};
+use crate::ident::VarId;
 use crate::span::Span;
 use crate::{ClassId, Symbol};
 
@@ -251,6 +252,10 @@ fn ingest_test_class(
     // Method-level `ensure` (`implicit: true`) is the outer shape; the
     // nested `begin/ensure` around the blocks is explicit so `super`
     // still runs when a block raises.
+    //
+    // When `def teardown` already calls `super` (including conditionally),
+    // mark it at the call site and skip the ensure fallback so mocha
+    // verify runs exactly once on every path.
     if !teardowns.is_empty() {
         let blocks = Expr::new(
             Span::synthetic(),
@@ -258,9 +263,10 @@ fn ingest_test_class(
                 exprs: teardowns.into_iter().rev().collect(),
             },
         );
+        let syn = Span::synthetic();
         let super_call = || {
             Expr::new(
-                Span::synthetic(),
+                syn,
                 ExprNode::Super { args: Some(Vec::new()) },
             )
         };
@@ -268,30 +274,73 @@ fn ingest_test_class(
         let (name_span, body) = match own.map(|i| helpers.remove(i)) {
             Some(m) => {
                 // def teardown
-                //   own
-                // ensure
+                //   __teardown_super_ran = false
                 //   begin
-                //     blocks
+                //     own  # Super sites set the flag then call super
                 //   ensure
-                //     super()
+                //     begin
+                //       blocks
+                //     ensure
+                //       super() unless __teardown_super_ran
+                //     end
                 //   end
                 // end
+                let flag = Symbol::from("__teardown_super_ran");
+                let flag_lit = |value: bool| {
+                    Expr::new(syn, ExprNode::Lit { value: Literal::Bool { value } })
+                };
+                let flag_var = || {
+                    Expr::new(
+                        syn,
+                        ExprNode::Var {
+                            id: VarId(0),
+                            name: flag.clone(),
+                        },
+                    )
+                };
+                let assign_flag = |value: bool| {
+                    Expr::new(
+                        syn,
+                        ExprNode::Assign {
+                            target: LValue::Var {
+                                id: VarId(0),
+                                name: flag.clone(),
+                            },
+                            value: flag_lit(value),
+                        },
+                    )
+                };
+                let mut own_body = m.body;
+                mark_teardown_super_ran(&mut own_body, &flag);
+                let fallback_super = Expr::new(
+                    syn,
+                    ExprNode::If {
+                        cond: flag_var(),
+                        then_branch: Expr::new(syn, ExprNode::Lit { value: Literal::Nil }),
+                        else_branch: super_call(),
+                    },
+                );
                 let blocks_then_super = Expr::new(
-                    Span::synthetic(),
+                    syn,
                     ExprNode::BeginRescue {
                         body: blocks,
                         rescues: Vec::new(),
                         else_branch: None,
-                        ensure: Some(super_call()),
+                        ensure: Some(fallback_super),
                         implicit: false,
                     },
                 );
                 (
                     m.name_span,
                     Expr::new(
-                        Span::synthetic(),
+                        syn,
                         ExprNode::BeginRescue {
-                            body: m.body,
+                            body: Expr::new(
+                                syn,
+                                ExprNode::Seq {
+                                    exprs: vec![assign_flag(false), own_body],
+                                },
+                            ),
                             rescues: Vec::new(),
                             else_branch: None,
                             ensure: Some(blocks_then_super),
@@ -430,6 +479,45 @@ pub fn ingest_test_case_setup(source: &[u8], file: &str) -> IngestResult<Option<
         return Ok(Some(Expr::new(Span::synthetic(), ExprNode::Seq { exprs })));
     }
     Ok(None)
+}
+
+/// Rewrite every `super` in a teardown body to set `__teardown_super_ran`
+/// before the call, so the ensure fallback can skip a second inherited
+/// teardown. Works for bare `super`, `super(...)`, and conditional forms
+/// (`super if x`) — only executed Super sites flip the flag.
+fn mark_teardown_super_ran(expr: &mut Expr, flag: &Symbol) {
+    if matches!(&*expr.node, ExprNode::Super { .. }) {
+        let super_expr = std::mem::replace(
+            expr,
+            Expr::new(Span::synthetic(), ExprNode::Lit { value: Literal::Nil }),
+        );
+        *expr = Expr::new(
+            super_expr.span,
+            ExprNode::Seq {
+                exprs: vec![
+                    Expr::new(
+                        Span::synthetic(),
+                        ExprNode::Assign {
+                            target: LValue::Var {
+                                id: VarId(0),
+                                name: flag.clone(),
+                            },
+                            value: Expr::new(
+                                Span::synthetic(),
+                                ExprNode::Lit {
+                                    value: Literal::Bool { value: true },
+                                },
+                            ),
+                        },
+                    ),
+                    super_expr,
+                ],
+            },
+        );
+        return;
+    }
+    expr.node
+        .for_each_child_mut(&mut |child| mark_teardown_super_ran(child, flag));
 }
 
 /// `def load_fixtures(config) = (fixtures = super; …; fixtures)` on the
