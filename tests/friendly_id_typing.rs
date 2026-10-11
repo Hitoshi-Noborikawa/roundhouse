@@ -156,11 +156,25 @@ end
         controller,
     );
     assert!(!kinds(&claimed).0.iter().any(|m| m == "friendly"));
-    // A relation held in a local (Relation-typed, not the inline chain).
-    let held = controller.replace(
+    // A longer inline builder chain is the same Array-typed chain.
+    let chained = controller.replace(
         "Article.where(title: \"x\").friendly.find",
         "Article.order(:title).limit(3).friendly.find",
     );
-    let unclaimed = analyze_with("class Article < ApplicationRecord\nend\n", &held);
+    let unclaimed = analyze_with("class Article < ApplicationRecord\nend\n", &chained);
     assert!(kinds(&unclaimed).0.iter().any(|m| m == "friendly"));
+    // A scope call types as a Relation, so `friendly` resolves (or not)
+    // through class-side delegation: only a claimed model registers it.
+    let scoped = controller.replace(
+        "Article.where(title: \"x\").friendly.find",
+        "Article.titled.friendly.find",
+    );
+    let scope = "  scope :titled, -> { where(title: \"x\") }\n";
+    let unclaimed = analyze_with(&format!("class Article < ApplicationRecord\n{scope}end\n"), &scoped);
+    assert!(kinds(&unclaimed).0.iter().any(|m| m == "friendly"));
+    let claimed = analyze_with(
+        &format!("class Article < ApplicationRecord\n  extend FriendlyId\n  friendly_id :title, use: :slugged\n{scope}end\n"),
+        &scoped,
+    );
+    assert!(!kinds(&claimed).0.iter().any(|m| m == "friendly"));
 }
