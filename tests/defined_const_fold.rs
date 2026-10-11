@@ -192,3 +192,34 @@ fn load_time_references_to_tree_names_do_not_fold_true() {
     // A method body runs after load.
     assert_eq!(emit_expr(&early.methods[0].body), "\"constant\"");
 }
+
+#[test]
+fn only_unconditional_requires_load_a_framework() {
+    use roundhouse::lower::defined_const_fold::loaded_frameworks;
+    let has = |src: &str, root: &str| loaded_frameworks(src).is_some_and(|f| f.iter().any(|r| r == root));
+    let base = "require \"rails\"\nrequire \"active_record/railtie\"\n";
+    // Top level, and inside the top-level module/class bodies: loaded.
+    assert!(has(&format!("{base}require \"active_storage/engine\"\n"), "ActiveStorage"));
+    assert!(has(&format!("{base}module Shop\n  class Application\n    require \"active_storage/engine\"\n  end\nend\n"), "ActiveStorage"));
+    // The parenthesized call form is the same call.
+    assert!(has("require(\"rails/all\")\n", "ActiveStorage"));
+    assert!(has(&format!("{base}require(\"active_storage/engine\")\n"), "ActiveStorage"));
+    // Under a conditional, a def, a block or a rescue: not loaded.
+    for nested in [
+        "if ENV[\"X\"]\n  require \"active_storage/engine\"\nend\n",
+        "unless ENV[\"X\"]\n  require \"active_storage/engine\"\nend\n",
+        "begin\n  require \"active_storage/engine\"\nrescue LoadError\nend\n",
+        "def boot\n  require \"active_storage/engine\"\nend\n",
+        "[1].each { require \"active_storage/engine\" }\n",
+        "require \"active_storage/engine\" if ENV[\"X\"]\n",
+    ] {
+        let src = format!("{base}{nested}");
+        assert!(!has(&src, "ActiveStorage"), "{nested}");
+        assert!(has(&src, "ActiveRecord"), "{nested}");
+    }
+    // A conditional `rails/all` is not `rails/all`.
+    assert!(!has("if ENV[\"X\"]\n  require \"rails/all\"\nend\nrequire \"rails\"\n", "ActiveStorage"));
+    // Unclassifiable: syntax error, or a require that is not a literal.
+    assert!(loaded_frameworks("require \"rails/all\"\nclass {\n").is_none());
+    assert!(loaded_frameworks("require \"rails/all\"\nrequire some_path\n").is_none());
+}
