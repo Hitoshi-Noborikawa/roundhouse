@@ -1013,7 +1013,10 @@ module ActiveRecord
     # requires either an `assign_from_instance` lowering or an
     # `[]=`-based field copy that subclasses override (today's Item
     # subclass in base_test doesn't override `[]`/`[]=`). Deferred.
-    def reload
+    # Rails accepts `reload(options = nil)` (and `lock!` forwards a
+    # Hash with `:lock`). SQLite ignores locking options; keep the
+    # arity so model forwarders can `super(options)` without ArgumentError.
+    def reload(options = nil)
       # Delegates to the lowerer-emitted (or Base default) per-model
       # `_adapter_reload` instance primitive, which re-reads the row
       # by `@id` and writes column values back into self (preserving
@@ -1037,6 +1040,8 @@ module ActiveRecord
     # String locking clause (`lock!("FOR UPDATE NOWAIT")`) — but
     # doesn't need either under SQLite; both are accepted and ignored.
     def lock!(lock = nil)
+      # Rails passes `reload(lock: lock)`; this runtime ignores the
+      # clause under SQLite, so a bare reload keeps the same guarantee.
       reload
     end
 

@@ -237,7 +237,7 @@ module ActiveRecord
     def save!: () -> Base
     def destroy: () -> Base
     def destroy!: () -> Base
-    def reload: () -> Base
+    def reload: (?untyped options) -> Base
     # `lock!` reloads (see the note on the body); `with_lock` (connection.rbs) runs the
     # block in a transaction and answers its value, same gradual
     # `untyped` escape as `self.transaction` in connection.rbs. The

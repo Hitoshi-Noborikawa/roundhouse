@@ -24,7 +24,7 @@ use crate::ty::Ty;
 /// model type promised by analysis is also true with Spinel's RBS seeds.
 pub(super) fn preserve_record_receiver_returns(lcs: &mut [LibraryClass], app: &App) {
     let templates = crate::runtime_src::parse_methods(
-        "def reload\n  super()\n  self\nend\ndef lock!(lock = true)\n  super(lock)\n  self\nend\n",
+        "def reload(options = nil)\n  super(options)\n  self\nend\ndef lock!(lock = true)\n  super(lock)\n  self\nend\n",
     ).expect("receiver-return forwarders parse");
     let classes: HashMap<ClassId, ()> = app.models.iter().map(|m| &m.name)
         .chain(app.library_classes.iter().map(|lc| &lc.name))
@@ -46,7 +46,12 @@ pub(super) fn preserve_record_receiver_returns(lcs: &mut [LibraryClass], app: &A
             method.body.ty = Some(self_ty.clone());
             let params = method.params.iter().map(|p| crate::ty::Param {
                 name: p.name.clone(),
-                ty: Ty::Union { variants: vec![Ty::Bool, Ty::Str, Ty::Nil] },
+                // `lock!` takes Rails' lock clause; `reload`'s options are open.
+                ty: if method.name.as_str() == "reload" {
+                    Ty::Untyped
+                } else {
+                    Ty::Union { variants: vec![Ty::Bool, Ty::Str, Ty::Nil] }
+                },
                 kind: crate::ty::ParamKind::Optional,
             }).collect();
             method.signature = Some(Ty::Fn {

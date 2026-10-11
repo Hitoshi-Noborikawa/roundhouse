@@ -47,6 +47,24 @@ fn reload_and_lock_keep_the_receiver_type_and_run() {
 }
 
 #[test]
+fn reload_forwards_optional_options_to_the_runtime() {
+    example().run_ruby(r#"
+observed = []
+ActiveRecord::Base.prepend(Module.new do
+  define_method(:reload) do |options = nil|
+    observed << options
+    super(options)
+  end
+end)
+widget = Widget.create!(name: 'fresh')
+raise unless widget.reload.equal?(widget)
+raise unless widget.reload(nil).equal?(widget)
+raise unless widget.reload({ lock: true }).equal?(widget)
+raise "reload options not forwarded: #{observed.inspect}" unless observed == [nil, nil, { lock: true }]
+"#).assert_passes();
+}
+
+#[test]
 fn bare_lock_forwards_true_to_the_runtime() {
     example().run_ruby(r#"
 observed = []
@@ -72,7 +90,12 @@ fn reload_and_lock_sidecars_keep_the_receiver_type() {
     let (emitted, errors) = example().emit(roundhouse::project::BuildTarget::Spinel);
     assert!(errors.is_empty(), "{errors:?}");
     let widget = std::fs::read_to_string(emitted.join("app/models/widget.rbs")).unwrap();
-    assert!(widget.contains("def reload: () -> Widget"), "{widget}");
+    assert!(
+        widget.lines().any(|line| {
+            line.contains("def reload:") && line.contains("-> Widget")
+        }),
+        "{widget}",
+    );
     assert!(widget.lines().any(|line| line.contains("def lock!:") && line.ends_with("-> Widget")), "{widget}");
     let stamp = std::fs::read_to_string(emitted.join("app/models/widget_stamp.rbs")).unwrap();
     for method in ["refreshed", "locked"] {
