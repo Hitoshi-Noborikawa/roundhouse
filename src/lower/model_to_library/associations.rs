@@ -132,11 +132,16 @@ pub(super) fn push_association_methods(
                 extension,
                 ..
             } => {
+                if crate::lower::assoc_primary_key::refuse(model, models, assoc, span) {
+                    continue;
+                }
+                let owner_key = assoc.owner_key();
                 methods.push(synth_has_many_reader(
                     owner,
                     name,
                     target,
                     foreign_key,
+                    &owner_key,
                     as_interface.as_ref(),
                     scope.as_ref(),
                     through.is_some(),
@@ -377,11 +382,16 @@ pub(super) fn push_association_methods(
                 autosave,
                 ..
             } => {
+                if crate::lower::assoc_primary_key::refuse(model, models, assoc, span) {
+                    continue;
+                }
+                let owner_key = assoc.owner_key();
                 methods.push(synth_has_one_reader(
                     owner,
                     name,
                     target,
                     foreign_key,
+                    &owner_key,
                     as_interface.as_ref(),
                     scope.as_ref(),
                 ));
@@ -406,6 +416,7 @@ pub(super) fn push_association_methods(
                         owner,
                         name,
                         foreign_key,
+                        &owner_key,
                         as_interface.as_ref(),
                     ));
                     let call = Expr::new(
@@ -488,11 +499,38 @@ fn push_association_names(methods: &mut Vec<MethodDef>, model: &Model) {
     });
 }
 
+/// A keyed association (`primary_key:` other than `id`) must not match
+/// when the owner's key is NULL: Rails answers nil / empty for it, but
+/// `where(fk: nil)` is `fk IS NULL`, which would return every orphan
+/// child. The extra predicate makes a nil key match nothing and is
+/// redundant otherwise.
+fn guard_nil_owner_key(query: Expr, foreign_key: &Symbol, owner_key: &Symbol) -> Expr {
+    if owner_key.as_str() == "id" {
+        return query;
+    }
+    Expr::new(
+        Span::synthetic(),
+        ExprNode::Send {
+            recv: Some(query),
+            method: Symbol::from("where"),
+            args: vec![Expr::new(
+                Span::synthetic(),
+                ExprNode::Lit {
+                    value: Literal::Str { value: format!("{} IS NOT NULL", foreign_key.as_str()) },
+                },
+            )],
+            block: None,
+            parenthesized: true,
+        },
+    )
+}
+
 fn synth_has_many_reader(
     owner: &ClassId,
     name: &Symbol,
     target: &ClassId,
     foreign_key: &Symbol,
+    owner_key: &Symbol,
     as_interface: Option<&Symbol>,
     scope: Option<&Expr>,
     through: bool,
@@ -506,7 +544,7 @@ fn synth_has_many_reader(
         lit_sym(foreign_key.clone()),
         Expr::new(
             Span::synthetic(),
-            ExprNode::Ivar { name: Symbol::from("id") },
+            ExprNode::Ivar { name: owner_key.clone() },
         ),
     )];
     if let Some(intf) = as_interface {
@@ -548,6 +586,7 @@ fn synth_has_many_reader(
     // `_preload_comments`) does not apply scopes yet; readers cover
     // the per-record access pattern (show pages), which is where
     // ordering is user-visible today.
+    let lazy_query = guard_nil_owner_key(lazy_query, foreign_key, owner_key);
     let lazy_query = match scope {
         Some(scope_expr) => graft_scope(scope_expr, lazy_query),
         None => lazy_query,
@@ -926,12 +965,13 @@ fn synth_has_one_reader(
     name: &Symbol,
     target: &ClassId,
     foreign_key: &Symbol,
+    owner_key: &Symbol,
     as_interface: Option<&Symbol>,
     scope: Option<&Expr>,
 ) -> MethodDef {
     let mut entries = vec![(
         lit_sym(foreign_key.clone()),
-        Expr::new(Span::synthetic(), ExprNode::Ivar { name: Symbol::from("id") }),
+        Expr::new(Span::synthetic(), ExprNode::Ivar { name: owner_key.clone() }),
     )];
     // See `synth_has_many_reader` — `as:` adds the type-half scope.
     if let Some(intf) = as_interface {
@@ -959,6 +999,7 @@ fn synth_has_one_reader(
             parenthesized: true,
         },
     );
+    let query = guard_nil_owner_key(query, foreign_key, owner_key);
     let query = match scope {
         Some(scope_expr) => graft_scope(scope_expr, query),
         None => query,
@@ -1093,6 +1134,7 @@ fn synth_has_one_autosave(
     owner: &ClassId,
     name: &Symbol,
     foreign_key: &Symbol,
+    owner_key: &Symbol,
     as_interface: Option<&Symbol>,
 ) -> MethodDef {
     let cache = || Expr::new(Span::synthetic(), ExprNode::Ivar { name: cache_ivar(name) });
@@ -1132,7 +1174,7 @@ fn synth_has_one_autosave(
             method: Symbol::from(format!("{}=", foreign_key.as_str())),
             args: vec![Expr::new(
                 Span::synthetic(),
-                ExprNode::Ivar { name: Symbol::from("id") },
+                ExprNode::Ivar { name: owner_key.clone() },
             )],
             block: None,
             parenthesized: false,

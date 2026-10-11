@@ -2994,6 +2994,7 @@ fn parse_association(
             dependent: dependent.unwrap_or_default(),
             as_interface: as_interface.as_deref().map(Symbol::from),
             scope,
+            primary_key: primary_key.as_deref().map(Symbol::from),
         }),
         "has_one" => Some(Association::HasOne {
             name: name.clone(),
@@ -3008,9 +3009,11 @@ fn parse_association(
                 }),
             foreign_key_explicit,
             dependent: dependent.unwrap_or_default(),
+            through: through.map(|s| Symbol::from(s.as_str())),
             as_interface: as_interface.as_deref().map(Symbol::from),
             scope,
             autosave: autosave.unwrap_or(false),
+            primary_key: primary_key.as_deref().map(Symbol::from),
         }),
         "belongs_to" => Some(Association::BelongsTo {
             name: name.clone(),
