@@ -56,6 +56,8 @@ mod controller_super_ivars;
 mod assoc_pluck_typed;
 #[path = "emit_and_run/action_controller_head.rs"]
 mod action_controller_head;
+#[path = "emit_and_run/inline_filter_guard.rs"]
+mod inline_filter_guard;
 #[path = "emit_and_run/sti_global_id.rs"]
 mod sti_global_id;
 #[path = "support/campfire_caches.rs"]
