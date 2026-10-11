@@ -2426,7 +2426,13 @@ Three gaps remain, all on spinel's side:
   at compile time from the default locale (`src/i18n`): `t` / `I18n.t`
   with a literal key, attribute names, validation messages and form
   labels. A key computed at run time, or one the locale lacks, is an
-  error rather than a guess.
+  error rather than a guess. A `Rails::Engine` gem's `config/locales`
+  load before the app's, read where Bundler installed the gem
+  (`BUNDLE_PATH`, `GEM_HOME`, `GEM_PATH`), so an uninstalled gem's keys
+  stay missing. Engines load in lockfile order, not Rails' railtie
+  order, which differs only when two gems define one key. A gem that is
+  not an engine adds its files from its own code; none is read unless
+  `src/i18n/gems.rs::NON_ENGINE_LOCALES` names its paths.
 - **`fragment_name_with_digest(name, digest_path)` adds no template
   digest**: templates carry none here (see
   `runtime/spinel/action_controller_fragment_caching.rb`), so an omitted

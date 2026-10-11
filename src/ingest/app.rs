@@ -1690,7 +1690,11 @@ end
             }
         }
     }
-    let (catalog, problems) = crate::i18n::Catalog::load(&default_locale(vfs, dir), &mut files);
+    let gem_files = match &app.gem_lock {
+        Some(lock) => crate::i18n::gems::gem_locale_files(vfs, dir, lock, &path_gem_dirs(vfs, dir)),
+        None => Vec::new(),
+    };
+    let (catalog, problems) = crate::i18n::Catalog::load_with_gems(&default_locale(vfs, dir), &gem_files, &mut files);
     for (file, problem) in problems {
         survey::record(&IngestError::Unsupported { file, message: format!("locale file not loaded: {problem}") });
     }

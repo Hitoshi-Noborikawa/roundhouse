@@ -11,6 +11,8 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 use serde_yaml_ng::Value;
 
+pub mod gems;
+
 /// Rails 8.1.4's bundled English, in the order its frameworks load it.
 const RAILS_EN: &[(&str, &str)] = &[
     ("activesupport", include_str!("rails/activesupport.en.yml")),
@@ -55,11 +57,17 @@ impl Catalog {
     /// Rails' English, then `files` (path, source), for `locale`. A file
     /// that does not parse is skipped and reported.
     pub fn load(locale: &str, files: &mut Vec<(String, String)>) -> (Catalog, Vec<(String, String)>) {
+        Catalog::load_with_gems(locale, &[], files)
+    }
+
+    /// As [`Catalog::load`], with the gems' files (already in load order)
+    /// between Rails' English and the app's.
+    pub fn load_with_gems(locale: &str, gems: &[(String, String)], files: &mut Vec<(String, String)>) -> (Catalog, Vec<(String, String)>) {
         files.sort_by(|a, b| a.0.cmp(&b.0));
         let mut catalog = Catalog { locale: locale.to_string(), entries: BTreeMap::new() };
         let mut problems = Vec::new();
         let rails = RAILS_EN.iter().map(|(name, src)| (name.to_string(), src.to_string()));
-        for (path, source) in rails.collect::<Vec<_>>().iter().chain(files.iter()) {
+        for (path, source) in rails.collect::<Vec<_>>().iter().chain(gems.iter()).chain(files.iter()) {
             if let Err(e) = catalog.merge_source(source) {
                 problems.push((path.clone(), e));
             }

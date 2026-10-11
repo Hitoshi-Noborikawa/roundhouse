@@ -927,6 +927,31 @@ fn template_t_answers_the_locale() {
     translate_app().run_test("test/controllers/translations_controller_test.rb").assert_passes();
 }
 
+/// A `Rails::Engine` gem's `config/locales` load between Rails' English
+/// and the app's, as Rails assembles `I18n.load_path`: the gem's key
+/// resolves, and the app overrides one the gem also defines.
+fn engine_locale_app() -> emit_and_run::Overlay {
+    let gem = "vendor/bundle/ruby/3.4.0/gems/shelf-1.2.0";
+    emit_and_run::real_blog()
+        .write(".bundle/config", "---\nBUNDLE_PATH: \"vendor/bundle\"\n")
+        .edit("Gemfile.lock", "  specs:\n", "  specs:\n    shelf (1.2.0)\n")
+        .write(&format!("{gem}/lib/shelf/engine.rb"), "module Shelf\n  class Engine < ::Rails::Engine\n  end\nend\n")
+        .write(&format!("{gem}/config/locales/shelf.en.yml"), "en:\n  shelf:\n    edit: \"Edit shelf\"\n    title: \"Gem title\"\n")
+        .write("config/locales/en.yml", "en:\n  hello: \"Hello world\"\n  shelf:\n    title: \"App title\"\n")
+        .edit(
+            "app/models/article.rb",
+            "  validates :title, presence: true\n",
+            "  validates :title, presence: true\n\n  def self.shelf_texts\n    [I18n.t(\"shelf.edit\"), I18n.t(\"shelf.title\")]\n  end\n",
+        )
+}
+
+#[test]
+fn an_engine_gem_s_locales_answer_beneath_the_app_s() {
+    engine_locale_app()
+        .run_ruby("raise Article.shelf_texts.inspect unless Article.shelf_texts == [\"Edit shelf\", \"App title\"]\nputs \"engine locales passed\"\n")
+        .assert_passes();
+}
+
 /// A key the locale lacks, one computed at run time (including one
 /// branch of a conditional key), or a call with a block stays an error.
 #[test]
