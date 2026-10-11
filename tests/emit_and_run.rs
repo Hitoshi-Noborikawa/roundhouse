@@ -11683,7 +11683,7 @@ fn belongs_to_primary_key_option_names_the_key_the_foreign_key_holds() {
              puts \"belongs_to primary_key passed\"\n",
         )
         .assert_passes();
-
+}
 
 /// A runtime façade's scalar constants (`Markly::SMART = 0` in
 /// runtime/ruby/gem_facades.rb) used to carry no type: the constant table
