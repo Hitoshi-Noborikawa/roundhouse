@@ -780,6 +780,9 @@ pub fn apply_post_analyze_lowerings(
     ran!("bool_fold");
     association_new::apply_association_new_lowering(app);
     ran!("association_new");
+    // Before the first `forwarding::apply` erases `**h` into a
+    // positional `h`, after which `f(x, **h)` and `f(x, h)` are one tree.
+    diags.extend(helper_kwargs::refuse_flattened_keyword_splats(app));
     diags.extend(forwarding::apply(app));
     ran!("forwarding_keywords");
     diags.extend(params_residue::apply_params_residue_ledger(app));

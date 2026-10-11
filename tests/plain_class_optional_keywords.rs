@@ -12,9 +12,9 @@
 //! the first flattened slot with no diagnostic.
 //!
 //! Native Ruby on the same source is the oracle. A call whose keywords
-//! cannot be moved into slot order (a key that is not a literal symbol,
-//! a skipped slot whose default reads the callee's context, a `send`)
-//! is refused with a named gap instead.
+//! cannot be moved into slot order (a `**` splat, a key that is not a
+//! literal symbol, a skipped slot whose default reads the callee's
+//! context, a `send`) is refused with a named gap instead.
 
 #[path = "support/emit_and_run.rs"]
 mod emit_and_run;
@@ -187,6 +187,12 @@ fn assert_refused(report: &str) {
 }
 
 #[test]
+fn a_keyword_splat_into_flattened_keywords_is_refused() {
+    assert_refused("b.field(:a, **opts)");
+    assert_refused("b.field(:a, null: false, **opts)");
+}
+
+#[test]
 fn a_dynamic_keyword_key_is_refused() {
     assert_refused("b.field(:a, key => false)");
     assert_refused("b.field(:a, \"null\" => false)");
@@ -206,6 +212,31 @@ fn a_skipped_slot_whose_default_reads_the_callee_is_refused() {
     assert_refused("b.mark(:a, note: \"late\")");
     let errors = refusal_errors("[b.field(:a, null: false), b.mark(:a, at: 1), b.mark(:b), b.field(:c, opts)]");
     assert!(errors.is_empty(), "{}", errors.join("\n"));
+}
+
+/// The same refusals through a receiver typed as the class, from
+/// another class.
+#[test]
+fn a_typed_receiver_keyword_splat_is_refused() {
+    const CALLER: &str = r##"module Kwlab
+  class Caller
+    def self.run(opts)
+      Kwlab::Builder.new.field(:a, **opts)
+    end
+  end
+end
+"##;
+    let (_emitted, errors) = emit_and_run::real_blog()
+        .write(
+            "app/lib/kwlab/builder.rb",
+            "module Kwlab\n  class Builder\n    def field(name, type = nil, null: true, description: nil)\n      [name, type, null, description]\n    end\n  end\nend\n",
+        )
+        .write("app/lib/kwlab/caller.rb", CALLER)
+        .emit(BuildTarget::Ruby);
+    assert!(
+        errors.iter().any(|e| e.contains("flattened keyword arguments not supported")),
+        "not refused; errors: {errors:#?}"
+    );
 }
 
 /// `self.field(…)` in the base reaches a subclass's `field` when the

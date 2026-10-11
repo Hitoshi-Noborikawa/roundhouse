@@ -222,6 +222,71 @@ fn rewrite_class_calls_node(
     }
 }
 
+/// Refuse a `**h` passed to a flattened optional-keyword group.
+///
+/// Runs before `lower::forwarding` first erases the splat into a plain
+/// positional `h` (the `forwarding_keywords` step), after which
+/// `f(x, **h)` and `f(x, h)` are one tree. The keys the bundle carries,
+/// and so the slots it fills, are known only at run time, and the erased
+/// call binds the whole Hash to the first open slot. A callee with a
+/// flattened `**rest` is left to `kwrest_forward`, which owns that shape.
+pub(crate) fn refuse_flattened_keyword_splats(app: &mut App) -> Vec<crate::diagnostic::Diagnostic> {
+    let mut diagnostics = Vec::new();
+    let class_params = library_class_call_params(app);
+    let index = owned::OwnerIndex::new(app);
+    let instance_slots = index.instance_slots();
+    owned::refuse_library_class_splats(app, &index, &mut diagnostics);
+    super::for_each_hook_body(app, &mut |e| {
+        refuse_typed_splats(e, &class_params, &instance_slots, &mut diagnostics);
+    });
+    let mut seen = std::collections::HashSet::new();
+    diagnostics.retain(|d| !is_flattened_refusal(d) || seen.insert(d.span));
+    diagnostics
+}
+
+fn refuse_typed_splats(
+    e: &mut Expr,
+    class_params: &HashMap<(String, Symbol), Vec<Slot>>,
+    instance_slots: &HashMap<(String, Symbol), Vec<Slot>>,
+    diagnostics: &mut Vec<crate::diagnostic::Diagnostic>,
+) {
+    e.node.for_each_child_mut(&mut |c| refuse_typed_splats(c, class_params, instance_slots, diagnostics));
+    let ExprNode::Send { recv: Some(recv), method, args, .. } = &*e.node else {
+        return;
+    };
+    let slots = match (&*recv.node, &recv.ty) {
+        (ExprNode::Const { path }, _) => {
+            let class = path.iter().map(|s| s.as_str()).collect::<Vec<_>>().join("::");
+            class_params.get(&(class, method.clone()))
+        }
+        (_, Some(crate::ty::Ty::Class { id, .. })) => {
+            instance_slots.get(&(id.0.as_str().to_string(), method.clone()))
+        }
+        _ => None,
+    };
+    if let Some(slots) = slots
+        && splat_into_flattened(args, slots)
+    {
+        refuse(e.span, SPLAT_REFUSAL, diagnostics);
+    }
+}
+
+/// A `**` argument aimed at flattened optional keywords with no
+/// flattened `**rest` beside them.
+fn splat_into_flattened(args: &[Expr], slots: &[Slot]) -> bool {
+    args.iter().any(|arg| {
+        matches!(
+            &*arg.node,
+            ExprNode::KeywordSplat { .. }
+                | ExprNode::ForwardKeywords
+                | ExprNode::ForwardKeywordsWithPairs { .. }
+        )
+    }) && slots.iter().any(|s| s.from_keyword)
+        && !slots.iter().any(|s| s.from_kwrest)
+}
+
+const SPLAT_REFUSAL: &str = "a `**` splat into optional keywords that are positional slots: which slots its keys fill is only known at run time";
+
 const SEND_METHODS: &[&str] = &["send", "public_send", "__send__"];
 
 /// The gap a call to a flattened keyword group is refused with, when its
@@ -331,6 +396,7 @@ struct Slot {
     name: Symbol,
     default: Option<Expr>,
     from_keyword: bool,
+    from_kwrest: bool,
 }
 
 fn slot_of(p: &crate::dialect::Param) -> Slot {
@@ -338,6 +404,7 @@ fn slot_of(p: &crate::dialect::Param) -> Slot {
         name: p.name.clone(),
         default: p.default.clone(),
         from_keyword: p.from_keyword,
+        from_kwrest: p.from_kwrest,
     }
 }
 

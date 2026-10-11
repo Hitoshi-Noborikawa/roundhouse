@@ -181,6 +181,18 @@ fn flattened_slots(m: &crate::dialect::MethodDef) -> Option<Vec<Slot>> {
     Some(m.params.iter().map(slot_of).collect())
 }
 
+impl OwnerIndex {
+    /// Instance-side flattened slots by `(class, method)`, as the typed
+    /// receiver lookup keys them.
+    pub(super) fn instance_slots(&self) -> HashMap<(String, Symbol), Vec<Slot>> {
+        self.defined
+            .iter()
+            .filter(|((_, side, _), _)| *side == Side::Instance)
+            .filter_map(|((c, _, m), slots)| Some(((c.clone(), m.clone()), slots.clone()?)))
+            .collect()
+    }
+}
+
 /// The receiver side an owner-relative call dispatches on, or `None`
 /// for a call this module does not resolve.
 fn owner_side(recv: &Option<Expr>, side: Side) -> Option<Side> {
@@ -189,6 +201,37 @@ fn owner_side(recv: &Option<Expr>, side: Side) -> Option<Side> {
         Some(r) if matches!(&*r.node, ExprNode::SelfRef) => Some(side),
         Some(r) if matches!(r.ty, Some(crate::ty::Ty::SelfInstance)) => Some(Side::Instance),
         Some(_) => None,
+    }
+}
+
+/// The `**` half of [`super::refuse_flattened_keyword_splats`] for
+/// owner-relative calls.
+pub(super) fn refuse_library_class_splats(
+    app: &mut App,
+    index: &OwnerIndex,
+    diagnostics: &mut Vec<crate::diagnostic::Diagnostic>,
+) {
+    fn walk(
+        e: &Expr,
+        owner: &str,
+        side: Side,
+        index: &OwnerIndex,
+        diagnostics: &mut Vec<crate::diagnostic::Diagnostic>,
+    ) {
+        e.node.for_each_child(&mut |c| walk(c, owner, side, index, diagnostics));
+        let ExprNode::Send { recv, method, args, .. } = &*e.node else { return };
+        let Some(side) = owner_side(recv, side) else { return };
+        if let Some(slots) = index.lookup(owner, side, method)
+            && super::splat_into_flattened(args, slots)
+        {
+            super::refuse(e.span, super::SPLAT_REFUSAL, diagnostics);
+        }
+    }
+    for lc in &app.library_classes {
+        let owner = lc.name.0.as_str();
+        for m in &lc.methods {
+            walk(&m.body, owner, Side::from(m.receiver), index, diagnostics);
+        }
     }
 }
 
