@@ -284,40 +284,47 @@ pub(super) fn lower_dry_structs(app: &mut App, sources: &[crate::span::SourceFil
         lc.parent = parent_of[&name].clone().map(|p| crate::ident::ClassId(Symbol::from(p.as_str())));
         any = true;
     }
-    // The stand-in makes `Dry::Struct` a known class. With a struct left
-    // unlowered that would end its ancestry at a class with no methods,
-    // and its attribute calls would read as missing; the gem keeps it.
-    if any && refused_roots.is_empty() {
-        app.library_classes.extend(error_classes());
-        // Nothing left needs dry-types, and the `Types` modules are not
-        // emitted: a constant still building a type would fail the load.
-        // The `Types` modules' own constants that build no type, an alias
-        // of one (`ALIAS = Types::LABEL`) included: round by round.
-        let mut plain: HashSet<String> = HashSet::new();
-        loop {
-            let found: Vec<String> = app
-                .library_classes
-                .iter()
-                .filter(|lc| types_modules.iter().any(|(m, _)| m == lc.name.0.as_str()))
-                .flat_map(|lc| {
-                    let holder = lc.name.0.as_str();
-                    lc.constants
-                        .iter()
-                        .map(move |(n, v)| (format!("{holder}::{}", n.as_str()), v, holder))
-                })
-                .filter(|(full, v, holder)| {
-                    !plain.contains(full) && !holds_dry_type(v, holder, &types_modules, &names, &plain)
-                })
-                .map(|(full, _, _)| full)
-                .collect();
-            if found.is_empty() {
-                break;
+    // Lowered constructors raise / rescue `Dry::Struct::Error`. Emit that
+    // stand-in whenever anything lowered — including when some hierarchies
+    // stay on the gem. The empty `Dry::Struct` shell must not land in that
+    // partial-refusal case: refused subclasses would resolve to a known
+    // class with no `attribute`, and the gap would become missing-method
+    // noise. Types cleanup is only safe once nothing remains on dry-types.
+    if any {
+        if refused_roots.is_empty() {
+            app.library_classes.extend(error_classes());
+            // Nothing left needs dry-types, and the `Types` modules are not
+            // emitted: a constant still building a type would fail the load.
+            // The `Types` modules' own constants that build no type, an alias
+            // of one (`ALIAS = Types::LABEL`) included: round by round.
+            let mut plain: HashSet<String> = HashSet::new();
+            loop {
+                let found: Vec<String> = app
+                    .library_classes
+                    .iter()
+                    .filter(|lc| types_modules.iter().any(|(m, _)| m == lc.name.0.as_str()))
+                    .flat_map(|lc| {
+                        let holder = lc.name.0.as_str();
+                        lc.constants
+                            .iter()
+                            .map(move |(n, v)| (format!("{holder}::{}", n.as_str()), v, holder))
+                    })
+                    .filter(|(full, v, holder)| {
+                        !plain.contains(full) && !holds_dry_type(v, holder, &types_modules, &names, &plain)
+                    })
+                    .map(|(full, _, _)| full)
+                    .collect();
+                if found.is_empty() {
+                    break;
+                }
+                plain.extend(found);
             }
-            plain.extend(found);
-        }
-        for lc in &mut app.library_classes {
-            let holder = lc.name.0.as_str().to_string();
-            lc.constants.retain(|(_, value)| !holds_dry_type(value, &holder, &types_modules, &names, &plain));
+            for lc in &mut app.library_classes {
+                let holder = lc.name.0.as_str().to_string();
+                lc.constants.retain(|(_, value)| !holds_dry_type(value, &holder, &types_modules, &names, &plain));
+            }
+        } else {
+            app.library_classes.extend(error_class_only());
         }
     }
 }
@@ -559,6 +566,16 @@ fn error_classes() -> Vec<LibraryClass> {
         .expect("the Dry::Struct::Error stand-in parses")
 }
 
+/// Just `Dry::Struct::Error` — for the partial-refusal case where the
+/// empty `Dry::Struct` shell must stay unknown so unlowered subclasses
+/// keep gem ancestry for `attribute`.
+fn error_class_only() -> Vec<LibraryClass> {
+    error_classes()
+        .into_iter()
+        .filter(|lc| lc.name.0.as_str() == "Dry::Struct::Error")
+        .collect()
+}
+
 /// A `Types` module and what its bare names (`Types::String`) mean:
 /// `Dry.Types()` makes them strict, `Dry.Types(default: :nominal)`
 /// nominal. Any other arguments leave them unread.
@@ -705,7 +722,18 @@ fn read_struct(lc: &LibraryClass, scope: &Scope<'_>) -> Result<StructClass, Stri
     let mut attributes = Vec::new();
     let mut transform_keys = None;
     for call in &lc.unknown_calls {
-        let ExprNode::Send { recv: None, method, args, block, .. } = &*call.node else { continue };
+        // Anything that is not a modeled dry-struct declaration refuses:
+        // `prepend` / `extend` (including from `class << self`) wrap
+        // `attribute` and would silently drop validation policy if ignored.
+        let ExprNode::Send { recv, method, args, block, .. } = &*call.node else {
+            return Err("a non-declaration expression in the class body".into());
+        };
+        if matches!(method.as_str(), "prepend" | "extend") {
+            return Err(format!("`{}` in the class body", method.as_str()));
+        }
+        if recv.is_some() {
+            return Err(format!("`{}` with a receiver in the class body", method.as_str()));
+        }
         match method.as_str() {
             "transform_keys" => {
                 if !args.is_empty() || block.is_none() {
@@ -739,7 +767,9 @@ fn read_struct(lc: &LibraryClass, scope: &Scope<'_>) -> Result<StructClass, Stri
             other if DRY_STRUCT_DSL.contains(&other) => {
                 return Err(format!("`{other}` in the class body"));
             }
-            _ => {}
+            other => {
+                return Err(format!("`{other}` in the class body"));
+            }
         }
     }
     Ok(StructClass { attributes, transform_keys })

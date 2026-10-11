@@ -1881,7 +1881,14 @@ fn dry_struct_hierarchy_is_lowered_whole_or_not_at_all() {
     assert_eq!(class("Shop::Base").parent.as_ref().map(|p| p.0.as_str()), Some("Dry::Struct"));
     assert!(class("Shop::Good").methods.iter().all(|m| m.name.as_str() != "id"), "sibling lowered");
     assert!(class("Shop::Good").unknown_calls.iter().any(|c| roundhouse::emit::ruby::emit_expr(c).starts_with("attribute")));
+    // Empty `Dry::Struct` shell stays unknown while anything remains on
+    // the gem; `Error` still lands so lowered constructors can raise it.
     assert!(app.library_classes.iter().all(|lc| lc.name.0.as_str() != "Dry::Struct"), "stand-in added");
+    assert!(
+        app.library_classes.iter().any(|lc| lc.name.0.as_str() == "Dry::Struct::Error"),
+        "Error stand-in missing while Kept lowered"
+    );
+    assert!(class("Shop::Kept").methods.iter().any(|m| m.name.as_str() == "id"), "Kept not lowered");
     // The nested struct goes with its refused owner, which names it as a
     // type on the gem.
     assert_eq!(class("Shop::Bad::Inner").parent.as_ref().map(|p| p.0.as_str()), Some("Dry::Struct"));
@@ -1899,6 +1906,67 @@ fn dry_struct_hierarchy_is_lowered_whole_or_not_at_all() {
     // `Types::String` in a subclass may be the parent's nominal `Types`,
     // which Ruby finds before the strict top-level one: refused.
     assert!(class("LegacyChild").methods.iter().all(|m| m.name.as_str() != "id"), "inherited Types guessed");
+}
+
+/// `class << self; prepend …` wraps `attribute`; lowering would drop the
+/// override. Refuse the class instead.
+#[test]
+fn dry_struct_singleton_prepend_refuses_lowering() {
+    let tree = [
+        ("lib/shop/types.rb", "module Shop\n  module Types\n    include Dry.Types()\n  end\nend\n"),
+        (
+            "lib/shop/strict.rb",
+            "module Shop\n  module StrictAttribute\n    def attribute(name, type = nil, **opts, &block)\n      super\n    end\n  end\n\n  class Strict < Dry::Struct\n    class << self\n      prepend StrictAttribute\n    end\n    attribute :id, ::Shop::Types::Coercible::String\n  end\nend\n",
+        ),
+        ("config/routes.rb", "Rails.application.routes.draw do\nend\n"),
+    ]
+    .into_iter()
+    .map(|(p, s)| (std::path::PathBuf::from(p), s.as_bytes().to_vec()))
+    .collect();
+    roundhouse::ingest::survey::activate();
+    let app = roundhouse::ingest::ingest_app_from_tree(tree).expect("ingest");
+    let strict = app.library_classes.iter().find(|lc| lc.name.0.as_str() == "Shop::Strict").expect("Shop::Strict");
+    assert_eq!(strict.parent.as_ref().map(|p| p.0.as_str()), Some("Dry::Struct"));
+    assert!(strict.origin.is_none(), "prepend override was silently lowered");
+    assert!(strict.methods.iter().all(|m| m.name.as_str() != "id"), "reader synthesized despite prepend");
+}
+
+/// Mixed refusal still emits `Dry::Struct::Error` (without the empty
+/// `Dry::Struct` shell) so a lowered sibling can raise it. Types stay
+/// while the gem does, so this pin is ingest-shaped like the hierarchy
+/// test — the all-lowered ruby contract already exercises the raise.
+#[test]
+fn dry_struct_error_standin_with_partial_refusal() {
+    let tree = [
+        ("lib/shop/types.rb", "module Shop\n  module Types\n    include Dry.Types()\n  end\nend\n"),
+        (
+            "lib/shop/bulk.rb",
+            "module Shop\n  class Bulk < Dry::Struct\n    attributes(id: ::Shop::Types::Coercible::String)\n  end\nend\n",
+        ),
+        (
+            "lib/shop/kept.rb",
+            "module Shop\n  class Kept < Dry::Struct\n    attribute :id, ::Shop::Types::Coercible::String\n  end\nend\n",
+        ),
+        ("config/routes.rb", "Rails.application.routes.draw do\nend\n"),
+    ]
+    .into_iter()
+    .map(|(p, s)| (std::path::PathBuf::from(p), s.as_bytes().to_vec()))
+    .collect();
+    roundhouse::ingest::survey::activate();
+    let app = roundhouse::ingest::ingest_app_from_tree(tree).expect("ingest");
+    assert!(
+        app.library_classes.iter().any(|lc| lc.name.0.as_str() == "Dry::Struct::Error"),
+        "Error stand-in missing under partial refusal"
+    );
+    assert!(
+        app.library_classes.iter().all(|lc| lc.name.0.as_str() != "Dry::Struct"),
+        "Dry::Struct shell must stay unknown while Bulk remains on the gem"
+    );
+    let kept = app.library_classes.iter().find(|lc| lc.name.0.as_str() == "Shop::Kept").expect("Kept");
+    assert_eq!(kept.origin, Some(roundhouse::dialect::LibraryClassOrigin::DryStruct));
+    assert!(kept.methods.iter().any(|m| m.name.as_str() == "initialize"));
+    let bulk = app.library_classes.iter().find(|lc| lc.name.0.as_str() == "Shop::Bulk").expect("Bulk");
+    assert_eq!(bulk.parent.as_ref().map(|p| p.0.as_str()), Some("Dry::Struct"));
 }
 
 /// A Concern macro that writes a `class_attribute` runs when the
