@@ -133,14 +133,17 @@ fn article_lowers_with_schema_methods() {
     );
 
     // The non-attr scaffold: table_name, schema_columns,
-    // schema_time_columns, schema_date_columns, instantiate, initialize,
-    // attributes, [], []=, update.
+    // schema_time_columns, schema_date_columns, schema_boolean_columns,
+    // schema_decimal_columns,
+    // instantiate, initialize, attributes, [], []=, update.
     for expected in [
         "table_name",
         "_table_sql",
         "schema_columns",
         "schema_time_columns",
         "schema_date_columns",
+        "schema_boolean_columns",
+        "schema_decimal_columns",
         "instantiate",
         "initialize",
         "attributes",
@@ -163,6 +166,8 @@ fn article_lowers_with_schema_methods() {
         "schema_columns",
         "schema_time_columns",
         "schema_date_columns",
+        "schema_boolean_columns",
+        "schema_decimal_columns",
         "instantiate",
         "from_row",
         "from_stmt",
@@ -176,6 +181,8 @@ fn article_lowers_with_schema_methods() {
         "delete_all",
         "_columns_sql",
         "_hydrate_all",
+        // #818: class-side name table for `reflect_on_association`.
+        "_association_names",
     ];
     for m in &lc.methods {
         let n = m.name.as_str();
@@ -1246,6 +1253,12 @@ fn collect_untyped_lowered(
         | ExprNode::ForwardKeywords
         | ExprNode::Defined { .. }
         | ExprNode::SelfRef => {}
+        ExprNode::ForwardKeywordsWithPairs { entries } => {
+            for (key, value) in entries {
+                collect_untyped_lowered(key, path, out);
+                collect_untyped_lowered(value, path, out);
+            }
+        }
         ExprNode::If { cond, then_branch, else_branch } => {
             collect_untyped_lowered(cond, &format!("{path}/if.cond"), out);
             collect_untyped_lowered(then_branch, &format!("{path}/if.then"), out);
@@ -1578,11 +1591,13 @@ fn unclaimed_model_dsl_reports_spanned_warning() {
     use roundhouse::ingest::ingest_model;
     use roundhouse::schema::Schema;
 
-    // `has_many_attached` is the unclaimed one; `has_one_attached` is
-    // claimed by lower::attached and must not report beside it.
+    // `unclaimed_macro` stands in for any Unknown DSL; `has_one_attached`
+    // and `has_many_attached` are both claimed by lower::attached and
+    // must not report beside it.
     let source = br#"class Clip < ApplicationRecord
   has_one_attached :audio
   has_many_attached :stems
+  unclaimed_macro :flag
 
   validates :name, presence: true
 end
@@ -1598,13 +1613,13 @@ end
     let unsupported: Vec<_> = diags
         .iter()
         .filter(|d| matches!(&d.kind, DiagnosticKind::Unsupported { construct, .. }
-            if construct.as_str() == "has_many_attached"))
+            if construct.as_str() == "unclaimed_macro"))
         .collect();
     assert_eq!(unsupported.len(), 1, "exactly one report: {diags:?}");
     assert!(
         !diags.iter().any(|d| matches!(&d.kind, DiagnosticKind::Unsupported { construct, .. }
-            if construct.as_str() == "has_one_attached")),
-        "has_one_attached is claimed by lower::attached and must not report: {diags:?}"
+            if construct.as_str() == "has_one_attached" || construct.as_str() == "has_many_attached")),
+        "has_*_attached are claimed by lower::attached and must not report: {diags:?}"
     );
     let d = unsupported[0];
     assert_eq!(d.severity, Severity::Warning, "tolerable per-app: warning, not error");

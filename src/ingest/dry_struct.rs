@@ -193,8 +193,8 @@ pub(super) fn lower_dry_structs(app: &mut App, sources: &[crate::span::SourceFil
         }
         let Some((mut methods, generated)) = built.remove(&name) else { continue };
         lc.unknown_calls.retain(|call| !is_struct_declaration(call));
-        // Constants holding dry types stay while anything is left on the
-        // gem, which may name them; they go app-wide below once nothing is.
+        // Dry-type constants are stripped app-wide below once the Class-safe
+        // shell is emitted; keep generated non-type constants (shared defaults).
         lc.constants.extend(generated);
         lc.origin = Some(crate::dialect::LibraryClassOrigin::DryStruct);
         methods.append(&mut lc.methods);
@@ -205,11 +205,33 @@ pub(super) fn lower_dry_structs(app: &mut App, sources: &[crate::span::SourceFil
         lc.parent = parent_of[&name].clone().map(|p| crate::ident::ClassId(Symbol::from(p.as_str())));
         any = true;
     }
-    // The stand-in makes `Dry::Struct` a known class. With a struct left
-    // unlowered that would end its ancestry at a class with no methods,
-    // and its attribute calls would read as missing; the gem keeps it.
-    if any && refused_roots.is_empty() {
+    // Lowered constructors raise / rescue `Dry::Struct::Error`. Emit the
+    // stand-in (empty `class Dry::Struct` + nested `Error`) whenever
+    // anything lowered — including when some hierarchies stay unlowered.
+    // The empty class shell is load-critical under partial refusal: nesting
+    // only `Error` makes the Ruby emitter open `module Struct`, and
+    // `class X < Dry::Struct` then TypeErrors. The shell carries no
+    // `attribute` methods; refused class-body DSL is not replayed onto a
+    // modeled parent (`replays_foreign_class_body`).
+    //
+    // With that shell, nothing left on dry-types can run: refused subclasses
+    // do not replay gem DSL, and lowered bodies bake coercions into
+    // `initialize`. Refused files may still `require_relative` a `Types`
+    // module (Const refs in dropped calls), so dry-type constants must be
+    // stripped whenever the shell is emitted — otherwise
+    // `Types.Constructor` / `Types::Coercible::…` crash the boot of the
+    // whole `models.rb` load, including lowered siblings.
+    if any {
         app.library_classes.extend(error_classes());
+        // Keep plain value constants / aliases (`LABEL`, `ALIAS = Types::LABEL`);
+        // drop anything that still builds a dry type.
+        let plain = super::dry_types::plain_constants(&app.library_classes, &types_modules, &names);
+        for lc in &mut app.library_classes {
+            let holder = lc.name.0.as_str().to_string();
+            lc.constants.retain(|(_, value)| {
+                !super::dry_types::holds_dry_type(value, &holder, &types_modules, &names, &plain)
+            });
+        }
     }
 }
 
@@ -442,8 +464,11 @@ fn effective_transform(
     None
 }
 
-/// `Dry::Struct::Error`, which the lowered constructors raise and an
-/// application may rescue. Nothing else of dry-struct is left.
+/// Empty `Dry::Struct` plus nested `Error`, which the lowered
+/// constructors raise and an application may rescue. Nothing else of
+/// dry-struct is left. The empty class (not module) shell is required so
+/// nest emit opens `class Struct` and refused `class X < Dry::Struct`
+/// keeps Class ancestry.
 fn error_classes() -> Vec<LibraryClass> {
     let source = "module Dry\n  class Struct\n    class Error < TypeError\n    end\n  end\nend\n";
     crate::ingest::ingest_library_classes(source.as_bytes(), "<dry_struct>")
@@ -512,7 +537,18 @@ fn read_struct(lc: &LibraryClass, scope: &Scope<'_>) -> Result<StructClass, Stri
     let mut attributes = Vec::new();
     let mut transform_keys = None;
     for call in &lc.unknown_calls {
-        let ExprNode::Send { recv: None, method, args, block, .. } = &*call.node else { continue };
+        // Anything that is not a modeled dry-struct declaration refuses:
+        // `prepend` / `extend` (including from `class << self`) wrap
+        // `attribute` and would silently drop validation policy if ignored.
+        let ExprNode::Send { recv, method, args, block, .. } = &*call.node else {
+            return Err("a non-declaration expression in the class body".into());
+        };
+        if matches!(method.as_str(), "prepend" | "extend") {
+            return Err(format!("`{}` in the class body", method.as_str()));
+        }
+        if recv.is_some() {
+            return Err(format!("`{}` with a receiver in the class body", method.as_str()));
+        }
         match method.as_str() {
             "transform_keys" => {
                 if !args.is_empty() || block.is_none() {
@@ -546,7 +582,9 @@ fn read_struct(lc: &LibraryClass, scope: &Scope<'_>) -> Result<StructClass, Stri
             other if DRY_STRUCT_DSL.contains(&other) => {
                 return Err(format!("`{other}` in the class body"));
             }
-            _ => {}
+            other => {
+                return Err(format!("`{other}` in the class body"));
+            }
         }
     }
     Ok(StructClass { attributes, transform_keys })

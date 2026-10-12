@@ -305,7 +305,10 @@ fn runtime_singularize(s: &str) -> String {
     s.to_string()
 }
 
-fn controller_name_of(class: &ClassId) -> String {
+/// `ArticlesController` → `"articles"`; `Admin::UsersController` →
+/// `"users"`. Shared with the controller lowerer's AOT string-literal
+/// overrides — one owner so acronym / strip rules cannot drift.
+pub(crate) fn controller_name_of(class: &ClassId) -> String {
     let leaf = naming::demodulize(class.0.as_str());
     let stripped = leaf.strip_suffix("Controller").unwrap_or(leaf);
     naming::snake_case(stripped)
@@ -336,7 +339,7 @@ pub(crate) fn harvest_ivar_set(
     };
     let ty = narrow_to_named_model(&name, ty, env.models_by_ivar);
     let merged = match out.remove(&name) {
-        Some(prev) => super::body::union_of(prev, ty),
+        Some(prev) => super::body::join_ivar_slot(prev, ty),
         None => ty,
     };
     out.insert(name, merged);

@@ -11,13 +11,16 @@
 //! fills with a disk service; variants are IDENTITY (no processor on any
 //! target) — see that file's header for the whole split.
 //!
-//! * `has_one_attached :name` is a MACRO. It expands to a reader whose
-//!   scope is the three columns Rails scopes on (`record_id`,
-//!   `record_type`, `name`), written out rather than declared for the
-//!   same reason `has_rich_text`'s is: a bare `has_one` would find the
-//!   FIRST attachment on the record regardless of name, which is right
-//!   for a model with one attachment and silently wrong for a model
-//!   with two.
+//! * `has_one_attached :name` / `has_many_attached :name` are MACROS.
+//!   Each expands to a reader whose scope is the three columns Rails
+//!   scopes on (`record_id`, `record_type`, `name`), written out rather
+//!   than declared for the same reason `has_rich_text`'s is: a bare
+//!   `has_one` would find the FIRST attachment on the record regardless
+//!   of name, which is right for a model with one attachment and
+//!   silently wrong for a model with two. The many form returns an
+//!   `ActiveStorage::AttachedMany` proxy whose `attach_blob` APPENDS
+//!   (no purge of prior) and whose `attachments` answers an Array of
+//!   `ActiveStorage::Attachment` rows.
 //! * The `name=` writer stages an ATTACHABLE (an uploaded file, a blob,
 //!   a signed id — the runtime's `Blob.from_attachable` narrows it) and
 //!   `_save_<name>_attachment`, folded into `after_save`, attaches it
@@ -54,6 +57,10 @@ use crate::ty::Ty;
 
 fn attached_class() -> ClassId {
     ClassId(Symbol::from("ActiveStorage::Attached"))
+}
+
+fn attached_many_class() -> ClassId {
+    ClassId(Symbol::from("ActiveStorage::AttachedMany"))
 }
 
 /// `has_one_attached :logo` declarations this pass expands, with the
@@ -99,15 +106,16 @@ pub fn apply_attach_lowering(app: &mut crate::app::App) {
 }
 
 /// `x.preview(format: :webp, resize_to_limit: [w, h])` ->
-/// `x.preview(ActiveStorage::Variation.new("", w, h, "webp"))`. Only
-/// `preview`: `variant`/`representation` take a declared name in the
-/// corpus, and their inline form stays the identity variant the
-/// runtime documents. A hash with a key this cannot lower is left as
-/// written.
+/// `x.preview(ActiveStorage::Variation.new("", w, h, "webp"))`, and the
+/// same for `variant` / `representation` written inline — campfire's
+/// `embeds.first.blob.variant(resize_to_limit: [ 1024, 768 ])`, the
+/// variant Action Text's own blob partial would make. A declared NAME
+/// (`variant(:thumb)`) is not a hash and is left for the runtime to
+/// look up; a hash with a key this cannot lower is left as written.
 fn rewrite_inline_transformation(e: &mut Expr) {
     e.node.for_each_child_mut(&mut rewrite_inline_transformation);
     let ExprNode::Send { method, args, .. } = &mut *e.node else { return };
-    if method.as_str() != "preview" || args.len() != 1 {
+    if !matches!(method.as_str(), "preview" | "variant" | "representation") || args.len() != 1 {
         return;
     }
     let ExprNode::Hash { entries, .. } = &*args[0].node else { return };
@@ -165,6 +173,27 @@ fn rewrite_attach(e: &mut Expr) {
         return;
     }
     let Some(recv_expr) = recv.clone() else { return };
+    // `uploads.attach([file, …])` — Rails' array form. Each element is
+    // one attachable; ground them into sequential `attach_blob`
+    // / `from_attachable` calls so the Many proxy's APPEND semantics
+    // run once per element (has_one still replaces via attach_blob).
+    if let ExprNode::Array { elements, .. } = &*args[0].node {
+        let steps: Vec<Expr> = elements
+            .iter()
+            .map(|attachable| {
+                let mut step = Expr::new(
+                    e.span,
+                    attach_blob_from_attachable(recv_expr.clone(), attachable.clone()),
+                );
+                step.ty = Some(Ty::Nil);
+                step
+            })
+            .collect();
+        e.diagnostic = None;
+        e.ty = Some(Ty::Nil);
+        *e.node = ExprNode::Seq { exprs: steps };
+        return;
+    }
     let attachable = args[0].clone();
     // Analyze stamped `SendDispatchFailed` on the one-arg Hash form
     // against the three-String `attach` signature; the rewrite is the
@@ -288,18 +317,20 @@ fn attach_blob_from_attachable(recv: Expr, attachable: Expr) -> ExprNode {
     // Underscored so a caller's locals are not shadowed. Bind the
     // receiver first: Ruby evaluates `recv.attach(x)` left-to-right,
     // and coercing before `recv` would upload an orphaned blob if
-    // `recv` then raised.
+    // `recv` then raised. Preserve One vs Many typing from the call
+    // site when present.
     let recv_name = Symbol::from("_attach_recv");
     let blob = Symbol::from("_attachable_blob");
     let blob_ty = Ty::Union {
         variants: vec![blob_class_ty(), Ty::Nil],
     };
+    let recv_ty = recv.ty.clone().unwrap_or_else(|| Ty::Class {
+        id: ClassId(Symbol::from("ActiveStorage::Attached")),
+        args: vec![],
+    });
     let recv_var = || typed(
         ExprNode::Var { id: crate::ident::VarId(0), name: recv_name.clone() },
-        Ty::Class {
-            id: ClassId(Symbol::from("ActiveStorage::Attached")),
-            args: vec![],
-        },
+        recv_ty.clone(),
     );
     let var = || typed(
         ExprNode::Var { id: crate::ident::VarId(0), name: blob.clone() },
@@ -501,7 +532,10 @@ fn ty_is_attached(ty: &Ty) -> bool {
     match ty {
         Ty::Class { id, .. } => {
             let name = id.0.as_str();
-            name == "ActiveStorage::Attached" || name == "Attached"
+            name == "ActiveStorage::Attached"
+                || name == "Attached"
+                || name == "ActiveStorage::AttachedMany"
+                || name == "AttachedMany"
         }
         Ty::Union { variants } => variants.iter().any(ty_is_attached),
         _ => false,
@@ -532,14 +566,23 @@ fn ty_is_hash(ty: &Ty) -> bool {
 }
 
 pub fn attached_attrs(model: &Model) -> Vec<(Span, Symbol)> {
+    macro_attrs(model, "has_one_attached")
+}
+
+/// `has_many_attached :uploads` declarations this pass expands.
+pub fn many_attached_attrs(model: &Model) -> Vec<(Span, Symbol)> {
+    macro_attrs(model, "has_many_attached")
+}
+
+fn macro_attrs(model: &Model, macro_name: &str) -> Vec<(Span, Symbol)> {
     let mut out = Vec::new();
     for item in &model.body {
         let ModelBodyItem::Unknown { expr, .. } = item else { continue };
         let ExprNode::Send { recv: None, method, args, .. } = &*expr.node else { continue };
-        // `has_one_attached :cover, dependent: :purge_later` — the
+        // `has_*_attached :cover, dependent: :purge_later` — the
         // options hash rides after the name; the reader it declares is
         // the same.
-        if method.as_str() != "has_one_attached" || args.is_empty() {
+        if method.as_str() != macro_name || args.is_empty() {
             continue;
         }
         if let ExprNode::Lit { value: Literal::Sym { value } } = &*args[0].node {
@@ -590,7 +633,10 @@ pub fn attached_variations(model: &Model, attr: &Symbol) -> Vec<VariationDecl> {
         if value.as_str() != attr.as_str() {
             continue;
         }
-        let ExprNode::Lambda { params, body, .. } = &*block.node else { continue };
+        let ExprNode::Lambda { extra_params, params, body, .. } = &*block.node else { continue };
+        if !extra_params.is_empty() {
+            continue;
+        }
         let Some(attachable) = params.first() else { continue };
         let stmts: Vec<&Expr> = match &*body.node {
             ExprNode::Seq { exprs } => exprs.iter().collect(),
@@ -694,7 +740,8 @@ pub fn variations_ruby_source(model: &Model, attr: &Symbol) -> String {
 }
 
 
-/// Synthesize each `has_one_attached` reader onto the declaring model.
+/// Synthesize each `has_one_attached` / `has_many_attached` reader onto
+/// the declaring model.
 pub(crate) fn push_attached_methods(methods: &mut Vec<MethodDef>, model: &Model) {
     for (span, attr) in attached_attrs(model) {
         let before = methods.len();
@@ -703,6 +750,159 @@ pub(crate) fn push_attached_methods(methods: &mut Vec<MethodDef>, model: &Model)
             m.body.inherit_span(span);
         }
     }
+    for (span, attr) in many_attached_attrs(model) {
+        let before = methods.len();
+        push_many_reader(methods, model, &attr);
+        for m in &mut methods[before..] {
+            m.body.inherit_span(span);
+        }
+    }
+    push_attachment_changes(methods, model);
+    push_purge_on_destroy(methods, model);
+}
+
+/// What destroying the owner does to an attachment, from the macro's
+/// `dependent:` — Rails' default `:purge_later` (the join row now, the
+/// blob in an `ActiveStorage::PurgeJob`), `:purge` (both now), or
+/// `false` (neither). `None` for a value Rails doesn't define, which
+/// keeps the default rather than guessing.
+fn attached_dependent(model: &Model, attr: &Symbol) -> Option<&'static str> {
+    for item in &model.body {
+        let ModelBodyItem::Unknown { expr, .. } = item else { continue };
+        let ExprNode::Send { recv: None, method, args, .. } = &*expr.node else { continue };
+        if !matches!(method.as_str(), "has_one_attached" | "has_many_attached") {
+            continue;
+        }
+        let Some(ExprNode::Lit { value: Literal::Sym { value } }) = args.first().map(|a| &*a.node) else {
+            continue;
+        };
+        if value.as_str() != attr.as_str() {
+            continue;
+        }
+        for arg in &args[1..] {
+            let ExprNode::Hash { entries, .. } = &*arg.node else { continue };
+            for (k, v) in entries {
+                let ExprNode::Lit { value: Literal::Sym { value: key } } = &*k.node else { continue };
+                if key.as_str() != "dependent" {
+                    continue;
+                }
+                return match &*v.node {
+                    ExprNode::Lit { value: Literal::Sym { value } } if value.as_str() == "purge" => Some("purge"),
+                    ExprNode::Lit { value: Literal::Bool { value: false } } => Some(""),
+                    _ => Some("purge_later"),
+                };
+            }
+        }
+    }
+    Some("purge_later")
+}
+
+/// ```ruby
+/// def after_destroy
+///   self.attachment.purge_later
+/// end
+/// ```
+///
+/// Destroying the owner takes its attachments with it, as Rails'
+/// `has_one :<attr>_attachment, dependent: :destroy` does, and the
+/// blob goes as `dependent:` says. Without it campfire's
+/// `Room#destroy_one_message_at_a_time` left every message's
+/// attachment row (and its file) behind.
+fn push_purge_on_destroy(methods: &mut Vec<MethodDef>, model: &Model) {
+    let attrs = attached_attrs(model).into_iter().chain(many_attached_attrs(model));
+    for (span, attr) in attrs {
+        let action = attached_dependent(model, &attr).unwrap_or("purge_later");
+        if action.is_empty() {
+            continue;
+        }
+        let syn = |node: ExprNode| Expr::new(span, node);
+        let call = syn(ExprNode::Send {
+            recv: Some(syn(ExprNode::Send {
+                recv: Some(syn(ExprNode::SelfRef)),
+                method: attr.clone(),
+                args: vec![],
+                block: None,
+                parenthesized: false,
+            })),
+            method: Symbol::from(action),
+            args: vec![],
+            block: None,
+            parenthesized: false,
+        });
+        super::model_to_library::markers::fold_into_or_push(methods, model, "after_destroy", call);
+    }
+}
+
+/// The type of `attachment_changes`: attribute name -> the blob the
+/// writer staged.
+pub fn attachment_changes_ty() -> Ty {
+    Ty::Hash { key: Box::new(Ty::Str), value: Box::new(blob_class_ty()) }
+}
+
+/// ```ruby
+/// def attachment_changes
+///   changes = {}
+///   changes["logo"] = @logo_pending unless @logo_pending.nil?
+///   changes
+/// end
+/// ```
+///
+/// Rails' dirty record of attachments assigned but not yet saved,
+/// keyed by attribute name — campfire's `Message::Searchable` asks
+/// `attachment_changes.key?("attachment")` in a `before_update` to learn
+/// the file was replaced. The writer's staged blob IS that record here:
+/// it is set by `<attr>=` and cleared once the save attaches it, so the
+/// hash answers through every callback up to `after_save`. Rails keeps
+/// an `ActiveStorage::Attached::Changes::CreateOne` as the value; this
+/// keeps the blob it wraps, so a caller reading the value's own API
+/// (`.attachable`, `.upload`) does not type.
+fn push_attachment_changes(methods: &mut Vec<MethodDef>, model: &Model) {
+    let attrs = attached_attrs(model);
+    let name = Symbol::from("attachment_changes");
+    if attrs.is_empty()
+        || super::model_to_library::model_defines_instance_method(model, &name)
+        || methods.iter().any(|m| m.name == name)
+    {
+        return;
+    }
+    let syn = |node: ExprNode| Expr::new(Span::synthetic(), node);
+    let changes = Symbol::from("changes");
+    let var = || syn(ExprNode::Var { id: crate::ident::VarId(0), name: changes.clone() });
+    let mut exprs = vec![syn(ExprNode::Assign {
+        target: crate::expr::LValue::Var { id: crate::ident::VarId(0), name: changes.clone() },
+        value: syn(ExprNode::Hash { entries: vec![], kwargs: false }),
+    })];
+    for (_span, attr) in &attrs {
+        let pending = || syn(ExprNode::Ivar { name: Symbol::from(format!("{}_pending", attr.as_str())) });
+        exprs.push(syn(ExprNode::If {
+            cond: syn(ExprNode::Send {
+                recv: Some(pending()),
+                method: Symbol::from("nil?"),
+                args: vec![],
+                block: None,
+                parenthesized: false,
+            }),
+            then_branch: syn(ExprNode::Lit { value: Literal::Nil }),
+            else_branch: syn(ExprNode::Send {
+                recv: Some(var()),
+                method: Symbol::from("[]="),
+                args: vec![syn(ExprNode::Lit { value: Literal::Str { value: attr.as_str().to_string() } }), pending()],
+                block: None,
+                parenthesized: false,
+            }),
+        }));
+    }
+    exprs.push(var());
+    super::model_to_library::push_synth_instance_method(
+        methods,
+        model,
+        name,
+        Vec::new(),
+        syn(ExprNode::Seq { exprs }),
+        Some(super::model_to_library::fn_sig(vec![], attachment_changes_ty())),
+        AccessorKind::Method,
+        true,
+    );
 }
 
 /// ```ruby
@@ -995,9 +1195,146 @@ pub fn attachment_assoc_name(attr: &Symbol) -> Symbol {
     Symbol::from(format!("{}_attachment", attr.as_str()))
 }
 
+/// Rails' name behind `has_many_attached :<attr>`: `<attr>_attachments`.
+pub fn many_attachments_assoc_name(attr: &Symbol) -> Symbol {
+    Symbol::from(format!("{}_attachments", attr.as_str()))
+}
+
 /// `_preload_<attr>_attachment` — the setter the batch loader calls.
 pub fn preload_setter_name(attr: &Symbol) -> Symbol {
     Symbol::from(format!("_preload_{}", attachment_assoc_name(attr).as_str()))
+}
+
+/// `_preload_<attr>_attachments` — Many form of the batch-loader setter.
+pub fn many_preload_setter_name(attr: &Symbol) -> Symbol {
+    Symbol::from(format!("_preload_{}", many_attachments_assoc_name(attr).as_str()))
+}
+
+/// ```ruby
+/// def uploads
+///   cached = @uploads_cache
+///   return cached unless cached.nil?
+///   fresh = ActiveStorage::AttachedMany.new("Doc", @id, "uploads")
+///   @uploads_cache = fresh
+///   fresh
+/// end
+///
+/// def _preload_uploads_attachments(att)
+///   @uploads_cache = att
+///   nil
+/// end
+/// ```
+///
+/// Always a non-nil Many proxy — same never-nil contract as
+/// `has_one_attached`, so `uploads.attach` / `uploads.attachments.last`
+/// do not need a nil guard.
+fn push_many_reader(methods: &mut Vec<MethodDef>, model: &Model, attr: &Symbol) {
+    if super::model_to_library::model_defines_instance_method(model, attr)
+        || methods
+            .iter()
+            .any(|m| m.name == *attr && m.receiver == MethodReceiver::Instance)
+    {
+        return;
+    }
+    let syn = |node: ExprNode| Expr::new(Span::synthetic(), node);
+    let str_lit = |v: &str| syn(ExprNode::Lit { value: Literal::Str { value: v.to_string() } });
+    let cache = Symbol::from(format!("{}_cache", attr.as_str()));
+    let cached = Symbol::from("cached");
+    let fresh = Symbol::from("fresh");
+    let var = |name: &Symbol| syn(ExprNode::Var { id: crate::ident::VarId(0), name: name.clone() });
+    let construct = syn(ExprNode::Send {
+        recv: Some(syn(ExprNode::Const {
+            path: attached_many_class().0.as_str().split("::").map(Symbol::from).collect(),
+        })),
+        method: Symbol::from("new"),
+        args: vec![
+            str_lit(model.name.0.as_str()),
+            syn(ExprNode::Ivar { name: Symbol::from("id") }),
+            str_lit(attr.as_str()),
+        ],
+        block: None,
+        parenthesized: true,
+    });
+    let body = syn(ExprNode::Seq {
+        exprs: vec![
+            syn(ExprNode::Assign {
+                target: crate::expr::LValue::Var { id: crate::ident::VarId(0), name: cached.clone() },
+                value: syn(ExprNode::Ivar { name: cache.clone() }),
+            }),
+            syn(ExprNode::If {
+                cond: syn(ExprNode::Send {
+                    recv: Some(syn(ExprNode::Send {
+                        recv: Some(var(&cached)),
+                        method: Symbol::from("nil?"),
+                        args: vec![],
+                        block: None,
+                        parenthesized: false,
+                    })),
+                    method: Symbol::from("!"),
+                    args: vec![],
+                    block: None,
+                    parenthesized: false,
+                }),
+                then_branch: syn(ExprNode::Return { value: var(&cached) }),
+                else_branch: syn(ExprNode::Lit { value: Literal::Nil }),
+            }),
+            syn(ExprNode::Assign {
+                target: crate::expr::LValue::Var { id: crate::ident::VarId(0), name: fresh.clone() },
+                value: construct,
+            }),
+            syn(ExprNode::Assign {
+                target: crate::expr::LValue::Ivar { name: cache.clone() },
+                value: var(&fresh),
+            }),
+            var(&fresh),
+        ],
+    });
+    let many_ty = Ty::Class { id: attached_many_class(), args: vec![] };
+    methods.push(MethodDef {
+        visibility: crate::dialect::MethodVisibility::Public,
+        unsupported_formals: None,
+        has_anonymous_block: false,
+        name_span: crate::span::Span::synthetic(),
+        name: attr.clone(),
+        receiver: MethodReceiver::Instance,
+        params: Vec::new(),
+        body,
+        signature: Some(super::model_to_library::fn_sig(vec![], many_ty.clone())),
+        effects: EffectSet::default(),
+        enclosing_class: Some(model.name.0.clone()),
+        kind: AccessorKind::Method,
+        is_async: false,
+        mutates_self: false,
+        block_param: None,
+    });
+
+    let att = Symbol::from("att");
+    let var_att = |name: &Symbol| syn(ExprNode::Var { id: crate::ident::VarId(0), name: name.clone() });
+    methods.push(MethodDef {
+        visibility: crate::dialect::MethodVisibility::Public,
+        unsupported_formals: None,
+        has_anonymous_block: false,
+        name_span: crate::span::Span::synthetic(),
+        name: many_preload_setter_name(attr),
+        receiver: MethodReceiver::Instance,
+        params: vec![crate::dialect::Param::positional(att.clone())],
+        body: syn(ExprNode::Seq {
+            exprs: vec![
+                syn(ExprNode::Assign {
+                    target: crate::expr::LValue::Ivar { name: cache },
+                    value: var_att(&att),
+                }),
+                syn(ExprNode::Lit { value: Literal::Nil }),
+            ],
+        }),
+        signature: Some(super::model_to_library::fn_sig(vec![(att, many_ty)], Ty::Nil)),
+        effects: EffectSet::default(),
+        enclosing_class: Some(model.name.0.clone()),
+        kind: AccessorKind::Method,
+        is_async: false,
+        mutates_self: true,
+        block_param: None,
+    });
 }
 
 // ── the preload scope ──────────────────────────────────────────
@@ -1015,11 +1352,12 @@ pub fn preload_scope_names(model: &Model) -> Vec<Symbol> {
 }
 
 /// Each preload scope with the association it preloads:
-/// `(with_attached_logo, logo_attachment)`. The emitter's relation
-/// delegate and the class-side body both read this, so they cannot
-/// disagree about what the scope does.
+/// `(with_attached_logo, logo_attachment)` /
+/// `(with_attached_uploads, uploads_attachments)`. The emitter's
+/// relation delegate and the class-side body both read this, so they
+/// cannot disagree about what the scope does.
 pub fn preload_scopes(model: &Model) -> Vec<(Symbol, Symbol)> {
-    attached_attrs(model)
+    let mut out: Vec<(Symbol, Symbol)> = attached_attrs(model)
         .into_iter()
         .map(|(_span, attr)| {
             (
@@ -1027,7 +1365,14 @@ pub fn preload_scopes(model: &Model) -> Vec<(Symbol, Symbol)> {
                 attachment_assoc_name(&attr),
             )
         })
-        .collect()
+        .collect();
+    out.extend(many_attached_attrs(model).into_iter().map(|(_span, attr)| {
+        (
+            Symbol::from(format!("with_attached_{}", attr.as_str())),
+            many_attachments_assoc_name(&attr),
+        )
+    }));
+    out
 }
 
 /// Give the preload scope a body: `def self.with_attached_avatar(__rel

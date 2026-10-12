@@ -24,7 +24,9 @@ pub(super) enum ThroughWriterJoin {
     /// matching the target class when that model is in the slice
     /// (survives `foreign_key:` overrides); a join model outside the
     /// slice falls back to the `<target>_id` convention.
-    Resolved(ClassId, Symbol, Symbol),
+    /// The fourth field is the through association's `as:` interface:
+    /// a polymorphic join row also carries `<as>_type` = the owner.
+    Resolved(ClassId, Symbol, Symbol, Option<Symbol>),
     /// The chain is nested — the join model reaches the target through
     /// ANOTHER association rather than a `belongs_to` (`Category
     /// has_many :stories, through: :tags` — Tag#stories itself goes
@@ -47,12 +49,15 @@ pub(super) fn through_writer_join(
     thr_name: &Symbol,
     target: &ClassId,
 ) -> ThroughWriterJoin {
-    let Some((join_class, owner_fk, thr_through)) = model.associations().find_map(|a| match a {
-        Association::HasMany { name: n, target: jt, foreign_key: jfk, through: jthru, .. }
-            if n == thr_name =>
-        {
-            Some((jt.clone(), jfk.clone(), jthru.clone()))
-        }
+    let Some((join_class, owner_fk, thr_through, thr_as)) = model.associations().find_map(|a| match a {
+        Association::HasMany {
+            name: n,
+            target: jt,
+            foreign_key: jfk,
+            through: jthru,
+            as_interface,
+            ..
+        } if n == thr_name => Some((jt.clone(), jfk.clone(), jthru.clone(), as_interface.clone())),
         _ => None,
     }) else {
         return ThroughWriterJoin::NoJoin;
@@ -62,18 +67,32 @@ pub(super) fn through_writer_join(
     if thr_through.is_some() {
         return ThroughWriterJoin::Nested(join_class);
     }
-    let Some(join_model) = models.iter().find(|m| m.name == join_class) else {
-        let src_fk =
-            Symbol::from(format!("{}_id", crate::naming::snake_case(target.0.as_str())));
-        return ThroughWriterJoin::Resolved(join_class, owner_fk, src_fk);
+    // `class_name: "::Admin::Report::Rule"` keeps its leading
+    // `::` in the IR; the model's own name never has it. Compare the
+    // constant paths, not the spellings, or a top-level-anchored
+    // class_name misses its join model and falls to the convention.
+    let same = |a: &ClassId, b: &ClassId| {
+        a.0.as_str().trim_start_matches("::") == b.0.as_str().trim_start_matches("::")
+    };
+    let Some(join_model) = models.iter().find(|m| same(&m.name, &join_class)) else {
+        // Rails' source `belongs_to` defaults its key from the
+        // association name, which is unqualified: `condition_id` for
+        // `Admin::Report::Rule`, never a `::`-pathed name.
+        let src_fk = Symbol::from(format!(
+            "{}_id",
+            crate::naming::snake_case(crate::naming::demodulize(
+                target.0.as_str().trim_start_matches("::")
+            ))
+        ));
+        return ThroughWriterJoin::Resolved(join_class, owner_fk, src_fk, thr_as);
     };
     match join_model.associations().find_map(|a| match a {
-        Association::BelongsTo { target: t, foreign_key, .. } if t == target => {
+        Association::BelongsTo { target: t, foreign_key, .. } if same(t, target) => {
             Some(foreign_key.clone())
         }
         _ => None,
     }) {
-        Some(src_fk) => ThroughWriterJoin::Resolved(join_class, owner_fk, src_fk),
+        Some(src_fk) => ThroughWriterJoin::Resolved(join_class, owner_fk, src_fk, thr_as),
         None => ThroughWriterJoin::Nested(join_class),
     }
 }
@@ -113,11 +132,16 @@ pub(super) fn push_association_methods(
                 extension,
                 ..
             } => {
+                if crate::lower::assoc_primary_key::refuse(model, models, assoc, span) {
+                    continue;
+                }
+                let owner_key = assoc.owner_key();
                 methods.push(synth_has_many_reader(
                     owner,
                     name,
                     target,
                     foreign_key,
+                    &owner_key,
                     as_interface.as_ref(),
                     scope.as_ref(),
                     through.is_some(),
@@ -137,6 +161,15 @@ pub(super) fn push_association_methods(
                     loaded_ivar(name),
                     Ty::Bool,
                 ));
+                {
+                    // `reload_<name>` — Rails' `owner.<name>.reload`
+                    // (`assoc_loaded` rewrites onto it): forget a
+                    // preloaded cache and read the rows again.
+                    let reload = Symbol::from(format!("reload_{}", name.as_str()));
+                    if !model_defines_instance_method(model, &reload) {
+                        methods.push(synth_has_many_reload(owner, name, target));
+                    }
+                }
                 methods.push(synth_cache_reader(
                     owner,
                     Symbol::from(format!("{}_target", name.as_str())),
@@ -185,7 +218,7 @@ pub(super) fn push_association_methods(
                 if let Some(thr_name) = through {
                     let writer_name = Symbol::from(format!("{}=", name.as_str()));
                     match through_writer_join(model, models, thr_name, target) {
-                        ThroughWriterJoin::Resolved(join_class, owner_fk, src_fk) => {
+                        ThroughWriterJoin::Resolved(join_class, owner_fk, src_fk, thr_as) => {
                             if !model_defines_instance_method(model, &writer_name)
                                 && !methods.iter().any(|m| {
                                     m.name == writer_name && m.receiver == MethodReceiver::Instance
@@ -198,6 +231,7 @@ pub(super) fn push_association_methods(
                                     &join_class,
                                     &owner_fk,
                                     &src_fk,
+                                    thr_as.as_ref(),
                                 ));
                                 super::markers::fold_into_or_push(
                                     methods,
@@ -312,10 +346,15 @@ pub(super) fn push_association_methods(
                 target,
                 foreign_key,
                 polymorphic: false,
+                primary_key,
                 ..
             } => {
                 let sentinel = fk_sentinel(model, foreign_key);
-                methods.push(synth_belongs_to_reader(owner, name, target, foreign_key, sentinel.clone()));
+                // `primary_key: "uuid"`: the target's key the fk holds; else the
+                // target's own primary key.
+                let assoc_pk =
+                    crate::lower::scope_chain::association_primary_key(models, target, primary_key.as_ref());
+                methods.push(synth_belongs_to_reader(owner, name, target, foreign_key, &assoc_pk, sentinel.clone()));
                 // Rails provides the writer alongside the reader
                 // (`comment.story = obj` stores the foreign key). A
                 // custom writer in the model body must win (Rails: the
@@ -330,8 +369,9 @@ pub(super) fn push_association_methods(
                         .iter()
                         .any(|m| m.name == writer_name && m.receiver == MethodReceiver::Instance)
                 {
-                    methods.push(synth_belongs_to_writer(owner, name, target, foreign_key, sentinel));
+                    methods.push(synth_belongs_to_writer(owner, name, target, foreign_key, &assoc_pk, sentinel));
                 }
+                push_singular_loaded_reader(methods, model, owner, name);
             }
             Association::HasOne {
                 name,
@@ -342,15 +382,21 @@ pub(super) fn push_association_methods(
                 autosave,
                 ..
             } => {
+                if crate::lower::assoc_primary_key::refuse(model, models, assoc, span) {
+                    continue;
+                }
+                let owner_key = assoc.owner_key();
                 methods.push(synth_has_one_reader(
                     owner,
                     name,
                     target,
                     foreign_key,
+                    &owner_key,
                     as_interface.as_ref(),
                     scope.as_ref(),
                 ));
                 methods.push(synth_has_one_preload_setter(owner, name, target));
+                push_singular_loaded_reader(methods, model, owner, name);
                 // Writer + after_save only when `autosave: true`. A cache-only
                 // writer on plain `has_one` would accept `owner.child = …`
                 // then drop the child on save (silent data loss vs Rails /
@@ -370,6 +416,7 @@ pub(super) fn push_association_methods(
                         owner,
                         name,
                         foreign_key,
+                        &owner_key,
                         as_interface.as_ref(),
                     ));
                     let call = Expr::new(
@@ -394,6 +441,88 @@ pub(super) fn push_association_methods(
             m.body.inherit_span(span);
         }
     }
+    push_association_names(methods, model);
+}
+
+/// `def self._association_names; [:room, :creator, …]; end` — the name
+/// table `ActiveRecord::Base.reflect_on_association` consults. Values
+/// are association names only; `counter_cache:` is unmodeled, so the
+/// reflection always answers `counter_cache_column == nil` (campfire's
+/// `Message.reflect_on_association(:room)` assertion).
+fn push_association_names(methods: &mut Vec<MethodDef>, model: &Model) {
+    let name = Symbol::from("_association_names");
+    if model.methods().any(|m| m.name == name && m.receiver == MethodReceiver::Class)
+        || methods
+            .iter()
+            .any(|m| m.name == name && m.receiver == MethodReceiver::Class)
+    {
+        return;
+    }
+    let elements: Vec<Expr> = model
+        .associations()
+        .map(|a| lit_sym(a.name().clone()))
+        .collect();
+    if elements.is_empty() {
+        return;
+    }
+    let mut body = Expr::new(
+        Span::synthetic(),
+        ExprNode::Array {
+            elements,
+            style: crate::expr::ArrayStyle::Brackets,
+        },
+    );
+    body.ty = Some(Ty::Array {
+        elem: Box::new(Ty::Sym),
+    });
+    methods.push(MethodDef {
+        visibility: crate::dialect::MethodVisibility::Public,
+        unsupported_formals: None,
+        has_anonymous_block: false,
+        name_span: Span::synthetic(),
+        name,
+        receiver: MethodReceiver::Class,
+        params: Vec::new(),
+        body,
+        signature: Some(fn_sig(
+            vec![],
+            Ty::Array {
+                elem: Box::new(Ty::Sym),
+            },
+        )),
+        effects: EffectSet::default(),
+        enclosing_class: Some(model.name.0.clone()),
+        kind: AccessorKind::Method,
+        is_async: false,
+        mutates_self: false,
+        block_param: None,
+    });
+}
+
+/// A keyed association (`primary_key:` other than `id`) must not match
+/// when the owner's key is NULL: Rails answers nil / empty for it, but
+/// `where(fk: nil)` is `fk IS NULL`, which would return every orphan
+/// child. The extra predicate makes a nil key match nothing and is
+/// redundant otherwise.
+fn guard_nil_owner_key(query: Expr, foreign_key: &Symbol, owner_key: &Symbol) -> Expr {
+    if owner_key.as_str() == "id" {
+        return query;
+    }
+    Expr::new(
+        Span::synthetic(),
+        ExprNode::Send {
+            recv: Some(query),
+            method: Symbol::from("where"),
+            args: vec![Expr::new(
+                Span::synthetic(),
+                ExprNode::Lit {
+                    value: Literal::Str { value: format!("{} IS NOT NULL", foreign_key.as_str()) },
+                },
+            )],
+            block: None,
+            parenthesized: true,
+        },
+    )
 }
 
 fn synth_has_many_reader(
@@ -401,6 +530,7 @@ fn synth_has_many_reader(
     name: &Symbol,
     target: &ClassId,
     foreign_key: &Symbol,
+    owner_key: &Symbol,
     as_interface: Option<&Symbol>,
     scope: Option<&Expr>,
     through: bool,
@@ -414,7 +544,7 @@ fn synth_has_many_reader(
         lit_sym(foreign_key.clone()),
         Expr::new(
             Span::synthetic(),
-            ExprNode::Ivar { name: Symbol::from("id") },
+            ExprNode::Ivar { name: owner_key.clone() },
         ),
     )];
     if let Some(intf) = as_interface {
@@ -456,6 +586,7 @@ fn synth_has_many_reader(
     // `_preload_comments`) does not apply scopes yet; readers cover
     // the per-record access pattern (show pages), which is where
     // ordering is user-visible today.
+    let lazy_query = guard_nil_owner_key(lazy_query, foreign_key, owner_key);
     let lazy_query = match scope {
         Some(scope_expr) => graft_scope(scope_expr, lazy_query),
         None => lazy_query,
@@ -610,7 +741,7 @@ fn synth_has_many_id_reader(owner: &ClassId, name: &Symbol) -> MethodDef {
             args: vec![],
             block: Some(Expr::new(
                 Span::synthetic(),
-                ExprNode::Lambda { rest_param: None,
+                ExprNode::Lambda { extra_params: Vec::new(), rest_param: None,
                     params: vec![rec],
                     block_param: None,
                     body: id_read,
@@ -834,12 +965,13 @@ fn synth_has_one_reader(
     name: &Symbol,
     target: &ClassId,
     foreign_key: &Symbol,
+    owner_key: &Symbol,
     as_interface: Option<&Symbol>,
     scope: Option<&Expr>,
 ) -> MethodDef {
     let mut entries = vec![(
         lit_sym(foreign_key.clone()),
-        Expr::new(Span::synthetic(), ExprNode::Ivar { name: Symbol::from("id") }),
+        Expr::new(Span::synthetic(), ExprNode::Ivar { name: owner_key.clone() }),
     )];
     // See `synth_has_many_reader` — `as:` adds the type-half scope.
     if let Some(intf) = as_interface {
@@ -867,6 +999,7 @@ fn synth_has_one_reader(
             parenthesized: true,
         },
     );
+    let query = guard_nil_owner_key(query, foreign_key, owner_key);
     let query = match scope {
         Some(scope_expr) => graft_scope(scope_expr, query),
         None => query,
@@ -1001,6 +1134,7 @@ fn synth_has_one_autosave(
     owner: &ClassId,
     name: &Symbol,
     foreign_key: &Symbol,
+    owner_key: &Symbol,
     as_interface: Option<&Symbol>,
 ) -> MethodDef {
     let cache = || Expr::new(Span::synthetic(), ExprNode::Ivar { name: cache_ivar(name) });
@@ -1040,7 +1174,7 @@ fn synth_has_one_autosave(
             method: Symbol::from(format!("{}=", foreign_key.as_str())),
             args: vec![Expr::new(
                 Span::synthetic(),
-                ExprNode::Ivar { name: Symbol::from("id") },
+                ExprNode::Ivar { name: owner_key.clone() },
             )],
             block: None,
             parenthesized: false,
@@ -1102,6 +1236,58 @@ fn synth_has_one_autosave(
 
 /// `def <name>; @<ivar>; end` — a plain read of one has_many cache ivar,
 /// typed as the ivar is (see the call site for why these exist).
+/// `<name>_loaded?` for a singular (belongs_to / has_one) association:
+/// the flat spelling of Rails' `association(:name).loaded?`, which
+/// `assoc_loaded` rewrites onto it. Reads the same `@<name>_loaded`
+/// flag the reader sets; a model that defines the name itself wins.
+fn push_singular_loaded_reader(
+    methods: &mut Vec<MethodDef>,
+    model: &Model,
+    owner: &ClassId,
+    name: &Symbol,
+) {
+    let flat = Symbol::from(format!("{}_loaded?", name.as_str()));
+    if model_defines_instance_method(model, &flat)
+        || methods.iter().any(|m| m.name == flat && m.receiver == MethodReceiver::Instance)
+    {
+        return;
+    }
+    methods.push(synth_cache_reader(owner, flat, loaded_ivar(name), Ty::Bool));
+}
+
+/// `def reload_<name>; @<name>_loaded = false; <name>; end`.
+fn synth_has_many_reload(owner: &ClassId, name: &Symbol, target: &ClassId) -> MethodDef {
+    let ret = Ty::Array { elem: Box::new(Ty::Class { id: target.clone(), args: vec![] }) };
+    let reset = Expr::new(
+        Span::synthetic(),
+        ExprNode::Assign {
+            target: LValue::Ivar { name: loaded_ivar(name) },
+            value: lit_bool(false),
+        },
+    );
+    let read = Expr::new(
+        Span::synthetic(),
+        ExprNode::Send { recv: None, method: name.clone(), args: vec![], block: None, parenthesized: false },
+    );
+    MethodDef {
+        visibility: crate::dialect::MethodVisibility::Public,
+        unsupported_formals: None,
+        has_anonymous_block: false,
+        name_span: crate::span::Span::synthetic(),
+        name: Symbol::from(format!("reload_{}", name.as_str())),
+        receiver: MethodReceiver::Instance,
+        params: Vec::new(),
+        body: Expr::new(Span::synthetic(), ExprNode::Seq { exprs: vec![reset, read] }),
+        signature: Some(super::fn_sig(vec![], ret)),
+        effects: EffectSet::default(),
+        enclosing_class: Some(owner.0.clone()),
+        kind: AccessorKind::Method,
+        is_async: false,
+        mutates_self: true,
+        block_param: None,
+    }
+}
+
 fn synth_cache_reader(owner: &ClassId, name: Symbol, ivar: Symbol, ty: Ty) -> MethodDef {
     MethodDef {
         visibility: crate::dialect::MethodVisibility::Public,
@@ -1129,6 +1315,39 @@ pub(in crate::lower::model_to_library) fn cache_ivar(name: &Symbol) -> Symbol {
 }
 pub(in crate::lower::model_to_library) fn loaded_ivar(name: &Symbol) -> Symbol {
     Symbol::from(format!("{}_loaded", name.as_str()))
+}
+
+/// `@<assoc>_loaded = false` assigns for every association that owns a
+/// load-once flag — same kinds as [`assoc_cache_ivar_bindings`]' loaded
+/// half. Adapter reload prefixes its body with these so Rails'
+/// association cache clears on `reload` (campfire mentionee /
+/// `association(:room).loaded?` after `create!.reload`).
+pub(in crate::lower::model_to_library) fn clear_loaded_flag_assigns(
+    model: &Model,
+) -> Vec<Expr> {
+    let mut out = Vec::new();
+    for assoc in model.associations() {
+        let name = match assoc {
+            Association::HasMany { name, .. }
+            | Association::HasOne { name, .. }
+            | Association::BelongsTo {
+                name,
+                polymorphic: false,
+                ..
+            } => name,
+            _ => continue,
+        };
+        out.push(Expr::new(
+            Span::synthetic(),
+            ExprNode::Assign {
+                target: LValue::Ivar {
+                    name: loaded_ivar(name),
+                },
+                value: lit_bool(false),
+            },
+        ));
+    }
+    out
 }
 
 /// Body-typer ivar bindings for a model's has_many eager-load caches
@@ -1170,6 +1389,11 @@ pub(in crate::lower::model_to_library) fn assoc_cache_ivar_bindings(
                 ));
                 out.push((loaded_ivar(name), Ty::Bool));
             }
+            // The belongs_to reader's own load-once flag, which its
+            // `<name>_loaded?` reads (`push_singular_loaded_reader`).
+            Association::BelongsTo { name, polymorphic: false, .. } => {
+                out.push((loaded_ivar(name), Ty::Bool));
+            }
             _ => {}
         }
     }
@@ -1204,6 +1428,7 @@ fn synth_belongs_to_reader(
     name: &Symbol,
     target: &ClassId,
     foreign_key: &Symbol,
+    assoc_pk: &Symbol,
     sentinel: Expr,
 ) -> MethodDef {
     // def article
@@ -1233,7 +1458,7 @@ fn synth_belongs_to_reader(
                 Span::synthetic(),
                 ExprNode::Hash {
                     entries: vec![(
-                        lit_sym(Symbol::from("id")),
+                        lit_sym(assoc_pk.clone()),
                         Expr::new(
                             Span::synthetic(),
                             ExprNode::Ivar { name: foreign_key.clone() },
@@ -1374,6 +1599,33 @@ fn synth_polymorphic_reader(
     }
 }
 
+/// `case scrutinee when Target then <arm(Target)> … end` over a polymorphic
+/// belongs_to's resolved implementor set. The class-pattern `when` keeps the
+/// type string a compile-time constant per arm (no `.class.name`), and an
+/// STI subclass instance lands in its implementor's arm — so what the writer
+/// stores and what a `where(assoc: record)` condition compares to are the
+/// same value by construction. Shared by `synth_polymorphic_writer` and the
+/// polymorphic condition lowering in `scope_chain`.
+pub(crate) fn polymorphic_type_switch(
+    scrutinee: Expr,
+    targets: &[ClassId],
+    arm_body: impl Fn(&ClassId) -> Expr,
+    otherwise: Option<Expr>,
+) -> Expr {
+    let mut arms: Vec<crate::expr::Arm> = targets
+        .iter()
+        .map(|t| crate::expr::Arm {
+            pattern: crate::expr::Pattern::Expr { expr: class_const(t) },
+            guard: None,
+            body: arm_body(t),
+        })
+        .collect();
+    if let Some(body) = otherwise {
+        arms.push(crate::expr::Arm { pattern: crate::expr::Pattern::Wildcard, guard: None, body });
+    }
+    Expr::new(Span::synthetic(), ExprNode::Case { scrutinee, arms })
+}
+
 fn synth_polymorphic_writer(
     owner: &ClassId,
     name: &Symbol,
@@ -1437,18 +1689,9 @@ fn synth_polymorphic_writer(
             parenthesized: false,
         },
     );
-    let type_arms: Vec<crate::expr::Arm> = targets
-        .iter()
-        .map(|t| crate::expr::Arm {
-            pattern: crate::expr::Pattern::Expr { expr: class_const(t) },
-            guard: None,
-            body: assign(&type_col, lit_str(t.0.as_str())),
-        })
-        .collect();
-    let type_switch = Expr::new(
-        Span::synthetic(),
-        ExprNode::Case { scrutinee: var_ref(value.clone()), arms: type_arms },
-    );
+    let type_switch = polymorphic_type_switch(var_ref(value.clone()), targets, |t| {
+        assign(&type_col, lit_str(t.0.as_str()))
+    }, None);
     let body = Expr::new(
         Span::synthetic(),
         ExprNode::If {
@@ -1501,6 +1744,7 @@ fn synth_belongs_to_writer(
     name: &Symbol,
     target: &ClassId,
     foreign_key: &Symbol,
+    assoc_pk: &Symbol,
     sentinel: Expr,
 ) -> MethodDef {
     // def story=(value)
@@ -1540,7 +1784,7 @@ fn synth_belongs_to_writer(
         Span::synthetic(),
         ExprNode::Send {
             recv: Some(var_ref(value.clone())),
-            method: Symbol::from("id"),
+            method: assoc_pk.clone(),
             args: vec![],
             block: None,
             parenthesized: false,
@@ -1717,11 +1961,21 @@ fn synth_through_sync(
     join_class: &ClassId,
     owner_fk: &Symbol,
     src_fk: &Symbol,
+    owner_as: Option<&Symbol>,
 ) -> MethodDef {
     use crate::ident::VarId;
 
     let stale_ivar = Symbol::from(format!("{}_stale", name.as_str()));
     let id_ivar = || Expr::new(Span::synthetic(), ExprNode::Ivar { name: Symbol::from("id") });
+    // `as: :responder` on the through association: Rails scopes and
+    // writes the join rows by `responder_type` too (the owner's class
+    // name, as the has_many reader's own scope does).
+    let owner_type = || {
+        Expr::new(
+            Span::synthetic(),
+            ExprNode::Lit { value: Literal::Str { value: owner.0.as_str().to_string() } },
+        )
+    };
     let send = |recv: Expr, method: &str, args: Vec<Expr>| {
         Expr::new(
             Span::synthetic(),
@@ -1744,7 +1998,16 @@ fn synth_through_sync(
             args: vec![Expr::new(
                 Span::synthetic(),
                 ExprNode::Hash {
-                    entries: vec![(lit_sym(owner_fk.clone()), id_ivar())],
+                    entries: {
+                        let mut e = vec![(lit_sym(owner_fk.clone()), id_ivar())];
+                        if let Some(intf) = owner_as {
+                            e.push((
+                                lit_sym(Symbol::from(format!("{intf}_type"))),
+                                owner_type(),
+                            ));
+                        }
+                        e
+                    },
                     kwargs: true,
                 },
             )],
@@ -1755,7 +2018,7 @@ fn synth_through_sync(
     let row = Symbol::from("__row");
     let delete_block = Expr::new(
         Span::synthetic(),
-        ExprNode::Lambda { rest_param: None,
+        ExprNode::Lambda { extra_params: Vec::new(), rest_param: None,
             params: vec![row.clone()],
             block_param: None,
             body: send(var_ref(row), "destroy", vec![]),
@@ -1777,7 +2040,7 @@ fn synth_through_sync(
     //                    __join.<src_fk> = __target.id; __join.save }
     let target_var = Symbol::from("__target");
     let join_var = Symbol::from("__join");
-    let insert_body = seq(vec![
+    let mut insert_stmts = vec![
         Expr::new(
             Span::synthetic(),
             ExprNode::Assign {
@@ -1795,6 +2058,15 @@ fn synth_through_sync(
             },
         ),
         send(var_ref(join_var.clone()), &format!("{}=", owner_fk.as_str()), vec![id_ivar()]),
+    ];
+    if let Some(intf) = owner_as {
+        insert_stmts.push(send(
+            var_ref(join_var.clone()),
+            &format!("{intf}_type="),
+            vec![owner_type()],
+        ));
+    }
+    insert_stmts.extend([
         send(
             var_ref(join_var.clone()),
             &format!("{}=", src_fk.as_str()),
@@ -1802,9 +2074,10 @@ fn synth_through_sync(
         ),
         send(var_ref(join_var), "save", vec![]),
     ]);
+    let insert_body = seq(insert_stmts);
     let insert_block = Expr::new(
         Span::synthetic(),
-        ExprNode::Lambda { rest_param: None,
+        ExprNode::Lambda { extra_params: Vec::new(), rest_param: None,
             params: vec![target_var],
             block_param: None,
             body: insert_body,
@@ -1881,7 +2154,7 @@ pub(super) fn push_dependent_destroy(methods: &mut Vec<MethodDef>, model: &Model
                 );
                 let block = Expr::new(
                     Span::synthetic(),
-                    ExprNode::Lambda { rest_param: None,
+                    ExprNode::Lambda { extra_params: Vec::new(), rest_param: None,
                         params: vec![Symbol::from("c")],
                         block_param: None,
                         body: iter_body,

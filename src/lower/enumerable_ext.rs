@@ -103,16 +103,42 @@ pub(crate) fn rewrite_node(expr: &mut Expr) -> bool {
         }
         return false;
     }
-    // `index_by` takes the block and `many?` refuses one — the bare
-    // call is the form Rails' counter-and-`any?` body reduces to a
-    // length test, and the block form counts MATCHES instead, which is
-    // a different question no corpus app asks.
+    // `many?` accepts either form: its block counts matching elements,
+    // while its bare form counts all elements. Keep the block attached
+    // when grounding it to the shared runtime helper.
     if method.as_str() == "wrap" {
         return ground_array_wrap(expr);
     }
+    // Rails' Array#excluding and its #without alias share this helper.
+    // Keep Relation calls on ActiveRecord::Relation's typed methods, and
+    // leave unions, variables, and computed receivers alone. Some dynamic
+    // Rails scopes are inferred as Arrays even though they return Relations;
+    // only an Array literal proves the runtime receiver is actually an Array.
+    if matches!(method.as_str(), "excluding" | "without") && block.is_none() {
+        let Some(receiver) = recv.as_ref() else { return false };
+        if !matches!(receiver.ty.as_ref(), Some(Ty::Array { .. })) {
+            return false;
+        }
+        if !matches!(&*receiver.node, ExprNode::Array { .. }) {
+            return false;
+        }
+        let receiver = recv.take().expect("checked above");
+        *recv = Some(Expr::new(
+            span,
+            ExprNode::Const { path: vec![Symbol::from("ActiveSupport")] },
+        ));
+        args.insert(0, receiver);
+        *method = Symbol::from("excluding");
+        *parenthesized = true;
+        return true;
+    }
+    if method.as_str() == "pluck" && block.is_none() {
+        return ground_indexed_pluck(expr);
+    }
     let wants_block = match method.as_str() {
         "index_by" => true,
-        "many?" | "to_sentence" | "sole" | "squish" => false,
+        "many?" => block.is_some(),
+        "to_sentence" | "sole" | "squish" | "squish!" => false,
         _ => return false,
     };
     // `to_sentence` takes Rails' three connector options; the module
@@ -141,7 +167,18 @@ pub(crate) fn rewrite_node(expr: &mut Expr) -> bool {
     // which is what `many?` without a block asks, so the call becomes
     // `size > 1`. On the Relation half that loads the rows rather than
     // counting them — the rows the partial iterates next anyway.
-    if method.as_str() == "many?" && is_relation_or_array_union(receiver.ty.as_ref()) {
+    //
+    // A plain Array takes the same `size > 1`. An association read the
+    // analyzer types `Array[Model]` is a Relation on spinel at run time
+    // (campfire's direct-room settings, `@room.users.many?`), and since
+    // spinel 269b6abe seeds the module function's `Array[Object]`
+    // parameter it refuses that Relation; `size` is answered by both.
+    if method.as_str() == "many?"
+        && block.is_none()
+        && (is_relation_or_array_union(receiver.ty.as_ref())
+            || is_relation(receiver.ty.as_ref())
+            || matches!(receiver.ty.as_ref(), Some(Ty::Array { .. })))
+    {
         let receiver = recv.take().expect("checked above");
         let mut size = Expr::new(
             span,
@@ -187,7 +224,9 @@ pub(crate) fn rewrite_node(expr: &mut Expr) -> bool {
     // goes — and it is the only one of these whose name a model could
     // plausibly define itself, which is the second reason to gate on
     // the analyzer's answer rather than on the spelling.
-    if method.as_str() == "squish" && !matches!(receiver.ty.as_ref(), Some(Ty::Str)) {
+    if matches!(method.as_str(), "squish" | "squish!")
+        && !matches!(receiver.ty.as_ref(), Some(Ty::Str))
+    {
         return false;
     }
     let receiver = recv.take().expect("checked above");
@@ -205,6 +244,69 @@ pub(crate) fn rewrite_node(expr: &mut Expr) -> bool {
         }));
     }
     *parenthesized = true;
+    if method.as_str() == "squish!" {
+        expr.ty = Some(Ty::Str);
+    }
+    true
+}
+
+/// Not a reader call per key, as `lower::assoc_pluck` writes for records:
+/// a Hash answers a key only through `[]`, which is what ActiveSupport's
+/// `pluck` sends to every element.
+fn ground_indexed_pluck(expr: &mut Expr) -> bool {
+    let span = expr.span;
+    let ExprNode::Send { recv: Some(recv), method, args, .. } = &*expr.node else {
+        return false;
+    };
+    let Some(Ty::Array { elem }) = &recv.ty else { return false };
+    if crate::analyze::indexed_pluck(method, elem, args).is_none() {
+        return false;
+    }
+    // Not always `__pluck`: a key local of that name would read the block's element instead.
+    let var = match &*args[0].node {
+        ExprNode::Var { name, .. } if name.as_str() == "__pluck" => Symbol::from("__pluck_element"),
+        _ => Symbol::from("__pluck"),
+    };
+    let mut element = Expr::new(span, ExprNode::Var { id: crate::ident::VarId(0), name: var.clone() });
+    element.ty = Some((**elem).clone());
+    let mut value = Expr::new(
+        span,
+        ExprNode::Send {
+            recv: Some(element),
+            method: Symbol::from("[]"),
+            args: args.clone(),
+            block: None,
+            parenthesized: false,
+        },
+    );
+    value.ty = match &expr.ty {
+        Some(Ty::Array { elem }) => Some((**elem).clone()),
+        _ => None,
+    };
+    let block = Expr::new(
+        span,
+        ExprNode::Lambda {
+            extra_params: Vec::new(),
+            params: vec![var],
+            rest_param: None,
+            block_param: None,
+            body: value,
+            block_style: crate::expr::BlockStyle::Brace,
+        },
+    );
+    let recv = recv.clone();
+    let ty = expr.ty.clone();
+    *expr = Expr::new(
+        span,
+        ExprNode::Send {
+            recv: Some(recv),
+            method: Symbol::from("map"),
+            args: vec![],
+            block: Some(block),
+            parenthesized: false,
+        },
+    );
+    expr.ty = ty;
     true
 }
 
@@ -455,6 +557,73 @@ mod tests {
         }
     }
 
+    fn array_exclusion(method: &str, receiver_ty: Ty, excluded: usize) -> Expr {
+        let mut receiver = Expr::new(
+            Span::synthetic(),
+            ExprNode::Array {
+                elements: Vec::new(),
+                style: Default::default(),
+            },
+        );
+        receiver.ty = Some(receiver_ty);
+        Expr::new(
+            Span::synthetic(),
+            ExprNode::Send {
+                recv: Some(receiver),
+                method: Symbol::from(method),
+                args: (0..excluded)
+                    .map(|value| Expr::new(Span::synthetic(), ExprNode::Lit { value: crate::expr::Literal::Int { value: value as i64 } }))
+                    .collect(),
+                block: None,
+                parenthesized: false,
+            },
+        )
+    }
+
+    #[test]
+    fn array_excluding_and_without_ground_to_the_shared_helper() {
+        for name in ["excluding", "without"] {
+            let mut e = array_exclusion(name, array_of_users(), 2);
+            assert!(rewrite_node(&mut e));
+            assert_eq!(method_of(&e), "excluding");
+            let ExprNode::Send { recv: Some(helper), args, parenthesized, .. } = &*e.node else { panic!() };
+            assert!(*parenthesized);
+            assert!(matches!(&*helper.node, ExprNode::Const { path } if path[0].as_str() == "ActiveSupport"));
+            assert_eq!(args.len(), 3, "receiver plus both exclusions");
+        }
+        let mut no_args = array_exclusion("excluding", array_of_users(), 0);
+        assert!(rewrite_node(&mut no_args));
+        let ExprNode::Send { args, .. } = &*no_args.node else { panic!() };
+        assert_eq!(args.len(), 1, "the empty Rails exclusion list still reaches the helper");
+    }
+
+    #[test]
+    fn relation_excluding_keeps_its_typed_relation_method() {
+        let model = crate::ident::ClassId(Symbol::from("User"));
+        let mut e = array_exclusion("excluding", Ty::Relation { of: model }, 1);
+        assert!(!rewrite_node(&mut e));
+        assert_eq!(method_of(&e), "excluding");
+        let ExprNode::Send { recv: Some(receiver), .. } = &*e.node else { panic!() };
+        assert!(matches!(&*receiver.node, ExprNode::Array { .. }));
+    }
+
+    #[test]
+    fn array_typed_variable_receiver_is_not_assumed_to_be_an_array() {
+        let mut e = array_exclusion("excluding", array_of_users(), 1);
+        let ExprNode::Send { recv: Some(receiver), .. } = &mut *e.node else { panic!() };
+        let mut variable = Expr::new(
+            Span::synthetic(),
+            ExprNode::Var {
+                id: crate::ident::VarId(0),
+                name: Symbol::from("items"),
+            },
+        );
+        variable.ty = Some(array_of_users());
+        *receiver = variable;
+        assert!(!rewrite_node(&mut e));
+        assert_eq!(method_of(&e), "excluding");
+    }
+
     /// campfire's direct-room sidebar: `presence || [user]` types
     /// `Array | untyped`, and the Array half has no `many?` on spinel.
     #[test]
@@ -467,14 +636,81 @@ mod tests {
         assert_eq!(e.ty, Some(Ty::Bool));
     }
 
-    /// A plain Array still takes the module function.
+    /// A plain Array is a size test too: an association typed
+    /// `Array[Model]` is a Relation on spinel, which the module
+    /// function's `Array[Object]` parameter refuses.
     #[test]
-    fn many_on_an_array_grounds_to_the_module_function() {
+    fn many_on_an_array_is_a_size_test() {
         let mut e = many_on(array_of_users());
         rewrite(&mut e);
-        assert_eq!(method_of(&e), "many?");
-        let ExprNode::Send { recv: Some(r), .. } = &*e.node else { panic!() };
-        assert!(matches!(&*r.node, ExprNode::Const { path } if path[0].as_str() == "ActiveSupport"));
+        assert_eq!(method_of(&e), ">");
+        let ExprNode::Send { recv: Some(size), .. } = &*e.node else { panic!() };
+        assert_eq!(method_of(size), "size");
+    }
+
+    #[test]
+    fn many_with_a_block_grounds_without_dropping_the_block() {
+        let mut e = many_on(array_of_users());
+        let ExprNode::Send { block, .. } = &mut *e.node else {
+            panic!()
+        };
+        *block = Some(Expr::new(
+            Span::synthetic(),
+            ExprNode::Lit {
+                value: crate::expr::Literal::Bool { value: true },
+            },
+        ));
+        rewrite(&mut e);
+        let ExprNode::Send {
+            recv: Some(r),
+            block: Some(_),
+            ..
+        } = &*e.node
+        else {
+            panic!()
+        };
+        assert!(
+            matches!(&*r.node, ExprNode::Const { path } if path[0].as_str() == "ActiveSupport")
+        );
+    }
+
+    #[test]
+    fn squish_bang_grounds_and_uses_its_non_nil_rails_return_type() {
+        let mut e = many_on(Ty::Str);
+        let ExprNode::Send { method, .. } = &mut *e.node else {
+            panic!()
+        };
+        *method = Symbol::from("squish!");
+        rewrite(&mut e);
+        let ExprNode::Send {
+            recv: Some(r),
+            args,
+            ..
+        } = &*e.node
+        else {
+            panic!()
+        };
+        assert_eq!(method_of(&e), "squish!");
+        assert!(
+            matches!(&*r.node, ExprNode::Const { path } if path[0].as_str() == "ActiveSupport")
+        );
+        assert_eq!(args.len(), 1);
+        assert_eq!(e.ty, Some(Ty::Str));
+    }
+
+    /// campfire `rooms/directs/edit`: `@room.users.many?` is a Relation.
+    /// Grounding to `size > 1` keeps Spinel from passing it into
+    /// `ActiveSupport.many?`'s Array slot.
+    #[test]
+    fn many_on_a_relation_is_a_size_test() {
+        let mut e = many_on(Ty::Relation {
+            of: crate::ident::ClassId(Symbol::from("User")),
+        });
+        rewrite(&mut e);
+        assert_eq!(method_of(&e), ">");
+        let ExprNode::Send { recv: Some(size), .. } = &*e.node else { panic!() };
+        assert_eq!(method_of(size), "size");
+        assert_eq!(e.ty, Some(Ty::Bool));
     }
 
     /// A union with a variant that has no `size` (nil) is left alone.

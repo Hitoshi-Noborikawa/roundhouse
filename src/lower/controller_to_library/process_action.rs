@@ -8,6 +8,7 @@ use crate::ident::{Symbol, VarId};
 use crate::span::Span;
 use crate::ty::Ty;
 
+use super::rewrites;
 use super::util::method_name_for_action;
 
 /// A statement in the synthesized before_action preamble — the filter
@@ -15,6 +16,8 @@ use super::util::method_name_for_action;
 /// method defined on this controller or an ancestor (`authenticate_user`
 /// on ApplicationController firing for every subclass action); `Block`
 /// inlines a block-form filter's body (`before_action { @page = page }`).
+/// `Lead` is not a filter: an always-on head of `process_action`
+/// (ParamsWrapper) that Rails runs outside the callback chain.
 /// `halt_check` appends `return if performed?` after the statement —
 /// Rails' halting semantics: a filter that renders or redirects skips
 /// the action. It's set only when the filter body can respond, so
@@ -36,6 +39,8 @@ pub(super) enum PreambleStmt {
         unless_cond_expr: Option<Expr>,
         halt_check: bool,
     },
+    /// Always-on head of `process_action` — not a before_action.
+    Lead { body: Expr },
 }
 
 /// Build the `process_action(action_name)` dispatcher:
@@ -104,6 +109,7 @@ pub(super) fn dispatcher_bodies<'a>(
                 out.push(body);
                 out.extend([if_cond_expr, unless_cond_expr].into_iter().flatten());
             }
+            PreambleStmt::Lead { body } => out.push(body),
         }
     }
     out.extend(wraps.around.iter().flat_map(filter_guards));
@@ -120,6 +126,7 @@ pub(super) fn synthesize_process_action(
     rescues: &[RescueHandler],
     wraps: &WrapFilters,
     reads_action_name: bool,
+    missing: &[Symbol],
 ) -> MethodDef {
     let mut stmts: Vec<Expr> = Vec::new();
 
@@ -144,6 +151,42 @@ pub(super) fn synthesize_process_action(
             parenthesized: true,
         }));
     }
+
+    // A route naming an action this controller does not define (no
+    // method here or on an ancestor, no template) is Rails'
+    // `AbstractController::ActionNotFound`, raised by `process` BEFORE
+    // the callback chain and outside `rescue_from`;
+    // `ActionDispatch::ExceptionWrapper` answers 404. Without this the
+    // `case` below falls through and the request answers 200 with an
+    // empty body. Only controllers with such a route get the guard;
+    // every other dispatcher is unchanged.
+    let not_found_guard = (!missing.is_empty()).then(|| {
+        let raise = syn(ExprNode::Send {
+            recv: None,
+            method: Symbol::from("raise"),
+            args: vec![
+                syn(ExprNode::Const {
+                    path: vec![Symbol::from("AbstractController"), Symbol::from("ActionNotFound")],
+                }),
+                syn(ExprNode::StringInterp {
+                    parts: vec![
+                        crate::expr::InterpPart::Text { value: "The action '".to_string() },
+                        crate::expr::InterpPart::Expr { expr: var_ref(param) },
+                        crate::expr::InterpPart::Text {
+                            value: format!("' could not be found for {}", enclosing_class.as_str()),
+                        },
+                    ],
+                }),
+            ],
+            block: None,
+            parenthesized: false,
+        });
+        syn(ExprNode::If {
+            cond: include_check(missing, &[], param),
+            then_branch: raise,
+            else_branch: empty_seq(),
+        })
+    });
 
     for p in preamble {
         let (stmt, halt_check) = match p {
@@ -178,6 +221,7 @@ pub(super) fn synthesize_process_action(
                 };
                 (stmt, *halt_check)
             }
+            PreambleStmt::Lead { body } => (body.clone(), false),
         };
         stmts.push(stmt);
         if halt_check {
@@ -198,7 +242,7 @@ pub(super) fn synthesize_process_action(
                 recv: None,
                 method: f.target.clone(),
                 args: vec![],
-                block: Some(syn(ExprNode::Lambda {
+                block: Some(syn(ExprNode::Lambda { extra_params: Vec::new(),
                     params: vec![],
                     rest_param: None,
                     block_param: None,
@@ -243,6 +287,8 @@ pub(super) fn synthesize_process_action(
                     }),
                     None => body.clone(),
                 },
+                // `Lead` is preamble-only; after filters never carry one.
+                PreambleStmt::Lead { body } => body.clone(),
             });
         }
     }
@@ -278,6 +324,10 @@ pub(super) fn synthesize_process_action(
         });
     }
 
+    if let Some(guard) = not_found_guard {
+        body = syn(ExprNode::Seq { exprs: vec![guard, body] });
+    }
+
     // Whole-cloth synthesis — attribute the dispatcher scaffolding to
     // the controller's source via its first public action (same file).
     // The per-arm dispatch Sends built in `case_dispatch` carry their
@@ -285,6 +335,15 @@ pub(super) fn synthesize_process_action(
     if let Some(first) = publics.first() {
         body.inherit_span(first.body.span);
     }
+
+    // Action bodies already run `rewrite_request_format` through
+    // `lower_action_body`. Everything *spliced into* this dispatcher —
+    // filter `if:`/`unless:` lambdas, block-form filter bodies
+    // (`before_action -> { … }`), and `rescue_from` handlers — skips
+    // that pipeline. One pass over the finished body closes the class
+    // of gap (map_expr walks If / Seq / Lambda / BeginRescue). The
+    // transform is idempotent on already-rewritten action-arm Sends.
+    body = rewrites::rewrite_request_format(&body);
 
     let param_sym = Symbol::from(param);
     MethodDef {
@@ -429,6 +488,11 @@ fn cond_from_guards(
     if let Some(name) = unless_cond {
         conds.push(negate(predicate(name)));
     }
+    // `request.format.<pred>?` in these exprs is rewritten once over
+    // the finished `process_action` body in `synthesize_process_action`
+    // (same helper action bodies get via `lower_action_body`). Do not
+    // re-apply here — that would special-case only the guard combiner
+    // and leave block-form filter / rescue bodies still raw.
     if let Some(c) = if_cond_expr {
         conds.push(c.clone());
     }

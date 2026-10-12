@@ -23,6 +23,10 @@ pub(super) struct Visibility {
     known: HashMap<(bool, String), Vec<usize>>,
     changed: HashSet<(bool, String)>,
     accessors: HashSet<(bool, String)>,
+    defaults: HashMap<usize, MethodVisibility>,
+    /// Walking a concern's `ClassMethods` carrier, whose body is the
+    /// includers' class side rather than a singleton of its own.
+    carrier: bool,
 }
 
 pub(super) fn marker(call: &CallNode<'_>) -> bool {
@@ -49,6 +53,44 @@ pub(super) fn definition<'pr>(node: &Node<'pr>) -> Option<ruby_prism::DefNode<'p
 }
 
 impl Visibility {
+    /// Recover lexical defaults for source declarations that a later pass
+    /// synthesizes into methods. Parse and walk each class body once per file.
+    pub(super) fn declaration_defaults(
+        source: &str,
+        file: &str,
+    ) -> HashMap<usize, MethodVisibility> {
+        let parsed = ruby_prism::parse(source.as_bytes());
+        let root = parsed.node();
+        let mut defaults = HashMap::new();
+        let bodies = super::util::find_all_classes_with_scope(&root)
+            .into_iter()
+            .filter_map(|(_, class)| class.body())
+            .chain(
+                super::util::find_all_module_declarations_with_scope(&root)
+                    .into_iter()
+                    .filter_map(|(_, module)| module.body()),
+            );
+        for body in bodies {
+            if let Ok(visibility) = Self::resolve(Some(&body), file, None) {
+                defaults.extend(visibility.defaults);
+            }
+            for statement in flatten_statements(body) {
+                let Some(call) = statement.as_call_node() else { continue };
+                if call.receiver().is_some() || constant_id_str(&call.name()) != "included" {
+                    continue;
+                }
+                let block_body = call
+                    .block()
+                    .and_then(|block| block.as_block_node())
+                    .and_then(|block| block.body());
+                if let Ok(visibility) = Self::resolve(block_body.as_ref(), file, None) {
+                    defaults.extend(visibility.defaults);
+                }
+            }
+        }
+        defaults
+    }
+
     pub(super) fn resolve(
         body: Option<&Node<'_>>,
         file: &str,
@@ -175,7 +217,7 @@ impl Visibility {
     fn walk_carrier(&mut self, body: Option<Node<'_>>, file: &str) -> IngestResult<()> {
         // A Concern's ClassMethods module is NOT the concern's own singleton
         // class. Their methods only share a bucket after flattening.
-        let mut carrier = Self::default();
+        let mut carrier = Self { carrier: true, ..Self::default() };
         carrier.walk(body, true, file, None)?;
         self.values.extend(carrier.values);
         Ok(())
@@ -268,9 +310,18 @@ impl Visibility {
                 self.invalid |= self.reject_defs;
             }
         }
+        // A def inside a call's block belongs to that block's owner, not
+        // to this class: a DSL block (has_many extensions), or the class
+        // a constant is assigned from — `ContentKey = Data.define(:digest)
+        // do def cache_key … end end` (campfire's FragmentCache),
+        // `Struct.new(…) do … end`.
+        let owns_defs = node.as_call_node().is_some()
+            || node
+                .as_constant_write_node()
+                .is_some_and(|w| w.value().as_call_node().is_some_and(|c| c.block().is_some()));
         let mut declarations = Declarations {
             invalid: false,
-            reject_defs: node.as_call_node().is_none(),
+            reject_defs: !owns_defs,
         };
         ruby_prism::Visit::visit(&mut declarations, node);
         if declarations.invalid {
@@ -282,6 +333,9 @@ impl Visibility {
         Ok(())
     }
 
+    /// Resolve static method visibility within one lexical body, starting public.
+    /// Nested classes and recognized Data factory blocks have separate declaration
+    /// passes, so their methods and visibility markers do not affect this scope.
     fn walk(
         &mut self,
         body: Option<Node<'_>>,
@@ -296,6 +350,7 @@ impl Visibility {
         let mut module_function = false;
         for statement in flatten_statements(body) {
             let offset = statement.location().start_offset();
+            self.defaults.insert(offset, default);
             let def = definition(&statement);
             let node = &statement;
             let mut inline = None;
@@ -426,6 +481,16 @@ impl Visibility {
                 continue;
             }
             if let Some(sc) = node.as_singleton_class_node() {
+                if self.carrier && class_side && sc.expression().as_self_node().is_some() {
+                    // Not the includers' class side: the carrier module's
+                    // own singleton, whose hooks Ruby runs when
+                    // `ActiveSupport::Concern` extends an includer with it.
+                    return Err(Self::unsupported(
+                        file,
+                        "`class << self` in a concern's `ClassMethods` defines the carrier module's own \
+                         singleton methods (such as an `extended` hook), which are not modeled",
+                    ));
+                }
                 if class_side || sc.expression().as_self_node().is_none() {
                     return Err(Self::unsupported(
                         file,
@@ -439,6 +504,9 @@ impl Visibility {
             if node.as_class_node().is_some() {
                 continue;
             }
+            if super::data_factory::declaration(node).is_some() {
+                continue;
+            }
             if let Some(module) = node.as_module_node() {
                 if module_name_path(&module).as_deref() == Some(&["ClassMethods".to_string()]) {
                     self.walk_carrier(module.body(), file)?;
@@ -446,6 +514,14 @@ impl Visibility {
                 continue;
             }
             let Some(call) = node.as_call_node() else {
+                // `X = Data.define(:a) do def … end` defines X's methods,
+                // not this body's; `library_class::data_block_classes`
+                // gives them a class of their own.
+                if node.as_constant_write_node().is_some_and(|cw| {
+                    super::library_class::data_define_block(&cw.value()).is_some()
+                }) {
+                    continue;
+                }
                 // A `def` is handled above. Anything else — an `if` that
                 // wraps a definition, a modifier that does not — still
                 // has to be rejected when it hides a marker or a `def`.

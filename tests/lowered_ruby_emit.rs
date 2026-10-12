@@ -9,6 +9,8 @@
 //! validation target for the lowering pipeline; per-target emitter
 //! migrations (TS / Rust / …) are deferred.
 
+use std::path::Path;
+
 use roundhouse::emit::{ruby, EmittedFile};
 use roundhouse::ingest::ingest_app;
 
@@ -840,7 +842,9 @@ fn controllers_article_params_lowers_to_typed_factory() {
     let files = lowered_real_blog_controllers();
     let src = find(&files, "articles_controller.rb");
     assert!(
-        src.contains("ArticleParams.from_raw(@params)"),
+        // The ruby family hands the factory `@params` behind
+        // `expect`'s refusal (ParameterMissing → 400, as Rails).
+        src.contains(r#"ArticleParams.from_raw(Params.expect_present(@params, "article", ["title", "body"], [], [], []))"#),
         "expected typed-factory lowering; got:\n{src}",
     );
     assert!(
@@ -1165,7 +1169,7 @@ fn controllers_params_helper_body_is_from_raw_call() {
         .split("def article_params").nth(1).unwrap()
         .split("end").next().unwrap();
     assert!(
-        body.contains("ArticleParams.from_raw(@params)"),
+        body.contains(r#"ArticleParams.from_raw(Params.expect_present(@params, "article", ["title", "body"], [], [], []))"#),
         "expected typed-factory body; got:\n{body}",
     );
     assert!(
@@ -1505,6 +1509,29 @@ fn lowered_article_partial_truncate_wrapped_in_html_escape() {
     assert!(
         src.contains("ActionView::ViewHelpers.html_escape(ActionView::ViewHelpers.truncate(article.body.to_s, length: 100))"),
         "expected html_escape-wrapped truncate; got:\n{src}",
+    );
+}
+
+#[test]
+fn lowered_view_word_wrap_routes_to_shared_runtime_and_escapes_output() {
+    let mut app = ingest_app(roundhouse::fixtures::real_blog()).expect("ingest real-blog");
+    let view = roundhouse::ingest::view::ingest_view(
+        "<%= word_wrap(\"one two three\", line_width: 7, break_sequence: \"|\") %>\n<%= word_wrap(article.body) %>\n",
+        Path::new("articles/word_wrap.html.erb"),
+        "app/views/articles/word_wrap.html.erb",
+    )
+    .expect("ingest word_wrap view");
+    app.views.push(view);
+
+    let files = ruby::emit_lowered_views(&app);
+    let src = find(&files, "app/views/articles/word_wrap.rb");
+    assert!(
+        src.contains("ActionView::ViewHelpers.html_escape(ActionView::ViewHelpers.word_wrap(\"one two three\", line_width: 7, break_sequence: \"|\"))"),
+        "expected a qualified shared helper call with normal interpolation escaping; got:\n{src}",
+    );
+    assert!(
+        src.contains("ActionView::ViewHelpers.html_escape(ActionView::ViewHelpers.word_wrap(article.body.to_s))"),
+        "expected nullable word_wrap text to be coerced to String; got:\n{src}",
     );
 }
 

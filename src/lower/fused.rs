@@ -72,6 +72,7 @@ pub fn apply_fused_late_rewrites(app: &mut App) {
 pub fn apply_fused_context_rewrites(app: &mut App) {
     let formats = std::mem::take(&mut app.time_formats);
     let mut gid_models: BTreeSet<Symbol> = BTreeSet::new();
+    let mut gid_signed: BTreeSet<Symbol> = BTreeSet::new();
     let materialized = super::assoc_pluck::materialized_assoc_names(app);
     let try_definers = super::try_guard::collect_definers(app);
     let try_parents = super::try_guard::collect_parents(app);
@@ -79,7 +80,7 @@ pub fn apply_fused_context_rewrites(app: &mut App) {
     super::for_each_hook_body(app, &mut |body| {
         walk_postorder(body, &mut |e| {
             super::time_current::rewrite_node(e, &formats);
-            super::global_id_locate::rewrite_node(e, &mut gid_models);
+            super::global_id_locate::rewrite_node(e, &mut gid_models, &mut gid_signed);
             super::assoc_pluck::rewrite_node(e, &materialized);
             super::try_guard::rewrite_node(e, &try_definers, &try_parents);
         });
@@ -88,12 +89,17 @@ pub fn apply_fused_context_rewrites(app: &mut App) {
         walk_postorder(body, &mut |e| {
             super::time_current::rewrite_node(e, &formats);
             super::webmock::rewrite_node(e);
+            // Same Array wall as hook bodies: campfire's destroy test
+            // plucks `room.memberships` for the enqueued job's args.
+            super::assoc_pluck::rewrite_node(e, &materialized);
             super::try_guard::rewrite_node(e, &try_definers, &try_parents);
         });
     });
     // `try_guard` also rewrites test constants and inner-class methods,
-    // which `for_each_test_body` does not reach. The other context
-    // rewrites never walked those surfaces.
+    // which `for_each_test_body` does not reach, and `webmock` the
+    // inner-class methods: an included test helper is carried in as
+    // inner classes (campfire's `PushServiceTestHelper#with_push_service`
+    // switches WebMock off around its real TLS server).
     for tm in &mut app.test_modules {
         for (_, value) in &mut tm.constants {
             walk_postorder(value, &mut |e| {
@@ -103,6 +109,7 @@ pub fn apply_fused_context_rewrites(app: &mut App) {
         for ic in &mut tm.inner_classes {
             for m in &mut ic.methods {
                 walk_postorder(&mut m.body, &mut |e| {
+                    super::webmock::rewrite_node(e);
                     super::try_guard::rewrite_node(e, &try_definers, &try_parents);
                 });
             }
@@ -110,13 +117,14 @@ pub fn apply_fused_context_rewrites(app: &mut App) {
     }
     for view in &mut app.views {
         walk_postorder(&mut view.body, &mut |e| {
-            super::global_id_locate::rewrite_node(e, &mut gid_models);
+            super::global_id_locate::rewrite_node(e, &mut gid_models, &mut gid_signed);
             super::try_guard::rewrite_node(e, &try_definers, &try_parents);
         });
     }
 
     app.time_formats = formats;
     app.global_id_locate_models.extend(gid_models);
+    app.global_id_locate_signed_models.extend(gid_signed);
 }
 
 /// Independent rewrites after the STI predecessor cluster and before
@@ -303,6 +311,7 @@ pub fn apply_fused_mid_rewrites(app: &mut App) {
     let json_map = super::has_json::has_json_columns(&app.models);
     let by_model = super::assoc_loaded::has_many_by_model(app);
     let readers = super::assoc_loaded::association_readers_by_model(app);
+    let flat_loaded = super::assoc_loaded::flat_loaded_by_model(app);
     let sole_includer = app.sole_includer_of_modules();
 
     super::for_each_owned_hook_body(app, &mut |owner, body| {
@@ -318,6 +327,7 @@ pub fn apply_fused_mid_rewrites(app: &mut App) {
                 &sole_includer,
                 &by_model,
                 &readers,
+                &flat_loaded,
             );
         });
     });
@@ -334,6 +344,7 @@ pub fn apply_fused_mid_rewrites(app: &mut App) {
                 &sole_includer,
                 &by_model,
                 &readers,
+                &flat_loaded,
             );
         });
     }
@@ -350,6 +361,7 @@ pub fn apply_fused_mid_rewrites(app: &mut App) {
                 &sole_includer,
                 &by_model,
                 &readers,
+                &flat_loaded,
             );
         });
     });
@@ -366,6 +378,7 @@ fn rewrite_mid_node(
     sole_includer: &std::collections::HashMap<crate::ident::ClassId, crate::ident::ClassId>,
     by_model: &std::collections::HashMap<crate::ident::ClassId, std::collections::HashSet<Symbol>>,
     readers: &std::collections::HashMap<crate::ident::ClassId, std::collections::HashSet<Symbol>>,
+    flat_loaded: &std::collections::HashMap<crate::ident::ClassId, std::collections::HashSet<Symbol>>,
 ) {
     if !helpers.is_empty() {
         super::route_format_suffix::rewrite_node(e, helpers);
@@ -386,7 +399,8 @@ fn rewrite_mid_node(
     if !json_map.is_empty() {
         super::has_json::rewrite_node(e, json_map);
     }
-    super::assoc_loaded::rewrite_node(e, enclosing, sole_includer, by_model, readers);
+    super::assoc_loaded::rewrite_node(e, enclosing, sole_includer, by_model, readers, flat_loaded);
+    super::arel_sql_order::rewrite_node(e);
 }
 
 fn apply_route_url_followups(
@@ -437,6 +451,9 @@ fn rewrite_hook_node(
     super::number_to_fs::rewrite_node(e);
     super::string_inflections::rewrite_node(e);
     super::to_json::rewrite_node(e);
+    super::preloader::rewrite_node(e);
+    super::bigdecimal::rewrite_node(e);
+    super::range_enumerable::rewrite_node(e);
     super::csv_generate::rewrite_node(e);
     super::presence_in::rewrite_node(e);
     super::enumerable_ext::rewrite_node(e);
@@ -483,6 +500,9 @@ fn rewrite_view_node(
     super::number_to_fs::rewrite_node(e);
     super::string_inflections::rewrite_node(e);
     super::to_json::rewrite_node(e);
+    super::preloader::rewrite_node(e);
+    super::bigdecimal::rewrite_node(e);
+    super::range_enumerable::rewrite_node(e);
     super::csv_generate::rewrite_node(e);
     super::presence_in::rewrite_node(e);
     super::enumerable_ext::rewrite_node(e);
@@ -511,6 +531,9 @@ fn rewrite_view_node(
 
 fn rewrite_test_node(e: &mut Expr, skip_full_messages: bool) {
     super::save_without_validation::rewrite_node(e);
+    super::preloader::rewrite_node(e);
+    super::bigdecimal::rewrite_node(e);
+    super::range_enumerable::rewrite_node(e);
     super::enumerable_ext::rewrite_node(e);
     super::byte_size::rewrite_node(e);
     super::dirty_predicate_kwargs::rewrite_node(e);

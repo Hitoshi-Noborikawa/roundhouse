@@ -70,6 +70,31 @@ pub(crate) fn association_readers_by_model(app: &App) -> HashMap<ClassId, HashSe
     out
 }
 
+/// Per-model association names with a synthesized flat `<name>_loaded?`:
+/// has_many, has_one, non-polymorphic belongs_to, and the
+/// `rich_text_<attr>` has_one. `association(:name).loaded?` rewrites onto
+/// it; any other name (a polymorphic belongs_to, habtm) stays put.
+pub(crate) fn flat_loaded_by_model(app: &App) -> HashMap<ClassId, HashSet<Symbol>> {
+    let mut out: HashMap<ClassId, HashSet<Symbol>> = HashMap::new();
+    for model in &app.models {
+        let entry = out.entry(model.name.clone()).or_default();
+        for (_, assoc) in model.spanned_associations() {
+            match assoc {
+                Association::HasMany { name, .. }
+                | Association::HasOne { name, .. }
+                | Association::BelongsTo { name, polymorphic: false, .. } => {
+                    entry.insert(name.clone());
+                }
+                _ => {}
+            }
+        }
+        for (_, attr) in crate::lower::rich_text::rich_text_attrs(model) {
+            entry.insert(Symbol::from(format!("rich_text_{}", attr.as_str())));
+        }
+    }
+    out
+}
+
 /// Resolve which model owns the association hop.
 ///
 /// Typed explicit receiver wins — including a union, but only when every
@@ -161,15 +186,16 @@ fn unique_model_for_name(
 pub fn apply_assoc_loaded_lowering(app: &mut App) -> Vec<Diagnostic> {
     let by_model = has_many_by_model(app);
     let readers = association_readers_by_model(app);
+    let flat_loaded = flat_loaded_by_model(app);
     let sole_includer = app.sole_includer_of_modules();
     super::for_each_owned_hook_body(app, &mut |owner, e| {
-        rewrite(e, owner, &sole_includer, &by_model, &readers);
+        rewrite(e, owner, &sole_includer, &by_model, &readers, &flat_loaded);
     });
     for view in &mut app.views {
-        rewrite(&mut view.body, None, &sole_includer, &by_model, &readers);
+        rewrite(&mut view.body, None, &sole_includer, &by_model, &readers, &flat_loaded);
     }
     super::for_each_test_body(app, &mut |e| {
-        rewrite(e, None, &sole_includer, &by_model, &readers);
+        rewrite(e, None, &sole_includer, &by_model, &readers, &flat_loaded);
     });
     Vec::new()
 }
@@ -180,10 +206,12 @@ fn rewrite(
     sole_includer: &HashMap<ClassId, ClassId>,
     by_model: &HashMap<ClassId, HashSet<Symbol>>,
     readers: &HashMap<ClassId, HashSet<Symbol>>,
+    flat_loaded: &HashMap<ClassId, HashSet<Symbol>>,
 ) {
-    expr.node
-        .for_each_child_mut(&mut |c| rewrite(c, enclosing, sole_includer, by_model, readers));
-    rewrite_node(expr, enclosing, sole_includer, by_model, readers);
+    expr.node.for_each_child_mut(&mut |c| {
+        rewrite(c, enclosing, sole_includer, by_model, readers, flat_loaded)
+    });
+    rewrite_node(expr, enclosing, sole_includer, by_model, readers, flat_loaded);
 }
 
 pub(crate) fn rewrite_node(
@@ -192,8 +220,12 @@ pub(crate) fn rewrite_node(
     sole_includer: &HashMap<ClassId, ClassId>,
     by_model: &HashMap<ClassId, HashSet<Symbol>>,
     readers: &HashMap<ClassId, HashSet<Symbol>>,
+    flat_loaded: &HashMap<ClassId, HashSet<Symbol>>,
 ) {
     if rewrite_association_target(expr, enclosing, sole_includer, readers) {
+        return;
+    }
+    if rewrite_association_loaded(expr, enclosing, sole_includer, flat_loaded) {
         return;
     }
     let ExprNode::Send {
@@ -205,7 +237,14 @@ pub(crate) fn rewrite_node(
     else {
         return;
     };
-    if method.as_str() != "loaded?" || !args.is_empty() {
+    // `.loaded?` → `<assoc>_loaded?`; `.reload` → `reload_<assoc>`
+    // (Rails' CollectionProxy#reload: the rows again, from the database).
+    let flat_name = |assoc: &Symbol| match method.as_str() {
+        "loaded?" => format!("{}_loaded?", assoc.as_str()),
+        _ => format!("reload_{}", assoc.as_str()),
+    };
+    let reload = method.as_str() == "reload";
+    if !(method.as_str() == "loaded?" || reload) || !args.is_empty() {
         return;
     }
     let ExprNode::Send {
@@ -234,7 +273,13 @@ pub(crate) fn rewrite_node(
     if !names.contains(assoc) {
         return;
     }
-    let flat = Symbol::from(format!("{}_loaded?", assoc.as_str()));
+    let flat = Symbol::from(flat_name(assoc));
+    let reload_ty = reload.then(|| Ty::Array {
+        elem: Box::new(inner.ty.as_ref().and_then(|t| match t {
+            Ty::Array { elem } => Some((**elem).clone()),
+            _ => None,
+        }).unwrap_or(Ty::Untyped)),
+    });
     // Explicit `message.boosts.loaded?` keeps `message` as receiver.
     // Implicit-self `boosts.loaded?` collapses to `self.boosts_loaded?`
     // — the same SelfRef hop `has_json` uses for `settings.foo?`.
@@ -259,8 +304,146 @@ pub(crate) fn rewrite_node(
             parenthesized: false,
         },
     );
+    rewritten.ty = Some(reload_ty.unwrap_or(Ty::Bool));
+    *expr = rewritten;
+}
+
+/// True when at least one model synthesizes `<name>_loaded?`.
+fn any_model_declares_name(
+    by_model: &HashMap<ClassId, HashSet<Symbol>>,
+    name: &Symbol,
+) -> bool {
+    by_model.values().any(|names| names.contains(name))
+}
+
+/// A ClassId that synthesizes `<name>_loaded?`, for stamping the
+/// rewritten send's receiver type on strict targets. When several
+/// models share the name (Message and Membership both `:room`), any
+/// declaring class is enough — the spelling is identical.
+fn a_model_declaring(
+    by_model: &HashMap<ClassId, HashSet<Symbol>>,
+    name: &Symbol,
+) -> Option<ClassId> {
+    by_model
+        .iter()
+        .find(|(_, names)| names.contains(name))
+        .map(|(id, _)| id.clone())
+}
+
+/// `association(:creator).loaded?` → `creator_loaded?` (or
+/// `self.creator_loaded?` when implicit-self), for every association
+/// with a synthesized flat predicate on the receiver's model.
+fn rewrite_association_loaded(
+    expr: &mut Expr,
+    enclosing: Option<&ClassId>,
+    sole_includer: &HashMap<ClassId, ClassId>,
+    flat_loaded: &HashMap<ClassId, HashSet<Symbol>>,
+) -> bool {
+    let ExprNode::Send { recv: Some(inner), method, args, .. } = &*expr.node else {
+        return false;
+    };
+    if method.as_str() != "loaded?" || !args.is_empty() {
+        return false;
+    }
+    let ExprNode::Send { recv: owner, method: assoc_method, args: assoc_args, .. } = &*inner.node
+    else {
+        return false;
+    };
+    if assoc_method.as_str() != "association" || assoc_args.len() != 1 {
+        return false;
+    }
+    let Some(name) = sym_lit(&assoc_args[0]) else {
+        return false;
+    };
+    let flat = Symbol::from(format!("{}_loaded?", name.as_str()));
+    let in_model = enclosing.is_some_and(|id| flat_loaded.contains_key(id));
+    // Test/view explicit receivers: unique-name fails when Message and
+    // Membership both `belongs_to :room`, and `message.reload` often
+    // types as `ActiveRecord::Base` so typed resolve has no flat
+    // `room_loaded?`. Name existence on *some* model gates the widen,
+    // but a known receiver model that itself lacks the flat predicate
+    // (polymorphic `belongs_to`) keeps the dynamic path. Stamp a
+    // declaring ClassId on the kept receiver for strict targets.
+    // Model methods and implicit-self keep the stricter resolve below.
+    if let Some(base) = owner {
+        if !in_model {
+            let typed = owner_from_typed_recv(base, flat_loaded, &name);
+            let allow = match &typed {
+                // `owner_from_typed_recv` only returns Some when every
+                // class alt declares `name` — or a single Class id. A
+                // concrete model key that omits the name (poly assoc)
+                // must not rewrite.
+                Some(id) if flat_loaded.contains_key(id) => {
+                    flat_loaded.get(id).is_some_and(|n| n.contains(&name))
+                }
+                // Base / untyped / unknown: any declaring model is enough.
+                _ => any_model_declares_name(flat_loaded, &name),
+            };
+            if allow {
+                let mut recv = base.clone();
+                let stamp = typed
+                    .filter(|id| {
+                        flat_loaded.get(id).is_some_and(|n| n.contains(&name))
+                    })
+                    .or_else(|| a_model_declaring(flat_loaded, &name));
+                if let Some(id) = stamp {
+                    recv.ty = Some(Ty::Class { id, args: vec![] });
+                }
+                let mut rewritten = Expr::new(
+                    expr.span,
+                    ExprNode::Send {
+                        recv: Some(recv),
+                        method: flat,
+                        args: vec![],
+                        block: None,
+                        parenthesized: false,
+                    },
+                );
+                rewritten.ty = Some(Ty::Bool);
+                *expr = rewritten;
+                return true;
+            }
+        }
+    }
+    let Some(owner_model) = resolve_owner_model(
+        owner.as_ref(),
+        enclosing,
+        sole_includer,
+        flat_loaded,
+        &name,
+    ) else {
+        return false;
+    };
+    if !flat_loaded
+        .get(&owner_model)
+        .is_some_and(|names| names.contains(&name))
+    {
+        return false;
+    }
+    let new_recv = match owner {
+        None => {
+            let mut s = Expr::new(inner.span, ExprNode::SelfRef);
+            s.ty = Some(Ty::Class {
+                id: owner_model,
+                args: vec![],
+            });
+            Some(s)
+        }
+        Some(base) => Some(base.clone()),
+    };
+    let mut rewritten = Expr::new(
+        expr.span,
+        ExprNode::Send {
+            recv: new_recv,
+            method: flat,
+            args: vec![],
+            block: None,
+            parenthesized: false,
+        },
+    );
     rewritten.ty = Some(Ty::Bool);
     *expr = rewritten;
+    true
 }
 
 /// `association(:rich_text_body).target` → `rich_text_body` (or

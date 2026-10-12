@@ -98,6 +98,22 @@ module Db
     @cv        = ConditionVariable.new
     @quarantined = []
     @missing_connections = 0
+    # Puma `before_worker_boot` re-configure sets @owner_pid to the child
+    # and therefore skips `adopt_after_fork`. Drop any inherited
+    # checkpoint-lock FD without LOCK_UN (same rule as adopt) and forget
+    # the parent's checkpointer pid so the child's first lease starts a
+    # fresh loop. Normal master boot never holds the flock; this closes
+    # the gap if it ever did.
+    inherited = @checkpoint_lock_file
+    if inherited && !inherited.closed?
+      begin
+        inherited.close
+      rescue StandardError
+      end
+    end
+    @checkpoint_lock_file = nil
+    @checkpointer_pid = nil
+    @checkpoint_warn_at = nil
     @pool      = open_pool
     @owner_pid = Process.pid
   end
@@ -196,6 +212,8 @@ module Db
           end
         end
         @checkpoint_lock_file = nil
+        @checkpointer_pid = nil
+        @checkpoint_warn_at = nil
         # The parent's handles are simply dropped. They are already
         # discarded by the gem's fork safety, and closing a descriptor
         # this process shares with its parent is not ours to do.
@@ -222,6 +240,18 @@ module Db
     @pool.free[0]
   end
 
+  # `ActiveRecord::Base.transaction`'s per-thread nesting depth
+  # (connection.rb) — see the contract note in runtime/ruby/db.rbs.
+  # `Fiber[:k]` for the same reason `current_dbh` above uses it.
+  def self._txn_depth
+    d = Fiber[:ar_txn_depth]
+    d.nil? ? 0 : d
+  end
+
+  def self._txn_depth=(value)
+    Fiber[:ar_txn_depth] = value
+  end
+
   # Request-scoped connection lease. Checks out a handle, binds it to
   # this thread's fiber-storage so `current_dbh` resolves to it for the
   # block's duration, and returns it on completion (even on raise).
@@ -237,6 +267,89 @@ module Db
   # rebind the connection and, on release, unbind the outer lease's.
   def self.in_lease?
     !Fiber[:db_handle].nil?
+  end
+
+  # `ActiveRecord::Base.connection_db_config` answers from these
+  # (runtime/spinel/active_record_db_config.rb): the database this
+  # process configured, the adapter name Rails would report for it, and
+  # whether the holder is inside a transaction of its own — the request
+  # read snapshot is the shim's, not the app's, so it does not count.
+  def self.database_path
+    @path
+  end
+
+  def self.adapter_name
+    "sqlite3"
+  end
+
+  def self.transaction_open?
+    conn = current_dbh
+    conn.transaction_active? && conn.instance_variable_get(:@rh_snapshot) != :open
+  end
+
+  # A request run on a connection this process did not open: the host
+  # Rails app's own, lent by `--target futamura`'s whole-route bridge
+  # (src/emit/futamura/routes.rb). No pool is configured in that mode.
+  #
+  # Why the connection and not the database file: the bridge runs this
+  # runtime inside a Ruby::Box, and a box loads its own copy of every
+  # native extension, sqlite3's included. Two SQLite libraries opening
+  # one file in one process can release each other's POSIX locks
+  # (sqlite.org/howtocorrupt.html, "multiple copies of SQLite"). Calling
+  # through the host's connection object runs the host's copy, so one
+  # library touches the file, and this request sees the host's open
+  # transaction (a test's fixtures) instead of a second view of the file.
+  #
+  # Cleanup is `with_connection`'s minus everything that would touch
+  # the host's state: the read snapshot is ended only if this request
+  # opened one, and a transaction is rolled back only if this fiber
+  # began it (it holds the write permit), never the host's.
+  def self.with_lent_connection(conn)
+    outer = Fiber[:db_handle]
+    as_hash = conn.results_as_hash
+    conn.results_as_hash = false
+    unless conn.instance_variable_get(:@rh_sql_functions)
+      SqlFunctions.install(conn) if defined?(SqlFunctions)
+      conn.instance_variable_set(:@rh_sql_functions, true)
+    end
+    Fiber[:db_handle] = conn
+    request_failed = false
+    begin
+      yield
+    rescue Exception
+      request_failed = true
+      raise
+    ensure
+      cleanup_error = nil
+      begin
+        if conn.instance_variable_get(:@rh_snapshot_depth).to_i > 0
+          conn.instance_variable_set(:@rh_snapshot_depth, 1)
+          read_snapshot_end
+        end
+      rescue StandardError => e
+        cleanup_error = e
+      end
+      begin
+        if permit_owned?
+          begin
+            conn.execute("ROLLBACK") if conn.transaction_active?
+          ensure
+            release_permit
+          end
+        end
+      rescue StandardError => e
+        cleanup_error ||= e
+      end
+      begin
+        release_open_statements(conn)
+      rescue StandardError => e
+        cleanup_error ||= e
+      ensure
+        Fiber[:db_handle] = outer
+        conn.results_as_hash = as_hash
+      end
+      raise cleanup_error if cleanup_error && !request_failed
+    end
   end
 
   def self.with_connection
@@ -370,6 +483,62 @@ module Db
 
   def self.exec(sql)
     record_query(sql)
+    write(sql) { |conn, s| run_exec(conn, s) }
+  end
+
+  # A write that returns rows (`INSERT … RETURNING`, roundhouse#91). It
+  # runs under exec's discipline (query cache cleared, snapshot ended,
+  # write permit), reads every row before the permit goes back, and
+  # answers a replay handle over them: step/column_*/finalize as for a
+  # read. `changes` is the write's row count.
+  def self.exec_returning(sql)
+    v = loaded_sqlite_version
+    if !returning_supported?(v)
+      raise "Db.exec_returning: RETURNING needs SQLite 3.35 or newer; this process loads " + v.to_s
+    end
+    record_query(sql)
+    rows = nil
+    names = nil
+    write(sql) do |conn, s|
+      stmt = conn.prepare(s)
+      begin
+        names = stmt.columns
+        rows = stmt.execute.to_a
+      rescue StandardError => e
+        raise ActiveRecord::RecordNotUnique, e.message if Db.unique_violation?(e.message)
+        raise
+      ensure
+        stmt.close
+      end
+    end
+    hit = { rows: rows, names: names, eof: true, sql: sql }
+    { stmt: nil, row: nil, cached: false, replay: hit, pos: 0, sql: sql }
+  end
+
+  # Test-only hook, matching the Spinel SQLite shim's (db.rb) accessor of
+  # the same name: always 0 here, since an exec_returning handle is a
+  # plain Ruby Hash — there is no persistent array of outstanding
+  # captures to leak.
+  def self.qc_cursor_count
+    0
+  end
+
+  # RETURNING arrived in SQLite 3.35.0 (3035000). An older library gets
+  # a clear error rather than a syntax error, as #91 agreed.
+  def self.returning_supported?(version_number)
+    version_number >= 3035000
+  end
+
+  # The library the gem loaded (not the one it was compiled against), as
+  # 3035000 for 3.35.0.
+  def self.loaded_sqlite_version
+    text = defined?(SQLite3::SQLITE_LOADED_VERSION) ? SQLite3::SQLITE_LOADED_VERSION : SQLite3::SQLITE_VERSION
+    major, minor, patch = text.split(".").map(&:to_i)
+    major * 1_000_000 + minor.to_i * 1000 + patch.to_i
+  end
+
+  # exec's write path; the block runs the statement on the connection.
+  def self.write(sql)
     # Any exec is (per the Db contract) DDL or a write — Rails
     # invalidates the whole query cache on write; so do we.
     qcache = Fiber[:rh_qcache]
@@ -384,7 +553,7 @@ module Db
     if permit_owned?
       # Inside this fiber's own transaction: the permit is already held.
       begin
-        run_exec(conn, sql)
+        yield(conn, sql)
       ensure
         release_permit if sql == "ROLLBACK" || (sql == "COMMIT" && !conn.transaction_active?)
       end
@@ -392,14 +561,14 @@ module Db
       # Inside a transaction that began WITHOUT the permit (its wait
       # timed out — see `acquire_permit`): SQLite's lock is already
       # held, so there is nothing to queue for.
-      run_exec(conn, sql)
+      yield(conn, sql)
     elsif sql == "BEGIN"
       # IMMEDIATE, as Rails 8's SQLite adapter begins: the write lock is
       # taken at BEGIN, not at the first write, so a transaction never
       # fails part way through upgrading a stale read.
       got = acquire_permit
       begin
-        run_exec(conn, "BEGIN IMMEDIATE")
+        yield(conn, "BEGIN IMMEDIATE")
       rescue Exception
         release_permit if got
         raise
@@ -407,7 +576,7 @@ module Db
     else
       got = acquire_permit
       begin
-        run_exec(conn, sql)
+        yield(conn, sql)
       ensure
         release_permit if got
       end
@@ -571,10 +740,33 @@ module Db
   # Tests, scripts and the console never ask, and keep SQLite's default.
   CHECKPOINT_INTERVAL = 0.25
   CHECKPOINT_RESTART_FRAMES = 8192 # ~32 MB of 4 KB pages
+  # Cap failure noise: the loop keeps its 250 ms cadence (no Campfire-style
+  # backoff that slows copying), but a stuck disk / permission / corruption
+  # path must not stay completely silent either. One warn per interval.
+  CHECKPOINT_WARN_INTERVAL = 30.0
 
   def self.checkpoint_in_background!
     @checkpoint_wanted = true
   end
+
+  # Rate-limited visibility for checkpoint_loop failures. Resets the
+  # suppress window only by time, not by success — a later success simply
+  # stops calling this. Private: the loop is the only production caller;
+  # tests reach it via `send`.
+  def self.warn_checkpoint_failure(error)
+    now = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+    last = @checkpoint_warn_at
+    return if last && (now - last) < CHECKPOINT_WARN_INTERVAL
+    @checkpoint_warn_at = now
+    begin
+      warn "[db] WAL checkpoint failed: #{error.class}: #{error.message}"
+    rescue StandardError
+      # A failing warning sink must not kill the checkpointer thread —
+      # wal_autocheckpoint is already 0 on serving connections.
+      nil
+    end
+  end
+  private_class_method :warn_checkpoint_failure
 
   def self.prepare_for_checkpointer(conn)
     start_checkpointer if @checkpointer_pid != Process.pid
@@ -638,9 +830,20 @@ module Db
   end
 
   def self.checkpoint_loop(path)
-    conn = SQLite3::Database.new(path)
-    conn.busy_handler_timeout = 100
     lock_path = checkpoint_lock_path(path)
+    # Open can fail (permissions, missing file mid-deploy). Do not let
+    # the thread die after prepare_for_checkpointer already set
+    # wal_autocheckpoint=0 — warn and retry on the same cadence.
+    conn = nil
+    until conn
+      begin
+        conn = SQLite3::Database.new(path)
+        conn.busy_handler_timeout = 100
+      rescue StandardError => error
+        warn_checkpoint_failure(error)
+        sleep CHECKPOINT_INTERVAL
+      end
+    end
     loop do
       # Hold the flock for the whole inner loop (Campfire #319), not
       # per tick: releasing every 250ms lets a sibling overlap a
@@ -651,6 +854,7 @@ module Db
         sleep CHECKPOINT_INTERVAL
         next
       end
+      held_error = nil
       begin
         loop do
           sleep CHECKPOINT_INTERVAL
@@ -666,12 +870,17 @@ module Db
             end
           end
         end
-      rescue StandardError
-        # A busy or failed checkpoint is retried on the next outer
-        # pass; the log only grows meanwhile.
+      rescue StandardError => error
+        held_error = error
       ensure
+        # Release before warn so a blocked $stderr cannot extend the
+        # exclusive flock and delay sibling takeover.
         release_checkpoint_lock(lock)
       end
+      # Retry on the next outer pass (same 250 ms cadence). Warn at
+      # most once per CHECKPOINT_WARN_INTERVAL so a persistent failure
+      # is visible without a multi-contender log storm.
+      warn_checkpoint_failure(held_error) if held_error
     end
   end
 
@@ -725,6 +934,11 @@ module Db
     Fiber[:rh_qcache] = nil
   end
 
+  # Is the replay cache on for this fiber? (`ActiveRecord::Base.uncached`)
+  def self.query_cache_enabled?
+    !Fiber[:rh_qcache].nil?
+  end
+
   # Statement identity => owning handle, on the leased connection. This
   # protects both cache hits and eviction, starting before the first step.
   def self.open_statements(conn)
@@ -752,6 +966,15 @@ module Db
   end
 
   def self.prepare(sql)
+    return prepare_marked(sql) if sql.include?("\x01")
+    prepare_plain(sql)
+  end
+
+  # Prepare without re-entering prepare_marked. After lift_binds, the
+  # bound/inline SQL may still contain \x01 inside string literals
+  # (bind_literal leaves such values unmarked); those bytes are data,
+  # not marks, and must reach SQLite intact.
+  def self.prepare_plain(sql)
     # A `?`-bearing SQL string is a placeholder query (roundhouse#12):
     # its result depends on the runtime binds set AFTER prepare, which
     # aren't in the SQL key — so it must NOT participate in the
@@ -823,6 +1046,38 @@ module Db
     handle = { stmt: stmt, row: nil, cached: cached, capture: nil, open: open }
     open[stmt] = handle
     handle[:capture] = { rows: [], names: stmt.columns, eof: false, sql: sql } if !qcache.nil? && !parameterized
+    handle
+  end
+
+  # A Relation read with its hash-condition values marked for binding
+  # (`Relation#bind_literal`). `Relation.lift_binds` answers the SQL
+  # with placeholders, which shares the prepared-statement cache by
+  # shape, and the key: the same read with the values written in. The
+  # request result cache is keyed on that, so a bound read and an inline
+  # read of the same rows share an entry, and a partial replay promotes
+  # by re-running it. Kind/value pairs follow from index 2 — "i" an
+  # integer, "s" a string — one per placeholder, in order.
+  def self.prepare_marked(marked)
+    binds = ActiveRecord::Relation.lift_binds(marked)
+    sql = binds[0].to_s
+    key = binds[1].to_s
+    return prepare_plain(key) if binds.length <= 2
+    qcache = Fiber[:rh_qcache]
+    cacheable = !qcache.nil? && !key.include?("?")
+    if cacheable && (hit = qcache[key])
+      return { stmt: nil, row: nil, cached: false, replay: hit, pos: 0, sql: key }
+    end
+    handle = prepare_plain(sql)
+    i = 2
+    while i < binds.length
+      if binds[i] == "i"
+        bind_int(handle, i / 2, binds[i + 1].to_i)
+      else
+        bind_text(handle, i / 2, binds[i + 1])
+      end
+      i += 2
+    end
+    handle[:capture] = { rows: [], names: handle[:stmt].columns, eof: false, sql: key } if cacheable
     handle
   end
 

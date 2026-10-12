@@ -680,7 +680,10 @@ fn map_loop_options(
     if method.as_str() != "map" {
         return None;
     }
-    let ExprNode::Lambda { params, body, .. } = &*block.node else { return None };
+    let ExprNode::Lambda { extra_params, params, body, .. } = &*block.node else { return None };
+    if !extra_params.is_empty() {
+        return None;
+    }
     let el = params.first().cloned()?;
     // The lambda pieces were argument-position code the template walk
     // never touched — run the helper rewrite over them so `h(x)` (the
@@ -790,7 +793,7 @@ fn each_loop_with_body(
     }
     let lambda = Expr::new(
         Span::synthetic(),
-        ExprNode::Lambda { rest_param: None,
+        ExprNode::Lambda { extra_params: Vec::new(), rest_param: None,
             params: vec![el],
             block_param: None,
             body: loop_body,
@@ -866,9 +869,12 @@ pub(super) fn emit_button_tag_block(
     block: &Expr,
     ctx: &ViewCtx,
 ) -> Option<Vec<Expr>> {
-    let ExprNode::Lambda { params, body, .. } = &*block.node else {
+    let ExprNode::Lambda { extra_params, params, body, .. } = &*block.node else {
         return None;
     };
+    if !extra_params.is_empty() {
+        return None;
+    }
     let (_positional, opts) = split_args(args);
     let mut out =
         vec![accumulator_append_call(string_interp(button_open_parts(opts.as_slice())), ctx)];
@@ -1114,9 +1120,12 @@ pub(super) fn emit_form_builder_block_inline(
     block: &Expr,
     ctx: &ViewCtx,
 ) -> Option<Vec<Expr>> {
-    let ExprNode::Lambda { params, body, .. } = &*block.node else {
+    let ExprNode::Lambda { extra_params, params, body, .. } = &*block.node else {
         return None;
     };
+    if !extra_params.is_empty() {
+        return None;
+    }
     let (positional, opts) = split_args(args);
     match kind {
         FormBuilderMethod::Button => {
@@ -1500,7 +1509,7 @@ fn emit_label(
             }),
         },
         None => parts.push(InterpPart::Text {
-            value: capitalize_ascii(field_sym.as_str()),
+            value: html_escape_static(&ctx.i18n.label(&binding.model_name, field_sym.as_str())),
         }),
     }
     parts.push(InterpPart::Text { value: "</label>".to_string() });
@@ -1802,7 +1811,8 @@ fn emit_rich_text_area(
 /// The ORDER is the gem's, traced from its option hash: the call's
 /// options as written (the two upload URLs appended into its `data:`),
 /// then `id` and `input` (`add_default_name_and_id`, the Trix-era input
-/// name kept), then `name`, then `value`, `class` and `data` only when
+/// name kept — absent under Rails' `ActionText::Editor` adapter, see
+/// `lexxy_uses_editor_adapter`), then `name`, then `value`, `class` and `data` only when
 /// the call did not give them — each a `||=` onto the hash. Measured
 /// against campfire's room page under Rails.
 ///
@@ -1902,9 +1912,14 @@ fn emit_lexxy_editor(
 
     let mut parts: Vec<InterpPart> = vec![InterpPart::Text { value: "<lexxy-editor".to_string() }];
     append_attr_parts(&mut parts, &opts);
-    parts.push(InterpPart::Text { value: format!(" id=\"{editor_id}\" input=\"") });
-    parts.push(input_id);
-    parts.push(InterpPart::Text { value: format!("\" name=\"{name}\"") });
+    // The Editor adapter (`ctx.lexxy_editor_adapter`) writes no `input`.
+    if ctx.lexxy_editor_adapter {
+        parts.push(InterpPart::Text { value: format!(" id=\"{editor_id}\" name=\"{name}\"") });
+    } else {
+        parts.push(InterpPart::Text { value: format!(" id=\"{editor_id}\" input=\"") });
+        parts.push(input_id);
+        parts.push(InterpPart::Text { value: format!("\" name=\"{name}\"") });
+    }
     if let Some(value) = value {
         parts.push(InterpPart::Expr { expr: view_helpers_call("optional_value_attr", vec![value]) });
     }
@@ -2013,7 +2028,7 @@ fn emit_submit(
 ) -> Vec<Expr> {
     let label_expr = match positional {
         Some(lbl) => lbl.clone(),
-        None => default_submit_text(binding),
+        None => default_submit_text(binding, ctx),
     };
     emit_submit_input(label_expr, opts, ctx)
 }
@@ -2050,10 +2065,9 @@ fn emit_submit_input(label_expr: Expr, opts: &[(Expr, Expr)], ctx: &ViewCtx) -> 
 /// "Update <ModelName>" else "Create <ModelName>"`. Built as an If
 /// node referencing the captured `form_method` local so per-record
 /// new/edit distinction renders correctly at runtime.
-fn default_submit_text(binding: &FormBuilderBinding) -> Expr {
-    let capitalized_model = capitalize_ascii(&binding.model_name);
-    let update_text = lit_str(format!("Update {capitalized_model}"));
-    let create_text = lit_str(format!("Create {capitalized_model}"));
+fn default_submit_text(binding: &FormBuilderBinding, ctx: &ViewCtx) -> Expr {
+    let update_text = lit_str(ctx.i18n.submit(&binding.model_name, "update"));
+    let create_text = lit_str(ctx.i18n.submit(&binding.model_name, "create"));
     let method_var_read = Expr::new(
         Span::synthetic(),
         ExprNode::Var {
@@ -2250,21 +2264,6 @@ fn field_symbol(field: Option<&Expr>) -> Option<Symbol> {
         ExprNode::Lit { value: Literal::Sym { value } } => Some(value.clone()),
         ExprNode::Lit { value: Literal::Str { value } } => Some(Symbol::from(value.as_str())),
         _ => None,
-    }
-}
-
-/// `String#capitalize` semantics (first char uppercase, rest
-/// lowercase) for ASCII identifiers. Field symbols in real fixtures
-/// are all ASCII; unicode handling would need a per-target shim.
-fn capitalize_ascii(s: &str) -> String {
-    let mut chars = s.chars();
-    match chars.next() {
-        None => String::new(),
-        Some(c) => {
-            let head: String = c.to_uppercase().collect();
-            let tail: String = chars.as_str().to_lowercase();
-            head + &tail
-        }
     }
 }
 

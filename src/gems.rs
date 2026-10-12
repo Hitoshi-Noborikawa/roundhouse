@@ -54,6 +54,11 @@ pub struct Lockfile {
     /// analyzed like the rest of the app rather than being a boundary.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub in_repo: Vec<String>,
+    /// Specs resolved from a `GIT` source. Emitting a rubygems.org
+    /// `gem "name", "= version"` pin would lie about their origin — the
+    /// locked-external wiring path skips these fail-closed.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub from_git: Vec<String>,
 }
 
 impl Lockfile {
@@ -90,6 +95,8 @@ impl Lockfile {
                         lock.specs.push((name.to_string(), version.to_string()));
                         if section == "PATH" {
                             lock.in_repo.push(name.to_string());
+                        } else if section == "GIT" {
+                            lock.from_git.push(name.to_string());
                         }
                     }
                 }
@@ -117,6 +124,11 @@ impl Lockfile {
     /// Does `name` live in this repository (a `PATH` source)?
     pub fn is_in_repo(&self, name: &str) -> bool {
         self.in_repo.iter().any(|n| n == name)
+    }
+
+    /// Is `name` resolved from a `GIT` source?
+    pub fn is_from_git(&self, name: &str) -> bool {
+        self.from_git.iter().any(|n| n == name)
     }
 
     pub fn version_of(&self, name: &str) -> Option<&str> {
@@ -300,17 +312,22 @@ const FATES: &[(&str, GemFate)] = &[
     ("uri", GemFate::Stdlib),
     ("yaml", GemFate::Stdlib),
     // ── Modeled (each row names where) ───────────────────────────
+    ("acts_as_votable", GemFate::Modeled), // ingest/acts_as_votable: ActsAsVotable::Vote on `votes`; acts_as_votable/acts_as_voter macros -> votes_for/votes + vote_by/liked_by/unvote_by/update_cached_votes (not vote_up_for/get_voted/association extensions)
     ("addressable", GemFate::Modeled), // catalog/gems: Addressable::URI
     ("bcrypt", GemFate::Modeled),      // catalog/gems: BCrypt::*; has_secure_password
-    ("devise", GemFate::Modeled), // helpers; devise_for = static 4 mappings (not model-module-driven); visibility wrappers
+    ("devise", GemFate::Modeled), // helpers; devise_for = static 4 mappings (not model-module-driven); no Warden route guards
+    ("discard", GemFate::Modeled),     // ingest/discard: include Discard::Model -> scopes + predicates + discard/undiscard (not discard_all/undiscard_all); Relation#unscope(where:)
     ("faker", GemFate::Modeled),       // catalog/gems: Faker::*
+    ("friendly_id", GemFate::Modeled), // lower/friendly_id + registry: friendly_id/friendly/to_param, Relation#friendly_find (slugged [+history] finder only; slug generation on save, :scoped/:finders/:simple_i18n unmodeled)
     ("geared_pagination", GemFate::Modeled), // registry/controllers: set_page_and_extract_portion_from
+    ("htmlentities", GemFate::Modeled), // catalog/gems: HTMLEntities
     ("image_processing", GemFate::Modeled), // active_storage variants seam
     ("invisible_captcha", GemFate::Modeled), // before_action + spam? on subtitle honeypot only
     ("kaminari", GemFate::Modeled),    // Relation#page / per / paginate
     ("mail", GemFate::Modeled),        // catalog/gems: Mail::Address; ActionMailer
     ("mocha", GemFate::Modeled),       // lower/mocha bridge
     ("nokogiri", GemFate::Modeled),    // catalog/gems: Nokogiri
+    ("pagy", GemFate::Modeled),        // registry/controllers + analyze/body/pagy + runtime action_controller/pagy.rb: pagy(scope[, limit: n]) offset paginator, Pagy#series_nav/info_tag/readers (English); other paginators/options/helpers refused
     ("pdf-reader", GemFate::Modeled),  // catalog/gems: PDF::Reader
     ("platform_agent", GemFate::Modeled), // useragent port
     ("pretender", GemFate::Modeled), // impersonates with local current_* → true_* wrap + impersonate_*; inherited-only stays unsupported
@@ -458,13 +475,10 @@ const SURFACES: &[(&str, &[&str])] = &[
     ("audited", &["audited", "audits", "own_and_associated_audits", "audit_comment"]),
     ("cancancan", &["can?", "cannot?", "authorize!", "load_and_authorize_resource", "load_resource", "authorize_resource", "current_ability", "accessible_by", "check_authorization", "skip_authorization_check"]),
     ("carrierwave", &["mount_uploader", "mount_uploaders", "remove_avatar!", "store!"]),
-    ("discard", &["discard", "discard!", "undiscard", "undiscard!", "discarded?", "undiscarded?", "kept", "discarded", "with_discarded", "discard_all", "undiscard_all"]),
     ("doorkeeper", &["doorkeeper_authorize!", "doorkeeper_token", "current_resource_owner"]),
     ("enumerize", &["enumerize"]),
-    ("friendly_id", &["friendly_id", "friendly", "slug_candidates", "should_generate_new_friendly_id?", "normalize_friendly_id"]),
     ("geocoder", &["geocoded_by", "reverse_geocoded_by", "geocode", "reverse_geocode", "near", "distance_to", "distance_from", "bearing_to", "within_bounding_box"]),
     ("money-rails", &["monetize"]),
-    ("pagy", &["pagy", "pagy_nav", "pagy_info", "pagy_array", "pagy_countless", "pagy_bootstrap_nav", "pagy_get_vars"]),
     ("paper_trail", &["has_paper_trail", "versions", "paper_trail", "whodunnit", "reify", "live?"]),
     ("paranoia", &["acts_as_paranoid", "with_deleted", "only_deleted", "without_deleted", "really_destroy!", "restore", "restore!", "paranoia_destroyed?", "deleted?"]),
     ("pundit", &["authorize", "policy_scope", "policy", "skip_authorization", "skip_policy_scope", "verify_authorized", "verify_policy_scoped", "pundit_user", "permitted_attributes", "authorized?"]),
@@ -521,6 +535,7 @@ pub fn namespace_of(gem: &str) -> String {
         ("combine_pdf", "CombinePDF"),
         ("fast_excel", "FastExcel"),
         ("graphql", "GraphQL"),
+        ("htmlentities", "HTMLEntities"),
         ("http", "HTTP"),
         ("i18n", "I18n"),
         ("jwt", "JWT"),
@@ -593,6 +608,238 @@ pub fn gem_owning_constant<'a>(census: &'a GemCensus, constant_path: &str) -> Op
     (owners.len() == 1).then(|| owners[0])
 }
 
+/// Literal external-gem includes whose defining file also has a matching
+/// top-level `require`. The lockfile identifies the gem and source names its
+/// feature; other unresolved includes remain unsupported.
+pub fn statically_resolved_external_includes(
+    app: &crate::App,
+) -> std::collections::BTreeMap<String, Vec<String>> {
+    let Some(lock) = app.gem_lock.as_ref() else {
+        return Default::default();
+    };
+    let census = GemCensus::of(lock);
+    let mut resolved = std::collections::BTreeMap::new();
+    for class in &app.library_classes {
+        let source = source_for_library_class(app, class);
+        let Some(source) = source else { continue };
+        for included in &class.includes {
+            let Some(gem) = gem_owning_constant(&census, included.0.as_str()) else {
+                continue;
+            };
+            // Fail-closed: Git-sourced gems have no Gemfile pin path that
+            // preserves the git remote — keep their includes unresolved.
+            if lock.is_from_git(gem) {
+                continue;
+            }
+            let gem_name = gem.to_ascii_lowercase();
+            let namespace = namespace_of(gem).to_ascii_lowercase();
+            let requires: Vec<String> = literal_file_level_requires(&source.text)
+                .into_iter()
+                .filter(|feature| {
+                    feature
+                        .split('/')
+                        .next()
+                        .is_some_and(|head| head == namespace || head == gem_name)
+                })
+                .collect();
+            if !requires.is_empty() {
+                resolved.insert(
+                    format!("{} includes unresolved {}", class.name.0, included.0),
+                    requires,
+                );
+            }
+        }
+    }
+    resolved
+}
+
+/// Defining source for a library class when scanning for literal requires.
+/// Prefer a real superclass / method / body span; include-only classes with
+/// no superclass leave `parent_span` synthetic (`file.0 == 0`), so fall back
+/// to a source file that declares the class or module by name.
+fn source_for_library_class<'a>(
+    app: &'a crate::App,
+    class: &crate::dialect::LibraryClass,
+) -> Option<&'a crate::span::SourceFile> {
+    let from_file = |file: crate::span::FileId| {
+        file.0
+            .checked_sub(1)
+            .and_then(|index| app.sources.get(index as usize))
+    };
+    from_file(class.parent_span.file)
+        .or_else(|| {
+            class
+                .methods
+                .iter()
+                .find_map(|method| from_file(method.name_span.file))
+        })
+        .or_else(|| {
+            class
+                .unknown_calls
+                .iter()
+                .find_map(|call| from_file(call.span.file))
+        })
+        .or_else(|| {
+            class
+                .constants
+                .iter()
+                .find_map(|(_, expr)| from_file(expr.span.file))
+        })
+        .or_else(|| {
+            class
+                .class_ivar_initializers
+                .iter()
+                .find_map(|expr| from_file(expr.span.file))
+        })
+        .or_else(|| source_declaring_class(app, class.name.0.as_str()))
+}
+
+fn source_declaring_class<'a>(
+    app: &'a crate::App,
+    class_name: &str,
+) -> Option<&'a crate::span::SourceFile> {
+    let leaf = class_name.rsplit("::").next().unwrap_or(class_name);
+    let candidates = [class_name, leaf];
+    app.sources.iter().find(|source| {
+        source.text.lines().any(|line| {
+            let trimmed = line.trim_start();
+            candidates.iter().any(|name| {
+                for keyword in ["class ", "module "] {
+                    let Some(rest) = trimmed.strip_prefix(keyword) else {
+                        continue;
+                    };
+                    if rest == *name {
+                        return true;
+                    }
+                    if let Some(after) = rest.strip_prefix(name) {
+                        let boundary = after
+                            .chars()
+                            .next()
+                            .is_none_or(|c| !c.is_alphanumeric() && c != '_' && c != ':');
+                        if boundary {
+                            return true;
+                        }
+                    }
+                }
+                false
+            })
+        })
+    })
+}
+
+/// Namespaces owned by unknown gems that are pinned in this app's lockfile.
+/// Ruby project emission uses these only when it also wires the exact gems.
+pub fn locked_external_gem_namespaces(app: &crate::App) -> std::collections::BTreeSet<String> {
+    let Some(lock) = app.gem_lock.as_ref() else {
+        return Default::default();
+    };
+    GemCensus::of(lock)
+        .unknown()
+        .filter(|gem| !lock.is_from_git(&gem.name))
+        .map(|gem| namespace_of(&gem.name))
+        .collect()
+}
+
+/// True when `detail` names a constant under `root` (`Rouge::X`), not a
+/// longer identifier that merely ends with the root (`NotRouge::X`).
+pub fn detail_names_external_namespace(detail: &str, root: &str) -> bool {
+    let needle = format!("{root}::");
+    let bytes = detail.as_bytes();
+    let mut start = 0;
+    while let Some(rel) = detail[start..].find(&needle) {
+        let abs = start + rel;
+        let boundary_ok = abs == 0 || !is_ruby_ident_byte(bytes[abs - 1]);
+        if boundary_ok {
+            return true;
+        }
+        start = abs + 1;
+    }
+    false
+}
+
+fn is_ruby_ident_byte(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || b == b'_'
+}
+
+/// Literal `require "…"` lines at file-level scope (nesting depth 0).
+/// Column-zero indentation alone is not enough — a require inside a
+/// multiline `if`/`class`/… must not hoist as an unconditional feature.
+fn literal_file_level_requires(text: &str) -> Vec<String> {
+    let mut depth = 0i32;
+    let mut out = Vec::new();
+    for line in text.lines() {
+        let trimmed = line.trim_start();
+        if opens_ruby_nest(trimmed) {
+            depth += 1;
+        }
+        if depth == 0 {
+            if let Some(feature) = literal_top_level_require(line) {
+                out.push(feature);
+            }
+        }
+        if closes_ruby_nest(trimmed) {
+            depth = depth.saturating_sub(1);
+        }
+    }
+    out
+}
+
+fn opens_ruby_nest(trimmed: &str) -> bool {
+    // Modifier forms (`foo if bar`) do not start with these keywords.
+    if trimmed == "begin"
+        || trimmed.starts_with("begin ")
+        || trimmed.starts_with("begin;")
+        || trimmed.starts_with("begin#")
+    {
+        return true;
+    }
+    if trimmed == "do"
+        || trimmed.starts_with("do ")
+        || trimmed.starts_with("do|")
+        || trimmed.starts_with("do;")
+    {
+        return true;
+    }
+    const OPENERS: &[&str] = &[
+        "class ",
+        "module ",
+        "def ",
+        "if ",
+        "unless ",
+        "case ",
+        "while ",
+        "until ",
+    ];
+    OPENERS.iter().any(|op| trimmed.starts_with(op))
+        || trimmed.starts_with("class<<")
+        || trimmed.starts_with("class <<")
+}
+
+fn closes_ruby_nest(trimmed: &str) -> bool {
+    trimmed == "end"
+        || trimmed.starts_with("end ")
+        || trimmed.starts_with("end;")
+        || trimmed.starts_with("end#")
+}
+
+fn literal_top_level_require(line: &str) -> Option<String> {
+    if line.starts_with(char::is_whitespace) || !line.starts_with("require ") {
+        return None;
+    }
+    let argument = line["require ".len()..].trim();
+    let quote = argument.chars().next()?;
+    if !matches!(quote, '\'' | '"') {
+        return None;
+    }
+    let end = argument[1..].find(quote)? + 1;
+    let trailing = argument[end + 1..].trim();
+    if !trailing.is_empty() && !trailing.starts_with('#') {
+        return None;
+    }
+    let feature = &argument[1..end];
+    (!feature.is_empty() && !feature.contains('#')).then(|| feature.to_string())
+}
+
 /// All candidates in the best namespace-matching tier. Full/irregular
 /// names beat dashed-prefix guesses (`Alba`: alba, not alba-inertia).
 pub fn gems_owning_constant<'a>(census: &'a GemCensus, constant_path: &str) -> Vec<&'a str> {
@@ -604,7 +851,45 @@ pub fn gem_owning_constant_with<'a>(census: &'a GemCensus, constant_path: &str, 
     (owners.len() == 1).then(|| owners[0])
 }
 
+// Not left to the head match, which hands a framework's namespace to the framework.
+const PARKED: &[(&str, &str)] = &[
+    ("active_model_serializers", "ActiveModel::Serializer"),
+    ("active_model_serializers", "ActiveModel::ArraySerializer"),
+];
+
+fn gems_parking_constant<'a>(census: &'a GemCensus, constant_path: &str) -> Vec<&'a str> {
+    let path = constant_path.trim_start_matches("::");
+    census
+        .unknown()
+        .filter(|g| {
+            g.version.is_some()
+                && PARKED.iter().any(|(gem, base)| {
+                    *gem == g.name && path.strip_prefix(base).is_some_and(|rest| rest.is_empty() || rest.starts_with("::"))
+                })
+        })
+        .map(|g| g.name.as_str())
+        .collect()
+}
+
+// Not the namespace tiers: an app class nested in a gem's namespace (`Twilio::IncomingMessageService`) is the app's own.
+pub fn gem_defining_constant<'a>(census: &'a GemCensus, constant_path: &str) -> Option<&'a str> {
+    let path = constant_path.trim_start_matches("::");
+    let owners: Vec<_> = census
+        .unknown()
+        .filter(|g| {
+            g.version.is_some()
+                && (namespace_of(&g.name) == path || PARKED.iter().any(|(gem, base)| *gem == g.name && *base == path))
+        })
+        .map(|g| g.name.as_str())
+        .collect();
+    (owners.len() == 1).then(|| owners[0])
+}
+
 pub(crate) fn gems_owning_constant_with<'a>(census: &'a GemCensus, constant_path: &str, declares: &dyn Fn(&str, &str) -> Option<bool>) -> Vec<&'a str> {
+    let parked = gems_parking_constant(census, constant_path);
+    if !parked.is_empty() {
+        return parked;
+    }
     let head = constant_path.trim_start_matches("::").split("::").next().unwrap_or(constant_path);
     let exact: Vec<_> = census
         .unknown()
@@ -732,7 +1017,32 @@ BUNDLED WITH
         assert_eq!(gem_owning_constant(&census, "Rails"), None, "framework gems don't claim");
         let lock = Lockfile::parse(LOCK);
         assert_eq!(gem_claiming_method(&lock, "policy_scope"), Some("pundit"));
-        assert_eq!(gem_claiming_method(&lock, "friendly_id"), None, "friendly_id is not in this lock");
+        assert_eq!(gem_claiming_method(&lock, "acts_as_list"), None, "acts-as-list is not in this lock");
+    }
+
+    #[test]
+    fn a_gem_parked_under_a_framework_namespace_owns_its_base() {
+        let lock = "\
+GEM
+  remote: https://rubygems.org/
+  specs:
+    active_model_serializers (0.10.14)
+    rails (8.0.2)
+    sanitize (7.0.0)
+
+DEPENDENCIES
+  active_model_serializers
+  rails
+  sanitize
+";
+        let census = GemCensus::of(&Lockfile::parse(lock));
+        assert_eq!(gem_owning_constant(&census, "ActiveModel::Serializer"), Some("active_model_serializers"));
+        assert_eq!(gem_owning_constant(&census, "ActiveModel::Serializer::CollectionSerializer"), Some("active_model_serializers"));
+        assert_eq!(gem_owning_constant(&census, "ActiveModel::Errors"), None, "the rest of the namespace stays the framework's");
+        assert_eq!(gem_defining_constant(&census, "ActiveModel::Serializer"), Some("active_model_serializers"));
+        assert_eq!(gem_defining_constant(&census, "ActiveModel::Serializer::Mine"), None);
+        assert_eq!(gem_defining_constant(&census, "Sanitize"), Some("sanitize"));
+        assert_eq!(gem_defining_constant(&census, "Sanitize::AppConfig"), None, "an app class nested in a gem's namespace is the app's");
     }
 
     #[test]
@@ -762,6 +1072,10 @@ GEM
 ";
         assert_eq!(lock_path_remotes(lock), vec!["lib/billing", "../shared"]);
         assert!(lock_path_remotes(LOCK).is_empty());
+        let parsed = Lockfile::parse(lock);
+        assert!(parsed.is_from_git("widgets"));
+        assert!(!parsed.is_from_git("billing"));
+        assert!(parsed.is_in_repo("billing"));
     }
 }
 

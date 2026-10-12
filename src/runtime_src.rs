@@ -277,17 +277,32 @@ fn collect_constant_from_stmt(
 }
 
 /// Best-effort type inference for the right-hand side of a constant
-/// assignment. Recognizes Hash and Array literals (typing element
-/// types from the first key/value or first array element), with an
-/// optional trailing `.freeze`. Falls back to None for unsupported
+/// assignment. Recognizes scalar literals, integer arithmetic on integer
+/// literals (`SMART = 1 << 10`), and Hash and Array literals (typing
+/// element types from the first key/value or first array element), with
+/// an optional trailing `.freeze`. Falls back to None for unsupported
 /// shapes — the body-typer's existing fallback still applies.
 fn type_of_const_literal(node: &Node<'_>) -> Option<Ty> {
+    if let Some(ty) = type_of_literal_node(node) {
+        return Some(ty);
+    }
     // Strip `.freeze` if present — it's a no-op for typing.
     if let Some(call) = node.as_call_node() {
         let name = std::str::from_utf8(call.name().as_slice()).ok()?;
         if name == "freeze" {
             let inner = call.receiver()?;
             return type_of_const_literal(&inner);
+        }
+        // `1 << 10`, `FLAG_A | FLAG_B`-free integer arithmetic: both
+        // operands integer literals (or such arithmetic) is an Integer.
+        if matches!(name, "<<" | ">>" | "|" | "&" | "^" | "+" | "-" | "*") {
+            let int = |n: &Node<'_>| matches!(type_of_const_literal(n), Some(Ty::Int));
+            let recv = call.receiver()?;
+            let args: Vec<_> = call.arguments().map(|a| a.arguments().iter().collect()).unwrap_or_default();
+            if int(&recv) && args.len() == 1 && int(&args[0]) {
+                return Some(Ty::Int);
+            }
+            return None;
         }
         // `CONST = Klass.new(…)` — a constructed instance is as much a
         // typed constant as a literal is, and it is the shape a rule
@@ -346,7 +361,11 @@ fn type_of_const_literal(node: &Node<'_>) -> Option<Ty> {
             args: vec![],
         });
     }
-    None
+    // A scalar literal (`SALT = "active_record/signed_id"`) types as
+    // itself. Without this a runtime class's scalar constant had no table
+    // entry, so an app read of it resolved to the runtime declaration with
+    // no type and was refused as an unsupported constant.
+    type_of_literal_node(node)
 }
 
 fn type_of_literal_node(node: &Node<'_>) -> Option<Ty> {
@@ -731,6 +750,51 @@ fn seed_well_known_classes(
         .or_insert(adapter_iface);
 }
 
+/// Private typing view: re-attach this file's full `Ty::Fn` for methods
+/// that declare a block. Shared registries are often return-only
+/// (`ret` stripped); `block_params_for` needs the Fn. Non-block entries
+/// already present in `classes` still win (registry-seeded returns).
+///
+/// When the caller registry lacks the enclosing class, `or_default`
+/// would otherwise build a sparse `ClassInfo` with only block-bearing
+/// methods — `send(name)` then unions to `Nil` instead of `Untyped`,
+/// and `{ (instance) -> void }` siblings stay unresolved. For those
+/// classes, also fill non-block local signatures with `or_insert`.
+/// Never mutates `classes`.
+fn typing_classes_with_local_block_contracts(
+    classes: &std::collections::HashMap<crate::ident::ClassId, crate::analyze::ClassInfo>,
+    methods: &[MethodDef],
+) -> std::collections::HashMap<crate::ident::ClassId, crate::analyze::ClassInfo> {
+    let declares_block: std::collections::HashSet<&Symbol> = methods
+        .iter()
+        .filter(|m| matches!(m.signature, Some(Ty::Fn { block: Some(_), .. })))
+        .filter_map(|m| m.enclosing_class.as_ref())
+        .collect();
+
+    let mut typing_classes = classes.clone();
+    for m in methods {
+        let (Some(enclosing), Some(sig)) = (&m.enclosing_class, &m.signature) else {
+            continue;
+        };
+        if !declares_block.contains(enclosing) {
+            continue;
+        }
+        let info = typing_classes
+            .entry(crate::ident::ClassId(enclosing.clone()))
+            .or_default();
+        let table = match m.receiver {
+            MethodReceiver::Instance => &mut info.instance_methods,
+            MethodReceiver::Class => &mut info.class_methods,
+        };
+        if matches!(sig, Ty::Fn { block: Some(_), .. }) {
+            table.insert(m.name.clone(), sig.clone());
+        } else {
+            table.entry(m.name.clone()).or_insert_with(|| sig.clone());
+        }
+    }
+    typing_classes
+}
+
 /// Same as `parse_methods_with_rbs` but takes a pre-built class
 /// registry — so cross-class method dispatch during body-typing can
 /// resolve. Used by the runtime-sweep test, which builds a unified
@@ -872,11 +936,8 @@ pub fn parse_methods_with_rbs_in_ctx(
     // Reads now resolve cleanly even when they lexically precede
     // the assignment (e.g. `@cache ||= compute` lowers to a `BoolOp`
     // whose left arm reads the unset ivar).
-    //
-    // Runtime code doesn't reference user classes today, so the
-    // dispatch table is empty — the body-typer falls back to its
-    // primitive method tables for everything.
-    let typer = crate::analyze::BodyTyper::new(classes);
+    let typing_classes = typing_classes_with_local_block_contracts(classes, &methods);
+    let typer = crate::analyze::BodyTyper::new(&typing_classes);
 
     // Extract module-level constants from the .rb so dispatch on
     // `STATUS_CODES.fetch(...)` etc. resolves through the constant's
@@ -888,9 +949,17 @@ pub fn parse_methods_with_rbs_in_ctx(
                      ivars: &std::collections::HashMap<Symbol, Ty>|
      -> crate::analyze::Ctx {
         let mut ctx = crate::analyze::Ctx::default();
+        ctx.class_side = m.receiver == MethodReceiver::Class;
         if let Some(Ty::Fn { params, .. }) = &m.signature {
             for (param, p) in m.params.iter().zip(params.iter()) {
                 ctx.local_bindings.insert(param.name.clone(), p.ty.clone());
+            }
+            // `def subscribe(subscriber, &block)`: the captured block is
+            // the signature's block, which `m.params` does not carry.
+            if let Some(block_param) = &m.block_param {
+                if let Some(p) = params.iter().find(|p| matches!(p.kind, crate::ty::ParamKind::Block)) {
+                    ctx.local_bindings.insert(block_param.name.clone(), p.ty.clone());
+                }
             }
         }
         if let Some(enclosing) = &m.enclosing_class {
@@ -1324,7 +1393,13 @@ fn method_def_from(
         MethodReceiver::Instance
     };
 
-    let formals = crate::ingest::forwarding::parse(def);
+    let mut formals = crate::ingest::forwarding::parse(def);
+    // The typed runtime keeps the strict rule: an anonymous `*` (even an
+    // unforwarded one, which app ingest binds to a generated name) has
+    // no business in a runtime method and stays a recorded fact.
+    if formals.anonymous_rest_name.is_some() && formals.unsupported.is_none() {
+        formals.unsupported = Some(crate::dialect::UnsupportedFormal::AnonymousRest);
+    }
     if formals.anonymous == Some(crate::ingest::forwarding::AnonymousFormal::Forwarding) {
         return Err(format!("method `{name}`: full forwarding is outside the typed runtime-source subset"));
     }

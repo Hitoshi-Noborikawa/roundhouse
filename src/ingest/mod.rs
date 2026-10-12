@@ -16,6 +16,7 @@
 //! cross-cutting Prism AST helpers live in [`util`].
 
 mod alba;
+mod pagy;
 mod graphql_ruby;
 pub(crate) mod class_attribute;
 mod class_configuration;
@@ -26,6 +27,7 @@ pub mod allow_browser;
 pub mod app;
 mod concern_accessors;
 pub mod controller;
+mod data_factory;
 pub mod expr;
 pub mod fixture;
 pub(crate) mod forwarding;
@@ -39,6 +41,9 @@ pub mod library_class;
 pub mod channel_callbacks;
 pub mod current_attributes;
 pub mod delegate;
+mod acts_as_votable;
+mod discard;
+mod model_delegate;
 pub mod thread_mattr;
 pub mod model;
 mod delegated_type;
@@ -47,6 +52,8 @@ pub mod on_load_reopen;
 pub mod prism;
 pub mod rbi;
 pub mod rate_limit;
+pub mod inertia;
+pub mod initializer_ledger;
 pub mod roda_app;
 pub mod routes;
 pub mod singleton_class;
@@ -62,6 +69,7 @@ pub mod survey;
 pub mod test;
 pub mod util;
 pub mod view;
+pub mod vite;
 mod visibility;
 
 pub use app::{ingest_app, ingest_app_from_tree, ingest_app_with_vfs};
@@ -75,10 +83,15 @@ pub use library_class::{
 pub use model::ingest_model;
 pub use roda_app::{ingest_roda_app_with_vfs, is_roda_app};
 pub use routes::ingest_routes;
-pub use schema::{ingest_migration, ingest_schema};
+pub use schema::{
+    ingest_migration, ingest_migration_with_generated_expression_dialect, ingest_schema,
+    ingest_schema_with_generated_expression_dialect,
+};
 pub use sequel_migration::ingest_sequel_migration;
 pub use sequel_model::ingest_sequel_model;
-pub use structure_sql::ingest_structure_sql;
+pub use structure_sql::{
+    ingest_structure_sql, ingest_structure_sql_with_generated_expression_dialect,
+};
 pub use test::{ingest_test_file, ingest_test_files};
 pub use view::ingest_view;
 

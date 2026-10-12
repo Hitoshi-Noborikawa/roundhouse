@@ -57,6 +57,10 @@ pub struct App {
     /// None when the app has no importmap.rb.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub importmap: Option<Importmap>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inertia: Option<InertiaConfig>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vite_manifest: Option<ViteManifest>,
     /// Logical stylesheet names discovered in `app/assets/stylesheets/`
     /// + `app/assets/builds/` (file stems without `.css`). When the
     /// ERB uses `stylesheet_link_tag :app, ...`, Rails with Propshaft
@@ -89,6 +93,14 @@ pub struct App {
     /// replaces Action Text's `rich_text_area`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gem_lock: Option<crate::gems::Lockfile>,
+    /// The Rails frameworks `config/application.rb` loads, as top-level
+    /// constant names (`rails/all` → every framework; individual
+    /// `require "active_storage/engine"` lines → just those). `None`
+    /// when the file is absent or unreadable, which is also what a
+    /// non-Rails tree looks like. Read by `lower::defined_const_fold`,
+    /// which answers `defined?(ActiveStorage)` from it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub loaded_frameworks: Option<Vec<String>>,
     /// The classes and method headers the locked gems' Tapioca RBIs
     /// declare ([`crate::gem_boundary`]). Declarations only, read at
     /// ingest when the tree (or the real location of its lockfile) has
@@ -103,6 +115,13 @@ pub struct App {
     /// the runtime's generated `ContentHelper.app_allowed_attributes`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub content_helper_allowed_attributes: Vec<String>,
+    /// Tags the app adds the same way — `allowed_tags=` in a
+    /// `to_prepare` / initializer (campfire's
+    /// `ContentFilters::EDITOR_FORMATTING_TAGS`). Rendered into
+    /// `ContentHelper.app_allowed_tags`. Needed once sanitize runs on
+    /// render: without it, editor markup (`s`/`u`/table) is stripped.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub content_helper_allowed_tags: Vec<String>,
     /// Call-site-unified parameter types, written by the analyzer's
     /// fixpoint (`unify_params_from_call_sites`) as its last act and
     /// read by lowerings that build method signatures — the controller
@@ -127,6 +146,9 @@ pub struct App {
     /// arrays would bloat every dump for nothing.
     #[serde(skip)]
     pub binary_assets: Vec<(String, Vec<u8>)>,
+    /// `config/locales` for the default locale (see `crate::i18n`).
+    #[serde(default, skip_serializing_if = "crate::i18n::Catalog::is_empty")]
+    pub i18n: crate::i18n::Catalog,
     /// App-helper method registry: maps each method name defined in an
     /// `app/helpers/*.rb` module to the helper module (`ClassId`) that
     /// defines it. Rails mixes all helper modules into every view, so a
@@ -171,6 +193,12 @@ pub struct App {
     /// where the finder is spelled as a literal constant.
     #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
     pub global_id_locate_models: BTreeSet<Symbol>,
+    /// Model class names a `GlobalID::Locator.locate_signed(sgid,
+    /// only: K, for:)` call site names. Same monomorphize reason as
+    /// [`Self::global_id_locate_models`]; the generated entry point is
+    /// `locate_signed_<model>(sgid, purpose)`.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub global_id_locate_signed_models: BTreeSet<Symbol>,
     /// Model names whose attachment sgid the app resolves even when
     /// its SIGNATURE fails — campfire's `%w[ User ]`, read by
     /// [`crate::ingest::on_load_reopen`] from the `from_node` reopen
@@ -183,6 +211,12 @@ pub struct App {
     /// as it is in stock Rails.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub attachable_unsigned_models: Vec<Symbol>,
+    /// Pending `on_load(:active_storage_attachment)` includes-only
+    /// reopens: `(model_name, module_paths)`. File order can visit the
+    /// load-hook file before the model; ingest applies these once
+    /// `app.models` is complete, just before the concern splice.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pending_attachment_on_load: Vec<(Symbol, Vec<Symbol>)>,
     /// Modules `include`d inside `ActiveSupport.on_load(:active_record)`
     /// that provide class-method macros. Mixin instance methods are not
     /// installed. Expansion treats these as an explicit provider origin
@@ -363,6 +397,12 @@ pub struct App {
     /// item provenance) can follow when emission needs it.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub concern_model_items: HashMap<ClassId, Vec<ModelBodyItem>>,
+    /// Instance-method names a concern's `included do` block (re)defines
+    /// (`def x`, `alias_method :x, ...`, `define_method`, `attr_*`), keyed by
+    /// module. Those statements are not carried as `concern_model_items`, so
+    /// this is the only record that an includer's reader `x` is replaced.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub concern_included_redefs: HashMap<ClassId, Vec<Symbol>>,
     /// Classes that were `ActiveSupport::CurrentAttributes` subclasses
     /// before `ingest::current_attributes` flattened them. Recorded
     /// because that pass CLEARS the parent — nothing downstream could
@@ -398,6 +438,15 @@ pub struct App {
     /// built by hand in tests.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub sources: Vec<crate::span::SourceFile>,
+    /// Rails' ParamsWrapper default for every controller: wrap a JSON
+    /// body under the controller's model name. On when
+    /// `config.load_defaults` is 7.0 or later (Rails sets
+    /// `action_controller.wrap_parameters_by_default`), unless that key
+    /// is set explicitly, or when an initializer calls
+    /// `wrap_parameters format: [:json]` (the pre-7.0 generator).
+    /// Read by `lower::controller_to_library::params_wrapper`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub wrap_parameters_by_default: bool,
     /// Rubydex answers for `sources`, resolved while ingest finished.
     /// The analyzer resolves the sources itself when this is absent.
     #[serde(skip)]
@@ -577,6 +626,28 @@ impl MixinKind {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Default)]
+pub struct InertiaConfig {
+    pub version: String,
+    pub encrypt_history: bool,
+    pub always_include_errors_hash: bool,
+    pub use_script_element_for_initial_page: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Default)]
+pub struct ViteManifest {
+    pub public_dir: String,
+    pub digest: String,
+    pub chunks: std::collections::BTreeMap<String, ViteChunk>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Default)]
+pub struct ViteChunk {
+    pub file: String,
+    pub css: Vec<String>,
+    pub imports: Vec<String>,
+}
+
 /// A Rails-style importmap: one `<name>` → `<path>` entry per
 /// pin, in declaration order (Rails preserves order for
 /// modulepreload link emission).
@@ -632,9 +703,7 @@ impl App {
                         if method.as_str() == "include" {
                             for arg in args {
                                 if let crate::expr::ExprNode::Const { path } = &*arg.node {
-                                    ids.push(crate::ident::ClassId(crate::ident::Symbol::from(
-                                        path.iter().map(|s| s.as_str()).collect::<Vec<_>>().join("::"),
-                                    )));
+                                    ids.push(crate::analyze::mixin_path_id(path));
                                 }
                             }
                         }
@@ -686,6 +755,7 @@ impl App {
             schema_version: Self::SCHEMA_VERSION,
             schema: Schema::default(),
             binary_assets: Vec::new(),
+            i18n: crate::i18n::Catalog::default(),
             models: Vec::new(),
             library_classes: Vec::new(),
             controllers: Vec::new(),
@@ -695,18 +765,24 @@ impl App {
             fixtures: Vec::new(),
             seeds: None,
             importmap: None,
+            inertia: None,
+            vite_manifest: None,
             stylesheets: Vec::new(),
             rbs_signatures: HashMap::new(),
             rbs_includes: HashMap::new(),
             gem_lock: None,
+            loaded_frameworks: None,
             gem_boundary: Default::default(),
             content_helper_allowed_attributes: Vec::new(),
+            content_helper_allowed_tags: Vec::new(),
             inferred_method_params: HashMap::new(),
             helper_method_index: HashMap::new(),
             view_visible_controller_methods: BTreeSet::new(),
             generated_helper_methods: BTreeMap::new(),
             global_id_locate_models: BTreeSet::new(),
+            global_id_locate_signed_models: BTreeSet::new(),
             attachable_unsigned_models: Vec::new(),
+            pending_attachment_on_load: Vec::new(),
             load_hook_class_macros: Vec::new(),
             partial_local_types: HashMap::new(),
             view_ivar_types: HashMap::new(),
@@ -722,11 +798,13 @@ impl App {
             concern_spliced_actions: HashMap::new(),
             concern_spliced_class_methods: HashMap::new(),
             concern_model_items: HashMap::new(),
+            concern_included_redefs: HashMap::new(),
             current_attribute_classes: Vec::new(),
             render_edges: HashMap::new(),
             view_feeders: HashMap::new(),
             controller_resolutions: HashMap::new(),
             sources: Vec::new(),
+            wrap_parameters_by_default: false,
             const_resolver: Default::default(),
             source_index_required: false,
             root: String::new(),

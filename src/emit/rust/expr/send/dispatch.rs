@@ -57,6 +57,7 @@ pub(super) fn external_class_method_param_tys(class: &str, method: &str) -> Opti
         }
         ("Db", "escape_bool_opt") => Some(vec![Ty::Union { variants: vec![Ty::Bool, Ty::Nil] }]),
         ("Db", "last_insert_rowid") => Some(vec![]),
+        ("Db", "changes") => Some(vec![]),
         // `Broadcasts::method(HashMap<String, Value>)` — the lowerer
         // emits kwargs as a HashMap; the runtime shim accepts that
         // shape and pulls named fields out.
@@ -334,7 +335,7 @@ pub(super) fn dispatch_method_by_recv_ty(
                 // `as i64` cast — non-primary. Decide pass stamps
                 // `NEEDS_PARENS` on this Send for chained-recv use;
                 // consumer wraps. Arg/let-RHS positions stay bare.
-                Some(format!("{recv_s}.len() as i64"))
+                Some(format!("{recv_s}.chars().count() as i64"))
             }
             // `str.to_i` → Ruby semantics: parse leading digits, 0 on
             // parse failure / non-numeric input. Rust's `parse::<i64>`

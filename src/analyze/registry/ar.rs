@@ -105,15 +105,28 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
             .or_default();
         for m in [
             "transaction",
-            "connection_pool",
             "establish_connection",
         ] {
             base.class_methods.entry(Symbol::from(m)).or_insert(Ty::Untyped);
         }
+        // Which database, and the pool's `with_connection` — served on the
+        // ruby family and spinel by runtime/spinel/active_record_db_config.rb.
+        base.class_methods
+            .entry(Symbol::from("connection_db_config"))
+            .or_insert(Ty::Class {
+                id: ClassId(Symbol::from("ActiveRecord::DatabaseConfigurations::HashConfig")),
+                args: vec![],
+            });
+        base.class_methods
+            .entry(Symbol::from("connection_pool"))
+            .or_insert(Ty::Class {
+                id: ClassId(Symbol::from("ActiveRecord::ConnectionAdapters::DbPool")),
+                args: vec![],
+            });
         base.class_methods
             .entry(Symbol::from("connection"))
             .or_insert_with(connection_ty);
-        for m in ["sanitize_sql", "sanitize_sql_array"] {
+        for m in ["sanitize_sql", "sanitize_sql_array", "sanitize_sql_like"] {
             base.class_methods.entry(Symbol::from(m)).or_insert(Ty::Str);
         }
         // Association / ActionText macro helpers call these on the
@@ -132,6 +145,28 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
         base.class_methods
             .entry(Symbol::from("strict_loading_by_default"))
             .or_insert(Ty::Bool);
+    }
+
+    {
+        let config = classes
+            .entry(ClassId(Symbol::from("ActiveRecord::DatabaseConfigurations::HashConfig")))
+            .or_default();
+        for m in ["database", "adapter", "name", "env_name"] {
+            config.instance_methods.entry(Symbol::from(m)).or_insert(Ty::Str);
+        }
+        // The block's value: whatever the caller computes from the connection.
+        classes
+            .entry(ClassId(Symbol::from("ActiveRecord::ConnectionAdapters::DbPool")))
+            .or_default()
+            .instance_methods
+            .entry(Symbol::from("with_connection"))
+            .or_insert(Ty::Untyped);
+        classes
+            .entry(ClassId(Symbol::from("ActiveRecord::ConnectionAdapters::SQLite3Adapter")))
+            .or_default()
+            .class_methods
+            .entry(Symbol::from("resolve_path"))
+            .or_insert(Ty::Str);
     }
 
     // CollectionProxy — the runtime helper transpiled models use
@@ -276,6 +311,7 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
             ("attach_blob", Ty::Nil),
             ("attach", Ty::Nil),
             ("purge", Ty::Nil),
+            ("purge_later", Ty::Nil),
             ("destroy", Ty::Nil),
         ] {
             attached.instance_methods.insert(Symbol::from(m), ty);
@@ -285,6 +321,62 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
             Ty::Array { elem: Box::new(class_ty(&ClassId(Symbol::from("ActiveStorage::Variation")))) },
         );
         classes.insert(attached_id.clone(), attached);
+
+        // `has_many_attached` proxy — `attachments` answers
+        // `ManyAttachment` (runtime join-row value), not the
+        // synthesized Attachment MODEL, so the registry can name it
+        // without racing the model loop.
+        {
+            let many_row_id = ClassId(Symbol::from("ActiveStorage::ManyAttachment"));
+            let mut many_row = ClassInfo::default();
+            many_row.instance_methods.insert(Symbol::from("id"), Ty::Int);
+            many_row.instance_methods.insert(
+                Symbol::from("blob"),
+                Ty::Union {
+                    variants: vec![class_ty(&blob_id), Ty::Nil],
+                },
+            );
+            many_row.instance_methods.insert(
+                Symbol::from("filename"),
+                Ty::Union {
+                    variants: vec![class_ty(&filename_id), Ty::Nil],
+                },
+            );
+            many_row.instance_methods.insert(
+                Symbol::from("content_type"),
+                Ty::Union {
+                    variants: vec![Ty::Str, Ty::Nil],
+                },
+            );
+            many_row.instance_methods.insert(Symbol::from("url"), Ty::Str);
+            classes.insert(many_row_id.clone(), many_row);
+
+            let many_id = ClassId(Symbol::from("ActiveStorage::AttachedMany"));
+            let mut many = ClassInfo::default();
+            many.instance_methods.insert(Symbol::from("attached?"), Ty::Bool);
+            many.instance_methods.insert(
+                Symbol::from("attachments"),
+                Ty::Array {
+                    elem: Box::new(class_ty(&many_row_id)),
+                },
+            );
+            // `delegate_missing_to :attachments` — `each` is the
+            // Enumerable call the corpus makes (`embeds.each(&:filename)`).
+            many.instance_methods.insert(
+                Symbol::from("each"),
+                super::block_fn(
+                    &class_ty(&many_row_id),
+                    Ty::Array { elem: Box::new(class_ty(&many_row_id)) },
+                ),
+            );
+            many.instance_methods.insert(Symbol::from("attach_blob"), Ty::Nil);
+            many.instance_methods.insert(Symbol::from("attach"), Ty::Nil);
+            many.instance_methods.insert(Symbol::from("purge"), Ty::Nil);
+            many.instance_methods.insert(Symbol::from("purge_later"), Ty::Nil);
+            many.instance_methods.insert(Symbol::from("first"), nilable(class_ty(&many_row_id)));
+            many.instance_methods.insert(Symbol::from("destroy"), Ty::Nil);
+            classes.insert(many_id, many);
+        }
 
         let mut blob = ClassInfo::default();
         for (m, ty) in [
@@ -297,11 +389,18 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
             ("signed_id", Ty::Str),
             ("download", Ty::Str),
             ("purge", Ty::Nil),
+            ("purge_later", Ty::Nil),
+            // `ActionText::Attachable` — the ruby-family Blob reopen
+            // (runtime/spinel/active_storage_disk.rb) mints it.
+            ("attachable_sgid", Ty::Str),
             ("video?", Ty::Bool),
             ("image?", Ty::Bool),
             ("audio?", Ty::Bool),
             ("variable?", Ty::Bool),
             ("url", Ty::Str),
+            // Attachment#url and Attached#url call `redirect_url`;
+            // register it beside `url` so synthesized helpers type.
+            ("redirect_url", Ty::Str),
             // Action Text's `_blob` partial: a previewable or variable
             // blob renders through `representation(transformations)`.
             ("representable?", Ty::Bool),
@@ -341,6 +440,7 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
         let mut variant = ClassInfo::default();
         for (m, ty) in [
             ("processed", class_ty(&variant_id)),
+            ("processed?", Ty::Bool),
             ("process", Ty::Nil),
             ("image", nilable(class_ty(&attached_id))),
             ("blob", nilable(class_ty(&blob_id))),
@@ -355,6 +455,9 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
         variant.class_methods.insert(Symbol::from("record_select"), Ty::Str);
         variant.class_methods.insert(Symbol::from("purge_records_of"), Ty::Nil);
         classes.insert(variant_id, variant);
+        let mut variant_record = ClassInfo::default();
+        variant_record.class_methods.insert(Symbol::from("count"), Ty::Int);
+        classes.insert(ClassId(Symbol::from("ActiveStorage::VariantRecord")), variant_record);
 
         // One `attachable.variant :name, resize_to_limit: [w, h],
         // format: :f` declaration, constructed into the reader by
@@ -627,7 +730,7 @@ pub(in crate::analyze) fn register_action_text(classes: &mut HashMap<ClassId, Cl
     let node_ty = Ty::Class { id: node_id.clone(), args: vec![] };
     let mut fragment = ClassInfo::default();
     fragment.class_methods.insert(Symbol::from("wrap"), fragment_ty.clone());
-    for m in ["to_s", "to_html", "source"] {
+    for m in ["to_s", "to_html", "source", "to_plain_text"] {
         fragment.instance_methods.insert(Symbol::from(m), Ty::Str);
     }
     for m in ["find_all", "css"] {
@@ -662,6 +765,9 @@ pub(in crate::analyze) fn register_action_text(classes: &mut HashMap<ClassId, Cl
     for m in ["blank?", "empty?", "present?"] {
         content.instance_methods.insert(Symbol::from(m), Ty::Bool);
     }
+    // The element view the runtime's `Content#fragment` builds
+    // (campfire's `Message#plain_text_body` asks it for attachments).
+    content.instance_methods.insert(Symbol::from("fragment"), fragment_ty.clone());
     content
         .instance_methods
         .insert(Symbol::from("links"), Ty::Array { elem: Box::new(Ty::Str) });

@@ -47,7 +47,7 @@ use std::process::Command;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use roundhouse::analyze::diagnose;
-use roundhouse::diagnostic::Severity;
+use roundhouse::diagnostic::{Diagnostic, Severity};
 use roundhouse::ingest::ingest_app;
 use roundhouse::project::BuildTarget;
 
@@ -144,8 +144,11 @@ impl Overlay {
     /// database before the script's first line.
     pub fn run_ruby(self, script: &str) -> Run {
         let (emitted, errors) = self.emit_tree(BuildTarget::Ruby);
+        // `ruby -e` reads its script in the locale's encoding, so under
+        // `LANG=C` any non-ASCII literal is a syntax error. The magic
+        // comment must be the first line to count.
         let script = format!(
-            "require File.expand_path(\"main\", Dir.pwd)\nMain.configure_default_adapter!\n{script}"
+            "# encoding: utf-8\nrequire File.expand_path(\"main\", Dir.pwd)\nMain.configure_default_adapter!\n{script}"
         );
         let output = ruby()
             .arg("-e")
@@ -160,20 +163,31 @@ impl Overlay {
     /// Compile the unchanged Spinel output and run its native binary.
     /// The consumer boots libraries, not the HTTP server or a database.
     pub fn run_spinel(self, script: &str) -> Run {
+        self.run_spinel_with_flags(script, &[])
+    }
+
+    /// Also enforce the emitted sidecars, as the shipped Makefile does.
+    pub fn run_spinel_with_rbs(self, script: &str) -> Run {
+        self.run_spinel_with_flags(script, &["--rbs", "."])
+    }
+
+    fn run_spinel_with_flags(self, script: &str, flags: &[&str]) -> Run {
         let (emitted, errors) = self.emit_tree(BuildTarget::Spinel);
         std::fs::write(emitted.join("contract.rb"), format!("require_relative \"boot\"\n{script}"))
             .expect("write native consumer");
         let compiler = std::env::var("SPINEL").unwrap_or_else(|_| "spinel".into());
-        let compiled = Command::new(&compiler).args(["contract.rb", "-o", "contract"])
+        let command = std::iter::once(compiler.as_str()).chain(flags.iter().copied())
+            .chain(["contract.rb", "-o", "contract"]).collect::<Vec<_>>().join(" ");
+        let compiled = Command::new(&compiler).args(flags).args(["contract.rb", "-o", "contract"])
             .current_dir(&emitted).output().expect("spawn spinel");
         std::fs::write(emitted.join("compile.stdout"), &compiled.stdout).expect("write compile stdout");
         std::fs::write(emitted.join("compile.stderr"), &compiled.stderr).expect("write compile stderr");
         if !compiled.status.success() {
-            return Run::new(format!("{compiler} contract.rb -o contract"), emitted, errors, compiled);
+            return Run::new(command, emitted, errors, compiled);
         }
         let output = Command::new(emitted.join("contract")).current_dir(&emitted)
             .output().expect("run native consumer");
-        Run::new(format!("{compiler} contract.rb -o contract && ./contract"), emitted, errors, output)
+        Run::new(format!("{command} && ./contract"), emitted, errors, output)
     }
 
     /// Copy the fixture, apply the edits, analyze, and write the Ruby
@@ -184,7 +198,24 @@ impl Overlay {
         (Emitted(dir), errors)
     }
 
+    /// Emit and retain structured errors plus the source catalogue that
+    /// resolves each diagnostic's `FileId`. Tests that make provenance
+    /// claims should inspect that mapping rather than grep `Debug` spans.
+    pub fn emit_with_app(
+        self,
+        target: BuildTarget,
+    ) -> (Emitted, roundhouse::App, Vec<Diagnostic>) {
+        let (dir, app, errors) = self.emit_app_tree(target);
+        (Emitted(dir), app, errors)
+    }
+
     fn emit_tree(self, target: BuildTarget) -> (PathBuf, Vec<String>) {
+        let (emitted, _app, errors) = self.emit_app_tree(target);
+        let errors = errors.into_iter().map(|d| format!("{:?}: {}", d.span, d.message)).collect();
+        (emitted, errors)
+    }
+
+    fn emit_app_tree(self, target: BuildTarget) -> (PathBuf, roundhouse::App, Vec<Diagnostic>) {
         let scratch = scratch_dir();
         let source = scratch.join("app");
         copy_tree(&self.base, &source);
@@ -223,19 +254,16 @@ impl Overlay {
             .into_iter()
             .chain(lower_diags)
             .filter(|d| d.severity == Severity::Error)
-            .map(|d| format!("{:?}: {}", d.span, d.message))
             .collect();
 
         let emitted = scratch.join("emitted");
         let (files, emit_diags) = roundhouse::emit::diagnostics::scope(|| {
             roundhouse::project::target_files(&app, &source, target)
         });
-        errors.extend(emit_diags.into_iter()
-            .filter(|d| d.severity == Severity::Error)
-            .map(|d| format!("{:?}: {}", d.span, d.message)));
+        errors.extend(emit_diags.into_iter().filter(|d| d.severity == Severity::Error));
         let files = files.expect("target files");
         roundhouse::project::write_to_dir(&files, &emitted).expect("write ruby target tree");
-        (emitted, errors)
+        (emitted, app, errors)
     }
 }
 
