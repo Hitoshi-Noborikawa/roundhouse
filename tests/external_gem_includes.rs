@@ -65,6 +65,64 @@ fn locked_external_include_keeps_its_literal_feature_require() {
 }
 
 #[test]
+fn namespace_match_requires_identifier_boundary() {
+    assert!(roundhouse::gems::detail_names_external_namespace(
+        "Rouge::Plugins::Redcarpet",
+        "Rouge"
+    ));
+    assert!(
+        !roundhouse::gems::detail_names_external_namespace("NotRouge::X", "Rouge"),
+        "longer identifiers that merely end with the root must not match"
+    );
+}
+
+#[test]
+fn multiline_conditional_require_does_not_resolve_include() {
+    let conditional = app(
+        "if ENV[\"ENABLE_MARKDOWN\"]\n\
+         require \"rouge/plugins/redcarpet\"\n\
+         end\n\
+         class MarkdownRenderer < Redcarpet::Render::HTML\n\
+           include Rouge::Plugins::Redcarpet\n\
+         end\n",
+    );
+    assert!(
+        statically_resolved_external_includes(&conditional).is_empty(),
+        "column-zero require inside multiline if must not resolve"
+    );
+}
+
+#[test]
+fn git_sourced_gem_stays_unresolved() {
+    let files = [
+        (
+            "Gemfile.lock",
+            "GIT\n  remote: https://github.com/acme/rouge.git\n  revision: abc\n  specs:\n    rouge (4.5.1)\n\nGEM\n  specs:\n    redcarpet (3.6.0)\n\nDEPENDENCIES\n  redcarpet\n  rouge!\n",
+        ),
+        (
+            "lib/markdown_renderer.rb",
+            "require \"rouge/plugins/redcarpet\"\n\
+             class MarkdownRenderer < Redcarpet::Render::HTML\n\
+               include Rouge::Plugins::Redcarpet\n\
+             end\n",
+        ),
+    ];
+    let tree: HashMap<PathBuf, Vec<u8>> = files
+        .into_iter()
+        .map(|(path, source)| (PathBuf::from(path), source.as_bytes().to_vec()))
+        .collect();
+    let app = ingest_app_from_tree(tree).expect("ingest git-sourced rouge");
+    assert!(
+        statically_resolved_external_includes(&app).is_empty(),
+        "Git-sourced gems must stay unresolved"
+    );
+    assert!(
+        !roundhouse::gems::locked_external_gem_namespaces(&app).contains("Rouge"),
+        "Git-sourced namespaces must not pass through emission"
+    );
+}
+
+#[test]
 fn unrequired_or_nonliteral_external_includes_remain_unresolved() {
     let mut missing_lock = app("require \"rouge/plugins/redcarpet\"\n\
          class MarkdownRenderer < Redcarpet::Render::HTML\n\

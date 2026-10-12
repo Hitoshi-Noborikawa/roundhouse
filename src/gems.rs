@@ -626,12 +626,15 @@ pub fn statically_resolved_external_includes(
             let Some(gem) = gem_owning_constant(&census, included.0.as_str()) else {
                 continue;
             };
+            // Fail-closed: Git-sourced gems have no Gemfile pin path that
+            // preserves the git remote — keep their includes unresolved.
+            if lock.is_from_git(gem) {
+                continue;
+            }
             let gem_name = gem.to_ascii_lowercase();
             let namespace = namespace_of(gem).to_ascii_lowercase();
-            let requires: Vec<String> = source
-                .text
-                .lines()
-                .filter_map(literal_top_level_require)
+            let requires: Vec<String> = literal_file_level_requires(&source.text)
+                .into_iter()
                 .filter(|feature| {
                     feature
                         .split('/')
@@ -732,8 +735,91 @@ pub fn locked_external_gem_namespaces(app: &crate::App) -> std::collections::BTr
     };
     GemCensus::of(lock)
         .unknown()
+        .filter(|gem| !lock.is_from_git(&gem.name))
         .map(|gem| namespace_of(&gem.name))
         .collect()
+}
+
+/// True when `detail` names a constant under `root` (`Rouge::X`), not a
+/// longer identifier that merely ends with the root (`NotRouge::X`).
+pub fn detail_names_external_namespace(detail: &str, root: &str) -> bool {
+    let needle = format!("{root}::");
+    let bytes = detail.as_bytes();
+    let mut start = 0;
+    while let Some(rel) = detail[start..].find(&needle) {
+        let abs = start + rel;
+        let boundary_ok = abs == 0 || !is_ruby_ident_byte(bytes[abs - 1]);
+        if boundary_ok {
+            return true;
+        }
+        start = abs + 1;
+    }
+    false
+}
+
+fn is_ruby_ident_byte(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || b == b'_'
+}
+
+/// Literal `require "…"` lines at file-level scope (nesting depth 0).
+/// Column-zero indentation alone is not enough — a require inside a
+/// multiline `if`/`class`/… must not hoist as an unconditional feature.
+fn literal_file_level_requires(text: &str) -> Vec<String> {
+    let mut depth = 0i32;
+    let mut out = Vec::new();
+    for line in text.lines() {
+        let trimmed = line.trim_start();
+        if opens_ruby_nest(trimmed) {
+            depth += 1;
+        }
+        if depth == 0 {
+            if let Some(feature) = literal_top_level_require(line) {
+                out.push(feature);
+            }
+        }
+        if closes_ruby_nest(trimmed) {
+            depth = depth.saturating_sub(1);
+        }
+    }
+    out
+}
+
+fn opens_ruby_nest(trimmed: &str) -> bool {
+    // Modifier forms (`foo if bar`) do not start with these keywords.
+    if trimmed == "begin"
+        || trimmed.starts_with("begin ")
+        || trimmed.starts_with("begin;")
+        || trimmed.starts_with("begin#")
+    {
+        return true;
+    }
+    if trimmed == "do"
+        || trimmed.starts_with("do ")
+        || trimmed.starts_with("do|")
+        || trimmed.starts_with("do;")
+    {
+        return true;
+    }
+    const OPENERS: &[&str] = &[
+        "class ",
+        "module ",
+        "def ",
+        "if ",
+        "unless ",
+        "case ",
+        "while ",
+        "until ",
+    ];
+    OPENERS.iter().any(|op| trimmed.starts_with(op))
+        || trimmed.starts_with("class<<")
+        || trimmed.starts_with("class <<")
+}
+
+fn closes_ruby_nest(trimmed: &str) -> bool {
+    trimmed == "end"
+        || trimmed.starts_with("end ")
+        || trimmed.starts_with("end;")
+        || trimmed.starts_with("end#")
 }
 
 fn literal_top_level_require(line: &str) -> Option<String> {

@@ -145,7 +145,7 @@ fn is_locked_external_gem_constant(expr: &Expr) -> bool {
         namespaces
             .borrow()
             .iter()
-            .any(|root| detail.contains(&format!("{root}::")))
+            .any(|root| crate::gems::detail_names_external_namespace(detail, root))
     })
 }
 

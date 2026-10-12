@@ -384,7 +384,9 @@ fn run_transpile(
                 construct, detail, ..
             } if construct.as_str() == "constant" => !external_namespaces
                 .iter()
-                .any(|namespace| detail.contains(&format!("{namespace}::"))),
+                .any(|namespace| {
+                    roundhouse::gems::detail_names_external_namespace(detail, namespace)
+                }),
             _ => true,
         });
     }
