@@ -1402,6 +1402,14 @@ fn push_user_methods(methods: &mut Vec<MethodDef>, model: &Model) {
 /// model, and this corpus has no counterexample, so order tracking
 /// for them isn't implemented.
 ///
+/// The same reasoning applies on the way OUT, to `new`: a hand-written
+/// `def new` declared AFTER this alias in the body is the last
+/// definition and wins over the alias copy, exactly as it would win
+/// over a `def new` written before the alias. Splicing the resolved
+/// copy into `methods` unconditionally — instead of checking for a
+/// later redefinition — silently lost that later `def` (#839).
+///
+
 /// **Per-source Rails ground truth** (checked against Rails 8.1 at
 /// class-body time, in-memory sqlite ActiveRecord — see the PR
 /// description for the transcript):
@@ -1478,7 +1486,7 @@ fn resolve_model_aliases(
     // changes it again).
     let mut live: HashMap<Symbol, MethodDef> = HashMap::new();
 
-    for item in &model.body {
+    for (idx, item) in model.body.iter().enumerate() {
         match item {
             ModelBodyItem::Method { method, .. } if method.receiver == MethodReceiver::Instance => {
                 live.insert(method.name.clone(), method.clone());
@@ -1523,13 +1531,33 @@ fn resolve_model_aliases(
                     Some(mut copy) => {
                         copy.name = new.clone();
                         copy.name_span = Span::synthetic();
-                        if let Some(idx) = methods
-                            .iter()
-                            .position(|m| m.name == *new && m.receiver == MethodReceiver::Instance)
-                        {
-                            methods[idx] = copy.clone();
-                        } else {
-                            methods.push(copy.clone());
+                        // Snapshot semantics cut both ways: `live`
+                        // above tracks what `old` meant AT THE ALIAS
+                        // LINE, and the same body-order reasoning
+                        // applies to `new` on the way out. Ruby's
+                        // class body runs top to bottom, so a
+                        // hand-written `def new` AFTER this alias
+                        // statement is the last definition and wins —
+                        // `push_user_methods` (which ran before this
+                        // function) already put that later def in
+                        // `methods`, so leave it there untouched. Only
+                        // a `def new` BEFORE the alias (or no `def
+                        // new` at all) lets the alias copy win.
+                        let redefined_later = model.body[idx + 1..].iter().any(|later| matches!(
+                            later,
+                            ModelBodyItem::Method { method, .. }
+                                if method.receiver == MethodReceiver::Instance
+                                    && method.name == *new
+                        ));
+                        if !redefined_later {
+                            if let Some(midx) = methods
+                                .iter()
+                                .position(|m| m.name == *new && m.receiver == MethodReceiver::Instance)
+                            {
+                                methods[midx] = copy.clone();
+                            } else {
+                                methods.push(copy.clone());
+                            }
                         }
                         live.insert(new.clone(), copy);
                     }
