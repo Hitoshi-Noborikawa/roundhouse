@@ -278,7 +278,11 @@ inside the Rails process (`vendor/futamura/lowered/`), and its
 `RUBY_BOX=1`. Ruby 4.0.x (4.0.5, 4.0.7) segfaults under `RUBY_BOX=1`
 as soon as Rails loads `net/imap`, before any box exists. The
 generated initializer refuses to boot without a box;
-`FUTAMURA_WHOLE_ROUTE=off` runs the same tree as plain Rails.
+`FUTAMURA_WHOLE_ROUTE=off` runs the same tree as plain Rails. It is
+SQLite-only for now, because the lowered runtime reads through the
+connection Rails lends it and only its SQLite shim can take one; on any
+other primary database the initializer turns whole-route off and says
+so, and every route is Rails'.
 
 **Which routes.** `src/emit/futamura/routes.rs` decides per GET
 action. It walks the classes the `ruby` target emits (controllers with
