@@ -57,6 +57,7 @@ pub(crate) use const_resolution::{ConstResolver, ConstResolverTask};
 pub use const_resolution::PreparedConstResolver;
 use const_resolution::ResolvedConstant;
 mod narrowing;
+mod pagy;
 mod send;
 pub(crate) use send::PARAM_VALUE;
 pub(crate) use send::{indexed_pluck, string_answers};
@@ -1498,6 +1499,22 @@ impl<'a> BodyTyper<'a> {
                 }
                 for a in args.iter_mut() {
                     self.analyze_expr(a, ctx);
+                }
+                // The pagy gem's `pagy(scope)`: `[Pagy, <the scope's type>]`.
+                if method.as_str() == "pagy"
+                    && block.is_none()
+                    && recv.as_ref().is_none_or(|r| matches!(&*r.node, ExprNode::SelfRef))
+                {
+                    let mut refusal = None;
+                    if let Some(ty) = self.pagy_call_ty(args, ctx, &mut refusal) {
+                        if refusal.is_some() {
+                            expr.diagnostic = refusal;
+                        }
+                        return ty;
+                    }
+                }
+                if let Some(refusal) = self.pagy_object_refusal(recv_ty.as_ref(), method, args) {
+                    expr.diagnostic = Some(refusal);
                 }
                 if let Some(r) = recv.as_mut() {
                     if promotes_to_param_value(r, recv_ty.as_ref(), method, args, &ctx.local_bindings) {

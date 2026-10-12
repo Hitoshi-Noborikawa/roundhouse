@@ -43,6 +43,13 @@ pub struct ErbSegment {
     pub e_end: u32,
 }
 
+/// `yield` / `render ...` as the whole body of an output tag: the view
+/// walker emits both without an escape, so `<%==` has nothing to remove.
+fn is_unescaped_call(ruby: &str) -> bool {
+    let first = ruby.split(|c: char| !(c.is_alphanumeric() || c == '_')).next().unwrap_or("");
+    matches!(first, "yield" | "render")
+}
+
 /// Translate one compiled-Ruby byte offset to a template byte offset.
 ///
 /// Offsets inside a segment translate by delta (clamped to the
@@ -320,10 +327,17 @@ pub fn compile_erb_mapped(source: &str) -> (String, Vec<ErbSegment>) {
                         // (`link_to x, y, class: "..."`) and low-precedence
                         // operators (`a || b`) bind as a single expression.
                         // Ingest unwraps ParenthesesNode transparently.
-                        out.push_str("_buf = _buf + (");
+                        //
+                        // `<%== expr %>` skips the auto-escape: spelled
+                        // `raw((expr))`, the form `<%= raw(expr) %>` already
+                        // lowers unescaped. `yield` and `render` are left
+                        // bare: the walker never escapes either, and its
+                        // classifiers match them as the whole expression.
+                        let raw_wrap = is_raw_output && !is_unescaped_call(ruby);
+                        out.push_str(if raw_wrap { "_buf = _buf + (raw((" } else { "_buf = _buf + (" });
                         record_code(&mut map, out.len(), ruby, body_start, body);
                         out.push_str(ruby);
-                        out.push_str(").to_s\n");
+                        out.push_str(if raw_wrap { "))).to_s\n" } else { ").to_s\n" });
                     }
                 } else if let Some(modifier) = end_tag_modifier(ruby) {
                     // `<% end %>`, and `<% end if cond %>` — a block

@@ -5052,6 +5052,25 @@ fn report_unsupported_bundled_constants(app: &App, target: BuildTarget) {
                 );
             }
         }
+        // The pagy gem's `pagy(scope)` is `runtime/ruby/action_controller/
+        // pagy.rb`, a Base reopen only the ruby family and spinel load. On
+        // a strict target the call would reach a controller with no such
+        // method; ledger it rather than emit it.
+        if let crate::expr::ExprNode::Send { recv, method, .. } = &*expr.node
+            && method.as_str() == "pagy"
+            && target != "spinel"
+            && target != "jruby"
+            && !expr.span.is_synthetic()
+            && recv.as_ref().is_none_or(|r| matches!(&*r.node, crate::expr::ExprNode::SelfRef))
+            && app.gem_lock.as_ref().is_some_and(|lock| lock.has("pagy"))
+        {
+            emit::diagnostics::report_unsupported(
+                expr.span,
+                target,
+                "pagy",
+                "the pagy gem's `pagy` is only available on the ruby family and spinel".to_string(),
+            );
+        }
         // A mapped JSON call does not emit a Ruby module object. Skip
         // only that exact receiver, not its arguments (which can still
         // contain unsupported class values) or unmapped method calls.
@@ -5881,6 +5900,7 @@ fn spinel_files(app: &App, fixture: &Path) -> Result<(Vec<(String, String)>, Vec
     apply_test_gem_wiring(&mut files);
     apply_spinel_sql_functions(&mut files, app)?;
     apply_pagination_demand(&mut files)?;
+    apply_pagy_demand(&mut files, app)?;
     Ok((files, test_stems))
 }
 
@@ -5912,6 +5932,32 @@ fn apply_pagination_demand(files: &mut Vec<(String, String)>) -> Result<(), Stri
         p != "runtime/action_controller/pagination.rb"
             && p != "runtime/action_controller/pagination.rbs"
             && p != "sig/runtime/action_controller/pagination.rbs"
+    });
+    Ok(())
+}
+
+/// The pagy gem's `pagy` / `Pagy` (runtime/ruby/action_controller/pagy.rb)
+/// ride the tree only for an app whose Gemfile.lock carries pagy: the file
+/// reopens `ActionController::Base`, and an app without the gem has no
+/// `pagy` method to model (a controller of its own named `pagy` would
+/// otherwise meet the base's).
+fn apply_pagy_demand(files: &mut Vec<(String, String)>, app: &App) -> Result<(), String> {
+    if app.gem_lock.as_ref().is_some_and(|l| l.has("pagy")) {
+        return Ok(());
+    }
+    const REQUIRE: &str = "require_relative \"action_controller/pagy\"\n";
+    let ac = files
+        .iter_mut()
+        .find(|(p, _)| p == "runtime/action_controller.rb")
+        .ok_or("spinel tree has no runtime/action_controller.rb")?;
+    if !ac.1.contains(REQUIRE) {
+        return Err("runtime/action_controller.rb: the pagy require moved".into());
+    }
+    ac.1 = ac.1.replacen(REQUIRE, "", 1);
+    files.retain(|(p, _)| {
+        p != "runtime/action_controller/pagy.rb"
+            && p != "runtime/action_controller/pagy.rbs"
+            && p != "sig/runtime/action_controller/pagy.rbs"
     });
     Ok(())
 }
