@@ -59,7 +59,11 @@ fn is_unescaped_call(ruby: &str) -> bool {
     let root = result.node();
     let Some(program) = root.as_program_node() else { return false };
     let top = program.statements().body();
-    let Some(def) = top.iter().next().and_then(|n| n.as_def_node()) else { return false };
+    let mut top_iter = top.iter();
+    // Exactly one top-level statement: the wrapper `def`, not one the body
+    // closed early and followed with more code.
+    let (Some(first), None) = (top_iter.next(), top_iter.next()) else { return false };
+    let Some(def) = first.as_def_node() else { return false };
     let Some(statements) = def.body().and_then(|b| b.as_statements_node()) else { return false };
     let stmt_list = statements.body();
     let mut stmts = stmt_list.iter();

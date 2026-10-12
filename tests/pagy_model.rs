@@ -343,3 +343,120 @@ fn raw_output_wraps_everything_but_a_bare_yield_or_render() {
         assert!(compiled.contains(&format!("raw(({chained}))")), "{chained}: {compiled}");
     }
 }
+
+fn wrapper_is_refused(wrapper: &str) -> bool {
+    let concern = format!(
+        "module Pagination\n  extend ActiveSupport::Concern\n\n  module BoundsCheck\n    {wrapper}\n  end\n\n  included do\n    prepend BoundsCheck\n  end\nend\n"
+    );
+    let files = tree(
+        Some(LOCK),
+        &[
+            ("app/controllers/concerns/pagination.rb", concern.as_str()),
+            ("app/controllers/application_controller.rb", "class ApplicationController < ActionController::Base\n  include Pagination\nend\n"),
+        ],
+    );
+    match ingest_app_from_tree(files) {
+        Err(e) => e.to_string().contains("overrides the pagy gem's `pagy`"),
+        Ok(_) => false,
+    }
+}
+
+#[test]
+fn a_wrapper_that_rebinds_or_returns_otherwise_in_any_form_is_refused() {
+    let bodies = [
+        ("case_in_bind", "case collection\n      in { title: pagy }\n        nil\n      else\n        nil\n      end"),
+        ("rightward_bind", "collection => { title: records }"),
+        ("predicate_bind", "collection in [pagy, _]"),
+        ("splat_multi", "first, *records = [1, 2]"),
+        ("nested_multi", "(a, pagy), b = [1, 2], 3"),
+        ("opassign_plus", "records += []"),
+        ("block_write", "[1].each { |x| pagy = x }"),
+        ("while_write", "while true\n        records = nil\n        break\n      end"),
+        ("rescue_mod_write", "(pagy = Integer(\"x\")) rescue nil"),
+        ("early_return_other_pair", "return [nil, collection] if collection.nil?"),
+        ("early_return_other_pair2", "return [pagy, []] if pagy.page > 1"),
+    ];
+    let mut leaked = vec![];
+    for (name, body) in bodies {
+        let w = format!("def pagy(collection, **vars)\n      pagy, records = super\n      {body}\n      [pagy, records]\n    end");
+        if !wrapper_is_refused(&w) {
+            leaked.push(name);
+        }
+    }
+    assert!(leaked.is_empty(), "accepted (should refuse): {leaked:?}");
+}
+
+/// `for records in ...` writes the outer local; ingest has no `for` node at
+/// all, so the wrapper never reaches the pass-through check: it is an ingest
+/// error (a compile-time refusal), not an accepted override.
+#[test]
+fn a_for_loop_in_the_wrapper_is_an_ingest_refusal() {
+    let wrapper = "def pagy(collection, **vars)\n      pagy, records = super\n      for records in [1]\n        nil\n      end\n      [pagy, records]\n    end";
+    let concern = format!(
+        "module Pagination\n  extend ActiveSupport::Concern\n\n  module BoundsCheck\n    {wrapper}\n  end\n\n  included do\n    prepend BoundsCheck\n  end\nend\n"
+    );
+    let files = tree(
+        Some(LOCK),
+        &[
+            ("app/controllers/concerns/pagination.rb", concern.as_str()),
+            ("app/controllers/application_controller.rb", "class ApplicationController < ActionController::Base\n  include Pagination\nend\n"),
+        ],
+    );
+    let err = ingest_app_from_tree(files).err().expect("refused").to_string();
+    assert!(err.contains("unsupported expression node"), "{err}");
+}
+
+#[test]
+fn raw_output_wraps_bodies_with_anything_after_the_call() {
+    // each must be wrapped in raw((...)): not a complete bare yield/render
+    for body in [
+        "yield; foo",
+        "yield\nfoo",
+        "yield # c\nfoo",
+        "self.render \"x\"",
+        "render(\"x\").to_s",
+        "render \"x\" do\n 1\nend.upcase",
+    ] {
+        let compiled = roundhouse::erb::compile_erb(&format!("<%== {body} %>"));
+        assert!(compiled.contains("raw(("), "{body:?}: {compiled}");
+    }
+}
+
+/// A body that closes the probe's wrapper `def` early and opens another
+/// is malformed ERB anyway, but must not be classified as a bare `yield`.
+#[test]
+fn raw_output_wraps_a_body_that_closes_the_probe_def_early() {
+    let compiled = roundhouse::erb::compile_erb("<%== yield\nend\ndef x\nfoo %>");
+    assert!(compiled.contains("raw(("), "{compiled}");
+}
+
+#[test]
+fn a_return_of_exactly_the_pair_is_accepted_and_any_other_exit_refused() {
+    let mk = |body: &str| format!("def pagy(collection, **vars)\n      pagy, records = super\n      {body}\n      [pagy, records]\n    end");
+    let accepted = [
+        "return [pagy, records] if collection.nil?",
+        "return pagy, records if collection.nil?",
+        "return ([pagy, records]) if collection.nil?",
+        "raise ActiveRecord::RecordNotFound if pagy.page > pagy.last",
+        "[1].each { |x| next if x }",
+        "[1].each { |x| next x }",
+        "while true\n        break\n      end",
+    ];
+    let refused = [
+        "return [records, pagy] if collection.nil?",
+        "return pagy, records, 1 if collection.nil?",
+        "return *[pagy, records] if collection.nil?",
+        "return if collection.nil?",
+        "return pagy if collection.nil?",
+        "return [pagy, records.to_a] if collection.nil?",
+        "next [nil, nil] if collection.nil?",
+        "next if collection.nil?",
+        "x = -> { return [nil, nil] }",
+        "begin\n        return [nil, nil]\n      ensure\n        nil\n      end",
+        "pagy.page > 1 ? (return [nil, nil]) : nil",
+        "collection.nil? && (return [nil, nil])",
+    ];
+    let bad_acc: Vec<_> = accepted.iter().filter(|b| wrapper_is_refused(&mk(b))).collect();
+    let bad_ref: Vec<_> = refused.iter().filter(|b| !wrapper_is_refused(&mk(b))).collect();
+    assert!(bad_acc.is_empty() && bad_ref.is_empty(), "wrongly refused: {bad_acc:?}\nwrongly accepted: {bad_ref:?}");
+}

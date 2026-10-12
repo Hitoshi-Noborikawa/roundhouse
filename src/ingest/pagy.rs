@@ -113,6 +113,35 @@ fn passes_through(body: &Expr) -> bool {
         // Nothing in between may rebind either name, however nested
         // (`pagy = other if cond`, `||=`, a block, a `rescue => pagy`).
         && !stmts[1..stmts.len() - 1].iter().any(|st| writes_any(st, &names))
+        // Nor may an early `return` / method-level `next` hand back anything
+        // but the pair itself.
+        && !stmts.iter().any(|st| leaves_other_than_pair(st, &names, false))
+}
+
+/// Does a `case/in` / `=>` / `in` pattern bind one of `names`?
+fn binds_any(pattern: &crate::expr::MatchPattern, names: &[&Symbol]) -> bool {
+    let mut bound = Vec::new();
+    pattern.bound_names(&mut bound);
+    bound.iter().any(|b| names.contains(&b))
+}
+
+/// Does `e`, or anything under it, `return` (or `next` out of the method
+/// body itself, not out of a block) something other than `[a, b]` in the
+/// names' order?
+fn leaves_other_than_pair(e: &Expr, names: &[&Symbol], in_block: bool) -> bool {
+    let is_pair = |v: &Expr| {
+        matches!(&*v.node, ExprNode::Array { elements, .. } if elements.len() == 2
+            && elements.iter().zip(names).all(|(x, n)| matches!(&*x.node, ExprNode::Var { name, .. } if name == *n)))
+    };
+    let here = match &*e.node {
+        ExprNode::Return { value } => !is_pair(value),
+        ExprNode::Next { value } if !in_block => !value.as_ref().is_some_and(is_pair),
+        _ => false,
+    };
+    let in_block = in_block || matches!(&*e.node, ExprNode::Lambda { .. });
+    let mut nested = false;
+    e.node.for_each_child(&mut |c| nested = nested || leaves_other_than_pair(c, names, in_block));
+    here || nested
 }
 
 /// Does `e`, or anything under it, write one of `names` as a local?
@@ -123,6 +152,8 @@ fn writes_any(e: &Expr, names: &[&Symbol]) -> bool {
         ExprNode::Assign { target, .. } | ExprNode::OpAssign { target, .. } => hits(target),
         ExprNode::MultiAssign { targets, .. } => targets.iter().any(hits),
         ExprNode::BeginRescue { rescues, .. } => rescues.iter().any(|r| r.binding.as_ref().is_some_and(|b| names.contains(&b))),
+        ExprNode::CaseMatch { arms, .. } => arms.iter().any(|a| binds_any(&a.pattern, names)),
+        ExprNode::MatchPredicate { pattern, .. } | ExprNode::MatchRequired { pattern, .. } => binds_any(pattern, names),
         _ => false,
     };
     let mut nested = false;
