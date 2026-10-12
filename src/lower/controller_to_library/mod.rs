@@ -328,6 +328,8 @@ pub fn lower_controllers_with_arel_views_assocs_and_routes(
     let mut params_specs = self::params::collect_specs(controllers);
     params_specs.mark_file_fields(models);
     params_specs.mark_keyed_associations(models);
+    params_specs.mark_model_resources(models, schema);
+    params_specs.mark_update_demand(controllers);
     let params_lcs = self::params::synthesize_params_classes(&params_specs);
 
     // The view↔controller ivar contract: each action view's read-ivars,

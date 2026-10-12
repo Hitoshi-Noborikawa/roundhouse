@@ -131,9 +131,82 @@ pub struct ParamsSpecs {
     /// Names of `has_one` / `has_many` associations declared with a
     /// `primary_key:` other than `id` (see [`Self::mark_keyed_associations`]).
     keyed_assocs: std::collections::HashSet<Symbol>,
+    /// Resources a model is named after (with a table), so the model
+    /// lowering gives it the typed `update_from_<x>` variants. `None`
+    /// until [`Self::mark_model_resources`] is told the models: a caller
+    /// that lowers controllers without them keeps every rename.
+    model_resources: Option<std::collections::HashSet<Symbol>>,
 }
 
 impl ParamsSpecs {
+    /// Record which resources name a model with a table: only those get
+    /// the typed update variants (`model_to_library`'s
+    /// `push_update_typed_variants`). An empty model list leaves the
+    /// set unknown.
+    pub fn mark_model_resources(
+        &mut self,
+        models: &[crate::dialect::Model],
+        schema: Option<&crate::schema::Schema>,
+    ) {
+        let Some(schema) = schema else { return };
+        if models.is_empty() {
+            return;
+        }
+        self.model_resources = Some(
+            models
+                .iter()
+                .filter(|m| schema.tables.contains_key(&m.table.0))
+                .map(|m| Symbol::from(crate::naming::snake_case(m.name.0.as_str())))
+                .collect(),
+        );
+    }
+
+    /// Whether some model defines `spec`'s typed update variants (true
+    /// when the models are not known).
+    pub fn has_typed_update(&self, spec: &ParamsSpec) -> bool {
+        self.model_resources.as_ref().is_none_or(|set| set.contains(&spec.resource))
+    }
+
+    /// `record.update(<x>_params)` where no model defines the typed
+    /// variant for `<x>`: `rewrite_update_to_typed_variant` hands Rails'
+    /// `update` the attribute Hash instead (`<x>_params.to_attrs`), so
+    /// the params class needs its `to_attrs`. Read after
+    /// [`Self::mark_model_resources`]; helpers are matched by name over
+    /// every controller, so an inherited helper counts too (a `to_attrs`
+    /// nobody calls costs one unused method).
+    pub fn mark_update_demand(&mut self, controllers: &[Controller]) {
+        if self.model_resources.is_none() {
+            return;
+        }
+        let mut wanted: Vec<ClassId> = Vec::new();
+        {
+            let helpers = helper_spec_map(controllers.iter().flat_map(|c| c.actions()), self);
+            for c in controllers {
+                for action in c.actions() {
+                    walk_all(&action.body, &mut |e| {
+                        let ExprNode::Send { recv: Some(_), method, args, .. } = &*e.node else {
+                            return;
+                        };
+                        if !matches!(method.as_str(), "update" | "update!") || args.len() != 1 {
+                            return;
+                        }
+                        let Some(helper) = bare_helper_call(&args[0]) else { return };
+                        if let Some(spec) = helpers.get(helper) {
+                            if !self.has_typed_update(spec) {
+                                wanted.push(spec.class_id.clone());
+                            }
+                        }
+                    });
+                }
+            }
+        }
+        for class_id in wanted {
+            if let Some(spec) = self.specs.iter_mut().find(|s| s.class_id == class_id) {
+                spec.wants_to_attrs = true;
+            }
+        }
+    }
+
     pub fn iter(&self) -> std::slice::Iter<'_, ParamsSpec> {
         self.specs.iter()
     }
@@ -404,6 +477,7 @@ pub fn specs_from_lists(lists: &[(Symbol, Vec<Symbol>)]) -> ParamsSpecs {
             })
             .collect(),
         keyed_assocs: Default::default(),
+        model_resources: None,
     }
 }
 
@@ -878,6 +952,15 @@ fn build_params_object(
     }
     stmts.push(var());
     with_ty(Expr::new(span, ExprNode::Seq { exprs: stmts }), owner_ty)
+}
+
+/// `helper` / `self.helper` with no arguments: the name it calls.
+pub(super) fn bare_helper_call(e: &Expr) -> Option<&Symbol> {
+    let ExprNode::Send { recv, method, args, block: None, .. } = &*e.node else {
+        return None;
+    };
+    (recv.as_ref().is_none_or(|r| matches!(&*r.node, ExprNode::SelfRef)) && args.is_empty())
+        .then_some(method)
 }
 
 pub fn helper_spec_map<'a, 'b, I>(
