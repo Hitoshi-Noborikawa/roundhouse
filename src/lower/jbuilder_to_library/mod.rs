@@ -207,7 +207,18 @@ pub fn jbuilder_signature_classes(views: &[View], app: &App) -> Vec<LibraryClass
 /// production bulk path is `lower_jbuilder_to_library_classes`.
 pub fn lower_jbuilder_to_library_class(view: &View, app: &App) -> LibraryClass {
     let partials = std::rc::Rc::new(partial_params(app));
-    build_library_class(view, app, &partials, /*type_body=*/ true)
+    let mut lc = build_library_class(view, app, &partials, /*type_body=*/ true);
+    // `presence` / `present?` / `blank?` in a value
+    // (`json.note(widget.note.presence || "none")`): the app-wide blank
+    // lowering walks no view, and the Spinel runtime has no such method
+    // on String or nil. Ground them as every app body's are.
+    let defs = crate::lower::blank::AppDefinitions::collect(app);
+    for method in &mut lc.methods {
+        if crate::lower::blank::ground_jbuilder_values(&mut method.body, &defs) {
+            type_method_body_solo(method);
+        }
+    }
+    lc
 }
 
 fn build_library_class(
