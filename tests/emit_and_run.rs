@@ -9633,6 +9633,8 @@ end
         .assert_passes();
 }
 
+#[path = "emit_and_run/pagy.rs"]
+mod pagy;
 #[path = "emit_and_run/string_bytes.rs"]
 mod string_bytes;
 

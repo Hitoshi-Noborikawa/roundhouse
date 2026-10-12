@@ -326,6 +326,7 @@ const FATES: &[(&str, GemFate)] = &[
     ("mail", GemFate::Modeled),        // catalog/gems: Mail::Address; ActionMailer
     ("mocha", GemFate::Modeled),       // lower/mocha bridge
     ("nokogiri", GemFate::Modeled),    // catalog/gems: Nokogiri
+    ("pagy", GemFate::Modeled),        // registry/controllers + analyze/body/pagy + runtime action_controller/pagy.rb: pagy(scope[, limit: n]) offset paginator, Pagy#series_nav/info_tag/readers (English); other paginators/options/helpers refused
     ("pdf-reader", GemFate::Modeled),  // catalog/gems: PDF::Reader
     ("platform_agent", GemFate::Modeled), // useragent port
     ("pretender", GemFate::Modeled), // impersonates with local current_* → true_* wrap + impersonate_*; inherited-only stays unsupported
@@ -478,7 +479,6 @@ const SURFACES: &[(&str, &[&str])] = &[
     ("enumerize", &["enumerize"]),
     ("geocoder", &["geocoded_by", "reverse_geocoded_by", "geocode", "reverse_geocode", "near", "distance_to", "distance_from", "bearing_to", "within_bounding_box"]),
     ("money-rails", &["monetize"]),
-    ("pagy", &["pagy", "pagy_nav", "pagy_info", "pagy_array", "pagy_countless", "pagy_bootstrap_nav", "pagy_get_vars"]),
     ("paper_trail", &["has_paper_trail", "versions", "paper_trail", "whodunnit", "reify", "live?"]),
     ("paranoia", &["acts_as_paranoid", "with_deleted", "only_deleted", "without_deleted", "really_destroy!", "restore", "restore!", "paranoia_destroyed?", "deleted?"]),
     ("pundit", &["authorize", "policy_scope", "policy", "skip_authorization", "skip_policy_scope", "verify_authorized", "verify_policy_scoped", "pundit_user", "permitted_attributes", "authorized?"]),
