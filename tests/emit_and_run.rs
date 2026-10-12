@@ -389,6 +389,58 @@ puts "guarded column passed"
     assert!(run.stdout.contains("guarded column passed"));
 }
 
+/// Three sites that diagnosed as errors while their emitted Ruby ran, each
+/// on code every lobsters request reaches (and so, under `--target
+/// futamura`'s whole-route replacement, each kept every route on Rails):
+/// a `try` on a nullable receiver, `|| default` over `pluck(:nullable)
+/// .first` (a nested nullable), and the TTL the `Rails.cache.fetch`
+/// lowering builds. Clean analysis is the claim; this is the run behind it.
+#[test]
+fn nullable_try_or_default_and_cache_ttl_run() {
+    let script = r#"Article.delete_all
+Article.create!(title: "scored", body: "A sufficiently long body.", score: 0.9)
+Article.create!(title: "unscored", body: "A sufficiently long body.")
+scored = Article.find_by(title: "scored")
+raise "try found: #{Article.title_of(scored.id).inspect}" unless Article.title_of(scored.id) == "scored"
+raise "try missing: #{Article.title_of(-1).inspect}" unless Article.title_of(-1).nil?
+raise "try str: #{Article.title_str(scored.id).inspect}" unless Article.title_str(scored.id) == "scored"
+raise "score set" unless Article.weighted(scored.id) == 1.8
+raise "score nil" unless Article.weighted(Article.find_by(title: "unscored").id) == 1.0
+raise "no row" unless Article.weighted(-1) == 1.0
+raise "cache miss" unless Article.cached_label("first") == "first"
+raise "cache hit" unless Article.cached_label("second") == "first"
+puts "nullable sites passed"
+"#;
+    let run = guarded_column_app()
+        .edit(
+            "app/models/article.rb",
+            "  def self.confident\n",
+            "  def self.title_of(id)
+    a = Article.find_by(id: id)
+    a.try(:title)
+  end
+
+  def self.title_str(id)
+    Article.find_by(id: id).try(\"title\")
+  end
+
+  def self.weighted(id)
+    s = Article.where(id: id).limit(1).pluck(:score).first || 0.5
+    (s * 2).round(1)
+  end
+
+  def self.cached_label(value)
+    Rails.cache.fetch(\"label\", :expires_in => (60 * 2)) { value.to_s }
+  end
+
+  def self.confident
+",
+        )
+        .run_ruby(script);
+    run.assert_passes();
+    assert!(run.stdout.contains("nullable sites passed"));
+}
+
 /// With a date column the Date package loads and an aggregate over it
 /// answers a Date, on Spinel as on CRuby.
 #[test]

@@ -414,11 +414,29 @@ fn narrow_binding<F: FnOnce(&Ty) -> Ty>(ctx: &mut Ctx, key: &VarKey, f: F) {
 pub(crate) fn remove_nil(ty: &Ty) -> Ty {
     match ty {
         Ty::Union { variants } => {
-            let kept: Vec<Ty> = variants
-                .iter()
-                .filter(|v| !matches!(v, Ty::Nil))
-                .cloned()
-                .collect();
+            // A nested union is peeled too: `pluck(:nullable).first` is
+            // typed `(Integer | nil) | nil`, and peeling only the outer
+            // nil left `x.first || 0.5` nullable (lobsters'
+            // `TrafficHelper.cached_current_intensity`, read on every
+            // request by `set_traffic_style`).
+            let mut kept: Vec<Ty> = Vec::new();
+            for v in variants {
+                match remove_nil(v) {
+                    Ty::Nil => {}
+                    Ty::Union { variants: inner } if matches!(v, Ty::Union { .. }) => {
+                        for t in inner {
+                            if !kept.contains(&t) {
+                                kept.push(t);
+                            }
+                        }
+                    }
+                    t => {
+                        if !kept.contains(&t) {
+                            kept.push(t);
+                        }
+                    }
+                }
+            }
             match kept.len() {
                 0 => Ty::Nil,
                 1 => kept.into_iter().next().unwrap(),
