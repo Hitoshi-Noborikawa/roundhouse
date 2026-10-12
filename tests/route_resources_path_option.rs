@@ -136,18 +136,44 @@ fn dynamic_segment_path_is_unsupported_not_served_without_its_param() {
     }
 }
 
+/// `path: ""` / `path: "/"` mounts the resource at its scope's root.
+/// Rails 8.1 (`bin/rails routes`):
+///
+/// ```text
+///       parts GET    /                  parts#index
+///    new_part GET    /new               parts#new
+///        part GET    /:id               parts#show
+///   edit_part GET    /:id/edit          parts#edit
+/// ping_api_gadgets GET /api/ping        api/gadgets#ping
+///             DELETE /api/tokens(/:id)  api/gadgets#destroy
+/// ```
 #[test]
-fn empty_path_is_unsupported_not_the_resource_name() {
-    // Rails mounts `path: ""` / `path: "/"` at the root (`GET /` is
-    // `parts#index`), not at `/parts`.
+fn empty_path_mounts_the_resource_at_its_scope_root() {
     for value in [r#""""#, r#""/""#, r#""//""#] {
-        let err = ingest_routes(
-            format!("Rails.application.routes.draw do\n  resources :parts, path: {value}\nend\n")
-                .as_bytes(),
-            "config/routes.rb",
-        )
-        .map(|t| format!("ingested: {t:?}"))
-        .expect_err("empty path: should be unsupported");
-        assert!(err.to_string().contains("mounts the resource at the root"), "{value}: {err}");
+        let got = table(&routes(&format!("  resources :parts, path: {value}")));
+        assert_eq!(
+            got,
+            [
+                "parts / Parts#index",
+                "new_part /new Parts#new",
+                "part /:id Parts#show",
+                "edit_part /:id/edit Parts#edit",
+            ]
+            .map(|s| s.replace("Parts#", "PartsController#")),
+            "{value}"
+        );
     }
+    let flat = routes(
+        "  namespace :api do\n    resources :gadgets, path: '/', only: %i[] do\n      collection do\n        get :ping\n        delete '/tokens/(:id)', to: 'gadgets#destroy'\n      end\n    end\n  end",
+    );
+    let paths: Vec<String> = flat
+        .iter()
+        .map(|r| format!("{:?} {} {}#{}", r.method, r.path, r.controller.0.as_str(), r.action.as_str()))
+        .collect();
+    assert!(paths.contains(&"Get /api/ping Api::GadgetsController#ping".to_string()), "{paths:#?}");
+    assert!(
+        paths.iter().any(|p| p.starts_with("Delete /api/tokens") && p.ends_with("Api::GadgetsController#destroy")),
+        "{paths:#?}"
+    );
+    assert!(!paths.iter().any(|p| p.contains("//")), "{paths:#?}");
 }
