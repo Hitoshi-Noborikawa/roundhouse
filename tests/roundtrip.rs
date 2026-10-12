@@ -182,6 +182,7 @@ fn tiny_blog_round_trips() {
         concern_spliced_actions: std::collections::HashMap::new(),
         concern_spliced_class_methods: std::collections::HashMap::new(),
         concern_model_items: std::collections::HashMap::new(),
+        concern_guarded_items: std::collections::HashMap::new(),
         concern_included_redefs: std::collections::HashMap::new(),
         render_edges: std::collections::HashMap::new(),
         view_feeders: std::collections::HashMap::new(),

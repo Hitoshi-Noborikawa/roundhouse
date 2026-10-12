@@ -56,9 +56,9 @@ module ActiveSupport
   # and the raw attributes of cached records (`RecordCache.fetch`).
   #
   # `as_json` is spelled out for the values those carry — nil, booleans,
-  # numbers, Strings, Symbols, and Arrays/Hashes of them, keys as their
-  # `to_s`, a non-finite Float as null, as Rails answers. Anything else
-  # (a Time, a record) raises rather than encode some other text.
+  # numbers, Strings, Symbols, Times, and Arrays/Hashes of them, keys as
+  # their `to_s`, a non-finite Float as null, as Rails answers. Anything
+  # else (a record) raises rather than encode some other text.
   #
   # `decode` is `JSON.parse`, which is all Rails' is while
   # `ActiveSupport.parse_json_times` keeps its default (off).
@@ -82,9 +82,21 @@ module ActiveSupport
         out
       when Float then value.finite? ? value : nil
       when Symbol then value.to_s
+      when Time then ActiveSupport::JSON.time_json(value)
       when nil, true, false, Integer, String then value
       else raise ArgumentError, "ActiveSupport::JSON.encode: #{value.class} values are not supported yet"
       end
+    end
+
+    # A Time as Rails' `TimeWithZone#as_json` writes it: `xmlschema(3)`,
+    # three fractional digits (truncated, as xmlschema does) and the
+    # offset, with `Z` for UTC. The runtime's Times stand in for
+    # TimeWithZone values in the app's zone, and a zone with no offset is
+    # taken to be UTC (Rails writes `+00:00` for a non-UTC zone at offset
+    # zero, such as London in winter).
+    def self.time_json(t)
+      zone = t.utc_offset == 0 ? "Z" : t.strftime("%:z")
+      t.strftime("%Y-%m-%dT%H:%M:%S") + format(".%03d", t.usec / 1000) + zone
     end
   end
 

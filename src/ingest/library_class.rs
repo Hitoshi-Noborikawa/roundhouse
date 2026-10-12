@@ -3905,6 +3905,62 @@ pub type ConcernModelItems = (
     Vec<(ClassId, Vec<ConcernEnumDecl>)>,
 );
 
+/// Items declared behind a guard on the includer, keyed by module (see
+/// [`crate::app::App::concern_guarded_items`]).
+pub type ConcernGuardedItems = Vec<(ClassId, Vec<crate::app::ConcernGuardedItem>)>;
+
+/// `X if self == A`, `X unless self == A`, `X if self != A`,
+/// `X if in?([A, B])` (also `self.in?`, `A == self`), or the block form
+/// `if self == A ... end`: the guard and the guarded statements. `None`
+/// for any other `if` / `unless`, or one with an `else`.
+fn includer_guarded_stmts<'pr>(
+    stmt: &ruby_prism::Node<'pr>,
+    file: &str,
+) -> Option<(crate::app::IncluderGuard, Vec<ruby_prism::Node<'pr>>)> {
+    let (predicate, body, unless) = if let Some(n) = stmt.as_if_node() {
+        if n.subsequent().is_some() {
+            return None;
+        }
+        (n.predicate(), n.statements()?, false)
+    } else if let Some(n) = stmt.as_unless_node() {
+        if n.else_clause().is_some() {
+            return None;
+        }
+        (n.predicate(), n.statements()?, true)
+    } else {
+        return None;
+    };
+    let body: Vec<_> = body.body().iter().collect();
+    if body.is_empty() {
+        return None;
+    }
+    let cond = super::expr::ingest_expr(&predicate, file).ok()?;
+    let (classes, negate) = includer_guard_classes(&cond)?;
+    Some((crate::app::IncluderGuard { classes, negate: negate != unless }, body))
+}
+
+fn includer_guard_classes(cond: &crate::expr::Expr) -> Option<(Vec<String>, bool)> {
+    use crate::expr::ExprNode;
+    let const_name = |e: &crate::expr::Expr| match &*e.node {
+        ExprNode::Const { path } => Some(path.iter().map(|s| s.as_str()).collect::<Vec<_>>().join("::")),
+        _ => None,
+    };
+    let is_self = |e: &crate::expr::Expr| matches!(&*e.node, ExprNode::SelfRef);
+    let ExprNode::Send { recv, method, args, block: None, .. } = &*cond.node else { return None };
+    match (method.as_str(), recv, args.as_slice()) {
+        ("==" | "!=", Some(r), [a]) => {
+            let name = if is_self(r) { const_name(a)? } else if is_self(a) { const_name(r)? } else { return None };
+            Some((vec![name], method.as_str() == "!="))
+        }
+        ("in?", r, [list]) if r.as_ref().is_none_or(|r| is_self(r)) => {
+            let ExprNode::Array { elements, .. } = &*list.node else { return None };
+            let names = elements.iter().map(const_name).collect::<Option<Vec<_>>>()?;
+            (!names.is_empty()).then_some((names, false))
+        }
+        _ => None,
+    }
+}
+
 fn walk_dsl_stmts<'pr>(body: ruby_prism::Node<'pr>, out: &mut Vec<ruby_prism::Node<'pr>>) {
     for stmt in flatten_statements(body) {
         if let Some(call) = stmt.as_call_node() {
@@ -3992,7 +4048,9 @@ pub(in crate::ingest) fn ingest_concern_included_redefs(source: &[u8], file: &st
 }
 
 pub fn ingest_concern_model_items(source: &[u8], file: &str) -> ConcernModelItems {
-    ingest_concern_model_items_with_constants(source, file, &super::model::EnumConstants::default())
+    let (items, enums, _guarded) =
+        ingest_concern_model_items_with_constants(source, file, &super::model::EnumConstants::default());
+    (items, enums)
 }
 
 /// Same as [`ingest_concern_model_items`], with the app-wide constant
@@ -4002,7 +4060,11 @@ pub(in crate::ingest) fn ingest_concern_model_items_with_constants(
     source: &[u8],
     file: &str,
     enum_constants: &super::model::EnumConstants,
-) -> ConcernModelItems {
+) -> (
+    Vec<(ClassId, Vec<crate::dialect::ModelBodyItem>)>,
+    Vec<(ClassId, Vec<ConcernEnumDecl>)>,
+    ConcernGuardedItems,
+) {
     use super::concern_accessors::{decline, is_candidate, is_supported};
     use crate::dialect::ModelBodyItem;
 
@@ -4010,6 +4072,7 @@ pub(in crate::ingest) fn ingest_concern_model_items_with_constants(
     let root = result.node();
     let mut out = Vec::new();
     let mut enums_out = Vec::new();
+    let mut guarded_out: ConcernGuardedItems = Vec::new();
     for (scope, module) in find_all_modules_with_scope(&root) {
         let Some(name_path) = module_name_path(&module) else { continue };
         let mut full_path: Vec<String> = scope.clone();
@@ -4027,6 +4090,7 @@ pub(in crate::ingest) fn ingest_concern_model_items_with_constants(
         let Some(body) = module.body() else { continue };
         let mut items: Vec<ModelBodyItem> = Vec::new();
         let mut enums: Vec<ConcernEnumDecl> = Vec::new();
+        let mut guarded: Vec<crate::app::ConcernGuardedItem> = Vec::new();
         for stmt in flatten_statements(body) {
             let Some(call) = stmt.as_call_node() else { continue };
             if call.receiver().is_some() || constant_id_str(&call.name()) != "included" {
@@ -4040,6 +4104,37 @@ pub(in crate::ingest) fn ingest_concern_model_items_with_constants(
             let mut stmts = Vec::new();
             walk_dsl_stmts(block.body().unwrap(), &mut stmts);
             for inner in stmts {
+                // `has_many :x, ... if self == Account`: `included do`
+                // runs with `self` bound to the includer, so the guard
+                // is a fact each includer answers. Carry the statement's
+                // items with the guard; the splice gives them to the
+                // includers it admits. Every statement under the guard
+                // must be one of those items, or the guard is left to
+                // today's handling as a whole.
+                if let Some((guard, stmts)) = includer_guarded_stmts(&inner, file) {
+                    let parsed: Option<Vec<ModelBodyItem>> = stmts.iter().try_fold(Vec::new(), |mut acc, stmt| {
+                        let parsed = super::model::ingest_model_body_items(stmt, &id, file, Vec::new(), None).ok()?;
+                        let claimed = !parsed.is_empty()
+                            && parsed.iter().all(|item| matches!(item,
+                                ModelBodyItem::Association { .. }
+                                | ModelBodyItem::Scope { .. }
+                                | ModelBodyItem::Validation { .. }
+                                | ModelBodyItem::Callback { .. }));
+                        claimed.then(|| {
+                            acc.extend(parsed);
+                            acc
+                        })
+                    });
+                    if let Some(parsed) = parsed {
+                        let at = items.len();
+                        guarded.extend(parsed.into_iter().map(|item| crate::app::ConcernGuardedItem {
+                            guard: guard.clone(),
+                            item,
+                            at,
+                        }));
+                        continue;
+                    }
+                }
                 // `enum` inside `included do` belongs to every includer
                 // exactly like an association does — campfire declares
                 // `enum :role, %i[member administrator bot]` in
@@ -4141,11 +4236,14 @@ pub(in crate::ingest) fn ingest_concern_model_items_with_constants(
         if !enums.is_empty() {
             enums_out.push((id.clone(), enums));
         }
+        if !guarded.is_empty() {
+            guarded_out.push((id.clone(), guarded));
+        }
         if !items.is_empty() {
             out.push((id, items));
         }
     }
-    (out, enums_out)
+    (out, enums_out, guarded_out)
 }
 
 /// Does this class's ancestry, as a `sig/**/*.rbs` sidecar states it,

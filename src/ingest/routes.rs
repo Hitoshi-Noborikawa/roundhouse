@@ -3283,19 +3283,12 @@ fn ingest_resources_route(
                             ),
                         });
                     }
-                    // `path: ""` / `path: "/"` mounts the resource at the
-                    // root (`GET /` is `index`, `/:id` is `show`). That
-                    // is not the resource name, so refuse it rather
-                    // than fall back to `/parts`.
+                    // `path: ""` / `path: "/"` mounts the resource at its
+                    // scope's root (`GET /` is `index`, `/:id` is
+                    // `show`, a collection route `/ping`): an empty
+                    // segment, which the flattener leaves out of the
+                    // path. The helpers still come from the name.
                     let segment = raw.trim_matches('/');
-                    if segment.is_empty() {
-                        return Err(IngestError::Unsupported {
-                            file: file.into(),
-                            message: format!(
-                                "resources :{name_str} `path: {raw:?}` mounts the resource at the root"
-                            ),
-                        });
-                    }
                     path = Some(segment.to_string());
                 }
                 // `concerns: :c` / `concerns: [:a, :b]` replays those

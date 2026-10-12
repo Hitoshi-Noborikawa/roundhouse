@@ -1661,6 +1661,62 @@ fn push_alias_target_unresolved_gap(
     ));
 }
 
+/// How many times `body` reads the local `name`.
+fn count_var_reads(body: &mut Expr, name: &Symbol) -> usize {
+    let mut n = 0;
+    if let ExprNode::Var { name: v, .. } = &*body.node {
+        if v == name {
+            return 1;
+        }
+    }
+    body.node.for_each_child_mut(&mut |child| n += count_var_reads(child, name));
+    n
+}
+
+/// Replace every read of the scope's threaded relation `name` that roots
+/// a chain with `name.spawn()`, so each chain in the body starts from its
+/// own copy. A read passed straight to a call as an argument (the
+/// relation threaded into another scope, `Model.other(__rel)`) is left
+/// bare: that callee spawns on entry, and with every chain root spawned
+/// nothing has mutated `__rel` by the time it is read.
+fn spawn_each_var_read(body: &mut Expr, name: &Symbol, model: &ClassId) {
+    if let ExprNode::Send { recv, args, block, .. } = &mut *body.node {
+        if let Some(r) = recv {
+            spawn_each_var_read(r, name, model);
+        }
+        for a in args.iter_mut() {
+            if !matches!(&*a.node, ExprNode::Var { name: v, .. } if v == name) {
+                spawn_each_var_read(a, name, model);
+            }
+        }
+        if let Some(b) = block {
+            spawn_each_var_read(b, name, model);
+        }
+        return;
+    }
+    if let ExprNode::Var { name: v, .. } = &*body.node {
+        if v == name {
+            let rel_ty = Ty::Relation { of: model.clone() };
+            let mut var = body.clone();
+            var.ty = Some(rel_ty.clone());
+            let mut spawn = Expr::new(
+                body.span,
+                ExprNode::Send {
+                    recv: Some(var),
+                    method: Symbol::from("spawn"),
+                    args: vec![],
+                    block: None,
+                    parenthesized: true,
+                },
+            );
+            spawn.ty = Some(rel_ty);
+            *body = spawn;
+            return;
+        }
+    }
+    body.node.for_each_child_mut(&mut |child| spawn_each_var_read(child, name, model));
+}
+
 pub(crate) fn push_scope_methods(
     methods: &mut Vec<MethodDef>,
     model: &Model,
@@ -1712,6 +1768,19 @@ pub(crate) fn push_scope_methods(
             models_set,
             assocs,
         );
+
+        // Rails relations are immutable, so every implicit-self root in
+        // a scope body starts from the scope as it was on entry:
+        // `where(a).or(where(b))` is `a OR b`. Ours mutate in place, and
+        // the rewrite roots each of those on the one threaded `__rel`,
+        // so the receiver's `where(a)` landed on the argument too and
+        // the query became `(a AND b) OR (a AND b)`. When the body reads
+        // the relation more than once, each read takes its own copy.
+        // (A single read keeps the bare `__rel`; the entry spawn below
+        // already protects the caller's relation.)
+        if count_var_reads(&mut body, &rel_param) > 1 {
+            spawn_each_var_read(&mut body, &rel_param, &model.name);
+        }
 
         // Rails scopes spawn on entry: `rel.visible.with_direct_rooms`
         // must not leave joins/orders on `rel.visible` for a sibling
