@@ -43,7 +43,7 @@ pub(super) fn emit_form_builder_inline(
     ctx: &ViewCtx,
 ) -> Vec<Expr> {
     let (positional, opts) = split_args(args);
-    match kind {
+    let out = match kind {
         FormBuilderMethod::Label => emit_label(
             positional.first().copied(),
             positional.get(1).copied(),
@@ -143,7 +143,60 @@ pub(super) fn emit_form_builder_inline(
             binding,
             ctx,
         ),
+    };
+    wrap_field_errors(out, kind, positional.first().copied(), binding, ctx)
+}
+
+/// Rails' default `field_error_proc`: a control whose field has errors
+/// renders inside `<div class="field_with_errors">`, decided per render.
+fn wrap_field_errors(
+    mut out: Vec<Expr>,
+    kind: FormBuilderMethod,
+    field: Option<&Expr>,
+    binding: &FormBuilderBinding,
+    ctx: &ViewCtx,
+) -> Vec<Expr> {
+    if !kind.wraps_field_errors() || binding.model_name.is_empty() || ctx.i18n.field_error_proc().is_some() {
+        return out;
     }
+    let Some(field_sym) = field_symbol(field) else { return out };
+    let Some(prefix) = ctx.i18n.error_prefix(&binding.model_name, field_sym.as_str()) else { return out };
+    // The check box's unchecked-value companion stays outside the wrapper, as Rails renders it
+    let first = usize::from(kind == FormBuilderMethod::CheckBox && out.len() > 1);
+    let flag = Symbol::from(format!("__{}_{}_errors", binding.form_param, field_sym.as_str()));
+    let record = Expr::new(Span::synthetic(), ExprNode::Var { id: VarId(0), name: binding.record_var.clone() });
+    let support = Expr::new(Span::synthetic(), ExprNode::Const { path: vec![Symbol::from("ActiveSupport")] });
+    let messages = send(
+        Some(support),
+        "errors_for",
+        vec![send(Some(record), "errors", Vec::new(), None, false), lit_str(prefix)],
+        None,
+        true,
+    );
+    let has_errors = Expr::new(
+        Span::synthetic(),
+        ExprNode::Assign {
+            target: crate::expr::LValue::Var { id: VarId(0), name: flag.clone() },
+            value: send(Some(messages), "any?", Vec::new(), None, false),
+        },
+    );
+    let when_errors = |text: &str| {
+        accumulator_append_call(
+            Expr::new(
+                Span::synthetic(),
+                ExprNode::If {
+                    cond: Expr::new(Span::synthetic(), ExprNode::Var { id: VarId(0), name: flag.clone() }),
+                    then_branch: lit_str(text.to_string()),
+                    else_branch: lit_str(String::new()),
+                },
+            ),
+            ctx,
+        )
+    };
+    out.insert(first, when_errors("<div class=\"field_with_errors\">"));
+    out.insert(first, has_errors);
+    out.push(when_errors("</div>"));
+    out
 }
 
 /// `<input name="user[f]" type="hidden" value="0" autocomplete="off">
@@ -162,15 +215,14 @@ fn emit_check_box(
     };
     let model_name = &binding.model_name;
     let field_str = field_sym.as_str();
+    // The unchecked-value companion carries no `autocomplete`
+    // attribute — Rails renders exactly
+    // `<input name="user[f]" type="hidden" value="0">`.
+    let hidden = lit_str(format!("<input name=\"{model_name}[{field_str}]\" type=\"hidden\" value=\"0\">"));
     let mut parts: Vec<InterpPart> = Vec::new();
     parts.push(InterpPart::Text {
         value: format!(
-            // The unchecked-value companion carries no `autocomplete`
-            // attribute — Rails renders exactly
-            // `<input name="user[f]" type="hidden" value="0">`.
-            "<input name=\"{mn}[{f}]\" type=\"hidden\" value=\"0\"><input type=\"checkbox\" value=\"1\"{nid}",
-            mn = model_name,
-            f = field_str,
+            "<input type=\"checkbox\" value=\"1\"{nid}",
             nid = name_id_attrs_for(binding, field_str, opts),
         ),
     });
@@ -237,7 +289,7 @@ fn emit_check_box(
     parts.push(InterpPart::Expr { expr: checked_expr });
     append_attr_parts(&mut parts, opts);
     parts.push(InterpPart::Text { value: ">".to_string() });
-    vec![accumulator_append_call(string_interp(parts), ctx)]
+    vec![accumulator_append_call(hidden, ctx), accumulator_append_call(string_interp(parts), ctx)]
 }
 
 /// `<input type="radio" value="V"[ checked] name="user[f]" id="user_f_v">`

@@ -1895,6 +1895,23 @@ impl<'a> BodyTyper<'a> {
                         });
                     }
                 }
+                if matches!(recv_ty.as_ref(), Some(Ty::Class { args: model, .. }) if !model.is_empty())
+                    && crate::lower::view::wraps_field_errors(method.as_str())
+                    && expr.diagnostic.is_none()
+                {
+                    let catalog = self.i18n.map_or(crate::i18n::Catalog::rails_default(), |c| c);
+                    let reason = match &catalog.field_error_proc {
+                        Some(file) => Some(format!("{file} replaces `field_error_proc`, which is not modeled")),
+                        None => crate::i18n::errors_index_refusal(catalog.or_rails_default().errors_format()).map(str::to_string),
+                    };
+                    if let Some(reason) = reason {
+                        expr.diagnostic = Some(crate::diagnostic::DiagnosticKind::Unsupported {
+                            target: None,
+                            construct: Symbol::from("field_with_errors"),
+                            detail: format!("`{method}` cannot tell whether its field has errors: {reason}"),
+                        });
+                    }
+                }
                 if method.as_str() == "human_attribute_name"
                     && matches!(dispatched, Ty::Var { .. } | Ty::Untyped)
                     && crate::lower::human_attribute_name::literal_attribute(args).is_some()

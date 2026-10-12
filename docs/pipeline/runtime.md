@@ -2450,11 +2450,13 @@ Three gaps remain, all on spinel's side:
   `token_tag` body is exactly `""` (campfire's header-only forgery
   protection) synthesizes `token_fields_omitted`. Another `token_tag`
   body is not read, and the forms keep their token field.
-- **A form field with errors is not wrapped in `field_with_errors`.**
-  Rails' default `field_error_proc` wraps the label and control of an
-  attribute with errors in `<div class="field_with_errors">`; the
-  inlined form builder renders them bare. A `class:` array over
-  `errors[:field]` still picks its classes as Rails does.
+- **Only Rails' default `field_error_proc` is modeled.** A label or
+  control whose field has errors renders inside
+  `<div class="field_with_errors">`, decided per render. An app that
+  sets its own `config.action_view.field_error_proc` keeps its form
+  fields as errors. A field's errors are told apart by the full
+  message's humanized prefix, as `errors[:field]` is (see above), so a
+  nested `fields_for` record falls back to the humanized attribute name.
 - **`config.after_initialize` blocks do not run at boot.** campfire has
   two: `Room::MessagesCount.ensure!` (its counter triggers, which
   `schema.rb` cannot dump) and starting the WAL checkpointer outside

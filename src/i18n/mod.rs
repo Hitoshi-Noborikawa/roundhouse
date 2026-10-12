@@ -32,6 +32,10 @@ pub struct Catalog {
     /// What a translation the locale lacks does, per environment.
     #[serde(default)]
     pub missing: MissingPolicy,
+    /// The file that sets `config.action_view.field_error_proc`, when the
+    /// app replaces Rails' `field_with_errors` wrapper.
+    #[serde(default)]
+    pub field_error_proc: Option<String>,
 }
 
 /// `config.i18n.raise_on_missing_translations`: Rails answers a missing
@@ -614,6 +618,27 @@ impl FormI18n {
             .map(str::to_string)
             .or_else(|| model.map(|m| m.human_attribute_name(method)))
             .unwrap_or_else(|| humanize(method))
+    }
+
+    /// What a full message for `method` starts with before the message,
+    /// for telling the field's errors apart; `None` when `errors.format`
+    /// leaves nothing to tell it by.
+    pub fn error_prefix(&self, object_name: &str, method: &str) -> Option<String> {
+        let catalog = self.catalog.or_rails_default();
+        let format = catalog.errors_format();
+        if errors_index_refusal(format).is_some() {
+            return None;
+        }
+        let human = match self.models.get(object_name) {
+            Some(m) => m.human_attribute_name(method),
+            None => catalog.human_attribute_name("activerecord", &[], method),
+        };
+        format.strip_suffix("%{message}").map(|p| p.replace("%{attribute}", &human))
+    }
+
+    /// The app's own `field_error_proc`, which this wrapper does not model.
+    pub fn field_error_proc(&self) -> Option<&str> {
+        self.catalog.field_error_proc.as_deref()
     }
 
     /// `form.submit`'s default text for `key` (`create`/`update`), as

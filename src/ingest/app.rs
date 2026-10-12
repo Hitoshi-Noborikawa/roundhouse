@@ -1811,6 +1811,7 @@ end
     }
     app.i18n = catalog;
     app.i18n.missing = missing_policy(vfs, dir);
+    app.i18n.field_error_proc = field_error_proc_file(vfs, dir);
     crate::i18n::stamp_models(&mut app);
 
     // `sig/**/*.rbs` — user-authored RBS sidecars for app code the
@@ -9711,6 +9712,22 @@ fn missing_policy<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> crate::i18n::MissingP
         }
     }
     policy
+}
+
+/// The config file that sets `field_error_proc`, wherever Rails reads it from.
+fn field_error_proc_file<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> Option<String> {
+    let mut files = vec![dir.join("config/application.rb")];
+    for sub in ["config/environments", "config/initializers"] {
+        let d = dir.join(sub);
+        let mut found = if vfs.is_dir(&d) { vfs.read_dir(&d).unwrap_or_default() } else { Vec::new() };
+        found.sort();
+        files.extend(found.into_iter().filter(|p| p.extension().is_some_and(|e| e == "rb")));
+    }
+    files.into_iter().find(|path| {
+        vfs.read_to_string(path)
+            .is_ok_and(|source| source.lines().any(|l| !l.trim_start().starts_with('#') && l.contains("field_error_proc")))
+    })
+    .map(|p| p.strip_prefix(dir).unwrap_or(&p).to_string_lossy().into_owned())
 }
 
 /// `:fr`, `:"pt-BR"`, `"fr"` or `'fr'` at the start of `value`, ignoring what follows it.
