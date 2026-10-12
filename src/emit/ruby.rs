@@ -239,6 +239,15 @@ pub(crate) fn materialize_models(
 }
 
 pub fn emit_lowered_models(app: &App) -> Vec<EmittedFile> {
+    let (lcs, params_specs) = lowered_model_lcs(app);
+    emit_model_classes(&lcs, app, &params_specs)
+}
+
+/// The model classes `emit_lowered_models` writes, before rendering.
+/// Shared with `emit::futamura::routes`, which walks what is emitted.
+pub(crate) fn lowered_model_lcs(
+    app: &App,
+) -> (Vec<LibraryClass>, crate::lower::controller_to_library::params::ParamsSpecs) {
     let (mut lcs, params_specs) = materialize_models(
         app,
         crate::lower::model_to_library::Materialization::Emit,
@@ -258,8 +267,7 @@ pub fn emit_lowered_models(app: &App) -> Vec<EmittedFile> {
         relax_from_stmt_handle(lc);
     }
     apply_model_lowering(&mut lcs, app);
-
-    emit_model_classes(&lcs, app, &params_specs)
+    (lcs, params_specs)
 }
 
 /// The existing ordered Ruby IR producers, shared with accessor admission.
@@ -532,6 +540,13 @@ pub fn emit_lowered_controllers(app: &App) -> Vec<EmittedFile> {
 /// re-emit controllers through this and dedupe last-wins over the
 /// spinel-shape files.
 pub fn emit_lowered_controllers_with_layout(app: &App) -> Vec<EmittedFile> {
+    let lcs = lowered_controller_lcs_with_layout(app);
+    emit_lowered_controllers_from_lcs(&lcs, app)
+}
+
+/// The controller classes `emit_lowered_controllers_with_layout`
+/// writes, before rendering. Shared with `emit::futamura::routes`.
+pub(crate) fn lowered_controller_lcs_with_layout(app: &App) -> Vec<LibraryClass> {
     // FULL: the CRuby/JRuby trees ship the overlay (JsonRender) so the
     // widened respond_to arms all resolve; these files dedupe last-wins
     // over the spinel-shape ones.
@@ -548,7 +563,7 @@ pub fn emit_lowered_controllers_with_layout(app: &App) -> Vec<EmittedFile> {
     library::apply_time_format_lowering(&mut lcs);
     library::apply_dynamic_render_options_lowering(&mut lcs);
     library::apply_layout_lowering(&mut lcs, app);
-    emit_lowered_controllers_from_lcs(&lcs, app)
+    lcs
 }
 
 /// Bulk lower controllers in spinel-shape. Synthesized siblings
@@ -699,6 +714,20 @@ fn prepend_sibling_classes(
 /// template named `<base>_json.rb` to avoid colliding with the html
 /// sibling. Both files reopen the same `Views::<Plural>` module.
 pub fn emit_lowered_views(app: &App) -> Vec<EmittedFile> {
+    let (html_views, lcs) = lowered_view_lcs(app);
+    html_views
+        .iter()
+        .zip(lcs.iter())
+        .flat_map(|(v, lc)| {
+            let out_path = view_output_path(&crate::lower::view::view_output_stem(v));
+            library::emit_library_class_pair(lc, app, out_path)
+        })
+        .collect()
+}
+
+/// The html view classes `emit_lowered_views` writes, paired with their
+/// views, before rendering. Shared with `emit::futamura::routes`.
+pub(crate) fn lowered_view_lcs(app: &App) -> (Vec<&crate::dialect::View>, Vec<LibraryClass>) {
     // Lower every view through ONE per-app context, then run the
     // Ruby-family passes over the whole group at once — per-view pass
     // application rebuilt the scope/assoc/helper registries for every
@@ -753,14 +782,7 @@ pub fn emit_lowered_views(app: &App) -> Vec<EmittedFile> {
     // appending into the view's own buffer. The variants are added on
     // the helper side (`emit_library_class_decls`) from the same table.
     crate::lower::tag_block_passing::apply_views(&mut lcs, &crate::lower::tag_block_passing::variants(app));
-    html_views
-        .iter()
-        .zip(lcs.iter())
-        .flat_map(|(v, lc)| {
-            let out_path = view_output_path(&crate::lower::view::view_output_stem(v));
-            library::emit_library_class_pair(lc, app, out_path)
-        })
-        .collect()
+    (html_views, lcs)
 }
 
 /// Lower each json-format `app.views` entry through `jbuilder_to_library`

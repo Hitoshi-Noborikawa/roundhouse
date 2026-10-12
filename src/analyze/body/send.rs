@@ -1089,8 +1089,18 @@ impl<'a> BodyTyper<'a> {
         // otherwise the gradual answer stands — silence about a method
         // is not a claim that the class lacks it.
         if matches!(method.as_str(), "try" | "try!") {
-            if let (Some(Ty::Class { id, .. }), Some(first)) = (recv_ty, args.first()) {
-                if let ExprNode::Lit { value: crate::expr::Literal::Sym { value: m } } = &*first.node {
+            // A nullable receiver (`@user.try(:username)` with `@user:
+            // User?`) answers the same: `nil.try` is nil, already in the
+            // union below.
+            let recv_ty = recv_ty.map(|t| t.clone().strip_nil());
+            if let (Some(Ty::Class { id, .. }), Some(first)) = (recv_ty.as_ref(), args.first()) {
+                // `try(:m)` and `try("m")` name the same method.
+                let name = match &*first.node {
+                    ExprNode::Lit { value: crate::expr::Literal::Sym { value } } => Some(value.clone()),
+                    ExprNode::Lit { value: crate::expr::Literal::Str { value } } => Some(Symbol::from(value.as_str())),
+                    _ => None,
+                };
+                if let Some(m) = &name {
                     let mut cur = Some(id.clone());
                     let mut depth = 0;
                     while let Some(cid) = cur {

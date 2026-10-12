@@ -343,6 +343,14 @@ fn run_transpile(
     // See `emit::roda`. Futamura needs the types but none of the
     // lowerings: those rewrite into the runtime's vocabulary, and its
     // specializations call Rails (docs/pipeline/specialization.md).
+    // Futamura's whole-route replacement needs the `ruby` target's
+    // lowering of the same app, from the ingest shape; built before the
+    // analysis below mutates `app`.
+    let whole_route = if target == BuildTarget::Futamura {
+        Some(project::futamura_whole_route(&app, input)?)
+    } else {
+        None
+    };
     let lower_diags = if target == BuildTarget::Roda {
         Vec::new()
     } else if target == BuildTarget::Futamura {
@@ -430,7 +438,10 @@ fn run_transpile(
     // single run surfaces the whole inventory instead of dying on the
     // first one.
     let (files_result, mut diags) =
-        roundhouse::emit::diagnostics::scope(|| project::target_files(&app, input, target));
+        roundhouse::emit::diagnostics::scope(|| match &whole_route {
+            Some(wr) => project::futamura_target_files(&app, input, Some(wr)),
+            None => project::target_files(&app, input, target),
+        });
 
     // Prism syntax errors recorded during ingest join the emit-gap
     // inventory: same `Diagnostic` shape, same print/policy/gate

@@ -20,7 +20,7 @@
 # Usage:
 #   scripts/lobsters-rails-replay [--src DIR] [--seq-out PATH] [--json PATH]
 #                                 [--warmup N] [--min-iters N] [--min-time S]
-#                                 [--dump DIR] [--dump-only] [--lowered TREE]
+#                                 [--dump DIR] [--dump-only]
 #
 #   --src DIR      lobsters checkout (default $LOBSTERS_SRC, else
 #                  ~/git/ruby-bench/benchmarks/lobsters)
@@ -34,12 +34,13 @@
 #                  renders". Same route set and same filename derivation as
 #                  lobsters-replay, so the two dirs line up file for file.
 #   --dump-only    dump and exit; skip warmup and timing entirely
-#   --lowered TREE the whole-route prototype: load TREE (a roundhouse
-#                  `--target ruby` emit of lobsters) into a Ruby::Box in this
-#                  Rails process and serve every GET from it, Rails keeping
-#                  everything else. Needs RUBY_BOX=1 and Ruby master; see
-#                  scripts/lobsters_futamura_bridge.rb for what crosses the
-#                  boundary and what the prototype leaves out.
+#
+# A `--target futamura` tree passed as --src carries its own whole-route
+# bridge (vendor/futamura/bridge.rb): under Ruby 4.1 with RUBY_BOX=1 the
+# GET actions the analysis cleared are served by the lowered app inside
+# this process, and the summary's "stack" says so. FUTAMURA_WHOLE_ROUTE=off
+# runs the same tree as plain Rails; FUTAMURA_STATS=1 prints how many
+# requests each side served.
 #
 # Self-bootstraps into the lobsters bundle: re-execs itself under
 # `bundle exec` from the --src directory, so it can be run from anywhere.
@@ -60,7 +61,6 @@ until args.empty?
   when "--min-time"  then opts[:min_time]  = Integer(args.shift)
   when "--dump"      then opts[:dump]      = File.expand_path(args.shift)
   when "--dump-only" then opts[:dump_only] = true
-  when "--lowered"   then opts[:lowered]   = File.expand_path(args.shift)
   else abort "lobsters-rails-replay: unknown arg #{a}"
   end
 end
@@ -79,7 +79,6 @@ unless ENV["LOBSTERS_RAILS_REPLAY_BOOTSTRAPPED"]
   argv += ["--json", opts[:json]] if opts[:json]
   argv += ["--dump", opts[:dump]] if opts[:dump]
   argv << "--dump-only" if opts[:dump_only]
-  argv += ["--lowered", opts[:lowered]] if opts[:lowered]
   if RUBY_ENGINE == "jruby"
     # The rails-jruby lane: bare `bundle`/`ruby` would resolve CRuby's via
     # PATH — re-exec explicitly into JRuby's bundler and interpreter.
@@ -115,15 +114,6 @@ end
 
 # ── boot (mirrors benchmark.rb) ──────────────────────────────────────
 $stderr.puts "booting Rails lobsters (production, in-mem DB)..."
-if opts[:lowered]
-  require_relative "lobsters_futamura_bridge"
-  LobstersFutamuraBridge.check!
-  # Before environment.rb initializes the app: the middleware stack is
-  # frozen once it is built.
-  require_relative File.join(opts[:src], "config/application")
-  Rails.application.config.middleware.insert_after ActionDispatch::Session::CookieStore,
-                                                   LobstersFutamuraBridge::Middleware
-end
 require_relative File.join(opts[:src], "config/environment")
 require_relative File.join(opts[:src], "route_generator")
 
@@ -153,7 +143,10 @@ else
   mem_db.execute("ANALYZE")
 end
 
-LobstersFutamuraBridge.boot!(opts[:lowered], File.join(opts[:src], "db/production.sqlite3")) if opts[:lowered]
+# A futamura tree with whole-route replacement on: its bridge booted the
+# lowered app into a Ruby::Box during initialization.
+WHOLE_ROUTE = defined?(Futamura::WholeRoute) && !Futamura::WholeRoute.box.nil?
+$stderr.puts "whole-route: #{Futamura::WholeRoute.actions.size} GET action(s) served by the lowered app" if WHOLE_ROUTE
 
 # Baseline footprint, sampled AFTER the in-memory seed — same point the
 # emit lanes sample, so the shared fixture is inside both baselines.
@@ -374,7 +367,11 @@ median = sorted.size.odd? ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2.0
 mean = iters.sum / iters.size
 
 summary = {
-  "stack"              => opts[:lowered] ? "rails+lowered" : "rails",
+  "stack"              => WHOLE_ROUTE ? "rails+whole-route" : "rails",
+  # The GET actions a futamura tree's whole-route bridge serves from the
+  # lowered app, and how many requests each side served this run.
+  "whole_route"        => WHOLE_ROUTE && { "actions" => Futamura::WholeRoute.actions.size,
+                                           "served" => Futamura::WholeRoute.stats.to_h },
   "generated_at"       => Time.now.utc.iso8601,
   "ruby"               => RUBY_DESCRIPTION,
   "rails"              => Rails::VERSION::STRING,

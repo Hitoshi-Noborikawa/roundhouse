@@ -318,14 +318,18 @@ pub fn target_readme(target: BuildTarget) -> String {
             "Rails → Ruby as a partial evaluator: what Roundhouse can \
              resolve statically is specialized, and everything else stays \
              residual Ruby running on the app's real gems, Rails included. \
-             This is stage 0, the identity: the residue is the whole app, \
-             so the tree is the Rails source unchanged (dotfiles and binary \
-             files are not carried yet). Build, run and test it as the Rails \
-             app it is:\n\n\
+             The tree is the Rails app with its static query chains \
+             specialized (config/initializers/futamura.rb) and, when the \
+             analysis clears any GET routes, whole-route replacement: those \
+             routes are served by the app's `--target ruby` emit \
+             (vendor/futamura/lowered) inside the Rails process. That part \
+             needs Ruby 4.1 started with RUBY_BOX=1; \
+             FUTAMURA_WHOLE_ROUTE=off runs the tree as plain Rails. Build, \
+             run and test it as the Rails app it is:\n\n\
              ```sh\n\
              bundle install\n\
              bin/rails db:prepare\n\
-             bin/rails test\n\
+             RUBY_BOX=1 bin/rails test\n\
              ```\n"
         }
         BuildTarget::Roda => {
@@ -1671,6 +1675,73 @@ fn reject_generated_fixture_assignments(app: &App) -> Result<(), String> {
     Ok(())
 }
 
+/// `--target futamura`'s tree: the app (`futamura_files`), its query
+/// specializations, and, given the `ruby` target's side
+/// (`futamura_whole_route`), whole-route replacement for the GET actions
+/// the analysis clears.
+pub fn futamura_target_files(
+    app: &App,
+    fixture: &Path,
+    whole_route: Option<&emit::futamura::WholeRoute>,
+) -> Result<Vec<(String, String)>, String> {
+    let target = BuildTarget::Futamura;
+    let ledger = std::env::var_os("ROUNDHOUSE_FUTAMURA_LEDGER").is_some();
+    let mut files = futamura_files(fixture)?;
+    let report = emit::futamura::specialize(app, &mut files)?;
+    eprintln!(
+        "roundhouse: futamura: specialized {} query site(s); {} left to Rails{}",
+        report.specialized.len(),
+        report.residue.len(),
+        if ledger { "" } else { " (ROUNDHOUSE_FUTAMURA_LEDGER=1 lists them)" },
+    );
+    if ledger {
+        for s in &report.specialized {
+            eprintln!("  specialized {s}");
+        }
+        for r in &report.residue {
+            eprintln!("  residue     {r}");
+        }
+    }
+    if let Some(wr) = whole_route {
+        let plan = emit::futamura::whole_route(&mut files, wr)?;
+        eprintln!(
+            "roundhouse: futamura: whole-route: {} GET action(s) served by the lowered app; {} left to Rails{}",
+            plan.actions.len(),
+            plan.residue.len(),
+            if ledger { "" } else { " (ROUNDHOUSE_FUTAMURA_LEDGER=1 lists them)" },
+        );
+        if ledger {
+            for a in &plan.actions {
+                eprintln!("  lowered     {a}");
+            }
+            for r in &plan.residue {
+                eprintln!("  rails       {r}");
+            }
+            for u in &plan.unowned {
+                eprintln!("  unowned     {u}");
+            }
+        }
+    }
+    Ok(ensure_readme(files, target))
+}
+
+/// The `ruby` target's half of `--target futamura`'s whole-route
+/// replacement, from the INGESTED app: lowered the way `--target ruby`
+/// lowers it, with every diagnostic that emit would report. Errors do
+/// not stop it: under this target an error keeps the routes that reach
+/// it on Rails (`emit::futamura::routes`).
+pub fn futamura_whole_route(ingested: &App, fixture: &Path) -> Result<emit::futamura::WholeRoute, String> {
+    let mut lowered = ingested.clone();
+    let mut diags = crate::session::analyze_and_lower(&mut lowered);
+    diags.extend(crate::analyze::diagnose(&lowered));
+    crate::lower::relation_residue::elevate_dynamic_relation_for_target(&mut diags, BuildTarget::Ruby);
+    crate::lower::params_residue::elevate_nested_params_for_target(&mut diags, BuildTarget::Ruby);
+    let (files, emit_diags) =
+        emit::diagnostics::scope(|| target_files(&lowered, fixture, BuildTarget::Ruby));
+    diags.extend(emit_diags);
+    Ok(emit::futamura::WholeRoute { lowered, files: files?, diags })
+}
+
 pub fn target_files(
     app: &App,
     fixture: &Path,
@@ -1680,23 +1751,7 @@ pub fn target_files(
     // yet, so none of the trimming or refusals below apply — every construct is
     // residue, and the residue runs on Rails.
     if target == BuildTarget::Futamura {
-        let mut files = futamura_files(fixture)?;
-        let report = emit::futamura::specialize(app, &mut files)?;
-        eprintln!(
-            "roundhouse: futamura: specialized {} query site(s); {} left to Rails{}",
-            report.specialized.len(),
-            report.residue.len(),
-            if std::env::var_os("ROUNDHOUSE_FUTAMURA_LEDGER").is_some() { "" } else { " (ROUNDHOUSE_FUTAMURA_LEDGER=1 lists them)" },
-        );
-        if std::env::var_os("ROUNDHOUSE_FUTAMURA_LEDGER").is_some() {
-            for s in &report.specialized {
-                eprintln!("  specialized {s}");
-            }
-            for r in &report.residue {
-                eprintln!("  residue     {r}");
-            }
-        }
-        return Ok(ensure_readme(files, target));
+        return futamura_target_files(app, fixture, None);
     }
     if target == BuildTarget::Ruby {
         let namespaces = crate::gems::locked_external_gem_namespaces(app);

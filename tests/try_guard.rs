@@ -282,3 +282,43 @@ fn a_definer_covers_its_definer_descendants_with_one_test() {
     assert!(!src.contains("is_a?(Pinger0)"), "{src}");
     assert!(!src.contains("other && other.ping"), "{src}");
 }
+
+/// A `try` on a NULLABLE receiver types like one on the class itself
+/// (`nil.try` is nil, already in the answer), and the `is_a?` test the
+/// narrowing builds is a Bool. lobsters' layout reads
+/// `@user.try(:username)` with `@user: User?`, and both used to read at
+/// the post-lowering diagnose as failed dispatches on `User?` — errors
+/// on every page that left every route of the app to Rails under
+/// `--target futamura`'s whole-route replacement.
+#[test]
+fn a_try_on_a_nullable_receiver_resolves_through_the_narrowing() {
+    let mut all: Vec<(&str, &str)> = vec![
+        ("db/schema.rb", SCHEMA),
+        ("app/models/room.rb", "class Room < ApplicationRecord\nend\n"),
+        ("app/models/user.rb", "class User < ApplicationRecord\nend\n"),
+        ("app/models/application_record.rb", "class ApplicationRecord < ActiveRecord::Base\nend\n"),
+        (
+            "app/controllers/application_controller.rb",
+            "class ApplicationController < ActionController::Base\nend\n",
+        ),
+        (
+            "app/controllers/rooms_controller.rb",
+            "class RoomsController < ApplicationController\n  def index\n    @user = User.find_by(name: params[:name])\n    @label = @user.try(:name)\n    @shout = @user.try(\"name\")\n  end\nend\n",
+        ),
+        ("app/views/rooms/index.html.erb", "<p><%= @label %> <%= @shout %></p>\n"),
+        ("config/routes.rb", "Rails.application.routes.draw do\n  resources :rooms\nend\n"),
+    ];
+    all.sort();
+    let tree: HashMap<PathBuf, Vec<u8>> = all
+        .into_iter()
+        .map(|(p, c)| (PathBuf::from(p), c.as_bytes().to_vec()))
+        .collect();
+    let mut app = ingest_app_from_tree(tree).expect("ingest");
+    let _ = roundhouse::session::analyze_and_lower(&mut app);
+    let errors: Vec<String> = roundhouse::analyze::diagnose(&app)
+        .into_iter()
+        .filter(|d| d.severity == roundhouse::analyze::Severity::Error)
+        .map(|d| d.message)
+        .collect();
+    assert!(errors.is_empty(), "{errors:#?}");
+}
