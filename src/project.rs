@@ -5619,6 +5619,9 @@ fn spinel_files(app: &App, fixture: &Path) -> Result<(Vec<(String, String)>, Vec
         "action_view_number_helper",
         "action_view_number_helper_mixin",
         "active_support_ext",
+        // `Rails.event` / `Rails.error`: the reporters, ParameterFilter and
+        // ExecutionContext. rails.rb requires it, so it ships beside rails.
+        "active_support_reporters",
         "hash_deep_merge",
         "security_utils",
         "params",
