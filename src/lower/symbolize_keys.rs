@@ -44,8 +44,19 @@ fn rewrite(expr: &mut Expr) {
 }
 
 /// The request's params (`params` / `@params`): a String-keyed Hash in
-/// every emitted program, whatever type the analyzer gave the reader.
+/// every emitted program. Only a reader typed as the request's params
+/// (`ActionController::Parameters`), as a Hash, or left untyped
+/// qualifies: one typed otherwise, such as a model's own `params`
+/// String, is some other value.
 fn is_request_params(e: &Expr) -> bool {
+    let typed_as_params = match e.ty.as_ref() {
+        None | Some(Ty::Untyped | Ty::Var { .. } | Ty::Hash { .. }) => true,
+        Some(Ty::Class { id, .. }) => id.0.as_str() == "ActionController::Parameters",
+        _ => false,
+    };
+    if !typed_as_params {
+        return false;
+    }
     match &*e.node {
         ExprNode::Send { recv: None, method, args, block: None, .. } => method.as_str() == "params" && args.is_empty(),
         ExprNode::Ivar { name } => name.as_str() == "params",
@@ -300,4 +311,65 @@ fn active_support_call(span: crate::span::Span, method: &str, arg: Expr) -> Expr
             parenthesized: true,
         },
     )
+}
+
+#[cfg(test)]
+mod as_json_tests {
+    use super::rewrite_node;
+    use crate::expr::{Expr, ExprNode};
+    use crate::ident::Symbol;
+    use crate::span::Span;
+    use crate::ty::Ty;
+
+    fn as_json_on_params(params_ty: Option<Ty>) -> Expr {
+        let mut params = Expr::new(
+            Span::synthetic(),
+            ExprNode::Send { recv: None, method: Symbol::from("params"), args: vec![], block: None, parenthesized: false },
+        );
+        params.ty = params_ty;
+        let mut call = Expr::new(
+            Span::synthetic(),
+            ExprNode::Send {
+                recv: Some(params),
+                method: Symbol::from("as_json"),
+                args: vec![],
+                block: None,
+                parenthesized: false,
+            },
+        );
+        rewrite_node(&mut call);
+        call
+    }
+
+    fn is_jsonable(e: &Expr) -> bool {
+        matches!(&*e.node, ExprNode::Send { method, .. } if method.as_str() == "jsonable")
+    }
+
+    /// A `params` reader the analyzer typed as something other than a
+    /// Hash (a model's own `params` String, say) is not the request's
+    /// params: its `as_json` is left alone.
+    #[test]
+    fn a_params_reader_typed_as_a_string_is_not_the_request_params() {
+        let call = as_json_on_params(Some(Ty::Str));
+        assert!(!is_jsonable(&call), "{call:?}");
+        assert!(call.ty.is_none(), "stamped {:?}", call.ty);
+        let other = Ty::Class { id: crate::ident::ClassId(Symbol::from("Gadget")), args: vec![] };
+        assert!(!is_jsonable(&as_json_on_params(Some(other))));
+    }
+
+    #[test]
+    fn the_request_params_untyped_or_hash_are_grounded() {
+        let parameters = Ty::Class {
+            id: crate::ident::ClassId(Symbol::from("ActionController::Parameters")),
+            args: vec![],
+        };
+        for ty in [
+            None,
+            Some(Ty::Untyped),
+            Some(Ty::Hash { key: Box::new(Ty::Str), value: Box::new(Ty::Untyped) }),
+            Some(parameters),
+        ] {
+            assert!(is_jsonable(&as_json_on_params(ty.clone())), "{ty:?}");
+        }
+    }
 }
