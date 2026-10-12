@@ -82,6 +82,16 @@ class DiscardsControllerTest < ActionDispatch::IntegrationTest
     assert_equal 2, Article.where(title: ["Getting Started with Rails", "Understanding MVC Architecture"]).merge(Article.all).with_discarded.count
   end
 
+  test "unscope drops the hash condition but never a raw SQL string that renders the same" do
+    gone = Article.create!(title: "Hidden away", body: "This one is discarded.")
+    gone.update_attribute(:discarded_at, Time.current)
+    rel = Article.where(discarded_at: nil).where("articles.discarded_at IS NULL").unscope(where: :discarded_at)
+    assert_equal 1, rel.to_sql.scan("articles.discarded_at IS NULL").length
+    assert_equal 2, rel.count
+    assert_equal 3, Article.where(discarded_at: nil).unscope(where: :discarded_at).count
+    assert_equal 2, Article.where("articles.discarded_at IS NULL").unscope(where: :discarded_at).count
+  end
+
   test "association relations take the scopes" do
     article = articles(:one)
     hidden = article.comments.create!(commenter: "Eve", body: "Hidden comment")
@@ -140,7 +150,7 @@ end
 fn discard_model_runs_in_emitted_ruby() {
     let run = app().write("test/controllers/discards_controller_test.rb", TEST).run_test("test/controllers/discards_controller_test.rb");
     run.assert_passes();
-    assert!(run.stdout.contains("9 tests passed"), "{}", run.stdout);
+    assert!(run.stdout.contains("10 tests passed"), "{}", run.stdout);
 }
 
 #[test]
