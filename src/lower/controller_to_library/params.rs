@@ -95,6 +95,10 @@ pub struct ParamsSpec {
     /// off `<Model>.create(<helper>)`, so nothing has to be threaded
     /// from the pass that decided it.
     pub wants_to_attrs: bool,
+    /// Some call site reads `<helper>.as_json` — synthesize `as_json`,
+    /// Rails' `Parameters#as_json`: the permitted values, String-keyed
+    /// (the class's `to_h`). Demand-gated like `wants_to_attrs`.
+    pub wants_as_json: bool,
     /// Controllers whose bodies declared this exact permit list, in
     /// source order. Two controllers permitting the same fields share
     /// one class (campfire's `FirstRunsController` and `UsersController`
@@ -382,6 +386,7 @@ pub fn collect_specs(controllers: &[Controller]) -> ParamsSpecs {
 fn scan_create_demand(controllers: &[Controller], specs: &mut ParamsSpecs) {
     let mut demand: Vec<(ClassId, bool)> = Vec::new();
     let mut to_attrs: Vec<ClassId> = Vec::new();
+    let mut as_json: Vec<ClassId> = Vec::new();
     // Read-only for the whole walk; the two demand lists are applied
     // after it, which is what keeps this a shared borrow.
     let specs_ro: &ParamsSpecs = specs;
@@ -405,6 +410,13 @@ fn scan_create_demand(controllers: &[Controller], specs: &mut ParamsSpecs) {
                 if method.as_str() == "to_attrs" && args.is_empty() {
                     if let Some(class) = params_source_class(recv, &helper_classes, specs_ro) {
                         to_attrs.push(class);
+                    }
+                    return;
+                }
+                // `<params-source>.as_json`: Rails' `Parameters#as_json`.
+                if method.as_str() == "as_json" && args.is_empty() {
+                    if let Some(class) = params_source_class(recv, &helper_classes, specs_ro) {
+                        as_json.push(class);
                     }
                     return;
                 }
@@ -448,6 +460,11 @@ fn scan_create_demand(controllers: &[Controller], specs: &mut ParamsSpecs) {
             spec.wants_to_attrs = true;
         }
     }
+    for class_id in as_json {
+        if let Some(spec) = specs.specs.iter_mut().find(|s| s.class_id == class_id) {
+            spec.wants_as_json = true;
+        }
+    }
 }
 
 fn walk_all<'a>(expr: &'a Expr, f: &mut impl FnMut(&'a Expr)) {
@@ -471,6 +488,7 @@ pub fn specs_from_lists(lists: &[(Symbol, Vec<Symbol>)]) -> ParamsSpecs {
                 wants_create: false,
                 wants_create_bang: false,
                 wants_to_attrs: false,
+                wants_as_json: false,
                 declaring: Vec::new(),
                 is_canonical: true,
                 file_fields: std::collections::BTreeSet::new(),
@@ -521,6 +539,7 @@ fn record(
                 wants_create: false,
                 wants_create_bang: false,
                 wants_to_attrs: false,
+                wants_as_json: false,
                 declaring: vec![controller.clone()],
                 is_canonical: false,
                 file_fields: std::collections::BTreeSet::new(),
@@ -1346,6 +1365,9 @@ fn build_params_class(spec: &ParamsSpec) -> LibraryClass {
     methods.push(synth_from_raw(spec));
     methods.push(synth_index_read(spec));
     methods.push(synth_to_h(spec));
+    if spec.wants_as_json {
+        methods.push(synth_as_json(&spec.class_id));
+    }
     if spec.wants_to_attrs {
         methods.push(synth_to_attrs(&spec.class_id, &spec.fields));
     }
@@ -2055,6 +2077,39 @@ fn synth_to_h(spec: &ParamsSpec) -> MethodDef {
         is_async: false,
             mutates_self: false,
             block_param: None,
+    }
+}
+
+/// `def as_json; to_h; end` — Rails' `Parameters#as_json` is the
+/// permitted values as a String-keyed Hash, which `to_h` already is.
+fn synth_as_json(owner: &ClassId) -> MethodDef {
+    let hash_ty = Ty::Hash { key: Box::new(Ty::Str), value: Box::new(Ty::Str) };
+    let body = expr(
+        ExprNode::Send {
+            recv: Some(expr(ExprNode::SelfRef, Some(Ty::Class { id: owner.clone(), args: vec![] }))),
+            method: Symbol::from("to_h"),
+            args: Vec::new(),
+            block: None,
+            parenthesized: false,
+        },
+        Some(hash_ty.clone()),
+    );
+    MethodDef {
+        visibility: crate::dialect::MethodVisibility::Public,
+        unsupported_formals: None,
+        has_anonymous_block: false,
+        name_span: crate::span::Span::synthetic(),
+        name: Symbol::from("as_json"),
+        receiver: MethodReceiver::Instance,
+        params: Vec::new(),
+        body,
+        signature: Some(fn_sig(vec![], hash_ty)),
+        effects: EffectSet::default(),
+        enclosing_class: Some(owner.0.clone()),
+        kind: AccessorKind::Method,
+        is_async: false,
+        mutates_self: false,
+        block_param: None,
     }
 }
 
