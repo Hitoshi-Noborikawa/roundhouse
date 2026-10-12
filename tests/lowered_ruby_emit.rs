@@ -1759,15 +1759,14 @@ fn lowered_form_partial_form_builder_methods() {
     );
     // `form.text_field :title, class: [...]` → inline `<input
     // type="text" name="article[title]" id="article_title"<value_attr>
-    // class="<simplified>">`. Class-array collapse + html_escape on
-    // the simplified literal land in the StringInterp.
+    // class="<class_names>">`.
     assert!(
         src.contains("name=\\\"article[title]\\\" id=\\\"article_title\\\""),
         "expected inline text_field name/id; got:\n{src}",
     );
     assert!(
-        src.contains("\"block shadow-sm rounded-md border px-3 py-2 mt-2 w-full border-gray-400 focus:outline-blue-600\""),
-        "expected class-array collapsed to base + first hash key; got:\n{src}",
+        src.contains("ActionView::ViewHelpers.class_names(\"block shadow-sm rounded-md border px-3 py-2 mt-2 w-full\", { \"border-gray-400 focus:outline-blue-600\": "),
+        "expected the class array to pick its classes per field at render time; got:\n{src}",
     );
     // `form.textarea :body, rows: 4, ...` → inline
     // `<textarea name="article[body]" id="article_body" rows="4"

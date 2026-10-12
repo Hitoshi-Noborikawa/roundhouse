@@ -728,11 +728,12 @@ fn localized_attribute_names_and_format_reach_error_messages() {
     localized_messages_app().run_ruby(&format!("{index}{LOCALIZED_MESSAGES_ASSERTIONS}")).assert_passes();
 }
 
-// Not `title_errors` here: `errors[:field]` does not compile on Spinel, with or without a locale.
 #[test]
 #[ignore = "requires the Spinel toolchain"]
 fn localized_attribute_names_and_format_reach_error_messages_on_spinel() {
-    localized_messages_app().run_spinel(LOCALIZED_MESSAGES_ASSERTIONS).assert_passes();
+    let index = r#"raise "index: #{Article.new(title: "", body: "long enough body").tap(&:valid?).title_errors.inspect}" unless Article.new(title: "", body: "long enough body").tap(&:valid?).title_errors == ["can't be blank"]
+"#;
+    localized_messages_app().run_spinel(&format!("{index}{LOCALIZED_MESSAGES_ASSERTIONS}")).assert_passes();
 }
 
 /// Validation and `errors.add` messages come from the locale as Rails
@@ -887,6 +888,26 @@ fn localized_form_app() -> emit_and_run::Overlay {
 #[test]
 fn localized_form_labels_and_submit_text() {
     localized_form_app().run_test("test/controllers/localized_forms_controller_test.rb").assert_passes();
+}
+
+/// A `class:` array over `errors[:field]` picks its classes per field,
+/// as Rails' `build_tag_values` does.
+const FORM_ERROR_CLASSES: &str = r#"a = Article.new(title: "", body: "long enough body")
+a.valid?
+html = Views::Articles.form(a)
+raise html unless html.include?("id=\"article_title\" class=\"block shadow-sm rounded-md border px-3 py-2 mt-2 w-full border-red-400 focus:outline-red-600\"")
+raise html unless html.include?("rows=\"4\" class=\"block shadow-sm rounded-md border px-3 py-2 mt-2 w-full border-gray-400 focus:outline-blue-600\">")
+"#;
+
+#[test]
+fn a_class_array_over_field_errors_picks_the_error_classes() {
+    emit_and_run::real_blog().run_ruby(FORM_ERROR_CLASSES).assert_passes();
+}
+
+#[test]
+#[ignore = "requires the Spinel toolchain"]
+fn a_class_array_over_field_errors_picks_the_error_classes_on_spinel() {
+    emit_and_run::real_blog().run_spinel(FORM_ERROR_CLASSES).assert_passes();
 }
 
 /// `I18n.t` and a template's `t` answer the locale at compile time:

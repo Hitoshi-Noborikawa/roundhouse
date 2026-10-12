@@ -58,7 +58,10 @@ module ActionView
       tokens = []
       args.each do |arg|
         if arg.is_a?(Hash)
-          arg.each { |k, v| tokens << k.to_s if v }
+          arg.each do |k, v|
+            key = k.to_s
+            tokens << key if v && !key.strip.empty?
+          end
         elsif arg.is_a?(Array)
           arg.each do |a|
             s = a.to_s

@@ -2290,48 +2290,53 @@ fn string_interp(parts: Vec<InterpPart>) -> Expr {
     )
 }
 
-/// `["base_string", {cond_class: pred, …}]` → `"base_string default_class"`,
-/// where `default_class` is the FIRST key of the conditional hash. The
-/// convention in real-blog is that the first hash entry is the
-/// no-errors variant; picking the first key gives byte-parity with
-/// Rails for the 5 default compare paths. A real if/else over
-/// `record.errors[:field].any?` would be strictly better and is
-/// tracked as a follow-on; this path matches the prior runtime
-/// behavior.
 fn simplify_class_array(v: &Expr) -> Expr {
-    let ExprNode::Array { elements, .. } = &*v.node else {
+    let ExprNode::Array { .. } = &*v.node else {
         return v.clone();
     };
-    let Some(first) = elements.first() else {
-        return v.clone();
-    };
-    let ExprNode::Lit { value: Literal::Str { value: base } } = &*first.node else {
-        return v.clone();
-    };
-    let mut composed = base.clone();
-    if let Some(second) = elements.get(1) {
-        if let ExprNode::Hash { entries, .. } = &*second.node {
-            if let Some((k, _)) = entries.first() {
-                let key_str = match &*k.node {
-                    ExprNode::Lit { value: Literal::Sym { value } } => {
-                        Some(value.as_str().to_string())
-                    }
-                    ExprNode::Lit { value: Literal::Str { value } } => Some(value.clone()),
-                    _ => None,
-                };
-                if let Some(s) = key_str {
-                    composed.push(' ');
-                    composed.push_str(&s);
+    let mut pieces = Vec::new();
+    flatten_class_pieces(v, &mut pieces);
+    let mut tokens = Vec::new();
+    for piece in &pieces {
+        match &*piece.node {
+            ExprNode::Lit { value: Literal::Str { value } } => {
+                if !value.trim().is_empty() {
+                    tokens.push(value.clone());
                 }
             }
+            ExprNode::Hash { entries, .. } => {
+                for (k, val) in entries {
+                    let truthy = match &*val.node {
+                        ExprNode::Lit { value: Literal::Bool { value } } => *value,
+                        ExprNode::Lit { value: Literal::Nil } => false,
+                        _ => return view_helpers_call("class_names", pieces),
+                    };
+                    let key = match &*k.node {
+                        ExprNode::Lit { value: Literal::Sym { value } } => value.as_str().to_string(),
+                        ExprNode::Lit { value: Literal::Str { value } } => value.clone(),
+                        _ => return view_helpers_call("class_names", pieces),
+                    };
+                    if truthy && !key.trim().is_empty() {
+                        tokens.push(key);
+                    }
+                }
+            }
+            _ => return view_helpers_call("class_names", pieces),
         }
     }
-    Expr::new(
-        first.span,
-        ExprNode::Lit {
-            value: Literal::Str { value: composed },
-        },
-    )
+    Expr::new(v.span, ExprNode::Lit { value: Literal::Str { value: tokens.join(" ") } })
+}
+
+// `class_names` reads a nested array's elements with `to_s`, so a hash inside one must arrive as its own argument
+fn flatten_class_pieces(v: &Expr, out: &mut Vec<Expr>) {
+    match &*v.node {
+        ExprNode::Array { elements, .. } => {
+            for e in elements {
+                flatten_class_pieces(e, out);
+            }
+        }
+        _ => out.push(v.clone()),
+    }
 }
 
 #[cfg(test)]
