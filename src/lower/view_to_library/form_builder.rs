@@ -163,15 +163,13 @@ fn wrap_field_errors(
     let Some(prefix) = ctx.i18n.error_prefix(&binding.model_name, field_sym.as_str()) else { return out };
     // The check box's unchecked-value companion stays outside the wrapper, as Rails renders it
     let first = usize::from(kind == FormBuilderMethod::CheckBox && out.len() > 1);
-    let flag = Symbol::from(format!("__{}_{}_errors", binding.form_param, field_sym.as_str()));
+    // Not a leading underscore: Elixir warns on reading such a variable, and its lanes treat warnings as errors
+    let flag = Symbol::from(format!("rh_{}_{}_errors", binding.form_param, field_sym.as_str()));
     let record = Expr::new(Span::synthetic(), ExprNode::Var { id: VarId(0), name: binding.record_var.clone() });
-    let support = Expr::new(Span::synthetic(), ExprNode::Const { path: vec![Symbol::from("ActiveSupport")] });
-    let messages = send(
-        Some(support),
-        "errors_for",
-        vec![send(Some(record), "errors", Vec::new(), None, false), lit_str(prefix)],
-        None,
-        true,
+    let messages = crate::lower::errors_index::errors_for_call(
+        send(Some(record), "errors", Vec::new(), None, false),
+        prefix,
+        Span::synthetic(),
     );
     let has_errors = Expr::new(
         Span::synthetic(),
@@ -181,16 +179,13 @@ fn wrap_field_errors(
         },
     );
     let when_errors = |text: &str| {
-        accumulator_append_call(
-            Expr::new(
-                Span::synthetic(),
-                ExprNode::If {
-                    cond: Expr::new(Span::synthetic(), ExprNode::Var { id: VarId(0), name: flag.clone() }),
-                    then_branch: lit_str(text.to_string()),
-                    else_branch: lit_str(String::new()),
-                },
-            ),
-            ctx,
+        Expr::new(
+            Span::synthetic(),
+            ExprNode::If {
+                cond: Expr::new(Span::synthetic(), ExprNode::Var { id: VarId(0), name: flag.clone() }),
+                then_branch: accumulator_append_call(lit_str(text.to_string()), ctx),
+                else_branch: super::nil_lit(),
+            },
         )
     };
     out.insert(first, when_errors("<div class=\"field_with_errors\">"));

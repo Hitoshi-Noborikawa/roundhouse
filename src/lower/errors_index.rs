@@ -193,23 +193,31 @@ fn rewrite_index(expr: &mut Expr, labels: &super::errors_add::Labels, diags: &mu
     let span = expr.span;
     let node = std::mem::replace(&mut *expr.node, ExprNode::Seq { exprs: vec![] });
     let ExprNode::Send { recv, .. } = node else { unreachable!() };
-    let accumulator = recv.expect("checked Some above");
+    *expr = errors_for_call(recv.expect("checked Some above"), prefix_text, span);
+}
+
+/// `ActiveSupport.errors_for(<accumulator>, "<prefix>")`, typed.
+pub(crate) fn errors_for_call(accumulator: Expr, prefix_text: String, span: crate::span::Span) -> Expr {
     let prefix = Expr::new(
         span,
         ExprNode::Lit { value: Literal::Str { value: prefix_text } },
     );
-    // Stamp the result: this pass runs *after* analyze, and the
+    let mut support = Expr::new(span, ExprNode::Const { path: vec![Symbol::from("ActiveSupport")] });
+    support.ty = Some(Ty::Class { id: crate::ident::ClassId(Symbol::from("ActiveSupport")), args: vec![] });
+    let mut call = Expr::new(
+        span,
+        ExprNode::Send {
+            recv: Some(support),
+            method: Symbol::from("errors_for"),
+            args: vec![accumulator, prefix],
+            block: None,
+            parenthesized: true,
+        },
+    );
+    // Stamp the result: callers run *after* analyze, and the
     // post-lowering `diagnose` walk reads stamped types without
     // re-dispatching, so an unstamped synthesis false-positives a
     // `send_dispatch_failed`.
-    expr.ty = Some(Ty::Array { elem: Box::new(Ty::Str) });
-    let mut support = Expr::new(span, ExprNode::Const { path: vec![Symbol::from("ActiveSupport")] });
-    support.ty = Some(Ty::Class { id: crate::ident::ClassId(Symbol::from("ActiveSupport")), args: vec![] });
-    *expr.node = ExprNode::Send {
-        recv: Some(support),
-        method: Symbol::from("errors_for"),
-        args: vec![accumulator, prefix],
-        block: None,
-        parenthesized: true,
-    };
+    call.ty = Some(Ty::Array { elem: Box::new(Ty::Str) });
+    call
 }

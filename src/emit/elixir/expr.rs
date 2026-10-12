@@ -2015,6 +2015,14 @@ fn effective_recv_ty(e: &Expr) -> Option<crate::ty::Ty> {
             }
         }
     }
+    // The form builder synthesizes this call after the view body is typed, and that per-view typer cannot see the record's `errors`
+    if let ExprNode::Send { recv: Some(r), method, .. } = &*e.node {
+        if method.as_str() == "errors_for"
+            && matches!(&*r.node, ExprNode::Const { path } if path.len() == 1 && path[0].as_str() == "ActiveSupport")
+        {
+            return Some(crate::ty::Ty::Array { elem: Box::new(crate::ty::Ty::Str) });
+        }
+    }
     // Fall back to the node's own ty.
     match e.ty.as_ref() {
         Some(t) if !matches!(t, crate::ty::Ty::Untyped) => Some(t.clone()),
