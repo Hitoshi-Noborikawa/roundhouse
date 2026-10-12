@@ -155,7 +155,7 @@ pub(super) fn emit_library_class_decls(app: &App) -> Vec<EmittedFile> {
     apply_boolean_lowering(&mut lcs, app);
     apply_hydration_nil_lowering(&mut lcs, app);
     apply_nilsafe_empty_lowering(&mut lcs);
-    apply_time_format_lowering(&mut lcs);
+    apply_time_format_lowering(&mut lcs, app);
     // Same rooting the view pipeline applies, for the same reason one
     // step over: a class nested in a namespace that SHADOWS what it
     // references. `Message::Broadcasts` is where the broadcast lowering
@@ -5801,13 +5801,105 @@ fn widen_fk_zero_guards(expr: &mut Expr, fks: &BTreeSet<Symbol>) {
 /// Zero-arg receiver sends only. Ruby-emit-path pass: the module
 /// function it names is ruby-family runtime, so this must not run from
 /// shared `lower/`.
-pub(crate) fn apply_time_format_lowering(lcs: &mut [LibraryClass]) {
+pub(crate) fn apply_time_format_lowering(lcs: &mut [LibraryClass], app: &App) {
     for lc in lcs.iter_mut() {
         for m in &mut lc.methods {
             rewrite_rfc2822(&mut m.body);
             rewrite_time_parse(&mut m.body);
         }
     }
+    apply_zoned_json_time_lowering(lcs, app);
+}
+
+/// Every `JsonBuilder.encode_datetime` in `lcs` grounds to the app's
+/// zone (`rewrite_zoned_encode_datetime`) when that zone is not UTC; a
+/// no-op otherwise. Runs with the other time-format rewrites (models'
+/// `as_json` writers, controllers, html views) and on the lowered
+/// jbuilder views, which take no other ruby-family pass.
+pub(crate) fn apply_zoned_json_time_lowering(lcs: &mut [LibraryClass], app: &App) {
+    if !app_presents_time_zoned(app) {
+        return;
+    }
+    for lc in lcs.iter_mut() {
+        for m in &mut lc.methods {
+            rewrite_zoned_encode_datetime(&mut m.body);
+        }
+    }
+}
+
+/// Whether the app's `config.time_zone` makes Rails write a JSON
+/// timestamp with an offset rather than `Z`.
+///
+/// `TimeWithZone#xmlschema` writes `Z` only when the zone itself is UTC
+/// (its abbreviation is "UTC" or "UCT"): Rails' default, and the names
+/// below. Every other zone writes the offset it has AT THAT INSTANT —
+/// `Europe/Paris` is `+02:00` in October and `+01:00` in January, and
+/// `London` is `+00:00`, not `Z` — so the offset cannot be fixed here.
+/// Ingest lifts the zone into a `config_time_zone` method on the
+/// `Rails::Application` reopen; an app with none presents UTC.
+fn app_presents_time_zoned(app: &App) -> bool {
+    const UTC_ZONES: [&str; 8] =
+        ["UTC", "Etc/UTC", "Universal", "Etc/Universal", "Zulu", "Etc/Zulu", "UCT", "Etc/UCT"];
+    let Some(application) = &app.rails_application else { return false };
+    let Some(method) = application.methods.iter().find(|m| m.name.as_str() == "config_time_zone") else {
+        return false;
+    };
+    let lit = match &*method.body.node {
+        ExprNode::Seq { exprs } if exprs.len() == 1 => &exprs[0],
+        _ => &method.body,
+    };
+    match &*lit.node {
+        ExprNode::Lit { value: Literal::Str { value } } => !UTC_ZONES.contains(&value.as_str()),
+        _ => false,
+    }
+}
+
+/// `JsonBuilder.encode_datetime(raw)` →
+/// `JsonBuilder.encode_value(ActiveSupport.json_time(raw))`, for an app
+/// whose `config.time_zone` is not UTC (`app_presents_time_zoned`).
+///
+/// The jbuilder lowerer and the default `as_json` writer serialize a
+/// datetime column through `encode_datetime`, a string reformat of the
+/// stored UTC text that always ends in `Z`. Rails presents the column
+/// as a `TimeWithZone` in the app's zone, so its JSON carries that
+/// zone's offset. `ActiveSupport.json_time` is the runtime seam that
+/// already renders it (`xmlschema(3)` of the hydrated value, which
+/// `parse_db_time` lands in the app's zone; DST-correct, because the
+/// offset is resolved per instant), and the one a model's own `as_json`
+/// writer uses (`PairEncoding::ZonedTime`).
+///
+/// Ruby-emit-path pass, like `rewrite_rfc2822`: `json_time` ships in
+/// the ruby-family trees (the CRuby/JRuby overlay and the spinel
+/// subset), not on the strict targets, whose runtimes present UTC, so
+/// the shared lowerer keeps emitting `encode_datetime`.
+fn rewrite_zoned_encode_datetime(expr: &mut Expr) {
+    expr.node.for_each_child_mut(&mut |c| rewrite_zoned_encode_datetime(c));
+    let ExprNode::Send { recv: Some(r), method, args, block: None, .. } = &mut *expr.node else {
+        return;
+    };
+    if method.as_str() != "encode_datetime" || args.len() != 1 {
+        return;
+    }
+    if !matches!(&*r.node, ExprNode::Const { path } if path.len() == 1 && path[0].as_str() == "JsonBuilder") {
+        return;
+    }
+    let raw = args[0].clone();
+    let mut zoned = Expr::new(
+        Span::synthetic(),
+        ExprNode::Send {
+            recv: Some(Expr::new(
+                Span::synthetic(),
+                ExprNode::Const { path: vec![Symbol::from("ActiveSupport")] },
+            )),
+            method: Symbol::from("json_time"),
+            args: vec![raw],
+            block: None,
+            parenthesized: true,
+        },
+    );
+    zoned.ty = Some(Ty::Union { variants: vec![Ty::Str, Ty::Nil] });
+    *method = Symbol::from("encode_value");
+    *args = vec![zoned];
 }
 
 // Not left as `Time.parse`: spinel ships no stdlib `time` (matz/spinel#1118), so it grounds like `rfc2822` above.
