@@ -97,6 +97,65 @@ pub fn ingest_app_from_tree(tree: HashMap<PathBuf, Vec<u8>>) -> IngestResult<App
 
 /// The actual whole-app walker. Generic over [`Vfs`] so it can read
 /// from disk or from an in-memory map without code duplication.
+/// What `inflections.rb` ingest does with one expression: the single
+/// definition of which `inflect.<m>(…)` calls the app's inflections carry,
+/// shared with the initializer ledger so the two cannot drift.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(super) enum InflectEffect {
+    /// Not a call on the block parameter `inflect`.
+    NotInflect,
+    /// An `inflect.<m>` call no rule reads (`human`, `clear`, a wrong arity).
+    Ignored,
+    /// Carried into `AppInflections`.
+    Carried,
+    /// A `plural`/`singular` regex rule: counted, reported as one survey gap.
+    RegexRule,
+}
+
+/// Apply `e` to `out` when it is an `inflect.<m>(…)` call, and say what happened.
+pub(super) fn apply_inflect_send(
+    e: &crate::expr::Expr,
+    out: &mut crate::naming::AppInflections,
+) -> InflectEffect {
+    use crate::expr::{Expr, ExprNode, Literal};
+    fn strings(e: &Expr, out: &mut Vec<String>) {
+        match &*e.node {
+            ExprNode::Lit { value: Literal::Str { value } } => out.push(value.clone()),
+            ExprNode::Lit { value: Literal::Sym { value } } => out.push(value.as_str().to_string()),
+            ExprNode::Array { elements, .. } => elements.iter().for_each(|x| strings(x, out)),
+            _ => {}
+        }
+    }
+    let ExprNode::Send { recv: Some(recv), method, args, .. } = &*e.node else {
+        return InflectEffect::NotInflect;
+    };
+    if !matches!(&*recv.node, ExprNode::Var { name, .. } if name.as_str() == "inflect") {
+        return InflectEffect::NotInflect;
+    }
+    let mut words = Vec::new();
+    args.iter().for_each(|a| strings(a, &mut words));
+    match method.as_str() {
+        "irregular" if words.len() == 2 => {
+            out.irregular.push((words[0].clone(), words[1].clone()));
+        }
+        "uncountable" => out.uncountable.extend(words),
+        "acronym" => out.acronym.extend(words),
+        // The string form carries; a regex rule cannot.
+        "singular" if words.len() == 2 && args.len() == 2 => {
+            out.singular.push((words[0].clone(), words[1].clone()));
+        }
+        "plural" if words.len() == 2 && args.len() == 2 => {
+            out.plural.push((words[0].clone(), words[1].clone()));
+        }
+        "plural" | "singular" => {
+            out.regex_rules += 1;
+            return InflectEffect::RegexRule;
+        }
+        _ => return InflectEffect::Ignored,
+    }
+    InflectEffect::Carried
+}
+
 /// `config/initializers/inflections.rb` → the app's inflection
 /// declarations: the `inflect.irregular` / `uncountable` / `acronym`
 /// calls inside the `ActiveSupport::Inflector.inflections(:en) do
@@ -106,45 +165,15 @@ pub fn ingest_app_from_tree(tree: HashMap<PathBuf, Vec<u8>>) -> IngestResult<App
 /// silently dropped. Any parse trouble yields the defaults — the
 /// initializer is optional and often all comments.
 pub fn ingest_inflections<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> crate::naming::AppInflections {
-    use crate::expr::{Expr, ExprNode, Literal};
+    use crate::expr::Expr;
     let path = dir.join("config/initializers/inflections.rb");
     let mut out = crate::naming::AppInflections::default();
     let Ok(source) = vfs.read_to_string(&path) else { return out };
     let file = path.to_string_lossy().into_owned();
     let Ok(program) = super::expr::ingest_ruby_program(&source, &file) else { return out };
 
-    fn strings(e: &Expr, out: &mut Vec<String>) {
-        match &*e.node {
-            ExprNode::Lit { value: Literal::Str { value } } => out.push(value.clone()),
-            ExprNode::Lit { value: Literal::Sym { value } } => out.push(value.as_str().to_string()),
-            ExprNode::Array { elements, .. } => elements.iter().for_each(|x| strings(x, out)),
-            _ => {}
-        }
-    }
     fn walk(e: &Expr, out: &mut crate::naming::AppInflections) {
-        if let ExprNode::Send { recv: Some(recv), method, args, .. } = &*e.node {
-            let on_inflect = matches!(&*recv.node, ExprNode::Var { name, .. } if name.as_str() == "inflect");
-            if on_inflect {
-                let mut words = Vec::new();
-                args.iter().for_each(|a| strings(a, &mut words));
-                match method.as_str() {
-                    "irregular" if words.len() == 2 => {
-                        out.irregular.push((words[0].clone(), words[1].clone()));
-                    }
-                    "uncountable" => out.uncountable.extend(words),
-                    "acronym" => out.acronym.extend(words),
-                    // The string form carries; a regex rule cannot.
-                    "singular" if words.len() == 2 && args.len() == 2 => {
-                        out.singular.push((words[0].clone(), words[1].clone()));
-                    }
-                    "plural" if words.len() == 2 && args.len() == 2 => {
-                        out.plural.push((words[0].clone(), words[1].clone()));
-                    }
-                    "plural" | "singular" => out.regex_rules += 1,
-                    _ => {}
-                }
-            }
-        }
+        apply_inflect_send(e, out);
         e.node.for_each_child(&mut |c| walk(c, out));
     }
     walk(&program, &mut out);
@@ -1882,6 +1911,14 @@ end
 
     enum_constants.validate_consumed_sources(&app, &sources, &enum_input_files)?;
     keep_initializer_defined(&mut app, dir, &sources, initializer_defined);
+    // The ledger of boot statements no recognizer above read. A warning
+    // per statement, in the ingest diagnostic channel; no `App` field.
+    super::initializer_ledger::record(
+        vfs,
+        dir,
+        &path_gems,
+        &engine_routes.keys().cloned().collect::<HashSet<String>>(),
+    );
     // Carrier provenance must not depend on where a module lives:
     // models, services, helpers and lib all use the same splice.
     let mut concern_class_method_spans = Vec::new();
@@ -6176,7 +6213,7 @@ fn validate_additional_test_paths<V: Vfs + ?Sized>(
 }
 
 /// Return true when a path component below `root` is a symbolic link.
-fn path_has_symlink_component<V: Vfs + ?Sized>(vfs: &V, root: &Path, path: &Path) -> bool {
+pub(super) fn path_has_symlink_component<V: Vfs + ?Sized>(vfs: &V, root: &Path, path: &Path) -> bool {
     let relative = if root.as_os_str().is_empty() {
         path
     } else if let Ok(relative) = path.strip_prefix(root) {
@@ -6527,7 +6564,7 @@ fn engine_app_roots<V: Vfs + ?Sized>(
 
 /// Whether any Ruby file under `lib_dir` subclasses `Rails::Engine`
 /// (`class Engine < ::Rails::Engine`).
-fn declares_rails_engine<V: Vfs + ?Sized>(vfs: &V, lib_dir: &Path) -> bool {
+pub(super) fn declares_rails_engine<V: Vfs + ?Sized>(vfs: &V, lib_dir: &Path) -> bool {
     if !vfs.is_dir(lib_dir) {
         return false;
     }
@@ -7397,7 +7434,7 @@ fn default_package_scan<V: Vfs + ?Sized>(vfs: &V, dir: &Path, out: &mut Vec<Path
 /// `time_zone` readers next to it: the file is railtie soup ingest does
 /// not model, and the generator ships the `<<` form commented out, so
 /// comment lines have to stay unmatched.
-fn extract_autoload_path_roots(source: &[u8]) -> Vec<String> {
+pub(super) fn extract_autoload_path_roots(source: &[u8]) -> Vec<String> {
     let source = String::from_utf8_lossy(source);
     let mut roots = Vec::new();
     for line in source.lines() {
@@ -7713,7 +7750,7 @@ fn lib_dir_is_explicitly_required<V: Vfs + ?Sized>(vfs: &V, dir: &Path, subdir: 
 /// deliberately not parsed); commented lines don't match. Absent call
 /// or unrecognized shape → empty list (walk everything, the prior
 /// behavior).
-fn extract_autoload_lib_ignores(source: &[u8]) -> Vec<String> {
+pub(super) fn extract_autoload_lib_ignores(source: &[u8]) -> Vec<String> {
     let source = String::from_utf8_lossy(source);
     for line in source.lines() {
         let t = line.trim_start();
@@ -7784,7 +7821,7 @@ fn extract_autoload_lib_ignores(source: &[u8]) -> Vec<String> {
 /// railtie configuration the emitted app has no use for — either a
 /// reader is synthesized for it explicitly (`time_zone`) or it
 /// configures machinery that does not exist here.
-const FRAMEWORK_CONFIG_KEYS: &[&str] = &[
+pub(super) const FRAMEWORK_CONFIG_KEYS: &[&str] = &[
     "time_zone",
     "session_store",
     "load_defaults",
@@ -7837,7 +7874,7 @@ const FRAMEWORK_CONFIG_KEYS: &[&str] = &[
 /// `"%Y%m%d%H%M%S"` here), so it is deliberately not folded in:
 /// Date's format registry is not modeled, and sharing Time's table would
 /// render a full timestamp where Rails renders eight digits.
-fn extract_time_formats(source: &[u8], file: &str) -> Vec<(String, TimeFormatSource)> {
+pub(super) fn extract_time_formats(source: &[u8], file: &str) -> Vec<(String, TimeFormatSource)> {
     let result = super::prism::parse(source, file);
     let root = result.node();
     let src = String::from_utf8_lossy(source).into_owned();
@@ -7930,7 +7967,7 @@ fn extract_time_formats(source: &[u8], file: &str) -> Vec<(String, TimeFormatSou
 /// `prepend`/`include`, and the single argument is a constant — three
 /// facts readable off the parse with nothing resolved. Anything else in
 /// the file is ignored, exactly as it is today.
-fn extract_module_mixins(source: &[u8], file: &str) -> Vec<crate::app::ModuleMixin> {
+pub(super) fn extract_module_mixins(source: &[u8], file: &str) -> Vec<crate::app::ModuleMixin> {
     use crate::app::{MixinKind, ModuleMixin};
 
     let result = super::prism::parse(source, file);
@@ -8198,7 +8235,7 @@ pub(super) fn initializer_statements<'a>(program: &ruby_prism::ProgramNode<'a>) 
 /// the parse. `except:`, a block, an `if:` — anything else — is not
 /// recorded, and the lowering reports the target it never sees a
 /// filter for.
-fn extract_initializer_filters(source: &[u8], file: &str) -> Vec<crate::app::InitializerFilter> {
+pub(super) fn extract_initializer_filters(source: &[u8], file: &str) -> Vec<crate::app::InitializerFilter> {
     use crate::app::InitializerFilter;
 
     let result = super::prism::parse(source, file);
@@ -8269,7 +8306,7 @@ pub(super) fn constant_text(node: &Node, src: &str) -> Option<String> {
 
 /// A registered format as its initializer spells it, before the lambda
 /// form is parsed into IR.
-enum TimeFormatSource {
+pub(super) enum TimeFormatSource {
     Strftime(String),
     Lambda { param: String, body: String },
 }
@@ -8281,7 +8318,7 @@ enum TimeFormatSource {
 /// (`config.x.vapid` read as a whole is an OrderedOptions in Rails), and
 /// `x_vapid_private_key` cannot be split back into its segments — the
 /// leaf has an underscore of its own.
-fn extract_config_assignments(source: &[u8], file: &str) -> Vec<(Vec<String>, String)> {
+pub(super) fn extract_config_assignments(source: &[u8], file: &str) -> Vec<(Vec<String>, String)> {
     fn walk(stmts: Vec<ruby_prism::Node<'_>>, src: &str, out: &mut Vec<(Vec<String>, String)>) {
         for stmt in stmts {
             // Config lines sit at the top level of an initializer and
@@ -8438,7 +8475,7 @@ fn extract_app_namespace(source: &[u8]) -> Option<String> {
     None
 }
 
-fn extract_session_cookie_key(source: &[u8]) -> Option<String> {
+pub(super) fn extract_session_cookie_key(source: &[u8]) -> Option<String> {
     let source = String::from_utf8_lossy(source);
     let mut seen_session_store = false;
     for line in source.lines() {
@@ -8488,7 +8525,7 @@ fn quoted_after_key_label(text: &str) -> Option<String> {
 }
 
 /// Result of scanning an initializer for `video_preview_arguments`.
-enum VideoPreviewArgsExtract {
+pub(super) enum VideoPreviewArgsExtract {
     Absent,
     Value(String),
     /// Assignment present but not a pure string-literal concatenation.
@@ -8500,7 +8537,7 @@ enum VideoPreviewArgsExtract {
 /// the way campfire tip writes the `-vf … -frames:v 1 -f image2` argv.
 /// Returns the joined runtime string. Computed RHS forms (`+ ENV…`) are
 /// `Unsupported` rather than a wrong joined literal.
-fn extract_video_preview_arguments(source: &[u8]) -> VideoPreviewArgsExtract {
+pub(super) fn extract_video_preview_arguments(source: &[u8]) -> VideoPreviewArgsExtract {
     let source = String::from_utf8_lossy(source);
     let mut lines = source.lines().peekable();
     while let Some(line) = lines.next() {
@@ -8650,7 +8687,7 @@ fn join_ruby_string_literals(text: &str) -> String {
 /// Returns the replacement's written name (e.g. `TimeLimitedVideoPreviewer`).
 /// Full-line comments are stripped so a commented-out swap cannot match;
 /// the assignment + `.map` form is required (not a bare class mention).
-fn extract_video_previewer_replacement(source: &[u8]) -> Option<String> {
+pub(super) fn extract_video_previewer_replacement(source: &[u8]) -> Option<String> {
     let source = String::from_utf8_lossy(source);
     let active: String = source
         .lines()
@@ -8690,7 +8727,7 @@ fn extract_video_previewer_replacement(source: &[u8]) -> Option<String> {
 /// (campfire breaks after the `-=`), so the scan continues to the
 /// closing bracket. Only the subtractive form: an app REPLACING the
 /// list (`= %w[…]`) is not read, and keeps Rails' default.
-fn extract_variable_content_type_exclusions(source: &[u8]) -> Vec<String> {
+pub(super) fn extract_variable_content_type_exclusions(source: &[u8]) -> Vec<String> {
     let source = String::from_utf8_lossy(source);
     let mut out = Vec::new();
     let mut lines = source.lines();
@@ -8722,7 +8759,7 @@ fn extract_variable_content_type_exclusions(source: &[u8]) -> Vec<String> {
 /// only the `true` arms are policy (`false` is libvips' default).
 /// Parens are optional (`Vips.block_untrusted true`); a `#` comment
 /// does not count. Named blocks accept double or single quotes.
-fn extract_vips_loader_policy(source: &[u8]) -> (bool, Vec<String>) {
+pub(super) fn extract_vips_loader_policy(source: &[u8]) -> (bool, Vec<String>) {
     let source = String::from_utf8_lossy(source);
     let mut untrusted = false;
     let mut blocked = Vec::new();
@@ -8765,16 +8802,25 @@ fn extract_vips_loader_policy(source: &[u8]) -> (bool, Vec<String>) {
 /// read) is recognized but not evaluated: it is a survey gap, and this
 /// file contributes no page size rather than a guessed one.
 fn extract_default_per_page(source: &[u8], file: &str) -> Option<u64> {
+    kaminari_default_per_page(source, file).1
+}
+
+/// `(recognized, value)`: `recognized` is true when the source holds a
+/// `Kaminari.configure do |c| … c.default_per_page = … end` this reader
+/// reads (the initializer ledger's definition of "consumed"), whether or
+/// not its value is a positive Integer literal.
+pub(super) fn kaminari_default_per_page(source: &[u8], file: &str) -> (bool, Option<u64>) {
     let src = String::from_utf8_lossy(source);
     // Cheap skip before parsing: this runs over every initializer, and
     // most never name Kaminari.
     if !src.contains("Kaminari") {
-        return None;
+        return (false, None);
     }
     let result = super::prism::parse(source, file);
     let root = result.node();
-    let program = root.as_program_node()?;
+    let Some(program) = root.as_program_node() else { return (false, None) };
     let mut found = None;
+    let mut recognized = false;
     for stmt in initializer_statements(&program) {
         let Some(call) = stmt.as_call_node() else { continue };
         if super::util::constant_id_str(&call.name()) != "configure" {
@@ -8808,6 +8854,7 @@ fn extract_default_per_page(source: &[u8], file: &str) -> Option<u64> {
             if !on_param {
                 continue;
             }
+            recognized = true;
             let Some(args) = assign.arguments() else { continue };
             let args: Vec<_> = args.arguments().iter().collect();
             let [value] = args.as_slice() else { continue };
@@ -8829,7 +8876,7 @@ fn extract_default_per_page(source: &[u8], file: &str) -> Option<u64> {
             found = literal;
         }
     }
-    found
+    (recognized, found)
 }
 
 /// `forgery_protection_verification_strategy`, app-wide, in Rails'
@@ -8891,13 +8938,38 @@ fn app_helpers_blank_token_tag<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> bool {
     })
 }
 
+/// `:header_only` / `:header_or_legacy_token` at the start of `text`.
+fn forgery_strategy_value(text: &str) -> Option<String> {
+    let v = text.trim().trim_start_matches(':');
+    let name: String =
+        v.chars().take_while(|c| c.is_ascii_alphanumeric() || *c == '_').collect();
+    matches!(name.as_str(), "header_only" | "header_or_legacy_token").then_some(name)
+}
+
+/// The strategy an explicit `config.action_controller.forgery_protection_
+/// verification_strategy = :x` line (already trimmed, not a comment) sets.
+pub(super) fn forgery_strategy_line(line: &str) -> Option<String> {
+    let rest =
+        line.strip_prefix("config.action_controller.forgery_protection_verification_strategy")?;
+    rest.trim().strip_prefix('=').and_then(forgery_strategy_value)
+}
+
+/// The version a `config.load_defaults 8.1` / `config.load_defaults(8.1)`
+/// line (already trimmed, not a comment) names.
+pub(super) fn load_defaults_version(line: &str) -> Option<f64> {
+    let rest = line.strip_prefix("config.load_defaults")?;
+    let version: String = rest
+        .trim()
+        .trim_start_matches('(')
+        .trim_matches(|c| c == '"' || c == '\'')
+        .chars()
+        .take_while(|c| c.is_ascii_digit() || *c == '.')
+        .collect();
+    version.parse::<f64>().ok()
+}
+
 fn read_forgery_verification_strategy<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> Option<String> {
-    fn strategy_value(text: &str) -> Option<String> {
-        let v = text.trim().trim_start_matches(':');
-        let name: String =
-            v.chars().take_while(|c| c.is_ascii_alphanumeric() || *c == '_').collect();
-        matches!(name.as_str(), "header_only" | "header_or_legacy_token").then_some(name)
-    }
+    let strategy_value = forgery_strategy_value;
     let code_lines = |bytes: &[u8]| -> Vec<String> {
         String::from_utf8_lossy(bytes)
             .lines()
@@ -8910,17 +8982,8 @@ fn read_forgery_verification_strategy<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> O
     if let Ok(source) = vfs.read(&dir.join("config/application.rb")) {
         let lines = code_lines(&source);
         for line in &lines {
-            if let Some(rest) = line.strip_prefix("config.load_defaults") {
-                let version: String = rest
-                    .trim()
-                    .trim_start_matches('(')
-                    .trim_matches(|c| c == '"' || c == '\'')
-                    .chars()
-                    .take_while(|c| c.is_ascii_digit() || *c == '.')
-                    .collect();
-                if let Ok(v) = version.parse::<f64>() {
-                    strategy = (v >= 8.2).then(|| "header_only".to_string());
-                }
+            if let Some(v) = load_defaults_version(line) {
+                strategy = (v >= 8.2).then(|| "header_only".to_string());
             }
         }
         config_files.push(lines);
@@ -8939,12 +9002,8 @@ fn read_forgery_verification_strategy<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> O
         }
     }
     for line in config_files.iter().flatten() {
-        if let Some(rest) =
-            line.strip_prefix("config.action_controller.forgery_protection_verification_strategy")
-        {
-            if let Some(v) = rest.trim().strip_prefix('=').and_then(strategy_value) {
-                strategy = Some(v);
-            }
+        if let Some(v) = forgery_strategy_line(line) {
+            strategy = Some(v);
         }
     }
     let controllers = dir.join("app/controllers");
@@ -8992,18 +9051,9 @@ fn read_wrap_parameters_by_default<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> bool
     if let Ok(source) = vfs.read(&dir.join("config/application.rb")) {
         let lines = code_lines(&source);
         for line in &lines {
-            if let Some(rest) = line.strip_prefix("config.load_defaults") {
-                // `config.load_defaults 8.1` and `config.load_defaults(8.1)`.
-                let version: String = rest
-                    .trim()
-                    .trim_start_matches('(')
-                    .trim_matches(|c| c == '"' || c == '\'')
-                    .chars()
-                    .take_while(|c| c.is_ascii_digit() || *c == '.')
-                    .collect();
-                if let Ok(v) = version.parse::<f64>() {
-                    default = v >= 7.0;
-                }
+            // `config.load_defaults 8.1` and `config.load_defaults(8.1)`.
+            if let Some(v) = load_defaults_version(line) {
+                default = v >= 7.0;
             }
         }
         files.push(lines);
@@ -9019,26 +9069,37 @@ fn read_wrap_parameters_by_default<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> bool
         }
     }
     for line in files.iter().flatten() {
-        if let Some(i) = line.find("action_controller.wrap_parameters_by_default") {
-            let rest = line[i..].split_once('=').map(|(_, v)| v.trim()).unwrap_or("");
-            if rest.starts_with("true") {
-                default = true;
-            } else if rest.starts_with("false") {
-                default = false;
-            }
-        } else if let Some(rest) = line.strip_prefix("wrap_parameters format:") {
-            // Receiverless only — `WidgetsController.wrap_parameters …` is
-            // that controller's call, not the app-wide on_load default.
-            // Format alone (the pre-7 generator); `include:` / `exclude:` /
-            // `name:` on the same line are not modeled as the app default.
-            if rest.contains("include:") || rest.contains("exclude:") || rest.contains("name:") {
-                continue;
-            }
-            // Exact `:json` / `json` entry — not a substring of `:json_api`.
-            default = wrap_parameters_format_includes_json(rest);
+        if let Some(v) = wrap_parameters_line(line) {
+            default = v;
         }
     }
     default
+}
+
+/// What a trimmed, non-comment config line sets the app-wide
+/// `wrap_parameters_by_default` to, or `None` when the line says nothing
+/// about it. One definition for the lift and the initializer ledger.
+pub(super) fn wrap_parameters_line(line: &str) -> Option<bool> {
+    if let Some(i) = line.find("action_controller.wrap_parameters_by_default") {
+        let rest = line[i..].split_once('=').map(|(_, v)| v.trim()).unwrap_or("");
+        if rest.starts_with("true") {
+            return Some(true);
+        }
+        if rest.starts_with("false") {
+            return Some(false);
+        }
+        return None;
+    }
+    let rest = line.strip_prefix("wrap_parameters format:")?;
+    // Receiverless only — `WidgetsController.wrap_parameters …` is
+    // that controller's call, not the app-wide on_load default.
+    // Format alone (the pre-7 generator); `include:` / `exclude:` /
+    // `name:` on the same line are not modeled as the app default.
+    if rest.contains("include:") || rest.contains("exclude:") || rest.contains("name:") {
+        return None;
+    }
+    // Exact `:json` / `json` entry — not a substring of `:json_api`.
+    Some(wrap_parameters_format_includes_json(rest))
 }
 
 /// Whether a `wrap_parameters format: …` argument list names `:json`
@@ -9050,7 +9111,7 @@ fn wrap_parameters_format_includes_json(rest: &str) -> bool {
         .any(|tok| tok == ":json" || tok == "json")
 }
 
-fn extract_config_time_zone(source: &[u8]) -> Option<String> {
+pub(super) fn extract_config_time_zone(source: &[u8]) -> Option<String> {
     let source = String::from_utf8_lossy(source);
     for line in source.lines() {
         let t = line.trim_start();
@@ -9592,6 +9653,12 @@ fn inherit_enums(models: &mut [crate::dialect::Model]) {
 }
 
 /// `config.i18n.default_locale = :xx` in `config/application.rb`, else `en`.
+/// The locale a trimmed config line's `config.i18n.default_locale = :xx` names.
+pub(super) fn default_locale_line(line: &str) -> Option<String> {
+    let rest = line.strip_prefix("config.i18n.default_locale").map(str::trim)?;
+    locale_literal(rest.strip_prefix('=')?.trim())
+}
+
 fn default_locale<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> String {
     let path = dir.join("config/application.rb");
     let source = vfs.read_to_string(&path).unwrap_or_default();
@@ -9599,10 +9666,20 @@ fn default_locale<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> String {
         .lines()
         .map(str::trim)
         .filter(|l| !l.starts_with('#'))
-        .find_map(|l| l.strip_prefix("config.i18n.default_locale").map(str::trim))
-        .and_then(|rest| rest.strip_prefix('='))
-        .and_then(|v| locale_literal(v.trim()))
+        .find_map(default_locale_line)
         .unwrap_or_else(|| "en".to_string())
+}
+
+/// What a trimmed config line's `config.i18n.raise_on_missing_translations = v` sets.
+pub(super) fn raise_on_missing_line(l: &str) -> Option<Result<bool, String>> {
+    let value = l.strip_prefix("config.i18n.raise_on_missing_translations")?.trim().strip_prefix('=')?;
+    let value = value.split('#').next().unwrap_or("").trim();
+    Some(match value {
+        "true" => Ok(true),
+        "false" | "nil" => Ok(false),
+        ":strict" => Err("`raise_on_missing_translations = :strict` also raises from ActiveModel, which is not modeled".to_string()),
+        _ => Err(format!("`raise_on_missing_translations = {value}` is computed at boot")),
+    })
 }
 
 /// `config.i18n.raise_on_missing_translations` from `config/application.rb`
@@ -9610,16 +9687,7 @@ fn default_locale<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> String {
 fn missing_policy<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> crate::i18n::MissingPolicy {
     let setting = |path: &Path| -> Option<Result<bool, String>> {
         let source = vfs.read_to_string(path).ok()?;
-        source.lines().map(str::trim).filter(|l| !l.starts_with('#')).find_map(|l| {
-            let value = l.strip_prefix("config.i18n.raise_on_missing_translations")?.trim().strip_prefix('=')?;
-            let value = value.split('#').next().unwrap_or("").trim();
-            Some(match value {
-                "true" => Ok(true),
-                "false" | "nil" => Ok(false),
-                ":strict" => Err("`raise_on_missing_translations = :strict` also raises from ActiveModel, which is not modeled".to_string()),
-                _ => Err(format!("`raise_on_missing_translations = {value}` is computed at boot")),
-            })
-        })
+        source.lines().map(str::trim).filter(|l| !l.starts_with('#')).find_map(raise_on_missing_line)
     };
     let mut policy = crate::i18n::MissingPolicy::default();
     match setting(&dir.join("config/application.rb")) {

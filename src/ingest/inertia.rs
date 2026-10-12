@@ -70,7 +70,7 @@ pub fn load_inertia_config<V: Vfs + ?Sized>(
 /// A non-literal value is a survey gap rather than an evaluated guess:
 /// the emitted app would otherwise run with the gem's default and no
 /// diagnostic would say so.
-fn extract_inertia_config(
+pub(super) fn extract_inertia_config(
     source: &[u8],
     file: &str,
     vite_digest: Option<&str>,
