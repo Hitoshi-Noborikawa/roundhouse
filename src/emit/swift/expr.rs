@@ -2606,6 +2606,18 @@ fn emit_send(
         }
     }
 
+    // `ActiveSupport.errors_for(errors, prefix)` (runtime/ruby/active_support_ext.rb): the messages that start with the field's prefix, without it.
+    if method == "errors_for" && args.len() == 2 {
+        if let Some(ExprNode::Const { path }) = recv.map(|r| &*r.node) {
+            if path.last().map(|s| s.as_str()) == Some("ActiveSupport") {
+                return format!(
+                    "({{ (prefix: String) -> [String] in ({}).filter {{ $0.hasPrefix(prefix) }}.map {{ String($0.dropFirst(prefix.count)) }} }}({}))",
+                    args_s[0], args_s[1]
+                );
+            }
+        }
+    }
+
     // Temporal writer intrinsic: `ActiveSupport.db_now` — current UTC time
     // in Rails' exact storage form ("YYYY-MM-DD HH:MM:SS.ffffff").
     // `fill_timestamps` stamps with it so a column's TEXT values stay
@@ -2989,6 +3001,11 @@ fn emit_send(
             "to_f" => return format!("Double(\"\\({rs})\")!"),
             "empty?" => return format!("{rs}.isEmpty"),
             "any?" => return format!("!{rs}.isEmpty"),
+            // An element that is never nil or false makes `none?` mean no elements at all
+            "none?" if matches!(
+                array_elem_ty(r),
+                Some(crate::ty::Ty::Str | crate::ty::Ty::Int | crate::ty::Ty::Float | crate::ty::Ty::Sym)
+            ) => return format!("{rs}.isEmpty"),
             "length" | "size" => return format!("{rs}.count"),
             "upcase" => return format!("{rs}.uppercased()"),
             "downcase" => return format!("{rs}.lowercased()"),
