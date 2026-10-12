@@ -121,7 +121,8 @@ module ActiveSupport
       # untyped), and a poly `match?` dispatch reaches PlatformAgent's
       # private `match?(pattern)` with a String, after which Spinel
       # compiles that method's own `String#match?` as an unconditional
-      # NoMethodError (campfire's /rooms/1 under a Chrome user agent).
+      # NoMethodError (campfire's /rooms/1 under a Chrome user agent;
+      # matz/spinel#8633).
       if @regexps.any? { |r| !(r =~ key.to_s).nil? }
         @mask
       elsif @deep_regexps.any? { |r| !(r =~ full_key).nil? }

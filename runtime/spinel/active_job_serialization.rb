@@ -119,7 +119,8 @@ module ActiveJob
     # Not `count`: a second user `count(x)` in the program turns Spinel's
     # poly `ActiveRecord.adapter.count(table)` into an unboxed sp_int
     # returned from an sp_RbVal function, a C error in every Spinel build
-    # that boots no adapter (around_block_filter_spinel and two more).
+    # that boots no adapter (around_block_filter_spinel and two more;
+    # matz/spinel#8634).
     def self.arg_count(args)
       args.length
     end
