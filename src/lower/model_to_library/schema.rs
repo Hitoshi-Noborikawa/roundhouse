@@ -2191,6 +2191,10 @@ fn model_body_names(models: &[Model]) -> std::collections::HashSet<Symbol> {
                         walk(c, &mut out);
                     }
                 }
+                ModelBodyItem::Alias { new, old, .. } => {
+                    out.insert(new.clone());
+                    out.insert(old.clone());
+                }
                 ModelBodyItem::Association { .. } | ModelBodyItem::Validation { .. } => {}
             }
         }

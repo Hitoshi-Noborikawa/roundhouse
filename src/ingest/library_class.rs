@@ -68,11 +68,46 @@ pub fn ingest_library_classes(
     source: &[u8],
     file: &str,
 ) -> IngestResult<Vec<LibraryClass>> {
+    ingest_library_classes_impl(source, file, true)
+}
+
+/// Like [`ingest_library_classes`], but only classes/modules NESTED
+/// inside some other class or module body — never a top-level
+/// declaration. For a model file, the model's own top-level class is
+/// ingested by `ingest_model`; this is the second walk `app.rs` runs
+/// over the same source just to find classes nested in the model's
+/// body (`class Relay < ApplicationRecord; class Something; … end;
+/// end`), and it should look at nothing else.
+///
+/// The library walk doesn't know about methods the model synthesizes
+/// (an `enum`-generated predicate, say), so re-ingesting the model's
+/// own top-level class here — as this function's sibling used to —
+/// could fail on an `alias` the model itself resolved just fine, even
+/// though that copy is discarded immediately after (`nested_under` in
+/// `app.rs` keeps only names prefixed with the model's own). Skipping
+/// top-level declarations avoids that spurious failure entirely,
+/// rather than chasing down every way the library walk might refuse
+/// something the model walk already accepted.
+pub fn ingest_nested_library_classes(
+    source: &[u8],
+    file: &str,
+) -> IngestResult<Vec<LibraryClass>> {
+    ingest_library_classes_impl(source, file, false)
+}
+
+fn ingest_library_classes_impl(
+    source: &[u8],
+    file: &str,
+    include_top_level: bool,
+) -> IngestResult<Vec<LibraryClass>> {
     super::sources::register(file, &String::from_utf8_lossy(source));
     let result = super::prism::parse(source, file);
     let root = result.node();
     let mut out = Vec::new();
-    for (scope, class) in find_all_classes_with_scope(&root) {
+    for (scope, class) in find_all_classes_with_scope(&root)
+        .into_iter()
+        .filter(|(scope, _)| include_top_level || !scope.is_empty())
+    {
         let (mut lc, struct_base) = library_class_and_struct_base(&class, &scope, file)?;
         // BEFORE the class it serves: a superclass has to be defined
         // when the `class X < Y` line runs, and these two share a file.
@@ -88,7 +123,10 @@ pub fn ingest_library_classes(
         // Not before the owner: the struct is named under it, so the owner has to exist first.
         out.extend(structs.into_iter().map(|(_, s)| s));
     }
-    for (scope, module) in find_all_modules_with_scope(&root) {
+    for (scope, module) in find_all_modules_with_scope(&root)
+        .into_iter()
+        .filter(|(scope, _)| include_top_level || !scope.is_empty())
+    {
         // A nested `ClassMethods` is not a namespace of its own — it's
         // ActiveSupport::Concern's class-side carrier, already folded
         // into its parent as Class-receiver methods by `walk_decl_body`.
