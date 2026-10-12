@@ -79,6 +79,7 @@ module ActiveRecord
     def order: (*(String | Symbol | Hash[Symbol, Symbol | Hash[Symbol, Symbol]]) parts) -> Relation
     def order_sql: (String fragment) -> Relation
     def reorder_sql: (String fragment) -> Relation
+    def clear_ordering: () -> Relation
     # In-memory sort of a LOADED relation. Records are `Base` (same
     # interim as first/take); `preloaded` stays bare for Spinel integer
     # seeds, but the loaded cache itself is a record array.
