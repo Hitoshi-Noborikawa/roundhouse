@@ -2296,35 +2296,56 @@ fn simplify_class_array(v: &Expr) -> Expr {
     };
     let mut pieces = Vec::new();
     flatten_class_pieces(v, &mut pieces);
-    let mut tokens = Vec::new();
+    // A token is its text, and the condition it renders under when that is only known at render time.
+    let mut tokens: Vec<(String, Option<Expr>)> = Vec::new();
     for piece in &pieces {
         match &*piece.node {
             ExprNode::Lit { value: Literal::Str { value } } => {
                 if !value.trim().is_empty() {
-                    tokens.push(value.clone());
+                    tokens.push((value.clone(), None));
                 }
             }
             ExprNode::Hash { entries, .. } => {
                 for (k, val) in entries {
-                    let truthy = match &*val.node {
-                        ExprNode::Lit { value: Literal::Bool { value } } => *value,
-                        ExprNode::Lit { value: Literal::Nil } => false,
-                        _ => return view_helpers_call("class_names", pieces),
-                    };
                     let key = match &*k.node {
                         ExprNode::Lit { value: Literal::Sym { value } } => value.as_str().to_string(),
                         ExprNode::Lit { value: Literal::Str { value } } => value.clone(),
                         _ => return view_helpers_call("class_names", pieces),
                     };
-                    if truthy && !key.trim().is_empty() {
-                        tokens.push(key);
+                    if key.trim().is_empty() {
+                        continue;
+                    }
+                    match &*val.node {
+                        ExprNode::Lit { value: Literal::Bool { value: true } } => tokens.push((key, None)),
+                        ExprNode::Lit { value: Literal::Bool { value: false } | Literal::Nil } => {}
+                        _ => tokens.push((key, Some(val.clone()))),
                     }
                 }
             }
             _ => return view_helpers_call("class_names", pieces),
         }
     }
-    Expr::new(v.span, ExprNode::Lit { value: Literal::Str { value: tokens.join(" ") } })
+    if tokens.iter().all(|(_, cond)| cond.is_none()) {
+        let text = tokens.into_iter().map(|(t, _)| t).collect::<Vec<_>>().join(" ");
+        return Expr::new(v.span, ExprNode::Lit { value: Literal::Str { value: text } });
+    }
+    // Not `class_names` here: a conditional token's separator rides with it, which every target can render without a runtime helper
+    let Some((head, None)) = tokens.first().cloned() else {
+        return view_helpers_call("class_names", pieces);
+    };
+    let mut parts = vec![InterpPart::Text { value: head }];
+    for (text, cond) in tokens.into_iter().skip(1) {
+        match cond {
+            None => parts.push(InterpPart::Text { value: format!(" {text}") }),
+            Some(cond) => parts.push(InterpPart::Expr {
+                expr: Expr::new(
+                    Span::synthetic(),
+                    ExprNode::If { cond, then_branch: lit_str(format!(" {text}")), else_branch: lit_str(String::new()) },
+                ),
+            }),
+        }
+    }
+    string_interp(parts)
 }
 
 // `class_names` reads a nested array's elements with `to_s`, so a hash inside one must arrive as its own argument

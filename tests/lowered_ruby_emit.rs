@@ -1765,7 +1765,7 @@ fn lowered_form_partial_form_builder_methods() {
         "expected inline text_field name/id; got:\n{src}",
     );
     assert!(
-        src.contains("ActionView::ViewHelpers.class_names(\"block shadow-sm rounded-md border px-3 py-2 mt-2 w-full\", { \"border-gray-400 focus:outline-blue-600\": "),
+        src.contains("block shadow-sm rounded-md border px-3 py-2 mt-2 w-full#{if "),
         "expected the class array to pick its classes per field at render time; got:\n{src}",
     );
     // `form.textarea :body, rows: 4, ...` → inline
