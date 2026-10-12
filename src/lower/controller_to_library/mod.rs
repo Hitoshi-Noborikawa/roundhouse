@@ -550,9 +550,10 @@ pub fn lower_controllers_with_arel_views_assocs_and_routes(
             // Bracket, broadcast, and arel all need the first typing
             // pass and do not consume each other's newly-stamped types,
             // so they share one follow-up type when any of them fires.
-            let mut rewritten = self::params::rewrite_typed_bracket_to_field_in_place(
+            let bracket_rewritten = self::params::rewrite_typed_bracket_to_field_in_place(
                 &mut method.body, &permitted_fields,
             );
+            let mut rewritten = bracket_rewritten;
             rewritten |= self::broadcasts::rewrite_broadcast_to_in_place(
                 &mut method.body,
                 views_module_name(controller).as_deref(),
@@ -568,6 +569,15 @@ pub fn lower_controllers_with_arel_views_assocs_and_routes(
                 }
             }
             if rewritten {
+                crate::lower::typing::type_method_body(method, &classes, &framework_ivars);
+            }
+            // `helper[:field].humanize` was an untyped read when the
+            // String inflections were grounded; the bracket rewrite just
+            // made it `helper.field`, a String. Ground them now, then type
+            // the grounded calls.
+            if bracket_rewritten
+                && crate::lower::string_inflections::ground_in_place(&mut method.body)
+            {
                 crate::lower::typing::type_method_body(method, &classes, &framework_ivars);
             }
         }
