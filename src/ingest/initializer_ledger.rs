@@ -417,7 +417,7 @@ fn content_helper_assignment(p: &Probe<'_>) -> bool {
 /// inert for the COMPILED app: ingest never reads it, and the thing it
 /// configures does not exist in the emitted program.
 pub const INERT: &[(&str, &str)] = &[
-    ("config.filter_parameters", "redacts parameter values in Rails' request log lines; the emitted runtime has no parameter filter (grep runtime/ for ParameterFilter: none) and logs no parameters"),
+    ("config.filter_parameters", "redacts parameter values in Rails' request log lines; the emitted runtime logs no parameters, and its ParameterFilter (active_support_reporters.rb) reads only `Rails.event` payloads, not this setting"),
     ("config.action_dispatch.cookies_serializer", "selects how Rails encodes cookie payloads on the wire (:json / :marshal); the emitted runtime owns one session codec and never reads the setting"),
     ("config.assets.version", "salts the asset digest Sprockets/Propshaft compute; the emitted app serves its own assets and does not read it"),
     ("config.generators", "consulted only by `rails generate`, which is not part of a compiled app (a block here only calls `g.<option>`)"),

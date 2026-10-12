@@ -117,9 +117,14 @@ module ActiveSupport
 
     def value_for_key(key, value, full_parent_key, original_params)
       full_key = full_parent_key.nil? ? key.to_s : "#{full_parent_key}.#{key}"
-      if @regexps.any? { |r| r.match?(key.to_s) }
+      # `=~`, not `match?`: Spinel types `r` as poly (the filters arrive
+      # untyped), and a poly `match?` dispatch reaches PlatformAgent's
+      # private `match?(pattern)` with a String, after which Spinel
+      # compiles that method's own `String#match?` as an unconditional
+      # NoMethodError (campfire's /rooms/1 under a Chrome user agent).
+      if @regexps.any? { |r| !(r =~ key.to_s).nil? }
         @mask
-      elsif @deep_regexps.any? { |r| r.match?(full_key) }
+      elsif @deep_regexps.any? { |r| !(r =~ full_key).nil? }
         @mask
       elsif value.is_a?(Hash)
         filter_hash(value, full_key, original_params)
