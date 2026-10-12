@@ -27,6 +27,7 @@ pub use schema::col_storage_name;
 pub use schema::shakeable_synthesized_names;
 pub(crate) mod validations;
 mod associations;
+pub(crate) use associations::polymorphic_type_switch;
 pub(crate) mod broadcasts;
 pub(crate) mod markers;
 pub mod row;
