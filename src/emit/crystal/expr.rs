@@ -416,6 +416,18 @@ fn emit_node(n: &ExprNode) -> String {
             {
                 return format!("# Crystal: {} (skipped — module load handled at file scope)", emit_send_base(recv.as_ref(), method, args, *parenthesized));
             }
+            // `ActiveSupport.errors_for(errors, prefix)` (runtime/ruby/active_support_ext.rb): the messages that start with the field's prefix, without it.
+            if method.as_str() == "errors_for" && args.len() == 2 {
+                if let Some(ExprNode::Const { path }) = recv.as_ref().map(|r| &*r.node) {
+                    if path.last().map(|s| s.as_str()) == Some("ActiveSupport") {
+                        return format!(
+                            "(->(errors : Array(String), prefix : String) {{ errors.select(&.starts_with?(prefix)).map {{ |m| m[prefix.size..] }} }}).call({}, {})",
+                            emit_expr(&args[0]),
+                            emit_expr(&args[1]),
+                        );
+                    }
+                }
+            }
             // Temporal reader intrinsic: `ActiveSupport.parse_db_time(s)`
             // parses stored ISO-8601 text into a native `Time`. Renders to
             // the Crystal runtime helper (nil-safe: `String?` → `Time?`).
