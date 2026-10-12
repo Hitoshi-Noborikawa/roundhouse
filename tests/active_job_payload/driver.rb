@@ -143,7 +143,7 @@ puts "job " + payload
 
 # ---- Read: every value back through its typed reader ----------------
 args = JSON.parse(args_json)
-check("count", A.count(args) == 23, A.count(args).to_s)
+check("count", A.arg_count(args) == 23, A.arg_count(args).to_s)
 check("null", A.null_at(args, 0), "")
 check("bool true", A.bool_at(args, 1) == true, "")
 check("bool false", A.bool_at(args, 2) == false, "")
