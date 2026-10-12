@@ -700,11 +700,14 @@ fn collect_flat_routes(spec: &RouteSpec, out: &mut Vec<FlatRoute>, ctx: &Ctx) {
                     continue;
                 }
                 let member = suffix.replace(":id", &format!(":{id_param}"));
+                // Empty for an index or show mounted with `path: "/"`; it
+                // stays empty through the nesting (`/account`, not
+                // `/account/`) and is the root `/` only at the very top.
                 let path = format!("{resource_path}{member}");
-                let path = if path.is_empty() { "/".to_string() } else { path };
                 let (nested_path, nested_params) =
                     nest_path(&path, &ctx.parents, ResourceScope::Nested);
                 let full_path = prefix_path(&ctx.ns_path, &nested_path);
+                let full_path = if full_path.is_empty() { "/".to_string() } else { full_path };
                 // A scope PATH can carry a dynamic segment of its own
                 // (`scope path: ":bot_key"`), and it is a helper
                 // argument like any other. `nest_path` only knows the
@@ -959,7 +962,7 @@ fn nest_path(
     // at `/rooms/:room_id/@:message_id`. Concatenating raw glued it onto
     // the id (`/rooms/:room_id@:message_id`) and the route never matched.
     let owned_path;
-    let path: &str = if path.starts_with('/') {
+    let path: &str = if path.is_empty() || path.starts_with('/') {
         path
     } else {
         owned_path = format!("/{path}");

@@ -177,3 +177,27 @@ fn empty_path_mounts_the_resource_at_its_scope_root() {
     );
     assert!(!paths.iter().any(|p| p.contains("//")), "{paths:#?}");
 }
+
+/// Nested under another resource or a namespace, an empty `path:` adds
+/// nothing to the parent's path: Rails normalizes `/account/` to
+/// `/account`. Only a resource at the very top is served at `/`.
+#[test]
+fn empty_path_nested_resource_has_no_trailing_slash() {
+    let paths = |source: &str| -> Vec<String> {
+        routes(source)
+            .iter()
+            .filter(|r| r.method == HttpMethod::Get)
+            .map(|r| format!("{} {}#{}", r.path, r.controller.0.as_str(), r.action.as_str()))
+            .collect()
+    };
+    let got = paths("  resource :account, only: %i[] do\n    resource :profile, path: '/', only: %i[show]\n  end");
+    assert_eq!(got, ["/account ProfilesController#show"], "{got:#?}");
+    let got = paths("  resources :users, only: %i[] do\n    resources :posts, path: '/', only: %i[index show]\n  end");
+    assert_eq!(
+        got,
+        ["/users/:user_id PostsController#index", "/users/:user_id/:id PostsController#show"],
+        "{got:#?}"
+    );
+    let got = paths("  namespace :api do\n    resources :gadgets, path: '/', only: %i[index]\n  end");
+    assert_eq!(got, ["/api Api::GadgetsController#index"], "{got:#?}");
+}
