@@ -1970,6 +1970,10 @@ end
         !(bodiless && model_names.contains(lc.name.0.as_str()))
     });
 
+    // A model's `begin include(X) rescue NameError end` becomes its
+    // `include`s (or nothing), now that every module of the app is
+    // known; before the qualification below, which reads them.
+    super::guarded_include::splice_guarded_includes(&mut app);
     // Before the splice: it (and every later consumer) looks concerns up
     // by ClassId, so the lexical-scope resolution has to have happened.
     qualify_relative_includes(&mut app);
