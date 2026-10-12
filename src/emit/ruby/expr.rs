@@ -11,7 +11,7 @@ use crate::ty::Ty;
 
 use super::shared::indent_lines;
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 
 thread_local! {
     /// True while emitting the body of a CORE-CLASS REOPEN (`class
@@ -21,11 +21,16 @@ thread_local! {
     /// see the comment there. Off everywhere else, so ordinary app and
     /// library bodies keep reading the way they always have.
     static IN_CORE_CLASS_REOPEN: Cell<bool> = const { Cell::new(false) };
+    /// Direct, locked unknown-gem namespaces admitted by the Ruby project
+    /// emitter. Other targets retain their constant refusal.
+    static EXTERNAL_GEM_NAMESPACES: RefCell<std::collections::BTreeSet<String>> = const {
+        RefCell::new(std::collections::BTreeSet::new())
+    };
     /// The emitted path (relative to the output root) of the file being
     /// rendered. A `SOURCE_FILE_PATH` literal anchors on it; `None`
     /// outside a per-file emit, where the literal is written as is.
-    static EMITTED_FILE: std::cell::RefCell<Option<std::path::PathBuf>> =
-        const { std::cell::RefCell::new(None) };
+    static EMITTED_FILE: RefCell<Option<std::path::PathBuf>> =
+        const { RefCell::new(None) };
 }
 
 /// Run `f` while emitting the file that lands at `out_path` (relative
@@ -73,9 +78,29 @@ pub(super) fn with_core_class_reopen<R>(yes: bool, f: impl FnOnce() -> R) -> R {
     r
 }
 
+pub(super) fn with_external_gem_namespaces<R>(
+    namespaces: &std::collections::BTreeSet<String>,
+    f: impl FnOnce() -> R,
+) -> R {
+    let previous = EXTERNAL_GEM_NAMESPACES
+        .with(|current| std::mem::replace(&mut *current.borrow_mut(), namespaces.clone()));
+    let result = f();
+    EXTERNAL_GEM_NAMESPACES.with(|current| {
+        *current.borrow_mut() = previous;
+    });
+    result
+}
+
+pub(crate) fn external_gem_namespace_is_enabled(namespace: &str) -> bool {
+    EXTERNAL_GEM_NAMESPACES.with(|namespaces| namespaces.borrow().contains(namespace))
+}
+
 /// Emit Ruby-family syntax while retaining diagnostics and typed primitive
 /// semantics, including the no-block form of String#bytes with literal &nil.
 pub fn emit_expr(e: &Expr) -> String {
+    if is_locked_external_gem_constant(e) {
+        return emit_node(&e.node);
+    }
     // A site a lowering replaced with a stub — `lower::object_extend`,
     // the arel `ColumnSpec::Named` placeholder — renders as the raise
     // the report describes, so the program fails THERE with the reason
@@ -104,6 +129,24 @@ pub fn emit_expr(e: &Expr) -> String {
         return format!("+{}", emit_node(&e.node));
     }
     emit_node(&e.node)
+}
+
+fn is_locked_external_gem_constant(expr: &Expr) -> bool {
+    let Some(DiagnosticKind::Unsupported {
+        construct, detail, ..
+    }) = &expr.diagnostic
+    else {
+        return false;
+    };
+    if construct.as_str() != "constant" {
+        return false;
+    }
+    EXTERNAL_GEM_NAMESPACES.with(|namespaces| {
+        namespaces
+            .borrow()
+            .iter()
+            .any(|root| crate::gems::detail_names_external_namespace(detail, root))
+    })
 }
 
 /// A string literal ingested from `+"literal"`. Written back with its

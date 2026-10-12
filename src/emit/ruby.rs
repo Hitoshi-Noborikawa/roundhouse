@@ -36,6 +36,13 @@ pub use rbs::ty_to_rbs;
 // External API: the historical surface kept for `tests/` and `bin/`.
 pub use expr::emit_expr;
 
+pub(crate) fn with_external_gem_namespaces<R>(
+    namespaces: &std::collections::BTreeSet<String>,
+    f: impl FnOnce() -> R,
+) -> R {
+    expr::with_external_gem_namespaces(namespaces, f)
+}
+
 /// Emit a single `MethodDef` as Ruby source (trailing newline included).
 /// The signature and effects are not emitted — they belong to the RBS
 /// sidecar, not to Ruby itself. Used by the runtime-extraction pipeline
