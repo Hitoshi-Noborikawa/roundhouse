@@ -28,6 +28,7 @@ mod broadcasts;
 mod inertia;
 mod process_action;
 pub mod params;
+mod permit_splat;
 pub mod params_wrapper;
 pub mod rewrites;
 pub mod util;
@@ -315,6 +316,11 @@ pub fn lower_controllers_with_arel_views_assocs_and_routes(
     // purely shape-directed — what it was before this table existed.
     let empty_segments = std::collections::HashMap::new();
     let route_id_segments = route_id_segments.unwrap_or(&empty_segments);
+    // `permit(*helper)` with a helper answering a literal Symbol list is
+    // the same permit written inline; inline it before anything reads
+    // the permit lists (`permit_splat`).
+    let inlined = self::permit_splat::inline_permit_splats(controllers);
+    let controllers: &[Controller] = inlined.as_deref().unwrap_or(controllers);
     // Scan source-shape action bodies for `permit(...)` declarations.
     // Each unique resource yields one `<Resource>Params` synthesized
     // class plus the (resource, fields, class_id) record we need to
