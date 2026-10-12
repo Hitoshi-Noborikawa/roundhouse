@@ -25,6 +25,30 @@ use crate::ty::Ty;
 
 /// The top-level IR: a Rails application as data. This is the serializable
 /// deliverable — the thing ingesters produce and emitters consume.
+/// A condition on the including class, read from a concern's
+/// `included do`: `self == A` / `self != A` / `in?([A, B])`, under `if`
+/// or `unless`. `classes` are the constants as written.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct IncluderGuard {
+    pub classes: Vec<String>,
+    pub negate: bool,
+}
+
+impl IncluderGuard {
+    /// Whether the guard holds for the includer named `includer` (its
+    /// full name). A written constant matches the includer's full name
+    /// or its trailing segments (`Account` admits `Billing::Account`
+    /// only when written in that namespace; the ingest sees the bare
+    /// name, so a suffix match on `::` boundaries is what it can do).
+    pub fn admits(&self, includer: &str) -> bool {
+        let hit = self.classes.iter().any(|c| {
+            let c = c.trim_start_matches("::");
+            includer == c || includer.ends_with(&format!("::{c}"))
+        });
+        hit != self.negate
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct App {
     pub schema_version: u32,
@@ -397,6 +421,15 @@ pub struct App {
     /// item provenance) can follow when emission needs it.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub concern_model_items: HashMap<ClassId, Vec<ModelBodyItem>>,
+    /// Items an `included do` block declares behind a guard on the
+    /// includer (`has_many :x if self == Account`, `unless in?([A, B])`),
+    /// keyed by module. `included do` runs with `self` bound to each
+    /// includer, so the guard is answered per includer when the module
+    /// is spliced: the item goes to the includers it admits and no
+    /// other. Kept apart from `concern_model_items`, which every
+    /// includer receives.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub concern_guarded_items: HashMap<ClassId, Vec<(IncluderGuard, ModelBodyItem)>>,
     /// Instance-method names a concern's `included do` block (re)defines
     /// (`def x`, `alias_method :x, ...`, `define_method`, `attr_*`), keyed by
     /// module. Those statements are not carried as `concern_model_items`, so
@@ -798,6 +831,7 @@ impl App {
             concern_spliced_actions: HashMap::new(),
             concern_spliced_class_methods: HashMap::new(),
             concern_model_items: HashMap::new(),
+            concern_guarded_items: HashMap::new(),
             concern_included_redefs: HashMap::new(),
             current_attribute_classes: Vec::new(),
             render_edges: HashMap::new(),

@@ -566,7 +566,7 @@ pub fn ingest_app_with_vfs<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResult
                                 unwrap_or_record(ingest_nested_library_classes(&source, &path_str))?
                             {
                                 let nested = nested_under(&outer, classes);
-                                let (concern_items, concern_enum_decls) =
+                                let (concern_items, concern_enum_decls, concern_guarded) =
                                     ingest_concern_model_items_with_constants(
                                         &source, &path_str, &enum_constants,
                                     );
@@ -574,6 +574,9 @@ pub fn ingest_app_with_vfs<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResult
                                     app.concern_included_redefs.entry(id).or_default().push(name);
                                 }
                                 app.concern_model_items.extend(concern_items.into_iter().filter(
+                                    |(id, _)| nested.iter().any(|class| class.name == *id),
+                                ));
+                                app.concern_guarded_items.extend(concern_guarded.into_iter().filter(
                                     |(id, _)| nested.iter().any(|class| class.name == *id),
                                 ));
                                 concern_enums.extend(concern_enum_decls.into_iter().filter(
@@ -603,7 +606,7 @@ pub fn ingest_app_with_vfs<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResult
                         {
                             app.concern_filters.extend(concern_filters);
                         }
-                        let (concern_items, concern_enum_decls) =
+                        let (concern_items, concern_enum_decls, concern_guarded) =
                             ingest_concern_model_items_with_constants(
                                 &source, &path_str, &enum_constants,
                             );
@@ -611,6 +614,7 @@ pub fn ingest_app_with_vfs<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResult
                             app.concern_included_redefs.entry(id).or_default().push(name);
                         }
                         app.concern_model_items.extend(concern_items);
+                        app.concern_guarded_items.extend(concern_guarded);
                         app.view_visible_controller_methods
                             .extend(ingest_helper_method_names(&source));
                         concern_enums.extend(concern_enum_decls);
@@ -731,7 +735,7 @@ pub fn ingest_app_with_vfs<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResult
                         // nested class in the file too.
                         if let Ok(classes) = ingest_nested_library_classes(&source, &path_str) {
                             let nested = nested_under(&outer, classes);
-                            let (concern_items, concern_enum_decls) =
+                            let (concern_items, concern_enum_decls, concern_guarded) =
                                 ingest_concern_model_items_with_constants(
                                     &source, &path_str, &enum_constants,
                                 );
@@ -739,6 +743,9 @@ pub fn ingest_app_with_vfs<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResult
                                 app.concern_included_redefs.entry(id).or_default().push(name);
                             }
                             app.concern_model_items.extend(concern_items.into_iter().filter(
+                                |(id, _)| nested.iter().any(|class| class.name == *id),
+                            ));
+                            app.concern_guarded_items.extend(concern_guarded.into_iter().filter(
                                 |(id, _)| nested.iter().any(|class| class.name == *id),
                             ));
                             concern_enums.extend(concern_enum_decls.into_iter().filter(
@@ -1394,7 +1401,7 @@ end
                         {
                             app.concern_filters.extend(concern_filters);
                         }
-                        let (concern_items, concern_enum_decls) =
+                        let (concern_items, concern_enum_decls, concern_guarded) =
                             ingest_concern_model_items_with_constants(
                                 &source, &path_str, &enum_constants,
                             );
@@ -1402,6 +1409,7 @@ end
                             app.concern_included_redefs.entry(id).or_default().push(name);
                         }
                         app.concern_model_items.extend(concern_items);
+                        app.concern_guarded_items.extend(concern_guarded);
                         app.view_visible_controller_methods
                             .extend(ingest_helper_method_names(&source));
                         concern_enums.extend(concern_enum_decls);
@@ -2227,9 +2235,18 @@ fn splice_concerns_into_models_named(app: &mut App, only: &[crate::ident::Symbol
             let items: Vec<ModelBodyItem> = concern_ids
                 .iter()
                 .filter(|id| spliced.insert((*id).clone()))
-                .filter_map(|id| app.concern_model_items.get(id).map(|items| (id, items)))
-                .flat_map(|(id, items)| {
-                    items.iter().map(|item| rehome_default_fk(item, id, &model_name))
+                .flat_map(|id| {
+                    // The module's unconditional items, then the ones
+                    // whose includer guard admits this model.
+                    let plain = app.concern_model_items.get(id).into_iter().flatten();
+                    let guarded = app
+                        .concern_guarded_items
+                        .get(id)
+                        .into_iter()
+                        .flatten()
+                        .filter(|(guard, _)| guard.admits(model_name.0.as_str()))
+                        .map(|(_, item)| item);
+                    plain.chain(guarded).map(|item| rehome_default_fk(item, id, &model_name)).collect::<Vec<_>>()
                 })
                 .collect();
             if items.is_empty() {
