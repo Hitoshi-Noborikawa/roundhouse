@@ -3345,6 +3345,14 @@ fn enum_arrays(model: &Model, col: &Column) -> Option<(Expr, Expr, Ty)> {
     let value_ty = match mapping.first().map(|(_, v)| v) {
         Some(Literal::Int { .. }) => Ty::Int,
         Some(Literal::Str { .. }) => Ty::Str,
+        // The `nil` entry alone (`{ unknown: nil }`): no stored value has a
+        // label, so the arrays are empty and typed by the column. The reader
+        // answers nil for any stored value and the writer refuses it, as
+        // Rails does (`'1' is not a valid kind`).
+        None if enum_nil_label(model, col).is_some() => match ty_of_column(&col.col_type) {
+            ty @ (Ty::Int | Ty::Str) => ty,
+            _ => return None,
+        },
         _ => return None,
     };
     let mut labels = Vec::new();

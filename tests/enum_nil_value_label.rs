@@ -17,6 +17,14 @@ mod emit_and_run;
 
 use roundhouse::project::BuildTarget;
 
+/// The model, with a `where` by label in app code, where the lowering
+/// sees it (a runner script's `where` reaches the runtime as written).
+fn widget_model(mapping: &str) -> String {
+    format!(
+        "class Widget < ApplicationRecord\n  enum :kind, {mapping}\n\n  def self.unknown_count\n    where(kind: :unknown).count\n  end\nend\n"
+    )
+}
+
 fn app() -> emit_and_run::Overlay {
     emit_and_run::empty_app()
         .write(
@@ -24,7 +32,7 @@ fn app() -> emit_and_run::Overlay {
             "ActiveRecord::Schema[8.1].define(version: 1) do\n  create_table \"widgets\", force: :cascade do |t|\n    t.string \"name\", null: false\n    t.integer \"kind\"\n  end\nend\n",
         )
         .write("app/models/application_record.rb", "class ApplicationRecord < ActiveRecord::Base\n  primary_abstract_class\nend\n")
-        .write("app/models/widget.rb", "class Widget < ApplicationRecord\n  enum :kind, { small: 0, large: 1, unknown: nil }\nend\n")
+        .write("app/models/widget.rb", &widget_model("{ small: 0, large: 1, unknown: nil }"))
         .write("app/controllers/application_controller.rb", "class ApplicationController < ActionController::API\nend\n")
         .write(
             "app/controllers/widgets_controller.rb",
@@ -63,11 +71,49 @@ raise "written #{large.instance_variable_get(:@kind).inspect}" unless large.inst
 large.kind = "small"
 raise "small #{large.instance_variable_get(:@kind).inspect}" unless large.instance_variable_get(:@kind) == 0
 raise "scope #{Widget.unknown.count}" unless Widget.unknown.count == 1
+raise "where #{Widget.unknown_count}" unless Widget.unknown_count == 1
 status, _headers, body = Main.run_rack("REQUEST_METHOD" => "GET", "PATH_INFO" => "/widgets.json", "QUERY_STRING" => "", "rack.input" => StringIO.new(""))
 text = +""
 body.each { |part| text << part }
 raise "status #{status} #{text}" unless status == 200
 raise "body #{text}" unless text == %([{"id":1,"kind":"large"},{"id":2,"kind":"unknown"}])
+puts "ALL OK"
+"##,
+        )
+        .assert_passes();
+}
+
+/// A mapping whose only entry is `nil` (`enum :kind, { unknown: nil }`):
+/// Rails 8.1 reads NULL as `"unknown"` (and any stored value no label
+/// names as nil), writes `"unknown"` as NULL, refuses any other value
+/// (`'1' is not a valid kind`), and `Widget.unknown` / `where(kind:
+/// :unknown)` select `kind IS NULL`.
+#[test]
+fn nil_only_enum_reads_and_writes_its_label() {
+    app()
+        .write("app/models/widget.rb", &widget_model("{ unknown: nil }"))
+        .run_ruby(
+            r##"
+blank = Widget.create!(name: "b")
+raise "blank #{blank.kind.inspect}" unless blank.kind == "unknown"
+raise "unknown? #{blank.unknown?}" unless blank.unknown?
+blank.kind = "unknown"
+raise "written #{blank.instance_variable_get(:@kind).inspect}" unless blank.instance_variable_get(:@kind).nil? && blank.kind == "unknown"
+refused = begin
+  blank.kind = "1"
+  false
+rescue ArgumentError
+  true
+end
+raise "a value no label names must be refused" unless refused
+raise "scope #{Widget.unknown.count}" unless Widget.unknown.count == 1
+raise "where #{Widget.unknown_count}" unless Widget.unknown_count == 1
+raise "kinds #{Widget.kinds.inspect}" unless Widget.kinds == { "unknown" => nil }
+status, _headers, body = Main.run_rack("REQUEST_METHOD" => "GET", "PATH_INFO" => "/widgets.json", "QUERY_STRING" => "", "rack.input" => StringIO.new(""))
+text = +""
+body.each { |part| text << part }
+raise "status #{status} #{text}" unless status == 200
+raise "body #{text}" unless text == %([{"id":1,"kind":"unknown"}])
 puts "ALL OK"
 "##,
         )

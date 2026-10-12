@@ -9,7 +9,8 @@
 //!   (`tests/indifferent_access_untyped_receiver.rs`);
 //! * `widget.parts.loaded?` in a partial when two models declare
 //!   `has_many :parts` (`tests/view_has_many_loaded_shared_name.rs`);
-//! * `enum :kind, { small: 0, large: 1, unknown: nil }` (`tests/enum_nil_value_label.rs`);
+//! * `enum :kind, { small: 0, large: 1, unknown: nil }`, and a mapping of the
+//!   `nil` entry alone (`tests/enum_nil_value_label.rs`);
 //! * datetime columns in a namespaced partial (`tests/jbuilder_namespaced_view_temporal.rs`).
 //!
 //! A full `spin build` (the controller/model load order is the
@@ -39,6 +40,13 @@ end
     render plain: Gizmo::Checker.allowed?(SCOPE).to_s
   end
 
+  def gadget_kind
+    gadget = Gadget.create!(name: "g")
+    gadget.kind = "unknown"
+    gadget.save!
+    render plain: "#{gadget.kind}|#{gadget.unknown?}|#{Gadget.unknown.count}"
+  end
+
   def header_names
     names = request.headers.map { |key, _value| key }.select { |key| key.start_with?("HTTP_X_") }
     render plain: names.sort.join(",")
@@ -62,6 +70,7 @@ end
 "##)
         .write("app/models/gadget.rb", r##"class Gadget < ApplicationRecord
   has_many :parts
+  enum :kind, { unknown: nil }
 end
 "##)
         .write("app/models/part.rb", r##"class Part < ApplicationRecord
@@ -105,6 +114,7 @@ end
     end
   end
   get "/widgets/seed", to: "widgets#seed"
+  get "/widgets/gadget_kind", to: "widgets#gadget_kind"
   get "/widgets/header_names", to: "widgets#header_names"
   get "/widgets/:id/extras", to: "widgets#extras"
   resources :widgets, only: [:index]
@@ -120,6 +130,7 @@ end
   end
   create_table "gadgets", force: :cascade do |t|
     t.string "name", null: false
+    t.integer "kind"
   end
   create_table "parts", force: :cascade do |t|
     t.string "name", null: false
@@ -141,6 +152,9 @@ fn rails_parity_fixes_run_on_spinel() {
 
     let seed = server.get("/widgets/seed");
     assert_eq!((seed.status, seed.body.as_str()), (200, "true"), "seed:\n{}", server.log());
+
+    let gadget = server.get("/widgets/gadget_kind");
+    assert_eq!(gadget.body, "unknown|true|1", "nil-only enum:\n{}", server.log());
 
     let names = server.get_with_headers("/widgets/header_names", &[("X-Trace", "1"), ("X-Other", "2")]);
     assert_eq!(names.body, "HTTP_X_OTHER,HTTP_X_TRACE", "headers:\n{}", server.log());
