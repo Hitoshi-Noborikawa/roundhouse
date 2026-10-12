@@ -608,6 +608,11 @@ rescue ArgumentError => error
   raise "wrong reorder error: #{error.message}" unless error.message == "The method .reorder() must contain arguments."
 end
 raise "failed reorder mutated the relation" unless ordered.to_sql == ordered_sql
+loaded = siblings.call(article).order(:position_score)
+loaded_ids = loaded.to_a.map(&:id)
+loaded.clear_ordering
+raise "clear_ordering kept the loaded cache" unless loaded.instance_variable_get(:@records).nil?
+raise "clear_ordering left stale ordered ids reachable" unless loaded.to_a.map(&:id) == loaded_ids
 raise "maximum lost the relation scope" unless ordered.maximum(:position_score) == 5.0
 projected = siblings.call(article).active.positioned.select(:id)
 raise "minimum ignored the relation scope/projection" unless projected.minimum(:position_score) == 1.0
