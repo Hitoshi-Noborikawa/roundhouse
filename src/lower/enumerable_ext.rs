@@ -1,7 +1,7 @@
 //! ActiveSupport's core_ext reopens, grounded to a runtime function
 //! instead of a reopen.
 //!
-//! Rails ships `index_by`, `many?`, `to_sentence` and `sole` on
+//! Rails ships `index_by`, `index_with`, `many?`, `to_sentence` and `sole` on
 //! `Enumerable`/`Array`, and `squish` on `String`, by reopening the
 //! builtin — which is a shape
 //! only the CRuby overlay can host: the transpiled runtimes cannot
@@ -134,6 +134,63 @@ pub(crate) fn rewrite_node(expr: &mut Expr) -> bool {
     }
     if method.as_str() == "pluck" && block.is_none() {
         return ground_indexed_pluck(expr);
+    }
+    // `index_with`, `index_by`'s mirror (each element a key), spelled at
+    // the call site as the `to_h` Rails' own body amounts to, so the Hash
+    // is typed by the call site's element and value (a module function
+    // taking any list and any value is untyped on every target):
+    //
+    //   list.index_with(v)          -> list.to_h { |k| [k, v] }
+    //   list.index_with { |x| b }   -> list.to_h { |x| [x, b] }
+    //   list.index_with(&blk)       -> list.to_h { |k| [k, blk.call(k)] }
+    //
+    // Rails evaluates the value form's `v` ONCE and every key shares that
+    // object, so only a `v` that is the same object on every read
+    // (`index_with_value_is_stable`) is moved into the block; another
+    // (`index_with([])`, a call) stays as written, as does the Enumerator
+    // form with neither. A Relation answers `to_h` through its rows.
+    if method.as_str() == "index_with" {
+        let Some(receiver) = recv.take() else { return false };
+        let key = Symbol::from("__index_with_key");
+        let key_read = || Expr::new(span, ExprNode::Var { id: crate::ident::VarId(0), name: key.clone() });
+        let pair = |k: Expr, v: Expr| {
+            Expr::new(span, ExprNode::Array { elements: vec![k, v], style: Default::default() })
+        };
+        let lambda = |params: Vec<Symbol>, body: Expr, style: crate::expr::BlockStyle| {
+            Expr::new(
+                span,
+                ExprNode::Lambda { params, rest_param: None, extra_params: Vec::new(), block_param: None, body, block_style: style },
+            )
+        };
+        let new_block = match (args.as_slice(), block.as_ref().map(|b| &*b.node)) {
+            ([v], None) if index_with_value_is_stable(v) => {
+                lambda(vec![key.clone()], pair(key_read(), v.clone()), Default::default())
+            }
+            ([], Some(ExprNode::Lambda { params, rest_param: None, extra_params, block_param: None, body, block_style }))
+                if params.len() == 1 && extra_params.is_empty() =>
+            {
+                let p = Expr::new(span, ExprNode::Var { id: crate::ident::VarId(0), name: params[0].clone() });
+                lambda(params.clone(), pair(p, body.clone()), *block_style)
+            }
+            ([], Some(ExprNode::Var { .. })) => {
+                let blk = block.clone().expect("matched Some");
+                let call = Expr::new(
+                    span,
+                    ExprNode::Send { recv: Some(blk), method: Symbol::from("call"), args: vec![key_read()], block: None, parenthesized: true },
+                );
+                lambda(vec![key.clone()], pair(key_read(), call), Default::default())
+            }
+            _ => {
+                *recv = Some(receiver);
+                return false;
+            }
+        };
+        *recv = Some(receiver);
+        *method = Symbol::from("to_h");
+        args.clear();
+        *block = Some(new_block);
+        *parenthesized = false;
+        return true;
     }
     let wants_block = match method.as_str() {
         "index_by" => true,
@@ -519,6 +576,21 @@ fn is_relation(ty: Option<&Ty>) -> bool {
     match ty {
         Some(Ty::Relation { .. }) => true,
         Some(Ty::Union { variants }) => variants.iter().any(|v| is_relation(Some(v))),
+        _ => false,
+    }
+}
+
+/// A value `index_with(v)` may read once per key and still hand every key
+/// the same object, as Rails' single evaluation does: an immediate
+/// (nil, true, false, a number, a Symbol), a constant, or a variable.
+fn index_with_value_is_stable(v: &Expr) -> bool {
+    use crate::expr::Literal;
+    match &*v.node {
+        ExprNode::Lit { value } => matches!(
+            value,
+            Literal::Nil | Literal::Bool { .. } | Literal::Int { .. } | Literal::Float { .. } | Literal::Sym { .. }
+        ),
+        ExprNode::Const { .. } | ExprNode::Var { .. } | ExprNode::Ivar { .. } => true,
         _ => false,
     }
 }

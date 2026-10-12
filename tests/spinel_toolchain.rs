@@ -51,6 +51,10 @@ mod rails_root_join;
 mod cable_broadcast_json_contract;
 #[path = "spinel_toolchain/cable_broadcast_json.rs"]
 mod cable_broadcast_json;
+#[path = "support/index_with.rs"]
+mod index_with_contract;
+#[path = "spinel_toolchain/index_with.rs"]
+mod index_with;
 #[path = "support/anonymous_keywords.rs"]
 mod anonymous_keywords;
 #[path = "support/lambda_signatures.rs"]

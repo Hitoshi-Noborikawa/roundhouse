@@ -42,6 +42,10 @@ mod rails_root_join;
 mod cable_broadcast_json_contract;
 #[path = "emit_and_run/cable_broadcast_json.rs"]
 mod cable_broadcast_json;
+#[path = "support/index_with.rs"]
+mod index_with_contract;
+#[path = "emit_and_run/index_with.rs"]
+mod index_with;
 #[path = "support/anonymous_keywords.rs"]
 mod anonymous_keywords;
 #[path = "support/delegate_association.rs"]
