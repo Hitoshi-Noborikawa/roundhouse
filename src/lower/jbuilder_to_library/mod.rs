@@ -1378,7 +1378,10 @@ fn classify<'a>(stmt: &'a Expr) -> JbStmt<'a> {
             // jbuilder's `partial!` sets `options[:partial]` to the
             // positional, over the option, and `as:` only names the
             // local (`record_partial_path` checks it is the name the
-            // lowered partial takes the record under). Any other
+            // lowered partial takes the record under). `cached:` is a
+            // rendering option Jbuilder strips from the locals with the
+            // other two; for one record it only turns on fragment
+            // caching, so it renders the same partial. Any other
             // option is a local for the partial, which the call has no
             // way to pass, so that form stays Unknown.
             if block.is_none() && local_name(path_arg).is_some() {
@@ -1387,7 +1390,7 @@ fn classify<'a>(stmt: &'a Expr) -> JbStmt<'a> {
                     2 => extract_hash(&args[1]).is_some_and(|opts| {
                         opts.iter().all(|(k, _)| {
                             matches!(&*k.node, ExprNode::Lit { value: Literal::Sym { value } }
-                                if matches!(value.as_str(), "partial" | "as"))
+                                if matches!(value.as_str(), "partial" | "as" | "cached"))
                         })
                     }),
                     _ => false,
