@@ -1275,7 +1275,9 @@ impl Analyzer {
                     let name = id.0.as_str().to_string();
                     // `::A::B` is never a lexical neighbour.
                     let rooted = path.first().is_some_and(|head| head.as_str().is_empty());
-                    let known = self.classes.contains_key(&id)
+                    let segs: Vec<&str> = path.iter().map(|s| s.as_str()).filter(|s| !s.is_empty()).collect();
+                    let known = crate::ingest::util::is_view_helper_marker_include(&segs)
+                        || self.classes.contains_key(&id)
                         || (!rooted && body::lexical_class(&id, model.name.0.as_str(), &self.classes).is_some())
                         || body::RUBY_TOP_LEVEL.contains(&name.as_str());
                     (!known).then_some(name)
@@ -7619,43 +7621,48 @@ pub(crate) fn body_includes(body: &[ModelBodyItem]) -> Vec<ClassId> {
 /// Whether an application-defined instance method is available on a source
 /// class through its own definition, parent chain, or included modules.
 pub(crate) fn source_instance_method(app: &App, owner: &ClassId, name: &str) -> bool {
-    fn lookup(app: &App, owner: &ClassId, name: &str, seen: &mut BTreeSet<ClassId>) -> bool {
+    source_method(app, owner, name, crate::dialect::MethodReceiver::Instance)
+}
+
+/// The class-side twin: a `def self.<name>` (or `class << self` def) on the
+/// class or its superclass chain. Included modules contribute instance
+/// methods only, so they are not walked here.
+pub(crate) fn source_class_method(app: &App, owner: &ClassId, name: &str) -> bool {
+    source_method(app, owner, name, crate::dialect::MethodReceiver::Class)
+}
+
+fn source_method(app: &App, owner: &ClassId, name: &str, side: crate::dialect::MethodReceiver) -> bool {
+    use crate::dialect::MethodReceiver::Instance;
+    fn lookup(
+        app: &App,
+        owner: &ClassId,
+        name: &str,
+        side: crate::dialect::MethodReceiver,
+        seen: &mut BTreeSet<ClassId>,
+    ) -> bool {
         if !seen.insert(owner.clone()) {
             return false;
         }
+        let walk_includes = side == Instance;
         if let Some(model) = app.models.iter().find(|model| &model.name == owner) {
-            if model.methods().any(|method| {
-                method.receiver == crate::dialect::MethodReceiver::Instance
-                    && method.name.as_str() == name
-            }) {
+            if model.methods().any(|method| method.receiver == side && method.name.as_str() == name) {
                 return true;
             }
-            return model
-                .parent
-                .as_ref()
-                .is_some_and(|parent| lookup(app, parent, name, seen))
-                || model_includes(model)
-                    .iter()
-                    .any(|include| lookup(app, include, name, seen));
+            return model.parent.as_ref().is_some_and(|parent| lookup(app, parent, name, side, seen))
+                || (walk_includes
+                    && model_includes(model).iter().any(|include| lookup(app, include, name, side, seen)));
         }
         app.library_classes
             .iter()
             .filter(|class| &class.name == owner)
             .any(|class| {
-                class.methods.iter().any(|method| {
-                    method.receiver == crate::dialect::MethodReceiver::Instance
-                        && method.name.as_str() == name
-                }) || class
-                    .parent
-                    .as_ref()
-                    .is_some_and(|parent| lookup(app, parent, name, seen))
-                    || class
-                        .includes
-                        .iter()
-                        .any(|include| lookup(app, include, name, seen))
+                class.methods.iter().any(|method| method.receiver == side && method.name.as_str() == name)
+                    || class.parent.as_ref().is_some_and(|parent| lookup(app, parent, name, side, seen))
+                    || (walk_includes
+                        && class.includes.iter().any(|include| lookup(app, include, name, side, seen)))
             })
     }
-    lookup(app, owner, name, &mut BTreeSet::new())
+    lookup(app, owner, name, side, &mut BTreeSet::new())
 }
 
 /// `**{k: v, …}.merge(h)`, `h` a `Hash[Symbol, V]` and the literal's

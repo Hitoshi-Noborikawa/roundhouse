@@ -2666,6 +2666,15 @@ pub(crate) fn apply_helper_lowering(lcs: &mut [LibraryClass], app: &App) {
         .collect();
     let helper_ivars = helper_read_ivars(app);
     let view_ivars = view_assigned_ivars(app);
+    // Instance-method names the app defines anywhere that collide with a
+    // framework view helper; only these need the ancestry lookup above.
+    let app_framework_helper_names: BTreeSet<String> = app
+        .models
+        .iter()
+        .flat_map(|m| m.methods().map(|d| d.name.as_str().to_string()).collect::<Vec<_>>())
+        .chain(app.library_classes.iter().flat_map(|c| c.methods.iter().map(|d| d.name.as_str().to_string())))
+        .filter(|n| is_framework_view_helper(n))
+        .collect();
     for lc in lcs.iter_mut() {
         // CONTROLLERS in the index provide `helper_method`s to views:
         // only the call-site rewrite applies to them — their methods
@@ -2683,8 +2692,44 @@ pub(crate) fn apply_helper_lowering(lcs: &mut [LibraryClass], app: &App) {
         // The class's own method names shadow the helper index inside its
         // bodies — a bare call to one of them is a self-dispatch, never a
         // cross-module helper reference.
-        let own_methods: std::collections::HashSet<Symbol> =
-            lc.methods.iter().map(|m| m.name.clone()).collect();
+        // Declared names per side (a helper module's methods are all about to
+        // become module functions, so for it they are one set): an instance
+        // body is not shadowed by a `def self.x`, nor a class body by `def x`.
+        let declared_on = |class_side: bool| -> std::collections::HashSet<Symbol> {
+            lc.methods
+                .iter()
+                .filter(|m| {
+                    is_helper_module
+                        || (m.receiver == MethodReceiver::Class) == class_side
+                })
+                .map(|m| m.name.clone())
+                .collect()
+        };
+        let declared_instance = declared_on(false);
+        let declared_class = declared_on(true);
+        // A framework-helper name the app defines on a SUPERCLASS or in an
+        // INCLUDED module (`ApplicationRecord#dom_class`, a concern's
+        // `number_to_currency`) is the same self-dispatch: qualifying it to
+        // `ViewHelpers` would call a different method than analysis kept.
+        // Resolved by the analyzer's own ancestry walk, PER SIDE: an
+        // instance method body is shadowed by inherited instance methods, a
+        // class-method body only by class-side ones (the class object
+        // cannot dispatch an instance method).
+        let inherited = |class_side: bool| -> std::collections::HashSet<Symbol> {
+            app_framework_helper_names
+                .iter()
+                .filter(|n| {
+                    if class_side {
+                        crate::analyze::source_class_method(app, &lc.name, n)
+                    } else {
+                        crate::analyze::source_instance_method(app, &lc.name, n)
+                    }
+                })
+                .map(|n| Symbol::from(n.as_str()))
+                .collect()
+        };
+        let inherited_instance = inherited(false);
+        let inherited_class = inherited(true);
         for m in &mut lc.methods {
             // A helper module's own methods become module-functions so the
             // rewritten `Module.method` call has a real target — Rails mixed
@@ -2708,6 +2753,16 @@ pub(crate) fn apply_helper_lowering(lcs: &mut [LibraryClass], app: &App) {
             // to params but not to real self-dispatched methods.
             let own_params: std::collections::HashSet<Symbol> =
                 m.params.iter().map(|p| p.name.clone()).collect();
+            // After the helper-module flip above: a module function is
+            // class-side, so it is shadowed by class-side definitions only.
+            let mut own_methods = match m.receiver {
+                MethodReceiver::Instance => declared_instance.clone(),
+                MethodReceiver::Class => declared_class.clone(),
+            };
+            own_methods.extend(match m.receiver {
+                MethodReceiver::Instance => inherited_instance.iter().cloned(),
+                MethodReceiver::Class => inherited_class.iter().cloned(),
+            });
             rewrite_helper_calls(
                 &mut m.body,
                 &app.helper_method_index,
@@ -3003,6 +3058,9 @@ fn is_framework_view_helper(name: &str) -> bool {
     matches!(
         name,
         "image_tag"
+            // `include ActionView::RecordIdentifier` brings `dom_id`
+            // (below) and its sibling `dom_class` into non-view classes.
+            | "dom_class"
             | "image_path"
             // The general asset helper beside the image one — same
             // body, and campfire asks it for an mp3.
