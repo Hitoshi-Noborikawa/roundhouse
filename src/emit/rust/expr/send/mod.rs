@@ -127,6 +127,18 @@ pub(super) fn emit_send(
             }
         }
     }
+    // `ActiveSupport.errors_for(errors, prefix)` (runtime/ruby/active_support_ext.rb): the messages that start with the field's prefix, without it.
+    if method == "errors_for" && args.len() == 2 {
+        if let Some(ExprNode::Const { path }) = recv.map(|r| &*r.node) {
+            if path.last().map(|s| s.as_str()) == Some("ActiveSupport") {
+                return format!(
+                    "{{ let prefix: String = ({}).to_string(); ({}).iter().filter(|m| m.starts_with(prefix.as_str())).map(|m| m[prefix.len()..].to_string()).collect::<Vec<String>>() }}",
+                    emit_expr(&args[1]),
+                    emit_expr(&args[0]),
+                );
+            }
+        }
+    }
     if let Some(s) = try_constructor_field_assign(recv, method, args) { return s; }
     if let Some(s) = try_stdlib_class_method(recv, method, args) { return s; }
     if let Some(s) = try_binary_operator(recv, method, args) { return s; }

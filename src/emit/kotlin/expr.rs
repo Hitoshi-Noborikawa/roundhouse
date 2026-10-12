@@ -1656,6 +1656,13 @@ fn emit_send(
                 (Some("ActiveSupport"), "parse_db_time") if args.len() == 1 => {
                     return format!("RhDateTime.parse({})", args_s[0]);
                 }
+                // `ActiveSupport.errors_for(errors, prefix)` (runtime/ruby/active_support_ext.rb): the messages that start with the field's prefix, without it.
+                (Some("ActiveSupport"), "errors_for") if args.len() == 2 => {
+                    return format!(
+                        "({{ prefix: String -> ({}).filter {{ it.startsWith(prefix) }}.map {{ it.removePrefix(prefix) }} }})({})",
+                        args_s[0], args_s[1]
+                    );
+                }
                 // Temporal writer intrinsic: `ActiveSupport.db_now` — current
                 // UTC time in Rails' exact storage form ("YYYY-MM-DD
                 // HH:MM:SS.ffffff"). `fill_timestamps` stamps with it so a
@@ -1980,6 +1987,12 @@ fn emit_send(
             "to_f" => return format!("{rs}.toString().toDouble()"),
             "empty?" => return format!("{rs}.isEmpty()"),
             "any?" => return format!("{rs}.isNotEmpty()"),
+            // An element that is never nil or false makes `none?` mean no elements at all
+            "none?" if matches!(
+                r.ty.as_ref(),
+                Some(crate::ty::Ty::Array { elem })
+                    if matches!(**elem, crate::ty::Ty::Str | crate::ty::Ty::Int | crate::ty::Ty::Float | crate::ty::Ty::Sym)
+            ) => return format!("{rs}.isEmpty()"),
             "upcase" => return format!("{rs}.uppercase()"),
             "downcase" => return format!("{rs}.lowercase()"),
             "strip" => return format!("{rs}.trim()"),

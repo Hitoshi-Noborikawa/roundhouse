@@ -494,7 +494,7 @@ pub(super) fn emit_expr(ctx: &EmitCtx, e: &Expr) -> String {
                     }
                     InterpPart::Expr { expr } => {
                         fmt.push_str("%v");
-                        args.push(emit_expr(ctx, expr));
+                        args.push(emit_expr_as_value(ctx, expr));
                     }
                 }
             }
@@ -1287,6 +1287,16 @@ pub(super) fn emit_send(
     if method == "empty?" && args.is_empty() {
         if let Some(r) = recv.filter(|r| !is_own_method(ctx, r, method)) {
             return format!("len({}) == 0", emit_expr(ctx, r));
+        }
+    }
+    // An element that is never nil or false makes `any?` / `none?` a question of size
+    if matches!(method, "any?" | "none?") && args.is_empty() {
+        let never_falsy = |r: &&Expr| {
+            matches!(r.ty.as_ref(), Some(Ty::Array { elem }) if matches!(**elem, Ty::Str | Ty::Int | Ty::Float | Ty::Sym))
+        };
+        if let Some(r) = recv.filter(never_falsy).filter(|r| !is_own_method(ctx, r, method)) {
+            let op = if method == "any?" { ">" } else { "==" };
+            return format!("len({}) {op} 0", emit_expr(ctx, r));
         }
     }
 
@@ -2113,6 +2123,13 @@ pub(super) fn emit_send(
                 // — the hand-written `Rh_parse_db_time`
                 // (runtime/go/v2/rh_datetime.go), not a transpiled
                 // `ActiveSupport_*` function (no such unit exists).
+                // `ActiveSupport.errors_for(errors, prefix)` (runtime/ruby/active_support_ext.rb): the messages that start with the field's prefix, without it.
+                if class_name == "ActiveSupport" && method == "errors_for" && args_s.len() == 2 {
+                    return format!(
+                        "func(errors []string, prefix string) []string {{ out := []string{{}}; for _, m := range errors {{ if strings.HasPrefix(m, prefix) {{ out = append(out, m[len(prefix):]) }} }}; return out }}({}, {})",
+                        args_s[0], args_s[1]
+                    );
+                }
                 if class_name == "ActiveSupport" && method == "parse_db_time" {
                     return format!("Rh_parse_db_time({})", args_s.join(", "));
                 }

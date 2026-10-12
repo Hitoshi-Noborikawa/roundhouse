@@ -27,7 +27,6 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use roundhouse::analyze::Analyzer;
 
 use roundhouse::ingest::ingest_app;
 
@@ -275,7 +274,8 @@ fn generate_project(fixture: &Path, scratch: &Path) {
     std::fs::create_dir_all(scratch).expect("create scratch");
 
     let mut app = ingest_app(fixture).expect("ingest");
-    Analyzer::new(&app).analyze(&mut app);
+    // The shipped tree is built from the post-analyze lowered IR, as `roundhouse --target spinel` builds it
+    roundhouse::session::analyze_and_lower(&mut app);
     let files = roundhouse::project::spinel_base_files(&app, fixture).expect("spinel base files");
     roundhouse::project::write_to_dir(&files, scratch).expect("write spinel tree");
 

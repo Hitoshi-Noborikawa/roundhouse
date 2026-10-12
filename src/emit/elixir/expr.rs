@@ -1165,6 +1165,16 @@ fn emit_send(recv: Option<&Expr>, method: &str, args: &[Expr]) -> String {
         }
     }
 
+    // An element that is never nil or false makes `any?` / `none?` a question of size
+    if matches!(method, "any?" | "none?") && args.is_empty() {
+        if let Some(r) = recv.filter(|r| {
+            matches!(effective_recv_ty(r), Some(crate::ty::Ty::Array { elem }) if matches!(*elem, crate::ty::Ty::Str | crate::ty::Ty::Int | crate::ty::Ty::Float | crate::ty::Ty::Sym))
+        }) {
+            let empty = format!("Enum.empty?({})", emit_expr(r));
+            return if method == "none?" { empty } else { format!("not {empty}") };
+        }
+    }
+
     // `recv.empty?` — Array/list → `Enum.empty?`, Hash → `map_size == 0`.
     // An unknown/struct receiver falls through (a struct's own `empty?`
     // method routes via the self-call / method-on-record paths).
@@ -1223,6 +1233,18 @@ fn emit_send(recv: Option<&Expr>, method: &str, args: &[Expr]) -> String {
     // stored ISO-8601 text into a native UTC `%DateTime{}` — the
     // hand-written `RhDateTime.parse` (runtime/elixir/v2/rh_datetime.ex),
     // not a transpiled `ActiveSupport` module (no such unit exists).
+    // `ActiveSupport.errors_for(errors, prefix)` (runtime/ruby/active_support_ext.rb): the messages that start with the field's prefix, without it.
+    if method == "errors_for" && args.len() == 2 {
+        if let Some(ExprNode::Const { path }) = recv.map(|r| &*r.node) {
+            if path.last().map(|s| s.as_str()) == Some("ActiveSupport") {
+                return format!(
+                    "(fn errors, prefix -> for m <- errors, String.starts_with?(m, prefix), do: String.replace_prefix(m, prefix, \"\") end).({}, {})",
+                    emit_expr(&args[0]),
+                    emit_expr(&args[1]),
+                );
+            }
+        }
+    }
     if method == "parse_db_time" && args.len() == 1 {
         if let Some(r) = recv {
             if let ExprNode::Const { path } = &*r.node {

@@ -39,18 +39,9 @@
 //! must itself be a zero-arg `errors` send, which is what makes the
 //! site our accumulator rather than some other object's `[]`.
 //!
-//! VIEWS ARE DELIBERATELY OUT OF SCOPE, unlike
-//! [`super::errors_full_messages`]. The view lowering already owns this
-//! exact shape: `classify_errors_field_predicate` recognizes
-//! `<record>.errors[:field].none? / .any?` — the scaffold's form
-//! partial styles every field from it — and grounds the whole
-//! predicate, `[]` included. Rewriting the inner `[]` here runs FIRST
-//! and leaves that classifier a shape it no longer matches, which takes
-//! the blog's `_form.html.erb` from four grounded predicates to four
-//! `unresolved_type` diagnostics. Scope is therefore hook bodies and
-//! TEST bodies; a view read outside the predicate shape stays exactly
-//! as unsupported as it was, which is honest, and the view lowering is
-//! where it would be claimed.
+//! Views take the same rewrite: the scaffold's form partial reads
+//! `<record>.errors[:field].none?` / `.any?` inside a `class:` array,
+//! which renders through `class_names` at request time.
 
 use crate::app::App;
 use crate::diagnostic::Diagnostic;
@@ -58,8 +49,8 @@ use crate::expr::{Expr, ExprNode, Literal};
 use crate::ident::Symbol;
 use crate::ty::Ty;
 
-/// Rewrite `errors[:field]` reads across every hook body and test body
-/// (NOT views — see the module docs). Returns the residue ledger:
+/// Rewrite `errors[:field]` reads across every hook, test and view body.
+/// Returns the residue ledger:
 /// recognizable `errors[…]` sites left dynamic, with the reason.
 pub fn apply_errors_index_lowering(app: &mut App) -> Vec<Diagnostic> {
     let mut diags = Vec::new();
@@ -72,6 +63,10 @@ pub fn apply_errors_index_lowering(app: &mut App) -> Vec<Diagnostic> {
         rewrite(body, &data.at(None), &mut diags);
         ledger_messages(body, &mut diags);
     });
+    for view in &mut app.views {
+        rewrite(&mut view.body, &data.at(None), &mut diags);
+        ledger_messages(&mut view.body, &mut diags);
+    }
     diags
 }
 
@@ -208,11 +203,10 @@ fn rewrite_index(expr: &mut Expr, labels: &super::errors_add::Labels, diags: &mu
     // re-dispatching, so an unstamped synthesis false-positives a
     // `send_dispatch_failed`.
     expr.ty = Some(Ty::Array { elem: Box::new(Ty::Str) });
+    let mut support = Expr::new(span, ExprNode::Const { path: vec![Symbol::from("ActiveSupport")] });
+    support.ty = Some(Ty::Class { id: crate::ident::ClassId(Symbol::from("ActiveSupport")), args: vec![] });
     *expr.node = ExprNode::Send {
-        recv: Some(Expr::new(
-            span,
-            ExprNode::Const { path: vec![Symbol::from("ActiveSupport")] },
-        )),
+        recv: Some(support),
         method: Symbol::from("errors_for"),
         args: vec![accumulator, prefix],
         block: None,
