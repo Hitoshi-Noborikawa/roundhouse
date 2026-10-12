@@ -3065,6 +3065,9 @@ fn lower_relation_args(
                 let span = a.span;
                 let ExprNode::Hash { entries, .. } = &mut *a.node else { continue };
                 let mut type_conditions: Vec<(Expr, Expr)> = Vec::new();
+                // (value, type column) of each polymorphic condition whose
+                // value may be nil at run time; see the guard after the loop.
+                let mut nil_guards: Vec<(Expr, Symbol)> = Vec::new();
                 for (k, v) in entries.iter_mut() {
                     let ExprNode::Lit { value: Literal::Sym { value: key } } = &*k.node else {
                         continue;
@@ -3093,10 +3096,9 @@ fn lower_relation_args(
                         };
                         if let Some(fk) = ctx.assocs.belongs_to_fk(model, key) {
                             if matches!(&*v.node, ExprNode::Lit { value: Literal::Nil }) {
-                                type_conditions.push((
-                                    syn(span, ExprNode::Lit { value: Literal::Sym { value: type_col.clone() } }),
-                                    syn(span, ExprNode::Lit { value: Literal::Nil }),
-                                ));
+                                // Rails: `where(voter: nil)` is `voter_id IS NULL`
+                                // alone — no type condition (verified against
+                                // Rails 8.1), so only the key is renamed.
                                 *k.node = ExprNode::Lit { value: Literal::Sym { value: fk.clone() } };
                                 continue;
                             }
@@ -3121,6 +3123,7 @@ fn lower_relation_args(
                                     syn(span, ExprNode::Lit { value: Literal::Sym { value: type_col.clone() } }),
                                     type_value,
                                 ));
+                                nil_guards.push((v.clone(), type_col.clone()));
                                 *k.node = ExprNode::Lit { value: Literal::Sym { value: fk.clone() } };
                                 continue;
                             }
@@ -3210,6 +3213,40 @@ fn lower_relation_args(
                     }
                 }
                 entries.extend(type_conditions);
+                // A value that is nil at run time must behave as the literal
+                // `nil` does (Rails: `voter_id IS NULL`, no type condition),
+                // not fall into the no-type sentinel. The type half cannot be
+                // omitted from a hash conditionally, so the whole condition
+                // hash is chosen by `v.nil?`; only one branch is evaluated, so
+                // the other entries are not read twice. One guarded
+                // polymorphic key per hash; a second is left on the switch.
+                if let [(guard_value, type_col)] = nil_guards.as_slice() {
+                    let without_type: Vec<(Expr, Expr)> = entries
+                        .iter()
+                        .filter(|(k, _)| {
+                            !matches!(&*k.node, ExprNode::Lit { value: Literal::Sym { value } } if value == type_col)
+                        })
+                        .cloned()
+                        .collect();
+                    let guarded = syn(span, ExprNode::Send {
+                        recv: Some(guard_value.clone()),
+                        method: Symbol::from("nil?"),
+                        args: vec![],
+                        block: None,
+                        parenthesized: false,
+                    });
+                    // Braced: a brace-less (keyword) hash is not an expression
+                    // inside an `if`.
+                    let mut with_type = std::mem::replace(&mut *a.node, ExprNode::Lit { value: Literal::Nil });
+                    if let ExprNode::Hash { kwargs, .. } = &mut with_type {
+                        *kwargs = false;
+                    }
+                    *a.node = ExprNode::If {
+                        cond: guarded,
+                        then_branch: syn(span, ExprNode::Hash { entries: without_type, kwargs: false }),
+                        else_branch: syn(span, with_type),
+                    };
+                }
             }
         }
         _ => {}
@@ -4806,7 +4843,11 @@ mod tests {
         let ctx = ctx_with(&scopes, &models, reg);
         let mut args = vec![hash_arg(vec![(sym_lit("record"), value)])];
         lower_relation_args(&ClassId(Symbol::from("ActionText::RichText")), &Symbol::from("where"), &mut args, &ctx);
-        let ExprNode::Hash { entries, .. } = &*args[0].node else { panic!("hash") };
+        let hash = match &*args[0].node {
+            ExprNode::If { else_branch, .. } => else_branch,
+            _ => &args[0],
+        };
+        let ExprNode::Hash { entries, .. } = &*hash.node else { panic!("hash") };
         entries
             .iter()
             .map(|(k, v)| {
@@ -4841,7 +4882,12 @@ mod tests {
         let ctx = ctx_with(&scopes, &models, &reg);
         let mut args = vec![hash_arg(vec![(sym_lit("record"), var("message"))])];
         lower_relation_args(&ClassId(Symbol::from("ActionText::RichText")), &Symbol::from("where"), &mut args, &ctx);
-        let ExprNode::Hash { entries, .. } = &*args[0].node else { panic!("hash") };
+        // A possibly-nil variable chooses the hash by `v.nil?`: the nil branch
+        // is `record_id` alone (Rails), the other carries the type switch.
+        let ExprNode::If { then_branch, else_branch, .. } = &*args[0].node else { panic!("nil guard") };
+        let ExprNode::Hash { entries: nil_entries, .. } = &*then_branch.node else { panic!("hash") };
+        assert_eq!(nil_entries.len(), 1);
+        let ExprNode::Hash { entries, .. } = &*else_branch.node else { panic!("hash") };
         let ExprNode::Case { arms, .. } = &*entries[1].1.node else { panic!("case") };
         assert_eq!(arms.len(), 2);
         assert!(matches!(arms[1].pattern, crate::expr::Pattern::Wildcard));

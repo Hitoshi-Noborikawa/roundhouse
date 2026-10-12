@@ -147,6 +147,11 @@ class VotesTest < ActiveSupport::TestCase
     @a1.liked_by(@r1)
     assert_equal 1, ActsAsVotable::Vote.where(voter: nil, vote_scope: "orphan").count
     assert_equal 0, ActsAsVotable::Vote.where(voter: nil, vote_scope: nil).count
+    # Rails: nil (literal or a variable) is `voter_id IS NULL` with no type condition
+    nobody = nil
+    assert_equal 1, ActsAsVotable::Vote.where(voter: nobody, vote_scope: "orphan").count
+    assert_equal 1, ActsAsVotable::Vote.where(voter: nobody).count
+    assert_equal 0, ActsAsVotable::Vote.where(voter: nobody, vote_scope: nil).count
     assert_equal 1, ActsAsVotable::Vote.where(voter: @r1).count
   end
 
