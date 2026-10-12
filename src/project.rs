@@ -1755,7 +1755,8 @@ pub fn target_files(
     }
     if target == BuildTarget::Ruby {
         let namespaces = crate::gems::locked_external_gem_namespaces(app);
-        return crate::emit::ruby::with_external_gem_namespaces(&namespaces, || {
+        let includes = crate::gems::statically_resolved_external_includes(app);
+        return crate::emit::ruby::with_external_gem_namespaces(&namespaces, includes, || {
             target_files_inner(app, fixture, target)
         });
     }
