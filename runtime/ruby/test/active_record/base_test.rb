@@ -384,6 +384,19 @@ class BaseTest < Minitest::Test
     assert_equal %w[i 7], out[2..]
   end
 
+  # A value that already holds \x01 is left unmarked; a sibling hash
+  # condition still marks. prepare_marked must not strip those bytes
+  # from the lifted SQL (blanket delete latch would search for "ab").
+  def test_prepare_marked_preserves_control_bytes_inside_literals
+    needle = "hello\x01world"
+    it = Item.new
+    it.title = needle
+    it.save()
+    rows = ActiveRecord::Relation.new(Item).where(title: needle, id: it.id).to_a
+    assert_equal 1, rows.length
+    assert_equal needle, rows[0].title
+  end
+
   # The request cache keys a bound read on its values written in, so a
   # repeat replays instead of re-running, and different values do not.
   def test_bound_reads_share_the_request_cache_by_value

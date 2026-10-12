@@ -432,6 +432,13 @@ module Db
   # STMT_CACHE_CAP bounds growth for other SQL shapes.
   def self.prepare(sql)
     return prepare_marked(sql) if sql.include?("\x01")
+    prepare_plain(sql)
+  end
+
+  # Prepare without re-entering prepare_marked. Post-lift SQL may still
+  # contain \x01 inside string literals (unmarked bind_literal values);
+  # those bytes are data and must not be stripped or re-dispatched.
+  def self.prepare_plain(sql)
     # A `?`-bearing SQL string is a placeholder query (roundhouse#12):
     # its result depends on binds set after prepare, which are not in
     # the key, so it never joins the result-replay cache.
@@ -479,12 +486,7 @@ module Db
     binds = ActiveRecord::Relation.lift_binds(marked)
     sql = binds[0].to_s
     key = binds[1].to_s
-    # Surviving marks would re-enter prepare_marked via prepare — strip
-    # delimiters and run inlined. Latch against SystemStackError.
-    if sql.include?("\x01") || key.include?("\x01")
-      return prepare(key.delete("\x01\x02"))
-    end
-    return prepare(key) if binds.length <= 2
+    return prepare_plain(key) if binds.length <= 2
     qcache = Fiber[:rh_qcache]
     cacheable = !qcache.nil? && !key.include?("?")
     if cacheable && (hit = qcache[key])
@@ -493,7 +495,7 @@ module Db
       st.replay = hit
       return st
     end
-    st = prepare(sql)
+    st = prepare_plain(sql)
     i = 2
     while i < binds.length
       if binds[i] == "i"
