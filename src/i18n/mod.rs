@@ -275,6 +275,7 @@ pub fn errors_index_refusal(format: &str) -> Option<&'static str> {
         None => Some("errors.format does not end in the message"),
         Some(before) if before.contains("%{message}") => Some("errors.format names the message twice"),
         Some("") => Some("errors.format puts nothing before the message to tell the field by"),
+        Some(before) if !before.contains("%{attribute}") => Some("errors.format does not name the attribute before the message"),
         Some(_) => None,
     }
 }

@@ -1235,6 +1235,29 @@ fn errors_index_under_a_message_only_format_stays_an_error() {
     assert!(errors.iter().any(|e| e.contains("nothing before the message")), "{errors:?}");
 }
 
+/// A format whose text before the message names no attribute is the same
+/// for every field, so neither `errors[:field]` nor the form's
+/// `field_with_errors` wrapper can tell fields apart.
+#[test]
+fn a_format_without_the_attribute_keeps_field_errors_an_error() {
+    let (_emitted, errors) = emit_and_run::real_blog()
+        .write("config/locales/en.yml", "en:\n  hello: \"Hello world\"\n  errors:\n    format: \"Error: %{message}\"\n")
+        .edit(
+            "app/models/article.rb",
+            "  validates :title, presence: true\n",
+            "  validates :title, presence: true\n\n  def title_errors\n    errors[:title]\n  end\n",
+        )
+        .emit(roundhouse::project::BuildTarget::Ruby);
+    assert!(
+        errors.iter().any(|e| e.contains("field_with_errors") && e.contains("does not name the attribute")),
+        "{errors:?}"
+    );
+    assert!(
+        errors.iter().any(|e| e.contains("errors[:field]") && e.contains("does not name the attribute")),
+        "{errors:?}"
+    );
+}
+
 /// A field the lowering cannot humanize at compile time keeps its error.
 #[test]
 fn errors_full_message_on_a_dynamic_field_stays_an_error() {

@@ -84,8 +84,11 @@ impl Labels<'_> {
     /// `None` when `errors.format` does not end in the message.
     pub(crate) fn message_prefix(&self, errors_reader: &Expr, field: &str) -> Option<String> {
         let i18n = self.model(errors_reader);
+        if crate::i18n::errors_index_refusal(i18n.errors_format()).is_some() {
+            return None;
+        }
         let format = i18n.errors_format().replace("%{attribute}", &i18n.human_attribute_name(field));
-        format.strip_suffix("%{message}").filter(|p| !p.contains("%{message}")).map(str::to_string)
+        format.strip_suffix("%{message}").map(str::to_string)
     }
 
     /// The model whose `errors` this is: the reader's receiver's type, or the owner for `errors` on self.
