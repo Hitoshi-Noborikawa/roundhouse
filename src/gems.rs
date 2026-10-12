@@ -54,6 +54,11 @@ pub struct Lockfile {
     /// analyzed like the rest of the app rather than being a boundary.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub in_repo: Vec<String>,
+    /// Specs resolved from a `GIT` source. Emitting a rubygems.org
+    /// `gem "name", "= version"` pin would lie about their origin — the
+    /// locked-external wiring path skips these fail-closed.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub from_git: Vec<String>,
 }
 
 impl Lockfile {
@@ -90,6 +95,8 @@ impl Lockfile {
                         lock.specs.push((name.to_string(), version.to_string()));
                         if section == "PATH" {
                             lock.in_repo.push(name.to_string());
+                        } else if section == "GIT" {
+                            lock.from_git.push(name.to_string());
                         }
                     }
                 }
@@ -117,6 +124,11 @@ impl Lockfile {
     /// Does `name` live in this repository (a `PATH` source)?
     pub fn is_in_repo(&self, name: &str) -> bool {
         self.in_repo.iter().any(|n| n == name)
+    }
+
+    /// Is `name` resolved from a `GIT` source?
+    pub fn is_from_git(&self, name: &str) -> bool {
+        self.from_git.iter().any(|n| n == name)
     }
 
     pub fn version_of(&self, name: &str) -> Option<&str> {
@@ -596,6 +608,238 @@ pub fn gem_owning_constant<'a>(census: &'a GemCensus, constant_path: &str) -> Op
     (owners.len() == 1).then(|| owners[0])
 }
 
+/// Literal external-gem includes whose defining file also has a matching
+/// top-level `require`. The lockfile identifies the gem and source names its
+/// feature; other unresolved includes remain unsupported.
+pub fn statically_resolved_external_includes(
+    app: &crate::App,
+) -> std::collections::BTreeMap<String, Vec<String>> {
+    let Some(lock) = app.gem_lock.as_ref() else {
+        return Default::default();
+    };
+    let census = GemCensus::of(lock);
+    let mut resolved = std::collections::BTreeMap::new();
+    for class in &app.library_classes {
+        let source = source_for_library_class(app, class);
+        let Some(source) = source else { continue };
+        for included in &class.includes {
+            let Some(gem) = gem_owning_constant(&census, included.0.as_str()) else {
+                continue;
+            };
+            // Fail-closed: Git-sourced gems have no Gemfile pin path that
+            // preserves the git remote — keep their includes unresolved.
+            if lock.is_from_git(gem) {
+                continue;
+            }
+            let gem_name = gem.to_ascii_lowercase();
+            let namespace = namespace_of(gem).to_ascii_lowercase();
+            let requires: Vec<String> = literal_file_level_requires(&source.text)
+                .into_iter()
+                .filter(|feature| {
+                    feature
+                        .split('/')
+                        .next()
+                        .is_some_and(|head| head == namespace || head == gem_name)
+                })
+                .collect();
+            if !requires.is_empty() {
+                resolved.insert(
+                    format!("{} includes unresolved {}", class.name.0, included.0),
+                    requires,
+                );
+            }
+        }
+    }
+    resolved
+}
+
+/// Defining source for a library class when scanning for literal requires.
+/// Prefer a real superclass / method / body span; include-only classes with
+/// no superclass leave `parent_span` synthetic (`file.0 == 0`), so fall back
+/// to a source file that declares the class or module by name.
+fn source_for_library_class<'a>(
+    app: &'a crate::App,
+    class: &crate::dialect::LibraryClass,
+) -> Option<&'a crate::span::SourceFile> {
+    let from_file = |file: crate::span::FileId| {
+        file.0
+            .checked_sub(1)
+            .and_then(|index| app.sources.get(index as usize))
+    };
+    from_file(class.parent_span.file)
+        .or_else(|| {
+            class
+                .methods
+                .iter()
+                .find_map(|method| from_file(method.name_span.file))
+        })
+        .or_else(|| {
+            class
+                .unknown_calls
+                .iter()
+                .find_map(|call| from_file(call.span.file))
+        })
+        .or_else(|| {
+            class
+                .constants
+                .iter()
+                .find_map(|(_, expr)| from_file(expr.span.file))
+        })
+        .or_else(|| {
+            class
+                .class_ivar_initializers
+                .iter()
+                .find_map(|expr| from_file(expr.span.file))
+        })
+        .or_else(|| source_declaring_class(app, class.name.0.as_str()))
+}
+
+fn source_declaring_class<'a>(
+    app: &'a crate::App,
+    class_name: &str,
+) -> Option<&'a crate::span::SourceFile> {
+    let leaf = class_name.rsplit("::").next().unwrap_or(class_name);
+    let candidates = [class_name, leaf];
+    app.sources.iter().find(|source| {
+        source.text.lines().any(|line| {
+            let trimmed = line.trim_start();
+            candidates.iter().any(|name| {
+                for keyword in ["class ", "module "] {
+                    let Some(rest) = trimmed.strip_prefix(keyword) else {
+                        continue;
+                    };
+                    if rest == *name {
+                        return true;
+                    }
+                    if let Some(after) = rest.strip_prefix(name) {
+                        let boundary = after
+                            .chars()
+                            .next()
+                            .is_none_or(|c| !c.is_alphanumeric() && c != '_' && c != ':');
+                        if boundary {
+                            return true;
+                        }
+                    }
+                }
+                false
+            })
+        })
+    })
+}
+
+/// Namespaces owned by unknown gems that are pinned in this app's lockfile.
+/// Ruby project emission uses these only when it also wires the exact gems.
+pub fn locked_external_gem_namespaces(app: &crate::App) -> std::collections::BTreeSet<String> {
+    let Some(lock) = app.gem_lock.as_ref() else {
+        return Default::default();
+    };
+    GemCensus::of(lock)
+        .unknown()
+        .filter(|gem| !lock.is_from_git(&gem.name))
+        .map(|gem| namespace_of(&gem.name))
+        .collect()
+}
+
+/// True when `detail` names a constant under `root` (`Rouge::X`), not a
+/// longer identifier that merely ends with the root (`NotRouge::X`).
+pub fn detail_names_external_namespace(detail: &str, root: &str) -> bool {
+    let needle = format!("{root}::");
+    let bytes = detail.as_bytes();
+    let mut start = 0;
+    while let Some(rel) = detail[start..].find(&needle) {
+        let abs = start + rel;
+        let boundary_ok = abs == 0 || !is_ruby_ident_byte(bytes[abs - 1]);
+        if boundary_ok {
+            return true;
+        }
+        start = abs + 1;
+    }
+    false
+}
+
+fn is_ruby_ident_byte(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || b == b'_'
+}
+
+/// Literal `require "…"` lines at file-level scope (nesting depth 0).
+/// Column-zero indentation alone is not enough — a require inside a
+/// multiline `if`/`class`/… must not hoist as an unconditional feature.
+fn literal_file_level_requires(text: &str) -> Vec<String> {
+    let mut depth = 0i32;
+    let mut out = Vec::new();
+    for line in text.lines() {
+        let trimmed = line.trim_start();
+        if opens_ruby_nest(trimmed) {
+            depth += 1;
+        }
+        if depth == 0 {
+            if let Some(feature) = literal_top_level_require(line) {
+                out.push(feature);
+            }
+        }
+        if closes_ruby_nest(trimmed) {
+            depth = depth.saturating_sub(1);
+        }
+    }
+    out
+}
+
+fn opens_ruby_nest(trimmed: &str) -> bool {
+    // Modifier forms (`foo if bar`) do not start with these keywords.
+    if trimmed == "begin"
+        || trimmed.starts_with("begin ")
+        || trimmed.starts_with("begin;")
+        || trimmed.starts_with("begin#")
+    {
+        return true;
+    }
+    if trimmed == "do"
+        || trimmed.starts_with("do ")
+        || trimmed.starts_with("do|")
+        || trimmed.starts_with("do;")
+    {
+        return true;
+    }
+    const OPENERS: &[&str] = &[
+        "class ",
+        "module ",
+        "def ",
+        "if ",
+        "unless ",
+        "case ",
+        "while ",
+        "until ",
+    ];
+    OPENERS.iter().any(|op| trimmed.starts_with(op))
+        || trimmed.starts_with("class<<")
+        || trimmed.starts_with("class <<")
+}
+
+fn closes_ruby_nest(trimmed: &str) -> bool {
+    trimmed == "end"
+        || trimmed.starts_with("end ")
+        || trimmed.starts_with("end;")
+        || trimmed.starts_with("end#")
+}
+
+fn literal_top_level_require(line: &str) -> Option<String> {
+    if line.starts_with(char::is_whitespace) || !line.starts_with("require ") {
+        return None;
+    }
+    let argument = line["require ".len()..].trim();
+    let quote = argument.chars().next()?;
+    if !matches!(quote, '\'' | '"') {
+        return None;
+    }
+    let end = argument[1..].find(quote)? + 1;
+    let trailing = argument[end + 1..].trim();
+    if !trailing.is_empty() && !trailing.starts_with('#') {
+        return None;
+    }
+    let feature = &argument[1..end];
+    (!feature.is_empty() && !feature.contains('#')).then(|| feature.to_string())
+}
+
 /// All candidates in the best namespace-matching tier. Full/irregular
 /// names beat dashed-prefix guesses (`Alba`: alba, not alba-inertia).
 pub fn gems_owning_constant<'a>(census: &'a GemCensus, constant_path: &str) -> Vec<&'a str> {
@@ -828,6 +1072,10 @@ GEM
 ";
         assert_eq!(lock_path_remotes(lock), vec!["lib/billing", "../shared"]);
         assert!(lock_path_remotes(LOCK).is_empty());
+        let parsed = Lockfile::parse(lock);
+        assert!(parsed.is_from_git("widgets"));
+        assert!(!parsed.is_from_git("billing"));
+        assert!(parsed.is_in_repo("billing"));
     }
 }
 
