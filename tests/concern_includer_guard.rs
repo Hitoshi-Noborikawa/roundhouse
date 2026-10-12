@@ -100,3 +100,45 @@ puts "ok"
         )
         .assert_passes();
 }
+
+/// Guarded and unconditional declarations keep their source order:
+/// callbacks run in the order they were declared, a guarded one first
+/// here, as Rails runs them.
+#[test]
+fn guarded_and_plain_callbacks_keep_source_order() {
+    emit_and_run::real_blog()
+        .write(
+            "app/models/concerns/stamped.rb",
+            r#"
+module Stamped
+  extend ActiveSupport::Concern
+
+  included do
+    before_save :upcase_title if self == Article
+    before_save :suffix_title
+  end
+
+  def upcase_title
+    self.title = title.upcase
+  end
+
+  def suffix_title
+    self.title = title + "-x"
+  end
+end
+"#,
+        )
+        .edit(
+            "app/models/article.rb",
+            "class Article < ApplicationRecord\n",
+            "class Article < ApplicationRecord\n  include Stamped\n",
+        )
+        .run_ruby(
+            r#"
+article = Article.create!(title: "Widget", body: "A sufficiently long body")
+raise "callbacks ran out of order: #{article.title}" unless article.title == "WIDGET-x"
+puts "ok"
+"#,
+        )
+        .assert_passes();
+}

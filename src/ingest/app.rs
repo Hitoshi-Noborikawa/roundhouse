@@ -2228,17 +2228,27 @@ fn splice_concerns_into_models_named(app: &mut App, only: &[crate::ident::Symbol
                 .iter()
                 .filter(|id| spliced.insert((*id).clone()))
                 .flat_map(|id| {
-                    // The module's unconditional items, then the ones
-                    // whose includer guard admits this model.
-                    let plain = app.concern_model_items.get(id).into_iter().flatten();
-                    let guarded = app
-                        .concern_guarded_items
-                        .get(id)
-                        .into_iter()
-                        .flatten()
-                        .filter(|(guard, _)| guard.admits(model_name.0.as_str()))
-                        .map(|(_, item)| item);
-                    plain.chain(guarded).map(|item| rehome_default_fk(item, id, &model_name)).collect::<Vec<_>>()
+                    // The module's unconditional items with the guarded
+                    // ones that admit this model, in source order (a
+                    // callback's place in the chain is its order).
+                    let plain: &[ModelBodyItem] =
+                        app.concern_model_items.get(id).map_or(&[], Vec::as_slice);
+                    let guarded: &[crate::app::ConcernGuardedItem] =
+                        app.concern_guarded_items.get(id).map_or(&[], Vec::as_slice);
+                    let includer = model_name.0.as_str();
+                    let mut ordered: Vec<&ModelBodyItem> = Vec::new();
+                    for i in 0..=plain.len() {
+                        for g in guarded {
+                            let here = if i == plain.len() { g.at >= i } else { g.at == i };
+                            if here && g.guard.admits(includer) {
+                                ordered.push(&g.item);
+                            }
+                        }
+                        if let Some(item) = plain.get(i) {
+                            ordered.push(item);
+                        }
+                    }
+                    ordered.into_iter().map(|item| rehome_default_fk(item, id, &model_name)).collect::<Vec<_>>()
                 })
                 .collect();
             if items.is_empty() {
@@ -6361,11 +6371,16 @@ fn append_concern_items(
     guarded: super::library_class::ConcernGuardedItems,
     keep: impl Fn(&crate::ident::ClassId) -> bool,
 ) {
+    // A guarded item's `at` counts the unconditional items before it in
+    // its own file; offset it by what earlier files already hold.
+    for (id, items) in guarded.into_iter().filter(|(id, _)| keep(id)) {
+        let offset = app.concern_model_items.get(&id).map_or(0, Vec::len);
+        app.concern_guarded_items.entry(id).or_default().extend(
+            items.into_iter().map(|g| crate::app::ConcernGuardedItem { at: g.at + offset, ..g }),
+        );
+    }
     for (id, items) in items.into_iter().filter(|(id, _)| keep(id)) {
         app.concern_model_items.entry(id).or_default().extend(items);
-    }
-    for (id, items) in guarded.into_iter().filter(|(id, _)| keep(id)) {
-        app.concern_guarded_items.entry(id).or_default().extend(items);
     }
 }
 

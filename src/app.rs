@@ -49,6 +49,16 @@ impl IncluderGuard {
     }
 }
 
+/// One item of [`App::concern_guarded_items`]: the guard, the item, and
+/// `at`, the number of the module's unconditional items
+/// (`concern_model_items`) declared before it.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ConcernGuardedItem {
+    pub guard: IncluderGuard,
+    pub item: ModelBodyItem,
+    pub at: usize,
+}
+
 /// The top-level IR: a Rails application as data. This is the serializable
 /// deliverable — the thing ingesters produce and emitters consume.
 
@@ -430,9 +440,10 @@ pub struct App {
     /// includer, so the guard is answered per includer when the module
     /// is spliced: the item goes to the includers it admits and no
     /// other. Kept apart from `concern_model_items`, which every
-    /// includer receives.
+    /// includer receives; each item records where it stood among those,
+    /// so the splice keeps source order.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
-    pub concern_guarded_items: HashMap<ClassId, Vec<(IncluderGuard, ModelBodyItem)>>,
+    pub concern_guarded_items: HashMap<ClassId, Vec<ConcernGuardedItem>>,
     /// Instance-method names a concern's `included do` block (re)defines
     /// (`def x`, `alias_method :x, ...`, `define_method`, `attr_*`), keyed by
     /// module. Those statements are not carried as `concern_model_items`, so

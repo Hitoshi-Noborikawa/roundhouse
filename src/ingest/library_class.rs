@@ -3907,8 +3907,7 @@ pub type ConcernModelItems = (
 
 /// Items declared behind a guard on the includer, keyed by module (see
 /// [`crate::app::App::concern_guarded_items`]).
-pub type ConcernGuardedItems =
-    Vec<(ClassId, Vec<(crate::app::IncluderGuard, crate::dialect::ModelBodyItem)>)>;
+pub type ConcernGuardedItems = Vec<(ClassId, Vec<crate::app::ConcernGuardedItem>)>;
 
 /// `X if self == A`, `X unless self == A`, `X if self != A`,
 /// `X if in?([A, B])` (also `self.in?`, `A == self`): the guard and the
@@ -4092,7 +4091,7 @@ pub(in crate::ingest) fn ingest_concern_model_items_with_constants(
         let Some(body) = module.body() else { continue };
         let mut items: Vec<ModelBodyItem> = Vec::new();
         let mut enums: Vec<ConcernEnumDecl> = Vec::new();
-        let mut guarded: Vec<(crate::app::IncluderGuard, ModelBodyItem)> = Vec::new();
+        let mut guarded: Vec<crate::app::ConcernGuardedItem> = Vec::new();
         for stmt in flatten_statements(body) {
             let Some(call) = stmt.as_call_node() else { continue };
             if call.receiver().is_some() || constant_id_str(&call.name()) != "included" {
@@ -4120,7 +4119,12 @@ pub(in crate::ingest) fn ingest_concern_model_items_with_constants(
                                 | ModelBodyItem::Validation { .. }
                                 | ModelBodyItem::Callback { .. })) =>
                         {
-                            guarded.extend(parsed.into_iter().map(|item| (guard.clone(), item)));
+                            let at = items.len();
+                            guarded.extend(parsed.into_iter().map(|item| crate::app::ConcernGuardedItem {
+                                guard: guard.clone(),
+                                item,
+                                at,
+                            }));
                             continue;
                         }
                         _ => {}
