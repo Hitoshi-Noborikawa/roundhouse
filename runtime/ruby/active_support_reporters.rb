@@ -25,6 +25,9 @@
 #   defines CurrentAttributes, which is what registers them.
 # - A report to an ErrorReporter with no subscribers is logged through
 #   Rails.logger, where Rails drops it (see ErrorReporter#report).
+# - ensure_backtrace trims this file's frames from `backtrace` by their
+#   "path:" prefix and leaves `backtrace_locations` whole; Rails reads the
+#   locations' paths and shifts both. Spinel has no backtrace_locations.
 #
 # Released activesupport (8.1) and the main-branch reporters differ
 # in the places listed here, so a reader can tell what each file is
@@ -692,11 +695,11 @@ module ActiveSupport
       rescue Exception
         nil
       end
-      locations = error.backtrace_locations
+      lines = error.backtrace
+      prefix = "#{__FILE__}:"
       count = 0
-      count += 1 while count < locations.length && locations[count].path == __FILE__
-      locations.shift(count)
-      error.backtrace.shift(count)
+      count += 1 while count < lines.length && lines[count].start_with?(prefix)
+      lines.shift(count)
       nil
     end
   end
