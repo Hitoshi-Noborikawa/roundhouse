@@ -401,6 +401,8 @@ fn diagnose_expr_in(expr: &Expr, out: &mut Vec<Diagnostic>, value_used: bool) {
             DiagnosticKind::UndefinedFilterTarget { .. } => Diagnostic::stub_text(kind),
             // Produced by `graphql::diagnose` as a returned list.
             DiagnosticKind::GraphqlNullableField { .. } => Diagnostic::stub_text(kind),
+            // Produced by `ingest::initializer_ledger` as a returned list.
+            DiagnosticKind::UnconsumedInitializer { .. } => Diagnostic::stub_text(kind),
         };
         if !matches!(
             kind,

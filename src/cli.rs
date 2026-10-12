@@ -8,7 +8,7 @@
 use std::path::Path;
 use std::process::ExitCode;
 
-use crate::analyze::{diagnose, Analyzer, Severity};
+use crate::analyze::{diagnose, Analyzer, Diagnostic, DiagnosticKind, Severity};
 use crate::ingest::{ingest_app, survey, IngestError};
 
 /// `roundhouse lsp`: serve the read-only Language Server over stdio
@@ -217,9 +217,25 @@ pub fn check(args: &[String], default_app: &str) -> ExitCode {
     let mut had_output = false;
     // Parse diagnostics lead — earliest phase, and usually the root
     // cause of any downstream analyze noise on the recovered AST.
+    // The initializer ledger (a warning per boot statement no recognizer
+    // reads) collapses to a count unless `--continue` asks for the list.
+    let is_ledger = |d: &Diagnostic| matches!(d.kind, DiagnosticKind::UnconsumedInitializer { .. });
+    let ledger_count = parse_diags.iter().filter(|d| is_ledger(d)).count();
     for d in &parse_diags {
+        if is_ledger(d) && !continue_on_error {
+            continue;
+        }
         eprintln!("{}", d.render(&app.sources));
         had_output = true;
+    }
+    if ledger_count > 0 && !continue_on_error {
+        eprintln!(
+            "{ledger_count} unconsumed initializer statement(s) (warnings) — rerun with --continue to list them"
+        );
+        had_output = true;
+    }
+    if ledger_count > 0 && continue_on_error {
+        eprint!("{}", crate::ingest::initializer_ledger::render_summary(&parse_diags));
     }
     for d in &diags {
         eprintln!("{}", d.render(&app.sources));
