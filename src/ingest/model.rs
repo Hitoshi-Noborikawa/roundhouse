@@ -1974,6 +1974,8 @@ fn enum_label_pairs<'a>(
             },
             None => match consts.scalar(&value) {
                 Some(lit) => EnumStored::Lit(lit),
+                // `unknown: nil` names a NULL column: a literal too.
+                None if value.as_nil_node().is_some() => EnumStored::Lit(Literal::Nil),
                 None => EnumStored::Expr(ingest_expr(&value, file)?),
             },
         };

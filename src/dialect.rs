@@ -2125,10 +2125,24 @@ pub fn enum_reads_label(model: &Model, column: &Symbol) -> bool {
 }
 
 // Not every string mapping: one whose labels are its values (`%w[…].index_by(&:itself)`) reads the column as it is.
+// One `nil` value is the label of a NULL column (`unknown: nil`): Rails' `EnumType#deserialize` is `mapping.key(value)`.
 pub fn enum_mapping_reads_label(m: &[(String, crate::expr::Literal)]) -> bool {
     use crate::expr::Literal;
-    !m.is_empty()
+    let nils = m.iter().filter(|(_, v)| matches!(v, Literal::Nil)).count();
+    let m: Vec<&(String, Literal)> = m.iter().filter(|(_, v)| !matches!(v, Literal::Nil)).collect();
+    // A mapping of the `nil` entry alone (`{ unknown: nil }`) reads its label too:
+    // NULL is `"unknown"`, and a stored value no label names reads as nil.
+    if nils == 1 && m.is_empty() {
+        return true;
+    }
+    nils <= 1
+        && !m.is_empty()
         && (m.iter().all(|(_, v)| matches!(v, Literal::Int { .. }))
             || (m.iter().all(|(_, v)| matches!(v, Literal::Str { .. }))
-                && m.iter().any(|(l, v)| !matches!(v, Literal::Str { value } if value == l))))
+                && (nils == 1 || m.iter().any(|(l, v)| !matches!(v, Literal::Str { value } if value == l)))))
+}
+
+/// The label an enum mapping gives a NULL column (`unknown: nil`), if any.
+pub fn enum_nil_label(m: &[(String, crate::expr::Literal)]) -> Option<&str> {
+    m.iter().find(|(_, v)| matches!(v, crate::expr::Literal::Nil)).map(|(l, _)| l.as_str())
 }
