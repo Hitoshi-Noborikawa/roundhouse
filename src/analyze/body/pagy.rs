@@ -6,10 +6,10 @@
 //! call is typed here, from the argument, and only for the shape the
 //! runtime (runtime/ruby/action_controller/pagy.rb) models:
 //!
-//! * one ActiveRecord scope, typed as a Relation (or the Array-of-model an
-//!   inline `Model.where(...)` chain carries), or one the analysis cannot
-//!   type at all (gradual) -- not a known Array of values, which the gem
-//!   paginates by slicing and this runtime does not;
+//! * one ActiveRecord scope, typed as a Relation, or one the analysis
+//!   cannot type at all (gradual) -- not a known Array (`Model.to_a`, a
+//!   literal), which the gem paginates only through `pagy(:offset, array)`
+//!   and which has no `offset` / `limit` for this runtime to call;
 //! * optionally one trailing hash holding only `limit:`, a literal
 //!   Integer of at least 1 (a computed limit may be 0, which the gem
 //!   rejects with `Pagy::OptionError` and the app turns into a 404 in a
@@ -28,7 +28,8 @@ use super::*;
 
 impl<'a> BodyTyper<'a> {
     /// What `pagy` hands back as the records: the scope's own type when it
-    /// is a Relation (or the Array-of-model an inline chain carries), the
+    /// is a Relation (never an Array: the runtime calls `offset` / `limit`
+    /// on the scope, which an Array lacks), the
     /// unique such type across the closed members of a union, and
     /// `Untyped` when the analysis could not type the scope at all (a base
     /// class it does not model, a method whose other return paths are
@@ -38,12 +39,7 @@ impl<'a> BodyTyper<'a> {
         match ty {
             None | Some(Ty::Untyped) | Some(Ty::Var { .. }) => Some(Ty::Untyped),
             Some(Ty::Relation { of }) => Some(Ty::Relation { of: of.clone() }),
-            Some(Ty::Array { elem }) => match &**elem {
-                Ty::Class { id, .. } if self.classes().get(id).is_some_and(|c| c.table.is_some()) => {
-                    Some(Ty::Array { elem: elem.clone() })
-                }
-                _ => None,
-            },
+            Some(Ty::Array { .. }) => None,
             Some(Ty::Union { variants }) => {
                 let mut closed: Option<Ty> = None;
                 for variant in variants {

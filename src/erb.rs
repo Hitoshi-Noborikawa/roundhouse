@@ -43,11 +43,31 @@ pub struct ErbSegment {
     pub e_end: u32,
 }
 
-/// `yield` / `render ...` as the whole body of an output tag: the view
-/// walker emits both without an escape, so `<%==` has nothing to remove.
+/// `yield` / `yield :slot` / `render ...` as the WHOLE body of an output
+/// tag: the view walker emits those without an escape, so `<%==` has
+/// nothing to remove. Asked of Prism: anything chained or operated on the
+/// result (`render("x") + extra`, `yield.upcase`, `render "x" if cond`) is
+/// a different expression whose value the walker would escape, so it is
+/// wrapped in `raw`.
 fn is_unescaped_call(ruby: &str) -> bool {
-    let first = ruby.split(|c: char| !(c.is_alphanumeric() || c == '_')).next().unwrap_or("");
-    matches!(first, "yield" | "render")
+    // Inside a method, so a bare `yield` is not a top-level syntax error.
+    let src = format!("def _t\n{ruby}\nend");
+    let result = ruby_prism::parse(src.as_bytes());
+    if result.errors().next().is_some() {
+        return false;
+    }
+    let root = result.node();
+    let Some(program) = root.as_program_node() else { return false };
+    let top = program.statements().body();
+    let Some(def) = top.iter().next().and_then(|n| n.as_def_node()) else { return false };
+    let Some(statements) = def.body().and_then(|b| b.as_statements_node()) else { return false };
+    let stmt_list = statements.body();
+    let mut stmts = stmt_list.iter();
+    let (Some(only), None) = (stmts.next(), stmts.next()) else { return false };
+    if only.as_yield_node().is_some() {
+        return true;
+    }
+    only.as_call_node().is_some_and(|call| call.receiver().is_none() && call.name().as_slice() == b"render")
 }
 
 /// Translate one compiled-Ruby byte offset to a template byte offset.

@@ -110,8 +110,24 @@ fn passes_through(body: &Expr) -> bool {
     let ExprNode::Array { elements, .. } = &*last.node else { return false };
     elements.len() == 2
         && elements.iter().zip(&names).all(|(e, n)| matches!(&*e.node, ExprNode::Var { name, .. } if name == *n))
-        // Nothing in between may rebind either name.
-        && !stmts[1..stmts.len() - 1].iter().any(|st| matches!(&*st.node, ExprNode::Assign { .. } | ExprNode::MultiAssign { .. }))
+        // Nothing in between may rebind either name, however nested
+        // (`pagy = other if cond`, `||=`, a block, a `rescue => pagy`).
+        && !stmts[1..stmts.len() - 1].iter().any(|st| writes_any(st, &names))
+}
+
+/// Does `e`, or anything under it, write one of `names` as a local?
+fn writes_any(e: &Expr, names: &[&Symbol]) -> bool {
+    use crate::expr::LValue;
+    let hits = |t: &LValue| matches!(t, LValue::Var { name, .. } if names.contains(&name));
+    let here = match &*e.node {
+        ExprNode::Assign { target, .. } | ExprNode::OpAssign { target, .. } => hits(target),
+        ExprNode::MultiAssign { targets, .. } => targets.iter().any(hits),
+        ExprNode::BeginRescue { rescues, .. } => rescues.iter().any(|r| r.binding.as_ref().is_some_and(|b| names.contains(&b))),
+        _ => false,
+    };
+    let mut nested = false;
+    e.node.for_each_child(&mut |c| nested = nested || writes_any(c, names));
+    here || nested
 }
 
 pub(super) fn lower_pagy(app: &mut crate::App) -> super::IngestResult<()> {

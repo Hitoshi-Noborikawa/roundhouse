@@ -224,6 +224,11 @@ fn a_wrapper_that_does_not_hand_back_the_gems_pair_is_refused() {
         "def pagy(collection, **vars)\n      [nil, collection]\n    end",
         // asks, then returns something else
         "def pagy(collection, **vars)\n      pagy, records = super\n      records\n    end",
+        // rebinds either name before handing the pair back, however nested
+        "def pagy(collection, **vars)\n      pagy, records = super\n      pagy = Pagy.new(0, 1, 1, \"/\", \"\") if collection.nil?\n      [pagy, records]\n    end",
+        "def pagy(collection, **vars)\n      pagy, records = super\n      records ||= collection\n      [pagy, records]\n    end",
+        "def pagy(collection, **vars)\n      pagy, records = super\n      if collection.nil?\n        records, other = [], 1\n      end\n      [pagy, records]\n    end",
+        "def pagy(collection, **vars)\n      pagy, records = super\n      begin\n        raise ArgumentError\n      rescue ArgumentError => records\n        nil\n      end\n      [pagy, records]\n    end",
     ];
     for wrapper in wrappers {
         let concern = format!(
@@ -309,4 +314,32 @@ fn raw_output_tags_do_not_escape() {
     // `yield` and `render` are never escaped by the view lowering, so the
     // raw tag leaves them as they were.
     assert!(!compiled.contains("raw((yield))") && !compiled.contains("raw((render"), "{compiled}");
+}
+
+/// The runtime slices with `offset` / `limit`, which a Ruby Array lacks, and
+/// pagy 43 paginates an Array only through `pagy(:offset, array)`: a known
+/// Array is refused at analysis, where a Relation chain is not.
+#[test]
+fn a_known_array_is_refused_where_a_relation_chain_is_not() {
+    for body in ["@pagy, @articles = pagy(Article.all.to_a)", "@pagy, @articles = pagy([Article.first])"] {
+        let errs = errors(with_controller(Some(LOCK), body));
+        assert!(errs.iter().any(|e| e.contains("pagy not supported") && e.contains("Array")), "{body}: {errs:?}");
+    }
+    let errs = errors(with_controller(Some(LOCK), "@pagy, @articles = pagy(Article.where(title: \"x\").order(:id).limit(3))"));
+    assert!(errs.is_empty(), "{errs:?}");
+}
+
+/// Only a complete bare `yield` / `render` is left unwrapped; anything
+/// chained or operated on it is an expression the walker would escape, and
+/// `<%==` never escapes.
+#[test]
+fn raw_output_wraps_everything_but_a_bare_yield_or_render() {
+    for bare in ["yield", "yield :slot", "render \"x\"", "render(\"x\", a: 1)", "render partial: \"x\""] {
+        let compiled = roundhouse::erb::compile_erb(&format!("<%== {bare} %>"));
+        assert!(!compiled.contains("raw(("), "{bare}: {compiled}");
+    }
+    for chained in ["render(\"x\") + extra", "yield.upcase", "yield + \"!\"", "render(\"x\").strip", "render \"x\" if ok", "yield || render(\"y\")", "renderer", "yield_value"] {
+        let compiled = roundhouse::erb::compile_erb(&format!("<%== {chained} %>"));
+        assert!(compiled.contains(&format!("raw(({chained}))")), "{chained}: {compiled}");
+    }
 }
