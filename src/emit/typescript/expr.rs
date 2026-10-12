@@ -1834,22 +1834,28 @@ fn js_send_inner(
             }
         }
     }
-    // `ActiveSupport.errors_for(errors, prefix)` (runtime/ruby/active_support_ext.rb): the messages that start with the field's prefix, without it.
-    if method == "errors_for" && args.len() == 2 {
+    // `ActiveSupport.errors_for(errors, attributes, attribute, prefix)` (runtime/ruby/active_support_ext.rb): the messages added on `attribute`, without their prefix.
+    if method == "errors_for" && args.len() == 4 {
         if let Some(ExprNode::Const { path }) = recv.map(|r| &*r.node) {
             if path.last().map(|s| s.as_str()) == Some("ActiveSupport") {
-                let string_param = |name: &str| JsParam {
+                let typed_param = |name: &str, ty: &str| JsParam {
                     name: name.into(),
                     optional: false,
-                    ty: Some(TsType("string".into())),
+                    ty: Some(TsType(ty.into())),
                     default: None,
                 };
+                let string_param = |name: &str| typed_param(name, "string");
                 let arrow = |params: Vec<JsParam>, body: Js| {
                     Js::synth(JsExpr::Arrow { params, body: ArrowBody::Expr(body), is_async: false })
                 };
                 let carries = arrow(
-                    vec![string_param("__m")],
-                    Js::method_call(span, synth_ident("__m"), "startsWith", vec![synth_ident("__prefix")]),
+                    vec![string_param("__m"), typed_param("__i", "number")],
+                    Js::binary(
+                        span,
+                        "===",
+                        Js::index(span, synth_ident("__attributes"), synth_ident("__i")),
+                        synth_ident("__attribute"),
+                    ),
                 );
                 let rest = arrow(
                     vec![string_param("__m")],
@@ -1862,7 +1868,14 @@ fn js_send_inner(
                 );
                 let filtered = Js::method_call(span, js_expr(&args[0]), "filter", vec![carries]);
                 let body = Js::method_call(span, filtered, "map", vec![rest]);
-                return Js::call(span, arrow(vec![string_param("__prefix")], body), vec![js_expr(&args[1])]);
+                return Js::call(
+                    span,
+                    arrow(
+                        vec![typed_param("__attributes", "string[]"), string_param("__attribute"), string_param("__prefix")],
+                        body,
+                    ),
+                    vec![js_expr(&args[1]), js_expr(&args[2]), js_expr(&args[3])],
+                );
             }
         }
     }

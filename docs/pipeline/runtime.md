@@ -1828,34 +1828,35 @@ through it loses those writes. The Rails idiom reassigns
 (`@room = @room.becomes!(Rooms::Closed)`), which is what campfire's two
 sites do; a site that kept both handles would diverge silently.
 
-### `errors[:field]` re-derives its field from the message text
+### `errors[:field]` picks its field by the attribute each message is on
 
 Rails' error accumulator keeps an attribute alongside every message, so
 `errors[:url]` is an exact lookup. Here the accumulator is a plain
-`Array[String]` of FULL messages (`"Url is not public"`), and
-`src/lower/errors_index.rs` grounds the read as
-`ActiveSupport.errors_for(errors, "Url ")` — a prefix match against the
-humanized field name that `errors.add` / `validates` baked at lower
-time.
+`Array[String]` of FULL messages (`"Url is not public"`), with an
+index-for-index companion, `error_attributes`, holding the attribute
+each message was added on. `errors.add` and every `validates` rule push
+to both (`src/lower/errors_add.rs`, `model_to_library/validations.rs`),
+`errors.clear` empties both, and `src/lower/errors_index.rs` grounds
+the read as
+`ActiveSupport.errors_for(errors, error_attributes, "url", "Url ")`:
+the messages added on `url`, less the prefix `errors.format` put before
+them. `:base` takes the empty prefix, as Rails' full message for it
+does. The form builder's `field_with_errors` wrapper asks the same
+question with `any?`.
 
-**Why.** Adding an attribute column changes `@errors`' type in every
-strict target — `Vec<String>` becomes a vector of pairs, and every
-emitted `validate` body, every `errors <<`, and the `full_messages`
-identity fold move with it. The projection is recoverable from the text
-the runtime already stores, so the type stays.
+**Why a companion, not pairs.** Pairs change `@errors`' type in every
+strict target — `Vec<String>` becomes a vector of pairs — and every
+emitted `validate` body, every `errors <<` and the `full_messages`
+identity fold would move with it. A second `Array[String]` leaves every
+reader of `errors` as it was.
 
-**What it costs.** Two cases, both named rather than silent:
-
-- One field's humanized name being a PREFIX of another's — `url` and
-  `url_host` humanize to `"Url"` and `"Url host"` — makes
-  `errors[:url]` also answer `"Url host can't be blank"`, with the
-  wrong prefix stripped. No corpus app has such a pair; an app that did
-  would diverge silently, and that is the case that would force the
-  attribute column.
-- `errors[:base]` DECLINES. Rails attaches `:base` messages to the
-  record, so `errors_add` bakes them with no prefix and there is no
-  text to match. Those sites stay dynamic and join the
-  `errors_index` residue ledger.
+**What it costs.** A message pushed by anything other than those two
+lowerings has no attribute beside it. `errors.delete` and
+`errors.import`, which some apps call, are not modeled; an `errors <<`
+written by hand pushes a message no field claims. Each grounding reads
+the record twice (once for `errors`, once for `error_attributes`), so
+one whose record is a call with arguments or a receiver
+(`Draft.latest.errors[:url]`) stays residue.
 
 ### A Turbo stream name is not signed — CLOSED on the ruby family
 
@@ -2450,11 +2451,14 @@ Three gaps remain, all on spinel's side:
   `token_tag` body is exactly `""` (campfire's header-only forgery
   protection) synthesizes `token_fields_omitted`. Another `token_tag`
   body is not read, and the forms keep their token field.
-- **A form field with errors is not wrapped in `field_with_errors`.**
-  Rails' default `field_error_proc` wraps the label and control of an
-  attribute with errors in `<div class="field_with_errors">`; the
-  inlined form builder renders them bare. A `class:` array over
-  `errors[:field]` still picks its classes as Rails does.
+- **Only Rails' default `field_error_proc` is modeled.** A label or
+  control whose field has errors renders inside
+  `<div class="field_with_errors">`, decided per render. An app that
+  sets its own `config.action_view.field_error_proc` keeps its form
+  fields as errors. A field's errors are told apart by the attribute
+  each message was added on, as `errors[:field]`'s are (see above).
+  A form over a record that is not one of the app's models (a form
+  object, say) is not wrapped, even when it has errors.
 - **`config.after_initialize` blocks do not run at boot.** campfire has
   two: `Room::MessagesCount.ensure!` (its counter triggers, which
   `schema.rb` cannot dump) and starting the WAL checkpointer outside

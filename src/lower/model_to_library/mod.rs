@@ -2165,6 +2165,11 @@ fn build_class_info_with_finder_inputs(
         "errors",
         fn_sig(vec![], Ty::Array { elem: Box::new(Ty::Str) }),
     );
+    insert_default(
+        &mut info.instance_methods,
+        "error_attributes",
+        fn_sig(vec![], Ty::Array { elem: Box::new(Ty::Str) }),
+    );
     insert_default(&mut info.instance_methods, "valid?", fn_sig(vec![], Ty::Bool));
     insert_default(
         &mut info.instance_methods,
@@ -2450,7 +2455,7 @@ fn build_class_info_with_finder_inputs(
     // `initialize`) — override the Method default so the body
     // analyzer's force-parens skips them. Callers reading
     // `record.errors` need the field, not a method call.
-    for field_name in ["errors", "id"] {
+    for field_name in ["errors", "error_attributes", "id"] {
         info.instance_method_kinds
             .insert(Symbol::from(field_name), AccessorKind::AttributeReader);
     }

@@ -2123,11 +2123,11 @@ pub(super) fn emit_send(
                 // — the hand-written `Rh_parse_db_time`
                 // (runtime/go/v2/rh_datetime.go), not a transpiled
                 // `ActiveSupport_*` function (no such unit exists).
-                // `ActiveSupport.errors_for(errors, prefix)` (runtime/ruby/active_support_ext.rb): the messages that start with the field's prefix, without it.
-                if class_name == "ActiveSupport" && method == "errors_for" && args_s.len() == 2 {
+                // `ActiveSupport.errors_for(errors, attributes, attribute, prefix)` (runtime/ruby/active_support_ext.rb): the messages added on `attribute`, without their prefix.
+                if class_name == "ActiveSupport" && method == "errors_for" && args_s.len() == 4 {
                     return format!(
-                        "func(errors []string, prefix string) []string {{ out := []string{{}}; for _, m := range errors {{ if strings.HasPrefix(m, prefix) {{ out = append(out, m[len(prefix):]) }} }}; return out }}({}, {})",
-                        args_s[0], args_s[1]
+                        "func(errors []string, attributes []string, attribute string, prefix string) []string {{ out := []string{{}}; for i, m := range errors {{ if i < len(attributes) && attributes[i] == attribute {{ out = append(out, strings.TrimPrefix(m, prefix)) }} }}; return out }}({}, {}, {}, {})",
+                        args_s[0], args_s[1], args_s[2], args_s[3]
                     );
                 }
                 if class_name == "ActiveSupport" && method == "parse_db_time" {

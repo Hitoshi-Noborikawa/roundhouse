@@ -964,6 +964,64 @@ fn a_class_array_over_field_errors_picks_the_error_classes_on_spinel() {
     emit_and_run::real_blog().run_spinel(FORM_ERROR_CLASSES).assert_passes();
 }
 
+/// Rails' default `field_error_proc`: a label or control whose field has
+/// errors renders inside `<div class="field_with_errors">`; a check box's
+/// hidden companion stays outside it.
+fn field_with_errors_app() -> emit_and_run::Overlay {
+    emit_and_run::real_blog().edit(
+        "app/views/articles/_form.html.erb",
+        "    <%= form.text_field :title,",
+        "    <%= form.check_box :title %>\n    <%= form.text_field :title,",
+    )
+}
+
+const FIELD_WITH_ERRORS: &str = r#"a = Article.new(title: "", body: "long enough body")
+a.valid?
+html = Views::Articles.form(a)
+raise html unless html.include?("<div class=\"field_with_errors\"><label for=\"article_title\">Title</label></div>")
+raise html unless html.include?("<input name=\"article[title]\" type=\"hidden\" value=\"0\"><div class=\"field_with_errors\"><input type=\"checkbox\" value=\"1\" name=\"article[title]\" id=\"article_title\"></div>")
+raise html unless html.include?("<div class=\"field_with_errors\"><input type=\"text\" name=\"article[title]\" id=\"article_title\"")
+raise html unless html.include?("<label for=\"article_body\">Body</label>\n")
+raise html unless html.include?("<textarea name=\"article[body]\"")
+raise html if html.include?("<div class=\"field_with_errors\"><textarea")
+clean = Views::Articles.form(Article.new(title: "t", body: "long enough body"))
+raise clean if clean.include?("field_with_errors")
+"#;
+
+#[test]
+fn a_field_with_errors_renders_inside_field_with_errors() {
+    field_with_errors_app().run_ruby(FIELD_WITH_ERRORS).assert_passes();
+}
+
+#[test]
+#[ignore = "requires the Spinel toolchain"]
+fn a_field_with_errors_renders_inside_field_with_errors_on_spinel() {
+    field_with_errors_app().run_spinel(FIELD_WITH_ERRORS).assert_passes();
+}
+
+/// An app that replaces `field_error_proc` keeps its form fields as errors.
+#[test]
+fn a_custom_field_error_proc_stays_an_error() {
+    let (_emitted, errors) = emit_and_run::real_blog()
+        .write(
+            "config/initializers/field_error_proc.rb",
+            "Rails.application.config.action_view.field_error_proc = proc { |html_tag, _instance| html_tag }\n",
+        )
+        .emit(roundhouse::project::BuildTarget::Ruby);
+    assert!(errors.iter().any(|e| e.contains("field_error_proc")), "{errors:?}");
+}
+
+#[test]
+fn a_mention_of_field_error_proc_keeps_the_default_wrapper() {
+    let (_emitted, errors) = emit_and_run::real_blog()
+        .write(
+            "config/initializers/notes.rb",
+            "Rails.application.config.x.note = \"field_error_proc\" # field_error_proc = custom\n",
+        )
+        .emit(roundhouse::project::BuildTarget::Ruby);
+    assert!(!errors.iter().any(|e| e.contains("field_error_proc")), "{errors:?}");
+}
+
 /// `I18n.t` and a template's `t` answer the locale at compile time:
 /// interpolation, plural forms chosen by a run-time count, `scope:`,
 /// `default:` and a view's lazy `.key`.
@@ -1162,19 +1220,64 @@ fn unresolvable_translations_stay_errors() {
     assert!(errors.iter().any(|e| e.contains(":strict")), "{errors:?}");
 }
 
-/// `errors[:field]` cannot tell fields apart when `errors.format` puts
-/// nothing before the message, so it stays an error.
-#[test]
-fn errors_index_under_a_message_only_format_stays_an_error() {
-    let (_emitted, errors) = emit_and_run::real_blog()
-        .write("config/locales/en.yml", "en:\n  hello: \"Hello world\"\n  errors:\n    format: \"%{message}\"\n")
+/// `errors[:field]` picks a message by the attribute it was added on,
+/// not by its text: `title_note`'s "Title note …" is not a `title`
+/// error, and a format that names no attribute still tells fields apart.
+fn errors_by_attribute_app(format: &str) -> emit_and_run::Overlay {
+    emit_and_run::real_blog()
+        .write("config/locales/en.yml", &format!("en:\n  hello: \"Hello world\"\n  errors:\n    format: \"{format}\"\n"))
         .edit(
             "app/models/article.rb",
             "  validates :title, presence: true\n",
-            "  validates :title, presence: true\n\n  def title_errors\n    errors[:title]\n  end\n",
+            "  validates :title, presence: true
+  validate :note_check
+
+  def note_check
+    errors.add(:title_note, \"is odd\") if body == \"an odd body\"
+  end
+
+  def title_errors
+    errors[:title]
+  end
+
+  def base_errors
+    errors[:base]
+  end
+
+  def recheck
+    errors.clear
+    errors.add(:body, \"is odd\")
+  end
+",
         )
-        .emit(roundhouse::project::BuildTarget::Ruby);
-    assert!(errors.iter().any(|e| e.contains("nothing before the message")), "{errors:?}");
+}
+
+const ERRORS_BY_ATTRIBUTE: &str = r#"a = Article.new(title: "", body: "an odd body")
+a.valid?
+raise a.title_errors.inspect unless a.title_errors == ["can't be blank"]
+raise a.base_errors.inspect unless a.base_errors.empty?
+html = Views::Articles.form(a)
+raise html unless html.include?("<div class=\"field_with_errors\"><label for=\"article_title\">Title</label></div>")
+raise html if html.include?("<div class=\"field_with_errors\"><textarea")
+a.recheck
+raise a.title_errors.inspect unless a.title_errors.empty?
+raise a.errors.inspect unless a.errors.length == 1
+"#;
+
+#[test]
+fn errors_index_picks_a_field_by_its_attribute() {
+    errors_by_attribute_app("%{attribute} %{message}").run_ruby(ERRORS_BY_ATTRIBUTE).assert_passes();
+}
+
+#[test]
+fn errors_index_picks_a_field_under_a_format_that_names_no_attribute() {
+    errors_by_attribute_app("Error: %{message}").run_ruby(ERRORS_BY_ATTRIBUTE).assert_passes();
+}
+
+#[test]
+#[ignore = "requires the Spinel toolchain"]
+fn errors_index_picks_a_field_by_its_attribute_on_spinel() {
+    errors_by_attribute_app("%{attribute} %{message}").run_spinel(ERRORS_BY_ATTRIBUTE).assert_passes();
 }
 
 /// A field the lowering cannot humanize at compile time keeps its error.
