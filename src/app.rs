@@ -23,8 +23,6 @@ use crate::ident::{ClassId, Symbol};
 use crate::schema::Schema;
 use crate::ty::Ty;
 
-/// The top-level IR: a Rails application as data. This is the serializable
-/// deliverable — the thing ingesters produce and emitters consume.
 /// A condition on the including class, read from a concern's
 /// `included do`: `self == A` / `self != A` / `in?([A, B])`, under `if`
 /// or `unless`. `classes` are the constants as written.
@@ -36,18 +34,23 @@ pub struct IncluderGuard {
 
 impl IncluderGuard {
     /// Whether the guard holds for the includer named `includer` (its
-    /// full name). A written constant matches the includer's full name
-    /// or its trailing segments (`Account` admits `Billing::Account`
-    /// only when written in that namespace; the ingest sees the bare
-    /// name, so a suffix match on `::` boundaries is what it can do).
+    /// full name). A root-qualified constant (`::Account`) names exactly
+    /// one class and matches only that full name. An unqualified one
+    /// matches the full name or its trailing segments (`Account` admits
+    /// `Billing::Account` only when written in that namespace; the ingest
+    /// sees the bare name, so a suffix match on `::` boundaries is what
+    /// it can do).
     pub fn admits(&self, includer: &str) -> bool {
-        let hit = self.classes.iter().any(|c| {
-            let c = c.trim_start_matches("::");
-            includer == c || includer.ends_with(&format!("::{c}"))
+        let hit = self.classes.iter().any(|c| match c.strip_prefix("::") {
+            Some(rooted) => includer == rooted,
+            None => includer == c || includer.ends_with(&format!("::{c}")),
         });
         hit != self.negate
     }
 }
+
+/// The top-level IR: a Rails application as data. This is the serializable
+/// deliverable — the thing ingesters produce and emitters consume.
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct App {
@@ -850,5 +853,35 @@ impl App {
 impl Default for App {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod includer_guard_tests {
+    use super::IncluderGuard;
+
+    fn guard(classes: &[&str], negate: bool) -> IncluderGuard {
+        IncluderGuard { classes: classes.iter().map(|c| c.to_string()).collect(), negate }
+    }
+
+    #[test]
+    fn a_root_qualified_constant_admits_only_that_class() {
+        let g = guard(&["::Article"], false);
+        assert!(g.admits("Article"));
+        assert!(!g.admits("Billing::Article"));
+        let g = guard(&["::Billing::Article"], false);
+        assert!(g.admits("Billing::Article"));
+        assert!(!g.admits("Article"));
+        assert!(!g.admits("Shop::Billing::Article"));
+        // `unless self == ::Article` keeps the namespaced includer.
+        assert!(guard(&["::Article"], true).admits("Billing::Article"));
+    }
+
+    #[test]
+    fn an_unqualified_constant_matches_on_segment_boundaries() {
+        let g = guard(&["Article"], false);
+        assert!(g.admits("Article"));
+        assert!(g.admits("Billing::Article"));
+        assert!(!g.admits("BillingArticle"));
     }
 }
