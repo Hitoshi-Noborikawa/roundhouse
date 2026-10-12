@@ -103,3 +103,26 @@ fn survey_mode_with_allow_unsupported_also_records_exactly_one_gap() {
     );
     let _ = std::fs::remove_dir_all(&root);
 }
+
+/// The attribution count printed alongside the punch list
+/// ("N diagnostic(s) attributed to them") tallied only `analyze_diags`
+/// — the diagnostics from `session::analyze_and_lower`. This alias's
+/// own `alias_target_unresolved` diagnostic is pushed from
+/// `resolve_model_aliases` *inside* `project::target_files`'s own
+/// `emit::diagnostics::scope`, which runs AFTER `analyze_and_lower`
+/// and is never folded back into `analyze_diags` — so this is a case
+/// where the attributed note comes from the emit phase alone, and the
+/// old count reported 0 attributed notes for a run that plainly
+/// attributed one (the gap line right above it says so). The report
+/// line must count the emit-phase `diags` too.
+#[test]
+fn the_attribution_count_includes_a_note_attributed_only_in_the_emit_phase() {
+    let root = app();
+    let (code, err) = roundhouse(&["--target", "ruby", "--survey"], &root);
+    assert_eq!(code, 0, "{err}");
+    assert!(
+        err.contains("1 ingest gap(s) recorded; 1 diagnostic(s) attributed to them"),
+        "expected the one alias gap to count as one attributed note, not 0: {err}"
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}

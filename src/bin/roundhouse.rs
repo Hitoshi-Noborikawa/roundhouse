@@ -538,7 +538,23 @@ fn run_transpile(
     // this is the most useful thing in the run, and printing it after
     // the early `return Err` would mean never printing it at all.
     if !survey_gaps.is_empty() {
-        let notes = analyze_diags.iter().filter(|d| d.severity == Severity::Info).count();
+        // `attribute_analysis_gaps` runs twice (once over `analyze_diags`,
+        // once over the emit-phase `diags` — see the call sites above) and
+        // an attributed note can land in EITHER vector, or only in `diags`
+        // when the construct is caught solely during emit (an unresolved
+        // model alias, today's only such case — `resolve_model_aliases`'s
+        // push only ever reaches `diags`' `emit::diagnostics::scope`, never
+        // `analyze_diags`). Counting `analyze_diags` alone could report 0
+        // attributed notes for a run that plainly has some. Count both,
+        // deduped by (span, message) so a construct caught in both passes
+        // for the same source line isn't counted twice.
+        let mut seen = std::collections::HashSet::new();
+        let notes = analyze_diags
+            .iter()
+            .chain(diags.iter())
+            .filter(|d| d.severity == Severity::Info)
+            .filter(|d| seen.insert((d.span, d.message.clone())))
+            .count();
         eprintln!();
         eprint!("{}", roundhouse::ingest::survey::render_report(&survey_gaps));
         eprintln!(
