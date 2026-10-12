@@ -1868,9 +1868,14 @@ fn dry_struct_classes_run_lowered() {
 
 #[test]
 fn dry_initializer_classes_run_lowered() {
-    let run = dry_initializer::ruby_overlay().run_ruby(dry_initializer::ASSERTIONS);
+    let run = dry_initializer::ruby_overlay().run_ruby(&format!(
+        "{}{}",
+        dry_initializer::ASSERTIONS,
+        dry_initializer::CLOCK_ASSERTIONS
+    ));
     run.assert_passes();
     assert!(run.stdout.contains("dry-initializer contract passed"));
+    assert!(run.stdout.contains("dry-initializer clock contract passed"));
 }
 
 /// A class the lowering cannot read keeps its whole hierarchy on the gem
@@ -1883,7 +1888,7 @@ fn dry_initializer_refusal_keeps_the_hierarchy_on_the_gem() {
     let refused = || dry_initializer::overlay()
         .write(
             "lib/svc/odd.rb",
-            "module Svc\n  class Odd < Base\n    option :size, ::Svc::Types::Strict::Integer.constrained(gt: 0)\n  end\n\n  class Odder < Odd\n  end\nend\n",
+            "module Svc\n  class Odd < Base\n    option :size, ::Svc::Types::Strict::String.constrained(uuid_v4: true)\n  end\n\n  class Odder < Odd\n  end\nend\n",
         )
         .write(
             "lib/svc/lone.rb",
@@ -1920,6 +1925,16 @@ puts "refusal contract passed"
     );
     run.assert_passes();
     assert!(run.stdout.contains("refusal contract passed"));
+}
+
+/// `Params::Time` coerces with `Time.parse`, which Spinel's tree does not
+/// have: reported for it, as for a struct, not emitted to fail.
+#[test]
+fn dry_initializer_stdlib_coercions_are_reported_for_spinel() {
+    let (_emitted, errors) = dry_initializer::ruby_overlay().emit(roundhouse::project::BuildTarget::Spinel);
+    assert!(errors.iter().any(|e| e.contains("`Time.parse`")), "Time.parse not reported: {errors:#?}");
+    let (_emitted, errors) = dry_initializer::overlay().emit(roundhouse::project::BuildTarget::Spinel);
+    assert!(errors.iter().all(|e| !e.contains("Time.parse")), "{errors:#?}");
 }
 
 /// The initializer lowering reads type constants before the `Dry::Struct`
@@ -1998,7 +2013,7 @@ fn dry_struct_hierarchy_is_lowered_whole_or_not_at_all() {
         ("lib/shop/good.rb", "module Shop\n  class Good < Base\n    attribute :id, ::Shop::Types::Coercible::String\n  end\nend\n"),
         (
             "lib/shop/bad.rb",
-            "module Shop\n  class Bad < Base\n    PIECES = ::Shop::Types::Array.of(::Shop::Piece)\n    attribute :amount, ::Shop::Types::Strict::String.constrained(min_size: 1)\n    attribute :other, Other\n    attribute :pieces, PIECES\n    attribute :inner do\n      attribute :n, ::Shop::Types::Coercible::Integer\n    end\n  end\nend\n",
+            "module Shop\n  class Bad < Base\n    PIECES = ::Shop::Types::Array.of(::Shop::Piece)\n    attribute :amount, ::Shop::Types::Strict::String.constrained(uuid_v4: true)\n    attribute :other, Other\n    attribute :pieces, PIECES\n    attribute :inner do\n      attribute :n, ::Shop::Types::Coercible::Integer\n    end\n  end\nend\n",
         ),
         ("lib/shop/other.rb", "module Shop\n  class Other < Dry::Struct\n    attribute :id, ::Shop::Types::Coercible::String\n  end\nend\n"),
         (

@@ -7,7 +7,8 @@
 //! `Params::` and `JSON::` scalars, dates and decimals; `Array.of`,
 //! `Hash.schema`, `Instance(X)`, a struct class, `A | B`,
 //! `Constructor(K) { }` and `.constructor { }`, `.optional`, `.enum`,
-//! `.meta`, `.default`; a constant holding any of these.
+//! `.constrained`, `.fallback`, `.meta`, `.default`; a constant holding
+//! any of these.
 
 use std::collections::{HashMap, HashSet};
 
@@ -49,6 +50,9 @@ pub(super) enum Base {
     Parse(&'static str),
     /// `Params::Decimal`: a value `Float()` accepts, as `to_d` makes it.
     ParamsDecimal,
+    /// A class where a type belongs, as `Array.of(Invoice)`: dry-types
+    /// calls `call_unsafe` on it, which a class does not answer.
+    Uncallable(String),
 }
 
 /// A `.default`: a value dry-types evaluates once, where the type is
@@ -82,6 +86,9 @@ pub(super) struct Scope<'a> {
     pub(super) structs: &'a HashMap<String, Option<String>>,
     /// Every class-body constant, by full name, with its value.
     pub(super) constants: &'a HashMap<String, Expr>,
+    /// The app's models and other classes, by full name: what an
+    /// `Array.of(X)` names when `X` is not a type.
+    pub(super) classes: &'a HashSet<String>,
     /// Constants followed so far, against a cycle.
     pub(super) depth: usize,
 }
@@ -93,8 +100,47 @@ pub(super) struct DryType {
     pub(super) default: Option<DefaultValue>,
     /// `.enum(...)`: the values the coerced value must be one of.
     pub(super) enumeration: Option<Vec<Expr>>,
+    /// `.constrained(gt: 0, ...)`: dry-logic predicates and their
+    /// arguments, checked on the coerced value.
+    pub(super) constraints: Vec<(Symbol, Expr)>,
+    /// `.fallback(v)`, `.fallback { |input| ... }`: what any failure of
+    /// the type gives instead.
+    pub(super) fallback: Option<Fallback>,
     /// `.meta(omittable: true)`: in a `Hash.schema`, the key may be absent.
     pub(super) omittable: bool,
+}
+
+impl DryType {
+    pub(super) fn of(base: Base) -> DryType {
+        DryType {
+            base,
+            optional: false,
+            default: None,
+            enumeration: None,
+            constraints: Vec::new(),
+            fallback: None,
+            omittable: false,
+        }
+    }
+}
+
+/// A `.fallback`: a value evaluated once where written, or a block
+/// called with the input.
+#[derive(Clone, Debug)]
+pub(super) enum Fallback {
+    Value(Expr),
+    Block { param: Option<Symbol>, body: Expr },
+}
+
+/// The dry-logic predicates `.constrained` is read with: unary ones take
+/// `true`.
+fn predicate(name: &str) -> Option<bool> {
+    match name {
+        "gt" | "gteq" | "lt" | "lteq" | "min_size" | "max_size" | "size" | "format" | "included_in"
+        | "excluded_from" | "eql" => Some(false),
+        "filled" => Some(true),
+        _ => None,
+    }
 }
 
 /// A `Types` module and what its bare names (`Types::String`) mean:
@@ -183,7 +229,7 @@ pub(super) fn resolve(owner: &str, parent: &str, names: &HashSet<String>) -> Opt
 
 /// The type a `Types::...` expression names, when it is one modeled here.
 pub(super) fn dry_type(expr: &Expr, scope: &Scope<'_>) -> Option<DryType> {
-    let plain = |base| Some(DryType { base, optional: false, default: None, enumeration: None, omittable: false });
+    let plain = |base| Some(DryType::of(base));
     match &*expr.node {
         ExprNode::Const { path } => {
             let Some(rest) = types_path(path, scope.owner, scope.types_modules, scope.names) else {
@@ -209,7 +255,7 @@ pub(super) fn dry_type(expr: &Expr, scope: &Scope<'_>) -> Option<DryType> {
             let base = match rest.as_slice() {
                 ["Coercible", "String"] => Base::Coerce("String"),
                 ["Coercible", "Integer"] => Base::Coerce("Integer"),
-                ["Coercible", "Float"] => Base::Coerce("Float"),
+                ["Coercible" | "Params", "Float"] => Base::Coerce("Float"),
                 ["Coercible", "Hash"] => Base::Coerce("Hash"),
                 ["Coercible", "Symbol"] => Base::CoerceSymbol,
                 ["Params", "Integer"] => Base::ParamsInteger,
@@ -221,13 +267,14 @@ pub(super) fn dry_type(expr: &Expr, scope: &Scope<'_>) -> Option<DryType> {
                 ["Params" | "JSON", "Date"] => Base::Parse("Date"),
                 ["Params" | "JSON", "DateTime"] => Base::Parse("DateTime"),
                 ["Params" | "JSON", "Time"] => Base::Parse("Time"),
-                ["Strict", t @ ("String" | "Integer" | "Float" | "Hash" | "Array" | "Symbol")] => {
+                ["Strict", t @ ("String" | "Integer" | "Float" | "Hash" | "Array" | "Symbol" | "Range")] => {
                     Base::Strict(match *t {
                         "String" => "String",
                         "Integer" => "Integer",
                         "Float" => "Float",
                         "Hash" => "Hash",
                         "Symbol" => "Symbol",
+                        "Range" => "Range",
                         _ => "Array",
                     })
                 }
@@ -237,7 +284,7 @@ pub(super) fn dry_type(expr: &Expr, scope: &Scope<'_>) -> Option<DryType> {
                 ["Strict", "Date"] => Base::Instance("::Date".into()),
                 ["Any"] => Base::Nominal,
                 ["Nominal", t]
-                    if matches!(*t, "String" | "Integer" | "Float" | "Bool" | "Hash" | "Array" | "Any" | "Symbol") =>
+                    if matches!(*t, "String" | "Integer" | "Float" | "Bool" | "Hash" | "Array" | "Any" | "Symbol" | "Range") =>
                 {
                     Base::Nominal
                 }
@@ -270,6 +317,27 @@ pub(super) fn dry_type(expr: &Expr, scope: &Scope<'_>) -> Option<DryType> {
             ty.default = Some(DefaultValue::Block(body.clone()));
             Some(ty)
         }
+        // `.fallback { |input| ... }`: called with the input whenever the
+        // type fails. Only a block that reads no `self`, as a constructor.
+        ExprNode::Send { recv: Some(recv), method, args, block: Some(block), .. }
+            if method.as_str() == "fallback" && args.is_empty() =>
+        {
+            let ExprNode::Lambda { params, body, .. } = &*block.node else { return None };
+            let param = match params.as_slice() {
+                [] => None,
+                [param] => Some(param.clone()),
+                _ => return None,
+            };
+            if reads_self(body) {
+                return None;
+            }
+            let mut ty = dry_type(recv, scope)?;
+            if ty.fallback.is_some() {
+                return None;
+            }
+            ty.fallback = Some(Fallback::Block { param, body: next_to_return(body) });
+            Some(ty)
+        }
         // `Types.Constructor(K) { |v| ... }`, `T.constructor { |v| ... }`.
         // The block runs as a class method of the struct, so only one that
         // reads no `self`.
@@ -286,7 +354,7 @@ pub(super) fn dry_type(expr: &Expr, scope: &Scope<'_>) -> Option<DryType> {
                 if !types_path(path, scope.owner, scope.types_modules, scope.names)?.is_empty() || args.len() != 1 {
                     return None;
                 }
-                DryType { base: Base::Nominal, optional: false, default: None, enumeration: None, omittable: false }
+                DryType::of(Base::Nominal)
             } else {
                 if !args.is_empty() {
                     return None;
@@ -361,21 +429,71 @@ pub(super) fn dry_type(expr: &Expr, scope: &Scope<'_>) -> Option<DryType> {
                 plain(Base::HashSchema(keys))
             }
             "enum" if !args.is_empty() => {
-                // Literal values, or a splatted constant list.
+                // Literal values, or a splatted list read without `self`.
                 // A Hash makes a mapping enum, which this does not model.
                 if !args.iter().all(|a| {
                     (literal(a) && !matches!(&*a.node, ExprNode::Hash { .. }))
-                        || matches!(&*a.node, ExprNode::Splat { value }
-                            if matches!(&*value.node, ExprNode::Const { .. }))
+                        || matches!(&*a.node, ExprNode::Splat { value } if !reads_self(value))
                 }) {
                     return None;
                 }
                 let mut ty = dry_type(recv, scope)?;
-                if ty.enumeration.is_some() {
+                if ty.enumeration.is_some() || ty.fallback.is_some() {
                     return None;
                 }
                 ty.enumeration = Some(args.clone());
                 Some(ty)
+            }
+            // `.constrained(gt: 0, format: RE)`: arguments read without `self`,
+            // checked after the coercion, as dry-types does.
+            "constrained" => {
+                let [ExprNode::Hash { entries, .. }] = args.iter().map(|a| &*a.node).collect::<Vec<_>>()[..]
+                else {
+                    return None;
+                };
+                let mut ty = dry_type(recv, scope)?;
+                if ty.optional || ty.fallback.is_some() || ty.default.is_some() {
+                    return None;
+                }
+                for (key, value) in entries {
+                    let ExprNode::Lit { value: Literal::Sym { value: name } } = &*key.node else { return None };
+                    let unary = predicate(name.as_str())?;
+                    if unary {
+                        if !matches!(&*value.node, ExprNode::Lit { value: Literal::Bool { value: true } }) {
+                            return None;
+                        }
+                    } else if reads_self(value) {
+                        return None;
+                    }
+                    ty.constraints.push((name.clone(), value.clone()));
+                }
+                Some(ty)
+            }
+            "fallback" => {
+                let value = match args.as_slice() {
+                    [value] => value,
+                    [value, options] if shared_option(options) => value,
+                    _ => return None,
+                };
+                if reads_self(value) {
+                    return None;
+                }
+                let mut ty = dry_type(recv, scope)?;
+                if ty.fallback.is_some() {
+                    return None;
+                }
+                ty.fallback = Some(Fallback::Value(value.clone()));
+                Some(ty)
+            }
+            // `Types.Array(T)`: `Strict(Array).of(T)`.
+            "Array" => {
+                let [member] = args.as_slice() else { return None };
+                let ExprNode::Const { path } = &*recv.node else { return None };
+                if !types_path(path, scope.owner, scope.types_modules, scope.names)?.is_empty() {
+                    return None;
+                }
+                let member = dry_type(member, scope)?;
+                plain(Base::ArrayOf { strict: true, member: Box::new(member) })
             }
             "of" => {
                 let [member] = args.as_slice() else { return None };
@@ -385,7 +503,7 @@ pub(super) fn dry_type(expr: &Expr, scope: &Scope<'_>) -> Option<DryType> {
                     ["Strict", "Array"] => true,
                     _ => return None,
                 };
-                let member = dry_type(member, scope)?;
+                let member = dry_type(member, scope).or_else(|| uncallable(member, scope))?;
                 plain(Base::ArrayOf { strict, member: Box::new(member) })
             }
             // `Types.Instance(X)`, `Types::Instance(X)`.
@@ -403,6 +521,26 @@ pub(super) fn dry_type(expr: &Expr, scope: &Scope<'_>) -> Option<DryType> {
         },
         _ => None,
     }
+}
+
+/// An app class written where a type belongs: not a `Types` path, a
+/// struct, or a constant.
+fn uncallable(expr: &Expr, scope: &Scope<'_>) -> Option<DryType> {
+    let ExprNode::Const { path } = &*expr.node else { return None };
+    if types_module_of(path, scope.owner, scope.types_modules, scope.names).is_some() {
+        return None;
+    }
+    let written: Vec<&str> = path.iter().map(|s| s.as_str()).filter(|s| !s.is_empty()).collect();
+    let name = written.join("::");
+    let full = if path.first().is_some_and(|s| s.as_str().is_empty()) {
+        scope.classes.contains(&name).then_some(name)?
+    } else {
+        resolve_in(scope.owner, &name, scope.classes)?
+    };
+    if scope.structs.contains_key(&full) || scope.constants.contains_key(&full) {
+        return None;
+    }
+    Some(DryType::of(Base::Uncallable(full)))
 }
 
 /// The part of `path` after a `Types` module: `Coercible::String` from
@@ -441,7 +579,12 @@ pub(super) fn types_module_of<'a>(
 ) -> Option<(String, BareNames, Vec<&'a str>)> {
     let absolute = path.first().is_some_and(|s| s.as_str().is_empty());
     let segments: Vec<&str> = path.iter().map(|s| s.as_str()).filter(|s| !s.is_empty()).collect();
-    let at = segments.iter().rposition(|s| *s == "Types")?;
+    // Inside a `Types` module's own body, a bare `String` is the one its
+    // `include Dry.Types()` brings in.
+    let Some(at) = segments.iter().rposition(|s| *s == "Types") else {
+        let (module, bare) = types_modules.iter().find(|(m, _)| m == owner).filter(|_| !absolute)?;
+        return Some((module.clone(), *bare, segments));
+    };
     let prefix = segments[..=at].join("::");
     let find = |full: &str| types_modules.iter().find(|(m, _)| m == full);
     let (module, bare) = if absolute {
@@ -673,6 +816,9 @@ pub(super) fn coerced(extra: &mut Gen, ty: &DryType, value: &str, key: &str) -> 
             "({value}.is_a?(::{class}) ? {value} : ({value}.is_a?(Hash) ? ::{class}.new({value}) : {fail}))"
         ),
         Base::Nominal => value.to_string(),
+        Base::Uncallable(class) => {
+            format!("raise(NoMethodError, \"undefined method 'call_unsafe' for class {class}\")")
+        }
         Base::ArrayOf { strict, member } => {
             let each = coerced(extra, member, "member", key);
             let mapped = format!("{value}.map {{ |member| {each} }}");
@@ -708,19 +854,63 @@ pub(super) fn coerced(extra: &mut Gen, ty: &DryType, value: &str, key: &str) -> 
         }
     };
     // The coerced value once, then checked and returned.
-    let inner = match &ty.enumeration {
-        Some(values) => {
-            let list = values.iter().map(crate::emit::ruby::emit_expr).collect::<Vec<_>>().join(", ");
-            let temp = format!("dry_struct_enum_{}", extra.temps);
-            extra.temps += 1;
-            format!("({temp} = {inner}\n[{list}].include?({temp}) ? {temp} : {fail})")
-        }
-        None => inner,
+    let temp = format!("dry_struct_enum_{}", extra.temps);
+    let mut checks = Vec::new();
+    if let Some(values) = &ty.enumeration {
+        let list = values.iter().map(crate::emit::ruby::emit_expr).collect::<Vec<_>>().join(", ");
+        checks.push(format!("[{list}].include?({temp})"));
+    }
+    for (name, arg) in &ty.constraints {
+        let arg = crate::emit::ruby::emit_expr(arg);
+        checks.push(match name.as_str() {
+            "gt" => format!("{temp} > ({arg})"),
+            "gteq" => format!("!({temp} < ({arg}))"),
+            "lt" => format!("{temp} < ({arg})"),
+            "lteq" => format!("!({temp} > ({arg}))"),
+            "min_size" => format!("{temp}.size >= ({arg})"),
+            "max_size" => format!("{temp}.size <= ({arg})"),
+            "size" => format!(
+                "(dry_logic_size = ({arg})\ndry_logic_size.is_a?(Integer) ? dry_logic_size.equal?({temp}.size) : dry_logic_size.include?({temp}.size))"
+            ),
+            "format" => format!("(!{temp}.nil? && ({arg}).match?({temp}))"),
+            "included_in" => format!("({arg}).include?({temp})"),
+            "excluded_from" => format!("!({arg}).include?({temp})"),
+            "eql" => format!("({arg}).eql?({temp})"),
+            // `filled: true`.
+            _ => format!(
+                "!(case {temp}\nwhen ::String, ::Array, ::Hash then {temp}.empty?\nwhen nil then true\nelse false\nend)"
+            ),
+        });
+    }
+    let inner = if checks.is_empty() {
+        inner
+    } else {
+        extra.temps += 1;
+        format!("({temp} = {inner}\n({}) ? {temp} : {fail})", checks.join(") && ("))
     };
-    if ty.optional {
+    let inner = if ty.optional {
         format!("({value}.nil? ? nil : ({inner}))")
     } else {
         inner
+    };
+    // Any failure of the type, a coercion or a check, gives the fallback.
+    match &ty.fallback {
+        None => inner,
+        Some(fallback) => {
+            let instead = match fallback {
+                Fallback::Value(v) => extra.missing_value(&DefaultValue::Value(v.clone())),
+                Fallback::Block { param, body } => {
+                    let name = format!("dry_struct_fallback_{}", extra.helpers.len());
+                    extra.helpers.push(format!(
+                        "  def self.{name}({})\n{}\n  end\n",
+                        param.as_ref().map_or("_input", |p| p.as_str()),
+                        crate::emit::ruby::emit_expr(body),
+                    ));
+                    format!("::{}.{name}({value})", extra.owner)
+                }
+            };
+            format!("(begin\n  {inner}\nrescue {error}\n  {instead}\nend)")
+        }
     }
 }
 

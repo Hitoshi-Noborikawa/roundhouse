@@ -1445,7 +1445,8 @@ fn report_sqlite_index_predicates(app: &App, target: BuildTarget) {
     }
 }
 
-/// The date and decimal coercions `ingest::dry_struct` generates call
+/// The date and decimal coercions `ingest::dry_struct` and
+/// `ingest::dry_initializer` generate call
 /// stdlib the CRuby and JRuby trees load. Spinel's tree has its own
 /// `Date` (`runtime/spinel/date.rb`, ISO `parse` included) and
 /// `BigDecimal()`, but no `DateTime`, `Time.parse` or
@@ -1462,21 +1463,21 @@ fn report_dry_struct_stdlib(app: &App, target: BuildTarget) {
         };
         let construct = match &*expr.node {
             ExprNode::Send { recv: Some(recv), method, .. } if method.as_str() == "parse" => match &*recv.node {
-                ExprNode::Const { path } if named(path) == ["Time"] => Some(("Time.parse", "Dry::Struct date coercion")),
+                ExprNode::Const { path } if named(path) == ["Time"] => Some(("Time.parse", "dry-types date coercion")),
                 _ => None,
             },
             ExprNode::Send { recv: Some(recv), method, .. } if method.as_str() == "interpret_loosely" => match &*recv.node {
                 ExprNode::Const { path } if named(path) == ["BigDecimal"] => {
-                    Some(("BigDecimal.interpret_loosely", "Dry::Struct decimal coercion"))
+                    Some(("BigDecimal.interpret_loosely", "dry-types decimal coercion"))
                 }
                 _ => None,
             },
             ExprNode::Send { recv: None, method, .. } if method.as_str() == "BigDecimal" && !spinel => {
-                Some(("BigDecimal()", "Dry::Struct decimal coercion"))
+                Some(("BigDecimal()", "dry-types decimal coercion"))
             }
-            ExprNode::Const { path } if named(path) == ["DateTime"] => Some(("DateTime", "Dry::Struct date coercion")),
+            ExprNode::Const { path } if named(path) == ["DateTime"] => Some(("DateTime", "dry-types date coercion")),
             ExprNode::Const { path } if named(path) == ["Date"] && !spinel => {
-                Some(("Date", "Dry::Struct date coercion"))
+                Some(("Date", "dry-types date coercion"))
             }
             _ => None,
         };
@@ -1491,7 +1492,10 @@ fn report_dry_struct_stdlib(app: &App, target: BuildTarget) {
         expr.node.for_each_child(&mut |child| visit(child, target));
     }
     for lc in &app.library_classes {
-        if lc.origin == Some(crate::dialect::LibraryClassOrigin::DryStruct) {
+        if matches!(
+            lc.origin,
+            Some(crate::dialect::LibraryClassOrigin::DryStruct | crate::dialect::LibraryClassOrigin::DryInitializer)
+        ) {
             for method in &lc.methods {
                 visit(&method.body, target);
             }

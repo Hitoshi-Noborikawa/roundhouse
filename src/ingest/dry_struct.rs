@@ -81,6 +81,13 @@ pub(super) fn lower_dry_structs(app: &mut App, sources: &[crate::span::SourceFil
     inline_attributes_from(app, &parent_of);
     let mut names: HashSet<String> =
         app.library_classes.iter().map(|lc| lc.name.0.as_str().to_string()).collect();
+    // The app's own classes, which an `Array.of` may name in place of a type.
+    let classes: HashSet<String> = app
+        .models
+        .iter()
+        .map(|m| m.name.0.as_str().to_string())
+        .chain(app.library_classes.iter().map(|lc| lc.name.0.as_str().to_string()))
+        .collect();
     let constants: HashMap<String, Expr> = app
         .library_classes
         .iter()
@@ -110,6 +117,7 @@ pub(super) fn lower_dry_structs(app: &mut App, sources: &[crate::span::SourceFil
             names: &names,
             structs: &parent_of,
             constants: &constants,
+            classes: &classes,
             depth: 0,
         };
         let s = match read_struct(lc, &scope) {
@@ -193,8 +201,8 @@ pub(super) fn lower_dry_structs(app: &mut App, sources: &[crate::span::SourceFil
         }
         let Some((mut methods, generated)) = built.remove(&name) else { continue };
         lc.unknown_calls.retain(|call| !is_struct_declaration(call));
-        // Dry-type constants are stripped app-wide after both lowerings once the Class-safe
-        // shell is emitted; keep generated non-type constants (shared defaults).
+        // Dry-type constants are stripped app-wide after both lowerings;
+        // keep generated non-type constants (shared defaults).
         lc.constants.extend(generated);
         lc.origin = Some(crate::dialect::LibraryClassOrigin::DryStruct);
         methods.append(&mut lc.methods);
@@ -217,11 +225,10 @@ pub(super) fn lower_dry_structs(app: &mut App, sources: &[crate::span::SourceFil
     // With that shell, nothing left on dry-types can run: refused subclasses
     // do not replay gem DSL, and lowered bodies bake coercions into
     // `initialize`. Refused files may still `require_relative` a `Types`
-    // module (Const refs in dropped calls), so dry-type constants must be
-    // stripped whenever the shell is emitted (`dry_initializer::drop_unused_type_constants`,
-    // after the initializer lowering has read them) — otherwise
-    // `Types.Constructor` / `Types::Coercible::…` crash the boot of the
-    // whole `models.rb` load, including lowered siblings.
+    // module (Const refs in dropped calls), so dry-type constants are
+    // stripped after both lowerings (`dry_initializer::drop_type_constants`)
+    // — otherwise `Types.Constructor` / `Types::Coercible::…` crash the
+    // boot of the whole `models.rb` load, including lowered siblings.
     if any {
         app.library_classes.extend(error_classes());
     }

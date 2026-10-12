@@ -22,12 +22,15 @@
 //! instance variable the gem's `UNDEFINED` when the app reads that), and
 //! otherwise raises `KeyError`. Type failures raise dry-types' own
 //! `CoercionError`/`ConstraintError`, which the gem lets through. Unknown
-//! keys are ignored, as the gem ignores them. A subclass's options follow
-//! its parent's.
+//! keys are ignored, as the gem ignores them; `required: true` drops the
+//! default and `optional:`; a type's own `.default` is never reached. A
+//! subclass's options follow its parent's, and one declared again
+//! replaces the earlier where it stood: that class assigns the whole
+//! hierarchy itself.
 //!
 //! Checked against dry-initializer 3.2. A class defining its own
-//! `initialize` where one is generated, redeclaring a parent's option,
-//! declaring a `param` that may be left out, or declaring anything not
+//! `initialize` where one is generated, redeclaring a param, declaring a
+//! `param` that may be left out, or declaring anything not
 //! modeled here is left as it was, ledgered, with its whole hierarchy, as
 //! under `Dry::Struct`: a refused class under a lowered ancestor would
 //! inherit a constructor that ignores its own options. The refused classes
@@ -42,11 +45,12 @@ use crate::expr::{Expr, ExprNode, Literal};
 use crate::ident::{ClassId, Symbol};
 
 use super::dry_types::{
-    BareNames, Base, DryType, Gen, Scope, coerced, dry_type, resolve, types_modules,
+    Base, DryType, Gen, Scope, coerced, dry_type, resolve, types_modules,
 };
 use super::{IngestError, survey};
 
 /// One `param` or `option`.
+#[derive(Clone)]
 struct Declared {
     /// The key it is read from, and its index among the hierarchy's params.
     name: Symbol,
@@ -80,6 +84,13 @@ pub(super) fn lower_dry_initializers(app: &mut App, sources: &[crate::span::Sour
                     .map(move |(n, _)| format!("{}::{}", lc.name.0.as_str(), n.as_str())),
             )
         })
+        .collect();
+    // The app's own classes, which an `Array.of` may name in place of a type.
+    let classes: HashSet<String> = app
+        .models
+        .iter()
+        .map(|m| m.name.0.as_str().to_string())
+        .chain(app.library_classes.iter().map(|lc| lc.name.0.as_str().to_string()))
         .collect();
     let constants: HashMap<String, Expr> = app
         .library_classes
@@ -157,18 +168,15 @@ pub(super) fn lower_dry_initializers(app: &mut App, sources: &[crate::span::Sour
             .iter()
             .find(|lc| lc.name.0.as_str() == name)
             .expect("listed");
-        let inherited: Vec<&Declared> = chain_of(name)
-            .iter()
-            .filter(|n| *n != name)
-            .filter_map(|n| read.get(n))
-            .flatten()
-            .collect();
+        let ancestors: Vec<String> = chain_of(name).into_iter().filter(|n| n != name).collect();
+        let inherited = effective(&ancestors, &read);
         let scope = Scope {
             types_modules: &types_modules,
             owner: name,
             names: &names,
             structs: &structs,
             constants: &constants,
+            classes: &classes,
             depth: 0,
         };
         match read_class(lc, &scope, &inherited, parent_of[name].is_none()) {
@@ -199,20 +207,17 @@ pub(super) fn lower_dry_initializers(app: &mut App, sources: &[crate::span::Sour
         if chain_of(name).iter().any(|n| refused.contains(n)) {
             continue;
         }
-        let inherited = chain_of(name)
-            .iter()
-            .filter(|n| *n != name)
-            .filter_map(|n| read.get(n))
-            .flatten()
-            .filter(|d| d.param.is_some())
-            .count();
-        let source = synthesized_source(
-            name,
-            declared,
-            inherited,
-            parent_of[name].is_none(),
-            sentinel,
-        );
+        let ancestors: Vec<String> = chain_of(name).into_iter().filter(|n| n != name).collect();
+        let inherited = effective(&ancestors, &read);
+        // A class redeclaring an ancestor's option assigns the whole
+        // hierarchy itself: the ancestor's would refuse what it now allows.
+        let source = if declared.iter().any(|d| inherited.iter().any(|i| i.name == d.name)) {
+            let all: Vec<Declared> = effective(&chain_of(name), &read).into_iter().cloned().collect();
+            synthesized_source(name, &all, 0, true, sentinel)
+        } else {
+            let params = inherited.iter().filter(|d| d.param.is_some()).count();
+            synthesized_source(name, declared, params, parent_of[name].is_none(), sentinel)
+        };
         let (parsed, diags) = crate::ingest::prism::scope(|| {
             crate::ingest::ingest_library_classes(source.as_bytes(), "<dry_initializer>")
         });
@@ -267,6 +272,7 @@ pub(super) fn lower_dry_initializers(app: &mut App, sources: &[crate::span::Sour
         methods.append(&mut lc.methods);
         lc.methods = methods;
         lc.constants.extend(generated);
+        lc.origin = Some(LibraryClassOrigin::DryInitializer);
         any = true;
     }
     // The gem is never emitted, and a refused hierarchy's declarations
@@ -283,19 +289,13 @@ fn reads_undefined(expr: &Expr) -> bool {
     found
 }
 
-/// After both lowerings: once nothing builds a dry type any more, the
-/// constants still holding one go, app-wide. The `Types` modules are not
-/// emitted, so such a constant would fail the load; while anything is left
-/// on the gems it stays, since that may name it. Under the `Dry::Struct`
-/// shell nothing left on the gems can run, so they go regardless; not
-/// before this point, since the initializer lowering reads them.
-pub(super) fn drop_unused_type_constants(app: &mut App, sources: &[crate::span::SourceFile]) {
+/// After both lowerings, the constants holding a dry type go, app-wide.
+/// The gems are never emitted, so such a constant would fail the load of
+/// everything after it, lowered or not; a class left on the gems cannot
+/// run either way. Not before this point: the lowerings read them.
+pub(super) fn drop_type_constants(app: &mut App, sources: &[crate::span::SourceFile]) {
     let types_modules = types_modules(sources);
-    let struct_shell = app
-        .library_classes
-        .iter()
-        .any(|lc| lc.origin == Some(LibraryClassOrigin::DryStruct));
-    if types_modules.is_empty() || (!struct_shell && uses_dry_types(app, &types_modules)) {
+    if types_modules.is_empty() {
         return;
     }
     let names: HashSet<String> = app
@@ -364,10 +364,14 @@ fn read_class(
                     .unwrap_or_default()
             )
         })?;
-        if inherited
+        // An option declared again replaces the earlier one in place, as
+        // the gem does; a param keeps its position, so it may not be.
+        if let Some(earlier) = inherited
             .iter()
-            .chain(declared.iter().collect::<Vec<_>>().iter())
-            .any(|o| o.name == d.name)
+            .copied()
+            .chain(declared.iter())
+            .find(|o| o.name == d.name)
+            && (earlier.param.is_some() || is_param)
         {
             return Err(format!("`{}` declared again", d.name.as_str()));
         }
@@ -383,7 +387,10 @@ fn read_class(
             }),
             ..d
         };
-        declared.push(d);
+        match declared.iter_mut().find(|o| o.name == d.name) {
+            Some(earlier) => *earlier = d,
+            None => declared.push(d),
+        }
     }
     // The gem's constructor sits in a module, under any the class writes;
     // the lowered one is the class's own, so only a class that gets none
@@ -392,7 +399,8 @@ fn read_class(
         .methods
         .iter()
         .any(|m| m.receiver == MethodReceiver::Instance && m.name.as_str() == "initialize");
-    if own_initialize && (is_root || declared.iter().any(|d| d.param.is_some())) {
+    let redeclares = declared.iter().any(|d| inherited.iter().any(|i| i.name == d.name));
+    if own_initialize && (is_root || redeclares || declared.iter().any(|d| d.param.is_some())) {
         return Err("the class defines its own `initialize`".into());
     }
     Ok(declared)
@@ -419,6 +427,7 @@ fn read_declaration(args: &[Expr], scope: &Scope<'_>) -> Result<Declared, String
         optional: false,
         reader: Reader::Public,
     };
+    let mut required = false;
     let mut type_expr = match positional.as_slice() {
         [] => None,
         [ty] => Some(*ty),
@@ -432,6 +441,7 @@ fn read_declaration(args: &[Expr], scope: &Scope<'_>) -> Result<Declared, String
             let key = sym(key).ok_or("a computed option")?;
             match key.as_str() {
                 "type" if type_expr.is_none() => type_expr = Some(value),
+                "type" => return Err("two types".into()),
                 "optional" => match &*value.node {
                     ExprNode::Lit {
                         value: Literal::Bool { value },
@@ -465,7 +475,14 @@ fn read_declaration(args: &[Expr], scope: &Scope<'_>) -> Result<Declared, String
                         _ => return Err("a computed `reader:`".into()),
                     }
                 }
-                other => return Err(format!("`{other}:`")),
+                "required" => match &*value.node {
+                    ExprNode::Lit {
+                        value: Literal::Bool { value },
+                    } => required = *value,
+                    _ => return Err("`required:` that is not true or false".into()),
+                },
+                // The gem ignores keys it has no dispatcher for.
+                _ => {}
             }
         }
     }
@@ -473,33 +490,41 @@ fn read_declaration(args: &[Expr], scope: &Scope<'_>) -> Result<Declared, String
         d.ty = Some(match callable_body(ty) {
             // `proc { |v| ... }`, `->(v) { ... }`: called with the value. It
             // was written in the class body, whose self the helper keeps.
-            Some((Some(param), body)) => DryType {
-                base: Base::Constructor {
-                    param,
-                    body,
-                    then: Box::new(DryType {
-                        base: Base::Nominal,
-                        optional: false,
-                        default: None,
-                        enumeration: None,
-                        omittable: false,
-                    }),
-                },
-                optional: false,
-                default: None,
-                enumeration: None,
-                omittable: false,
-            },
+            Some((Some(param), body)) => DryType::of(Base::Constructor {
+                param,
+                body,
+                then: Box::new(DryType::of(Base::Nominal)),
+            }),
             Some((None, _)) => return Err("a type block without a parameter".into()),
             None => dry_type(ty, scope)
                 .ok_or_else(|| format!("type `{}`", crate::emit::ruby::emit_expr(ty)))?,
         });
-        // A dry type's own `.default` is not the option's.
-        if d.ty.as_ref().is_some_and(|t| t.default.is_some()) {
-            return Err("a type with its own `.default`".into());
+        // A dry type's own `.default` answers only an absent input, which
+        // the gem never hands it: a given value goes through, a missing
+        // one is the option's business.
+        if let Some(ty) = d.ty.as_mut() {
+            ty.default = None;
         }
     }
+    // `required: true` overrides `default:` and `optional:`.
+    if required {
+        d.default = None;
+        d.optional = false;
+    }
     Ok(d)
+}
+
+/// What `chain` (root first) declares, a later option replacing an
+/// earlier one of the same name where it stood.
+fn effective<'a>(chain: &[String], read: &'a HashMap<String, Vec<Declared>>) -> Vec<&'a Declared> {
+    let mut out: Vec<&Declared> = Vec::new();
+    for d in chain.iter().filter_map(|n| read.get(n)).flatten() {
+        match out.iter_mut().find(|o| o.name == d.name) {
+            Some(slot) => *slot = d,
+            None => out.push(d),
+        }
+    }
+    out
 }
 
 /// `-> { }`, `proc { }`, `lambda { }`: its one parameter, if any, and its
@@ -627,62 +652,6 @@ fn synthesized_source(
     out.push_str(&assign);
     out.push_str("    self\n  end\nend\n");
     out
-}
-
-/// Whether anything left in the app still builds a dry type or depends on
-/// the gems: a `Dry::Struct` or `Dry::Initializer` class not lowered, a
-/// `Types` module read in a method or class body, `Dry::Types[...]` or
-/// `Dry.Types()`. A constant holding a type is not a use (it goes with
-/// the rest), nor is a rescue of `Dry::Types::CoercionError` (that is what
-/// the stand-in is for).
-fn uses_dry_types(app: &App, types_modules: &[(String, BareNames)]) -> bool {
-    let names: HashSet<String> = app
-        .library_classes
-        .iter()
-        .map(|lc| lc.name.0.as_str().to_string())
-        .collect();
-    let plain = super::dry_types::plain_constants(&app.library_classes, types_modules, &names);
-    fn builds(
-        expr: &Expr,
-        holder: &str,
-        types_modules: &[(String, BareNames)],
-        names: &HashSet<String>,
-        plain: &HashSet<String>,
-    ) -> bool {
-        let own = match &*expr.node {
-            ExprNode::Send {
-                recv: Some(recv),
-                method,
-                ..
-            } => {
-                (method.as_str() == "[]" && is_const(recv, "Dry::Types"))
-                    || (method.as_str() == "Types" && is_const(recv, "Dry"))
-            }
-            _ => false,
-        } || super::dry_types::holds_dry_type(expr, holder, types_modules, names, plain);
-        let mut found = own;
-        expr.node
-            .for_each_child(&mut |c| found |= builds(c, holder, types_modules, names, plain));
-        found
-    }
-    app.library_classes.iter().any(|lc| {
-        let holder = lc.name.0.as_str();
-        // A `Types` module's own `include Dry.Types()` is not emitted.
-        if types_modules.iter().any(|(m, _)| m == holder) {
-            return false;
-        }
-        lc.parent
-            .as_ref()
-            .is_some_and(|p| p.0.as_str().trim_start_matches("::") == "Dry::Struct")
-            || lc
-                .unknown_calls
-                .iter()
-                .any(|c| extends_initializer(c) || builds(c, holder, types_modules, &names, &plain))
-            || lc
-                .methods
-                .iter()
-                .any(|m| builds(&m.body, holder, types_modules, &names, &plain))
-    })
 }
 
 /// dry-types' error classes, which the lowered constructors raise and an
