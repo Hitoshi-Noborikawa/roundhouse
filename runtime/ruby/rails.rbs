@@ -10,6 +10,7 @@ module Rails
   def self.logger: () -> Rails::Logger
   def self.log_line: (String line) -> void
   def self.error: () -> ActiveSupport::ErrorReporter
+  def self.event: () -> ActiveSupport::EventReporter
   def self.application: () -> Application
 
   class AppPath
