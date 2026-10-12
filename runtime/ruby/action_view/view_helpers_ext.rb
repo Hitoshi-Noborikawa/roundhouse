@@ -52,8 +52,9 @@ module ActionView
 
     # Rails `class_names` (alias of `token_list`): strings/arrays add
     # their tokens, hash entries contribute their key when the value is
-    # truthy (`class_names("nav", current_page: cur == path)`), nil and
-    # blank tokens drop. Joined with single spaces.
+    # truthy (`class_names("nav", current_page: cur == path)`), nested
+    # arrays recurse, and nil, false and blank tokens drop. Joined with
+    # single spaces.
     def self.class_names(*args)
       tokens = []
       args.each do |arg|
@@ -63,11 +64,9 @@ module ActionView
             tokens << key if v && !key.strip.empty?
           end
         elsif arg.is_a?(Array)
-          arg.each do |a|
-            s = a.to_s
-            tokens << s unless s.strip.empty?
-          end
-        elsif !arg.nil?
+          s = class_names(*arg)
+          tokens << s unless s.empty?
+        elsif arg
           s = arg.to_s
           tokens << s unless s.strip.empty?
         end

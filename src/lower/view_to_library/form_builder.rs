@@ -2305,6 +2305,7 @@ fn simplify_class_array(v: &Expr) -> Expr {
                     tokens.push((value.clone(), None));
                 }
             }
+            ExprNode::Lit { value: Literal::Bool { value: false } | Literal::Nil } => {}
             ExprNode::Hash { entries, .. } => {
                 for (k, val) in entries {
                     let key = match &*k.node {
@@ -2348,7 +2349,6 @@ fn simplify_class_array(v: &Expr) -> Expr {
     string_interp(parts)
 }
 
-// `class_names` reads a nested array's elements with `to_s`, so a hash inside one must arrive as its own argument
 fn flatten_class_pieces(v: &Expr, out: &mut Vec<Expr>) {
     match &*v.node {
         ExprNode::Array { elements, .. } => {

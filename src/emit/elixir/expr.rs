@@ -1168,7 +1168,7 @@ fn emit_send(recv: Option<&Expr>, method: &str, args: &[Expr]) -> String {
     // An element that is never nil or false makes `any?` / `none?` a question of size
     if matches!(method, "any?" | "none?") && args.is_empty() {
         if let Some(r) = recv.filter(|r| {
-            matches!(r.ty.as_ref(), Some(crate::ty::Ty::Array { elem }) if matches!(**elem, crate::ty::Ty::Str | crate::ty::Ty::Int | crate::ty::Ty::Float | crate::ty::Ty::Sym))
+            matches!(effective_recv_ty(r), Some(crate::ty::Ty::Array { elem }) if matches!(*elem, crate::ty::Ty::Str | crate::ty::Ty::Int | crate::ty::Ty::Float | crate::ty::Ty::Sym))
         }) {
             let empty = format!("Enum.empty?({})", emit_expr(r));
             return if method == "none?" { empty } else { format!("not {empty}") };
