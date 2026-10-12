@@ -93,3 +93,97 @@ fn unrequired_or_nonliteral_external_includes_remain_unresolved() {
     );
     assert!(statically_resolved_external_includes(&conditional).is_empty());
 }
+
+#[test]
+fn include_only_class_without_superclass_still_resolves() {
+    // No superclass → synthetic parent_span; no methods → no method spans.
+    // Source must still be recovered so the literal require can resolve.
+    let app = app(
+        "require \"rouge/plugins/redcarpet\"\n\
+         class MarkdownRenderer\n\
+           include Rouge::Plugins::Redcarpet\n\
+         end\n",
+    );
+    let resolved = statically_resolved_external_includes(&app);
+    assert_eq!(
+        resolved.get("MarkdownRenderer includes unresolved Rouge::Plugins::Redcarpet"),
+        Some(&vec!["rouge/plugins/redcarpet".to_string()]),
+        "include-only / no-superclass class must not silently stay unresolved"
+    );
+}
+
+#[test]
+fn locked_wiring_is_cruby_only() {
+    let app = app(
+        "require \"rouge/plugins/redcarpet\"\n\
+         class MarkdownRenderer < Redcarpet::Render::HTML\n\
+           include Rouge::Plugins::Redcarpet\n\
+         end\n",
+    );
+
+    let jruby = project::target_files(&app, &PathBuf::from("."), BuildTarget::Jruby)
+        .expect("emit JRuby project");
+    let jruby_gemfile = jruby
+        .iter()
+        .find(|(path, _)| path == "Gemfile")
+        .map(|(_, c)| c.as_str())
+        .unwrap_or("");
+    assert!(
+        !jruby_gemfile.contains("gem \"rouge\""),
+        "JRuby must not receive locked external-gem Gemfile pins:\n{jruby_gemfile}"
+    );
+    let jruby_boot = jruby
+        .iter()
+        .find(|(path, _)| path == "boot.rb")
+        .map(|(_, c)| c.as_str())
+        .unwrap_or("");
+    assert!(
+        !jruby_boot.contains("require \"rouge\""),
+        "JRuby must not receive locked external-gem boot requires:\n{jruby_boot}"
+    );
+}
+
+#[test]
+fn locked_wiring_rewrites_unpinned_runtime_gem_overlap() {
+    // `parslet` is both RUNTIME_GEMS (unpinned `gem "parslet"`) and Unknown
+    // in the lock — locked wiring must rewrite the bare line to `= version`
+    // before deleting Gemfile.lock.
+    let files = [
+        (
+            "Gemfile.lock",
+            "GEM\n  specs:\n    parslet (2.0.0)\n\nDEPENDENCIES\n  parslet\n",
+        ),
+        (
+            "app/models/search_parser.rb",
+            "class SearchParser < Parslet::Parser\nend\n",
+        ),
+    ];
+    let tree: HashMap<PathBuf, Vec<u8>> = files
+        .into_iter()
+        .map(|(path, source)| (PathBuf::from(path), source.as_bytes().to_vec()))
+        .collect();
+    let app = ingest_app_from_tree(tree).expect("ingest parslet app");
+    let emitted = project::target_files(&app, &PathBuf::from("."), BuildTarget::Ruby)
+        .expect("emit Ruby project");
+    let gemfile = emitted
+        .iter()
+        .find(|(path, _)| path == "Gemfile")
+        .expect("generated Gemfile");
+    assert!(
+        gemfile.1.contains("gem \"parslet\", \"= 2.0.0\""),
+        "unpinned RUNTIME_GEMS overlap must be rewritten to the lock pin:\n{}",
+        gemfile.1
+    );
+    assert!(
+        !gemfile
+            .1
+            .lines()
+            .any(|line| line.trim() == "gem \"parslet\""),
+        "bare unpinned parslet line must not survive:\n{}",
+        gemfile.1
+    );
+    assert!(
+        !emitted.iter().any(|(path, _)| path == "Gemfile.lock"),
+        "scaffold lock is removed after pins are authored"
+    );
+}

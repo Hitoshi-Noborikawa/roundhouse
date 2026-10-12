@@ -54,6 +54,11 @@ pub struct Lockfile {
     /// analyzed like the rest of the app rather than being a boundary.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub in_repo: Vec<String>,
+    /// Specs resolved from a `GIT` source. Emitting a rubygems.org
+    /// `gem "name", "= version"` pin would lie about their origin — the
+    /// locked-external wiring path skips these fail-closed.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub from_git: Vec<String>,
 }
 
 impl Lockfile {
@@ -90,6 +95,8 @@ impl Lockfile {
                         lock.specs.push((name.to_string(), version.to_string()));
                         if section == "PATH" {
                             lock.in_repo.push(name.to_string());
+                        } else if section == "GIT" {
+                            lock.from_git.push(name.to_string());
                         }
                     }
                 }
@@ -117,6 +124,11 @@ impl Lockfile {
     /// Does `name` live in this repository (a `PATH` source)?
     pub fn is_in_repo(&self, name: &str) -> bool {
         self.in_repo.iter().any(|n| n == name)
+    }
+
+    /// Is `name` resolved from a `GIT` source?
+    pub fn is_from_git(&self, name: &str) -> bool {
+        self.from_git.iter().any(|n| n == name)
     }
 
     pub fn version_of(&self, name: &str) -> Option<&str> {
@@ -608,22 +620,7 @@ pub fn statically_resolved_external_includes(
     let census = GemCensus::of(lock);
     let mut resolved = std::collections::BTreeMap::new();
     for class in &app.library_classes {
-        let source = class
-            .parent_span
-            .file
-            .0
-            .checked_sub(1)
-            .and_then(|index| app.sources.get(index as usize))
-            .or_else(|| {
-                class.methods.iter().find_map(|method| {
-                    method
-                        .name_span
-                        .file
-                        .0
-                        .checked_sub(1)
-                        .and_then(|index| app.sources.get(index as usize))
-                })
-            });
+        let source = source_for_library_class(app, class);
         let Some(source) = source else { continue };
         for included in &class.includes {
             let Some(gem) = gem_owning_constant(&census, included.0.as_str()) else {
@@ -651,6 +648,80 @@ pub fn statically_resolved_external_includes(
         }
     }
     resolved
+}
+
+/// Defining source for a library class when scanning for literal requires.
+/// Prefer a real superclass / method / body span; include-only classes with
+/// no superclass leave `parent_span` synthetic (`file.0 == 0`), so fall back
+/// to a source file that declares the class or module by name.
+fn source_for_library_class<'a>(
+    app: &'a crate::App,
+    class: &crate::dialect::LibraryClass,
+) -> Option<&'a crate::span::SourceFile> {
+    let from_file = |file: crate::span::FileId| {
+        file.0
+            .checked_sub(1)
+            .and_then(|index| app.sources.get(index as usize))
+    };
+    from_file(class.parent_span.file)
+        .or_else(|| {
+            class
+                .methods
+                .iter()
+                .find_map(|method| from_file(method.name_span.file))
+        })
+        .or_else(|| {
+            class
+                .unknown_calls
+                .iter()
+                .find_map(|call| from_file(call.span.file))
+        })
+        .or_else(|| {
+            class
+                .constants
+                .iter()
+                .find_map(|(_, expr)| from_file(expr.span.file))
+        })
+        .or_else(|| {
+            class
+                .class_ivar_initializers
+                .iter()
+                .find_map(|expr| from_file(expr.span.file))
+        })
+        .or_else(|| source_declaring_class(app, class.name.0.as_str()))
+}
+
+fn source_declaring_class<'a>(
+    app: &'a crate::App,
+    class_name: &str,
+) -> Option<&'a crate::span::SourceFile> {
+    let leaf = class_name.rsplit("::").next().unwrap_or(class_name);
+    let candidates = [class_name, leaf];
+    app.sources.iter().find(|source| {
+        source.text.lines().any(|line| {
+            let trimmed = line.trim_start();
+            candidates.iter().any(|name| {
+                for keyword in ["class ", "module "] {
+                    let Some(rest) = trimmed.strip_prefix(keyword) else {
+                        continue;
+                    };
+                    if rest == *name {
+                        return true;
+                    }
+                    if let Some(after) = rest.strip_prefix(name) {
+                        let boundary = after
+                            .chars()
+                            .next()
+                            .is_none_or(|c| !c.is_alphanumeric() && c != '_' && c != ':');
+                        if boundary {
+                            return true;
+                        }
+                    }
+                }
+                false
+            })
+        })
+    })
 }
 
 /// Namespaces owned by unknown gems that are pinned in this app's lockfile.
@@ -915,6 +986,10 @@ GEM
 ";
         assert_eq!(lock_path_remotes(lock), vec!["lib/billing", "../shared"]);
         assert!(lock_path_remotes(LOCK).is_empty());
+        let parsed = Lockfile::parse(lock);
+        assert!(parsed.is_from_git("widgets"));
+        assert!(!parsed.is_from_git("billing"));
+        assert!(parsed.is_in_repo("billing"));
     }
 }
 

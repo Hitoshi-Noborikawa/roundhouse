@@ -3314,7 +3314,12 @@ fn ruby_family_runtime_files(
     apply_cable_strip(&mut files, app)?;
     apply_makefile_test_list_stems(&mut files, &test_stems);
     apply_runtime_gem_wiring(&mut files);
-    apply_locked_external_gem_wiring(&mut files, app);
+    // Namespaces / feature requires land only on CRuby (`target_files`
+    // wraps `with_external_gem_namespaces` for `BuildTarget::Ruby` alone).
+    // JRuby must not get Gemfile pins + boot requires without that path.
+    if flavor == RubyFlavor::CRuby {
+        apply_locked_external_gem_wiring(&mut files, app);
+    }
     // AGAIN, on purpose, and this time PERFORMING them. `spinel_files`
     // appended a commented-out block to the spinel tree's boot.rb (that
     // target cannot perform a mixin — see `apply_module_mixins`), and the
@@ -6718,6 +6723,11 @@ fn apply_locked_external_gem_wiring(files: &mut Vec<(String, String)>, app: &App
     let needed: Vec<_> = census
         .unknown()
         .filter(|gem| {
+            // Fail-closed: a GIT-sourced unknown must not be rewritten as a
+            // rubygems.org name/version pin.
+            if lock.is_from_git(&gem.name) {
+                return false;
+            }
             let namespace = crate::gems::namespace_of(&gem.name);
             files.iter().any(|(path, content)| {
                 (path.starts_with("app/") || path.starts_with("lib/"))
@@ -6739,20 +6749,22 @@ fn apply_locked_external_gem_wiring(files: &mut Vec<(String, String)>, app: &App
         if namespace == gem.name {
             eager_requires.push(gem.name.clone());
         }
-        if gemfile.contains(&format!("gem {:?}", gem.name)) {
+        let version = gem.version.as_deref();
+        let pinned = match version {
+            Some(v) => format!("gem {:?}, \"= {v}\"", gem.name),
+            None => format!("gem {:?}", gem.name),
+        };
+        if gemfile_declares_exact(gemfile, &gem.name, version) {
             continue;
         }
-        let version = gem
-            .version
-            .as_deref()
-            .map(|version| format!(", \"= {version}\""))
-            .unwrap_or_default();
+        if rewrite_gemfile_declaration(gemfile, &gem.name, &pinned) {
+            continue;
+        }
         if !gemfile.ends_with('\n') {
             gemfile.push('\n');
         }
         gemfile.push_str(&format!(
-            "\n# Required by emitted application constants.\ngem {:?}{version}\n",
-            gem.name
+            "\n# Required by emitted application constants.\n{pinned}\n"
         ));
     }
     if let Some((_, boot)) = files.iter_mut().find(|(path, _)| path == "boot.rb") {
@@ -6766,6 +6778,48 @@ fn apply_locked_external_gem_wiring(files: &mut Vec<(String, String)>, app: &App
         }
     }
     files.retain(|(path, _)| path != "Gemfile.lock");
+}
+
+/// True when `Gemfile` already has `gem "name"` or `gem "name", "= ver"`.
+fn gemfile_declares_exact(gemfile: &str, name: &str, version: Option<&str>) -> bool {
+    let want = match version {
+        Some(v) => format!("gem {name:?}, \"= {v}\""),
+        None => format!("gem {name:?}"),
+    };
+    gemfile.lines().any(|line| {
+        let trimmed = line.trim();
+        trimmed == want || trimmed.starts_with(&format!("{want} #")) || trimmed.starts_with(&format!("{want}\t#"))
+    })
+}
+
+/// Rewrite an existing `gem "name"` / `gem "name", …` line to `pinned`.
+/// Returns true when a declaration was found and updated.
+fn rewrite_gemfile_declaration(gemfile: &mut String, name: &str, pinned: &str) -> bool {
+    let marker = format!("gem {name:?}");
+    let Some(line_start) = gemfile.find(&marker).map(|idx| {
+        gemfile[..idx].rfind('\n').map(|n| n + 1).unwrap_or(0)
+    }) else {
+        return false;
+    };
+    let line_end = gemfile[line_start..]
+        .find('\n')
+        .map(|i| line_start + i)
+        .unwrap_or(gemfile.len());
+    let line = &gemfile[line_start..line_end];
+    let trimmed = line.trim_start();
+    if !trimmed.starts_with(&marker) {
+        return false;
+    }
+    let indent_len = line.len() - trimmed.len();
+    let indent = &line[..indent_len];
+    let comment = trimmed
+        .find(" #")
+        .or_else(|| trimmed.find("\t#"))
+        .map(|i| &trimmed[i..])
+        .unwrap_or("");
+    let replacement = format!("{indent}{pinned}{comment}");
+    gemfile.replace_range(line_start..line_end, &replacement);
+    true
 }
 
 /// The prebuilt JS bundles that arrive from a gem rather than from the
