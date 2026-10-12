@@ -2435,11 +2435,14 @@ module ActiveRecord
     # where each liftable mark was, `inline` has the literal, and each
     # pair says how to bind one placeholder, in order — "i" an integer,
     # "s" a string. A mark holding any other literal (NULL, a float,
-    # an X'' blob) stays inline in both. String literals and comments,
-    # where inline user text can sit, are copied whole, so a control
-    # byte inside one is never read as a mark. Quoted identifiers are
-    # not: they name schema columns, and skipping the fifty in a model's
-    # column list doubled the cost of every hydrating read.
+    # an X'' blob) stays inline in both. String literals, quoted
+    # identifiers and comments, where inline user text can sit, are
+    # copied whole, so a control byte inside one is never read as a
+    # mark. The fast path below still skips quoted identifiers (a
+    # model's column list has dozens; scanning each doubled the cost of
+    # every hydrating read) — the scan path must still honor them so a
+    # `--` or `/*` inside `"…"` is not treated as a comment that
+    # swallows later marks (sql_identifiers InjectionPurchase).
     def self.lift_binds(sql)
       # Fast path: split at the marks, and know each mark sits outside a
       # string literal because the text before it holds an even number
@@ -2488,16 +2491,18 @@ module ActiveRecord
       n
     end
 
-    # The general lift: a scan that copies string literals and comments
-    # whole.
+    # The general lift: a scan that copies string literals, quoted
+    # identifiers and comments whole.
     def self.lift_binds_scan(sql)
       out = ["", ""]
       bound = []
       inline = []
       # Each token's next position is searched once and reused until the
-      # scan passes it: one pass over the text per token kind.
-      toks = ["'", "\x01", "--", "/*"]
-      nexts = [-1, -1, -1, -1]
+      # scan passes it: one pass over the text per token kind. `"` is
+      # required so `--` / `/*` inside a quoted identifier are not
+      # comments (see lift_binds); the fast path omits it on purpose.
+      toks = ["'", "\"", "\x01", "--", "/*"]
+      nexts = [-1, -1, -1, -1, -1]
       i = 0
       n = sql.length
       while i < n
@@ -2547,8 +2552,8 @@ module ActiveRecord
       out
     end
 
-    # One past the end of the string literal or comment opening at `j`
-    # (a doubled quote stays inside the literal).
+    # One past the end of the string literal, quoted identifier, or
+    # comment opening at `j` (a doubled quote stays inside the token).
     def self.sql_token_end(sql, j, ch, n)
       if ch == "-"
         nl = sql.index("\n", j)

@@ -1841,6 +1841,13 @@ module Db
   # itself (NUL-terminated).
   def self.prepare(sql)
     return prepare_marked(sql) if sql.include?("\x01")
+    prepare_plain(sql)
+  end
+
+  # Prepare without re-entering prepare_marked. Post-lift SQL may still
+  # contain \x01 inside string literals (unmarked bind_literal values);
+  # those bytes are data and must not be stripped or re-dispatched.
+  def self.prepare_plain(sql)
     conn = current_conn
     handle = conn.qc_lookup(sql)
     if handle != 0
@@ -1866,7 +1873,7 @@ module Db
     binds = ActiveRecord::Relation.lift_binds(marked)
     sql = binds[0].to_s
     key = binds[1].to_s
-    return prepare(key) if binds.length <= 2
+    return prepare_plain(key) if binds.length <= 2
     conn = current_conn
     handle = conn.qc_lookup(key)
     if handle != 0
