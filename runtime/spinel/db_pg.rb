@@ -1022,7 +1022,10 @@ module Db
   # `?` the lift writes, so it runs with its values written in, as it
   # did before binding.
   def self.prepare_marked(marked)
-    prepare(ActiveRecord::Relation.inline_sql(marked))
+    inlined = ActiveRecord::Relation.inline_sql(marked)
+    # Surviving marks would re-enter prepare_marked via prepare.
+    inlined = inlined.delete("\x01\x02") if inlined.include?("\x01")
+    prepare(inlined)
   end
 
   # Reads with too many SQL shapes to cache run as the unnamed statement.

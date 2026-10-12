@@ -988,6 +988,12 @@ module Db
     binds = ActiveRecord::Relation.lift_binds(marked)
     sql = binds[0].to_s
     key = binds[1].to_s
+    # Surviving marks would re-enter prepare_marked via prepare — strip
+    # delimiters and run inlined (literals remain). Lift should not leave
+    # marks; this latch stops a SystemStackError if it ever does.
+    if sql.include?("\x01") || key.include?("\x01")
+      return prepare(key.delete("\x01\x02"))
+    end
     return prepare(key) if binds.length <= 2
     qcache = Fiber[:rh_qcache]
     cacheable = !qcache.nil? && !key.include?("?")

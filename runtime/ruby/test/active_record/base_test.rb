@@ -363,6 +363,27 @@ class BaseTest < Minitest::Test
     assert_equal 2, out.length
   end
 
+  # `--` / `/*` inside a double-quoted identifier are identifier text,
+  # not comments. Leaving them as comments swallowed later marks and
+  # made prepare_marked ↔ prepare recurse until SystemStackError
+  # (c6f2a664 tip; sql_identifiers InjectionPurchase).
+  def test_lift_binds_keeps_marks_after_quoted_ident_with_comment_bytes
+    lift = ->(sql) { ActiveRecord::Relation.lift_binds(sql) }
+    table = SqliteAdapter.quote_column_name("\"; DELETE FROM purchases; --")
+    sql = "SELECT * FROM #{table} WHERE name = \x01'x'\x02"
+    out = lift.call(sql)
+    assert_equal "SELECT * FROM #{table} WHERE name = ?", out[0]
+    assert_equal "SELECT * FROM #{table} WHERE name = 'x'", out[1]
+    assert_equal %w[s x], out[2..]
+    refute_includes out[0], "\x01"
+    refute_includes out[1], "\x01"
+    table = SqliteAdapter.quote_column_name("edge/*entries")
+    sql = "SELECT * FROM #{table} WHERE name = \x017\x02"
+    out = lift.call(sql)
+    assert_equal "SELECT * FROM #{table} WHERE name = ?", out[0]
+    assert_equal %w[i 7], out[2..]
+  end
+
   # The request cache keys a bound read on its values written in, so a
   # repeat replays instead of re-running, and different values do not.
   def test_bound_reads_share_the_request_cache_by_value
