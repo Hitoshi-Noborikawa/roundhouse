@@ -156,12 +156,40 @@ fn rails_parity_fixes_run_on_spinel() {
         server.log()
     );
 
+    // Each row has exactly the keys `id`, `created_at` and `touched_at`,
+    // and each timestamp is exactly `YYYY-MM-DDTHH:MM:SS.mmmZ`.
     let namespaced = server.get("/api/v1/widgets.json");
-    let stamps: Vec<&str> = namespaced.body.split('"').filter(|s| s.len() == 24 && s.ends_with('Z')).collect();
-    assert_eq!(stamps.len(), 4, "xmlschema(3) timestamps: {}\n{}", namespaced.body, server.log());
-    assert!(
-        stamps.iter().all(|s| s.as_bytes()[10] == b'T' && s.as_bytes()[19] == b'.'),
-        "xmlschema(3) timestamps: {}",
-        namespaced.body
-    );
+    let rows: serde_json::Value = serde_json::from_str(&namespaced.body)
+        .unwrap_or_else(|e| panic!("namespaced body is not JSON ({e}): {}\n{}", namespaced.body, server.log()));
+    let rows = rows.as_array().unwrap_or_else(|| panic!("namespaced body is not an array: {}", namespaced.body));
+    assert_eq!(rows.len(), 2, "namespaced rows: {}", namespaced.body);
+    for (i, row) in rows.iter().enumerate() {
+        let mut keys: Vec<&str> = row
+            .as_object()
+            .unwrap_or_else(|| panic!("row {i} is not an object: {}", namespaced.body))
+            .keys()
+            .map(String::as_str)
+            .collect();
+        keys.sort_unstable();
+        assert_eq!(keys, ["created_at", "id", "touched_at"], "row {i} keys: {}", namespaced.body);
+        assert_eq!(row["id"], serde_json::json!(i + 1), "row {i} id: {}", namespaced.body);
+        for key in ["created_at", "touched_at"] {
+            let value = row[key].as_str().unwrap_or_else(|| panic!("row {i} {key} is not a string: {}", namespaced.body));
+            assert!(is_xmlschema_millis(value), "row {i} {key} is not xmlschema(3): {value:?} in {}", namespaced.body);
+        }
+    }
+}
+
+/// `YYYY-MM-DDTHH:MM:SS.mmmZ`, Rails' `Time#xmlschema(3)` in UTC.
+fn is_xmlschema_millis(value: &str) -> bool {
+    let b = value.as_bytes();
+    b.len() == 24
+        && b.iter().enumerate().all(|(i, c)| match i {
+            4 | 7 => *c == b'-',
+            10 => *c == b'T',
+            13 | 16 => *c == b':',
+            19 => *c == b'.',
+            23 => *c == b'Z',
+            _ => c.is_ascii_digit(),
+        })
 }
