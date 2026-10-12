@@ -142,3 +142,47 @@ puts "ok"
         )
         .assert_passes();
 }
+
+/// A guard over several statements (`if self == Article ... end`) gives
+/// every statement in it to the includers it admits.
+#[test]
+fn a_guard_over_several_statements_keeps_them_all() {
+    emit_and_run::real_blog()
+        .write(
+            "app/models/concerns/remarkable.rb",
+            r#"
+module Remarkable
+  extend ActiveSupport::Concern
+
+  included do
+    if self == Article
+      has_many :remarks, class_name: "Comment", dependent: :destroy
+      scope :titled, ->(t) { where(title: t) }
+    end
+  end
+end
+"#,
+        )
+        .edit(
+            "app/models/article.rb",
+            "class Article < ApplicationRecord\n",
+            "class Article < ApplicationRecord\n  include Remarkable\n",
+        )
+        .edit(
+            "app/models/comment.rb",
+            "class Comment < ApplicationRecord\n",
+            "class Comment < ApplicationRecord\n  include Remarkable\n",
+        )
+        .run_ruby(
+            r#"
+article = Article.create!(title: "Widget", body: "A sufficiently long body")
+first = Comment.create!(article_id: article.id, commenter: "Gadget", body: "first")
+raise "has_many in a guard block" unless article.respond_to?(:remarks) && article.remarks.to_a.size == 1
+raise "scope in a guard block" unless Article.respond_to?(:titled) && Article.titled("Widget").to_a.size == 1
+raise "Comment must not get remarks" if first.respond_to?(:remarks)
+raise "Comment must not get titled" if Comment.respond_to?(:titled)
+puts "ok"
+"#,
+        )
+        .assert_passes();
+}

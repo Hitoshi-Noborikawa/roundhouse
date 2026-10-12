@@ -3910,13 +3910,13 @@ pub type ConcernModelItems = (
 pub type ConcernGuardedItems = Vec<(ClassId, Vec<crate::app::ConcernGuardedItem>)>;
 
 /// `X if self == A`, `X unless self == A`, `X if self != A`,
-/// `X if in?([A, B])` (also `self.in?`, `A == self`): the guard and the
-/// single guarded statement. `None` for any other `if` / `unless`, or
-/// one with an `else`.
-fn includer_guarded_stmt<'pr>(
+/// `X if in?([A, B])` (also `self.in?`, `A == self`), or the block form
+/// `if self == A ... end`: the guard and the guarded statements. `None`
+/// for any other `if` / `unless`, or one with an `else`.
+fn includer_guarded_stmts<'pr>(
     stmt: &ruby_prism::Node<'pr>,
     file: &str,
-) -> Option<(crate::app::IncluderGuard, ruby_prism::Node<'pr>)> {
+) -> Option<(crate::app::IncluderGuard, Vec<ruby_prism::Node<'pr>>)> {
     let (predicate, body, unless) = if let Some(n) = stmt.as_if_node() {
         if n.subsequent().is_some() {
             return None;
@@ -3930,14 +3930,13 @@ fn includer_guarded_stmt<'pr>(
     } else {
         return None;
     };
-    let mut body: Vec<_> = body.body().iter().collect();
-    if body.len() != 1 {
+    let body: Vec<_> = body.body().iter().collect();
+    if body.is_empty() {
         return None;
     }
-    let inner = body.pop()?;
     let cond = super::expr::ingest_expr(&predicate, file).ok()?;
     let (classes, negate) = includer_guard_classes(&cond)?;
-    Some((crate::app::IncluderGuard { classes, negate: negate != unless }, inner))
+    Some((crate::app::IncluderGuard { classes, negate: negate != unless }, body))
 }
 
 fn includer_guard_classes(cond: &crate::expr::Expr) -> Option<(Vec<String>, bool)> {
@@ -4109,25 +4108,31 @@ pub(in crate::ingest) fn ingest_concern_model_items_with_constants(
                 // runs with `self` bound to the includer, so the guard
                 // is a fact each includer answers. Carry the statement's
                 // items with the guard; the splice gives them to the
-                // includers it admits.
-                if let Some((guard, stmt)) = includer_guarded_stmt(&inner, file) {
-                    match super::model::ingest_model_body_items(&stmt, &id, file, Vec::new(), None) {
-                        Ok(parsed) if !parsed.is_empty()
+                // includers it admits. Every statement under the guard
+                // must be one of those items, or the guard is left to
+                // today's handling as a whole.
+                if let Some((guard, stmts)) = includer_guarded_stmts(&inner, file) {
+                    let parsed: Option<Vec<ModelBodyItem>> = stmts.iter().try_fold(Vec::new(), |mut acc, stmt| {
+                        let parsed = super::model::ingest_model_body_items(stmt, &id, file, Vec::new(), None).ok()?;
+                        let claimed = !parsed.is_empty()
                             && parsed.iter().all(|item| matches!(item,
                                 ModelBodyItem::Association { .. }
                                 | ModelBodyItem::Scope { .. }
                                 | ModelBodyItem::Validation { .. }
-                                | ModelBodyItem::Callback { .. })) =>
-                        {
-                            let at = items.len();
-                            guarded.extend(parsed.into_iter().map(|item| crate::app::ConcernGuardedItem {
-                                guard: guard.clone(),
-                                item,
-                                at,
-                            }));
-                            continue;
-                        }
-                        _ => {}
+                                | ModelBodyItem::Callback { .. }));
+                        claimed.then(|| {
+                            acc.extend(parsed);
+                            acc
+                        })
+                    });
+                    if let Some(parsed) = parsed {
+                        let at = items.len();
+                        guarded.extend(parsed.into_iter().map(|item| crate::app::ConcernGuardedItem {
+                            guard: guard.clone(),
+                            item,
+                            at,
+                        }));
+                        continue;
                     }
                 }
                 // `enum` inside `included do` belongs to every includer
