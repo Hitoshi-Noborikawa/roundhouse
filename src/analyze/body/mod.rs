@@ -1900,15 +1900,11 @@ impl<'a> BodyTyper<'a> {
                     && expr.diagnostic.is_none()
                 {
                     let catalog = self.i18n.map_or(crate::i18n::Catalog::rails_default(), |c| c);
-                    let reason = match &catalog.field_error_proc {
-                        Some(file) => Some(format!("{file} replaces `field_error_proc`, which is not modeled")),
-                        None => crate::i18n::errors_index_refusal(catalog.or_rails_default().errors_format()).map(str::to_string),
-                    };
-                    if let Some(reason) = reason {
+                    if let Some(file) = &catalog.field_error_proc {
                         expr.diagnostic = Some(crate::diagnostic::DiagnosticKind::Unsupported {
                             target: None,
                             construct: Symbol::from("field_with_errors"),
-                            detail: format!("`{method}` cannot tell whether its field has errors: {reason}"),
+                            detail: format!("`{method}` renders through the `field_error_proc` {file} sets, which is not modeled"),
                         });
                     }
                 }

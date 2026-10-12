@@ -160,7 +160,6 @@ fn wrap_field_errors(
         return out;
     }
     let Some(field_sym) = field_symbol(field) else { return out };
-    let Some(prefix) = ctx.i18n.error_prefix(&binding.model_name, field_sym.as_str()) else { return out };
     // The check box's unchecked-value companion stays outside the wrapper, as Rails renders it
     let first = usize::from(kind == FormBuilderMethod::CheckBox && out.len() > 1);
     // Not a leading underscore: Elixir warns on reading such a variable, and its lanes treat warnings as errors
@@ -168,7 +167,8 @@ fn wrap_field_errors(
     let record = Expr::new(Span::synthetic(), ExprNode::Var { id: VarId(0), name: binding.record_var.clone() });
     let messages = crate::lower::errors_index::errors_for_call(
         send(Some(record), "errors", Vec::new(), None, false),
-        prefix,
+        field_sym.as_str(),
+        String::new(),
         Span::synthetic(),
     );
     let has_errors = Expr::new(

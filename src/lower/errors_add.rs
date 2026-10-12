@@ -1,5 +1,7 @@
 //! `errors.add` grounding: `errors.add(:field, "msg")` →
-//! `errors << "Field msg"`.
+//! `errors << "Field msg"` and `error_attributes << "field"`, so the
+//! accumulator keeps which attribute each message is on; `errors.clear`
+//! empties both.
 //!
 //! The shared runtime's error accumulator is a plain `Array[String]` —
 //! the validates lowering bakes humanized full messages at lower time
@@ -87,6 +89,10 @@ impl Labels<'_> {
         if crate::i18n::errors_index_refusal(i18n.errors_format()).is_some() {
             return None;
         }
+        // Rails' full message for `:base` is the message alone, whatever the format
+        if field == "base" {
+            return Some(String::new());
+        }
         let format = i18n.errors_format().replace("%{attribute}", &i18n.human_attribute_name(field));
         format.strip_suffix("%{message}").map(str::to_string)
     }
@@ -154,6 +160,31 @@ fn rewrite_errors_add(expr: &mut Expr, labels: &Labels, diags: &mut Vec<Diagnost
             *expr = message;
             expr.ty = Some(crate::ty::Ty::Str);
             return;
+        }
+    }
+    if let ExprNode::Send { recv: Some(r), method, args, block: None, .. } = &*expr.node {
+        if method.as_str() == "clear" && args.is_empty() {
+            if let ExprNode::Send { recv: owner, method: em, args: ea, .. } = &*r.node {
+                if em.as_str() == "errors" && ea.is_empty() {
+                    let span = expr.span;
+                    let owner = owner.clone();
+                    let ty = expr.ty.clone();
+                    let clear_errors = std::mem::replace(expr, Expr::new(span, ExprNode::Seq { exprs: vec![] }));
+                    let mut attributes = Expr::new(
+                        span,
+                        ExprNode::Send { recv: owner, method: Symbol::from("error_attributes"), args: Vec::new(), block: None, parenthesized: false },
+                    );
+                    attributes.ty = Some(crate::ty::Ty::Array { elem: Box::new(crate::ty::Ty::Str) });
+                    let mut clear_attributes = Expr::new(
+                        span,
+                        ExprNode::Send { recv: Some(attributes), method: Symbol::from("clear"), args: Vec::new(), block: None, parenthesized: false },
+                    );
+                    clear_attributes.ty = Some(crate::ty::Ty::Array { elem: Box::new(crate::ty::Ty::Str) });
+                    *expr = Expr::new(span, ExprNode::Seq { exprs: vec![clear_errors, clear_attributes] });
+                    expr.ty = ty;
+                    return;
+                }
+            }
         }
     }
     // Any `add` on an `errors` reader is this pass's construct; decide
@@ -247,14 +278,48 @@ fn rewrite_errors_add(expr: &mut Expr, labels: &Labels, diags: &mut Vec<Diagnost
     // dispatching — leaving `ty = None` here makes it false-positive a
     // `send_dispatch_failed` on a receiver it can see the type of.
     let recv_ty = recv.as_ref().and_then(|r| r.ty.clone());
-    *expr.node = ExprNode::Send {
-        recv,
-        method: Symbol::from("<<"),
-        args: vec![message],
-        block: None,
-        parenthesized: false,
+    let owner = match recv.as_ref().map(|r| &*r.node) {
+        Some(ExprNode::Send { recv: owner, .. }) => owner.clone(),
+        _ => unreachable!("checked errors reader"),
     };
-    expr.ty = recv_ty;
+    let mut push_message = Expr::new(
+        span,
+        ExprNode::Send { recv, method: Symbol::from("<<"), args: vec![message], block: None, parenthesized: false },
+    );
+    push_message.ty = recv_ty.clone();
+    *expr = attributed_push(push_message, owner, field.as_str(), span);
+}
+
+/// `<errors> << msg` followed by `<owner>.error_attributes << "field"`, so
+/// the accumulator keeps which attribute each message is on.
+pub(crate) fn attributed_push(push_message: Expr, owner: Option<Expr>, field: &str, span: crate::span::Span) -> Expr {
+    let str_array = crate::ty::Ty::Array { elem: Box::new(crate::ty::Ty::Str) };
+    let mut attributes = Expr::new(
+        span,
+        ExprNode::Send {
+            recv: owner,
+            method: Symbol::from("error_attributes"),
+            args: Vec::new(),
+            block: None,
+            parenthesized: false,
+        },
+    );
+    attributes.ty = Some(str_array.clone());
+    let mut push_attribute = Expr::new(
+        span,
+        ExprNode::Send {
+            recv: Some(attributes),
+            method: Symbol::from("<<"),
+            args: vec![Expr::new(span, ExprNode::Lit { value: Literal::Str { value: field.to_string() } })],
+            block: None,
+            parenthesized: false,
+        },
+    );
+    push_attribute.ty = Some(str_array);
+    let ty = push_message.ty.clone();
+    let mut both = Expr::new(span, ExprNode::Seq { exprs: vec![push_message, push_attribute] });
+    both.ty = ty;
+    both
 }
 
 /// `<errors reader>.full_message(:field, message)`: the one shape whose

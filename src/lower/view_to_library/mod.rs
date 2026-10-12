@@ -1477,7 +1477,15 @@ pub(crate) fn insert_framework_stubs(
     let support = classes.entry(ClassId(Symbol::from("ActiveSupport"))).or_default();
     let str_array = Ty::Array { elem: Box::new(Ty::Str) };
     support.class_methods.entry(Symbol::from("errors_for")).or_insert_with(|| {
-        fn_sig(vec![(Symbol::from("errors"), str_array.clone()), (Symbol::from("prefix"), Ty::Str)], str_array.clone())
+        fn_sig(
+            vec![
+                (Symbol::from("errors"), str_array.clone()),
+                (Symbol::from("attributes"), str_array.clone()),
+                (Symbol::from("attribute"), Ty::Str),
+                (Symbol::from("prefix"), Ty::Str),
+            ],
+            str_array.clone(),
+        )
     });
     support.class_method_kinds.entry(Symbol::from("errors_for")).or_insert(AccessorKind::Method);
 

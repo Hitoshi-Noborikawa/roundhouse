@@ -268,14 +268,12 @@ impl ErrorOpts {
     }
 }
 
-/// Why `errors[:field]`, which finds a field's messages by the text
-/// `format` puts before them, cannot be answered under `format`.
+/// Why `errors[:field]`, which strips the text `format` puts before a
+/// field's messages, cannot be answered under `format`.
 pub fn errors_index_refusal(format: &str) -> Option<&'static str> {
     match format.strip_suffix("%{message}") {
         None => Some("errors.format does not end in the message"),
         Some(before) if before.contains("%{message}") => Some("errors.format names the message twice"),
-        Some("") => Some("errors.format puts nothing before the message to tell the field by"),
-        Some(before) if !before.contains("%{attribute}") => Some("errors.format does not name the attribute before the message"),
         Some(_) => None,
     }
 }
@@ -619,22 +617,6 @@ impl FormI18n {
             .map(str::to_string)
             .or_else(|| model.map(|m| m.human_attribute_name(method)))
             .unwrap_or_else(|| humanize(method))
-    }
-
-    /// What a full message for `method` starts with before the message,
-    /// for telling the field's errors apart; `None` when `errors.format`
-    /// leaves nothing to tell it by.
-    pub fn error_prefix(&self, object_name: &str, method: &str) -> Option<String> {
-        let catalog = self.catalog.or_rails_default();
-        let format = catalog.errors_format();
-        if errors_index_refusal(format).is_some() {
-            return None;
-        }
-        let human = match self.models.get(object_name) {
-            Some(m) => m.human_attribute_name(method),
-            None => catalog.human_attribute_name("activerecord", &[], method),
-        };
-        format.strip_suffix("%{message}").map(|p| p.replace("%{attribute}", &human))
     }
 
     /// Whether the form's record is one of the app's models, or a record

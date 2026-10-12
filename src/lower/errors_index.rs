@@ -181,27 +181,32 @@ fn rewrite_index(expr: &mut Expr, labels: &super::errors_add::Labels, diags: &mu
         diags.push(residue(expr, "dynamic field"));
         return;
     };
-    if field.as_str() == "base" {
-        diags.push(residue(expr, ":base carries no humanized prefix"));
-        return;
-    }
     let ExprNode::Send { recv: Some(reader), .. } = &*expr.node else { unreachable!() };
-    let Some(prefix_text) = labels.message_prefix(reader, field.as_str()).filter(|p| !p.is_empty()) else {
-        diags.push(residue(expr, "errors.format does not put the field before the message"));
+    let Some(prefix_text) = labels.message_prefix(reader, field.as_str()) else {
+        diags.push(residue(expr, "errors.format does not end in the message"));
         return;
     };
     let span = expr.span;
     let node = std::mem::replace(&mut *expr.node, ExprNode::Seq { exprs: vec![] });
     let ExprNode::Send { recv, .. } = node else { unreachable!() };
-    *expr = errors_for_call(recv.expect("checked Some above"), prefix_text, span);
+    *expr = errors_for_call(recv.expect("checked Some above"), field.as_str(), prefix_text, span);
 }
 
-/// `ActiveSupport.errors_for(<accumulator>, "<prefix>")`, typed.
-pub(crate) fn errors_for_call(accumulator: Expr, prefix_text: String, span: crate::span::Span) -> Expr {
-    let prefix = Expr::new(
+/// `ActiveSupport.errors_for(<owner>.errors, <owner>.error_attributes, "<attribute>", "<prefix>")`, typed.
+pub(crate) fn errors_for_call(accumulator: Expr, attribute: &str, prefix_text: String, span: crate::span::Span) -> Expr {
+    let str_lit = |value: String| Expr::new(span, ExprNode::Lit { value: Literal::Str { value } });
+    let ExprNode::Send { recv: owner, .. } = &*accumulator.node else { unreachable!("an errors reader") };
+    let mut attributes = Expr::new(
         span,
-        ExprNode::Lit { value: Literal::Str { value: prefix_text } },
+        ExprNode::Send {
+            recv: owner.clone(),
+            method: Symbol::from("error_attributes"),
+            args: Vec::new(),
+            block: None,
+            parenthesized: false,
+        },
     );
+    attributes.ty = Some(Ty::Array { elem: Box::new(Ty::Str) });
     let mut support = Expr::new(span, ExprNode::Const { path: vec![Symbol::from("ActiveSupport")] });
     support.ty = Some(Ty::Class { id: crate::ident::ClassId(Symbol::from("ActiveSupport")), args: vec![] });
     let mut call = Expr::new(
@@ -209,7 +214,7 @@ pub(crate) fn errors_for_call(accumulator: Expr, prefix_text: String, span: crat
         ExprNode::Send {
             recv: Some(support),
             method: Symbol::from("errors_for"),
-            args: vec![accumulator, prefix],
+            args: vec![accumulator, attributes, str_lit(attribute.to_string()), str_lit(prefix_text)],
             block: None,
             parenthesized: true,
         },
