@@ -2193,6 +2193,40 @@ end
 }
 
 #[test]
+fn has_secure_password_authenticate_includes_its_false_result() {
+    let mut app = app_from_files(&[
+        (
+            "app/models/application_record.rb",
+            "class ApplicationRecord < ActiveRecord::Base\nend\n",
+        ),
+        (
+            "app/models/user.rb",
+            "class User < ApplicationRecord\n  has_secure_password\n\n  def check_password(value)\n    authenticate(value)\n  end\nend\n",
+        ),
+    ]);
+    Analyzer::new(&app).analyze(&mut app);
+    let user = app
+        .models
+        .iter()
+        .find(|model| model.name.0.as_str() == "User")
+        .expect("User model");
+    let check = user
+        .methods()
+        .find(|method| method.name.as_str() == "check_password")
+        .expect("check_password method");
+    let expected = Ty::Union {
+        variants: vec![
+            Ty::Class {
+                id: ClassId(Symbol::from("User")),
+                args: vec![],
+            },
+            Ty::Bool,
+        ],
+    };
+    assert_eq!(check.body.ty.as_ref(), Some(&expected));
+}
+
+#[test]
 fn bare_module_under_app_models_registers_as_library_class() {
     // A bare `module Foo; def self.x; …` under app/models/ (e.g.
     // lobsters' InactiveUser) is a namespace of singleton methods, not
