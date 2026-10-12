@@ -140,8 +140,9 @@ module ActiveRecord
       out
     end
 
-    # The column lists inside are never mutated after they are built,
-    # so a shallow copy of the outer list is a faithful copy.
+    # Each inner list is built fresh per clause by `push_where_cols` and
+    # nothing appends to it afterwards, so a shallow copy of the outer
+    # list is a faithful copy.
     def copy_cols_list(xs)
       out = []
       xs.each { |x| out << x }
@@ -313,7 +314,7 @@ module ActiveRecord
 
     def push_where_cols(sql, cols)
       @wheres << sql
-      @where_cols << cols
+      @where_cols << cols.map { |c| c }
       self
     end
 
@@ -340,7 +341,7 @@ module ActiveRecord
         raise NotImplementedError, "unscope(where:) after merge or or: the merged conditions are not attributed to columns here, so they would silently survive"
       end
       targets = []
-      if where.is_a?(Symbol)
+      if where.is_a?(Symbol) || where.is_a?(String)
         targets << where.to_s
       elsif where.is_a?(Array)
         i = 0
@@ -348,6 +349,8 @@ module ActiveRecord
           targets << where[i].to_s
           i += 1
         end
+      else
+        raise ArgumentError, "unscope supports only where: :column or where: [:a, :b]"
       end
       kept = []
       kept_cols = []
@@ -2377,17 +2380,32 @@ module ActiveRecord
     # A hash of conditions ANDed: `{is_deleted: false, user_id: 3}` ->
     # `is_deleted = 0 AND user_id = 3`. Array value -> `IN`, nil ->
     # `IS NULL`, nested Hash -> qualified `table.col = ...`.
+    # The name `unscope(where:)` matches a hash condition on. A column of
+    # this relation's own table -- bare, `"articles.col"`, or nested
+    # `articles: { col: }` -- is its bare name. A foreign table's column
+    # keeps its qualifier, which no bare target matches, so a condition on
+    # another table stays put (Rails unscopes by attribute name on the
+    # relation's own table only).
+    def hash_column_name(col)
+      return col unless col.include?(".")
+      halves = col.split(".")
+      return halves.last.to_s if halves.first.to_s == @table
+      col
+    end
+
     def hash_conditions(hash)
+      @hash_columns = []
       parts = []
       hash.each do |key, val|
         if val.is_a?(Hash)
           val.each do |col, v|
-            parts << column_predicate("#{key}.#{col}", v)
-            @hash_columns << "#{key}."
+            qualified = "#{key}.#{col}"
+            parts << column_predicate(qualified, v)
+            @hash_columns << hash_column_name(qualified)
           end
         else
           parts << column_predicate(key.to_s, val)
-          @hash_columns << key.to_s
+          @hash_columns << hash_column_name(key.to_s)
         end
       end
       parts.join(" AND ")

@@ -154,3 +154,21 @@ fn a_before_discard_hook_is_refused_not_dropped() {
     let err = ingest_app_from_tree(tree(Some(LOCK), SCHEMA, &[("article", src)])).err().expect("refused");
     assert!(err.to_string().contains("before_discard"), "{err}");
 }
+
+#[test]
+fn discard_all_is_refused_not_silent() {
+    let src = "class Article < ApplicationRecord\n  include Discard::Model\n\n  def self.purge\n    kept.discard_all\n  end\n\n  def self.purge2\n    discard_all\n  end\nend\n";
+    let mut app = ingest_app_from_tree(tree(Some(LOCK), SCHEMA, &[("article", src)])).expect("ingest");
+    let errs = errors(&mut app);
+    assert!(errs.iter().any(|e| e.contains("discard_all")), "{errs:?}");
+}
+
+#[test]
+fn an_unscope_other_than_where_columns_is_refused() {
+    for call in ["unscope(:order)", "unscope(where: nil)", "unscope(where: some_cols)"] {
+        let src = format!("class Article < ApplicationRecord\n  include Discard::Model\n\n  def self.plain(some_cols = nil)\n    order(:id).{call}\n  end\nend\n");
+        let mut app = ingest_app_from_tree(tree(Some(LOCK), SCHEMA, &[("article", &src)])).expect("ingest");
+        let errs = errors(&mut app);
+        assert!(errs.iter().any(|e| e.contains("unscope")), "{call} accepted silently: {errs:?}");
+    }
+}

@@ -72,6 +72,7 @@ module ActiveRecord
     @scope_attributes: Hash[Symbol, untyped]
     @where_cols: Array[Array[String]]
     @hash_columns: Array[String]
+    def hash_column_name: (String col) -> String
     @opaque_wheres: bool
     def where_scope: (Hash[Symbol, untyped] condition) -> Relation
     def scope_attributes: () -> Hash[Symbol, untyped]
@@ -150,7 +151,7 @@ module ActiveRecord
     def references: (*Symbol names) -> Relation
     def merge: (Relation other) -> Relation
     def where_clauses: () -> Array[String]
-    def unscope: (?where: Symbol | Array[Symbol]?) -> Relation
+    def unscope: (?where: Symbol | String | Array[Symbol | String]?) -> Relation
     def arel: () -> Arel::SelectManager
     def none: () -> Relation
     def reload: () -> Relation
