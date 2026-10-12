@@ -5553,3 +5553,70 @@ fn a_vite_tag_without_a_manifest_entry_is_a_survey_gap() {
         "{gaps:#?}"
     );
 }
+
+/// `include ActionView::RecordIdentifier` is admitted on a model and on a
+/// plain library class (no "includes unresolved" refusal), and `dom_id` /
+/// `dom_class` — the module's public surface — type as String there.
+#[test]
+fn record_identifier_include_is_admitted_and_dom_calls_are_strings() {
+    let app = app_from_files(&[
+        (
+            "app/models/application_record.rb",
+            "class ApplicationRecord < ActiveRecord::Base\n  primary_abstract_class\n  include ActionView::RecordIdentifier\nend\n",
+        ),
+        (
+            "db/schema.rb",
+            "ActiveRecord::Schema.define do\n  create_table \"things\" do |t|\n    t.string \"name\"\n  end\nend\n",
+        ),
+        (
+            "app/models/thing.rb",
+            "class Thing < ApplicationRecord\n  def row_id\n    dom_id(self)\n  end\n\n  def edit_id\n    dom_id(self, :edit)\n  end\n\n  def row_class\n    dom_class(self)\n  end\nend\n",
+        ),
+        (
+            "lib/presenter.rb",
+            "class Presenter\n  include ActionView::RecordIdentifier\n\n  def row(thing)\n    dom_id(thing, :row)\n  end\nend\n",
+        ),
+    ]);
+    let refused: Vec<String> = diagnose(&app)
+        .into_iter()
+        .filter(|d| d.message.contains("RecordIdentifier"))
+        .map(|d| d.message)
+        .collect();
+    assert!(refused.is_empty(), "include refused: {refused:?}");
+    let thing = app.models.iter().find(|m| m.name.0.as_str() == "Thing").expect("Thing");
+    for name in ["row_id", "edit_id", "row_class"] {
+        let m = thing.methods().find(|m| m.name.as_str() == name).expect(name);
+        assert_eq!(m.body.ty, Some(Ty::Str), "{name}");
+    }
+    let presenter = app
+        .library_classes
+        .iter()
+        .find(|c| c.name.0.as_str() == "Presenter")
+        .expect("Presenter");
+    let row = presenter.methods.iter().find(|m| m.name.as_str() == "row").expect("row");
+    assert_eq!(row.body.ty, Some(Ty::Str), "Presenter#row");
+}
+
+/// Only the BARE `dom_id` is the mixed-in helper (emit qualifies bare
+/// calls alone); an explicit receiver that does not define it stays
+/// unresolved (not String-typed), so nothing claims it runs.
+#[test]
+fn record_identifier_explicit_receiver_dom_id_stays_unresolved() {
+    let app = app_from_files(&[
+        (
+            "app/models/application_record.rb",
+            "class ApplicationRecord < ActiveRecord::Base\n  primary_abstract_class\nend\n",
+        ),
+        (
+            "lib/other.rb",
+            "class Other\n  def name\n    \"o\"\n  end\nend\n\nclass Caller\n  def bad(other)\n    Other.new.dom_id(other)\n  end\nend\n",
+        ),
+    ]);
+    let caller = app
+        .library_classes
+        .iter()
+        .find(|c| c.name.0.as_str() == "Caller")
+        .expect("Caller");
+    let bad = caller.methods.iter().find(|m| m.name.as_str() == "bad").expect("bad");
+    assert_ne!(bad.body.ty, Some(Ty::Str), "explicit-receiver dom_id must not type as String");
+}

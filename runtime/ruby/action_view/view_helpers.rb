@@ -593,6 +593,17 @@ module ActionView
       end
     end
   
+    # Rails' `dom_class(record, prefix = nil)`: the model's singular
+    # (`dom_prefix()`), with the prefix joined ahead of it by `_`. The same
+    # `dom_prefix()` that `dom_id` composes from, so the two cannot drift.
+    def self.dom_class(record, prefix = nil)
+      if prefix.nil?
+        record.dom_prefix()
+      else
+        "#{prefix}_#{record.dom_prefix()}"
+      end
+    end
+
     # ── HTML element helpers ─────────────────────────────────────────
 
     # Frozen empty default so no-opts helpers do not allocate a Hash.

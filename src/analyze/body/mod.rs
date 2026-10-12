@@ -380,6 +380,31 @@ impl<'a> BodyTyper<'a> {
 
     /// Whether `self`'s class, its includes or its ancestors register
     /// `method` — an app definition, whatever type it answered.
+    /// [`Self::app_defines`] for one side: an instance body is shadowed by
+    /// instance methods (own, included, inherited), a class-method body by
+    /// class-side ones only, since a class object cannot dispatch an
+    /// instance method.
+    fn app_defines_on_side(&self, self_ty: Option<&Ty>, method: &Symbol, instance: bool) -> bool {
+        let Some(Ty::Class { id, .. }) = self_ty else { return false };
+        let mut stack = vec![id];
+        let mut seen = std::collections::HashSet::new();
+        while let Some(cid) = stack.pop() {
+            if !seen.insert(cid) {
+                continue;
+            }
+            let Some(cls) = self.classes.get(cid) else { continue };
+            let table = if instance { &cls.instance_methods } else { &cls.class_methods };
+            if table.contains_key(method) {
+                return true;
+            }
+            if instance {
+                stack.extend(cls.includes.iter());
+            }
+            stack.extend(cls.parent.iter());
+        }
+        false
+    }
+
     fn app_defines(&self, self_ty: Option<&Ty>, method: &Symbol) -> bool {
         let Some(Ty::Class { id, .. }) = self_ty else { return false };
         let mut stack = vec![id];
@@ -1788,6 +1813,20 @@ impl<'a> BodyTyper<'a> {
                     {
                         receiver.decisions |= crate::expr::RESOLVED_OPERATOR_RECEIVER;
                     }
+                }
+                // `include ActionView::RecordIdentifier` is a marker include
+                // (dropped at ingest); emit qualifies only the BARE
+                // `dom_id` / `dom_class` to `ViewHelpers`, so only the bare
+                // call types String. An explicit receiver (`x.dom_id(a)`)
+                // has nothing to run and stays unresolved.
+                if recv.is_none()
+                    && matches!(method.as_str(), "dom_id" | "dom_class")
+                    && (1..=2).contains(&args.len())
+                    && block.is_none()
+                    && matches!(dispatched, Ty::Var { .. })
+                    && !self.app_defines_on_side(ctx.self_ty.as_ref(), method, ctx.instance_body)
+                {
+                    return Ty::Str;
                 }
                 // Kernel.Array is a container even for scalar params.
                 // App methods (including inherited/included overrides)

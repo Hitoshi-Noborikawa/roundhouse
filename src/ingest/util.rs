@@ -815,12 +815,20 @@ pub(super) fn slice_has_blank_line(bytes: &[u8], from: usize, to: usize) -> bool
 /// through it is qualified to `ActionView::ViewHelpers.<name>` at emit
 /// (`emit::ruby::library::is_framework_view_helper`).
 ///
+/// `ActionView::RecordIdentifier` is the same story for `dom_id` /
+/// `dom_class`: models, presenters and broadcasters mix it in to name a
+/// DOM node, and the calls resolve to the one shared
+/// `ActionView::ViewHelpers.dom_id` / `dom_class` views already use.
+///
 /// Called from BOTH homes that build an include list —
 /// `analyze::model_includes` for models, `ingest::library_class`'s decl
 /// walk for everything else — because the same source line means the
 /// same thing in either.
 pub(crate) fn is_view_helper_marker_include(path: &[&str]) -> bool {
-    matches!(path, ["ActionView", "Helpers", ..] | ["ActiveSupport", "NumberHelper"])
+    matches!(
+        path,
+        ["ActionView", "Helpers", ..] | ["ActionView", "RecordIdentifier"] | ["ActiveSupport", "NumberHelper"]
+    )
 }
 
 /// `ActiveModel::*` (Validations / Conversion / AttributeMethods /
