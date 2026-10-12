@@ -5208,7 +5208,9 @@ fn unavailable_class_module_construct(name: &str, target: &str) -> Option<&'stat
         // rqrcode_core's / spinel-rqrcode's.
         | "RQRCodeCore::QRCodeRunTimeError" | "RQRCodeCore::QRCodeArgumentError"
         | "GC" | "OpenSSL::HMAC" | "CSV::MalformedCSVError"
-        | "Enumerator::Product" | "Enumerator::Lazy");
+        | "Enumerator::Product" | "Enumerator::Lazy"
+        | "Monitor" | "ConditionVariable" | "Thread::ConditionVariable"
+        | "UNIXServer" | "UNIXSocket" | "Open3" | "Find");
     if !bundled {
         return None;
     }
@@ -7847,7 +7849,7 @@ fn apply_bundled_gem_wiring(files: &mut [(String, String)]) {
 /// Constant → bundled library that provides it. One table, read by
 /// both the pass that writes the requires and the gate that checks a
 /// tree for missing ones — a second copy is how the rule drifts.
-const BUNDLED: [(&str, &str); 20] = [
+const BUNDLED: [(&str, &str); 25] = [
     // INERT in our trees, and deliberately: `runtime/spinel/base64.rb`
     // defines `Base64` without requiring the library, which the second
     // condition below reads as "the program defines it" and drops the
@@ -7920,6 +7922,15 @@ const BUNDLED: [(&str, &str); 20] = [
     // `packages/openssl`; an app that signs a payload without HTTP never
     // loads it through net/http.
     ("OpenSSL", "openssl"),
+    // `Monitor.new`, `UNIXServer.new` / `UNIXSocket.new`, `Open3.capture3`
+    // and `Find.find`: the standard library on CRuby/JRuby; spinel
+    // defines Monitor and the socket classes only after the require, and
+    // takes `packages/open3` and `packages/find`.
+    ("Monitor", "monitor"),
+    ("UNIXServer", "socket"),
+    ("UNIXSocket", "socket"),
+    ("Open3", "open3"),
+    ("Find", "find"),
 ];
 
 /// Every gap in a tree, as `(file index, require line)`. One walk,
@@ -7954,6 +7965,7 @@ fn bundled_require_gaps(files: &[(String, String)]) -> Vec<(usize, String)> {
             if path.ends_with(".rb")
                 && names_constant(content, konst)
                 && !requires_feature(content, &require_line)
+                && !gaps.contains(&(i, require_line.clone()))
             {
                 gaps.push((i, require_line.clone()));
             }
