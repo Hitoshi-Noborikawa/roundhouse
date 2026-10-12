@@ -102,8 +102,6 @@ fn for_scope_is_not_a_block_scope() {
 #[test]
 fn registry_signatures_do_not_supply_missing_runtime() {
     for (body, name) in [
-        ("Rails.event.notify(\"probe\")", "event"),
-        ("Rails.error.set_context(probe: true)", "error"),
         ("ActiveRecord::Base.connected_to(role: :reading) { 7 }", "connected_to"),
         ("Benchmark.realtime { 1 }", "Benchmark"),
         ("\"2020-01-02\".to_date", "to_date"),

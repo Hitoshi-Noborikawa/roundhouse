@@ -1012,6 +1012,12 @@ module Db
   def self.prepare(sql)
     sql = sql.to_s
     return prepare_marked(sql) if sql.include?("\x01")
+    prepare_plain(sql)
+  end
+
+  # Prepare without re-entering prepare_marked. Post-inline SQL may
+  # still contain \x01 inside string literals (unmarked values).
+  def self.prepare_plain(sql)
     record_query(sql)
     h = current_conn.open_stmt(sql, true)
     h
@@ -1022,7 +1028,7 @@ module Db
   # `?` the lift writes, so it runs with its values written in, as it
   # did before binding.
   def self.prepare_marked(marked)
-    prepare(ActiveRecord::Relation.inline_sql(marked))
+    prepare_plain(ActiveRecord::Relation.inline_sql(marked))
   end
 
   # Reads with too many SQL shapes to cache run as the unnamed statement.
