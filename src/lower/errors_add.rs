@@ -166,6 +166,10 @@ fn rewrite_errors_add(expr: &mut Expr, labels: &Labels, diags: &mut Vec<Diagnost
         if method.as_str() == "clear" && args.is_empty() {
             if let ExprNode::Send { recv: owner, method: em, args: ea, .. } = &*r.node {
                 if em.as_str() == "errors" && ea.is_empty() {
+                    if !owner_reads_once(owner.as_ref()) {
+                        diags.push(residue(expr, "the record is not a plain read, and clearing both arrays reads it twice"));
+                        return;
+                    }
                     let span = expr.span;
                     let owner = owner.clone();
                     let ty = expr.ty.clone();
@@ -197,6 +201,17 @@ fn rewrite_errors_add(expr: &mut Expr, labels: &Labels, diags: &mut Vec<Diagnost
                     if em.as_str() == "errors" && ea.is_empty())
     );
     if !recognized {
+        return;
+    }
+    let owner_once = match &*expr.node {
+        ExprNode::Send { recv: Some(r), .. } => match &*r.node {
+            ExprNode::Send { recv: owner, .. } => owner_reads_once(owner.as_ref()),
+            _ => false,
+        },
+        _ => false,
+    };
+    if !owner_once {
+        diags.push(residue(expr, "the record is not a plain read, and pushing the message and its attribute reads it twice"));
         return;
     }
     let matches = matches!(
@@ -337,6 +352,15 @@ pub(crate) fn full_message_bakes(recv: Option<&Expr>, args: &[Expr], block: Opti
 /// Folding drops the receiver, so only one whose evaluation does nothing.
 fn reads_without_effect(e: &Expr) -> bool {
     matches!(&*e.node, ExprNode::Var { .. } | ExprNode::Ivar { .. } | ExprNode::SelfRef)
+}
+
+/// The record an `errors` reader is on, when reading it again is the same record: self, or a plain read.
+pub(crate) fn owner_reads_once(owner: Option<&Expr>) -> bool {
+    // A bare zero-arg call counts: a view's or partial's local reaches here in that shape
+    owner.is_none_or(|o| {
+        reads_without_effect(o)
+            || matches!(&*o.node, ExprNode::Send { recv: None, args, block: None, .. } if args.is_empty())
+    })
 }
 
 /// A looked-up message as a string: a literal when every part is known,

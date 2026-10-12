@@ -182,6 +182,11 @@ fn rewrite_index(expr: &mut Expr, labels: &super::errors_add::Labels, diags: &mu
         return;
     };
     let ExprNode::Send { recv: Some(reader), .. } = &*expr.node else { unreachable!() };
+    let owner_once = matches!(&*reader.node, ExprNode::Send { recv: owner, .. } if super::errors_add::owner_reads_once(owner.as_ref()));
+    if !owner_once {
+        diags.push(residue(expr, "the record is not a plain read, and picking by attribute reads it twice"));
+        return;
+    }
     let Some(prefix_text) = labels.message_prefix(reader, field.as_str()) else {
         diags.push(residue(expr, "errors.format does not end in the message"));
         return;

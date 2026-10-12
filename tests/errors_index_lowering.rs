@@ -217,3 +217,19 @@ end
     assert_eq!(diags.len(), 1, "expected one residue entry: {diags:?}");
     assert!(diags[0].contains("errors.messages"), "{diags:?}");
 }
+
+#[test]
+fn a_record_that_is_not_a_plain_read_declines_with_residue() {
+    // Picking by attribute reads `errors` and `error_attributes`; a receiver call would run twice.
+    let (out, diags) = lower_and_emit(
+        r#"
+class Draft
+  def problems
+    Draft.latest.errors[:url]
+  end
+end
+"#,
+    );
+    assert!(out.contains("Draft.latest.errors[:url]"), "{out}");
+    assert_eq!(diags.len(), 1, "{diags:?}");
+}
