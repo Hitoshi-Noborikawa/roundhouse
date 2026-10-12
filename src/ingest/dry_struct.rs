@@ -193,7 +193,7 @@ pub(super) fn lower_dry_structs(app: &mut App, sources: &[crate::span::SourceFil
         }
         let Some((mut methods, generated)) = built.remove(&name) else { continue };
         lc.unknown_calls.retain(|call| !is_struct_declaration(call));
-        // Dry-type constants are stripped app-wide below once the Class-safe
+        // Dry-type constants are stripped app-wide after both lowerings once the Class-safe
         // shell is emitted; keep generated non-type constants (shared defaults).
         lc.constants.extend(generated);
         lc.origin = Some(crate::dialect::LibraryClassOrigin::DryStruct);
@@ -218,20 +218,12 @@ pub(super) fn lower_dry_structs(app: &mut App, sources: &[crate::span::SourceFil
     // do not replay gem DSL, and lowered bodies bake coercions into
     // `initialize`. Refused files may still `require_relative` a `Types`
     // module (Const refs in dropped calls), so dry-type constants must be
-    // stripped whenever the shell is emitted — otherwise
+    // stripped whenever the shell is emitted (`dry_initializer::drop_unused_type_constants`,
+    // after the initializer lowering has read them) — otherwise
     // `Types.Constructor` / `Types::Coercible::…` crash the boot of the
     // whole `models.rb` load, including lowered siblings.
     if any {
         app.library_classes.extend(error_classes());
-        // Keep plain value constants / aliases (`LABEL`, `ALIAS = Types::LABEL`);
-        // drop anything that still builds a dry type.
-        let plain = super::dry_types::plain_constants(&app.library_classes, &types_modules, &names);
-        for lc in &mut app.library_classes {
-            let holder = lc.name.0.as_str().to_string();
-            lc.constants.retain(|(_, value)| {
-                !super::dry_types::holds_dry_type(value, &holder, &types_modules, &names, &plain)
-            });
-        }
     }
 }
 

@@ -28,10 +28,11 @@
 //! Checked against dry-initializer 3.2. A class defining its own
 //! `initialize` where one is generated, redeclaring a parent's option,
 //! declaring a `param` that may be left out, or declaring anything not
-//! modeled here is left as it was, ledgered, with its subclasses (which
-//! would `super` into it); its ancestors do not depend on it and are
-//! lowered. Unlike `Dry::Struct`, where a hierarchy shares its type
-//! constants: one base class here can hold hundreds of commands.
+//! modeled here is left as it was, ledgered, with its whole hierarchy, as
+//! under `Dry::Struct`: a refused class under a lowered ancestor would
+//! inherit a constructor that ignores its own options. The refused classes
+//! keep no declarations, so constructing one is reported, not emitted to
+//! fail.
 
 use std::collections::{HashMap, HashSet};
 
@@ -236,16 +237,26 @@ pub(super) fn lower_dry_initializers(app: &mut App, sources: &[crate::span::Sour
         }
     }
 
+    // All or nothing per hierarchy: a refused class under a lowered
+    // ancestor would inherit a constructor that ignores its own options.
+    let refused_roots: HashSet<String> = refused
+        .iter()
+        .chain(&failed)
+        .map(|n| chain_of(n)[0].clone())
+        .collect();
     let mut any = false;
     for lc in &mut app.library_classes {
         let name = lc.name.0.as_str().to_string();
         let Some(parent) = parent_of.get(&name) else {
             continue;
         };
-        if chain_of(&name)
-            .iter()
-            .any(|n| refused.contains(n) || failed.contains(n))
-        {
+        // The parent by its resolved name, as later passes look it up; a
+        // refused class too, or the emitter takes `Base` for a gem's class
+        // and replays the declarations it cannot load.
+        if let Some(parent) = parent {
+            lc.parent = Some(ClassId(Symbol::from(parent.as_str())));
+        }
+        if refused_roots.contains(&chain_of(&name)[0]) {
             continue;
         }
         let Some((mut methods, generated)) = built.remove(&name) else {
@@ -256,13 +267,11 @@ pub(super) fn lower_dry_initializers(app: &mut App, sources: &[crate::span::Sour
         methods.append(&mut lc.methods);
         lc.methods = methods;
         lc.constants.extend(generated);
-        // The parent by its resolved name, as later passes look it up.
-        if let Some(parent) = parent {
-            lc.parent = Some(ClassId(Symbol::from(parent.as_str())));
-        }
         any = true;
     }
-    if any && !uses_dry_types(app, &types_modules) {
+    // The gem is never emitted, and a refused hierarchy's declarations
+    // are dropped with it: what the lowered classes raise must exist.
+    if any {
         app.library_classes.extend(error_classes(sentinel));
     }
 }
@@ -277,10 +286,16 @@ fn reads_undefined(expr: &Expr) -> bool {
 /// After both lowerings: once nothing builds a dry type any more, the
 /// constants still holding one go, app-wide. The `Types` modules are not
 /// emitted, so such a constant would fail the load; while anything is left
-/// on the gems it stays, since that may name it.
+/// on the gems it stays, since that may name it. Under the `Dry::Struct`
+/// shell nothing left on the gems can run, so they go regardless; not
+/// before this point, since the initializer lowering reads them.
 pub(super) fn drop_unused_type_constants(app: &mut App, sources: &[crate::span::SourceFile]) {
     let types_modules = types_modules(sources);
-    if types_modules.is_empty() || uses_dry_types(app, &types_modules) {
+    let struct_shell = app
+        .library_classes
+        .iter()
+        .any(|lc| lc.origin == Some(LibraryClassOrigin::DryStruct));
+    if types_modules.is_empty() || (!struct_shell && uses_dry_types(app, &types_modules)) {
         return;
     }
     let names: HashSet<String> = app

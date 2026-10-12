@@ -1873,24 +1873,81 @@ fn dry_initializer_classes_run_lowered() {
     assert!(run.stdout.contains("dry-initializer contract passed"));
 }
 
-/// A class the lowering cannot read stays on the gem with its subclasses
-/// (ledgered); its parent and siblings are lowered regardless.
+/// A class the lowering cannot read keeps its whole hierarchy on the gem
+/// (ledgered): a refused class under a lowered ancestor would inherit a
+/// constructor that ignores its own options. Constructing one is an
+/// error; another hierarchy is lowered, and the tree still boots with the
+/// stand-ins the lowered classes raise.
 #[test]
-fn dry_initializer_refusal_stops_at_the_refused_class() {
-    let (emitted, _errors) = dry_initializer::overlay()
+fn dry_initializer_refusal_keeps_the_hierarchy_on_the_gem() {
+    let refused = || dry_initializer::overlay()
         .write(
             "lib/svc/odd.rb",
             "module Svc\n  class Odd < Base\n    option :size, ::Svc::Types::Strict::Integer.constrained(gt: 0)\n  end\n\n  class Odder < Odd\n  end\nend\n",
         )
-        .emit(roundhouse::project::BuildTarget::Ruby);
-    let base = std::fs::read_to_string(emitted.join("app/models/svc/base.rb")).expect("emitted Svc::Base");
-    assert!(base.contains("def dry_initializer_assign"), "parent not lowered:\n{base}");
-    let quote = std::fs::read_to_string(emitted.join("app/models/svc/quote.rb")).expect("emitted Svc::Quote");
-    assert!(quote.contains("def dry_initializer_assign"), "sibling not lowered:\n{quote}");
-    for refused in ["svc/odd.rb", "svc/odder.rb"] {
-        let source = std::fs::read_to_string(emitted.join("app/models").join(refused)).expect(refused);
-        assert!(!source.contains("dry_initializer_assign"), "{refused} lowered:\n{source}");
+        .write(
+            "lib/svc/lone.rb",
+            "module Svc\n  class Lone\n    extend Dry::Initializer\n\n    option :count, ::Svc::Types::Coercible::Integer\n  end\nend\n",
+        );
+    let (emitted, _errors) = refused().emit(roundhouse::project::BuildTarget::Ruby);
+    for kept in ["svc/base.rb", "svc/charge.rb", "svc/quote.rb", "svc/odd.rb", "svc/odder.rb"] {
+        let source = std::fs::read_to_string(emitted.join("app/models").join(kept)).expect(kept);
+        assert!(!source.contains("dry_initializer_assign"), "{kept} lowered:\n{source}");
     }
+    let lone = std::fs::read_to_string(emitted.join("app/models/svc/lone.rb")).expect("emitted Svc::Lone");
+    assert!(lone.contains("def dry_initializer_assign"), "other hierarchy not lowered:\n{lone}");
+
+    let (_, errors) = refused()
+        .write("app/models/odd_caller.rb", "class OddCaller\n  def self.size\n    Svc::Odd.new(size: 3).size\n  end\nend\n")
+        .emit(roundhouse::project::BuildTarget::Ruby);
+    assert!(
+        errors.iter().any(|e| e.contains("unmodeled constructor lookup")),
+        "a refused class constructs without an error:\n{}",
+        errors.join("\n")
+    );
+
+    let run = refused().run_ruby(
+        r#"
+raise "lone" unless Svc::Lone.new(count: "3").count == 3
+begin
+  Svc::Lone.new(count: "x")
+  raise "coercible integer accepted a word"
+rescue Dry::Types::CoercionError
+end
+raise "undefined" unless defined?(Dry::Initializer::UNDEFINED)
+puts "refusal contract passed"
+"#,
+    );
+    run.assert_passes();
+    assert!(run.stdout.contains("refusal contract passed"));
+}
+
+/// The initializer lowering reads type constants before the `Dry::Struct`
+/// shell strips them: an option typed by one is lowered next to a struct.
+#[test]
+fn dry_initializer_reads_type_constants_beside_a_lowered_struct() {
+    let run = dry_initializer::overlay()
+        .write(
+            "lib/svc/amounts.rb",
+            "module Svc\n  module Amounts\n    COUNT = ::Svc::Types::Coercible::Integer\n  end\nend\n",
+        )
+        .write(
+            "lib/svc/point.rb",
+            "module Svc\n  class Point < Dry::Struct\n    attribute :x, ::Svc::Types::Coercible::Integer\n  end\nend\n",
+        )
+        .write(
+            "lib/svc/tally.rb",
+            "module Svc\n  class Tally\n    extend Dry::Initializer\n\n    option :count, ::Svc::Amounts::COUNT\n  end\nend\n",
+        )
+        .run_ruby(
+            r#"
+raise "struct" unless Svc::Point.new(x: "2").x == 2
+raise "constant type" unless Svc::Tally.new(count: "4").count == 4
+puts "type constant contract passed"
+"#,
+        );
+    run.assert_passes();
+    assert!(run.stdout.contains("type constant contract passed"));
 }
 
 /// Spinel's tree has its own `Date` and `BigDecimal()`, but no
@@ -12860,3 +12917,4 @@ puts "PASS friendly oracle"
 }
 #[path = "emit_and_run/acts_as_votable.rs"]
 mod acts_as_votable;
+
