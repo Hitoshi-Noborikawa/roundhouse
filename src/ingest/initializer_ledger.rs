@@ -638,7 +638,11 @@ fn judge(origin: Origin, st: &Stmt<'_>, file_name: &str, lib_ignores: &[String],
         lib_ignores,
     };
     if st.level == Level::Inflections {
-        match inflections_effect(&probe) {
+        // Re-ingesting the statement goes through `ingest_expr`, which in
+        // survey mode records an unsupported construct as a gap; inflections
+        // ingest already recorded it against the real file.
+        let (effect, _) = prism::scope(|| survey::without_recording(|| inflections_effect(&probe)));
+        match effect {
             Some(InflectEffect::Carried) => return Verdict::Consumed("inflections"),
             Some(InflectEffect::RegexRule) => {
                 return Verdict::Consumed("inflections (regex rule, reported as its own survey gap)")

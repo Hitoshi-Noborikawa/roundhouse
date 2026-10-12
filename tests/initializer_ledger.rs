@@ -333,6 +333,29 @@ fn the_ledger_is_a_warning_and_never_a_survey_gap() {
 }
 
 #[test]
+fn the_inflections_probe_records_no_survey_gap_of_its_own() {
+    // An inflections statement holding a construct `ingest_expr` rejects is
+    // recorded once, by inflections ingest, against the real file. The
+    // ledger's own probe of that statement must not record it again.
+    survey::activate();
+    let (app, _diags) = prism::scope(|| {
+        ingest_app_from_tree(tree(&[
+            ("db/schema.rb", SCHEMA),
+            (
+                "config/initializers/inflections.rb",
+                "ActiveSupport::Inflector.inflections(:en) do |inflect|\n  inflect.acronym(\"API\") if (a = 1)..(a == 2)\n  inflect.acronym([1].each { redo }.to_s)\nend\n",
+            ),
+        ]))
+    });
+    let recorded = survey::drain();
+    app.expect("ingest");
+    assert!(
+        recorded.iter().all(|e| !format!("{e:?}").contains("initializer_ledger")),
+        "the ledger probe recorded a gap of its own: {recorded:?}"
+    );
+}
+
+#[test]
 fn the_recognizer_table_names_are_unique() {
     let names = roundhouse::ingest::initializer_ledger::recognizer_names();
     let unique: std::collections::HashSet<_> = names.iter().collect();
