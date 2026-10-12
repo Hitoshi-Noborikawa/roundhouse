@@ -1085,13 +1085,13 @@ pub(super) fn emit_send(recv: Option<&Expr>, method: &str, args: &[Expr], parent
             }
         }
     }
-    // `ActiveSupport.errors_for(errors, prefix)` (runtime/ruby/active_support_ext.rb): the messages that start with the field's prefix, without it.
-    if method == "errors_for" && args.len() == 2 {
+    // `ActiveSupport.errors_for(errors, attributes, attribute, prefix)` (runtime/ruby/active_support_ext.rb): the messages added on `attribute`, without their prefix.
+    if method == "errors_for" && args.len() == 4 {
         if let Some(ExprNode::Const { path }) = recv.map(|r| &*r.node) {
             if path.last().map(|s| s.as_str()) == Some("ActiveSupport") {
                 return format!(
-                    "(lambda prefix: [m[len(prefix):] for m in {} if m.startswith(prefix)])({})",
-                    args_s[0], args_s[1]
+                    "(lambda attribute, prefix: [m.removeprefix(prefix) for m, a in zip({}, {}) if a == attribute])({}, {})",
+                    args_s[0], args_s[1], args_s[2], args_s[3]
                 );
             }
         }

@@ -1349,11 +1349,11 @@ fn emit_send(
                 (Some("ActiveSupport"), "parse_db_time") if args.len() == 1 => {
                     return format!("Roundhouse.RhDateTime.Parse({})", args_s[0]);
                 }
-                // `ActiveSupport.errors_for(errors, prefix)` (runtime/ruby/active_support_ext.rb): the messages that start with the field's prefix, without it.
-                (Some("ActiveSupport"), "errors_for") if args.len() == 2 => {
+                // `ActiveSupport.errors_for(errors, attributes, attribute, prefix)` (runtime/ruby/active_support_ext.rb): the messages added on `attribute`, without their prefix.
+                (Some("ActiveSupport"), "errors_for") if args.len() == 4 => {
                     return format!(
-                        "((System.Func<string, List<string>>)(prefix => ({}).Where(m => m.StartsWith(prefix, System.StringComparison.Ordinal)).Select(m => m.Substring(prefix.Length)).ToList()))({})",
-                        args_s[0], args_s[1]
+                        "((System.Func<string, string, List<string>>)((attribute, prefix) => ({}).Zip({}, (m, a) => (m, a)).Where(p => p.a == attribute).Select(p => p.m.StartsWith(prefix, System.StringComparison.Ordinal) ? p.m.Substring(prefix.Length) : p.m).ToList()))({}, {})",
+                        args_s[0], args_s[1], args_s[2], args_s[3]
                     );
                 }
                 // Temporal writer intrinsic: `ActiveSupport.db_now` — current

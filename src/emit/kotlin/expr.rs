@@ -1656,11 +1656,11 @@ fn emit_send(
                 (Some("ActiveSupport"), "parse_db_time") if args.len() == 1 => {
                     return format!("RhDateTime.parse({})", args_s[0]);
                 }
-                // `ActiveSupport.errors_for(errors, prefix)` (runtime/ruby/active_support_ext.rb): the messages that start with the field's prefix, without it.
-                (Some("ActiveSupport"), "errors_for") if args.len() == 2 => {
+                // `ActiveSupport.errors_for(errors, attributes, attribute, prefix)` (runtime/ruby/active_support_ext.rb): the messages added on `attribute`, without their prefix.
+                (Some("ActiveSupport"), "errors_for") if args.len() == 4 => {
                     return format!(
-                        "({{ prefix: String -> ({}).filter {{ it.startsWith(prefix) }}.map {{ it.removePrefix(prefix) }} }})({})",
-                        args_s[0], args_s[1]
+                        "({{ attribute: String, prefix: String -> ({}).zip({}).filter {{ it.second == attribute }}.map {{ it.first.removePrefix(prefix) }} }})({}, {})",
+                        args_s[0], args_s[1], args_s[2], args_s[3]
                     );
                 }
                 // Temporal writer intrinsic: `ActiveSupport.db_now` — current

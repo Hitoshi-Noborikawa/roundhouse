@@ -2606,13 +2606,13 @@ fn emit_send(
         }
     }
 
-    // `ActiveSupport.errors_for(errors, prefix)` (runtime/ruby/active_support_ext.rb): the messages that start with the field's prefix, without it.
-    if method == "errors_for" && args.len() == 2 {
+    // `ActiveSupport.errors_for(errors, attributes, attribute, prefix)` (runtime/ruby/active_support_ext.rb): the messages added on `attribute`, without their prefix.
+    if method == "errors_for" && args.len() == 4 {
         if let Some(ExprNode::Const { path }) = recv.map(|r| &*r.node) {
             if path.last().map(|s| s.as_str()) == Some("ActiveSupport") {
                 return format!(
-                    "({{ (prefix: String) -> [String] in ({}).filter {{ $0.hasPrefix(prefix) }}.map {{ String($0.dropFirst(prefix.count)) }} }}({}))",
-                    args_s[0], args_s[1]
+                    "({{ (attribute: String, prefix: String) -> [String] in zip({}, {}).filter {{ $0.1 == attribute }}.map {{ $0.0.hasPrefix(prefix) ? String($0.0.dropFirst(prefix.count)) : $0.0 }} }}({}, {}))",
+                    args_s[0], args_s[1], args_s[2], args_s[3]
                 );
             }
         }

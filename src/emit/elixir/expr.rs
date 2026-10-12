@@ -1233,14 +1233,16 @@ fn emit_send(recv: Option<&Expr>, method: &str, args: &[Expr]) -> String {
     // stored ISO-8601 text into a native UTC `%DateTime{}` — the
     // hand-written `RhDateTime.parse` (runtime/elixir/v2/rh_datetime.ex),
     // not a transpiled `ActiveSupport` module (no such unit exists).
-    // `ActiveSupport.errors_for(errors, prefix)` (runtime/ruby/active_support_ext.rb): the messages that start with the field's prefix, without it.
-    if method == "errors_for" && args.len() == 2 {
+    // `ActiveSupport.errors_for(errors, attributes, attribute, prefix)` (runtime/ruby/active_support_ext.rb): the messages added on `attribute`, without their prefix.
+    if method == "errors_for" && args.len() == 4 {
         if let Some(ExprNode::Const { path }) = recv.map(|r| &*r.node) {
             if path.last().map(|s| s.as_str()) == Some("ActiveSupport") {
                 return format!(
-                    "(fn errors, prefix -> for m <- errors, String.starts_with?(m, prefix), do: String.replace_prefix(m, prefix, \"\") end).({}, {})",
+                    "(fn errors, attributes, attribute, prefix -> for {{m, a}} <- Enum.zip(errors, attributes), a == attribute, do: String.replace_prefix(m, prefix, \"\") end).({}, {}, {}, {})",
                     emit_expr(&args[0]),
                     emit_expr(&args[1]),
+                    emit_expr(&args[2]),
+                    emit_expr(&args[3]),
                 );
             }
         }
