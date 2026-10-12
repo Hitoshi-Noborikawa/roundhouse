@@ -221,6 +221,8 @@ fn the_registry_writes_and_reads_each_payload_job() {
     let src = registry_source(&app.job_plans);
 
     assert!(src.contains("def self.payload_push_job(room, message)"), "{src}");
+    // The wrapper hands its rest parameter over as one Array.
+    assert!(src.contains("def self.payload_notify_job(messages)"), "{src}");
     assert!(
         src.contains(r#"ActiveJob::Payload.build("PushJob", "default", ActiveJob::Arguments.list([ActiveJob::Arguments.record(room.to_gid_uri), ActiveJob::Arguments.record(message.to_gid_uri)]))"#),
         "{src}"
@@ -259,4 +261,38 @@ fn an_app_without_jobs_keeps_an_empty_registry() {
         src,
         "  def self.perform(job_class, args)\n    false\n  end\n\n  def self.discards_deserialization_error(job_class)\n    false\n  end\n"
     );
+}
+
+/// A job that enqueues itself without naming its class, and a job that
+/// takes a class with no table, keep their Procs.
+#[test]
+fn unattributable_calls_and_tableless_models_keep_the_proc() {
+    let mut app = ingest_app_from_tree(tree(&[
+        ("db/schema.rb", SCHEMA),
+        (
+            "app/models/application_record.rb",
+            "class ApplicationRecord < ActiveRecord::Base\n  primary_abstract_class\nend\n",
+        ),
+        ("app/models/user.rb", "class User < ApplicationRecord\nend\n"),
+        (
+            "app/models/search.rb",
+            "class Search\n  include ActiveModel::Model\n\n  def self.run\n    SearchJob.perform_later(Search.new)\n    RetryJob.perform_later(User.first)\n  end\nend\n",
+        ),
+        ("app/jobs/application_job.rb", "class ApplicationJob < ActiveJob::Base\nend\n"),
+        (
+            "app/jobs/search_job.rb",
+            "class SearchJob < ApplicationJob\n  def perform(search)\n    nil\n  end\nend\n",
+        ),
+        (
+            "app/jobs/retry_job.rb",
+            "class RetryJob < ApplicationJob\n  def perform(user)\n    self.class.perform_later(user)\n  end\nend\n",
+        ),
+    ]))
+    .expect("ingest job app");
+    roundhouse::session::analyze_and_lower(&mut app);
+    let search = plan(&app, "SearchJob");
+    assert!(!search.is_payload(), "a model without a table has no codec: {search:#?}");
+    let retry = plan(&app, "RetryJob");
+    let fallback = retry.fallback.as_ref().expect("self.class.perform_later is unattributable");
+    assert!(fallback.reason.contains("doesn't name the job class"), "{fallback:?}");
 }

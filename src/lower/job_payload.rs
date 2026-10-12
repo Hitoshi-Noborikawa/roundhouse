@@ -106,6 +106,7 @@ fn suffix(class_name: &str) -> String {
 /// synthesized `perform_later`), in name order.
 pub fn plan_jobs(app: &App, jobs: &BTreeSet<String>, wrapped: &BTreeSet<String>) -> Vec<JobPlan> {
     let sites = call_site_types(app, jobs);
+    let unattributed = unattributed_jobs(app, jobs);
     let sti = crate::lower::sti_scope::sti_bases(app);
     let mut plans = Vec::new();
     for name in wrapped {
@@ -121,7 +122,16 @@ pub fn plan_jobs(app: &App, jobs: &BTreeSet<String>, wrapped: &BTreeSet<String>)
         let discards = discards_deserialization_error(app, lc);
         let empty = Vec::new();
         let job_sites = sites.get(name).unwrap_or(&empty);
-        let (params, fallback) = match plan_params(app, &sti, &perform.params, job_sites) {
+        let planned = if unattributed.contains(name) || unattributed.contains("*") {
+            Err(JobFallback {
+                param: None,
+                reason: "a `perform_later` call doesn't name the job class, so its argument types are unknown"
+                    .to_string(),
+            })
+        } else {
+            plan_params(app, &sti, &perform.params, job_sites)
+        };
+        let (params, fallback) = match planned {
             Ok(params) => (params, None),
             Err(f) => (Vec::new(), Some(f)),
         };
@@ -146,6 +156,84 @@ fn call_site_types(app: &App, jobs: &BTreeSet<String>) -> BTreeMap<String, Vec<S
         collect_sites(body, jobs, &mut out);
     });
     out
+}
+
+/// Jobs with a `perform_later` call that doesn't name its class: a bare
+/// `perform_later` or `self.perform_later` in a job's own methods,
+/// `self.class.perform_later`, or a class held in a variable. Such a
+/// call can pass any type, so the job keeps its Proc rather than risk a
+/// codec that doesn't fit. `"*"` means a call that could be any job.
+fn unattributed_jobs(app: &App, jobs: &BTreeSet<String>) -> BTreeSet<String> {
+    let mut out = BTreeSet::new();
+    // In a job's own methods, an implicit or `self` receiver is the job
+    // (or a subclass of it).
+    for lc in &app.library_classes {
+        if !jobs.contains(lc.name.0.as_str()) {
+            continue;
+        }
+        for m in &lc.methods {
+            let mut hit = false;
+            find_self_enqueues(&m.body, &mut hit);
+            if hit {
+                out.insert(lc.name.0.as_str().to_string());
+            }
+        }
+    }
+    crate::lower::for_each_hook_body_ref(app, &mut |body| {
+        find_dynamic_enqueues(body, app, jobs, &mut out);
+    });
+    // A subclass inherits whatever reaches its parent through `self`.
+    let named: Vec<String> = out.iter().cloned().collect();
+    for lc in &app.library_classes {
+        if jobs.contains(lc.name.0.as_str())
+            && ancestry(app, lc).iter().any(|a| named.iter().any(|n| n == a.name.0.as_str()))
+        {
+            out.insert(lc.name.0.as_str().to_string());
+        }
+    }
+    out
+}
+
+fn is_enqueue(method: &Symbol) -> bool {
+    method.as_str() == "perform_later"
+}
+
+fn find_self_enqueues(e: &Expr, hit: &mut bool) {
+    if let ExprNode::Send { recv, method, .. } = &*e.node {
+        if is_enqueue(method) && matches!(recv.as_ref().map(|r| &*r.node), None | Some(ExprNode::SelfRef)) {
+            *hit = true;
+        }
+    }
+    e.node.for_each_child(&mut |c| find_self_enqueues(c, hit));
+}
+
+fn find_dynamic_enqueues(e: &Expr, app: &App, jobs: &BTreeSet<String>, out: &mut BTreeSet<String>) {
+    if let ExprNode::Send { recv: Some(r), method, .. } = &*e.node {
+        if is_enqueue(method) {
+            match &*r.node {
+                ExprNode::Const { .. } | ExprNode::SelfRef => {}
+                // `x.class.perform_later`: the job `x` is, when its type
+                // names one; otherwise it could be any.
+                ExprNode::Send { recv: Some(x), method: m, .. } if m.as_str() == "class" => {
+                    match &x.ty {
+                        Some(Ty::Class { id, .. }) if jobs.contains(id.0.as_str()) => {
+                            out.insert(id.0.as_str().to_string());
+                        }
+                        _ if matches!(&*x.node, ExprNode::SelfRef) => {}
+                        _ => {
+                            out.insert("*".to_string());
+                        }
+                    }
+                }
+                // A class in a variable, or any other computed receiver.
+                _ => {
+                    out.insert("*".to_string());
+                }
+            }
+        }
+    }
+    let _ = app;
+    e.node.for_each_child(&mut |c| find_dynamic_enqueues(c, app, jobs, out));
 }
 
 fn collect_sites(e: &Expr, jobs: &BTreeSet<String>, out: &mut BTreeMap<String, Vec<Site>>) {
@@ -251,6 +339,18 @@ fn record_of(
     } else {
         sti.get(id)?.clone()
     };
+    // Only a model with a table has `find_by` and a key to write: an
+    // ActiveModel class under app/models or the abstract
+    // `ApplicationRecord` keeps the Proc path. Same gate as
+    // `project::apply_instantiate_named`.
+    let has_table = app
+        .models
+        .iter()
+        .find(|m| m.name == base)
+        .is_some_and(|m| app.schema.tables.contains_key(&m.table.0));
+    if !has_table {
+        return None;
+    }
     let mut accepts: Vec<String> = vec![base.0.as_str().to_string()];
     let mut subs: Vec<String> = sti
         .iter()
@@ -687,8 +787,9 @@ pub fn registry_source(plans: &[JobPlan]) -> String {
     s
 }
 
-/// `(room, message)`, `(*comments)`, or nothing for a job without
-/// parameters.
+/// `(room, message)`, or nothing for a job without parameters. A rest
+/// parameter is a plain one here: `perform_later(*comments)` hands the
+/// writer `comments`, the Array it collected, not its elements.
 fn writer_params(plan: &JobPlan) -> String {
     if plan.params.is_empty() {
         return String::new();
@@ -696,7 +797,7 @@ fn writer_params(plan: &JobPlan) -> String {
     let list = plan
         .params
         .iter()
-        .map(|p| if p.rest { format!("*{}", p.name.as_str()) } else { p.name.as_str().to_string() })
+        .map(|p| p.name.as_str().to_string())
         .collect::<Vec<_>>()
         .join(", ");
     format!("({list})")

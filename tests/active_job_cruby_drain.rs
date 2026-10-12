@@ -170,6 +170,7 @@ raise "argument lost" unless got.all? { |n, tag, _| tag == "t#{n / 100}" }
 ORDER_SEEN = Queue.new
 module JobRegistry
   def self.perform(job_class, args)
+    return false unless job_class == "CountJob"
     ORDER_SEEN << "j#{ActiveJob::Arguments.int_at(args, 0)}"
     true
   end
@@ -183,6 +184,7 @@ raise "order #{seen.inspect}" unless seen == ["p1", "j2", "p3", "j4"]
 
 # An unknown class and a raising payload are lost jobs, not a lost drain.
 ActiveJob.enqueue_payload(ActiveJob::Payload.build("NopeJob", "default", "[]"))
+ActiveJob.enqueue_payload(ActiveJob::Payload.build("CountJob", "default", "[{}]"))
 after = Queue.new
 ActiveJob.enqueue(-> { after << :ok; nil })
 raise "drain died" unless after.pop == :ok
