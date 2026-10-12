@@ -18,7 +18,7 @@ module ActiveJob
     def self.time: (Time value) -> String
     def self.list: (Array[String] parts) -> String
 
-    def self.count: (untyped args) -> Integer
+    def self.arg_count: (untyped args) -> Integer
     def self.null_at: (untyped args, Integer i) -> bool
     def self.bool_at: (untyped args, Integer i) -> bool
     def self.int_at: (untyped args, Integer i) -> Integer
