@@ -27,7 +27,6 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use roundhouse::analyze::Analyzer;
 
 use roundhouse::ingest::ingest_app;
 
