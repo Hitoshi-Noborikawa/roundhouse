@@ -26,7 +26,8 @@
 # a key Rails deletes stays cached on the lowered side until it expires.
 #
 # Requires Ruby 4.1 (Ruby::Box) with RUBY_BOX=1 set before the process
-# starts. FUTAMURA_WHOLE_ROUTE=off serves everything from Rails.
+# starts, and SQLite (on another database it turns itself off).
+# FUTAMURA_WHOLE_ROUTE=off serves everything from Rails.
 require "set"
 
 module Futamura
@@ -44,6 +45,14 @@ module Futamura
 
       def install(app, root, actions)
         return unless enabled?
+        # The lowered runtime reads through the connection Rails lends it,
+        # and only its SQLite shim can take one. On any other database
+        # every route stays Rails' (and no box is needed).
+        adapter = primary_adapter(app)
+        unless adapter.to_s.start_with?("sqlite")
+          warn "futamura: whole-route replacement is off: it supports SQLite only, and the primary database is #{adapter.inspect}"
+          return
+        end
         unless defined?(Ruby::Box) && Ruby::Box.respond_to?(:enabled?) && Ruby::Box.enabled?
           raise "futamura: whole-route replacement needs Ruby::Box: Ruby 4.1 or newer, started with " \
                 "RUBY_BOX=1 (or set FUTAMURA_WHOLE_ROUTE=off to serve every route from Rails)"
@@ -57,6 +66,13 @@ module Futamura
         end
         app.config.after_initialize { Futamura::WholeRoute.boot(root) }
         at_exit { warn "futamura whole-route: #{@stats.sort_by { |_, v| -v }.to_h}" } if ENV["FUTAMURA_STATS"]
+      end
+
+      def primary_adapter(app)
+        config = app.config.database_configuration[Rails.env.to_s] || {}
+        config["adapter"] || config.dig("primary", "adapter")
+      rescue StandardError
+        nil
       end
 
       def boot(root)
