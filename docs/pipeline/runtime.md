@@ -2457,6 +2457,8 @@ Three gaps remain, all on spinel's side:
   fields as errors. A field's errors are told apart by the full
   message's humanized prefix, as `errors[:field]` is (see above), so a
   nested `fields_for` record falls back to the humanized attribute name.
+  A form over a record that is not one of the app's models (a form
+  object, say) is not wrapped, even when it has errors.
 - **`config.after_initialize` blocks do not run at boot.** campfire has
   two: `Room::MessagesCount.ensure!` (its counter triggers, which
   `schema.rb` cannot dump) and starting the WAL checkpointer outside

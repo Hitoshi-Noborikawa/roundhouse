@@ -1011,6 +1011,17 @@ fn a_custom_field_error_proc_stays_an_error() {
     assert!(errors.iter().any(|e| e.contains("field_error_proc")), "{errors:?}");
 }
 
+#[test]
+fn a_mention_of_field_error_proc_keeps_the_default_wrapper() {
+    let (_emitted, errors) = emit_and_run::real_blog()
+        .write(
+            "config/initializers/notes.rb",
+            "Rails.application.config.x.note = \"field_error_proc\" # field_error_proc = custom\n",
+        )
+        .emit(roundhouse::project::BuildTarget::Ruby);
+    assert!(!errors.iter().any(|e| e.contains("field_error_proc")), "{errors:?}");
+}
+
 /// `I18n.t` and a template's `t` answer the locale at compile time:
 /// interpolation, plural forms chosen by a run-time count, `scope:`,
 /// `default:` and a view's lazy `.key`.

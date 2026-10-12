@@ -9725,9 +9725,18 @@ fn field_error_proc_file<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> Option<String>
     }
     files.into_iter().find(|path| {
         vfs.read_to_string(path)
-            .is_ok_and(|source| source.lines().any(|l| !l.trim_start().starts_with('#') && l.contains("field_error_proc")))
+            .is_ok_and(|source| source.lines().any(assigns_field_error_proc))
     })
     .map(|p| p.strip_prefix(dir).unwrap_or(&p).to_string_lossy().into_owned())
+}
+
+/// `….field_error_proc = …`, and not a line that only mentions the name.
+fn assigns_field_error_proc(line: &str) -> bool {
+    let code = line.split('#').next().unwrap_or("");
+    code.match_indices(".field_error_proc").any(|(at, name)| {
+        let rest = code[at + name.len()..].trim_start();
+        rest.starts_with('=') && !rest.starts_with("==")
+    })
 }
 
 /// `:fr`, `:"pt-BR"`, `"fr"` or `'fr'` at the start of `value`, ignoring what follows it.

@@ -156,7 +156,7 @@ fn wrap_field_errors(
     binding: &FormBuilderBinding,
     ctx: &ViewCtx,
 ) -> Vec<Expr> {
-    if !kind.wraps_field_errors() || binding.model_name.is_empty() || ctx.i18n.field_error_proc().is_some() {
+    if !kind.wraps_field_errors() || !ctx.i18n.has_errors(&binding.model_name) || ctx.i18n.field_error_proc().is_some() {
         return out;
     }
     let Some(field_sym) = field_symbol(field) else { return out };

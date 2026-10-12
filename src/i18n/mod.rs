@@ -636,6 +636,12 @@ impl FormI18n {
         format.strip_suffix("%{message}").map(|p| p.replace("%{attribute}", &human))
     }
 
+    /// Whether the form's record is one of the app's models, or a record
+    /// nested under one, so it answers `errors` as Rails' wrapper requires.
+    pub fn has_errors(&self, object_name: &str) -> bool {
+        self.models.contains_key(object_name.split('[').next().unwrap_or(object_name))
+    }
+
     /// The app's own `field_error_proc`, which this wrapper does not model.
     pub fn field_error_proc(&self) -> Option<&str> {
         self.catalog.field_error_proc.as_deref()
