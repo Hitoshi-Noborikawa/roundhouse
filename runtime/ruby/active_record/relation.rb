@@ -348,6 +348,7 @@ module ActiveRecord
     # operation distinct from the public, argument-requiring `reorder` API.
     def clear_ordering
       @orders = []
+      @records = nil
       self
     end
 
