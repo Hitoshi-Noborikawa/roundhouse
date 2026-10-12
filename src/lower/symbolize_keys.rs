@@ -43,6 +43,16 @@ fn rewrite(expr: &mut Expr) {
     rewrite_node(expr);
 }
 
+/// The request's params (`params` / `@params`): a String-keyed Hash in
+/// every emitted program, whatever type the analyzer gave the reader.
+fn is_request_params(e: &Expr) -> bool {
+    match &*e.node {
+        ExprNode::Send { recv: None, method, args, block: None, .. } => method.as_str() == "params" && args.is_empty(),
+        ExprNode::Ivar { name } => name.as_str() == "params",
+        _ => false,
+    }
+}
+
 pub(crate) fn rewrite_node(expr: &mut Expr) {
     let replacement = match &mut *expr.node {
         // A typed, no-block Hash#deep_merge call is routed through the
@@ -90,6 +100,44 @@ pub(crate) fn rewrite_node(expr: &mut Expr) {
             let ty = r.ty.clone();
             let mut call = active_support_call(expr.span, "deep_dup", r.clone());
             call.ty = ty;
+            Some(call)
+        }
+        // `as_json` on a typed Hash or Array (a request's params, a
+        // literal built in the action): ActiveSupport's core_ext reopen,
+        // which nothing hosts on Spinel ("undefined method 'as_json' for
+        // an instance of Hash"). `ActiveSupport::JSON.jsonable` is that
+        // conversion for the values such a container holds (String keys,
+        // Symbols as Strings, nested Hashes and Arrays), and raises on
+        // anything it does not model rather than answer other JSON.
+        ExprNode::Send { recv: Some(r), method, args, block: None, .. }
+            if method.as_str() == "as_json"
+                && args.is_empty()
+                && (matches!(r.ty.as_ref(), Some(Ty::Hash { .. } | Ty::Array { .. }))
+                    || is_request_params(r)) =>
+        {
+            let ty = match r.ty.as_ref() {
+                Some(Ty::Array { .. }) => Ty::Array { elem: Box::new(Ty::Untyped) },
+                _ => Ty::Hash { key: Box::new(Ty::Str), value: Box::new(Ty::Untyped) },
+            };
+            let mut call = Expr::new(
+                expr.span,
+                ExprNode::Send {
+                    recv: Some(Expr::new(
+                        expr.span,
+                        ExprNode::Const {
+                            path: vec![
+                                crate::ident::Symbol::from("ActiveSupport"),
+                                crate::ident::Symbol::from("JSON"),
+                            ],
+                        },
+                    )),
+                    method: crate::ident::Symbol::from("jsonable"),
+                    args: vec![r.clone()],
+                    block: None,
+                    parenthesized: true,
+                },
+            );
+            call.ty = Some(ty);
             Some(call)
         }
         ExprNode::Send { recv: Some(r), method, args, block: None, .. }
