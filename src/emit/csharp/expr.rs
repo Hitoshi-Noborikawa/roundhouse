@@ -1349,6 +1349,13 @@ fn emit_send(
                 (Some("ActiveSupport"), "parse_db_time") if args.len() == 1 => {
                     return format!("Roundhouse.RhDateTime.Parse({})", args_s[0]);
                 }
+                // `ActiveSupport.errors_for(errors, prefix)` (runtime/ruby/active_support_ext.rb): the messages that start with the field's prefix, without it.
+                (Some("ActiveSupport"), "errors_for") if args.len() == 2 => {
+                    return format!(
+                        "((System.Func<string, List<string>>)(prefix => ({}).Where(m => m.StartsWith(prefix, System.StringComparison.Ordinal)).Select(m => m.Substring(prefix.Length)).ToList()))({})",
+                        args_s[0], args_s[1]
+                    );
+                }
                 // Temporal writer intrinsic: `ActiveSupport.db_now` — current
                 // UTC time in Rails' exact storage form ("YYYY-MM-DD
                 // HH:MM:SS.ffffff"). `fill_timestamps` stamps with it.
@@ -1619,6 +1626,12 @@ fn emit_send(
                     format!("({rs}.Length != 0)")
                 };
             }
+            // An element that is never nil or false makes `none?` mean no elements at all
+            "none?" if matches!(
+                r.ty.as_ref(),
+                Some(crate::ty::Ty::Array { elem })
+                    if matches!(**elem, crate::ty::Ty::Str | crate::ty::Ty::Int | crate::ty::Ty::Float | crate::ty::Ty::Sym)
+            ) => return format!("({rs}.Count == 0)"),
             "upcase" => return format!("{rs}.ToUpperInvariant()"),
             "downcase" => return format!("{rs}.ToLowerInvariant()"),
             "strip" => return format!("{rs}.Trim()"),
