@@ -287,6 +287,71 @@ module Db
     conn.transaction_active? && conn.instance_variable_get(:@rh_snapshot) != :open
   end
 
+  # A request run on a connection this process did not open: the host
+  # Rails app's own, lent by `--target futamura`'s whole-route bridge
+  # (src/emit/futamura/routes.rb). No pool is configured in that mode.
+  #
+  # Why the connection and not the database file: the bridge runs this
+  # runtime inside a Ruby::Box, and a box loads its own copy of every
+  # native extension, sqlite3's included. Two SQLite libraries opening
+  # one file in one process can release each other's POSIX locks
+  # (sqlite.org/howtocorrupt.html, "multiple copies of SQLite"). Calling
+  # through the host's connection object runs the host's copy, so one
+  # library touches the file, and this request sees the host's open
+  # transaction (a test's fixtures) instead of a second view of the file.
+  #
+  # Cleanup is `with_connection`'s minus everything that would touch
+  # the host's state: the read snapshot is ended only if this request
+  # opened one, and a transaction is rolled back only if this fiber
+  # began it (it holds the write permit), never the host's.
+  def self.with_lent_connection(conn)
+    outer = Fiber[:db_handle]
+    as_hash = conn.results_as_hash
+    conn.results_as_hash = false
+    unless conn.instance_variable_get(:@rh_sql_functions)
+      SqlFunctions.install(conn) if defined?(SqlFunctions)
+      conn.instance_variable_set(:@rh_sql_functions, true)
+    end
+    Fiber[:db_handle] = conn
+    request_failed = false
+    begin
+      yield
+    rescue Exception
+      request_failed = true
+      raise
+    ensure
+      cleanup_error = nil
+      begin
+        if conn.instance_variable_get(:@rh_snapshot_depth).to_i > 0
+          conn.instance_variable_set(:@rh_snapshot_depth, 1)
+          read_snapshot_end
+        end
+      rescue StandardError => e
+        cleanup_error = e
+      end
+      begin
+        if permit_owned?
+          begin
+            conn.execute("ROLLBACK") if conn.transaction_active?
+          ensure
+            release_permit
+          end
+        end
+      rescue StandardError => e
+        cleanup_error ||= e
+      end
+      begin
+        release_open_statements(conn)
+      rescue StandardError => e
+        cleanup_error ||= e
+      ensure
+        Fiber[:db_handle] = outer
+        conn.results_as_hash = as_hash
+      end
+      raise cleanup_error if cleanup_error && !request_failed
+    end
+  end
+
   def self.with_connection
     h = nil
     adopt_after_fork

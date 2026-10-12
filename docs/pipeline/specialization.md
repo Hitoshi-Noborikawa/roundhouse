@@ -97,10 +97,10 @@ class. The alternatives (loading the Roundhouse runtime beside Rails,
 or splitting routes across two processes) would bypass those hooks on
 every specialized path. The runtime also defines Rails' own top-level
 constants (`ActiveRecord`, `ActionController`, …), so it cannot be
-loaded into Rails' namespace. The one exception measured so far is
-[whole-route replacement](#prototype-whole-route-replacement), which
-loads the runtime into a `Ruby::Box` and lets only the session cross
-to Rails, never a model object.
+loaded into Rails' namespace. The one exception is
+[whole-route replacement](#whole-route-replacement), which loads the
+runtime into a `Ruby::Box` and lets only the session, the flash and
+the database connection cross, never a model object.
 
 **Stage 0 is the identity.** Nothing is specialized, so the residue is
 the whole app and the output is the app as source control holds it:
@@ -259,55 +259,141 @@ Keeping real Active Record and Active Support objects caps the target
 at roughly 2x. The rest of the distance to 4.2x is those objects, and
 it is removed only when a whole request avoids them.
 
-### Prototype: whole-route replacement
+### Whole-route replacement
 
-`scripts/lobsters-rails-replay --lowered TREE` (bridge in
-`scripts/lobsters_futamura_bridge.rb`) loads the `--target ruby` emit
-of Lobsters into a `Ruby::Box` inside the Rails process. The box gives
-the runtime's `ActiveRecord`, `ActionController` and `ActiveSupport`
-their own constants, separate from Rails'. A middleware placed after
-Rails' session store hands every GET to the lowered dispatcher. Rails
-keeps everything else, including the login POST.
+Specializing inside Rails keeps Rails' objects, and the profile above
+caps that at roughly 2x. The rest is reached by not running Rails at
+all for a request: `--target futamura` also ships the app's
+`--target ruby` emit, and serves a route from it when the analysis
+says nothing on that route is left for Rails. It is the residue policy
+of this target applied at route granularity: a route either runs
+entirely on the lowered app, or entirely on Rails.
 
-Only the session crosses the boundary. Rails' session goes in as the
-lowered app's signed session cookie, and keys the lowered app changes
-are written back into Rails' session. CSRF tokens use Rails' format
-on both sides, so a form the lowered app renders posts to Rails and
-verifies. No model object built on one side reaches the other, so the
+**Ruby 4.1's `Ruby::Box` is a hard dependency.** The Roundhouse runtime
+defines Rails' own top-level constants (`ActiveRecord`,
+`ActionController`, ...), so it cannot share Rails' namespace. A
+`Ruby::Box` gives it its own: the lowered app is loaded into a box
+inside the Rails process (`vendor/futamura/lowered/`), and its
+`ActiveRecord` is not Rails'. Boxes need Ruby 4.1 started with
+`RUBY_BOX=1`. Ruby 4.0.x (4.0.5, 4.0.7) segfaults under `RUBY_BOX=1`
+as soon as Rails loads `net/imap`, before any box exists. The
+generated initializer refuses to boot without a box;
+`FUTAMURA_WHOLE_ROUTE=off` runs the same tree as plain Rails.
+
+**Which routes.** `src/emit/futamura/routes.rs` decides per GET
+action. It walks the classes the `ruby` target emits (controllers with
+their filter chain spelled out in `process_action`, views, models,
+library classes), starting from one action's arm of `process_action`,
+and closes over calls. An error diagnostic from the `ruby` analysis
+means a construct may be emitted wrong, so an action whose walk
+reaches one stays on Rails. The walk over-approximates: a send whose
+receiver the analysis did not type reaches every app instance method
+of that name, and a `case` on a value it cannot decide reaches every
+arm. Errors are attributed to the method whose body holds the
+expression; methods the lowering synthesized (attribute readers and
+writers, `from_stmt`, row classes) borrow spans from the source and do
+not own errors. Also left to Rails, whatever the walk says: every verb
+but GET (writes keep the model callbacks gems add, which the lowered
+models do not have), and any action a route the lowered router refused
+could shadow (Rails would match the refused route first).
+
+`ROUNDHOUSE_FUTAMURA_LEDGER=1` prints the decision for every GET
+action, and for each one left to Rails the first error and the call
+path to it (`=2` also lists every error with the methods that own it):
+
+```
+rails  GET /top home#top: reaches 1 error(s), first app/controllers/home_controller.rb:267
+       `>` with incompatible operand types: Integer | String | ... | nil? > Integer
+       via HomeController#process_action -> HomeController#top
+```
+
+That makes the `ruby` target's error ledger read as a list of routes,
+ordered by what they cost: clearing an error moves the routes it
+blocked onto the lowered path.
+
+**What crosses the boundary.** A middleware just after Rails' session
+store hands a GET to the lowered dispatcher; the dispatcher declines
+any action not on the list before app code runs, and Rails serves it.
+For a served request:
+
+- *The session* goes in as a Hash of its String values
+  (`roundhouse.session`), and the keys the lowered app changes are
+  written back into Rails' session, which Rails' own store persists.
+  Nothing is signed or verified twice. CSRF tokens are Rails' format on
+  both sides, so a form the lowered app renders posts to Rails and
+  verifies.
+- *The flash* goes in from Rails' session (`flashes` minus `discard`)
+  and what survives the request goes back.
+- *The database connection* is Rails' own, checked out of its pool and
+  lent for the request (`Db.with_lent_connection`). A box loads its own
+  copy of every native extension, `sqlite3` included, so the lowered
+  app opening the database file itself would put two SQLite libraries
+  on one file in one process, which SQLite documents as a corruption
+  hazard (each copy can release the other's POSIX locks). Calling
+  through Rails' connection object runs Rails' copy. It also keeps
+  Rails' open transaction in view, so a test's fixtures are what the
+  lowered app reads, and its writes roll back with the test.
+
+No model object built on one side ever reaches the other, so the
 coupling that makes model stand-ins hard (class identity in `is_a?`,
-policy and serializer lookup by class name) never arises on a
-replaced route.
+policy and serializer lookup by class name) never arises on a replaced
+route.
 
-Measured (October 2026, rubix3, Ruby master 46033eff6c + YJIT, frozen
-sequence, every GET served by the lowered app):
+**Not shared.** `Rails.cache`: the lowered app keeps its own in-memory
+store, and a key Rails deletes stays cached on the lowered side until
+it expires. Sharing the store is not a matter of pointing at it: a
+cached value holding model objects would load as the other side's
+classes.
+
+**Gates.** Real-blog's own suite on the emitted tree under Ruby 4.1 and
+`RUBY_BOX=1` gives the same result as on the source (21 runs, 0
+failures, its GET requests served by the lowered app inside Rails' test
+transactions). Lobsters' 26 parity routes are content-equivalent to
+plain Rails under `scripts/lobsters-content-diff`.
+
+**Measured** (October 2026, rubix3, Ruby master 46033eff6c + YJIT, the
+frozen 114-visit sequence; the analysis clears 48 of Lobsters' 84 GET
+actions, which is 40% of the visits; no request fell back):
 
 | | ms per pass |
 |---|--:|
-| Rails | 1,261-1,280 |
-| Rails under `RUBY_BOX=1` | 1,519 |
-| Rails + lowered GETs | 377-379 (min 337, max 533) |
-| `--target ruby` alone | 287 |
+| Rails | 1,264 |
+| Rails with a memory cache store instead of Lobsters' file store | 1,203 |
+| Futamura, specializations 1-2 only | 1,249 |
+| the same under `RUBY_BOX=1` | 1,490 |
+| Futamura with whole-route replacement | 1,085 |
 
-Content: 25 of 26 routes equivalent to Rails' under
-`scripts/lobsters-content-diff`. `/rss` differs, the same gap the
-`ruby` lane has.
+Per route (p25, ms), lowered routes against Rails and Rails under a
+box:
 
-What the prototype does not settle:
+| | Rails | Rails, `RUBY_BOX=1` | whole-route |
+|---|--:|--:|--:|
+| `/s/:id` | 14.05 | 16.65 | 2.98 |
+| `/comments` | 17.69 | 20.39 | 4.61 |
+| `/settings` | 7.20 | 8.13 | 1.72 |
+| `/u` | 5.60 | 5.94 | 2.47 |
+| `/hottest` (left to Rails) | 23.55 | 31.46 | 29.97 |
 
-- **Ruby version.** Ruby 4.0.x (4.0.5, 4.0.7) segfaults under
-  `RUBY_BOX=1` as soon as Rails loads `net/imap`, before any box is
-  created. Ruby master does not.
-- **The Box tax.** `RUBY_BOX=1` slows Rails itself by ~20%. A route
-  left to Rails pays that.
-- **Bridge cost.** ~0.8 ms per request separates the hybrid from the
-  lowered app alone. That covers Rails' middleware in front of the
-  session store, plus signing and verifying the session for each
-  request. Iteration times also vary more than either app alone.
-- **One database.** The lowered app reads its own in-memory copy,
-  seeded like Rails'. That is sound only for a GET-only benchmark.
-- **Route selection.** "Every GET, falling back to Rails on 404 or
-  >= 500" is a prototype rule. The target would choose the routes the
-  analysis lowers with no residue.
+A lowered route runs 2.3-4.7x faster than Rails. The pass as a whole
+gains 1.17x, because `RUBY_BOX=1` slows Rails itself by ~19% and every
+route left to Rails pays that. Peak RSS is 386 MB against Rails' 347.
+With every GET lowered (the October 12 prototype) the pass ran at
+377 ms, 3.3x; the distance between the two is the error ledger.
+
+What it does not settle:
+
+- **The Box tax.** ~19% on every request Rails serves, measured with
+  no box created at all; it is the cost of `RUBY_BOX=1` alone. Until it
+  shrinks, whole-route pays only when most of the traffic is lowered.
+  Under it, a `warn` in a required file prints even with `$VERBOSE`
+  nil, so Rails' silenced probe for the `msgpack` gem shows up as a
+  warning.
+- **Writes.** GET only. A lowered write would skip the model callbacks
+  gems add.
+- **The cache.** See above.
+- **Precision.** The walk is conservative; a `case` over a view's
+  partial name reaches every partial, which is what keeps Lobsters'
+  front pages on Rails (one nullable comparison in `_single_tag`).
 
 ## Why `roda` and `futamura` stay separate targets
 
