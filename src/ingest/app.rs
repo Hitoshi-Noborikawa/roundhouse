@@ -722,8 +722,14 @@ pub fn ingest_app_with_vfs<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResult
                         let outer = model.name.clone();
                         app.models.push(model);
                         // Classes nested in the model's body are classes
-                        // of their own, exactly as under `app/models`.
-                        if let Ok(classes) = ingest_library_classes(&source, &path_str) {
+                        // of their own, exactly as under `app/models` —
+                        // and, same as there, the plain (non-nested)
+                        // walk would re-walk the model's own class with
+                        // none of its synthesized methods in scope, so
+                        // an alias naming one (an enum predicate, say)
+                        // would hard-fail here and drop every genuinely
+                        // nested class in the file too.
+                        if let Ok(classes) = ingest_nested_library_classes(&source, &path_str) {
                             let nested = nested_under(&outer, classes);
                             let (concern_items, concern_enum_decls) =
                                 ingest_concern_model_items_with_constants(

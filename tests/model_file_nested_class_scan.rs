@@ -120,3 +120,57 @@ end
         app.library_classes.iter().map(|c| c.name.0.as_str()).collect::<Vec<_>>()
     );
 }
+
+/// Same gap, the OTHER model-file site: a model that lives under a
+/// support root (`lib/`, a package's own autoload path, …) instead of
+/// `app/models` is ingested by a second loop in `app.rs` (the one
+/// `model_roots.rs` covers — "an ActiveRecord class is a model
+/// wherever it lives"). That loop's own "classes nested in the
+/// model's body are classes of their own" second walk still called
+/// the general-purpose `ingest_library_classes` — the exact bug this
+/// file's other tests fixed for `app/models`, left unfixed here. An
+/// enum alias in a lib-rooted model dropped its nested class with no
+/// diagnostic at all.
+#[test]
+fn a_support_root_model_with_an_enum_alias_still_ingests_its_nested_class() {
+    let source = r#"class Widget < ApplicationRecord
+  enum :state, { idle: 0, accepted: 1 }
+  alias enabled? accepted?
+
+  class Badge
+    def self.describe
+      "nested"
+    end
+  end
+end
+"#;
+    let app = ingest_app_from_tree(tree(&[
+        ("db/schema.rb", SCHEMA),
+        ("app/models/application_record.rb", "class ApplicationRecord < ActiveRecord::Base\n  self.abstract_class = true\nend\n"),
+        ("lib/pkg/widget.rb", source),
+    ]))
+    .expect("must ingest despite the enum alias");
+
+    // The model itself ingested (not dropped as a library class).
+    assert!(
+        app.models.iter().any(|m| m.name.0.as_str() == "Widget"),
+        "Widget must ingest as a model: {:?}",
+        app.models.iter().map(|m| m.name.0.as_str()).collect::<Vec<_>>()
+    );
+
+    let nested = app
+        .library_classes
+        .iter()
+        .find(|c| c.name.0.as_str() == "Widget::Badge")
+        .expect("the nested class must still be registered as a library class");
+    assert!(
+        nested.methods.iter().any(|m| m.name.as_str() == "describe"),
+        "the nested class's own method must survive: {nested:?}"
+    );
+
+    assert!(
+        app.library_classes.iter().all(|c| c.name.0.as_str() != "Widget"),
+        "the model's own class must not be duplicated as a library class: {:?}",
+        app.library_classes.iter().map(|c| c.name.0.as_str()).collect::<Vec<_>>()
+    );
+}
