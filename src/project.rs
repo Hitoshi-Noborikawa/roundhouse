@@ -5916,7 +5916,10 @@ fn spinel_files(app: &App, fixture: &Path) -> Result<(Vec<(String, String)>, Vec
     }
     let public = fixture.join("public");
     if public.exists() {
-        walk_dir_into(&public, "public/", &mut files)?;
+        // Everything under public/, at any depth: Rails serves the directory as
+        // it is (ActionDispatch::Static), and hindmost's terminal loads xterm
+        // from public/vendor/xterm, which the dev-directory skip dropped.
+        walk_dir_into_skipping(&public, "public/", &[], &mut files)?;
     }
     // `test/fixtures/files` — `file_fixture_path`, which `file_fixture`,
     // `fixture_file_upload` and an `ActiveStorage::FixtureSet.blob`
@@ -8581,6 +8584,16 @@ fn walk_dir_into(
     prefix: &str,
     out: &mut Vec<(String, String)>,
 ) -> Result<(), String> {
+    walk_dir_into_skipping(src, prefix, SKIP_DIRS, out)
+}
+
+/// [`walk_dir_into`] with the directory names to skip given explicitly.
+fn walk_dir_into_skipping(
+    src: &Path,
+    prefix: &str,
+    skip_dirs: &[&str],
+    out: &mut Vec<(String, String)>,
+) -> Result<(), String> {
     if !src.exists() {
         return Err(format!("missing {}/", src.display()));
     }
@@ -8595,7 +8608,7 @@ fn walk_dir_into(
             }
             let path = entry.path();
             let ty = entry.file_type().map_err(|e| format!("stat: {e}"))?;
-            if ty.is_dir() && SKIP_DIRS.contains(&name_str.as_ref()) {
+            if ty.is_dir() && skip_dirs.contains(&name_str.as_ref()) {
                 continue;
             }
             let nested = format!("{sub_prefix}{name_str}");
