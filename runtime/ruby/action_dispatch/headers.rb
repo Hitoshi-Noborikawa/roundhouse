@@ -53,12 +53,19 @@ module ActionDispatch
       # request logger or a header filter reads them all. `map` is
       # spelled out rather than taken from `include Enumerable`, so a
       # target that compiles this class needs no mixin.
+      #
+      # Without a block both answer an Enumerator over the `[key, value]`
+      # pairs, as Rails' do (`each` is the env's `each_header`, and
+      # Enumerable's `map` is lazy until given a block): the env Hash's
+      # own blockless `each` / `map`.
       def each
+        return @env.each unless block_given?
         @env.each { |key, value| yield key, value }
         self
       end
 
       def map
+        return @env.map unless block_given?
         out = []
         @env.each { |key, value| out << yield(key, value) }
         out
