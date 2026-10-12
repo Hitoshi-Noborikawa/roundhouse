@@ -201,3 +201,23 @@ fn empty_path_nested_resource_has_no_trailing_slash() {
     let got = paths("  namespace :api do\n    resources :gadgets, path: '/', only: %i[index]\n  end");
     assert_eq!(got, ["/api Api::GadgetsController#index"], "{got:#?}");
 }
+
+/// A root scope (`scope path: "/"`) adds nothing either: the resource
+/// mounted at its root is served at `/`, `/new`, `/:id`, never `//new`.
+#[test]
+fn empty_path_resource_in_a_root_scope_has_no_double_slash() {
+    for scope in [r#""/""#, r#""""#] {
+        let got = table(&routes(&format!("  scope path: {scope} do\n    resources :parts, path: \"/\"\n  end")));
+        assert_eq!(
+            got,
+            [
+                "parts / Parts#index",
+                "new_part /new Parts#new",
+                "part /:id Parts#show",
+                "edit_part /:id/edit Parts#edit",
+            ]
+            .map(|s| s.replace("Parts#", "PartsController#")),
+            "scope path: {scope}"
+        );
+    }
+}

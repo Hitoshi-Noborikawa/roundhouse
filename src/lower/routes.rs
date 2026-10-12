@@ -887,6 +887,9 @@ fn defaults_for(ctx: &Ctx, params: &[String]) -> Vec<(String, String)> {
 /// segments; guard the bare-`/` and missing-slash edges (`root` inside
 /// a namespace, `get "health"` with no leading slash).
 fn prefix_path(ns: &str, path: &str) -> String {
+    // A root scope (`scope path: "/"`) contributes nothing, and a scope
+    // never ends in a slash: Rails normalizes `//new` to `/new`.
+    let ns = ns.trim_end_matches('/');
     if ns.is_empty() {
         if path.starts_with('/') || path.is_empty() {
             path.to_string()
