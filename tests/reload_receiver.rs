@@ -241,6 +241,45 @@ raise 'concern lock result was discarded' unless widget.lock!.name == 'concern o
 }
 
 #[test]
+fn lock_bang_pads_reload_optional_arg_on_rust() {
+    // #730 widened `reload(options = nil)`. Rust emits the optional as a
+    // required `serde_json::Value` param; `lock!`'s bare `reload` must pad
+    // the default or compare(rust) hits E0061 (Full val on tip 13d17fa2).
+    // Plain non-AR classes (WidgetStamp) are refused on rust — keep the
+    // overlay to AR models so emit stays clean.
+    let (emitted, errors) = emit_and_run::empty_app()
+        .write(
+            "db/schema.rb",
+            "ActiveRecord::Schema.define do\n  create_table :widgets do |t|\n    t.string :name\n  end\nend\n",
+        )
+        .write(
+            "app/models/application_record.rb",
+            "class ApplicationRecord < ActiveRecord::Base\n  primary_abstract_class\nend\n",
+        )
+        .write("app/models/widget.rb", "class Widget < ApplicationRecord\nend\n")
+        .write(
+            "app/controllers/application_controller.rb",
+            "class ApplicationController < ActionController::API\nend\n",
+        )
+        .write(
+            "config/routes.rb",
+            "Rails.application.routes.draw do\nend\n",
+        )
+        .emit(roundhouse::project::BuildTarget::Rust);
+    assert!(errors.is_empty(), "{errors:?}");
+    let base = std::fs::read_to_string(emitted.join("src/active_record_base.rs")).unwrap();
+    assert!(
+        !base.contains("self.reload()"),
+        "lock! must not call zero-arg reload once reload takes options:\n{base}"
+    );
+    assert!(
+        base.contains("self.reload(serde_json::Value::Null)"),
+        "lock! should pad reload's optional options with Null:\n{base}"
+    );
+}
+
+
+#[test]
 #[ignore = "requires the native Spinel compiler"]
 fn reload_and_lock_keep_the_receiver_type_natively() {
     let script = format!("Db.configure(\":memory:\")\nDb.exec(\"CREATE TABLE widgets (id INTEGER PRIMARY KEY, name TEXT)\")\n{ASSERTIONS}");

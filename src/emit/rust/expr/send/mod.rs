@@ -373,6 +373,21 @@ pub(super) fn emit_send(
                 }
             }
         }
+        // Sibling instance methods with omitted trailing defaults —
+        // e.g. Base#lock! → `self.reload()` after #730 made
+        // `reload(options = nil)`. Class-method SelfRef already pads
+        // via `current_class_method_param_tys` above; instance SelfRef
+        // previously only padded controller shims, so lock!'s bare
+        // reload call emitted zero-arg against a one-arg rust sig
+        // (Full-val compare(rust) E0061).
+        if let Some(param_tys) = current_class_method_param_tys(&effective_method) {
+            for i in out.len()..param_tys.len() {
+                match param_tys.get(i).and_then(synth_default_for_ty) {
+                    Some(d) => out.push(d),
+                    None => break,
+                }
+            }
+        }
         out
     } else if let ExprNode::Const { path } = &*r.node {
         let class = path.last().map(|s| s.as_str()).unwrap_or("");
