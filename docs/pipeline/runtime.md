@@ -1853,7 +1853,10 @@ reader of `errors` as it was.
 **What it costs.** A message pushed by anything other than those two
 lowerings has no attribute beside it. `errors.delete` and
 `errors.import`, which some apps call, are not modeled; an `errors <<`
-written by hand pushes a message no field claims.
+written by hand pushes a message no field claims. Each grounding reads
+the record twice (once for `errors`, once for `error_attributes`), so
+one whose record is a call with arguments or a receiver
+(`Draft.latest.errors[:url]`) stays residue.
 
 ### A Turbo stream name is not signed — CLOSED on the ruby family
 
