@@ -357,12 +357,17 @@ module ActiveRecord
       @wheres.each_with_index do |clause, idx|
         cols = @where_cols[idx]
         hit = false
+        other = false
         j = 0
         while j < cols.length
-          hit = true if targets.include?(cols[j])
+          if targets.include?(cols[j])
+            hit = true
+          else
+            other = true
+          end
           j += 1
         end
-        if hit && cols.length > 1
+        if hit && other
           raise ArgumentError, "unscope(where:) cannot split the multi-column condition #{clause}"
         end
         unless hit
@@ -2380,17 +2385,13 @@ module ActiveRecord
     # A hash of conditions ANDed: `{is_deleted: false, user_id: 3}` ->
     # `is_deleted = 0 AND user_id = 3`. Array value -> `IN`, nil ->
     # `IS NULL`, nested Hash -> qualified `table.col = ...`.
-    # The name `unscope(where:)` matches a hash condition on. A column of
-    # this relation's own table -- bare, `"articles.col"`, or nested
-    # `articles: { col: }` -- is its bare name. A foreign table's column
-    # keeps its qualifier, which no bare target matches, so a condition on
-    # another table stays put (Rails unscopes by attribute name on the
-    # relation's own table only).
+    # The name `unscope(where:)` matches a hash condition on: the bare
+    # column, whatever table it was written against (`"comments.col"`,
+    # `comments: { col: }`). Rails matches by attribute name on any table,
+    # so a joined table's predicate on the same column goes too.
     def hash_column_name(col)
       return col unless col.include?(".")
-      halves = col.split(".")
-      return halves.last.to_s if halves.first.to_s == @table
-      col
+      col.split(".").last.to_s
     end
 
     def hash_conditions(hash)
