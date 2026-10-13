@@ -88,6 +88,9 @@ module JsonBuilder
     # Not `finite?`, which not every target's Float answers: NaN and the infinities are the values `v - v` is not 0.0 for, and Rails writes them `null`.
     return (v - v == 0.0 ? v.to_s : "null") if v.is_a?(Float)
     return "\"#{encode_string(v)}\"" if v.is_a?(String)
+    # An Array value (`json.tags([a, nil])`) is a JSON array of its
+    # elements, each encoded as a value is; not its `to_s`.
+    return "[" + v.map { |e| encode_value(e) }.join(",") + "]" if v.is_a?(Array)
     # Fallback: stringify and quote. Call sites convert Time /
     # BigDecimal / etc. before reaching here.
     "\"#{encode_string(v.to_s)}\""
