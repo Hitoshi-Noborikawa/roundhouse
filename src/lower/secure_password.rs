@@ -55,6 +55,9 @@ pub(crate) fn push_secure_password_methods(methods: &mut Vec<MethodDef>, model: 
         variants: vec![self_ty.clone(), Ty::Bool],
     };
     let plaintext_ty = Ty::Union { variants: vec![Ty::Str, Ty::Nil] };
+    // `self` or `false`, as Rails answers: a signature of the record
+    // alone is a seed spinel refuses as contradicted by the `false` arm.
+    let auth_ty = Ty::Union { variants: vec![self_ty, Ty::Bool] };
     push_synth_instance_method(
         methods,
         model,
