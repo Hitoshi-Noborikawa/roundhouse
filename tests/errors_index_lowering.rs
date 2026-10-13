@@ -177,19 +177,38 @@ end
 }
 
 #[test]
-fn whole_messages_hash_declines_with_residue() {
+fn whole_messages_hash_reads_the_record_s_error_details() {
     let (out, diags) = lower_and_emit(
         r#"
 class Draft
   def problems
     errors.messages.compact_blank
   end
+
+  def problems_on(field)
+    errors.messages[field]
+  end
 end
 "#,
     );
-    assert!(out.contains("errors.messages"), "left alone:\n{out}");
-    assert_eq!(diags.len(), 1, "expected one residue entry: {diags:?}");
-    assert!(diags[0].contains("errors.messages"), "{diags:?}");
+    assert!(out.contains("ActiveSupport.errors_messages(error_details).compact_blank"), "{out}");
+    assert!(out.contains("ActiveSupport.errors_messages(error_details)[field]"), "a field that is not a literal reads the Hash:\n{out}");
+    assert!(diags.is_empty(), "unexpected residue: {diags:?}");
+}
+
+#[test]
+fn attribute_names_reads_the_record_s_error_details() {
+    let (out, diags) = lower_and_emit(
+        r#"
+class Draft
+  def problem_names
+    errors.attribute_names
+  end
+end
+"#,
+    );
+    assert!(out.contains("ActiveSupport.errors_attribute_names(error_details)"), "{out}");
+    assert!(diags.is_empty(), "unexpected residue: {diags:?}");
 }
 
 #[test]

@@ -20,7 +20,10 @@
 //!
 //! `errors.to_hash` is the same projection for every attribute at once:
 //! `ActiveSupport.errors_to_hash(<recv>.error_details)` groups the
-//! details' messages by attribute, in the order Rails does.
+//! details' messages by attribute, in the order Rails does. A
+//! `messages` the per-field rewrites leave is that Hash too, through
+//! `errors_messages`, and `attribute_names` is
+//! `errors_attribute_names`.
 //!
 //! Views take the same rewrite: the scaffold's form partial reads
 //! `<record>.errors[:field].none?` / `.any?` inside a `class:` array,
@@ -39,15 +42,15 @@ pub fn apply_errors_index_lowering(app: &mut App) -> Vec<Diagnostic> {
     let mut diags = Vec::new();
     super::for_each_owned_hook_body(app, &mut |_, body| {
         rewrite(body, &mut diags);
-        ledger_messages(body, &mut diags);
+        rewrite_whole_messages(body);
     });
     super::for_each_test_body(app, &mut |body| {
         rewrite(body, &mut diags);
-        ledger_messages(body, &mut diags);
+        rewrite_whole_messages(body);
     });
     for view in &mut app.views {
         rewrite(&mut view.body, &mut diags);
-        ledger_messages(&mut view.body, &mut diags);
+        rewrite_whole_messages(&mut view.body);
     }
     diags
 }
@@ -84,6 +87,13 @@ fn is_messages_read(e: &Expr) -> bool {
             if method.as_str() == "messages" && args.is_empty() && is_errors_read(r))
 }
 
+fn sym_lit(e: &Expr) -> Option<&Symbol> {
+    match &*e.node {
+        ExprNode::Lit { value: Literal::Sym { value } } => Some(value),
+        _ => None,
+    }
+}
+
 fn send(span: crate::span::Span, recv: Expr, method: &str, args: Vec<Expr>, ty: Ty) -> Expr {
     let mut e = Expr::new(
         span,
@@ -102,12 +112,13 @@ fn rewrite_messages(expr: &mut Expr, diags: &mut Vec<Diagnostic>) {
     }
     let ExprNode::Send { recv: Some(errors), .. } = &*r.node else { return };
     let accumulator = errors.clone();
+    // A field that is not a Symbol literal reads the whole Hash instead, which `rewrite_whole_messages` builds.
     let replacement = match (method.as_str(), args.as_slice()) {
-        ("[]", [_]) => {
+        ("[]", [field]) if sym_lit(field).is_some() => {
             *r = accumulator;
             None
         }
-        ("key?" | "has_key?" | "include?" | "member?", [field]) => {
+        ("key?" | "has_key?" | "include?" | "member?", [field]) if sym_lit(field).is_some() => {
             let field = field.clone();
             let mut index = send(span, accumulator, "[]", vec![field], Ty::Array { elem: std::sync::Arc::new(Ty::Str) });
             rewrite_index(&mut index, diags);
@@ -130,13 +141,29 @@ fn rewrite(expr: &mut Expr, diags: &mut Vec<Diagnostic>) {
     rewrite_render_json(expr);
 }
 
-/// `<owner>.errors.to_hash` and `.as_json` → `ActiveSupport.errors_to_hash(<owner>.error_details)`, typed.
-fn rewrite_to_hash(expr: &mut Expr) {
-    let ExprNode::Send { recv: Some(reader), method, args, block: None, .. } = &*expr.node else { return };
-    if !matches!(method.as_str(), "to_hash" | "as_json") || !args.is_empty() || !is_errors_read(reader) {
+/// What the per-field rewrites leave of `errors.messages` is the Hash itself.
+fn rewrite_whole_messages(expr: &mut Expr) {
+    expr.node.for_each_child_mut(&mut |c| rewrite_whole_messages(c));
+    if !is_messages_read(expr) {
         return;
     }
-    *expr = errors_hash(expr.span, reader);
+    let ExprNode::Send { recv: Some(reader), .. } = &*expr.node else { unreachable!("a messages read") };
+    *expr = details_call(expr.span, reader, "errors_messages", messages_ty());
+}
+
+/// `<owner>.errors.to_hash` and `.as_json` → `ActiveSupport.errors_to_hash(<owner>.error_details)`,
+/// `.attribute_names` → `ActiveSupport.errors_attribute_names(…)`, typed.
+fn rewrite_to_hash(expr: &mut Expr) {
+    let ExprNode::Send { recv: Some(reader), method, args, block: None, .. } = &*expr.node else { return };
+    if !args.is_empty() || !is_errors_read(reader) {
+        return;
+    }
+    let (helper, ty) = match method.as_str() {
+        "to_hash" | "as_json" => ("errors_to_hash", messages_ty()),
+        "attribute_names" => ("errors_attribute_names", Ty::Array { elem: std::sync::Arc::new(Ty::Sym) }),
+        _ => return,
+    };
+    *expr = details_call(expr.span, reader, helper, ty);
 }
 
 // Not the Array of full messages, nor `errors_to_hash`: Rails' `render json:` writes `errors.as_json` keyed by attribute, and `Base#errors_json` reaches every target with String keys, which JSON writes the same.
@@ -156,8 +183,13 @@ fn rewrite_render_json(expr: &mut Expr) {
 }
 
 fn json_value(value: &mut Expr) {
-    if is_errors_read(value) {
-        let ExprNode::Send { recv: owner, .. } = &*value.node else { unreachable!("an errors reader") };
+    let reader = match &*value.node {
+        _ if is_errors_read(value) => Some(&*value),
+        ExprNode::Send { recv: Some(r), .. } if is_messages_read(value) => Some(r),
+        _ => None,
+    };
+    if let Some(reader) = reader {
+        let ExprNode::Send { recv: owner, .. } = &*reader.node else { unreachable!("an errors reader") };
         let mut json = Expr::new(
             value.span,
             ExprNode::Send { recv: owner.clone(), method: Symbol::from("errors_json"), args: Vec::new(), block: None, parenthesized: false },
@@ -176,7 +208,15 @@ fn json_value(value: &mut Expr) {
     }
 }
 
-fn errors_hash(span: crate::span::Span, reader: &Expr) -> Expr {
+fn messages_ty() -> Ty {
+    Ty::Hash {
+        key: std::sync::Arc::new(Ty::Sym),
+        value: std::sync::Arc::new(Ty::Array { elem: std::sync::Arc::new(Ty::Str) }),
+    }
+}
+
+/// `ActiveSupport.<helper>(<owner>.error_details)`, typed.
+fn details_call(span: crate::span::Span, reader: &Expr, helper: &str, ty: Ty) -> Expr {
     let ExprNode::Send { recv: owner, .. } = &*reader.node else { unreachable!("an errors reader") };
     let mut details = Expr::new(
         span,
@@ -187,30 +227,10 @@ fn errors_hash(span: crate::span::Span, reader: &Expr) -> Expr {
     support.ty = Some(Ty::Class { id: crate::ident::ClassId(Symbol::from("ActiveSupport")), args: vec![].into() });
     let mut call = Expr::new(
         span,
-        ExprNode::Send { recv: Some(support), method: Symbol::from("errors_to_hash"), args: vec![details], block: None, parenthesized: true },
+        ExprNode::Send { recv: Some(support), method: Symbol::from(helper), args: vec![details], block: None, parenthesized: true },
     );
-    call.ty = Some(Ty::Hash {
-        key: std::sync::Arc::new(Ty::Sym),
-        value: std::sync::Arc::new(Ty::Array {
-            elem: std::sync::Arc::new(Ty::Str),
-        }),
-    });
+    call.ty = Some(ty);
     call
-}
-
-fn ledger_messages(expr: &mut Expr, diags: &mut Vec<Diagnostic>) {
-    if is_messages_read(expr) {
-        diags.push(crate::lower::residue_diagnostic(
-            "errors_index",
-            "errors.messages",
-            expr.span,
-            "whole_hash",
-            "`errors.messages` grounds only as `[]`, `key?`, `blank?`/`empty?` or `present?`/`any?`; the whole \
-             Hash is not built"
-                .to_string(),
-        ));
-    }
-    expr.node.for_each_child_mut(&mut |c| ledger_messages(c, diags));
 }
 
 fn rewrite_index(expr: &mut Expr, diags: &mut Vec<Diagnostic>) {

@@ -1367,6 +1367,53 @@ fn errors_to_hash_does_not_depend_on_the_message_format() {
     errors_to_hash_app("%{message} (%{attribute})").run_ruby(ERRORS_TO_HASH).assert_passes();
 }
 
+/// `attribute_names` and a `messages` read as a whole answer what
+/// Rails 8.1 does: the Hash answers `[]` for an attribute with no
+/// errors, and both it and the names are frozen.
+fn errors_readers_app() -> emit_and_run::Overlay {
+    errors_to_hash_app("%{attribute} %{message}").edit(
+        "app/models/article.rb",
+        "  def errors_hash\n",
+        "  def error_names
+    errors.attribute_names
+  end
+
+  def all_messages
+    errors.messages
+  end
+
+  def messages_on(field)
+    errors.messages[field]
+  end
+
+  def errors_hash\n",
+    )
+}
+
+const ERRORS_READERS: &str = r#"a = Article.new(title: "", body: "odd")
+a.valid?
+raise a.error_names.inspect unless a.error_names == [:title, :body, :base] && a.error_names.frozen?
+expected = { title: ["can't be blank"], body: ["is too short (minimum is 10 characters)"], base: ["is odd"] }
+raise a.all_messages.inspect unless a.all_messages == expected && a.all_messages.frozen?
+raise a.all_messages[:nothing].inspect unless a.all_messages[:nothing] == []
+raise a.messages_on(:base).inspect unless a.messages_on(:base) == ["is odd"] && a.messages_on(:nothing) == []
+b = Article.new(title: "A title", body: "A long enough body")
+b.valid?
+raise b.error_names.inspect unless b.error_names.empty? && b.all_messages.empty?
+puts "errors readers passed"
+"#;
+
+#[test]
+fn errors_readers_answer_from_the_error_details() {
+    errors_readers_app().run_ruby(ERRORS_READERS).assert_passes();
+}
+
+#[test]
+#[ignore = "requires the Spinel toolchain"]
+fn errors_readers_answer_from_the_error_details_on_spinel() {
+    errors_readers_app().run_spinel(ERRORS_READERS).assert_passes();
+}
+
 #[test]
 #[ignore = "requires the Spinel toolchain"]
 fn errors_to_hash_groups_messages_by_attribute_on_spinel() {
@@ -1382,6 +1429,17 @@ fn errors_to_hash_is_a_gap_on_strict_targets() {
         2,
         "{errors:#?}"
     );
+}
+
+/// The Hash and the names do not reach a strict target, as `to_hash` does not.
+#[test]
+fn errors_readers_are_a_gap_on_strict_targets() {
+    let (_emitted, errors) = errors_readers_app().emit(roundhouse::project::BuildTarget::Crystal);
+    let gated = |helper: &str| {
+        errors.iter().filter(|e| e.contains(&format!("ActiveSupport.{helper} is only available on the ruby family and spinel"))).count()
+    };
+    assert_eq!((gated("errors_to_hash"), gated("errors_messages"), gated("errors_attribute_names")), (2, 2, 1), "{errors:#?}");
+    assert_eq!(errors.len(), 5, "{errors:#?}");
 }
 
 /// A field the lowering cannot humanize at compile time keeps its error.
@@ -3318,6 +3376,55 @@ end
         )
         .run_test("test/controllers/drafts_controller_test.rb")
         .assert_passes();
+}
+
+/// `render json: { error: record.errors.messages }` writes the same Hash Rails does.
+fn render_json_errors_messages_app() -> emit_and_run::Overlay {
+    emit_and_run::real_blog()
+        .edit(
+            "config/routes.rb",
+            "  root \"articles#index\"\n",
+            "  root \"articles#index\"\n  get \"/drafts/check\", to: \"drafts#check\"\n",
+        )
+        .write(
+            "app/controllers/drafts_controller.rb",
+            r#"class DraftsController < ApplicationController
+  def check
+    article = Article.new(title: "", body: "x")
+    if article.valid?
+      head :ok
+    else
+      render json: { error: article.errors.messages }, status: :unprocessable_entity
+    end
+  end
+end
+"#,
+        )
+        .write(
+            "test/controllers/drafts_controller_test.rb",
+            r#"require "test_helper"
+
+class DraftsControllerTest < ActionDispatch::IntegrationTest
+  test "messages inside a hash" do
+    get "/drafts/check"
+    assert_response :unprocessable_entity
+    assert_equal %({"error":{"title":["can't be blank"],"body":["is too short (minimum is 10 characters)"]}}), response.body
+  end
+end
+"#,
+        )
+}
+
+#[test]
+fn render_json_errors_messages_is_keyed_by_attribute() {
+    render_json_errors_messages_app().run_test("test/controllers/drafts_controller_test.rb").assert_passes();
+}
+
+/// Not `errors_messages`, which a strict target does not have: the rendered Hash is `errors_json`, which every target has.
+#[test]
+fn render_json_errors_messages_reaches_strict_targets() {
+    let (_emitted, errors) = render_json_errors_messages_app().emit(roundhouse::project::BuildTarget::Crystal);
+    assert!(errors.is_empty(), "{errors:#?}");
 }
 
 /// offset. Expected values are ActiveSupport 8.1's.
@@ -13572,4 +13679,5 @@ puts "PASS friendly oracle"
 }
 #[path = "emit_and_run/acts_as_votable.rs"]
 mod acts_as_votable;
+
 
