@@ -65,7 +65,15 @@ module ActionController
       return true unless conditional_get_verb_ok?
       inm = request_if_none_match
       return true if inm.nil?
-      !if_none_match_matches?(inm, tag)
+      # Rails: matching INM both answers 304 and reports fresh (`false`)
+      # so `if stale?(etag:)` skips the action body with a performed
+      # response — same as `fresh_when`, not a bare boolean.
+      if if_none_match_matches?(inm, tag)
+        head(:not_modified)
+        false
+      else
+        true
+      end
     end
 
     def conditional_get_verb_ok?

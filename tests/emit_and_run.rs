@@ -11132,6 +11132,27 @@ stale_post.request = ActionDispatch::Request.new({
   "HTTP_IF_NONE_MATCH" => "W/\"abc123\"",
 })
 raise "stale? post" unless stale_post.stale?(etag: "abc123") == true
+raise "stale? post performed" if stale_post.performed?
+
+# Matching INM on GET: stale? is false AND the response is 304.
+stale_fresh = ActionController::Base.new
+stale_fresh.request = ActionDispatch::Request.new({
+  "REQUEST_METHOD" => "GET",
+  "HTTP_IF_NONE_MATCH" => "W/\"abc123\"",
+})
+raise "stale? match" unless stale_fresh.stale?(etag: "abc123") == false
+raise "stale? match status #{stale_fresh.status}" unless stale_fresh.status == 304
+raise "stale? match performed" unless stale_fresh.performed?
+
+# Mismatch stays stale and unperformed so the action can render.
+stale_miss = ActionController::Base.new
+stale_miss.request = ActionDispatch::Request.new({
+  "REQUEST_METHOD" => "GET",
+  "HTTP_IF_NONE_MATCH" => "W/\"old\"",
+})
+raise "stale? miss" unless stale_miss.stale?(etag: "abc123") == true
+raise "stale? miss performed" if stale_miss.performed?
+raise "stale? miss etag" unless stale_miss.headers["ETag"] == "W/\"abc123\""
 "##
         )
         .assert_passes();
