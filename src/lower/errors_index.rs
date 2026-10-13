@@ -148,7 +148,12 @@ fn rewrite_to_hash(expr: &mut Expr) {
         span,
         ExprNode::Send { recv: Some(support), method: Symbol::from("errors_to_hash"), args: vec![details], block: None, parenthesized: true },
     );
-    call.ty = Some(Ty::Hash { key: Box::new(Ty::Sym), value: Box::new(Ty::Array { elem: Box::new(Ty::Str) }) });
+    call.ty = Some(Ty::Hash {
+        key: std::sync::Arc::new(Ty::Sym),
+        value: std::sync::Arc::new(Ty::Array {
+            elem: std::sync::Arc::new(Ty::Str),
+        }),
+    });
     *expr = call;
 }
 
