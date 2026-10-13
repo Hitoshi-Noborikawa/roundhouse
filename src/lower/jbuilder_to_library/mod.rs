@@ -2398,12 +2398,33 @@ fn partial_target(path: &str, resource_dir: &str) -> (Vec<Symbol>, String) {
 /// user whose name is `David <script>alert(123)</script>`.
 ///
 /// Nested `h(h(x))` double-escapes, as it does in Rails.
+///
+/// `raw(x)` is `x`: it only marks the String html_safe, which JSON
+/// encoding ignores (Rails' JSON view renders the same String). Left as
+/// a call, it reached a view module with no `raw` (`undefined method
+/// 'raw'`).
+///
+/// Every value position is walked, inside Arrays, Hashes, conditionals
+/// and blocks as well as call arguments.
 fn rewrite_h_escape(e: &Expr) -> Expr {
-    let new_node = match &*e.node {
-        ExprNode::Send { recv: None, method, args, block: None, .. }
-            if method.as_str() == "h" && args.len() == 1 =>
-        {
-            ExprNode::Send {
+    let mut out = e.clone();
+    rewrite_h_escape_in_place(&mut out);
+    out
+}
+
+fn rewrite_h_escape_in_place(e: &mut Expr) {
+    e.node.for_each_child_mut(&mut rewrite_h_escape_in_place);
+    let ExprNode::Send { recv: None, method, args, block: None, .. } = &mut *e.node else {
+        return;
+    };
+    if args.len() != 1 {
+        return;
+    }
+    match method.as_str() {
+        "h" => {
+            let arg = args.remove(0);
+            let ty = e.ty.clone();
+            *e.node = ExprNode::Send {
                 recv: Some(Expr::new(
                     e.span,
                     ExprNode::Const {
@@ -2411,23 +2432,18 @@ fn rewrite_h_escape(e: &Expr) -> Expr {
                     },
                 )),
                 method: Symbol::from("html_escape"),
-                args: vec![rewrite_h_escape(&args[0])],
+                args: vec![arg],
                 block: None,
                 parenthesized: true,
-            }
+            };
+            e.ty = ty;
         }
-        ExprNode::Send { recv, method, args, block, parenthesized } => ExprNode::Send {
-            recv: recv.as_ref().map(rewrite_h_escape),
-            method: method.clone(),
-            args: args.iter().map(rewrite_h_escape).collect(),
-            block: block.as_ref().map(rewrite_h_escape),
-            parenthesized: *parenthesized,
-        },
-        _ => return e.clone(),
-    };
-    let mut out = Expr::new(e.span, new_node);
-    out.ty = e.ty.clone();
-    out
+        "raw" => {
+            let arg = args.remove(0);
+            *e = arg;
+        }
+        _ => {}
+    }
 }
 
 // ── route-helper rewrite for pair values ────────────────────────────
