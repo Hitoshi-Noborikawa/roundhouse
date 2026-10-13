@@ -60,6 +60,10 @@ mod cable_broadcast_json;
 mod index_with_contract;
 #[path = "emit_and_run/index_with.rs"]
 mod index_with;
+#[path = "support/request_id_runtime.rs"]
+mod request_id_runtime_contract;
+#[path = "emit_and_run/request_id_runtime.rs"]
+mod request_id_runtime;
 #[path = "support/anonymous_keywords.rs"]
 mod anonymous_keywords;
 #[path = "support/delegate_association.rs"]

@@ -96,6 +96,10 @@ mod params_helper_no_permit;
 mod rails_parity;
 #[path = "spinel_toolchain/server_binding.rs"]
 mod server_binding;
+#[path = "support/request_id_runtime.rs"]
+mod request_id_runtime_contract;
+#[path = "spinel_toolchain/request_id_runtime.rs"]
+mod request_id_runtime;
 
 /// Compile and execute the shared custom Data factory contract with Spinel;
 /// successful Ruby emission alone does not establish native target support.
