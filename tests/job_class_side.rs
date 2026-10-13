@@ -287,3 +287,47 @@ fn a_sidekiq_workers_own_perform_in_is_not_folded() {
     let body = format!("{:?}", app.library_classes.iter().find(|lc| lc.name.0.as_str() == "Caller").unwrap().methods);
     assert!(body.contains("perform_in"), "the worker's own perform_in is called: {body}");
 }
+
+/// An abstract Sidekiq worker with no `perform` anywhere in its own
+/// chain isn't an entry point: its `include` and `sidekiq_options` are
+/// stripped quietly — no wrapper, no diagnostic — exactly like a
+/// wrapped worker's wiring is stripped. A concrete subclass that
+/// defines its own positional `perform` is still wrapped as today.
+#[test]
+fn an_abstract_worker_with_no_perform_is_stripped_quietly() {
+    let mut app = app_from(vec![
+        (
+            "app/workers/base_worker.rb",
+            "class BaseWorker\n  include Sidekiq::Worker\n  sidekiq_options queue: 'x'\n\n  private\n\n  def helper\n    1\n  end\nend\n",
+        ),
+        (
+            "app/workers/concrete_worker.rb",
+            "class ConcreteWorker < BaseWorker\n  def perform(id)\n    id\n  end\nend\n",
+        ),
+    ]);
+    let diags = roundhouse::lower::job_class_side::apply_job_class_side(&mut app);
+    assert!(
+        diags.iter().all(|d| d.severity != roundhouse::diagnostic::Severity::Error),
+        "an abstract base with no perform anywhere must report nothing: {diags:?}"
+    );
+
+    let base = app.library_classes.iter().find(|lc| lc.name.0.as_str() == "BaseWorker").expect("ingested");
+    assert!(
+        !base.includes.iter().any(|inc| inc.0.as_str() == "Sidekiq::Worker"),
+        "the abstract base's Sidekiq include is stripped: {:?}",
+        base.includes
+    );
+    assert!(
+        base.methods.iter().any(|m| m.name.as_str() == "helper"),
+        "the base's own methods are untouched"
+    );
+
+    let concrete = app.library_classes.iter().find(|lc| lc.name.0.as_str() == "ConcreteWorker").expect("ingested");
+    assert!(
+        concrete.methods.iter().any(|m| {
+            m.name.as_str() == "perform_async" && m.receiver == roundhouse::dialect::MethodReceiver::Class
+        }),
+        "the concrete subclass is still wrapped: {:?}",
+        concrete.methods
+    );
+}

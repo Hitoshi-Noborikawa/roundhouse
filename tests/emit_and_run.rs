@@ -1389,6 +1389,48 @@ puts "sidekiq passed"
     assert!(run.stdout.contains("sidekiq passed"));
 }
 
+/// An abstract base worker with no `perform` anywhere in its own chain
+/// (just the Sidekiq include, `sidekiq_options`, and a private helper)
+/// isn't an entry point: it gets no wrapper and raises no analysis
+/// error, and its concrete subclass's own positional `perform` is
+/// still wrapped and still runs `perform_async` inline.
+#[test]
+fn an_abstract_base_worker_with_no_perform_is_not_an_entry_point() {
+    let run = emit_and_run::real_blog()
+        .write(
+            "app/workers/base_worker.rb",
+            "class BaseWorker
+  include Sidekiq::Worker
+  sidekiq_options queue: \"default\"
+
+  private
+
+  def helper
+    \"unused\"
+  end
+end
+",
+        )
+        .write(
+            "app/workers/concrete_worker.rb",
+            "class ConcreteWorker < BaseWorker
+  def perform(title)
+    Article.create!(title: title, body: \"A sufficiently long body.\")
+  end
+end
+",
+        )
+        .run_ruby(
+            r#"ConcreteWorker.perform_async("abstract base worked")
+titles = Article.all.map(&:title)
+raise "titles: #{titles.inspect}" unless titles.include?("abstract base worked")
+puts "abstract base worker passed"
+"#,
+        );
+    run.assert_passes();
+    assert!(run.stdout.contains("abstract base worker passed"));
+}
+
 /// A class object and its instances that define the same names: each
 /// side's call types and runs as that side's method.
 #[test]

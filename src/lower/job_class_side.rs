@@ -58,6 +58,7 @@ pub fn apply_job_class_side(app: &mut App) -> Vec<Diagnostic> {
     }
     let workers = sidekiq_workers(app);
     let wrapped = workers_with_positional_perform(app, &workers);
+    let has_perform = workers_with_any_perform(app, &workers);
     let delay_folds = without_delayed_enqueue_overrides(app, &wrapped);
     if jobs.is_empty() && workers.is_empty() {
         return diags;
@@ -106,6 +107,21 @@ pub fn apply_job_class_side(app: &mut App) -> Vec<Diagnostic> {
             continue;
         }
         if is_worker {
+            // A worker with no `perform` anywhere in its own chain is an
+            // abstract base, not an entry point: strip its Sidekiq wiring
+            // quietly, as a wrapped worker's is stripped below, and
+            // generate no wrapper. A concrete subclass that defines its
+            // own positional `perform` is still wrapped (`wrapped`
+            // walks the same chain), so this only drops the base's own
+            // dead include and options.
+            if !has_perform.contains(lc.name.0.as_str()) {
+                lc.includes.retain(|inc| !SIDEKIQ_MODULES.contains(&inc.0.as_str()));
+                lc.unknown_calls.retain(|call| {
+                    !matches!(&*call.node, ExprNode::Send { recv: None, method, .. }
+                        if SIDEKIQ_CLASS_MACROS.contains(&method.as_str()))
+                });
+                continue;
+            }
             // The include and options stay on a worker no wrapper is generated for, so it reads as the unsupported class it is.
             if !wrapped.contains(lc.name.0.as_str()) {
                 let span = lc
@@ -545,6 +561,32 @@ fn workers_with_positional_perform(app: &App, workers: &BTreeSet<String>) -> BTr
                 if m.block_param.is_none() && !m.params.iter().any(|p| p.forwarding || p.keyword || p.rest) {
                     out.insert(name.clone());
                 }
+                break;
+            }
+            cur = c.parent.as_ref().and_then(|p| by_name.get(p.0.as_str()).copied());
+        }
+    }
+    out
+}
+
+/// Whether `name`'s own class chain (itself, then ancestors) defines
+/// an instance `perform` at all, regardless of its parameter shape.
+/// Tells an abstract base worker (no `perform` anywhere — never an
+/// entry point) apart from one whose `perform` exists but isn't
+/// positional (still refused, as `workers_with_positional_perform`
+/// already reports).
+fn workers_with_any_perform(app: &App, workers: &BTreeSet<String>) -> BTreeSet<String> {
+    let by_name: std::collections::HashMap<&str, &crate::dialect::LibraryClass> =
+        app.library_classes.iter().map(|lc| (lc.name.0.as_str(), lc)).collect();
+    let mut out = BTreeSet::new();
+    for name in workers {
+        let mut cur = by_name.get(name.as_str()).copied();
+        for _ in 0..32 {
+            let Some(c) = cur else { break };
+            if c.methods.iter().any(|m| {
+                m.receiver == crate::dialect::MethodReceiver::Instance && m.name.as_str() == "perform"
+            }) {
+                out.insert(name.clone());
                 break;
             }
             cur = c.parent.as_ref().and_then(|p| by_name.get(p.0.as_str()).copied());
