@@ -1566,15 +1566,33 @@ fn synthesize_controller_string_method(
 }
 
 /// Names a controller marks with `helper_method :x` whose public
-/// method body is IVAR-FREE (pure over its arguments) — the set the
-/// view-call rewrite and the class-side clone above serve. Shared with
-/// ingest, which registers these in `app.helper_method_index`.
+/// method body is pure over its arguments - the set the view-call
+/// rewrite and the class-side clone above serve. Shared with ingest,
+/// which registers these in `app.helper_method_index`.
+///
+/// Pure means it reads no instance state: no ivar, and none of the
+/// request's state the controller instance carries (`session`,
+/// `cookies`, `request`, `params`, ...). In Rails a helper method runs
+/// on the controller that handles the request; a class-side clone has no
+/// request, and a clone of an `authenticated?` that reads
+/// `session[:authenticated_at]` read `session` off the class, which no
+/// target can compile.
 pub(crate) fn controller_helper_method_names(controller: &Controller) -> Vec<Symbol> {
     use crate::expr::Literal;
+
+    const REQUEST_STATE: &[&str] = &[
+        "session", "cookies", "request", "response", "params", "flash", "headers",
+        "reset_session", "request_forgery_protection_token", "form_authenticity_token",
+    ];
 
     fn has_ivar(e: &Expr) -> bool {
         if matches!(&*e.node, ExprNode::Ivar { .. }) {
             return true;
+        }
+        if let ExprNode::Send { recv: None, method, .. } = &*e.node {
+            if REQUEST_STATE.contains(&method.as_str()) {
+                return true;
+            }
         }
         let mut found = false;
         e.node.for_each_child(&mut |c| {
