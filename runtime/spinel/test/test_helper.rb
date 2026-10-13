@@ -21,6 +21,13 @@
 # the future Spinel-AOT target's tree will contain its own
 # `runtime/db.rb` (FFI-backed). Same require path, target-appropriate
 # implementation.
+# Signed stream names in the view suite are vectors. boot.rb asks
+# LocalSecret, and an unset SECRET_KEY_BASE is a fresh random key, so
+# those vectors would move every run. Pin one known key before that
+# resolve. Assignment, not ||=: an empty string is not a pin
+# (LocalSecret treats "" as unset) and a secret inherited from the
+# parent process would sign the vectors with a different key.
+ENV["SECRET_KEY_BASE"] = "roundhouse-test-secret"
 require_relative "../runtime/base64"
 require_relative "../runtime/json_impl"
 require_relative "../runtime/db"
@@ -1955,6 +1962,9 @@ module RequestDispatch
       end
       controller.request.request_parameters = body_params
     end
+    # The query string's params alone (`request.query_parameters`), by the
+    # parser the merge above already used.
+    CgiIo.parse_form_into(request_query, controller.request.query_parameters) unless request_query.empty?
     # Raw query for path-option redirects that keep it — same slot every
     # target's dispatcher seeds (`query_string` on the controller).
     controller.query_string = request_query

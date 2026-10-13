@@ -114,6 +114,7 @@ pub fn emit_overlay_files(app: &App) -> Vec<EmittedFile> {
                 "errors".to_string(),
                 crate::ty::Ty::Array { elem: std::sync::Arc::new(crate::ty::Ty::Str) },
             ));
+            fields.push(("error_details".to_string(), crate::lower::errors_add::error_details_ty()));
             let name = model.name.0.as_str();
             expr::register_field_types(name, &fields);
             let row_fields: Vec<(String, crate::ty::Ty)> = table
@@ -213,6 +214,17 @@ pub fn emit_overlay_files(app: &App) -> Vec<EmittedFile> {
         out.push(EmittedFile {
             path: output_path(OutputKind::HandWrittenRuntime { name: "broadcasts.ex" }).path,
             content: include_str!("../../runtime/elixir/v2/broadcasts.ex").to_string(),
+        });
+        // Thin AssociationReflection — Base is not on ELIXIR_RUNTIME
+        // yet, but lowered models call `.new/2` from
+        // `reflect_on_association` (#832).
+        out.push(EmittedFile {
+            path: output_path(OutputKind::HandWrittenRuntime {
+                name: "association_reflection.ex",
+            })
+            .path,
+            content: include_str!("../../runtime/elixir/v2/association_reflection.ex")
+                .to_string(),
         });
 
         // Per-model emit. Elixir has no inheritance, so each model module

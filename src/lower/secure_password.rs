@@ -20,9 +20,7 @@
 //! The analyzer already types this surface
 //! (`register_has_secure_password`); signatures here mirror it —
 //! writers take the plaintext `Str`, and the authenticator returns
-//! the model instance (the dominant truthy use; the runtime `false`
-//! arm is the analyzer's deliberate simplification, kept in
-//! agreement here).
+//! the model instance or `false`.
 //!
 //! Shared home of what used to be the ruby-family emit pass
 //! `apply_secure_password_lowering`. Strict no-op for marker-free
@@ -51,13 +49,16 @@ pub(crate) fn push_secure_password_methods(methods: &mut Vec<MethodDef>, model: 
     let plain = Symbol::from("unencrypted_password");
     let self_ty = Ty::Class { id: model.name.clone(), args: vec![].into() };
     let plaintext_ty = Ty::Union { variants: vec![Ty::Str, Ty::Nil].into() };
+    // `self` or `false`, as Rails answers: a signature of the record
+    // alone is a seed spinel refuses as contradicted by the `false` arm.
+    let auth_ty = Ty::Union { variants: vec![self_ty, Ty::Bool].into() };
     push_synth_instance_method(
         methods,
         model,
         auth_name,
         vec![Param::positional(plain.clone())],
         authenticate_body(&digest),
-        Some(fn_sig(vec![(plain.clone(), Ty::Str)], self_ty)),
+        Some(fn_sig(vec![(plain.clone(), Ty::Str)], auth_ty)),
         AccessorKind::Method,
         false,
     );

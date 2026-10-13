@@ -67,6 +67,11 @@ module ActionDispatch
 
     def get? = request_method == "GET"
     def post? = request_method == "POST"
+    # Do not route `put?` through `request_method` — that helper upcases,
+    # while Rack/Rails compare the raw env value to literal `"PUT"` (so
+    # `"put"` must stay false). Shared `runtime/ruby` `put?` is likewise
+    # case-sensitive on `@request_method` (no upcase on assign).
+    def put? = @env["REQUEST_METHOD"] == "PUT"
     # Rails' "is this a safe request" idiom is `request.get? ||
     # request.head?`, and campfire writes exactly that in
     # `BlockBannedRequests#safe_request?`. This overlay is the Request
@@ -196,6 +201,10 @@ module ActionDispatch
 
     def xhr?
       @env["HTTP_X_REQUESTED_WITH"] == "XMLHttpRequest"
+    end
+
+    def inertia?
+      !@env["HTTP_X_INERTIA"].to_s.empty?
     end
 
     # Query-string params only (Rails' GET-vs-POST split); lobsters'
