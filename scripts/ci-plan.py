@@ -89,6 +89,7 @@ SPINEL_TESTS = [
     "around_block_filter_spinel",
     "plain_class_optional_keywords_spinel",
     "active_job_payload",
+    "render_json_encoder_spinel",
 ]
 # Inputs of the ActiveJob payload gate (tests/active_job_payload.rs):
 # the files its driver loads beside it.

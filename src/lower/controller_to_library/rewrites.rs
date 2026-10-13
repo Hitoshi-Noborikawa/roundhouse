@@ -842,8 +842,9 @@ fn strip_format_kwarg(arg: &Expr) -> Option<Expr> {
 /// expects ONE kwargs hash, not multiple.
 /// `ActionController::JsonRender.encode(<value>)` — the runtime JSON
 /// encoder behind inline `render json: <expr>` whose value neither
-/// `as_json_poro` nor the primitive-collection path handles. CRuby answers it via
-/// the overlay (as_json-aware recursive encode); a strict target whose
+/// `as_json_poro` nor the primitive-collection path handles. The ruby family
+/// answers it via runtime/spinel/action_controller_json_render.rb
+/// (as_json-aware recursive encode); a strict target whose
 /// app reaches this call surfaces an unresolved-constant gap loudly
 /// rather than silently rendering html.
 /// `ActionView::ViewHelpers.html_escape(<body>)` — the `render html:`

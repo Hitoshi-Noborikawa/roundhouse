@@ -42,6 +42,7 @@ require_relative "runtime/json_impl"
 # `runtime/json.rb`'s `JSON.generate` shim: this module exposes
 # `JsonBuilder.encode_value` / `encode_string` for per-value encoding.
 require_relative "runtime/json_builder"
+require_relative "runtime/action_controller_json_render"
 # Params — narrowing accessors over the recursive request-params tree
 # (`Roundhouse::ParamValue`). The synthesized `<Resource>Params.from_raw`
 # calls these instead of open-coding `is_a?` narrowing per field, so the
