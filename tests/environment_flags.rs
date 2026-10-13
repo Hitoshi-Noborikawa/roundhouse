@@ -38,3 +38,9 @@ fn a_commented_assume_ssl_is_not() {
     let boot = boot_rb("Rails.application.configure do\n  # config.assume_ssl = true\nend\n");
     assert!(boot.contains("def self.assume_ssl?(env)\n    false\n"), "{boot}");
 }
+
+#[test]
+fn an_assume_ssl_with_a_trailing_comment_is_carried() {
+    let boot = boot_rb("Rails.application.configure do\n  config.assume_ssl = true # TLS ends at the proxy\nend\n");
+    assert!(boot.contains("def self.assume_ssl?(env)\n    env == \"production\"\n"), "{boot}");
+}

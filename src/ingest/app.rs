@@ -9828,13 +9828,14 @@ mod locale_tests {
     }
 }
 
-/// `config.assume_ssl = true` on an uncommented line of an environment file.
+/// `config.assume_ssl = true` on an uncommented line of an environment file
+/// (a trailing comment after the value is allowed, as Ruby allows it).
 pub(crate) fn sets_assume_ssl(text: &str) -> bool {
     text.lines().any(|line| {
         let t = line.trim();
         t.strip_prefix("config.assume_ssl")
             .map(|rest| rest.trim_start())
             .and_then(|rest| rest.strip_prefix('='))
-            .is_some_and(|rest| rest.trim() == "true")
+            .is_some_and(|rest| rest.split('#').next().unwrap_or("").trim() == "true")
     })
 }
