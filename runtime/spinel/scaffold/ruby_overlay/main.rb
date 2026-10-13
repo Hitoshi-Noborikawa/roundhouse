@@ -158,6 +158,13 @@ module Main
       return [404, "", "text/html; charset=utf-8", nil, {}, {}, {}, {}, {}]
     end
 
+    # A JSON body that does not parse: Rails' params parser raises
+    # ParseError and the request is answered 400 before any action runs
+    # (the spinel twin: `Main.request_params` returning nil).
+    if request[:bad_request]
+      return [400, "<h1>400 Bad Request</h1>", "text/html; charset=utf-8", nil, {}, {}, {}, {}, {}]
+    end
+
     controller = Main.instantiate_controller(matched.controller)
     merged = matched.path_params.dup
     request[:params].each { |k, v| merged[k] = v }
