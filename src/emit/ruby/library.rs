@@ -4719,9 +4719,6 @@ pub(crate) fn apply_duration_lowering(lcs: &mut [LibraryClass], app: &App) {
 pub(crate) fn apply_route_param_lowering(lcs: &mut [LibraryClass], app: &App) {
     let all_models: std::collections::HashSet<String> =
         app.models.iter().map(|m| m.name.0.as_str().to_string()).collect();
-    if all_models.is_empty() {
-        return;
-    }
     let slug_models = models_overriding_to_param(app);
     let assoc_targets = singular_association_targets(app);
     let collection_targets = collection_association_targets(app);
@@ -5199,12 +5196,19 @@ fn rewrite_route_params(expr: &mut Expr, sig: &RecordSignals<'_>) {
     // Rails renders a record there with `to_param` too. The helper's
     // query key is typed to match (routes_to_library::query_param_demand
     // types a record-valued key `String` for a slug model, else `Integer`).
+    // An Integer under any other key (`page: page + 1`) goes through
+    // `to_s`, as `project_route_helper_ids` does in test bodies.
     if let ExprNode::Send { args, .. } = &mut *expr.node {
+        use crate::lower::controller_to_library::rewrites::{int_in_query_slot, to_s_of};
         if let Some(last) = args.last_mut() {
             if let ExprNode::Hash { entries, kwargs: true } = &mut *last.node {
-                for (_, v) in entries.iter_mut() {
+                for (k, v) in entries.iter_mut() {
                     if let Some(model) = arg_record_model(v, sig) {
                         project_record_arg(v, &model, sig, false);
+                    } else if int_in_query_slot(k, v) {
+                        let mut to_s = to_s_of(v.clone());
+                        to_s.ty = Some(Ty::Str);
+                        *v = to_s;
                     }
                 }
             }
