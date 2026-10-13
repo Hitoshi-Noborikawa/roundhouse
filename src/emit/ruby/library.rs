@@ -118,6 +118,10 @@ pub(super) fn emit_library_class_decls(app: &App) -> Vec<EmittedFile> {
     // own body wants every one of them applied.
     crate::lower::tag_block_passing::apply_helpers(&mut lcs);
     apply_scope_lowering(&mut lcs, app);
+    // ActiveJob payloads: the enqueue arm of each planned job's
+    // `perform_later`, and `to_gid_uri` beside `to_gid_param`.
+    // Ruby-family only, like the GlobalID runtime it writes through.
+    crate::lower::job_payload::apply_ruby(&mut lcs, app);
     apply_library_partial_render_lowering(&mut lcs, app);
     // The Attachment's readers on a content-type attachable (campfire's
     // `OpengraphEmbed`): Rails hands the partial the Attachment, which
@@ -1531,6 +1535,7 @@ pub(crate) fn apply_scope_lowering(lcs: &mut [LibraryClass], app: &App) {
             crate::lower::attached::push_preload_scope_methods(&mut lc.methods, model);
             crate::lower::attachable::push_attachable_sgid(&mut lc.methods, model, &attachable);
             crate::lower::broadcasts::push_to_gid_param(&mut lc.methods, model);
+            crate::lower::job_payload::push_model_to_gid_uri(&mut lc.methods, model);
         }
     }
     let scopes = crate::lower::scope_chain::build_scope_registry(&app.models);
@@ -7256,8 +7261,12 @@ fn emit_library_class_decl_inner(
     } else {
         let own = app_extension_calls(lc, app);
         for call in &lc.unknown_calls {
+            // A payload job's `queue_as` and `discard_on
+            // ActiveJob::DeserializationError` are not dropped: the plan
+            // carries them (`lower::job_payload`).
             if !own.iter().any(|c| std::ptr::eq(*c, call))
                 && !is_preserved_external_include(call)
+                && !crate::lower::job_payload::modelled_class_body_call(app, lc, call)
             {
                 report_dropped_class_body_call(lc, call);
             }
