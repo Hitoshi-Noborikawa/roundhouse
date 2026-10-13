@@ -116,3 +116,23 @@ fn only_the_ruby_family_emits_the_ruby_only_sends() {
     }
     std::fs::remove_dir_all(&root).unwrap();
 }
+
+/// An app method named like the Kernel conversion is the app's own, so a
+/// call to it is not refused as Kernel's.
+#[test]
+fn an_app_method_named_integer_is_not_refused_as_kernel_s() {
+    let root = std::env::temp_dir().join(format!("rh_ruby_only_sends_shadow_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    for (path, text) in [
+        ("db/schema.rb", "ActiveRecord::Schema.define do\n  create_table \"articles\" do |t|\n    t.string \"title\"\n  end\nend\n"),
+        ("app/models/application_record.rb", "class ApplicationRecord < ActiveRecord::Base\n  self.abstract_class = true\nend\n"),
+        ("app/models/article.rb", "class Article < ApplicationRecord\n  #: (String) -> Integer\n  def Integer(text) = text.length\n\n  #: () -> Integer\n  def title_length = Integer(title.to_s)\nend\n"),
+    ] {
+        let file = root.join(path);
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        std::fs::write(file, text).unwrap();
+    }
+    let (_ok, text) = build(&root, "rust");
+    assert!(!text.contains("Kernel#Integer not supported"), "{text}");
+    std::fs::remove_dir_all(&root).unwrap();
+}

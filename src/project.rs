@@ -1579,15 +1579,24 @@ fn report_ruby_only_sends(app: &App, target: BuildTarget) {
         | BuildTarget::Spinel | BuildTarget::Roda) {
         return;
     }
-    fn visit(expr: &crate::expr::Expr, target: BuildTarget) {
+    // Not per call site: a receiverless send in a model or library body
+    // carries no mark of the method it dispatched to, so an app method of
+    // the same name anywhere keeps its calls out of the refusal.
+    let defines = |name: &str| {
+        app.models.iter().any(|model| model.methods().any(|method| method.name.as_str() == name))
+            || app.library_classes.iter().any(|class| class.methods.iter().any(|method| method.name.as_str() == name))
+            || app.controllers.iter().any(|controller| controller.actions().any(|action| action.name.as_str() == name))
+    };
+    let kernel: Vec<&str> = ["Rational", "Integer", "Float"].into_iter().filter(|name| !defines(name)).collect();
+    fn visit(expr: &crate::expr::Expr, target: BuildTarget, kernel: &[&str]) {
         use crate::expr::ExprNode;
         use crate::ty::Ty;
         if let ExprNode::Send { recv, method, .. } = &*expr.node {
             let recv_ty = recv.as_ref().and_then(|r| r.ty.as_ref());
             let construct = match (recv, method.as_str()) {
-                (None, "Rational") => Some("Kernel#Rational"),
-                (None, "Integer") => Some("Kernel#Integer"),
-                (None, "Float") => Some("Kernel#Float"),
+                (None, "Rational") if kernel.contains(&"Rational") => Some("Kernel#Rational"),
+                (None, "Integer") if kernel.contains(&"Integer") => Some("Kernel#Integer"),
+                (None, "Float") if kernel.contains(&"Float") => Some("Kernel#Float"),
                 (Some(r), "[]") => match &*r.node {
                     ExprNode::Const { path } if path.len() == 1 && path[0].as_str() == "Array" => Some("Array[]"),
                     ExprNode::Const { path } if path.len() == 1 && path[0].as_str() == "Hash" => Some("Hash[]"),
@@ -1608,9 +1617,9 @@ fn report_ruby_only_sends(app: &App, target: BuildTarget) {
                 );
             }
         }
-        expr.node.for_each_child(&mut |child| visit(child, target));
+        expr.node.for_each_child(&mut |child| visit(child, target, kernel));
     }
-    crate::lower::for_each_emit_body_ref(app, &mut |expr| visit(expr, target));
+    crate::lower::for_each_emit_body_ref(app, &mut |expr| visit(expr, target, &kernel));
 }
 
 /// `case/in` is not equivalent to the targets' existing `case/when`
