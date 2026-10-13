@@ -154,10 +154,11 @@ fn article_renders_validate_with_inline_checks() {
         src.contains("self.errors << \"Body can't be blank\"\n      self.error_details << ActiveRecord::ErrorDetail.new(\"body\", \"blank\", \"can't be blank\")"),
         "{src}",
     );
-    // Length is now also inline (third slice of Phase 2.5(a)).
-    // Expansion: `unless @body.nil?; len = ...; if len < N; errors << "..."; …; end; end`.
-    // Message matches Rails' full_messages: humanized attribute +
-    // "characters" suffix (see model_to_library::validations::humanize).
+    // Length is inline. A nil body fails the minimum (Rails does not
+    // skip it); a present body compares `len`. Message matches Rails'
+    // full_messages: humanized attribute + "characters" suffix
+    // (see model_to_library::validations::humanize). Attributed push
+    // pairs each message with `error_attributes`.
     assert!(
         src.contains(
             r#"errors << "Body is too short (minimum is 10 characters)""#
