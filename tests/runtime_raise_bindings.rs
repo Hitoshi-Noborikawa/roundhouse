@@ -208,3 +208,34 @@ fn main() {{
         std::thread::sleep(Duration::from_millis(10));
     }
 }
+
+/// A runtime method whose Ruby body is a bare `nil` answers nil on Swift, not a crash.
+#[test]
+fn swift_bare_nil_bodies_return_nil() {
+    let files = roundhouse::emit::swift::emit(&roundhouse::App::default());
+    for (path, method) in [
+        (
+            "Sources/App/ActiveRecordBase.swift",
+            "func klass() -> Any? {",
+        ),
+        (
+            "Sources/App/ActiveRecordBase.swift",
+            "func macro() -> Any? {",
+        ),
+        (
+            "Sources/App/ActionControllerBase.swift",
+            "func requestForCsrf() -> Any? {",
+        ),
+    ] {
+        let source = &files
+            .iter()
+            .find(|file| file.path == std::path::Path::new(path))
+            .unwrap_or_else(|| panic!("{path}"))
+            .content;
+        let start = source
+            .find(method)
+            .unwrap_or_else(|| panic!("{method} in {path}"));
+        let body = &source[start..start + source[start..].find("\n    }\n").expect("method end")];
+        assert!(body.contains("return nil"), "{body}");
+    }
+}

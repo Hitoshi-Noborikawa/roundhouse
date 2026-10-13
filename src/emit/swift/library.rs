@@ -1179,6 +1179,8 @@ fn default_return(ret_ty: Option<&Ty>) -> String {
         {
             "return nil".to_string()
         }
+        // An untyped return is `Any?`, so Ruby's bare `nil` answers as itself
+        Some(Ty::Untyped | Ty::Var { .. }) => "return nil".to_string(),
         _ => "fatalError(\"unimplemented\")".to_string(),
     }
 }
