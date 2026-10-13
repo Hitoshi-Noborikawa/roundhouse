@@ -6,6 +6,12 @@
 //! answers for the same calls. A class-body constant is the case that
 //! mattered: on Spinel an ungrounded `index_with` left the constant
 //! "defined nowhere", with no `check` diagnostic.
+//!
+//! Lowering rewrites only Array / Relation / Tuple receivers — a Hash
+//! (or a gradual receiver that may be one) yields pairs to `index_with`
+//! but keys alone to `to_h`. The contract therefore pins Array-typed
+//! call sites (literals); method-param receivers stay unsupported until
+//! typed.
 
 pub fn overlay() -> super::emit_and_run::Overlay {
     super::emit_and_run::real_blog().edit(
@@ -15,12 +21,16 @@ pub fn overlay() -> super::emit_and_run::Overlay {
   UNSET = %w[draft live].index_with(nil).freeze
   SIZES = %w[a bb].index_with(&:size)
 
-  def self.counts(names)
-    names.index_with { |n| n.length * 10 }
+  def self.counts
+    %w[x yy].index_with { |n| n.length * 10 }
   end
 
-  def self.zeroes(names)
-    names.index_with(0)
+  def self.zeroes
+    %w[p].index_with(0)
+  end
+
+  def self.empty_zeroes
+    [].index_with(0)
   end
 "#,
     )
@@ -29,8 +39,8 @@ pub fn overlay() -> super::emit_and_run::Overlay {
 pub const ASSERTIONS: &str = r#"
 raise "value form: #{Article::UNSET.inspect}" unless Article::UNSET == { "draft" => nil, "live" => nil }
 raise "symbol block: #{Article::SIZES.inspect}" unless Article::SIZES == { "a" => 1, "bb" => 2 }
-raise "block: #{Article.counts(["x", "yy"]).inspect}" unless Article.counts(["x", "yy"]) == { "x" => 10, "yy" => 20 }
-raise "value: #{Article.zeroes(["p"]).inspect}" unless Article.zeroes(["p"]) == { "p" => 0 }
-raise "empty: #{Article.zeroes([]).inspect}" unless Article.zeroes([]) == {}
+raise "block: #{Article.counts.inspect}" unless Article.counts == { "x" => 10, "yy" => 20 }
+raise "value: #{Article.zeroes.inspect}" unless Article.zeroes == { "p" => 0 }
+raise "empty: #{Article.empty_zeroes.inspect}" unless Article.empty_zeroes == {}
 puts "index_with contract passed"
 "#;
