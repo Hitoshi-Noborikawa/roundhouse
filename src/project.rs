@@ -5843,6 +5843,14 @@ fn spinel_files(app: &App, fixture: &Path) -> Result<(Vec<(String, String)>, Vec
         files.push(("sig/runtime/action_controller_head.rbs".to_string(), rbs));
     }
 
+    // Rails 8.1.4 `send_data(filename:)` and its Content-Disposition
+    // escaping, which works over UTF-8 bytes: Ruby family and Spinel only.
+    {
+        let rbs = crate::runtime_files::read_to_string("runtime/spinel/action_controller_send_data.rbs")
+            .map_err(|e| format!("read runtime/spinel/action_controller_send_data.rbs: {e}"))?;
+        files.push(("sig/runtime/action_controller_send_data.rbs".to_string(), rbs));
+    }
+
     // HTTP Token/Basic auth sidecar — the ActionController::Base reopen in
     // runtime/http_authentication.rb (ruby family only). It types the
     // block parameters the helpers yield, which the app's blocks compare.

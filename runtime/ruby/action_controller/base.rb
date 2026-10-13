@@ -1125,7 +1125,8 @@ module ActionController
     # `send_data data, type:, disposition:` — a binary response body
     # (lobsters streams avatar PNGs). Same buffering contract as
     # render. `disposition` is retained as a Content-Disposition
-    # response header.
+    # response header. The Ruby family and Spinel reopen it with
+    # `filename:` (runtime/spinel/action_controller_send_data.rb).
     def send_data(data, type: "application/octet-stream", disposition: "attachment")
       @body = data
       @content_type = type
