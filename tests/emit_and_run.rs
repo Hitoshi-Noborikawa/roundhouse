@@ -1367,14 +1367,19 @@ fn errors_to_hash_does_not_depend_on_the_message_format() {
     errors_to_hash_app("%{message} (%{attribute})").run_ruby(ERRORS_TO_HASH).assert_passes();
 }
 
-/// `attribute_names` and a `messages` read as a whole answer what
-/// Rails 8.1 does: the Hash answers `[]` for an attribute with no
-/// errors, and both it and the names are frozen.
+/// `errors.include?` / `key?` / `has_key?`, `attribute_names` and a
+/// `messages` read as a whole answer what Rails 8.1 does: the Hash
+/// answers `[]` for an attribute with no errors, and both it and the
+/// names are frozen.
 fn errors_readers_app() -> emit_and_run::Overlay {
     errors_to_hash_app("%{attribute} %{message}").edit(
         "app/models/article.rb",
         "  def errors_hash\n",
-        "  def error_names
+        "  def error_questions
+    [errors.include?(:title), errors.key?(\"body\"), errors.has_key?(:base), errors.include?(:nothing)]
+  end
+
+  def error_names
     errors.attribute_names
   end
 
@@ -1392,6 +1397,7 @@ fn errors_readers_app() -> emit_and_run::Overlay {
 
 const ERRORS_READERS: &str = r#"a = Article.new(title: "", body: "odd")
 a.valid?
+raise a.error_questions.inspect unless a.error_questions == [true, true, true, false]
 raise a.error_names.inspect unless a.error_names == [:title, :body, :base] && a.error_names.frozen?
 expected = { title: ["can't be blank"], body: ["is too short (minimum is 10 characters)"], base: ["is odd"] }
 raise a.all_messages.inspect unless a.all_messages == expected && a.all_messages.frozen?
@@ -1399,6 +1405,7 @@ raise a.all_messages[:nothing].inspect unless a.all_messages[:nothing] == []
 raise a.messages_on(:base).inspect unless a.messages_on(:base) == ["is odd"] && a.messages_on(:nothing) == []
 b = Article.new(title: "A title", body: "A long enough body")
 b.valid?
+raise b.error_questions.inspect unless b.error_questions == [false, false, false, false]
 raise b.error_names.inspect unless b.error_names.empty? && b.all_messages.empty?
 puts "errors readers passed"
 "#;
@@ -1431,9 +1438,9 @@ fn errors_to_hash_is_a_gap_on_strict_targets() {
     );
 }
 
-/// The Hash and the names do not reach a strict target, as `to_hash` does not.
+/// The membership questions read `error_messages_for`, which every target has; the Hash and the names do not reach a strict target.
 #[test]
-fn errors_readers_are_a_gap_on_strict_targets() {
+fn errors_readers_beyond_membership_are_a_gap_on_strict_targets() {
     let (_emitted, errors) = errors_readers_app().emit(roundhouse::project::BuildTarget::Crystal);
     let gated = |helper: &str| {
         errors.iter().filter(|e| e.contains(&format!("ActiveSupport.{helper} is only available on the ruby family and spinel"))).count()

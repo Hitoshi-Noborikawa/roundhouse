@@ -23,7 +23,8 @@
 //! details' messages by attribute, in the order Rails does. A
 //! `messages` the per-field rewrites leave is that Hash too, through
 //! `errors_messages`, and `attribute_names` is
-//! `errors_attribute_names`.
+//! `errors_attribute_names`. `include?` / `key?` / `has_key?` ask
+//! `error_messages_for` like `errors[:field]` does.
 //!
 //! Views take the same rewrite: the scaffold's form partial reads
 //! `<record>.errors[:field].none?` / `.any?` inside a `class:` array,
@@ -137,8 +138,39 @@ fn rewrite(expr: &mut Expr, diags: &mut Vec<Diagnostic>) {
     expr.node.for_each_child_mut(&mut |c| rewrite(c, diags));
     rewrite_messages(expr, diags);
     rewrite_index(expr, diags);
+    rewrite_include(expr, diags);
     rewrite_to_hash(expr);
     rewrite_render_json(expr);
+}
+
+// Not left to the accumulator: `Array#include?(:title)` answers false for an Array of full messages.
+fn rewrite_include(expr: &mut Expr, diags: &mut Vec<Diagnostic>) {
+    let ExprNode::Send { recv: Some(reader), method, args, block: None, .. } = &*expr.node else { return };
+    if !matches!(method.as_str(), "include?" | "key?" | "has_key?") || args.len() != 1 || !is_errors_read(reader) {
+        return;
+    }
+    let field = match &*args[0].node {
+        ExprNode::Lit { value: Literal::Sym { value } } => Some(value.as_str().to_string()),
+        ExprNode::Lit { value: Literal::Str { value } } => Some(value.clone()),
+        _ => None,
+    };
+    let Some(field) = field else {
+        let mut d = crate::lower::residue_diagnostic(
+            "errors_index",
+            "errors.include?",
+            expr.span,
+            "dynamic field",
+            format!(
+                "`errors.{method}` with a field that is not a literal is not grounded; the error \
+                 accumulator's own `{method}` would ask its full messages"
+            ),
+        );
+        d.severity = crate::diagnostic::Severity::Error;
+        diags.push(d);
+        return;
+    };
+    let ExprNode::Send { recv: owner, .. } = &*reader.node else { unreachable!("an errors reader") };
+    *expr = has_errors_on(owner.clone(), &field, expr.span);
 }
 
 /// What the per-field rewrites leave of `errors.messages` is the Hash itself.
