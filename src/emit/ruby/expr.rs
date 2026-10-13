@@ -858,6 +858,7 @@ fn emit_string_interp(parts: &[crate::expr::InterpPart]) -> String {
                     '\r' => out.push_str("\\r"),
                     '\t' => out.push_str("\\t"),
                     '#' => out.push_str("\\#"),
+                    c if c.is_control() => out.push_str(&format!("\\u{{{:x}}}", c as u32)),
                     other => out.push(other),
                 }
             }
