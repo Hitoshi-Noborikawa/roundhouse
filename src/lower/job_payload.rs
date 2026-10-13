@@ -779,7 +779,7 @@ pub fn registry_source(plans: &[JobPlan]) -> String {
         if lists.contains(model) {
             s.push_str(&format!(
                 "\n  def self.locate_{sfx}_from(args, from)\n\
-                 \x20   (from...ActiveJob::Arguments.count(args)).map {{ |j| locate_{sfx}_at(args, j) }}\n\
+                 \x20   (from...ActiveJob::Arguments.arg_count(args)).map {{ |j| locate_{sfx}_at(args, j) }}\n\
                  \x20 end\n",
             ));
         }
