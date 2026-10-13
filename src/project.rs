@@ -4610,7 +4610,9 @@ fn apply_app_requires(files: &mut [(String, String)], app: &App) {
 /// railties' `gem_version.rb` splits it (MAJOR, MINOR, TINY, PRE, and
 /// STRING joined from them), for an app that prints
 /// `Rails::VERSION::STRING`. Without a lockfile nothing is written and the
-/// constant stays undefined, as before.
+/// constant stays undefined, as before. The block goes right after
+/// `runtime/rails` loads, ahead of the app's own files, as `require
+/// "rails"` defines it in Rails before `config/application.rb` runs.
 fn apply_rails_version(files: &mut [(String, String)], app: &App) {
     const MARK: &str = "# Rails::VERSION from the app's Gemfile.lock";
     let Some(lock) = &app.gem_lock else { return };
@@ -4626,11 +4628,19 @@ fn apply_rails_version(files: &mut [(String, String)], app: &App) {
     let parts: Vec<&str> = version.split('.').collect();
     let num = |i: usize| parts.get(i).and_then(|p| p.parse::<u32>().ok()).unwrap_or(0);
     let pre = if parts.len() > 3 { format!("{:?}", parts[3..].join(".")) } else { "nil".to_string() };
-    boot.push_str(&format!(
-        "\n{MARK} (see project.rs::apply_rails_version).\n\
+    let block = format!(
+        "{MARK} (see project.rs::apply_rails_version).\n\
          module Rails\n  module VERSION\n    MAJOR = {}\n    MINOR = {}\n    TINY = {}\n    PRE = {pre}\n    STRING = {version:?}\n  end\nend\n",
         num(0), num(1), num(2)
-    ));
+    );
+    const AFTER: &str = "require_relative \"runtime/rails\"\n";
+    match boot.find(AFTER) {
+        Some(at) => boot.insert_str(at + AFTER.len(), &block),
+        None => {
+            boot.push('\n');
+            boot.push_str(&block);
+        }
+    }
 }
 
 /// THE FORM DIFFERS BY TARGET, and the reason is spinel's, not ours.

@@ -85,6 +85,10 @@ fn rails_version_is_the_locked_one() {
         let boot = boot(target);
         assert!(boot.contains("STRING = \"8.1.4\""), "{target:?}:\n{boot}");
         assert!(boot.contains("MAJOR = 8") && boot.contains("MINOR = 1") && boot.contains("TINY = 4"));
+        // defined before the app's files load, as `require "rails"` does
+        let version = boot.find("STRING = \"8.1.4\"").expect("version block");
+        let app = boot.find("require_relative \"config/application\"").expect("config/application");
+        assert!(version < app, "{target:?}: Rails::VERSION after the app loads:\n{boot}");
     }
     let run = app_with_requires().run_ruby("puts Rails::VERSION::STRING\nputs Rails::VERSION::PRE.inspect\n");
     run.assert_passes();
