@@ -3265,6 +3265,50 @@ raise "got #{got.inspect}" unless got == "First,Second,Second 1,2"
         .assert_passes();
 }
 
+/// `render … and return`, `redirect_to … and return` and `head … and return` return, as Rails' truthy answers make them.
+#[test]
+fn a_response_call_and_return_returns() {
+    emit_and_run::real_blog()
+        .edit(
+            "config/routes.rb",
+            "  root \"articles#index\"\n",
+            "  root \"articles#index\"\n  get \"/drafts/check\", to: \"drafts#check\"\n",
+        )
+        .write(
+            "app/controllers/drafts_controller.rb",
+            r#"class DraftsController < ApplicationController
+  def check
+    render plain: "stopped", status: :unprocessable_entity and return if params[:stop] == "render"
+    redirect_to articles_path and return if params[:stop] == "redirect"
+    head :no_content and return if params[:stop] == "head"
+    render plain: "fell through"
+  end
+end
+"#,
+        )
+        .write(
+            "test/controllers/drafts_controller_test.rb",
+            r#"require "test_helper"
+
+class DraftsControllerTest < ActionDispatch::IntegrationTest
+  test "each response call returns" do
+    get "/drafts/check", params: { stop: "render" }
+    assert_response :unprocessable_entity
+    assert_equal "stopped", response.body
+    get "/drafts/check", params: { stop: "redirect" }
+    assert_redirected_to articles_path
+    get "/drafts/check", params: { stop: "head" }
+    assert_response :no_content
+    get "/drafts/check"
+    assert_equal "fell through", response.body
+  end
+end
+"#,
+        )
+        .run_test("test/controllers/drafts_controller_test.rb")
+        .assert_passes();
+}
+
 /// `ActiveSupport::TimeZone[name]`, `.all`, and a zone's `name`,
 /// `to_s`, `utc_offset`, `formatted_offset` and `now` answer what Rails
 /// answers. Only offsets no daylight saving moves are pinned here; the
