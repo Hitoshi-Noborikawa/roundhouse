@@ -918,8 +918,8 @@ pub fn ingest_app_with_vfs<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResult
         // the render layer is required to honor: Rails presents every
         // AR temporal value in this zone (lobsters runs Central).
         // Synthesized as a `config_time_zone` method on the
-        // Application reopen; the CRuby overlay maps it to an IANA TZ
-        // at boot (main.rb pins ENV["TZ"]). Every other config.* line
+        // Application reopen; the boot makes it the runtime's default
+        // zone (`ActiveSupport.set_default_zone`). Every other config.* line
         // remains railtie noise ingest deliberately does not model.
         if let Some(zone) = extract_config_time_zone(&source) {
             if let Ok(mut synth) = crate::runtime_src::parse_methods(&format!(

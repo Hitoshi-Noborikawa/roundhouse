@@ -934,8 +934,32 @@ module ActiveSupport
     sign * (h * 3600 + mi * 60 + s)
   end
 
+  # The app's `config.time_zone` (Rails' default `Time.zone`), set once at
+  # boot by `set_default_zone`; empty until then, which presents in the
+  # host's zone. Rails keeps the process zone alone: `Time.now` is the
+  # host's local time and only `Time.current` and Active Record values are
+  # in the configured zone. The boot used to pin `ENV["TZ"]` to the
+  # configured zone instead, which made `Time.now` the configured zone
+  # too (an app that names a file after `Time.now.strftime` on a Warsaw
+  # host gets the Warsaw time from Rails).
+  DEFAULT_ZONE = []
+
+  # UTC needs no tzdata: a zone with no transitions and offset 0, so a
+  # container without /usr/share/zoneinfo still boots on Rails' default.
+  def self.set_default_zone(name)
+    iana = ZONE_NAMES[name.to_s] || name.to_s
+    DEFAULT_ZONE.clear
+    if iana == "UTC" || iana == "Etc/UTC" || iana == "Etc/UCT" || iana == "GMT" || iana == "Etc/GMT"
+      DEFAULT_ZONE << TimeZoneData.new("UTC", [], [], 0, [], [])
+    else
+      DEFAULT_ZONE << find_zone!(name)
+    end
+    nil
+  end
+
   def self.current_zone
-    Thread.current[:rh_time_zone]
+    zone = Thread.current[:rh_time_zone]
+    zone.nil? ? DEFAULT_ZONE[0] : zone
   end
 
   def self.use_zone(zone)

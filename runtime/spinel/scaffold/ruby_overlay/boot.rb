@@ -286,18 +286,20 @@ end
 # as it did — the comment was believed and the order was not measured.
 # The spinel scaffold's boot.rb had it right; only this one was wrong.
 require_relative "runtime/active_storage_processor"
-# Pin the process zone to the app's config.time_zone (ingest
+# The app's config.time_zone becomes the runtime's default zone (ingest
 # synthesizes `config_time_zone` from the one config-DSL line the
 # render layer must honor; absent → "UTC", Rails' default). Rails
 # presents every AR temporal value in this zone REGARDLESS of the
-# host's zone — parse_db_time hydrates UTC then `.getlocal` lands
-# here, so strftime/iso8601/pubDate offsets match Rails on any host.
+# host's zone - parse_db_time hydrates UTC then `ActiveSupport.present`
+# lands it here, so strftime/iso8601/pubDate offsets match Rails on any
+# host - and leaves the process zone alone, so `Time.now` stays the
+# host's local time, as in Rails.
 tz_name = if Rails.application.respond_to?(:config_time_zone)
   Rails.application.config_time_zone
 else
   "UTC"
 end
-ENV["TZ"] = ActiveSupport::RAILS_TZ_TO_IANA.fetch(tz_name, tz_name)
+ActiveSupport.set_default_zone(tz_name)
 # Rails' fragment caching through the controller: reopens
 # `ActionView::ViewHelpers.fragment_read/_write`, so after every file that
 # defines them.

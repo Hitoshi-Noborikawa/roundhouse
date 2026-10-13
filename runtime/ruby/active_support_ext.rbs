@@ -124,6 +124,8 @@ module ActiveSupport
   end
   def self.parse_tz_rule: (String spec) -> Array[Integer]
   def self.posix_seconds: (String text) -> Integer
+  DEFAULT_ZONE: Array[TimeZoneData]
+  def self.set_default_zone: (String name) -> nil
   def self.current_zone: () -> TimeZoneData?
   def self.use_zone: (String? zone) { () -> untyped } -> untyped
   def self.present: (Time t) -> Time
