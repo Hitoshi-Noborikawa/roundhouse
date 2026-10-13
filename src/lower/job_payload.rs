@@ -530,7 +530,7 @@ pub fn apply_ruby(lcs: &mut [LibraryClass], app: &App) {
                     ExprNode::Var { id: crate::ident::VarId(i as u32), name: p.name.clone() },
                 );
                 v.ty = match &wrapper.signature {
-                    Some(Ty::Fn { params, .. }) => params.get(i).map(|tp| tp.ty.clone()),
+                    Some(Ty::Fn { params, .. }) => params.get(i).map(|tp| (*tp.ty).clone()),
                     _ => None,
                 };
                 v

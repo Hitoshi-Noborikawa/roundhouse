@@ -33,7 +33,7 @@ pub(super) fn preserve_record_receiver_returns(lcs: &mut [LibraryClass], app: &A
         if !app.models.iter().any(|m| m.name == lc.name && app.schema.tables.contains_key(&m.table.0)) {
             continue;
         }
-        let self_ty = Ty::Class { id: lc.name.clone(), args: vec![] };
+        let self_ty = Ty::Class { id: lc.name.clone(), args: vec![].into() };
         for template in &templates {
             if lc.methods.iter().any(|m| m.name == template.name && m.receiver == MethodReceiver::Instance)
                 || record_return_overridden(app, &classes, &lc.name, template.name.as_str())
@@ -48,15 +48,15 @@ pub(super) fn preserve_record_receiver_returns(lcs: &mut [LibraryClass], app: &A
                 name: p.name.clone(),
                 // `lock!` takes Rails' lock clause; `reload`'s options are open.
                 ty: if method.name.as_str() == "reload" {
-                    Ty::Untyped
+                    Ty::Untyped.into()
                 } else {
-                    Ty::Union { variants: vec![Ty::Bool, Ty::Str, Ty::Nil] }
+                    Ty::Union { variants: vec![Ty::Bool, Ty::Str, Ty::Nil].into() }.into()
                 },
                 kind: crate::ty::ParamKind::Optional,
-            }).collect();
+            }).collect::<Vec<_>>().into();
             method.signature = Some(Ty::Fn {
                 params,
-                ret: Box::new(self_ty.clone()),
+                ret: std::sync::Arc::new(self_ty.clone()),
                 block: None,
                 effects: crate::effect::EffectSet::default(),
             });
@@ -1481,7 +1481,7 @@ fn insert_rel_param(m: &mut crate::dialect::MethodDef, rel_param: &Symbol, owner
                 .unwrap_or(params.len());
             params.insert(at, crate::ty::Param {
                 name: rel_param.clone(),
-                ty: Ty::Relation { of: owner.clone() },
+                ty: Ty::Relation { of: owner.clone() }.into(),
                 kind: crate::ty::ParamKind::Keyword { required: false },
             });
         }
@@ -1504,7 +1504,7 @@ fn insert_rel_param(m: &mut crate::dialect::MethodDef, rel_param: &Symbol, owner
             at,
             crate::ty::Param {
                 name: rel_param.clone(),
-                ty: Ty::Untyped,
+                ty: Ty::Untyped.into(),
                 kind: crate::ty::ParamKind::Optional,
             },
         );
@@ -3979,10 +3979,10 @@ fn rewrite_helper_calls(
                 // campfire's join form rendered `action="/join/"`.
                 if m == "params" {
                     expr.ty = Some(crate::ty::Ty::Hash {
-                        key: Box::new(crate::ty::Ty::Str),
-                        value: Box::new(crate::ty::Ty::Class {
+                        key: std::sync::Arc::new(crate::ty::Ty::Str),
+                        value: std::sync::Arc::new(crate::ty::Ty::Class {
                             id: ClassId(Symbol::from("Roundhouse::ParamValue")),
-                            args: vec![],
+                            args: vec![].into(),
                         }),
                     });
                 }
@@ -5084,7 +5084,7 @@ fn route_helper_param_types(
         };
         out.insert(
             f.name.as_str().to_string(),
-            params.iter().map(|p| p.ty.clone()).collect(),
+            params.iter().map(|p| (*p.ty).clone()).collect(),
         );
     }
     out
@@ -5955,7 +5955,7 @@ fn rewrite_zoned_encode_datetime(expr: &mut Expr) {
             parenthesized: true,
         },
     );
-    zoned.ty = Some(Ty::Union { variants: vec![Ty::Str, Ty::Nil] });
+    zoned.ty = Some(Ty::Union { variants: vec![Ty::Str, Ty::Nil].into() });
     *method = Symbol::from("encode_value");
     *args = vec![zoned];
 }
@@ -9530,11 +9530,11 @@ mod insert_rel_param_tests {
         let sig = Ty::Fn {
             params: vec![crate::ty::Param {
                 name: Symbol::from("tags"),
-                ty: Ty::Untyped,
+                ty: Ty::Untyped.into(),
                 kind: ParamKind::Rest,
-            }],
+            }].into(),
             block: None,
-            ret: Box::new(Ty::Untyped),
+            ret: std::sync::Arc::new(Ty::Untyped),
             effects: crate::effect::EffectSet::pure(),
         };
         let mut m = bare_method(params, Some(sig));
@@ -9551,7 +9551,7 @@ mod insert_rel_param_tests {
         };
         let rel_ty_param = params.iter().find(|p| p.name == rel_param).expect("__rel in signature");
         assert_eq!(rel_ty_param.kind, ParamKind::Keyword { required: false });
-        assert_eq!(rel_ty_param.ty, Ty::Relation { of: owner });
+        assert_eq!(*rel_ty_param.ty, Ty::Relation { of: owner });
     }
 
     /// The untouched case: no rest param, `__rel` stays exactly what it
@@ -9565,11 +9565,11 @@ mod insert_rel_param_tests {
         let sig = Ty::Fn {
             params: vec![crate::ty::Param {
                 name: Symbol::from("user"),
-                ty: Ty::Untyped,
+                ty: Ty::Untyped.into(),
                 kind: ParamKind::Required,
-            }],
+            }].into(),
             block: None,
-            ret: Box::new(Ty::Untyped),
+            ret: std::sync::Arc::new(Ty::Untyped),
             effects: crate::effect::EffectSet::pure(),
         };
         let mut m = bare_method(params, Some(sig));
@@ -9585,7 +9585,7 @@ mod insert_rel_param_tests {
         };
         let rel_ty_param = params.iter().find(|p| p.name == rel_param).expect("__rel in signature");
         assert_eq!(rel_ty_param.kind, ParamKind::Optional);
-        assert_eq!(rel_ty_param.ty, Ty::Untyped, "unchanged: still Untyped, not Relation");
+        assert_eq!(*rel_ty_param.ty, Ty::Untyped, "unchanged: still Untyped, not Relation");
     }
 
     /// `def f(*tags, **opts)`: no keyword may follow `**opts`, so `__rel:`
@@ -9597,11 +9597,11 @@ mod insert_rel_param_tests {
         let params = vec![Param::rest(Symbol::from("tags")), kwrest];
         let sig = Ty::Fn {
             params: vec![
-                crate::ty::Param { name: Symbol::from("tags"), ty: Ty::Untyped, kind: ParamKind::Rest },
-                crate::ty::Param { name: Symbol::from("opts"), ty: Ty::Untyped, kind: ParamKind::KeywordRest },
-            ],
+                crate::ty::Param { name: Symbol::from("tags"), ty: Ty::Untyped.into(), kind: ParamKind::Rest },
+                crate::ty::Param { name: Symbol::from("opts"), ty: Ty::Untyped.into(), kind: ParamKind::KeywordRest },
+            ].into(),
             block: None,
-            ret: Box::new(Ty::Untyped),
+            ret: std::sync::Arc::new(Ty::Untyped),
             effects: crate::effect::EffectSet::pure(),
         };
         let mut m = bare_method(params, Some(sig));

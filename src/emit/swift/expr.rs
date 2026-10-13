@@ -3192,7 +3192,7 @@ mod equal_identity_tests {
         let mut recv = var(name);
         recv.ty = Some(Ty::Class {
             id: ClassId(Symbol::from("ActionController::HeaderStore")),
-            args: vec![],
+            args: vec![].into(),
         });
         recv
     }
@@ -3213,7 +3213,7 @@ mod equal_identity_tests {
     #[test]
     fn equal_on_a_hash_stays_a_call() {
         let mut recv = var("attrs");
-        recv.ty = Some(Ty::Hash { key: Box::new(Ty::Str), value: Box::new(Ty::Untyped) });
+        recv.ty = Some(Ty::Hash { key: std::sync::Arc::new(Ty::Str), value: std::sync::Arc::new(Ty::Untyped) });
         let out = emit_expr(&send(recv, "equal?", var("sentinel")));
         assert!(out.contains("equalPred"), "{out}");
         assert!(!out.contains("==="), "{out}");

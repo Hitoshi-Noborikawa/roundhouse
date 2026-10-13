@@ -3798,7 +3798,7 @@ mod array_eq_tests {
     use crate::span::Span;
 
     fn ints() -> Ty {
-        Ty::Array { elem: Box::new(Ty::Int) }
+        Ty::Array { elem: std::sync::Arc::new(Ty::Int) }
     }
 
     fn cmp(method: &str, actual_ty: Option<Ty>) -> String {

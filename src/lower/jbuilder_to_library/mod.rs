@@ -559,13 +559,13 @@ fn type_method_body_solo(method: &mut MethodDef) {
     let mut ctx = crate::analyze::Ctx::default();
     if let Some(crate::ty::Ty::Fn { params, .. }) = &method.signature {
         for (param, sig) in method.params.iter().zip(params.iter()) {
-            ctx.local_bindings.insert(param.name.clone(), sig.ty.clone());
+            ctx.local_bindings.insert(param.name.clone(), (*sig.ty).clone());
         }
     }
     if let Some(enclosing) = &method.enclosing_class {
         ctx.self_ty = Some(crate::ty::Ty::Class {
             id: ClassId(enclosing.clone()),
-            args: vec![],
+            args: vec![].into(),
         });
     }
     typer.analyze_expr(&mut method.body, &ctx);
@@ -2207,8 +2207,8 @@ fn request_params_to_local(e: &mut Expr, name: &Symbol) {
 fn template_param_ty(name: &str, known_models: &[String]) -> crate::ty::Ty {
     if name == "params" {
         return crate::ty::Ty::Hash {
-            key: Box::new(crate::ty::Ty::Str),
-            value: Box::new(crate::ty::Ty::Untyped),
+            key: std::sync::Arc::new(crate::ty::Ty::Str),
+            value: std::sync::Arc::new(crate::ty::Ty::Untyped),
         };
     }
     crate::lower::view_to_library::ivar_ty(name, known_models)

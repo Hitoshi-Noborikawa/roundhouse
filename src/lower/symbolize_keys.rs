@@ -150,11 +150,15 @@ pub(crate) fn rewrite_node(expr: &mut Expr) {
                     || is_open_value(r)) =>
         {
             let ty = match r.ty.as_ref() {
-                Some(Ty::Array { .. }) => Ty::Array { elem: Box::new(Ty::Untyped) },
-                Some(Ty::Hash { .. }) => Ty::Hash { key: Box::new(Ty::Str), value: Box::new(Ty::Untyped) },
-                _ if is_request_params(r) => {
-                    Ty::Hash { key: Box::new(Ty::Str), value: Box::new(Ty::Untyped) }
-                }
+                Some(Ty::Array { .. }) => Ty::Array { elem: std::sync::Arc::new(Ty::Untyped) },
+                Some(Ty::Hash { .. }) => Ty::Hash {
+                    key: std::sync::Arc::new(Ty::Str),
+                    value: std::sync::Arc::new(Ty::Untyped),
+                },
+                _ if is_request_params(r) => Ty::Hash {
+                    key: std::sync::Arc::new(Ty::Str),
+                    value: std::sync::Arc::new(Ty::Untyped),
+                },
                 _ => Ty::Untyped,
             };
             let mut call = Expr::new(
@@ -186,7 +190,7 @@ pub(crate) fn rewrite_node(expr: &mut Expr) {
                 Some(Ty::Hash { key, value }) if **key == Ty::Sym => {
                     let value = value.clone();
                     let mut call = active_support_call(expr.span, "stringify_keys", r.clone());
-                    call.ty = Some(Ty::Hash { key: Box::new(Ty::Str), value });
+                    call.ty = Some(Ty::Hash { key: std::sync::Arc::new(Ty::Str), value });
                     Some(call)
                 }
                 _ => None,
@@ -240,7 +244,7 @@ pub(crate) fn rewrite_node(expr: &mut Expr) {
                                 parenthesized: true,
                             },
                         );
-                        call.ty = Some(Ty::Hash { key: Box::new(Ty::Sym), value });
+                        call.ty = Some(Ty::Hash { key: std::sync::Arc::new(Ty::Sym), value });
                         Some(call)
                     }
                 }
@@ -380,7 +384,7 @@ mod as_json_tests {
         let call = as_json_on_params(Some(Ty::Str));
         assert!(!is_jsonable(&call), "{call:?}");
         assert!(call.ty.is_none(), "stamped {:?}", call.ty);
-        let other = Ty::Class { id: crate::ident::ClassId(Symbol::from("Gadget")), args: vec![] };
+        let other = Ty::Class { id: crate::ident::ClassId(Symbol::from("Gadget")), args: vec![].into() };
         assert!(!is_jsonable(&as_json_on_params(Some(other))));
     }
 
@@ -388,12 +392,12 @@ mod as_json_tests {
     fn the_request_params_untyped_or_hash_are_grounded() {
         let parameters = Ty::Class {
             id: crate::ident::ClassId(Symbol::from("ActionController::Parameters")),
-            args: vec![],
+            args: vec![].into(),
         };
         for ty in [
             None,
             Some(Ty::Untyped),
-            Some(Ty::Hash { key: Box::new(Ty::Str), value: Box::new(Ty::Untyped) }),
+            Some(Ty::Hash { key: std::sync::Arc::new(Ty::Str), value: std::sync::Arc::new(Ty::Untyped) }),
             Some(parameters),
         ] {
             assert!(is_jsonable(&as_json_on_params(ty.clone())), "{ty:?}");

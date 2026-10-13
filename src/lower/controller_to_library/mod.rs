@@ -485,8 +485,8 @@ pub fn lower_controllers_with_arel_views_assocs_and_routes(
     framework_ivars.insert(
         Symbol::from("params"),
         Ty::Hash {
-            key: Box::new(Ty::Str),
-            value: Box::new(Ty::Untyped),
+            key: std::sync::Arc::new(Ty::Str),
+            value: std::sync::Arc::new(Ty::Untyped),
         },
     );
     // `@flash` is also framework-guaranteed: the render-rewrite emits
@@ -500,7 +500,7 @@ pub fn lower_controllers_with_arel_views_assocs_and_routes(
         Symbol::from("flash"),
         Ty::Class {
             id: ClassId(Symbol::from("ActionDispatch::Flash")),
-            args: vec![],
+            args: vec![].into(),
         },
     );
     // `@session` ditto — per Phase 2.5(b), typed as the per-app
@@ -510,7 +510,7 @@ pub fn lower_controllers_with_arel_views_assocs_and_routes(
         Symbol::from("session"),
         Ty::Class {
             id: ClassId(Symbol::from("ActionDispatch::Session")),
-            args: vec![],
+            args: vec![].into(),
         },
     );
 
@@ -2391,7 +2391,7 @@ fn calls_super(body: &Expr) -> bool {
 /// per-arg types lands when a routing-table-aware typer surfaces.
 fn insert_baseline_controller_methods(info: &mut crate::analyze::ClassInfo) {
     use crate::lower::typing::fn_sig;
-    let any_hash = Ty::Hash { key: Box::new(Ty::Sym), value: Box::new(Ty::Untyped) };
+    let any_hash = Ty::Hash { key: std::sync::Arc::new(Ty::Sym), value: std::sync::Arc::new(Ty::Untyped) };
 
     // Terminals — render/redirect/head/render_404 all return Nil.
     // The framework runtime declares these with named keyword params
@@ -2407,11 +2407,11 @@ fn insert_baseline_controller_methods(info: &mut crate::analyze::ClassInfo) {
         Ty::Fn {
             params: vec![crate::ty::Param {
                 name: Symbol::from("opts"),
-                ty: any_hash.clone(),
+                ty: any_hash.clone().into(),
                 kind: crate::ty::ParamKind::KeywordRest,
-            }],
+            }].into(),
             block: None,
-            ret: Box::new(Ty::Nil),
+            ret: std::sync::Arc::new(Ty::Nil),
             effects: crate::effect::EffectSet::pure(),
         }
     };
@@ -2420,17 +2420,17 @@ fn insert_baseline_controller_methods(info: &mut crate::analyze::ClassInfo) {
             params: vec![
                 crate::ty::Param {
                     name: Symbol::from(first_name),
-                    ty: first_ty,
+                    ty: first_ty.into(),
                     kind: crate::ty::ParamKind::Required,
                 },
                 crate::ty::Param {
                     name: Symbol::from("opts"),
-                    ty: any_hash.clone(),
+                    ty: any_hash.clone().into(),
                     kind: crate::ty::ParamKind::KeywordRest,
                 },
-            ],
+            ].into(),
             block: None,
-            ret: Box::new(Ty::Nil),
+            ret: std::sync::Arc::new(Ty::Nil),
             effects: crate::effect::EffectSet::pure(),
         }
     };
@@ -2461,7 +2461,7 @@ fn insert_baseline_controller_methods(info: &mut crate::analyze::ClassInfo) {
     // its parameters. `runtime/ruby/action_controller/base.rb` defines
     // all three; without these entries a strict target cannot resolve
     // the sends that reach them.
-    let str_or_nil = Ty::Union { variants: vec![Ty::Str, Ty::Nil] };
+    let str_or_nil = Ty::Union { variants: vec![Ty::Str, Ty::Nil].into() };
     info.instance_methods
         .entry(Symbol::from("response_body"))
         .or_insert_with(|| fn_sig(vec![], Ty::Str));
@@ -2807,7 +2807,7 @@ fn action_to_method(
         let spec = self::params::first_permit_in(&a.body)
             .and_then(|(resource, fields)| params_specs.find(&resource, &fields));
         if let Some(spec) = spec {
-            Ty::Class { id: spec.class_id.clone(), args: vec![] }
+            Ty::Class { id: spec.class_id.clone(), args: vec![].into() }
         } else {
             // No recognized permit list: the `_params` suffix is a naming
             // convention, not a contract. A guard filter named
@@ -2928,7 +2928,7 @@ fn union_with(a: Ty, b: Ty) -> Ty {
             out.push(v);
         }
     }
-    if out.len() == 1 { out.pop().unwrap() } else { Ty::Union { variants: out } }
+    if out.len() == 1 { out.pop().unwrap() } else { Ty::Union { variants: out.into() } }
 }
 
 /// Each signature slot takes the kind its `def` declares. A param with

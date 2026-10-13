@@ -2028,7 +2028,7 @@ fn effective_recv_ty(e: &Expr) -> Option<crate::ty::Ty> {
     if let ExprNode::Send { method, .. } = &*e.node {
         if method.as_str() == "error_messages_for"
         {
-            return Some(crate::ty::Ty::Array { elem: Box::new(crate::ty::Ty::Str) });
+            return Some(crate::ty::Ty::Array { elem: std::sync::Arc::new(crate::ty::Ty::Str) });
         }
     }
     // Fall back to the node's own ty.
@@ -2284,7 +2284,7 @@ mod tests {
         })
     }
     fn arr() -> Ty {
-        Ty::Array { elem: Box::new(Ty::Untyped) }
+        Ty::Array { elem: std::sync::Arc::new(Ty::Untyped) }
     }
 
     fn unary(method: &str, recv: Expr) -> Expr {
@@ -2438,7 +2438,7 @@ mod tests {
         // the receiver.
         let record = var_t(
             "record",
-            Ty::Class { id: ClassId(Symbol::from("ActiveRecord::Base")), args: vec![] },
+            Ty::Class { id: ClassId(Symbol::from("ActiveRecord::Base")), args: vec![].into() },
         );
         let call = Expr::new(crate::span::Span::synthetic(), ExprNode::Send {
             recv: Some(record),
@@ -2565,7 +2565,7 @@ mod tests {
     #[test]
     fn hash_methods_map_to_elixir_map() {
         let hash = || {
-            var_t("h", Ty::Hash { key: Box::new(Ty::Str), value: Box::new(Ty::Untyped) })
+            var_t("h", Ty::Hash { key: std::sync::Arc::new(Ty::Str), value: std::sync::Arc::new(Ty::Untyped) })
         };
         let no_args = |m: &str| Expr::new(crate::span::Span::synthetic(), ExprNode::Send {
             recv: Some(hash()),
@@ -2775,7 +2775,7 @@ mod tests {
         // the threaded record) → polymorphic `instance.__struct__.save(
         // instance)`. `instance.id` (a struct field) → field read.
         let mut instance = syn(ExprNode::Var { id: VarId(0), name: sym("instance") });
-        instance.ty = Some(Ty::Class { id: ClassId(sym("Foo")), args: vec![] });
+        instance.ty = Some(Ty::Class { id: ClassId(sym("Foo")), args: vec![].into() });
         let save_call = call(instance.clone(), "save", vec![]);
         let id_read = call(instance, "id", vec![]);
 
@@ -2789,7 +2789,7 @@ mod tests {
             emit_expr(&call(
                 {
                     let mut v = syn(ExprNode::Var { id: VarId(0), name: sym("instance") });
-                    v.ty = Some(Ty::Class { id: ClassId(sym("Foo")), args: vec![] });
+                    v.ty = Some(Ty::Class { id: ClassId(sym("Foo")), args: vec![].into() });
                     v
                 },
                 "id",
@@ -2826,7 +2826,7 @@ mod tests {
             emit_expr(&call(var_t("s", Ty::Str), "include?", vec![lit(":")])),
             "String.contains?(s, \":\")"
         );
-        let nilable = Ty::Union { variants: vec![Ty::Str, Ty::Nil] };
+        let nilable = Ty::Union { variants: vec![Ty::Str, Ty::Nil].into() };
         assert_eq!(
             emit_expr(&call(var_t("pp", nilable), "include?", vec![lit(":")])),
             "String.contains?(pp, \":\")"
@@ -2837,7 +2837,7 @@ mod tests {
     fn container_query_methods_dispatch_on_type() {
         // Array receiver → Enum.*; Hash receiver → Map.* / map_size.
         let arr = || var_t("xs", arr());
-        let hsh = || var_t("h", Ty::Hash { key: Box::new(Ty::Untyped), value: Box::new(Ty::Untyped) });
+        let hsh = || var_t("h", Ty::Hash { key: std::sync::Arc::new(Ty::Untyped), value: std::sync::Arc::new(Ty::Untyped) });
         assert_eq!(emit_expr(&call(arr(), "empty?", vec![])), "Enum.empty?(xs)");
         assert_eq!(emit_expr(&call(hsh(), "empty?", vec![])), "map_size(h) == 0");
         assert_eq!(
@@ -2886,7 +2886,7 @@ mod tests {
             id: VarId(0),
             name: Symbol::from("row"),
         });
-        row.ty = Some(Ty::Class { id: ClassId(Symbol::from("ArticleRow")), args: vec![] });
+        row.ty = Some(Ty::Class { id: ClassId(Symbol::from("ArticleRow")), args: vec![].into() });
         assert_eq!(emit_expr(&call(row, "id", vec![])), "row.id");
 
         set_current_class_name("");
@@ -3027,13 +3027,13 @@ mod tests {
         clear_param_types();
         register_field_types(
             "Article",
-            &[("errors".to_string(), Ty::Array { elem: Box::new(Ty::Str) })],
+            &[("errors".to_string(), Ty::Array { elem: std::sync::Arc::new(Ty::Str) })],
         );
         register_param_types(
             "Views::Articles",
             &[(
                 "article".to_string(),
-                Ty::Class { id: ClassId(Symbol::from("Article")), args: vec![] },
+                Ty::Class { id: ClassId(Symbol::from("Article")), args: vec![].into() },
             )],
         );
         set_current_class_name("Views::Articles");
@@ -3151,8 +3151,8 @@ mod tests {
         let recv = var_t(
             "counts",
             Ty::Hash {
-                key: Box::new(Ty::Int),
-                value: Box::new(Ty::Int),
+                key: std::sync::Arc::new(Ty::Int),
+                value: std::sync::Arc::new(Ty::Int),
             },
         );
         let key = var_t("id", Ty::Int);

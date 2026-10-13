@@ -2325,14 +2325,14 @@ mod equal_and_hash_pin_tests {
             "HeaderStore",
             "merge!",
             vec![Ty::Hash {
-                key: Box::new(Ty::Str),
-                value: Box::new(Ty::Union { variants: vec![Ty::Str, Ty::Nil] }),
+                key: std::sync::Arc::new(Ty::Str),
+                value: std::sync::Arc::new(Ty::Union { variants: vec![Ty::Str, Ty::Nil].into() }),
             }],
         );
         let mut recv = var("headers");
         recv.ty = Some(Ty::Class {
             id: ClassId(Symbol::from("ActionController::HeaderStore")),
-            args: vec![],
+            args: vec![].into(),
         });
         let out = emit_expr(&send(recv, "merge!", vec![quota_hash()]));
         reset_method_params();

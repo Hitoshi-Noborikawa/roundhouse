@@ -2218,10 +2218,11 @@ fn has_secure_password_authenticate_includes_its_false_result() {
         variants: vec![
             Ty::Class {
                 id: ClassId(Symbol::from("User")),
-                args: vec![],
+                args: vec![].into(),
             },
             Ty::Bool,
-        ],
+        ]
+        .into(),
     };
     assert_eq!(check.body.ty.as_ref(), Some(&expected));
 }
@@ -5097,7 +5098,7 @@ fn method_ref_block_arg_types_map_result_by_referenced_method_return_ty() {
         .expect("doubled_list present");
     assert_eq!(
         doubled_list.body.ty,
-        Some(Ty::Array { elem: Box::new(Ty::Int) }),
+        Some(Ty::Array { elem: std::sync::Arc::new(Ty::Int) }),
         "[1, 2, 3].map(&method(:double)) should type as Array[Integer], got {:?}",
         doubled_list.body.ty,
     );

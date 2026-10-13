@@ -419,7 +419,7 @@ fn empty_array(span: crate::span::Span) -> Expr {
     // A later pass reads assignment types. An untyped `[]` is invisible
     // to it, so a controller ivar assigned both this and a Relation
     // would keep the Relation.
-    empty.ty = Some(Ty::Array { elem: Box::new(Ty::Untyped) });
+    empty.ty = Some(Ty::Array { elem: std::sync::Arc::new(Ty::Untyped) });
     empty
 }
 
@@ -430,7 +430,7 @@ fn fold_array_wrap(span: crate::span::Span, arg: &Expr) -> Option<Expr> {
             span,
             ExprNode::Array { elements: vec![value], style: Default::default() },
         );
-        wrapped.ty = Some(Ty::Array { elem: Box::new(Ty::Untyped) });
+        wrapped.ty = Some(Ty::Array { elem: std::sync::Arc::new(Ty::Untyped) });
         wrapped
     };
     match arg.ty.as_ref() {
@@ -497,19 +497,19 @@ fn fold_union_wrap(span: crate::span::Span, arg: &Expr, variants: &[Ty]) -> Opti
             span,
             ExprNode::Array { elements: vec![read.clone()], style: Default::default() },
         );
-        wrapped.ty = Some(Ty::Array { elem: Box::new(Ty::Untyped) });
+        wrapped.ty = Some(Ty::Array { elem: std::sync::Arc::new(Ty::Untyped) });
         let mut branch = Expr::new(
             span,
             ExprNode::If { cond: test, then_branch: read.clone(), else_branch: wrapped },
         );
-        branch.ty = Some(Ty::Array { elem: Box::new(Ty::Untyped) });
+        branch.ty = Some(Ty::Array { elem: std::sync::Arc::new(Ty::Untyped) });
         branch
     } else {
         let mut wrapped = Expr::new(
             span,
             ExprNode::Array { elements: vec![read.clone()], style: Default::default() },
         );
-        wrapped.ty = Some(Ty::Array { elem: Box::new(Ty::Untyped) });
+        wrapped.ty = Some(Ty::Array { elem: std::sync::Arc::new(Ty::Untyped) });
         wrapped
     };
     let mut cond = Expr::new(
@@ -531,7 +531,7 @@ fn fold_union_wrap(span: crate::span::Span, arg: &Expr, variants: &[Ty]) -> Opti
             else_branch: when_present,
         },
     );
-    branch.ty = Some(Ty::Array { elem: Box::new(Ty::Untyped) });
+    branch.ty = Some(Ty::Array { elem: std::sync::Arc::new(Ty::Untyped) });
     Some(Expr::new(
         span,
         ExprNode::Seq { exprs: vec![bound.assign, branch] },
@@ -652,7 +652,7 @@ mod tests {
         Expr::new(Span::synthetic(), ExprNode::Lit { value: crate::expr::Literal::Int { value } })
     }
 
-    fn strs() -> Option<Ty> { Some(Ty::Array { elem: Box::new(Ty::Str) }) }
+    fn strs() -> Option<Ty> { Some(Ty::Array { elem: std::sync::Arc::new(Ty::Str) }) }
 
     /// Value form rewrites to a bind-once Seq whose last expr is `to_h`.
     fn grounded_to_h(e: &Expr) -> &Expr {
@@ -675,8 +675,8 @@ mod tests {
     #[test]
     fn index_with_on_a_hash_stays_as_written() {
         // `{a: 1}.index_with(0)` keys by the pair; `to_h` would key by `:a`.
-        let hash = Ty::Hash { key: Box::new(Ty::Sym), value: Box::new(Ty::Int) };
-        for ty in [hash.clone(), Ty::Union { variants: vec![hash, Ty::Nil] }] {
+        let hash = Ty::Hash { key: std::sync::Arc::new(Ty::Sym), value: std::sync::Arc::new(Ty::Int) };
+        for ty in [hash.clone(), Ty::Union { variants: vec![hash, Ty::Nil].into() }] {
             let mut e = index_with_on(Some(ty), int(0));
             assert!(!rewrite_node(&mut e));
             assert_eq!(method_of(&e), "index_with");
@@ -730,7 +730,7 @@ mod tests {
     }
 
     fn array_of_users() -> Ty {
-        Ty::Array { elem: Box::new(Ty::Class { id: crate::ident::ClassId(Symbol::from("User")), args: vec![] }) }
+        Ty::Array { elem: std::sync::Arc::new(Ty::Class { id: crate::ident::ClassId(Symbol::from("User")), args: vec![].into() }) }
     }
 
     fn method_of(e: &Expr) -> String {
@@ -811,7 +811,7 @@ mod tests {
     /// `Array | untyped`, and the Array half has no `many?` on spinel.
     #[test]
     fn many_on_an_array_or_untyped_union_is_a_size_test() {
-        let mut e = many_on(Ty::Union { variants: vec![array_of_users(), Ty::Untyped] });
+        let mut e = many_on(Ty::Union { variants: vec![array_of_users(), Ty::Untyped].into() });
         rewrite(&mut e);
         assert_eq!(method_of(&e), ">");
         let ExprNode::Send { recv: Some(size), .. } = &*e.node else { panic!() };
@@ -899,7 +899,7 @@ mod tests {
     /// A union with a variant that has no `size` (nil) is left alone.
     #[test]
     fn many_on_a_nilable_array_union_is_untouched() {
-        let mut e = many_on(Ty::Union { variants: vec![array_of_users(), Ty::Nil] });
+        let mut e = many_on(Ty::Union { variants: vec![array_of_users(), Ty::Nil].into() });
         rewrite(&mut e);
         assert_eq!(method_of(&e), "many?");
         let ExprNode::Send { recv: Some(r), .. } = &*e.node else { panic!() };
@@ -918,7 +918,7 @@ mod tests {
     /// `Array | untyped` union reads through `to_a`, typed as the Array half.
     #[test]
     fn first_n_on_an_array_or_untyped_union_reads_through_to_a() {
-        let mut e = first_n_on(Ty::Union { variants: vec![array_of_users(), Ty::Untyped] });
+        let mut e = first_n_on(Ty::Union { variants: vec![array_of_users(), Ty::Untyped].into() });
         rewrite(&mut e);
         assert_eq!(method_of(&e), "first");
         let ExprNode::Send { recv: Some(to_a), args, .. } = &*e.node else { panic!() };
@@ -937,7 +937,7 @@ mod tests {
     }
 
     fn sentence_on(options: Vec<(&str, &str)>) -> Expr {
-        let mut e = many_on(Ty::Array { elem: Box::new(Ty::Str) });
+        let mut e = many_on(Ty::Array { elem: std::sync::Arc::new(Ty::Str) });
         let ExprNode::Send { method, args, .. } = &mut *e.node else { panic!() };
         *method = Symbol::from("to_sentence");
         if !options.is_empty() {

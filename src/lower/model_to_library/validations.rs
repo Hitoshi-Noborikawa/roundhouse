@@ -410,7 +410,7 @@ fn push_active_model_validation_surface(methods: &mut Vec<MethodDef>, model: &Mo
             receiver: MethodReceiver::Instance,
             params: Vec::new(),
             body: errors_read(),
-            signature: Some(fn_sig(vec![], Ty::Array { elem: Box::new(Ty::Str) })),
+            signature: Some(fn_sig(vec![], Ty::Array { elem: std::sync::Arc::new(Ty::Str) })),
             effects: EffectSet::default(),
             enclosing_class: Some(model.name.0.clone()),
             kind: AccessorKind::Method,
@@ -447,7 +447,7 @@ fn push_active_model_validation_surface(methods: &mut Vec<MethodDef>, model: &Mo
             receiver: MethodReceiver::Instance,
             params: vec![crate::dialect::Param::positional(Symbol::from("attribute"))],
             body: error_messages_for_body(span),
-            signature: Some(fn_sig(vec![(Symbol::from("attribute"), Ty::Str)], Ty::Array { elem: Box::new(Ty::Str) })),
+            signature: Some(fn_sig(vec![(Symbol::from("attribute"), Ty::Str)], Ty::Array { elem: std::sync::Arc::new(Ty::Str) })),
             effects: EffectSet::default(),
             enclosing_class: Some(model.name.0.clone()),
             kind: AccessorKind::Method,
@@ -461,7 +461,7 @@ fn push_active_model_validation_surface(methods: &mut Vec<MethodDef>, model: &Mo
 /// `out = []; @error_details.each { |e| out << e.message if e.attribute == attribute }; out`,
 /// the body `ActiveRecord::Base#error_messages_for` has in the shared runtime.
 fn error_messages_for_body(span: Span) -> Expr {
-    let str_array = Ty::Array { elem: Box::new(Ty::Str) };
+    let str_array = Ty::Array { elem: std::sync::Arc::new(Ty::Str) };
     let typed = |node: ExprNode, ty: Ty| {
         let mut e = Expr::new(span, node);
         e.ty = Some(ty);
@@ -471,7 +471,7 @@ fn error_messages_for_body(span: Span) -> Expr {
     let call = |recv: Expr, method: &str, args: Vec<Expr>, ty: Ty| {
         typed(ExprNode::Send { recv: Some(recv), method: Symbol::from(method), args, block: None, parenthesized: false }, ty)
     };
-    let error_ty = Ty::Class { id: ClassId(Symbol::from("ActiveRecord::ErrorDetail")), args: vec![] };
+    let error_ty = Ty::Class { id: ClassId(Symbol::from("ActiveRecord::ErrorDetail")), args: vec![].into() };
     let error = || var("e", error_ty.clone());
     let picked = typed(
         ExprNode::If {
@@ -1307,7 +1307,7 @@ mod tests {
 
     #[test]
     fn presence_array_typed_attr_drops_is_a_string_branch() {
-        let expr = inline_presence_check(Messages::default(), &attr(), Some(&Ty::Array { elem: Box::new(Ty::Str) }));
+        let expr = inline_presence_check(Messages::default(), &attr(), Some(&Ty::Array { elem: std::sync::Arc::new(Ty::Str) }));
         let dbg = format!("{:?}", expr);
         assert!(
             !dbg.contains("\"String\""),

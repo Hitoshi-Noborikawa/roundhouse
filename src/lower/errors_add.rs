@@ -313,7 +313,7 @@ pub(crate) fn attributed_push(
     message: Expr,
     span: crate::span::Span,
 ) -> Expr {
-    let error_ty = crate::ty::Ty::Class { id: crate::ident::ClassId(Symbol::from("ActiveRecord::ErrorDetail")), args: vec![] };
+    let error_ty = crate::ty::Ty::Class { id: crate::ident::ClassId(Symbol::from("ActiveRecord::ErrorDetail")), args: vec![].into() };
     let mut class = Expr::new(span, ExprNode::Const { path: vec![Symbol::from("ActiveRecord"), Symbol::from("ErrorDetail")] });
     class.ty = Some(error_ty.clone());
     let mut record = Expr::new(
@@ -346,7 +346,7 @@ pub(crate) fn attributed_push(
 
 pub(crate) fn error_details_ty() -> crate::ty::Ty {
     crate::ty::Ty::Array {
-        elem: Box::new(crate::ty::Ty::Class { id: crate::ident::ClassId(Symbol::from("ActiveRecord::ErrorDetail")), args: vec![] }),
+        elem: std::sync::Arc::new(crate::ty::Ty::Class { id: crate::ident::ClassId(Symbol::from("ActiveRecord::ErrorDetail")), args: vec![].into() }),
     }
 }
 
