@@ -1858,6 +1858,15 @@ impl<'a> BodyTyper<'a> {
                 {
                     return send::bigdecimal();
                 }
+                // Not with a Hash argument: `exception: false` answers nil where the conversion fails.
+                if recv.is_none() && block.is_none()
+                    && ((method.as_str() == "Integer" && matches!(args.len(), 1 | 2)) || (method.as_str() == "Float" && args.len() == 1))
+                    && !args.iter().any(|a| matches!(&*a.node, ExprNode::Hash { .. }))
+                    && matches!(dispatched, Ty::Var { .. } | Ty::Untyped)
+                    && !self.app_defines(ctx.self_ty.as_ref(), method)
+                {
+                    return if method.as_str() == "Integer" { Ty::Int } else { Ty::Float };
+                }
                 if recv.is_none() && method.as_str() == "Array" && args.len() == 1
                     && block.is_none()
                     && (matches!(dispatched, Ty::Var { .. })

@@ -1570,10 +1570,10 @@ fn report_self_bindings(app: &App, target: BuildTarget) {
 /// Ruby family has: `Array#fetch`, `each_slice`, `each_cons`, an
 /// enumerator's `with_object`, `Array[...]` and `Hash[...]`, `include?` on
 /// a `Class`/`Module` value (Module's ancestry query, which the other
-/// targets' `include?` is not) and Kernel's `Rational(...)`, which a
-/// rational literal ingests as. The other emitters render them as the
-/// method name on the receiver, which nothing there defines, so they
-/// refuse each by name.
+/// targets' `include?` is not), Kernel's `Rational(...)`, which a
+/// rational literal ingests as, and Kernel's `Integer(...)` and
+/// `Float(...)`. The other emitters render them as the method name on
+/// the receiver, which nothing there defines, so they refuse each by name.
 fn report_ruby_only_sends(app: &App, target: BuildTarget) {
     if matches!(target, BuildTarget::Blog | BuildTarget::Ruby | BuildTarget::Jruby
         | BuildTarget::Spinel | BuildTarget::Roda) {
@@ -1586,6 +1586,8 @@ fn report_ruby_only_sends(app: &App, target: BuildTarget) {
             let recv_ty = recv.as_ref().and_then(|r| r.ty.as_ref());
             let construct = match (recv, method.as_str()) {
                 (None, "Rational") => Some("Kernel#Rational"),
+                (None, "Integer") => Some("Kernel#Integer"),
+                (None, "Float") => Some("Kernel#Float"),
                 (Some(r), "[]") => match &*r.node {
                     ExprNode::Const { path } if path.len() == 1 && path[0].as_str() == "Array" => Some("Array[]"),
                     ExprNode::Const { path } if path.len() == 1 && path[0].as_str() == "Hash" => Some("Hash[]"),

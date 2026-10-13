@@ -1,7 +1,8 @@
 //! Sends the analyzer types for every target but only the Ruby family can
 //! run: `Array#fetch`, `each_slice`, `each_cons`, an enumerator's
-//! `with_object`, `Array[...]`, `Hash[...]`, `include?` on a `Class` value
-//! and Kernel's `Rational(...)` (what a rational literal ingests as).
+//! `with_object`, `Array[...]`, `Hash[...]`, `include?` on a `Class` value,
+//! Kernel's `Rational(...)` (what a rational literal ingests as) and
+//! Kernel's `Integer(...)` and `Float(...)`.
 //!
 //! The other emitters render each as the method name on its receiver,
 //! which nothing there defines, so every one refuses the construct by name
@@ -50,10 +51,16 @@ const MODEL: &str = r#"class Article < ApplicationRecord
 
   #: (Class) -> bool
   def self.tagged?(klass) = klass.include?(Tagged)
+
+  #: (String) -> Integer
+  def self.count(text) = Integer(text)
+
+  #: (String) -> Float
+  def self.ratio(text) = Float(text)
 end
 "#;
 
-const REFUSED: [&str; 8] = [
+const REFUSED: [&str; 10] = [
     "Array#fetch",
     "Array#each_slice",
     "Array#each_cons",
@@ -62,6 +69,8 @@ const REFUSED: [&str; 8] = [
     "Hash[]",
     "Kernel#Rational",
     "Module#include?",
+    "Kernel#Integer",
+    "Kernel#Float",
 ];
 
 fn build(root: &std::path::Path, target: &str) -> (bool, String) {
