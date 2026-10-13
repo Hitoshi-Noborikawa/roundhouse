@@ -1508,13 +1508,24 @@ fn report_native_ruby_syntax(app: &App, target: BuildTarget) {
     if matches!(target, BuildTarget::Blog | BuildTarget::Ruby | BuildTarget::Jruby) {
         return;
     }
-    fn visit(expr: &crate::expr::Expr, target: BuildTarget) {
+    fn visit(expr: &crate::expr::Expr, target: BuildTarget, load_time: bool) {
         use crate::expr::{ExprNode, LValue};
         let construct = match &*expr.node {
             ExprNode::ForwardKeywords if target == BuildTarget::Spinel => None,
             ExprNode::ForwardKeywords => Some("anonymous keyword forwarding"),
             ExprNode::ForwardKeywordsWithPairs { .. } if target == BuildTarget::Spinel => None,
             ExprNode::ForwardKeywordsWithPairs { .. } => Some("anonymous keyword forwarding"),
+            // `defined?(A::B)` that `lower::defined_const_fold` could not
+            // decide, where it runs after the program has loaded (a method
+            // body, a lambda, a template): Spinel answers it from the whole
+            // program, which is then what CRuby answers for the emitted
+            // program ("constant" or nil; lexical, inherited, nested and
+            // missing paths included). While the program loads, CRuby
+            // answers nil for a constant whose file has not run yet and
+            // Spinel does not, so that position stays refused.
+            ExprNode::Defined { operand }
+                if target == BuildTarget::Spinel && !load_time
+                    && matches!(&*operand.node, ExprNode::Const { .. }) => None,
             ExprNode::Defined { .. } => Some("runtime defined? query"),
             // The Ruby emitter (Spinel's and Roda's too) renders the whole
             // signature; the other emitters read only the required names
@@ -1539,9 +1550,12 @@ fn report_native_ruby_syntax(app: &App, target: BuildTarget) {
                 "native Ruby semantics have no verified implementation on this target",
             );
         }
-        expr.node.for_each_child(&mut |child| visit(child, target));
+        expr.node.for_each_child(&mut |child| visit(child, target, load_time));
     }
-    crate::lower::for_each_emit_body_ref(app, &mut |expr| visit(expr, target));
+    let load_time = crate::lower::defined_const_fold::load_time_roots(app);
+    crate::lower::for_each_emit_body_ref(app, &mut |expr| {
+        visit(expr, target, load_time.contains(&(expr as *const crate::expr::Expr as usize)))
+    });
 }
 
 /// A self binding (`T.bind(self, T)`, `#: self as T`) retypes `self` for
