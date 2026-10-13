@@ -1402,8 +1402,9 @@ impl<'a> BodyTyper<'a> {
                     }
                     // Kernel#` - a backtick / `%x{}` shell-out (ingest
                     // spells the literal as this call): the command's
-                    // standard output, a String, with `$?` set.
-                    if method.as_str() == "`" && args.len() == 1 {
+                    // standard output, a String, with `$?` set. An app class
+                    // that defines its own ` is dispatched to it instead.
+                    if method.as_str() == "`" && args.len() == 1 && !self.app_defines(ctx.self_ty.as_ref(), method) {
                         for a in args.iter_mut() { self.analyze_expr(a, ctx); }
                         return Ty::Str;
                     }
