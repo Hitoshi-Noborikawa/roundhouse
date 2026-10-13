@@ -399,3 +399,35 @@ fn a_worker_including_an_unresolved_module_is_refused_not_stripped() {
         "no wrapper is generated for a refused worker"
     );
 }
+
+/// A worker whose superclass is outside `library_classes` (a gem base,
+/// or any parent ingest never recorded) is the same shape: whether that
+/// parent provides `perform` can't be answered, so refuse loudly rather
+/// than strip Sidekiq wiring as if the worker were abstract.
+#[test]
+fn a_worker_with_an_unresolved_superclass_is_refused_not_stripped() {
+    let mut app = app_from(vec![(
+        "app/workers/inherited_worker.rb",
+        "class InheritedWorker < SomeGem::BaseWorker\n  include Sidekiq::Worker\nend\n",
+    )]);
+    let diags = roundhouse::lower::job_class_side::apply_job_class_side(&mut app);
+    assert!(
+        diags.iter().any(|d| d.severity == roundhouse::diagnostic::Severity::Error
+            && d.message.contains("Sidekiq worker without a positional perform")),
+        "an unresolved superclass must be treated conservatively, not as proof there's no perform: {diags:?}"
+    );
+    let worker = app
+        .library_classes
+        .iter()
+        .find(|lc| lc.name.0.as_str() == "InheritedWorker")
+        .expect("ingested");
+    assert!(
+        worker.includes.iter().any(|inc| inc.0.as_str() == "Sidekiq::Worker"),
+        "a refused worker keeps its Sidekiq include, as on main: {:?}",
+        worker.includes
+    );
+    assert!(
+        !worker.methods.iter().any(|m| m.name.as_str() == "perform_async"),
+        "no wrapper is generated for a refused worker"
+    );
+}

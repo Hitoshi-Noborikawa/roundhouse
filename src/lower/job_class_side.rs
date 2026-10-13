@@ -585,6 +585,10 @@ fn workers_with_positional_perform(app: &App, workers: &BTreeSet<String>) -> BTr
 /// existing "without a positional perform" refusal, exactly as before;
 /// this function does not widen wrapping to mixin-provided `perform`s,
 /// only widens what counts as "a perform exists".
+///
+/// An explicit superclass that isn't in `app.library_classes` is
+/// treated the same as an unresolved include: it may provide
+/// `perform`, so the worker is not stripped as abstract.
 fn workers_with_any_perform(app: &App, workers: &BTreeSet<String>) -> BTreeSet<String> {
     let by_name: std::collections::HashMap<&str, &crate::dialect::LibraryClass> =
         app.library_classes.iter().map(|lc| (lc.name.0.as_str(), lc)).collect();
@@ -636,7 +640,18 @@ fn workers_with_any_perform(app: &App, workers: &BTreeSet<String>) -> BTreeSet<S
                 out.insert(name.clone());
                 break;
             }
-            cur = c.parent.as_ref().and_then(|p| by_name.get(p.0.as_str()).copied());
+            // No parent declared → end of chain (true abstract base if
+            // nothing above provided perform). An explicit parent that
+            // isn't ingested is unknown — same conservatism as an
+            // unresolved include: count as a possible perform provider.
+            let Some(parent) = c.parent.as_ref() else {
+                break;
+            };
+            if !by_name.contains_key(parent.0.as_str()) {
+                out.insert(name.clone());
+                break;
+            }
+            cur = by_name.get(parent.0.as_str()).copied();
         }
     }
     out
