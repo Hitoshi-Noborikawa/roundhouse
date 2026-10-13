@@ -71,6 +71,9 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
         ("none?", Ty::Bool),
         ("empty?", Ty::Bool),
         ("include?", Ty::Bool),
+        ("key?", Ty::Bool),
+        ("has_key?", Ty::Bool),
+        ("attribute_names", Ty::Array { elem: std::sync::Arc::new(Ty::Sym) }),
         ("full_messages", str_arr()),
         // `errors[:title]` returns an Array<String> of messages for that attribute.
         ("[]", str_arr()),

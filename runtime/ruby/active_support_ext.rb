@@ -264,6 +264,22 @@ module ActiveSupport
     out
   end
 
+  # Not `errors_to_hash` itself: Rails' `messages` answers `[]` for an attribute with no errors, and is frozen.
+  def self.errors_messages(details)
+    out = errors_to_hash(details)
+    out.default = [].freeze
+    out.freeze
+  end
+
+  def self.errors_attribute_names(details)
+    out = []
+    details.each do |detail|
+      key = detail.attribute.to_sym
+      out << key unless out.include?(key)
+    end
+    out.freeze
+  end
+
   # `ActiveSupport::MessageVerifier::InvalidSignature` — what a signed
   # value that does not verify raises. Rails hangs it off the verifier
   # class, and the NAME is the whole point: a controller that rescues it

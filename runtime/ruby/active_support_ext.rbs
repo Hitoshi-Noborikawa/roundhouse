@@ -22,6 +22,8 @@ module ActiveSupport
 
   # `errors.to_hash` -> each attribute to its messages, from the error details.
   def self.errors_to_hash: (Array[ActiveRecord::ErrorDetail] details) -> Hash[Symbol, Array[String]]
+  def self.errors_messages: (Array[ActiveRecord::ErrorDetail] details) -> Hash[Symbol, Array[String]]
+  def self.errors_attribute_names: (Array[ActiveRecord::ErrorDetail] details) -> Array[Symbol]
 
   # Rails' name for "this signed value does not verify" — see the .rb.
   class MessageVerifier

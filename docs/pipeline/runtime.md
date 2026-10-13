@@ -1913,6 +1913,17 @@ attribute's first error, as Rails orders it. The helper lives in
 `runtime/ruby/active_support_ext.rb`, so a strict target ledgers the
 call as a `bundled_method` gap. A message pushed with `errors <<` has
 no detail, so `to_hash` leaves it out; Rails' Errors has no `<<`.
+`errors.messages`, when it is read as the Hash rather than through
+`[:field]`, `key?` or the emptiness questions, is
+`ActiveSupport.errors_messages(error_details)`: the same Hash with
+Rails' `[]` default, frozen. `errors.attribute_names` is
+`errors_attribute_names`, each attribute once, frozen. Both are gaps on
+a strict target as `to_hash` is, except under `render json:`, which
+writes `Base#errors_json` on every target. `errors.include?`, `key?`
+and `has_key?` ask `error_messages_for(...).any?`, so they reach every
+target; a field that is not a Symbol or String literal is an error,
+because the accumulator's own `include?` would ask its full messages
+and answer false.
 
 **Why full messages stay in `errors`.** The runtime has no i18n to
 humanize an attribute with, and the lowering already bakes the full
