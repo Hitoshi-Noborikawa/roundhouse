@@ -72,6 +72,14 @@ const CORE_VALUE_CONSTS: &[(&str, &str, fn() -> Ty)] = &[
     ("File", "LOCK_EX", || Ty::Int),
     ("File", "LOCK_NB", || Ty::Int),
     ("File", "LOCK_UN", || Ty::Int),
+    // `path.start_with?(root + File::SEPARATOR)`, a `PATH` joined with
+    // `File::PATH_SEPARATOR`, and `File.open(path, File::RDONLY |
+    // File::NOFOLLOW | File::NONBLOCK)`; CRuby and spinel answer the same
+    // values.
+    ("File", "SEPARATOR", || Ty::Str),
+    ("File", "PATH_SEPARATOR", || Ty::Str),
+    ("File", "NOFOLLOW", || Ty::Int),
+    ("File", "NONBLOCK", || Ty::Int),
     ("Encoding", "UTF_8", encoding_ty),
     ("Encoding", "BINARY", encoding_ty),
     ("Encoding", "ASCII_8BIT", encoding_ty),
