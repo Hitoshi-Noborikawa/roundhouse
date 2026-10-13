@@ -44,6 +44,10 @@ mod dry_struct;
 mod data_factory;
 #[path = "support/rails_root_join.rs"]
 mod rails_root_join;
+#[path = "support/cable_actions.rs"]
+mod cable_actions_contract;
+#[path = "emit_and_run/cable_actions.rs"]
+mod cable_actions;
 #[path = "support/cable_broadcast_json.rs"]
 mod cable_broadcast_json_contract;
 #[path = "emit_and_run/cable_broadcast_json.rs"]

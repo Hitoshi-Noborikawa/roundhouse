@@ -48,6 +48,10 @@ mod data_factory;
 mod dry_struct;
 #[path = "support/rails_root_join.rs"]
 mod rails_root_join;
+#[path = "support/cable_actions.rs"]
+mod cable_actions_contract;
+#[path = "spinel_toolchain/cable_actions.rs"]
+mod cable_actions;
 #[path = "support/cable_broadcast_json.rs"]
 mod cable_broadcast_json_contract;
 #[path = "spinel_toolchain/cable_broadcast_json.rs"]
