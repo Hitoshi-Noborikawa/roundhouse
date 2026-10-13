@@ -263,6 +263,7 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
         ("to_s", Ty::Str), ("to_path", Ty::Str), ("extname", Ty::Str),
         ("read", Ty::Str), ("write", Ty::Int),
         ("exist?", Ty::Bool), ("file?", Ty::Bool), ("directory?", Ty::Bool),
+        ("absolute?", Ty::Bool), ("relative?", Ty::Bool),
         ("children", Ty::Array { elem: Box::new(pathname()) }),
     ]);
     // `ActiveSupport::SecurityUtils.secure_compare` — the constant-time
@@ -271,7 +272,7 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
         ("secure_compare", Ty::Bool), ("fixed_length_secure_compare", Ty::Bool),
     ], &[]);
     register_stdlib_class(classes, "File", &[
-        ("read", Ty::Str), ("binread", Ty::Str), ("write", Ty::Int),
+        ("read", Ty::Str), ("binread", Ty::Str), ("write", Ty::Int), ("binwrite", Ty::Int),
         ("exist?", Ty::Bool), ("exists?", Ty::Bool), ("file?", Ty::Bool),
         ("directory?", Ty::Bool), ("open", Ty::Untyped),
         ("unlink", Ty::Int), ("delete", Ty::Int), ("rename", Ty::Int),
