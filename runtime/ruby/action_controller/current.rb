@@ -136,24 +136,32 @@ module ActionController
       if_none_match_members_at(inm.to_s, 0, "", false, [])
     end
 
+    # Iterative scan: a long If-None-Match must not recurse once per
+    # character (stack blow-up on an accepted header). Quote-aware
+    # commas, trim, and empty-member omission match the prior walker.
     def if_none_match_members_at(s, i, buf, in_quote, out)
-      if i >= s.length
-        part = buf.strip
-        out << part unless part.empty?
-        return out
+      while i < s.length
+        ch = s[i, 1]
+        if ch == "\""
+          nxt = false
+          nxt = true unless in_quote
+          in_quote = nxt
+        else
+          if ch == "," && !in_quote
+            part = buf.strip
+            out << part unless part.empty?
+            buf = ""
+            in_quote = false
+            i = i + 1
+            next
+          end
+        end
+        buf = buf + ch
+        i = i + 1
       end
-      ch = s[i, 1]
-      if ch == "\""
-        nxt = false
-        nxt = true unless in_quote
-        return if_none_match_members_at(s, i + 1, buf + ch, nxt, out)
-      end
-      if ch == "," && !in_quote
-        part = buf.strip
-        out << part unless part.empty?
-        return if_none_match_members_at(s, i + 1, "", false, out)
-      end
-      if_none_match_members_at(s, i + 1, buf + ch, in_quote, out)
+      part = buf.strip
+      out << part unless part.empty?
+      out
     end
 
     def normalize_etag(value)
