@@ -123,13 +123,17 @@ module ActionController
       if_none_match_parts_match?(parts, 0, want)
     end
 
+    # Iterative over members: a long comma-list of valid tags must not
+    # recurse once per member (stack blow-up under Spinel's header cap).
     def if_none_match_parts_match?(parts, i, want)
-      return false if i >= parts.length
-      part = parts[i]
-      return true if part == "*"
-      got = normalize_etag(part)
-      return true if !got.nil? && got == want
-      if_none_match_parts_match?(parts, i + 1, want)
+      while i < parts.length
+        part = parts[i]
+        return true if part == "*"
+        got = normalize_etag(part)
+        return true if !got.nil? && got == want
+        i = i + 1
+      end
+      false
     end
 
     def if_none_match_members(inm)
