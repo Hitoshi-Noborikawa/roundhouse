@@ -781,7 +781,10 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
     // The request family. CRuby builds these as `Net::HTTP::Post.new(…)`
     // and the surface lives on a shared parent; the registry does no
     // inheritance for stdlib classes, so each verb carries it.
-    for verb in ["Get", "Post", "Put", "Delete", "Head"] {
+    // `Patch` is in CRuby's net/http and Spinel's packages/net (same
+    // request-family surface as Put). Jumpstart Pro's ApplicationClient
+    // and every JSON API client that mirrors Rails' patch routes name it.
+    for verb in ["Get", "Post", "Put", "Patch", "Delete", "Head"] {
         register_stdlib_class(classes, &format!("Net::HTTP::{verb}"), &[], &[
             ("body=", Ty::Str), ("body", Ty::Str),
             ("[]=", Ty::Str), ("[]", str_or_nil.clone()),
@@ -790,6 +793,12 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
             ("method", Ty::Str), ("path", Ty::Str),
         ]);
     }
+    // `Net::ProtocolError` — Spinel's packages/net defines it (with
+    // OpenTimeout / ReadTimeout). `Net::HTTPBadResponse` is registered
+    // above for Lobsters and Spinel-ledgers via
+    // `unavailable_class_module_construct`. `Net::HTTPHeaderSyntaxError`
+    // stays a CRuby-only constant gap until Spinel grows it (invariant 6).
+    register_stdlib_class(classes, "Net::ProtocolError", &[], &exception_surface);
     // `Mime::Type` — the class `runtime/ruby/mime.rb` ports from
     // actionpack. `lookup` is deliberately NON-nilable: upstream answers
     // a Type for any well-formed string (symbol nil when unregistered)
@@ -921,6 +930,31 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
         "Thread::Mutex", "Comparable", "Enumerable"] {
         register_stdlib_class(classes, name, &[], &[]);
     }
+    // Ruby and Spinel supply these too, once the BUNDLED requires are
+    // written. Only the calls checked on both (tests/stdlib_constant_execution.rs)
+    // are typed; what `ConditionVariable#wait` answers is not checked, so it
+    // stays untyped. `Find.find` answers nil with a block and an Enumerator
+    // without one, so it stays untyped as `File.open` does.
+    register_stdlib_class(classes, "Monitor", &[], &[]);
+    for name in ["ConditionVariable", "Thread::ConditionVariable"] {
+        let condition_variable = Ty::Class { id: ClassId(Symbol::from(name)), args: vec![] };
+        register_stdlib_class(classes, name, &[], &[
+            ("signal", condition_variable.clone()),
+            ("broadcast", condition_variable),
+            ("wait", Ty::Untyped),
+        ]);
+    }
+    let unix_socket = Ty::Class { id: ClassId(Symbol::from("UNIXSocket")), args: vec![] };
+    register_stdlib_class(classes, "UNIXSocket", &[], &[]);
+    register_stdlib_class(classes, "UNIXServer", &[], &[("accept", unix_socket)]);
+    classes.get_mut(&ClassId(Symbol::from("UNIXSocket"))).expect("registered above").parent =
+        Some(ClassId(Symbol::from("IO")));
+    classes.get_mut(&ClassId(Symbol::from("UNIXServer"))).expect("registered above").parent =
+        Some(ClassId(Symbol::from("UNIXSocket")));
+    register_stdlib_class(classes, "Open3", &[
+        ("capture3", Ty::Tuple { elems: vec![Ty::Str, Ty::Str, Ty::Untyped] }),
+    ], &[]);
+    register_stdlib_class(classes, "Find", &[("find", Ty::Untyped), ("prune", Ty::Bottom)], &[]);
     for (class, method) in BUILTIN_BLOCK_VALUE_METHODS {
         classes
             .entry(ClassId(Symbol::from(*class)))
@@ -1015,6 +1049,7 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
 pub(crate) const BUILTIN_BLOCK_VALUE_METHODS: &[(&str, &str)] = &[
     ("Mutex", "synchronize"),
     ("Thread::Mutex", "synchronize"),
+    ("Monitor", "synchronize"),
     ("ActiveSupport::Cache::MemoryStore", "fetch"),
 ];
 

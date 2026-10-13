@@ -660,6 +660,8 @@ fn py_const_path(path: &[crate::ident::Symbol]) -> String {
         Some("ActionDispatch" | "ActionController" | "ActionView") if path.len() >= 2 => {
             path.last().unwrap().to_string()
         }
+        // A sibling of `Base` in active_record_base.py, not an attribute of its `ActiveRecord` class
+        Some("ActiveRecord") if path.len() == 2 && path[1].as_str() == "ErrorDetail" => "ErrorDetail".to_string(),
         _ => path
             .iter()
             .map(|s| s.to_string())
@@ -1082,17 +1084,6 @@ pub(super) fn emit_send(recv: Option<&Expr>, method: &str, args: &[Expr], parent
                 if path.last().map(|s| s.as_str()) == Some("ActiveSupport") {
                     return format!("Roundhouse.RhDateTime.parse({})", args_s[0]);
                 }
-            }
-        }
-    }
-    // `ActiveSupport.errors_for(errors, attributes, attribute, prefix)` (runtime/ruby/active_support_ext.rb): the messages added on `attribute`, without their prefix.
-    if method == "errors_for" && args.len() == 4 {
-        if let Some(ExprNode::Const { path }) = recv.map(|r| &*r.node) {
-            if path.last().map(|s| s.as_str()) == Some("ActiveSupport") {
-                return format!(
-                    "(lambda attribute, prefix: [m.removeprefix(prefix) for m, a in zip({}, {}) if a == attribute])({}, {})",
-                    args_s[0], args_s[1], args_s[2], args_s[3]
-                );
             }
         }
     }

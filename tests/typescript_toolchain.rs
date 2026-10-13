@@ -201,13 +201,11 @@ fn assert_node_test_passes(fixture: &str, scratch: &Path) {
         String::from_utf8_lossy(&install.stderr),
     );
 
-    // Shell invocation so glob expansion picks up every test file —
-    // passing the directory confuses tsx/node:test when there's no
-    // index entry. tsx registers a module loader so `.ts` imports
-    // resolve at run time.
-    let output = Command::new("sh")
-        .arg("-c")
-        .arg("./node_modules/.bin/tsx --test test/*.test.ts")
+    // The emitted `npm test` script is the suite (recursive find,
+    // fail closed when nothing matches). A second finder here is how
+    // the harness and package.json drifted.
+    let output = Command::new("npm")
+        .arg("test")
         .current_dir(scratch)
         .output()
         .expect("run node --test via tsx");

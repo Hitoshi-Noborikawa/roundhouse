@@ -1828,35 +1828,50 @@ through it loses those writes. The Rails idiom reassigns
 (`@room = @room.becomes!(Rooms::Closed)`), which is what campfire's two
 sites do; a site that kept both handles would diverge silently.
 
-### `errors[:field]` picks its field by the attribute each message is on
+### Each error keeps the record Rails keeps for it
 
-Rails' error accumulator keeps an attribute alongside every message, so
-`errors[:url]` is an exact lookup. Here the accumulator is a plain
-`Array[String]` of FULL messages (`"Url is not public"`), with an
-index-for-index companion, `error_attributes`, holding the attribute
-each message was added on. `errors.add` and every `validates` rule push
-to both (`src/lower/errors_add.rs`, `model_to_library/validations.rs`),
-`errors.clear` empties both, and `src/lower/errors_index.rs` grounds
-the read as
-`ActiveSupport.errors_for(errors, error_attributes, "url", "Url ")`:
-the messages added on `url`, less the prefix `errors.format` put before
-them. `:base` takes the empty prefix, as Rails' full message for it
-does. The form builder's `field_with_errors` wrapper asks the same
-question with `any?`.
+Rails' error accumulator holds one `ActiveModel::Error` per message:
+the attribute, the error type and the message without the attribute's
+name. Here `errors` stays a plain `Array[String]` of FULL messages
+(`"Url is not public"`), and an index-for-index companion,
+`error_details`, holds an `ActiveRecord::ErrorDetail` for each:
+attribute `"url"`, kind `"not_public"` (the message itself when
+`errors.add` was given a String, as Rails' type is), message
+`"is not public"`. `errors.add` and every `validates` rule push to both
+(`src/lower/errors_add.rs`, `model_to_library/validations.rs`), and
+`errors.clear` empties both. `src/lower/errors_index.rs` grounds
+`errors[:url]` as `error_messages_for("url")`, a `Base` method that
+picks the details on that attribute and answers their messages, so the
+read is exact under any `errors.format`, and `:base` is an attribute
+like any other. The form builder's `field_with_errors` wrapper asks the
+same question with `any?`.
 
-**Why a companion, not pairs.** Pairs change `@errors`' type in every
-strict target — `Vec<String>` becomes a vector of pairs — and every
-emitted `validate` body, every `errors <<` and the `full_messages`
-identity fold would move with it. A second `Array[String]` leaves every
-reader of `errors` as it was.
+`errors.to_hash` groups the same details by attribute:
+`ActiveSupport.errors_to_hash(error_details)`, in the order of each
+attribute's first error, as Rails orders it. The helper lives in
+`runtime/ruby/active_support_ext.rb`, so a strict target ledgers the
+call as a `bundled_method` gap. A message pushed with `errors <<` has
+no detail, so `to_hash` leaves it out; Rails' Errors has no `<<`.
+
+**Why full messages stay in `errors`.** The runtime has no i18n to
+humanize an attribute with, and the lowering already bakes the full
+text; every reader of `errors` (`each`, `count`, `full_messages`, the
+views) keeps reading it as it was.
+
+**Why `ErrorDetail` under `ActiveRecord`, with `kind`.** The strict
+targets emit the class unqualified, where `Error` is the language's own
+(Swift, Kotlin, Go, TypeScript), and a field named `type` does not
+compile in Rust or Go. The class sits in `active_record/base.rb` so
+`Base`'s own bodies type against it.
 
 **What it costs.** A message pushed by anything other than those two
-lowerings has no attribute beside it. `errors.delete` and
-`errors.import`, which some apps call, are not modeled; an `errors <<`
-written by hand pushes a message no field claims. Each grounding reads
-the record twice (once for `errors`, once for `error_attributes`), so
-one whose record is a call with arguments or a receiver
-(`Draft.latest.errors[:url]`) stays residue.
+lowerings has no detail beside it. `errors.delete` and `errors.import`,
+which some apps call, are not modeled; an `errors <<` written by hand
+pushes a message no field claims. `errors.add` reads its record twice
+(once for each push), so one whose record is a call with arguments or a
+receiver (`Draft.latest.errors.add(...)`) stays residue, and so does a
+message that is a call (`errors.add(:title, reason_for(x))`), which the
+push would evaluate twice.
 
 ### A Turbo stream name is not signed — CLOSED on the ruby family
 

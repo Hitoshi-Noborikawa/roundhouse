@@ -20,9 +20,7 @@
 //! The analyzer already types this surface
 //! (`register_has_secure_password`); signatures here mirror it —
 //! writers take the plaintext `Str`, and the authenticator returns
-//! the model instance (the dominant truthy use; the runtime `false`
-//! arm is the analyzer's deliberate simplification, kept in
-//! agreement here).
+//! the model instance or `false`.
 //!
 //! Shared home of what used to be the ruby-family emit pass
 //! `apply_secure_password_lowering`. Strict no-op for marker-free

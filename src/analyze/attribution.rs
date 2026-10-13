@@ -643,6 +643,17 @@ pub fn attribute_unknown_gems(diags: &mut [Diagnostic], app: &App) {
         if !eligible(&d.kind) || d.severity == Severity::Info {
             continue;
         }
+        // Catalogued gem classes (e.g. Pay::Charge for `is_a?`) own their
+        // surface: missing methods must stay errors. Downgrading them to
+        // unknown-gem notes would quiet `check` while the empty façade
+        // still NoMethodErrors on emit (invariant 6).
+        if matches!(
+            &d.kind,
+            DiagnosticKind::SendDispatchFailed { recv_ty, .. }
+                if catalogued_class_receiver(recv_ty)
+        ) {
+            continue;
+        }
         if let Some((gem, evidence)) = gem_for(d) {
             sites.push((d.span.file, d.span.start, gem.to_string()));
             mark(d, gem, None);
@@ -707,6 +718,18 @@ fn mark(d: &mut Diagnostic, gem: &str, via_ivar: Option<&str>) {
         None => d.message.push_str(&format!(
             " — likely roundhouse coverage, not an app error (the `{gem}` gem is in the Gemfile and roundhouse does not model it)"
         )),
+    }
+}
+
+/// Receiver class id appears in [`crate::catalog::GEM_CATALOG`]. Roundhouse
+/// already owns that surface — missing methods are intentional refusals,
+/// not unknown-gem notes (invariant 6).
+fn catalogued_class_receiver(ty: &crate::ty::Ty) -> bool {
+    match ty {
+        crate::ty::Ty::Class { id, .. } => crate::catalog::GEM_CATALOG
+            .iter()
+            .any(|g| g.name == id.0.as_str()),
+        _ => false,
     }
 }
 

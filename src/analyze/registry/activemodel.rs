@@ -77,6 +77,7 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
         ("messages_for", str_arr()),
         // Not `details`: the accumulator keeps no error type, so only the message projection `lower::errors_index` can ground types.
         ("messages", Ty::Hash { key: Box::new(Ty::Sym), value: Box::new(str_arr()) }),
+        ("to_hash", Ty::Hash { key: Box::new(Ty::Sym), value: Box::new(str_arr()) }),
         // `.each` yields an Error — registered via block_params_for below.
         ("each", error_ty.clone()),
         // `errors << "message"` is the transpiled-shape idiom for adding

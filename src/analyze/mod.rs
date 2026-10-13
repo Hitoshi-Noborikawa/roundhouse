@@ -4957,8 +4957,14 @@ impl Analyzer {
         for info in self.classes.values_mut() {
             info.block_value_methods.clear();
         }
+        // Not the registered method tables: the registry lists the built-in
+        // method there too (`MemoryStore#fetch`), so only the app's own
+        // source can tell that the app replaced it.
         for (class, method) in registry::stdlib::BUILTIN_BLOCK_VALUE_METHODS {
-            found.push((ClassId(Symbol::from(*class)), Symbol::from(*method)));
+            let class_id = ClassId(Symbol::from(*class));
+            if !source_instance_method(app, &class_id, method) {
+                found.push((class_id, Symbol::from(*method)));
+            }
         }
         for (class_id, method) in found {
             self.classes.entry(class_id).or_default().block_value_methods.insert(method);
@@ -8581,7 +8587,7 @@ fn walk_expr<'a>(e: &'a Expr, f: &mut dyn FnMut(&'a Expr)) {
 ///     (Str); they return the assigned value.
 ///   - `authenticate` (default) / `authenticate_<attr>` (custom) — checks
 ///     the plaintext against the digest, returning the record on success
-///     or false; typed as the model instance (the dominant truthy use).
+///     or false.
 /// `or_insert`, so a real `def` of the same name still wins.
 fn register_has_secure_password(
     body: &[ModelBodyItem],
@@ -8614,7 +8620,8 @@ fn register_has_secure_password(
         } else {
             format!("authenticate_{attr}")
         };
-        methods.entry(Symbol::from(auth)).or_insert(self_ty.clone());
+        let auth_ty = Ty::Union { variants: vec![self_ty.clone(), Ty::Bool] };
+        methods.entry(Symbol::from(auth)).or_insert(auth_ty.clone());
         // Rails 7.1+: the password-reset token round-trip the
         // authentication generator's PasswordsController and mailer
         // use — `user.password_reset_token` (a signed token, Str), its
@@ -8629,7 +8636,7 @@ fn register_has_secure_password(
             .or_insert(Ty::Int);
         methods
             .entry(Symbol::from(format!("authenticate_{attr}")))
-            .or_insert(self_ty.clone());
+            .or_insert(auth_ty);
         methods
             .entry(Symbol::from(format!("{attr}_salt")))
             .or_insert(Ty::Str);

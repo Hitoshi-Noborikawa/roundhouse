@@ -354,12 +354,14 @@ pub fn target_readme(target: BuildTarget) -> String {
              bundle exec rackup\n\
              ```\n"
         }
-        // ruby/jruby Test sections run the same five driver files as
-        // `tests/ruby_toolchain.rs` — NOT `rake test`: the archive's
-        // emitted `test/test_helper.rb` is deliberately Minitest-free
-        // (TestBase, for spinel AOT), while the scaffold's runtime
-        // tests subclass Minitest::Test, so one rake_test_loader
-        // process can't host both populations.
+        // ruby/jruby `## Test` is `rake test`. The Rakefile's
+        // `FileList["test/**/*_test.rb"]` is the suite: emitted
+        // TestBase files run their autorun shim when loaded, and the
+        // scaffold's Minitest::Test files run at exit. A hand-written
+        // list of five drivers (the old README, and
+        // `tests/ruby_toolchain.rs`) left every other shipped file
+        // unrun — views, broadcasts, route helpers — so they drifted
+        // for months while smoke stayed green.
         BuildTarget::Ruby => {
             "This tree is the Rails-shape-without-metaprogramming \
              specimen — see `SPECIMEN.md` for the full architecture \
@@ -383,11 +385,7 @@ pub fn target_readme(target: BuildTarget) -> String {
              ```\n\n\
              ## Test\n\
              ```sh\n\
-             bundle exec ruby -Itest -I. test/models/article_test.rb\n\
-             bundle exec ruby -Itest -I. test/models/comment_test.rb\n\
-             bundle exec ruby -Itest -I. test/controllers/articles_controller_test.rb\n\
-             bundle exec ruby -Itest -I. test/controllers/comments_controller_test.rb\n\
-             bundle exec ruby -Itest -I. test/query_count_test.rb\n\
+             bundle exec rake test\n\
              ```\n"
         }
         BuildTarget::Jruby => {
@@ -414,11 +412,7 @@ pub fn target_readme(target: BuildTarget) -> String {
              ```\n\n\
              ## Test\n\
              ```sh\n\
-             jruby -S bundle exec jruby -Itest -I. test/models/article_test.rb\n\
-             jruby -S bundle exec jruby -Itest -I. test/models/comment_test.rb\n\
-             jruby -S bundle exec jruby -Itest -I. test/controllers/articles_controller_test.rb\n\
-             jruby -S bundle exec jruby -Itest -I. test/controllers/comments_controller_test.rb\n\
-             jruby -S bundle exec jruby -Itest -I. test/query_count_test.rb\n\
+             jruby -S bundle exec jruby -S rake test\n\
              ```\n"
         }
         BuildTarget::Crystal => {
@@ -1512,13 +1506,24 @@ fn report_native_ruby_syntax(app: &App, target: BuildTarget) {
     if matches!(target, BuildTarget::Blog | BuildTarget::Ruby | BuildTarget::Jruby) {
         return;
     }
-    fn visit(expr: &crate::expr::Expr, target: BuildTarget) {
+    fn visit(expr: &crate::expr::Expr, target: BuildTarget, load_time: bool) {
         use crate::expr::{ExprNode, LValue};
         let construct = match &*expr.node {
             ExprNode::ForwardKeywords if target == BuildTarget::Spinel => None,
             ExprNode::ForwardKeywords => Some("anonymous keyword forwarding"),
             ExprNode::ForwardKeywordsWithPairs { .. } if target == BuildTarget::Spinel => None,
             ExprNode::ForwardKeywordsWithPairs { .. } => Some("anonymous keyword forwarding"),
+            // `defined?(A::B)` that `lower::defined_const_fold` could not
+            // decide, where it runs after the program has loaded (a method
+            // body, a lambda, a template): Spinel answers it from the whole
+            // program, which is then what CRuby answers for the emitted
+            // program ("constant" or nil; lexical, inherited, nested and
+            // missing paths included). While the program loads, CRuby
+            // answers nil for a constant whose file has not run yet and
+            // Spinel does not, so that position stays refused.
+            ExprNode::Defined { operand }
+                if target == BuildTarget::Spinel && !load_time
+                    && matches!(&*operand.node, ExprNode::Const { .. }) => None,
             ExprNode::Defined { .. } => Some("runtime defined? query"),
             // The Ruby emitter (Spinel's and Roda's too) renders the whole
             // signature; the other emitters read only the required names
@@ -1543,9 +1548,12 @@ fn report_native_ruby_syntax(app: &App, target: BuildTarget) {
                 "native Ruby semantics have no verified implementation on this target",
             );
         }
-        expr.node.for_each_child(&mut |child| visit(child, target));
+        expr.node.for_each_child(&mut |child| visit(child, target, load_time));
     }
-    crate::lower::for_each_emit_body_ref(app, &mut |expr| visit(expr, target));
+    let load_time = crate::lower::defined_const_fold::load_time_roots(app);
+    crate::lower::for_each_emit_body_ref(app, &mut |expr| {
+        visit(expr, target, load_time.contains(&(expr as *const crate::expr::Expr as usize)))
+    });
 }
 
 /// A self binding (`T.bind(self, T)`, `#: self as T`) retypes `self` for
@@ -3407,6 +3415,10 @@ fn ruby_family_runtime_files(
     if app_uses_date(app) {
         inject_cruby_date_calendar_boot_requires(&mut files)?;
     }
+    // Re-apply after the gem_facades rewrite above: the CRuby/JRuby
+    // content replaces the spinel-tree file that `apply_pay_demand`
+    // already annotated in `spinel_files`.
+    apply_pay_demand(&mut files, app)?;
     Ok(files)
 }
 
@@ -5208,7 +5220,9 @@ fn unavailable_class_module_construct(name: &str, target: &str) -> Option<&'stat
         // rqrcode_core's / spinel-rqrcode's.
         | "RQRCodeCore::QRCodeRunTimeError" | "RQRCodeCore::QRCodeArgumentError"
         | "GC" | "OpenSSL::HMAC" | "CSV::MalformedCSVError"
-        | "Enumerator::Product" | "Enumerator::Lazy");
+        | "Enumerator::Product" | "Enumerator::Lazy"
+        | "Monitor" | "ConditionVariable" | "Thread::ConditionVariable"
+        | "UNIXServer" | "UNIXSocket" | "Open3" | "Find");
     if !bundled {
         return None;
     }
@@ -5235,6 +5249,9 @@ const RUBY_SPINEL_ONLY_METHODS: &[(&str, &str)] = &[
     // `lower::record_snapshot`'s closed-world `constantize` — the
     // generated `case` lives in the same ruby-family/spinel file.
     ("ActiveRecord::Base", "instantiate_named"),
+    // `lower::errors_index`'s `errors.to_hash`: the helper is
+    // `runtime/ruby/active_support_ext.rb`, which no strict target loads.
+    ("ActiveSupport", "errors_to_hash"),
 ];
 
 /// Instance methods only the ruby family and spinel can answer: a model's
@@ -6055,6 +6072,10 @@ fn spinel_files(app: &App, fixture: &Path) -> Result<(Vec<(String, String)>, Vec
         // previewer capture. Port for Spinel; CRuby/JRuby swap to the
         // default gem below. BUNDLED also lists Timeout → "timeout".
         "timeout",
+        // `Pay::Error` / `Pay::ActionRequired` + Charge/Subscription/
+        // Customer class constants — Jumpstart Pro / pay gem first slice.
+        // Stripped when the lock has no `pay` (see `apply_pay_demand`).
+        "pay",
         // `I18n.locale` / `default_locale` — the locale campfire folds
         // into its cache keys. Rails' default, `:en`; setting one is
         // not modeled (see the file's header).
@@ -6259,6 +6280,7 @@ fn spinel_files(app: &App, fixture: &Path) -> Result<(Vec<(String, String)>, Vec
     apply_spinel_sql_functions(&mut files, app)?;
     apply_pagination_demand(&mut files)?;
     apply_pagy_demand(&mut files, app)?;
+    apply_pay_demand(&mut files, app)?;
     Ok((files, test_stems))
 }
 
@@ -6291,6 +6313,57 @@ fn apply_pagination_demand(files: &mut Vec<(String, String)>) -> Result<(), Stri
             && p != "runtime/action_controller/pagination.rbs"
             && p != "sig/runtime/action_controller/pagination.rbs"
     });
+    Ok(())
+}
+
+/// `runtime/ruby/pay.rb` rides the tree only for an app whose
+/// Gemfile.lock carries `pay`. Without the gem the façade would still
+/// define `Pay::Error`, which is fine for name resolution but wrong for
+/// an app that never asked for billing — strip it the same way pagy is.
+/// With the gem, ensure `gem_facades.rb` loads it (the CRuby/JRuby
+/// rewrite of that file drops the source-tree `require_relative`), and
+/// drop any `require "pay"` that locked-external wiring added: the
+/// gem stays **Unknown** in the census (so Pay::Currency dispatches
+/// stay notes, not invented errors), and the façade is the runtime
+/// half of the first-slice claim (`Pay::Error` / `is_a?(Pay::Charge)`).
+fn apply_pay_demand(files: &mut Vec<(String, String)>, app: &App) -> Result<(), String> {
+    const REQUIRE: &str = "require_relative \"pay\"\n";
+    let has_pay = app.gem_lock.as_ref().is_some_and(|l| l.has("pay"));
+    if !has_pay {
+        if let Some((_, facades)) = files.iter_mut().find(|(p, _)| p == "runtime/gem_facades.rb") {
+            if facades.contains(REQUIRE) {
+                *facades = facades.replacen(REQUIRE, "", 1);
+            }
+        }
+        files.retain(|(p, _)| {
+            p != "runtime/pay.rb"
+                && p != "runtime/pay.rbs"
+                && p != "sig/runtime/pay.rbs"
+        });
+        return Ok(());
+    }
+    if let Some((_, facades)) = files.iter_mut().find(|(p, _)| p == "runtime/gem_facades.rb") {
+        if !facades.contains(REQUIRE) {
+            facades.push_str(REQUIRE);
+        }
+    }
+    // Prefer the façade over Bundler's `pay` gem for this slice.
+    for (path, content) in files.iter_mut() {
+        if path != "boot.rb" && path != "Gemfile" {
+            continue;
+        }
+        let filtered: Vec<&str> = content
+            .lines()
+            .filter(|line| {
+                let t = line.trim();
+                t != "require \"pay\"" && !t.starts_with("gem \"pay\"")
+            })
+            .collect();
+        *content = filtered.join("\n");
+        if !content.is_empty() && !content.ends_with('\n') {
+            content.push('\n');
+        }
+    }
     Ok(())
 }
 
@@ -7847,7 +7920,7 @@ fn apply_bundled_gem_wiring(files: &mut [(String, String)]) {
 /// Constant → bundled library that provides it. One table, read by
 /// both the pass that writes the requires and the gate that checks a
 /// tree for missing ones — a second copy is how the rule drifts.
-const BUNDLED: [(&str, &str); 20] = [
+const BUNDLED: [(&str, &str); 25] = [
     // INERT in our trees, and deliberately: `runtime/spinel/base64.rb`
     // defines `Base64` without requiring the library, which the second
     // condition below reads as "the program defines it" and drops the
@@ -7902,11 +7975,15 @@ const BUNDLED: [(&str, &str); 20] = [
     // before the app; spinel's runtime defines it without a package.
     ("SocketError", "socket"),
     // `Shellwords.escape`: a default gem that a booted Rails 8.1 app has
-    // already loaded, so apps call it without a require. INERT on our
-    // trees: `runtime/spinel/shellwords.rb` defines the module (no
-    // String/Array reopen — packages/shellwords' reopen makes
-    // String#split a PolyArray and the Rails tree fails C compile), so
-    // the program-defined-constant clause below drops the row.
+    // already loaded, so apps call it without a require. The Spinel
+    // port is `runtime/spinel/shellwords_spinel.rb` (module only — no
+    // String/Array reopen, because packages/shellwords makes
+    // String#split a PolyArray and the Rails tree fails C compile).
+    // Defining the module drops this row. The file must not be named
+    // `shellwords.rb`: walk_flat copies it into every target and
+    // `runtime/` is on `$LOAD_PATH`, so that name would answer the
+    // require below and hide stdlib `String#shellescape`. CRuby/JRuby
+    // boot requires the stdlib feature by hand.
     ("Shellwords", "shellwords"),
     // `PTY.spawn`: the app writes `require "pty"` (Rails does not load
     // it), but an app file reaches the tree without its requires.
@@ -7920,6 +7997,15 @@ const BUNDLED: [(&str, &str); 20] = [
     // `packages/openssl`; an app that signs a payload without HTTP never
     // loads it through net/http.
     ("OpenSSL", "openssl"),
+    // `Monitor.new`, `UNIXServer.new` / `UNIXSocket.new`, `Open3.capture3`
+    // and `Find.find`: the standard library on CRuby/JRuby; spinel
+    // defines Monitor and the socket classes only after the require, and
+    // takes `packages/open3` and `packages/find`.
+    ("Monitor", "monitor"),
+    ("UNIXServer", "socket"),
+    ("UNIXSocket", "socket"),
+    ("Open3", "open3"),
+    ("Find", "find"),
 ];
 
 /// Every gap in a tree, as `(file index, require line)`. One walk,
@@ -7954,6 +8040,7 @@ fn bundled_require_gaps(files: &[(String, String)]) -> Vec<(usize, String)> {
             if path.ends_with(".rb")
                 && names_constant(content, konst)
                 && !requires_feature(content, &require_line)
+                && !gaps.contains(&(i, require_line.clone()))
             {
                 gaps.push((i, require_line.clone()));
             }
