@@ -2101,9 +2101,10 @@ jobs:
     needs: [generate-fixture, spinel-build, plan]
     if: ${{ !cancelled() && contains(fromJSON(needs.plan.outputs.jobs), 'spinel-toolchain') && needs.generate-fixture.result == 'success' && needs.spinel-build.outputs.artifact-id != '' }}
     # Two shards by test-module name: one runner took ~20 min of a 25 min
-    # ceiling once the parity modules landed. `parity` takes the heaviest
-    # modules; `rest` skips exactly those, so a new module lands in `rest`
-    # by default. Each shard reports its own output key (ci-plan.py
+    # ceiling once the parity modules landed. Each test is one Spinel
+    # build of about the same cost, so balance by count: `parity` lists
+    # 20 tests' modules; `rest` skips exactly those (19 tests + the
+    # tiny_api gates), so a new module lands in `rest` by default. Each shard reports its own output key (ci-plan.py
     # requires both), since a matrix's shared output would let one
     # shard's success hide the other's failure.
     strategy:
@@ -2111,9 +2112,9 @@ jobs:
       matrix:
         include:
           - shard: parity
-            filter: "campfire_caches:: json_request_values:: action_controller_head:: params_wrapper::"
+            filter: "campfire_caches:: json_request_values:: action_controller_head:: params_wrapper:: strong_params:: cable_actions:: cable_broadcast_json:: lambda_signatures:: rails_parity::"
           - shard: rest
-            filter: "--skip campfire_caches:: --skip json_request_values:: --skip action_controller_head:: --skip params_wrapper::"
+            filter: "--skip campfire_caches:: --skip json_request_values:: --skip action_controller_head:: --skip params_wrapper:: --skip strong_params:: --skip cable_actions:: --skip cable_broadcast_json:: --skip lambda_signatures:: --skip rails_parity::"
     outputs:
       parity: ${{ steps.result.outputs.parity }}
       rest: ${{ steps.result.outputs.rest }}
