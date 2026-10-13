@@ -23,6 +23,8 @@ mod array_excluding;
 mod array_excluding_runs;
 #[path = "emit_and_run/integer_query_find_by.rs"]
 mod integer_query_find_by;
+#[path = "emit_and_run/controller_translate.rs"]
+mod controller_translate;
 #[path = "support/lambda_signatures.rs"]
 mod lambda_signatures_contract;
 #[path = "emit_and_run/lambda_signatures.rs"]
@@ -1217,18 +1219,18 @@ fn a_missing_translation_raises_where_the_environment_says_so() {
         .assert_passes();
 }
 
-/// A key computed at run time, a missing key with only key defaults, a
-/// `:strict` setting, or a call with a block stays an error.
+/// A key computed at run time, a `:strict` setting, or a call with a
+/// block stays an error.
 #[test]
 fn unresolvable_translations_stay_errors() {
     let (_emitted, errors) = emit_and_run::real_blog()
         .edit(
             "app/models/article.rb",
             "  validates :title, presence: true\n",
-            "  validates :title, presence: true\n\n  def self.missing\n    I18n.t(\"no.such.key\", default: :also_missing)\n  end\n\n  def self.dynamic(key)\n    I18n.t(key)\n  end\n\n  def self.blocked\n    I18n.t(\"hello\") { |text| text }\n  end\n",
+            "  validates :title, presence: true\n\n  def self.dynamic(key)\n    I18n.t(key)\n  end\n\n  def self.blocked\n    I18n.t(\"hello\") { |text| text }\n  end\n",
         )
         .emit(roundhouse::project::BuildTarget::Ruby);
-    assert_eq!(errors.iter().filter(|e| e.contains("I18n not supported")).count(), 3, "{errors:?}");
+    assert_eq!(errors.iter().filter(|e| e.contains("I18n not supported")).count(), 2, "{errors:?}");
     let (_emitted, errors) = emit_and_run::real_blog()
         .edit(
             "config/environments/test.rb",

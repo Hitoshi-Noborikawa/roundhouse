@@ -287,6 +287,9 @@ pub struct Translate {
     pub scope: Option<String>,
     /// `default:` entries in order: a key (`Symbol`) or literal text.
     pub defaults: Vec<Fallback>,
+    /// `default:` was an Array (`default: [:a]`, not `default: :a`), which
+    /// is what makes I18n's missing message list every key it considered.
+    pub default_list: bool,
     /// `count:` given.
     pub counted: bool,
     /// The other keywords, each an interpolation value.
@@ -329,9 +332,12 @@ pub enum Fallback {
 pub enum Translation {
     One(String),
     Plural { zero: Option<String>, one: String, other: String },
-    /// No entry and no `default:`: Rails' missing-translation answer for
-    /// `key`, with the locale in front (`en.shop.title`).
-    Missing { key: String },
+    /// Nothing found: Rails' missing-translation answer for `key`, with
+    /// the locale in front (`en.shop.title`). `considered` is every
+    /// `default:` key after it, normalized the same way, when the call
+    /// gave its defaults as an Array: I18n's message then lists them all
+    /// (`Translation missing. Options considered were:`).
+    Missing { key: String, considered: Vec<String> },
 }
 
 impl Catalog {
@@ -358,7 +364,14 @@ impl Catalog {
         let missing = format!("{}.{}", self.locale, full(&call.key).unwrap_or_default());
         let translation = match found {
             Some(t) => t,
-            None if call.defaults.is_empty() && self.missing.unknown.is_none() => return Ok(Translation::Missing { key: missing }),
+            // Every default was a key, and none is here either.
+            None if self.missing.unknown.is_none() => {
+                let considered = match call.default_list {
+                    true => candidates[1..].iter().flatten().map(|k| format!("{}.{k}", self.locale)).collect(),
+                    false => Vec::new(),
+                };
+                return Ok(Translation::Missing { key: missing, considered });
+            }
             None => {
                 let why = self.missing.unknown.as_deref().map(|u| format!(" ({u})")).unwrap_or_default();
                 return Err(format!("translation missing: {missing}{why}"));
@@ -816,8 +829,11 @@ mod tests {
         );
         assert!(c.resolve(&Translate { values: vec!["other".into()], ..t("greet") }).is_err());
         assert!(c.resolve(&Translate { values: vec!["name".into()], ..t("greet") }).is_ok());
-        assert_eq!(c.resolve(&t("nope")), Ok(Translation::Missing { key: "en.nope".into() }));
-        assert!(c.resolve(&Translate { defaults: vec![Fallback::Key("also_nope".into())], ..t("nope") }).is_err());
+        let missing = |considered: &[&str]| Translation::Missing { key: "en.nope".into(), considered: keys(considered) };
+        assert_eq!(c.resolve(&t("nope")), Ok(missing(&[])));
+        let also = vec![Fallback::Key("also_nope".into())];
+        assert_eq!(c.resolve(&Translate { defaults: also.clone(), ..t("nope") }), Ok(missing(&[])));
+        assert_eq!(c.resolve(&Translate { defaults: also, default_list: true, scope: None, ..t("nope") }), Ok(missing(&["en.also_nope"])));
         let unknown = Catalog { missing: MissingPolicy { unknown: Some("`:strict`".into()), ..Default::default() }, ..c.clone() };
         assert!(unknown.resolve(&t("nope")).is_err());
         assert!(c.resolve(&t(".title")).is_err());

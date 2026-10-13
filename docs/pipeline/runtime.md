@@ -2497,8 +2497,15 @@ Three gaps remain, all on spinel's side:
   (`I18n.locale =`, `with_locale`) is not modeled. Translation is answered
   at compile time from the default locale (`src/i18n`): `t` / `I18n.t`
   with a literal key, attribute names, validation messages and form
-  labels. A key the locale lacks answers as Rails does in the running
-  environment: `Translation missing: en.key`, a template's
+  labels. A controller's `t` is `AbstractController::Translation`'s: a
+  lazy `t(".key")` reads `<controller_path>.<action_name>.key`, then
+  `<controller_path>.key`, with `action_name` read when it runs. Its
+  `_html` keys stay an error: Rails returns them html-safe, and a String
+  here carries no such mark on to the view that renders it. A key the
+  locale lacks answers as Rails does in the running
+  environment: `Translation missing: en.key` (I18n's
+  `Options considered were:` list when `default:` was a list of keys,
+  none of them there either), a template's
   `translation_missing` span, or `I18n::MissingTranslationData` where
   `config.i18n.raise_on_missing_translations` is set (`:strict` and a
   value computed at boot stay errors). A key with run-time text after a

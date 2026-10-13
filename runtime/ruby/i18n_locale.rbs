@@ -9,5 +9,6 @@ module I18n
   def self.subtree_translation: (String key) -> String
   def self.missing_raises: (bool raises, String flipped) -> bool
   def self.missing_translation: (String key, bool raises) -> String
+  def self.missing_translation_among: (String key, String rest, bool raises) -> String
   def self.missing_translation_tag: (String key, String details, bool raises) -> String
 end

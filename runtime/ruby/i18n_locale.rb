@@ -49,6 +49,15 @@ module I18n
     message
   end
 
+  # The same answer when the call's `default:` was a list of keys none of
+  # which is there either: I18n lists every key it considered, `rest`
+  # being the defaults' lines (`"\n- en.posts.title"`).
+  def self.missing_translation_among(key, rest, raises)
+    message = "Translation missing. Options considered were:\n- " + key + rest
+    raise MissingTranslationData, message if raises
+    message
+  end
+
   # A template's `t` for `key`: Action View's debug span, titled with the
   # key and the call's options (`details`, each value escaped once), and
   # reading as the key's last segment titleized.
