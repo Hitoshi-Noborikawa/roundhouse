@@ -27,9 +27,15 @@ mod lambda_signatures;
 mod strong_params;
 #[path = "emit_and_run/params_wrapper.rs"]
 mod params_wrapper;
+#[path = "support/stdlib_rnp.rs"]
+mod stdlib_rnp_contract;
+#[path = "emit_and_run/stdlib_rnp.rs"]
+mod stdlib_rnp;
 
 #[path = "support/class_configuration.rs"]
 mod class_configuration;
+#[path = "support/dry_initializer.rs"]
+mod dry_initializer;
 #[path = "support/runtime_block_signature.rs"]
 mod runtime_block_signature;
 #[path = "support/dry_struct.rs"]
@@ -38,6 +44,10 @@ mod dry_struct;
 mod data_factory;
 #[path = "support/rails_root_join.rs"]
 mod rails_root_join;
+#[path = "support/cable_actions.rs"]
+mod cable_actions_contract;
+#[path = "emit_and_run/cable_actions.rs"]
+mod cable_actions;
 #[path = "support/cable_broadcast_json.rs"]
 mod cable_broadcast_json_contract;
 #[path = "emit_and_run/cable_broadcast_json.rs"]
@@ -88,6 +98,8 @@ mod ordinalize;
 mod autoload_once_paths;
 #[path = "emit_and_run/defined_const_fold.rs"]
 mod defined_const_fold;
+#[path = "emit_and_run/job_payload.rs"]
+mod job_payload;
 
 /// A generated text column on the real-blog Article model exercises the
 /// schema-to-runtime path together with Rails-style symbol callbacks. The
@@ -1988,6 +2000,105 @@ fn dry_struct_classes_run_lowered() {
     assert!(run.stdout.contains("dry-struct clock contract passed"));
 }
 
+#[test]
+fn dry_initializer_classes_run_lowered() {
+    let run = dry_initializer::ruby_overlay().run_ruby(&format!(
+        "{}{}",
+        dry_initializer::ASSERTIONS,
+        dry_initializer::CLOCK_ASSERTIONS
+    ));
+    run.assert_passes();
+    assert!(run.stdout.contains("dry-initializer contract passed"));
+    assert!(run.stdout.contains("dry-initializer clock contract passed"));
+}
+
+/// A class the lowering cannot read keeps its whole hierarchy on the gem
+/// (ledgered): a refused class under a lowered ancestor would inherit a
+/// constructor that ignores its own options. Constructing one is an
+/// error; another hierarchy is lowered, and the tree still boots with the
+/// stand-ins the lowered classes raise.
+#[test]
+fn dry_initializer_refusal_keeps_the_hierarchy_on_the_gem() {
+    let refused = || dry_initializer::overlay()
+        .write(
+            "lib/svc/odd.rb",
+            "module Svc\n  class Odd < Base\n    option :size, ::Svc::Types::Strict::String.constrained(uuid_v4: true)\n  end\n\n  class Odder < Odd\n  end\nend\n",
+        )
+        .write(
+            "lib/svc/lone.rb",
+            "module Svc\n  class Lone\n    extend Dry::Initializer\n\n    option :count, ::Svc::Types::Coercible::Integer\n  end\nend\n",
+        );
+    let (emitted, _errors) = refused().emit(roundhouse::project::BuildTarget::Ruby);
+    for kept in ["svc/base.rb", "svc/charge.rb", "svc/quote.rb", "svc/odd.rb", "svc/odder.rb"] {
+        let source = std::fs::read_to_string(emitted.join("app/models").join(kept)).expect(kept);
+        assert!(!source.contains("dry_initializer_assign"), "{kept} lowered:\n{source}");
+    }
+    let lone = std::fs::read_to_string(emitted.join("app/models/svc/lone.rb")).expect("emitted Svc::Lone");
+    assert!(lone.contains("def dry_initializer_assign"), "other hierarchy not lowered:\n{lone}");
+
+    let (_, errors) = refused()
+        .write("app/models/odd_caller.rb", "class OddCaller\n  def self.size\n    Svc::Odd.new(size: 3).size\n  end\nend\n")
+        .emit(roundhouse::project::BuildTarget::Ruby);
+    assert!(
+        errors.iter().any(|e| e.contains("unmodeled constructor lookup")),
+        "a refused class constructs without an error:\n{}",
+        errors.join("\n")
+    );
+
+    let run = refused().run_ruby(
+        r#"
+raise "lone" unless Svc::Lone.new(count: "3").count == 3
+begin
+  Svc::Lone.new(count: "x")
+  raise "coercible integer accepted a word"
+rescue Dry::Types::CoercionError
+end
+raise "undefined" unless defined?(Dry::Initializer::UNDEFINED)
+puts "refusal contract passed"
+"#,
+    );
+    run.assert_passes();
+    assert!(run.stdout.contains("refusal contract passed"));
+}
+
+/// `Params::Time` coerces with `Time.parse`, which Spinel's tree does not
+/// have: reported for it, as for a struct, not emitted to fail.
+#[test]
+fn dry_initializer_stdlib_coercions_are_reported_for_spinel() {
+    let (_emitted, errors) = dry_initializer::ruby_overlay().emit(roundhouse::project::BuildTarget::Spinel);
+    assert!(errors.iter().any(|e| e.contains("`Time.parse`")), "Time.parse not reported: {errors:#?}");
+    let (_emitted, errors) = dry_initializer::overlay().emit(roundhouse::project::BuildTarget::Spinel);
+    assert!(errors.iter().all(|e| !e.contains("Time.parse")), "{errors:#?}");
+}
+
+/// The initializer lowering reads type constants before the `Dry::Struct`
+/// shell strips them: an option typed by one is lowered next to a struct.
+#[test]
+fn dry_initializer_reads_type_constants_beside_a_lowered_struct() {
+    let run = dry_initializer::overlay()
+        .write(
+            "lib/svc/amounts.rb",
+            "module Svc\n  module Amounts\n    COUNT = ::Svc::Types::Coercible::Integer\n  end\nend\n",
+        )
+        .write(
+            "lib/svc/point.rb",
+            "module Svc\n  class Point < Dry::Struct\n    attribute :x, ::Svc::Types::Coercible::Integer\n  end\nend\n",
+        )
+        .write(
+            "lib/svc/tally.rb",
+            "module Svc\n  class Tally\n    extend Dry::Initializer\n\n    option :count, ::Svc::Amounts::COUNT\n  end\nend\n",
+        )
+        .run_ruby(
+            r#"
+raise "struct" unless Svc::Point.new(x: "2").x == 2
+raise "constant type" unless Svc::Tally.new(count: "4").count == 4
+puts "type constant contract passed"
+"#,
+        );
+    run.assert_passes();
+    assert!(run.stdout.contains("type constant contract passed"));
+}
+
 /// Spinel's tree has its own `Date` and `BigDecimal()`, but no
 /// `DateTime`, `Time.parse` or `BigDecimal.interpret_loosely`: a lowered
 /// struct using those is reported for it, not emitted to fail when first
@@ -2036,7 +2147,7 @@ fn dry_struct_hierarchy_is_lowered_whole_or_not_at_all() {
         ("lib/shop/good.rb", "module Shop\n  class Good < Base\n    attribute :id, ::Shop::Types::Coercible::String\n  end\nend\n"),
         (
             "lib/shop/bad.rb",
-            "module Shop\n  class Bad < Base\n    PIECES = ::Shop::Types::Array.of(::Shop::Piece)\n    attribute :amount, ::Shop::Types::Strict::String.constrained(min_size: 1)\n    attribute :other, Other\n    attribute :pieces, PIECES\n    attribute :inner do\n      attribute :n, ::Shop::Types::Coercible::Integer\n    end\n  end\nend\n",
+            "module Shop\n  class Bad < Base\n    PIECES = ::Shop::Types::Array.of(::Shop::Piece)\n    attribute :amount, ::Shop::Types::Strict::String.constrained(uuid_v4: true)\n    attribute :other, Other\n    attribute :pieces, PIECES\n    attribute :inner do\n      attribute :n, ::Shop::Types::Coercible::Integer\n    end\n  end\nend\n",
         ),
         ("lib/shop/other.rb", "module Shop\n  class Other < Dry::Struct\n    attribute :id, ::Shop::Types::Coercible::String\n  end\nend\n"),
         (
@@ -9214,6 +9325,116 @@ end
         .assert_passes();
 }
 
+/// lobsters' `Sponge` keeps the exceptions it shrugs off in a class-body
+/// Array, so a refusal stub for any one of them fails the whole app at
+/// load. These are the library constants it names (plus its TLS modes,
+/// `Github`'s `Net::HTTPSuccess` test and `Utils`' `OpenSSL::Random`),
+/// read and rescued as Ruby has them.
+#[test]
+fn network_library_constants_load_and_rescue() {
+    let run = emit_and_run::empty_app()
+        .write(
+            "app/models/application_record.rb",
+            "class ApplicationRecord < ActiveRecord::Base\n  self.abstract_class = true\nend\n",
+        )
+        .write(
+            "app/models/fetcher.rb",
+            r#"class Fetcher
+  PROBLEMS = [
+    EOFError,
+    Errno::ECONNRESET,
+    Net::HTTPBadResponse,
+    OpenSSL::SSL::SSLError,
+    Zlib::DataError,
+    Encoding::CompatibilityError
+  ].freeze
+
+  def verify_mode(strict)
+    strict ? OpenSSL::SSL::VERIFY_PEER : OpenSSL::SSL::VERIFY_NONE
+  end
+
+  def shrug(error)
+    raise error, "boom"
+  rescue *PROBLEMS => e
+    e.message
+  end
+
+  def success?(response)
+    response.is_a?(Net::HTTPSuccess)
+  end
+
+  def self.random_byte
+    OpenSSL::Random.random_bytes(1)
+  end
+end
+"#,
+        )
+        .write(
+            "db/schema.rb",
+            "ActiveRecord::Schema[8.1].define(version: 2026_01_01_000000) do\n  create_table \"widgets\", force: :cascade do |t|\n    t.string \"name\"\n  end\nend\n",
+        )
+        .run_ruby(
+            r##"f = Fetcher.new
+raise "PROBLEMS: #{Fetcher::PROBLEMS.size}" unless Fetcher::PROBLEMS.size == 6
+[Net::HTTPBadResponse, Zlib::DataError, Encoding::CompatibilityError].each do |error|
+  got = f.shrug(error)
+  raise "#{error} not rescued: #{got.inspect}" unless got == "boom"
+end
+raise "VERIFY_PEER" unless f.verify_mode(true) == OpenSSL::SSL::VERIFY_PEER
+raise "VERIFY_NONE" unless f.verify_mode(false) == OpenSSL::SSL::VERIFY_NONE
+ok = Net::HTTPOK.new("1.1", "200", "OK")
+raise "HTTPSuccess" unless f.success?(ok)
+raise "HTTPSuccess negative" if f.success?(Object.new)
+byte = Fetcher.random_byte
+raise "random_bytes: #{byte.inspect}" unless byte.is_a?(String) && byte.bytesize == 1
+"##,
+        );
+    run.assert_passes();
+}
+
+/// `module_function :name` promotes the def to the module, and ingest
+/// retargets the sibling bare call to `Owner.name`. That receiver is
+/// generated, not written, so it must resolve rather than emit a refusal
+/// stub (lobsters' `EmailBlocklistValidation`, run on every User save).
+#[test]
+fn module_function_retargeted_call_runs() {
+    let run = emit_and_run::empty_app()
+        .write(
+            "app/models/application_record.rb",
+            "class ApplicationRecord < ActiveRecord::Base\n  self.abstract_class = true\nend\n",
+        )
+        .write(
+            "app/models/blocklist.rb",
+            r#"module Blocklist
+  def blocked
+    email && on_blocklist?(email)
+  end
+
+  def on_blocklist?(email)
+    email.end_with?("@spam.test")
+  end
+
+  module_function :on_blocklist?
+end
+"#,
+        )
+        .write(
+            "app/models/signup.rb",
+            "class Signup\n  include Blocklist\n\n  attr_reader :email\n\n  def initialize(email)\n    @email = email\n  end\nend\n",
+        )
+        .write(
+            "db/schema.rb",
+            "ActiveRecord::Schema[8.1].define(version: 2026_01_01_000000) do\n  create_table \"widgets\", force: :cascade do |t|\n    t.string \"name\"\n  end\nend\n",
+        )
+        .run_ruby(
+            r#"raise "module call" unless Blocklist.on_blocklist?("a@spam.test")
+raise "blocked" unless Signup.new("a@spam.test").blocked
+raise "not blocked" if Signup.new("a@ok.test").blocked
+"#,
+        );
+    run.assert_passes();
+}
+
 /// lobsters keeps its site settings in a top-level
 /// `class << Rails.application` block. Rubydex records no constant
 /// references inside a singleton class opened on an expression, so the
@@ -12955,3 +13176,4 @@ puts "PASS friendly oracle"
 }
 #[path = "emit_and_run/acts_as_votable.rs"]
 mod acts_as_votable;
+

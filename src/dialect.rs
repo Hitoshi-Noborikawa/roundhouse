@@ -1072,6 +1072,9 @@ pub enum LibraryClassOrigin {
     /// (`ingest::dry_struct`). Carried so a target can tell the coercions
     /// it generated from the app's own code.
     DryStruct,
+    /// A `Dry::Initializer` class given its constructor and readers
+    /// (`ingest::dry_initializer`), for the same reason.
+    DryInitializer,
 }
 
 /// A graphql-ruby object type (a class descending from

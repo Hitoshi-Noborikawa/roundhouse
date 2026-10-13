@@ -2787,12 +2787,16 @@ fn retarget_module_function_calls(expr: &mut Expr, owner: &ClassId, promoted: &[
     if recv.is_some() || !promoted.iter().any(|p| p == method) {
         return;
     }
-    *recv = Some(Expr::new(
+    // The owner was never written at this call, so the borrowed span is
+    // no evidence of a source reference for the resolver to require.
+    let mut owner_ref = Expr::new(
         expr.span,
         ExprNode::Const {
             path: vec![owner.0.clone()],
         },
-    ));
+    );
+    owner_ref.decisions |= crate::expr::GENERATED_CONST_REF;
+    *recv = Some(owner_ref);
 }
 
 /// Synthesize the writer pair for `attr_writer` / `attr_accessor`,

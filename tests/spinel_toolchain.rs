@@ -40,12 +40,18 @@ mod array_excluding_native;
 mod class_attribute;
 #[path = "support/class_configuration.rs"]
 mod class_configuration;
+#[path = "support/dry_initializer.rs"]
+mod dry_initializer;
 #[path = "support/data_factory.rs"]
 mod data_factory;
 #[path = "support/dry_struct.rs"]
 mod dry_struct;
 #[path = "support/rails_root_join.rs"]
 mod rails_root_join;
+#[path = "support/cable_actions.rs"]
+mod cable_actions_contract;
+#[path = "spinel_toolchain/cable_actions.rs"]
+mod cable_actions;
 #[path = "support/cable_broadcast_json.rs"]
 mod cable_broadcast_json_contract;
 #[path = "spinel_toolchain/cable_broadcast_json.rs"]
@@ -94,6 +100,10 @@ fn custom_data_factories_run_natively() {
     run.assert_passes();
     assert!(run.stdout.contains("custom Data factory contract passed"));
 }
+#[path = "support/stdlib_rnp.rs"]
+mod stdlib_rnp_contract;
+#[path = "spinel_toolchain/stdlib_rnp.rs"]
+mod stdlib_rnp;
 
 /// The native counterpart of the generic emitted-Ruby regression test.
 #[test]
@@ -165,6 +175,15 @@ fn finite_concern_class_configuration_runs_natively() {
         run.assert_passes();
         assert!(run.stdout.contains("finite class configuration contract passed"));
     }
+}
+
+/// The native half of `emit_and_run::dry_initializer_classes_run_lowered`.
+#[test]
+#[ignore = "requires the Spinel toolchain, run in its CI lane"]
+fn dry_initializer_classes_run_lowered_natively() {
+    let run = dry_initializer::overlay().run_spinel(dry_initializer::ASSERTIONS);
+    run.assert_passes();
+    assert!(run.stdout.contains("dry-initializer contract passed"));
 }
 
 /// The native half of `emit_and_run::dry_struct_classes_run_lowered`.
