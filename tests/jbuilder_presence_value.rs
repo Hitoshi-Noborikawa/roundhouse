@@ -59,6 +59,7 @@ json.flag(widget.note.present? ? "y" : "n")
 const FLAG: &str = r#"if @widget.name.present?
   json.named true
 end
+json.call(@widget, :note) unless @widget.note.presence.nil?
 "#;
 
 fn emitted() -> Vec<(String, String)> {
@@ -124,6 +125,16 @@ fn a_condition_is_left_to_the_condition_rewrite() {
     let files = emitted();
     let src = view(&files, "widgets/flag_json.rb");
     assert!(src.contains("widget.name.present?"), "{src}");
+}
+
+/// `x.presence` in a template-level condition is a value the condition
+/// rewrite does not read: it is grounded (`ActiveSupport.presence(x)`).
+#[test]
+fn presence_in_a_template_condition_is_grounded() {
+    let files = emitted();
+    let src = view(&files, "widgets/flag_json.rb");
+    assert!(src.contains("ActiveSupport.presence(widget.note).nil?"), "{src}");
+    assert!(!src.contains("note.presence"), "{src}");
 }
 
 /// The partial on CRuby with the runtime's `JsonBuilder` and

@@ -155,16 +155,18 @@ pub(crate) fn ground_body(body: &mut Expr, defs: &AppDefinitions) -> bool {
 /// `if` there included (`json.flag(note.present? ? "y" : "n")`): the
 /// grounded predicate answers a Boolean, which any condition takes. The
 /// condition of a template-level `if` / `unless` (one that chooses
-/// which pairs to write) is left as it was: that is the view-condition
-/// rewrite's (`view_to_library::predicates`) question.
+/// which pairs to write) keeps its `present?` / `blank?` for the
+/// view-condition rewrite (`view_to_library::predicates`); only a
+/// `presence` there is grounded, since that rewrite does not read it.
 pub(crate) fn ground_jbuilder_values(body: &mut Expr, defs: &AppDefinitions) -> bool {
     fn walk(expr: &mut Expr, in_value: bool, defs: &AppDefinitions, diags: &mut Vec<Diagnostic>) -> bool {
         if !in_value {
             match &mut *expr.node {
-                ExprNode::If { then_branch, else_branch, .. } => {
+                ExprNode::If { cond, then_branch, else_branch } => {
+                    let cond_changed = presence_only(cond, defs, diags);
                     let then_changed = walk(then_branch, false, defs, diags);
                     let else_changed = walk(else_branch, false, defs, diags);
-                    return then_changed || else_changed;
+                    return cond_changed || then_changed || else_changed;
                 }
                 ExprNode::Seq { exprs } => {
                     let mut changed = false;
@@ -183,6 +185,24 @@ pub(crate) fn ground_jbuilder_values(body: &mut Expr, defs: &AppDefinitions) -> 
             }
         });
         if try_rewrite(expr, defs, diags) {
+            changed = true;
+        }
+        changed
+    }
+    /// A template-level condition: `presence` only. It is a value inside
+    /// the condition (`x.presence.nil?`), which the view-condition
+    /// rewrite does not read and no Spinel String or nil answers;
+    /// `present?` / `blank?` there stay that rewrite's.
+    fn presence_only(expr: &mut Expr, defs: &AppDefinitions, diags: &mut Vec<Diagnostic>) -> bool {
+        let mut changed = false;
+        expr.node.for_each_child_mut(&mut |c| {
+            if presence_only(c, defs, diags) {
+                changed = true;
+            }
+        });
+        if matches!(&*expr.node, ExprNode::Send { method, .. } if method.as_str() == "presence")
+            && try_rewrite(expr, defs, diags)
+        {
             changed = true;
         }
         changed
