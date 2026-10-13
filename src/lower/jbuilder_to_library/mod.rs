@@ -266,14 +266,27 @@ fn build_library_class(
     let mut rewritten = rewrite_ivars_to_locals(&view.body);
     // The request's `params`: the parameter the template's closure gave
     // it (`reads_request_params`). A partial whose callers pass a local
-    // named `params` reads that local instead, as Rails' would.
+    // named `params` reads that local instead, as Rails' would — and
+    // that explicit local must win even when the request-params ivar
+    // was renamed to `__rh_ivar_params` to avoid clashing with it.
     let params_param: Option<Symbol> = match &partial_key {
-        Some(k) => partials
-            .ivars
-            .get(k)
-            .and_then(|ivs| ivs.iter().find(|(iv, _)| iv.as_str() == "params"))
-            .map(|(_, p)| p.clone())
-            .filter(|p| p.as_str() == "params"),
+        Some(k) => {
+            let explicit = partials
+                .params
+                .get(k)
+                .and_then(|names| names.iter().find(|n| n.as_str() == "params"))
+                .cloned();
+            if explicit.is_some() {
+                explicit
+            } else {
+                partials
+                    .ivars
+                    .get(k)
+                    .and_then(|ivs| ivs.iter().find(|(iv, _)| iv.as_str() == "params"))
+                    .map(|(_, p)| p.clone())
+                    .filter(|p| p.as_str() == "params")
+            }
+        }
         None => method.params.iter().find(|p| p.name.as_str() == "params").map(|p| p.name.clone()),
     };
     if let Some(ivars) = partial_key.as_ref().and_then(|k| partials.ivars.get(k)) {

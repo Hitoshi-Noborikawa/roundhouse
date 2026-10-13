@@ -25,6 +25,13 @@
 //! was: a rescue that only names `LoadError` does not catch the
 //! `NameError`, and a rescue with a body (a fallback include) does
 //! something this pass does not model.
+//!
+//! A constant that names an app **class** is not spliced: Ruby raises
+//! `TypeError` (rescued when the clause catches `StandardError`). A
+//! Ruby core/stdlib module (`Enumerable`, …) counts as defined even
+//! though it is outside the app set. Relative lookup is root-only —
+//! `class A::B` does not open `A` lexically, so owner-name splitting
+//! would invent a false scope.
 
 use std::collections::HashSet;
 
@@ -34,14 +41,21 @@ use crate::expr::{Expr, ExprNode};
 use crate::ident::{ClassId, Symbol};
 
 pub(super) fn splice_guarded_includes(app: &mut App) {
-    let known: HashSet<ClassId> = app
+    let known_modules: HashSet<ClassId> = app
         .library_classes
         .iter()
+        .filter(|lc| lc.is_module)
         .map(|lc| lc.name.clone())
         .chain(app.concern_model_items.keys().cloned())
         .collect();
+    let known_classes: HashSet<ClassId> = app
+        .library_classes
+        .iter()
+        .filter(|lc| !lc.is_module)
+        .map(|lc| lc.name.clone())
+        .chain(app.models.iter().map(|m| m.name.clone()))
+        .collect();
     for model in &mut app.models {
-        let owner = model.name.0.as_str().to_string();
         let mut body = Vec::with_capacity(model.body.len());
         for item in std::mem::take(&mut model.body) {
             let ModelBodyItem::Unknown { expr, leading_comments, leading_blank_line } = &item else {
@@ -52,11 +66,23 @@ pub(super) fn splice_guarded_includes(app: &mut App) {
                 body.push(item);
                 continue;
             };
+            // A known class target would TypeError under `include`; keep
+            // the rescue when the clause can catch that.
+            if includes.iter().any(|include| {
+                include_consts(include).any(|path| matches!(lookup(path, &known_modules, &known_classes), Lookup::Class))
+            }) {
+                body.push(item);
+                continue;
+            }
             // `include A, B` looks both up before including either, so one
             // undefined name stops the whole call.
             let includes: Vec<&Expr> = includes
                 .into_iter()
-                .take_while(|include| include_consts(include).all(|path| resolves(&owner, path, &known)))
+                .take_while(|include| {
+                    include_consts(include).all(|path| {
+                        matches!(lookup(path, &known_modules, &known_classes), Lookup::Module)
+                    })
+                })
                 .collect();
             let mut comments = leading_comments.clone();
             let mut blank = *leading_blank_line;
@@ -126,13 +152,20 @@ fn include_consts(include: &Expr) -> impl Iterator<Item = &[Symbol]> {
     })
 }
 
-/// `path` as written inside `owner` names a module the app defines:
-/// itself, or under one of the owner's nesting scopes (innermost
-/// first), as Ruby's lexical lookup would find it.
-///
-/// An absolute const (`::Chime`, path `["", "Chime"]`) looks up only
-/// from the root — the leading empty segment is not part of the name.
-fn resolves(owner: &str, path: &[Symbol], known: &HashSet<ClassId>) -> bool {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Lookup {
+    /// An includable module the app (or Ruby core) defines.
+    Module,
+    /// An app class — `include` would TypeError.
+    Class,
+    /// Not in the app set and not a known core module.
+    Unknown,
+}
+
+/// Root-only const lookup. Absolute paths strip a leading empty segment;
+/// relative paths do **not** invent scopes from a qualified class name
+/// (`class A::B` does not open `A` lexically).
+fn lookup(path: &[Symbol], modules: &HashSet<ClassId>, classes: &HashSet<ClassId>) -> Lookup {
     let absolute = path.first().is_some_and(|s| s.as_str().is_empty());
     let segments: Vec<&str> = if absolute {
         path.iter().skip(1).map(|s| s.as_str()).collect()
@@ -140,19 +173,31 @@ fn resolves(owner: &str, path: &[Symbol], known: &HashSet<ClassId>) -> bool {
         path.iter().map(|s| s.as_str()).collect()
     };
     if segments.is_empty() {
-        return false;
+        return Lookup::Unknown;
     }
-    let tail = segments.join("::");
-    if absolute {
-        return known.contains(&ClassId(Symbol::from(tail.as_str())));
+    let name = segments.join("::");
+    let id = ClassId(Symbol::from(name.as_str()));
+    if modules.contains(&id) || is_ruby_core_module(&segments) {
+        Lookup::Module
+    } else if classes.contains(&id) {
+        Lookup::Class
+    } else {
+        Lookup::Unknown
     }
-    let scope: Vec<&str> = owner.split("::").collect();
-    (0..=scope.len()).rev().any(|depth| {
-        let candidate = if depth == 0 {
-            tail.clone()
-        } else {
-            format!("{}::{tail}", scope[..depth].join("::"))
-        };
-        known.contains(&ClassId(Symbol::from(candidate.as_str())))
-    })
+}
+
+/// Core/stdlib modules a guarded `include` may name without the app
+/// defining them. Kept small — only names that are modules in Ruby and
+/// appear in real Rails apps' optional-include guards.
+fn is_ruby_core_module(segments: &[&str]) -> bool {
+    matches!(
+        segments,
+        ["Enumerable"]
+            | ["Comparable"]
+            | ["Kernel"]
+            | ["Forwardable"]
+            | ["SingleForwardable"]
+            | ["JSON"]
+            | ["FileUtils"]
+    )
 }

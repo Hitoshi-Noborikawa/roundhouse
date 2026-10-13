@@ -129,3 +129,84 @@ fn other_guards_are_left_alone() {
         }
     }
 }
+
+/// Core modules live outside the app set but are still defined in Ruby.
+#[test]
+fn a_guarded_include_of_enumerable_is_kept() {
+    let guarded = "  begin\n    include Enumerable\n  rescue NameError\n  end\n";
+    for target in [BuildTarget::Ruby, BuildTarget::Spinel] {
+        let src = emitted_part(target, guarded);
+        assert!(
+            src.contains("include Enumerable") || src.contains("Enumerable"),
+            "{target:?}: core module must not be dropped as missing:\n{src}"
+        );
+    }
+}
+
+/// `include` of a class raises TypeError; keep the rescue rather than
+/// splicing an uncaught include.
+#[test]
+fn a_guarded_include_of_a_class_is_left_alone() {
+    let mut tree: HashMap<PathBuf, Vec<u8>> = HashMap::new();
+    tree.insert(PathBuf::from("db/schema.rb"), SCHEMA.as_bytes().to_vec());
+    tree.insert(
+        PathBuf::from("app/models/application_record.rb"),
+        b"class ApplicationRecord < ActiveRecord::Base\n  primary_abstract_class\nend\n".to_vec(),
+    );
+    tree.insert(
+        PathBuf::from("app/models/gong.rb"),
+        b"class Gong < ApplicationRecord\nend\n".to_vec(),
+    );
+    let head = "  begin\n    include Gong\n  rescue StandardError\n  end\n";
+    tree.insert(PathBuf::from("app/models/part.rb"), part(head).into_bytes());
+    let mut app = ingest_app_from_tree(tree).expect("ingest");
+    roundhouse::session::analyze_and_lower(&mut app);
+    for target in [BuildTarget::Ruby, BuildTarget::Spinel] {
+        let files = target_files(&app, Path::new("fixtures/tiny-blog"), target).expect("emit");
+        let src = files
+            .iter()
+            .filter(|(p, _)| p.ends_with("models/part.rb"))
+            .map(|(_, c)| c.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            !src.contains("include Gong"),
+            "{target:?}: class include must not be spliced:\n{src}"
+        );
+    }
+}
+
+/// `class A::B` does not open `A` lexically — do not resolve `Chime` to
+/// `A::Chime` from the qualified class name.
+#[test]
+fn qualified_class_name_does_not_invent_lexical_scope() {
+    let mut tree: HashMap<PathBuf, Vec<u8>> = HashMap::new();
+    tree.insert(PathBuf::from("db/schema.rb"), SCHEMA.as_bytes().to_vec());
+    tree.insert(
+        PathBuf::from("app/models/application_record.rb"),
+        b"class ApplicationRecord < ActiveRecord::Base\n  primary_abstract_class\nend\n".to_vec(),
+    );
+    tree.insert(
+        PathBuf::from("app/models/a/chime.rb"),
+        b"module A\n  module Chime\n    def ring(code)\n      \"rang #{code}\"\n    end\n  end\nend\n".to_vec(),
+    );
+    tree.insert(
+        PathBuf::from("app/models/a/b.rb"),
+        b"class A::B < ApplicationRecord\n  begin\n    include Chime\n  rescue NameError\n  end\n  def announce\n    \"ok\"\n  end\nend\n".to_vec(),
+    );
+    let mut app = ingest_app_from_tree(tree).expect("ingest");
+    roundhouse::session::analyze_and_lower(&mut app);
+    for target in [BuildTarget::Ruby, BuildTarget::Spinel] {
+        let files = target_files(&app, Path::new("fixtures/tiny-blog"), target).expect("emit");
+        let src = files
+            .iter()
+            .filter(|(p, _)| p.contains("models") && (p.ends_with("b.rb") || p.contains("/a/")))
+            .map(|(p, c)| format!("# {p}\n{c}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            !src.contains("include Chime") && !src.contains("include A::Chime"),
+            "{target:?}: must not invent A:: scope from class A::B:\n{src}"
+        );
+    }
+}
