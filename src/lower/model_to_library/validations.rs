@@ -409,7 +409,7 @@ fn push_active_model_validation_surface(methods: &mut Vec<MethodDef>, model: &Mo
             name: Symbol::from("errors"),
             receiver: MethodReceiver::Instance,
             params: Vec::new(),
-            body: errors_read(),
+            body: created_on_first_read(span, "errors", Ty::Array { elem: std::sync::Arc::new(Ty::Str) }),
             signature: Some(fn_sig(vec![], Ty::Array { elem: std::sync::Arc::new(Ty::Str) })),
             effects: EffectSet::default(),
             enclosing_class: Some(model.name.0.clone()),
@@ -428,7 +428,7 @@ fn push_active_model_validation_surface(methods: &mut Vec<MethodDef>, model: &Mo
             name: Symbol::from("error_details"),
             receiver: MethodReceiver::Instance,
             params: Vec::new(),
-            body: Expr::new(span, ExprNode::Ivar { name: Symbol::from("error_details") }),
+            body: created_on_first_read(span, "error_details", crate::lower::errors_add::error_details_ty()),
             signature: Some(fn_sig(vec![], crate::lower::errors_add::error_details_ty())),
             effects: EffectSet::default(),
             enclosing_class: Some(model.name.0.clone()),
@@ -458,7 +458,24 @@ fn push_active_model_validation_surface(methods: &mut Vec<MethodDef>, model: &Mo
     }
 }
 
-/// `out = []; @error_details.each { |e| out << e.message if e.attribute == attribute }; out`,
+/// `@<name> ||= []`, created on first read as Rails' `errors` is, so an
+/// `errors.add` before any `valid?` has a list to add to.
+fn created_on_first_read(span: Span, name: &str, ty: Ty) -> Expr {
+    let mut empty = Expr::new(span, ExprNode::Array { elements: vec![], style: ArrayStyle::default() });
+    empty.ty = Some(ty.clone());
+    let mut read = Expr::new(
+        span,
+        ExprNode::OpAssign {
+            target: crate::expr::LValue::Ivar { name: Symbol::from(name) },
+            op: crate::expr::OpAssignOp::OrOr,
+            value: empty,
+        },
+    );
+    read.ty = Some(ty);
+    read
+}
+
+/// `out = []; error_details.each { |e| out << e.message if e.attribute == attribute }; out`,
 /// the body `ActiveRecord::Base#error_messages_for` has in the shared runtime.
 fn error_messages_for_body(span: Span) -> Expr {
     let str_array = Ty::Array { elem: std::sync::Arc::new(Ty::Str) };
@@ -492,7 +509,10 @@ fn error_messages_for_body(span: Span) -> Expr {
             block_style: crate::expr::BlockStyle::Brace,
         },
     );
-    let details = typed(ExprNode::Ivar { name: Symbol::from("error_details") }, crate::lower::errors_add::error_details_ty());
+    let details = typed(
+        ExprNode::Send { recv: None, method: Symbol::from("error_details"), args: vec![], block: None, parenthesized: false },
+        crate::lower::errors_add::error_details_ty(),
+    );
     let each = typed(
         ExprNode::Send { recv: Some(details), method: Symbol::from("each"), args: vec![], block: Some(block), parenthesized: false },
         crate::lower::errors_add::error_details_ty(),
