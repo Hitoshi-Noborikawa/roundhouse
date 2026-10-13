@@ -267,7 +267,7 @@ module ActiveSupport
   # Not `errors_to_hash` itself: Rails' `messages` answers `[]` for an attribute with no errors, and is frozen.
   def self.errors_messages(details)
     out = errors_to_hash(details)
-    out.default = []
+    out.default = [].freeze
     out.freeze
   end
 

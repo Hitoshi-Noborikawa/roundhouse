@@ -201,14 +201,16 @@ fn membership_asks_the_attribute_s_messages() {
     let (out, diags) = lower_and_emit(
         r#"
 class Draft
+  include ActiveModel::Validations
+
   def problems
-    [errors.include?(:url), errors.key?("url"), Draft.latest.errors.has_key?(:base)]
+    [errors.include?(:url), errors.key?("url"), Draft.new.errors.has_key?(:base)]
   end
 end
 "#,
     );
     assert!(out.contains(r#"error_messages_for("url").any?, error_messages_for("url").any?"#), "{out}");
-    assert!(out.contains(r#"Draft.latest.error_messages_for("base").any?"#), "{out}");
+    assert!(out.contains(r#"Draft.new.error_messages_for("base").any?"#), "{out}");
     assert!(diags.is_empty(), "unexpected residue: {diags:?}");
 }
 
@@ -217,6 +219,8 @@ fn membership_on_a_dynamic_field_is_an_error() {
     let (out, diags) = lower_and_emit(
         r#"
 class Draft
+  include ActiveModel::Validations
+
   def problem?(field)
     errors.include?(field)
   end
@@ -233,6 +237,8 @@ fn attribute_names_reads_the_record_s_error_details() {
     let (out, diags) = lower_and_emit(
         r#"
 class Draft
+  include ActiveModel::Validations
+
   def problem_names
     errors.attribute_names
   end
@@ -279,4 +285,24 @@ end
         "expected the projection to read the record once:\n{out}"
     );
     assert!(diags.is_empty(), "unexpected residue: {diags:?}");
+}
+
+
+#[test]
+fn an_app_s_own_errors_array_is_left_alone() {
+    let (out, diags) = lower_and_emit(
+        r#"
+class Probe
+  def errors
+    [:timeout]
+  end
+
+  def timed_out?
+    errors.include?(:timeout)
+  end
+end
+"#,
+    );
+    assert!(out.contains("errors.include?(:timeout)"), "{out}");
+    assert!(diags.is_empty(), "{diags:?}");
 }

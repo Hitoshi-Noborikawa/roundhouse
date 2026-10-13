@@ -82,6 +82,11 @@ fn is_errors_read(e: &Expr) -> bool {
     )
 }
 
+// Not shape alone, as `[]` is: an app's own `errors` Array answers `include?` and `attribute_names` itself.
+fn is_model_errors_read(e: &Expr) -> bool {
+    is_errors_read(e) && matches!(&e.ty, Some(Ty::Class { id, .. }) if id.0.as_str() == "ActiveModel::Errors")
+}
+
 fn is_messages_read(e: &Expr) -> bool {
     matches!(&*e.node,
         ExprNode::Send { recv: Some(r), method, args, block: None, .. }
@@ -146,7 +151,7 @@ fn rewrite(expr: &mut Expr, diags: &mut Vec<Diagnostic>) {
 // Not left to the accumulator: `Array#include?(:title)` answers false for an Array of full messages.
 fn rewrite_include(expr: &mut Expr, diags: &mut Vec<Diagnostic>) {
     let ExprNode::Send { recv: Some(reader), method, args, block: None, .. } = &*expr.node else { return };
-    if !matches!(method.as_str(), "include?" | "key?" | "has_key?") || args.len() != 1 || !is_errors_read(reader) {
+    if !matches!(method.as_str(), "include?" | "key?" | "has_key?") || args.len() != 1 || !is_model_errors_read(reader) {
         return;
     }
     let field = match &*args[0].node {
@@ -192,7 +197,7 @@ fn rewrite_to_hash(expr: &mut Expr) {
     }
     let (helper, ty) = match method.as_str() {
         "to_hash" | "as_json" => ("errors_to_hash", messages_ty()),
-        "attribute_names" => ("errors_attribute_names", Ty::Array { elem: std::sync::Arc::new(Ty::Sym) }),
+        "attribute_names" if is_model_errors_read(reader) => ("errors_attribute_names", Ty::Array { elem: std::sync::Arc::new(Ty::Sym) }),
         _ => return,
     };
     *expr = details_call(expr.span, reader, helper, ty);

@@ -1401,7 +1401,7 @@ raise a.error_questions.inspect unless a.error_questions == [true, true, true, f
 raise a.error_names.inspect unless a.error_names == [:title, :body, :base] && a.error_names.frozen?
 expected = { title: ["can't be blank"], body: ["is too short (minimum is 10 characters)"], base: ["is odd"] }
 raise a.all_messages.inspect unless a.all_messages == expected && a.all_messages.frozen?
-raise a.all_messages[:nothing].inspect unless a.all_messages[:nothing] == []
+raise a.all_messages[:nothing].inspect unless a.all_messages[:nothing] == [] && a.all_messages[:nothing].frozen?
 raise a.messages_on(:base).inspect unless a.messages_on(:base) == ["is odd"] && a.messages_on(:nothing) == []
 b = Article.new(title: "A title", body: "A long enough body")
 b.valid?
