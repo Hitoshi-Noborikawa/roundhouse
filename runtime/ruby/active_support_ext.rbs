@@ -20,6 +20,9 @@ module ActiveSupport
 
   # `errors[:field]` -> the messages added on that attribute, prefix stripped.
 
+  # `errors.to_hash` -> each attribute to its messages, from the error details.
+  def self.errors_to_hash: (Array[ActiveRecord::ErrorDetail] details) -> Hash[Symbol, Array[String]]
+
   # Rails' name for "this signed value does not verify" — see the .rb.
   class MessageVerifier
     class InvalidSignature < StandardError

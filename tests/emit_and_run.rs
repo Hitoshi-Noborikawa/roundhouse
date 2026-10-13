@@ -1308,6 +1308,74 @@ fn errors_index_picks_a_field_by_its_attribute_on_spinel() {
     errors_by_attribute_app("%{attribute} %{message}").run_spinel(ERRORS_BY_ATTRIBUTE).assert_passes();
 }
 
+/// `errors.to_hash` maps each attribute with errors to its messages, in
+/// the order Rails gives: a `validates` rule, a `validate` method's
+/// `errors.add(:base, …)`, on the record itself and on a record a class
+/// method builds.
+fn errors_to_hash_app(format: &str) -> emit_and_run::Overlay {
+    emit_and_run::real_blog()
+        .write("config/locales/en.yml", &format!("en:\n  hello: \"Hello world\"\n  errors:\n    format: \"{format}\"\n"))
+        .edit(
+            "app/models/article.rb",
+            "  validates :body, presence: true, length: { minimum: 10 }\n",
+            "  validates :body, presence: true, length: { minimum: 10 }
+  validate :odd_body
+
+  def odd_body
+    errors.add(:base, \"is odd\") if body == \"odd\"
+  end
+
+  def errors_hash
+    errors.to_hash
+  end
+
+  def self.draft_errors(title, body)
+    article = Article.new(title: title, body: body)
+    article.valid?
+    article.errors.to_hash
+  end
+",
+        )
+}
+
+const ERRORS_TO_HASH: &str = r#"a = Article.new(title: "", body: "odd")
+a.valid?
+expected = { title: ["can't be blank"], body: ["is too short (minimum is 10 characters)"], base: ["is odd"] }
+raise a.errors_hash.inspect unless a.errors_hash == expected && a.errors_hash.keys == [:title, :body, :base]
+raise Article.draft_errors("", "odd").inspect unless Article.draft_errors("", "odd") == expected
+b = Article.new(title: "A title", body: "A long enough body")
+b.valid?
+raise b.errors_hash.inspect unless b.errors_hash.empty?
+puts "errors.to_hash passed"
+"#;
+
+#[test]
+fn errors_to_hash_groups_messages_by_attribute() {
+    errors_to_hash_app("%{attribute} %{message}").run_ruby(ERRORS_TO_HASH).assert_passes();
+}
+
+#[test]
+fn errors_to_hash_does_not_depend_on_the_message_format() {
+    errors_to_hash_app("%{message} (%{attribute})").run_ruby(ERRORS_TO_HASH).assert_passes();
+}
+
+#[test]
+#[ignore = "requires the Spinel toolchain"]
+fn errors_to_hash_groups_messages_by_attribute_on_spinel() {
+    errors_to_hash_app("%{attribute} %{message}").run_spinel(ERRORS_TO_HASH).assert_passes();
+}
+
+/// The helper is the shared Ruby runtime's, which no strict target loads.
+#[test]
+fn errors_to_hash_is_a_gap_on_strict_targets() {
+    let (_emitted, errors) = errors_to_hash_app("%{attribute} %{message}").emit(roundhouse::project::BuildTarget::Crystal);
+    assert_eq!(
+        errors.iter().filter(|e| e.contains("ActiveSupport.errors_to_hash is only available on the ruby family and spinel")).count(),
+        2,
+        "{errors:#?}"
+    );
+}
+
 /// A field the lowering cannot humanize at compile time keeps its error.
 #[test]
 fn errors_full_message_on_a_dynamic_field_stays_an_error() {
