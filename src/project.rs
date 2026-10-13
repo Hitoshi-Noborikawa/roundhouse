@@ -3543,6 +3543,35 @@ fn apply_cable_connection(files: &mut [(String, String)], app: &App) {
     }
 }
 
+/// `runtime/i18n_locale.rb`'s generated block: the app's
+/// `config.i18n.default_locale` and `available_locales` (read at ingest,
+/// `App::i18n`), as the literals `I18n.default_locale` and
+/// `I18n.available_locales` answer and `I18n.locale =` checks against.
+/// An app that sets neither keeps the file's `:en`.
+fn apply_i18n_locales(files: &mut [(String, String)], app: &App) {
+    const HEAD: &str = "  # >>> generated: i18n-locales\n";
+    const TAIL: &str = "  # <<< generated: i18n-locales\n";
+    let catalog = app.i18n.or_rails_default();
+    let sym = |l: &str| match l.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+        true => format!(":{l}"),
+        false => format!(":{}", crate::emit::ruby::expr::ruby_str_literal(l)),
+    };
+    let available = catalog.locales().iter().map(|l| sym(l)).collect::<Vec<_>>().join(", ");
+    let generated = format!(
+        "{HEAD}  def self.app_default_locale\n    {}\n  end\n\n  def self.app_available_locales\n    [{available}]\n  end\n{TAIL}",
+        sym(&catalog.locale)
+    );
+    for (path, content) in files.iter_mut() {
+        if !path.ends_with("runtime/i18n_locale.rb") {
+            continue;
+        }
+        let Some(start) = content.find(HEAD) else { continue };
+        let Some(rel_end) = content[start..].find(TAIL) else { continue };
+        let end = start + rel_end + TAIL.len();
+        content.replace_range(start..end, &generated);
+    }
+}
+
 /// Route `ActionText::Content#to_s` through the app's own
 /// `layouts/action_text/contents/_content` layout — Rails' contract,
 /// and how a rich text arrives wrapped (campfire's layout is
@@ -6249,6 +6278,7 @@ fn spinel_files(app: &App, fixture: &Path) -> Result<(Vec<(String, String)>, Vec
     apply_content_layout(&mut files, app);
     apply_content_helper_attributes(&mut files, app);
     apply_content_helper_tags(&mut files, app);
+    apply_i18n_locales(&mut files, app);
     // The `only:`-as-finder specializations, also in the shared base:
     // `runtime/global_id_locator.rb` is ONE file that both the spinel
     // tree and the ruby overlay require, and the rewrite that names

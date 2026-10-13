@@ -238,7 +238,7 @@ fn application_rb_reports_config_statements_nothing_reads() {
         "config/application.rb",
         "require_relative \"boot\"\nrequire \"rails/all\"\n\nmodule Shop\n  class Application < Rails::Application\n    \
          config.load_defaults 8.1\n    config.time_zone = \"Central Time (US & Canada)\"\n    \
-         config.eager_load = true\n    config.i18n.fallbacks = true\n    \
+         config.eager_load = true\n    config.i18n.enforce_available_locales = false\n    \
          config.after_initialize do\n      Warmup.run\n    end\n\n    def read_only?\n      false\n    end\n  end\nend\n",
     )]);
     // time_zone and the method still ingest ...
@@ -246,7 +246,7 @@ fn application_rb_reports_config_statements_nothing_reads() {
     assert!(application.methods.iter().any(|m| m.name.as_str() == "config_time_zone"));
     assert!(application.methods.iter().any(|m| m.name.as_str() == "read_only?"));
     // ... load_defaults / time_zone are consumed, eager_load is inert, defs are methods.
-    assert_eq!(statements(&ledger), ["config.i18n.fallbacks =", "config.after_initialize"]);
+    assert_eq!(statements(&ledger), ["config.i18n.enforce_available_locales =", "config.after_initialize"]);
     assert_eq!(owner(&ledger[0]), "host config/application.rb");
     assert_eq!(location(&ledger[1]), "config/application.rb:10:5");
 }
