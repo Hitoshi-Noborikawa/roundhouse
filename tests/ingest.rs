@@ -1378,8 +1378,10 @@ fn survey_mode_recovers_from_unsupported_construct_and_records_skipped_views() {
         "skipped RABL view should be recorded as a gap, got: {messages:?}"
     );
     assert!(
-        !messages.is_empty(),
-        "unsupported `defined?` call should be recorded as a gap"
+        messages
+            .iter()
+            .any(|m| m.contains("defined? calls with arguments, blocks or safe navigation are not modeled")),
+        "unsupported `defined?` call should be recorded as a gap, got: {messages:?}"
     );
 }
 
