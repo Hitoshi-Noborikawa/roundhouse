@@ -61,6 +61,23 @@ fn a_required_library_is_loaded_on_the_ruby_lane() {
     assert!(run.stdout.contains("true"), "{}", run.stdout);
 }
 
+/// A Packwerk package's files reach the emitted app as the root app's
+/// do, so a require in one opens boot.rb too.
+#[test]
+fn a_package_s_requires_open_boot_too() {
+    let (emitted, errors) = emit_and_run::real_blog()
+        .write("packwerk.yml", "# package_paths: **/\n")
+        .write("packs/terminal/package.yml", "enforce_dependencies: true\n")
+        .write(
+            "packs/terminal/app/services/terminal_size.rb",
+            "require \"io/console\"\n\nclass TerminalSize\n  def self.rows = 1\nend\n",
+        )
+        .emit(BuildTarget::Ruby);
+    assert!(errors.is_empty(), "errors: {errors:?}");
+    let boot = std::fs::read_to_string(emitted.join("boot.rb")).expect("read boot.rb");
+    assert!(boot.lines().any(|l| l.trim() == "require \"io/console\""), "{boot}");
+}
+
 #[test]
 fn rails_version_is_the_locked_one() {
     // fixtures/real-blog locks rails 8.1.4.

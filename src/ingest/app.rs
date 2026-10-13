@@ -2101,7 +2101,9 @@ end
     // that signature (campfire's `WebPush::Connections::Stages`).
     crate::lower::known_super_forwarding::restate(&mut app);
     collect_binary_assets(vfs, dir, &mut app);
-    app.app_requires = collect_app_requires(vfs, dir);
+    let mut require_roots: Vec<String> = roots.iter().map(|r| r.display().to_string()).collect();
+    require_roots.extend(support_roots(vfs, dir, &roots, &path_gems, &lib_ignores));
+    app.app_requires = collect_app_requires(vfs, dir, &require_roots);
     // Generated re-ingest labels never register real sources. No later
     // pass may append source-backed FileIds beyond the indexed snapshot.
     let late_sources = super::sources::drain();
@@ -2123,11 +2125,13 @@ const APP_REQUIRABLE_STDLIB: &[&str] = &[
 ];
 
 /// [`App::app_requires`]: every literal top-level `require "lib"` of a
-/// standard library in `app/` and `lib/`. A terminal channel that
+/// standard library in the trees the app loads from (`roots`: each app
+/// root, a Packwerk package's or an engine's included, and the support
+/// roots beside them, `lib/` among them). A terminal channel that
 /// requires `pty` and `io/console` needs the second for `IO#winsize=`,
 /// which io/console adds and no constant names, so the bundled requires
 /// (driven by the constants a file names) cannot bring it back.
-fn collect_app_requires<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> Vec<String> {
+fn collect_app_requires<V: Vfs + ?Sized>(vfs: &V, dir: &Path, roots: &[String]) -> Vec<String> {
     fn walk<V: Vfs + ?Sized>(vfs: &V, path: &Path, out: &mut std::collections::BTreeSet<String>, depth: usize) {
         if depth > 16 || vfs.is_symlink(path) {
             return;
@@ -2160,8 +2164,8 @@ fn collect_app_requires<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> Vec<String> {
         }
     }
     let mut out = std::collections::BTreeSet::new();
-    for sub in ["app", "lib"] {
-        walk(vfs, &dir.join(sub), &mut out, 0);
+    for root in roots {
+        walk(vfs, &dir.join(root), &mut out, 0);
     }
     out.into_iter().collect()
 }
