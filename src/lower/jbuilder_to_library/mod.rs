@@ -242,6 +242,18 @@ fn build_library_class(
         partial_key(&mod_path, &method)
     });
     let mut rewritten = rewrite_ivars_to_locals(&view.body);
+    // The request's `params`: the parameter the template's closure gave
+    // it (`reads_request_params`). A partial whose callers pass a local
+    // named `params` reads that local instead, as Rails' would.
+    let params_param: Option<Symbol> = match &partial_key {
+        Some(k) => partials
+            .ivars
+            .get(k)
+            .and_then(|ivs| ivs.iter().find(|(iv, _)| iv.as_str() == "params"))
+            .map(|(_, p)| p.clone())
+            .filter(|p| p.as_str() == "params"),
+        None => method.params.iter().find(|p| p.name.as_str() == "params").map(|p| p.name.clone()),
+    };
     if let Some(ivars) = partial_key.as_ref().and_then(|k| partials.ivars.get(k)) {
         let renames: std::collections::HashMap<Symbol, Symbol> = ivars
             .iter()
@@ -253,6 +265,9 @@ fn build_library_class(
             rename_ivars(&mut body, &renames);
             rewritten = rewrite_ivars_to_locals(&body);
         }
+    }
+    if let Some(p) = &params_param {
+        request_params_to_local(&mut rewritten, p);
     }
     // A partial's `local_assigns[:x]` is its parameter `x`, nil when
     // the caller did not pass it — the ERB lowering's reading.
@@ -387,7 +402,11 @@ fn jbuilder_method_parts(
         Vec::new()
     } else {
         partials.closures.get(&view.name).cloned().unwrap_or_else(|| {
-            crate::lower::view_to_library::view_read_ivars(&view.body)
+            let mut reads = crate::lower::view_to_library::view_read_ivars(&view.body);
+            if reads_request_params(&view.body) && !reads.iter().any(|r| r.as_str() == "params") {
+                reads.push(Symbol::from("params"));
+            }
+            reads
         })
     };
 
@@ -454,6 +473,8 @@ fn jbuilder_method_parts(
                     crate::lower::view_to_library::ivar_ty(iv.as_str(), &known_models)
                 } else if n == arg_name {
                     crate::lower::view_to_library::record_arg_ty(dir, false, &known_models)
+                } else if ivar_of(l).is_some() {
+                    template_param_ty(&n, &known_models)
                 } else {
                     crate::lower::view_to_library::ivar_ty(&n, &known_models)
                 };
@@ -468,7 +489,7 @@ fn jbuilder_method_parts(
             .iter()
             .map(|iv| {
                 let n = iv.as_str().to_string();
-                let t = crate::lower::view_to_library::ivar_ty(&n, &known_models);
+                let t = template_param_ty(&n, &known_models);
                 (n, t)
             })
             .collect();
@@ -1867,10 +1888,15 @@ fn record_partial_path(
 }
 
 /// The name of a bare local: a `Var`, or the receiverless, argless,
-/// blockless `Send` prism gives a partial's locals.
+/// blockless `Send` prism gives a partial's locals. An ivar counts under
+/// its own name: the template walk reads it as that local
+/// (`rewrite_ivars_to_locals`), and the render graph, which walks the
+/// template as written (`render_edges`), has to find the same partial
+/// for `json.partial! @widget`, or the template's ivar closure misses
+/// the partial's ivars and its call passes them as undefined names.
 fn local_name(e: &Expr) -> Option<Symbol> {
     match &*e.node {
-        ExprNode::Var { name, .. } => Some(name.clone()),
+        ExprNode::Var { name, .. } | ExprNode::Ivar { name } => Some(name.clone()),
         ExprNode::Send { recv: None, method, args, block: None, .. } if args.is_empty() => {
             Some(method.clone())
         }
@@ -2113,6 +2139,46 @@ fn render_edges(views: &[&View], known_models: &[String]) -> Vec<(Symbol, Render
         .collect()
 }
 
+/// Whether a template reads the request's `params` (a bare, receiverless
+/// `params`). A view reads the params of the controller that renders
+/// it, which the lowered controller holds as `@params`, so the template
+/// takes it as one more ivar of its closure: the controller passes
+/// `@params`, and each partial gets it from its renderer.
+fn reads_request_params(e: &Expr) -> bool {
+    if matches!(&*e.node, ExprNode::Send { recv: None, method, args, block: None, .. }
+        if method.as_str() == "params" && args.is_empty())
+    {
+        return true;
+    }
+    let mut found = false;
+    e.node.for_each_child(&mut |c| found = found || reads_request_params(c));
+    found
+}
+
+/// Every bare `params` read in `e`, as the local `name`.
+fn request_params_to_local(e: &mut Expr, name: &Symbol) {
+    if matches!(&*e.node, ExprNode::Send { recv: None, method, args, block: None, .. }
+        if method.as_str() == "params" && args.is_empty())
+    {
+        *e.node = ExprNode::Var { id: VarId(0), name: name.clone() };
+        return;
+    }
+    e.node.for_each_child_mut(&mut |c| request_params_to_local(c, name));
+}
+
+/// A template parameter's type: the request's params are a String-keyed
+/// Hash (so `params[:q]` reads `"q"`, as in the controller), anything
+/// else as its ivar name gives.
+fn template_param_ty(name: &str, known_models: &[String]) -> crate::ty::Ty {
+    if name == "params" {
+        return crate::ty::Ty::Hash {
+            key: Box::new(crate::ty::Ty::Str),
+            value: Box::new(crate::ty::Ty::Untyped),
+        };
+    }
+    crate::lower::view_to_library::ivar_ty(name, known_models)
+}
+
 /// The ivar closure of every template: its own reads, in first-seen
 /// order, then each rendered partial's closure, depth first. A render
 /// cycle contributes what was found before it closed.
@@ -2138,6 +2204,10 @@ fn ivar_closures(
             .get(name)
             .map(|b| crate::lower::view_to_library::view_read_ivars(b))
             .unwrap_or_default();
+        let params = Symbol::from("params");
+        if bodies.get(name).is_some_and(|b| reads_request_params(b)) && !out.contains(&params) {
+            out.push(params);
+        }
         for child in children.get(name).into_iter().flatten() {
             for iv in visit(child, bodies, children, done, open) {
                 if !out.contains(&iv) {
