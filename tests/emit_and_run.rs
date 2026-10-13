@@ -27,6 +27,10 @@ mod lambda_signatures;
 mod strong_params;
 #[path = "emit_and_run/params_wrapper.rs"]
 mod params_wrapper;
+#[path = "support/stdlib_rnp.rs"]
+mod stdlib_rnp_contract;
+#[path = "emit_and_run/stdlib_rnp.rs"]
+mod stdlib_rnp;
 
 #[path = "support/class_configuration.rs"]
 mod class_configuration;
