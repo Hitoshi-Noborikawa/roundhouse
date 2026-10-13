@@ -11046,12 +11046,202 @@ raise "filter" unless ActiveStorage.video_preview_vf_filter.include?("gte(t\\,5)
 raise "previewers include" unless ActiveStorage.previewers.include?(TimeLimitedVideoPreviewer)
 raise "previewers exclude" if ActiveStorage.previewers.include?(ActiveStorage::Previewer::VideoPreviewer)
 
+# Rails' ActiveStorage.paths — mutable executable locations.
+raise "paths default" unless ActiveStorage.paths.is_a?(Hash)
+previous = ActiveStorage.paths[:ffmpeg]
+ActiveStorage.paths[:ffmpeg] = "/tmp/fake-ffmpeg"
+raise "paths assign" unless ActiveStorage.paths[:ffmpeg] == "/tmp/fake-ffmpeg"
+ActiveStorage.paths[:ffmpeg] = previous
+
+# TIME_LIMIT on the video subclass → class-side poster (preview_timeout
+# override is the typed API; TIME_LIMIT is the campfire/stub_const path).
+raise "TIME_LIMIT" unless TimeLimitedVideoPreviewer::TIME_LIMIT == 10
+raise "preview_timeout default" unless TimeLimitedVideoPreviewer.preview_timeout.nil?
+raise "time limit" unless ActiveStorage::Previewer.poster_time_limit == 10
+
 # `-vf` must match as a whole option, not a prefix of `-vframes`.
 def ActiveStorage.video_preview_arguments
   "-vframes 1 -vf 'scale=320:240' -f image2"
 end
 raise "vf vs vframes" unless ActiveStorage.video_preview_vf_filter == "scale=320:240"
 "#,
+        )
+        .assert_passes();
+}
+
+/// Conditional GET: `fresh_when etag:` sets ETag and answers 304 when
+/// `If-None-Match` matches (campfire CachedResponses native validators).
+#[test]
+fn fresh_when_etag_answers_not_modified() {
+    emit_and_run::real_blog()
+        .run_ruby(
+            r##"
+c = ActionController::Base.new
+c.request = ActionDispatch::Request.new({ "HTTP_IF_NONE_MATCH" => "W/\"abc123\"" })
+c.fresh_when(etag: "abc123", template: false)
+raise "status #{c.status}" unless c.status == 304
+raise "performed" unless c.performed?
+raise "etag #{c.headers["ETag"].inspect}" unless c.headers["ETag"] == "W/\"abc123\""
+
+fresh = ActionController::Base.new
+fresh.request = ActionDispatch::Request.new({ "REQUEST_METHOD" => "GET" })
+fresh.fresh_when(etag: "abc123", template: false)
+raise "fresh status #{fresh.status}" unless fresh.status == 200
+raise "fresh performed" if fresh.performed?
+raise "fresh etag" unless fresh.headers["ETag"] == "W/\"abc123\""
+
+other = ActionController::Base.new
+other.request = ActionDispatch::Request.new({ "HTTP_IF_NONE_MATCH" => "W/\"old\"" })
+other.fresh_when({ etag: "new" })
+raise "mismatch status" unless other.status == 200
+raise "mismatch etag" unless other.headers["ETag"] == "W/\"new\""
+
+# Quoted opaque-tags may contain commas; blind split must not 304 on `"b"`.
+comma = ActionController::Base.new
+comma.request = ActionDispatch::Request.new({ "HTTP_IF_NONE_MATCH" => "\"a,b\"" })
+comma.fresh_when(etag: "b", template: false)
+raise "comma status #{comma.status}" unless comma.status == 200
+
+# Wildcard list member matches any validator.
+star = ActionController::Base.new
+star.request = ActionDispatch::Request.new({ "HTTP_IF_NONE_MATCH" => "\"other\", *" })
+star.fresh_when(etag: "abc123", template: false)
+raise "star status #{star.status}" unless star.status == 304
+
+# Unquoted tokens are not entity-tags.
+bare = ActionController::Base.new
+bare.request = ActionDispatch::Request.new({ "HTTP_IF_NONE_MATCH" => "abc123" })
+bare.fresh_when(etag: "abc123", template: false)
+raise "bare status #{bare.status}" unless bare.status == 200
+
+# RFC 9110: 304 only for GET/HEAD — POST still sets ETag but stays 200.
+post = ActionController::Base.new
+post.request = ActionDispatch::Request.new({
+  "REQUEST_METHOD" => "POST",
+  "HTTP_IF_NONE_MATCH" => "W/\"abc123\"",
+})
+post.fresh_when(etag: "abc123", template: false)
+raise "post status #{post.status}" unless post.status == 200
+raise "post etag" unless post.headers["ETag"] == "W/\"abc123\""
+raise "post performed" if post.performed?
+
+# stale? on POST stays stale (true) so `if stale?` still runs the body.
+stale_post = ActionController::Base.new
+stale_post.request = ActionDispatch::Request.new({
+  "REQUEST_METHOD" => "POST",
+  "HTTP_IF_NONE_MATCH" => "W/\"abc123\"",
+})
+raise "stale? post" unless stale_post.stale?(etag: "abc123") == true
+"##
+        )
+        .assert_passes();
+}
+
+/// `Model.none` and `where(id: [])` are Rails NullRelations: empty
+/// terminals with zero adapter selects. Negation / `or` must not stick
+/// or invert nullness (thermos H1).
+#[test]
+fn relation_none_and_empty_in_do_not_query() {
+    emit_and_run::real_blog()
+        .run_ruby(
+            r##"
+QUERIES = []
+adapter = ActiveRecord.adapter
+orig = adapter.method(:select_rows)
+adapter.define_singleton_method(:select_rows) do |sql|
+  QUERIES << sql
+  orig.call(sql)
+end
+
+def assert_no_query(label)
+  before = QUERIES.length
+  yield
+  n = QUERIES.length - before
+  raise "#{label}: #{n} queries" if n > 0
+end
+
+row = Article.create!(title: "NullRel", body: "long enough body")
+
+none = Article.none
+raise "klass" unless none.klass == Article
+assert_no_query("none.to_a") { raise "to_a" unless none.to_a.empty? }
+assert_no_query("none.ids") { raise "ids" unless none.ids.empty? }
+assert_no_query("none.empty?") { raise "empty?" unless none.empty? }
+assert_no_query("none.exists?") { raise "exists?" if none.exists? }
+assert_no_query("none.any?") { raise "any?" if none.any? }
+assert_no_query("none.count") { raise "count" unless none.count == 0 }
+assert_no_query("none.pluck") { raise "pluck" unless none.pluck(:id).empty? }
+
+empty_in = Article.where(id: [])
+assert_no_query("empty_in.to_a") { raise "empty_in to_a" unless empty_in.to_a.empty? }
+assert_no_query("empty_in.ids") { raise "empty_in ids" unless empty_in.ids.empty? }
+assert_no_query("empty_in.empty?") { raise "empty_in empty?" unless empty_in.empty? }
+assert_no_query("empty_in.count") { raise "empty_in count" unless empty_in.count == 0 }
+
+# Negated empty IN is a tautology — must not be NullRelation.
+# (`where.not` lowers to Relation#not; call it directly in this MRI script.)
+not_empty = Article.all.not(id: [])
+raise "not null?" if not_empty.null_relation?
+raise "not to_a" unless not_empty.to_a.map(&:id).include?(row.id)
+
+excl = Article.all.excluding([])
+raise "excluding null?" if excl.null_relation?
+raise "excluding to_a" unless excl.to_a.map(&:id).include?(row.id)
+
+# Left-null OR productive side yields the other (Rails NullRelation#or).
+or_side = Article.none.or(Article.where(id: row.id))
+raise "or null?" if or_side.null_relation?
+raise "or to_a" unless or_side.to_a.map(&:id) == [row.id]
+
+# Temporary find_by / find_sole_by(id: []) must not stick null on the receiver.
+rel = Article.all.where("1=1")
+raise "find_by empty" unless rel.find_by(id: []).nil?
+raise "find_by sticky" if rel.null_relation?
+raise "find_by still loads" unless rel.to_a.map(&:id).include?(row.id)
+begin
+  rel.find_sole_by(id: [])
+  raise "find_sole_by should raise"
+rescue ActiveRecord::RecordNotFound
+end
+raise "find_sole_by sticky" if rel.null_relation?
+
+# merge(none) adopts null.
+merged = Article.all.where("1=1").merge(Article.none)
+raise "merge null?" unless merged.null_relation?
+assert_no_query("merge.none.ids") { raise "merge ids" unless merged.ids.empty? }
+
+# Empty-IN NullRelation must clear when unscope drops the contradiction
+# (Thermos M1). `none.unscope(where: :id)` stays null — none's (1 = 0)
+# is unattributed.
+restored = Article.where(id: []).unscope(where: :id)
+raise "unscope sticky null?" if restored.null_relation?
+raise "unscope restores rows" unless restored.to_a.map(&:id).include?(row.id)
+still_none = Article.none.unscope(where: :id)
+raise "none unscope null?" unless still_none.null_relation?
+assert_no_query("none.unscope.ids") { raise "none unscope ids" unless still_none.ids.empty? }
+assert_no_query("none.limit.unscope.size") {
+  n = Article.none.limit(1).unscope(where: :id).size
+  raise "none limit size #{n}" unless n == 0
+}
+
+# Compound empty-IN keeps null when a sibling where is unscoped away.
+compound = Article.where(id: []).where(title: "NullRel")
+raise "compound null?" unless compound.null_relation?
+kept = compound.unscope(where: :title)
+raise "compound unscope cleared null?" unless kept.null_relation?
+assert_no_query("compound.unscope.ids") { raise "compound ids" unless kept.ids.empty? }
+
+# A value that literally contains "1=0" must not stick @null after the
+# empty-IN clause is unscoped (structural tracking, not SQL text search).
+titled = Article.create!(title: "1=0", body: "long enough body for pin")
+sticky = Article.where(id: []).where(title: "1=0").unscope(where: :id)
+raise "title 1=0 sticky null?" if sticky.null_relation?
+raise "title 1=0 row" unless sticky.to_a.map(&:id).include?(titled.id)
+
+# preloaded integer ids must not call .id on Fixnum.
+pre = Article.all.preloaded([row.id], true)
+raise "preloaded ids" unless pre.ids == [row.id]
+"##
         )
         .assert_passes();
 }
