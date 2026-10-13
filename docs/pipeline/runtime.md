@@ -1501,8 +1501,10 @@ come from the job's `perform_later` call sites, and
 - **The test adapter keeps closures.** `assert_enqueued_with` still
   checks the job and not its arguments (above).
 - **`enqueue_after_transaction_commit`** is honored for payload jobs
-  inside `Model.transaction`, which is flat. A closure job that sets it
-  is still queued at once.
+  inside `Model.transaction`, held until the outermost COMMIT. A nested
+  `requires_new:` block runs in a SAVEPOINT, and a job held inside one
+  that rolls back is still queued when the outer transaction commits
+  (Rails drops it). A closure job that sets it is still queued at once.
 
 ### ActiveJob's test helpers count NAMES, and `perform_enqueued_jobs` re-enters inline
 

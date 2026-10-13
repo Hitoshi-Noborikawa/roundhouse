@@ -463,11 +463,11 @@ fn is_discard_on_deserialization(call: &Expr) -> bool {
 }
 
 /// `self.enqueue_after_transaction_commit = <bool>` in the class body
-/// or a job ancestor's, nearest first; false (Rails 8.1's default) when
-/// none says.
+/// or a job ancestor's, nearest class first and the last assignment in
+/// a class winning; false (Rails 8.1's default) when none says.
 fn enqueues_after_commit(app: &App, lc: &LibraryClass) -> bool {
     for class in ancestry(app, lc) {
-        for call in &class.unknown_calls {
+        for call in class.unknown_calls.iter().rev() {
             if let Some(value) = enqueue_after_commit_literal(call) {
                 return value;
             }

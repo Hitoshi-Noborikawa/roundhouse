@@ -627,7 +627,20 @@ module ActiveRecord
             nil
           else
             Db._txn_depth = 0
-            Db.exec("COMMIT")
+            begin
+              Db.exec("COMMIT")
+            rescue Exception => e
+              # A failed COMMIT (SQLITE_BUSY, a deferred constraint) leaves
+              # the transaction open: end it, and tell the hooks it rolled
+              # back so nothing held for it is queued by a later COMMIT.
+              begin
+                Db.exec("ROLLBACK")
+              rescue StandardError
+                # Already ended; the COMMIT's error is the one to raise.
+              end
+              ActiveRecord::TransactionHooks.rolled_back
+              raise e
+            end
             ActiveRecord::TransactionHooks.committed
           end
         end
