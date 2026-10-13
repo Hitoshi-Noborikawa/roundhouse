@@ -14,9 +14,10 @@ fn sanitize_sql_like_only(
     classes
         .into_iter()
         .map(|mut class| {
-            class
-                .methods
-                .retain(|method| method.name.as_str() == "sanitize_sql_like");
+            class.methods.retain(|method| {
+                method.name.as_str() == "sanitize_sql_like"
+                    || method.name.as_str().starts_with("like_")
+            });
             class
         })
         .collect()
@@ -97,7 +98,12 @@ fn emitted_rust_like_escaping_compiles_and_runs_with_a_deadline() {
     let start = base
         .find("    pub fn sanitize_sql_like(")
         .expect("sanitizer");
-    let end = start + base[start..].find("\n    }\n").expect("method end") + 6;
+    // The sanitizer and its `like_*` helpers, which follow it in source order.
+    let last = start
+        + base[start..]
+            .find("    pub fn like_group_reference(")
+            .expect("last helper");
+    let end = last + base[last..].find("\n    }\n").expect("method end") + 6;
     let method = &base[start..end];
     let cases = [
         ("", "\\", ""),
