@@ -64,6 +64,28 @@ fn is_request_params(e: &Expr) -> bool {
     }
 }
 
+/// A value with no static type read out of a container: an index,
+/// `fetch` or `dig` read, or the temporary `a&.b` binds it to
+/// (`(t = h["order"]) && t.as_json`). Such a value is a Hash, an Array
+/// or a scalar, whose `as_json` is Rails' core_ext one, and
+/// `ActiveSupport::JSON.jsonable` answers it. Any other untyped
+/// receiver (a plain local, an ivar, a helper call that the controller
+/// lowering may still type as a params class) can be a record with its
+/// own `as_json`, which `jsonable` does not model, so it is left alone.
+fn is_open_value(e: &Expr) -> bool {
+    if !matches!(e.ty.as_ref(), None | Some(Ty::Untyped | Ty::Var { .. })) {
+        return false;
+    }
+    match &*e.node {
+        ExprNode::Var { name, .. } => name.as_str().starts_with("__safe_nav"),
+        ExprNode::Send { recv: Some(r), method, .. } => {
+            !matches!(&*r.node, ExprNode::SelfRef)
+                && matches!(method.as_str(), "[]" | "fetch" | "dig")
+        }
+        _ => false,
+    }
+}
+
 pub(crate) fn rewrite_node(expr: &mut Expr) {
     let replacement = match &mut *expr.node {
         // A typed, no-block Hash#deep_merge call is routed through the
@@ -124,11 +146,16 @@ pub(crate) fn rewrite_node(expr: &mut Expr) {
             if method.as_str() == "as_json"
                 && args.is_empty()
                 && (matches!(r.ty.as_ref(), Some(Ty::Hash { .. } | Ty::Array { .. }))
-                    || is_request_params(r)) =>
+                    || is_request_params(r)
+                    || is_open_value(r)) =>
         {
             let ty = match r.ty.as_ref() {
                 Some(Ty::Array { .. }) => Ty::Array { elem: Box::new(Ty::Untyped) },
-                _ => Ty::Hash { key: Box::new(Ty::Str), value: Box::new(Ty::Untyped) },
+                Some(Ty::Hash { .. }) => Ty::Hash { key: Box::new(Ty::Str), value: Box::new(Ty::Untyped) },
+                _ if is_request_params(r) => {
+                    Ty::Hash { key: Box::new(Ty::Str), value: Box::new(Ty::Untyped) }
+                }
+                _ => Ty::Untyped,
             };
             let mut call = Expr::new(
                 expr.span,

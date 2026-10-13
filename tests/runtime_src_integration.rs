@@ -1041,7 +1041,10 @@ fn every_runtime_method_body_concretely_typed() {
     // borrowed-condition walks and quote-aware If-None-Match members
     // add gradual sites in `active_record/relation.rb` and
     // `action_controller/base.rb` (+16).
-    const CEILING: usize = 717;
+    // `ActiveStorage::AttachedMany#map` (the proxy's Enumerable reads for a
+    // jbuilder block over `record.pictures`) adds 1, MEASURED: the value
+    // of its `yield`, the same block-return escape `#each` carries.
+    const CEILING: usize = 718;
     assert!(
         total_gradual <= CEILING,
         "{total_gradual} Ty::Untyped sites exceeds ceiling of {CEILING}",
