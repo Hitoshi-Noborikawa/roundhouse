@@ -598,10 +598,7 @@ const POST_ANALYZE_PASS_ORDER: &[(&str, &[&str])] = &[
     ("normalizes", &["authenticate_by"]),
     ("dead_default", &[]),
     ("errors_add", &[]),
-    // `errors[:field]` -> `ActiveSupport.errors_for(errors, "Field ")`.
-    // AFTER `errors_add`, so a hand-written `errors.add(:field, …)` in
-    // the same body has already baked its humanized prefix — the
-    // projection this pass emits reads that text.
+    // `errors[:field]` -> `error_messages_for("field")`.
     ("errors_index", &["errors_add"]),
     ("human_attribute_name", &[]),
     ("i18n_translate", &[]),

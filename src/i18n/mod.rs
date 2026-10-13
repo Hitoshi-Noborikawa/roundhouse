@@ -268,16 +268,6 @@ impl ErrorOpts {
     }
 }
 
-/// Why `errors[:field]`, which strips the text `format` puts before a
-/// field's messages, cannot be answered under `format`.
-pub fn errors_index_refusal(format: &str) -> Option<&'static str> {
-    match format.strip_suffix("%{message}") {
-        None => Some("errors.format does not end in the message"),
-        Some(before) if before.contains("%{message}") => Some("errors.format names the message twice"),
-        Some(_) => None,
-    }
-}
-
 pub fn format_full(format: &str, attribute: &str, message: &str) -> String {
     interpolate_text(format, |name| match name {
         "attribute" => Some(attribute.to_string()),
@@ -552,12 +542,16 @@ impl ModelI18n {
         self.catalog().errors_format()
     }
 
+    /// The message for an error of `kind` on `attr`, without the attribute, as parts.
+    pub fn error(&self, attr: &str, kind: &str, opts: &ErrorOpts) -> Vec<Part> {
+        self.catalog()
+            .error_message(self.scope(), &self.keys, attr, kind, opts)
+            .unwrap_or_else(|| vec![Part::Text(format!("translation missing: {}.errors.messages.{kind}", self.catalog().locale))])
+    }
+
     /// The full message for an error of `kind` on `attr`, as parts.
     pub fn full_error(&self, attr: &str, kind: &str, opts: &ErrorOpts) -> Vec<Part> {
-        let message = self
-            .catalog()
-            .error_message(self.scope(), &self.keys, attr, kind, opts)
-            .unwrap_or_else(|| vec![Part::Text(format!("translation missing: {}.errors.messages.{kind}", self.catalog().locale))]);
+        let message = self.error(attr, kind, opts);
         if attr == "base" {
             return message;
         }

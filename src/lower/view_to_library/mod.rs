@@ -1473,22 +1473,6 @@ pub(crate) fn insert_framework_stubs(
     tag_all_method(&mut inf);
     classes.insert(ClassId(Symbol::from("Inflector")), inf);
 
-    // `errors[:field]` in a view grounds to this (runtime/ruby/active_support_ext.rb).
-    let support = classes.entry(ClassId(Symbol::from("ActiveSupport"))).or_default();
-    let str_array = Ty::Array { elem: Box::new(Ty::Str) };
-    support.class_methods.entry(Symbol::from("errors_for")).or_insert_with(|| {
-        fn_sig(
-            vec![
-                (Symbol::from("errors"), str_array.clone()),
-                (Symbol::from("attributes"), str_array.clone()),
-                (Symbol::from("attribute"), Ty::Str),
-                (Symbol::from("prefix"), Ty::Str),
-            ],
-            str_array.clone(),
-        )
-    });
-    support.class_method_kinds.entry(Symbol::from("errors_for")).or_insert(AccessorKind::Method);
-
     // JsonBuilder — encode_value / encode_string. Used by lowered
     // `*.json.jbuilder` templates (see `jbuilder_to_library`). Both
     // return String; encode_value takes Untyped because it dispatches

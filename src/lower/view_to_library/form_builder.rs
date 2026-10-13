@@ -165,17 +165,11 @@ fn wrap_field_errors(
     // Not a leading underscore: Elixir warns on reading such a variable, and its lanes treat warnings as errors
     let flag = Symbol::from(format!("rh_{}_{}_errors", binding.form_param, field_sym.as_str()));
     let record = Expr::new(Span::synthetic(), ExprNode::Var { id: VarId(0), name: binding.record_var.clone() });
-    let messages = crate::lower::errors_index::errors_for_call(
-        send(Some(record), "errors", Vec::new(), None, false),
-        field_sym.as_str(),
-        String::new(),
-        Span::synthetic(),
-    );
     let has_errors = Expr::new(
         Span::synthetic(),
         ExprNode::Assign {
             target: crate::expr::LValue::Var { id: VarId(0), name: flag.clone() },
-            value: send(Some(messages), "any?", Vec::new(), None, false),
+            value: crate::lower::errors_index::has_errors_on(Some(record), field_sym.as_str(), Span::synthetic()),
         },
     );
     let when_errors = |text: &str| {

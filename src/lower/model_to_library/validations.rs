@@ -337,7 +337,7 @@ fn push_active_model_validation_surface(methods: &mut Vec<MethodDef>, model: &Mo
         };
         body_stmts.extend(vec![
             reset("errors"),
-            reset("error_attributes"),
+            reset("error_details"),
             Expr::new(
                 span,
                 ExprNode::Send {
@@ -397,17 +397,35 @@ fn push_active_model_validation_surface(methods: &mut Vec<MethodDef>, model: &Mo
             block_param: None,
         });
     }
-    if !defines("error_attributes") {
+    if !defines("error_details") {
         methods.push(MethodDef {
             visibility: crate::dialect::MethodVisibility::Public,
             unsupported_formals: None,
             has_anonymous_block: false,
             name_span: crate::span::Span::synthetic(),
-            name: Symbol::from("error_attributes"),
+            name: Symbol::from("error_details"),
             receiver: MethodReceiver::Instance,
             params: Vec::new(),
-            body: Expr::new(span, ExprNode::Ivar { name: Symbol::from("error_attributes") }),
-            signature: Some(fn_sig(vec![], Ty::Array { elem: Box::new(Ty::Str) })),
+            body: Expr::new(span, ExprNode::Ivar { name: Symbol::from("error_details") }),
+            signature: Some(fn_sig(vec![], crate::lower::errors_add::error_details_ty())),
+            effects: EffectSet::default(),
+            enclosing_class: Some(model.name.0.clone()),
+            kind: AccessorKind::Method,
+            is_async: false,
+            mutates_self: false,
+            block_param: None,
+        });
+    }    if !defines("error_messages_for") {
+        methods.push(MethodDef {
+            visibility: crate::dialect::MethodVisibility::Public,
+            unsupported_formals: None,
+            has_anonymous_block: false,
+            name_span: crate::span::Span::synthetic(),
+            name: Symbol::from("error_messages_for"),
+            receiver: MethodReceiver::Instance,
+            params: vec![crate::dialect::Param::positional(Symbol::from("attribute"))],
+            body: error_messages_for_body(span),
+            signature: Some(fn_sig(vec![(Symbol::from("attribute"), Ty::Str)], Ty::Array { elem: Box::new(Ty::Str) })),
             effects: EffectSet::default(),
             enclosing_class: Some(model.name.0.clone()),
             kind: AccessorKind::Method,
@@ -416,6 +434,55 @@ fn push_active_model_validation_surface(methods: &mut Vec<MethodDef>, model: &Mo
             block_param: None,
         });
     }
+}
+
+/// `out = []; @error_details.each { |e| out << e.message if e.attribute == attribute }; out`,
+/// the body `ActiveRecord::Base#error_messages_for` has in the shared runtime.
+fn error_messages_for_body(span: Span) -> Expr {
+    let str_array = Ty::Array { elem: Box::new(Ty::Str) };
+    let typed = |node: ExprNode, ty: Ty| {
+        let mut e = Expr::new(span, node);
+        e.ty = Some(ty);
+        e
+    };
+    let var = |name: &str, ty: Ty| typed(ExprNode::Var { id: crate::ident::VarId(0), name: Symbol::from(name) }, ty);
+    let call = |recv: Expr, method: &str, args: Vec<Expr>, ty: Ty| {
+        typed(ExprNode::Send { recv: Some(recv), method: Symbol::from(method), args, block: None, parenthesized: false }, ty)
+    };
+    let error_ty = Ty::Class { id: ClassId(Symbol::from("ActiveRecord::ErrorDetail")), args: vec![] };
+    let error = || var("e", error_ty.clone());
+    let picked = typed(
+        ExprNode::If {
+            cond: call(call(error(), "attribute", vec![], Ty::Str), "==", vec![var("attribute", Ty::Str)], Ty::Bool),
+            then_branch: call(var("out", str_array.clone()), "<<", vec![call(error(), "message", vec![], Ty::Str)], str_array.clone()),
+            else_branch: typed(ExprNode::Lit { value: Literal::Nil }, Ty::Nil),
+        },
+        Ty::Nil,
+    );
+    let block = Expr::new(
+        span,
+        ExprNode::Lambda {
+            extra_params: Vec::new(),
+            rest_param: None,
+            params: vec![Symbol::from("e")],
+            block_param: None,
+            body: picked,
+            block_style: crate::expr::BlockStyle::Brace,
+        },
+    );
+    let details = typed(ExprNode::Ivar { name: Symbol::from("error_details") }, crate::lower::errors_add::error_details_ty());
+    let each = typed(
+        ExprNode::Send { recv: Some(details), method: Symbol::from("each"), args: vec![], block: Some(block), parenthesized: false },
+        crate::lower::errors_add::error_details_ty(),
+    );
+    let init = Expr::new(
+        span,
+        ExprNode::Assign {
+            target: crate::expr::LValue::Var { id: crate::ident::VarId(0), name: Symbol::from("out") },
+            value: typed(ExprNode::Array { elements: vec![], style: ArrayStyle::default() }, str_array.clone()),
+        },
+    );
+    seq(vec![init, each, var("out", str_array)])
 }
 
 /// Produce the list of helper-call expressions for one `ValidationRule` on
@@ -1011,12 +1078,23 @@ pub(crate) struct Messages<'a>(pub(crate) Option<&'a Model>);
 use crate::i18n::ErrorOpts;
 
 impl Messages<'_> {
-    /// The full message Rails stores for an error of `kind` on `attr`.
-    fn error(&self, attr: &str, kind: &str, opts: &ErrorOpts) -> Expr {
+    /// The full message Rails stores for an error of `kind` on `attr`, with the error it records.
+    fn error(&self, attr: &str, kind: &str, opts: &ErrorOpts) -> Message {
         let default = crate::i18n::ModelI18n::default();
         let i18n = self.0.map(|m| &m.i18n).unwrap_or(&default);
-        crate::lower::errors_add::parts_expr(Span::synthetic(), i18n.full_error(attr, kind, opts), None, attr)
+        let parts = |p| crate::lower::errors_add::parts_expr(Span::synthetic(), p, None, attr);
+        Message {
+            full: parts(i18n.full_error(attr, kind, opts)),
+            kind: kind.to_string(),
+            bare: parts(i18n.error(attr, kind, opts)),
+        }
     }
+}
+
+pub(crate) struct Message {
+    full: Expr,
+    kind: String,
+    bare: Expr,
 }
 
 // ── IR helpers ────────────────────────────────────────────────
@@ -1049,12 +1127,12 @@ fn is_a_check(value: &Expr, class_name: &str) -> Expr {
     send(value.clone(), "is_a?", vec![class_const])
 }
 
-/// `errors << <msg_expr>` and `error_attributes << "<attribute>"` —
+/// `errors << <msg_expr>` and `error_details << ActiveRecord::ErrorDetail.new(...)` —
 /// pushes a String literal onto the `errors` collection, and the
-/// attribute it is on onto its index-for-index companion. `errors` is reached via implicit-self Send (the same
+/// error it records onto its index-for-index companion. `errors` is reached via implicit-self Send (the same
 /// shape every existing validates_*_of helper produces inside the
 /// Validations module).
-fn errors_push(attribute: &str, msg: Expr) -> Expr {
+fn errors_push(attribute: &str, msg: Message) -> Expr {
     let errors_call = Expr::new(
         Span::synthetic(),
         ExprNode::Send {
@@ -1065,7 +1143,8 @@ fn errors_push(attribute: &str, msg: Expr) -> Expr {
             parenthesized: false,
         },
     );
-    crate::lower::errors_add::attributed_push(send(errors_call, "<<", vec![msg]), None, attribute, Span::synthetic())
+    let kind = Expr::new(Span::synthetic(), ExprNode::Lit { value: Literal::Str { value: msg.kind } });
+    crate::lower::errors_add::attributed_push(send(errors_call, "<<", vec![msg.full]), None, attribute, kind, msg.bare, Span::synthetic())
 }
 
 fn if_with_nil_else(cond: Expr, then_branch: Expr) -> Expr {

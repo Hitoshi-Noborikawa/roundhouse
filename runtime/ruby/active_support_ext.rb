@@ -247,30 +247,6 @@ module ActiveSupport
     value.is_a?(String) && list.include?(value) ? value : nil
   end
 
-  # Rails' `ActiveModel::Errors#[]` — the messages for ONE attribute,
-  # without the humanized attribute prefix (`[ "is not public" ]`, not
-  # `[ "Url is not public" ]`). Reached from `src/lower/errors_index.rs`.
-  # A message is picked by the attribute it was added on (`attributes`
-  # runs index for index with `errors`), and then loses the prefix the
-  # `errors.add` / `validates` lowerings baked for that attribute.
-  #
-  # Takes the accumulator as an ARGUMENT for the same reason `blank?`
-  # above does: the shared accumulator is a plain `Array[String]` and
-  # Array has no `[]`-by-Symbol to reopen, so the projection has to be a
-  # function over the array rather than a method on it.
-  #
-  # `m[prefix.length, m.length - prefix.length]` rather than a range or
-  # `delete_prefix`: two-integer `String#[]` is the slice spelling every
-  # target lowers, and `sub`/`delete_prefix` are the shapes that have
-  # bitten this runtime before (a two-string `gsub` has no C# lowering).
-  def self.errors_for(errors, attributes, attribute, prefix)
-    out = []
-    errors.each_with_index do |m, i|
-      out << m[prefix.length, m.length - prefix.length] if attributes[i] == attribute
-    end
-    out
-  end
-
   # `ActiveSupport::MessageVerifier::InvalidSignature` — what a signed
   # value that does not verify raises. Rails hangs it off the verifier
   # class, and the NAME is the whole point: a controller that rescues it
