@@ -72,13 +72,17 @@ fn emitted_part(target: BuildTarget, head: &str) -> String {
 const PLAIN: &str = "  include Chime\n";
 const GUARDED: &str = "  begin\n    include(Chime)\n  rescue NameError\n  end\n";
 const GUARDED_LOAD: &str = "  begin\n    include Chime\n  rescue NameError, LoadError\n    nil\n  end\n";
+/// `NameError`'s ancestors catch it too, and a bare `rescue` is
+/// `StandardError`.
+const GUARDED_STANDARD: &str = "  begin\n    include Chime\n  rescue StandardError\n  end\n";
+const GUARDED_BARE: &str = "  begin\n    include Chime\n  rescue\n  end\n";
 
 #[test]
 fn a_guarded_include_of_a_defined_module_is_the_include() {
     for target in [BuildTarget::Ruby, BuildTarget::Spinel] {
         let plain = emitted_part(target, PLAIN);
         assert!(plain.contains("ring"), "{target:?}: the plain include reaches the model:\n{plain}");
-        for guarded in [GUARDED, GUARDED_LOAD] {
+        for guarded in [GUARDED, GUARDED_LOAD, GUARDED_STANDARD, GUARDED_BARE] {
             assert_eq!(emitted_part(target, guarded), plain, "{target:?}: {guarded}");
         }
     }
@@ -89,10 +93,37 @@ fn a_guarded_include_of_a_defined_module_is_the_include() {
 #[test]
 fn a_guarded_include_of_an_undefined_module_is_nothing() {
     let missing = "  begin\n    include(Bell)\n  rescue NameError\n  end\n";
-    let partly = "  begin\n    include Chime\n    include Bell\n  rescue NameError\n  end\n";
+    let first = "  begin\n    include Bell\n    include Chime\n  rescue NameError\n  end\n";
+    let together = "  begin\n    include Chime, Bell\n  rescue NameError\n  end\n";
     for target in [BuildTarget::Ruby, BuildTarget::Spinel] {
         let bare = emitted_part(target, "");
-        assert_eq!(emitted_part(target, missing), bare, "{target:?}");
-        assert_eq!(emitted_part(target, partly), bare, "{target:?}");
+        for source in [missing, first, together] {
+            assert_eq!(emitted_part(target, source), bare, "{target:?}: {source}");
+        }
+    }
+}
+
+/// Ruby runs the includes in order and stops at the first that raises:
+/// the ones before it stay.
+#[test]
+fn the_includes_before_the_undefined_one_stay() {
+    let partly = "  begin\n    include Chime\n    include Bell\n  rescue NameError\n  end\n";
+    for target in [BuildTarget::Ruby, BuildTarget::Spinel] {
+        assert_eq!(emitted_part(target, partly), emitted_part(target, PLAIN), "{target:?}");
+    }
+}
+
+/// Blocks this pass does not model are left as they were: a rescue that
+/// cannot catch the `NameError` (`LoadError` is a `ScriptError`), and a
+/// rescue that does something (a fallback include).
+#[test]
+fn other_guards_are_left_alone() {
+    let load_only = "  begin\n    include Chime\n  rescue LoadError\n  end\n";
+    let fallback = "  begin\n    include Bell\n  rescue NameError\n    include Chime\n  end\n";
+    for target in [BuildTarget::Ruby, BuildTarget::Spinel] {
+        for source in [load_only, fallback] {
+            let src = emitted_part(target, source);
+            assert!(!src.contains("include Chime"), "{target:?}: {source}\n{src}");
+        }
     }
 }
