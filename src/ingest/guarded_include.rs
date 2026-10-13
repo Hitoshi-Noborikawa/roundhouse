@@ -66,16 +66,10 @@ pub(super) fn splice_guarded_includes(app: &mut App) {
                 body.push(item);
                 continue;
             };
-            // A known class target would TypeError under `include`; keep
-            // the rescue when the clause can catch that.
-            if includes.iter().any(|include| {
-                include_consts(include).any(|path| matches!(lookup(path, &known_modules, &known_classes), Lookup::Class))
-            }) {
-                body.push(item);
-                continue;
-            }
             // `include A, B` looks both up before including either, so one
-            // undefined name stops the whole call.
+            // undefined name stops the whole call. A known **class** target
+            // is the same stop: Ruby would TypeError there; keep the
+            // successful module prefix (do not discard the whole begin).
             let includes: Vec<&Expr> = includes
                 .into_iter()
                 .take_while(|include| {

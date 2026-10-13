@@ -143,8 +143,39 @@ fn a_guarded_include_of_enumerable_is_kept() {
     }
 }
 
-/// `include` of a class raises TypeError; keep the rescue rather than
-/// splicing an uncaught include.
+/// A successful module include before a class target must stay — same
+/// prefix contract as an undefined name after a defined module.
+#[test]
+fn the_includes_before_a_class_target_stay() {
+    let mut tree: HashMap<PathBuf, Vec<u8>> = HashMap::new();
+    tree.insert(PathBuf::from("db/schema.rb"), SCHEMA.as_bytes().to_vec());
+    tree.insert(
+        PathBuf::from("app/models/application_record.rb"),
+        b"class ApplicationRecord < ActiveRecord::Base\n  primary_abstract_class\nend\n".to_vec(),
+    );
+    tree.insert(PathBuf::from("app/models/concerns/chime.rb"), CHIME.as_bytes().to_vec());
+    tree.insert(
+        PathBuf::from("app/models/gong.rb"),
+        b"class Gong < ApplicationRecord\nend\n".to_vec(),
+    );
+    let head = "  begin\n    include Chime\n    include Gong\n  rescue StandardError\n  end\n";
+    tree.insert(PathBuf::from("app/models/part.rb"), part(head).into_bytes());
+    let mut app = ingest_app_from_tree(tree).expect("ingest");
+    roundhouse::session::analyze_and_lower(&mut app);
+    for target in [BuildTarget::Ruby, BuildTarget::Spinel] {
+        let files = target_files(&app, Path::new("fixtures/tiny-blog"), target).expect("emit");
+        let src = files
+            .iter()
+            .filter(|(p, _)| p.ends_with("models/part.rb"))
+            .map(|(_, c)| c.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(src.contains("ring"), "{target:?}: Chime prefix must stay:\n{src}");
+        assert!(!src.contains("include Gong"), "{target:?}: class must not splice:\n{src}");
+    }
+}
+
+/// `include` of a class raises TypeError; do not splice it.
 #[test]
 fn a_guarded_include_of_a_class_is_left_alone() {
     let mut tree: HashMap<PathBuf, Vec<u8>> = HashMap::new();
