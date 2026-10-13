@@ -5249,6 +5249,9 @@ const RUBY_SPINEL_ONLY_METHODS: &[(&str, &str)] = &[
     // `lower::record_snapshot`'s closed-world `constantize` — the
     // generated `case` lives in the same ruby-family/spinel file.
     ("ActiveRecord::Base", "instantiate_named"),
+    // `lower::errors_index`'s `errors.to_hash`: the helper is
+    // `runtime/ruby/active_support_ext.rb`, which no strict target loads.
+    ("ActiveSupport", "errors_to_hash"),
 ];
 
 /// Instance methods only the ruby family and spinel can answer: a model's
