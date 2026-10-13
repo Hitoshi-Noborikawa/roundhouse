@@ -99,27 +99,38 @@ pub(super) fn push_validate_method(methods: &mut Vec<MethodDef>, model: &Model, 
 
     stmts.extend(secure_password_checks(model));
 
-    if stmts.is_empty() {
+    // An ActiveModel class with no rule still has `errors`: `errors.add`
+    // in its own methods needs the same surface a validating one gets.
+    let active_model = model.parent.is_none() && includes_active_model_validations(model);
+    if stmts.is_empty() && !active_model {
         return;
     }
 
-    methods.push(MethodDef {
-        visibility: crate::dialect::MethodVisibility::Public,
-        unsupported_formals: None,
-        has_anonymous_block: false,
-        name_span: crate::span::Span::synthetic(),
-        name: Symbol::from("validate"),
-        receiver: MethodReceiver::Instance,
-        params: Vec::new(),
-        body: seq(stmts),
-        signature: Some(fn_sig(vec![], Ty::Nil)),
-        effects: EffectSet::default(),
-        enclosing_class: Some(model.name.0.clone()),
-        kind: AccessorKind::Method,
-        is_async: false,
+    // Empty synth must not shadow a source `def validate`:
+    // `push_user_methods` keeps Method synthesizers over source defs, so
+    // pushing here would drop the user's body on the newly opened
+    // ruleless ActiveModel path. Still emit the surface below.
+    let source_validate =
+        super::model_defines_instance_method(model, &Symbol::from("validate"));
+    if !(stmts.is_empty() && source_validate) {
+        methods.push(MethodDef {
+            visibility: crate::dialect::MethodVisibility::Public,
+            unsupported_formals: None,
+            has_anonymous_block: false,
+            name_span: crate::span::Span::synthetic(),
+            name: Symbol::from("validate"),
+            receiver: MethodReceiver::Instance,
+            params: Vec::new(),
+            body: seq(stmts),
+            signature: Some(fn_sig(vec![], Ty::Nil)),
+            effects: EffectSet::default(),
+            enclosing_class: Some(model.name.0.clone()),
+            kind: AccessorKind::Method,
+            is_async: false,
             mutates_self: false,
             block_param: None,
-    });
+        });
+    }
 
     // A validating model OUTSIDE the ActiveRecord hierarchy (`class
     // Search` + `include ActiveModel::Validations`, no superclass)
@@ -253,10 +264,8 @@ pub(super) fn push_active_model_constructor(methods: &mut Vec<MethodDef>, model:
     ));
 }
 
-/// `include ActiveModel::Model` in the class body. The narrower
-/// `ActiveModel::Validations` brings `valid?`/`errors` and no
-/// constructor, so the two are not interchangeable here.
-fn includes_active_model_model(model: &Model) -> bool {
+/// Bare `include ActiveModel::<leaf>` in the class body for any of `modules`.
+fn includes_active_model(model: &Model, modules: &[&str]) -> bool {
     model.body.iter().any(|item| {
         let crate::dialect::ModelBodyItem::Unknown { expr, .. } = item else { return false };
         let ExprNode::Send { recv: None, method, args, .. } = &*expr.node else {
@@ -266,8 +275,21 @@ fn includes_active_model_model(model: &Model) -> bool {
             && args.iter().any(|a| matches!(&*a.node,
                 ExprNode::Const { path } if path.len() == 2
                     && path[0].as_str() == "ActiveModel"
-                    && path[1].as_str() == "Model"))
+                    && modules.contains(&path[1].as_str())))
     })
+}
+
+/// `include ActiveModel::Validations` or `include ActiveModel::Model`
+/// (which includes it) in the class body.
+fn includes_active_model_validations(model: &Model) -> bool {
+    includes_active_model(model, &["Validations", "Model"])
+}
+
+/// `include ActiveModel::Model` in the class body. The narrower
+/// `ActiveModel::Validations` brings `valid?`/`errors` and no
+/// constructor, so the two are not interchangeable here.
+fn includes_active_model_model(model: &Model) -> bool {
+    includes_active_model(model, &["Model"])
 }
 
 /// `before_validation :sanitize_fields` in the model body. Only the
