@@ -235,6 +235,7 @@ pub(crate) fn materialize_models(
         materialization,
         crate::lower::model_to_library::FinderInputs::Request,
         true,
+        crate::lower::model_to_library::ErrorsReaders::CreatedOnFirstRead,
     ).0;
     (lcs, params_specs)
 }

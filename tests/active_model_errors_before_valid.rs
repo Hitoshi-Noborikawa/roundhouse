@@ -3,6 +3,8 @@
 #[path = "support/emit_and_run.rs"]
 mod emit_and_run;
 
+use roundhouse::project::BuildTarget;
+
 fn form_object(rules: &str) -> String {
     format!(
         r#"class Signup
@@ -72,4 +74,21 @@ raise "valid? starts over" unless article.valid? && article.title_problems.empty
 puts "active record passed"
 "#)
         .assert_passes();
+}
+
+/// Only the Ruby family creates them on first read; the strict targets keep
+/// reading the fields.
+#[test]
+fn rust_readers_keep_reading_the_fields() {
+    let (emitted, _) = emit_and_run::real_blog()
+        .write("app/models/signup.rb", &form_object("  validates :email, presence: true\n"))
+        .emit(BuildTarget::Rust);
+    let signup = std::fs::read_to_string(emitted.join("src/models/signup.rs")).expect("read the emitted Signup");
+    for read in [
+        "pub fn errors(&self) -> Vec<String> {\n        self.errors.clone()\n    }",
+        "pub fn error_details(&self) -> Vec<ErrorDetail> {\n        self.error_details.clone()\n    }",
+        "        self.error_details.each(",
+    ] {
+        assert!(signup.contains(read), "missing {read:?} in\n{signup}");
+    }
 }

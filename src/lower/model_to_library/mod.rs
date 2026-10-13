@@ -106,6 +106,15 @@ pub(crate) enum FinderInputs {
     Request,
 }
 
+/// The Ruby-family runtimes create `errors`/`error_details` on first read,
+/// as Rails does. Strict targets keep the field read: the Rust emitter
+/// turns an `@errors ||= []` reader into a method that does not compile.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ErrorsReaders {
+    FieldRead,
+    CreatedOnFirstRead,
+}
+
 /// Probe bodies expose framework ownership hidden by source overrides,
 /// but register the ordinary production definitions for faithful typing.
 /// Selection bounds retained bodies, never registry or demand inputs.
@@ -245,7 +254,7 @@ pub(crate) fn lower_models_inner(
 ) -> (Vec<LibraryClass>, HashMap<ClassId, crate::analyze::ClassInfo>) {
     lower_models_inner_with_ruby_values(
         models, schema, extra_class_infos, params_specs, unfolded, materialization,
-        finder_inputs, false,
+        finder_inputs, false, ErrorsReaders::FieldRead,
     )
 }
 
@@ -258,11 +267,12 @@ pub(crate) fn lower_models_inner_with_ruby_values(
     materialization: Materialization<'_>,
     finder_inputs: FinderInputs,
     ruby_read_values: bool,
+    errors_readers: ErrorsReaders,
 ) -> (Vec<LibraryClass>, HashMap<ClassId, crate::analyze::ClassInfo>) {
     let mut all_methods: Vec<(Vec<MethodDef>, ClassId, Option<&Table>, &Model)> = Vec::new();
     let mut classes: HashMap<ClassId, crate::analyze::ClassInfo> = HashMap::new();
     for model in models {
-        let methods = build_methods_with_finder_inputs(model, models, schema, params_specs, finder_inputs);
+        let methods = build_methods_with_finder_inputs(model, models, schema, params_specs, finder_inputs, errors_readers);
         let table = schema.tables.get(&model.table.0);
         // Register actual production definitions, even for unselected
         // models and when source overrides hide framework ownership.
@@ -281,7 +291,7 @@ pub(crate) fn lower_models_inner_with_ruby_values(
                             if matches!(method.as_str(), "attr_accessor" | "attr_reader" | "attr_writer")),
                     _ => true,
                 });
-                let mut methods = build_methods_with_finder_inputs(&definitions, models, schema, params_specs, finder_inputs);
+                let mut methods = build_methods_with_finder_inputs(&definitions, models, schema, params_specs, finder_inputs, errors_readers);
                 // Preserve original source inputs for late derivations
                 // (e.g. raw helpers) without treating them as framework
                 // claims. Both kinds traverse the canonical Arel/typer.
@@ -1075,7 +1085,7 @@ pub(crate) fn build_methods(
     schema: &Schema,
     params_specs: &crate::lower::controller_to_library::params::ParamsSpecs,
 ) -> Vec<MethodDef> {
-    build_methods_with_finder_inputs(model, models, schema, params_specs, FinderInputs::Scalar)
+    build_methods_with_finder_inputs(model, models, schema, params_specs, FinderInputs::Scalar, ErrorsReaders::FieldRead)
 }
 
 /// Return the instance method surface synthesized for a model, for ingest
@@ -1100,6 +1110,7 @@ fn build_methods_with_finder_inputs(
     schema: &Schema,
     params_specs: &crate::lower::controller_to_library::params::ParamsSpecs,
     finder_inputs: FinderInputs,
+    errors_readers: ErrorsReaders,
 ) -> Vec<MethodDef> {
     // No-op outside an emit diagnostics scope, so the many direct
     // test callers of the lowering entries are unaffected.
@@ -1197,7 +1208,7 @@ fn build_methods_with_finder_inputs(
         }
     }
 
-    push_validate_method(&mut methods, model, models);
+    push_validate_method(&mut methods, model, models, errors_readers);
     push_association_methods(&mut methods, model, models);
     push_dependent_destroy(&mut methods, model);
     push_unknown_marker_methods(&mut methods, model);
