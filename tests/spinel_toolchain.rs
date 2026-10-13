@@ -94,6 +94,8 @@ mod ordinalize;
 mod params_helper_no_permit;
 #[path = "spinel_toolchain/rails_parity.rs"]
 mod rails_parity;
+#[path = "spinel_toolchain/server_binding.rs"]
+mod server_binding;
 
 /// Compile and execute the shared custom Data factory contract with Spinel;
 /// successful Ruby emission alone does not establish native target support.
