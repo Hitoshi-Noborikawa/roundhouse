@@ -52,6 +52,7 @@ const PARTIAL: &str = r#"json.name widget.name
 json.note(widget.note.presence || "none")
 json.noted widget.note.present?
 json.empty widget.note.blank?
+json.flag(widget.note.present? ? "y" : "n")
 "#;
 
 /// A predicate as an `if` condition.
@@ -109,6 +110,15 @@ fn a_predicate_in_a_value_is_grounded() {
     }
 }
 
+/// The condition of a ternary inside a value is part of the value.
+#[test]
+fn a_predicate_in_a_ternary_value_is_grounded() {
+    let files = emitted();
+    let src = partial(&files);
+    assert!(src.contains("encode_value(if ActiveSupport.present?(widget.note)"), "{src}");
+    assert!(!src.contains("note.present?"), "{src}");
+}
+
 #[test]
 fn a_condition_is_left_to_the_condition_rewrite() {
     let files = emitted();
@@ -156,9 +166,9 @@ puts JSON.generate([
         String::from_utf8_lossy(&output.stderr)
     );
     let expected = concat!(
-        r#"[{"name":"a","note":"hi","noted":true,"empty":false},"#,
-        r#"{"name":"b","note":"none","noted":false,"empty":true},"#,
-        r#"{"name":"","note":"none","noted":false,"empty":true}]"#,
+        r#"[{"name":"a","note":"hi","noted":true,"empty":false,"flag":"y"},"#,
+        r#"{"name":"b","note":"none","noted":false,"empty":true,"flag":"n"},"#,
+        r#"{"name":"","note":"none","noted":false,"empty":true,"flag":"n"}]"#,
     );
     assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), expected);
 }

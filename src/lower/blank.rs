@@ -149,19 +149,36 @@ pub(crate) fn ground_body(body: &mut Expr, defs: &AppDefinitions) -> bool {
 /// jbuilder value stayed a dynamic call: on CRuby the overlay serves
 /// it, on Spinel it raised `undefined method 'presence' for nil`. The
 /// grounding is the one every app body gets, `Runtime` arm included,
-/// so an untyped receiver becomes `ActiveSupport.presence(x)`. The
-/// condition of an `if` is left as it was: conditions are a separate
+/// so an untyped receiver becomes `ActiveSupport.presence(x)`.
+///
+/// Everything inside a value counts, the condition of a ternary or an
+/// `if` there included (`json.flag(note.present? ? "y" : "n")`): the
+/// grounded predicate answers a Boolean, which any condition takes. The
+/// condition of a template-level `if` / `unless` (one that chooses
+/// which pairs to write) is left as it was: that is the view-condition
 /// rewrite's (`view_to_library::predicates`) question.
 pub(crate) fn ground_jbuilder_values(body: &mut Expr, defs: &AppDefinitions) -> bool {
-    fn values(expr: &mut Expr, defs: &AppDefinitions, diags: &mut Vec<Diagnostic>) -> bool {
-        if let ExprNode::If { then_branch, else_branch, .. } = &mut *expr.node {
-            let then_changed = values(then_branch, defs, diags);
-            let else_changed = values(else_branch, defs, diags);
-            return then_changed || else_changed;
+    fn walk(expr: &mut Expr, in_value: bool, defs: &AppDefinitions, diags: &mut Vec<Diagnostic>) -> bool {
+        if !in_value {
+            match &mut *expr.node {
+                ExprNode::If { then_branch, else_branch, .. } => {
+                    let then_changed = walk(then_branch, false, defs, diags);
+                    let else_changed = walk(else_branch, false, defs, diags);
+                    return then_changed || else_changed;
+                }
+                ExprNode::Seq { exprs } => {
+                    let mut changed = false;
+                    for e in exprs {
+                        changed |= walk(e, false, defs, diags);
+                    }
+                    return changed;
+                }
+                _ => {}
+            }
         }
         let mut changed = false;
         expr.node.for_each_child_mut(&mut |c| {
-            if values(c, defs, diags) {
+            if walk(c, true, defs, diags) {
                 changed = true;
             }
         });
@@ -171,7 +188,7 @@ pub(crate) fn ground_jbuilder_values(body: &mut Expr, defs: &AppDefinitions) -> 
         changed
     }
     let mut diags = Vec::new();
-    let changed = values(body, defs, &mut diags);
+    let changed = walk(body, false, defs, &mut diags);
     for d in diags {
         crate::emit::diagnostics::push(d);
     }
