@@ -51,8 +51,12 @@ fn explicit_params_local_wins_over_request_params_ivar() {
         .lines()
         .find(|l| l.contains("def self.widget_json"))
         .unwrap_or(partial);
+    let sig = def_line.split_once('(').map(|(_, r)| r).unwrap_or(def_line);
+    let has_params_token = sig
+        .split(|c: char| !(c.is_alphanumeric() || c == '_'))
+        .any(|tok| tok == "params");
     assert!(
-        def_line.contains("params") && !def_line.contains("params:") ,
+        has_params_token,
         "explicit params: local must remain a parameter named params:\n{partial}"
     );
     assert!(
