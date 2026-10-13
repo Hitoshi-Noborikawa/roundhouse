@@ -431,6 +431,15 @@ fn open3_and_find_constants_execute_after_emission() {
         .run_ruby(OPEN3_AND_FIND_SCRIPT).assert_passes();
 }
 
+/// Without a block `Find.find` answers an Enumerator, not nil.
+#[test]
+fn find_without_a_block_is_an_enumerator() {
+    stdlib_app()
+        .write("app/models/tree_probe.rb", "require \"find\"\nclass TreeProbe\n  def self.files(root)\n    Find.find(root).select { |path| File.file?(path) }.length\n  end\nend\n")
+        .run_ruby("require \"tmpdir\"\nDir.mktmpdir do |dir|\n  File.write(File.join(dir, \"a.txt\"), \"x\")\n  raise \"Find.find enumerator lost\" unless TreeProbe.files(dir) == 1\nend\nputs \"Find enumerator passed\"\n")
+        .assert_passes();
+}
+
 #[test]
 #[ignore = "requires the native Spinel compiler; set SPINEL"]
 fn open3_and_find_constants_execute_in_native_spinel() {

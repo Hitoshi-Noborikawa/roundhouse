@@ -924,7 +924,8 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
     // Ruby and Spinel supply these too, once the BUNDLED requires are
     // written. Only the calls checked on both (tests/stdlib_constant_execution.rs)
     // are typed; what `ConditionVariable#wait` answers is not checked, so it
-    // stays untyped.
+    // stays untyped. `Find.find` answers nil with a block and an Enumerator
+    // without one, so it stays untyped as `File.open` does.
     register_stdlib_class(classes, "Monitor", &[], &[]);
     for name in ["ConditionVariable", "Thread::ConditionVariable"] {
         let condition_variable = Ty::Class { id: ClassId(Symbol::from(name)), args: vec![] };
@@ -944,7 +945,7 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
     register_stdlib_class(classes, "Open3", &[
         ("capture3", Ty::Tuple { elems: vec![Ty::Str, Ty::Str, Ty::Untyped] }),
     ], &[]);
-    register_stdlib_class(classes, "Find", &[("find", Ty::Nil), ("prune", Ty::Bottom)], &[]);
+    register_stdlib_class(classes, "Find", &[("find", Ty::Untyped), ("prune", Ty::Bottom)], &[]);
     for (class, method) in BUILTIN_BLOCK_VALUE_METHODS {
         classes
             .entry(ClassId(Symbol::from(*class)))
