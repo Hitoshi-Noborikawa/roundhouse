@@ -343,8 +343,8 @@ pub(crate) fn apply_model_lowering(mut lcs: &mut [LibraryClass], app: &App) {
     // N+1 lazy reads. Runs last so nothing reprocesses the synthesized
     // bodies (no-op unless the app mentions includes).
     library::apply_preload_lowering(&mut lcs, app);
-    // A belongs_to reader memoizes, and writing the foreign key
-    // invalidates it (no-op for models with no belongs_to). AFTER the
+    // A belongs_to reader memoizes, and writing the foreign key or the
+    // association invalidates it (no-op for models with no belongs_to). AFTER the
     // preload pass, which is what puts the `return @<name>_cache if
     // @<name>_loaded` guard on the reader — this pass memoizes into
     // that same cache and would have nothing to prepend itself to if it

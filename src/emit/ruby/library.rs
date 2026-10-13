@@ -1902,6 +1902,7 @@ pub(crate) fn apply_belongs_to_memoization(lcs: &mut [LibraryClass], app: &App) 
         for (name, fk) in names {
             memoize_reader(lc, &name);
             invalidate_on_fk_write(lc, &name, &fk);
+            invalidate_on_assoc_write(lc, &name, &fk);
         }
     }
 }
@@ -1946,6 +1947,58 @@ fn memoize_reader(lc: &mut LibraryClass, name: &Symbol) {
         }),
         syn(ExprNode::Ivar { name: cache }),
     ];
+}
+
+/// `def <name>=(value)` gains `@<name>_loaded = false` as its first
+/// statement, when it writes `@<fk>` itself.
+///
+/// The association writer sets the key ivar directly rather than through
+/// `<fk>=`, so the reset that writer carries never ran: after a read,
+/// `comment.article = other` and `comment.article = nil` left the reader
+/// answering the owner it had loaded first, where Rails answers `other`
+/// and nil. The reset comes first so the unsaved-owner stash
+/// (`apply_belongs_to_autosave`), which sets the flag again, still wins;
+/// it also keeps a stash replaced by `= nil` from being autosaved.
+fn invalidate_on_assoc_write(lc: &mut LibraryClass, name: &Symbol, fk: &Symbol) {
+    let writer = Symbol::from(format!("{}=", name.as_str()));
+    let Some(m) = lc
+        .methods
+        .iter_mut()
+        .find(|m| m.name == writer && m.receiver == MethodReceiver::Instance)
+    else {
+        return;
+    };
+    fn writes_ivar(e: &Expr, ivar: &Symbol, found: &mut bool) {
+        if *found {
+            return;
+        }
+        if let ExprNode::Assign { target: LValue::Ivar { name }, .. } = &*e.node {
+            if name == ivar {
+                *found = true;
+                return;
+            }
+        }
+        e.node.for_each_child(&mut |c| writes_ivar(c, ivar, found));
+    }
+    let mut found = false;
+    writes_ivar(&m.body, fk, &mut found);
+    if !found {
+        return;
+    }
+    let span = m.body.span;
+    let reset = Expr::new(
+        span,
+        ExprNode::Assign {
+            target: LValue::Ivar { name: Symbol::from(format!("{}_loaded", name.as_str())) },
+            value: Expr::new(span, ExprNode::Lit { value: Literal::Bool { value: false } }),
+        },
+    );
+    let mut stmts = match &*m.body.node {
+        ExprNode::Seq { exprs } => exprs.clone(),
+        _ => vec![m.body.clone()],
+    };
+    stmts.insert(0, reset);
+    m.body = Expr::new(span, ExprNode::Seq { exprs: stmts });
 }
 
 /// `def <fk>=(value); @<fk> = value; end` gains `@<name>_loaded = false`.
