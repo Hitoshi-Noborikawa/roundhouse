@@ -99,7 +99,10 @@ pub(super) fn push_validate_method(methods: &mut Vec<MethodDef>, model: &Model, 
 
     stmts.extend(secure_password_checks(model));
 
-    if stmts.is_empty() {
+    // An ActiveModel class with no rule still has `errors`: `errors.add`
+    // in its own methods needs the same surface a validating one gets.
+    let active_model = model.parent.is_none() && includes_active_model_validations(model);
+    if stmts.is_empty() && !active_model {
         return;
     }
 
@@ -251,6 +254,22 @@ pub(super) fn push_active_model_constructor(methods: &mut Vec<MethodDef>, model:
         model.span,
         &names,
     ));
+}
+
+/// `include ActiveModel::Validations` or `include ActiveModel::Model`
+/// (which includes it) in the class body.
+fn includes_active_model_validations(model: &Model) -> bool {
+    model.body.iter().any(|item| {
+        let crate::dialect::ModelBodyItem::Unknown { expr, .. } = item else { return false };
+        let ExprNode::Send { recv: None, method, args, .. } = &*expr.node else {
+            return false;
+        };
+        method.as_str() == "include"
+            && args.iter().any(|a| matches!(&*a.node,
+                ExprNode::Const { path } if path.len() == 2
+                    && path[0].as_str() == "ActiveModel"
+                    && matches!(path[1].as_str(), "Validations" | "Model")))
+    })
 }
 
 /// `include ActiveModel::Model` in the class body. The narrower
