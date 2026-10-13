@@ -930,6 +930,31 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
         "Thread::Mutex", "Comparable", "Enumerable"] {
         register_stdlib_class(classes, name, &[], &[]);
     }
+    // Ruby and Spinel supply these too, once the BUNDLED requires are
+    // written. Only the calls checked on both (tests/stdlib_constant_execution.rs)
+    // are typed; what `ConditionVariable#wait` answers is not checked, so it
+    // stays untyped. `Find.find` answers nil with a block and an Enumerator
+    // without one, so it stays untyped as `File.open` does.
+    register_stdlib_class(classes, "Monitor", &[], &[]);
+    for name in ["ConditionVariable", "Thread::ConditionVariable"] {
+        let condition_variable = Ty::Class { id: ClassId(Symbol::from(name)), args: vec![] };
+        register_stdlib_class(classes, name, &[], &[
+            ("signal", condition_variable.clone()),
+            ("broadcast", condition_variable),
+            ("wait", Ty::Untyped),
+        ]);
+    }
+    let unix_socket = Ty::Class { id: ClassId(Symbol::from("UNIXSocket")), args: vec![] };
+    register_stdlib_class(classes, "UNIXSocket", &[], &[]);
+    register_stdlib_class(classes, "UNIXServer", &[], &[("accept", unix_socket)]);
+    classes.get_mut(&ClassId(Symbol::from("UNIXSocket"))).expect("registered above").parent =
+        Some(ClassId(Symbol::from("IO")));
+    classes.get_mut(&ClassId(Symbol::from("UNIXServer"))).expect("registered above").parent =
+        Some(ClassId(Symbol::from("UNIXSocket")));
+    register_stdlib_class(classes, "Open3", &[
+        ("capture3", Ty::Tuple { elems: vec![Ty::Str, Ty::Str, Ty::Untyped] }),
+    ], &[]);
+    register_stdlib_class(classes, "Find", &[("find", Ty::Untyped), ("prune", Ty::Bottom)], &[]);
     for (class, method) in BUILTIN_BLOCK_VALUE_METHODS {
         classes
             .entry(ClassId(Symbol::from(*class)))
@@ -1024,6 +1049,7 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
 pub(crate) const BUILTIN_BLOCK_VALUE_METHODS: &[(&str, &str)] = &[
     ("Mutex", "synchronize"),
     ("Thread::Mutex", "synchronize"),
+    ("Monitor", "synchronize"),
     ("ActiveSupport::Cache::MemoryStore", "fetch"),
 ];
 
