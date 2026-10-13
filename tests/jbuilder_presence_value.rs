@@ -17,7 +17,9 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use roundhouse::emit::ruby;
+use roundhouse::emit::ruby::emit_method;
 use roundhouse::ingest::ingest_app_from_tree;
+use roundhouse::lower::lower_jbuilder_to_library_classes;
 
 const SCHEMA: &str = r#"ActiveRecord::Schema.define do
   create_table "widgets", force: :cascade do |t|
@@ -108,6 +110,44 @@ fn a_predicate_in_a_value_is_grounded() {
     ] {
         assert!(src.contains(grounded), "{call}:\n{src}");
         assert!(!src.contains(&format!("note.{call}")), "{call}:\n{src}");
+    }
+}
+
+/// The bulk lowerer (every non-Ruby emitter) must ground the same way
+/// the single-template entry does — a dual-path miss would leave
+/// Spinel-green tests while rust/typescript/… still emit `.presence`.
+#[test]
+fn bulk_path_grounds_a_predicate_in_a_value() {
+    let files: HashMap<PathBuf, Vec<u8>> = [
+        ("db/schema.rb", SCHEMA),
+        ("config/routes.rb", ROUTES),
+        ("app/models/application_record.rb", "class ApplicationRecord < ActiveRecord::Base\n  primary_abstract_class\nend\n"),
+        ("app/models/widget.rb", "class Widget < ApplicationRecord\nend\n"),
+        ("app/controllers/application_controller.rb", "class ApplicationController < ActionController::Base\nend\n"),
+        ("app/controllers/widgets_controller.rb", CONTROLLER),
+        ("app/views/widgets/show.json.jbuilder", SHOW),
+        ("app/views/widgets/_widget.json.jbuilder", PARTIAL),
+        ("app/views/widgets/flag.json.jbuilder", FLAG),
+    ]
+    .iter()
+    .map(|(p, c)| (PathBuf::from(p), c.as_bytes().to_vec()))
+    .collect();
+    let mut app = ingest_app_from_tree(files).expect("ingest");
+    roundhouse::session::analyze_and_lower(&mut app);
+    let lcs = lower_jbuilder_to_library_classes(&app.views, &app, Vec::new());
+    let method = lcs
+        .iter()
+        .flat_map(|lc| lc.methods.iter())
+        .find(|m| m.name.as_str() == "widget_json")
+        .expect("widget_json");
+    let src = emit_method(method);
+    for (call, grounded) in [
+        ("presence", "ActiveSupport.presence(widget.note)"),
+        ("present?", "ActiveSupport.present?(widget.note)"),
+        ("blank?", "ActiveSupport.blank?(widget.note)"),
+    ] {
+        assert!(src.contains(grounded), "bulk {call}:\n{src}");
+        assert!(!src.contains(&format!("note.{call}")), "bulk {call}:\n{src}");
     }
 }
 

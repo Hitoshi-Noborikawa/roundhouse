@@ -151,6 +151,10 @@ pub fn lower_jbuilder_to_library_classes(
 
     let empty_ivars: std::collections::HashMap<Symbol, crate::ty::Ty> =
         std::collections::HashMap::new();
+    // Collect once for every view — `ground_jbuilder_library` walks
+    // value-position blank predicates after typing (shared with the
+    // single-template entry so Ruby emit and every other target agree).
+    let blank_defs = crate::lower::blank::AppDefinitions::collect(app);
     for lc in &mut lcs {
         for method in &mut lc.methods {
             crate::lower::typing::type_method_body(method, &classes, &empty_ivars);
@@ -172,6 +176,9 @@ pub fn lower_jbuilder_to_library_classes(
                 crate::lower::typing::type_method_body(method, &classes, &empty_ivars);
             }
         }
+        ground_jbuilder_library(lc, &blank_defs, |method| {
+            crate::lower::typing::type_method_body(method, &classes, &empty_ivars);
+        });
     }
     lcs
 }
@@ -203,8 +210,11 @@ pub fn jbuilder_signature_classes(views: &[View], app: &App) -> Vec<LibraryClass
         .collect()
 }
 
-/// Single-template entry. Used by tests and the dump_ir binary; the
-/// production bulk path is `lower_jbuilder_to_library_classes`.
+/// Single-template entry. Ruby/Spinel emit (`emit_lowered_jbuilder_views`)
+/// and focused tests use this; every other emitter goes through
+/// [`lower_jbuilder_to_library_classes`]. Both call
+/// [`ground_jbuilder_library`] so value-position blank predicates are
+/// grounded once, in a shared home.
 pub fn lower_jbuilder_to_library_class(view: &View, app: &App) -> LibraryClass {
     let partials = std::rc::Rc::new(partial_params(app));
     let mut lc = build_library_class(view, app, &partials, /*type_body=*/ true);
@@ -213,12 +223,24 @@ pub fn lower_jbuilder_to_library_class(view: &View, app: &App) -> LibraryClass {
     // lowering walks no view, and the Spinel runtime has no such method
     // on String or nil. Ground them as every app body's are.
     let defs = crate::lower::blank::AppDefinitions::collect(app);
+    ground_jbuilder_library(&mut lc, &defs, type_method_body_solo);
+    lc
+}
+
+/// Ground `presence` / `present?` / `blank?` in jbuilder value positions
+/// on an already-typed library class, then retype any body that changed.
+/// Shared by the bulk and single-template entries so a target cannot
+/// silently miss the rewrite by picking the other door.
+fn ground_jbuilder_library(
+    lc: &mut LibraryClass,
+    defs: &crate::lower::blank::AppDefinitions,
+    mut retype: impl FnMut(&mut MethodDef),
+) {
     for method in &mut lc.methods {
-        if crate::lower::blank::ground_jbuilder_values(&mut method.body, &defs) {
-            type_method_body_solo(method);
+        if crate::lower::blank::ground_jbuilder_values(&mut method.body, defs) {
+            retype(method);
         }
     }
-    lc
 }
 
 fn build_library_class(
