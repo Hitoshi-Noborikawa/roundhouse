@@ -2714,7 +2714,7 @@ fn project_arg(a: &Expr) -> Expr {
 /// An Integer-typed value under a query key the helper types
 /// `String?` — every key but `id` / `*_id` (Integer segments) and
 /// `format`.
-fn int_in_query_slot(k: &Expr, v: &Expr) -> bool {
+pub(crate) fn int_in_query_slot(k: &Expr, v: &Expr) -> bool {
     let ExprNode::Lit { value: crate::expr::Literal::Sym { value: key } } = &*k.node else {
         return false;
     };
@@ -2742,7 +2742,7 @@ fn arg_carries_a_model(a: &Expr) -> bool {
     }
 }
 
-fn to_s_of(a: Expr) -> Expr {
+pub(crate) fn to_s_of(a: Expr) -> Expr {
     Expr::new(
         a.span,
         ExprNode::Send {
