@@ -116,6 +116,8 @@ mod autoload_once_paths;
 mod defined_const_fold;
 #[path = "emit_and_run/job_payload.rs"]
 mod job_payload;
+#[path = "emit_and_run/sidekiq_push.rs"]
+mod sidekiq_adapter;
 
 /// A generated text column on the real-blog Article model exercises the
 /// schema-to-runtime path together with Rails-style symbol callbacks. The

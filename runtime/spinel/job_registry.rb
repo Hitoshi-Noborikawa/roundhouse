@@ -18,6 +18,10 @@
 # turned into a class) and raises DeserializationError for a row that is
 # gone, as Rails does.
 #
+# `sidekiq?` says whether the app is on `queue_adapter :sidekiq` with a
+# payload job, so the tree pushes jobs to Redis (`runtime/sidekiq_push.rb`)
+# and carries a real Redis client; the server logs where at boot.
+#
 # Dispatch is a `case` over the class name, never `constantize`, for
 # the reason the locator gives: a class computed from a wire string is
 # a shape this pipeline will not emit.
@@ -28,6 +32,10 @@ module JobRegistry
   end
 
   def self.discards_deserialization_error(job_class)
+    false
+  end
+
+  def self.sidekiq?
     false
   end
   # <<< generated: job-registry
