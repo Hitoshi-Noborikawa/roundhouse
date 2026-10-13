@@ -90,6 +90,10 @@ module ActiveRecord
 
   class Base
     def self.sanitize_sql_like: (String value, ?String escape_character) -> String
+    def self.like_escapes_doubled: (String value, String escape_character) -> String
+    def self.like_wildcards_marked: (String source, String escape_character) -> String
+    def self.like_replacement: (String source, Integer index, String escape_character) -> String
+    def self.like_group_reference: (String escape_character, Integer start) -> void
 
     EMPTY_ATTRS: Hash[Symbol, untyped]
     HYDRATE_ATTRS: Hash[Symbol, untyped]
