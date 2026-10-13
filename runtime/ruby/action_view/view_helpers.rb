@@ -211,6 +211,23 @@ module ActionView
 
     URL_ESCAPE_PATTERN = /[\x00\r\n !"\#$%&'()*+,\/:;<=>?@\[\\\]^`{|}]/.freeze
 
+    # ERB::Util.url_encode, a view's `u(x)`: every byte but the unreserved
+    # ones (A-Z a-z 0-9 _ . ~ -) as `%XX`, uppercase, so a space is `%20`
+    # and a multibyte character is its UTF-8 bytes. Not `url_encode`
+    # below, which is CGI.escape (`+` for a space) for query strings.
+    def self.erb_url_encode(s)
+      out = +""
+      s.bytes.each do |b|
+        if (b >= 48 && b <= 57) || (b >= 65 && b <= 90) || (b >= 97 && b <= 122) ||
+           b == 45 || b == 46 || b == 95 || b == 126
+          out << b.chr
+        else
+          out << format("%%%02X", b)
+        end
+      end
+      out
+    end
+
     # Same include? probe as html_escape (no portable match? emit).
     def self.url_encode(s)
       return s unless needs_url_escape?(s)
