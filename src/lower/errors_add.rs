@@ -164,7 +164,8 @@ fn rewrite_errors_add(expr: &mut Expr, labels: &Labels, diags: &mut Vec<Diagnost
                         ExprNode::Send { recv: Some(error_details(owner, span)), method: Symbol::from("clear"), args: Vec::new(), block: None, parenthesized: false },
                     );
                     clear_details.ty = Some(error_details_ty());
-                    *expr = Expr::new(span, ExprNode::Seq { exprs: vec![clear_errors, clear_details] });
+                    // Details first, so the value is the `errors` array the caller cleared
+                    *expr = Expr::new(span, ExprNode::Seq { exprs: vec![clear_details, clear_errors] });
                     expr.ty = ty;
                     return;
                 }
@@ -378,7 +379,7 @@ fn reads_without_effect_deep(e: &Expr) -> bool {
             InterpPart::Text { .. } => true,
             InterpPart::Expr { expr } => reads_without_effect_deep(expr),
         }),
-        ExprNode::Send { recv, args, block: None, .. } => args.is_empty() && recv.as_ref().is_none_or(reads_without_effect_deep),
+        // Not a zero-arg call either: nothing proves it leaves state alone, and it would run twice
         _ => false,
     }
 }

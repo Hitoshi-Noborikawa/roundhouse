@@ -231,10 +231,12 @@ fn a_message_that_is_not_a_plain_read_stays_residue() {
 class Draft
   def validate_body(record)
     errors.add(:title, reason_for(record))
+    errors.add(:body, next_message)
   end
 end
 "#,
     );
     assert!(out.contains("errors.add(:title, reason_for(record))"), "{out}");
-    assert_eq!(diags.len(), 1, "{diags:?}");
+    assert!(out.contains("errors.add(:body, next_message)"), "{out}");
+    assert_eq!(diags.len(), 2, "{diags:?}");
 }
