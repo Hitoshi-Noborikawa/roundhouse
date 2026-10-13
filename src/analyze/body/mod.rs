@@ -1897,19 +1897,6 @@ impl<'a> BodyTyper<'a> {
                     }
                     return Ty::Str;
                 }
-                if method.as_str() == "[]"
-                    && matches!(recv_ty.as_ref(), Some(Ty::Class { id, .. }) if id.0.as_str() == "ActiveModel::Errors")
-                    && expr.diagnostic.is_none()
-                {
-                    let catalog = self.i18n.map_or(crate::i18n::Catalog::rails_default(), |c| c.or_rails_default());
-                    if let Some(reason) = crate::i18n::errors_index_refusal(catalog.errors_format()) {
-                        expr.diagnostic = Some(crate::diagnostic::DiagnosticKind::Unsupported {
-                            target: None,
-                            construct: Symbol::from("ActiveModel::Errors"),
-                            detail: format!("`errors[:field]` cannot pick a field's messages: {reason}"),
-                        });
-                    }
-                }
                 if matches!(recv_ty.as_ref(), Some(Ty::Class { args: model, .. }) if !model.is_empty())
                     && crate::lower::view::wraps_field_errors(method.as_str())
                     && expr.diagnostic.is_none()

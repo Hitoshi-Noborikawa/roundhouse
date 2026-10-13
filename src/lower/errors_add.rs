@@ -1,6 +1,6 @@
 //! `errors.add` grounding: `errors.add(:field, "msg")` →
-//! `errors << "Field msg"` and `error_attributes << "field"`, so the
-//! accumulator keeps which attribute each message is on; `errors.clear`
+//! `errors << "Field msg"` and `error_details << ActiveRecord::ErrorDetail.new("field", "msg", "msg")`,
+//! so the accumulator keeps what Rails keeps for each message; `errors.clear`
 //! empties both.
 //!
 //! The shared runtime's error accumulator is a plain `Array[String]` —
@@ -82,21 +82,6 @@ pub(crate) struct Labels<'a> {
 }
 
 impl Labels<'_> {
-    /// The text a full message for `field` starts with, before its message;
-    /// `None` when `errors.format` does not end in the message.
-    pub(crate) fn message_prefix(&self, errors_reader: &Expr, field: &str) -> Option<String> {
-        let i18n = self.model(errors_reader);
-        if crate::i18n::errors_index_refusal(i18n.errors_format()).is_some() {
-            return None;
-        }
-        // Rails' full message for `:base` is the message alone, whatever the format
-        if field == "base" {
-            return Some(String::new());
-        }
-        let format = i18n.errors_format().replace("%{attribute}", &i18n.human_attribute_name(field));
-        format.strip_suffix("%{message}").map(str::to_string)
-    }
-
     /// The model whose `errors` this is: the reader's receiver's type, or the owner for `errors` on self.
     fn model(&self, errors_reader: &Expr) -> &crate::i18n::ModelI18n {
         let ExprNode::Send { recv, .. } = &*errors_reader.node else { return &self.data.unknown };
@@ -174,17 +159,12 @@ fn rewrite_errors_add(expr: &mut Expr, labels: &Labels, diags: &mut Vec<Diagnost
                     let owner = owner.clone();
                     let ty = expr.ty.clone();
                     let clear_errors = std::mem::replace(expr, Expr::new(span, ExprNode::Seq { exprs: vec![] }));
-                    let mut attributes = Expr::new(
+                    let mut clear_details = Expr::new(
                         span,
-                        ExprNode::Send { recv: owner, method: Symbol::from("error_attributes"), args: Vec::new(), block: None, parenthesized: false },
+                        ExprNode::Send { recv: Some(error_details(owner, span)), method: Symbol::from("clear"), args: Vec::new(), block: None, parenthesized: false },
                     );
-                    attributes.ty = Some(crate::ty::Ty::Array { elem: Box::new(crate::ty::Ty::Str) });
-                    let mut clear_attributes = Expr::new(
-                        span,
-                        ExprNode::Send { recv: Some(attributes), method: Symbol::from("clear"), args: Vec::new(), block: None, parenthesized: false },
-                    );
-                    clear_attributes.ty = Some(crate::ty::Ty::Array { elem: Box::new(crate::ty::Ty::Str) });
-                    *expr = Expr::new(span, ExprNode::Seq { exprs: vec![clear_errors, clear_attributes] });
+                    clear_details.ty = Some(error_details_ty());
+                    *expr = Expr::new(span, ExprNode::Seq { exprs: vec![clear_errors, clear_details] });
                     expr.ty = ty;
                     return;
                 }
@@ -279,12 +259,29 @@ fn rewrite_errors_add(expr: &mut Expr, labels: &Labels, diags: &mut Vec<Diagnost
         Some(ExprNode::Lit { value: Literal::Sym { value } }) => Some(value.as_str().to_string()),
         _ => None,
     };
-    let message = match kind {
-        Some(kind) => {
-            let ExprNode::Send { recv: owner, .. } = &*reader.node else { unreachable!() };
-            parts_expr(span, i18n.full_error(field.as_str(), &kind, &Default::default()), owner.as_ref(), field.as_str())
+    let ExprNode::Send { recv: reader_owner, .. } = &*reader.node else { unreachable!() };
+    let (message, kind, bare) = match kind {
+        Some(kind) => (
+            parts_expr(span, i18n.full_error(field.as_str(), &kind, &Default::default()), reader_owner.as_ref(), field.as_str()),
+            str_lit(span, &kind),
+            parts_expr(span, i18n.error(field.as_str(), &kind, &Default::default()), reader_owner.as_ref(), field.as_str()),
+        ),
+        None => {
+            let bare = msg.clone().unwrap_or_else(|| unreachable!("a missing message is `:invalid`"));
+            if !reads_without_effect_deep(&bare) {
+                diags.push(residue(expr, "the message is not a plain read, and the record keeps it twice"));
+                *expr.node = ExprNode::Send {
+                    recv,
+                    method: Symbol::from("add"),
+                    args: vec![field_expr, bare],
+                    block: None,
+                    parenthesized: true,
+                };
+                return;
+            }
+            // Rails' type for a String message is the message itself
+            (baked_message(i18n, span, field.as_str(), msg), bare.clone(), bare)
         }
-        None => baked_message(i18n, span, field.as_str(), msg),
     };
     // `<<` returns the accumulator it appends to (Array#<< / the errors
     // collection), so the synthesized send's result type is the
@@ -302,39 +299,88 @@ fn rewrite_errors_add(expr: &mut Expr, labels: &Labels, diags: &mut Vec<Diagnost
         ExprNode::Send { recv, method: Symbol::from("<<"), args: vec![message], block: None, parenthesized: false },
     );
     push_message.ty = recv_ty.clone();
-    *expr = attributed_push(push_message, owner, field.as_str(), span);
+    *expr = attributed_push(push_message, owner, field.as_str(), kind, bare, span);
 }
 
-/// `<errors> << msg` followed by `<owner>.error_attributes << "field"`, so
-/// the accumulator keeps which attribute each message is on.
-pub(crate) fn attributed_push(push_message: Expr, owner: Option<Expr>, field: &str, span: crate::span::Span) -> Expr {
-    let str_array = crate::ty::Ty::Array { elem: Box::new(crate::ty::Ty::Str) };
-    let mut attributes = Expr::new(
+/// `<errors> << msg` followed by `<owner>.error_details << ActiveRecord::ErrorDetail.new("field", type, message)`,
+/// so the accumulator keeps what Rails keeps for each message.
+pub(crate) fn attributed_push(
+    push_message: Expr,
+    owner: Option<Expr>,
+    field: &str,
+    kind: Expr,
+    message: Expr,
+    span: crate::span::Span,
+) -> Expr {
+    let error_ty = crate::ty::Ty::Class { id: crate::ident::ClassId(Symbol::from("ActiveRecord::ErrorDetail")), args: vec![] };
+    let mut class = Expr::new(span, ExprNode::Const { path: vec![Symbol::from("ActiveRecord"), Symbol::from("ErrorDetail")] });
+    class.ty = Some(error_ty.clone());
+    let mut record = Expr::new(
         span,
         ExprNode::Send {
-            recv: owner,
-            method: Symbol::from("error_attributes"),
-            args: Vec::new(),
+            recv: Some(class),
+            method: Symbol::from("new"),
+            args: vec![str_lit(span, field), typed_str(kind), typed_str(message)],
             block: None,
-            parenthesized: false,
+            parenthesized: true,
         },
     );
-    attributes.ty = Some(str_array.clone());
-    let mut push_attribute = Expr::new(
+    record.ty = Some(error_ty);
+    let mut push_detail = Expr::new(
         span,
         ExprNode::Send {
-            recv: Some(attributes),
+            recv: Some(error_details(owner, span)),
             method: Symbol::from("<<"),
-            args: vec![Expr::new(span, ExprNode::Lit { value: Literal::Str { value: field.to_string() } })],
+            args: vec![record],
             block: None,
             parenthesized: false,
         },
     );
-    push_attribute.ty = Some(str_array);
+    push_detail.ty = Some(error_details_ty());
     let ty = push_message.ty.clone();
-    let mut both = Expr::new(span, ExprNode::Seq { exprs: vec![push_message, push_attribute] });
+    let mut both = Expr::new(span, ExprNode::Seq { exprs: vec![push_message, push_detail] });
     both.ty = ty;
     both
+}
+
+pub(crate) fn error_details_ty() -> crate::ty::Ty {
+    crate::ty::Ty::Array {
+        elem: Box::new(crate::ty::Ty::Class { id: crate::ident::ClassId(Symbol::from("ActiveRecord::ErrorDetail")), args: vec![] }),
+    }
+}
+
+/// `<owner>.error_details`, typed.
+pub(crate) fn error_details(owner: Option<Expr>, span: crate::span::Span) -> Expr {
+    let mut e = Expr::new(
+        span,
+        ExprNode::Send { recv: owner, method: Symbol::from("error_details"), args: Vec::new(), block: None, parenthesized: false },
+    );
+    e.ty = Some(error_details_ty());
+    e
+}
+
+fn str_lit(span: crate::span::Span, value: &str) -> Expr {
+    typed_str(Expr::new(span, ExprNode::Lit { value: Literal::Str { value: value.to_string() } }))
+}
+
+fn typed_str(mut e: Expr) -> Expr {
+    if e.ty.is_none() {
+        e.ty = Some(crate::ty::Ty::Str);
+    }
+    e
+}
+
+/// A message the push may evaluate twice, once for the full text and once for the record.
+fn reads_without_effect_deep(e: &Expr) -> bool {
+    match &*e.node {
+        ExprNode::Lit { .. } | ExprNode::Var { .. } | ExprNode::Ivar { .. } | ExprNode::SelfRef | ExprNode::Const { .. } => true,
+        ExprNode::StringInterp { parts } => parts.iter().all(|p| match p {
+            InterpPart::Text { .. } => true,
+            InterpPart::Expr { expr } => reads_without_effect_deep(expr),
+        }),
+        ExprNode::Send { recv, args, block: None, .. } => args.is_empty() && recv.as_ref().is_none_or(reads_without_effect_deep),
+        _ => false,
+    }
 }
 
 /// `<errors reader>.full_message(:field, message)`: the one shape whose

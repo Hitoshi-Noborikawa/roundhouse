@@ -1268,6 +1268,8 @@ const ERRORS_BY_ATTRIBUTE: &str = r#"a = Article.new(title: "", body: "an odd bo
 a.valid?
 raise a.title_errors.inspect unless a.title_errors == ["can't be blank"]
 raise a.base_errors.inspect unless a.base_errors.empty?
+details = a.error_details.map { |e| e.attribute + "/" + e.kind + "/" + e.message }
+raise details.inspect unless details == ["title/blank/can't be blank", "title_note/is odd/is odd"]
 html = Views::Articles.form(a)
 raise html unless html.include?("<div class=\"field_with_errors\"><label for=\"article_title\">Title</label></div>")
 raise html if html.include?("<div class=\"field_with_errors\"><textarea")
@@ -1284,6 +1286,12 @@ fn errors_index_picks_a_field_by_its_attribute() {
 #[test]
 fn errors_index_picks_a_field_under_a_format_that_names_no_attribute() {
     errors_by_attribute_app("Error: %{message}").run_ruby(ERRORS_BY_ATTRIBUTE).assert_passes();
+}
+
+/// Each error keeps its message apart from the full text, so the format can put the message anywhere.
+#[test]
+fn errors_index_picks_a_field_under_a_format_that_ends_elsewhere() {
+    errors_by_attribute_app("%{message} (%{attribute})").run_ruby(ERRORS_BY_ATTRIBUTE).assert_passes();
 }
 
 #[test]

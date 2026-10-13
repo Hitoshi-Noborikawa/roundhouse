@@ -173,6 +173,21 @@ module ActiveRecord
     end
   end
 
+  # One error as Rails' `ActiveModel::Error` holds it: the attribute, the
+  # error type (the message itself when `errors.add` was given a String),
+  # and the message without the attribute's name.
+  # Not `ActiveModel::Error`: the strict targets emit the class unqualified, beside their own `Error`.
+  class ErrorDetail
+    # `kind`, not Rails' `type`: a field named `type` does not compile in Rust or Go
+    attr_reader :attribute, :kind, :message
+
+    def initialize(attribute, kind, message)
+      @attribute = attribute
+      @kind = kind
+      @message = message
+    end
+  end
+
   # Base class for all models. Designed to contain *zero* metaprogramming:
   # subclasses provide their own `attributes`, `[]`, `[]=`, `update`, and
   # `initialize`-from-attrs methods (typically by writing them out per
@@ -289,11 +304,18 @@ module ActiveRecord
       @errors
     end
 
-    # The attribute each message in `errors` is on, index for index, so
-    # `errors[:field]` and `field_with_errors` pick a field's messages by
-    # attribute as Rails does rather than by the message's text.
-    def error_attributes
-      @error_attributes
+    # Each message in `errors` as Rails' `ActiveModel::Error` holds it,
+    # index for index: `errors` keeps the full messages because there is
+    # no i18n at run time to build them from these.
+    def error_details
+      @error_details
+    end
+
+    # Rails' `errors[attribute]`: the messages added on one attribute.
+    def error_messages_for(attribute)
+      out = []
+      error_details.each { |error| out << error.message if error.attribute == attribute }
+      out
     end
 
     # The one frozen empty Hash a model's `initialize(attrs = …)` defaults
@@ -347,7 +369,7 @@ module ActiveRecord
       # (`self.id = (attrs[:id] || 0)` — `|| ""` for a string key), not
       # here: see the class comment on why the base holds no `@id`.
       @errors = []
-      @error_attributes = []
+      @error_details = []
       @id_previously_changed = false
       @persisted = false
       @destroyed = false
@@ -1256,7 +1278,7 @@ module ActiveRecord
 
     def valid?
       @errors = []
-      @error_attributes = []
+      @error_details = []
       validate
       @errors.empty?
     end
