@@ -129,8 +129,23 @@ fn include_consts(include: &Expr) -> impl Iterator<Item = &[Symbol]> {
 /// `path` as written inside `owner` names a module the app defines:
 /// itself, or under one of the owner's nesting scopes (innermost
 /// first), as Ruby's lexical lookup would find it.
+///
+/// An absolute const (`::Chime`, path `["", "Chime"]`) looks up only
+/// from the root — the leading empty segment is not part of the name.
 fn resolves(owner: &str, path: &[Symbol], known: &HashSet<ClassId>) -> bool {
-    let tail = path.iter().map(|s| s.as_str()).collect::<Vec<_>>().join("::");
+    let absolute = path.first().is_some_and(|s| s.as_str().is_empty());
+    let segments: Vec<&str> = if absolute {
+        path.iter().skip(1).map(|s| s.as_str()).collect()
+    } else {
+        path.iter().map(|s| s.as_str()).collect()
+    };
+    if segments.is_empty() {
+        return false;
+    }
+    let tail = segments.join("::");
+    if absolute {
+        return known.contains(&ClassId(Symbol::from(tail.as_str())));
+    }
     let scope: Vec<&str> = owner.split("::").collect();
     (0..=scope.len()).rev().any(|depth| {
         let candidate = if depth == 0 {

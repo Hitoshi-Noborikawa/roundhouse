@@ -153,17 +153,19 @@ pub(crate) fn ground_body(body: &mut Expr, defs: &AppDefinitions) -> bool {
 ///
 /// Everything inside a value counts, the condition of a ternary or an
 /// `if` there included (`json.flag(note.present? ? "y" : "n")`): the
-/// grounded predicate answers a Boolean, which any condition takes. The
-/// condition of a template-level `if` / `unless` (one that chooses
-/// which pairs to write) keeps its `present?` / `blank?` for the
-/// view-condition rewrite (`view_to_library::predicates`); only a
-/// `presence` there is grounded, since that rewrite does not read it.
+/// grounded predicate answers a Boolean, which any condition takes.
+/// Template-level `if` / `unless` conditions are grounded the same way:
+/// jbuilder never runs the ERB view-condition rewrite
+/// (`view_to_library::predicates`), and Spinel has no `String#present?`
+/// / `NilClass#present?`, so leaving the call dynamic is a NameError.
 pub(crate) fn ground_jbuilder_values(body: &mut Expr, defs: &AppDefinitions) -> bool {
     fn walk(expr: &mut Expr, in_value: bool, defs: &AppDefinitions, diags: &mut Vec<Diagnostic>) -> bool {
         if !in_value {
             match &mut *expr.node {
                 ExprNode::If { cond, then_branch, else_branch } => {
-                    let cond_changed = presence_only(cond, defs, diags);
+                    // Condition is a value for blank predicates; branches
+                    // stay template-shaped (pairs / nested ifs).
+                    let cond_changed = walk(cond, true, defs, diags);
                     let then_changed = walk(then_branch, false, defs, diags);
                     let else_changed = walk(else_branch, false, defs, diags);
                     return cond_changed || then_changed || else_changed;
@@ -185,24 +187,6 @@ pub(crate) fn ground_jbuilder_values(body: &mut Expr, defs: &AppDefinitions) -> 
             }
         });
         if try_rewrite(expr, defs, diags) {
-            changed = true;
-        }
-        changed
-    }
-    /// A template-level condition: `presence` only. It is a value inside
-    /// the condition (`x.presence.nil?`), which the view-condition
-    /// rewrite does not read and no Spinel String or nil answers;
-    /// `present?` / `blank?` there stay that rewrite's.
-    fn presence_only(expr: &mut Expr, defs: &AppDefinitions, diags: &mut Vec<Diagnostic>) -> bool {
-        let mut changed = false;
-        expr.node.for_each_child_mut(&mut |c| {
-            if presence_only(c, defs, diags) {
-                changed = true;
-            }
-        });
-        if matches!(&*expr.node, ExprNode::Send { method, .. } if method.as_str() == "presence")
-            && try_rewrite(expr, defs, diags)
-        {
             changed = true;
         }
         changed

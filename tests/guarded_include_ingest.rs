@@ -76,13 +76,15 @@ const GUARDED_LOAD: &str = "  begin\n    include Chime\n  rescue NameError, Load
 /// `StandardError`.
 const GUARDED_STANDARD: &str = "  begin\n    include Chime\n  rescue StandardError\n  end\n";
 const GUARDED_BARE: &str = "  begin\n    include Chime\n  rescue\n  end\n";
+/// Absolute const path — `::Chime` is root-only lookup, not `"::Chime"`.
+const GUARDED_ABSOLUTE: &str = "  begin\n    include ::Chime\n  rescue NameError\n  end\n";
 
 #[test]
 fn a_guarded_include_of_a_defined_module_is_the_include() {
     for target in [BuildTarget::Ruby, BuildTarget::Spinel] {
         let plain = emitted_part(target, PLAIN);
         assert!(plain.contains("ring"), "{target:?}: the plain include reaches the model:\n{plain}");
-        for guarded in [GUARDED, GUARDED_LOAD, GUARDED_STANDARD, GUARDED_BARE] {
+        for guarded in [GUARDED, GUARDED_LOAD, GUARDED_STANDARD, GUARDED_BARE, GUARDED_ABSOLUTE] {
             assert_eq!(emitted_part(target, guarded), plain, "{target:?}: {guarded}");
         }
     }
