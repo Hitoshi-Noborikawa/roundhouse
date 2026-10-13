@@ -848,10 +848,11 @@ wrongly.
 **Inline `render json: <object>` is written down, not walked.** Rails
 encodes a plain object through `Object#as_json` — `instance_values`,
 reflection over every ivar — and then a structural walk of the Hash.
-The CRuby overlay's `ActionController::JsonRender.encode` reproduces
-that walk (`respond_to?(:as_json)`, `case … when Hash`), and it is
-CRuby-only by nature: on a compiled tree the constant is unresolved and
-the site is a 500 (campfire's `POST /unfurl_links`, every pasted link).
+The runtime's `ActionController::JsonRender.encode` reproduces that walk
+(`respond_to?(:as_json)`, `case … when Hash`). No strict target can bind
+it, and until the spinel tree loaded it too, the constant was unresolved
+there and the site was a 500 (campfire's `POST /unfurl_links`, every
+pasted link).
 The compiler already knows the key set — it is the class's declared
 `attr_*` readers — so `lower::as_json_poro` writes both halves down: an
 `as_json` Hash over those readers, and an `as_json_str` writer in the
@@ -865,7 +866,7 @@ the analyzer typed at a `render json:` site is given the pair. A value
 with no writer — a collection containing objects or temporal values, a Relation, a class with its own
 `as_json` (whose pairs `as_json_shape` recognizes but whose computed
 values are not yet typed, see that module) — keeps the runtime
-encoder, CRuby-only and loud elsewhere; the suite ledger's
+encoder, which the strict targets do not have; the suite ledger's
 `render-json-encoder` rule is the tripwire for it.
 
 Inline Hash/Array payloads whose inferred contents are JSON primitives use
@@ -884,6 +885,13 @@ this path delegates primitive encoding to `JSON.generate`. The helper applies
 the Rails 8.1+ defaults: HTML-entity escaping enabled, U+2028/U+2029 escaping
 disabled. Per-application changes to those Rails encoder settings are not
 reflected here.
+
+The CRuby, JRuby and spinel trees load the same `ActionController::JsonRender`
+(`runtime/spinel/action_controller_json_render.rb`), so they write the same
+bytes for a value outside the primitive path. Its divergences from Rails: an
+object with no `as_json` is written as its `to_s`, where Rails walks its
+instance variables, and the text is not HTML-entity escaped, unlike the
+primitive path above.
 
 ### Active Storage: rows and bytes are modeled, variants are a seam
 

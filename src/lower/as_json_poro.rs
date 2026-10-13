@@ -36,10 +36,9 @@
 //! ## The encoder, monomorphized
 //!
 //! `as_json` answers the Hash; something still has to turn it into
-//! text. The CRuby overlay's `ActionController::JsonRender.encode` walks
+//! text. The runtime's `ActionController::JsonRender.encode` walks
 //! that Hash reflectively (`respond_to?(:as_json)`, `case value when
-//! Hash …`), which no strict target can bind — on the spinel tree the
-//! constant is unresolved and every `POST /unfurl_links` is a 500.
+//! Hash …`), which no strict target can bind.
 //!
 //! The key set is known here, so the text is written down too: the same
 //! readers become an `as_json_str` writer ([`super::as_json_writer`],
@@ -67,7 +66,7 @@
 //! `Relation[Story]`) is a JSON array of each record's text.
 //!
 //! Primitive-only Hash/Array values use JSON.generate in the controller
-//! rewrite. What keeps the runtime encoder, CRuby-only as before: a
+//! rewrite. What keeps the runtime encoder (ruby family only): a
 //! collection containing objects or temporal values, an untyped value, and a model whose
 //! `as_json` is outside the two idioms or has a value with no encoding
 //! here (a nested record, a Hash).
