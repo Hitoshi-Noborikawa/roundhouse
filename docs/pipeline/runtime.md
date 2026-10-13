@@ -1846,6 +1846,13 @@ read is exact under any `errors.format`, and `:base` is an attribute
 like any other. The form builder's `field_with_errors` wrapper asks the
 same question with `any?`.
 
+`errors.to_hash` groups the same details by attribute:
+`ActiveSupport.errors_to_hash(error_details)`, in the order of each
+attribute's first error, as Rails orders it. The helper lives in
+`runtime/ruby/active_support_ext.rb`, so a strict target ledgers the
+call as a `bundled_method` gap. A message pushed with `errors <<` has
+no detail, so `to_hash` leaves it out; Rails' Errors has no `<<`.
+
 **Why full messages stay in `errors`.** The runtime has no i18n to
 humanize an attribute with, and the lowering already bakes the full
 text; every reader of `errors` (`each`, `count`, `full_messages`, the

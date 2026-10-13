@@ -1506,13 +1506,24 @@ fn report_native_ruby_syntax(app: &App, target: BuildTarget) {
     if matches!(target, BuildTarget::Blog | BuildTarget::Ruby | BuildTarget::Jruby) {
         return;
     }
-    fn visit(expr: &crate::expr::Expr, target: BuildTarget) {
+    fn visit(expr: &crate::expr::Expr, target: BuildTarget, load_time: bool) {
         use crate::expr::{ExprNode, LValue};
         let construct = match &*expr.node {
             ExprNode::ForwardKeywords if target == BuildTarget::Spinel => None,
             ExprNode::ForwardKeywords => Some("anonymous keyword forwarding"),
             ExprNode::ForwardKeywordsWithPairs { .. } if target == BuildTarget::Spinel => None,
             ExprNode::ForwardKeywordsWithPairs { .. } => Some("anonymous keyword forwarding"),
+            // `defined?(A::B)` that `lower::defined_const_fold` could not
+            // decide, where it runs after the program has loaded (a method
+            // body, a lambda, a template): Spinel answers it from the whole
+            // program, which is then what CRuby answers for the emitted
+            // program ("constant" or nil; lexical, inherited, nested and
+            // missing paths included). While the program loads, CRuby
+            // answers nil for a constant whose file has not run yet and
+            // Spinel does not, so that position stays refused.
+            ExprNode::Defined { operand }
+                if target == BuildTarget::Spinel && !load_time
+                    && matches!(&*operand.node, ExprNode::Const { .. }) => None,
             ExprNode::Defined { .. } => Some("runtime defined? query"),
             // The Ruby emitter (Spinel's and Roda's too) renders the whole
             // signature; the other emitters read only the required names
@@ -1537,9 +1548,12 @@ fn report_native_ruby_syntax(app: &App, target: BuildTarget) {
                 "native Ruby semantics have no verified implementation on this target",
             );
         }
-        expr.node.for_each_child(&mut |child| visit(child, target));
+        expr.node.for_each_child(&mut |child| visit(child, target, load_time));
     }
-    crate::lower::for_each_emit_body_ref(app, &mut |expr| visit(expr, target));
+    let load_time = crate::lower::defined_const_fold::load_time_roots(app);
+    crate::lower::for_each_emit_body_ref(app, &mut |expr| {
+        visit(expr, target, load_time.contains(&(expr as *const crate::expr::Expr as usize)))
+    });
 }
 
 /// A self binding (`T.bind(self, T)`, `#: self as T`) retypes `self` for
@@ -5206,7 +5220,9 @@ fn unavailable_class_module_construct(name: &str, target: &str) -> Option<&'stat
         // rqrcode_core's / spinel-rqrcode's.
         | "RQRCodeCore::QRCodeRunTimeError" | "RQRCodeCore::QRCodeArgumentError"
         | "GC" | "OpenSSL::HMAC" | "CSV::MalformedCSVError"
-        | "Enumerator::Product" | "Enumerator::Lazy");
+        | "Enumerator::Product" | "Enumerator::Lazy"
+        | "Monitor" | "ConditionVariable" | "Thread::ConditionVariable"
+        | "UNIXServer" | "UNIXSocket" | "Open3" | "Find");
     if !bundled {
         return None;
     }
@@ -5233,6 +5249,9 @@ const RUBY_SPINEL_ONLY_METHODS: &[(&str, &str)] = &[
     // `lower::record_snapshot`'s closed-world `constantize` — the
     // generated `case` lives in the same ruby-family/spinel file.
     ("ActiveRecord::Base", "instantiate_named"),
+    // `lower::errors_index`'s `errors.to_hash`: the helper is
+    // `runtime/ruby/active_support_ext.rb`, which no strict target loads.
+    ("ActiveSupport", "errors_to_hash"),
 ];
 
 /// Instance methods only the ruby family and spinel can answer: a model's
@@ -7901,7 +7920,7 @@ fn apply_bundled_gem_wiring(files: &mut [(String, String)]) {
 /// Constant → bundled library that provides it. One table, read by
 /// both the pass that writes the requires and the gate that checks a
 /// tree for missing ones — a second copy is how the rule drifts.
-const BUNDLED: [(&str, &str); 20] = [
+const BUNDLED: [(&str, &str); 25] = [
     // INERT in our trees, and deliberately: `runtime/spinel/base64.rb`
     // defines `Base64` without requiring the library, which the second
     // condition below reads as "the program defines it" and drops the
@@ -7978,6 +7997,15 @@ const BUNDLED: [(&str, &str); 20] = [
     // `packages/openssl`; an app that signs a payload without HTTP never
     // loads it through net/http.
     ("OpenSSL", "openssl"),
+    // `Monitor.new`, `UNIXServer.new` / `UNIXSocket.new`, `Open3.capture3`
+    // and `Find.find`: the standard library on CRuby/JRuby; spinel
+    // defines Monitor and the socket classes only after the require, and
+    // takes `packages/open3` and `packages/find`.
+    ("Monitor", "monitor"),
+    ("UNIXServer", "socket"),
+    ("UNIXSocket", "socket"),
+    ("Open3", "open3"),
+    ("Find", "find"),
 ];
 
 /// Every gap in a tree, as `(file index, require line)`. One walk,
@@ -8012,6 +8040,7 @@ fn bundled_require_gaps(files: &[(String, String)]) -> Vec<(usize, String)> {
             if path.ends_with(".rb")
                 && names_constant(content, konst)
                 && !requires_feature(content, &require_line)
+                && !gaps.contains(&(i, require_line.clone()))
             {
                 gaps.push((i, require_line.clone()));
             }
