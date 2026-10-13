@@ -5736,6 +5736,15 @@ fn spinel_files(app: &App, fixture: &Path) -> Result<(Vec<(String, String)>, Vec
         files.push(("sig/runtime/active_job_serialization.rbs".to_string(), rbs));
     }
 
+    // Sidekiq pushes (queue_adapter :sidekiq): the envelope writer and
+    // the Redis façade. `spin_shape` drops the façade's sidecar when it
+    // swaps in the real client, whose surface is inferred.
+    for name in ["sidekiq_push", "sidekiq_redis"] {
+        let src = format!("runtime/spinel/{name}.rbs");
+        let rbs = crate::runtime_files::read_to_string(&src).map_err(|e| format!("read {src}: {e}"))?;
+        files.push((format!("sig/runtime/{name}.rbs"), rbs));
+    }
+
     // Duration sidecar — pins @seconds Integer so ago/from_now stay
     // Time-typed under AOT inference (an untyped @seconds widens the
     // temporal arithmetic to poly against the Time-typed C return).

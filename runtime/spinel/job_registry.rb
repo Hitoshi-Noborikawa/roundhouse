@@ -46,6 +46,9 @@ module ActiveJob
   # dropped at ROLLBACK. Rails 8.1's default for the setting is false,
   # and a job that keeps it so is queued at once, as before.
   #
+  # Under `queue_adapter :sidekiq` the held jobs are Sidekiq pushes,
+  # kept in `SidekiqPush.held` and pushed or dropped at the same edges.
+  #
   # Per thread, because the transaction is: each request thread holds
   # its own connection lease. Only the outermost transaction counts: a
   # job enqueued inside a nested `requires_new:` block that rolls back
@@ -84,13 +87,13 @@ module ActiveJob
     while held.length > 0
       enqueue_payload(held.shift)
     end
-    nil
+    SidekiqPush.flush_held
   end
 
   def self.transaction_rolled_back
     Thread.current[:aj_in_transaction] = false
     __held_until_commit.clear
-    nil
+    SidekiqPush.drop_held
   end
 
   # The drain's payload arm (`ActiveJob.drain` in the shared runtime and
