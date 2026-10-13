@@ -46,3 +46,25 @@ fn a_model_class_without_rules_has_its_errors() {
 fn a_validations_class_without_rules_has_its_errors_on_spinel() {
     emit_and_run::real_blog().write("app/models/signup.rb", &form_object("Validations")).run_spinel(SCRIPT).assert_passes();
 }
+
+/// A source `def validate` on a ruleless ActiveModel class must keep its
+/// body: an empty synthesizer would shadow it via `push_user_methods`
+/// collision rules and `valid?` would always pass.
+#[test]
+fn a_source_validate_on_a_ruleless_model_still_runs() {
+    const SRC: &str = r#"class Signup
+  include ActiveModel::Model
+
+  def validate
+    errors.add(:email, "is taken")
+  end
+end
+"#;
+    const RUN: &str = r#"
+signup = Signup.new
+raise "valid?" unless signup.valid? == false
+raise signup.errors.inspect unless signup.errors.to_a == ["Email is taken"]
+puts "source validate passed"
+"#;
+    emit_and_run::real_blog().write("app/models/signup.rb", SRC).run_ruby(RUN).assert_passes();
+}
