@@ -569,23 +569,70 @@ fn workers_with_positional_perform(app: &App, workers: &BTreeSet<String>) -> BTr
     out
 }
 
-/// Whether `name`'s own class chain (itself, then ancestors) defines
-/// an instance `perform` at all, regardless of its parameter shape.
+/// Whether `name`'s own class chain (itself, then ancestors) defines an
+/// instance `perform` at all, regardless of its parameter shape —
+/// including one provided by an included module rather than the class
+/// body itself. Library classes never get concern methods spliced into
+/// `methods` the way models and controllers do (`ingest::app`'s
+/// `splice_concerns_into_models`/`_controllers` has no library-class
+/// twin), so a worker's own `perform` from a mixin is invisible unless
+/// this walks `includes` too.
+///
 /// Tells an abstract base worker (no `perform` anywhere — never an
-/// entry point) apart from one whose `perform` exists but isn't
-/// positional (still refused, as `workers_with_positional_perform`
-/// already reports).
+/// entry point) apart from one whose `perform` exists somewhere (on
+/// itself, an ancestor, or a mixin) but isn't positional — that case
+/// still goes through `workers_with_positional_perform` and the
+/// existing "without a positional perform" refusal, exactly as before;
+/// this function does not widen wrapping to mixin-provided `perform`s,
+/// only widens what counts as "a perform exists".
 fn workers_with_any_perform(app: &App, workers: &BTreeSet<String>) -> BTreeSet<String> {
     let by_name: std::collections::HashMap<&str, &crate::dialect::LibraryClass> =
         app.library_classes.iter().map(|lc| (lc.name.0.as_str(), lc)).collect();
+
+    fn defines_instance_perform(c: &crate::dialect::LibraryClass) -> bool {
+        c.methods.iter().any(|m| {
+            m.receiver == crate::dialect::MethodReceiver::Instance && m.name.as_str() == "perform"
+        })
+    }
+
+    // Whether an include target provides `perform`: the Sidekiq marker
+    // modules that make the class a worker in the first place never
+    // do, so they're excluded up front — otherwise every worker would
+    // read as "maybe performs" through its own `include Sidekiq::
+    // Worker`. Any OTHER include that resolves to an ingested library
+    // class answers via its own methods or (transitively) its own
+    // includes. An include this app never ingested — a gem module, or
+    // any other name ingest didn't resolve to a library class — is
+    // unknown, so this is conservative: it may as well provide
+    // `perform`, so the class takes the existing refusal path rather
+    // than being silently stripped.
+    fn include_provides_perform(
+        id: &crate::ident::ClassId,
+        by_name: &std::collections::HashMap<&str, &crate::dialect::LibraryClass>,
+        seen: &mut std::collections::HashSet<crate::ident::ClassId>,
+    ) -> bool {
+        if SIDEKIQ_MODULES.contains(&id.0.as_str()) {
+            return false;
+        }
+        if !seen.insert(id.clone()) {
+            return false;
+        }
+        let Some(c) = by_name.get(id.0.as_str()).copied() else {
+            return true;
+        };
+        defines_instance_perform(c)
+            || c.includes.iter().any(|inc| include_provides_perform(inc, by_name, seen))
+    }
+
     let mut out = BTreeSet::new();
     for name in workers {
         let mut cur = by_name.get(name.as_str()).copied();
+        let mut seen = std::collections::HashSet::new();
         for _ in 0..32 {
             let Some(c) = cur else { break };
-            if c.methods.iter().any(|m| {
-                m.receiver == crate::dialect::MethodReceiver::Instance && m.name.as_str() == "perform"
-            }) {
+            let found = defines_instance_perform(c)
+                || c.includes.iter().any(|inc| include_provides_perform(inc, &by_name, &mut seen));
+            if found {
                 out.insert(name.clone());
                 break;
             }
