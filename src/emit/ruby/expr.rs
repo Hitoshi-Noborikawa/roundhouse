@@ -1222,6 +1222,16 @@ pub(super) fn emit_send_base(
 ) -> String {
     let args_s: Vec<String> = args.iter().map(emit_keyword_forward_arg).collect();
     let m = method.as_str();
+    // Kernel#` (ingest's spelling of a backtick literal): written back as
+    // the literal. The command emits as a double-quoted String, and a
+    // backtick literal takes the same escapes, so only its delimiter
+    // changes, with a backtick inside escaped.
+    if recv.is_none() && m == "`" && args_s.len() == 1 {
+        let quoted = &args_s[0];
+        if let Some(inner) = quoted.strip_prefix('"').and_then(|q| q.strip_suffix('"')) {
+            return format!("`{}`", inner.replace('`', "\\`"));
+        }
+    }
     // `...` is a send argument packet, never an index or infix operand.
     // Preserve explicit call syntax even for operator/setter method names
     // and `self`, before any surface-syntax prettification below.

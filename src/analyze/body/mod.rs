@@ -1400,6 +1400,13 @@ impl<'a> BodyTyper<'a> {
                         for a in args.iter_mut() { self.analyze_expr(a, ctx); }
                         return Ty::Str;
                     }
+                    // Kernel#` - a backtick / `%x{}` shell-out (ingest
+                    // spells the literal as this call): the command's
+                    // standard output, a String, with `$?` set.
+                    if method.as_str() == "`" && args.len() == 1 {
+                        for a in args.iter_mut() { self.analyze_expr(a, ctx); }
+                        return Ty::Str;
+                    }
                 }
 
                 // Self-dispatch annotation. When `recv == None` and the
