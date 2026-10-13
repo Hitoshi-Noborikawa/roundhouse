@@ -839,7 +839,7 @@ impl<'a> BodyTyper<'a> {
                             unknown()
                         }
                     }
-                    Some(Some(ResolvedConstant::Value { declaration, name, runtime })) => {
+                    Some(Some(ResolvedConstant::Value { declaration, name, runtime, runtime_decl })) => {
                         // Concern splices retain the resolved value owner.
                         // Test-helper splice lifts a foreign module's
                         // constant onto the test class as a bare name
@@ -878,6 +878,12 @@ impl<'a> BodyTyper<'a> {
                             // Not left unknown: ingest turned `Result = Struct.new(…)` into the class it defines.
                             None if self.classes().get(&id).is_some_and(|c| c.app_declared) => {
                                 expr.decisions |= crate::expr::RESOLVED_CLASS_REF;
+                                Ty::Class { id, args: vec![] }
+                            }
+                            // A runtime façade's alias (`OpenSSL::Random =
+                            // RandomSource`) of a class the registry models
+                            // by that exact name: the registry's answer.
+                            None if *runtime_decl && self.classes().contains_key(&id) => {
                                 Ty::Class { id, args: vec![] }
                             }
                             None => unknown(),

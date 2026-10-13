@@ -4890,9 +4890,10 @@ pub const RUBY_FAMILY_RUNTIME_CONSTANTS: &[&str] = &[
 /// ruby-family runtime exception stubs (`ruby_family_runtime_constant`).
 fn unavailable_class_module_construct(name: &str, target: &str) -> Option<&'static str> {
     // Spinel supplies the other bundled and ruby-family class values,
-    // but recognizes GeneratorError only as a literal rescue name.
+    // but recognizes GeneratorError only as a literal rescue name, and
+    // its `packages/net` stops short of net/protocol's `HTTPBadResponse`.
     if target == "spinel" {
-        return if name == "JSON::GeneratorError" {
+        return if matches!(name, "JSON::GeneratorError" | "Net::HTTPBadResponse") {
             Some("bundled_constant")
         } else {
             None
@@ -4911,6 +4912,7 @@ fn unavailable_class_module_construct(name: &str, target: &str) -> Option<&'stat
         "URI::HTTP" | "URI::HTTPS" | "URI::Error" | "URI::InvalidURIError" | "Net::OpenTimeout" | "Net::ReadTimeout"
         | "SocketError"
         | "Net::HTTPRedirection" | "Net::HTTPOK" | "StringIO" | "OpenSSL::OpenSSLError"
+        | "Net::HTTPSuccess" | "Net::HTTPBadResponse" | "Zlib::DataError" | "OpenSSL::Random"
         | "Rails::HTML5::SafeListSanitizer" | "JSON" | "JSON::ParserError"
         | "Struct" | "Mutex" | "Queue" | "SizedQueue"
         | "Thread::Queue" | "Thread::SizedQueue" | "Thread::Mutex"

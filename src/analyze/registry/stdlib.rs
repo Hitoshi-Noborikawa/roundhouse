@@ -224,6 +224,10 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
     ], &[
         ("rand", Ty::Untyped), ("bytes", Ty::Str), ("seed", Ty::Int),
     ]);
+    // `OpenSSL::Random.random_bytes(n)` — lobsters' `Utils.random_str`.
+    // The openssl library's own on the ruby family; on spinel the
+    // façade alias in `runtime/spinel/facades/sponge.rb`.
+    register_stdlib_class(classes, "OpenSSL::Random", &[("random_bytes", Ty::Str)], &[]);
     // `Turbo::StreamsChannel` — turbo-rails' CLASS-side broadcast API,
     // the one an app reaches for when the payload is not a record's
     // partial: a rendered component, a counter, a status panel. The
@@ -663,6 +667,13 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
         "Timeout::Error",
         // `rescue EOFError` around `readpartial` on a pipe or a pty.
         "EOFError",
+        // lobsters' `Sponge::OTHER_PEOPLES_PROBLEMS`, a class-body Array
+        // of exception classes. zlib's and Encoding's are Ruby's own and
+        // spinel's (`packages/zlib`, `lib/sp_exc.c`). net/protocol's
+        // `HTTPBadResponse` is CRuby's only: spinel's `packages/net`
+        // does not define it, so `project::unavailable_class_module_construct`
+        // ledgers it there.
+        "Zlib::DataError", "Encoding::CompatibilityError", "Net::HTTPBadResponse",
         // `rescue SQLite3::Exception` — campfire's `ResponseCache` drops
         // its observer on any driver error (see `SQLite3::Database`).
         "SQLite3::Exception", "SQLite3::CantOpenException",
@@ -801,7 +812,9 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
     // real bundled class, without claiming any extra instance methods.
     register_stdlib_class(classes, "URI::HTTP", &[], &[]);
     register_stdlib_class(classes, "URI::HTTPS", &[], &[]);
-    for response in ["Net::HTTPRedirection", "Net::HTTPOK"] {
+    // `res.is_a?(Net::HTTPSuccess)` — lobsters' Github; spinel's
+    // `packages/net` defines the same response family.
+    for response in ["Net::HTTPRedirection", "Net::HTTPOK", "Net::HTTPSuccess"] {
         register_stdlib_class(classes, response, &[], &[]);
     }
     // The implementation is bundled on Ruby/Spinel. Other targets

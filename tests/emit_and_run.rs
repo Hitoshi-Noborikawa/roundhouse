@@ -9214,6 +9214,116 @@ end
         .assert_passes();
 }
 
+/// lobsters' `Sponge` keeps the exceptions it shrugs off in a class-body
+/// Array, so a refusal stub for any one of them fails the whole app at
+/// load. These are the library constants it names (plus its TLS modes,
+/// `Github`'s `Net::HTTPSuccess` test and `Utils`' `OpenSSL::Random`),
+/// read and rescued as Ruby has them.
+#[test]
+fn network_library_constants_load_and_rescue() {
+    let run = emit_and_run::empty_app()
+        .write(
+            "app/models/application_record.rb",
+            "class ApplicationRecord < ActiveRecord::Base\n  self.abstract_class = true\nend\n",
+        )
+        .write(
+            "app/models/fetcher.rb",
+            r#"class Fetcher
+  PROBLEMS = [
+    EOFError,
+    Errno::ECONNRESET,
+    Net::HTTPBadResponse,
+    OpenSSL::SSL::SSLError,
+    Zlib::DataError,
+    Encoding::CompatibilityError
+  ].freeze
+
+  def verify_mode(strict)
+    strict ? OpenSSL::SSL::VERIFY_PEER : OpenSSL::SSL::VERIFY_NONE
+  end
+
+  def shrug(error)
+    raise error, "boom"
+  rescue *PROBLEMS => e
+    e.message
+  end
+
+  def success?(response)
+    response.is_a?(Net::HTTPSuccess)
+  end
+
+  def self.random_byte
+    OpenSSL::Random.random_bytes(1)
+  end
+end
+"#,
+        )
+        .write(
+            "db/schema.rb",
+            "ActiveRecord::Schema[8.1].define(version: 2026_01_01_000000) do\n  create_table \"widgets\", force: :cascade do |t|\n    t.string \"name\"\n  end\nend\n",
+        )
+        .run_ruby(
+            r##"f = Fetcher.new
+raise "PROBLEMS: #{Fetcher::PROBLEMS.size}" unless Fetcher::PROBLEMS.size == 6
+[Net::HTTPBadResponse, Zlib::DataError, Encoding::CompatibilityError].each do |error|
+  got = f.shrug(error)
+  raise "#{error} not rescued: #{got.inspect}" unless got == "boom"
+end
+raise "VERIFY_PEER" unless f.verify_mode(true) == OpenSSL::SSL::VERIFY_PEER
+raise "VERIFY_NONE" unless f.verify_mode(false) == OpenSSL::SSL::VERIFY_NONE
+ok = Net::HTTPOK.new("1.1", "200", "OK")
+raise "HTTPSuccess" unless f.success?(ok)
+raise "HTTPSuccess negative" if f.success?(Object.new)
+byte = Fetcher.random_byte
+raise "random_bytes: #{byte.inspect}" unless byte.is_a?(String) && byte.bytesize == 1
+"##,
+        );
+    run.assert_passes();
+}
+
+/// `module_function :name` promotes the def to the module, and ingest
+/// retargets the sibling bare call to `Owner.name`. That receiver is
+/// generated, not written, so it must resolve rather than emit a refusal
+/// stub (lobsters' `EmailBlocklistValidation`, run on every User save).
+#[test]
+fn module_function_retargeted_call_runs() {
+    let run = emit_and_run::empty_app()
+        .write(
+            "app/models/application_record.rb",
+            "class ApplicationRecord < ActiveRecord::Base\n  self.abstract_class = true\nend\n",
+        )
+        .write(
+            "app/models/blocklist.rb",
+            r#"module Blocklist
+  def blocked
+    email && on_blocklist?(email)
+  end
+
+  def on_blocklist?(email)
+    email.end_with?("@spam.test")
+  end
+
+  module_function :on_blocklist?
+end
+"#,
+        )
+        .write(
+            "app/models/signup.rb",
+            "class Signup\n  include Blocklist\n\n  attr_reader :email\n\n  def initialize(email)\n    @email = email\n  end\nend\n",
+        )
+        .write(
+            "db/schema.rb",
+            "ActiveRecord::Schema[8.1].define(version: 2026_01_01_000000) do\n  create_table \"widgets\", force: :cascade do |t|\n    t.string \"name\"\n  end\nend\n",
+        )
+        .run_ruby(
+            r#"raise "module call" unless Blocklist.on_blocklist?("a@spam.test")
+raise "blocked" unless Signup.new("a@spam.test").blocked
+raise "not blocked" if Signup.new("a@ok.test").blocked
+"#,
+        );
+    run.assert_passes();
+}
+
 /// lobsters keeps its site settings in a top-level
 /// `class << Rails.application` block. Rubydex records no constant
 /// references inside a singleton class opened on an expression, so the
