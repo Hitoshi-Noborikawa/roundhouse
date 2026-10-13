@@ -41,6 +41,10 @@ const PROBE: &str = "  validates :title, presence: true
     I18n.t(\"probe.#{key}\")
   end
 
+  def self.only_key(key)
+    I18n.t(\"probe.only_#{key}\")
+  end
+
   def self.named(locale)
     I18n.t(\"probe.greet\", locale: locale)
   end
@@ -95,6 +99,7 @@ const LOCALE_ASSERTIONS: &str = r##"expect = lambda { |what, got, want| raise "#
 expect.call("lookups", Article.lookups, ["Hello", "Hi <x>", "1 item", "2 items", "Translation missing: en.probe.nope", "Cześć", "fallback 3", "en"])
 expect.call("polish", Article.polish, ["1 rzecz", "5 rzeczy", "English only", "Cześć", "Translation missing: pl.probe.nope", "Cześć", "Hi Ola", "pl"])
 expect.call("restored", I18n.locale, :en)
+expect.call("dynamic miss", Article.in_locale(:pl) { [Article.only_key("en"), Article.only_key("xx")] }, ["English only", "Translation missing: pl.probe.only_xx"])
 expect.call("settings", [I18n.available_locales, I18n.default_locale], [[:en, :pl], :en])
 expect.call("named", [Article.named("pl"), Article.named(:en), Article.named(nil)], ["Cześć", "Hello", "Hello"])
 expect.call("forwarded", Article.in_locale(:pl) { Article.lookups.first }, "Cześć")

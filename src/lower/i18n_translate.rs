@@ -757,9 +757,15 @@ fn dynamic_fold(
     rest.dynamic = None;
     let (folded, html) = fold(rest, otherwise, span, in_view, catalog, missing_key)?;
     let html = html || otherwise_html;
-    case_arms.push(Arm { pattern: Pattern::Wildcard, guard: None, body: shown((folded, html)) });
-    let case = typed(Expr::new(span, ExprNode::Case { scrutinee: read(), arms: case_arms }));
-    let whole = typed(Expr::new(span, ExprNode::Seq { exprs: vec![assign, case] }));
+    let otherwise = shown((folded, html));
+    // A key that reaches nothing in this locale is the else alone: Ruby has no `case` without a `when`.
+    let body = if case_arms.is_empty() {
+        otherwise
+    } else {
+        case_arms.push(Arm { pattern: Pattern::Wildcard, guard: None, body: otherwise });
+        typed(Expr::new(span, ExprNode::Case { scrutinee: read(), arms: case_arms }))
+    };
+    let whole = typed(Expr::new(span, ExprNode::Seq { exprs: vec![assign, body] }));
     Some(whole)
 }
 
