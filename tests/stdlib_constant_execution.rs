@@ -435,8 +435,8 @@ fn open3_and_find_constants_execute_after_emission() {
 #[test]
 fn find_without_a_block_is_an_enumerator() {
     stdlib_app()
-        .write("app/models/tree_probe.rb", "require \"find\"\nclass TreeProbe\n  def self.files(root)\n    Find.find(root).select { |path| File.file?(path) }.length\n  end\nend\n")
-        .run_ruby("require \"tmpdir\"\nDir.mktmpdir do |dir|\n  File.write(File.join(dir, \"a.txt\"), \"x\")\n  raise \"Find.find enumerator lost\" unless TreeProbe.files(dir) == 1\nend\nputs \"Find enumerator passed\"\n")
+        .write("app/models/item.rb", "require \"find\"\nclass Item < ActiveRecord::Base\n  def self.files(root)\n    Find.find(root).select { |path| File.file?(path) }.length\n  end\nend\n")
+        .run_ruby("require \"tmpdir\"\nDir.mktmpdir do |dir|\n  File.write(File.join(dir, \"a.txt\"), \"x\")\n  raise \"Find.find enumerator lost\" unless Item.files(dir) == 1\nend\nputs \"Find enumerator passed\"\n")
         .assert_passes();
 }
 
