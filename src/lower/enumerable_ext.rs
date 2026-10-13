@@ -652,7 +652,7 @@ mod tests {
         Expr::new(Span::synthetic(), ExprNode::Lit { value: crate::expr::Literal::Int { value } })
     }
 
-    fn strs() -> Option<Ty> { Some(Ty::Array { elem: Box::new(Ty::Str) }) }
+    fn strs() -> Option<Ty> { Some(Ty::Array { elem: std::sync::Arc::new(Ty::Str) }) }
 
     /// Value form rewrites to a bind-once Seq whose last expr is `to_h`.
     fn grounded_to_h(e: &Expr) -> &Expr {
@@ -675,8 +675,8 @@ mod tests {
     #[test]
     fn index_with_on_a_hash_stays_as_written() {
         // `{a: 1}.index_with(0)` keys by the pair; `to_h` would key by `:a`.
-        let hash = Ty::Hash { key: Box::new(Ty::Sym), value: Box::new(Ty::Int) };
-        for ty in [hash.clone(), Ty::Union { variants: vec![hash, Ty::Nil] }] {
+        let hash = Ty::Hash { key: std::sync::Arc::new(Ty::Sym), value: std::sync::Arc::new(Ty::Int) };
+        for ty in [hash.clone(), Ty::Union { variants: vec![hash, Ty::Nil].into() }] {
             let mut e = index_with_on(Some(ty), int(0));
             assert!(!rewrite_node(&mut e));
             assert_eq!(method_of(&e), "index_with");
