@@ -74,7 +74,8 @@ module Main
   # `request_params` merges query and path keys into its body hash.
   # URL-encoded and multipart form data are nested by `ParamBuilder`;
   # JSON is normalized by `ParamBuilder.from_json` to keep typed values
-  # and Rails' default deep-munge behavior. nil where Rails answers 400.
+  # and Rails' default deep-munge behavior. nil where Rails answers 400,
+  # including a JSON body that does not parse (Rails' ParseError).
   def self.request_body_params(req)
     body = {}
     if req.form?
@@ -90,7 +91,7 @@ module Main
       end
       body = ParamBuilder.build(keys, values, present)
     elsif req.json?
-      body = ParamBuilder.from_json(req.json_body_params)
+      body = req.json_body_malformed ? nil : ParamBuilder.from_json(req.json_body_params)
     end
     body
   end
