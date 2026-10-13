@@ -143,7 +143,7 @@ fn rewrite_to_hash(expr: &mut Expr) {
     );
     details.ty = Some(super::errors_add::error_details_ty());
     let mut support = Expr::new(span, ExprNode::Const { path: vec![Symbol::from("ActiveSupport")] });
-    support.ty = Some(Ty::Class { id: crate::ident::ClassId(Symbol::from("ActiveSupport")), args: vec![] });
+    support.ty = Some(Ty::Class { id: crate::ident::ClassId(Symbol::from("ActiveSupport")), args: vec![].into() });
     let mut call = Expr::new(
         span,
         ExprNode::Send { recv: Some(support), method: Symbol::from("errors_to_hash"), args: vec![details], block: None, parenthesized: true },

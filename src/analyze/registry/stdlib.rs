@@ -937,14 +937,14 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
     // without one, so it stays untyped as `File.open` does.
     register_stdlib_class(classes, "Monitor", &[], &[]);
     for name in ["ConditionVariable", "Thread::ConditionVariable"] {
-        let condition_variable = Ty::Class { id: ClassId(Symbol::from(name)), args: vec![] };
+        let condition_variable = Ty::Class { id: ClassId(Symbol::from(name)), args: vec![].into() };
         register_stdlib_class(classes, name, &[], &[
             ("signal", condition_variable.clone()),
             ("broadcast", condition_variable),
             ("wait", Ty::Untyped),
         ]);
     }
-    let unix_socket = Ty::Class { id: ClassId(Symbol::from("UNIXSocket")), args: vec![] };
+    let unix_socket = Ty::Class { id: ClassId(Symbol::from("UNIXSocket")), args: vec![].into() };
     register_stdlib_class(classes, "UNIXSocket", &[], &[]);
     register_stdlib_class(classes, "UNIXServer", &[], &[("accept", unix_socket)]);
     classes.get_mut(&ClassId(Symbol::from("UNIXSocket"))).expect("registered above").parent =
@@ -952,7 +952,7 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
     classes.get_mut(&ClassId(Symbol::from("UNIXServer"))).expect("registered above").parent =
         Some(ClassId(Symbol::from("UNIXSocket")));
     register_stdlib_class(classes, "Open3", &[
-        ("capture3", Ty::Tuple { elems: vec![Ty::Str, Ty::Str, Ty::Untyped] }),
+        ("capture3", Ty::Tuple { elems: vec![Ty::Str, Ty::Str, Ty::Untyped].into() }),
     ], &[]);
     register_stdlib_class(classes, "Find", &[("find", Ty::Untyped), ("prune", Ty::Bottom)], &[]);
     for (class, method) in BUILTIN_BLOCK_VALUE_METHODS {
