@@ -47,13 +47,7 @@ pub(crate) fn push_secure_password_methods(methods: &mut Vec<MethodDef>, model: 
     // default `password` which gets the bare `authenticate`.
     let auth_name = authenticator_name(&attr);
     let plain = Symbol::from("unencrypted_password");
-    let self_ty = Ty::Class {
-        id: model.name.clone(),
-        args: vec![],
-    };
-    let auth_ty = Ty::Union {
-        variants: vec![self_ty.clone(), Ty::Bool],
-    };
+    let self_ty = Ty::Class { id: model.name.clone(), args: vec![] };
     let plaintext_ty = Ty::Union { variants: vec![Ty::Str, Ty::Nil] };
     // `self` or `false`, as Rails answers: a signature of the record
     // alone is a seed spinel refuses as contradicted by the `false` arm.
