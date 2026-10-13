@@ -2281,6 +2281,8 @@ jobs:
         if: matrix.target == 'swift'
         uses: swift-actions/setup-swift@v2
         with:
+          # Stay on 6.1 while emit caps Hummingbird below 2.27 (2.27+ needs
+          # tools 6.2; on 6.2.1 swift-websocket 1.6.2 fails a lifetime check).
           swift-version: '6.1'
       - name: Install libsqlite3-dev (Swift CSQLite systemLibrary)
         if: matrix.target == 'swift'
@@ -2735,6 +2737,7 @@ jobs:
         if: matrix.target == 'swift'
         uses: swift-actions/setup-swift@v2
         with:
+          # Stay on 6.1 while emit caps Hummingbird below 2.27 (see compare-extra).
           swift-version: '6.1'
       - name: Install libsqlite3-dev (Swift CSQLite systemLibrary)
         if: matrix.target == 'swift'
