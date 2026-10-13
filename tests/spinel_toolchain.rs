@@ -40,6 +40,8 @@ mod array_excluding_native;
 mod class_attribute;
 #[path = "support/class_configuration.rs"]
 mod class_configuration;
+#[path = "support/dry_initializer.rs"]
+mod dry_initializer;
 #[path = "support/data_factory.rs"]
 mod data_factory;
 #[path = "support/dry_struct.rs"]
@@ -165,6 +167,15 @@ fn finite_concern_class_configuration_runs_natively() {
         run.assert_passes();
         assert!(run.stdout.contains("finite class configuration contract passed"));
     }
+}
+
+/// The native half of `emit_and_run::dry_initializer_classes_run_lowered`.
+#[test]
+#[ignore = "requires the Spinel toolchain, run in its CI lane"]
+fn dry_initializer_classes_run_lowered_natively() {
+    let run = dry_initializer::overlay().run_spinel(dry_initializer::ASSERTIONS);
+    run.assert_passes();
+    assert!(run.stdout.contains("dry-initializer contract passed"));
 }
 
 /// The native half of `emit_and_run::dry_struct_classes_run_lowered`.
