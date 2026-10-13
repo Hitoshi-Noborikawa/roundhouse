@@ -1558,6 +1558,29 @@ module ActiveStorage
       rows
     end
 
+    # More of the same delegation: a jbuilder `json.pictures(record
+    # .pictures) do |picture| … end` maps the proxy, and `size` /
+    # `empty?` are the reads a view guards it with.
+    def map
+      out = []
+      rows = attachments
+      i = 0
+      n = rows.length
+      while i < n
+        out.push(yield rows[i])
+        i += 1
+      end
+      out
+    end
+
+    def size
+      attachments.length
+    end
+
+    def empty?
+      attachments.length == 0
+    end
+
     # `self.embeds = blobs` for blob ids, in order: Rails' replace on
     # assign to a `has_many_attached`. A row whose blob is not listed
     # is detached; a listed blob not yet attached is attached once; an

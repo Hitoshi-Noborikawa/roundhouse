@@ -368,8 +368,18 @@ fn fold_array_wrap(span: crate::span::Span, arg: &Expr) -> Option<Expr> {
         Some(Ty::Array { .. }) => Some(arg.clone()),
         Some(Ty::Union { variants }) => fold_union_wrap(span, arg, variants),
         None => None,
+        // An open type may hold nil, an Array or anything else at run
+        // time (a json column, an untyped helper's value): the same
+        // three-way branch Rails takes, made explicit.
+        Some(t) if is_open(t) => fold_union_wrap(span, arg, &[Ty::Nil, t.clone()]),
         Some(_) => Some(one(arg.clone())),
     }
+}
+
+/// A type that says nothing about the value's shape: wrapping it as
+/// one element would wrap an Array a second time.
+fn is_open(ty: &Ty) -> bool {
+    matches!(ty, Ty::Untyped | Ty::Var { .. })
 }
 
 /// `Array | Nil` is `[]` or the array. `String | Nil` is `[]` or
@@ -385,7 +395,7 @@ fn fold_union_wrap(span: crate::span::Span, arg: &Expr, variants: &[Ty]) -> Opti
     if arrays.len() > 1 || (!others.is_empty() && !arrays.is_empty()) {
         return None;
     }
-    if !has_nil && arrays.is_empty() {
+    if !has_nil && arrays.is_empty() && !others.iter().any(|t| is_open(t)) {
         return Some(Expr::new(
             span,
             ExprNode::Array { elements: vec![arg.clone()], style: Default::default() },
@@ -396,6 +406,34 @@ fn fold_union_wrap(span: crate::span::Span, arg: &Expr, variants: &[Ty]) -> Opti
     let when_nil = empty_array(span);
     let when_present = if arrays.len() == 1 {
         read.clone()
+    } else if others.iter().any(|t| is_open(t)) {
+        // `x.is_a?(Array) ? x : [x]`: Rails' `to_ary` for a real
+        // Array, one element for anything else.
+        let mut test = Expr::new(
+            span,
+            ExprNode::Send {
+                recv: Some(read.clone()),
+                method: crate::ident::Symbol::from("is_a?"),
+                args: vec![Expr::new(
+                    span,
+                    ExprNode::Const { path: vec![crate::ident::Symbol::from("Array")] },
+                )],
+                block: None,
+                parenthesized: true,
+            },
+        );
+        test.ty = Some(Ty::Bool);
+        let mut wrapped = Expr::new(
+            span,
+            ExprNode::Array { elements: vec![read.clone()], style: Default::default() },
+        );
+        wrapped.ty = Some(Ty::Array { elem: std::sync::Arc::new(Ty::Untyped) });
+        let mut branch = Expr::new(
+            span,
+            ExprNode::If { cond: test, then_branch: read.clone(), else_branch: wrapped },
+        );
+        branch.ty = Some(Ty::Array { elem: std::sync::Arc::new(Ty::Untyped) });
+        branch
     } else {
         let mut wrapped = Expr::new(
             span,

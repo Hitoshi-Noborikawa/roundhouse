@@ -369,6 +369,18 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
                     Ty::Array { elem: std::sync::Arc::new(class_ty(&many_row_id)) },
                 ),
             );
+            // The other Enumerable reads views make of the proxy: a
+            // jbuilder block over `record.pictures` maps it, and
+            // `size` / `empty?` guard it.
+            many.instance_methods.insert(
+                Symbol::from("map"),
+                super::block_fn(
+                    &class_ty(&many_row_id),
+                    Ty::Array { elem: std::sync::Arc::new(Ty::Untyped) },
+                ),
+            );
+            many.instance_methods.insert(Symbol::from("size"), Ty::Int);
+            many.instance_methods.insert(Symbol::from("empty?"), Ty::Bool);
             many.instance_methods.insert(Symbol::from("attach_blob"), Ty::Nil);
             many.instance_methods.insert(Symbol::from("attach"), Ty::Nil);
             many.instance_methods.insert(Symbol::from("purge"), Ty::Nil);
