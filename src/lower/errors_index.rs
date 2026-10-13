@@ -127,16 +127,57 @@ fn rewrite(expr: &mut Expr, diags: &mut Vec<Diagnostic>) {
     rewrite_messages(expr, diags);
     rewrite_index(expr, diags);
     rewrite_to_hash(expr);
+    rewrite_render_json(expr);
 }
 
-/// `<owner>.errors.to_hash` → `ActiveSupport.errors_to_hash(<owner>.error_details)`, typed.
+/// `<owner>.errors.to_hash` and `.as_json` → `ActiveSupport.errors_to_hash(<owner>.error_details)`, typed.
 fn rewrite_to_hash(expr: &mut Expr) {
     let ExprNode::Send { recv: Some(reader), method, args, block: None, .. } = &*expr.node else { return };
-    if method.as_str() != "to_hash" || !args.is_empty() || !is_errors_read(reader) {
+    if !matches!(method.as_str(), "to_hash" | "as_json") || !args.is_empty() || !is_errors_read(reader) {
         return;
     }
+    *expr = errors_hash(expr.span, reader);
+}
+
+// Not the Array of full messages, nor `errors_to_hash`: Rails' `render json:` writes `errors.as_json` keyed by attribute, and `Base#errors_json` reaches every target with String keys, which JSON writes the same.
+fn rewrite_render_json(expr: &mut Expr) {
+    let ExprNode::Send { recv: None, method, args, .. } = &mut *expr.node else { return };
+    if method.as_str() != "render" {
+        return;
+    }
+    for arg in args.iter_mut() {
+        let ExprNode::Hash { entries, .. } = &mut *arg.node else { continue };
+        for (key, value) in entries.iter_mut() {
+            if matches!(&*key.node, ExprNode::Lit { value: Literal::Sym { value } } if value.as_str() == "json") {
+                json_value(value);
+            }
+        }
+    }
+}
+
+fn json_value(value: &mut Expr) {
+    if is_errors_read(value) {
+        let ExprNode::Send { recv: owner, .. } = &*value.node else { unreachable!("an errors reader") };
+        let mut json = Expr::new(
+            value.span,
+            ExprNode::Send { recv: owner.clone(), method: Symbol::from("errors_json"), args: Vec::new(), block: None, parenthesized: false },
+        );
+        json.ty = Some(Ty::Hash {
+            key: std::sync::Arc::new(Ty::Str),
+            value: std::sync::Arc::new(Ty::Array { elem: std::sync::Arc::new(Ty::Str) }),
+        });
+        *value = json;
+        return;
+    }
+    match &mut *value.node {
+        ExprNode::Hash { entries, .. } => entries.iter_mut().for_each(|(_, v)| json_value(v)),
+        ExprNode::Array { elements, .. } => elements.iter_mut().for_each(json_value),
+        _ => {}
+    }
+}
+
+fn errors_hash(span: crate::span::Span, reader: &Expr) -> Expr {
     let ExprNode::Send { recv: owner, .. } = &*reader.node else { unreachable!("an errors reader") };
-    let span = expr.span;
     let mut details = Expr::new(
         span,
         ExprNode::Send { recv: owner.clone(), method: Symbol::from("error_details"), args: Vec::new(), block: None, parenthesized: false },
@@ -154,7 +195,7 @@ fn rewrite_to_hash(expr: &mut Expr) {
             elem: std::sync::Arc::new(Ty::Str),
         }),
     });
-    *expr = call;
+    call
 }
 
 fn ledger_messages(expr: &mut Expr, diags: &mut Vec<Diagnostic>) {

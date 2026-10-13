@@ -318,6 +318,13 @@ module ActiveRecord
       out
     end
 
+    # Not `errors`, the full messages: Rails renders a record's errors keyed by attribute, as `errors.as_json` answers.
+    def errors_json
+      out = {}
+      error_details.each { |error| out[error.attribute] = error_messages_for(error.attribute) }
+      out
+    end
+
     # The one frozen empty Hash a model's `initialize(attrs = …)` defaults
     # to on the ruby family (`lower::lazy_model_state`). A record built
     # bare — which is every hydration path: `from_row` is `new` then the

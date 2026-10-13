@@ -3265,6 +3265,57 @@ raise "got #{got.inspect}" unless got == "First,Second,Second 1,2"
 /// `to_s`, `utc_offset`, `formatted_offset` and `now` answer what Rails
 /// answers. Only offsets no daylight saving moves are pinned here; the
 /// runtime port reads `utc_offset` as Rails does, as the period's base
+/// `render json: record.errors` writes the errors keyed by attribute, as
+/// Rails' `errors.as_json` (`to_hash`) does, not the Array of full
+/// messages: the scaffold's JSON failure arm (#586), the same inside a
+/// Hash, and `errors.as_json` itself.
+#[test]
+fn render_json_errors_is_keyed_by_attribute() {
+    emit_and_run::real_blog()
+        .edit(
+            "config/routes.rb",
+            "  root \"articles#index\"\n",
+            "  root \"articles#index\"\n  get \"/drafts/check\", to: \"drafts#check\"\n",
+        )
+        .write(
+            "app/controllers/drafts_controller.rb",
+            r#"class DraftsController < ApplicationController
+  def check
+    article = Article.new(title: "", body: "x")
+    article.valid?
+    if params[:as] == "hash"
+      render json: article.errors.as_json
+    else
+      render json: { errors: article.errors }, status: :unprocessable_entity
+    end
+  end
+end
+"#,
+        )
+        .write(
+            "test/controllers/drafts_controller_test.rb",
+            r#"require "test_helper"
+
+class DraftsControllerTest < ActionDispatch::IntegrationTest
+  test "the scaffold's json failure arm" do
+    post "/articles.json", params: { article: { title: "", body: "x" } }
+    assert_response :unprocessable_entity
+    assert_equal %({"title":["can't be blank"],"body":["is too short (minimum is 10 characters)"]}), response.body
+  end
+
+  test "errors inside a hash, and as_json" do
+    get "/drafts/check"
+    assert_equal %({"errors":{"title":["can't be blank"],"body":["is too short (minimum is 10 characters)"]}}), response.body
+    get "/drafts/check", params: { as: "hash" }
+    assert_equal %({"title":["can't be blank"],"body":["is too short (minimum is 10 characters)"]}), response.body
+  end
+end
+"#,
+        )
+        .run_test("test/controllers/drafts_controller_test.rb")
+        .assert_passes();
+}
+
 /// offset. Expected values are ActiveSupport 8.1's.
 #[test]
 fn time_zone_lookups_run() {
