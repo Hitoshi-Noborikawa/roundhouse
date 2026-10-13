@@ -3407,6 +3407,8 @@ fn ruby_family_runtime_files(
     // gets the block exactly once; this is the ruby family's turn, and
     // the ruby family is the one that can run the lines.
     apply_module_mixins(&mut files, app, MixinForm::ExplicitReceiver);
+    apply_app_requires(&mut files, app);
+    apply_rails_version(&mut files, app);
     // Overlay boot replaces the spinel boot wholesale (see comment above
     // on apply_module_mixins), wiping the Date-package inject from
     // `spinel_files`. Re-inject only the shared `date_*` helpers — not
@@ -4561,6 +4563,74 @@ fn mixin_target_keyword(app: &App, target: &str) -> &'static str {
         Some(true) => "module",
         _ => "class",
     }
+}
+
+/// The app's own standard-library requires ([`App::app_requires`]) at
+/// the head of `boot.rb`, ahead of everything that file loads. Twice on
+/// the ruby family, like the mixins: the overlay's boot.rb replaces the
+/// spinel one wholesale, so each final tree gets the block from its own
+/// call. Idempotent, so a tree that already has it keeps one copy.
+///
+/// A library whose constant the tree defines itself is left out, by the
+/// rule `bundled_require_gaps` reads for the same table: the runtime's
+/// own `ERB` and `Shellwords` stand in for the libraries, and loading
+/// the library as well would reopen them (spinel's erb package opens
+/// `class ERB` over the runtime's module).
+fn apply_app_requires(files: &mut [(String, String)], app: &App) {
+    let provided_by_tree = |lib: &str| {
+        let require_line = format!("require {lib:?}");
+        BUNDLED.iter().filter(|(_, feature)| *feature == lib).any(|(konst, _)| {
+            files.iter().any(|(p, c)| {
+                p.ends_with(".rb") && defines_constant(c, konst) && !requires_feature(c, &require_line)
+            })
+        })
+    };
+    let libs: Vec<&String> = app.app_requires.iter().filter(|lib| !provided_by_tree(lib)).collect();
+    if libs.is_empty() {
+        return;
+    }
+    const MARK: &str = "# The app's own standard-library requires";
+    let Some((_, boot)) = files.iter_mut().find(|(p, _)| p == "boot.rb") else { return };
+    if boot.contains(MARK) {
+        return;
+    }
+    let mut block = format!(
+        "{MARK} (`require` lines in app/ and lib/,\n\
+         # which the emitted files do not carry; see App::app_requires).\n"
+    );
+    for lib in libs {
+        block.push_str(&format!("require {lib:?}\n"));
+    }
+    block.push('\n');
+    boot.insert_str(0, &block);
+}
+
+/// `Rails::VERSION` as the app's own Rails answers it: the `rails` (or
+/// `railties`) version its `Gemfile.lock` resolved, split the way
+/// railties' `gem_version.rb` splits it (MAJOR, MINOR, TINY, PRE, and
+/// STRING joined from them), for an app that prints
+/// `Rails::VERSION::STRING`. Without a lockfile nothing is written and the
+/// constant stays undefined, as before.
+fn apply_rails_version(files: &mut [(String, String)], app: &App) {
+    const MARK: &str = "# Rails::VERSION from the app's Gemfile.lock";
+    let Some(lock) = &app.gem_lock else { return };
+    let Some(version) = ["rails", "railties"].iter().find_map(|g| {
+        lock.specs.iter().find(|(n, _)| n == g).map(|(_, v)| v.clone())
+    }) else {
+        return;
+    };
+    let Some((_, boot)) = files.iter_mut().find(|(p, _)| p == "boot.rb") else { return };
+    if boot.contains(MARK) {
+        return;
+    }
+    let parts: Vec<&str> = version.split('.').collect();
+    let num = |i: usize| parts.get(i).and_then(|p| p.parse::<u32>().ok()).unwrap_or(0);
+    let pre = if parts.len() > 3 { format!("{:?}", parts[3..].join(".")) } else { "nil".to_string() };
+    boot.push_str(&format!(
+        "\n{MARK} (see project.rs::apply_rails_version).\n\
+         module Rails\n  module VERSION\n    MAJOR = {}\n    MINOR = {}\n    TINY = {}\n    PRE = {pre}\n    STRING = {version:?}\n  end\nend\n",
+        num(0), num(1), num(2)
+    ));
 }
 
 /// THE FORM DIFFERS BY TARGET, and the reason is spinel's, not ours.
@@ -6264,6 +6334,8 @@ fn spinel_files(app: &App, fixture: &Path) -> Result<(Vec<(String, String)>, Vec
     apply_models_aggregator(&mut files);
     apply_route_helpers_demand(&mut files);
     apply_module_mixins(&mut files, app, MixinForm::Reopen);
+    apply_app_requires(&mut files, app);
+    apply_rails_version(&mut files, app);
     // All three scaffold targets (spinel + the ruby/jruby trees derived
     // from this set) ship the comprehensive scaffold README as SPECIMEN.md,
     // freeing README.md for the generated quick-start `ensure_readme`

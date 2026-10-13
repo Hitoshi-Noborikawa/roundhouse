@@ -2101,11 +2101,69 @@ end
     // that signature (campfire's `WebPush::Connections::Stages`).
     crate::lower::known_super_forwarding::restate(&mut app);
     collect_binary_assets(vfs, dir, &mut app);
+    app.app_requires = collect_app_requires(vfs, dir);
     // Generated re-ingest labels never register real sources. No later
     // pass may append source-backed FileIds beyond the indexed snapshot.
     let late_sources = super::sources::drain();
     super::sources::assert_snapshot_matches(&[], &late_sources);
     Ok(app)
+}
+
+/// Standard libraries a Ruby program loads by name, the ones an app's
+/// own `require` can mean. A require of anything else is the app's own
+/// file (Zeitwerk or `require_relative` territory) or a gem, which the
+/// Gemfile and the runtime wiring answer for.
+const APP_REQUIRABLE_STDLIB: &[&str] = &[
+    "base64", "benchmark", "bigdecimal", "cgi", "csv", "date", "delegate", "digest",
+    "digest/md5", "digest/sha1", "digest/sha2", "English", "erb", "etc", "fileutils", "find",
+    "forwardable", "io/console", "io/nonblock", "io/wait", "ipaddr", "json", "logger",
+    "monitor", "net/http", "observer", "open3", "openssl", "optparse", "ostruct", "pathname",
+    "pp", "pty", "securerandom", "set", "shellwords", "singleton", "socket", "stringio",
+    "strscan", "tempfile", "time", "timeout", "tmpdir", "uri", "weakref", "yaml", "zlib",
+];
+
+/// [`App::app_requires`]: every literal top-level `require "lib"` of a
+/// standard library in `app/` and `lib/`. A terminal channel that
+/// requires `pty` and `io/console` needs the second for `IO#winsize=`,
+/// which io/console adds and no constant names, so the bundled requires
+/// (driven by the constants a file names) cannot bring it back.
+fn collect_app_requires<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> Vec<String> {
+    fn walk<V: Vfs + ?Sized>(vfs: &V, path: &Path, out: &mut std::collections::BTreeSet<String>, depth: usize) {
+        if depth > 16 || vfs.is_symlink(path) {
+            return;
+        }
+        if vfs.is_dir(path) {
+            let Ok(entries) = vfs.read_dir(path) else { return };
+            for entry in entries {
+                walk(vfs, &entry, out, depth + 1);
+            }
+            return;
+        }
+        if path.extension().and_then(|e| e.to_str()) != Some("rb") {
+            return;
+        }
+        let Ok(text) = vfs.read_to_string(path) else { return };
+        for line in text.lines() {
+            let Some(rest) = line.strip_prefix("require ") else { continue };
+            // `require "io/console" # why`: the literal, then nothing but
+            // a comment
+            let rest = rest.trim_start();
+            let Some(q) = rest.chars().next().filter(|c| *c == '"' || *c == '\'') else { continue };
+            let Some(end) = rest[1..].find(q) else { continue };
+            let after = rest[end + 2..].trim_start();
+            let quoted = (after.is_empty() || after.starts_with('#')).then(|| &rest[1..end + 1]);
+            if let Some(lib) = quoted {
+                if APP_REQUIRABLE_STDLIB.contains(&lib) {
+                    out.insert(lib.to_string());
+                }
+            }
+        }
+    }
+    let mut out = std::collections::BTreeSet::new();
+    for sub in ["app", "lib"] {
+        walk(vfs, &dir.join(sub), &mut out, 0);
+    }
+    out.into_iter().collect()
 }
 
 /// Source subtrees whose binary files are copied into the emitted tree.
