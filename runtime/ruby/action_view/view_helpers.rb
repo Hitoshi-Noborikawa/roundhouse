@@ -215,14 +215,16 @@ module ActionView
     # ones (A-Z a-z 0-9 _ . ~ -) as `%XX`, uppercase, so a space is `%20`
     # and a multibyte character is its UTF-8 bytes. Not `url_encode`
     # below, which is CGI.escape (`+` for a space) for query strings.
+    # Concat, not `<<`, as in render_attrs: `out << s` lowers as `.add` /
+    # write-into-`&str` on Kotlin/C#/Rust/Python/Elixir.
     def self.erb_url_encode(s)
-      out = +""
+      out = ""
       s.bytes.each do |b|
         if (b >= 48 && b <= 57) || (b >= 65 && b <= 90) || (b >= 97 && b <= 122) ||
            b == 45 || b == 46 || b == 95 || b == 126
-          out << b.chr
+          out = out + b.chr
         else
-          out << format("%%%02X", b)
+          out = out + format("%%%02X", b)
         end
       end
       out
