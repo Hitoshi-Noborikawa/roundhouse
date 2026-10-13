@@ -170,7 +170,10 @@ fn the_includes_before_a_class_target_stay() {
             .map(|(_, c)| c.as_str())
             .collect::<Vec<_>>()
             .join("\n");
-        assert!(src.contains("ring"), "{target:?}: Chime prefix must stay:\n{src}");
+        assert!(
+            src.contains("def ring") || src.contains("include Chime"),
+            "{target:?}: Chime prefix must stay:\n{src}"
+        );
         assert!(!src.contains("include Gong"), "{target:?}: class must not splice:\n{src}");
     }
 }
@@ -203,6 +206,118 @@ fn a_guarded_include_of_a_class_is_left_alone() {
         assert!(
             !src.contains("include Gong"),
             "{target:?}: class include must not be spliced:\n{src}"
+        );
+    }
+}
+
+/// A class target under `rescue NameError` raises unrescued `TypeError`
+/// in Ruby — leave the begin alone rather than erasing the failure.
+#[test]
+fn a_class_target_under_name_error_rescue_is_left_alone() {
+    let mut tree: HashMap<PathBuf, Vec<u8>> = HashMap::new();
+    tree.insert(PathBuf::from("db/schema.rb"), SCHEMA.as_bytes().to_vec());
+    tree.insert(
+        PathBuf::from("app/models/application_record.rb"),
+        b"class ApplicationRecord < ActiveRecord::Base\n  primary_abstract_class\nend\n".to_vec(),
+    );
+    tree.insert(PathBuf::from("app/models/concerns/chime.rb"), CHIME.as_bytes().to_vec());
+    tree.insert(
+        PathBuf::from("app/models/gong.rb"),
+        b"class Gong < ApplicationRecord\nend\n".to_vec(),
+    );
+    // Prefix would be wrong to splice: Ruby includes Chime then TypeErrors.
+    let head = "  begin\n    include Chime\n    include Gong\n  rescue NameError\n  end\n";
+    tree.insert(PathBuf::from("app/models/part.rb"), part(head).into_bytes());
+    let mut app = ingest_app_from_tree(tree).expect("ingest");
+    roundhouse::session::analyze_and_lower(&mut app);
+    for target in [BuildTarget::Ruby, BuildTarget::Spinel] {
+        let files = target_files(&app, Path::new("fixtures/tiny-blog"), target).expect("emit");
+        let src = files
+            .iter()
+            .filter(|(p, _)| p.ends_with("models/part.rb"))
+            .map(|(_, c)| c.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            !src.contains("def ring") && !src.contains("include Chime"),
+            "{target:?}: must not splice Chime when a later class target is unrescued:\n{src}"
+        );
+        assert!(!src.contains("include Gong"), "{target:?}: class must not splice:\n{src}");
+    }
+}
+
+/// A module whose residual `def self.included` can raise keeps its guard.
+#[test]
+fn a_module_with_included_hook_keeps_the_guard() {
+    let mut tree: HashMap<PathBuf, Vec<u8>> = HashMap::new();
+    tree.insert(PathBuf::from("db/schema.rb"), SCHEMA.as_bytes().to_vec());
+    tree.insert(
+        PathBuf::from("app/models/application_record.rb"),
+        b"class ApplicationRecord < ActiveRecord::Base\n  primary_abstract_class\nend\n".to_vec(),
+    );
+    tree.insert(
+        PathBuf::from("app/models/concerns/boom.rb"),
+        b"module Boom\n  def self.included(base)\n    raise NameError, \"boom\"\n  end\n  def bang\n    \"bang\"\n  end\nend\n".to_vec(),
+    );
+    let head = "  begin\n    include Boom\n  rescue NameError\n  end\n";
+    tree.insert(
+        PathBuf::from("app/models/part.rb"),
+        format!(
+            "class Part < ApplicationRecord\n{head}\n  def announce\n    \"ok\"\n  end\nend\n"
+        )
+        .into_bytes(),
+    );
+    let mut app = ingest_app_from_tree(tree).expect("ingest");
+    roundhouse::session::analyze_and_lower(&mut app);
+    for target in [BuildTarget::Ruby, BuildTarget::Spinel] {
+        let files = target_files(&app, Path::new("fixtures/tiny-blog"), target).expect("emit");
+        let src = files
+            .iter()
+            .filter(|(p, _)| p.ends_with("models/part.rb"))
+            .map(|(_, c)| c.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        // Bare-splicing would raise outside the rescue. Leaving the begin
+        // means the include never reaches the class (same as before this
+        // pass modeled the form) — not a silent bare include.
+        assert!(
+            !src.contains("include Boom") && !src.contains("bang"),
+            "{target:?}: must not bare-splice a module with included hook:\n{src}"
+        );
+    }
+}
+
+/// Relative `Chime` inside `A::B` finds `A::B::Chime` (the model's own
+/// nest), without inventing `A::Chime`.
+#[test]
+fn relative_include_resolves_in_the_model_nest() {
+    let mut tree: HashMap<PathBuf, Vec<u8>> = HashMap::new();
+    tree.insert(PathBuf::from("db/schema.rb"), SCHEMA.as_bytes().to_vec());
+    tree.insert(
+        PathBuf::from("app/models/application_record.rb"),
+        b"class ApplicationRecord < ActiveRecord::Base\n  primary_abstract_class\nend\n".to_vec(),
+    );
+    tree.insert(
+        PathBuf::from("app/models/a/b/chime.rb"),
+        b"module A\n  module B\n    module Chime\n      def ring(code)\n        \"rang #{code}\"\n      end\n    end\n  end\nend\n".to_vec(),
+    );
+    tree.insert(
+        PathBuf::from("app/models/a/b.rb"),
+        b"class A::B < ApplicationRecord\n  begin\n    include Chime\n  rescue NameError\n  end\n  def announce\n    ring(\"part\")\n  end\nend\n".to_vec(),
+    );
+    let mut app = ingest_app_from_tree(tree).expect("ingest");
+    roundhouse::session::analyze_and_lower(&mut app);
+    for target in [BuildTarget::Ruby, BuildTarget::Spinel] {
+        let files = target_files(&app, Path::new("fixtures/tiny-blog"), target).expect("emit");
+        let src = files
+            .iter()
+            .filter(|(p, _)| p.contains("models") && (p.ends_with("b.rb") || p.contains("/a/")))
+            .map(|(p, c)| format!("# {p}\n{c}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            src.contains("def ring") || src.contains("include Chime") || src.contains("include A::B::Chime"),
+            "{target:?}: A::B::Chime must resolve for include Chime inside A::B:\n{src}"
         );
     }
 }

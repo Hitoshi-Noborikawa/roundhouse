@@ -27,16 +27,25 @@
 //! something this pass does not model.
 //!
 //! A constant that names an app **class** is not spliced: Ruby raises
-//! `TypeError` (rescued when the clause catches `StandardError`). A
-//! Ruby core/stdlib module (`Enumerable`, …) counts as defined even
-//! though it is outside the app set. Relative lookup is root-only —
-//! `class A::B` does not open `A` lexically, so owner-name splitting
-//! would invent a false scope.
+//! `TypeError`. When the rescue catches `TypeError` (`StandardError`,
+//! `Exception`, `TypeError`, or a bare `rescue`), the successful module
+//! prefix stays. When it only catches `NameError`, the whole `begin` is
+//! left alone — splicing would erase an unrescued load failure.
+//!
+//! A module that still carries a class-side `included` method after
+//! ingest (a custom `def self.included`, not the Concern `included do`
+//! DSL) is also left alone: `include` can raise from that callback, and
+//! the rescue must stay around the call.
+//!
+//! A Ruby core/stdlib module (`Enumerable`, …) counts as defined even
+//! though it is outside the app set. Relative lookup tries the model's
+//! own nest (`A::B::Chime` inside `A::B`) then the root; it does **not**
+//! invent parent scopes (`class A::B` does not open `A`).
 
 use std::collections::HashSet;
 
 use crate::app::App;
-use crate::dialect::ModelBodyItem;
+use crate::dialect::{MethodReceiver, ModelBodyItem};
 use crate::expr::{Expr, ExprNode};
 use crate::ident::{ClassId, Symbol};
 
@@ -55,32 +64,75 @@ pub(super) fn splice_guarded_includes(app: &mut App) {
         .map(|lc| lc.name.clone())
         .chain(app.models.iter().map(|m| m.name.clone()))
         .collect();
+    // Residual `def self.included` after ingest — Concern's `included do`
+    // is not a MethodDef. A custom hook can raise NameError under the
+    // guard; bare-splicing would let that escape.
+    let modules_with_included_hook: HashSet<ClassId> = app
+        .library_classes
+        .iter()
+        .filter(|lc| lc.is_module)
+        .filter(|lc| {
+            lc.methods.iter().any(|m| {
+                m.receiver == MethodReceiver::Class && m.name.as_str() == "included"
+            })
+        })
+        .map(|lc| lc.name.clone())
+        .collect();
     for model in &mut app.models {
+        let owner = model.name.clone();
         let mut body = Vec::with_capacity(model.body.len());
         for item in std::mem::take(&mut model.body) {
-            let ModelBodyItem::Unknown { expr, leading_comments, leading_blank_line } = &item else {
+            let ModelBodyItem::Unknown {
+                expr,
+                leading_comments,
+                leading_blank_line,
+            } = &item
+            else {
                 body.push(item);
                 continue;
             };
-            let Some(includes) = guarded_includes(expr) else {
+            let Some(guard) = guarded_includes(expr) else {
                 body.push(item);
                 continue;
             };
-            // `include A, B` looks both up before including either, so one
-            // undefined name stops the whole call. A known **class** target
-            // is the same stop: Ruby would TypeError there; keep the
-            // successful module prefix (do not discard the whole begin).
-            let includes: Vec<&Expr> = includes
-                .into_iter()
-                .take_while(|include| {
-                    include_consts(include).all(|path| {
-                        matches!(lookup(path, &known_modules, &known_classes), Lookup::Module)
-                    })
-                })
-                .collect();
+            // Walk calls in order. `include A, B` looks both up before
+            // including either. Stop rules:
+            // - Unknown: keep the module prefix (NameError swallowed).
+            // - Class, rescue catches TypeError: keep the module prefix.
+            // - Class, rescue does not catch TypeError: leave the begin
+            //   (do not erase an unrescued TypeError).
+            // - Module with a residual `included` hook: leave the begin.
+            let mut prefix: Vec<&Expr> = Vec::new();
+            let mut leave_begin = false;
+            for include in &guard.includes {
+                let lookups: Vec<Lookup> = include_consts(include)
+                    .map(|path| lookup(path, &owner, &known_modules, &known_classes))
+                    .collect();
+                if lookups.iter().any(|l| matches!(l, Lookup::Unknown)) {
+                    break;
+                }
+                if lookups.iter().any(|l| matches!(l, Lookup::Class)) {
+                    if !guard.catches_type_error {
+                        leave_begin = true;
+                    }
+                    break;
+                }
+                if lookups.iter().any(|l| match l {
+                    Lookup::Module(id) => modules_with_included_hook.contains(id),
+                    _ => false,
+                }) {
+                    leave_begin = true;
+                    break;
+                }
+                prefix.push(include);
+            }
+            if leave_begin {
+                body.push(item);
+                continue;
+            }
             let mut comments = leading_comments.clone();
             let mut blank = *leading_blank_line;
-            for include in includes {
+            for include in prefix {
                 body.push(ModelBodyItem::Unknown {
                     expr: include.clone(),
                     leading_comments: std::mem::take(&mut comments),
@@ -92,11 +144,23 @@ pub(super) fn splice_guarded_includes(app: &mut App) {
     }
 }
 
+struct Guarded<'a> {
+    includes: Vec<&'a Expr>,
+    /// Rescue catches `TypeError` (bare, `StandardError`, `Exception`,
+    /// or `TypeError` itself).
+    catches_type_error: bool,
+}
+
 /// The `include` calls of a guarded block, or None when `expr` is not
 /// one.
-fn guarded_includes(expr: &Expr) -> Option<Vec<&Expr>> {
-    let ExprNode::BeginRescue { body, rescues, else_branch: None, ensure: None, implicit: false } =
-        &*expr.node
+fn guarded_includes(expr: &Expr) -> Option<Guarded<'_>> {
+    let ExprNode::BeginRescue {
+        body,
+        rescues,
+        else_branch: None,
+        ensure: None,
+        implicit: false,
+    } = &*expr.node
     else {
         return None;
     };
@@ -106,6 +170,14 @@ fn guarded_includes(expr: &Expr) -> Option<Vec<&Expr>> {
             || clause.classes.iter().any(|class| {
                 matches!(&*class.node, ExprNode::Const { path }
                     if path.last().is_some_and(|n| matches!(n.as_str(), "NameError" | "StandardError" | "Exception"))
+                        && (path.len() == 1 || (path.len() == 2 && path[0].as_str().is_empty())))
+            })
+    });
+    let catches_type_error = rescues.iter().any(|clause| {
+        clause.classes.is_empty()
+            || clause.classes.iter().any(|class| {
+                matches!(&*class.node, ExprNode::Const { path }
+                    if path.last().is_some_and(|n| matches!(n.as_str(), "TypeError" | "StandardError" | "Exception"))
                         && (path.len() == 1 || (path.len() == 2 && path[0].as_str().is_empty())))
             })
     });
@@ -123,14 +195,22 @@ fn guarded_includes(expr: &Expr) -> Option<Vec<&Expr>> {
                 && !args.is_empty()
                 && args.iter().all(|a| matches!(&*a.node, ExprNode::Const { .. })))
     };
-    (!statements.is_empty() && statements.iter().all(is_include)).then_some(statements)
+    if statements.is_empty() || !statements.iter().all(is_include) {
+        return None;
+    }
+    Some(Guarded {
+        includes: statements,
+        catches_type_error,
+    })
 }
 
 /// A rescue body that does nothing: empty, or a lone `nil`.
 fn is_empty_body(body: &Expr) -> bool {
     match &*body.node {
         ExprNode::Seq { exprs } => exprs.iter().all(is_empty_body),
-        ExprNode::Lit { value: crate::expr::Literal::Nil } => true,
+        ExprNode::Lit {
+            value: crate::expr::Literal::Nil,
+        } => true,
         _ => false,
     }
 }
@@ -146,20 +226,28 @@ fn include_consts(include: &Expr) -> impl Iterator<Item = &[Symbol]> {
     })
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum Lookup {
     /// An includable module the app (or Ruby core) defines.
-    Module,
+    Module(ClassId),
     /// An app class — `include` would TypeError.
     Class,
     /// Not in the app set and not a known core module.
     Unknown,
 }
 
-/// Root-only const lookup. Absolute paths strip a leading empty segment;
-/// relative paths do **not** invent scopes from a qualified class name
-/// (`class A::B` does not open `A` lexically).
-fn lookup(path: &[Symbol], modules: &HashSet<ClassId>, classes: &HashSet<ClassId>) -> Lookup {
+/// Const lookup for an include argument under `owner`.
+///
+/// Absolute paths (`::Chime`) are root-only. Relative paths try the
+/// model's own nest first (`A::B::Chime` inside `A::B`), then the root
+/// — never parent scopes invented by splitting a qualified class name
+/// (`class A::B` does not open `A`).
+fn lookup(
+    path: &[Symbol],
+    owner: &ClassId,
+    modules: &HashSet<ClassId>,
+    classes: &HashSet<ClassId>,
+) -> Lookup {
     let absolute = path.first().is_some_and(|s| s.as_str().is_empty());
     let segments: Vec<&str> = if absolute {
         path.iter().skip(1).map(|s| s.as_str()).collect()
@@ -170,9 +258,19 @@ fn lookup(path: &[Symbol], modules: &HashSet<ClassId>, classes: &HashSet<ClassId
         return Lookup::Unknown;
     }
     let name = segments.join("::");
+    if !absolute {
+        let scoped_name = format!("{owner}::{name}");
+        let scoped_id = ClassId(Symbol::from(scoped_name.as_str()));
+        if modules.contains(&scoped_id) {
+            return Lookup::Module(scoped_id);
+        }
+        if classes.contains(&scoped_id) {
+            return Lookup::Class;
+        }
+    }
     let id = ClassId(Symbol::from(name.as_str()));
     if modules.contains(&id) || is_ruby_core_module(&segments) {
-        Lookup::Module
+        Lookup::Module(id)
     } else if classes.contains(&id) {
         Lookup::Class
     } else {
