@@ -328,6 +328,11 @@ module Main
     # header store, right before it is copied below — a no-op unless
     # the action or one of its filters touched the store.
     controller.commit_cache_control!
+    # Rails' Rack::ETag and Rack::ConditionalGet
+    # (action_controller/conditional_get.rb): the body ETag, the default
+    # Cache-Control, and a 304 for a matching If-None-Match, on the
+    # controller's status, body and headers before they are read below.
+    controller.commit_conditional_get!(env["REQUEST_METHOD"].to_s, env["HTTP_IF_NONE_MATCH"].to_s)
     # Headers the action set beyond Content-Type/Location — a
     # `Content-Disposition` on a download, the Cache-Control a blob
     # route asks for — ride as the tuple's sixth element.

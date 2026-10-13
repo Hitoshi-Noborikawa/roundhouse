@@ -544,6 +544,17 @@ module Main
       return
     end
 
+    # Compose `Cache-Control` from whatever `response.cache_control`
+    # holds (`expires_in`, `replace`/`merge!`/`[]=`) onto the buffered
+    # header store - a no-op unless the action or one of its filters
+    # touched the store. Then Rails' Rack::ETag and Rack::ConditionalGet
+    # (action_controller/conditional_get.rb): the body ETag, the default
+    # Cache-Control, and a 304 for a matching If-None-Match. Both run
+    # before the status, body and headers are copied below, since a 304
+    # changes all three.
+    controller.commit_cache_control!
+    controller.commit_conditional_get!(req.verb, req.req_headers.fetch("if-none-match", ""))
+
     res.status = controller.status
     # The layout wrap happens at the controller's render call sites
     # (apply_layout_lowering — the seam where the @ivars a layout reads
@@ -574,11 +585,6 @@ module Main
     elsif controller.content_type != "text/html; charset=utf-8"
       res.headers["Content-Type"] = controller.content_type
     end
-    # Compose `Cache-Control` from whatever `response.cache_control`
-    # holds (`expires_in`, `replace`/`merge!`/`[]=`) onto the buffered
-    # header store, right before it is copied below — a no-op unless
-    # the action or one of its filters touched the store.
-    controller.commit_cache_control!
     # Headers the action set beyond those two — a `Content-Disposition`
     # on a download, the Cache-Control a blob route asks for. A nil
     # value is a header the app UNSET (campfire's `X-Rev` is
