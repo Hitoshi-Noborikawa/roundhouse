@@ -638,7 +638,7 @@ fn with_locale(e: &Expr) -> Option<Expr> {
         _ => return None,
     };
     // Every node is stamped: the lowered IR is diagnosed again.
-    let prev_ty = Ty::Union { variants: vec![Ty::Str, Ty::Nil] };
+    let prev_ty = Ty::Union { variants: vec![Ty::Str, Ty::Nil].into() };
     let prev = Symbol::from(format!("__i18n_locale_prev_{}", span.start));
     let read_prev = Expr { ty: Some(prev_ty.clone()), ..Expr::new(span, ExprNode::Var { id: VarId(0), name: prev.clone() }) };
     let enter = Expr { ty: Some(prev_ty.clone()), ..const_send(span, "I18n", "enter_locale", vec![locale.clone()]) };
