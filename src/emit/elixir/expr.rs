@@ -1233,19 +1233,26 @@ fn emit_send(recv: Option<&Expr>, method: &str, args: &[Expr]) -> String {
     // stored ISO-8601 text into a native UTC `%DateTime{}` — the
     // hand-written `RhDateTime.parse` (runtime/elixir/v2/rh_datetime.ex),
     // not a transpiled `ActiveSupport` module (no such unit exists).
-    // `ActiveSupport.errors_for(errors, attributes, attribute, prefix)` (runtime/ruby/active_support_ext.rb): the messages added on `attribute`, without their prefix.
-    if method == "errors_for" && args.len() == 4 {
+    // `ActiveRecord::ErrorDetail` (runtime/ruby/active_record/base.rb) is a map here: the Elixir model keeps no transpiled Base.
+    if method == "new" && args.len() == 3 {
         if let Some(ExprNode::Const { path }) = recv.map(|r| &*r.node) {
-            if path.last().map(|s| s.as_str()) == Some("ActiveSupport") {
+            if path.iter().map(|s| s.as_str()).eq(["ActiveRecord", "ErrorDetail"]) {
                 return format!(
-                    "(fn errors, attributes, attribute, prefix -> for {{m, a}} <- Enum.zip(errors, attributes), a == attribute, do: String.replace_prefix(m, prefix, \"\") end).({}, {}, {}, {})",
+                    "%{{attribute: {}, kind: {}, message: {}}}",
                     emit_expr(&args[0]),
                     emit_expr(&args[1]),
                     emit_expr(&args[2]),
-                    emit_expr(&args[3]),
                 );
             }
         }
+    }
+    // `Base#error_messages_for(attribute)`: the messages of the details on `attribute`.
+    if method == "error_messages_for" && args.len() == 1 {
+        let record = recv.map(emit_expr).unwrap_or_else(|| "record".to_string());
+        return format!(
+            "(for detail <- {record}.error_details, detail.attribute == {}, do: detail.message)",
+            emit_expr(&args[0]),
+        );
     }
     if method == "parse_db_time" && args.len() == 1 {
         if let Some(r) = recv {
@@ -2018,9 +2025,8 @@ fn effective_recv_ty(e: &Expr) -> Option<crate::ty::Ty> {
         }
     }
     // The form builder synthesizes this call after the view body is typed, and that per-view typer cannot see the record's `errors`
-    if let ExprNode::Send { recv: Some(r), method, .. } = &*e.node {
-        if method.as_str() == "errors_for"
-            && matches!(&*r.node, ExprNode::Const { path } if path.len() == 1 && path[0].as_str() == "ActiveSupport")
+    if let ExprNode::Send { method, .. } = &*e.node {
+        if method.as_str() == "error_messages_for"
         {
             return Some(crate::ty::Ty::Array { elem: Box::new(crate::ty::Ty::Str) });
         }
