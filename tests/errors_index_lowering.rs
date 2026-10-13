@@ -206,3 +206,26 @@ end
     assert!(out.contains(r#"Draft.latest.error_messages_for("url")"#), "{out}");
     assert!(diags.is_empty(), "{diags:?}");
 }
+
+#[test]
+fn to_hash_groups_the_record_s_error_details() {
+    let (out, diags) = lower_and_emit(
+        r#"
+class Draft
+  def problems
+    errors.to_hash
+  end
+
+  def latest_problems
+    Draft.latest.errors.to_hash
+  end
+end
+"#,
+    );
+    assert!(out.contains("ActiveSupport.errors_to_hash(error_details)"), "expected the projection on self:\n{out}");
+    assert!(
+        out.contains("ActiveSupport.errors_to_hash(Draft.latest.error_details)"),
+        "expected the projection to read the record once:\n{out}"
+    );
+    assert!(diags.is_empty(), "unexpected residue: {diags:?}");
+}

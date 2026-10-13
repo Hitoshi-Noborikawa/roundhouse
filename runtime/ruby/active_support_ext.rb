@@ -247,6 +247,23 @@ module ActiveSupport
     value.is_a?(String) && list.include?(value) ? value : nil
   end
 
+  # Rails' `ActiveModel::Errors#to_hash`: each attribute with errors, in
+  # the order of its first error, to its messages
+  # (`{ title: ["can't be blank"] }`). Reached from
+  # `src/lower/errors_index.rs` with the record's `error_details`. Takes
+  # the details as an ARGUMENT, not a `Base` method: every strict target
+  # transpiles `Base`, so a method there would need an implementation and
+  # a check on each of them.
+  def self.errors_to_hash(details)
+    out = {}
+    details.each do |detail|
+      key = detail.attribute.to_sym
+      out[key] = [] unless out.key?(key)
+      out[key] << detail.message
+    end
+    out
+  end
+
   # `ActiveSupport::MessageVerifier::InvalidSignature` — what a signed
   # value that does not verify raises. Rails hangs it off the verifier
   # class, and the NAME is the whole point: a controller that rescues it

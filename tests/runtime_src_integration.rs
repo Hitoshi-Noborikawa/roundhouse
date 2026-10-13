@@ -1037,7 +1037,14 @@ fn every_runtime_method_body_concretely_typed() {
     // values and collect the block's untyped answers, as Rails' Enumerable
     // Headers does (+4 in action_dispatch/headers.rb; their blockless
     // Enumerator answers add none).
-    const CEILING: usize = 701;
+    // MEASURED 717 on 2026-10-13 (#829): NullRelation `@where_null` /
+    // borrowed-condition walks and quote-aware If-None-Match members
+    // add gradual sites in `active_record/relation.rb` and
+    // `action_controller/base.rb` (+16).
+    // `ActiveStorage::AttachedMany#map` (the proxy's Enumerable reads for a
+    // jbuilder block over `record.pictures`) adds 1, MEASURED: the value
+    // of its `yield`, the same block-return escape `#each` carries.
+    const CEILING: usize = 718;
     assert!(
         total_gradual <= CEILING,
         "{total_gradual} Ty::Untyped sites exceeds ceiling of {CEILING}",

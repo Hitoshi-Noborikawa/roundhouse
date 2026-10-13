@@ -1308,6 +1308,74 @@ fn errors_index_picks_a_field_by_its_attribute_on_spinel() {
     errors_by_attribute_app("%{attribute} %{message}").run_spinel(ERRORS_BY_ATTRIBUTE).assert_passes();
 }
 
+/// `errors.to_hash` maps each attribute with errors to its messages, in
+/// the order Rails gives: a `validates` rule, a `validate` method's
+/// `errors.add(:base, …)`, on the record itself and on a record a class
+/// method builds.
+fn errors_to_hash_app(format: &str) -> emit_and_run::Overlay {
+    emit_and_run::real_blog()
+        .write("config/locales/en.yml", &format!("en:\n  hello: \"Hello world\"\n  errors:\n    format: \"{format}\"\n"))
+        .edit(
+            "app/models/article.rb",
+            "  validates :body, presence: true, length: { minimum: 10 }\n",
+            "  validates :body, presence: true, length: { minimum: 10 }
+  validate :odd_body
+
+  def odd_body
+    errors.add(:base, \"is odd\") if body == \"odd\"
+  end
+
+  def errors_hash
+    errors.to_hash
+  end
+
+  def self.draft_errors(title, body)
+    article = Article.new(title: title, body: body)
+    article.valid?
+    article.errors.to_hash
+  end
+",
+        )
+}
+
+const ERRORS_TO_HASH: &str = r#"a = Article.new(title: "", body: "odd")
+a.valid?
+expected = { title: ["can't be blank"], body: ["is too short (minimum is 10 characters)"], base: ["is odd"] }
+raise a.errors_hash.inspect unless a.errors_hash == expected && a.errors_hash.keys == [:title, :body, :base]
+raise Article.draft_errors("", "odd").inspect unless Article.draft_errors("", "odd") == expected
+b = Article.new(title: "A title", body: "A long enough body")
+b.valid?
+raise b.errors_hash.inspect unless b.errors_hash.empty?
+puts "errors.to_hash passed"
+"#;
+
+#[test]
+fn errors_to_hash_groups_messages_by_attribute() {
+    errors_to_hash_app("%{attribute} %{message}").run_ruby(ERRORS_TO_HASH).assert_passes();
+}
+
+#[test]
+fn errors_to_hash_does_not_depend_on_the_message_format() {
+    errors_to_hash_app("%{message} (%{attribute})").run_ruby(ERRORS_TO_HASH).assert_passes();
+}
+
+#[test]
+#[ignore = "requires the Spinel toolchain"]
+fn errors_to_hash_groups_messages_by_attribute_on_spinel() {
+    errors_to_hash_app("%{attribute} %{message}").run_spinel(ERRORS_TO_HASH).assert_passes();
+}
+
+/// The helper is the shared Ruby runtime's, which no strict target loads.
+#[test]
+fn errors_to_hash_is_a_gap_on_strict_targets() {
+    let (_emitted, errors) = errors_to_hash_app("%{attribute} %{message}").emit(roundhouse::project::BuildTarget::Crystal);
+    assert_eq!(
+        errors.iter().filter(|e| e.contains("ActiveSupport.errors_to_hash is only available on the ruby family and spinel")).count(),
+        2,
+        "{errors:#?}"
+    );
+}
+
 /// A field the lowering cannot humanize at compile time keeps its error.
 #[test]
 fn errors_full_message_on_a_dynamic_field_stays_an_error() {
@@ -1387,6 +1455,48 @@ puts "sidekiq passed"
         );
     run.assert_passes();
     assert!(run.stdout.contains("sidekiq passed"));
+}
+
+/// An abstract base worker with no `perform` anywhere in its own chain
+/// (just the Sidekiq include, `sidekiq_options`, and a private helper)
+/// isn't an entry point: it gets no wrapper and raises no analysis
+/// error, and its concrete subclass's own positional `perform` is
+/// still wrapped and still runs `perform_async` inline.
+#[test]
+fn an_abstract_base_worker_with_no_perform_is_not_an_entry_point() {
+    let run = emit_and_run::real_blog()
+        .write(
+            "app/workers/base_worker.rb",
+            "class BaseWorker
+  include Sidekiq::Worker
+  sidekiq_options queue: \"default\"
+
+  private
+
+  def helper
+    \"unused\"
+  end
+end
+",
+        )
+        .write(
+            "app/workers/concrete_worker.rb",
+            "class ConcreteWorker < BaseWorker
+  def perform(title)
+    Article.create!(title: title, body: \"A sufficiently long body.\")
+  end
+end
+",
+        )
+        .run_ruby(
+            r#"ConcreteWorker.perform_async("abstract base worked")
+titles = Article.all.map(&:title)
+raise "titles: #{titles.inspect}" unless titles.include?("abstract base worked")
+puts "abstract base worker passed"
+"#,
+        );
+    run.assert_passes();
+    assert!(run.stdout.contains("abstract base worker passed"));
 }
 
 /// A class object and its instances that define the same names: each
@@ -10978,12 +11088,202 @@ raise "filter" unless ActiveStorage.video_preview_vf_filter.include?("gte(t\\,5)
 raise "previewers include" unless ActiveStorage.previewers.include?(TimeLimitedVideoPreviewer)
 raise "previewers exclude" if ActiveStorage.previewers.include?(ActiveStorage::Previewer::VideoPreviewer)
 
+# Rails' ActiveStorage.paths — mutable executable locations.
+raise "paths default" unless ActiveStorage.paths.is_a?(Hash)
+previous = ActiveStorage.paths[:ffmpeg]
+ActiveStorage.paths[:ffmpeg] = "/tmp/fake-ffmpeg"
+raise "paths assign" unless ActiveStorage.paths[:ffmpeg] == "/tmp/fake-ffmpeg"
+ActiveStorage.paths[:ffmpeg] = previous
+
+# TIME_LIMIT on the video subclass → class-side poster (preview_timeout
+# override is the typed API; TIME_LIMIT is the campfire/stub_const path).
+raise "TIME_LIMIT" unless TimeLimitedVideoPreviewer::TIME_LIMIT == 10
+raise "preview_timeout default" unless TimeLimitedVideoPreviewer.preview_timeout.nil?
+raise "time limit" unless ActiveStorage::Previewer.poster_time_limit == 10
+
 # `-vf` must match as a whole option, not a prefix of `-vframes`.
 def ActiveStorage.video_preview_arguments
   "-vframes 1 -vf 'scale=320:240' -f image2"
 end
 raise "vf vs vframes" unless ActiveStorage.video_preview_vf_filter == "scale=320:240"
 "#,
+        )
+        .assert_passes();
+}
+
+/// Conditional GET: `fresh_when etag:` sets ETag and answers 304 when
+/// `If-None-Match` matches (campfire CachedResponses native validators).
+#[test]
+fn fresh_when_etag_answers_not_modified() {
+    emit_and_run::real_blog()
+        .run_ruby(
+            r##"
+c = ActionController::Base.new
+c.request = ActionDispatch::Request.new({ "HTTP_IF_NONE_MATCH" => "W/\"abc123\"" })
+c.fresh_when(etag: "abc123", template: false)
+raise "status #{c.status}" unless c.status == 304
+raise "performed" unless c.performed?
+raise "etag #{c.headers["ETag"].inspect}" unless c.headers["ETag"] == "W/\"abc123\""
+
+fresh = ActionController::Base.new
+fresh.request = ActionDispatch::Request.new({ "REQUEST_METHOD" => "GET" })
+fresh.fresh_when(etag: "abc123", template: false)
+raise "fresh status #{fresh.status}" unless fresh.status == 200
+raise "fresh performed" if fresh.performed?
+raise "fresh etag" unless fresh.headers["ETag"] == "W/\"abc123\""
+
+other = ActionController::Base.new
+other.request = ActionDispatch::Request.new({ "HTTP_IF_NONE_MATCH" => "W/\"old\"" })
+other.fresh_when({ etag: "new" })
+raise "mismatch status" unless other.status == 200
+raise "mismatch etag" unless other.headers["ETag"] == "W/\"new\""
+
+# Quoted opaque-tags may contain commas; blind split must not 304 on `"b"`.
+comma = ActionController::Base.new
+comma.request = ActionDispatch::Request.new({ "HTTP_IF_NONE_MATCH" => "\"a,b\"" })
+comma.fresh_when(etag: "b", template: false)
+raise "comma status #{comma.status}" unless comma.status == 200
+
+# Wildcard list member matches any validator.
+star = ActionController::Base.new
+star.request = ActionDispatch::Request.new({ "HTTP_IF_NONE_MATCH" => "\"other\", *" })
+star.fresh_when(etag: "abc123", template: false)
+raise "star status #{star.status}" unless star.status == 304
+
+# Unquoted tokens are not entity-tags.
+bare = ActionController::Base.new
+bare.request = ActionDispatch::Request.new({ "HTTP_IF_NONE_MATCH" => "abc123" })
+bare.fresh_when(etag: "abc123", template: false)
+raise "bare status #{bare.status}" unless bare.status == 200
+
+# RFC 9110: 304 only for GET/HEAD — POST still sets ETag but stays 200.
+post = ActionController::Base.new
+post.request = ActionDispatch::Request.new({
+  "REQUEST_METHOD" => "POST",
+  "HTTP_IF_NONE_MATCH" => "W/\"abc123\"",
+})
+post.fresh_when(etag: "abc123", template: false)
+raise "post status #{post.status}" unless post.status == 200
+raise "post etag" unless post.headers["ETag"] == "W/\"abc123\""
+raise "post performed" if post.performed?
+
+# stale? on POST stays stale (true) so `if stale?` still runs the body.
+stale_post = ActionController::Base.new
+stale_post.request = ActionDispatch::Request.new({
+  "REQUEST_METHOD" => "POST",
+  "HTTP_IF_NONE_MATCH" => "W/\"abc123\"",
+})
+raise "stale? post" unless stale_post.stale?(etag: "abc123") == true
+"##
+        )
+        .assert_passes();
+}
+
+/// `Model.none` and `where(id: [])` are Rails NullRelations: empty
+/// terminals with zero adapter selects. Negation / `or` must not stick
+/// or invert nullness (thermos H1).
+#[test]
+fn relation_none_and_empty_in_do_not_query() {
+    emit_and_run::real_blog()
+        .run_ruby(
+            r##"
+QUERIES = []
+adapter = ActiveRecord.adapter
+orig = adapter.method(:select_rows)
+adapter.define_singleton_method(:select_rows) do |sql|
+  QUERIES << sql
+  orig.call(sql)
+end
+
+def assert_no_query(label)
+  before = QUERIES.length
+  yield
+  n = QUERIES.length - before
+  raise "#{label}: #{n} queries" if n > 0
+end
+
+row = Article.create!(title: "NullRel", body: "long enough body")
+
+none = Article.none
+raise "klass" unless none.klass == Article
+assert_no_query("none.to_a") { raise "to_a" unless none.to_a.empty? }
+assert_no_query("none.ids") { raise "ids" unless none.ids.empty? }
+assert_no_query("none.empty?") { raise "empty?" unless none.empty? }
+assert_no_query("none.exists?") { raise "exists?" if none.exists? }
+assert_no_query("none.any?") { raise "any?" if none.any? }
+assert_no_query("none.count") { raise "count" unless none.count == 0 }
+assert_no_query("none.pluck") { raise "pluck" unless none.pluck(:id).empty? }
+
+empty_in = Article.where(id: [])
+assert_no_query("empty_in.to_a") { raise "empty_in to_a" unless empty_in.to_a.empty? }
+assert_no_query("empty_in.ids") { raise "empty_in ids" unless empty_in.ids.empty? }
+assert_no_query("empty_in.empty?") { raise "empty_in empty?" unless empty_in.empty? }
+assert_no_query("empty_in.count") { raise "empty_in count" unless empty_in.count == 0 }
+
+# Negated empty IN is a tautology — must not be NullRelation.
+# (`where.not` lowers to Relation#not; call it directly in this MRI script.)
+not_empty = Article.all.not(id: [])
+raise "not null?" if not_empty.null_relation?
+raise "not to_a" unless not_empty.to_a.map(&:id).include?(row.id)
+
+excl = Article.all.excluding([])
+raise "excluding null?" if excl.null_relation?
+raise "excluding to_a" unless excl.to_a.map(&:id).include?(row.id)
+
+# Left-null OR productive side yields the other (Rails NullRelation#or).
+or_side = Article.none.or(Article.where(id: row.id))
+raise "or null?" if or_side.null_relation?
+raise "or to_a" unless or_side.to_a.map(&:id) == [row.id]
+
+# Temporary find_by / find_sole_by(id: []) must not stick null on the receiver.
+rel = Article.all.where("1=1")
+raise "find_by empty" unless rel.find_by(id: []).nil?
+raise "find_by sticky" if rel.null_relation?
+raise "find_by still loads" unless rel.to_a.map(&:id).include?(row.id)
+begin
+  rel.find_sole_by(id: [])
+  raise "find_sole_by should raise"
+rescue ActiveRecord::RecordNotFound
+end
+raise "find_sole_by sticky" if rel.null_relation?
+
+# merge(none) adopts null.
+merged = Article.all.where("1=1").merge(Article.none)
+raise "merge null?" unless merged.null_relation?
+assert_no_query("merge.none.ids") { raise "merge ids" unless merged.ids.empty? }
+
+# Empty-IN NullRelation must clear when unscope drops the contradiction
+# (Thermos M1). `none.unscope(where: :id)` stays null — none's (1 = 0)
+# is unattributed.
+restored = Article.where(id: []).unscope(where: :id)
+raise "unscope sticky null?" if restored.null_relation?
+raise "unscope restores rows" unless restored.to_a.map(&:id).include?(row.id)
+still_none = Article.none.unscope(where: :id)
+raise "none unscope null?" unless still_none.null_relation?
+assert_no_query("none.unscope.ids") { raise "none unscope ids" unless still_none.ids.empty? }
+assert_no_query("none.limit.unscope.size") {
+  n = Article.none.limit(1).unscope(where: :id).size
+  raise "none limit size #{n}" unless n == 0
+}
+
+# Compound empty-IN keeps null when a sibling where is unscoped away.
+compound = Article.where(id: []).where(title: "NullRel")
+raise "compound null?" unless compound.null_relation?
+kept = compound.unscope(where: :title)
+raise "compound unscope cleared null?" unless kept.null_relation?
+assert_no_query("compound.unscope.ids") { raise "compound ids" unless kept.ids.empty? }
+
+# A value that literally contains "1=0" must not stick @null after the
+# empty-IN clause is unscoped (structural tracking, not SQL text search).
+titled = Article.create!(title: "1=0", body: "long enough body for pin")
+sticky = Article.where(id: []).where(title: "1=0").unscope(where: :id)
+raise "title 1=0 sticky null?" if sticky.null_relation?
+raise "title 1=0 row" unless sticky.to_a.map(&:id).include?(titled.id)
+
+# preloaded integer ids must not call .id on Fixnum.
+pre = Article.all.preloaded([row.id], true)
+raise "preloaded ids" unless pre.ids == [row.id]
+"##
         )
         .assert_passes();
 }
