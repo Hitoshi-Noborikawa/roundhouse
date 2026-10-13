@@ -47,6 +47,7 @@ pub mod seeds_to_library;
 pub mod test_module_to_library;
 pub mod create_block;
 pub mod as_json_poro;
+mod as_json_record;
 pub mod active_model_model;
 pub mod enumerable_ext;
 mod fused;

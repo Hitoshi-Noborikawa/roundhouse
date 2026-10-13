@@ -3320,6 +3320,93 @@ end
         .assert_passes();
 }
 
+/// `render json:` of a table-backed record, an Array of them and a Relation.
+fn records_json_app() -> emit_and_run::Overlay {
+    emit_and_run::real_blog()
+        .edit(
+            "config/routes.rb",
+            "  root \"articles#index\"\n",
+            "  root \"articles#index\"\n  get \"/records/one\", to: \"records#one\"\n  get \"/records/all\", to: \"records#all\"\n  get \"/records/comments\", to: \"records#comments\"\n",
+        )
+        .write(
+            "app/controllers/records_controller.rb",
+            r#"class RecordsController < ApplicationController
+  def one
+    render json: Article.find(params[:id])
+  end
+
+  def all
+    render json: Article.order(:id).to_a
+  end
+
+  def comments
+    render json: Comment.where(article_id: params[:id])
+  end
+end
+"#,
+        )
+}
+
+/// Rails' `serializable_hash`: every column in schema order, timestamps as
+/// `TimeWithZone#as_json` writes them, strings HTML-escaped.
+#[test]
+fn render_json_record_writes_its_columns() {
+    records_json_app()
+        .write(
+            "test/controllers/records_controller_test.rb",
+            r#"require "test_helper"
+
+class RecordsControllerTest < ActionDispatch::IntegrationTest
+  TIME = '"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z"'
+
+  setup do
+    @article = Article.create!(title: "A <b> & co", body: "Long enough body text")
+    @comment = @article.comments.create!(commenter: "Ann", body: "Nice")
+  end
+
+  test "one record" do
+    get "/records/one", params: { id: @article.id }
+    assert_equal "application/json", response.media_type
+    assert_match(/\A\{"id":#{@article.id},"title":"A \\u003cb\\u003e \\u0026 co","body":"Long enough body text","created_at":#{TIME},"updated_at":#{TIME}\}\z/, response.body)
+  end
+
+  test "an Array of records" do
+    get "/records/all"
+    assert_match(/\A\[\{"id":\d+,.*\}\]\z/, response.body)
+    assert_equal Article.count, response.body.scan('"id":').size
+  end
+
+  test "a Relation of records" do
+    get "/records/comments", params: { id: @article.id }
+    assert_match(/\A\[\{"id":#{@comment.id},"article_id":#{@article.id},"commenter":"Ann","body":"Nice","created_at":#{TIME},"updated_at":#{TIME}\}\]\z/, response.body)
+  end
+end
+"#,
+        )
+        .run_test("test/controllers/records_controller_test.rb")
+        .assert_passes();
+}
+
+/// The same writer compiled by Spinel, where the runtime encoder does not exist.
+#[test]
+#[ignore = "requires the Spinel toolchain"]
+fn render_json_record_writer_runs_on_spinel() {
+    let script = r#"Db.configure(":memory:")
+Schema.statements.each { |sql| Db.exec(sql) }
+ActiveRecord.adapter = SqliteAdapter
+a = Article.create!(title: "A <b> & co", body: "Long enough body text")
+c = Comment.create!(article_id: a.id, commenter: "Ann", body: "Nice")
+time = '"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z"'
+want = Regexp.new('\A\{"id":' + a.id.to_s + ',"title":"A \\\\u003cb\\\\u003e \\\\u0026 co","body":"Long enough body text","created_at":' + time + ',"updated_at":' + time + '\}\z')
+raise "article: #{a.as_json_str}" unless want.match?(a.as_json_str)
+raise "comment: #{c.as_json_str}" unless c.as_json_str.start_with?('{"id":' + c.id.to_s + ',"article_id":' + a.id.to_s + ',"commenter":"Ann","body":"Nice","created_at":"')
+puts "record json passed"
+"#;
+    let run = records_json_app().run_spinel(script);
+    run.assert_passes();
+    assert!(run.stdout.contains("record json passed"));
+}
+
 /// offset. Expected values are ActiveSupport 8.1's.
 #[test]
 fn time_zone_lookups_run() {

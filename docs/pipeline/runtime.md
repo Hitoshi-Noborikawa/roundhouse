@@ -863,11 +863,30 @@ an already-encoded body, `render plain: v.as_json_str, content_type:
 target; `JsonBuilder` is shared runtime, so the ruby lane runs the very
 writer the compiled lane does. Demand-gated and type-gated: only a class
 the analyzer typed at a `render json:` site is given the pair. A value
-with no writer — a collection containing objects or temporal values, a Relation, a class with its own
+with no writer — a collection containing objects or temporal values, a Relation of a class with no writer, a class with its own
 `as_json` (whose pairs `as_json_shape` recognizes but whose computed
 values are not yet typed, see that module) — keeps the runtime
 encoder, which the strict targets do not have; the suite ledger's
 `render-json-encoder` rule is the tripwire for it.
+
+**A table-backed record with no `as_json` is its columns.** Rails
+serializes one through `serializable_hash`: every attribute in
+`attribute_names` order (the primary key, then the schema's columns), each
+as `as_json` writes it, except the inheritance column (`type`), which
+ActiveRecord's `serializable_hash` always excepts. `lower::as_json_record` writes that down as the same
+`as_json_str` writer over the columns, so `render json: @article`, an Array
+of records and a Relation (`render json: @stories`) are the writer's text
+on every tree. The writer is HTML-entity escaped and writes a datetime as
+the jbuilder writer does (`Z` for a UTC app, the zone's offset otherwise),
+both of which the runtime encoder got wrong for a record, and it encoded a
+Relation as its `to_s`. A model keeps the runtime encoder when Rails would
+answer differently from the columns alone. That covers a `time`, `decimal`,
+`json`/`jsonb` or `binary` column, a `references` column the schema keeps
+under its logical name, and an `attribute`, `serialize`, `store`,
+`store_accessor`, `encrypts` or `composed_of` declaration, a renamed
+`inheritance_column` or `ignored_columns`, and an overridden reader of a date
+or datetime column (the writer reads the stored value, while Rails calls the
+reader). It also covers a column whose reader is not typed as a JSON scalar.
 
 Inline Hash/Array payloads whose inferred contents are JSON primitives use
 the target's existing `JSON.generate` encoder, including nested primitive

@@ -130,12 +130,16 @@ pub fn apply_as_json_synthesis(app: &mut App, registry: &HashMap<ClassId, ClassI
             written.insert(model.name.clone());
             continue;
         }
-        // A TABLE-backed record without its own `as_json` serializes
-        // its columns in Rails (`serializable_hash`), not its
-        // `attr_accessor`s — a different answer this path does not
-        // write. The declared-readers writer is for the tableless class
-        // (`Opengraph::Metadata`); a record keeps the runtime encoder.
-        if app.schema.tables.contains_key(&model.table.0) {
+        // Not the declared readers below: a table-backed record serializes its columns (`serializable_hash`), not its `attr_accessor`s.
+        if let Some(table) = app.schema.tables.get(&model.table.0) {
+            if let Ok(writer) = super::as_json_record::column_writer(model, table, registry) {
+                model.body.push(ModelBodyItem::Method {
+                    method: writer,
+                    leading_comments: Vec::new(),
+                    leading_blank_line: true,
+                });
+                written.insert(model.name.clone());
+            }
             continue;
         }
         // The `attr_*` family, splat expanded — the SAME list the
@@ -386,7 +390,7 @@ fn declared_as_json_writer(
 }
 
 /// The encoder a value of type `ty` takes, when there is one.
-fn encoding_for(ty: &Ty) -> Result<PairEncoding, ShapeError> {
+pub(super) fn encoding_for(ty: &Ty) -> Result<PairEncoding, ShapeError> {
     fn scalar(ty: &Ty) -> bool {
         match ty {
             Ty::Str | Ty::Int | Ty::Float | Ty::Bool | Ty::Nil => true,
