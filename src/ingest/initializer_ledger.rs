@@ -314,7 +314,8 @@ const RECOGNIZERS: &[Recognizer] = &[
         name: "i18n available_locales (config.i18n.available_locales =)",
         origins: APP,
         levels: ANY,
-        reads: |p| code_lines(p.text).any(|l| available_locales_line(l).is_some()),
+        // A computed list is not read (the locales come from the app's files), so it stays reported.
+        reads: |p| code_lines(p.text).any(|l| matches!(available_locales_line(l), Some(Ok(_)))),
     },
     Recognizer {
         name: "i18n fallbacks (config.i18n.fallbacks =)",

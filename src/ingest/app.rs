@@ -1818,8 +1818,9 @@ end
     }
     app.i18n = catalog;
     app.i18n.missing = missing_policy(vfs, dir);
-    let (available, fallbacks) = locale_settings(vfs, dir, &app.i18n.locale, &files);
+    let (available, fallbacks, available_unknown) = locale_settings(vfs, dir, &app.i18n.locale, &files);
     app.i18n.load_locales(available, fallbacks, &gem_files, &mut files);
+    app.i18n.available_unknown = available_unknown;
     app.i18n.field_error_proc = field_error_proc_file(vfs, dir);
     crate::i18n::stamp_models(&mut app);
 
@@ -9772,24 +9773,26 @@ fn locale_list(value: &str) -> Option<Vec<String>> {
 /// `config/application.rb`, and the fallbacks each
 /// `config/environments/<env>.rb` sets for itself. With no
 /// `available_locales`, the default locale and those the app's own
-/// locale files name.
+/// locale files name; the same when it is computed at boot, with why it
+/// cannot be read as the third value.
 fn locale_settings<V: Vfs + ?Sized>(
     vfs: &V,
     dir: &Path,
     default: &str,
     files: &[(String, String)],
-) -> (Vec<String>, crate::i18n::FallbackPolicy) {
+) -> (Vec<String>, crate::i18n::FallbackPolicy, Option<String>) {
     let lines = |path: &Path| -> Vec<String> {
         let source = vfs.read_to_string(path).unwrap_or_default();
         source.lines().map(str::trim).filter(|l| !l.starts_with('#')).map(str::to_string).collect()
     };
     let mut policy = crate::i18n::FallbackPolicy::default();
     let app_lines = lines(&dir.join("config/application.rb"));
+    let mut available_unknown = None;
     let mut available = match app_lines.iter().find_map(|l| available_locales_line(l)) {
         Some(Ok(list)) => list,
         Some(Err(why)) => {
-            policy.unknown = Some(why);
-            Vec::new()
+            available_unknown = Some(why);
+            crate::i18n::Catalog::file_locales(files)
         }
         None => crate::i18n::Catalog::file_locales(files),
     };
@@ -9812,7 +9815,7 @@ fn locale_settings<V: Vfs + ?Sized>(
             None => {}
         }
     }
-    (available, policy)
+    (available, policy, available_unknown)
 }
 
 /// What a trimmed config line's `config.i18n.raise_on_missing_translations = v` sets.

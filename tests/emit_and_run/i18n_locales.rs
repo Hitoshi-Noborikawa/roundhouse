@@ -163,3 +163,19 @@ fn an_environment_s_fallbacks_win_there() {
         .run_ruby("raise Article.polish[2] unless Article.polish[2] == \"English only\"\nputs \"env fallbacks passed\"\n")
         .assert_passes();
 }
+
+/// `config.i18n.available_locales` computed at boot: the locales a
+/// translation can run in are not known at compile time, so a
+/// translation the app's locale files give in several locales stays an
+/// error naming that setting, instead of folding the default locale alone.
+#[test]
+fn a_computed_available_locales_stays_an_error() {
+    let (_emitted, errors) = locales_app()
+        .edit(
+            "config/application.rb",
+            "    config.i18n.available_locales = %i[en pl]\n",
+            "    config.i18n.available_locales = ENV.fetch(\"LOCALES\", \"en pl\").split.map(&:to_sym)\n",
+        )
+        .emit(roundhouse::project::BuildTarget::Ruby);
+    assert!(errors.iter().any(|e| e.contains("`config.i18n.available_locales`: `available_locales = ENV.fetch")), "{errors:?}");
+}

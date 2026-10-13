@@ -74,6 +74,11 @@ pub(crate) fn plans(catalog: &Catalog, call: &Call, in_view: bool) -> Result<Vec
         Some(Locale::Literal(l)) => vec![l.clone()],
         _ => catalog.locales(),
     };
+    if locales.len() > 1 {
+        if let Some(why) = &catalog.available_unknown {
+            return Err(format!("`config.i18n.available_locales`: {why}"));
+        }
+    }
     if locales.len() > 1 || catalog.fallbacks.app.is_some() || !catalog.fallbacks.envs.is_empty() {
         if let Some(why) = &catalog.fallbacks.unknown {
             return Err(format!("`config.i18n.fallbacks` {why}"));

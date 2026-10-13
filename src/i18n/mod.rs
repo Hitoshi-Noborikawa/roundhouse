@@ -40,6 +40,12 @@ pub struct Catalog {
     /// when the app has only its default locale.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub available: Vec<String>,
+    /// Why `config.i18n.available_locales` cannot be read at compile time
+    /// (a value computed at boot); `available` then holds the locales the
+    /// app's files name, and a translation that can run in more than one
+    /// stays an error.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub available_unknown: Option<String>,
     /// The catalogs of the other available locales, and of any locale a
     /// fallback chain names, loaded as this one is.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
