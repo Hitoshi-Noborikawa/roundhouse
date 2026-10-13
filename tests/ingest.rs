@@ -2058,6 +2058,7 @@ fn backticks_ingest_as_the_kernel_call_and_round_trip() {
         ("`ls -la`", "`ls -la`"),
         ("%x{ls}", "`ls`"),
         ("`tmux list -F '\\#{x}' #{name}`", "`tmux list -F '\\#{x}' #{name}`"),
+        ("%x{echo #{`printf hi`} a\\`b}", "`echo #{`printf hi`} a\\`b`"),
     ] {
         let result = ruby_prism::parse(source.as_bytes());
         let program = result.node();
