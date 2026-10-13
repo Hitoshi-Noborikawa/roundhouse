@@ -1723,32 +1723,11 @@ pub(super) fn rewrite_update_to_typed_variant(
         let spec = match_params_helper(&args[0], &helper_specs, params_specs)?;
         // The variant exists only on the model the resource is named
         // after. With none (a record wrapped under another key), the
-        // call stays Rails' `update` / `update!`, handed the attribute
-        // Hash the helper's permit list stands for (#856;
-        // `ParamsSpecs::mark_update_demand` asks for its `to_attrs`).
-        // Any other spelling of the params is left as written.
+        // call stays Rails' `update` / `update!`; once the body is typed,
+        // `params::hand_update_the_attrs` gives it the attribute Hash
+        // when the argument turns out to be the params object (#856).
         if !params_specs.has_typed_update(spec) {
-            super::params::bare_helper_call(&args[0])?;
-            let attrs = Expr::new(
-                args[0].span,
-                ExprNode::Send {
-                    recv: Some(args[0].clone()),
-                    method: Symbol::from("to_attrs"),
-                    args: Vec::new(),
-                    block: None,
-                    parenthesized: false,
-                },
-            );
-            return Some(Expr::new(
-                e.span,
-                ExprNode::Send {
-                    recv: Some(recv.clone()),
-                    method: method.clone(),
-                    args: vec![attrs],
-                    block: None,
-                    parenthesized: *parenthesized,
-                },
-            ));
+            return None;
         }
         Some(Expr::new(
             e.span,

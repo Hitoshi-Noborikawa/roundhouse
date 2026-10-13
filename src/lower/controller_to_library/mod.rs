@@ -329,7 +329,6 @@ pub fn lower_controllers_with_arel_views_assocs_and_routes(
     params_specs.mark_file_fields(models);
     params_specs.mark_keyed_associations(models);
     params_specs.mark_model_resources(models, schema);
-    params_specs.mark_update_demand(controllers);
     let params_lcs = self::params::synthesize_params_classes(&params_specs);
 
     // The view↔controller ivar contract: each action view's read-ivars,
@@ -529,6 +528,9 @@ pub fn lower_controllers_with_arel_views_assocs_and_routes(
     let permitted_fields = self::params::permitted_field_tys(&params_specs);
 
     let mut out = Vec::new();
+    // Params classes a kept `update(<params object>)` reads `to_attrs`
+    // of (`params::hand_update_the_attrs`).
+    let mut wants_to_attrs: std::collections::BTreeSet<ClassId> = Default::default();
     crate::timings::phase("lower: controllers type", || {
     for (mut methods, controller) in all_methods {
         // Surveyed over the WHOLE controller before any body is
@@ -589,6 +591,14 @@ pub fn lower_controllers_with_arel_views_assocs_and_routes(
                 crate::lower::typing::type_method_body(method, &classes, &framework_ivars);
             }
         }
+        // After every body is typed: whether a helper answers the params
+        // object is its body's type, which its declared signature does
+        // not say (`permitted.to_h.except(:k)` is still declared the
+        // params class).
+        let answers = self::params::helper_answers(&methods);
+        for method in &mut methods {
+            self::params::hand_update_the_attrs(&mut method.body, &params_specs, &answers, &mut wants_to_attrs);
+        }
         methods.extend(collect_attr_accessor_methods(controller));
         apply_alias_methods(controller, &mut methods);
         apply_undef_methods(controller, &mut methods);
@@ -615,6 +625,15 @@ pub fn lower_controllers_with_arel_views_assocs_and_routes(
     // seed, the typer leaves it as `TyVar(0)` and the strict residual
     // check fails.
     let mut params_lcs = params_lcs;
+    for params_lc in &mut params_lcs {
+        if wants_to_attrs.contains(&params_lc.name)
+            && !params_lc.methods.iter().any(|m| m.name.as_str() == "to_attrs")
+        {
+            if let Some(spec) = params_specs.by_class(&params_lc.name) {
+                params_lc.methods.push(self::params::synth_to_attrs(&spec.class_id, &spec.fields));
+            }
+        }
+    }
     for params_lc in &mut params_lcs {
         let mut params_ivars: std::collections::HashMap<Symbol, Ty> =
             std::collections::HashMap::new();

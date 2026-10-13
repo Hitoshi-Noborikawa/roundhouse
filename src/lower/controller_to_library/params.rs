@@ -171,46 +171,6 @@ impl ParamsSpecs {
         self.model_resources.as_ref().is_none_or(|set| set.contains(&spec.resource))
     }
 
-    /// `record.update(<x>_params)` where no model defines the typed
-    /// variant for `<x>`: `rewrite_update_to_typed_variant` hands Rails'
-    /// `update` the attribute Hash instead (`<x>_params.to_attrs`), so
-    /// the params class needs its `to_attrs`. Read after
-    /// [`Self::mark_model_resources`]; helpers are matched by name over
-    /// every controller, so an inherited helper counts too (a `to_attrs`
-    /// nobody calls costs one unused method).
-    pub fn mark_update_demand(&mut self, controllers: &[Controller]) {
-        if self.model_resources.is_none() {
-            return;
-        }
-        let mut wanted: Vec<ClassId> = Vec::new();
-        {
-            let helpers = helper_spec_map(controllers.iter().flat_map(|c| c.actions()), self);
-            for c in controllers {
-                for action in c.actions() {
-                    walk_all(&action.body, &mut |e| {
-                        let ExprNode::Send { recv: Some(_), method, args, .. } = &*e.node else {
-                            return;
-                        };
-                        if !matches!(method.as_str(), "update" | "update!") || args.len() != 1 {
-                            return;
-                        }
-                        let Some(helper) = bare_helper_call(&args[0]) else { return };
-                        if let Some(spec) = helpers.get(helper) {
-                            if !self.has_typed_update(spec) {
-                                wanted.push(spec.class_id.clone());
-                            }
-                        }
-                    });
-                }
-            }
-        }
-        for class_id in wanted {
-            if let Some(spec) = self.specs.iter_mut().find(|s| s.class_id == class_id) {
-                spec.wants_to_attrs = true;
-            }
-        }
-    }
-
     pub fn iter(&self) -> std::slice::Iter<'_, ParamsSpec> {
         self.specs.iter()
     }
@@ -973,13 +933,67 @@ fn build_params_object(
     with_ty(Expr::new(span, ExprNode::Seq { exprs: stmts }), owner_ty)
 }
 
-/// `helper` / `self.helper` with no arguments: the name it calls.
-pub(super) fn bare_helper_call(e: &Expr) -> Option<&Symbol> {
-    let ExprNode::Send { recv, method, args, block: None, .. } = &*e.node else {
-        return None;
+/// Each method's name with the type of the value its typed body
+/// answers (its last statement's).
+pub(super) fn helper_answers(methods: &[MethodDef]) -> std::collections::HashMap<Symbol, Option<Ty>> {
+    methods.iter().map(|m| (m.name.clone(), body_tail(&m.body).ty.clone())).collect()
+}
+
+/// `record.update(x)` / `update!(x)` where `x` is TYPED as a params
+/// class no model has a typed update variant for (#856): Rails' `update`
+/// takes the attribute Hash, which is `x.to_attrs`. Runs on a typed
+/// body, so a helper that answers a Hash (`permitted.to_h.except(:k)`)
+/// is left as written, and the class is the one the call site holds
+/// (a controller-qualified list, not the resource's canonical one).
+/// Each class read this way is added to `wanted`.
+///
+/// `answers` is each of the controller's own methods' typed body value
+/// ([`helper_answers`]): a call to one of them counts only when its body
+/// answers the params class, whatever its signature declares.
+pub(super) fn hand_update_the_attrs(
+    body: &mut Expr,
+    specs: &ParamsSpecs,
+    answers: &std::collections::HashMap<Symbol, Option<Ty>>,
+    wanted: &mut std::collections::BTreeSet<ClassId>,
+) {
+    body.node.for_each_child_mut(&mut |c| hand_update_the_attrs(c, specs, answers, wanted));
+    let ExprNode::Send { recv: Some(_), method, args, block: None, .. } = &mut *body.node else {
+        return;
     };
-    (recv.as_ref().is_none_or(|r| matches!(&*r.node, ExprNode::SelfRef)) && args.is_empty())
-        .then_some(method)
+    if !matches!(method.as_str(), "update" | "update!") || args.len() != 1 {
+        return;
+    }
+    let Some(Ty::Class { id, .. }) = args[0].ty.as_ref() else { return };
+    let Some(spec) = specs.by_class(id) else { return };
+    if let ExprNode::Send { recv, method: helper, args: helper_args, block: None, .. } = &*args[0].node {
+        let own = recv.as_ref().is_none_or(|r| matches!(&*r.node, ExprNode::SelfRef)) && helper_args.is_empty();
+        if own {
+            if let Some(answer) = answers.get(helper) {
+                if !matches!(answer, Some(Ty::Class { id: a, .. }) if a == id) {
+                    return;
+                }
+            }
+        }
+    }
+    if specs.has_typed_update(spec) {
+        return;
+    }
+    let class_id = spec.class_id.clone();
+    let value = std::mem::replace(&mut args[0], expr(ExprNode::Lit { value: Literal::Nil }, None));
+    let span = value.span;
+    let mut attrs = expr(
+        ExprNode::Send {
+            recv: Some(value),
+            method: Symbol::from("to_attrs"),
+            args: Vec::new(),
+            block: None,
+            parenthesized: false,
+        },
+        Some(Ty::Hash { key: Box::new(Ty::Sym), value: Box::new(Ty::Untyped) }),
+    );
+    attrs.span = span;
+    args[0] = attrs;
+    wanted.insert(class_id);
 }
 
 pub fn helper_spec_map<'a, 'b, I>(
@@ -1802,7 +1816,7 @@ fn synth_from_raw(spec: &ParamsSpec) -> MethodDef {
 /// `""` — the same distinction `<field>_provided` was introduced for.
 /// Writing it would overwrite a column default on create, which is the
 /// data loss the presence slots were added to stop.
-fn synth_to_attrs(owner: &ClassId, fields: &[Symbol]) -> MethodDef {
+pub(super) fn synth_to_attrs(owner: &ClassId, fields: &[Symbol]) -> MethodDef {
     use crate::lower::typing::with_ty;
     let attrs = Symbol::from("attrs");
     // The declared type is `initialize`'s parameter type verbatim: this
