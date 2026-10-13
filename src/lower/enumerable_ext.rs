@@ -149,9 +149,29 @@ pub(crate) fn rewrite_node(expr: &mut Expr) -> bool {
     // (`index_with_value_is_stable`) is moved into the block; another
     // (`index_with([])`, a call) stays as written, as does the Enumerator
     // form with neither. A Relation answers `to_h` through its rows.
+    //
+    // A Hash yields each pair to `index_with` but key and value apart to
+    // `to_h`'s block, so a receiver that is (or may be) a Hash keeps the
+    // call as written. An Array or a Relation runs no program code between
+    // its yields, so a variable read in the block is the value Rails reads
+    // once before them; another receiver may (its own `each`), so there
+    // only a literal or a constant moves into the block.
     if method.as_str() == "index_with" {
         let Some(receiver) = recv.take() else { return false };
+        let hash_like = |t: &Ty| matches!(t, Ty::Hash { .. } | Ty::Record { .. });
+        let may_be_hash = match receiver.ty.as_ref() {
+            Some(Ty::Union { variants }) => variants.iter().any(hash_like),
+            Some(t) => hash_like(t),
+            None => false,
+        };
+        if may_be_hash {
+            *recv = Some(receiver);
+            return false;
+        }
+        let elementwise = matches!(receiver.ty, Some(Ty::Array { .. } | Ty::Relation { .. } | Ty::Tuple { .. }));
         let key = Symbol::from("__index_with_key");
+        // The generated key parameter must not capture a read of its name.
+        let shadows = |e: &Expr| matches!(&*e.node, ExprNode::Var { name, .. } if *name == key);
         let key_read = || Expr::new(span, ExprNode::Var { id: crate::ident::VarId(0), name: key.clone() });
         let pair = |k: Expr, v: Expr| {
             Expr::new(span, ExprNode::Array { elements: vec![k, v], style: Default::default() })
@@ -163,7 +183,7 @@ pub(crate) fn rewrite_node(expr: &mut Expr) -> bool {
             )
         };
         let new_block = match (args.as_slice(), block.as_ref().map(|b| &*b.node)) {
-            ([v], None) if index_with_value_is_stable(v) => {
+            ([v], None) if index_with_value_is_stable(v, elementwise) && !shadows(v) => {
                 lambda(vec![key.clone()], pair(key_read(), v.clone()), Default::default())
             }
             ([], Some(ExprNode::Lambda { params, rest_param: None, extra_params, block_param: None, body, block_style }))
@@ -172,7 +192,7 @@ pub(crate) fn rewrite_node(expr: &mut Expr) -> bool {
                 let p = Expr::new(span, ExprNode::Var { id: crate::ident::VarId(0), name: params[0].clone() });
                 lambda(params.clone(), pair(p, body.clone()), *block_style)
             }
-            ([], Some(ExprNode::Var { .. })) => {
+            ([], Some(ExprNode::Var { .. })) if !shadows(block.as_ref().expect("matched Some")) => {
                 let blk = block.clone().expect("matched Some");
                 let call = Expr::new(
                     span,
@@ -582,15 +602,17 @@ fn is_relation(ty: Option<&Ty>) -> bool {
 
 /// A value `index_with(v)` may read once per key and still hand every key
 /// the same object, as Rails' single evaluation does: an immediate
-/// (nil, true, false, a number, a Symbol), a constant, or a variable.
-fn index_with_value_is_stable(v: &Expr) -> bool {
+/// (nil, true, false, a number, a Symbol), a constant, or, when no program
+/// code runs between the receiver's yields (`elementwise`), a variable.
+fn index_with_value_is_stable(v: &Expr, elementwise: bool) -> bool {
     use crate::expr::Literal;
     match &*v.node {
         ExprNode::Lit { value } => matches!(
             value,
             Literal::Nil | Literal::Bool { .. } | Literal::Int { .. } | Literal::Float { .. } | Literal::Sym { .. }
         ),
-        ExprNode::Const { .. } | ExprNode::Var { .. } | ExprNode::Ivar { .. } => true,
+        ExprNode::Const { .. } => true,
+        ExprNode::Var { .. } | ExprNode::Ivar { .. } => elementwise,
         _ => false,
     }
 }
@@ -599,6 +621,75 @@ fn index_with_value_is_stable(v: &Expr) -> bool {
 mod tests {
     use super::*;
     use crate::span::Span;
+
+    fn var(name: &str) -> Expr {
+        Expr::new(Span::synthetic(), ExprNode::Var { id: crate::ident::VarId(0), name: Symbol::from(name) })
+    }
+
+    fn index_with_on(receiver_ty: Option<Ty>, value: Expr) -> Expr {
+        let mut list = var("list");
+        list.ty = receiver_ty;
+        Expr::new(
+            Span::synthetic(),
+            ExprNode::Send { recv: Some(list), method: Symbol::from("index_with"), args: vec![value], block: None, parenthesized: true },
+        )
+    }
+
+    fn int(value: i64) -> Expr {
+        Expr::new(Span::synthetic(), ExprNode::Lit { value: crate::expr::Literal::Int { value } })
+    }
+
+    #[test]
+    fn index_with_on_an_array_moves_a_literal_or_a_variable_into_to_h() {
+        let strs = || Some(Ty::Array { elem: Box::new(Ty::Str) });
+        let mut e = index_with_on(strs(), int(0));
+        assert!(rewrite_node(&mut e));
+        assert_eq!(method_of(&e), "to_h");
+        let mut e = index_with_on(strs(), var("default"));
+        assert!(rewrite_node(&mut e));
+        assert_eq!(method_of(&e), "to_h");
+    }
+
+    #[test]
+    fn index_with_on_a_hash_stays_as_written() {
+        // `{a: 1}.index_with(0)` keys by the pair `[:a, 1]`; `to_h`'s block
+        // would get the key alone.
+        let hash = Ty::Hash { key: Box::new(Ty::Sym), value: Box::new(Ty::Int) };
+        let mut e = index_with_on(Some(hash.clone()), int(0));
+        assert!(!rewrite_node(&mut e));
+        assert_eq!(method_of(&e), "index_with");
+        let mut e = index_with_on(Some(Ty::Union { variants: vec![hash, Ty::Nil] }), int(0));
+        assert!(!rewrite_node(&mut e));
+        assert_eq!(method_of(&e), "index_with");
+    }
+
+    #[test]
+    fn index_with_keeps_a_variable_value_where_the_receiver_may_run_code_between_yields() {
+        let mut e = index_with_on(None, var("default"));
+        assert!(!rewrite_node(&mut e));
+        assert_eq!(method_of(&e), "index_with");
+        // a literal reads the same however the receiver iterates
+        let mut e = index_with_on(None, int(0));
+        assert!(rewrite_node(&mut e));
+        assert_eq!(method_of(&e), "to_h");
+    }
+
+    #[test]
+    fn index_with_keeps_a_value_named_like_the_generated_key() {
+        let mut e = index_with_on(Some(Ty::Array { elem: Box::new(Ty::Str) }), var("__index_with_key"));
+        assert!(!rewrite_node(&mut e));
+        assert_eq!(method_of(&e), "index_with");
+    }
+
+    #[test]
+    fn index_with_of_a_fresh_object_stays_as_written() {
+        // Rails hands every key the same `[]`; moved into the block, each
+        // key would get its own.
+        let empty = Expr::new(Span::synthetic(), ExprNode::Array { elements: Vec::new(), style: Default::default() });
+        let mut e = index_with_on(Some(Ty::Array { elem: Box::new(Ty::Str) }), empty);
+        assert!(!rewrite_node(&mut e));
+        assert_eq!(method_of(&e), "index_with");
+    }
 
     fn many_on(ty: Ty) -> Expr {
         let mut members = Expr::new(
