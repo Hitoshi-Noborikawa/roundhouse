@@ -7132,19 +7132,20 @@ pub(crate) fn apply_constant_rooting(
             (1..segs.len()).map(|i| segs[..i].join("::")).collect()
         };
         for m in &mut lc.methods {
-            root_shadowed_constants(&mut m.body, &shadowing, &prefixes, &known);
+            root_shadowed_constants(&mut m.body, name, &shadowing, &prefixes, &known);
         }
     }
 }
 
 fn root_shadowed_constants(
     expr: &mut Expr,
+    own: &str,
     shadowing: &[String],
     prefixes: &[String],
     known: &dyn Fn(&str) -> bool,
 ) {
     expr.node
-        .for_each_child_mut(&mut |c| root_shadowed_constants(c, shadowing, prefixes, known));
+        .for_each_child_mut(&mut |c| root_shadowed_constants(c, own, shadowing, prefixes, known));
     let ExprNode::Const { path } = &mut *expr.node else {
         return;
     };
@@ -7172,6 +7173,15 @@ fn root_shadowed_constants(
                 }
             }
         }
+    }
+    // The class's own constant is the innermost lexical scope, in the
+    // source as in the emit, and binds the head before any enclosing
+    // namespace's: `Catalog::Lifecycle::Entry` declares
+    // `module Type` (`private_constant`) and reads `Type::NOTIFY_*` in a
+    // `when`, while `Catalog::Type` is known and has no `NOTIFY_*`.
+    // Rooted, that was `::Type`: uninitialized constant Type.
+    if known(&format!("{own}::{}", head.as_str())) {
+        return;
     }
     // Either the name's OWN segments shadow it (the pre-existing rule:
     // `Views::Stats` referencing `Stats`, `Message::Broadcasts`
