@@ -46,6 +46,8 @@ mod dry_initializer;
 mod data_factory;
 #[path = "support/dry_struct.rs"]
 mod dry_struct;
+#[path = "support/dry_validation.rs"]
+mod dry_validation;
 #[path = "support/rails_root_join.rs"]
 mod rails_root_join;
 #[path = "support/cable_actions.rs"]
@@ -493,4 +495,13 @@ fn identical_cli_emission_reuses_native_build_but_changed_ruby_rebuilds() {
     );
     assert!(fs::metadata(&executable).unwrap().modified().unwrap() > built_at);
     fs::remove_dir_all(scratch).unwrap();
+}
+
+/// The native half of `emit_and_run::dry_validation_contracts_run_lowered`.
+#[test]
+#[ignore = "requires the Spinel toolchain, run in its CI lane"]
+fn dry_validation_contracts_run_lowered_natively() {
+    let run = dry_validation::overlay().run_spinel(&dry_validation::assertions());
+    run.assert_passes();
+    assert!(run.stdout.contains("dry-validation contract passed"));
 }

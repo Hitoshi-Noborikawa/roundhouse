@@ -44,6 +44,8 @@ mod dry_initializer;
 mod runtime_block_signature;
 #[path = "support/dry_struct.rs"]
 mod dry_struct;
+#[path = "support/dry_validation.rs"]
+mod dry_validation;
 #[path = "support/data_factory.rs"]
 mod data_factory;
 #[path = "support/rails_root_join.rs"]
@@ -2497,6 +2499,94 @@ fn dry_struct_classes_run_lowered() {
     assert!(run.stdout.contains("dry-struct contract passed"));
     assert!(run.stdout.contains("dry-struct stamp contract passed"));
     assert!(run.stdout.contains("dry-struct clock contract passed"));
+}
+
+#[test]
+fn dry_validation_contracts_run_lowered() {
+    let run = dry_validation::overlay().run_ruby(&dry_validation::assertions());
+    run.assert_passes();
+    assert!(run.stdout.contains("dry-validation contract passed"));
+}
+
+/// A message file is read from the app only: a `load_paths` entry that
+/// is absolute or climbs out refuses the contract. Outside survey mode a
+/// refusal fails the ingest instead of passing as supported.
+#[test]
+fn dry_validation_load_paths_stay_in_the_app_and_refusals_fail_strict_ingest() {
+    let tree = |path: &str| -> std::collections::HashMap<std::path::PathBuf, Vec<u8>> {
+        [
+            (
+                "app/contracts/far_contract.rb".to_string(),
+                format!("class FarContract < Dry::Validation::Contract\n  config.messages.load_paths << \"{path}\"\n\n  params do\n    required(:a).filled(:string)\n  end\nend\n"),
+            ),
+            ("config/routes.rb".to_string(), "Rails.application.routes.draw do\nend\n".to_string()),
+        ]
+        .into_iter()
+        .map(|(p, s)| (std::path::PathBuf::from(p), s.into_bytes()))
+        .collect()
+    };
+    for path in ["/etc/hostname", "../outside.yml", "config/../../outside.yml"] {
+        roundhouse::ingest::survey::activate();
+        let app = roundhouse::ingest::ingest_app_from_tree(tree(path)).expect("survey ingest");
+        let ledger: Vec<String> = roundhouse::ingest::survey::drain().iter().map(|e| e.to_string()).collect();
+        assert!(ledger.iter().any(|e| e.contains("outside the app")), "{path}: {ledger:#?}");
+        let contract = app.library_classes.iter().find(|lc| lc.name.0.as_str() == "FarContract").expect("contract");
+        assert!(contract.methods.iter().all(|m| m.name.as_str() != "call"), "{path}: lowered");
+        assert!(roundhouse::ingest::ingest_app_from_tree(tree(path)).is_err(), "{path}: strict ingest passed");
+    }
+    roundhouse::ingest::survey::activate();
+    roundhouse::ingest::ingest_app_from_tree(tree("config/locales/x.yml")).expect("an app path");
+    let ledger: Vec<String> = roundhouse::ingest::survey::drain().iter().map(|e| e.to_string()).collect();
+    assert!(ledger.iter().all(|e| !e.contains("FarContract")), "{ledger:#?}");
+}
+
+/// `:time` and `:date_time` coerce with `Time.parse` and `DateTime`,
+/// which Spinel's tree does not have: reported for it, not emitted to
+/// fail. The fixture's dates and decimals are not.
+#[test]
+fn dry_validation_stdlib_coercions_are_reported_for_spinel() {
+    let (_emitted, errors) = dry_validation::overlay().emit(roundhouse::project::BuildTarget::Spinel);
+    assert!(errors.is_empty(), "{errors:#?}");
+    let (_emitted, errors) = dry_validation::overlay()
+        .write(
+            "app/contracts/clock_contract.rb",
+            "class ClockContract < Dry::Validation::Contract\n  params do\n    optional(:at).value(:time)\n    optional(:stamp).value(:date_time)\n  end\nend\n",
+        )
+        .emit(roundhouse::project::BuildTarget::Spinel);
+    for what in ["`Time.parse`", "`DateTime`"] {
+        assert!(errors.iter().any(|e| e.contains(what)), "{what} not reported: {errors:#?}");
+    }
+}
+
+/// A contract the lowering cannot read (here, an `option`) stays as it was,
+/// with the topmost contract it inherits a schema from and everything
+/// under that: a lowered parent's `call` would answer for it. Its
+/// declarations are dropped, not replayed onto a gem that is not there,
+/// so the tree boots and another contract is lowered.
+#[test]
+fn dry_validation_refusal_takes_the_schema_hierarchy() {
+    let refused = || {
+        dry_validation::overlay().write(
+            "app/contracts/ruled_contract.rb",
+            "class RuledBase < Dry::Validation::Contract\n  params do\n    required(:a).filled(:integer)\n  end\nend\n\nclass RuledChild < RuledBase\n  option :repo\nend\n\nclass RuledSibling < RuledBase\n  params do\n    required(:b).filled(:string)\n  end\nend\n",
+        )
+    };
+    // Survey mode, as `--survey` runs: strict ingest fails on the refusal
+    // (`dry_validation_load_paths_stay_in_the_app_and_refusals_fail_strict_ingest`).
+    roundhouse::ingest::survey::activate();
+    let (emitted, _errors) = refused().emit(roundhouse::project::BuildTarget::Ruby);
+    let ledger: Vec<String> = roundhouse::ingest::survey::drain().iter().map(|e| e.to_string()).collect();
+    assert!(ledger.iter().any(|e| e.contains("RuledChild") && e.contains("`option`")), "{ledger:#?}");
+    for kept in ["ruled_base.rb", "ruled_child.rb", "ruled_sibling.rb"] {
+        let source = std::fs::read_to_string(emitted.join("app/models").join(kept)).expect(kept);
+        assert!(!source.contains("def call"), "{kept} lowered:\n{source}");
+        assert!(!source.contains("params do"), "{kept} replays the DSL:\n{source}");
+    }
+    roundhouse::ingest::survey::activate();
+    let run = refused().run_ruby("raise \"lowered\" unless UserContract.new.call(\"name\" => \"a\", \"age\" => \"1\").success?\nputs \"refusal contract passed\"\n");
+    roundhouse::ingest::survey::drain();
+    run.assert_passes();
+    assert!(run.stdout.contains("refusal contract passed"));
 }
 
 #[test]
