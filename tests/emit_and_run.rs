@@ -15036,3 +15036,215 @@ puts "PASS friendly oracle"
 }
 #[path = "emit_and_run/acts_as_votable.rs"]
 mod acts_as_votable;
+
+/// A file whose only statement is `Breadcrumb = Data.define(…)`, a
+/// class nested under it with a compact name, and a constant that
+/// another class builds from it. No file reopens `class Breadcrumb`,
+/// so only the Data factory declares it.
+fn top_level_data_factory_app() -> emit_and_run::Overlay {
+    emit_and_run::real_blog()
+        .write("app/models/breadcrumb.rb", "Breadcrumb = Data.define(:name, :path)\n")
+        .write("app/models/breadcrumb/trail.rb", "class Breadcrumb::Trail\n  def self.label = \"trail\"\nend\n")
+        .write("app/models/app_nav.rb", "class AppNav\n  HOME = Breadcrumb.new(name: \"Home\", path: \"/\")\n\n  def self.home = HOME\nend\n")
+        .write("app/controllers/data_probe_controller.rb", r#"class DataProbeController < ApplicationController
+  def index
+    @crumb = Breadcrumb.new(name: "Posts", path: "/posts")
+    @path = @crumb.path
+    @trail = Breadcrumb::Trail.label
+    @home = AppNav.home.name
+  end
+end
+"#)
+}
+
+const TOP_LEVEL_DATA_FACTORY: &str = r#"
+keyword = Breadcrumb.new(name: "Posts", path: "/posts")
+positional = Breadcrumb.new("Posts", "/posts")
+raise "readers changed" unless keyword.name == "Posts" && keyword.path == "/posts"
+raise "Data lost value equality" unless keyword == positional
+raise "nested class lost" unless Breadcrumb::Trail.label == "trail"
+raise "class constant lost" unless AppNav.home.name == "Home" && AppNav.home.path == "/"
+puts "top-level Data factory passed"
+"#;
+
+#[test]
+fn a_top_level_data_factory_file_checks_cleanly_and_executes() {
+    let run = top_level_data_factory_app().run_ruby(&format!(r#"{TOP_LEVEL_DATA_FACTORY}
+raise "not a Data class" unless Breadcrumb.superclass == Data && Breadcrumb.name == "Breadcrumb"
+raise "members changed" unless Breadcrumb.members == [:name, :path]
+raise "Data lost immutability" unless Breadcrumb.new("a", "b").frozen? && !Breadcrumb.new("a", "b").respond_to?(:name=)
+raise "a nested class leaked to the top level" if Object.const_defined?(:Trail, false)
+begin
+  Breadcrumb.new(name: "Posts")
+  raise "a missing member was accepted"
+rescue ArgumentError
+end
+"#));
+    run.assert_passes();
+    let emitted = std::fs::read_to_string(run.emitted.join("app/models/breadcrumb.rb")).unwrap();
+    assert_eq!(emitted.matches("Data.define").count(), 1, "{emitted}");
+    assert!(emitted.contains("Breadcrumb = Data.define(:name, :path)"), "{emitted}");
+    let sidecar = std::fs::read_to_string(run.emitted.join("sig/app/models/breadcrumb.rbs")).unwrap();
+    assert!(sidecar.contains("class Breadcrumb < ::Data"), "{sidecar}");
+    let signatures = roundhouse::rbs::parse_app_signatures(&sidecar).expect("emitted RBS parses");
+    let breadcrumb = &signatures[&roundhouse::ident::ClassId(roundhouse::ident::Symbol::from("Breadcrumb"))];
+    for method in ["new", "name", "path"] {
+        assert!(breadcrumb.contains_key(&roundhouse::ident::Symbol::from(method)), "{sidecar}");
+    }
+}
+
+#[test]
+fn a_class_nested_by_reopening_a_top_level_data_class_executes() {
+    emit_and_run::real_blog()
+        .write("app/models/breadcrumb.rb", "Breadcrumb = Data.define(:name, :path)\n")
+        .write("app/models/breadcrumb/separator.rb", "class Breadcrumb\n  class Separator\n    def self.text = \" > \"\n  end\nend\n")
+        .write("app/controllers/data_probe_controller.rb", r#"class DataProbeController < ApplicationController
+  def index
+    @crumb = Breadcrumb.new("Posts", "/posts").name
+    @separator = Breadcrumb::Separator.text
+  end
+end
+"#)
+        .run_ruby(r#"
+raise "Data class lost" unless Breadcrumb.new("Posts", "/posts").path == "/posts"
+raise "nested class lost" unless Breadcrumb::Separator.text == " > "
+raise "a nested class leaked to the top level" if Object.const_defined?(:Separator, false)
+puts "reopened Data class passed"
+"#)
+        .assert_passes();
+}
+
+#[test]
+#[ignore = "requires the native Spinel compiler"]
+fn a_top_level_data_factory_file_runs_natively() {
+    top_level_data_factory_app()
+        .run_spinel(TOP_LEVEL_DATA_FACTORY)
+        .assert_passes();
+}
+
+fn data_define_block_app() -> emit_and_run::Overlay {
+    emit_and_run::real_blog()
+        .write("app/models/timeframe_limits.rb", "module TimeframeLimits\n  TIMEFRAME_LIMIT = 5\nend\n")
+        .write("app/models/timeframe.rb", r##"Timeframe = Data.define(:id, :label_text) do
+  include TimeframeLimits
+
+  TIMEFRAME_OPTIONS = { "this_year" => "This year", "all_time" => "All time" }.freeze
+  TIMEFRAME_LIMIT = 10
+  DEFAULT_TIMEFRAME = new("all_time", nil)
+  @current = DEFAULT_TIMEFRAME
+
+  def self.find(id) = new(id, TIMEFRAME_OPTIONS.fetch(id))
+  def self.current = @current
+  def limit = TIMEFRAME_LIMIT
+
+  def label = "#{label_text}!"
+  def label_text = TIMEFRAME_OPTIONS.fetch(id)
+
+  private
+
+  def secret = "hidden"
+end
+"##)
+        .write("app/models/timeframe_report.rb", "class TimeframeReport\n  def self.option_count = TIMEFRAME_OPTIONS.size\nend\n")
+        .write("app/controllers/data_probe_controller.rb", r#"class DataProbeController < ApplicationController
+  def index
+    @label = Timeframe.find("this_year").label
+    @default = DEFAULT_TIMEFRAME.id
+    @current = Timeframe.current.id
+    @limit = Timeframe.find("this_year").limit
+    @count = TimeframeReport.option_count
+  end
+end
+"#)
+}
+
+const DATA_DEFINE_BLOCK: &str = r#"
+raise "class method lost" unless Timeframe.find("this_year").label == "This year!"
+raise "reader override lost" unless Timeframe.new("all_time", "ignored").label_text == "All time"
+raise "constant built with new lost" unless DEFAULT_TIMEFRAME.is_a?(Timeframe) && DEFAULT_TIMEFRAME.id == "all_time"
+raise "constant read from another file lost" unless TimeframeReport.option_count == 2
+raise "class state lost its constant" unless Timeframe.current.equal?(DEFAULT_TIMEFRAME)
+raise "a mixin constant shadowed the block's constant" unless Timeframe.find("this_year").limit == 10
+raise "private method exposed" if Timeframe.new("all_time", nil).respond_to?(:secret)
+puts "Data.define block passed"
+"#;
+
+#[test]
+fn a_data_define_block_is_the_class_body_and_executes() {
+    let run = data_define_block_app().run_ruby(&format!(r#"{DATA_DEFINE_BLOCK}
+raise "not a Data class" unless Timeframe.superclass == Data && Timeframe.members == [:id, :label_text]
+raise "block constant not on Object" unless Object.const_defined?(:TIMEFRAME_OPTIONS, false)
+raise "block constant on the Data class" if Timeframe.const_defined?(:TIMEFRAME_OPTIONS, false)
+"#));
+    run.assert_passes();
+    let sidecar = std::fs::read_to_string(run.emitted.join("sig/app/models/timeframe.rbs")).unwrap();
+    let signatures = roundhouse::rbs::parse_app_signatures(&sidecar).expect("emitted RBS parses");
+    let timeframe = &signatures[&roundhouse::ident::ClassId(roundhouse::ident::Symbol::from("Timeframe"))];
+    for method in ["new", "id", "label_text", "find", "label"] {
+        assert!(timeframe.contains_key(&roundhouse::ident::Symbol::from(method)), "{sidecar}");
+    }
+    assert_eq!(sidecar.matches("def label_text").count(), 1, "{sidecar}");
+}
+
+#[test]
+#[ignore = "requires the native Spinel compiler"]
+fn a_data_define_block_runs_natively() {
+    data_define_block_app()
+        .run_spinel(DATA_DEFINE_BLOCK)
+        .assert_passes();
+}
+
+fn qualified_data_define_app() -> emit_and_run::Overlay {
+    emit_and_run::real_blog()
+        .write("app/models/article/summary.rb", r##"Article::Summary = Data.define(:article) do
+  ARTICLE_SUMMARY_PREFIX = "Summary of "
+
+  def self.for(article) = new(article)
+
+  def text = "#{ARTICLE_SUMMARY_PREFIX}#{article.title}"
+end
+"##)
+        .write("app/models/reports/line.rb", "Reports::Line = Data.define(:label, :amount)\n")
+        .write("app/models/formatting.rb", "module Formatting\n  def format_count = \"top\"\nend\n")
+        .write("app/models/reports/formatting.rb", "module Reports\n  module Formatting\n    def format_count = \"nested\"\n  end\nend\n")
+        .write("app/models/reports/total.rb", "Reports::Total = Data.define(:amount) do\n  include Formatting\nend\n")
+        .write("app/models/catalog.rb", "class Catalog\n  def self.size = 1\nend\n")
+        .write("app/models/catalog/entry.rb", "Catalog::Entry = Data.define(:name)\n")
+        .write("app/controllers/data_probe_controller.rb", r#"class DataProbeController < ApplicationController
+  def index
+    @summary = Article::Summary.for(Article.new(title: "Hello")).text
+    @line = Reports::Line.new("articles", 2).amount
+    @total = Reports::Total.new(2).format_count
+    @entry = Catalog::Entry.new("first").name
+  end
+end
+"#)
+}
+
+const QUALIFIED_DATA_DEFINE: &str = r#"
+raise "a class namespace lost its Data class" unless Article::Summary.for(Article.new(title: "Hello")).text == "Summary of Hello"
+raise "a module namespace lost its Data class" unless Reports::Line.new("articles", 2).amount == 2
+raise "the include did not resolve from the top level" unless Reports::Total.new(2).format_count == "top"
+raise "a library class namespace lost its Data class" unless Catalog::Entry.new("first").name == "first" && Catalog.size == 1
+puts "qualified Data.define passed"
+"#;
+
+#[test]
+fn a_qualified_data_define_file_executes_in_its_namespace() {
+    qualified_data_define_app()
+        .run_ruby(&format!(r#"{QUALIFIED_DATA_DEFINE}
+raise "not a Data class" unless Article::Summary.superclass == Data && Reports::Line.superclass == Data
+raise "the class left its namespace" if Object.const_defined?(:Summary, false) || Object.const_defined?(:Line, false)
+raise "the namespace class lost its superclass" unless Article.superclass == ApplicationRecord
+raise "block constant not on Object" unless Object.const_defined?(:ARTICLE_SUMMARY_PREFIX, false)
+"#))
+        .assert_passes();
+}
+
+#[test]
+#[ignore = "requires the native Spinel compiler"]
+fn a_qualified_data_define_file_runs_natively() {
+    qualified_data_define_app()
+        .run_spinel(QUALIFIED_DATA_DEFINE)
+        .assert_passes();
+}

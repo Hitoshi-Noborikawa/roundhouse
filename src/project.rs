@@ -1304,15 +1304,18 @@ fn reject_unsupported_data_factories(app: &App, target: BuildTarget) -> Result<(
     if matches!(target, BuildTarget::Blog | BuildTarget::Ruby | BuildTarget::Spinel) {
         return Ok(());
     }
+    fn report(span: crate::span::Span, target: &str, found: &mut bool) {
+        *found = true;
+        emit::diagnostics::report_unsupported(
+            span,
+            target,
+            "Data.define",
+            "this target has no supported Data factory representation; use Ruby or Spinel",
+        );
+    }
     fn visit(expr: &crate::expr::Expr, target: &str, found: &mut bool) {
         if expr.decisions & crate::expr::RESOLVED_DATA_FACTORY != 0 {
-            *found = true;
-            emit::diagnostics::report_unsupported(
-                expr.span,
-                target,
-                "Data.define",
-                "this target has no supported Data factory representation; use Ruby or Spinel",
-            );
+            report(expr.span, target, found);
         }
         expr.node.for_each_child(&mut |child| visit(child, target, found));
     }
@@ -1320,6 +1323,11 @@ fn reject_unsupported_data_factories(app: &App, target: BuildTarget) -> Result<(
     crate::lower::for_each_forwarding_body_ref(app, &mut |expr| {
         visit(expr, target.as_str(), &mut found);
     });
+    // A file-level `X = Data.define(…)` is a library class, not an
+    // expression in a body.
+    for (_, span) in app.library_classes.iter().filter_map(|lc| lc.data_define()) {
+        report(span, target.as_str(), &mut found);
+    }
     if found {
         return Err(format!("{}: Data.define is not supported; use Ruby or Spinel", target.as_str()));
     }

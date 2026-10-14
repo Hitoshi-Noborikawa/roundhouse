@@ -6905,7 +6905,9 @@ fn emit_library_class_decl_inner(
     // Lowered controllers also have no origin, but Concern methods carry
     // spans from another file. Their offsets cannot order the controller's
     // macro calls: those initializers must run after all collected methods.
-    let ordered_body = lc.origin.is_none()
+    // A `Data.define` block is source too: its `@ivar` writes and
+    // constants run in the order that the block gives them.
+    let ordered_body = (lc.origin.is_none() || lc.data_define().is_some())
         && lc.has_source_ivar_initializers()
         && !app.controllers.iter().any(|controller| controller.name == lc.name);
     let (mut eager, mut deferred, initializers_call_self) = partition_deferred_constants(lc);
@@ -7229,7 +7231,24 @@ fn emit_library_class_decl_inner(
         }
     };
 
-    let open_header = |s: &mut String| {
+    // A file-level `X = Data.define(…)` assigns the class once, inside
+    // the namespace of `X`, and the body reopens it. A block would not
+    // do: a `class` in a block body belongs to the enclosing scope, not
+    // to the Data class.
+    let data_factory = lc.data_define().map(|(members, _)| {
+        let members: Vec<String> = members
+            .iter()
+            .map(|member| {
+                super::emit_expr(&Expr::new(
+                    Span::synthetic(),
+                    ExprNode::Lit { value: Literal::Sym { value: member.clone() } },
+                ))
+            })
+            .collect();
+        format!("Data.define({})", members.join(", "))
+    });
+    // A split reopens the class later in the file, without the factory.
+    let open_header = |s: &mut String, factory: Option<&str>| {
         if lc.is_module {
             // Modules don't take a parent; ingest already enforces this.
             for (i, seg) in segments.iter().enumerate() {
@@ -7247,6 +7266,9 @@ fn emit_library_class_decl_inner(
             }
             let last = segments[depth - 1];
             let pad = "  ".repeat(depth - 1);
+            if let Some(factory) = factory {
+                writeln!(s, "{pad}{last} = {factory}\n").unwrap();
+            }
             match lc.parent.as_ref() {
                 Some(p) => {
                     let parent = lexically_qualified(p.0.as_str(), &segments[..depth - 1], app);
@@ -7256,7 +7278,29 @@ fn emit_library_class_decl_inner(
             }
         }
     };
-    open_header(&mut s);
+    // The source block has the top level as its lexical scope. Ruby puts
+    // its constants on `Object`, and its methods read constants from
+    // there, not through the class and its mixins. `::NAME` writes and
+    // reads give the same result in the reopened class. A block itself
+    // would not do here either: Spinel runs the statements of a block
+    // with `self` as `main`, not as the class.
+    let data_block = lc.data_define().is_some();
+    let scope = if data_block { "::" } else { "" };
+    let top_level = |expr: &Expr| {
+        let mut expr = expr.clone();
+        if data_block {
+            read_constants_from_top_level(&mut expr);
+        }
+        expr
+    };
+    let include_name = |inc: &ClassId| {
+        if data_block {
+            format!("::{}", inc.0.as_str())
+        } else {
+            lexically_qualified(inc.0.as_str(), &segments, app)
+        }
+    };
+    open_header(&mut s, data_factory.as_deref());
 
     for require in &nested_include_requires {
         writeln!(s, "{body_pad}require_relative {require:?}").unwrap();
@@ -7285,7 +7329,7 @@ fn emit_library_class_decl_inner(
         if positioned.iter().any(|(_, p)| *p == inc) {
             continue;
         }
-        writeln!(s, "{body_pad}include {}", lexically_qualified(inc.0.as_str(), &segments, app)).unwrap();
+        writeln!(s, "{body_pad}include {}", include_name(inc)).unwrap();
     }
     if lc.includes.len() > positioned.len() && !lc.methods.is_empty() {
         writeln!(s).unwrap();
@@ -7304,7 +7348,7 @@ fn emit_library_class_decl_inner(
     let render_constants = |s: &mut String, which: &[usize]| {
         for &i in which {
             let (cname, value) = &lc.constants[i];
-            let rendered = super::emit_expr(value);
+            let rendered = super::emit_expr(&top_level(value));
             if let Some(factory) = app.library_classes.iter().find(|class| {
                 matches!(class.origin, Some(LibraryClassOrigin::DataFactory { declaration_span })
                     if declaration_span == value.span)
@@ -7319,7 +7363,7 @@ fn emit_library_class_decl_inner(
             let mut lines = rendered.lines();
             match lines.next() {
                 Some(first_line) => {
-                    writeln!(s, "{body_pad}{} = {first_line}", cname.as_str()).unwrap();
+                    writeln!(s, "{body_pad}{scope}{} = {first_line}", cname.as_str()).unwrap();
                     for line in lines {
                         if line.is_empty() {
                             writeln!(s).unwrap();
@@ -7328,19 +7372,28 @@ fn emit_library_class_decl_inner(
                         }
                     }
                 }
-                None => writeln!(s, "{body_pad}{} = nil", cname.as_str()).unwrap(),
+                None => writeln!(s, "{body_pad}{scope}{} = nil", cname.as_str()).unwrap(),
             }
         }
     };
     let render_method = |s: &mut String, m: &MethodDef| {
-        render_library_method(s, m, &body_pad);
+        if data_block {
+            let mut m = m.clone();
+            m.body = top_level(&m.body);
+            for param in m.params.iter_mut().chain(m.block_param.iter_mut()) {
+                param.default = param.default.as_ref().map(&top_level);
+            }
+            render_library_method(s, &m, &body_pad);
+        } else {
+            render_library_method(s, m, &body_pad);
+        }
     };
     let render_body = |s: &mut String, items: &[(u32, BodyItem<'_>)]| {
         for (_, item) in items {
             match item {
                 BodyItem::Constant(i, _) => render_constants(s, &[*i]),
                 BodyItem::Initializer(expr) if ordered_body => {
-                    for line in super::emit_expr(expr).lines() {
+                    for line in super::emit_expr(&top_level(expr)).lines() {
                         writeln!(s, "{body_pad}{line}").unwrap();
                     }
                 }
@@ -7382,7 +7435,7 @@ fn emit_library_class_decl_inner(
             writeln!(s, "require_relative {r:?}").unwrap();
         }
         writeln!(s).unwrap();
-        open_header(&mut s);
+        open_header(&mut s, None);
         start = *at;
     }
     render_body(&mut s, &body[start..]);
@@ -7445,14 +7498,14 @@ fn emit_library_class_decl_inner(
             }
             first = false;
             for (_, inc) in positioned.iter().filter(|(at, _)| *at == index) {
-                writeln!(s, "{body_pad}include {}", lexically_qualified(inc.0.as_str(), &segments, app)).unwrap();
+                writeln!(s, "{body_pad}include {}", include_name(inc)).unwrap();
                 writeln!(s).unwrap();
             }
             render_method(&mut s, m);
         }
         for (_, inc) in positioned.iter().filter(|(at, _)| *at >= lc.methods.len()) {
             writeln!(s).unwrap();
-            writeln!(s, "{body_pad}include {}", lexically_qualified(inc.0.as_str(), &segments, app)).unwrap();
+            writeln!(s, "{body_pad}include {}", include_name(inc)).unwrap();
         }
     }
 
@@ -7475,7 +7528,7 @@ fn emit_library_class_decl_inner(
         writeln!(s).unwrap();
     }
     for init in lc.class_ivar_initializers.iter().filter(|init| remaining_inits(init)) {
-        for line in super::emit_expr(init).lines() {
+        for line in super::emit_expr(&top_level(init)).lines() {
             writeln!(s, "{body_pad}{line}").unwrap();
         }
     }
@@ -7768,6 +7821,17 @@ fn partition_deferred_constants(lc: &LibraryClass) -> (Vec<usize>, Vec<usize>, b
     let initializers_call_self = lc.class_ivar_initializers.iter()
         .any(|init| calls_self(init, &own, &deferred_names, lc.name.0.as_str()));
     (eager, deferred, initializers_call_self)
+}
+
+/// Writes every relative constant read in `expr` as a read from the top
+/// level, `X` as `::X`. See `emit_library_class_decl_inner`.
+fn read_constants_from_top_level(expr: &mut Expr) {
+    if let ExprNode::Const { path } = &mut *expr.node {
+        if path.first().is_some_and(|segment| !segment.as_str().is_empty()) {
+            path.insert(0, Symbol::from(""));
+        }
+    }
+    expr.node.for_each_child_mut(&mut |child| read_constants_from_top_level(child));
 }
 
 /// Project-root-anchored require target for a parent class, if one is needed.
