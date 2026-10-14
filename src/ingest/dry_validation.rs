@@ -177,7 +177,7 @@ pub(super) fn lower_dry_validation(
     app: &mut App,
     sources: &[crate::span::SourceFile],
     read_file: &dyn Fn(&str) -> Option<String>,
-) {
+) -> super::IngestResult<()> {
     let names: HashSet<String> = app.library_classes.iter().map(|lc| lc.name.0.as_str().to_string()).collect();
     // Each contract and its contract parent (None under the gem's class).
     let mut parent_of: HashMap<String, Option<String>> = HashMap::new();
@@ -244,7 +244,7 @@ pub(super) fn lower_dry_validation(
         }
     }
     if parent_of.is_empty() && schemas.is_empty() {
-        return;
+        return Ok(());
     }
     let configs = read_configs(sources);
 
@@ -293,11 +293,15 @@ pub(super) fn lower_dry_validation(
         refused_tops.insert(top);
     }
     let lowered = |name: &str| !chain_of(name).iter().any(|n| refused_tops.contains(n));
-    for (name, reason) in &refused {
-        survey::record(&IngestError::Unsupported {
+    // A refusal is a gap in survey mode and a failure otherwise, in a
+    // repeatable order.
+    let mut refusals: Vec<(&String, &String)> = refused.iter().collect();
+    refusals.sort();
+    for (name, reason) in refusals {
+        survey::continue_or_fail(IngestError::Unsupported {
             file: name.clone(),
             message: format!("Dry::Validation not lowered: {reason}"),
-        });
+        })?;
     }
 
     let mut generated: Vec<(String, String)> = Vec::new();
@@ -333,18 +337,20 @@ pub(super) fn lower_dry_validation(
         generated.push((name.clone(), contract_source(name, &schema, &rules, &methods, &messages, &mut used)));
     }
     let mut schema_classes: Vec<(String, String, String)> = Vec::new();
-    for (full, schema) in &schemas {
-        match schema {
+    let mut schema_names: Vec<&String> = schemas.keys().collect();
+    schema_names.sort();
+    for full in schema_names {
+        match &schemas[full] {
             Ok(schema) => {
                 let (owner, constant) = full.rsplit_once("::").unwrap_or(("", full));
                 let class = format!("{owner}::DrySchema{constant}");
                 let messages = Messages::new(&Config::default(), None, read_file, "dry_schema");
                 schema_classes.push((full.clone(), class.clone(), schema_source(&class, schema, &messages, &mut used)));
             }
-            Err(reason) => survey::record(&IngestError::Unsupported {
+            Err(reason) => survey::continue_or_fail(IngestError::Unsupported {
                 file: full.clone(),
                 message: format!("Dry::Schema not lowered: {reason}"),
-            }),
+            })?,
         }
     }
 
@@ -396,6 +402,7 @@ pub(super) fn lower_dry_validation(
     if any || !parent_of.is_empty() {
         app.library_classes.extend(stand_ins(&used));
     }
+    Ok(())
 }
 
 /// `Dry::Schema.Params do ... end`, `.JSON`, `.define`: the processor and
@@ -1088,6 +1095,15 @@ fn read_configs(sources: &[crate::span::SourceFile]) -> HashMap<String, Config> 
                     _ => config.refused = Some("a computed `default_locale`".into()),
                 },
                 ("config.messages.load_paths", "<<", [v]) => match value(v) {
+                    // Read from the app only: an absolute path or one
+                    // climbing out of it is not followed.
+                    Some(ConfigValue::Literal(v))
+                        if std::path::Path::new(&v).components().any(|c| {
+                            !matches!(c, std::path::Component::Normal(_) | std::path::Component::CurDir)
+                        }) =>
+                    {
+                        config.refused = Some(format!("`load_paths` entry `{v}` outside the app"))
+                    }
                     Some(ConfigValue::Literal(v)) => config.load_paths.push(v),
                     _ => config.refused = Some("a computed `load_paths` entry".into()),
                 },
