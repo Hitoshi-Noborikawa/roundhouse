@@ -35,6 +35,10 @@ mod params_wrapper;
 mod stdlib_rnp_contract;
 #[path = "emit_and_run/stdlib_rnp.rs"]
 mod stdlib_rnp;
+#[path = "support/erb_template.rs"]
+mod erb_template_contract;
+#[path = "emit_and_run/erb_template.rs"]
+mod erb_template;
 
 #[path = "support/class_configuration.rs"]
 mod class_configuration;
