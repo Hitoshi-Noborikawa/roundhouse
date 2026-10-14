@@ -240,6 +240,7 @@ module ActionView
 
     # Not `bytes[i]` inline, nor `bytes[i] || 0`: the inline read types as Integer | nil, which Elixir refuses arithmetic on, and Rust's Vec<i64> has no `unwrap_or`.
     def self.erb_url_byte(bytes, i)
+      raise ArgumentError, "erb_url_byte: index outside the bytes" if i < 0 || i >= bytes.length
       bytes[i]
     end
 
