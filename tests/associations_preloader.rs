@@ -1,7 +1,7 @@
 //! `ActiveRecord::Associations::Preloader.new(records:, associations:).call`
 //! checks clean when its value is discarded and its records are one
 //! model's (it lowers to that model's `preload_associations`) or several
-//! models' (`Base.preload_records`), and keeps its refusal for any other
+//! models' (`ActiveRecord::Preloading.records`), and keeps its refusal for any other
 //! option, since no target ships the class.
 
 use std::collections::HashMap;
@@ -48,7 +48,7 @@ fn a_used_value_keeps_the_refusal() {
     assert_eq!(errors.len(), 2, "{errors:#?}");
 }
 
-/// Several models' records, or records of a type analysis does not know, are grouped by class at run time (`Base.preload_records`), as Rails' preloader groups them.
+/// Several models' records, or records of a type analysis does not know, are grouped by class at run time (`ActiveRecord::Preloading.records`), as Rails' preloader groups them.
 #[test]
 fn mixed_or_unknown_records_check_clean() {
     let errors = constant_errors(

@@ -5389,6 +5389,8 @@ const RUBY_SPINEL_ONLY_METHODS: &[(&str, &str)] = &[
     // `lower::record_snapshot`'s closed-world `constantize` — the
     // generated `case` lives in the same ruby-family/spinel file.
     ("ActiveRecord::Base", "instantiate_named"),
+    // `lower::preloader` over several models' records: `runtime/ruby/active_record/preloading.rb`, which no strict target loads.
+    ("ActiveRecord::Preloading", "records"),
     // `lower::errors_index`'s `errors.to_hash`, `messages`,
     // `attribute_names`, `delete`, `details`, `import` and `merge!`: the helpers are
     // `runtime/ruby/active_support_ext.rb`, which no strict target loads.

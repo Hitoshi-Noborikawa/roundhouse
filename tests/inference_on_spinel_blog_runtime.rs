@@ -373,7 +373,7 @@ fn untyped_subexpressions_baseline() {
     // initialize ivar write, untyped here like the other three fields'.
     // `ErrorDetail#symbolic`: 610 -> 612, MEASURED — the same write.
     // `ErrorDetail#optionless`: 612 -> 614, MEASURED — the same write.
-    // `Base.preload_records` / `Base#_preload_as_group` (mixed-model
+    // `ActiveRecord::Preloading.records` / `Base#_preload_as_group` (mixed-model
     // `Associations::Preloader`): 614 -> 632, MEASURED — 16 + 2, every
     // read of the `records`/`specs`/`group` parameters, untyped here
     // without the RBS the runtime gate reads them with.
