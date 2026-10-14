@@ -156,6 +156,7 @@ pub(super) fn emit_library_class_decls(app: &App) -> Vec<EmittedFile> {
     // re-applies the same reader idempotently and adds the Ruby writer
     // normalize.
     apply_datetime_lowering(&mut lcs, app);
+    apply_rich_text_content_memo(&mut lcs);
     apply_boolean_lowering(&mut lcs, app);
     apply_hydration_nil_lowering(&mut lcs, app);
     apply_nilsafe_empty_lowering(&mut lcs);
@@ -5653,6 +5654,126 @@ fn invalidate_parse_memo_on_raw_writes(e: &mut Expr, temporal: &BTreeSet<Symbol>
                     span,
                     ExprNode::Assign {
                         target: LValue::Ivar { name: parse_memo_ivar(&base) },
+                        value: Expr::new(span, ExprNode::Lit { value: Literal::Nil }),
+                    },
+                ),
+                store,
+            ],
+        },
+    );
+}
+
+/// A rich-text record's `body` reader (`lower::rich_text`: `def body;
+/// ActionText::Content.new(@body); end`) answers ONE Content per record,
+/// as Rails' serialized attribute does: `@__content_body ||=
+/// ActionText::Content.new(@body)`, reset before every statement-position
+/// `@body = …` in the class (the writer and the adapter's reload alike).
+///
+/// A new Content per read threw away what the last one had worked out:
+/// campfire reads each message's body four times a render, and its
+/// plain-text conversion walked the markup every time (27% of a room
+/// page). Ruby emit only: the memo is a second ivar, and the strict
+/// targets declare fields from the schema.
+pub(crate) fn apply_rich_text_content_memo(lcs: &mut [LibraryClass]) {
+    for lc in lcs.iter_mut() {
+        let memoized: BTreeSet<Symbol> = lc
+            .methods
+            .iter()
+            .filter(|m| m.receiver == MethodReceiver::Instance && m.params.is_empty())
+            .filter_map(|m| content_new_of_ivar(&m.body).filter(|iv| *iv == m.name))
+            .collect();
+        if memoized.is_empty() {
+            continue;
+        }
+        for m in &mut lc.methods {
+            if m.receiver != MethodReceiver::Instance {
+                continue;
+            }
+            if m.params.is_empty() && memoized.contains(&m.name) && content_new_of_ivar(&m.body).is_some() {
+                m.body = Expr::new(
+                    m.body.span,
+                    ExprNode::OpAssign {
+                        target: LValue::Ivar { name: content_memo_ivar(&m.name) },
+                        op: crate::expr::OpAssignOp::OrOr,
+                        value: m.body.clone(),
+                    },
+                );
+                continue;
+            }
+            reset_content_memo_on_writes(&mut m.body, &memoized);
+        }
+    }
+}
+
+/// `@x` when `e` is exactly `ActionText::Content.new(@x)`.
+fn content_new_of_ivar(e: &Expr) -> Option<Symbol> {
+    let ExprNode::Send { recv: Some(recv), method, args, block: None, .. } = &*e.node else {
+        return None;
+    };
+    let ExprNode::Const { path } = &*recv.node else {
+        return None;
+    };
+    if method.as_str() != "new"
+        || path.len() != 2
+        || path[0].as_str() != "ActionText"
+        || path[1].as_str() != "Content"
+    {
+        return None;
+    }
+    match args.as_slice() {
+        [arg] => match &*arg.node {
+            ExprNode::Ivar { name } => Some(name.clone()),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+fn content_memo_ivar(col: &Symbol) -> Symbol {
+    Symbol::from(format!("__content_{}", col.as_str()))
+}
+
+/// Statement-position `@x = …` for a memoized `x` becomes
+/// `@__content_x = nil; @x = …` (the same walk the temporal memo takes).
+fn reset_content_memo_on_writes(e: &mut Expr, memoized: &BTreeSet<Symbol>) {
+    match &mut *e.node {
+        ExprNode::Seq { exprs } => {
+            for x in exprs.iter_mut() {
+                reset_content_memo_on_writes(x, memoized);
+            }
+            return;
+        }
+        ExprNode::If { then_branch, else_branch, .. } => {
+            reset_content_memo_on_writes(then_branch, memoized);
+            reset_content_memo_on_writes(else_branch, memoized);
+            return;
+        }
+        // `[]=`'s `case name when :body then @body = value&.to_s`.
+        ExprNode::Case { arms, .. } => {
+            for arm in arms.iter_mut() {
+                reset_content_memo_on_writes(&mut arm.body, memoized);
+            }
+            return;
+        }
+        _ => {}
+    }
+    let ExprNode::Assign { target: LValue::Ivar { name }, .. } = &*e.node else {
+        return;
+    };
+    if !memoized.contains(name) {
+        return;
+    }
+    let span = e.span;
+    let memo = content_memo_ivar(name);
+    let store = e.clone();
+    *e = Expr::new(
+        span,
+        ExprNode::Seq {
+            exprs: vec![
+                Expr::new(
+                    span,
+                    ExprNode::Assign {
+                        target: LValue::Ivar { name: memo },
                         value: Expr::new(span, ExprNode::Lit { value: Literal::Nil }),
                     },
                 ),

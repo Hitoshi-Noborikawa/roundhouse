@@ -322,6 +322,7 @@ pub(crate) fn apply_model_lowering(mut lcs: &mut [LibraryClass], app: &App) {
     // Date/DateTime/Time column accessors coerce to/from real `Time`
     // (no-op for apps with no temporal columns).
     library::apply_datetime_lowering(&mut lcs, app);
+    library::apply_rich_text_content_memo(&mut lcs);
     // has_secure_password (authenticate + plaintext accessors, bcrypt
     // contract) and typed_store virtual-attribute accessors are
     // synthesized by the shared model lowering
