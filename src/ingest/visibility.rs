@@ -52,6 +52,47 @@ pub(super) fn definition<'pr>(node: &Node<'pr>) -> Option<ruby_prism::DefNode<'p
     node.as_def_node()
 }
 
+/// Does this `included do … end` body mix a visibility marker (bare or
+/// named — either spelling makes the marker's reach matter) with some
+/// OTHER receiverless call this file's visibility tracking does not
+/// itself attribute a method to? `def`s and the marker calls themselves
+/// are always fine; `attr_reader`/`attr_writer`/`attr_accessor`,
+/// `alias_method`, and nested `class_methods`/`included`/
+/// `module_function` are the declaration forms `Visibility::walk`
+/// already tracks, so they're fine too. Anything else — `delegate`,
+/// `scope`, `has_many`, an arbitrary DSL block — might generate a
+/// method whose visibility this walk cannot verify, so its presence
+/// alongside a marker is reported, not silently accepted.
+fn marker_mixed_with_unmodeled_call(body: &Node<'_>) -> bool {
+    const TRACKED: &[&str] = &[
+        "attr_reader",
+        "attr_writer",
+        "attr_accessor",
+        "alias_method",
+        "class_methods",
+        "included",
+        "module_function",
+    ];
+    let Some(statements) = body.as_statements_node() else { return false };
+    let stmts = flatten_statements(statements.as_node());
+    let has_marker = stmts.iter().any(|stmt| {
+        stmt.as_call_node().is_some_and(|c| c.receiver().is_none() && marker(&c))
+    });
+    if !has_marker {
+        return false;
+    }
+    stmts.iter().any(|stmt| {
+        if stmt.as_def_node().is_some() {
+            return false;
+        }
+        let Some(call) = stmt.as_call_node() else { return false };
+        if call.receiver().is_some() || marker(&call) {
+            return false;
+        }
+        !TRACKED.contains(&constant_id_str(&call.name()))
+    })
+}
+
 impl Visibility {
     /// Recover lexical defaults for source declarations that a later pass
     /// synthesizes into methods. Parse and walk each class body once per file.
@@ -220,6 +261,45 @@ impl Visibility {
         let mut carrier = Self { carrier: true, ..Self::default() };
         carrier.walk(body, true, file, None)?;
         self.values.extend(carrier.values);
+        Ok(())
+    }
+
+    /// `included do … end` runs under `class_eval` on the includer: its
+    /// defs land on the includer's INSTANCE side, not a singleton of
+    /// their own. Walk it as its own lexical scope that starts public —
+    /// the same bucket-isolation `walk_carrier` gives `class_methods do
+    /// … end`, just on the instance side (`class_side: false`).
+    ///
+    /// Narrowly scoped to defs and the markers themselves (plus the
+    /// declaration helpers `walk` already tracks — `attr_*`,
+    /// `alias_method`, nested `class_methods`/`included`/
+    /// `module_function`): a marker's effect on anything else this body
+    /// might generate a method from (`delegate :email, to: :author`,
+    /// `scope`, `has_many`, an arbitrary DSL) is NOT modeled, and
+    /// silently proceeding would risk shipping that method PUBLIC where
+    /// the source marks it private — `attachment_model_lowering.rs`'s
+    /// `a_private_delegate_in_an_included_block_is_rejected_at_ingest`
+    /// is exactly that case. So a marker coexisting with any other
+    /// receiverless, non-marker call keeps the same blanket rejection
+    /// this whole block used to raise for ANY marker, same as a named
+    /// marker (`private :helper`) naming something NOT defined within
+    /// this same `included do` (the one-sided-accessor shape a
+    /// separate, already-deferred gap owns) — any error here folds back
+    /// to that one message rather than surfacing a new, more specific
+    /// one that would read as a second construct now being claimed
+    /// supported.
+    fn walk_included(&mut self, body: Option<Node<'_>>, file: &str) -> IngestResult<()> {
+        if body.as_ref().is_some_and(marker_mixed_with_unmodeled_call) {
+            return Err(Self::unsupported(
+                file,
+                "conditional or dynamic visibility declarations are not modeled",
+            ));
+        }
+        let mut included = Self::default();
+        included
+            .walk(body, false, file, None)
+            .map_err(|_| Self::unsupported(file, "conditional or dynamic visibility declarations are not modeled"))?;
+        self.values.extend(included.values);
         Ok(())
     }
 
@@ -583,6 +663,18 @@ impl Visibility {
             if name == "class_methods" {
                 if let Some(block) = call.block().and_then(|b| b.as_block_node()) {
                     self.walk_carrier(block.body(), file)?;
+                }
+            } else if name == "included" {
+                // The accessor-shape special case above already handled
+                // (and skipped) its candidate; any other `included do …
+                // end` is a plain lexical scope on the includer's
+                // instance side. A bodyless `included` (no block) has
+                // nothing to walk and falls back to the dynamic-marker
+                // check, same as any other unrecognized call.
+                if let Some(block) = call.block().and_then(|b| b.as_block_node()) {
+                    self.walk_included(block.body(), file)?;
+                } else {
+                    Self::reject_dynamic_declarations(node, file)?;
                 }
             } else if matches!(name, "attr_reader" | "attr_writer" | "attr_accessor") {
                 if let Some(args) = call.arguments() {
