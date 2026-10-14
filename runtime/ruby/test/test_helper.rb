@@ -96,6 +96,11 @@ require "action_controller/cookies"
 # strict-target tables, read by the ruby-family lanes alone, required
 # from the helper rather than inline in the test.
 require "action_controller/cache_control"
+# Rack::ETag / Rack::ConditionalGet over the buffered response
+# (conditional_get_test.rb), for the same reason: ruby-family only. Its
+# body digest is stdlib `digest`, which the emitted trees require for it.
+require "digest"
+require "action_controller/conditional_get"
 # What `cookies.signed` signs WITH. cookies.rb names it but does not
 # require it — the production aggregator (runtime/ruby/action_controller
 # .rb) supplies it, and this helper is a second list of the same thing.

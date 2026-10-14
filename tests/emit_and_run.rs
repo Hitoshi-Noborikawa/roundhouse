@@ -106,6 +106,10 @@ mod assoc_primary_key;
 mod assoc_pluck_typed;
 #[path = "emit_and_run/action_controller_head.rs"]
 mod action_controller_head;
+#[path = "support/conditional_get.rs"]
+mod conditional_get_contract;
+#[path = "emit_and_run/conditional_get.rs"]
+mod conditional_get;
 #[path = "emit_and_run/nil_body_length.rs"]
 mod nil_body_length;
 #[path = "emit_and_run/inline_filter_guard.rs"]
