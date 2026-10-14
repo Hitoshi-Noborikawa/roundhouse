@@ -226,7 +226,7 @@ module ActionView
       out = ""
       i = 0
       while i < bytes.length
-        b = bytes[i]
+        b = erb_url_byte(bytes, i)
         if (b >= 48 && b <= 57) || (b >= 65 && b <= 90) || (b >= 97 && b <= 122) ||
            b == 45 || b == 46 || b == 95 || b == 126
           out = out + printable[b - 32, 1].to_s
@@ -236,6 +236,11 @@ module ActionView
         i += 1
       end
       out
+    end
+
+    # Not `bytes[i]` inline, nor `bytes[i] || 0`: the inline read types as Integer | nil, which Elixir refuses arithmetic on, and Rust's Vec<i64> has no `unwrap_or`.
+    def self.erb_url_byte(bytes, i)
+      bytes[i]
     end
 
     # Same include? probe as html_escape (no portable match? emit).
