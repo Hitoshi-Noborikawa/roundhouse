@@ -1460,7 +1460,8 @@ impl<'a> BodyTyper<'a> {
                         ctx.self_ty.as_ref(),
                         Some(Ty::Class { id, .. })
                             if self.classes().get(id).is_some_and(|cls|
-                                cls.class_methods.contains_key(method)
+                                // Not a class method from an instance body: `dom_id(self)` beside a `self.dom_id` is the instance's own.
+                                (!ctx.instance_body && cls.class_methods.contains_key(method))
                                     || cls.instance_methods.contains_key(method))
                     );
                 if resolves_through_self {
