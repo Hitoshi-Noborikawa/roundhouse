@@ -3496,6 +3496,27 @@ end
         .assert_passes();
 }
 
+/// A strict target reports the written-down encoder as unsupported rather than emitting code no toolchain has built.
+#[test]
+fn render_json_record_writer_is_unsupported_on_strict_targets() {
+    use roundhouse::project::BuildTarget;
+    for target in [BuildTarget::Rust, BuildTarget::Go, BuildTarget::Typescript] {
+        let (_emitted, errors) = records_json_app().emit(target);
+        assert!(errors.iter().any(|e| e.contains("json_writer")), "{target:?}: {errors:?}");
+    }
+    for target in [BuildTarget::Ruby, BuildTarget::Spinel] {
+        let (_emitted, errors) = records_json_app().emit(target);
+        assert!(!errors.iter().any(|e| e.contains("json_writer")), "{target:?}: {errors:?}");
+    }
+    // An app's own method of that name is not the compiler's writer.
+    let own = emit_and_run::real_blog()
+        .edit("app/models/article.rb", "  validates :title, presence: true\n", "  validates :title, presence: true\n\n  def as_json_str\n    title.to_s\n  end\n")
+        .edit("config/routes.rb", "  root \"articles#index\"\n", "  root \"articles#index\"\n  get \"/own/:id\", to: \"own#show\"\n")
+        .write("app/controllers/own_controller.rb", "class OwnController < ApplicationController\n  def show\n    render plain: Article.find(params[:id]).as_json_str\n  end\nend\n");
+    let (_emitted, errors) = own.emit(BuildTarget::Rust);
+    assert!(!errors.iter().any(|e| e.contains("json_writer")), "{errors:?}");
+}
+
 /// The same writer compiled by Spinel, where the runtime encoder does not exist.
 #[test]
 #[ignore = "requires the Spinel toolchain"]

@@ -876,7 +876,10 @@ as `as_json` writes it, except the inheritance column (`type`), which
 ActiveRecord's `serializable_hash` always excepts. `lower::as_json_record` writes that down as the same
 `as_json_str` writer over the columns, so `render json: @article`, an Array
 of records and a Relation (`render json: @stories`) are the writer's text
-on every tree. The writer is HTML-entity escaped and writes a datetime as
+on the ruby family and spinel. A strict target reports a call to the writer
+as `json_writer` unsupported: no strict toolchain has built it yet (Rust's
+model and controller files do not import `JsonBuilder`), and an unsupported
+error is what tells the ledger so. The writer is HTML-entity escaped and writes a datetime as
 the jbuilder writer does (`Z` for a UTC app, the zone's offset otherwise),
 both of which the runtime encoder got wrong for a record, and it encoded a
 Relation as its `to_s`. A model keeps the runtime encoder when Rails would

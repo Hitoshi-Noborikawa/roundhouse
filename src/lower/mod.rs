@@ -48,6 +48,7 @@ pub mod test_module_to_library;
 pub mod create_block;
 pub mod as_json_poro;
 mod as_json_record;
+pub use as_json_writer::WRITER_METHOD as JSON_WRITER_METHOD;
 pub mod active_model_model;
 pub mod enumerable_ext;
 mod fused;
