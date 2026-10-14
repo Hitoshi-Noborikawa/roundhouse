@@ -565,8 +565,6 @@ fn bind_once_as(span: crate::span::Span, arg: &Expr, name: &str, skip_simple: bo
     Bound { assign, read }
 }
 
-/// words_connector, two_words_connector, last_word_connector — Rails'
-/// `:en` defaults.
 /// ActiveSupport's `String#truncate(truncate_to, omission:, separator:)`
 /// → `ActiveSupport.truncate(text, truncate_to, omission, separator)`,
 /// an absent option passed as `nil` (the module function reads `nil`
@@ -649,6 +647,8 @@ fn is_effect_free(e: &Expr) -> bool {
     )
 }
 
+/// words_connector, two_words_connector, last_word_connector — Rails'
+/// `:en` defaults.
 const SENTENCE_DEFAULTS: [&str; 3] = [", ", " and ", ", and "];
 
 /// Rails' `to_sentence` connectors (`:en` defaults), in the module
@@ -1105,90 +1105,90 @@ mod tests {
         assert_eq!(string_args(&e), [", ", "+", ", and "]);
     }
 
-fn truncate_on(receiver_ty: Option<Ty>, options: Vec<(&str, Expr)>) -> Expr {
-    let mut text = var("text");
-    text.ty = receiver_ty;
-    let mut args = vec![int(27)];
-    if !options.is_empty() {
-        let entries = options
-            .into_iter()
-            .map(|(k, v)| {
-                let key = Expr::new(Span::synthetic(), ExprNode::Lit { value: crate::expr::Literal::Sym { value: Symbol::from(k) } });
-                (key, v)
-            })
-            .collect();
-        args.push(Expr::new(Span::synthetic(), ExprNode::Hash { entries, kwargs: true }));
-    }
-    Expr::new(Span::synthetic(), ExprNode::Send {
-        recv: Some(text), method: Symbol::from("truncate"), args, block: None, parenthesized: true,
-    })
-}
-
-fn str_lit(value: &str) -> Expr {
-    let mut e = Expr::new(Span::synthetic(), ExprNode::Lit { value: crate::expr::Literal::Str { value: value.to_string() } });
-    e.ty = Some(Ty::Str);
-    e
-}
-
-fn arg_kinds(e: &Expr) -> Vec<String> {
-    let ExprNode::Send { args, .. } = &*e.node else { panic!("not a Send") };
-    args.iter()
-        .map(|a| match &*a.node {
-            ExprNode::Lit { value: crate::expr::Literal::Str { value } } => value.clone(),
-            ExprNode::Lit { value: crate::expr::Literal::Nil } => "nil".to_string(),
-            ExprNode::Lit { value: crate::expr::Literal::Int { value } } => value.to_string(),
-            ExprNode::Var { name, .. } => name.as_str().to_string(),
-            other => format!("{other:?}"),
+    fn truncate_on(receiver_ty: Option<Ty>, options: Vec<(&str, Expr)>) -> Expr {
+        let mut text = var("text");
+        text.ty = receiver_ty;
+        let mut args = vec![int(27)];
+        if !options.is_empty() {
+            let entries = options
+                .into_iter()
+                .map(|(k, v)| {
+                    let key = Expr::new(Span::synthetic(), ExprNode::Lit { value: crate::expr::Literal::Sym { value: Symbol::from(k) } });
+                    (key, v)
+                })
+                .collect();
+            args.push(Expr::new(Span::synthetic(), ExprNode::Hash { entries, kwargs: true }));
+        }
+        Expr::new(Span::synthetic(), ExprNode::Send {
+            recv: Some(text), method: Symbol::from("truncate"), args, block: None, parenthesized: true,
         })
-        .collect()
-}
-
-#[test]
-fn string_truncate_grounds_with_positional_options() {
-    let mut bare = truncate_on(Some(Ty::Str), vec![]);
-    assert!(rewrite_node(&mut bare));
-    assert_eq!(arg_kinds(&bare), ["text", "27", "nil", "nil"]);
-    assert_eq!(bare.ty, Some(Ty::Str));
-
-    let mut separator = truncate_on(Some(Ty::Str), vec![("separator", str_lit(" "))]);
-    assert!(rewrite_node(&mut separator));
-    assert_eq!(arg_kinds(&separator), ["text", "27", "nil", " "]);
-
-    // Literal values cannot observe their order, so a separator
-    // written first still reaches its positional slot.
-    let mut both = truncate_on(Some(Ty::Str), vec![("separator", str_lit(" ")), ("omission", str_lit("~"))]);
-    assert!(rewrite_node(&mut both));
-    assert_eq!(arg_kinds(&both), ["text", "27", "~", " "]);
-    let ExprNode::Send { recv: Some(r), method, .. } = &*both.node else { panic!() };
-    assert_eq!(method.as_str(), "truncate");
-    assert!(matches!(&*r.node, ExprNode::Const { path } if path[0].as_str() == "ActiveSupport"));
-}
-
-#[test]
-fn string_truncate_stays_as_written_when_grounding_would_change_it() {
-    // Not proven a String: a model or an adapter may own `truncate`.
-    for ty in [None, Some(Ty::Untyped)] {
-        let mut e = truncate_on(ty, vec![]);
-        assert!(!rewrite_node(&mut e));
     }
-    // A Regexp separator does not fit the String parameter.
-    let mut regexp = Expr::new(Span::synthetic(), ExprNode::Lit {
-        value: crate::expr::Literal::Regex { pattern: "\\s".to_string(), flags: String::new() },
-    });
-    regexp.ty = Some(Ty::Class { id: crate::ident::ClassId(Symbol::from("Regexp")), args: vec![] });
-    let mut e = truncate_on(Some(Ty::Str), vec![("separator", regexp)]);
-    assert!(!rewrite_node(&mut e));
-    // An option Rails does not read, and a reorder past an effect.
-    let mut unknown = truncate_on(Some(Ty::Str), vec![("length", int(3))]);
-    assert!(!rewrite_node(&mut unknown));
-    let call = |name: &str| {
-        let mut c = Expr::new(Span::synthetic(), ExprNode::Send {
-            recv: None, method: Symbol::from(name), args: vec![], block: None, parenthesized: false,
+
+    fn str_lit(value: &str) -> Expr {
+        let mut e = Expr::new(Span::synthetic(), ExprNode::Lit { value: crate::expr::Literal::Str { value: value.to_string() } });
+        e.ty = Some(Ty::Str);
+        e
+    }
+
+    fn arg_kinds(e: &Expr) -> Vec<String> {
+        let ExprNode::Send { args, .. } = &*e.node else { panic!("not a Send") };
+        args.iter()
+            .map(|a| match &*a.node {
+                ExprNode::Lit { value: crate::expr::Literal::Str { value } } => value.clone(),
+                ExprNode::Lit { value: crate::expr::Literal::Nil } => "nil".to_string(),
+                ExprNode::Lit { value: crate::expr::Literal::Int { value } } => value.to_string(),
+                ExprNode::Var { name, .. } => name.as_str().to_string(),
+                other => format!("{other:?}"),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn string_truncate_grounds_with_positional_options() {
+        let mut bare = truncate_on(Some(Ty::Str), vec![]);
+        assert!(rewrite_node(&mut bare));
+        assert_eq!(arg_kinds(&bare), ["text", "27", "nil", "nil"]);
+        assert_eq!(bare.ty, Some(Ty::Str));
+
+        let mut separator = truncate_on(Some(Ty::Str), vec![("separator", str_lit(" "))]);
+        assert!(rewrite_node(&mut separator));
+        assert_eq!(arg_kinds(&separator), ["text", "27", "nil", " "]);
+
+        // Literal values cannot observe their order, so a separator
+        // written first still reaches its positional slot.
+        let mut both = truncate_on(Some(Ty::Str), vec![("separator", str_lit(" ")), ("omission", str_lit("~"))]);
+        assert!(rewrite_node(&mut both));
+        assert_eq!(arg_kinds(&both), ["text", "27", "~", " "]);
+        let ExprNode::Send { recv: Some(r), method, .. } = &*both.node else { panic!() };
+        assert_eq!(method.as_str(), "truncate");
+        assert!(matches!(&*r.node, ExprNode::Const { path } if path[0].as_str() == "ActiveSupport"));
+    }
+
+    #[test]
+    fn string_truncate_stays_as_written_when_grounding_would_change_it() {
+        // Not proven a String: a model or an adapter may own `truncate`.
+        for ty in [None, Some(Ty::Untyped)] {
+            let mut e = truncate_on(ty, vec![]);
+            assert!(!rewrite_node(&mut e));
+        }
+        // A Regexp separator does not fit the String parameter.
+        let mut regexp = Expr::new(Span::synthetic(), ExprNode::Lit {
+            value: crate::expr::Literal::Regex { pattern: "\\s".to_string(), flags: String::new() },
         });
-        c.ty = Some(Ty::Str);
-        c
-    };
-    let mut effects = truncate_on(Some(Ty::Str), vec![("separator", call("sep")), ("omission", call("mark"))]);
-    assert!(!rewrite_node(&mut effects));
-}
+        regexp.ty = Some(Ty::Class { id: crate::ident::ClassId(Symbol::from("Regexp")), args: vec![].into() });
+        let mut e = truncate_on(Some(Ty::Str), vec![("separator", regexp)]);
+        assert!(!rewrite_node(&mut e));
+        // An option Rails does not read, and a reorder past an effect.
+        let mut unknown = truncate_on(Some(Ty::Str), vec![("length", int(3))]);
+        assert!(!rewrite_node(&mut unknown));
+        let call = |name: &str| {
+            let mut c = Expr::new(Span::synthetic(), ExprNode::Send {
+                recv: None, method: Symbol::from(name), args: vec![], block: None, parenthesized: false,
+            });
+            c.ty = Some(Ty::Str);
+            c
+        };
+        let mut effects = truncate_on(Some(Ty::Str), vec![("separator", call("sep")), ("omission", call("mark"))]);
+        assert!(!rewrite_node(&mut effects));
+    }
 }
