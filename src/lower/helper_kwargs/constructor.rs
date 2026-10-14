@@ -389,6 +389,25 @@ fn rewrite_instance_call(
         return;
     };
     let Some(crate::ty::Ty::Class { id, .. }) = &recv.ty else {
+        // The receiver's class isn't known (#800's remainder): #814
+        // repairs a CONST receiver, an `instance`-typed one and the
+        // owner-relative shapes (receiverless/`self.`), but a value
+        // whose type didn't resolve to any of those — an untyped
+        // parameter, a gradual read — names nothing this lookup can
+        // confirm. Guessing which class's slot layout applies would be
+        // exactly the silent-mis-bind #800 reported, just moved one
+        // level up; when the method's own NAME is one that SOME class
+        // in this app only accepts as flattened positionals, and the
+        // call carries keywords at all, refuse loudly instead — the
+        // same gap #814 raises when it CAN see the receiver's class
+        // but cannot safely respell the call.
+        if super::carries_keywords(args) && params.slots.keys().any(|(_, m)| m == method) {
+            super::refuse(
+                expr.span,
+                "cannot resolve this receiver's class to confirm which positional slots its keywords belong in",
+                diagnostics,
+            );
+        }
         return;
     };
     let is_constructor = method.as_str() == "new" && matches!(&*recv.node, ExprNode::Const { .. });
