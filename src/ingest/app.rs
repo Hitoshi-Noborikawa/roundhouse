@@ -1994,11 +1994,25 @@ end
     // After the structs: an option typed with a struct builds the lowered one.
     super::dry_initializer::lower_dry_initializers(&mut app, &sources);
     // Contracts and schemas, whose messages are the app's own files too.
+    // A load path is read only inside the app, as the other app-relative
+    // paths are; `read_configs` refuses one that reaches out.
     super::dry_validation::lower_dry_validation(&mut app, &sources, &|path: &str| {
-        vfs.read_to_string(&dir.join(path)).ok()
-    });
+        let mut relative = PathBuf::new();
+        for component in Path::new(path).components() {
+            match component {
+                Component::CurDir => {}
+                Component::Normal(segment) => relative.push(segment),
+                Component::ParentDir | Component::RootDir | Component::Prefix(_) => return None,
+            }
+        }
+        let full = dir.join(relative);
+        if path_has_symlink_component(vfs, dir, &full) {
+            return None;
+        }
+        vfs.read_to_string(&full).ok()
+    })?;
     // After it: a contract result's `to_monad` is a Result.
-    super::dry_monads::lower_dry_monads(&mut app, &sources);
+    super::dry_monads::lower_dry_monads(&mut app, &sources)?;
     super::dry_initializer::drop_type_constants(&mut app, &sources);
     // graphql-ruby object types: analyzer-only field methods, so
     // inference carries each type's record class down the schema.

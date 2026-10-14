@@ -395,6 +395,10 @@ fn emit_node(n: &ExprNode) -> String {
         // `target += value`, etc. Preserves source short-circuit
         // semantics (and Rails dirty-tracking on `||=`).
         ExprNode::OpAssign { target, op, value } => {
+            // `x ||= (y if c)`, every form below: bare, the modifier
+            // guards the assignment.
+            let rhs = emit_expr(value);
+            let rhs = if assigns_as_modifier_if(value) { format!("({rhs})") } else { rhs };
             // `ENV[k] ||= v`: spinel models ENV only as a call receiver,
             // and an op-assign target reads it as a value. Expand to the
             // read-then-write Ruby defines it as.
@@ -404,7 +408,7 @@ fn emit_node(n: &ExprNode) -> String {
                 if matches!(&*index.node, ExprNode::Lit { value: Literal::Str { .. } })
                     && matches!(&*recv.node, ExprNode::Const { path } if path.len() == 1 && path[0].as_str() == "ENV") {
                     let k = emit_expr(index);
-                    let v = emit_expr(value);
+                    let v = rhs.clone();
                     let infix = op.as_ruby().trim_end_matches('=');
                     return match infix {
                         "||" | "&&" => format!("(ENV[{k}] {infix} (ENV[{k}] = {v}))"),
@@ -430,14 +434,9 @@ fn emit_node(n: &ExprNode) -> String {
                 ) {
                     let r = emit_expr(recv);
                     let infix = op.as_ruby().trim_end_matches('=');
-                    return format!(
-                        "{r}.{name} = {r}.{name} {infix} {}",
-                        emit_expr(value)
-                    );
+                    return format!("{r}.{name} = {r}.{name} {infix} {rhs}");
                 }
             }
-            let rhs = emit_expr(value);
-            let rhs = if assigns_as_modifier_if(value) { format!("({rhs})") } else { rhs };
             format!("{} {} {}", emit_lvalue(target), op.as_ruby(), rhs)
         }
         ExprNode::Yield { args } => {
@@ -1949,6 +1948,47 @@ mod tests {
             },
         );
         assert!(emit_expr(&call).starts_with("j(if "), "got {}", emit_expr(&call));
+    }
+
+    /// A modifier `if` on an assignment's right is parenthesized in every
+    /// form: bare, it would guard the assignment (`x = y if c` leaves `x`
+    /// as it was where the `if` gives nil).
+    #[test]
+    fn an_assigned_modifier_if_is_parenthesized() {
+        let modifier = || {
+            Expr::new(
+                Span::default(),
+                ExprNode::If {
+                    cond: send(None, "c", vec![]),
+                    then_branch: lit_str("y"),
+                    else_branch: Expr::new(Span::default(), ExprNode::Lit { value: Literal::Nil }),
+                },
+            )
+        };
+        let var = || crate::expr::LValue::Var { id: crate::ident::VarId(0), name: Symbol::from("x") };
+        let assign = Expr::new(Span::default(), ExprNode::Assign { target: var(), value: modifier() });
+        assert_eq!(emit_expr(&assign), "x = (\"y\" if c)");
+        let env = Expr::new(
+            Span::default(),
+            ExprNode::OpAssign {
+                target: crate::expr::LValue::Index {
+                    recv: Expr::new(Span::default(), ExprNode::Const { path: vec![Symbol::from("ENV")] }),
+                    index: lit_str("K"),
+                },
+                op: crate::expr::OpAssignOp::OrOr,
+                value: modifier(),
+            },
+        );
+        assert!(emit_expr(&env).contains("(ENV[\"K\"] = (\"y\" if c))"), "got {}", emit_expr(&env));
+        let attr = Expr::new(
+            Span::default(),
+            ExprNode::OpAssign {
+                target: crate::expr::LValue::Attr { recv: self_ref(), name: Symbol::from("n") },
+                op: crate::expr::OpAssignOp::Add,
+                value: modifier(),
+            },
+        );
+        assert!(emit_expr(&attr).ends_with("+ (\"y\" if c)"), "got {}", emit_expr(&attr));
     }
 
     fn self_ref() -> Expr {

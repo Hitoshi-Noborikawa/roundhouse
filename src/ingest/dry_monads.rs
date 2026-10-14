@@ -41,10 +41,12 @@ use super::survey;
 
 const RESULT_MIXIN: &str = "Dry::Monads::Result::Mixin";
 
-pub(super) fn lower_dry_monads(app: &mut App, sources: &[crate::span::SourceFile]) {
+pub(super) fn lower_dry_monads(app: &mut App, sources: &[crate::span::SourceFile]) -> super::IngestResult<()> {
     let names: HashSet<String> = app.library_classes.iter().map(|lc| lc.name.0.as_str().to_string()).collect();
     let mut any = false;
     let mut do_marked: HashSet<String> = HashSet::new();
+    // A gap in survey mode, a failed ingest otherwise.
+    let mut refusals: Vec<IngestError> = Vec::new();
     for lc in &mut app.library_classes {
         let mut result = false;
         let mut do_notation = false;
@@ -72,7 +74,7 @@ pub(super) fn lower_dry_monads(app: &mut App, sources: &[crate::span::SourceFile
             }
         });
         if let Some(reason) = refused {
-            survey::record(&IngestError::Unsupported {
+            refusals.push(IngestError::Unsupported {
                 file: lc.name.0.as_str().to_string(),
                 message: format!("Dry::Monads not lowered: {reason}"),
             });
@@ -89,9 +91,12 @@ pub(super) fn lower_dry_monads(app: &mut App, sources: &[crate::span::SourceFile
             any = true;
         }
     }
+    for err in refusals {
+        survey::continue_or_fail(err)?;
+    }
     let validation_monads = sources.iter().any(|s| s.text.contains("load_extensions(:monads)"));
     if !any && !validation_monads {
-        return;
+        return Ok(());
     }
 
     // `Do::All` follows the class to its subclasses and includers.
@@ -124,10 +129,10 @@ pub(super) fn lower_dry_monads(app: &mut App, sources: &[crate::span::SourceFile
                 continue;
             }
             if method.block_param.is_some() || method.has_anonymous_block || asks_block_given(&method.body) {
-                survey::record(&IngestError::Unsupported {
+                survey::continue_or_fail(IngestError::Unsupported {
                     file: lc.name.0.as_str().to_string(),
                     message: format!("Dry::Monads do notation not lowered: `{}` takes a block", method.name.as_str()),
-                });
+                })?;
                 continue;
             }
             let span = method.body.span;
@@ -177,6 +182,7 @@ pub(super) fn lower_dry_monads(app: &mut App, sources: &[crate::span::SourceFile
     }
     let existing: HashSet<String> = app.library_classes.iter().map(|lc| lc.name.0.as_str().to_string()).collect();
     app.library_classes.extend(classes.into_iter().filter(|c| !existing.contains(c.name.0.as_str())));
+    Ok(())
 }
 
 /// `include Dry::Monads[:result, :do]`, `include Dry::Monads::Do`,
