@@ -16,6 +16,7 @@ const FILES: &[(&str, &str)] = &[
     ("config/locales/contracts.ru.yml", include_str!("dry_validation/config/locales/contracts.ru.yml")),
     ("app/contracts/typed_contract.rb", include_str!("dry_validation/app/contracts/typed_contract.rb")),
     ("lib/shop/types.rb", include_str!("dry_validation/lib/shop/types.rb")),
+    ("app/contracts/chain_contract.rb", include_str!("dry_validation/app/contracts/chain_contract.rb")),
 ];
 
 pub fn overlay() -> super::emit_and_run::Overlay {

@@ -36,3 +36,8 @@ dv_raises(34, TypedContract.new, {"n" => "x", "i" => 0, "on" => "x", "qty" => "x
 dv_check(35, TypedContract.new, {"n" => nil, "i" => "1", "on" => "", "qty" => "", "ratio" => "", "device" => "", "flag" => nil, "items" => "x", "codes" => "x", "order" => {}}, false, {:n => nil, :i => "1", :on => "", :qty => "", :ratio => nil, :device => "", :flag => nil, :items => "x", :codes => "x", :order => {}}, {:n => ["must be a number"], :i => ["must be an integer"], :on => ["must be a date"], :qty => ["must be filled"], :device => ["must be filled"], :flag => ["must be filled"], :items => ["must be an array"], :codes => ["must be an array"], :order => {:lines => ["is missing"]}})
 dv_check(36, TypedContract.new, {"qty" => nil, "ratio" => nil, "device" => 1, "items" => [{"id" => ""}, 3]}, false, {:qty => nil, :ratio => nil, :device => 1, :items => [{:id => ""}, 3], :flag => false}, {:qty => ["must be filled"], :device => ["must be a string"], :items => {0 => {:id => ["must be filled"]}, 1 => ["must be a hash"]}})
 dv_check(37, TypedContract.new, {}, true, {:flag => false}, {})
+dv_check(38, ChainContract.new, {v: nil}, true, {:v => nil}, {})
+dv_check(39, ChainContract.new, {v: 1, c: {n: "1", x: 1}, f: {k: "a", z: 1}}, true, {:v => 1, :c => {:n => 1}, :f => {:k => "a"}}, {})
+dv_check(40, ChainContract.new, {v: 1, c: "s", f: {}}, false, {:v => 1, :c => "s", :f => {}}, {:c => ["must be a hash"], :f => ["must be filled"]})
+dv_check(41, ChainContract.new, {v: 1, c: nil, f: nil}, false, {:v => 1, :c => nil, :f => nil}, {:c => ["must be a hash"], :f => ["must be a hash"]})
+dv_check(42, ChainContract.new, {}, false, {}, {:v => ["is missing"]})

@@ -85,6 +85,8 @@ struct Rule {
     /// in a predicate block) takes no argument.
     preds: Vec<(String, Option<Expr>)>,
     nested: Option<Nested>,
+    /// A chained `.hash` checks `hash?` before the macro's `filled?`.
+    type_first: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -489,15 +491,35 @@ fn read_key(
         return Ok(Key {
             name: name.as_str().to_string(),
             required: kind.as_str() == "required",
-            rule: Rule { macro_: Macro::Value, ty: Ty::Any, preds, nested: None },
+            rule: Rule { macro_: Macro::Value, ty: Ty::Any, preds, nested: None, type_first: false },
         });
     }
-    // `.value(:array, ...).each(...)`: the members' rule on the array's.
-    let (expr, each) = match &*expr.node {
-        ExprNode::Send { recv: Some(recv), method, args, block, .. } if method.as_str() == "each" => {
-            (recv, Some((args.as_slice(), block.as_ref())))
+    // `required(:k)` alone: present, whatever it holds.
+    if let ExprNode::Send { recv: None, method: kind, args: key_args, block: None, .. } = &*expr.node
+        && matches!(kind.as_str(), "required" | "optional")
+        && let [key] = key_args.as_slice()
+        && let ExprNode::Lit { value: Literal::Sym { value: name } } = &*key.node
+    {
+        return Ok(Key {
+            name: name.as_str().to_string(),
+            required: kind.as_str() == "required",
+            rule: Rule { macro_: Macro::Value, ty: Ty::Any, preds: Vec::new(), nested: None, type_first: false },
+        });
+    }
+    // `.value(:array, ...).each(...)`: the members' rule on the array's;
+    // `.value(:hash).schema(S)`: the keys' on the hash's.
+    let (expr, each, keys) = match &*expr.node {
+        ExprNode::Send { recv: Some(recv), method, args, block, .. }
+            if method.as_str() == "each" && matches!(&*recv.node, ExprNode::Send { recv: Some(_), .. }) =>
+        {
+            (recv, Some((args.as_slice(), block.as_ref())), None)
         }
-        _ => (expr, None),
+        ExprNode::Send { recv: Some(recv), method, args, block, .. }
+            if matches!(method.as_str(), "schema" | "hash") && matches!(&*recv.node, ExprNode::Send { recv: Some(_), .. }) =>
+        {
+            (recv, None, Some((args.as_slice(), block.as_ref(), method.as_str() == "hash")))
+        }
+        _ => (expr, None, None),
     };
     let ExprNode::Send { recv: Some(recv), method, args, block, .. } = &*expr.node else {
         return Err(format!("`{}` in a schema", shown()));
@@ -516,6 +538,17 @@ fn read_key(
     };
     let mut rule = read_rule(method.as_str(), args, block.as_ref(), processor, owner, cx, schemas)
         .map_err(|e| format!("`{}`: {e}", name.as_str()))?;
+    if let Some((keys_args, keys_block, chained_hash)) = keys {
+        // After `maybe` the gem's chain treats nil its own way (a second
+        // `hash?`, or the keys read off nil): not modeled.
+        if !matches!(rule.ty, Ty::Coerced("hash")) || rule.nested.is_some() || rule.macro_ == Macro::Maybe {
+            return Err(format!("`{}`: a schema chained on what is not a hash", name.as_str()));
+        }
+        let Rule { nested, .. } = read_rule("hash", keys_args, keys_block, processor, owner, cx, schemas)
+            .map_err(|e| format!("`{}`: {e}", name.as_str()))?;
+        rule.nested = nested;
+        rule.type_first = chained_hash;
+    }
     if let Some((each_args, each_block)) = each {
         if !matches!(rule.ty, Ty::Coerced("array")) || rule.nested.is_some() {
             return Err(format!("`{}`: `each` on what is not an array", name.as_str()));
@@ -728,7 +761,7 @@ fn read_rule(
                 Some(_) => return Err(format!("a block on `{macro_name}` of another type")),
                 None => None,
             };
-            Ok(Rule { macro_, ty, preds, nested })
+            Ok(Rule { macro_, ty, preds, nested, type_first: false })
         }
         // `hash do ... end`, `hash(Schema)`, `schema do ... end`.
         "hash" | "schema" => {
@@ -742,9 +775,9 @@ fn read_rule(
                 schema.extend(&s);
             }
             if spec.is_none() && block.is_none() {
-                return Ok(Rule { macro_: Macro::Value, ty: Ty::Coerced("hash"), preds, nested: None });
+                return Ok(Rule { macro_: Macro::Value, ty: Ty::Coerced("hash"), preds, nested: None, type_first: false });
             }
-            Ok(Rule { macro_: Macro::Value, ty: Ty::Coerced("hash"), preds, nested: Some(Nested::Hash(schema)) })
+            Ok(Rule { macro_: Macro::Value, ty: Ty::Coerced("hash"), preds, nested: Some(Nested::Hash(schema)), type_first: false })
         }
         // `array(:integer)`, `array(:hash) do ... end`, `array(Schema)`.
         "array" => {
@@ -758,6 +791,7 @@ fn read_rule(
                         ty: Ty::Any,
                         preds: Vec::new(),
                         nested: Some(Nested::Hash(referenced.clone())),
+                        type_first: false,
                     }
                 }
                 spec => {
@@ -771,10 +805,10 @@ fn read_rule(
                         None => None,
                     };
                     let ty = if nested.is_some() { Ty::Coerced("hash") } else { ty };
-                    Rule { macro_: Macro::Value, ty, preds: Vec::new(), nested }
+                    Rule { macro_: Macro::Value, ty, preds: Vec::new(), nested, type_first: false }
                 }
             };
-            Ok(Rule { macro_: Macro::Value, ty: Ty::Coerced("array"), preds, nested: Some(Nested::Array(Box::new(member))) })
+            Ok(Rule { macro_: Macro::Value, ty: Ty::Coerced("array"), preds, nested: Some(Nested::Array(Box::new(member))), type_first: false })
         }
         other => Err(format!("`{other}`")),
     }
@@ -1228,6 +1262,7 @@ impl Gen<'_> {
             conds.push((format!("::Dry::Schema::Lowered.filled?({value})"), self.message("filled?", path, &[], value)));
         }
         let type_check = |g: &Gen<'_>, pred: &str, test: String| (test, g.message(pred, path, &[], value));
+        let filled_at = conds.len();
         match &rule.ty {
             Ty::Coerced(t) => {
                 let (pred, test) = match *t {
@@ -1281,12 +1316,16 @@ impl Gen<'_> {
                     .iter()
                     .map(|(p, arg)| if p.as_str() == "filled" { ("filled?".to_string(), None) } else { (format!("{}?", p.as_str()), Some(arg.clone())) })
                     .collect();
-                let rule = Rule { macro_: Macro::Value, ty: Ty::Any, preds: constraints, nested: None };
+                let rule = Rule { macro_: Macro::Value, ty: Ty::Any, preds: constraints, nested: None, type_first: false };
                 // The constraints read like a predicate list.
                 let inner = self.preds_conds(&rule, path, value);
                 conds.extend(inner);
             }
             Ty::Any => {}
+        }
+        if rule.type_first && filled_at == 1 && conds.len() > 1 {
+            let type_cond = conds.remove(1);
+            conds.insert(0, type_cond);
         }
         conds.extend(self.preds_conds(rule, path, value));
         let failed = format!("dry_schema_message_{depth}");

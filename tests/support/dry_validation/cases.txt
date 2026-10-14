@@ -36,3 +36,8 @@ TypedContract.new | {"n" => "x", "i" => 0, "on" => "x", "qty" => "x", "ratio" =>
 TypedContract.new | {"n" => nil, "i" => "1", "on" => "", "qty" => "", "ratio" => "", "device" => "", "flag" => nil, "items" => "x", "codes" => "x", "order" => {}}
 TypedContract.new | {"qty" => nil, "ratio" => nil, "device" => 1, "items" => [{"id" => ""}, 3]}
 TypedContract.new | {}
+ChainContract.new | {v: nil}
+ChainContract.new | {v: 1, c: {n: "1", x: 1}, f: {k: "a", z: 1}}
+ChainContract.new | {v: 1, c: "s", f: {}}
+ChainContract.new | {v: 1, c: nil, f: nil}
+ChainContract.new | {}
