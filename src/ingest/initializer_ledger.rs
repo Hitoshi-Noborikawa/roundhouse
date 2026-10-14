@@ -77,7 +77,7 @@ use crate::span::{SourceFile, Span};
 use crate::vfs::Vfs;
 
 use super::app::{
-    default_locale_line, declares_rails_engine, extract_autoload_lib_ignores,
+    available_locales_line, default_locale_line, declares_rails_engine, fallbacks_line, extract_autoload_lib_ignores,
     extract_autoload_path_roots, extract_config_assignments, extract_config_time_zone,
     extract_initializer_filters, extract_module_mixins, extract_session_cookie_key,
     extract_time_formats, extract_variable_content_type_exclusions,
@@ -312,6 +312,19 @@ const RECOGNIZERS: &[Recognizer] = &[
         origins: APP,
         levels: ANY,
         reads: |p| code_lines(p.text).any(|l| default_locale_line(l).is_some()),
+    },
+    Recognizer {
+        name: "i18n available_locales (config.i18n.available_locales =)",
+        origins: APP,
+        levels: ANY,
+        // A computed list is not read (the locales come from the app's files), so it stays reported.
+        reads: |p| code_lines(p.text).any(|l| matches!(available_locales_line(l), Some(Ok(_)))),
+    },
+    Recognizer {
+        name: "i18n fallbacks (config.i18n.fallbacks =)",
+        origins: APP,
+        levels: ANY,
+        reads: |p| code_lines(p.text).any(|l| fallbacks_line(l, "").is_some()),
     },
     Recognizer {
         name: "i18n raise_on_missing_translations",

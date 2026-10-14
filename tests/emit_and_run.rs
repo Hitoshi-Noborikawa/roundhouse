@@ -33,6 +33,8 @@ mod time_zone_default;
 mod view_presence_url_encode;
 #[path = "emit_and_run/controller_translate.rs"]
 mod controller_translate;
+#[path = "emit_and_run/i18n_locales.rs"]
+mod i18n_locales;
 #[path = "support/lambda_signatures.rs"]
 mod lambda_signatures_contract;
 #[path = "emit_and_run/lambda_signatures.rs"]

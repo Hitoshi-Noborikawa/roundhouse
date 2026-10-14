@@ -1818,6 +1818,9 @@ end
     }
     app.i18n = catalog;
     app.i18n.missing = missing_policy(vfs, dir);
+    let (available, fallbacks, available_unknown) = locale_settings(vfs, dir, &app.i18n.locale, &files);
+    app.i18n.load_locales(available, fallbacks, &gem_files, &mut files);
+    app.i18n.available_unknown = available_unknown;
     app.i18n.field_error_proc = field_error_proc_file(vfs, dir);
     crate::i18n::stamp_models(&mut app);
 
@@ -9750,6 +9753,90 @@ fn default_locale<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> String {
         .filter(|l| !l.starts_with('#'))
         .find_map(default_locale_line)
         .unwrap_or_else(|| "en".to_string())
+}
+
+/// What a trimmed config line's `config.i18n.available_locales = …` sets:
+/// a literal list, or why it cannot be read.
+pub(super) fn available_locales_line(line: &str) -> Option<Result<Vec<String>, String>> {
+    let value = line.strip_prefix("config.i18n.available_locales")?.trim().strip_prefix('=')?;
+    let value = value.split('#').next().unwrap_or("").trim();
+    Some(locale_list(value).ok_or_else(|| format!("`available_locales = {value}` is computed at boot")))
+}
+
+/// What a trimmed config line's `config.i18n.fallbacks = …` sets: the
+/// default locales the Fallbacks backend appends (`true` is the default
+/// locale, `[]` none), `None` when it leaves the backend out, or why it
+/// cannot be read. A Hash of per-locale chains is not modeled.
+pub(super) fn fallbacks_line(line: &str, default: &str) -> Option<Result<Option<Vec<String>>, String>> {
+    let value = line.strip_prefix("config.i18n.fallbacks")?.trim().strip_prefix('=')?;
+    let value = value.split('#').next().unwrap_or("").trim();
+    Some(match value {
+        "true" => Ok(Some(vec![default.to_string()])),
+        "false" | "nil" => Ok(None),
+        _ => locale_list(value).map(Some).ok_or_else(|| format!("`fallbacks = {value}` is not a list of locales")),
+    })
+}
+
+/// `%i[en pl]`, `%w[en pl]`, `[:en, :pl]` or `["en", "pl"]`.
+fn locale_list(value: &str) -> Option<Vec<String>> {
+    if let Some(rest) = value.strip_prefix("%i").or_else(|| value.strip_prefix("%w")) {
+        let inner = rest.strip_prefix(['[', '(']).and_then(|r| r.strip_suffix([']', ')']))?;
+        return Some(inner.split_whitespace().map(str::to_string).collect());
+    }
+    let inner = value.strip_prefix('[')?.strip_suffix(']')?.trim();
+    if inner.is_empty() {
+        return Some(Vec::new());
+    }
+    inner.split(',').map(|item| locale_literal(item.trim())).collect()
+}
+
+/// `config.i18n.available_locales` and `config.i18n.fallbacks` from
+/// `config/application.rb`, and the fallbacks each
+/// `config/environments/<env>.rb` sets for itself. With no
+/// `available_locales`, the default locale and those the app's own
+/// locale files name; the same when it is computed at boot, with why it
+/// cannot be read as the third value.
+fn locale_settings<V: Vfs + ?Sized>(
+    vfs: &V,
+    dir: &Path,
+    default: &str,
+    files: &[(String, String)],
+) -> (Vec<String>, crate::i18n::FallbackPolicy, Option<String>) {
+    let lines = |path: &Path| -> Vec<String> {
+        let source = vfs.read_to_string(path).unwrap_or_default();
+        source.lines().map(str::trim).filter(|l| !l.starts_with('#')).map(str::to_string).collect()
+    };
+    let mut policy = crate::i18n::FallbackPolicy::default();
+    let app_lines = lines(&dir.join("config/application.rb"));
+    let mut available_unknown = None;
+    let mut available = match app_lines.iter().find_map(|l| available_locales_line(l)) {
+        Some(Ok(list)) => list,
+        Some(Err(why)) => {
+            available_unknown = Some(why);
+            crate::i18n::Catalog::file_locales(files)
+        }
+        None => crate::i18n::Catalog::file_locales(files),
+    };
+    if !available.iter().any(|l| l == default) {
+        available.insert(0, default.to_string());
+    }
+    match app_lines.iter().find_map(|l| fallbacks_line(l, default)) {
+        Some(Ok(setting)) => policy.app = setting,
+        Some(Err(why)) => policy.unknown = Some(why),
+        None => {}
+    }
+    let envs_dir = dir.join("config/environments");
+    let mut envs = if vfs.is_dir(&envs_dir) { vfs.read_dir(&envs_dir).unwrap_or_default() } else { Vec::new() };
+    envs.sort();
+    for path in envs {
+        let Some(env) = path.file_stem().and_then(|s| s.to_str()).filter(|_| path.extension().is_some_and(|e| e == "rb")) else { continue };
+        match lines(&path).iter().find_map(|l| fallbacks_line(l, default)) {
+            Some(Ok(setting)) => policy.envs.push((env.to_string(), setting)),
+            Some(Err(why)) => policy.unknown = Some(why),
+            None => {}
+        }
+    }
+    (available, policy, available_unknown)
 }
 
 /// What a trimmed config line's `config.i18n.raise_on_missing_translations = v` sets.
