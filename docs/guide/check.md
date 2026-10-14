@@ -136,7 +136,11 @@ same table:
   they wrap so its own inferred type flows on; the annotation on those is discarded.
   `T.must(x)` lowers to the check sorbet-runtime makes, `x` unless it
   is nil and a `TypeError` otherwise, so what follows reads `x` with nil
-  removed; `T.must_because` stays refused.
+  removed. `T.must_because(x) { reason }` lowers the same way, with
+  sorbet's message — `"Unexpected `nil` because "` followed by the
+  block's value — and the reason evaluated only on the nil path. A
+  reason that is not a literal block, a forwarded `&blk` or one taking
+  parameters, has no message to inline and stays refused.
   `T.bind(self, Type)`, and its RBS inline form, a `#: self as Type`
   line, give `self` that type from that statement to the end of the
   enclosing body, blocks inside it included: sends on `self`, implicit

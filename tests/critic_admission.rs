@@ -91,8 +91,12 @@ fn errors_full_message_on_a_computed_receiver_is_admitted() {
 
 #[test]
 fn non_nil_assertions_require_runtime_support() {
-    // `T.must` lowers to sorbet's check (tests/sorbet_must_runs.rs).
-    refuses("T.must_because(1) { \"present\" }", "non-nil assertion");
+    // `T.must` and `T.must_because` with a literal reason lower to
+    // sorbet's check (tests/sorbet_must_runs.rs,
+    // tests/sorbet_must_because_runs.rs). A reason that is not a
+    // literal block has no message to inline and stays refused.
+    refuses("T.must_because(1, &blk)", "non-nil assertion");
+    refuses("T.must_because(1) { |why| why }", "non-nil assertion");
     refuses("1.not_nil!", "not_nil!");
 }
 
