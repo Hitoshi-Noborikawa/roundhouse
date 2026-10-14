@@ -4272,6 +4272,67 @@ fn render_json_time_in_a_zone_at_offset_zero_on_spinel() {
     assert_eq!(run.stdout, "{\"utc\":\"2026-01-02T03:04:05.000Z\",\"london\":\"2026-01-02T03:04:05.000+00:00\"}\n");
 }
 
+/// A failed statement raises ActiveRecord's own class, in Rails' hierarchy:
+/// a unique index is RecordNotUnique, a NOT NULL column NotNullViolation,
+/// a bad statement StatementInvalid, and every one rescues as
+/// StatementInvalid and ActiveRecordError.
+fn statement_errors_app() -> emit_and_run::Overlay {
+    emit_and_run::real_blog()
+        .edit("db/schema.rb", "    t.index [\"article_id\"], name: \"index_comments_on_article_id\"\n", "    t.index [\"article_id\"], name: \"index_comments_on_article_id\"\n    t.index [\"commenter\"], name: \"index_comments_on_commenter\", unique: true\n")
+        .edit(
+            "config/routes.rb",
+            "  root \"articles#index\"\n",
+            "  root \"articles#index\"\n  get \"/statement_errors\", to: \"statement_errors#show\"\n",
+        )
+        .write(
+            "app/controllers/statement_errors_controller.rb",
+            r#"class StatementErrorsController < ApplicationController
+  def show
+    article = Article.create!(title: "Errors", body: "Long enough body text")
+    out = []
+    Comment.create!(article_id: article.id, commenter: "Ann", body: "first")
+    begin
+      Comment.create!(article_id: article.id, commenter: "Ann", body: "second")
+    rescue ActiveRecord::StatementInvalid => e
+      out << e.class.name
+    end
+    begin
+      ActiveRecord::Base.connection.execute("INSERT INTO comments (article_id, commenter, body, created_at, updated_at) VALUES (NULL, 'Bob', 'x', '2026-01-01', '2026-01-01')")
+    rescue ActiveRecord::StatementInvalid => e
+      out << e.class.name
+    end
+    begin
+      Article.where("no_such_column = 1").to_a
+    rescue ActiveRecord::ActiveRecordError => e
+      out << e.class.name
+    end
+    render plain: out.join("|")
+  end
+end
+"#,
+        )
+}
+
+#[test]
+fn statement_errors_raise_activerecords_classes() {
+    statement_errors_app()
+        .write(
+            "test/controllers/statement_errors_controller_test.rb",
+            "require \"test_helper\"\n\nclass StatementErrorsControllerTest < ActionDispatch::IntegrationTest\n  test \"each failed statement\" do\n    get \"/statement_errors\"\n    assert_equal \"ActiveRecord::RecordNotUnique|ActiveRecord::NotNullViolation|ActiveRecord::StatementInvalid\", response.body\n  end\nend\n",
+        )
+        .run_test("test/controllers/statement_errors_controller_test.rb")
+        .assert_passes();
+}
+
+#[test]
+#[ignore = "requires the Spinel toolchain"]
+fn statement_errors_raise_activerecords_classes_on_spinel() {
+    let script = "Db.configure(\":memory:\")\nSchema.statements.each { |sql| Db.exec(sql) }\nActiveRecord.adapter = SqliteAdapter\nc = StatementErrorsController.new\nc.params = {}\nc.process_action(:show)\nputs c.body\n";
+    let run = statement_errors_app().run_spinel(script);
+    run.assert_passes();
+    assert_eq!(run.stdout, "ActiveRecord::RecordNotUnique|ActiveRecord::NotNullViolation|ActiveRecord::StatementInvalid\n");
+}
+
 /// offset. Expected values are ActiveSupport 8.1's.
 #[test]
 fn time_zone_lookups_run() {

@@ -504,9 +504,8 @@ module Db
       begin
         names = stmt.columns
         rows = stmt.execute.to_a
-      rescue StandardError => e
-        raise ActiveRecord::RecordNotUnique, e.message if Db.unique_violation?(e.message)
-        raise
+      rescue SQLite3::Exception => e
+        Db.raise_statement_error(e.message, e.is_a?(SQLite3::BusyException))
       ensure
         stmt.close
       end
@@ -585,9 +584,8 @@ module Db
 
   def self.run_exec(conn, sql)
     conn.execute(sql)
-  rescue StandardError => e
-    raise ActiveRecord::RecordNotUnique, e.message if Db.unique_violation?(e.message)
-    raise
+  rescue SQLite3::Exception => e
+    Db.raise_statement_error(e.message, e.is_a?(SQLite3::BusyException))
   end
 
   # ── The write permit ──
@@ -903,6 +901,16 @@ module Db
     message.to_s.include?("UNIQUE constraint failed")
   end
 
+  # Not the driver's own exception: Rails translates every statement error into ActiveRecord's hierarchy (sqlite3_adapter `translate_exception`), keyed on SQLite's own message as `unique_violation?` is.
+  def self.raise_statement_error(message, busy)
+    raise ActiveRecord::RecordNotUnique, message if unique_violation?(message)
+    raise ActiveRecord::NotNullViolation, message if message.include?("NOT NULL constraint failed")
+    raise ActiveRecord::InvalidForeignKey, message if message.include?("FOREIGN KEY constraint failed")
+    raise ActiveRecord::CheckViolation, message if message.include?("CHECK constraint failed")
+    raise ActiveRecord::StatementTimeout, message if busy
+    raise ActiveRecord::StatementInvalid, message
+  end
+
   # Prepared-statement cache (roundhouse#12). A SQLite3::Statement is bound
   # to the connection it was prepared on, so the cache lives ON the
   # connection object — and since `with_connection` leases a connection to
@@ -968,6 +976,8 @@ module Db
   def self.prepare(sql)
     return prepare_marked(sql) if sql.include?("\x01")
     prepare_plain(sql)
+  rescue SQLite3::Exception => e
+    Db.raise_statement_error(e.message, e.is_a?(SQLite3::BusyException))
   end
 
   # Prepare without re-entering prepare_marked. After lift_binds, the
@@ -1158,6 +1168,7 @@ module Db
     rescue StandardError
       # Failed closes remain owned until lease cleanup quarantines them.
     end
+    Db.raise_statement_error(error.message, error.is_a?(SQLite3::BusyException)) if error.is_a?(SQLite3::Exception)
     raise error
   end
 
