@@ -302,9 +302,28 @@ module Main
     0
   end
 
+  # Rails' Rack::Runtime and ActionDispatch::RequestId around the whole
+  # request (runtime/action_dispatch/request_id.rb): every response the
+  # app answers carries X-Request-Id and X-Runtime, its error pages
+  # included. They sit behind ActionDispatch::Static, so a file sent
+  # from static/ or public/ carries neither, and the /cable upgrade is
+  # left as Action Cable answers it.
+  def self.dispatch(req, res)
+    started = ActionDispatch::Runtime.clock_time
+    Main.dispatch_request(req, res)
+    return nil if res.file_path.length > 0 || res.upgrading_ws
+    res.headers[ActionDispatch::RequestId::HEADER] =
+      ActionDispatch::RequestId.make(req.req_headers.fetch("x-request-id", ""))
+    # Rack::Runtime leaves a value the app set itself.
+    unless res.headers.keys.any? { |k| k.downcase == "x-runtime" }
+      res.headers[ActionDispatch::Runtime::HEADER] = ActionDispatch::Runtime.header_value(started)
+    end
+    nil
+  end
+
   # Serve static files or dispatch the complete request path through Router,
   # preserving literal suffix routes while negotiating the response format.
-  def self.dispatch(req, res)
+  def self.dispatch_request(req, res)
     ActionView::ViewHelpers.reset_slots!
     Broadcasts.reset_log!
     # Under RH_SQL_TRACE the request line brackets its queries, so a

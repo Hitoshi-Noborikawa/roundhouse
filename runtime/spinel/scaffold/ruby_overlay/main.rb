@@ -415,6 +415,7 @@ module Main
   # entry per cookie) and reuses `CgiIo.url_encode` so values match the
   # CGI path exactly.
   def self.run_rack(env)
+    started = ActionDispatch::Runtime.clock_time
     status, body, content_type, location, set_cookies, extra_headers, secure_cookies, samesite_cookies, httponly_cookies, expires_cookies =
       dispatch_core(env, env["rack.input"] || StringIO.new(""))
     headers = {}
@@ -442,6 +443,12 @@ module Main
       end
     end
     headers["set-cookie"] = cookies unless cookies.empty?
+    # Rails' ActionDispatch::RequestId and Rack::Runtime around the whole
+    # request (runtime/action_dispatch/request_id.rb), as the spinel
+    # dispatcher stamps them: X-Request-Id always, X-Runtime unless the
+    # app set one. config.ru serves static and public files before this.
+    headers["x-request-id"] = ActionDispatch::RequestId.make(env["HTTP_X_REQUEST_ID"].to_s)
+    headers["x-runtime"] = ActionDispatch::Runtime.header_value(started) unless headers.key?("x-runtime")
     [status, headers, [body]]
   end
 

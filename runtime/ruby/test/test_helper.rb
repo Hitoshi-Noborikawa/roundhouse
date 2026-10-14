@@ -78,6 +78,10 @@ require "action_dispatch/mime_negotiation"
 # the same "a second list of the same thing" the CookieJar note below
 # describes.
 require "action_dispatch/request"
+# X-Request-Id / X-Runtime (request_id_test.rb). Its aggregator is
+# `action_dispatch.rb`, which this helper does not load.
+require "securerandom"
+require "action_dispatch/request_id"
 require "action_controller/base"
 # The keyed digest before anything that calls `MessageDigest.secure_compare`.
 begin
