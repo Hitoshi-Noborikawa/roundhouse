@@ -5834,8 +5834,8 @@ fn spinel_files(app: &App, fixture: &Path) -> Result<(Vec<(String, String)>, Vec
         files.push(("sig/runtime/tcp_socket_stub.rbs".to_string(), rbs));
     }
 
-    // ERB::Util shim sidecar — same story as CGI: spinel has no stdlib
-    // ERB, the flat walk emits runtime/erb_spinel.rb, and the .rbs pins
+    // ERB::Util shim sidecar: the flat walk emits runtime/erb_spinel.rb,
+    // which reopens spinel's `packages/erb` class, and the .rbs pins
     // html_escape's String return so callers concatenating it stay typed.
     {
         let rbs = crate::runtime_files::read_to_string("runtime/spinel/erb_spinel.rbs")

@@ -66,6 +66,10 @@ mod index_with;
 mod vary_accept_contract;
 #[path = "spinel_toolchain/vary_accept.rs"]
 mod vary_accept;
+#[path = "support/erb_template.rs"]
+mod erb_template_contract;
+#[path = "spinel_toolchain/erb_template.rs"]
+mod erb_template;
 #[path = "support/anonymous_keywords.rs"]
 mod anonymous_keywords;
 #[path = "support/lambda_signatures.rs"]
