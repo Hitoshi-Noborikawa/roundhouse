@@ -1451,13 +1451,12 @@ fn render_autorun_shim(lc: &LibraryClass, reset_lines: &[String]) -> String {
         // that fails to load is a per-test error in Rails. Outside
         // the guard it would abort the file and hide every test
         // behind it — the exact failure mode this shim exists to end.
-        // Rails' fixture setup: loaded with referential integrity off, then checked (`verify_foreign_keys_for_fixtures`).
-        writeln!(s, "  Db.without_foreign_keys do").unwrap();
+        // Rails' fixture setup: loaded with referential integrity off, then checked; through the helper, since a framework test runs this shim with no Db loaded.
+        writeln!(s, "  FixtureLoader.with_foreign_keys_deferred do").unwrap();
         for line in reset_lines {
             writeln!(s, "    {line}").unwrap();
         }
         writeln!(s, "  end").unwrap();
-        writeln!(s, "  Db.check_foreign_keys!").unwrap();
         writeln!(s, "  __t.setup").unwrap();
         writeln!(s, "  __t.{tm}").unwrap();
         // `rescue Exception`, not a bare rescue: a bare one catches
