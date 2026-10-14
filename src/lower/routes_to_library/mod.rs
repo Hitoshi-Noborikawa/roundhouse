@@ -910,6 +910,10 @@ fn build_helper_function(
         .enumerate()
         .filter(|(_, p)| !keyworded(p))
         .map(|(i, p)| {
+            // Not `param_ty` for a defaulted segment: its default is the route table's text, so the type follows that `Str`, as the keyword half below does.
+            if seg_default(p).is_some() {
+                return (Symbol::from(p.clone()), Ty::Str);
+            }
             let base = param_ty(p, slug_params.contains(p.as_str()));
             let ty = if i < required {
                 base
