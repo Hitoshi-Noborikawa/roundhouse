@@ -35,6 +35,10 @@ const CONTROLLER: &str = r#"class WidgetsController < ApplicationController
   def event
     render json: Event.find(params[:id])
   end
+
+  def included
+    render json: Widget.find(params[:id]), include: :things
+  end
 end
 "#;
 
@@ -53,7 +57,7 @@ fn emitted() -> (String, String) {
     );
     tree.insert(
         PathBuf::from("config/routes.rb"),
-        b"Rails.application.routes.draw do\n  resources :widgets do\n    get :price, on: :member\n    get :note, on: :member\n    get :event, on: :member\n  end\nend\n".to_vec(),
+        b"Rails.application.routes.draw do\n  resources :widgets do\n    get :price, on: :member\n    get :note, on: :member\n    get :event, on: :member\n    get :included, on: :member\n  end\nend\n".to_vec(),
     );
     tree.insert(PathBuf::from("app/controllers/widgets_controller.rb"), CONTROLLER.as_bytes().to_vec());
     let mut app = ingest_app_from_tree(tree).expect("ingest");
@@ -114,4 +118,12 @@ fn an_overridden_temporal_reader_keeps_the_runtime_encoder() {
     assert!(!class_body(&models, "Event").contains("as_json_str"));
     let event = &controller[controller.find("def event").expect("event")..];
     assert!(event.contains("JsonRender") && !event.contains("as_json_str"), "{event}");
+}
+
+
+#[test]
+fn an_option_the_writer_does_not_read_keeps_the_runtime_encoder() {
+    let (_, controller) = emitted();
+    let included = &controller[controller.find("def included").expect("included")..];
+    assert!(included.contains("JsonRender") && !included.contains("as_json_str"), "{included}");
 }
