@@ -1358,6 +1358,13 @@ impl<'a> BodyTyper<'a> {
             ExprNode::Defined { .. } => union_of(Ty::Str, Ty::Nil),
 
             ExprNode::Send { recv, method, args, block, parenthesized } => {
+                // `tap` and `each` answer their receiver, so the block's own value is dropped.
+                if matches!(method.as_str(), "tap" | "each")
+                    && let Some(b) = block.as_mut()
+                    && let ExprNode::Lambda { body, .. } = &mut *b.node
+                {
+                    mark_discarded(body);
+                }
                 if matches!(&expr.diagnostic, Some(crate::diagnostic::DiagnosticKind::Unsupported { construct, .. })
                     if matches!(construct.as_str(), "Module protocol" | "ActiveModel::Errors" | "ActiveModel::Error" | "Rails" | "ActiveRecord::Base" | "String extension" | "Hash extension" | "not_nil!" | "Object extension" | "Module callback argument"))
                 { expr.diagnostic = None; }
@@ -2244,7 +2251,7 @@ impl<'a> BodyTyper<'a> {
                     let tail = i + 1 == exprs.len();
                     let e = &mut exprs[i];
                     if !tail {
-                        e.decisions |= crate::expr::DISCARDED_VALUE;
+                        mark_discarded(e);
                     }
                     if !matches!(&*e.node, ExprNode::Assign { target: LValue::Var { .. }, .. }) {
                         forget_class_object_writes(e, &mut local_ctx);
@@ -5384,4 +5391,23 @@ pub(super) const RUBY_TOP_LEVEL: &[&str] = &[
 /// `Array[String]` — what `ActiveSupport.presence_in(value, list)` declares for its list.
 fn is_string_array(ty: Option<&Ty>) -> bool {
     matches!(ty, Some(Ty::Array { elem }) if **elem == Ty::Str)
+}
+
+/// A value the program drops: the expression itself and, through an `if`'s
+/// branches and a sequence's last statement, the one that would have
+/// answered it.
+fn mark_discarded(e: &mut Expr) {
+    e.decisions |= crate::expr::DISCARDED_VALUE;
+    match &mut *e.node {
+        ExprNode::If { then_branch, else_branch, .. } => {
+            mark_discarded(then_branch);
+            mark_discarded(else_branch);
+        }
+        ExprNode::Seq { exprs } => {
+            if let Some(last) = exprs.last_mut() {
+                mark_discarded(last);
+            }
+        }
+        _ => {}
+    }
 }

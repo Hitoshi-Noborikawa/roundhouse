@@ -57,6 +57,15 @@ fn mixed_or_unknown_records_check_clean() {
     assert!(errors.is_empty(), "{errors:#?}");
 }
 
+/// A `tap` or `each` block's value and an `if` branch whose `if` is a dropped statement are dropped too, so a call there checks clean; a method's tail is the method's value and keeps the refusal.
+#[test]
+fn a_dropped_block_or_branch_value_checks_clean() {
+    let errors = constant_errors(
+        "    Comment.all.to_a.tap { |rs| ActiveRecord::Associations::Preloader.new(records: rs, associations: :article).call }\n    if Comment.count > 0\n      ActiveRecord::Associations::Preloader.new(records: Comment.all.to_a, associations: :article).call\n    end\n    nil\n",
+    );
+    assert!(errors.is_empty(), "{errors:#?}");
+}
+
 /// Any option beside `records:` and `associations:` (`scope:`) keeps the refusal.
 #[test]
 fn a_scope_option_keeps_the_refusal() {

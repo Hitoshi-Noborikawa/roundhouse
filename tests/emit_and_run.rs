@@ -4142,6 +4142,55 @@ fn mixed_records_preloading_is_unsupported_on_strict_targets() {
     );
 }
 
+/// A Preloader call whose value is dropped by a `tap` block or by an
+/// `if` branch whose `if` is a statement preloads like one standing alone.
+fn tap_digest_app() -> emit_and_run::Overlay {
+    emit_and_run::real_blog()
+        .write(
+            "app/models/tap_digest.rb",
+            r#"class TapDigest
+  def self.tapped
+    Comment.all.to_a.tap do |records|
+      ActiveRecord::Associations::Preloader.new(records: records, associations: :article).call
+    end
+  end
+
+  def self.branched(records)
+    if records.any?
+      ActiveRecord::Associations::Preloader.new(records: records, associations: :article).call
+    end
+    records
+  end
+end
+"#,
+        )
+}
+
+const TAP_DIGEST_SCRIPT: &str = r##"a = Article.create!(title: "First", body: "A body long enough")
+Comment.create!(article_id: a.id, commenter: "x", body: "one")
+Comment.create!(article_id: a.id, commenter: "y", body: "two")
+tapped = TapDigest.tapped
+branched = TapDigest.branched(Comment.all.to_a)
+titles = nil
+queries = Db.capture_sql { titles = (tapped + branched).map { |c| c.article.title }.join(",") }
+raise "got #{titles.inspect}" unless titles == "First,First,First,First"
+raise "reads ran #{queries.length} queries" unless queries.empty?
+puts "ok"
+"##;
+
+#[test]
+fn associations_preloader_in_a_tap_block_or_a_dropped_branch_runs() {
+    tap_digest_app().run_ruby(TAP_DIGEST_SCRIPT).assert_passes();
+}
+
+#[test]
+#[ignore = "requires the Spinel toolchain"]
+fn associations_preloader_in_a_tap_block_or_a_dropped_branch_runs_on_spinel() {
+    let run = tap_digest_app().run_spinel(&format!("Db.configure(\":memory:\")\nSchema.statements.each {{ |sql| Db.exec(sql) }}\nActiveRecord.adapter = SqliteAdapter\n{TAP_DIGEST_SCRIPT}"));
+    run.assert_passes();
+    assert_eq!(run.stdout, "ok\n");
+}
+
 /// `render … and return`, `redirect_to … and return` and `head … and return` return, as Rails' truthy answers make them.
 #[test]
 fn a_response_call_and_return_returns() {
