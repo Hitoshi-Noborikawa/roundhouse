@@ -2,6 +2,7 @@
 # this also exercises the statement-lifecycle commit before binds land.
 #   jruby tests/support/jdbc_cleanup_failures.rb
 raise "JRuby required" unless RUBY_ENGINE == "jruby"
+require_relative "../../runtime/ruby/active_record/errors"
 require_relative "../../runtime/spinel/db_jruby"
 require "timeout"
 
