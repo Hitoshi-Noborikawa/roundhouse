@@ -1549,7 +1549,7 @@ fn each_link_of_a_safe_navigation_chain_reads_its_own_receiver_on_spinel() {
 }
 
 /// `error.type` is a Symbol, or the message when `errors.add` was given a
-/// String, and `of_kind?` asks it, as Rails 8.1 does.
+/// String, and `of_kind?` and `where` ask it, as Rails 8.1 does.
 fn error_types_app() -> emit_and_run::Overlay {
     errors_each_app().edit(
         "app/models/article.rb",
@@ -1560,6 +1560,15 @@ fn error_types_app() -> emit_and_run::Overlay {
 
   def first_type
     errors.first ? errors.first.type : :none
+  end
+
+  def body_errors
+    errors.where(:body).map(&:full_message)
+  end
+
+  def where_sizes
+    [errors.where(:title, :blank).size, errors.where(:base, \"is odd\").size, errors.where(:base, :invalid).size,
+     errors.where(\"title\").reject { |error| error.type == :blank }.size]
   end
 
   def kinds
@@ -1576,6 +1585,8 @@ a.valid?
 raise a.error_types.inspect unless a.error_types == [:blank, :too_short, "is odd"]
 raise a.first_type.inspect unless a.first_type == :blank
 raise a.kinds.inspect unless a.kinds == [true, false, true, true, false, false]
+raise a.body_errors.inspect unless a.body_errors == ["Body is too short (minimum is 10 characters)"]
+raise a.where_sizes.inspect unless a.where_sizes == [1, 1, 0, 0]
 b = Article.new(title: "A title", body: "A long enough body")
 b.valid?
 raise b.kinds.inspect unless b.kinds == [false, false, false, false, false, false] && b.first_type == :none

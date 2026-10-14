@@ -1925,6 +1925,14 @@ impl<'a> BodyTyper<'a> {
                 {
                     return Ty::Str;
                 }
+                if method.as_str() == "where"
+                    && matches!(dispatched, Ty::Var { .. } | Ty::Untyped)
+                    && matches!(recv_ty.as_ref(), Some(Ty::Class { id, .. }) if id.0.as_str() == "ActiveModel::Errors")
+                    && block.is_none()
+                    && crate::lower::errors_index::where_args(args).is_some()
+                {
+                    return crate::lower::errors_index::error_array_ty();
+                }
                 if method.as_str() == "delete"
                     && matches!(dispatched, Ty::Var { .. } | Ty::Untyped)
                     && matches!(recv_ty.as_ref(), Some(Ty::Class { id, .. }) if id.0.as_str() == "ActiveModel::Errors")

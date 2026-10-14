@@ -233,6 +233,7 @@ fn rewrite(expr: &mut Expr, diags: &mut Vec<Diagnostic>) {
     rewrite_include(expr, diags);
     rewrite_of_kind(expr, diags);
     rewrite_delete(expr, diags);
+    rewrite_where(expr, diags);
     rewrite_to_hash(expr);
     rewrite_render_json(expr);
 }
@@ -356,6 +357,11 @@ fn rewrite_of_kind(expr: &mut Expr, diags: &mut Vec<Diagnostic>) {
         *parenthesized = true;
         return;
     }
+    *expr = details_filter(span, owner.clone(), "any?", &field, Some((symbolic, &kind)), Ty::Bool);
+}
+
+/// `<owner>.error_details.<method> { |error| error.attribute == "field" && <type matches> }`, typed.
+fn details_filter(span: crate::span::Span, owner: Option<Expr>, method: &str, field: &str, kind: Option<(bool, &str)>, ty: Ty) -> Expr {
     let detail_ty = Ty::Class { id: crate::ident::ClassId(Symbol::from("ActiveRecord::ErrorDetail")), args: vec![].into() };
     let error = || {
         let mut e = Expr::new(span, ExprNode::Var { id: crate::ident::VarId(0), name: Symbol::from("error") });
@@ -370,7 +376,14 @@ fn rewrite_of_kind(expr: &mut Expr, diags: &mut Vec<Diagnostic>) {
     let equals = |reader: &str, value: &str| {
         send(span, send(span, error(), reader, vec![], Ty::Str), "==", vec![str_expr(span, value)], Ty::Bool)
     };
-    let body = and(and(equals("attribute", &field), send(span, error(), "symbolic", vec![], Ty::Bool)), equals("kind", &kind));
+    let mut body = equals("attribute", field);
+    if let Some((symbolic, kind)) = kind {
+        let mut typed = send(span, error(), "symbolic", vec![], Ty::Bool);
+        if !symbolic {
+            typed = send(span, typed, "!", vec![], Ty::Bool);
+        }
+        body = and(and(body, typed), equals("kind", kind));
+    }
     let block = Expr::new(
         span,
         ExprNode::Lambda {
@@ -382,18 +395,62 @@ fn rewrite_of_kind(expr: &mut Expr, diags: &mut Vec<Diagnostic>) {
             block_style: crate::expr::BlockStyle::Brace,
         },
     );
-    let mut any = Expr::new(
+    let mut call = Expr::new(
         span,
         ExprNode::Send {
-            recv: Some(super::errors_add::error_details(owner.clone(), span)),
-            method: Symbol::from("any?"),
+            recv: Some(super::errors_add::error_details(owner, span)),
+            method: Symbol::from(method),
             args: vec![],
             block: Some(block),
             parenthesized: false,
         },
     );
-    any.ty = Some(Ty::Bool);
-    *expr = any;
+    call.ty = Some(ty);
+    call
+}
+
+/// The field and the type `errors.where` selects on, when each is a literal.
+pub(crate) fn where_args(args: &[Expr]) -> Option<(String, Option<(bool, String)>)> {
+    let field = match args.first().map(|a| &*a.node) {
+        Some(ExprNode::Lit { value: Literal::Sym { value } }) => value.as_str().to_string(),
+        Some(ExprNode::Lit { value: Literal::Str { value } }) => value.clone(),
+        _ => return None,
+    };
+    let kind = match args.get(1).map(|a| &*a.node) {
+        None => None,
+        Some(ExprNode::Lit { value: Literal::Sym { value } }) => Some((true, value.as_str().to_string())),
+        Some(ExprNode::Lit { value: Literal::Str { value } }) => Some((false, value.clone())),
+        _ => return None,
+    };
+    (args.len() <= 2).then_some((field, kind))
+}
+
+/// `errors.where(:field)` and `where(:field, :type)`: the field's errors, of that type when one is given, as Rails' `Error#match?` picks them.
+fn rewrite_where(expr: &mut Expr, diags: &mut Vec<Diagnostic>) {
+    let ExprNode::Send { recv: Some(reader), method, args, block: None, .. } = &*expr.node else { return };
+    if method.as_str() != "where" || !is_model_errors_read(reader) {
+        return;
+    }
+    let Some((field, kind)) = where_args(args) else {
+        let mut d = crate::lower::residue_diagnostic(
+            "errors_index",
+            "errors.where",
+            expr.span,
+            "not literal",
+            "`errors.where` with a field or type that is not a literal, or with options, is not grounded".to_string(),
+        );
+        d.severity = crate::diagnostic::Severity::Error;
+        diags.push(d);
+        return;
+    };
+    let span = expr.span;
+    let ExprNode::Send { recv: owner, .. } = &*reader.node else { unreachable!("an errors reader") };
+    let ty = expr.ty.clone().unwrap_or_else(error_array_ty);
+    *expr = details_filter(span, owner.clone(), "select", &field, kind.as_ref().map(|(s, k)| (*s, k.as_str())), ty);
+}
+
+pub(crate) fn error_array_ty() -> Ty {
+    Ty::Array { elem: std::sync::Arc::new(Ty::Class { id: crate::ident::ClassId(Symbol::from("ActiveModel::Error")), args: vec![].into() }) }
 }
 
 fn str_expr(span: crate::span::Span, value: &str) -> Expr {

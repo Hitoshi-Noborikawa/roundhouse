@@ -1936,7 +1936,9 @@ yield, `attribute` reads `attribute.to_sym`, Rails' Symbol, and
 only on an error read more than once without effect: a block parameter,
 a local or `errors.first`. `errors.of_kind?(:field, :type)` asks for an
 error on that field with that Symbol type, and with a String type asks
-the field's messages, as Rails does. `errors.delete(:field)` is
+the field's messages, as Rails does. `errors.where(:field, :type)` is
+the `error_details` on that field, of that type when one is given, so
+what it answers reads like an iteration's. `errors.delete(:field)` is
 `ActiveSupport.errors_delete(errors, error_details, "field")`, which
 drops the field's entries from both, index for index, and answers their
 messages or nil; like `to_hash`, it is a gap on a strict target. Without a block, `any?`, `none?` and `count` keep
