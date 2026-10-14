@@ -230,9 +230,8 @@ module JdbcCleanupFailures
           rescue StandardError => e
             e
           end
-          expected_class = actual_driver_error ? Java::OrgSqlite::SQLiteException : Java::JavaSql::SQLException
-          check("#{operation}: preserve the driver exception class", error.instance_of?(expected_class))
-          check("#{operation}: preserve the driver exception object", error.equal?(original_error))
+          check("#{operation}: translate as Rails does", error.instance_of?(ActiveRecord::StatementInvalid))
+          check("#{operation}: keep the driver exception as the cause", error.cause.equal?(original_error))
           check("#{operation}: evict the failed statement", !Db.current_dbh.stmt_cache.values.include?(ps))
         ensure
           ps.define_singleton_method(:close, original_close)
