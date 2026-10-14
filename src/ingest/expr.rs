@@ -494,6 +494,25 @@ fn sorbet_assertion_is_must_because(node: &Node<'_>) -> bool {
 /// place of the `yield`. `None` when the block takes parameters —
 /// sorbet's `yield` passes none, so a parameter would read as nil and
 /// a body relying on it would not survive the inline.
+/// Whether the reason body carries a `next` or `break` of its OWN —
+/// control flow that is defined relative to the block Ruby wrote, and
+/// that the inline removes the boundary for. `next "x"` is how a
+/// reason can answer through sorbet's `yield`, but inlined into the
+/// `raise` it is no longer inside any block and does not even parse.
+/// Nested lambdas and while/until loops own theirs, as in
+/// `analyze::body`'s equivalent for bytes blocks.
+fn reason_escapes_its_block(e: &Expr) -> bool {
+    match &*e.node {
+        ExprNode::Next { .. } | ExprNode::Break { .. } => true,
+        ExprNode::Lambda { .. } | ExprNode::While { .. } => false,
+        _ => {
+            let mut found = false;
+            e.node.for_each_child(&mut |child| found |= reason_escapes_its_block(child));
+            found
+        }
+    }
+}
+
 fn must_because_message(
     node: &Node<'_>,
     file: &str,
@@ -507,6 +526,9 @@ fn must_because_message(
     }
     let Some(body) = block.body() else { return Ok(None) };
     let reason = ingest_expr(&body, file)?;
+    if reason_escapes_its_block(&reason) {
+        return Ok(None);
+    }
     Ok(Some(Expr::new(
         span,
         ExprNode::StringInterp {

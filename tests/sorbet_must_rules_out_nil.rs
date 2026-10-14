@@ -95,6 +95,28 @@ fn t_must_because_without_an_inlinable_reason_is_refused() {
     ));
     assert!(parameterized.iter().any(|d| d.contains("nil-check")), "parameterized: {parameterized:?}");
     assert!(parameterized.iter().any(|d| d.contains("Nil")), "parameterized: {parameterized:?}");
+
+    // `next`/`break` answer through sorbet's `yield` and are defined
+    // relative to the block. Inlined into the raise they are inside no
+    // block at all, and the emitted Ruby would not parse.
+    for reason in ["{ next \"a line\" }", "{ break \"a line\" }"] {
+        let escaping = receivers(&action(&format!(
+            "T.must_because(Line.find_by(id: 1)) {reason}.bogus_after"
+        )));
+        assert!(escaping.iter().any(|d| d.contains("nil-check")), "{reason}: {escaping:?}");
+        assert!(escaping.iter().any(|d| d.contains("Nil")), "{reason}: {escaping:?}");
+    }
+}
+
+#[test]
+fn t_must_because_allows_control_flow_owned_by_a_nested_block() {
+    // The `next` belongs to the inner iterator, not to the reason, so
+    // the inline keeps its boundary and the lowering stands.
+    let nested = receivers(&action(
+        "T.must_because(Line.find_by(id: 1)) { [1].map { |n| next n }.join }.bogus_after",
+    ));
+    assert_eq!(nested.len(), 1, "{nested:?}");
+    assert!(nested[0].contains("Line") && !nested[0].contains("Nil"), "{nested:?}");
 }
 
 #[test]
