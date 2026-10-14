@@ -4361,10 +4361,8 @@ end
 #[test]
 fn render_json_record_writer_is_unsupported_on_strict_targets() {
     use roundhouse::project::BuildTarget;
-    for target in [BuildTarget::Go] {
-        let (_emitted, errors) = records_json_app().emit(target);
-        assert!(errors.iter().any(|e| e.contains("json_writer")), "{target:?}: {errors:?}");
-    }
+    let (_emitted, errors) = records_json_app().emit(BuildTarget::TypescriptWorker);
+    assert!(errors.iter().any(|e| e.contains("json_writer")), "{errors:?}");
     // Rust builds the writer, except a `methods:` one (`render_json_record_writer_runs_on_rust`).
     let (_emitted, errors) = json_writer_rust_app().emit(BuildTarget::Rust);
     assert!(errors.is_empty(), "{errors:?}");
@@ -4379,7 +4377,7 @@ fn render_json_record_writer_is_unsupported_on_strict_targets() {
         .edit("app/models/article.rb", "  validates :title, presence: true\n", "  validates :title, presence: true\n\n  def as_json_str\n    title.to_s\n  end\n")
         .edit("config/routes.rb", "  root \"articles#index\"\n", "  root \"articles#index\"\n  get \"/own/:id\", to: \"own#show\"\n")
         .write("app/controllers/own_controller.rb", "class OwnController < ApplicationController\n  def show\n    render plain: Article.find(params[:id]).as_json_str\n  end\nend\n");
-    let (_emitted, errors) = own.emit(BuildTarget::Go);
+    let (_emitted, errors) = own.emit(BuildTarget::TypescriptWorker);
     assert!(!errors.iter().any(|e| e.contains("json_writer")), "{errors:?}");
 }
 
@@ -4617,6 +4615,19 @@ fn render_json_record_writer_runs_on_elixir() {
         }
         let output = mix.output().expect("run mix");
         assert!(output.status.success(), "mix {args:?} in {}\n{}\n{}", emitted.display(),
+            String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+    }
+}
+
+/// The same test, translated to Go.
+#[test]
+#[ignore = "requires Go; builds and runs an emitted app"]
+fn render_json_record_writer_runs_on_go() {
+    let (emitted, errors) = json_writer_app().emit(roundhouse::project::BuildTarget::Go);
+    assert!(errors.is_empty(), "{errors:?}");
+    for args in [&["mod", "tidy"][..], &["test", "./..."][..]] {
+        let output = std::process::Command::new("go").args(args).current_dir(&*emitted).output().expect("run go");
+        assert!(output.status.success(), "go {args:?} in {}\n{}\n{}", emitted.display(),
             String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
     }
 }

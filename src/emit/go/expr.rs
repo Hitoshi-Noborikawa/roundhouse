@@ -1898,7 +1898,7 @@ pub(super) fn emit_send(
     // through the Self back-pointer so subclass overrides fire — same
     // mechanism as `self.class.X` above and `self[k]=v` / `self[k]`
     // earlier in this function. Modeler membership gates which methods
-    // qualify; non-polymorphic methods (Save, NewRecord, FillTimestamps,
+    // qualify; non-polymorphic methods (Save, NewRecord,
     // OpResolveStatus) stay on the static binding because they're not
     // overridden by subclasses.
     if let Some(r) = recv {
@@ -2222,6 +2222,12 @@ pub(super) fn emit_send(
                 // call sites that omit parens still resolve
                 // definitionally.
                 if is_known_class_method(method) {
+                    return format!("{recv_s}.{go_m}()");
+                }
+                // Not a field: the written-down `render json:` encoder is a method on every model it serializes.
+                if method == crate::lower::JSON_WRITER_METHOD
+                    || method.starts_with(&format!("{}__", crate::lower::JSON_WRITER_METHOD))
+                {
                     return format!("{recv_s}.{go_m}()");
                 }
                 // Temporal-reader read (`article.created_at`, stamped
@@ -3179,6 +3185,8 @@ fn is_modeler_member(name: &str) -> bool {
             | "_adapter_update"
             | "_adapter_touch"
             | "_adapter_delete"
+            // Not Base's: a model's own keeps a timestamp already set, as Rails does, and writes the stored text Base's `self[:col] = now` loses in Go's `time.Time` assertion.
+            | "fill_timestamps"
             // Validation + callbacks — Save() drives `valid?` →
             // `self.validate`; create/update/destroy paths drive
             // `after_*_commit` and `before_destroy`. Subclasses (Article,
