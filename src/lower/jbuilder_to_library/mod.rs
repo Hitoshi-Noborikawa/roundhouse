@@ -465,7 +465,12 @@ fn jbuilder_method_parts(
         params.extend(locals.iter().cloned().map(Param::positional));
     } else if !ivar_params.is_empty() {
         params.extend(ivar_params.iter().cloned().map(Param::positional));
-    } else if !arg_name.is_empty() {
+    } else if !arg_name.is_empty() && is_partial {
+        // The convention arg is a PARTIAL's fallback only. An action
+        // view's render call passes exactly its ivar closure
+        // (`action_view_ivar_map`), so a template whose action sets no
+        // ivar (`def index; end` beside `json.ok true`) takes nothing:
+        // a guessed `gizmos` parameter made the call an ArgumentError.
         params.push(Param::positional(Symbol::from(arg_name.clone())));
     }
     // jbuilder templates today don't reference flash locals; if a
@@ -520,7 +525,8 @@ fn jbuilder_method_parts(
             .collect();
         crate::lower::view_to_library::build_view_signature_from(&typed, &extra_params)
     } else if ivar_params.is_empty() {
-        build_view_signature(stem, dir, is_partial, &arg_name, &extra_params, &known_models)
+        let convention_arg = if is_partial { arg_name.as_str() } else { "" };
+        build_view_signature(stem, dir, is_partial, convention_arg, &extra_params, &known_models)
     } else {
         let typed: Vec<(String, crate::ty::Ty)> = ivar_params
             .iter()
