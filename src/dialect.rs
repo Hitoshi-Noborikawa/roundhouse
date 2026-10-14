@@ -1081,6 +1081,9 @@ pub enum LibraryClassOrigin {
     /// A `Dry::Initializer` class given its constructor and readers
     /// (`ingest::dry_initializer`), for the same reason.
     DryInitializer,
+    /// A `Dry::Validation::Contract` given its `call`, a `Dry::Schema`
+    /// constant's class, or what they share (`ingest::dry_validation`).
+    DryValidation,
 }
 
 /// A graphql-ruby object type (a class descending from

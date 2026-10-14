@@ -44,6 +44,8 @@ mod dry_initializer;
 mod runtime_block_signature;
 #[path = "support/dry_struct.rs"]
 mod dry_struct;
+#[path = "support/dry_validation.rs"]
+mod dry_validation;
 #[path = "support/data_factory.rs"]
 mod data_factory;
 #[path = "support/rails_root_join.rs"]
@@ -2197,6 +2199,13 @@ fn dry_struct_classes_run_lowered() {
     assert!(run.stdout.contains("dry-struct contract passed"));
     assert!(run.stdout.contains("dry-struct stamp contract passed"));
     assert!(run.stdout.contains("dry-struct clock contract passed"));
+}
+
+#[test]
+fn dry_validation_contracts_run_lowered() {
+    let run = dry_validation::overlay().run_ruby(&dry_validation::assertions());
+    run.assert_passes();
+    assert!(run.stdout.contains("dry-validation contract passed"));
 }
 
 #[test]

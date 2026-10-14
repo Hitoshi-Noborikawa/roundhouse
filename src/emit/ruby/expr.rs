@@ -382,7 +382,9 @@ fn emit_node(n: &ExprNode) -> String {
             // group so the assign value is the last expression — bare
             // newlines end the statement after the first line.
             let rhs = emit_expr(value);
-            let rhs = if is_multi_seq(value) {
+            // `x = (y if c)`: bare, `x = y if c` assigns only when `c`
+            // holds, where the `if` without an else gives nil.
+            let rhs = if is_multi_seq(value) || assigns_as_modifier_if(value) {
                 format!("({rhs})")
             } else {
                 rhs
@@ -434,7 +436,9 @@ fn emit_node(n: &ExprNode) -> String {
                     );
                 }
             }
-            format!("{} {} {}", emit_lvalue(target), op.as_ruby(), emit_expr(value))
+            let rhs = emit_expr(value);
+            let rhs = if assigns_as_modifier_if(value) { format!("({rhs})") } else { rhs };
+            format!("{} {} {}", emit_lvalue(target), op.as_ruby(), rhs)
         }
         ExprNode::Yield { args } => {
             let args_s: Vec<String> = args.iter().map(emit_arg).collect();
@@ -1060,6 +1064,13 @@ fn renders_as_trailing_modifier(e: &Expr) -> bool {
         ExprNode::RescueModifier { .. } => true,
         _ => false,
     }
+}
+
+/// Does `e` emit as a modifier `if`? On an assignment's right it would
+/// guard the assignment itself (`x = y if c`); `rescue` does not, Ruby
+/// binds it to the value.
+fn assigns_as_modifier_if(e: &Expr) -> bool {
+    matches!(&*e.node, ExprNode::If { .. }) && renders_as_trailing_modifier(e)
 }
 
 /// Would `r`, emitted as a bare method-call receiver (`<r>.method`),

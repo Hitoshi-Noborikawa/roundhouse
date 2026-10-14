@@ -1993,6 +1993,10 @@ end
     super::dry_struct::lower_dry_structs(&mut app, &sources);
     // After the structs: an option typed with a struct builds the lowered one.
     super::dry_initializer::lower_dry_initializers(&mut app, &sources);
+    // Contracts and schemas, whose messages are the app's own files too.
+    super::dry_validation::lower_dry_validation(&mut app, &sources, &|path: &str| {
+        vfs.read_to_string(&dir.join(path)).ok()
+    });
     super::dry_initializer::drop_type_constants(&mut app, &sources);
     // graphql-ruby object types: analyzer-only field methods, so
     // inference carries each type's record class down the schema.

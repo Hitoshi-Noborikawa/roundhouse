@@ -1488,7 +1488,11 @@ fn report_dry_struct_stdlib(app: &App, target: BuildTarget) {
     for lc in &app.library_classes {
         if matches!(
             lc.origin,
-            Some(crate::dialect::LibraryClassOrigin::DryStruct | crate::dialect::LibraryClassOrigin::DryInitializer)
+            Some(
+                crate::dialect::LibraryClassOrigin::DryStruct
+                    | crate::dialect::LibraryClassOrigin::DryInitializer
+                    | crate::dialect::LibraryClassOrigin::DryValidation
+            )
         ) {
             for method in &lc.methods {
                 visit(&method.body, target);
