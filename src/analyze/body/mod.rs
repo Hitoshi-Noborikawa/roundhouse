@@ -1925,6 +1925,14 @@ impl<'a> BodyTyper<'a> {
                 {
                     return Ty::Str;
                 }
+                if method.as_str() == "delete"
+                    && matches!(dispatched, Ty::Var { .. } | Ty::Untyped)
+                    && matches!(recv_ty.as_ref(), Some(Ty::Class { id, .. }) if id.0.as_str() == "ActiveModel::Errors")
+                    && block.is_none()
+                    && crate::lower::errors_index::delete_field(args).is_some()
+                {
+                    return Ty::Union { variants: vec![Ty::Array { elem: std::sync::Arc::new(Ty::Str) }, Ty::Nil].into() };
+                }
                 if method.as_str() == "of_kind?"
                     && matches!(dispatched, Ty::Var { .. } | Ty::Untyped)
                     && matches!(recv_ty.as_ref(), Some(Ty::Class { id, .. }) if id.0.as_str() == "ActiveModel::Errors")

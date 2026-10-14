@@ -1593,6 +1593,57 @@ fn an_error_s_type_is_rails_type_on_spinel() {
     error_types_app().run_spinel(ERROR_TYPES).assert_passes();
 }
 
+/// `errors.delete(:field)` drops the field's errors from the full
+/// messages and the details alike, and answers their messages or nil.
+fn errors_delete_app() -> emit_and_run::Overlay {
+    errors_each_app().edit(
+        "app/models/article.rb",
+        "  def error_rows\n",
+        "  def drop_errors(field)
+    field == \"body\" ? errors.delete(:body) : errors.delete(\"nothing\")
+  end
+
+  def listed_messages
+    [errors.full_messages, errors.count]
+  end
+
+  def error_rows\n",
+    )
+}
+
+const ERRORS_DELETE: &str = r#"a = Article.new(title: "", body: "odd")
+a.valid?
+raise a.drop_errors("nothing").inspect unless a.drop_errors("nothing").nil?
+deleted = a.drop_errors("body")
+raise deleted.inspect unless deleted == ["is too short (minimum is 10 characters)"]
+raise a.error_full_messages.inspect unless a.error_full_messages == ["Title can't be blank", "is odd"]
+raise a.error_attributes.inspect unless a.error_attributes == [:title, :base]
+raise a.listed_messages.inspect unless a.listed_messages == [["Title can't be blank", "is odd"], 2]
+raise a.drop_errors("body").inspect unless a.drop_errors("body").nil?
+puts "errors.delete passed"
+"#;
+
+#[test]
+fn errors_delete_drops_the_field_s_errors() {
+    errors_delete_app().run_ruby(ERRORS_DELETE).assert_passes();
+}
+
+#[test]
+#[ignore = "requires the Spinel toolchain"]
+fn errors_delete_drops_the_field_s_errors_on_spinel() {
+    errors_delete_app().run_spinel(ERRORS_DELETE).assert_passes();
+}
+
+#[test]
+fn errors_delete_is_a_gap_on_strict_targets() {
+    let (_emitted, errors) = errors_delete_app().emit(roundhouse::project::BuildTarget::Crystal);
+    assert_eq!(
+        errors.iter().filter(|e| e.contains("ActiveSupport.errors_delete is only available on the ruby family and spinel")).count(),
+        2,
+        "{errors:#?}"
+    );
+}
+
 /// `type` reads the error more than once, so a found error is an error.
 #[test]
 fn the_type_of_an_error_that_is_not_a_plain_read_is_an_error() {

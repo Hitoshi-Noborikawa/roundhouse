@@ -1936,7 +1936,10 @@ yield, `attribute` reads `attribute.to_sym`, Rails' Symbol, and
 only on an error read more than once without effect: a block parameter,
 a local or `errors.first`. `errors.of_kind?(:field, :type)` asks for an
 error on that field with that Symbol type, and with a String type asks
-the field's messages, as Rails does. Without a block, `any?`, `none?` and `count` keep
+the field's messages, as Rails does. `errors.delete(:field)` is
+`ActiveSupport.errors_delete(errors, error_details, "field")`, which
+drops the field's entries from both, index for index, and answers their
+messages or nil; like `to_hash`, it is a gap on a strict target. Without a block, `any?`, `none?` and `count` keep
 asking the full messages, which answer the same.
 
 Every one of these rewrites matches an `errors` send as its receiver,
@@ -1957,9 +1960,10 @@ compile in Rust or Go. The class sits in `active_record/base.rb` so
 `Base`'s own bodies type against it.
 
 **What it costs.** A message pushed by anything other than those two
-lowerings has no detail beside it. `errors.delete` and `errors.import`,
-which some apps call, are not modeled; an `errors <<` written by hand
-pushes a message no field claims. `errors.add` reads its record twice
+lowerings has no detail beside it. `errors.import` and `errors.merge!`,
+which some apps call, are not modeled, and neither is `errors.delete`
+with a type; an `errors <<` written by hand pushes a message no field
+claims. `errors.add` reads its record twice
 (once for each push), so one whose record is a call with arguments or a
 receiver (`Draft.latest.errors.add(...)`) stays residue, and so does a
 message that is a call (`errors.add(:title, reason_for(x))`), which the

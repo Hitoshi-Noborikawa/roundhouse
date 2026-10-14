@@ -232,6 +232,7 @@ fn rewrite(expr: &mut Expr, diags: &mut Vec<Diagnostic>) {
     rewrite_index(expr, diags);
     rewrite_include(expr, diags);
     rewrite_of_kind(expr, diags);
+    rewrite_delete(expr, diags);
     rewrite_to_hash(expr);
     rewrite_render_json(expr);
 }
@@ -264,6 +265,47 @@ fn rewrite_include(expr: &mut Expr, diags: &mut Vec<Diagnostic>) {
     };
     let ExprNode::Send { recv: owner, .. } = &*reader.node else { unreachable!("an errors reader") };
     *expr = has_errors_on(owner.clone(), &field, expr.span);
+}
+
+/// The field `errors.delete` removes, when it is the only argument and a literal.
+pub(crate) fn delete_field(args: &[Expr]) -> Option<String> {
+    match args {
+        [field] => match &*field.node {
+            ExprNode::Lit { value: Literal::Sym { value } } => Some(value.as_str().to_string()),
+            ExprNode::Lit { value: Literal::Str { value } } => Some(value.clone()),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// `errors.delete(:field)` → `ActiveSupport.errors_delete(<owner>.errors, <owner>.error_details, "field")`.
+fn rewrite_delete(expr: &mut Expr, diags: &mut Vec<Diagnostic>) {
+    let ExprNode::Send { recv: Some(reader), method, args, block: None, .. } = &*expr.node else { return };
+    if method.as_str() != "delete" || !is_model_errors_read(reader) {
+        return;
+    }
+    let ExprNode::Send { recv: owner, .. } = &*reader.node else { unreachable!("an errors reader") };
+    let (Some(field), true) = (delete_field(args), super::errors_add::owner_reads_once(owner.as_ref())) else {
+        let mut d = crate::lower::residue_diagnostic(
+            "errors_index",
+            "errors.delete",
+            expr.span,
+            "not a literal field on a plain read",
+            "`errors.delete` is grounded only with a literal field, no type, on a record read without effect".to_string(),
+        );
+        d.severity = crate::diagnostic::Severity::Error;
+        diags.push(d);
+        return;
+    };
+    let span = expr.span;
+    let mut call = details_call(span, reader, "errors_delete", Ty::Union { variants: vec![Ty::Array { elem: std::sync::Arc::new(Ty::Str) }, Ty::Nil].into() });
+    let ExprNode::Send { args, .. } = &mut *call.node else { unreachable!() };
+    let mut errors = reader.clone();
+    errors.ty = Some(Ty::Array { elem: std::sync::Arc::new(Ty::Str) });
+    args.insert(0, errors);
+    args.push(str_expr(span, &field));
+    *expr = call;
 }
 
 /// The field, whether the type is a Symbol, and the type, when each is a literal.
