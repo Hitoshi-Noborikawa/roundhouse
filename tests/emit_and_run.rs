@@ -15640,14 +15640,14 @@ fn model_methods_read_the_record_on_implicit_self_on_go() {
 /// A controller of its own, outside real-blog's resources, reading `params` into a local.
 fn probe_controller_app() -> emit_and_run::Overlay {
     emit_and_run::real_blog()
-        .edit("config/routes.rb", "  root \"articles#index\"\n", "  root \"articles#index\"\n  get \"/probe/:id\", to: \"probe#show\", as: :probe\n  get \"/probe/:id/joined\", to: \"probe#joined\", as: :probe_joined\n")
+        .edit("config/routes.rb", "  root \"articles#index\"\n", "  root \"articles#index\"\n  get \"/probe/:id\", to: \"probe#show\", as: :probe\n  get \"/probe/:id/joined\", to: \"probe#joined\", as: :probe_joined\n  get \"/search\", to: \"probe#search\", as: :search\n")
         .write(
             "app/controllers/probe_controller.rb",
-            "class ProbeController < ApplicationController\n  def show\n    article = Article.find(params[:id])\n    render plain: article.title.to_s\n  end\n\n  def joined\n    article = Article.find(params[:id])\n    render plain: article.comments.map(&:commenter).join(\"|\") + \" \" + [article.comments.size, 0].join(\",\") + \" \" + [true, false].join(\",\")\n  end\nend\n",
+            "class ProbeController < ApplicationController\n  def show\n    article = Article.find(params[:id])\n    render plain: article.title.to_s\n  end\n\n  def search\n    render plain: \"q=\" + params[:q].to_s + \" page=\" + params[:page].to_s\n  end\n\n  def joined\n    article = Article.find(params[:id])\n    render plain: article.comments.map(&:commenter).join(\"|\") + \" \" + [article.comments.size, 0].join(\",\") + \" \" + [true, false].join(\",\")\n  end\nend\n",
         )
         .write(
             "test/controllers/probe_controller_test.rb",
-            "require \"test_helper\"\n\nclass ProbeControllerTest < ActionDispatch::IntegrationTest\n  setup do\n    @article = articles(:one)\n  end\n\n  test \"reads params into a local\" do\n    get probe_url(@article)\n    assert_response :success\n    assert_equal \"Getting Started with Rails\", response.body\n  end\n\n  test \"joins what is not a String\" do\n    get probe_joined_url(@article)\n    assert_equal \"Alice 1,0 true,false\", response.body\n  end\nend\n",
+            "require \"test_helper\"\n\nclass ProbeControllerTest < ActionDispatch::IntegrationTest\n  setup do\n    @article = articles(:one)\n  end\n\n  test \"reads params into a local\" do\n    get probe_url(@article)\n    assert_response :success\n    assert_equal \"Getting Started with Rails\", response.body\n  end\n\n  test \"joins what is not a String\" do\n    get probe_joined_url(@article)\n    assert_equal \"Alice 1,0 true,false\", response.body\n  end\n\n  test \"reads the query string\" do\n    get \"/search?q=rails&page=2\"\n    assert_equal \"q=rails page=2\", response.body\n  end\nend\n",
         )
 }
 

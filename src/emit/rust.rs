@@ -1135,10 +1135,12 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
                 // into `c.flash` only when the field exists; the
                 // outgoing path is field-independent (thread-local).
                 let has_flash = body.contains("pub flash:");
+                let has_params = body.contains("pub params:");
                 let axum_wrappers = render_axum_handler_wrappers(
                     lc.name.0.as_str(),
                     &flat_routes_2c,
                     has_flash,
+                    has_params,
                     sets_action_name,
                 );
                 let content = format!("{CONTROLLER_IMPORTS}{body}{ac_shim}{axum_wrappers}");
@@ -1585,6 +1587,7 @@ fn render_axum_handler_wrappers(
     controller_name: &str,
     flat_routes: &[crate::lower::FlatRoute],
     has_flash: bool,
+    has_params: bool,
     sets_action_name: bool,
 ) -> String {
     use crate::dialect::HttpMethod;
@@ -1662,6 +1665,13 @@ fn render_axum_handler_wrappers(
         if !path_extractor.is_empty() {
             args.push(path_extractor);
         }
+        // Rails' `params` holds the query string too; only a controller that reads `params` has the field to take it.
+        if has_params {
+            args.push(
+                "axum::extract::Query(query): axum::extract::Query<std::collections::HashMap<String, String>>"
+                    .to_string(),
+            );
+        }
         if has_body {
             // Body extractor MUST be last per axum's contract (each
             // request body can only be consumed once; placing it
@@ -1677,7 +1687,15 @@ fn render_axum_handler_wrappers(
         let mut body = String::new();
         body.push_str("    crate::http::response_clear();\n");
         body.push_str("    crate::http::request_format_set(_fmt.0);\n");
-        if has_body {
+        if has_params {
+            if has_body {
+                // Query after form, as Rails' `request_parameters.merge(query_parameters)`: a shallow merge where the query wins.
+                body.push_str("    let mut params = crate::http::params_from_form(form);\n");
+                body.push_str("    params.extend(crate::http::params_from_form(query));\n");
+            } else {
+                body.push_str("    let mut params = crate::http::params_from_form(query);\n");
+            }
+        } else if has_body {
             body.push_str("    let mut params = crate::http::params_from_form(form);\n");
         } else if !path_params.is_empty() {
             body.push_str(
@@ -1701,7 +1719,7 @@ fn render_axum_handler_wrappers(
                 "    params.insert({p:?}.to_string(), serde_json::Value::from({p}));\n",
             ));
         }
-        if has_body || !path_params.is_empty() {
+        if has_params || has_body || !path_params.is_empty() {
             body.push_str(&format!(
                 "    let mut c = {controller_name} {{ params, ..Default::default() }};\n",
             ));
