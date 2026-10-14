@@ -1692,6 +1692,11 @@ fn stand_ins(used: &HashSet<&'static str>) -> Vec<LibraryClass> {
         source.push_str("    end\n");
     }
     source.push_str("  end\nend\n");
-    crate::ingest::ingest_library_classes(source.as_bytes(), "<dry_validation>")
-        .expect("the dry-validation stand-ins parse")
+    let mut classes = crate::ingest::ingest_library_classes(source.as_bytes(), "<dry_validation>")
+        .expect("the dry-validation stand-ins parse");
+    // Scanned with the lowered classes for stdlib a target lacks.
+    for c in &mut classes {
+        c.origin = Some(LibraryClassOrigin::DryValidation);
+    }
+    classes
 }

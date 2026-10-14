@@ -2208,6 +2208,48 @@ fn dry_validation_contracts_run_lowered() {
     assert!(run.stdout.contains("dry-validation contract passed"));
 }
 
+/// `:time` and `:date_time` coerce with `Time.parse` and `DateTime`,
+/// which Spinel's tree does not have: reported for it, not emitted to
+/// fail. The fixture's dates and decimals are not.
+#[test]
+fn dry_validation_stdlib_coercions_are_reported_for_spinel() {
+    let (_emitted, errors) = dry_validation::overlay().emit(roundhouse::project::BuildTarget::Spinel);
+    assert!(errors.is_empty(), "{errors:#?}");
+    let (_emitted, errors) = dry_validation::overlay()
+        .write(
+            "app/contracts/clock_contract.rb",
+            "class ClockContract < Dry::Validation::Contract\n  params do\n    optional(:at).value(:time)\n    optional(:stamp).value(:date_time)\n  end\nend\n",
+        )
+        .emit(roundhouse::project::BuildTarget::Spinel);
+    for what in ["`Time.parse`", "`DateTime`"] {
+        assert!(errors.iter().any(|e| e.contains(what)), "{what} not reported: {errors:#?}");
+    }
+}
+
+/// A contract the lowering cannot read (here, a `rule`) stays as it was,
+/// with the topmost contract it inherits a schema from and everything
+/// under that: a lowered parent's `call` would answer for it. Its
+/// declarations are dropped, not replayed onto a gem that is not there,
+/// so the tree boots and another contract is lowered.
+#[test]
+fn dry_validation_refusal_takes_the_schema_hierarchy() {
+    let refused = || {
+        dry_validation::overlay().write(
+            "app/contracts/ruled_contract.rb",
+            "class RuledBase < Dry::Validation::Contract\n  params do\n    required(:a).filled(:integer)\n  end\nend\n\nclass RuledChild < RuledBase\n  rule(:a) do\n    key.failure(\"too big\") if value > 5\n  end\nend\n\nclass RuledSibling < RuledBase\n  params do\n    required(:b).filled(:string)\n  end\nend\n",
+        )
+    };
+    let (emitted, _errors) = refused().emit(roundhouse::project::BuildTarget::Ruby);
+    for kept in ["ruled_base.rb", "ruled_child.rb", "ruled_sibling.rb"] {
+        let source = std::fs::read_to_string(emitted.join("app/models").join(kept)).expect(kept);
+        assert!(!source.contains("def call"), "{kept} lowered:\n{source}");
+        assert!(!source.contains("params do"), "{kept} replays the DSL:\n{source}");
+    }
+    let run = refused().run_ruby("raise \"lowered\" unless UserContract.new.call(\"name\" => \"a\", \"age\" => \"1\").success?\nputs \"refusal contract passed\"\n");
+    run.assert_passes();
+    assert!(run.stdout.contains("refusal contract passed"));
+}
+
 #[test]
 fn dry_initializer_classes_run_lowered() {
     let run = dry_initializer::ruby_overlay().run_ruby(&format!(
@@ -13847,5 +13889,7 @@ puts "PASS friendly oracle"
 }
 #[path = "emit_and_run/acts_as_votable.rs"]
 mod acts_as_votable;
+
+
 
 
