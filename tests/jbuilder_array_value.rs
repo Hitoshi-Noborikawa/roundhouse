@@ -3,7 +3,9 @@
 //! `JsonBuilder.encode_value` had no Array branch and fell through to
 //! "stringify and quote", so the value came out as the Array's `to_s`
 //! (`"[\"b\", nil]"`) where Jbuilder writes a JSON array (`["b",null]`).
-//! Each element is now encoded the way a scalar value is.
+//! Each element is now encoded the way a scalar value is, and a Hash
+//! element is a JSON object (String keys, values encoded the same way),
+//! as Jbuilder writes `json.tags([{name: "b"}, [1, nil]])`.
 //! The Spinel side is `jbuilder_array_value_spinel.rs`.
 
 use std::collections::HashMap;
@@ -15,6 +17,7 @@ use roundhouse::ingest::ingest_app_from_tree;
 
 const PARTIAL: &str = r#"json.tags([widget.name, nil])
 json.nested [[widget.size, 1.5], [], "x"]
+json.mixed([{name: widget.name}, [1, nil]])
 "#;
 
 fn emitted() -> Vec<(String, String)> {
@@ -81,9 +84,9 @@ puts Views::Widgets.widget_json(Widget.new(nil, nil))
     assert_eq!(
         String::from_utf8_lossy(&output.stdout).trim(),
         concat!(
-            r#"{"tags":["b",null],"nested":[[2,1.5],[],"x"]}"#,
+            r#"{"tags":["b",null],"nested":[[2,1.5],[],"x"],"mixed":[{"name":"b"},[1,null]]}"#,
             "\n",
-            r#"{"tags":[null,null],"nested":[[null,1.5],[],"x"]}"#,
+            r#"{"tags":[null,null],"nested":[[null,1.5],[],"x"],"mixed":[{"name":null},[1,null]]}"#,
         )
     );
 }

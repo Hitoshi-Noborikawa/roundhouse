@@ -1053,7 +1053,10 @@ fn every_runtime_method_body_concretely_typed() {
     // a JSON array) adds 2, MEASURED: the `map` over the untyped value
     // and its untyped element handed back to `encode_value`, the same
     // gradual input every other branch of that method reads.
-    const CEILING: usize = 736;
+    // Its Hash branch (a Hash element as a JSON object) adds 3, MEASURED:
+    // the `keys` of the untyped Hash, a key's `to_s` and its value read
+    // back into `encode_value`.
+    const CEILING: usize = 739;
     assert!(
         total_gradual <= CEILING,
         "{total_gradual} Ty::Untyped sites exceeds ceiling of {CEILING}",
