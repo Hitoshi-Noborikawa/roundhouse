@@ -1587,6 +1587,61 @@ fn errors_readers_beyond_membership_are_a_gap_on_strict_targets() {
     assert_eq!(errors.len(), 5, "{errors:#?}");
 }
 
+/// A record built for its `errors` is still built: Rails runs
+/// `Article.create!` before it answers the full message.
+fn full_message_on_a_built_record_app() -> emit_and_run::Overlay {
+    emit_and_run::real_blog().edit(
+        "app/models/article.rb",
+        "  validates :title, presence: true\n",
+        "  validates :title, presence: true
+
+  def self.taken_message(reason)
+    error = Article.create!(title: \"Built\", body: \"A long enough body\").errors.full_message(:title, reason.strip)
+    skipped = reason.empty? || Article.create!(title: \"Skipped\", body: \"A long enough body\").errors.full_message(:base, \"is skipped\")
+    [error, skipped, Article.new.errors.full_message(:base, \"is odd\")]
+  end
+",
+    )
+}
+
+#[test]
+fn full_message_on_a_built_record_builds_it() {
+    full_message_on_a_built_record_app()
+        .run_ruby(
+            r#"messages = Article.taken_message(" is taken ")
+raise messages.inspect unless messages == ["Title is taken", "is skipped", "is odd"]
+messages = Article.taken_message("")
+raise messages.inspect unless messages == ["Title ", true, "is odd"]
+raise Article.count.inspect unless Article.where(title: "Built").count == 2 && Article.where(title: "Skipped").count == 1
+puts "full message on a built record passed"
+"#,
+        )
+        .assert_passes();
+}
+
+#[test]
+#[ignore = "requires the Spinel toolchain"]
+fn full_message_on_a_built_record_builds_it_on_spinel() {
+    emit_and_run::real_blog()
+        .edit(
+            "app/models/article.rb",
+            "  validates :title, presence: true\n",
+            "  validates :title, presence: true
+
+  def self.odd_message(reason)
+    reason.empty? || Article.new.errors.full_message(:title, reason.strip)
+  end
+",
+        )
+        .run_spinel(
+            r#"raise Article.odd_message(" is odd ").inspect unless Article.odd_message(" is odd ") == "Title is odd"
+raise Article.odd_message("").inspect unless Article.odd_message("") == true
+puts "full message on a built record passed"
+"#,
+        )
+        .assert_passes();
+}
+
 /// A field the lowering cannot humanize at compile time keeps its error.
 #[test]
 fn errors_full_message_on_a_dynamic_field_stays_an_error() {

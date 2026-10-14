@@ -80,8 +80,8 @@ fn errors_full_message_on_a_literal_field_is_admitted() {
 }
 
 #[test]
-fn errors_full_message_on_a_computed_receiver_is_refused() {
-    refuses("Probe.create!(title: \"x\").errors.full_message(:title, \"is taken\")", "ActiveModel::Errors");
+fn errors_full_message_on_a_computed_receiver_is_admitted() {
+    admits("Probe.create!(title: \"x\").errors.full_message(:title, \"is taken\").upcase");
 }
 
 #[test]

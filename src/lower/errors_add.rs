@@ -26,8 +26,9 @@
 //! `errors.full_message(:field, msg)` bakes the same text without touching
 //! the accumulator: Rails answers the humanized field before the message
 //! (the bare message for `:base`), which is a pure function of the two
-//! arguments. Only that shape is typed (`full_message_bakes`); any other
-//! spelling keeps analyze's Errors gap.
+//! arguments. A record that is not a plain read is still built before the
+//! text, as `User.new && "Email is invalid"`. Only that shape is typed
+//! (`full_message_bakes`); any other spelling keeps analyze's Errors gap.
 //!
 //! Purely shape-directed; runs on the post-analyze hook
 //! (`apply_post_analyze_lowerings`) with its siblings so every target
@@ -141,9 +142,21 @@ fn rewrite_errors_add(expr: &mut Expr, labels: &Labels, diags: &mut Vec<Diagnost
             let ExprNode::Lit { value: Literal::Sym { value: field } } = &*field_expr.node else {
                 unreachable!()
             };
-            let message = baked_message(i18n, span, field.as_str(), args.next().map(fold_str_concat));
-            *expr = message;
-            expr.ty = Some(crate::ty::Ty::Str);
+            let mut message = baked_message(i18n, span, field.as_str(), args.next().map(fold_str_concat));
+            message.ty = Some(crate::ty::Ty::Str);
+            let ExprNode::Send { recv: owner, .. } = *recv.expect("checked errors reader").node else { unreachable!() };
+            *expr = match owner {
+                // Not a Seq: an emitter hoists one out of `||` and `?:`, which would build the record where Rails does not.
+                Some(owner) if !reads_without_effect(&owner) => {
+                    let mut built = Expr::new(
+                        span,
+                        ExprNode::BoolOp { op: crate::expr::BoolOpKind::And, surface: crate::expr::BoolOpSurface::Symbol, left: owner, right: message },
+                    );
+                    built.ty = Some(crate::ty::Ty::Str);
+                    built
+                }
+                _ => message,
+            };
             return;
         }
     }
@@ -395,7 +408,12 @@ pub(crate) fn full_message_bakes(recv: Option<&Expr>, args: &[Expr], block: Opti
         && matches!(&*args[0].node, ExprNode::Lit { value: Literal::Sym { .. } })
         && !matches!(&*args[1].node, ExprNode::Hash { .. })
         && recv.is_some_and(|r| matches!(&*r.node, ExprNode::Send { recv: owner, method, args, .. }
-            if method.as_str() == "errors" && args.is_empty() && owner.as_ref().is_none_or(reads_without_effect)))
+            if method.as_str() == "errors" && args.is_empty() && owner.as_ref().is_none_or(|o| reads_without_effect(o) || is_record(o))))
+}
+
+/// A record built for its `errors`, which `&&` evaluates before the text and which is never falsy.
+fn is_record(e: &Expr) -> bool {
+    matches!(&e.ty, Some(crate::ty::Ty::Class { .. }))
 }
 
 /// Folding drops the receiver, so only one whose evaluation does nothing.
