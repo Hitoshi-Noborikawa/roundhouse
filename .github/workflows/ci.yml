@@ -2412,6 +2412,9 @@ jobs:
       - name: cargo test --test typescript_toolchain real_blog -- --ignored
         if: ${{ !cancelled() && matrix.target == 'typescript' }}
         run: cargo test --test typescript_toolchain real_blog -- --ignored --nocapture
+      - name: cargo test --test emit_and_run render json writer on typescript
+        if: ${{ !cancelled() && matrix.target == 'typescript' }}
+        run: cargo test --locked --test emit_and_run render_json_record_writer_runs_on_typescript -- --ignored --nocapture --exact
       - name: cargo test --test framework_tests_typescript -- --ignored
         if: ${{ !cancelled() && matrix.target == 'typescript' }}
         run: cargo test --test framework_tests_typescript -- --ignored --nocapture
