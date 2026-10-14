@@ -814,6 +814,22 @@ Three gaps remain:
   never raised. That matches Rails outside a `while_preventing_writes`
   block.
 
+### `dependent:` acts on the children as Rails' does
+
+A `has_many`/`has_one` `dependent:` runs in the owner's `before_destroy`,
+in declaration order. `:destroy` destroys each child, running its
+callbacks. `has_many … dependent: :delete_all` and `has_one … dependent:
+:delete` delete the children in one statement, and `:nullify` sets their
+foreign key (and the type column for `as:`) to NULL, both without
+callbacks. Both are the reader's own query (`Target.where(fk: @key)`) with
+`delete_all` / `update_all` on it. A `where` ahead of a bulk write
+(`delete_all`, `update_all`, `destroy_all`, `touch_all`) stays a relation,
+not a SELECT folded into its rows (`lower::arel::requires_relation_receiver`).
+
+Three gaps remain: a `through:` association's `dependent:` (Rails deletes
+or nullifies the join rows), `:restrict_with_exception` /
+`:restrict_with_error`, and `:destroy_async` all do nothing.
+
 ### `Current.reset` replaces the instance instead of nilling it
 
 `ingest::current_attributes` turns `class Current <

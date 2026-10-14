@@ -4034,6 +4034,98 @@ puts queries.length
     assert_eq!(run.stdout, "First,Second,Second\n0\n");
 }
 
+/// `Model.where(…).delete_all` / `update_all` / `destroy_all` /
+/// `touch_all` run against the relation: lifted into a SELECT, the
+/// receiver would be the hydrated rows, which answer none of them.
+fn bulk_writes_app() -> emit_and_run::Overlay {
+    emit_and_run::real_blog()
+        .edit(
+            "app/models/article.rb",
+            "  has_many :comments, dependent: :destroy\n",
+            concat!(
+                "  has_many :comments, dependent: :destroy\n\n",
+                "  def rename_comments\n    Comment.where(article_id: @id).update_all(commenter: \"renamed\")\n    Comment.where(article_id: @id).touch_all\n  end\n\n",
+                "  def drop_comments\n    Comment.where(article_id: @id).delete_all\n  end\n\n",
+                "  def drop_self\n    Article.where(id: @id).destroy_all\n  end\n",
+            ),
+        )
+}
+
+const BULK_WRITES_SCRIPT: &str = r##"a = Article.create!(title: "Keep", body: "A body long enough")
+b = Article.create!(title: "Drop", body: "Another body long enough")
+Comment.create!(article_id: a.id, commenter: "x", body: "one")
+Comment.create!(article_id: b.id, commenter: "y", body: "two")
+a.rename_comments
+b.drop_comments
+b.drop_self
+raise "comments: #{Comment.count}" unless Comment.count == 1
+raise "renamed: #{Comment.first.commenter}" unless Comment.first.commenter == "renamed"
+raise "articles: #{Article.count}" unless Article.count == 1
+puts "ok"
+"##;
+
+#[test]
+fn bulk_writes_on_a_where_run_against_the_relation() {
+    bulk_writes_app().run_ruby(BULK_WRITES_SCRIPT).assert_passes();
+}
+
+#[test]
+#[ignore = "requires the Spinel toolchain"]
+fn bulk_writes_on_a_where_run_against_the_relation_on_spinel() {
+    let run = bulk_writes_app().run_spinel(&format!("Db.configure(\":memory:\")\nSchema.statements.each {{ |sql| Db.exec(sql) }}\nActiveRecord.adapter = SqliteAdapter\n{BULK_WRITES_SCRIPT}"));
+    run.assert_passes();
+    assert_eq!(run.stdout, "ok\n");
+}
+
+/// `dependent: :delete_all`, `has_one … dependent: :delete` and
+/// `dependent: :nullify` act on the children in one statement each,
+/// running none of their callbacks, as Rails' do.
+fn dependent_app() -> emit_and_run::Overlay {
+    emit_and_run::real_blog()
+        .edit(
+            "db/schema.rb",
+            "  add_foreign_key \"comments\", \"articles\"\n",
+            concat!(
+                "  create_table \"notes\", force: :cascade do |t|\n    t.integer \"article_id\"\n    t.string \"text\"\n  end\n\n",
+                "  create_table \"summaries\", force: :cascade do |t|\n    t.integer \"article_id\"\n    t.string \"text\"\n  end\n\n",
+                "  add_foreign_key \"comments\", \"articles\"\n",
+            ),
+        )
+        .edit("app/models/article.rb", "  has_many :comments, dependent: :destroy\n", "  has_many :comments, dependent: :delete_all\n  has_many :tagged_notes, -> { where(text: \"tag\") }, class_name: \"Note\", dependent: :delete_all\n  has_many :notes, dependent: :nullify\n  has_one :summary, dependent: :delete\n")
+        .edit("app/models/comment.rb", "  belongs_to :article\n", "  belongs_to :article\n  before_destroy { raise \"a delete_all child runs no callback\" }\n")
+        .write("app/models/note.rb", "class Note < ApplicationRecord\n  belongs_to :article, optional: true\nend\n")
+        .write("app/models/summary.rb", "class Summary < ApplicationRecord\n  belongs_to :article, optional: true\nend\n")
+}
+
+const DEPENDENT_SCRIPT: &str = r##"a = Article.create!(title: "Gone", body: "A body long enough")
+b = Article.create!(title: "Kept", body: "Another body long enough")
+Comment.create!(article_id: a.id, commenter: "x", body: "one")
+Comment.create!(article_id: b.id, commenter: "y", body: "two")
+n = Note.create!(article_id: a.id, text: "n")
+Note.create!(article_id: a.id, text: "tag")
+Summary.create!(article_id: a.id, text: "s")
+Summary.create!(article_id: b.id, text: "t")
+a.destroy
+raise "comments left: #{Comment.count}" unless Comment.count == 1
+raise "summaries left: #{Summary.count}" unless Summary.count == 1
+raise "note kept its key" unless Note.find(n.id).article_id.nil?
+raise "notes left: #{Note.count}" unless Note.count == 1
+puts "ok"
+"##;
+
+#[test]
+fn dependent_delete_all_delete_and_nullify_run() {
+    dependent_app().run_ruby(DEPENDENT_SCRIPT).assert_passes();
+}
+
+#[test]
+#[ignore = "requires the Spinel toolchain"]
+fn dependent_delete_all_delete_and_nullify_run_on_spinel() {
+    let run = dependent_app().run_spinel(&format!("Db.configure(\":memory:\")\nSchema.statements.each {{ |sql| Db.exec(sql) }}\nActiveRecord.adapter = SqliteAdapter\n{DEPENDENT_SCRIPT}"));
+    run.assert_passes();
+    assert_eq!(run.stdout, "ok\n");
+}
+
 /// `render … and return`, `redirect_to … and return` and `head … and return` return, as Rails' truthy answers make them.
 #[test]
 fn a_response_call_and_return_returns() {
