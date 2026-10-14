@@ -138,6 +138,9 @@ struct Probe<'a> {
     /// stays attached and the slice parses on its own).
     text: &'a str,
     node: &'a Node<'a>,
+    /// The whole file: `node`'s offsets index this, not `text`, which
+    /// starts at the statement.
+    src: &'a str,
     /// The initializer's file name (`session_store.rb`).
     file_name: &'a str,
     /// `config.autoload_lib(ignore: …)` directories, before any filtering.
@@ -391,10 +394,10 @@ fn mapper_extension(p: &Probe<'_>) -> bool {
         return false;
     }
     let Some(recv) = call.receiver() else { return false };
-    let Some(target) = super::app::constant_text(&recv, p.text) else { return false };
+    let Some(target) = super::app::constant_text(&recv, p.src) else { return false };
     target.trim_start_matches("::") == "ActionDispatch::Routing::Mapper"
         && call.arguments().is_some_and(|a| {
-            a.arguments().iter().any(|arg| super::app::constant_text(&arg, p.text).is_some())
+            a.arguments().iter().any(|arg| super::app::constant_text(&arg, p.src).is_some())
         })
 }
 
@@ -407,7 +410,7 @@ fn content_helper_assignment(p: &Probe<'_>) -> bool {
         return false;
     }
     let Some(recv) = call.receiver() else { return false };
-    if super::app::constant_text(&recv, p.text).as_deref() != Some("ActionText::ContentHelper") {
+    if super::app::constant_text(&recv, p.src).as_deref() != Some("ActionText::ContentHelper") {
         return false;
     }
     call.arguments().is_some_and(|a| a.arguments().iter().count() == 1)
@@ -634,6 +637,7 @@ fn judge(origin: Origin, st: &Stmt<'_>, file_name: &str, lib_ignores: &[String],
     let probe = Probe {
         text: st.text,
         node: &st.node,
+        src,
         file_name,
         lib_ignores,
     };

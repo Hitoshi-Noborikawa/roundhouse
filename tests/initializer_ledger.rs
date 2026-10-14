@@ -110,6 +110,37 @@ fn a_to_prepare_block_is_unwrapped_like_the_recognizers_and_only_the_unread_stat
     assert_eq!(location(&ledger[0]), "config/initializers/prepare.rb:3:3");
 }
 
+// A statement's node carries offsets into its whole file, past the end of
+// the statement's own text once anything comes before it. The recognizers
+// that read a constant receiver slice the file, not that text.
+
+#[test]
+fn a_prepended_module_new_after_other_statements_is_reported_not_a_panic() {
+    let (_, ledger) = ingest(&[(
+        "config/initializers/document.rb",
+        "# Extensions for the JSON:API document.\n\
+         # They run once the app's classes are loaded,\n\
+         # after every other initializer has run.\n\
+         \n\
+         Rails.application.config.to_prepare do\n  Audit.record_boot\n  \
+         Document.prepend(Module.new do\n    def to_hash\n      super\n    end\n  end)\nend\n",
+    )]);
+    let locations: Vec<&str> = ledger.iter().map(location).collect();
+    assert_eq!(locations, ["config/initializers/document.rb:6:3", "config/initializers/document.rb:7:3"]);
+}
+
+#[test]
+fn a_content_helper_allow_list_after_other_statements_is_read() {
+    let (_, ledger) = ingest(&[(
+        "config/initializers/rich_text.rb",
+        "# Allow video embeds in rich text.\n\
+         \n\
+         Rails.application.config.to_prepare do\n  Audit.record_boot\n  \
+         ActionText::ContentHelper.allowed_tags = Set[\"video\"]\nend\n",
+    )]);
+    assert_eq!(statements(&ledger), ["Audit.record_boot"]);
+}
+
 #[test]
 fn an_after_initialize_hook_is_one_unconsumed_statement() {
     let (_, ledger) = ingest(&[(
