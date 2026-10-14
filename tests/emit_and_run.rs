@@ -15636,3 +15636,31 @@ fn model_methods_read_the_record_on_implicit_self_on_go() {
     assert!(errors.is_empty(), "{errors:?}");
     run_emitted(&emitted, &[("go", &["mod", "tidy"]), ("go", &["test", "./..."])]);
 }
+
+/// A controller of its own, outside real-blog's resources, reading `params` into a local.
+fn probe_controller_app() -> emit_and_run::Overlay {
+    emit_and_run::real_blog()
+        .edit("config/routes.rb", "  root \"articles#index\"\n", "  root \"articles#index\"\n  get \"/probe/:id\", to: \"probe#show\", as: :probe\n")
+        .write(
+            "app/controllers/probe_controller.rb",
+            "class ProbeController < ApplicationController\n  def show\n    article = Article.find(params[:id])\n    render plain: article.title.to_s\n  end\nend\n",
+        )
+        .write(
+            "test/controllers/probe_controller_test.rb",
+            "require \"test_helper\"\n\nclass ProbeControllerTest < ActionDispatch::IntegrationTest\n  setup do\n    @article = articles(:one)\n  end\n\n  test \"reads params into a local\" do\n    get probe_url(@article)\n    assert_response :success\n    assert_equal \"Getting Started with Rails\", response.body\n  end\nend\n",
+        )
+}
+
+#[test]
+fn a_controller_reads_params_into_a_local() {
+    probe_controller_app().run_test("test/controllers/probe_controller_test.rb").assert_passes();
+}
+
+/// Rust gave the controller no `params` field (only ivar writes and a few node shapes were walked), and its `process_action` on `&self` called a `&mut self` stub.
+#[test]
+#[ignore = "requires the Rust toolchain; builds and runs an emitted app"]
+fn a_controller_reads_params_into_a_local_on_rust() {
+    let (emitted, errors) = probe_controller_app().emit(roundhouse::project::BuildTarget::Rust);
+    assert!(errors.is_empty(), "{errors:?}");
+    run_emitted(&emitted, &[("cargo", &["test", "--quiet"])]);
+}

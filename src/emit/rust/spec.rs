@@ -303,6 +303,13 @@ fn emit_ctrl_test_expr(expr: &Expr, app: &App) -> String {
                     return format!("{class}::count()");
                 }
             }
+            // `response.body` is the request's `resp`, bound above, not a field of anything named `response`.
+            if m == "body"
+                && args.is_empty()
+                && matches!(&*r.node, ExprNode::Send { recv: None, method, args, .. } if method.as_str() == "response" && args.is_empty())
+            {
+                return "resp.text()".to_string();
+            }
             if args.is_empty() {
                 let recv_s = match &*r.node {
                     ExprNode::Ivar { name } | ExprNode::Var { name, .. } => name.to_string(),

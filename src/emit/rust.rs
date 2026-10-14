@@ -1083,6 +1083,7 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
                 // but do not embed Base — stub the two Sends so the
                 // inherited process_action compiles. Full CSRF via
                 // the http thread-local surface is a follow-on.
+                // `verify_authenticity_token` takes `&self`, not `&mut self`: the stub writes nothing, and a controller whose actions write no ivar runs `process_action` on `&self`.
                 let ac_shim = format!(
                     "\nimpl {name} {{\n\
                     \x20   pub fn render(&self, content: String) {{\n\
@@ -1110,7 +1111,7 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
                     \x20       let content_type = opts.get(\"content_type\").and_then(|v| v.as_str()).map(|s| s.to_string());\n\
                     \x20       crate::http::response_set_head(status, content_type);\n\
                     \x20   }}\n\
-                    \x20   pub fn verify_authenticity_token(&mut self) {{}}\n\
+                    \x20   pub fn verify_authenticity_token(&self) {{}}\n\
                     \x20   pub fn performed_pred(&self) -> bool {{ false }}\n\
                     }}\n",
                     name = lc.name.0.as_str()
