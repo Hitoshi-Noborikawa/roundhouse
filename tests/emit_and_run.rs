@@ -47,6 +47,10 @@ mod stdlib_rnp;
 mod erb_template_contract;
 #[path = "emit_and_run/erb_template.rs"]
 mod erb_template;
+#[path = "support/representable_decorator.rs"]
+mod representable_decorator;
+#[path = "emit_and_run/representable.rs"]
+mod representable;
 
 #[path = "support/class_configuration.rs"]
 mod class_configuration;
