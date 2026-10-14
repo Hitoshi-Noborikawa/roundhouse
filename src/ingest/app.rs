@@ -7738,7 +7738,8 @@ fn app_relative_path(value: &str) -> Option<&str> {
 /// check (what a Kamal proxy probes) — names Rails' OWN
 /// `Rails::HealthController`, which no app tree holds: the route
 /// dispatched to nothing and `/up` answered 404. Written here as the
-/// controller Rails ships (8.1: `render html:` of the green page; the
+/// controller Rails ships (8.1: a `respond_to` answering the green page
+/// to HTML and `{"status":"up","timestamp":"<iso8601>"}` to JSON; the
 /// `rescue_from` → red 500 half needs a boot failure, which a one-shot
 /// process reports by not answering at all). Synthesized only when a
 /// route targets it and the app doesn't define its own. A namespaced
@@ -7752,7 +7753,20 @@ fn synthesize_rails_health_controller(app: &mut crate::App) {
     if !routed || app.controllers.iter().any(|c| c.name.0.as_str() == RAILS_HEALTH_CONTROLLER) {
         return;
     }
-    let src = "class Rails::HealthController < ActionController::Base\n  def show\n    render html: \"<!DOCTYPE html><html><body style=\\\"background-color: green\\\"></body></html>\".html_safe\n  end\nend\n";
+    // The JSON arm is Rails' `render json: { status: "up", timestamp:
+    // Time.current.iso8601 }` written out as the encoded text it
+    // renders: an inline `render json:` arm of a `respond_to` reaches
+    // the runtime encoder, which only the CRuby breadth keeps, and the
+    // Spinel emit would drop the arm.
+    let src = r##"class Rails::HealthController < ActionController::Base
+  def show
+    respond_to do |format|
+      format.html { render html: "<!DOCTYPE html><html><body style=\"background-color: green\"></body></html>".html_safe }
+      format.json { render plain: "{\"status\":\"up\",\"timestamp\":\"#{Time.current.iso8601}\"}", content_type: "application/json" }
+    end
+  end
+end
+"##;
     if let Ok(Some(controller)) = super::controller::ingest_controller(src.as_bytes(), "<rails/health>") {
         app.controllers.push(controller);
     }
