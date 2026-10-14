@@ -99,17 +99,14 @@ pub(crate) fn finite_floats(value: Expr) -> Expr {
         ExprNode::Hash { entries, kwargs } => {
             let entries = entries.into_iter().map(|(k, v)| (k, finite_floats(v))).collect();
             let mut out = Expr::new(span, ExprNode::Hash { entries, kwargs });
-            out.ty = ty;
+            out.ty = ty.as_ref().map(nullable_floats);
             out
         }
         ExprNode::Array { elements, style } => {
-            // Not a splat's elements: `[*xs]` spreads at run time, and wrapping it would hand `map` a spread.
-            let elements = elements
-                .into_iter()
-                .map(|e| if matches!(&*e.node, ExprNode::Splat { .. }) { e } else { finite_floats(e) })
-                .collect();
+            let elements = elements.into_iter().map(finite_float_element).collect();
             let mut out = Expr::new(span, ExprNode::Array { elements, style });
-            out.ty = ty;
+            // Not the literal's own type: its Float elements are `Float?` now, and Go builds the slice from this type.
+            out.ty = ty.as_ref().map(nullable_floats);
             out
         }
         node => {
@@ -141,6 +138,43 @@ pub(crate) fn finite_floats(value: Expr) -> Expr {
                 _ => value,
             }
         }
+    }
+}
+
+/// An element of an Array literal; a splat's operand, not the splat itself, is what holds the Floats.
+fn finite_float_element(e: Expr) -> Expr {
+    let span = e.span;
+    let ty = e.ty.clone();
+    match *e.node {
+        ExprNode::Splat { value } => {
+            let mut out = Expr::new(span, ExprNode::Splat { value: finite_floats(value) });
+            out.ty = ty.as_ref().map(nullable_floats);
+            out
+        }
+        node => finite_floats(Expr { node: Box::new(node), ..e }),
+    }
+}
+
+/// `ty` with each Float a payload can hold made `Float?`, as `finite_floats` leaves its values.
+fn nullable_floats(ty: &Ty) -> Ty {
+    match ty {
+        Ty::Float => nullable_float(),
+        Ty::Array { elem } => Ty::Array { elem: std::sync::Arc::new(nullable_floats(elem)) },
+        Ty::Hash { key, value } => Ty::Hash { key: key.clone(), value: std::sync::Arc::new(nullable_floats(value)) },
+        Ty::Union { variants } => {
+            let mut out: Vec<Ty> = Vec::new();
+            for v in variants.iter() {
+                let v = if matches!(v, Ty::Float) { Ty::Float } else { nullable_floats(v) };
+                if !out.contains(&v) {
+                    out.push(v);
+                }
+            }
+            if variants.iter().any(|v| matches!(v, Ty::Float)) && !out.contains(&Ty::Nil) {
+                out.push(Ty::Nil);
+            }
+            Ty::Union { variants: out.into() }
+        }
+        other => other.clone(),
     }
 }
 
