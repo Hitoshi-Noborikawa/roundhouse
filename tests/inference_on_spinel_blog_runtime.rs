@@ -377,13 +377,20 @@ fn untyped_subexpressions_baseline() {
     // `Associations::Preloader`): 614 -> 632, MEASURED — 16 + 2, every
     // read of the `records`/`specs`/`group` parameters, untyped here
     // without the RBS the runtime gate reads them with.
+    // `param_ty_with_default` no longer types a `= nil` parameter as
+    // always-`Nil` when no call site gives it a type: 632 -> 677,
+    // MEASURED — every read of such a parameter (Arel::Table/Attribute
+    // column/qualified/subquery/fragment, ErrorDetail's five ivar
+    // writes, etc.) is now a real inference var instead of a folded
+    // `Nil`, which is the honest "unknown" the RBS already says
+    // (`?untyped`) rather than a type that silently zeroed `presence`.
 
     // This uncalled API adds 27 nodes without its String parameter RBS.
     // Keep the existing-method ceiling and RBS-aware typing gates intact.
     const LIKE_CEILING: usize = 27;
     let existing_untyped = all_untyped.len() - like_untyped;
     eprintln!("inference-only ledger: existing={existing_untyped}, sanitize_sql_like={like_untyped}");
-    const CEILING: usize = 632;
+    const CEILING: usize = 677;
     assert!(
         existing_untyped <= CEILING && like_untyped <= LIKE_CEILING,
         "{} untyped sub-expressions on spinel-blog runtime — exceeds ledger: \
