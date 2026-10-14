@@ -109,6 +109,37 @@ fn included_do_marker_mixed_with_an_untracked_call_stays_rejected() {
     );
 }
 
+/// An explicit `self.` receiver is the includer, same as no receiver at
+/// all — `self.delegate` must be caught exactly like a bare `delegate`
+/// call. Fails on b6379ca9 (the receiver check skipped it, so this
+/// ingested and would have shipped `shine` public once something
+/// downstream splices the delegate onto the includer).
+#[test]
+fn included_do_marker_mixed_with_a_self_qualified_untracked_call_stays_rejected() {
+    let err = gadget_app("    private\n\n    self.delegate :shine, to: :tool\n")
+        .expect_err("a marker mixed with a self-qualified untracked declaration stays rejected");
+    assert!(
+        format!("{err:?}").contains("not modeled"),
+        "expected a not-modeled visibility error, got: {err:?}"
+    );
+}
+
+/// An includer guard (`if`/`unless`) around the untracked call is no
+/// safer than writing it directly in the block. Fails on b6379ca9 (the
+/// walker only looked at direct, receiverless top-level statements, so
+/// a `delegate` nested inside an `if` passed through unseen).
+#[test]
+fn included_do_marker_mixed_with_an_untracked_call_inside_a_conditional_stays_rejected() {
+    let err = gadget_app(
+        "    private\n\n    if true\n      delegate :shine, to: :tool\n    end\n",
+    )
+    .expect_err("a marker mixed with a conditionally-guarded untracked declaration stays rejected");
+    assert!(
+        format!("{err:?}").contains("not modeled"),
+        "expected a not-modeled visibility error, got: {err:?}"
+    );
+}
+
 /// Splicing `included do`'s plain defs onto the includer's own emitted
 /// body is a separate, pre-existing gap (reproduces identically with no
 /// marker at all, e.g. the `Hooked` module in

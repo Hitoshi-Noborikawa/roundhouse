@@ -63,16 +63,31 @@ pub(super) fn definition<'pr>(node: &Node<'pr>) -> Option<ruby_prism::DefNode<'p
 /// `scope`, `has_many`, an arbitrary DSL block — might generate a
 /// method whose visibility this walk cannot verify, so its presence
 /// alongside a marker is reported, not silently accepted.
+/// Declaration forms `Visibility::walk` already attributes a method
+/// (or methods) to, besides a plain `def`. Anything else — `delegate`,
+/// `scope`, `has_many`, an arbitrary DSL — might generate a method
+/// whose visibility this walk cannot verify.
+const TRACKED_DECLARATIONS: &[&str] = &[
+    "attr_reader",
+    "attr_writer",
+    "attr_accessor",
+    "alias_method",
+    "class_methods",
+    "included",
+    "module_function",
+];
+
+/// Does this `included do … end` body mix a visibility marker (bare or
+/// named — either spelling makes the marker's reach matter) with some
+/// OTHER call, ANYWHERE in the body (including inside `if`/`unless`
+/// branches, and however deeply elsif-chained), that this file's
+/// visibility tracking does not itself attribute a method to? `def`s
+/// and the marker calls themselves are always fine, on any receiver;
+/// [`TRACKED_DECLARATIONS`] are fine too, but ONLY when sent to the
+/// includer itself — bare (implicit `self`) or an explicit `self.` —
+/// since a call on some OTHER receiver (`Other.attr_accessor`) cannot
+/// be generating a method on THIS class regardless of what it's named.
 fn marker_mixed_with_unmodeled_call(body: &Node<'_>) -> bool {
-    const TRACKED: &[&str] = &[
-        "attr_reader",
-        "attr_writer",
-        "attr_accessor",
-        "alias_method",
-        "class_methods",
-        "included",
-        "module_function",
-    ];
     let Some(statements) = body.as_statements_node() else { return false };
     let stmts = flatten_statements(statements.as_node());
     let has_marker = stmts.iter().any(|stmt| {
@@ -81,16 +96,54 @@ fn marker_mixed_with_unmodeled_call(body: &Node<'_>) -> bool {
     if !has_marker {
         return false;
     }
-    stmts.iter().any(|stmt| {
-        if stmt.as_def_node().is_some() {
+    stmts.iter().any(statement_has_unmodeled_call)
+}
+
+/// A single statement, or (recursively) anything reachable through an
+/// `if`/`unless` branch it opens — an includer guard around a
+/// method-generating call is exactly as effective as one written
+/// directly in the block.
+fn statement_has_unmodeled_call(stmt: &Node<'_>) -> bool {
+    if stmt.as_def_node().is_some() {
+        return false;
+    }
+    if let Some(call) = stmt.as_call_node() {
+        if marker(&call) {
             return false;
         }
-        let Some(call) = stmt.as_call_node() else { return false };
-        if call.receiver().is_some() || marker(&call) {
+        let targets_includer = call.receiver().is_none_or(|r| r.as_self_node().is_some());
+        if !targets_includer {
             return false;
         }
-        !TRACKED.contains(&constant_id_str(&call.name()))
-    })
+        return !TRACKED_DECLARATIONS.contains(&constant_id_str(&call.name()));
+    }
+    branch_has_unmodeled_call(stmt)
+}
+
+/// Descend into an `if`/`unless` node's branches (both arms, and an
+/// elsif chain) looking for [`statement_has_unmodeled_call`]. Anything
+/// that is not itself an `if`/`unless` node is not a branch at all —
+/// `false`, same as `statement_has_unmodeled_call`'s own fallthrough.
+fn branch_has_unmodeled_call(node: &Node<'_>) -> bool {
+    let body_has = |body: Option<ruby_prism::StatementsNode<'_>>| {
+        body.is_some_and(|s| flatten_statements(s.as_node()).iter().any(statement_has_unmodeled_call))
+    };
+    if let Some(branch) = node.as_if_node() {
+        body_has(branch.statements())
+            || branch.subsequent().is_some_and(|sub| {
+                if let Some(else_node) = sub.as_else_node() {
+                    body_has(else_node.statements())
+                } else {
+                    // `elsif` — another `IfNode`, chained via `subsequent`.
+                    branch_has_unmodeled_call(&sub)
+                }
+            })
+    } else if let Some(branch) = node.as_unless_node() {
+        body_has(branch.statements())
+            || branch.else_clause().is_some_and(|clause| body_has(clause.statements()))
+    } else {
+        false
+    }
 }
 
 impl Visibility {
