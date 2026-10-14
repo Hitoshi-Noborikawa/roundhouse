@@ -51,6 +51,10 @@ module ActionView
     # both with the nested bracket grammar and Rails' per-level sort.
     def self.fragment_read: (String key) -> String?
     def self.fragment_write: (String key, String value, Integer ttl) -> String
+    def self.collection_caching?: () -> bool
+    def self.collection_fragment_key: (String partial, untyped key) -> String
+    def self.collection_fragment_read: (String name) -> String?
+    def self.collection_fragment_write: (String name, String value) -> String
     def self.to_query: (Hash[Symbol, untyped] params) -> String
     def self.to_query_pairs: (Hash[Symbol, untyped] params, String namespace) -> String
     def self.to_query_value: (String name, untyped value) -> String

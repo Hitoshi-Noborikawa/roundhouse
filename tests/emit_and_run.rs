@@ -132,6 +132,10 @@ mod action_dispatch_request_put;
 mod controller_url_helpers;
 #[path = "emit_and_run/route_default_segment_args.rs"]
 mod route_default_segment_args;
+#[path = "emit_and_run/keyed_collection_cache.rs"]
+mod keyed_collection_cache;
+#[path = "emit_and_run/association_loaded_list.rs"]
+mod association_loaded_list;
 #[path = "emit_and_run/controller_super_ivars.rs"]
 mod controller_super_ivars;
 #[path = "emit_and_run/helper_method_session.rs"]
