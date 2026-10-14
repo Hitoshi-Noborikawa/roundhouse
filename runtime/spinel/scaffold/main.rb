@@ -529,6 +529,14 @@ module Main
     controller.flash = ActionDispatch::Flash.new(inbound_flash)
     controller.request_format = request_format
     controller.accepts_any_format = Main.accepts_any_format?(req.req_headers.fetch("accept", ""))
+    # Rails' `Vary: Accept` on a render whose format came from the Accept
+    # header (runtime/action_dispatch/mime_negotiation.rb). A `format`
+    # param - the path extension, `?format=`, a route's own format -
+    # is read instead of Accept.
+    controller.vary_on_accept = ActionDispatch::MimeNegotiation.should_apply_vary_header?(
+      req.req_headers.fetch("accept", ""), req.req_headers.fetch("x-requested-with", ""),
+      req.req_headers.fetch("content-type", ""),
+      controller.params.key?("format") || !matched.req_format.nil?)
 
     begin
       controller.process_action(matched.action)

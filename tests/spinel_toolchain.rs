@@ -62,6 +62,10 @@ mod cable_broadcast_json;
 mod index_with_contract;
 #[path = "spinel_toolchain/index_with.rs"]
 mod index_with;
+#[path = "support/vary_accept.rs"]
+mod vary_accept_contract;
+#[path = "spinel_toolchain/vary_accept.rs"]
+mod vary_accept;
 #[path = "support/anonymous_keywords.rs"]
 mod anonymous_keywords;
 #[path = "support/lambda_signatures.rs"]

@@ -138,6 +138,10 @@ module ActionController
     def query_string=: (String) -> String
     def accepts_any_format: () -> bool
     def accepts_any_format=: (bool) -> bool
+    def vary_on_accept: () -> bool
+    def vary_on_accept=: (bool) -> bool
+    # Rails' `_set_vary_header` (render, send_data); see the .rb.
+    def apply_vary_header: () -> nil
     def path_parameters: () -> Hash[String, String]
     def path_parameters=: (Hash[String, String]) -> Hash[String, String]
     @headers: ActionController::HeaderStore

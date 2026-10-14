@@ -70,6 +70,9 @@ require "action_view/view_helpers"
 # reopen here cannot leak into them.
 require "action_view/view_helpers_ext"
 require "action_dispatch/router"
+# `Vary: Accept` (mime_negotiation_test.rb). Its aggregator is
+# `action_dispatch.rb`, which this helper does not load.
+require "action_dispatch/mime_negotiation"
 # The shared Request (request_test.rb). Its aggregator is the scaffold's
 # boot.rb, not `action_dispatch.rb`, so this helper names it directly —
 # the same "a second list of the same thing" the CookieJar note below
