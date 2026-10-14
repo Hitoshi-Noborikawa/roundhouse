@@ -4361,7 +4361,7 @@ end
 #[test]
 fn render_json_record_writer_is_unsupported_on_strict_targets() {
     use roundhouse::project::BuildTarget;
-    for target in [BuildTarget::Go, BuildTarget::Swift] {
+    for target in [BuildTarget::Go, BuildTarget::Elixir] {
         let (_emitted, errors) = records_json_app().emit(target);
         assert!(errors.iter().any(|e| e.contains("json_writer")), "{target:?}: {errors:?}");
     }
@@ -4584,6 +4584,21 @@ fn render_json_record_writer_runs_on_kotlin() {
         gradle.env("JAVA_HOME", java_home);
     }
     let output = gradle.output().expect("run gradle test");
+    assert!(output.status.success(), "{}\n{}\n{}", emitted.display(),
+        String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+}
+
+/// The same test, translated to Swift. macOS needs a full Xcode for XCTest (`DEVELOPER_DIR`).
+#[test]
+#[ignore = "requires Swift and XCTest; builds and runs an emitted app"]
+fn render_json_record_writer_runs_on_swift() {
+    let (emitted, errors) = json_writer_app().emit(roundhouse::project::BuildTarget::Swift);
+    assert!(errors.is_empty(), "{errors:?}");
+    let output = std::process::Command::new("swift")
+        .arg("test")
+        .current_dir(&*emitted)
+        .output()
+        .expect("run swift test");
     assert!(output.status.success(), "{}\n{}\n{}", emitted.display(),
         String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
 }
