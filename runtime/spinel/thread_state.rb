@@ -230,6 +230,11 @@ module ActiveJob
         work = PENDING.shift if PENDING.length > 0
       end
       break if work.nil?
+      # A job gets its own broadcast log, as `dispatch` gives a request.
+      # The drain thread is never a request, so nothing else clears its
+      # log: every message a job broadcast stayed on it, rendered HTML
+      # and all (~9 KB a campfire POST, 3 GB over a bench's POST cells).
+      Broadcasts.reset_log!
       begin
         work.call
         ran = ran + 1
