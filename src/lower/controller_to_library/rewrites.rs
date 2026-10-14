@@ -487,6 +487,10 @@ pub(super) fn rewrite_render_to_views(
             // implicit render's js arm — same qualified-stem rule.
             let is_js = render_kwargs_have_format(args, "js");
             let is_json = render_kwargs_have_format(args, "json");
+            // Mastodon's `custom_css#show`: `resolve_formats_only_render`
+            // plants the same `format:` marker for a resolvable
+            // `content_type:`, so this reads the same way `svg` does.
+            let is_css = render_kwargs_have_format(args, "css");
             // A feed branch (`format.rss { render action: "stories" }`):
             // the format-qualified template (`stories.rss.builder` →
             // `stories_rss`) when there is one, else a format-AGNOSTIC
@@ -505,6 +509,8 @@ pub(super) fn rewrite_render_to_views(
                 format!("{}_turbo_stream", view_method.as_str())
             } else if is_svg {
                 format!("{}_svg", view_method.as_str())
+            } else if is_css {
+                format!("{}_css", view_method.as_str())
             } else if is_js {
                 format!("{}_js", view_method.as_str())
             } else if is_json {
@@ -534,7 +540,7 @@ pub(super) fn rewrite_render_to_views(
             // that is right there. Same trap the `svg` note above
             // describes, entered from the other side.
             let mut json_only = false;
-            if contract.is_none() && !is_json && !is_turbo_stream && !is_svg {
+            if contract.is_none() && !is_json && !is_turbo_stream && !is_svg && !is_css {
                 let json_stem = format!("{}_json", view_method.as_str());
                 if let Some(c) = view_ivars.get(&(render_module.clone(), json_stem)) {
                     contract = Some(c);
@@ -580,7 +586,7 @@ pub(super) fn rewrite_render_to_views(
             let mut subclass_hook: Option<Symbol> = None;
             if contract.is_none() {
                 let mut stems: Vec<(String, bool)> = vec![(contract_stem.clone(), false)];
-                if !is_json && !is_turbo_stream && !is_svg {
+                if !is_json && !is_turbo_stream && !is_svg && !is_css {
                     stems.push((format!("{}_json", view_method.as_str()), true));
                 }
                 'stems: for (stem, via_json_only) in stems {
@@ -658,6 +664,14 @@ pub(super) fn rewrite_render_to_views(
                     (
                         Symbol::from(format!("{}_svg", view_method.as_str())),
                         Some(crate::lower::controller::body::mime_for_format("svg")),
+                    )
+                } else if is_css {
+                    // Mastodon's `custom_css#show` — same shape as
+                    // `svg`: format-qualified view method, MIME from
+                    // the shared table.
+                    (
+                        Symbol::from(format!("{}_css", view_method.as_str())),
+                        Some(crate::lower::controller::body::mime_for_format("css")),
                     )
                 } else if is_js {
                     (

@@ -6210,11 +6210,17 @@ fn walk_erb<V: Vfs + ?Sized>(
                 // different template shape. Lowered as `<action>_pdf` /
                 // `<action>_csv` / `<action>_txt`, beside the html
                 // template.
+                // `.css.erb` joins them too: a CSS responder with no
+                // HTML sibling (Mastodon's `custom_css#show`, served
+                // through `render content_type: "text/css"` with no
+                // template name — `resolve_formats_only_render` binds
+                // that to THIS action's own template). Lowered as
+                // `<action>_css`, same naming answer.
                 if stem.ends_with(".html")
                     || !stem.contains('.')
                     || matches!(
                         format,
-                        Some("turbo_stream" | "svg" | "text" | "json" | "js" | "pdf" | "csv" | "txt")
+                        Some("turbo_stream" | "svg" | "text" | "json" | "js" | "pdf" | "csv" | "txt" | "css")
                     )
                     // Feeds: `.rss.builder` / `.atom.builder` (lobsters'
                     // `home/stories.rss.builder`), lowered as
@@ -6229,7 +6235,7 @@ fn walk_erb<V: Vfs + ?Sized>(
                 {
                     out.push((path, engine));
                 } else {
-                    record_skipped_view(&path, &format!("{e} (non-html format)"));
+                    record_skipped_view(&path, &format!("{e} (non-html format)"))?;
                 }
             }
             // A view with a format and NO handler extension renders
@@ -6256,7 +6262,7 @@ fn walk_erb<V: Vfs + ?Sized>(
             // Moving one of these into `ViewEngine::from_extension` (above)
             // is the whole walker-side change to support a new engine.
             Some("ruby" | "rabl") => {
-                record_skipped_view(&path, ext.expect("matched a Some arm"));
+                record_skipped_view(&path, ext.expect("matched a Some arm"))?;
             }
             _ => {}
         }
@@ -6264,16 +6270,21 @@ fn walk_erb<V: Vfs + ?Sized>(
     Ok(())
 }
 
-/// Record an un-ingested view template as a survey gap. A no-op when
-/// survey mode is off, so the strict/CI path is unchanged; under
-/// `--continue` (and the LSP/MCP, which now ingest in survey mode) it
+/// Record an un-ingested view template as a survey gap under
+/// `--continue` (and the LSP/MCP, which now ingest in survey mode) —
 /// makes the HAML / `.text.erb` / `.ruby` coverage hole visible instead
-/// of letting whole template files vanish without a trace.
-fn record_skipped_view(path: &Path, engine: &str) {
-    survey::record(&IngestError::Unsupported {
+/// of letting whole template files vanish without a trace. STRICT mode
+/// now aborts instead of silently dropping the template: it used to
+/// call `survey::record` directly, a no-op outside survey, so a
+/// still-unsupported format (`.rabl`, `.ruby`, or any non-html ERB
+/// format this allow-list doesn't carry) emitted the controller with
+/// no view and reported no error — the one silent-drop `check`'s error
+/// gate is supposed to rule out.
+fn record_skipped_view(path: &Path, engine: &str) -> IngestResult<()> {
+    survey::continue_or_fail(IngestError::Unsupported {
         file: path.display().to_string(),
         message: format!("view template not ingested: {engine}"),
-    });
+    })
 }
 
 fn read_jbuilder_files<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResult<Vec<PathBuf>> {
