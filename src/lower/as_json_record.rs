@@ -55,12 +55,21 @@ pub(super) fn column_writer_with(
     }
     let info = registry.get(&model.name).ok_or("the model has no analyzed class info")?;
     let mut pairs = Vec::new();
-    for column in &table.columns {
-        // Not serialized: Rails' `serializable_hash` excepts the inheritance column whenever the record has one, and `only:` overrides `except:`.
-        let listed = opts.only.as_ref().map(|only| only.contains(&column.name));
-        if listed == Some(false) || (listed.is_none() && (column.name.as_str() == "type" || opts.except.contains(&column.name))) {
-            continue;
+    // Not the table's order under `only:`: Rails' `serializable_hash` takes `Array(only) & attribute_names`, the `only:` list's order.
+    let columns: Vec<_> = match &opts.only {
+        Some(only) => {
+            let mut seen = Vec::new();
+            only.iter()
+                .filter(|name| !seen.contains(*name) && { seen.push((*name).clone()); true })
+                .filter_map(|name| table.columns.iter().find(|c| &c.name == name))
+                .collect()
         }
+        // Not serialized: Rails' `serializable_hash` excepts the inheritance column whenever the record has one.
+        None => table.columns.iter()
+            .filter(|c| c.name.as_str() != "type" && !opts.except.contains(&c.name))
+            .collect(),
+    };
+    for column in columns {
         match &column.col_type {
             // `writer_body` routes these through the date seam and `encode_datetime`, which a later pass zones for a non-UTC app.
             ColumnType::Date | ColumnType::DateTime => {
@@ -123,7 +132,8 @@ pub(super) struct SerializeOpts {
 impl SerializeOpts {
     pub(super) fn method_name(&self) -> String {
         let mut name = super::as_json_writer::WRITER_METHOD.to_string();
-        let join = |l: &[crate::ident::Symbol]| l.iter().map(|s| s.as_str()).collect::<Vec<_>>().join("_");
+        // Not joined by `_` alone: `only: [:a_b, :c]` and `only: [:a, :b_c]` would share a name; each name carries its length.
+        let join = |l: &[crate::ident::Symbol]| l.iter().map(|s| format!("{}{}", s.as_str().len(), s.as_str())).collect::<Vec<_>>().join("_");
         if let Some(only) = &self.only {
             name += &format!("__only_{}", join(only));
         }

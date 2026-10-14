@@ -4007,7 +4007,7 @@ class ValuesControllerTest < ActionDispatch::IntegrationTest
 
   test "only:, except: and methods: as Rails' serializable_hash reads them" do
     get "/values/#{@article.id}", params: { shape: "only" }
-    assert_equal %({"id":#{@article.id},"title":"A \\u003cb\\u003e"}), response.body
+    assert_equal %({"title":"A \\u003cb\\u003e","id":#{@article.id}}), response.body
     get "/values/#{@article.id}", params: { shape: "except" }
     assert_match(/\A\{"id":#{@article.id},"title":"A \\u003cb\\u003e","created_at":"[^"]+"\}\z/, response.body)
     get "/values/#{@article.id}", params: { shape: "methods" }
@@ -4070,7 +4070,7 @@ end
     assert!(lines[6].starts_with(r#"{"id":1,"#) && lines[6].contains(r#"Z"}|{"a":{"id":1,"#), "{}", lines[6]);
     assert_eq!(lines[7], r#"{"article":null}"#);
     assert_eq!(lines[8], r#"{"at":"2026-01-02T03:04:05.678Z","x":null,"y":1.5}"#);
-    assert_eq!(lines[9], r#"{"id":1,"title":"A \u003cb\u003e"}"#);
+    assert_eq!(lines[9], r#"{"title":"A \u003cb\u003e","id":1}"#);
     assert_eq!(lines[10], r#"{"id":1,"headline":"A \u003cB\u003e"}"#);
     assert_eq!(lines[11], r#"[{"id":1}]"#);
 }

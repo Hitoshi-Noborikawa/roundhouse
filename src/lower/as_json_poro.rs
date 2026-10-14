@@ -138,15 +138,16 @@ pub fn apply_as_json_synthesis(app: &mut App, registry: &HashMap<ClassId, ClassI
                     leading_blank_line: true,
                 });
                 written.insert(model.name.clone());
-                for opts in option_sites.get(&model.name).into_iter().flatten() {
-                    if let Ok(writer) = super::as_json_record::column_writer_with(model, table, registry, opts) {
-                        variants.insert((model.name.clone(), opts.method_name()));
-                        model.body.push(ModelBodyItem::Method {
-                            method: writer,
-                            leading_comments: Vec::new(),
-                            leading_blank_line: true,
-                        });
-                    }
+            }
+            // Not only when the full writer was built: `only:` can leave out the column that writer declines.
+            for opts in option_sites.get(&model.name).into_iter().flatten() {
+                if let Ok(writer) = super::as_json_record::column_writer_with(model, table, registry, opts) {
+                    variants.insert((model.name.clone(), opts.method_name()));
+                    model.body.push(ModelBodyItem::Method {
+                        method: writer,
+                        leading_comments: Vec::new(),
+                        leading_blank_line: true,
+                    });
                 }
             }
             continue;
@@ -260,7 +261,7 @@ fn rewrite_render_json(e: &Expr, written: &HashSet<ClassId>, variants: &HashSet<
     };
     let record = value.ty.as_ref().and_then(rendered_class).filter(|(id, _)| written.contains(*id));
     let text = matches!(value.ty.as_ref(), Some(Ty::Str));
-    if record.is_none() && !text && !super::as_json_value::needs_text(value, written) {
+    if variant.is_none() && record.is_none() && !text && !super::as_json_value::needs_text(value, written) {
         return None;
     }
     let sym = |name: &str| {
