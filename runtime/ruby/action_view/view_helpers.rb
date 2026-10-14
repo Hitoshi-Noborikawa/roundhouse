@@ -219,14 +219,21 @@ module ActionView
     # Concat, not `<<`, as in render_attrs: `out << s` lowers as `.add` /
     # write-into-`&str` on Kotlin/C#/Rust/Python/Elixir.
     def self.erb_url_encode(s)
+      # Not `b.chr` / `format("%%%02X", b)`, nor a constant table, `bytes.each` or `str[i]`: no strict target answers the first two, Rust reads a constant through a lock, a block's byte as `&mut` and indexes no `str` by an Integer.
+      hex = "0123456789ABCDEF"
+      printable = " !\"\#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghijklmnopqrstuvwxyz{|}~"
+      bytes = s.bytes
       out = ""
-      s.bytes.each do |b|
+      i = 0
+      while i < bytes.length
+        b = bytes[i]
         if (b >= 48 && b <= 57) || (b >= 65 && b <= 90) || (b >= 97 && b <= 122) ||
            b == 45 || b == 46 || b == 95 || b == 126
-          out = out + b.chr
+          out = out + printable[b - 32, 1].to_s
         else
-          out = out + format("%%%02X", b)
+          out = out + "%" + hex[b / 16, 1].to_s + hex[b % 16, 1].to_s
         end
+        i += 1
       end
       out
     end
