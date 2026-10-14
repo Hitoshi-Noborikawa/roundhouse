@@ -472,6 +472,28 @@ module Rails
       "header_or_legacy_token"
     end
 
+    # Action Cable's three origin settings, as the `/cable` handshake
+    # check reads them (runtime/spinel/request_forgery_protection.rb):
+    # Rails' defaults. Ingest lifts an app's `config.action_cable.*`
+    # assignments, per environment, into overrides on the app's reopen
+    # (`ingest::action_cable_config`), the same shape as
+    # `forgery_protection_verification_strategy`.
+    #
+    # `allowed_request_origins` is unset outside development; in
+    # development Action Cable's engine sets it to
+    # `/https?:\/\/localhost:\d+/`, matched with `===`, so unanchored.
+    def action_cable_origin_listed?(origin)
+      Rails.env.development? && /https?:\/\/localhost:\d+/ === origin
+    end
+
+    def action_cable_allow_same_origin_as_host
+      true
+    end
+
+    def action_cable_disable_request_forgery_protection
+      false
+    end
+
     # Whether forms carry no authenticity token field at all: an app
     # helper overriding ActionView's `token_tag` to answer "" (the shape
     # header-only forgery protection uses) makes it true; ingest

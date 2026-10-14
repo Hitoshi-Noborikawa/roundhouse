@@ -329,14 +329,20 @@ What differs from Rails, and why:
   handler.** Those strategies are recognized as forgery filters but are
   not modeled as empty-session / wipe pass-throughs. `prepend:` and a
   custom `store:` remain unmodeled.
-- **Action Cable's Origin check uses Rails' defaults only.** On the
-  ruby family, a `/cable` handshake must carry an `Origin` naming the
-  request's own host (compared by host, as above), or in development
-  any `localhost` port. Otherwise the answer is Rails' 404 and the app's
-  `connect` never runs; a handshake with no `Origin` is refused, as in
-  Rails. An app's own `config.action_cable.allowed_request_origins` and
-  `disable_request_forgery_protection` are not read. The strict
-  targets' sockets check no Origin.
+- **Action Cable's Origin check follows the app's `config.action_cable`.**
+  On the ruby family, a `/cable` handshake passes Rails'
+  `allow_request_origin?`: everything when
+  `disable_request_forgery_protection` is set; else an `Origin` naming
+  the request's own scheme and `Host` (unless `allow_same_origin_as_host`
+  is false), or one `===` an entry of `allowed_request_origins` (in
+  development, any `localhost` port unless the app lists its own).
+  Otherwise the answer is Rails' 404 and the app's `connect` never runs;
+  a handshake with no `Origin` is refused, as in Rails. The settings are
+  read per environment from `config/application.rb`,
+  `config/environments/*.rb` and initializers; a list that is not a
+  literal or an Array literal (it might be an Array at run time) is
+  refused at build time. Listed values are evaluated per handshake, not
+  once at boot. The strict targets' sockets check no Origin.
 
 The strict targets issue no token (`form_authenticity_token` is empty
 there) and check none: an app emitted for them is not protected

@@ -24,6 +24,7 @@ mod class_configuration;
 mod dry_initializer;
 mod dry_struct;
 mod dry_types;
+mod action_cable_config;
 pub mod allow_browser;
 pub mod app;
 mod concern_accessors;
