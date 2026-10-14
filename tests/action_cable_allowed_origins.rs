@@ -17,6 +17,10 @@ use std::process::Command;
 
 #[test]
 fn rails_answers_the_contract_table() {
+    if !Command::new("ruby").args(["-raction_cable", "-e", "1"]).status().is_ok_and(|s| s.success()) {
+        eprintln!("skipping: ruby with the actioncable gem not available");
+        return;
+    }
     let origins: Vec<String> = cable_allowed_origins::ORIGINS
         .iter()
         .map(|o| if o.is_empty() { "nil".to_string() } else { format!("{o:?}") })

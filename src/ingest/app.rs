@@ -963,10 +963,15 @@ pub fn ingest_app_with_vfs<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResult
         // `action_cable_config`). Only keys the app assigns are
         // synthesized; the runtime defaults in runtime/ruby/rails.rb
         // are Rails' own.
+        // The app's own expressions are spliced in, so a parse failure
+        // is the app's settings lost: refused rather than answered with
+        // the permissive defaults.
         if let Some(cable) = super::action_cable_config::synthesize(vfs, dir)? {
-            if let Ok(mut synth) = crate::runtime_src::parse_methods(&cable) {
-                methods.append(&mut synth);
-            }
+            let mut synth = crate::runtime_src::parse_methods(&cable).map_err(|message| IngestError::Unsupported {
+                file: "config/ (config.action_cable settings)".to_string(),
+                message: format!("the app's Action Cable origin settings do not parse once synthesized: {message}"),
+            })?;
+            methods.append(&mut synth);
         }
         // A helper that overrides ActionView's `token_tag` to answer ""
         // (campfire's ApplicationHelper: "Header-only forgery protection
