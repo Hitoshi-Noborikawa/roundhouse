@@ -10,7 +10,14 @@ use std::path::PathBuf;
 use roundhouse::ingest::ingest_app_from_tree;
 
 fn constant_errors(body: &str) -> Vec<String> {
+    constant_errors_with(body, &[])
+}
+
+fn constant_errors_with(body: &str, extra: &[(&str, &str)]) -> Vec<String> {
     let mut tree: HashMap<PathBuf, Vec<u8>> = HashMap::new();
+    for (path, src) in extra {
+        tree.insert(PathBuf::from(path), src.as_bytes().to_vec());
+    }
     tree.insert(
         PathBuf::from("db/schema.rb"),
         b"ActiveRecord::Schema.define do\n  create_table \"articles\" do |t|\n    t.string \"title\"\n  end\n  create_table \"comments\" do |t|\n    t.integer \"article_id\"\n  end\nend\n".to_vec(),
@@ -64,6 +71,16 @@ fn a_dropped_block_or_branch_value_checks_clean() {
         "    Comment.all.to_a.tap { |rs| ActiveRecord::Associations::Preloader.new(records: rs, associations: :article).call }\n    if Comment.count > 0\n      ActiveRecord::Associations::Preloader.new(records: Comment.all.to_a, associations: :article).call\n    end\n    nil\n",
     );
     assert!(errors.is_empty(), "{errors:#?}");
+}
+
+/// An application `tap` may answer its block's value, so the call stays a value.
+#[test]
+fn an_app_defined_tap_keeps_the_refusal() {
+    let errors = constant_errors_with(
+        "    Basket.new.tap { ActiveRecord::Associations::Preloader.new(records: Comment.all.to_a, associations: :article).call }\n    nil\n",
+        &[("app/models/basket.rb", "class Basket\n  def tap\n    yield\n  end\nend\n")],
+    );
+    assert_eq!(errors.len(), 1, "{errors:#?}");
 }
 
 /// Any option beside `records:` and `associations:` (`scope:`) keeps the refusal.

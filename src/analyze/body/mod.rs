@@ -366,6 +366,26 @@ impl<'a> BodyTyper<'a> {
         self.classes
     }
 
+    fn answers_receiver(&self, ty: &Ty, method: &Symbol) -> bool {
+        match ty {
+            Ty::Union { variants } => variants.iter().all(|v| self.answers_receiver(v, method)),
+            Ty::Class { id, .. } => {
+                let mut current = Some(id);
+                for _ in 0..32 {
+                    let Some(cid) = current else { return true };
+                    let Some(cls) = self.classes.get(cid) else { return false };
+                    if cls.open || cls.instance_methods.contains_key(method) {
+                        return false;
+                    }
+                    current = cls.parent.as_ref();
+                }
+                false
+            }
+            Ty::Relation { .. } | Ty::Array { .. } | Ty::Hash { .. } | Ty::Tuple { .. } | Ty::Str | Ty::Int => true,
+            _ => false,
+        }
+    }
+
     fn has_unknown_ancestor(&self, id: &crate::ident::ClassId) -> bool {
         let mut current = Some(id);
         for step in 0..32 {
@@ -1358,13 +1378,6 @@ impl<'a> BodyTyper<'a> {
             ExprNode::Defined { .. } => union_of(Ty::Str, Ty::Nil),
 
             ExprNode::Send { recv, method, args, block, parenthesized } => {
-                // `tap` and `each` answer their receiver, so the block's own value is dropped.
-                if matches!(method.as_str(), "tap" | "each")
-                    && let Some(b) = block.as_mut()
-                    && let ExprNode::Lambda { body, .. } = &mut *b.node
-                {
-                    mark_discarded(body);
-                }
                 if matches!(&expr.diagnostic, Some(crate::diagnostic::DiagnosticKind::Unsupported { construct, .. })
                     if matches!(construct.as_str(), "Module protocol" | "ActiveModel::Errors" | "ActiveModel::Error" | "Rails" | "ActiveRecord::Base" | "String extension" | "Hash extension" | "not_nil!" | "Object extension" | "Module callback argument"))
                 { expr.diagnostic = None; }
@@ -1467,6 +1480,14 @@ impl<'a> BodyTyper<'a> {
                     Some(r) => Some(self.analyze_expr(r, ctx)),
                     None => ctx.self_ty.clone(),
                 };
+                // Not by name alone: an application `tap`/`each` may answer its block's value.
+                if matches!(method.as_str(), "tap" | "each")
+                    && let Some(b) = block.as_mut()
+                    && let ExprNode::Lambda { body, .. } = &mut *b.node
+                {
+                    // Not left set once marked: an early round sees the receiver's class before its methods are known.
+                    set_discarded(body, recv_ty.as_ref().is_some_and(|t| self.answers_receiver(t, method)));
+                }
                 if method.as_str() == "new"
                     && block.is_none()
                     && crate::analyze::indifferent::constructor_args(args)
@@ -5397,15 +5418,23 @@ fn is_string_array(ty: Option<&Ty>) -> bool {
 /// branches and a sequence's last statement, the one that would have
 /// answered it.
 fn mark_discarded(e: &mut Expr) {
-    e.decisions |= crate::expr::DISCARDED_VALUE;
+    set_discarded(e, true);
+}
+
+fn set_discarded(e: &mut Expr, discarded: bool) {
+    if discarded {
+        e.decisions |= crate::expr::DISCARDED_VALUE;
+    } else {
+        e.decisions &= !crate::expr::DISCARDED_VALUE;
+    }
     match &mut *e.node {
         ExprNode::If { then_branch, else_branch, .. } => {
-            mark_discarded(then_branch);
-            mark_discarded(else_branch);
+            set_discarded(then_branch, discarded);
+            set_discarded(else_branch, discarded);
         }
         ExprNode::Seq { exprs } => {
             if let Some(last) = exprs.last_mut() {
-                mark_discarded(last);
+                set_discarded(last, discarded);
             }
         }
         _ => {}
