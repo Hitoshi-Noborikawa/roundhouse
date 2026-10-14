@@ -532,6 +532,23 @@ module ActiveRecord
     def self.preload_associations(_records, _specs)
     end
 
+    # `Associations::Preloader.new(records:, associations:).call` over
+    # records of several models or of a type analysis does not know:
+    # each class's own `preload_associations` over its records, the
+    # grouping Rails' preloader does by reflection.
+    def self.preload_records(records, specs)
+      records.each_with_index do |record, i|
+        # Not a Hash keyed by class: analysis types `record.class` as a bare Class, which answers no class method.
+        next if records.take(i).any? { |earlier| earlier.class == record.class }
+        record._preload_as_group(records.select { |other| other.class == record.class }, specs)
+      end
+      nil
+    end
+
+    def _preload_as_group(group, specs)
+      self.class.preload_associations(group, specs)
+    end
+
     # Per-model adapter primitives — public AR API delegates here.
     # Default implementations route through the legacy
     # `ActiveRecord.adapter.X` + `instantiate` path so subclasses that

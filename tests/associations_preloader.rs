@@ -1,7 +1,8 @@
 //! `ActiveRecord::Associations::Preloader.new(records:, associations:).call`
 //! checks clean when its value is discarded and its records are one
-//! model's (it lowers to that model's `preload_associations`), and keeps
-//! its refusal otherwise, since no target ships the class.
+//! model's (it lowers to that model's `preload_associations`) or several
+//! models' (`Base.preload_records`), and keeps its refusal for any other
+//! option, since no target ships the class.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -47,10 +48,20 @@ fn a_used_value_keeps_the_refusal() {
     assert_eq!(errors.len(), 2, "{errors:#?}");
 }
 
+/// Several models' records, or records of a type analysis does not know, are grouped by class at run time (`Base.preload_records`), as Rails' preloader groups them.
 #[test]
-fn mixed_records_keep_the_refusal() {
+fn mixed_or_unknown_records_check_clean() {
     let errors = constant_errors(
         "    ActiveRecord::Associations::Preloader.new(records: [Comment.first, Article.first], associations: :article).call\n    nil\n",
+    );
+    assert!(errors.is_empty(), "{errors:#?}");
+}
+
+/// Any option beside `records:` and `associations:` (`scope:`) keeps the refusal.
+#[test]
+fn a_scope_option_keeps_the_refusal() {
+    let errors = constant_errors(
+        "    ActiveRecord::Associations::Preloader.new(records: Comment.all.to_a, associations: :article, scope: Article.where(id: 1)).call\n    nil\n",
     );
     assert_eq!(errors.len(), 1, "{errors:#?}");
 }
