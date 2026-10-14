@@ -94,6 +94,10 @@ mod io_process_constants;
 mod json_params_contract;
 #[path = "emit_and_run/json_params.rs"]
 mod json_params;
+#[path = "support/class_side_default.rs"]
+mod class_side_default_contract;
+#[path = "emit_and_run/class_side_default.rs"]
+mod class_side_default;
 #[path = "emit_and_run/helper_anonymous_rest.rs"]
 mod helper_anonymous_rest;
 #[path = "emit_and_run/controller_response_body.rs"]
