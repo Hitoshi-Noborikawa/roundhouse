@@ -2806,6 +2806,13 @@ fn splice_concerns_into_controllers(app: &mut App) {
     let mut posts_spliced: std::collections::HashSet<(crate::ident::ClassId, crate::ident::Symbol)> =
         std::collections::HashSet::new();
 
+    // Per controller, the action names a route reaches on it or on a
+    // controller that inherits from it. A module method that is PUBLIC
+    // and routed here is an action of the includer, as in Rails (a
+    // concern's public method is an action like any other); the rest
+    // stay behind the private marker, as helpers.
+    let routed_here = routed_actions_with_descendants(app);
+
     for controller in &mut app.controllers {
         let include_groups = crate::analyze::controller_include_groups(controller);
         let includes: Vec<crate::ident::ClassId> = include_groups.iter().flatten().cloned().collect();
@@ -2851,6 +2858,8 @@ fn splice_concerns_into_controllers(app: &mut App) {
 
         let mut filters: Vec<ControllerBodyItem> = Vec::new();
         let mut methods: Vec<ControllerBodyItem> = Vec::new();
+        let mut actions: Vec<ControllerBodyItem> = Vec::new();
+        let routed = routed_here.get(&controller.name);
         for module in &filter_order {
             for filter in app.concern_filters.get(module).into_iter().flatten() {
                 if let Some(call) = &filter.block {
@@ -2966,7 +2975,10 @@ fn splice_concerns_into_controllers(app: &mut App) {
                     .entry(controller.name.clone())
                     .or_default()
                     .insert(method.name.clone(), module.clone());
-                methods.push(ControllerBodyItem::Action {
+                let is_action = matches!(method.visibility, crate::dialect::MethodVisibility::Public)
+                    && routed.is_some_and(|names| names.contains(&method.name));
+                let into = if is_action { &mut actions } else { &mut methods };
+                into.push(ControllerBodyItem::Action {
                     action: Action {
                         name_span: method.name_span,
                         name: method.name.clone(),
@@ -2986,17 +2998,21 @@ fn splice_concerns_into_controllers(app: &mut App) {
                 });
             }
         }
-        if filters.is_empty() && methods.is_empty() {
+        if filters.is_empty() && methods.is_empty() && actions.is_empty() {
             continue;
         }
         // Filters first (Rails runs an included filter ahead of the
-        // includer's own), then the methods behind a private marker —
-        // they're helpers, never routable actions.
-        let has_private_marker = controller
+        // includer's own), then the routed public methods among the
+        // includer's own public actions, then the rest behind a private
+        // marker — they're helpers.
+        let first_private = controller
             .body
             .iter()
-            .any(|i| matches!(i, ControllerBodyItem::PrivateMarker { .. }));
+            .position(|i| matches!(i, ControllerBodyItem::PrivateMarker { .. }));
+        let has_private_marker = first_private.is_some();
         let mut body = std::mem::take(&mut controller.body);
+        let at = first_private.unwrap_or(body.len());
+        body.splice(at..at, actions);
         filters.extend(body.drain(..));
         if !methods.is_empty() && !has_private_marker {
             filters.push(ControllerBodyItem::PrivateMarker {
@@ -3035,6 +3051,34 @@ fn splice_concerns_into_controllers(app: &mut App) {
         }
     }
     app.concern_spliced_actions = spliced_origin;
+}
+
+/// Controller -> the actions routes name on it or on any controller
+/// below it in the inheritance chain (a subclass dispatches an action
+/// its ancestor defines).
+fn routed_actions_with_descendants(
+    app: &App,
+) -> HashMap<crate::ident::ClassId, std::collections::HashSet<crate::ident::Symbol>> {
+    let parents: HashMap<&crate::ident::ClassId, &crate::ident::ClassId> = app
+        .controllers
+        .iter()
+        .filter_map(|c| c.parent.as_ref().map(|p| (&c.name, p)))
+        .collect();
+    let mut out: HashMap<crate::ident::ClassId, std::collections::HashSet<crate::ident::Symbol>> =
+        HashMap::new();
+    for route in crate::lower::routes::flatten_routes(app) {
+        let mut cur = Some(&route.controller);
+        let mut depth = 0;
+        while let Some(c) = cur {
+            out.entry(c.clone()).or_default().insert(route.action.clone());
+            depth += 1;
+            if depth > 16 {
+                break;
+            }
+            cur = parents.get(c).copied();
+        }
+    }
+    out
 }
 
 /// The order a controller's concern filters REGISTER in — the order
