@@ -625,6 +625,88 @@ end
     );
 }
 
+/// `devise_for :widgets, path: "auth", format: false` — no enclosing
+/// scope, so this isolates `Devise::Mapping`'s `options[:path] || name`
+/// path segment and `format: false` from the separate scope-module
+/// controller bug (covered on its own below). Devise 5
+/// (`devise/mapping.rb:61`, `devise/rails/routes.rb`). Fails to ingest
+/// on main (`unsupported devise_for option \`path\``).
+#[test]
+fn devise_for_path_option_builds_the_route_table_under_the_given_segment() {
+    let source = br#"Rails.application.routes.draw do
+  devise_for :widgets, path: "auth", format: false
+end
+"#;
+    roundhouse::ingest::survey::activate();
+    let (result, _) = roundhouse::ingest::prism::scope(|| {
+        roundhouse::ingest::ingest_routes(source, "config/routes.rb")
+    });
+    let gaps = roundhouse::ingest::survey::drain();
+    let table = result.expect("ingest");
+    assert!(
+        gaps.iter().all(|g| !format!("{g:?}").contains("devise_for")),
+        "devise_for path:/format: must not survey: {gaps:?}"
+    );
+    let mut app = roundhouse::App::default();
+    app.routes = table;
+    let flat = roundhouse::lower::flatten_routes(&app);
+    let by_name: std::collections::HashMap<_, _> =
+        flat.iter().map(|r| (r.as_name.as_str(), r)).collect();
+    let new_session = by_name.get("new_widget_session").expect("new_widget_session");
+    assert_eq!(new_session.path, "/auth/sign_in");
+    // No enclosing scope module: the controller stays the stock
+    // `Devise::*` default, unaffected by `path:`.
+    assert_eq!(new_session.controller.0.as_str(), "Devise::SessionsController");
+    let new_registration =
+        by_name.get("new_widget_registration").expect("new_widget_registration");
+    assert_eq!(new_registration.path, "/auth/sign_up");
+    let new_password = by_name.get("new_widget_password").expect("new_widget_password");
+    assert_eq!(new_password.path, "/auth/password/new");
+    let new_confirmation =
+        by_name.get("new_widget_confirmation").expect("new_widget_confirmation");
+    assert_eq!(new_confirmation.path, "/auth/confirmation/new");
+}
+
+/// `devise_for format: true` would need the `(.:format)` optional
+/// suffix this table never models; it fails loud instead of silently
+/// matching `format: false`'s (already-modeled) behavior.
+#[test]
+fn devise_for_rejects_format_true() {
+    let source = br#"Rails.application.routes.draw do
+  devise_for :widgets, format: true
+end
+"#;
+    let (result, _) = roundhouse::ingest::prism::scope(|| {
+        roundhouse::ingest::ingest_routes(source, "config/routes.rb")
+    });
+    let err = result.expect_err("format: true is not modeled");
+    assert!(format!("{err:?}").contains("format: true"));
+}
+
+/// `path_names:` overrides the stock segment names
+/// (`Devise::Mapping#default_path_names`), merged over the defaults.
+#[test]
+fn devise_for_path_names_override() {
+    let source = br#"Rails.application.routes.draw do
+  devise_for :widgets, path_names: { sign_in: "login", sign_out: "logout" }
+end
+"#;
+    let (result, _) = roundhouse::ingest::prism::scope(|| {
+        roundhouse::ingest::ingest_routes(source, "config/routes.rb")
+    });
+    let table = result.expect("ingest");
+    let mut app = roundhouse::App::default();
+    app.routes = table;
+    let flat = roundhouse::lower::flatten_routes(&app);
+    let by_name: std::collections::HashMap<_, _> =
+        flat.iter().map(|r| (r.as_name.as_str(), r)).collect();
+    let new_session = by_name.get("new_widget_session").expect("new_widget_session");
+    assert_eq!(new_session.path, "/widgets/login");
+    let destroy_session =
+        by_name.get("destroy_widget_session").expect("destroy_widget_session");
+    assert_eq!(destroy_session.path, "/widgets/logout");
+}
+
 /// A route omission is an error on the recovered table, not a fatal parse.
 #[test]
 fn routes_mount_diagnostic_preserves_siblings_in_every_mode() {
