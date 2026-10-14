@@ -1548,21 +1548,66 @@ fn each_link_of_a_safe_navigation_chain_reads_its_own_receiver_on_spinel() {
     safe_navigation_chain_app().run_spinel(SAFE_NAVIGATION_CHAIN).assert_passes();
 }
 
-/// `ErrorDetail#kind` is a String, so it cannot answer Rails' Symbol `type`.
+/// `error.type` is a Symbol, or the message when `errors.add` was given a
+/// String, and `of_kind?` asks it, as Rails 8.1 does.
+fn error_types_app() -> emit_and_run::Overlay {
+    errors_each_app().edit(
+        "app/models/article.rb",
+        "  def error_rows\n",
+        "  def error_types
+    errors.map { |error| error.type }
+  end
+
+  def first_type
+    errors.first ? errors.first.type : :none
+  end
+
+  def kinds
+    [errors.of_kind?(:title, :blank), errors.of_kind?(:body, :blank), errors.of_kind?(\"body\", :too_short),
+     errors.of_kind?(:base, \"is odd\"), errors.of_kind?(:base, :invalid), errors.of_kind?(:title)]
+  end
+
+  def error_rows\n",
+    )
+}
+
+const ERROR_TYPES: &str = r#"a = Article.new(title: "", body: "odd")
+a.valid?
+raise a.error_types.inspect unless a.error_types == [:blank, :too_short, "is odd"]
+raise a.first_type.inspect unless a.first_type == :blank
+raise a.kinds.inspect unless a.kinds == [true, false, true, true, false, false]
+b = Article.new(title: "A title", body: "A long enough body")
+b.valid?
+raise b.kinds.inspect unless b.kinds == [false, false, false, false, false, false] && b.first_type == :none
+puts "error types passed"
+"#;
+
 #[test]
-fn an_error_s_type_stays_an_error() {
+fn an_error_s_type_is_rails_type() {
+    error_types_app().run_ruby(ERROR_TYPES).assert_passes();
+}
+
+#[test]
+#[ignore = "requires the Spinel toolchain"]
+fn an_error_s_type_is_rails_type_on_spinel() {
+    error_types_app().run_spinel(ERROR_TYPES).assert_passes();
+}
+
+/// `type` reads the error more than once, so a found error is an error.
+#[test]
+fn the_type_of_an_error_that_is_not_a_plain_read_is_an_error() {
     let (_emitted, errors) = errors_each_app()
         .edit(
             "app/models/article.rb",
             "  def error_rows\n",
-            "  def error_types
-    errors.map { |error| error.type }
+            "  def base_type
+    errors.find { |error| error.attribute == :base }.type
   end
 
   def error_rows\n",
         )
         .emit(roundhouse::project::BuildTarget::Ruby);
-    assert!(errors.iter().any(|e| e.contains("ActiveModel::Error not supported (all targets): type lacks")), "{errors:#?}");
+    assert!(errors.iter().any(|e| e.contains("`error.type` reads the error three times")), "{errors:#?}");
 }
 
 /// The helper is the shared Ruby runtime's, which no strict target loads.

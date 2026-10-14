@@ -99,12 +99,13 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
         errors_cls,
     );
 
-    // Individual Error with its Rails API. Not `type`: `ErrorDetail#kind` is a String, where Rails answers a Symbol unless `errors.add` was given a String.
+    // Individual Error with its Rails API.
     let mut error_cls = ClassInfo::default();
     for (m, ty) in [
         ("full_message", Ty::Str),
         ("message", Ty::Str),
         ("attribute", Ty::Sym),
+        ("type", Ty::Union { variants: vec![Ty::Sym, Ty::Str].into() }),
     ] {
         error_cls.instance_methods.insert(Symbol::from(m), ty);
     }

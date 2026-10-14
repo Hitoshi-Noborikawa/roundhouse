@@ -1,5 +1,5 @@
 //! `errors.add` grounding: `errors.add(:field, "msg")` →
-//! `errors << "Field msg"` and `error_details << ActiveRecord::ErrorDetail.new("field", "msg", "msg", "Field msg")`,
+//! `errors << "Field msg"` and `error_details << ActiveRecord::ErrorDetail.new("field", "msg", "msg", "Field msg", false)`,
 //! so the accumulator keeps what Rails keeps for each message; `errors.clear`
 //! empties both.
 //!
@@ -274,6 +274,7 @@ fn rewrite_errors_add(expr: &mut Expr, labels: &Labels, diags: &mut Vec<Diagnost
         _ => None,
     };
     let ExprNode::Send { recv: reader_owner, .. } = &*reader.node else { unreachable!() };
+    let symbolic = kind.is_some();
     let (message, kind, bare) = match kind {
         Some(kind) => (
             parts_expr(span, i18n.full_error(field.as_str(), &kind, &Default::default()), reader_owner.as_ref(), field.as_str()),
@@ -313,16 +314,17 @@ fn rewrite_errors_add(expr: &mut Expr, labels: &Labels, diags: &mut Vec<Diagnost
         ExprNode::Send { recv, method: Symbol::from("<<"), args: vec![message], block: None, parenthesized: false },
     );
     push_message.ty = recv_ty.clone();
-    *expr = attributed_push(push_message, owner, field.as_str(), kind, bare, span);
+    *expr = attributed_push(push_message, owner, field.as_str(), kind, symbolic, bare, span);
 }
 
-/// `<errors> << msg` followed by `<owner>.error_details << ActiveRecord::ErrorDetail.new("field", type, message, msg)`,
+/// `<errors> << msg` followed by `<owner>.error_details << ActiveRecord::ErrorDetail.new("field", type, message, msg, symbolic)`,
 /// so the accumulator keeps what Rails keeps for each message.
 pub(crate) fn attributed_push(
     push_message: Expr,
     owner: Option<Expr>,
     field: &str,
     kind: Expr,
+    symbolic: bool,
     message: Expr,
     span: crate::span::Span,
 ) -> Expr {
@@ -336,7 +338,7 @@ pub(crate) fn attributed_push(
         ExprNode::Send {
             recv: Some(class),
             method: Symbol::from("new"),
-            args: vec![str_lit(span, field), typed_str(kind), typed_str(message), full_message],
+            args: vec![str_lit(span, field), typed_str(kind), typed_str(message), full_message, bool_lit(span, symbolic)],
             block: None,
             parenthesized: true,
         },
@@ -372,6 +374,12 @@ pub(crate) fn error_details(owner: Option<Expr>, span: crate::span::Span) -> Exp
         ExprNode::Send { recv: owner, method: Symbol::from("error_details"), args: Vec::new(), block: None, parenthesized: false },
     );
     e.ty = Some(error_details_ty());
+    e
+}
+
+fn bool_lit(span: crate::span::Span, value: bool) -> Expr {
+    let mut e = Expr::new(span, ExprNode::Lit { value: Literal::Bool { value } });
+    e.ty = Some(crate::ty::Ty::Bool);
     e
 }
 

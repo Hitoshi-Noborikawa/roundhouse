@@ -1231,7 +1231,7 @@ fn errors_push(attribute: &str, msg: Message) -> Expr {
         },
     );
     let kind = Expr::new(Span::synthetic(), ExprNode::Lit { value: Literal::Str { value: msg.kind } });
-    crate::lower::errors_add::attributed_push(send(errors_call, "<<", vec![msg.full]), None, attribute, kind, msg.bare, Span::synthetic())
+    crate::lower::errors_add::attributed_push(send(errors_call, "<<", vec![msg.full]), None, attribute, kind, true, msg.bare, Span::synthetic())
 }
 
 fn if_with_nil_else(cond: Expr, then_branch: Expr) -> Expr {

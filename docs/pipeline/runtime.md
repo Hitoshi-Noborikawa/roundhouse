@@ -1898,7 +1898,8 @@ name. Here `errors` stays a plain `Array[String]` of FULL messages
 `error_details`, holds an `ActiveRecord::ErrorDetail` for each:
 attribute `"url"`, kind `"not_public"` (the message itself when
 `errors.add` was given a String, as Rails' type is), message
-`"is not public"`, full message `"Url is not public"`. `errors.add` and every `validates` rule push to both
+`"is not public"`, full message `"Url is not public"`, and whether the
+type is a Symbol (`errors.add` given a String message records `false`). `errors.add` and every `validates` rule push to both
 (`src/lower/errors_add.rs`, `model_to_library/validations.rs`), and
 `errors.clear` empties both. `src/lower/errors_index.rs` grounds
 `errors[:url]` as `error_messages_for("url")`, a `Base` method that
@@ -1930,9 +1931,12 @@ Iterating `errors` (`each`, `map`, `collect`, `select`, `filter`,
 `count` with a block) iterates `error_details` instead, because Rails
 yields each `ActiveModel::Error`, not its full message. On what they
 yield, `attribute` reads `attribute.to_sym`, Rails' Symbol, and
-`message` and `full_message` read the detail's. `type` stays an error:
-`kind` is a String, where Rails answers a Symbol unless `errors.add`
-was given a String. Without a block, `any?`, `none?` and `count` keep
+`message` and `full_message` read the detail's. `type` reads
+`kind.to_sym` when the type is a Symbol and `kind` when it is not, so
+only on an error read more than once without effect: a block parameter,
+a local or `errors.first`. `errors.of_kind?(:field, :type)` asks for an
+error on that field with that Symbol type, and with a String type asks
+the field's messages, as Rails does. Without a block, `any?`, `none?` and `count` keep
 asking the full messages, which answer the same.
 
 Every one of these rewrites matches an `errors` send as its receiver,

@@ -147,11 +147,11 @@ fn article_renders_validate_with_inline_checks() {
     // constants; the type-erased `value: untyped` channel is gone.
     // Each message is pushed with the error Rails records for it.
     assert!(
-        src.contains("self.errors << \"Title can't be blank\"\n      self.error_details << ActiveRecord::ErrorDetail.new(\"title\", \"blank\", \"can't be blank\", \"Title can't be blank\")"),
+        src.contains("self.errors << \"Title can't be blank\"\n      self.error_details << ActiveRecord::ErrorDetail.new(\"title\", \"blank\", \"can't be blank\", \"Title can't be blank\", true)"),
         "{src}",
     );
     assert!(
-        src.contains("self.errors << \"Body can't be blank\"\n      self.error_details << ActiveRecord::ErrorDetail.new(\"body\", \"blank\", \"can't be blank\", \"Body can't be blank\")"),
+        src.contains("self.errors << \"Body can't be blank\"\n      self.error_details << ActiveRecord::ErrorDetail.new(\"body\", \"blank\", \"can't be blank\", \"Body can't be blank\", true)"),
         "{src}",
     );
     // Length is inline. A nil body fails the minimum (Rails does not

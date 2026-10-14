@@ -56,7 +56,7 @@ pub fn apply_errors_index_lowering(app: &mut App) -> Vec<Diagnostic> {
 fn rewrite_body(body: &mut Expr, diags: &mut Vec<Diagnostic>) {
     rewrite(body, diags);
     rewrite_whole_messages(body);
-    symbolize_error_attributes(body);
+    read_errors(body, diags);
     iterate_details(body);
 }
 
@@ -68,16 +68,58 @@ fn is_error(e: &Expr) -> bool {
     matches!(e.ty.as_ref().map(Ty::peel_nilable), Some(Ty::Class { id, .. }) if id.0.as_str() == "ActiveModel::Error")
 }
 
-// Not `ErrorDetail#attribute` as it is: it is the attribute's String, where Rails' `Error#attribute` is a Symbol.
-fn symbolize_error_attributes(expr: &mut Expr) {
-    expr.node.for_each_child_mut(&mut |c| symbolize_error_attributes(c));
+/// `ActiveModel::Error#attribute` and `#type` over the `ErrorDetail` an iteration yields.
+fn read_errors(expr: &mut Expr, diags: &mut Vec<Diagnostic>) {
+    expr.node.for_each_child_mut(&mut |c| read_errors(c, diags));
     let ExprNode::Send { recv: Some(r), method, args, block: None, .. } = &mut *expr.node else { return };
-    if method.as_str() != "attribute" || !args.is_empty() || !is_error(r) {
+    if !args.is_empty() || !is_error(r) {
         return;
     }
-    expr.ty = Some(Ty::Str);
-    let read = std::mem::replace(expr, Expr::new(expr.span, ExprNode::Seq { exprs: vec![] }));
-    *expr = send(read.span, read, "to_sym", vec![], Ty::Sym);
+    let span = expr.span;
+    match method.as_str() {
+        // Not `ErrorDetail#attribute` as it is: it is the attribute's String, where Rails' `Error#attribute` is a Symbol.
+        "attribute" => {
+            expr.ty = Some(Ty::Str);
+            let read = std::mem::replace(expr, Expr::new(span, ExprNode::Seq { exprs: vec![] }));
+            *expr = send(span, read, "to_sym", vec![], Ty::Sym);
+        }
+        // Rails' type is a Symbol, or the message when `errors.add` was given a String.
+        "type" => {
+            if !reads_again(r) {
+                let mut d = crate::lower::residue_diagnostic(
+                    "errors_index",
+                    "error.type",
+                    span,
+                    "the error is not a plain read",
+                    "`error.type` reads the error three times, so only on a block parameter, a local or `errors.first`".to_string(),
+                );
+                d.severity = crate::diagnostic::Severity::Error;
+                diags.push(d);
+                return;
+            }
+            let error = r.clone();
+            let kind = || send(span, error.clone(), "kind", vec![], Ty::Str);
+            let mut read = Expr::new(
+                span,
+                ExprNode::If {
+                    cond: send(span, error.clone(), "symbolic", vec![], Ty::Bool),
+                    then_branch: send(span, kind(), "to_sym", vec![], Ty::Sym),
+                    else_branch: kind(),
+                },
+            );
+            read.ty = Some(Ty::Union { variants: vec![Ty::Sym, Ty::Str].into() });
+            *expr = read;
+        }
+        _ => {}
+    }
+}
+
+fn reads_again(e: &Expr) -> bool {
+    match &*e.node {
+        ExprNode::Var { .. } | ExprNode::Ivar { .. } => true,
+        ExprNode::Send { recv: Some(r), method, args, block: None, .. } => method.as_str() == "first" && args.is_empty() && is_errors_read(r),
+        _ => false,
+    }
 }
 
 /// `<owner>.errors.<iterator>` → `<owner>.error_details.<iterator>`, and
@@ -189,6 +231,7 @@ fn rewrite(expr: &mut Expr, diags: &mut Vec<Diagnostic>) {
     rewrite_messages(expr, diags);
     rewrite_index(expr, diags);
     rewrite_include(expr, diags);
+    rewrite_of_kind(expr, diags);
     rewrite_to_hash(expr);
     rewrite_render_json(expr);
 }
@@ -221,6 +264,100 @@ fn rewrite_include(expr: &mut Expr, diags: &mut Vec<Diagnostic>) {
     };
     let ExprNode::Send { recv: owner, .. } = &*reader.node else { unreachable!("an errors reader") };
     *expr = has_errors_on(owner.clone(), &field, expr.span);
+}
+
+/// The field, whether the type is a Symbol, and the type, when each is a literal.
+fn of_kind_args(args: &[Expr]) -> Option<(String, bool, String)> {
+    let field = match args.first().map(|a| &*a.node) {
+        Some(ExprNode::Lit { value: Literal::Sym { value } }) => value.as_str().to_string(),
+        Some(ExprNode::Lit { value: Literal::Str { value } }) => value.clone(),
+        _ => return None,
+    };
+    let (symbolic, kind) = match args.get(1).map(|a| &*a.node) {
+        None => (true, "invalid".to_string()),
+        Some(ExprNode::Lit { value: Literal::Sym { value } }) => (true, value.as_str().to_string()),
+        Some(ExprNode::Lit { value: Literal::Str { value } }) => (false, value.clone()),
+        _ => return None,
+    };
+    (args.len() <= 2).then_some((field, symbolic, kind))
+}
+
+/// Shared with analyze, which types `of_kind?` only when this holds.
+pub(crate) fn of_kind_grounds(args: &[Expr]) -> bool {
+    of_kind_args(args).is_some()
+}
+
+/// `errors.of_kind?(:field, :type)`: an error on the field with that Symbol type; a String type is one of the field's messages, as Rails asks it.
+fn rewrite_of_kind(expr: &mut Expr, diags: &mut Vec<Diagnostic>) {
+    let ExprNode::Send { recv: Some(reader), method, args, block: None, .. } = &*expr.node else { return };
+    if method.as_str() != "of_kind?" || !is_model_errors_read(reader) {
+        return;
+    }
+    let Some((field, symbolic, kind)) = of_kind_args(args) else {
+        let mut d = crate::lower::residue_diagnostic(
+            "errors_index",
+            "errors.of_kind?",
+            expr.span,
+            "not literal",
+            "`errors.of_kind?` with a field or type that is not a literal is not grounded".to_string(),
+        );
+        d.severity = crate::diagnostic::Severity::Error;
+        diags.push(d);
+        return;
+    };
+    let span = expr.span;
+    let ExprNode::Send { recv: owner, .. } = &*reader.node else { unreachable!("an errors reader") };
+    if !symbolic {
+        let messages = messages_on(owner.clone(), &field, span);
+        *expr = send(span, messages, "include?", vec![str_expr(span, &kind)], Ty::Bool);
+        let ExprNode::Send { parenthesized, .. } = &mut *expr.node else { unreachable!() };
+        *parenthesized = true;
+        return;
+    }
+    let detail_ty = Ty::Class { id: crate::ident::ClassId(Symbol::from("ActiveRecord::ErrorDetail")), args: vec![].into() };
+    let error = || {
+        let mut e = Expr::new(span, ExprNode::Var { id: crate::ident::VarId(0), name: Symbol::from("error") });
+        e.ty = Some(detail_ty.clone());
+        e
+    };
+    let and = |left: Expr, right: Expr| {
+        let mut e = Expr::new(span, ExprNode::BoolOp { op: crate::expr::BoolOpKind::And, surface: crate::expr::BoolOpSurface::Symbol, left, right });
+        e.ty = Some(Ty::Bool);
+        e
+    };
+    let equals = |reader: &str, value: &str| {
+        send(span, send(span, error(), reader, vec![], Ty::Str), "==", vec![str_expr(span, value)], Ty::Bool)
+    };
+    let body = and(and(equals("attribute", &field), send(span, error(), "symbolic", vec![], Ty::Bool)), equals("kind", &kind));
+    let block = Expr::new(
+        span,
+        ExprNode::Lambda {
+            extra_params: Vec::new(),
+            rest_param: None,
+            params: vec![Symbol::from("error")],
+            block_param: None,
+            body,
+            block_style: crate::expr::BlockStyle::Brace,
+        },
+    );
+    let mut any = Expr::new(
+        span,
+        ExprNode::Send {
+            recv: Some(super::errors_add::error_details(owner.clone(), span)),
+            method: Symbol::from("any?"),
+            args: vec![],
+            block: Some(block),
+            parenthesized: false,
+        },
+    );
+    any.ty = Some(Ty::Bool);
+    *expr = any;
+}
+
+fn str_expr(span: crate::span::Span, value: &str) -> Expr {
+    let mut e = Expr::new(span, ExprNode::Lit { value: Literal::Str { value: value.to_string() } });
+    e.ty = Some(Ty::Str);
+    e
 }
 
 /// What the per-field rewrites leave of `errors.messages` is the Hash itself.

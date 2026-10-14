@@ -371,13 +371,14 @@ fn untyped_subexpressions_baseline() {
     // Remount remeasure after #818 merge: 603 -> 608.
     // `ErrorDetail`'s full message: 608 -> 610, MEASURED — its
     // initialize ivar write, untyped here like the other three fields'.
+    // `ErrorDetail#symbolic`: 610 -> 612, MEASURED — the same write.
 
     // This uncalled API adds 27 nodes without its String parameter RBS.
     // Keep the existing-method ceiling and RBS-aware typing gates intact.
     const LIKE_CEILING: usize = 27;
     let existing_untyped = all_untyped.len() - like_untyped;
     eprintln!("inference-only ledger: existing={existing_untyped}, sanitize_sql_like={like_untyped}");
-    const CEILING: usize = 610;
+    const CEILING: usize = 612;
     assert!(
         existing_untyped <= CEILING && like_untyped <= LIKE_CEILING,
         "{} untyped sub-expressions on spinel-blog runtime — exceeds ledger: \

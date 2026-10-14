@@ -83,11 +83,13 @@ module ActiveRecord
     @kind: String
     @message: String
     @full_message: String
+    @symbolic: bool
     def attribute: () -> String
     def kind: () -> String
     def message: () -> String
     def full_message: () -> String
-    def initialize: (String attribute, String kind, String message, String full_message) -> void
+    def symbolic: () -> bool
+    def initialize: (String attribute, String kind, String message, String full_message, bool symbolic) -> void
   end
 
   class Base
