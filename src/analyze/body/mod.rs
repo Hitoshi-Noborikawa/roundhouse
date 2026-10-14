@@ -1941,7 +1941,14 @@ impl<'a> BodyTyper<'a> {
                 {
                     return Ty::Union { variants: vec![Ty::Array { elem: std::sync::Arc::new(Ty::Str) }, Ty::Nil].into() };
                 }
-                if method.as_str() == "of_kind?"
+                if method.as_str() == "[]"
+                    && matches!(dispatched, Ty::Var { .. } | Ty::Untyped)
+                    && matches!(recv_ty.as_ref().map(Ty::peel_nilable), Some(Ty::Class { id, .. }) if id.0.as_str() == crate::lower::errors_index::DETAILS_ENTRY)
+                    && crate::lower::errors_index::reads_detail_type(args)
+                {
+                    return Ty::Union { variants: vec![Ty::Sym, Ty::Str].into() };
+                }
+                if matches!(method.as_str(), "of_kind?" | "added?")
                     && matches!(dispatched, Ty::Var { .. } | Ty::Untyped)
                     && matches!(recv_ty.as_ref(), Some(Ty::Class { id, .. }) if id.0.as_str() == "ActiveModel::Errors")
                     && block.is_none()

@@ -1234,16 +1234,17 @@ fn emit_send(recv: Option<&Expr>, method: &str, args: &[Expr]) -> String {
     // hand-written `RhDateTime.parse` (runtime/elixir/v2/rh_datetime.ex),
     // not a transpiled `ActiveSupport` module (no such unit exists).
     // `ActiveRecord::ErrorDetail` (runtime/ruby/active_record/base.rb) is a map here: the Elixir model keeps no transpiled Base.
-    if method == "new" && args.len() == 5 {
+    if method == "new" && args.len() == 6 {
         if let Some(ExprNode::Const { path }) = recv.map(|r| &*r.node) {
             if path.iter().map(|s| s.as_str()).eq(["ActiveRecord", "ErrorDetail"]) {
                 return format!(
-                    "%{{attribute: {}, kind: {}, message: {}, full_message: {}, symbolic: {}}}",
+                    "%{{attribute: {}, kind: {}, message: {}, full_message: {}, symbolic: {}, optionless: {}}}",
                     emit_expr(&args[0]),
                     emit_expr(&args[1]),
                     emit_expr(&args[2]),
                     emit_expr(&args[3]),
                     emit_expr(&args[4]),
+                    emit_expr(&args[5]),
                 );
             }
         }

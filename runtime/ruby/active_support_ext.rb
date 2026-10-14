@@ -315,6 +315,19 @@ module ActiveSupport
     deleted.empty? ? nil : deleted
   end
 
+  # Rails' `details`: each attribute's errors, in the order of its first
+  # one. `lower::errors_index` reads an entry's `[:error]` as the type.
+  def self.errors_details(details)
+    out = {}
+    details.each do |detail|
+      key = detail.attribute.to_sym
+      out[key] = [] unless out.key?(key)
+      out[key] << detail
+    end
+    out.default = [].freeze
+    out.freeze
+  end
+
   # `ActiveSupport::MessageVerifier::InvalidSignature` — what a signed
   # value that does not verify raises. Rails hangs it off the verifier
   # class, and the NAME is the whole point: a controller that rescues it

@@ -1183,6 +1183,8 @@ impl Messages<'_> {
             full: parts(i18n.full_error(attr, kind, opts)),
             kind: kind.to_string(),
             bare: parts(i18n.error(attr, kind, opts)),
+            // The others carry `count:`, `value:` or `attribute:` beside the type in Rails' `details`.
+            optionless: matches!(kind, "blank" | "present" | "required" | "accepted" | "password_too_long"),
         }
     }
 }
@@ -1191,6 +1193,7 @@ pub(crate) struct Message {
     full: Expr,
     kind: String,
     bare: Expr,
+    optionless: bool,
 }
 
 // ── IR helpers ────────────────────────────────────────────────
@@ -1240,7 +1243,7 @@ fn errors_push(attribute: &str, msg: Message) -> Expr {
         },
     );
     let kind = Expr::new(Span::synthetic(), ExprNode::Lit { value: Literal::Str { value: msg.kind } });
-    crate::lower::errors_add::attributed_push(send(errors_call, "<<", vec![msg.full]), None, attribute, kind, true, msg.bare, Span::synthetic())
+    crate::lower::errors_add::attributed_push(send(errors_call, "<<", vec![msg.full]), None, attribute, kind, true, msg.optionless, msg.bare, Span::synthetic())
 }
 
 fn if_with_nil_else(cond: Expr, then_branch: Expr) -> Expr {

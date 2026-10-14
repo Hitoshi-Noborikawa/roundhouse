@@ -1693,6 +1693,79 @@ fn a_belongs_to_error_lists_where_it_is_declared_on_spinel() {
     belongs_to_errors_app().run_spinel(BELONGS_TO_ERRORS).assert_passes();
 }
 
+/// `details` groups the errors by attribute, an entry's `[:error]` is its
+/// type, and `added?` matches only an error Rails keeps no options for.
+fn errors_details_app() -> emit_and_run::Overlay {
+    error_types_app().edit(
+        "app/models/article.rb",
+        "  def error_rows\n",
+        "  def detail_types
+    out = []
+    errors.details.each_pair { |attribute, entries| entries.each { |entry| out << [attribute, entry[:error]] } }
+    out
+  end
+
+  def short_body
+    [errors.details[:body].any? { |detail| detail[:error] == :too_short }, errors.details[:nothing].size]
+  end
+
+  def addeds
+    [errors.added?(:title, :blank), errors.added?(:body, :too_short), errors.added?(:base, \"is odd\"), errors.added?(:title),
+     errors.added?(:base, :invalid)]
+  end
+
+  def error_rows\n",
+    )
+}
+
+const ERRORS_DETAILS: &str = r#"a = Article.new(title: "", body: "odd")
+a.valid?
+raise a.detail_types.inspect unless a.detail_types == [[:title, :blank], [:body, :too_short], [:base, "is odd"]]
+raise a.short_body.inspect unless a.short_body == [true, 0]
+raise a.addeds.inspect unless a.addeds == [true, false, true, false, false]
+b = Article.new(title: "A title", body: "A long enough body")
+b.valid?
+raise b.detail_types.inspect unless b.detail_types.empty? && b.short_body == [false, 0]
+puts "errors.details passed"
+"#;
+
+#[test]
+fn errors_details_reads_each_error_s_type() {
+    errors_details_app().run_ruby(ERRORS_DETAILS).assert_passes();
+}
+
+#[test]
+#[ignore = "requires the Spinel toolchain"]
+fn errors_details_reads_each_error_s_type_on_spinel() {
+    errors_details_app().run_spinel(ERRORS_DETAILS).assert_passes();
+}
+
+#[test]
+fn errors_details_is_a_gap_on_strict_targets() {
+    let (_emitted, errors) = errors_details_app().emit(roundhouse::project::BuildTarget::Crystal);
+    assert!(
+        errors.iter().any(|e| e.contains("ActiveSupport.errors_details is only available on the ruby family and spinel")),
+        "{errors:#?}"
+    );
+}
+
+/// A `details` entry's other keys are its options, which no error keeps.
+#[test]
+fn a_details_entry_s_options_are_an_error() {
+    let (_emitted, errors) = errors_each_app()
+        .edit(
+            "app/models/article.rb",
+            "  def error_rows\n",
+            "  def body_minimum
+    errors.details[:body].map { |detail| detail[:count] }
+  end
+
+  def error_rows\n",
+        )
+        .emit(roundhouse::project::BuildTarget::Ruby);
+    assert!(errors.iter().any(|e| e.contains("no known method `[]`")), "{errors:#?}");
+}
+
 /// `type` reads the error more than once, so a found error is an error.
 #[test]
 fn the_type_of_an_error_that_is_not_a_plain_read_is_an_error() {
@@ -1707,7 +1780,7 @@ fn the_type_of_an_error_that_is_not_a_plain_read_is_an_error() {
   def error_rows\n",
         )
         .emit(roundhouse::project::BuildTarget::Ruby);
-    assert!(errors.iter().any(|e| e.contains("`error.type` reads the error three times")), "{errors:#?}");
+    assert!(errors.iter().any(|e| e.contains("read the error three times")), "{errors:#?}");
 }
 
 /// The helper is the shared Ruby runtime's, which no strict target loads.
