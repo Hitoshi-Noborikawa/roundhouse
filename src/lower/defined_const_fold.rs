@@ -603,6 +603,17 @@ fn walk(e: &mut Expr, owner: Option<&ClassId>, facts: &Facts, lt: bool) -> bool 
             if matches!(&*e.node, ExprNode::Lit { value: Literal::Bool { .. } }) {
                 e.ty = Some(Ty::Bool);
             }
+            // `a && defined?(X)` with X defined keeps a `"constant"`
+            // operand, and a string literal under a condition is Ruby's
+            // "string literal in condition" warning (which a warnings-as-errors
+            // boot raises). `true` keeps its truthiness.
+            if changed.get(1) == Some(&true) {
+                if let ExprNode::BoolOp { right, .. } = &mut *e.node {
+                    if matches!(&*right.node, ExprNode::Lit { value: Literal::Str { .. } }) {
+                        *right = lit(right, Literal::Bool { value: true }, Ty::Bool);
+                    }
+                }
+            }
         }
     }
     true
