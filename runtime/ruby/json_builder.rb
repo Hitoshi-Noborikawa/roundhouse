@@ -74,7 +74,8 @@ module JsonBuilder
     return "true" if v.is_a?(TrueClass)
     return "false" if v.is_a?(FalseClass)
     return v.to_s if v.is_a?(Integer)
-    return v.to_s if v.is_a?(Float)
+    # Not `finite?`, which not every target's Float answers: NaN and the infinities are the values `v - v` is not 0.0 for, and Rails writes them `null`.
+    return (v - v == 0.0 ? v.to_s : "null") if v.is_a?(Float)
     return "\"#{encode_string(v)}\"" if v.is_a?(String)
     # Fallback: stringify and quote. Call sites convert Time /
     # BigDecimal / etc. before reaching here.

@@ -95,7 +95,7 @@ module ActiveSupport
     # taken to be UTC (Rails writes `+00:00` for a non-UTC zone at offset
     # zero, such as London in winter).
     def self.time_json(t)
-      zone = t.utc_offset == 0 ? "Z" : t.strftime("%:z")
+      zone = t.zone == "UTC" || (t.utc_offset == 0 && ActiveSupport::JSON.utc_zone?) ? "Z" : t.strftime("%:z")
       t.strftime("%Y-%m-%dT%H:%M:%S") + format(".%03d", t.usec / 1000) + zone
     end
 
@@ -103,6 +103,15 @@ module ActiveSupport
     def self.written(text)
       text
     end
+
+    # Not offset zero alone: Rails writes `Z` only when the zone is UTC itself, and `+00:00` for London in winter.
+    def self.utc_zone?
+      zone = ActiveSupport.current_zone
+      name = zone.nil? ? Rails.application.config_time_zone : zone.name
+      UTC_ZONE_NAMES.include?(name)
+    end
+
+    UTC_ZONE_NAMES = ["UTC", "Etc/UTC", "Universal", "Etc/Universal", "Zulu", "Etc/Zulu", "UCT", "Etc/UCT"].freeze
 
     # Not `time_json` at the call site: a nil Time is `null`, and a written-down encoder would otherwise read its value twice.
     def self.time_fragment(t)

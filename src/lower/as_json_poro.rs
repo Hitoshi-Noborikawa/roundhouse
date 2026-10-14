@@ -182,6 +182,33 @@ pub fn apply_as_json_synthesis(app: &mut App, registry: &HashMap<ClassId, ClassI
             replace_in(&mut action.body, &mut |e| rewrite_render_json(e, &written));
         }
     }
+    super::for_each_hook_body(app, &mut |body| rewrite_to_json(body, &written));
+    for view in &mut app.views {
+        rewrite_to_json(&mut view.body, &written);
+    }
+}
+
+/// `<value>.to_json` → the same text a `render json:` of it writes; what has no writer falls back to `JSON.generate`, as before.
+fn rewrite_to_json(e: &mut Expr, written: &HashSet<ClassId>) {
+    e.node.for_each_child_mut(&mut |c| rewrite_to_json(c, written));
+    let ExprNode::Send { recv: Some(r), method, args, block: None, .. } = &*e.node else { return };
+    if method.as_str() != "to_json" || !args.is_empty() {
+        return;
+    }
+    let text = match r.ty.as_ref().and_then(rendered_class).filter(|(id, _)| written.contains(*id)) {
+        Some((id, true)) => Some(collection_text(r, id)),
+        Some((_, false)) => Some(writer_call(r.clone())),
+        None if super::as_json_value::needs_text(r, written) => super::as_json_value::json_text(r, written),
+        None => None,
+    };
+    match text {
+        Some(t) => {
+            let span = e.span;
+            *e = t;
+            e.span = span;
+        }
+        None => super::to_json::rewrite_node_now(e),
+    }
 }
 
 /// `render json: <v>` → `render plain: <v>.as_json_str, content_type:
@@ -201,7 +228,8 @@ fn rewrite_render_json(e: &Expr, written: &HashSet<ClassId>) -> Option<Expr> {
     };
     let value = entries.iter().find_map(|(k, v)| is_key(k, "json").then_some(v))?;
     let record = value.ty.as_ref().and_then(rendered_class).filter(|(id, _)| written.contains(*id));
-    if record.is_none() && !super::as_json_value::needs_text(value, written) {
+    let text = matches!(value.ty.as_ref(), Some(Ty::Str));
+    if record.is_none() && !text && !super::as_json_value::needs_text(value, written) {
         return None;
     }
     let sym = |name: &str| {
@@ -213,6 +241,8 @@ fn rewrite_render_json(e: &Expr, written: &HashSet<ClassId>) -> Option<Expr> {
     let encoded = match record {
         Some((id, true)) => collection_text(value, id),
         Some((_, false)) => writer_call(value.clone()),
+        // Not encoded again: Rails sends a String it is handed as the body.
+        None if text => value.clone(),
         None => super::as_json_value::json_text(value, written)?,
     };
     let mut new_entries: Vec<(Expr, Expr)> = Vec::new();
@@ -429,6 +459,20 @@ fn as_json_str_method(owner: &ClassId, readers: &[Symbol]) -> MethodDef {
 /// guess.
 fn json_rendered_classes(app: &App) -> HashSet<ClassId> {
     let mut out = HashSet::new();
+    let mut to_json_ids = Vec::new();
+    let mut collect = |e: &Expr| {
+        walk(e, &mut |e| {
+            if let ExprNode::Send { recv: Some(r), method, args, block: None, .. } = &*e.node {
+                if method.as_str() == "to_json" && args.is_empty() {
+                    super::as_json_value::classes_in(r, &mut to_json_ids);
+                }
+            }
+        })
+    };
+    super::for_each_hook_body_ref(app, &mut collect);
+    for view in &app.views {
+        collect(&view.body);
+    }
     let known: HashSet<&ClassId> = app
         .library_classes
         .iter()
@@ -459,6 +503,7 @@ fn json_rendered_classes(app: &App) -> HashSet<ClassId> {
             });
         }
     }
+    out.extend(to_json_ids.into_iter().filter(|id| known.contains(id)));
     out
 }
 

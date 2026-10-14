@@ -382,7 +382,9 @@ pub(super) fn rewrite_render_to_views(
                             // plain: v.as_json_str, content_type:
                             // "application/json"`, the writer's text.
                             "json" => {
-                                body = Some((json_render_encode(v), Some("application/json")))
+                                // Not encoded again: Rails' json renderer sends a String as it is (`json.to_json unless json.kind_of?(String)`); `json_render_encode`'s other callers encode one.
+                                let encoded = if matches!(v.ty.as_ref(), Some(Ty::Str)) { v.clone() } else { json_render_encode(v) };
+                                body = Some((encoded, Some("application/json")))
                             }
                             // The flattener's dispatch marker, read by
                             // `render_kwargs_have_format` above.
