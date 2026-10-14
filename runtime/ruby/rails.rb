@@ -575,8 +575,8 @@ module Rails
     # strict target can call it without a `respond_to?` guard.
     #
     # The value is a Rails zone NAME ("Central Time (US & Canada)"), not
-    # an IANA identifier; `ActiveSupport::RAILS_TZ_TO_IANA` translates,
-    # and main.rb pins ENV["TZ"] from the result before any render.
+    # an IANA identifier; `ActiveSupport::ZONE_NAMES` translates, and the
+    # boot makes it the runtime's default zone before any render.
     def config_time_zone
       "UTC"
     end
