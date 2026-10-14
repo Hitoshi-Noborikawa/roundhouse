@@ -236,6 +236,12 @@ module Main
     # comma is read as html.
     accept = request.fetch(:accept, "").to_s
     controller.accepts_any_format = !accept.include?(",") && accept.split(";", 2)[0].to_s.strip == "*/*"
+    # Rails' `Vary: Accept` on a render whose format came from the Accept
+    # header (runtime/action_dispatch/mime_negotiation.rb), as the spinel
+    # dispatcher decides it.
+    controller.vary_on_accept = ActionDispatch::MimeNegotiation.should_apply_vary_header?(
+      accept, env["HTTP_X_REQUESTED_WITH"].to_s, env["CONTENT_TYPE"].to_s,
+      merged.key?("format") || !matched.req_format.nil?)
     # The full request object (CRuby overlay class) — filters read
     # `request.remote_ip` / `request.env` / `request[:format]`. `env.to_h`
     # detaches a plain mutable Hash (callers write scratch keys the real

@@ -712,6 +712,12 @@ module ActionController
     # The dispatcher sets it; false keeps every other request on the
     # html path.
     attr_accessor :accepts_any_format
+    # Rails' `request.should_apply_vary_header?`: the response format
+    # was negotiated from the request's Accept header (no `format`
+    # param, a non-browser Accept, or an XHR). The dispatcher sets it;
+    # `render` and `send_data` then answer `Vary: Accept`. False keeps
+    # every target that does not set it as it was.
+    attr_accessor :vary_on_accept
     # Rails' `request.path_parameters`: the matched route's own segments
     # (`{"length" => "1y"}` on `/top/1y`), not the query string. The
     # dispatcher assigns it; a `url_for` options hash reads it to fill a
@@ -765,6 +771,7 @@ module ActionController
       @request_format = :html
       @query_string = +""
       @accepts_any_format = false
+      @vary_on_accept = false
       @content_type = "text/html; charset=utf-8"
       @content_type_explicit = false
       @headers = ActionController::HeaderStore.new
@@ -880,6 +887,18 @@ module ActionController
       @performed = true
       @content_type = content_type unless content_type.nil?
       @location = ActionController.sanitize_location(location) unless location.nil?
+      apply_vary_header
+      nil
+    end
+
+    # Rails' `_set_vary_header`, which every `render` runs (`send_data`
+    # renders too): `Vary: Accept` when the format was negotiated from
+    # the Accept header and the action set no Vary of its own. A
+    # redirect or a `head` does not render, so it carries none.
+    def apply_vary_header
+      return nil unless @vary_on_accept
+      vary = @headers["Vary"]
+      @headers["Vary"] = "Accept" if vary.nil? || vary.strip.empty?
       nil
     end
 
@@ -1132,6 +1151,7 @@ module ActionController
       @performed = true
       disp = disposition.to_s == "inline" ? "inline" : "attachment"
       @headers["Content-Disposition"] = disp
+      apply_vary_header
       nil
     end
 

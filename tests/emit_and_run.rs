@@ -27,6 +27,10 @@ mod integer_query_find_by;
 mod lambda_signatures_contract;
 #[path = "emit_and_run/lambda_signatures.rs"]
 mod lambda_signatures;
+#[path = "support/vary_accept.rs"]
+mod vary_accept_contract;
+#[path = "emit_and_run/vary_accept.rs"]
+mod vary_accept;
 #[path = "emit_and_run/strong_params.rs"]
 mod strong_params;
 #[path = "emit_and_run/params_wrapper.rs"]
