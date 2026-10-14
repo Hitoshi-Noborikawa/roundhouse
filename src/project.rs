@@ -3411,7 +3411,7 @@ fn ruby_family_runtime_files(
     // gets the block exactly once; this is the ruby family's turn, and
     // the ruby family is the one that can run the lines.
     apply_module_mixins(&mut files, app, MixinForm::ExplicitReceiver);
-    apply_app_requires(&mut files, app);
+    apply_app_requires(&mut files, app, RequireTarget::RubyFamily);
     apply_rails_version(&mut files, app);
     // Overlay boot replaces the spinel boot wholesale (see comment above
     // on apply_module_mixins), wiping the Date-package inject from
@@ -4598,6 +4598,23 @@ fn mixin_target_keyword(app: &App, target: &str) -> &'static str {
     }
 }
 
+/// Which tree [`apply_app_requires`] writes into.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum RequireTarget {
+    RubyFamily,
+    Spinel,
+}
+
+/// Standard libraries in `ingest::app`'s requirable list that Spinel has
+/// no package or native module for: `spinel` warns "is not available in
+/// Spinel" for each, and an app binary's `--require-gate` (from `spin
+/// flags`) makes that fatal. The spinel tree leaves them out, as it did
+/// before app requires were carried; the ruby family loads them all.
+const SPINEL_LACKS: &[&str] = &[
+    "date", "delegate", "English", "etc", "io/nonblock", "io/wait", "ipaddr", "observer", "pp",
+    "weakref", "yaml",
+];
+
 /// The app's own standard-library requires ([`App::app_requires`]) at
 /// the head of `boot.rb`, ahead of everything that file loads. Twice on
 /// the ruby family, like the mixins: the overlay's boot.rb replaces the
@@ -4609,7 +4626,7 @@ fn mixin_target_keyword(app: &App, target: &str) -> &'static str {
 /// own `ERB` and `Shellwords` stand in for the libraries, and loading
 /// the library as well would reopen them (spinel's erb package opens
 /// `class ERB` over the runtime's module).
-fn apply_app_requires(files: &mut [(String, String)], app: &App) {
+fn apply_app_requires(files: &mut [(String, String)], app: &App, target: RequireTarget) {
     let provided_by_tree = |lib: &str| {
         let require_line = format!("require {lib:?}");
         BUNDLED.iter().filter(|(_, feature)| *feature == lib).any(|(konst, _)| {
@@ -4618,7 +4635,12 @@ fn apply_app_requires(files: &mut [(String, String)], app: &App) {
             })
         })
     };
-    let libs: Vec<&String> = app.app_requires.iter().filter(|lib| !provided_by_tree(lib)).collect();
+    let libs: Vec<&String> = app
+        .app_requires
+        .iter()
+        .filter(|lib| !provided_by_tree(lib))
+        .filter(|lib| target == RequireTarget::RubyFamily || !SPINEL_LACKS.contains(&lib.as_str()))
+        .collect();
     if libs.is_empty() {
         return;
     }
@@ -4654,6 +4676,11 @@ fn apply_rails_version(files: &mut [(String, String)], app: &App) {
     }) else {
         return;
     };
+    // A version is digits, letters and dots (`8.1.0.rc1`); anything else
+    // would be spelled into a double-quoted Ruby string as written.
+    if version.is_empty() || !version.chars().all(|c| c.is_ascii_alphanumeric() || c == '.') {
+        return;
+    }
     let Some((_, boot)) = files.iter_mut().find(|(p, _)| p == "boot.rb") else { return };
     if boot.contains(MARK) {
         return;
@@ -6432,7 +6459,7 @@ fn spinel_files(app: &App, fixture: &Path) -> Result<(Vec<(String, String)>, Vec
     apply_models_aggregator(&mut files);
     apply_route_helpers_demand(&mut files);
     apply_module_mixins(&mut files, app, MixinForm::Reopen);
-    apply_app_requires(&mut files, app);
+    apply_app_requires(&mut files, app, RequireTarget::Spinel);
     apply_rails_version(&mut files, app);
     // All three scaffold targets (spinel + the ruby/jruby trees derived
     // from this set) ship the comprehensive scaffold README as SPECIMEN.md,

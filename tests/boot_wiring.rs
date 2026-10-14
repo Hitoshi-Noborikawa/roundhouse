@@ -52,6 +52,29 @@ fn a_library_the_tree_defines_itself_is_not_required() {
     assert!(!boot.lines().any(|l| l.trim() == "require \"shellwords\""), "{boot}");
 }
 
+/// A library Spinel has no package for (`date`, `yaml`, ...) stays out
+/// of the spinel tree, whose `--require-gate` build would refuse it, and
+/// is carried on the ruby family.
+#[test]
+fn a_library_spinel_lacks_is_required_on_the_ruby_family_only() {
+    let overlay = || {
+        emit_and_run::real_blog().write(
+            "app/models/dated_probe.rb",
+            "require \"date\"\nrequire \"yaml\"\nrequire \"open3\"\n\nclass DatedProbe\n  def self.size = 1\nend\n",
+        )
+    };
+    for (target, carried) in [(BuildTarget::Spinel, false), (BuildTarget::Ruby, true)] {
+        let (emitted, errors) = overlay().emit(target);
+        assert!(errors.is_empty(), "{target:?} errors: {errors:?}");
+        let boot = std::fs::read_to_string(emitted.join("boot.rb")).expect("read boot.rb");
+        assert!(boot.lines().any(|l| l.trim() == "require \"open3\""), "{target:?}:\n{boot}");
+        for lib in ["date", "yaml"] {
+            let line = format!("require {lib:?}");
+            assert_eq!(boot.lines().take(12).any(|l| l.trim() == line), carried, "{target:?} {lib}:\n{boot}");
+        }
+    }
+}
+
 /// The library is loaded before the app runs: `IO#winsize=` exists only
 /// once io/console is required.
 #[test]
