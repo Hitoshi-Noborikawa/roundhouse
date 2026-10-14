@@ -784,6 +784,36 @@ UNKNOWN method name does, so campfire's `Membership.insert_all(…)`
 reported `no known method insert_all on Class { Membership }` while the
 emitted code was the inlined loop, correct all along.
 
+### A failed statement raises Rails' class, but SQLite enforces no foreign keys
+
+`runtime/ruby/active_record/errors.rb` carries Rails 8.1's statement-error
+hierarchy: `ActiveRecordError`, `StatementInvalid`,
+`WrappedDatabaseException` (`RecordNotUnique`, `InvalidForeignKey`),
+`NotNullViolation`, `CheckViolation`, `ExclusionViolation`, `RangeError`,
+`ValueTooLong`, `TransactionRollbackError` (`SerializationFailure`,
+`Deadlocked`), `QueryAborted` (`StatementTimeout`, `QueryCanceled`),
+`LockWaitTimeout` and `ReadOnlyError`. The existing record errors now sit
+under `ActiveRecordError`, so a `rescue ActiveRecord::StatementInvalid`
+catches what Rails' does.
+
+Each ruby-family SQLite `Db` (`db.rb`, `db_cruby.rb`, `db_jruby.rb`) raises
+them through `Db.raise_statement_error`, keyed on SQLite's own message as
+Rails' `translate_exception` is: UNIQUE, NOT NULL, FOREIGN KEY and CHECK
+failures, `SQLITE_BUSY` as `StatementTimeout`, anything else as
+`StatementInvalid`. The PostgreSQL shims map Rails' SQLSTATE table
+(`pg_errors.rb`), and a code it does not list is `StatementInvalid`.
+
+Three gaps remain:
+- **Foreign keys.** Rails turns on `PRAGMA foreign_keys` for SQLite and this
+  runtime does not. A foreign-key violation is accepted rather than raised,
+  so `InvalidForeignKey` is raised only by the PostgreSQL shims.
+- **Optimistic locking.** `lock_version` is not modeled, so
+  `StaleObjectError` is left undefined and a reference to it stays an
+  error.
+- **`ReadOnlyError`** is defined, but nothing here prevents writes, so it is
+  never raised. That matches Rails outside a `while_preventing_writes`
+  block.
+
 ### `Current.reset` replaces the instance instead of nilling it
 
 `ingest::current_attributes` turns `class Current <

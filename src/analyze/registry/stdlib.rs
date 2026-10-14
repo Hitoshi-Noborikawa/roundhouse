@@ -705,6 +705,22 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
         register_stdlib_class(classes, &format!("Errno::{name}"), &[], &exception_surface);
     }
     for (exc, extra) in [
+        ("ActiveRecord::ActiveRecordError", None),
+        ("ActiveRecord::StatementInvalid", None),
+        ("ActiveRecord::WrappedDatabaseException", None),
+        ("ActiveRecord::InvalidForeignKey", None),
+        ("ActiveRecord::NotNullViolation", None),
+        ("ActiveRecord::CheckViolation", None),
+        ("ActiveRecord::ExclusionViolation", None),
+        ("ActiveRecord::RangeError", None),
+        ("ActiveRecord::TransactionRollbackError", None),
+        ("ActiveRecord::SerializationFailure", None),
+        ("ActiveRecord::Deadlocked", None),
+        ("ActiveRecord::QueryAborted", None),
+        ("ActiveRecord::LockWaitTimeout", None),
+        ("ActiveRecord::StatementTimeout", None),
+        ("ActiveRecord::QueryCanceled", None),
+        ("ActiveRecord::ReadOnlyError", None),
         ("ActiveRecord::RecordNotFound", None),
         ("ActiveRecord::RecordNotUnique", None),
         ("ActiveRecord::ValueTooLong", None),

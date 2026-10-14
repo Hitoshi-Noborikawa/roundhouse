@@ -56,6 +56,7 @@ module SQL
   ffi_const :OK,   0
   ffi_const :ROW,  100
   ffi_const :DONE, 101
+  ffi_const :BUSY, 5
   # sqlite3_column_type storage classes. NULL is the one the nullable
   # reads have always needed; the rest let `column_value` hand back the
   # driver's native type instead of everything-as-text.
@@ -577,7 +578,7 @@ class DbConn
       st = rc == SQL::OK ? SQL.read_ptr(SQL.stmt_out) : 0
     end
     if rc != SQL::OK
-      raise "Db.prepare failed (" + rc.to_s + "): " + SQL.sqlite3_errmsg(@dbh) + " — sql: " + sql
+      Db.raise_statement_error("Db.prepare failed (" + rc.to_s + "): " + SQL.sqlite3_errmsg(@dbh) + " — sql: " + sql, rc == SQL::BUSY)
     end
     entry = Stmt.new(sql, st, cached)
     index_cached(entry) if cached
@@ -839,7 +840,7 @@ class DbConn
     msg = SQL.sqlite3_errmsg(@dbh)
     @qc_recording.delete(ptr)
     SQL.sqlite3_reset(ptr)
-    raise "Db.step failed (" + rc.to_s + "): " + msg
+    Db.raise_statement_error("Db.step failed (" + rc.to_s + "): " + msg, rc == SQL::BUSY)
   end
 
   def bind_checked(ptr, idx, rc)
@@ -847,7 +848,7 @@ class DbConn
     msg = SQL.sqlite3_errmsg(@dbh)
     @qc_recording.delete(ptr)
     SQL.sqlite3_reset(ptr)
-    raise "Db.bind failed (" + rc.to_s + ") at parameter " + idx.to_s + ": " + msg
+    Db.raise_statement_error("Db.bind failed (" + rc.to_s + ") at parameter " + idx.to_s + ": " + msg, rc == SQL::BUSY)
   end
 
   def qc_step?(handle)
@@ -1791,13 +1792,8 @@ module Db
     ptr = conn.prepare_uncached(sql)
     e = conn.qc_entry_for(ptr, sql)
     begin
-      begin
-        while conn.step_checked(ptr)
-          e.record_row(ptr)
-        end
-      rescue RuntimeError => err
-        raise ActiveRecord::RecordNotUnique, err.message if Db.unique_violation?(err.message)
-        raise err
+      while conn.step_checked(ptr)
+        e.record_row(ptr)
       end
       e.mark_eof
     ensure
@@ -1810,8 +1806,7 @@ module Db
     rc = SQL.sqlite3_exec(h, sql, nil, nil, nil)
     if rc != SQL::OK
       msg = SQL.sqlite3_errmsg(h)
-      raise ActiveRecord::RecordNotUnique, msg if Db.unique_violation?(msg)
-      raise "Db.exec failed (" + rc.to_s + "): " + msg + " — sql: " + sql
+      Db.raise_statement_error("Db.exec failed (" + rc.to_s + "): " + msg + " — sql: " + sql, rc == SQL::BUSY)
     end
     nil
   end
@@ -1833,6 +1828,16 @@ module Db
   # their own `Db` and their own mapping; this is the ruby-family half.)
   def self.unique_violation?(message)
     message.include?("UNIQUE constraint failed")
+  end
+
+  # Not the driver's own exception: Rails translates every statement error into ActiveRecord's hierarchy (sqlite3_adapter `translate_exception`), keyed on SQLite's own message as `unique_violation?` is.
+  def self.raise_statement_error(message, busy)
+    raise ActiveRecord::RecordNotUnique, message if unique_violation?(message)
+    raise ActiveRecord::NotNullViolation, message if message.include?("NOT NULL constraint failed")
+    raise ActiveRecord::InvalidForeignKey, message if message.include?("FOREIGN KEY constraint failed")
+    raise ActiveRecord::CheckViolation, message if message.include?("CHECK constraint failed")
+    raise ActiveRecord::StatementTimeout, message if busy
+    raise ActiveRecord::StatementInvalid, message
   end
 
   # Returns the stmt pointer; caller advances with `step?`, reads
