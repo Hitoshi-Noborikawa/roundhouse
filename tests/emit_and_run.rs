@@ -2518,6 +2518,7 @@ fn dry_monads_results_run_lowered() {
 fn dry_monads_refusals_are_ledgered() {
     let tree: std::collections::HashMap<std::path::PathBuf, Vec<u8>> = [
         ("app/services/maybe_service.rb", "class MaybeService\n  include Dry::Monads[:maybe]\nend\n"),
+        ("app/services/for_service.rb", "class ForService\n  include Dry::Monads::Do.for(:call)\nend\n"),
         (
             "app/services/block_service.rb",
             "class BlockService\n  include Dry::Monads[:result, :do]\n\n  def each_item\n    return to_enum(:each_item) unless block_given?\n\n    yield Success(1)\n  end\n\n  def call\n    v = yield Success(2)\n    Success(v)\n  end\nend\n",
@@ -2532,6 +2533,7 @@ fn dry_monads_refusals_are_ledgered() {
     let app = roundhouse::ingest::ingest_app_from_tree(tree).expect("ingest");
     let ledger: Vec<String> = roundhouse::ingest::survey::drain().iter().map(|e| e.to_string()).collect();
     assert!(ledger.iter().any(|e| e.contains("Dry::Monads not lowered: `:maybe`")), "{ledger:#?}");
+    assert!(ledger.iter().any(|e| e.contains("Dry::Monads not lowered: `include Dry::Monads::Do.for(:call)`")), "{ledger:#?}");
     assert!(ledger.iter().any(|e| e.contains("`each_item` takes a block")), "{ledger:#?}");
     let class = |name: &str| app.library_classes.iter().find(|lc| lc.name.0.as_str() == name).expect(name);
     assert!(class("MaybeService").unknown_calls.iter().any(|c| roundhouse::emit::ruby::emit_expr(c).contains("Dry::Monads[:maybe]")));

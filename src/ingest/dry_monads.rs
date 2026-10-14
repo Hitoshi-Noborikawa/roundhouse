@@ -208,6 +208,13 @@ fn features(call: &Expr) -> Option<Result<Vec<String>, String>> {
             }
             Some(Ok(out))
         }
+        // `Do.for(:call)`, `Result(Error)`: forms of the gem this does not
+        // model.
+        ExprNode::Send { recv: Some(recv), .. }
+            if path(recv).is_some_and(|p| p == "Dry::Monads" || p.starts_with("Dry::Monads::")) =>
+        {
+            Some(Err(format!("`include {}`", crate::emit::ruby::emit_expr(arg))))
+        }
         _ => match path(arg).as_deref() {
             Some("Dry::Monads::Do" | "Dry::Monads::Do::All") => Some(Ok(vec!["do".into()])),
             Some("Dry::Monads::Result::Mixin") => Some(Ok(vec!["result".into()])),

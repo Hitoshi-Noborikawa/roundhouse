@@ -1254,33 +1254,57 @@ fn flat_yaml(text: &str) -> Vec<(String, String)> {
     out
 }
 
-/// A Ruby String literal of `template`, its `%{token}`s interpolated from
-/// the expressions given.
-fn interpolated(template: &str, tokens: &HashMap<String, String>) -> String {
+/// A Ruby String literal of a message template, as dry-schema's YAML
+/// backend makes one: it turns `%` into `#` and evaluates `"#{text}"`, so
+/// a token (`%{num}`) is interpolated from the expression given, `#@x`
+/// and `#@@x` read nothing (nil), `#$x` reads the global and any other
+/// `#{...}` is Ruby, run where the message is built.
+/// ponytail: a backslash stays literal; the gem would read it as an
+/// escape, which a message file has not been seen to rely on.
+fn template_literal(template: &str, tokens: &HashMap<String, String>) -> String {
+    let text = template.replace('%', "#");
+    let ident = |s: &str| s.find(|c: char| !(c.is_alphanumeric() || c == '_')).unwrap_or(s.len());
     let mut out = String::from("\"");
-    let mut rest = template;
-    while let Some(at) = rest.find("%{") {
+    let mut rest = text.as_str();
+    while let Some(at) = rest.find('#') {
         out.push_str(&escape(&rest[..at]));
-        let after = &rest[at + 2..];
-        let Some(end) = after.find('}') else {
-            out.push_str(&escape(&rest[at..]));
-            rest = "";
-            break;
-        };
-        let token = &after[..end];
-        match tokens.get(token) {
-            Some(expr) => out.push_str(&format!("#{{{expr}}}")),
-            None => out.push_str(&escape(&format!("%{{{token}}}"))),
+        let after = &rest[at + 1..];
+        if let Some(body) = after.strip_prefix('{')
+            && let Some(end) = body.find('}')
+        {
+            let inner = &body[..end];
+            match tokens.get(inner) {
+                Some(expr) => out.push_str(&format!("#{{{expr}}}")),
+                None => out.push_str(&format!("#{{{inner}}}")),
+            }
+            rest = &body[end + 1..];
+        } else if let Some(name) = after.strip_prefix("@@").or_else(|| after.strip_prefix('@'))
+            && ident(name) > 0
+        {
+            rest = &name[ident(name)..];
+        } else if let Some(name) = after.strip_prefix('$')
+            && ident(name) > 0
+        {
+            out.push_str(&format!("#{{${}}}", &name[..ident(name)]));
+            rest = &name[ident(name)..];
+        } else {
+            out.push_str("\\#");
+            rest = after;
         }
-        rest = &after[end + 1..];
     }
     out.push_str(&escape(rest));
     out.push('"');
     out
 }
 
+/// A Ruby String literal of `text` as written: nothing in it interpolates.
+fn literal(text: &str) -> String {
+    format!("\"{}\"", escape(text))
+}
+
 fn escape(s: &str) -> String {
-    s.replace('\\', "\\\\").replace('"', "\\\"").replace("#{", "\\#{")
+    // Every `#`: `#@ivar`, `#@@cvar` and `#$global` interpolate too.
+    s.replace('\\', "\\\\").replace('"', "\\\"").replace('#', "\\#")
 }
 
 /// What generates one class's methods.
@@ -1324,14 +1348,11 @@ impl Gen<'_> {
                         .map(|(k, v)| (k.replace("size", "num"), v.clone()))
                         .collect();
                     tokens.extend(mapped);
-                    interpolated(t, &tokens)
+                    template_literal(t, &tokens)
                 }
                 None => format!(
                     "raise(::Dry::Schema::MissingMessageError, {})",
-                    interpolated(
-                        &format!("Message template for :{path} under \"\" was not found"),
-                        &HashMap::new()
-                    )
+                    literal(&format!("Message template for :{path} under \"\" was not found"))
                 ),
             }
         };
@@ -1399,7 +1420,7 @@ impl Gen<'_> {
     /// `base`), its tokens interpolated.
     fn failure_message(&mut self, failure: Failure<'_>) -> String {
         let (id, tokens) = match failure.message {
-            FailureMessage::Text(text) => return interpolated(text, &HashMap::new()),
+            FailureMessage::Text(text) => return literal(text),
             FailureMessage::Id(id, tokens) => (id, tokens),
         };
         let tokens: HashMap<String, String> = tokens
@@ -1415,16 +1436,13 @@ impl Gen<'_> {
                 .map(str::to_string),
         };
         match template {
-            Some(t) => interpolated(&t, &tokens),
+            Some(t) => template_literal(&t, &tokens),
             None => format!(
                 "raise(::Dry::Validation::MissingMessageError, {})",
-                interpolated(
-                    &format!(
-                        "Message template for :{id} under \"{}\" was not found",
-                        failure.path.map(|p| p.join(".")).unwrap_or_default()
-                    ),
-                    &HashMap::new()
-                )
+                literal(&format!(
+                    "Message template for :{id} under \"{}\" was not found",
+                    failure.path.map(|p| p.join(".")).unwrap_or_default()
+                ))
             ),
         }
     }
