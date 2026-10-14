@@ -406,6 +406,26 @@ impl<'a> BodyTyper<'a> {
         false
     }
 
+    /// The lazy-lookup scope of a controller whose instance methods have
+    /// `AbstractController::Translation`'s `t`: one descending from
+    /// `ActionController::Base` that defines no `t` / `translate` of its
+    /// own (see `lower::i18n_translate`).
+    fn translating_controller(&self, self_ty: Option<&Ty>) -> Option<String> {
+        let Some(Ty::Class { id, .. }) = self_ty else { return None };
+        if ["t", "translate"].iter().any(|m| self.app_defines(self_ty, &Symbol::from(*m))) {
+            return None;
+        }
+        let mut current = id;
+        for _ in 0..32 {
+            let parent = self.classes.get(current)?.parent.as_ref()?;
+            if parent.0.as_str() == "ActionController::Base" {
+                return Some(crate::lower::i18n_translate::controller_scope(id.0.as_str()));
+            }
+            current = parent;
+        }
+        None
+    }
+
     fn app_defines(&self, self_ty: Option<&Ty>, method: &Symbol) -> bool {
         let Some(Ty::Class { id, .. }) = self_ty else { return false };
         let mut stack = vec![id];
@@ -1883,8 +1903,17 @@ impl<'a> BodyTyper<'a> {
                     return Ty::Array { elem: std::sync::Arc::new(elem.unwrap_or_else(unknown)) };
                 }
                 let catalog = self.i18n.map_or(crate::i18n::Catalog::rails_default(), |c| c.or_rails_default());
+                let scope = match (ctx.in_view, recv.is_none() && !ctx.class_side) {
+                    (false, true) => self.translating_controller(ctx.self_ty.as_ref()),
+                    _ => None,
+                };
+                let site = match (&scope, ctx.in_view) {
+                    (_, true) => crate::lower::i18n_translate::Site::View(ctx.view_name.as_ref().map(|v| v.as_str())),
+                    (Some(scope), false) => crate::lower::i18n_translate::Site::Controller(scope),
+                    (None, false) => crate::lower::i18n_translate::Site::Other,
+                };
                 if let Some(resolved) = crate::lower::i18n_translate::resolves(
-                    catalog, recv.as_ref(), method.as_str(), args, block.as_ref(), ctx.in_view, ctx.view_name.as_ref().map(|v| v.as_str()),
+                    catalog, recv.as_ref(), method.as_str(), args, block.as_ref(), site,
                 ) {
                     if let Err(reason) = resolved {
                         if expr.diagnostic.is_none() {
