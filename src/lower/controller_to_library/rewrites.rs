@@ -382,7 +382,9 @@ pub(super) fn rewrite_render_to_views(
                             // plain: v.as_json_str, content_type:
                             // "application/json"`, the writer's text.
                             "json" => {
-                                body = Some((json_render_encode(v), Some("application/json")))
+                                // Not encoded again: Rails' json renderer sends a String as it is (`json.to_json unless json.kind_of?(String)`); `json_render_encode`'s other callers encode one.
+                                let encoded = if matches!(v.ty.as_ref(), Some(Ty::Str)) { v.clone() } else { json_render_body(v) };
+                                body = Some((encoded, Some("application/json")))
                             }
                             // The flattener's dispatch marker, read by
                             // `render_kwargs_have_format` above.
@@ -892,6 +894,26 @@ fn html_escape_call(value: &Expr) -> Expr {
             parenthesized: true,
         },
     )
+}
+
+/// `json_render_encode`, with a value that may be a String at run time sent as it is (`JsonRender.body`).
+fn json_render_body(value: &Expr) -> Expr {
+    let mut encoded = json_render_encode(value);
+    if may_be_str(value.ty.as_ref())
+        && let ExprNode::Send { method, .. } = &mut *encoded.node
+        && method.as_str() == "encode"
+    {
+        *method = Symbol::from("body");
+    }
+    encoded
+}
+
+fn may_be_str(ty: Option<&Ty>) -> bool {
+    match ty {
+        None | Some(Ty::Str | Ty::Untyped | Ty::Var { .. }) => true,
+        Some(Ty::Union { variants }) => variants.iter().any(|v| may_be_str(Some(v))),
+        _ => false,
+    }
 }
 
 /// Select the bundled JSON encoder for proven primitive collections; retain

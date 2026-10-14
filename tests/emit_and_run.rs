@@ -4021,6 +4021,11 @@ fn render_json_errors_messages_reaches_strict_targets() {
 fn json_values_app() -> emit_and_run::Overlay {
     emit_and_run::real_blog()
         .edit(
+            "app/models/article.rb",
+            "  validates :title, presence: true\n",
+            "  validates :title, presence: true\n\n  def headline\n    title.to_s.upcase\n  end\n",
+        )
+        .edit(
             "config/routes.rb",
             "  root \"articles#index\"\n",
             "  root \"articles#index\"\n  get \"/values/:id\", to: \"values#show\"\n",
@@ -4040,6 +4045,28 @@ fn json_values_app() -> emit_and_run::Overlay {
       render json: [article, nil, "x"]
     when "splat"
       render json: [*Article.where(id: article.id).to_a, "x"]
+    when "string"
+      render json: { a: 1 }.to_json
+    when "raw"
+      render json: "[1,2]"
+    when "maybe_string"
+      text = params[:other] ? "[3]" : nil
+      render json: text
+    when "to_json"
+      render plain: article.to_json + "|" + { a: article }.to_json
+    when "maybe"
+      found = Article.find_by(id: params[:other])
+      render json: { article: found }
+    when "float"
+      render json: { at: at, x: Float::INFINITY, y: 1.5 }
+    when "only"
+      render json: article, only: [:title, :id]
+    when "except"
+      render json: article, except: [:body, :updated_at], status: :ok
+    when "methods"
+      render plain: article.to_json(only: [:id], methods: [:headline])
+    when "relation_only"
+      render json: Article.where(id: article.id), only: :id
     else
       stamps = { "at" => at }
       render json: { stamps: stamps, times: [at] }
@@ -4086,6 +4113,45 @@ class ValuesControllerTest < ActionDispatch::IntegrationTest
     assert_match(/\A\[\{"id":#{@article.id},.*\},"x"\]\z/, response.body)
   end
 
+  test "a String is the body as it is" do
+    get "/values/#{@article.id}", params: { shape: "string" }
+    assert_equal %({"a":1}), response.body
+    get "/values/#{@article.id}", params: { shape: "raw" }
+    assert_equal "[1,2]", response.body
+    get "/values/#{@article.id}", params: { shape: "maybe_string", other: 1 }
+    assert_equal "[3]", response.body
+    get "/values/#{@article.id}", params: { shape: "maybe_string" }
+    assert_equal "null", response.body
+  end
+
+  test "to_json writes what render json: does" do
+    get "/values/#{@article.id}", params: { shape: "to_json" }
+    assert_equal %(#{@record}|{"a":#{@record}}), response.body
+  end
+
+  test "a record that may be nil" do
+    get "/values/#{@article.id}", params: { shape: "maybe", other: @article.id }
+    assert_equal %({"article":#{@record}}), response.body
+    get "/values/#{@article.id}", params: { shape: "maybe", other: 0 }
+    assert_equal %({"article":null}), response.body
+  end
+
+  test "only:, except: and methods: as Rails' serializable_hash reads them" do
+    get "/values/#{@article.id}", params: { shape: "only" }
+    assert_equal %({"title":"A \\u003cb\\u003e","id":#{@article.id}}), response.body
+    get "/values/#{@article.id}", params: { shape: "except" }
+    assert_match(/\A\{"id":#{@article.id},"title":"A \\u003cb\\u003e","created_at":"[^"]+"\}\z/, response.body)
+    get "/values/#{@article.id}", params: { shape: "methods" }
+    assert_equal %({"id":#{@article.id},"headline":"A \\u003cB\\u003e"}), response.body
+    get "/values/#{@article.id}", params: { shape: "relation_only" }
+    assert_equal %([{"id":#{@article.id}}]), response.body
+  end
+
+  test "a non-finite Float is null" do
+    get "/values/#{@article.id}", params: { shape: "float" }
+    assert_equal %({"at":"2026-01-02T03:04:05.678Z","x":null,"y":1.5}), response.body
+  end
+
   test "a typed hash and array of times" do
     get "/values/#{@article.id}"
     assert_equal %({"stamps":{"at":"2026-01-02T03:04:05.678Z"},"times":["2026-01-02T03:04:05.678Z"]}), response.body
@@ -4105,7 +4171,7 @@ fn render_json_values_run_on_spinel() {
 Schema.statements.each { |sql| Db.exec(sql) }
 ActiveRecord.adapter = SqliteAdapter
 a = Article.create!(title: "A <b>", body: "Long enough body text")
-["hash", "list", "array", "times"].each do |shape|
+["hash", "list", "array", "times", "string", "raw", "to_json", "maybe", "float", "only", "methods", "relation_only"].each do |shape|
   c = ValuesController.new
   c.params = { "id" => a.id.to_s, "shape" => shape }
   c.process_action(:show)
@@ -4115,7 +4181,7 @@ end
     let run = json_values_app().run_spinel(script);
     run.assert_passes();
     let lines: Vec<&str> = run.stdout.lines().collect();
-    assert_eq!(lines.len(), 4, "{}", run.stdout);
+    assert_eq!(lines.len(), 12, "{}", run.stdout);
     // The record's timestamps are the run's own; read them back and build the exact text around them.
     let stamp = |key: &str| {
         let at = lines[0].find(&format!("\"{key}\":\"")).expect(key) + key.len() + 4;
@@ -4130,6 +4196,14 @@ end
     assert_eq!(lines[1], format!(r#"{{"articles":[{record}],"total":1}}"#));
     assert_eq!(lines[2], format!(r#"[{record},null,"x"]"#));
     assert_eq!(lines[3], r#"{"stamps":{"at":"2026-01-02T03:04:05.678Z"},"times":["2026-01-02T03:04:05.678Z"]}"#);
+    assert_eq!(lines[4], r#"{"a":1}"#);
+    assert_eq!(lines[5], "[1,2]");
+    assert!(lines[6].starts_with(r#"{"id":1,"#) && lines[6].contains(r#"Z"}|{"a":{"id":1,"#), "{}", lines[6]);
+    assert_eq!(lines[7], r#"{"article":null}"#);
+    assert_eq!(lines[8], r#"{"at":"2026-01-02T03:04:05.678Z","x":null,"y":1.5}"#);
+    assert_eq!(lines[9], r#"{"title":"A \u003cb\u003e","id":1}"#);
+    assert_eq!(lines[10], r#"{"id":1,"headline":"A \u003cB\u003e"}"#);
+    assert_eq!(lines[11], r#"[{"id":1}]"#);
 }
 
 /// A Date value as Rails writes it: the ISO date, and `null` for nil.
@@ -4197,6 +4271,46 @@ end
         run.stdout,
         "{\"day\":\"2026-01-02\",\"days\":[\"2026-03-04\"]}\n{\"day\":null,\"days\":[\"2026-03-04\"]}\n"
     );
+}
+
+/// In a non-UTC zone at offset zero (London in winter) a zoned Time is
+/// `+00:00`, as `TimeWithZone#as_json` writes it; a `Time.utc` is still `Z`.
+fn london_json_app() -> emit_and_run::Overlay {
+    emit_and_run::real_blog()
+        .edit(
+            "config/application.rb",
+            "    # config.time_zone = \"Central Time (US & Canada)\"",
+            "    config.time_zone = \"London\"",
+        )
+        .edit(
+            "config/routes.rb",
+            "  root \"articles#index\"\n",
+            "  root \"articles#index\"\n  get \"/zoned\", to: \"zoned#show\"\n",
+        )
+        .write(
+            "app/controllers/zoned_controller.rb",
+            "class ZonedController < ApplicationController\n  def show\n    at = Time.utc(2026, 1, 2, 3, 4, 5)\n    render json: { utc: at, london: at.in_time_zone(\"London\") }\n  end\nend\n",
+        )
+}
+
+#[test]
+fn render_json_time_in_a_zone_at_offset_zero() {
+    london_json_app()
+        .write(
+            "test/controllers/zoned_controller_test.rb",
+            "require \"test_helper\"\n\nclass ZonedControllerTest < ActionDispatch::IntegrationTest\n  test \"london in winter\" do\n    get \"/zoned\"\n    assert_equal %({\"utc\":\"2026-01-02T03:04:05.000Z\",\"london\":\"2026-01-02T03:04:05.000+00:00\"}), response.body\n  end\nend\n",
+        )
+        .run_test("test/controllers/zoned_controller_test.rb")
+        .assert_passes();
+}
+
+#[test]
+#[ignore = "requires the Spinel toolchain"]
+fn render_json_time_in_a_zone_at_offset_zero_on_spinel() {
+    let script = "c = ZonedController.new\nc.params = {}\nc.process_action(:show)\nputs c.body\n";
+    let run = london_json_app().run_spinel(script);
+    run.assert_passes();
+    assert_eq!(run.stdout, "{\"utc\":\"2026-01-02T03:04:05.000Z\",\"london\":\"2026-01-02T03:04:05.000+00:00\"}\n");
 }
 
 /// offset. Expected values are ActiveSupport 8.1's.
