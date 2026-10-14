@@ -1473,7 +1473,12 @@ for lane in "${LANES[@]}"; do
             case "$lane" in
                 rust|go|tobi) ;;
                 *)
-                    if [[ -z "$csrf" ]]; then
+                    # A header-only app (the edbc779 pin) renders no token:
+                    # the Sec-Fetch-Site + Origin the POST script sends are
+                    # the proof, as at sign-in. parse_wrk still nulls a
+                    # cell that drew a 422.
+                    if [[ -z "$csrf" ]] &&
+                       ! grep -rqs 'using: :header_only' "$APP/app/controllers"; then
                         fail "$lane POST skipped: no CSRF token (a 422 is not a write measurement)"
                         continue
                     fi
