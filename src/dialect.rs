@@ -1084,6 +1084,8 @@ pub enum LibraryClassOrigin {
     /// A `Dry::Validation::Contract` given its `call`, a `Dry::Schema`
     /// constant's class, or what they share (`ingest::dry_validation`).
     DryValidation,
+    /// dry-monads' Result and do-notation stand-ins (`ingest::dry_monads`).
+    DryMonads,
 }
 
 /// A graphql-ruby object type (a class descending from
