@@ -15587,7 +15587,7 @@ fn implicit_self_app() -> emit_and_run::Overlay {
         .edit(
             "test/models/article_test.rb",
             "  test \"destroys comments when article is destroyed\" do\n",
-            "  test \"methods read the record on implicit self\" do\n    article = articles(:one)\n    assert_equal \"GETTING STARTED WITH RAILS!\", article.shout\n    assert_equal 1, article.comment_count\n  end\n\n  test \"destroys comments when article is destroyed\" do\n",
+            "  test \"methods read the record on implicit self\" do\n    article = articles(:one)\n    assert_equal \"GETTING STARTED WITH RAILS!\", article.shout\n    assert_equal 1, article.comment_count\n    assert_equal \"!\", Article.new.shout\n  end\n\n  test \"destroys comments when article is destroyed\" do\n",
         )
 }
 
