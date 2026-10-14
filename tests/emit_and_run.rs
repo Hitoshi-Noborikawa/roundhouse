@@ -25,6 +25,8 @@ mod array_excluding_runs;
 mod integer_query_find_by;
 #[path = "emit_and_run/time_zone_default.rs"]
 mod time_zone_default;
+#[path = "emit_and_run/view_presence_url_encode.rs"]
+mod view_presence_url_encode;
 #[path = "support/lambda_signatures.rs"]
 mod lambda_signatures_contract;
 #[path = "emit_and_run/lambda_signatures.rs"]
