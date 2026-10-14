@@ -2399,6 +2399,9 @@ jobs:
       - name: cargo test --test framework_tests_crystal -- --ignored
         if: ${{ !cancelled() && matrix.target == 'crystal' }}
         run: cargo test --test framework_tests_crystal -- --ignored --nocapture
+      - name: cargo test --test emit_and_run render json writer on crystal
+        if: ${{ !cancelled() && matrix.target == 'crystal' }}
+        run: cargo test --locked --test emit_and_run render_json_record_writer_runs_on_crystal -- --ignored --nocapture --exact
       - name: cargo test --test framework_tests_kotlin
         if: ${{ !cancelled() && matrix.target == 'kotlin' }}
         run: cargo test --test framework_tests_kotlin -- --ignored --nocapture

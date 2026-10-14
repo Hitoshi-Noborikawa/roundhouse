@@ -4361,7 +4361,7 @@ end
 #[test]
 fn render_json_record_writer_is_unsupported_on_strict_targets() {
     use roundhouse::project::BuildTarget;
-    for target in [BuildTarget::Go, BuildTarget::Crystal] {
+    for target in [BuildTarget::Go, BuildTarget::CSharp] {
         let (_emitted, errors) = records_json_app().emit(target);
         assert!(errors.iter().any(|e| e.contains("json_writer")), "{target:?}: {errors:?}");
     }
@@ -4542,6 +4542,19 @@ fn render_json_record_writer_runs_on_python() {
         .expect("run python unittest");
     assert!(output.status.success(), "{}\n{}\n{}", emitted.display(),
         String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+}
+
+/// The same test, translated to Crystal.
+#[test]
+#[ignore = "requires Crystal; builds and runs an emitted app"]
+fn render_json_record_writer_runs_on_crystal() {
+    let (emitted, errors) = json_writer_app().emit(roundhouse::project::BuildTarget::Crystal);
+    assert!(errors.is_empty(), "{errors:?}");
+    for (program, args) in [("shards", &["install"][..]), ("crystal", &["spec", "--no-color"][..])] {
+        let output = std::process::Command::new(program).args(args).current_dir(&*emitted).output().expect("run crystal");
+        assert!(output.status.success(), "{program} {args:?} in {}\n{}\n{}", emitted.display(),
+            String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+    }
 }
 
 /// The same writer compiled by Spinel, where the runtime encoder does not exist.
