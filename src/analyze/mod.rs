@@ -7845,6 +7845,9 @@ fn param_ty_with_default(observed: Option<Ty>, param: &crate::dialect::Param) ->
     match (observed, default) {
         (Some(o), Some(d)) => Some(crate::analyze::body::union_of(o, d)),
         (Some(o), None) => Some(o),
+        // A `nil` default says the parameter is nilable, not that it is
+        // always nil: with no call-site evidence the value is unknown.
+        (None, Some(Ty::Nil)) => None,
         (None, Some(d)) => Some(d),
         (None, None) => None,
     }
