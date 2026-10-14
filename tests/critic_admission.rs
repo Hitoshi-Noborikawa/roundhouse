@@ -75,8 +75,8 @@ fn new_errors_api_requires_runtime_support() {
 }
 
 #[test]
-fn errors_details_and_added_are_admitted() {
-    admits("errors.details[:title].map { |detail| detail[:error] }; errors.added?(:title, :blank)");
+fn errors_merge_details_and_added_are_admitted() {
+    admits("errors.merge!(errors); errors.details[:title].map { |detail| detail[:error] }; errors.added?(:title, :blank)");
 }
 
 #[test]

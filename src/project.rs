@@ -5254,13 +5254,15 @@ const RUBY_SPINEL_ONLY_METHODS: &[(&str, &str)] = &[
     // generated `case` lives in the same ruby-family/spinel file.
     ("ActiveRecord::Base", "instantiate_named"),
     // `lower::errors_index`'s `errors.to_hash`, `messages`,
-    // `attribute_names`, `delete` and `details`: the helpers are
+    // `attribute_names`, `delete`, `details`, `import` and `merge!`: the helpers are
     // `runtime/ruby/active_support_ext.rb`, which no strict target loads.
     ("ActiveSupport", "errors_to_hash"),
     ("ActiveSupport", "errors_messages"),
     ("ActiveSupport", "errors_attribute_names"),
     ("ActiveSupport", "errors_delete"),
     ("ActiveSupport", "errors_details"),
+    ("ActiveSupport", "errors_import"),
+    ("ActiveSupport", "errors_merge"),
 ];
 
 /// Instance methods only the ruby family and spinel can answer: a model's

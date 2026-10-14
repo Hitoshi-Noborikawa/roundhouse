@@ -2027,6 +2027,20 @@ values, so any other key is an error. `errors.added?(:field, :type)` is
 is Rails' `strict_match?` with no options: `added?(:body, :too_short)`
 is false, because `length` keeps `count:`. With options it is an error.
 
+`errors.import(error, attribute: :field)` and `errors.merge!(other)`
+add another record's errors, and Rails names each imported attribute
+as the importing model does: a `Comment`'s `body` error merged into an
+`Article` reads `Body can't be blank` even when the locale names the
+comment's `body` "Remark". The attribute is only known at run time, so
+the lowering passes `ActiveSupport.errors_import` / `errors_merge` the
+importing model's translated attribute names, folded from the locale,
+and `errors.format` split around the name and the message; any other
+attribute is humanized, as `human_attribute_name` falls back to.
+`merge!` of the errors themselves adds nothing, as in Rails. An
+`errors.format` that does not name the attribute and then the message
+once each, or an `import` with options beyond a Symbol `attribute:`,
+is an error. Both helpers are gaps on a strict target.
+
 A `belongs_to` checks its record where it is declared, among the
 `validates`, so its error lists in Rails' order, and its type is
 `:blank`: Rails validates the association's presence with `message:
@@ -2050,10 +2064,11 @@ compile in Rust or Go. The class sits in `active_record/base.rb` so
 `Base`'s own bodies type against it.
 
 **What it costs.** A message pushed by anything other than those two
-lowerings has no detail beside it. `errors.import` and `errors.merge!`,
-which some apps call, are not modeled, and neither is `errors.delete`
-with a type, nor are the option values `details` would answer; an
-`errors <<` written by hand pushes a message no field claims. `errors.add` reads its record twice
+lowerings has no detail beside it. `errors.delete` with a type is not
+modeled, nor are the option values `details` would answer; an
+`errors <<` written by hand pushes a message no field claims. A dotted
+attribute (`comments.body`) is named by humanizing it, where Rails
+looks under the association's namespace first. `errors.add` reads its record twice
 (once for each push), so one whose record is a call with arguments or a
 receiver (`Draft.latest.errors.add(...)`) stays residue, and so does a
 message that is a call (`errors.add(:title, reason_for(x))`), which the
