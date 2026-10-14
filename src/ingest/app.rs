@@ -3389,6 +3389,51 @@ fn is_recognized_wrap_parameters(method: &str, args: &[crate::expr::Expr]) -> bo
         && crate::lower::controller_to_library::params_wrapper::is_recognized_wrap_parameters_call(args)
 }
 
+/// Class-level `respond_to :json` is consumed as a no-op when nothing
+/// in this controller's ANCESTOR CHAIN (self included) calls
+/// `respond_with` — the only thing the responders gem's `respond_to`
+/// declaration ever feeds. `respond_with` isn't modeled, so a
+/// controller that actually calls it is left to fail there (an
+/// ordinary unresolved-method error at analyze time), not silenced by
+/// this check.
+fn respond_to_macro_is_consumed(
+    controller: &crate::dialect::Controller,
+    all: &[crate::dialect::Controller],
+) -> bool {
+    use std::collections::HashSet;
+    let mut seen: HashSet<crate::ident::ClassId> = HashSet::new();
+    let mut cur = Some(controller);
+    while let Some(c) = cur {
+        if !seen.insert(c.name.clone()) {
+            break;
+        }
+        if c.actions().any(|a| expr_calls_respond_with(&a.body)) {
+            return false;
+        }
+        cur = c.parent.as_ref().and_then(|p| all.iter().find(|x| &x.name == p));
+    }
+    true
+}
+
+/// Does `expr` contain a receiverless (or `self.`) call to
+/// `respond_with` anywhere in its tree?
+fn expr_calls_respond_with(expr: &crate::expr::Expr) -> bool {
+    use crate::expr::ExprNode;
+    if let ExprNode::Send { recv, method, .. } = &*expr.node
+        && method.as_str() == "respond_with"
+        && recv.as_ref().is_none_or(|r| matches!(&*r.node, ExprNode::SelfRef))
+    {
+        return true;
+    }
+    let mut found = false;
+    expr.node.for_each_child(&mut |c| {
+        if !found && expr_calls_respond_with(c) {
+            found = true;
+        }
+    });
+    found
+}
+
 /// A receiverless, blockless call left in a controller's class body
 /// after every consumer has run is a macro roundhouse does not
 /// recognize — `rate_limit`, say. Its effect (a guard, a filter, a
@@ -3484,6 +3529,22 @@ fn report_unrecognized_controller_macros(app: &App) {
                         method.as_str()
                     ),
                 });
+                continue;
+            }
+            // Class-level `respond_to :json` (the responders gem) — a
+            // pure config declaration: it names the mimes `respond_with`
+            // answers, and has no effect of its own. `respond_with`
+            // itself isn't modeled, so a controller that actually
+            // depends on it keeps failing loudly there (an ordinary
+            // unresolved-method error); this macro just configures a
+            // call nothing in the chain makes, so it's consumed as a
+            // no-op rather than flagged as an unrecognized gap. Distinct
+            // from the ACTION-body `respond_to do |format| … end`
+            // block, which carries a block and never reaches this
+            // (blockless) branch at all.
+            if method.as_str() == "respond_to"
+                && respond_to_macro_is_consumed(controller, &app.controllers)
+            {
                 continue;
             }
             // `before_action -> { … }, only: […]` (233 controllers) and
