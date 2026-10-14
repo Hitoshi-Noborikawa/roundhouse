@@ -4018,6 +4018,11 @@ fn json_values_app() -> emit_and_run::Overlay {
       render json: { article: found }
     when "float"
       render json: { at: at, x: Float::INFINITY, y: 1.5 }
+    when "float_only"
+      ratios = [1.5, Float::NAN]
+      render json: { x: Float::INFINITY, y: 1.5, ratios: ratios, nested: [-Float::INFINITY] }
+    when "float_to_json"
+      render plain: { x: Float::NAN, y: 2.5 }.to_json
     when "only"
       render json: article, only: [:title, :id]
     when "except"
@@ -4109,6 +4114,10 @@ class ValuesControllerTest < ActionDispatch::IntegrationTest
   test "a non-finite Float is null" do
     get "/values/#{@article.id}", params: { shape: "float" }
     assert_equal %({"at":"2026-01-02T03:04:05.678Z","x":null,"y":1.5}), response.body
+    get "/values/#{@article.id}", params: { shape: "float_only" }
+    assert_equal %({"x":null,"y":1.5,"ratios":[1.5,null],"nested":[null]}), response.body
+    get "/values/#{@article.id}", params: { shape: "float_to_json" }
+    assert_equal %({"x":null,"y":2.5}), response.body
   end
 
   test "a typed hash and array of times" do
@@ -4130,7 +4139,7 @@ fn render_json_values_run_on_spinel() {
 Schema.statements.each { |sql| Db.exec(sql) }
 ActiveRecord.adapter = SqliteAdapter
 a = Article.create!(title: "A <b>", body: "Long enough body text")
-["hash", "list", "array", "times", "string", "raw", "to_json", "maybe", "float", "only", "methods", "relation_only"].each do |shape|
+["hash", "list", "array", "times", "string", "raw", "to_json", "maybe", "float", "only", "methods", "relation_only", "float_only", "float_to_json"].each do |shape|
   c = ValuesController.new
   c.params = { "id" => a.id.to_s, "shape" => shape }
   c.process_action(:show)
@@ -4140,7 +4149,7 @@ end
     let run = json_values_app().run_spinel(script);
     run.assert_passes();
     let lines: Vec<&str> = run.stdout.lines().collect();
-    assert_eq!(lines.len(), 12, "{}", run.stdout);
+    assert_eq!(lines.len(), 14, "{}", run.stdout);
     // The record's timestamps are the run's own; read them back and build the exact text around them.
     let stamp = |key: &str| {
         let at = lines[0].find(&format!("\"{key}\":\"")).expect(key) + key.len() + 4;
@@ -4163,6 +4172,8 @@ end
     assert_eq!(lines[9], r#"{"title":"A \u003cb\u003e","id":1}"#);
     assert_eq!(lines[10], r#"{"id":1,"headline":"A \u003cB\u003e"}"#);
     assert_eq!(lines[11], r#"[{"id":1}]"#);
+    assert_eq!(lines[12], r#"{"x":null,"y":1.5,"ratios":[1.5,null],"nested":[null]}"#);
+    assert_eq!(lines[13], r#"{"x":null,"y":2.5}"#);
 }
 
 /// A Date value as Rails writes it: the ISO date, and `null` for nil.

@@ -942,11 +942,15 @@ unencoded; a value that is a String only at run time goes through
 `JsonRender.body`, which tests for one. `JsonBuilder.encode_value` writes a
 non-finite Float as `null`. `time_json` writes `Z` only for a UTC Time or a
 UTC app zone, so London in winter is `+00:00`, as `TimeWithZone#as_json`
-writes it. Two divergences remain. A runtime Time carries an offset and no
-zone, so in a UTC app zone a Time moved to London with `in_time_zone` is
-written `Z` in winter, where Rails writes `+00:00`. A payload of primitives
-alone goes through `JSON.generate` (below), which raises on a non-finite
-Float, where Rails writes `null`.
+writes it. A payload of primitives alone goes through `JSON.generate`
+(below), which raises on a non-finite Float where Rails writes `null`, so
+each Float a literal or a typed `Array[Float]` holds is handed over through
+`JsonBuilder.finite_float`, nil for NaN and the infinities; `to_json` on a
+Hash or Array does the same. Two divergences remain. A Float inside a
+Hash or nested Array held in a variable is not reached, and still raises
+when it is not finite. A runtime Time carries an offset and no zone, so in
+a UTC app zone a Time moved to London with `in_time_zone` is written `Z` in
+winter, where Rails writes `+00:00`.
 
 `only:`, `except:` and `methods:` given as literal Symbol lists, either to
 `render json: <record>` (Rails hands a render's other options to `to_json`)
