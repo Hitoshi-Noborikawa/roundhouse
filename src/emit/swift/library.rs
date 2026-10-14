@@ -974,9 +974,12 @@ fn split_types(sig: &str) -> Vec<String> {
     let mut depth = 0i32;
     let mut cur = String::new();
     let mut chars = sig.chars().peekable();
+    let mut prev = ' ';
     while let Some(c) = chars.next() {
         match c {
             '(' | '[' | '<' => depth += 1,
+            // Not a closing bracket: the `>` of a function type's `->`.
+            '>' if prev == '-' => {}
             ')' | ']' | '>' => depth -= 1,
             ',' if depth == 0 && chars.peek() == Some(&' ') => {
                 chars.next();
@@ -986,11 +989,21 @@ fn split_types(sig: &str) -> Vec<String> {
             _ => {}
         }
         cur.push(c);
+        prev = c;
     }
     if !cur.is_empty() {
         out.push(cur);
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn split_types_keeps_a_function_type_whole() {
+        assert_eq!(super::split_types("(Int) -> Int, String"), vec!["(Int) -> Int", "String"]);
+        assert_eq!(super::split_types("[String: Any], Int?"), vec!["[String: Any]", "Int?"]);
+    }
 }
 
 fn render_params(m: &MethodDef) -> (String, String, String) {
