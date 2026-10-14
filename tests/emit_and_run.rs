@@ -4361,7 +4361,7 @@ end
 #[test]
 fn render_json_record_writer_is_unsupported_on_strict_targets() {
     use roundhouse::project::BuildTarget;
-    for target in [BuildTarget::Go, BuildTarget::Elixir] {
+    for target in [BuildTarget::Go] {
         let (_emitted, errors) = records_json_app().emit(target);
         assert!(errors.iter().any(|e| e.contains("json_writer")), "{target:?}: {errors:?}");
     }
@@ -4601,6 +4601,24 @@ fn render_json_record_writer_runs_on_swift() {
         .expect("run swift test");
     assert!(output.status.success(), "{}\n{}\n{}", emitted.display(),
         String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+}
+
+/// The same test, translated to Elixir.
+#[test]
+#[ignore = "requires Elixir; builds and runs an emitted app"]
+fn render_json_record_writer_runs_on_elixir() {
+    let (emitted, errors) = json_writer_app().emit(roundhouse::project::BuildTarget::Elixir);
+    assert!(errors.is_empty(), "{errors:?}");
+    for (args, env) in [(&["deps.get"][..], Some("test")), (&["test"][..], None)] {
+        let mut mix = std::process::Command::new("mix");
+        mix.args(args).current_dir(&*emitted).env("MIX_HOME", emitted.join(".mix"));
+        if let Some(env) = env {
+            mix.env("MIX_ENV", env);
+        }
+        let output = mix.output().expect("run mix");
+        assert!(output.status.success(), "mix {args:?} in {}\n{}\n{}", emitted.display(),
+            String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+    }
 }
 
 /// The same writer compiled by Spinel, where the runtime encoder does not exist.

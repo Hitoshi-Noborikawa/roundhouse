@@ -543,7 +543,7 @@ fn writer_call_named(recv: Expr, name: &str) -> Expr {
     )
 }
 
-/// `"[" + <v>.map { |record| record.as_json_str }.join(",") + "]"` —
+/// `"[" + <v>.map { |item| item.as_json_str }.join(",") + "]"` —
 /// map+join, the shape the jbuilder lowerer's `array!` uses, for the
 /// same reason: it emits idiomatically on every target, where a
 /// mutable first-element flag does not.
@@ -559,7 +559,8 @@ fn collection_text_named(value: &Expr, id: &ClassId, name: &str) -> Expr {
             Ty::Str,
         )
     };
-    let item = Symbol::from("record");
+    // Not `record`: Elixir threads `self` through a local of that name, which the block param would shadow.
+    let item = Symbol::from("item");
     let item_ref = with_ty(
         Expr::new(span, ExprNode::Var { id: crate::ident::VarId(0), name: item.clone() }),
         Ty::Class { id: id.clone(), args: vec![].into() },

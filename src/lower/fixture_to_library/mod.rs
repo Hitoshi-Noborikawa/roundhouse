@@ -51,13 +51,7 @@ pub fn lower_fixtures_to_library_classes(app: &App) -> Vec<LibraryClass> {
                     .map(|t| t.columns.iter()
                         .filter(|c| m.enum_defaults.contains_key(&c.name)).collect()))
                 .unwrap_or_default();
-            let temporal: HashMap<Symbol, bool> = app.models.iter()
-                .find(|m| m.name == f.class)
-                .and_then(|m| app.schema.tables.get(&m.table.0))
-                .map(|t| t.columns.iter()
-                    .filter(|c| matches!(c.col_type, crate::schema::ColumnType::Date | crate::schema::ColumnType::DateTime))
-                    .map(|c| (c.name.clone(), c.col_type == crate::schema::ColumnType::Date)).collect())
-                .unwrap_or_default();
+            let temporal = temporal_columns(app, &f.class);
             build_fixture_class(f, &lowered, dynamic.contains(&f.name), &defaults, &temporal)
         })
         .collect()
@@ -500,8 +494,7 @@ fn build_load_method_body(
         for field in &r.fields {
             // Not `<col>=`: it takes a parsed Time on a strict target, where the YAML text is the stored text hydration writes.
             let method = match &field.value {
-                LoweredFixtureValue::Literal { raw, .. }
-                    if temporal.get(&field.column).is_some_and(|&date| is_stored_temporal_text(raw, date)) =>
+                LoweredFixtureValue::Literal { raw, .. } if is_stored_temporal(temporal, &field.column, raw) =>
                 {
                     format!("{}_raw=", field.column.as_str())
                 }
@@ -625,6 +618,22 @@ fn load_file_blob(id: i64, blob: &crate::dialect::FixtureFileBlob) -> Expr {
 /// YAML-string values come through as raw strings; cast to the
 /// column's typed literal. Number-shaped raws to Int/Float; "true"/
 /// "false" to Bool; everything else to Str.
+/// A model's date and datetime columns, each with whether it is a date.
+pub(crate) fn temporal_columns(app: &App, class: &ClassId) -> HashMap<Symbol, bool> {
+    app.models.iter()
+        .find(|m| &m.name == class)
+        .and_then(|m| app.schema.tables.get(&m.table.0))
+        .map(|t| t.columns.iter()
+            .filter(|c| matches!(c.col_type, crate::schema::ColumnType::Date | crate::schema::ColumnType::DateTime))
+            .map(|c| (c.name.clone(), c.col_type == crate::schema::ColumnType::Date)).collect())
+        .unwrap_or_default()
+}
+
+/// Whether a fixture's text for `column` is already what the column stores, so a loader writes it to `<column>_raw`.
+pub(crate) fn is_stored_temporal(temporal: &HashMap<Symbol, bool>, column: &Symbol, raw: &str) -> bool {
+    temporal.get(column).is_some_and(|&date| is_stored_temporal_text(raw, date))
+}
+
 /// `YYYY-MM-DD` for a date column, and that and ` HH:MM:SS[.fraction]` for a datetime one: the text each stores.
 fn is_stored_temporal_text(raw: &str, date_column: bool) -> bool {
     let b = raw.as_bytes();

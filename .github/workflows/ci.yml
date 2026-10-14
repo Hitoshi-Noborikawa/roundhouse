@@ -2430,6 +2430,9 @@ jobs:
       - name: cargo test --test elixir_toolchain -- --ignored
         if: ${{ !cancelled() && matrix.target == 'elixir' }}
         run: cargo test --test elixir_toolchain -- --ignored --nocapture
+      - name: cargo test --test emit_and_run render json writer on elixir
+        if: ${{ !cancelled() && matrix.target == 'elixir' }}
+        run: cargo test --locked --test emit_and_run render_json_record_writer_runs_on_elixir -- --ignored --nocapture --exact
       - name: cargo test --test python_toolchain -- --ignored
         if: ${{ !cancelled() && matrix.target == 'python' }}
         run: cargo test --test python_toolchain -- --ignored --nocapture
