@@ -93,6 +93,32 @@ fn a_controller_html_key_stays_an_error_and_an_own_t_is_kept() {
     assert!(controller.contains("t(\"anything\")"), "{controller}");
 }
 
+/// A `t` from a concern the controller includes is the concern's, the
+/// same as one the controller defines: typed as the concern's method
+/// and not folded into I18n's.
+#[test]
+fn a_t_from_an_included_concern_is_kept() {
+    let (emitted, errors) = emit_and_run::real_blog()
+        .write(
+            "app/controllers/concerns/shouting.rb",
+            "module Shouting\n  extend ActiveSupport::Concern\n\n  def t(key)\n    key.upcase\n  end\nend\n",
+        )
+        .edit(
+            "app/controllers/articles_controller.rb",
+            "class ArticlesController < ApplicationController\n",
+            "class ArticlesController < ApplicationController\n  include Shouting\n",
+        )
+        .edit(
+            "app/controllers/articles_controller.rb",
+            "    @articles = Article.includes(:comments).order(created_at: :desc)\n",
+            "    @articles = Article.includes(:comments).order(created_at: :desc)\n    @note = t(\"anything\")\n",
+        )
+        .emit(roundhouse::project::BuildTarget::Ruby);
+    assert!(!errors.iter().any(|e| e.contains("I18n")), "{errors:?}");
+    let controller = std::fs::read_to_string(emitted.join("app/controllers/articles_controller.rb")).expect("emitted controller");
+    assert!(controller.contains("t(\"anything\")"), "{controller}");
+}
+
 /// `I18n.t` with only key defaults, none of them there: a bare Symbol
 /// answers the plain missing message, a list names every key considered
 /// (i18n 1.15.2's `MissingTranslation#message`), and the environment
