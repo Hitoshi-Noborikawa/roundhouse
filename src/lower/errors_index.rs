@@ -26,6 +26,10 @@
 //! `errors_attribute_names`. `include?` / `key?` / `has_key?` ask
 //! `error_messages_for` like `errors[:field]` does.
 //!
+//! Iterating `errors` (`each`, `map`, `find`, `first`, …) iterates
+//! `error_details`, which Rails' `ActiveModel::Error` reads are asked of:
+//! `attribute` answers a Symbol, `message` and `full_message` the texts.
+//!
 //! Views take the same rewrite: the scaffold's form partial reads
 //! `<record>.errors[:field].none?` / `.any?` inside a `class:` array,
 //! which renders through `class_names` at request time.
@@ -41,19 +45,60 @@ use crate::ty::Ty;
 /// recognizable `errors[…]` sites left dynamic, with the reason.
 pub fn apply_errors_index_lowering(app: &mut App) -> Vec<Diagnostic> {
     let mut diags = Vec::new();
-    super::for_each_owned_hook_body(app, &mut |_, body| {
-        rewrite(body, &mut diags);
-        rewrite_whole_messages(body);
-    });
-    super::for_each_test_body(app, &mut |body| {
-        rewrite(body, &mut diags);
-        rewrite_whole_messages(body);
-    });
+    super::for_each_owned_hook_body(app, &mut |_, body| rewrite_body(body, &mut diags));
+    super::for_each_test_body(app, &mut |body| rewrite_body(body, &mut diags));
     for view in &mut app.views {
-        rewrite(&mut view.body, &mut diags);
-        rewrite_whole_messages(&mut view.body);
+        rewrite_body(&mut view.body, &mut diags);
     }
     diags
+}
+
+fn rewrite_body(body: &mut Expr, diags: &mut Vec<Diagnostic>) {
+    rewrite(body, diags);
+    rewrite_whole_messages(body);
+    symbolize_error_attributes(body);
+    iterate_details(body);
+}
+
+/// What `errors` answers through Enumerable, over its `ActiveModel::Error`s.
+pub(crate) const ERROR_ITERATORS: &[&str] =
+    &["each", "map", "collect", "select", "filter", "reject", "find", "detect", "any?", "all?", "none?", "count", "first"];
+
+fn is_error(e: &Expr) -> bool {
+    matches!(e.ty.as_ref().map(Ty::peel_nilable), Some(Ty::Class { id, .. }) if id.0.as_str() == "ActiveModel::Error")
+}
+
+// Not `ErrorDetail#attribute` as it is: it is the attribute's String, where Rails' `Error#attribute` is a Symbol.
+fn symbolize_error_attributes(expr: &mut Expr) {
+    expr.node.for_each_child_mut(&mut |c| symbolize_error_attributes(c));
+    let ExprNode::Send { recv: Some(r), method, args, block: None, .. } = &mut *expr.node else { return };
+    if method.as_str() != "attribute" || !args.is_empty() || !is_error(r) {
+        return;
+    }
+    expr.ty = Some(Ty::Str);
+    let read = std::mem::replace(expr, Expr::new(expr.span, ExprNode::Seq { exprs: vec![] }));
+    *expr = send(read.span, read, "to_sym", vec![], Ty::Sym);
+}
+
+/// `<owner>.errors.<iterator>` → `<owner>.error_details.<iterator>`, and
+/// every `ActiveModel::Error` it yields or answers is an `ErrorDetail`.
+fn iterate_details(expr: &mut Expr) {
+    expr.node.for_each_child_mut(&mut |c| iterate_details(c));
+    let error = crate::ident::ClassId(Symbol::from("ActiveModel::Error"));
+    let detail = crate::ident::ClassId(Symbol::from("ActiveRecord::ErrorDetail"));
+    if let Some(ty) = &expr.ty {
+        expr.ty = Some(ty.rebind_class(&error, &detail));
+    }
+    let ExprNode::Send { recv: Some(reader), method, block, .. } = &mut *expr.node else { return };
+    if !ERROR_ITERATORS.contains(&method.as_str()) || !is_model_errors_read(reader) {
+        return;
+    }
+    // Their own answers when blockless are the accumulator's: the count, or whether there is any message.
+    if block.is_none() && matches!(method.as_str(), "each" | "any?" | "none?" | "count") {
+        return;
+    }
+    let ExprNode::Send { recv: owner, .. } = &*reader.node else { unreachable!("an errors reader") };
+    *reader = super::errors_add::error_details(owner.clone(), reader.span);
 }
 
 fn residue(expr: &Expr, reason: &str) -> Diagnostic {

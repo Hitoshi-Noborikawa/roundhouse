@@ -1427,6 +1427,98 @@ fn errors_to_hash_groups_messages_by_attribute_on_spinel() {
     errors_to_hash_app("%{attribute} %{message}").run_spinel(ERRORS_TO_HASH).assert_passes();
 }
 
+/// Iterating `errors` yields each `ActiveModel::Error`, as Rails 8.1
+/// does: its attribute is a Symbol, its `message` the bare message and
+/// its `full_message` the one `full_messages` lists.
+fn errors_each_app() -> emit_and_run::Overlay {
+    errors_to_hash_app("%{attribute} %{message}").edit(
+        "app/models/article.rb",
+        "  def errors_hash\n",
+        "  def error_rows
+    rows = []
+    errors.each { |error| rows << [error.attribute, error.message, error.full_message] }
+    rows
+  end
+
+  def error_full_messages
+    errors.map(&:full_message)
+  end
+
+  def error_attributes
+    errors.collect { |error| error.attribute }
+  end
+
+  def base_message
+    found = errors.find { |error| error.attribute == :base }
+    found ? found.message : \"none\"
+  end
+
+  def first_attribute
+    errors.first ? errors.first.attribute : :none
+  end
+
+  def body_messages
+    errors.select { |error| error.attribute == :body }.map(&:message)
+  end
+
+  def unattributed_count
+    errors.reject { |error| error.attribute == :base }.size
+  end
+
+  def all_have_messages
+    errors.all? { |error| error.message.length > 0 }
+  end
+
+  def errors_hash\n",
+    )
+}
+
+const ERRORS_EACH: &str = r#"a = Article.new(title: "", body: "odd")
+a.valid?
+rows = [[:title, "can't be blank", "Title can't be blank"], [:body, "is too short (minimum is 10 characters)", "Body is too short (minimum is 10 characters)"], [:base, "is odd", "is odd"]]
+raise a.error_rows.inspect unless a.error_rows == rows
+raise a.error_full_messages.inspect unless a.error_full_messages == rows.map(&:last)
+raise a.error_attributes.inspect unless a.error_attributes == [:title, :body, :base]
+raise a.base_message.inspect unless a.base_message == "is odd"
+raise a.first_attribute.inspect unless a.first_attribute == :title
+raise a.body_messages.inspect unless a.body_messages == ["is too short (minimum is 10 characters)"]
+raise a.unattributed_count.inspect unless a.unattributed_count == 2
+raise a.all_have_messages.inspect unless a.all_have_messages == true
+b = Article.new(title: "A title", body: "A long enough body")
+b.valid?
+raise b.error_rows.inspect unless b.error_rows.empty? && b.error_full_messages.empty?
+raise b.base_message.inspect unless b.base_message == "none" && b.first_attribute == :none
+puts "errors iteration passed"
+"#;
+
+#[test]
+fn iterating_errors_yields_each_error() {
+    errors_each_app().run_ruby(ERRORS_EACH).assert_passes();
+}
+
+#[test]
+#[ignore = "requires the Spinel toolchain"]
+fn iterating_errors_yields_each_error_on_spinel() {
+    errors_each_app().run_spinel(ERRORS_EACH).assert_passes();
+}
+
+/// `ErrorDetail#kind` is a String, so it cannot answer Rails' Symbol `type`.
+#[test]
+fn an_error_s_type_stays_an_error() {
+    let (_emitted, errors) = errors_each_app()
+        .edit(
+            "app/models/article.rb",
+            "  def error_rows\n",
+            "  def error_types
+    errors.map { |error| error.type }
+  end
+
+  def error_rows\n",
+        )
+        .emit(roundhouse::project::BuildTarget::Ruby);
+    assert!(errors.iter().any(|e| e.contains("ActiveModel::Error not supported (all targets): type lacks")), "{errors:#?}");
+}
+
 /// The helper is the shared Ruby runtime's, which no strict target loads.
 #[test]
 fn errors_to_hash_is_a_gap_on_strict_targets() {
@@ -13817,5 +13909,3 @@ puts "PASS friendly oracle"
 }
 #[path = "emit_and_run/acts_as_votable.rs"]
 mod acts_as_votable;
-
-

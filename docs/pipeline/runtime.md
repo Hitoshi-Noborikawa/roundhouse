@@ -1898,7 +1898,7 @@ name. Here `errors` stays a plain `Array[String]` of FULL messages
 `error_details`, holds an `ActiveRecord::ErrorDetail` for each:
 attribute `"url"`, kind `"not_public"` (the message itself when
 `errors.add` was given a String, as Rails' type is), message
-`"is not public"`. `errors.add` and every `validates` rule push to both
+`"is not public"`, full message `"Url is not public"`. `errors.add` and every `validates` rule push to both
 (`src/lower/errors_add.rs`, `model_to_library/validations.rs`), and
 `errors.clear` empties both. `src/lower/errors_index.rs` grounds
 `errors[:url]` as `error_messages_for("url")`, a `Base` method that
@@ -1925,10 +1925,20 @@ target; a field that is not a Symbol or String literal is an error,
 because the accumulator's own `include?` would ask its full messages
 and answer false.
 
+Iterating `errors` (`each`, `map`, `collect`, `select`, `filter`,
+`reject`, `find`, `detect`, `all?`, `first`, and `any?`, `none?` and
+`count` with a block) iterates `error_details` instead, because Rails
+yields each `ActiveModel::Error`, not its full message. On what they
+yield, `attribute` reads `attribute.to_sym`, Rails' Symbol, and
+`message` and `full_message` read the detail's. `type` stays an error:
+`kind` is a String, where Rails answers a Symbol unless `errors.add`
+was given a String. Without a block, `any?`, `none?` and `count` keep
+asking the full messages, which answer the same.
+
 **Why full messages stay in `errors`.** The runtime has no i18n to
 humanize an attribute with, and the lowering already bakes the full
-text; every reader of `errors` (`each`, `count`, `full_messages`, the
-views) keeps reading it as it was.
+text; `full_messages` and the views keep reading it as they did, and
+each detail keeps its own full message for an iteration to read.
 
 **Why `ErrorDetail` under `ActiveRecord`, with `kind`.** The strict
 targets emit the class unqualified, where `Error` is the language's own

@@ -65,9 +65,12 @@ fn unresolved_declared_classes_are_errors() {
 
 #[test]
 fn new_errors_api_requires_runtime_support() {
-    for body in ["errors.added?(:title, :blank)", "errors.details", "errors.where(:title)", "errors.merge!(errors)", "errors.first.options", "errors.delete(:title); errors.size", "f = title.to_sym; errors.full_message(f, \"is taken\")"] {
+    for body in ["errors.added?(:title, :blank)", "errors.details", "errors.where(:title)", "errors.merge!(errors)", "errors.delete(:title); errors.size", "f = title.to_sym; errors.full_message(f, \"is taken\")"] {
         refuses(body, "ActiveModel::Errors");
     }
+    // Not `ActiveModel::Error`: on emit, what an iteration yields is already the `ErrorDetail` the lowering iterates.
+    refuses("errors.first.options", "no known method `options`");
+    refuses("errors.each { |error| error.type }", "no known method `type`");
 }
 
 #[test]
