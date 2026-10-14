@@ -98,6 +98,8 @@ mod controller_url_helpers;
 mod route_default_segment_args;
 #[path = "emit_and_run/controller_super_ivars.rs"]
 mod controller_super_ivars;
+#[path = "emit_and_run/helper_method_session.rs"]
+mod helper_method_session;
 #[path = "emit_and_run/assoc_primary_key.rs"]
 mod assoc_primary_key;
 #[path = "emit_and_run/assoc_pluck_typed.rs"]
