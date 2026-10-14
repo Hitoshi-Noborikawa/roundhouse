@@ -1976,8 +1976,11 @@ name. Here `errors` stays a plain `Array[String]` of FULL messages
 `error_details`, holds an `ActiveRecord::ErrorDetail` for each:
 attribute `"url"`, kind `"not_public"` (the message itself when
 `errors.add` was given a String, as Rails' type is), message
-`"is not public"`, full message `"Url is not public"`, and whether the
-type is a Symbol (`errors.add` given a String message records `false`). `errors.add` and every `validates` rule push to both
+`"is not public"`, full message `"Url is not public"`, whether the
+type is a Symbol (`errors.add` given a String message records `false`),
+and whether Rails' `details` keeps nothing beside the type (`length`
+keeps `count:`, `format`, `inclusion` and `numericality` keep
+`value:`, `confirmation` keeps `attribute:`). `errors.add` and every `validates` rule push to both
 (`src/lower/errors_add.rs`, `model_to_library/validations.rs`), and
 `errors.clear` empties both. `src/lower/errors_index.rs` grounds
 `errors[:url]` as `error_messages_for("url")`, a `Base` method that
@@ -2022,6 +2025,33 @@ drops the field's entries from both, index for index, and answers their
 messages or nil; like `to_hash`, it is a gap on a strict target. Without a block, `any?`, `none?` and `count` keep
 asking the full messages, which answer the same.
 
+`errors.details` is `ActiveSupport.errors_details(error_details)`, the
+details grouped by attribute with Rails' `[]` default, frozen. An
+entry's `[:error]` reads as `type` does; the detail keeps no option
+values, so any other key is an error. `errors.added?(:field, :type)` is
+`of_kind?` asked only of errors with nothing beside their type, which
+is Rails' `strict_match?` with no options: `added?(:body, :too_short)`
+is false, because `length` keeps `count:`. With options it is an error.
+
+`errors.import(error, attribute: :field)` and `errors.merge!(other)`
+add another record's errors, and Rails names each imported attribute
+as the importing model does: a `Comment`'s `body` error merged into an
+`Article` reads `Body can't be blank` even when the locale names the
+comment's `body` "Remark". The attribute is only known at run time, so
+the lowering passes `ActiveSupport.errors_import` / `errors_merge` the
+importing model's translated attribute names, folded from the locale,
+and `errors.format` split around the name and the message; any other
+attribute is humanized, as `human_attribute_name` falls back to.
+`merge!` of the errors themselves adds nothing, as in Rails. An
+`errors.format` that does not name the attribute and then the message
+once each, or an `import` with options beyond a Symbol `attribute:`,
+is an error. Both helpers are gaps on a strict target.
+
+A `belongs_to` checks its record where it is declared, among the
+`validates`, so its error lists in Rails' order, and its type is
+`:blank`: Rails validates the association's presence with `message:
+:required`, which picks the text and leaves the type.
+
 Every one of these rewrites matches an `errors` send as its receiver,
 which `&.` hides behind a local (`(t = record.errors) && t.m`).
 `src/lower/errors_safe_nav.rs` reads `record.errors&.m` as
@@ -2040,10 +2070,11 @@ compile in Rust or Go. The class sits in `active_record/base.rb` so
 `Base`'s own bodies type against it.
 
 **What it costs.** A message pushed by anything other than those two
-lowerings has no detail beside it. `errors.import` and `errors.merge!`,
-which some apps call, are not modeled, and neither is `errors.delete`
-with a type; an `errors <<` written by hand pushes a message no field
-claims. `errors.add` reads its record twice
+lowerings has no detail beside it. `errors.delete` with a type is not
+modeled, nor are the option values `details` would answer; an
+`errors <<` written by hand pushes a message no field claims. A dotted
+attribute (`comments.body`) is named by humanizing it, where Rails
+looks under the association's namespace first. `errors.add` reads its record twice
 (once for each push), so one whose record is a call with arguments or a
 receiver (`Draft.latest.errors.add(...)`) stays residue, and so does a
 message that is a call (`errors.add(:title, reason_for(x))`), which the

@@ -29,6 +29,10 @@
 //! Iterating `errors` (`each`, `map`, `find`, `first`, …) iterates
 //! `error_details`, which Rails' `ActiveModel::Error` reads are asked of:
 //! `attribute` answers a Symbol, `message` and `full_message` the texts.
+//! `details` groups the same records by attribute, and an entry's
+//! `[:error]` reads as `type` does; its options are not kept, so no
+//! other key is grounded. `added?` is `of_kind?` asked only of errors
+//! Rails keeps no options for.
 //!
 //! Views take the same rewrite: the scaffold's form partial reads
 //! `<record>.errors[:field].none?` / `.any?` inside a `class:` array,
@@ -68,15 +72,28 @@ fn is_error(e: &Expr) -> bool {
     matches!(e.ty.as_ref().map(Ty::peel_nilable), Some(Ty::Class { id, .. }) if id.0.as_str() == "ActiveModel::Error")
 }
 
+/// What analyze types an entry of `errors.details` as: Rails' Hash of the type and the error's options.
+pub(crate) const DETAILS_ENTRY: &str = "ActiveModel::ErrorDetails";
+
+fn is_details_entry(e: &Expr) -> bool {
+    matches!(e.ty.as_ref().map(Ty::peel_nilable), Some(Ty::Class { id, .. }) if id.0.as_str() == DETAILS_ENTRY)
+}
+
+/// `[:error]`, the one key of a `details` entry that is grounded.
+pub(crate) fn reads_detail_type(args: &[Expr]) -> bool {
+    matches!(args, [key] if sym_lit(key).is_some_and(|k| k.as_str() == "error"))
+}
+
 /// `ActiveModel::Error#attribute` and `#type` over the `ErrorDetail` an iteration yields.
 fn read_errors(expr: &mut Expr, diags: &mut Vec<Diagnostic>) {
     expr.node.for_each_child_mut(&mut |c| read_errors(c, diags));
     let ExprNode::Send { recv: Some(r), method, args, block: None, .. } = &mut *expr.node else { return };
-    if !args.is_empty() || !is_error(r) {
+    let entry_type = method.as_str() == "[]" && is_details_entry(r) && reads_detail_type(args);
+    if !entry_type && (!args.is_empty() || !is_error(r)) {
         return;
     }
     let span = expr.span;
-    match method.as_str() {
+    match if entry_type { "type" } else { method.as_str() } {
         // Not `ErrorDetail#attribute` as it is: it is the attribute's String, where Rails' `Error#attribute` is a Symbol.
         "attribute" => {
             expr.ty = Some(Ty::Str);
@@ -91,7 +108,7 @@ fn read_errors(expr: &mut Expr, diags: &mut Vec<Diagnostic>) {
                     "error.type",
                     span,
                     "the error is not a plain read",
-                    "`error.type` reads the error three times, so only on a block parameter, a local or `errors.first`".to_string(),
+                    "`error.type` and a `details` entry's `[:error]` read the error three times, so only on a block parameter, a local or `errors.first`".to_string(),
                 );
                 d.severity = crate::diagnostic::Severity::Error;
                 diags.push(d);
@@ -127,9 +144,10 @@ fn reads_again(e: &Expr) -> bool {
 fn iterate_details(expr: &mut Expr) {
     expr.node.for_each_child_mut(&mut |c| iterate_details(c));
     let error = crate::ident::ClassId(Symbol::from("ActiveModel::Error"));
+    let entry = crate::ident::ClassId(Symbol::from(DETAILS_ENTRY));
     let detail = crate::ident::ClassId(Symbol::from("ActiveRecord::ErrorDetail"));
     if let Some(ty) = &expr.ty {
-        expr.ty = Some(ty.rebind_class(&error, &detail));
+        expr.ty = Some(ty.rebind_class(&error, &detail).rebind_class(&entry, &detail));
     }
     let ExprNode::Send { recv: Some(reader), method, block, .. } = &mut *expr.node else { return };
     if !ERROR_ITERATORS.contains(&method.as_str()) || !is_model_errors_read(reader) {
@@ -333,16 +351,18 @@ pub(crate) fn of_kind_grounds(args: &[Expr]) -> bool {
 /// `errors.of_kind?(:field, :type)`: an error on the field with that Symbol type; a String type is one of the field's messages, as Rails asks it.
 fn rewrite_of_kind(expr: &mut Expr, diags: &mut Vec<Diagnostic>) {
     let ExprNode::Send { recv: Some(reader), method, args, block: None, .. } = &*expr.node else { return };
-    if method.as_str() != "of_kind?" || !is_model_errors_read(reader) {
+    if !matches!(method.as_str(), "of_kind?" | "added?") || !is_model_errors_read(reader) {
         return;
     }
+    // Rails' `added?` is `strict_match?`: the error's options, `count:` or `value:`, must be the ones asked, and none are.
+    let strict = method.as_str() == "added?";
     let Some((field, symbolic, kind)) = of_kind_args(args) else {
         let mut d = crate::lower::residue_diagnostic(
             "errors_index",
-            "errors.of_kind?",
+            if strict { "errors.added?" } else { "errors.of_kind?" },
             expr.span,
             "not literal",
-            "`errors.of_kind?` with a field or type that is not a literal is not grounded".to_string(),
+            format!("`errors.{method}` with a field or type that is not a literal, or with options, is not grounded"),
         );
         d.severity = crate::diagnostic::Severity::Error;
         diags.push(d);
@@ -357,11 +377,11 @@ fn rewrite_of_kind(expr: &mut Expr, diags: &mut Vec<Diagnostic>) {
         *parenthesized = true;
         return;
     }
-    *expr = details_filter(span, owner.clone(), "any?", &field, Some((symbolic, &kind)), Ty::Bool);
+    *expr = details_filter(span, owner.clone(), "any?", &field, Some((symbolic, &kind)), strict, Ty::Bool);
 }
 
 /// `<owner>.error_details.<method> { |error| error.attribute == "field" && <type matches> }`, typed.
-fn details_filter(span: crate::span::Span, owner: Option<Expr>, method: &str, field: &str, kind: Option<(bool, &str)>, ty: Ty) -> Expr {
+fn details_filter(span: crate::span::Span, owner: Option<Expr>, method: &str, field: &str, kind: Option<(bool, &str)>, optionless: bool, ty: Ty) -> Expr {
     let detail_ty = Ty::Class { id: crate::ident::ClassId(Symbol::from("ActiveRecord::ErrorDetail")), args: vec![].into() };
     let error = || {
         let mut e = Expr::new(span, ExprNode::Var { id: crate::ident::VarId(0), name: Symbol::from("error") });
@@ -383,6 +403,9 @@ fn details_filter(span: crate::span::Span, owner: Option<Expr>, method: &str, fi
             typed = send(span, typed, "!", vec![], Ty::Bool);
         }
         body = and(and(body, typed), equals("kind", kind));
+    }
+    if optionless {
+        body = and(body, send(span, error(), "optionless", vec![], Ty::Bool));
     }
     let block = Expr::new(
         span,
@@ -446,7 +469,7 @@ fn rewrite_where(expr: &mut Expr, diags: &mut Vec<Diagnostic>) {
     let span = expr.span;
     let ExprNode::Send { recv: owner, .. } = &*reader.node else { unreachable!("an errors reader") };
     let ty = expr.ty.clone().unwrap_or_else(error_array_ty);
-    *expr = details_filter(span, owner.clone(), "select", &field, kind.as_ref().map(|(s, k)| (*s, k.as_str())), ty);
+    *expr = details_filter(span, owner.clone(), "select", &field, kind.as_ref().map(|(s, k)| (*s, k.as_str())), false, ty);
 }
 
 pub(crate) fn error_array_ty() -> Ty {
@@ -479,6 +502,7 @@ fn rewrite_to_hash(expr: &mut Expr) {
     let (helper, ty) = match method.as_str() {
         "to_hash" | "as_json" => ("errors_to_hash", messages_ty()),
         "attribute_names" if is_model_errors_read(reader) => ("errors_attribute_names", Ty::Array { elem: std::sync::Arc::new(Ty::Sym) }),
+        "details" if is_model_errors_read(reader) => ("errors_details", details_ty()),
         _ => return,
     };
     *expr = details_call(expr.span, reader, helper, ty);
@@ -524,6 +548,12 @@ fn json_value(value: &mut Expr) {
         ExprNode::Array { elements, .. } => elements.iter_mut().for_each(json_value),
         _ => {}
     }
+}
+
+/// `Hash[Symbol, Array[<a details entry>]]`.
+pub(crate) fn details_ty() -> Ty {
+    let entry = Ty::Class { id: crate::ident::ClassId(Symbol::from(DETAILS_ENTRY)), args: vec![].into() };
+    Ty::Hash { key: std::sync::Arc::new(Ty::Sym), value: std::sync::Arc::new(Ty::Array { elem: std::sync::Arc::new(entry) }) }
 }
 
 fn messages_ty() -> Ty {

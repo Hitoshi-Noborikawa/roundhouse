@@ -542,6 +542,30 @@ impl ModelI18n {
         self.catalog().errors_format()
     }
 
+    /// Each attribute the locale names for this model, with that name.
+    pub fn translated_attribute_names(&self) -> Vec<(String, String)> {
+        let scope = self.scope();
+        let prefixes: Vec<String> =
+            self.keys.iter().map(|k| format!("{scope}.attributes.{k}.")).chain(std::iter::once("attributes.".to_string())).collect();
+        let mut attrs: Vec<String> = self
+            .catalog()
+            .entries
+            .keys()
+            .filter_map(|key| prefixes.iter().find_map(|p| key.strip_prefix(p.as_str())))
+            .filter(|attr| !attr.contains('.'))
+            .map(str::to_string)
+            .collect();
+        attrs.sort();
+        attrs.dedup();
+        attrs
+            .into_iter()
+            .map(|attr| {
+                let name = self.human_attribute_name(&attr);
+                (attr, name)
+            })
+            .collect()
+    }
+
     /// The message for an error of `kind` on `attr`, without the attribute, as parts.
     pub fn error(&self, attr: &str, kind: &str, opts: &ErrorOpts) -> Vec<Part> {
         self.catalog()

@@ -315,6 +315,44 @@ module ActiveSupport
     deleted.empty? ? nil : deleted
   end
 
+  # Rails' `details`: each attribute's errors, in the order of its first
+  # one. `lower::errors_index` reads an entry's `[:error]` as the type.
+  def self.errors_details(details)
+    out = {}
+    details.each do |detail|
+      key = detail.attribute.to_sym
+      out[key] = [] unless out.key?(key)
+      out[key] << detail
+    end
+    out.default = [].freeze
+    out.freeze
+  end
+
+  # Rails' `errors.import(error, attribute:)`: the error under
+  # `attribute` (its own when nil), its full message named as the
+  # importing model names that attribute. `names` is the importing
+  # model's translated attribute names, folded from the locale; any other
+  # is humanized, as `human_attribute_name` falls back to.
+  def self.errors_import(errors, details, error, attribute, names, before, between, after)
+    name = attribute.nil? ? error.attribute : attribute
+    full = error.message
+    unless name == "base"
+      human = names.key?(name) ? names[name].to_s : humanize(name.tr(".", "_"))
+      full = before + human + between + error.message + after
+    end
+    errors << full
+    details << ActiveRecord::ErrorDetail.new(name, error.kind, error.message, full, error.symbolic, error.optionless)
+    details
+  end
+
+  # Rails' `errors.merge!(other)`: each of the other record's errors
+  # imported under its own attribute, and nothing when it is these errors.
+  def self.errors_merge(errors, details, others, names, before, between, after)
+    return details if others.equal?(details)
+    others.each { |error| errors_import(errors, details, error, nil, names, before, between, after) }
+    others
+  end
+
   # `ActiveSupport::MessageVerifier::InvalidSignature` — what a signed
   # value that does not verify raises. Rails hangs it off the verifier
   # class, and the NAME is the whole point: a controller that rescues it

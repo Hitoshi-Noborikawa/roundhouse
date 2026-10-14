@@ -1659,6 +1659,206 @@ fn errors_delete_is_a_gap_on_strict_targets() {
     );
 }
 
+/// A `belongs_to` checks its record where it is declared, among the
+/// `validates`, and its error's type is `:blank`: Rails validates the
+/// association's presence with `message: :required`.
+fn belongs_to_errors_app() -> emit_and_run::Overlay {
+    emit_and_run::real_blog().edit(
+        "app/models/comment.rb",
+        "  validates :body, presence: true\n",
+        "  validates :body, presence: true
+
+  def error_rows
+    errors.map { |error| [error.attribute, error.type, error.full_message] }
+  end
+",
+    )
+}
+
+const BELONGS_TO_ERRORS: &str = r#"comment = Comment.new
+comment.valid?
+rows = [[:article, :blank, "Article must exist"], [:commenter, :blank, "Commenter can't be blank"], [:body, :blank, "Body can't be blank"]]
+raise comment.error_rows.inspect unless comment.error_rows == rows
+puts "belongs_to errors passed"
+"#;
+
+#[test]
+fn a_belongs_to_error_lists_where_it_is_declared() {
+    belongs_to_errors_app().run_ruby(BELONGS_TO_ERRORS).assert_passes();
+}
+
+#[test]
+#[ignore = "requires the Spinel toolchain"]
+fn a_belongs_to_error_lists_where_it_is_declared_on_spinel() {
+    belongs_to_errors_app().run_spinel(BELONGS_TO_ERRORS).assert_passes();
+}
+
+/// `details` groups the errors by attribute, an entry's `[:error]` is its
+/// type, and `added?` matches only an error Rails keeps no options for.
+fn errors_details_app() -> emit_and_run::Overlay {
+    error_types_app().edit(
+        "app/models/article.rb",
+        "  def error_rows\n",
+        "  def detail_types
+    out = []
+    errors.details.each_pair { |attribute, entries| entries.each { |entry| out << [attribute, entry[:error]] } }
+    out
+  end
+
+  def short_body
+    [errors.details[:body].any? { |detail| detail[:error] == :too_short }, errors.details[:nothing].size]
+  end
+
+  def addeds
+    [errors.added?(:title, :blank), errors.added?(:body, :too_short), errors.added?(:base, \"is odd\"), errors.added?(:title),
+     errors.added?(:base, :invalid)]
+  end
+
+  def error_rows\n",
+    )
+}
+
+const ERRORS_DETAILS: &str = r#"a = Article.new(title: "", body: "odd")
+a.valid?
+raise a.detail_types.inspect unless a.detail_types == [[:title, :blank], [:body, :too_short], [:base, "is odd"]]
+raise a.short_body.inspect unless a.short_body == [true, 0]
+raise a.addeds.inspect unless a.addeds == [true, false, true, false, false]
+b = Article.new(title: "A title", body: "A long enough body")
+b.valid?
+raise b.detail_types.inspect unless b.detail_types.empty? && b.short_body == [false, 0]
+puts "errors.details passed"
+"#;
+
+#[test]
+fn errors_details_reads_each_error_s_type() {
+    errors_details_app().run_ruby(ERRORS_DETAILS).assert_passes();
+}
+
+#[test]
+#[ignore = "requires the Spinel toolchain"]
+fn errors_details_reads_each_error_s_type_on_spinel() {
+    errors_details_app().run_spinel(ERRORS_DETAILS).assert_passes();
+}
+
+#[test]
+fn errors_details_is_a_gap_on_strict_targets() {
+    let (_emitted, errors) = errors_details_app().emit(roundhouse::project::BuildTarget::Crystal);
+    assert!(
+        errors.iter().any(|e| e.contains("ActiveSupport.errors_details is only available on the ruby family and spinel")),
+        "{errors:#?}"
+    );
+}
+
+/// `errors.merge!` and `errors.import` file another record's errors here,
+/// each full message naming its attribute as this model does.
+fn errors_import_app() -> emit_and_run::Overlay {
+    errors_details_app()
+        .write(
+            "config/locales/en.yml",
+            "en:\n  hello: \"Hello world\"\n  activerecord:\n    attributes:\n      article:\n        commenter: \"Reviewer\"\n      comment:\n        body: \"Remark\"\n",
+        )
+        .edit(
+            "app/models/article.rb",
+            "  def error_rows\n",
+            "  def self.comment_messages
+    comment = Comment.new
+    comment.valid?
+    comment.errors.full_messages
+  end
+
+  def merged_messages
+    comment = Comment.new
+    comment.valid?
+    errors.merge!(comment)
+    errors.full_messages
+  end
+
+  def merged_errors
+    comment = Comment.new
+    comment.valid?
+    errors.merge!(comment.errors)
+    errors.map { |error| [error.attribute, error.type, error.message, error.full_message] }
+  end
+
+  def imported_errors
+    comment = Comment.new
+    comment.valid?
+    [:title].each { |field| comment.errors.each { |error| errors.import(error, attribute: field) } }
+    errors.map { |error| [error.attribute, error.type, error.message, error.full_message] }
+  end
+
+  def imported_own
+    comment = Comment.new
+    comment.valid?
+    comment.errors.each { |error| errors.import(error) }
+    errors.full_messages
+  end
+
+  def merged_into_itself
+    before = errors.size
+    errors.merge!(errors)
+    errors.size == before
+  end
+
+  def error_rows\n",
+        )
+}
+
+const ERRORS_IMPORT: &str = r#"raise Article.comment_messages.inspect unless Article.comment_messages == ["Article must exist", "Commenter can't be blank", "Remark can't be blank"]
+fresh = -> { Article.new(title: "A title", body: "A long enough body") }
+messages = fresh.call.merged_messages
+raise messages.inspect unless messages == ["Article must exist", "Reviewer can't be blank", "Body can't be blank"]
+rows = [[:article, :blank, "must exist", "Article must exist"], [:commenter, :blank, "can't be blank", "Reviewer can't be blank"], [:body, :blank, "can't be blank", "Body can't be blank"]]
+merged = fresh.call
+raise merged.merged_errors.inspect unless merged.merged_errors == rows
+raise merged.addeds.inspect unless merged.addeds == [false, false, false, false, false]
+raise merged.merged_into_itself.inspect unless merged.merged_into_itself
+titled = [[:title, :blank, "must exist", "Title must exist"], [:title, :blank, "can't be blank", "Title can't be blank"], [:title, :blank, "can't be blank", "Title can't be blank"]]
+raise fresh.call.imported_errors.inspect unless fresh.call.imported_errors == titled
+own = fresh.call.imported_own
+raise own.inspect unless own == ["Article must exist", "Reviewer can't be blank", "Body can't be blank"]
+puts "errors.import passed"
+"#;
+
+#[test]
+fn imported_errors_are_named_as_the_importing_model_names_them() {
+    errors_import_app().run_ruby(ERRORS_IMPORT).assert_passes();
+}
+
+#[test]
+#[ignore = "requires the Spinel toolchain"]
+fn imported_errors_are_named_as_the_importing_model_names_them_on_spinel() {
+    errors_import_app().run_spinel(ERRORS_IMPORT).assert_passes();
+}
+
+#[test]
+fn errors_import_is_a_gap_on_strict_targets() {
+    let (_emitted, errors) = errors_import_app().emit(roundhouse::project::BuildTarget::Crystal);
+    for helper in ["errors_merge", "errors_import"] {
+        assert!(
+            errors.iter().any(|e| e.contains(&format!("ActiveSupport.{helper} is only available on the ruby family and spinel"))),
+            "{helper}: {errors:#?}"
+        );
+    }
+}
+
+/// A `details` entry's other keys are its options, which no error keeps.
+#[test]
+fn a_details_entry_s_options_are_an_error() {
+    let (_emitted, errors) = errors_each_app()
+        .edit(
+            "app/models/article.rb",
+            "  def error_rows\n",
+            "  def body_minimum
+    errors.details[:body].map { |detail| detail[:count] }
+  end
+
+  def error_rows\n",
+        )
+        .emit(roundhouse::project::BuildTarget::Ruby);
+    assert!(errors.iter().any(|e| e.contains("no known method `[]`")), "{errors:#?}");
+}
+
 /// `type` reads the error more than once, so a found error is an error.
 #[test]
 fn the_type_of_an_error_that_is_not_a_plain_read_is_an_error() {
@@ -1673,7 +1873,7 @@ fn the_type_of_an_error_that_is_not_a_plain_read_is_an_error() {
   def error_rows\n",
         )
         .emit(roundhouse::project::BuildTarget::Ruby);
-    assert!(errors.iter().any(|e| e.contains("`error.type` reads the error three times")), "{errors:#?}");
+    assert!(errors.iter().any(|e| e.contains("read the error three times")), "{errors:#?}");
 }
 
 /// The helper is the shared Ruby runtime's, which no strict target loads.
