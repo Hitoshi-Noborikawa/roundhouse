@@ -7,9 +7,11 @@
 //! `raw` only marks a String html_safe, which JSON encoding ignores:
 //! Rails renders the same String. The jbuilder lowering left the call,
 //! and the view module it landed in has no `raw` ("undefined method
-//! 'raw' for an instance of Views::Widgets"). It is now the value
-//! itself, in any value position (inside an Array, a conditional, a call
-//! argument). `h(x)` keeps escaping, there too.
+//! 'raw' for an instance of Views::Widgets"). It is now Rails' `x.to_s`
+//! (`raw(nil)` renders `""`), in any value position (inside an Array, a
+//! conditional, a call argument), and `h(raw(x))` is that String
+//! unescaped, as `h` leaves an html_safe String alone. `h(x)` keeps
+//! escaping everywhere else.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -22,6 +24,8 @@ const PARTIAL: &str = r#"json.title raw(widget.name)
 json.labels [widget.name, raw(widget.note)]
 json.marked(widget.note ? raw(widget.note.upcase) : "none")
 json.escaped h(widget.name)
+json.bare raw(widget.note)
+json.kept h(raw(widget.name))
 "#;
 
 fn emitted() -> Vec<(String, String)> {
@@ -65,7 +69,10 @@ fn raw_is_the_value_itself() {
     let files = emitted();
     let src = partial(&files);
     assert!(!src.contains("raw("), "{src}");
-    assert!(src.contains("[widget.name, widget.note]"), "{src}");
+    assert!(!src.contains("__rh_raw"), "{src}");
+    assert!(src.contains("[widget.name, widget.note.to_s]"), "{src}");
+    // `h` leaves an html_safe String alone, so `h(raw(x))` is not escaped.
+    assert!(!src.contains("html_escape(widget.name.to_s)"), "{src}");
     assert!(src.contains("ActionView::ViewHelpers.html_escape(widget.name)"), "{src}");
 }
 
@@ -89,11 +96,8 @@ module ActionView; module ViewHelpers; def self.html_escape(s) = s.to_s.gsub("<"
 require {partial:?}
 require "json"
 Widget = Struct.new(:name, :note)
-# `labels` is left out: the runtime encodes a non-String Array value
-# as its `to_s`, which is not what this test is about.
-puts JSON.generate([Widget.new("<a>", "hi"), Widget.new("b", nil)].map {{ |w|
-  JSON.parse(Views::Widgets.widget_json(w)).tap {{ |h| h.delete("labels") }}
-}})
+puts Views::Widgets.widget_json(Widget.new("<a>", "hi"))
+puts Views::Widgets.widget_json(Widget.new("b", nil))
 "#,
         json_builder = root.join("json_builder.rb").display().to_string(),
         partial = partial.display().to_string(),
@@ -106,9 +110,16 @@ puts JSON.generate([Widget.new("<a>", "hi"), Widget.new("b", nil)].map {{ |w|
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
+    // Jbuilder 2.15 on Rails 8.1 for the same rows: `raw(x)` is
+    // `x.to_s.html_safe`, so `raw(nil)` is `""`, and `h` leaves it as is.
+    // Rails' JSON encoding writes `<`, `>` and `&` as `\u003c`, `\u003e`
+    // and `\u0026` (`escape_html_entities_in_json`), and so does the
+    // runtime: the text is compared as written.
     let expected = concat!(
-        r#"[{"title":"<a>","marked":"HI","escaped":"&lt;a&gt;"},"#,
-        r#"{"title":"b","marked":"none","escaped":"b"}]"#,
+        r#"{"title":"\u003ca\u003e","labels":["\u003ca\u003e","hi"],"marked":"HI","#,
+        r#""escaped":"\u0026lt;a\u0026gt;","bare":"hi","kept":"\u003ca\u003e"}"#,
+        "\n",
+        r#"{"title":"b","labels":["b",""],"marked":"none","escaped":"b","bare":"","kept":"b"}"#,
     );
     assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), expected);
 }
