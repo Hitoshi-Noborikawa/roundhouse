@@ -2757,7 +2757,8 @@ fn backfill_scalar_signature(method: &mut MethodDef, body_ty: Ty) {
     });
 }
 
-fn contains_return(e: &Expr) -> bool {
+/// Does `e` contain a `return` anywhere, nested blocks included?
+pub(crate) fn contains_return(e: &Expr) -> bool {
     if matches!(&*e.node, ExprNode::Return { .. }) {
         return true;
     }

@@ -102,6 +102,8 @@ mod action_controller_head;
 mod nil_body_length;
 #[path = "emit_and_run/inline_filter_guard.rs"]
 mod inline_filter_guard;
+#[path = "emit_and_run/before_action_return.rs"]
+mod before_action_return;
 #[path = "emit_and_run/sti_global_id.rs"]
 mod sti_global_id;
 #[path = "support/campfire_caches.rs"]
