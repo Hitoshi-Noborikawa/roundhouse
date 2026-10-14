@@ -2138,12 +2138,13 @@ fn synth_through_sync(
 /// `dependent: :delete_all` / `:delete` / `:nullify`: one statement over
 /// the rows the association names, with no callbacks, as Rails' do. The
 /// rows are the reader's own query (`Target.where(fk: @key)`, the type
-/// column too for `as:`); `:nullify` clears the key, and the type with it.
+/// column too for `as:`, and the association's scope); `:nullify` clears
+/// the key, and the type with it.
 fn dependent_rows_statement(model: &Model, assoc: &Association) -> Option<Expr> {
-    let (target, foreign_key, as_interface, dependent, through) = match assoc {
-        Association::HasMany { target, foreign_key, as_interface, dependent, through, .. }
-        | Association::HasOne { target, foreign_key, as_interface, dependent, through, .. } => {
-            (target, foreign_key, as_interface.as_ref(), dependent, through)
+    let (target, foreign_key, as_interface, dependent, through, scope) = match assoc {
+        Association::HasMany { target, foreign_key, as_interface, dependent, through, scope, .. }
+        | Association::HasOne { target, foreign_key, as_interface, dependent, through, scope, .. } => {
+            (target, foreign_key, as_interface.as_ref(), dependent, through, scope.as_ref())
         }
         _ => return None,
     };
@@ -2177,7 +2178,12 @@ fn dependent_rows_statement(model: &Model, assoc: &Association) -> Option<Expr> 
         },
     );
     query.ty = Some(relation.clone());
-    let mut rows = guard_nil_owner_key(query, foreign_key, &owner_key);
+    let rows = guard_nil_owner_key(query, foreign_key, &owner_key);
+    // Not the key alone: Rails' `dependent:` acts on the association's rows, so its scope narrows them as the reader's does.
+    let mut rows = match scope {
+        Some(scope_expr) => graft_scope(scope_expr, rows),
+        None => rows,
+    };
     rows.ty = Some(relation);
     let args = if verb == "update_all" {
         let mut cleared = vec![(lit_sym(foreign_key.clone()), nil_lit())];

@@ -4091,7 +4091,7 @@ fn dependent_app() -> emit_and_run::Overlay {
                 "  add_foreign_key \"comments\", \"articles\"\n",
             ),
         )
-        .edit("app/models/article.rb", "  has_many :comments, dependent: :destroy\n", "  has_many :comments, dependent: :delete_all\n  has_many :notes, dependent: :nullify\n  has_one :summary, dependent: :delete\n")
+        .edit("app/models/article.rb", "  has_many :comments, dependent: :destroy\n", "  has_many :comments, dependent: :delete_all\n  has_many :tagged_notes, -> { where(text: \"tag\") }, class_name: \"Note\", dependent: :delete_all\n  has_many :notes, dependent: :nullify\n  has_one :summary, dependent: :delete\n")
         .edit("app/models/comment.rb", "  belongs_to :article\n", "  belongs_to :article\n  before_destroy { raise \"a delete_all child runs no callback\" }\n")
         .write("app/models/note.rb", "class Note < ApplicationRecord\n  belongs_to :article, optional: true\nend\n")
         .write("app/models/summary.rb", "class Summary < ApplicationRecord\n  belongs_to :article, optional: true\nend\n")
@@ -4102,12 +4102,14 @@ b = Article.create!(title: "Kept", body: "Another body long enough")
 Comment.create!(article_id: a.id, commenter: "x", body: "one")
 Comment.create!(article_id: b.id, commenter: "y", body: "two")
 n = Note.create!(article_id: a.id, text: "n")
+Note.create!(article_id: a.id, text: "tag")
 Summary.create!(article_id: a.id, text: "s")
 Summary.create!(article_id: b.id, text: "t")
 a.destroy
 raise "comments left: #{Comment.count}" unless Comment.count == 1
 raise "summaries left: #{Summary.count}" unless Summary.count == 1
 raise "note kept its key" unless Note.find(n.id).article_id.nil?
+raise "notes left: #{Note.count}" unless Note.count == 1
 puts "ok"
 "##;
 
