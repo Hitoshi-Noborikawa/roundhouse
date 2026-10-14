@@ -1,3 +1,5 @@
+# frozen_string_literal: true
+
 module ActiveRecord
   # Not in base.rb: the strict targets have no `record.class` dispatch to a class method, so only the ruby family and spinel load this.
   module Preloading
