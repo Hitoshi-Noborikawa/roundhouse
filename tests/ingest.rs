@@ -795,6 +795,67 @@ end
     assert_eq!(destroy_session.path, "/widgets/logout");
 }
 
+/// `devise_for :widgets, path: ""` is a common Devise idiom (mount the
+/// whole table at the resource's own root segment). `base_path` is
+/// empty, so naive `"/{base_path}"` prefixing produces `"/"`, and
+/// joining that with a suffix that already starts with `"/"` doubles
+/// it into `"//sign_in"`. Real Devise (`Mapping#fullpath`:
+/// `"/#{path_prefix}/#{@path}".squeeze("/")`) gives `/sign_in`,
+/// `/sign_out`, `/password...`, `/sign_up`, and `/` for the
+/// registration root (create/update/destroy). Fails on b6379ca9
+/// (produces `"//sign_in"` etc., and `""` for the registration root).
+#[test]
+fn devise_for_empty_path_does_not_double_the_leading_slash() {
+    let source = br#"Rails.application.routes.draw do
+  devise_for :widgets, path: ""
+end
+"#;
+    let (result, _) = roundhouse::ingest::prism::scope(|| {
+        roundhouse::ingest::ingest_routes(source, "config/routes.rb")
+    });
+    let table = result.expect("ingest");
+    let mut app = roundhouse::App::default();
+    app.routes = table;
+    let flat = roundhouse::lower::flatten_routes(&app);
+    let by_name: std::collections::HashMap<_, _> =
+        flat.iter().map(|r| (r.as_name.as_str(), r)).collect();
+    let new_session = by_name.get("new_widget_session").expect("new_widget_session");
+    assert_eq!(new_session.path, "/sign_in");
+    let destroy_session =
+        by_name.get("destroy_widget_session").expect("destroy_widget_session");
+    assert_eq!(destroy_session.path, "/sign_out");
+    let new_password = by_name.get("new_widget_password").expect("new_widget_password");
+    assert_eq!(new_password.path, "/password/new");
+    let new_registration =
+        by_name.get("new_widget_registration").expect("new_widget_registration");
+    assert_eq!(new_registration.path, "/sign_up");
+    let create_registration =
+        by_name.get("widget_registration").expect("widget_registration");
+    assert_eq!(create_registration.path, "/");
+}
+
+/// `path: "/auth"` (a leading slash on the segment itself) must not
+/// double up with the suffix's own leading slash either. Fails on
+/// b6379ca9 (produces `"//auth/sign_in"`).
+#[test]
+fn devise_for_path_with_a_leading_slash_does_not_double_it() {
+    let source = br#"Rails.application.routes.draw do
+  devise_for :widgets, path: "/auth"
+end
+"#;
+    let (result, _) = roundhouse::ingest::prism::scope(|| {
+        roundhouse::ingest::ingest_routes(source, "config/routes.rb")
+    });
+    let table = result.expect("ingest");
+    let mut app = roundhouse::App::default();
+    app.routes = table;
+    let flat = roundhouse::lower::flatten_routes(&app);
+    let by_name: std::collections::HashMap<_, _> =
+        flat.iter().map(|r| (r.as_name.as_str(), r)).collect();
+    let new_session = by_name.get("new_widget_session").expect("new_widget_session");
+    assert_eq!(new_session.path, "/auth/sign_in");
+}
+
 /// A route omission is an error on the recovered table, not a fatal parse.
 #[test]
 fn routes_mount_diagnostic_preserves_siblings_in_every_mode() {

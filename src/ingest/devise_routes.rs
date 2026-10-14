@@ -94,6 +94,25 @@ fn render_suffix(template: &str, names: &HashMap<String, String>) -> String {
     }
 }
 
+/// Join the `path:` segment with a route's rendered suffix the way
+/// `"/#{path_prefix}/#{@path}".squeeze("/")` does in Devise's own
+/// `Mapping#fullpath` — a leading/trailing slash on `path:` itself
+/// (`path: "/auth"`, `path: "/auth/"`) and an empty `path:`
+/// (`path: ""`, the registration root, or Devise's own default
+/// `path_names[:registration]`) must not leave a doubled `//` or an
+/// empty path where Devise gives `/`.
+fn join_devise_path(segment: &str, suffix: &str) -> String {
+    let segment = segment.trim_matches('/');
+    let joined = format!("{segment}{suffix}");
+    if joined.is_empty() {
+        "/".to_string()
+    } else if joined.starts_with('/') {
+        joined
+    } else {
+        format!("/{joined}")
+    }
+}
+
 const DEVISE_ROUTES: &[DeviseRoute] = &[
     // Sessions (database_authenticatable)
     DeviseRoute {
@@ -458,7 +477,6 @@ pub(super) fn ingest_devise_for(
     // RESOURCE name, independent of a `path:` override.
     let singular = crate::naming::singularize(&plural);
     let base_path = path.unwrap_or_else(|| plural.clone());
-    let path_prefix = format!("/{base_path}");
     let mut names = default_path_names();
     names.extend(path_name_overrides);
     // `Devise::Mapping#default_controllers`: `mod = options[:module] ||
@@ -488,7 +506,7 @@ pub(super) fn ingest_devise_for(
             let suffix = render_suffix(route.path_template, &names);
             RouteSpec::Explicit {
                 method: route.method.clone(),
-                path: format!("{path_prefix}{suffix}"),
+                path: join_devise_path(&base_path, &suffix),
                 controller: ClassId(Symbol::from(controller.clone())),
                 action: Symbol::from(route.action),
                 as_name: Some(Symbol::from(as_name.as_str())),
