@@ -98,6 +98,17 @@ module ActiveSupport
       zone = t.utc_offset == 0 ? "Z" : t.strftime("%:z")
       t.strftime("%Y-%m-%dT%H:%M:%S") + format(".%03d", t.usec / 1000) + zone
     end
+
+    # Not inlined at the call site: a strict target has built no written-down encoder, and this ruby-family/spinel seam is what reports it unsupported there.
+    def self.written(text)
+      text
+    end
+
+    # Not `time_json` at the call site: a nil Time is `null`, and a written-down encoder would otherwise read its value twice.
+    def self.time_fragment(t)
+      return "null" if t.nil?
+      "\"" + ActiveSupport::JSON.time_json(t) + "\""
+    end
   end
 
   # ActiveSupport's `deep_dup` (core_ext/object/deep_dup.rb), for a typed
@@ -278,6 +289,21 @@ module ActiveSupport
       out << key unless out.include?(key)
     end
     out.freeze
+  end
+
+  # Not a `reject!` on each: `errors` holds each detail's full message index for index, so both lose the same entries.
+  def self.errors_delete(errors, details, attribute)
+    deleted = []
+    i = details.length - 1
+    while i >= 0
+      if details[i].attribute == attribute
+        deleted.unshift(details[i].message)
+        details.delete_at(i)
+        errors.delete_at(i)
+      end
+      i -= 1
+    end
+    deleted.empty? ? nil : deleted
   end
 
   # `ActiveSupport::MessageVerifier::InvalidSignature` — what a signed

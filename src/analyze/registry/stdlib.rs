@@ -512,6 +512,9 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
     register_stdlib_class(classes, "ActiveSupport::JSON", &[
         ("encode", Ty::Str),
         ("decode", Ty::Untyped),
+        ("time_json", Ty::Str),
+        ("time_fragment", Ty::Str),
+        ("written", Ty::Str),
     ], &[]);
     // `Rack::Utils` — the two encoding-negotiation functions, ported
     // into `runtime/ruby/rack_utils.rb` (the rack gem's own on the ruby

@@ -137,6 +137,11 @@ pub fn emit_overlay_files(app: &App) -> Vec<EmittedFile> {
     // (`record.dom_prefix()`) isn't a registered field, so it still
     // dispatches through `__struct__`.
     expr::register_field_names("ActiveRecord::Base", &["id".to_string()]);
+    // `ActiveRecord::ErrorDetail` is a map here, so what an `errors` iteration yields reads its keys.
+    let mut detail_fields: Vec<(String, crate::ty::Ty)> =
+        ["attribute", "kind", "message", "full_message"].iter().map(|f| (f.to_string(), crate::ty::Ty::Str)).collect();
+    detail_fields.push(("symbolic".to_string(), crate::ty::Ty::Bool));
+    expr::register_field_types("ActiveRecord::ErrorDetail", &detail_fields);
 
     // Functional-target lowerings (issue #29): rewrite imperative
     // control flow (while→recursion, …) into the functional IR the

@@ -1,5 +1,5 @@
 //! `errors.add` grounding: `errors.add(:field, "msg")` →
-//! `errors << "Field msg"` and `error_details << ActiveRecord::ErrorDetail.new("field", "msg", "msg")`,
+//! `errors << "Field msg"` and `error_details << ActiveRecord::ErrorDetail.new("field", "msg", "msg", "Field msg", false)`,
 //! so the accumulator keeps what Rails keeps for each message; `errors.clear`
 //! empties both.
 //!
@@ -26,8 +26,9 @@
 //! `errors.full_message(:field, msg)` bakes the same text without touching
 //! the accumulator: Rails answers the humanized field before the message
 //! (the bare message for `:base`), which is a pure function of the two
-//! arguments. Only that shape is typed (`full_message_bakes`); any other
-//! spelling keeps analyze's Errors gap.
+//! arguments. A record that is not a plain read is still built before the
+//! text, as `User.new && "Email is invalid"`. Only that shape is typed
+//! (`full_message_bakes`); any other spelling keeps analyze's Errors gap.
 //!
 //! Purely shape-directed; runs on the post-analyze hook
 //! (`apply_post_analyze_lowerings`) with its siblings so every target
@@ -141,9 +142,21 @@ fn rewrite_errors_add(expr: &mut Expr, labels: &Labels, diags: &mut Vec<Diagnost
             let ExprNode::Lit { value: Literal::Sym { value: field } } = &*field_expr.node else {
                 unreachable!()
             };
-            let message = baked_message(i18n, span, field.as_str(), args.next().map(fold_str_concat));
-            *expr = message;
-            expr.ty = Some(crate::ty::Ty::Str);
+            let mut message = baked_message(i18n, span, field.as_str(), args.next().map(fold_str_concat));
+            message.ty = Some(crate::ty::Ty::Str);
+            let ExprNode::Send { recv: owner, .. } = *recv.expect("checked errors reader").node else { unreachable!() };
+            *expr = match owner {
+                // Not a Seq: an emitter hoists one out of `||` and `?:`, which would build the record where Rails does not.
+                Some(owner) if !reads_without_effect(&owner) => {
+                    let mut built = Expr::new(
+                        span,
+                        ExprNode::BoolOp { op: crate::expr::BoolOpKind::And, surface: crate::expr::BoolOpSurface::Symbol, left: owner, right: message },
+                    );
+                    built.ty = Some(crate::ty::Ty::Str);
+                    built
+                }
+                _ => message,
+            };
             return;
         }
     }
@@ -261,6 +274,7 @@ fn rewrite_errors_add(expr: &mut Expr, labels: &Labels, diags: &mut Vec<Diagnost
         _ => None,
     };
     let ExprNode::Send { recv: reader_owner, .. } = &*reader.node else { unreachable!() };
+    let symbolic = kind.is_some();
     let (message, kind, bare) = match kind {
         Some(kind) => (
             parts_expr(span, i18n.full_error(field.as_str(), &kind, &Default::default()), reader_owner.as_ref(), field.as_str()),
@@ -300,19 +314,22 @@ fn rewrite_errors_add(expr: &mut Expr, labels: &Labels, diags: &mut Vec<Diagnost
         ExprNode::Send { recv, method: Symbol::from("<<"), args: vec![message], block: None, parenthesized: false },
     );
     push_message.ty = recv_ty.clone();
-    *expr = attributed_push(push_message, owner, field.as_str(), kind, bare, span);
+    *expr = attributed_push(push_message, owner, field.as_str(), kind, symbolic, bare, span);
 }
 
-/// `<errors> << msg` followed by `<owner>.error_details << ActiveRecord::ErrorDetail.new("field", type, message)`,
+/// `<errors> << msg` followed by `<owner>.error_details << ActiveRecord::ErrorDetail.new("field", type, message, msg, symbolic)`,
 /// so the accumulator keeps what Rails keeps for each message.
 pub(crate) fn attributed_push(
     push_message: Expr,
     owner: Option<Expr>,
     field: &str,
     kind: Expr,
+    symbolic: bool,
     message: Expr,
     span: crate::span::Span,
 ) -> Expr {
+    let ExprNode::Send { args, .. } = &*push_message.node else { unreachable!("an `errors <<` push") };
+    let full_message = typed_str(args[0].clone());
     let error_ty = crate::ty::Ty::Class { id: crate::ident::ClassId(Symbol::from("ActiveRecord::ErrorDetail")), args: vec![].into() };
     let mut class = Expr::new(span, ExprNode::Const { path: vec![Symbol::from("ActiveRecord"), Symbol::from("ErrorDetail")] });
     class.ty = Some(error_ty.clone());
@@ -321,7 +338,7 @@ pub(crate) fn attributed_push(
         ExprNode::Send {
             recv: Some(class),
             method: Symbol::from("new"),
-            args: vec![str_lit(span, field), typed_str(kind), typed_str(message)],
+            args: vec![str_lit(span, field), typed_str(kind), typed_str(message), full_message, bool_lit(span, symbolic)],
             block: None,
             parenthesized: true,
         },
@@ -360,6 +377,12 @@ pub(crate) fn error_details(owner: Option<Expr>, span: crate::span::Span) -> Exp
     e
 }
 
+fn bool_lit(span: crate::span::Span, value: bool) -> Expr {
+    let mut e = Expr::new(span, ExprNode::Lit { value: Literal::Bool { value } });
+    e.ty = Some(crate::ty::Ty::Bool);
+    e
+}
+
 fn str_lit(span: crate::span::Span, value: &str) -> Expr {
     typed_str(Expr::new(span, ExprNode::Lit { value: Literal::Str { value: value.to_string() } }))
 }
@@ -393,7 +416,12 @@ pub(crate) fn full_message_bakes(recv: Option<&Expr>, args: &[Expr], block: Opti
         && matches!(&*args[0].node, ExprNode::Lit { value: Literal::Sym { .. } })
         && !matches!(&*args[1].node, ExprNode::Hash { .. })
         && recv.is_some_and(|r| matches!(&*r.node, ExprNode::Send { recv: owner, method, args, .. }
-            if method.as_str() == "errors" && args.is_empty() && owner.as_ref().is_none_or(reads_without_effect)))
+            if method.as_str() == "errors" && args.is_empty() && owner.as_ref().is_none_or(|o| reads_without_effect(o) || is_record(o))))
+}
+
+/// A record built for its `errors`, which `&&` evaluates before the text and which is never falsy.
+fn is_record(e: &Expr) -> bool {
+    matches!(&e.ty, Some(crate::ty::Ty::Class { .. }))
 }
 
 /// Folding drops the receiver, so only one whose evaluation does nothing.

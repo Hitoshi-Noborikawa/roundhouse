@@ -65,9 +65,17 @@ fn unresolved_declared_classes_are_errors() {
 
 #[test]
 fn new_errors_api_requires_runtime_support() {
-    for body in ["errors.added?(:title, :blank)", "errors.details", "errors.where(:title)", "errors.merge!(errors)", "errors.first.options", "errors.delete(:title); errors.size", "f = title.to_sym; errors.full_message(f, \"is taken\")"] {
+    for body in ["errors.added?(:title, :blank)", "errors.details", "errors.where(title)", "errors.merge!(errors)", "errors.delete(title); errors.size", "f = title.to_sym; errors.full_message(f, \"is taken\")"] {
         refuses(body, "ActiveModel::Errors");
     }
+    // Not `ActiveModel::Error`: on emit, what an iteration yields is already the `ErrorDetail` the lowering iterates.
+    refuses("errors.first.options", "no known method `options`");
+    refuses("errors.of_kind?(title.to_sym, :blank)", "of_kind?");
+}
+
+#[test]
+fn errors_where_on_a_literal_field_is_admitted() {
+    admits("errors.where(:title, :blank).map(&:full_message)");
 }
 
 #[test]
@@ -77,8 +85,8 @@ fn errors_full_message_on_a_literal_field_is_admitted() {
 }
 
 #[test]
-fn errors_full_message_on_a_computed_receiver_is_refused() {
-    refuses("Probe.create!(title: \"x\").errors.full_message(:title, \"is taken\")", "ActiveModel::Errors");
+fn errors_full_message_on_a_computed_receiver_is_admitted() {
+    admits("Probe.create!(title: \"x\").errors.full_message(:title, \"is taken\").upcase");
 }
 
 #[test]

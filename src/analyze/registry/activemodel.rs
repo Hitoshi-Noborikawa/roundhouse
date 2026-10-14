@@ -105,7 +105,7 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
         ("full_message", Ty::Str),
         ("message", Ty::Str),
         ("attribute", Ty::Sym),
-        ("type", Ty::Sym),
+        ("type", Ty::Union { variants: vec![Ty::Sym, Ty::Str].into() }),
     ] {
         error_cls.instance_methods.insert(Symbol::from(m), ty);
     }

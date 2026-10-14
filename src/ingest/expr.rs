@@ -1015,7 +1015,8 @@ fn ingest_expr_node(node: &Node<'_>, file: &str) -> IngestResult<Expr> {
                     // One local per site: a shared name would hold a
                     // different type at each `&.` in a method, and a
                     // local that does is polymorphic on spinel.
-                    let temp = Symbol::from(format!("__safe_nav{}", r.span.start));
+                    // Not the receiver's start: every link of `a&.b&.c` starts where `a` does.
+                    let temp = Symbol::from(format!("__safe_nav{}", r.span.end));
                     let read = Expr::new(
                         r.span,
                         ExprNode::Var { id: crate::ident::VarId(0), name: temp.clone() },
