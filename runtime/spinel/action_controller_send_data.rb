@@ -16,6 +16,7 @@ module ActionController
       @performed = true
       disp = disposition.to_s == "inline" ? "inline" : "attachment"
       @headers["Content-Disposition"] = filename.nil? ? disp : ActionController::Base.content_disposition(disp, filename)
+      apply_vary_header
       nil
     end
 

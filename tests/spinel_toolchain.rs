@@ -70,6 +70,10 @@ mod cable_broadcast_json;
 mod index_with_contract;
 #[path = "spinel_toolchain/index_with.rs"]
 mod index_with;
+#[path = "support/send_data_filename.rs"]
+mod send_data_filename_contract;
+#[path = "spinel_toolchain/send_data_filename.rs"]
+mod send_data_filename;
 #[path = "support/vary_accept.rs"]
 mod vary_accept_contract;
 #[path = "spinel_toolchain/vary_accept.rs"]

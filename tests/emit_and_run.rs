@@ -39,6 +39,10 @@ mod i18n_locales;
 mod lambda_signatures_contract;
 #[path = "emit_and_run/lambda_signatures.rs"]
 mod lambda_signatures;
+#[path = "support/send_data_filename.rs"]
+mod send_data_filename_contract;
+#[path = "emit_and_run/send_data_filename.rs"]
+mod send_data_filename;
 #[path = "support/vary_accept.rs"]
 mod vary_accept_contract;
 #[path = "emit_and_run/vary_accept.rs"]
