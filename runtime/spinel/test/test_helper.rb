@@ -157,9 +157,12 @@ module SchemaSetup
   # truncate call from `ActiveRecord.adapter.truncate(t)` to
   # `<Model>._adapter_truncate` is the per-model dispatch.
   def self.reset!
-    Article._adapter_truncate if defined?(Article)
-    Comment._adapter_truncate if defined?(Comment)
-    FixtureLoader.load_all!
+    Db.without_foreign_keys do
+      Article._adapter_truncate if defined?(Article)
+      Comment._adapter_truncate if defined?(Comment)
+      FixtureLoader.load_all!
+    end
+    Db.check_foreign_keys!
   end
 end
 

@@ -784,7 +784,7 @@ UNKNOWN method name does, so campfire's `Membership.insert_all(…)`
 reported `no known method insert_all on Class { Membership }` while the
 emitted code was the inlined loop, correct all along.
 
-### A failed statement raises Rails' class, but SQLite enforces no foreign keys
+### A failed statement raises Rails' class, and SQLite enforces foreign keys
 
 `runtime/ruby/active_record/errors.rb` carries Rails 8.1's statement-error
 hierarchy: `ActiveRecordError`, `StatementInvalid`,
@@ -803,10 +803,24 @@ failures, `SQLITE_BUSY` as `StatementTimeout`, anything else as
 `StatementInvalid`. The PostgreSQL shims map Rails' SQLSTATE table
 (`pg_errors.rb`), and a code it does not list is `StatementInvalid`.
 
+Foreign keys are enforced on SQLite as Rails enforces them. The SQLite DDL
+(`emit::shared::schema_sql`) writes each `add_foreign_key` as a `FOREIGN
+KEY … REFERENCES …` clause, with its `on_delete`/`on_update` action, and the
+three SQLite `Db`s turn on `PRAGMA foreign_keys`, as Rails' `DEFAULT_PRAGMAS`
+do. A test's fixture setup truncates and loads inside
+`Db.without_foreign_keys` (Rails' `disable_referential_integrity`:
+`defer_foreign_keys` on, `foreign_keys` off), so fixtures load in any order,
+and then runs `Db.check_foreign_keys!` (`PRAGMA foreign_key_check`), which
+raises `StatementInvalid` naming the tables, as Rails'
+`verify_foreign_keys_for_fixtures` does.
+
 Three gaps remain:
-- **Foreign keys.** Rails turns on `PRAGMA foreign_keys` for SQLite and this
-  runtime does not. A foreign-key violation is accepted rather than raised,
-  so `InvalidForeignKey` is raised only by the PostgreSQL shims.
+- **Foreign keys off SQLite.** The PostgreSQL DDL writes no foreign keys
+  (Rails adds them with `ALTER TABLE`, and its fixture loader then disables
+  triggers to load out of order), so `InvalidForeignKey` is not raised
+  there. The strict targets share the SQLite DDL but not the `Db`s: each
+  enforces the clauses only if its driver turns `foreign_keys` on, and their
+  fixture loaders do not defer it.
 - **Optimistic locking.** `lock_version` is not modeled, so
   `StaleObjectError` is left undefined and a reference to it stays an
   error.
