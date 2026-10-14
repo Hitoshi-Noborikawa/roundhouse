@@ -5220,7 +5220,7 @@ fn unavailable_class_module_construct(name: &str, target: &str) -> Option<&'stat
         // rqrcode_core's / spinel-rqrcode's.
         | "RQRCodeCore::QRCodeRunTimeError" | "RQRCodeCore::QRCodeArgumentError"
         | "GC" | "OpenSSL::HMAC" | "CSV::MalformedCSVError"
-        | "Enumerator::Product" | "Enumerator::Lazy"
+        | "Enumerator::Product" | "Enumerator::Lazy" | "Enumerator::Chain"
         | "Monitor" | "ConditionVariable" | "Thread::ConditionVariable"
         | "UNIXServer" | "UNIXSocket" | "Open3" | "Find");
     if !bundled {

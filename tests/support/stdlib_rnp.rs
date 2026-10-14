@@ -40,6 +40,26 @@ class StdlibProbe
   def self.lazy?(value)
     value.is_a?(Enumerator::Lazy)
   end
+
+  def self.chain
+    Enumerator::Chain.new(*[[1, 2].each, nil, [3].each].compact)
+  end
+
+  def self.chained
+    out = []
+    chain.each { |x| out << x }
+    [chain.select(&:odd?), chain.filter(&:even?), chain.reject(&:odd?), chain.map { |x| x * 10 }, chain.to_a, out]
+  end
+
+  def self.lazily
+    lazy = chain.lazy
+    [lazy.select(&:odd?).to_a, lazy.filter(&:even?).force, lazy.reject(&:odd?).to_a,
+     lazy.map { |x| x + 1 }.select(&:odd?).first]
+  end
+
+  def self.chain?(value)
+    value.is_a?(Enumerator::Chain)
+  end
 end
 "#;
 
@@ -56,6 +76,9 @@ raise "csv" unless StdlibProbe.rows("a,b\nc,d\n") == 2
 raise "csv malformed" unless StdlibProbe.rows("a,\"b") == -1
 raise "product" unless StdlibProbe.pairs == 4
 raise "lazy" if StdlibProbe.lazy?([1].each)
+raise "chain #{StdlibProbe.chained}" unless StdlibProbe.chained == [[1, 3], [2], [2], [10, 20, 30], [1, 2, 3], [1, 2, 3]]
+raise "lazy chain #{StdlibProbe.lazily}" unless StdlibProbe.lazily == [[1, 3], [2], [2], 3]
+raise "chain?" unless StdlibProbe.chain?(StdlibProbe.chain) && !StdlibProbe.chain?([1].each)
 puts "stdlib constants OK"
 "#;
 
