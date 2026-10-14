@@ -17,6 +17,10 @@ mod net_http_patch;
 mod temporal_index_assign;
 #[path = "support/class_attribute.rs"]
 mod class_attribute;
+#[path = "support/string_truncate.rs"]
+mod string_truncate;
+#[path = "emit_and_run/string_truncate.rs"]
+mod string_truncate_runs;
 #[path = "support/array_excluding.rs"]
 mod array_excluding;
 #[path = "emit_and_run/array_excluding.rs"]
