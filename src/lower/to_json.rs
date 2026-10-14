@@ -46,6 +46,15 @@ fn rewrite(expr: &mut Expr) {
 }
 
 pub(crate) fn rewrite_node(expr: &mut Expr) {
+    rewrite_with(expr, true);
+}
+
+/// `rewrite_node` without the deferral, for `as_json_poro`'s fallback.
+pub(crate) fn rewrite_node_now(expr: &mut Expr) {
+    rewrite_with(expr, false);
+}
+
+fn rewrite_with(expr: &mut Expr, defer: bool) {
     let span = expr.span;
     let ExprNode::Send { recv, method, args, block, parenthesized } = &mut *expr.node else {
         return;
@@ -59,10 +68,25 @@ pub(crate) fn rewrite_node(expr: &mut Expr) {
     {
         return;
     }
+    // Not yet: a value holding a record, Time or Date is `lower::as_json_poro`'s to write down, which falls back here when it cannot.
+    if defer && recv.as_ref().and_then(|r| r.ty.as_ref()).is_some_and(holds_object) {
+        return;
+    }
     let receiver = recv.take().expect("checked above");
     *recv = Some(Expr::new(span, ExprNode::Const { path: vec![Symbol::from("JSON")] }));
     *method = Symbol::from("generate");
     args.push(receiver);
     *parenthesized = true;
     expr.ty = Some(Ty::Str);
+}
+
+
+fn holds_object(ty: &Ty) -> bool {
+    match ty {
+        Ty::Class { .. } | Ty::Relation { .. } | Ty::Time | Ty::Date => true,
+        Ty::Array { elem } => holds_object(elem),
+        Ty::Hash { value, .. } => holds_object(value),
+        Ty::Union { variants } => variants.iter().any(holds_object),
+        _ => false,
+    }
 }

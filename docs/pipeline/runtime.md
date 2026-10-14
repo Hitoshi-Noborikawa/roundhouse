@@ -898,14 +898,25 @@ reaches a record with a writer, a `Time` or a `Date` is respelled by
 built from each part's static type: a record through its writer, a
 collection as `[…]`/`{…}`, a Time through `ActiveSupport::JSON.time_fragment`
 (`xmlschema(3)`, `Z` at offset zero), a Date as its ISO date and nil as
-`null`, and a scalar through `JsonBuilder.encode_value`, HTML-escaped. A part
-with no encoding (an untyped value, a nullable record, a key that needs
-escaping) leaves the whole site to the runtime encoder. The text goes through `ActiveSupport::JSON.written`, an identity that only the ruby
-family and spinel load, so a strict target reports the site unsupported
-instead of emitting code no strict toolchain has built. Two divergences
-remain. A non-finite Float is written as Ruby's `NaN`/`Infinity`, where Rails
-writes `null`. A Time at offset zero in a non-UTC zone is written `Z`, where
-Rails writes `+00:00`.
+`null`, and a scalar through `JsonBuilder.encode_value`, HTML-escaped. A
+nullable record read from a variable is `null` or its writer's text. A part
+with no encoding (an untyped value, a nullable record computed in place, a
+key that needs escaping) leaves the whole site to the runtime encoder. The
+text goes through `ActiveSupport::JSON.written`, an identity that only the
+ruby family and spinel load, so a strict target reports the site unsupported
+instead of emitting code no strict toolchain has built.
+`<value>.to_json` anywhere in the app writes the same text, and falls back to
+`JSON.generate` for what has no encoding here. A String handed to `render
+json:` is the body as it is, as Rails' json renderer leaves a String
+unencoded; a value that is a String only at run time goes through
+`JsonRender.body`, which tests for one. `JsonBuilder.encode_value` writes a
+non-finite Float as `null`. `time_json` writes `Z` only for a UTC Time or a
+UTC app zone, so London in winter is `+00:00`, as `TimeWithZone#as_json`
+writes it. Two divergences remain. A runtime Time carries an offset and no
+zone, so in a UTC app zone a Time moved to London with `in_time_zone` is
+written `Z` in winter, where Rails writes `+00:00`. A payload of primitives
+alone goes through `JSON.generate` (below), which raises on a non-finite
+Float, where Rails writes `null`.
 
 Inline Hash/Array payloads whose inferred contents are JSON primitives use
 the target's existing `JSON.generate` encoder, including nested primitive

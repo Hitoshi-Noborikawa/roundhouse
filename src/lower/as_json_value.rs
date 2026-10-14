@@ -113,6 +113,26 @@ fn ty_text(value: &Expr, ty: &Ty, written: &HashSet<ClassId>) -> Option<Expr> {
         Ty::Date => Some(date_text(value)),
         Ty::Union { variants } if variants.iter().all(|v| matches!(v, Ty::Date | Ty::Nil)) => Some(date_text(value)),
         Ty::Class { id, .. } if written.contains(id) => Some(writer_call(value.clone())),
+        // Only a variable read: the value is read twice, once for the nil test.
+        Ty::Union { variants } if matches!(&*value.node, ExprNode::Var { .. } | ExprNode::Ivar { .. }) => {
+            let mut others = variants.iter().filter(|v| !matches!(v, Ty::Nil));
+            let (Some(Ty::Class { id, .. }), None) = (others.next(), others.next()) else { return None };
+            if !written.contains(id) || !variants.iter().any(|v| matches!(v, Ty::Nil)) {
+                return None;
+            }
+            let present = with_ty(value.clone(), Ty::Class { id: id.clone(), args: vec![].into() });
+            Some(with_ty(
+                Expr::new(
+                    value.span,
+                    ExprNode::If {
+                        cond: send(Some(value.clone()), "nil?", vec![], Ty::Bool),
+                        then_branch: lit(value, "null"),
+                        else_branch: writer_call(present),
+                    },
+                ),
+                Ty::Str,
+            ))
+        }
         Ty::Relation { of } if written.contains(of) => Some(collection_text(value, of)),
         Ty::Array { elem } => {
             if let Ty::Class { id, .. } = &**elem {
