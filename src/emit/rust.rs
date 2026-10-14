@@ -200,6 +200,10 @@ use crate::views::*;
 use crate::errors_ext::{raise, ArgumentError, NotImplementedError, RecordNotFound, RecordInvalid};
 ";
 
+/// The written-down `render json:` encoder (`lower::as_json_writer`) in a model's `as_json_str`.
+/// Not in MODEL_IMPORTS: a test file joins those with FRAMEWORK_TEST_IMPORTS, which import it too.
+const MODEL_JSON_IMPORT: &str = "#[allow(unused_imports)]\nuse crate::json_builder::JsonBuilder;\n";
+
 const MODEL_IMPORTS: &str = "\
 #[allow(unused_imports)]
 use crate::active_record_base::ErrorDetail;
@@ -931,7 +935,7 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
             // `errors` send differently), this rewrite stops firing
             // and the bare `errors().push` falls through harmlessly
             // until updated.
-            let content = format!("{MODEL_IMPORTS}{body}{ar_shim}");
+            let content = format!("{MODEL_IMPORTS}{MODEL_JSON_IMPORT}{body}{ar_shim}");
             let content = content
                 .replace("self.errors().push(", "crate::errors_ext::validation_errors_push(")
                 .replace("self.error_details().push(", "Self::push_error_detail(");

@@ -4361,10 +4361,15 @@ end
 #[test]
 fn render_json_record_writer_is_unsupported_on_strict_targets() {
     use roundhouse::project::BuildTarget;
-    for target in [BuildTarget::Rust, BuildTarget::Go, BuildTarget::Typescript] {
+    for target in [BuildTarget::Go, BuildTarget::Typescript] {
         let (_emitted, errors) = records_json_app().emit(target);
         assert!(errors.iter().any(|e| e.contains("json_writer")), "{target:?}: {errors:?}");
     }
+    // Rust builds the writer, except a `methods:` one (`render_json_record_writer_runs_on_rust`).
+    let (_emitted, errors) = json_writer_rust_app().emit(BuildTarget::Rust);
+    assert!(errors.is_empty(), "{errors:?}");
+    let (_emitted, errors) = json_writer_app().emit(BuildTarget::Rust);
+    assert!(errors.iter().any(|e| e.contains("json_writer")), "{errors:?}");
     for target in [BuildTarget::Ruby, BuildTarget::Spinel] {
         let (_emitted, errors) = records_json_app().emit(target);
         assert!(!errors.iter().any(|e| e.contains("json_writer")), "{target:?}: {errors:?}");
@@ -4374,8 +4379,141 @@ fn render_json_record_writer_is_unsupported_on_strict_targets() {
         .edit("app/models/article.rb", "  validates :title, presence: true\n", "  validates :title, presence: true\n\n  def as_json_str\n    title.to_s\n  end\n")
         .edit("config/routes.rb", "  root \"articles#index\"\n", "  root \"articles#index\"\n  get \"/own/:id\", to: \"own#show\"\n")
         .write("app/controllers/own_controller.rb", "class OwnController < ApplicationController\n  def show\n    render plain: Article.find(params[:id]).as_json_str\n  end\nend\n");
-    let (_emitted, errors) = own.emit(BuildTarget::Rust);
+    let (_emitted, errors) = own.emit(BuildTarget::Go);
     assert!(!errors.iter().any(|e| e.contains("json_writer")), "{errors:?}");
+}
+
+/// `render json:` of a record, of a has_many and of a loaded Relation, with `only:`, `except:` and `methods:`.
+/// One action each, in `ArticlesController`: the Rust runtime builds `params` from the path alone, and builds a controller only in the shape real-blog's take.
+fn json_writer_app() -> emit_and_run::Overlay {
+    const CONTROLLER: &str = "app/controllers/articles_controller.rb";
+    emit_and_run::real_blog()
+        .edit(CONTROLLER, "  def show\n  end\n", "  def show\n    render json: @article\n  end\n")
+        .edit(CONTROLLER, "  def edit\n  end\n", "  def edit\n    render json: @article, only: [:title, :id]\n  end\n")
+        .edit(
+            CONTROLLER,
+            "    @articles = Article.includes(:comments).order(created_at: :desc)\n",
+            "    @articles = Article.includes(:comments).order(created_at: :desc)\n    render json: @articles, methods: [:headline]\n",
+        )
+        .edit("app/models/article.rb", "  validates :title, presence: true\n", "  validates :title, presence: true\n\n  def headline\n    \"Big\"\n  end\n")
+        .edit(
+            CONTROLLER,
+            "    respond_to do |format|\n      if @article.update(article_params)\n        format.html { redirect_to @article, notice: \"Article was successfully updated.\", status: :see_other }\n        format.json { render :show, status: :ok, location: @article }\n      else\n        format.html { render :edit, status: :unprocessable_content }\n        format.json { render json: @article.errors, status: :unprocessable_content }\n      end\n    end\n",
+            "    render json: @article, except: [:body, :updated_at], status: :ok\n",
+        )
+        .edit(
+            CONTROLLER,
+            "    @article.destroy!\n\n    respond_to do |format|\n      format.html { redirect_to articles_path, notice: \"Article was successfully destroyed.\", status: :see_other }\n      format.json { head :no_content }\n    end\n",
+            "    render json: @article.comments\n",
+        )
+        .write("test/fixtures/articles.yml", JSON_WRITER_ARTICLES)
+        .write("test/fixtures/comments.yml", JSON_WRITER_COMMENTS)
+        .write("test/controllers/articles_controller_test.rb", JSON_WRITER_TEST)
+        .remove("test/models/article_test.rb")
+}
+
+const JSON_WRITER_ARTICLES: &str = "one:\n  title: A <b> & co\n  body: Long enough body text\n  created_at: 2026-01-02 03:04:05.678901\n  updated_at: 2026-01-03 00:00:00\n\ntwo:\n  title: Second\n  body: Another body text\n  created_at: 2026-01-04 00:00:00\n  updated_at: 2026-01-04 00:00:00\n";
+
+const JSON_WRITER_COMMENTS: &str = "one:\n  article: one\n  commenter: Ann\n  body: Nice\n  created_at: 2026-01-05 00:00:00\n  updated_at: 2026-01-05 00:00:00\n";
+
+/// What ActiveRecord 8.1.4 writes for these fixtures.
+const JSON_WRITER_TEST: &str = r##"require "test_helper"
+
+class ArticlesControllerTest < ActionDispatch::IntegrationTest
+  setup do
+    @article = articles(:one)
+    @second = articles(:two)
+    @comment = comments(:one)
+  end
+
+  test "a record is its columns" do
+    get article_url(@article)
+    assert_equal %({"id":#{@article.id},"title":"A \\u003cb\\u003e \\u0026 co","body":"Long enough body text","created_at":"2026-01-02T03:04:05.678Z","updated_at":"2026-01-03T00:00:00.000Z"}), response.body
+  end
+
+  test "only: writes its own order" do
+    get edit_article_url(@article)
+    assert_equal %({"title":"A \\u003cb\\u003e \\u0026 co","id":#{@article.id}}), response.body
+  end
+
+  test "except: leaves out its columns" do
+    patch article_url(@article), params: { article: { title: "unused" } }
+    assert_equal %({"id":#{@article.id},"title":"A \\u003cb\\u003e \\u0026 co","created_at":"2026-01-02T03:04:05.678Z"}), response.body
+  end
+
+  test "a has_many is its records" do
+    delete article_url(@article)
+    assert_equal %([{"id":#{@comment.id},"article_id":#{@article.id},"commenter":"Ann","body":"Nice","created_at":"2026-01-05T00:00:00.000Z","updated_at":"2026-01-05T00:00:00.000Z"}]), response.body
+  end
+
+  test "a Relation with methods: is its records and the methods" do
+    get articles_url
+    assert_equal %([{"id":#{@second.id},"title":"Second","body":"Another body text","created_at":"2026-01-04T00:00:00.000Z","updated_at":"2026-01-04T00:00:00.000Z","headline":"Big"},{"id":#{@article.id},"title":"A \\u003cb\\u003e \\u0026 co","body":"Long enough body text","created_at":"2026-01-02T03:04:05.678Z","updated_at":"2026-01-03T00:00:00.000Z","headline":"Big"}]), response.body
+  end
+end
+"##;
+
+/// The Rust project builds the writer and answers what Rails' `serializable_hash` writes.
+#[test]
+#[ignore = "requires the Rust toolchain; compiles and executes an emitted app"]
+fn render_json_record_writer_runs_on_rust() {
+    let (emitted, errors) = json_writer_rust_app().emit(roundhouse::project::BuildTarget::Rust);
+    assert!(errors.is_empty(), "{errors:?}");
+    std::fs::create_dir_all(emitted.join("tests")).unwrap();
+    std::fs::write(emitted.join("tests/json_writer.rs"), r##"
+use app::db::{self, Db};
+use app::{router, schema_sql};
+
+#[tokio::test(flavor = "multi_thread")]
+async fn record_json_is_rails_serializable_hash() {
+    db::setup_test_db(schema_sql::CREATE_TABLES);
+    Db::exec("INSERT INTO articles (title, body, created_at, updated_at) VALUES ('A <b> & co', 'Long enough body text', '2026-01-02 03:04:05.678901', '2026-01-03 00:00:00')");
+    Db::exec("INSERT INTO articles (title, body, created_at, updated_at) VALUES ('Second', 'Another body text', '2026-01-04 00:00:00', '2026-01-04 00:00:00')");
+    Db::exec("INSERT INTO comments (article_id, commenter, body, created_at, updated_at) VALUES (1, 'Ann', 'Nice', '2026-01-05 00:00:00', '2026-01-05 00:00:00')");
+    let server = axum_test::TestServer::new(router::router()).unwrap();
+    let one = r#"{"id":1,"title":"A \u003cb\u003e \u0026 co","body":"Long enough body text","created_at":"2026-01-02T03:04:05.678Z","updated_at":"2026-01-03T00:00:00.000Z"}"#;
+    let second = r#"{"id":2,"title":"Second","body":"Another body text","created_at":"2026-01-04T00:00:00.000Z","updated_at":"2026-01-04T00:00:00.000Z"}"#;
+    for (method, path, want) in [
+        ("GET", "/articles/1", one.to_string()),
+        ("GET", "/articles/1/edit", r#"{"title":"A \u003cb\u003e \u0026 co","id":1}"#.to_string()),
+        ("PATCH", "/articles/1", r#"{"id":1,"title":"A \u003cb\u003e \u0026 co","created_at":"2026-01-02T03:04:05.678Z"}"#.to_string()),
+        ("DELETE", "/articles/1", r#"[{"id":1,"article_id":1,"commenter":"Ann","body":"Nice","created_at":"2026-01-05T00:00:00.000Z","updated_at":"2026-01-05T00:00:00.000Z"}]"#.to_string()),
+        ("GET", "/articles", format!("[{second},{one}]")),
+    ] {
+        let response = match method {
+            "PATCH" => server.patch(path).form(&[("article[title]", "unused")]).await,
+            "DELETE" => server.delete(path).await,
+            _ => server.get(path).await,
+        };
+        assert_eq!(response.status_code(), 200, "{method} {path}");
+        assert_eq!(response.header("content-type"), "application/json", "{method} {path}");
+        assert_eq!(response.text(), want, "{method} {path}");
+    }
+}
+"##).unwrap();
+    let output = std::process::Command::new("cargo")
+        .args(["test", "--test", "json_writer"])
+        .env_remove("CARGO_TARGET_DIR")
+        .current_dir(&*emitted)
+        .output()
+        .expect("run the emitted Rust project's test");
+    assert!(output.status.success(), "{}\n{}\n{}", emitted.display(),
+        String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+}
+
+/// Without `methods:`, which Rust reports (`render_json_record_writer_is_unsupported_on_strict_targets`).
+fn json_writer_rust_app() -> emit_and_run::Overlay {
+    json_writer_app().edit(
+        "app/controllers/articles_controller.rb",
+        "    render json: @articles, methods: [:headline]\n",
+        "    render json: @articles\n",
+    )
+}
+
+/// The fixtures' test, as ActiveRecord 8.1.4 answers it.
+#[test]
+fn render_json_record_writer_test_passes() {
+    json_writer_app().run_test("test/controllers/articles_controller_test.rb").assert_passes();
 }
 
 /// The same writer compiled by Spinel, where the runtime encoder does not exist.
