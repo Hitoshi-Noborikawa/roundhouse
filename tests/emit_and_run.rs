@@ -1502,6 +1502,52 @@ fn iterating_errors_yields_each_error_on_spinel() {
     errors_each_app().run_spinel(ERRORS_EACH).assert_passes();
 }
 
+/// Each `&.` of a chain binds its own receiver: one shared local held
+/// `errors` and then its full messages, so `&.join` was asked of `errors`.
+fn safe_navigation_chain_app() -> emit_and_run::Overlay {
+    emit_and_run::real_blog().edit(
+        "app/models/article.rb",
+        "  validates :title, presence: true\n",
+        "  validates :title, presence: true
+
+  def self.error_line(title)
+    Article.find_by(title: title)&.errors&.full_messages&.join(\", \")
+  end
+
+  def error_sentence
+    errors&.full_messages&.to_sentence
+  end
+
+  def shout
+    title&.strip&.upcase&.length
+  end
+",
+    )
+}
+
+const SAFE_NAVIGATION_CHAIN: &str = r#"a = Article.new(title: " hi ", body: "")
+a.valid?
+raise a.error_sentence.inspect unless a.error_sentence == "Body can't be blank and Body is too short (minimum is 10 characters)"
+raise a.shout.inspect unless a.shout == 2
+puts "safe navigation chain passed"
+"#;
+
+#[test]
+fn each_link_of_a_safe_navigation_chain_reads_its_own_receiver() {
+    let found = r#"Article.create!(title: "Saved", body: "A long enough body")
+raise Article.error_line("Saved").inspect unless Article.error_line("Saved") == ""
+raise Article.error_line("Missing").inspect unless Article.error_line("Missing").nil?
+"#;
+    safe_navigation_chain_app().run_ruby(&format!("{found}{SAFE_NAVIGATION_CHAIN}")).assert_passes();
+}
+
+/// The native consumer boots no database, so only the chains on a built record.
+#[test]
+#[ignore = "requires the Spinel toolchain"]
+fn each_link_of_a_safe_navigation_chain_reads_its_own_receiver_on_spinel() {
+    safe_navigation_chain_app().run_spinel(SAFE_NAVIGATION_CHAIN).assert_passes();
+}
+
 /// `ErrorDetail#kind` is a String, so it cannot answer Rails' Symbol `type`.
 #[test]
 fn an_error_s_type_stays_an_error() {

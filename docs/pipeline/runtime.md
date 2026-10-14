@@ -1935,6 +1935,12 @@ yield, `attribute` reads `attribute.to_sym`, Rails' Symbol, and
 was given a String. Without a block, `any?`, `none?` and `count` keep
 asking the full messages, which answer the same.
 
+Every one of these rewrites matches an `errors` send as its receiver,
+which `&.` hides behind a local (`(t = record.errors) && t.m`).
+`src/lower/errors_safe_nav.rs` reads `record.errors&.m` as
+`record.errors.m`, and `record&.errors&.m` as
+`record && record.errors.m`, because Rails' `errors` is never nil.
+
 **Why full messages stay in `errors`.** The runtime has no i18n to
 humanize an attribute with, and the lowering already bakes the full
 text; `full_messages` and the views keep reading it as they did, and
