@@ -4130,6 +4130,18 @@ fn dependent_delete_all_delete_and_nullify_run_on_spinel() {
     assert_eq!(run.stdout, "ok\n");
 }
 
+/// A strict target loads no `runtime/ruby/active_record/preloading.rb`, so
+/// mixed-model records keep the call unsupported there rather than emit a
+/// call to nothing.
+#[test]
+fn mixed_records_preloading_is_unsupported_on_strict_targets() {
+    let (_emitted, errors) = mixed_preload_app().emit(roundhouse::project::BuildTarget::Rust);
+    assert!(
+        errors.iter().any(|e| e.contains("ActiveRecord::Preloading.records is only available on the ruby family and spinel")),
+        "{errors:#?}"
+    );
+}
+
 /// `render … and return`, `redirect_to … and return` and `head … and return` return, as Rails' truthy answers make them.
 #[test]
 fn a_response_call_and_return_returns() {

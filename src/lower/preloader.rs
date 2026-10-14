@@ -1,10 +1,10 @@
-// Not Rails' `ActiveRecord::Associations::Preloader`, which no target ships: its one public use, `new(records:, associations:).call`, is the model's own `preload_associations`, or `Base.preload_records` grouping several models' records by class.
+// Not Rails' `ActiveRecord::Associations::Preloader`, which no target ships: its one public use, `new(records:, associations:).call`, is the model's own `preload_associations`, or `ActiveRecord::Preloading.records` grouping several models' records by class.
 use crate::expr::{Expr, ExprNode, Literal};
 use crate::ident::{ClassId, Symbol};
 use crate::ty::Ty;
 
 pub(crate) struct PreloaderCall<'a> {
-    /// The one model the records are; `None` when they are several models' or of a type analysis does not know, which `Base.preload_records` groups by class at run time.
+    /// The one model the records are; `None` when they are several models' or of a type analysis does not know, which `ActiveRecord::Preloading.records` groups by class at run time.
     pub model: Option<ClassId>,
     pub records: &'a Expr,
     pub relation: bool,
@@ -75,6 +75,7 @@ pub(crate) fn rewrite_node(expr: &mut Expr) {
     let span = expr.span;
     let base = ClassId(Symbol::from("ActiveRecord::Base"));
     let owner = call.model.clone().unwrap_or_else(|| base.clone());
+    let receiver_class = if call.model.is_some() { owner.clone() } else { ClassId(Symbol::from("ActiveRecord::Preloading")) };
     let mut records = call.records.clone();
     if call.relation {
         let array = Ty::Array { elem: std::sync::Arc::new(Ty::Class { id: owner.clone(), args: vec![].into() }) };
@@ -83,9 +84,9 @@ pub(crate) fn rewrite_node(expr: &mut Expr) {
     }
     let mut specs = Expr::new(span, ExprNode::Array { elements: vec![call.associations.clone()], style: Default::default() });
     specs.ty = Some(Ty::Array { elem: std::sync::Arc::new(Ty::Untyped) });
-    let mut model = Expr::new(span, ExprNode::Const { path: owner.0.as_str().split("::").map(Symbol::from).collect() });
-    model.ty = Some(Ty::Class { id: owner.clone(), args: vec![].into() });
-    let method = if call.model.is_some() { "preload_associations" } else { "preload_records" };
+    let mut model = Expr::new(span, ExprNode::Const { path: receiver_class.0.as_str().split("::").map(Symbol::from).collect() });
+    model.ty = Some(Ty::Class { id: receiver_class.clone(), args: vec![].into() });
+    let method = if call.model.is_some() { "preload_associations" } else { "records" };
     let mut lowered = Expr::new(
         span,
         ExprNode::Send { recv: Some(model), method: Symbol::from(method), args: vec![records, specs], block: None, parenthesized: true },

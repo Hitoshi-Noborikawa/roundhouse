@@ -166,8 +166,6 @@ module ActiveRecord
     # Eager-load hook consumed by `Relation#to_a`; the Ruby emit path
     # synthesizes per-model overrides, this default is a no-op.
     def self.preload_associations: (Array[untyped] _records, Array[untyped] _specs) -> void
-    def self.preload_records: (Array[Base] records, Array[untyped] specs) -> nil
-    def _preload_as_group: (Array[Base] group, Array[untyped] specs) -> void
 
     # Subclass-overridden instance API. `attributes` returns the
     # column hash for adapter writes; `assign_from_row` populates
