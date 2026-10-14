@@ -4361,7 +4361,7 @@ end
 #[test]
 fn render_json_record_writer_is_unsupported_on_strict_targets() {
     use roundhouse::project::BuildTarget;
-    for target in [BuildTarget::Go, BuildTarget::CSharp] {
+    for target in [BuildTarget::Go, BuildTarget::Kotlin] {
         let (_emitted, errors) = records_json_app().emit(target);
         assert!(errors.iter().any(|e| e.contains("json_writer")), "{target:?}: {errors:?}");
     }
@@ -4555,6 +4555,21 @@ fn render_json_record_writer_runs_on_crystal() {
         assert!(output.status.success(), "{program} {args:?} in {}\n{}\n{}", emitted.display(),
             String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
     }
+}
+
+/// The same test, translated to C#.
+#[test]
+#[ignore = "requires .NET; builds and runs an emitted app"]
+fn render_json_record_writer_runs_on_csharp() {
+    let (emitted, errors) = json_writer_app().emit(roundhouse::project::BuildTarget::CSharp);
+    assert!(errors.is_empty(), "{errors:?}");
+    let output = std::process::Command::new("dotnet")
+        .args(["test", "tests", "--nologo"])
+        .current_dir(&*emitted)
+        .output()
+        .expect("run dotnet test");
+    assert!(output.status.success(), "{}\n{}\n{}", emitted.display(),
+        String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
 }
 
 /// The same writer compiled by Spinel, where the runtime encoder does not exist.

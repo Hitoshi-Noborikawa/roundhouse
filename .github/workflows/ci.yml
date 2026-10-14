@@ -2444,6 +2444,13 @@ jobs:
           DOTNET_NOLOGO: '1'
           DOTNET_CLI_TELEMETRY_OPTOUT: '1'
         run: cargo test --test csharp_toolchain -- --ignored --nocapture --test-threads=1
+      - name: cargo test --test emit_and_run render json writer on csharp
+        if: ${{ !cancelled() && matrix.target == 'csharp' }}
+        env:
+          DOTNET_SKIP_FIRST_TIME_EXPERIENCE: '1'
+          DOTNET_NOLOGO: '1'
+          DOTNET_CLI_TELEMETRY_OPTOUT: '1'
+        run: cargo test --locked --test emit_and_run render_json_record_writer_runs_on_csharp -- --ignored --nocapture --exact
       - name: scripts/compare ${{ matrix.target }}
         if: ${{ !cancelled() }}
         run: scripts/compare ${{ matrix.target }}
