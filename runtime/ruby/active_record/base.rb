@@ -175,16 +175,18 @@ module ActiveRecord
 
   # One error as Rails' `ActiveModel::Error` holds it: the attribute, the
   # error type (the message itself when `errors.add` was given a String),
-  # and the message without the attribute's name.
+  # the message without the attribute's name, and the full message
+  # `errors` lists for it.
   # Not `ActiveModel::Error`: the strict targets emit the class unqualified, beside their own `Error`.
   class ErrorDetail
     # `kind`, not Rails' `type`: a field named `type` does not compile in Rust or Go
-    attr_reader :attribute, :kind, :message
+    attr_reader :attribute, :kind, :message, :full_message
 
-    def initialize(attribute, kind, message)
+    def initialize(attribute, kind, message, full_message)
       @attribute = attribute
       @kind = kind
       @message = message
+      @full_message = full_message
     end
   end
 

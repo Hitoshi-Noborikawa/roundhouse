@@ -82,10 +82,12 @@ module ActiveRecord
     @attribute: String
     @kind: String
     @message: String
+    @full_message: String
     def attribute: () -> String
     def kind: () -> String
     def message: () -> String
-    def initialize: (String attribute, String kind, String message) -> void
+    def full_message: () -> String
+    def initialize: (String attribute, String kind, String message, String full_message) -> void
   end
 
   class Base

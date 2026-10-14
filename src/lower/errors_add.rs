@@ -1,5 +1,5 @@
 //! `errors.add` grounding: `errors.add(:field, "msg")` →
-//! `errors << "Field msg"` and `error_details << ActiveRecord::ErrorDetail.new("field", "msg", "msg")`,
+//! `errors << "Field msg"` and `error_details << ActiveRecord::ErrorDetail.new("field", "msg", "msg", "Field msg")`,
 //! so the accumulator keeps what Rails keeps for each message; `errors.clear`
 //! empties both.
 //!
@@ -303,7 +303,7 @@ fn rewrite_errors_add(expr: &mut Expr, labels: &Labels, diags: &mut Vec<Diagnost
     *expr = attributed_push(push_message, owner, field.as_str(), kind, bare, span);
 }
 
-/// `<errors> << msg` followed by `<owner>.error_details << ActiveRecord::ErrorDetail.new("field", type, message)`,
+/// `<errors> << msg` followed by `<owner>.error_details << ActiveRecord::ErrorDetail.new("field", type, message, msg)`,
 /// so the accumulator keeps what Rails keeps for each message.
 pub(crate) fn attributed_push(
     push_message: Expr,
@@ -313,6 +313,8 @@ pub(crate) fn attributed_push(
     message: Expr,
     span: crate::span::Span,
 ) -> Expr {
+    let ExprNode::Send { args, .. } = &*push_message.node else { unreachable!("an `errors <<` push") };
+    let full_message = typed_str(args[0].clone());
     let error_ty = crate::ty::Ty::Class { id: crate::ident::ClassId(Symbol::from("ActiveRecord::ErrorDetail")), args: vec![].into() };
     let mut class = Expr::new(span, ExprNode::Const { path: vec![Symbol::from("ActiveRecord"), Symbol::from("ErrorDetail")] });
     class.ty = Some(error_ty.clone());
@@ -321,7 +323,7 @@ pub(crate) fn attributed_push(
         ExprNode::Send {
             recv: Some(class),
             method: Symbol::from("new"),
-            args: vec![str_lit(span, field), typed_str(kind), typed_str(message)],
+            args: vec![str_lit(span, field), typed_str(kind), typed_str(message), full_message],
             block: None,
             parenthesized: true,
         },
