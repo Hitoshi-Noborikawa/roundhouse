@@ -10,6 +10,7 @@ const FILES: &[(&str, &str)] = &[
     ("app/services/base_service.rb", include_str!("dry_monads/app/services/base_service.rb")),
     ("app/services/order_service.rb", include_str!("dry_monads/app/services/order_service.rb")),
     ("app/services/lookup.rb", include_str!("dry_monads/app/services/lookup.rb")),
+    ("app/services/worker.rb", include_str!("dry_monads/app/services/worker.rb")),
     ("app/contracts/signup_contract.rb", include_str!("dry_monads/app/contracts/signup_contract.rb")),
 ];
 

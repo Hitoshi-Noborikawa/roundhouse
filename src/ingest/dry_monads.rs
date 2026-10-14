@@ -25,11 +25,16 @@
 //! takes a block or asks `block_given?` is left alone: called with one,
 //! the gem's wrapper steps aside, which this does not model.
 //!
+//! `include Dry::Monads::Do.for(:call)` wraps just those methods, defined
+//! after it in that class, as the gem's `method_added` hook does.
+//!
 //! Checked against dry-monads 1.9. Other monads (`:maybe`, `:try`,
-//! `:list`, ...) are not modeled: an include naming one stays in the
-//! class body, ledgered, beside what it names that is.
+//! `:list`) are not modeled: an include naming one the app builds
+//! (`Some(..)`, `Try { }`, `List[..]`) stays in the class body, ledgered,
+//! beside what it names that is; one the app never builds changes
+//! nothing and is dropped.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use crate::App;
 use crate::dialect::{LibraryClass, LibraryClassOrigin, MethodReceiver};
@@ -45,12 +50,34 @@ pub(super) fn lower_dry_monads(app: &mut App, sources: &[crate::span::SourceFile
     let names: HashSet<String> = app.library_classes.iter().map(|lc| lc.name.0.as_str().to_string()).collect();
     let mut any = false;
     let mut do_marked: HashSet<String> = HashSet::new();
+    // `Do.for(...)`: per class, the methods and where the include stands.
+    let mut do_for: HashMap<String, (HashSet<String>, crate::span::Span)> = HashMap::new();
+    // A monad the app never builds is an include that changes nothing.
+    let unused = |feature: &str| -> bool {
+        let constructors: &[&str] = match feature {
+            "maybe" => &["Maybe", "Some", "None"],
+            "try" => &["Try"],
+            "list" => &["List"],
+            _ => return false,
+        };
+        !sources.iter().any(|s| {
+            constructors.iter().any(|c| {
+                s.text.match_indices(c).any(|(at, _)| {
+                    let before = s.text[..at].chars().next_back();
+                    let after = &s.text[at + c.len()..];
+                    !before.is_some_and(|b| b.is_alphanumeric() || b == '_' || b == ':')
+                        && (after.starts_with('(') || after.starts_with('[') || after.starts_with(" {") || after.starts_with(" do"))
+                })
+            })
+        })
+    };
     // A gap in survey mode, a failed ingest otherwise.
     let mut refusals: Vec<IngestError> = Vec::new();
     for lc in &mut app.library_classes {
         let mut result = false;
         let mut do_notation = false;
         let mut refused = None;
+        let mut for_methods: Option<(HashSet<String>, crate::span::Span)> = None;
         lc.unknown_calls.retain(|call| match features(call) {
             None => true,
             // What is modeled applies; the include stays for the rest.
@@ -60,6 +87,11 @@ pub(super) fn lower_dry_monads(app: &mut App, sources: &[crate::span::SourceFile
                     match f.as_str() {
                         "result" => result = true,
                         "do" => do_notation = true,
+                        other if other.starts_with("for:") => {
+                            let entry = for_methods.get_or_insert_with(|| (HashSet::new(), call.span));
+                            entry.0.insert(other["for:".len()..].to_string());
+                        }
+                        other if unused(other) => {}
                         other => {
                             refused = Some(format!("`:{other}`"));
                             kept = true;
@@ -88,6 +120,10 @@ pub(super) fn lower_dry_monads(app: &mut App, sources: &[crate::span::SourceFile
         }
         if do_notation {
             do_marked.insert(lc.name.0.as_str().to_string());
+            any = true;
+        }
+        if let Some(found) = for_methods {
+            do_for.insert(lc.name.0.as_str().to_string(), found);
             any = true;
         }
     }
@@ -121,11 +157,25 @@ pub(super) fn lower_dry_monads(app: &mut App, sources: &[crate::span::SourceFile
         }
     }
     for lc in &mut app.library_classes {
-        if !in_scope.contains(lc.name.0.as_str()) {
+        let all = in_scope.contains(lc.name.0.as_str());
+        // `Do.for` wraps the named methods the class defines after the
+        // include (its `method_added` hook), in the class itself only: a
+        // subclass's own definition is found before the wrapper.
+        let listed = do_for.get(lc.name.0.as_str()).cloned();
+        if !all && listed.is_none() {
             continue;
         }
         for method in &mut lc.methods {
             if method.receiver != MethodReceiver::Instance || !yields(&method.body) {
+                continue;
+            }
+            let wrapped = all
+                || listed.as_ref().is_some_and(|(names, at)| {
+                    names.contains(method.name.as_str())
+                        && method.name_span.file == at.file
+                        && method.name_span.start > at.start
+                });
+            if !wrapped {
                 continue;
             }
             if method.block_param.is_some() || method.has_anonymous_block || asks_block_given(&method.body) {
@@ -208,8 +258,20 @@ fn features(call: &Expr) -> Option<Result<Vec<String>, String>> {
             }
             Some(Ok(out))
         }
-        // `Do.for(:call)`, `Result(Error)`: forms of the gem this does not
-        // model.
+        // `Do.for(:call, :run)`: those methods only.
+        ExprNode::Send { recv: Some(recv), method, args, .. }
+            if method.as_str() == "for" && path(recv).as_deref() == Some("Dry::Monads::Do") =>
+        {
+            let mut out = Vec::new();
+            for a in args {
+                match &*a.node {
+                    ExprNode::Lit { value: Literal::Sym { value } } => out.push(format!("for:{}", value.as_str())),
+                    _ => return Some(Err(format!("`include {}`", crate::emit::ruby::emit_expr(arg)))),
+                }
+            }
+            Some(Ok(out))
+        }
+        // `Result(Error)` and the like: forms of the gem this does not model.
         ExprNode::Send { recv: Some(recv), .. }
             if path(recv).is_some_and(|p| p == "Dry::Monads" || p.starts_with("Dry::Monads::")) =>
         {

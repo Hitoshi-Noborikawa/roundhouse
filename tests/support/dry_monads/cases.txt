@@ -25,3 +25,8 @@ Lookup.new.find(:a).value!
 [Lookup.new.find(:a).success?, Lookup.new.find(:b).failure?, Lookup.new.find(:a).to_monad.success?, Lookup.new.find(:b).or(5)]
 Lookup.new.find(:a).tee { |v| Lookup.new.find(:b) }
 Lookup.new.find(:b).value_or(7)
+Worker.new.work(2)
+Worker.new.work(-2)
+Worker.new.other(2)
+Worker.new.early(2)
+ChildWorker.new.work(2)

@@ -25,3 +25,8 @@ dm_check(23, ([Lookup.new.find(:a) == Lookup.new.find(:a), Lookup.new.find(:a) =
 dm_check(24, ([Lookup.new.find(:a).success?, Lookup.new.find(:b).failure?, Lookup.new.find(:a).to_monad.success?, Lookup.new.find(:b).or(5)]).inspect, "[true, true, true, 5]")
 dm_check(25, (Lookup.new.find(:a).tee { |v| Lookup.new.find(:b) }).inspect, "Failure(:missing)")
 dm_check(26, (Lookup.new.find(:b).value_or(7)).inspect, "7")
+dm_check(27, (Worker.new.work(2)).inspect, "\"worked 2\"")
+dm_check(28, (Worker.new.work(-2)).inspect, "\"halted negative\"")
+dm_raises(29, -> { Worker.new.other(2) }, LocalJumpError, "no block given (yield)")
+dm_raises(30, -> { Worker.new.early(2) }, LocalJumpError, "no block given (yield)")
+dm_raises(31, -> { ChildWorker.new.work(2) }, LocalJumpError, "no block given (yield)")
