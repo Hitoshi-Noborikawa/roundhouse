@@ -10,6 +10,7 @@ module ActionController
     @status: Integer
     @body: String
     @content_type: String
+    def self.body_sha256_hex: (String body) -> String
     def commit_conditional_get!: (String request_method, String if_none_match) -> nil
   end
 end
