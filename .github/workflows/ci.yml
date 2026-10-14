@@ -2424,6 +2424,9 @@ jobs:
       - name: cargo test --test python_toolchain -- --ignored
         if: ${{ !cancelled() && matrix.target == 'python' }}
         run: cargo test --test python_toolchain -- --ignored --nocapture
+      - name: cargo test --test emit_and_run render json writer on python
+        if: ${{ !cancelled() && matrix.target == 'python' }}
+        run: cargo test --locked --test emit_and_run render_json_record_writer_runs_on_python -- --ignored --nocapture --exact
       - name: Warm the dotnet CLI (first-run config is not concurrency-safe)
         if: ${{ !cancelled() && matrix.target == 'csharp' }}
         env:

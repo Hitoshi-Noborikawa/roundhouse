@@ -936,7 +936,7 @@ as `as_json` writes it, except the inheritance column (`type`), which
 ActiveRecord's `serializable_hash` always excepts. `lower::as_json_record` writes that down as the same
 `as_json_str` writer over the columns, so `render json: @article`, an Array
 of records and a Relation (`render json: @stories`) are the writer's text
-on the ruby family, spinel, Rust and TypeScript. The other strict targets report a call
+on the ruby family, spinel, Rust, TypeScript and Python. The other strict targets report a call
 to the writer as `json_writer` unsupported: no other strict toolchain has
 built it yet, and an unsupported error is what tells the ledger so. Rust
 reports a `methods:` writer the same way: a model method's return reaches

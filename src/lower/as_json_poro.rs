@@ -535,7 +535,8 @@ fn writer_call_named(recv: Expr, name: &str) -> Expr {
                 method: Symbol::from(name),
                 args: vec![],
                 block: None,
-                parenthesized: false,
+                // Python reads an unparenthesized zero-arg send as an attribute, and the writer is a method.
+                parenthesized: true,
             },
         ),
         Ty::Str,
