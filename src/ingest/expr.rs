@@ -478,15 +478,62 @@ fn sorbet_assertion_is_must(node: &Node<'_>) -> bool {
     node.as_call_node().is_some_and(|c| constant_id_str(&c.name()) == "must")
 }
 
-/// `T.must(x)` as sorbet-runtime runs it: the value when it is not nil
-/// (`false` included), else `raise TypeError.new("Passed `nil` into
-/// T.must")` (through `T::Configuration`'s inline type error handler,
-/// whose default re-raises that error). The value is
+/// Whether `node` is `T.must_because(x) { reason }` WITH a literal
+/// block attached. A forwarded `&blk` is not one: its body is not in
+/// hand here, and sorbet-runtime's message comes from calling it, so
+/// inlining is not available and the refusal stands.
+fn sorbet_assertion_is_must_because(node: &Node<'_>) -> bool {
+    node.as_call_node().is_some_and(|c| {
+        constant_id_str(&c.name()) == "must_because"
+            && c.block().is_some_and(|b| b.as_block_node().is_some())
+    })
+}
+
+/// The message `T.must_because(x) { reason }` raises with: sorbet's
+/// `"Unexpected `nil` because #{yield}"`, with the block's body in
+/// place of the `yield`. `None` when the block takes parameters —
+/// sorbet's `yield` passes none, so a parameter would read as nil and
+/// a body relying on it would not survive the inline.
+fn must_because_message(
+    node: &Node<'_>,
+    file: &str,
+    span: Span,
+) -> IngestResult<Option<Expr>> {
+    let Some(call) = node.as_call_node() else { return Ok(None) };
+    let Some(block) = call.block() else { return Ok(None) };
+    let Some(block) = block.as_block_node() else { return Ok(None) };
+    if block.parameters().is_some() {
+        return Ok(None);
+    }
+    let Some(body) = block.body() else { return Ok(None) };
+    let reason = ingest_expr(&body, file)?;
+    Ok(Some(Expr::new(
+        span,
+        ExprNode::StringInterp {
+            parts: vec![
+                crate::expr::InterpPart::Text { value: "Unexpected `nil` because ".to_string() },
+                crate::expr::InterpPart::Expr { expr: reason },
+            ],
+        },
+    )))
+}
+
+/// `T.must(x)` / `T.must_because(x) { reason }` as sorbet-runtime runs
+/// them: the value when it is not nil (`false` included), else `raise
+/// TypeError.new(message)` (through `T::Configuration`'s inline type
+/// error handler, whose default re-raises that error). The value is
 /// evaluated once: a local read is tested directly, anything else is
 /// bound to a generated local inside the condition,
 /// `if (__must_N = x).nil? then raise ... else __must_N end`, so the
 /// else side reads it with nil narrowed away.
-fn must_check(span: Span, value: Expr, location: &ruby_prism::Location<'_>) -> Expr {
+///
+/// `message` is the argument to `TypeError.new`. It is built by the
+/// caller because the two forms differ only there: a fixed string for
+/// `T.must`, and `"Unexpected `nil` because #{...}"` around the
+/// block's body for `T.must_because`. It sits in the `then` branch, so
+/// a `must_because` reason is evaluated only when the value IS nil,
+/// which is where sorbet-runtime's `yield` evaluates it too.
+fn must_check(span: Span, value: Expr, location: &ruby_prism::Location<'_>, message: Expr) -> Expr {
     let (tested, read) = match &*value.node {
         ExprNode::Var { .. } => (value.clone(), value),
         _ => {
@@ -511,10 +558,6 @@ fn must_check(span: Span, value: Expr, location: &ruby_prism::Location<'_>) -> E
     let send = |recv: Option<Expr>, method: &str, args: Vec<Expr>, parenthesized: bool| {
         Expr::new(span, ExprNode::Send { recv, method: Symbol::from(method), args, block: None, parenthesized })
     };
-    let message = Expr::new(
-        span,
-        ExprNode::Lit { value: crate::expr::Literal::Str { value: "Passed `nil` into T.must".to_string() } },
-    );
     let type_error = Expr::new(Span::synthetic(), ExprNode::Const { path: vec![Symbol::from("TypeError")] });
     let raise = send(None, "raise", vec![send(Some(type_error), "new", vec![message], true)], true);
     let cond = send(Some(tested), "nil?", Vec::new(), false);
@@ -702,14 +745,28 @@ fn ingest_expr_node(node: &Node<'_>, file: &str) -> IngestResult<Expr> {
         end: loc.end_offset() as u32,
     };
     // Type ascriptions retain the value and its declared type. Nil assertions
-    // are behavior: `T.must` lowers to the check sorbet-runtime performs;
-    // `T.must_because` keeps its explicit Unsupported annotation instead of
+    // are behavior: `T.must` and `T.must_because` lower to the check
+    // sorbet-runtime performs. A `T.must_because` whose reason is not a
+    // literal block keeps its explicit Unsupported annotation instead of
     // erasing a possible raise.
     if let Some(inner) = sorbet_assertion_argument(node) {
         let declared = super::type_ascription::sorbet_declared_type(node);
         let value = ingest_expr_strict(&inner, file)?;
+        let because = if sorbet_assertion_is_must_because(node) {
+            must_because_message(node, file, span)?
+        } else {
+            None
+        };
         let value = if sorbet_assertion_is_must(node) {
-            must_check(span, value, &node.location())
+            let message = Expr::new(
+                span,
+                ExprNode::Lit {
+                    value: crate::expr::Literal::Str { value: "Passed `nil` into T.must".to_string() },
+                },
+            );
+            must_check(span, value, &node.location(), message)
+        } else if let Some(message) = because {
+            must_check(span, value, &node.location(), message)
         } else if sorbet_assertion_rules_out_nil(node) {
             super::type_ascription::not_nil(value)
         } else {

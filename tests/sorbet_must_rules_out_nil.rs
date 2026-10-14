@@ -1,6 +1,8 @@
-//! `T.must` lowers to sorbet-runtime's nil check, so its value is the
-//! argument with nil ruled out; `T.must_because` remains unsupported
-//! until its runtime semantics are shared.
+//! `T.must` and `T.must_because` lower to sorbet-runtime's nil check,
+//! so their value is the argument with nil ruled out. A
+//! `T.must_because` whose reason is not a literal block — a forwarded
+//! `&blk`, or one taking parameters — stays unsupported: its message
+//! is not in hand to inline.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -65,12 +67,34 @@ fn t_must_rules_nil_out() {
 }
 
 #[test]
-fn t_must_because_requires_a_shared_nil_check() {
+fn t_must_because_rules_nil_out() {
     let must = receivers(&action(
         "T.must_because(Line.find_by(id: 1)) { \"a line\" }.bogus_after",
     ));
-    assert!(must.iter().any(|d| d.contains("nil-check")), "{must:?}");
-    assert!(must.iter().any(|d| d.contains("Nil")), "{must:?}");
+    // As for `T.must`: the one failure left is `bogus_after` on a Line
+    // that cannot be nil, and no refusal is reported.
+    assert_eq!(must.len(), 1, "{must:?}");
+    assert!(must[0].contains("Line") && !must[0].contains("Nil"), "{must:?}");
+}
+
+#[test]
+fn t_must_because_without_an_inlinable_reason_is_refused() {
+    // A forwarded block: the message comes from calling it, which is
+    // not available at the call site, so the refusal stands.
+    let forwarded = receivers(
+        "class CartController < ApplicationController\n  def show(&blk)\n    T.must_because(Line.find_by(id: 1), &blk).bogus_after\n  end\nend\n",
+    );
+    assert!(forwarded.iter().any(|d| d.contains("nil-check")), "forwarded: {forwarded:?}");
+    assert!(forwarded.iter().any(|d| d.contains("Nil")), "forwarded: {forwarded:?}");
+
+    // A reason taking parameters: sorbet's `yield` passes none, so the
+    // parameter would read as nil and a body using it would not
+    // survive the inline.
+    let parameterized = receivers(&action(
+        "T.must_because(Line.find_by(id: 1)) { |why| why.to_s }.bogus_after",
+    ));
+    assert!(parameterized.iter().any(|d| d.contains("nil-check")), "parameterized: {parameterized:?}");
+    assert!(parameterized.iter().any(|d| d.contains("Nil")), "parameterized: {parameterized:?}");
 }
 
 #[test]
