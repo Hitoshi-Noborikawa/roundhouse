@@ -3613,6 +3613,9 @@ fn json_values_app() -> emit_and_run::Overlay {
       render json: { a: 1 }.to_json
     when "raw"
       render json: "[1,2]"
+    when "maybe_string"
+      text = params[:other] ? "[3]" : nil
+      render json: text
     when "to_json"
       render plain: article.to_json + "|" + { a: article }.to_json
     when "maybe"
@@ -3671,6 +3674,10 @@ class ValuesControllerTest < ActionDispatch::IntegrationTest
     assert_equal %({"a":1}), response.body
     get "/values/#{@article.id}", params: { shape: "raw" }
     assert_equal "[1,2]", response.body
+    get "/values/#{@article.id}", params: { shape: "maybe_string", other: 1 }
+    assert_equal "[3]", response.body
+    get "/values/#{@article.id}", params: { shape: "maybe_string" }
+    assert_equal "null", response.body
   end
 
   test "to_json writes what render json: does" do
