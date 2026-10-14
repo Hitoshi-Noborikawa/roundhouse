@@ -90,6 +90,8 @@ mod request_optional_port;
 mod action_dispatch_request_put;
 #[path = "emit_and_run/controller_url_helpers.rs"]
 mod controller_url_helpers;
+#[path = "emit_and_run/route_default_segment_args.rs"]
+mod route_default_segment_args;
 #[path = "emit_and_run/controller_super_ivars.rs"]
 mod controller_super_ivars;
 #[path = "emit_and_run/assoc_primary_key.rs"]

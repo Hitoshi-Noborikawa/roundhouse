@@ -1096,6 +1096,14 @@ pub fn emit_spinel(app: &App) -> Vec<EmittedFile> {
             // into a seeded Relation. See the module.
             crate::lower::records_to_relation_arg::rewrite_test_classes(&mut test_lcs, app);
             library::apply_scope_lowering(&mut test_lcs, app);
+            // A route-helper argument as the helper's SIGNATURE takes
+            // it, as app bodies get it: a String-typed segment (a slug,
+            // or one typed by its `scope defaults:` text) takes
+            // `id.to_s`, not the Integer `project_route_helper_ids`
+            // left. campfire's `user_profile_url(users(:jason))` reached
+            // `?String user_id` as an Integer, and Spinel refused the
+            // contradicted seed.
+            library::apply_route_param_lowering(&mut test_lcs, app);
             // `1.minute.ago` in a class a test file carries (campfire's
             // `PushServiceTestHelper.sign`), as library classes get it.
             library::apply_duration_lowering(&mut test_lcs, app);

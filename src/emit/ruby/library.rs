@@ -5143,7 +5143,25 @@ fn rewrite_route_params(expr: &mut Expr, sig: &RecordSignals<'_>) {
             // bare `id` read and `arg_record_model` sees no record at
             // all. Same defect, later in the pipeline — coerce it the
             // same way.
-            if wants_str_here && is_bare_id_read(arg) {
+            //
+            // A Symbol too: Rails renders one with `to_param`, which is
+            // `to_s`. campfire's own test writes `user_sidebar_url(:me)`
+            // against a `scope defaults: { user_id: "me" }` segment,
+            // and that segment is declared `String` after its default.
+            if wants_str_here {
+                if let ExprNode::Lit { value: crate::expr::Literal::Sym { value } } = &*arg.node {
+                    let mut lit = Expr::new(
+                        arg.span,
+                        ExprNode::Lit {
+                            value: crate::expr::Literal::Str { value: value.as_str().to_string() },
+                        },
+                    );
+                    lit.ty = Some(crate::ty::Ty::Str);
+                    *arg = lit;
+                    continue;
+                }
+            }
+            if wants_str_here && (is_bare_id_read(arg) || is_symbol_arg(arg)) {
                 let span = arg.span;
                 let inner =
                     std::mem::replace(arg, Expr::new(span, ExprNode::Seq { exprs: vec![] }));
@@ -5264,6 +5282,11 @@ fn is_bare_id_read(arg: &Expr) -> bool {
     matches!(&*arg.node,
         ExprNode::Send { recv: Some(_), method, args, block: None, .. }
             if method.as_str() == "id" && args.is_empty())
+}
+
+fn is_symbol_arg(arg: &Expr) -> bool {
+    matches!(&*arg.node, ExprNode::Lit { value: crate::expr::Literal::Sym { .. } })
+        || matches!(arg.ty, Some(crate::ty::Ty::Sym))
 }
 
 fn arg_record_model(arg: &Expr, sig: &RecordSignals<'_>) -> Option<String> {
