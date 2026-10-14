@@ -1553,6 +1553,13 @@ fn emit_send(recv: Option<&Expr>, method: &str, args: &[Expr]) -> String {
         if method == "**" {
             return format!(":math.pow({}, {})", emit_expr(r), emit_expr(arg));
         }
+        // Not `div/2`: it truncates toward zero, where Ruby's Integer#/ floors.
+        if method == "/"
+            && matches!(r.ty.as_ref(), Some(crate::ty::Ty::Int))
+            && matches!(arg.ty.as_ref(), Some(crate::ty::Ty::Int))
+        {
+            return format!("Integer.floor_div({}, {})", emit_expr(r), emit_expr(arg));
+        }
         if is_infix(method) {
             return format!("{} {method} {}", emit_expr(r), emit_expr(arg));
         }
