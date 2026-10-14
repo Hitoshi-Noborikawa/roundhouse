@@ -593,8 +593,7 @@ impl<'a> BodyTyper<'a> {
             // ActiveModel::Errors iteration yields an Error to the block.
             Ty::Class { id, .. } if id.0.as_str() == "ActiveModel::Errors" => {
                 match method.as_str() {
-                    "each" | "map" | "collect" | "select" | "filter" | "reject"
-                    | "any?" | "all?" | "none?" => Some(vec![Ty::Class {
+                    m if crate::lower::errors_index::ERROR_ITERATORS.contains(&m) => Some(vec![Ty::Class {
                         id: ClassId(Symbol::from("ActiveModel::Error")),
                         args: vec![].into(),
                     }]),
@@ -1014,6 +1013,18 @@ impl<'a> BodyTyper<'a> {
             {
                 let as_hash = params_as_hash();
                 return self.dispatch(Some(&as_hash), method, block_ret, args);
+            }
+        }
+        // What `errors` does not answer itself it delegates to its Array of `ActiveModel::Error`, as Rails' Enumerable does.
+        if let Some(Ty::Class { id, .. }) = recv_ty {
+            if id.0.as_str() == "ActiveModel::Errors"
+                && crate::lower::errors_index::ERROR_ITERATORS.contains(&method.as_str())
+                && !self.classes().get(id).is_some_and(|c| c.instance_methods.contains_key(method))
+            {
+                let as_array = Ty::Array {
+                    elem: std::sync::Arc::new(Ty::Class { id: ClassId(Symbol::from("ActiveModel::Error")), args: vec![].into() }),
+                };
+                return self.dispatch(Some(&as_array), method, block_ret, args);
             }
         }
         // `self[:generated_at]` / `read_attribute(:generated_at)` read

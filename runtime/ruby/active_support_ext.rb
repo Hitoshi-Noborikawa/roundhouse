@@ -291,6 +291,21 @@ module ActiveSupport
     out.freeze
   end
 
+  # Not a `reject!` on each: `errors` holds each detail's full message index for index, so both lose the same entries.
+  def self.errors_delete(errors, details, attribute)
+    deleted = []
+    i = details.length - 1
+    while i >= 0
+      if details[i].attribute == attribute
+        deleted.unshift(details[i].message)
+        details.delete_at(i)
+        errors.delete_at(i)
+      end
+      i -= 1
+    end
+    deleted.empty? ? nil : deleted
+  end
+
   # `ActiveSupport::MessageVerifier::InvalidSignature` — what a signed
   # value that does not verify raises. Rails hangs it off the verifier
   # class, and the NAME is the whole point: a controller that rescues it

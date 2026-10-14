@@ -871,9 +871,9 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
                     "\nimpl {name} {{\n\
                         pub fn mark_persisted_bang(&mut self) {{ }}\n\
                         pub fn errors(&self) -> Vec<String> {{ crate::errors_ext::validation_errors_snapshot() }}\n\
-                        pub fn error_details(&self) -> Vec<crate::active_record_base::ErrorDetail> {{ crate::errors_ext::validation_error_details_snapshot().iter().map(|(a, k, m)| crate::active_record_base::ErrorDetail::new(a, k, m)).collect() }}\n\
-                        pub fn push_error_detail(error: crate::active_record_base::ErrorDetail) {{ crate::errors_ext::validation_error_details_push(error.attribute(), error.kind(), error.message()) }}\n\
-                        pub fn error_messages_for(&self, attribute: &str) -> Vec<String> {{ crate::errors_ext::validation_error_details_snapshot().into_iter().filter(|(a, _, _)| a == attribute).map(|(_, _, m)| m).collect() }}\n\
+                        pub fn error_details(&self) -> Vec<crate::active_record_base::ErrorDetail> {{ crate::errors_ext::validation_error_details_snapshot().iter().map(|(a, k, m, f, s)| crate::active_record_base::ErrorDetail::new(a, k, m, f, *s)).collect() }}\n\
+                        pub fn push_error_detail(error: crate::active_record_base::ErrorDetail) {{ crate::errors_ext::validation_error_details_push(error.attribute(), error.kind(), error.message(), error.full_message(), error.symbolic()) }}\n\
+                        pub fn error_messages_for(&self, attribute: &str) -> Vec<String> {{ crate::errors_ext::validation_error_details_snapshot().into_iter().filter(|(a, _, _, _, _)| a == attribute).map(|(_, _, m, _, _)| m).collect() }}\n\
                         pub fn save(&mut self) -> bool {{\n\
                             crate::errors_ext::validation_errors_clear();\n\
                             self.validate();\n\

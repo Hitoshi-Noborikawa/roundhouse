@@ -1427,6 +1427,251 @@ fn errors_to_hash_groups_messages_by_attribute_on_spinel() {
     errors_to_hash_app("%{attribute} %{message}").run_spinel(ERRORS_TO_HASH).assert_passes();
 }
 
+/// Iterating `errors` yields each `ActiveModel::Error`, as Rails 8.1
+/// does: its attribute is a Symbol, its `message` the bare message and
+/// its `full_message` the one `full_messages` lists.
+fn errors_each_app() -> emit_and_run::Overlay {
+    errors_to_hash_app("%{attribute} %{message}").edit(
+        "app/models/article.rb",
+        "  def errors_hash\n",
+        "  def error_rows
+    rows = []
+    errors.each { |error| rows << [error.attribute, error.message, error.full_message] }
+    rows
+  end
+
+  def error_full_messages
+    errors.map(&:full_message)
+  end
+
+  def error_attributes
+    errors.collect { |error| error.attribute }
+  end
+
+  def base_message
+    found = errors.find { |error| error.attribute == :base }
+    found ? found.message : \"none\"
+  end
+
+  def first_attribute
+    errors.first ? errors.first.attribute : :none
+  end
+
+  def body_messages
+    errors.select { |error| error.attribute == :body }.map(&:message)
+  end
+
+  def unattributed_count
+    errors.reject { |error| error.attribute == :base }.size
+  end
+
+  def all_have_messages
+    errors.all? { |error| error.message.length > 0 }
+  end
+
+  def errors_hash\n",
+    )
+}
+
+const ERRORS_EACH: &str = r#"a = Article.new(title: "", body: "odd")
+a.valid?
+rows = [[:title, "can't be blank", "Title can't be blank"], [:body, "is too short (minimum is 10 characters)", "Body is too short (minimum is 10 characters)"], [:base, "is odd", "is odd"]]
+raise a.error_rows.inspect unless a.error_rows == rows
+raise a.error_full_messages.inspect unless a.error_full_messages == rows.map(&:last)
+raise a.error_attributes.inspect unless a.error_attributes == [:title, :body, :base]
+raise a.base_message.inspect unless a.base_message == "is odd"
+raise a.first_attribute.inspect unless a.first_attribute == :title
+raise a.body_messages.inspect unless a.body_messages == ["is too short (minimum is 10 characters)"]
+raise a.unattributed_count.inspect unless a.unattributed_count == 2
+raise a.all_have_messages.inspect unless a.all_have_messages == true
+b = Article.new(title: "A title", body: "A long enough body")
+b.valid?
+raise b.error_rows.inspect unless b.error_rows.empty? && b.error_full_messages.empty?
+raise b.base_message.inspect unless b.base_message == "none" && b.first_attribute == :none
+puts "errors iteration passed"
+"#;
+
+#[test]
+fn iterating_errors_yields_each_error() {
+    errors_each_app().run_ruby(ERRORS_EACH).assert_passes();
+}
+
+#[test]
+#[ignore = "requires the Spinel toolchain"]
+fn iterating_errors_yields_each_error_on_spinel() {
+    errors_each_app().run_spinel(ERRORS_EACH).assert_passes();
+}
+
+/// Each `&.` of a chain binds its own receiver: one shared local held
+/// `errors` and then its full messages, so `&.join` was asked of `errors`.
+fn safe_navigation_chain_app() -> emit_and_run::Overlay {
+    emit_and_run::real_blog().edit(
+        "app/models/article.rb",
+        "  validates :title, presence: true\n",
+        "  validates :title, presence: true
+
+  def self.error_line(title)
+    Article.find_by(title: title)&.errors&.full_messages&.join(\", \")
+  end
+
+  def error_sentence
+    errors&.full_messages&.to_sentence
+  end
+
+  def shout
+    title&.strip&.upcase&.length
+  end
+",
+    )
+}
+
+const SAFE_NAVIGATION_CHAIN: &str = r#"a = Article.new(title: " hi ", body: "")
+a.valid?
+raise a.error_sentence.inspect unless a.error_sentence == "Body can't be blank and Body is too short (minimum is 10 characters)"
+raise a.shout.inspect unless a.shout == 2
+puts "safe navigation chain passed"
+"#;
+
+#[test]
+fn each_link_of_a_safe_navigation_chain_reads_its_own_receiver() {
+    let found = r#"Article.create!(title: "Saved", body: "A long enough body")
+raise Article.error_line("Saved").inspect unless Article.error_line("Saved") == ""
+raise Article.error_line("Missing").inspect unless Article.error_line("Missing").nil?
+"#;
+    safe_navigation_chain_app().run_ruby(&format!("{found}{SAFE_NAVIGATION_CHAIN}")).assert_passes();
+}
+
+/// The native consumer boots no database, so only the chains on a built record.
+#[test]
+#[ignore = "requires the Spinel toolchain"]
+fn each_link_of_a_safe_navigation_chain_reads_its_own_receiver_on_spinel() {
+    safe_navigation_chain_app().run_spinel(SAFE_NAVIGATION_CHAIN).assert_passes();
+}
+
+/// `error.type` is a Symbol, or the message when `errors.add` was given a
+/// String, and `of_kind?` and `where` ask it, as Rails 8.1 does.
+fn error_types_app() -> emit_and_run::Overlay {
+    errors_each_app().edit(
+        "app/models/article.rb",
+        "  def error_rows\n",
+        "  def error_types
+    errors.map { |error| error.type }
+  end
+
+  def first_type
+    errors.first ? errors.first.type : :none
+  end
+
+  def body_errors
+    errors.where(:body).map(&:full_message)
+  end
+
+  def where_sizes
+    [errors.where(:title, :blank).size, errors.where(:base, \"is odd\").size, errors.where(:base, :invalid).size,
+     errors.where(\"title\").reject { |error| error.type == :blank }.size]
+  end
+
+  def kinds
+    [errors.of_kind?(:title, :blank), errors.of_kind?(:body, :blank), errors.of_kind?(\"body\", :too_short),
+     errors.of_kind?(:base, \"is odd\"), errors.of_kind?(:base, :invalid), errors.of_kind?(:title)]
+  end
+
+  def error_rows\n",
+    )
+}
+
+const ERROR_TYPES: &str = r#"a = Article.new(title: "", body: "odd")
+a.valid?
+raise a.error_types.inspect unless a.error_types == [:blank, :too_short, "is odd"]
+raise a.first_type.inspect unless a.first_type == :blank
+raise a.kinds.inspect unless a.kinds == [true, false, true, true, false, false]
+raise a.body_errors.inspect unless a.body_errors == ["Body is too short (minimum is 10 characters)"]
+raise a.where_sizes.inspect unless a.where_sizes == [1, 1, 0, 0]
+b = Article.new(title: "A title", body: "A long enough body")
+b.valid?
+raise b.kinds.inspect unless b.kinds == [false, false, false, false, false, false] && b.first_type == :none
+puts "error types passed"
+"#;
+
+#[test]
+fn an_error_s_type_is_rails_type() {
+    error_types_app().run_ruby(ERROR_TYPES).assert_passes();
+}
+
+#[test]
+#[ignore = "requires the Spinel toolchain"]
+fn an_error_s_type_is_rails_type_on_spinel() {
+    error_types_app().run_spinel(ERROR_TYPES).assert_passes();
+}
+
+/// `errors.delete(:field)` drops the field's errors from the full
+/// messages and the details alike, and answers their messages or nil.
+fn errors_delete_app() -> emit_and_run::Overlay {
+    errors_each_app().edit(
+        "app/models/article.rb",
+        "  def error_rows\n",
+        "  def drop_errors(field)
+    field == \"body\" ? errors.delete(:body) : errors.delete(\"nothing\")
+  end
+
+  def listed_messages
+    [errors.full_messages, errors.count]
+  end
+
+  def error_rows\n",
+    )
+}
+
+const ERRORS_DELETE: &str = r#"a = Article.new(title: "", body: "odd")
+a.valid?
+raise a.drop_errors("nothing").inspect unless a.drop_errors("nothing").nil?
+deleted = a.drop_errors("body")
+raise deleted.inspect unless deleted == ["is too short (minimum is 10 characters)"]
+raise a.error_full_messages.inspect unless a.error_full_messages == ["Title can't be blank", "is odd"]
+raise a.error_attributes.inspect unless a.error_attributes == [:title, :base]
+raise a.listed_messages.inspect unless a.listed_messages == [["Title can't be blank", "is odd"], 2]
+raise a.drop_errors("body").inspect unless a.drop_errors("body").nil?
+puts "errors.delete passed"
+"#;
+
+#[test]
+fn errors_delete_drops_the_field_s_errors() {
+    errors_delete_app().run_ruby(ERRORS_DELETE).assert_passes();
+}
+
+#[test]
+#[ignore = "requires the Spinel toolchain"]
+fn errors_delete_drops_the_field_s_errors_on_spinel() {
+    errors_delete_app().run_spinel(ERRORS_DELETE).assert_passes();
+}
+
+#[test]
+fn errors_delete_is_a_gap_on_strict_targets() {
+    let (_emitted, errors) = errors_delete_app().emit(roundhouse::project::BuildTarget::Crystal);
+    assert_eq!(
+        errors.iter().filter(|e| e.contains("ActiveSupport.errors_delete is only available on the ruby family and spinel")).count(),
+        2,
+        "{errors:#?}"
+    );
+}
+
+/// `type` reads the error more than once, so a found error is an error.
+#[test]
+fn the_type_of_an_error_that_is_not_a_plain_read_is_an_error() {
+    let (_emitted, errors) = errors_each_app()
+        .edit(
+            "app/models/article.rb",
+            "  def error_rows\n",
+            "  def base_type
+    errors.find { |error| error.attribute == :base }.type
+  end
+
+  def error_rows\n",
+        )
+        .emit(roundhouse::project::BuildTarget::Ruby);
+    assert!(errors.iter().any(|e| e.contains("`error.type` reads the error three times")), "{errors:#?}");
+}
+
 /// The helper is the shared Ruby runtime's, which no strict target loads.
 #[test]
 fn errors_to_hash_is_a_gap_on_strict_targets() {
@@ -1447,6 +1692,61 @@ fn errors_readers_beyond_membership_are_a_gap_on_strict_targets() {
     };
     assert_eq!((gated("errors_to_hash"), gated("errors_messages"), gated("errors_attribute_names")), (2, 2, 1), "{errors:#?}");
     assert_eq!(errors.len(), 5, "{errors:#?}");
+}
+
+/// A record built for its `errors` is still built: Rails runs
+/// `Article.create!` before it answers the full message.
+fn full_message_on_a_built_record_app() -> emit_and_run::Overlay {
+    emit_and_run::real_blog().edit(
+        "app/models/article.rb",
+        "  validates :title, presence: true\n",
+        "  validates :title, presence: true
+
+  def self.taken_message(reason)
+    error = Article.create!(title: \"Built\", body: \"A long enough body\").errors.full_message(:title, reason.strip)
+    skipped = reason.empty? || Article.create!(title: \"Skipped\", body: \"A long enough body\").errors.full_message(:base, \"is skipped\")
+    [error, skipped, Article.new.errors.full_message(:base, \"is odd\")]
+  end
+",
+    )
+}
+
+#[test]
+fn full_message_on_a_built_record_builds_it() {
+    full_message_on_a_built_record_app()
+        .run_ruby(
+            r#"messages = Article.taken_message(" is taken ")
+raise messages.inspect unless messages == ["Title is taken", "is skipped", "is odd"]
+messages = Article.taken_message("")
+raise messages.inspect unless messages == ["Title ", true, "is odd"]
+raise Article.count.inspect unless Article.where(title: "Built").count == 2 && Article.where(title: "Skipped").count == 1
+puts "full message on a built record passed"
+"#,
+        )
+        .assert_passes();
+}
+
+#[test]
+#[ignore = "requires the Spinel toolchain"]
+fn full_message_on_a_built_record_builds_it_on_spinel() {
+    emit_and_run::real_blog()
+        .edit(
+            "app/models/article.rb",
+            "  validates :title, presence: true\n",
+            "  validates :title, presence: true
+
+  def self.odd_message(reason)
+    reason.empty? || Article.new.errors.full_message(:title, reason.strip)
+  end
+",
+        )
+        .run_spinel(
+            r#"raise Article.odd_message(" is odd ").inspect unless Article.odd_message(" is odd ") == "Title is odd"
+raise Article.odd_message("").inspect unless Article.odd_message("") == true
+puts "full message on a built record passed"
+"#,
+        )
+        .assert_passes();
 }
 
 /// A field the lowering cannot humanize at compile time keeps its error.
@@ -14020,5 +14320,3 @@ puts "PASS friendly oracle"
 }
 #[path = "emit_and_run/acts_as_votable.rs"]
 mod acts_as_votable;
-
-
