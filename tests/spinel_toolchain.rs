@@ -32,6 +32,10 @@ use roundhouse::ingest::ingest_app;
 
 #[path = "support/emit_and_run.rs"]
 mod emit_and_run;
+#[path = "support/string_truncate.rs"]
+mod string_truncate;
+#[path = "spinel_toolchain/string_truncate.rs"]
+mod string_truncate_native;
 #[path = "support/array_excluding.rs"]
 mod array_excluding;
 #[path = "spinel_toolchain/array_excluding.rs"]

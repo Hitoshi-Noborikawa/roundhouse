@@ -452,6 +452,31 @@ module ActiveSupport
     text
   end
 
+  # AS `String#truncate(truncate_to, omission: "...", separator: nil)`
+  # (core_ext/string/filters.rb), with the options positional: the
+  # result is at most `truncate_to` characters including the omission,
+  # unless the omission alone is longer, in which case it is the
+  # omission. A separator cuts at its last occurrence that still leaves
+  # room for the omission; when it does not occur there, the cut is
+  # where it would have been without one. `nil` for either option means
+  # what Rails' `options[:omission] || "..."` and `if
+  # options[:separator]` make it mean. A String reopen the transpiled
+  # runtimes cannot host - same home and same rule as `squish` above.
+  def self.truncate(text, truncate_to, omission, separator)
+    return text.dup unless text.length > truncate_to
+
+    mark = omission || "..."
+    room = truncate_to - mark.length
+    return mark.dup if room <= 0
+
+    stop = room
+    if separator
+      found = text.rindex(separator, room)
+      stop = found if found
+    end
+    text[0, stop] + mark
+  end
+
   # AS `Enumerable#sole`: THE one element, and a raise for any other
   # count — Rails' `SoleItemExpectedError` with its two messages. A
   # core_ext reopen (`Enumerable`) the transpiled runtimes cannot host,
