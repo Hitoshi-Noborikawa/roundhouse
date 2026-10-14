@@ -66,6 +66,16 @@ module JsonBuilder
     json.gsub(JSON_HTML_ESCAPE_PATTERN, ESCAPES)
   end
 
+  # A Float as Rails' encoder sees it: NaN and the infinities are written
+  # `null` (`Float#as_json`), where `JSON.generate` raises on them. The
+  # lowerer wraps each Float leaf of a payload it hands `JSON.generate`.
+  def self.finite_float(v)
+    return nil if v.nil?
+    # Not `finite?`, which not every target's Float answers.
+    return nil if v - v != 0.0
+    v
+  end
+
   # Render a scalar Ruby value as its JSON fragment, complete with
   # surrounding quotes for strings. Returns a String the lowered
   # body can concatenate directly into the io accumulator.
