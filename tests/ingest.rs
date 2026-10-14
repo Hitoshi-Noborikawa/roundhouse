@@ -625,16 +625,22 @@ end
     );
 }
 
-/// `devise_for :widgets, path: "auth", format: false` — no enclosing
-/// scope, so this isolates `Devise::Mapping`'s `options[:path] || name`
-/// path segment and `format: false` from the separate scope-module
-/// controller bug (covered on its own below). Devise 5
-/// (`devise/mapping.rb:61`, `devise/rails/routes.rb`). Fails to ingest
-/// on main (`unsupported devise_for option \`path\``).
+/// `devise_for :widgets, path: "auth", format: false` under `scope
+/// module: :auth` — the Top-3 reduction for ranked gaps #1 and #2.
+/// Devise::Mapping uses `options[:path] || name` as the path segment
+/// and substitutes the enclosing scope's module for its own `"devise"`
+/// default: `auth/sessions#new`, not `auth/devise/sessions#new` and not
+/// `devise/sessions#new` (that would drop the scope entirely). Checked
+/// against the real Devise 5 routes this mirrors (`devise/rails/routes.rb`,
+/// `devise/mapping.rb`). Fails to ingest on main (`unsupported
+/// devise_for option \`path\``).
 #[test]
-fn devise_for_path_option_builds_the_route_table_under_the_given_segment() {
+fn devise_for_with_scope_module_and_path_matches_real_devise_routes() {
     let source = br#"Rails.application.routes.draw do
-  devise_for :widgets, path: "auth", format: false
+  scope module: :auth do
+    devise_for :widgets, path: "auth", format: false
+  end
+  resources :widgets, only: %i[index show]
 end
 "#;
     roundhouse::ingest::survey::activate();
@@ -652,19 +658,101 @@ end
     let flat = roundhouse::lower::flatten_routes(&app);
     let by_name: std::collections::HashMap<_, _> =
         flat.iter().map(|r| (r.as_name.as_str(), r)).collect();
+
     let new_session = by_name.get("new_widget_session").expect("new_widget_session");
     assert_eq!(new_session.path, "/auth/sign_in");
-    // No enclosing scope module: the controller stays the stock
-    // `Devise::*` default, unaffected by `path:`.
-    assert_eq!(new_session.controller.0.as_str(), "Devise::SessionsController");
+    assert_eq!(new_session.controller.0.as_str(), "Auth::SessionsController");
+    let destroy_session =
+        by_name.get("destroy_widget_session").expect("destroy_widget_session");
+    assert_eq!(destroy_session.path, "/auth/sign_out");
+
     let new_registration =
         by_name.get("new_widget_registration").expect("new_widget_registration");
     assert_eq!(new_registration.path, "/auth/sign_up");
+    assert_eq!(
+        new_registration.controller.0.as_str(),
+        "Auth::RegistrationsController"
+    );
+    let create_registration =
+        by_name.get("widget_registration").expect("widget_registration");
+    assert_eq!(create_registration.path, "/auth");
+
     let new_password = by_name.get("new_widget_password").expect("new_widget_password");
     assert_eq!(new_password.path, "/auth/password/new");
+    assert_eq!(new_password.controller.0.as_str(), "Auth::PasswordsController");
+
     let new_confirmation =
         by_name.get("new_widget_confirmation").expect("new_widget_confirmation");
     assert_eq!(new_confirmation.path, "/auth/confirmation/new");
+    assert_eq!(
+        new_confirmation.controller.0.as_str(),
+        "Auth::ConfirmationsController"
+    );
+
+    // The sibling `resources :widgets`, OUTSIDE the `scope module:`
+    // block, must not pick up the Devise scope's module.
+    let index = by_name.get("widgets").expect("widgets index");
+    assert_eq!(index.path, "/widgets");
+    assert_eq!(index.controller.0.as_str(), "WidgetsController");
+}
+
+/// Same scope-module substitution bug (ranked gap #1's second half), with
+/// no `path:` override, so it isolates the controller-naming half of the
+/// fix: the sessions controller resolves as `auth/sessions`, not
+/// `auth/devise/sessions` (what the un-fixed route lowering's blind
+/// module-prefix concatenation produces) and not bare `devise/sessions`
+/// (dropping the scope entirely). Fails (wrong controller) on main.
+#[test]
+fn devise_for_under_scope_module_resolves_controller_in_place_of_devise() {
+    let source = br#"Rails.application.routes.draw do
+  scope module: :auth do
+    devise_for :widgets
+  end
+end
+"#;
+    let (result, _) = roundhouse::ingest::prism::scope(|| {
+        roundhouse::ingest::ingest_routes(source, "config/routes.rb")
+    });
+    let table = result.expect("ingest");
+    let mut app = roundhouse::App::default();
+    app.routes = table;
+    let flat = roundhouse::lower::flatten_routes(&app);
+    let by_name: std::collections::HashMap<_, _> =
+        flat.iter().map(|r| (r.as_name.as_str(), r)).collect();
+    let session = by_name.get("new_widget_session").expect("new_widget_session");
+    assert_eq!(session.path, "/widgets/sign_in");
+    assert_eq!(session.controller.0.as_str(), "Auth::SessionsController");
+    let registration =
+        by_name.get("new_widget_registration").expect("new_widget_registration");
+    assert_eq!(
+        registration.controller.0.as_str(),
+        "Auth::RegistrationsController"
+    );
+}
+
+/// `controllers:` overrides are absolute in real Devise
+/// (`with_devise_exclusive_scope` resets the scope's module to `nil`
+/// before applying them) — an enclosing `scope module:` must not
+/// re-qualify them on top of what `controllers:` already names.
+#[test]
+fn devise_for_controllers_override_ignores_enclosing_scope_module() {
+    let source = br#"Rails.application.routes.draw do
+  scope module: :auth do
+    devise_for :widgets, controllers: { sessions: "widgets/sessions" }
+  end
+end
+"#;
+    let (result, _) = roundhouse::ingest::prism::scope(|| {
+        roundhouse::ingest::ingest_routes(source, "config/routes.rb")
+    });
+    let table = result.expect("ingest");
+    let mut app = roundhouse::App::default();
+    app.routes = table;
+    let flat = roundhouse::lower::flatten_routes(&app);
+    let by_name: std::collections::HashMap<_, _> =
+        flat.iter().map(|r| (r.as_name.as_str(), r)).collect();
+    let session = by_name.get("new_widget_session").expect("new_widget_session");
+    assert_eq!(session.controller.0.as_str(), "Widgets::SessionsController");
 }
 
 /// `devise_for format: true` would need the `(.:format)` optional

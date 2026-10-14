@@ -5,12 +5,18 @@
 //! passwords, confirmations — matching stock Devise helpers/paths. This is
 //! not driven by the model's `devise :module, …` list; `skip:` / `only:`
 //! fail loud instead of silently narrowing. Controllers default to
-//! `devise/<mapping>` (`devise/sessions`, …); `controllers:`
-//! overrides replace per mapping, and keys outside the four modeled
-//! mappings fail loud (no silent OmniAuth accept-then-ignore). Does not
-//! model Warden, OmniAuth callback routes, or Devise controller bodies.
-//! Unsupported options (`skip:`, `only:`, `as:`, `class_name:`, `module:`,
-//! …) fail loud.
+//! `devise/<mapping>` (`devise/sessions`, …) the way
+//! `Devise::Mapping#default_controllers` does (`mod = options[:module] ||
+//! @scope[:module] || "devise"`) — route lowering substitutes the
+//! enclosing `scope module:`, if any, for `"devise"`; see
+//! `resolve_default_controller` and its caller in `lower::routes`.
+//! `controllers:` overrides replace per mapping and are absolute (Devise
+//! resets the scope's module to `nil` before applying them —
+//! `with_devise_exclusive_scope` — so no enclosing scope ever re-qualifies
+//! them). Keys outside the four modeled mappings fail loud (no silent
+//! OmniAuth accept-then-ignore). Does not model Warden, OmniAuth callback
+//! routes, or Devise controller bodies. Unsupported options (`skip:`,
+//! `only:`, `as:`, `class_name:`, `module:`, …) fail loud.
 
 use std::collections::HashMap;
 
@@ -221,6 +227,36 @@ const DEVISE_ROUTES: &[DeviseRoute] = &[
     },
 ];
 
+/// Sentinel for a DEFAULT devise_for controller (no `controllers:`
+/// override): lower-case with a leading NUL, which no camelized
+/// `FooController` class name can look like, so route lowering can tell
+/// it apart from an ordinary already-qualified controller and
+/// substitute the enclosing scope's module for Devise's own `"devise"`
+/// default instead of concatenating onto it. See `resolve_default_controller`.
+const DEFAULT_MARKER_PREFIX: &str = "\u{0}devise-default:";
+
+fn default_controller_marker(mapping: &str) -> String {
+    format!("{DEFAULT_MARKER_PREFIX}{mapping}")
+}
+
+/// Resolve a [`default_controller_marker`] placeholder against the
+/// enclosing scope's accumulated module prefix (`"Auth::"`, already
+/// `Camel::`-joined with a trailing `::`, or empty for no enclosing
+/// module). Mirrors `Devise::Mapping#default_controllers`: `mod =
+/// options[:module] || @scope[:module] || "devise"` — we only ever see
+/// the scope's module here, since `devise_for … module:` itself fails
+/// loud at ingest. Returns `None` when `controller` is not one of our
+/// placeholders, so the caller falls through to ordinary qualification.
+pub(crate) fn resolve_default_controller(module_prefix: &str, controller: &str) -> Option<String> {
+    let mapping = controller.strip_prefix(DEFAULT_MARKER_PREFIX)?;
+    let module = if module_prefix.is_empty() {
+        "Devise"
+    } else {
+        module_prefix.trim_end_matches("::")
+    };
+    Some(format!("{module}::{}Controller", crate::naming::camelize(mapping)))
+}
+
 /// Expand `devise_for :users[, path:, path_names:, format:, controllers:
 /// { sessions: "users/sessions", … }]`.
 ///
@@ -425,13 +461,18 @@ pub(super) fn ingest_devise_for(
     let path_prefix = format!("/{base_path}");
     let mut names = default_path_names();
     names.extend(path_name_overrides);
-    // Devise::Mapping#default_controllers uses `#{module}/#{mapping}`
-    // with module defaulting to "devise".
+    // `Devise::Mapping#default_controllers`: `mod = options[:module] ||
+    // "devise"`; an explicit `controllers:` entry is absolute (Devise
+    // resets the scope's module before applying it), marked here with a
+    // leading `::` the way `qualify_controller` already treats any
+    // other absolute target. The default (no override) is left as a
+    // placeholder route lowering resolves against the enclosing scope's
+    // module — see `resolve_default_controller`.
     let ctrl = |mapping: &str| -> String {
-        controllers
-            .get(mapping)
-            .cloned()
-            .unwrap_or_else(|| format!("devise/{mapping}"))
+        match controllers.get(mapping) {
+            Some(cv) => format!("::{}", controller_class_name(cv)),
+            None => default_controller_marker(mapping),
+        }
     };
     let mut resolved: HashMap<&str, String> = HashMap::new();
     for route in DEVISE_ROUTES {
@@ -448,7 +489,7 @@ pub(super) fn ingest_devise_for(
             RouteSpec::Explicit {
                 method: route.method.clone(),
                 path: format!("{path_prefix}{suffix}"),
-                controller: ClassId(Symbol::from(controller_class_name(controller))),
+                controller: ClassId(Symbol::from(controller.clone())),
                 action: Symbol::from(route.action),
                 as_name: Some(Symbol::from(as_name.as_str())),
                 constraints: IndexMap::new(),
