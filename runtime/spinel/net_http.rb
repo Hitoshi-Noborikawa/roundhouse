@@ -224,7 +224,7 @@ module Net
       connect if @socket.nil?
       begin_transport(req)
       write_request(req)
-      read_response(req.method)
+      read_response(req.method, req.decode_content)
     end
 
     # The package connects direct or not at all (`Net::HTTP.new` raises
