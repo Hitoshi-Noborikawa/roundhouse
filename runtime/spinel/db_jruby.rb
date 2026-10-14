@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 # Primitive Db surface — JRuby variant. Same `module Db` contract as
   # The query cache keeps results up to this many rows — see db.rb.
   QC_CAPTURE_ROWS = 16

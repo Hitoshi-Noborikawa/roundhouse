@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 # Primitive Db surface over PostgreSQL, for spinel-compiled binaries.
 #
 # The same `module Db` contract as runtime/spinel/db.rb (SQLite over

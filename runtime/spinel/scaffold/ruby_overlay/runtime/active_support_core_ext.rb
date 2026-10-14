@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 # CRuby-only ActiveSupport core extensions (Object / String / Array).
 #
 # The reopened-builtin surface the lobsters corpus actually calls —

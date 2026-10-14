@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 require_relative "action_dispatch/router"
 # Whether a render answers `Vary: Accept` (ruby-family dispatchers).
 require_relative "action_dispatch/mime_negotiation"

@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 # Spinel-only ERB shim. CRuby/JRuby get `ERB::Util` from the stdlib that
 # Rails loads for them; the AOT tree has no stdlib ERB, so the constant
 # resolved to nothing and `ERB::Util.html_escape` raised

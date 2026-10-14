@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 # Primitive Db surface — the layer that per-model adapter code sits on
 # top of. The contract is database-agnostic; this file is the SQLite-via-
 # the-cruby-`sqlite3`-gem implementation. Other backends (sqlite via

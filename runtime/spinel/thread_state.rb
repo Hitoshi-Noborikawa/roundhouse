@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 # Per-request state, per THREAD.
 #
 # Four modules in the shared runtime keep per-request state at module

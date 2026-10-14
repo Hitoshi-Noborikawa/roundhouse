@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 # Boot chain — every `require_relative` the app needs, in the order it
 # needs them, and NOTHING that starts anything.
 #

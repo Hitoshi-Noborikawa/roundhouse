@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 require_relative "action_controller/base"
 # `ActionController::API`, the base an API app's ApplicationController
 # names: Base under the API name.

@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 # Multi-id finder misses need the pluralizer even without app view helpers.
 require_relative "../inflector"
 

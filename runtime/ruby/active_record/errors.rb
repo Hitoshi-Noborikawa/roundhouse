@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 module ActiveRecord
   # Not StandardError subclasses each: Rails' hierarchy (8.1.4), so `rescue ActiveRecord::StatementInvalid` catches what Rails' does.
   class ActiveRecordError < StandardError

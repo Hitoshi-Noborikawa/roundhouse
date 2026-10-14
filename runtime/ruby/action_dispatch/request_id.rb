@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 # The two response headers Rails' outermost request middleware add to
 # every response the app answers: `ActionDispatch::RequestId`
 # (`X-Request-Id`) and `Rack::Runtime` (`X-Runtime`). Both sit after

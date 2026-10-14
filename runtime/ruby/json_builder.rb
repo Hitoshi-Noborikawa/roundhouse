@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 # JSON encoding primitives used by Views::*.<x>_json render methods —
 # the lowered output of `*.json.jbuilder` templates. Hand-rolled to drop
 # the stdlib `json` dependency (which spinel doesn't ship), and to keep

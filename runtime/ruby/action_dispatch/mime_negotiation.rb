@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 # actionpack 8.1's `ActionDispatch::Http::MimeNegotiation#
 # should_apply_vary_header?`: whether the response format was
 # negotiated from the request's Accept header, which is when Rails'

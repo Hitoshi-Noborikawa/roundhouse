@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 # What Rails' default middleware does to a controller's response on
 # its way out: `Rack::ETag` and `Rack::ConditionalGet`, plus the
 # `Cache-Control` default `ActionDispatch::Response` writes for a

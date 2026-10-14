@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 # Rails 8.1.4 `send_data(data, type:, disposition:, filename:)`.
 #
 # With a filename the Content-Disposition header is what

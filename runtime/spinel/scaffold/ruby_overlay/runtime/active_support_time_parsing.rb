@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 # Native date-only parsing plus UTC-safe timestamp parsing/stamping.
 #
 # Dates store as YYYY-MM-DD, with no time or zone. Separately,

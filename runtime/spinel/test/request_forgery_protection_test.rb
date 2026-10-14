@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 # Minitest-shaped, like hash_to_query_test.rb: a CRuby-only framework
 # test of the ruby family's forgery check
 # (runtime/request_forgery_protection.rb over the shared

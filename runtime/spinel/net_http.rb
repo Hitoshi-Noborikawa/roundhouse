@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 # Net::HTTP, reopened over spinel's bundled `packages/net` so the stub
 # table (`runtime/http_stub.rb`) is consulted BEFORE any socket opens.
 #

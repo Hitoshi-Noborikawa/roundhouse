@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 # Framework-level test bootstrap. Loads the framework Ruby (under
 # `runtime/ruby/`). Runs under stock CRuby — no spinel, no transpile,
 # no app fixture. Tests check framework-source correctness; transpile-

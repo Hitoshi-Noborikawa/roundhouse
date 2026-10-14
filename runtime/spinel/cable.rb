@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 # Cable — Action Cable (actioncable-v1-json) WebSocket endpoint for the
 # spinel target, built on the Tep::WebSocket codec + Tep::Broadcast fan-out
 # under Tep::Server::Threaded.

@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 require_relative "active_record/errors"
 require_relative "active_record/connection_not_established"
 require_relative "active_record/connection_pool"
