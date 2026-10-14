@@ -17,6 +17,7 @@ const FILES: &[(&str, &str)] = &[
     ("app/contracts/typed_contract.rb", include_str!("dry_validation/app/contracts/typed_contract.rb")),
     ("lib/shop/types.rb", include_str!("dry_validation/lib/shop/types.rb")),
     ("app/contracts/chain_contract.rb", include_str!("dry_validation/app/contracts/chain_contract.rb")),
+    ("app/contracts/rules_contract.rb", include_str!("dry_validation/app/contracts/rules_contract.rb")),
 ];
 
 pub fn overlay() -> super::emit_and_run::Overlay {

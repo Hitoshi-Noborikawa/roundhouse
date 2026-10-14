@@ -122,6 +122,33 @@ impl Schema {
     }
 }
 
+/// A contract's own declarations.
+#[derive(Clone, Debug, Default)]
+struct Contract {
+    schema: Option<Schema>,
+    rules: Vec<RuleDecl>,
+}
+
+/// `rule(:a, addr: :city) do ... end`: the key paths, the block's body.
+#[derive(Clone, Debug)]
+struct RuleDecl {
+    paths: Vec<Vec<String>>,
+    body: Expr,
+}
+
+/// A `failure` in a rule: where (None for `base`), and what.
+struct Failure<'a> {
+    path: Option<Vec<String>>,
+    message: FailureMessage<'a>,
+}
+
+enum FailureMessage<'a> {
+    Text(&'a str),
+    /// A message id, looked up as dry-validation looks it up, with its
+    /// interpolation tokens.
+    Id(&'a str, Vec<(String, Expr)>),
+}
+
 /// `config.messages` as a class body sets it.
 #[derive(Clone, Default, Debug)]
 struct Config {
@@ -231,7 +258,7 @@ pub(super) fn lower_dry_validation(
     };
 
     // Each contract's own schema, or why it is not read.
-    let mut own: HashMap<String, Option<Schema>> = HashMap::new();
+    let mut own: HashMap<String, Contract> = HashMap::new();
     let mut refused: HashMap<String, String> = HashMap::new();
     for name in parent_of.keys() {
         let lc = app.library_classes.iter().find(|lc| lc.name.0.as_str() == name).expect("listed");
@@ -239,9 +266,15 @@ pub(super) fn lower_dry_validation(
             refused.insert(name.clone(), reason);
             continue;
         }
-        match read_contract(lc, &cx, &schemas_read) {
-            Ok(schema) => {
-                own.insert(name.clone(), schema);
+        // A rule may call the contract's own methods, an ancestor's too.
+        let methods: HashSet<String> = chain_of(name)
+            .iter()
+            .filter_map(|n| app.library_classes.iter().find(|lc| lc.name.0.as_str() == n))
+            .flat_map(|lc| lc.methods.iter().map(|m| m.name.as_str().to_string()))
+            .collect();
+        match read_contract(lc, &cx, &schemas_read, &methods) {
+            Ok(contract) => {
+                own.insert(name.clone(), contract);
             }
             Err(reason) => {
                 refused.insert(name.clone(), reason);
@@ -252,7 +285,7 @@ pub(super) fn lower_dry_validation(
     // contract under a lowered one would answer its parent's, and one over
     // a lowered child would be its parent. The topmost contract with a
     // schema above a refusal goes with it, and all below that.
-    let has_schema = |name: &str| chain_of(name).iter().any(|n| own.get(n).is_some_and(|s| s.is_some()));
+    let has_schema = |name: &str| chain_of(name).iter().any(|n| own.get(n).is_some_and(|c| c.schema.is_some()));
     let mut refused_tops: HashSet<String> = HashSet::new();
     for name in refused.keys() {
         let chain = chain_of(name);
@@ -275,8 +308,12 @@ pub(super) fn lower_dry_validation(
         }
         let chain = chain_of(name);
         let mut schema: Option<Schema> = None;
+        let mut rules: Vec<RuleDecl> = Vec::new();
         for n in &chain {
-            if let Some(Some(s)) = own.get(n) {
+            if let Some(c) = own.get(n) {
+                rules.extend(c.rules.iter().cloned());
+            }
+            if let Some(Contract { schema: Some(s), .. }) = own.get(n) {
                 match &mut schema {
                     None => schema = Some(s.clone()),
                     Some(acc) => {
@@ -288,7 +325,12 @@ pub(super) fn lower_dry_validation(
         }
         let schema = schema.expect("has a schema");
         let messages = messages_for(&chain, &configs, &constants, read_file, "dry_validation");
-        generated.push((name.clone(), contract_source(name, &schema, &messages, &mut used)));
+        let methods: HashSet<String> = chain
+            .iter()
+            .filter_map(|n| app.library_classes.iter().find(|lc| lc.name.0.as_str() == n))
+            .flat_map(|lc| lc.methods.iter().map(|m| m.name.as_str().to_string()))
+            .collect();
+        generated.push((name.clone(), contract_source(name, &schema, &rules, &methods, &messages, &mut used)));
     }
     let mut schema_classes: Vec<(String, String, String)> = Vec::new();
     for (full, schema) in &schemas {
@@ -322,7 +364,7 @@ pub(super) fn lower_dry_validation(
         if has_schema(&name) && !built.contains_key(&name) {
             continue;
         }
-        lc.unknown_calls.retain(|call| !is_schema_definition(call));
+        lc.unknown_calls.retain(|call| !is_schema_definition(call) && !is_rule(call));
         if let Some(methods) = built.remove(&name) {
             let mut methods = methods;
             methods.append(&mut lc.methods);
@@ -379,6 +421,10 @@ fn is_const(expr: &Expr, name: &str) -> bool {
         if path.iter().map(|s| s.as_str()).filter(|s| !s.is_empty()).collect::<Vec<_>>().join("::") == name)
 }
 
+fn is_rule(call: &Expr) -> bool {
+    matches!(&*call.node, ExprNode::Send { recv: None, method, block: Some(_), .. } if method.as_str() == "rule")
+}
+
 fn is_schema_definition(call: &Expr) -> bool {
     matches!(&*call.node, ExprNode::Send { recv: None, method, block: Some(_), .. }
         if matches!(method.as_str(), "params" | "json" | "schema"))
@@ -389,15 +435,24 @@ fn read_contract(
     lc: &LibraryClass,
     cx: &Cx<'_>,
     schemas: &HashMap<String, Schema>,
-) -> Result<Option<Schema>, String> {
+    methods: &HashSet<String>,
+) -> Result<Contract, String> {
     let owner = lc.name.0.as_str();
     let mut schema: Option<Schema> = None;
+    let mut rules = Vec::new();
     for call in &lc.unknown_calls {
         let ExprNode::Send { recv, method, args, block, .. } = &*call.node else {
             return Err("a non-declaration expression in the class body".into());
         };
         if recv.is_some() {
             return Err(format!("`{}` with a receiver in the class body", method.as_str()));
+        }
+        if method.as_str() == "rule" {
+            let rule = read_rule_decl(args, block.as_ref())?;
+            // Checked here, so a refusal is known before any is generated.
+            rewrite_rule(&rule, methods, &mut |_| "nil".to_string())?;
+            rules.push(rule);
+            continue;
         }
         let processor = match method.as_str() {
             "params" => Processor::Params,
@@ -417,7 +472,166 @@ fn read_contract(
         }
         schema = Some(read);
     }
-    Ok(schema)
+    Ok(Contract { schema, rules })
+}
+
+/// A rule's keys: `:a`, `"a.b"`, `a: :b`.
+fn read_rule_decl(args: &[Expr], block: Option<&Expr>) -> Result<RuleDecl, String> {
+    let Some(block) = block else { return Err("a `rule` without a block".into()) };
+    let ExprNode::Lambda { params, body, .. } = &*block.node else { return Err("a `rule` without a block".into()) };
+    if !params.is_empty() {
+        return Err("a `rule` block with parameters".into());
+    }
+    fn path(expr: &Expr) -> Option<Vec<String>> {
+        match &*expr.node {
+            ExprNode::Lit { value: Literal::Sym { value } } => Some(vec![value.as_str().to_string()]),
+            ExprNode::Lit { value: Literal::Str { value } } => Some(value.split('.').map(str::to_string).collect()),
+            _ => None,
+        }
+    }
+    let mut paths = Vec::new();
+    for arg in args {
+        match &*arg.node {
+            ExprNode::Hash { entries, .. } => {
+                for (k, v) in entries {
+                    let mut p = path(k).ok_or("a computed rule key")?;
+                    p.extend(path(v).ok_or("a computed rule key")?);
+                    paths.push(p);
+                }
+            }
+            _ => paths.push(path(arg).ok_or_else(|| format!("rule key `{}`", crate::emit::ruby::emit_expr(arg)))?),
+        }
+    }
+    if paths.is_empty() {
+        return Err("a `rule` without keys".into());
+    }
+    Ok(RuleDecl { paths, body: body.clone() })
+}
+
+/// What a rule's evaluator answers that the lowering does not model.
+const RULE_API: &[&str] = &[
+    "rule_error?", "error?", "context", "_context", "macro", "keys", "path", "result", "_options", "base_rule_error?",
+];
+
+/// A rule's body as a method of the contract taking `dry_rule_values`,
+/// `dry_rule_errors` and `dry_rule_schema_errors`: `value`, `values`,
+/// `key?`, `schema_error?` read them, `key.failure`/`key(..).failure`/
+/// `base.failure` write the message `failure` gives, `next` returns.
+fn rewrite_rule(
+    rule: &RuleDecl,
+    methods: &HashSet<String>,
+    failure: &mut dyn FnMut(Failure<'_>) -> String,
+) -> Result<Expr, String> {
+    fn ruby(src: &str) -> Expr {
+        parse_expr(src).expect("generated Ruby parses")
+    }
+    fn sym_path(expr: &Expr) -> Option<Vec<String>> {
+        match &*expr.node {
+            ExprNode::Lit { value: Literal::Sym { value } } => Some(vec![value.as_str().to_string()]),
+            ExprNode::Lit { value: Literal::Str { value } } => Some(value.split('.').map(str::to_string).collect()),
+            ExprNode::Array { elements, .. } => {
+                elements.iter().map(|e| sym_path(e).map(|p| p.join("."))).collect::<Option<Vec<_>>>()
+                    .map(|v| v.into_iter().flat_map(|p| p.split('.').map(str::to_string).collect::<Vec<_>>()).collect())
+            }
+            _ => None,
+        }
+    }
+    fn path_src(path: &[String]) -> String {
+        format!("[{}]", path.iter().map(|k| format!(":{k}")).collect::<Vec<_>>().join(", "))
+    }
+    fn walk(
+        expr: &Expr,
+        rule: &RuleDecl,
+        methods: &HashSet<String>,
+        failure: &mut dyn FnMut(Failure<'_>) -> String,
+    ) -> Result<Expr, String> {
+        let first = &rule.paths[0];
+        let shown = || crate::emit::ruby::emit_expr(expr).lines().next().unwrap_or_default().to_string();
+        match &*expr.node {
+            ExprNode::Ivar { .. } | ExprNode::SelfRef => return Err(format!("`{}` in a rule", shown())),
+            ExprNode::Send { recv: None, method, args, block: None, .. } => match (method.as_str(), args.as_slice()) {
+                ("value", []) => {
+                    return Ok(ruby(&if first.len() == 1 {
+                        format!("dry_rule_values[:{}]", first[0])
+                    } else {
+                        format!("dry_rule_values.dig({})", first.iter().map(|k| format!(":{k}")).collect::<Vec<_>>().join(", "))
+                    }));
+                }
+                ("values", []) => return Ok(ruby("dry_rule_values")),
+                ("key?", []) => return Ok(ruby(&format!("::Dry::Schema::Lowered.key_at?(dry_rule_values, {})", path_src(first)))),
+                ("key?", [p]) => {
+                    let p = sym_path(p).ok_or_else(|| format!("`{}` in a rule", shown()))?;
+                    return Ok(ruby(&format!("::Dry::Schema::Lowered.key_at?(dry_rule_values, {})", path_src(&p))));
+                }
+                ("schema_error?", [p]) => {
+                    let p = sym_path(p).ok_or_else(|| format!("`{}` in a rule", shown()))?;
+                    return Ok(ruby(&format!("::Dry::Schema::Lowered.error_at?(dry_rule_schema_errors, {})", path_src(&p))));
+                }
+                (m, _) if matches!(m, "key" | "base" | "value" | "values" | "key?" | "schema_error?") || RULE_API.contains(&m) => {
+                    return Err(format!("`{}` in a rule", shown()));
+                }
+                _ => {}
+            },
+            ExprNode::Send { recv: Some(target), method, args, block: None, .. } if method.as_str() == "failure" => {
+                let path = match &*target.node {
+                    ExprNode::Send { recv: None, method: m, args: a, block: None, .. } => match (m.as_str(), a.as_slice()) {
+                        ("key", []) => Some(first.clone()),
+                        ("key", [p]) => Some(sym_path(p).ok_or_else(|| format!("`{}` in a rule", shown()))?),
+                        ("base", []) => None,
+                        _ => return Err(format!("`{}` in a rule", shown())),
+                    },
+                    _ => return Err(format!("`{}` in a rule", shown())),
+                };
+                let message = match args.as_slice() {
+                    [m] | [m, _] => match &*m.node {
+                        ExprNode::Lit { value: Literal::Str { value } } if args.len() == 1 => FailureMessage::Text(value),
+                        ExprNode::Lit { value: Literal::Sym { value } } => {
+                            let mut tokens = Vec::new();
+                            if let [_, opts] = args.as_slice() {
+                                let ExprNode::Hash { entries, .. } = &*opts.node else {
+                                    return Err(format!("`{}` in a rule", shown()));
+                                };
+                                for (k, v) in entries {
+                                    let ExprNode::Lit { value: Literal::Sym { value: k } } = &*k.node else {
+                                        return Err(format!("`{}` in a rule", shown()));
+                                    };
+                                    tokens.push((k.as_str().to_string(), walk(v, rule, methods, failure)?));
+                                }
+                            }
+                            FailureMessage::Id(value.as_str(), tokens)
+                        }
+                        _ => return Err(format!("`{}` in a rule", shown())),
+                    },
+                    _ => return Err(format!("`{}` in a rule", shown())),
+                };
+                let target = match &path {
+                    Some(p) => path_src(p),
+                    None => "[nil]".to_string(),
+                };
+                let text = failure(Failure { path, message });
+                return Ok(ruby(&format!("::Dry::Schema::Lowered.add_error(dry_rule_errors, {target}, {text})")));
+            }
+            _ => {}
+        }
+        let mut out = expr.clone();
+        let mut err = None;
+        out.node.for_each_child_mut(&mut |child| {
+            if err.is_some() {
+                return;
+            }
+            match walk(child, rule, methods, failure) {
+                Ok(rewritten) => *child = rewritten,
+                Err(e) => err = Some(e),
+            }
+        });
+        match err {
+            Some(e) => Err(e),
+            None => Ok(out),
+        }
+    }
+    let _ = methods;
+    let body = walk(&rule.body, rule, methods, failure)?;
+    Ok(super::dry_types::next_to_return(&body))
 }
 
 /// A schema constant named where a schema belongs.
@@ -1164,6 +1378,41 @@ impl Gen<'_> {
         out
     }
 
+    /// The text a rule's `failure` writes: a String as given, an id looked
+    /// up as dry-validation's resolver looks it up (`rules.<id>` for
+    /// `base`), its tokens interpolated.
+    fn failure_message(&mut self, failure: Failure<'_>) -> String {
+        let (id, tokens) = match failure.message {
+            FailureMessage::Text(text) => return interpolated(text, &HashMap::new()),
+            FailureMessage::Id(id, tokens) => (id, tokens),
+        };
+        let tokens: HashMap<String, String> = tokens
+            .iter()
+            .map(|(k, v)| (k.clone(), format!("dry_schema_token({})", crate::emit::ruby::emit_expr(v))))
+            .collect();
+        let template = match &failure.path {
+            None => self.messages.template(&format!("rules.{id}"), "", "default", "default").map(str::to_string),
+            Some(path) => self
+                .messages
+                .template(id, &path.join("."), "default", "default")
+                .or_else(|| self.messages.template(id, path.last().map_or("", |s| s.as_str()), "default", "default"))
+                .map(str::to_string),
+        };
+        match template {
+            Some(t) => interpolated(&t, &tokens),
+            None => format!(
+                "raise(::Dry::Validation::MissingMessageError, {})",
+                interpolated(
+                    &format!(
+                        "Message template for :{id} under \"{}\" was not found",
+                        failure.path.map(|p| p.join(".")).unwrap_or_default()
+                    ),
+                    &HashMap::new()
+                )
+            ),
+        }
+    }
+
     /// The test a unary predicate is.
     fn unary(&mut self, pred: &str, value: &str) -> String {
         match pred {
@@ -1448,17 +1697,27 @@ impl Gen<'_> {
 }
 
 /// A contract class's `call` and its helpers.
-fn contract_source(owner: &str, schema: &Schema, messages: &Messages, used: &mut HashSet<&'static str>) -> String {
-    class_source(owner, schema, messages, "::Dry::Validation::Result", used)
+fn contract_source(
+    owner: &str,
+    schema: &Schema,
+    rules: &[RuleDecl],
+    methods: &HashSet<String>,
+    messages: &Messages,
+    used: &mut HashSet<&'static str>,
+) -> String {
+    class_source(owner, schema, rules, methods, messages, "::Dry::Validation::Result", used)
 }
 
 fn schema_source(owner: &str, schema: &Schema, messages: &Messages, used: &mut HashSet<&'static str>) -> String {
-    class_source(owner, schema, messages, "::Dry::Schema::Result", used)
+    class_source(owner, schema, &[], &HashSet::new(), messages, "::Dry::Schema::Result", used)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn class_source(
     owner: &str,
     schema: &Schema,
+    rules: &[RuleDecl],
+    methods: &HashSet<String>,
     messages: &Messages,
     result: &str,
     used: &mut HashSet<&'static str>,
@@ -1466,9 +1725,38 @@ fn class_source(
     let mut g = Gen { messages, helpers: Vec::new(), used };
     let top = g.schema_helper(schema);
     let _ = &messages.namespace;
+    // The rules, each skipped where the schema failed one of its keys.
+    let mut run_rules = String::new();
+    if !rules.is_empty() {
+        for helper in ["deep_dup", "error_at?", "add_error", "key_at?"] {
+            g.use_helper(helper);
+        }
+        run_rules.push_str("    dry_rule_schema_errors = ::Dry::Schema::Lowered.deep_dup(errors)\n");
+    }
+    for (i, rule) in rules.iter().enumerate() {
+        let body = rewrite_rule(rule, methods, &mut |f| g.failure_message(f)).expect("checked when read");
+        g.helpers.push(format!(
+            "  def dry_rule_{i}(dry_rule_values, dry_rule_errors, dry_rule_schema_errors)\n{}\n  end\n",
+            crate::emit::ruby::emit_expr(&body)
+        ));
+        let guards: Vec<String> = rule
+            .paths
+            .iter()
+            .map(|p| {
+                format!(
+                    "::Dry::Schema::Lowered.error_at?(dry_rule_schema_errors, [{}])",
+                    p.iter().map(|k| format!(":{k}")).collect::<Vec<_>>().join(", ")
+                )
+            })
+            .collect();
+        run_rules.push_str(&format!(
+            "    dry_rule_{i}(values, errors, dry_rule_schema_errors) unless {}\n",
+            guards.join(" || ")
+        ));
+    }
     let mut out = format!("class {}\n", owner.rsplit("::").next().unwrap_or(owner));
     out.push_str(&format!(
-        "  def call(input)\n    raise(ArgumentError, \"Input must be a Hash. #{{input.class}} was given.\") unless input.is_a?(Hash)\n    values = {{}}\n    errors = {{}}\n    {top}(input, values, errors)\n    {result}.new(values, errors)\n  end\n\n  private\n\n"
+        "  def call(input)\n    raise(ArgumentError, \"Input must be a Hash. #{{input.class}} was given.\") unless input.is_a?(Hash)\n    values = {{}}\n    errors = {{}}\n    {top}(input, values, errors)\n{run_rules}    {result}.new(values, errors)\n  end\n\n  private\n\n"
     ));
     out.push_str("  def dry_schema_token(value)\n    value.is_a?(Array) ? value.join(\", \") : value\n  end\n\n");
     for helper in &g.helpers {
@@ -1515,6 +1803,26 @@ fn parse_expr(source: &str) -> Option<Expr> {
 /// `Time.parse` has no use for it otherwise.
 const LOWERED: &[(&str, &str, &[&str])] = &[
     ("params_nil", "def self.params_nil(value)\n  value == \"\" ? nil : value\nend", &[]),
+    (
+        "add_error",
+        "def self.add_error(errors, path, text)\n  node = errors\n  path[0...-1].each { |key| node = (node[key] ||= {}) }\n  (node[path.last] ||= []) << text\n  errors\nend",
+        &[],
+    ),
+    (
+        "error_at?",
+        "def self.error_at?(errors, path)\n  node = errors\n  path.each do |key|\n    return true if node.is_a?(Array)\n    return false unless node.is_a?(Hash) && node.key?(key)\n    node = node[key]\n  end\n  true\nend",
+        &[],
+    ),
+    (
+        "key_at?",
+        "def self.key_at?(values, path)\n  node = values\n  path.each do |key|\n    return false unless node.is_a?(Hash) && node.key?(key)\n    node = node[key]\n  end\n  true\nend",
+        &[],
+    ),
+    (
+        "deep_dup",
+        "def self.deep_dup(errors)\n  errors.transform_values { |value| value.is_a?(Hash) ? deep_dup(value) : value.dup }\nend",
+        &[],
+    ),
     ("coerce_string", "def self.coerce_string(value)\n  String(value)\nrescue ArgumentError, TypeError\n  value\nend", &[]),
     (
         "coerce_integer",
@@ -1587,6 +1895,9 @@ fn stand_ins(used: &HashSet<&'static str>) -> Vec<LibraryClass> {
     const SOURCE: &str = r#"module Dry
   module Validation
     class Contract
+    end
+
+    class MissingMessageError < StandardError
     end
 
     class MessageSet

@@ -41,3 +41,13 @@ ChainContract.new | {v: 1, c: {n: "1", x: 1}, f: {k: "a", z: 1}}
 ChainContract.new | {v: 1, c: "s", f: {}}
 ChainContract.new | {v: 1, c: nil, f: nil}
 ChainContract.new | {}
+RulesContract.new | {"name" => "a"}
+RulesContract.new | {"name" => "Ab", "nick" => "long"}
+RulesContract.new | {"name" => "", "a" => "1", "b" => "1"}
+RulesContract.new | {"name" => "ok", "a" => "0", "b" => "0"}
+RulesContract.new | {"name" => "ok", "a" => "x", "b" => "1"}
+RulesContract.new | {"name" => "ok", "addr" => {"city" => "Moscow"}}
+RulesContract.new | {"name" => "ok", "a" => 7, "b" => 9, "nick" => nil}
+RulesContract.new | {"a" => "1"}
+Users::SignupContract.new | {"login" => "adm", "age" => 1}
+Users::SignupContract.new | {"login" => "zzz", "age" => 1}

@@ -2226,7 +2226,7 @@ fn dry_validation_stdlib_coercions_are_reported_for_spinel() {
     }
 }
 
-/// A contract the lowering cannot read (here, a `rule`) stays as it was,
+/// A contract the lowering cannot read (here, an `option`) stays as it was,
 /// with the topmost contract it inherits a schema from and everything
 /// under that: a lowered parent's `call` would answer for it. Its
 /// declarations are dropped, not replayed onto a gem that is not there,
@@ -2236,7 +2236,7 @@ fn dry_validation_refusal_takes_the_schema_hierarchy() {
     let refused = || {
         dry_validation::overlay().write(
             "app/contracts/ruled_contract.rb",
-            "class RuledBase < Dry::Validation::Contract\n  params do\n    required(:a).filled(:integer)\n  end\nend\n\nclass RuledChild < RuledBase\n  rule(:a) do\n    key.failure(\"too big\") if value > 5\n  end\nend\n\nclass RuledSibling < RuledBase\n  params do\n    required(:b).filled(:string)\n  end\nend\n",
+            "class RuledBase < Dry::Validation::Contract\n  params do\n    required(:a).filled(:integer)\n  end\nend\n\nclass RuledChild < RuledBase\n  option :repo\nend\n\nclass RuledSibling < RuledBase\n  params do\n    required(:b).filled(:string)\n  end\nend\n",
         )
     };
     let (emitted, _errors) = refused().emit(roundhouse::project::BuildTarget::Ruby);

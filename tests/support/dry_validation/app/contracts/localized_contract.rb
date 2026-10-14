@@ -13,6 +13,11 @@ module Users
       required(:age).filled(:integer)
       optional(:tags).array(:string)
     end
+
+    rule(:login) do
+      key.failure(:taken, who: %w[admin root]) if value == "adm"
+      base.failure(:closed) if value == "zzz"
+    end
   end
 
   class GuestContract < LocalizedContract
