@@ -6244,8 +6244,8 @@ fn spinel_files(app: &App, fixture: &Path) -> Result<(Vec<(String, String)>, Vec
         // Stripped when the lock has no `pay` (see `apply_pay_demand`).
         "pay",
         // `I18n.locale` / `default_locale` — the locale campfire folds
-        // into its cache keys. Rails' default, `:en`; setting one is
-        // not modeled (see the file's header).
+        // into its cache keys; per thread, the app's default until a
+        // request sets one (see the file's header).
         "i18n_locale",
     ] {
         let rb = format!("runtime/ruby/{stem}.rb");

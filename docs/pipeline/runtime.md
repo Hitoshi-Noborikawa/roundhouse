@@ -2699,12 +2699,15 @@ Three gaps remain, all on spinel's side:
 
 ### Smaller shapes campfire main reaches, each narrower than Rails
 
-- **`I18n.locale` / `default_locale` answer `:en`** (`runtime/ruby/i18n_locale.rb`),
-  Rails' default when nothing sets one. Setting a locale at run time
-  (`I18n.locale =`, `with_locale`) is not modeled. Translation is answered
-  at compile time from the default locale (`src/i18n`): `t` / `I18n.t`
-  with a literal key, attribute names, validation messages and form
-  labels. A controller's `t` is `AbstractController::Translation`'s: a
+- **`I18n.locale` is per request** (`runtime/ruby/i18n_locale.rb`): held
+  per thread as the gem holds it, the app's `default_locale` (Rails'
+  `:en` when it sets none) until `I18n.locale =` or `with_locale` sets
+  another of its `available_locales`, which an unavailable one raises
+  `I18n::InvalidLocale` for. Translation is folded at compile time
+  (`src/i18n`), once per available locale, and a call that can run in
+  more than one picks its branch by `I18n.locale` when it runs: `t` /
+  `I18n.t` with a literal key, attribute names, validation messages and
+  form labels. A controller's `t` is `AbstractController::Translation`'s: a
   lazy `t(".key")` reads `<controller_path>.<action_name>.key`, then
   `<controller_path>.key`, with `action_name` read when it runs. Its
   `_html` keys stay an error: Rails returns them html-safe, and a String
