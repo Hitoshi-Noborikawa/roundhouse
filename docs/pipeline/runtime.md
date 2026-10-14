@@ -918,6 +918,18 @@ written `Z` in winter, where Rails writes `+00:00`. A payload of primitives
 alone goes through `JSON.generate` (below), which raises on a non-finite
 Float, where Rails writes `null`.
 
+`only:`, `except:` and `methods:` given as literal Symbol lists, either to
+`render json: <record>` (Rails hands a render's other options to `to_json`)
+or to `<record>.to_json(…)`, get a writer of their own, named for the
+options. It keeps `attribute_names` order, or the `only:` list's order as
+Rails' `Array(only) & attribute_names` does, lets `only:` override the
+excepted inheritance column, and appends each `methods:` reader whose type
+is a JSON scalar. Its own columns decide whether it is built, so `only:`
+that leaves out a decimal column is written down even though the
+full-column writer is not. A site with any other serialization option (`include:`,
+`root:`, a list that is not literal) keeps the runtime encoder rather than
+the full-column writer.
+
 Inline Hash/Array payloads whose inferred contents are JSON primitives use
 the target's existing `JSON.generate` encoder, including nested primitive
 collections. The shared `JsonBuilder.escape_html_entities` helper then

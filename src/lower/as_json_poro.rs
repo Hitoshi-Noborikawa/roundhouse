@@ -95,6 +95,8 @@ pub fn apply_as_json_synthesis(app: &mut App, registry: &HashMap<ClassId, ClassI
     // The classes given a writer, so the call sites below rewrite for
     // exactly those and no other.
     let mut written: HashSet<ClassId> = HashSet::new();
+    let option_sites = serialize_option_sites(app);
+    let mut variants: HashSet<(ClassId, String)> = HashSet::new();
     for model in &mut app.models {
         if !wanted.contains(&model.name) {
             continue;
@@ -136,6 +138,17 @@ pub fn apply_as_json_synthesis(app: &mut App, registry: &HashMap<ClassId, ClassI
                     leading_blank_line: true,
                 });
                 written.insert(model.name.clone());
+            }
+            // Not only when the full writer was built: `only:` can leave out the column that writer declines.
+            for opts in option_sites.get(&model.name).into_iter().flatten() {
+                if let Ok(writer) = super::as_json_record::column_writer_with(model, table, registry, opts) {
+                    variants.insert((model.name.clone(), opts.method_name()));
+                    model.body.push(ModelBodyItem::Method {
+                        method: writer,
+                        leading_comments: Vec::new(),
+                        leading_blank_line: true,
+                    });
+                }
             }
             continue;
         }
@@ -179,20 +192,33 @@ pub fn apply_as_json_synthesis(app: &mut App, registry: &HashMap<ClassId, ClassI
     }
     for controller in &mut app.controllers {
         for action in controller.actions_mut() {
-            replace_in(&mut action.body, &mut |e| rewrite_render_json(e, &written));
+            replace_in(&mut action.body, &mut |e| rewrite_render_json(e, &written, &variants));
         }
     }
-    super::for_each_hook_body(app, &mut |body| rewrite_to_json(body, &written));
+    super::for_each_hook_body(app, &mut |body| rewrite_to_json(body, &written, &variants));
     for view in &mut app.views {
-        rewrite_to_json(&mut view.body, &written);
+        rewrite_to_json(&mut view.body, &written, &variants);
     }
 }
 
 /// `<value>.to_json` → the same text a `render json:` of it writes; what has no writer falls back to `JSON.generate`, as before.
-fn rewrite_to_json(e: &mut Expr, written: &HashSet<ClassId>) {
-    e.node.for_each_child_mut(&mut |c| rewrite_to_json(c, written));
+fn rewrite_to_json(e: &mut Expr, written: &HashSet<ClassId>, variants: &HashSet<(ClassId, String)>) {
+    e.node.for_each_child_mut(&mut |c| rewrite_to_json(c, written, variants));
     let ExprNode::Send { recv: Some(r), method, args, block: None, .. } = &*e.node else { return };
-    if method.as_str() != "to_json" || !args.is_empty() {
+    if method.as_str() != "to_json" {
+        return;
+    }
+    if let [arg] = args.as_slice() {
+        let ExprNode::Hash { entries, .. } = &*arg.node else { return };
+        let Ok(Some(opts)) = super::as_json_record::SerializeOpts::read(entries, &[]) else { return };
+        if let Some(t) = variant_text(r, &opts, variants) {
+            let span = e.span;
+            *e = t;
+            e.span = span;
+        }
+        return;
+    }
+    if !args.is_empty() {
         return;
     }
     let text = match r.ty.as_ref().and_then(rendered_class).filter(|(id, _)| written.contains(*id)) {
@@ -215,7 +241,7 @@ fn rewrite_to_json(e: &mut Expr, written: &HashSet<ClassId>) {
 /// "application/json"` when `<v>` is typed as a class this pass wrote a
 /// writer for. Other entries ride along untouched; an author's own
 /// `content_type:` stands (the controller rewrite keeps the first).
-fn rewrite_render_json(e: &Expr, written: &HashSet<ClassId>) -> Option<Expr> {
+fn rewrite_render_json(e: &Expr, written: &HashSet<ClassId>, variants: &HashSet<(ClassId, String)>) -> Option<Expr> {
     let ExprNode::Send { recv: None, method, args, block, parenthesized } = &*e.node else {
         return None;
     };
@@ -227,9 +253,15 @@ fn rewrite_render_json(e: &Expr, written: &HashSet<ClassId>) -> Option<Expr> {
         matches!(&*k.node, ExprNode::Lit { value: Literal::Sym { value } } if value.as_str() == name)
     };
     let value = entries.iter().find_map(|(k, v)| is_key(k, "json").then_some(v))?;
+    // Not the full-column writer: Rails hands a render's other options to `to_json`, so `only:` and its kind change the text.
+    let opts = super::as_json_record::SerializeOpts::read(entries, RENDER_OWN_OPTIONS).ok()?;
+    let variant = match &opts {
+        Some(opts) => Some(variant_text(value, opts, variants)?),
+        None => None,
+    };
     let record = value.ty.as_ref().and_then(rendered_class).filter(|(id, _)| written.contains(*id));
     let text = matches!(value.ty.as_ref(), Some(Ty::Str));
-    if record.is_none() && !text && !super::as_json_value::needs_text(value, written) {
+    if variant.is_none() && record.is_none() && !text && !super::as_json_value::needs_text(value, written) {
         return None;
     }
     let sym = |name: &str| {
@@ -238,17 +270,22 @@ fn rewrite_render_json(e: &Expr, written: &HashSet<ClassId>) -> Option<Expr> {
             Ty::Sym,
         )
     };
-    let encoded = match record {
+    let encoded = match (variant, record) {
+        (Some(text), _) => text,
+        (None, record) => match record {
         Some((id, true)) => collection_text(value, id),
         Some((_, false)) => writer_call(value.clone()),
         // Not encoded again: Rails sends a String it is handed as the body.
         None if text => value.clone(),
         None => super::as_json_value::json_text(value, written)?,
+        },
     };
     let mut new_entries: Vec<(Expr, Expr)> = Vec::new();
     for (k, v) in entries {
         if is_key(k, "json") {
             new_entries.push((sym("plain"), encoded.clone()));
+        } else if ["only", "except", "methods"].iter().any(|o| is_key(k, o)) {
+            continue;
         } else {
             new_entries.push((k.clone(), v.clone()));
         }
@@ -297,13 +334,17 @@ fn rendered_class(ty: &Ty) -> Option<(&ClassId, bool)> {
 
 /// `<v>.as_json_str`
 pub(super) fn writer_call(recv: Expr) -> Expr {
+    writer_call_named(recv, WRITER_METHOD)
+}
+
+fn writer_call_named(recv: Expr, name: &str) -> Expr {
     let span = recv.span;
     with_ty(
         Expr::new(
             span,
             ExprNode::Send {
                 recv: Some(recv),
-                method: Symbol::from(WRITER_METHOD),
+                method: Symbol::from(name),
                 args: vec![],
                 block: None,
                 parenthesized: false,
@@ -318,6 +359,10 @@ pub(super) fn writer_call(recv: Expr) -> Expr {
 /// same reason: it emits idiomatically on every target, where a
 /// mutable first-element flag does not.
 pub(super) fn collection_text(value: &Expr, id: &ClassId) -> Expr {
+    collection_text_named(value, id, WRITER_METHOD)
+}
+
+fn collection_text_named(value: &Expr, id: &ClassId, name: &str) -> Expr {
     let span = value.span;
     let str_lit = |s: &str| {
         with_ty(
@@ -336,7 +381,7 @@ pub(super) fn collection_text(value: &Expr, id: &ClassId) -> Expr {
             rest_param: None,
             params: vec![item],
             block_param: None,
-            body: writer_call(item_ref),
+            body: writer_call_named(item_ref, name),
             block_style: crate::expr::BlockStyle::Brace,
         },
     );
@@ -463,7 +508,7 @@ fn json_rendered_classes(app: &App) -> HashSet<ClassId> {
     let mut collect = |e: &Expr| {
         walk(e, &mut |e| {
             if let ExprNode::Send { recv: Some(r), method, args, block: None, .. } = &*e.node {
-                if method.as_str() == "to_json" && args.is_empty() {
+                if method.as_str() == "to_json" && args.len() <= 1 {
                     super::as_json_value::classes_in(r, &mut to_json_ids);
                 }
             }
@@ -602,4 +647,61 @@ fn sole_ivar_read(body: &Expr) -> Option<Symbol> {
 fn walk(e: &Expr, f: &mut impl FnMut(&Expr)) {
     f(e);
     e.node.for_each_child(&mut |c| walk(c, f));
+}
+
+// Not serialization options: what `render` itself reads before handing the rest to `to_json`.
+const RENDER_OWN_OPTIONS: &[&str] = &["json", "status", "content_type", "location", "layout"];
+
+/// A record or collection written by the writer `opts` names, when one was built for its class.
+fn variant_text(value: &Expr, opts: &super::as_json_record::SerializeOpts, variants: &HashSet<(ClassId, String)>) -> Option<Expr> {
+    let (id, collection) = rendered_class(value.ty.as_ref()?)?;
+    let name = opts.method_name();
+    if !variants.contains(&(id.clone(), name.clone())) {
+        return None;
+    }
+    Some(if collection { collection_text_named(value, id, &name) } else { writer_call_named(value.clone(), &name) })
+}
+
+/// Each class's `only:`/`except:`/`methods:` sets, from `render json:` and `to_json` sites, for the demand gate.
+fn serialize_option_sites(app: &App) -> HashMap<ClassId, HashSet<super::as_json_record::SerializeOpts>> {
+    let mut out: HashMap<ClassId, HashSet<super::as_json_record::SerializeOpts>> = HashMap::new();
+    let mut note = |value: &Expr, entries: &[(Expr, Expr)], ignore: &[&str]| {
+        let Ok(Some(opts)) = super::as_json_record::SerializeOpts::read(entries, ignore) else { return };
+        if let Some((id, _)) = value.ty.as_ref().and_then(rendered_class) {
+            out.entry(id.clone()).or_default().insert(opts);
+        }
+    };
+    let mut visit = |e: &Expr| {
+        walk(e, &mut |e| match &*e.node {
+            ExprNode::Send { recv: None, method, args, .. } if method.as_str() == "render" => {
+                for arg in args {
+                    let ExprNode::Hash { entries, .. } = &*arg.node else { continue };
+                    let json = entries.iter().find_map(|(k, v)| {
+                        matches!(&*k.node, ExprNode::Lit { value: Literal::Sym { value } } if value.as_str() == "json").then_some(v)
+                    });
+                    if let Some(v) = json {
+                        note(v, entries, RENDER_OWN_OPTIONS);
+                    }
+                }
+            }
+            ExprNode::Send { recv: Some(r), method, args, block: None, .. } if method.as_str() == "to_json" => {
+                if let [arg] = args.as_slice() {
+                    if let ExprNode::Hash { entries, .. } = &*arg.node {
+                        note(r, entries, &[]);
+                    }
+                }
+            }
+            _ => {}
+        })
+    };
+    for controller in &app.controllers {
+        for action in controller.actions() {
+            visit(&action.body);
+        }
+    }
+    super::for_each_hook_body_ref(app, &mut visit);
+    for view in &app.views {
+        visit(&view.body);
+    }
+    out
 }
