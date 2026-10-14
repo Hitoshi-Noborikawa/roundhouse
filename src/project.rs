@@ -3219,9 +3219,11 @@ fn ruby_family_runtime_files(
             for (path, content) in files.iter_mut() {
                 if path == "runtime/db_cruby.rb" {
                     *path = "runtime/db.rb".to_string();
-                    content.insert_str(0, TIME_PARSING_REQUIRE);
+                    // Below the file's magic comments, or the requires would
+                    // switch its `frozen_string_literal` off.
+                    insert_require_line(content, TIME_PARSING_REQUIRE.trim_end());
                     if sql_functions.is_some() {
-                        content.insert_str(0, "require_relative \"sql_functions\"\n");
+                        insert_require_line(content, "require_relative \"sql_functions\"");
                     }
                 }
             }
@@ -6849,7 +6851,7 @@ fn apply_test_gem_wiring(files: &mut Vec<(String, String)>) {
             const BOOT: &str = "require_relative \"../boot\"\n";
             match helper.find(BOOT) {
                 Some(at) if *gem == "webmock" => helper.insert_str(at + BOOT.len(), &format!("{line}\n")),
-                _ => helper.insert_str(0, &format!("{line}\n")),
+                _ => insert_require_line(helper, &line),
             }
         }
         let with_mocha = needed.iter().any(|(gem, _)| *gem == "mocha");
@@ -7428,7 +7430,7 @@ fn apply_locked_external_gem_wiring(files: &mut Vec<(String, String)>, app: &App
             .map(|feature| format!("require {feature:?}\n"))
             .collect::<String>();
         if !requires.is_empty() {
-            boot.insert_str(0, &format!("{requires}\n"));
+            insert_require_line(boot, &requires);
         }
     }
     files.retain(|(path, _)| path != "Gemfile.lock");

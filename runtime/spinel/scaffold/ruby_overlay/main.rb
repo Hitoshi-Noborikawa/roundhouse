@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 # Top-level entry point for the CRuby (Puma/Rack) target.
 #
 # Dispatch lives in `Main.dispatch_core`, which returns a response

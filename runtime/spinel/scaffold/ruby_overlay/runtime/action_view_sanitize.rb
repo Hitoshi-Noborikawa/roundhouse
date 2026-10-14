@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 # `sanitize`, `strip_tags` and `auto_link` — the real ones, on CRuby.
 #
 # The shared runtime (`runtime/ruby/action_view/view_helpers_ext.rb`)

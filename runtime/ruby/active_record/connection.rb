@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 # Ruby-family model surfaces: raw-SQL connections and request-key finders.
 #
 # Rails hands back the adapter itself here; this runtime hands back a

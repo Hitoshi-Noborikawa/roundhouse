@@ -29,6 +29,11 @@ as the same special case in several emitters. The runtime loader shares its
 transpile driver through target hooks. New Ruby runtime files also need
 registration in `src/project.rs::spinel_files`.
 
+Every Ruby file under `runtime/ruby/` and `runtime/spinel/` uses
+`# frozen_string_literal: true`. The directive follows an optional shebang
+and precedes generated requires. `tests/runtime_frozen_string_literal.rs`
+checks all runtime Ruby files.
+
 Other entry points: `src/bin/` (CLI/debug tools), `wasm/` (browser compiler),
 `editors/vscode/` (LSP client), `tools/compare/` (standalone differential oracle).
 `scripts/` drives workflows; `tests/`, `e2e/`, and `tests/browser_smoke/` carry

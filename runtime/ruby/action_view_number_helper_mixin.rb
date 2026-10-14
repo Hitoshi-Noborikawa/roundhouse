@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 # Instance-method facade of ActionView::Helpers::NumberHelper, separated
 # from its module-function implementation for runtime source typing.
 require_relative "action_view_number_helper"

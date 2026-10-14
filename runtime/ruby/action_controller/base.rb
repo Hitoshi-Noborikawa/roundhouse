@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 require_relative "../action_dispatch/flash"
 require_relative "../action_dispatch/session"
 require_relative "../action_view"

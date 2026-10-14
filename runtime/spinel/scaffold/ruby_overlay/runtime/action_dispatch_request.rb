@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 # CRuby-only ActionDispatch::Request over the CGI env.
 #
 # The request-object surface controllers and filters reach

@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 # View helpers — module functions invoked from Views::* render methods.
 #
 # Surface tracks what real-blog actually uses (cf. fixtures/real-blog/

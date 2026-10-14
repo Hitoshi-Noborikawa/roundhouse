@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 # Rails' request forgery check: Origin / Action Cable helpers, and the
 # ruby-family reopen of `verified_request?` that adds the Origin rule
 # the shared Base cannot (it has no Request). Token matching is

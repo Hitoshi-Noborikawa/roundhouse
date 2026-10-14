@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 require_relative "../test_helper"
 
 # `commit_conditional_get!` (action_controller/conditional_get.rb):

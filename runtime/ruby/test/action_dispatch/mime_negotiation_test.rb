@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 require_relative "../test_helper"
 
 # `ActionDispatch::MimeNegotiation.should_apply_vary_header?` and the

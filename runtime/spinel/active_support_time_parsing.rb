@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 # Spinel-subset temporal intrinsics: ActiveSupport.parse_db_time /
 # db_now. Sibling of the CRuby/JRuby overlay's
 # ruby_overlay/runtime/active_support_time_parsing.rb, which shadows

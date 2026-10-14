@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 module ActionDispatch
   # Route captures exposed with String/Symbol-indifferent reads. Query
   # parameters are kept separately by the request and never enter this map.

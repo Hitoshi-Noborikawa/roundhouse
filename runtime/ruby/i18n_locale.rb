@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 # `I18n.locale` / `I18n.default_locale` / `I18n.available_locales`, the
 # locale a request runs in, and the answers for a key the locale lacks.
 #

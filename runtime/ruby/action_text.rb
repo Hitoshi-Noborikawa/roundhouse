@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 # Action Text's value layer: the HTML fragment a `has_rich_text`
 # attribute holds, and the attachment nodes embedded in it.
 #

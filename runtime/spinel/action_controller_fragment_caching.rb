@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 # Rails' controller fragment caching (AbstractController::Caching and
 # ::Fragments) and the view side that asks it (ActionView::Helpers::
 # CacheHelper), for the ruby family and spinel.

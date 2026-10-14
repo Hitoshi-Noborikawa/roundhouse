@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 # Top-level entry point for the spinel-blog application.
 #
 # Reads a CGI request from ENV + $stdin, dispatches through the router
