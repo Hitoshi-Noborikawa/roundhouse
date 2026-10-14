@@ -1604,8 +1604,11 @@ fn for_each_route_call_site(app: &App, f: &mut impl FnMut(&Expr)) {
 fn append_query_string(path: Expr, keys: &[QueryKey]) -> Expr {
     let mut out = path;
     for (i, key) in keys.iter().enumerate() {
+        // Not `var_ref`'s own type: an omitted key is nil, and a `nil?` on a non-nilable receiver folds to `false` on Rust.
         let is_nil = |k: &str| -> Expr {
-            send_method(var_ref(k), "nil?", Vec::new())
+            let var = var_ref(k);
+            let ty = var.ty.clone().map(|t| Ty::Union { variants: vec![t, Ty::Nil].into() });
+            with_ty(send_method(Expr { ty, ..var }, "nil?", Vec::new()), Ty::Bool)
         };
         let key_name = key.name.as_str();
         // `?` only while nothing earlier was rendered. The first key
@@ -1626,31 +1629,37 @@ fn append_query_string(path: Expr, keys: &[QueryKey]) -> Expr {
                     },
                 );
             }
-            Expr::new(
-                Span::synthetic(),
-                ExprNode::If {
-                    cond,
-                    then_branch: lit_str("?".to_string()),
-                    else_branch: lit_str("&".to_string()),
-                },
+            with_ty(
+                Expr::new(
+                    Span::synthetic(),
+                    ExprNode::If {
+                        cond,
+                        then_branch: lit_str("?".to_string()),
+                        else_branch: lit_str("&".to_string()),
+                    },
+                ),
+                Ty::Str,
             )
             })
         };
         let url_encode = |value: Expr| -> Expr {
-            Expr::new(
-                Span::synthetic(),
-                ExprNode::Send {
-                    recv: Some(Expr::new(
-                        Span::synthetic(),
-                        ExprNode::Const {
-                            path: vec![Symbol::from("ActionView"), Symbol::from("ViewHelpers")],
-                        },
-                    )),
-                    method: Symbol::from("url_encode"),
-                    args: vec![send_method(value, "to_s", Vec::new())],
-                    block: None,
-                    parenthesized: true,
-                },
+            with_ty(
+                Expr::new(
+                    Span::synthetic(),
+                    ExprNode::Send {
+                        recv: Some(Expr::new(
+                            Span::synthetic(),
+                            ExprNode::Const {
+                                path: vec![Symbol::from("ActionView"), Symbol::from("ViewHelpers")],
+                            },
+                        )),
+                        method: Symbol::from("url_encode"),
+                        args: vec![with_ty(send_method(value, "to_s", Vec::new()), Ty::Str)],
+                        block: None,
+                        parenthesized: true,
+                    },
+                ),
+                Ty::Str,
             )
         };
         // Rails renders an Array option as one `k[]=v` pair per
@@ -1694,7 +1703,7 @@ fn append_query_string(path: Expr, keys: &[QueryKey]) -> Expr {
                 Some(sep) => parts.push(InterpPart::Expr { expr: sep }),
             }
             parts.push(InterpPart::Expr { expr: joined });
-            Expr::new(Span::synthetic(), ExprNode::StringInterp { parts })
+            with_ty(Expr::new(Span::synthetic(), ExprNode::StringInterp { parts }), Ty::Str)
         } else {
             let mut parts: Vec<InterpPart> = Vec::new();
             match separator {
@@ -1705,17 +1714,20 @@ fn append_query_string(path: Expr, keys: &[QueryKey]) -> Expr {
                 }
             }
             parts.push(InterpPart::Expr { expr: url_encode(var_ref(key_name)) });
-            Expr::new(Span::synthetic(), ExprNode::StringInterp { parts })
+            with_ty(Expr::new(Span::synthetic(), ExprNode::StringInterp { parts }), Ty::Str)
         };
-        let arm = Expr::new(
-            Span::synthetic(),
-            ExprNode::If {
-                cond: send_method(var_ref(key_name), "nil?", Vec::new()),
-                then_branch: lit_str(String::new()),
-                else_branch: pair,
-            },
+        let arm = with_ty(
+            Expr::new(
+                Span::synthetic(),
+                ExprNode::If {
+                    cond: is_nil(key_name),
+                    then_branch: lit_str(String::new()),
+                    else_branch: pair,
+                },
+            ),
+            Ty::Str,
         );
-        out = send_method(out, "+", vec![arm]);
+        out = with_ty(send_method(out, "+", vec![arm]), Ty::Str);
     }
     out
 }

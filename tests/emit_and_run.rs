@@ -15647,7 +15647,7 @@ fn probe_controller_app() -> emit_and_run::Overlay {
         )
         .write(
             "test/controllers/probe_controller_test.rb",
-            "require \"test_helper\"\n\nclass ProbeControllerTest < ActionDispatch::IntegrationTest\n  setup do\n    @article = articles(:one)\n  end\n\n  test \"reads params into a local\" do\n    get probe_url(@article)\n    assert_response :success\n    assert_equal \"Getting Started with Rails\", response.body\n  end\n\n  test \"joins what is not a String\" do\n    get probe_joined_url(@article)\n    assert_equal \"Alice 1,0 true,false\", response.body\n  end\n\n  test \"reads the query string\" do\n    get \"/search?q=rails&page=2\"\n    assert_equal \"q=rails page=2\", response.body\n  end\nend\n",
+            "require \"test_helper\"\n\nclass ProbeControllerTest < ActionDispatch::IntegrationTest\n  setup do\n    @article = articles(:one)\n  end\n\n  test \"reads params into a local\" do\n    get probe_url(@article)\n    assert_response :success\n    assert_equal \"Getting Started with Rails\", response.body\n  end\n\n  test \"joins what is not a String\" do\n    get probe_joined_url(@article)\n    assert_equal \"Alice 1,0 true,false\", response.body\n  end\n\n  test \"reads the query string\" do\n    get search_url(q: \"rails\", page: 2)\n    assert_equal \"q=rails page=2\", response.body\n  end\n\n  test \"leaves an omitted key out of the query string\" do\n    get search_url(q: \"rails\")\n    assert_equal \"q=rails page=\", response.body\n  end\nend\n",
         )
 }
 

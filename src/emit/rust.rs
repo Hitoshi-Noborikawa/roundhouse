@@ -958,9 +958,10 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
         // RouteHelpers`). Append per-method delegating wrappers so
         // both call shapes resolve.
         let bare_wrappers = render_route_helpers_bare_wrappers(lc);
+        let import = if body.contains("ViewHelpers::") { "use crate::view_helpers::ViewHelpers;\n\n" } else { "" };
         files.push(EmittedFile {
             path: PathBuf::from("src/route_helpers.rs"),
-            content: format!("{body}{bare_wrappers}"),
+            content: format!("{import}{body}{bare_wrappers}"),
         });
     }
 
@@ -1422,7 +1423,7 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
     if !controller_test_modules.is_empty() {
         let mut ctrl_entries: Vec<(String, String)> = Vec::new();
         for tm in &controller_test_modules {
-            let file = spec::emit_rust_test_module(tm, app);
+            let file = spec::with_route_helpers(&route_helper_funcs, || spec::emit_rust_test_module(tm, app));
             let class_name = tm.name.0.as_str().to_string();
             let stem = file
                 .path

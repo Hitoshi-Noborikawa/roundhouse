@@ -199,8 +199,15 @@ fn emit_url_expr(expr: &Expr, app: &App) -> String {
         return emit_ctrl_test_expr(expr, app);
     };
     let helper_name = format!("{}_path", helper.helper_base);
-    let args_s: Vec<String> = helper
-        .args
+    let mut args = helper.args.as_slice();
+    let mut query: Option<&[(Expr, Expr)]> = None;
+    if let Some((UrlArg::Raw(last), rest)) = args.split_last()
+        && let ExprNode::Hash { entries, .. } = &*last.node
+    {
+        query = Some(entries);
+        args = rest;
+    }
+    let mut args_s: Vec<String> = args
         .iter()
         .map(|a| match a {
             UrlArg::IvarOrVarId(name) => format!("{name}.id"),
@@ -208,7 +215,59 @@ fn emit_url_expr(expr: &Expr, app: &App) -> String {
             UrlArg::Raw(e) => emit_ctrl_test_expr(e, app),
         })
         .collect();
+    if let Some(entries) = query {
+        args_s.extend(query_args(&helper_name, entries, app));
+    }
     format!("route_helpers::{helper_name}({})", args_s.join(", "))
+}
+
+thread_local! {
+    static ROUTE_HELPERS: std::cell::RefCell<Vec<crate::dialect::LibraryFunction>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// Run `f` with the app's lowered route helpers in reach of `query_args`.
+pub fn with_route_helpers<T>(funcs: &[crate::dialect::LibraryFunction], f: impl FnOnce() -> T) -> T {
+    let prev = ROUTE_HELPERS.with(|c| c.replace(funcs.to_vec()));
+    let result = f();
+    ROUTE_HELPERS.with(|c| c.replace(prev));
+    result
+}
+
+/// A helper's keyword options as its trailing `Option` positionals, in the order the helper declares them.
+fn query_args(helper_name: &str, entries: &[(Expr, Expr)], app: &App) -> Vec<String> {
+    let params = ROUTE_HELPERS.with(|c| {
+        // Outside `with_route_helpers` there is no emission-wide copy, so lower them here.
+        let lowered;
+        let funcs = c.borrow();
+        let funcs: &[crate::dialect::LibraryFunction] = if funcs.is_empty() {
+            lowered = crate::lower::lower_routes_to_library_functions(app);
+            &lowered
+        } else {
+            &funcs
+        };
+        match funcs.iter().find(|f| f.name.as_str() == helper_name).and_then(|f| f.signature.clone()) {
+            Some(crate::ty::Ty::Fn { params, .. }) => params.to_vec(),
+            _ => Vec::new(),
+        }
+    });
+    params
+        .iter()
+        .filter(|p| matches!(p.kind, crate::ty::ParamKind::Keyword { .. }))
+        .map(|p| {
+            let value = entries.iter().find_map(|(k, v)| match &*k.node {
+                ExprNode::Lit { value: Literal::Sym { value } } if value.as_str() == p.name.as_str() => Some(v),
+                _ => None,
+            });
+            match value {
+                None => "None".to_string(),
+                Some(v) if matches!(p.ty.peel_nilable(), crate::ty::Ty::Str) => {
+                    format!("Some(({}).to_string())", emit_ctrl_test_expr(v, app))
+                }
+                Some(v) => format!("Some({})", emit_ctrl_test_expr(v, app)),
+            }
+        })
+        .collect()
 }
 
 fn emit_assert_select_classified(
