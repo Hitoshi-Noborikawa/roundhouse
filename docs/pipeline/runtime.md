@@ -891,6 +891,22 @@ under its logical name, and an `attribute`, `serialize`, `store`,
 or datetime column (the writer reads the stored value, while Rails calls the
 reader). It also covers a column whose reader is not typed as a JSON scalar.
 
+**A value holding a record, a Time or a Date is written down too.** A Hash
+or Array literal, or a typed `Array`/`Hash` with String or Symbol keys, that
+reaches a record with a writer, a `Time` or a `Date` is respelled by
+`lower::as_json_value` as the text Rails' `to_json` writes. That text is
+built from each part's static type: a record through its writer, a
+collection as `[…]`/`{…}`, a Time through `ActiveSupport::JSON.time_fragment`
+(`xmlschema(3)`, `Z` at offset zero), a Date as its ISO date and nil as
+`null`, and a scalar through `JsonBuilder.encode_value`, HTML-escaped. A part
+with no encoding (an untyped value, a nullable record, a key that needs
+escaping) leaves the whole site to the runtime encoder. The text goes through `ActiveSupport::JSON.written`, an identity that only the ruby
+family and spinel load, so a strict target reports the site unsupported
+instead of emitting code no strict toolchain has built. Two divergences
+remain. A non-finite Float is written as Ruby's `NaN`/`Infinity`, where Rails
+writes `null`. A Time at offset zero in a non-UTC zone is written `Z`, where
+Rails writes `+00:00`.
+
 Inline Hash/Array payloads whose inferred contents are JSON primitives use
 the target's existing `JSON.generate` encoder, including nested primitive
 collections. The shared `JsonBuilder.escape_html_entities` helper then

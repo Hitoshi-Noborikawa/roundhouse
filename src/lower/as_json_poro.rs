@@ -88,9 +88,6 @@ use super::typing::with_ty;
 
 pub fn apply_as_json_synthesis(app: &mut App, registry: &HashMap<ClassId, ClassInfo>) {
     let wanted = json_rendered_classes(app);
-    if wanted.is_empty() {
-        return;
-    }
     // BOTH homes. A tableless class under `app/models/` — which is what
     // campfire's `Opengraph::Metadata` is — rides in `app.models`, not
     // `app.library_classes`, so looking in one place found nothing and
@@ -180,9 +177,6 @@ pub fn apply_as_json_synthesis(app: &mut App, registry: &HashMap<ClassId, ClassI
         lc.methods.push(as_json_str_method(&lc.name, &readers));
         written.insert(lc.name.clone());
     }
-    if written.is_empty() {
-        return;
-    }
     for controller in &mut app.controllers {
         for action in controller.actions_mut() {
             replace_in(&mut action.body, &mut |e| rewrite_render_json(e, &written));
@@ -206,8 +200,8 @@ fn rewrite_render_json(e: &Expr, written: &HashSet<ClassId>) -> Option<Expr> {
         matches!(&*k.node, ExprNode::Lit { value: Literal::Sym { value } } if value.as_str() == name)
     };
     let value = entries.iter().find_map(|(k, v)| is_key(k, "json").then_some(v))?;
-    let (id, collection) = rendered_class(value.ty.as_ref()?)?;
-    if !written.contains(id) {
+    let record = value.ty.as_ref().and_then(rendered_class).filter(|(id, _)| written.contains(*id));
+    if record.is_none() && !super::as_json_value::needs_text(value, written) {
         return None;
     }
     let sym = |name: &str| {
@@ -216,10 +210,10 @@ fn rewrite_render_json(e: &Expr, written: &HashSet<ClassId>) -> Option<Expr> {
             Ty::Sym,
         )
     };
-    let encoded = if collection {
-        collection_text(value, id)
-    } else {
-        writer_call(value.clone())
+    let encoded = match record {
+        Some((id, true)) => collection_text(value, id),
+        Some((_, false)) => writer_call(value.clone()),
+        None => super::as_json_value::json_text(value, written)?,
     };
     let mut new_entries: Vec<(Expr, Expr)> = Vec::new();
     for (k, v) in entries {
@@ -272,7 +266,7 @@ fn rendered_class(ty: &Ty) -> Option<(&ClassId, bool)> {
 }
 
 /// `<v>.as_json_str`
-fn writer_call(recv: Expr) -> Expr {
+pub(super) fn writer_call(recv: Expr) -> Expr {
     let span = recv.span;
     with_ty(
         Expr::new(
@@ -293,7 +287,7 @@ fn writer_call(recv: Expr) -> Expr {
 /// map+join, the shape the jbuilder lowerer's `array!` uses, for the
 /// same reason: it emits idiomatically on every target, where a
 /// mutable first-element flag does not.
-fn collection_text(value: &Expr, id: &ClassId) -> Expr {
+pub(super) fn collection_text(value: &Expr, id: &ClassId) -> Expr {
     let span = value.span;
     let str_lit = |s: &str| {
         with_ty(
@@ -457,11 +451,9 @@ fn json_rendered_classes(app: &App) -> HashSet<ClassId> {
                         if value.as_str() != "json" {
                             continue;
                         }
-                        if let Some((id, _)) = v.ty.as_ref().and_then(rendered_class) {
-                            if known.contains(id) {
-                                out.insert(id.clone());
-                            }
-                        }
+                        let mut ids = Vec::new();
+                        super::as_json_value::classes_in(v, &mut ids);
+                        out.extend(ids.into_iter().filter(|id| known.contains(id)));
                     }
                 }
             });
