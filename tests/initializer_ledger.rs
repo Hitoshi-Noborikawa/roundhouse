@@ -201,6 +201,10 @@ fn every_recognizer_that_reads_an_initializer_keeps_its_statement_out_of_the_led
         ),
         ("config/initializers/mapper.rb", "ActionDispatch::Routing::Mapper.prepend Extras\n"),
         (
+            "config/initializers/cable.rb",
+            "Rails.application.config.action_cable.allowed_request_origins = [\"https://a.example\", /https:\\/\\/b/]\n",
+        ),
+        (
             "config/initializers/content.rb",
             "ActionText::ContentHelper.allowed_tags = ActionText::ContentHelper.allowed_tags | %w[mark]\n",
         ),
@@ -433,6 +437,7 @@ fn a_statement_the_ledger_calls_consumed_has_its_recognizers_effect_on_the_app()
         ),
         ("config/initializers/kaminari.rb", "Kaminari.configure do |config|\n  config.default_per_page = 10\nend\n"),
         ("config/initializers/lift.rb", "Rails.application.config.app_version = \"1\"\n"),
+        ("config/initializers/cable.rb", "Rails.application.config.action_cable.allow_same_origin_as_host = false\n"),
     ]);
     assert!(ledger.is_empty(), "{:?}", statements(&ledger));
     assert!(!app.time_formats.is_empty());
@@ -446,5 +451,10 @@ fn a_statement_the_ledger_calls_consumed_has_its_recognizers_effect_on_the_app()
         .iter()
         .map(|m| m.name.as_str())
         .collect();
-    assert!(names.contains(&"default_per_page") && names.contains(&"app_version"), "{names:?}");
+    assert!(
+        names.contains(&"default_per_page")
+            && names.contains(&"app_version")
+            && names.contains(&"action_cable_allow_same_origin_as_host"),
+        "{names:?}"
+    );
 }

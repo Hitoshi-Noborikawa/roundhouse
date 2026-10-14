@@ -26,6 +26,7 @@ mod dry_struct;
 mod dry_types;
 mod dry_validation;
 mod representable;
+mod action_cable_config;
 pub mod allow_browser;
 pub mod app;
 mod concern_accessors;

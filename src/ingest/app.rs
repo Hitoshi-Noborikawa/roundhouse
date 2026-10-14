@@ -957,6 +957,17 @@ pub fn ingest_app_with_vfs<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResult
                 methods.append(&mut synth);
             }
         }
+        // Action Cable's handshake origin rule: `config.action_cable.
+        // allowed_request_origins`, `allow_same_origin_as_host` and
+        // `disable_request_forgery_protection`, per environment (see
+        // `action_cable_config`). Only keys the app assigns are
+        // synthesized; the runtime defaults in runtime/ruby/rails.rb
+        // are Rails' own.
+        if let Some(cable) = super::action_cable_config::synthesize(vfs, dir)? {
+            if let Ok(mut synth) = crate::runtime_src::parse_methods(&cable) {
+                methods.append(&mut synth);
+            }
+        }
         // A helper that overrides ActionView's `token_tag` to answer ""
         // (campfire's ApplicationHelper: "Header-only forgery protection
         // needs no secret in forms or cached HTML"). Rails' form helpers

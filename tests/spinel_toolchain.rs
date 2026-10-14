@@ -54,6 +54,10 @@ mod dry_struct;
 mod dry_validation;
 #[path = "support/rails_root_join.rs"]
 mod rails_root_join;
+#[path = "support/cable_allowed_origins.rs"]
+mod cable_allowed_origins_contract;
+#[path = "spinel_toolchain/cable_allowed_origins.rs"]
+mod cable_allowed_origins;
 #[path = "support/cable_actions.rs"]
 mod cable_actions_contract;
 #[path = "spinel_toolchain/cable_actions.rs"]

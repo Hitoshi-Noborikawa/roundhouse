@@ -278,6 +278,12 @@ const RECOGNIZERS: &[Recognizer] = &[
         reads: |p| code_lines(p.text).any(|l| forgery_strategy_line(l).is_some()),
     },
     Recognizer {
+        name: "action_cable origins (config.action_cable.allowed_request_origins / allow_same_origin_as_host / disable_request_forgery_protection =)",
+        origins: INIT_APP,
+        levels: ANY,
+        reads: |p| super::action_cable_config::assignment(p.node).is_some(),
+    },
+    Recognizer {
         name: "autoload ignore (initializer that explicitly requires an ignored lib/ directory)",
         origins: INIT,
         levels: TOP,
