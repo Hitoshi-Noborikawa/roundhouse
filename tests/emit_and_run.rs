@@ -5630,6 +5630,7 @@ fn offset_exists_and_caching_knobs_run() {
 
 class ArticlePagingTest < ActiveSupport::TestCase
   test "a row past the offset, and the caching knobs" do
+    Comment.delete_all
     Article.delete_all
     2.times { |i| Article.create!(title: "Paged #{i}", body: "Body text here") }
     assert Article.offset(1).exists?
@@ -6709,6 +6710,7 @@ fn relation_more_than_probes_offset_without_count() {
 
 class ArticleMoreThanTest < ActiveSupport::TestCase
   test "more_than? offsets without COUNT or mutating the relation" do
+    Comment.delete_all
     Article.delete_all
     3.times { |i| Article.create!(title: "more-#{i}", body: "Body text here") }
     rel = Article.where("title LIKE 'more-%'")
@@ -14019,14 +14021,14 @@ class ArticleCountingTest < ActiveSupport::TestCase
 
   test "a raw write transaction rolls back when its block raises" do
     connection = ActiveRecord::Base.connection
-    count = Article.count
+    count = Comment.count
     assert_raises(RuntimeError) do
       connection.raw_connection.transaction(:immediate) do
-        connection.execute("DELETE FROM articles")
+        connection.execute("DELETE FROM comments")
         raise "abandon"
       end
     end
-    assert_equal count, Article.count
+    assert_equal count, Comment.count
   end
 end
 "##)
@@ -14361,6 +14363,7 @@ fn exists_without_an_argument_asks_for_any_row_and_nil_is_false() {
 
 class ArticleExistsTest < ActiveSupport::TestCase
   test "bare exists? is any row; exists?(nil) is false" do
+    Comment.delete_all
     Article.delete_all
     assert_not Article.exists?
     assert_not Article.all.exists?
@@ -14895,6 +14898,7 @@ fn friendly_article_overlay(use_modules: &str) -> emit_and_run::Overlay {
 
 class ArticlesControllerTest < ActionDispatch::IntegrationTest
   setup do
+    Comment.delete_all
     Article.delete_all
     @gamma = Article.create!(title: "Gamma Post", body: "gamma body is long enough", slug: "gamma-post")
     # A slug that is another row's id: friendly_id looks the slug up
@@ -14948,6 +14952,7 @@ fn friendly_find_with_history_finds_a_former_slug() {
 
 class ArticlesControllerTest < ActionDispatch::IntegrationTest
   setup do
+    Comment.delete_all
     Article.delete_all
     @old = Article.create!(title: "Renamed Post", body: "renamed body is long enough", slug: "renamed-post")
     @other = Article.create!(title: "Other Post", body: "other body is long enough", slug: "other-post")
