@@ -1659,6 +1659,40 @@ fn errors_delete_is_a_gap_on_strict_targets() {
     );
 }
 
+/// A `belongs_to` checks its record where it is declared, among the
+/// `validates`, and its error's type is `:blank`: Rails validates the
+/// association's presence with `message: :required`.
+fn belongs_to_errors_app() -> emit_and_run::Overlay {
+    emit_and_run::real_blog().edit(
+        "app/models/comment.rb",
+        "  validates :body, presence: true\n",
+        "  validates :body, presence: true
+
+  def error_rows
+    errors.map { |error| [error.attribute, error.type, error.full_message] }
+  end
+",
+    )
+}
+
+const BELONGS_TO_ERRORS: &str = r#"comment = Comment.new
+comment.valid?
+rows = [[:article, :blank, "Article must exist"], [:commenter, :blank, "Commenter can't be blank"], [:body, :blank, "Body can't be blank"]]
+raise comment.error_rows.inspect unless comment.error_rows == rows
+puts "belongs_to errors passed"
+"#;
+
+#[test]
+fn a_belongs_to_error_lists_where_it_is_declared() {
+    belongs_to_errors_app().run_ruby(BELONGS_TO_ERRORS).assert_passes();
+}
+
+#[test]
+#[ignore = "requires the Spinel toolchain"]
+fn a_belongs_to_error_lists_where_it_is_declared_on_spinel() {
+    belongs_to_errors_app().run_spinel(BELONGS_TO_ERRORS).assert_passes();
+}
+
 /// `type` reads the error more than once, so a found error is an error.
 #[test]
 fn the_type_of_an_error_that_is_not_a_plain_read_is_an_error() {

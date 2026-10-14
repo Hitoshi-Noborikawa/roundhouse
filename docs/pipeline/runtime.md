@@ -2016,6 +2016,11 @@ drops the field's entries from both, index for index, and answers their
 messages or nil; like `to_hash`, it is a gap on a strict target. Without a block, `any?`, `none?` and `count` keep
 asking the full messages, which answer the same.
 
+A `belongs_to` checks its record where it is declared, among the
+`validates`, so its error lists in Rails' order, and its type is
+`:blank`: Rails validates the association's presence with `message:
+:required`, which picks the text and leaves the type.
+
 Every one of these rewrites matches an `errors` send as its receiver,
 which `&.` hides behind a local (`(t = record.errors) && t.m`).
 `src/lower/errors_safe_nav.rs` reads `record.errors&.m` as
