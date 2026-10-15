@@ -5635,10 +5635,11 @@ fn report_unsupported_bundled_constants(app: &App, target: BuildTarget) {
                 report_unavailable_class_value(app, target, id.0.as_str(), expr.span);
             }
         }
-        // Not emitted on a strict target: the written-down JSON encoder (`lower::as_json_poro`) has been built and run only on the ruby family and spinel.
+        // Not emitted on the other strict targets: the written-down JSON encoder (`lower::as_json_poro`) has been built and run only on the ruby family, spinel, Rust, TypeScript, Python, Crystal, C#, Kotlin, Swift, Elixir and Go.
         if let crate::expr::ExprNode::Send { recv: Some(_), method, .. } = &*expr.node
-            && target != "spinel"
-            && target != "jruby"
+            && !matches!(target, "spinel" | "jruby" | "typescript" | "python" | "crystal" | "csharp" | "kotlin" | "swift" | "elixir" | "go")
+            // Not Rust's `methods:`: a model method's String return reaches `encode_value` untyped, where Rust wants a Value.
+            && (target != "rust" || method.as_str().contains("__methods_"))
             && !expr.span.is_synthetic()
             && (method.as_str() == crate::lower::JSON_WRITER_METHOD
                 || method.as_str().starts_with(&format!("{}__", crate::lower::JSON_WRITER_METHOD)))
@@ -5649,7 +5650,7 @@ fn report_unsupported_bundled_constants(app: &App, target: BuildTarget) {
                 expr.span,
                 target,
                 "json_writer",
-                format!("the compiled `render json:` encoder (`#{method}`) is verified on the ruby family and spinel only"),
+                format!("the compiled `render json:` encoder (`#{method}`) is verified on the ruby family, spinel, Rust (without `methods:`), TypeScript, Python, Crystal, C#, Kotlin, Swift, Elixir and Go only"),
             );
         }
         if let crate::expr::ExprNode::Send { recv: Some(recv), method, .. } = &*expr.node

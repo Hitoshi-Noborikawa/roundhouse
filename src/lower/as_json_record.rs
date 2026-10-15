@@ -114,7 +114,8 @@ pub(super) fn column_writer_with(
         if !matches!(encoding_for(&ty)?, PairEncoding::Scalar(_)) {
             return Err("a `methods:` value is not a JSON scalar");
         }
-        pairs.push(JsonPair { key: name.clone(), value: PairValue::Reader(name.clone()), cond: None });
+        // Not a `Reader`: that reads a column, which Python spells as an attribute, where a `methods:` name is called.
+        pairs.push(JsonPair { key: name.clone(), value: PairValue::Computed(super::as_json_writer::self_call(name.as_str())), cond: None });
     }
     let mut writer = writer_method(&model.name, &pairs, Some(table), &[])?;
     writer.name = crate::ident::Symbol::from(opts.method_name());
