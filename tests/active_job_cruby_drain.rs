@@ -70,6 +70,13 @@ after = Queue.new
 ActiveJob.enqueue(-> { after << :ok; nil })
 raise "drain died after a raise" unless after.pop == :ok
 
+# Each job starts with an empty broadcast log: the drain thread is never
+# a request, so nothing else would clear what its jobs broadcast.
+sizes = Queue.new
+3.times { ActiveJob.enqueue(-> { Broadcasts.log_append({ html: "x" }); sizes << Broadcasts.log.length; nil }) }
+got_sizes = 3.times.map { sizes.pop }
+raise "broadcast log grew across jobs: #{got_sizes.inspect}" unless got_sizes == [1, 1, 1]
+
 # Serving: the test log no longer grows.
 ActiveJob.record_performed("While serving")
 raise "log grew while serving" unless ActiveJob.performed == ["Before"]

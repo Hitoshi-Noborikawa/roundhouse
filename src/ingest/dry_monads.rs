@@ -21,9 +21,10 @@
 //! `:do` wraps a class's instance methods (its subclasses' and includers'
 //! too, as `Do::All` does): in each that `yield`s, `yield m` becomes
 //! `Do.bind([m])`, which unwraps a Success and raises `Halt` with a
-//! Failure, and the body rescues `Halt` into its Failure. A method that
-//! takes a block or asks `block_given?` is left alone: called with one,
-//! the gem's wrapper steps aside, which this does not model.
+//! Failure, and the body rescues `Halt` into its Failure. Called with a
+//! block, the gem's wrapper steps aside: `yield` stays the caller's then.
+//! A method that takes a block or asks `block_given?` itself is left
+//! alone, as under the wrapper it always sees one.
 //!
 //! `include Dry::Monads::Do.for(:call)` wraps just those methods, defined
 //! after it in that class, as the gem's `method_added` hook does.
@@ -51,7 +52,7 @@ pub(super) fn lower_dry_monads(app: &mut App, sources: &[crate::span::SourceFile
     let mut any = false;
     let mut do_marked: HashSet<String> = HashSet::new();
     // `Do.for(...)`: per class, the methods and where the include stands.
-    let mut do_for: HashMap<String, (HashSet<String>, crate::span::Span)> = HashMap::new();
+    let mut do_for: HashMap<String, HashMap<String, crate::span::Span>> = HashMap::new();
     // A monad the app never builds is an include that changes nothing.
     let unused = |feature: &str| -> bool {
         let constructors: &[&str] = match feature {
@@ -77,7 +78,8 @@ pub(super) fn lower_dry_monads(app: &mut App, sources: &[crate::span::SourceFile
         let mut result = false;
         let mut do_notation = false;
         let mut refused = None;
-        let mut for_methods: Option<(HashSet<String>, crate::span::Span)> = None;
+        // Each named method and the first include naming it.
+        let mut for_methods: Option<HashMap<String, crate::span::Span>> = None;
         lc.unknown_calls.retain(|call| match features(call) {
             None => true,
             // What is modeled applies; the include stays for the rest.
@@ -88,8 +90,10 @@ pub(super) fn lower_dry_monads(app: &mut App, sources: &[crate::span::SourceFile
                         "result" => result = true,
                         "do" => do_notation = true,
                         other if other.starts_with("for:") => {
-                            let entry = for_methods.get_or_insert_with(|| (HashSet::new(), call.span));
-                            entry.0.insert(other["for:".len()..].to_string());
+                            for_methods
+                                .get_or_insert_with(HashMap::new)
+                                .entry(other["for:".len()..].to_string())
+                                .or_insert(call.span);
                         }
                         other if unused(other) => {}
                         other => {
@@ -170,10 +174,8 @@ pub(super) fn lower_dry_monads(app: &mut App, sources: &[crate::span::SourceFile
                 continue;
             }
             let wrapped = all
-                || listed.as_ref().is_some_and(|(names, at)| {
-                    names.contains(method.name.as_str())
-                        && method.name_span.file == at.file
-                        && method.name_span.start > at.start
+                || listed.as_ref().and_then(|named| named.get(method.name.as_str())).is_some_and(|at| {
+                    method.name_span.file == at.file && method.name_span.start > at.start
                 });
             if !wrapped {
                 continue;
@@ -308,7 +310,9 @@ fn asks_block_given(expr: &Expr) -> bool {
     found
 }
 
-/// `yield a, b` as `Do.bind([a, b])`.
+/// `yield a, b` as `block_given? ? yield(a, b) : Do.bind([a, b])`: called
+/// with a block, the gem's wrapper steps aside and `yield` is the
+/// caller's; without one it unwraps.
 fn unwrap_yields(expr: &Expr) -> Expr {
     let mut out = expr.clone();
     fn walk(expr: &mut Expr) {
@@ -316,13 +320,28 @@ fn unwrap_yields(expr: &Expr) -> Expr {
         if let ExprNode::Yield { args } = &*expr.node {
             let span = expr.span;
             let monads = Expr::new(span, ExprNode::Array { elements: args.clone(), style: Default::default() });
-            *expr.node = ExprNode::Send {
-                recv: Some(constant(span, &["Dry", "Monads", "Do"])),
-                method: Symbol::from("bind"),
-                args: vec![monads],
-                block: None,
-                parenthesized: true,
-            };
+            let bind = Expr::new(
+                span,
+                ExprNode::Send {
+                    recv: Some(constant(span, &["Dry", "Monads", "Do"])),
+                    method: Symbol::from("bind"),
+                    args: vec![monads],
+                    block: None,
+                    parenthesized: true,
+                },
+            );
+            let block_given = Expr::new(
+                span,
+                ExprNode::Send {
+                    recv: None,
+                    method: Symbol::from("block_given?"),
+                    args: Vec::new(),
+                    block: None,
+                    parenthesized: false,
+                },
+            );
+            let caller = Expr::new(span, ExprNode::Yield { args: args.clone() });
+            *expr.node = ExprNode::If { cond: block_given, then_branch: caller, else_branch: bind };
         }
     }
     walk(&mut out);

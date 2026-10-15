@@ -705,6 +705,22 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
         register_stdlib_class(classes, &format!("Errno::{name}"), &[], &exception_surface);
     }
     for (exc, extra) in [
+        ("ActiveRecord::ActiveRecordError", None),
+        ("ActiveRecord::StatementInvalid", None),
+        ("ActiveRecord::WrappedDatabaseException", None),
+        ("ActiveRecord::InvalidForeignKey", None),
+        ("ActiveRecord::NotNullViolation", None),
+        ("ActiveRecord::CheckViolation", None),
+        ("ActiveRecord::ExclusionViolation", None),
+        ("ActiveRecord::RangeError", None),
+        ("ActiveRecord::TransactionRollbackError", None),
+        ("ActiveRecord::SerializationFailure", None),
+        ("ActiveRecord::Deadlocked", None),
+        ("ActiveRecord::QueryAborted", None),
+        ("ActiveRecord::LockWaitTimeout", None),
+        ("ActiveRecord::StatementTimeout", None),
+        ("ActiveRecord::QueryCanceled", None),
+        ("ActiveRecord::ReadOnlyError", None),
         ("ActiveRecord::RecordNotFound", None),
         ("ActiveRecord::RecordNotUnique", None),
         ("ActiveRecord::ValueTooLong", None),
@@ -915,7 +931,24 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
         // unsized or endless factor, and it is not checked on both lanes.
         ("to_a", Ty::Array { elem: std::sync::Arc::new(Ty::Array { elem: std::sync::Arc::new(Ty::Untyped) }) }),
     ]);
-    register_stdlib_class(classes, "Enumerator::Lazy", &[], &[]);
+    // `Enumerator::Chain.new(*enumerators)` followed by `select`, `each` or
+    // `lazy`, as an API walks several generated path lists as one; and the
+    // lazy chain's filters. Element types are untyped (neither class is
+    // parameterized here). Only calls checked against CRuby and Spinel.
+    let chain = Ty::Class { id: ClassId(Symbol::from("Enumerator::Chain")), args: vec![].into() };
+    let lazy = Ty::Class { id: ClassId(Symbol::from("Enumerator::Lazy")), args: vec![].into() };
+    let elems = Ty::Array { elem: std::sync::Arc::new(Ty::Untyped) };
+    register_stdlib_class(classes, "Enumerator::Chain", &[("new", chain)], &[
+        ("each", Ty::Untyped),
+        ("select", elems.clone()), ("filter", elems.clone()), ("reject", elems.clone()),
+        ("map", elems.clone()), ("to_a", elems.clone()),
+        ("lazy", lazy.clone()),
+    ]);
+    register_stdlib_class(classes, "Enumerator::Lazy", &[], &[
+        ("select", lazy.clone()), ("filter", lazy.clone()), ("reject", lazy.clone()),
+        ("map", lazy.clone()),
+        ("first", Ty::Untyped), ("to_a", elems.clone()), ("force", elems),
+    ]);
     // JSON dispatch is already intrinsic in BodyTyper and the emitters;
     // a source-backed reference must also recognize its exact namespace.
     register_stdlib_class(classes, "JSON", &[], &[]);

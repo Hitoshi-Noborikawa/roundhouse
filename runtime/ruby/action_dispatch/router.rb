@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 # Path router: matches (method, path) against a typed route table and
 # resolves to (controller, action, path_params).
 #

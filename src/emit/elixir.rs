@@ -141,6 +141,7 @@ pub fn emit_overlay_files(app: &App) -> Vec<EmittedFile> {
     let mut detail_fields: Vec<(String, crate::ty::Ty)> =
         ["attribute", "kind", "message", "full_message"].iter().map(|f| (f.to_string(), crate::ty::Ty::Str)).collect();
     detail_fields.push(("symbolic".to_string(), crate::ty::Ty::Bool));
+    detail_fields.push(("optionless".to_string(), crate::ty::Ty::Bool));
     expr::register_field_types("ActiveRecord::ErrorDetail", &detail_fields);
 
     // Functional-target lowerings (issue #29): rewrite imperative

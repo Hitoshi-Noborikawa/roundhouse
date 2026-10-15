@@ -2565,7 +2565,7 @@ jobs:
           jruby -S gem install jdbc-sqlite3 --no-document
           jruby tests/support/jdbc_cleanup_failures.rb
           # These shared ownership cases need no Db.bind_* setters.
-          jruby -r ./runtime/spinel/db_jruby -r ./runtime/spinel/test/statement_cache_cases <<'RUBY'
+          jruby -r ./runtime/ruby/active_record/errors -r ./runtime/spinel/db_jruby -r ./runtime/spinel/test/statement_cache_cases <<'RUBY'
           Db.configure(":memory:", pool_size: 1)
           begin
             cases = StatementCacheTest.new

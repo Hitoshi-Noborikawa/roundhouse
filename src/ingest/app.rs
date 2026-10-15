@@ -918,8 +918,8 @@ pub fn ingest_app_with_vfs<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResult
         // the render layer is required to honor: Rails presents every
         // AR temporal value in this zone (lobsters runs Central).
         // Synthesized as a `config_time_zone` method on the
-        // Application reopen; the CRuby overlay maps it to an IANA TZ
-        // at boot (main.rb pins ENV["TZ"]). Every other config.* line
+        // Application reopen; the boot makes it the runtime's default
+        // zone (`ActiveSupport.set_default_zone`). Every other config.* line
         // remains railtie noise ingest deliberately does not model.
         if let Some(zone) = extract_config_time_zone(&source) {
             if let Ok(mut synth) = crate::runtime_src::parse_methods(&format!(
@@ -956,6 +956,22 @@ pub fn ingest_app_with_vfs<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResult
             )) {
                 methods.append(&mut synth);
             }
+        }
+        // Action Cable's handshake origin rule: `config.action_cable.
+        // allowed_request_origins`, `allow_same_origin_as_host` and
+        // `disable_request_forgery_protection`, per environment (see
+        // `action_cable_config`). Only keys the app assigns are
+        // synthesized; the runtime defaults in runtime/ruby/rails.rb
+        // are Rails' own.
+        // The app's own expressions are spliced in, so a parse failure
+        // is the app's settings lost: refused rather than answered with
+        // the permissive defaults.
+        if let Some(cable) = super::action_cable_config::synthesize(vfs, dir)? {
+            let mut synth = crate::runtime_src::parse_methods(&cable).map_err(|message| IngestError::Unsupported {
+                file: "config/ (config.action_cable settings)".to_string(),
+                message: format!("the app's Action Cable origin settings do not parse once synthesized: {message}"),
+            })?;
+            methods.append(&mut synth);
         }
         // A helper that overrides ActionView's `token_tag` to answer ""
         // (campfire's ApplicationHelper: "Header-only forgery protection
@@ -1818,6 +1834,9 @@ end
     }
     app.i18n = catalog;
     app.i18n.missing = missing_policy(vfs, dir);
+    let (available, fallbacks, available_unknown) = locale_settings(vfs, dir, &app.i18n.locale, &files);
+    app.i18n.load_locales(available, fallbacks, &gem_files, &mut files);
+    app.i18n.available_unknown = available_unknown;
     app.i18n.field_error_proc = field_error_proc_file(vfs, dir);
     crate::i18n::stamp_models(&mut app);
 
@@ -2017,6 +2036,9 @@ end
     // graphql-ruby object types: analyzer-only field methods, so
     // inference carries each type's record class down the schema.
     super::graphql_ruby::lower_graphql_types(&mut app);
+    // Representable decorators: expanded into plain methods the same way;
+    // survey mode ledgers an unsupported one and keeps going.
+    super::representable::lower_representable_decorators(&mut app, &sources)?;
     // After it, not before: `Current`'s own `delegate` reads an
     // ATTRIBUTE's ivar, which that pass has the declarations for. What
     // reaches here is the general shape, whose target is a method.
@@ -2121,11 +2143,73 @@ end
     // that signature (campfire's `WebPush::Connections::Stages`).
     crate::lower::known_super_forwarding::restate(&mut app);
     collect_binary_assets(vfs, dir, &mut app);
+    let mut require_roots: Vec<String> = roots.iter().map(|r| r.display().to_string()).collect();
+    require_roots.extend(support_roots(vfs, dir, &roots, &path_gems, &lib_ignores));
+    app.app_requires = collect_app_requires(vfs, dir, &require_roots);
     // Generated re-ingest labels never register real sources. No later
     // pass may append source-backed FileIds beyond the indexed snapshot.
     let late_sources = super::sources::drain();
     super::sources::assert_snapshot_matches(&[], &late_sources);
     Ok(app)
+}
+
+/// Standard libraries a Ruby program loads by name, the ones an app's
+/// own `require` can mean. A require of anything else is the app's own
+/// file (Zeitwerk or `require_relative` territory) or a gem, which the
+/// Gemfile and the runtime wiring answer for.
+const APP_REQUIRABLE_STDLIB: &[&str] = &[
+    "base64", "benchmark", "bigdecimal", "cgi", "csv", "date", "delegate", "digest",
+    "digest/md5", "digest/sha1", "digest/sha2", "English", "erb", "etc", "fileutils", "find",
+    "forwardable", "io/console", "io/nonblock", "io/wait", "ipaddr", "json", "logger",
+    "monitor", "net/http", "observer", "open3", "openssl", "optparse", "ostruct", "pathname",
+    "pp", "pty", "securerandom", "set", "shellwords", "singleton", "socket", "stringio",
+    "strscan", "tempfile", "time", "timeout", "tmpdir", "uri", "weakref", "yaml", "zlib",
+];
+
+/// [`App::app_requires`]: every literal top-level `require "lib"` of a
+/// standard library in the trees the app loads from (`roots`: each app
+/// root, a Packwerk package's or an engine's included, and the support
+/// roots beside them, `lib/` among them). A terminal channel that
+/// requires `pty` and `io/console` needs the second for `IO#winsize=`,
+/// which io/console adds and no constant names, so the bundled requires
+/// (driven by the constants a file names) cannot bring it back.
+fn collect_app_requires<V: Vfs + ?Sized>(vfs: &V, dir: &Path, roots: &[String]) -> Vec<String> {
+    fn walk<V: Vfs + ?Sized>(vfs: &V, path: &Path, out: &mut std::collections::BTreeSet<String>, depth: usize) {
+        if depth > 16 || vfs.is_symlink(path) {
+            return;
+        }
+        if vfs.is_dir(path) {
+            let Ok(entries) = vfs.read_dir(path) else { return };
+            for entry in entries {
+                walk(vfs, &entry, out, depth + 1);
+            }
+            return;
+        }
+        if path.extension().and_then(|e| e.to_str()) != Some("rb") {
+            return;
+        }
+        let Ok(text) = vfs.read_to_string(path) else { return };
+        for line in text.lines() {
+            let Some(rest) = line.strip_prefix("require ") else { continue };
+            // `require "io/console" # why`: the literal, then nothing but
+            // a comment
+            let rest = rest.trim_start();
+            let Some(q) = rest.chars().next().filter(|c| *c == '"' || *c == '\'') else { continue };
+            let Some(end) = rest[1..].find(q) else { continue };
+            let after = rest[end + 2..].trim_start();
+            let quoted = (after.is_empty() || after.starts_with('#')).then(|| &rest[1..end + 1]);
+            if let Some(lib) = quoted {
+                if APP_REQUIRABLE_STDLIB.contains(&lib) {
+                    out.insert(lib.to_string());
+                }
+            }
+        }
+    }
+    let mut out = std::collections::BTreeSet::new();
+    for root in roots {
+        walk(vfs, &dir.join(root), &mut out, 0);
+    }
+    out.into_iter().collect()
 }
 
 /// Source subtrees whose binary files are copied into the emitted tree.
@@ -5667,7 +5751,9 @@ fn qualify_relative_includes(app: &mut App) {
         .filter_map(|lc| Some((lc.name.0.as_str().to_string(), lc.parent.clone()?)))
         .collect();
     let join = |path: &[crate::ident::Symbol]| path.iter().map(|s| s.as_str()).collect::<Vec<_>>().join("::");
-    for lc in &mut app.library_classes {
+    // A `Data.define` block resolves constants from the top level, so
+    // its includes are already absolute.
+    for lc in app.library_classes.iter_mut().filter(|lc| lc.data_define().is_none()) {
         let owner = lc.name.0.as_str().to_string();
         for inc in &mut lc.includes {
             let path: Vec<crate::ident::Symbol> =
@@ -9749,6 +9835,90 @@ fn default_locale<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> String {
         .filter(|l| !l.starts_with('#'))
         .find_map(default_locale_line)
         .unwrap_or_else(|| "en".to_string())
+}
+
+/// What a trimmed config line's `config.i18n.available_locales = …` sets:
+/// a literal list, or why it cannot be read.
+pub(super) fn available_locales_line(line: &str) -> Option<Result<Vec<String>, String>> {
+    let value = line.strip_prefix("config.i18n.available_locales")?.trim().strip_prefix('=')?;
+    let value = value.split('#').next().unwrap_or("").trim();
+    Some(locale_list(value).ok_or_else(|| format!("`available_locales = {value}` is computed at boot")))
+}
+
+/// What a trimmed config line's `config.i18n.fallbacks = …` sets: the
+/// default locales the Fallbacks backend appends (`true` is the default
+/// locale, `[]` none), `None` when it leaves the backend out, or why it
+/// cannot be read. A Hash of per-locale chains is not modeled.
+pub(super) fn fallbacks_line(line: &str, default: &str) -> Option<Result<Option<Vec<String>>, String>> {
+    let value = line.strip_prefix("config.i18n.fallbacks")?.trim().strip_prefix('=')?;
+    let value = value.split('#').next().unwrap_or("").trim();
+    Some(match value {
+        "true" => Ok(Some(vec![default.to_string()])),
+        "false" | "nil" => Ok(None),
+        _ => locale_list(value).map(Some).ok_or_else(|| format!("`fallbacks = {value}` is not a list of locales")),
+    })
+}
+
+/// `%i[en pl]`, `%w[en pl]`, `[:en, :pl]` or `["en", "pl"]`.
+fn locale_list(value: &str) -> Option<Vec<String>> {
+    if let Some(rest) = value.strip_prefix("%i").or_else(|| value.strip_prefix("%w")) {
+        let inner = rest.strip_prefix(['[', '(']).and_then(|r| r.strip_suffix([']', ')']))?;
+        return Some(inner.split_whitespace().map(str::to_string).collect());
+    }
+    let inner = value.strip_prefix('[')?.strip_suffix(']')?.trim();
+    if inner.is_empty() {
+        return Some(Vec::new());
+    }
+    inner.split(',').map(|item| locale_literal(item.trim())).collect()
+}
+
+/// `config.i18n.available_locales` and `config.i18n.fallbacks` from
+/// `config/application.rb`, and the fallbacks each
+/// `config/environments/<env>.rb` sets for itself. With no
+/// `available_locales`, the default locale and those the app's own
+/// locale files name; the same when it is computed at boot, with why it
+/// cannot be read as the third value.
+fn locale_settings<V: Vfs + ?Sized>(
+    vfs: &V,
+    dir: &Path,
+    default: &str,
+    files: &[(String, String)],
+) -> (Vec<String>, crate::i18n::FallbackPolicy, Option<String>) {
+    let lines = |path: &Path| -> Vec<String> {
+        let source = vfs.read_to_string(path).unwrap_or_default();
+        source.lines().map(str::trim).filter(|l| !l.starts_with('#')).map(str::to_string).collect()
+    };
+    let mut policy = crate::i18n::FallbackPolicy::default();
+    let app_lines = lines(&dir.join("config/application.rb"));
+    let mut available_unknown = None;
+    let mut available = match app_lines.iter().find_map(|l| available_locales_line(l)) {
+        Some(Ok(list)) => list,
+        Some(Err(why)) => {
+            available_unknown = Some(why);
+            crate::i18n::Catalog::file_locales(files)
+        }
+        None => crate::i18n::Catalog::file_locales(files),
+    };
+    if !available.iter().any(|l| l == default) {
+        available.insert(0, default.to_string());
+    }
+    match app_lines.iter().find_map(|l| fallbacks_line(l, default)) {
+        Some(Ok(setting)) => policy.app = setting,
+        Some(Err(why)) => policy.unknown = Some(why),
+        None => {}
+    }
+    let envs_dir = dir.join("config/environments");
+    let mut envs = if vfs.is_dir(&envs_dir) { vfs.read_dir(&envs_dir).unwrap_or_default() } else { Vec::new() };
+    envs.sort();
+    for path in envs {
+        let Some(env) = path.file_stem().and_then(|s| s.to_str()).filter(|_| path.extension().is_some_and(|e| e == "rb")) else { continue };
+        match lines(&path).iter().find_map(|l| fallbacks_line(l, default)) {
+            Some(Ok(setting)) => policy.envs.push((env.to_string(), setting)),
+            Some(Err(why)) => policy.unknown = Some(why),
+            None => {}
+        }
+    }
+    (available, policy, available_unknown)
 }
 
 /// What a trimmed config line's `config.i18n.raise_on_missing_translations = v` sets.

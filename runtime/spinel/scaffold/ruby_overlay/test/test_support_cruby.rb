@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 # Test support the CRuby tree can give and the spinel tree cannot:
 # loaded last by test/test_helper.rb on the ruby target only
 # (`project.rs::apply_cruby_test_support`).

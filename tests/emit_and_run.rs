@@ -17,16 +17,36 @@ mod net_http_patch;
 mod temporal_index_assign;
 #[path = "support/class_attribute.rs"]
 mod class_attribute;
+#[path = "support/string_truncate.rs"]
+mod string_truncate;
+#[path = "emit_and_run/string_truncate.rs"]
+mod string_truncate_runs;
 #[path = "support/array_excluding.rs"]
 mod array_excluding;
 #[path = "emit_and_run/array_excluding.rs"]
 mod array_excluding_runs;
 #[path = "emit_and_run/integer_query_find_by.rs"]
 mod integer_query_find_by;
+#[path = "emit_and_run/time_zone_default.rs"]
+mod time_zone_default;
+#[path = "emit_and_run/view_presence_url_encode.rs"]
+mod view_presence_url_encode;
+#[path = "emit_and_run/controller_translate.rs"]
+mod controller_translate;
+#[path = "emit_and_run/i18n_locales.rs"]
+mod i18n_locales;
 #[path = "support/lambda_signatures.rs"]
 mod lambda_signatures_contract;
 #[path = "emit_and_run/lambda_signatures.rs"]
 mod lambda_signatures;
+#[path = "support/send_data_filename.rs"]
+mod send_data_filename_contract;
+#[path = "emit_and_run/send_data_filename.rs"]
+mod send_data_filename;
+#[path = "support/vary_accept.rs"]
+mod vary_accept_contract;
+#[path = "emit_and_run/vary_accept.rs"]
+mod vary_accept;
 #[path = "emit_and_run/strong_params.rs"]
 mod strong_params;
 #[path = "emit_and_run/params_wrapper.rs"]
@@ -35,6 +55,14 @@ mod params_wrapper;
 mod stdlib_rnp_contract;
 #[path = "emit_and_run/stdlib_rnp.rs"]
 mod stdlib_rnp;
+#[path = "support/erb_template.rs"]
+mod erb_template_contract;
+#[path = "emit_and_run/erb_template.rs"]
+mod erb_template;
+#[path = "support/representable_decorator.rs"]
+mod representable_decorator;
+#[path = "emit_and_run/representable.rs"]
+mod representable;
 
 #[path = "support/class_configuration.rs"]
 mod class_configuration;
@@ -52,6 +80,10 @@ mod dry_monads;
 mod data_factory;
 #[path = "support/rails_root_join.rs"]
 mod rails_root_join;
+#[path = "support/cable_allowed_origins.rs"]
+mod cable_allowed_origins_contract;
+#[path = "emit_and_run/cable_allowed_origins.rs"]
+mod cable_allowed_origins;
 #[path = "support/cable_actions.rs"]
 mod cable_actions_contract;
 #[path = "emit_and_run/cable_actions.rs"]
@@ -64,6 +96,10 @@ mod cable_broadcast_json;
 mod index_with_contract;
 #[path = "emit_and_run/index_with.rs"]
 mod index_with;
+#[path = "support/request_id_runtime.rs"]
+mod request_id_runtime_contract;
+#[path = "emit_and_run/request_id_runtime.rs"]
+mod request_id_runtime;
 #[path = "support/anonymous_keywords.rs"]
 mod anonymous_keywords;
 #[path = "support/delegate_association.rs"]
@@ -76,6 +112,10 @@ mod io_process_constants;
 mod json_params_contract;
 #[path = "emit_and_run/json_params.rs"]
 mod json_params;
+#[path = "support/class_side_default.rs"]
+mod class_side_default_contract;
+#[path = "emit_and_run/class_side_default.rs"]
+mod class_side_default;
 #[path = "emit_and_run/helper_anonymous_rest.rs"]
 mod helper_anonymous_rest;
 #[path = "emit_and_run/controller_response_body.rs"]
@@ -92,14 +132,26 @@ mod request_optional_port;
 mod action_dispatch_request_put;
 #[path = "emit_and_run/controller_url_helpers.rs"]
 mod controller_url_helpers;
+#[path = "emit_and_run/route_default_segment_args.rs"]
+mod route_default_segment_args;
+#[path = "emit_and_run/keyed_collection_cache.rs"]
+mod keyed_collection_cache;
+#[path = "emit_and_run/association_loaded_list.rs"]
+mod association_loaded_list;
 #[path = "emit_and_run/controller_super_ivars.rs"]
 mod controller_super_ivars;
+#[path = "emit_and_run/helper_method_session.rs"]
+mod helper_method_session;
 #[path = "emit_and_run/assoc_primary_key.rs"]
 mod assoc_primary_key;
 #[path = "emit_and_run/assoc_pluck_typed.rs"]
 mod assoc_pluck_typed;
 #[path = "emit_and_run/action_controller_head.rs"]
 mod action_controller_head;
+#[path = "support/conditional_get.rs"]
+mod conditional_get_contract;
+#[path = "emit_and_run/conditional_get.rs"]
+mod conditional_get;
 #[path = "emit_and_run/nil_body_length.rs"]
 mod nil_body_length;
 #[path = "emit_and_run/inline_filter_guard.rs"]
@@ -1229,18 +1281,18 @@ fn a_missing_translation_raises_where_the_environment_says_so() {
         .assert_passes();
 }
 
-/// A key computed at run time, a missing key with only key defaults, a
-/// `:strict` setting, or a call with a block stays an error.
+/// A key computed at run time, a `:strict` setting, or a call with a
+/// block stays an error.
 #[test]
 fn unresolvable_translations_stay_errors() {
     let (_emitted, errors) = emit_and_run::real_blog()
         .edit(
             "app/models/article.rb",
             "  validates :title, presence: true\n",
-            "  validates :title, presence: true\n\n  def self.missing\n    I18n.t(\"no.such.key\", default: :also_missing)\n  end\n\n  def self.dynamic(key)\n    I18n.t(key)\n  end\n\n  def self.blocked\n    I18n.t(\"hello\") { |text| text }\n  end\n",
+            "  validates :title, presence: true\n\n  def self.dynamic(key)\n    I18n.t(key)\n  end\n\n  def self.blocked\n    I18n.t(\"hello\") { |text| text }\n  end\n",
         )
         .emit(roundhouse::project::BuildTarget::Ruby);
-    assert_eq!(errors.iter().filter(|e| e.contains("I18n not supported")).count(), 3, "{errors:?}");
+    assert_eq!(errors.iter().filter(|e| e.contains("I18n not supported")).count(), 2, "{errors:?}");
     let (_emitted, errors) = emit_and_run::real_blog()
         .edit(
             "config/environments/test.rb",
@@ -1659,6 +1711,206 @@ fn errors_delete_is_a_gap_on_strict_targets() {
     );
 }
 
+/// A `belongs_to` checks its record where it is declared, among the
+/// `validates`, and its error's type is `:blank`: Rails validates the
+/// association's presence with `message: :required`.
+fn belongs_to_errors_app() -> emit_and_run::Overlay {
+    emit_and_run::real_blog().edit(
+        "app/models/comment.rb",
+        "  validates :body, presence: true\n",
+        "  validates :body, presence: true
+
+  def error_rows
+    errors.map { |error| [error.attribute, error.type, error.full_message] }
+  end
+",
+    )
+}
+
+const BELONGS_TO_ERRORS: &str = r#"comment = Comment.new
+comment.valid?
+rows = [[:article, :blank, "Article must exist"], [:commenter, :blank, "Commenter can't be blank"], [:body, :blank, "Body can't be blank"]]
+raise comment.error_rows.inspect unless comment.error_rows == rows
+puts "belongs_to errors passed"
+"#;
+
+#[test]
+fn a_belongs_to_error_lists_where_it_is_declared() {
+    belongs_to_errors_app().run_ruby(BELONGS_TO_ERRORS).assert_passes();
+}
+
+#[test]
+#[ignore = "requires the Spinel toolchain"]
+fn a_belongs_to_error_lists_where_it_is_declared_on_spinel() {
+    belongs_to_errors_app().run_spinel(BELONGS_TO_ERRORS).assert_passes();
+}
+
+/// `details` groups the errors by attribute, an entry's `[:error]` is its
+/// type, and `added?` matches only an error Rails keeps no options for.
+fn errors_details_app() -> emit_and_run::Overlay {
+    error_types_app().edit(
+        "app/models/article.rb",
+        "  def error_rows\n",
+        "  def detail_types
+    out = []
+    errors.details.each_pair { |attribute, entries| entries.each { |entry| out << [attribute, entry[:error]] } }
+    out
+  end
+
+  def short_body
+    [errors.details[:body].any? { |detail| detail[:error] == :too_short }, errors.details[:nothing].size]
+  end
+
+  def addeds
+    [errors.added?(:title, :blank), errors.added?(:body, :too_short), errors.added?(:base, \"is odd\"), errors.added?(:title),
+     errors.added?(:base, :invalid)]
+  end
+
+  def error_rows\n",
+    )
+}
+
+const ERRORS_DETAILS: &str = r#"a = Article.new(title: "", body: "odd")
+a.valid?
+raise a.detail_types.inspect unless a.detail_types == [[:title, :blank], [:body, :too_short], [:base, "is odd"]]
+raise a.short_body.inspect unless a.short_body == [true, 0]
+raise a.addeds.inspect unless a.addeds == [true, false, true, false, false]
+b = Article.new(title: "A title", body: "A long enough body")
+b.valid?
+raise b.detail_types.inspect unless b.detail_types.empty? && b.short_body == [false, 0]
+puts "errors.details passed"
+"#;
+
+#[test]
+fn errors_details_reads_each_error_s_type() {
+    errors_details_app().run_ruby(ERRORS_DETAILS).assert_passes();
+}
+
+#[test]
+#[ignore = "requires the Spinel toolchain"]
+fn errors_details_reads_each_error_s_type_on_spinel() {
+    errors_details_app().run_spinel(ERRORS_DETAILS).assert_passes();
+}
+
+#[test]
+fn errors_details_is_a_gap_on_strict_targets() {
+    let (_emitted, errors) = errors_details_app().emit(roundhouse::project::BuildTarget::Crystal);
+    assert!(
+        errors.iter().any(|e| e.contains("ActiveSupport.errors_details is only available on the ruby family and spinel")),
+        "{errors:#?}"
+    );
+}
+
+/// `errors.merge!` and `errors.import` file another record's errors here,
+/// each full message naming its attribute as this model does.
+fn errors_import_app() -> emit_and_run::Overlay {
+    errors_details_app()
+        .write(
+            "config/locales/en.yml",
+            "en:\n  hello: \"Hello world\"\n  activerecord:\n    attributes:\n      article:\n        commenter: \"Reviewer\"\n      comment:\n        body: \"Remark\"\n",
+        )
+        .edit(
+            "app/models/article.rb",
+            "  def error_rows\n",
+            "  def self.comment_messages
+    comment = Comment.new
+    comment.valid?
+    comment.errors.full_messages
+  end
+
+  def merged_messages
+    comment = Comment.new
+    comment.valid?
+    errors.merge!(comment)
+    errors.full_messages
+  end
+
+  def merged_errors
+    comment = Comment.new
+    comment.valid?
+    errors.merge!(comment.errors)
+    errors.map { |error| [error.attribute, error.type, error.message, error.full_message] }
+  end
+
+  def imported_errors
+    comment = Comment.new
+    comment.valid?
+    [:title].each { |field| comment.errors.each { |error| errors.import(error, attribute: field) } }
+    errors.map { |error| [error.attribute, error.type, error.message, error.full_message] }
+  end
+
+  def imported_own
+    comment = Comment.new
+    comment.valid?
+    comment.errors.each { |error| errors.import(error) }
+    errors.full_messages
+  end
+
+  def merged_into_itself
+    before = errors.size
+    errors.merge!(errors)
+    errors.size == before
+  end
+
+  def error_rows\n",
+        )
+}
+
+const ERRORS_IMPORT: &str = r#"raise Article.comment_messages.inspect unless Article.comment_messages == ["Article must exist", "Commenter can't be blank", "Remark can't be blank"]
+fresh = -> { Article.new(title: "A title", body: "A long enough body") }
+messages = fresh.call.merged_messages
+raise messages.inspect unless messages == ["Article must exist", "Reviewer can't be blank", "Body can't be blank"]
+rows = [[:article, :blank, "must exist", "Article must exist"], [:commenter, :blank, "can't be blank", "Reviewer can't be blank"], [:body, :blank, "can't be blank", "Body can't be blank"]]
+merged = fresh.call
+raise merged.merged_errors.inspect unless merged.merged_errors == rows
+raise merged.addeds.inspect unless merged.addeds == [false, false, false, false, false]
+raise merged.merged_into_itself.inspect unless merged.merged_into_itself
+titled = [[:title, :blank, "must exist", "Title must exist"], [:title, :blank, "can't be blank", "Title can't be blank"], [:title, :blank, "can't be blank", "Title can't be blank"]]
+raise fresh.call.imported_errors.inspect unless fresh.call.imported_errors == titled
+own = fresh.call.imported_own
+raise own.inspect unless own == ["Article must exist", "Reviewer can't be blank", "Body can't be blank"]
+puts "errors.import passed"
+"#;
+
+#[test]
+fn imported_errors_are_named_as_the_importing_model_names_them() {
+    errors_import_app().run_ruby(ERRORS_IMPORT).assert_passes();
+}
+
+#[test]
+#[ignore = "requires the Spinel toolchain"]
+fn imported_errors_are_named_as_the_importing_model_names_them_on_spinel() {
+    errors_import_app().run_spinel(ERRORS_IMPORT).assert_passes();
+}
+
+#[test]
+fn errors_import_is_a_gap_on_strict_targets() {
+    let (_emitted, errors) = errors_import_app().emit(roundhouse::project::BuildTarget::Crystal);
+    for helper in ["errors_merge", "errors_import"] {
+        assert!(
+            errors.iter().any(|e| e.contains(&format!("ActiveSupport.{helper} is only available on the ruby family and spinel"))),
+            "{helper}: {errors:#?}"
+        );
+    }
+}
+
+/// A `details` entry's other keys are its options, which no error keeps.
+#[test]
+fn a_details_entry_s_options_are_an_error() {
+    let (_emitted, errors) = errors_each_app()
+        .edit(
+            "app/models/article.rb",
+            "  def error_rows\n",
+            "  def body_minimum
+    errors.details[:body].map { |detail| detail[:count] }
+  end
+
+  def error_rows\n",
+        )
+        .emit(roundhouse::project::BuildTarget::Ruby);
+    assert!(errors.iter().any(|e| e.contains("no known method `[]`")), "{errors:#?}");
+}
+
 /// `type` reads the error more than once, so a found error is an error.
 #[test]
 fn the_type_of_an_error_that_is_not_a_plain_read_is_an_error() {
@@ -1673,7 +1925,7 @@ fn the_type_of_an_error_that_is_not_a_plain_read_is_an_error() {
   def error_rows\n",
         )
         .emit(roundhouse::project::BuildTarget::Ruby);
-    assert!(errors.iter().any(|e| e.contains("`error.type` reads the error three times")), "{errors:#?}");
+    assert!(errors.iter().any(|e| e.contains("read the error three times")), "{errors:#?}");
 }
 
 /// The helper is the shared Ruby runtime's, which no strict target loads.
@@ -3764,6 +4016,225 @@ raise "got #{got.inspect}" unless got == "First,Second,Second 1,2"
         .assert_passes();
 }
 
+/// Records of several models, handed over as a parameter analysis does
+/// not type, are grouped by class and each group preloaded, as Rails'
+/// preloader does: reading the association afterwards runs no query.
+fn mixed_preload_app() -> emit_and_run::Overlay {
+    emit_and_run::real_blog()
+        .edit(
+            "db/schema.rb",
+            "  add_foreign_key \"comments\", \"articles\"\n",
+            "  create_table \"notes\", force: :cascade do |t|\n    t.integer \"article_id\", null: false\n    t.string \"text\"\n  end\n\n  add_foreign_key \"comments\", \"articles\"\n",
+        )
+        .write("app/models/note.rb", "class Note < ApplicationRecord\n  belongs_to :article\nend\n")
+        .write(
+            "app/models/preload_digest.rb",
+            r#"class PreloadDigest
+  def self.preload(records)
+    ActiveRecord::Associations::Preloader.new(records: records, associations: :article).call
+    nil
+  end
+end
+"#,
+        )
+}
+
+#[test]
+fn associations_preloader_groups_mixed_records() {
+    mixed_preload_app()
+        .run_ruby(
+            r##"a = Article.create!(title: "First", body: "A body long enough")
+b = Article.create!(title: "Second", body: "Another body long enough")
+Comment.create!(article_id: a.id, commenter: "x", body: "one")
+Comment.create!(article_id: b.id, commenter: "y", body: "two")
+Note.create!(article_id: b.id, text: "n")
+records = Comment.all.to_a + Note.all.to_a
+PreloadDigest.preload(records)
+titles = nil
+queries = Db.capture_sql { titles = records.map { |r| r.article.title }.join(",") }
+raise "got #{titles.inspect}" unless titles == "First,Second,Second"
+raise "reads ran #{queries.length} queries: #{queries.inspect}" unless queries.empty?
+"##,
+        )
+        .assert_passes();
+}
+
+#[test]
+#[ignore = "requires the Spinel toolchain"]
+fn associations_preloader_groups_mixed_records_on_spinel() {
+    let script = r#"Db.configure(":memory:")
+Schema.statements.each { |sql| Db.exec(sql) }
+ActiveRecord.adapter = SqliteAdapter
+a = Article.create!(title: "First", body: "A body long enough")
+b = Article.create!(title: "Second", body: "Another body long enough")
+Comment.create!(article_id: a.id, commenter: "x", body: "one")
+Comment.create!(article_id: b.id, commenter: "y", body: "two")
+Note.create!(article_id: b.id, text: "n")
+records = Comment.all.to_a + Note.all.to_a
+PreloadDigest.preload(records)
+titles = ""
+queries = Db.capture_sql { titles = records.map { |r| r.article.title }.join(",") }
+puts titles
+puts queries.length
+"#;
+    let run = mixed_preload_app().run_spinel(script);
+    run.assert_passes();
+    assert_eq!(run.stdout, "First,Second,Second\n0\n");
+}
+
+/// `Model.where(…).delete_all` / `update_all` / `destroy_all` /
+/// `touch_all` run against the relation: lifted into a SELECT, the
+/// receiver would be the hydrated rows, which answer none of them.
+fn bulk_writes_app() -> emit_and_run::Overlay {
+    emit_and_run::real_blog()
+        .edit(
+            "app/models/article.rb",
+            "  has_many :comments, dependent: :destroy\n",
+            concat!(
+                "  has_many :comments, dependent: :destroy\n\n",
+                "  def rename_comments\n    Comment.where(article_id: @id).update_all(commenter: \"renamed\")\n    Comment.where(article_id: @id).touch_all\n  end\n\n",
+                "  def drop_comments\n    Comment.where(article_id: @id).delete_all\n  end\n\n",
+                "  def drop_self\n    Article.where(id: @id).destroy_all\n  end\n",
+            ),
+        )
+}
+
+const BULK_WRITES_SCRIPT: &str = r##"a = Article.create!(title: "Keep", body: "A body long enough")
+b = Article.create!(title: "Drop", body: "Another body long enough")
+Comment.create!(article_id: a.id, commenter: "x", body: "one")
+Comment.create!(article_id: b.id, commenter: "y", body: "two")
+a.rename_comments
+b.drop_comments
+b.drop_self
+raise "comments: #{Comment.count}" unless Comment.count == 1
+raise "renamed: #{Comment.first.commenter}" unless Comment.first.commenter == "renamed"
+raise "articles: #{Article.count}" unless Article.count == 1
+puts "ok"
+"##;
+
+#[test]
+fn bulk_writes_on_a_where_run_against_the_relation() {
+    bulk_writes_app().run_ruby(BULK_WRITES_SCRIPT).assert_passes();
+}
+
+#[test]
+#[ignore = "requires the Spinel toolchain"]
+fn bulk_writes_on_a_where_run_against_the_relation_on_spinel() {
+    let run = bulk_writes_app().run_spinel(&format!("Db.configure(\":memory:\")\nSchema.statements.each {{ |sql| Db.exec(sql) }}\nActiveRecord.adapter = SqliteAdapter\n{BULK_WRITES_SCRIPT}"));
+    run.assert_passes();
+    assert_eq!(run.stdout, "ok\n");
+}
+
+/// `dependent: :delete_all`, `has_one … dependent: :delete` and
+/// `dependent: :nullify` act on the children in one statement each,
+/// running none of their callbacks, as Rails' do.
+fn dependent_app() -> emit_and_run::Overlay {
+    emit_and_run::real_blog()
+        .edit(
+            "db/schema.rb",
+            "  add_foreign_key \"comments\", \"articles\"\n",
+            concat!(
+                "  create_table \"notes\", force: :cascade do |t|\n    t.integer \"article_id\"\n    t.string \"text\"\n  end\n\n",
+                "  create_table \"summaries\", force: :cascade do |t|\n    t.integer \"article_id\"\n    t.string \"text\"\n  end\n\n",
+                "  add_foreign_key \"comments\", \"articles\"\n",
+            ),
+        )
+        .edit("app/models/article.rb", "  has_many :comments, dependent: :destroy\n", "  has_many :comments, dependent: :delete_all\n  has_many :tagged_notes, -> { where(text: \"tag\") }, class_name: \"Note\", dependent: :delete_all\n  has_many :notes, dependent: :nullify\n  has_one :summary, dependent: :delete\n")
+        .edit("app/models/comment.rb", "  belongs_to :article\n", "  belongs_to :article\n  before_destroy { raise \"a delete_all child runs no callback\" }\n")
+        .write("app/models/note.rb", "class Note < ApplicationRecord\n  belongs_to :article, optional: true\nend\n")
+        .write("app/models/summary.rb", "class Summary < ApplicationRecord\n  belongs_to :article, optional: true\nend\n")
+}
+
+const DEPENDENT_SCRIPT: &str = r##"a = Article.create!(title: "Gone", body: "A body long enough")
+b = Article.create!(title: "Kept", body: "Another body long enough")
+Comment.create!(article_id: a.id, commenter: "x", body: "one")
+Comment.create!(article_id: b.id, commenter: "y", body: "two")
+n = Note.create!(article_id: a.id, text: "n")
+Note.create!(article_id: a.id, text: "tag")
+Summary.create!(article_id: a.id, text: "s")
+Summary.create!(article_id: b.id, text: "t")
+a.destroy
+raise "comments left: #{Comment.count}" unless Comment.count == 1
+raise "summaries left: #{Summary.count}" unless Summary.count == 1
+raise "note kept its key" unless Note.find(n.id).article_id.nil?
+raise "notes left: #{Note.count}" unless Note.count == 1
+puts "ok"
+"##;
+
+#[test]
+fn dependent_delete_all_delete_and_nullify_run() {
+    dependent_app().run_ruby(DEPENDENT_SCRIPT).assert_passes();
+}
+
+#[test]
+#[ignore = "requires the Spinel toolchain"]
+fn dependent_delete_all_delete_and_nullify_run_on_spinel() {
+    let run = dependent_app().run_spinel(&format!("Db.configure(\":memory:\")\nSchema.statements.each {{ |sql| Db.exec(sql) }}\nActiveRecord.adapter = SqliteAdapter\n{DEPENDENT_SCRIPT}"));
+    run.assert_passes();
+    assert_eq!(run.stdout, "ok\n");
+}
+
+/// A strict target loads no `runtime/ruby/active_record/preloading.rb`, so
+/// mixed-model records keep the call unsupported there rather than emit a
+/// call to nothing.
+#[test]
+fn mixed_records_preloading_is_unsupported_on_strict_targets() {
+    let (_emitted, errors) = mixed_preload_app().emit(roundhouse::project::BuildTarget::Rust);
+    assert!(
+        errors.iter().any(|e| e.contains("ActiveRecord::Preloading.records is only available on the ruby family and spinel")),
+        "{errors:#?}"
+    );
+}
+
+/// A Preloader call whose value is dropped by a `tap` block or by an
+/// `if` branch whose `if` is a statement preloads like one standing alone.
+fn tap_digest_app() -> emit_and_run::Overlay {
+    emit_and_run::real_blog()
+        .write(
+            "app/models/tap_digest.rb",
+            r#"class TapDigest
+  def self.tapped
+    Comment.all.to_a.tap do |records|
+      ActiveRecord::Associations::Preloader.new(records: records, associations: :article).call
+    end
+  end
+
+  def self.branched(records)
+    if records.any?
+      ActiveRecord::Associations::Preloader.new(records: records, associations: :article).call
+    end
+    records
+  end
+end
+"#,
+        )
+}
+
+const TAP_DIGEST_SCRIPT: &str = r##"a = Article.create!(title: "First", body: "A body long enough")
+Comment.create!(article_id: a.id, commenter: "x", body: "one")
+Comment.create!(article_id: a.id, commenter: "y", body: "two")
+tapped = TapDigest.tapped
+branched = TapDigest.branched(Comment.all.to_a)
+titles = nil
+queries = Db.capture_sql { titles = (tapped + branched).map { |c| c.article.title }.join(",") }
+raise "got #{titles.inspect}" unless titles == "First,First,First,First"
+raise "reads ran #{queries.length} queries" unless queries.empty?
+puts "ok"
+"##;
+
+#[test]
+fn associations_preloader_in_a_tap_block_or_a_dropped_branch_runs() {
+    tap_digest_app().run_ruby(TAP_DIGEST_SCRIPT).assert_passes();
+}
+
+#[test]
+#[ignore = "requires the Spinel toolchain"]
+fn associations_preloader_in_a_tap_block_or_a_dropped_branch_runs_on_spinel() {
+    let run = tap_digest_app().run_spinel(&format!("Db.configure(\":memory:\")\nSchema.statements.each {{ |sql| Db.exec(sql) }}\nActiveRecord.adapter = SqliteAdapter\n{TAP_DIGEST_SCRIPT}"));
+    run.assert_passes();
+    assert_eq!(run.stdout, "ok\n");
+}
+
 /// `render … and return`, `redirect_to … and return` and `head … and return` return, as Rails' truthy answers make them.
 #[test]
 fn a_response_call_and_return_returns() {
@@ -4062,6 +4533,14 @@ fn json_values_app() -> emit_and_run::Overlay {
       render json: { article: found }
     when "float"
       render json: { at: at, x: Float::INFINITY, y: 1.5 }
+    when "float_only"
+      ratios = [1.5, Float::NAN]
+      render json: { x: Float::INFINITY, y: 1.5, ratios: ratios, nested: [-Float::INFINITY] }
+    when "float_to_json"
+      render plain: { x: Float::NAN, y: 2.5 }.to_json
+    when "float_splat"
+      ratios = [1.5, Float::NAN]
+      render json: [*ratios, 2.5]
     when "only"
       render json: article, only: [:title, :id]
     when "except"
@@ -4153,6 +4632,12 @@ class ValuesControllerTest < ActionDispatch::IntegrationTest
   test "a non-finite Float is null" do
     get "/values/#{@article.id}", params: { shape: "float" }
     assert_equal %({"at":"2026-01-02T03:04:05.678Z","x":null,"y":1.5}), response.body
+    get "/values/#{@article.id}", params: { shape: "float_only" }
+    assert_equal %({"x":null,"y":1.5,"ratios":[1.5,null],"nested":[null]}), response.body
+    get "/values/#{@article.id}", params: { shape: "float_to_json" }
+    assert_equal %({"x":null,"y":2.5}), response.body
+    get "/values/#{@article.id}", params: { shape: "float_splat" }
+    assert_equal %([1.5,null,2.5]), response.body
   end
 
   test "a typed hash and array of times" do
@@ -4166,6 +4651,18 @@ end
         .assert_passes();
 }
 
+/// Not Go's `[]float64`: a literal Array whose Floats `finite_float` wraps holds `Float?`, and Go builds the slice from the literal's type.
+#[test]
+fn a_wrapped_float_array_literal_is_nullable_on_go() {
+    let (emitted, errors) = emit_and_run::real_blog()
+        .edit("config/routes.rb", "  root \"articles#index\"\n", "  root \"articles#index\"\n  get \"/f\", to: \"f#show\"\n")
+        .write("app/controllers/f_controller.rb", "class FController < ApplicationController\n  def show\n    r = 2.5\n    render json: { nested: [r, 1.0] }\n  end\nend\n")
+        .emit(roundhouse::project::BuildTarget::Go);
+    assert!(errors.is_empty(), "{errors:?}");
+    let controller = std::fs::read_to_string(emitted.join("app/v2/fcontroller.go")).expect("controller");
+    assert!(controller.contains("[]interface{}{JsonBuilder_finite_float(r), JsonBuilder_finite_float(1.0)}"), "{controller}");
+}
+
 /// The same values compiled by Spinel, where the runtime encoder cannot type them.
 #[test]
 #[ignore = "requires the Spinel toolchain"]
@@ -4174,7 +4671,7 @@ fn render_json_values_run_on_spinel() {
 Schema.statements.each { |sql| Db.exec(sql) }
 ActiveRecord.adapter = SqliteAdapter
 a = Article.create!(title: "A <b>", body: "Long enough body text")
-["hash", "list", "array", "times", "string", "raw", "to_json", "maybe", "float", "only", "methods", "relation_only"].each do |shape|
+["hash", "list", "array", "times", "string", "raw", "to_json", "maybe", "float", "only", "methods", "relation_only", "float_only", "float_to_json"].each do |shape|
   c = ValuesController.new
   c.params = { "id" => a.id.to_s, "shape" => shape }
   c.process_action(:show)
@@ -4184,7 +4681,7 @@ end
     let run = json_values_app().run_spinel(script);
     run.assert_passes();
     let lines: Vec<&str> = run.stdout.lines().collect();
-    assert_eq!(lines.len(), 12, "{}", run.stdout);
+    assert_eq!(lines.len(), 14, "{}", run.stdout);
     // The record's timestamps are the run's own; read them back and build the exact text around them.
     let stamp = |key: &str| {
         let at = lines[0].find(&format!("\"{key}\":\"")).expect(key) + key.len() + 4;
@@ -4207,6 +4704,9 @@ end
     assert_eq!(lines[9], r#"{"title":"A \u003cb\u003e","id":1}"#);
     assert_eq!(lines[10], r#"{"id":1,"headline":"A \u003cB\u003e"}"#);
     assert_eq!(lines[11], r#"[{"id":1}]"#);
+    assert_eq!(lines[12], r#"{"x":null,"y":1.5,"ratios":[1.5,null],"nested":[null]}"#);
+    assert_eq!(lines[13], r#"{"x":null,"y":2.5}"#);
+    // Not "float_splat": spinel spreads a map-built `Float?` Array into a literal with its nil as 0.0 (matz/spinel#9114).
 }
 
 /// A Date value as Rails writes it: the ISO date, and `null` for nil.
@@ -4314,6 +4814,67 @@ fn render_json_time_in_a_zone_at_offset_zero_on_spinel() {
     let run = london_json_app().run_spinel(script);
     run.assert_passes();
     assert_eq!(run.stdout, "{\"utc\":\"2026-01-02T03:04:05.000Z\",\"london\":\"2026-01-02T03:04:05.000+00:00\"}\n");
+}
+
+/// A failed statement raises ActiveRecord's own class, in Rails' hierarchy:
+/// a unique index is RecordNotUnique, a NOT NULL column NotNullViolation,
+/// a bad statement StatementInvalid, and every one rescues as
+/// StatementInvalid and ActiveRecordError.
+fn statement_errors_app() -> emit_and_run::Overlay {
+    emit_and_run::real_blog()
+        .edit("db/schema.rb", "    t.index [\"article_id\"], name: \"index_comments_on_article_id\"\n", "    t.index [\"article_id\"], name: \"index_comments_on_article_id\"\n    t.index [\"commenter\"], name: \"index_comments_on_commenter\", unique: true\n")
+        .edit(
+            "config/routes.rb",
+            "  root \"articles#index\"\n",
+            "  root \"articles#index\"\n  get \"/statement_errors\", to: \"statement_errors#show\"\n",
+        )
+        .write(
+            "app/controllers/statement_errors_controller.rb",
+            r#"class StatementErrorsController < ApplicationController
+  def show
+    article = Article.create!(title: "Errors", body: "Long enough body text")
+    out = []
+    Comment.create!(article_id: article.id, commenter: "Ann", body: "first")
+    begin
+      Comment.create!(article_id: article.id, commenter: "Ann", body: "second")
+    rescue ActiveRecord::StatementInvalid => e
+      out << e.class.name
+    end
+    begin
+      ActiveRecord::Base.connection.execute("INSERT INTO comments (article_id, commenter, body, created_at, updated_at) VALUES (NULL, 'Bob', 'x', '2026-01-01', '2026-01-01')")
+    rescue ActiveRecord::StatementInvalid => e
+      out << e.class.name
+    end
+    begin
+      Article.where("no_such_column = 1").to_a
+    rescue ActiveRecord::ActiveRecordError => e
+      out << e.class.name
+    end
+    render plain: out.join("|")
+  end
+end
+"#,
+        )
+}
+
+#[test]
+fn statement_errors_raise_activerecords_classes() {
+    statement_errors_app()
+        .write(
+            "test/controllers/statement_errors_controller_test.rb",
+            "require \"test_helper\"\n\nclass StatementErrorsControllerTest < ActionDispatch::IntegrationTest\n  test \"each failed statement\" do\n    get \"/statement_errors\"\n    assert_equal \"ActiveRecord::RecordNotUnique|ActiveRecord::NotNullViolation|ActiveRecord::StatementInvalid\", response.body\n  end\nend\n",
+        )
+        .run_test("test/controllers/statement_errors_controller_test.rb")
+        .assert_passes();
+}
+
+#[test]
+#[ignore = "requires the Spinel toolchain"]
+fn statement_errors_raise_activerecords_classes_on_spinel() {
+    let script = "Db.configure(\":memory:\")\nSchema.statements.each { |sql| Db.exec(sql) }\nActiveRecord.adapter = SqliteAdapter\nc = StatementErrorsController.new\nc.params = {}\nc.process_action(:show)\nputs c.body\n";
+    let run = statement_errors_app().run_spinel(script);
+    run.assert_passes();
+    assert_eq!(run.stdout, "ActiveRecord::RecordNotUnique|ActiveRecord::NotNullViolation|ActiveRecord::StatementInvalid\n");
 }
 
 /// offset. Expected values are ActiveSupport 8.1's.
@@ -14568,3 +15129,215 @@ puts "PASS friendly oracle"
 }
 #[path = "emit_and_run/acts_as_votable.rs"]
 mod acts_as_votable;
+
+/// A file whose only statement is `Breadcrumb = Data.define(…)`, a
+/// class nested under it with a compact name, and a constant that
+/// another class builds from it. No file reopens `class Breadcrumb`,
+/// so only the Data factory declares it.
+fn top_level_data_factory_app() -> emit_and_run::Overlay {
+    emit_and_run::real_blog()
+        .write("app/models/breadcrumb.rb", "Breadcrumb = Data.define(:name, :path)\n")
+        .write("app/models/breadcrumb/trail.rb", "class Breadcrumb::Trail\n  def self.label = \"trail\"\nend\n")
+        .write("app/models/app_nav.rb", "class AppNav\n  HOME = Breadcrumb.new(name: \"Home\", path: \"/\")\n\n  def self.home = HOME\nend\n")
+        .write("app/controllers/data_probe_controller.rb", r#"class DataProbeController < ApplicationController
+  def index
+    @crumb = Breadcrumb.new(name: "Posts", path: "/posts")
+    @path = @crumb.path
+    @trail = Breadcrumb::Trail.label
+    @home = AppNav.home.name
+  end
+end
+"#)
+}
+
+const TOP_LEVEL_DATA_FACTORY: &str = r#"
+keyword = Breadcrumb.new(name: "Posts", path: "/posts")
+positional = Breadcrumb.new("Posts", "/posts")
+raise "readers changed" unless keyword.name == "Posts" && keyword.path == "/posts"
+raise "Data lost value equality" unless keyword == positional
+raise "nested class lost" unless Breadcrumb::Trail.label == "trail"
+raise "class constant lost" unless AppNav.home.name == "Home" && AppNav.home.path == "/"
+puts "top-level Data factory passed"
+"#;
+
+#[test]
+fn a_top_level_data_factory_file_checks_cleanly_and_executes() {
+    let run = top_level_data_factory_app().run_ruby(&format!(r#"{TOP_LEVEL_DATA_FACTORY}
+raise "not a Data class" unless Breadcrumb.superclass == Data && Breadcrumb.name == "Breadcrumb"
+raise "members changed" unless Breadcrumb.members == [:name, :path]
+raise "Data lost immutability" unless Breadcrumb.new("a", "b").frozen? && !Breadcrumb.new("a", "b").respond_to?(:name=)
+raise "a nested class leaked to the top level" if Object.const_defined?(:Trail, false)
+begin
+  Breadcrumb.new(name: "Posts")
+  raise "a missing member was accepted"
+rescue ArgumentError
+end
+"#));
+    run.assert_passes();
+    let emitted = std::fs::read_to_string(run.emitted.join("app/models/breadcrumb.rb")).unwrap();
+    assert_eq!(emitted.matches("Data.define").count(), 1, "{emitted}");
+    assert!(emitted.contains("Breadcrumb = Data.define(:name, :path)"), "{emitted}");
+    let sidecar = std::fs::read_to_string(run.emitted.join("sig/app/models/breadcrumb.rbs")).unwrap();
+    assert!(sidecar.contains("class Breadcrumb < ::Data"), "{sidecar}");
+    let signatures = roundhouse::rbs::parse_app_signatures(&sidecar).expect("emitted RBS parses");
+    let breadcrumb = &signatures[&roundhouse::ident::ClassId(roundhouse::ident::Symbol::from("Breadcrumb"))];
+    for method in ["new", "name", "path"] {
+        assert!(breadcrumb.contains_key(&roundhouse::ident::Symbol::from(method)), "{sidecar}");
+    }
+}
+
+#[test]
+fn a_class_nested_by_reopening_a_top_level_data_class_executes() {
+    emit_and_run::real_blog()
+        .write("app/models/breadcrumb.rb", "Breadcrumb = Data.define(:name, :path)\n")
+        .write("app/models/breadcrumb/separator.rb", "class Breadcrumb\n  class Separator\n    def self.text = \" > \"\n  end\nend\n")
+        .write("app/controllers/data_probe_controller.rb", r#"class DataProbeController < ApplicationController
+  def index
+    @crumb = Breadcrumb.new("Posts", "/posts").name
+    @separator = Breadcrumb::Separator.text
+  end
+end
+"#)
+        .run_ruby(r#"
+raise "Data class lost" unless Breadcrumb.new("Posts", "/posts").path == "/posts"
+raise "nested class lost" unless Breadcrumb::Separator.text == " > "
+raise "a nested class leaked to the top level" if Object.const_defined?(:Separator, false)
+puts "reopened Data class passed"
+"#)
+        .assert_passes();
+}
+
+#[test]
+#[ignore = "requires the native Spinel compiler"]
+fn a_top_level_data_factory_file_runs_natively() {
+    top_level_data_factory_app()
+        .run_spinel(TOP_LEVEL_DATA_FACTORY)
+        .assert_passes();
+}
+
+fn data_define_block_app() -> emit_and_run::Overlay {
+    emit_and_run::real_blog()
+        .write("app/models/timeframe_limits.rb", "module TimeframeLimits\n  TIMEFRAME_LIMIT = 5\nend\n")
+        .write("app/models/timeframe.rb", r##"Timeframe = Data.define(:id, :label_text) do
+  include TimeframeLimits
+
+  TIMEFRAME_OPTIONS = { "this_year" => "This year", "all_time" => "All time" }.freeze
+  TIMEFRAME_LIMIT = 10
+  DEFAULT_TIMEFRAME = new("all_time", nil)
+  @current = DEFAULT_TIMEFRAME
+
+  def self.find(id) = new(id, TIMEFRAME_OPTIONS.fetch(id))
+  def self.current = @current
+  def limit = TIMEFRAME_LIMIT
+
+  def label = "#{label_text}!"
+  def label_text = TIMEFRAME_OPTIONS.fetch(id)
+
+  private
+
+  def secret = "hidden"
+end
+"##)
+        .write("app/models/timeframe_report.rb", "class TimeframeReport\n  def self.option_count = TIMEFRAME_OPTIONS.size\nend\n")
+        .write("app/controllers/data_probe_controller.rb", r#"class DataProbeController < ApplicationController
+  def index
+    @label = Timeframe.find("this_year").label
+    @default = DEFAULT_TIMEFRAME.id
+    @current = Timeframe.current.id
+    @limit = Timeframe.find("this_year").limit
+    @count = TimeframeReport.option_count
+  end
+end
+"#)
+}
+
+const DATA_DEFINE_BLOCK: &str = r#"
+raise "class method lost" unless Timeframe.find("this_year").label == "This year!"
+raise "reader override lost" unless Timeframe.new("all_time", "ignored").label_text == "All time"
+raise "constant built with new lost" unless DEFAULT_TIMEFRAME.is_a?(Timeframe) && DEFAULT_TIMEFRAME.id == "all_time"
+raise "constant read from another file lost" unless TimeframeReport.option_count == 2
+raise "class state lost its constant" unless Timeframe.current.equal?(DEFAULT_TIMEFRAME)
+raise "a mixin constant shadowed the block's constant" unless Timeframe.find("this_year").limit == 10
+raise "private method exposed" if Timeframe.new("all_time", nil).respond_to?(:secret)
+puts "Data.define block passed"
+"#;
+
+#[test]
+fn a_data_define_block_is_the_class_body_and_executes() {
+    let run = data_define_block_app().run_ruby(&format!(r#"{DATA_DEFINE_BLOCK}
+raise "not a Data class" unless Timeframe.superclass == Data && Timeframe.members == [:id, :label_text]
+raise "block constant not on Object" unless Object.const_defined?(:TIMEFRAME_OPTIONS, false)
+raise "block constant on the Data class" if Timeframe.const_defined?(:TIMEFRAME_OPTIONS, false)
+"#));
+    run.assert_passes();
+    let sidecar = std::fs::read_to_string(run.emitted.join("sig/app/models/timeframe.rbs")).unwrap();
+    let signatures = roundhouse::rbs::parse_app_signatures(&sidecar).expect("emitted RBS parses");
+    let timeframe = &signatures[&roundhouse::ident::ClassId(roundhouse::ident::Symbol::from("Timeframe"))];
+    for method in ["new", "id", "label_text", "find", "label"] {
+        assert!(timeframe.contains_key(&roundhouse::ident::Symbol::from(method)), "{sidecar}");
+    }
+    assert_eq!(sidecar.matches("def label_text").count(), 1, "{sidecar}");
+}
+
+#[test]
+#[ignore = "requires the native Spinel compiler"]
+fn a_data_define_block_runs_natively() {
+    data_define_block_app()
+        .run_spinel(DATA_DEFINE_BLOCK)
+        .assert_passes();
+}
+
+fn qualified_data_define_app() -> emit_and_run::Overlay {
+    emit_and_run::real_blog()
+        .write("app/models/article/summary.rb", r##"Article::Summary = Data.define(:article) do
+  ARTICLE_SUMMARY_PREFIX = "Summary of "
+
+  def self.for(article) = new(article)
+
+  def text = "#{ARTICLE_SUMMARY_PREFIX}#{article.title}"
+end
+"##)
+        .write("app/models/reports/line.rb", "Reports::Line = Data.define(:label, :amount)\n")
+        .write("app/models/formatting.rb", "module Formatting\n  def format_count = \"top\"\nend\n")
+        .write("app/models/reports/formatting.rb", "module Reports\n  module Formatting\n    def format_count = \"nested\"\n  end\nend\n")
+        .write("app/models/reports/total.rb", "Reports::Total = Data.define(:amount) do\n  include Formatting\nend\n")
+        .write("app/models/catalog.rb", "class Catalog\n  def self.size = 1\nend\n")
+        .write("app/models/catalog/entry.rb", "Catalog::Entry = Data.define(:name)\n")
+        .write("app/controllers/data_probe_controller.rb", r#"class DataProbeController < ApplicationController
+  def index
+    @summary = Article::Summary.for(Article.new(title: "Hello")).text
+    @line = Reports::Line.new("articles", 2).amount
+    @total = Reports::Total.new(2).format_count
+    @entry = Catalog::Entry.new("first").name
+  end
+end
+"#)
+}
+
+const QUALIFIED_DATA_DEFINE: &str = r#"
+raise "a class namespace lost its Data class" unless Article::Summary.for(Article.new(title: "Hello")).text == "Summary of Hello"
+raise "a module namespace lost its Data class" unless Reports::Line.new("articles", 2).amount == 2
+raise "the include did not resolve from the top level" unless Reports::Total.new(2).format_count == "top"
+raise "a library class namespace lost its Data class" unless Catalog::Entry.new("first").name == "first" && Catalog.size == 1
+puts "qualified Data.define passed"
+"#;
+
+#[test]
+fn a_qualified_data_define_file_executes_in_its_namespace() {
+    qualified_data_define_app()
+        .run_ruby(&format!(r#"{QUALIFIED_DATA_DEFINE}
+raise "not a Data class" unless Article::Summary.superclass == Data && Reports::Line.superclass == Data
+raise "the class left its namespace" if Object.const_defined?(:Summary, false) || Object.const_defined?(:Line, false)
+raise "the namespace class lost its superclass" unless Article.superclass == ApplicationRecord
+raise "block constant not on Object" unless Object.const_defined?(:ARTICLE_SUMMARY_PREFIX, false)
+"#))
+        .assert_passes();
+}
+
+#[test]
+#[ignore = "requires the native Spinel compiler"]
+fn a_qualified_data_define_file_runs_natively() {
+    qualified_data_define_app()
+        .run_spinel(QUALIFIED_DATA_DEFINE)
+        .assert_passes();
+}

@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 # View helpers — module functions invoked from Views::* render methods.
 #
 # Surface tracks what real-blog actually uses (cf. fixtures/real-blog/
@@ -211,6 +212,38 @@ module ActionView
 
     URL_ESCAPE_PATTERN = /[\x00\r\n !"\#$%&'()*+,\/:;<=>?@\[\\\]^`{|}]/.freeze
 
+    # ERB::Util.url_encode, a view's `u(x)`: every byte but the unreserved
+    # ones (A-Z a-z 0-9 _ . ~ -) as `%XX`, uppercase, so a space is `%20`
+    # and a multibyte character is its UTF-8 bytes. Not `url_encode`
+    # below, which is CGI.escape (`+` for a space) for query strings.
+    # Concat, not `<<`, as in render_attrs: `out << s` lowers as `.add` /
+    # write-into-`&str` on Kotlin/C#/Rust/Python/Elixir.
+    def self.erb_url_encode(s)
+      # Not `b.chr` / `format("%%%02X", b)`, nor a constant table, `bytes.each` or `str[i]`: no strict target answers the first two, Rust reads a constant through a lock, a block's byte as `&mut` and indexes no `str` by an Integer.
+      hex = "0123456789ABCDEF"
+      printable = " !\"\#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghijklmnopqrstuvwxyz{|}~"
+      bytes = s.bytes
+      out = ""
+      i = 0
+      while i < bytes.length
+        b = erb_url_byte(bytes, i)
+        if (b >= 48 && b <= 57) || (b >= 65 && b <= 90) || (b >= 97 && b <= 122) ||
+           b == 45 || b == 46 || b == 95 || b == 126
+          out = out + printable[b - 32, 1].to_s
+        else
+          out = out + "%" + hex[b / 16, 1].to_s + hex[b % 16, 1].to_s
+        end
+        i += 1
+      end
+      out
+    end
+
+    # Not `bytes[i]` inline, nor `bytes[i] || 0`: the inline read types as Integer | nil, which Elixir refuses arithmetic on, and Rust's Vec<i64> has no `unwrap_or`.
+    def self.erb_url_byte(bytes, i)
+      raise ArgumentError, "erb_url_byte: index outside the bytes" if i < 0 || i >= bytes.length
+      bytes[i]
+    end
+
     # Same include? probe as html_escape (no portable match? emit).
     def self.url_encode(s)
       return s unless needs_url_escape?(s)
@@ -247,6 +280,28 @@ module ActionView
     end
 
     def self.fragment_write(_key, value, _ttl)
+      value
+    end
+
+    # A `render collection:, cached: ->(item) { key }` reads and writes
+    # each element's fragment through these four
+    # (`lower::view_to_library::partial`, `wrap_keyed_cached_collection`).
+    # Here caching is off, so the lowering takes its uncached branch;
+    # the ruby family and spinel reopen them with the controller's
+    # `perform_caching`, `combined_fragment_cache_key` and `cache_store`.
+    def self.collection_caching?
+      false
+    end
+
+    def self.collection_fragment_key(partial, _key)
+      partial
+    end
+
+    def self.collection_fragment_read(_name)
+      nil
+    end
+
+    def self.collection_fragment_write(_name, value)
       value
     end
 

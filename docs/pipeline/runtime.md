@@ -784,6 +784,52 @@ UNKNOWN method name does, so campfire's `Membership.insert_all(…)`
 reported `no known method insert_all on Class { Membership }` while the
 emitted code was the inlined loop, correct all along.
 
+### A failed statement raises Rails' class, but SQLite enforces no foreign keys
+
+`runtime/ruby/active_record/errors.rb` carries Rails 8.1's statement-error
+hierarchy: `ActiveRecordError`, `StatementInvalid`,
+`WrappedDatabaseException` (`RecordNotUnique`, `InvalidForeignKey`),
+`NotNullViolation`, `CheckViolation`, `ExclusionViolation`, `RangeError`,
+`ValueTooLong`, `TransactionRollbackError` (`SerializationFailure`,
+`Deadlocked`), `QueryAborted` (`StatementTimeout`, `QueryCanceled`),
+`LockWaitTimeout` and `ReadOnlyError`. The existing record errors now sit
+under `ActiveRecordError`, so a `rescue ActiveRecord::StatementInvalid`
+catches what Rails' does.
+
+Each ruby-family SQLite `Db` (`db.rb`, `db_cruby.rb`, `db_jruby.rb`) raises
+them through `Db.raise_statement_error`, keyed on SQLite's own message as
+Rails' `translate_exception` is: UNIQUE, NOT NULL, FOREIGN KEY and CHECK
+failures, `SQLITE_BUSY` as `StatementTimeout`, anything else as
+`StatementInvalid`. The PostgreSQL shims map Rails' SQLSTATE table
+(`pg_errors.rb`), and a code it does not list is `StatementInvalid`.
+
+Three gaps remain:
+- **Foreign keys.** Rails turns on `PRAGMA foreign_keys` for SQLite and this
+  runtime does not. A foreign-key violation is accepted rather than raised,
+  so `InvalidForeignKey` is raised only by the PostgreSQL shims.
+- **Optimistic locking.** `lock_version` is not modeled, so
+  `StaleObjectError` is left undefined and a reference to it stays an
+  error.
+- **`ReadOnlyError`** is defined, but nothing here prevents writes, so it is
+  never raised. That matches Rails outside a `while_preventing_writes`
+  block.
+
+### `dependent:` acts on the children as Rails' does
+
+A `has_many`/`has_one` `dependent:` runs in the owner's `before_destroy`,
+in declaration order. `:destroy` destroys each child, running its
+callbacks. `has_many … dependent: :delete_all` and `has_one … dependent:
+:delete` delete the children in one statement, and `:nullify` sets their
+foreign key (and the type column for `as:`) to NULL, both without
+callbacks. Both are the reader's own query (`Target.where(fk: @key)`) with
+`delete_all` / `update_all` on it. A `where` ahead of a bulk write
+(`delete_all`, `update_all`, `destroy_all`, `touch_all`) stays a relation,
+not a SELECT folded into its rows (`lower::arel::requires_relation_receiver`).
+
+Three gaps remain: a `through:` association's `dependent:` (Rails deletes
+or nullifies the join rows), `:restrict_with_exception` /
+`:restrict_with_error`, and `:destroy_async` all do nothing.
+
 ### `Current.reset` replaces the instance instead of nilling it
 
 `ingest::current_attributes` turns `class Current <
@@ -912,11 +958,17 @@ unencoded; a value that is a String only at run time goes through
 `JsonRender.body`, which tests for one. `JsonBuilder.encode_value` writes a
 non-finite Float as `null`. `time_json` writes `Z` only for a UTC Time or a
 UTC app zone, so London in winter is `+00:00`, as `TimeWithZone#as_json`
-writes it. Two divergences remain. A runtime Time carries an offset and no
-zone, so in a UTC app zone a Time moved to London with `in_time_zone` is
-written `Z` in winter, where Rails writes `+00:00`. A payload of primitives
-alone goes through `JSON.generate` (below), which raises on a non-finite
-Float, where Rails writes `null`.
+writes it. A payload of primitives alone goes through `JSON.generate`
+(below), which raises on a non-finite Float where Rails writes `null`, so
+each Float a literal or a typed `Array[Float]` holds is handed over through
+`JsonBuilder.finite_float`, nil for NaN and the infinities; `to_json` on a
+Hash or Array does the same, including the operand of a splat
+(`[*ratios, 2.5]`). Three divergences remain. A Float inside a Hash or
+nested Array held in a variable is not reached, and still raises when it
+is not finite. On Spinel a splatted `Float?` Array spreads its nil as
+`0.0` until matz/spinel#9114 lands. A runtime Time carries an offset and
+no zone, so in a UTC app zone a Time moved to London with `in_time_zone`
+is written `Z` in winter, where Rails writes `+00:00`.
 
 `only:`, `except:` and `methods:` given as literal Symbol lists, either to
 `render json: <record>` (Rails hands a render's other options to `to_json`)
@@ -1940,8 +1992,11 @@ name. Here `errors` stays a plain `Array[String]` of FULL messages
 `error_details`, holds an `ActiveRecord::ErrorDetail` for each:
 attribute `"url"`, kind `"not_public"` (the message itself when
 `errors.add` was given a String, as Rails' type is), message
-`"is not public"`, full message `"Url is not public"`, and whether the
-type is a Symbol (`errors.add` given a String message records `false`). `errors.add` and every `validates` rule push to both
+`"is not public"`, full message `"Url is not public"`, whether the
+type is a Symbol (`errors.add` given a String message records `false`),
+and whether Rails' `details` keeps nothing beside the type (`length`
+keeps `count:`, `format`, `inclusion` and `numericality` keep
+`value:`, `confirmation` keeps `attribute:`). `errors.add` and every `validates` rule push to both
 (`src/lower/errors_add.rs`, `model_to_library/validations.rs`), and
 `errors.clear` empties both. `src/lower/errors_index.rs` grounds
 `errors[:url]` as `error_messages_for("url")`, a `Base` method that
@@ -1986,6 +2041,33 @@ drops the field's entries from both, index for index, and answers their
 messages or nil; like `to_hash`, it is a gap on a strict target. Without a block, `any?`, `none?` and `count` keep
 asking the full messages, which answer the same.
 
+`errors.details` is `ActiveSupport.errors_details(error_details)`, the
+details grouped by attribute with Rails' `[]` default, frozen. An
+entry's `[:error]` reads as `type` does; the detail keeps no option
+values, so any other key is an error. `errors.added?(:field, :type)` is
+`of_kind?` asked only of errors with nothing beside their type, which
+is Rails' `strict_match?` with no options: `added?(:body, :too_short)`
+is false, because `length` keeps `count:`. With options it is an error.
+
+`errors.import(error, attribute: :field)` and `errors.merge!(other)`
+add another record's errors, and Rails names each imported attribute
+as the importing model does: a `Comment`'s `body` error merged into an
+`Article` reads `Body can't be blank` even when the locale names the
+comment's `body` "Remark". The attribute is only known at run time, so
+the lowering passes `ActiveSupport.errors_import` / `errors_merge` the
+importing model's translated attribute names, folded from the locale,
+and `errors.format` split around the name and the message; any other
+attribute is humanized, as `human_attribute_name` falls back to.
+`merge!` of the errors themselves adds nothing, as in Rails. An
+`errors.format` that does not name the attribute and then the message
+once each, or an `import` with options beyond a Symbol `attribute:`,
+is an error. Both helpers are gaps on a strict target.
+
+A `belongs_to` checks its record where it is declared, among the
+`validates`, so its error lists in Rails' order, and its type is
+`:blank`: Rails validates the association's presence with `message:
+:required`, which picks the text and leaves the type.
+
 Every one of these rewrites matches an `errors` send as its receiver,
 which `&.` hides behind a local (`(t = record.errors) && t.m`).
 `src/lower/errors_safe_nav.rs` reads `record.errors&.m` as
@@ -2004,10 +2086,11 @@ compile in Rust or Go. The class sits in `active_record/base.rb` so
 `Base`'s own bodies type against it.
 
 **What it costs.** A message pushed by anything other than those two
-lowerings has no detail beside it. `errors.import` and `errors.merge!`,
-which some apps call, are not modeled, and neither is `errors.delete`
-with a type; an `errors <<` written by hand pushes a message no field
-claims. `errors.add` reads its record twice
+lowerings has no detail beside it. `errors.delete` with a type is not
+modeled, nor are the option values `details` would answer; an
+`errors <<` written by hand pushes a message no field claims. A dotted
+attribute (`comments.body`) is named by humanizing it, where Rails
+looks under the association's namespace first. `errors.add` reads its record twice
 (once for each push), so one whose record is a call with arguments or a
 receiver (`Draft.latest.errors.add(...)`) stays residue, and so does a
 message that is a call (`errors.add(:title, reason_for(x))`), which the
@@ -2632,13 +2715,23 @@ Three gaps remain, all on spinel's side:
 
 ### Smaller shapes campfire main reaches, each narrower than Rails
 
-- **`I18n.locale` / `default_locale` answer `:en`** (`runtime/ruby/i18n_locale.rb`),
-  Rails' default when nothing sets one. Setting a locale at run time
-  (`I18n.locale =`, `with_locale`) is not modeled. Translation is answered
-  at compile time from the default locale (`src/i18n`): `t` / `I18n.t`
-  with a literal key, attribute names, validation messages and form
-  labels. A key the locale lacks answers as Rails does in the running
-  environment: `Translation missing: en.key`, a template's
+- **`I18n.locale` is per request** (`runtime/ruby/i18n_locale.rb`): held
+  per thread as the gem holds it, the app's `default_locale` (Rails'
+  `:en` when it sets none) until `I18n.locale =` or `with_locale` sets
+  another of its `available_locales`, which an unavailable one raises
+  `I18n::InvalidLocale` for. Translation is folded at compile time
+  (`src/i18n`), once per available locale, and a call that can run in
+  more than one picks its branch by `I18n.locale` when it runs: `t` /
+  `I18n.t` with a literal key, attribute names, validation messages and
+  form labels. A controller's `t` is `AbstractController::Translation`'s: a
+  lazy `t(".key")` reads `<controller_path>.<action_name>.key`, then
+  `<controller_path>.key`, with `action_name` read when it runs. Its
+  `_html` keys stay an error: Rails returns them html-safe, and a String
+  here carries no such mark on to the view that renders it. A key the
+  locale lacks answers as Rails does in the running
+  environment: `Translation missing: en.key` (I18n's
+  `Options considered were:` list when `default:` was a list of keys,
+  none of them there either), a template's
   `translation_missing` span, or `I18n::MissingTranslationData` where
   `config.i18n.raise_on_missing_translations` is set (`:strict` and a
   value computed at boot stay errors). A key with run-time text after a

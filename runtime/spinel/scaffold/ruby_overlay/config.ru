@@ -105,10 +105,9 @@ app = lambda do |env|
   if env["PATH_INFO"] == "/cable"
     unless ActionController::RequestForgeryProtection.cable_origin_allowed?(
         env["HTTP_ORIGIN"].to_s,
-        ActionController::RequestForgeryProtection.base_url_for(
+        ActionController::RequestForgeryProtection.host_origin_for(
           env["HTTP_HOST"].to_s, env["HTTPS"].to_s, env["HTTP_X_FORWARDED_PROTO"].to_s,
-          env["rack.url_scheme"].to_s),
-        Rails.env.development?)
+          env["rack.url_scheme"].to_s))
       return [404, { "content-type" => "text/plain" }, ["Page not found"]]
     end
     if Db.with_connection { Cable.upgrade(env) }

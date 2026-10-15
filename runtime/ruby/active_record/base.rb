@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 require_relative "errors"
 require "time"
 
@@ -176,18 +177,20 @@ module ActiveRecord
   # One error as Rails' `ActiveModel::Error` holds it: the attribute, the
   # error type (the message itself when `errors.add` was given a String),
   # the message without the attribute's name, the full message
-  # `errors` lists for it, and whether the type is a Symbol.
+  # `errors` lists for it, whether the type is a Symbol, and whether
+  # Rails' `details` keeps nothing beside the type (no `count:` or `value:`).
   # Not `ActiveModel::Error`: the strict targets emit the class unqualified, beside their own `Error`.
   class ErrorDetail
     # `kind`, not Rails' `type`: a field named `type` does not compile in Rust or Go
-    attr_reader :attribute, :kind, :message, :full_message, :symbolic
+    attr_reader :attribute, :kind, :message, :full_message, :symbolic, :optionless
 
-    def initialize(attribute, kind, message, full_message, symbolic)
+    def initialize(attribute, kind, message, full_message, symbolic, optionless)
       @attribute = attribute
       @kind = kind
       @message = message
       @full_message = full_message
       @symbolic = symbolic
+      @optionless = optionless
     end
   end
 

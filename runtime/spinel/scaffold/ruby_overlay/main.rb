@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 # Top-level entry point for the CRuby (Puma/Rack) target.
 #
 # Dispatch lives in `Main.dispatch_core`, which returns a response
@@ -243,6 +244,12 @@ module Main
     # comma is read as html.
     accept = request.fetch(:accept, "").to_s
     controller.accepts_any_format = !accept.include?(",") && accept.split(";", 2)[0].to_s.strip == "*/*"
+    # Rails' `Vary: Accept` on a render whose format came from the Accept
+    # header (runtime/action_dispatch/mime_negotiation.rb), as the spinel
+    # dispatcher decides it.
+    controller.vary_on_accept = ActionDispatch::MimeNegotiation.should_apply_vary_header?(
+      accept, env["HTTP_X_REQUESTED_WITH"].to_s, env["CONTENT_TYPE"].to_s,
+      merged.key?("format") || !matched.req_format.nil?)
     # The full request object (CRuby overlay class) — filters read
     # `request.remote_ip` / `request.env` / `request[:format]`. `env.to_h`
     # detaches a plain mutable Hash (callers write scratch keys the real
@@ -335,6 +342,11 @@ module Main
     # header store, right before it is copied below — a no-op unless
     # the action or one of its filters touched the store.
     controller.commit_cache_control!
+    # Rails' Rack::ETag and Rack::ConditionalGet
+    # (action_controller/conditional_get.rb): the body ETag, the default
+    # Cache-Control, and a 304 for a matching If-None-Match, on the
+    # controller's status, body and headers before they are read below.
+    controller.commit_conditional_get!(env["REQUEST_METHOD"].to_s, env["HTTP_IF_NONE_MATCH"].to_s)
     # Headers the action set beyond Content-Type/Location — a
     # `Content-Disposition` on a download, the Cache-Control a blob
     # route asks for — ride as the tuple's sixth element.
@@ -404,6 +416,7 @@ module Main
   # entry per cookie) and reuses `CgiIo.url_encode` so values match the
   # CGI path exactly.
   def self.run_rack(env)
+    started = ActionDispatch::Runtime.clock_time
     status, body, content_type, location, set_cookies, extra_headers, secure_cookies, samesite_cookies, httponly_cookies, expires_cookies =
       dispatch_core(env, env["rack.input"] || StringIO.new(""))
     headers = {}
@@ -431,6 +444,12 @@ module Main
       end
     end
     headers["set-cookie"] = cookies unless cookies.empty?
+    # Rails' ActionDispatch::RequestId and Rack::Runtime around the whole
+    # request (runtime/action_dispatch/request_id.rb), as the spinel
+    # dispatcher stamps them: X-Request-Id always, X-Runtime unless the
+    # app set one. config.ru serves static and public files before this.
+    headers["x-request-id"] = ActionDispatch::RequestId.make(env["HTTP_X_REQUEST_ID"].to_s)
+    headers["x-runtime"] = ActionDispatch::Runtime.header_value(started) unless headers.key?("x-runtime")
     [status, headers, [body]]
   end
 

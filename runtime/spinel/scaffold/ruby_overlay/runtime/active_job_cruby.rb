@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 # CRuby serving: `perform_later` puts the work down and returns.
 #
 # The shared runtime has the queue (`ActiveJob.enqueue` / `drain`) but
