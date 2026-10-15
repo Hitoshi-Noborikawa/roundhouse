@@ -53,7 +53,6 @@
  "data_factory_constants": 5,
  "date_columns": 6,
  "delegated_type": 5,
- "emit_and_run": 237,
  "emitted_require_graph": 10,
  "engine_mount_cli": 17,
  "enum_constant_mappings": 11,

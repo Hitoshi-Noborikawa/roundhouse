@@ -95,6 +95,8 @@ def validate_shard(index: int, count: int) -> None:
         raise SystemExit("--shard-index must satisfy 0 <= index < --shard-count")
 
 
+# Targets too long for one shard: every shard runs its share of their tests.
+SPLIT_TARGETS = ("emit_and_run",)
 WEIGHTS = Path(__file__).with_name("ci-unit-weights.json")
 # Seconds shard 0 spends on library and binary unit tests before any target.
 LIB_BINS_SECONDS = 100
@@ -248,6 +250,32 @@ def build_and_run_integration_batch(
     return 0
 
 
+def split_share(tests: list[str], index: int, count: int) -> list[str]:
+    return sorted(tests)[index::count]
+
+
+def build_and_run_split_target(name: str, index: int, count: int, deps: Path) -> int:
+    print(f"== unit split {name}: share {index} of {count} ==", flush=True)
+    listing = subprocess.run(
+        [cargo_bin(), "test", "--locked", "--test", name, "--", "--list", "--format", "terse"],
+        check=False,
+        text=True,
+        capture_output=True,
+    )
+    if listing.returncode != 0:
+        sys.stderr.write(listing.stderr)
+        return listing.returncode
+    tests = [line[: -len(": test")] for line in listing.stdout.splitlines() if line.endswith(": test")]
+    share = split_share(tests, index, count)
+    if share:
+        status = run_cargo(["test", "--locked", "--test", name, "--", "--exact", *share])
+        if status != 0:
+            return status
+    freed = free_integration_targets(deps, [name])
+    print(f"== unit split {name}: {len(share)} of {len(tests)} tests; freed {freed} bytes ==", flush=True)
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -285,8 +313,13 @@ def main(argv: list[str] | None = None) -> int:
     started = time.monotonic()
     names, target_root = package_plan(cargo_metadata())
     verify_coverage(names)
+    split = [name for name in SPLIT_TARGETS if name in names]
     selected = select_shard(
-        names, args.shard_index, args.shard_count, load_weights(), LIB_BINS_SECONDS
+        [name for name in names if name not in split],
+        args.shard_index,
+        args.shard_count,
+        load_weights(),
+        LIB_BINS_SECONDS,
     )
     batches = chunks(selected, args.batch_size)
     shard_note = (
@@ -325,6 +358,11 @@ def main(argv: list[str] | None = None) -> int:
             deps=deps,
             timings=args.timings,
         )
+        if status != 0:
+            return status
+
+    for name in split:
+        status = build_and_run_split_target(name, args.shard_index, args.shard_count, deps)
         if status != 0:
             return status
 

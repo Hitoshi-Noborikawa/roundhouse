@@ -187,6 +187,29 @@ class UnitBatchTests(unittest.TestCase):
         self.assertEqual(unit.select_shard(names, 1, 2, weights), ["a", "b", "c", "d"])
         self.assertEqual(unit.select_shard(names, 0, 2, weights, 20), [])
 
+    def test_split_share_gives_each_test_to_one_shard(self):
+        tests = ["c", "a", "e", "b", "d"]
+        shares = [unit.split_share(tests, index, 2) for index in range(2)]
+        self.assertEqual(shares, [["a", "c", "e"], ["b", "d"]])
+
+    def test_a_split_target_is_left_out_of_the_shard_batches(self):
+        names = ["alpha", "emit_and_run", "gamma"]
+        meta = {
+            "target_directory": "/tmp",
+            "packages": [{
+                "name": "roundhouse",
+                "targets": [{"name": name, "kind": ["test"]} for name in names],
+            }],
+        }
+        stdout = io.StringIO()
+        with mock.patch.object(unit, "cargo_metadata", return_value=meta), mock.patch.object(
+            unit, "verify_coverage"
+        ), mock.patch.object(unit, "LIB_BINS_SECONDS", 0), mock.patch(
+            "sys.stdout", stdout
+        ), mock.patch("sys.stderr", io.StringIO()):
+            unit.main(["--list-only", "--shard-index", "0", "--shard-count", "1"])
+        self.assertEqual(stdout.getvalue().splitlines(), ["alpha", "gamma"])
+
     def test_list_only_prints_selected_shard_after_global_coverage(self):
         names = [f"t{i:02d}" for i in range(7)]
         # Shard 0's library and binary tests outweigh seven unlisted targets.
