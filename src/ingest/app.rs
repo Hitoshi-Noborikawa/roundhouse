@@ -9960,9 +9960,11 @@ fn plural_rules<V: Vfs + ?Sized>(
             }
         }
     }
-    if vfs.exists(&dir.join("config/locales/plurals.rb")) {
-        for locale in &locales {
-            out.insert(locale.clone(), String::new());
+    if let Ok(source) = vfs.read_to_string(&dir.join("config/locales/plurals.rb")) {
+        for (locale, rule) in crate::i18n::plural::cldr_rules(&source) {
+            if locales.contains(&locale) {
+                out.insert(locale, rule.unwrap_or_default());
+            }
         }
     }
     out
