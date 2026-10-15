@@ -306,7 +306,65 @@ pub(crate) fn split_key(args: &[Expr]) -> Option<(Expr, Vec<Expr>, Vec<Expr>)> {
 
 /// Whether every key a translate call can look up resolves; `None` when
 /// this is not a translate call.
+thread_local! {
+    static RESOLVED: std::cell::RefCell<Option<std::collections::HashMap<ResolveKey, Option<Result<(), String>>>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// A call by where it sits and its source spans.
+type ResolveKey = (usize, u8, String, String, Vec<(u32, u32, u32)>, String);
+
+/// Run `f` with each call's `resolves` answer kept: the analyzer asks again
+/// every typing round, and each asking plans the call in every locale.
+/// The key is the call's source spans, which `f`'s one app does not reuse.
+pub(crate) fn with_resolve_cache<T>(f: impl FnOnce() -> T) -> T {
+    let prev = RESOLVED.with(|c| c.borrow_mut().replace(Default::default()));
+    let out = f();
+    RESOLVED.with(|c| *c.borrow_mut() = prev);
+    out
+}
+
 pub(crate) fn resolves(
+    catalog: &Catalog,
+    recv: Option<&Expr>,
+    method: &str,
+    args: &[Expr],
+    block: Option<&Expr>,
+    site: Site<'_>,
+) -> Option<Result<(), String>> {
+    let spans: Vec<(u32, u32, u32)> = recv.iter().copied().chain(args).chain(block).map(|e| (e.span.file.0, e.span.start, e.span.end)).collect();
+    let key: Option<ResolveKey> = (!args.is_empty() && spans.iter().all(|s| *s != (0, 0, 0))).then(|| {
+        let (kind, name) = match site {
+            Site::Other => (0, ""),
+            Site::View(v) => (1, v.unwrap_or("")),
+            Site::Controller(c) => (2, c),
+        };
+        // Not the spans alone: a ternary key's branch calls carry the spans of the call they came from.
+        let shape: String = args.iter().map(|a| match &*a.node {
+            ExprNode::Lit { value: Literal::Str { value } } => value.as_str(),
+            ExprNode::Lit { value: Literal::Sym { value } } => value.as_str(),
+            ExprNode::If { .. } => "?",
+            _ => "_",
+        }).collect::<Vec<_>>().join("\u{1f}");
+        (catalog as *const Catalog as usize, kind + if recv.is_some() { 4 } else { 0 }, name.to_string(), method.to_string(), spans, shape)
+    });
+    if let Some(key) = &key
+        && let Some(hit) = RESOLVED.with(|c| c.borrow().as_ref().and_then(|m| m.get(key).cloned()))
+    {
+        return hit;
+    }
+    let out = resolves_uncached(catalog, recv, method, args, block, site);
+    if let Some(key) = key {
+        RESOLVED.with(|c| {
+            if let Some(m) = c.borrow_mut().as_mut() {
+                m.insert(key, out.clone());
+            }
+        });
+    }
+    out
+}
+
+fn resolves_uncached(
     catalog: &Catalog,
     recv: Option<&Expr>,
     method: &str,
