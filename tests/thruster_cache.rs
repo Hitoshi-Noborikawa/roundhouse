@@ -150,7 +150,7 @@ app = lambda do |env|
   calls[env["PATH_INFO"]] += 1
   case env["PATH_INFO"]
   when "/public"
-    [200, { "content-type" => "text/css", "cache-control" => "public, max-age=60",
+    [200, { "content-type" => "text/css", "cache-control" => "public, max-age=60", "content-length" => "11",
             "set-cookie" => "s=1", "etag" => "\"v1\"" }, ["body-public"]]
   when "/vary"
     [200, { "cache-control" => "public, max-age=60", "vary" => "Accept" }, ["accept=#{env["HTTP_ACCEPT"]}"]]
@@ -176,6 +176,7 @@ check.(r.status == 200 && r.body.chunks == ["body-public"] && r.body.length == 1
 check.(r.headers["x-cache"] == "hit" && r.headers["content-type"] == "text/css", "the front's hit carries the stored headers and X-Cache: hit")
 check.(r.headers["set-cookie"].nil?, "the front's hit carries no Set-Cookie")
 check.(r.headers["vary"] == "Accept-Encoding", "the front's hit carries the Vary the store added")
+check.(r.headers.to_a.none? { |k, _| k == "content-length" }, "the front's hit leaves Content-Length to the writer (a stored one went out twice)")
 check.(calls["/public"] == 1, "the front's hit never reaches the Rack app")
 
 r = front.call(req.("/public", { "if-none-match" => "\"v0\", \"v1\"" }))
@@ -184,7 +185,7 @@ r = front.call(req.("/public", method: "HEAD"))
 check.(inner.last == "/public" && r == :passed_to_app, "HEAD has its own key, so a GET entry is not its hit")
 rack_get.("/public", method: "HEAD")
 r = front.call(req.("/public", method: "HEAD"))
-check.(r.status == 200 && r.body.nil?, "a HEAD hit has no body")
+check.(r.status == 200 && r.body.nil? && r.headers["content-length"] == "11", "a HEAD hit has no body and states its length")
 
 check.(front.call(req.("/public", { "range" => "bytes=0-1" })) == :passed_to_app, "a Range request bypasses the front")
 check.(front.call(req.("/public", { "upgrade" => "websocket" })) == :passed_to_app, "a WebSocket upgrade bypasses the front")

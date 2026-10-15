@@ -178,7 +178,7 @@ module ThrusterCache
     variant = vary_names(headers)&.map { |name| [name, header.call(name).to_s].freeze }&.freeze
     size = text.bytesize + key.bytesize + ENTRY_OVERHEAD
     headers.each { |name, value| size += name.bytesize + value.to_s.bytesize }
-    fields = headers.map { |name, value| [name, value.to_s].freeze }.freeze
+    fields = headers.filter_map { |name, value| [name, value.to_s].freeze unless WRITER_FIELDS.include?(name) }.freeze
     set(key, Entry.new(status, headers.freeze, fields, text.frozen? ? text : text.dup.freeze, variant, expires_at, size))
   end
 
@@ -210,6 +210,11 @@ module ThrusterCache
 
   HIT_FIELD = ["x-cache", HIT].freeze
   BODILESS = %w[content-type content-length].freeze
+  # Fields a Protocol::HTTP response must not carry: Falcon's HTTP/1
+  # writer states the length from the body and owns the connection, so a
+  # stored `content-length` went out twice and wrk dropped the connection
+  # (Falcon's Rack adapter strips the same set from a Rack response).
+  WRITER_FIELDS = %w[content-length transfer-encoding connection keep-alive].freeze
 
   # The hit as [status, fields, body] for a Protocol::HTTP front: fields a
   # fresh Array of [name, value] pairs, body a String or nil.
@@ -222,7 +227,9 @@ module ThrusterCache
     fields = entry.fields.dup
     fields << HIT_FIELD
     body = entry.body
-    [entry.status, fields, method == "HEAD" || body.empty? ? nil : body]
+    # Without a body the writer cannot state the length, so a HEAD says it.
+    return [entry.status, fields << ["content-length", body.bytesize.to_s], nil] if method == "HEAD"
+    [entry.status, fields, body.empty? ? nil : body]
   end
 
   # Falcon's front: answers a hit as a Protocol::HTTP response, without the
