@@ -112,6 +112,10 @@ fn turning_a_model_s_stamping_off_is_an_error() {
         .emit(roundhouse::project::BuildTarget::Ruby);
     let found: Vec<&String> = errors.iter().filter(|e| e.contains("turning a model's timestamp stamping off is not modeled")).collect();
     assert_eq!(found.len(), 1, "{errors:#?}");
+    let (_emitted, errors) = emit_and_run::real_blog()
+        .write("app/models/stamp_settings.rb", "class StampSettings\n  attr_accessor :record_timestamps\n\n  def self.quiet\n    settings = StampSettings.new\n    settings.record_timestamps = false\n    settings\n  end\nend\n")
+        .emit(roundhouse::project::BuildTarget::Ruby);
+    assert!(!errors.iter().any(|e| e.contains("timestamp stamping")), "{errors:#?}");
 }
 
 /// No strict runtime carries `upsert_all`: the call is reported there.
