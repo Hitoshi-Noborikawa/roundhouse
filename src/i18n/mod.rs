@@ -75,7 +75,7 @@ pub struct FallbackPolicy {
 /// One way a translation can be looked up at run time: in `locale`,
 /// with `fallbacks`, in the environments `envs` names (every environment
 /// but `except` when `envs` is `None`).
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Hash)]
 pub struct Variant {
     pub locale: String,
     pub fallbacks: Option<Vec<String>>,
@@ -458,7 +458,7 @@ pub enum Fallback {
 
 /// What a resolved translation renders: one template, or the plural
 /// forms a run-time `count` picks between.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Hash)]
 pub enum Translation {
     One(String),
     Plural { zero: Option<String>, one: String, other: String },
@@ -612,7 +612,10 @@ impl Catalog {
         let stem = base.trim_end_matches('.');
         let under = |k: &str| k.starts_with(base) || k == stem;
         let mut nodes: Vec<String> = Vec::new();
-        for key in self.entries.keys().filter(|k| under(k)) {
+        // Not every key filtered: the ones under `base` sit together in the sorted map, and `stem` (base without its dot) sorts before them.
+        let within = self.entries.range(base.to_string()..).map(|(k, _)| k).take_while(|k| k.starts_with(base));
+        let at_stem = self.entries.get_key_value(stem).map(|(k, _)| k).filter(|k| !k.starts_with(base));
+        for key in at_stem.into_iter().chain(within) {
             let mut node = key.as_str();
             nodes.push(node.to_string());
             while let Some((parent, _)) = node.rsplit_once('.') {
