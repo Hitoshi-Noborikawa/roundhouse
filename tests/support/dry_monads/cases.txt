@@ -30,3 +30,8 @@ Worker.new.work(-2)
 Worker.new.other(2)
 Worker.new.early(2)
 ChildWorker.new.work(2)
+Worker.new.work(2) { |result| result.value! + 1 }
+OrderService.new.call(1) { |result| result.value! * 10 }
+SplitWorker.new.a(1)
+SplitWorker.new.a(-1)
+SplitWorker.new.b(1)
