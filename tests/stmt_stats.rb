@@ -1,3 +1,4 @@
+require_relative "active_record_errors"
 require_relative "db"
 
 # The flag must remain the value captured at boot even if an application
@@ -66,12 +67,13 @@ Db.dump_stmt_stats("released")
 
 # Checked step consumes the driver's error with a reset but retains ownership.
 # Lease cleanup can then reuse this statement; it is not a finalization.
+# Statement failures use ActiveRecord's hierarchy, as in an emitted app.
 Db.with_connection do
   bad = Db.prepare("SELECT abs(-9223372036854775808)")
   begin
     Db.step?(bad)
     raise "step should fail"
-  rescue RuntimeError => e
+  rescue ActiveRecord::StatementInvalid => e
     raise e unless e.message.include?("Db.step failed") && e.message.include?("integer overflow")
   end
 end
@@ -96,7 +98,7 @@ Db.with_connection do
   begin
     Db.prepare("SELECT missing_column")
     raise "prepare should fail"
-  rescue RuntimeError => e
+  rescue ActiveRecord::StatementInvalid => e
     raise e unless e.message.include?("Db.prepare failed")
   end
   i = 0

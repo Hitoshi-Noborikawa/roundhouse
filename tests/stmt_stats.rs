@@ -29,6 +29,11 @@ fn statement_stats_are_opt_in_and_count_cached_transient_and_bound_reads() {
     for name in ["db.rb", "active_support_time_parsing.rb"] {
         std::fs::copy(root.join("runtime/spinel").join(name), dir.join(name)).unwrap();
     }
+    std::fs::copy(
+        root.join("runtime/ruby/active_record/errors.rb"),
+        dir.join("active_record_errors.rb"),
+    )
+    .unwrap();
     std::fs::write(dir.join("probe.rb"), include_str!("stmt_stats.rb")).unwrap();
     let compile = Command::new(std::env::var("SPINEL").unwrap_or_else(|_| "spinel".into()))
         .args(["probe.rb", "-o", "probe"])
