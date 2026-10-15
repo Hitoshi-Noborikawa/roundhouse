@@ -1969,19 +1969,6 @@ impl<'a> BodyTyper<'a> {
                         });
                     }
                 }
-                if matches!(method.as_str(), "upsert" | "upsert_all")
-                    && expr.diagnostic.is_none()
-                    && let Some(Ty::Class { id, .. }) = recv_ty.as_ref()
-                    && self.classes().get(id).is_some_and(|c| {
-                        ["created_at", "updated_at"].iter().any(|col| c.instance_methods.contains_key(&Symbol::from(*col)))
-                    })
-                {
-                    expr.diagnostic = Some(crate::diagnostic::DiagnosticKind::Unsupported {
-                        target: None,
-                        construct: Symbol::from("upsert"),
-                        detail: format!("`{}.{method}` on a table with created_at/updated_at: Rails stamps them (`record_timestamps`), which the runtime's upsert does not", id.0.as_str()),
-                    });
-                }
                 if method.as_str() == "human_attribute_name"
                     && matches!(dispatched, Ty::Var { .. } | Ty::Untyped)
                     && crate::lower::human_attribute_name::literal_attribute(args).is_some()

@@ -1,7 +1,7 @@
-//! `Model.upsert(attrs, on_duplicate: …)` on a table without timestamps,
-//! as lobsters' Keystore counts: one statement that inserts, or folds
-//! into an UPDATE on the unique key. A table with `created_at` /
-//! `updated_at` stays an error: Rails stamps them, the runtime does not.
+//! `Model.upsert(attrs, on_duplicate: …)`, as lobsters' Keystore counts:
+//! one statement that inserts, or folds into an UPDATE on the unique key.
+//! On a table with timestamps it stamps them as Rails 8.1 does: both on
+//! insert, `updated_at` again only when an assigned column changed.
 
 use super::emit_and_run;
 
@@ -41,15 +41,39 @@ fn upsert_inserts_then_updates_on_the_unique_key() {
 }
 
 #[test]
-fn upsert_on_a_timestamped_table_stays_an_error() {
-    let (_emitted, errors) = emit_and_run::real_blog()
+fn upsert_stamps_timestamps_as_rails_does() {
+    emit_and_run::real_blog()
         .edit(
             "app/models/article.rb",
             "  validates :title, presence: true\n",
             "  validates :title, presence: true\n\n  def self.put(id, title)\n    Article.upsert({id: id, title: title, body: \"b\"})\n  end\n",
         )
-        .emit(roundhouse::project::BuildTarget::Ruby);
-    assert!(errors.iter().any(|e| e.contains("`Article.upsert` on a table with created_at/updated_at")), "{errors:#?}");
+        .write(
+            "test/models/article_upsert_test.rb",
+            r#"require "test_helper"
+
+class ArticleUpsertTest < ActiveSupport::TestCase
+  test "timestamps are stamped on insert and moved only by a change" do
+    Article.put(500, "First")
+    stamped = Article.find(500)
+    assert stamped.created_at.present?
+    assert_equal stamped.created_at, stamped.updated_at
+    sleep 0.01
+    Article.put(500, "First")
+    unchanged = Article.find(500)
+    assert_equal stamped.updated_at, unchanged.updated_at
+    sleep 0.01
+    Article.put(500, "Second")
+    changed = Article.find(500)
+    assert_equal "Second", changed.title
+    assert_equal stamped.created_at, changed.created_at
+    assert changed.updated_at > stamped.updated_at
+  end
+end
+"#,
+        )
+        .run_test("test/models/article_upsert_test.rb")
+        .assert_passes();
 }
 
 /// No strict runtime carries `upsert_all`: the call is reported there.

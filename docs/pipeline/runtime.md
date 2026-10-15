@@ -784,16 +784,16 @@ UNKNOWN method name does, so campfire's `Membership.insert_all(…)`
 reported `no known method insert_all on Class { Membership }` while the
 emitted code was the inlined loop, correct all along.
 
-### `upsert` / `upsert_all` answer the affected-row count, and skip timestamps
+### `upsert` / `upsert_all` answer the affected-row count
 
 `runtime/ruby/active_record/connection.rb`'s `upsert_all` issues one
 `INSERT … ON CONFLICT (target) DO UPDATE SET …` and answers the
 affected-row count, where Rails answers an `ActiveRecord::Result`; the
-catalog types the call `Integer`, what the emitted code returns. It does
-not stamp `created_at` / `updated_at` as Rails' `record_timestamps` does,
-so a call on a model whose table has either stays an error at analysis.
-No strict runtime transpiles `connection.rb`; the call is reported
-there.
+catalog types the call `Integer`, what the emitted code returns.
+Timestamps are stamped as Rails 8.1's SQLite adapter stamps them
+(`STRFTIME('%Y-%m-%d %H:%M:%f', 'NOW')`, `updated_at` moved only when
+an assigned column changed). No strict runtime transpiles
+`connection.rb`; the call is reported there.
 
 ### A failed statement raises Rails' class, and SQLite enforces foreign keys
 

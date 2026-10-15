@@ -727,11 +727,14 @@ module ActiveRecord
     # identity here, so it arrives as a String). Otherwise every
     # non-conflict column is assigned from `excluded`, matching Rails.
     #
+    # Timestamps as Rails 8.1's `record_timestamps` stamps them: an
+    # insert fills every created/updated column a row leaves out, and an
+    # update moves `updated_at` only when an assigned column changed; a
+    # raw `on_duplicate:` is left as written.
+    #
     # NOT Rails-complete, deliberately: no RETURNING (asking for it
-    # raises rather than quietly handing back nothing) and no
-    # `record_timestamps` stamping — no corpus model upserts a table
-    # that has timestamps. Returns the affected-row count, the same
-    # currency `update_counters` deals in.
+    # raises rather than quietly handing back nothing). Returns the
+    # affected-row count, the same currency `update_counters` deals in.
     def self.upsert_all(rows, unique_by: nil, on_duplicate: nil, returning: nil)
       return 0 if rows.length == 0
       if returning
@@ -742,8 +745,13 @@ module ActiveRecord
       target = unique_by.nil? ? primary_key : unique_by
       target_names = target.is_a?(Array) ? target.map { |c| c.to_s } : [target.to_s]
 
+      # Not `ActiveSupport.db_now`: Rails' insert_all stamps with SQLite's own clock, to the millisecond.
+      now = "STRFTIME('%Y-%m-%d %H:%M:%f', 'NOW')"
+      table_cols = schema_columns
+      stamps = [:created_at, :created_on, :updated_at, :updated_on].select { |c| table_cols.include?(c) && !cols.include?(c) }
       tuples = rows.map do |row|
-        "(" + cols.map { |c| ActiveRecord.adapter.escape_value(row[c]) }.join(", ") + ")"
+        values = cols.map { |c| ActiveRecord.adapter.escape_value(row[c]) }
+        "(" + (values + stamps.map { |_c| now }).join(", ") + ")"
       end
 
       assigns = on_duplicate
@@ -752,14 +760,20 @@ module ActiveRecord
         # Every column IS the conflict target: there is nothing left to
         # assign, and `DO UPDATE SET` with an empty list is a syntax
         # error. Rails degrades to a no-op insert here too.
-        assigns = updatable.length == 0 ? nil : updatable.map { |c| "#{c} = excluded.#{c}" }.join(", ")
+        unless updatable.length == 0
+          unchanged = updatable.map { |c| "#{c} IS excluded.#{c}" }.join(" AND ")
+          touches = [:updated_at, :updated_on].select { |c| stamps.include?(c) }.map do |c|
+            "#{c} = (CASE WHEN (#{unchanged}) THEN #{table_name}.#{c} ELSE #{now} END)"
+          end
+          assigns = (touches + updatable.map { |c| "#{c} = excluded.#{c}" }).join(", ")
+        end
       end
       action = assigns.nil? ? "DO NOTHING" : "DO UPDATE SET #{assigns}"
 
       predicate = _conflict_predicate(target_names.sort.join(", "))
       conflict_where = predicate == "" ? "" : " WHERE #{predicate}"
 
-      sql = "INSERT INTO #{table_name} (#{cols.join(", ")}) VALUES #{tuples.join(", ")}" \
+      sql = "INSERT INTO #{table_name} (#{(cols + stamps).join(", ")}) VALUES #{tuples.join(", ")}" \
             " ON CONFLICT (#{target_names.join(", ")})#{conflict_where} #{action}"
       ActiveRecord.adapter.execute_ddl(sql)
       ActiveRecord.adapter.changes
