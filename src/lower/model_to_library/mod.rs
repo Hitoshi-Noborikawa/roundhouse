@@ -579,6 +579,10 @@ fn model_class(model: &Model, methods: Vec<MethodDef>, table: Option<&Table>) ->
         parent_span: Default::default(),
         // Mixins and constants must survive in every model projection.
         includes: crate::analyze::model_includes(model),
+        // A model's own includes stay `ModelBodyItem::Unknown` with a
+        // real span (`analyze/mod.rs`'s model loop uses it directly,
+        // not this projection), so this envelope needs none.
+        include_spans: Vec::new(),
         methods,
         nullable_columns: nullable_column_names(table),
         origin: None,

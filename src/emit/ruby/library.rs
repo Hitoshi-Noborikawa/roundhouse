@@ -6775,6 +6775,7 @@ fn synthesize_module_lc(
         parent: None,
         parent_span: Default::default(),
         includes: Vec::new(),
+        include_spans: Vec::new(),
         methods,
         nullable_columns: Vec::new(),
         origin: None,
@@ -7305,6 +7306,18 @@ fn emit_library_class_decl_inner(
             lexically_qualified(inc.0.as_str(), &segments, app)
         }
     };
+    // Plain `include X` normally; guarded only inside futamura's own
+    // internal `ruby` copy, and only for an include the analyzer could
+    // not resolve — the planner blocks just the routes that reach this
+    // file, so the box must still load the rest. See `FUTAMURA_BOX`.
+    let include_line = |inc: &ClassId| {
+        let name = include_name(inc);
+        if super::expr::in_futamura_box() && include_is_unresolved(lc, inc) {
+            format!("include {name} if defined?({name})")
+        } else {
+            format!("include {name}")
+        }
+    };
     open_header(&mut s, data_factory.as_deref());
 
     for require in &nested_include_requires {
@@ -7334,7 +7347,7 @@ fn emit_library_class_decl_inner(
         if positioned.iter().any(|(_, p)| *p == inc) {
             continue;
         }
-        writeln!(s, "{body_pad}include {}", include_name(inc)).unwrap();
+        writeln!(s, "{body_pad}{}", include_line(inc)).unwrap();
     }
     if lc.includes.len() > positioned.len() && !lc.methods.is_empty() {
         writeln!(s).unwrap();
@@ -7503,14 +7516,14 @@ fn emit_library_class_decl_inner(
             }
             first = false;
             for (_, inc) in positioned.iter().filter(|(at, _)| *at == index) {
-                writeln!(s, "{body_pad}include {}", include_name(inc)).unwrap();
+                writeln!(s, "{body_pad}{}", include_line(inc)).unwrap();
                 writeln!(s).unwrap();
             }
             render_method(&mut s, m);
         }
         for (_, inc) in positioned.iter().filter(|(at, _)| *at >= lc.methods.len()) {
             writeln!(s).unwrap();
-            writeln!(s, "{body_pad}include {}", include_name(inc)).unwrap();
+            writeln!(s, "{body_pad}{}", include_line(inc)).unwrap();
         }
     }
 
@@ -7992,6 +8005,21 @@ fn external_include_is_enabled(detail: &str) -> bool {
     };
     let namespace = module.split("::").next().unwrap_or(module);
     super::expr::external_gem_namespace_is_enabled(namespace)
+}
+
+/// Is `inc` one of `lc`'s includes the analyzer could not resolve? Scans
+/// `unknown_calls` for the matching refusal `Analyzer::analyze` pushes
+/// (`"{class} includes unresolved {module}"`, `analyze/mod.rs`). Only
+/// consulted inside futamura's box (`FUTAMURA_BOX`) to decide whether
+/// this one `include` line needs guarding; every other include stays
+/// plain.
+fn include_is_unresolved(lc: &LibraryClass, inc: &ClassId) -> bool {
+    let detail = format!("{} includes unresolved {}", lc.name.0, inc.0);
+    lc.unknown_calls.iter().any(|call| {
+        matches!(&call.diagnostic,
+            Some(crate::diagnostic::DiagnosticKind::Unsupported { construct, detail: d, .. })
+            if construct.as_str() == "include" && *d == detail)
+    })
 }
 
 /// Is this name one of the app's own CLASSES (not a module)? Namespace

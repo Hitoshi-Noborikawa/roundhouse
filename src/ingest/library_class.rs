@@ -238,7 +238,7 @@ fn data_block_classes(
             continue;
         }
         let name = ClassId(Symbol::from(format!("{}::{}", owner.0.as_str(), constant_id_str(&cw.name()))));
-        let DeclBody { includes, methods, constants, unknown_calls, class_initializers, class_attributes: _ } =
+        let DeclBody { includes, include_spans, methods, constants, unknown_calls, class_initializers, class_attributes: _ } =
             walk_decl_body(block.body(), &name, file, DeclBodyMode::Instance)?;
         debug_assert!(includes.is_empty() && constants.is_empty() && unknown_calls.is_empty());
         out.push(LibraryClass {
@@ -247,6 +247,7 @@ fn data_block_classes(
             parent: None,
             parent_span: Span::synthetic(),
             includes,
+            include_spans,
             methods,
             nullable_columns: Vec::new(),
             origin: None,
@@ -285,7 +286,7 @@ fn file_data_class(root: &ruby_prism::Node<'_>, file: &str) -> IngestResult<Opti
             });
         }
     }
-    let DeclBody { includes, methods, constants, mut unknown_calls, mut class_initializers, class_attributes: _ } =
+    let DeclBody { includes, include_spans, methods, constants, mut unknown_calls, mut class_initializers, class_attributes: _ } =
         walk_decl_body(body(), &owner, file, DeclBodyMode::Instance)?;
     class_initializers.extend(take_class_ivar_initializers(&mut unknown_calls));
     Ok(Some(LibraryClass {
@@ -294,6 +295,7 @@ fn file_data_class(root: &ruby_prism::Node<'_>, file: &str) -> IngestResult<Opti
         parent: None,
         parent_span: Span::synthetic(),
         includes,
+        include_spans,
         methods,
         nullable_columns: Vec::new(),
         origin: Some(crate::dialect::LibraryClassOrigin::DataDefine {
@@ -516,6 +518,7 @@ pub(super) fn library_class_and_struct_base(
 
     let DeclBody {
         mut includes,
+        mut include_spans,
         mut methods,
         mut constants,
         mut unknown_calls,
@@ -536,7 +539,13 @@ pub(super) fn library_class_and_struct_base(
         // emitted as calls; the sorbet mixins have nothing left to
         // provide.
         unknown_calls.retain(|call| !is_struct_declaration(call));
-        includes.retain(|i| !i.0.as_str().starts_with("T::"));
+        // Keep `include_spans` aligned: both vecs are parallel and
+        // `retain` alone would desync them if applied separately.
+        let keep: Vec<bool> = includes.iter().map(|i| !i.0.as_str().starts_with("T::")).collect();
+        let mut k = keep.iter();
+        includes.retain(|_| *k.next().unwrap());
+        let mut k = keep.iter();
+        include_spans.retain(|_| *k.next().unwrap());
         let mut synthesized = synth_sorbet_struct_methods(&owner, &members, comparable, true);
         synthesized.append(&mut methods);
         methods = synthesized;
@@ -601,6 +610,7 @@ pub(super) fn library_class_and_struct_base(
                 source_parent_span
             },
             includes,
+            include_spans,
             methods,
             nullable_columns: Vec::new(),
             origin: None,
@@ -1405,6 +1415,7 @@ fn struct_class(
         parent: None,
         parent_span: Span::synthetic(),
         includes: Vec::new(),
+        include_spans: Vec::new(),
         methods,
         nullable_columns: Vec::new(),
         origin: Some(origin),
@@ -1541,6 +1552,7 @@ pub(super) fn library_class_from_module_node_with_scope(
     let visibility = Visibility::resolve(module.body().as_ref(), file, Some(&owner))?;
     let DeclBody {
         includes,
+        include_spans,
         methods,
         constants,
         mut unknown_calls,
@@ -1554,6 +1566,7 @@ pub(super) fn library_class_from_module_node_with_scope(
         parent: None,
         parent_span: Span::synthetic(),
         includes,
+        include_spans,
         methods,
         nullable_columns: Vec::new(),
         origin: None,
@@ -1595,6 +1608,9 @@ impl DeclBodyMode {
 #[derive(Default)]
 struct DeclBody {
     includes: Vec<ClassId>,
+    /// Parallel to `includes`: the span of each `include` call, so an
+    /// unresolved one can be pointed at.
+    include_spans: Vec<Span>,
     methods: Vec<MethodDef>,
     constants: Vec<(Symbol, Expr)>,
     unknown_calls: Vec<Expr>,
@@ -1607,6 +1623,7 @@ struct DeclBody {
 impl DeclBody {
     fn extend(&mut self, other: Self) {
         self.includes.extend(other.includes);
+        self.include_spans.extend(other.include_spans);
         self.methods.extend(other.methods);
         self.constants.extend(other.constants);
         self.unknown_calls.extend(other.unknown_calls);
@@ -2322,6 +2339,12 @@ fn walk_decl_body_with_visibility<'pr>(
                                         continue;
                                     }
                                     out.includes.push(ClassId(Symbol::from(path.join("::"))));
+                                    // The `include` call's own span, not
+                                    // the argument's: a refusal should
+                                    // point at `include` even when the
+                                    // module name sits on a continuation
+                                    // line (`include\n  X`).
+                                    out.include_spans.push(super::util::node_span(&stmt, file));
                                 } else if crate::ingest::util::is_rails_url_helpers_chain(&arg) {
                                     // `include Rails.application.routes.
                                     // url_helpers` (lobsters' Routes class,
@@ -2333,6 +2356,7 @@ fn walk_decl_body_with_visibility<'pr>(
                                     // ruby emit rewrites `X.<helper>` call
                                     // sites through RouteHelpers.
                                     out.includes.push(ClassId(Symbol::from("RouteHelpers")));
+                                    out.include_spans.push(super::util::node_span(&stmt, file));
                                 }
                             }
                         }

@@ -1269,7 +1269,7 @@ impl Analyzer {
         // An unresolvable include is a load-time error, not an open method
         // surface. Keep it in the class-body ledger even when no method is called.
         for class in &mut app.library_classes {
-            for included in &class.includes {
+            for (i, included) in class.includes.iter().enumerate() {
                 let known = self.classes.contains_key(included)
                     || body::lexical_class(included, class.name.0.as_str(), &self.classes).is_some()
                     || body::RUBY_TOP_LEVEL.contains(&included.0.as_str())
@@ -1283,7 +1283,11 @@ impl Analyzer {
                 if class.unknown_calls.iter().any(|call| matches!(&call.diagnostic,
                     Some(crate::diagnostic::DiagnosticKind::Unsupported { construct, detail: old, .. })
                     if construct.as_str() == "include" && old == &detail)) { continue; }
-                let mut refusal = crate::expr::Expr::new(crate::span::Span::synthetic(),
+                // The call's own span, carried alongside `includes` since
+                // #58 — `Span::synthetic()` when ingest didn't record one
+                // (an older cache, or a lowering-synthesized class).
+                let span = class.include_spans.get(i).copied().unwrap_or_default();
+                let mut refusal = crate::expr::Expr::new(span,
                     crate::expr::ExprNode::Lit { value: crate::expr::Literal::Nil });
                 refusal.diagnostic = Some(crate::diagnostic::DiagnosticKind::Unsupported {
                     target: None, construct: Symbol::from("include"), detail,

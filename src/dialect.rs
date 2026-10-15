@@ -932,6 +932,15 @@ pub struct LibraryClass {
     /// (e.g. `Enumerable`).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub includes: Vec<ClassId>,
+    /// Span of each `include` call in `includes`, same length and
+    /// order. Ingest drops the call's own span once it resolves the
+    /// name (most of the time it's never needed again), so an
+    /// unresolved include had nowhere to point a diagnostic at; this
+    /// gives it one. Synthesized classes and a literal `LibraryClass`
+    /// built by a lowering (not ingested from source) carry an empty
+    /// vec, same as a missing `parent_span`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub include_spans: Vec<Span>,
     /// All instance + class methods in the class. `attr_reader` /
     /// `attr_writer` / `attr_accessor` are lowered to synthetic
     /// `MethodDef`s at ingest time (not preserved as attr declarations

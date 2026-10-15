@@ -1766,16 +1766,38 @@ pub fn futamura_target_files(
 /// lowers it, with every diagnostic that emit would report. Errors do
 /// not stop it: under this target an error keeps the routes that reach
 /// it on Rails (`emit::futamura::routes`).
-pub fn futamura_whole_route(ingested: &App, fixture: &Path) -> Result<emit::futamura::WholeRoute, String> {
+pub fn futamura_whole_route(
+    ingested: &App,
+    fixture: &Path,
+    gaps: &[crate::ingest::IngestError],
+) -> Result<emit::futamura::WholeRoute, String> {
     let mut lowered = ingested.clone();
     let mut diags = crate::session::analyze_and_lower(&mut lowered);
     diags.extend(crate::analyze::diagnose(&lowered));
     crate::lower::relation_residue::elevate_dynamic_relation_for_target(&mut diags, BuildTarget::Ruby);
     crate::lower::params_residue::elevate_nested_params_for_target(&mut diags, BuildTarget::Ruby);
-    let (files, emit_diags) =
-        emit::diagnostics::scope(|| target_files(&lowered, fixture, BuildTarget::Ruby));
+    // Guarded so the box still loads if the planner leaves a route in
+    // place that reaches a file with an unresolved include — see
+    // `emit::ruby::expr::FUTAMURA_BOX`. Plain `--target ruby` never
+    // wraps this and stays fail-loud.
+    let (files, emit_diags) = emit::diagnostics::scope(|| {
+        crate::emit::ruby::expr::with_futamura_box(|| target_files(&lowered, fixture, BuildTarget::Ruby))
+    });
     diags.extend(emit_diags);
-    Ok(emit::futamura::WholeRoute { lowered, files: files?, diags })
+    // Ingest gaps aren't diagnostics (survey mode substitutes a nil
+    // placeholder and keeps going), so they never reach `diags` above;
+    // carried separately for `routes::plan` to attribute to the routes
+    // whose controller or view they belong to.
+    let gaps = gaps
+        .iter()
+        .filter_map(|g| match g {
+            crate::ingest::IngestError::Unsupported { file, message } => {
+                Some((file.clone(), message.clone()))
+            }
+            crate::ingest::IngestError::Io(_) | crate::ingest::IngestError::Parse { .. } => None,
+        })
+        .collect();
+    Ok(emit::futamura::WholeRoute { lowered, files: files?, diags, gaps })
 }
 
 pub fn target_files(
@@ -10532,6 +10554,7 @@ mod tests {
             parent: Some(ClassId(Symbol::from("ActionCable::Connection::Base"))),
             parent_span: Default::default(),
             includes: Vec::new(),
+            include_spans: Vec::new(),
             methods: Vec::new(),
             nullable_columns: Vec::new(),
             origin: None,
@@ -10705,6 +10728,7 @@ mod tests {
             parent: None,
             parent_span: Default::default(),
             includes: Vec::new(),
+            include_spans: Vec::new(),
             methods: Vec::new(),
             nullable_columns: Vec::new(),
             origin: None,

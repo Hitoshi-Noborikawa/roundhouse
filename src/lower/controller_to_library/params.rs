@@ -1401,6 +1401,7 @@ fn build_params_class(spec: &ParamsSpec) -> LibraryClass {
         parent: None,
         parent_span: Default::default(),
         includes: Vec::new(),
+        include_spans: Vec::new(),
         methods,
         nullable_columns: Vec::new(),
         origin: Some(LibraryClassOrigin::ResourceParams {
