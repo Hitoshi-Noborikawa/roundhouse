@@ -360,6 +360,96 @@ pub(super) fn rewrite_instance_call_node(
     rewrite_instance_call(expr, params, diagnostics);
 }
 
+/// What `resolve_instance_receiver_class` found for a non-constructor
+/// instance call's receiver type.
+enum ClassResolution {
+    /// No candidate class defines this method with flattened keyword
+    /// slots (including an untyped/non-class remainder after dropping
+    /// `Nil`): nothing for this pass to rewrite.
+    None,
+    /// Exactly one class remains after dropping `Nil`, or several
+    /// remain whose flattened slots for this method are identical —
+    /// either way the keywords land in the same positions whichever
+    /// branch runs at runtime.
+    One(String),
+    /// Several classes remain whose flattened slots for this method
+    /// differ: which slot the keywords fill depends on which branch
+    /// runs, so the call must be refused rather than respelled against
+    /// an arbitrary one.
+    Mismatch,
+}
+
+/// Resolve the library class a non-constructor instance call's receiver
+/// may be, after dropping `Nil` from a nilable union. `Array#first`,
+/// `find_by`, and an `[]` read all type the receiver
+/// `Ty::Union { [Class, Nil] }` — the analyzer knows the class, the
+/// receiver just isn't pinned to it the way a plain `Ty::Class` is. A
+/// wider union of several classes is handled too, as long as they agree
+/// on this method's slot shape; anything else (an `Untyped`/`Var` arm,
+/// a non-class type) returns `None`, leaving that gap exactly as it was.
+fn resolve_instance_receiver_class(
+    ty: &crate::ty::Ty,
+    params: &InstanceCallParams,
+    method: &Symbol,
+) -> ClassResolution {
+    let stripped = ty.clone().strip_nil();
+    let class_ids: Vec<String> = match &stripped {
+        crate::ty::Ty::Class { id, .. } => vec![id.0.as_str().to_string()],
+        crate::ty::Ty::Union { variants } => {
+            let mut ids = Vec::with_capacity(variants.len());
+            for variant in variants.iter() {
+                let crate::ty::Ty::Class { id, .. } = variant else {
+                    return ClassResolution::None;
+                };
+                ids.push(id.0.as_str().to_string());
+            }
+            ids
+        }
+        _ => return ClassResolution::None,
+    };
+    let mut representative: Option<(&str, &Vec<Slot>)> = None;
+    for class_id in &class_ids {
+        let Some(slots) = params.slots.get(&(class_id.clone(), method.clone())) else {
+            // This branch of the union doesn't define the method with
+            // flattened keywords (it may not define it at all, which
+            // would raise `NoMethodError` at that branch regardless of
+            // this rewrite).
+            continue;
+        };
+        match representative {
+            None => representative = Some((class_id.as_str(), slots)),
+            Some((_, rep_slots)) if !slots_match_shape(rep_slots, slots) => {
+                return ClassResolution::Mismatch;
+            }
+            Some(_) => {}
+        }
+    }
+    match representative {
+        Some((id, _)) => ClassResolution::One(id.to_string()),
+        None => ClassResolution::None,
+    }
+}
+
+/// Whether two classes' flattened slots for the same method name agree
+/// on shape: same slot count, same names in the same order, the same
+/// keyword/kwrest origin per slot, and structurally equal defaults
+/// (defaults are spliced into gaps the caller left unnamed, so a
+/// mismatched default would change behavior depending on which branch
+/// actually runs).
+fn slots_match_shape(a: &[Slot], b: &[Slot]) -> bool {
+    a.len() == b.len()
+        && a.iter().zip(b.iter()).all(|(x, y)| {
+            x.name == y.name
+                && x.from_keyword == y.from_keyword
+                && x.from_kwrest == y.from_kwrest
+                && match (&x.default, &y.default) {
+                    (None, None) => true,
+                    (Some(dx), Some(dy)) => dx.node == dy.node,
+                    _ => false,
+                }
+        })
+}
+
 fn rewrite_instance_call(
     expr: &mut Expr,
     params: &InstanceCallParams,
@@ -388,30 +478,52 @@ fn rewrite_instance_call(
     else {
         return;
     };
-    let Some(crate::ty::Ty::Class { id, .. }) = &recv.ty else {
-        return;
-    };
     let is_constructor = method.as_str() == "new" && matches!(&*recv.node, ExprNode::Const { .. });
-    let class_id = if is_constructor {
-        params
+    let owned_class_id: String;
+    let class_id: &str = if is_constructor {
+        let Some(crate::ty::Ty::Class { id, .. }) = &recv.ty else {
+            return;
+        };
+        let class_id = params
             .unqualified_class_ids
             .get(id.0.as_str())
-            .map_or(id.0.as_str(), String::as_str)
-    } else {
-        id.0.as_str()
-    };
-    if is_constructor
-        && let Some(reason) =
+            .map_or(id.0.as_str(), String::as_str);
+        if let Some(reason) =
             constructor_refusal_reason(params, expr.span, id.0.as_str(), class_id, args)
-    {
-        refuse_constructor(expr.span, &mut expr.diagnostic, reason, diagnostics);
-        return;
-    }
-    if is_constructor {
+        {
+            refuse_constructor(expr.span, &mut expr.diagnostic, reason, diagnostics);
+            return;
+        }
         if params.custom_new.contains(class_id) {
             return;
         }
-    }
+        class_id
+    } else {
+        // A receiver whose type isn't a single `Ty::Class` is usually
+        // untyped (out of scope here), but `Array#first`, `find_by` and
+        // an `[]` read type it `Ty::Union { [Class, Nil] }`: the
+        // analyzer knows the class(es), the call just isn't pinned to
+        // one. Strip `Nil` and respell against what's left when that's
+        // unambiguous; a call on the dropped `nil` branch would raise
+        // `NoMethodError` either way, so narrowing it away doesn't
+        // change that call's behavior.
+        let Some(ty) = &recv.ty else { return };
+        match resolve_instance_receiver_class(ty, params, method) {
+            ClassResolution::None => return,
+            ClassResolution::One(id) => {
+                owned_class_id = id;
+                owned_class_id.as_str()
+            }
+            ClassResolution::Mismatch => {
+                super::refuse(
+                    expr.span,
+                    "receiver is a union of classes whose flattened keyword slots for this method differ",
+                    diagnostics,
+                );
+                return;
+            }
+        }
+    };
     if !is_constructor && super::SEND_METHODS.contains(&method.as_str()) {
         let class_id = class_id.to_string();
         super::owned::refuse_send(
