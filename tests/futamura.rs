@@ -263,6 +263,147 @@ end
     fs::remove_dir_all(&out).unwrap();
 }
 
+/// #957's gap rule only checked the route's own controller file and its
+/// conventional view path. A gap in a file the route's reach actually
+/// walks into — here the layout every action renders through, via
+/// `apply_layout_lowering`'s `render(Views::Layouts.application(...))`
+/// wrap — went unblocked: the layout still lowers to a real
+/// `Views::Layouts.application` method (the dropped
+/// `vite_typescript_tag` call is only a gap, not a parse failure), so
+/// the route used to clear even though the lowered app cannot serve
+/// what that tag would have rendered. `routes::plan` now also blocks on
+/// any gap file the reach walk's `reached_files` contains.
+#[test]
+fn ingest_gap_in_a_rendered_layout_blocks_the_route() {
+    let src = scratch("layout-gap-src");
+    let out = scratch("layout-gap-out");
+    write(&src, "Gemfile", b"source \"https://rubygems.org\"\ngem \"rails\"\n");
+    write(&src, "config/routes.rb", b"Rails.application.routes.draw do\n  get \"widgets\" => \"widgets#index\"\nend\n");
+    write(&src, "app/controllers/application_controller.rb", b"class ApplicationController < ActionController::Base\nend\n");
+    write(&src, "app/controllers/widgets_controller.rb", br#"class WidgetsController < ApplicationController
+  def index
+    @name = "hi"
+  end
+end
+"#);
+    write(&src, "app/views/widgets/index.html.erb", b"<%= @name %>\n");
+    // No Vite manifest: the tag call stays an unresolved gap on the
+    // layout's own file, not a parse failure — the layout still becomes
+    // a real `Views::Layouts.application` method the route's reach
+    // walks into.
+    write(&src, "app/views/layouts/application.html.erb", b"<html><head><%= vite_typescript_tag \"application\" %></head><body><%= yield %></body></html>\n");
+
+    let run = Command::new(env!("CARGO_BIN_EXE_roundhouse"))
+        .args(["--target", "futamura", "--survey", "-o"])
+        .arg(&out)
+        .arg(&src)
+        .env("ROUNDHOUSE_FUTAMURA_LEDGER", "1")
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&run.stderr);
+    assert!(run.status.success(), "{stderr}");
+    assert!(stderr.contains("whole-route: 0 GET action(s) served by the lowered app; 1 left to Rails"), "{stderr}");
+    let residue = stderr.lines().find(|l| l.contains("widgets#index")).unwrap_or_else(|| panic!("{stderr}"));
+    assert!(residue.contains("ingest gap") && residue.contains("layouts/application.html.erb") && residue.contains("vite_typescript_tag"), "{residue}");
+
+    fs::remove_dir_all(&src).unwrap();
+    fs::remove_dir_all(&out).unwrap();
+}
+
+/// A gap in a parent controller's class body (here an `around_action`
+/// block shape the ingester refuses, round-tripped as `Unknown` rather
+/// than lowered into the filter chain) must block every subclass route,
+/// not only routes that reach the parent's file through a call —
+/// #957's rule named only the route's own controller file, so a gap in
+/// `ApplicationController` left every subclass route unblocked.
+#[test]
+fn ingest_gap_in_a_parent_controllers_class_body_blocks_the_route() {
+    let src = scratch("parent-gap-src");
+    let out = scratch("parent-gap-out");
+    write(&src, "Gemfile", b"source \"https://rubygems.org\"\ngem \"rails\"\n");
+    write(&src, "config/routes.rb", b"Rails.application.routes.draw do\n  get \"widgets\" => \"widgets#index\"\nend\n");
+    // Three block parameters: a shape `around_block_filter` refuses
+    // (only 0, 1, or 2 — controller and continuation — are supported),
+    // recorded as a gap on this file and kept as `Unknown` rather than
+    // becoming a filter. `unrelated_helper` is never called by
+    // `widgets#index`, so nothing about this route's own reach touches
+    // this file either — only the ancestor-chain check does.
+    write(&src, "app/controllers/application_controller.rb", br#"class ApplicationController < ActionController::Base
+  around_action { |controller, block, extra| block.call }
+
+  def unrelated_helper
+    "ok"
+  end
+end
+"#);
+    write(&src, "app/controllers/widgets_controller.rb", br#"class WidgetsController < ApplicationController
+  def index
+    @name = "hi"
+  end
+end
+"#);
+    write(&src, "app/views/widgets/index.html.erb", b"<%= @name %>\n");
+
+    let run = Command::new(env!("CARGO_BIN_EXE_roundhouse"))
+        .args(["--target", "futamura", "--survey", "-o"])
+        .arg(&out)
+        .arg(&src)
+        .env("ROUNDHOUSE_FUTAMURA_LEDGER", "1")
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&run.stderr);
+    assert!(run.status.success(), "{stderr}");
+    assert!(stderr.contains("whole-route: 0 GET action(s) served by the lowered app; 1 left to Rails"), "{stderr}");
+    let residue = stderr.lines().find(|l| l.contains("widgets#index")).unwrap_or_else(|| panic!("{stderr}"));
+    assert!(residue.contains("ingest gap") && residue.contains("application_controller.rb") && residue.contains("around_action block declares 3 parameters"), "{residue}");
+
+    fs::remove_dir_all(&src).unwrap();
+    fs::remove_dir_all(&out).unwrap();
+}
+
+/// The extended gap rule only blocks more: a route whose reached files
+/// (its own controller, its ancestor chain, and the layout it renders
+/// through) carry no gap at all still clears, same as before #957's
+/// rule was extended.
+#[test]
+fn route_with_clean_reached_files_still_clears() {
+    let src = scratch("clean-reach-src");
+    let out = scratch("clean-reach-out");
+    write(&src, "Gemfile", b"source \"https://rubygems.org\"\ngem \"rails\"\n");
+    write(&src, "config/routes.rb", b"Rails.application.routes.draw do\n  get \"widgets\" => \"widgets#index\"\nend\n");
+    write(&src, "app/controllers/application_controller.rb", br#"class ApplicationController < ActionController::Base
+  around_action :with_timing
+
+  def with_timing
+    yield
+  end
+end
+"#);
+    write(&src, "app/controllers/widgets_controller.rb", br#"class WidgetsController < ApplicationController
+  def index
+    @name = "hi"
+  end
+end
+"#);
+    write(&src, "app/views/layouts/application.html.erb", b"<html><body><%= yield %></body></html>\n");
+    write(&src, "app/views/widgets/index.html.erb", b"<%= @name %>\n");
+
+    let run = Command::new(env!("CARGO_BIN_EXE_roundhouse"))
+        .args(["--target", "futamura", "--survey", "-o"])
+        .arg(&out)
+        .arg(&src)
+        .env("ROUNDHOUSE_FUTAMURA_LEDGER", "1")
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&run.stderr);
+    assert!(run.status.success(), "{stderr}");
+    assert!(!stderr.contains("ingest gap"), "{stderr}");
+    assert!(stderr.contains("whole-route: 1 GET action(s) served by the lowered app; 0 left to Rails"), "{stderr}");
+
+    fs::remove_dir_all(&src).unwrap();
+    fs::remove_dir_all(&out).unwrap();
+}
+
 /// A view template format the ingester does not model (here `.ics.erb`
 /// — `erb` is only ingested for `html` and a short allow-list of other
 /// text formats) never becomes a `View`, so the action's `render` leaves

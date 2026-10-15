@@ -165,25 +165,47 @@ fn view_prefix(controller_class: &str, action: &str) -> String {
 /// has no span (survey mode substitutes a nil placeholder and keeps
 /// going instead of failing ingest), so it never reaches `diags` and
 /// the usual blocking filter never sees it — yet it still names a file,
-/// which is either the route's own controller (a class-body macro or
+/// which may be: the route's own controller (a class-body macro or
 /// block the ingest never modeled: `serialization_scope`,
-/// `content_security_policy`) or the view template the action renders
-/// by convention (a template engine not ingested: `.css.erb`,
-/// `.xml.ruby`). Either way the lowered app cannot serve what the gap
-/// dropped, so the route it belongs to stays with Rails. Narrow: only
-/// the controller's own file and the action's conventional view path
-/// are checked, not every file a route might transitively reach, so a
-/// gap in an unrelated library class or a partial does not (yet) block
-/// anything here.
+/// `content_security_policy`), a file in the controller's ancestor
+/// chain (the same kind of gap in a parent controller — `Admin::Base
+/// Controller`'s dropped CSP block applies to every subclass, though
+/// the gap only names the parent's file), any file the route's reach
+/// actually walks into (a partial or layout inlined into the view
+/// method that renders it), or the view template the action renders by
+/// convention (a template engine not ingested at all: `.css.erb`,
+/// `.xml.ruby` — these never become a method, so reach can't see them,
+/// which is why the prefix check stays). Either way the lowered app
+/// cannot serve what the gap dropped, so the route it belongs to stays
+/// with Rails.
 fn gap_blocking<'g>(
     gaps: &'g [(String, String)],
-    controller_files: Option<&HashSet<String>>,
+    blocking_files: &HashSet<String>,
     prefix: &str,
 ) -> Option<&'g (String, String)> {
     gaps.iter().find(|(file, _)| {
         let rel = app_relative(file);
-        controller_files.is_some_and(|fs| fs.contains(&rel)) || rel.starts_with(prefix)
+        blocking_files.contains(&rel) || rel.starts_with(prefix)
     })
+}
+
+/// Every class above `class` found by walking `parent` alone (never
+/// `includes` — a mixed-in concern's gap is covered by `reached_files`
+/// instead, through whichever reached method actually pulls it in):
+/// `ApplicationController` is a `WidgetsController`'s ancestor this way.
+fn ancestor_chain(index: &Index, class: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut seen: HashSet<String> = HashSet::from([class.to_string()]);
+    let mut cur = class.to_string();
+    while let Some(parent) = index.classes.get(&cur).into_iter().flatten().find_map(|lc| lc.parent.clone()) {
+        let parent = parent.0.as_str().to_string();
+        if !seen.insert(parent.clone()) {
+            break;
+        }
+        out.push(parent.clone());
+        cur = parent;
+    }
+    out
 }
 
 /// Decide which GET actions the lowered app serves.
@@ -295,20 +317,29 @@ pub fn plan(lowered: &App, diags: &[Diagnostic], gaps: &[(String, String)]) -> R
             out.residue.push(format!("{label}: {controller} is not lowered"));
             continue;
         }
-        if let Some((file, message)) = gap_blocking(
-            gaps,
-            controller_files.get(controller),
-            &view_prefix(controller, first.action.as_str()),
-        ) {
-            out.residue.push(format!("{label}: ingest gap in {file}: {message}"));
-            continue;
-        }
         let reached = reach(&index, &mut callees, controller, first.action.as_str());
         let mut reached_files: HashSet<u32> = HashSet::new();
         for m in reached.keys() {
             if let Some(rs) = ranges.get(m) {
                 reached_files.extend(rs.keys().copied());
             }
+        }
+        // Every file whose ingest gap must block this route: the
+        // controller's own file, any file in its ancestor chain (the
+        // same files `reach`'s `Super` handling and `enqueue_send`'s
+        // lookup walk), and every file the route's reach actually
+        // touches — partials and layouts are inlined into the view
+        // method that renders them, so a gap in one shows up here.
+        let mut blocking_files: HashSet<String> = controller_files.get(controller).cloned().unwrap_or_default();
+        for ancestor in ancestor_chain(&index, controller) {
+            if let Some(fs) = controller_files.get(&ancestor) {
+                blocking_files.extend(fs.iter().cloned());
+            }
+        }
+        blocking_files.extend(reached_files.iter().filter_map(|&f| rel_path(lowered, f)));
+        if let Some((file, message)) = gap_blocking(gaps, &blocking_files, &view_prefix(controller, first.action.as_str())) {
+            out.residue.push(format!("{label}: ingest gap in {file}: {message}"));
+            continue;
         }
         let blocking: Vec<&Diagnostic> = errors
             .iter()
@@ -767,6 +798,6 @@ mod tests {
             "view template not ingested: erb".to_string(),
         )];
         let prefix = view_prefix("GadgetStylesController", "show");
-        assert!(gap_blocking(&gaps, None, &prefix).is_some());
+        assert!(gap_blocking(&gaps, &std::collections::HashSet::new(), &prefix).is_some());
     }
 }
