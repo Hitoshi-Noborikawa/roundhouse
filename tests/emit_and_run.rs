@@ -15678,7 +15678,7 @@ fn a_controller_test_reads_the_fixture_its_setup_names_on_rust() {
 }
 
 /// The CRuby tree's `rake test` load path, as its Rakefile spells it, answers a gem's `require "logger"` with Ruby's
-/// own Logger (ruby-vips calls `Logger.new($stdout)`).
+/// own Logger (ruby-vips calls `Logger.new($stdout)`), and only an app with the blog's Article gets the scaffold's Article tests.
 #[test]
 fn cruby_rake_load_path_keeps_rubys_own_libraries() {
     use roundhouse::project::BuildTarget;
@@ -15689,6 +15689,16 @@ fn cruby_rake_load_path_keeps_rubys_own_libraries() {
         .write("app/models/widget.rb", "class Widget < ApplicationRecord\nend\n")
         .emit(BuildTarget::Ruby);
     assert!(errors.is_empty(), "{errors:?}");
+    for scaffold in [
+        "test/models/article_broadcasts_test.rb",
+        "test/views/articles_test.rb",
+        "test/views/articles_json_test.rb",
+        "test/query_count_test.rb",
+        "test/relation_find_test.rb",
+        "test/route_helpers_test.rb",
+    ] {
+        assert!(!emitted.join(scaffold).exists(), "{scaffold}");
+    }
     let rakefile = std::fs::read_to_string(emitted.join("Rakefile")).unwrap();
     let libs: Vec<String> = rakefile
         .lines()
@@ -15702,4 +15712,7 @@ fn cruby_rake_load_path_keeps_rubys_own_libraries() {
         .output()
         .unwrap();
     assert!(output.status.success(), "{libs:?}\n{}", String::from_utf8_lossy(&output.stderr));
+
+    let (emitted, _) = emit_and_run::real_blog().emit(BuildTarget::Ruby);
+    assert!(emitted.join("test/models/article_broadcasts_test.rb").exists());
 }
