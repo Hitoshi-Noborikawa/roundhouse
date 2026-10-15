@@ -8229,8 +8229,10 @@ fn with_bundled_requires(mut files: Vec<(String, String)>) -> Vec<(String, Strin
 
 /// The libraries in `BUNDLED` that are bundled gems, not default gems,
 /// as of Ruby 3.4. Under bundler a bundled gem is not on the load path
-/// unless the Gemfile names it.
-const BUNDLED_GEMS: [&str; 3] = ["base64", "bigdecimal", "csv"];
+/// unless the Gemfile names it. rexml has been one since Ruby 3.0, and
+/// its feature is `rexml/document`, so a require of the gem name or of a
+/// path under it counts.
+const BUNDLED_GEMS: [&str; 4] = ["base64", "bigdecimal", "csv", "rexml"];
 
 /// Names in the Gemfile each bundled gem that the tree requires.
 /// Without the line, `bundle exec` stops at the require with "cannot
@@ -8251,7 +8253,12 @@ fn apply_bundled_gem_wiring(files: &mut [(String, String)]) {
         .filter(|gem| !files[gemfile_at].1.contains(&format!("gem {gem:?}")))
         .filter(|gem| {
             let require_line = format!("require {gem:?}");
-            files.iter().any(|(p, c)| p.ends_with(".rb") && requires_feature(c, &require_line))
+            let under_gem = format!("require \"{gem}/");
+            files.iter().any(|(p, c)| {
+                p.ends_with(".rb")
+                    && (requires_feature(c, &require_line)
+                        || c.lines().any(|line| line.trim_start().starts_with(&under_gem)))
+            })
         })
         .collect();
     if missing.is_empty() {
@@ -8270,7 +8277,7 @@ fn apply_bundled_gem_wiring(files: &mut [(String, String)]) {
 /// Constant → bundled library that provides it. One table, read by
 /// both the pass that writes the requires and the gate that checks a
 /// tree for missing ones — a second copy is how the rule drifts.
-const BUNDLED: [(&str, &str); 25] = [
+const BUNDLED: [(&str, &str); 26] = [
     // INERT in our trees, and deliberately: `runtime/spinel/base64.rb`
     // defines `Base64` without requiring the library, which the second
     // condition below reads as "the program defines it" and drops the
@@ -8356,6 +8363,11 @@ const BUNDLED: [(&str, &str); 25] = [
     ("UNIXSocket", "socket"),
     ("Open3", "open3"),
     ("Find", "find"),
+    // `REXML::Document.new(xml)` - a bundled gem an app requires by hand
+    // (Rails does not load it); spinel takes `packages/rexml`. Without the
+    // require the constant is not REXML's at all on spinel: another
+    // `Document` in the tree (the Nokogiri facade's) answers the name.
+    ("REXML", "rexml/document"),
 ];
 
 /// Every gap in a tree, as `(file index, require line)`. One walk,
@@ -10582,6 +10594,29 @@ mod tests {
         for prose in ["app/controllers/login_controller.rb", "runtime/tep/response.rb"] {
             assert!(!get(prose).contains("require \"set\""), "{prose}");
         }
+    }
+
+    /// `REXML::Document.new(xml)` in an app file: the emit drops the
+    /// app's own `require "rexml/document"`, so the pass writes it back,
+    /// and the Gemfile names rexml, a bundled gem since Ruby 3.0, which
+    /// bundler otherwise keeps off the load path. Without the require,
+    /// spinel resolved `REXML::Document` to the Nokogiri facade's
+    /// `Document` and `Document.new(xml)` raised ArgumentError.
+    #[test]
+    fn bundled_requires_write_rexml_document_for_an_app_that_names_rexml() {
+        let mut files = vec![
+            ("Gemfile".to_string(), "source \"https://rubygems.org\"\n".to_string()),
+            (
+                "app/models/feed.rb".to_string(),
+                "class Feed\n  def titles(xml)\n    REXML::Document.new(xml).get_elements(\"//title\")\n  end\nend\n"
+                    .to_string(),
+            ),
+        ];
+        write_bundled_requires(&mut files);
+        let get = |p: &str| &files.iter().find(|(q, _)| q == p).unwrap().1;
+        let feed = get("app/models/feed.rb");
+        assert!(feed.starts_with("require \"rexml/document\"\n"), "{feed}");
+        assert!(get("Gemfile").contains("gem \"rexml\"\n"), "{}", get("Gemfile"));
     }
 
     /// `ActionCable::Connection.build` is rewritten from the app, and the
