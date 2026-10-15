@@ -835,6 +835,15 @@ module Db
     Thread.current[:ar_txn_depth] = value
   end
 
+  # Not PostgreSQL's DISABLE TRIGGER: its DDL here carries no foreign keys yet (emit::shared::schema_sql), so a fixture load has nothing to defer.
+  def self.without_foreign_keys
+    yield
+  end
+
+  def self.check_foreign_keys!
+    nil
+  end
+
   # Request-scoped lease. Handles left open by the block are released
   # with the lease, and the release runs even when the block raises.
   def self.with_connection

@@ -186,6 +186,11 @@ pub struct App {
     /// `config/locales` for the default locale (see `crate::i18n`).
     #[serde(default, skip_serializing_if = "crate::i18n::Catalog::is_empty")]
     pub i18n: crate::i18n::Catalog,
+    /// The sites of a `t` whose answer differs by locale
+    /// (`lower::i18n_translate`), whose entries the ruby-family trees write
+    /// to the translation table the runtime reads.
+    #[serde(skip)]
+    pub i18n_table: Vec<crate::lower::i18n_translate::TableSite>,
     /// App-helper method registry: maps each method name defined in an
     /// `app/helpers/*.rb` module to the helper module (`ClassId`) that
     /// defines it. Rails mixes all helper modules into every view, so a
@@ -819,6 +824,7 @@ impl App {
             schema: Schema::default(),
             binary_assets: Vec::new(),
             i18n: crate::i18n::Catalog::default(),
+            i18n_table: Vec::new(),
             models: Vec::new(),
             library_classes: Vec::new(),
             controllers: Vec::new(),
