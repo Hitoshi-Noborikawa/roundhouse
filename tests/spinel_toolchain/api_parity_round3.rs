@@ -48,9 +48,7 @@ end
         .write("app/controllers/gizmos_controller.rb", r##"class GizmosController < ApplicationController
   def index; end
 
-  def show
-    @extra = { "region" => "north" }
-  end
+  def show; end
 end
 "##)
         .write("app/controllers/widgets_controller.rb", r##"class WidgetsController < ApplicationController
@@ -97,7 +95,7 @@ end
 end
 "##)
         .write("app/views/gizmos/index.json.jbuilder", "json.ok true\n")
-        .write("app/views/gizmos/show.json.jbuilder", "json.merge!({ kind: \"gizmo\", version: 2 })\njson.merge!(@extra)\n")
+        .write("app/views/gizmos/show.json.jbuilder", "json.merge!({ kind: \"gizmo\", version: 2 })\njson.id 1\n")
         .write("config/routes.rb", r##"Rails.application.routes.draw do
   root to: "rails/health#show"
   get "up" => "rails/health#show"
@@ -177,7 +175,7 @@ fn api_parity_round3_fixes_run_on_spinel() {
     assert_eq!(admins.body, r#"{"names":["alpha","beta"]}"#, "enum constant:\n{}", server.log());
 
     let merged = server.get("/gizmos/1.json");
-    assert_eq!(merged.body, r#"{"kind":"gizmo","version":2,"region":"north"}"#, "merge!:\n{}", server.log());
+    assert_eq!(merged.body, r#"{"kind":"gizmo","version":2,"id":1}"#, "merge!:\n{}", server.log());
 
     let counts = server.get("/widgets/counts");
     assert_eq!((counts.status, counts.body.as_str()), (200, r#"{"counts":3}"#), "concern action:\n{}", server.log());
