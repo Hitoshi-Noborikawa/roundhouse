@@ -13,8 +13,9 @@ Peak disk is reduced because only one integration batch is resident at a time.
 Compile-everything-before-any-execute is intentionally not preserved: a later
 batch can fail to compile after earlier batches have already run.
 
-Optional --shard-index/--shard-count stride sorted integration targets across
-jobs. Coverage is checked on the global metadata set first. Shard 0 also runs
+Optional --shard-index/--shard-count spread integration targets across jobs by
+the seconds each took (scripts/ci-unit-weights.json; an unlisted target counts
+one second). Coverage is checked on the global metadata set first. Shard 0 also runs
 library and binary unit tests; every integration target still executes exactly
 once across the shards.
 """
@@ -94,8 +95,34 @@ def validate_shard(index: int, count: int) -> None:
         raise SystemExit("--shard-index must satisfy 0 <= index < --shard-count")
 
 
-def select_shard(names: list[str], index: int, count: int) -> list[str]:
-    return names[index::count]
+WEIGHTS = Path(__file__).with_name("ci-unit-weights.json")
+# Seconds shard 0 spends on library and binary unit tests before any target.
+LIB_BINS_SECONDS = 100
+
+
+def load_weights() -> dict[str, float]:
+    try:
+        return json.loads(WEIGHTS.read_text())
+    except FileNotFoundError:
+        return {}
+
+
+def select_shard(
+    names: list[str],
+    index: int,
+    count: int,
+    weights: dict[str, float] | None = None,
+    first_shard_seconds: float = 0,
+) -> list[str]:
+    """Heaviest target first onto the lightest shard; unweighted names interleave."""
+    weights = weights or {}
+    loads = [first_shard_seconds] + [0.0] * (count - 1)
+    owner: dict[str, int] = {}
+    for name in sorted(names, key=lambda n: -weights.get(n, 1)):
+        shard = loads.index(min(loads))
+        owner[name] = shard
+        loads[shard] += weights.get(name, 1)
+    return [name for name in names if owner[name] == index]
 
 
 def verify_coverage(names: list[str]) -> None:
@@ -258,7 +285,9 @@ def main(argv: list[str] | None = None) -> int:
     started = time.monotonic()
     names, target_root = package_plan(cargo_metadata())
     verify_coverage(names)
-    selected = select_shard(names, args.shard_index, args.shard_count)
+    selected = select_shard(
+        names, args.shard_index, args.shard_count, load_weights(), LIB_BINS_SECONDS
+    )
     batches = chunks(selected, args.batch_size)
     shard_note = (
         f"shard {args.shard_index} of {args.shard_count}: "
