@@ -3564,6 +3564,20 @@ fn apply_cable_connection(files: &mut [(String, String)], app: &App) {
 /// `App::i18n`), as the literals `I18n.default_locale` and
 /// `I18n.available_locales` answer and `I18n.locale =` checks against.
 /// An app that sets neither keeps the file's `:en`.
+/// `app.i18n_table` as `I18n.load_translation_table` reads it.
+fn i18n_table_text(app: &App) -> String {
+    let mut out = String::new();
+    for (key, entry) in &app.i18n_table {
+        out.push_str(key);
+        for field in entry {
+            out.push('\u{1f}');
+            out.push_str(field);
+        }
+        out.push_str("\u{1f}.\u{1e}");
+    }
+    out
+}
+
 fn apply_i18n_locales(files: &mut [(String, String)], app: &App) {
     const HEAD: &str = "  # >>> generated: i18n-locales\n";
     const TAIL: &str = "  # <<< generated: i18n-locales\n";
@@ -6456,6 +6470,9 @@ fn spinel_files(app: &App, fixture: &Path) -> Result<(Vec<(String, String)>, Vec
     apply_content_helper_attributes(&mut files, app);
     apply_content_helper_tags(&mut files, app);
     apply_i18n_locales(&mut files, app);
+    if !app.i18n_table.is_empty() {
+        files.push(("config/i18n_translations".to_string(), i18n_table_text(app)));
+    }
     // The `only:`-as-finder specializations, also in the shared base:
     // `runtime/global_id_locator.rb` is ONE file that both the spinel
     // tree and the ruby overlay require, and the rewrite that names

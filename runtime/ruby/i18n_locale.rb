@@ -135,6 +135,68 @@ module I18n
     "<span class=\"translation_missing\" title=\"" + title + "\">" + text + "</span>"
   end
 
+  # Not folded per locale at the call: an app with a hundred locales made every `t` a hundred-arm case.
+  def self.translate_site(id, loc, key, count, names, values, details, raises, in_view, escape_plain)
+    entry = site_entry(id, loc, key)
+    kind = entry[0]
+    html = entry[1] == "1"
+    if kind == "m"
+      shown = entry[2].empty? ? loc + "." + key : entry[2]
+      return missing_translation_tag(shown, details, raises) if in_view
+      return entry[3].empty? ? missing_translation(shown, raises) : missing_translation_among(shown, entry[3], raises)
+    end
+    return subtree_translation(key) if kind == "s"
+    template = entry[2]
+    if kind == "p"
+      template = (count == 0 && entry[2] == "1") ? entry[3] : (count == 1 ? entry[4] : entry[5])
+    end
+    out = render_template(template, count, names, values, html)
+    escape_plain && !html ? ActionView::ViewHelpers.html_escape(out) : out
+  end
+
+  def self.site_entry(id, loc, key)
+    table = translation_table
+    env = Rails.env.to_s
+    sep = "\u001C"
+    found = table[id + sep + loc + sep + env + sep + key] || table[id + sep + loc + sep + sep + key]
+    if found.nil? && !key.empty?
+      found = table[id + sep + loc + sep + env + sep + "*"] || table[id + sep + loc + sep + sep + "*"]
+    end
+    raise ArgumentError, "no translation table entry for " + id + " in " + loc if found.nil?
+    found
+  end
+
+  def self.render_template(template, count, names, values, html)
+    out = ""
+    template.split("\u001D").each do |part|
+      next if part.empty?
+      body = part[1, part.length - 1].to_s
+      if part[0, 1] == "n"
+        at = names.index(body)
+        value = at.nil? ? (body == "count" ? count.to_s : "%{" + body + "}") : values[at].to_s
+        out = out + (html ? ActionView::ViewHelpers.html_escape(value) : value)
+      else
+        out = out + body
+      end
+    end
+    out
+  end
+
+  def self.translation_table
+    @translation_table ||= load_translation_table
+  end
+
+  # Each record ends in a "." field: `split` drops trailing empty fields, and a template can be empty.
+  def self.load_translation_table
+    table = {}
+    File.read(File.join(Rails.root.to_s, "config", "i18n_translations")).split("\u001E").each do |record|
+      fields = record.split("\u001F")
+      next if fields.length < 2
+      table[fields[0]] = fields[1, fields.length - 2]
+    end
+    table
+  end
+
   # >>> generated: i18n-locales
   def self.app_default_locale
     :en
