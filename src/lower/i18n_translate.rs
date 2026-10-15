@@ -473,7 +473,7 @@ fn parse_args(args: &[Expr], view: Option<&str>, template: bool) -> Result<Call,
 /// private methods they call) take the controller's `t`.
 thread_local! {
     /// The sites this lowering wrote to the table, by their records, and the records in order.
-    static TABLE: std::cell::RefCell<(std::collections::HashMap<Vec<(String, Vec<String>)>, String>, Vec<(String, Vec<String>)>)> =
+    static TABLE: std::cell::RefCell<(std::collections::HashMap<u64, Vec<(String, usize, usize)>>, Vec<(String, Vec<String>)>)> =
         std::cell::RefCell::new(Default::default());
 }
 
@@ -721,17 +721,31 @@ fn table_site(call: &Call, locales: &[(String, Vec<(Plan, Vec<Variant>)>)], span
         .map(|(l, _)| l.to_string())
         .collect();
     records.retain(|(suffix, _)| !same.contains(suffix.split('\u{1c}').next().unwrap_or("")));
-    records.sort();
+    // Not the records themselves as the key: a run-time key's site has tens of thousands, hashed and cloned per call.
+    let hash = {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        records.hash(&mut h);
+        h.finish()
+    };
     let id = TABLE.with(|t| {
         let mut t = t.borrow_mut();
-        if let Some(id) = t.0.get(&records) {
+        let (index, written) = &mut *t;
+        let same_as = |(id, start, len): &(String, usize, usize)| {
+            *len == records.len()
+                && written[*start..*start + *len].iter().zip(&records).all(|((key, entry), (suffix, e))| {
+                    key.len() == id.len() + 1 + suffix.len() && key.ends_with(suffix.as_str()) && entry == e
+                })
+        };
+        if let Some((id, _, _)) = index.get(&hash).and_then(|c| c.iter().find(|s| same_as(s))) {
             return id.clone();
         }
-        let id = format!("t{}", t.0.len());
-        for (suffix, entry) in &records {
-            t.1.push((format!("{id}\u{1c}{suffix}"), entry.clone()));
+        let id = format!("t{}", index.values().map(Vec::len).sum::<usize>());
+        let start = written.len();
+        for (suffix, entry) in records {
+            written.push((format!("{id}\u{1c}{suffix}"), entry));
         }
-        t.0.insert(records.clone(), id.clone());
+        index.entry(hash).or_default().push((id.clone(), start, written.len() - start));
         id
     });
     let dynamic = call.dynamic.is_some();
