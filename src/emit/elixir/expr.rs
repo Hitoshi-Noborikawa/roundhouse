@@ -1547,11 +1547,24 @@ fn emit_send(recv: Option<&Expr>, method: &str, args: &[Expr]) -> String {
                 _ if matches!(r.ty.as_ref(), Some(crate::ty::Ty::Float)) => {
                     format!(":math.fmod({ls}, {rs})")
                 }
+                // Not `rem/2` for two Integers: it takes the dividend's sign, where Ruby's takes the divisor's.
+                _ if matches!(r.ty.as_ref(), Some(crate::ty::Ty::Int))
+                    && matches!(arg.ty.as_ref(), Some(crate::ty::Ty::Int)) =>
+                {
+                    format!("Integer.mod({ls}, {rs})")
+                }
                 _ => format!("rem({ls}, {rs})"),
             };
         }
         if method == "**" {
             return format!(":math.pow({}, {})", emit_expr(r), emit_expr(arg));
+        }
+        // Not `div/2`: it truncates toward zero, where Ruby's Integer#/ floors.
+        if method == "/"
+            && matches!(r.ty.as_ref(), Some(crate::ty::Ty::Int))
+            && matches!(arg.ty.as_ref(), Some(crate::ty::Ty::Int))
+        {
+            return format!("Integer.floor_div({}, {})", emit_expr(r), emit_expr(arg));
         }
         if is_infix(method) {
             return format!("{} {method} {}", emit_expr(r), emit_expr(arg));
