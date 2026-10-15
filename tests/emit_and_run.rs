@@ -15575,3 +15575,92 @@ fn a_qualified_data_define_file_runs_natively() {
         .run_spinel(QUALIFIED_DATA_DEFINE)
         .assert_passes();
 }
+
+/// A model's methods that call each other, a column and an association on implicit `self`.
+fn implicit_self_app() -> emit_and_run::Overlay {
+    emit_and_run::real_blog()
+        .edit(
+            "app/models/article.rb",
+            "  validates :title, presence: true\n",
+            "  validates :title, presence: true\n\n  def headline\n    title.to_s.upcase\n  end\n\n  def shout\n    headline + \"!\"\n  end\n\n  def comment_count\n    comments.size\n  end\n",
+        )
+        .edit(
+            "test/models/article_test.rb",
+            "  test \"destroys comments when article is destroyed\" do\n",
+            "  test \"methods read the record on implicit self\" do\n    article = articles(:one)\n    assert_equal \"GETTING STARTED WITH RAILS!\", article.shout\n    assert_equal 1, article.comment_count\n    assert_equal \"!\", Article.new.shout\n  end\n\n  test \"destroys comments when article is destroyed\" do\n",
+        )
+}
+
+#[test]
+fn model_methods_read_the_record_on_implicit_self() {
+    implicit_self_app().run_test("test/models/article_test.rb").assert_passes();
+}
+
+/// Runs a translated test suite in an emitted tree: each command must succeed.
+fn run_emitted(emitted: &std::path::Path, commands: &[(&str, &[&str])]) {
+    for (program, args) in commands {
+        let output = std::process::Command::new(program)
+            .args(*args)
+            .env_remove("CARGO_TARGET_DIR")
+            .current_dir(emitted)
+            .output()
+            .unwrap_or_else(|e| panic!("run {program}: {e}"));
+        assert!(output.status.success(), "{program} {args:?} in {}\n{}\n{}", emitted.display(),
+            String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+    }
+}
+
+/// Rust rendered each bare call as a free function (`title()`), and the methods without `&self`.
+#[test]
+#[ignore = "requires the Rust toolchain; builds and runs an emitted app"]
+fn model_methods_read_the_record_on_implicit_self_on_rust() {
+    let (emitted, errors) = implicit_self_app().emit(roundhouse::project::BuildTarget::Rust);
+    assert!(errors.is_empty(), "{errors:?}");
+    run_emitted(&emitted, &[("cargo", &["test", "--quiet"])]);
+}
+
+/// TypeScript read `headline` as a property (`this.headline + "!"`).
+#[test]
+#[ignore = "requires Node; installs and runs an emitted app"]
+fn model_methods_read_the_record_on_implicit_self_on_typescript() {
+    let (emitted, errors) = implicit_self_app().emit(roundhouse::project::BuildTarget::Typescript);
+    assert!(errors.is_empty(), "{errors:?}");
+    run_emitted(&emitted, &[("npm", &["install", "--silent", "--no-audit", "--no-fund"]), ("npm", &["test"])]);
+}
+
+/// Go formatted the `*string` column with `%v`, the pointer's address.
+#[test]
+#[ignore = "requires Go; builds and runs an emitted app"]
+fn model_methods_read_the_record_on_implicit_self_on_go() {
+    let (emitted, errors) = implicit_self_app().emit(roundhouse::project::BuildTarget::Go);
+    assert!(errors.is_empty(), "{errors:?}");
+    run_emitted(&emitted, &[("go", &["mod", "tidy"]), ("go", &["test", "./..."])]);
+}
+
+/// A controller of its own, outside real-blog's resources, reading `params` into a local.
+fn probe_controller_app() -> emit_and_run::Overlay {
+    emit_and_run::real_blog()
+        .edit("config/routes.rb", "  root \"articles#index\"\n", "  root \"articles#index\"\n  get \"/probe/:id\", to: \"probe#show\", as: :probe\n  get \"/probe/:id/joined\", to: \"probe#joined\", as: :probe_joined\n  get \"/search\", to: \"probe#search\", as: :search\n")
+        .write(
+            "app/controllers/probe_controller.rb",
+            "class ProbeController < ApplicationController\n  def show\n    article = Article.find(params[:id])\n    render plain: article.title.to_s\n  end\n\n  def search\n    render plain: \"q=\" + params[:q].to_s + \" page=\" + params[:page].to_s\n  end\n\n  def joined\n    article = Article.find(params[:id])\n    render plain: article.comments.map(&:commenter).join(\"|\") + \" \" + [article.comments.size, 0].join(\",\") + \" \" + [true, false].join(\",\")\n  end\nend\n",
+        )
+        .write(
+            "test/controllers/probe_controller_test.rb",
+            "require \"test_helper\"\n\nclass ProbeControllerTest < ActionDispatch::IntegrationTest\n  setup do\n    @article = articles(:one)\n  end\n\n  test \"reads params into a local\" do\n    get probe_url(@article)\n    assert_response :success\n    assert_equal \"Getting Started with Rails\", response.body\n  end\n\n  test \"joins what is not a String\" do\n    get probe_joined_url(@article)\n    assert_equal \"Alice 1,0 true,false\", response.body\n  end\n\n  test \"reads the query string\" do\n    get search_url(q: \"rails\", page: 2)\n    assert_equal \"q=rails page=2\", response.body\n  end\n\n  test \"leaves an omitted key out of the query string\" do\n    get search_url(q: \"rails\")\n    assert_equal \"q=rails page=\", response.body\n  end\nend\n",
+        )
+}
+
+#[test]
+fn a_controller_reads_params_into_a_local() {
+    probe_controller_app().run_test("test/controllers/probe_controller_test.rb").assert_passes();
+}
+
+/// Rust gave the controller no `params` field (only ivar writes and a few node shapes were walked), and its `process_action` on `&self` called a `&mut self` stub.
+#[test]
+#[ignore = "requires the Rust toolchain; builds and runs an emitted app"]
+fn a_controller_reads_params_into_a_local_on_rust() {
+    let (emitted, errors) = probe_controller_app().emit(roundhouse::project::BuildTarget::Rust);
+    assert!(errors.is_empty(), "{errors:?}");
+    run_emitted(&emitted, &[("cargo", &["test", "--quiet"])]);
+}

@@ -958,9 +958,10 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
         // RouteHelpers`). Append per-method delegating wrappers so
         // both call shapes resolve.
         let bare_wrappers = render_route_helpers_bare_wrappers(lc);
+        let import = if body.contains("ViewHelpers::") { "use crate::view_helpers::ViewHelpers;\n\n" } else { "" };
         files.push(EmittedFile {
             path: PathBuf::from("src/route_helpers.rs"),
-            content: format!("{body}{bare_wrappers}"),
+            content: format!("{import}{body}{bare_wrappers}"),
         });
     }
 
@@ -1083,6 +1084,7 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
                 // but do not embed Base — stub the two Sends so the
                 // inherited process_action compiles. Full CSRF via
                 // the http thread-local surface is a follow-on.
+                // `verify_authenticity_token` takes `&self`, not `&mut self`: the stub writes nothing, and a controller whose actions write no ivar runs `process_action` on `&self`.
                 let ac_shim = format!(
                     "\nimpl {name} {{\n\
                     \x20   pub fn render(&self, content: String) {{\n\
@@ -1110,7 +1112,7 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
                     \x20       let content_type = opts.get(\"content_type\").and_then(|v| v.as_str()).map(|s| s.to_string());\n\
                     \x20       crate::http::response_set_head(status, content_type);\n\
                     \x20   }}\n\
-                    \x20   pub fn verify_authenticity_token(&mut self) {{}}\n\
+                    \x20   pub fn verify_authenticity_token(&self) {{}}\n\
                     \x20   pub fn performed_pred(&self) -> bool {{ false }}\n\
                     }}\n",
                     name = lc.name.0.as_str()
@@ -1134,10 +1136,12 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
                 // into `c.flash` only when the field exists; the
                 // outgoing path is field-independent (thread-local).
                 let has_flash = body.contains("pub flash:");
+                let has_params = body.contains("pub params:");
                 let axum_wrappers = render_axum_handler_wrappers(
                     lc.name.0.as_str(),
                     &flat_routes_2c,
                     has_flash,
+                    has_params,
                     sets_action_name,
                 );
                 let content = format!("{CONTROLLER_IMPORTS}{body}{ac_shim}{axum_wrappers}");
@@ -1420,7 +1424,7 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
     if !controller_test_modules.is_empty() {
         let mut ctrl_entries: Vec<(String, String)> = Vec::new();
         for tm in &controller_test_modules {
-            let file = spec::emit_rust_test_module(tm, app);
+            let file = spec::with_route_helpers(&route_helper_funcs, || spec::emit_rust_test_module(tm, app));
             let class_name = tm.name.0.as_str().to_string();
             let stem = file
                 .path
@@ -1585,6 +1589,7 @@ fn render_axum_handler_wrappers(
     controller_name: &str,
     flat_routes: &[crate::lower::FlatRoute],
     has_flash: bool,
+    has_params: bool,
     sets_action_name: bool,
 ) -> String {
     use crate::dialect::HttpMethod;
@@ -1662,6 +1667,13 @@ fn render_axum_handler_wrappers(
         if !path_extractor.is_empty() {
             args.push(path_extractor);
         }
+        // Rails' `params` holds the query string too; only a controller that reads `params` has the field to take it.
+        if has_params {
+            args.push(
+                "axum::extract::Query(query): axum::extract::Query<std::collections::HashMap<String, String>>"
+                    .to_string(),
+            );
+        }
         if has_body {
             // Body extractor MUST be last per axum's contract (each
             // request body can only be consumed once; placing it
@@ -1677,7 +1689,15 @@ fn render_axum_handler_wrappers(
         let mut body = String::new();
         body.push_str("    crate::http::response_clear();\n");
         body.push_str("    crate::http::request_format_set(_fmt.0);\n");
-        if has_body {
+        if has_params {
+            if has_body {
+                // Query after form, as Rails' `request_parameters.merge(query_parameters)`: a shallow merge where the query wins.
+                body.push_str("    let mut params = crate::http::params_from_form(form);\n");
+                body.push_str("    params.extend(crate::http::params_from_form(query));\n");
+            } else {
+                body.push_str("    let mut params = crate::http::params_from_form(query);\n");
+            }
+        } else if has_body {
             body.push_str("    let mut params = crate::http::params_from_form(form);\n");
         } else if !path_params.is_empty() {
             body.push_str(
@@ -1701,7 +1721,7 @@ fn render_axum_handler_wrappers(
                 "    params.insert({p:?}.to_string(), serde_json::Value::from({p}));\n",
             ));
         }
-        if has_body || !path_params.is_empty() {
+        if has_params || has_body || !path_params.is_empty() {
             body.push_str(&format!(
                 "    let mut c = {controller_name} {{ params, ..Default::default() }};\n",
             ));
