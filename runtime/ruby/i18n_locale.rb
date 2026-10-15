@@ -166,10 +166,11 @@ module I18n
     table = translation_table
     env = Rails.env.to_s
     sep = "\u001C"
-    found = table[id + sep + loc + sep + env + sep + key] || table[id + sep + loc + sep + sep + key]
-    if found.nil? && !key.empty?
-      found = table[id + sep + loc + sep + env + sep + "*"] || table[id + sep + loc + sep + sep + "*"]
-    end
+    # Not the any-environment key before this environment's "*": an environment with entries of its own has them all.
+    found = table[id + sep + loc + sep + env + sep + key]
+    found = table[id + sep + loc + sep + env + sep + "*"] if found.nil? && !key.empty?
+    found = table[id + sep + loc + sep + sep + key] if found.nil?
+    found = table[id + sep + loc + sep + sep + "*"] if found.nil? && !key.empty?
     found
   end
 

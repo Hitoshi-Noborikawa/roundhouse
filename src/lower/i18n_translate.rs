@@ -718,6 +718,24 @@ fn table_site(call: &Call, locales: &[(String, Vec<(Plan, Vec<Variant>)>)], span
         return None;
     }
     let any_missing = plans().any(|p| matches!(p, Plan::Static(Translation::Missing { .. })));
+    // Not written with a separator of the table's in it: the runtime splits its lines on U+001C to U+001F, and the call stays the error it was.
+    let separator = |t: &str| t.chars().any(|c| ('\u{1c}'..='\u{1f}').contains(&c));
+    let texts = |t: &Translation| -> Vec<String> {
+        match t {
+            Translation::One(x) => vec![x.clone()],
+            Translation::Plural { zero, one, other } => zero.iter().cloned().chain([one.clone(), other.clone()]).collect(),
+            Translation::Missing { key, considered } => std::iter::once(key.clone()).chain(considered.iter().cloned()).collect(),
+        }
+    };
+    let keys = |p: &Plan| -> Vec<String> {
+        match p {
+            Plan::Static(_) => Vec::new(),
+            Plan::Dynamic { arms, subtrees, .. } => arms.iter().map(|(k, _)| k.clone()).chain(subtrees.iter().cloned()).collect(),
+        }
+    };
+    if plans().any(|p| translations(p).iter().flat_map(texts).chain(keys(p)).any(|t| separator(&t))) {
+        return None;
+    }
     // Not the entries spelled out here: only a ruby-family tree writes the table, and a browser transpile to another target would build half a million strings for nothing.
     let full_key = Translate::full_key(&call.lookup, &call.lookup.key).unwrap_or_default();
     let interpolates = call.lookup.interpolates();

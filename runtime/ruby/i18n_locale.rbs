@@ -24,10 +24,10 @@ module I18n
   def self.missing_translation: (String key, bool raises) -> String
   def self.missing_translation_among: (String key, String rest, bool raises) -> String
   def self.missing_translation_tag: (String key, String details, bool raises) -> String
-  def self.translate_site: (String id, String loc, String key, Integer? count, Array[String] names, Array[String] values, String details, bool raises, bool in_view, bool escape_plain) -> String
+  def self.translate_site: (String id, String loc, String key, (Integer | Float)? count, Array[String] names, Array[String] values, String details, bool raises, bool in_view, bool escape_plain) -> String
   def self.site_entry: (String id, String loc, String key) -> Array[String]
   def self.site_entry_in: (String id, String loc, String key) -> Integer?
-  def self.render_template: (String template, Integer? count, Array[String] names, Array[String] values, bool html) -> String
+  def self.render_template: (String template, (Integer | Float)? count, Array[String] names, Array[String] values, bool html) -> String
   def self.translation_table: () -> Hash[String, Integer]
   def self.translation_entries: () -> Array[Array[String]]
   def self.load_translation_table: () -> nil
