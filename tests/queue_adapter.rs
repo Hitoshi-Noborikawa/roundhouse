@@ -50,6 +50,28 @@ fn a_symbol_and_a_string_both_name_the_adapter() {
 }
 
 #[test]
+fn a_comment_needs_no_space_before_it() {
+    let sym = application("    config.active_job.queue_adapter = :sidekiq# Redis\n");
+    let string = application("    config.active_job.queue_adapter = \"sidekiq\"# Redis\n");
+    assert_eq!(adapter(&[("config/application.rb", &sym)]).as_deref(), Some("sidekiq"));
+    assert_eq!(adapter(&[("config/application.rb", &string)]).as_deref(), Some("sidekiq"));
+}
+
+#[test]
+fn a_hash_inside_the_quotes_is_not_a_comment() {
+    let app = application("    config.active_job.queue_adapter = \"side#kiq\"\n");
+    assert_eq!(adapter(&[("config/application.rb", &app)]), None);
+}
+
+#[test]
+fn a_comparison_does_not_set_it() {
+    let app = application(
+        "    config.active_job.queue_adapter = :sidekiq\n    puts 1 if config.active_job.queue_adapter == :async\n    config.active_job.queue_adapter == :async\n    config.active_job.queue_adapter =~ /async/\n",
+    );
+    assert_eq!(adapter(&[("config/application.rb", &app)]).as_deref(), Some("sidekiq"));
+}
+
+#[test]
 fn a_commented_out_line_is_ignored() {
     let app = application("    # config.active_job.queue_adapter = :sidekiq\n");
     assert_eq!(adapter(&[("config/application.rb", &app)]), None);

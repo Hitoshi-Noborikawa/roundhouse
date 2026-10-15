@@ -9149,10 +9149,30 @@ pub(super) fn queue_adapter_line(line: &str) -> Option<Option<String>> {
     let rest = line
         .strip_prefix("Rails.application.config.active_job.queue_adapter")
         .or_else(|| line.strip_prefix("config.active_job.queue_adapter"))?;
-    let value = rest.trim().strip_prefix('=')?.trim();
-    let value = match value.find(" #") {
-        Some(at) => value[..at].trim(),
-        None => value,
+    // An assignment, not the `==` or `=~` operators.
+    let value = rest.trim_start().strip_prefix('=')?;
+    if value.starts_with(['=', '~']) {
+        return None;
+    }
+    let value = value.trim();
+    // Drop a trailing comment, with or without a space before its `#`,
+    // but not a `#` inside a quoted value.
+    let value = match value.chars().next() {
+        Some(q @ ('"' | '\'')) => match value[1..].find(q) {
+            Some(at) => {
+                let (quoted, after) = value.split_at(at + 2);
+                let after = after.trim_start();
+                if !after.is_empty() && !after.starts_with('#') {
+                    return Some(None);
+                }
+                quoted
+            }
+            None => value,
+        },
+        _ => match value.find('#') {
+            Some(at) => value[..at].trim(),
+            None => value,
+        },
     };
     let name = if let Some(sym) = value.strip_prefix(':') {
         sym
