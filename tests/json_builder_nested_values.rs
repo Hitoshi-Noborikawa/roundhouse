@@ -43,3 +43,19 @@ fn nested_values_encode_on_rust() {
     .unwrap();
     run(&emitted, "cargo", &["test", "--quiet", "--test", "json_builder_nested_values"]);
 }
+
+#[test]
+#[ignore = "requires Go; builds an emitted app"]
+fn nested_values_encode_on_go() {
+    let (emitted, errors) = emit_and_run::real_blog().emit(BuildTarget::Go);
+    assert!(errors.is_empty(), "{errors:?}");
+    std::fs::write(
+        emitted.join("app/v2/json_builder_nested_values_test.go"),
+        format!(
+            "package v2\n\nimport \"testing\"\n\nfunc TestEncodeNestedValues(t *testing.T) {{\n\tv := []any{{[]any{{\"b\", nil}}, []any{{int64(2), 1.5}}, []any{{}}, \"x\", map[string]any{{\"name\": \"b\"}}}}\n\tif got := JsonBuilder_encode_value(v); got != {EXPECTED:?} {{\n\t\tt.Fatalf(\"got %s\", got)\n\t}}\n}}\n"
+        ),
+    )
+    .unwrap();
+    run(&emitted, "go", &["mod", "tidy"]);
+    run(&emitted, "go", &["test", "./app/v2/", "-run", "TestEncodeNestedValues"]);
+}
