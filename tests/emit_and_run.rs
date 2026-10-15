@@ -33,6 +33,8 @@ mod time_zone_default;
 mod view_presence_url_encode;
 #[path = "emit_and_run/controller_translate.rs"]
 mod controller_translate;
+#[path = "emit_and_run/controller_sibling_classes.rs"]
+mod controller_sibling_classes;
 #[path = "emit_and_run/i18n_locales.rs"]
 mod i18n_locales;
 #[path = "emit_and_run/i18n_runtime.rs"]

@@ -1048,6 +1048,29 @@ fn report_unemitted_library_classes(app: &App, target: BuildTarget) {
     }
 }
 
+/// `class LoginFailedError < StandardError; end` beside a controller in
+/// its file: the Ruby emit re-declares it ahead of the controller, the
+/// other targets declare nothing for it.
+fn report_controller_sibling_classes(app: &App, target: BuildTarget) {
+    if matches!(target, BuildTarget::Blog | BuildTarget::Ruby | BuildTarget::Jruby | BuildTarget::Spinel) {
+        return;
+    }
+    for controller in &app.controllers {
+        for sibling in &controller.sibling_classes {
+            emit::diagnostics::report_unsupported(
+                sibling.parent_span,
+                target.as_str(),
+                "class",
+                format!(
+                    "`{}`, declared beside `{}` in its file, is not emitted for this target (the Ruby emit carries it)",
+                    sibling.name.as_str(),
+                    controller.name.0.as_str()
+                ),
+            );
+        }
+    }
+}
+
 /// True when every ancestor of `lc` is another app library class (or
 /// explicit `Object`), so the chain ends at `Object` rather than a
 /// framework / gem / stdlib base. Explicit `Object` is treated as the
@@ -1896,6 +1919,7 @@ fn target_files_inner(
     reject_unsupported_forwarded_procs(app, target)?;
     report_unsupported_keys(app, target);
     report_unemitted_library_classes(app, target);
+    report_controller_sibling_classes(app, target);
     report_sqlite_index_predicates(app, target);
     report_native_ruby_syntax(app, target);
     report_self_bindings(app, target);

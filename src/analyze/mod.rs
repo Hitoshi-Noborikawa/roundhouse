@@ -1046,6 +1046,10 @@ impl Analyzer {
             if !includes.is_empty() {
                 cls.includes = includes;
             }
+            for sibling in &controller.sibling_classes {
+                let id = ClassId(sibling.name.clone());
+                classes.entry(id).or_default().parent = Some(ClassId(sibling.parent.clone()));
+            }
         }
 
         // Classes a locked gem's RBI declares. After everything the app
@@ -1063,6 +1067,11 @@ impl Analyzer {
             .chain(app.library_classes.iter().map(|lc| &lc.name))
         {
             if let Some(info) = classes.get_mut(id) {
+                info.app_declared = true;
+            }
+        }
+        for sibling in app.controllers.iter().flat_map(|c| &c.sibling_classes) {
+            if let Some(info) = classes.get_mut(&ClassId(sibling.name.clone())) {
                 info.app_declared = true;
             }
         }
