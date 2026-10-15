@@ -140,3 +140,92 @@ fn a_two_class_union_with_matching_slot_shapes_binds_by_name() {
         "both branches share a slot shape, so the call should move into it rather than stay a Hash:\n{source}"
     );
 }
+
+/// Two classes behind the union that do NOT agree: `Widget#deliver`'s
+/// optional keyword is flattened, but `Gadget#deliver(opts)` takes a
+/// plain positional parameter and no keywords at all — ingest never
+/// flattens it (nothing to flatten), so the ORIGINAL call already binds
+/// correctly for that branch as written (Ruby turns the trailing
+/// `connection: "REAL"` into a positional Hash). Respelling the shared
+/// call site into `deliver("REAL")` for Widget's sake would silently
+/// change Gadget's `opts` from the Hash `{connection: "REAL"}` to the
+/// bare string `"REAL"` — the regression CodeRabbit flagged in
+/// `resolve_instance_receiver_class`, which treated Gadget's missing
+/// `params.slots` entry as "doesn't define the method" instead of
+/// checking whether it defines it unflattened. The fix must refuse the
+/// call instead of guessing, leaving it exactly as written so both
+/// branches keep their own (pre-existing) binding.
+const MISMATCHED_SHAPE_SOURCE: &str = r##"module Nilable
+  class Widget
+    def deliver(connection: nil)
+      connection
+    end
+  end
+
+  class Gadget
+    def deliver(opts)
+      opts
+    end
+  end
+
+  class Courier
+    def self.send_either(use_widget)
+      (use_widget ? Widget.new : Gadget.new).deliver(connection: "REAL")
+    end
+  end
+end
+"##;
+
+#[test]
+fn a_two_class_union_with_mismatched_slot_shapes_is_refused_and_the_unflattened_branch_stays_correct()
+{
+    // Native oracle: neither branch is flattened in source, so both bind
+    // by keyword/implicit-Hash exactly as written.
+    let native_script = "raise 'widget branch' unless Nilable::Courier.send_either(true) == 'REAL'\n\
+raise 'gadget branch' unless Nilable::Courier.send_either(false) == { connection: 'REAL' }\n\
+puts 'ok'\n";
+    assert_eq!(
+        native(&[("mismatch.rb", MISMATCHED_SHAPE_SOURCE)], native_script),
+        "ok\n",
+        "native control"
+    );
+
+    // `Widget#deliver`'s own flattening happens at ingest from its
+    // signature alone, independent of whether this call site is
+    // rewritten (see the module doc) — so the Widget branch stays a
+    // separate, pre-existing, out-of-scope gap (the general
+    // unresolved-receiver case) whether or not the call is refused.
+    // What THIS fix must guarantee is the Gadget branch: `Gadget#deliver`
+    // has no keyword parameters at all, so it was never flattened and
+    // the original call already bound correctly — a universal positional
+    // rewrite picked from Widget's shape alone (the bug CodeRabbit
+    // flagged) would have silently corrupted it.
+    let script = "puts(Nilable::Courier.send_either(false) == { connection: 'REAL' } ? 'ok' : 'wrong')\n";
+    let run = emit_and_run::real_blog()
+        .write("app/lib/nilable/mismatch.rb", MISMATCHED_SHAPE_SOURCE)
+        .run_ruby(&format!(
+            "require_relative \"app/models/nilable/widget\"\nrequire_relative \"app/models/nilable/gadget\"\nrequire_relative \"app/models/nilable/courier\"\n{script}"
+        ));
+    assert!(
+        run.errors.iter().any(|e| e.contains("flattened keyword arguments not supported")),
+        "a union with mismatched slot shapes (one branch never flattened at all) must be refused, not guessed at: {:#?}",
+        run.errors
+    );
+    assert!(
+        run.success,
+        "=== stdout ===\n{}\n=== stderr ===\n{}",
+        run.stdout, run.stderr
+    );
+    assert_eq!(
+        run.stdout, "ok\n",
+        "Gadget's branch was never flattened and must keep binding the Hash positionally, \
+         not have its call site rewritten from Widget's shape alone"
+    );
+
+    let source =
+        std::fs::read_to_string(run.emitted.join("app/models/nilable/courier.rb")).unwrap();
+    assert!(
+        source.contains("deliver(connection: \"REAL\")"),
+        "a refused call must be left exactly as written, not rewritten from one branch's shape:\n{source}"
+    );
+}

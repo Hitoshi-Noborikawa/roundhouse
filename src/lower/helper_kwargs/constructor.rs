@@ -10,6 +10,7 @@ use crate::expr::{Expr, ExprNode, Literal};
 use crate::ident::Symbol;
 
 use super::{Slot, slot_of};
+use super::owned::{Defined, OwnerIndex, Side};
 
 pub(super) struct InstanceCallParams {
     pub(super) slots: HashMap<(String, Symbol), Vec<Slot>>,
@@ -20,6 +21,12 @@ pub(super) struct InstanceCallParams {
     unqualified_class_ids: HashMap<String, String>,
     ambiguous_names: HashSet<String>,
     model_names: HashSet<String>,
+    /// The owner-relative walk's ancestor/module-aware lookup, reused
+    /// here to tell "this union member doesn't define the method at
+    /// all" apart from "defines it, but not with flattened keyword
+    /// slots" when narrowing a nilable receiver's union — `params.slots`
+    /// alone cannot tell those apart (see `resolve_instance_receiver_class`).
+    owner_index: OwnerIndex,
 }
 
 impl InstanceCallParams {
@@ -114,6 +121,7 @@ impl InstanceCallParams {
             unqualified_class_ids,
             ambiguous_names: names.ambiguous_names.clone(),
             model_names: names.model_names.clone(),
+            owner_index: OwnerIndex::new(app),
         }
     }
 }
@@ -372,10 +380,12 @@ enum ClassResolution {
     /// either way the keywords land in the same positions whichever
     /// branch runs at runtime.
     One(String),
-    /// Several classes remain whose flattened slots for this method
-    /// differ: which slot the keywords fill depends on which branch
-    /// runs, so the call must be refused rather than respelled against
-    /// an arbitrary one.
+    /// Several classes remain that disagree about this method: either
+    /// their flattened slots differ, or one of them defines the method
+    /// without a flattened keyword ABI at all (real keywords, `rest`,
+    /// forwarding, or no keywords — already binding correctly as
+    /// written). Either way no one respelling is right for every
+    /// branch, so the call must be refused rather than guessed at.
     Mismatch,
 }
 
@@ -387,46 +397,97 @@ enum ClassResolution {
 /// wider union of several classes is handled too, as long as they agree
 /// on this method's slot shape; anything else (an `Untyped`/`Var` arm,
 /// a non-class type) returns `None`, leaving that gap exactly as it was.
+///
+/// A union member with no entry in `params.slots` is NOT assumed to
+/// skip the method: `params.slots` only ever holds flattened keyword
+/// ABIs, so a class that defines the method with real keywords, `rest`,
+/// forwarding, or a plain positional parameter (`def deliver(opts)`,
+/// which already binds the caller's keyword Hash correctly as written)
+/// looks identical to a class that doesn't define the method at all.
+/// Respelling the call for another branch would silently change that
+/// one's binding. `OwnerIndex::defines` — the same ancestor/module-aware
+/// lookup the owner-relative walk uses — tells the two apart: truly
+/// missing is skipped (that branch's dispatch never reaches the method,
+/// so it raises `NoMethodError` regardless of this rewrite), while
+/// "defined but not flattened" is a `Mismatch`.
 fn resolve_instance_receiver_class(
     ty: &crate::ty::Ty,
     params: &InstanceCallParams,
     method: &Symbol,
 ) -> ClassResolution {
     let stripped = ty.clone().strip_nil();
-    let class_ids: Vec<String> = match &stripped {
-        crate::ty::Ty::Class { id, .. } => vec![id.0.as_str().to_string()],
+    match &stripped {
+        // A single class is unambiguous — there is no other branch to
+        // agree or disagree with — so this is exactly the plain typed
+        // receiver case #814 already handled: a miss in `params.slots`
+        // means nothing to rewrite, not a refusal. The ancestor-aware
+        // `Mismatch` check below only makes sense across several
+        // candidates, so it does not apply here (it would otherwise
+        // turn every ordinary, non-keyword method call on a typed
+        // instance — an `attr_reader`, `b.add(...).rows` below — into a
+        // spurious refusal, since `OwnerIndex::defines` resolves nearly
+        // every real method name as "defined, not flattened").
+        crate::ty::Ty::Class { id, .. } => {
+            let class_id = id.0.as_str().to_string();
+            match params.slots.get(&(class_id.clone(), method.clone())) {
+                Some(_) => ClassResolution::One(class_id),
+                None => ClassResolution::None,
+            }
+        }
         crate::ty::Ty::Union { variants } => {
-            let mut ids = Vec::with_capacity(variants.len());
+            let mut class_ids = Vec::with_capacity(variants.len());
             for variant in variants.iter() {
                 let crate::ty::Ty::Class { id, .. } = variant else {
                     return ClassResolution::None;
                 };
-                ids.push(id.0.as_str().to_string());
+                class_ids.push(id.0.as_str().to_string());
             }
-            ids
-        }
-        _ => return ClassResolution::None,
-    };
-    let mut representative: Option<(&str, &Vec<Slot>)> = None;
-    for class_id in &class_ids {
-        let Some(slots) = params.slots.get(&(class_id.clone(), method.clone())) else {
-            // This branch of the union doesn't define the method with
-            // flattened keywords (it may not define it at all, which
-            // would raise `NoMethodError` at that branch regardless of
-            // this rewrite).
-            continue;
-        };
-        match representative {
-            None => representative = Some((class_id.as_str(), slots)),
-            Some((_, rep_slots)) if !slots_match_shape(rep_slots, slots) => {
-                return ClassResolution::Mismatch;
+            let mut representative: Option<(&str, &Vec<Slot>)> = None;
+            for class_id in &class_ids {
+                let slots = match params.slots.get(&(class_id.clone(), method.clone())) {
+                    Some(slots) => slots,
+                    // `params.slots` only keys each class's OWN direct
+                    // definitions; fall back to the ancestor/module-aware
+                    // lookup for one reached only through inheritance or
+                    // an included module (e.g. a subclass that doesn't
+                    // override the method at all).
+                    None => match params.owner_index.defines(class_id, Side::Instance, method) {
+                        Defined::Missing => {
+                            // This branch of the union doesn't define
+                            // the method at all: calling it raises
+                            // `NoMethodError` regardless of this
+                            // rewrite, so it doesn't constrain the
+                            // respelling.
+                            continue;
+                        }
+                        Defined::Flattened(slots) => slots,
+                        Defined::Unflattened | Defined::Ambiguous => {
+                            // Defined, but without a flattened keyword
+                            // ABI this call site could respell to (real
+                            // keywords, rest, forwarding, no keywords at
+                            // all — already binds correctly as written),
+                            // or the lookup itself is ambiguous.
+                            // Rewriting the call for another branch
+                            // would silently change this one's binding,
+                            // so refuse rather than guess.
+                            return ClassResolution::Mismatch;
+                        }
+                    },
+                };
+                match representative {
+                    None => representative = Some((class_id.as_str(), slots)),
+                    Some((_, rep_slots)) if !slots_match_shape(rep_slots, slots) => {
+                        return ClassResolution::Mismatch;
+                    }
+                    Some(_) => {}
+                }
             }
-            Some(_) => {}
+            match representative {
+                Some((id, _)) => ClassResolution::One(id.to_string()),
+                None => ClassResolution::None,
+            }
         }
-    }
-    match representative {
-        Some((id, _)) => ClassResolution::One(id.to_string()),
-        None => ClassResolution::None,
+        _ => ClassResolution::None,
     }
 }
 
@@ -517,7 +578,7 @@ fn rewrite_instance_call(
             ClassResolution::Mismatch => {
                 super::refuse(
                     expr.span,
-                    "receiver is a union of classes whose flattened keyword slots for this method differ",
+                    "receiver is a union of classes that do not agree on this method's flattened keyword slots",
                     diagnostics,
                 );
                 return;
