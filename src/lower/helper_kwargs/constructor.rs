@@ -384,8 +384,10 @@ enum ClassResolution {
     /// their flattened slots differ, or one of them defines the method
     /// without a flattened keyword ABI at all (real keywords, `rest`,
     /// forwarding, or no keywords — already binding correctly as
-    /// written). Either way no one respelling is right for every
-    /// branch, so the call must be refused rather than guessed at.
+    /// written). No one respelling is right for every branch, so the
+    /// call is left exactly as written — the dynamic path, with no
+    /// diagnostic, the same as before this fix existed and the same as
+    /// the general untyped-receiver gap.
     Mismatch,
 }
 
@@ -409,7 +411,8 @@ enum ClassResolution {
 /// lookup the owner-relative walk uses — tells the two apart: truly
 /// missing is skipped (that branch's dispatch never reaches the method,
 /// so it raises `NoMethodError` regardless of this rewrite), while
-/// "defined but not flattened" is a `Mismatch`.
+/// "defined but not flattened" is a `Mismatch` — left exactly as
+/// written, the dynamic path, with no diagnostic (see `ClassResolution`).
 fn resolve_instance_receiver_class(
     ty: &crate::ty::Ty,
     params: &InstanceCallParams,
@@ -469,7 +472,8 @@ fn resolve_instance_receiver_class(
                             // or the lookup itself is ambiguous.
                             // Rewriting the call for another branch
                             // would silently change this one's binding,
-                            // so refuse rather than guess.
+                            // so this is a `Mismatch` — left dynamic,
+                            // not guessed at.
                             return ClassResolution::Mismatch;
                         }
                     },
@@ -477,6 +481,8 @@ fn resolve_instance_receiver_class(
                 match representative {
                     None => representative = Some((class_id.as_str(), slots)),
                     Some((_, rep_slots)) if !slots_match_shape(rep_slots, slots) => {
+                        // Two members flatten this method differently:
+                        // same reasoning, same `Mismatch`.
                         return ClassResolution::Mismatch;
                     }
                     Some(_) => {}
@@ -575,14 +581,17 @@ fn rewrite_instance_call(
                 owned_class_id = id;
                 owned_class_id.as_str()
             }
-            ClassResolution::Mismatch => {
-                super::refuse(
-                    expr.span,
-                    "receiver is a union of classes that do not agree on this method's flattened keyword slots",
-                    diagnostics,
-                );
-                return;
-            }
+            // Several classes disagree about this method (different
+            // flattened shapes, or one of them isn't flattened at all):
+            // no one respelling is right for every branch. Per #959's
+            // CodeRabbit review, this keeps the DYNAMIC path — the call
+            // is left exactly as written, with no diagnostic — the same
+            // as the general untyped-receiver gap and as every union
+            // receiver before this fix existed. A hard refusal here
+            // regressed `critic_corrections_preserve_class_objects_
+            // reflection_and_operators`, which passes on main precisely
+            // because its mismatched union fell through silently.
+            ClassResolution::Mismatch => return,
         }
     };
     if !is_constructor && super::SEND_METHODS.contains(&method.as_str()) {

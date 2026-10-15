@@ -150,11 +150,18 @@ fn a_two_class_union_with_matching_slot_shapes_binds_by_name() {
 /// call site into `deliver("REAL")` for Widget's sake would silently
 /// change Gadget's `opts` from the Hash `{connection: "REAL"}` to the
 /// bare string `"REAL"` — the regression CodeRabbit flagged in
-/// `resolve_instance_receiver_class`, which treated Gadget's missing
-/// `params.slots` entry as "doesn't define the method" instead of
-/// checking whether it defines it unflattened. The fix must refuse the
-/// call instead of guessing, leaving it exactly as written so both
-/// branches keep their own (pre-existing) binding.
+/// `resolve_instance_receiver_class` (#959), which treated Gadget's
+/// missing `params.slots` entry as "doesn't define the method" instead
+/// of checking whether it defines it unflattened.
+///
+/// Per CodeRabbit's follow-up review, the fix keeps the DYNAMIC path —
+/// the call is left exactly as written, with NO diagnostic — the same
+/// as every union receiver before this whole fix existed, and the same
+/// as the general untyped-receiver gap. An earlier version of this fix
+/// instead refused the call (an error diagnostic), which regressed
+/// `emit_and_run::critic_corrections_preserve_class_objects_reflection_and_operators`:
+/// that test's own mismatched union passes on main precisely because it
+/// falls through silently.
 const MISMATCHED_SHAPE_SOURCE: &str = r##"module Nilable
   class Widget
     def deliver(connection: nil)
@@ -177,7 +184,7 @@ end
 "##;
 
 #[test]
-fn a_two_class_union_with_mismatched_slot_shapes_is_refused_and_the_unflattened_branch_stays_correct()
+fn a_two_class_union_with_mismatched_slot_shapes_keeps_the_dynamic_path_and_the_unflattened_branch_stays_correct()
 {
     // Native oracle: neither branch is flattened in source, so both bind
     // by keyword/implicit-Hash exactly as written.
@@ -194,7 +201,7 @@ puts 'ok'\n";
     // signature alone, independent of whether this call site is
     // rewritten (see the module doc) — so the Widget branch stays a
     // separate, pre-existing, out-of-scope gap (the general
-    // unresolved-receiver case) whether or not the call is refused.
+    // unresolved-receiver case) whether or not the call is left alone.
     // What THIS fix must guarantee is the Gadget branch: `Gadget#deliver`
     // has no keyword parameters at all, so it was never flattened and
     // the original call already bound correctly — a universal positional
@@ -206,16 +213,7 @@ puts 'ok'\n";
         .run_ruby(&format!(
             "require_relative \"app/models/nilable/widget\"\nrequire_relative \"app/models/nilable/gadget\"\nrequire_relative \"app/models/nilable/courier\"\n{script}"
         ));
-    assert!(
-        run.errors.iter().any(|e| e.contains("flattened keyword arguments not supported")),
-        "a union with mismatched slot shapes (one branch never flattened at all) must be refused, not guessed at: {:#?}",
-        run.errors
-    );
-    assert!(
-        run.success,
-        "=== stdout ===\n{}\n=== stderr ===\n{}",
-        run.stdout, run.stderr
-    );
+    run.assert_passes();
     assert_eq!(
         run.stdout, "ok\n",
         "Gadget's branch was never flattened and must keep binding the Hash positionally, \
@@ -226,6 +224,6 @@ puts 'ok'\n";
         std::fs::read_to_string(run.emitted.join("app/models/nilable/courier.rb")).unwrap();
     assert!(
         source.contains("deliver(connection: \"REAL\")"),
-        "a refused call must be left exactly as written, not rewritten from one branch's shape:\n{source}"
+        "a mismatched union must be left exactly as written (the dynamic path), not rewritten from one branch's shape:\n{source}"
     );
 }
