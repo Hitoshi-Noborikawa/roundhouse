@@ -524,6 +524,46 @@ end
     fs::remove_dir_all(&out_ruby).unwrap();
 }
 
+/// `Rack::Utils::HTTP_STATUS_CODES` is a real Rack constant the lowered
+/// runtime doesn't model: unresolved, a bare reference to it types as
+/// `Var` (the same sentinel a totally unknown name gets), which trips
+/// the Const arm's own "unresolved reference" diagnostic
+/// (`analyze::body::compute`) wherever the app reads it — every route
+/// that reaches the read, blocked directly, no fan-out needed. Typing
+/// it as `Hash[Integer, String]` in the registry (matching Rack's own
+/// table) resolves the constant, so the diagnostic — and the block —
+/// disappears.
+#[test]
+fn http_status_codes_constant_resolves_and_the_route_clears() {
+    let src = scratch("http-status-src");
+    let out = scratch("http-status-out");
+    write(&src, "Gemfile", b"source \"https://rubygems.org\"\ngem \"rails\"\n");
+    write(&src, "config/routes.rb", b"Rails.application.routes.draw do\n  get \"widgets\" => \"widgets#index\"\nend\n");
+    write(&src, "app/controllers/application_controller.rb", b"class ApplicationController < ActionController::Base\nend\n");
+    write(&src, "app/controllers/widgets_controller.rb", br#"class WidgetsController < ApplicationController
+  def index
+    @reason = Rack::Utils::HTTP_STATUS_CODES[200]
+  end
+end
+"#);
+    write(&src, "app/views/widgets/index.html.erb", b"<%= @reason %>\n");
+
+    let run = Command::new(env!("CARGO_BIN_EXE_roundhouse"))
+        .args(["--target", "futamura", "--survey", "-o"])
+        .arg(&out)
+        .arg(&src)
+        .env("ROUNDHOUSE_FUTAMURA_LEDGER", "1")
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&run.stderr);
+    assert!(run.status.success(), "{stderr}");
+    assert!(!stderr.contains("HTTP_STATUS_CODES"), "{stderr}");
+    assert!(stderr.contains("whole-route: 1 GET action(s) served by the lowered app; 0 left to Rails"), "{stderr}");
+
+    fs::remove_dir_all(&src).unwrap();
+    fs::remove_dir_all(&out).unwrap();
+}
+
 /// A minimal app whose `ruby` emit refuses one association (a `through:`
 /// hop keyed on a non-id column, Mastodon's `Status.reblogged_by_accounts`).
 fn app_with_a_ruby_refusal(src: &Path) {
