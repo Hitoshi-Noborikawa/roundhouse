@@ -650,6 +650,19 @@ fn table_site(call: &Call, locales: &[(String, Vec<(Plan, Vec<Variant>)>)], span
             }
         }
     }
+    // Not a block per locale: one that answers as the default locale's does is left to the runtime's fallback to it.
+    let default = locales.first()?.0.as_str();
+    let mut blocks: std::collections::HashMap<&str, Vec<(&str, &Vec<String>)>> = std::collections::HashMap::new();
+    for (suffix, entry) in &records {
+        let (locale, rest) = suffix.split_once('\u{1c}').unwrap_or((suffix.as_str(), ""));
+        blocks.entry(locale).or_default().push((rest, entry));
+    }
+    let same: std::collections::HashSet<String> = blocks
+        .iter()
+        .filter(|(l, b)| **l != default && blocks.get(default) == Some(*b))
+        .map(|(l, _)| l.to_string())
+        .collect();
+    records.retain(|(suffix, _)| !same.contains(suffix.split('\u{1c}').next().unwrap_or("")));
     records.sort();
     let id = TABLE.with(|t| {
         let mut t = t.borrow_mut();

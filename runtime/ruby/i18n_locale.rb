@@ -154,7 +154,15 @@ module I18n
     escape_plain && !html ? ActionView::ViewHelpers.html_escape(out) : out
   end
 
+  # A locale without records of its own answers as the default locale: the table leaves out each one that would repeat it.
   def self.site_entry(id, loc, key)
+    found = site_entry_in(id, loc, key)
+    found = site_entry_in(id, app_default_locale.to_s, key) if found.nil?
+    raise ArgumentError, "no translation table entry for " + id + " in " + loc if found.nil?
+    translation_entries[found]
+  end
+
+  def self.site_entry_in(id, loc, key)
     table = translation_table
     env = Rails.env.to_s
     sep = "\u001C"
@@ -162,7 +170,6 @@ module I18n
     if found.nil? && !key.empty?
       found = table[id + sep + loc + sep + env + sep + "*"] || table[id + sep + loc + sep + sep + "*"]
     end
-    raise ArgumentError, "no translation table entry for " + id + " in " + loc if found.nil?
     found
   end
 
@@ -183,18 +190,42 @@ module I18n
   end
 
   def self.translation_table
-    @translation_table ||= load_translation_table
+    load_translation_table if @translation_table.nil?
+    @translation_table || {}
   end
 
-  # Each record ends in a "." field: `split` drops trailing empty fields, and a template can be empty.
+  def self.translation_entries
+    load_translation_table if @translation_entries.nil?
+    @translation_entries || []
+  end
+
+  # A line ends in a "." field: `split` drops trailing empty fields, and a template or a key can be empty.
   def self.load_translation_table
     table = {}
-    File.read(File.join(Rails.root.to_s, "config", "i18n_translations")).split("\u001E").each do |record|
-      fields = record.split("\u001F")
-      next if fields.length < 2
-      table[fields[0]] = fields[1, fields.length - 2]
+    entries = []
+    keys = {}
+    sep = "\u001C"
+    File.read(File.join(Rails.root.to_s, "config", "i18n_translations")).split("\u001E").each do |line|
+      fields = line.split("\u001F")
+      kind = fields[0]
+      if kind == "E"
+        entries << fields[1, fields.length - 2]
+      elsif kind == "K"
+        keys[fields[1]] = fields[2, fields.length - 3]
+      elsif kind == "B"
+        names = keys[fields[1]] || []
+        prefix = fields[1] + sep + fields[2] + sep + fields[3] + sep
+        i = 0
+        while i < names.length
+          at = fields[4 + i]
+          table[prefix + names[i]] = at.to_i unless at == "-"
+          i += 1
+        end
+      end
     end
-    table
+    @translation_entries = entries
+    @translation_table = table
+    nil
   end
 
   # >>> generated: i18n-locales
