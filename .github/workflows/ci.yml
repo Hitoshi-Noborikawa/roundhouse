@@ -2378,6 +2378,18 @@ jobs:
       - name: cargo test --test json_builder_nested_values on go
         if: ${{ !cancelled() && matrix.target == 'go' }}
         run: cargo test --locked --test json_builder_nested_values nested_values_encode_on_go -- --ignored --nocapture --exact
+      - name: cargo test --test json_builder_nested_values on csharp
+        if: ${{ !cancelled() && matrix.target == 'csharp' }}
+        run: cargo test --locked --test json_builder_nested_values nested_values_encode_on_csharp -- --ignored --nocapture --exact
+      - name: cargo test --test truncate_separator on rust
+        if: ${{ !cancelled() && matrix.target == 'rust' }}
+        run: cargo test --locked --test truncate_separator truncate_separator_runs_on_rust -- --ignored --nocapture --exact
+      - name: cargo test --test truncate_separator on go
+        if: ${{ !cancelled() && matrix.target == 'go' }}
+        run: cargo test --locked --test truncate_separator truncate_separator_runs_on_go -- --ignored --nocapture --exact
+      - name: cargo test --test truncate_separator on csharp
+        if: ${{ !cancelled() && matrix.target == 'csharp' }}
+        run: cargo test --locked --test truncate_separator truncate_separator_runs_on_csharp -- --ignored --nocapture --exact
       - name: cargo test --test crystal_toolchain -- --ignored
         if: ${{ !cancelled() && matrix.target == 'crystal' }}
         run: cargo test --test crystal_toolchain -- --ignored --nocapture

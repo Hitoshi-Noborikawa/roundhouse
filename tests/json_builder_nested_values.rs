@@ -10,6 +10,23 @@ mod emit_and_run;
 
 use roundhouse::project::BuildTarget;
 
+// On a model: C# emits no plain Ruby class.
+const NARROWED_WRITE: &str = r#"class Article < ApplicationRecord
+  def self.append_three(v)
+    if v.is_a?(Array)
+      v << 3
+    end
+    nil
+  end
+
+  def self.put_k(v)
+    if v.is_a?(Hash)
+      v["k"] = 1
+    end
+    nil
+  end
+"#;
+
 const EXPECTED: &str = r#"[["b",null],[2,1.5],[],"x",{"name":"b"}]"#;
 
 fn run(dir: &std::path::Path, program: &str, args: &[&str]) {
@@ -58,4 +75,20 @@ fn nested_values_encode_on_go() {
     .unwrap();
     run(&emitted, "go", &["mod", "tidy"]);
     run(&emitted, "go", &["test", "./app/v2/", "-run", "TestEncodeNestedValues"]);
+}
+
+#[test]
+#[ignore = "requires .NET; builds an emitted app"]
+fn nested_values_encode_on_csharp() {
+    let (emitted, errors) = emit_and_run::real_blog().edit("app/models/article.rb", "class Article < ApplicationRecord\n", NARROWED_WRITE).emit(BuildTarget::CSharp);
+    assert!(errors.is_empty(), "{errors:?}");
+    // A `List<long>` too: it is no `IEnumerable<object>`, so a generic pattern would miss it.
+    std::fs::write(
+        emitted.join("tests/JsonBuilderNestedValuesTest.cs"),
+        format!(
+            "using System.Collections.Generic;\nusing Xunit;\n\nnamespace Roundhouse;\n\npublic class JsonBuilderNestedValuesTest\n{{\n    [Fact]\n    public void NestedValues() {{\n        var v = new List<object?> {{ new List<object?> {{ \"b\", null }}, new List<object?> {{ 2L, 1.5 }}, new List<object?>(), \"x\", new Dictionary<string, object?> {{ [\"name\"] = \"b\" }} }};\n        Assert.Equal({EXPECTED:?}, JsonBuilder.EncodeValue(v));\n        Assert.Equal(\"[1,2]\", JsonBuilder.EncodeValue(new List<long> {{ 1L, 2L }}));\n    }}\n\n    [Fact]\n    public void NarrowedWritesReachTheOriginal() {{\n        var l = new List<long> {{ 1L }};\n        Article.AppendThree(l);\n        Assert.Equal(new List<long> {{ 1L, 3L }}, l);\n        var h = new Dictionary<string, object?>();\n        Article.PutK(h);\n        Assert.Equal(1L, h[\"k\"]);\n    }}\n}}\n"
+        ),
+    )
+    .unwrap();
+    run(&emitted, "dotnet", &["test", "tests/App.Tests.csproj", "--filter", "FullyQualifiedName~JsonBuilderNestedValuesTest"]);
 }
