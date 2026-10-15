@@ -76,7 +76,7 @@ pub(super) fn mark_local_var_ty(name: &str, ty: crate::ty::Ty) {
 /// the same `.clone().unwrap()` Option-unwrap fires for `params =
 /// match_pattern(...)` locals as for function params declared
 /// `Option<T>` in RBS.
-fn var_decl_ty(name: &str) -> Option<crate::ty::Ty> {
+pub(super) fn var_decl_ty(name: &str) -> Option<crate::ty::Ty> {
     param_ty(name).or_else(|| local_var_ty(name))
 }
 

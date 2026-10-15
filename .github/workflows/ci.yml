@@ -2372,6 +2372,12 @@ jobs:
           name: ci-executed-rust-inflector-${{ github.run_attempt }}
           path: ${{ steps.inflector.outputs.bundle }}
           retention-days: 7
+      - name: cargo test --test json_builder_nested_values on rust
+        if: ${{ !cancelled() && matrix.target == 'rust' }}
+        run: cargo test --locked --test json_builder_nested_values nested_values_encode_on_rust -- --ignored --nocapture --exact
+      - name: cargo test --test json_builder_nested_values on go
+        if: ${{ !cancelled() && matrix.target == 'go' }}
+        run: cargo test --locked --test json_builder_nested_values nested_values_encode_on_go -- --ignored --nocapture --exact
       - name: cargo test --test crystal_toolchain -- --ignored
         if: ${{ !cancelled() && matrix.target == 'crystal' }}
         run: cargo test --test crystal_toolchain -- --ignored --nocapture
