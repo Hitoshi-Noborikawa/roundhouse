@@ -14,6 +14,7 @@ require "rack"
 require_relative "main"
 require_relative "cable"
 require_relative "runtime/gzip_cache"
+require_relative "runtime/thruster_cache"
 
 Main.configure_default_adapter!
 
@@ -45,6 +46,12 @@ ActiveJob.drain_in_background!
 # the rendered `<turbo-stream>` to every WS connection subscribed
 # to that stream name.
 Broadcasts.set_transport(Cable::Registry)
+
+# Thruster's response cache, in process (runtime/thruster_cache.rb says
+# why). Outermost, so a stored stylesheet or avatar is answered before
+# the static file server or the app is reached, as Thruster answers
+# before Puma.
+use ThrusterCache::Middleware
 
 # Static asset serving — `rake assets` lays files out under
 # `static/assets/*` (CSS + JS) plus root-level icons. Rack::Static
