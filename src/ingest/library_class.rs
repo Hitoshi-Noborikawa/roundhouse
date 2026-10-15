@@ -2339,7 +2339,12 @@ fn walk_decl_body_with_visibility<'pr>(
                                         continue;
                                     }
                                     out.includes.push(ClassId(Symbol::from(path.join("::"))));
-                                    out.include_spans.push(super::util::node_span(&arg, file));
+                                    // The `include` call's own span, not
+                                    // the argument's: a refusal should
+                                    // point at `include` even when the
+                                    // module name sits on a continuation
+                                    // line (`include\n  X`).
+                                    out.include_spans.push(super::util::node_span(&stmt, file));
                                 } else if crate::ingest::util::is_rails_url_helpers_chain(&arg) {
                                     // `include Rails.application.routes.
                                     // url_helpers` (lobsters' Routes class,
@@ -2351,7 +2356,7 @@ fn walk_decl_body_with_visibility<'pr>(
                                     // ruby emit rewrites `X.<helper>` call
                                     // sites through RouteHelpers.
                                     out.includes.push(ClassId(Symbol::from("RouteHelpers")));
-                                    out.include_spans.push(super::util::node_span(&arg, file));
+                                    out.include_spans.push(super::util::node_span(&stmt, file));
                                 }
                             }
                         }
