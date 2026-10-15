@@ -1,0 +1,6 @@
+# Typing contract for mime_negotiation.rb beside this file.
+module ActionDispatch
+  module MimeNegotiation
+    def self.should_apply_vary_header?: (String accept, String x_requested_with, String content_type, bool format_param) -> bool
+  end
+end

@@ -1304,15 +1304,18 @@ fn reject_unsupported_data_factories(app: &App, target: BuildTarget) -> Result<(
     if matches!(target, BuildTarget::Blog | BuildTarget::Ruby | BuildTarget::Spinel) {
         return Ok(());
     }
+    fn report(span: crate::span::Span, target: &str, found: &mut bool) {
+        *found = true;
+        emit::diagnostics::report_unsupported(
+            span,
+            target,
+            "Data.define",
+            "this target has no supported Data factory representation; use Ruby or Spinel",
+        );
+    }
     fn visit(expr: &crate::expr::Expr, target: &str, found: &mut bool) {
         if expr.decisions & crate::expr::RESOLVED_DATA_FACTORY != 0 {
-            *found = true;
-            emit::diagnostics::report_unsupported(
-                expr.span,
-                target,
-                "Data.define",
-                "this target has no supported Data factory representation; use Ruby or Spinel",
-            );
+            report(expr.span, target, found);
         }
         expr.node.for_each_child(&mut |child| visit(child, target, found));
     }
@@ -1320,6 +1323,11 @@ fn reject_unsupported_data_factories(app: &App, target: BuildTarget) -> Result<(
     crate::lower::for_each_forwarding_body_ref(app, &mut |expr| {
         visit(expr, target.as_str(), &mut found);
     });
+    // A file-level `X = Data.define(…)` is a library class, not an
+    // expression in a body.
+    for (_, span) in app.library_classes.iter().filter_map(|lc| lc.data_define()) {
+        report(span, target.as_str(), &mut found);
+    }
     if found {
         return Err(format!("{}: Data.define is not supported; use Ruby or Spinel", target.as_str()));
     }
@@ -3219,9 +3227,11 @@ fn ruby_family_runtime_files(
             for (path, content) in files.iter_mut() {
                 if path == "runtime/db_cruby.rb" {
                     *path = "runtime/db.rb".to_string();
-                    content.insert_str(0, TIME_PARSING_REQUIRE);
+                    // Below the file's magic comments, or the requires would
+                    // switch its `frozen_string_literal` off.
+                    insert_require_line(content, TIME_PARSING_REQUIRE.trim_end());
                     if sql_functions.is_some() {
-                        content.insert_str(0, "require_relative \"sql_functions\"\n");
+                        insert_require_line(content, "require_relative \"sql_functions\"");
                     }
                 }
             }
@@ -3411,6 +3421,8 @@ fn ruby_family_runtime_files(
     // gets the block exactly once; this is the ruby family's turn, and
     // the ruby family is the one that can run the lines.
     apply_module_mixins(&mut files, app, MixinForm::ExplicitReceiver);
+    apply_app_requires(&mut files, app, RequireTarget::RubyFamily);
+    apply_rails_version(&mut files, app);
     // Overlay boot replaces the spinel boot wholesale (see comment above
     // on apply_module_mixins), wiping the Date-package inject from
     // `spinel_files`. Re-inject only the shared `date_*` helpers — not
@@ -3538,6 +3550,35 @@ fn apply_cable_connection(files: &mut [(String, String)], app: &App) {
     );
     for (path, content) in files.iter_mut() {
         if !path.ends_with("/action_cable.rb") {
+            continue;
+        }
+        let Some(start) = content.find(HEAD) else { continue };
+        let Some(rel_end) = content[start..].find(TAIL) else { continue };
+        let end = start + rel_end + TAIL.len();
+        content.replace_range(start..end, &generated);
+    }
+}
+
+/// `runtime/i18n_locale.rb`'s generated block: the app's
+/// `config.i18n.default_locale` and `available_locales` (read at ingest,
+/// `App::i18n`), as the literals `I18n.default_locale` and
+/// `I18n.available_locales` answer and `I18n.locale =` checks against.
+/// An app that sets neither keeps the file's `:en`.
+fn apply_i18n_locales(files: &mut [(String, String)], app: &App) {
+    const HEAD: &str = "  # >>> generated: i18n-locales\n";
+    const TAIL: &str = "  # <<< generated: i18n-locales\n";
+    let catalog = app.i18n.or_rails_default();
+    let sym = |l: &str| match l.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+        true => format!(":{l}"),
+        false => format!(":{}", crate::emit::ruby::expr::ruby_str_literal(l)),
+    };
+    let available = catalog.locales().iter().map(|l| sym(l)).collect::<Vec<_>>().join(", ");
+    let generated = format!(
+        "{HEAD}  def self.app_default_locale\n    {}\n  end\n\n  def self.app_available_locales\n    [{available}]\n  end\n{TAIL}",
+        sym(&catalog.locale)
+    );
+    for (path, content) in files.iter_mut() {
+        if !path.ends_with("runtime/i18n_locale.rb") {
             continue;
         }
         let Some(start) = content.find(HEAD) else { continue };
@@ -4567,6 +4608,111 @@ fn mixin_target_keyword(app: &App, target: &str) -> &'static str {
     }
 }
 
+/// Which tree [`apply_app_requires`] writes into.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum RequireTarget {
+    RubyFamily,
+    Spinel,
+}
+
+/// Standard libraries in `ingest::app`'s requirable list that Spinel has
+/// no package or native module for: `spinel` warns "is not available in
+/// Spinel" for each, and an app binary's `--require-gate` (from `spin
+/// flags`) makes that fatal. The spinel tree leaves them out, as it did
+/// before app requires were carried; the ruby family loads them all.
+const SPINEL_LACKS: &[&str] = &[
+    "date", "delegate", "English", "etc", "io/nonblock", "io/wait", "ipaddr", "observer", "pp",
+    "weakref", "yaml",
+];
+
+/// The app's own standard-library requires ([`App::app_requires`]) at
+/// the head of `boot.rb`, ahead of everything that file loads. Twice on
+/// the ruby family, like the mixins: the overlay's boot.rb replaces the
+/// spinel one wholesale, so each final tree gets the block from its own
+/// call. Idempotent, so a tree that already has it keeps one copy.
+///
+/// A library whose constant the tree defines itself is left out, by the
+/// rule `bundled_require_gaps` reads for the same table: the runtime's
+/// own `ERB` and `Shellwords` stand in for the libraries, and loading
+/// the library as well would reopen them (spinel's erb package opens
+/// `class ERB` over the runtime's module).
+fn apply_app_requires(files: &mut [(String, String)], app: &App, target: RequireTarget) {
+    let provided_by_tree = |lib: &str| {
+        let require_line = format!("require {lib:?}");
+        BUNDLED.iter().filter(|(_, feature)| *feature == lib).any(|(konst, _)| {
+            files.iter().any(|(p, c)| {
+                p.ends_with(".rb") && defines_constant(c, konst) && !requires_feature(c, &require_line)
+            })
+        })
+    };
+    let libs: Vec<&String> = app
+        .app_requires
+        .iter()
+        .filter(|lib| !provided_by_tree(lib))
+        .filter(|lib| target == RequireTarget::RubyFamily || !SPINEL_LACKS.contains(&lib.as_str()))
+        .collect();
+    if libs.is_empty() {
+        return;
+    }
+    const MARK: &str = "# The app's own standard-library requires";
+    let Some((_, boot)) = files.iter_mut().find(|(p, _)| p == "boot.rb") else { return };
+    if boot.contains(MARK) {
+        return;
+    }
+    let mut block = format!(
+        "{MARK} (`require` lines in app/ and lib/,\n\
+         # which the emitted files do not carry; see App::app_requires).\n"
+    );
+    for lib in libs {
+        block.push_str(&format!("require {lib:?}\n"));
+    }
+    block.push('\n');
+    boot.insert_str(0, &block);
+}
+
+/// `Rails::VERSION` as the app's own Rails answers it: the `rails` (or
+/// `railties`) version its `Gemfile.lock` resolved, split the way
+/// railties' `gem_version.rb` splits it (MAJOR, MINOR, TINY, PRE, and
+/// STRING joined from them), for an app that prints
+/// `Rails::VERSION::STRING`. Without a lockfile nothing is written and the
+/// constant stays undefined, as before. The block goes right after
+/// `runtime/rails` loads, ahead of the app's own files, as `require
+/// "rails"` defines it in Rails before `config/application.rb` runs.
+fn apply_rails_version(files: &mut [(String, String)], app: &App) {
+    const MARK: &str = "# Rails::VERSION from the app's Gemfile.lock";
+    let Some(lock) = &app.gem_lock else { return };
+    let Some(version) = ["rails", "railties"].iter().find_map(|g| {
+        lock.specs.iter().find(|(n, _)| n == g).map(|(_, v)| v.clone())
+    }) else {
+        return;
+    };
+    // A version is digits, letters and dots (`8.1.0.rc1`); anything else
+    // would be spelled into a double-quoted Ruby string as written.
+    if version.is_empty() || !version.chars().all(|c| c.is_ascii_alphanumeric() || c == '.') {
+        return;
+    }
+    let Some((_, boot)) = files.iter_mut().find(|(p, _)| p == "boot.rb") else { return };
+    if boot.contains(MARK) {
+        return;
+    }
+    let parts: Vec<&str> = version.split('.').collect();
+    let num = |i: usize| parts.get(i).and_then(|p| p.parse::<u32>().ok()).unwrap_or(0);
+    let pre = if parts.len() > 3 { format!("{:?}", parts[3..].join(".")) } else { "nil".to_string() };
+    let block = format!(
+        "{MARK} (see project.rs::apply_rails_version).\n\
+         module Rails\n  module VERSION\n    MAJOR = {}\n    MINOR = {}\n    TINY = {}\n    PRE = {pre}\n    STRING = {version:?}\n  end\nend\n",
+        num(0), num(1), num(2)
+    );
+    const AFTER: &str = "require_relative \"runtime/rails\"\n";
+    match boot.find(AFTER) {
+        Some(at) => boot.insert_str(at + AFTER.len(), &block),
+        None => {
+            boot.push('\n');
+            boot.push_str(&block);
+        }
+    }
+}
+
 /// THE FORM DIFFERS BY TARGET, and the reason is spinel's, not ours.
 /// `X.prepend Y` through an explicit receiver is refused outright there
 /// — "the class graph, ancestor chain, and method/ivar layout are baked
@@ -5224,7 +5370,7 @@ fn unavailable_class_module_construct(name: &str, target: &str) -> Option<&'stat
         // rqrcode_core's / spinel-rqrcode's.
         | "RQRCodeCore::QRCodeRunTimeError" | "RQRCodeCore::QRCodeArgumentError"
         | "GC" | "OpenSSL::HMAC" | "CSV::MalformedCSVError"
-        | "Enumerator::Product" | "Enumerator::Lazy"
+        | "Enumerator::Product" | "Enumerator::Lazy" | "Enumerator::Chain"
         | "Monitor" | "ConditionVariable" | "Thread::ConditionVariable"
         | "UNIXServer" | "UNIXSocket" | "Open3" | "Find");
     if !bundled {
@@ -5253,13 +5399,18 @@ const RUBY_SPINEL_ONLY_METHODS: &[(&str, &str)] = &[
     // `lower::record_snapshot`'s closed-world `constantize` — the
     // generated `case` lives in the same ruby-family/spinel file.
     ("ActiveRecord::Base", "instantiate_named"),
+    // `lower::preloader` over several models' records: `runtime/ruby/active_record/preloading.rb`, which no strict target loads.
+    ("ActiveRecord::Preloading", "records"),
     // `lower::errors_index`'s `errors.to_hash`, `messages`,
-    // `attribute_names` and `delete`: the helpers are
+    // `attribute_names`, `delete`, `details`, `import` and `merge!`: the helpers are
     // `runtime/ruby/active_support_ext.rb`, which no strict target loads.
     ("ActiveSupport", "errors_to_hash"),
     ("ActiveSupport", "errors_messages"),
     ("ActiveSupport", "errors_attribute_names"),
     ("ActiveSupport", "errors_delete"),
+    ("ActiveSupport", "errors_details"),
+    ("ActiveSupport", "errors_import"),
+    ("ActiveSupport", "errors_merge"),
 ];
 
 /// Instance methods only the ruby family and spinel can answer: a model's
@@ -5831,8 +5982,8 @@ fn spinel_files(app: &App, fixture: &Path) -> Result<(Vec<(String, String)>, Vec
         files.push(("sig/runtime/tcp_socket_stub.rbs".to_string(), rbs));
     }
 
-    // ERB::Util shim sidecar — same story as CGI: spinel has no stdlib
-    // ERB, the flat walk emits runtime/erb_spinel.rb, and the .rbs pins
+    // ERB::Util shim sidecar: the flat walk emits runtime/erb_spinel.rb,
+    // which reopens spinel's `packages/erb` class, and the .rbs pins
     // html_escape's String return so callers concatenating it stay typed.
     {
         let rbs = crate::runtime_files::read_to_string("runtime/spinel/erb_spinel.rbs")
@@ -5888,6 +6039,14 @@ fn spinel_files(app: &App, fixture: &Path) -> Result<(Vec<(String, String)>, Vec
         let rbs = crate::runtime_files::read_to_string("runtime/spinel/action_controller_head.rbs")
             .map_err(|e| format!("read runtime/spinel/action_controller_head.rbs: {e}"))?;
         files.push(("sig/runtime/action_controller_head.rbs".to_string(), rbs));
+    }
+
+    // Rails 8.1.4 `send_data(filename:)` and its Content-Disposition
+    // escaping, which works over UTF-8 bytes: Ruby family and Spinel only.
+    {
+        let rbs = crate::runtime_files::read_to_string("runtime/spinel/action_controller_send_data.rbs")
+            .map_err(|e| format!("read runtime/spinel/action_controller_send_data.rbs: {e}"))?;
+        files.push(("sig/runtime/action_controller_send_data.rbs".to_string(), rbs));
     }
 
     // HTTP Token/Basic auth sidecar — the ActionController::Base reopen in
@@ -6124,8 +6283,8 @@ fn spinel_files(app: &App, fixture: &Path) -> Result<(Vec<(String, String)>, Vec
         // Stripped when the lock has no `pay` (see `apply_pay_demand`).
         "pay",
         // `I18n.locale` / `default_locale` — the locale campfire folds
-        // into its cache keys. Rails' default, `:en`; setting one is
-        // not modeled (see the file's header).
+        // into its cache keys; per thread, the app's default until a
+        // request sets one (see the file's header).
         "i18n_locale",
     ] {
         let rb = format!("runtime/ruby/{stem}.rb");
@@ -6296,6 +6455,7 @@ fn spinel_files(app: &App, fixture: &Path) -> Result<(Vec<(String, String)>, Vec
     apply_content_layout(&mut files, app);
     apply_content_helper_attributes(&mut files, app);
     apply_content_helper_tags(&mut files, app);
+    apply_i18n_locales(&mut files, app);
     // The `only:`-as-finder specializations, also in the shared base:
     // `runtime/global_id_locator.rb` is ONE file that both the spinel
     // tree and the ruby overlay require, and the rewrite that names
@@ -6311,6 +6471,8 @@ fn spinel_files(app: &App, fixture: &Path) -> Result<(Vec<(String, String)>, Vec
     apply_models_aggregator(&mut files);
     apply_route_helpers_demand(&mut files);
     apply_module_mixins(&mut files, app, MixinForm::Reopen);
+    apply_app_requires(&mut files, app, RequireTarget::Spinel);
+    apply_rails_version(&mut files, app);
     // All three scaffold targets (spinel + the ruby/jruby trees derived
     // from this set) ship the comprehensive scaffold README as SPECIMEN.md,
     // freeing README.md for the generated quick-start `ensure_readme`
@@ -6699,7 +6861,7 @@ fn apply_test_gem_wiring(files: &mut Vec<(String, String)>) {
             const BOOT: &str = "require_relative \"../boot\"\n";
             match helper.find(BOOT) {
                 Some(at) if *gem == "webmock" => helper.insert_str(at + BOOT.len(), &format!("{line}\n")),
-                _ => helper.insert_str(0, &format!("{line}\n")),
+                _ => insert_require_line(helper, &line),
             }
         }
         let with_mocha = needed.iter().any(|(gem, _)| *gem == "mocha");
@@ -7278,7 +7440,7 @@ fn apply_locked_external_gem_wiring(files: &mut Vec<(String, String)>, app: &App
             .map(|feature| format!("require {feature:?}\n"))
             .collect::<String>();
         if !requires.is_empty() {
-            boot.insert_str(0, &format!("{requires}\n"));
+            insert_require_line(boot, &requires);
         }
     }
     files.retain(|(path, _)| path != "Gemfile.lock");

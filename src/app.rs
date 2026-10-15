@@ -355,6 +355,15 @@ pub struct App {
     /// kept mixin supplies.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub initializer_filters: Vec<InitializerFilter>,
+    /// Standard libraries the app's own files require (`require
+    /// "io/console"` at the top of a channel, `require "pty"` in a
+    /// service), sorted and deduplicated. The emitted files do not carry
+    /// their source's requires, so the ruby-family trees write these
+    /// into `boot.rb`, which every program built from the tree loads:
+    /// a production Rails app eager-loads every file at boot, so the
+    /// libraries are loaded before any request either way.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub app_requires: Vec<String>,
     /// SQL functions an initializer registers on every SQLite
     /// connection (`raw_connection.create_function("regexp", 2) do …`,
     /// `create_aggregate("stddev", 1) do step … finalize … end`).
@@ -845,6 +854,7 @@ impl App {
             time_formats: BTreeMap::new(),
             module_mixins: Vec::new(),
             initializer_filters: Vec::new(),
+            app_requires: Vec::new(),
             sql_functions: Vec::new(),
             rails_application: None,
             concern_filters: HashMap::new(),

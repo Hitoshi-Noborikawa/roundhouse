@@ -1,19 +1,85 @@
-# `I18n.locale` / `I18n.default_locale` — the locale an app folds into
-# its cache keys (campfire's CachedResponses and MessagesHelper key
-# every cached page and fragment by it).
+# frozen_string_literal: true
+# `I18n.locale` / `I18n.default_locale` / `I18n.available_locales`, the
+# locale a request runs in, and the answers for a key the locale lacks.
 #
-# Rails' default locale is `:en`, and the current locale is the default
-# until something sets it. Both answer `:en` here; setting a locale at
-# run time (`I18n.locale =`, `with_locale`) is not modeled. Translation
-# is folded at compile time (`src/lower/i18n_translate.rs`); what reaches
-# here is the answer for a key the locale lacks.
+# Translation is folded at compile time (`src/lower/i18n_translate.rs`),
+# once per locale the app makes available; a call that can run in more
+# than one picks its branch by `I18n.locale` when it runs. The locale is
+# per thread, as the gem holds it (`I18n.config` is thread-local), and
+# is the default until something sets it. The app's default and
+# available locales are spelled into the generated block below
+# (`project::apply_i18n_locales`); an app that sets none keeps Rails'
+# `:en`.
+#
+# `I18n.with_locale(l) { … }` returns its block's value, which no
+# signature here can type, so `lower::i18n_translate` spells each call
+# site out over `enter_locale` / `leave_locale`.
 module I18n
+  # `I18n.locale = :xx` for a locale the app does not make available
+  # (the gem's `enforce_available_locales`, true by default).
+  class InvalidLocale < ArgumentError
+  end
+
   def self.default_locale
-    :en
+    app_default_locale
+  end
+
+  def self.available_locales
+    app_available_locales
+  end
+
+  # The locale set for this thread, by name ("" when none is): a Symbol
+  # read back out of `Thread.current` is a value the strict targets
+  # cannot narrow, and a String they can. (Not `locale_set`: Spinel
+  # spells `locale=` with that name.)
+  def self.thread_locale_name
+    Thread.current[:roundhouse_i18n_locale].to_s
   end
 
   def self.locale
-    default_locale
+    set = thread_locale_name
+    set.empty? ? app_default_locale : set.to_sym
+  end
+
+  # `I18n.locale = x`: an available locale, a Symbol or its String.
+  def self.locale=(value)
+    Thread.current[:roundhouse_i18n_locale] = checked_locale(value).to_s
+  end
+
+  # `value` as the locale it names, or the gem's InvalidLocale, whose
+  # message shows the value as `inspect` does (nil is not a locale).
+  def self.checked_locale(value)
+    name = value.to_s.to_sym
+    return name if !value.nil? && app_available_locales.include?(name)
+    shown = value.nil? ? "nil" : (value.is_a?(Symbol) ? ":" + value.to_s : "\"" + value.to_s + "\"")
+    raise InvalidLocale, shown + " is not a valid locale"
+  end
+
+  # A call's `locale:` read when it runs, by name: nil is the current
+  # locale, anything else must be available.
+  def self.locale_name(value)
+    value.nil? ? locale.to_s : checked_locale(value).to_s
+  end
+
+  # `with_locale(l)`'s first half: nil changes nothing and answers nil,
+  # anything else is set and the locale it replaces answered, for
+  # `leave_locale` to put back however the block ends.
+  def self.enter_locale(value)
+    return nil if value.nil?
+    previous = locale.to_s
+    Thread.current[:roundhouse_i18n_locale] = checked_locale(value).to_s
+    previous
+  end
+
+  def self.leave_locale(previous)
+    Thread.current[:roundhouse_i18n_locale] = previous unless previous.nil?
+    nil
+  end
+
+  # Whether the running environment is one of `envs` (comma-separated),
+  # where `config.i18n.fallbacks` differs by environment.
+  def self.running_in?(envs)
+    envs.split(",").include?(Rails.env.to_s)
   end
 
   class MissingTranslationData < ArgumentError
@@ -49,6 +115,15 @@ module I18n
     message
   end
 
+  # The same answer when the call's `default:` was a list of keys none of
+  # which is there either: I18n lists every key it considered, `rest`
+  # being the defaults' lines (`"\n- en.posts.title"`).
+  def self.missing_translation_among(key, rest, raises)
+    message = "Translation missing. Options considered were:\n- " + key + rest
+    raise MissingTranslationData, message if raises
+    message
+  end
+
   # A template's `t` for `key`: Action View's debug span, titled with the
   # key and the call's options (`details`, each value escaped once), and
   # reading as the key's last segment titleized.
@@ -59,4 +134,14 @@ module I18n
     text = ActionView::ViewHelpers.html_escape(ActiveSupport.titleize(last))
     "<span class=\"translation_missing\" title=\"" + title + "\">" + text + "</span>"
   end
+
+  # >>> generated: i18n-locales
+  def self.app_default_locale
+    :en
+  end
+
+  def self.app_available_locales
+    [:en]
+  end
+  # <<< generated: i18n-locales
 end

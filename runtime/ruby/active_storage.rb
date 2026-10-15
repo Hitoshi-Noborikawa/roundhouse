@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 # Active Storage — what a `has_one_attached` reader hands back, the
 # blob it points at, and the identity "variant" of that blob.
 #

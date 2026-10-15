@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 # `Rack::Utils.q_values` and `Rack::Utils.select_best_encoding`, ported
 # from rack 3.2 (lib/rack/utils.rb) for the trees that have no rack gem
 # to load. The ruby family swaps this file for `require "rack/utils"`

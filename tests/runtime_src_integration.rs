@@ -1044,7 +1044,12 @@ fn every_runtime_method_body_concretely_typed() {
     // `ActiveStorage::AttachedMany#map` (the proxy's Enumerable reads for a
     // jbuilder block over `record.pictures`) adds 1, MEASURED: the value
     // of its `yield`, the same block-return escape `#each` carries.
-    const CEILING: usize = 718;
+    // MEASURED 734 on 2026-10-14: ActiveRecord's statement-error hierarchy
+    // (`ActiveRecordError`, `StatementInvalid` and the fourteen below them)
+    // adds one gradual site per class, its `super(message)` into the
+    // exception initializer, as the existing exception classes carry (+16
+    // in active_record/errors.rb).
+    const CEILING: usize = 734;
     assert!(
         total_gradual <= CEILING,
         "{total_gradual} Ty::Untyped sites exceeds ceiling of {CEILING}",

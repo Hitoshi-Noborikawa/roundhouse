@@ -940,7 +940,7 @@ pub(super) fn json_render_encode(value: &Expr) -> Expr {
         ExprNode::Send {
             recv: Some(recv),
             method: Symbol::from(if primitive_collection { "generate" } else { "encode" }),
-            args: vec![value.clone()],
+            args: vec![if primitive_collection { crate::lower::to_json::finite_floats(value.clone()) } else { value.clone() }],
             block: None,
             parenthesized: true,
         },

@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 # CRuby-only Rails::Application#routes surface.
 #
 # Lobsters' config/application.rb composes absolute URLs via

@@ -32,6 +32,10 @@ use roundhouse::ingest::ingest_app;
 
 #[path = "support/emit_and_run.rs"]
 mod emit_and_run;
+#[path = "support/string_truncate.rs"]
+mod string_truncate;
+#[path = "spinel_toolchain/string_truncate.rs"]
+mod string_truncate_native;
 #[path = "support/array_excluding.rs"]
 mod array_excluding;
 #[path = "spinel_toolchain/array_excluding.rs"]
@@ -52,6 +56,10 @@ mod dry_validation;
 mod dry_monads;
 #[path = "support/rails_root_join.rs"]
 mod rails_root_join;
+#[path = "support/cable_allowed_origins.rs"]
+mod cable_allowed_origins_contract;
+#[path = "spinel_toolchain/cable_allowed_origins.rs"]
+mod cable_allowed_origins;
 #[path = "support/cable_actions.rs"]
 mod cable_actions_contract;
 #[path = "spinel_toolchain/cable_actions.rs"]
@@ -64,6 +72,18 @@ mod cable_broadcast_json;
 mod index_with_contract;
 #[path = "spinel_toolchain/index_with.rs"]
 mod index_with;
+#[path = "support/send_data_filename.rs"]
+mod send_data_filename_contract;
+#[path = "spinel_toolchain/send_data_filename.rs"]
+mod send_data_filename;
+#[path = "support/vary_accept.rs"]
+mod vary_accept_contract;
+#[path = "spinel_toolchain/vary_accept.rs"]
+mod vary_accept;
+#[path = "support/erb_template.rs"]
+mod erb_template_contract;
+#[path = "spinel_toolchain/erb_template.rs"]
+mod erb_template;
 #[path = "support/anonymous_keywords.rs"]
 mod anonymous_keywords;
 #[path = "support/lambda_signatures.rs"]
@@ -74,6 +94,10 @@ mod lambda_signatures;
 mod native_http;
 #[path = "spinel_toolchain/action_controller_head.rs"]
 mod action_controller_head;
+#[path = "support/conditional_get.rs"]
+mod conditional_get_contract;
+#[path = "spinel_toolchain/conditional_get.rs"]
+mod conditional_get;
 #[path = "spinel_toolchain/action_dispatch_request_put.rs"]
 mod action_dispatch_request_put;
 #[path = "spinel_toolchain/strong_params.rs"]
@@ -90,6 +114,10 @@ mod json_params;
 mod io_process_constants_contract;
 #[path = "spinel_toolchain/io_process_constants.rs"]
 mod io_process_constants;
+#[path = "support/class_side_default.rs"]
+mod class_side_default_contract;
+#[path = "spinel_toolchain/class_side_default.rs"]
+mod class_side_default;
 #[path = "spinel_toolchain/action_text_sanitize.rs"]
 mod action_text_sanitize;
 #[path = "support/campfire_caches.rs"]
@@ -104,6 +132,10 @@ mod params_helper_no_permit;
 mod rails_parity;
 #[path = "spinel_toolchain/server_binding.rs"]
 mod server_binding;
+#[path = "support/request_id_runtime.rs"]
+mod request_id_runtime_contract;
+#[path = "spinel_toolchain/request_id_runtime.rs"]
+mod request_id_runtime;
 
 /// Compile and execute the shared custom Data factory contract with Spinel;
 /// successful Ruby emission alone does not establish native target support.
@@ -120,6 +152,10 @@ fn custom_data_factories_run_natively() {
 mod stdlib_rnp_contract;
 #[path = "spinel_toolchain/stdlib_rnp.rs"]
 mod stdlib_rnp;
+#[path = "support/representable_decorator.rs"]
+mod representable_decorator;
+#[path = "spinel_toolchain/representable.rs"]
+mod representable;
 
 /// The native counterpart of the generic emitted-Ruby regression test.
 #[test]

@@ -213,7 +213,16 @@ pub(super) fn throws_lookup(type_name: &str, method_camel: &str) -> bool {
 }
 
 fn is_error_class_name(name: &str) -> bool {
-    ERROR_CLASSES.with(|m| m.borrow().contains(name))
+    let mut cur = name.to_string();
+    loop {
+        if ERROR_CLASSES.with(|m| m.borrow().contains(&cur)) {
+            return true;
+        }
+        match CLASS_PARENTS.with(|m| m.borrow().get(&cur).cloned()) {
+            Some(p) => cur = p,
+            None => return false,
+        }
+    }
 }
 
 /// Ruby's `Module#<` family. `RecordNotFound < StandardError` is a

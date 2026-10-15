@@ -84,12 +84,14 @@ module ActiveRecord
     @message: String
     @full_message: String
     @symbolic: bool
+    @optionless: bool
     def attribute: () -> String
     def kind: () -> String
     def message: () -> String
     def full_message: () -> String
     def symbolic: () -> bool
-    def initialize: (String attribute, String kind, String message, String full_message, bool symbolic) -> void
+    def optionless: () -> bool
+    def initialize: (String attribute, String kind, String message, String full_message, bool symbolic, bool optionless) -> void
   end
 
   class Base
