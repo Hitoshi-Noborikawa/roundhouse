@@ -77,6 +77,14 @@ const TRACKED_DECLARATIONS: &[&str] = &[
     "module_function",
 ];
 
+/// Thor's command-annotation DSL: these describe the NEXT command and
+/// define no methods of their own, so a visibility marker coexisting
+/// with one is never the soundness hole `marker_mixed_with_unmodeled_call`
+/// otherwise guards against — but only the bare, receiverless spelling
+/// Thor's own DSL uses; see [`marker_mixed_with_unmodeled_call`] for why
+/// a self-qualified or conditionally-guarded one still isn't exempt.
+const THOR_DSL_ANNOTATIONS: &[&str] = &["desc", "long_desc", "option", "method_option", "class_option"];
+
 /// Does this `included do … end` body mix a visibility marker (bare or
 /// named — either spelling makes the marker's reach matter) with some
 /// OTHER call, ANYWHERE in the body (including inside `if`/`unless`
@@ -87,6 +95,15 @@ const TRACKED_DECLARATIONS: &[&str] = &[
 /// includer itself — bare (implicit `self`) or an explicit `self.` —
 /// since a call on some OTHER receiver (`Other.attr_accessor`) cannot
 /// be generating a method on THIS class regardless of what it's named.
+///
+/// A top-level, bare [`THOR_DSL_ANNOTATIONS`] call is ALSO exempt — but
+/// narrowly: only that exact shape. `self.desc …` isn't a spelling
+/// Thor's DSL itself produces, so it stays an ordinary unmodeled call
+/// (same bucket as any other `self.`-qualified mystery), and one nested
+/// inside an `if`/`unless` reaches [`statement_has_unmodeled_call`]
+/// through [`branch_has_unmodeled_call`]'s own recursion, never through
+/// this exemption, so it stays refused too — conditionally annotating a
+/// Thor command isn't a shape its DSL produces either.
 fn marker_mixed_with_unmodeled_call(body: &Node<'_>) -> bool {
     let Some(statements) = body.as_statements_node() else { return false };
     let stmts = flatten_statements(statements.as_node());
@@ -96,7 +113,18 @@ fn marker_mixed_with_unmodeled_call(body: &Node<'_>) -> bool {
     if !has_marker {
         return false;
     }
-    stmts.iter().any(statement_has_unmodeled_call)
+    stmts.iter().any(|stmt| !is_bare_thor_annotation(stmt) && statement_has_unmodeled_call(stmt))
+}
+
+/// A direct, receiverless call naming one of [`THOR_DSL_ANNOTATIONS`] —
+/// the one shape Thor's own DSL produces. Checked only at the top level
+/// of an `included do` body; see `marker_mixed_with_unmodeled_call`'s
+/// doc comment for why a self-qualified or nested spelling does not
+/// qualify.
+fn is_bare_thor_annotation(stmt: &Node<'_>) -> bool {
+    stmt.as_call_node().is_some_and(|c| {
+        c.receiver().is_none() && THOR_DSL_ANNOTATIONS.contains(&constant_id_str(&c.name()))
+    })
 }
 
 /// A single statement, or (recursively) anything reachable through an

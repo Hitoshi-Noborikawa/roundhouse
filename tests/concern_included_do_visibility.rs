@@ -75,6 +75,30 @@ fn included_do_protected_is_applied_not_rejected() {
         .expect("GadgetTools ingests: `protected` inside `included do` is applied, not rejected");
 }
 
+/// Thor's command-annotation DSL (`desc`, `long_desc`, `option`, …)
+/// describes the next command and defines no methods — a bare marker
+/// is still applied alongside one, the same as alongside a plain `def`.
+/// This is the Mastodon shape (`lib/mastodon/cli/federation.rb`:
+/// `included do; desc …; long_desc …; def self_destruct; …; private;
+/// def domain_match_confirmed?; …; end; end`) `marker_mixed_with_unmodeled_call`
+/// otherwise rejected: not because `desc`/`long_desc` generate
+/// anything, just because they weren't on its allowlist. Like the three
+/// `included_do_*_is_applied_not_rejected` tests above, and for the same
+/// reason (`included_do_defs_are_not_yet_spliced_into_the_model_body`'s
+/// pre-existing, unrelated gap — confirmed by probing `GadgetTools`'s own
+/// `LibraryClass.methods`, which stays empty whether or not a def's
+/// `included do` block ingests clean), the regression proof available
+/// today is ingest succeeding where it used to fail loud, not a
+/// per-method visibility read-back.
+#[test]
+fn included_do_marker_coexists_with_bare_thor_annotations() {
+    gadget_app(
+        "    desc \"polish\", \"Polish it\"\n    long_desc \"explains polishing in depth\"\n    \
+         option :force, type: :boolean\n    def polish = shine\n\n    private\n\n    def shine = \"shiny\"\n",
+    )
+    .expect("GadgetTools ingests: Thor annotations beside `private` are not an unmodeled call");
+}
+
 /// Other dynamic or conditional visibility inside `included do … end`
 /// still fails loud — this fix only recognizes the static `private` /
 /// `protected` forms, not a marker guarded by a runtime condition.
