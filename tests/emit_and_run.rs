@@ -35,6 +35,8 @@ mod view_presence_url_encode;
 mod controller_translate;
 #[path = "emit_and_run/job_rest_params.rs"]
 mod job_rest_params;
+#[path = "emit_and_run/regexp_constants.rs"]
+mod regexp_constants;
 #[path = "emit_and_run/controller_sibling_classes.rs"]
 mod controller_sibling_classes;
 #[path = "emit_and_run/i18n_locales.rs"]

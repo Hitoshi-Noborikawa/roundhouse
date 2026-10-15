@@ -5506,7 +5506,7 @@ fn unavailable_class_module_construct(name: &str, target: &str) -> Option<&'stat
         | "Rails::HTML5::SafeListSanitizer" | "JSON" | "JSON::ParserError"
         | "Struct" | "Mutex" | "Queue" | "SizedQueue"
         | "Thread::Queue" | "Thread::SizedQueue" | "Thread::Mutex"
-        | "ThreadError" | "ClosedQueueError" | "Comparable" | "Enumerable"
+        | "ThreadError" | "ClosedQueueError" | "RegexpError" | "Comparable" | "Enumerable"
         | "JSON::GeneratorError"
         // Ported for spinel (`runtime/ruby/rack_utils.rb`), the gem's own on
         // the ruby family; no strict target loads either.
@@ -5722,6 +5722,17 @@ fn report_unsupported_bundled_constants(app: &App, target: BuildTarget) {
                     format!("ActiveSupport::Duration is the Ruby-family runtime's value class; the {target} runtime ships none"),
                 );
             }
+        }
+        if !matches!(target, "jruby" | "spinel")
+            && let crate::expr::ExprNode::Const { path } = &*expr.node
+            && let ["Regexp", flag @ ("IGNORECASE" | "EXTENDED" | "MULTILINE")] = path.iter().map(|s| s.as_str()).skip_while(|s| s.is_empty()).collect::<Vec<_>>()[..]
+        {
+            emit::diagnostics::report_unsupported(
+                expr.span,
+                target,
+                "bundled_constant",
+                format!("Regexp::{flag} is Ruby's option bit, which the {target} emit has no Regexp to read"),
+            );
         }
         // `translate_site` / `translate_runtime` are reported with their call (`report_i18n_table_sites`).
         if !matches!(target, "jruby" | "spinel")
