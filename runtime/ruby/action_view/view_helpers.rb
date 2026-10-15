@@ -419,8 +419,22 @@ module ActionView
       return s if s.length <= length
       cutoff = length - omission.length
       return omission if cutoff <= 0
-      cutoff = s.rindex(separator, cutoff) || cutoff if separator
+      unless separator.nil?
+        found = rindex_at_or_before(s, separator, cutoff)
+        cutoff = found if found >= 0
+      end
       "#{s[0, cutoff]}#{omission}"
+    end
+
+    # Not `s.rindex(sub, pos)`, which no strict target's runtime answers, and -1 rather than nil, which Go and C# do not narrow from a local.
+    def self.rindex_at_or_before(s, sub, pos)
+      i = s.length - sub.length
+      i = pos if pos < i
+      while i >= 0
+        return i if s[i, sub.length] == sub
+        i -= 1
+      end
+      -1
     end
 
     # Rails 8.1.4's ActionView::TextHelper#word_wrap for positive widths.
