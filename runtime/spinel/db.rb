@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 # Primitive Db surface — the layer that per-model adapter code sits on
 # top of. The contract is database-agnostic; this file is the
 # SQLite-via-libsqlite3-FFI implementation, the runtime spinel-compiled
@@ -56,6 +57,7 @@ module SQL
   ffi_const :OK,   0
   ffi_const :ROW,  100
   ffi_const :DONE, 101
+  ffi_const :BUSY, 5
   # sqlite3_column_type storage classes. NULL is the one the nullable
   # reads have always needed; the rest let `column_value` hand back the
   # driver's native type instead of everything-as-text.
@@ -348,19 +350,26 @@ class QcEntry
   end
 
   def cell_kind(row, i)
-    @kinds[row * @ncols + i]
+    v = @kinds[row * @ncols + i]
+    # Spinel tip (ea683750+): Array[Integer]#[] is Integer? (sp_oint).
+    # Coalesce so qc_int / column_int stay plain Integer and
+    # `_adapter_count` does not unify to sp_oint against sp_poly_count_val.
+    v.nil? ? 0 : v
   end
 
   def cell_int(row, i)
-    @ints[row * @ncols + i]
+    v = @ints[row * @ncols + i]
+    v.nil? ? 0 : v
   end
 
   def cell_float(row, i)
-    @floats[row * @ncols + i]
+    v = @floats[row * @ncols + i]
+    v.nil? ? 0.0 : v
   end
 
   def cell_text(row, i)
-    @texts[row * @ncols + i]
+    v = @texts[row * @ncols + i]
+    v.nil? ? "" : v
   end
 end
 
@@ -602,7 +611,7 @@ class DbConn
     end
     if rc != SQL::OK
       @stat_failures += 1 if STMT_STATS
-      raise "Db.prepare failed (" + rc.to_s + "): " + SQL.sqlite3_errmsg(@dbh) + " — sql: " + sql
+      Db.raise_statement_error("Db.prepare failed (" + rc.to_s + "): " + SQL.sqlite3_errmsg(@dbh) + " — sql: " + sql, rc == SQL::BUSY)
     end
     entry = Stmt.new(sql, st, cached)
     index_cached(entry) if cached
@@ -886,7 +895,7 @@ class DbConn
     msg = SQL.sqlite3_errmsg(@dbh)
     @qc_recording.delete(ptr)
     SQL.sqlite3_reset(ptr)
-    raise "Db.step failed (" + rc.to_s + "): " + msg
+    Db.raise_statement_error("Db.step failed (" + rc.to_s + "): " + msg, rc == SQL::BUSY)
   end
 
   def bind_checked(ptr, idx, rc)
@@ -894,7 +903,7 @@ class DbConn
     msg = SQL.sqlite3_errmsg(@dbh)
     @qc_recording.delete(ptr)
     SQL.sqlite3_reset(ptr)
-    raise "Db.bind failed (" + rc.to_s + ") at parameter " + idx.to_s + ": " + msg
+    Db.raise_statement_error("Db.bind failed (" + rc.to_s + ") at parameter " + idx.to_s + ": " + msg, rc == SQL::BUSY)
   end
 
   def qc_step?(handle)
@@ -1466,7 +1475,15 @@ module Db
     # outside any lease pinned (`pin_transaction`), keeps the thread's
     # connection. A second lease would rebind it and, on release, unbind
     # (and roll back) the outer holder's.
-    return yield if !Thread.current[:db_conn].nil?
+    #
+    # Do not write `return yield if …`: Spinel tip (ea683750+) inlines that
+    # form at each call site and, when the block raises, emits
+    # `sp_oint_arg(({ raise…; 0; }))` — an int where sp_oint is required.
+    # Binding the yield result first keeps the early-return path well-typed.
+    unless Thread.current[:db_conn].nil?
+      result = yield
+      return result
+    end
     pool = pool_for_thread
     idx = pool.lease
     conn = pool.conn(idx)
@@ -1894,13 +1911,8 @@ module Db
     ptr = conn.prepare_uncached(sql)
     e = conn.qc_entry_for(ptr, sql)
     begin
-      begin
-        while conn.step_checked(ptr)
-          e.record_row(ptr)
-        end
-      rescue RuntimeError => err
-        raise ActiveRecord::RecordNotUnique, err.message if Db.unique_violation?(err.message)
-        raise err
+      while conn.step_checked(ptr)
+        e.record_row(ptr)
       end
       e.mark_eof
     ensure
@@ -1913,8 +1925,7 @@ module Db
     rc = SQL.sqlite3_exec(h, sql, nil, nil, nil)
     if rc != SQL::OK
       msg = SQL.sqlite3_errmsg(h)
-      raise ActiveRecord::RecordNotUnique, msg if Db.unique_violation?(msg)
-      raise "Db.exec failed (" + rc.to_s + "): " + msg + " — sql: " + sql
+      Db.raise_statement_error("Db.exec failed (" + rc.to_s + "): " + msg + " — sql: " + sql, rc == SQL::BUSY)
     end
     nil
   end
@@ -1938,11 +1949,29 @@ module Db
     message.include?("UNIQUE constraint failed")
   end
 
+  # Not the driver's own exception: Rails translates every statement error into ActiveRecord's hierarchy (sqlite3_adapter `translate_exception`), keyed on SQLite's own message as `unique_violation?` is.
+  def self.raise_statement_error(message, busy)
+    raise ActiveRecord::RecordNotUnique, message if unique_violation?(message)
+    raise ActiveRecord::NotNullViolation, message if message.include?("NOT NULL constraint failed")
+    raise ActiveRecord::InvalidForeignKey, message if message.include?("FOREIGN KEY constraint failed")
+    raise ActiveRecord::CheckViolation, message if message.include?("CHECK constraint failed")
+    raise ActiveRecord::StatementTimeout, message if busy
+    raise ActiveRecord::StatementInvalid, message
+  end
+
   # Returns the stmt pointer; caller advances with `step?`, reads
   # columns with `column_int` / `column_text`, releases with
   # `finalize`. The -1 length argument lets sqlite measure the SQL
   # itself (NUL-terminated).
   def self.prepare(sql)
+    return prepare_marked(sql) if sql.include?("\x01")
+    prepare_plain(sql)
+  end
+
+  # Prepare without re-entering prepare_marked. Post-lift SQL may still
+  # contain \x01 inside string literals (unmarked bind_literal values);
+  # those bytes are data and must not be stripped or re-dispatched.
+  def self.prepare_plain(sql)
     conn = current_conn
     handle = conn.qc_lookup(sql)
     if handle != 0
@@ -1957,6 +1986,39 @@ module Db
     begin_snapshot(conn)
     ptr = conn.prepare_cached(sql)
     conn.qc_record(sql, ptr)
+    ptr
+  end
+
+  # A Relation read with its hash-condition values marked for binding;
+  # see db_cruby.rb's `prepare_marked`. The result cache records and
+  # replays under `key` (the values written in), so a replay that
+  # promotes re-runs that inline SQL and needs no binds.
+  def self.prepare_marked(marked)
+    binds = ActiveRecord::Relation.lift_binds(marked)
+    sql = binds[0].to_s
+    key = binds[1].to_s
+    return prepare_plain(key) if binds.length <= 2
+    conn = current_conn
+    handle = conn.qc_lookup(key)
+    if handle != 0
+      if @sql_trace
+        $stderr.puts "  CACHE " + key
+      end
+      return handle
+    end
+    record_query(sql)
+    begin_snapshot(conn)
+    ptr = conn.prepare_cached(sql)
+    i = 2
+    while i < binds.length
+      if binds[i] == "i"
+        bind_int(ptr, i / 2, binds[i + 1].to_i)
+      else
+        bind_text(ptr, i / 2, binds[i + 1])
+      end
+      i += 2
+    end
+    conn.qc_record(key, ptr)
     ptr
   end
 
@@ -2320,6 +2382,14 @@ module Db
     return "NULL" if ids.empty?
 
     ids.map { |i| i.to_i.to_s }.join(", ")
+  end
+
+  # The same `IN (...)` batch over string keys (a uuid primary key): each
+  # key quoted as a literal, never `to_i`'d to its leading digits.
+  def self.escape_string_list(ids)
+    return "NULL" if ids.empty?
+
+    ids.map { |i| escape_string(i.to_s) }.join(", ")
   end
 
   # SQLite stores booleans as 0/1 integers (no native bool type) —

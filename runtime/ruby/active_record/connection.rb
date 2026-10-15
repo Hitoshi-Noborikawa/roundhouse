@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 # Ruby-family model surfaces: raw-SQL connections and request-key finders.
 #
 # Rails hands back the adapter itself here; this runtime hands back a
@@ -130,6 +131,25 @@ module ActiveRecord
         i += 1
       end
       false
+    end
+  end
+
+  # The edges of `Model.transaction`, for work that has to wait for the
+  # COMMIT. No-ops here, so this file stays self-contained; the
+  # Ruby-family job registry (runtime/job_registry.rb) redefines them to
+  # hold the ActiveJob payloads of jobs that set
+  # `enqueue_after_transaction_commit`, and a later definition wins.
+  module TransactionHooks
+    def self.began
+      nil
+    end
+
+    def self.committed
+      nil
+    end
+
+    def self.rolled_back
+      nil
     end
   end
 
@@ -360,8 +380,13 @@ module ActiveRecord
     # Reject nil before a key-typed adapter can coerce it. Generated
     # models override `_exists_primary_key_input` with schema-selected
     # dispatch (same split as find) so Spinel never compiles String into
-    # an Integer adapter slot.
-    def self.exists?(id)
+    # an Integer adapter slot. No argument asks for any row (Rails'
+    # `exists?(conditions = :none)`); the optional argument is a splat
+    # so "absent" and `nil` stay distinct without an untyped default.
+    def self.exists?(*ids)
+      return all.exists? if ids.empty?
+      raise ArgumentError, "wrong number of arguments (given #{ids.length}, expected 0..1)" if ids.length > 1
+      id = ids[0]
       return false if id.nil?
       _exists_primary_key_input(id)
     end
@@ -525,6 +550,9 @@ module ActiveRecord
     # `raise ActiveRecord::Rollback` inside the block rolls the
     # transaction back without the exception escaping, and the call
     # answers nil.
+    #
+    # The outermost transaction's edges are reported to
+    # `TransactionHooks` (above). A nested block reports nothing.
     def self.transaction(isolation: nil, requires_new: nil, joinable: true)
       depth = Db._txn_depth
       if depth > 0
@@ -568,6 +596,7 @@ module ActiveRecord
         end
       else
         Db.exec("BEGIN")
+        ActiveRecord::TransactionHooks.began
         Db._txn_depth = 1
         rolled_back = false
         begin
@@ -578,6 +607,7 @@ module ActiveRecord
             rolled_back = true
             Db._txn_depth = 0
             Db.exec("ROLLBACK")
+            ActiveRecord::TransactionHooks.rolled_back
             result = nil
           rescue Exception => e
             rolled_back = true
@@ -590,6 +620,7 @@ module ActiveRecord
               # transaction, not just the statement, does this) — the
               # ROLLBACK's own failure must not hide the real error below.
             end
+            ActiveRecord::TransactionHooks.rolled_back
             raise e
           end
         ensure
@@ -597,7 +628,21 @@ module ActiveRecord
             nil
           else
             Db._txn_depth = 0
-            Db.exec("COMMIT")
+            begin
+              Db.exec("COMMIT")
+            rescue Exception => e
+              # A failed COMMIT (SQLITE_BUSY, a deferred constraint) leaves
+              # the transaction open: end it, and tell the hooks it rolled
+              # back so nothing held for it is queued by a later COMMIT.
+              begin
+                Db.exec("ROLLBACK")
+              rescue StandardError
+                # Already ended; the COMMIT's error is the one to raise.
+              end
+              ActiveRecord::TransactionHooks.rolled_back
+              raise e
+            end
+            ActiveRecord::TransactionHooks.committed
           end
         end
       end
@@ -809,6 +854,24 @@ module ActiveRecord
     # survive); non-Hash inputs raise rather than reach Relation's SQL path.
     def self.find_by(conditions)
       ActiveRecord::Relation.new(self).find_by(conditions.to_h)
+    end
+
+    # `Model.find_or_initialize_by` / `find_or_create_by` /
+    # `find_or_create_by!`: Rails delegates them to `all`, so the
+    # default scope applies to the find and seeds the built record. The
+    # lowered call sites (`lower::first_or_create`) inline the statement
+    # forms; these answer the rest (a receiverless call inside a class
+    # method, an `||` operand).
+    def self.find_or_initialize_by(conditions)
+      ActiveRecord::Relation.new(self).find_or_initialize_by(conditions.to_h)
+    end
+
+    def self.find_or_create_by(conditions)
+      ActiveRecord::Relation.new(self).find_or_create_by(conditions.to_h)
+    end
+
+    def self.find_or_create_by!(conditions)
+      ActiveRecord::Relation.new(self).find_or_create_by!(conditions.to_h)
     end
 
     # `Model.find_sole_by(attrs)` — Rails' `where(attrs).sole`; see

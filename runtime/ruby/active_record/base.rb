@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 require_relative "errors"
 require "time"
 
@@ -140,6 +141,59 @@ module ActiveRecord
     lo
   end
 
+  # Thin reflection surface for `Model.reflect_on_association(:name)`.
+  # Campfire asks `counter_cache_column` (nil when the belongs_to did not
+  # declare `counter_cache:`). Deeper Rails reflection stays unmodeled.
+  module Reflection
+    class AssociationReflection
+      def initialize(name, counter_cache_column)
+        @name = name
+        @counter_cache_column = counter_cache_column
+      end
+
+      def name
+        @name
+      end
+
+      def counter_cache_column
+        @counter_cache_column
+      end
+
+      # Catalog also types `.klass` / `.macro`; presence-only callers get
+      # nil rather than a NameError until those halves are synthesized.
+      # Bare `nil` (return-tail untyped) — not `result = nil; result`,
+      # which rust emits as `Option`/`None` against a Value return
+      # (issue #832). Same shape as `request_for_csrf`.
+      def klass
+        nil
+      end
+
+      def macro
+        nil
+      end
+    end
+  end
+
+  # One error as Rails' `ActiveModel::Error` holds it: the attribute, the
+  # error type (the message itself when `errors.add` was given a String),
+  # the message without the attribute's name, the full message
+  # `errors` lists for it, whether the type is a Symbol, and whether
+  # Rails' `details` keeps nothing beside the type (no `count:` or `value:`).
+  # Not `ActiveModel::Error`: the strict targets emit the class unqualified, beside their own `Error`.
+  class ErrorDetail
+    # `kind`, not Rails' `type`: a field named `type` does not compile in Rust or Go
+    attr_reader :attribute, :kind, :message, :full_message, :symbolic, :optionless
+
+    def initialize(attribute, kind, message, full_message, symbolic, optionless)
+      @attribute = attribute
+      @kind = kind
+      @message = message
+      @full_message = full_message
+      @symbolic = symbolic
+      @optionless = optionless
+    end
+  end
+
   # Base class for all models. Designed to contain *zero* metaprogramming:
   # subclasses provide their own `attributes`, `[]`, `[]=`, `update`, and
   # `initialize`-from-attrs methods (typically by writing them out per
@@ -147,6 +201,89 @@ module ActiveRecord
   # delegates to the adapter + validations + lifecycle hooks — without
   # any reflective access to ivars.
   class Base
+    # Escape existing markers before adding markers to LIKE wildcards.
+    def self.sanitize_sql_like(value, escape_character = "\\")
+      source = value
+      if escape_character != "%" && escape_character != "_" && !escape_character.empty?
+        source = like_escapes_doubled(value, escape_character)
+      end
+      like_wildcards_marked(source, escape_character)
+    end
+
+    # The helpers below hold one counter loop each, accumulating with `x = x + y` rather than `+=`: the Elixir emit turns only that shape into recursion.
+    # `gsub(escape_character, '\0\0')`: every escape character doubled.
+    def self.like_escapes_doubled(value, escape_character)
+      doubled = ""
+      index = 0
+      while index < value.length
+        piece = value[index, 1]
+        step = 1
+        if value[index, escape_character.length] == escape_character
+          piece = escape_character + escape_character
+          step = escape_character.length
+        end
+        doubled = doubled + piece
+        index += step
+      end
+      doubled
+    end
+
+    # `gsub(/(?=[%_])/, escape_character)`: the expanded replacement before each wildcard.
+    def self.like_wildcards_marked(source, escape_character)
+      result = ""
+      index = 0
+      while index < source.length
+        character = source[index, 1]
+        if character == "%" || character == "_"
+          result = result + like_replacement(source, index, escape_character)
+        end
+        result = result + character
+        index += 1
+      end
+      result
+    end
+
+    # gsub replacement escapes expand against a zero-width match at `index`.
+    def self.like_replacement(source, index, escape_character)
+      result = ""
+      replacement_index = 0
+      while replacement_index < escape_character.length
+        replacement = escape_character[replacement_index, 1]
+        step = 1
+        if replacement == "\\" && replacement_index + 1 < escape_character.length
+          step = 2
+          replacement = escape_character[replacement_index + 1, 1]
+          if replacement == "\\"
+            result = result + replacement
+          elsif replacement == "`"
+            result = result + source[0, index]
+          elsif replacement == "'"
+            result = result + source[index, source.length - index]
+          elsif replacement == "k" && escape_character[replacement_index + 2, 1] == "<"
+            like_group_reference(escape_character, replacement_index + 3)
+          elsif !"0123456789&+".include?(replacement)
+            result = result + "\\" + replacement
+          end
+        else
+          result = result + replacement
+        end
+        replacement_index += step
+      end
+      result
+    end
+
+    # A named group reference raises: the zero-width match has no groups.
+    def self.like_group_reference(escape_character, start)
+      group_name = ""
+      group_index = start
+      while group_index < escape_character.length && escape_character[group_index, 1] != ">"
+        group_name = group_name + escape_character[group_index, 1]
+        group_index += 1
+      end
+      raise RuntimeError, "invalid group name reference format" if group_index == escape_character.length
+      raise IndexError, "undefined group name reference: " + group_name
+    end
+
     # No `attr_accessor :id` and no `@id` here — the key lives on each
     # model. Under Spinel a base-class ivar is a UNION POINT: the slot
     # on the ancestor must hold every subclass's writes, so one
@@ -194,6 +331,27 @@ module ActiveRecord
     # on a Vec doesn't exist).
     def errors
       @errors
+    end
+
+    # Each message in `errors` as Rails' `ActiveModel::Error` holds it,
+    # index for index: `errors` keeps the full messages because there is
+    # no i18n at run time to build them from these.
+    def error_details
+      @error_details
+    end
+
+    # Rails' `errors[attribute]`: the messages added on one attribute.
+    def error_messages_for(attribute)
+      out = []
+      error_details.each { |error| out << error.message if error.attribute == attribute }
+      out
+    end
+
+    # Not `errors`, the full messages: Rails renders a record's errors keyed by attribute, as `errors.as_json` answers.
+    def errors_json
+      out = {}
+      error_details.each { |error| out[error.attribute] = error_messages_for(error.attribute) }
+      out
     end
 
     # The one frozen empty Hash a model's `initialize(attrs = …)` defaults
@@ -247,6 +405,7 @@ module ActiveRecord
       # (`self.id = (attrs[:id] || 0)` — `|| ""` for a string key), not
       # here: see the class comment on why the base holds no `@id`.
       @errors = []
+      @error_details = []
       @id_previously_changed = false
       @persisted = false
       @destroyed = false
@@ -287,6 +446,36 @@ module ActiveRecord
       "id"
     end
 
+    # Association names this model declares — overridden by the model
+    # lowerer (`_association_names`). Empty on Base so an unknown model
+    # answers `reflect_on_association` with nil the way Rails does.
+    def self._association_names
+      []
+    end
+
+    # Rails' `Model.reflect_on_association(:name)`. Looks the name up in
+    # `_association_names`; `counter_cache:` is unmodeled so every hit
+    # answers `counter_cache_column == nil` (honest for campfire's
+    # trigger-backed `messages_count`, which is not an AR counter cache).
+    # Index recursion — not `each`+`return` — so rust/kotlin/swift do
+    # not lower the match into a for_each closure that cannot return
+    # the outer Option (issue #832).
+    def self.reflect_on_association(name)
+      reflect_on_association_at(name.to_s, 0)
+    end
+
+    def self.reflect_on_association_at(needle, i)
+      names = _association_names
+      if i >= names.length
+        return nil
+      end
+      assoc = names[i]
+      if assoc.to_s == needle
+        return ActiveRecord::Reflection::AssociationReflection.new(assoc, nil)
+      end
+      reflect_on_association_at(needle, i + 1)
+    end
+
     # Finder casting runs in connection.rb (Relation is ruby-family
     # only). Keep the typed contract here without transpiling a union
     # receiver's conversion into strict targets.
@@ -295,6 +484,18 @@ module ActiveRecord
     end
 
     def self._string_primary_key
+      false
+    end
+
+    # friendly_id (`friendly_id :col, use: [:slugged ...]`): the column
+    # `Model.friendly.find` looks a slug up in, and whether `:history`
+    # also consults `friendly_id_slugs`. lower::friendly_id overrides both
+    # on a declaring model; any other model has no `friendly`, as in Rails.
+    def self._friendly_slug_column
+      raise NotImplementedError, "#{name} does not declare friendly_id"
+    end
+
+    def self._friendly_history
       false
     end
 
@@ -1013,7 +1214,10 @@ module ActiveRecord
     # requires either an `assign_from_instance` lowering or an
     # `[]=`-based field copy that subclasses override (today's Item
     # subclass in base_test doesn't override `[]`/`[]=`). Deferred.
-    def reload
+    # Rails accepts `reload(options = nil)` (and `lock!` forwards a
+    # Hash with `:lock`). SQLite ignores locking options; keep the
+    # arity so model forwarders can `super(options)` without ArgumentError.
+    def reload(options = nil)
       # Delegates to the lowerer-emitted (or Base default) per-model
       # `_adapter_reload` instance primitive, which re-reads the row
       # by `@id` and writes column values back into self (preserving
@@ -1037,6 +1241,8 @@ module ActiveRecord
     # String locking clause (`lock!("FOR UPDATE NOWAIT")`) — but
     # doesn't need either under SQLite; both are accepted and ignored.
     def lock!(lock = nil)
+      # Rails passes `reload(lock: lock)`; this runtime ignores the
+      # clause under SQLite, so a bare reload keeps the same guarantee.
       reload
     end
 
@@ -1108,6 +1314,7 @@ module ActiveRecord
 
     def valid?
       @errors = []
+      @error_details = []
       validate
       @errors.empty?
     end

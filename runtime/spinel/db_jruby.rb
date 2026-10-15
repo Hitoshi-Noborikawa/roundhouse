@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 # Primitive Db surface — JRuby variant. Same `module Db` contract as
   # The query cache keeps results up to this many rows — see db.rb.
   QC_CAPTURE_ROWS = 16
@@ -323,9 +324,8 @@ module Db
       conn.in_txn = true if word == "BEGIN"
       rollback_to_savepoint = word == "ROLLBACK" && sql.strip.upcase.start_with?("ROLLBACK TO ")
       conn.in_txn = false if word == "COMMIT" || word == "END" || (word == "ROLLBACK" && !rollback_to_savepoint)
-    rescue StandardError => e
-      raise ActiveRecord::RecordNotUnique, e.message if Db.unique_violation?(e.message)
-      raise
+    rescue Java::JavaSql::SQLException => e
+      Db.raise_statement_error(e.message, e.message.include?("SQLITE_BUSY"))
     ensure
       st.close
     end
@@ -361,9 +361,8 @@ module Db
           rs.close
         end
       end
-    rescue StandardError => e
-      raise ActiveRecord::RecordNotUnique, e.message if Db.unique_violation?(e.message)
-      raise
+    rescue Java::JavaSql::SQLException => e
+      Db.raise_statement_error(e.message, e.message.include?("SQLITE_BUSY"))
     ensure
       st.close
     end
@@ -423,6 +422,16 @@ module Db
     message.to_s.include?("UNIQUE constraint failed")
   end
 
+  # Not the driver's own exception: Rails translates every statement error into ActiveRecord's hierarchy (sqlite3_adapter `translate_exception`), keyed on SQLite's own message as `unique_violation?` is.
+  def self.raise_statement_error(message, busy)
+    raise ActiveRecord::RecordNotUnique, message if unique_violation?(message)
+    raise ActiveRecord::NotNullViolation, message if message.include?("NOT NULL constraint failed")
+    raise ActiveRecord::InvalidForeignKey, message if message.include?("FOREIGN KEY constraint failed")
+    raise ActiveRecord::CheckViolation, message if message.include?("CHECK constraint failed")
+    raise ActiveRecord::StatementTimeout, message if busy
+    raise ActiveRecord::StatementInvalid, message
+  end
+
   # Prepared-statement cache (roundhouse#12). A cache hit reuses the open
   # PreparedStatement only when idle. Xerial's `executeQuery` in `step?`
   # resets the cursor before execution; release clears old parameters.
@@ -431,6 +440,16 @@ module Db
   # Placeholder queries reuse one cached statement across bound values;
   # STMT_CACHE_CAP bounds growth for other SQL shapes.
   def self.prepare(sql)
+    return prepare_marked(sql) if sql.include?("\x01")
+    prepare_plain(sql)
+  rescue Java::JavaSql::SQLException => e
+    Db.raise_statement_error(e.message, e.message.include?("SQLITE_BUSY"))
+  end
+
+  # Prepare without re-entering prepare_marked. Post-lift SQL may still
+  # contain \x01 inside string literals (unmarked bind_literal values);
+  # those bytes are data and must not be stripped or re-dispatched.
+  def self.prepare_plain(sql)
     # A `?`-bearing SQL string is a placeholder query (roundhouse#12):
     # its result depends on binds set after prepare, which are not in
     # the key, so it never joins the result-replay cache.
@@ -466,6 +485,38 @@ module Db
     st.open[pstmt] = st
     st.sql = sql
     st.capture = { rows: [], names: nil, eof: false } if !qcache.nil? && !parameterized
+    st
+  end
+
+  # A Relation read with its hash-condition values marked for binding;
+  # see db_cruby.rb's `prepare_marked`. `stmt.sql` stays the placeholder
+  # SQL (the statement cache's key); the capture carries the result-cache
+  # key, the read with its values written in, which `finalize` publishes
+  # under and a promoting replay re-runs.
+  def self.prepare_marked(marked)
+    binds = ActiveRecord::Relation.lift_binds(marked)
+    sql = binds[0].to_s
+    key = binds[1].to_s
+    return prepare_plain(key) if binds.length <= 2
+    qcache = Fiber[:rh_qcache]
+    cacheable = !qcache.nil? && !key.include?("?")
+    if cacheable && (hit = qcache[key])
+      st = Stmt.new(nil, false)
+      st.sql = key
+      st.replay = hit
+      return st
+    end
+    st = prepare_plain(sql)
+    i = 2
+    while i < binds.length
+      if binds[i] == "i"
+        bind_int(st, i / 2, binds[i + 1].to_i)
+      else
+        bind_text(st, i / 2, binds[i + 1])
+      end
+      i += 2
+    end
+    st.capture = { rows: [], names: nil, eof: false, key: key } if cacheable
     st
   end
 
@@ -678,8 +729,9 @@ module Db
       # consumer would find an empty, eof-less prefix and promote, which
       # is correct but pointless — leave it out.
       qcache = Fiber[:rh_qcache]
-      if !c[:names].nil? && !qcache.nil? && !qcache.key?(stmt.sql)
-        qcache[stmt.sql] = c
+      key = c[:key] || stmt.sql
+      if !c[:names].nil? && !qcache.nil? && !qcache.key?(key)
+        qcache[key] = c
       end
     end
     release_statement(stmt)
@@ -750,6 +802,7 @@ module Db
     rescue StandardError
       # Failed closes remain owned until lease cleanup quarantines them.
     end
+    Db.raise_statement_error(error.message, error.message.include?("SQLITE_BUSY")) if error.is_a?(Java::JavaSql::SQLException)
     raise error
   end
 
@@ -905,6 +958,14 @@ module Db
     return "NULL" if ids.empty?
 
     ids.map { |i| i.to_i.to_s }.join(", ")
+  end
+
+  # The same `IN (...)` batch over string keys (a uuid primary key): each
+  # key quoted as a literal, never `to_i`'d to its leading digits.
+  def self.escape_string_list(ids)
+    return "NULL" if ids.empty?
+
+    ids.map { |i| escape_string(i.to_s) }.join(", ")
   end
 
   def self.escape_bool(b)

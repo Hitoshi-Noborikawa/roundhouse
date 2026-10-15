@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 # View helpers — module functions invoked from Views::* render methods.
 #
 # Surface tracks what real-blog actually uses (cf. fixtures/real-blog/
@@ -211,6 +212,38 @@ module ActionView
 
     URL_ESCAPE_PATTERN = /[\x00\r\n !"\#$%&'()*+,\/:;<=>?@\[\\\]^`{|}]/.freeze
 
+    # ERB::Util.url_encode, a view's `u(x)`: every byte but the unreserved
+    # ones (A-Z a-z 0-9 _ . ~ -) as `%XX`, uppercase, so a space is `%20`
+    # and a multibyte character is its UTF-8 bytes. Not `url_encode`
+    # below, which is CGI.escape (`+` for a space) for query strings.
+    # Concat, not `<<`, as in render_attrs: `out << s` lowers as `.add` /
+    # write-into-`&str` on Kotlin/C#/Rust/Python/Elixir.
+    def self.erb_url_encode(s)
+      # Not `b.chr` / `format("%%%02X", b)`, nor a constant table, `bytes.each` or `str[i]`: no strict target answers the first two, Rust reads a constant through a lock, a block's byte as `&mut` and indexes no `str` by an Integer.
+      hex = "0123456789ABCDEF"
+      printable = " !\"\#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghijklmnopqrstuvwxyz{|}~"
+      bytes = s.bytes
+      out = ""
+      i = 0
+      while i < bytes.length
+        b = erb_url_byte(bytes, i)
+        if (b >= 48 && b <= 57) || (b >= 65 && b <= 90) || (b >= 97 && b <= 122) ||
+           b == 45 || b == 46 || b == 95 || b == 126
+          out = out + printable[b - 32, 1].to_s
+        else
+          out = out + "%" + hex[b / 16, 1].to_s + hex[b % 16, 1].to_s
+        end
+        i += 1
+      end
+      out
+    end
+
+    # Not `bytes[i]` inline, nor `bytes[i] || 0`: the inline read types as Integer | nil, which Elixir refuses arithmetic on, and Rust's Vec<i64> has no `unwrap_or`.
+    def self.erb_url_byte(bytes, i)
+      raise ArgumentError, "erb_url_byte: index outside the bytes" if i < 0 || i >= bytes.length
+      bytes[i]
+    end
+
     # Same include? probe as html_escape (no portable match? emit).
     def self.url_encode(s)
       return s unless needs_url_escape?(s)
@@ -247,6 +280,28 @@ module ActionView
     end
 
     def self.fragment_write(_key, value, _ttl)
+      value
+    end
+
+    # A `render collection:, cached: ->(item) { key }` reads and writes
+    # each element's fragment through these four
+    # (`lower::view_to_library::partial`, `wrap_keyed_cached_collection`).
+    # Here caching is off, so the lowering takes its uncached branch;
+    # the ruby family and spinel reopen them with the controller's
+    # `perform_caching`, `combined_fragment_cache_key` and `cache_store`.
+    def self.collection_caching?
+      false
+    end
+
+    def self.collection_fragment_key(partial, _key)
+      partial
+    end
+
+    def self.collection_fragment_read(_name)
+      nil
+    end
+
+    def self.collection_fragment_write(_name, value)
       value
     end
 
@@ -359,7 +414,176 @@ module ActionView
       cutoff = 0 if cutoff < 0
       "#{s[0, cutoff]}#{omission}"
     end
-  
+
+    # Rails 8.1.4's ActionView::TextHelper#word_wrap for positive widths.
+    # Wraps at whitespace/newline boundaries and leaves an unbroken word
+    # longer than `line_width` intact. Rails' zero/negative-width behavior
+    # is inconsistent (RegexpError or nil), so reject those values rather
+    # than weakening this helper's String return contract.
+    #
+    # Portable subset for strict-target emit: no Regexp, no `break`/`next`
+    # (TS), no nested `while` (Elixir while→recursion is single-loop only),
+    # character access via `s[i, 1]` / `s[i, n]` (Rust), concat with `+`
+    # (owned String). Outer scan and break search are explicit recursion.
+    def self.word_wrap(text, line_width: 80, break_sequence: "\n")
+      raise ArgumentError, "line_width must be positive" if line_width <= 0
+      return "" if text.empty?
+      word_wrap_finish(
+        word_wrap_scan(text, line_width, break_sequence, "", 0, text.length),
+        break_sequence
+      )
+    end
+
+    def self.word_wrap_finish(out, break_sequence)
+      bl = break_sequence.length
+      if bl > 0 && out.length >= bl && out[out.length - bl, bl] == break_sequence
+        out[0, out.length - bl]
+      else
+        out
+      end
+    end
+
+    def self.word_wrap_scan(text, line_width, break_sequence, out, i, n)
+      return out if i >= n
+      if text[i, 1] == "\n"
+        word_wrap_scan(text, line_width, break_sequence, out + break_sequence, i + 1, n)
+      else
+        max_end = i + line_width
+        max_end = n if max_end > n
+        word_wrap_find_break(text, line_width, break_sequence, out, i, n, i + 1, max_end, -1, -1)
+      end
+    end
+
+    # Break search: Integer indices stay method params (Elixir `-` / TS
+    # scoping). A newline ends the window immediately — Rails'
+    # `.{1,N}` never crosses `\n`, so a later space must not replace it.
+    def self.word_wrap_find_break(text, line_width, break_sequence, out, i, n, j, max_end, best_j, best_next)
+      if j > max_end
+        if best_j < 0
+          word_wrap_hard(text, line_width, break_sequence, out, i, n)
+        else
+          word_wrap_scan(
+            text,
+            line_width,
+            break_sequence,
+            out + text[i, best_j - i] + break_sequence,
+            best_next,
+            n
+          )
+        end
+      else
+        if j >= n
+          word_wrap_find_break(text, line_width, break_sequence, out, i, n, j + 1, max_end, j, n)
+        else
+          if text[j, 1] == "\n"
+            # No temps: TS emit only hoists some assigned locals. Advance
+            # one newline; scan re-enters for further `\n`s.
+            word_wrap_scan(
+              text,
+              line_width,
+              break_sequence,
+              out + text[i, j - i] + break_sequence,
+              j + 1,
+              n
+            )
+          else
+            if text[j, 1] == " " || text[j, 1] == "\t" || text[j, 1] == "\r" || text[j, 1] == "\f" || text[j, 1] == "\v"
+              word_wrap_find_break(
+                text,
+                line_width,
+                break_sequence,
+                out,
+                i,
+                n,
+                j + 1,
+                max_end,
+                j,
+                word_wrap_ws_next(text, j, n)
+              )
+            else
+              word_wrap_find_break(text, line_width, break_sequence, out, i, n, j + 1, max_end, best_j, best_next)
+            end
+          end
+        end
+      end
+    end
+
+    def self.word_wrap_skip_nl(text, r, n)
+      return r if r >= n
+      return r if text[r, 1] != "\n"
+      word_wrap_skip_nl(text, r + 1, n)
+    end
+
+    def self.word_wrap_skip_ws(text, k, n)
+      return k if k >= n
+      w = text[k, 1]
+      return k unless w == " " || w == "\t" || w == "\r" || w == "\f" || w == "\v"
+      word_wrap_skip_ws(text, k + 1, n)
+    end
+
+    # Index after whitespace at `k`, consuming one trailing newline.
+    def self.word_wrap_ws_next(text, k, n)
+      word_wrap_after_ws(text, word_wrap_skip_ws(text, k, n), n)
+    end
+
+    def self.word_wrap_after_ws(text, k2, n)
+      return k2 + 1 if k2 < n && text[k2, 1] == "\n"
+      k2
+    end
+
+    def self.word_wrap_word_end(text, j, n)
+      return j if j >= n
+      w = text[j, 1]
+      return j if w == "\n" || w == " " || w == "\t" || w == "\r" || w == "\f" || w == "\v"
+      word_wrap_word_end(text, j + 1, n)
+    end
+
+    def self.word_wrap_hard(text, line_width, break_sequence, out, i, n)
+      word_wrap_hard_at(
+        text,
+        line_width,
+        break_sequence,
+        out,
+        i,
+        n,
+        word_wrap_hard_end(text, i, n)
+      )
+    end
+
+    def self.word_wrap_hard_end(text, i, n)
+      j = word_wrap_word_end(text, i, n)
+      return i + 1 if j == i
+      j
+    end
+
+    def self.word_wrap_hard_at(text, line_width, break_sequence, out, i, n, j)
+      out2 = out + text[i, j - i]
+      if j < n
+        word_wrap_hard_cont(text, line_width, break_sequence, out2, j, n, text[j, 1])
+      else
+        word_wrap_scan(text, line_width, break_sequence, out2, j, n)
+      end
+    end
+
+    def self.word_wrap_hard_cont(text, line_width, break_sequence, out2, j, n, w)
+      if w == " " || w == "\t" || w == "\r" || w == "\f" || w == "\v"
+        word_wrap_scan(
+          text,
+          line_width,
+          break_sequence,
+          out2 + break_sequence,
+          word_wrap_ws_next(text, j, n),
+          n
+        )
+      else
+        if w == "\n"
+          word_wrap_scan(text, line_width, break_sequence, out2 + break_sequence, j + 1, n)
+        else
+          word_wrap_scan(text, line_width, break_sequence, out2, j, n)
+        end
+      end
+    end
+
     # ── DOM helpers ──────────────────────────────────────────────────
 
     # Monomorphic: param typed `ActiveRecord::Base`. Was previously a
@@ -424,6 +648,17 @@ module ActionView
       end
     end
   
+    # Rails' `dom_class(record, prefix = nil)`: the model's singular
+    # (`dom_prefix()`), with the prefix joined ahead of it by `_`. The same
+    # `dom_prefix()` that `dom_id` composes from, so the two cannot drift.
+    def self.dom_class(record, prefix = nil)
+      if prefix.nil?
+        record.dom_prefix()
+      else
+        "#{prefix}_#{record.dom_prefix()}"
+      end
+    end
+
     # ── HTML element helpers ─────────────────────────────────────────
 
     # Frozen empty default so no-opts helpers do not allocate a Hash.

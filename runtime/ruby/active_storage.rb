@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 # Active Storage — what a `has_one_attached` reader hands back, the
 # blob it points at, and the identity "variant" of that blob.
 #
@@ -78,6 +79,19 @@ module ActiveStorage
 
   def self.variable_content_type?(content_type)
     variable_content_types.include?(content_type)
+  end
+
+  # Rails' `ActiveStorage.paths` — executable locations for previewers /
+  # analyzers (`:ffmpeg`, `:ffprobe`, `:mutool`). Default `{}` means
+  # PATH lookup. Tests and config assign `paths[:ffmpeg] = "/bin/…"`.
+  def self.paths
+    @paths = {} if @paths.nil?
+    @paths
+  end
+
+  def self.paths=(value)
+    @paths = value
+    value
   end
 
   # Rails' `config.active_storage.video_preview_arguments` — the ffmpeg
@@ -293,7 +307,14 @@ module ActiveStorage
     # (and `config.active_storage.previewers` identity checks against
     # that constant) resolve. Poster drawing on this runtime goes
     # through `Previewer.poster`, not the Rails instance `capture` path.
+    #
+    # Override `preview_timeout` to cap the class-side poster (seconds),
+    # or define `TIME_LIMIT` on the subclass — the spinel poster reads
+    # either (campfire's TimeLimitedVideoPreviewer + suite stub_const).
     class VideoPreviewer < Previewer
+      def self.preview_timeout
+        nil
+      end
     end
   end
 
@@ -1536,6 +1557,29 @@ module ActiveStorage
         i += 1
       end
       rows
+    end
+
+    # More of the same delegation: a jbuilder `json.pictures(record
+    # .pictures) do |picture| … end` maps the proxy, and `size` /
+    # `empty?` are the reads a view guards it with.
+    def map
+      out = []
+      rows = attachments
+      i = 0
+      n = rows.length
+      while i < n
+        out.push(yield rows[i])
+        i += 1
+      end
+      out
+    end
+
+    def size
+      attachments.length
+    end
+
+    def empty?
+      attachments.length == 0
     end
 
     # `self.embeds = blobs` for blob ids, in order: Rails' replace on

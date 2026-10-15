@@ -65,9 +65,23 @@ fn unresolved_declared_classes_are_errors() {
 
 #[test]
 fn new_errors_api_requires_runtime_support() {
-    for body in ["errors.added?(:title, :blank)", "errors.details", "errors.where(:title)", "errors.merge!(errors)", "errors.first.options", "errors.delete(:title); errors.size", "f = title.to_sym; errors.full_message(f, \"is taken\")"] {
+    for body in ["errors.added?(:title, :blank, count: 1)", "errors.where(title)", "errors.merge!(title)", "errors.import(errors.first, type: :taken)", "errors.delete(title); errors.size", "f = title.to_sym; errors.full_message(f, \"is taken\")"] {
         refuses(body, "ActiveModel::Errors");
     }
+    // Not `ActiveModel::Error`: on emit, what an iteration yields is already the `ErrorDetail` the lowering iterates.
+    refuses("errors.first.options", "no known method `options`");
+    refuses("errors.of_kind?(title.to_sym, :blank)", "of_kind?");
+    refuses("errors.details[:title].map { |detail| detail[:count] }", "no known method `[]`");
+}
+
+#[test]
+fn errors_merge_details_and_added_are_admitted() {
+    admits("errors.merge!(errors); errors.details[:title].map { |detail| detail[:error] }; errors.added?(:title, :blank)");
+}
+
+#[test]
+fn errors_where_on_a_literal_field_is_admitted() {
+    admits("errors.where(:title, :blank).map(&:full_message)");
 }
 
 #[test]
@@ -77,14 +91,18 @@ fn errors_full_message_on_a_literal_field_is_admitted() {
 }
 
 #[test]
-fn errors_full_message_on_a_computed_receiver_is_refused() {
-    refuses("Probe.create!(title: \"x\").errors.full_message(:title, \"is taken\")", "ActiveModel::Errors");
+fn errors_full_message_on_a_computed_receiver_is_admitted() {
+    admits("Probe.create!(title: \"x\").errors.full_message(:title, \"is taken\").upcase");
 }
 
 #[test]
 fn non_nil_assertions_require_runtime_support() {
-    refuses("T.must(1) + 1", "non-nil assertion");
-    refuses("T.must_because(1) { \"present\" }", "non-nil assertion");
+    // `T.must` and `T.must_because` with a literal reason lower to
+    // sorbet's check (tests/sorbet_must_runs.rs,
+    // tests/sorbet_must_because_runs.rs). A reason that is not a
+    // literal block has no message to inline and stays refused.
+    refuses("T.must_because(1, &blk)", "non-nil assertion");
+    refuses("T.must_because(1) { |why| why }", "non-nil assertion");
     refuses("1.not_nil!", "not_nil!");
 }
 
@@ -102,8 +120,6 @@ fn for_scope_is_not_a_block_scope() {
 #[test]
 fn registry_signatures_do_not_supply_missing_runtime() {
     for (body, name) in [
-        ("Rails.event.notify(\"probe\")", "event"),
-        ("Rails.error.set_context(probe: true)", "error"),
         ("ActiveRecord::Base.connected_to(role: :reading) { 7 }", "connected_to"),
         ("Benchmark.realtime { 1 }", "Benchmark"),
         ("\"2020-01-02\".to_date", "to_date"),

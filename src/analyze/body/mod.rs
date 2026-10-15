@@ -57,9 +57,10 @@ pub(crate) use const_resolution::{ConstResolver, ConstResolverTask};
 pub use const_resolution::PreparedConstResolver;
 use const_resolution::ResolvedConstant;
 mod narrowing;
+mod pagy;
 mod send;
 pub(crate) use send::PARAM_VALUE;
-pub(crate) use send::string_answers;
+pub(crate) use send::{indexed_pluck, string_answers};
 
 /// Typed constants for generated expressions without Ruby source spans.
 /// The class's constants shadow the shared app registry. Source-backed
@@ -103,6 +104,11 @@ impl ConstScope {
 #[derive(Clone, Default)]
 pub struct Ctx {
     pub self_ty: Option<Ty>,
+    /// What `self_ty` was before a self binding (`T.bind(self, T)`,
+    /// `#: self as T`) replaced it for the rest of a body. Names in a
+    /// declared type still resolve in the lexical namespace, not in
+    /// the one `self` was bound to. `None` while nothing is bound.
+    pub lexical_self: Option<Ty>,
     /// Ivar bindings observed as a `Seq` walks its statements in order.
     /// `@post = Post.find(...)` in stmt 1 lets `@post.destroy` in stmt 2
     /// dispatch correctly.
@@ -174,6 +180,10 @@ pub struct ClassInfo {
     pub table: Option<crate::ident::TableRef>,
     /// Instance-state shape (columns + attr_accessor).
     pub attributes: Row,
+    /// Attributes of `attributes` that the app's own `def` replaces. A
+    /// `def confidence` computes whatever it likes, so two reads of it need
+    /// not agree and a guard on one says nothing about the other.
+    pub overridden_attributes: std::collections::HashSet<Symbol>,
     /// Methods callable on the class itself: `Post.all`, `Post.find(id)`.
     pub class_methods: HashMap<Symbol, Ty>,
     /// Source declares its own class-side `new`, whose result need not be self.
@@ -316,10 +326,10 @@ impl ClassInfo {
 /// resolved lexically: `scope::name`, then each enclosing namespace,
 /// and finally the name as written. `None` when no registered class
 /// answers, so an unknown name (a gem's class) is left as written.
-pub(crate) fn lexical_class(
+pub(crate) fn lexical_class<T>(
     written: &ClassId,
     scope: &str,
-    classes: &HashMap<ClassId, ClassInfo>,
+    classes: &HashMap<ClassId, T>,
 ) -> Option<ClassId> {
     let name = written.0.as_str();
     let mut parts: Vec<&str> = scope.split("::").filter(|s| !s.is_empty()).collect();
@@ -356,6 +366,26 @@ impl<'a> BodyTyper<'a> {
         self.classes
     }
 
+    fn answers_receiver(&self, ty: &Ty, method: &Symbol) -> bool {
+        match ty {
+            Ty::Union { variants } => variants.iter().all(|v| self.answers_receiver(v, method)),
+            Ty::Class { id, .. } => {
+                let mut current = Some(id);
+                for _ in 0..32 {
+                    let Some(cid) = current else { return true };
+                    let Some(cls) = self.classes.get(cid) else { return false };
+                    if cls.open || cls.instance_methods.contains_key(method) {
+                        return false;
+                    }
+                    current = cls.parent.as_ref();
+                }
+                false
+            }
+            Ty::Relation { .. } | Ty::Array { .. } | Ty::Hash { .. } | Ty::Tuple { .. } | Ty::Str | Ty::Int => true,
+            _ => false,
+        }
+    }
+
     fn has_unknown_ancestor(&self, id: &crate::ident::ClassId) -> bool {
         let mut current = Some(id);
         for step in 0..32 {
@@ -371,6 +401,51 @@ impl<'a> BodyTyper<'a> {
 
     /// Whether `self`'s class, its includes or its ancestors register
     /// `method` — an app definition, whatever type it answered.
+    /// [`Self::app_defines`] for one side: an instance body is shadowed by
+    /// instance methods (own, included, inherited), a class-method body by
+    /// class-side ones only, since a class object cannot dispatch an
+    /// instance method.
+    fn app_defines_on_side(&self, self_ty: Option<&Ty>, method: &Symbol, instance: bool) -> bool {
+        let Some(Ty::Class { id, .. }) = self_ty else { return false };
+        let mut stack = vec![id];
+        let mut seen = std::collections::HashSet::new();
+        while let Some(cid) = stack.pop() {
+            if !seen.insert(cid) {
+                continue;
+            }
+            let Some(cls) = self.classes.get(cid) else { continue };
+            let table = if instance { &cls.instance_methods } else { &cls.class_methods };
+            if table.contains_key(method) {
+                return true;
+            }
+            if instance {
+                stack.extend(cls.includes.iter());
+            }
+            stack.extend(cls.parent.iter());
+        }
+        false
+    }
+
+    /// The lazy-lookup scope of a controller whose instance methods have
+    /// `AbstractController::Translation`'s `t`: one descending from
+    /// `ActionController::Base` that defines no `t` / `translate` of its
+    /// own (see `lower::i18n_translate`).
+    fn translating_controller(&self, self_ty: Option<&Ty>) -> Option<String> {
+        let Some(Ty::Class { id, .. }) = self_ty else { return None };
+        if ["t", "translate"].iter().any(|m| self.app_defines(self_ty, &Symbol::from(*m))) {
+            return None;
+        }
+        let mut current = id;
+        for _ in 0..32 {
+            let parent = self.classes.get(current)?.parent.as_ref()?;
+            if parent.0.as_str() == "ActionController::Base" {
+                return Some(crate::lower::i18n_translate::controller_scope(id.0.as_str()));
+            }
+            current = parent;
+        }
+        None
+    }
+
     fn app_defines(&self, self_ty: Option<&Ty>, method: &Symbol) -> bool {
         let Some(Ty::Class { id, .. }) = self_ty else { return false };
         let mut stack = vec![id];
@@ -537,7 +612,7 @@ impl<'a> BodyTyper<'a> {
                     // need not be symbols, even though pattern keys are.
                     let rest_ty = match subject_ty {
                         Some(ty @ Ty::Hash { .. }) if constant.is_none() => ty.clone(),
-                        _ => Ty::Hash { key: Box::new(Ty::Untyped), value: Box::new(Ty::Untyped) },
+                        _ => Ty::Hash { key: std::sync::Arc::new(Ty::Untyped), value: std::sync::Arc::new(Ty::Untyped) },
                     };
                     out.push((name.clone(), rest_ty));
                 }
@@ -579,6 +654,11 @@ impl<'a> BodyTyper<'a> {
     /// ancestor's. Such a read is a plain state read, which is what lets a
     /// guard on it (`expires_at.present? && expires_at > now`) speak for
     /// the reads that follow it the way a guard on a local does.
+    ///
+    /// The type is the reader's, not the column's: `serialize :metadata`,
+    /// an enum or a money column registers a reader that answers something
+    /// other than the storage type, and `return if metadata.nil?` must not
+    /// narrow the reads after it back to the column's `String`.
     fn self_attribute_ty(&self, name: &Symbol, ctx: &Ctx) -> Option<Ty> {
         let Some(Ty::Class { id, .. }) = &ctx.self_ty else {
             return None;
@@ -589,6 +669,34 @@ impl<'a> BodyTyper<'a> {
             let Some(cur) = cursor else { break };
             let Some(info) = self.classes.get(&cur) else { break };
             if let Some(ty) = info.attributes.fields.get(name) {
+                return Some(info.instance_methods.get(name).unwrap_or(ty).clone());
+            }
+            cursor = info.parent.clone();
+        }
+        None
+    }
+
+    /// The type of `local.attr` when that read is a stable attribute read:
+    /// `local` is bound to a record class, and `attr` is a schema column (or
+    /// `attr_accessor`) of it or of an ancestor, with no `def attr` of the
+    /// app's own along the way. Such a read is a plain state read, so two
+    /// reads with no write between them see the same value and a guard on
+    /// one speaks for the other. A user-defined `attr` may compute anything,
+    /// so it never qualifies.
+    fn member_attribute_ty(&self, local: &Symbol, attr: &Symbol, ctx: &Ctx) -> Option<Ty> {
+        let Some(Ty::Class { id, .. }) = ctx.local_bindings.get(local) else {
+            return None;
+        };
+        let mut cursor = Some(id.clone());
+        // Bounded: a parent link that cycles must not hang the typer.
+        for _ in 0..16 {
+            let cur = cursor?;
+            let info = self.classes.get(&cur)?;
+            if info.overridden_attributes.contains(attr) {
+                return None;
+            }
+            if let Some(field) = info.attributes.fields.get(attr) {
+                let ty = info.instance_methods.get(attr).unwrap_or(field);
                 return Some(ty.clone());
             }
             cursor = info.parent.clone();
@@ -627,6 +735,30 @@ impl<'a> BodyTyper<'a> {
                         Some(Ty::Class { id: ty_id, .. }) if *ty_id == id
                     )
             }
+            // Kernel#singleton_class answers the receiver's own singleton
+            // class, one class object unique to that receiver: no subclass
+            // can stand in, unlike `x.class` on a nominal type. Only for a
+            // proven class/module object or an instance of a known
+            // non-immediate class (`1.singleton_class` raises TypeError),
+            // and not where an app method overrides it.
+            ExprNode::Send { recv: Some(r), method, args, block: None, .. }
+                if method.as_str() == "singleton_class" && args.is_empty() =>
+            {
+                let class_object = self.is_class_object(r, ctx);
+                let instance = matches!(r.ty.as_ref(), Some(Ty::Class { id, .. })
+                    if self.classes().contains_key(id)
+                        && !matches!(id.0.as_str(), "Integer" | "Float" | "Symbol" | "Rational" | "Complex" | "NilClass" | "TrueClass" | "FalseClass"));
+                (class_object || instance) && !self.owns_operator(r.ty.as_ref(), method, class_object)
+            }
+            // `Module.new` / `Class.new(Parent)` answer a fresh module or
+            // class, unless the app overrides `new` on them.
+            ExprNode::Send { recv: Some(r), method, .. }
+                if method.as_str() == "new"
+                    && matches!(&*r.node, ExprNode::Const { path } if matches!(path.as_slice(), [n] if matches!(n.as_str(), "Module" | "Class")))
+                    && self.is_class_object(r, ctx) =>
+            {
+                !self.owns_operator(r.ty.as_ref(), method, true)
+            }
             _ => false,
         }
     }
@@ -635,6 +767,22 @@ impl<'a> BodyTyper<'a> {
     fn is_instance(&self, expr: &Expr, ctx: &Ctx) -> bool {
         !self.is_class_object(expr, ctx)
             && !matches!(&*expr.node, ExprNode::Send { method, args, .. } if method.as_str() == "class" && args.is_empty())
+    }
+
+    /// An instance method of a class that descends from `Module`
+    /// (`class Recorder < Module`) runs with a module as self: every
+    /// instance of such a class is a module, whichever subclass.
+    fn self_is_module_instance(&self, ctx: &Ctx) -> bool {
+        if ctx.class_side { return false; }
+        let Some(Ty::Class { id, .. }) = ctx.self_ty.as_ref() else { return false };
+        let mut seen = std::collections::HashSet::new();
+        let mut current = self.classes().get(id).and_then(|c| c.parent.clone());
+        while let Some(id) = current {
+            if matches!(id.0.as_str(), "Module" | "Class") { return true; }
+            if !seen.insert(id.clone()) { break; }
+            current = self.classes().get(&id).and_then(|c| c.parent.clone());
+        }
+        false
     }
 
     fn is_module_callback(&self, recv_ty: Option<&Ty>, method: &Symbol) -> bool {
@@ -689,7 +837,12 @@ impl<'a> BodyTyper<'a> {
                 // Never search by suffix or borrow another scope's
                 // same-named declaration: only the exact written class.
                 let exact_modeled_class = |path: &[Symbol]| {
-                    let id = written_class_id(path);
+                    let id = match path {
+                        [name] | [_, name] if name.as_str() == "HashWithIndifferentAccess" && (path.len() == 1 || path[0].as_str().is_empty()) => {
+                            crate::ident::ClassId(Symbol::from(crate::analyze::indifferent::CLASS))
+                        }
+                        _ => written_class_id(path),
+                    };
                     if let Some((name, owner)) = path.split_last() {
                         if !owner.is_empty() {
                             if let Some(info) = self.classes().get(&written_class_id(owner)) {
@@ -700,7 +853,7 @@ impl<'a> BodyTyper<'a> {
                         }
                     }
                     if self.classes().contains_key(&id) {
-                        Ty::Class { id, args: vec![] }
+                        Ty::Class { id, args: vec![].into() }
                     } else {
                         unknown()
                     }
@@ -721,12 +874,12 @@ impl<'a> BodyTyper<'a> {
                         if self.classes().contains_key(&id) || *runtime {
                             expr.decisions |= crate::expr::RESOLVED_CLASS_REF;
                             qualify_resolved_path(path, &id);
-                            Ty::Class { id, args: vec![] }
+                            Ty::Class { id, args: vec![].into() }
                         } else {
                             unknown()
                         }
                     }
-                    Some(Some(ResolvedConstant::Value { declaration, name, runtime })) => {
+                    Some(Some(ResolvedConstant::Value { declaration, name, runtime, runtime_decl })) => {
                         // Concern splices retain the resolved value owner.
                         // Test-helper splice lifts a foreign module's
                         // constant onto the test class as a bare name
@@ -765,7 +918,13 @@ impl<'a> BodyTyper<'a> {
                             // Not left unknown: ingest turned `Result = Struct.new(…)` into the class it defines.
                             None if self.classes().get(&id).is_some_and(|c| c.app_declared) => {
                                 expr.decisions |= crate::expr::RESOLVED_CLASS_REF;
-                                Ty::Class { id, args: vec![] }
+                                Ty::Class { id, args: vec![].into() }
+                            }
+                            // A runtime façade's alias (`OpenSSL::Random =
+                            // RandomSource`) of a class the registry models
+                            // by that exact name: the registry's answer.
+                            None if *runtime_decl && self.classes().contains_key(&id) => {
+                                Ty::Class { id, args: vec![].into() }
                             }
                             None => unknown(),
                         }
@@ -803,9 +962,17 @@ impl<'a> BodyTyper<'a> {
                         };
                         // Otherwise retain the written class path, but
                         // never guess another class by its suffix.
-                        value.unwrap_or_else(|| Ty::Class { id: written_class_id(path), args: vec![] })
+                        value.unwrap_or_else(|| Ty::Class { id: written_class_id(path), args: vec![].into() })
                     }
                 };
+                // Not a class the emitted program has: the indifferent hash is a plain Hash there, so only its `new` is supported.
+                if matches!(&ty, Ty::Class { id, args } if args.is_empty() && id.0.as_str() == crate::analyze::indifferent::CLASS) {
+                    expr.diagnostic = Some(crate::diagnostic::DiagnosticKind::Unsupported {
+                        target: None,
+                        construct: Symbol::from("constant"),
+                        detail: written_class_id(path).0.as_str().to_string(),
+                    });
+                }
                 if indexed_source && matches!(ty, Ty::Var { .. }) {
                     expr.diagnostic = Some(crate::diagnostic::DiagnosticKind::Unsupported {
                         target: None,
@@ -891,7 +1058,7 @@ impl<'a> BodyTyper<'a> {
                             name.clone(),
                             rescued.unwrap_or_else(|| Ty::Class {
                                 id: crate::ident::ClassId(Symbol::from("StandardError")),
-                                args: vec![],
+                                args: vec![].into(),
                             }),
                         );
                         self.analyze_expr(&mut rc.body, &inner);
@@ -973,8 +1140,8 @@ impl<'a> BodyTyper<'a> {
                     });
                 }
                 Ty::Hash {
-                    key: Box::new(key_ty.unwrap_or_else(unknown)),
-                    value: Box::new(value_ty.unwrap_or_else(unknown)),
+                    key: std::sync::Arc::new(key_ty.unwrap_or_else(unknown)),
+                    value: std::sync::Arc::new(value_ty.unwrap_or_else(unknown)),
                 }
             }
 
@@ -991,12 +1158,21 @@ impl<'a> BodyTyper<'a> {
                 let mut elem_ty: Option<Ty> = None;
                 for e in elements.iter_mut() {
                     let et = self.analyze_expr(e, ctx);
+                    // `[*a, b]` holds `a`'s elements, not `a`.
+                    let et = if matches!(&*e.node, ExprNode::Splat { .. }) {
+                        match splat_elements(et) {
+                            Some(et) => et,
+                            None => continue,
+                        }
+                    } else {
+                        et
+                    };
                     elem_ty = Some(match elem_ty.take() {
                         Some(prev) => union_of(prev, et),
                         None => et,
                     });
                 }
-                Ty::Array { elem: Box::new(elem_ty.unwrap_or_else(unknown)) }
+                Ty::Array { elem: std::sync::Arc::new(elem_ty.unwrap_or_else(unknown)) }
             }
 
             ExprNode::StringInterp { parts } => {
@@ -1036,16 +1212,21 @@ impl<'a> BodyTyper<'a> {
                 let mut seeded = ctx.clone();
                 collect_var_assignments_into(left, &mut seeded.local_bindings);
                 self.propagate_match_bindings(left, &mut seeded, true);
-                let pred = narrowing::extract_narrowing_with(left, &|n| self.self_attribute_ty(n, ctx));
-                let right_ctx = match (&pred, &*op) {
+                let reader = |n: &Symbol| self.self_attribute_ty(n, ctx);
+                let member = |l: &Symbol, a: &Symbol| self.member_attribute_ty(l, a, &seeded);
+                let pred = narrowing::extract_narrowing_with(left, &narrowing::Probe { reader: &reader, member: &member });
+                let mut right_ctx = match (&pred, &*op) {
                     (Some(p), crate::expr::BoolOpKind::And) => {
                         narrowing::apply_narrowing(&seeded, p, true)
                     }
                     (Some(p), crate::expr::BoolOpKind::Or) => {
                         narrowing::apply_narrowing(&seeded, p, false)
                     }
-                    _ => seeded,
+                    _ => seeded.clone(),
                 };
+                // A narrowed `x.attr` stays valid only while `x` is not
+                // rebound or written through between the guard and the use.
+                narrowing::drop_unstable_members(&mut right_ctx, &[&*left, &*right]);
                 let rt = self.analyze_expr(right, &right_ctx);
                 // Short-circuit: the result is either left (if it
                 // determined the short-circuit) or right — a union
@@ -1125,7 +1306,7 @@ impl<'a> BodyTyper<'a> {
                 // parameter (`c = b`) rather than an outer local.
                 for param in extra_params.iter_mut() {
                     let ty = match (&mut param.default, param.keyword && param.rest) {
-                        (_, true) => Ty::Hash { key: Box::new(Ty::Sym), value: Box::new(Ty::Untyped) },
+                        (_, true) => Ty::Hash { key: std::sync::Arc::new(Ty::Sym), value: std::sync::Arc::new(Ty::Untyped) },
                         (Some(default), false) => self.analyze_expr(default, &inner),
                         (None, false) => Ty::Untyped,
                     };
@@ -1144,9 +1325,9 @@ impl<'a> BodyTyper<'a> {
                 // Lambda node without seeing Var. Effects default to
                 // pure; full effect inference is future work.
                 Ty::Fn {
-                    params: Vec::new(),
+                    params: Vec::new().into(),
                     block: None,
-                    ret: Box::new(body_ty),
+                    ret: std::sync::Arc::new(body_ty),
                     effects: crate::effect::EffectSet::pure(),
                 }
             }
@@ -1221,6 +1402,18 @@ impl<'a> BodyTyper<'a> {
                         return ty.clone();
                     }
                 }
+                // `x.attr` under a guard that proved it non-nil (see
+                // `narrowing::VarKey::Member`): the same read, typed from the guard.
+                if args.is_empty() && block.is_none() {
+                    if let Some(r) = recv.as_mut() {
+                        if let ExprNode::Var { name, .. } = &*r.node {
+                            if let Some(ty) = ctx.local_bindings.get(&narrowing::member_key(name, method)).cloned() {
+                                self.analyze_expr(r, ctx);
+                                return ty;
+                            }
+                        }
+                    }
+                }
                 // Bare-name Kernel calls (no explicit receiver). `require`,
                 // `require_relative`, etc. — Ruby treats these as private
                 // module methods, but the body-typer otherwise resolves
@@ -1287,6 +1480,23 @@ impl<'a> BodyTyper<'a> {
                     Some(r) => Some(self.analyze_expr(r, ctx)),
                     None => ctx.self_ty.clone(),
                 };
+                // Not by name alone: an application `tap`/`each` may answer its block's value.
+                if matches!(method.as_str(), "tap" | "each")
+                    && let Some(b) = block.as_mut()
+                    && let ExprNode::Lambda { body, .. } = &mut *b.node
+                {
+                    // Not left set once marked: an early round sees the receiver's class before its methods are known.
+                    set_discarded(body, recv_ty.as_ref().is_some_and(|t| self.answers_receiver(t, method)));
+                }
+                if method.as_str() == "new"
+                    && block.is_none()
+                    && crate::analyze::indifferent::constructor_args(args)
+                    && let Some(r) = recv.as_mut()
+                    && matches!(&*r.node, ExprNode::Const { .. })
+                    && matches!(&r.ty, Some(Ty::Class { id, args }) if args.is_empty() && id.0.as_str() == crate::analyze::indifferent::CLASS)
+                {
+                    r.diagnostic = None;
+                }
                 // Not a value: Rails' `call` answers the loaders, which `preload_associations` does not.
                 if method.as_str() == "call" && args.is_empty() && block.is_none()
                     && expr.decisions & crate::expr::DISCARDED_VALUE != 0
@@ -1343,6 +1553,22 @@ impl<'a> BodyTyper<'a> {
                 }
                 for a in args.iter_mut() {
                     self.analyze_expr(a, ctx);
+                }
+                // The pagy gem's `pagy(scope)`: `[Pagy, <the scope's type>]`.
+                if method.as_str() == "pagy"
+                    && block.is_none()
+                    && recv.as_ref().is_none_or(|r| matches!(&*r.node, ExprNode::SelfRef))
+                {
+                    let mut refusal = None;
+                    if let Some(ty) = self.pagy_call_ty(args, ctx, &mut refusal) {
+                        if refusal.is_some() {
+                            expr.diagnostic = refusal;
+                        }
+                        return ty;
+                    }
+                }
+                if let Some(refusal) = self.pagy_object_refusal(recv_ty.as_ref(), method, args) {
+                    expr.diagnostic = Some(refusal);
                 }
                 if let Some(r) = recv.as_mut() {
                     if promotes_to_param_value(r, recv_ty.as_ref(), method, args, &ctx.local_bindings) {
@@ -1610,6 +1836,12 @@ impl<'a> BodyTyper<'a> {
                 {
                     return t;
                 }
+                if expr.decisions & crate::expr::REVERSE_MERGE != 0
+                    && let (Some(defaults), [hash]) = (recv_ty.as_ref(), args.as_slice())
+                    && let Some(ty) = hash.ty.as_ref().and_then(|h| crate::analyze::indifferent::reverse_merged(defaults, h))
+                {
+                    return ty;
+                }
                 let instance_receiver = recv.as_ref().map_or(ctx.instance_body, |r| self.is_instance(r, ctx))
                     && recv_ty.as_ref().is_some_and(instance_shaped);
                 let dispatched =
@@ -1639,9 +1871,9 @@ impl<'a> BodyTyper<'a> {
                         .get(name)
                         .is_some_and(forwarded_block_may_be_nil)
                 {
-                    let file = Ty::Class { id: ClassId(Symbol::from("File")), args: vec![] };
+                    let file = Ty::Class { id: ClassId(Symbol::from("File")), args: vec![].into() };
                     return union_of(
-                        Ty::Tuple { elems: vec![file.clone(), file, Ty::Int] },
+                        Ty::Tuple { elems: vec![file.clone(), file, Ty::Int].into() },
                         Ty::Nil,
                     );
                 }
@@ -1652,6 +1884,20 @@ impl<'a> BodyTyper<'a> {
                     {
                         receiver.decisions |= crate::expr::RESOLVED_OPERATOR_RECEIVER;
                     }
+                }
+                // `include ActionView::RecordIdentifier` is a marker include
+                // (dropped at ingest); emit qualifies only the BARE
+                // `dom_id` / `dom_class` to `ViewHelpers`, so only the bare
+                // call types String. An explicit receiver (`x.dom_id(a)`)
+                // has nothing to run and stays unresolved.
+                if recv.is_none()
+                    && matches!(method.as_str(), "dom_id" | "dom_class")
+                    && (1..=2).contains(&args.len())
+                    && block.is_none()
+                    && matches!(dispatched, Ty::Var { .. })
+                    && !self.app_defines_on_side(ctx.self_ty.as_ref(), method, ctx.instance_body)
+                {
+                    return Ty::Str;
                 }
                 // Kernel.Array is a container even for scalar params.
                 // App methods (including inherited/included overrides)
@@ -1666,6 +1912,15 @@ impl<'a> BodyTyper<'a> {
                 {
                     return send::bigdecimal();
                 }
+                // Not with a Hash argument: `exception: false` answers nil where the conversion fails.
+                if recv.is_none() && block.is_none()
+                    && ((method.as_str() == "Integer" && matches!(args.len(), 1 | 2)) || (method.as_str() == "Float" && args.len() == 1))
+                    && !args.iter().any(|a| matches!(&*a.node, ExprNode::Hash { .. }))
+                    && matches!(dispatched, Ty::Var { .. } | Ty::Untyped)
+                    && !self.app_defines(ctx.self_ty.as_ref(), method)
+                {
+                    return if method.as_str() == "Integer" { Ty::Int } else { Ty::Float };
+                }
                 if recv.is_none() && method.as_str() == "Array" && args.len() == 1
                     && block.is_none()
                     && (matches!(dispatched, Ty::Var { .. })
@@ -1673,13 +1928,21 @@ impl<'a> BodyTyper<'a> {
                             && !self.app_defines(ctx.self_ty.as_ref(), method)))
                 {
                     let elem = args[0].ty.as_ref().and_then(kernel_array_elem);
-                    return Ty::Array { elem: Box::new(elem.unwrap_or_else(unknown)) };
+                    return Ty::Array { elem: std::sync::Arc::new(elem.unwrap_or_else(unknown)) };
                 }
-                if let Some(call) = crate::lower::i18n_translate::parse(
-                    recv.as_ref(), method.as_str(), args, block.as_ref(), ctx.in_view, ctx.view_name.as_ref().map(|v| v.as_str()),
+                let catalog = self.i18n.map_or(crate::i18n::Catalog::rails_default(), |c| c.or_rails_default());
+                let scope = match (ctx.in_view, recv.is_none() && !ctx.class_side) {
+                    (false, true) => self.translating_controller(ctx.self_ty.as_ref()),
+                    _ => None,
+                };
+                let site = match (&scope, ctx.in_view) {
+                    (_, true) => crate::lower::i18n_translate::Site::View(ctx.view_name.as_ref().map(|v| v.as_str())),
+                    (Some(scope), false) => crate::lower::i18n_translate::Site::Controller(scope),
+                    (None, false) => crate::lower::i18n_translate::Site::Other,
+                };
+                if let Some(resolved) = crate::lower::i18n_translate::resolves(
+                    catalog, recv.as_ref(), method.as_str(), args, block.as_ref(), site,
                 ) {
-                    let catalog = self.i18n.map_or(crate::i18n::Catalog::rails_default(), |c| c.or_rails_default());
-                    let resolved = call.and_then(|c| catalog.resolve(&c.lookup).map(|_| ()));
                     if let Err(reason) = resolved {
                         if expr.diagnostic.is_none() {
                             expr.diagnostic = Some(crate::diagnostic::DiagnosticKind::Unsupported {
@@ -1691,16 +1954,16 @@ impl<'a> BodyTyper<'a> {
                     }
                     return Ty::Str;
                 }
-                if method.as_str() == "[]"
-                    && matches!(recv_ty.as_ref(), Some(Ty::Class { id, .. }) if id.0.as_str() == "ActiveModel::Errors")
+                if matches!(recv_ty.as_ref(), Some(Ty::Class { args: model, .. }) if !model.is_empty())
+                    && crate::lower::view::wraps_field_errors(method.as_str())
                     && expr.diagnostic.is_none()
                 {
-                    let catalog = self.i18n.map_or(crate::i18n::Catalog::rails_default(), |c| c.or_rails_default());
-                    if let Some(reason) = crate::i18n::errors_index_refusal(catalog.errors_format()) {
+                    let catalog = self.i18n.map_or(crate::i18n::Catalog::rails_default(), |c| c);
+                    if let Some(file) = &catalog.field_error_proc {
                         expr.diagnostic = Some(crate::diagnostic::DiagnosticKind::Unsupported {
                             target: None,
-                            construct: Symbol::from("ActiveModel::Errors"),
-                            detail: format!("`errors[:field]` cannot pick a field's messages: {reason}"),
+                            construct: Symbol::from("field_with_errors"),
+                            detail: format!("`{method}` renders through the `field_error_proc` {file} sets, which is not modeled"),
                         });
                     }
                 }
@@ -1719,6 +1982,45 @@ impl<'a> BodyTyper<'a> {
                 {
                     return Ty::Str;
                 }
+                if method.as_str() == "where"
+                    && matches!(dispatched, Ty::Var { .. } | Ty::Untyped)
+                    && matches!(recv_ty.as_ref(), Some(Ty::Class { id, .. }) if id.0.as_str() == "ActiveModel::Errors")
+                    && block.is_none()
+                    && crate::lower::errors_index::where_args(args).is_some()
+                {
+                    return crate::lower::errors_index::error_array_ty();
+                }
+                if method.as_str() == "delete"
+                    && matches!(dispatched, Ty::Var { .. } | Ty::Untyped)
+                    && matches!(recv_ty.as_ref(), Some(Ty::Class { id, .. }) if id.0.as_str() == "ActiveModel::Errors")
+                    && block.is_none()
+                    && crate::lower::errors_index::delete_field(args).is_some()
+                {
+                    return Ty::Union { variants: vec![Ty::Array { elem: std::sync::Arc::new(Ty::Str) }, Ty::Nil].into() };
+                }
+                if matches!(method.as_str(), "import" | "merge!")
+                    && matches!(dispatched, Ty::Var { .. } | Ty::Untyped)
+                    && matches!(recv_ty.as_ref(), Some(Ty::Class { id, .. }) if id.0.as_str() == "ActiveModel::Errors")
+                    && block.is_none()
+                    && crate::lower::errors_add::import_grounds(method.as_str(), args, &|id| self.classes.get(id).is_some_and(|c| c.table.is_some()))
+                {
+                    return crate::lower::errors_index::error_array_ty();
+                }
+                if method.as_str() == "[]"
+                    && matches!(dispatched, Ty::Var { .. } | Ty::Untyped)
+                    && matches!(recv_ty.as_ref().map(Ty::peel_nilable), Some(Ty::Class { id, .. }) if id.0.as_str() == crate::lower::errors_index::DETAILS_ENTRY)
+                    && crate::lower::errors_index::reads_detail_type(args)
+                {
+                    return Ty::Union { variants: vec![Ty::Sym, Ty::Str].into() };
+                }
+                if matches!(method.as_str(), "of_kind?" | "added?")
+                    && matches!(dispatched, Ty::Var { .. } | Ty::Untyped)
+                    && matches!(recv_ty.as_ref(), Some(Ty::Class { id, .. }) if id.0.as_str() == "ActiveModel::Errors")
+                    && block.is_none()
+                    && crate::lower::errors_index::of_kind_grounds(args)
+                {
+                    return Ty::Bool;
+                }
                 if method.as_str() == "full_message"
                     && matches!(dispatched, Ty::Var { .. } | Ty::Untyped)
                     && matches!(recv_ty.as_ref(), Some(Ty::Class { id, .. }) if id.0.as_str() == "ActiveModel::Errors")
@@ -1729,7 +2031,12 @@ impl<'a> BodyTyper<'a> {
                 // What every object and every module answers, when the
                 // receiver's own table did not. App analyzer only.
                 // `class_object_receiver` was resolved above for block binding
-                // so it matches the same class/instance table preference.
+                // so it matches the same class/instance table preference. A
+                // `Module` subclass's own implicit-self Module protocol is a
+                // class-object receiver too.
+                let class_object_receiver = class_object_receiver
+                    || (recv.as_ref().is_none_or(|r| matches!(&*r.node, ExprNode::SelfRef))
+                        && send::is_module_protocol(method) && self.self_is_module_instance(ctx));
                 if matches!(dispatched, Ty::Var { .. } | Ty::Untyped) && self.inquirers.is_some()
                     && (recv.is_some() || (ctx.self_ty.is_some() && send::is_module_protocol(method)))
                     && !self.owns_operator(recv_ty.as_ref(), method, class_object_receiver) {
@@ -1738,10 +2045,13 @@ impl<'a> BodyTyper<'a> {
                     // membership. Refuse Module protocol only for true Module-only
                     // names, or for `include?` on a nominal class *instance* (where
                     // Module#include? would be the wrong answer). Untyped /
-                    // String / Array receivers fall through to membership → Bool.
+                    // String / Array receivers fall through to membership → Bool, and
+                    // so does a value typed `Class` or `Module`, which is a module
+                    // object and answers Module#include? itself.
                     let module_only = send::is_module_protocol(method)
                         && (method.as_str() != "include?"
-                            || matches!(recv_ty, Some(Ty::Class { .. })));
+                            || matches!(&recv_ty, Some(Ty::Class { id, .. })
+                                if !matches!(id.0.as_str(), "Class" | "Module")));
                     if module_only && !class_object
                         && !self.owns_operator(recv_ty.as_ref(), method, false) {
                         expr.diagnostic = Some(crate::diagnostic::DiagnosticKind::Unsupported {
@@ -1781,6 +2091,15 @@ impl<'a> BodyTyper<'a> {
                         // Not refused again on a receiver the constant refusal already accounts for.
                         _ if matches!(recv_ty, None | Some(Ty::Var { .. } | Ty::Untyped))
                             && recv.as_ref().is_some_and(|r| rooted_in_refused_constant(r)) => None,
+                        // Grounded, so not a gap: `presence_in(<Array[String]>)` is
+                        // `ActiveSupport.presence_in` (lower::presence_in), and a
+                        // zero-arg `to_query` on a Hash, or on a receiver inference
+                        // could not type, is `ActiveSupport.to_query` (lower::symbolize_keys).
+                        // A list inference cannot prove is an Array[String], or a
+                        // `to_query(key)` (the Object/Array/nil form), still refuse.
+                        _ if method.as_str() == "presence_in" && args.len() == 1 && block.is_none() && is_string_array(args[0].ty.as_ref()) => None,
+                        _ if method.as_str() == "to_query" && args.is_empty() && block.is_none()
+                            && matches!(recv_ty, None | Some(Ty::Var { .. } | Ty::Untyped | Ty::Hash { .. })) => None,
                         _ if matches!(method.as_str(), "to_query" | "instance_values" | "acts_like?" | "presence_in" | "as_json" | "with_options" | "pretty_inspect") => Some("Object extension"),
                         _ => None,
                     };
@@ -1806,7 +2125,6 @@ impl<'a> BodyTyper<'a> {
 
             ExprNode::If { cond, then_branch, else_branch } => {
                 self.analyze_expr(cond, ctx);
-                let pred = narrowing::extract_narrowing_with(cond, &|n| self.self_attribute_ty(n, ctx));
                 // Var assignments inside `cond` (e.g.
                 // `if (user = User.find_by(...)) && user.is_active?`)
                 // must flow into both branches: the assignment
@@ -1825,15 +2143,20 @@ impl<'a> BodyTyper<'a> {
                     base.local_bindings.insert(k.clone(), v.clone());
                 }
                 self.propagate_match_bindings(cond, &mut base, true);
-                let then_ctx = match &pred {
+                let reader = |n: &Symbol| self.self_attribute_ty(n, ctx);
+                let member = |l: &Symbol, a: &Symbol| self.member_attribute_ty(l, a, &base);
+                let pred = narrowing::extract_narrowing_with(cond, &narrowing::Probe { reader: &reader, member: &member });
+                let mut then_ctx = match &pred {
                     Some(p) => narrowing::apply_narrowing(&base, p, true),
                     None => base.clone(),
                 };
+                narrowing::drop_unstable_members(&mut then_ctx, &[&*cond, &*then_branch]);
                 let t = self.analyze_expr(then_branch, &then_ctx);
-                let else_ctx = match &pred {
+                let mut else_ctx = match &pred {
                     Some(p) => narrowing::apply_narrowing(&base, p, false),
-                    None => base,
+                    None => base.clone(),
                 };
+                narrowing::drop_unstable_members(&mut else_ctx, &[&*cond, &*else_branch]);
                 let e = self.analyze_expr(else_branch, &else_ctx);
                 union_of(t, e)
             }
@@ -1949,12 +2272,25 @@ impl<'a> BodyTyper<'a> {
                     let tail = i + 1 == exprs.len();
                     let e = &mut exprs[i];
                     if !tail {
-                        e.decisions |= crate::expr::DISCARDED_VALUE;
+                        mark_discarded(e);
                     }
                     if !matches!(&*e.node, ExprNode::Assign { target: LValue::Var { .. }, .. }) {
                         forget_class_object_writes(e, &mut local_ctx);
                     }
                     last = self.analyze_expr(e, &local_ctx);
+                    // A self binding gives `self` its declared type from
+                    // the next statement to the end of this body, blocks
+                    // inside included. It changes only how `self` types:
+                    // which class a method defined below belongs to is
+                    // settled at ingest, lexically. A class-object binding
+                    // puts `self` on the class side, as in a `def self.x`.
+                    if crate::expr::is_self_binding(e) {
+                        if local_ctx.lexical_self.is_none() {
+                            local_ctx.lexical_self = local_ctx.self_ty.clone();
+                        }
+                        local_ctx.self_ty = e.ty.clone();
+                        local_ctx.class_side = e.decisions & crate::expr::SELF_BINDING_CLASS_OBJECT != 0;
+                    }
                     if let ExprNode::Assign { target: LValue::Var { name, .. }, value } = &*e.node {
                         let proven = self.is_class_object(value, &local_ctx);
                         forget_class_object_writes(value, &mut local_ctx);
@@ -2186,7 +2522,7 @@ impl<'a> BodyTyper<'a> {
                             // keys as strings regardless.
                             let refined = Ty::Hash {
                                 key: key.clone(),
-                                value: Box::new(new_value),
+                                value: std::sync::Arc::new(new_value),
                             };
                             bindings.insert(name.clone(), refined.clone());
                             // Retro-stamp the `{}` seed, same as the
@@ -2246,7 +2582,7 @@ impl<'a> BodyTyper<'a> {
                             } else {
                                 union_of((**cur).clone(), elem)
                             };
-                            let refined = Ty::Array { elem: Box::new(new_elem) };
+                            let refined = Ty::Array { elem: std::sync::Arc::new(new_elem) };
                             bindings.insert(name.clone(), refined.clone());
                             // Retro-stamp the seed literal so decl-site
                             // emitters agree with the refined uses: the
@@ -2338,7 +2674,7 @@ impl<'a> BodyTyper<'a> {
                             _ => false,
                         };
                         if then_diverges && else_empty {
-                            if let Some(pred) = narrowing::extract_narrowing_with(cond, &|n| self.self_attribute_ty(n, ctx)) {
+                            if let Some(pred) = narrowing::extract_narrowing_with(cond, &narrowing::Probe::without_members(&|n| self.self_attribute_ty(n, ctx))) {
                                 local_ctx = narrowing::apply_narrowing(&local_ctx, &pred, false);
                             }
                         }
@@ -2353,7 +2689,7 @@ impl<'a> BodyTyper<'a> {
                         };
                         let else_diverges = matches!(else_branch.ty.as_ref(), Some(Ty::Bottom));
                         if else_diverges && then_empty {
-                            if let Some(pred) = narrowing::extract_narrowing_with(cond, &|n| self.self_attribute_ty(n, ctx)) {
+                            if let Some(pred) = narrowing::extract_narrowing_with(cond, &narrowing::Probe::without_members(&|n| self.self_attribute_ty(n, ctx))) {
                                 local_ctx = narrowing::apply_narrowing(&local_ctx, &pred, true);
                             }
                         }
@@ -2500,7 +2836,7 @@ impl<'a> BodyTyper<'a> {
                     .unwrap_or(Ty::Untyped);
                 Ty::Class {
                     id: ClassId(Symbol::from("Range")),
-                    args: vec![elem],
+                    args: vec![elem].into(),
                 }
             }
             ExprNode::Cast { value, target_ty } => {
@@ -2512,9 +2848,9 @@ impl<'a> BodyTyper<'a> {
                 let _ = self.analyze_expr(value, ctx);
                 // A class named inside a namespace means the lexically
                 // nearest one (`Capabilities::Charge` in
-                // `ShopifyPayments::Capability` is
-                // `ShopifyPayments::Capabilities::Charge`).
-                let resolved = match &ctx.self_ty {
+                // `Billing::Capability` is
+                // `Billing::Capabilities::Charge`).
+                let resolved = match ctx.lexical_self.as_ref().or(ctx.self_ty.as_ref()) {
                     Some(Ty::Class { id: scope, .. }) => target_ty.map_class_ids(&|id| {
                         lexical_class(id, scope.0.as_str(), self.classes).unwrap_or_else(|| id.clone())
                     }),
@@ -2602,7 +2938,7 @@ pub(super) fn lit_ty(lit: &Literal) -> Ty {
         // through the ordinary class walk rather than through a
         // per-literal table.
         Literal::Regex { .. } => {
-            Ty::Class { id: ClassId(Symbol::from("Regexp")), args: vec![] }
+            Ty::Class { id: ClassId(Symbol::from("Regexp")), args: vec![].into() }
         }
     }
 }
@@ -2620,6 +2956,26 @@ fn written_class_id(path: &[Symbol]) -> ClassId {
         name.push_str(part.as_str());
     }
     ClassId(Symbol::from(name))
+}
+
+/// What `*value` adds to an array literal's elements: an array's or a
+/// tuple's elements, a hash's pairs, nothing for `nil`. Ruby `to_a`s any
+/// other value; one with no modeled element is kept as the one element
+/// `[*object]` gives for an object that is not a collection.
+fn splat_elements(ty: Ty) -> Option<Ty> {
+    match ty {
+        Ty::Nil => None,
+        Ty::Tuple { elems } => elems.into_iter().reduce(union_of),
+        Ty::Hash { key, value } => Some(Ty::Tuple {
+            elems: vec![
+                std::sync::Arc::unwrap_or_clone(key),
+                std::sync::Arc::unwrap_or_clone(value),
+            ]
+            .into(),
+        }),
+        Ty::Union { variants } => variants.into_iter().filter_map(splat_elements).reduce(union_of),
+        other => Some(other.collection_elem().unwrap_or(other)),
+    }
 }
 
 /// Rubydex can resolve a relative path to a name with a lexical prefix:
@@ -2657,7 +3013,7 @@ fn kernel_array_elem(arg: &Ty) -> Option<Ty> {
         Ty::Array { elem } => Some((**elem).clone()),
         Ty::Tuple { elems } => Some(elems.iter().cloned().reduce(union_of).unwrap_or(Ty::Bottom)),
         // `to_a` of a relation is its records; of a range, its elements.
-        Ty::Relation { of } => Some(Ty::Class { id: of.clone(), args: vec![] }),
+        Ty::Relation { of } => Some(Ty::Class { id: of.clone(), args: vec![].into() }),
         Ty::Class { id, args } if id.0.as_str() == "Range" => args.first().cloned(),
         Ty::Nil => Some(Ty::Bottom),
         Ty::Union { variants } => variants
@@ -2722,7 +3078,7 @@ pub(crate) fn multiassign_target_ty(rhs: &Option<Ty>, index: usize) -> Option<Ty
         Some(Ty::Array { elem }) => Some((**elem).clone()),
         // Destructuring a relation materializes it — each scalar
         // target gets the element model, same as `Array<of>`.
-        Some(Ty::Relation { of }) => Some(Ty::Class { id: of.clone(), args: vec![] }),
+        Some(Ty::Relation { of }) => Some(Ty::Class { id: of.clone(), args: vec![].into() }),
         Some(Ty::Tuple { elems }) => elems.get(index).cloned(),
         Some(Ty::Untyped) => Some(Ty::Untyped),
         _ => None,
@@ -2927,13 +3283,13 @@ pub(crate) fn union_of(a: Ty, b: Ty) -> Ty {
     match (&a, &b) {
         (Ty::Hash { key: k1, value: v1 }, Ty::Hash { key: k2, value: v2 }) => {
             return Ty::Hash {
-                key: Box::new(union_of((**k1).clone(), (**k2).clone())),
-                value: Box::new(union_of((**v1).clone(), (**v2).clone())),
+                key: std::sync::Arc::new(union_of((**k1).clone(), (**k2).clone())),
+                value: std::sync::Arc::new(union_of((**v1).clone(), (**v2).clone())),
             };
         }
         (Ty::Array { elem: e1 }, Ty::Array { elem: e2 }) => {
             return Ty::Array {
-                elem: Box::new(union_of((**e1).clone(), (**e2).clone())),
+                elem: std::sync::Arc::new(union_of((**e1).clone(), (**e2).clone())),
             };
         }
         _ => {}
@@ -2959,7 +3315,7 @@ pub(crate) fn union_of(a: Ty, b: Ty) -> Ty {
     match variants.len() {
         0 => Ty::Bottom,
         1 => variants.into_iter().next().unwrap(),
-        _ => Ty::Union { variants },
+        _ => Ty::Union { variants: variants.into() },
     }
 }
 
@@ -2979,8 +3335,8 @@ fn push_union_variants(t: Ty, out: &mut Vec<Ty>) {
         Ty::Hash { key, value } => {
             for existing in out.iter_mut() {
                 if let Ty::Hash { key: k0, value: v0 } = existing {
-                    *k0 = Box::new(union_of((**k0).clone(), *key));
-                    *v0 = Box::new(union_of((**v0).clone(), *value));
+                    *k0 = std::sync::Arc::new(union_of((**k0).clone(), std::sync::Arc::unwrap_or_clone(key)));
+                    *v0 = std::sync::Arc::new(union_of((**v0).clone(), std::sync::Arc::unwrap_or_clone(value)));
                     return;
                 }
             }
@@ -2989,7 +3345,7 @@ fn push_union_variants(t: Ty, out: &mut Vec<Ty>) {
         Ty::Array { elem } => {
             for existing in out.iter_mut() {
                 if let Ty::Array { elem: e0 } = existing {
-                    *e0 = Box::new(union_of((**e0).clone(), *elem));
+                    *e0 = std::sync::Arc::new(union_of((**e0).clone(), std::sync::Arc::unwrap_or_clone(elem)));
                     return;
                 }
             }
@@ -3027,10 +3383,10 @@ pub(crate) fn join_ivar_slot(a: Ty, b: Ty) -> Ty {
 pub(crate) fn drop_pending_arms(t: Ty) -> Ty {
     match t {
         Ty::Hash { key, value } => Ty::Hash {
-            key: Box::new(drop_pending_arms(*key)),
-            value: Box::new(drop_pending_arms(*value)),
+            key: std::sync::Arc::new(drop_pending_arms(std::sync::Arc::unwrap_or_clone(key))),
+            value: std::sync::Arc::new(drop_pending_arms(std::sync::Arc::unwrap_or_clone(value))),
         },
-        Ty::Array { elem } => Ty::Array { elem: Box::new(drop_pending_arms(*elem)) },
+        Ty::Array { elem } => Ty::Array { elem: std::sync::Arc::new(drop_pending_arms(std::sync::Arc::unwrap_or_clone(elem))) },
         Ty::Union { variants } => {
             let mut variants: Vec<Ty> = variants.into_iter().map(drop_pending_arms).collect();
             if variants.iter().any(|v| !matches!(v, Ty::Var { .. })) {
@@ -3041,7 +3397,7 @@ pub(crate) fn drop_pending_arms(t: Ty) -> Ty {
             Ty::canonicalize_variants(&mut variants);
             match variants.len() {
                 1 => variants.pop().unwrap(),
-                _ => Ty::Union { variants },
+                _ => Ty::Union { variants: variants.into() },
             }
         }
         other => other,
@@ -3119,7 +3475,7 @@ mod tests {
             ty,
             Ty::Class {
                 id: ClassId(Symbol::from("StandardError")),
-                args: vec![],
+                args: vec![].into(),
             }
         );
         assert_ne!(
@@ -3131,7 +3487,7 @@ mod tests {
 
     fn optional_str() -> Ty {
         Ty::Union {
-            variants: vec![Ty::Str, Ty::Nil],
+            variants: vec![Ty::Str, Ty::Nil].into(),
         }
     }
 
@@ -3153,7 +3509,7 @@ mod tests {
             }
             classes.insert(child.clone(), info);
             let mut ctx = Ctx::default();
-            ctx.self_ty = Some(Ty::Class { id: child.clone(), args: vec![] });
+            ctx.self_ty = Some(Ty::Class { id: child.clone(), args: vec![].into() });
             let mut expr = send(None, "Array", vec![nil_lit()]);
             assert_eq!(BodyTyper::new(&classes).analyze_expr(&mut expr, &ctx), ret);
         }
@@ -3161,16 +3517,16 @@ mod tests {
 
     #[test]
     fn kernel_array_keeps_the_argument_element_type() {
-        let array_of = |elem: Ty| Ty::Array { elem: Box::new(elem) };
+        let array_of = |elem: Ty| Ty::Array { elem: std::sync::Arc::new(elem) };
         for (arg, elem) in [
             (array_of(Ty::Str), Ty::Str),
-            (Ty::Tuple { elems: vec![Ty::Str, Ty::Int] }, union_of(Ty::Str, Ty::Int)),
-            (Ty::Relation { of: ClassId(Symbol::from("Story")) }, Ty::Class { id: ClassId(Symbol::from("Story")), args: vec![] }),
-            (Ty::Class { id: ClassId(Symbol::from("Range")), args: vec![Ty::Int] }, Ty::Int),
+            (Ty::Tuple { elems: vec![Ty::Str, Ty::Int].into() }, union_of(Ty::Str, Ty::Int)),
+            (Ty::Relation { of: ClassId(Symbol::from("Story")) }, Ty::Class { id: ClassId(Symbol::from("Story")), args: vec![].into() }),
+            (Ty::Class { id: ClassId(Symbol::from("Range")), args: vec![Ty::Int].into() }, Ty::Int),
             // Unknown elements: the class may unpack through `to_a`.
-            (Ty::Class { id: ClassId(Symbol::from("Story")), args: vec![] }, Ty::Var { var: TyVar(0) }),
+            (Ty::Class { id: ClassId(Symbol::from("Story")), args: vec![].into() }, Ty::Var { var: TyVar(0) }),
             (Ty::Sym, Ty::Sym),
-            (Ty::Union { variants: vec![array_of(Ty::Sym), Ty::Sym, Ty::Nil] }, Ty::Sym),
+            (Ty::Union { variants: vec![array_of(Ty::Sym), Ty::Sym, Ty::Nil].into() }, Ty::Sym),
         ] {
             let ctx = ctx_with_local("x", arg);
             let mut expr = send(None, "Array", vec![var("x")]);
@@ -3180,7 +3536,7 @@ mod tests {
 
     #[test]
     fn array_plus_onto_an_unknown_element_takes_the_argument_element() {
-        let array_of = |elem: Ty| Ty::Array { elem: Box::new(elem) };
+        let array_of = |elem: Ty| Ty::Array { elem: std::sync::Arc::new(elem) };
         let mut ctx = ctx_with_local("empty", array_of(Ty::Var { var: TyVar(0) }));
         ctx.local_bindings.insert(Symbol::from("strs"), array_of(Ty::Str));
         ctx.local_bindings.insert(Symbol::from("syms"), array_of(Ty::Sym));
@@ -3280,7 +3636,7 @@ mod tests {
         let cond = send(Some(var("x")), "is_a?", vec![class_ref]);
         let pred = extract_narrowing(&cond).expect("is_a? recognized");
         let mixed = Ty::Union {
-            variants: vec![Ty::Str, Ty::Int, Ty::Nil],
+            variants: vec![Ty::Str, Ty::Int, Ty::Nil].into(),
         };
         let ctx = ctx_with_local("x", mixed);
         let then_ctx = apply_narrowing(&ctx, &pred, true);
@@ -3289,7 +3645,7 @@ mod tests {
         assert_eq!(
             else_ctx.local_bindings[&Symbol::from("x")],
             Ty::Union {
-                variants: vec![Ty::Int, Ty::Nil],
+                variants: vec![Ty::Int, Ty::Nil].into(),
             }
         );
     }
@@ -3305,7 +3661,7 @@ mod tests {
             "x",
             Ty::Class {
                 id: ClassId(Symbol::from("Post")),
-                args: vec![],
+                args: vec![].into(),
             },
         );
         let then_ctx = apply_narrowing(&ctx, &pred, true);
@@ -3313,7 +3669,7 @@ mod tests {
             then_ctx.local_bindings[&Symbol::from("x")],
             Ty::Class {
                 id: ClassId(Symbol::from("Post")),
-                args: vec![]
+                args: vec![].into()
             }
         );
     }
@@ -3478,7 +3834,7 @@ mod tests {
         // arr.map { |x| x.to_s } on arr: Array[Int] should produce Array[Str]
         let arr = {
             let mut e = var("arr");
-            e.ty = Some(Ty::Array { elem: Box::new(Ty::Int) });
+            e.ty = Some(Ty::Array { elem: std::sync::Arc::new(Ty::Int) });
             e
         };
         let block_body = send(Some(var("x")), "to_s", vec![]);
@@ -3497,11 +3853,31 @@ mod tests {
         let mut ctx = Ctx::default();
         ctx.local_bindings.insert(
             Symbol::from("arr"),
-            Ty::Array { elem: Box::new(Ty::Int) },
+            Ty::Array { elem: std::sync::Arc::new(Ty::Int) },
         );
         let ty = typer.analyze_expr(&mut expr, &ctx);
 
-        assert_eq!(ty, Ty::Array { elem: Box::new(Ty::Str) });
+        assert_eq!(ty, Ty::Array { elem: std::sync::Arc::new(Ty::Str) });
+    }
+
+    #[test]
+    fn an_array_literal_holds_a_splatted_arrays_elements() {
+        // [*arr, "x"] on arr: Array[Array[Str]] is Array[Array[Str] | Str],
+        // and a splatted nil adds nothing.
+        let splat = |name: &str| synth(ExprNode::Splat { value: var(name) });
+        let mut expr = synth(ExprNode::Array {
+            elements: vec![splat("arr"), splat("none"), synth(ExprNode::Lit { value: Literal::Str { value: "x".into() } })],
+            style: Default::default(),
+        });
+        let classes = empty_classes();
+        let typer = BodyTyper::new(&classes);
+        let mut ctx = Ctx::default();
+        let inner = Ty::Array { elem: std::sync::Arc::new(Ty::Str) };
+        ctx.local_bindings.insert(Symbol::from("arr"), Ty::Array { elem: std::sync::Arc::new(inner.clone()) });
+        ctx.local_bindings.insert(Symbol::from("none"), Ty::Nil);
+        let ty = typer.analyze_expr(&mut expr, &ctx);
+
+        assert_eq!(ty, Ty::Array { elem: std::sync::Arc::new(union_of(inner, Ty::Str)) });
     }
 
     #[test]
@@ -3509,7 +3885,7 @@ mod tests {
         // arr.select { |x| x > 0 } on arr: Array[Int] should still be Array[Int]
         let arr = {
             let mut e = var("arr");
-            e.ty = Some(Ty::Array { elem: Box::new(Ty::Int) });
+            e.ty = Some(Ty::Array { elem: std::sync::Arc::new(Ty::Int) });
             e
         };
         let block_body = send(Some(var("x")), ">", vec![synth(ExprNode::Lit {
@@ -3530,11 +3906,11 @@ mod tests {
         let mut ctx = Ctx::default();
         ctx.local_bindings.insert(
             Symbol::from("arr"),
-            Ty::Array { elem: Box::new(Ty::Int) },
+            Ty::Array { elem: std::sync::Arc::new(Ty::Int) },
         );
         let ty = typer.analyze_expr(&mut expr, &ctx);
 
-        assert_eq!(ty, Ty::Array { elem: Box::new(Ty::Int) });
+        assert_eq!(ty, Ty::Array { elem: std::sync::Arc::new(Ty::Int) });
     }
 
     #[test]
@@ -3542,7 +3918,7 @@ mod tests {
         // arr.flat_map { |x| [x.to_s] } on arr: Array[Int] should be Array[Str]
         let arr = {
             let mut e = var("arr");
-            e.ty = Some(Ty::Array { elem: Box::new(Ty::Int) });
+            e.ty = Some(Ty::Array { elem: std::sync::Arc::new(Ty::Int) });
             e
         };
         let inner_arr = synth(ExprNode::Array {
@@ -3564,11 +3940,11 @@ mod tests {
         let mut ctx = Ctx::default();
         ctx.local_bindings.insert(
             Symbol::from("arr"),
-            Ty::Array { elem: Box::new(Ty::Int) },
+            Ty::Array { elem: std::sync::Arc::new(Ty::Int) },
         );
         let ty = typer.analyze_expr(&mut expr, &ctx);
 
-        assert_eq!(ty, Ty::Array { elem: Box::new(Ty::Str) });
+        assert_eq!(ty, Ty::Array { elem: std::sync::Arc::new(Ty::Str) });
     }
 
     #[test]
@@ -3592,7 +3968,7 @@ mod tests {
         let typer = BodyTyper::new(&classes);
         let ctx = Ctx::default();
         let ty = typer.analyze_expr(&mut seq, &ctx);
-        assert_eq!(ty, Ty::Array { elem: Box::new(Ty::Int) });
+        assert_eq!(ty, Ty::Array { elem: std::sync::Arc::new(Ty::Int) });
     }
 
     #[test]
@@ -3618,7 +3994,7 @@ mod tests {
         let ctx = Ctx::default();
         typer.analyze_expr(&mut seq, &ctx);
 
-        let expected = Ty::Array { elem: Box::new(Ty::Int) };
+        let expected = Ty::Array { elem: std::sync::Arc::new(Ty::Int) };
         let ExprNode::Seq { exprs } = &*seq.node else { panic!("seq") };
         assert_eq!(exprs[0].ty.as_ref(), Some(&expected));
         let ExprNode::Assign { value, .. } = &*exprs[0].node else { panic!("assign") };
@@ -3706,8 +4082,8 @@ mod tests {
         let ctx = ctx_with_local(
             "opts",
             Ty::Hash {
-                key: Box::new(Ty::Str),
-                value: Box::new(Ty::Untyped),
+                key: std::sync::Arc::new(Ty::Str),
+                value: std::sync::Arc::new(Ty::Untyped),
             },
         );
         typer.analyze_expr(&mut seq, &ctx);
@@ -3767,8 +4143,8 @@ mod tests {
         let h = {
             let mut e = var("h");
             e.ty = Some(Ty::Hash {
-                key: Box::new(Ty::Sym),
-                value: Box::new(Ty::Int),
+                key: std::sync::Arc::new(Ty::Sym),
+                value: std::sync::Arc::new(Ty::Int),
             });
             e
         };
@@ -3789,13 +4165,13 @@ mod tests {
         ctx.local_bindings.insert(
             Symbol::from("h"),
             Ty::Hash {
-                key: Box::new(Ty::Sym),
-                value: Box::new(Ty::Int),
+                key: std::sync::Arc::new(Ty::Sym),
+                value: std::sync::Arc::new(Ty::Int),
             },
         );
         let ty = typer.analyze_expr(&mut expr, &ctx);
 
-        assert_eq!(ty, Ty::Array { elem: Box::new(Ty::Str) });
+        assert_eq!(ty, Ty::Array { elem: std::sync::Arc::new(Ty::Str) });
     }
 
     #[test]
@@ -3804,8 +4180,8 @@ mod tests {
         let h = {
             let mut e = var("h");
             e.ty = Some(Ty::Hash {
-                key: Box::new(Ty::Sym),
-                value: Box::new(Ty::Int),
+                key: std::sync::Arc::new(Ty::Sym),
+                value: std::sync::Arc::new(Ty::Int),
             });
             e
         };
@@ -3826,8 +4202,8 @@ mod tests {
         ctx.local_bindings.insert(
             Symbol::from("h"),
             Ty::Hash {
-                key: Box::new(Ty::Sym),
-                value: Box::new(Ty::Int),
+                key: std::sync::Arc::new(Ty::Sym),
+                value: std::sync::Arc::new(Ty::Int),
             },
         );
         let ty = typer.analyze_expr(&mut expr, &ctx);
@@ -3835,8 +4211,8 @@ mod tests {
         assert_eq!(
             ty,
             Ty::Hash {
-                key: Box::new(Ty::Sym),
-                value: Box::new(Ty::Str),
+                key: std::sync::Arc::new(Ty::Sym),
+                value: std::sync::Arc::new(Ty::Str),
             }
         );
     }
@@ -3847,7 +4223,7 @@ mod tests {
         // should still produce a sensible Array[elem] type.
         let arr = {
             let mut e = var("arr");
-            e.ty = Some(Ty::Array { elem: Box::new(Ty::Int) });
+            e.ty = Some(Ty::Array { elem: std::sync::Arc::new(Ty::Int) });
             e
         };
         let call = synth(ExprNode::Send {
@@ -3864,11 +4240,11 @@ mod tests {
         let mut ctx = Ctx::default();
         ctx.local_bindings.insert(
             Symbol::from("arr"),
-            Ty::Array { elem: Box::new(Ty::Int) },
+            Ty::Array { elem: std::sync::Arc::new(Ty::Int) },
         );
         let ty = typer.analyze_expr(&mut expr, &ctx);
 
-        assert_eq!(ty, Ty::Array { elem: Box::new(Ty::Int) });
+        assert_eq!(ty, Ty::Array { elem: std::sync::Arc::new(Ty::Int) });
     }
 
     // ── diagnostic annotation ─────────────────────────────────────
@@ -4028,8 +4404,8 @@ mod tests {
                 kwargs: false,
             });
             e.ty = Some(Ty::Hash {
-                key: Box::new(Ty::Sym),
-                value: Box::new(Ty::Int),
+                key: std::sync::Arc::new(Ty::Sym),
+                value: std::sync::Arc::new(Ty::Int),
             });
             e
         };
@@ -4115,12 +4491,12 @@ mod tests {
     fn law_universe() -> Vec<Ty> {
         let class = |name: &str| Ty::Class {
             id: ClassId(Symbol::from(name)),
-            args: vec![],
+            args: vec![].into(),
         };
-        let arr = |elem: Ty| Ty::Array { elem: Box::new(elem) };
+        let arr = |elem: Ty| Ty::Array { elem: std::sync::Arc::new(elem) };
         let hash = |k: Ty, v: Ty| Ty::Hash {
-            key: Box::new(k),
-            value: Box::new(v),
+            key: std::sync::Arc::new(k),
+            value: std::sync::Arc::new(v),
         };
         vec![
             Ty::Int,
@@ -4143,10 +4519,10 @@ mod tests {
                 Ty::Var { var: TyVar(1) },
                 Ty::Var { var: TyVar(2) },
             ),
-            Ty::Union { variants: vec![Ty::Str, Ty::Nil] },
-            Ty::Union { variants: vec![Ty::Int, Ty::Str] },
+            Ty::Union { variants: vec![Ty::Str, Ty::Nil].into() },
+            Ty::Union { variants: vec![Ty::Int, Ty::Str].into() },
             Ty::Union {
-                variants: vec![hash(Ty::Str, Ty::Int), Ty::Nil],
+                variants: vec![hash(Ty::Str, Ty::Int), Ty::Nil].into(),
             },
         ]
     }
@@ -4186,7 +4562,7 @@ mod tests {
         assert_eq!(
             got,
             Ty::Union {
-                variants: vec![Ty::Int, Ty::Bool, Ty::Nil]
+                variants: vec![Ty::Int, Ty::Bool, Ty::Nil].into()
             }
         );
     }
@@ -4255,12 +4631,12 @@ mod tests {
         // out per variant — union_of's own doc names that shape as the
         // harmful one.
         let h1 = Ty::Hash {
-            key: Box::new(Ty::Str),
-            value: Box::new(Ty::Int),
+            key: std::sync::Arc::new(Ty::Str),
+            value: std::sync::Arc::new(Ty::Int),
         };
         let h2 = Ty::Hash {
-            key: Box::new(Ty::Sym),
-            value: Box::new(Ty::Str),
+            key: std::sync::Arc::new(Ty::Sym),
+            value: std::sync::Arc::new(Ty::Str),
         };
         let via_nil_first = union_of(union_of(h1.clone(), Ty::Nil), h2.clone());
         let via_hashes_first = union_of(union_of(h1.clone(), h2.clone()), Ty::Nil);
@@ -4361,16 +4737,16 @@ mod tests {
         let mut raw = law_universe();
         raw.extend([
             Ty::Var { var: TyVar(2) },
-            Ty::Union { variants: vec![Ty::Str, Ty::Untyped] },
-            Ty::Union { variants: vec![Ty::Int, Ty::Var { var: TyVar(4) }] },
-            Ty::Union { variants: vec![Ty::Untyped, Ty::Nil] },
-            Ty::Union { variants: vec![Ty::Var { var: TyVar(5) }, Ty::Nil] },
-            Ty::Union { variants: vec![Ty::Var { var: TyVar(6) }, Ty::Untyped, Ty::Nil] },
+            Ty::Union { variants: vec![Ty::Str, Ty::Untyped].into() },
+            Ty::Union { variants: vec![Ty::Int, Ty::Var { var: TyVar(4) }].into() },
+            Ty::Union { variants: vec![Ty::Untyped, Ty::Nil].into() },
+            Ty::Union { variants: vec![Ty::Var { var: TyVar(5) }, Ty::Nil].into() },
+            Ty::Union { variants: vec![Ty::Var { var: TyVar(6) }, Ty::Untyped, Ty::Nil].into() },
             Ty::Union {
                 variants: vec![
-                    Ty::Hash { key: Box::new(Ty::Str), value: Box::new(Ty::Untyped) },
+                    Ty::Hash { key: std::sync::Arc::new(Ty::Str), value: std::sync::Arc::new(Ty::Untyped) },
                     Ty::Nil,
-                ],
+                ].into(),
             },
         ]);
         let mut out: Vec<Ty> = Vec::new();
@@ -4423,7 +4799,7 @@ mod tests {
     #[test]
     fn param_slot_join_classifies_untyped_arms_inside_unions() {
         let join = crate::analyze::unify_param_ty;
-        let str_or_untyped = Ty::Union { variants: vec![Ty::Str, Ty::Untyped] };
+        let str_or_untyped = Ty::Union { variants: vec![Ty::Str, Ty::Untyped].into() };
         assert_eq!(
             join(Ty::Int, str_or_untyped),
             join(join(Ty::Int, Ty::Str), Ty::Untyped),
@@ -4436,10 +4812,10 @@ mod tests {
     #[test]
     fn param_slot_join_keeps_untyped_beside_nil_alone() {
         let join = crate::analyze::unify_param_ty;
-        let nil_or_untyped = Ty::Union { variants: vec![Ty::Untyped, Ty::Nil] };
+        let nil_or_untyped = Ty::Union { variants: vec![Ty::Untyped, Ty::Nil].into() };
         assert_eq!(join(Ty::Nil, Ty::Untyped), nil_or_untyped);
         assert_eq!(join(Ty::Untyped, Ty::Nil), nil_or_untyped);
-        let str_or_nil = Ty::Union { variants: vec![Ty::Str, Ty::Nil] };
+        let str_or_nil = Ty::Union { variants: vec![Ty::Str, Ty::Nil].into() };
         assert_eq!(join(nil_or_untyped.clone(), Ty::Str), str_or_nil);
         assert_eq!(join(Ty::Str, nil_or_untyped), str_or_nil);
     }
@@ -4448,7 +4824,7 @@ mod tests {
     /// Hash at another is that Hash, as for an ivar.
     #[test]
     fn param_slot_join_drops_pending_inside_hash_spines() {
-        let filled = Ty::Hash { key: Box::new(Ty::Str), value: Box::new(Ty::Int) };
+        let filled = Ty::Hash { key: std::sync::Arc::new(Ty::Str), value: std::sync::Arc::new(Ty::Int) };
         assert_eq!(crate::analyze::unify_param_ty(empty_hash(), filled.clone()), filled);
     }
 
@@ -4487,7 +4863,7 @@ mod tests {
     }
 
     fn empty_hash() -> Ty {
-        Ty::Hash { key: Box::new(Ty::Var { var: TyVar(0) }), value: Box::new(Ty::Var { var: TyVar(0) }) }
+        Ty::Hash { key: std::sync::Arc::new(Ty::Var { var: TyVar(0) }), value: std::sync::Arc::new(Ty::Var { var: TyVar(0) }) }
     }
 
     /// `@h = {}` and `@h[k] = v` give one type whichever is harvested
@@ -4505,8 +4881,8 @@ mod tests {
             ivar_write("h", empty_hash()),
         ]);
         let want = Ty::Hash {
-            key: Box::new(Ty::Str),
-            value: Box::new(Ty::Union { variants: vec![Ty::Int, Ty::Str] }),
+            key: std::sync::Arc::new(Ty::Str),
+            value: std::sync::Arc::new(Ty::Union { variants: vec![Ty::Int, Ty::Str].into() }),
         };
         assert_eq!(seed_first, want);
         assert_eq!(writes_first, want);
@@ -4522,11 +4898,11 @@ mod tests {
         let want = Ty::Union {
             variants: vec![
                 Ty::Hash {
-                    key: Box::new(Ty::Str),
-                    value: Box::new(Ty::Union { variants: vec![Ty::Int, Ty::Str] }),
+                    key: std::sync::Arc::new(Ty::Str),
+                    value: std::sync::Arc::new(Ty::Union { variants: vec![Ty::Int, Ty::Str].into() }),
                 },
                 Ty::Nil,
-            ],
+            ].into(),
         };
         let seeded = harvested_ivar("data", vec![
             ivar_write("data", Ty::Nil),
@@ -4548,8 +4924,8 @@ mod tests {
     /// a nullable one) alone: that class's own `[]=` runs, not Hash's.
     #[test]
     fn index_writes_leave_a_class_instance_ivar_alone() {
-        let foo = Ty::Class { id: ClassId(Symbol::from("Foo")), args: vec![] };
-        let nullable_foo = Ty::Union { variants: vec![foo, Ty::Nil] };
+        let foo = Ty::Class { id: ClassId(Symbol::from("Foo")), args: vec![].into() };
+        let nullable_foo = Ty::Union { variants: vec![foo, Ty::Nil].into() };
         let got = harvested_ivar("x", vec![
             ivar_write("x", nullable_foo.clone()),
             ivar_index_write("x", Ty::Int),
@@ -4582,11 +4958,11 @@ mod tests {
         let want_nullable = Ty::Union {
             variants: vec![
                 Ty::Hash {
-                    key: Box::new(Ty::Str),
-                    value: Box::new(Ty::Union { variants: vec![Ty::Int, Ty::Str] }),
+                    key: std::sync::Arc::new(Ty::Str),
+                    value: std::sync::Arc::new(Ty::Union { variants: vec![Ty::Int, Ty::Str].into() }),
                 },
                 Ty::Nil,
-            ],
+            ].into(),
         };
         let stmts = vec![
             ivar_write("data", Ty::Nil),
@@ -4597,7 +4973,7 @@ mod tests {
         for order in permutations(stmts) {
             assert_eq!(harvested_ivar("data", order.clone()), want_nullable, "order {order:?}");
         }
-        let want = Ty::Hash { key: Box::new(Ty::Str), value: Box::new(Ty::Int) };
+        let want = Ty::Hash { key: std::sync::Arc::new(Ty::Str), value: std::sync::Arc::new(Ty::Int) };
         let stmts = vec![
             ivar_write("data", Ty::Var { var: TyVar(3) }),
             ivar_write("data", empty_hash()),
@@ -4612,8 +4988,8 @@ mod tests {
     /// instance is assigned.
     #[test]
     fn index_writes_leave_a_class_instance_ivar_alone_in_any_order() {
-        let foo = Ty::Class { id: ClassId(Symbol::from("Foo")), args: vec![] };
-        let nullable_foo = Ty::Union { variants: vec![foo, Ty::Nil] };
+        let foo = Ty::Class { id: ClassId(Symbol::from("Foo")), args: vec![].into() };
+        let nullable_foo = Ty::Union { variants: vec![foo, Ty::Nil].into() };
         for order in permutations(vec![ivar_write("x", nullable_foo.clone()), ivar_index_write("x", Ty::Int)]) {
             assert_eq!(harvested_ivar("x", order), nullable_foo);
         }
@@ -4623,10 +4999,10 @@ mod tests {
     fn concrete_value_shapes_are_truthy_for_boolean_operators() {
         let values = [
             Ty::Date,
-            Ty::Tuple { elems: vec![Ty::Int] },
+            Ty::Tuple { elems: vec![Ty::Int].into() },
             Ty::Record { row: Row::default() },
             Ty::Fn {
-                params: Vec::new(), block: None, ret: Box::new(Ty::Str),
+                params: Vec::new().into(), block: None, ret: std::sync::Arc::new(Ty::Str),
                 effects: crate::effect::EffectSet::pure(),
             },
         ];
@@ -4640,14 +5016,14 @@ mod tests {
     fn nil_arms_of_concrete_value_unions_remain_falsy() {
         for truthy in [
             Ty::Date,
-            Ty::Tuple { elems: vec![Ty::Int] },
+            Ty::Tuple { elems: vec![Ty::Int].into() },
             Ty::Record { row: Row::default() },
             Ty::Fn {
-                params: Vec::new(), block: None, ret: Box::new(Ty::Str),
+                params: Vec::new().into(), block: None, ret: std::sync::Arc::new(Ty::Str),
                 effects: crate::effect::EffectSet::pure(),
             },
         ] {
-            let left = Ty::Union { variants: vec![truthy, Ty::Nil] };
+            let left = Ty::Union { variants: vec![truthy, Ty::Nil].into() };
             assert!(!never_falsy(&left), "{left:?} must not always short-circuit `||`");
             assert_eq!(falsy_part(&left), Some(Ty::Nil), "{left:?} must retain nil for `&&`");
         }
@@ -4665,7 +5041,7 @@ mod tests {
         // `h` is statically `Hash[Sym, Str]`; the value-omission bind
         // `data:` should type as the hash's uniform value type (`Str`),
         // and so should the arm body that reads it back.
-        let h_ty = Ty::Hash { key: Box::new(Ty::Sym), value: Box::new(Ty::Str) };
+        let h_ty = Ty::Hash { key: std::sync::Arc::new(Ty::Sym), value: std::sync::Arc::new(Ty::Str) };
         let pattern = MatchPattern::Hash {
             constant: None,
             pairs: vec![
@@ -4754,7 +5130,7 @@ fn falsy_part(ty: &Ty) -> Option<Ty> {
             match kept.len() {
                 0 => None,
                 1 => kept.into_iter().next(),
-                _ => Some(Ty::Union { variants: kept }),
+                _ => Some(Ty::Union { variants: kept.into() }),
             }
         }
         t if never_falsy(t) => None,
@@ -4806,7 +5182,7 @@ fn time_parse_ty(recv: &Expr, method: &Symbol, args: &[Expr]) -> Option<Ty> {
         ExprNode::Send { recv: Some(r), method, args, block: None, .. }
             if method.as_str() == "zone" && args.is_empty() && is_time_const(r) =>
         {
-            Some(Ty::Union { variants: vec![Ty::Time, Ty::Nil] })
+            Some(Ty::Union { variants: vec![Ty::Time, Ty::Nil].into() })
         }
         _ => None,
     }
@@ -4845,7 +5221,7 @@ fn expect_hash_arg_ty(recv_ty: Option<&Ty>, method: &str, args: &[crate::expr::E
     let (key, value) = match recv_ty {
         Some(Ty::Hash { key, value }) => (key.clone(), value.clone()),
         Some(Ty::Class { id, .. }) if id.0.as_str() == "ActionController::Parameters" => {
-            (Box::new(Ty::Str), Box::new(Ty::Untyped))
+            (std::sync::Arc::new(Ty::Str), std::sync::Arc::new(Ty::Untyped))
         }
         _ => return None,
     };
@@ -5014,7 +5390,7 @@ fn literal_extremum_ty(recv: Option<&Expr>, recv_ty: &Ty, method: &Symbol, args:
             match kept.len() {
                 0 => return None,
                 1 => kept.into_iter().next().unwrap(),
-                _ => Ty::Union { variants: kept },
+                _ => Ty::Union { variants: kept.into() },
             }
         }
         other => other.clone(),
@@ -5032,3 +5408,35 @@ pub(super) const RUBY_TOP_LEVEL: &[&str] = &[
     "Socket", "StringIO", "Struct", "Tempfile", "Thread", "Time", "Timeout", "URI", "YAML",
     "Zlib",
 ];
+
+/// `Array[String]` — what `ActiveSupport.presence_in(value, list)` declares for its list.
+fn is_string_array(ty: Option<&Ty>) -> bool {
+    matches!(ty, Some(Ty::Array { elem }) if **elem == Ty::Str)
+}
+
+/// A value the program drops: the expression itself and, through an `if`'s
+/// branches and a sequence's last statement, the one that would have
+/// answered it.
+fn mark_discarded(e: &mut Expr) {
+    set_discarded(e, true);
+}
+
+fn set_discarded(e: &mut Expr, discarded: bool) {
+    if discarded {
+        e.decisions |= crate::expr::DISCARDED_VALUE;
+    } else {
+        e.decisions &= !crate::expr::DISCARDED_VALUE;
+    }
+    match &mut *e.node {
+        ExprNode::If { then_branch, else_branch, .. } => {
+            set_discarded(then_branch, discarded);
+            set_discarded(else_branch, discarded);
+        }
+        ExprNode::Seq { exprs } => {
+            if let Some(last) = exprs.last_mut() {
+                set_discarded(last, discarded);
+            }
+        }
+        _ => {}
+    }
+}

@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 # Net::HTTP, reopened over spinel's bundled `packages/net` so the stub
 # table (`runtime/http_stub.rb`) is consulted BEFORE any socket opens.
 #
@@ -172,18 +173,26 @@ module Net
     def connect_with_timeout
       limit = @open_timeout.nil? ? 0 : @open_timeout
       target = @ipaddr.empty? ? @address : @ipaddr
-      TcpSocketStub.check(target, @port)
-      return TCPSocket.new(target, @port) if limit <= 0
+      # Spinel tip (9bac0daa+): `@port` is Integer? (sp_oint) while
+      # `TcpSocketStub.check` / `TCPSocket.new` take Integer. Default to
+      # the scheme port the same way `stub_url` does, so a definite
+      # Integer reaches those calls.
+      port = @port
+      if port.nil?
+        port = @use_ssl ? 443 : 80
+      end
+      TcpSocketStub.check(target, port)
+      return TCPSocket.new(target, port) if limit <= 0
       s = Socket.new(Socket::AF_INET, Socket::SOCK_STREAM, 0)
       begin
-        s.connect_nonblock(target, @port)
+        s.connect_nonblock(target, port)
       rescue IO::WaitWritable
         if IO.select(nil, [s], nil, limit).nil?
           s.close
           raise OpenTimeout
         end
         begin
-          s.connect_nonblock(target, @port)
+          s.connect_nonblock(target, port)
         rescue Errno::EISCONN
           # already connected: the wait above is what completed it
         end
@@ -216,7 +225,7 @@ module Net
       connect if @socket.nil?
       begin_transport(req)
       write_request(req)
-      read_response(req.method)
+      read_response(req.method, req.decode_content)
     end
 
     # The package connects direct or not at all (`Net::HTTP.new` raises

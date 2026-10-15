@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 # CRuby serving: `perform_later` puts the work down and returns.
 #
 # The shared runtime has the queue (`ActiveJob.enqueue` / `drain`) but
@@ -13,7 +14,9 @@
 # after config.ru, and threads do not survive a fork), keyed by pid like
 # the WAL checkpointer. The thread blocks on a Thread::Queue rather than
 # polling, and takes its own Db lease per pass, as `Main.job_loop` does.
-# The queue itself is thread_state's: a shared Array under a lock.
+# The queue itself is thread_state's: a shared Array of Procs under a
+# lock. A serialized ActiveJob payload rides it inside a Proc
+# (`ActiveJob.enqueue_payload`), so it takes this same wakeup.
 # Nothing is retried and nothing survives a restart: the ledgered limit
 # of the in-process queue (docs/pipeline/runtime.md).
 module ActiveJob

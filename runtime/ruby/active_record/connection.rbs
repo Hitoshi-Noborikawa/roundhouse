@@ -5,6 +5,12 @@ module ActiveRecord
   class Rollback < StandardError
   end
 
+  module TransactionHooks
+    def self.began: () -> nil
+    def self.committed: () -> nil
+    def self.rolled_back: () -> nil
+  end
+
   class IntegerKeyCast
     @valid: bool
     @value: Integer
@@ -77,12 +83,16 @@ module ActiveRecord
     def delete: () -> Base
     def _as_json_only: (Array[Symbol] only) -> Hash[String, untyped]
     # Nil and uncastable request keys reject before the scalar adapter.
-    def self.exists?: (Integer | Float | String | nil id) -> bool
+    # Not `?id`: the def takes `*ids`, and spinel types a positional field by the def's own slot.
+    def self.exists?: (*(Integer | Float | String | nil) ids) -> bool
     def self._exists_primary_key_input: (Integer | Float | String | nil id) -> bool
     # Ruby-family overrides of base.rb's Array / COUNT fallbacks.
     def self.where: (Hash[Symbol, untyped] conditions) -> Relation
     def self.find_by: (Hash[String | Symbol, untyped] conditions) -> Base?
     def self.find_sole_by: (Hash[String | Symbol, untyped] conditions) -> Base
+    def self.find_or_initialize_by: (Hash[Symbol, untyped] conditions) -> Base
+    def self.find_or_create_by: (Hash[Symbol, untyped] conditions) -> Base
+    def self.find_or_create_by!: (Hash[Symbol, untyped] conditions) -> Base
     def self.sole: () -> Base
     def self.all: () -> Relation
     def self.none: () -> Relation

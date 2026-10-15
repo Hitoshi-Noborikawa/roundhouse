@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 # Generic ActiveRecord adapter facade routed through the `Db.*` primitive
 # surface. Implements the 10-method contract that AR Base's `_adapter_*`
 # defaults call into when a model hasn't received the lowerer's Level-3
@@ -23,8 +24,10 @@ module SqliteAdapter
     Db.configure(database_path)
   end
 
+  # Writes run with their values written in: a Relation's bind marks
+  # (`Relation#bind_literal`) are dropped here, not lifted.
   def self.execute_ddl(sql)
-    Db.exec(sql)
+    Db.exec(ActiveRecord::Relation.inline_sql(sql))
   end
 
   # Rows affected by the last INSERT/UPDATE/DELETE — Rails'

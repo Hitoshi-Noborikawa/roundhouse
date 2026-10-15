@@ -1,4 +1,27 @@
 module I18n
+  class InvalidLocale < ArgumentError
+  end
+
   def self.default_locale: () -> Symbol
+  def self.available_locales: () -> Array[Symbol]
+  def self.thread_locale_name: () -> String
   def self.locale: () -> Symbol
+  def self.locale=: (String | Symbol | nil value) -> String
+  def self.checked_locale: (String | Symbol | nil value) -> Symbol
+  def self.locale_name: (String | Symbol | nil value) -> String
+  def self.enter_locale: (String | Symbol | nil value) -> String?
+  def self.leave_locale: (String? previous) -> nil
+  def self.running_in?: (String envs) -> bool
+  def self.app_default_locale: () -> Symbol
+  def self.app_available_locales: () -> Array[Symbol]
+
+  class MissingTranslationData < ArgumentError
+  end
+
+  def self.normalize_key: (String key) -> String
+  def self.subtree_translation: (String key) -> String
+  def self.missing_raises: (bool raises, String flipped) -> bool
+  def self.missing_translation: (String key, bool raises) -> String
+  def self.missing_translation_among: (String key, String rest, bool raises) -> String
+  def self.missing_translation_tag: (String key, String details, bool raises) -> String
 end

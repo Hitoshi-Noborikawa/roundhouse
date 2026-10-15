@@ -1103,7 +1103,41 @@ end
     assert_eq!(title_v.rules.len(), 1);
     assert!(matches!(
         title_v.rules[0],
-        ValidationRule::Length { min: None, max: Some(80), .. }
+        ValidationRule::Length { min: None, max: Some(80), allow_nil: None, .. }
+    ));
+}
+
+#[test]
+fn length_allow_nil_is_ingested() {
+    use roundhouse::{ModelBodyItem, ValidationRule};
+
+    let source = br#"
+class Widget < ApplicationRecord
+  validates :body, length: { minimum: 10 }, allow_nil: true
+  validates :title, length: { maximum: 80, allow_nil: false }
+end
+"#;
+    let schema = roundhouse::schema::Schema::default();
+    let model = roundhouse::ingest::ingest_model(source, "<inline>", &schema, &Default::default())
+        .unwrap()
+        .unwrap();
+    let validations: Vec<_> = model
+        .body
+        .iter()
+        .filter_map(|item| match item {
+            ModelBodyItem::Validation { validation, .. } => Some(validation),
+            _ => None,
+        })
+        .collect();
+    let body = validations.iter().find(|v| v.attribute.as_str() == "body").unwrap();
+    assert!(matches!(
+        body.rules[0],
+        ValidationRule::Length { min: Some(10), allow_nil: Some(true), .. }
+    ));
+    let title = validations.iter().find(|v| v.attribute.as_str() == "title").unwrap();
+    assert!(matches!(
+        title.rules[0],
+        ValidationRule::Length { max: Some(80), allow_nil: Some(false), .. }
     ));
 }
 
@@ -1965,13 +1999,44 @@ fn class_variable_compound_assignment_in_method_body_ingests_and_round_trips() {
 }
 
 #[test]
+fn global_variable_writes_in_a_method_body_ingest_and_round_trip() {
+    use roundhouse::emit::ruby::emit_expr;
+    use roundhouse::expr::{LValue, OpAssignOp};
+
+    for (source, op) in [
+        ("$stdout = out", None),
+        ("$stdout = STDOUT", None),
+        ("$memo ||= []", Some(OpAssignOp::OrOr)),
+        ("$gate &&= false", Some(OpAssignOp::AndAnd)),
+    ] {
+        let parse = |source: &str| {
+            let result = ruby_prism::parse(source.as_bytes());
+            let program = result.node();
+            let stmt = program.as_program_node().unwrap().statements().body().iter().next().unwrap();
+            roundhouse::ingest::ingest_expr(&stmt, "<snippet>").unwrap()
+        };
+        let expr = parse(source);
+        let name = source.split(' ').next().unwrap();
+        match op {
+            None => assert!(matches!(&*expr.node, ExprNode::Assign { target: LValue::Var { name: n, .. }, .. } if n.as_str() == name), "{source}"),
+            Some(op) => assert!(matches!(&*expr.node, ExprNode::OpAssign { target: LValue::Var { name: n, .. }, op: o, .. } if n.as_str() == name && *o == op), "{source}"),
+        }
+        assert_eq!(emit_expr(&expr), source);
+    }
+    let result = ruby_prism::parse(b"$count += 1");
+    let stmt = result.node().as_program_node().unwrap().statements().body().iter().next().unwrap();
+    let expr = roundhouse::ingest::ingest_expr(&stmt, "<snippet>").unwrap();
+    assert!(matches!(&*expr.node, ExprNode::OpAssign { target: LValue::Var { name, .. }, .. } if name.as_str() == "$count"));
+    assert_eq!(emit_expr(&expr), "$count += 1");
+}
+
+#[test]
 fn specific_ledger_messages_replace_the_generic_catch_all() {
     use roundhouse::ingest::IngestError;
 
     for (source, expected) in [
         ("`ls`", "shell command (backticks) is not modeled"),
         ("%x{ls}", "shell command (backticks) is not modeled"),
-        ("$stdout = out", "global variable write"),
         ("class Foo; end", "class/module defined inside a method or block (runtime class definition)"),
         ("module Foo; end", "class/module defined inside a method or block (runtime class definition)"),
         ("1 + ", "unparsed fragment (Prism recovery node)"),

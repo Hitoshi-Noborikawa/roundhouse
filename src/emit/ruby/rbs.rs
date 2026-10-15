@@ -6,6 +6,7 @@
 //! layout, but Steep / TypeProf auto-discover `sig/` by convention —
 //! so this layout costs zero extra config for either consumer.
 
+use std::cell::Cell;
 use std::fmt::Write;
 use std::path::{Path, PathBuf};
 
@@ -15,6 +16,28 @@ use crate::dialect::{
 };
 use crate::expr::{Expr, ExprNode, Literal, RESOLVED_DATA_FACTORY};
 use crate::ty::{Param, ParamKind, Ty};
+
+thread_local! {
+    /// True while rendering a class-side `def self.x` signature. See the
+    /// `Ty::SelfInstance` arm of `ty_to_rbs_in`.
+    static CLASS_SIDE_SIG: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Sets [`CLASS_SIDE_SIG`] for its scope and restores the previous value
+/// on drop, so an early return cannot leak the flag.
+struct ClassSideGuard(bool);
+
+impl ClassSideGuard {
+    fn enter(class_side: bool) -> Self {
+        ClassSideGuard(CLASS_SIDE_SIG.with(|c| c.replace(class_side)))
+    }
+}
+
+impl Drop for ClassSideGuard {
+    fn drop(&mut self) {
+        CLASS_SIDE_SIG.with(|c| c.set(self.0));
+    }
+}
 
 /// Emit an `.rbs` sidecar for a single `LibraryClass`. The output
 /// path mirrors `rb_path` under a top-level `sig/` tree with the
@@ -68,11 +91,24 @@ fn render_class(lc: &LibraryClass, classes: &[LibraryClass]) -> String {
         let pad = "  ".repeat(depth - 1);
         match lc.parent.as_ref() {
             Some(p) => writeln!(s, "{pad}class {last} < {}", p.0.as_str()).unwrap(),
+            None if lc.data_define().is_some() => writeln!(s, "{pad}class {last} < ::Data").unwrap(),
             None => writeln!(s, "{pad}class {last}").unwrap(),
         }
     }
 
     let body_pad = "  ".repeat(depth);
+
+    if let Some((members, _)) = lc.data_define() {
+        writeln!(s, "{body_pad}def self.new: (*untyped, **untyped) -> instance").unwrap();
+        // A `def` in the `Data.define` block replaces the reader, and RBS
+        // rejects a second declaration of one method.
+        let defined = |member: &crate::ident::Symbol| {
+            lc.methods.iter().any(|m| m.receiver == MethodReceiver::Instance && m.name == *member)
+        };
+        for member in members.iter().filter(|member| !defined(member)) {
+            writeln!(s, "{body_pad}def `{}`: () -> untyped", member.as_str()).unwrap();
+        }
+    }
 
     for inc in &lc.includes {
         writeln!(s, "{body_pad}include {}", inc.0.as_str()).unwrap();
@@ -193,6 +229,8 @@ fn render_def(m: &MethodDef, enclosing: &[&str]) -> String {
         MethodReceiver::Instance => "",
         MethodReceiver::Class => "self.",
     };
+    let class_side = matches!(m.receiver, MethodReceiver::Class);
+    let _side = ClassSideGuard::enter(class_side);
     // A full forwarder has no named rest binding. Neither its keywords
     // nor its block can be inferred from the synthetic signature slot.
     let sig = match &m.signature {
@@ -249,7 +287,7 @@ fn render_typed_params(params: &[Param], enclosing: &[&str]) -> String {
         let name = p.name.as_str();
         // IR keyword-rest params name the collected Hash, while RBS
         // **T names the type of each keyword value (see rbs ingestion).
-        let param_ty = match (&p.kind, &p.ty) {
+        let param_ty = match (&p.kind, &*p.ty) {
             (ParamKind::KeywordRest, Ty::Hash { value, .. }) => &**value,
             _ => &p.ty,
         };
@@ -327,6 +365,11 @@ fn ty_to_rbs_in(ty: &Ty, enclosing: &[&str]) -> String {
         // here is a signature that was read and never dispatched.
         // Printing `instance` back out would make that defect
         // invisible precisely because the output stays valid.
+        // The exception is a class-side signature: `def self.make; new;
+        // end` keeps `SelfInstance` on purpose so that `Child.make`
+        // answers Child at dispatch (`analyze::body`), and RBS
+        // `instance` in a singleton method means exactly that.
+        Ty::SelfInstance if CLASS_SIDE_SIG.with(Cell::get) => "instance".into(),
         Ty::SelfInstance => {
             crate::emit::diagnostics::unsupported_self_instance_ty("rbs")
         }
@@ -458,10 +501,10 @@ mod tests {
 
     #[test]
     fn keyword_rest_renders_values_not_a_nested_hash() {
-        let hash = Ty::Hash { key: Box::new(Ty::Sym), value: Box::new(Ty::Str) };
+        let hash = Ty::Hash { key: std::sync::Arc::new(Ty::Sym), value: std::sync::Arc::new(Ty::Str) };
         let params = [
-            Param { name: Symbol::from("mapping"), ty: hash.clone(), kind: ParamKind::Required },
-            Param { name: Symbol::from("opts"), ty: hash, kind: ParamKind::KeywordRest },
+            Param { name: Symbol::from("mapping"), ty: hash.clone().into(), kind: ParamKind::Required },
+            Param { name: Symbol::from("opts"), ty: hash.into(), kind: ParamKind::KeywordRest },
         ];
         assert_eq!(render_typed_params(&params, &[]), "Hash[Symbol, String] mapping, **String opts");
     }

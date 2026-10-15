@@ -1,31 +1,173 @@
-//! `t("key", …)` in a template and `I18n.t("key", …)` anywhere → the
-//! String Rails' I18n answers from the app's locale (`crate::i18n`).
+//! `t("key", …)` in a template or a controller, and `I18n.t("key", …)`
+//! anywhere → the String Rails' I18n answers from the app's locale
+//! (`crate::i18n`).
 //!
 //! The lookup happens at compile time: a literal key (or a view's lazy
 //! `.key`), literal `scope:` / `default:`, and interpolation values that
 //! are any expression. `count:` keeps the choice between plural forms
 //! for run time. A template's `_html` key renders unescaped with its
-//! values escaped, as `HtmlSafeTranslation` does. Anything else (a
-//! dynamic key, `locale:`, a key the locale lacks, whose answer Rails
-//! makes per environment by `raise_on_missing_translations`) is an error
-//! in analyze, since no runtime carries the locale table; only what
-//! `parse` and `Catalog::resolve` accept is typed, and only that folds.
+//! values escaped, as `HtmlSafeTranslation` does. A key the locale lacks
+//! answers as Rails does in the running environment
+//! (`raise_on_missing_translations`, read per environment at ingest).
+//! A controller's `t` is `AbstractController::Translation#translate`: a
+//! lazy `.key` reads `"<controller_path>.<action_name>.key"` with
+//! `:"<controller_path>.key"` as its first default, `action_name` read
+//! when it runs, and the rest is `I18n.t`'s. Its `_html` keys stay an
+//! error: Rails returns them html-safe, and no String here carries that
+//! mark on to the view that renders them.
+//! Anything else (a dynamic key, `locale:`, a setting not readable at
+//! compile time) is an error in analyze; only what `parse` and
+//! `Catalog::resolve` accept is typed, and only that folds.
 
 use crate::app::App;
-use crate::expr::{Expr, ExprNode, InterpPart, LValue, Literal};
-use crate::i18n::{Catalog, Fallback, Piece, Translate, Translation};
+use crate::expr::{Arm, Expr, ExprNode, InterpPart, LValue, Literal, Pattern};
+use crate::i18n::{Catalog, Fallback, Piece, Translate, Translation, Variant};
 use crate::ident::{Symbol, VarId};
 use crate::span::Span;
 use crate::ty::Ty;
 
 /// A translate call's lookup, and the expressions its `count:` and
 /// interpolation values read.
+#[derive(Clone)]
 pub(crate) struct Call {
     pub lookup: Translate,
     count: Option<Expr>,
     values: Vec<(String, Expr)>,
     /// `count` and the value names, in source order.
     order: Vec<String>,
+    /// A key with run-time text: its parts after the literal prefix
+    /// (`lookup.key`), and the literal text it ends in.
+    dynamic: Option<(Vec<InterpPart>, String)>,
+    /// `locale:`, when the call names one.
+    locale: Option<Locale>,
+}
+
+/// A `locale:` option: a literal (`:pl`, `"pl"`), or a value read when
+/// the call runs.
+#[derive(Clone)]
+pub(crate) enum Locale {
+    Literal(String),
+    Dynamic(Expr),
+}
+
+/// Most translations one run-time key may reach before folding each
+/// stops being worth the branch.
+const MAX_REACH: usize = 400;
+
+/// How a translate call folds: one translation, or one per key a
+/// run-time key can reach, the subtrees it can name, and what it answers
+/// for any other key.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) enum Plan {
+    Static(Translation),
+    Dynamic { arms: Vec<(String, Translation)>, subtrees: Vec<String>, otherwise: Translation, otherwise_html: bool },
+}
+
+/// Every way `call` can be looked up at run time, each with its plan:
+/// one per locale it can run in (the `locale:` it names, else each
+/// available locale) and per environment whose fallbacks differ.
+pub(crate) fn plans(catalog: &Catalog, call: &Call, in_view: bool) -> Result<Vec<(Variant, Plan)>, String> {
+    let locales = match &call.locale {
+        Some(Locale::Literal(l)) if !catalog.locales().contains(l) => {
+            return Err(format!("`locale: :{l}`, which is not an available locale"));
+        }
+        Some(Locale::Literal(l)) => vec![l.clone()],
+        _ => catalog.locales(),
+    };
+    if locales.len() > 1 {
+        if let Some(why) = &catalog.available_unknown {
+            return Err(format!("`config.i18n.available_locales`: {why}"));
+        }
+    }
+    if locales.len() > 1 || catalog.fallbacks.app.is_some() || !catalog.fallbacks.envs.is_empty() {
+        if let Some(why) = &catalog.fallbacks.unknown {
+            return Err(format!("`config.i18n.fallbacks` {why}"));
+        }
+    }
+    catalog
+        .variants(&locales)
+        .into_iter()
+        .map(|v| plan(catalog, &v, call, in_view).map(|p| (v, p)))
+        .collect()
+}
+
+fn plan(catalog: &Catalog, variant: &Variant, call: &Call, in_view: bool) -> Result<Plan, String> {
+    let (locale, fallbacks) = (variant.locale.as_str(), variant.fallbacks.as_deref());
+    let Some((_, tail)) = &call.dynamic else {
+        return catalog.resolve_in(locale, fallbacks, &call.lookup).map(Plan::Static);
+    };
+    let base = Translate::full_key(&call.lookup, &call.lookup.key)?;
+    let chain = match fallbacks {
+        Some(defaults) => crate::i18n::fallback_chain(locale, defaults),
+        None => vec![locale.to_string()],
+    };
+    let (mut keys, mut subtrees) = (Vec::new(), Vec::new());
+    for reached in chain.iter().filter_map(|l| catalog.catalog_for(l)) {
+        let (k, s) = reached.reach(&base, tail, call.lookup.counted);
+        keys.extend(k);
+        subtrees.extend(s);
+    }
+    keys.sort();
+    keys.dedup();
+    subtrees.sort();
+    subtrees.dedup();
+    subtrees.retain(|s| !keys.contains(s));
+    if keys.len() + subtrees.len() > MAX_REACH {
+        return Err(format!("a key computed at run time that can reach {} translations", keys.len() + subtrees.len()));
+    }
+    // Each arm is the literal key, already scoped, with the call's defaults scoped the same way.
+    let mut defaults = Vec::new();
+    for d in &call.lookup.defaults {
+        defaults.push(match d {
+            Fallback::Key(k) => Fallback::Key(Translate::full_key(&call.lookup, k)?),
+            Fallback::Text(t) => Fallback::Text(t.clone()),
+        });
+    }
+    let mut arms = Vec::new();
+    for key in keys {
+        let lookup = Translate { key: key.clone(), view: None, scope: None, defaults: defaults.clone(), ..call.lookup.clone() };
+        arms.push((key, catalog.resolve_in(locale, fallbacks, &lookup)?));
+    }
+    let otherwise = if call.lookup.defaults.is_empty() {
+        if let Some(why) = &catalog.missing.unknown {
+            return Err(format!("a key computed at run time can be missing ({why})"));
+        }
+        Translation::Missing { key: String::new(), considered: Vec::new() }
+    } else {
+        catalog.resolve_in(locale, fallbacks, &Translate { key: "\u{0}".into(), ..call.lookup.clone() })?
+    };
+    // A found translation is html-safe by the key the call passed, which only its literal tail can tell.
+    let otherwise_html = crate::i18n::is_html_safe_key(tail);
+    if in_view && !call.lookup.defaults.is_empty() && !otherwise_html && tail.trim_matches('.').is_empty() {
+        return Err("a default under a key whose end is computed at run time, which decides whether it is html-safe".into());
+    }
+    Ok(Plan::Dynamic { arms, subtrees, otherwise, otherwise_html })
+}
+
+/// Where a call sits, which decides what a receiver-less `t` is.
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum Site<'a> {
+    /// Anywhere else: only `I18n.t` translates.
+    Other,
+    /// A template (`articles/_form` when known): ActionView's `t`.
+    View(Option<&'a str>),
+    /// An instance method of an `ActionController::Base` controller,
+    /// under its `controller_path` with `/` read as `.` (`admin.users`):
+    /// AbstractController::Translation's `t`.
+    Controller(&'a str),
+}
+
+impl Site<'_> {
+    pub(crate) fn in_view(self) -> bool {
+        matches!(self, Site::View(_))
+    }
+}
+
+/// `controller_path` with `/` as `.`, as `AbstractController::Translation`
+/// scopes a lazy key: `Admin::UsersController` → `admin.users`.
+pub(crate) fn controller_scope(class_name: &str) -> String {
+    let name = class_name.strip_suffix("Controller").unwrap_or(class_name);
+    crate::naming::underscore(name).replace('/', ".")
 }
 
 /// `None` when this is not a translate call; `Err` when it is one whose
@@ -35,43 +177,174 @@ pub(crate) fn parse(
     method: &str,
     args: &[Expr],
     block: Option<&Expr>,
-    in_view: bool,
-    view: Option<&str>,
+    site: Site<'_>,
 ) -> Option<Result<Call, String>> {
     if !matches!(method, "t" | "translate") {
         return None;
     }
     let on_i18n = matches!(recv.map(|r| &*r.node),
         Some(ExprNode::Const { path }) if path.len() == 1 && path[0].as_str() == "I18n");
-    if !(on_i18n || (recv.is_none() && in_view)) {
+    let bare = recv.is_none() && !matches!(site, Site::Other);
+    if !(on_i18n || bare) {
         return None;
     }
     if block.is_some() {
         return Some(Err("a block on the call".into()));
     }
-    Some(parse_args(args, view))
+    Some(match (site, on_i18n) {
+        (Site::View(view), false) => parse_args(args, view, true),
+        (Site::Controller(scope), false) => parse_controller_args(args, scope),
+        _ => parse_args(args, None, false),
+    })
+}
+
+/// `AbstractController::Translation#translate`: a lazy `.key` becomes
+/// `"<scope>.#{action_name}.key"`, with `:"<scope>.key"` put in front of
+/// any `default:` (always a list then); an `_html` key is refused.
+fn parse_controller_args(args: &[Expr], scope: &str) -> Result<Call, String> {
+    let lazy = args.first().and_then(literal_text).and_then(|k| k.strip_prefix('.').map(str::to_string));
+    let call = match lazy {
+        None => parse_args(args, None, false)?,
+        Some(rest) => {
+            let span = args[0].span;
+            let action_name = Expr::new(span, ExprNode::Send {
+                recv: None,
+                method: Symbol::from("action_name"),
+                args: vec![],
+                block: None,
+                parenthesized: false,
+            });
+            let key = Expr::new(span, ExprNode::StringInterp {
+                parts: vec![
+                    InterpPart::Text { value: format!("{scope}.") },
+                    InterpPart::Expr { expr: typed(action_name) },
+                    InterpPart::Text { value: format!(".{rest}") },
+                ],
+            });
+            let mut call = parse_args(&std::iter::once(key).chain(args[1..].iter().cloned()).collect::<Vec<_>>(), None, false)?;
+            call.lookup.defaults.insert(0, Fallback::Key(format!("{scope}.{rest}")));
+            call.lookup.default_list = true;
+            call
+        }
+    };
+    let written = match &call.dynamic {
+        Some((_, tail)) => tail.clone(),
+        None => call.lookup.key.clone(),
+    };
+    if crate::i18n::is_html_safe_key(&written) {
+        return Err("an `_html` key in a controller: Rails returns it html-safe, and that mark does not reach the view here".into());
+    }
+    Ok(call)
 }
 
 fn literal_text(e: &Expr) -> Option<String> {
     match &*e.node {
         ExprNode::Lit { value: Literal::Str { value } } => Some(value.clone()),
         ExprNode::Lit { value: Literal::Sym { value } } => Some(value.as_str().to_string()),
+        ExprNode::StringInterp { parts } => parts
+            .iter()
+            .map(|p| match p {
+                InterpPart::Text { value } => Some(value.clone()),
+                InterpPart::Expr { expr } => interpolated_text(expr),
+            })
+            .collect(),
         _ => None,
     }
 }
 
-fn parse_args(args: &[Expr], view: Option<&str>) -> Result<Call, String> {
+/// What `#{expr}` renders for a literal `expr`.
+fn interpolated_text(e: &Expr) -> Option<String> {
+    match &*e.node {
+        ExprNode::Lit { value: Literal::Nil } => Some(String::new()),
+        ExprNode::Lit { value: Literal::Int { value } } => Some(value.to_string()),
+        _ => literal_text(e),
+    }
+}
+
+/// `"prefix.#{x}.tail"`: the literal text before the first run-time
+/// part (which must not be empty), the parts from there on, and the
+/// literal text after the last run-time part.
+fn dynamic_key(key: &Expr) -> Option<(String, Vec<InterpPart>, String)> {
+    let ExprNode::StringInterp { parts } = &*key.node else { return None };
+    let literal = |p: &InterpPart| match p {
+        InterpPart::Text { value } => Some(value.clone()),
+        InterpPart::Expr { expr } => interpolated_text(expr),
+    };
+    let first = parts.iter().position(|p| literal(p).is_none())?;
+    let last = parts.iter().rposition(|p| literal(p).is_none())?;
+    let prefix: String = parts[..first].iter().filter_map(literal).collect();
+    let tail: String = parts[last + 1..].iter().filter_map(literal).collect();
+    (!prefix.is_empty()).then(|| (prefix, parts[first..].to_vec(), tail))
+}
+
+/// A key that picks between literals by a condition (`c ? "a" : "b"`,
+/// or `"x.#{c ? 'a' : 'b'}"`): the condition, and the arguments with
+/// the key each way it can go.
+pub(crate) fn split_key(args: &[Expr]) -> Option<(Expr, Vec<Expr>, Vec<Expr>)> {
+    let key = args.first()?;
+    let with_key = |k: Expr| std::iter::once(k).chain(args[1..].iter().cloned()).collect::<Vec<_>>();
+    let (cond, then_key, else_key) = match &*key.node {
+        ExprNode::If { cond, then_branch, else_branch } => (cond.clone(), then_branch.clone(), else_branch.clone()),
+        ExprNode::StringInterp { parts } => {
+            let at = parts.iter().position(|p| match p {
+                InterpPart::Expr { expr } => interpolated_text(expr).is_none(),
+                InterpPart::Text { .. } => false,
+            })?;
+            let InterpPart::Expr { expr } = &parts[at] else { unreachable!() };
+            let ExprNode::If { cond, then_branch, else_branch } = &*expr.node else { return None };
+            let swap = |branch: &Expr| {
+                let mut parts = parts.clone();
+                parts[at] = InterpPart::Expr { expr: branch.clone() };
+                Expr::new(key.span, ExprNode::StringInterp { parts })
+            };
+            (cond.clone(), swap(then_branch), swap(else_branch))
+        }
+        _ => return None,
+    };
+    Some((cond, with_key(then_key), with_key(else_key)))
+}
+
+/// Whether every key a translate call can look up resolves; `None` when
+/// this is not a translate call.
+pub(crate) fn resolves(
+    catalog: &Catalog,
+    recv: Option<&Expr>,
+    method: &str,
+    args: &[Expr],
+    block: Option<&Expr>,
+    site: Site<'_>,
+) -> Option<Result<(), String>> {
+    let parsed = parse(recv, method, args, block, site)?;
+    Some(match (parsed, split_key(args)) {
+        (Err(reason), _) if block.is_some() => Err(reason),
+        (_, Some((_, then_args, else_args))) => [then_args, else_args]
+            .iter()
+            .try_for_each(|a| resolves(catalog, recv, method, a, block, site).expect("still a translate call")),
+        (Ok(call), None) => plans(catalog, &call, site.in_view()).map(|_| ()),
+        (Err(reason), None) => Err(reason),
+    })
+}
+
+fn parse_args(args: &[Expr], view: Option<&str>, template: bool) -> Result<Call, String> {
     let (key, opts) = match args {
         [key] => (key, None),
         [key, opts] => (key, Some(opts)),
         _ => return Err("an argument shape other than (key, **options)".into()),
     };
-    let key = literal_text(key).ok_or("a key computed at run time")?;
+    let (key, dynamic) = match literal_text(key) {
+        Some(key) => (key, None),
+        None => {
+            let (prefix, rest, tail) = dynamic_key(key).ok_or("a key computed at run time")?;
+            (prefix, Some((rest, tail)))
+        }
+    };
     let mut call = Call {
-        lookup: Translate { key, view: view.map(str::to_string), ..Default::default() },
+        lookup: Translate { key, view: view.map(str::to_string), template, ..Default::default() },
         count: None,
         values: Vec::new(),
         order: Vec::new(),
+        dynamic,
+        locale: None,
     };
     let Some(opts) = opts else { return Ok(call) };
     let ExprNode::Hash { entries, .. } = &*opts.node else {
@@ -100,13 +373,31 @@ fn parse_args(args: &[Expr], view: Option<&str>) -> Result<Call, String> {
                     _ => one(v).map(|d| vec![d]),
                 };
                 call.lookup.defaults = defaults.ok_or("a default computed at run time")?;
+                call.lookup.default_list = matches!(&*v.node, ExprNode::Array { .. });
             }
             "count" => {
                 call.lookup.counted = true;
                 call.count = Some(v.clone());
                 call.order.push("count".into());
             }
-            "locale" | "raise" | "throw" | "separator" | "exception_handler" | "fallback" => {
+            "locale" => {
+                call.locale = Some(match literal_text(v) {
+                    Some(locale) => Locale::Literal(locale),
+                    // Read before the arms that evaluate the other options,
+                    // so none before it may have an effect to reorder.
+                    None => {
+                        let effect = call.order.iter().any(|n| {
+                            let value = if n == "count" { call.count.as_ref() } else { call.values.iter().find(|(m, _)| m == n).map(|(_, v)| v) };
+                            value.is_some_and(|v| !is_plain(v))
+                        });
+                        if effect {
+                            return Err("a `locale:` read after an option with effects".into());
+                        }
+                        Locale::Dynamic(v.clone())
+                    }
+                });
+            }
+            "raise" | "throw" | "separator" | "exception_handler" | "fallback" => {
                 return Err(format!("the `{name}:` option"));
             }
             _ => {
@@ -120,24 +411,382 @@ fn parse_args(args: &[Expr], view: Option<&str>) -> Result<Call, String> {
 }
 
 /// Fold every resolvable translate call in hook bodies, test bodies and
-/// templates.
+/// templates. A controller's instance methods (its actions and the
+/// private methods they call) take the controller's `t`.
 pub fn apply_i18n_translate_lowering(app: &mut App) {
     let catalog = app.i18n.or_rails_default().clone();
-    super::for_each_hook_body(app, &mut |body| rewrite(body, &catalog, false, None));
-    super::for_each_test_body(app, &mut |body| rewrite(body, &catalog, false, None));
+    let controllers: std::collections::HashMap<crate::ident::ClassId, String> = app
+        .controllers
+        .iter()
+        .filter(|c| translates(app, c))
+        .map(|c| (c.name.clone(), controller_scope(c.name.0.as_str())))
+        .collect();
+    super::for_each_owned_hook_body(app, &mut |owner, body| {
+        if owner.is_some_and(|o| controllers.contains_key(o)) {
+            return;
+        }
+        rewrite(body, &catalog, Site::Other)
+    });
+    for controller in &mut app.controllers {
+        let Some(scope) = controllers.get(&controller.name) else { continue };
+        for item in &mut controller.body {
+            match item {
+                crate::dialect::ControllerBodyItem::Action { action, .. } => {
+                    for (_name, default) in &mut action.opt_params {
+                        rewrite(default, &catalog, Site::Controller(scope));
+                    }
+                    rewrite(&mut action.body, &catalog, Site::Controller(scope));
+                }
+                crate::dialect::ControllerBodyItem::ClassMethod { method, .. } => {
+                    for p in &mut method.params {
+                        if let Some(default) = &mut p.default {
+                            rewrite(default, &catalog, Site::Other);
+                        }
+                    }
+                    rewrite(&mut method.body, &catalog, Site::Other);
+                }
+                crate::dialect::ControllerBodyItem::Unknown { expr, .. } => rewrite(expr, &catalog, Site::Other),
+                crate::dialect::ControllerBodyItem::Filter { filter, .. } => {
+                    for c in [&mut filter.if_cond_expr, &mut filter.unless_cond_expr].into_iter().flatten() {
+                        rewrite(c, &catalog, Site::Other);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    super::for_each_test_body(app, &mut |body| rewrite(body, &catalog, Site::Other));
     for view in &mut app.views {
         let name = view.name.as_str().to_string();
-        rewrite(&mut view.body, &catalog, true, Some(&name));
+        rewrite(&mut view.body, &catalog, Site::View(Some(&name)));
     }
 }
 
-fn rewrite(expr: &mut Expr, catalog: &Catalog, in_view: bool, view: Option<&str>) {
-    expr.node.for_each_child_mut(&mut |c| rewrite(c, catalog, in_view, view));
+/// Whether `controller` has `AbstractController::Translation`'s `t`:
+/// it descends from `ActionController::Base` (an `ActionController::API`
+/// controller has no `t`) and neither it nor an app ancestor defines its
+/// own `t` / `translate`.
+fn translates(app: &App, controller: &crate::dialect::Controller) -> bool {
+    let by_name: std::collections::HashMap<&str, &crate::dialect::Controller> =
+        app.controllers.iter().map(|c| (c.name.0.as_str(), c)).collect();
+    let mut current = Some(controller);
+    for _ in 0..32 {
+        let Some(c) = current else { return false };
+        if c.actions().any(|a| matches!(a.name.as_str(), "t" | "translate")) {
+            return false;
+        }
+        let Some(parent) = c.parent.as_ref().map(|p| p.0.as_str()) else { return false };
+        if parent == "ActionController::Base" {
+            return true;
+        }
+        // A parent named as written may be relative to the child's namespace.
+        current = by_name.get(parent).copied().or_else(|| {
+            let ns = c.name.0.as_str().rsplit_once("::").map(|(ns, _)| ns)?;
+            by_name.get(format!("{ns}::{parent}").as_str()).copied()
+        });
+    }
+    false
+}
+
+fn rewrite(expr: &mut Expr, catalog: &Catalog, site: Site<'_>) {
+    expr.node.for_each_child_mut(&mut |c| rewrite(c, catalog, site));
+    if let Some(spelled) = with_locale(expr) {
+        *expr = spelled;
+        return;
+    }
+    let in_view = site.in_view();
     let ExprNode::Send { recv, method, args, block, .. } = &*expr.node else { return };
-    let Some(Ok(mut call)) = parse(recv.as_ref(), method.as_str(), args, block.as_ref(), in_view, view) else { return };
-    let Ok(translation) = catalog.resolve(&call.lookup) else { return };
-    let span = expr.span;
-    let html = in_view && crate::i18n::is_html_safe_key(&call.lookup.key);
+    let Some(parsed) = parse(recv.as_ref(), method.as_str(), args, block.as_ref(), site) else { return };
+    if let Some((cond, then_args, else_args)) = split_key(args) {
+        let resolved = resolves(catalog, recv.as_ref(), method.as_str(), args, block.as_ref(), site);
+        if !matches!(resolved, Some(Ok(()))) {
+            return;
+        }
+        let branch = |args: Vec<Expr>| {
+            let mut e = expr.clone();
+            if let ExprNode::Send { args: a, .. } = &mut *e.node {
+                *a = args;
+            }
+            rewrite(&mut e, catalog, site);
+            e
+        };
+        let (then_branch, else_branch) = (branch(then_args), branch(else_args));
+        *expr = typed(Expr::new(expr.span, ExprNode::If { cond, then_branch, else_branch }));
+        return;
+    }
+    let Ok(call) = parsed else { return };
+    let Ok(plans) = plans(catalog, &call, in_view) else { return };
+    let Some(folded) = fold_variants(&call, plans, expr.span, in_view, catalog) else { return };
+    *expr = folded;
+}
+
+/// The call folded once per way it can run, chosen between when it runs:
+/// by the locale (`I18n.locale`, or the `locale:` the call reads), then
+/// by the environment where `config.i18n.fallbacks` differs between
+/// them. Ways that fold the same share one branch, so an app with one
+/// locale and one setting folds exactly as before. In a template a
+/// branch that is not html-safe is escaped when another one is, and the
+/// whole is marked raw.
+fn fold_variants(call: &Call, plans: Vec<(Variant, Plan)>, span: Span, in_view: bool, catalog: &Catalog) -> Option<Expr> {
+    // Per locale, in order: its plans, the variants that share each.
+    let mut locales: Vec<(String, Vec<(Plan, Vec<Variant>)>)> = Vec::new();
+    for (variant, plan) in plans {
+        let at = match locales.iter().position(|(l, _)| *l == variant.locale) {
+            Some(at) => at,
+            None => {
+                locales.push((variant.locale.clone(), Vec::new()));
+                locales.len() - 1
+            }
+        };
+        let groups = &mut locales[at].1;
+        match groups.iter_mut().find(|(p, _)| *p == plan) {
+            Some((_, variants)) => variants.push(variant),
+            None => groups.push((plan, vec![variant])),
+        }
+    }
+    let shared = locales.windows(2).all(|w| w[0].1 == w[1].1);
+    let mut arms: Vec<(String, (Expr, bool))> = Vec::new();
+    for (locale, groups) in &locales {
+        let mut branches: Vec<(Option<Vec<String>>, (Expr, bool))> = Vec::new();
+        for (plan, variants) in groups {
+            // The variant that covers every environment not named is the else branch.
+            let envs = match variants.iter().any(|v| v.envs.is_none()) {
+                true => None,
+                false => Some(variants.iter().flat_map(|v| v.envs.clone().unwrap_or_default()).collect()),
+            };
+            branches.push((envs, fold_plan(call, plan.clone(), locale, span, in_view, catalog)?));
+        }
+        branches.sort_by_key(|(envs, _)| envs.is_none());
+        arms.push((locale.clone(), choose(span, in_view, branches, |envs| {
+            let mut test = const_send(span, "I18n", "running_in?", vec![lit(span, envs.join(","))]);
+            test.ty = Some(Ty::Bool);
+            test
+        })));
+        if shared {
+            break;
+        }
+    }
+    let (whole, html) = if arms.len() == 1 {
+        arms.pop()?.1
+    } else {
+        let scrutinee = match &call.locale {
+            Some(Locale::Dynamic(value)) => const_send(span, "I18n", "locale_name", vec![value.clone()]),
+            _ => Expr::new(span, ExprNode::Send {
+                recv: Some(Expr { ty: Some(Ty::Sym), ..const_send(span, "I18n", "locale", vec![]) }),
+                method: Symbol::from("to_s"),
+                args: vec![],
+                block: None,
+                parenthesized: false,
+            }),
+        };
+        // The default locale, first, answers any other.
+        let default = arms.remove(0);
+        let mut branches: Vec<(Option<String>, (Expr, bool))> = arms.into_iter().map(|(l, e)| (Some(l), e)).collect();
+        branches.push((None, default.1));
+        let any_html = in_view && branches.iter().any(|(_, (_, h))| *h);
+        let mut case_arms = Vec::new();
+        for (locale, shown) in branches {
+            let body = show(span, shown, any_html);
+            case_arms.push(Arm {
+                pattern: match locale {
+                    Some(l) => Pattern::Lit { value: Literal::Str { value: l } },
+                    None => Pattern::Wildcard,
+                },
+                guard: None,
+                body,
+            });
+        }
+        (typed(Expr::new(span, ExprNode::Case { scrutinee: typed(scrutinee), arms: case_arms })), any_html)
+    };
+    Some(if html { raw(span, whole) } else { whole })
+}
+
+/// `I18n.with_locale(l) { body }`, or `I18n.with_locale(l, &action)` as
+/// an `around_action` writes it, spelled out as the gem runs it:
+///
+/// ```ruby
+/// __i18n_locale_prev = I18n.enter_locale(l)
+/// begin
+///   body              # or action.call
+/// ensure
+///   I18n.leave_locale(__i18n_locale_prev)
+/// end
+/// ```
+///
+/// The gem returns the block's value, which no runtime signature can
+/// type without generics; spelled out, the value is the body's own.
+/// `enter_locale(nil)` changes nothing and answers nil, so nothing is
+/// restored, as in the gem. A block with parameters, or none, is left
+/// as written.
+fn with_locale(e: &Expr) -> Option<Expr> {
+    let ExprNode::Send { recv: Some(r), method, args, block: Some(block), .. } = &*e.node else { return None };
+    let on_i18n = matches!(&*r.node, ExprNode::Const { path } if path.len() == 1 && path[0].as_str() == "I18n");
+    if !on_i18n || method.as_str() != "with_locale" {
+        return None;
+    }
+    let [locale] = args.as_slice() else { return None };
+    let span = e.span;
+    let body = match &*block.node {
+        ExprNode::Lambda { params, rest_param: None, extra_params, block_param: None, body, .. }
+            if params.is_empty() && extra_params.is_empty() => body.clone(),
+        ExprNode::Var { .. } => {
+            let mut call = Expr::new(span, ExprNode::Send {
+                recv: Some(block.clone()),
+                method: Symbol::from("call"),
+                args: vec![],
+                block: None,
+                parenthesized: false,
+            });
+            call.ty = Some(Ty::Untyped);
+            call
+        }
+        _ => return None,
+    };
+    // Every node is stamped: the lowered IR is diagnosed again.
+    let prev_ty = Ty::Union { variants: vec![Ty::Str, Ty::Nil].into() };
+    let prev = Symbol::from(format!("__i18n_locale_prev_{}", span.start));
+    let read_prev = Expr { ty: Some(prev_ty.clone()), ..Expr::new(span, ExprNode::Var { id: VarId(0), name: prev.clone() }) };
+    let enter = Expr { ty: Some(prev_ty.clone()), ..const_send(span, "I18n", "enter_locale", vec![locale.clone()]) };
+    let leave = Expr { ty: Some(Ty::Nil), ..const_send(span, "I18n", "leave_locale", vec![read_prev]) };
+    let save = Expr { ty: Some(prev_ty), ..Expr::new(span, ExprNode::Assign { target: LValue::Var { id: VarId(0), name: prev }, value: enter }) };
+    let body_ty = body.ty.clone();
+    let run = Expr {
+        ty: body_ty.clone(),
+        ..Expr::new(span, ExprNode::BeginRescue { body, rescues: Vec::new(), else_branch: None, ensure: Some(leave), implicit: false })
+    };
+    Some(Expr { ty: body_ty, ..Expr::new(span, ExprNode::Seq { exprs: vec![save, run] }) })
+}
+
+/// `branches` (each with the environments it runs in, `None` for every
+/// other one, last) as one value: `if <test(envs)> … else … end`.
+fn choose(span: Span, in_view: bool, mut branches: Vec<(Option<Vec<String>>, (Expr, bool))>, test: impl Fn(&[String]) -> Expr) -> (Expr, bool) {
+    if branches.len() == 1 {
+        return branches.pop().expect("one branch").1;
+    }
+    let any_html = in_view && branches.iter().any(|(_, (_, h))| *h);
+    let (_, last) = branches.pop().expect("an else branch");
+    let mut out = show(span, last, any_html);
+    while let Some((envs, shown)) = branches.pop() {
+        let then_branch = show(span, shown, any_html);
+        out = typed(Expr::new(span, ExprNode::If { cond: test(&envs.unwrap_or_default()), then_branch, else_branch: out }));
+    }
+    (out, any_html)
+}
+
+/// A branch's value where its siblings may be html-safe: escaped unless
+/// it is html-safe itself, when any sibling is.
+fn show(span: Span, (folded, html): (Expr, bool), any_html: bool) -> Expr {
+    match (any_html, html) {
+        (true, false) => typed(Expr::new(span, ExprNode::Send {
+            recv: Some(Expr::new(span, ExprNode::Const { path: vec![Symbol::from("ActionView"), Symbol::from("ViewHelpers")] })),
+            method: Symbol::from("html_escape"),
+            args: vec![folded],
+            block: None,
+            parenthesized: true,
+        })),
+        _ => folded,
+    }
+}
+
+/// One plan folded for `locale`, with whether the value is html-safe.
+fn fold_plan(call: &Call, plan: Plan, locale: &str, span: Span, in_view: bool, catalog: &Catalog) -> Option<(Expr, bool)> {
+    match plan {
+        Plan::Static(translation) => {
+            let key = lit(span, format!("{locale}.{}", Translate::full_key(&call.lookup, &call.lookup.key).unwrap_or_default()));
+            fold(call.clone(), translation, span, in_view, catalog, key)
+        }
+        Plan::Dynamic { arms, subtrees, otherwise, otherwise_html } => {
+            dynamic_fold(call, arms, subtrees, otherwise, otherwise_html, span, in_view, catalog, locale).map(|e| (e, in_view))
+        }
+    }
+}
+
+/// `__k = I18n.normalize_key("<scoped prefix>#{…}")`, then a `case` over
+/// every key it can reach, each arm folded as that literal key. In a
+/// template every arm is escaped or html-safe already, and the caller
+/// marks the whole raw, since arms differ in which they are.
+#[allow(clippy::too_many_arguments)]
+fn dynamic_fold(
+    call: &Call,
+    arms: Vec<(String, Translation)>,
+    subtrees: Vec<String>,
+    otherwise: Translation,
+    otherwise_html: bool,
+    span: Span,
+    in_view: bool,
+    catalog: &Catalog,
+    locale: &str,
+) -> Option<Expr> {
+    let (parts, _) = call.dynamic.as_ref()?;
+    let base = Translate::full_key(&call.lookup, &call.lookup.key).ok()?;
+    let local = Symbol::from(format!("__i18n_key_{}", span.start));
+    let read = || typed(Expr::new(span, ExprNode::Var { id: VarId(0), name: local.clone() }));
+    let key_text = typed(Expr::new(span, ExprNode::StringInterp {
+        parts: std::iter::once(InterpPart::Text { value: base }).chain(parts.iter().cloned()).collect(),
+    }));
+    let assign = Expr::new(span, ExprNode::Assign {
+        target: LValue::Var { id: VarId(0), name: local.clone() },
+        value: typed(const_send(span, "I18n", "normalize_key", vec![key_text])),
+    });
+    let shown = |(folded, html): (Expr, bool)| match (in_view, html) {
+        (true, false) => typed(Expr::new(span, ExprNode::Send {
+            recv: Some(Expr::new(span, ExprNode::Const { path: vec![Symbol::from("ActionView"), Symbol::from("ViewHelpers")] })),
+            method: Symbol::from("html_escape"),
+            args: vec![folded],
+            block: None,
+            parenthesized: true,
+        })),
+        _ => folded,
+    };
+    let mut case_arms = Vec::new();
+    for (key, translation) in arms {
+        let mut each = call.clone_for(&key);
+        each.dynamic = None;
+        let full = lit(span, format!("{locale}.{key}"));
+        let body = shown(fold(each, translation, span, in_view, catalog, full)?);
+        case_arms.push(Arm { pattern: Pattern::Lit { value: Literal::Str { value: key } }, guard: None, body });
+    }
+    for key in subtrees {
+        let body = typed(const_send(span, "I18n", "subtree_translation", vec![read()]));
+        case_arms.push(Arm { pattern: Pattern::Lit { value: Literal::Str { value: key } }, guard: None, body });
+    }
+    let missing_key = typed(Expr::new(span, ExprNode::StringInterp {
+        parts: vec![InterpPart::Text { value: format!("{locale}.") }, InterpPart::Expr { expr: read() }],
+    }));
+    let mut rest = call.clone_for(&call.lookup.key);
+    rest.dynamic = None;
+    let (folded, html) = fold(rest, otherwise, span, in_view, catalog, missing_key)?;
+    let html = html || otherwise_html;
+    let otherwise = shown((folded, html));
+    // A key that reaches nothing in this locale is the else alone: Ruby has no `case` without a `when`.
+    let body = if case_arms.is_empty() {
+        otherwise
+    } else {
+        case_arms.push(Arm { pattern: Pattern::Wildcard, guard: None, body: otherwise });
+        typed(Expr::new(span, ExprNode::Case { scrutinee: read(), arms: case_arms }))
+    };
+    let whole = typed(Expr::new(span, ExprNode::Seq { exprs: vec![assign, body] }));
+    Some(whole)
+}
+
+impl Call {
+    fn clone_for(&self, key: &str) -> Call {
+        Call {
+            lookup: Translate { key: key.to_string(), ..self.lookup.clone() },
+            count: self.count.clone(),
+            values: self.values.clone(),
+            order: self.order.clone(),
+            dynamic: self.dynamic.clone(),
+            locale: self.locale.clone(),
+        }
+    }
+}
+
+/// `translation` as the call's value, with whether it is html-safe (an
+/// `_html` key's, or a template's missing-translation span). `key` is
+/// the missing key's text, read only for `Translation::Missing`.
+fn fold(mut call: Call, translation: Translation, span: Span, in_view: bool, catalog: &Catalog, key: Expr) -> Option<(Expr, bool)> {
+    let html = in_view && (crate::i18n::is_html_safe_key(&call.lookup.key) || matches!(translation, Translation::Missing { .. }));
     let bound = bind_options(&mut call, &translation, span);
     let render = |template: &str| interpolate(span, template, &call, html);
     let mut folded = match (translation, &call.count) {
@@ -162,22 +811,71 @@ fn rewrite(expr: &mut Expr, catalog: &Catalog, in_view: bool, view: Option<&str>
                 None => plural,
             }
         }
-        (Translation::Plural { .. }, None) => return,
+        (Translation::Plural { .. }, None) => return None,
+        (Translation::Missing { considered, .. }, _) => missing(span, key, &considered, &call, in_view, &catalog.missing),
     };
     folded.ty = Some(Ty::Str);
     if !bound.is_empty() {
         folded = typed(Expr::new(span, ExprNode::Seq { exprs: bound.into_iter().chain([folded]).collect() }));
     }
-    if html {
-        folded = typed(Expr::new(span, ExprNode::Send {
-            recv: None,
-            method: Symbol::from("raw"),
-            args: vec![folded],
-            block: None,
-            parenthesized: true,
-        }));
+    Some((folded, html))
+}
+
+fn lit(span: Span, value: String) -> Expr {
+    typed(Expr::new(span, ExprNode::Lit { value: Literal::Str { value } }))
+}
+
+fn const_send(span: Span, recv: &str, method: &str, args: Vec<Expr>) -> Expr {
+    Expr::new(span, ExprNode::Send {
+        recv: Some(Expr::new(span, ExprNode::Const { path: vec![Symbol::from(recv)] })),
+        method: Symbol::from(method),
+        args,
+        block: None,
+        parenthesized: true,
+    })
+}
+
+fn raw(span: Span, folded: Expr) -> Expr {
+    typed(Expr::new(span, ExprNode::Send {
+        recv: None,
+        method: Symbol::from("raw"),
+        args: vec![folded],
+        block: None,
+        parenthesized: true,
+    }))
+}
+
+/// `I18n.missing_translation(key, raises)` (`missing_translation_among`
+/// when I18n lists the `default:` keys it also considered), or in a
+/// template the debug span Action View renders, titled with the call's
+/// options in order: ActionView tries each default key itself and names
+/// only the first key in the span.
+fn missing(span: Span, key: Expr, considered: &[String], call: &Call, in_view: bool, policy: &crate::i18n::MissingPolicy) -> Expr {
+    let mut raises = const_send(span, "I18n", "missing_raises", vec![
+        Expr::new(span, ExprNode::Lit { value: Literal::Bool { value: policy.raises } }),
+        lit(span, policy.flipped.join(",")),
+    ]);
+    raises.ty = Some(Ty::Bool);
+    if !in_view && !considered.is_empty() {
+        let rest: String = considered.iter().map(|k| format!("\n- {k}")).collect();
+        return typed(const_send(span, "I18n", "missing_translation_among", vec![key, lit(span, rest), raises]));
     }
-    *expr = folded;
+    if !in_view {
+        return typed(const_send(span, "I18n", "missing_translation", vec![key, raises]));
+    }
+    let mut parts = Vec::new();
+    for name in &call.order {
+        let value = match name.as_str() {
+            "count" => call.count.clone(),
+            _ => call.values.iter().find(|(n, _)| n == name).map(|(_, v)| v.clone()),
+        };
+        if let Some(value) = value {
+            parts.push(InterpPart::Text { value: format!(", {name}: ") });
+            parts.push(InterpPart::Expr { expr: escaped(span, value) });
+        }
+    }
+    let details = if parts.is_empty() { lit(span, String::new()) } else { typed(Expr::new(span, ExprNode::StringInterp { parts })) };
+    typed(const_send(span, "I18n", "missing_translation_tag", vec![key, details, raises]))
 }
 
 fn typed(mut e: Expr) -> Expr {

@@ -11,6 +11,8 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 use serde_yaml_ng::Value;
 
+pub mod gems;
+
 /// Rails 8.1.4's bundled English, in the order its frameworks load it.
 const RAILS_EN: &[(&str, &str)] = &[
     ("activesupport", include_str!("rails/activesupport.en.yml")),
@@ -27,6 +29,114 @@ pub struct Catalog {
     pub locale: String,
     /// Dotted key (`activerecord.attributes.user.email`) → string leaf.
     pub entries: BTreeMap<String, String>,
+    /// What a translation the locale lacks does, per environment.
+    #[serde(default)]
+    pub missing: MissingPolicy,
+    /// The file that sets `config.action_view.field_error_proc`, when the
+    /// app replaces Rails' `field_with_errors` wrapper.
+    #[serde(default)]
+    pub field_error_proc: Option<String>,
+    /// `config.i18n.available_locales`, this locale among them; empty
+    /// when the app has only its default locale.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub available: Vec<String>,
+    /// Why `config.i18n.available_locales` cannot be read at compile time
+    /// (a value computed at boot); `available` then holds the locales the
+    /// app's files name, and a translation that can run in more than one
+    /// stays an error.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub available_unknown: Option<String>,
+    /// The catalogs of the other available locales, and of any locale a
+    /// fallback chain names, loaded as this one is.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub others: Vec<Catalog>,
+    /// `config.i18n.fallbacks`, per environment.
+    #[serde(default)]
+    pub fallbacks: FallbackPolicy,
+}
+
+/// `config.i18n.fallbacks`: Rails includes I18n's Fallbacks backend when
+/// it is set, and a lookup then tries the requested locale, its parents
+/// (`pt-BR`, `pt`), then these default locales. `true` is
+/// `[default_locale]`; `false`, `nil` or unset leaves the backend out.
+/// An environment's file runs after `config/application.rb`, so its own
+/// setting wins there.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct FallbackPolicy {
+    /// `config/application.rb`'s setting.
+    pub app: Option<Vec<String>>,
+    /// Each environment whose own file sets it, with its setting.
+    pub envs: Vec<(String, Option<Vec<String>>)>,
+    /// Why a setting cannot be read at compile time (a Hash of chains, a
+    /// value computed at boot); a translation then stays an error.
+    pub unknown: Option<String>,
+}
+
+/// One way a translation can be looked up at run time: in `locale`,
+/// with `fallbacks`, in the environments `envs` names (every environment
+/// but `except` when `envs` is `None`).
+#[derive(Clone, Debug, PartialEq)]
+pub struct Variant {
+    pub locale: String,
+    pub fallbacks: Option<Vec<String>>,
+    pub envs: Option<Vec<String>>,
+    pub except: Vec<String>,
+}
+
+impl Catalog {
+    /// The locales `I18n.locale` can be, the default first.
+    pub fn locales(&self) -> Vec<String> {
+        let mut out = vec![self.locale.clone()];
+        out.extend(self.available.iter().filter(|l| **l != self.locale).cloned());
+        out
+    }
+
+    /// Every (locale, fallback setting, environments) a lookup in one of
+    /// `locales` can run under.
+    pub fn variants(&self, locales: &[String]) -> Vec<Variant> {
+        let except: Vec<String> = self.fallbacks.envs.iter().map(|(e, _)| e.clone()).collect();
+        let mut out = Vec::new();
+        for locale in locales {
+            out.push(Variant { locale: locale.clone(), fallbacks: self.fallbacks.app.clone(), envs: None, except: except.clone() });
+            for (env, setting) in &self.fallbacks.envs {
+                out.push(Variant { locale: locale.clone(), fallbacks: setting.clone(), envs: Some(vec![env.clone()]), except: Vec::new() });
+            }
+        }
+        out
+    }
+}
+
+/// `I18n::Locale::Fallbacks#[]`: `locale` and its parents, then each
+/// default locale and its parents, each once.
+pub fn fallback_chain(locale: &str, defaults: &[String]) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for tag in std::iter::once(locale).chain(defaults.iter().map(String::as_str)) {
+        let mut tag = tag.to_string();
+        loop {
+            if !out.contains(&tag) {
+                out.push(tag.clone());
+            }
+            match tag.rsplit_once('-') {
+                Some((parent, _)) => tag = parent.to_string(),
+                None => break,
+            }
+        }
+    }
+    out
+}
+
+/// `config.i18n.raise_on_missing_translations`: Rails answers a missing
+/// translation with text unless the running environment sets it, and
+/// then raises `I18n::MissingTranslationData`.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct MissingPolicy {
+    /// `config/application.rb`'s value, Rails' `false` when unset.
+    pub raises: bool,
+    /// The environments whose own file sets the other value.
+    pub flipped: Vec<String>,
+    /// Why the setting cannot be read at compile time (`:strict`, or a
+    /// value computed at boot); a missing translation then stays an error.
+    pub unknown: Option<String>,
 }
 
 /// One piece of an interpolated message: text known at compile time, or
@@ -55,16 +165,41 @@ impl Catalog {
     /// Rails' English, then `files` (path, source), for `locale`. A file
     /// that does not parse is skipped and reported.
     pub fn load(locale: &str, files: &mut Vec<(String, String)>) -> (Catalog, Vec<(String, String)>) {
+        Catalog::load_with_gems(locale, &[], files)
+    }
+
+    /// As [`Catalog::load`], with the gems' files (already in load order)
+    /// between Rails' English and the app's.
+    pub fn load_with_gems(locale: &str, gems: &[(String, String)], files: &mut Vec<(String, String)>) -> (Catalog, Vec<(String, String)>) {
         files.sort_by(|a, b| a.0.cmp(&b.0));
-        let mut catalog = Catalog { locale: locale.to_string(), entries: BTreeMap::new() };
+        let mut catalog = Catalog { locale: locale.to_string(), ..Default::default() };
         let mut problems = Vec::new();
         let rails = RAILS_EN.iter().map(|(name, src)| (name.to_string(), src.to_string()));
-        for (path, source) in rails.collect::<Vec<_>>().iter().chain(files.iter()) {
+        for (path, source) in rails.collect::<Vec<_>>().iter().chain(gems.iter()).chain(files.iter()) {
             if let Err(e) = catalog.merge_source(source) {
                 problems.push((path.clone(), e));
             }
         }
         (catalog, problems)
+    }
+
+    /// The other locales: each of `available` but this one, and each a
+    /// fallback chain from one of them reaches, loaded from the same
+    /// files as this one.
+    pub fn load_locales(&mut self, available: Vec<String>, fallbacks: FallbackPolicy, gems: &[(String, String)], files: &mut Vec<(String, String)>) {
+        let settings: Vec<&Vec<String>> = fallbacks.app.iter().chain(fallbacks.envs.iter().filter_map(|(_, s)| s.as_ref())).collect();
+        let mut wanted: Vec<String> = Vec::new();
+        for locale in &available {
+            let chains = settings.iter().flat_map(|d| fallback_chain(locale, d));
+            for l in std::iter::once(locale.clone()).chain(chains) {
+                if l != self.locale && !wanted.contains(&l) {
+                    wanted.push(l);
+                }
+            }
+        }
+        self.others = wanted.iter().map(|l| Catalog::load_with_gems(l, gems, files).0).collect();
+        self.available = if available.len() > 1 { available } else { Vec::new() };
+        self.fallbacks = fallbacks;
     }
 
     fn merge_source(&mut self, source: &str) -> Result<(), String> {
@@ -125,7 +260,7 @@ impl Catalog {
             .filter(|(k, _)| prefixes.iter().any(|p| k.starts_with(p.as_str())))
             .map(|(k, v)| (k.clone(), v.clone()))
             .collect();
-        Catalog { locale: self.locale.clone(), entries }
+        Catalog { locale: self.locale.clone(), entries, ..Default::default() }
     }
 
     /// `Model.human_attribute_name(attr)`: the first of
@@ -239,17 +374,6 @@ impl ErrorOpts {
     }
 }
 
-/// Why `errors[:field]`, which finds a field's messages by the text
-/// `format` puts before them, cannot be answered under `format`.
-pub fn errors_index_refusal(format: &str) -> Option<&'static str> {
-    match format.strip_suffix("%{message}") {
-        None => Some("errors.format does not end in the message"),
-        Some(before) if before.contains("%{message}") => Some("errors.format names the message twice"),
-        Some("") => Some("errors.format puts nothing before the message to tell the field by"),
-        Some(_) => None,
-    }
-}
-
 pub fn format_full(format: &str, attribute: &str, message: &str) -> String {
     interpolate_text(format, |name| match name {
         "attribute" => Some(attribute.to_string()),
@@ -269,6 +393,12 @@ pub struct Translate {
     pub scope: Option<String>,
     /// `default:` entries in order: a key (`Symbol`) or literal text.
     pub defaults: Vec<Fallback>,
+    /// `default:` was an Array (`default: [:a]`, not `default: :a`), which
+    /// is what makes I18n's missing message list every key it considered.
+    pub default_list: bool,
+    /// The call is ActionView's `t`, which tries its key and each default
+    /// key in turn rather than leaving the defaults to I18n.
+    pub template: bool,
     /// `count:` given.
     pub counted: bool,
     /// The other keywords, each an interpolation value.
@@ -276,6 +406,22 @@ pub struct Translate {
 }
 
 impl Translate {
+    /// `key` as I18n normalizes it for this call: a view's lazy `.key`
+    /// expanded from the template's path, then `scope:` in front.
+    pub fn full_key(call: &Translate, key: &str) -> Result<String, String> {
+        let key = match key.strip_prefix('.') {
+            Some(rest) => {
+                let view = call.view.as_deref().ok_or("a lazy key outside a template")?;
+                format!("{}.{rest}", view.replace("/_", ".").replace('/', "."))
+            }
+            None => key.to_string(),
+        };
+        Ok(match &call.scope {
+            Some(scope) => format!("{scope}.{key}"),
+            None => key,
+        })
+    }
+
     /// I18n interpolates only when the call passes a value, so with none
     /// `%{x}` and `%%` stay as written.
     pub fn interpolates(&self) -> bool {
@@ -295,40 +441,105 @@ pub enum Fallback {
 pub enum Translation {
     One(String),
     Plural { zero: Option<String>, one: String, other: String },
+    /// Nothing found: Rails' missing-translation answer for `key`, with
+    /// the locale in front (`en.shop.title`). `considered` is every
+    /// `default:` key after it, normalized the same way, when the call
+    /// gave its defaults as an Array: I18n's message then lists them all
+    /// (`Translation missing. Options considered were:`).
+    Missing { key: String, considered: Vec<String> },
 }
 
 impl Catalog {
     /// Resolve `call` as I18n's simple backend does, or say why it
     /// cannot be answered at compile time.
     pub fn resolve(&self, call: &Translate) -> Result<Translation, String> {
-        let full = |key: &str| -> Result<String, String> {
-            let key = match key.strip_prefix('.') {
-                Some(rest) => {
-                    let view = call.view.as_deref().ok_or("a lazy key outside a template")?;
-                    format!("{}.{rest}", view.replace("/_", ".").replace('/', "."))
-                }
-                None => key.to_string(),
-            };
-            Ok(match &call.scope {
-                Some(scope) => format!("{scope}.{key}"),
-                None => key,
-            })
+        self.resolve_in(&self.locale, None, call)
+    }
+
+    /// The catalog of `locale`: this one, or one of [`Catalog::others`].
+    pub fn catalog_for(&self, locale: &str) -> Option<&Catalog> {
+        if self.locale == locale {
+            return Some(self);
+        }
+        self.others.iter().find(|c| c.locale == locale)
+    }
+
+    /// Resolve `call` for `locale` as I18n does with `fallbacks` (`None`
+    /// when the Fallbacks backend is not included, else its default
+    /// locales). With fallbacks I18n tries the key in the locale, then each
+    /// `default:` key before the first text across the whole chain, then
+    /// the key in each later locale, then the text; ActionView's `t`
+    /// instead walks its key and each default key in turn, each across
+    /// the chain. A missing translation names the requested locale.
+    pub fn resolve_in(&self, locale: &str, fallbacks: Option<&[String]>, call: &Translate) -> Result<Translation, String> {
+        let chain: Vec<&Catalog> = match fallbacks {
+            None => self.catalog_for(locale).into_iter().collect(),
+            Some(defaults) => fallback_chain(locale, defaults).iter().filter_map(|l| self.catalog_for(l)).collect(),
         };
-        let mut candidates: Vec<Result<String, String>> = vec![Ok(full(&call.key)?)];
+        if chain.first().is_none_or(|c| c.locale != locale) {
+            return Err(format!("`{locale}` is not an available locale"));
+        }
+        let full = |key: &str| Translate::full_key(call, key);
+        let key = full(&call.key)?;
+        let mut defaults: Vec<Result<String, String>> = Vec::new();
         for default in &call.defaults {
-            candidates.push(match default {
+            defaults.push(match default {
                 Fallback::Key(k) => Ok(full(k)?),
                 Fallback::Text(t) => Err(t.clone()),
             });
         }
+        // What is tried, in order: `Ok((catalog, key))` or `Err(text)`.
+        let across = |k: &str| -> Vec<Result<(&Catalog, String), String>> { chain.iter().map(|c| Ok((*c, k.to_string()))).collect() };
+        let candidates: Vec<Result<(&Catalog, String), String>> = match (fallbacks, call.template) {
+            (None, _) => std::iter::once(Ok((chain[0], key.clone())))
+                .chain(defaults.iter().map(|d| d.clone().map(|k| (chain[0], k))))
+                .collect(),
+            (Some(_), true) => std::iter::once(Ok(key.clone()))
+                .chain(defaults.iter().cloned())
+                .flat_map(|d| match d {
+                    Ok(k) => across(&k),
+                    Err(t) => vec![Err(t)],
+                })
+                .collect(),
+            (Some(_), false) => {
+                let symbols: Vec<&String> = defaults.iter().map_while(|d| d.as_ref().ok()).collect();
+                let text = defaults.iter().find_map(|d| d.clone().err());
+                std::iter::once(Ok((chain[0], key.clone())))
+                    .chain(symbols.iter().flat_map(|k| across(k)))
+                    .chain(chain[1..].iter().map(|c| Ok((*c, key.clone()))))
+                    .chain(text.map(Err))
+                    .collect()
+            }
+        };
+        for (catalog, key) in candidates.iter().flatten() {
+            if catalog.entry(key, call.counted).is_none() && catalog.is_subtree(key) {
+                return Err(format!("`{key}` names a subtree, which I18n answers as a Hash"));
+            }
+        }
         let found = candidates.iter().find_map(|c| match c {
-            Ok(key) => self.entry(key, call.counted),
+            Ok((catalog, key)) => catalog.entry(key, call.counted),
             Err(text) => Some(Translation::One(text.clone())),
         });
-        let translation = found.ok_or_else(|| format!("translation missing: {}.{}", self.locale, full(&call.key).unwrap_or_default()))?;
+        let missing = format!("{locale}.{key}");
+        let translation = match found {
+            Some(t) => t,
+            // Every default was a key, and none is here either.
+            None if self.missing.unknown.is_none() => {
+                let considered = match call.default_list {
+                    true => defaults.iter().flatten().map(|k| format!("{locale}.{k}")).collect(),
+                    false => Vec::new(),
+                };
+                return Ok(Translation::Missing { key: missing, considered });
+            }
+            None => {
+                let why = self.missing.unknown.as_deref().map(|u| format!(" ({u})")).unwrap_or_default();
+                return Err(format!("translation missing: {missing}{why}"));
+            }
+        };
         let templates: Vec<&String> = match &translation {
             Translation::One(t) => vec![t],
             Translation::Plural { zero, one, other } => zero.iter().chain([one, other]).collect(),
+            Translation::Missing { .. } => Vec::new(),
         };
         if !call.interpolates() {
             return Ok(translation);
@@ -343,6 +554,65 @@ impl Catalog {
             }
         }
         Ok(translation)
+    }
+
+        /// I18n's own `available_locales` for the app's files: each locale a
+    /// file names at its top level, in path order.
+    pub fn file_locales(files: &[(String, String)]) -> Vec<String> {
+        let mut sorted: Vec<&(String, String)> = files.iter().collect();
+        sorted.sort_by(|a, b| a.0.cmp(&b.0));
+        let mut out: Vec<String> = Vec::new();
+        for (_, source) in sorted {
+            let Ok(Value::Mapping(top)) = serde_yaml_ng::from_str::<Value>(source) else { continue };
+            for key in top.keys() {
+                if let Value::String(l) = key {
+                    if !out.contains(l) {
+                        out.push(l.clone());
+                    }
+                }
+            }
+        }
+        out
+    }
+
+/// Whether `key` has entries beneath it.
+    pub fn is_subtree(&self, key: &str) -> bool {
+        let below = format!("{key}.");
+        self.entries.range(below.clone()..).next().is_some_and(|(k, _)| k.starts_with(&below))
+    }
+
+    /// The keys a call can reach when its key is `base` (already scoped
+    /// and expanded) followed by text known only at run time and ending
+    /// in `tail`: the translations to fold, and the subtrees Rails would
+    /// answer as a Hash. Supersets are harmless, since the run-time key
+    /// is compared to each exactly.
+    pub fn reach(&self, base: &str, tail: &str, counted: bool) -> (Vec<String>, Vec<String>) {
+        let tail = tail.trim_matches('.');
+        let stem = base.trim_end_matches('.');
+        let under = |k: &str| k.starts_with(base) || k == stem;
+        let mut nodes: Vec<String> = Vec::new();
+        for key in self.entries.keys().filter(|k| under(k)) {
+            let mut node = key.as_str();
+            nodes.push(node.to_string());
+            while let Some((parent, _)) = node.rsplit_once('.') {
+                if !under(parent) {
+                    break;
+                }
+                nodes.push(parent.to_string());
+                node = parent;
+            }
+        }
+        nodes.sort();
+        nodes.dedup();
+        let (mut keys, mut subtrees) = (Vec::new(), Vec::new());
+        for node in nodes {
+            match self.entry(&node, counted) {
+                Some(_) if node.ends_with(tail) => keys.push(node),
+                Some(_) => {}
+                None => subtrees.push(node),
+            }
+        }
+        (keys, subtrees)
     }
 
     fn entry(&self, key: &str, counted: bool) -> Option<Translation> {
@@ -463,12 +733,40 @@ impl ModelI18n {
         self.catalog().errors_format()
     }
 
+    /// Each attribute the locale names for this model, with that name.
+    pub fn translated_attribute_names(&self) -> Vec<(String, String)> {
+        let scope = self.scope();
+        let prefixes: Vec<String> =
+            self.keys.iter().map(|k| format!("{scope}.attributes.{k}.")).chain(std::iter::once("attributes.".to_string())).collect();
+        let mut attrs: Vec<String> = self
+            .catalog()
+            .entries
+            .keys()
+            .filter_map(|key| prefixes.iter().find_map(|p| key.strip_prefix(p.as_str())))
+            .filter(|attr| !attr.contains('.'))
+            .map(str::to_string)
+            .collect();
+        attrs.sort();
+        attrs.dedup();
+        attrs
+            .into_iter()
+            .map(|attr| {
+                let name = self.human_attribute_name(&attr);
+                (attr, name)
+            })
+            .collect()
+    }
+
+    /// The message for an error of `kind` on `attr`, without the attribute, as parts.
+    pub fn error(&self, attr: &str, kind: &str, opts: &ErrorOpts) -> Vec<Part> {
+        self.catalog()
+            .error_message(self.scope(), &self.keys, attr, kind, opts)
+            .unwrap_or_else(|| vec![Part::Text(format!("translation missing: {}.errors.messages.{kind}", self.catalog().locale))])
+    }
+
     /// The full message for an error of `kind` on `attr`, as parts.
     pub fn full_error(&self, attr: &str, kind: &str, opts: &ErrorOpts) -> Vec<Part> {
-        let message = self
-            .catalog()
-            .error_message(self.scope(), &self.keys, attr, kind, opts)
-            .unwrap_or_else(|| vec![Part::Text(format!("translation missing: {}.errors.messages.{kind}", self.catalog().locale))]);
+        let message = self.error(attr, kind, opts);
         if attr == "base" {
             return message;
         }
@@ -528,6 +826,17 @@ impl FormI18n {
             .map(str::to_string)
             .or_else(|| model.map(|m| m.human_attribute_name(method)))
             .unwrap_or_else(|| humanize(method))
+    }
+
+    /// Whether the form's record is one of the app's models, or a record
+    /// nested under one, so it answers `errors` as Rails' wrapper requires.
+    pub fn has_errors(&self, object_name: &str) -> bool {
+        self.models.contains_key(object_name.split('[').next().unwrap_or(object_name))
+    }
+
+    /// The app's own `field_error_proc`, which this wrapper does not model.
+    pub fn field_error_proc(&self) -> Option<&str> {
+        self.catalog.field_error_proc.as_deref()
     }
 
     /// `form.submit`'s default text for `key` (`create`/`update`), as
@@ -722,7 +1031,13 @@ mod tests {
         );
         assert!(c.resolve(&Translate { values: vec!["other".into()], ..t("greet") }).is_err());
         assert!(c.resolve(&Translate { values: vec!["name".into()], ..t("greet") }).is_ok());
-        assert!(c.resolve(&t("nope")).is_err());
+        let missing = |considered: &[&str]| Translation::Missing { key: "en.nope".into(), considered: keys(considered) };
+        assert_eq!(c.resolve(&t("nope")), Ok(missing(&[])));
+        let also = vec![Fallback::Key("also_nope".into())];
+        assert_eq!(c.resolve(&Translate { defaults: also.clone(), ..t("nope") }), Ok(missing(&[])));
+        assert_eq!(c.resolve(&Translate { defaults: also, default_list: true, scope: None, ..t("nope") }), Ok(missing(&["en.also_nope"])));
+        let unknown = Catalog { missing: MissingPolicy { unknown: Some("`:strict`".into()), ..Default::default() }, ..c.clone() };
+        assert!(unknown.resolve(&t("nope")).is_err());
         assert!(c.resolve(&t(".title")).is_err());
     }
 
@@ -748,6 +1063,46 @@ mod tests {
         let (_, problems) = Catalog::load("en", &mut files);
         assert_eq!(problems.len(), 1);
         assert_eq!(problems[0].0, "config/locales/bad.yml");
+    }
+
+    #[test]
+    fn a_run_time_key_reaches_the_translations_under_its_prefix() {
+        let c = catalog(&[(
+            "config/locales/en.yml",
+            "en:\n  vis:\n    public: Everyone\n    group:\n      staff: Staff\n    inbox:\n      one: \"1\"\n      other: \"%{count}\"\n  visitor: Guest\n",
+        )]);
+        let (keys, subtrees) = c.reach("vis.", "", false);
+        assert_eq!(keys, vec!["vis.group.staff", "vis.inbox.one", "vis.inbox.other", "vis.public"]);
+        assert_eq!(subtrees, vec!["vis", "vis.group", "vis.inbox"]);
+        let (keys, subtrees) = c.reach("vis.", "", true);
+        assert!(keys.contains(&"vis.inbox".to_string()) && !subtrees.contains(&"vis.inbox".to_string()));
+        assert_eq!(c.reach("vis.", ".staff", false).0, vec!["vis.group.staff"]);
+        assert!(c.resolve(&Translate { key: "vis.group".into(), ..Default::default() }).is_err());
+    }
+
+    /// i18n 1.15.2 with `I18n.fallbacks = I18n::Locale::Fallbacks.new(:en)`:
+    /// the key in the locale, then the Symbol defaults across the chain,
+    /// then the key in the later locales, then the text default.
+    #[test]
+    fn fallbacks_follow_the_gem_s_order() {
+        assert_eq!(fallback_chain("pt-BR", &keys(&["en"])), keys(&["pt-BR", "pt", "en"]));
+        assert_eq!(fallback_chain("en", &keys(&["en"])), keys(&["en"]));
+        let mut files = vec![
+            ("config/locales/en.yml".to_string(), "en:\n  a: A-en\n  b: B-en\n".to_string()),
+            ("config/locales/pl.yml".to_string(), "pl:\n  b: B-pl\n  d: D-pl\n".to_string()),
+        ];
+        let (mut c, _) = Catalog::load("en", &mut files);
+        let policy = FallbackPolicy { app: Some(keys(&["en"])), ..Default::default() };
+        c.load_locales(keys(&["en", "pl"]), policy, &[], &mut files);
+        let en = Some(&["en".to_string()][..]);
+        let t = |key: &str, defaults: Vec<Fallback>| Translate { key: key.into(), defaults, ..Default::default() };
+        let one = |s: &str| Ok(Translation::One(s.into()));
+        assert_eq!(c.resolve_in("pl", en, &t("a", vec![])), one("A-en"));
+        assert_eq!(c.resolve_in("pl", None, &t("a", vec![])), Ok(Translation::Missing { key: "pl.a".into(), considered: vec![] }));
+        assert_eq!(c.resolve_in("pl", en, &t("a", vec![Fallback::Key("d".into())])), one("D-pl"));
+        assert_eq!(c.resolve_in("pl", en, &t("a", vec![Fallback::Key("b".into())])), one("B-pl"));
+        assert_eq!(c.resolve_in("pl", en, &t("x", vec![Fallback::Key("y".into()), Fallback::Text("txt".into())])), one("txt"));
+        assert!(c.resolve_in("de", en, &t("a", vec![])).is_err());
     }
 
     #[test]

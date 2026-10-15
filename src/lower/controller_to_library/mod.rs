@@ -25,8 +25,10 @@
 //! the synthesized `MethodDef`.
 
 mod broadcasts;
+mod inertia;
 mod process_action;
 pub mod params;
+mod permit_splat;
 pub mod params_wrapper;
 pub mod rewrites;
 pub mod util;
@@ -317,12 +319,19 @@ pub fn lower_controllers_with_arel_views_assocs_and_routes(
     // purely shape-directed — what it was before this table existed.
     let empty_segments = std::collections::HashMap::new();
     let route_id_segments = route_id_segments.unwrap_or(&empty_segments);
+    // `permit(*helper)` with a helper answering a literal Symbol list is
+    // the same permit written inline; inline it before anything reads
+    // the permit lists (`permit_splat`).
+    let inlined = self::permit_splat::inline_permit_splats(controllers);
+    let controllers: &[Controller] = inlined.as_deref().unwrap_or(controllers);
     // Scan source-shape action bodies for `permit(...)` declarations.
     // Each unique resource yields one `<Resource>Params` synthesized
     // class plus the (resource, fields, class_id) record we need to
     // rewrite controller bodies + register the class with the typer.
     let mut params_specs = self::params::collect_specs(controllers);
     params_specs.mark_file_fields(models);
+    params_specs.mark_keyed_associations(models);
+    params_specs.mark_model_resources(models, schema);
     let params_lcs = self::params::synthesize_params_classes(&params_specs);
 
     // The view↔controller ivar contract: each action view's read-ivars,
@@ -479,8 +488,8 @@ pub fn lower_controllers_with_arel_views_assocs_and_routes(
     framework_ivars.insert(
         Symbol::from("params"),
         Ty::Hash {
-            key: Box::new(Ty::Str),
-            value: Box::new(Ty::Untyped),
+            key: std::sync::Arc::new(Ty::Str),
+            value: std::sync::Arc::new(Ty::Untyped),
         },
     );
     // `@flash` is also framework-guaranteed: the render-rewrite emits
@@ -494,7 +503,7 @@ pub fn lower_controllers_with_arel_views_assocs_and_routes(
         Symbol::from("flash"),
         Ty::Class {
             id: ClassId(Symbol::from("ActionDispatch::Flash")),
-            args: vec![],
+            args: vec![].into(),
         },
     );
     // `@session` ditto — per Phase 2.5(b), typed as the per-app
@@ -504,7 +513,7 @@ pub fn lower_controllers_with_arel_views_assocs_and_routes(
         Symbol::from("session"),
         Ty::Class {
             id: ClassId(Symbol::from("ActionDispatch::Session")),
-            args: vec![],
+            args: vec![].into(),
         },
     );
 
@@ -522,6 +531,9 @@ pub fn lower_controllers_with_arel_views_assocs_and_routes(
     let permitted_fields = self::params::permitted_field_tys(&params_specs);
 
     let mut out = Vec::new();
+    // Params classes a kept `update(<params object>)` reads `to_attrs`
+    // of (`params::hand_update_the_attrs`).
+    let mut wants_to_attrs: std::collections::BTreeSet<ClassId> = Default::default();
     crate::timings::phase("lower: controllers type", || {
     for (mut methods, controller) in all_methods {
         // Surveyed over the WHOLE controller before any body is
@@ -551,9 +563,10 @@ pub fn lower_controllers_with_arel_views_assocs_and_routes(
             // Bracket, broadcast, and arel all need the first typing
             // pass and do not consume each other's newly-stamped types,
             // so they share one follow-up type when any of them fires.
-            let mut rewritten = self::params::rewrite_typed_bracket_to_field_in_place(
+            let bracket_rewritten = self::params::rewrite_typed_bracket_to_field_in_place(
                 &mut method.body, &permitted_fields,
             );
+            let mut rewritten = bracket_rewritten;
             rewritten |= self::broadcasts::rewrite_broadcast_to_in_place(
                 &mut method.body,
                 views_module_name(controller).as_deref(),
@@ -572,6 +585,23 @@ pub fn lower_controllers_with_arel_views_assocs_and_routes(
             if rewritten {
                 crate::lower::typing::type_method_body(method, &classes, &framework_ivars);
             }
+            // `helper[:field].humanize` was an untyped read when the
+            // String inflections were grounded; the bracket rewrite just
+            // made it `helper.field`, a String. Ground them now, then type
+            // the grounded calls.
+            if bracket_rewritten
+                && crate::lower::string_inflections::ground_in_place(&mut method.body)
+            {
+                crate::lower::typing::type_method_body(method, &classes, &framework_ivars);
+            }
+        }
+        // After every body is typed: whether a helper answers the params
+        // object is its body's type, which its declared signature does
+        // not say (`permitted.to_h.except(:k)` is still declared the
+        // params class).
+        let answers = self::params::helper_answers(&methods);
+        for method in &mut methods {
+            self::params::hand_update_the_attrs(&mut method.body, &params_specs, &answers, &mut wants_to_attrs);
         }
         methods.extend(collect_attr_accessor_methods(controller));
         apply_alias_methods(controller, &mut methods);
@@ -599,6 +629,15 @@ pub fn lower_controllers_with_arel_views_assocs_and_routes(
     // seed, the typer leaves it as `TyVar(0)` and the strict residual
     // check fails.
     let mut params_lcs = params_lcs;
+    for params_lc in &mut params_lcs {
+        if wants_to_attrs.contains(&params_lc.name)
+            && !params_lc.methods.iter().any(|m| m.name.as_str() == "to_attrs")
+        {
+            if let Some(spec) = params_specs.by_class(&params_lc.name) {
+                params_lc.methods.push(self::params::synth_to_attrs(&spec.class_id, &spec.fields));
+            }
+        }
+    }
     for params_lc in &mut params_lcs {
         let mut params_ivars: std::collections::HashMap<Symbol, Ty> =
             std::collections::HashMap::new();
@@ -1206,9 +1245,18 @@ fn build_methods(
     // inlining — drop them from the emitted methods. Filter targets
     // that are also called from action bodies (e.g., `_params`
     // helpers — actually those don't appear in before_filters, but
-    // be defensive) stay.
-    let filter_target_names: std::collections::HashSet<&Symbol> =
-        before_filters.iter().map(|f| &f.target).collect();
+    // be defensive) stay. A guarded filter (`if:`/`unless:`) is never
+    // inlined (`inline_before_filters` skips it; see
+    // `filter_is_guarded`) — its target is still called by name from
+    // the preamble, so it's excluded here even when another,
+    // unguarded, before_action on the same controller also names it.
+    let guarded_target_names: std::collections::HashSet<&Symbol> =
+        before_filters.iter().filter(|f| filter_is_guarded(f)).map(|f| &f.target).collect();
+    let filter_target_names: std::collections::HashSet<&Symbol> = before_filters
+        .iter()
+        .map(|f| &f.target)
+        .filter(|t| !guarded_target_names.contains(*t))
+        .collect();
     // A subclassed controller keeps its filter targets: descendants
     // inherit the before_action and their preambles call the target
     // BY NAME (`default_periods` in ModNotesController's dispatcher,
@@ -1522,15 +1570,33 @@ fn synthesize_controller_string_method(
 }
 
 /// Names a controller marks with `helper_method :x` whose public
-/// method body is IVAR-FREE (pure over its arguments) — the set the
-/// view-call rewrite and the class-side clone above serve. Shared with
-/// ingest, which registers these in `app.helper_method_index`.
+/// method body is pure over its arguments - the set the view-call
+/// rewrite and the class-side clone above serve. Shared with ingest,
+/// which registers these in `app.helper_method_index`.
+///
+/// Pure means it reads no instance state: no ivar, and none of the
+/// request's state the controller instance carries (`session`,
+/// `cookies`, `request`, `params`, ...). In Rails a helper method runs
+/// on the controller that handles the request; a class-side clone has no
+/// request, and a clone of an `authenticated?` that reads
+/// `session[:authenticated_at]` read `session` off the class, which no
+/// target can compile.
 pub(crate) fn controller_helper_method_names(controller: &Controller) -> Vec<Symbol> {
     use crate::expr::Literal;
+
+    const REQUEST_STATE: &[&str] = &[
+        "session", "cookies", "request", "response", "params", "flash", "headers",
+        "reset_session", "request_forgery_protection_token", "form_authenticity_token",
+    ];
 
     fn has_ivar(e: &Expr) -> bool {
         if matches!(&*e.node, ExprNode::Ivar { .. }) {
             return true;
+        }
+        if let ExprNode::Send { recv: None, method, .. } = &*e.node {
+            if REQUEST_STATE.contains(&method.as_str()) {
+                return true;
+            }
         }
         let mut found = false;
         e.node.for_each_child(&mut |c| {
@@ -1577,6 +1643,17 @@ fn filter_applies(f: &Filter, action_name: &Symbol) -> bool {
     }
 }
 
+/// Does `f` carry an `if:`/`unless:` guard (Symbol- or lambda-form)?
+/// A guarded filter is runtime-conditional on something the splice site
+/// can't evaluate, so it can't be spliced into an action body wholesale
+/// — see the comment on `inline_before_filters`.
+fn filter_is_guarded(f: &Filter) -> bool {
+    f.if_cond.is_some()
+        || f.unless_cond.is_some()
+        || f.if_cond_expr.is_some()
+        || f.unless_cond_expr.is_some()
+}
+
 /// May this controller's own filters be inlined into its action bodies
 /// at all?
 ///
@@ -1614,7 +1691,11 @@ fn own_filter_inlining_is_ordered(controller: &Controller, privs: &[Action]) -> 
     let own_priv = |target: &Symbol| privs.iter().any(|a| &a.name == target);
     let mut seen_inlinable = false;
     for f in controller.filters().filter(|f| matches!(f.kind, FilterKind::Before)) {
-        if own_priv(&f.target) {
+        // A guarded own-private filter is never inlined (see
+        // `filter_is_guarded`) — it stays in the preamble exactly like
+        // an ancestor-target filter, so it doesn't count as "inlinable"
+        // for this ordering check either.
+        if own_priv(&f.target) && !filter_is_guarded(f) {
             seen_inlinable = true;
         } else if seen_inlinable {
             return false;
@@ -1627,6 +1708,16 @@ fn own_filter_inlining_is_ordered(controller: &Controller, privs: &[Action]) -> 
 /// filter target's body prepended to the action body. A filter
 /// applies when its `only:` includes the action name, or its
 /// `except:` doesn't, or it has neither (unconditional).
+///
+/// A guarded filter (`if:`/`unless:`) is skipped here regardless —
+/// splicing its target's body straight into the action body would run
+/// it unconditionally, which is a correctness bug, not just a missed
+/// optimization: `before_action :reject_paging, if: :paging?` answered
+/// 401 for every request, paged or not, and the harmful direction is
+/// just as real (`if: :public?` on a cache-header filter would mark
+/// every response publicly cacheable). A guarded filter is left for
+/// `build_filter_preamble`, which already turns `if:`/`unless:` into a
+/// runtime condition (`cond_from_guards`) around the dispatch call.
 ///
 /// A prepended body that can render/redirect/head is followed by
 /// `return if performed?`, exactly as the preamble does for the filters
@@ -1643,7 +1734,7 @@ fn inline_before_filters(
     let action_name = &action.name;
     let mut prepended: Vec<Expr> = Vec::new();
     for f in filters {
-        if !filter_applies(f, action_name) {
+        if !filter_applies(f, action_name) || filter_is_guarded(f) {
             continue;
         }
         // Look up the filter's target action by name in privs.
@@ -1866,7 +1957,11 @@ fn build_filter_preamble(
                 ControllerBodyItem::Filter { filter, .. }
                     if matches!(filter.kind, FilterKind::Before) =>
                 {
-                    if is_own && own_privs_inlined && own_priv_targets.contains(&filter.target) {
+                    if is_own
+                        && own_privs_inlined
+                        && own_priv_targets.contains(&filter.target)
+                        && !filter_is_guarded(filter)
+                    {
                         continue; // inlined into action bodies upstream
                     }
                     push_call(filter, if filter.prepend { &mut prepends } else { &mut preamble });
@@ -2318,7 +2413,7 @@ fn calls_super(body: &Expr) -> bool {
 /// per-arg types lands when a routing-table-aware typer surfaces.
 fn insert_baseline_controller_methods(info: &mut crate::analyze::ClassInfo) {
     use crate::lower::typing::fn_sig;
-    let any_hash = Ty::Hash { key: Box::new(Ty::Sym), value: Box::new(Ty::Untyped) };
+    let any_hash = Ty::Hash { key: std::sync::Arc::new(Ty::Sym), value: std::sync::Arc::new(Ty::Untyped) };
 
     // Terminals — render/redirect/head/render_404 all return Nil.
     // The framework runtime declares these with named keyword params
@@ -2334,11 +2429,11 @@ fn insert_baseline_controller_methods(info: &mut crate::analyze::ClassInfo) {
         Ty::Fn {
             params: vec![crate::ty::Param {
                 name: Symbol::from("opts"),
-                ty: any_hash.clone(),
+                ty: any_hash.clone().into(),
                 kind: crate::ty::ParamKind::KeywordRest,
-            }],
+            }].into(),
             block: None,
-            ret: Box::new(Ty::Nil),
+            ret: std::sync::Arc::new(Ty::Nil),
             effects: crate::effect::EffectSet::pure(),
         }
     };
@@ -2347,17 +2442,17 @@ fn insert_baseline_controller_methods(info: &mut crate::analyze::ClassInfo) {
             params: vec![
                 crate::ty::Param {
                     name: Symbol::from(first_name),
-                    ty: first_ty,
+                    ty: first_ty.into(),
                     kind: crate::ty::ParamKind::Required,
                 },
                 crate::ty::Param {
                     name: Symbol::from("opts"),
-                    ty: any_hash.clone(),
+                    ty: any_hash.clone().into(),
                     kind: crate::ty::ParamKind::KeywordRest,
                 },
-            ],
+            ].into(),
             block: None,
-            ret: Box::new(Ty::Nil),
+            ret: std::sync::Arc::new(Ty::Nil),
             effects: crate::effect::EffectSet::pure(),
         }
     };
@@ -2388,7 +2483,7 @@ fn insert_baseline_controller_methods(info: &mut crate::analyze::ClassInfo) {
     // its parameters. `runtime/ruby/action_controller/base.rb` defines
     // all three; without these entries a strict target cannot resolve
     // the sends that reach them.
-    let str_or_nil = Ty::Union { variants: vec![Ty::Str, Ty::Nil] };
+    let str_or_nil = Ty::Union { variants: vec![Ty::Str, Ty::Nil].into() };
     info.instance_methods
         .entry(Symbol::from("response_body"))
         .or_insert_with(|| fn_sig(vec![], Ty::Str));
@@ -2734,12 +2829,16 @@ fn action_to_method(
         let spec = self::params::first_permit_in(&a.body)
             .and_then(|(resource, fields)| params_specs.find(&resource, &fields));
         if let Some(spec) = spec {
-            Ty::Class { id: spec.class_id.clone(), args: vec![] }
+            Ty::Class { id: spec.class_id.clone(), args: vec![].into() }
         } else {
-            // Fallback for helpers whose permit list we didn't recognize
-            // (campfire's `role_params` builds a bare Hash) — stays
-            // typed-coarse rather than panicking.
-            Ty::Hash { key: Box::new(Ty::Sym), value: Box::new(Ty::Untyped) }
+            // No recognized permit list: the `_params` suffix is a naming
+            // convention, not a contract. A guard filter named
+            // `check_kind_params` can answer `nil` or a `head(...)` result,
+            // not a Hash — pinning Hash[Symbol, untyped] here is the same
+            // mistake the blanket-Nil pin above was (issue #810). Untyped
+            // lets the compiler infer from the body instead; campfire's
+            // `role_params`, which builds a bare Hash, still infers Hash.
+            Ty::Untyped
         }
     } else if is_public {
         // Routed actions terminate in render/redirect → Nil.
@@ -2851,7 +2950,7 @@ fn union_with(a: Ty, b: Ty) -> Ty {
             out.push(v);
         }
     }
-    if out.len() == 1 { out.pop().unwrap() } else { Ty::Union { variants: out } }
+    if out.len() == 1 { out.pop().unwrap() } else { Ty::Union { variants: out.into() } }
 }
 
 /// Each signature slot takes the kind its `def` declares. A param with
@@ -3033,6 +3132,7 @@ fn lower_action_body(
     // `RouteHelpers.<x>_path(@x.id)`, matching the documented Rails
     // polymorphic location form without runtime class dispatch.
     let with_response_location = rewrite_response_location_kwarg(&with_render);
+    let with_response_location = inertia::encode_inertia_values(&with_response_location);
     let with_params = rewrite_params(&with_response_location);
     // After bare `params.expect(...)` / `params.require(:r).permit(...)`
     // canonicalize via `rewrite_params`, replace each permit chain with

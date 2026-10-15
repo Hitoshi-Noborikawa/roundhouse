@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 # Top-level entry point for the CRuby (Puma/Rack) target.
 #
 # Dispatch lives in `Main.dispatch_core`, which returns a response
@@ -147,6 +148,24 @@ module Main
     # extension but the route pins the response format.
     request_format = matched.req_format unless matched.req_format.nil?
 
+    # `--target futamura`'s whole-route bridge serves only the actions
+    # the analysis cleared (src/emit/futamura/routes.rb); any other
+    # match is declined here, before any app code runs, and the host
+    # Rails app serves the request. Matched once, here, not again in
+    # the bridge.
+    allowed = env["roundhouse.actions"]
+    if !allowed.nil? && !allowed.include?("#{matched.controller}##{matched.action}")
+      env["roundhouse.declined"] = true
+      return [404, "", "text/html; charset=utf-8", nil, {}, {}, {}, {}, {}]
+    end
+
+    # A JSON body that does not parse: Rails' params parser raises
+    # ParseError and the request is answered 400 before any action runs
+    # (the spinel twin: `Main.request_params` returning nil).
+    if request[:bad_request]
+      return [400, "<h1>400 Bad Request</h1>", "text/html; charset=utf-8", nil, {}, {}, {}, {}, {}]
+    end
+
     controller = Main.instantiate_controller(matched.controller)
     merged = matched.path_params.dup
     request[:params].each { |k, v| merged[k] = v }
@@ -177,8 +196,18 @@ module Main
     session_cookie = Rails.application.session_cookie_key
     # SIGNED — see the spinel main.rb twin: `session_in` is the restored
     # session's plain encoding, and only a changed session is re-signed.
-    restored = ActionDispatch::Session.from_signed_cookie(
-      cookies[session_cookie.to_sym].to_s, session_cookie)
+    #
+    # Under the futamura bridge the host Rails app owns the session: it
+    # arrives already decoded as `roundhouse.session` and leaves as
+    # `roundhouse.session.out`, with no cookie signed or verified on
+    # this side.
+    host_session = env["roundhouse.session"]
+    restored = if host_session.nil?
+      ActionDispatch::Session.from_signed_cookie(
+        cookies[session_cookie.to_sym].to_s, session_cookie)
+    else
+      ActionDispatch::Session.new(host_session)
+    end
     session_in = restored.to_cookie
     controller.assign_http_session(restored)
     # Expose the inbound cookies to the controller as a CookieJar so
@@ -191,10 +220,15 @@ module Main
     # SIGNED — see the spinel main.rb twin: a cookie that does not verify
     # is no message (and is still cleared below, as a consumed one is).
     inbound_flash = {}
-    %w[notice alert].each do |kind|
-      name = "flash_#{kind}"
-      value = ActionDispatch::SignedCookie.verified(cookies[name.to_sym].to_s, name)
-      inbound_flash[kind] = value unless value.empty?
+    host_flash = env["roundhouse.flash"]
+    if host_flash.nil?
+      %w[notice alert].each do |kind|
+        name = "flash_#{kind}"
+        value = ActionDispatch::SignedCookie.verified(cookies[name.to_sym].to_s, name)
+        inbound_flash[kind] = value unless value.empty?
+      end
+    else
+      host_flash.each { |k, v| inbound_flash[k.to_s] = v }
     end
     controller.flash = ActionDispatch::Flash.new(inbound_flash)
 
@@ -210,12 +244,19 @@ module Main
     # comma is read as html.
     accept = request.fetch(:accept, "").to_s
     controller.accepts_any_format = !accept.include?(",") && accept.split(";", 2)[0].to_s.strip == "*/*"
+    # Rails' `Vary: Accept` on a render whose format came from the Accept
+    # header (runtime/action_dispatch/mime_negotiation.rb), as the spinel
+    # dispatcher decides it.
+    controller.vary_on_accept = ActionDispatch::MimeNegotiation.should_apply_vary_header?(
+      accept, env["HTTP_X_REQUESTED_WITH"].to_s, env["CONTENT_TYPE"].to_s,
+      merged.key?("format") || !matched.req_format.nil?)
     # The full request object (CRuby overlay class) — filters read
     # `request.remote_ip` / `request.env` / `request[:format]`. `env.to_h`
     # detaches a plain mutable Hash (callers write scratch keys the real
     # ENV would reject); params delegation gets the same merged hash the
     # controller sees.
     controller.request = ActionDispatch::Request.new(env.to_h, merged)
+    controller.request.path_parameters = matched.path_params
     # The body's params alone, for ParamsWrapper (`Params.wrap`).
     controller.request.request_parameters = request[:body_params]
     # Same object, module-reachable — helpers are module functions with
@@ -249,12 +290,18 @@ module Main
     # a displayed notice doesn't repeat.
     out_cookies = {}
     persisted = controller.flash.to_persisted
-    if persisted.key?("notice")
+    if !host_flash.nil?
+      # The host keeps the flash in its own session; hand back what
+      # survives this request (nothing, once displayed).
+      env["roundhouse.flash.out"] = persisted
+    elsif persisted.key?("notice")
       out_cookies[:flash_notice] = ActionDispatch::SignedCookie.sign(persisted["notice"], "flash_notice")
     elsif cookies.key?(:flash_notice)
       out_cookies[:flash_notice] = nil
     end
-    if persisted.key?("alert")
+    if !host_flash.nil?
+      # Handed back above, with the notice.
+    elsif persisted.key?("alert")
       out_cookies[:flash_alert] = ActionDispatch::SignedCookie.sign(persisted["alert"], "flash_alert")
     elsif cookies.key?(:flash_alert)
       out_cookies[:flash_alert] = nil
@@ -283,7 +330,9 @@ module Main
     # `request.session_options[:skip] = true` leaves it alone — see
     # the spinel main.
     session_out = controller.session.to_cookie
-    if session_out != session_in && !controller.request.session_skip?
+    if !host_session.nil?
+      env["roundhouse.session.out"] = controller.session.to_hash if session_out != session_in && !controller.request.session_skip?
+    elsif session_out != session_in && !controller.request.session_skip?
       out_cookies[session_cookie] =
         session_out.empty? ? nil : ActionDispatch::Session.signed_cookie(session_out, session_cookie)
     end
@@ -293,6 +342,11 @@ module Main
     # header store, right before it is copied below — a no-op unless
     # the action or one of its filters touched the store.
     controller.commit_cache_control!
+    # Rails' Rack::ETag and Rack::ConditionalGet
+    # (action_controller/conditional_get.rb): the body ETag, the default
+    # Cache-Control, and a 304 for a matching If-None-Match, on the
+    # controller's status, body and headers before they are read below.
+    controller.commit_conditional_get!(env["REQUEST_METHOD"].to_s, env["HTTP_IF_NONE_MATCH"].to_s)
     # Headers the action set beyond Content-Type/Location — a
     # `Content-Disposition` on a download, the Cache-Control a blob
     # route asks for — ride as the tuple's sixth element.
@@ -362,6 +416,7 @@ module Main
   # entry per cookie) and reuses `CgiIo.url_encode` so values match the
   # CGI path exactly.
   def self.run_rack(env)
+    started = ActionDispatch::Runtime.clock_time
     status, body, content_type, location, set_cookies, extra_headers, secure_cookies, samesite_cookies, httponly_cookies, expires_cookies =
       dispatch_core(env, env["rack.input"] || StringIO.new(""))
     headers = {}
@@ -389,6 +444,12 @@ module Main
       end
     end
     headers["set-cookie"] = cookies unless cookies.empty?
+    # Rails' ActionDispatch::RequestId and Rack::Runtime around the whole
+    # request (runtime/action_dispatch/request_id.rb), as the spinel
+    # dispatcher stamps them: X-Request-Id always, X-Runtime unless the
+    # app set one. config.ru serves static and public files before this.
+    headers["x-request-id"] = ActionDispatch::RequestId.make(env["HTTP_X_REQUEST_ID"].to_s)
+    headers["x-runtime"] = ActionDispatch::Runtime.header_value(started) unless headers.key?("x-runtime")
     [status, headers, [body]]
   end
 

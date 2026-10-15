@@ -632,7 +632,7 @@ fn every_runtime_method_body_is_fully_typed() {
                 .into_iter()
                 .map(|(name, ty)| {
                     let ret_ty = match ty {
-                        Ty::Fn { ret, .. } => *ret,
+                        Ty::Fn { ret, .. } => std::sync::Arc::unwrap_or_clone(ret),
                         other => other,
                     };
                     (name, ret_ty)
@@ -832,7 +832,7 @@ fn every_runtime_method_body_concretely_typed() {
             let entry = class_registry.entry(short_id(&class_id)).or_default();
             for (name, ty) in methods {
                 let ret_ty = match ty {
-                    Ty::Fn { ret, .. } => *ret,
+                    Ty::Fn { ret, .. } => std::sync::Arc::unwrap_or_clone(ret),
                     other => other,
                 };
                 entry.instance_methods.insert(name, ret_ty);
@@ -1018,7 +1018,38 @@ fn every_runtime_method_body_concretely_typed() {
     // MEASURED 459 on 2026-10-10 against main's 423 (445 at the Hash-surface commit + 14).
     // Rebased onto main's 428 (after the exception classes and the date-column hook):
     // MEASURED 466 on 2026-10-10, main 9249df4d (452 at the Hash-surface commit + 14).
-    const CEILING: usize = 466;
+    // MEASURED 489 on 2026-10-11: the indifferent hash's conversions
+    // (`ActiveSupport.indifferent*`, active_support_ext.rb) walk an untyped
+    // Hash/Array value the way `deep_dup` does (+23).
+    // MEASURED 491 on 2026-10-11 (#818): AssociationReflection `#klass` /
+    // `#macro` presence stubs answer nil until synthesized (+2).
+    // MEASURED 496 on 2026-10-11 (#802/#833): portable `word_wrap` helpers
+    // (`word_wrap_ws_next` / `word_wrap_hard_*`) add String-index sites
+    // typed gradually (+5 in action_view/view_helpers.rb).
+    // MEASURED 697 on 2026-10-11 (#834): `active_support_reporters.rb`
+    // (EventReporter, ErrorReporter, ParameterFilter, ExecutionContext)
+    // adds 201. What they hold is caller-defined: the subscriber a
+    // reporter calls, an event payload and its filter, an error context
+    // (`deep_dup` walks it the way the indifferent hash's conversions do),
+    // and the value a `handle` / `record` block answers.
+    // MEASURED 701 on 2026-10-12 (rebased onto main's 697):
+    // `ActionDispatch::Http::Headers#each` / `#map` yield the env's untyped
+    // values and collect the block's untyped answers, as Rails' Enumerable
+    // Headers does (+4 in action_dispatch/headers.rb; their blockless
+    // Enumerator answers add none).
+    // MEASURED 717 on 2026-10-13 (#829): NullRelation `@where_null` /
+    // borrowed-condition walks and quote-aware If-None-Match members
+    // add gradual sites in `active_record/relation.rb` and
+    // `action_controller/base.rb` (+16).
+    // `ActiveStorage::AttachedMany#map` (the proxy's Enumerable reads for a
+    // jbuilder block over `record.pictures`) adds 1, MEASURED: the value
+    // of its `yield`, the same block-return escape `#each` carries.
+    // MEASURED 734 on 2026-10-14: ActiveRecord's statement-error hierarchy
+    // (`ActiveRecordError`, `StatementInvalid` and the fourteen below them)
+    // adds one gradual site per class, its `super(message)` into the
+    // exception initializer, as the existing exception classes carry (+16
+    // in active_record/errors.rb).
+    const CEILING: usize = 734;
     assert!(
         total_gradual <= CEILING,
         "{total_gradual} Ty::Untyped sites exceeds ceiling of {CEILING}",
@@ -1079,8 +1110,8 @@ fn empty_html_opts_emits_string_keyed_maps_on_csharp_and_kotlin() {
         ExprNode::Hash { entries: vec![], kwargs: false },
     );
     arg.ty = Some(Ty::Hash {
-        key: Box::new(Ty::Untyped),
-        value: Box::new(Ty::Untyped),
+        key: std::sync::Arc::new(Ty::Untyped),
+        value: std::sync::Arc::new(Ty::Untyped),
     });
     let emitted = roundhouse::emit::kotlin::emit_expr_for_runtime(&arg);
     assert_eq!(

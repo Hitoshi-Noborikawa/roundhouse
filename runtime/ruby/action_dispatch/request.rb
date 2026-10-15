@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 # ActionDispatch::Request — the request-object surface controllers,
 # filters, and helpers reach (`request.remote_ip`, `request.referer`,
 # `request.xhr?`, `request.env[...]`, `request.get?`). Typed fields the
@@ -13,6 +14,7 @@
 # Request (CGI-env-backed, runtime/action_dispatch_request.rb) and must
 # not blend the two shapes.
 require_relative "headers"
+require_relative "request_path_parameters"
 
 module ActionDispatch
   # `request.body` — the raw body as Rails hands it back: an IO, not the
@@ -133,6 +135,12 @@ module ActionDispatch
     # query string or the path captures. ParamsWrapper copies from these
     # (`Params.wrap`); the dispatcher fills them.
     attr_accessor :request_parameters
+    # Rails' `query_parameters`: the QUERY STRING's params alone, nested
+    # by the dispatcher's own parser (`ParamBuilder` on the spinel lane,
+    # which fills it; the CRuby overlay twin parses `query_string` on
+    # read). A reader, not a re-parse here: this file is shared with
+    # every target and names neither parser.
+    attr_accessor :query_parameters
 
     def initialize
       @remote_ip = "127.0.0.1"
@@ -147,6 +155,8 @@ module ActionDispatch
       @body_io = nil
       @env = {}
       @request_parameters = {}
+      @query_parameters = {}
+      @path_parameters = RequestPathParameters.new({})
       # `@params` too, and for a reason `@env` shows: `Request.for`
       # COPIES into both (`params.each { |k, v| r.params[k] = v }`),
       # which READS the slot before anything writes it. Unset, that read
@@ -215,12 +225,30 @@ module ActionDispatch
       @body
     end
 
+    # Rails checks the ordinary Rack Authorization key, legacy server
+    # spellings, and the CGI redirect fallback.
+    def authorization
+      ActionDispatch::Http::Headers.authorization(@env)
+    end
+
+    def path_parameters
+      @path_parameters
+    end
+
+    def path_parameters=(values)
+      @path_parameters = RequestPathParameters.new(values)
+    end
+
     def get?
       @request_method == "GET"
     end
 
     def post?
       @request_method == "POST"
+    end
+
+    def put?
+      @request_method == "PUT"
     end
 
     # `head?` sits beside `get?` because Rails' "is this a safe
@@ -235,6 +263,10 @@ module ActionDispatch
 
     def xhr?
       @env.fetch("HTTP_X_REQUESTED_WITH", "").to_s == "XMLHttpRequest"
+    end
+
+    def inertia?
+      @env.fetch("HTTP_X_INERTIA", "").to_s != ""
     end
 
     def fullpath
