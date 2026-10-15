@@ -748,7 +748,8 @@ module ActiveRecord
       # Not `ActiveSupport.db_now`: Rails' insert_all stamps with SQLite's own clock, to the millisecond.
       now = "STRFTIME('%Y-%m-%d %H:%M:%f', 'NOW')"
       table_cols = schema_columns
-      stamps = [:created_at, :created_on, :updated_at, :updated_on].select { |c| table_cols.include?(c) && !cols.include?(c) }
+      given = cols.map { |c| c.to_s }
+      stamps = [:created_at, :created_on, :updated_at, :updated_on].select { |c| table_cols.include?(c) && !given.include?(c.to_s) }
       tuples = rows.map do |row|
         values = cols.map { |c| ActiveRecord.adapter.escape_value(row[c]) }
         "(" + (values + stamps.map { |_c| now }).join(", ") + ")"

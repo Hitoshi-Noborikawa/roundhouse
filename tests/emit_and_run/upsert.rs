@@ -68,6 +68,12 @@ class ArticleUpsertTest < ActiveSupport::TestCase
     assert_equal "Second", changed.title
     assert_equal stamped.created_at, changed.created_at
     assert changed.updated_at > stamped.updated_at
+    Article.upsert({"id" => 501, "title" => "Given", "body" => "b", "created_at" => "2020-01-01 00:00:00", "updated_at" => "2020-01-01 00:00:00"})
+    given = Article.find(501)
+    assert_equal "Given", given.title
+    assert_equal 2020, given.created_at.year
+    Article.upsert({"id" => 501, "title" => "Moved", "body" => "b", "updated_at" => "2021-01-01 00:00:00"})
+    assert_equal 2021, Article.find(501).updated_at.year
   end
 end
 "#,
