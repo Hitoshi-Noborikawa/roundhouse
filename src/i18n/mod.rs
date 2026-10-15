@@ -53,6 +53,11 @@ pub struct Catalog {
     /// `config.i18n.fallbacks`, per environment.
     #[serde(default)]
     pub fallbacks: FallbackPolicy,
+    /// Where a locale's own plural rules come from (rails-i18n's
+    /// pluralization, an app's `config/locales/plurals.rb`), when the app
+    /// has them: a count then picks `few`, `many` or `two` by the locale.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plural_rules: Option<String>,
 }
 
 /// `config.i18n.fallbacks`: Rails includes I18n's Fallbacks backend when

@@ -1839,6 +1839,7 @@ end
     app.i18n.load_locales(available, fallbacks, &gem_files, &mut files);
     app.i18n.available_unknown = available_unknown;
     app.i18n.field_error_proc = field_error_proc_file(vfs, dir);
+    app.i18n.plural_rules = plural_rules(vfs, dir, app.gem_lock.as_ref());
     crate::i18n::stamp_models(&mut app);
 
     // `sig/**/*.rbs` — user-authored RBS sidecars for app code the
@@ -9931,6 +9932,25 @@ pub(super) fn fallbacks_line(line: &str, default: &str) -> Option<Result<Option<
             .map(Some)
             .ok_or_else(|| format!("`fallbacks = {value}` is not a list of locales")),
     })
+}
+
+/// Where the app's locales take their own plural rules from: rails-i18n
+/// adds its pluralization module unless `config.rails_i18n.enabled_modules`
+/// leaves it out, and `config/locales/plurals.rb` is the file I18n's
+/// Pluralization backend reads.
+fn plural_rules<V: Vfs + ?Sized>(vfs: &V, dir: &Path, lock: Option<&crate::gems::Lockfile>) -> Option<String> {
+    if vfs.exists(&dir.join("config/locales/plurals.rb")) {
+        return Some("config/locales/plurals.rb".into());
+    }
+    if !lock.is_some_and(|l| l.has("rails-i18n")) {
+        return None;
+    }
+    let application = vfs.read_to_string(&dir.join("config/application.rb")).unwrap_or_default();
+    let modules = application.lines().map(str::trim).find_map(|l| l.strip_prefix("config.rails_i18n.enabled_modules"));
+    match modules {
+        Some(value) if !value.contains("pluralization") => None,
+        _ => Some("rails-i18n's pluralization".into()),
+    }
 }
 
 /// `%i[en pl]`, `%w[en pl]`, `[:en, :pl]` or `["en", "pl"]`.

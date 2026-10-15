@@ -57,7 +57,7 @@ const PROBE: &str = "  validates :title, presence: true
 
 /// The probe model, two locales with English as the fallback, and an
 /// `around_action` that runs each request in the `locale` it asks for.
-fn locales_app() -> emit_and_run::Overlay {
+pub(super) fn locales_app() -> emit_and_run::Overlay {
     emit_and_run::real_blog()
         .write("config/locales/en.yml", EN_YML)
         .write("config/locales/pl.yml", PL_YML)

@@ -1383,6 +1383,24 @@ fn emits_namespaced_controllers(target: BuildTarget) -> bool {
     matches!(target, BuildTarget::Blog | BuildTarget::Ruby | BuildTarget::Jruby | BuildTarget::Spinel)
 }
 
+/// A `t` that reads the translation table or the whole catalog when it
+/// runs (`lower::i18n_translate`): only the Ruby-family runtime carries
+/// `I18n.translate_site` / `I18n.translate_runtime`, so another target
+/// reports each one rather than emit a call to nothing.
+fn report_i18n_table_sites(app: &App, target: BuildTarget) {
+    if matches!(target, BuildTarget::Blog | BuildTarget::Ruby | BuildTarget::Jruby | BuildTarget::Spinel | BuildTarget::Futamura) {
+        return;
+    }
+    for span in &app.i18n_table_sites {
+        crate::emit::diagnostics::report_unsupported(
+            *span,
+            target.as_str(),
+            "I18n",
+            "a translation chosen by the locale or read from the app's catalog when it runs, which only the Ruby-family runtime carries",
+        );
+    }
+}
+
 /// The app without `Rails::HealthController`, for a target that cannot
 /// emit a namespaced controller: ingest synthesizes it for the `/up`
 /// route, and emitting it there breaks the build or misroutes it,
@@ -1870,6 +1888,7 @@ fn target_files_inner(
     // reference that it hides would leave the transpile with fewer
     // errors than the app has.
     report_unsupported_bundled_constants(app, target);
+    report_i18n_table_sites(app, target);
     reject_unsupported_pattern_matches(app, target)?;
     reject_file_blob_fixtures(app, target)?;
     reject_unsupported_data_factories(app, target)?;
@@ -3645,6 +3664,31 @@ fn i18n_table_text(app: &App) -> String {
             }
         }
         out.push_str("\u{1f}.\u{1e}");
+    }
+    // The whole catalog and each locale's fallback chain, for `I18n.translate_runtime`: only when a call is left to it.
+    if !app.i18n_runtime_sites.is_empty() {
+        let catalog = app.i18n.or_rails_default();
+        let mut locales = catalog.locales();
+        for other in &catalog.others {
+            if !locales.contains(&other.locale) {
+                locales.push(other.locale.clone());
+            }
+        }
+        for locale in &locales {
+            let Some(c) = catalog.catalog_for(locale) else { continue };
+            for (key, text) in &c.entries {
+                out.push_str(&format!("L\u{1f}{locale}.{key}\u{1f}{text}\u{1f}.\u{1e}"));
+            }
+        }
+        for variant in catalog.variants(&locales) {
+            let chain = match &variant.fallbacks {
+                Some(defaults) => crate::i18n::fallback_chain(&variant.locale, defaults),
+                None => vec![variant.locale.clone()],
+            };
+            for env in variant.envs.clone().unwrap_or_else(|| vec![String::new()]) {
+                out.push_str(&format!("F\u{1f}{}\u{1f}{env}\u{1f}{}\u{1f}.\u{1e}", variant.locale, chain.join(",")));
+            }
+        }
     }
     out
 }
@@ -6542,7 +6586,7 @@ fn spinel_files(app: &App, fixture: &Path) -> Result<(Vec<(String, String)>, Vec
     apply_content_helper_attributes(&mut files, app);
     apply_content_helper_tags(&mut files, app);
     apply_i18n_locales(&mut files, app);
-    if !app.i18n_table.is_empty() {
+    if !app.i18n_table.is_empty() || !app.i18n_runtime_sites.is_empty() {
         files.push(("config/i18n_translations".to_string(), i18n_table_text(app)));
     }
     // The `only:`-as-finder specializations, also in the shared base:
