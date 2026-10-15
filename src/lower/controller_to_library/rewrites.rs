@@ -491,6 +491,21 @@ pub(super) fn rewrite_render_to_views(
             // plants the same `format:` marker for a resolvable
             // `content_type:`, so this reads the same way `svg` does.
             let is_css = render_kwargs_have_format(args, "css");
+            // Unlike `svg`/`js`/`json`, a css-marked render isn't
+            // guaranteed a `_css`-suffixed template: `render
+            // content_type: :css` names no template at all, and an
+            // action can answer it with its ONLY (format-agnostic)
+            // template — a bare `show.erb`, ingested as the `html`
+            // view — the same way a feed format falls back to a
+            // format-agnostic template below. `css_qualified` gates
+            // the contract-stem and final dispatch the same way
+            // `feed_qualified` already does, so a controller with no
+            // `show.css.erb` sibling gets its one template (with
+            // `content_type: "text/css"` still set) instead of a
+            // `MissingTemplate` raise for a template that was never
+            // going to exist (CodeRabbit 4277530506).
+            let css_qualified = is_css
+                && view_ivars.contains_key(&(render_module.clone(), format!("{}_css", view_method.as_str())));
             // A feed branch (`format.rss { render action: "stories" }`):
             // the format-qualified template (`stories.rss.builder` →
             // `stories_rss`) when there is one, else a format-AGNOSTIC
@@ -509,7 +524,7 @@ pub(super) fn rewrite_render_to_views(
                 format!("{}_turbo_stream", view_method.as_str())
             } else if is_svg {
                 format!("{}_svg", view_method.as_str())
-            } else if is_css {
+            } else if css_qualified {
                 format!("{}_css", view_method.as_str())
             } else if is_js {
                 format!("{}_js", view_method.as_str())
@@ -667,12 +682,20 @@ pub(super) fn rewrite_render_to_views(
                     )
                 } else if is_css {
                     // Mastodon's `custom_css#show` — same shape as
-                    // `svg`: format-qualified view method, MIME from
-                    // the shared table.
-                    (
-                        Symbol::from(format!("{}_css", view_method.as_str())),
-                        Some(crate::lower::controller::body::mime_for_format("css")),
-                    )
+                    // `svg`, but the view method is the qualified one
+                    // only when `show.css.erb` actually exists
+                    // (`css_qualified`); otherwise the action's only
+                    // (format-agnostic) template answers, same as
+                    // `feed_fmt` below falls back for rss/atom/xml.
+                    // The MIME is `text/css` either way — that's the
+                    // whole point of `render content_type: :css` with
+                    // no template name.
+                    let m = if css_qualified {
+                        Symbol::from(format!("{}_css", view_method.as_str()))
+                    } else {
+                        view_method
+                    };
+                    (m, Some(crate::lower::controller::body::mime_for_format("css")))
                 } else if is_js {
                     (
                         Symbol::from(format!("{}_js", view_method.as_str())),
