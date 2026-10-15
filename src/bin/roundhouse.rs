@@ -399,6 +399,24 @@ fn run_transpile(
                 }),
             _ => true,
         });
+        // A gem a project extension says reaches Rails is not carried, so
+        // its constants stay refused. Say why, with the extension's evidence.
+        for diagnostic in &mut analyze_diags {
+            let roundhouse::diagnostic::DiagnosticKind::Unsupported { construct, detail, .. } =
+                &diagnostic.kind
+            else {
+                continue;
+            };
+            if construct.as_str() != "constant" {
+                continue;
+            }
+            if let Some(row) = roundhouse::gems::rails_dependent_owner(&app, detail) {
+                diagnostic.message.push_str(&format!(
+                    " (a project extension marks gem {} rails_dependent: {})",
+                    row.gem, row.why
+                ));
+            }
+        }
     }
 
     // A residue whose own text says the construct is "unsupported at

@@ -497,6 +497,10 @@ impl Analyzer {
             // `serialize :col, coder: …` — the column reads back as the
             // coder's object, not the storage text.
             register_serialized_columns(&model.body, &mut cls.instance_methods);
+            // A project extension's attribute macros (`crate::extensions`):
+            // gem column DSLs whose attributes read back as the DSL's own
+            // value object.
+            register_attribute_macros(&model.body, &app.extensions, &mut cls.instance_methods);
             // `attribute :name, :type` virtual attributes (ActiveModel) —
             // backed by something other than a schema column, so absent
             // from `model.attributes` above.
@@ -8871,6 +8875,50 @@ fn register_serialized_columns(body: &[ModelBodyItem], methods: &mut HashMap<Sym
         for name in args.iter().map_while(symbol_arg) {
             methods.insert(name.clone(), Ty::Untyped);
             methods.insert(Symbol::from(format!("{}=", name.as_str())), Ty::Untyped);
+        }
+    }
+}
+
+/// A project extension's `attribute_macros` (`crate::extensions`): a
+/// class-body DSL call such as `price_column :amount, currency: :usd` or
+/// `bag_columns attributes: [:total, :tax]` whose symbol arguments name
+/// attributes. The schema holds a number, but the attribute reads back as
+/// the DSL's value object, which is not modeled here. That is an unmodeled
+/// gem boundary, so the reader and writer are gradual rather than the
+/// storage type. `insert`, as for `serialize`: this deliberately overrides
+/// the schema-derived type.
+fn register_attribute_macros(
+    body: &[ModelBodyItem],
+    extensions: &crate::extensions::Extensions,
+    methods: &mut HashMap<Symbol, Ty>,
+) {
+    use crate::extensions::MacroAttributes;
+    if extensions.attribute_macros.is_empty() {
+        return;
+    }
+    for item in body {
+        let ModelBodyItem::Unknown { expr, .. } = item else { continue };
+        let ExprNode::Send { recv: None, method, args, .. } = &*expr.node else { continue };
+        let Some(spec) = extensions.attribute_macro(method.as_str()) else { continue };
+        let mut names: Vec<Symbol> = Vec::new();
+        match &spec.attributes {
+            MacroAttributes::Positional => names.extend(args.iter().map_while(symbol_arg).cloned()),
+            MacroAttributes::HashKey(key) => {
+                for arg in args {
+                    let ExprNode::Hash { entries, .. } = &*arg.node else { continue };
+                    for (k, v) in entries {
+                        if symbol_arg(k).is_some_and(|k| k.as_str() == key) {
+                            if let ExprNode::Array { elements, .. } = &*v.node {
+                                names.extend(elements.iter().filter_map(symbol_arg).cloned());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        for name in names {
+            methods.insert(Symbol::from(format!("{}=", name.as_str())), Ty::Untyped);
+            methods.insert(name, Ty::Untyped);
         }
     }
 }

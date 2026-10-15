@@ -28,6 +28,7 @@ use zip::write::SimpleFileOptions;
 
 use crate::App;
 use crate::emit::{self, EmittedFile};
+use crate::gems::{GEM_REQUIRES, Marker, VARIATION_MARKER, compiler_runtime_gems};
 use crate::ingest::ingest_app;
 
 /// Targets the `roundhouse` binary can produce, plus the `Blog`
@@ -3084,7 +3085,7 @@ fn ruby_family_runtime_files(
         // at a time; CRuby's is zlib's own C. Both answer the same
         // number by construction (the port IS CRC-32/ISO-HDLC), so the
         // tree that has the real one should use it.
-        // `TypeID`: the gem itself (`project::GEM_REQUIRES` and the
+        // `TypeID`: the gem itself (`gems::GEM_REQUIRES` and the
         // Gemfile carry it), so the file under the port's require path
         // just loads it.
         if path == "runtime/typeid.rb" {
@@ -3366,7 +3367,7 @@ fn ruby_family_runtime_files(
              require_relative \"module_delegate\"\n\
              require_relative \"open_telemetry_facade\"\n\
              {}{}",
-            gem_require_block(&[]),
+            gem_require_block(&[], &lock_gated_requires(app)),
             WEB_PUSH_STUB_REOPEN
         ),
         RubyFlavor::JRuby => {
@@ -3391,7 +3392,7 @@ fn ruby_family_runtime_files(
                  require_relative \"open_telemetry_facade\"\n\
                  {}{}",
                 markly_require,
-                gem_require_block(&["markly"]),
+                gem_require_block(&["markly"], &[]),
                 WEB_PUSH_STUB_REOPEN
             )
         }
@@ -3448,11 +3449,12 @@ fn ruby_family_runtime_files(
     apply_route_table_root(&mut files, app);
     apply_cable_strip(&mut files, app)?;
     apply_makefile_test_list_stems(&mut files, &test_stems);
-    apply_runtime_gem_wiring(&mut files);
+    apply_runtime_gem_wiring(&mut files, &app.extensions);
     // Namespaces / feature requires land only on CRuby (`target_files`
     // wraps `with_external_gem_namespaces` for `BuildTarget::Ruby` alone).
     // JRuby must not get Gemfile pins + boot requires without that path.
     if flavor == RubyFlavor::CRuby {
+        apply_lock_gated_gem_wiring(&mut files, app);
         apply_locked_external_gem_wiring(&mut files, app);
     }
     // AGAIN, on purpose, and this time PERFORMING them. `spinel_files`
@@ -6768,13 +6770,6 @@ fn apply_spinel_sql_functions(files: &mut Vec<(String, String)>, app: &App) -> R
     Ok(())
 }
 
-/// How a test body asks for a gem: by naming a constant, or by writing
-/// one of its method spellings.
-enum Marker {
-    Constant(&'static str),
-    AnyText(&'static [&'static str]),
-}
-
 /// `Mocha::API` mixed into TestBase, with the three lifecycle calls it
 /// requires. `mocha/minitest` would do this itself; it also refuses to
 /// load without Minitest, which the emitted helper deliberately does not
@@ -7043,73 +7038,6 @@ fn apply_test_gem_wiring(files: &mut Vec<(String, String)>) {
     }
 }
 
-/// The RUNTIME twin of `apply_test_gem_wiring`, and it exists because
-/// `runtime/gem_facades.rb` swallows the failure.
-///
-/// That file guarded-requires the CRuby-path gems — `require gem_name`
-/// inside `rescue LoadError; nil` — so an app whose Gemfile does not name
-/// one does not fail at boot. It fails at REQUEST TIME, as an undefined
-/// constant, in whatever code path first reaches the gem. campfire's is
-/// sign-in: `POST /session` answered 500 with `uninitialized constant
-/// User::BCrypt`, every authenticated page redirected, and nothing in the
-/// tree said a gem was missing.
-///
-/// The rescue is right — the blog uses none of these and must boot without
-/// them installed — so the fix is to DECLARE what this app reaches, which
-/// is the same argument `apply_test_gem_wiring` already makes one function
-/// up: a tree that only runs where a gem happens to be installed is a tree
-/// whose dependencies are ambient. CI installing bcrypt is what kept this
-/// hidden; a clean `bundle install && puma` is what found it.
-///
-/// Detected from `app/`, not from the app's own Gemfile, for the reason
-/// the test table gives: a gem listed there but never reached would be a
-/// dependency we invented. The constant in an emitted body IS the demand.
-///
-/// Ruby-family only, and wired at the CRuby/JRuby forks rather than in
-/// `spinel_files`, beside `apply_makefile_test_list_stems` for the reason that
-/// function's own note gives: the shared scaffold set feeds spinel too,
-/// and a spinel tree that declares nokogiri in a Gemfile its toolchain
-/// lane has to `bundle install` is a build break in a target that never
-/// wanted the gem. The spinel target answers the same demand at its own
-/// seam — `spin_shape` swaps `runtime/bcrypt_facade.rb` for the real spin
-/// package and adds it to the manifest. This is the CRuby half of that
-/// same decision, which had no half until now.
-/// The gems every ruby-family tree guarded-requires, written once.
-///
-/// Under Rails, Bundler auto-requires these; the transpiled tree loads
-/// them so app classes that reach gem constants at LOAD time (lobsters'
-/// `html_encoder.rb` runs `HTMLEntities.new` in its class body;
-/// campfire's `ApplicationPlatform < PlatformAgent` names its
-/// superclass) or at request time (bcrypt behind the synthesized
-/// `User#authenticate`, rotp behind 2FA, markly+nokogiri behind
-/// `Markdowner.to_html`) resolve.
-///
-/// svg-graph loads by file path: the gem has no `svg-graph.rb` entry
-/// file, and lobsters' Gemfile declares `require: "SVG/Graph/TimeSeries"`.
-///
-/// Kept in step with `RUNTIME_GEMS` — that table is the DEMAND (what
-/// the emitted Gemfile declares, derived from the constants `app/`
-/// names), this one is the LOAD.
-const GEM_REQUIRES: &[&str] = &[
-    "bcrypt",
-    "htmlentities",
-    "rotp",
-    "markly",
-    // Current lobsters' Markdowner renders through commonmarker 2.x (the
-    // ruby-bench snapshot used markly).
-    "commonmarker",
-    "nokogiri",
-    "parslet",
-    "typeid",
-    "rqrcode",
-    "rqrcode_core",
-    "SVG/Graph/TimeSeries",
-    "sentry-ruby",
-    "rails-html-sanitizer",
-    "net/http/persistent",
-    "web-push",
-];
-
 /// The guarded-require block, minus any gem this tree provides another
 /// way. Guarded because an app that uses none of them — the blog — must
 /// boot with none installed.
@@ -7370,127 +7298,137 @@ fn spinel_sql_functions_file(app: &App) -> Option<String> {
     Some(out)
 }
 
-fn gem_require_block(exclude: &[&str]) -> String {
-    let names: Vec<String> = GEM_REQUIRES
-        .iter()
-        .filter(|g| !exclude.contains(g))
-        .map(|g| format!("{g:?}"))
-        .collect();
+/// `lock_gated` appends a project's extension requires
+/// ([`lock_gated_requires`]) after the compiler's own list, in extension
+/// order, skipping one the list already has.
+fn gem_require_block(exclude: &[&str], lock_gated: &[&crate::extensions::LockGatedRequire]) -> String {
+    let mut requires: Vec<&str> = GEM_REQUIRES.iter().copied().filter(|g| !exclude.contains(g)).collect();
+    for row in lock_gated {
+        if !requires.contains(&row.require.as_str()) {
+            requires.push(&row.require);
+        }
+    }
+    let names: Vec<String> = requires.iter().map(|g| format!("{g:?}")).collect();
     let mut out = format!("[{}].each do |gem_name|\n", names.join(", "));
     out.push_str("  begin\n    require gem_name\n  rescue LoadError\n    nil\n  end\nend\n");
     out
 }
 
-fn apply_runtime_gem_wiring(files: &mut Vec<(String, String)>) {
-    // Kept in step with the guarded list in `runtime/gem_facades.rb`:
-    // (constant an emitted body names, gem that defines it). Only gems
-    // whose absence is a RUNTIME error belong here — the list is the
-    // façade's, not a survey of what an app might like.
-    const RUNTIME_GEMS: [(Marker, &str); 16] = [
-        (Marker::Constant("BCrypt"), "bcrypt"),
-        (Marker::Constant("HTMLEntities"), "htmlentities"),
-        (Marker::Constant("ROTP"), "rotp"),
-        (Marker::Constant("Markly"), "markly"),
-        (Marker::Constant("Commonmarker"), "commonmarker"),
-        (Marker::Constant("Nokogiri"), "nokogiri"),
-        (Marker::Constant("Parslet"), "parslet"),
-        (Marker::Constant("TypeID"), "typeid"),
-        (Marker::Constant("RQRCode"), "rqrcode"),
-        (Marker::Constant("RQRCodeCore"), "rqrcode_core"),
-        // campfire's web push builds one `Net::HTTP::Persistent` pool
-        // per process (`WebPush::Pool`), and the gem went undeclared
-        // exactly as bcrypt did — the façade names the constant and
-        // nothing put it in the Gemfile.
-        //
-        // ITS ABSENCE IS FATAL TO A WRITE, not to a feature, and that
-        // is why it belongs in this table rather than in a ledger. The
-        // job adapter is `:inline`, so `Room::MessagePusher` runs
-        // INSIDE the message-create request: with no gem, every
-        // `POST /rooms/N/messages` answers 500 with
-        // `uninitialized constant Net::HTTP::Persistent`. Found by the
-        // ruby socket lane, which is the first harness to post a
-        // message on this tree WITHOUT the walk's stubs spliced in —
-        // the HTTP bench lanes only GET, and campfire-compare stubs the
-        // pusher. A gem the app depends on is not a modeling gap; it is
-        // a line in the Gemfile.
-        (Marker::Constant("Net::HTTP::Persistent"), "net-http-persistent"),
-        // The thread pools that same `WebPush::Pool` posts to. Ported for
-        // spinel (runtime/spinel/concurrent.rb) and swapped for the gem on
-        // this lane (`ruby_runtime_files`), so the tree must declare it —
-        // it is only ever in the lock today as sentry-ruby's dependency.
-        (Marker::Constant("Concurrent"), "concurrent-ruby"),
-        // The gem those pools deliver through. `WEB_PUSH_STUB_REOPEN`
-        // was written to sit on top of it — `alias_method
-        // :payload_send_without_stub, :payload_send if method_defined?` —
-        // and nothing had ever put the gem underneath: the app's
-        // `WebPush::Pool#deliver` rescues `WebPush::ExpiredSubscription`,
-        // a constant only the gem defines on this lane, and its suite
-        // raises one through the slot. With the gem in the tree an
-        // unstubbed `payload_send` is a real delivery.
-        (Marker::Constant("WebPush"), "web-push"),
-        // campfire's message helpers rescue through
-        // `Sentry.capture_exception`, and the gem was standing in
-        // `scripts/campfire-walk-stubs.rb` as a hand-written module. A
-        // gem the app depends on is not a modeling gap; it is a line in
-        // the Gemfile, which is what this table is for. MEASURED: the
-        // real gem loads in the emitted tree under CRuby.
-        //
-        (Marker::Constant("Sentry"), "sentry-ruby"),
-        // `platform_agent` USED TO BE HERE, and is deliberately not any
-        // more: `runtime/ruby/user_agent.rb` ports it, along with the
-        // `useragent` it delegates to. Requiring the gem beside the port
-        // would redefine `PlatformAgent` and `UserAgent` on the CRuby
-        // tree alone, so the ruby lane would be running the GEM while
-        // every strict lane ran the port — and a sibling lane is
-        // evidence only if it runs the same code. The port's own suite
-        // (`runtime/ruby/test/user_agent_test.rb`) compares it against
-        // the real gems instead, which is where that comparison belongs.
-        // rails-html-sanitizer, and it is the first entry whose demand
-        // is OURS rather than the app's: no campfire file names
-        // `Rails::HTML`, but `ActionView::ViewHelpers.sanitize` is what
-        // a bare `sanitize` / `strip_tags` / `auto_link` in an app body
-        // lowers to, and the CRuby overlay serves those from the real
-        // gem. So the marker is the emitted CALL, the same shape the
-        // test table already uses for mocha.
-        //
-        // A Gemfile line rather than a port because the safe-list pass
-        // is HTML5 tree construction, not filtering — see the header of
-        // ruby_overlay/runtime/action_view_sanitize.rb. Its closure is
-        // loofah + crass + nokogiri, and nokogiri is already declared by
-        // an entry above for any app that reaches this one.
-        (
-            Marker::AnyText(&[
-                "ActionView::ViewHelpers.sanitize(",
-                "ActionView::ViewHelpers.strip_tags(",
-                "ActionView::ViewHelpers.auto_link(",
-            ]),
-            "rails-html-sanitizer",
-        ),
-        // A declared variant is an image processor's demand: the
-        // reopen `apply_image_processor_wiring` swaps in requires
-        // "vips", and the marker is the constructor call every
-        // `attachable.variant …` lowers to. The gem needs libvips
-        // installed, which the app's own Gemfile (image_processing →
-        // ruby-vips) already asked of the machine.
-        (Marker::AnyText(&[VARIATION_MARKER]), "ruby-vips"),
-    ];
+/// The `lock_gated_requires` of the app's extensions (`crate::extensions`)
+/// whose gem its `Gemfile.lock` resolves from a gem server, in extension
+/// order. A gem locked from a git or path source is skipped, fail-closed
+/// as in `apply_locked_external_gem_wiring`: a rubygems.org pin would
+/// misstate a git gem's origin, and a path gem's source is already part of
+/// the tree. The CRuby tree alone loads these.
+fn lock_gated_requires(app: &App) -> Vec<&crate::extensions::LockGatedRequire> {
+    let Some(lock) = app.gem_lock.as_ref() else { return Vec::new() };
+    app.extensions
+        .lock_gated_requires
+        .iter()
+        .filter(|row| lock.has(&row.gem) && !lock.is_from_git(&row.gem) && !lock.is_in_repo(&row.gem))
+        .collect()
+}
 
+/// Pin the gems of [`lock_gated_requires`] in the CRuby tree's Gemfile at
+/// their locked versions, so the guarded requires in `gem_facades.rb` find
+/// them. The source lockfile is the version authority, as for
+/// `apply_locked_external_gem_wiring`, and the scaffold lock goes for the
+/// same reason: Bundler must resolve the new pins.
+fn apply_lock_gated_gem_wiring(files: &mut Vec<(String, String)>, app: &App) {
+    let Some(lock) = app.gem_lock.as_ref() else { return };
+    let mut gems: Vec<&str> = Vec::new();
+    for row in lock_gated_requires(app) {
+        if !gems.contains(&row.gem.as_str()) {
+            gems.push(&row.gem);
+        }
+    }
+    if gems.is_empty() {
+        return;
+    }
+    let Some((_, gemfile)) = files.iter_mut().find(|(path, _)| path == "Gemfile") else {
+        return;
+    };
+    let mut block = String::new();
+    for gem in gems {
+        let version = lock.version_of(gem);
+        let pinned = match version {
+            Some(v) => format!("gem {gem:?}, \"= {v}\""),
+            None => format!("gem {gem:?}"),
+        };
+        if gemfile_declares_exact(gemfile, gem, version) || rewrite_gemfile_declaration(gemfile, gem, &pinned) {
+            continue;
+        }
+        block.push_str(&pinned);
+        block.push('\n');
+    }
+    if !block.is_empty() {
+        if !gemfile.ends_with('\n') {
+            gemfile.push('\n');
+        }
+        gemfile.push_str("\n# Required at boot by the project's extensions (roundhouse.yml).\n");
+        gemfile.push_str(&block);
+    }
+    files.retain(|(path, _)| path != "Gemfile.lock");
+}
+
+/// The RUNTIME twin of `apply_test_gem_wiring`, and it exists because
+/// `runtime/gem_facades.rb` swallows the failure.
+///
+/// That file guarded-requires the CRuby-path gems — `require gem_name`
+/// inside `rescue LoadError; nil` — so an app whose Gemfile does not name
+/// one does not fail at boot. It fails at REQUEST TIME, as an undefined
+/// constant, in whatever code path first reaches the gem. campfire's is
+/// sign-in: `POST /session` answered 500 with `uninitialized constant
+/// User::BCrypt`, every authenticated page redirected, and nothing in the
+/// tree said a gem was missing.
+///
+/// The rescue is right — the blog uses none of these and must boot without
+/// them installed — so the fix is to DECLARE what this app reaches, which
+/// is the same argument `apply_test_gem_wiring` already makes one function
+/// up: a tree that only runs where a gem happens to be installed is a tree
+/// whose dependencies are ambient. CI installing bcrypt is what kept this
+/// hidden; a clean `bundle install && puma` is what found it.
+///
+/// Detected from `app/`, not from the app's own Gemfile, for the reason
+/// the test table gives: a gem listed there but never reached would be a
+/// dependency we invented. The constant in an emitted body IS the demand.
+///
+/// Ruby-family only, and wired at the CRuby/JRuby forks rather than in
+/// `spinel_files`, beside `apply_makefile_test_list_stems` for the reason that
+/// function's own note gives: the shared scaffold set feeds spinel too,
+/// and a spinel tree that declares nokogiri in a Gemfile its toolchain
+/// lane has to `bundle install` is a build break in a target that never
+/// wanted the gem. The spinel target answers the same demand at its own
+/// seam — `spin_shape` swaps `runtime/bcrypt_facade.rb` for the real spin
+/// package and adds it to the manifest. This is the CRuby half of that
+/// same decision, which had no half until now.
+fn apply_runtime_gem_wiring(files: &mut Vec<(String, String)>, extensions: &crate::extensions::Extensions) {
+    // `app/` only. The runtime tree names several of these itself (the
+    // façade lists all nine), and a scan that saw those would declare
+    // every gem for every app — the same self-fulfilling wiring the
+    // test table had to exclude `test_helper.rb` to avoid.
+    let app_body_has = |found: &dyn Fn(&str) -> bool| {
+        files.iter().any(|(p, c)| p.starts_with("app/") && p.ends_with(".rb") && found(c))
+    };
     let mut needed: Vec<&str> = Vec::new();
-    for (marker, gem) in RUNTIME_GEMS {
-        // `app/` only. The runtime tree names several of these itself (the
-        // façade lists all nine), and a scan that saw those would declare
-        // every gem for every app — the same self-fulfilling wiring the
-        // test table had to exclude `test_helper.rb` to avoid.
-        let demanded = files.iter().any(|(p, c)| {
-            p.starts_with("app/")
-                && p.ends_with(".rb")
-                && match marker {
-                    Marker::Constant(konst) => names_constant(c, konst),
-                    Marker::AnyText(needles) => needles.iter().any(|n| c.contains(n)),
-                }
+    for (marker, gem) in compiler_runtime_gems() {
+        let demanded = app_body_has(&|c| match marker {
+            Marker::Constant(konst) => names_constant(c, konst),
+            Marker::AnyText(needles) => needles.iter().any(|n| c.contains(n)),
         });
         if demanded {
             needed.push(gem);
+        }
+    }
+    // A project's extension rows, after the compiler's and in extension
+    // order (`crate::extensions`).
+    for row in &extensions.runtime_gems {
+        let demanded = app_body_has(&|c| match &row.demand {
+            crate::extensions::Demand::Constant(konst) => names_constant(c, konst),
+            crate::extensions::Demand::AnyText(needles) => needles.iter().any(|n| c.contains(n.as_str())),
+        });
+        if demanded && !needed.contains(&row.gem.as_str()) {
+            needed.push(&row.gem);
         }
     }
     if needed.is_empty() {
@@ -7533,6 +7471,11 @@ fn apply_locked_external_gem_wiring(files: &mut Vec<(String, String)>, app: &App
             // Fail-closed: a GIT-sourced unknown must not be rewritten as a
             // rubygems.org name/version pin.
             if lock.is_from_git(&gem.name) {
+                return false;
+            }
+            // A gem a project extension says reaches Rails is never
+            // required natively (`crate::extensions`).
+            if app.extensions.is_rails_dependent(&gem.name) {
                 return false;
             }
             let namespace = crate::gems::namespace_of(&gem.name);
@@ -8498,12 +8441,6 @@ fn ruby_magic_comment(line: &str) -> bool {
         "frozen_string_literal" | "encoding" | "coding" | "warn_indent" | "shareable_constant_value" | "warn_past_scope"
     )
 }
-
-/// The emitted call every declared variant lowers to (`lower::attached
-/// ::variations_expr`): the reader's constructor argument on the app
-/// side, and the one line the wiring below looks for. An app with no
-/// `attachable.variant …` block emits an empty list and never names it.
-const VARIATION_MARKER: &str = "ActiveStorage::Variation.new(";
 
 /// Whether the emitted app declares Active Storage variants — the
 /// demand for an image processor.

@@ -325,8 +325,10 @@ pub fn ingest_app_with_vfs<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResult
     let source_vfs = PathGemVfs { inner: vfs, root: dir, dirs: &path_gems };
     let vfs = &source_vfs;
     let engine_routes = engine_route_sources(vfs, dir, &path_gems);
-    let additional_test_paths = additional_test_paths(vfs, dir)?;
+    let config = roundhouse_config(vfs, dir)?;
+    let additional_test_paths = additional_test_paths(dir, &config)?;
     validate_additional_test_paths(vfs, dir, &additional_test_paths)?;
+    let extensions = project_extensions(vfs, dir, &config)?;
     let roots = app_roots(vfs, dir, &path_gems);
     let lib_ignores: Vec<String> = vfs
         .read(&dir.join("config/application.rb"))
@@ -352,6 +354,7 @@ pub fn ingest_app_with_vfs<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResult
         )
     };
     let mut app = App::new();
+    app.extensions = extensions;
     // `enum` columns declared inside a concern's `included do`, keyed by
     // the module. Local rather than a field on `App`: they exist only
     // until the splice folds them into each including model's own
@@ -2314,6 +2317,20 @@ fn splice_concerns_into_models_named(app: &mut App, only: &[crate::ident::Symbol
     use crate::dialect::ModelBodyItem;
     use crate::expr::ExprNode;
 
+    if app.concern_model_items.is_empty() && app.concern_guarded_items.is_empty() {
+        return;
+    }
+
+    // A carried statement keeps the concern's lexical constants.
+    let mut defined = std::collections::HashSet::new();
+    for class in &app.library_classes {
+        defined.insert(class.name.0.as_str().to_string());
+        for (name, _) in &class.constants {
+            defined.insert(format!("{}::{}", class.name.0.as_str(), name.as_str()));
+        }
+    }
+    defined.extend(app.models.iter().map(|model| model.name.0.as_str().to_string()));
+
     for model in &mut app.models {
         if !only.is_empty() && !only.iter().any(|n| n == &model.name.0) {
             continue;
@@ -2377,7 +2394,13 @@ fn splice_concerns_into_models_named(app: &mut App, only: &[crate::ident::Symbol
                             ordered.push(item);
                         }
                     }
-                    ordered.into_iter().map(|item| rehome_default_fk(item, id, &model_name)).collect::<Vec<_>>()
+                    ordered.into_iter().map(|item| {
+                        let mut item = rehome_default_fk(item, id, &model_name);
+                        if let ModelBodyItem::Unknown { expr, .. } = &mut item {
+                            qualify_carried_constants(expr, id.0.as_str(), &defined);
+                        }
+                        item
+                    }).collect::<Vec<_>>()
                 })
                 .collect();
             if items.is_empty() {
@@ -2388,6 +2411,34 @@ fn splice_concerns_into_models_named(app: &mut App, only: &[crate::ident::Symbol
             i += 1;
         }
     }
+}
+
+/// An enclosing module's constant keeps its lexical meaning after splicing.
+/// The concern's own constants remain reachable through model ancestry.
+fn qualify_carried_constants(
+    expr: &mut crate::expr::Expr,
+    concern: &str,
+    defined: &std::collections::HashSet<String>,
+) {
+    use crate::expr::ExprNode;
+    let Some((enclosing, _)) = concern.rsplit_once("::") else { return };
+    if let ExprNode::Const { path } = &mut *expr.node {
+        if path.first().is_some_and(|first| !first.as_str().is_empty()) {
+            let written = path.iter().map(|part| part.as_str()).collect::<Vec<_>>().join("::");
+            let mut scope = Some(enclosing);
+            while let Some(owner) = scope {
+                if defined.contains(&format!("{owner}::{written}")) {
+                    let mut qualified: Vec<Symbol> = owner.split("::").map(Symbol::from).collect();
+                    qualified.append(path);
+                    *path = qualified;
+                    break;
+                }
+                scope = owner.rsplit_once("::").map(|(scope, _)| scope);
+            }
+        }
+        return;
+    }
+    expr.node.for_each_child_mut(&mut |child| qualify_carried_constants(child, concern, defined));
 }
 
 /// The concern an `include` arg written inside `owner` names. A rooted
@@ -6612,18 +6663,21 @@ fn read_test_rb_files<V: Vfs + ?Sized>(
     Ok(files)
 }
 
-/// Additional test roots from the app's `roundhouse.yml`.
-fn additional_test_paths<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResult<Vec<PathBuf>> {
-    #[derive(Default, serde::Deserialize)]
-    #[serde(default, deny_unknown_fields)]
-    struct RoundhouseConfig {
-        test_paths: Vec<PathBuf>,
-    }
+/// The app's `roundhouse.yml`. An absent file is the default configuration.
+#[derive(Default, serde::Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct RoundhouseConfig {
+    test_paths: Vec<PathBuf>,
+    /// Extension directories (`crate::extensions`), in listing order.
+    extensions: Vec<PathBuf>,
+}
 
+/// Read and parse the app's `roundhouse.yml`.
+fn roundhouse_config<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResult<RoundhouseConfig> {
     let config_path = dir.join("roundhouse.yml");
     let text = match vfs.read_to_string(&config_path) {
         Ok(text) => text,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(RoundhouseConfig::default()),
         Err(error) => {
             return Err(IngestError::Io(std::io::Error::new(
                 error.kind(),
@@ -6637,37 +6691,71 @@ fn additional_test_paths<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResult<V
             message: error.to_string(),
         }
     })?;
+    Ok(config.unwrap_or_default())
+}
 
-    let mut paths = Vec::new();
-    for path in config.into_iter().flat_map(|config| config.test_paths) {
-        let mut normalized = PathBuf::new();
-        for component in path.components() {
-            match component {
-                Component::CurDir => {}
-                Component::Normal(segment) => normalized.push(segment),
-                Component::ParentDir | Component::RootDir | Component::Prefix(_) => {
-                    return Err(IngestError::Parse {
-                        file: config_path.display().to_string(),
-                        message: format!(
-                            "test_paths entries must be non-empty app-relative directories without '..': {path:?}"
-                        ),
-                    });
-                }
-            }
+/// A configured directory as a literal app-relative path, `.` segments
+/// dropped. `None` for an empty path, an absolute one, or one with `..`.
+fn app_relative_dir(path: &Path) -> Option<PathBuf> {
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::CurDir => {}
+            Component::Normal(segment) => normalized.push(segment),
+            Component::ParentDir | Component::RootDir | Component::Prefix(_) => return None,
         }
-        if normalized.as_os_str().is_empty() {
+    }
+    (!normalized.as_os_str().is_empty()).then_some(normalized)
+}
+
+/// Additional test roots from the app's `roundhouse.yml`.
+fn additional_test_paths(dir: &Path, config: &RoundhouseConfig) -> IngestResult<Vec<PathBuf>> {
+    let config_path = dir.join("roundhouse.yml");
+    let mut paths = Vec::new();
+    for path in &config.test_paths {
+        let Some(normalized) = app_relative_dir(path) else {
             return Err(IngestError::Parse {
                 file: config_path.display().to_string(),
                 message: format!(
                     "test_paths entries must be non-empty app-relative directories without '..': {path:?}"
                 ),
             });
-        }
+        };
         paths.push(normalized);
     }
     paths.sort();
     paths.dedup();
     Ok(paths)
+}
+
+/// The facts of the extensions `roundhouse.yml` lists, loaded for this app
+/// alone (`crate::extensions`). Entries follow the `test_paths` rules, and
+/// listing order is load order, so an entry listed twice is refused rather
+/// than silently loaded twice or deduplicated.
+fn project_extensions<V: Vfs + ?Sized>(
+    vfs: &V,
+    dir: &Path,
+    config: &RoundhouseConfig,
+) -> IngestResult<crate::extensions::Extensions> {
+    let config_path = dir.join("roundhouse.yml");
+    let refuse = |message: String| IngestError::Parse { file: config_path.display().to_string(), message };
+    let mut dirs: Vec<PathBuf> = Vec::new();
+    for entry in &config.extensions {
+        let Some(relative) = app_relative_dir(entry) else {
+            return Err(refuse(format!(
+                "extensions entries must be non-empty app-relative directories without '..': {entry:?}"
+            )));
+        };
+        let resolved = dir.join(relative);
+        if path_has_symlink_component(vfs, dir, &resolved) {
+            return Err(refuse(format!("extensions entries must not contain symbolic links: {entry:?}")));
+        }
+        if dirs.contains(&resolved) {
+            return Err(refuse(format!("extensions entries must be listed once: {entry:?}")));
+        }
+        dirs.push(resolved);
+    }
+    crate::extensions::load(vfs, &dirs).map_err(|error| IngestError::Parse { file: error.file, message: error.message })
 }
 
 /// The classes from `classes` that are NESTED under `outer` — the ones
