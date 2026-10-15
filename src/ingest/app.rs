@@ -1088,6 +1088,61 @@ end
                 }
             }
         }
+        // `config.filter_parameters += [:passw, …]` — the keys Rails
+        // masks in `request.filtered_parameters`. Application body
+        // first, then the initializers in load order, as Rails runs
+        // them. (Rails also copies the list into
+        // `ActiveSupport.filter_parameters` for the event reporter; the
+        // runtime's stays the reporter's own, as before.) Synthesized as
+        // `config_filter_parameters` on the reopen, over the framework
+        // default (`[]`) in runtime/ruby/rails.rb. A Regexp, Proc or
+        // computed operand is not read; the survey names it.
+        {
+            let mut names: Vec<String> = Vec::new();
+            let mut seen = false;
+            let mut fold = |bytes: &[u8], file: &Path| {
+                for line in extract_filter_parameters(bytes) {
+                    match line {
+                        FilterParametersLine::Literal { replace, names: more } => {
+                            seen = true;
+                            if replace {
+                                names.clear();
+                            }
+                            names.extend(more);
+                        }
+                        FilterParametersLine::Computed { replace } => {
+                            // A computed `=` still replaces what came before
+                            // it; only its own operand goes unread.
+                            if replace {
+                                seen = true;
+                                names.clear();
+                            }
+                            survey::record(&IngestError::Unsupported {
+                                file: file.display().to_string(),
+                                message: "config.filter_parameters is not a list of Symbol or String literals; request.filtered_parameters does not apply it".to_string(),
+                            })
+                        }
+                    }
+                }
+            };
+            fold(&source, &app_config_path);
+            let init_dir = dir.join("config/initializers");
+            if vfs.is_dir(&init_dir) {
+                for entry in read_rb_files(vfs, &init_dir)? {
+                    if let Ok(bytes) = vfs.read(&entry) {
+                        fold(&bytes, &entry);
+                    }
+                }
+            }
+            if seen {
+                let literal = names.iter().map(|n| format!("{n:?}")).collect::<Vec<_>>().join(", ");
+                if let Ok(mut synth) = crate::runtime_src::parse_methods(&format!(
+                    "def config_filter_parameters\n  [{literal}]\nend\n"
+                )) {
+                    methods.append(&mut synth);
+                }
+            }
+        }
         // `Vips.block_untrusted(true)` / `Vips.block("<op>", true)` —
         // an initializer setting libvips' loader policy before any
         // upload is decoded (any app that stores user uploads; campfire
@@ -9218,6 +9273,101 @@ pub(super) fn extract_variable_content_type_exclusions(source: &[u8]) -> Vec<Str
         out.extend(body[..close].split_whitespace().map(|s| s.to_string()));
     }
     out
+}
+
+/// One `config.filter_parameters` statement, as
+/// [`extract_filter_parameters`] reads it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum FilterParametersLine {
+    /// `+= [...]` (`replace: false`) or `= [...]` (`replace: true`) of
+    /// Symbol and String literals, each as its String.
+    Literal { replace: bool, names: Vec<String> },
+    /// Any other operand: a Regexp, a Proc, a computed list. `replace`
+    /// is true for a plain `=`, which still discards the names before it.
+    Computed { replace: bool },
+}
+
+/// The `config.filter_parameters` statements of a file, in source order
+/// (`Rails.application.config.filter_parameters += [:passw, :email]` in
+/// `filter_parameter_logging.rb`, or `config.filter_parameters += [...]`
+/// in the Application body). Line-scanned like the other config reads;
+/// the list may span lines, so the scan continues to its closing
+/// bracket. `%i[...]` and `%w[...]` lists count as literals.
+pub(crate) fn extract_filter_parameters(source: &[u8]) -> Vec<FilterParametersLine> {
+    let source = String::from_utf8_lossy(source);
+    let mut out = Vec::new();
+    let mut lines = source.lines();
+    while let Some(line) = lines.next() {
+        let t = line.trim_start();
+        if t.starts_with('#') {
+            continue;
+        }
+        let Some(idx) = t.find("config.filter_parameters") else { continue };
+        let rest = t[idx + "config.filter_parameters".len()..].trim_start();
+        let (replace, rest) = if let Some(r) = rest.strip_prefix("+=") {
+            (false, r)
+        } else if let Some(r) = rest.strip_prefix('=').filter(|r| !r.starts_with('=')) {
+            (true, r)
+        } else {
+            out.push(FilterParametersLine::Computed { replace: false });
+            continue;
+        };
+        let mut text = rest.trim().to_string();
+        if text.is_empty() {
+            if let Some(next) = lines.next() {
+                text.push_str(next.trim());
+            }
+        }
+        let opens = text.starts_with('[') || text.starts_with("%i[") || text.starts_with("%w[");
+        if opens {
+            while !text.contains(']') {
+                let Some(next) = lines.next() else { break };
+                text.push(' ');
+                text.push_str(next.trim());
+            }
+        }
+        out.push(filter_parameter_list(&text).map_or(FilterParametersLine::Computed { replace }, |names| {
+            FilterParametersLine::Literal { replace, names }
+        }));
+    }
+    out
+}
+
+/// The names of a `[:a, "b"]`, `%i[a b]` or `%w[a b]` literal that is
+/// the whole operand (nothing but a comment after it).
+fn filter_parameter_list(text: &str) -> Option<Vec<String>> {
+    let (words, body) = if let Some(b) = text.strip_prefix("%i[").or_else(|| text.strip_prefix("%w[")) {
+        (true, b)
+    } else {
+        (false, text.strip_prefix('[')?)
+    };
+    let close = body.find(']')?;
+    let after = body[close + 1..].trim();
+    if !(after.is_empty() || after.starts_with('#')) {
+        return None;
+    }
+    let inner = &body[..close];
+    if words {
+        return Some(inner.split_whitespace().map(str::to_string).collect());
+    }
+    inner
+        .split(',')
+        .map(str::trim)
+        .filter(|e| !e.is_empty())
+        .map(|e| {
+            let name = if let Some(sym) = e.strip_prefix(':') {
+                sym
+            } else if e.len() >= 2
+                && ((e.starts_with('"') && e.ends_with('"')) || (e.starts_with('\'') && e.ends_with('\'')))
+            {
+                &e[1..e.len() - 1]
+            } else {
+                return None;
+            };
+            let plain = !name.is_empty() && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '.');
+            plain.then(|| name.to_string())
+        })
+        .collect()
 }
 
 /// `(Vips.block_untrusted(true) seen, operations named by Vips.block(
