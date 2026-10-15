@@ -913,7 +913,7 @@ def _advisory_complete(job, need, advisory, plan=None):
         return False
     keys = {
         "campfire-spinel-compare": ["default", "minor-gc", "verify-gen"],
-        "spinel-toolchain": ["parity", "rest"],
+        "spinel-toolchain": ["shard-0", "shard-1", "shard-2"],
         "spinel-framework": [
             f"shard-{s['shard']}"
             for s in (plan or {}).get("spinel_framework_shards", [])

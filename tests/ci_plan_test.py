@@ -996,8 +996,6 @@ class Results(unittest.TestCase):
                         "default": "success",
                         "minor-gc": "success",
                         "verify-gen": "success",
-                        "parity": "success",
-                        "rest": "success",
                         "shard-0": "success",
                         "shard-1": "success",
                         "shard-2": "success",
@@ -1108,11 +1106,11 @@ class Results(unittest.TestCase):
                     self.assertEqual(ci.check_results(plan, needs), ([], False))
 
     def test_each_spinel_toolchain_shard_must_actually_pass_for_completion(self):
-        # The suite is a two-shard matrix; each shard writes its own output
+        # The suite is a three-shard matrix; each shard writes its own output
         # key, so one shard's success cannot stand in for the other's.
         plan = ci.select([], spinel_lane=True)
         self.assertIn("spinel-toolchain", plan["jobs"])
-        for shard in ["parity", "rest"]:
+        for shard in ["shard-0", "shard-1", "shard-2"]:
             for status in ["failure", "cancelled", "", None]:
                 with self.subTest(shard=shard, status=status):
                     needs = self.needs(plan)
