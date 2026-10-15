@@ -35,6 +35,10 @@ mod view_presence_url_encode;
 mod controller_translate;
 #[path = "emit_and_run/i18n_locales.rs"]
 mod i18n_locales;
+#[path = "emit_and_run/i18n_runtime.rs"]
+mod i18n_runtime;
+#[path = "emit_and_run/i18n_plural_rules.rs"]
+mod i18n_plural_rules;
 #[path = "support/lambda_signatures.rs"]
 mod lambda_signatures_contract;
 #[path = "emit_and_run/lambda_signatures.rs"]
@@ -1279,8 +1283,8 @@ fn a_missing_translation_raises_where_the_environment_says_so() {
         .assert_passes();
 }
 
-/// A key computed at run time, a `:strict` setting, or a call with a
-/// block stays an error.
+/// A `:strict` setting or a call with a block stays an error; a key
+/// computed at run time is read from the catalog then (`i18n_runtime`).
 #[test]
 fn unresolvable_translations_stay_errors() {
     let (_emitted, errors) = emit_and_run::real_blog()
@@ -1290,7 +1294,8 @@ fn unresolvable_translations_stay_errors() {
             "  validates :title, presence: true\n\n  def self.dynamic(key)\n    I18n.t(key)\n  end\n\n  def self.blocked\n    I18n.t(\"hello\") { |text| text }\n  end\n",
         )
         .emit(roundhouse::project::BuildTarget::Ruby);
-    assert_eq!(errors.iter().filter(|e| e.contains("I18n not supported")).count(), 2, "{errors:?}");
+    let i18n: Vec<&String> = errors.iter().filter(|e| e.contains("I18n not supported")).collect();
+    assert!(i18n.len() == 1 && i18n[0].contains("a block on the call"), "{errors:?}");
     let (_emitted, errors) = emit_and_run::real_blog()
         .edit(
             "config/environments/test.rb",
