@@ -39,6 +39,8 @@ mod i18n_locales;
 mod i18n_runtime;
 #[path = "emit_and_run/i18n_plural_rules.rs"]
 mod i18n_plural_rules;
+#[path = "emit_and_run/rails_i18n_locales.rs"]
+mod rails_i18n_locales;
 #[path = "support/lambda_signatures.rs"]
 mod lambda_signatures_contract;
 #[path = "emit_and_run/lambda_signatures.rs"]
