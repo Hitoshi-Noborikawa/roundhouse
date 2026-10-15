@@ -205,25 +205,32 @@ module Db
   end
 
   # Rails' SQLite `disable_referential_integrity`: fixtures load and tables empty in any order. Not foreign_keys=OFF alone: that pragma is a no-op inside a transaction, where defer_foreign_keys moves the check to COMMIT instead.
-  def self.without_foreign_keys
-    Db.with_connection do
-      Db.exec("PRAGMA defer_foreign_keys = ON")
-      Db.exec("PRAGMA foreign_keys = OFF")
-      result = nil
-      begin
-        result = yield
-      ensure
-        Db.exec("PRAGMA defer_foreign_keys = OFF")
-        Db.exec("PRAGMA foreign_keys = ON")
-      end
-      result
+  def self.without_foreign_keys(&block)
+    on_lease { foreign_keys_off(&block) }
+  end
+
+  def self.foreign_keys_off
+    Db.exec("PRAGMA defer_foreign_keys = ON")
+    Db.exec("PRAGMA foreign_keys = OFF")
+    result = nil
+    begin
+      result = yield
+    ensure
+      Db.exec("PRAGMA defer_foreign_keys = OFF")
+      Db.exec("PRAGMA foreign_keys = ON")
     end
+    result
+  end
+
+  # Not a lease of its own when the caller holds one: with a pool of one handle, the second checkout waits for the first forever.
+  def self.on_lease(&block)
+    in_lease? ? yield : Db.with_connection(&block)
   end
 
   # Rails' `check_all_foreign_keys_valid!`, which its fixture loader runs after a load (`verify_foreign_keys_for_fixtures`).
   def self.check_foreign_keys!
     tables = []
-    Db.with_connection do
+    on_lease do
       st = Db.prepare("PRAGMA foreign_key_check")
       while Db.step?(st)
         table = Db.column_text(st, 0)
