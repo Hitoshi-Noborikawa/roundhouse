@@ -2738,6 +2738,44 @@ puts "runtime cable endpoint preserved"
         .assert_passes();
 }
 
+/// config.ru serves public/ ahead of the routes, from the file list it
+/// takes at boot: nested files, HEAD, a 304 for a repeated
+/// Last-Modified; a POST to a public path and a path that is not a file
+/// reach the app; `..` reaches nothing outside public/.
+#[test]
+fn public_files_are_served_from_the_boot_listing() {
+    emit_and_run::real_blog()
+        .write("public/robots.txt", "User-agent: *\n")
+        .write("public/nested/deep/note.txt", "deep\n")
+        .run_ruby(r##"
+require "rack"
+require "rack/mock"
+%w[nio websocket/driver].each { |feature| $LOADED_FEATURES << "#{feature}.rb" }
+module NIO; end
+module WebSocket; end
+builder = Rack::Builder.new
+builder.instance_eval(File.read("config.ru"), "config.ru")
+client = Rack::MockRequest.new(builder.to_app)
+check = ->(cond, what) { raise "FAILED: #{what}" unless cond }
+
+r = client.get("/robots.txt")
+check.(r.status == 200 && r.body == "User-agent: *\n", "a public file is served: #{r.status}")
+check.(client.get("/nested/deep/note.txt").body == "deep\n", "a nested public file is served")
+h = client.request("HEAD", "/robots.txt")
+check.(h.status == 200 && h.body.empty?, "HEAD of a public file has no body")
+m = client.get("/robots.txt", "HTTP_IF_MODIFIED_SINCE" => r.headers["last-modified"])
+check.(m.status == 304, "a repeated Last-Modified is a 304: #{m.status}")
+p = client.post("/robots.txt")
+check.(p.status != 405 && p.body != "User-agent: *\n", "a POST to a public path reaches the app: #{p.status}")
+check.(client.get("/nested").status != 200 || client.get("/nested").body != "deep\n", "a directory is not a file")
+check.(client.get("/missing.txt").status == 404, "a path that is no file reaches the app's 404")
+t = client.get("/../Gemfile")
+check.(!t.body.include?("source"), "`..` serves nothing outside public/")
+puts "public files contract passed"
+"##)
+        .assert_passes();
+}
+
 #[test]
 fn finite_concern_class_configuration_runs_without_replaying_rails() {
     for (overlay, assertions) in [
