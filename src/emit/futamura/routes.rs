@@ -126,11 +126,68 @@ fn is_class_side(r: &MethodReceiver) -> bool {
     !matches!(r, MethodReceiver::Instance)
 }
 
+/// Trim whatever root a path was walked from down to its `app/...`
+/// tail, the shape both a diagnostic's resolved location and an ingest
+/// gap's file (the survey's `IngestError::Unsupported.file`, an
+/// absolute path under the surveyed fixture) are compared in.
+fn app_relative(path: &str) -> String {
+    path.rsplit_once("/app/").map(|(_, r)| format!("app/{r}")).unwrap_or_else(|| path.to_string())
+}
+
+/// A span's file the way the ingest-gap ledger's paths are shaped:
+/// `app/...`, trimmed of whatever root the survey ran from. `None` for
+/// a synthesized span (no location at all).
+fn rel_path(lowered: &App, file: u32) -> Option<String> {
+    if file == 0 {
+        return None;
+    }
+    Some(app_relative(&lowered.sources[file as usize - 1].path))
+}
+
+/// Rails' naming convention for the view template an action renders:
+/// `app/views/<dir>/<action>.`, the format and handler extensions
+/// following. Namespaces nest as directories
+/// (`WellKnown::HostMetaController` -> `well_known/host_meta`), unlike
+/// the flattened form `controller_symbol` builds for the route-helper
+/// table and the ledger's own keys.
+fn view_prefix(controller_class: &str, action: &str) -> String {
+    let base = controller_class.strip_suffix("Controller").unwrap_or(controller_class);
+    format!("app/views/{}/{action}.", crate::naming::underscore(base))
+}
+
+/// Does a recorded ingest gap mean this route cannot be trusted? A gap
+/// has no span (survey mode substitutes a nil placeholder and keeps
+/// going instead of failing ingest), so it never reaches `diags` and
+/// the usual blocking filter never sees it — yet it still names a file,
+/// which is either the route's own controller (a class-body macro or
+/// block the ingest never modeled: `serialization_scope`,
+/// `content_security_policy`) or the view template the action renders
+/// by convention (a template engine not ingested: `.css.erb`,
+/// `.xml.ruby`). Either way the lowered app cannot serve what the gap
+/// dropped, so the route it belongs to stays with Rails. Narrow: only
+/// the controller's own file and the action's conventional view path
+/// are checked, not every file a route might transitively reach, so a
+/// gap in an unrelated library class or a partial does not (yet) block
+/// anything here.
+fn gap_blocking<'g>(
+    gaps: &'g [(String, String)],
+    controller_files: Option<&HashSet<String>>,
+    prefix: &str,
+) -> Option<&'g (String, String)> {
+    gaps.iter().find(|(file, _)| {
+        let rel = app_relative(file);
+        controller_files.is_some_and(|fs| fs.contains(&rel)) || rel.starts_with(prefix)
+    })
+}
+
 /// Decide which GET actions the lowered app serves.
 ///
 /// `lowered` is the app after `analyze_and_lower` (what the `ruby`
-/// target emits from); `diags` every diagnostic that emit reported.
-pub fn plan(lowered: &App, diags: &[Diagnostic]) -> RoutePlan {
+/// target emits from); `diags` every diagnostic that emit reported;
+/// `gaps` every recorded ingest gap, as `(file, message)` — these carry
+/// no span and never become a diagnostic, so they are attributed here
+/// instead of through the usual blocking filter below.
+pub fn plan(lowered: &App, diags: &[Diagnostic], gaps: &[(String, String)]) -> RoutePlan {
     // Re-lowering pushes the `ruby` emit's refusals into whatever
     // diagnostic scope is active, which here is futamura's own. They are
     // already in `diags` (`project::futamura_whole_route`); collected
@@ -147,6 +204,17 @@ pub fn plan(lowered: &App, diags: &[Diagnostic]) -> RoutePlan {
     // re-synthesized header.
     let controllers: HashSet<String> = lowered.controllers.iter().map(|c| c.name.0.as_str().to_string()).collect();
     let ranges = method_ranges(&controllers, &lcs);
+    // Every rel-path file a controller's own methods are written in —
+    // almost always one file, but a controller can reopen across files
+    // the way a reopened model does.
+    let mut controller_files: HashMap<String, HashSet<String>> = HashMap::new();
+    for ((class, _, _), rs) in &ranges {
+        if !controllers.contains(class) {
+            continue;
+        }
+        let files = controller_files.entry(class.clone()).or_default();
+        files.extend(rs.keys().filter_map(|&f| rel_path(lowered, f)));
+    }
     let exact = expression_owners(&controllers, &lcs);
     let owners = |d: &Diagnostic| -> Vec<&MethodKey> {
         match exact.get(&(d.span.file.0, d.span.start)) {
@@ -168,7 +236,7 @@ pub fn plan(lowered: &App, diags: &[Diagnostic]) -> RoutePlan {
         }
         let source = &lowered.sources[d.span.file.0 as usize - 1];
         let (line, _) = source.line_col(d.span.start);
-        let rel = source.path.rsplit_once("/app/").map(|(_, r)| format!("app/{r}")).unwrap_or_else(|| source.path.clone());
+        let rel = rel_path(lowered, d.span.file.0).unwrap_or_else(|| source.path.clone());
         format!("{rel}:{line}")
     };
 
@@ -219,6 +287,14 @@ pub fn plan(lowered: &App, diags: &[Diagnostic]) -> RoutePlan {
         let controller = first.controller.0.as_str();
         if !index.classes.contains_key(controller) {
             out.residue.push(format!("{label}: {controller} is not lowered"));
+            continue;
+        }
+        if let Some((file, message)) = gap_blocking(
+            gaps,
+            controller_files.get(controller),
+            &view_prefix(controller, first.action.as_str()),
+        ) {
+            out.residue.push(format!("{label}: ingest gap in {file}: {message}"));
             continue;
         }
         let reached = reach(&index, &mut callees, controller, first.action.as_str());

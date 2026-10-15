@@ -1766,7 +1766,11 @@ pub fn futamura_target_files(
 /// lowers it, with every diagnostic that emit would report. Errors do
 /// not stop it: under this target an error keeps the routes that reach
 /// it on Rails (`emit::futamura::routes`).
-pub fn futamura_whole_route(ingested: &App, fixture: &Path) -> Result<emit::futamura::WholeRoute, String> {
+pub fn futamura_whole_route(
+    ingested: &App,
+    fixture: &Path,
+    gaps: &[crate::ingest::IngestError],
+) -> Result<emit::futamura::WholeRoute, String> {
     let mut lowered = ingested.clone();
     let mut diags = crate::session::analyze_and_lower(&mut lowered);
     diags.extend(crate::analyze::diagnose(&lowered));
@@ -1775,7 +1779,20 @@ pub fn futamura_whole_route(ingested: &App, fixture: &Path) -> Result<emit::futa
     let (files, emit_diags) =
         emit::diagnostics::scope(|| target_files(&lowered, fixture, BuildTarget::Ruby));
     diags.extend(emit_diags);
-    Ok(emit::futamura::WholeRoute { lowered, files: files?, diags })
+    // Ingest gaps aren't diagnostics (survey mode substitutes a nil
+    // placeholder and keeps going), so they never reach `diags` above;
+    // carried separately for `routes::plan` to attribute to the routes
+    // whose controller or view they belong to.
+    let gaps = gaps
+        .iter()
+        .filter_map(|g| match g {
+            crate::ingest::IngestError::Unsupported { file, message } => {
+                Some((file.clone(), message.clone()))
+            }
+            crate::ingest::IngestError::Io(_) | crate::ingest::IngestError::Parse { .. } => None,
+        })
+        .collect();
+    Ok(emit::futamura::WholeRoute { lowered, files: files?, diags, gaps })
 }
 
 pub fn target_files(

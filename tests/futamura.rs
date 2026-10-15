@@ -263,6 +263,48 @@ end
     fs::remove_dir_all(&out).unwrap();
 }
 
+/// A view template format the ingester does not model (here `.css.erb`
+/// — `erb` is only ingested for `html` and a short allow-list of other
+/// text formats) never becomes a `View`, so the action's `render` leaves
+/// no trace the planner can walk into: nothing reaches an error, and the
+/// route used to clear. The ingest gap this leaves behind has no span,
+/// so it is attributed by file: the gap's view template matches
+/// `gadget_styles#show`'s conventional path
+/// (`app/views/gadget_styles/show.`), which blocks the route even
+/// though its (ingested) code is clean.
+#[test]
+fn ingest_gaps_block_the_routes_whose_view_they_belong_to() {
+    let src = scratch("gap-src");
+    let out = scratch("gap-out");
+    write(&src, "Gemfile", b"source \"https://rubygems.org\"\ngem \"rails\"\n");
+    write(&src, "config/routes.rb", b"Rails.application.routes.draw do\n  get \"gadget.css\", to: \"gadget_styles#show\"\nend\n");
+    write(&src, "app/controllers/application_controller.rb", b"class ApplicationController < ActionController::Base\nend\n");
+    write(&src, "app/controllers/gadget_styles_controller.rb", br#"class GadgetStylesController < ApplicationController
+  def show
+    @color = "teal"
+    render content_type: "text/css"
+  end
+end
+"#);
+    write(&src, "app/views/gadget_styles/show.css.erb", b".gadget { color: <%= @color %>; }\n");
+
+    let run = Command::new(env!("CARGO_BIN_EXE_roundhouse"))
+        .args(["--target", "futamura", "--survey", "-o"])
+        .arg(&out)
+        .arg(&src)
+        .env("ROUNDHOUSE_FUTAMURA_LEDGER", "1")
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&run.stderr);
+    assert!(run.status.success(), "{stderr}");
+    assert!(stderr.contains("whole-route: 0 GET action(s) served by the lowered app; 1 left to Rails"), "{stderr}");
+    let residue = stderr.lines().find(|l| l.contains("gadget_styles#show")).unwrap_or_else(|| panic!("{stderr}"));
+    assert!(residue.contains("ingest gap") && residue.contains("show.css.erb"), "{residue}");
+
+    fs::remove_dir_all(&src).unwrap();
+    fs::remove_dir_all(&out).unwrap();
+}
+
 /// A minimal app whose `ruby` emit refuses one association (a `through:`
 /// hop keyed on a non-id column, Mastodon's `Status.reblogged_by_accounts`).
 fn app_with_a_ruby_refusal(src: &Path) {
