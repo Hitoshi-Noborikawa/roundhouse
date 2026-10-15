@@ -1840,10 +1840,21 @@ end
             }
         }
     }
-    let gem_files = match &app.gem_lock {
+    let (mut gem_files, missing_gems) = match &app.gem_lock {
         Some(lock) => crate::i18n::gems::gem_locale_files(vfs, dir, lock, &path_gem_dirs(vfs, dir)),
-        None => Vec::new(),
+        None => (Vec::new(), Vec::new()),
     };
+    let application_rb = vfs.read_to_string(&dir.join("config/application.rb")).unwrap_or_default();
+    let configured = application_rb.lines().map(str::trim).filter(|l| !l.starts_with('#')).find_map(available_locales_line).and_then(Result::ok);
+    gem_files.retain(|(path, _)| crate::i18n::rails_i18n::loads(path, &application_rb, configured.as_deref()));
+    for gem in missing_gems.iter().filter(|g| !g.starts_with("rails-i18n ") || crate::i18n::rails_i18n::enables(&application_rb, "locale")) {
+        warn_i18n(format!("{gem} is in Gemfile.lock but installed in no gem root (BUNDLE_PATH, GEM_HOME, GEM_PATH): its locale files are not read, so a key only it defines answers as a missing translation"));
+    }
+    if let Some(version) = app.gem_lock.as_ref().and_then(|l| l.version_of("rails-i18n")) {
+        if version != crate::i18n::rails_i18n::RULES_VERSION && crate::i18n::rails_i18n::enables(&application_rb, "pluralization") {
+            warn_i18n(format!("rails-i18n {version}: plural rules are read as rails-i18n {}'s, which may differ from this version's", crate::i18n::rails_i18n::RULES_VERSION));
+        }
+    }
     let (catalog, problems) = crate::i18n::Catalog::load_with_gems(&default_locale(vfs, dir), &gem_files, &mut files);
     for (file, problem) in problems {
         survey::record(&IngestError::Unsupported { file, message: format!("locale file not loaded: {problem}") });
@@ -10160,6 +10171,13 @@ pub(super) fn fallbacks_line(line: &str, default: &str) -> Option<Result<Option<
             .map(Some)
             .ok_or_else(|| format!("`fallbacks = {value}` is not a list of locales")),
     })
+}
+
+/// A warning about what the app's i18n reads from its gems.
+fn warn_i18n(detail: String) {
+    let mut d = crate::diagnostic::Diagnostic::unsupported(crate::span::Span::synthetic(), None, "I18n", detail);
+    d.severity = crate::diagnostic::Severity::Warning;
+    super::prism::push(d);
 }
 
 /// Each locale's own plural rule: rails-i18n adds its pluralization

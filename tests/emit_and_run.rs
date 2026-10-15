@@ -33,12 +33,22 @@ mod time_zone_default;
 mod view_presence_url_encode;
 #[path = "emit_and_run/controller_translate.rs"]
 mod controller_translate;
+#[path = "emit_and_run/job_rest_params.rs"]
+mod job_rest_params;
+#[path = "emit_and_run/regexp_constants.rs"]
+mod regexp_constants;
+#[path = "emit_and_run/upsert.rs"]
+mod upsert;
+#[path = "emit_and_run/controller_sibling_classes.rs"]
+mod controller_sibling_classes;
 #[path = "emit_and_run/i18n_locales.rs"]
 mod i18n_locales;
 #[path = "emit_and_run/i18n_runtime.rs"]
 mod i18n_runtime;
 #[path = "emit_and_run/i18n_plural_rules.rs"]
 mod i18n_plural_rules;
+#[path = "emit_and_run/rails_i18n_locales.rs"]
+mod rails_i18n_locales;
 #[path = "support/lambda_signatures.rs"]
 mod lambda_signatures_contract;
 #[path = "emit_and_run/lambda_signatures.rs"]

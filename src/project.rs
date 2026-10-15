@@ -1049,6 +1049,29 @@ fn report_unemitted_library_classes(app: &App, target: BuildTarget) {
     }
 }
 
+/// `class LoginFailedError < StandardError; end` beside a controller in
+/// its file: the Ruby emit re-declares it ahead of the controller, the
+/// other targets declare nothing for it.
+fn report_controller_sibling_classes(app: &App, target: BuildTarget) {
+    if matches!(target, BuildTarget::Blog | BuildTarget::Ruby | BuildTarget::Jruby | BuildTarget::Spinel) {
+        return;
+    }
+    for controller in &app.controllers {
+        for sibling in &controller.sibling_classes {
+            emit::diagnostics::report_unsupported(
+                sibling.parent_span,
+                target.as_str(),
+                "class",
+                format!(
+                    "`{}`, declared beside `{}` in its file, is not emitted for this target (the Ruby emit carries it)",
+                    sibling.name.as_str(),
+                    controller.name.0.as_str()
+                ),
+            );
+        }
+    }
+}
+
 /// True when every ancestor of `lc` is another app library class (or
 /// explicit `Object`), so the chain ends at `Object` rather than a
 /// framework / gem / stdlib base. Explicit `Object` is treated as the
@@ -1908,6 +1931,7 @@ fn target_files_inner(
     reject_unsupported_forwarded_procs(app, target)?;
     report_unsupported_keys(app, target);
     report_unemitted_library_classes(app, target);
+    report_controller_sibling_classes(app, target);
     report_sqlite_index_predicates(app, target);
     report_native_ruby_syntax(app, target);
     report_self_bindings(app, target);
@@ -5497,7 +5521,7 @@ fn unavailable_class_module_construct(name: &str, target: &str) -> Option<&'stat
         | "Rails::HTML5::SafeListSanitizer" | "JSON" | "JSON::ParserError"
         | "Struct" | "Mutex" | "Queue" | "SizedQueue"
         | "Thread::Queue" | "Thread::SizedQueue" | "Thread::Mutex"
-        | "ThreadError" | "ClosedQueueError" | "Comparable" | "Enumerable"
+        | "ThreadError" | "ClosedQueueError" | "RegexpError" | "Comparable" | "Enumerable"
         | "JSON::GeneratorError"
         // Ported for spinel (`runtime/ruby/rack_utils.rb`), the gem's own on
         // the ruby family; no strict target loads either.
@@ -5713,6 +5737,43 @@ fn report_unsupported_bundled_constants(app: &App, target: BuildTarget) {
                     format!("ActiveSupport::Duration is the Ruby-family runtime's value class; the {target} runtime ships none"),
                 );
             }
+        }
+        if !matches!(target, "jruby" | "spinel")
+            && let crate::expr::ExprNode::Const { path } = &*expr.node
+            && let ["Regexp", flag @ ("IGNORECASE" | "EXTENDED" | "MULTILINE")] = path.iter().map(|s| s.as_str()).skip_while(|s| s.is_empty()).collect::<Vec<_>>()[..]
+        {
+            emit::diagnostics::report_unsupported(
+                expr.span,
+                target,
+                "bundled_constant",
+                format!("Regexp::{flag} is Ruby's option bit, which the {target} emit has no Regexp to read"),
+            );
+        }
+        // `runtime/ruby/active_record/connection.rb` carries `upsert_all`; no strict runtime transpiles it.
+        if !matches!(target, "jruby" | "spinel")
+            && let crate::expr::ExprNode::Send { recv: Some(_), method, .. } = &*expr.node
+            && matches!(method.as_str(), "upsert" | "upsert_all")
+            && expr.ty == Some(crate::ty::Ty::Int)
+        {
+            emit::diagnostics::report_unsupported(
+                expr.span,
+                target,
+                "upsert",
+                format!("`{}` is the Ruby-family runtime's; the {target} runtime ships none", method.as_str()),
+            );
+        }
+        // `translate_site` / `translate_runtime` are reported with their call (`report_i18n_table_sites`).
+        if !matches!(target, "jruby" | "spinel")
+            && let crate::expr::ExprNode::Send { recv: Some(recv), method, .. } = &*expr.node
+            && matches!(&*recv.node, crate::expr::ExprNode::Const { path } if path.iter().map(|s| s.as_str()).skip_while(|s| s.is_empty()).eq(["I18n"]))
+            && !matches!(method.as_str(), "translate_site" | "translate_runtime")
+        {
+            emit::diagnostics::report_unsupported(
+                expr.span,
+                target,
+                "I18n",
+                format!("`I18n.{}` is the Ruby-family runtime's (the locale in effect, switching it, or a missing translation's answer); the {target} runtime ships none", method.as_str()),
+            );
         }
         if matches!(&*expr.node, crate::expr::ExprNode::Const { .. }) {
             if let Some(crate::ty::Ty::Class { id, .. }) = &expr.ty {
