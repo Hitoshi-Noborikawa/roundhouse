@@ -1633,7 +1633,7 @@ fn emit_bool_op(op: BoolOpKind, left: &Expr, right: &Expr, e: &Expr) -> String {
     let l = emit_expr(left);
     // Swift does not narrow across `||`: past `x == nil`, the right operand reads `x!`.
     let r = match (op, nil_checked_local(left)) {
-        (BoolOpKind::Or, Some(n)) => group_try_rhs(&with_narrowed_local(&n, right)),
+        (BoolOpKind::Or, Some(n)) if !rebinds(right, &n) => group_try_rhs(&with_narrowed_local(&n, right)),
         _ => group_try_rhs(&emit_expr(right)),
     };
     match op {
@@ -2063,6 +2063,17 @@ fn reassigned_nil_guard(stmt: &Expr) -> Option<(String, String)> {
     };
     let line = format!("if {n} == nil{more} {{\n{}\n}}", indent(&emit_expr(then_branch)));
     Some((n, line))
+}
+
+/// Does `e` bind the local `name` again (a block parameter, an assignment)? A read of that one is not the checked local.
+fn rebinds(e: &Expr, name: &str) -> bool {
+    let binds = match &*e.node {
+        ExprNode::Lambda { params, rest_param, .. } => {
+            params.iter().chain(rest_param.iter()).any(|p| camel(p.as_str()) == name)
+        }
+        _ => false,
+    };
+    binds || writes_local(e, name) || children(e).into_iter().any(|c| rebinds(c, name))
 }
 
 /// The optional local `x` of an `x.nil?` check.
@@ -3289,6 +3300,29 @@ mod nil_or_narrowing_tests {
         let out = emit_expr(&or(call(optional_str("vary"), "nil?"), call(stripped, "empty?")));
         assert!(out.contains("vary!.trimmingCharacters"), "{out}");
         assert!(out.starts_with("(vary == nil) ||"), "{out}");
+    }
+
+    #[test]
+    fn a_block_parameter_of_the_same_name_is_not_the_checked_local() {
+        let mut lambda = Expr::new(
+            Span::synthetic(),
+            ExprNode::Lambda {
+                params: vec![Symbol::from("vary")],
+                rest_param: None,
+                extra_params: vec![],
+                block_param: None,
+                body: call(optional_str("vary"), "empty?"),
+                block_style: Default::default(),
+            },
+        );
+        lambda.ty = Some(Ty::Bool);
+        let mut any = Expr::new(
+            Span::synthetic(),
+            ExprNode::Send { recv: Some(optional_str("list")), method: Symbol::from("any?"), args: vec![], block: Some(lambda), parenthesized: false },
+        );
+        any.ty = Some(Ty::Bool);
+        let out = emit_expr(&or(call(optional_str("vary"), "nil?"), any));
+        assert!(!out.contains("vary!"), "{out}");
     }
 
     #[test]
