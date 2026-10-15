@@ -4268,7 +4268,8 @@ pub(crate) fn apply_layout_lowering(lcs: &mut [LibraryClass], app: &App) {
         crate::span::Span::synthetic(),
         ExprNode::Lit { value: crate::expr::Literal::Nil },
     );
-    if crate::lower::view_to_library::layout_wrap_expr(app, probe).is_none() {
+    let closures = crate::lower::view_to_library::view_ivar_closures(&app.views, &app.controllers);
+    if crate::lower::view_to_library::layout_wrap_expr_with(app, &closures, probe).is_none() {
         return;
     }
     for lc in lcs.iter_mut() {
@@ -4289,13 +4290,17 @@ pub(crate) fn apply_layout_lowering(lcs: &mut [LibraryClass], app: &App) {
             if decl.as_ref().is_some_and(|d| d.suppresses(&m.name)) {
                 continue;
             }
-            rewrite_layout_wrap(&mut m.body, app);
+            rewrite_layout_wrap(&mut m.body, app, &closures);
         }
     }
 }
 
-fn rewrite_layout_wrap(expr: &mut Expr, app: &App) {
-    expr.node.for_each_child_mut(&mut |c| rewrite_layout_wrap(c, app));
+fn rewrite_layout_wrap(
+    expr: &mut Expr,
+    app: &App,
+    closures: &std::collections::HashMap<crate::lower::view_to_library::ViewKey, Vec<crate::ident::Symbol>>,
+) {
+    expr.node.for_each_child_mut(&mut |c| rewrite_layout_wrap(c, app, closures));
     // Post-lowering action bodies carry `render` as a SelfRef-receiver
     // Send (`self.render(...)` shape); accept the bare form too.
     let ExprNode::Send { recv, method, args, .. } = &mut *expr.node else {
@@ -4388,7 +4393,7 @@ fn rewrite_layout_wrap(expr: &mut Expr, app: &App) {
         return;
     }
     let inner = args[0].clone();
-    if let Some(wrapped) = crate::lower::view_to_library::layout_wrap_expr(app, inner) {
+    if let Some(wrapped) = crate::lower::view_to_library::layout_wrap_expr_with(app, closures, inner) {
         args[0] = wrapped;
     }
 }

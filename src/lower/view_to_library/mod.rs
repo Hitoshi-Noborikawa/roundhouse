@@ -2741,12 +2741,20 @@ fn view_key_of(v: &View) -> Option<ViewKey> {
 /// generic dispatch previously wrapped layouts body-only; a layout
 /// reading @user had no way to receive it there.)
 pub fn layout_wrap_expr(app: &crate::App, inner: Expr) -> Option<Expr> {
+    layout_wrap_expr_with(app, &view_ivar_closures(&app.views, &app.controllers), inner)
+}
+
+/// `layout_wrap_expr` over closures the caller computed once for every render it wraps.
+pub(crate) fn layout_wrap_expr_with(
+    app: &crate::App,
+    closures: &std::collections::HashMap<ViewKey, Vec<Symbol>>,
+    inner: Expr,
+) -> Option<Expr> {
     let key: ViewKey = ("Layouts".to_string(), "application".to_string());
     let layout = app
         .views
         .iter()
         .find(|v| v.format.as_str() == "html" && view_key_of(v).as_ref() == Some(&key))?;
-    let closures = view_ivar_closures(&app.views, &app.controllers);
     let ivars = closures.get(&key).cloned().unwrap_or_default();
     let span = inner.span;
     let ivar = |name: &Symbol| Expr::new(span, ExprNode::Ivar { name: name.clone() });
