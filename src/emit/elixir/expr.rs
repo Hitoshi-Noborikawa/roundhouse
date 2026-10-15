@@ -1547,6 +1547,12 @@ fn emit_send(recv: Option<&Expr>, method: &str, args: &[Expr]) -> String {
                 _ if matches!(r.ty.as_ref(), Some(crate::ty::Ty::Float)) => {
                     format!(":math.fmod({ls}, {rs})")
                 }
+                // Not `rem/2` for two Integers: it takes the dividend's sign, where Ruby's takes the divisor's.
+                _ if matches!(r.ty.as_ref(), Some(crate::ty::Ty::Int))
+                    && matches!(arg.ty.as_ref(), Some(crate::ty::Ty::Int)) =>
+                {
+                    format!("Integer.mod({ls}, {rs})")
+                }
                 _ => format!("rem({ls}, {rs})"),
             };
         }
