@@ -316,27 +316,28 @@ fn build_library_class(
     // (a partial whose callers name its local `widget` reads that,
     // and the model is the one the name gives, as the param type).
     let params: Vec<&str> = method.params.iter().map(|p| p.name.as_str()).collect();
-    let (arg_name, arg_columns) = if arg_name.is_empty() {
-        (arg_name, std::collections::HashMap::new())
+    let (arg_name, arg_model) = if arg_name.is_empty() {
+        (arg_name, None)
     } else if !is_partial || params.contains(&arg_name.as_str()) {
-        let columns = columns_for_arg(&arg_name, dir, is_partial, stem, app);
-        (arg_name, columns)
+        let model = model_for_arg(dir, is_partial, stem, app);
+        (arg_name, model)
     } else {
         params
             .iter()
             .find_map(|p| match crate::lower::view_to_library::ivar_ty(p, &known_models) {
-                crate::ty::Ty::Class { id, .. } => {
-                    Some((p.to_string(), columns_for_model(id.0.as_str(), app)))
-                }
+                crate::ty::Ty::Class { id, .. } => Some((p.to_string(), Some(id.0.as_str().to_string()))),
                 _ => None,
             })
             .unwrap_or_default()
     };
+    let arg_columns = arg_model.as_deref().map(|m| columns_for_model(m, app)).unwrap_or_default();
+    let arg_attributes = arg_model.as_deref().and_then(|m| attribute_names(m, app));
     let ctx = Ctx {
         resource_dir: dir.to_string(),
         accumulator: "io".to_string(),
         arg_name: arg_name.clone(),
         arg_columns,
+        arg_attributes,
         direct_helpers: app
             .routes
             .direct_helpers
@@ -602,6 +603,11 @@ struct Ctx {
     /// temporal columns through their storage text (see
     /// `temporal_column_json`) rather than the generic `encode_value`.
     arg_columns: std::collections::HashMap<Symbol, crate::schema::ColumnType>,
+    /// The keys Rails' `attributes` answers for the record `arg_name`
+    /// names, in order: its model's table columns. `None` when the arg
+    /// has no such model, or the model declares an attribute its table
+    /// lacks (the attribute API), which `attributes` would also hold.
+    arg_attributes: Option<Vec<String>>,
     /// Names declared by `direct :name do |…| … end`, without the
     /// `_path`/`_url` suffix. A direct helper's block parameter is
     /// whatever the CALLER hands it — campfire's `direct
@@ -1011,6 +1017,16 @@ fn emit_pairs(
     mut sep: Sep,
 ) -> Sep {
     for (stmt, src) in classified.iter().zip(raw_stmts.iter()) {
+        // `json.merge!(record.attributes…)` proved sound: the pairs
+        // `extract!` writes for the same attributes.
+        if let JbStmt::Merge { value } = stmt {
+            if let Some((obj, attrs)) = attributes_merge(value, ctx) {
+                if ctx.sound_merges.borrow().contains(&(*src as *const Expr as usize)) {
+                    sep = emit_pairs(&[JbStmt::Extract { obj, attrs }], &[*src], ctx, out, sep);
+                    continue;
+                }
+            }
+        }
         // Synthesis choke point: everything pushed for this DSL
         // statement (key/comma appends, encode_value calls) attributes
         // back to it. The `{` / `}` wrappers belong to the template as
@@ -1307,6 +1323,59 @@ fn emit_merge(value: &Expr, ctx: &Ctx, out: &mut Vec<Expr>, mut sep: Sep) -> Sep
     if sep == Sep::After { Sep::After } else { Sep::Unknown }
 }
 
+/// `json.merge!(record.attributes)`, narrowed by any chain of
+/// `except(...)` / `slice(...)` with literal keys: the record and the
+/// attributes the merge writes, in the order Rails' Hash answers them.
+/// `attributes` is the record's columns under String keys, in column
+/// order (an enum column under its label), so the merge is the object
+/// `json.extract!(record, *those)` builds. Only for the template's own
+/// record, whose model's columns are known (`Ctx::arg_attributes`).
+///
+/// The Hash is String-keyed: a Symbol passed to `except` / `slice`
+/// names no key, as on Rails' plain Hash. `slice` answers in its
+/// arguments' order.
+fn attributes_merge<'a>(value: &'a Expr, ctx: &Ctx) -> Option<(&'a Expr, Vec<Symbol>)> {
+    let mut ops: Vec<(bool, Vec<Option<String>>)> = Vec::new();
+    let mut cur = value;
+    let record = loop {
+        let ExprNode::Send { recv: Some(recv), method, args, block: None, .. } = &*cur.node else { return None };
+        match method.as_str() {
+            "except" | "slice" => {
+                let keys = args
+                    .iter()
+                    .map(|a| match &*a.node {
+                        ExprNode::Lit { value: Literal::Sym { .. } } => Some(None),
+                        _ => string_literal(a).map(Some),
+                    })
+                    .collect::<Option<Vec<_>>>()?;
+                ops.push((method.as_str() == "slice", keys));
+                cur = recv;
+            }
+            "attributes" if args.is_empty() => break recv,
+            _ => return None,
+        }
+    };
+    if !obj_is_named_local(record, &ctx.arg_name) {
+        return None;
+    }
+    let mut keys: Vec<String> = ctx.arg_attributes.clone()?;
+    for (slice, names) in ops.into_iter().rev() {
+        let names: Vec<String> = names.into_iter().flatten().collect();
+        keys = if slice {
+            let mut picked: Vec<String> = Vec::new();
+            for n in names {
+                if keys.contains(&n) && !picked.contains(&n) {
+                    picked.push(n);
+                }
+            }
+            picked
+        } else {
+            keys.into_iter().filter(|k| !names.contains(k)).collect()
+        };
+    }
+    Some((record, keys.into_iter().map(Symbol::from).collect()))
+}
+
 /// Whether a `json.merge!` statement is lowered: a literal Hash its
 /// object proved sound (`mark_sound_merges`), or any other value whose
 /// type is a Hash. Anything else (an Array, which Jbuilder renders as
@@ -1324,11 +1393,11 @@ fn merge_lowers(stmt: &Expr, value: &Expr, ctx: &Ctx) -> bool {
 /// all known: a pair's key, `extract!`'s attributes, a literal merge's
 /// keys, both branches of a condition. `None` for a partial, a block
 /// on another call, a merge of a non-literal, or anything unknown.
-fn object_keys(stmt: &JbStmt<'_>) -> Option<Vec<String>> {
+fn object_keys(stmt: &JbStmt<'_>, ctx: &Ctx) -> Option<Vec<String>> {
     let branch = |body: &Expr| -> Option<Vec<String>> {
         let mut keys = Vec::new();
         for s in branch_stmts(body) {
-            keys.extend(object_keys(&classify(s))?);
+            keys.extend(object_keys(&classify(s), ctx)?);
         }
         Some(keys)
     };
@@ -1338,7 +1407,10 @@ fn object_keys(stmt: &JbStmt<'_>) -> Option<Vec<String>> {
         | JbStmt::PairPartial { key, .. }
         | JbStmt::Nested { key, .. }
         | JbStmt::PairBlock { key, .. } => Some(vec![key.as_str().to_string()]),
-        JbStmt::Merge { value } => literal_merge_pairs(value).map(|pairs| pairs.into_iter().map(|(k, _)| k).collect()),
+        JbStmt::Merge { value } => match literal_merge_pairs(value) {
+            Some(pairs) => Some(pairs.into_iter().map(|(k, _)| k).collect()),
+            None => attributes_merge(value, ctx).map(|(_, attrs)| attrs.iter().map(|a| a.as_str().to_string()).collect()),
+        },
         JbStmt::Local => Some(Vec::new()),
         JbStmt::Cond { then_branch, else_branch, .. } => {
             let mut keys = branch(then_branch)?;
@@ -1357,16 +1429,19 @@ fn object_keys(stmt: &JbStmt<'_>) -> Option<Vec<String>> {
 fn mark_sound_merges(classified: &[JbStmt<'_>], raw_stmts: &[&Expr], ctx: &Ctx) {
     for (i, stmt) in classified.iter().enumerate() {
         let JbStmt::Merge { value } = stmt else { continue };
-        let Some(own) = literal_merge_pairs(value).map(|pairs| pairs.into_iter().map(|(k, _)| k).collect::<Vec<_>>())
-        else {
-            continue;
+        let own = match literal_merge_pairs(value) {
+            Some(pairs) => pairs.into_iter().map(|(k, _)| k).collect::<Vec<_>>(),
+            None => match attributes_merge(value, ctx) {
+                Some((_, attrs)) => attrs.iter().map(|a| a.as_str().to_string()).collect(),
+                None => continue,
+            },
         };
         let distinct: std::collections::HashSet<&String> = own.iter().collect();
         if distinct.len() != own.len() {
             continue;
         }
         let mut others: Vec<String> = Vec::new();
-        let known = classified.iter().enumerate().filter(|(j, _)| *j != i).all(|(_, c)| match object_keys(c) {
+        let known = classified.iter().enumerate().filter(|(j, _)| *j != i).all(|(_, c)| match object_keys(c, ctx) {
             Some(keys) => {
                 others.extend(keys);
                 true
@@ -2960,46 +3035,56 @@ fn obj_is_named_local(obj: &Expr, name: &str) -> bool {
     }
 }
 
-/// Build the `{column_name → ColumnType}` map for the template's
-/// main positional arg, when that arg resolves to a known model
-/// backed by a schema table. Returns an empty map for layouts,
-/// index views (arg is a collection, not a single record), and any
-/// arg we can't tie back to a schema row.
-fn columns_for_arg(
-    arg_name: &str,
-    dir: &str,
-    is_partial: bool,
-    stem: &str,
-    app: &App,
-) -> std::collections::HashMap<Symbol, crate::schema::ColumnType> {
-    let mut out: std::collections::HashMap<Symbol, crate::schema::ColumnType> =
-        std::collections::HashMap::new();
+/// The model the template's main positional arg is a record of, when
+/// it resolves to a known model backed by a schema table. `None` for
+/// layouts, index views (the arg is a collection, not a single record),
+/// and any arg we can't tie back to a schema row.
+fn model_for_arg(dir: &str, is_partial: bool, stem: &str, app: &App) -> Option<String> {
     // Index views' arg is the plural collection (`articles`), not a
     // single record. Per-row column lookups don't apply — the
     // extract! inside the partial handles those instead.
-    if !is_partial && stem == "index" {
-        return out;
+    if (!is_partial && stem == "index") || dir == "layouts" {
+        return None;
     }
-    if dir == "layouts" {
-        return out;
-    }
-    let model_class = crate::naming::singularize_camelize(dir);
-    out = columns_for_model(&model_class, app);
+    let backed = |m: String| (!columns_for_model(&m, app).is_empty()).then_some(m);
     // A namespaced view directory (`api/v1/widgets`) names its record by
     // the last segment, as Rails' partial lookup does: the namespace is
     // the controller's. A namespaced model (`admin/widgets` for
     // `Admin::Widget`) is tried first.
-    if out.is_empty() {
-        if let Some((_, last)) = dir.rsplit_once('/') {
-            out = columns_for_model(&crate::naming::classify_path(dir), app);
-            if out.is_empty() {
-                out = columns_for_model(&crate::naming::singularize_camelize(last), app);
+    backed(crate::naming::singularize_camelize(dir)).or_else(|| {
+        let (_, last) = dir.rsplit_once('/')?;
+        backed(crate::naming::classify_path(dir)).or_else(|| backed(crate::naming::singularize_camelize(last)))
+    })
+}
+
+/// Rails' `attributes` keys for `model_class`, in order: its table's
+/// columns. `None` when the model declares an attribute the table lacks
+/// (the attribute API adds it to `attributes`), or changes which columns
+/// are attributes (`ignored_columns`, which Rails leaves out of
+/// `attributes`, or `inheritance_column`): the same declarations
+/// `as_json_record` does not read.
+fn attribute_names(model_class: &str, app: &App) -> Option<Vec<String>> {
+    use crate::lower::as_json_record::{ATTRIBUTE_MACROS, COLUMN_SETTERS};
+    let model = app.models.iter().find(|m| m.name.0.as_str() == model_class)?;
+    let changes_columns = model.body.iter().any(|item| match item {
+        crate::dialect::ModelBodyItem::Unknown { expr, .. } => match &*expr.node {
+            ExprNode::Send { recv, method, .. } => {
+                COLUMN_SETTERS.contains(&method.as_str())
+                    || (recv.is_none() && ATTRIBUTE_MACROS.contains(&method.as_str()))
             }
-        }
+            _ => false,
+        },
+        _ => false,
+    });
+    if changes_columns {
+        return None;
     }
-    let _ = arg_name; // arg_name is informational; the dir → model
-                     // resolution above is the load-bearing path.
-    out
+    let table = app.schema.tables.get(&model.table.0)?;
+    let columns: Vec<String> = table.columns.iter().map(|c| c.name.as_str().to_string()).collect();
+    if model.attributes.fields.keys().any(|k| !columns.iter().any(|c| c == k.as_str())) {
+        return None;
+    }
+    Some(columns)
 }
 
 /// The `{column_name → ColumnType}` map of `model_class`'s table; empty
