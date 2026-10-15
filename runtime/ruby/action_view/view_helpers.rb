@@ -408,10 +408,18 @@ module ActionView
         s.include?("}")
     end
 
-    def self.truncate(s, length: 30, omission: "...")
+    # `separator:` cuts at the last occurrence of `separator` at or
+    # before the omission-adjusted cutoff, so a truncated string doesn't
+    # split mid-word — ActiveSupport's `String#truncate`
+    # (active_support/core_ext/string/filters.rb) algorithm, read off
+    # the installed gem and confirmed against Rails 8.1.4's own output
+    # (rubys/roundhouse#812). `omission:` alone (no separator) is
+    # unchanged from before.
+    def self.truncate(s, length: 30, omission: "...", separator: nil)
       return s if s.length <= length
       cutoff = length - omission.length
-      cutoff = 0 if cutoff < 0
+      return omission if cutoff <= 0
+      cutoff = s.rindex(separator, cutoff) || cutoff if separator
       "#{s[0, cutoff]}#{omission}"
     end
 
