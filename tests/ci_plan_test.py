@@ -32,7 +32,8 @@ def git_repository():
     ):
         env.pop(name, None)
     with tempfile.TemporaryDirectory() as directory:
-        root = Path(directory)
+        # Resolved: macOS's temp dir is a symlink, and git reports the real path.
+        root = Path(directory).resolve()
 
         def git(*args):
             return (
