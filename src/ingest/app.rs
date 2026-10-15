@@ -2060,6 +2060,9 @@ end
     // After the splice too: the inverse `has_many …, as: :owner` may be
     // declared in a concern's `included do`.
     resolve_polymorphic_targets(&mut app);
+    // After the splice too: the source association may come from a
+    // concern on the through model.
+    resolve_through_targets(&mut app);
     // `allow_browser` becomes a filter plus the method it runs, on the
     // concern (before the splice carries both to the includer) or on
     // the controller that called it directly.
@@ -5901,6 +5904,71 @@ fn resolve_polymorphic_targets(app: &mut App) {
                 literal_sets.iter().find(|(n, _)| n == name)
             {
                 *polymorphic_targets = found.clone();
+            }
+        }
+    }
+}
+
+/// Set the target of each `has_many …, through:` association that no
+/// `class_name:` or `source_type:` names to the class of its source
+/// association, as Rails' `ThroughReflection#derive_class_name` does.
+/// `has_many :article_remarks, through: :articles, source: :remarks`,
+/// with `Article` `has_many :remarks, class_name: "Comment"`, reads
+/// `Comment` rows. Ingest guessed `Remark` from the name.
+///
+/// [`Model::through_source`](crate::dialect::Model::through_source)
+/// finds the source association. The guess stays when the app does not
+/// have the through model or the source association, or when the source
+/// is a polymorphic `belongs_to` (only `source_type:` names that class).
+/// The pass repeats so that a source association that is itself a
+/// `through:` gives its resolved class.
+fn resolve_through_targets(app: &mut App) {
+    use crate::dialect::{Association, ModelBodyItem};
+    use crate::ident::ClassId;
+
+    fn target_of(assoc: &Association) -> Option<&ClassId> {
+        match assoc {
+            Association::BelongsTo { polymorphic: true, .. } => None,
+            Association::BelongsTo { target, .. }
+            | Association::HasMany { target, .. }
+            | Association::HasOne { target, .. }
+            | Association::HasAndBelongsToMany { target, .. } => Some(target),
+        }
+    }
+
+    for _ in 0..app.models.len() {
+        let mut updates: Vec<(usize, usize, ClassId)> = Vec::new();
+        for (i, model) in app.models.iter().enumerate() {
+            for (j, item) in model.body.iter().enumerate() {
+                let ModelBodyItem::Association { assoc, .. } = item else { continue };
+                let Association::HasMany {
+                    target, through: Some(through), class_explicit: false, ..
+                } = assoc
+                else {
+                    continue;
+                };
+                let resolved = model
+                    .associations()
+                    .filter(|a| a.name() == through)
+                    .last()
+                    .and_then(target_of)
+                    .and_then(|class| app.models.iter().find(|m| &m.name == class))
+                    .and_then(|through_model| through_model.through_source(assoc))
+                    .and_then(target_of);
+                if let Some(resolved) = resolved.filter(|r| *r != target) {
+                    updates.push((i, j, resolved.clone()));
+                }
+            }
+        }
+        if updates.is_empty() {
+            return;
+        }
+        for (i, j, resolved) in updates {
+            if let ModelBodyItem::Association {
+                assoc: Association::HasMany { target, .. }, ..
+            } = &mut app.models[i].body[j]
+            {
+                *target = resolved;
             }
         }
     }

@@ -2457,10 +2457,10 @@ fn fold_before_validation(
 ///       .where("taggings.story_id = ?", @id)
 ///   end
 ///
-/// The through-model's `belongs_to` whose target matches the assoc's
-/// target supplies the source foreign key (works for `source:` renames —
-/// `upvoted_stories, through: :votes, source: :story` finds
-/// `Vote.belongs_to :story`); when the source is a `has_many` instead
+/// The source association on the through model, found by name
+/// (`upvoted_stories, through: :votes, source: :story` finds
+/// `Vote.belongs_to :story`), supplies the source foreign key when it is
+/// a `belongs_to`; when the source is a `has_many` instead
 /// the key is on the target table and the join reverses (campfire's
 /// `reachable_messages, through: :rooms, source: :messages`). Nested chains — the source association on
 /// the join model is itself `:through` (`Category has_many :stories,
@@ -2478,13 +2478,13 @@ pub(crate) fn apply_through_assoc_lowering(lcs: &mut [LibraryClass], app: &App) 
         let Some(model) = app.models.iter().find(|m| m.name == lc.name) else { continue };
         for assoc in model.associations() {
             let Association::HasMany {
-                name, target, through: Some(thr_name), scope: assoc_scope, ..
+                name, target, through: Some(_), scope: assoc_scope, ..
             } = assoc
             else {
                 continue;
             };
             let Some((joins, edge_table, edge_fk)) =
-                resolve_through_chain(&app.models, model, thr_name, target, 0)
+                resolve_through_chain(&app.models, model, assoc, 0)
             else {
                 continue;
             };
@@ -2503,20 +2503,19 @@ pub(crate) fn apply_through_assoc_lowering(lcs: &mut [LibraryClass], app: &App) 
     }
 }
 
-/// Resolve the SQL join chain for a `has_many :through` on `model`
-/// reaching `target` via the sibling association named `thr_name`.
-/// Returns the INNER JOIN fragments (target-nearest first, ready to
-/// `join(" ")`) plus the WHERE edge `(table, fk)` that points back at
+/// Resolve the SQL join chain for `assoc`, a `has_many :through` on
+/// `model`. Returns the INNER JOIN fragments (target-nearest first, ready
+/// to `join(" ")`) plus the WHERE edge `(table, fk)` that points back at
 /// the owner's id. One recursion per indirection: a first hop that is
 /// itself `:through`, or a join-model source association that is.
-/// `None` when a hop can't be proven — missing join model, no
-/// `belongs_to`/`has_many`/through source matching the target class —
-/// and for pathological depth (cyclic `through:` declarations).
+/// `None` when a hop can't be proven — missing join model, no source
+/// association ([`Model::through_source`](crate::dialect::Model::through_source)),
+/// a source kind with no join here — and for pathological depth (cyclic
+/// `through:` declarations).
 fn resolve_through_chain(
     models: &[crate::dialect::Model],
     model: &crate::dialect::Model,
-    thr_name: &Symbol,
-    target: &ClassId,
+    assoc: &crate::dialect::Association,
     depth: usize,
 ) -> Option<(Vec<String>, String, Symbol)> {
     use crate::dialect::Association;
@@ -2525,69 +2524,57 @@ fn resolve_through_chain(
     if depth > 4 {
         return None;
     }
+    let Association::HasMany { target, through: Some(thr_name), .. } = assoc else {
+        return None;
+    };
     // The through association on the owner (`:votes`, `:taggings`, `:tags`).
-    let (thr_target, thr_fk, thr_through, as_interface) = model.associations().find_map(|a| match a {
-        Association::HasMany { name, target, foreign_key, through, as_interface, .. }
-            if name == thr_name =>
-        {
-            Some((target, foreign_key, through, as_interface))
-        }
-        _ => None,
-    })?;
+    let thr = model
+        .associations()
+        .find(|a| matches!(a, Association::HasMany { name, .. } if name == thr_name))?;
+    let Association::HasMany {
+        target: thr_target, foreign_key: thr_fk, through: thr_through, as_interface, ..
+    } = thr
+    else {
+        return None;
+    };
     // How the join model's rows tie back to the owner: directly by the
     // sibling's fk, or through the sibling's own chain.
     let (back_joins, edge_table, edge_fk) = match thr_through {
         None => (Vec::new(), pluralize_snake(thr_target.0.as_str()), thr_fk.clone()),
-        Some(inner) => resolve_through_chain(models, model, inner, thr_target, depth + 1)?,
+        Some(_) => resolve_through_chain(models, model, thr, depth + 1)?,
     };
     let thr_model = models.iter().find(|m| &m.name == thr_target)?;
     let thr_table = pluralize_snake(thr_target.0.as_str());
     let target_table = pluralize_snake(target.0.as_str());
     let owner_type = through_owner_type_predicate(&thr_table, as_interface, &model.name);
-    // The source belongs_to on the join model (`Vote.belongs_to :story`)
-    // — matched by target class, so `source:` renames resolve without a
-    // name convention.
-    if let Some(src_fk) = thr_model.associations().find_map(|a| match a {
-        Association::BelongsTo { target: t, foreign_key, .. } if t == target => Some(foreign_key),
-        _ => None,
-    }) {
-        let mut joins = vec![format!(
+    let mut joins = match thr_model.through_source(assoc)? {
+        // The source belongs_to on the join model (`Vote.belongs_to
+        // :story`). A polymorphic one needs a type predicate this join
+        // does not write, so it stays on the shared reader.
+        Association::BelongsTo { foreign_key: src_fk, polymorphic: false, .. } => vec![format!(
             "INNER JOIN {thr_table} ON {thr_table}.{src_fk} = {target_table}.id{owner_type}"
-        )];
-        joins.extend(back_joins);
-        return Some((joins, edge_table, edge_fk));
-    }
-    // The source is a plain `has_many` on the join model, so the
-    // foreign key is on the TARGET table and the join points the other
-    // way (campfire: `has_many :reachable_messages, through: :rooms,
-    // source: :messages` — Room#messages, `messages.room_id`). The
-    // belongs_to branch above cannot serve this: there is no column on
-    // the join table naming the target.
-    if let Some(src_fk) = thr_model.associations().find_map(|a| match a {
-        Association::HasMany { target: t, foreign_key, through: None, .. } if t == target => {
-            Some(foreign_key)
-        }
-        _ => None,
-    }) {
-        let mut joins = vec![format!(
+        )],
+        // The source is a plain `has_many` on the join model, so the
+        // foreign key is on the TARGET table and the join points the
+        // other way (campfire: `has_many :reachable_messages, through:
+        // :rooms, source: :messages` — Room#messages, `messages.room_id`).
+        Association::HasMany { foreign_key: src_fk, through: None, .. } => vec![format!(
             "INNER JOIN {thr_table} ON {thr_table}.id = {target_table}.{src_fk}{owner_type}"
-        )];
-        joins.extend(back_joins);
-        return Some((joins, edge_table, edge_fk));
-    }
-    // Nested: the join model reaches the target through its own
-    // `:through` association. Resolve that chain (phrased from the same
-    // target table), then graft the join model onto its owner edge.
-    let src_through = thr_model.associations().find_map(|a| match a {
-        Association::HasMany { target: t, through: Some(thru), .. } if t == target => Some(thru),
-        _ => None,
-    })?;
-    let (src_joins, src_edge_table, src_edge_fk) =
-        resolve_through_chain(models, thr_model, src_through, target, depth + 1)?;
-    let mut joins = src_joins;
-    joins.push(format!(
-        "INNER JOIN {thr_table} ON {thr_table}.id = {src_edge_table}.{src_edge_fk}{owner_type}"
-    ));
+        )],
+        // Nested: the join model reaches the target through its own
+        // `:through` association. Resolve that chain (phrased from the
+        // same target table), then graft the join model onto its owner
+        // edge.
+        src @ Association::HasMany { through: Some(_), .. } => {
+            let (mut src_joins, src_edge_table, src_edge_fk) =
+                resolve_through_chain(models, thr_model, src, depth + 1)?;
+            src_joins.push(format!(
+                "INNER JOIN {thr_table} ON {thr_table}.id = {src_edge_table}.{src_edge_fk}{owner_type}"
+            ));
+            src_joins
+        }
+        _ => return None,
+    };
     joins.extend(back_joins);
     Some((joins, edge_table, edge_fk))
 }
@@ -9139,10 +9126,8 @@ fn preload_targets(model: &crate::dialect::Model, app: &App) -> Vec<(String, Pre
                 let Some(thr_model) = app.models.iter().find(|m| &m.name == thr_target) else {
                     continue;
                 };
-                let Some(Association::BelongsTo { foreign_key: src_fk, .. }) =
-                    thr_model.associations().find(|a| {
-                        matches!(a, Association::BelongsTo { target: t, .. } if t == target)
-                    })
+                let Some(Association::BelongsTo { foreign_key: src_fk, polymorphic: false, .. }) =
+                    thr_model.through_source(assoc)
                 else {
                     continue;
                 };
