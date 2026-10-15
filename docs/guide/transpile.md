@@ -40,11 +40,12 @@ that describe gems and class-body DSLs Roundhouse does not know.
 `check` and the editor read the same file, so their diagnostics match
 what transpile sees.
 
-A [`gems.yml`](roundhouse-yml.md#gemsyml) acts only on the transpiled
-`ruby` and `jruby` trees. It can pin and require a locked gem at boot,
-declare a gem in the emitted Gemfile when `app/` names it, or keep a gem
-that loads Rails out of every tree. For that last kind, transpile errors
-on the gem's constants include the reason the file gives.
+A [`gems.yml`](roundhouse-yml.md#gemsyml) supplies facts for gem RBI
+selection. It also controls native gem loads in `ruby` and `jruby`
+projects. The facts can pin and require a locked gem at boot or declare
+a gem when `app/` names it. They can also refuse a gem that loads Rails.
+Constants from a refused gem stay errors, including constants known
+through an RBI.
 
 Transpilation is the analysis from [`check.md`](check.md) followed by
 lowering and emit. It requires zero analysis errors and a runtime for

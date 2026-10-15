@@ -109,9 +109,10 @@ now names the cause once, rather than one error for each use.
 `jruby` targets carry many of the app's gems, but not every gem is
 required at boot or declared in the emitted Gemfile.
 [`gems.yml`](#gemsyml) tells those targets how to load or declare a gem,
-or records that the gem cannot load without Rails. It does not teach
-`check` the gem's types. A constant from a gem Roundhouse does not
-model is still an error:
+or records that the gem cannot load without Rails. Its facts can also
+select a locked gem's RBI for type information. An RBI supplies types,
+not executable code. Without a selected RBI, a constant from a gem
+Roundhouse does not model can still produce an error:
 
 ```
 app/services/report.rb:3:5: error[unsupported]: constant not supported (all targets): WidgetEngine::Thing — unmodeled gem `widget_engine`; emitted constant availability is unverified
@@ -148,21 +149,44 @@ runtime_gems:
   - {any_text: ["Widget::Cache."], gem: "widget-cache"}
 ```
 
-- `lock_gated_requires`: load this gem when the app starts. When the
-  app's `Gemfile.lock` resolves the gem from a gem server, the `ruby`
-  tree pins it at the locked version and requires the path at boot.
-  A gem locked from git or a path is skipped.
-- `rails_dependent`: requiring the gem loads Rails, so no tree loads it.
-  The `ruby` tree does not carry it from the lockfile, and its constants
-  stay errors. `roundhouse --target` adds the `why` text to those errors;
-  `check` does not.
+- `lock_gated_requires`: when the app's `Gemfile.lock` resolves the gem,
+  the `ruby` and `jruby` trees require the path at boot. Registry gems
+  use the locked version. Git gems keep the locked URL and revision.
+  PATH gems remain source inputs; this setting does not load them natively.
+- `rails_dependent`: requiring the gem loads Rails, so compiled projects
+  do not load it natively. References to its constants stay errors,
+  including constants made known by an RBI. The error includes the gem
+  name and the `why` text. App-owned constants keep their own definitions.
+  The Ruby-core exemption applies to exact constants such as `String`,
+  not to all constants inside their namespaces.
 - `runtime_gems`: the `ruby` and `jruby` trees declare the gem in their
   Gemfile when a file under `app/` names the constant or contains one of
-  the texts. This only declares the gem; it does not require it.
+  the texts. Git gems keep their source and revision. This setting does
+  not require the gem; use an application require or `lock_gated_requires`.
 
-These facts change what the `ruby` and `jruby` trees load and declare.
-They do not add type information. Errors for the gem's constants in
-`check` output are the same with or without them.
+Extension gem facts also select the locked gems' Tapioca RBIs under
+`sorbet/rbi/gems/`. This includes gems classified as infrastructure or
+standard-library gems. An RBI supplies types and ownership, not executable
+code. A gem in `rails_dependent` stays refused even when its RBI declares
+the referenced class, module, or value. Other targets refuse constants
+that depend on a native extension gem instead of emitting missing classes.
+
+Roundhouse records extension boot loads on each app. A lockfile dependency
+alone does not establish that a gem loads. A `runtime_gems` row does not
+become a boot require.
+
+For Git-backed native gems, run the emitted project's `bundle install`.
+At boot, Roundhouse activates the locked checkouts under
+`<gem home>/bundler/gems/`, including Git-backed dependencies, before the
+guarded requires. It reports an error if source metadata or a checkout
+is missing, or if a published copy is already active. It never replaces
+a locked Git source with a published gem of the same name.
+The Gemfile also preserves Git `glob` and `submodules` settings.
+The runtime uses the locked glob to find each gemspec.
+
+A guarded require stays quiet when the optional feature itself is absent.
+If a present feature fails to load an internal dependency, the runtime
+reports both the requested feature and the load error on standard error.
 
 ### `macros.yml`
 
