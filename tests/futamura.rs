@@ -305,6 +305,84 @@ end
     fs::remove_dir_all(&out).unwrap();
 }
 
+/// A library module whose `include` names an external gem module the
+/// analyzer cannot resolve has no span to blame (ingest drops the
+/// call's span once `LibraryClass.includes` resolves the name), so the
+/// refusal used to block every route. Carrying the span (`include_spans`)
+/// gives it a real location, and the planner's existing per-file rule
+/// then blocks only the routes that reach `GadgetTools`' file —
+/// `widgets#index` never does, so it still clears. That's sound only if
+/// the box still LOADS with the include unresolved: futamura's own copy
+/// of the `ruby` emit guards it (`include X if defined?(X)`); plain
+/// `--target ruby` does not, and stays fail-loud.
+#[test]
+fn include_locations_free_routes_that_never_reach_them_and_the_box_still_loads() {
+    let src = scratch("inc-src");
+    let out = scratch("inc-out");
+    write(&src, "Gemfile", b"source \"https://rubygems.org\"\ngem \"rails\"\n");
+    write(&src, "config/routes.rb", b"Rails.application.routes.draw do\n  get \"widgets\" => \"widgets#index\"\nend\n");
+    write(&src, "app/controllers/application_controller.rb", b"class ApplicationController < ActionController::Base\nend\n");
+    write(&src, "app/controllers/widgets_controller.rb", br#"class WidgetsController < ApplicationController
+  def index
+    @name = "hi"
+  end
+end
+"#);
+    write(&src, "app/views/widgets/index.html.erb", b"<%= @name %>\n");
+    // Never reached by `widgets#index`: a library module that includes
+    // an unresolved external gem module, and a class that mixes it in.
+    write(&src, "app/lib/gadget_tools.rb", br#"module GadgetTools
+  include ExternalGem::Mixin
+
+  def polish
+    "shiny"
+  end
+end
+"#);
+    write(&src, "app/lib/gadget.rb", b"class Gadget\n  include GadgetTools\nend\n");
+
+    let run = Command::new(env!("CARGO_BIN_EXE_roundhouse"))
+        .args(["--target", "futamura", "--survey", "-o"])
+        .arg(&out)
+        .arg(&src)
+        .env("ROUNDHOUSE_FUTAMURA_LEDGER", "1")
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&run.stderr);
+    assert!(run.status.success(), "{stderr}");
+    let unowned = stderr
+        .lines()
+        .find(|l| l.contains("includes unresolved ExternalGem::Mixin"))
+        .unwrap_or_else(|| panic!("{stderr}"));
+    assert!(unowned.contains("gadget_tools.rb:2"), "{unowned}");
+    assert!(!unowned.contains("(no location)"), "{unowned}");
+    assert!(stderr.contains("whole-route: 1 GET action(s) served by the lowered app; 0 left to Rails"), "{stderr}");
+
+    let lowered = fs::read_to_string(out.join("vendor/futamura/lowered/app/models/gadget_tools.rb")).unwrap();
+    assert!(lowered.contains("include ExternalGem::Mixin if defined?(ExternalGem::Mixin)"), "{lowered}");
+    let ruby = Command::new("ruby")
+        .arg(out.join("vendor/futamura/lowered/app/models/gadget_tools.rb"))
+        .output()
+        .expect("ruby must be on PATH");
+    assert!(ruby.status.success(), "{}", String::from_utf8_lossy(&ruby.stderr));
+
+    // Plain `--target ruby` leaves the same include bare.
+    let out_ruby = scratch("inc-out-ruby");
+    let run_ruby = Command::new(env!("CARGO_BIN_EXE_roundhouse"))
+        .args(["--target", "ruby", "--survey", "--allow-unsupported", "-o"])
+        .arg(&out_ruby)
+        .arg(&src)
+        .output()
+        .unwrap();
+    assert!(run_ruby.status.success(), "{}", String::from_utf8_lossy(&run_ruby.stderr));
+    let plain = fs::read_to_string(out_ruby.join("app/models/gadget_tools.rb")).unwrap();
+    assert!(plain.contains("include ExternalGem::Mixin\n") && !plain.contains("if defined?"), "{plain}");
+
+    fs::remove_dir_all(&src).unwrap();
+    fs::remove_dir_all(&out).unwrap();
+    fs::remove_dir_all(&out_ruby).unwrap();
+}
+
 /// A minimal app whose `ruby` emit refuses one association (a `through:`
 /// hop keyed on a non-id column, Mastodon's `Status.reblogged_by_accounts`).
 fn app_with_a_ruby_refusal(src: &Path) {

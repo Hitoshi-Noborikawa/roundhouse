@@ -1776,8 +1776,13 @@ pub fn futamura_whole_route(
     diags.extend(crate::analyze::diagnose(&lowered));
     crate::lower::relation_residue::elevate_dynamic_relation_for_target(&mut diags, BuildTarget::Ruby);
     crate::lower::params_residue::elevate_nested_params_for_target(&mut diags, BuildTarget::Ruby);
-    let (files, emit_diags) =
-        emit::diagnostics::scope(|| target_files(&lowered, fixture, BuildTarget::Ruby));
+    // Guarded so the box still loads if the planner leaves a route in
+    // place that reaches a file with an unresolved include — see
+    // `emit::ruby::expr::FUTAMURA_BOX`. Plain `--target ruby` never
+    // wraps this and stays fail-loud.
+    let (files, emit_diags) = emit::diagnostics::scope(|| {
+        crate::emit::ruby::expr::with_futamura_box(|| target_files(&lowered, fixture, BuildTarget::Ruby))
+    });
     diags.extend(emit_diags);
     // Ingest gaps aren't diagnostics (survey mode substitutes a nil
     // placeholder and keeps going), so they never reach `diags` above;
@@ -10548,6 +10553,7 @@ mod tests {
             parent: Some(ClassId(Symbol::from("ActionCable::Connection::Base"))),
             parent_span: Default::default(),
             includes: Vec::new(),
+            include_spans: Vec::new(),
             methods: Vec::new(),
             nullable_columns: Vec::new(),
             origin: None,
@@ -10721,6 +10727,7 @@ mod tests {
             parent: None,
             parent_span: Default::default(),
             includes: Vec::new(),
+            include_spans: Vec::new(),
             methods: Vec::new(),
             nullable_columns: Vec::new(),
             origin: None,

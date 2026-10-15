@@ -47,6 +47,7 @@ pub fn emit_module(methods: &[MethodDef]) -> Result<String, String> {
         parent: None,
         parent_span: Default::default(),
         includes: Vec::new(),
+        include_spans: Vec::new(),
         methods: std::mem::take(&mut colored),
         nullable_columns: Vec::new(),
         origin: None,
