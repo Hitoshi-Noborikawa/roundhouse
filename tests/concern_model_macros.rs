@@ -259,18 +259,6 @@ fn unsupported_accessor_shapes_are_reported_only_for_includers() {
     }
 }
 
-/// Receiver-bearing calls and unrelated DSL keep their existing path;
-/// recognizing attr_* must not start treating arbitrary calls as macros.
-#[test]
-fn unrelated_calls_are_not_accessor_candidates() {
-    for declaration in ["self.attr_accessor :scratch", "Other.attr_accessor :scratch", "unknown_macro :scratch"] {
-        let source = format!("module DraftState\n  extend ActiveSupport::Concern\n  included {{ {declaration} }}\nend\n");
-        let (items, enums) = roundhouse::ingest::library_class::ingest_concern_model_items(source.as_bytes(), "draft_state.rb");
-        assert!(items.is_empty(), "must not claim unrelated {declaration}: {items:?}");
-        assert!(enums.is_empty());
-    }
-}
-
 /// Newly accepted accessors must be rejected, not silently publicized
 /// or used to replace a different generated storage contract.
 #[test]
@@ -288,6 +276,7 @@ fn accessor_contexts_fail_strict_ingest_and_are_not_carried_in_survey() {
         ("attr_accessor :scratch\n    private :scratch", "include DraftState"),
         ("with_options if: false do\n      attr_accessor :scratch\n    end", "include DraftState"),
         ("attr_accessor :scratch\n    def scratch\n      'included override'\n    end", "include DraftState"),
+        ("attr_accessor :scratch\n    unknown_macro :scratch", "include DraftState"),
         ("attr_accessor :scratch", "def scratch\n    'earlier'\n  end\n  include DraftState"),
         ("attr_accessor :scratch", "def scratch=(value)\n    @scratch = value\n  end\n  include DraftState"),
         ("attr_accessor :body", "include DraftState"),

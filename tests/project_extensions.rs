@@ -250,6 +250,63 @@ fn an_undeclared_attribute_keeps_its_column_type() {
     assert!(failures[0].contains("`parts`"), "{failures:#?}");
 }
 
+#[test]
+fn concern_attribute_macros_type_each_includer_and_refuse_the_declarations() {
+    let invoice = INVOICE.replace(
+        "  price_column :amount, currency: :usd\n  bag_columns(attributes: [:total], packer: :default)\n",
+        "  include Priced\n",
+    );
+    let receipt = invoice.replace(
+        "class Invoice < ApplicationRecord\n",
+        "class Receipt < ApplicationRecord\n  self.table_name = \"invoices\"\n",
+    );
+    let app = analyzed(&[
+        ("roundhouse.yml", "extensions: [config/rh]\n"),
+        ("config/rh/macros.yml", PRICE_MACROS),
+        ("db/schema.rb", INVOICE_SCHEMA),
+        ("app/models/application_record.rb", APPLICATION_RECORD),
+        ("app/models/concerns/priced.rb", "module Priced\n  extend ActiveSupport::Concern\n  included do\n    price_column :amount, currency: :usd\n    bag_columns(attributes: [:total], packer: :default)\n  end\nend\n"),
+        ("app/models/invoice.rb", &invoice),
+        ("app/models/receipt.rb", &receipt),
+    ]);
+    let diagnostics = diagnose(&app);
+    assert!(dispatch_failures(&app).is_empty(), "{:#?}", codes(&diagnostics));
+    let errors: Vec<&Diagnostic> = diagnostics.iter().filter(|d| d.severity == Severity::Error).collect();
+    assert_eq!(errors.len(), 4, "{:#?}", codes(&diagnostics));
+    for owner in ["Invoice", "Receipt"] {
+        for name in ["price_column", "bag_columns"] {
+            let refusal = errors.iter().find(|d| matches!(&d.kind,
+                DiagnosticKind::Unsupported { construct, detail, .. }
+                    if construct.as_str() == name && detail.contains(&format!("`{owner}`"))
+            )).unwrap_or_else(|| panic!("missing {owner}.{name} refusal: {:#?}", codes(&diagnostics)));
+            let source = &app.sources[refusal.span.file.0 as usize - 1];
+            assert!(source.path.ends_with("app/models/concerns/priced.rb"));
+        }
+    }
+    assert_eq!(diagnostics.iter().filter(|d| d.code() == "gradual_untyped").count(), 4);
+}
+
+#[test]
+fn dormant_concern_attribute_macros_do_not_change_column_types_or_report_declarations() {
+    let invoice = INVOICE.replace(
+        "  price_column :amount, currency: :usd\n  bag_columns(attributes: [:total], packer: :default)\n",
+        "",
+    );
+    let app = analyzed(&[
+        ("roundhouse.yml", "extensions: [config/rh]\n"),
+        ("config/rh/macros.yml", PRICE_MACROS),
+        ("db/schema.rb", INVOICE_SCHEMA),
+        ("app/models/application_record.rb", APPLICATION_RECORD),
+        ("app/models/concerns/priced.rb", "module Priced\n  extend ActiveSupport::Concern\n  included do\n    price_column :amount\n    bag_columns(attributes: [:total])\n  end\nend\n"),
+        ("app/models/invoice.rb", &invoice),
+    ]);
+    let diagnostics = diagnose(&app);
+    let errors: Vec<&Diagnostic> = diagnostics.iter().filter(|d| d.severity == Severity::Error).collect();
+    assert_eq!(errors.len(), 2, "{:#?}", codes(&diagnostics));
+    assert!(errors.iter().all(|d| d.code() == "send_dispatch_failed"), "{:#?}", codes(&diagnostics));
+    assert!(!diagnostics.iter().any(|d| d.code() == "gradual_untyped"), "{:#?}", codes(&diagnostics));
+}
+
 // ── Gem facts on the emitted trees ──────────────────────────────────
 
 const WIDGET_LOCK: &str = "GEM\n  remote: https://rubygems.org/\n  specs:\n    widgets (1.2.0)\n\nDEPENDENCIES\n  widgets\n";

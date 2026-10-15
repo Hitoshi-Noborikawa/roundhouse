@@ -116,6 +116,14 @@ attribute_macros:
   macro itself, so each call is reported as an error at its declaration.
   This replaces a dispatch error at every place the value object is used.
 
+Configured attribute macros also apply in a concern's `included do`
+block. Roundhouse retains direct statements from `ActiveSupport::Concern`
+blocks and inserts them into each including model before analysis.
+Each model gets the macro's attribute types and its declaration error.
+A concern that no model includes does not change attribute types or
+produce macro declaration errors. This does not add general class-body
+execution or support for `class_attribute` on models.
+
 Extension rows are added after Roundhouse's own rows and never replace
 them. Unknown keys, malformed rows, a missing directory, and a
 `rails_dependent` gem that another fact loads or that Roundhouse models

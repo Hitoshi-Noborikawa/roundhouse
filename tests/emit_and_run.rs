@@ -6839,6 +6839,29 @@ fn an_include_from_an_included_block_brings_its_own_included_items() {
         .assert_passes();
 }
 
+#[test]
+fn a_concerns_unclaimed_attribute_declaration_runs_on_each_includer() {
+    emit_and_run::real_blog()
+        .write(
+            "app/models/concerns/reviewable.rb",
+            "module Reviewable\n  extend ActiveSupport::Concern\n  included do\n    attribute :review_note, :string\n  end\nend\n",
+        )
+        .edit(
+            "app/models/article.rb",
+            "class Article < ApplicationRecord\n",
+            "class Article < ApplicationRecord\n  include Reviewable\n",
+        )
+        .edit(
+            "app/models/comment.rb",
+            "class Comment < ApplicationRecord\n",
+            "class Comment < ApplicationRecord\n  include Reviewable\n",
+        )
+        .run_ruby(
+            "article = Article.new\ncomment = Comment.new\narticle.review_note = \"article note\"\ncomment.review_note = \"comment note\"\nraise \"article attribute lost\" unless article.review_note == \"article note\"\nraise \"comment attribute lost\" unless comment.review_note == \"comment note\"\n",
+        )
+        .assert_passes();
+}
+
 /// An action whose whole body is a call to a rendering helper defined
 /// on a PARENT controller. The default response appended to the action
 /// must be guarded by `performed?`, as it is for a helper on the

@@ -2298,6 +2298,20 @@ fn splice_concerns_into_models_named(app: &mut App, only: &[crate::ident::Symbol
     use crate::dialect::ModelBodyItem;
     use crate::expr::ExprNode;
 
+    if app.concern_model_items.is_empty() && app.concern_guarded_items.is_empty() {
+        return;
+    }
+
+    // A carried statement keeps the concern's lexical constants.
+    let mut defined = std::collections::HashSet::new();
+    for class in &app.library_classes {
+        defined.insert(class.name.0.as_str().to_string());
+        for (name, _) in &class.constants {
+            defined.insert(format!("{}::{}", class.name.0.as_str(), name.as_str()));
+        }
+    }
+    defined.extend(app.models.iter().map(|model| model.name.0.as_str().to_string()));
+
     for model in &mut app.models {
         if !only.is_empty() && !only.iter().any(|n| n == &model.name.0) {
             continue;
@@ -2361,7 +2375,13 @@ fn splice_concerns_into_models_named(app: &mut App, only: &[crate::ident::Symbol
                             ordered.push(item);
                         }
                     }
-                    ordered.into_iter().map(|item| rehome_default_fk(item, id, &model_name)).collect::<Vec<_>>()
+                    ordered.into_iter().map(|item| {
+                        let mut item = rehome_default_fk(item, id, &model_name);
+                        if let ModelBodyItem::Unknown { expr, .. } = &mut item {
+                            qualify_carried_constants(expr, id.0.as_str(), &defined);
+                        }
+                        item
+                    }).collect::<Vec<_>>()
                 })
                 .collect();
             if items.is_empty() {
@@ -2372,6 +2392,34 @@ fn splice_concerns_into_models_named(app: &mut App, only: &[crate::ident::Symbol
             i += 1;
         }
     }
+}
+
+/// An enclosing module's constant keeps its lexical meaning after splicing.
+/// The concern's own constants remain reachable through model ancestry.
+fn qualify_carried_constants(
+    expr: &mut crate::expr::Expr,
+    concern: &str,
+    defined: &std::collections::HashSet<String>,
+) {
+    use crate::expr::ExprNode;
+    let Some((enclosing, _)) = concern.rsplit_once("::") else { return };
+    if let ExprNode::Const { path } = &mut *expr.node {
+        if path.first().is_some_and(|first| !first.as_str().is_empty()) {
+            let written = path.iter().map(|part| part.as_str()).collect::<Vec<_>>().join("::");
+            let mut scope = Some(enclosing);
+            while let Some(owner) = scope {
+                if defined.contains(&format!("{owner}::{written}")) {
+                    let mut qualified: Vec<Symbol> = owner.split("::").map(Symbol::from).collect();
+                    qualified.append(path);
+                    *path = qualified;
+                    break;
+                }
+                scope = owner.rsplit_once("::").map(|(scope, _)| scope);
+            }
+        }
+        return;
+    }
+    expr.node.for_each_child_mut(&mut |child| qualify_carried_constants(child, concern, defined));
 }
 
 /// The concern an `include` arg written inside `owner` names. A rooted

@@ -4010,6 +4010,40 @@ const CONCERN_MODEL_MACROS: &[&str] = &[
     "include",
 ];
 
+/// Unclaimed direct `included do` statements run in each includer's
+/// class body. Visibility and definition statements keep their refusal.
+fn carries_to_includer(item: &crate::dialect::ModelBodyItem) -> bool {
+    use crate::expr::ExprNode;
+    let crate::dialect::ModelBodyItem::Unknown { expr, .. } = item else { return false };
+    match &*expr.node {
+        // Concern ingestion already records these declaration gaps.
+        ExprNode::Send { recv: None, method, block: Some(_), .. }
+            if matches!(method.as_str(), "aasm" | "state_machine") =>
+        {
+            false
+        }
+        ExprNode::Send { recv: None, method, .. } => !matches!(
+            method.as_str(),
+            "private"
+                | "protected"
+                | "public"
+                | "private_class_method"
+                | "public_class_method"
+                | "module_function"
+                | "private_constant"
+                | "public_constant"
+                | "attr_reader"
+                | "attr_writer"
+                | "attr_accessor"
+                | "alias_method"
+                | "define_method"
+                | "remove_method"
+                | "undef_method"
+        ),
+        _ => true,
+    }
+}
+
 /// True when an Unknown body item is one of [`CONCERN_MODEL_MACROS`].
 /// The block form counts — `has_one_attached :avatar do |attachable|
 /// attachable.variant … end` declares variants we don't model, and the
@@ -4219,6 +4253,18 @@ pub(in crate::ingest) fn ingest_concern_model_items_with_constants(
         let Some(body) = module.body() else { continue };
         let mut items: Vec<ModelBodyItem> = Vec::new();
         let mut enums: Vec<ConcernEnumDecl> = Vec::new();
+        let is_concern = flatten_statements(module.body().unwrap()).iter().any(|stmt| {
+            stmt.as_call_node().is_some_and(|call| {
+                call.receiver().is_none()
+                    && call.block().is_none()
+                    && constant_id_str(&call.name()) == "extend"
+                    && call.arguments().is_some_and(|args| {
+                        args.arguments().iter().any(|arg| {
+                            constant_path_of(&arg).is_some_and(|path| path.join("::") == "ActiveSupport::Concern")
+                        })
+                    })
+            })
+        });
         let mut guarded: Vec<crate::app::ConcernGuardedItem> = Vec::new();
         for stmt in flatten_statements(body) {
             let Some(call) = stmt.as_call_node() else { continue };
@@ -4305,6 +4351,9 @@ pub(in crate::ingest) fn ingest_concern_model_items_with_constants(
                 // per attribute, and a concern splices ALL of them into
                 // every includer — keeping only the first would fault
                 // one field of several.
+                let is_direct = direct.iter().any(|stmt| {
+                    stmt.location().start_offset() == inner.location().start_offset()
+                });
                 match super::model::ingest_model_body_items(&inner, &id, file, Vec::new(), None) {
                     Ok(parsed) => {
                         for mut item in parsed {
@@ -4320,13 +4369,14 @@ pub(in crate::ingest) fn ingest_concern_model_items_with_constants(
                                 // items; keep the ones the callback
                                 // lowering understands so the concern
                                 // splice carries them into each
-                                // includer. Other Unknowns stay with the
-                                // module.
+                                // includer. Unclaimed direct statements
+                                // also run on an ActiveSupport::Concern's
+                                // includer, not on the module.
                                 ModelBodyItem::Unknown { .. } => {
                                     if is_candidate(&item) {
                                         if !is_supported(&item) {
                                             decline(&mut item, "unsupported accessor shape: only direct, nonempty, literal-Symbol attr_accessor is modeled");
-                                        } else if !direct.iter().any(|stmt| stmt.location().start_offset() == inner.location().start_offset()) {
+                                        } else if !is_direct {
                                             decline(&mut item, "inside with_options is not modeled");
                                         }
                                     }
@@ -4335,9 +4385,15 @@ pub(in crate::ingest) fn ingest_concern_model_items_with_constants(
                                         || is_candidate(&item)
                                     {
                                         items.push(item);
-                                    } else if !matches!(&item, ModelBodyItem::Unknown { expr, .. }
+                                    } else if matches!(&item, ModelBodyItem::Unknown { expr, .. }
                                         if matches!(&*expr.node, crate::expr::ExprNode::Lit { .. }))
                                     {
+                                    } else if is_concern && is_direct && carries_to_includer(&item) {
+                                        // General class-body replay is not available
+                                        // here. Keep accessor admission conservative.
+                                        unclaimed = true;
+                                        items.push(item);
+                                    } else {
                                         unclaimed = true;
                                     }
                                 }
