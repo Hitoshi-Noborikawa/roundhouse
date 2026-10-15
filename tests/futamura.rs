@@ -361,6 +361,54 @@ end
     fs::remove_dir_all(&out).unwrap();
 }
 
+/// A gap in an `app/helpers/*_helper.rb` module must block every route
+/// that renders a view, not only ones whose reach happens to touch
+/// that file — Rails mixes every helper module into every view
+/// (`helper :all`, the default), and `ingest_library_classes` rejecting
+/// the helper outright means it was never a `LibraryClass` `reach`
+/// could have added to the route's own `blocking_files` in the first
+/// place (CodeRabbit 4281788796: the planner could replace a route
+/// while the emit lacks the helper, a NoMethodError at runtime).
+#[test]
+fn ingest_gap_in_a_helper_module_blocks_every_route_that_renders_a_view() {
+    let src = scratch("helper-gap-src");
+    let out = scratch("helper-gap-out");
+    write(&src, "Gemfile", b"source \"https://rubygems.org\"\ngem \"rails\"\n");
+    write(&src, "config/routes.rb", b"Rails.application.routes.draw do\n  get \"widgets\" => \"widgets#index\"\nend\n");
+    write(&src, "app/controllers/widgets_controller.rb", br#"class WidgetsController < ApplicationController
+  def index
+    @name = "hi"
+  end
+end
+"#);
+    write(&src, "app/views/widgets/index.html.erb", b"<%= @name %>\n");
+    // Mixing a `cattr_accessor ... default:` with a source `@@` write
+    // is a recorded ingest gap (`class-variable initializer with
+    // non-nil value`), on `application_helper.rb` — a file nothing in
+    // `widgets#index`'s own reach ever calls into.
+    write(&src, "app/helpers/application_helper.rb", br#"module ApplicationHelper
+  cattr_accessor :locale, default: "en"
+  @@locale = "fr"
+end
+"#);
+
+    let run = Command::new(env!("CARGO_BIN_EXE_roundhouse"))
+        .args(["--target", "futamura", "--survey", "-o"])
+        .arg(&out)
+        .arg(&src)
+        .env("ROUNDHOUSE_FUTAMURA_LEDGER", "1")
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&run.stderr);
+    assert!(run.status.success(), "{stderr}");
+    assert!(stderr.contains("whole-route: 0 GET action(s) served by the lowered app; 1 left to Rails"), "{stderr}");
+    let residue = stderr.lines().find(|l| l.contains("widgets#index")).unwrap_or_else(|| panic!("{stderr}"));
+    assert!(residue.contains("ingest gap") && residue.contains("application_helper.rb"), "{residue}");
+
+    fs::remove_dir_all(&src).unwrap();
+    fs::remove_dir_all(&out).unwrap();
+}
+
 /// The extended gap rule only blocks more: a route whose reached files
 /// (its own controller, its ancestor chain, and the layout it renders
 /// through) carry no gap at all still clears, same as before #957's

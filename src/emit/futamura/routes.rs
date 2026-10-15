@@ -185,8 +185,35 @@ fn gap_blocking<'g>(
 ) -> Option<&'g (String, String)> {
     gaps.iter().find(|(file, _)| {
         let rel = app_relative(file);
-        blocking_files.contains(&rel) || rel.starts_with(prefix)
+        if blocking_files.contains(&rel) || rel.starts_with(prefix) {
+            return true;
+        }
+        // A gap in an `app/helpers/*_helper.rb` module is never a file
+        // `reach` can walk into: Rails ingest only registers a helper
+        // module's methods into `helper_method_index`, never into a
+        // `LibraryClass` `reach` could add to `blocking_files` — the
+        // file rejected ingest outright, so there is no method body to
+        // find it through in the first place. Yet Rails mixes EVERY
+        // helper module into EVERY view (`helper :all`, the default),
+        // so whatever the gap dropped is missing from every view's
+        // surface, not just one route's. Block any route that renders
+        // a view at all.
+        is_helper_gap(&rel) && blocking_files.iter().any(|f| f.starts_with("app/views/"))
     })
+}
+
+/// Rails' own naming convention for which `app/helpers/` files get
+/// mixed into every view (`all_helpers_from_path` globs
+/// `**/*_helper.rb`, nothing else — see `ingest/app.rs`'s
+/// `is_helper_module`). Matched the same way here so a gap on, say, a
+/// plain PORO that happens to live under `app/helpers/` does not
+/// over-block routes it was never mixed into.
+fn is_helper_gap(rel: &str) -> bool {
+    rel.strip_prefix("app/helpers/")
+        .and_then(|tail| tail.strip_suffix(".rb"))
+        .is_some_and(|stem| {
+            stem.rsplit('/').next().is_some_and(|name| name.ends_with("_helper"))
+        })
 }
 
 /// Every class above `class` found by walking `parent` alone (never
