@@ -139,6 +139,7 @@ fn tiny_blog_round_trips() {
         // the roundtrip fixture has nothing to say about it.
         binary_assets: Vec::new(),
         i18n: Default::default(),
+        i18n_table: Default::default(),
         inferred_method_params: Default::default(),
         models: vec![post_model],
         library_classes: vec![],

@@ -3031,6 +3031,9 @@ pub(super) fn array_method(method: &Symbol, elem: &Ty, block_ret: Option<&Ty>) -
         "exclude?" | "intersect?" => Ty::Bool,
         // `Set` isn't parameterized, so the element type can't be carried.
         "to_set" => Ty::Class { id: ClassId(Symbol::from("Set")), args: vec![].into() },
+        // `ids.lazy.filter_map { … }.first` stops at the first hit; the
+        // lazy filters are registered on Enumerator::Lazy (stdlib.rs).
+        "lazy" => Ty::Class { id: ClassId(Symbol::from("Enumerator::Lazy")), args: vec![].into() },
         // JSON serialization of a collection is a String whatever the
         // elements are.
         "to_json" => Ty::Str,

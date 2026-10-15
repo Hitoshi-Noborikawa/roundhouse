@@ -1930,8 +1930,9 @@ impl<'a> BodyTyper<'a> {
                     let elem = args[0].ty.as_ref().and_then(kernel_array_elem);
                     return Ty::Array { elem: std::sync::Arc::new(elem.unwrap_or_else(unknown)) };
                 }
+                let translate = matches!(method.as_str(), "t" | "translate");
                 let catalog = self.i18n.map_or(crate::i18n::Catalog::rails_default(), |c| c.or_rails_default());
-                let scope = match (ctx.in_view, recv.is_none() && !ctx.class_side) {
+                let scope = match (!translate || ctx.in_view, recv.is_none() && !ctx.class_side) {
                     (false, true) => self.translating_controller(ctx.self_ty.as_ref()),
                     _ => None,
                 };
@@ -1940,7 +1941,7 @@ impl<'a> BodyTyper<'a> {
                     (Some(scope), false) => crate::lower::i18n_translate::Site::Controller(scope),
                     (None, false) => crate::lower::i18n_translate::Site::Other,
                 };
-                if let Some(resolved) = crate::lower::i18n_translate::resolves(
+                if translate && let Some(resolved) = crate::lower::i18n_translate::resolves(
                     catalog, recv.as_ref(), method.as_str(), args, block.as_ref(), site,
                 ) {
                     if let Err(reason) = resolved {

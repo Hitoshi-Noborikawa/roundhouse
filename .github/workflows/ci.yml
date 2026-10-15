@@ -80,6 +80,7 @@ jobs:
       spinel-revision: ${{ steps.plan.outputs.spinel-revision }}
       campfire-latest-revision: ${{ steps.plan.outputs.campfire-latest-revision }}
       spinel-tests: ${{ steps.plan.outputs.spinel-tests }}
+      spinel-framework-shards: ${{ steps.plan.outputs.spinel-framework-shards }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -916,18 +917,27 @@ jobs:
   # `ar_base` is disabled in-test (b453fcf) pending real-sqlite
   # rewiring of the test_helper.
   spinel-framework:
-    name: spinel-framework (suite)
+    name: spinel-framework (suite, ${{ matrix.shard }})
     # Needs the real-blog fixture: date_columns_spinel overlays it.
     # Advisory unless ci:spinel focus hardens CORE (+ this suite).
     needs: [generate-fixture, spinel-build, plan]
     if: ${{ !cancelled() && contains(fromJSON(needs.plan.outputs.jobs), 'spinel-framework') && needs.generate-fixture.result == 'success' && needs.spinel-build.outputs.artifact-id != '' }}
-    outputs: &advisory-outputs
-      execution: ${{ steps.result.outputs.status }}
+    # The plan balances the selected suites over up to three shards by their
+    # recorded durations; each shard reports its own output key, as
+    # spinel-toolchain's do.
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.plan.outputs.spinel-framework-shards) }}
+    outputs:
+      shard-0: ${{ steps.result.outputs.shard-0 }}
+      shard-1: ${{ steps.result.outputs.shard-1 }}
+      shard-2: ${{ steps.result.outputs.shard-2 }}
     runs-on: ubuntu-latest
-    # 30m: Full validation 38397424326 finished the suite in ~20m of a 25m
-    # budget. Keep the real checks; leave a little headroom for cold cache /
-    # slow Postgres health without papering over a hung suite.
-    timeout-minutes: 30
+    # 20m: unsharded, the suite took 20-30m (full run 38665931779); a shard
+    # carries about a third. Headroom for cold cache / slow Postgres health
+    # without papering over a hung suite.
+    timeout-minutes: 20
 
     continue-on-error: ${{ needs.plan.outputs.spinel-advisory == 'true' }}
     # spinel_pg_db runs the PostgreSQL Db shim against this server.
@@ -945,7 +955,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - name: Check out spinel-pg (pinned)
-        if: ${{ contains(fromJSON(needs.plan.outputs.spinel-tests), 'spinel_pg_db') }}
+        if: ${{ contains(matrix.tests, 'spinel_pg_db') }}
         uses: actions/checkout@v7
         with:
           repository: rubys/spinel-pg
@@ -970,7 +980,7 @@ jobs:
       # Continue after a failing suite without losing its failure status.
       - name: Run selected native framework checks
         env:
-          TESTS: ${{ join(fromJSON(needs.plan.outputs.spinel-tests), ' ') }}
+          TESTS: ${{ join(matrix.tests, ' ') }}
           # Inputs of spinel_pg_db only; it fails without them.
           SPINEL_PG_DIR: ${{ github.workspace }}/spinel-pg
           DATABASE_URL: postgres://postgres:postgres@127.0.0.1:5432/postgres
@@ -989,7 +999,12 @@ jobs:
             esac
           done
           exit "$status"
-      - *advisory-result
+      - name: Report actual advisory execution
+        id: result
+        if: always()
+        env:
+          STATUS: ${{ job.status }}
+        run: echo "shard-${{ matrix.shard }}=$STATUS" >> "$GITHUB_OUTPUT"
 
   # Campfire conformance — ONCE Campfire's OWN test suite, run against a
   # roundhouse emit of it. The C4 rung of the coverage ladder, and the
@@ -1402,7 +1417,8 @@ jobs:
     name: campfire-spinel-db (models)
     needs: [spinel-build, plan]
     if: ${{ !cancelled() && contains(fromJSON(needs.plan.outputs.jobs), 'campfire-spinel-db') && needs.spinel-build.outputs.artifact-id != '' }}
-    outputs: *advisory-outputs
+    outputs: &advisory-outputs
+      execution: ${{ steps.result.outputs.status }}
     runs-on: ubuntu-latest
     # 60m: leave headroom after a slow 20m libvips-dev apt for oracle/emit.
     timeout-minutes: 60
@@ -2105,24 +2121,20 @@ jobs:
     # hardens the CORE lane (spinel-advisory=false).
     needs: [generate-fixture, spinel-build, plan]
     if: ${{ !cancelled() && contains(fromJSON(needs.plan.outputs.jobs), 'spinel-toolchain') && needs.generate-fixture.result == 'success' && needs.spinel-build.outputs.artifact-id != '' }}
-    # Two shards by test-module name: one runner took ~20 min of a 25 min
-    # ceiling once the parity modules landed. Each test is one Spinel
-    # build of about the same cost, so balance by count: `parity` lists
-    # 20 tests' modules; `rest` skips exactly those (19 tests + the
-    # tiny_api gates), so a new module lands in `rest` by default. Each shard reports its own output key (ci-plan.py
-    # requires both), since a matrix's shared output would let one
-    # shard's success hide the other's failure.
+    # Three shards, each taking every third test of the sorted list: each
+    # test is one Spinel build of about the same cost, so count balances
+    # them, and a new test spreads instead of growing a hand-kept catch-all
+    # shard (two such shards reached 25 of 25 minutes). Each shard reports
+    # its own output key (ci-plan.py requires all three), since a matrix's
+    # shared output would let one shard's success hide another's failure.
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - shard: parity
-            filter: "campfire_caches:: json_request_values:: action_controller_head:: params_wrapper:: strong_params:: cable_actions:: cable_broadcast_json:: lambda_signatures:: rails_parity::"
-          - shard: rest
-            filter: "--skip campfire_caches:: --skip json_request_values:: --skip action_controller_head:: --skip params_wrapper:: --skip strong_params:: --skip cable_actions:: --skip cable_broadcast_json:: --skip lambda_signatures:: --skip rails_parity::"
+        shard: [0, 1, 2]
     outputs:
-      parity: ${{ steps.result.outputs.parity }}
-      rest: ${{ steps.result.outputs.rest }}
+      shard-0: ${{ steps.result.outputs.shard-0 }}
+      shard-1: ${{ steps.result.outputs.shard-1 }}
+      shard-2: ${{ steps.result.outputs.shard-2 }}
     runs-on: ubuntu-latest
     timeout-minutes: 25
 
@@ -2159,13 +2171,20 @@ jobs:
           bundler-cache: true
           working-directory: ./runtime/spinel/scaffold
       - name: cargo test --test spinel_toolchain -- --ignored (${{ matrix.shard }})
-        run: cargo test --test spinel_toolchain -- --ignored --nocapture ${{ matrix.filter }}
+        run: |
+          mapfile -t all < <(cargo test --test spinel_toolchain -- --ignored --list --format terse | sed -n 's/: test$//p' | sort)
+          mine=()
+          for i in "${!all[@]}"; do
+            if (( i % 3 == ${{ matrix.shard }} )); then mine+=("${all[$i]}"); fi
+          done
+          test "${#mine[@]}" -gt 0
+          cargo test --test spinel_toolchain -- --ignored --nocapture --exact "${mine[@]}"
       # fixtures/tiny-api, the API-only app (#321): `spin build` of the
       # app entry, HTTP requests to the binary, and the model script
       # compiled natively. Filtered by name, so the ignored test named
       # after an open issue (#163) is not selected.
       - name: cargo test --test tiny_api spinel_gate_ -- --ignored
-        if: ${{ !cancelled() && matrix.shard == 'rest' }}
+        if: ${{ !cancelled() && matrix.shard == 2 }}
         run: cargo test --test tiny_api spinel_gate_ -- --ignored --nocapture
 
       # On failure, capture spinel's actual generated C for the failing
@@ -2213,7 +2232,7 @@ jobs:
         if: always()
         env:
           STATUS: ${{ job.status }}
-        run: echo "${{ matrix.shard }}=$STATUS" >> "$GITHUB_OUTPUT"
+        run: echo "shard-${{ matrix.shard }}=$STATUS" >> "$GITHUB_OUTPUT"
 
   # -------------------------------------------------------------------
   # DOM equivalence: boot Rails + the target server side-by-side and
@@ -2357,6 +2376,9 @@ jobs:
             echo '::error::Rust controller identity test did not execute successfully'
             exit 1
           fi
+      - name: cargo test --test emit_and_run render json writer on rust
+        if: ${{ !cancelled() && matrix.target == 'rust' }}
+        run: cargo test --locked --test emit_and_run render_json_record_writer_runs_on_rust -- --ignored --nocapture --exact
       - name: cargo test --test framework_tests_rust (green subset)
         id: inflector
         if: ${{ !cancelled() && matrix.target == 'rust' }}
@@ -2372,15 +2394,39 @@ jobs:
           name: ci-executed-rust-inflector-${{ github.run_attempt }}
           path: ${{ steps.inflector.outputs.bundle }}
           retention-days: 7
+      - name: cargo test --test json_builder_nested_values on rust
+        if: ${{ !cancelled() && matrix.target == 'rust' }}
+        run: cargo test --locked --test json_builder_nested_values nested_values_encode_on_rust -- --ignored --nocapture --exact
+      - name: cargo test --test json_builder_nested_values on go
+        if: ${{ !cancelled() && matrix.target == 'go' }}
+        run: cargo test --locked --test json_builder_nested_values nested_values_encode_on_go -- --ignored --nocapture --exact
+      - name: cargo test --test json_builder_nested_values on csharp
+        if: ${{ !cancelled() && matrix.target == 'csharp' }}
+        run: cargo test --locked --test json_builder_nested_values nested_values_encode_on_csharp -- --ignored --nocapture --exact
+      - name: cargo test --test truncate_separator on rust
+        if: ${{ !cancelled() && matrix.target == 'rust' }}
+        run: cargo test --locked --test truncate_separator truncate_separator_runs_on_rust -- --ignored --nocapture --exact
+      - name: cargo test --test truncate_separator on go
+        if: ${{ !cancelled() && matrix.target == 'go' }}
+        run: cargo test --locked --test truncate_separator truncate_separator_runs_on_go -- --ignored --nocapture --exact
+      - name: cargo test --test truncate_separator on csharp
+        if: ${{ !cancelled() && matrix.target == 'csharp' }}
+        run: cargo test --locked --test truncate_separator truncate_separator_runs_on_csharp -- --ignored --nocapture --exact
       - name: cargo test --test crystal_toolchain -- --ignored
         if: ${{ !cancelled() && matrix.target == 'crystal' }}
         run: cargo test --test crystal_toolchain -- --ignored --nocapture
       - name: cargo test --test framework_tests_crystal -- --ignored
         if: ${{ !cancelled() && matrix.target == 'crystal' }}
         run: cargo test --test framework_tests_crystal -- --ignored --nocapture
+      - name: cargo test --test emit_and_run render json writer on crystal
+        if: ${{ !cancelled() && matrix.target == 'crystal' }}
+        run: cargo test --locked --test emit_and_run render_json_record_writer_runs_on_crystal -- --ignored --nocapture --exact
       - name: cargo test --test framework_tests_kotlin
         if: ${{ !cancelled() && matrix.target == 'kotlin' }}
         run: cargo test --test framework_tests_kotlin -- --ignored --nocapture
+      - name: cargo test --test emit_and_run render json writer on kotlin
+        if: ${{ !cancelled() && matrix.target == 'kotlin' }}
+        run: cargo test --locked --test emit_and_run render_json_record_writer_runs_on_kotlin -- --ignored --nocapture --exact
       - name: cargo test --test framework_tests_swift
         if: ${{ !cancelled() && matrix.target == 'swift' }}
         run: |
@@ -2388,18 +2434,33 @@ jobs:
           # the libroundhouse just built for the test harness.
           cargo build --bin emit_preview --quiet
           cargo test --test framework_tests_swift -- --ignored --nocapture
+      - name: cargo test --test emit_and_run render json writer on swift
+        if: ${{ !cancelled() && matrix.target == 'swift' }}
+        run: cargo test --locked --test emit_and_run render_json_record_writer_runs_on_swift -- --ignored --nocapture --exact
       - name: cargo test --test typescript_toolchain real_blog -- --ignored
         if: ${{ !cancelled() && matrix.target == 'typescript' }}
         run: cargo test --test typescript_toolchain real_blog -- --ignored --nocapture
+      - name: cargo test --test emit_and_run render json writer on typescript
+        if: ${{ !cancelled() && matrix.target == 'typescript' }}
+        run: cargo test --locked --test emit_and_run render_json_record_writer_runs_on_typescript -- --ignored --nocapture --exact
       - name: cargo test --test framework_tests_typescript -- --ignored
         if: ${{ !cancelled() && matrix.target == 'typescript' }}
         run: cargo test --test framework_tests_typescript -- --ignored --nocapture
       - name: cargo test --test elixir_toolchain -- --ignored
         if: ${{ !cancelled() && matrix.target == 'elixir' }}
         run: cargo test --test elixir_toolchain -- --ignored --nocapture
+      - name: cargo test --test emit_and_run render json writer on elixir
+        if: ${{ !cancelled() && matrix.target == 'elixir' }}
+        run: cargo test --locked --test emit_and_run render_json_record_writer_runs_on_elixir -- --ignored --nocapture --exact
       - name: cargo test --test python_toolchain -- --ignored
         if: ${{ !cancelled() && matrix.target == 'python' }}
         run: cargo test --test python_toolchain -- --ignored --nocapture
+      - name: cargo test --test emit_and_run render json writer on go
+        if: ${{ !cancelled() && matrix.target == 'go' }}
+        run: cargo test --locked --test emit_and_run render_json_record_writer_runs_on_go -- --ignored --nocapture --exact
+      - name: cargo test --test emit_and_run render json writer on python
+        if: ${{ !cancelled() && matrix.target == 'python' }}
+        run: cargo test --locked --test emit_and_run render_json_record_writer_runs_on_python -- --ignored --nocapture --exact
       - name: Warm the dotnet CLI (first-run config is not concurrency-safe)
         if: ${{ !cancelled() && matrix.target == 'csharp' }}
         env:
@@ -2414,6 +2475,13 @@ jobs:
           DOTNET_NOLOGO: '1'
           DOTNET_CLI_TELEMETRY_OPTOUT: '1'
         run: cargo test --test csharp_toolchain -- --ignored --nocapture --test-threads=1
+      - name: cargo test --test emit_and_run render json writer on csharp
+        if: ${{ !cancelled() && matrix.target == 'csharp' }}
+        env:
+          DOTNET_SKIP_FIRST_TIME_EXPERIENCE: '1'
+          DOTNET_NOLOGO: '1'
+          DOTNET_CLI_TELEMETRY_OPTOUT: '1'
+        run: cargo test --locked --test emit_and_run render_json_record_writer_runs_on_csharp -- --ignored --nocapture --exact
       - name: scripts/compare ${{ matrix.target }}
         if: ${{ !cancelled() }}
         run: scripts/compare ${{ matrix.target }}

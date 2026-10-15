@@ -65,7 +65,7 @@ pub(crate) fn emit_go_tests(tm: &TestModule, app: &App) -> EmittedFile {
             if !app.fixtures.is_empty() {
                 writeln!(s, "\tsetupTest()").unwrap();
             }
-            let body = emit_go_controller_test_body(test, app, &ctx);
+            let body = emit_go_controller_test_body(test, tm.setup.as_ref(), app, &ctx);
             for line in body.lines() {
                 writeln!(s, "\t{line}").unwrap();
             }

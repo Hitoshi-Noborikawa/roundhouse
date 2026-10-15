@@ -4361,10 +4361,13 @@ end
 #[test]
 fn render_json_record_writer_is_unsupported_on_strict_targets() {
     use roundhouse::project::BuildTarget;
-    for target in [BuildTarget::Rust, BuildTarget::Go, BuildTarget::Typescript] {
-        let (_emitted, errors) = records_json_app().emit(target);
-        assert!(errors.iter().any(|e| e.contains("json_writer")), "{target:?}: {errors:?}");
-    }
+    let (_emitted, errors) = records_json_app().emit(BuildTarget::TypescriptWorker);
+    assert!(errors.iter().any(|e| e.contains("json_writer")), "{errors:?}");
+    // Rust builds the writer, except a `methods:` one (`render_json_record_writer_runs_on_rust`).
+    let (_emitted, errors) = json_writer_rust_app().emit(BuildTarget::Rust);
+    assert!(errors.is_empty(), "{errors:?}");
+    let (_emitted, errors) = json_writer_app().emit(BuildTarget::Rust);
+    assert!(errors.iter().any(|e| e.contains("json_writer")), "{errors:?}");
     for target in [BuildTarget::Ruby, BuildTarget::Spinel] {
         let (_emitted, errors) = records_json_app().emit(target);
         assert!(!errors.iter().any(|e| e.contains("json_writer")), "{target:?}: {errors:?}");
@@ -4374,8 +4377,259 @@ fn render_json_record_writer_is_unsupported_on_strict_targets() {
         .edit("app/models/article.rb", "  validates :title, presence: true\n", "  validates :title, presence: true\n\n  def as_json_str\n    title.to_s\n  end\n")
         .edit("config/routes.rb", "  root \"articles#index\"\n", "  root \"articles#index\"\n  get \"/own/:id\", to: \"own#show\"\n")
         .write("app/controllers/own_controller.rb", "class OwnController < ApplicationController\n  def show\n    render plain: Article.find(params[:id]).as_json_str\n  end\nend\n");
-    let (_emitted, errors) = own.emit(BuildTarget::Rust);
+    let (_emitted, errors) = own.emit(BuildTarget::TypescriptWorker);
     assert!(!errors.iter().any(|e| e.contains("json_writer")), "{errors:?}");
+}
+
+/// `render json:` of a record, of a has_many and of a loaded Relation, with `only:`, `except:` and `methods:`.
+/// One action each, in `ArticlesController`: the Rust runtime builds `params` from the path alone, and builds a controller only in the shape real-blog's take.
+fn json_writer_app() -> emit_and_run::Overlay {
+    const CONTROLLER: &str = "app/controllers/articles_controller.rb";
+    emit_and_run::real_blog()
+        .edit(CONTROLLER, "  def show\n  end\n", "  def show\n    render json: @article\n  end\n")
+        .edit(CONTROLLER, "  def edit\n  end\n", "  def edit\n    render json: @article, only: [:title, :id]\n  end\n")
+        .edit(
+            CONTROLLER,
+            "    @articles = Article.includes(:comments).order(created_at: :desc)\n",
+            "    @articles = Article.includes(:comments).order(created_at: :desc)\n    render json: @articles, methods: [:headline]\n",
+        )
+        .edit("app/models/article.rb", "  validates :title, presence: true\n", "  validates :title, presence: true\n\n  def headline\n    \"Big\"\n  end\n")
+        .edit(
+            CONTROLLER,
+            "    respond_to do |format|\n      if @article.update(article_params)\n        format.html { redirect_to @article, notice: \"Article was successfully updated.\", status: :see_other }\n        format.json { render :show, status: :ok, location: @article }\n      else\n        format.html { render :edit, status: :unprocessable_content }\n        format.json { render json: @article.errors, status: :unprocessable_content }\n      end\n    end\n",
+            "    render json: @article, except: [:body, :updated_at], status: :ok\n",
+        )
+        .edit(
+            CONTROLLER,
+            "    @article.destroy!\n\n    respond_to do |format|\n      format.html { redirect_to articles_path, notice: \"Article was successfully destroyed.\", status: :see_other }\n      format.json { head :no_content }\n    end\n",
+            "    render json: @article.comments\n",
+        )
+        .write("test/fixtures/articles.yml", JSON_WRITER_ARTICLES)
+        .write("test/fixtures/comments.yml", JSON_WRITER_COMMENTS)
+        .write("test/controllers/articles_controller_test.rb", JSON_WRITER_TEST)
+        .remove("test/models/article_test.rb")
+}
+
+const JSON_WRITER_ARTICLES: &str = "one:\n  title: A <b> & co\n  body: Long enough body text\n  created_at: 2026-01-02 03:04:05.678901\n  updated_at: 2026-01-03 00:00:00\n\ntwo:\n  title: Second\n  body: Another body text\n  created_at: 2026-01-04 00:00:00\n  updated_at: 2026-01-04 00:00:00\n";
+
+const JSON_WRITER_COMMENTS: &str = "one:\n  article: one\n  commenter: Ann\n  body: Nice\n  created_at: 2026-01-05 00:00:00\n  updated_at: 2026-01-05 00:00:00\n";
+
+/// What ActiveRecord 8.1.4 writes for these fixtures.
+const JSON_WRITER_TEST: &str = r##"require "test_helper"
+
+class ArticlesControllerTest < ActionDispatch::IntegrationTest
+  setup do
+    @article = articles(:one)
+    @second = articles(:two)
+    @comment = comments(:one)
+  end
+
+  test "a record is its columns" do
+    get article_url(@article)
+    assert_equal %({"id":#{@article.id},"title":"A \\u003cb\\u003e \\u0026 co","body":"Long enough body text","created_at":"2026-01-02T03:04:05.678Z","updated_at":"2026-01-03T00:00:00.000Z"}), response.body
+  end
+
+  test "only: writes its own order" do
+    get edit_article_url(@article)
+    assert_equal %({"title":"A \\u003cb\\u003e \\u0026 co","id":#{@article.id}}), response.body
+  end
+
+  test "except: leaves out its columns" do
+    patch article_url(@article), params: { article: { title: "unused" } }
+    assert_equal %({"id":#{@article.id},"title":"A \\u003cb\\u003e \\u0026 co","created_at":"2026-01-02T03:04:05.678Z"}), response.body
+  end
+
+  test "a has_many is its records" do
+    delete article_url(@article)
+    assert_equal %([{"id":#{@comment.id},"article_id":#{@article.id},"commenter":"Ann","body":"Nice","created_at":"2026-01-05T00:00:00.000Z","updated_at":"2026-01-05T00:00:00.000Z"}]), response.body
+  end
+
+  test "a Relation with methods: is its records and the methods" do
+    get articles_url
+    assert_equal %([{"id":#{@second.id},"title":"Second","body":"Another body text","created_at":"2026-01-04T00:00:00.000Z","updated_at":"2026-01-04T00:00:00.000Z","headline":"Big"},{"id":#{@article.id},"title":"A \\u003cb\\u003e \\u0026 co","body":"Long enough body text","created_at":"2026-01-02T03:04:05.678Z","updated_at":"2026-01-03T00:00:00.000Z","headline":"Big"}]), response.body
+  end
+end
+"##;
+
+/// The Rust project builds the writer and answers what Rails' `serializable_hash` writes.
+#[test]
+#[ignore = "requires the Rust toolchain; compiles and executes an emitted app"]
+fn render_json_record_writer_runs_on_rust() {
+    let (emitted, errors) = json_writer_rust_app().emit(roundhouse::project::BuildTarget::Rust);
+    assert!(errors.is_empty(), "{errors:?}");
+    std::fs::create_dir_all(emitted.join("tests")).unwrap();
+    std::fs::write(emitted.join("tests/json_writer.rs"), r##"
+use app::db::{self, Db};
+use app::{router, schema_sql};
+
+#[tokio::test(flavor = "multi_thread")]
+async fn record_json_is_rails_serializable_hash() {
+    db::setup_test_db(schema_sql::CREATE_TABLES);
+    Db::exec("INSERT INTO articles (title, body, created_at, updated_at) VALUES ('A <b> & co', 'Long enough body text', '2026-01-02 03:04:05.678901', '2026-01-03 00:00:00')");
+    Db::exec("INSERT INTO articles (title, body, created_at, updated_at) VALUES ('Second', 'Another body text', '2026-01-04 00:00:00', '2026-01-04 00:00:00')");
+    Db::exec("INSERT INTO comments (article_id, commenter, body, created_at, updated_at) VALUES (1, 'Ann', 'Nice', '2026-01-05 00:00:00', '2026-01-05 00:00:00')");
+    let server = axum_test::TestServer::new(router::router()).unwrap();
+    let one = r#"{"id":1,"title":"A \u003cb\u003e \u0026 co","body":"Long enough body text","created_at":"2026-01-02T03:04:05.678Z","updated_at":"2026-01-03T00:00:00.000Z"}"#;
+    let second = r#"{"id":2,"title":"Second","body":"Another body text","created_at":"2026-01-04T00:00:00.000Z","updated_at":"2026-01-04T00:00:00.000Z"}"#;
+    for (method, path, want) in [
+        ("GET", "/articles/1", one.to_string()),
+        ("GET", "/articles/1/edit", r#"{"title":"A \u003cb\u003e \u0026 co","id":1}"#.to_string()),
+        ("PATCH", "/articles/1", r#"{"id":1,"title":"A \u003cb\u003e \u0026 co","created_at":"2026-01-02T03:04:05.678Z"}"#.to_string()),
+        ("DELETE", "/articles/1", r#"[{"id":1,"article_id":1,"commenter":"Ann","body":"Nice","created_at":"2026-01-05T00:00:00.000Z","updated_at":"2026-01-05T00:00:00.000Z"}]"#.to_string()),
+        ("GET", "/articles", format!("[{second},{one}]")),
+    ] {
+        let response = match method {
+            "PATCH" => server.patch(path).form(&[("article[title]", "unused")]).await,
+            "DELETE" => server.delete(path).await,
+            _ => server.get(path).await,
+        };
+        assert_eq!(response.status_code(), 200, "{method} {path}");
+        assert_eq!(response.header("content-type"), "application/json", "{method} {path}");
+        assert_eq!(response.text(), want, "{method} {path}");
+    }
+}
+"##).unwrap();
+    let output = std::process::Command::new("cargo")
+        .args(["test", "--test", "json_writer"])
+        .env_remove("CARGO_TARGET_DIR")
+        .current_dir(&*emitted)
+        .output()
+        .expect("run the emitted Rust project's test");
+    assert!(output.status.success(), "{}\n{}\n{}", emitted.display(),
+        String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+}
+
+/// Without `methods:`, which Rust reports (`render_json_record_writer_is_unsupported_on_strict_targets`).
+fn json_writer_rust_app() -> emit_and_run::Overlay {
+    json_writer_app().edit(
+        "app/controllers/articles_controller.rb",
+        "    render json: @articles, methods: [:headline]\n",
+        "    render json: @articles\n",
+    )
+}
+
+/// The fixtures' test, as ActiveRecord 8.1.4 answers it.
+#[test]
+fn render_json_record_writer_test_passes() {
+    json_writer_app().run_test("test/controllers/articles_controller_test.rb").assert_passes();
+}
+
+/// The same test, translated to TypeScript, against the writer the TypeScript project builds.
+#[test]
+#[ignore = "requires Node; installs and runs an emitted app"]
+fn render_json_record_writer_runs_on_typescript() {
+    let (emitted, errors) = json_writer_app().emit(roundhouse::project::BuildTarget::Typescript);
+    assert!(errors.is_empty(), "{errors:?}");
+    for args in [&["install", "--silent", "--no-audit", "--no-fund"][..], &["test"][..]] {
+        let output = std::process::Command::new("npm").args(args).current_dir(&*emitted).output().expect("run npm");
+        assert!(output.status.success(), "npm {args:?} in {}\n{}\n{}", emitted.display(),
+            String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+    }
+}
+
+/// The same test, translated to Python.
+#[test]
+#[ignore = "requires Python; runs an emitted app"]
+fn render_json_record_writer_runs_on_python() {
+    let (emitted, errors) = json_writer_app().emit(roundhouse::project::BuildTarget::Python);
+    assert!(errors.is_empty(), "{errors:?}");
+    let output = std::process::Command::new("python3")
+        .args(["-m", "unittest", "discover", "-s", "tests", "-t", "."])
+        .current_dir(&*emitted)
+        .output()
+        .expect("run python unittest");
+    assert!(output.status.success(), "{}\n{}\n{}", emitted.display(),
+        String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+}
+
+/// The same test, translated to Crystal.
+#[test]
+#[ignore = "requires Crystal; builds and runs an emitted app"]
+fn render_json_record_writer_runs_on_crystal() {
+    let (emitted, errors) = json_writer_app().emit(roundhouse::project::BuildTarget::Crystal);
+    assert!(errors.is_empty(), "{errors:?}");
+    for (program, args) in [("shards", &["install"][..]), ("crystal", &["spec", "--no-color"][..])] {
+        let output = std::process::Command::new(program).args(args).current_dir(&*emitted).output().expect("run crystal");
+        assert!(output.status.success(), "{program} {args:?} in {}\n{}\n{}", emitted.display(),
+            String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+    }
+}
+
+/// The same test, translated to C#.
+#[test]
+#[ignore = "requires .NET; builds and runs an emitted app"]
+fn render_json_record_writer_runs_on_csharp() {
+    let (emitted, errors) = json_writer_app().emit(roundhouse::project::BuildTarget::CSharp);
+    assert!(errors.is_empty(), "{errors:?}");
+    let output = std::process::Command::new("dotnet")
+        .args(["test", "tests", "--nologo"])
+        .current_dir(&*emitted)
+        .output()
+        .expect("run dotnet test");
+    assert!(output.status.success(), "{}\n{}\n{}", emitted.display(),
+        String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+}
+
+/// The same test, translated to Kotlin.
+#[test]
+#[ignore = "requires Gradle; builds and runs an emitted app"]
+fn render_json_record_writer_runs_on_kotlin() {
+    let (emitted, errors) = json_writer_app().emit(roundhouse::project::BuildTarget::Kotlin);
+    assert!(errors.is_empty(), "{errors:?}");
+    let mut gradle = std::process::Command::new("gradle");
+    gradle.args(["test", "--console=plain", "--no-daemon"]).current_dir(&*emitted);
+    if let Ok(java_home) = std::env::var("KOTLIN_JAVA_HOME").or_else(|_| std::env::var("JAVA_HOME")) {
+        gradle.env("JAVA_HOME", java_home);
+    }
+    let output = gradle.output().expect("run gradle test");
+    assert!(output.status.success(), "{}\n{}\n{}", emitted.display(),
+        String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+}
+
+/// The same test, translated to Swift. macOS needs a full Xcode for XCTest (`DEVELOPER_DIR`).
+#[test]
+#[ignore = "requires Swift and XCTest; builds and runs an emitted app"]
+fn render_json_record_writer_runs_on_swift() {
+    let (emitted, errors) = json_writer_app().emit(roundhouse::project::BuildTarget::Swift);
+    assert!(errors.is_empty(), "{errors:?}");
+    let output = std::process::Command::new("swift")
+        .arg("test")
+        .current_dir(&*emitted)
+        .output()
+        .expect("run swift test");
+    assert!(output.status.success(), "{}\n{}\n{}", emitted.display(),
+        String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+}
+
+/// The same test, translated to Elixir.
+#[test]
+#[ignore = "requires Elixir; builds and runs an emitted app"]
+fn render_json_record_writer_runs_on_elixir() {
+    let (emitted, errors) = json_writer_app().emit(roundhouse::project::BuildTarget::Elixir);
+    assert!(errors.is_empty(), "{errors:?}");
+    for (args, env) in [(&["deps.get"][..], Some("test")), (&["test"][..], None)] {
+        let mut mix = std::process::Command::new("mix");
+        mix.args(args).current_dir(&*emitted).env("MIX_HOME", emitted.join(".mix"));
+        if let Some(env) = env {
+            mix.env("MIX_ENV", env);
+        }
+        let output = mix.output().expect("run mix");
+        assert!(output.status.success(), "mix {args:?} in {}\n{}\n{}", emitted.display(),
+            String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+    }
+}
+
+/// The same test, translated to Go.
+#[test]
+#[ignore = "requires Go; builds and runs an emitted app"]
+fn render_json_record_writer_runs_on_go() {
+    let (emitted, errors) = json_writer_app().emit(roundhouse::project::BuildTarget::Go);
+    assert!(errors.is_empty(), "{errors:?}");
+    for args in [&["mod", "tidy"][..], &["test", "./..."][..]] {
+        let output = std::process::Command::new("go").args(args).current_dir(&*emitted).output().expect("run go");
+        assert!(output.status.success(), "go {args:?} in {}\n{}\n{}", emitted.display(),
+            String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+    }
 }
 
 /// The same writer compiled by Spinel, where the runtime encoder does not exist.
@@ -4806,6 +5060,11 @@ fn statement_errors_app() -> emit_and_run::Overlay {
     rescue ActiveRecord::ActiveRecordError => e
       out << e.class.name
     end
+    begin
+      ActiveRecord::Base.connection.execute("INSERT INTO comments (article_id, commenter, body, created_at, updated_at) VALUES (999999, 'Cy', 'x', '2026-01-01', '2026-01-01')")
+    rescue ActiveRecord::StatementInvalid => e
+      out << e.class.name
+    end
     render plain: out.join("|")
   end
 end
@@ -4818,7 +5077,7 @@ fn statement_errors_raise_activerecords_classes() {
     statement_errors_app()
         .write(
             "test/controllers/statement_errors_controller_test.rb",
-            "require \"test_helper\"\n\nclass StatementErrorsControllerTest < ActionDispatch::IntegrationTest\n  test \"each failed statement\" do\n    get \"/statement_errors\"\n    assert_equal \"ActiveRecord::RecordNotUnique|ActiveRecord::NotNullViolation|ActiveRecord::StatementInvalid\", response.body\n  end\nend\n",
+            "require \"test_helper\"\n\nclass StatementErrorsControllerTest < ActionDispatch::IntegrationTest\n  test \"each failed statement\" do\n    get \"/statement_errors\"\n    assert_equal \"ActiveRecord::RecordNotUnique|ActiveRecord::NotNullViolation|ActiveRecord::StatementInvalid|ActiveRecord::InvalidForeignKey\", response.body\n  end\nend\n",
         )
         .run_test("test/controllers/statement_errors_controller_test.rb")
         .assert_passes();
@@ -4830,7 +5089,21 @@ fn statement_errors_raise_activerecords_classes_on_spinel() {
     let script = "Db.configure(\":memory:\")\nSchema.statements.each { |sql| Db.exec(sql) }\nActiveRecord.adapter = SqliteAdapter\nc = StatementErrorsController.new\nc.params = {}\nc.process_action(:show)\nputs c.body\n";
     let run = statement_errors_app().run_spinel(script);
     run.assert_passes();
-    assert_eq!(run.stdout, "ActiveRecord::RecordNotUnique|ActiveRecord::NotNullViolation|ActiveRecord::StatementInvalid\n");
+    assert_eq!(run.stdout, "ActiveRecord::RecordNotUnique|ActiveRecord::NotNullViolation|ActiveRecord::StatementInvalid|ActiveRecord::InvalidForeignKey\n");
+}
+
+/// A fixture naming a parent no fixture defines fails the test's setup, as Rails' `verify_foreign_keys_for_fixtures` does; the loader itself runs with referential integrity off, so fixture order does not matter.
+#[test]
+fn a_fixture_naming_a_missing_parent_fails_setup() {
+    let run = emit_and_run::real_blog()
+        .edit("test/fixtures/comments.yml", "  article: two\n", "  article: missing\n")
+        .write(
+            "test/models/fk_check_test.rb",
+            "require \"test_helper\"\n\nclass FkCheckTest < ActiveSupport::TestCase\n  test \"loads\" do\n    assert Article.count > 0\n  end\nend\n",
+        )
+        .run_test("test/models/fk_check_test.rb");
+    assert!(!run.success, "{}", run.stdout);
+    assert!(run.stdout.contains("Foreign key violations found: comments") || run.stderr.contains("Foreign key violations found: comments"), "{}\n{}", run.stdout, run.stderr);
 }
 
 /// offset. Expected values are ActiveSupport 8.1's.
@@ -5611,6 +5884,7 @@ fn offset_exists_and_caching_knobs_run() {
 
 class ArticlePagingTest < ActiveSupport::TestCase
   test "a row past the offset, and the caching knobs" do
+    Comment.delete_all
     Article.delete_all
     2.times { |i| Article.create!(title: "Paged #{i}", body: "Body text here") }
     assert Article.offset(1).exists?
@@ -6690,6 +6964,7 @@ fn relation_more_than_probes_offset_without_count() {
 
 class ArticleMoreThanTest < ActiveSupport::TestCase
   test "more_than? offsets without COUNT or mutating the relation" do
+    Comment.delete_all
     Article.delete_all
     3.times { |i| Article.create!(title: "more-#{i}", body: "Body text here") }
     rel = Article.where("title LIKE 'more-%'")
@@ -14000,14 +14275,14 @@ class ArticleCountingTest < ActiveSupport::TestCase
 
   test "a raw write transaction rolls back when its block raises" do
     connection = ActiveRecord::Base.connection
-    count = Article.count
+    count = Comment.count
     assert_raises(RuntimeError) do
       connection.raw_connection.transaction(:immediate) do
-        connection.execute("DELETE FROM articles")
+        connection.execute("DELETE FROM comments")
         raise "abandon"
       end
     end
-    assert_equal count, Article.count
+    assert_equal count, Comment.count
   end
 end
 "##)
@@ -14342,6 +14617,7 @@ fn exists_without_an_argument_asks_for_any_row_and_nil_is_false() {
 
 class ArticleExistsTest < ActiveSupport::TestCase
   test "bare exists? is any row; exists?(nil) is false" do
+    Comment.delete_all
     Article.delete_all
     assert_not Article.exists?
     assert_not Article.all.exists?
@@ -14876,6 +15152,7 @@ fn friendly_article_overlay(use_modules: &str) -> emit_and_run::Overlay {
 
 class ArticlesControllerTest < ActionDispatch::IntegrationTest
   setup do
+    Comment.delete_all
     Article.delete_all
     @gamma = Article.create!(title: "Gamma Post", body: "gamma body is long enough", slug: "gamma-post")
     # A slug that is another row's id: friendly_id looks the slug up
@@ -14929,6 +15206,7 @@ fn friendly_find_with_history_finds_a_former_slug() {
 
 class ArticlesControllerTest < ActionDispatch::IntegrationTest
   setup do
+    Comment.delete_all
     Article.delete_all
     @old = Article.create!(title: "Renamed Post", body: "renamed body is long enough", slug: "renamed-post")
     @other = Article.create!(title: "Other Post", body: "other body is long enough", slug: "other-post")

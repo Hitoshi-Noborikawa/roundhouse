@@ -57,6 +57,15 @@ class StdlibProbe
      lazy.map { |x| x + 1 }.select(&:odd?).first]
   end
 
+  def self.lazy_hits
+    ids = [3, 4, 5, 6]
+    [ids.lazy.filter_map { |i| i * 10 if i.even? }.first,
+     ids.lazy.filter_map { |i| i * 10 if i > 100 }.first.nil?,
+     ids.lazy.filter_map { |i| i * 10 if i.even? }.to_a,
+     chain.lazy.filter_map { |x| x * 2 if x.odd? }.to_a,
+     Enumerator::Product.new([1, 2], [:a, :b]).lazy.filter_map { |x, y| [x, y] if x == 2 }.to_a]
+  end
+
   def self.chain?(value)
     value.is_a?(Enumerator::Chain)
   end
@@ -78,6 +87,7 @@ raise "product" unless StdlibProbe.pairs == 4
 raise "lazy" if StdlibProbe.lazy?([1].each)
 raise "chain #{StdlibProbe.chained}" unless StdlibProbe.chained == [[1, 3], [2], [2], [10, 20, 30], [1, 2, 3], [1, 2, 3]]
 raise "lazy chain #{StdlibProbe.lazily}" unless StdlibProbe.lazily == [[1, 3], [2], [2], 3]
+raise "lazy hits #{StdlibProbe.lazy_hits}" unless StdlibProbe.lazy_hits == [40, true, [40, 60], [2, 6], [[2, :a], [2, :b]]]
 raise "chain?" unless StdlibProbe.chain?(StdlibProbe.chain) && !StdlibProbe.chain?([1].each)
 puts "stdlib constants OK"
 "#;

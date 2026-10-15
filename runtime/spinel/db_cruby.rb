@@ -153,6 +153,8 @@ module Db
     # the read() copy. Harmless on :memory: (pages are already heap).
     db.execute("PRAGMA cache_size=-65536")
     db.execute("PRAGMA mmap_size=268435456")
+    # Not SQLite's default (off): Rails' DEFAULT_PRAGMAS turn it on, as db.rb's PRAGMAS do.
+    db.execute("PRAGMA foreign_keys=ON")
     # The gem's default is 0: a second writer fails at once with
     # SQLITE_BUSY. Rails' database.yml says `timeout: 5000`, and so do
     # the binary's PRAGMAS — the harness's file database (see
@@ -351,6 +353,44 @@ module Db
       end
       raise cleanup_error if cleanup_error && !request_failed
     end
+  end
+
+  # Rails' SQLite `disable_referential_integrity`: fixtures load and tables empty in any order. Not foreign_keys=OFF alone: that pragma is a no-op inside a transaction, where defer_foreign_keys moves the check to COMMIT instead.
+  def self.without_foreign_keys(&block)
+    on_lease { foreign_keys_off(&block) }
+  end
+
+  def self.foreign_keys_off
+    Db.exec("PRAGMA defer_foreign_keys = ON")
+    Db.exec("PRAGMA foreign_keys = OFF")
+    result = nil
+    begin
+      result = yield
+    ensure
+      Db.exec("PRAGMA defer_foreign_keys = OFF")
+      Db.exec("PRAGMA foreign_keys = ON")
+    end
+    result
+  end
+
+  # Not a lease of its own when the caller holds one: with a pool of one handle, the second checkout waits for the first forever.
+  def self.on_lease(&block)
+    in_lease? ? yield : Db.with_connection(&block)
+  end
+
+  # Rails' `check_all_foreign_keys_valid!`, which its fixture loader runs after a load (`verify_foreign_keys_for_fixtures`).
+  def self.check_foreign_keys!
+    tables = []
+    on_lease do
+      st = Db.prepare("PRAGMA foreign_key_check")
+      while Db.step?(st)
+        table = Db.column_text(st, 0)
+        tables << table unless tables.include?(table)
+      end
+      Db.finalize(st)
+    end
+    raise ActiveRecord::StatementInvalid, "Foreign key violations found: " + tables.join(", ") unless tables.empty?
+    nil
   end
 
   def self.with_connection

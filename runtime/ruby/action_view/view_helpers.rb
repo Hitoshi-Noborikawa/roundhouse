@@ -408,11 +408,33 @@ module ActionView
         s.include?("}")
     end
 
-    def self.truncate(s, length: 30, omission: "...")
+    # `separator:` cuts at the last occurrence of `separator` at or
+    # before the omission-adjusted cutoff, so a truncated string doesn't
+    # split mid-word — ActiveSupport's `String#truncate`
+    # (active_support/core_ext/string/filters.rb) algorithm, read off
+    # the installed gem and confirmed against Rails 8.1.4's own output
+    # (rubys/roundhouse#812). `omission:` alone (no separator) is
+    # unchanged from before.
+    def self.truncate(s, length: 30, omission: "...", separator: nil)
       return s if s.length <= length
       cutoff = length - omission.length
-      cutoff = 0 if cutoff < 0
+      return omission if cutoff <= 0
+      unless separator.nil?
+        found = rindex_at_or_before(s, separator, cutoff)
+        cutoff = found if found >= 0
+      end
       "#{s[0, cutoff]}#{omission}"
+    end
+
+    # Not `s.rindex(sub, pos)`, which no strict target's runtime answers, and -1 rather than nil, which Go and C# do not narrow from a local.
+    def self.rindex_at_or_before(s, sub, pos)
+      i = s.length - sub.length
+      i = pos if pos < i
+      while i >= 0
+        return i if s[i, sub.length] == sub
+        i -= 1
+      end
+      -1
     end
 
     # Rails 8.1.4's ActionView::TextHelper#word_wrap for positive widths.

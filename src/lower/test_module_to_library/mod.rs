@@ -264,7 +264,7 @@ pub fn lower_test_modules_with_inner(
             info.instance_methods.entry(sym.clone()).or_insert_with(|| sig());
             info.instance_method_kinds
                 .entry(sym)
-                .or_insert(AccessorKind::Method);
+                .or_insert(minitest_kind(name));
         }
         // Mix in fixture helpers — `articles(:one)` returns Article.
         for (helper_name, sig) in &fixture_helpers {
@@ -1042,6 +1042,11 @@ const MINITEST_INSTANCE_METHODS: &[(&str, SigBuilder)] = &[
     ("flash", || crate::lower::typing::fn_sig(vec![], Ty::Untyped)),
 ];
 
+/// `response` is a reader: every test runtime keeps it as a field (TypeScript's `response: any`, Python's `TestResponse`), so a call to it fails.
+fn minitest_kind(name: &str) -> AccessorKind {
+    if name == "response" { AccessorKind::AttributeReader } else { AccessorKind::Method }
+}
+
 fn fn_sig_one(p: Ty, ret: Ty) -> Ty {
     crate::lower::typing::fn_sig(vec![(Symbol::from("arg"), p)], ret)
 }
@@ -1182,7 +1187,7 @@ fn insert_minitest_test_baseline(classes: &mut HashMap<ClassId, ClassInfo>) {
     for (name, sig) in MINITEST_INSTANCE_METHODS.iter() {
         let sym = Symbol::from(*name);
         info.instance_methods.insert(sym.clone(), sig());
-        info.instance_method_kinds.insert(sym, AccessorKind::Method);
+        info.instance_method_kinds.insert(sym, minitest_kind(name));
     }
     classes.insert(
         ClassId(Symbol::from("Minitest::Test")),

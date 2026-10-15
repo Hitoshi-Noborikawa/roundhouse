@@ -28,6 +28,7 @@ pub(super) struct GoTestCtx<'a> {
 
 pub(super) fn emit_go_controller_test_body(
     test: &Test,
+    setup: Option<&Expr>,
     app: &App,
     ctx: &GoTestCtx,
 ) -> String {
@@ -37,6 +38,10 @@ pub(super) fn emit_go_controller_test_body(
     // `@article` → `article := ArticlesOne()`.
     let walked = crate::lower::walk_controller_ivars(&test.body);
     for ivar in walked.ivars_read_without_assign() {
+        if let Some((fixture, label)) = setup.and_then(|s| setup_fixture(s, &ivar, ctx)) {
+            out.push_str(&format!("{} := {}{}()\n", ivar.as_str(), crate::naming::camelize(fixture.as_str()), go_field_name(&label)));
+            continue;
+        }
         let plural = crate::naming::pluralize_snake(ivar.as_str());
         if ctx.fixture_names.iter().any(|s| s.as_str() == plural) {
             out.push_str(&format!(
@@ -58,6 +63,23 @@ pub(super) fn emit_go_controller_test_body(
         out.push('\n');
     }
     out
+}
+
+/// The `@<ivar> = <fixture>(:<label>)` a setup assigns, as (fixture, label).
+fn setup_fixture(setup: &Expr, ivar: &crate::ident::Symbol, ctx: &GoTestCtx) -> Option<(crate::ident::Symbol, String)> {
+    let value = crate::lower::test_body_stmts(setup).into_iter().rev().find_map(|stmt| match &*stmt.node {
+        ExprNode::Assign { target: LValue::Ivar { name }, value } if name == ivar => Some(value),
+        _ => None,
+    })?;
+    let ExprNode::Send { recv: None, method, args, .. } = &*value.node else { return None };
+    let [arg] = args.as_slice() else { return None };
+    let ExprNode::Lit { value: Literal::Sym { value: label } } = &*arg.node else { return None };
+    ctx.fixture_names.contains(method).then(|| (method.clone(), label.to_string()))
+}
+
+/// `response`, the request's `resp`.
+fn is_response(e: &Expr) -> bool {
+    matches!(&*e.node, ExprNode::Send { recv: None, method, args, .. } if method.as_str() == "response" && args.is_empty())
 }
 
 fn emit_go_ctrl_test_stmt(stmt: &Expr, app: &App, ctx: &GoTestCtx) -> String {
@@ -302,6 +324,10 @@ fn emit_go_ctrl_test_expr(expr: &Expr, app: &App, ctx: &GoTestCtx) -> String {
                     return format!("{class}Count()");
                 }
             }
+            // Not `DerefString`: a response's body is a plain string, not a nullable column.
+            if args.is_empty() && is_response(r) {
+                return format!("resp.{}", go_field_name(m));
+            }
             if args.is_empty() {
                 let recv_s = match &*r.node {
                     ExprNode::Ivar { name } | ExprNode::Var { name, .. } => {
@@ -335,6 +361,20 @@ fn emit_go_ctrl_test_expr(expr: &Expr, app: &App, ctx: &GoTestCtx) -> String {
             } else {
                 format!("{method}({})", args_s.join(", "))
             }
+        }
+        ExprNode::StringInterp { parts } => {
+            let mut format = String::new();
+            let mut values = Vec::new();
+            for part in parts {
+                match part {
+                    crate::expr::InterpPart::Text { value } => format.push_str(&value.replace('%', "%%")),
+                    crate::expr::InterpPart::Expr { expr } => {
+                        format.push_str("%v");
+                        values.push(emit_go_ctrl_test_expr(expr, app, ctx));
+                    }
+                }
+            }
+            format!("fmt.Sprintf({format:?}, {})", values.join(", "))
         }
         _ => "nil /* TODO expr */".to_string(),
     }

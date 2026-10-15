@@ -1120,6 +1120,8 @@ class DbPool
     # on OS or power failure. That is the guarantee campfire ships with,
     # so it is the one to match.
     "PRAGMA synchronous=NORMAL",
+    # Not SQLite's default (off): Rails' DEFAULT_PRAGMAS turn it on, so a row naming a missing parent raises InvalidForeignKey.
+    "PRAGMA foreign_keys=ON",
   ].freeze
 
   def initialize(path, n)
@@ -1468,6 +1470,37 @@ module Db
   # rebind the connection and, on release, unbind the outer lease's.
   def self.in_lease?
     !Thread.current[:db_conn].nil?
+  end
+
+  # Rails' SQLite `disable_referential_integrity`: fixtures load and tables empty in any order. Not foreign_keys=OFF alone: that pragma is a no-op inside a transaction, where defer_foreign_keys moves the check to COMMIT instead.
+  def self.without_foreign_keys
+    Db.with_connection do
+      Db.exec("PRAGMA defer_foreign_keys = ON")
+      Db.exec("PRAGMA foreign_keys = OFF")
+      result = nil
+      begin
+        result = yield
+      ensure
+        Db.exec("PRAGMA defer_foreign_keys = OFF")
+        Db.exec("PRAGMA foreign_keys = ON")
+      end
+      result
+    end
+  end
+
+  # Rails' `check_all_foreign_keys_valid!`, which its fixture loader runs after a load (`verify_foreign_keys_for_fixtures`).
+  def self.check_foreign_keys!
+    tables = []
+    Db.with_connection do
+      st = Db.prepare("PRAGMA foreign_key_check")
+      while Db.step?(st)
+        table = Db.column_text(st, 0)
+        tables << table unless tables.include?(table)
+      end
+      Db.finalize(st)
+    end
+    raise ActiveRecord::StatementInvalid, "Foreign key violations found: " + tables.join(", ") unless tables.empty?
+    nil
   end
 
   def self.with_connection
