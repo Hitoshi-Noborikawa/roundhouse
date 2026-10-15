@@ -140,6 +140,32 @@ impl Model {
         })
     }
 
+    /// The association on this model, the `through:` model, that
+    /// supplies the rows of `through_assoc`. This is Rails'
+    /// `source_reflection_names`: the `source:` name when it is given,
+    /// and otherwise the singular name, then the name itself. `None`
+    /// when no candidate is declared here, or when both are (Rails
+    /// raises `AmbiguousSourceReflectionForThroughAssociation`). Never
+    /// match the source by class: a model can have two associations to
+    /// one class, and each one gives other rows.
+    pub fn through_source(&self, through_assoc: &Association) -> Option<&Association> {
+        let Association::HasMany { name, source, .. } = through_assoc else { return None };
+        let mut candidates = match source {
+            Some(source) => vec![source.clone()],
+            None => vec![Symbol::from(crate::naming::singularize(name.as_str())), name.clone()],
+        };
+        candidates.dedup();
+        // A later declaration of a name replaces an earlier one, as in Rails.
+        let found = candidates
+            .iter()
+            .filter_map(|c| self.associations().filter(|a| a.name() == c).last())
+            .collect::<Vec<_>>();
+        match found.as_slice() {
+            [one] => Some(one),
+            _ => None,
+        }
+    }
+
     /// Like `associations()`, but paired with each declaration's source
     /// span — for lowerers that stamp synthesized methods with the
     /// `has_many`/`belongs_to` line they came from.
@@ -415,6 +441,17 @@ pub enum Association {
         #[serde(default, skip_serializing_if = "is_false")]
         foreign_key_explicit: bool,
         through: Option<Symbol>,
+        /// The `source:` option as written. It names the association on
+        /// the `through:` model that supplies the rows. Read it through
+        /// [`Model::through_source`], which also covers an omitted
+        /// `source:`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        source: Option<Symbol>,
+        /// Written with `class_name:` or `source_type:`. Otherwise app
+        /// assembly sets the `target` of a `through:` association to the
+        /// class of its source association, as Rails does.
+        #[serde(default, skip_serializing_if = "is_false")]
+        class_explicit: bool,
         dependent: Dependent,
         /// `has_many :notifications, as: :notifiable` — this side is
         /// one implementor of the named polymorphic interface; rows

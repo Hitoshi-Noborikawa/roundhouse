@@ -150,6 +150,8 @@ mod controller_super_ivars;
 mod helper_method_session;
 #[path = "emit_and_run/assoc_primary_key.rs"]
 mod assoc_primary_key;
+#[path = "emit_and_run/through_source_class.rs"]
+mod through_source_class;
 #[path = "emit_and_run/assoc_pluck_typed.rs"]
 mod assoc_pluck_typed;
 #[path = "emit_and_run/action_controller_head.rs"]

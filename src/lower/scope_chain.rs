@@ -1521,9 +1521,9 @@ pub fn build_assoc_registry(models: &[Model]) -> AssocRegistry {
                 // (`Tag.joins(:stories)` → JOIN taggings ON tag_id, JOIN
                 // stories ON story_id). Same fk resolution as the
                 // through-reader lowering: the through association names
-                // the join model; its `belongs_to` matching the assoc's
-                // target class supplies the source fk (survives `source:`
-                // renames, which ingest folds into `target`).
+                // the join model; its source association, found by name
+                // (`Model::through_source`), supplies the source fk when
+                // it is a `belongs_to`.
                 Association::HasMany { name, target, through: Some(thr_name), .. } => {
                     // A keyed hop is refused at synthesis; no join tail
                     // is better than one that joins on `id`.
@@ -1540,10 +1540,9 @@ pub fn build_assoc_registry(models: &[Model]) -> AssocRegistry {
                     let Some(thr_model) = models.iter().find(|tm| &tm.name == thr_target) else {
                         continue;
                     };
-                    let Some(Association::BelongsTo { foreign_key: src_fk, primary_key: src_pk, .. }) =
-                        thr_model.associations().find(|a| {
-                            matches!(a, Association::BelongsTo { target: t, .. } if t == target)
-                        })
+                    let Some(Association::BelongsTo {
+                        foreign_key: src_fk, primary_key: src_pk, polymorphic: false, ..
+                    }) = thr_model.through_source(a)
                     else {
                         continue;
                     };

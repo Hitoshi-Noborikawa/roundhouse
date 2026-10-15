@@ -239,6 +239,8 @@ fn parse_sequel_association(
                 foreign_key,
                 foreign_key_explicit,
                 through: None,
+                source: None,
+                class_explicit: false,
                 dependent,
                 as_interface: None,
                 scope: order_expr,
