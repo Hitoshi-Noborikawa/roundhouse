@@ -26,6 +26,12 @@ const CONTRACT: &str = r#"require_relative "app/models/sponge"
 require_relative "app/models/utils"
 require_relative "runtime/secure_random_stub"
 
+def assert_binary_bytes(bytes, length)
+  raise "wrong byte length for #{length}: #{bytes.bytesize}" unless bytes.bytesize == length
+  raise "wrong encoding for #{length}: #{bytes.encoding.name}" unless bytes.encoding.name == "ASCII-8BIT"
+  raise "invalid binary encoding for #{length}" unless bytes.valid_encoding?
+end
+
 # The test reopen stubs renderers, not the package's random_bytes primitive.
 SecureRandom.stub_alphanumeric("fixed")
 SecureRandom.stub_uuid("fixed")
@@ -36,15 +42,27 @@ srand(12345)
 second = OpenSSL::Random.random_bytes(32)
 raise "random bytes repeated after srand" if first == second
 
-# Cross the native package's single-draw boundary, and include an empty draw.
-[0, 1, 16, 32, 256, 257, 1024].each do |length|
-  bytes = OpenSSL::Random.random_bytes(length)
-  raise "wrong byte length for #{length}: #{bytes.bytesize}" unless bytes.bytesize == length
+# Cover empty, single-draw, and multi-draw results, including both sides of
+# successive native chunk boundaries. Both facade names must preserve the
+# binary contract when the draw is nested in another call.
+[0, 1, 16, 32, 255, 256, 257, 511, 512, 513, 1024].each do |length|
+  assert_binary_bytes(OpenSSL::Random.random_bytes(length), length)
+  assert_binary_bytes(OpenSSL::RandomSource.random_bytes(length), length)
 end
+
+assert_binary_bytes(OpenSSL::Random.random_bytes(257), 257)
+assert_binary_bytes(OpenSSL::RandomSource.random_bytes(256 + 1), 257)
+assert_binary_bytes(OpenSSL::RandomSource.random_bytes(OpenSSL::Random.random_bytes(1).bytesize + 256), 257)
 
 begin
   OpenSSL::Random.random_bytes(-1)
   raise "negative length was accepted"
+rescue ArgumentError
+end
+
+begin
+  OpenSSL::RandomSource.random_bytes(-1)
+  raise "negative length was accepted through RandomSource"
 rescue ArgumentError
 end
 
@@ -97,8 +115,23 @@ fn run_twice(mut command: Command) {
 }
 
 #[test]
-fn sponge_random_uses_entropy_and_preserves_lengths() {
+fn sponge_random_uses_entropy_and_preserves_binary_strings() {
     let emitted = facade_tree();
+    // General consumer aliases are supported by CRuby; the native SDK only
+    // admits the facade's declared OpenSSL::Random alias in this contract.
+    let aliases = r#"
+RandomBytes = OpenSSL::Random
+[0, 1, 16, 32, 255, 256, 257, 511, 512, 513, 1024].each do |length|
+  assert_binary_bytes(RandomBytes.random_bytes(length), length)
+end
+begin
+  RandomBytes.random_bytes(-1)
+  raise "negative length was accepted through a consumer alias"
+rescue ArgumentError
+end
+"#;
+    std::fs::write(emitted.join("contract.rb"), format!("{CONTRACT}{aliases}"))
+        .expect("write Ruby consumer alias");
     let mut command = Command::new("ruby");
     command.arg("contract.rb").current_dir(&emitted);
     run_twice(command);

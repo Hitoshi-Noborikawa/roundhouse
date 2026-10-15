@@ -88,7 +88,8 @@ end
 module OpenSSL
   module RandomSource
     def self.random_bytes(n)
-      SecureRandom.random_bytes(n)
+      # Multi-draw SDK buffers can be UTF-8; OpenSSL always returns binary bytes.
+      SecureRandom.random_bytes(n).b
     end
   end
 
