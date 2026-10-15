@@ -5723,6 +5723,19 @@ fn report_unsupported_bundled_constants(app: &App, target: BuildTarget) {
                 );
             }
         }
+        // `translate_site` / `translate_runtime` are reported with their call (`report_i18n_table_sites`).
+        if !matches!(target, "jruby" | "spinel")
+            && let crate::expr::ExprNode::Send { recv: Some(recv), method, .. } = &*expr.node
+            && matches!(&*recv.node, crate::expr::ExprNode::Const { path } if path.iter().map(|s| s.as_str()).skip_while(|s| s.is_empty()).eq(["I18n"]))
+            && !matches!(method.as_str(), "translate_site" | "translate_runtime")
+        {
+            emit::diagnostics::report_unsupported(
+                expr.span,
+                target,
+                "I18n",
+                format!("`I18n.{}` is the Ruby-family runtime's (the locale in effect, switching it, or a missing translation's answer); the {target} runtime ships none", method.as_str()),
+            );
+        }
         if matches!(&*expr.node, crate::expr::ExprNode::Const { .. }) {
             if let Some(crate::ty::Ty::Class { id, .. }) = &expr.ty {
                 report_unavailable_class_value(app, target, id.0.as_str(), expr.span);
