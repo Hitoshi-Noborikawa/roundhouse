@@ -212,6 +212,10 @@ pub fn apply_job_class_side(app: &mut App) -> Vec<Diagnostic> {
                         },
                     );
                     v.ty = ty.clone();
+                    if p.rest {
+                        v.ty = Some(Ty::Array { elem: std::sync::Arc::new(ty.clone().unwrap_or(Ty::Untyped)) });
+                        return Expr::new(span, ExprNode::Splat { value: v });
+                    }
                     v
                 })
                 .collect();
