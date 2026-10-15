@@ -15664,3 +15664,26 @@ fn a_controller_reads_params_into_a_local_on_rust() {
     assert!(errors.is_empty(), "{errors:?}");
     run_emitted(&emitted, &[("cargo", &["test", "--quiet"])]);
 }
+
+/// A controller test whose setup names a fixture other than `one`.
+fn setup_fixture_label_app() -> emit_and_run::Overlay {
+    // In `ArticlesControllerTest`: a test class named for no controller is not emitted.
+    emit_and_run::real_blog().write(
+        "test/controllers/articles_controller_test.rb",
+        "require \"test_helper\"\n\nclass ArticlesControllerTest < ActionDispatch::IntegrationTest\n  setup do\n    @article = articles(:two)\n  end\n\n  test \"shows the fixture the setup names\" do\n    get article_url(@article)\n    assert_response :success\n    assert_select \"h1\", \"Understanding MVC Architecture\"\n  end\nend\n",
+    )
+}
+
+#[test]
+fn a_controller_test_reads_the_fixture_its_setup_names() {
+    setup_fixture_label_app().run_test("test/controllers/articles_controller_test.rb").assert_passes();
+}
+
+/// Rust primed every such ivar with the `one` fixture, whatever the setup named.
+#[test]
+#[ignore = "requires the Rust toolchain; builds and runs an emitted app"]
+fn a_controller_test_reads_the_fixture_its_setup_names_on_rust() {
+    let (emitted, errors) = setup_fixture_label_app().emit(roundhouse::project::BuildTarget::Rust);
+    assert!(errors.is_empty(), "{errors:?}");
+    run_emitted(&emitted, &[("cargo", &["test", "--quiet"])]);
+}
