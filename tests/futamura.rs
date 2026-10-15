@@ -564,6 +564,62 @@ end
     fs::remove_dir_all(&out).unwrap();
 }
 
+/// A method's own `&block` parameter (an `around_action` filter method
+/// written `def with_x(&block); block.call; end`) used to stay untyped
+/// through the controller→library lowering: `type_method_body` re-types
+/// each method body from scratch and seeded only the signature's
+/// params, never the method's own block param, so it read back as the
+/// unresolved `Var` sentinel. Untyped, the planner's `block.call` fanned
+/// out to every app method named `call`, including an unrelated class's
+/// unsupported one. Fixed by seeding the block param the same way the
+/// analyzer already does (`captured_block_ty`/the declared signature),
+/// so `classes_of` answers "no app class" and no fan-out happens.
+#[test]
+fn a_methods_own_block_param_is_not_app_dispatch() {
+    let src = scratch("blockcall-src");
+    let out = scratch("blockcall-out");
+    write(&src, "Gemfile", b"source \"https://rubygems.org\"\ngem \"rails\"\n");
+    write(&src, "config/routes.rb", b"Rails.application.routes.draw do\n  get \"widgets\" => \"widgets#index\"\nend\n");
+    write(&src, "app/controllers/application_controller.rb", br#"class ApplicationController < ActionController::Base
+  around_action :with_x
+
+  def with_x(&block)
+    block.call
+  end
+end
+"#);
+    write(&src, "app/controllers/widgets_controller.rb", br#"class WidgetsController < ApplicationController
+  def index
+    @name = "hi"
+  end
+end
+"#);
+    write(&src, "app/views/widgets/index.html.erb", b"<%= @name %>\n");
+    // Unrelated: its own `call`, with an unsupported body. Before the
+    // fix, `block.call`'s untyped receiver fans out to this.
+    write(&src, "app/lib/gadget.rb", br#"class Gadget
+  def call
+    Frobnicator::Spinner.new.spin
+  end
+end
+"#);
+
+    let run = Command::new(env!("CARGO_BIN_EXE_roundhouse"))
+        .args(["--target", "futamura", "--survey", "-o"])
+        .arg(&out)
+        .arg(&src)
+        .env("ROUNDHOUSE_FUTAMURA_LEDGER", "1")
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&run.stderr);
+    assert!(run.status.success(), "{stderr}");
+    assert!(!stderr.contains("Gadget") && !stderr.contains("Frobnicator"), "{stderr}");
+    assert!(stderr.contains("whole-route: 1 GET action(s) served by the lowered app; 0 left to Rails"), "{stderr}");
+
+    fs::remove_dir_all(&src).unwrap();
+    fs::remove_dir_all(&out).unwrap();
+}
+
 /// A minimal app whose `ruby` emit refuses one association (a `through:`
 /// hop keyed on a non-id column, Mastodon's `Status.reblogged_by_accounts`).
 fn app_with_a_ruby_refusal(src: &Path) {
