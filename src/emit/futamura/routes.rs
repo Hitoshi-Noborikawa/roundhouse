@@ -131,7 +131,13 @@ fn is_class_side(r: &MethodReceiver) -> bool {
 /// gap's file (the survey's `IngestError::Unsupported.file`, an
 /// absolute path under the surveyed fixture) are compared in.
 fn app_relative(path: &str) -> String {
-    path.rsplit_once("/app/").map(|(_, r)| format!("app/{r}")).unwrap_or_else(|| path.to_string())
+    // `IngestError::Unsupported.file` is `Path::display()` of wherever
+    // the survey walked, which on Windows carries `\` separators; the
+    // match below (and `view_prefix`'s `/`-joined prefix) only ever
+    // looks for `/`, so a backslash path would never trim down to
+    // `app/...` and a gap on it would silently stop blocking its route.
+    let path = path.replace('\\', "/");
+    path.rsplit_once("/app/").map(|(_, r)| format!("app/{r}")).unwrap_or(path)
 }
 
 /// A span's file the way the ingest-gap ledger's paths are shaped:
@@ -724,7 +730,7 @@ fn may_overlap(a: &str, b: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::may_overlap;
+    use super::{app_relative, gap_blocking, may_overlap, view_prefix};
 
     #[test]
     fn overlap_is_segmentwise() {
@@ -733,5 +739,34 @@ mod tests {
         assert!(!may_overlap("/domains/:id", "/domain/:id"));
         assert!(!may_overlap("/domains/:id/edit", "/domains/:id"));
         assert!(may_overlap("/files/*path", "/anything/at/all"));
+    }
+
+    /// `IngestError::Unsupported.file` is `Path::display()` of wherever
+    /// the survey walked; on Windows that's backslash-separated, and
+    /// `app_relative`'s `/app/` match (and `view_prefix`'s `/`-joined
+    /// prefix) must still find it there.
+    #[test]
+    fn app_relative_normalizes_windows_separators() {
+        assert_eq!(
+            app_relative(r"C:\ci\fixture\app\controllers\widgets_controller.rb"),
+            "app/controllers/widgets_controller.rb"
+        );
+        assert_eq!(
+            app_relative(r"C:\ci\fixture\app\views\gadget_styles\show.css.erb"),
+            "app/views/gadget_styles/show.css.erb"
+        );
+    }
+
+    /// A gap recorded with a Windows path must still block the route
+    /// whose conventional view it names — this is `gap_blocking`'s own
+    /// match, downstream of `app_relative`.
+    #[test]
+    fn gap_blocking_matches_a_windows_style_view_path() {
+        let gaps = vec![(
+            r"C:\ci\fixture\app\views\gadget_styles\show.css.erb".to_string(),
+            "view template not ingested: erb".to_string(),
+        )];
+        let prefix = view_prefix("GadgetStylesController", "show");
+        assert!(gap_blocking(&gaps, None, &prefix).is_some());
     }
 }
