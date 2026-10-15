@@ -9926,7 +9926,10 @@ pub(super) fn fallbacks_line(line: &str, default: &str) -> Option<Result<Option<
     Some(match value {
         "true" => Ok(Some(vec![default.to_string()])),
         "false" | "nil" => Ok(None),
-        _ => locale_list(value).map(Some).ok_or_else(|| format!("`fallbacks = {value}` is not a list of locales")),
+        // Not the app's default for `I18n.default_locale`: a config file runs before the i18n railtie applies it, so the gem's `:en` is what it reads.
+        _ => locale_list(&value.replace("I18n.default_locale", ":en"))
+            .map(Some)
+            .ok_or_else(|| format!("`fallbacks = {value}` is not a list of locales")),
     })
 }
 

@@ -169,6 +169,28 @@ fn an_environment_s_fallbacks_win_there() {
         .assert_passes();
 }
 
+/// `config.i18n.fallbacks = [I18n.default_locale]` in an environment's
+/// file reads the gem's `:en`: the file runs before the i18n railtie
+/// applies the app's `default_locale` (here `:pl`), so a Polish lookup
+/// still falls back to English.
+#[test]
+fn a_fallback_to_i18n_default_locale_reads_the_gem_s_default() {
+    locales_app()
+        .edit("config/application.rb", "    config.i18n.default_locale = :en
+    config.i18n.fallbacks = [ :en ]
+", "    config.i18n.default_locale = :pl
+")
+        .edit(
+            "config/environments/development.rb",
+            "Rails.application.configure do\n",
+            "Rails.application.configure do\n  config.i18n.fallbacks = [I18n.default_locale]\n",
+        )
+        .run_ruby(
+            "got = [I18n.default_locale, Article.polish[2]]\nraise got.inspect unless got == [:pl, \"English only\"]\nputs \"default fallback passed\"\n",
+        )
+        .assert_passes();
+}
+
 /// `config.i18n.available_locales` computed at boot: the locales a
 /// translation can run in are not known at compile time, so a
 /// translation the app's locale files give in several locales stays an
