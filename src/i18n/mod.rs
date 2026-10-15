@@ -106,6 +106,16 @@ impl Catalog {
     }
 }
 
+/// The keys a YAML file names at its top level (`en:`, `"pt-BR":`), as
+/// `Catalog::merge_source` looks for them.
+fn top_level_keys(source: &str) -> std::collections::HashSet<String> {
+    source
+        .lines()
+        .filter(|l| !l.starts_with([' ', '\t', '#', '-']))
+        .filter_map(|l| l.split_once(':').map(|(k, _)| k.trim().trim_matches(['"', '\'']).to_string()))
+        .collect()
+}
+
 /// `I18n::Locale::Fallbacks#[]`: `locale` and its parents, then each
 /// default locale and its parents, each once.
 pub fn fallback_chain(locale: &str, defaults: &[String]) -> Vec<String> {
@@ -197,7 +207,18 @@ impl Catalog {
                 }
             }
         }
-        self.others = wanted.iter().map(|l| Catalog::load_with_gems(l, gems, files).0).collect();
+        files.sort_by(|a, b| a.0.cmp(&b.0));
+        // Not every file for every locale: a hundred locales each scanned every line of every file.
+        let tops: Vec<std::collections::HashSet<String>> = gems.iter().chain(files.iter()).map(|(_, src)| top_level_keys(src)).collect();
+        self.others = wanted
+            .iter()
+            .map(|l| {
+                let mut at = tops.iter();
+                let gems: Vec<(String, String)> = gems.iter().filter(|_| at.next().is_some_and(|t| t.contains(l))).cloned().collect();
+                let mut files: Vec<(String, String)> = files.iter().filter(|_| at.next().is_some_and(|t| t.contains(l))).cloned().collect();
+                Catalog::load_with_gems(l, &gems, &mut files).0
+            })
+            .collect();
         self.available = if available.len() > 1 { available } else { Vec::new() };
         self.fallbacks = fallbacks;
     }
