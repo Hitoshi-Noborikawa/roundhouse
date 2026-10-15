@@ -144,6 +144,11 @@ pub struct App {
     /// `sorbet/rbi/gems/`; empty otherwise.
     #[serde(default, skip_serializing_if = "crate::gem_boundary::GemBoundary::is_empty")]
     pub gem_boundary: crate::gem_boundary::GemBoundary,
+    /// The gem and DSL facts of the extensions `roundhouse.yml` lists
+    /// ([`crate::extensions`]), loaded at ingest for this app alone. Empty
+    /// when it lists none.
+    #[serde(default, skip_serializing_if = "crate::extensions::Extensions::is_empty")]
+    pub extensions: crate::extensions::Extensions,
     /// Attributes the app (and its gems) add to Action Text's sanitizer
     /// allow-list at boot — `ActionText::ContentHelper.allowed_attributes`
     /// as the initializers leave it, minus the framework defaults the
@@ -836,6 +841,7 @@ impl App {
             gem_lock: None,
             loaded_frameworks: None,
             gem_boundary: Default::default(),
+            extensions: Default::default(),
             content_helper_allowed_attributes: Vec::new(),
             content_helper_allowed_tags: Vec::new(),
             inferred_method_params: HashMap::new(),

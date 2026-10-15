@@ -18,8 +18,164 @@
 //! judged — nobody chose them. Classification is a table plus a few
 //! family rules (`rubocop-*`, `opentelemetry-*`, `aws-sdk-*`); a gem
 //! the table has never seen is `Unknown`, honestly.
+//!
+//! Ruby-family gem require and demand tables also live here. Shared extension
+//! validation reads them on both native and WASM builds.
 
 use serde::{Deserialize, Serialize};
+
+/// How an emitted body asks for a gem: a constant name or literal text.
+pub(crate) enum Marker {
+    Constant(&'static str),
+    AnyText(&'static [&'static str]),
+}
+
+/// The emitted constructor call for declared Active Storage variants.
+/// Project assembly uses it to select the image processor. An app without
+/// variants never emits this call.
+pub(crate) const VARIATION_MARKER: &str = "ActiveStorage::Variation.new(";
+
+/// The gems every ruby-family tree guarded-requires, written once.
+///
+/// Under Rails, Bundler auto-requires these; the transpiled tree loads
+/// them so app classes that reach gem constants at LOAD time (lobsters'
+/// `html_encoder.rb` runs `HTMLEntities.new` in its class body;
+/// campfire's `ApplicationPlatform < PlatformAgent` names its
+/// superclass) or at request time (bcrypt behind the synthesized
+/// `User#authenticate`, rotp behind 2FA, markly+nokogiri behind
+/// `Markdowner.to_html`) resolve.
+///
+/// svg-graph loads by file path: the gem has no `svg-graph.rb` entry
+/// file, and lobsters' Gemfile declares `require: "SVG/Graph/TimeSeries"`.
+///
+/// Kept in step with `RUNTIME_GEMS` — that table is the DEMAND (what
+/// the emitted Gemfile declares, derived from the constants `app/`
+/// names), this one is the LOAD.
+pub(crate) const GEM_REQUIRES: &[&str] = &[
+    "bcrypt",
+    "htmlentities",
+    "rotp",
+    "markly",
+    // Current lobsters' Markdowner renders through commonmarker 2.x (the
+    // ruby-bench snapshot used markly).
+    "commonmarker",
+    "nokogiri",
+    "parslet",
+    "typeid",
+    "rqrcode",
+    "rqrcode_core",
+    "SVG/Graph/TimeSeries",
+    "sentry-ruby",
+    "rails-html-sanitizer",
+    "net/http/persistent",
+    "web-push",
+];
+
+/// Whether the compiler's own tables have a Ruby-family tree declare or
+/// require `gem`: the runtime gems the emitted Gemfile declares on demand
+/// and the guarded requires in `gem_facades.rb`. Extensions validate a
+/// `rails_dependent` fact against it (`crate::extensions`).
+pub(crate) fn compiler_tree_loads_gem(gem: &str) -> bool {
+    compiler_runtime_gems().iter().any(|(_, loaded)| *loaded == gem) || GEM_REQUIRES.contains(&gem)
+}
+
+/// The compiler's own runtime gem rows; an app's extensions append to them
+/// in `apply_runtime_gem_wiring`.
+pub(crate) fn compiler_runtime_gems() -> &'static [(Marker, &'static str)] {
+    // Kept in step with the guarded list in `runtime/gem_facades.rb`:
+    // (constant an emitted body names, gem that defines it). Only gems
+    // whose absence is a RUNTIME error belong here — the list is the
+    // façade's, not a survey of what an app might like.
+    const RUNTIME_GEMS: [(Marker, &str); 16] = [
+        (Marker::Constant("BCrypt"), "bcrypt"),
+        (Marker::Constant("HTMLEntities"), "htmlentities"),
+        (Marker::Constant("ROTP"), "rotp"),
+        (Marker::Constant("Markly"), "markly"),
+        (Marker::Constant("Commonmarker"), "commonmarker"),
+        (Marker::Constant("Nokogiri"), "nokogiri"),
+        (Marker::Constant("Parslet"), "parslet"),
+        (Marker::Constant("TypeID"), "typeid"),
+        (Marker::Constant("RQRCode"), "rqrcode"),
+        (Marker::Constant("RQRCodeCore"), "rqrcode_core"),
+        // campfire's web push builds one `Net::HTTP::Persistent` pool
+        // per process (`WebPush::Pool`), and the gem went undeclared
+        // exactly as bcrypt did — the façade names the constant and
+        // nothing put it in the Gemfile.
+        //
+        // ITS ABSENCE IS FATAL TO A WRITE, not to a feature, and that
+        // is why it belongs in this table rather than in a ledger. The
+        // job adapter is `:inline`, so `Room::MessagePusher` runs
+        // INSIDE the message-create request: with no gem, every
+        // `POST /rooms/N/messages` answers 500 with
+        // `uninitialized constant Net::HTTP::Persistent`. Found by the
+        // ruby socket lane, which is the first harness to post a
+        // message on this tree WITHOUT the walk's stubs spliced in —
+        // the HTTP bench lanes only GET, and campfire-compare stubs the
+        // pusher. A gem the app depends on is not a modeling gap; it is
+        // a line in the Gemfile.
+        (Marker::Constant("Net::HTTP::Persistent"), "net-http-persistent"),
+        // The thread pools that same `WebPush::Pool` posts to. Ported for
+        // spinel (runtime/spinel/concurrent.rb) and swapped for the gem on
+        // this lane (`ruby_runtime_files`), so the tree must declare it —
+        // it is only ever in the lock today as sentry-ruby's dependency.
+        (Marker::Constant("Concurrent"), "concurrent-ruby"),
+        // The gem those pools deliver through. `WEB_PUSH_STUB_REOPEN`
+        // was written to sit on top of it — `alias_method
+        // :payload_send_without_stub, :payload_send if method_defined?` —
+        // and nothing had ever put the gem underneath: the app's
+        // `WebPush::Pool#deliver` rescues `WebPush::ExpiredSubscription`,
+        // a constant only the gem defines on this lane, and its suite
+        // raises one through the slot. With the gem in the tree an
+        // unstubbed `payload_send` is a real delivery.
+        (Marker::Constant("WebPush"), "web-push"),
+        // campfire's message helpers rescue through
+        // `Sentry.capture_exception`, and the gem was standing in
+        // `scripts/campfire-walk-stubs.rb` as a hand-written module. A
+        // gem the app depends on is not a modeling gap; it is a line in
+        // the Gemfile, which is what this table is for. MEASURED: the
+        // real gem loads in the emitted tree under CRuby.
+        //
+        (Marker::Constant("Sentry"), "sentry-ruby"),
+        // `platform_agent` USED TO BE HERE, and is deliberately not any
+        // more: `runtime/ruby/user_agent.rb` ports it, along with the
+        // `useragent` it delegates to. Requiring the gem beside the port
+        // would redefine `PlatformAgent` and `UserAgent` on the CRuby
+        // tree alone, so the ruby lane would be running the GEM while
+        // every strict lane ran the port — and a sibling lane is
+        // evidence only if it runs the same code. The port's own suite
+        // (`runtime/ruby/test/user_agent_test.rb`) compares it against
+        // the real gems instead, which is where that comparison belongs.
+        // rails-html-sanitizer, and it is the first entry whose demand
+        // is OURS rather than the app's: no campfire file names
+        // `Rails::HTML`, but `ActionView::ViewHelpers.sanitize` is what
+        // a bare `sanitize` / `strip_tags` / `auto_link` in an app body
+        // lowers to, and the CRuby overlay serves those from the real
+        // gem. So the marker is the emitted CALL, the same shape the
+        // test table already uses for mocha.
+        //
+        // A Gemfile line rather than a port because the safe-list pass
+        // is HTML5 tree construction, not filtering — see the header of
+        // ruby_overlay/runtime/action_view_sanitize.rb. Its closure is
+        // loofah + crass + nokogiri, and nokogiri is already declared by
+        // an entry above for any app that reaches this one.
+        (
+            Marker::AnyText(&[
+                "ActionView::ViewHelpers.sanitize(",
+                "ActionView::ViewHelpers.strip_tags(",
+                "ActionView::ViewHelpers.auto_link(",
+            ]),
+            "rails-html-sanitizer",
+        ),
+        // A declared variant is an image processor's demand: the
+        // reopen `apply_image_processor_wiring` swaps in requires
+        // "vips", and the marker is the constructor call every
+        // `attachable.variant …` lowers to. The gem needs libvips
+        // installed, which the app's own Gemfile (image_processing →
+        // ruby-vips) already asked of the machine.
+        (Marker::AnyText(&[VARIATION_MARKER]), "ruby-vips"),
+    ];
+    &RUNTIME_GEMS
+}
 
 /// The `remote:` of every `PATH` section in a `Gemfile.lock`, lock
 /// order — the directories of the app's path-sourced gems
@@ -634,6 +790,11 @@ pub fn statically_resolved_external_includes(
             if lock.is_from_git(gem) {
                 continue;
             }
+            // A gem a project extension says reaches Rails is never
+            // required natively (`crate::extensions`).
+            if app.extensions.is_rails_dependent(gem) {
+                continue;
+            }
             let gem_name = gem.to_ascii_lowercase();
             let namespace = namespace_of(gem).to_ascii_lowercase();
             let requires: Vec<String> = literal_file_level_requires(&source.text)
@@ -732,15 +893,30 @@ fn source_declaring_class<'a>(
 
 /// Namespaces owned by unknown gems that are pinned in this app's lockfile.
 /// Ruby project emission uses these only when it also wires the exact gems.
+/// A gem a project extension says reaches Rails is not wired, so its
+/// constants stay refused (`crate::extensions`).
 pub fn locked_external_gem_namespaces(app: &crate::App) -> std::collections::BTreeSet<String> {
     let Some(lock) = app.gem_lock.as_ref() else {
         return Default::default();
     };
     GemCensus::of(lock)
         .unknown()
-        .filter(|gem| !lock.is_from_git(&gem.name))
+        .filter(|gem| !lock.is_from_git(&gem.name) && !app.extensions.is_rails_dependent(&gem.name))
         .map(|gem| namespace_of(&gem.name))
         .collect()
+}
+
+/// The `rails_dependent` extension fact (`crate::extensions`) whose gem
+/// owns the namespace `detail` names: the evidence for refusing a constant
+/// the CRuby tree would otherwise carry from the lockfile.
+pub fn rails_dependent_owner<'a>(
+    app: &'a crate::App,
+    detail: &str,
+) -> Option<&'a crate::extensions::RailsDependentGem> {
+    app.extensions
+        .rails_dependent
+        .iter()
+        .find(|row| detail_names_external_namespace(detail, &namespace_of(&row.gem)))
 }
 
 /// True when `detail` names a constant under `root` (`Rouge::X`), not a

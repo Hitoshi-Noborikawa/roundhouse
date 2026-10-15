@@ -60,6 +60,74 @@ follow symbolic links below selected folders.
 Roundhouse reads `test/test_helper.rb`, `test/test_helpers/`, and
 `test/fixtures/` outside this folder list.
 
+## Project extensions
+
+An app can describe gems and class-body DSLs that Roundhouse does not
+know about. The descriptions live in the app's own tree, so the compiler
+does not have to carry them. List extension directories in
+`roundhouse.yml`:
+
+```yaml
+extensions:
+  - config/roundhouse
+```
+
+Each entry names a literal directory relative to the app root, as with
+`test_paths`. It must not contain `..`, an absolute path, or a symbolic
+link in the directory path. Directories load in the listed order.
+The same directory must not appear twice.
+
+The `gems.yml` and `macros.yml` files are optional. Each file can be a
+symbolic link, including a link to a file outside the app root.
+Roundhouse reports an error if it cannot read a linked file.
+
+Example files:
+
+```yaml
+# gems.yml
+lock_gated_requires:
+  - {require: "widgets/all", gem: "widgets"}
+rails_dependent:
+  - {gem: "widget-engine", why: "requiring it loads Rails framework files"}
+runtime_gems:
+  - {constant: "Widget", gem: "widgets"}
+  - {any_text: ["Widget::Cache."], gem: "widget-cache"}
+```
+
+```yaml
+# macros.yml
+attribute_macros:
+  - {name: price_column, positional: true}
+  - {name: bag_columns, hash_key: attributes}
+```
+
+- `lock_gated_requires`: when the app's `Gemfile.lock` resolves the gem
+  from a gem server, the `ruby` tree pins it at the locked version and
+  requires the path at boot. A gem locked from git or a path is skipped.
+- `rails_dependent`: requiring the gem loads Rails, so no tree loads it.
+  The `ruby` tree does not carry it from the lockfile, and its constants
+  stay errors. The error message includes the `why` text.
+- `runtime_gems`: the `ruby` and `jruby` trees declare the gem in their
+  Gemfile when a file under `app/` names the constant or contains one of
+  the texts. This only declares the gem; it does not require it.
+- `attribute_macros`: the attributes a macro names read and write as
+  untyped, either from its leading symbol arguments (`positional`) or
+  from the array under a keyword (`hash_key`). No target lowers the
+  macro itself, so each call is reported as an error at its declaration.
+  This replaces a dispatch error at every place the value object is used.
+
+Extension rows are added after Roundhouse's own rows and never replace
+them. Unknown keys, malformed rows, a missing directory, and a
+`rails_dependent` gem that another fact loads or that Roundhouse models
+all stop ingestion with an error that names the file. The `types` and
+`overlay` entries are reserved and rejected until they are implemented.
+
+The CLI and browser use the same built-in gem tables to validate
+extensions.
+
+Extension facts belong to the app that lists them. An app that lists no
+extensions behaves as before.
+
 Transpilation is the analysis from [`check.md`](check.md) followed by
 lowering and emit. It requires zero analysis errors and a runtime for
 the modeled constructs on the selected target. A clean target-independent
