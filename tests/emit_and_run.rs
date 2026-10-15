@@ -37,6 +37,8 @@ mod controller_translate;
 mod job_rest_params;
 #[path = "emit_and_run/regexp_constants.rs"]
 mod regexp_constants;
+#[path = "emit_and_run/upsert.rs"]
+mod upsert;
 #[path = "emit_and_run/controller_sibling_classes.rs"]
 mod controller_sibling_classes;
 #[path = "emit_and_run/i18n_locales.rs"]

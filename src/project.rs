@@ -5734,6 +5734,19 @@ fn report_unsupported_bundled_constants(app: &App, target: BuildTarget) {
                 format!("Regexp::{flag} is Ruby's option bit, which the {target} emit has no Regexp to read"),
             );
         }
+        // `runtime/ruby/active_record/connection.rb` carries `upsert_all`; no strict runtime transpiles it.
+        if !matches!(target, "jruby" | "spinel")
+            && let crate::expr::ExprNode::Send { recv: Some(_), method, .. } = &*expr.node
+            && matches!(method.as_str(), "upsert" | "upsert_all")
+            && expr.ty == Some(crate::ty::Ty::Int)
+        {
+            emit::diagnostics::report_unsupported(
+                expr.span,
+                target,
+                "upsert",
+                format!("`{}` is the Ruby-family runtime's; the {target} runtime ships none", method.as_str()),
+            );
+        }
         // `translate_site` / `translate_runtime` are reported with their call (`report_i18n_table_sites`).
         if !matches!(target, "jruby" | "spinel")
             && let crate::expr::ExprNode::Send { recv: Some(recv), method, .. } = &*expr.node
