@@ -441,6 +441,12 @@ pub fn apply_job_class_side(app: &mut App) -> Vec<Diagnostic> {
             w.name = Symbol::from(entry);
             w.receiver = crate::dialect::MethodReceiver::Class;
             w.body = body;
+            // Not `perform`'s signature whole: the enqueueing wrapper answers nil, whatever `perform` returns.
+            if matches!(entry, "perform_later" | "perform_async")
+                && let Some(Ty::Fn { params, block, effects, .. }) = &perform.signature
+            {
+                w.signature = Some(Ty::Fn { params: params.clone(), block: block.clone(), ret: std::sync::Arc::new(Ty::Nil), effects: effects.clone() });
+            }
             wrappers.push(w);
         }
 
