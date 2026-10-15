@@ -2398,12 +2398,49 @@ fn partial_target(path: &str, resource_dir: &str) -> (Vec<Symbol>, String) {
 /// user whose name is `David <script>alert(123)</script>`.
 ///
 /// Nested `h(h(x))` double-escapes, as it does in Rails.
+///
+/// `raw(x)` is `x.to_s`: Rails' `raw` is `x.to_s.html_safe`, and the
+/// html_safe mark means nothing to JSON encoding (`raw(nil)` renders
+/// `""`, not `null`). Left as a call, it reached a view module with no
+/// `raw` (`undefined method 'raw'`). `h` leaves an html_safe String as
+/// it is, so `h(raw(x))` is `x.to_s` too, unescaped.
+///
+/// Every value position is walked, inside Arrays, Hashes, conditionals
+/// and blocks as well as call arguments.
 fn rewrite_h_escape(e: &Expr) -> Expr {
-    let new_node = match &*e.node {
-        ExprNode::Send { recv: None, method, args, block: None, .. }
-            if method.as_str() == "h" && args.len() == 1 =>
-        {
-            ExprNode::Send {
+    let mut out = e.clone();
+    rewrite_h_escape_in_place(&mut out);
+    unmark_raw_string(&mut out);
+    out
+}
+
+fn rewrite_h_escape_in_place(e: &mut Expr) {
+    e.node.for_each_child_mut(&mut rewrite_h_escape_in_place);
+    // A marked child has now been seen by its parent (this node), and
+    // only an `h` reads the mark: from here on it is Ruby's `to_s`.
+    let h_of_raw = matches!(&*e.node, ExprNode::Send { recv: None, method, args, block: None, .. }
+        if method.as_str() == "h" && args.len() == 1 && is_raw_string(&args[0]));
+    if !h_of_raw {
+        e.node.for_each_child_mut(&mut unmark_raw_string);
+    }
+    let ExprNode::Send { recv: None, method, args, block: None, .. } = &mut *e.node else {
+        return;
+    };
+    if args.len() != 1 {
+        return;
+    }
+    match method.as_str() {
+        // `h(raw(x))`: the argument is already the html_safe String
+        // (lowered below to `x.to_s`, marked `RAW_STRING`), which `h`
+        // returns unescaped.
+        "h" if is_raw_string(&args[0]) => {
+            let arg = args.remove(0);
+            *e = arg;
+        }
+        "h" => {
+            let arg = args.remove(0);
+            let ty = e.ty.clone();
+            *e.node = ExprNode::Send {
                 recv: Some(Expr::new(
                     e.span,
                     ExprNode::Const {
@@ -2411,23 +2448,49 @@ fn rewrite_h_escape(e: &Expr) -> Expr {
                     },
                 )),
                 method: Symbol::from("html_escape"),
-                args: vec![rewrite_h_escape(&args[0])],
+                args: vec![arg],
                 block: None,
                 parenthesized: true,
-            }
+            };
+            e.ty = ty;
         }
-        ExprNode::Send { recv, method, args, block, parenthesized } => ExprNode::Send {
-            recv: recv.as_ref().map(rewrite_h_escape),
-            method: method.clone(),
-            args: args.iter().map(rewrite_h_escape).collect(),
-            block: block.as_ref().map(rewrite_h_escape),
-            parenthesized: *parenthesized,
-        },
-        _ => return e.clone(),
-    };
-    let mut out = Expr::new(e.span, new_node);
-    out.ty = e.ty.clone();
-    out
+        "raw" => {
+            let arg = args.remove(0);
+            let span = e.span;
+            let mut to_s = Expr::new(
+                span,
+                ExprNode::Send {
+                    recv: Some(arg),
+                    method: Symbol::from(RAW_STRING),
+                    args: Vec::new(),
+                    block: None,
+                    parenthesized: false,
+                },
+            );
+            to_s.ty = Some(crate::ty::Ty::Str);
+            *e = to_s;
+        }
+        _ => {}
+    }
+}
+
+fn unmark_raw_string(e: &mut Expr) {
+    if let ExprNode::Send { method, args, .. } = &mut *e.node {
+        if method.as_str() == RAW_STRING && args.is_empty() {
+            *method = Symbol::from("to_s");
+        }
+    }
+}
+
+/// The method name `raw(x)` lowers to while its parent is still being
+/// rewritten, so an enclosing `h(...)` can tell it from a `to_s` the
+/// template wrote (which `h` does escape). Renamed to `to_s` when its
+/// parent has been visited (or at the end, for the root).
+const RAW_STRING: &str = "__rh_raw_to_s";
+
+fn is_raw_string(e: &Expr) -> bool {
+    matches!(&*e.node, ExprNode::Send { method, args, .. }
+        if method.as_str() == RAW_STRING && args.is_empty())
 }
 
 // ── route-helper rewrite for pair values ────────────────────────────
