@@ -2044,6 +2044,8 @@ end
         }
         vfs.read_to_string(&full).ok()
     })?;
+    // After it: a contract result's `to_monad` is a Result.
+    super::dry_monads::lower_dry_monads(&mut app, &sources)?;
     super::dry_initializer::drop_type_constants(&mut app, &sources);
     // graphql-ruby object types: analyzer-only field methods, so
     // inference carries each type's record class down the schema.

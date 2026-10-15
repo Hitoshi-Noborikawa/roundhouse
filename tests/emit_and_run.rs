@@ -78,6 +78,8 @@ mod runtime_block_signature;
 mod dry_struct;
 #[path = "support/dry_validation.rs"]
 mod dry_validation;
+#[path = "support/dry_monads.rs"]
+mod dry_monads;
 #[path = "support/data_factory.rs"]
 mod data_factory;
 #[path = "support/rails_root_join.rs"]
@@ -2762,6 +2764,48 @@ fn dry_struct_classes_run_lowered() {
     assert!(run.stdout.contains("dry-struct contract passed"));
     assert!(run.stdout.contains("dry-struct stamp contract passed"));
     assert!(run.stdout.contains("dry-struct clock contract passed"));
+}
+
+#[test]
+fn dry_monads_results_run_lowered() {
+    let run = dry_monads::overlay().run_ruby(&dry_monads::assertions());
+    run.assert_passes();
+    assert!(run.stdout.contains("dry-monads contract passed"));
+}
+
+/// What dry-monads lowering leaves as it was, ledgered: a monad it does
+/// not model that the app builds (`Some(1)`), a called form it does not
+/// read, and a do-notation method that takes a block (called with one,
+/// the gem's wrapper steps aside). Outside survey mode each fails the
+/// ingest.
+#[test]
+fn dry_monads_refusals_are_ledgered() {
+    let tree: std::collections::HashMap<std::path::PathBuf, Vec<u8>> = [
+        ("app/services/maybe_service.rb", "class MaybeService\n  include Dry::Monads[:maybe]\n\n  def one\n    Some (1)\n  end\nend\n"),
+        ("app/services/typed_service.rb", "class TypedService\n  include Dry::Monads::Result(StandardError)\nend\n"),
+        (
+            "app/services/block_service.rb",
+            "class BlockService\n  include Dry::Monads[:result, :do]\n\n  def each_item\n    return to_enum(:each_item) unless block_given?\n\n    yield Success(1)\n  end\n\n  def call\n    v = yield Success(2)\n    Success(v)\n  end\nend\n",
+        ),
+        ("config/routes.rb", "Rails.application.routes.draw do\nend\n"),
+    ]
+    .into_iter()
+    .map(|(p, s)| (std::path::PathBuf::from(p), s.as_bytes().to_vec()))
+    .collect();
+    assert!(roundhouse::ingest::ingest_app_from_tree(tree.clone()).is_err(), "strict ingest passed a refusal");
+    roundhouse::ingest::survey::activate();
+    let app = roundhouse::ingest::ingest_app_from_tree(tree).expect("ingest");
+    let ledger: Vec<String> = roundhouse::ingest::survey::drain().iter().map(|e| e.to_string()).collect();
+    assert!(ledger.iter().any(|e| e.contains("Dry::Monads not lowered: `:maybe`")), "{ledger:#?}");
+    assert!(ledger.iter().any(|e| e.contains("Dry::Monads not lowered: `include Dry::Monads") && e.contains("Result(StandardError)`")), "{ledger:#?}");
+    assert!(ledger.iter().any(|e| e.contains("`each_item` takes a block")), "{ledger:#?}");
+    let class = |name: &str| app.library_classes.iter().find(|lc| lc.name.0.as_str() == name).expect(name);
+    assert!(class("MaybeService").unknown_calls.iter().any(|c| roundhouse::emit::ruby::emit_expr(c).contains("Dry::Monads[:maybe]")));
+    let body = |name: &str| {
+        roundhouse::emit::ruby::emit_expr(&class("BlockService").methods.iter().find(|m| m.name.as_str() == name).expect(name).body)
+    };
+    assert!(body("each_item").contains("yield"), "{}", body("each_item"));
+    assert!(body("call").contains("Do.bind"), "{}", body("call"));
 }
 
 #[test]

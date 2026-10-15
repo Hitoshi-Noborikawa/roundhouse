@@ -52,6 +52,8 @@ mod data_factory;
 mod dry_struct;
 #[path = "support/dry_validation.rs"]
 mod dry_validation;
+#[path = "support/dry_monads.rs"]
+mod dry_monads;
 #[path = "support/rails_root_join.rs"]
 mod rails_root_join;
 #[path = "support/cable_allowed_origins.rs"]
@@ -546,4 +548,13 @@ fn dry_validation_contracts_run_lowered_natively() {
     let run = dry_validation::overlay().run_spinel(&dry_validation::assertions());
     run.assert_passes();
     assert!(run.stdout.contains("dry-validation contract passed"));
+}
+
+/// The native half of `emit_and_run::dry_monads_results_run_lowered`.
+#[test]
+#[ignore = "requires the Spinel toolchain, run in its CI lane"]
+fn dry_monads_results_run_lowered_natively() {
+    let run = dry_monads::overlay().run_spinel(&dry_monads::assertions());
+    run.assert_passes();
+    assert!(run.stdout.contains("dry-monads contract passed"));
 }

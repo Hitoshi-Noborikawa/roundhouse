@@ -1406,7 +1406,11 @@ pub(super) fn emit_send_base(
             format!("{}.{attr} = {}", emit_postfix_recv(r), args_s[0])
         }
         (None, _) => {
-            if args_s.is_empty() {
+            // A capitalized name without parens reads as a constant:
+            // `Success()` is a call, `Success` is not.
+            if args_s.is_empty() && method.as_str().starts_with(|c: char| c.is_ascii_uppercase()) {
+                format!("{method}()")
+            } else if args_s.is_empty() {
                 method.to_string()
             } else if parenthesized || first_arg_opens_block(&args_s) {
                 format!("{method}({})", args_s.join(", "))
