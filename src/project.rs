@@ -1629,6 +1629,7 @@ fn report_ruby_only_sends(app: &App, target: BuildTarget) {
                 (Some(_), "fetch") if matches!(recv_ty, Some(Ty::Array { .. })) => Some("Array#fetch"),
                 (Some(_), "each_slice") if matches!(recv_ty, Some(Ty::Array { .. })) => Some("Array#each_slice"),
                 (Some(_), "each_cons") if matches!(recv_ty, Some(Ty::Array { .. })) => Some("Array#each_cons"),
+                (Some(_), "lazy") if matches!(recv_ty, Some(Ty::Array { .. })) => Some("Array#lazy"),
                 (Some(_), "with_object") if matches!(recv_ty, Some(Ty::Array { .. })) => Some("Enumerator#with_object"),
                 (Some(_), "include?") if matches!(recv_ty, Some(Ty::Class { id, .. })
                     if matches!(id.0.as_str(), "Class" | "Module")) => Some("Module#include?"),
