@@ -198,6 +198,71 @@ end
     assert_eq!(fs::read(out.join("app/models/post.rb")).unwrap(), fs::read(src.join("app/models/post.rb")).unwrap());
 }
 
+/// A receiverless call in a controller (`request`, `params`) dispatches
+/// on the controller's own lookup — its ancestors and included modules —
+/// never on an unrelated concrete class that happens to define a method
+/// of the same name. Two ways the planner used to get this wrong, fixed
+/// together:
+///
+///   * a bare receiverless call not found on the class used to fan out
+///     to every app definer, including plain classes (here, `Gadget`);
+///   * `request.x` was treated as reaching app code merely because some
+///     app class defines `request`, instead of asking whether the
+///     *current* class's own lookup resolves it (here it does not, so
+///     `request` is the runtime's, and `.path` never reaches
+///     `PathExploder#path`).
+///
+/// Neither `Gadget` nor `PathExploder` is reachable from `widgets#index`,
+/// so the route is clean and clears.
+#[test]
+fn receiverless_calls_resolve_through_the_controllers_own_lookup_not_an_unrelated_class() {
+    let src = scratch("recv-src");
+    let out = scratch("recv-out");
+    write(&src, "Gemfile", b"source \"https://rubygems.org\"\ngem \"rails\"\n");
+    write(&src, "config/routes.rb", b"Rails.application.routes.draw do\n  get \"widgets\" => \"widgets#index\"\nend\n");
+    write(&src, "app/controllers/application_controller.rb", b"class ApplicationController < ActionController::Base\nend\n");
+    write(&src, "app/controllers/widgets_controller.rb", br#"class WidgetsController < ApplicationController
+  def index
+    @path = request.path
+  end
+end
+"#);
+    write(&src, "app/views/widgets/index.html.erb", b"<%= @path %>\n");
+    // A plain (non-module) class that happens to define `request`: the
+    // planner must not treat `WidgetsController`'s bare `request` call as
+    // reaching it.
+    write(&src, "app/lib/gadget.rb", br#"class Gadget
+  def request
+    Frobnicator::Spinner.new.spin
+  end
+end
+"#);
+    // A plain class defining `path`: only reachable if `request.path` is
+    // wrongly treated as app-rooted once `request` itself resolves to
+    // nothing on the controller.
+    write(&src, "app/lib/path_exploder.rb", br#"class PathExploder
+  def path
+    Combobulator::Unit.new.run
+  end
+end
+"#);
+
+    let run = Command::new(env!("CARGO_BIN_EXE_roundhouse"))
+        .args(["--target", "futamura", "-o"])
+        .arg(&out)
+        .arg(&src)
+        .env("ROUNDHOUSE_FUTAMURA_LEDGER", "1")
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&run.stderr);
+    assert!(run.status.success(), "{stderr}");
+    assert!(stderr.contains("whole-route: 1 GET action(s) served by the lowered app; 0 left to Rails"), "{stderr}");
+    assert!(!stderr.contains("Gadget") && !stderr.contains("PathExploder"), "{stderr}");
+
+    fs::remove_dir_all(&src).unwrap();
+    fs::remove_dir_all(&out).unwrap();
+}
+
 /// A minimal app whose `ruby` emit refuses one association (a `through:`
 /// hop keyed on a non-id column, Mastodon's `Status.reblogged_by_accounts`).
 fn app_with_a_ruby_refusal(src: &Path) {

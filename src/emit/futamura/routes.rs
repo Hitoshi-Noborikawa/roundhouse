@@ -112,6 +112,14 @@ impl<'a> Index<'a> {
         }
         None
     }
+
+    /// Is `class` declared with `module` rather than `class`? A name can
+    /// be reopened across files (one view template per file shares a
+    /// name with its siblings); any declaration saying "module" is
+    /// enough, since a mixin can only be a module in the first place.
+    fn is_module(&self, class: &str) -> bool {
+        self.classes.get(class).into_iter().flatten().any(|lc| lc.is_module)
+    }
 }
 
 fn is_class_side(r: &MethodReceiver) -> bool {
@@ -500,13 +508,19 @@ fn enqueue_send(
             None | Some((ExprNode::SelfRef, _)) => {
                 match index.lookup(class, method, class_side) {
                     Some(k) => push(k),
-                    // Not on this class: a runtime method (`render`,
-                    // `params`), or a helper module's function the
-                    // lowering left receiverless; any app definer of
-                    // either side may run.
+                    // Not on this class (nor its ancestors or included
+                    // modules, which `index.lookup` already walked): a
+                    // runtime method (`render`, `params`), or a helper
+                    // module's function the lowering left receiverless.
+                    // A receiverless call dispatches on `self`, so it can
+                    // never reach an unrelated concrete class that
+                    // happens to define the same name — only a module,
+                    // the shape a mixed-in helper takes.
                     None => {
                         for (c, side) in index.by_name.get(method).into_iter().flatten() {
-                            push((c.clone(), method.clone(), *side));
+                            if index.is_module(c) {
+                                push((c.clone(), method.clone(), *side));
+                            }
                         }
                     }
                 }
@@ -523,7 +537,7 @@ fn enqueue_send(
             }
             // `Rails.cache.fetch`, `ActiveRecord::Base.connection.x`: a
             // framework object, whose methods are the runtime's.
-            Some(_) if rooted_in_framework(index, recv.as_ref().unwrap()) => {}
+            Some(_) if rooted_in_framework(index, class, class_side, recv.as_ref().unwrap()) => {}
             Some((_, ty)) => {
                 let classes = ty.map(classes_of).unwrap_or_default();
                 if classes.is_empty() {
@@ -566,17 +580,22 @@ fn enqueue_send(
     }
 }
 
-/// Is `e` a chain of sends rooted in a constant the app does not define?
-fn rooted_in_framework(index: &Index, e: &Expr) -> bool {
+/// Is `e` a chain of sends rooted in a constant the app does not define,
+/// or in a receiverless call `class` itself does not resolve? `class` and
+/// `class_side` are the method body being walked, so a receiverless call
+/// is checked the same way `enqueue_send`'s own dispatch is: through
+/// `class`'s lookup, never by asking whether some unrelated app class
+/// happens to define a method of that name.
+fn rooted_in_framework(index: &Index, class: &str, class_side: bool, e: &Expr) -> bool {
     match &*e.node {
         ExprNode::Const { path } => {
             let name = path.iter().map(|s| s.as_str()).collect::<Vec<_>>().join("::");
             !index.classes.contains_key(&name)
         }
-        ExprNode::Send { recv: Some(r), .. } => rooted_in_framework(index, r),
-        // `request.env`, `params[:x]`, `cookies`: a receiverless call no
-        // app class answers is the framework's accessor.
-        ExprNode::Send { recv: None, method, .. } => !index.by_name.contains_key(method),
+        ExprNode::Send { recv: Some(r), .. } => rooted_in_framework(index, class, class_side, r),
+        // `request.env`, `params[:x]`, `cookies`: a receiverless call
+        // `class`'s own lookup misses is the framework's accessor.
+        ExprNode::Send { recv: None, method, .. } => index.lookup(class, method, class_side).is_none(),
         _ => false,
     }
 }
