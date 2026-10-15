@@ -66,8 +66,12 @@ pub(super) fn lower_dry_monads(app: &mut App, sources: &[crate::span::SourceFile
                 s.text.match_indices(c).any(|(at, _)| {
                     let before = s.text[..at].chars().next_back();
                     let after = &s.text[at + c.len()..];
+                    // `Some(1)`, `Some (1)`, `List [1]`, `Try { }`, `Try do`.
+                    let spaced = after.trim_start_matches([' ', '\t']);
                     !before.is_some_and(|b| b.is_alphanumeric() || b == '_' || b == ':')
-                        && (after.starts_with('(') || after.starts_with('[') || after.starts_with(" {") || after.starts_with(" do"))
+                        && (spaced.starts_with('(')
+                            || spaced.starts_with('[')
+                            || (spaced.len() < after.len() && (spaced.starts_with('{') || spaced.starts_with("do"))))
                 })
             })
         })
