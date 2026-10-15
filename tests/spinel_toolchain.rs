@@ -58,6 +58,10 @@ mod rails_root_join;
 mod cable_allowed_origins_contract;
 #[path = "spinel_toolchain/cable_allowed_origins.rs"]
 mod cable_allowed_origins;
+#[path = "support/public_file_server_headers.rs"]
+mod public_file_server_headers_contract;
+#[path = "spinel_toolchain/public_file_server_headers.rs"]
+mod public_file_server_headers;
 #[path = "support/cable_actions.rs"]
 mod cable_actions_contract;
 #[path = "spinel_toolchain/cable_actions.rs"]

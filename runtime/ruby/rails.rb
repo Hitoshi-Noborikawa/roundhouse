@@ -472,6 +472,16 @@ module Rails
       "header_or_legacy_token"
     end
 
+    # `config.public_file_server.headers`: what the static file server
+    # adds to every `public/` (and `/assets/`) response — the
+    # `Cache-Control` a browser, or a cache in front of the app, keeps a
+    # stylesheet by. Rails' default sends nothing extra; ingest lifts an
+    # app's own Hash into an override on the reopen
+    # (src/ingest/public_file_server_config.rs).
+    def public_file_server_headers
+      {}
+    end
+
     # Action Cable's three origin settings, as the `/cable` handshake
     # check reads them (runtime/spinel/request_forgery_protection.rb):
     # Rails' defaults. Ingest lifts an app's `config.action_cable.*`

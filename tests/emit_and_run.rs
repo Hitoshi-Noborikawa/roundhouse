@@ -86,6 +86,10 @@ mod rails_root_join;
 mod cable_allowed_origins_contract;
 #[path = "emit_and_run/cable_allowed_origins.rs"]
 mod cable_allowed_origins;
+#[path = "support/public_file_server_headers.rs"]
+mod public_file_server_headers_contract;
+#[path = "emit_and_run/public_file_server_headers.rs"]
+mod public_file_server_headers;
 #[path = "support/cable_actions.rs"]
 mod cable_actions_contract;
 #[path = "emit_and_run/cable_actions.rs"]

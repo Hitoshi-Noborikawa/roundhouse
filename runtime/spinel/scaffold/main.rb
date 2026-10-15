@@ -209,6 +209,11 @@ module Main
       return nil
     end
     res.headers["Content-Type"] = Main.asset_content_type(path)
+    # `config.public_file_server.headers`, as ActionDispatch::Static
+    # sends them on every public/ and /assets/ file.
+    Rails.application.public_file_server_headers.each do |name, value|
+      res.headers[name] = value
+    end
     res.send_file(disk)
     nil
   end

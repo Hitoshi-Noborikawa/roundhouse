@@ -50,12 +50,21 @@ Broadcasts.set_transport(Cable::Registry)
 # `static/assets/*` (CSS + JS) plus root-level icons. Rack::Static
 # intercepts those URLs before the Rack adapter dispatches to
 # Main.run_rack. Anything else falls through to the dynamic Router.
-use Rack::Static, urls: ["/assets", "/icon.png", "/icon.svg"], root: "static"
+#
+# Both carry `config.public_file_server.headers`, as ActionDispatch::Static
+# does: campfire's production `Cache-Control: public, max-age=2592000`,
+# without which no browser — and no cache in front of the app — keeps a
+# stylesheet. Lowercased because Rack 3 requires lowercase response
+# header names.
+STATIC_HEADERS = Rails.application.public_file_server_headers
+  .to_h { |name, value| [name.downcase, value] }.freeze
+use Rack::Static, urls: ["/assets", "/icon.png", "/icon.svg"], root: "static",
+    header_rules: STATIC_HEADERS.empty? ? [] : [[:all, STATIC_HEADERS]]
 # Rails' ActionDispatch::Static: a GET/HEAD for a file that exists under
 # public/ (robots.txt, the error pages) is served ahead of the routes.
 # Not `Rack::Static, urls: [""], cascade: true`: Rack::Files answers a
 # POST with 405, which does not cascade, and every form post died there.
-PUBLIC_FILES = Rack::Files.new("public")
+PUBLIC_FILES = Rack::Files.new("public", STATIC_HEADERS)
 use(Class.new do
   def initialize(app) = @app = app
 

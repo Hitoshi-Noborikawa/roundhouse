@@ -973,6 +973,18 @@ pub fn ingest_app_with_vfs<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResult
             })?;
             methods.append(&mut synth);
         }
+        // The headers `ActionDispatch::Static` puts on every `public/`
+        // file (`config.public_file_server.headers`; see
+        // `public_file_server_config`). Spliced like the cable settings,
+        // and refused the same way when the effective value is not a
+        // Hash the runtime can type.
+        if let Some(headers) = super::public_file_server_config::synthesize(vfs, dir)? {
+            let mut synth = crate::runtime_src::parse_methods(&headers).map_err(|message| IngestError::Unsupported {
+                file: "config/ (config.public_file_server.headers)".to_string(),
+                message: format!("the app's public file server headers do not parse once synthesized: {message}"),
+            })?;
+            methods.append(&mut synth);
+        }
         // A helper that overrides ActionView's `token_tag` to answer ""
         // (campfire's ApplicationHelper: "Header-only forgery protection
         // needs no secret in forms or cached HTML"). Rails' form helpers
