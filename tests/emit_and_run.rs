@@ -4363,11 +4363,9 @@ fn render_json_record_writer_is_unsupported_on_strict_targets() {
     use roundhouse::project::BuildTarget;
     let (_emitted, errors) = records_json_app().emit(BuildTarget::TypescriptWorker);
     assert!(errors.iter().any(|e| e.contains("json_writer")), "{errors:?}");
-    // Rust builds the writer, except a `methods:` one (`render_json_record_writer_runs_on_rust`).
-    let (_emitted, errors) = json_writer_rust_app().emit(BuildTarget::Rust);
-    assert!(errors.is_empty(), "{errors:?}");
+    // Rust builds the writer, `methods:` included (`render_json_record_writer_runs_on_rust`).
     let (_emitted, errors) = json_writer_app().emit(BuildTarget::Rust);
-    assert!(errors.iter().any(|e| e.contains("json_writer")), "{errors:?}");
+    assert!(errors.is_empty(), "{errors:?}");
     for target in [BuildTarget::Ruby, BuildTarget::Spinel] {
         let (_emitted, errors) = records_json_app().emit(target);
         assert!(!errors.iter().any(|e| e.contains("json_writer")), "{target:?}: {errors:?}");
@@ -4455,7 +4453,7 @@ end
 #[test]
 #[ignore = "requires the Rust toolchain; compiles and executes an emitted app"]
 fn render_json_record_writer_runs_on_rust() {
-    let (emitted, errors) = json_writer_rust_app().emit(roundhouse::project::BuildTarget::Rust);
+    let (emitted, errors) = json_writer_app().emit(roundhouse::project::BuildTarget::Rust);
     assert!(errors.is_empty(), "{errors:?}");
     std::fs::create_dir_all(emitted.join("tests")).unwrap();
     std::fs::write(emitted.join("tests/json_writer.rs"), r##"
@@ -4476,7 +4474,7 @@ async fn record_json_is_rails_serializable_hash() {
         ("GET", "/articles/1/edit", r#"{"title":"A \u003cb\u003e \u0026 co","id":1}"#.to_string()),
         ("PATCH", "/articles/1", r#"{"id":1,"title":"A \u003cb\u003e \u0026 co","created_at":"2026-01-02T03:04:05.678Z"}"#.to_string()),
         ("DELETE", "/articles/1", r#"[{"id":1,"article_id":1,"commenter":"Ann","body":"Nice","created_at":"2026-01-05T00:00:00.000Z","updated_at":"2026-01-05T00:00:00.000Z"}]"#.to_string()),
-        ("GET", "/articles", format!("[{second},{one}]")),
+        ("GET", "/articles", format!("[{},{}]", second.replace("Z\"}", "Z\",\"headline\":\"Big\"}"), one.replace("Z\"}", "Z\",\"headline\":\"Big\"}"))),
     ] {
         let response = match method {
             "PATCH" => server.patch(path).form(&[("article[title]", "unused")]).await,
@@ -4497,15 +4495,6 @@ async fn record_json_is_rails_serializable_hash() {
         .expect("run the emitted Rust project's test");
     assert!(output.status.success(), "{}\n{}\n{}", emitted.display(),
         String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
-}
-
-/// Without `methods:`, which Rust reports (`render_json_record_writer_is_unsupported_on_strict_targets`).
-fn json_writer_rust_app() -> emit_and_run::Overlay {
-    json_writer_app().edit(
-        "app/controllers/articles_controller.rb",
-        "    render json: @articles, methods: [:headline]\n",
-        "    render json: @articles\n",
-    )
 }
 
 /// The fixtures' test, as ActiveRecord 8.1.4 answers it.
