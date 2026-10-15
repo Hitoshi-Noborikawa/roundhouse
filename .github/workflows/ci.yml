@@ -80,6 +80,7 @@ jobs:
       spinel-revision: ${{ steps.plan.outputs.spinel-revision }}
       campfire-latest-revision: ${{ steps.plan.outputs.campfire-latest-revision }}
       spinel-tests: ${{ steps.plan.outputs.spinel-tests }}
+      spinel-framework-shards: ${{ steps.plan.outputs.spinel-framework-shards }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -916,18 +917,27 @@ jobs:
   # `ar_base` is disabled in-test (b453fcf) pending real-sqlite
   # rewiring of the test_helper.
   spinel-framework:
-    name: spinel-framework (suite)
+    name: spinel-framework (suite, ${{ matrix.shard }})
     # Needs the real-blog fixture: date_columns_spinel overlays it.
     # Advisory unless ci:spinel focus hardens CORE (+ this suite).
     needs: [generate-fixture, spinel-build, plan]
     if: ${{ !cancelled() && contains(fromJSON(needs.plan.outputs.jobs), 'spinel-framework') && needs.generate-fixture.result == 'success' && needs.spinel-build.outputs.artifact-id != '' }}
-    outputs: &advisory-outputs
-      execution: ${{ steps.result.outputs.status }}
+    # The plan balances the selected suites over up to three shards by their
+    # recorded durations; each shard reports its own output key, as
+    # spinel-toolchain's do.
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.plan.outputs.spinel-framework-shards) }}
+    outputs:
+      shard-0: ${{ steps.result.outputs.shard-0 }}
+      shard-1: ${{ steps.result.outputs.shard-1 }}
+      shard-2: ${{ steps.result.outputs.shard-2 }}
     runs-on: ubuntu-latest
-    # 30m: Full validation 38397424326 finished the suite in ~20m of a 25m
-    # budget. Keep the real checks; leave a little headroom for cold cache /
-    # slow Postgres health without papering over a hung suite.
-    timeout-minutes: 30
+    # 20m: unsharded, the suite took 20-30m (full run 38665931779); a shard
+    # carries about a third. Headroom for cold cache / slow Postgres health
+    # without papering over a hung suite.
+    timeout-minutes: 20
 
     continue-on-error: ${{ needs.plan.outputs.spinel-advisory == 'true' }}
     # spinel_pg_db runs the PostgreSQL Db shim against this server.
@@ -945,7 +955,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - name: Check out spinel-pg (pinned)
-        if: ${{ contains(fromJSON(needs.plan.outputs.spinel-tests), 'spinel_pg_db') }}
+        if: ${{ contains(matrix.tests, 'spinel_pg_db') }}
         uses: actions/checkout@v7
         with:
           repository: rubys/spinel-pg
@@ -970,7 +980,7 @@ jobs:
       # Continue after a failing suite without losing its failure status.
       - name: Run selected native framework checks
         env:
-          TESTS: ${{ join(fromJSON(needs.plan.outputs.spinel-tests), ' ') }}
+          TESTS: ${{ join(matrix.tests, ' ') }}
           # Inputs of spinel_pg_db only; it fails without them.
           SPINEL_PG_DIR: ${{ github.workspace }}/spinel-pg
           DATABASE_URL: postgres://postgres:postgres@127.0.0.1:5432/postgres
@@ -989,7 +999,12 @@ jobs:
             esac
           done
           exit "$status"
-      - *advisory-result
+      - name: Report actual advisory execution
+        id: result
+        if: always()
+        env:
+          STATUS: ${{ job.status }}
+        run: echo "shard-${{ matrix.shard }}=$STATUS" >> "$GITHUB_OUTPUT"
 
   # Campfire conformance — ONCE Campfire's OWN test suite, run against a
   # roundhouse emit of it. The C4 rung of the coverage ladder, and the
@@ -1402,7 +1417,8 @@ jobs:
     name: campfire-spinel-db (models)
     needs: [spinel-build, plan]
     if: ${{ !cancelled() && contains(fromJSON(needs.plan.outputs.jobs), 'campfire-spinel-db') && needs.spinel-build.outputs.artifact-id != '' }}
-    outputs: *advisory-outputs
+    outputs: &advisory-outputs
+      execution: ${{ steps.result.outputs.status }}
     runs-on: ubuntu-latest
     # 60m: leave headroom after a slow 20m libvips-dev apt for oracle/emit.
     timeout-minutes: 60

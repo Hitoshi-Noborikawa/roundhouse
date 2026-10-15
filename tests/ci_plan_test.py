@@ -998,6 +998,9 @@ class Results(unittest.TestCase):
                         "verify-gen": "success",
                         "parity": "success",
                         "rest": "success",
+                        "shard-0": "success",
+                        "shard-1": "success",
+                        "shard-2": "success",
                     },
                 }
                 for j in plan["jobs"]
@@ -1119,6 +1122,33 @@ class Results(unittest.TestCase):
                     else:
                         outputs[shard] = status
                     self.assertEqual(ci.check_results(plan, needs), ([], False))
+
+    def test_each_spinel_framework_shard_must_actually_pass_for_completion(self):
+        plan = ci.select([], spinel_lane=True)
+        self.assertEqual(len(plan["spinel_framework_shards"]), 3)
+        for shard in ["shard-0", "shard-1", "shard-2"]:
+            for status in ["failure", "cancelled", "", None]:
+                with self.subTest(shard=shard, status=status):
+                    needs = self.needs(plan)
+                    outputs = needs["spinel-framework"]["outputs"]
+                    if status is None:
+                        del outputs[shard]
+                    else:
+                        outputs[shard] = status
+                    self.assertEqual(ci.check_results(plan, needs), ([], False))
+
+    def test_spinel_framework_shards_cover_each_selected_suite_once(self):
+        shards = ci.spinel_framework_shards(ci.SPINEL_TESTS)
+        self.assertEqual([s["shard"] for s in shards], [0, 1, 2])
+        self.assertEqual(
+            sorted(t for s in shards for t in s["tests"]), sorted(ci.SPINEL_TESTS)
+        )
+        loads = [sum(map(ci.spinel_test_seconds, s["tests"])) for s in shards]
+        self.assertLess(max(loads) - min(loads), max(ci.SPINEL_TEST_SECONDS.values()))
+        self.assertEqual(
+            ci.spinel_framework_shards(["spinel_pg_db"]),
+            [{"shard": 0, "tests": ["spinel_pg_db"]}],
+        )
 
     def test_advisory_ledger_extras_never_claim_complete_under_coe(self):
         # continue-on-error makes needs.*.result=success even when a matrix
