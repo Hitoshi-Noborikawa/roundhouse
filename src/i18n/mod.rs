@@ -13,6 +13,7 @@ use serde_yaml_ng::Value;
 
 pub mod gems;
 pub mod plural;
+pub mod rails_i18n;
 
 /// Rails 8.1.4's bundled English, in the order its frameworks load it.
 const RAILS_EN: &[(&str, &str)] = &[

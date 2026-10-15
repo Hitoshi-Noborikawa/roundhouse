@@ -9950,16 +9950,8 @@ fn plural_rules<V: Vfs + ?Sized>(
             locales.push(other.locale.clone());
         }
     }
-    let mut out = std::collections::BTreeMap::new();
     let application = vfs.read_to_string(&dir.join("config/application.rb")).unwrap_or_default();
-    let modules = application.lines().map(str::trim).find_map(|l| l.strip_prefix("config.rails_i18n.enabled_modules"));
-    if lock.is_some_and(|l| l.has("rails-i18n")) && modules.is_none_or(|m| m.contains("pluralization")) {
-        for locale in &locales {
-            if let Some(rule) = crate::i18n::plural::rails_i18n(locale) {
-                out.insert(locale.clone(), rule);
-            }
-        }
-    }
+    let mut out: std::collections::BTreeMap<String, String> = crate::i18n::rails_i18n::plural_rules(lock, &application, &locales).into_iter().collect();
     if let Ok(source) = vfs.read_to_string(&dir.join("config/locales/plurals.rb")) {
         for (locale, rule) in crate::i18n::plural::cldr_rules(&source) {
             if locales.contains(&locale) {
