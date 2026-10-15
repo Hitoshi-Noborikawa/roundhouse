@@ -3689,6 +3689,9 @@ fn i18n_table_text(app: &App) -> String {
                 out.push_str(&format!("F\u{1f}{}\u{1f}{env}\u{1f}{}\u{1f}.\u{1e}", variant.locale, chain.join(",")));
             }
         }
+        for (locale, rule) in catalog.plurals.iter().filter(|(_, rule)| !rule.is_empty()) {
+            out.push_str(&format!("R\u{1f}{locale}\u{1f}{rule}\u{1f}.\u{1e}"));
+        }
     }
     out
 }

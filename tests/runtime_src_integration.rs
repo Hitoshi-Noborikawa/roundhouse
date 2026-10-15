@@ -1061,7 +1061,10 @@ fn every_runtime_method_body_concretely_typed() {
     // the caller's options Hash as the gem does: its `:scope`, `:default`,
     // `:count`, `:locale` and each interpolation value are whatever the
     // caller passed (+15 in i18n_locale.rb).
-    const CEILING: usize = 754;
+    // MEASURED 770 on 2026-10-16: a locale's own plural rule reads the
+    // count the caller passed, an Integer, a Float or whatever else, as
+    // rails-i18n's and CLDR's rules do (+16 in i18n_locale.rb).
+    const CEILING: usize = 770;
     assert!(
         total_gradual <= CEILING,
         "{total_gradual} Ty::Untyped sites exceeds ceiling of {CEILING}",

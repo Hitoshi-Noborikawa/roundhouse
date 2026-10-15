@@ -34,7 +34,14 @@ module I18n
   def self.scope_text: (untyped scope) -> String
   def self.html_safe_key?: (String key) -> bool
   def self.runtime_lookup: (String loc, String full, untyped count) -> String?
-  def self.plural_form: (Hash[String, String] leaves, String node, untyped count) -> String
+  def self.plural_form: (Hash[String, String] leaves, String loc, String node, untyped count) -> String
+  def self.plural_rule: (String loc) -> Array[String]?
+  def self.plural_category: (Array[String] rule, untyped count) -> String
+  def self.plural_key: (Array[String] rule, Hash[String, Float] ops) -> String
+  def self.plural_bool: (Array[String] rule, Hash[String, Float] ops) -> bool
+  def self.plural_num: (Array[String] rule, Hash[String, Float] ops) -> Float
+  def self.plural_step: () -> Integer
+  def self.runtime_rules: () -> Hash[String, Array[String]]
   def self.runtime_chain: (String loc) -> Array[String]
   def self.interpolate_runtime: (String text, Hash[Symbol, untyped] options, bool html) -> String
   def self.runtime_leaves: () -> Hash[String, String]

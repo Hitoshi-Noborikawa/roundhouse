@@ -12,6 +12,7 @@ use serde::{Deserialize, Serialize};
 use serde_yaml_ng::Value;
 
 pub mod gems;
+pub mod plural;
 
 /// Rails 8.1.4's bundled English, in the order its frameworks load it.
 const RAILS_EN: &[(&str, &str)] = &[
@@ -53,11 +54,12 @@ pub struct Catalog {
     /// `config.i18n.fallbacks`, per environment.
     #[serde(default)]
     pub fallbacks: FallbackPolicy,
-    /// Where a locale's own plural rules come from (rails-i18n's
-    /// pluralization, an app's `config/locales/plurals.rb`), when the app
-    /// has them: a count then picks `few`, `many` or `two` by the locale.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub plural_rules: Option<String>,
+    /// Each locale's own plural rule (rails-i18n's pluralization, an
+    /// app's `config/locales/plurals.rb`) in [`plural`]'s text, empty for
+    /// one roundhouse cannot read: a count then picks `few`, `many` or
+    /// `two` by the locale. A locale with none uses I18n's default.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub plurals: BTreeMap<String, String>,
 }
 
 /// `config.i18n.fallbacks`: Rails includes I18n's Fallbacks backend when

@@ -201,20 +201,117 @@ module I18n
       text = leaves[l + "." + full]
       return text unless text.nil?
       next unless runtime_nodes.key?(l + "." + full)
-      return plural_form(leaves, l + "." + full, count) unless count.nil?
+      return plural_form(leaves, l, l + "." + full, count) unless count.nil?
       subtree_translation(full)
     end
     nil
   end
 
-  # Not a locale's own plural rule: I18n's default picks zero (when given), one or other.
-  def self.plural_form(leaves, node, count)
+  # Not `entry[form]` alone: with a locale's rule, I18n's Pluralization backend takes the `zero`, `0` and `1` keys first and `other` for a form the entry lacks.
+  def self.plural_form(leaves, loc, node, count)
     zero = leaves[node + ".zero"]
     return zero if count == 0 && !zero.nil?
-    form = count == 1 ? "one" : "other"
-    text = leaves[node + "." + form]
+    rule = plural_rule(loc)
+    if rule.nil?
+      form = count == 1 ? "one" : "other"
+      text = leaves[node + "." + form]
+      raise InvalidPluralizationData, "translation data #{node} can not be used with :count => #{count}. key '#{form}' is missing." if text.nil?
+      return text
+    end
+    if count == 0 || count == 1
+      exact = leaves[node + "." + (count == 0 ? "0" : "1")]
+      return exact unless exact.nil?
+    end
+    form = plural_category(rule, count)
+    text = leaves[node + "." + form] || leaves[node + ".other"]
     raise InvalidPluralizationData, "translation data #{node} can not be used with :count => #{count}. key '#{form}' is missing." if text.nil?
     text
+  end
+
+  def self.plural_rule(loc)
+    rules = runtime_rules
+    runtime_chain(loc).each do |l|
+      rule = rules[l]
+      return rule unless rule.nil?
+    end
+    nil
+  end
+
+  # The operands CLDR rules read (n i v f t) and rails-i18n's (r, and d for a fraction's digits), all from the count as Ruby prints it.
+  def self.plural_category(rule, count)
+    numeric = count.is_a?(Integer) || count.is_a?(Float)
+    printed = numeric ? count.abs.to_s : count.to_s
+    printed = printed[1, printed.length - 1].to_s if printed.start_with?("-")
+    digits = printed.split(".")[1]
+    fraction = digits.nil? ? "" : digits.to_s
+    trimmed = fraction.sub(/0+\z/, "")
+    raw = numeric ? count.to_f : 0.0
+    ops = {}
+    ops["r"] = raw
+    ops["n"] = numeric ? count.abs.to_f : printed.to_f
+    ops["i"] = (numeric ? count.abs.to_i : printed.to_i).to_f
+    ops["v"] = fraction.length.to_f
+    ops["f"] = fraction.to_i.to_f
+    ops["t"] = trimmed.to_i.to_f
+    ops["d"] = count.is_a?(Float) && raw % 1 != 0 ? count.to_s.split(".").last.to_s.to_i.to_f : raw
+    ops["num"] = numeric ? 1.0 : 0.0
+    @plural_at = 0
+    plural_key(rule, ops)
+  end
+
+  def self.plural_key(rule, ops)
+    token = rule[plural_step].to_s
+    return token[1, token.length - 1].to_s if token.start_with?(":")
+    cond = plural_bool(rule, ops)
+    yes = plural_key(rule, ops)
+    no = plural_key(rule, ops)
+    cond ? yes : no
+  end
+
+  # Both sides read even when the first decides: the rule is prefix text, and skipping a side means walking it anyway.
+  def self.plural_bool(rule, ops)
+    token = rule[plural_step].to_s
+    if token == "&" || token == "|"
+      a = plural_bool(rule, ops)
+      b = plural_bool(rule, ops)
+      return token == "&" ? a && b : a || b
+    end
+    return !plural_bool(rule, ops) if token == "!"
+    return ops["num"] == 1.0 if token == "num"
+    x = plural_num(rule, ops)
+    return x % 1 == 0 if token == "int"
+    if token == "of"
+      size = rule[plural_step].to_s.to_i
+      found = false
+      size.times { found = true if plural_num(rule, ops) == x }
+      return found
+    end
+    y = plural_num(rule, ops)
+    return x == y if token == "=="
+    return x != y if token == "!="
+    return x >= y if token == ">="
+    return x < y if token == "<"
+    hi = plural_num(rule, ops)
+    within = x >= y && x <= hi
+    token == "inz" ? within && x % 1 == 0 : within
+  end
+
+  def self.plural_num(rule, ops)
+    token = rule[plural_step].to_s
+    if token == "%"
+      a = plural_num(rule, ops)
+      b = plural_num(rule, ops)
+      return a % b
+    end
+    return plural_num(rule, ops).floor.to_f if token == "floor"
+    value = ops[token]
+    value.nil? ? token.to_f : value
+  end
+
+  def self.plural_step
+    at = @plural_at || 0
+    @plural_at = at + 1
+    at
   end
 
   def self.runtime_chain(loc)
@@ -337,8 +434,14 @@ module I18n
   end
 
   # A line ends in a "." field: `split` drops trailing empty fields, and a template or a key can be empty.
+  def self.runtime_rules
+    load_translation_table if @runtime_rules.nil?
+    @runtime_rules || {}
+  end
+
   def self.load_translation_table
     table = {}
+    rules = {}
     entries = []
     keys = {}
     leaves = {}
@@ -360,6 +463,8 @@ module I18n
           nodes[parts[0, j].join(".")] = true
           j -= 1
         end
+      elsif kind == "R"
+        rules[fields[1]] = fields[2].to_s.split(" ")
       elsif kind == "F"
         chains[fields[1] + sep + fields[2]] = fields[3].to_s.split(",")
       elsif kind == "B"
@@ -376,6 +481,7 @@ module I18n
     @runtime_leaves = leaves
     @runtime_nodes = nodes
     @runtime_chains = chains
+    @runtime_rules = rules
     @translation_entries = entries
     @translation_table = table
     nil

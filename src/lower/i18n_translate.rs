@@ -409,6 +409,7 @@ fn resolves_uncached(
         (_, Some((_, then_args, else_args))) => [then_args, else_args]
             .iter()
             .try_for_each(|a| resolves(catalog, recv, method, a, block, site).expect("still a translate call")),
+        (Ok(call), None) if counted_by_rule(&call, catalog) => Err(COUNT_BY_RULE.to_string()),
         (Ok(call), None) => plans_at(catalog, &call, plan_key(recv, method, args, block, site), site.in_view()).map(|_| ()),
         (Err(reason), None) => Err(reason),
     };
@@ -420,19 +421,20 @@ fn resolves_uncached(
 
 /// Whether a call refused for `reason` can be answered by
 /// `I18n.translate_runtime` instead, which reads the app's whole catalog
-/// as the gem does. Not one whose count picks a form by a locale's own
-/// rules (rails-i18n, `plurals.rb`): the runtime knows English's only.
+/// as the gem does. Not one whose count may meet a locale's plural rule
+/// that roundhouse cannot read.
 fn runs_at_run_time(reason: &str, args: &[Expr], catalog: &Catalog) -> bool {
     let runtime = reason.starts_with("a key computed at run time")
         || reason == "a scope computed at run time"
         || reason == "a default computed at run time"
         || reason == "options that are not a literal Hash"
         || reason == "a `locale:` read after an option with effects"
+        || reason == COUNT_BY_RULE
         || reason.starts_with("missing interpolation argument");
     if !runtime || !matches!(args.len(), 1 | 2) {
         return false;
     }
-    if catalog.plural_rules.is_none() {
+    if catalog.plurals.values().all(|rule| !rule.is_empty()) {
         return true;
     }
     match args.get(1).map(|o| &*o.node) {
@@ -443,6 +445,13 @@ fn runs_at_run_time(reason: &str, args: &[Expr], catalog: &Catalog) -> bool {
         }),
         Some(_) => false,
     }
+}
+
+const COUNT_BY_RULE: &str = "a count whose form a locale's own plural rule picks";
+
+/// A count meets a locale's own rule only when the call runs.
+fn counted_by_rule(call: &Call, catalog: &Catalog) -> bool {
+    call.lookup.counted && !catalog.plurals.is_empty()
 }
 
 fn parse_args(args: &[Expr], view: Option<&str>, template: bool) -> Result<Call, String> {
@@ -659,6 +668,9 @@ fn rewrite(expr: &mut Expr, catalog: &Catalog, site: Site<'_>) {
         Ok(call) => call,
         Err(reason) => return runtime(&reason, expr),
     };
+    if counted_by_rule(&call, catalog) {
+        return runtime(COUNT_BY_RULE, expr);
+    }
     let key = plan_key(recv.as_ref(), method.as_str(), args, block.as_ref(), site);
     let plans = match plans_at(catalog, &call, key, in_view) {
         Ok(plans) => plans,
