@@ -3573,7 +3573,8 @@ fn i18n_table_text(app: &App) -> String {
     let mut entries = String::new();
     let mut keys: Vec<(&str, Vec<&str>)> = Vec::new();
     let mut blocks: Vec<((&str, &str, &str), std::collections::HashMap<&str, usize>)> = Vec::new();
-    for (record, entry) in &app.i18n_table {
+    let table: Vec<(String, Vec<String>)> = app.i18n_table.iter().flat_map(|site| site.records()).collect();
+    for (record, entry) in &table {
         let mut parts = record.splitn(4, '\u{1c}');
         let (site, locale, env, key) = (parts.next().unwrap_or(""), parts.next().unwrap_or(""), parts.next().unwrap_or(""), parts.next().unwrap_or(""));
         let next = index.len();
