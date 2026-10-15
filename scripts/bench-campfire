@@ -235,6 +235,7 @@ set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 . "$REPO_ROOT/scripts/lib/spinel-link-path.sh"   # spinel_link_path: jemalloc's -L on a mac
+. "$REPO_ROOT/scripts/lib/trim-logs.sh"           # trim_logs: the exit trap's log cap
 # A local spinel checkout (AGENTS.md: ~/git/spinel) is enough; CI puts
 # the same binaries on PATH. Prepend so `command -v spin` / `spinel` work
 # without a profile.
@@ -447,6 +448,10 @@ cleanup() {
         sleep 0.3
         kill -KILL "$SERVER_PID" 2>/dev/null || true
     fi
+    # The logs live in the results directory, which is kept: untrimmed,
+    # every run archived a 3 GB rails.log (scripts/lib/trim-logs.sh).
+    # Not under --keep, where a live server is still writing one.
+    (( KEEP == 0 )) && trim_logs "${LOG_DIR:-}"
     exit "$code"
 }
 trap cleanup EXIT INT TERM
