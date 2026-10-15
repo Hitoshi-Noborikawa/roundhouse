@@ -51,6 +51,11 @@ class FalconController < Async::Container::Controller
       Sync do
         Dir.chdir(ROOT)
         app, = Rack::Builder.parse_file(File.join(ROOT, "config.ru"))
+        # Jobs drain on this worker's event loop, not on a thread that
+        # would take the GVL from it (active_job_cruby.rb's start_drainer).
+        if defined?(ActiveJob) && ActiveJob.respond_to?(:start_drainer)
+          ActiveJob.start_drainer { |work| Async(transient: true) { work.call } }
+        end
         front = ThrusterCache::Front.new(Protocol::Rack::Adapter.new(app))
         server = Falcon::Server.new(front, bound, protocol: endpoint.protocol, scheme: endpoint.scheme)
         instance.ready!
