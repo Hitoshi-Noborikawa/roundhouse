@@ -700,8 +700,8 @@ module ActiveRecord
     # `Model.upsert(attrs, …)` — INSERT that folds into an UPDATE when it
     # collides, in one statement. Rails routes the single-row form
     # through `upsert_all`; so does this.
-    def self.upsert(attrs, unique_by: nil, on_duplicate: nil, returning: nil)
-      upsert_all([attrs], unique_by: unique_by, on_duplicate: on_duplicate, returning: returning)
+    def self.upsert(attrs, unique_by: nil, on_duplicate: nil, returning: nil, record_timestamps: nil)
+      upsert_all([attrs], unique_by: unique_by, on_duplicate: on_duplicate, returning: returning, record_timestamps: record_timestamps)
     end
 
     # The predicate of the unique index on `columns` (sorted, joined with
@@ -735,7 +735,7 @@ module ActiveRecord
     # NOT Rails-complete, deliberately: no RETURNING (asking for it
     # raises rather than quietly handing back nothing). Returns the
     # affected-row count, the same currency `update_counters` deals in.
-    def self.upsert_all(rows, unique_by: nil, on_duplicate: nil, returning: nil)
+    def self.upsert_all(rows, unique_by: nil, on_duplicate: nil, returning: nil, record_timestamps: nil)
       return 0 if rows.length == 0
       if returning
         raise NotImplementedError, "#{name}.upsert_all: RETURNING is not supported"
@@ -749,7 +749,8 @@ module ActiveRecord
       now = "STRFTIME('%Y-%m-%d %H:%M:%f', 'NOW')"
       table_cols = schema_columns
       given = cols.map { |c| c.to_s }
-      stamps = [:created_at, :created_on, :updated_at, :updated_on].select { |c| table_cols.include?(c) && !given.include?(c.to_s) }
+      stamping = record_timestamps.nil? ? self.record_timestamps : record_timestamps
+      stamps = [:created_at, :created_on, :updated_at, :updated_on].select { |c| stamping && table_cols.include?(c) && !given.include?(c.to_s) }
       tuples = rows.map do |row|
         values = cols.map { |c| ActiveRecord.adapter.escape_value(row[c]) }
         "(" + (values + stamps.map { |_c| now }).join(", ") + ")"
@@ -781,9 +782,9 @@ module ActiveRecord
     end
 
     # `self.record_timestamps=` — Rails class-attribute toggling auto
-    # timestamp stamping around a bulk write. `fill_timestamps` always
-    # stamps (the toggle only matters on write paths); accept and ignore
-    # the assignment so the class-side setter resolves.
+    # timestamp stamping. Kept nowhere: `fill_timestamps` always stamps,
+    # so analysis reports any assignment other than `true`; the per-call
+    # `upsert_all(…, record_timestamps:)` is honored.
     def self.record_timestamps=(value)
       value
     end

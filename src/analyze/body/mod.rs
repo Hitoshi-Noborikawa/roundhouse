@@ -513,6 +513,18 @@ impl<'a> BodyTyper<'a> {
     pub fn analyze_expr(&self, expr: &mut Expr, ctx: &Ctx) -> Ty {
         let ty = self.compute(expr, ctx);
         expr.ty = Some(ty.clone());
+        // Not accepted silently: the runtime's setter keeps nothing, so every save would still stamp.
+        if expr.diagnostic.is_none()
+            && let ExprNode::Send { recv: Some(_), method, args, .. } = &*expr.node
+            && method.as_str() == "record_timestamps="
+            && !matches!(args.first().map(|a| &*a.node), Some(ExprNode::Lit { value: Literal::Bool { value: true } }))
+        {
+            expr.diagnostic = Some(crate::diagnostic::DiagnosticKind::Unsupported {
+                target: None,
+                construct: Symbol::from("record_timestamps"),
+                detail: "turning a model's timestamp stamping off is not modeled: its saves would still stamp them (`upsert_all(…, record_timestamps: false)` is)".to_string(),
+            });
+        }
         expr.decisions &= !crate::expr::CLASS_OBJECT_VALUE;
         if self.is_class_object(expr, ctx) { expr.decisions |= crate::expr::CLASS_OBJECT_VALUE; }
         diagnostic::detect_diagnostic(expr);

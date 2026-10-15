@@ -82,6 +82,38 @@ end
         .assert_passes();
 }
 
+/// `record_timestamps: false` on the call leaves them as the row has them,
+/// as Rails' does; turning a model's stamping off is not modeled, and says so.
+#[test]
+fn upsert_without_record_timestamps_leaves_them_unset() {
+    emit_and_run::real_blog()
+        .edit(
+            "db/schema.rb",
+            "create_table \"comments\", force: :cascade do |t|\n",
+            "create_table \"visits\", force: :cascade do |t|\n    t.string \"path\"\n    t.datetime \"created_at\"\n    t.datetime \"updated_at\"\n  end\n\n  create_table \"comments\", force: :cascade do |t|\n",
+        )
+        .write("app/models/visit.rb", "class Visit < ApplicationRecord\n  def self.put(id, path)\n    Visit.upsert_all([{id: id, path: path}], record_timestamps: false)\n  end\nend\n")
+        .write(
+            "test/models/visit_test.rb",
+            "require \"test_helper\"\n\nclass VisitTest < ActiveSupport::TestCase\n  test \"no timestamps when the call says so\" do\n    Visit.put(1, \"/a\")\n    visit = Visit.find(1)\n    assert_equal \"/a\", visit.path\n    assert_nil visit.created_at\n    assert_nil visit.updated_at\n  end\nend\n",
+        )
+        .run_test("test/models/visit_test.rb")
+        .assert_passes();
+}
+
+#[test]
+fn turning_a_model_s_stamping_off_is_an_error() {
+    let (_emitted, errors) = emit_and_run::real_blog()
+        .edit(
+            "app/models/article.rb",
+            "  validates :title, presence: true\n",
+            "  validates :title, presence: true\n\n  def self.quiet\n    Article.record_timestamps = false\n    Article.record_timestamps = true\n  end\n",
+        )
+        .emit(roundhouse::project::BuildTarget::Ruby);
+    let found: Vec<&String> = errors.iter().filter(|e| e.contains("turning a model's timestamp stamping off is not modeled")).collect();
+    assert_eq!(found.len(), 1, "{errors:#?}");
+}
+
 /// No strict runtime carries `upsert_all`: the call is reported there.
 #[test]
 fn upsert_is_unsupported_on_strict_targets() {
