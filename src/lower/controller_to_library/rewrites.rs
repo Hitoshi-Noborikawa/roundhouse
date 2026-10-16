@@ -2366,7 +2366,7 @@ fn polymorphic_path(ivar_name: &Symbol, span: Span) -> Expr {
 /// The `Rails.application.routes.url_helpers` receiver chain — Rails'
 /// spelling for reaching a path helper from somewhere with no helper
 /// mixin (a model, a job, a test body).
-fn is_rails_url_helpers_chain(e: &Expr) -> bool {
+pub(crate) fn is_rails_url_helpers_chain(e: &Expr) -> bool {
     let mut node = &*e.node;
     for step in ["url_helpers", "routes", "application"] {
         let ExprNode::Send { recv: Some(r), method, args, block: None, .. } = node else {
