@@ -35,6 +35,8 @@ mod view_presence_url_encode;
 mod controller_translate;
 #[path = "emit_and_run/mailer_templates.rs"]
 mod mailer_templates;
+#[path = "emit_and_run/unreachable_views.rs"]
+mod unreachable_views;
 #[path = "emit_and_run/job_rest_params.rs"]
 mod job_rest_params;
 #[path = "emit_and_run/regexp_constants.rs"]

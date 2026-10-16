@@ -2242,6 +2242,7 @@ end
     // pass may append source-backed FileIds beyond the indexed snapshot.
     let late_sources = super::sources::drain();
     super::sources::assert_snapshot_matches(&[], &late_sources);
+    super::unreachable_views::mark(&mut app);
     Ok(app)
 }
 
