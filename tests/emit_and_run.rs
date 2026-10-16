@@ -8307,6 +8307,7 @@ end
 <i id="rp-health"><%= route_of("/up") %></i>
 <i id="rp-disk"><%= route_of("/rails/active_storage/disk/k/x.png") %></i>
 <i id="rp-blob"><%= route_of("/rails/active_storage/blobs/redirect/abc/x.png") %></i>
+<i id="rp-proxy"><%= route_of("/rails/active_storage/blobs/proxy/abc/x.png") %></i>
 <i id="rp-no-root"><%= route_of("/") %></i>
 "#,
         r#"    assert_match(/<i id="rp-namespaced">controller=admin\/articles action=index<\/i>/, response.body)
@@ -8315,6 +8316,7 @@ end
     assert_match(/<i id="rp-health">controller=rails\/health action=show<\/i>/, response.body)
     assert_match(/<i id="rp-disk">controller=active_storage\/disk action=show encoded_key=k filename=x format=png<\/i>/, response.body)
     assert_match(/<i id="rp-blob">controller=active_storage\/blobs\/redirect action=show signed_id=abc filename=x format=png<\/i>/, response.body)
+    assert_match(/<i id="rp-proxy">controller=active_storage\/blobs\/proxy action=show signed_id=abc filename=x format=png<\/i>/, response.body)
     assert_match(/<i id="rp-no-root">none: No route matches (&quot;|")\/(&quot;|")<\/i>/, response.body)
 "#,
     );

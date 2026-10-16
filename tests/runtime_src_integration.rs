@@ -1067,7 +1067,12 @@ fn every_runtime_method_body_concretely_typed() {
     // MEASURED 771 on 2026-10-15: `Request#filtered_parameters` copies
     // the request's params, whose values are whatever the request sent,
     // into the Hash it filters (+1 in action_dispatch/request.rb).
-    const CEILING: usize = 771;
+    // MEASURED 773 on 2026-10-16: `ActiveSupport.to_query` takes any
+    // Hash key, as Rails' `Hash#to_query` does (a Symbol-keyed literal
+    // reached it and Spinel refused the `Hash[String, _]` declaration);
+    // the key's `to_s` in `query_pairs` is read twice (+2 in
+    // active_support_ext.rb).
+    const CEILING: usize = 773;
     assert!(
         total_gradual <= CEILING,
         "{total_gradual} Ty::Untyped sites exceeds ceiling of {CEILING}",
