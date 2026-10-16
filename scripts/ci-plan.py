@@ -97,28 +97,40 @@ SPINEL_TESTS = [
     "hash_to_query_symbol_keys_spinel",
     "storage_proxy_path_spinel",
 ]
-# Seconds each suite took in spinel-framework (full run 38665931779), for
-# balancing its shards; a suite not listed counts as one Spinel build.
+# Seconds each suite took in spinel-framework (main run 38936441376, its
+# test binary's compile included), for balancing its shards; a suite not
+# listed counts as one Spinel build.
 SPINEL_TEST_SECONDS = {
-    "date_columns_spinel": 45,
-    "framework_tests_spinel": 77,
-    "param_binds": 174,
-    "param_binds_values": 79,
-    "param_binds_cleanup": 88,
-    "spinel_stmt_cache_lru": 113,
-    "db_sqlite_concurrency": 14,
-    "spinel_pg_db": 11,
-    "pessimistic_locking": 46,
-    "not_found_parity_spinel": 118,
-    # Upstream run 38915016729: the transactional-saves cases tripled it.
-    "spinel_transaction_connection": 339,
+    "spinel_transaction_connection": 501,
+    "spinel_stmt_cache_lru": 203,
+    "param_binds": 181,
+    "not_found_parity_spinel": 169,
+    "param_binds_values": 126,
+    "param_binds_cleanup": 86,
+    "framework_tests_spinel": 78,
+    "date_columns_spinel": 62,
+    "postgres_json_types_spinel": 61,
+    "around_block_filter_spinel": 57,
+    "pessimistic_locking": 54,
+    "render_json_encoder_spinel": 54,
+    "jbuilder_array_value_spinel": 52,
+    "jbuilder_extract_attributes_spinel": 52,
+    "hash_to_query_symbol_keys_spinel": 51,
+    "open_telemetry_stub_spinel": 50,
+    "storage_proxy_path_spinel": 46,
+    "plain_class_optional_keywords_spinel": 41,
+    "url_helpers_absolute_spinel": 38,
+    "routes_segment_pattern_spinel": 37,
+    "generated_columns_spinel": 36,
+    "db_sqlite_concurrency": 23,
+    "spinel_pg_db": 19,
+    "spinel_net_http_start": 10,
     **dict.fromkeys(
         [
             "spinel_web_push_crypto",
             "spinel_db_lease",
             "param_binds_planner",
             "spinel_param_builder",
-            "spinel_net_http_start",
             "rails_compat_vectors_spinel",
             "active_job_payload",
         ],
@@ -126,7 +138,7 @@ SPINEL_TEST_SECONDS = {
     ),
 }
 SPINEL_TEST_DEFAULT_SECONDS = 40
-SPINEL_FRAMEWORK_SHARDS = 3
+SPINEL_FRAMEWORK_SHARDS = 4
 # Not balanced by count: these three take two to three times a typical test (local run, 2026-10-17).
 SPINEL_TOOLCHAIN_SECONDS = {
     "real_blog_spinel_tests_pass": 265,
