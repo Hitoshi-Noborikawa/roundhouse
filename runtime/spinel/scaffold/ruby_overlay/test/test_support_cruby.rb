@@ -204,15 +204,22 @@ module ActionView
 end
 
 # The integration session's cookie jar is Rack::Test's, which answers nil
-# for a cookie the browser does not hold — `assert_not cookies[
-# "_campfire_session"]` asks exactly that. The runtime's controller-side
-# jar answers "" (typed String, see action_controller/cookies.rb); the
-# test's view of the browser reads nil. A deleted cookie (written back
-# as "") is one the browser dropped.
+# for a cookie the browser never held — `assert_not cookies[
+# "_campfire_session"]` asks exactly that — and "" for one a response
+# deleted, as it keeps the expired entry (Rails 8's generated
+# `assert_empty cookies[:session_id]` after sign-out reads it). The
+# shared harness drops a deleted cookie (`accept_cookies`), so the names
+# it dropped are remembered here; the runtime's controller-side jar
+# answers "" for both (typed String, see action_controller/cookies.rb).
+# The names live on the test, not the jar: the harness builds a fresh jar
+# from each response's accepted cookies.
 module TestCookieReads
+  attr_writer :deleted_cookie_names
+
   def [](key)
-    value = to_h[key.to_s]
-    value.nil? || value == "" ? nil : super
+    name = key.to_s
+    return super if to_h.key?(name)
+    (@deleted_cookie_names || []).include?(name) ? "" : nil
   end
 end
 
@@ -221,7 +228,24 @@ module RequestDispatch
     def cookies
       jar = super
       jar.extend(TestCookieReads) unless jar.is_a?(TestCookieReads)
+      jar.deleted_cookie_names = deleted_cookie_names
       jar
+    end
+
+    def deleted_cookie_names
+      @__deleted_cookie_names ||= []
+    end
+
+    def accept_cookies(carried, pending)
+      names = deleted_cookie_names
+      pending.each do |k, v|
+        if v == ""
+          names << k unless names.include?(k)
+        else
+          names.delete(k)
+        end
+      end
+      super
     end
   end
   prepend NilCookieReads
