@@ -150,6 +150,7 @@ fn tiny_blog_round_trips() {
         collection_cache_store: None,
         app_requires: Vec::new(),
         sql_functions: Vec::new(),
+        database_pragmas: Vec::new(),
         rbs_includes: Default::default(),
         controllers: vec![posts_controller],
         routes,
