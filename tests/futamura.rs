@@ -827,6 +827,144 @@ end
     fs::remove_dir_all(&out).unwrap();
 }
 
+/// The whole-route planner must reach every app method a route can run,
+/// or it clears a route that runs unsupported code. Each fixture below
+/// has one `widgets#index` route whose action reaches `Frobnicator`, a
+/// constant the lowered app cannot resolve, through one call shape the
+/// walk used to miss, and so must stay with Rails.
+fn reach_ledger(name: &str, action: &str, helpers: &str, extra: &[(&str, &str)]) -> String {
+    let src = scratch(&format!("{name}-src"));
+    let out = scratch(&format!("{name}-out"));
+    write(&src, "Gemfile", b"source \"https://rubygems.org\"\ngem \"rails\"\n");
+    write(&src, "config/routes.rb", b"Rails.application.routes.draw do\n  get \"widgets\" => \"widgets#index\"\nend\n");
+    write(&src, "app/controllers/application_controller.rb", b"class ApplicationController < ActionController::Base\nend\n");
+    let controller = format!(
+        "class WidgetsController < ApplicationController\n{helpers}\n  def index\n{action}\n  end\n\n  private\n\n  def pick\n    Widget.new\n  end\nend\n"
+    );
+    write(&src, "app/controllers/widgets_controller.rb", controller.as_bytes());
+    write(&src, "app/views/widgets/index.html.erb", b"<%= @name %>\n");
+    write(&src, "app/lib/widget.rb", b"class Widget\nend\n");
+    for (path, body) in extra {
+        write(&src, path, body.as_bytes());
+    }
+    let run = Command::new(env!("CARGO_BIN_EXE_roundhouse"))
+        .args(["--target", "futamura", "--survey", "-o"])
+        .arg(&out)
+        .arg(&src)
+        .env("ROUNDHOUSE_FUTAMURA_LEDGER", "1")
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&run.stderr).into_owned();
+    assert!(run.status.success(), "{stderr}");
+    fs::remove_dir_all(&src).unwrap();
+    fs::remove_dir_all(&out).unwrap();
+    stderr
+}
+
+const GADGET: (&str, &str) = ("app/lib/gadget.rb", "class Gadget\n  def call\n    Frobnicator::Spinner.new.spin\n  end\nend\n");
+
+fn assert_left_to_rails(stderr: &str, via: &str) {
+    assert!(stderr.contains("whole-route: 0 GET action(s) served by the lowered app; 1 left to Rails"), "{stderr}");
+    let residue = stderr.lines().find(|l| l.contains("rails ") && l.contains("widgets#index")).unwrap_or_else(|| panic!("{stderr}"));
+    assert!(residue.contains("Frobnicator") && residue.contains(via), "{residue}");
+}
+
+/// A record out of a relation is an app object: the walk used to skip
+/// any send on a framework call's result (`ActiveRecord::Relation.new(
+/// Post).where(…)…`, as the lowering spells it), and cleared the route.
+#[test]
+fn a_send_on_a_record_from_a_relation_is_followed() {
+    let stderr = reach_ledger(
+        "reach-relation",
+        "    @name = Post.where(title: \"x\").to_a.sample.call",
+        "",
+        &[
+            (
+                "db/schema.rb",
+                "ActiveRecord::Schema.define do\n  create_table \"posts\", force: :cascade do |t|\n    t.string \"title\", null: false\n  end\nend\n",
+            ),
+            ("app/models/application_record.rb", "class ApplicationRecord < ActiveRecord::Base\n  primary_abstract_class\nend\n"),
+            ("app/models/post.rb", "class Post < ApplicationRecord\n  def call\n    Frobnicator::Spinner.new.spin\n  end\nend\n"),
+        ],
+    );
+    assert_left_to_rails(&stderr, "Post#call");
+}
+
+/// A value read back from the cache is whatever some request stored:
+/// the walk used to skip the send because `Rails.cache` is the
+/// framework's.
+#[test]
+fn a_send_on_a_value_from_the_cache_is_followed() {
+    let stderr = reach_ledger("reach-cache", "    @name = Rails.cache.read(\"gadget\").call", "", &[GADGET]);
+    assert_left_to_rails(&stderr, "Gadget#call");
+}
+
+/// A class-side `method_missing` answers a name no class method defines
+/// (`Setting.some_key`).
+#[test]
+fn a_class_side_method_missing_is_followed() {
+    let stderr = reach_ledger(
+        "reach-cmissing",
+        "    @name = Gizmo.anything",
+        "",
+        &[("app/lib/gizmo.rb", "class Gizmo\n  def self.method_missing(name, *args)\n    Frobnicator::Spinner.new.spin\n  end\nend\n")],
+    );
+    assert_left_to_rails(&stderr, "Gizmo.method_missing");
+}
+
+/// An instance-side `method_missing` answers an untyped send of a name
+/// its class does not define. (A typed `Gizmo.new.anything` needs no
+/// test here: the analysis already refuses it.)
+#[test]
+fn an_instance_side_method_missing_is_followed() {
+    let stderr = reach_ledger(
+        "reach-imissing",
+        "    @name = Rails.cache.read(\"k\").anything",
+        "",
+        &[("app/lib/gizmo.rb", "class Gizmo\n  def method_missing(name, *args)\n    Frobnicator::Spinner.new.spin\n  end\nend\n")],
+    );
+    assert_left_to_rails(&stderr, "Gizmo#method_missing");
+}
+
+/// `"#{x}"` calls `x.to_s`.
+#[test]
+fn string_interpolation_calls_to_s() {
+    let stderr = reach_ledger(
+        "reach-interp",
+        "    @name = \"<#{{ w: pick }[:w]}>\"",
+        "",
+        &[("app/lib/gadget.rb", "class Gadget\n  def to_s\n    Frobnicator::Spinner.new.spin\n  end\nend\n")],
+    );
+    assert_left_to_rails(&stderr, "Gadget#to_s");
+}
+
+/// `x.public_send(:call)` is `x.call`.
+#[test]
+fn public_send_with_a_literal_name_is_that_call() {
+    let stderr = reach_ledger("reach-public-send", "    @name = Gadget.new.public_send(:call)", "", &[GADGET]);
+    assert_left_to_rails(&stderr, "Gadget#call");
+}
+
+/// A constant holding an object, not a class: a send on it dispatches
+/// on what it holds.
+#[test]
+fn a_send_on_a_value_constant_is_followed() {
+    let stderr = reach_ledger("reach-value-const", "    @name = SPARE.call", "  SPARE = Gadget.new\n", &[GADGET]);
+    assert_left_to_rails(&stderr, "Gadget#call");
+}
+
+/// A parameter's default value runs in the method.
+#[test]
+fn a_parameter_default_is_walked() {
+    let stderr = reach_ledger(
+        "reach-default",
+        "    label\n    @name = \"hi\"",
+        "  def label(text = Gadget.new.call)\n    text\n  end\n",
+        &[GADGET],
+    );
+    assert_left_to_rails(&stderr, "Gadget#call");
+}
+
 /// A minimal app whose `ruby` emit refuses one association (a `through:`
 /// hop keyed on a non-id column, Mastodon's `Status.reblogged_by_accounts`).
 fn app_with_a_ruby_refusal(src: &Path) {
