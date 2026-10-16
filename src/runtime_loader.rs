@@ -1858,8 +1858,11 @@ fn py_format_constant(name: &str, value: &Expr) -> String {
 /// a method looks a global up when it is called, but a constant
 /// initializer runs at import. `CONTROLLER_CONFIG_SLOT =
 /// [ControllerConfig()]` therefore has to follow `class
-/// ControllerConfig`. Rotate the two blocks. A file with no class
-/// (module mode) is left as emitted.
+/// ControllerConfig`. A default argument is also evaluated while the
+/// class body runs, so `opts = EMPTY_HTML_OPTS` has to see that
+/// constant *before* the class. Move only the constants whose value
+/// names a class in this file; leave the rest ahead of the class. A
+/// file with no class (module mode) is left as emitted.
 fn py_wrap_namespace(_namespace: &str, body: &str) -> String {
     let class_at = if body.starts_with("class ") {
         0
@@ -1876,15 +1879,87 @@ fn py_wrap_namespace(_namespace: &str, body: &str) -> String {
     if constants.is_empty() {
         return body.to_string();
     }
-    let mut out = String::with_capacity(body.len() + 2);
-    out.push_str(&body[class_at..]);
-    if !out.ends_with('\n') {
+    let class_names = python_class_names(&body[class_at..]);
+    let (before, after) = split_python_constants_around_classes(constants, &class_names);
+    let mut out = String::with_capacity(body.len() + 4);
+    if !before.is_empty() {
+        out.push_str(&before);
+        if !out.ends_with('\n') {
+            out.push('\n');
+        }
         out.push('\n');
     }
-    out.push('\n');
-    out.push_str(constants);
-    out.push('\n');
+    out.push_str(&body[class_at..]);
+    if !after.is_empty() {
+        if !out.ends_with('\n') {
+            out.push('\n');
+        }
+        out.push('\n');
+        out.push_str(&after);
+        if !out.ends_with('\n') {
+            out.push('\n');
+        }
+    }
     out
+}
+
+/// Top-level and nested `class Name` declarations in an emitted Python
+/// body. Indentation does not matter: a constant that constructs a
+/// nested class still has to follow that class.
+fn python_class_names(body: &str) -> Vec<String> {
+    let mut names = Vec::new();
+    for line in body.lines() {
+        let Some(rest) = line.trim_start().strip_prefix("class ") else {
+            continue;
+        };
+        let name: String = rest
+            .chars()
+            .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+            .collect();
+        if !name.is_empty() && !names.iter().any(|n| n == &name) {
+            names.push(name);
+        }
+    }
+    names
+}
+
+/// Split a leading constant block into values that do not mention a
+/// class in this file (they stay above the class, so a default
+/// argument can read them) and values that do (they follow the class
+/// they construct).
+fn split_python_constants_around_classes(constants: &str, class_names: &[String]) -> (String, String) {
+    let mut before = String::new();
+    let mut after = String::new();
+    let mut stmt = String::new();
+    let flush = |stmt: &mut String, before: &mut String, after: &mut String| {
+        if stmt.trim().is_empty() {
+            stmt.clear();
+            return;
+        }
+        let depends = class_names.iter().any(|name| {
+            stmt.split(|c: char| !c.is_ascii_alphanumeric() && c != '_')
+                .any(|word| word == name.as_str())
+        });
+        if depends {
+            after.push_str(stmt);
+        } else {
+            before.push_str(stmt);
+        }
+        stmt.clear();
+    };
+    for line in constants.split_inclusive('\n') {
+        let is_assign = !line.starts_with(|c: char| c == ' ' || c == '\t')
+            && line.contains(" = ");
+        if is_assign && !stmt.is_empty() {
+            flush(&mut stmt, &mut before, &mut after);
+        }
+        stmt.push_str(line);
+    }
+    flush(&mut stmt, &mut before, &mut after);
+    (
+        before.trim_end_matches(|c: char| c == '\n' || c == '\r').to_string(),
+        after.trim_end_matches(|c: char| c == '\n' || c == '\r').to_string(),
+    )
 }
 
 /// Python runtime transpile table. Mirrors `TYPESCRIPT_RUNTIME` 1:1 by

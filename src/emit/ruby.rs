@@ -1447,11 +1447,14 @@ fn render_autorun_shim(lc: &LibraryClass, reset_lines: &[String]) -> String {
     // inside a non-joinable transaction, so each `save`/`destroy` is a
     // SAVEPOINT. `TestBase.use_transactional_tests` is that default; a
     // class that sets the flag false overrides the class method.
+    // Framework tests are not `TestBase` subclasses and have no such
+    // method — call the example directly rather than raising
+    // `NoMethodError` before it runs.
     if !test_methods.is_empty() {
         writeln!(s, "class {class_name}").unwrap();
         for tm in &test_methods {
             writeln!(s, "  def __txn_{tm}").unwrap();
-            writeln!(s, "    if self.class.use_transactional_tests").unwrap();
+            writeln!(s, "    if self.class.respond_to?(:use_transactional_tests) && self.class.use_transactional_tests").unwrap();
             writeln!(s, "      ActiveRecord::Base.transaction(joinable: false) do").unwrap();
             writeln!(s, "        {tm}").unwrap();
             writeln!(s, "      end").unwrap();
@@ -1507,14 +1510,21 @@ fn render_autorun_shim(lc: &LibraryClass, reset_lines: &[String]) -> String {
         // counting it passed claims a check that never ran. So it is
         // reported on its own line and taken out of BOTH sides of the
         // tally by `scripts/campfire-suite`.
-        writeln!(s, "rescue TestSkipped => __e").unwrap();
-        writeln!(s, "  __ok = false").unwrap();
-        writeln!(s, "  __skipped = __skipped + 1").unwrap();
-        writeln!(s, "  puts {:?} + __e.message", format!("SKIP {class_name}#{tm}: ")).unwrap();
+        // One `rescue Exception`. `TestSkipped < Exception`, and a
+        // framework file never loads the helper that defines that
+        // class — naming it in its own rescue arm raised
+        // `NameError` while handling an ordinary failure. The class
+        // name is the skip signal the helper's `skip` raises.
         writeln!(s, "rescue Exception => __e").unwrap();
-        writeln!(s, "  __ok = false").unwrap();
-        writeln!(s, "  __failed = __failed + 1").unwrap();
-        writeln!(s, "  puts {:?} + __e.message", format!("FAIL {class_name}#{tm}: ")).unwrap();
+        writeln!(s, "  if __e.class.name == \"TestSkipped\"").unwrap();
+        writeln!(s, "    __ok = false").unwrap();
+        writeln!(s, "    __skipped = __skipped + 1").unwrap();
+        writeln!(s, "    puts {:?} + __e.message", format!("SKIP {class_name}#{tm}: ")).unwrap();
+        writeln!(s, "  else").unwrap();
+        writeln!(s, "    __ok = false").unwrap();
+        writeln!(s, "    __failed = __failed + 1").unwrap();
+        writeln!(s, "    puts {:?} + __e.message", format!("FAIL {class_name}#{tm}: ")).unwrap();
+        writeln!(s, "  end").unwrap();
         writeln!(s, "end").unwrap();
         // Teardown gets a guard of its OWN, for the reason the comment
         // above gives for the reset lines: unguarded, a raise here
