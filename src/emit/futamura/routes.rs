@@ -786,11 +786,34 @@ fn rooted_in_framework(index: &Index, class: &str, class_side: bool, e: &Expr) -
 /// expression spans — so a span found here names the same source
 /// location as its counterpart in the re-lowered body.
 fn analyzer_stamps(app: &App) -> HashMap<(u32, u32, u32), Ty> {
-    let mut out = HashMap::new();
+    let mut out: HashMap<(u32, u32, u32), Ty> = HashMap::new();
+    // A span can recur with a different type: a synthesized method body
+    // can share its span with another (`owns_source`'s note on
+    // synthesized accessors borrowing spans), and a concern spliced into
+    // several controllers replays the same source at the same span under
+    // a different `self_ty` each time. The first type seen is no more
+    // trustworthy than the second, so a span that ever disagrees with
+    // itself is dropped for good rather than left holding whichever type
+    // happened to visit first — a wrong stamp here would narrow
+    // `enqueue_send`'s dispatch past a real target.
+    let mut conflicted: HashSet<(u32, u32, u32)> = HashSet::new();
     let mut record = |e: &Expr| {
-        if let Some(ty) = &e.ty {
-            if e.span.file.0 != 0 {
-                out.entry((e.span.file.0, e.span.start, e.span.end)).or_insert_with(|| ty.clone());
+        let Some(ty) = &e.ty else { return };
+        if e.span.file.0 == 0 {
+            return;
+        }
+        let key = (e.span.file.0, e.span.start, e.span.end);
+        if conflicted.contains(&key) {
+            return;
+        }
+        match out.get(&key) {
+            None => {
+                out.insert(key, ty.clone());
+            }
+            Some(existing) if existing == ty => {}
+            Some(_) => {
+                out.remove(&key);
+                conflicted.insert(key);
             }
         }
     };
@@ -854,7 +877,94 @@ fn may_overlap(a: &str, b: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{app_relative, gap_blocking, may_overlap, view_prefix};
+    use super::{analyzer_stamps, app_relative, gap_blocking, may_overlap, view_prefix};
+    use crate::dialect::{Action, Controller, ControllerBodyItem, LayoutDecl, RenderTarget};
+    use crate::expr::{Expr, ExprNode};
+    use crate::ident::{ClassId, Symbol};
+    use crate::span::{FileId, Span};
+    use crate::ty::{Row, Ty};
+    use crate::App;
+
+    /// A minimal controller holding one action whose whole body is `e`,
+    /// so `analyzer_stamps` sees exactly the spans and types `e` carries.
+    fn controller_with_action(class: &str, action: &str, body: Expr) -> Controller {
+        Controller {
+            name: ClassId(Symbol::from(class)),
+            parent: None,
+            parent_span: Span::synthetic(),
+            body: vec![ControllerBodyItem::Action {
+                action: Action {
+                    name: Symbol::from(action),
+                    params: Row::closed(),
+                    opt_params: Vec::new(),
+                    kw_params: Vec::new(),
+                    kwrest_param: None,
+                    block_param: None,
+                    rest_param: None,
+                    anonymous_formal: None,
+                    name_span: Span::synthetic(),
+                    body,
+                    renders: RenderTarget::Inferred,
+                    effects: Default::default(),
+                },
+                leading_comments: Vec::new(),
+                leading_blank_line: false,
+            }],
+            layout: LayoutDecl::Inherit,
+            sibling_classes: Vec::new(),
+        }
+    }
+
+    fn class_ty(name: &str) -> Ty {
+        Ty::Class { id: ClassId(Symbol::from(name)), args: Vec::new().into() }
+    }
+
+    fn stamped(span: Span, ty: Ty) -> Expr {
+        let mut e = Expr::new(span, ExprNode::SelfRef);
+        e.ty = Some(ty);
+        e
+    }
+
+    /// Two controllers whose bodies were spliced from the same concern
+    /// source (`ingest::splice_concerns_into_controllers` copies a
+    /// concern's methods into each includer) can carry the SAME span
+    /// typed differently per includer — e.g. a private `target` helper
+    /// the concern calls answers a different model in each controller.
+    /// The first type seen for that span is no more trustworthy than the
+    /// second, so a span that ever disagrees with itself must yield no
+    /// stamp at all, never whichever type happened to visit first: a
+    /// wrong stamp would let `enqueue_send` narrow dispatch past a real
+    /// target.
+    #[test]
+    fn a_span_with_two_different_types_yields_no_stamp() {
+        let conflict_span = Span { file: FileId(1), start: 10, end: 20 };
+        let app = App {
+            controllers: vec![
+                controller_with_action("WidgetsController", "index", stamped(conflict_span, class_ty("Widget"))),
+                controller_with_action("ThingsController", "index", stamped(conflict_span, class_ty("Thing"))),
+            ],
+            ..Default::default()
+        };
+        let stamps = analyzer_stamps(&app);
+        assert_eq!(stamps.get(&(1, 10, 20)), None, "{stamps:?}");
+    }
+
+    /// The same span typed the SAME way twice (two includers whose
+    /// helper happens to answer the same model) is not a conflict: the
+    /// stamp survives.
+    #[test]
+    fn a_span_with_the_same_type_twice_keeps_its_stamp() {
+        let agree_span = Span { file: FileId(1), start: 30, end: 40 };
+        let app = App {
+            controllers: vec![
+                controller_with_action("WidgetsController", "index", stamped(agree_span, class_ty("Widget"))),
+                controller_with_action("GadgetsController", "index", stamped(agree_span, class_ty("Widget"))),
+            ],
+            ..Default::default()
+        };
+        let stamps = analyzer_stamps(&app);
+        assert_eq!(stamps.get(&(1, 30, 40)), Some(&class_ty("Widget")));
+    }
 
     #[test]
     fn overlap_is_segmentwise() {
