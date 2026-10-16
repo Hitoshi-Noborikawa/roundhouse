@@ -2124,20 +2124,22 @@ jobs:
     # hardens the CORE lane (spinel-advisory=false).
     needs: [generate-fixture, spinel-build, plan]
     if: ${{ !cancelled() && contains(fromJSON(needs.plan.outputs.jobs), 'spinel-toolchain') && needs.generate-fixture.result == 'success' && needs.spinel-build.outputs.artifact-id != '' }}
-    # Three shards, each taking every third test of the sorted list: each
-    # test is one Spinel build of about the same cost, so count balances
-    # them, and a new test spreads instead of growing a hand-kept catch-all
-    # shard (two such shards reached 25 of 25 minutes). Each shard reports
-    # its own output key (ci-plan.py requires all three), since a matrix's
-    # shared output would let one shard's success hide another's failure.
+    # Four shards, balanced by `ci-plan.py toolchain-shard` on recorded
+    # seconds: a new test lands on the lightest shard instead of growing a
+    # hand-kept catch-all one (two such shards reached 25 of 25 minutes).
+    # Not every-third-by-name: three tests take two to three times the rest,
+    # and two of them shared the slowest shard. Each shard reports its own
+    # output key (ci-plan.py requires all four), since a matrix's shared
+    # output would let one shard's success hide another's failure.
     strategy:
       fail-fast: false
       matrix:
-        shard: [0, 1, 2]
+        shard: [0, 1, 2, 3]
     outputs:
       shard-0: ${{ steps.result.outputs.shard-0 }}
       shard-1: ${{ steps.result.outputs.shard-1 }}
       shard-2: ${{ steps.result.outputs.shard-2 }}
+      shard-3: ${{ steps.result.outputs.shard-3 }}
     runs-on: ubuntu-latest
     timeout-minutes: 25
 
@@ -2175,11 +2177,7 @@ jobs:
           working-directory: ./runtime/spinel/scaffold
       - name: cargo test --test spinel_toolchain -- --ignored (${{ matrix.shard }})
         run: |
-          mapfile -t all < <(cargo test --test spinel_toolchain -- --ignored --list --format terse | sed -n 's/: test$//p' | sort)
-          mine=()
-          for i in "${!all[@]}"; do
-            if (( i % 3 == ${{ matrix.shard }} )); then mine+=("${all[$i]}"); fi
-          done
+          mapfile -t mine < <(cargo test --test spinel_toolchain -- --ignored --list --format terse | sed -n 's/: test$//p' | python3 scripts/ci-plan.py toolchain-shard --shard ${{ matrix.shard }})
           test "${#mine[@]}" -gt 0
           cargo test --test spinel_toolchain -- --ignored --nocapture --exact "${mine[@]}"
       # fixtures/tiny-api, the API-only app (#321): `spin build` of the
@@ -2187,7 +2185,7 @@ jobs:
       # compiled natively. Filtered by name, so the ignored test named
       # after an open issue (#163) is not selected.
       - name: cargo test --test tiny_api spinel_gate_ -- --ignored
-        if: ${{ !cancelled() && matrix.shard == 2 }}
+        if: ${{ !cancelled() && matrix.shard == 3 }}
         run: cargo test --test tiny_api spinel_gate_ -- --ignored --nocapture
 
       # On failure, capture spinel's actual generated C for the failing

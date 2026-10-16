@@ -13,6 +13,7 @@ import json
 import os
 import re
 import subprocess
+import sys
 from collections import namedtuple
 from pathlib import Path
 
@@ -126,6 +127,16 @@ SPINEL_TEST_SECONDS = {
 }
 SPINEL_TEST_DEFAULT_SECONDS = 40
 SPINEL_FRAMEWORK_SHARDS = 3
+# Not balanced by count: these three take two to three times a typical test (local run, 2026-10-17).
+SPINEL_TOOLCHAIN_SECONDS = {
+    "real_blog_spinel_tests_pass": 265,
+    "identical_cli_emission_reuses_native_build_but_changed_ruby_rebuilds": 187,
+    "finite_concern_class_configuration_runs_natively": 133,
+}
+SPINEL_TOOLCHAIN_DEFAULT_SECONDS = 80
+SPINEL_TOOLCHAIN_SHARDS = 4
+# tiny_api's gate runs alone after the suite on the last shard, so its 111s counts once per test thread.
+SPINEL_TOOLCHAIN_TAIL_SECONDS = 111 * 4
 # Inputs of the ActiveJob payload gate (tests/active_job_payload.rs):
 # the files its driver loads beside it.
 ACTIVE_JOB_PAYLOAD_INPUTS = {
@@ -686,6 +697,19 @@ def spinel_framework_shards(tests, count=SPINEL_FRAMEWORK_SHARDS):
     return [{"shard": i, "tests": [t for t in tests if t in shard]} for i, shard in enumerate(shards)]
 
 
+def spinel_toolchain_shard(tests, shard, count=SPINEL_TOOLCHAIN_SHARDS):
+    """This shard's tests: longest first onto the lightest shard, by name order within it."""
+    loads = [0] * count
+    loads[-1] = SPINEL_TOOLCHAIN_TAIL_SECONDS
+    mine = []
+    for test in sorted(tests, key=lambda t: (-SPINEL_TOOLCHAIN_SECONDS.get(t, SPINEL_TOOLCHAIN_DEFAULT_SECONDS), t)):
+        i = loads.index(min(loads))
+        loads[i] += SPINEL_TOOLCHAIN_SECONDS.get(test, SPINEL_TOOLCHAIN_DEFAULT_SECONDS)
+        if i == shard:
+            mine.append(test)
+    return sorted(mine)
+
+
 def finish(
     jobs,
     extra,
@@ -918,7 +942,7 @@ def _advisory_complete(job, need, advisory, plan=None):
         return False
     keys = {
         "campfire-spinel-compare": ["default", "minor-gc", "verify-gen"],
-        "spinel-toolchain": ["shard-0", "shard-1", "shard-2"],
+        "spinel-toolchain": [f"shard-{i}" for i in range(SPINEL_TOOLCHAIN_SHARDS)],
         "spinel-framework": [
             f"shard-{s['shard']}"
             for s in (plan or {}).get("spinel_framework_shards", [])
@@ -942,8 +966,13 @@ def write_outputs(values):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("command", choices=["plan", "gate", "compact-gate"])
+    parser.add_argument("command", choices=["plan", "gate", "compact-gate", "toolchain-shard"])
+    parser.add_argument("--shard", type=int)
     args = parser.parse_args()
+    if args.command == "toolchain-shard":
+        tests = [line.strip() for line in sys.stdin if line.strip()]
+        print("\n".join(spinel_toolchain_shard(tests, args.shard)))
+        return False
     if args.command != "plan":
         raw_plan = os.environ.get("CI_PLAN", "")
         if not raw_plan.strip():
