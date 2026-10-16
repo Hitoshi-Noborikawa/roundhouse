@@ -953,6 +953,8 @@ jobs:
           --health-timeout 5s --health-retries 10
     env:
       MAKEFLAGS: "-j4"
+      # Not the test profile's opt-level 1, as in spinel-toolchain: Spinel and cc are the run here.
+      CARGO_PROFILE_TEST_OPT_LEVEL: "0"
     steps:
       - uses: actions/checkout@v7
       - name: Check out spinel-pg (pinned)
@@ -2147,6 +2149,8 @@ jobs:
     continue-on-error: ${{ needs.plan.outputs.spinel-advisory == 'true' }}
     env:
       MAKEFLAGS: "-j4"
+      # Not the test profile's opt-level 1: Spinel and cc are the run here, and it tripled the crate's compile (44s to 3m35s).
+      CARGO_PROFILE_TEST_OPT_LEVEL: "0"
     steps:
       - uses: actions/checkout@v7
       - uses: ./.github/actions/setup-rust
