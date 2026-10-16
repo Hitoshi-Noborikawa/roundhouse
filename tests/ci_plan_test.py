@@ -1151,6 +1151,13 @@ class Results(unittest.TestCase):
         loads[-1] += ci.SPINEL_TOOLCHAIN_TAIL_SECONDS
         self.assertLess(max(loads) - min(loads), max(ci.SPINEL_TOOLCHAIN_SECONDS.values()))
 
+    def test_toolchain_shard_prints_nothing_for_an_empty_selection(self):
+        out = subprocess.run(
+            ["python3", spec.origin, "toolchain-shard", "--shard", "0"],
+            input="", capture_output=True, text=True, check=True,
+        ).stdout
+        self.assertEqual(out, "")
+
     def test_spinel_framework_shards_cover_each_selected_suite_once(self):
         shards = ci.spinel_framework_shards(ci.SPINEL_TESTS)
         self.assertEqual([s["shard"] for s in shards], [0, 1, 2, 3])

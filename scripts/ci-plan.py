@@ -983,7 +983,8 @@ def main():
     args = parser.parse_args()
     if args.command == "toolchain-shard":
         tests = [line.strip() for line in sys.stdin if line.strip()]
-        print("\n".join(spinel_toolchain_shard(tests, args.shard)))
+        for test in spinel_toolchain_shard(tests, args.shard):
+            print(test)
         return False
     if args.command != "plan":
         raw_plan = os.environ.get("CI_PLAN", "")
