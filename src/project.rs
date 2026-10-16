@@ -1049,6 +1049,34 @@ fn report_unemitted_library_classes(app: &App, target: BuildTarget) {
     }
 }
 
+/// A mailer and the `ActionMailer` runtime it delivers through ship on
+/// the Ruby family only; elsewhere `Mailer.action(…)` reached nothing,
+/// or a view of the same name.
+fn report_mailers(app: &App, target: BuildTarget) {
+    if matches!(target, BuildTarget::Blog | BuildTarget::Ruby | BuildTarget::Jruby | BuildTarget::Spinel) {
+        return;
+    }
+    let mailers = crate::lower::mailer_class_side::mailer_names(app);
+    // Not every mailer: real-blog's bare `ApplicationMailer` has no action to deliver.
+    for lc in app.library_classes.iter().filter(|lc| mailers.contains(lc.name.0.as_str())) {
+        let Some(span) = lc
+            .methods
+            .iter()
+            .filter(|m| m.receiver == crate::dialect::MethodReceiver::Instance && m.name.as_str() != "initialize")
+            .map(|m| m.name_span)
+            .find(|s| !s.is_synthetic())
+        else {
+            continue;
+        };
+        emit::diagnostics::report_unsupported(
+            span,
+            target.as_str(),
+            "mailer",
+            format!("`{}` delivers through the Ruby-family ActionMailer runtime; the {} runtime ships none", lc.name.0.as_str(), target.as_str()),
+        );
+    }
+}
+
 /// `class LoginFailedError < StandardError; end` beside a controller in
 /// its file: the Ruby emit re-declares it ahead of the controller, the
 /// other targets declare nothing for it.
@@ -1932,6 +1960,7 @@ fn target_files_inner(
     report_unsupported_keys(app, target);
     report_unemitted_library_classes(app, target);
     report_controller_sibling_classes(app, target);
+    report_mailers(app, target);
     report_sqlite_index_predicates(app, target);
     report_native_ruby_syntax(app, target);
     report_self_bindings(app, target);

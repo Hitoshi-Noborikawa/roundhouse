@@ -33,6 +33,8 @@ mod time_zone_default;
 mod view_presence_url_encode;
 #[path = "emit_and_run/controller_translate.rs"]
 mod controller_translate;
+#[path = "emit_and_run/mailer_templates.rs"]
+mod mailer_templates;
 #[path = "emit_and_run/job_rest_params.rs"]
 mod job_rest_params;
 #[path = "emit_and_run/regexp_constants.rs"]
