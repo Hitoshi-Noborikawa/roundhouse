@@ -30,75 +30,81 @@ pub(super) fn push_validate_method(
     let msgs = Messages(Some(model));
     let mut stmts: Vec<Expr> = Vec::new();
 
-    for (span, v) in model.spanned_validations() {
-        // Column type from the model's attributes row (when present).
-        // Lets the per-rule generator skip dead `is_a?(Array)` branches
-        // for fields the schema declares as `Str` — tsc narrows
-        // `Array.isArray(stringField)` to `never` and rejects the
-        // subsequent `.length` access.
-        let attr_ty = model.attributes.fields.get(&v.attribute);
-        // `validates :user, presence: true` on a `belongs_to :user` (or
-        // `has_one`) names the ASSOCIATION, and Rails asks its reader —
-        // `user.blank?`, nil for a record. There is no `@user` slot: the
-        // writer sets `@user_id` and caches the record, so the column
-        // check below read an ivar nothing writes and rejected every
-        // record. The 2023 lobsters snapshot's ReadRibbon validates this
-        // way, and its story page (reached once `around_action` ran)
-        // could never save a ribbon.
-        let is_assoc = model.associations().any(|a| {
-            matches!(a, Association::BelongsTo { name, .. } | Association::HasOne { name, .. }
-                if name == &v.attribute)
-        });
-        for rule in &v.rules {
-            if is_assoc && matches!(rule, ValidationRule::Presence) {
-                let reader = Expr::new(
-                    Span::synthetic(),
-                    ExprNode::Send {
-                        recv: None,
-                        method: v.attribute.clone(),
-                        args: vec![],
-                        block: None,
-                        parenthesized: false,
-                    },
-                );
-                let mut check = if_with_nil_else(
-                    send(reader, "nil?", vec![]),
-                    errors_push(v.attribute.as_str(), msgs.error(v.attribute.as_str(), "blank", &Default::default())),
-                );
-                check.inherit_span(span);
-                stmts.push(check);
-                continue;
+    // One pass in declaration order: Rails checks a `belongs_to` where it is declared, among the `validates`, so its error lists there.
+    for item in &model.body {
+        let span = item.span();
+        match item {
+            crate::dialect::ModelBodyItem::Validation { validation: v, .. } => {
+                // Column type from the model's attributes row (when present).
+                // Lets the per-rule generator skip dead `is_a?(Array)` branches
+                // for fields the schema declares as `Str` — tsc narrows
+                // `Array.isArray(stringField)` to `never` and rejects the
+                // subsequent `.length` access.
+                let attr_ty = model.attributes.fields.get(&v.attribute);
+                // `validates :user, presence: true` on a `belongs_to :user` (or
+                // `has_one`) names the ASSOCIATION, and Rails asks its reader —
+                // `user.blank?`, nil for a record. There is no `@user` slot: the
+                // writer sets `@user_id` and caches the record, so the column
+                // check below read an ivar nothing writes and rejected every
+                // record. The 2023 lobsters snapshot's ReadRibbon validates this
+                // way, and its story page (reached once `around_action` ran)
+                // could never save a ribbon.
+                let is_assoc = model.associations().any(|a| {
+                    matches!(a, Association::BelongsTo { name, .. } | Association::HasOne { name, .. }
+                        if name == &v.attribute)
+                });
+                for rule in &v.rules {
+                    if is_assoc && matches!(rule, ValidationRule::Presence) {
+                        let reader = Expr::new(
+                            Span::synthetic(),
+                            ExprNode::Send {
+                                recv: None,
+                                method: v.attribute.clone(),
+                                args: vec![],
+                                block: None,
+                                parenthesized: false,
+                            },
+                        );
+                        let mut check = if_with_nil_else(
+                            send(reader, "nil?", vec![]),
+                            errors_push(v.attribute.as_str(), msgs.error(v.attribute.as_str(), "blank", &Default::default())),
+                        );
+                        check.inherit_span(span);
+                        stmts.push(check);
+                        continue;
+                    }
+                    for mut check in validation_rule_to_calls(msgs, &v.attribute, rule, attr_ty) {
+                        // Each expanded check attributes to its `validates` line.
+                        check.inherit_span(span);
+                        stmts.push(check);
+                    }
+                }
             }
-            for mut check in validation_rule_to_calls(msgs, &v.attribute, rule, attr_ty) {
-                // Each expanded check attributes to its `validates` line.
-                check.inherit_span(span);
-                stmts.push(check);
+            crate::dialect::ModelBodyItem::Association { assoc, .. } => {
+                // Rails 5+ default: every `belongs_to` requires the associated
+                // record to exist before save. Emit `validates_belongs_to(:assoc,
+                // @<fk>, <Target>)` per non-optional belongs_to. The runtime
+                // helper short-circuits when the FK is unset (nil/0) and queries
+                // `<Target>.exists?(fk_value)` otherwise (by the association's
+                // `primary_key:` when it names a column other than the target's key).
+                if let Association::BelongsTo {
+                    name, target, foreign_key, optional: false, polymorphic, primary_key, ..
+                } = assoc
+                {
+                    // The foreign key holds the association's primary key; the
+                    // existence lookup goes by that column when it is not the
+                    // target's own key (`primary_key: "uuid"`).
+                    let assoc_pk =
+                        crate::lower::scope_chain::association_primary_key(models, target, primary_key.as_ref());
+                    let own_pk = crate::lower::scope_chain::association_primary_key(models, target, None);
+                    let lookup_pk = (assoc_pk != own_pk).then_some(&assoc_pk);
+                    let mut check =
+                        inline_belongs_to_check(msgs, name, foreign_key, target, lookup_pk, *polymorphic);
+                    check.inherit_span(span);
+                    stmts.push(check);
+                }
             }
-        }
-    }
-
-    // Rails 5+ default: every `belongs_to` requires the associated
-    // record to exist before save. Emit `validates_belongs_to(:assoc,
-    // @<fk>, <Target>)` per non-optional belongs_to. The runtime
-    // helper short-circuits when the FK is unset (nil/0) and queries
-    // `<Target>.exists?(fk_value)` otherwise (by the association's
-    // `primary_key:` when it names a column other than the target's key).
-    for (span, assoc) in model.spanned_associations() {
-        if let Association::BelongsTo {
-            name, target, foreign_key, optional: false, polymorphic, primary_key, ..
-        } = assoc
-        {
-            // The foreign key holds the association's primary key; the
-            // existence lookup goes by that column when it is not the
-            // target's own key (`primary_key: "uuid"`).
-            let assoc_pk =
-                crate::lower::scope_chain::association_primary_key(models, target, primary_key.as_ref());
-            let own_pk = crate::lower::scope_chain::association_primary_key(models, target, None);
-            let lookup_pk = (assoc_pk != own_pk).then_some(&assoc_pk);
-            let mut check =
-                inline_belongs_to_check(msgs, name, foreign_key, target, lookup_pk, *polymorphic);
-            check.inherit_span(span);
-            stmts.push(check);
+            _ => {}
         }
     }
 
@@ -650,7 +656,10 @@ fn inline_belongs_to_check(
             ExprNode::Lit { value: Literal::Int { value: 0 } },
         )],
     );
-    let push_err = errors_push(assoc_name.as_str(), msgs.error(assoc_name.as_str(), "required", &Default::default()));
+    // Not a `:required` error: Rails' `belongs_to` validates presence with `message: :required`, so the type stays `:blank`.
+    let mut message = msgs.error(assoc_name.as_str(), "required", &Default::default());
+    message.kind = "blank".to_string();
+    let push_err = errors_push(assoc_name.as_str(), message);
     if polymorphic {
         return if_with_nil_else(bool_op(BoolOpKind::Or, nil_check, zero_check), push_err);
     }
@@ -1174,6 +1183,8 @@ impl Messages<'_> {
             full: parts(i18n.full_error(attr, kind, opts)),
             kind: kind.to_string(),
             bare: parts(i18n.error(attr, kind, opts)),
+            // The others carry `count:`, `value:` or `attribute:` beside the type in Rails' `details`.
+            optionless: matches!(kind, "blank" | "present" | "required" | "accepted" | "password_too_long"),
         }
     }
 }
@@ -1182,6 +1193,7 @@ pub(crate) struct Message {
     full: Expr,
     kind: String,
     bare: Expr,
+    optionless: bool,
 }
 
 // ── IR helpers ────────────────────────────────────────────────
@@ -1231,7 +1243,7 @@ fn errors_push(attribute: &str, msg: Message) -> Expr {
         },
     );
     let kind = Expr::new(Span::synthetic(), ExprNode::Lit { value: Literal::Str { value: msg.kind } });
-    crate::lower::errors_add::attributed_push(send(errors_call, "<<", vec![msg.full]), None, attribute, kind, msg.bare, Span::synthetic())
+    crate::lower::errors_add::attributed_push(send(errors_call, "<<", vec![msg.full]), None, attribute, kind, true, msg.optionless, msg.bare, Span::synthetic())
 }
 
 fn if_with_nil_else(cond: Expr, then_branch: Expr) -> Expr {

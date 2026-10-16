@@ -1044,7 +1044,27 @@ fn every_runtime_method_body_concretely_typed() {
     // `ActiveStorage::AttachedMany#map` (the proxy's Enumerable reads for a
     // jbuilder block over `record.pictures`) adds 1, MEASURED: the value
     // of its `yield`, the same block-return escape `#each` carries.
-    const CEILING: usize = 718;
+    // MEASURED 734 on 2026-10-14: ActiveRecord's statement-error hierarchy
+    // (`ActiveRecordError`, `StatementInvalid` and the fourteen below them)
+    // adds one gradual site per class, its `super(message)` into the
+    // exception initializer, as the existing exception classes carry (+16
+    // in active_record/errors.rb).
+    // `JsonBuilder.encode_value`'s Array branch (`json.tags([a, nil])` as
+    // a JSON array) adds 2, MEASURED: the `map` over the untyped value
+    // and its untyped element handed back to `encode_value`, the same
+    // gradual input every other branch of that method reads.
+    // Its Hash branch (a Hash element as a JSON object) adds 3, MEASURED:
+    // the `keys` of the untyped Hash, a key's `to_s` and its value read
+    // back into `encode_value`.
+    // MEASURED 754 on 2026-10-15: `I18n.translate_runtime` (a `t` whose
+    // key, scope, default or options are known only when it runs) reads
+    // the caller's options Hash as the gem does: its `:scope`, `:default`,
+    // `:count`, `:locale` and each interpolation value are whatever the
+    // caller passed (+15 in i18n_locale.rb).
+    // MEASURED 770 on 2026-10-16: a locale's own plural rule reads the
+    // count the caller passed, an Integer, a Float or whatever else, as
+    // rails-i18n's and CLDR's rules do (+16 in i18n_locale.rb).
+    const CEILING: usize = 770;
     assert!(
         total_gradual <= CEILING,
         "{total_gradual} Ty::Untyped sites exceeds ceiling of {CEILING}",

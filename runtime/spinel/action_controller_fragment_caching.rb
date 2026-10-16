@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 # Rails' controller fragment caching (AbstractController::Caching and
 # ::Fragments) and the view side that asks it (ActionView::Helpers::
 # CacheHelper), for the ruby family and spinel.
@@ -120,6 +121,44 @@ module ActionView
 
     def self.fragment_write(key, value, ttl)
       ActionView::ViewHelpers.fragment_controller.write_fragment(ActionView::ViewHelpers.fragment_name(key), value, ttl)
+    end
+
+    # Rails' `CollectionCaching#will_cache?`: the rendering controller's
+    # `perform_caching`.
+    def self.collection_caching?
+      ActionView::ViewHelpers.fragment_controller.perform_caching
+    end
+
+    # One element's key, as Rails' `expanded_cache_key` builds it:
+    # `combined_fragment_cache_key(cache_fragment_name(key, digest_path:))`.
+    # The template path stands in for the digest path (templates carry
+    # no digest here), so an app's override of
+    # `combined_fragment_cache_key` sees the same `[path, key]` shape.
+    # Expanded once, for the read and the write to share.
+    def self.collection_fragment_key(partial, key)
+      controller = ActionView::ViewHelpers.fragment_controller
+      ActiveSupport::Cache.expanded_key(controller.combined_fragment_cache_key([ partial, key ]))
+    end
+
+    # Rails reads every element from `ActionView::PartialRenderer.
+    # collection_cache`, which defaults to `Rails.cache` and which
+    # campfire points at its fragment store. The controller's
+    # `cache_store` is that store for every app this runtime serves.
+    def self.collection_fragment_read(name)
+      store = ActionView::ViewHelpers.fragment_controller.cache_store
+      return nil if store.nil?
+      return store.read(name) if store.is_a?(ActiveSupport::Cache::MemoryStore)
+      store.read_str(name)
+    end
+
+    def self.collection_fragment_write(name, value)
+      store = ActionView::ViewHelpers.fragment_controller.cache_store
+      return value if store.nil?
+      if store.is_a?(ActiveSupport::Cache::MemoryStore)
+        store.write(name, value)
+        return value
+      end
+      store.write_str(name, value, 0)
     end
 
     # The controller rendering this page, or a detached one.

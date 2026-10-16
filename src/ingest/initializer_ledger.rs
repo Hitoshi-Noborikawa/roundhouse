@@ -77,7 +77,7 @@ use crate::span::{SourceFile, Span};
 use crate::vfs::Vfs;
 
 use super::app::{
-    default_locale_line, declares_rails_engine, extract_autoload_lib_ignores,
+    available_locales_line, default_locale_line, declares_rails_engine, fallbacks_line, extract_autoload_lib_ignores,
     extract_autoload_path_roots, extract_config_assignments, extract_config_time_zone,
     extract_initializer_filters, extract_module_mixins, extract_session_cookie_key,
     extract_time_formats, extract_variable_content_type_exclusions,
@@ -138,6 +138,9 @@ struct Probe<'a> {
     /// stays attached and the slice parses on its own).
     text: &'a str,
     node: &'a Node<'a>,
+    /// The whole file: `node`'s offsets index this, not `text`, which
+    /// starts at the statement.
+    src: &'a str,
     /// The initializer's file name (`session_store.rb`).
     file_name: &'a str,
     /// `config.autoload_lib(ignore: …)` directories, before any filtering.
@@ -283,6 +286,12 @@ const RECOGNIZERS: &[Recognizer] = &[
         reads: |p| code_lines(p.text).any(|l| forgery_strategy_line(l).is_some()),
     },
     Recognizer {
+        name: "action_cable origins (config.action_cable.allowed_request_origins / allow_same_origin_as_host / disable_request_forgery_protection =)",
+        origins: INIT_APP,
+        levels: ANY,
+        reads: |p| super::action_cable_config::assignment(p.node).is_some(),
+    },
+    Recognizer {
         name: "autoload ignore (initializer that explicitly requires an ignored lib/ directory)",
         origins: INIT,
         levels: TOP,
@@ -317,6 +326,19 @@ const RECOGNIZERS: &[Recognizer] = &[
         origins: APP,
         levels: ANY,
         reads: |p| code_lines(p.text).any(|l| default_locale_line(l).is_some()),
+    },
+    Recognizer {
+        name: "i18n available_locales (config.i18n.available_locales =)",
+        origins: APP,
+        levels: ANY,
+        // A computed list is not read (the locales come from the app's files), so it stays reported.
+        reads: |p| code_lines(p.text).any(|l| matches!(available_locales_line(l), Some(Ok(_)))),
+    },
+    Recognizer {
+        name: "i18n fallbacks (config.i18n.fallbacks =)",
+        origins: APP,
+        levels: ANY,
+        reads: |p| code_lines(p.text).any(|l| fallbacks_line(l, "").is_some()),
     },
     Recognizer {
         name: "i18n raise_on_missing_translations",
@@ -399,10 +421,10 @@ fn mapper_extension(p: &Probe<'_>) -> bool {
         return false;
     }
     let Some(recv) = call.receiver() else { return false };
-    let Some(target) = super::app::constant_text(&recv, p.text) else { return false };
+    let Some(target) = super::app::constant_text(&recv, p.src) else { return false };
     target.trim_start_matches("::") == "ActionDispatch::Routing::Mapper"
         && call.arguments().is_some_and(|a| {
-            a.arguments().iter().any(|arg| super::app::constant_text(&arg, p.text).is_some())
+            a.arguments().iter().any(|arg| super::app::constant_text(&arg, p.src).is_some())
         })
 }
 
@@ -415,7 +437,7 @@ fn content_helper_assignment(p: &Probe<'_>) -> bool {
         return false;
     }
     let Some(recv) = call.receiver() else { return false };
-    if super::app::constant_text(&recv, p.text).as_deref() != Some("ActionText::ContentHelper") {
+    if super::app::constant_text(&recv, p.src).as_deref() != Some("ActionText::ContentHelper") {
         return false;
     }
     call.arguments().is_some_and(|a| a.arguments().iter().count() == 1)
@@ -642,6 +664,7 @@ fn judge(origin: Origin, st: &Stmt<'_>, file_name: &str, lib_ignores: &[String],
     let probe = Probe {
         text: st.text,
         node: &st.node,
+        src,
         file_name,
         lib_ignores,
     };

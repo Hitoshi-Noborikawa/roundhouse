@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 # Primitive Db surface — the layer that per-model adapter code sits on
 # top of. The contract is database-agnostic; this file is the SQLite-via-
 # the-cruby-`sqlite3`-gem implementation. Other backends (sqlite via
@@ -152,6 +153,8 @@ module Db
     # the read() copy. Harmless on :memory: (pages are already heap).
     db.execute("PRAGMA cache_size=-65536")
     db.execute("PRAGMA mmap_size=268435456")
+    # Not SQLite's default (off): Rails' DEFAULT_PRAGMAS turn it on, as db.rb's PRAGMAS do.
+    db.execute("PRAGMA foreign_keys=ON")
     # The gem's default is 0: a second writer fails at once with
     # SQLITE_BUSY. Rails' database.yml says `timeout: 5000`, and so do
     # the binary's PRAGMAS — the harness's file database (see
@@ -352,6 +355,44 @@ module Db
     end
   end
 
+  # Rails' SQLite `disable_referential_integrity`: fixtures load and tables empty in any order. Not foreign_keys=OFF alone: that pragma is a no-op inside a transaction, where defer_foreign_keys moves the check to COMMIT instead.
+  def self.without_foreign_keys(&block)
+    on_lease { foreign_keys_off(&block) }
+  end
+
+  def self.foreign_keys_off
+    Db.exec("PRAGMA defer_foreign_keys = ON")
+    Db.exec("PRAGMA foreign_keys = OFF")
+    result = nil
+    begin
+      result = yield
+    ensure
+      Db.exec("PRAGMA defer_foreign_keys = OFF")
+      Db.exec("PRAGMA foreign_keys = ON")
+    end
+    result
+  end
+
+  # Not a lease of its own when the caller holds one: with a pool of one handle, the second checkout waits for the first forever.
+  def self.on_lease(&block)
+    in_lease? ? yield : Db.with_connection(&block)
+  end
+
+  # Rails' `check_all_foreign_keys_valid!`, which its fixture loader runs after a load (`verify_foreign_keys_for_fixtures`).
+  def self.check_foreign_keys!
+    tables = []
+    on_lease do
+      st = Db.prepare("PRAGMA foreign_key_check")
+      while Db.step?(st)
+        table = Db.column_text(st, 0)
+        tables << table unless tables.include?(table)
+      end
+      Db.finalize(st)
+    end
+    raise ActiveRecord::StatementInvalid, "Foreign key violations found: " + tables.join(", ") unless tables.empty?
+    nil
+  end
+
   def self.with_connection
     h = nil
     adopt_after_fork
@@ -504,9 +545,8 @@ module Db
       begin
         names = stmt.columns
         rows = stmt.execute.to_a
-      rescue StandardError => e
-        raise ActiveRecord::RecordNotUnique, e.message if Db.unique_violation?(e.message)
-        raise
+      rescue SQLite3::Exception => e
+        Db.raise_statement_error(e.message, e.is_a?(SQLite3::BusyException))
       ensure
         stmt.close
       end
@@ -585,9 +625,8 @@ module Db
 
   def self.run_exec(conn, sql)
     conn.execute(sql)
-  rescue StandardError => e
-    raise ActiveRecord::RecordNotUnique, e.message if Db.unique_violation?(e.message)
-    raise
+  rescue SQLite3::Exception => e
+    Db.raise_statement_error(e.message, e.is_a?(SQLite3::BusyException))
   end
 
   # ── The write permit ──
@@ -903,6 +942,16 @@ module Db
     message.to_s.include?("UNIQUE constraint failed")
   end
 
+  # Not the driver's own exception: Rails translates every statement error into ActiveRecord's hierarchy (sqlite3_adapter `translate_exception`), keyed on SQLite's own message as `unique_violation?` is.
+  def self.raise_statement_error(message, busy)
+    raise ActiveRecord::RecordNotUnique, message if unique_violation?(message)
+    raise ActiveRecord::NotNullViolation, message if message.include?("NOT NULL constraint failed")
+    raise ActiveRecord::InvalidForeignKey, message if message.include?("FOREIGN KEY constraint failed")
+    raise ActiveRecord::CheckViolation, message if message.include?("CHECK constraint failed")
+    raise ActiveRecord::StatementTimeout, message if busy
+    raise ActiveRecord::StatementInvalid, message
+  end
+
   # Prepared-statement cache (roundhouse#12). A SQLite3::Statement is bound
   # to the connection it was prepared on, so the cache lives ON the
   # connection object — and since `with_connection` leases a connection to
@@ -968,6 +1017,8 @@ module Db
   def self.prepare(sql)
     return prepare_marked(sql) if sql.include?("\x01")
     prepare_plain(sql)
+  rescue SQLite3::Exception => e
+    Db.raise_statement_error(e.message, e.is_a?(SQLite3::BusyException))
   end
 
   # Prepare without re-entering prepare_marked. After lift_binds, the
@@ -1158,6 +1209,7 @@ module Db
     rescue StandardError
       # Failed closes remain owned until lease cleanup quarantines them.
     end
+    Db.raise_statement_error(error.message, error.is_a?(SQLite3::BusyException)) if error.is_a?(SQLite3::Exception)
     raise error
   end
 

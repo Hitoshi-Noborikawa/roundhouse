@@ -26,7 +26,7 @@ fn run(name: &str, body: &str) {
         r#"
 require {pool:?}
 require {shim:?}
-module ActiveRecord; class RecordNotUnique < StandardError; end; end
+require {errors:?}
 def check(what, ok)
   raise "FAILED: #{{what}}" unless ok
 end
@@ -43,6 +43,7 @@ puts "OK"
 "#,
         pool = root.join("runtime/ruby/active_record/connection_pool.rb"),
         shim = root.join("runtime/spinel/db_cruby.rb"),
+        errors = root.join("runtime/ruby/active_record/errors.rb"),
         db = dir.join("test.sqlite3"),
     );
     std::fs::write(dir.join("check.rb"), script).unwrap();
@@ -459,7 +460,7 @@ Db.with_connection do
       begin
         Db.exec("INSERT INTO t VALUES (2)")
         outcome = :wrote
-      rescue SQLite3::BusyException
+      rescue ActiveRecord::StatementTimeout
         outcome = :busy
       end
     end

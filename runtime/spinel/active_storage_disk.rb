@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 require "json"
 # Active Storage's BYTES half, for the ruby family: the disk service,
 # the attachable coercion, the image analyzer, and the three engine

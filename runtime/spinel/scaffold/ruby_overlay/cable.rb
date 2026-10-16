@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 # Cable — Action-Cable-shape WebSocket endpoint for the CRuby target.
 #
 # ARCHITECTURE. One reactor thread owns every connection: a single

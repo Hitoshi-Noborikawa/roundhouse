@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 # Ruby-family-only ViewHelpers extensions — a reopen, same pattern as
 # active_record/connection.rb: NOT listed in runtime_loader's strict-
 # target tables (the scaffold dir-walk ships it to spinel/CRuby/JRuby

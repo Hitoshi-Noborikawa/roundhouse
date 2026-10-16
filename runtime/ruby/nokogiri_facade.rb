@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 # Nokogiri façade — its own file, so the spin-shaped spinel tree can swap
 # the FILE for `require "nokogiri"` (the spinel-nokogiri spin package:
 # libxml2 2.13.9 with Nokogiri's patches, carried) when the app names

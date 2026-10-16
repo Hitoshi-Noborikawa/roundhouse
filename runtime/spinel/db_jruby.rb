@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 # Primitive Db surface — JRuby variant. Same `module Db` contract as
   # The query cache keeps results up to this many rows — see db.rb.
   QC_CAPTURE_ROWS = 16
@@ -144,6 +145,8 @@ module Db
     st.execute("PRAGMA journal_mode=WAL")
     st.execute("PRAGMA synchronous=NORMAL")
     st.execute("PRAGMA busy_timeout=5000")
+    # Not SQLite's default (off): Rails' DEFAULT_PRAGMAS turn it on, as db.rb's PRAGMAS do.
+    st.execute("PRAGMA foreign_keys=ON")
     st.close
     Conn.new(raw)
   end
@@ -199,6 +202,44 @@ module Db
 
   def self.transaction_open?
     current_dbh.in_txn
+  end
+
+  # Rails' SQLite `disable_referential_integrity`: fixtures load and tables empty in any order. Not foreign_keys=OFF alone: that pragma is a no-op inside a transaction, where defer_foreign_keys moves the check to COMMIT instead.
+  def self.without_foreign_keys(&block)
+    on_lease { foreign_keys_off(&block) }
+  end
+
+  def self.foreign_keys_off
+    Db.exec("PRAGMA defer_foreign_keys = ON")
+    Db.exec("PRAGMA foreign_keys = OFF")
+    result = nil
+    begin
+      result = yield
+    ensure
+      Db.exec("PRAGMA defer_foreign_keys = OFF")
+      Db.exec("PRAGMA foreign_keys = ON")
+    end
+    result
+  end
+
+  # Not a lease of its own when the caller holds one: with a pool of one handle, the second checkout waits for the first forever.
+  def self.on_lease(&block)
+    in_lease? ? yield : Db.with_connection(&block)
+  end
+
+  # Rails' `check_all_foreign_keys_valid!`, which its fixture loader runs after a load (`verify_foreign_keys_for_fixtures`).
+  def self.check_foreign_keys!
+    tables = []
+    on_lease do
+      st = Db.prepare("PRAGMA foreign_key_check")
+      while Db.step?(st)
+        table = Db.column_text(st, 0)
+        tables << table unless tables.include?(table)
+      end
+      Db.finalize(st)
+    end
+    raise ActiveRecord::StatementInvalid, "Foreign key violations found: " + tables.join(", ") unless tables.empty?
+    nil
   end
 
   def self.with_connection
@@ -323,9 +364,8 @@ module Db
       conn.in_txn = true if word == "BEGIN"
       rollback_to_savepoint = word == "ROLLBACK" && sql.strip.upcase.start_with?("ROLLBACK TO ")
       conn.in_txn = false if word == "COMMIT" || word == "END" || (word == "ROLLBACK" && !rollback_to_savepoint)
-    rescue StandardError => e
-      raise ActiveRecord::RecordNotUnique, e.message if Db.unique_violation?(e.message)
-      raise
+    rescue Java::JavaSql::SQLException => e
+      Db.raise_statement_error(e.message, e.message.include?("SQLITE_BUSY"))
     ensure
       st.close
     end
@@ -361,9 +401,8 @@ module Db
           rs.close
         end
       end
-    rescue StandardError => e
-      raise ActiveRecord::RecordNotUnique, e.message if Db.unique_violation?(e.message)
-      raise
+    rescue Java::JavaSql::SQLException => e
+      Db.raise_statement_error(e.message, e.message.include?("SQLITE_BUSY"))
     ensure
       st.close
     end
@@ -423,6 +462,16 @@ module Db
     message.to_s.include?("UNIQUE constraint failed")
   end
 
+  # Not the driver's own exception: Rails translates every statement error into ActiveRecord's hierarchy (sqlite3_adapter `translate_exception`), keyed on SQLite's own message as `unique_violation?` is.
+  def self.raise_statement_error(message, busy)
+    raise ActiveRecord::RecordNotUnique, message if unique_violation?(message)
+    raise ActiveRecord::NotNullViolation, message if message.include?("NOT NULL constraint failed")
+    raise ActiveRecord::InvalidForeignKey, message if message.include?("FOREIGN KEY constraint failed")
+    raise ActiveRecord::CheckViolation, message if message.include?("CHECK constraint failed")
+    raise ActiveRecord::StatementTimeout, message if busy
+    raise ActiveRecord::StatementInvalid, message
+  end
+
   # Prepared-statement cache (roundhouse#12). A cache hit reuses the open
   # PreparedStatement only when idle. Xerial's `executeQuery` in `step?`
   # resets the cursor before execution; release clears old parameters.
@@ -433,6 +482,8 @@ module Db
   def self.prepare(sql)
     return prepare_marked(sql) if sql.include?("\x01")
     prepare_plain(sql)
+  rescue Java::JavaSql::SQLException => e
+    Db.raise_statement_error(e.message, e.message.include?("SQLITE_BUSY"))
   end
 
   # Prepare without re-entering prepare_marked. Post-lift SQL may still
@@ -791,6 +842,7 @@ module Db
     rescue StandardError
       # Failed closes remain owned until lease cleanup quarantines them.
     end
+    Db.raise_statement_error(error.message, error.message.include?("SQLITE_BUSY")) if error.is_a?(Java::JavaSql::SQLException)
     raise error
   end
 

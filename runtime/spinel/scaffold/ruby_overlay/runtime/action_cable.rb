@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 # ActionCable — the framework surface an app's OWN channels sit on, plus
 # the low-level publish API that model code calls directly.
 #
