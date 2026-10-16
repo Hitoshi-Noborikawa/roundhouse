@@ -290,12 +290,18 @@ fn tag_html(e: &Expr, manifest: Option<&ViteManifest>) -> Option<String> {
                 // Consumed by Rails' asset path resolution; never an
                 // attribute on the emitted tag.
                 "extname" => continue,
-                "crossorigin" => match attr_lit(v) {
-                    Some(lit) => tag_options.crossorigin = render_scalar(&lit),
+                "crossorigin" => match attr_lit(v).map(|lit| render_override(&lit, true)) {
+                    Some(Some(value)) => tag_options.crossorigin = value,
+                    Some(None) => {
+                        return gap("option `crossorigin` has a value that cannot be rendered as an attribute (e.g. a Hash)".to_string());
+                    }
                     None => return gap("option `crossorigin` has a non-literal value".to_string()),
                 },
-                "type" => match attr_lit(v) {
-                    Some(lit) => tag_options.script_type = render_scalar(&lit),
+                "type" => match attr_lit(v).map(|lit| render_override(&lit, false)) {
+                    Some(Some(value)) => tag_options.script_type = value,
+                    Some(None) => {
+                        return gap("option `type` has a value that cannot be rendered as an attribute (e.g. a Hash)".to_string());
+                    }
                     None => return gap("option `type` has a non-literal value".to_string()),
                 },
                 // `aria:` needs its own array/boolean token-join rules
@@ -374,16 +380,25 @@ fn attr_lit(e: &Expr) -> Option<AttrLit> {
     }
 }
 
-/// Renders a `crossorigin:`/`type:` override to the plain string Rails'
-/// `tag_option` would produce for it (no surrounding quotes).
-fn render_scalar(lit: &AttrLit) -> String {
+/// Renders a `crossorigin:`/`type:` override the way Rails' `tag_option`
+/// (a plain, non-boolean attribute) would: `None` means the value isn't
+/// representable as an attribute at all (a Hash — real Rails would raise
+/// `NoMethodError` calling `#join` on it, since only `class:` treats an
+/// Array/Hash specially) and the caller must gap instead of rendering;
+/// `Some(None)` is `nil`, which Rails' `TagBuilder#tag_options` omits
+/// from the tag entirely (`elsif !value.nil?`); `Some(Some(text))` is
+/// the html-escaped value to render (`key="text"`). `is_crossorigin`
+/// selects `javascript_include_tag`'s own `crossorigin: true` =>
+/// `"anonymous"` special case; `type:` has no such case and renders a
+/// literal `true`/`false` like any other non-boolean attribute.
+fn render_override(lit: &AttrLit, is_crossorigin: bool) -> Option<Option<String>> {
     match lit {
-        AttrLit::Str(s) => s.clone(),
-        AttrLit::Bool(true) => "anonymous".to_string(), // `crossorigin: true` => "anonymous"
-        AttrLit::Bool(false) => "false".to_string(),
-        AttrLit::Int(i) => i.to_string(),
-        AttrLit::Nil => String::new(),
-        AttrLit::Hash(_) => String::new(),
+        AttrLit::Nil => Some(None),
+        AttrLit::Str(s) => Some(Some(html_escape(s))),
+        AttrLit::Bool(true) if is_crossorigin => Some(Some("anonymous".to_string())),
+        AttrLit::Bool(b) => Some(Some(b.to_string())), // "true"/"false": no special characters to escape
+        AttrLit::Int(i) => Some(Some(i.to_string())),
+        AttrLit::Hash(_) => None,
     }
 }
 
@@ -467,15 +482,22 @@ fn render_extra_attrs(extra: &[(String, AttrLit)]) -> String {
 }
 
 struct TagOptions {
-    crossorigin: String,
-    script_type: String,
+    /// `None` omits the `crossorigin`/`type` attribute entirely (an
+    /// explicit `nil` override) — distinct from `Some("")`, which still
+    /// renders `crossorigin=""`, vite_javascript_tag's own default.
+    crossorigin: Option<String>,
+    script_type: Option<String>,
     extra: Vec<(String, AttrLit)>,
 }
 
 impl Default for TagOptions {
     fn default() -> Self {
         // vite_javascript_tag's own defaults: `crossorigin: ""`, `type: "module"`.
-        TagOptions { crossorigin: String::new(), script_type: "module".to_string(), extra: Vec::new() }
+        TagOptions {
+            crossorigin: Some(String::new()),
+            script_type: Some("module".to_string()),
+            extra: Vec::new(),
+        }
     }
 }
 
@@ -498,8 +520,11 @@ fn entry_key(name: &str, ext: &str) -> String {
 fn tags(manifest: &ViteManifest, entries: &[&ViteChunk], options: &TagOptions) -> Result<String, String> {
     let asset = |file: &str| format!("/{}/{}", manifest.public_dir, file);
     let extra_html = render_extra_attrs(&options.extra);
-    let crossorigin = &options.crossorigin;
-    let script_type = &options.script_type;
+    // Pre-formatted ` key="value"` fragments, empty when the override is
+    // `nil` (the attribute is omitted entirely, not rendered as `=""`).
+    let crossorigin_attr =
+        options.crossorigin.as_ref().map(|v| format!(" crossorigin=\"{v}\"")).unwrap_or_default();
+    let type_attr = options.script_type.as_ref().map(|v| format!(" type=\"{v}\"")).unwrap_or_default();
     let mut seen = std::collections::HashSet::new();
     let mut imports: Vec<&ViteChunk> = Vec::new();
     for entry in entries {
@@ -509,7 +534,7 @@ fn tags(manifest: &ViteManifest, entries: &[&ViteChunk], options: &TagOptions) -
         .iter()
         .map(|e| {
             format!(
-                "<script src=\"{}\" crossorigin=\"{crossorigin}\" type=\"{script_type}\"{extra_html}></script>",
+                "<script src=\"{}\"{crossorigin_attr}{type_attr}{extra_html}></script>",
                 asset(&e.file)
             )
         })
@@ -527,7 +552,7 @@ fn tags(manifest: &ViteManifest, entries: &[&ViteChunk], options: &TagOptions) -
             .iter()
             .map(|href| {
                 format!(
-                    "<link rel=\"modulepreload\" href=\"{href}\" as=\"script\" crossorigin=\"{crossorigin}\"{extra_html}>"
+                    "<link rel=\"modulepreload\" href=\"{href}\" as=\"script\"{crossorigin_attr}{extra_html}>"
                 )
             })
             .collect::<Vec<_>>()
@@ -545,9 +570,7 @@ fn tags(manifest: &ViteManifest, entries: &[&ViteChunk], options: &TagOptions) -
     html.push_str(
         &css.iter()
             .map(|href| {
-                format!(
-                    "<link rel=\"stylesheet\" crossorigin=\"{crossorigin}\" href=\"{href}\"{extra_html} />"
-                )
+                format!("<link rel=\"stylesheet\"{crossorigin_attr} href=\"{href}\"{extra_html} />")
             })
             .collect::<Vec<_>>()
             .join("\n"),
