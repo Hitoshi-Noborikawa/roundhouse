@@ -110,7 +110,8 @@ SPINEL_TEST_SECONDS = {
     "spinel_pg_db": 11,
     "pessimistic_locking": 46,
     "not_found_parity_spinel": 118,
-    "spinel_transaction_connection": 98,
+    # Upstream run 38915016729: the transactional-saves cases tripled it.
+    "spinel_transaction_connection": 339,
     **dict.fromkeys(
         [
             "spinel_web_push_crypto",
