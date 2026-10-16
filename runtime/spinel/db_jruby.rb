@@ -179,17 +179,6 @@ module Db
     Fiber[:ar_txn_depth] = value
   end
 
-  # The open transaction's enlisted writes (connection.rb), held in the
-  # same per-thread storage as the depth.
-  def self._txn_records
-    records = Fiber[:ar_txn_records]
-    if records.nil?
-      records = []
-      Fiber[:ar_txn_records] = records
-    end
-    records
-  end
-
   # Request-scoped connection lease. Mirrors db_cruby.rb: checks out a
   # Conn under @mutex (parking on @cv while the pool is momentarily
   # exhausted), binds it to fiber-storage so `current_dbh` resolves to it

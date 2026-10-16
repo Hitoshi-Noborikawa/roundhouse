@@ -1288,14 +1288,9 @@ and no behavioral test can see that, because nothing renders
 
 Two residues, both smaller than they look:
 
-* **`touch` runs COMMIT callbacks on the Ruby family only.** Rails
-  fires `after_update_commit`/`after_commit` after a touch, held, like
-  every commit callback, until the enclosing transaction's COMMIT;
-  the Ruby family's `touch` does (connection.rb), the strict targets'
-  fires `after_touch` only. On the Ruby family a save, destroy and
-  touch each run inside `Model.transaction`, an exception from their
-  callbacks rolls the whole write back, and a ROLLBACK drops the held
-  commit callbacks.
+* **`touch` still runs no COMMIT callbacks.** Rails fires
+  `after_commit` (and the `_commit` variants) after a touch; this
+  runtime fires `after_touch` only.
 * **The update hook is unguarded.** Rails registers its touch with
   `if: :saved_changes?` and skips the parent when the child's save
   changed nothing. This runtime's `save` issues an unconditional

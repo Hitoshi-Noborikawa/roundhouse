@@ -83,34 +83,21 @@ pub fn rewrite_assoc_create(expr: &Expr) -> Expr {
 }
 
 pub fn rewrite_assoc_create_with_models(expr: &Expr, models: &[crate::dialect::Model]) -> Expr {
-    crate::lower::controller_to_library::util::map_expr(expr, &|e| assoc_create_rewrite(e, models, false))
+    crate::lower::controller_to_library::util::map_expr(expr, &|e| assoc_create_rewrite(e, models))
 }
 
 /// In-place twin. Returns whether any node changed so the test
 /// lowerer can skip a follow-up typing pass.
-///
-/// `owner_objects` (the Ruby family only): when the association has an
-/// automatic inverse (`scope_chain::automatic_inverse`), the owner goes
-/// in as the OBJECT under the `belongs_to` name (`room: room`) rather
-/// than as `room_id: room.id`, as Rails sets the inverse — the record's
-/// reader then answers that same owner. A strict target's attrs bag
-/// cannot hold a record (see `synth_initialize`), so the others keep
-/// the key.
 pub fn rewrite_assoc_create_with_models_in_place(
     expr: &mut Expr,
     models: &[crate::dialect::Model],
-    owner_objects: bool,
 ) -> bool {
     crate::lower::controller_to_library::util::map_expr_mut(expr, &|e| {
-        assoc_create_rewrite(e, models, owner_objects)
+        assoc_create_rewrite(e, models)
     })
 }
 
-fn assoc_create_rewrite(
-    e: &Expr,
-    models: &[crate::dialect::Model],
-    owner_objects: bool,
-) -> Option<Expr> {
+fn assoc_create_rewrite(e: &Expr, models: &[crate::dialect::Model]) -> Option<Expr> {
     // (target class, declared foreign key, owner column it matches).
     // The key and column are the declaration's own: a `foreign_key:` or
     // `primary_key:` is not derivable from the owner's name and `id`.
@@ -165,16 +152,6 @@ fn assoc_create_rewrite(
         _ => return None,
     };
     let declared = declared_target(&parent_class, assoc_method.as_str());
-    let inverse = if owner_objects {
-        models.iter().find(|m| m.name.0.as_str() == parent_class).and_then(|owner| {
-            owner
-                .associations()
-                .find(|a| matches!(a, crate::dialect::Association::HasMany { name, .. } if name == assoc_method))
-                .and_then(|a| crate::lower::scope_chain::automatic_inverse(models, owner, a))
-        })
-    } else {
-        None
-    };
     let default_fk = format!("{}_id", crate::naming::snake_case(&parent_class));
     // An association declaring `primary_key:` matches the owner's
     // column, not `id`; its foreign key is the declared one.
@@ -198,19 +175,13 @@ fn assoc_create_rewrite(
             parenthesized: false,
         },
     );
-    let fk_entry = match inverse {
-        Some(bt) => (
-            Expr::new(e.span, ExprNode::Lit { value: crate::expr::Literal::Sym { value: bt } }),
-            parent_expr.clone(),
+    let fk_entry = (
+        Expr::new(
+            e.span,
+            ExprNode::Lit { value: crate::expr::Literal::Sym { value: Symbol::from(fk) } },
         ),
-        None => (
-            Expr::new(
-                e.span,
-                ExprNode::Lit { value: crate::expr::Literal::Sym { value: Symbol::from(fk) } },
-            ),
-            parent_id,
-        ),
-    };
+        parent_id,
+    );
 
     // Merge FK entry with original kwargs/hash. Real-blog's
     // `article.comments.create!(commenter:, body:)` parses the

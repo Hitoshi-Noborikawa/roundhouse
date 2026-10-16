@@ -264,17 +264,6 @@ module Db
     Fiber[:ar_txn_depth] = value
   end
 
-  # The open transaction's enlisted writes (connection.rb), held in the
-  # same per-thread storage as the depth.
-  def self._txn_records
-    records = Fiber[:ar_txn_records]
-    if records.nil?
-      records = []
-      Fiber[:ar_txn_records] = records
-    end
-    records
-  end
-
   # Request-scoped connection lease. Checks out a handle, binds it to
   # this thread's fiber-storage so `current_dbh` resolves to it for the
   # block's duration, and returns it on completion (even on raise).

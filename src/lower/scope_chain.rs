@@ -1253,45 +1253,9 @@ pub struct AssocRegistry {
     /// association names produces different flattened names, which is
     /// also correct.
     assoc_extension: std::collections::HashSet<(Symbol, Symbol)>,
-    /// `(model, has_many name)` -> the target's `belongs_to` that Rails
-    /// finds as the association's AUTOMATIC inverse: named after the
-    /// declaring model (`Room has_many :messages` -> `Message
-    /// belongs_to :room`), on the same foreign key, pointing back at
-    /// the declaring model. `room.messages.new(...)` hands that
-    /// `belongs_to` the owner OBJECT, so `message.room` is `room`
-    /// itself rather than a re-read of the row: a singleton method or
-    /// an unsaved change on the owner is what the record sees.
-    ///
-    /// Rails' own conditions for finding one, as far as this registry
-    /// can see them: no `through:`, no `as:`, no scope, no explicit
-    /// `foreign_key:` on either side, and an `id` owner key.
-    has_many_inverse: HashMap<(ClassId, Symbol), Symbol>,
 }
 
 impl AssocRegistry {
-    /// The automatic-inverse `belongs_to` of `owner.<assoc>` (see the
-    /// field). None for an owner the call site could not resolve.
-    /// With no owner (the by-NAME rung), only when every model
-    /// declaring `has_many <assoc>` has the same inverse.
-    fn has_many_inverse(&self, owner: Option<&ClassId>, assoc: &Symbol) -> Option<&Symbol> {
-        match owner {
-            Some(m) => self.has_many_inverse.get(&(m.clone(), assoc.clone())),
-            None => {
-                let mut found: Option<&Symbol> = None;
-                for (m, a) in self.has_many_fk.keys() {
-                    if a != assoc {
-                        continue;
-                    }
-                    let inv = self.has_many_inverse.get(&(m.clone(), a.clone()))?;
-                    if found.is_some_and(|f| f != inv) {
-                        return None;
-                    }
-                    found = Some(inv);
-                }
-                found
-            }
-        }
-    }
     /// The table `model` stores in. Falls back to Rails' derivation for
     /// a class that is not an ingested model (a `class_name:` naming
     /// something outside `app/models/`), which is the best guess
@@ -1440,48 +1404,6 @@ pub(crate) fn association_primary_key(
 /// Build the association registry. Table names use the same
 /// `pluralize_snake` the synthesized `table_name` methods use, so the
 /// generated SQL and the runtime agree by construction.
-/// The `belongs_to` on the target that Rails finds as `owner`'s
-/// `has_many` AUTOMATIC inverse (see `AssocRegistry::has_many_inverse`):
-/// named after the declaring model, on the same foreign key, pointing
-/// back at it. Rails' conditions, as far as the declarations show them:
-/// no `through:`, no `as:`, no scope, no explicit `foreign_key:` on
-/// either side, and an `id` owner key.
-pub fn automatic_inverse(models: &[Model], owner: &Model, assoc: &Association) -> Option<Symbol> {
-    let Association::HasMany {
-        target,
-        foreign_key,
-        foreign_key_explicit: false,
-        through: None,
-        as_interface: None,
-        scope: None,
-        ..
-    } = assoc
-    else {
-        return None;
-    };
-    if assoc.owner_key().as_str() != "id" {
-        return None;
-    }
-    let inverse = crate::naming::underscore(crate::naming::demodulize(owner.name.0.as_str()));
-    models.iter().find(|tm| &tm.name == target)?.associations().find_map(|ta| match ta {
-        Association::BelongsTo {
-            name: bt,
-            target: bt_target,
-            foreign_key: bt_fk,
-            polymorphic: false,
-            primary_key: None,
-            ..
-        } if bt.as_str() == inverse
-            && bt_target == &owner.name
-            && bt_fk == foreign_key
-            && bt_fk.as_str() == format!("{inverse}_id") =>
-        {
-            Some(bt.clone())
-        }
-        _ => None,
-    })
-}
-
 pub fn build_assoc_registry(models: &[Model]) -> AssocRegistry {
     let mut reg = AssocRegistry::default();
     for m in models {
@@ -1539,9 +1461,6 @@ pub fn build_assoc_registry(models: &[Model]) -> AssocRegistry {
                         reg.assoc_extension.insert((name.clone(), x.name.clone()));
                     }
                     let owner_key = a.owner_key();
-                    if let Some(bt) = automatic_inverse(models, m, a) {
-                        reg.has_many_inverse.insert((m.name.clone(), name.clone()), bt);
-                    }
                     if owner_key.as_str() != "id" {
                         reg.has_many_owner_key
                             .insert((m.name.clone(), name.clone()), owner_key.clone());
@@ -4023,14 +3942,6 @@ fn rewrite_send(expr: &mut Expr, ctx: &Ctx, locals: &mut Locals) -> Option<Class
                         }
                         _ => None,
                     };
-                    // The owner model the association resolved through,
-                    // for its automatic inverse (constructors only).
-                    let inverse = match &*ir.node {
-                        ExprNode::SelfRef => ctx.assocs.has_many_inverse(ctx.instance_self.as_ref(), aname),
-                        _ => assoc_read_target(ir, aname, ctx.models, ctx.assocs)
-                            .and_then(|(owner_model, _, _)| ctx.assocs.has_many_inverse(owner_model.as_ref(), aname)),
-                    }
-                    .cloned();
                     if let Some((target, fk, owner_id)) = resolved {
                         // CollectionProxy constructors: `story.comments
                         // .build(attrs)` constructs the target with the
@@ -4048,30 +3959,15 @@ fn rewrite_send(expr: &mut Expr, ctx: &Ctx, locals: &mut Locals) -> Option<Class
                             _ => None,
                         };
                         if let Some(ctor_name) = ctor {
-                            // With an automatic inverse the OWNER goes in
-                            // under the `belongs_to` name (`room: room`),
-                            // as Rails sets the inverse: the record's
-                            // `belongs_to` reader then answers the owner
-                            // object itself. Its writer stores the same
-                            // foreign key `fk: owner.id` would have.
-                            let fk_entry = match &inverse {
-                                Some(bt) => (
-                                    syn(
-                                        span,
-                                        ExprNode::Lit { value: Literal::Sym { value: bt.clone() } },
-                                    ),
-                                    ir.clone(),
+                            let fk_entry = (
+                                syn(
+                                    span,
+                                    ExprNode::Lit {
+                                        value: Literal::Sym { value: fk.clone() },
+                                    },
                                 ),
-                                None => (
-                                    syn(
-                                        span,
-                                        ExprNode::Lit {
-                                            value: Literal::Sym { value: fk.clone() },
-                                        },
-                                    ),
-                                    owner_id.clone(),
-                                ),
-                            };
+                                owner_id.clone(),
+                            );
                             let merged: Option<Vec<Expr>> = if args.is_empty() {
                                 Some(vec![syn(
                                     span,
