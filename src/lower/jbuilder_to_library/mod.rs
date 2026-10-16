@@ -723,6 +723,11 @@ enum JbStmt<'a> {
     /// literal Hash with literal keys is its pairs, written at compile
     /// time; any other value is walked when the template runs.
     Merge { value: &'a Expr },
+    /// `json.extract!(obj, *attrs)` / `json.(obj, params[:f])`: an
+    /// attribute list that is not all literal names, so the keys are
+    /// not known when the template is lowered. Jbuilder writes one pair
+    /// per name, whatever the list holds. Reported, never dropped.
+    ExtractDynamic,
     /// Unrecognized DSL or non-Send statement. Surfaces as an empty io
     /// append so the lowered body stays well-formed.
     Unknown,
@@ -870,7 +875,7 @@ fn has_unlowered(stmts: &[&Expr], ctx: &Ctx) -> bool {
                 || rescues.iter().any(|r| has_unlowered(&branch_stmts(&r.body), ctx))
         }
         JbStmt::Around { body, .. } => has_unlowered(&branch_stmts(body), ctx),
-        JbStmt::AroundUnlowered => true,
+        JbStmt::AroundUnlowered | JbStmt::ExtractDynamic => true,
         JbStmt::Merge { value } => !merge_lowers(s, value, ctx),
         _ => false,
     })
@@ -1212,6 +1217,18 @@ fn emit_pairs(
                     "the block reaches `json` but its parameters or form cannot be lowered",
                 ));
             }
+            JbStmt::ExtractDynamic => {
+                crate::ingest::survey::record(&crate::ingest::IngestError::Unsupported {
+                    file: String::new(),
+                    message: "jbuilder: `json.extract!`/`json.call` with an attribute list that is not all literal names"
+                        .to_string(),
+                });
+                out.push(unsupported_stmt(
+                    src.span,
+                    "jbuilder extract! with dynamic attributes",
+                    "only literal attribute names are lowered; a splat, a param, an ivar or a constant names keys known only at run time",
+                ));
+            }
             JbStmt::Merge { value } if merge_lowers(src, value, ctx) => {
                 sep = emit_merge(value, ctx, out, sep);
             }
@@ -1549,7 +1566,9 @@ fn classify<'a>(stmt: &'a Expr) -> JbStmt<'a> {
                 {
                     attrs.push(value.clone());
                 } else {
-                    return JbStmt::Unknown;
+                    // Silently writing nothing for this statement is a
+                    // 200 with keys missing; refuse it instead.
+                    return JbStmt::ExtractDynamic;
                 }
             }
             JbStmt::Extract { obj, attrs }
