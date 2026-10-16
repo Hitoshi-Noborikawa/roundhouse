@@ -909,11 +909,12 @@ module ActionView
       ActionController.masked_authenticity_token
     end
   
-    # Empty when no request policy is configured. The ruby family
-    # reopens this in `view_helpers_ext.rb` and emits the meta tag
-    # Rails' `csp_meta_tag` emits once `request.content_security_policy`
-    # is set. Strict targets have no request in a view helper, so they
-    # stay empty — the same split as `url_for_path`.
+    # Empty when no policy is configured. The ruby family reopens this
+    # in `view_helpers_ext.rb` and emits the meta tag Rails'
+    # `csp_meta_tag` emits once `Rails.application.content_security_policy`
+    # is set (the object a request duplicates). Strict targets have no
+    # request in a view helper, so they stay empty — the same split as
+    # `url_for_path`.
     def self.csp_meta_tag
       ""
     end

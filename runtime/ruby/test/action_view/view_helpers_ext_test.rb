@@ -1,6 +1,5 @@
 # frozen_string_literal: true
 require_relative "../test_helper"
-require "action_dispatch/content_security_policy"
 
 # Direct unit tests for the ruby-family ViewHelpers extensions
 # (`runtime/ruby/action_view/view_helpers_ext.rb`).
@@ -16,31 +15,24 @@ require "action_dispatch/content_security_policy"
 class ViewHelpersExtTest < Minitest::Test
   include ActionView
 
-  # Rails emits nothing until the request has a policy, and emits
+  # Rails emits nothing until a policy is configured, and emits
   # `<meta name="csp-nonce" />` with no content attribute when the
   # policy has no nonce generator (campfire's hash policy). Measured
   # against Action View 8.1's `tag("meta")`, which omits a nil content.
-  def test_csp_meta_tag_is_empty_without_a_request
-    ActionController::Current.request = nil
-    assert_equal "", ViewHelpers.csp_meta_tag
-  end
-
+  # The harness does not load Current or ContentSecurityPolicy, and
+  # `Rails.application` is a fresh object, so the positive case sets
+  # the module flag the helper reads beside the app policy.
   def test_csp_meta_tag_is_empty_when_the_app_has_no_policy
-    ActionController::Current.request = ActionDispatch::Request.new
-    assert_nil ActionController::Current.request.content_security_policy
+    ViewHelpers.csp_policy_for_test = false
+    assert_nil Rails.application.content_security_policy
     assert_equal "", ViewHelpers.csp_meta_tag
-  ensure
-    ActionController::Current.request = nil
   end
 
   def test_csp_meta_tag_names_the_nonce_slot_when_a_policy_is_configured
-    req = ActionDispatch::Request.new
-    req.instance_variable_set(:@csp_ready, true)
-    req.instance_variable_set(:@content_security_policy, ActionDispatch::ContentSecurityPolicy.new)
-    ActionController::Current.request = req
+    ViewHelpers.csp_policy_for_test = true
     assert_equal %(<meta name="csp-nonce" />), ViewHelpers.csp_meta_tag
   ensure
-    ActionController::Current.request = nil
+    ViewHelpers.csp_policy_for_test = false
   end
 
   # The plain form. Note the closing ` />`: `hidden_field_tag` goes
