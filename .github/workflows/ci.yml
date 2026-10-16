@@ -3064,8 +3064,8 @@ jobs:
   # -------------------------------------------------------------------
   campfire-archive-build:
     name: campfire-archive-build
-    needs: [spinel-build, plan]
-    if: ${{ !cancelled() && contains(fromJSON(needs.plan.outputs.jobs), 'campfire-archive-build') }}
+    needs: [build-roundhouse, spinel-build, plan]
+    if: ${{ !cancelled() && contains(fromJSON(needs.plan.outputs.jobs), 'campfire-archive-build') && needs.build-roundhouse.outputs.roundhouse-bin-artifact-id != '' }}
     runs-on: ubuntu-latest
     # 50, not 30: `spin pack` runs spinel's front-end over the whole
     # campfire tree, and with the ruby-vips package in it the job took
@@ -3077,8 +3077,13 @@ jobs:
       MAKEFLAGS: "-j4"
     steps:
       - uses: actions/checkout@v7
-      - uses: ./.github/actions/setup-rust
-      - uses: Swatinem/rust-cache@v2
+      # No setup-rust: a release build here took ~2.5m on the campfire-smoke
+      # critical path; the shared debug binary emits the same tree in seconds.
+      - uses: actions/download-artifact@v8
+        with:
+          name: roundhouse-debug-bin
+          path: roundhouse-debug-bin
+      - *stage-roundhouse-debug-bin
       - uses: ruby/setup-ruby@v1
         with:
           ruby-version: ${{ env.MRI_RUBY }}
