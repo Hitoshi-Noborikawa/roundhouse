@@ -52,12 +52,18 @@ mod data_factory;
 mod dry_struct;
 #[path = "support/dry_validation.rs"]
 mod dry_validation;
+#[path = "support/dry_monads.rs"]
+mod dry_monads;
 #[path = "support/rails_root_join.rs"]
 mod rails_root_join;
 #[path = "support/cable_allowed_origins.rs"]
 mod cable_allowed_origins_contract;
 #[path = "spinel_toolchain/cable_allowed_origins.rs"]
 mod cable_allowed_origins;
+#[path = "support/public_file_server_headers.rs"]
+mod public_file_server_headers_contract;
+#[path = "spinel_toolchain/public_file_server_headers.rs"]
+mod public_file_server_headers;
 #[path = "support/cable_actions.rs"]
 mod cable_actions_contract;
 #[path = "spinel_toolchain/cable_actions.rs"]
@@ -128,6 +134,10 @@ mod ordinalize;
 mod params_helper_no_permit;
 #[path = "spinel_toolchain/rails_parity.rs"]
 mod rails_parity;
+#[path = "spinel_toolchain/api_parity_round3.rs"]
+mod api_parity_round3;
+#[path = "spinel_toolchain/api_parity_round4.rs"]
+mod api_parity_round4;
 #[path = "spinel_toolchain/server_binding.rs"]
 mod server_binding;
 #[path = "support/request_id_runtime.rs"]
@@ -540,4 +550,13 @@ fn dry_validation_contracts_run_lowered_natively() {
     let run = dry_validation::overlay().run_spinel(&dry_validation::assertions());
     run.assert_passes();
     assert!(run.stdout.contains("dry-validation contract passed"));
+}
+
+/// The native half of `emit_and_run::dry_monads_results_run_lowered`.
+#[test]
+#[ignore = "requires the Spinel toolchain, run in its CI lane"]
+fn dry_monads_results_run_lowered_natively() {
+    let run = dry_monads::overlay().run_spinel(&dry_monads::assertions());
+    run.assert_passes();
+    assert!(run.stdout.contains("dry-monads contract passed"));
 }

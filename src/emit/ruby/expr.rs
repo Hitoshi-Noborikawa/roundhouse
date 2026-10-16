@@ -21,6 +21,16 @@ thread_local! {
     /// see the comment there. Off everywhere else, so ordinary app and
     /// library bodies keep reading the way they always have.
     static IN_CORE_CLASS_REOPEN: Cell<bool> = const { Cell::new(false) };
+    /// True while emitting the futamura whole-route box's own internal
+    /// copy of the `ruby` target (`project::futamura_whole_route`). An
+    /// include the analyzer could not resolve is guarded there
+    /// (`include X if defined?(X)`) rather than written plain: the
+    /// planner blocks only the routes that reach the including file, so
+    /// the box must still LOAD when such a route is never served from
+    /// it. The CLI's own `--target ruby` leaves this off and stays
+    /// fail-loud — an app meant to run on its own should not silently
+    /// swallow a mixin it could not resolve.
+    static FUTAMURA_BOX: Cell<bool> = const { Cell::new(false) };
     /// Direct, locked unknown-gem namespaces admitted by the Ruby project
     /// emitter. Other targets retain their constant refusal.
     static EXTERNAL_GEM_NAMESPACES: RefCell<std::collections::BTreeSet<String>> = const {
@@ -82,6 +92,19 @@ pub(super) fn with_core_class_reopen<R>(yes: bool, f: impl FnOnce() -> R) -> R {
     let r = f();
     IN_CORE_CLASS_REOPEN.with(|c| c.set(prev));
     r
+}
+
+/// Run `f` while emitting futamura's internal `ruby` copy. See
+/// `FUTAMURA_BOX`.
+pub(crate) fn with_futamura_box<R>(f: impl FnOnce() -> R) -> R {
+    let prev = FUTAMURA_BOX.with(|c| c.replace(true));
+    let r = f();
+    FUTAMURA_BOX.with(|c| c.set(prev));
+    r
+}
+
+pub(super) fn in_futamura_box() -> bool {
+    FUTAMURA_BOX.with(Cell::get)
 }
 
 pub(super) fn with_external_gem_namespaces<R>(
@@ -1383,7 +1406,11 @@ pub(super) fn emit_send_base(
             format!("{}.{attr} = {}", emit_postfix_recv(r), args_s[0])
         }
         (None, _) => {
-            if args_s.is_empty() {
+            // A capitalized name without parens reads as a constant:
+            // `Success()` is a call, `Success` is not.
+            if args_s.is_empty() && method.as_str().starts_with(|c: char| c.is_ascii_uppercase()) {
+                format!("{method}()")
+            } else if args_s.is_empty() {
                 method.to_string()
             } else if parenthesized || first_arg_opens_block(&args_s) {
                 format!("{method}({})", args_s.join(", "))

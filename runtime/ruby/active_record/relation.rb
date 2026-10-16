@@ -933,10 +933,20 @@ module ActiveRecord
       self
     end
 
-    def distinct
+    # Rails' `QueryMethods#distinct(value = true)`: any truthy value
+    # turns DISTINCT on (`distinct(:name)` is not a column list; it is
+    # `distinct(true)`), `false` turns it off.
+    def distinct(value = true)
       unload_records
-      @distinct = true
+      @distinct = value ? true : false
       self
+    end
+
+    # Rails' `Relation#all`: the relation itself, as a new relation, so a
+    # chain written for a class (`Widget.all`) also reads on a scope or an
+    # association reader (`owner.widgets.active.all`).
+    def all
+      spawn
     end
 
     # `includes`/`preload`/`eager_load` — eager-load hints. The specs
@@ -1902,7 +1912,10 @@ module ActiveRecord
       else
         updates.to_s
       end
-      sql = "UPDATE #{@table} SET #{set_sql}#{scoped_write_where}"
+      # The table quoted, as Rails' Arel renders it (`UPDATE "memberships"
+      # SET ...`): a test that picks the statement out of the SQL log
+      # (campfire's creation-commit test) matches that spelling.
+      sql = "UPDATE \"#{@table}\" SET #{set_sql}#{scoped_write_where}"
       ActiveRecord.adapter.execute_ddl(sql)
       ActiveRecord.adapter.changes
     end
@@ -1921,7 +1934,7 @@ module ActiveRecord
       parts.push("updated_at = #{now}") if @model.schema_columns.include?(:updated_at)
       parts.push("#{name} = #{now}") unless name.nil?
       return 0 if parts.empty?
-      ActiveRecord.adapter.execute_ddl("UPDATE #{@table} SET #{parts.join(", ")}#{scoped_write_where}")
+      ActiveRecord.adapter.execute_ddl("UPDATE \"#{@table}\" SET #{parts.join(", ")}#{scoped_write_where}")
       ActiveRecord.adapter.changes
     end
 

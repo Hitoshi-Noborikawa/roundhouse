@@ -472,6 +472,16 @@ module Rails
       "header_or_legacy_token"
     end
 
+    # `config.public_file_server.headers`: what the static file server
+    # adds to every `public/` (and `/assets/`) response — the
+    # `Cache-Control` a browser, or a cache in front of the app, keeps a
+    # stylesheet by. Rails' default sends nothing extra; ingest lifts an
+    # app's own Hash into an override on the reopen
+    # (src/ingest/public_file_server_config.rs).
+    def public_file_server_headers
+      {}
+    end
+
     # Action Cable's three origin settings, as the `/cable` handshake
     # check reads them (runtime/spinel/request_forgery_protection.rb):
     # Rails' defaults. Ingest lifts an app's `config.action_cable.*`
@@ -601,6 +611,15 @@ module Rails
     # boot makes it the runtime's default zone before any render.
     def config_time_zone
       "UTC"
+    end
+
+    # `config.filter_parameters`: the keys `request.filtered_parameters`
+    # masks (Rails' `rails new` initializer lists `:passw`, `:token`,
+    # ...). Same framework-default shape as `config_time_zone` above:
+    # Rails' default list is empty, and ingest lifts an app's Symbol and
+    # String filters, each as its String, into an override on the reopen.
+    def config_filter_parameters
+      []
     end
 
     # `config.active_storage.variable_content_types -= %w[…]` — the

@@ -51,3 +51,5 @@ dv_check(49, RulesContract.new, {"name" => "ok", "a" => 7, "b" => 9, "nick" => n
 dv_check(50, RulesContract.new, {"a" => "1"}, false, {:a => 1}, {:name => ["is missing"], :a => ["a schema err"]})
 dv_check(51, Users::SignupContract.new, {"login" => "adm", "age" => 1}, false, {:login => "adm", :age => 1}, {:login => ["Логин занят (admin, root)"]})
 dv_check(52, Users::SignupContract.new, {"login" => "zzz", "age" => 1}, false, {:login => "zzz", :age => 1}, {nil => ["Регистрация закрыта"]})
+dv_check(53, Users::SignupContract.new, {"login" => "hsh", "age" => 1}, false, {:login => "hsh", :age => 1}, {:login => ["тег  и "]})
+dv_check(54, RulesContract.new, {"name" => "ok", "nick" => "hsh"}, false, {:name => "ok", :nick => "hsh"}, {:nick => ["nick \#@x \#$y \#{z}"]})

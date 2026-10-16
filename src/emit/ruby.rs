@@ -23,6 +23,7 @@ const SPINEL_TEST_HELPER: &str =
 
 pub(crate) mod expr;
 mod library;
+pub(crate) use library::install_lookup_indexes;
 mod rbs;
 pub mod shake;
 mod shared;
@@ -347,6 +348,9 @@ pub(crate) fn apply_model_lowering(mut lcs: &mut [LibraryClass], app: &App) {
     // (no-op for apps with no temporal columns).
     library::apply_datetime_lowering(&mut lcs, app);
     library::apply_rich_text_content_memo(&mut lcs);
+    // `ActionText::RichText belongs_to :record, touch: true`: a saved
+    // rich text touches the record it was read through.
+    library::apply_rich_text_record_touch(&mut lcs, app);
     // has_secure_password (authenticate + plaintext accessors, bcrypt
     // contract) and typed_store virtual-attribute accessors are
     // synthesized by the shared model lowering
@@ -883,6 +887,7 @@ pub fn emit_spinel(app: &App) -> Vec<EmittedFile> {
 
 /// Ruby-family emit with the build target's resolved bind policy.
 pub(crate) fn emit_spinel_with_param_binds(app: &App, param_binds: bool) -> Vec<EmittedFile> {
+    let _indexes = library::install_lookup_indexes(app);
     let mut files = Vec::new();
     files.extend(emit_lowered_schema_pair(app));
     // routes.rb gets a require-relative header prepended (see
@@ -1102,12 +1107,13 @@ pub(crate) fn emit_spinel_with_param_binds(app: &App, param_binds: bool) -> Vec<
         // as the Ruby family's jbuilder `_url` does (see the pass).
         let test_modules =
             crate::lower::test_module_to_library::ruby_family_absolute_test_urls(&app.test_modules);
-        let mut test_lowered = crate::lower::lower_test_modules_with_inner(
+        let mut test_lowered = crate::lower::test_module_to_library::lower_test_modules_with_inner_opts(
             &test_modules,
             &app.fixtures,
             &app.models,
             fixture_extras,
             &crate::lower::routes::helper_id_segments(app),
+            true,
         );
         // A test body writes the same relation chains an app body does —
         // `@room.messages.ordered`, `user.push_subscriptions.find_by(…)`,

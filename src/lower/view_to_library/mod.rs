@@ -857,6 +857,7 @@ fn build_library_class(view: &View, lx: &ViewLowerCtx, type_body: bool) -> Libra
         parent: None,
         parent_span: Default::default(),
         includes: Vec::new(),
+        include_spans: Vec::new(),
         methods: vec![method],
         nullable_columns: Vec::new(),
         origin: None,
@@ -1100,6 +1101,24 @@ pub fn insert_db_stub(
     db_info.class_methods.insert(
         Symbol::from("_txn_depth="),
         fn_sig(vec![(Symbol::from("value"), Ty::Int)], Ty::Int),
+    );
+    // Whether the connection holds a transaction — one ActiveRecord
+    // opened or one opened beneath it (connection.rb's
+    // `self.transaction` joins the latter instead of nesting a BEGIN).
+    db_info.class_methods.insert(Symbol::from("transaction_open?"), fn_sig(vec![], Ty::Bool));
+    // The open transaction's enlisted writes (connection.rb's
+    // `_commit_enlisted`), boxed per thread the same way.
+    db_info.class_methods.insert(
+        Symbol::from("_txn_records"),
+        fn_sig(
+            vec![],
+            Ty::Array {
+                elem: std::sync::Arc::new(Ty::Class {
+                    id: ClassId(Symbol::from("ActiveRecord::EnlistedRecord")),
+                    args: vec![].into(),
+                }),
+            },
+        ),
     );
     classes.insert(ClassId(Symbol::from("Db")), db_info);
 

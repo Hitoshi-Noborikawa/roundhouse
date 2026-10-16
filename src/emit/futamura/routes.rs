@@ -26,11 +26,11 @@
 //!   * actions with a route that a route the lowered router refused
 //!     could shadow (Rails would match the refused one first).
 
-use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 
 use crate::App;
 use crate::diagnostic::{Diagnostic, Severity};
-use crate::dialect::{LibraryClass, MethodReceiver};
+use crate::dialect::{ControllerBodyItem, LibraryClass, MethodReceiver};
 use crate::expr::{Expr, ExprNode, Literal, Pattern};
 use crate::ident::Symbol;
 use crate::lower::routes::FlatRoute;
@@ -57,10 +57,18 @@ struct Index<'a> {
     classes: HashMap<String, Vec<&'a LibraryClass>>,
     /// method name -> every (class, side) defining it, for fan-out.
     by_name: HashMap<Symbol, Vec<(String, bool)>>,
+    /// INTERIM (see `enqueue_send`'s fallback): the analyzer's own type
+    /// for every expression in the app's controller bodies, from before
+    /// `routes::plan`'s own re-lowering re-types them from scratch and
+    /// loses framework/private-helper receiver types (G2/G3, tracked
+    /// upstream as rubys/roundhouse#58). Keyed by exact source span
+    /// (file, start, end), since the re-lowering reads the same spans
+    /// without moving them.
+    analyzer_stamps: HashMap<(u32, u32, u32), Ty>,
 }
 
 impl<'a> Index<'a> {
-    fn new(lcs: &'a [LibraryClass]) -> Self {
+    fn new(lcs: &'a [LibraryClass], analyzer_stamps: HashMap<(u32, u32, u32), Ty>) -> Self {
         let mut classes: HashMap<String, Vec<&'a LibraryClass>> = HashMap::new();
         let mut by_name: HashMap<Symbol, Vec<(String, bool)>> = HashMap::new();
         for lc in lcs {
@@ -72,7 +80,7 @@ impl<'a> Index<'a> {
                     .push((lc.name.0.as_str().to_string(), is_class_side(&m.receiver)));
             }
         }
-        Index { classes, by_name }
+        Index { classes, by_name, analyzer_stamps }
     }
 
     /// Every body of `class`'s `name` on one side (a reopened class or a
@@ -112,17 +120,137 @@ impl<'a> Index<'a> {
         }
         None
     }
+
+    /// Is `class` declared with `module` rather than `class`? A name can
+    /// be reopened across files (one view template per file shares a
+    /// name with its siblings); any declaration saying "module" is
+    /// enough, since a mixin can only be a module in the first place.
+    fn is_module(&self, class: &str) -> bool {
+        self.classes.get(class).into_iter().flatten().any(|lc| lc.is_module)
+    }
 }
 
 fn is_class_side(r: &MethodReceiver) -> bool {
     !matches!(r, MethodReceiver::Instance)
 }
 
+/// Trim whatever root a path was walked from down to its `app/...`
+/// tail, the shape both a diagnostic's resolved location and an ingest
+/// gap's file (the survey's `IngestError::Unsupported.file`, an
+/// absolute path under the surveyed fixture) are compared in.
+fn app_relative(path: &str) -> String {
+    // `IngestError::Unsupported.file` is `Path::display()` of wherever
+    // the survey walked, which on Windows carries `\` separators; the
+    // match below (and `view_prefix`'s `/`-joined prefix) only ever
+    // looks for `/`, so a backslash path would never trim down to
+    // `app/...` and a gap on it would silently stop blocking its route.
+    let path = path.replace('\\', "/");
+    path.rsplit_once("/app/").map(|(_, r)| format!("app/{r}")).unwrap_or(path)
+}
+
+/// A span's file the way the ingest-gap ledger's paths are shaped:
+/// `app/...`, trimmed of whatever root the survey ran from. `None` for
+/// a synthesized span (no location at all).
+fn rel_path(lowered: &App, file: u32) -> Option<String> {
+    if file == 0 {
+        return None;
+    }
+    Some(app_relative(&lowered.sources[file as usize - 1].path))
+}
+
+/// Rails' naming convention for the view template an action renders:
+/// `app/views/<dir>/<action>.`, the format and handler extensions
+/// following. Namespaces nest as directories
+/// (`WellKnown::HostMetaController` -> `well_known/host_meta`), unlike
+/// the flattened form `controller_symbol` builds for the route-helper
+/// table and the ledger's own keys.
+fn view_prefix(controller_class: &str, action: &str) -> String {
+    let base = controller_class.strip_suffix("Controller").unwrap_or(controller_class);
+    format!("app/views/{}/{action}.", crate::naming::underscore(base))
+}
+
+/// Does a recorded ingest gap mean this route cannot be trusted? A gap
+/// has no span (survey mode substitutes a nil placeholder and keeps
+/// going instead of failing ingest), so it never reaches `diags` and
+/// the usual blocking filter never sees it — yet it still names a file,
+/// which may be: the route's own controller (a class-body macro or
+/// block the ingest never modeled: `serialization_scope`,
+/// `content_security_policy`), a file in the controller's ancestor
+/// chain (the same kind of gap in a parent controller — `Admin::Base
+/// Controller`'s dropped CSP block applies to every subclass, though
+/// the gap only names the parent's file), any file the route's reach
+/// actually walks into (a partial or layout inlined into the view
+/// method that renders it), or the view template the action renders by
+/// convention (a template engine not ingested at all: `.css.erb`,
+/// `.xml.ruby` — these never become a method, so reach can't see them,
+/// which is why the prefix check stays). Either way the lowered app
+/// cannot serve what the gap dropped, so the route it belongs to stays
+/// with Rails.
+fn gap_blocking<'g>(
+    gaps: &'g [(String, String)],
+    blocking_files: &HashSet<String>,
+    prefix: &str,
+) -> Option<&'g (String, String)> {
+    gaps.iter().find(|(file, _)| {
+        let rel = app_relative(file);
+        if blocking_files.contains(&rel) || rel.starts_with(prefix) {
+            return true;
+        }
+        // A gap in an `app/helpers/*_helper.rb` module is never a file
+        // `reach` can walk into: Rails ingest only registers a helper
+        // module's methods into `helper_method_index`, never into a
+        // `LibraryClass` `reach` could add to `blocking_files` — the
+        // file rejected ingest outright, so there is no method body to
+        // find it through in the first place. Yet Rails mixes EVERY
+        // helper module into EVERY view (`helper :all`, the default),
+        // so whatever the gap dropped is missing from every view's
+        // surface, not just one route's. Block any route that renders
+        // a view at all.
+        is_helper_gap(&rel) && blocking_files.iter().any(|f| f.starts_with("app/views/"))
+    })
+}
+
+/// Rails' own naming convention for which `app/helpers/` files get
+/// mixed into every view (`all_helpers_from_path` globs
+/// `**/*_helper.rb`, nothing else — see `ingest/app.rs`'s
+/// `is_helper_module`). Matched the same way here so a gap on, say, a
+/// plain PORO that happens to live under `app/helpers/` does not
+/// over-block routes it was never mixed into.
+fn is_helper_gap(rel: &str) -> bool {
+    rel.strip_prefix("app/helpers/")
+        .and_then(|tail| tail.strip_suffix(".rb"))
+        .is_some_and(|stem| {
+            stem.rsplit('/').next().is_some_and(|name| name.ends_with("_helper"))
+        })
+}
+
+/// Every class above `class` found by walking `parent` alone (never
+/// `includes` — a mixed-in concern's gap is covered by `reached_files`
+/// instead, through whichever reached method actually pulls it in):
+/// `ApplicationController` is a `WidgetsController`'s ancestor this way.
+fn ancestor_chain(index: &Index, class: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut seen: HashSet<String> = HashSet::from([class.to_string()]);
+    let mut cur = class.to_string();
+    while let Some(parent) = index.classes.get(&cur).into_iter().flatten().find_map(|lc| lc.parent.clone()) {
+        let parent = parent.0.as_str().to_string();
+        if !seen.insert(parent.clone()) {
+            break;
+        }
+        out.push(parent.clone());
+        cur = parent;
+    }
+    out
+}
+
 /// Decide which GET actions the lowered app serves.
 ///
 /// `lowered` is the app after `analyze_and_lower` (what the `ruby`
-/// target emits from); `diags` every diagnostic that emit reported.
-pub fn plan(lowered: &App, diags: &[Diagnostic]) -> RoutePlan {
+/// target emits from); `diags` every diagnostic that emit reported;
+/// `gaps` every recorded ingest gap, as `(file, message)` — these carry
+/// no span and never become a diagnostic, so they are attributed here
+/// instead of through the usual blocking filter below.
+pub fn plan(lowered: &App, diags: &[Diagnostic], gaps: &[(String, String)]) -> RoutePlan {
     // Re-lowering pushes the `ruby` emit's refusals into whatever
     // diagnostic scope is active, which here is futamura's own. They are
     // already in `diags` (`project::futamura_whole_route`); collected
@@ -134,11 +262,22 @@ pub fn plan(lowered: &App, diags: &[Diagnostic]) -> RoutePlan {
         lcs
     });
     lcs.extend(lowered.library_classes.iter().cloned());
-    let index = Index::new(&lcs);
+    let index = Index::new(&lcs, analyzer_stamps(lowered));
     // Controllers: their actions keep the app's spans under a
     // re-synthesized header.
     let controllers: HashSet<String> = lowered.controllers.iter().map(|c| c.name.0.as_str().to_string()).collect();
     let ranges = method_ranges(&controllers, &lcs);
+    // Every rel-path file a controller's own methods are written in —
+    // almost always one file, but a controller can reopen across files
+    // the way a reopened model does.
+    let mut controller_files: HashMap<String, HashSet<String>> = HashMap::new();
+    for ((class, _, _), rs) in &ranges {
+        if !controllers.contains(class) {
+            continue;
+        }
+        let files = controller_files.entry(class.clone()).or_default();
+        files.extend(rs.keys().filter_map(|&f| rel_path(lowered, f)));
+    }
     let exact = expression_owners(&controllers, &lcs);
     let owners = |d: &Diagnostic| -> Vec<&MethodKey> {
         match exact.get(&(d.span.file.0, d.span.start)) {
@@ -160,7 +299,7 @@ pub fn plan(lowered: &App, diags: &[Diagnostic]) -> RoutePlan {
         }
         let source = &lowered.sources[d.span.file.0 as usize - 1];
         let (line, _) = source.line_col(d.span.start);
-        let rel = source.path.rsplit_once("/app/").map(|(_, r)| format!("app/{r}")).unwrap_or_else(|| source.path.clone());
+        let rel = rel_path(lowered, d.span.file.0).unwrap_or_else(|| source.path.clone());
         format!("{rel}:{line}")
     };
 
@@ -219,6 +358,23 @@ pub fn plan(lowered: &App, diags: &[Diagnostic]) -> RoutePlan {
             if let Some(rs) = ranges.get(m) {
                 reached_files.extend(rs.keys().copied());
             }
+        }
+        // Every file whose ingest gap must block this route: the
+        // controller's own file, any file in its ancestor chain (the
+        // same files `reach`'s `Super` handling and `enqueue_send`'s
+        // lookup walk), and every file the route's reach actually
+        // touches — partials and layouts are inlined into the view
+        // method that renders them, so a gap in one shows up here.
+        let mut blocking_files: HashSet<String> = controller_files.get(controller).cloned().unwrap_or_default();
+        for ancestor in ancestor_chain(&index, controller) {
+            if let Some(fs) = controller_files.get(&ancestor) {
+                blocking_files.extend(fs.iter().cloned());
+            }
+        }
+        blocking_files.extend(reached_files.iter().filter_map(|&f| rel_path(lowered, f)));
+        if let Some((file, message)) = gap_blocking(gaps, &blocking_files, &view_prefix(controller, first.action.as_str())) {
+            out.residue.push(format!("{label}: ingest gap in {file}: {message}"));
+            continue;
         }
         let blocking: Vec<&Diagnostic> = errors
             .iter()
@@ -500,13 +656,19 @@ fn enqueue_send(
             None | Some((ExprNode::SelfRef, _)) => {
                 match index.lookup(class, method, class_side) {
                     Some(k) => push(k),
-                    // Not on this class: a runtime method (`render`,
-                    // `params`), or a helper module's function the
-                    // lowering left receiverless; any app definer of
-                    // either side may run.
+                    // Not on this class (nor its ancestors or included
+                    // modules, which `index.lookup` already walked): a
+                    // runtime method (`render`, `params`), or a helper
+                    // module's function the lowering left receiverless.
+                    // A receiverless call dispatches on `self`, so it can
+                    // never reach an unrelated concrete class that
+                    // happens to define the same name — only a module,
+                    // the shape a mixed-in helper takes.
                     None => {
                         for (c, side) in index.by_name.get(method).into_iter().flatten() {
-                            push((c.clone(), method.clone(), *side));
+                            if index.is_module(c) {
+                                push((c.clone(), method.clone(), *side));
+                            }
                         }
                     }
                 }
@@ -523,9 +685,34 @@ fn enqueue_send(
             }
             // `Rails.cache.fetch`, `ActiveRecord::Base.connection.x`: a
             // framework object, whose methods are the runtime's.
-            Some(_) if rooted_in_framework(index, recv.as_ref().unwrap()) => {}
+            Some(_) if rooted_in_framework(index, class, class_side, recv.as_ref().unwrap()) => {}
             Some((_, ty)) => {
-                let classes = ty.map(classes_of).unwrap_or_default();
+                // INTERIM (rubys/roundhouse#58, G2/G3): `routes::plan`'s
+                // own re-lowering re-types every body from scratch and
+                // loses the analyzer's type for values that come from a
+                // framework helper (Devise's `current_<scope>`) or the
+                // app's own private helpers (pinned `Untyped` on purpose
+                // by #810), reading back as the open `Var`/`Bottom`
+                // sentinel or `Untyped`. Only in that case, fall back to
+                // the analyzer's own stamp for this exact receiver span
+                // (`lowered.controllers`, never re-lowered) — but only
+                // when the analyzer itself considers it resolved, never
+                // a `Var`/`Bottom`/`Untyped` of its own and never a
+                // union with an unresolved member, so a wrong guess can
+                // never make the planner skip a real dispatch target.
+                // Remove this once G2/G3 are settled upstream.
+                let needs_fallback = ty.is_none_or(|t| t.is_open() || t.is_unknown());
+                let classes = if needs_fallback {
+                    let r = recv.as_ref().unwrap();
+                    index
+                        .analyzer_stamps
+                        .get(&(r.span.file.0, r.span.start, r.span.end))
+                        .filter(|t| !t.is_open() && !t.is_unknown() && !t.mentions_unknown())
+                        .map(classes_of)
+                        .unwrap_or_else(|| ty.map(classes_of).unwrap_or_default())
+                } else {
+                    ty.map(classes_of).unwrap_or_default()
+                };
                 if classes.is_empty() {
                     fan_out(method, &mut push);
                 } else {
@@ -566,19 +753,100 @@ fn enqueue_send(
     }
 }
 
-/// Is `e` a chain of sends rooted in a constant the app does not define?
-fn rooted_in_framework(index: &Index, e: &Expr) -> bool {
+/// Is `e` a chain of sends rooted in a constant the app does not define,
+/// or in a receiverless call `class` itself does not resolve? `class` and
+/// `class_side` are the method body being walked, so a receiverless call
+/// is checked the same way `enqueue_send`'s own dispatch is: through
+/// `class`'s lookup, never by asking whether some unrelated app class
+/// happens to define a method of that name.
+fn rooted_in_framework(index: &Index, class: &str, class_side: bool, e: &Expr) -> bool {
     match &*e.node {
         ExprNode::Const { path } => {
             let name = path.iter().map(|s| s.as_str()).collect::<Vec<_>>().join("::");
             !index.classes.contains_key(&name)
         }
-        ExprNode::Send { recv: Some(r), .. } => rooted_in_framework(index, r),
-        // `request.env`, `params[:x]`, `cookies`: a receiverless call no
-        // app class answers is the framework's accessor.
-        ExprNode::Send { recv: None, method, .. } => !index.by_name.contains_key(method),
+        ExprNode::Send { recv: Some(r), .. } => rooted_in_framework(index, class, class_side, r),
+        // `request.env`, `params[:x]`, `cookies`: a receiverless call
+        // `class`'s own lookup misses is the framework's accessor.
+        ExprNode::Send { recv: None, method, .. } => index.lookup(class, method, class_side).is_none(),
         _ => false,
     }
+}
+
+/// INTERIM (see `enqueue_send`'s fallback, rubys/roundhouse#58): every
+/// expression's type as the analyzer itself left it on `app.controllers`
+/// — the app's own action and private-helper bodies — keyed by exact
+/// source span. `routes::plan` re-lowers these same bodies into fresh
+/// `LibraryClass`es through `emit::ruby::lowered_controller_lcs_with_layout`,
+/// which reads `app.controllers` by shared reference and re-types a
+/// *clone* of each body from scratch (`lower::typing::type_method_body`);
+/// it never mutates `app.controllers` itself, so the analyzer's original
+/// stamps survive here untouched. The two trees share spans because the
+/// lowering only re-types in place — it does not move or resynthesize
+/// expression spans — so a span found here names the same source
+/// location as its counterpart in the re-lowered body.
+fn analyzer_stamps(app: &App) -> HashMap<(u32, u32, u32), Ty> {
+    let mut out: HashMap<(u32, u32, u32), Ty> = HashMap::new();
+    // A span can recur with a different type, and not every recurrence
+    // is a real disagreement:
+    //
+    //   * safe navigation (`u&.email`) re-types its guarded receiver
+    //     TWICE at the identical span — once with its honest, unnarrowed
+    //     type (`T | nil`, the local's static type) and once narrowed to
+    //     plain `T` inside the branch where the dispatch actually runs.
+    //     `classes_of` already drops a union's `Nil` member, so these
+    //     two answer `enqueue_send`'s question identically; keeping
+    //     either is fine, and `dispatch_classes` below treats them as
+    //     the same stamp rather than a conflict.
+    //   * a synthesized method body can share its span with another
+    //     (`owns_source`'s note on synthesized accessors borrowing
+    //     spans), and a concern spliced into several controllers
+    //     replays the same source at the same span under a different
+    //     `self_ty` each time — these CAN genuinely disagree on which
+    //     app classes a call reaches, and that is a real conflict: the
+    //     first type seen is no more trustworthy than the second, so a
+    //     span whose dispatch classes ever disagree is dropped for good
+    //     rather than left holding whichever type happened to visit
+    //     first — a wrong stamp here would narrow `enqueue_send`'s
+    //     dispatch past a real target.
+    //
+    // An open or unknown type (`Var`/`Bottom`/`Untyped`, or a union
+    // mentioning one) is never recorded and never conflicts: `enqueue_send`
+    // already refuses to adopt one (see its own filter), so storing it
+    // would only ever risk manufacturing a conflict against a later,
+    // useful closed stamp for no benefit.
+    let mut conflicted: HashSet<(u32, u32, u32)> = HashSet::new();
+    let mut record = |e: &Expr| {
+        let Some(ty) = &e.ty else { return };
+        if e.span.file.0 == 0 || ty.is_open() || ty.is_unknown() || ty.mentions_unknown() {
+            return;
+        }
+        let key = (e.span.file.0, e.span.start, e.span.end);
+        if conflicted.contains(&key) {
+            return;
+        }
+        match out.get(&key) {
+            None => {
+                out.insert(key, ty.clone());
+            }
+            Some(existing) if existing == ty => {}
+            Some(existing) if dispatch_classes(existing) == dispatch_classes(ty) => {}
+            Some(_) => {
+                out.remove(&key);
+                conflicted.insert(key);
+            }
+        }
+    };
+    for c in &app.controllers {
+        for item in &c.body {
+            match item {
+                ControllerBodyItem::Action { action, .. } => visit(&action.body, &mut record),
+                ControllerBodyItem::ClassMethod { method, .. } => visit(&method.body, &mut record),
+                _ => {}
+            }
+        }
+    }
+    out
 }
 
 /// App classes a typed receiver can be. Empty means "unknown": fan out.
@@ -602,6 +870,16 @@ fn classes_of(ty: &Ty) -> Vec<String> {
         Ty::Untyped | Ty::Var { .. } => Vec::new(),
         _ => vec![String::from("\0none")],
     }
+}
+
+/// `classes_of` as an order-insensitive set, for comparing whether two
+/// types answer `enqueue_send`'s dispatch question the same way —
+/// `analyzer_stamps`'s own conflict check, so a nilable union and its
+/// narrowed non-nil member (safe navigation's two stamps for one
+/// receiver span) compare equal without caring which union variant
+/// order either happened to carry.
+fn dispatch_classes(ty: &Ty) -> BTreeSet<String> {
+    classes_of(ty).into_iter().collect()
 }
 
 fn visit(e: &Expr, f: &mut dyn FnMut(&Expr)) {
@@ -629,7 +907,151 @@ fn may_overlap(a: &str, b: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::may_overlap;
+    use super::{analyzer_stamps, app_relative, gap_blocking, may_overlap, view_prefix};
+    use crate::dialect::{Action, Controller, ControllerBodyItem, LayoutDecl, RenderTarget};
+    use crate::expr::{Expr, ExprNode};
+    use crate::ident::{ClassId, Symbol, TyVar};
+    use crate::span::{FileId, Span};
+    use crate::ty::{Row, Ty};
+    use crate::App;
+
+    /// A minimal controller holding one action whose whole body is `e`,
+    /// so `analyzer_stamps` sees exactly the spans and types `e` carries.
+    fn controller_with_action(class: &str, action: &str, body: Expr) -> Controller {
+        Controller {
+            name: ClassId(Symbol::from(class)),
+            parent: None,
+            parent_span: Span::synthetic(),
+            body: vec![ControllerBodyItem::Action {
+                action: Action {
+                    name: Symbol::from(action),
+                    params: Row::closed(),
+                    opt_params: Vec::new(),
+                    kw_params: Vec::new(),
+                    kwrest_param: None,
+                    block_param: None,
+                    rest_param: None,
+                    anonymous_formal: None,
+                    name_span: Span::synthetic(),
+                    body,
+                    renders: RenderTarget::Inferred,
+                    effects: Default::default(),
+                },
+                leading_comments: Vec::new(),
+                leading_blank_line: false,
+            }],
+            layout: LayoutDecl::Inherit,
+            sibling_classes: Vec::new(),
+        }
+    }
+
+    fn class_ty(name: &str) -> Ty {
+        Ty::Class { id: ClassId(Symbol::from(name)), args: Vec::new().into() }
+    }
+
+    fn stamped(span: Span, ty: Ty) -> Expr {
+        let mut e = Expr::new(span, ExprNode::SelfRef);
+        e.ty = Some(ty);
+        e
+    }
+
+    /// Two controllers whose bodies were spliced from the same concern
+    /// source (`ingest::splice_concerns_into_controllers` copies a
+    /// concern's methods into each includer) can carry the SAME span
+    /// typed differently per includer — e.g. a private `target` helper
+    /// the concern calls answers a different model in each controller.
+    /// The first type seen for that span is no more trustworthy than the
+    /// second, so a span that ever disagrees with itself must yield no
+    /// stamp at all, never whichever type happened to visit first: a
+    /// wrong stamp would let `enqueue_send` narrow dispatch past a real
+    /// target.
+    #[test]
+    fn a_span_with_two_different_types_yields_no_stamp() {
+        let conflict_span = Span { file: FileId(1), start: 10, end: 20 };
+        let app = App {
+            controllers: vec![
+                controller_with_action("WidgetsController", "index", stamped(conflict_span, class_ty("Widget"))),
+                controller_with_action("ThingsController", "index", stamped(conflict_span, class_ty("Thing"))),
+            ],
+            ..Default::default()
+        };
+        let stamps = analyzer_stamps(&app);
+        assert_eq!(stamps.get(&(1, 10, 20)), None, "{stamps:?}");
+    }
+
+    /// The same span typed the SAME way twice (two includers whose
+    /// helper happens to answer the same model) is not a conflict: the
+    /// stamp survives.
+    #[test]
+    fn a_span_with_the_same_type_twice_keeps_its_stamp() {
+        let agree_span = Span { file: FileId(1), start: 30, end: 40 };
+        let app = App {
+            controllers: vec![
+                controller_with_action("WidgetsController", "index", stamped(agree_span, class_ty("Widget"))),
+                controller_with_action("GadgetsController", "index", stamped(agree_span, class_ty("Widget"))),
+            ],
+            ..Default::default()
+        };
+        let stamps = analyzer_stamps(&app);
+        assert_eq!(stamps.get(&(1, 30, 40)), Some(&class_ty("Widget")));
+    }
+
+    fn nilable_class_ty(name: &str) -> Ty {
+        Ty::Union { variants: vec![class_ty(name), Ty::Nil].into() }
+    }
+
+    /// Safe navigation (`u&.email`) re-types its guarded receiver TWICE
+    /// at the identical span: its honest, unnarrowed type (`T | nil`)
+    /// and, in the non-nil dispatch branch, plain `T`. This is the
+    /// actual shape that regressed rubys/roundhouse#1001 — neither side
+    /// is open or unknown, so "ignore open/unknown types" alone does not
+    /// cover it. `classes_of` already drops a union's `Nil` member, so
+    /// both stamps answer `enqueue_send`'s dispatch question identically
+    /// and must not be treated as a conflict.
+    #[test]
+    fn a_nilable_union_and_its_narrowed_non_nil_member_are_not_a_conflict() {
+        let span = Span { file: FileId(1), start: 50, end: 60 };
+        let app = App {
+            controllers: vec![controller_with_action(
+                "WidgetsController",
+                "index",
+                // One occurrence narrowed, one not — order must not
+                // matter, so this covers unnarrowed-then-narrowed.
+                Expr::new(Span::synthetic(), ExprNode::Seq {
+                    exprs: vec![
+                        stamped(span, nilable_class_ty("Widget")),
+                        stamped(span, class_ty("Widget")),
+                    ],
+                }),
+            )],
+            ..Default::default()
+        };
+        let stamps = analyzer_stamps(&app);
+        assert!(stamps.get(&(1, 50, 60)).is_some(), "{stamps:?}");
+    }
+
+    /// An open type (`Var`, the analyzer's own "not yet inferred"
+    /// sentinel) recorded before a later, closed type for the same span
+    /// must not poison it: the open occurrence is never stored in the
+    /// first place, so the closed one that follows is simply the span's
+    /// first real entry.
+    #[test]
+    fn an_open_type_then_a_closed_type_keeps_the_closed_one() {
+        let span = Span { file: FileId(1), start: 70, end: 80 };
+        let open = Ty::Var { var: TyVar(0) };
+        let app = App {
+            controllers: vec![controller_with_action(
+                "WidgetsController",
+                "index",
+                Expr::new(Span::synthetic(), ExprNode::Seq {
+                    exprs: vec![stamped(span, open), stamped(span, class_ty("Widget"))],
+                }),
+            )],
+            ..Default::default()
+        };
+        let stamps = analyzer_stamps(&app);
+        assert_eq!(stamps.get(&(1, 70, 80)), Some(&class_ty("Widget")), "{stamps:?}");
+    }
 
     #[test]
     fn overlap_is_segmentwise() {
@@ -638,5 +1060,34 @@ mod tests {
         assert!(!may_overlap("/domains/:id", "/domain/:id"));
         assert!(!may_overlap("/domains/:id/edit", "/domains/:id"));
         assert!(may_overlap("/files/*path", "/anything/at/all"));
+    }
+
+    /// `IngestError::Unsupported.file` is `Path::display()` of wherever
+    /// the survey walked; on Windows that's backslash-separated, and
+    /// `app_relative`'s `/app/` match (and `view_prefix`'s `/`-joined
+    /// prefix) must still find it there.
+    #[test]
+    fn app_relative_normalizes_windows_separators() {
+        assert_eq!(
+            app_relative(r"C:\ci\fixture\app\controllers\widgets_controller.rb"),
+            "app/controllers/widgets_controller.rb"
+        );
+        assert_eq!(
+            app_relative(r"C:\ci\fixture\app\views\gadget_styles\show.css.erb"),
+            "app/views/gadget_styles/show.css.erb"
+        );
+    }
+
+    /// A gap recorded with a Windows path must still block the route
+    /// whose conventional view it names — this is `gap_blocking`'s own
+    /// match, downstream of `app_relative`.
+    #[test]
+    fn gap_blocking_matches_a_windows_style_view_path() {
+        let gaps = vec![(
+            r"C:\ci\fixture\app\views\gadget_styles\show.css.erb".to_string(),
+            "view template not ingested: erb".to_string(),
+        )];
+        let prefix = view_prefix("GadgetStylesController", "show");
+        assert!(gap_blocking(&gaps, &std::collections::HashSet::new(), &prefix).is_some());
     }
 }

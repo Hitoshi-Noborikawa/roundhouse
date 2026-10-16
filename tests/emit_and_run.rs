@@ -33,8 +33,22 @@ mod time_zone_default;
 mod view_presence_url_encode;
 #[path = "emit_and_run/controller_translate.rs"]
 mod controller_translate;
+#[path = "emit_and_run/job_rest_params.rs"]
+mod job_rest_params;
+#[path = "emit_and_run/regexp_constants.rs"]
+mod regexp_constants;
+#[path = "emit_and_run/upsert.rs"]
+mod upsert;
+#[path = "emit_and_run/controller_sibling_classes.rs"]
+mod controller_sibling_classes;
 #[path = "emit_and_run/i18n_locales.rs"]
 mod i18n_locales;
+#[path = "emit_and_run/i18n_runtime.rs"]
+mod i18n_runtime;
+#[path = "emit_and_run/i18n_plural_rules.rs"]
+mod i18n_plural_rules;
+#[path = "emit_and_run/rails_i18n_locales.rs"]
+mod rails_i18n_locales;
 #[path = "support/lambda_signatures.rs"]
 mod lambda_signatures_contract;
 #[path = "emit_and_run/lambda_signatures.rs"]
@@ -74,6 +88,8 @@ mod runtime_block_signature;
 mod dry_struct;
 #[path = "support/dry_validation.rs"]
 mod dry_validation;
+#[path = "support/dry_monads.rs"]
+mod dry_monads;
 #[path = "support/data_factory.rs"]
 mod data_factory;
 #[path = "support/rails_root_join.rs"]
@@ -82,6 +98,10 @@ mod rails_root_join;
 mod cable_allowed_origins_contract;
 #[path = "emit_and_run/cable_allowed_origins.rs"]
 mod cable_allowed_origins;
+#[path = "support/public_file_server_headers.rs"]
+mod public_file_server_headers_contract;
+#[path = "emit_and_run/public_file_server_headers.rs"]
+mod public_file_server_headers;
 #[path = "support/cable_actions.rs"]
 mod cable_actions_contract;
 #[path = "emit_and_run/cable_actions.rs"]
@@ -130,6 +150,10 @@ mod request_optional_port;
 mod action_dispatch_request_put;
 #[path = "emit_and_run/controller_url_helpers.rs"]
 mod controller_url_helpers;
+#[path = "emit_and_run/url_helpers_only_path.rs"]
+mod url_helpers_only_path;
+#[path = "emit_and_run/url_helpers_absolute.rs"]
+mod url_helpers_absolute;
 #[path = "emit_and_run/route_default_segment_args.rs"]
 mod route_default_segment_args;
 #[path = "emit_and_run/keyed_collection_cache.rs"]
@@ -142,6 +166,8 @@ mod controller_super_ivars;
 mod helper_method_session;
 #[path = "emit_and_run/assoc_primary_key.rs"]
 mod assoc_primary_key;
+#[path = "emit_and_run/through_source_class.rs"]
+mod through_source_class;
 #[path = "emit_and_run/assoc_pluck_typed.rs"]
 mod assoc_pluck_typed;
 #[path = "emit_and_run/action_controller_head.rs"]
@@ -170,6 +196,71 @@ mod autoload_once_paths;
 mod defined_const_fold;
 #[path = "emit_and_run/job_payload.rs"]
 mod job_payload;
+
+#[test]
+fn markdown_templates_render_with_their_mime_type_and_erb_escaping() {
+    const TEMPLATE: &str = "---\ntitle: <%= @value %>\n---\n# Report\n<%= @value %>\n<%= @value.html_safe %>\n<em>static</em>\n";
+    emit_and_run::empty_app()
+        .write("db/schema.rb", "ActiveRecord::Schema.define(version: 1) do\nend\n")
+        .write(
+            "app/controllers/application_controller.rb",
+            "class ApplicationController < ActionController::Base\n  layout false\nend\n",
+        )
+        .write(
+            "config/routes.rb",
+            "Rails.application.routes.draw do\n  get \"/markdown\", to: \"reports#show\", format: \"md\"\n  get \"/html\", to: \"reports#show\"\n  get \"/explicit\", to: \"reports#explicit\"\nend\n",
+        )
+        .write(
+            "app/controllers/reports_controller.rb",
+            r#"class ReportsController < ApplicationController
+  def show
+    @value = params[:value].to_s
+  end
+
+  def explicit
+    @value = params[:value].to_s
+    render formats: :md
+  end
+end
+"#,
+        )
+        .write("app/views/reports/show.html.erb", "HTML sibling\n")
+        .write("app/views/reports/show.md.erb", TEMPLATE)
+        .write("app/views/reports/explicit.md.erb", TEMPLATE)
+        .run_ruby(
+            r##"require "uri"
+value = %q(<strong title="x">'A' & B</strong>)
+escaped = "&lt;strong title=&quot;x&quot;&gt;&#39;A&#39; &amp; B&lt;/strong&gt;"
+expected = "---\ntitle: #{escaped}\n---\n# Report\n#{escaped}\n#{value}\n<em>static</em>\n"
+
+["/markdown", "/explicit"].each do |path|
+  status, headers, body = Main.run_rack(
+    "REQUEST_METHOD" => "GET",
+    "PATH_INFO" => path,
+    "QUERY_STRING" => URI.encode_www_form(value: value),
+    "HTTP_HOST" => "localhost",
+    "rack.input" => StringIO.new("")
+  )
+  raise "#{path} status: #{status}" unless status == 200
+  raise "#{path} content type: #{headers.inspect}" unless headers["content-type"].split(";").first == "text/markdown"
+  raise "#{path} body: #{body.inspect}" unless body == [expected]
+end
+
+status, headers, body = Main.run_rack(
+  "REQUEST_METHOD" => "GET",
+  "PATH_INFO" => "/html",
+  "QUERY_STRING" => "",
+  "HTTP_HOST" => "localhost",
+  "rack.input" => StringIO.new("")
+)
+raise "HTML status: #{status}" unless status == 200
+raise "HTML content type: #{headers.inspect}" unless headers["content-type"].split(";").first == "text/html"
+raise "HTML sibling: #{body.inspect}" unless body == ["HTML sibling\n"]
+puts "Markdown template rendering passed"
+"##,
+        )
+        .assert_passes();
+}
 
 /// A generated text column on the real-blog Article model exercises the
 /// schema-to-runtime path together with Rails-style symbol callbacks. The
@@ -338,6 +429,25 @@ puts "to_sql subquery passed"
         );
     run.assert_passes();
     assert!(run.stdout.contains("to_sql subquery passed"));
+}
+
+/// `ActiveRecord::Base.connection` is one object, whichever class asks
+/// and however often, as Rails' leased connection is: campfire's record
+/// cache test stubs `transaction_open?` on it and reads the stub back
+/// through `connection_pool.with_connection`.
+#[test]
+fn the_connection_is_one_object_for_every_caller() {
+    let run = emit_and_run::real_blog().run_ruby(
+        r#"conn = ActiveRecord::Base.connection
+raise "fresh per call" unless conn.equal?(ActiveRecord::Base.connection)
+raise "per model" unless conn.equal?(Article.connection)
+pooled = ActiveRecord::Base.connection_pool.with_connection { |c| c }
+raise "pool yields another" unless conn.equal?(pooled)
+puts "one connection passed"
+"#,
+    );
+    run.assert_passes();
+    assert!(run.stdout.contains("one connection passed"));
 }
 
 /// A has_many reader followed by `to_sql` is rooted as the association's
@@ -709,6 +819,88 @@ puts "savepoints passed"
         );
     run.assert_passes();
     assert!(run.stdout.contains("savepoints passed"));
+}
+
+/// A save runs in a transaction, and its commit callbacks wait for the
+/// COMMIT, as Rails' do:
+/// - an exception from an `after_save` rolls the row back and propagates;
+/// - an `after_create_commit` runs after the outermost COMMIT, outside
+///   the transaction, once per record however often it was saved;
+/// - a ROLLBACK drops the held callbacks and makes the record new again;
+/// - `touch` is an update to the commit callbacks;
+/// - `article.comments.new` hands the article itself to the comment's
+///   `belongs_to` (the automatic inverse), so a singleton method on the
+///   owner is what the comment reaches.
+/// (campfire's `Message::CreationTest` and `MessageCreationCommitTest`.)
+#[test]
+fn saves_are_transactional_and_commit_callbacks_wait_for_the_commit() {
+    emit_and_run::real_blog()
+        .edit(
+            "app/models/article.rb",
+            "  validates :title, presence: true\n",
+            "  validates :title, presence: true
+
+  LOG = []
+  after_save { raise \"after_save failed\" if title == \"explode\" }
+  after_create_commit { LOG << \"create #{title} open=#{Article.connection.transaction_open?}\" }
+  after_update_commit { LOG << \"update #{title}\" }
+",
+        )
+        .write(
+            "test/models/transactional_save_test.rb",
+            r##"require "test_helper"
+
+class TransactionalSaveTest < ActiveSupport::TestCase
+  setup { Article::LOG.clear }
+
+  test "an exception from after_save rolls the insert back" do
+    count = Article.count
+    article = Article.new(title: "explode", body: "A sufficiently long article body.")
+    assert_raises(RuntimeError) { article.save! }
+    assert_equal count, Article.count
+    assert_equal [], Article::LOG
+  end
+
+  test "commit callbacks run once, after the outermost commit" do
+    article = nil
+    Article.transaction do
+      article = Article.create!(title: "Held", body: "A sufficiently long article body.")
+      article.update!(body: "Another sufficiently long body.")
+      assert_equal [], Article::LOG
+    end
+    assert_equal [ "create Held open=false" ], Article::LOG
+  end
+
+  test "a rollback drops the held callbacks and the record is new again" do
+    count = Article.count
+    article = Article.new(title: "Dropped", body: "A sufficiently long article body.")
+    Article.transaction do
+      article.save!
+      raise ActiveRecord::Rollback
+    end
+    assert_equal count, Article.count
+    assert_equal [], Article::LOG
+    assert article.new_record?
+  end
+
+  test "touch runs the update commit callbacks" do
+    article = Article.create!(title: "Touched", body: "A sufficiently long article body.")
+    Article::LOG.clear
+    article.touch
+    assert_equal [ "update Touched" ], Article::LOG
+  end
+
+  test "an association constructor hands the owner to the inverse" do
+    article = Article.create!(title: "Owner", body: "A sufficiently long article body.")
+    comment = article.comments.new(commenter: "Ann", body: "Hello there")
+    assert_same article, comment.article
+    assert_equal article.id, comment.article_id
+  end
+end
+"##,
+        )
+        .run_test("test/models/transactional_save_test.rb")
+        .assert_passes();
 }
 
 /// `rescue URI::Error` catches `URI.parse`'s `URI::InvalidURIError`, and
@@ -1279,8 +1471,8 @@ fn a_missing_translation_raises_where_the_environment_says_so() {
         .assert_passes();
 }
 
-/// A key computed at run time, a `:strict` setting, or a call with a
-/// block stays an error.
+/// A `:strict` setting or a call with a block stays an error; a key
+/// computed at run time is read from the catalog then (`i18n_runtime`).
 #[test]
 fn unresolvable_translations_stay_errors() {
     let (_emitted, errors) = emit_and_run::real_blog()
@@ -1290,7 +1482,8 @@ fn unresolvable_translations_stay_errors() {
             "  validates :title, presence: true\n\n  def self.dynamic(key)\n    I18n.t(key)\n  end\n\n  def self.blocked\n    I18n.t(\"hello\") { |text| text }\n  end\n",
         )
         .emit(roundhouse::project::BuildTarget::Ruby);
-    assert_eq!(errors.iter().filter(|e| e.contains("I18n not supported")).count(), 2, "{errors:?}");
+    let i18n: Vec<&String> = errors.iter().filter(|e| e.contains("I18n not supported")).collect();
+    assert!(i18n.len() == 1 && i18n[0].contains("a block on the call"), "{errors:?}");
     let (_emitted, errors) = emit_and_run::real_blog()
         .edit(
             "config/environments/test.rb",
@@ -2725,6 +2918,44 @@ puts "runtime cable endpoint preserved"
         .assert_passes();
 }
 
+/// config.ru serves public/ ahead of the routes, from the file list it
+/// takes at boot: nested files, HEAD, a 304 for a repeated
+/// Last-Modified; a POST to a public path and a path that is not a file
+/// reach the app; `..` reaches nothing outside public/.
+#[test]
+fn public_files_are_served_from_the_boot_listing() {
+    emit_and_run::real_blog()
+        .write("public/robots.txt", "User-agent: *\n")
+        .write("public/nested/deep/note.txt", "deep\n")
+        .run_ruby(r##"
+require "rack"
+require "rack/mock"
+%w[nio websocket/driver].each { |feature| $LOADED_FEATURES << "#{feature}.rb" }
+module NIO; end
+module WebSocket; end
+builder = Rack::Builder.new
+builder.instance_eval(File.read("config.ru"), "config.ru")
+client = Rack::MockRequest.new(builder.to_app)
+check = ->(cond, what) { raise "FAILED: #{what}" unless cond }
+
+r = client.get("/robots.txt")
+check.(r.status == 200 && r.body == "User-agent: *\n", "a public file is served: #{r.status}")
+check.(client.get("/nested/deep/note.txt").body == "deep\n", "a nested public file is served")
+h = client.request("HEAD", "/robots.txt")
+check.(h.status == 200 && h.body.empty?, "HEAD of a public file has no body")
+m = client.get("/robots.txt", "HTTP_IF_MODIFIED_SINCE" => r.headers["last-modified"])
+check.(m.status == 304, "a repeated Last-Modified is a 304: #{m.status}")
+p = client.post("/robots.txt")
+check.(p.status != 405 && p.body != "User-agent: *\n", "a POST to a public path reaches the app: #{p.status}")
+check.(client.get("/nested").status != 200 || client.get("/nested").body != "deep\n", "a directory is not a file")
+check.(client.get("/missing.txt").status == 404, "a path that is no file reaches the app's 404")
+t = client.get("/../Gemfile")
+check.(!t.body.include?("source"), "`..` serves nothing outside public/")
+puts "public files contract passed"
+"##)
+        .assert_passes();
+}
+
 #[test]
 fn finite_concern_class_configuration_runs_without_replaying_rails() {
     for (overlay, assertions) in [
@@ -2751,6 +2982,48 @@ fn dry_struct_classes_run_lowered() {
     assert!(run.stdout.contains("dry-struct contract passed"));
     assert!(run.stdout.contains("dry-struct stamp contract passed"));
     assert!(run.stdout.contains("dry-struct clock contract passed"));
+}
+
+#[test]
+fn dry_monads_results_run_lowered() {
+    let run = dry_monads::overlay().run_ruby(&dry_monads::assertions());
+    run.assert_passes();
+    assert!(run.stdout.contains("dry-monads contract passed"));
+}
+
+/// What dry-monads lowering leaves as it was, ledgered: a monad it does
+/// not model that the app builds (`Some(1)`), a called form it does not
+/// read, and a do-notation method that takes a block (called with one,
+/// the gem's wrapper steps aside). Outside survey mode each fails the
+/// ingest.
+#[test]
+fn dry_monads_refusals_are_ledgered() {
+    let tree: std::collections::HashMap<std::path::PathBuf, Vec<u8>> = [
+        ("app/services/maybe_service.rb", "class MaybeService\n  include Dry::Monads[:maybe]\n\n  def one\n    Some (1)\n  end\nend\n"),
+        ("app/services/typed_service.rb", "class TypedService\n  include Dry::Monads::Result(StandardError)\nend\n"),
+        (
+            "app/services/block_service.rb",
+            "class BlockService\n  include Dry::Monads[:result, :do]\n\n  def each_item\n    return to_enum(:each_item) unless block_given?\n\n    yield Success(1)\n  end\n\n  def call\n    v = yield Success(2)\n    Success(v)\n  end\nend\n",
+        ),
+        ("config/routes.rb", "Rails.application.routes.draw do\nend\n"),
+    ]
+    .into_iter()
+    .map(|(p, s)| (std::path::PathBuf::from(p), s.as_bytes().to_vec()))
+    .collect();
+    assert!(roundhouse::ingest::ingest_app_from_tree(tree.clone()).is_err(), "strict ingest passed a refusal");
+    roundhouse::ingest::survey::activate();
+    let app = roundhouse::ingest::ingest_app_from_tree(tree).expect("ingest");
+    let ledger: Vec<String> = roundhouse::ingest::survey::drain().iter().map(|e| e.to_string()).collect();
+    assert!(ledger.iter().any(|e| e.contains("Dry::Monads not lowered: `:maybe`")), "{ledger:#?}");
+    assert!(ledger.iter().any(|e| e.contains("Dry::Monads not lowered: `include Dry::Monads") && e.contains("Result(StandardError)`")), "{ledger:#?}");
+    assert!(ledger.iter().any(|e| e.contains("`each_item` takes a block")), "{ledger:#?}");
+    let class = |name: &str| app.library_classes.iter().find(|lc| lc.name.0.as_str() == name).expect(name);
+    assert!(class("MaybeService").unknown_calls.iter().any(|c| roundhouse::emit::ruby::emit_expr(c).contains("Dry::Monads[:maybe]")));
+    let body = |name: &str| {
+        roundhouse::emit::ruby::emit_expr(&class("BlockService").methods.iter().find(|m| m.name.as_str() == name).expect(name).body)
+    };
+    assert!(body("each_item").contains("yield"), "{}", body("each_item"));
+    assert!(body("call").contains("Do.bind"), "{}", body("call"));
 }
 
 #[test]
@@ -3433,7 +3706,8 @@ fn a_send_whose_selector_every_caller_names_dispatches_statically_on_spinel() {
 /// and assert_response's failure message. Rails 8.2-era tests write all
 /// of them: basecamp/once-campfire#301 checks `img[src*='install-edge']`,
 /// #303 checks `input[type=checkbox]:not([checked])` and passes a message
-/// to assert_response.
+/// to assert_response. A `?` in a predicate is Rails' substitution value
+/// (campfire's sidebar test: `"#row[data-sorted-list-number=?]", epoch`).
 #[test]
 fn assert_select_attribute_operators_and_negation_run() {
     emit_and_run::real_blog()
@@ -3450,6 +3724,7 @@ class ArticleSelectorsControllerTest < ActionDispatch::IntegrationTest
     assert_select "a[href^='/articles/']"
     assert_select "a[href*='articles']"
     assert_select "h1[class]:not([hidden])"
+    assert_select "a[href=?]", edit_article_path(article)
   end
 end
 "#,
@@ -4363,11 +4638,9 @@ fn render_json_record_writer_is_unsupported_on_strict_targets() {
     use roundhouse::project::BuildTarget;
     let (_emitted, errors) = records_json_app().emit(BuildTarget::TypescriptWorker);
     assert!(errors.iter().any(|e| e.contains("json_writer")), "{errors:?}");
-    // Rust builds the writer, except a `methods:` one (`render_json_record_writer_runs_on_rust`).
-    let (_emitted, errors) = json_writer_rust_app().emit(BuildTarget::Rust);
-    assert!(errors.is_empty(), "{errors:?}");
+    // Rust builds the writer, `methods:` included (`render_json_record_writer_runs_on_rust`).
     let (_emitted, errors) = json_writer_app().emit(BuildTarget::Rust);
-    assert!(errors.iter().any(|e| e.contains("json_writer")), "{errors:?}");
+    assert!(errors.is_empty(), "{errors:?}");
     for target in [BuildTarget::Ruby, BuildTarget::Spinel] {
         let (_emitted, errors) = records_json_app().emit(target);
         assert!(!errors.iter().any(|e| e.contains("json_writer")), "{target:?}: {errors:?}");
@@ -4455,7 +4728,7 @@ end
 #[test]
 #[ignore = "requires the Rust toolchain; compiles and executes an emitted app"]
 fn render_json_record_writer_runs_on_rust() {
-    let (emitted, errors) = json_writer_rust_app().emit(roundhouse::project::BuildTarget::Rust);
+    let (emitted, errors) = json_writer_app().emit(roundhouse::project::BuildTarget::Rust);
     assert!(errors.is_empty(), "{errors:?}");
     std::fs::create_dir_all(emitted.join("tests")).unwrap();
     std::fs::write(emitted.join("tests/json_writer.rs"), r##"
@@ -4476,7 +4749,7 @@ async fn record_json_is_rails_serializable_hash() {
         ("GET", "/articles/1/edit", r#"{"title":"A \u003cb\u003e \u0026 co","id":1}"#.to_string()),
         ("PATCH", "/articles/1", r#"{"id":1,"title":"A \u003cb\u003e \u0026 co","created_at":"2026-01-02T03:04:05.678Z"}"#.to_string()),
         ("DELETE", "/articles/1", r#"[{"id":1,"article_id":1,"commenter":"Ann","body":"Nice","created_at":"2026-01-05T00:00:00.000Z","updated_at":"2026-01-05T00:00:00.000Z"}]"#.to_string()),
-        ("GET", "/articles", format!("[{second},{one}]")),
+        ("GET", "/articles", format!("[{},{}]", second.replace("Z\"}", "Z\",\"headline\":\"Big\"}"), one.replace("Z\"}", "Z\",\"headline\":\"Big\"}"))),
     ] {
         let response = match method {
             "PATCH" => server.patch(path).form(&[("article[title]", "unused")]).await,
@@ -4497,15 +4770,6 @@ async fn record_json_is_rails_serializable_hash() {
         .expect("run the emitted Rust project's test");
     assert!(output.status.success(), "{}\n{}\n{}", emitted.display(),
         String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
-}
-
-/// Without `methods:`, which Rust reports (`render_json_record_writer_is_unsupported_on_strict_targets`).
-fn json_writer_rust_app() -> emit_and_run::Overlay {
-    json_writer_app().edit(
-        "app/controllers/articles_controller.rb",
-        "    render json: @articles, methods: [:headline]\n",
-        "    render json: @articles\n",
-    )
 }
 
 /// The fixtures' test, as ActiveRecord 8.1.4 answers it.
@@ -7114,6 +7378,76 @@ fn an_include_from_an_included_block_brings_its_own_included_items() {
         .assert_passes();
 }
 
+#[test]
+fn a_concerns_unclaimed_attribute_declaration_runs_on_each_includer() {
+    emit_and_run::real_blog()
+        .write(
+            "app/models/concerns/reviewable.rb",
+            "module Reviewable\n  extend ActiveSupport::Concern\n  included do\n    attribute :review_note, :string\n  end\nend\n",
+        )
+        .edit(
+            "app/models/article.rb",
+            "class Article < ApplicationRecord\n",
+            "class Article < ApplicationRecord\n  include Reviewable\n",
+        )
+        .edit(
+            "app/models/comment.rb",
+            "class Comment < ApplicationRecord\n",
+            "class Comment < ApplicationRecord\n  include Reviewable\n",
+        )
+        .run_ruby(
+            "article = Article.new\ncomment = Comment.new\narticle.review_note = \"article note\"\ncomment.review_note = \"comment note\"\nraise \"article attribute lost\" unless article.review_note == \"article note\"\nraise \"comment attribute lost\" unless comment.review_note == \"comment note\"\n",
+        )
+        .assert_passes();
+}
+
+#[test]
+fn extension_rbi_methods_run_on_the_native_infrastructure_gem() {
+    let lock = roundhouse::gems::Lockfile::parse(
+        &std::fs::read_to_string(roundhouse::fixtures::real_blog().join("Gemfile.lock")).unwrap(),
+    );
+    let version = lock.version_of("rake").expect("the Rails fixture resolves rake");
+    let rbi_path = format!("sorbet/rbi/gems/rake@{version}.rbi");
+    emit_and_run::real_blog()
+        .write("roundhouse.yml", "extensions: [config/rh]\n")
+        .write("config/rh/gems.yml", "lock_gated_requires:\n  - {require: rake, gem: rake}\n")
+        .write(
+            &rbi_path,
+            "module Rake\n  class Task\n    sig { params(task_name: String).returns(T::Boolean) }\n    def self.task_defined?(task_name); end\n  end\nend\n",
+        )
+        .write(
+            "app/models/rake_probe.rb",
+            "class RakeProbe\n  def self.registered?\n    Rake::Task.task_defined?(\"roundhouse_extension_probe_task\")\n  end\nend\n",
+        )
+        .run_ruby(
+            "raise \"unexpected native task\" if RakeProbe.registered?\nRake::Task.define_task(\"roundhouse_extension_probe_task\")\nraise \"the RBI did not reach the native gem\" unless RakeProbe.registered?\n",
+        )
+        .assert_passes();
+}
+
+#[test]
+fn extension_rbi_patches_preserve_runtime_constant_ownership() {
+    let lock = std::fs::read_to_string(
+        roundhouse::fixtures::real_blog().join("Gemfile.lock"),
+    ).unwrap().replacen("  specs:\n", "  specs:\n    widget-engine (1.0)\n", 1);
+    emit_and_run::real_blog()
+        .write("roundhouse.yml", "extensions: [config/rh]\n")
+        .write("config/rh/gems.yml", "rails_dependent:\n  - {gem: widget-engine, why: requires the Rails framework}\n")
+        .write("Gemfile.lock", &lock)
+        .write(
+            "sorbet/rbi/gems/widget-engine@1.0.rbi",
+            "class ActiveRecord::Base\n  def gem_patch; end\nend\n",
+        )
+        .write(
+            "app/models/runtime_probe.rb",
+            "class RuntimeProbe\n  def self.base\n    ActiveRecord::Base\n  end\nend\n",
+        )
+        .run_ruby(
+            "raise \"runtime class ownership changed\" unless RuntimeProbe.base == ActiveRecord::Base\n",
+        )
+        .assert_passes();
+}
+
 /// An action whose whole body is a call to a rendering helper defined
 /// on a PARENT controller. The default response appended to the action
 /// must be guarded by `performed?`, as it is for a helper on the
@@ -8076,6 +8410,7 @@ end
 <i id="rp-health"><%= route_of("/up") %></i>
 <i id="rp-disk"><%= route_of("/rails/active_storage/disk/k/x.png") %></i>
 <i id="rp-blob"><%= route_of("/rails/active_storage/blobs/redirect/abc/x.png") %></i>
+<i id="rp-proxy"><%= route_of("/rails/active_storage/blobs/proxy/abc/x.png") %></i>
 <i id="rp-no-root"><%= route_of("/") %></i>
 "#,
         r#"    assert_match(/<i id="rp-namespaced">controller=admin\/articles action=index<\/i>/, response.body)
@@ -8084,6 +8419,7 @@ end
     assert_match(/<i id="rp-health">controller=rails\/health action=show<\/i>/, response.body)
     assert_match(/<i id="rp-disk">controller=active_storage\/disk action=show encoded_key=k filename=x format=png<\/i>/, response.body)
     assert_match(/<i id="rp-blob">controller=active_storage\/blobs\/redirect action=show signed_id=abc filename=x format=png<\/i>/, response.body)
+    assert_match(/<i id="rp-proxy">controller=active_storage\/blobs\/proxy action=show signed_id=abc filename=x format=png<\/i>/, response.body)
     assert_match(/<i id="rp-no-root">none: No route matches (&quot;|")\/(&quot;|")<\/i>/, response.body)
 "#,
     );
@@ -15120,6 +15456,118 @@ end
 }
 
 
+// ---------------------------------------------------------------------
+// vite_typescript_tag / vite_javascript_tag: extra HTML options are
+// passed through to the script tag, the way vite_rails does. Without
+// this, a call like `vite_typescript_tag "gadget.ts", crossorigin:
+// "anonymous"` was an ingest gap for the whole call — on a large real
+// app that gap blocked every route that reached the view.
+// ---------------------------------------------------------------------
+
+#[test]
+fn vite_tag_html_options_pass_through_to_the_script_tag() {
+    const MANIFEST: &str = r#"{
+  "entrypoints/gadget.ts": {"file": "assets/gadget-abc.js", "src": "entrypoints/gadget.ts", "isEntry": true},
+  "entrypoints/widget.ts": {"file": "assets/widget-xyz.js", "src": "entrypoints/widget.ts", "isEntry": true}
+}
+"#;
+    emit_and_run::real_blog()
+        .write("public/vite/.vite/manifest.json", MANIFEST)
+        .write("public/vite/assets/gadget-abc.js", "console.log('gadget');\n")
+        .write("public/vite/assets/widget-xyz.js", "console.log('widget');\n")
+        .edit(
+            "app/views/layouts/application.html.erb",
+            "    <%= javascript_importmap_tags %>\n",
+            "    <%= javascript_importmap_tags %>\n    <%= vite_typescript_tag \"gadget.ts\", crossorigin: \"anonymous\", defer: true %>\n    <%= vite_typescript_tag \"widget.ts\", data: { turbo_track: \"reload\" } %>\n",
+        )
+        .edit(
+            "config/routes.rb",
+            "  root \"articles#index\"\n",
+            "  root \"articles#index\"\n  get \"/vite_options\", to: \"vite_options#show\"\n",
+        )
+        .write(
+            "app/controllers/vite_options_controller.rb",
+            "class ViteOptionsController < ApplicationController\n  def show\n  end\nend\n",
+        )
+        .write("app/views/vite_options/show.html.erb", "<p>vite options probe</p>\n")
+        .write(
+            "test/controllers/vite_options_controller_test.rb",
+            r##"require "test_helper"
+
+class ViteOptionsControllerTest < ActionDispatch::IntegrationTest
+  test "crossorigin, defer and a data hash pass through like vite_rails" do
+    get "/vite_options"
+    assert_response :success
+    assert_includes response.body,
+      %(<script src="/vite/assets/gadget-abc.js" crossorigin="anonymous" type="module" defer="defer"></script>)
+    assert_includes response.body,
+      %(<script src="/vite/assets/widget-xyz.js" crossorigin="" type="module" data-turbo-track="reload"></script>)
+    assert_no_match(/vite_typescript_tag/, response.body)
+  end
+end
+"##,
+        )
+        .run_test("test/controllers/vite_options_controller_test.rb")
+        .assert_passes();
+}
+
+/// `crossorigin:`/`type:` overrides are a plain (non-boolean) attribute in
+/// Rails' `TagBuilder#tag_options`: a `"` or `&` in the value must be
+/// html-escaped like any other attribute text, `nil` omits the attribute
+/// entirely rather than rendering `=""`, and `false` (not `nil`, not
+/// `true`) renders the literal string `"false"`.
+#[test]
+fn vite_tag_crossorigin_and_type_overrides_escape_nil_and_false_like_rails() {
+    const MANIFEST: &str = r#"{
+  "entrypoints/sprocket.ts": {"file": "assets/sprocket-abc.js", "src": "entrypoints/sprocket.ts", "isEntry": true},
+  "entrypoints/doohickey.ts": {"file": "assets/doohickey-abc.js", "src": "entrypoints/doohickey.ts", "isEntry": true},
+  "entrypoints/gizmo.ts": {"file": "assets/gizmo-abc.js", "src": "entrypoints/gizmo.ts", "isEntry": true}
+}
+"#;
+    emit_and_run::real_blog()
+        .write("public/vite/.vite/manifest.json", MANIFEST)
+        .write("public/vite/assets/sprocket-abc.js", "console.log('sprocket');\n")
+        .write("public/vite/assets/doohickey-abc.js", "console.log('doohickey');\n")
+        .write("public/vite/assets/gizmo-abc.js", "console.log('gizmo');\n")
+        .edit(
+            "app/views/layouts/application.html.erb",
+            "    <%= javascript_importmap_tags %>\n",
+            "    <%= javascript_importmap_tags %>\n    <%= vite_typescript_tag 'sprocket.ts', type: 'a\"b&c' %>\n    <%= vite_typescript_tag 'doohickey.ts', crossorigin: nil, type: nil %>\n    <%= vite_typescript_tag 'gizmo.ts', crossorigin: false %>\n",
+        )
+        .edit(
+            "config/routes.rb",
+            "  root \"articles#index\"\n",
+            "  root \"articles#index\"\n  get \"/vite_escaping\", to: \"vite_escaping#show\"\n",
+        )
+        .write(
+            "app/controllers/vite_escaping_controller.rb",
+            "class ViteEscapingController < ApplicationController\n  def show\n  end\nend\n",
+        )
+        .write("app/views/vite_escaping/show.html.erb", "<p>vite escaping probe</p>\n")
+        .write(
+            "test/controllers/vite_escaping_controller_test.rb",
+            r##"require "test_helper"
+
+class ViteEscapingControllerTest < ActionDispatch::IntegrationTest
+  test "crossorigin/type overrides escape, omit nil, and render false like Rails" do
+    get "/vite_escaping"
+    assert_response :success
+    assert_includes response.body,
+      %(<script src="/vite/assets/sprocket-abc.js" crossorigin="" type="a&quot;b&amp;c"></script>)
+    assert_includes response.body,
+      %(<script src="/vite/assets/doohickey-abc.js"></script>)
+    assert_includes response.body,
+      %(<script src="/vite/assets/gizmo-abc.js" crossorigin="false" type="module"></script>)
+    assert_no_match(/vite_typescript_tag/, response.body)
+  end
+end
+"##,
+        )
+        .run_test("test/controllers/vite_escaping_controller_test.rb")
+        .assert_passes();
+}
+
+
 
 // ---------------------------------------------------------------------
 // friendly_id: `Article.friendly.find` (slugged + history)
@@ -15574,4 +16022,194 @@ fn a_qualified_data_define_file_runs_natively() {
     qualified_data_define_app()
         .run_spinel(QUALIFIED_DATA_DEFINE)
         .assert_passes();
+}
+
+/// A model's methods that call each other, a column and an association on implicit `self`.
+fn implicit_self_app() -> emit_and_run::Overlay {
+    emit_and_run::real_blog()
+        .edit(
+            "app/models/article.rb",
+            "  validates :title, presence: true\n",
+            "  validates :title, presence: true\n\n  def headline\n    title.to_s.upcase\n  end\n\n  def shout\n    headline + \"!\"\n  end\n\n  def comment_count\n    comments.size\n  end\n",
+        )
+        .edit(
+            "test/models/article_test.rb",
+            "  test \"destroys comments when article is destroyed\" do\n",
+            "  test \"methods read the record on implicit self\" do\n    article = articles(:one)\n    assert_equal \"GETTING STARTED WITH RAILS!\", article.shout\n    assert_equal 1, article.comment_count\n    assert_equal \"!\", Article.new.shout\n  end\n\n  test \"destroys comments when article is destroyed\" do\n",
+        )
+}
+
+#[test]
+fn model_methods_read_the_record_on_implicit_self() {
+    implicit_self_app().run_test("test/models/article_test.rb").assert_passes();
+}
+
+/// Runs a translated test suite in an emitted tree: each command must succeed.
+fn run_emitted(emitted: &std::path::Path, commands: &[(&str, &[&str])]) {
+    for (program, args) in commands {
+        let output = std::process::Command::new(program)
+            .args(*args)
+            .env_remove("CARGO_TARGET_DIR")
+            .current_dir(emitted)
+            .output()
+            .unwrap_or_else(|e| panic!("run {program}: {e}"));
+        assert!(output.status.success(), "{program} {args:?} in {}\n{}\n{}", emitted.display(),
+            String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+    }
+}
+
+/// Rust rendered each bare call as a free function (`title()`), and the methods without `&self`.
+#[test]
+#[ignore = "requires the Rust toolchain; builds and runs an emitted app"]
+fn model_methods_read_the_record_on_implicit_self_on_rust() {
+    let (emitted, errors) = implicit_self_app().emit(roundhouse::project::BuildTarget::Rust);
+    assert!(errors.is_empty(), "{errors:?}");
+    run_emitted(&emitted, &[("cargo", &["test", "--quiet"])]);
+}
+
+/// TypeScript read `headline` as a property (`this.headline + "!"`).
+#[test]
+#[ignore = "requires Node; installs and runs an emitted app"]
+fn model_methods_read_the_record_on_implicit_self_on_typescript() {
+    let (emitted, errors) = implicit_self_app().emit(roundhouse::project::BuildTarget::Typescript);
+    assert!(errors.is_empty(), "{errors:?}");
+    run_emitted(&emitted, &[("npm", &["install", "--silent", "--no-audit", "--no-fund"]), ("npm", &["test"])]);
+}
+
+/// Go formatted the `*string` column with `%v`, the pointer's address.
+#[test]
+#[ignore = "requires Go; builds and runs an emitted app"]
+fn model_methods_read_the_record_on_implicit_self_on_go() {
+    let (emitted, errors) = implicit_self_app().emit(roundhouse::project::BuildTarget::Go);
+    assert!(errors.is_empty(), "{errors:?}");
+    run_emitted(&emitted, &[("go", &["mod", "tidy"]), ("go", &["test", "./..."])]);
+}
+
+/// A controller of its own, outside real-blog's resources, reading `params` into a local.
+fn probe_controller_app() -> emit_and_run::Overlay {
+    emit_and_run::real_blog()
+        .edit("config/routes.rb", "  root \"articles#index\"\n", "  root \"articles#index\"\n  get \"/probe/:id\", to: \"probe#show\", as: :probe\n  get \"/probe/:id/joined\", to: \"probe#joined\", as: :probe_joined\n  get \"/search\", to: \"probe#search\", as: :search\n  post \"/search\", to: \"probe#search\"\n  delete \"/search\", to: \"probe#search\"\n")
+        .write(
+            "app/controllers/probe_controller.rb",
+            "class ProbeController < ApplicationController\n  def show\n    article = Article.find(params[:id])\n    render plain: article.title.to_s\n  end\n\n  def search\n    render plain: \"q=\" + params[:q].to_s + \" page=\" + params[:page].to_s\n  end\n\n  def joined\n    article = Article.find(params[:id])\n    render plain: article.comments.map(&:commenter).join(\"|\") + \" \" + [article.comments.size, 0].join(\",\") + \" \" + [true, false].join(\",\")\n  end\nend\n",
+        )
+        .write(
+            "test/controllers/probe_controller_test.rb",
+            "require \"test_helper\"\n\nclass ProbeControllerTest < ActionDispatch::IntegrationTest\n  setup do\n    @article = articles(:one)\n  end\n\n  test \"reads params into a local\" do\n    get probe_url(@article)\n    assert_response :success\n    assert_equal \"Getting Started with Rails\", response.body\n  end\n\n  test \"joins what is not a String\" do\n    get probe_joined_url(@article)\n    assert_equal \"Alice 1,0 true,false\", response.body\n  end\n\n  test \"reads the query string\" do\n    get search_url(q: \"rails\", page: 2)\n    assert_equal \"q=rails page=2\", response.body\n  end\n\n  test \"leaves an omitted key out of the query string\" do\n    get search_url(q: \"rails\")\n    assert_equal \"q=rails page=\", response.body\n  end\n\n  test \"lets the query string win over the form\" do\n    post search_url(q: \"query\"), params: { q: \"form\", page: \"3\" }\n    assert_equal \"q=query page=3\", response.body\n  end\n\n  test \"reads a bodyless delete\" do\n    delete search_url(q: \"gone\")\n    assert_equal \"q=gone page=\", response.body\n  end\nend\n",
+        )
+}
+
+#[test]
+fn a_controller_reads_params_into_a_local() {
+    probe_controller_app().run_test("test/controllers/probe_controller_test.rb").assert_passes();
+}
+
+/// Rust gave the controller no `params` field (only ivar writes and a few node shapes were walked), and its `process_action` on `&self` called a `&mut self` stub.
+#[test]
+#[ignore = "requires the Rust toolchain; builds and runs an emitted app"]
+fn a_controller_reads_params_into_a_local_on_rust() {
+    let (emitted, errors) = probe_controller_app().emit(roundhouse::project::BuildTarget::Rust);
+    assert!(errors.is_empty(), "{errors:?}");
+    run_emitted(&emitted, &[("cargo", &["test", "--quiet"])]);
+}
+
+/// A controller test whose setup names a fixture other than `one`.
+fn setup_fixture_label_app() -> emit_and_run::Overlay {
+    // In `ArticlesControllerTest`: a test class named for no controller is not emitted.
+    emit_and_run::real_blog().write(
+        "test/controllers/articles_controller_test.rb",
+        "require \"test_helper\"\n\nclass ArticlesControllerTest < ActionDispatch::IntegrationTest\n  setup do\n    @article = articles(:two)\n  end\n\n  test \"shows the fixture the setup names\" do\n    get article_url(@article)\n    assert_response :success\n    assert_select \"h1\", \"Understanding MVC Architecture\"\n  end\nend\n",
+    )
+}
+
+#[test]
+fn a_controller_test_reads_the_fixture_its_setup_names() {
+    setup_fixture_label_app().run_test("test/controllers/articles_controller_test.rb").assert_passes();
+}
+
+/// Rust primed every such ivar with the `one` fixture, whatever the setup named.
+#[test]
+#[ignore = "requires the Rust toolchain; builds and runs an emitted app"]
+fn a_controller_test_reads_the_fixture_its_setup_names_on_rust() {
+    let (emitted, errors) = setup_fixture_label_app().emit(roundhouse::project::BuildTarget::Rust);
+    assert!(errors.is_empty(), "{errors:?}");
+    run_emitted(&emitted, &[("cargo", &["test", "--quiet"])]);
+}
+
+/// The CRuby tree's `rake test` load path, as its Rakefile spells it, answers a gem's `require "logger"` with Ruby's
+/// own Logger (ruby-vips calls `Logger.new($stdout)`), and only an app with the blog's Article gets the scaffold's Article tests.
+#[test]
+fn cruby_rake_load_path_keeps_rubys_own_libraries() {
+    use roundhouse::project::BuildTarget;
+    let (emitted, errors) = emit_and_run::empty_app()
+        .write("app/models/application_record.rb", "class ApplicationRecord < ActiveRecord::Base\n  self.abstract_class = true\nend\n")
+        .write("app/controllers/application_controller.rb", "class ApplicationController < ActionController::Base\nend\n")
+        .write("db/schema.rb", "ActiveRecord::Schema.define do\n  create_table \"widgets\", force: :cascade do |t|\n    t.string \"name\"\n  end\nend\n")
+        .write("app/models/widget.rb", "class Widget < ApplicationRecord\nend\n")
+        .emit(BuildTarget::Ruby);
+    assert!(errors.is_empty(), "{errors:?}");
+    for scaffold in [
+        "test/models/article_broadcasts_test.rb",
+        "test/views/articles_test.rb",
+        "test/views/articles_json_test.rb",
+        "test/query_count_test.rb",
+        "test/relation_find_test.rb",
+        "test/route_helpers_test.rb",
+    ] {
+        assert!(!emitted.join(scaffold).exists(), "{scaffold}");
+    }
+    let rakefile = std::fs::read_to_string(emitted.join("Rakefile")).unwrap();
+    let libs: Vec<String> = rakefile
+        .lines()
+        .filter_map(|line| Some(format!("-I{}", line.trim().strip_prefix("t.libs << \"")?.strip_suffix('"')?)))
+        .collect();
+    assert!(!libs.is_empty(), "{rakefile}");
+    let output = emit_and_run::ruby()
+        .args(&libs)
+        .args(["-e", "require \"logger\"; Logger.new($stdout).level = Logger::WARN"])
+        .current_dir(&*emitted)
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{libs:?}\n{}", String::from_utf8_lossy(&output.stderr));
+
+    let (emitted, _) = emit_and_run::real_blog().emit(BuildTarget::Ruby);
+    assert!(emitted.join("test/models/article_broadcasts_test.rb").exists());
+}
+
+/// campfire's `MessagesHelper#auto_link_text`: `sanitize` with the
+/// caller's lists, `Nokogiri::HTML5.fragment`, its text nodes by XPath,
+/// `replace` with a parsed fragment, and `to_html(preserve_newline:)`.
+/// The Ruby tree loads the real nokogiri gem behind the façade's types.
+#[test]
+fn nokogiri_html5_fragment_text_nodes_are_rewritten_and_serialized() {
+    let run = emit_and_run::real_blog()
+        .write(
+            "app/helpers/articles_helper.rb",
+            r#"module ArticlesHelper
+  LINK_TAGS = %w[a div pre]
+  LINK_ATTRIBUTES = %w[href]
+
+  def link_words(html)
+    fragment = Nokogiri::HTML5.fragment(sanitize(html, tags: LINK_TAGS, attributes: LINK_ATTRIBUTES))
+    fragment.xpath(".//text()[not(ancestor::a)]").each do |node|
+      if node.text.match?(/go/)
+        text = node.to_html
+        linked = text.sub("go", "<a href=\"/go\">go</a>")
+        node.replace Nokogiri::HTML5.fragment(linked) unless linked == text
+      end
+    end
+    fragment.to_html(preserve_newline: true)
+  end
+end
+"#,
+        )
+        .run_ruby(
+            r#"out = ArticlesHelper.link_words("<div onclick=\"x()\">go <em>on</em> <a href=\"/k\">go</a></div><pre>\n\n\ngo</pre>")
+want = "<div><a href=\"/go\">go</a> on <a href=\"/k\">go</a></div><pre>\n\n<a href=\"/go\">go</a></pre>"
+raise "link_words: #{out.inspect}" unless out == want
+puts "nokogiri html5 helper passed"
+"#,
+        );
+    run.assert_passes();
+    assert!(run.stdout.contains("nokogiri html5 helper passed"));
 }
