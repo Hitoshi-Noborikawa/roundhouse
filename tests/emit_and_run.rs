@@ -152,6 +152,8 @@ mod action_dispatch_request_put;
 mod controller_url_helpers;
 #[path = "emit_and_run/url_helpers_only_path.rs"]
 mod url_helpers_only_path;
+#[path = "emit_and_run/url_helpers_absolute.rs"]
+mod url_helpers_absolute;
 #[path = "emit_and_run/route_default_segment_args.rs"]
 mod route_default_segment_args;
 #[path = "emit_and_run/keyed_collection_cache.rs"]

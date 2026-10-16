@@ -4404,16 +4404,28 @@ fn rewrite_layout_wrap(
 // accumulator shape, with non-self receivers on the residue ledger.
 
 /// Ground `Rails.application.routes.url_helpers.<x>_url(record?, host: H,
-/// protocol: P)` → `"#{P}://#{H}#{RouteHelpers.<x>_path(record?)}"`. The
-/// routing object graph behind `url_helpers` isn't modeled (and never
+/// protocol: P, port: N)` → `"#{P}://#{H}:N#{RouteHelpers.<x>_path(record?)}"`.
+/// The routing object graph behind `url_helpers` isn't modeled (and never
 /// needs to be for this shape — an absolute URL is protocol + host + the
 /// generated path helper). Leading positional args (the record in
-/// `user_url(sender, host:)`) and any non-host/protocol kwargs (real
-/// path params) are forwarded to the `<x>_path` helper; the record rides
-/// whole so its custom `to_param` resolves. Non-matching url_helpers
+/// `user_url(sender, host:)`) and any kwargs that are not host options
+/// (real path params) are forwarded to the `<x>_path` helper; the record
+/// rides whole so its custom `to_param` resolves. Non-matching url_helpers
 /// uses are left alone. Applied to the Rails::Application reopen (whose
 /// kwargs-only `root_url` is the original occurrence) and mod_note's
 /// `user_url(sender, host:)`.
+///
+/// Rails' `url_for` keeps its host options for itself (`RESERVED_OPTIONS`,
+/// see `lower::route_url_options`), so none of `host:`, `protocol:`,
+/// `port:` or `only_path:` is ever passed on to the path helper:
+///
+///   * `only_path: true` answers the path alone. An app route's call
+///     arrives here already renamed to `_path` by
+///     `lower::route_url_options`; this arm is for the engine helpers
+///     that pass does not know (Active Storage's `rails_blob_url`).
+///   * `port:` follows the host as `:N`. A literal port that is the
+///     scheme's own (80 for http, 443 for https) or `nil` is left out,
+///     as Rails' `build_host_url` leaves it out.
 pub(crate) fn rewrite_url_helpers_absolute(expr: &mut Expr) {
     expr.node.for_each_child_mut(&mut rewrite_url_helpers_absolute);
     let matches = matches!(
@@ -4437,6 +4449,8 @@ pub(crate) fn rewrite_url_helpers_absolute(expr: &mut Expr) {
     let ExprNode::Hash { entries, .. } = &*trailing.node else { unreachable!() };
     let mut host: Option<Expr> = None;
     let mut protocol: Option<Expr> = None;
+    let mut port: Option<Expr> = None;
+    let mut only_path = false;
     let mut path_kwargs: Vec<(Expr, Expr)> = Vec::new();
     for (k, v) in entries {
         if let ExprNode::Lit { value: Literal::Sym { value } } = &*k.node {
@@ -4449,10 +4463,18 @@ pub(crate) fn rewrite_url_helpers_absolute(expr: &mut Expr) {
                     protocol = Some(v.clone());
                     continue;
                 }
+                "port" => {
+                    port = Some(v.clone());
+                    continue;
+                }
+                "only_path" => {
+                    only_path = matches!(&*v.node, ExprNode::Lit { value: Literal::Bool { value: true } });
+                    continue;
+                }
                 _ => {}
             }
         }
-        // Any non-host/protocol key is a real path parameter — forward it.
+        // Any other key is a real path parameter — forward it.
         path_kwargs.push((k.clone(), v.clone()));
     }
     // Forward leading positionals plus any surviving path kwargs to the
@@ -4479,21 +4501,113 @@ pub(crate) fn rewrite_url_helpers_absolute(expr: &mut Expr) {
             parenthesized: true,
         },
     );
+    if only_path {
+        *expr = path_call;
+        expr.ty = Some(crate::ty::Ty::Str);
+        return;
+    }
     let lit = |s: &str| crate::expr::InterpPart::Text { value: s.to_string() };
     let dyn_part = |e: Expr| crate::expr::InterpPart::Expr { expr: e };
+    // The scheme's own port, when the protocol is known at compile time.
+    let https = match protocol.as_ref().map(|p| &*p.node) {
+        None => Some(false),
+        Some(ExprNode::Lit { value: Literal::Str { value } }) => {
+            Some(value.trim_end_matches("://") == "https")
+        }
+        Some(_) => None,
+    };
+    // A protocol known only at run time is read once, into a local the
+    // port's run-time check below can read again.
+    let protocol_var = Symbol::from("__url_protocol");
+    let protocol_part = protocol.map(|p| match https {
+        Some(_) => dyn_part(p),
+        None => dyn_part(Expr::new(
+            p.span,
+            ExprNode::Assign {
+                target: crate::expr::LValue::Var { id: crate::ident::VarId(0), name: protocol_var.clone() },
+                value: p,
+            },
+        )),
+    });
+    let port_part = port.and_then(|p| match (&*p.node, https) {
+        (ExprNode::Lit { value: Literal::Nil }, _) => None,
+        (ExprNode::Lit { value: Literal::Int { value } }, Some(https)) => {
+            let standard = if https { *value == 443 } else { *value == 80 };
+            (!standard).then(|| lit(&format!(":{value}")))
+        }
+        (ExprNode::Lit { value: Literal::Str { value } }, Some(https)) => {
+            let standard = if https { value == "443" } else { value == "80" };
+            (!standard).then(|| lit(&format!(":{value}")))
+        }
+        // Known only at run time: decided there, as Rails decides it.
+        _ => Some(dyn_part(runtime_port(p, https, &protocol_var))),
+    });
     let mut parts: Vec<crate::expr::InterpPart> = Vec::new();
-    if let Some(p) = protocol {
-        parts.push(dyn_part(p));
-    } else {
-        parts.push(lit("http"));
+    match protocol_part {
+        Some(p) => parts.push(p),
+        None => parts.push(lit("http")),
     }
     parts.push(lit("://"));
     if let Some(h) = host {
         parts.push(dyn_part(h));
     }
+    if let Some(p) = port_part {
+        parts.push(p);
+    }
     parts.push(dyn_part(path_call));
     *expr.node = ExprNode::StringInterp { parts };
     expr.ty = Some(crate::ty::Ty::Str);
+}
+
+/// `port:` known only at run time, read once:
+///
+/// ```ruby
+/// __url_port = <port>
+/// __url_port.nil? || __url_port.to_i == <default> ? "" : ":#{__url_port}"
+/// ```
+///
+/// Rails' `build_host_url` leaves the port out when it is nil or the
+/// scheme's own (`80` for http, `443` for https), comparing as Integers
+/// (`"80"` is left out too). The default is a literal when the protocol
+/// is, and otherwise read from the `__url_protocol` local the protocol
+/// part assigned.
+fn runtime_port(port: Expr, https: Option<bool>, protocol_var: &Symbol) -> Expr {
+    let span = port.span;
+    let mk = |node: ExprNode| Expr::new(span, node);
+    let int = |v: i64| mk(ExprNode::Lit { value: Literal::Int { value: v } });
+    let str_lit = |v: &str| mk(ExprNode::Lit { value: Literal::Str { value: v.to_string() } });
+    let call = |recv: Expr, m: &str, args: Vec<Expr>| {
+        mk(ExprNode::Send { recv: Some(recv), method: Symbol::from(m), args, block: None, parenthesized: true })
+    };
+    let port_var = Symbol::from("__url_port");
+    let var = |name: &Symbol| mk(ExprNode::Var { id: crate::ident::VarId(0), name: name.clone() });
+    let default = match https {
+        Some(true) => int(443),
+        Some(false) => int(80),
+        None => mk(ExprNode::If {
+            cond: call(call(var(protocol_var), "to_s", vec![]), "start_with?", vec![str_lit("https")]),
+            then_branch: int(443),
+            else_branch: int(80),
+        }),
+    };
+    let leave_out = mk(ExprNode::BoolOp {
+        op: crate::expr::BoolOpKind::Or,
+        surface: Default::default(),
+        left: call(var(&port_var), "nil?", vec![]),
+        right: call(call(var(&port_var), "to_i", vec![]), "==", vec![default]),
+    });
+    let written = mk(ExprNode::StringInterp {
+        parts: vec![
+            crate::expr::InterpPart::Text { value: ":".to_string() },
+            crate::expr::InterpPart::Expr { expr: var(&port_var) },
+        ],
+    });
+    mk(ExprNode::Let {
+        id: crate::ident::VarId(0),
+        name: port_var.clone(),
+        value: port,
+        body: mk(ExprNode::If { cond: leave_out, then_branch: str_lit(""), else_branch: written }),
+    })
 }
 
 fn is_url_helpers_chain(e: &Expr) -> bool {
