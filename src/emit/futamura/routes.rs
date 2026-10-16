@@ -26,7 +26,7 @@
 //!   * actions with a route that a route the lowered router refused
 //!     could shadow (Rails would match the refused one first).
 
-use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 
 use crate::App;
 use crate::diagnostic::{Diagnostic, Severity};
@@ -787,19 +787,38 @@ fn rooted_in_framework(index: &Index, class: &str, class_side: bool, e: &Expr) -
 /// location as its counterpart in the re-lowered body.
 fn analyzer_stamps(app: &App) -> HashMap<(u32, u32, u32), Ty> {
     let mut out: HashMap<(u32, u32, u32), Ty> = HashMap::new();
-    // A span can recur with a different type: a synthesized method body
-    // can share its span with another (`owns_source`'s note on
-    // synthesized accessors borrowing spans), and a concern spliced into
-    // several controllers replays the same source at the same span under
-    // a different `self_ty` each time. The first type seen is no more
-    // trustworthy than the second, so a span that ever disagrees with
-    // itself is dropped for good rather than left holding whichever type
-    // happened to visit first — a wrong stamp here would narrow
-    // `enqueue_send`'s dispatch past a real target.
+    // A span can recur with a different type, and not every recurrence
+    // is a real disagreement:
+    //
+    //   * safe navigation (`u&.email`) re-types its guarded receiver
+    //     TWICE at the identical span — once with its honest, unnarrowed
+    //     type (`T | nil`, the local's static type) and once narrowed to
+    //     plain `T` inside the branch where the dispatch actually runs.
+    //     `classes_of` already drops a union's `Nil` member, so these
+    //     two answer `enqueue_send`'s question identically; keeping
+    //     either is fine, and `dispatch_classes` below treats them as
+    //     the same stamp rather than a conflict.
+    //   * a synthesized method body can share its span with another
+    //     (`owns_source`'s note on synthesized accessors borrowing
+    //     spans), and a concern spliced into several controllers
+    //     replays the same source at the same span under a different
+    //     `self_ty` each time — these CAN genuinely disagree on which
+    //     app classes a call reaches, and that is a real conflict: the
+    //     first type seen is no more trustworthy than the second, so a
+    //     span whose dispatch classes ever disagree is dropped for good
+    //     rather than left holding whichever type happened to visit
+    //     first — a wrong stamp here would narrow `enqueue_send`'s
+    //     dispatch past a real target.
+    //
+    // An open or unknown type (`Var`/`Bottom`/`Untyped`, or a union
+    // mentioning one) is never recorded and never conflicts: `enqueue_send`
+    // already refuses to adopt one (see its own filter), so storing it
+    // would only ever risk manufacturing a conflict against a later,
+    // useful closed stamp for no benefit.
     let mut conflicted: HashSet<(u32, u32, u32)> = HashSet::new();
     let mut record = |e: &Expr| {
         let Some(ty) = &e.ty else { return };
-        if e.span.file.0 == 0 {
+        if e.span.file.0 == 0 || ty.is_open() || ty.is_unknown() || ty.mentions_unknown() {
             return;
         }
         let key = (e.span.file.0, e.span.start, e.span.end);
@@ -811,6 +830,7 @@ fn analyzer_stamps(app: &App) -> HashMap<(u32, u32, u32), Ty> {
                 out.insert(key, ty.clone());
             }
             Some(existing) if existing == ty => {}
+            Some(existing) if dispatch_classes(existing) == dispatch_classes(ty) => {}
             Some(_) => {
                 out.remove(&key);
                 conflicted.insert(key);
@@ -852,6 +872,16 @@ fn classes_of(ty: &Ty) -> Vec<String> {
     }
 }
 
+/// `classes_of` as an order-insensitive set, for comparing whether two
+/// types answer `enqueue_send`'s dispatch question the same way —
+/// `analyzer_stamps`'s own conflict check, so a nilable union and its
+/// narrowed non-nil member (safe navigation's two stamps for one
+/// receiver span) compare equal without caring which union variant
+/// order either happened to carry.
+fn dispatch_classes(ty: &Ty) -> BTreeSet<String> {
+    classes_of(ty).into_iter().collect()
+}
+
 fn visit(e: &Expr, f: &mut dyn FnMut(&Expr)) {
     f(e);
     e.node.for_each_child(&mut |c| visit(c, f));
@@ -880,7 +910,7 @@ mod tests {
     use super::{analyzer_stamps, app_relative, gap_blocking, may_overlap, view_prefix};
     use crate::dialect::{Action, Controller, ControllerBodyItem, LayoutDecl, RenderTarget};
     use crate::expr::{Expr, ExprNode};
-    use crate::ident::{ClassId, Symbol};
+    use crate::ident::{ClassId, Symbol, TyVar};
     use crate::span::{FileId, Span};
     use crate::ty::{Row, Ty};
     use crate::App;
@@ -964,6 +994,63 @@ mod tests {
         };
         let stamps = analyzer_stamps(&app);
         assert_eq!(stamps.get(&(1, 30, 40)), Some(&class_ty("Widget")));
+    }
+
+    fn nilable_class_ty(name: &str) -> Ty {
+        Ty::Union { variants: vec![class_ty(name), Ty::Nil].into() }
+    }
+
+    /// Safe navigation (`u&.email`) re-types its guarded receiver TWICE
+    /// at the identical span: its honest, unnarrowed type (`T | nil`)
+    /// and, in the non-nil dispatch branch, plain `T`. This is the
+    /// actual shape that regressed rubys/roundhouse#1001 — neither side
+    /// is open or unknown, so "ignore open/unknown types" alone does not
+    /// cover it. `classes_of` already drops a union's `Nil` member, so
+    /// both stamps answer `enqueue_send`'s dispatch question identically
+    /// and must not be treated as a conflict.
+    #[test]
+    fn a_nilable_union_and_its_narrowed_non_nil_member_are_not_a_conflict() {
+        let span = Span { file: FileId(1), start: 50, end: 60 };
+        let app = App {
+            controllers: vec![controller_with_action(
+                "WidgetsController",
+                "index",
+                // One occurrence narrowed, one not — order must not
+                // matter, so this covers unnarrowed-then-narrowed.
+                Expr::new(Span::synthetic(), ExprNode::Seq {
+                    exprs: vec![
+                        stamped(span, nilable_class_ty("Widget")),
+                        stamped(span, class_ty("Widget")),
+                    ],
+                }),
+            )],
+            ..Default::default()
+        };
+        let stamps = analyzer_stamps(&app);
+        assert!(stamps.get(&(1, 50, 60)).is_some(), "{stamps:?}");
+    }
+
+    /// An open type (`Var`, the analyzer's own "not yet inferred"
+    /// sentinel) recorded before a later, closed type for the same span
+    /// must not poison it: the open occurrence is never stored in the
+    /// first place, so the closed one that follows is simply the span's
+    /// first real entry.
+    #[test]
+    fn an_open_type_then_a_closed_type_keeps_the_closed_one() {
+        let span = Span { file: FileId(1), start: 70, end: 80 };
+        let open = Ty::Var { var: TyVar(0) };
+        let app = App {
+            controllers: vec![controller_with_action(
+                "WidgetsController",
+                "index",
+                Expr::new(Span::synthetic(), ExprNode::Seq {
+                    exprs: vec![stamped(span, open), stamped(span, class_ty("Widget"))],
+                }),
+            )],
+            ..Default::default()
+        };
+        let stamps = analyzer_stamps(&app);
+        assert_eq!(stamps.get(&(1, 70, 80)), Some(&class_ty("Widget")), "{stamps:?}");
     }
 
     #[test]
