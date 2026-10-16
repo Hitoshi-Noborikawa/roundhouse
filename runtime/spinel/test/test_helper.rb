@@ -29,6 +29,11 @@
 # (LocalSecret treats "" as unset) and a secret inherited from the
 # parent process would sign the vectors with a different key.
 ENV["SECRET_KEY_BASE"] = "roundhouse-test-secret"
+# Rails' own test_helper opens with `ENV["RAILS_ENV"] ||= "test"`, and
+# boot.rb parks it as `Rails.env`. Without it a test process reads as
+# development: `Rails.env.test?` gates (campfire's WAL checkpointer
+# `start(enabled: !Rails.env.test?)`) take the serving branch.
+ENV["RAILS_ENV"] = "test" if ENV["RAILS_ENV"].nil?
 require_relative "../runtime/base64"
 require_relative "../runtime/json_impl"
 require_relative "../runtime/db"
