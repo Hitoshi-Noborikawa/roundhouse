@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 # The Redis connection `SidekiqPush` pushes through, for a tree on
 # `queue_adapter :sidekiq`. Swapped in for the raising façade at
 # `runtime/sidekiq_redis.rb`. `require "redis"` is spinel-redis on

@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 # Pushing ActiveJob payloads to Redis the way Sidekiq 8.1's ActiveJob
 # adapter does, for an app on `config.active_job.queue_adapter =
 # :sidekiq`. A Ruby Sidekiq process, in a Rails app with the same job

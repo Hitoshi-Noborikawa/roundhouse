@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 # The Redis connection `SidekiqPush` pushes through — the façade every
 # tree gets by default. A tree on `queue_adapter :sidekiq` with a
 # payload job gets `runtime/spinel/sidekiq/sidekiq_redis.rb` here
