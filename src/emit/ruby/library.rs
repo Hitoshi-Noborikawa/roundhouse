@@ -2190,13 +2190,20 @@ fn sti_dispatch(base_new: Expr, type_read: &Expr, subs: &[ClassId], span: Span) 
 /// the key stayed 0 and campfire's whole first run died on
 /// `Validation failed: Creator must exist` (four tests, two files).
 ///
-/// Two edits per non-polymorphic belongs_to:
+/// Three edits per non-polymorphic belongs_to:
 ///
-///   1. the writer stashes an UNSAVED value in the reader's cache —
-///      a record with no id yet cannot be found again from the foreign
-///      key, so something has to hold it until the save;
-///   2. `_autosave_<name>` saves it and takes the id, folded into
-///      `before_validation`.
+///   1. the writer keeps the assigned value in the reader's cache, as
+///      Rails' writer sets the association target — an UNSAVED one
+///      because a record with no id yet cannot be found again from the
+///      foreign key, a saved one because the reader then answers that
+///      same object (`room.messages.new` hands its owner in this way,
+///      the automatic inverse, and a singleton method or unsaved change
+///      on the owner is what the record must see);
+///   2. `_autosave_<name>` saves an unsaved one and takes the id,
+///      folded into `before_validation`;
+///   3. the constructor's `attrs[:<name>]` goes through that writer,
+///      as Rails routes every attrs key through its writer, instead of
+///      the shared lowering's bare foreign-key copy.
 ///
 /// ```ruby
 /// def creator=(value)
@@ -2204,10 +2211,8 @@ fn sti_dispatch(base_new: Expr, type_read: &Expr, subs: &[ClassId], span: Span) 
 ///     @creator_id = 0
 ///   else
 ///     @creator_id = value.id
-///     if value.id == 0
-///       @creator_cache = value
-///       @creator_loaded = true
-///     end
+///     @creator_cache = value
+///     @creator_loaded = true
 ///   end
 /// end
 ///
@@ -2219,9 +2224,10 @@ fn sti_dispatch(base_new: Expr, type_read: &Expr, subs: &[ClassId], span: Span) 
 /// end
 /// ```
 ///
-/// A SAVED value deliberately does not populate the cache, so the
-/// reader keeps re-querying by foreign key for those and a later direct
-/// write to the key cannot be answered from a stale object.
+/// A SAVED value once deliberately stayed out of the cache, so that a
+/// later direct write to the key could not be answered from a stale
+/// object. `apply_belongs_to_memoization` closed that hazard: the
+/// foreign-key writer resets the cache, as Rails' does.
 ///
 /// WHY RUBY-FAMILY AND NOT THE SHARED LOWERING. This started shared and
 /// the strict targets refused it, each in its own way — the two of them
@@ -2285,51 +2291,114 @@ pub(crate) fn apply_belongs_to_autosave(lcs: &mut [LibraryClass], app: &App) {
             let assign = else_branch.clone();
             *else_branch = Expr::new(
                 span,
-                ExprNode::Seq { exprs: vec![assign, stash_unsaved(&name, span)] },
+                ExprNode::Seq { exprs: vec![assign, stash_target(&name, span)] },
             );
             lc.methods.push(autosave_method(&lc.name, &name, &fk));
             fold_before_validation(&mut lc.methods, &lc.name, &name);
+            route_init_through_writer(lc, &name, &fk);
         }
     }
 }
 
-/// `if value.id == 0 then @<name>_cache = value; @<name>_loaded = true end`
-fn stash_unsaved(name: &Symbol, span: Span) -> Expr {
+/// `@<name>_cache = value; @<name>_loaded = true`
+fn stash_target(name: &Symbol, span: Span) -> Expr {
     let syn = |n| Expr::new(span, n);
     let value = || syn(ExprNode::Var { id: VarId(0), name: Symbol::from("value") });
-    let id_read = syn(ExprNode::Send {
-        recv: Some(value()),
-        method: Symbol::from("id"),
-        args: vec![],
-        block: None,
-        parenthesized: false,
-    });
-    syn(ExprNode::If {
-        cond: syn(ExprNode::Send {
-            recv: Some(id_read),
-            method: Symbol::from("=="),
-            args: vec![syn(ExprNode::Lit { value: Literal::Int { value: 0 } })],
-            block: None,
-            parenthesized: false,
-        }),
-        then_branch: syn(ExprNode::Seq {
-            exprs: vec![
-                syn(ExprNode::Assign {
-                    target: LValue::Ivar {
-                        name: Symbol::from(format!("{}_cache", name.as_str())),
-                    },
-                    value: value(),
-                }),
-                syn(ExprNode::Assign {
-                    target: LValue::Ivar {
-                        name: Symbol::from(format!("{}_loaded", name.as_str())),
-                    },
-                    value: syn(ExprNode::Lit { value: Literal::Bool { value: true } }),
-                }),
-            ],
-        }),
-        else_branch: syn(ExprNode::Lit { value: Literal::Nil }),
+    syn(ExprNode::Seq {
+        exprs: vec![
+            syn(ExprNode::Assign {
+                target: LValue::Ivar { name: Symbol::from(format!("{}_cache", name.as_str())) },
+                value: value(),
+            }),
+            syn(ExprNode::Assign {
+                target: LValue::Ivar { name: Symbol::from(format!("{}_loaded", name.as_str())) },
+                value: syn(ExprNode::Lit { value: Literal::Bool { value: true } }),
+            }),
+        ],
     })
+}
+
+/// The constructor's `self.<fk> = attrs[:<name>].id if !attrs[:<name>].nil?`
+/// (the shared `synth_initialize`, which cannot hand a strict target's
+/// attrs bag a record) becomes `self.<name> = attrs[:<name>] if …`: the
+/// writer stores the same key and keeps the object, so
+/// `Message.new(room: room).room` is `room`, as in Rails.
+fn route_init_through_writer(lc: &mut LibraryClass, name: &Symbol, fk: &Symbol) {
+    let Some(init) = lc
+        .methods
+        .iter_mut()
+        .find(|m| m.name.as_str() == "initialize" && m.receiver == MethodReceiver::Instance)
+    else {
+        return;
+    };
+    let fk_writer = format!("{}=", fk.as_str());
+    let writer = Symbol::from(format!("{}=", name.as_str()));
+    fn is_lookup(e: &Expr, name: &Symbol) -> bool {
+        matches!(&*e.node, ExprNode::Send { recv: Some(_), method, args, block: None, .. }
+            if method.as_str() == "[]" && args.len() == 1
+                && matches!(&*args[0].node, ExprNode::Lit { value: Literal::Sym { value } } if value == name))
+    }
+    fn walk(e: &mut Expr, name: &Symbol, fk_writer: &str, writer: &Symbol, done: &mut bool) {
+        if *done {
+            return;
+        }
+        if let ExprNode::If { then_branch, .. } = &mut *e.node {
+            let lookup = match &*then_branch.node {
+                ExprNode::Send { recv: Some(r), method, args, .. }
+                    if matches!(&*r.node, ExprNode::SelfRef)
+                        && method.as_str() == fk_writer
+                        && args.len() == 1 =>
+                {
+                    match &*args[0].node {
+                        ExprNode::Send { recv: Some(obj), method: id, args: id_args, .. }
+                            if id.as_str() == "id" && id_args.is_empty() =>
+                        {
+                            let inner = match &*obj.node {
+                                ExprNode::Cast { value, .. } => value,
+                                _ => obj,
+                            };
+                            is_lookup(inner, name).then(|| inner.clone())
+                        }
+                        _ => None,
+                    }
+                }
+                _ => None,
+            };
+            if let Some(lookup) = lookup {
+                let span = then_branch.span;
+                *then_branch = Expr::new(
+                    span,
+                    ExprNode::Send {
+                        recv: Some(Expr::new(span, ExprNode::SelfRef)),
+                        method: writer.clone(),
+                        args: vec![lookup],
+                        block: None,
+                        parenthesized: false,
+                    },
+                );
+                *done = true;
+                return;
+            }
+        }
+        e.node.for_each_child_mut(&mut |c| walk(c, name, fk_writer, writer, done));
+    }
+    let mut done = false;
+    walk(&mut init.body, name, &fk_writer, &writer, &mut done);
+    // The constructor's tail resets `@<name>_loaded = false` for every
+    // association, which would forget the object the writer just kept.
+    // The reset is already done ahead of it: the foreign-key column's
+    // own `self.<fk> = attrs[:<fk>] || 0` runs first, and its writer
+    // clears the cache (`apply_belongs_to_memoization`).
+    if done {
+        let loaded = Symbol::from(format!("{}_loaded", name.as_str()));
+        if let ExprNode::Seq { exprs } = &mut *init.body.node {
+            exprs.retain(|e| {
+                !matches!(&*e.node, ExprNode::Assign { target: LValue::Ivar { name: n }, value }
+                    if n == &loaded
+                        && matches!(&*value.node, ExprNode::Lit { value: Literal::Bool { value: false } }))
+            });
+        }
+    }
 }
 
 fn autosave_method(
@@ -5819,6 +5888,124 @@ fn invalidate_parse_memo_on_raw_writes(e: &mut Expr, temporal: &BTreeSet<Symbol>
 /// plain-text conversion walked the markup every time (27% of a room
 /// page). Ruby emit only: the memo is a second ivar, and the strict
 /// targets declare fields from the schema.
+/// Ruby-family pass: Action Text's `belongs_to :record, polymorphic:
+/// true, touch: true`.
+///
+/// Rails' `has_rich_text` declares its `has_one` with `inverse_of:
+/// :record`, so a rich text read or built through its record knows that
+/// record object, and saving it (`message.body.update!(body: …)`)
+/// touches it: `updated_at` moves, `after_touch` cascades (a message's
+/// own `belongs_to :room, touch: true`), and the record's update commit
+/// callbacks run — campfire's `Message::Searchable` rewrites the search
+/// index from `after_update_commit`, which is how a body edited through
+/// the rich text reaches the index.
+///
+/// Two edits:
+///
+///   1. every owner-side write of the rich-text slot (`rich_text_<attr>`,
+///      `build_rich_text_<attr>`, `_preload_rich_text_<attr>`) hands the
+///      record to it — `@__rich_text_body._adopt_touch_owner(self)` — the
+///      inverse;
+///   2. `ActionText::RichText`'s `after_save` and `after_destroy` end in
+///      `_touch_owner` (connection.rb), which touches that record when
+///      it is persisted.
+///
+/// A rich text loaded on its own (not through its record) has no owner
+/// object and touches nothing: the polymorphic `record` lookup Rails
+/// would make is not modeled. Ruby-family only — the owner slot is a
+/// `Base` reference, which the strict targets' plain structs have no
+/// supertype for.
+pub(crate) fn apply_rich_text_record_touch(lcs: &mut [LibraryClass], app: &App) {
+    let record = crate::lower::rich_text::record_class();
+    let span = Span::synthetic();
+    let syn = |n| Expr::new(span, n);
+    let touch_call = || {
+        syn(ExprNode::Send {
+            recv: None,
+            method: Symbol::from("_touch_owner"),
+            args: vec![],
+            block: None,
+            parenthesized: false,
+        })
+    };
+    for lc in lcs.iter_mut() {
+        if lc.name == record {
+            let Some(model) = app.models.iter().find(|m| m.name == record) else { continue };
+            crate::lower::model_to_library::markers::fold_into_or_push(
+                &mut lc.methods,
+                model,
+                "after_save",
+                touch_call(),
+            );
+            crate::lower::model_to_library::markers::fold_into_or_push(
+                &mut lc.methods,
+                model,
+                "after_destroy",
+                touch_call(),
+            );
+            continue;
+        }
+        let Some(model) = app.models.iter().find(|m| m.name == lc.name) else { continue };
+        for (_, attr) in crate::lower::rich_text::rich_text_attrs(model) {
+            let slot = Symbol::from(format!("__rich_text_{}", attr.as_str()));
+            let writers = [
+                format!("rich_text_{}", attr.as_str()),
+                format!("build_rich_text_{}", attr.as_str()),
+                format!("_preload_rich_text_{}", attr.as_str()),
+            ];
+            for m in lc.methods.iter_mut() {
+                if m.receiver != MethodReceiver::Instance || !writers.iter().any(|w| w == m.name.as_str()) {
+                    continue;
+                }
+                adopt_after_slot_writes(&mut m.body, &slot);
+            }
+        }
+    }
+}
+
+/// After each `@<slot> = …` statement in a sequence, insert
+/// `@<slot>._adopt_touch_owner(self) if !@<slot>.nil?`.
+fn adopt_after_slot_writes(e: &mut Expr, slot: &Symbol) {
+    e.node.for_each_child_mut(&mut |c| adopt_after_slot_writes(c, slot));
+    let ExprNode::Seq { exprs } = &mut *e.node else { return };
+    let mut i = 0;
+    while i < exprs.len() {
+        let writes = matches!(&*exprs[i].node, ExprNode::Assign { target: LValue::Ivar { name }, .. } if name == slot);
+        if writes {
+            let span = exprs[i].span;
+            let syn = |n| Expr::new(span, n);
+            let ivar = || syn(ExprNode::Ivar { name: slot.clone() });
+            let adopt = syn(ExprNode::If {
+                cond: syn(ExprNode::Send {
+                    recv: Some(syn(ExprNode::Send {
+                        recv: Some(ivar()),
+                        method: Symbol::from("nil?"),
+                        args: vec![],
+                        block: None,
+                        parenthesized: false,
+                    })),
+                    method: Symbol::from("!"),
+                    args: vec![],
+                    block: None,
+                    parenthesized: false,
+                }),
+                then_branch: syn(ExprNode::Send {
+                    recv: Some(ivar()),
+                    method: Symbol::from("_adopt_touch_owner"),
+                    args: vec![syn(ExprNode::SelfRef)],
+                    block: None,
+                    parenthesized: true,
+                }),
+                else_branch: syn(ExprNode::Lit { value: Literal::Nil }),
+            });
+            exprs.insert(i + 1, adopt);
+            i += 2;
+        } else {
+            i += 1;
+        }
+    }
+}
+
 pub(crate) fn apply_rich_text_content_memo(lcs: &mut [LibraryClass]) {
     for lc in lcs.iter_mut() {
         let memoized: BTreeSet<Symbol> = lc

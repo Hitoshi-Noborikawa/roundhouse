@@ -821,6 +821,88 @@ puts "savepoints passed"
     assert!(run.stdout.contains("savepoints passed"));
 }
 
+/// A save runs in a transaction, and its commit callbacks wait for the
+/// COMMIT, as Rails' do:
+/// - an exception from an `after_save` rolls the row back and propagates;
+/// - an `after_create_commit` runs after the outermost COMMIT, outside
+///   the transaction, once per record however often it was saved;
+/// - a ROLLBACK drops the held callbacks and makes the record new again;
+/// - `touch` is an update to the commit callbacks;
+/// - `article.comments.new` hands the article itself to the comment's
+///   `belongs_to` (the automatic inverse), so a singleton method on the
+///   owner is what the comment reaches.
+/// (campfire's `Message::CreationTest` and `MessageCreationCommitTest`.)
+#[test]
+fn saves_are_transactional_and_commit_callbacks_wait_for_the_commit() {
+    emit_and_run::real_blog()
+        .edit(
+            "app/models/article.rb",
+            "  validates :title, presence: true\n",
+            "  validates :title, presence: true
+
+  LOG = []
+  after_save { raise \"after_save failed\" if title == \"explode\" }
+  after_create_commit { LOG << \"create #{title} open=#{Article.connection.transaction_open?}\" }
+  after_update_commit { LOG << \"update #{title}\" }
+",
+        )
+        .write(
+            "test/models/transactional_save_test.rb",
+            r##"require "test_helper"
+
+class TransactionalSaveTest < ActiveSupport::TestCase
+  setup { Article::LOG.clear }
+
+  test "an exception from after_save rolls the insert back" do
+    count = Article.count
+    article = Article.new(title: "explode", body: "A sufficiently long article body.")
+    assert_raises(RuntimeError) { article.save! }
+    assert_equal count, Article.count
+    assert_equal [], Article::LOG
+  end
+
+  test "commit callbacks run once, after the outermost commit" do
+    article = nil
+    Article.transaction do
+      article = Article.create!(title: "Held", body: "A sufficiently long article body.")
+      article.update!(body: "Another sufficiently long body.")
+      assert_equal [], Article::LOG
+    end
+    assert_equal [ "create Held open=false" ], Article::LOG
+  end
+
+  test "a rollback drops the held callbacks and the record is new again" do
+    count = Article.count
+    article = Article.new(title: "Dropped", body: "A sufficiently long article body.")
+    Article.transaction do
+      article.save!
+      raise ActiveRecord::Rollback
+    end
+    assert_equal count, Article.count
+    assert_equal [], Article::LOG
+    assert article.new_record?
+  end
+
+  test "touch runs the update commit callbacks" do
+    article = Article.create!(title: "Touched", body: "A sufficiently long article body.")
+    Article::LOG.clear
+    article.touch
+    assert_equal [ "update Touched" ], Article::LOG
+  end
+
+  test "an association constructor hands the owner to the inverse" do
+    article = Article.create!(title: "Owner", body: "A sufficiently long article body.")
+    comment = article.comments.new(commenter: "Ann", body: "Hello there")
+    assert_same article, comment.article
+    assert_equal article.id, comment.article_id
+  end
+end
+"##,
+        )
+        .run_test("test/models/transactional_save_test.rb")
+        .assert_passes();
+}
+
 /// `rescue URI::Error` catches `URI.parse`'s `URI::InvalidURIError`, and
 /// `SocketError` resolves where the app names it without a require (Rails
 /// has loaded socket); both lanes define the classes.
