@@ -425,6 +425,14 @@ module Db
   end
 
   def self.with_connection
+    # Re-entrant, as db.rb and Rails' executor are. A BEGIN outside a
+    # lease pins its connection (`reserve_txn_connection`); a second
+    # checkout would write on another handle and, on the way out,
+    # `release_abandoned_write` would roll the open transaction back.
+    if in_lease?
+      result = yield
+      return result
+    end
     h = nil
     adopt_after_fork
     @mutex.synchronize do
@@ -608,49 +616,94 @@ module Db
     major * 1_000_000 + minor.to_i * 1000 + patch.to_i
   end
 
+  # A BEGIN outside a lease binds its connection to this fiber until
+  # the transaction ends, as db.rb's `pin_transaction` does. Without
+  # it a request inside the test's fixture transaction
+  # (`joinable: false`) checked out another pooled handle: its reads
+  # missed the uncommitted rows, and when it drew the transaction's
+  # own handle `release_abandoned_write` rolled that transaction back
+  # (`cannot commit - no transaction is active`).
+  def self.reserve_txn_connection
+    conn = nil
+    adopt_after_fork
+    @mutex.synchronize do
+      while @pool.available_count == 0
+        if @missing_connections > 0
+          replace_connection
+        else
+          @cv.wait(@mutex)
+        end
+      end
+      conn = @pool.checkout
+    end
+    Fiber[:db_handle] = conn
+    Fiber[:db_txn_pin] = true
+    conn
+  end
+
+  def self.release_txn_pin_if_idle(conn)
+    return nil unless Fiber[:db_txn_pin] == true
+    return nil if conn.transaction_active?
+    Fiber[:db_handle] = nil
+    Fiber[:db_txn_pin] = false
+    @mutex.synchronize do
+      # Unleased work uses `free[0]`. Commit callbacks run after
+      # `exec("COMMIT")` returns, so this handle has to be that slot
+      # or they prepare against a different connection (an empty
+      # `:memory:` one has no tables).
+      @pool.free.unshift(conn)
+      @cv.signal
+    end
+    nil
+  end
+
   # exec's write path; the block runs the statement on the connection.
   def self.write(sql)
     # Any exec is (per the Db contract) DDL or a write — Rails
     # invalidates the whole query cache on write; so do we.
     qcache = Fiber[:rh_qcache]
     qcache.clear unless qcache.nil?
-    conn = current_dbh
+    conn = sql == "BEGIN" && !in_lease? ? reserve_txn_connection : current_dbh
     # A write can't run inside the request's read snapshot: if another
     # connection committed since the snapshot began, SQLite refuses the
     # upgrade at once with SQLITE_BUSY (no busy handler is consulted).
     # End the snapshot first; the next read opens a fresh one that sees
     # this write.
     end_snapshot(conn)
-    if permit_owned?
-      # Inside this fiber's own transaction: the permit is already held.
-      begin
+    begin
+      if permit_owned?
+        # Inside this fiber's own transaction: the permit is already held.
+        begin
+          yield(conn, sql)
+        ensure
+          release_permit if sql == "ROLLBACK" || (sql == "COMMIT" && !conn.transaction_active?)
+        end
+      elsif conn.transaction_active?
+        # Inside a transaction that began WITHOUT the permit (its wait
+        # timed out — see `acquire_permit`): SQLite's lock is already
+        # held, so there is nothing to queue for.
         yield(conn, sql)
-      ensure
-        release_permit if sql == "ROLLBACK" || (sql == "COMMIT" && !conn.transaction_active?)
+      elsif sql == "BEGIN"
+        # IMMEDIATE, as Rails 8's SQLite adapter begins: the write lock is
+        # taken at BEGIN, not at the first write, so a transaction never
+        # fails part way through upgrading a stale read.
+        got = acquire_permit
+        begin
+          yield(conn, "BEGIN IMMEDIATE")
+        rescue Exception
+          release_permit if got
+          raise
+        end
+      else
+        got = acquire_permit
+        begin
+          yield(conn, sql)
+        ensure
+          release_permit if got
+        end
       end
-    elsif conn.transaction_active?
-      # Inside a transaction that began WITHOUT the permit (its wait
-      # timed out — see `acquire_permit`): SQLite's lock is already
-      # held, so there is nothing to queue for.
-      yield(conn, sql)
-    elsif sql == "BEGIN"
-      # IMMEDIATE, as Rails 8's SQLite adapter begins: the write lock is
-      # taken at BEGIN, not at the first write, so a transaction never
-      # fails part way through upgrading a stale read.
-      got = acquire_permit
-      begin
-        yield(conn, "BEGIN IMMEDIATE")
-      rescue Exception
-        release_permit if got
-        raise
-      end
-    else
-      got = acquire_permit
-      begin
-        yield(conn, sql)
-      ensure
-        release_permit if got
-      end
+    ensure
+      release_txn_pin_if_idle(conn)
     end
   end
 
