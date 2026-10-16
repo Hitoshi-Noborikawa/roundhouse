@@ -30,9 +30,13 @@ end
 # descendant selector read from it would answer for the whole page.
 require "nokogiri"
 
+# rails-dom-testing parses with HTML5 where Nokogiri has the parser and
+# HTML4 where it does not, which is JRuby.
+HTML_FRAGMENT_PARSER = defined?(Nokogiri::HTML5) ? Nokogiri::HTML5 : Nokogiri::HTML4
+
 class TestBase
   def css_select(selector)
-    Nokogiri::HTML5.fragment(@__response.body.to_s).css(selector).to_a
+    HTML_FRAGMENT_PARSER.fragment(@__response.body.to_s).css(selector).to_a
   end
 end
 
@@ -260,12 +264,12 @@ module RequestDispatch
       return super unless block
       super(selector_or_root, content_or_opts, opts, &nil)
       if selector_or_root.is_a?(String)
-        root = Nokogiri::HTML5.fragment(@__response.body.to_s)
+        root = HTML_FRAGMENT_PARSER.fragment(@__response.body.to_s)
         selector = selector_or_root
         substitute = content_or_opts
       else
         root = selector_or_root
-        root = Nokogiri::HTML5.fragment(root.to_s) if root.is_a?(String)
+        root = HTML_FRAGMENT_PARSER.fragment(root.to_s) if root.is_a?(String)
         selector = content_or_opts
         substitute = opts
       end
