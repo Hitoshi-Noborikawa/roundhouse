@@ -1058,8 +1058,9 @@ jobs:
     timeout-minutes: 55
 
     services:
+      # Not public.ecr.aws: its anonymous pulls fail with "toomanyrequests: Data limit exceeded" on shared runner IPs.
       redis:
-        image: public.ecr.aws/docker/library/redis
+        image: mirror.gcr.io/library/redis
         ports: ['6379:6379']
     env:
       # The oracle's `bundle install` lands inside build/campfire-oracle
@@ -1322,8 +1323,9 @@ jobs:
       minor-gc: ${{ steps.result.outputs.minor-gc }}
       verify-gen: ${{ steps.result.outputs.verify-gen }}
     services:
+      # Not public.ecr.aws: its anonymous pulls fail with "toomanyrequests: Data limit exceeded" on shared runner IPs.
       redis:
-        image: public.ecr.aws/docker/library/redis
+        image: mirror.gcr.io/library/redis
         ports: ['6379:6379']
     env:
       BUNDLE_PATH: vendor/bundle
@@ -1425,8 +1427,9 @@ jobs:
 
     continue-on-error: true
     services:
+      # Not public.ecr.aws: its anonymous pulls fail with "toomanyrequests: Data limit exceeded" on shared runner IPs.
       redis:
-        image: public.ecr.aws/docker/library/redis
+        image: mirror.gcr.io/library/redis
         ports: ['6379:6379']
     env:
       BUNDLE_PATH: vendor/bundle
