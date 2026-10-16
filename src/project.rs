@@ -1049,6 +1049,34 @@ fn report_unemitted_library_classes(app: &App, target: BuildTarget) {
     }
 }
 
+/// A mailer and the `ActionMailer` runtime it delivers through ship on
+/// the Ruby family only; elsewhere `Mailer.action(…)` reached nothing,
+/// or a view of the same name.
+fn report_mailers(app: &App, target: BuildTarget) {
+    if matches!(target, BuildTarget::Blog | BuildTarget::Ruby | BuildTarget::Jruby | BuildTarget::Spinel) {
+        return;
+    }
+    let mailers = crate::lower::mailer_class_side::mailer_names(app);
+    // Not every mailer: real-blog's bare `ApplicationMailer` has no action to deliver.
+    for lc in app.library_classes.iter().filter(|lc| mailers.contains(lc.name.0.as_str())) {
+        let Some(span) = lc
+            .methods
+            .iter()
+            .filter(|m| m.receiver == crate::dialect::MethodReceiver::Instance && m.name.as_str() != "initialize")
+            .map(|m| m.name_span)
+            .find(|s| !s.is_synthetic())
+        else {
+            continue;
+        };
+        emit::diagnostics::report_unsupported(
+            span,
+            target.as_str(),
+            "mailer",
+            format!("`{}` delivers through the Ruby-family ActionMailer runtime; the {} runtime ships none", lc.name.0.as_str(), target.as_str()),
+        );
+    }
+}
+
 /// `class LoginFailedError < StandardError; end` beside a controller in
 /// its file: the Ruby emit re-declares it ahead of the controller, the
 /// other targets declare nothing for it.
@@ -1932,6 +1960,7 @@ fn target_files_inner(
     report_unsupported_keys(app, target);
     report_unemitted_library_classes(app, target);
     report_controller_sibling_classes(app, target);
+    report_mailers(app, target);
     report_sqlite_index_predicates(app, target);
     report_native_ruby_syntax(app, target);
     report_self_bindings(app, target);
@@ -3716,8 +3745,12 @@ fn i18n_table_text(app: &App) -> String {
         }
         for locale in &locales {
             let Some(c) = catalog.catalog_for(locale) else { continue };
-            for (key, text) in &c.entries {
+            // In the files' order, not the catalog's sorted one: `translate_tree` builds its Hash from them as they come.
+            for (key, text) in c.ordered_entries() {
                 out.push_str(&format!("L\u{1f}{locale}.{key}\u{1f}{text}\u{1f}.\u{1e}"));
+            }
+            for key in &c.opaque {
+                out.push_str(&format!("O\u{1f}{locale}.{key}\u{1f}.\u{1e}"));
             }
         }
         for variant in catalog.variants(&locales) {
@@ -5803,6 +5836,18 @@ fn report_unsupported_bundled_constants(app: &App, target: BuildTarget) {
                 );
             }
         }
+        // A regexp literal maps to each target's own; the `Regexp` class does not, so its methods were emitted as names nothing defines.
+        if !matches!(target, "jruby" | "spinel")
+            && let crate::expr::ExprNode::Send { recv: Some(recv), method, .. } = &*expr.node
+            && matches!(&*recv.node, crate::expr::ExprNode::Const { path } if path.iter().map(|s| s.as_str()).skip_while(|s| s.is_empty()).eq(["Regexp"]))
+        {
+            emit::diagnostics::report_unsupported(
+                expr.span,
+                target,
+                "Regexp",
+                format!("`Regexp.{}` is Ruby's Regexp class, which the {target} emit does not map (a regexp literal it does)", method.as_str()),
+            );
+        }
         if !matches!(target, "jruby" | "spinel")
             && let crate::expr::ExprNode::Const { path } = &*expr.node
             && let ["Regexp", flag @ ("IGNORECASE" | "EXTENDED" | "MULTILINE")] = path.iter().map(|s| s.as_str()).skip_while(|s| s.is_empty()).collect::<Vec<_>>()[..]
@@ -5812,6 +5857,24 @@ fn report_unsupported_bundled_constants(app: &App, target: BuildTarget) {
                 target,
                 "bundled_constant",
                 format!("Regexp::{flag} is Ruby's option bit, which the {target} emit has no Regexp to read"),
+            );
+        }
+        // Typed as IO for the Ruby family; a strict emit spelled them as names its runtime does not define.
+        if !matches!(target, "jruby" | "spinel")
+            && let Some(name) = match &*expr.node {
+                crate::expr::ExprNode::Const { path } => match path.iter().map(|s| s.as_str()).skip_while(|s| s.is_empty()).collect::<Vec<_>>()[..] {
+                    [n @ ("STDIN" | "STDOUT" | "STDERR")] => Some(n.to_string()),
+                    _ => None,
+                },
+                crate::expr::ExprNode::Var { name, .. } if matches!(name.as_str(), "$stdin" | "$stdout" | "$stderr") => Some(name.as_str().to_string()),
+                _ => None,
+            }
+        {
+            emit::diagnostics::report_unsupported(
+                expr.span,
+                target,
+                "bundled_constant",
+                format!("`{name}` is Ruby's process stream, which the {target} emit does not map"),
             );
         }
         // `runtime/ruby/active_record/connection.rb` carries `upsert_all`; no strict runtime transpiles it.

@@ -1079,7 +1079,11 @@ fn every_runtime_method_body_concretely_typed() {
     // snapshot's own values are (+2); and `transaction`'s branch that
     // runs inside a transaction opened beneath ActiveRecord answers the
     // block's untyped value, as the others do (+1).
-    const CEILING: usize = 776;
+    // MEASURED 781 on 2026-10-17: a mailer's address headers read
+    // `mail`'s opts, whatever the action put there (a String, an Array,
+    // nil), as ActionMailer's `Mail::Message` normalizes them (+5 in
+    // action_mailer.rb).
+    const CEILING: usize = 781;
     assert!(
         total_gradual <= CEILING,
         "{total_gradual} Ty::Untyped sites exceeds ceiling of {CEILING}",

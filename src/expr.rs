@@ -82,6 +82,10 @@ pub const SELF_BINDING_CLASS_OBJECT: u64 = 1 << 15;
 /// The `defaults.merge(hash)` ingest wrote for `hash.reverse_merge(defaults)`.
 pub const REVERSE_MERGE: u64 = 1 << 16;
 
+/// A `t` in a controller's copy of an `app/helpers` method no controller
+/// calls: it only ever runs in the view, so it is ActionView's `t`.
+pub const HELPER_COPY_TRANSLATE: u64 = 1 << 17;
+
 /// Whether `expr` is a [`SELF_BINDING`] cast.
 pub fn is_self_binding(expr: &Expr) -> bool {
     expr.decisions & SELF_BINDING != 0

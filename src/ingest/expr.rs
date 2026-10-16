@@ -20,7 +20,7 @@ pub fn ingest_expr(node: &Node<'_>, file: &str) -> IngestResult<Expr> {
     // ingester keeps going. Errors are recorded into the per-thread
     // collector for the post-run punch list. See `survey.rs`.
     match ingest_expr_strict(node, file) {
-        Ok(e) => Ok(e),
+        Ok(e) => Ok(proc_new_as_proc(e)),
         Err(err) if super::survey::is_active() => {
             super::survey::record(&err);
             Ok(Expr::new(
@@ -32,6 +32,20 @@ pub fn ingest_expr(node: &Node<'_>, file: &str) -> IngestResult<Expr> {
     }
 }
 
+
+/// `Proc.new { … }` is Kernel's `proc { … }`: the same Proc from the same
+/// block, which the pipeline already carries.
+fn proc_new_as_proc(mut e: Expr) -> Expr {
+    if let ExprNode::Send { recv, method, args, block: Some(_), .. } = &mut *e.node
+        && method.as_str() == "new"
+        && args.is_empty()
+        && recv.as_ref().is_some_and(|r| matches!(&*r.node, ExprNode::Const { path } if path.iter().map(|s| s.as_str()).filter(|s| !s.is_empty()).eq(["Proc"])))
+    {
+        *recv = None;
+        *method = Symbol::from("proc");
+    }
+    e
+}
 
 /// Extract one multi-write target — `a`, `@a`, `recv.attr`, or
 /// `recv[i]` (e.g. `link['href'], title = attrs`) — as an `LValue`. Shared by the

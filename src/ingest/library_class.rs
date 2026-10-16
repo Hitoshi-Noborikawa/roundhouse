@@ -117,11 +117,14 @@ fn ingest_library_classes_impl(
         let owner = lc.name.clone();
         let structs = struct_constant_classes(&owner, class.body(), file)?;
         lc.constants.retain(|(name, _)| !structs.iter().any(|(s, _)| s == name));
+        let made = class_new_constant_classes(&owner, class.body(), file);
+        lc.constants.retain(|(name, _)| !made.iter().any(|(s, _)| s == name));
         out.extend(super::data_factory::collect(class.body(), &owner, file)?);
         out.push(lc);
         out.extend(data_block_classes(class.body(), &owner, file)?);
         // Not before the owner: the struct is named under it, so the owner has to exist first.
         out.extend(structs.into_iter().map(|(_, s)| s));
+        out.extend(made.into_iter().map(|(_, c)| c));
     }
     for (scope, module) in find_all_modules_with_scope(&root)
         .into_iter()
@@ -140,10 +143,13 @@ fn ingest_library_classes_impl(
         let owner = lc.name.clone();
         let structs = struct_constant_classes(&owner, module.body(), file)?;
         lc.constants.retain(|(name, _)| !structs.iter().any(|(s, _)| s == name));
+        let made = class_new_constant_classes(&owner, module.body(), file);
+        lc.constants.retain(|(name, _)| !made.iter().any(|(s, _)| s == name));
         out.extend(super::data_factory::collect(module.body(), &owner, file)?);
         out.push(lc);
         out.extend(data_block_classes(module.body(), &owner, file)?);
         out.extend(structs.into_iter().map(|(_, s)| s));
+        out.extend(made.into_iter().map(|(_, c)| c));
     }
     if out.is_empty() {
         if let Some(lc) = file_data_class(&root, file)? {
@@ -1505,6 +1511,59 @@ fn struct_constant_spec<'pr>(value: &ruby_prism::Node<'pr>) -> Option<StructCons
 
 /// The classes `owner`'s body defines through `X = Struct.new(…)`, with
 /// the constant names they replace.
+/// `Error = Class.new(StandardError)` in a class or module body: the
+/// class it defines, as `class Error < StandardError; end` would, under
+/// the owner (`Owner::Error`). A parent written bare that names an
+/// earlier such class of the same owner (`FunctionExecutionError =
+/// Class.new(Error)`) is that one, as Ruby's lexical lookup finds it.
+/// Only the block-less form with one constant argument.
+fn class_new_constant_classes(owner: &ClassId, body: Option<ruby_prism::Node<'_>>, file: &str) -> Vec<(Symbol, LibraryClass)> {
+    let mut out: Vec<(Symbol, LibraryClass)> = Vec::new();
+    let Some(body) = body else { return out };
+    for stmt in flatten_statements(body) {
+        let Some(cw) = stmt.as_constant_write_node() else { continue };
+        let value = cw.value();
+        let Some(call) = value.as_call_node() else { continue };
+        if constant_id_str(&call.name()) != "new" || call.block().is_some() {
+            continue;
+        }
+        let Some(recv) = call.receiver() else { continue };
+        if constant_path_of(&recv).map(|p| p.into_iter().filter(|s| !s.is_empty()).collect::<Vec<_>>()) != Some(vec!["Class".to_string()]) {
+            continue;
+        }
+        let args: Vec<ruby_prism::Node<'_>> = call.arguments().map(|a| a.arguments().iter().collect()).unwrap_or_default();
+        let [parent_node] = args.as_slice() else { continue };
+        let Some(written) = constant_path_of(parent_node) else { continue };
+        let rooted = parent_node.as_constant_path_node().is_some_and(|p| super::util::constant_path_is_rooted(&p));
+        let written: Vec<String> = written.into_iter().filter(|s| !s.is_empty()).collect();
+        let parent = match written.as_slice() {
+            [one] if !rooted && out.iter().any(|(n, _)| n.as_str() == one) => format!("{}::{one}", owner.0.as_str()),
+            // Kept `::`-rooted: emitted inside the owner, a bare name would resolve to the sibling.
+            _ if rooted => format!("::{}", written.join("::")),
+            _ => written.join("::"),
+        };
+        let name = Symbol::from(constant_id_str(&cw.name()));
+        out.push((
+            name.clone(),
+            LibraryClass {
+                name: ClassId(Symbol::from(format!("{}::{}", owner.0.as_str(), name.as_str()))),
+                is_module: false,
+                parent: Some(ClassId(Symbol::from(parent))),
+                parent_span: super::util::node_span(parent_node, file),
+                includes: Vec::new(),
+                include_spans: Vec::new(),
+                methods: Vec::new(),
+                nullable_columns: Vec::new(),
+                origin: None,
+                constants: Vec::new(),
+                unknown_calls: Vec::new(),
+                class_ivar_initializers: Vec::new(),
+            },
+        ));
+    }
+    out
+}
+
 fn struct_constant_classes(
     owner: &ClassId,
     body: Option<ruby_prism::Node<'_>>,

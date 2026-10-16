@@ -457,6 +457,11 @@ pub struct App {
     /// every construction site including a dozen in tests.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub concern_spliced_actions: HashMap<ClassId, HashMap<Symbol, ClassId>>,
+    /// Templates no action, route or render reaches
+    /// (`ingest::unreachable_views`): kept and emitted, but their errors
+    /// are reported as warnings, since Rails never runs them.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub unreachable_views: BTreeSet<Symbol>,
     /// The class-side twin of `concern_spliced_actions`: concern methods
     /// `splice_concern_class_methods_into_includers` copied onto a model
     /// or library class, keyed includer → method → the source module.
@@ -909,6 +914,7 @@ impl App {
             graphql_types: Vec::new(),
             graphql_signatures: Vec::new(),
             concern_spliced_actions: HashMap::new(),
+            unreachable_views: BTreeSet::new(),
             concern_spliced_class_methods: HashMap::new(),
             concern_model_items: HashMap::new(),
             concern_guarded_items: HashMap::new(),

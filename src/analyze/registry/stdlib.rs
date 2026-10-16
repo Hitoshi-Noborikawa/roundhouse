@@ -911,6 +911,13 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
         ("rewind", Ty::Int),
         ("binmode", io.clone()),
         ("close", Ty::Nil),
+        // Writing to a stream: `STDERR.puts "…"`.
+        ("puts", Ty::Nil),
+        ("print", Ty::Nil),
+        ("flush", io.clone()),
+        ("sync", Ty::Bool),
+        ("tty?", Ty::Bool),
+        ("fileno", Ty::Int),
     ]);
     // `File < IO` — Ruby's hierarchy (not a PTY detail). File's class
     // methods are registered earlier; the parent is set once `IO` exists

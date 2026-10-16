@@ -124,6 +124,9 @@ pub struct Analyzer {
     inquirers: std::collections::HashSet<Symbol>,
     /// The app's translations, for `t` / `I18n.t` (see `crate::i18n`).
     i18n: crate::i18n::Catalog,
+    /// `app/helpers` modules, whose bodies run in a view and take
+    /// ActionView's `t`.
+    helper_modules: std::collections::HashSet<ClassId>,
     /// Per-(controller, method) ivar bindings AS REFINED by Phase B,
     /// carried across fixpoint rounds.
     ///
@@ -1187,6 +1190,7 @@ impl Analyzer {
             refined_action_bindings: HashMap::new(),
             inquirers: inquiry::inquirer_methods(app),
             i18n: app.i18n.clone(),
+            helper_modules: app.helper_method_index.values().cloned().collect(),
             const_resolver,
             source_indexed: !app.sources.is_empty(),
             typed_constants: IdentityHashMap::default(),
@@ -1205,7 +1209,7 @@ impl Analyzer {
     fn body_typer(&self) -> BodyTyper<'_> {
         let typer = BodyTyper::new(&self.classes)
             .with_inquirers(&self.inquirers)
-            .with_i18n(&self.i18n)
+            .with_i18n(&self.i18n, &self.helper_modules)
             .with_typed_constants(&self.typed_constants)
             .with_data_factories(&self.data_factories);
         if self.source_indexed { typer.with_const_resolver(self.const_resolver.clone()) } else { typer }
