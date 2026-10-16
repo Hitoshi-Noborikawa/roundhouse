@@ -16016,3 +16016,41 @@ fn cruby_rake_load_path_keeps_rubys_own_libraries() {
     let (emitted, _) = emit_and_run::real_blog().emit(BuildTarget::Ruby);
     assert!(emitted.join("test/models/article_broadcasts_test.rb").exists());
 }
+
+/// campfire's `MessagesHelper#auto_link_text`: `sanitize` with the
+/// caller's lists, `Nokogiri::HTML5.fragment`, its text nodes by XPath,
+/// `replace` with a parsed fragment, and `to_html(preserve_newline:)`.
+/// The Ruby tree loads the real nokogiri gem behind the façade's types.
+#[test]
+fn nokogiri_html5_fragment_text_nodes_are_rewritten_and_serialized() {
+    let run = emit_and_run::real_blog()
+        .write(
+            "app/helpers/articles_helper.rb",
+            r#"module ArticlesHelper
+  LINK_TAGS = %w[a div pre]
+  LINK_ATTRIBUTES = %w[href]
+
+  def link_words(html)
+    fragment = Nokogiri::HTML5.fragment(sanitize(html, tags: LINK_TAGS, attributes: LINK_ATTRIBUTES))
+    fragment.xpath(".//text()[not(ancestor::a)]").each do |node|
+      if node.text.match?(/go/)
+        text = node.to_html
+        linked = text.sub("go", "<a href=\"/go\">go</a>")
+        node.replace Nokogiri::HTML5.fragment(linked) unless linked == text
+      end
+    end
+    fragment.to_html(preserve_newline: true)
+  end
+end
+"#,
+        )
+        .run_ruby(
+            r#"out = ArticlesHelper.link_words("<div onclick=\"x()\">go <em>on</em> <a href=\"/k\">go</a></div><pre>\n\n\ngo</pre>")
+want = "<div><a href=\"/go\">go</a> on <a href=\"/k\">go</a></div><pre>\n\n<a href=\"/go\">go</a></pre>"
+raise "link_words: #{out.inspect}" unless out == want
+puts "nokogiri html5 helper passed"
+"#,
+        );
+    run.assert_passes();
+    assert!(run.stdout.contains("nokogiri html5 helper passed"));
+}

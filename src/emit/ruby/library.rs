@@ -4225,6 +4225,37 @@ fn rewrite_helper_calls(
         }
     }
 
+    // `sanitize(html, tags: T, attributes: A)` → `sanitize_with(html, T,
+    // A)`: the runtime's `sanitize` takes the html alone (its arity is
+    // fixed across targets), and the caller's allow-lists are their own
+    // entry point. Both keywords, or the call is left as written.
+    if let ExprNode::Send { recv: Some(r), method, args, block: None, .. } = &mut *expr.node {
+        if method.as_str() == "sanitize" && is_view_helpers_const(r) && args.len() == 2 {
+            let lists = match &*args[1].node {
+                ExprNode::Hash { entries, kwargs: true } if entries.len() == 2 => {
+                    let get = |name: &str| {
+                        entries.iter().find_map(|(k, v)| match &*k.node {
+                            ExprNode::Lit { value: crate::expr::Literal::Sym { value } }
+                                if value.as_str() == name =>
+                            {
+                                Some(v.clone())
+                            }
+                            _ => None,
+                        })
+                    };
+                    get("tags").zip(get("attributes"))
+                }
+                _ => None,
+            };
+            if let Some((tags, attributes)) = lists {
+                *method = Symbol::from("sanitize_with");
+                args.truncate(1);
+                args.push(tags);
+                args.push(attributes);
+            }
+        }
+    }
+
     // Unwrap the view walker's default `html_escape(<call>.to_s)` when
     // the call is html_safe (see is_html_safe_call) — Rails doesn't
     // escape safe buffers, and escaping them ships literal &lt;img&gt;.
