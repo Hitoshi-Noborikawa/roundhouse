@@ -112,17 +112,137 @@ impl<'a> Index<'a> {
         }
         None
     }
+
+    /// Is `class` declared with `module` rather than `class`? A name can
+    /// be reopened across files (one view template per file shares a
+    /// name with its siblings); any declaration saying "module" is
+    /// enough, since a mixin can only be a module in the first place.
+    fn is_module(&self, class: &str) -> bool {
+        self.classes.get(class).into_iter().flatten().any(|lc| lc.is_module)
+    }
 }
 
 fn is_class_side(r: &MethodReceiver) -> bool {
     !matches!(r, MethodReceiver::Instance)
 }
 
+/// Trim whatever root a path was walked from down to its `app/...`
+/// tail, the shape both a diagnostic's resolved location and an ingest
+/// gap's file (the survey's `IngestError::Unsupported.file`, an
+/// absolute path under the surveyed fixture) are compared in.
+fn app_relative(path: &str) -> String {
+    // `IngestError::Unsupported.file` is `Path::display()` of wherever
+    // the survey walked, which on Windows carries `\` separators; the
+    // match below (and `view_prefix`'s `/`-joined prefix) only ever
+    // looks for `/`, so a backslash path would never trim down to
+    // `app/...` and a gap on it would silently stop blocking its route.
+    let path = path.replace('\\', "/");
+    path.rsplit_once("/app/").map(|(_, r)| format!("app/{r}")).unwrap_or(path)
+}
+
+/// A span's file the way the ingest-gap ledger's paths are shaped:
+/// `app/...`, trimmed of whatever root the survey ran from. `None` for
+/// a synthesized span (no location at all).
+fn rel_path(lowered: &App, file: u32) -> Option<String> {
+    if file == 0 {
+        return None;
+    }
+    Some(app_relative(&lowered.sources[file as usize - 1].path))
+}
+
+/// Rails' naming convention for the view template an action renders:
+/// `app/views/<dir>/<action>.`, the format and handler extensions
+/// following. Namespaces nest as directories
+/// (`WellKnown::HostMetaController` -> `well_known/host_meta`), unlike
+/// the flattened form `controller_symbol` builds for the route-helper
+/// table and the ledger's own keys.
+fn view_prefix(controller_class: &str, action: &str) -> String {
+    let base = controller_class.strip_suffix("Controller").unwrap_or(controller_class);
+    format!("app/views/{}/{action}.", crate::naming::underscore(base))
+}
+
+/// Does a recorded ingest gap mean this route cannot be trusted? A gap
+/// has no span (survey mode substitutes a nil placeholder and keeps
+/// going instead of failing ingest), so it never reaches `diags` and
+/// the usual blocking filter never sees it — yet it still names a file,
+/// which may be: the route's own controller (a class-body macro or
+/// block the ingest never modeled: `serialization_scope`,
+/// `content_security_policy`), a file in the controller's ancestor
+/// chain (the same kind of gap in a parent controller — `Admin::Base
+/// Controller`'s dropped CSP block applies to every subclass, though
+/// the gap only names the parent's file), any file the route's reach
+/// actually walks into (a partial or layout inlined into the view
+/// method that renders it), or the view template the action renders by
+/// convention (a template engine not ingested at all: `.css.erb`,
+/// `.xml.ruby` — these never become a method, so reach can't see them,
+/// which is why the prefix check stays). Either way the lowered app
+/// cannot serve what the gap dropped, so the route it belongs to stays
+/// with Rails.
+fn gap_blocking<'g>(
+    gaps: &'g [(String, String)],
+    blocking_files: &HashSet<String>,
+    prefix: &str,
+) -> Option<&'g (String, String)> {
+    gaps.iter().find(|(file, _)| {
+        let rel = app_relative(file);
+        if blocking_files.contains(&rel) || rel.starts_with(prefix) {
+            return true;
+        }
+        // A gap in an `app/helpers/*_helper.rb` module is never a file
+        // `reach` can walk into: Rails ingest only registers a helper
+        // module's methods into `helper_method_index`, never into a
+        // `LibraryClass` `reach` could add to `blocking_files` — the
+        // file rejected ingest outright, so there is no method body to
+        // find it through in the first place. Yet Rails mixes EVERY
+        // helper module into EVERY view (`helper :all`, the default),
+        // so whatever the gap dropped is missing from every view's
+        // surface, not just one route's. Block any route that renders
+        // a view at all.
+        is_helper_gap(&rel) && blocking_files.iter().any(|f| f.starts_with("app/views/"))
+    })
+}
+
+/// Rails' own naming convention for which `app/helpers/` files get
+/// mixed into every view (`all_helpers_from_path` globs
+/// `**/*_helper.rb`, nothing else — see `ingest/app.rs`'s
+/// `is_helper_module`). Matched the same way here so a gap on, say, a
+/// plain PORO that happens to live under `app/helpers/` does not
+/// over-block routes it was never mixed into.
+fn is_helper_gap(rel: &str) -> bool {
+    rel.strip_prefix("app/helpers/")
+        .and_then(|tail| tail.strip_suffix(".rb"))
+        .is_some_and(|stem| {
+            stem.rsplit('/').next().is_some_and(|name| name.ends_with("_helper"))
+        })
+}
+
+/// Every class above `class` found by walking `parent` alone (never
+/// `includes` — a mixed-in concern's gap is covered by `reached_files`
+/// instead, through whichever reached method actually pulls it in):
+/// `ApplicationController` is a `WidgetsController`'s ancestor this way.
+fn ancestor_chain(index: &Index, class: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut seen: HashSet<String> = HashSet::from([class.to_string()]);
+    let mut cur = class.to_string();
+    while let Some(parent) = index.classes.get(&cur).into_iter().flatten().find_map(|lc| lc.parent.clone()) {
+        let parent = parent.0.as_str().to_string();
+        if !seen.insert(parent.clone()) {
+            break;
+        }
+        out.push(parent.clone());
+        cur = parent;
+    }
+    out
+}
+
 /// Decide which GET actions the lowered app serves.
 ///
 /// `lowered` is the app after `analyze_and_lower` (what the `ruby`
-/// target emits from); `diags` every diagnostic that emit reported.
-pub fn plan(lowered: &App, diags: &[Diagnostic]) -> RoutePlan {
+/// target emits from); `diags` every diagnostic that emit reported;
+/// `gaps` every recorded ingest gap, as `(file, message)` — these carry
+/// no span and never become a diagnostic, so they are attributed here
+/// instead of through the usual blocking filter below.
+pub fn plan(lowered: &App, diags: &[Diagnostic], gaps: &[(String, String)]) -> RoutePlan {
     // Re-lowering pushes the `ruby` emit's refusals into whatever
     // diagnostic scope is active, which here is futamura's own. They are
     // already in `diags` (`project::futamura_whole_route`); collected
@@ -139,6 +259,17 @@ pub fn plan(lowered: &App, diags: &[Diagnostic]) -> RoutePlan {
     // re-synthesized header.
     let controllers: HashSet<String> = lowered.controllers.iter().map(|c| c.name.0.as_str().to_string()).collect();
     let ranges = method_ranges(&controllers, &lcs);
+    // Every rel-path file a controller's own methods are written in —
+    // almost always one file, but a controller can reopen across files
+    // the way a reopened model does.
+    let mut controller_files: HashMap<String, HashSet<String>> = HashMap::new();
+    for ((class, _, _), rs) in &ranges {
+        if !controllers.contains(class) {
+            continue;
+        }
+        let files = controller_files.entry(class.clone()).or_default();
+        files.extend(rs.keys().filter_map(|&f| rel_path(lowered, f)));
+    }
     let exact = expression_owners(&controllers, &lcs);
     let owners = |d: &Diagnostic| -> Vec<&MethodKey> {
         match exact.get(&(d.span.file.0, d.span.start)) {
@@ -160,7 +291,7 @@ pub fn plan(lowered: &App, diags: &[Diagnostic]) -> RoutePlan {
         }
         let source = &lowered.sources[d.span.file.0 as usize - 1];
         let (line, _) = source.line_col(d.span.start);
-        let rel = source.path.rsplit_once("/app/").map(|(_, r)| format!("app/{r}")).unwrap_or_else(|| source.path.clone());
+        let rel = rel_path(lowered, d.span.file.0).unwrap_or_else(|| source.path.clone());
         format!("{rel}:{line}")
     };
 
@@ -219,6 +350,23 @@ pub fn plan(lowered: &App, diags: &[Diagnostic]) -> RoutePlan {
             if let Some(rs) = ranges.get(m) {
                 reached_files.extend(rs.keys().copied());
             }
+        }
+        // Every file whose ingest gap must block this route: the
+        // controller's own file, any file in its ancestor chain (the
+        // same files `reach`'s `Super` handling and `enqueue_send`'s
+        // lookup walk), and every file the route's reach actually
+        // touches — partials and layouts are inlined into the view
+        // method that renders them, so a gap in one shows up here.
+        let mut blocking_files: HashSet<String> = controller_files.get(controller).cloned().unwrap_or_default();
+        for ancestor in ancestor_chain(&index, controller) {
+            if let Some(fs) = controller_files.get(&ancestor) {
+                blocking_files.extend(fs.iter().cloned());
+            }
+        }
+        blocking_files.extend(reached_files.iter().filter_map(|&f| rel_path(lowered, f)));
+        if let Some((file, message)) = gap_blocking(gaps, &blocking_files, &view_prefix(controller, first.action.as_str())) {
+            out.residue.push(format!("{label}: ingest gap in {file}: {message}"));
+            continue;
         }
         let blocking: Vec<&Diagnostic> = errors
             .iter()
@@ -500,13 +648,19 @@ fn enqueue_send(
             None | Some((ExprNode::SelfRef, _)) => {
                 match index.lookup(class, method, class_side) {
                     Some(k) => push(k),
-                    // Not on this class: a runtime method (`render`,
-                    // `params`), or a helper module's function the
-                    // lowering left receiverless; any app definer of
-                    // either side may run.
+                    // Not on this class (nor its ancestors or included
+                    // modules, which `index.lookup` already walked): a
+                    // runtime method (`render`, `params`), or a helper
+                    // module's function the lowering left receiverless.
+                    // A receiverless call dispatches on `self`, so it can
+                    // never reach an unrelated concrete class that
+                    // happens to define the same name — only a module,
+                    // the shape a mixed-in helper takes.
                     None => {
                         for (c, side) in index.by_name.get(method).into_iter().flatten() {
-                            push((c.clone(), method.clone(), *side));
+                            if index.is_module(c) {
+                                push((c.clone(), method.clone(), *side));
+                            }
                         }
                     }
                 }
@@ -523,7 +677,7 @@ fn enqueue_send(
             }
             // `Rails.cache.fetch`, `ActiveRecord::Base.connection.x`: a
             // framework object, whose methods are the runtime's.
-            Some(_) if rooted_in_framework(index, recv.as_ref().unwrap()) => {}
+            Some(_) if rooted_in_framework(index, class, class_side, recv.as_ref().unwrap()) => {}
             Some((_, ty)) => {
                 let classes = ty.map(classes_of).unwrap_or_default();
                 if classes.is_empty() {
@@ -566,17 +720,22 @@ fn enqueue_send(
     }
 }
 
-/// Is `e` a chain of sends rooted in a constant the app does not define?
-fn rooted_in_framework(index: &Index, e: &Expr) -> bool {
+/// Is `e` a chain of sends rooted in a constant the app does not define,
+/// or in a receiverless call `class` itself does not resolve? `class` and
+/// `class_side` are the method body being walked, so a receiverless call
+/// is checked the same way `enqueue_send`'s own dispatch is: through
+/// `class`'s lookup, never by asking whether some unrelated app class
+/// happens to define a method of that name.
+fn rooted_in_framework(index: &Index, class: &str, class_side: bool, e: &Expr) -> bool {
     match &*e.node {
         ExprNode::Const { path } => {
             let name = path.iter().map(|s| s.as_str()).collect::<Vec<_>>().join("::");
             !index.classes.contains_key(&name)
         }
-        ExprNode::Send { recv: Some(r), .. } => rooted_in_framework(index, r),
-        // `request.env`, `params[:x]`, `cookies`: a receiverless call no
-        // app class answers is the framework's accessor.
-        ExprNode::Send { recv: None, method, .. } => !index.by_name.contains_key(method),
+        ExprNode::Send { recv: Some(r), .. } => rooted_in_framework(index, class, class_side, r),
+        // `request.env`, `params[:x]`, `cookies`: a receiverless call
+        // `class`'s own lookup misses is the framework's accessor.
+        ExprNode::Send { recv: None, method, .. } => index.lookup(class, method, class_side).is_none(),
         _ => false,
     }
 }
@@ -629,7 +788,7 @@ fn may_overlap(a: &str, b: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::may_overlap;
+    use super::{app_relative, gap_blocking, may_overlap, view_prefix};
 
     #[test]
     fn overlap_is_segmentwise() {
@@ -638,5 +797,34 @@ mod tests {
         assert!(!may_overlap("/domains/:id", "/domain/:id"));
         assert!(!may_overlap("/domains/:id/edit", "/domains/:id"));
         assert!(may_overlap("/files/*path", "/anything/at/all"));
+    }
+
+    /// `IngestError::Unsupported.file` is `Path::display()` of wherever
+    /// the survey walked; on Windows that's backslash-separated, and
+    /// `app_relative`'s `/app/` match (and `view_prefix`'s `/`-joined
+    /// prefix) must still find it there.
+    #[test]
+    fn app_relative_normalizes_windows_separators() {
+        assert_eq!(
+            app_relative(r"C:\ci\fixture\app\controllers\widgets_controller.rb"),
+            "app/controllers/widgets_controller.rb"
+        );
+        assert_eq!(
+            app_relative(r"C:\ci\fixture\app\views\gadget_styles\show.css.erb"),
+            "app/views/gadget_styles/show.css.erb"
+        );
+    }
+
+    /// A gap recorded with a Windows path must still block the route
+    /// whose conventional view it names — this is `gap_blocking`'s own
+    /// match, downstream of `app_relative`.
+    #[test]
+    fn gap_blocking_matches_a_windows_style_view_path() {
+        let gaps = vec![(
+            r"C:\ci\fixture\app\views\gadget_styles\show.css.erb".to_string(),
+            "view template not ingested: erb".to_string(),
+        )];
+        let prefix = view_prefix("GadgetStylesController", "show");
+        assert!(gap_blocking(&gaps, &std::collections::HashSet::new(), &prefix).is_some());
     }
 }

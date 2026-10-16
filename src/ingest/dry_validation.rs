@@ -520,7 +520,7 @@ fn read_contract(
         }
         let mut read = Schema { processor, keys: Vec::new() };
         for arg in args {
-            read.extend(schema_ref(arg, owner, cx, schemas)?);
+            read.extend(schema_ref(arg, owner, schemas)?);
         }
         if let Some(block) = block {
             read.extend(&read_schema(processor, block, owner, cx, schemas)?);
@@ -693,7 +693,6 @@ fn rewrite_rule(
 fn schema_ref<'a>(
     expr: &Expr,
     owner: &str,
-    cx: &Cx<'_>,
     schemas: &'a HashMap<String, Schema>,
 ) -> Result<&'a Schema, String> {
     // `OtherContract.schema`: that contract's, published once read.
@@ -1083,7 +1082,7 @@ fn read_rule(
         "hash" | "schema" => {
             let mut schema = Schema { processor, keys: Vec::new() };
             if let Some(spec) = spec {
-                let referenced = schema_ref(spec, owner, cx, schemas)?;
+                let referenced = schema_ref(spec, owner, schemas)?;
                 schema.processor = referenced.processor;
                 schema.extend(referenced);
             }
@@ -1101,7 +1100,7 @@ fn read_rule(
                 // A schema object checks no `hash?` first: a member that is
                 // not a Hash fails in the gem's `key?`, as it does here.
                 Some(spec) if matches!(&*spec.node, ExprNode::Const { .. }) => {
-                    let referenced = schema_ref(spec, owner, cx, schemas)?;
+                    let referenced = schema_ref(spec, owner, schemas)?;
                     Rule {
                         macro_: Macro::Value,
                         ty: Ty::Any,

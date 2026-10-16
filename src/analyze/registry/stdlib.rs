@@ -527,6 +527,31 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
         ("q_values", Ty::Array { elem: std::sync::Arc::new(q_pair) }),
         ("select_best_encoding", Ty::Union { variants: vec![Ty::Str, Ty::Nil].into() }),
     ], &[]);
+    // `Rack::Utils::HTTP_STATUS_CODES` — the status-code-to-reason-phrase
+    // table every app can reach for (`Rack::Utils::HTTP_STATUS_CODES
+    // [code]`, Mastodon's error-response helpers among them). A bare
+    // constant read, not a method call, so it is modeled on
+    // `ClassInfo.constants` rather than `class_methods`/
+    // `instance_methods` — the one table `Const` resolution consults for
+    // a gem's own constant (`analyze::body::compute`'s
+    // `exact_modeled_class`), gated on `gem_boundary` the way an RBI's
+    // constants are. Reusing that gate (rather than widening the gate
+    // itself) keeps this additive: nothing before now ever set
+    // `gem_boundary` on a hand-curated stdlib entry, and nothing here
+    // subclasses `Rack::Utils`, so the ancestor-walk escape the flag
+    // also controls (`send.rs`'s `via_undeclared`) never engages. Typed
+    // as `Hash[Integer, String]` (not a `[]` method entry) so ordinary
+    // Hash dispatch answers `[]` as nilable `Str` — exactly what Rack's
+    // `Hash#[]` does for a code the table doesn't have. The table
+    // itself is Rack's own (`lib/rack/utils.rb`), current as of Rack 3.
+    {
+        let info = classes.entry(ClassId(Symbol::from("Rack::Utils"))).or_default();
+        info.gem_boundary = true;
+        info.constants.insert(
+            Symbol::from("HTTP_STATUS_CODES"),
+            Ty::Hash { key: std::sync::Arc::new(Ty::Int), value: std::sync::Arc::new(Ty::Str) },
+        );
+    }
     register_stdlib_class(classes, "IPAddr", &[], &[
         ("ipv4?", Ty::Bool), ("ipv6?", Ty::Bool), ("ipv4_mapped?", Ty::Bool),
         ("loopback?", Ty::Bool), ("private?", Ty::Bool), ("link_local?", Ty::Bool),
@@ -661,7 +686,7 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
         "TypeError", "NameError", "NoMethodError", "IndexError",
         "KeyError", "RangeError", "IOError", "NotImplementedError",
         "FrozenError", "ZeroDivisionError", "StopIteration",
-        "ThreadError", "ClosedQueueError",
+        "ThreadError", "ClosedQueueError", "RegexpError",
         // CRuby's bundled libraries and Spinel's uri/net/json packages
         // recognize these exception names; emitted requires load them.
         "URI::Error", "URI::InvalidURIError", "Net::OpenTimeout", "Net::ReadTimeout",
@@ -926,17 +951,18 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
     register_stdlib_class(classes, "GC", &[("start", Ty::Nil)], &[]);
     register_stdlib_class(classes, "OpenSSL::HMAC", &[("digest", Ty::Str), ("hexdigest", Ty::Str)], &[]);
     let product = Ty::Class { id: ClassId(Symbol::from("Enumerator::Product")), args: vec![].into() };
+    let lazy = Ty::Class { id: ClassId(Symbol::from("Enumerator::Lazy")), args: vec![].into() };
     register_stdlib_class(classes, "Enumerator::Product", &[("new", product)], &[
         // `size` is left out: it answers nil or Float::INFINITY for an
         // unsized or endless factor, and it is not checked on both lanes.
         ("to_a", Ty::Array { elem: std::sync::Arc::new(Ty::Array { elem: std::sync::Arc::new(Ty::Untyped) }) }),
+        ("lazy", lazy.clone()),
     ]);
     // `Enumerator::Chain.new(*enumerators)` followed by `select`, `each` or
     // `lazy`, as an API walks several generated path lists as one; and the
     // lazy chain's filters. Element types are untyped (neither class is
     // parameterized here). Only calls checked against CRuby and Spinel.
     let chain = Ty::Class { id: ClassId(Symbol::from("Enumerator::Chain")), args: vec![].into() };
-    let lazy = Ty::Class { id: ClassId(Symbol::from("Enumerator::Lazy")), args: vec![].into() };
     let elems = Ty::Array { elem: std::sync::Arc::new(Ty::Untyped) };
     register_stdlib_class(classes, "Enumerator::Chain", &[("new", chain)], &[
         ("each", Ty::Untyped),
@@ -946,7 +972,7 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
     ]);
     register_stdlib_class(classes, "Enumerator::Lazy", &[], &[
         ("select", lazy.clone()), ("filter", lazy.clone()), ("reject", lazy.clone()),
-        ("map", lazy.clone()),
+        ("map", lazy.clone()), ("filter_map", lazy.clone()),
         ("first", Ty::Untyped), ("to_a", elems.clone()), ("force", elems),
     ]);
     // JSON dispatch is already intrinsic in BodyTyper and the emitters;

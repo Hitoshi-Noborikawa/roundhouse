@@ -88,9 +88,39 @@ SPINEL_TESTS = [
     "open_telemetry_stub_spinel",
     "around_block_filter_spinel",
     "plain_class_optional_keywords_spinel",
+    "jbuilder_array_value_spinel",
     "active_job_payload",
     "render_json_encoder_spinel",
 ]
+# Seconds each suite took in spinel-framework (full run 38665931779), for
+# balancing its shards; a suite not listed counts as one Spinel build.
+SPINEL_TEST_SECONDS = {
+    "date_columns_spinel": 45,
+    "framework_tests_spinel": 77,
+    "param_binds": 174,
+    "param_binds_values": 79,
+    "param_binds_cleanup": 88,
+    "spinel_stmt_cache_lru": 113,
+    "db_sqlite_concurrency": 14,
+    "spinel_pg_db": 11,
+    "pessimistic_locking": 46,
+    "not_found_parity_spinel": 118,
+    "spinel_transaction_connection": 98,
+    **dict.fromkeys(
+        [
+            "spinel_web_push_crypto",
+            "spinel_db_lease",
+            "param_binds_planner",
+            "spinel_param_builder",
+            "spinel_net_http_start",
+            "rails_compat_vectors_spinel",
+            "active_job_payload",
+        ],
+        5,
+    ),
+}
+SPINEL_TEST_DEFAULT_SECONDS = 40
+SPINEL_FRAMEWORK_SHARDS = 3
 # Inputs of the ActiveJob payload gate (tests/active_job_payload.rs):
 # the files its driver loads beside it.
 ACTIVE_JOB_PAYLOAD_INPUTS = {
@@ -636,6 +666,21 @@ def select(
     )
 
 
+def spinel_test_seconds(test):
+    return SPINEL_TEST_SECONDS.get(test, SPINEL_TEST_DEFAULT_SECONDS)
+
+
+def spinel_framework_shards(tests, count=SPINEL_FRAMEWORK_SHARDS):
+    """Longest suite first onto the lightest shard; each shard keeps SPINEL_TESTS order."""
+    shards = [[] for _ in range(min(count, len(tests)) or 1)]
+    loads = [0] * len(shards)
+    for test in sorted(tests, key=lambda t: -spinel_test_seconds(t)):
+        i = loads.index(min(loads))
+        shards[i].append(test)
+        loads[i] += spinel_test_seconds(test)
+    return [{"shard": i, "tests": [t for t in tests if t in shard]} for i, shard in enumerate(shards)]
+
+
 def finish(
     jobs,
     extra,
@@ -690,6 +735,7 @@ def finish(
         "site": site,
         "spinel": spinel,
         "spinel_tests": spinel_tests or [],
+        "spinel_framework_shards": spinel_framework_shards(spinel_tests or []),
         "publish": publish,
         "extras_advisory": extras_advisory,
         "spinel_advisory": spinel_advisory,
@@ -844,12 +890,12 @@ def check_results(plan, needs, *, compact=False):
     advisory = set(plan["advisory"]) if "advisory" in plan else set(ADVISORY)
     tracked = required if compact else plan["jobs"]
     complete = not failures and all(
-        _advisory_complete(j, needs.get(j, {}), advisory) for j in tracked
+        _advisory_complete(j, needs.get(j, {}), advisory, plan) for j in tracked
     )
     return failures, complete
 
 
-def _advisory_complete(job, need, advisory):
+def _advisory_complete(job, need, advisory, plan=None):
     """Whether one selected job counts as actually finished.
 
     Under continue-on-error, GitHub reports needs.*.result=success even when
@@ -867,7 +913,12 @@ def _advisory_complete(job, need, advisory):
         return False
     keys = {
         "campfire-spinel-compare": ["default", "minor-gc", "verify-gen"],
-        "spinel-toolchain": ["parity", "rest"],
+        "spinel-toolchain": ["shard-0", "shard-1", "shard-2"],
+        "spinel-framework": [
+            f"shard-{s['shard']}"
+            for s in (plan or {}).get("spinel_framework_shards", [])
+        ]
+        or ["execution"],
     }.get(job, ["execution"])
     return all(need.get("outputs", {}).get(key) == "success" for key in keys)
 
@@ -1009,6 +1060,7 @@ def main():
             "extra-compare": plan["extra_compare"],
             "compare": plan["compare"],
             "spinel-tests": plan["spinel_tests"],
+            "spinel-framework-shards": plan["spinel_framework_shards"],
             "smoke": plan["smoke"],
             "smoke-extra": plan["smoke_extra"],
             "extras-advisory": plan["extras_advisory"],

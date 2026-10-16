@@ -16,6 +16,38 @@ use super::{ClassInfo, PreloadCoverage};
 use super::preload;
 
 
+/// A project extension's attribute macros (`crate::extensions`) make the
+/// attributes they name gradual, so a dispatch on the DSL's value object
+/// does not fail at every call site. No target lowers the macro call
+/// itself, though: the emitted model drops it, and the attribute reads
+/// back as its storage type. So the declaration is the refusal, one error
+/// at the root of what used to be a cascade, rather than a clean check
+/// over a program that would not run.
+fn attribute_macro_refusals(app: &App) -> Vec<Diagnostic> {
+    let mut out = Vec::new();
+    if app.extensions.attribute_macros.is_empty() {
+        return out;
+    }
+    for model in &app.models {
+        for item in &model.body {
+            let crate::dialect::ModelBodyItem::Unknown { expr, .. } = item else { continue };
+            let ExprNode::Send { recv: None, method, .. } = &*expr.node else { continue };
+            if app.extensions.attribute_macro(method.as_str()).is_some() {
+                out.push(Diagnostic::unsupported(
+                    expr.span,
+                    None,
+                    method.as_str(),
+                    format!(
+                        "attribute macro on `{}` from a project extension: its attributes read untyped, and no target lowers the call",
+                        model.name.0.as_str()
+                    ),
+                ));
+            }
+        }
+    }
+    out
+}
+
 /// Walk an analyzed `App` collecting every position where typing failed
 /// in a way that matters for downstream typed emission. Does not modify
 /// the IR — purely a read pass.
@@ -43,6 +75,7 @@ pub fn diagnose_with_coverage(app: &App) -> (Vec<Diagnostic>, PreloadCoverage) {
     // Only validated synthesized Alba serializers, with per-constructor
     // evidence; this does not widen the general library diagnostic policy.
     out.extend(super::alba::diagnose(app));
+    out.extend(crate::gems::extension_gem_refusals(app, None));
     // graphql-ruby object types: their bodies, and each `null: false`
     // field's resolved value.
     out.extend(super::graphql::diagnose(app, diagnose_expr));
@@ -117,6 +150,7 @@ pub fn diagnose_with_coverage(app: &App) -> (Vec<Diagnostic>, PreloadCoverage) {
             }
         }
     }
+    out.extend(attribute_macro_refusals(app));
     // A filter's return value is Rails' to discard (`around_action
     // :switch_locale` → `I18n.with_locale(locale, &action)`): nothing
     // escapes from its tail, so an `untyped` there is not a gradual
@@ -166,6 +200,14 @@ pub fn diagnose_with_coverage(app: &App) -> (Vec<Diagnostic>, PreloadCoverage) {
     // ivar channel.
     let (preload_diags, coverage) = preload::missing_preload_report(app);
     out.extend(preload_diags);
+    let refused_gem_sites: std::collections::HashSet<_> = out.iter().filter_map(|diagnostic| {
+        matches!(&diagnostic.kind, DiagnosticKind::Unsupported { construct, .. }
+            if construct.as_str() == "gem_requires_rails").then_some(diagnostic.span)
+    }).collect();
+    out.retain(|diagnostic| !matches!(&diagnostic.kind,
+        DiagnosticKind::Unsupported { construct, .. }
+            if construct.as_str() == "constant" && refused_gem_sites.contains(&diagnostic.span)
+    ));
 
     // Collapse diagnostics that render to the same place with the same
     // text — same start position, same kind, same message. Method chains

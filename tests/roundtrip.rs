@@ -139,6 +139,9 @@ fn tiny_blog_round_trips() {
         // the roundtrip fixture has nothing to say about it.
         binary_assets: Vec::new(),
         i18n: Default::default(),
+        i18n_table: Default::default(),
+        i18n_runtime_sites: Default::default(),
+        i18n_table_sites: Default::default(),
         inferred_method_params: Default::default(),
         models: vec![post_model],
         library_classes: vec![],
@@ -161,6 +164,7 @@ fn tiny_blog_round_trips() {
         gem_lock: None,
         loaded_frameworks: None,
         gem_boundary: Default::default(),
+        extensions: Default::default(),
         content_helper_allowed_attributes: Vec::new(),
         content_helper_allowed_tags: Vec::new(),
         helper_method_index: std::collections::HashMap::new(),

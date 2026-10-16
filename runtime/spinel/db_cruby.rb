@@ -65,6 +65,10 @@ module Db
   # lease. See `start_checkpointer`.
   @checkpoint_wanted = false
   @checkpointer_pid  = nil
+  # True when a process of the server's own runs the checkpoints
+  # (`checkpoint_in_own_process!`): serving processes then start no
+  # checkpoint thread at all.
+  @checkpoint_external = false
   # The process-shared flock File while this process holds it. Retained
   # so `adopt_after_fork` can close the child's inherited copy without
   # LOCK_UN (parent keeps the lock). Cleared on release.
@@ -153,6 +157,8 @@ module Db
     # the read() copy. Harmless on :memory: (pages are already heap).
     db.execute("PRAGMA cache_size=-65536")
     db.execute("PRAGMA mmap_size=268435456")
+    # Not SQLite's default (off): Rails' DEFAULT_PRAGMAS turn it on, as db.rb's PRAGMAS do.
+    db.execute("PRAGMA foreign_keys=ON")
     # The gem's default is 0: a second writer fails at once with
     # SQLITE_BUSY. Rails' database.yml says `timeout: 5000`, and so do
     # the binary's PRAGMAS — the harness's file database (see
@@ -351,6 +357,44 @@ module Db
       end
       raise cleanup_error if cleanup_error && !request_failed
     end
+  end
+
+  # Rails' SQLite `disable_referential_integrity`: fixtures load and tables empty in any order. Not foreign_keys=OFF alone: that pragma is a no-op inside a transaction, where defer_foreign_keys moves the check to COMMIT instead.
+  def self.without_foreign_keys(&block)
+    on_lease { foreign_keys_off(&block) }
+  end
+
+  def self.foreign_keys_off
+    Db.exec("PRAGMA defer_foreign_keys = ON")
+    Db.exec("PRAGMA foreign_keys = OFF")
+    result = nil
+    begin
+      result = yield
+    ensure
+      Db.exec("PRAGMA defer_foreign_keys = OFF")
+      Db.exec("PRAGMA foreign_keys = ON")
+    end
+    result
+  end
+
+  # Not a lease of its own when the caller holds one: with a pool of one handle, the second checkout waits for the first forever.
+  def self.on_lease(&block)
+    in_lease? ? yield : Db.with_connection(&block)
+  end
+
+  # Rails' `check_all_foreign_keys_valid!`, which its fixture loader runs after a load (`verify_foreign_keys_for_fixtures`).
+  def self.check_foreign_keys!
+    tables = []
+    on_lease do
+      st = Db.prepare("PRAGMA foreign_key_check")
+      while Db.step?(st)
+        table = Db.column_text(st, 0)
+        tables << table unless tables.include?(table)
+      end
+      Db.finalize(st)
+    end
+    raise ActiveRecord::StatementInvalid, "Foreign key violations found: " + tables.join(", ") unless tables.empty?
+    nil
   end
 
   def self.with_connection
@@ -748,6 +792,31 @@ module Db
     @checkpoint_wanted = true
   end
 
+  # CHECKPOINTS IN A PROCESS THAT SERVES NOTHING, for a server that can
+  # run one (falcon.rb). A checkpoint runs inside SQLite holding the GVL,
+  # so the thread above freezes its whole process while it copies the
+  # WAL and syncs, and its RESTART holds that process's write permit.
+  # Under Falcon a process is one event loop with all of its requests on
+  # it: the worker that won the checkpoint lock had half of the POST
+  # cell's stalls on the bench box (2026-10-15), and with no checkpointer
+  # at all the POST p99 fell to Puma's. Serving processes call this
+  # instead: their connections still leave checkpoints to someone else
+  # (wal_autocheckpoint=0), and no thread starts. The server runs
+  # `run_checkpointer` in a process of its own and restarts it if it dies.
+  def self.checkpoint_in_own_process!
+    @checkpoint_wanted = true
+    @checkpoint_external = true
+  end
+
+  # The checkpoint loop on the calling thread; it does not return. Takes
+  # the same flock as the per-worker thread, so it is still the only
+  # checkpointer. Nothing to do for a database with no file.
+  def self.run_checkpointer
+    path = @path
+    return if path.nil? || path == ":memory:" || path.start_with?("file:")
+    checkpoint_loop(path)
+  end
+
   # Rate-limited visibility for checkpoint_loop failures. Resets the
   # suppress window only by time, not by success — a later success simply
   # stops calling this. Private: the loop is the only production caller;
@@ -768,8 +837,13 @@ module Db
   private_class_method :warn_checkpoint_failure
 
   def self.prepare_for_checkpointer(conn)
-    start_checkpointer if @checkpointer_pid != Process.pid
-    return if @checkpointer_pid != Process.pid
+    if @checkpoint_external
+      path = @path
+      return if path.nil? || path == ":memory:" || path.start_with?("file:")
+    else
+      start_checkpointer if @checkpointer_pid != Process.pid
+      return if @checkpointer_pid != Process.pid
+    end
     return if conn.instance_variable_get(:@rh_manual_checkpoint)
     conn.execute("PRAGMA wal_autocheckpoint=0")
     conn.instance_variable_set(:@rh_manual_checkpoint, true)

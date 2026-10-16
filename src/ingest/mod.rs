@@ -28,6 +28,7 @@ mod dry_monads;
 mod dry_validation;
 mod representable;
 mod action_cable_config;
+mod public_file_server_config;
 pub mod allow_browser;
 pub mod app;
 mod concern_accessors;

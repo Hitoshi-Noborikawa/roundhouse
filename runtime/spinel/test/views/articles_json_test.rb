@@ -86,7 +86,6 @@ class ViewsArticlesJsonTest < Minitest::Test
   # ── index: index_json.rb ────────────────────────────────────────
 
   def test_index_json_renders_empty_array_for_empty_collection
-    Article._adapter_truncate
     assert_equal "[]", Views::Articles.index_json([])
   end
 

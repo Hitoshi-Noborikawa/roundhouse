@@ -238,7 +238,7 @@ fn data_block_classes(
             continue;
         }
         let name = ClassId(Symbol::from(format!("{}::{}", owner.0.as_str(), constant_id_str(&cw.name()))));
-        let DeclBody { includes, methods, constants, unknown_calls, class_initializers, class_attributes: _ } =
+        let DeclBody { includes, include_spans, methods, constants, unknown_calls, class_initializers, class_attributes: _ } =
             walk_decl_body(block.body(), &name, file, DeclBodyMode::Instance)?;
         debug_assert!(includes.is_empty() && constants.is_empty() && unknown_calls.is_empty());
         out.push(LibraryClass {
@@ -247,6 +247,7 @@ fn data_block_classes(
             parent: None,
             parent_span: Span::synthetic(),
             includes,
+            include_spans,
             methods,
             nullable_columns: Vec::new(),
             origin: None,
@@ -285,7 +286,7 @@ fn file_data_class(root: &ruby_prism::Node<'_>, file: &str) -> IngestResult<Opti
             });
         }
     }
-    let DeclBody { includes, methods, constants, mut unknown_calls, mut class_initializers, class_attributes: _ } =
+    let DeclBody { includes, include_spans, methods, constants, mut unknown_calls, mut class_initializers, class_attributes: _ } =
         walk_decl_body(body(), &owner, file, DeclBodyMode::Instance)?;
     class_initializers.extend(take_class_ivar_initializers(&mut unknown_calls));
     Ok(Some(LibraryClass {
@@ -294,6 +295,7 @@ fn file_data_class(root: &ruby_prism::Node<'_>, file: &str) -> IngestResult<Opti
         parent: None,
         parent_span: Span::synthetic(),
         includes,
+        include_spans,
         methods,
         nullable_columns: Vec::new(),
         origin: Some(crate::dialect::LibraryClassOrigin::DataDefine {
@@ -516,6 +518,7 @@ pub(super) fn library_class_and_struct_base(
 
     let DeclBody {
         mut includes,
+        mut include_spans,
         mut methods,
         mut constants,
         mut unknown_calls,
@@ -536,7 +539,13 @@ pub(super) fn library_class_and_struct_base(
         // emitted as calls; the sorbet mixins have nothing left to
         // provide.
         unknown_calls.retain(|call| !is_struct_declaration(call));
-        includes.retain(|i| !i.0.as_str().starts_with("T::"));
+        // Keep `include_spans` aligned: both vecs are parallel and
+        // `retain` alone would desync them if applied separately.
+        let keep: Vec<bool> = includes.iter().map(|i| !i.0.as_str().starts_with("T::")).collect();
+        let mut k = keep.iter();
+        includes.retain(|_| *k.next().unwrap());
+        let mut k = keep.iter();
+        include_spans.retain(|_| *k.next().unwrap());
         let mut synthesized = synth_sorbet_struct_methods(&owner, &members, comparable, true);
         synthesized.append(&mut methods);
         methods = synthesized;
@@ -601,6 +610,7 @@ pub(super) fn library_class_and_struct_base(
                 source_parent_span
             },
             includes,
+            include_spans,
             methods,
             nullable_columns: Vec::new(),
             origin: None,
@@ -1405,6 +1415,7 @@ fn struct_class(
         parent: None,
         parent_span: Span::synthetic(),
         includes: Vec::new(),
+        include_spans: Vec::new(),
         methods,
         nullable_columns: Vec::new(),
         origin: Some(origin),
@@ -1541,6 +1552,7 @@ pub(super) fn library_class_from_module_node_with_scope(
     let visibility = Visibility::resolve(module.body().as_ref(), file, Some(&owner))?;
     let DeclBody {
         includes,
+        include_spans,
         methods,
         constants,
         mut unknown_calls,
@@ -1554,6 +1566,7 @@ pub(super) fn library_class_from_module_node_with_scope(
         parent: None,
         parent_span: Span::synthetic(),
         includes,
+        include_spans,
         methods,
         nullable_columns: Vec::new(),
         origin: None,
@@ -1595,6 +1608,9 @@ impl DeclBodyMode {
 #[derive(Default)]
 struct DeclBody {
     includes: Vec<ClassId>,
+    /// Parallel to `includes`: the span of each `include` call, so an
+    /// unresolved one can be pointed at.
+    include_spans: Vec<Span>,
     methods: Vec<MethodDef>,
     constants: Vec<(Symbol, Expr)>,
     unknown_calls: Vec<Expr>,
@@ -1607,6 +1623,7 @@ struct DeclBody {
 impl DeclBody {
     fn extend(&mut self, other: Self) {
         self.includes.extend(other.includes);
+        self.include_spans.extend(other.include_spans);
         self.methods.extend(other.methods);
         self.constants.extend(other.constants);
         self.unknown_calls.extend(other.unknown_calls);
@@ -2322,6 +2339,12 @@ fn walk_decl_body_with_visibility<'pr>(
                                         continue;
                                     }
                                     out.includes.push(ClassId(Symbol::from(path.join("::"))));
+                                    // The `include` call's own span, not
+                                    // the argument's: a refusal should
+                                    // point at `include` even when the
+                                    // module name sits on a continuation
+                                    // line (`include\n  X`).
+                                    out.include_spans.push(super::util::node_span(&stmt, file));
                                 } else if crate::ingest::util::is_rails_url_helpers_chain(&arg) {
                                     // `include Rails.application.routes.
                                     // url_helpers` (lobsters' Routes class,
@@ -2333,6 +2356,7 @@ fn walk_decl_body_with_visibility<'pr>(
                                     // ruby emit rewrites `X.<helper>` call
                                     // sites through RouteHelpers.
                                     out.includes.push(ClassId(Symbol::from("RouteHelpers")));
+                                    out.include_spans.push(super::util::node_span(&stmt, file));
                                 }
                             }
                         }
@@ -4010,6 +4034,40 @@ const CONCERN_MODEL_MACROS: &[&str] = &[
     "include",
 ];
 
+/// Unclaimed direct `included do` statements run in each includer's
+/// class body. Visibility and definition statements keep their refusal.
+fn carries_to_includer(item: &crate::dialect::ModelBodyItem) -> bool {
+    use crate::expr::ExprNode;
+    let crate::dialect::ModelBodyItem::Unknown { expr, .. } = item else { return false };
+    match &*expr.node {
+        // Concern ingestion already records these declaration gaps.
+        ExprNode::Send { recv: None, method, block: Some(_), .. }
+            if matches!(method.as_str(), "aasm" | "state_machine") =>
+        {
+            false
+        }
+        ExprNode::Send { recv: None, method, .. } => !matches!(
+            method.as_str(),
+            "private"
+                | "protected"
+                | "public"
+                | "private_class_method"
+                | "public_class_method"
+                | "module_function"
+                | "private_constant"
+                | "public_constant"
+                | "attr_reader"
+                | "attr_writer"
+                | "attr_accessor"
+                | "alias_method"
+                | "define_method"
+                | "remove_method"
+                | "undef_method"
+        ),
+        _ => true,
+    }
+}
+
 /// True when an Unknown body item is one of [`CONCERN_MODEL_MACROS`].
 /// The block form counts — `has_one_attached :avatar do |attachable|
 /// attachable.variant … end` declares variants we don't model, and the
@@ -4219,6 +4277,18 @@ pub(in crate::ingest) fn ingest_concern_model_items_with_constants(
         let Some(body) = module.body() else { continue };
         let mut items: Vec<ModelBodyItem> = Vec::new();
         let mut enums: Vec<ConcernEnumDecl> = Vec::new();
+        let is_concern = flatten_statements(module.body().unwrap()).iter().any(|stmt| {
+            stmt.as_call_node().is_some_and(|call| {
+                call.receiver().is_none()
+                    && call.block().is_none()
+                    && constant_id_str(&call.name()) == "extend"
+                    && call.arguments().is_some_and(|args| {
+                        args.arguments().iter().any(|arg| {
+                            constant_path_of(&arg).is_some_and(|path| path.join("::") == "ActiveSupport::Concern")
+                        })
+                    })
+            })
+        });
         let mut guarded: Vec<crate::app::ConcernGuardedItem> = Vec::new();
         for stmt in flatten_statements(body) {
             let Some(call) = stmt.as_call_node() else { continue };
@@ -4305,6 +4375,9 @@ pub(in crate::ingest) fn ingest_concern_model_items_with_constants(
                 // per attribute, and a concern splices ALL of them into
                 // every includer — keeping only the first would fault
                 // one field of several.
+                let is_direct = direct.iter().any(|stmt| {
+                    stmt.location().start_offset() == inner.location().start_offset()
+                });
                 match super::model::ingest_model_body_items(&inner, &id, file, Vec::new(), None) {
                     Ok(parsed) => {
                         for mut item in parsed {
@@ -4320,13 +4393,14 @@ pub(in crate::ingest) fn ingest_concern_model_items_with_constants(
                                 // items; keep the ones the callback
                                 // lowering understands so the concern
                                 // splice carries them into each
-                                // includer. Other Unknowns stay with the
-                                // module.
+                                // includer. Unclaimed direct statements
+                                // also run on an ActiveSupport::Concern's
+                                // includer, not on the module.
                                 ModelBodyItem::Unknown { .. } => {
                                     if is_candidate(&item) {
                                         if !is_supported(&item) {
                                             decline(&mut item, "unsupported accessor shape: only direct, nonempty, literal-Symbol attr_accessor is modeled");
-                                        } else if !direct.iter().any(|stmt| stmt.location().start_offset() == inner.location().start_offset()) {
+                                        } else if !is_direct {
                                             decline(&mut item, "inside with_options is not modeled");
                                         }
                                     }
@@ -4335,9 +4409,15 @@ pub(in crate::ingest) fn ingest_concern_model_items_with_constants(
                                         || is_candidate(&item)
                                     {
                                         items.push(item);
-                                    } else if !matches!(&item, ModelBodyItem::Unknown { expr, .. }
+                                    } else if matches!(&item, ModelBodyItem::Unknown { expr, .. }
                                         if matches!(&*expr.node, crate::expr::ExprNode::Lit { .. }))
                                     {
+                                    } else if is_concern && is_direct && carries_to_includer(&item) {
+                                        // General class-body replay is not available
+                                        // here. Keep accessor admission conservative.
+                                        unclaimed = true;
+                                        items.push(item);
+                                    } else {
                                         unclaimed = true;
                                     }
                                 }

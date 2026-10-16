@@ -446,6 +446,21 @@ impl<'a> BodyTyper<'a> {
         None
     }
 
+    /// Whether `recv` is a model class, whose setter is `ActiveRecord::Base`'s.
+    fn is_model_class(&self, recv: Option<&Ty>) -> bool {
+        let Some(Ty::Class { id, .. }) = recv else { return false };
+        let mut current = id;
+        for _ in 0..32 {
+            // Not `ActiveRecord::Base` alone: the registry leaves `ApplicationRecord`'s parent unset.
+            if matches!(current.0.as_str(), "ActiveRecord::Base" | "ApplicationRecord") {
+                return true;
+            }
+            let Some(parent) = self.classes.get(current).and_then(|c| c.parent.as_ref()) else { return false };
+            current = parent;
+        }
+        false
+    }
+
     fn app_defines(&self, self_ty: Option<&Ty>, method: &Symbol) -> bool {
         let Some(Ty::Class { id, .. }) = self_ty else { return false };
         let mut stack = vec![id];
@@ -513,6 +528,19 @@ impl<'a> BodyTyper<'a> {
     pub fn analyze_expr(&self, expr: &mut Expr, ctx: &Ctx) -> Ty {
         let ty = self.compute(expr, ctx);
         expr.ty = Some(ty.clone());
+        // Not accepted silently: the runtime's setter keeps nothing, so every save would still stamp.
+        if expr.diagnostic.is_none()
+            && let ExprNode::Send { recv: Some(recv), method, args, .. } = &*expr.node
+            && method.as_str() == "record_timestamps="
+            && !matches!(args.first().map(|a| &*a.node), Some(ExprNode::Lit { value: Literal::Bool { value: true } }))
+            && self.is_model_class(recv.ty.as_ref())
+        {
+            expr.diagnostic = Some(crate::diagnostic::DiagnosticKind::Unsupported {
+                target: None,
+                construct: Symbol::from("record_timestamps"),
+                detail: "turning a model's timestamp stamping off is not modeled: its saves would still stamp them (`upsert_all(…, record_timestamps: false)` is)".to_string(),
+            });
+        }
         expr.decisions &= !crate::expr::CLASS_OBJECT_VALUE;
         if self.is_class_object(expr, ctx) { expr.decisions |= crate::expr::CLASS_OBJECT_VALUE; }
         diagnostic::detect_diagnostic(expr);
@@ -1460,7 +1488,8 @@ impl<'a> BodyTyper<'a> {
                         ctx.self_ty.as_ref(),
                         Some(Ty::Class { id, .. })
                             if self.classes().get(id).is_some_and(|cls|
-                                cls.class_methods.contains_key(method)
+                                // Not a class method from an instance body: `dom_id(self)` beside a `self.dom_id` is the instance's own.
+                                (!ctx.instance_body && cls.class_methods.contains_key(method))
                                     || cls.instance_methods.contains_key(method))
                     );
                 if resolves_through_self {
@@ -1930,8 +1959,9 @@ impl<'a> BodyTyper<'a> {
                     let elem = args[0].ty.as_ref().and_then(kernel_array_elem);
                     return Ty::Array { elem: std::sync::Arc::new(elem.unwrap_or_else(unknown)) };
                 }
+                let translate = matches!(method.as_str(), "t" | "translate");
                 let catalog = self.i18n.map_or(crate::i18n::Catalog::rails_default(), |c| c.or_rails_default());
-                let scope = match (ctx.in_view, recv.is_none() && !ctx.class_side) {
+                let scope = match (!translate || ctx.in_view, recv.is_none() && !ctx.class_side) {
                     (false, true) => self.translating_controller(ctx.self_ty.as_ref()),
                     _ => None,
                 };
@@ -1940,7 +1970,7 @@ impl<'a> BodyTyper<'a> {
                     (Some(scope), false) => crate::lower::i18n_translate::Site::Controller(scope),
                     (None, false) => crate::lower::i18n_translate::Site::Other,
                 };
-                if let Some(resolved) = crate::lower::i18n_translate::resolves(
+                if translate && let Some(resolved) = crate::lower::i18n_translate::resolves(
                     catalog, recv.as_ref(), method.as_str(), args, block.as_ref(), site,
                 ) {
                     if let Err(reason) = resolved {

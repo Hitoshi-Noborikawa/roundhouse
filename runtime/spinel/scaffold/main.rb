@@ -209,7 +209,33 @@ module Main
       return nil
     end
     res.headers["Content-Type"] = Main.asset_content_type(path)
+    # `config.public_file_server.headers`, as ActionDispatch::Static
+    # sends them on every public/ and /assets/ file.
+    Rails.application.public_file_server_headers.each do |name, value|
+      res.headers[name] = value
+    end
     res.send_file(disk)
+    nil
+  end
+
+  # A 404 the app did not rescue (no route, ActionNotFound,
+  # RecordNotFound), answered as Rails' production exceptions app
+  # (ActionDispatch::PublicExceptions) does: `{"status":404,"error":
+  # "Not Found"}` when the request's format is JSON
+  # (ActionDispatch::MimeNegotiation.json_format?), the HTML page
+  # otherwise. `format_param` is the request's `format` parameter, ""
+  # when it has none.
+  def self.render_not_found(res, format_param, path, req)
+    res.status = 404
+    extension = path.end_with?(".json") ? "json" : ""
+    if ActionDispatch::MimeNegotiation.json_format?(format_param, extension,
+         req.req_headers.fetch("accept", ""), req.req_headers.fetch("x-requested-with", ""),
+         req.req_headers.fetch("content-type", ""))
+      res.headers["Content-Type"] = "application/json; charset=UTF-8"
+      res.body = "{\"status\":404,\"error\":\"Not Found\"}"
+    else
+      res.body = "<h1>404 Not Found</h1>"
+    end
     nil
   end
 
@@ -385,8 +411,9 @@ module Main
 
     matched = ActionDispatch::Router.match(verb, request_path, Main.route_table)
     if matched.nil?
-      res.status = 404
-      res.body = "<h1>404 Not Found</h1>"
+      # No route: the format is the `?format=` param, a trusted Accept,
+      # or the path's extension (Main.render_not_found).
+      Main.render_not_found(res, req.req_params.fetch("format", ""), request_path, req)
       return
     end
     # A `(.:format)` EXTENSION the router stripped off the path
@@ -561,8 +588,10 @@ module Main
     begin
       controller.process_action(matched.action)
     rescue ActiveRecord::RecordNotFound, ActionController::RoutingError, AbstractController::ActionNotFound
-      res.status = 404
-      res.body = "<h1>404 Not Found</h1>"
+      # The routed format (extension, route default) is the `format`
+      # param; an html one may still name `?format=`.
+      format_param = request_format == :html ? req.req_params.fetch("format", "") : fmt_name
+      Main.render_not_found(res, format_param, request_path, req)
       return
     rescue ActionController::ParameterMissing, ActionController::BadRequest
       # `params.expect` / `params.require` refused the request and the app

@@ -716,10 +716,12 @@ pub fn renders_through_view_path(format: &str) -> bool {
     // `<action>_txt`. Paired with the ingest gate in `ingest::app`'s
     // `walk_erb` the same way `svg`/`json` are: a format admitted only
     // here or only there is silently dropped in between.
+    // `css`: joins them the same way — a CSS responder with no html
+    // sibling (Mastodon's `custom_css#show`), as `<action>_css`.
     matches!(
         format,
         "html" | "turbo_stream" | "svg" | "rss" | "atom" | "xml" | "xls" | "json" | "js" | "pdf"
-            | "csv" | "txt"
+            | "csv" | "txt" | "css" | "md"
     )
 }
 

@@ -536,18 +536,11 @@ fn schema_emits_create_index_lines_for_table_indexes() {
     );
 }
 
+/// Not dropped: Rails' SQLite schema carries the constraint and its adapter turns `foreign_keys` on, so a row naming a missing parent raises `InvalidForeignKey` there.
 #[test]
-fn schema_drops_foreign_key_constraints() {
-    // Real-blog has `add_foreign_key "comments", "articles"` — but the
-    // spinel runtime models relationships at the app layer (e.g.
-    // belongs_to lowers to `Article.find_by(id: @article_id)`), so the
-    // DB-level constraint is dropped per yagni-on-round-trip:
-    // structural compile-equivalence, not source-equivalence.
+fn schema_keeps_foreign_key_constraints() {
     let src = lowered_real_blog_schema();
-    assert!(
-        !src.contains("FOREIGN KEY") && !src.contains("REFERENCES"),
-        "spinel schema should not emit FK constraints; got:\n{src}",
-    );
+    assert!(src.contains("FOREIGN KEY (article_id) REFERENCES articles (id)"), "{src}");
 }
 
 #[test]

@@ -157,9 +157,11 @@ module SchemaSetup
   # truncate call from `ActiveRecord.adapter.truncate(t)` to
   # `<Model>._adapter_truncate` is the per-model dispatch.
   def self.reset!
-    Article._adapter_truncate if defined?(Article)
-    Comment._adapter_truncate if defined?(Comment)
-    FixtureLoader.load_all!
+    FixtureLoader.with_foreign_keys_deferred do
+      Article._adapter_truncate if defined?(Article)
+      Comment._adapter_truncate if defined?(Comment)
+      FixtureLoader.load_all!
+    end
   end
 end
 
@@ -196,6 +198,17 @@ module FixtureLoader
   # Filter by `*Fixtures` suffix BEFORE `const_get` so deprecated
   # constants like Ruby 3.4's `SortedSet` (which raises on access via
   # autoload) don't get touched while scanning for fixture modules.
+  # Rails' fixture setup: loaded with referential integrity off, then checked (`verify_foreign_keys_for_fixtures`). Not Db's alone: a framework test runs this helper with no Db loaded.
+  def self.with_foreign_keys_deferred
+    if defined?(Db)
+      Db.without_foreign_keys { yield }
+      Db.check_foreign_keys!
+    else
+      yield
+    end
+    nil
+  end
+
   def self.load_all!
     Object.constants.sort.each do |c|
       next unless c.to_s.end_with?("Fixtures")
@@ -1835,6 +1848,7 @@ module RequestDispatch
     # after the body parse. campfire's fetch-metadata test posts
     # `_method: "delete"` cross-site and expects the DELETE route's
     # forgery refusal, not "No route matches POST".
+    wire_method = method
     if method == "POST" && params.is_a?(Hash)
       override = (params[:_method] || params["_method"]).to_s.upcase
       method = override if override == "PUT" || override == "PATCH" || override == "DELETE"
@@ -1855,40 +1869,49 @@ module RequestDispatch
     # check is inline at the call site (not inside stringify_keys) so
     # the helper itself stays strictly typed as `(Hash) -> Hash`.
     #
-    # `stringify_keys(matched.path_params)` (rather than `path_params
-    # .dup`) seeds `merged` as `Hash[String, untyped]` — needed so the
-    # nested-Hash branch of the ternary below has a slot wide enough
-    # to hold a Hash value. `path_params.dup` keeps the StrStrHash
-    # shape, which spinel then refuses to assign a Hash into.
-    merged = stringify_keys(matched.path_params)
+    # `stringify_keys({})` (rather than `path_params.dup` or `{}`)
+    # seeds each Hash below as `Hash[String, untyped]` — needed so the
+    # nested-Hash branch has a slot wide enough to hold a Hash value.
+    # `path_params.dup` keeps the StrStrHash shape, which spinel then
+    # refuses to assign a Hash into.
     # `post url, params: "Hello Bot World!"` — Rails' integration tests
     # take a STRING `params:` as the raw request BODY, not as a
     # parameter hash. campfire's bot endpoint is written that way (a bot
     # POSTs plain text and the controller reads `request.body`), and the
     # harness iterated it: `undefined method 'each' for an instance of
     # String`, every test in the file.
-    # Query-string pairs are parameters too, and they arrive UNDER the
-    # explicit `params:` — Rails merges the request's own parameters
-    # first and lets the caller's hash win on a collision.
     # `CgiIo.parse_form_into` — THE SAME PARSER the production
     # dispatcher uses on `QUERY_STRING` (`parse_request` calls it on
     # exactly this string), so the harness cannot disagree with
     # production about what a query string means. Not `CGI.parse`: Ruby
     # 4.0 no longer ships it, and a hand-rolled split would be a second
     # copy of a table this tree already owns.
-    CgiIo.parse_form_into(query, merged) unless query.empty?
+    from_query = stringify_keys({})
+    CgiIo.parse_form_into(query, from_query) unless query.empty?
+    from_caller = stringify_keys({})
     request_body = +""
     if params.is_a?(String)
       request_body = params.to_s
     else
       params.each do |k, v|
         if v.is_a?(Hash)
-          merged[k.to_s] = stringify_keys(v)
+          from_caller[k.to_s] = stringify_keys(v)
         else
-          merged[k.to_s] = v
+          from_caller[k.to_s] = v
         end
       end
     end
+    # Not one order for every verb: Rack::Test appends a GET's `params:` to its query string, so they win there, while any other verb sends them as the body and Rails' `request_parameters.merge(query_parameters)` lets the query win.
+    merged = stringify_keys({})
+    if wire_method == "GET"
+      from_query.each { |k, v| merged[k] = v }
+      from_caller.each { |k, v| merged[k] = v }
+    else
+      from_caller.each { |k, v| merged[k] = v }
+      from_query.each { |k, v| merged[k] = v }
+    end
+    # Rails' `params.merge!(path_parameters)`: the route's own segments win over both.
+    matched.path_params.each { |k, v| merged[k.to_s] = v }
     controller.params  = merged
     controller.path_parameters = matched.path_params
     controller.session = @__session ||= ActionDispatch::Session.new

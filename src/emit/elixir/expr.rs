@@ -2634,6 +2634,7 @@ mod tests {
                 parent: None,
                 parent_span: Default::default(),
                 includes: vec![],
+                include_spans: Vec::new(),
                 methods: vec![],
                 nullable_columns: Vec::new(),
                 origin: None,
@@ -2760,6 +2761,7 @@ mod tests {
             parent: None,
             parent_span: Default::default(),
             includes: vec![],
+            include_spans: Vec::new(),
             methods: vec![render, resolve],
             nullable_columns: Vec::new(),
             origin: None,
@@ -2998,6 +3000,7 @@ mod tests {
             parent: None,
             parent_span: Default::default(),
             includes: vec![],
+            include_spans: Vec::new(),
             methods: vec![truncate],
             nullable_columns: Vec::new(),
             origin: None,
@@ -3353,7 +3356,7 @@ fn emit_string_interp(parts: &[InterpPart]) -> String {
 /// characters json_builder's `ESCAPES` keys carry as raw bytes
 /// (backspace `\b` 0x08, form feed `\f` 0x0c, …). Other control chars
 /// fall back to `\xHH`.
-fn push_escaped(out: &mut String, value: &str) {
+pub(super) fn push_escaped(out: &mut String, value: &str) {
     for c in value.chars() {
         match c {
             '"' => out.push_str("\\\""),

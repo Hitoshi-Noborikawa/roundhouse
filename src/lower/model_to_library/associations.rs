@@ -113,6 +113,50 @@ fn fk_sentinel(model: &Model, foreign_key: &Symbol) -> Expr {
     if is_str { super::lit_str(String::new()) } else { lit_int(0) }
 }
 
+/// Push an `unsupported` error for a `has_many :through` whose source
+/// association has a scope (`has_many :bo_remarks, -> { where(...) }`).
+/// The through reader, preload and join apply only the scope of the
+/// through association itself, so they would return the rows that the
+/// source scope filters out. Returns true when it refused: the caller
+/// then synthesizes no reader.
+fn refuse_scoped_through_source(
+    model: &Model,
+    models: &[Model],
+    assoc: &Association,
+    span: Span,
+) -> bool {
+    let Association::HasMany { name, through: Some(thr_name), .. } = assoc else { return false };
+    let source = model
+        .associations()
+        .find(|a| a.name() == thr_name)
+        .and_then(|thr| match thr {
+            Association::HasMany { target, .. } | Association::HasOne { target, .. } => Some(target),
+            _ => None,
+        })
+        .and_then(|thr_target| models.iter().find(|m| &m.name == thr_target))
+        .and_then(|thr_model| thr_model.through_source(assoc));
+    let Some(
+        source @ (Association::HasMany { scope: Some(_), .. }
+        | Association::HasOne { scope: Some(_), .. }),
+    ) = source
+    else {
+        return false;
+    };
+    crate::emit::diagnostics::push(crate::diagnostic::Diagnostic::unsupported(
+        span,
+        None,
+        "through_source_scope",
+        format!(
+            "`{}.{name}`: its source association `{}` has a scope, and the through \
+             reader, preload and join do not apply it, so they would return the rows \
+             that the scope filters out",
+            model.name.0,
+            source.name()
+        ),
+    ));
+    true
+}
+
 pub(super) fn push_association_methods(
     methods: &mut Vec<MethodDef>,
     model: &Model,
@@ -133,6 +177,9 @@ pub(super) fn push_association_methods(
                 ..
             } => {
                 if crate::lower::assoc_primary_key::refuse(model, models, assoc, span) {
+                    continue;
+                }
+                if refuse_scoped_through_source(model, models, assoc, span) {
                     continue;
                 }
                 let owner_key = assoc.owner_key();

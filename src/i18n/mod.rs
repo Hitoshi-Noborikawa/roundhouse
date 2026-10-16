@@ -12,6 +12,8 @@ use serde::{Deserialize, Serialize};
 use serde_yaml_ng::Value;
 
 pub mod gems;
+pub mod plural;
+pub mod rails_i18n;
 
 /// Rails 8.1.4's bundled English, in the order its frameworks load it.
 const RAILS_EN: &[(&str, &str)] = &[
@@ -53,6 +55,12 @@ pub struct Catalog {
     /// `config.i18n.fallbacks`, per environment.
     #[serde(default)]
     pub fallbacks: FallbackPolicy,
+    /// Each locale's own plural rule (rails-i18n's pluralization, an
+    /// app's `config/locales/plurals.rb`) in [`plural`]'s text, empty for
+    /// one roundhouse cannot read: a count then picks `few`, `many` or
+    /// `two` by the locale. A locale with none uses I18n's default.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub plurals: BTreeMap<String, String>,
 }
 
 /// `config.i18n.fallbacks`: Rails includes I18n's Fallbacks backend when
@@ -75,7 +83,7 @@ pub struct FallbackPolicy {
 /// One way a translation can be looked up at run time: in `locale`,
 /// with `fallbacks`, in the environments `envs` names (every environment
 /// but `except` when `envs` is `None`).
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Hash)]
 pub struct Variant {
     pub locale: String,
     pub fallbacks: Option<Vec<String>>,
@@ -104,6 +112,16 @@ impl Catalog {
         }
         out
     }
+}
+
+/// The keys a YAML file names at its top level (`en:`, `"pt-BR":`), as
+/// `Catalog::merge_source` looks for them.
+fn top_level_keys(source: &str) -> std::collections::HashSet<String> {
+    source
+        .lines()
+        .filter(|l| !l.starts_with([' ', '\t', '#', '-']))
+        .filter_map(|l| l.split_once(':').map(|(k, _)| k.trim().trim_matches(['"', '\'']).to_string()))
+        .collect()
 }
 
 /// `I18n::Locale::Fallbacks#[]`: `locale` and its parents, then each
@@ -197,7 +215,18 @@ impl Catalog {
                 }
             }
         }
-        self.others = wanted.iter().map(|l| Catalog::load_with_gems(l, gems, files).0).collect();
+        files.sort_by(|a, b| a.0.cmp(&b.0));
+        // Not every file for every locale: a hundred locales each scanned every line of every file.
+        let tops: Vec<std::collections::HashSet<String>> = gems.iter().chain(files.iter()).map(|(_, src)| top_level_keys(src)).collect();
+        self.others = wanted
+            .iter()
+            .map(|l| {
+                let mut at = tops.iter();
+                let gems: Vec<(String, String)> = gems.iter().filter(|_| at.next().is_some_and(|t| t.contains(l))).cloned().collect();
+                let mut files: Vec<(String, String)> = files.iter().filter(|_| at.next().is_some_and(|t| t.contains(l))).cloned().collect();
+                Catalog::load_with_gems(l, &gems, &mut files).0
+            })
+            .collect();
         self.available = if available.len() > 1 { available } else { Vec::new() };
         self.fallbacks = fallbacks;
     }
@@ -437,7 +466,7 @@ pub enum Fallback {
 
 /// What a resolved translation renders: one template, or the plural
 /// forms a run-time `count` picks between.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Hash)]
 pub enum Translation {
     One(String),
     Plural { zero: Option<String>, one: String, other: String },
@@ -591,7 +620,10 @@ impl Catalog {
         let stem = base.trim_end_matches('.');
         let under = |k: &str| k.starts_with(base) || k == stem;
         let mut nodes: Vec<String> = Vec::new();
-        for key in self.entries.keys().filter(|k| under(k)) {
+        // Not every key filtered: the ones under `base` sit together in the sorted map, and `stem` (base without its dot) sorts before them.
+        let within = self.entries.range(base.to_string()..).map(|(k, _)| k).take_while(|k| k.starts_with(base));
+        let at_stem = self.entries.get_key_value(stem).map(|(k, _)| k).filter(|k| !k.starts_with(base));
+        for key in at_stem.into_iter().chain(within) {
             let mut node = key.as_str();
             nodes.push(node.to_string());
             while let Some((parent, _)) = node.rsplit_once('.') {
