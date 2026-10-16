@@ -9227,6 +9227,31 @@ fn expr_mentions_includes(expr: &Expr) -> bool {
     found
 }
 
+/// Whether `model`'s primary key is a uuid / string column, which an
+/// `IN (...)` lists quoted and a batch keys by its String (the integer
+/// helper would `to_i` it to its leading digits and find nothing; cf.
+/// #310 for `Relation#ids`).
+fn string_primary_key(app: &App, model: &crate::dialect::Model) -> bool {
+    app.schema
+        .tables
+        .get(&model.table.0)
+        .and_then(|t| t.columns.iter().find(|c| c.primary_key))
+        .is_some_and(|c| {
+            matches!(
+                c.col_type,
+                crate::schema::ColumnType::Uuid
+                    | crate::schema::ColumnType::String { .. }
+                    | crate::schema::ColumnType::Text
+            )
+        })
+}
+
+/// The `Db` list helper and the row-key conversion for a batch keyed by
+/// the owner's id.
+fn key_helpers(string_key: bool) -> (&'static str, &'static str) {
+    if string_key { ("escape_string_list", "to_s") } else { ("escape_int_list", "to_i") }
+}
+
 /// One preloadable association, resolved against the app's model set.
 enum PreloadKind {
     /// (fk column on the owner, target class, target table, the `Db`
@@ -9240,19 +9265,19 @@ enum PreloadKind {
     /// Batched form of the through-reader join:
     /// `SELECT <t>.*, <thr>.<thr_fk> AS __src FROM <t> JOIN <thr> ON
     /// <thr>.<src_fk> = <t>.id WHERE <thr>.<thr_fk> IN (...)`.
-    Through { target: String, join: String, group_col: String, order: Option<String> },
+    Through { target: String, join: String, group_col: String, order: Option<String>, string_key: bool },
     /// `has_one_attached :<attr>`: one join over the attachment and blob
     /// tables for the whole record set, installing a row-bearing
     /// `ActiveStorage::Attached` on each record (`attr`, owner class).
     /// `variations` is the declared-variant list as Ruby source
     /// (`lower::attached::variations_ruby_source`), the proxy's fourth
     /// constructor argument.
-    Attached { attr: String, owner: String, variations: String },
+    Attached { attr: String, owner: String, variations: String, string_key: bool },
     /// `has_many_attached :<attr>`: one join over the attachment and blob
     /// tables for the whole record set, installing a proxy per record
     /// that answers its rows (`AttachedMany#_preload_rows`) without
     /// asking again.
-    AttachedMany { attr: String, owner: String },
+    AttachedMany { attr: String, owner: String, string_key: bool },
     /// `has_rich_text :<attr>`: one `IN` over `action_text_rich_texts`,
     /// installed through the owner's load-once setter.
     RichText { attr: String, owner: String },
@@ -9268,6 +9293,10 @@ fn preload_targets(model: &crate::dialect::Model, app: &App) -> Vec<(String, Pre
     use crate::naming::pluralize_snake;
 
     let model_exists = |id: &ClassId| app.models.iter().any(|m| &m.name == id);
+    // The owner's own key is a uuid / string: the batches keyed by it
+    // (attachments, has_many :through) list it quoted and key their rows
+    // by the String, as the belongs_to batch below does for its target.
+    let owner_string_key = string_primary_key(app, model);
     let mut out = Vec::new();
     for assoc in model.associations() {
         // A refused association (`assoc_primary_key`) has no reader to
@@ -9283,19 +9312,7 @@ fn preload_targets(model: &crate::dialect::Model, app: &App) -> Vec<(String, Pre
                 // A uuid / string key is a quoted literal in `IN (...)`;
                 // the integer helper would `to_i` it to its leading
                 // digits and find nothing (cf. #310 for `Relation#ids`).
-                let string_key = app
-                    .schema
-                    .tables
-                    .get(&target_model.table.0)
-                    .and_then(|t| t.columns.iter().find(|c| c.primary_key))
-                    .is_some_and(|c| {
-                        matches!(
-                            c.col_type,
-                            crate::schema::ColumnType::Uuid
-                                | crate::schema::ColumnType::String { .. }
-                                | crate::schema::ColumnType::Text
-                        )
-                    });
+                let string_key = string_primary_key(app, target_model);
                 out.push((
                     name.as_str().to_string(),
                     PreloadKind::BelongsTo {
@@ -9390,6 +9407,7 @@ fn preload_targets(model: &crate::dialect::Model, app: &App) -> Vec<(String, Pre
                         ),
                         group_col: format!("{thr_table}.{thr_fk}"),
                         order: order.map(|o| o.to_string()),
+                        string_key: owner_string_key,
                     },
                 ));
             }
@@ -9404,6 +9422,7 @@ fn preload_targets(model: &crate::dialect::Model, app: &App) -> Vec<(String, Pre
                 attr: attr.as_str().to_string(),
                 owner: model.name.0.as_str().to_string(),
                 variations: crate::lower::attached::variations_ruby_source(model, &attr),
+                string_key: owner_string_key,
             },
         ));
     }
@@ -9415,6 +9434,7 @@ fn preload_targets(model: &crate::dialect::Model, app: &App) -> Vec<(String, Pre
             PreloadKind::AttachedMany {
                 attr: attr.as_str().to_string(),
                 owner: model.name.0.as_str().to_string(),
+                string_key: owner_string_key,
             },
         ));
     }
@@ -9568,7 +9588,8 @@ end
 "#
                 );
             }
-            PreloadKind::Through { target, join, group_col, order } => {
+            PreloadKind::Through { target, join, group_col, order, string_key } => {
+                let (key_list, to_key) = key_helpers(*string_key);
                 let table = crate::naming::pluralize_snake(target.as_str());
                 let order_sql = match order {
                     Some(o) => format!(" ORDER BY {o}"),
@@ -9585,11 +9606,11 @@ def self._preload_batch_{name}(records)
   grouped = {{}}
   loaded = []
   if ids.length > 0
-    rows = ActiveRecord.adapter.select_rows("SELECT {table}.*, {group_col} AS __src FROM {table} {join} WHERE {group_col} IN (" + Db.escape_int_list(ids) + "){order_sql}")
+    rows = ActiveRecord.adapter.select_rows("SELECT {table}.*, {group_col} AS __src FROM {table} {join} WHERE {group_col} IN (" + Db.{key_list}(ids) + "){order_sql}")
     rows.each do |row|
       rec = {target}.instantiate(row)
       loaded << rec
-      k = row["__src"].to_i
+      k = row["__src"].{to_key}
       grouped[k] = [] if grouped[k].nil?
       grouped[k] << rec
     end
@@ -9609,7 +9630,8 @@ end
             // this query and the proxy's own cannot disagree about the
             // row shape; two typed hashes (attachment id, blob) rather
             // than one hash of rows so every value keeps its own type.
-            PreloadKind::Attached { attr, owner, variations } => {
+            PreloadKind::Attached { attr, owner, variations, string_key } => {
+                let (key_list, to_key) = key_helpers(*string_key);
                 let _ = write!(
                     src,
                     r#"
@@ -9621,8 +9643,8 @@ def self._preload_batch_{name}(records)
   att_ids = {{}}
   blobs = {{}}
   if ids.length > 0
-    ActiveRecord.adapter.select_rows("SELECT a.record_id AS record_id, a.id AS attachment_id, " + ActiveStorage::Blob.columns("b") + " FROM active_storage_attachments a JOIN active_storage_blobs b ON b.id = a.blob_id WHERE a.record_type = '{owner}' AND a.name = '{attr}' AND a.record_id IN (" + Db.escape_int_list(ids) + ")").each do |row|
-      rid = row["record_id"].to_i
+    ActiveRecord.adapter.select_rows("SELECT a.record_id AS record_id, a.id AS attachment_id, " + ActiveStorage::Blob.columns("b") + " FROM active_storage_attachments a JOIN active_storage_blobs b ON b.id = a.blob_id WHERE a.record_type = '{owner}' AND a.name = '{attr}' AND a.record_id IN (" + Db.{key_list}(ids) + ")").each do |row|
+      rid = row["record_id"].{to_key}
       att_ids[rid] = row["attachment_id"].to_i
       blobs[rid] = ActiveStorage::Blob.from_row(row)
     end
@@ -9642,7 +9664,8 @@ end
 "#
                 );
             }
-            PreloadKind::AttachedMany { attr, owner } => {
+            PreloadKind::AttachedMany { attr, owner, string_key } => {
+                let (key_list, to_key) = key_helpers(*string_key);
                 let _ = write!(
                     src,
                     r#"
@@ -9653,8 +9676,8 @@ def self._preload_batch_{name}(records)
   end
   rows_by = {{}}
   if ids.length > 0
-    ActiveRecord.adapter.select_rows("SELECT a.record_id AS record_id, a.id AS attachment_id, " + ActiveStorage::Blob.columns("b") + " FROM active_storage_attachments a JOIN active_storage_blobs b ON b.id = a.blob_id WHERE a.record_type = '{owner}' AND a.name = '{attr}' AND a.record_id IN (" + Db.escape_int_list(ids) + ") ORDER BY a.id").each do |row|
-      rid = row["record_id"].to_i
+    ActiveRecord.adapter.select_rows("SELECT a.record_id AS record_id, a.id AS attachment_id, " + ActiveStorage::Blob.columns("b") + " FROM active_storage_attachments a JOIN active_storage_blobs b ON b.id = a.blob_id WHERE a.record_type = '{owner}' AND a.name = '{attr}' AND a.record_id IN (" + Db.{key_list}(ids) + ") ORDER BY a.id").each do |row|
+      rid = row["record_id"].{to_key}
       list = rows_by[rid]
       if list.nil?
         list = []

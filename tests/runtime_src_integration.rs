@@ -1064,7 +1064,10 @@ fn every_runtime_method_body_concretely_typed() {
     // MEASURED 770 on 2026-10-16: a locale's own plural rule reads the
     // count the caller passed, an Integer, a Float or whatever else, as
     // rails-i18n's and CLDR's rules do (+16 in i18n_locale.rb).
-    const CEILING: usize = 770;
+    // MEASURED 771 on 2026-10-15: `Request#filtered_parameters` copies
+    // the request's params, whose values are whatever the request sent,
+    // into the Hash it filters (+1 in action_dispatch/request.rb).
+    const CEILING: usize = 771;
     assert!(
         total_gradual <= CEILING,
         "{total_gradual} Ty::Untyped sites exceeds ceiling of {CEILING}",
