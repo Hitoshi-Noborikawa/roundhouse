@@ -5832,6 +5832,18 @@ fn report_unsupported_bundled_constants(app: &App, target: BuildTarget) {
                 );
             }
         }
+        // A regexp literal maps to each target's own; the `Regexp` class does not, so its methods were emitted as names nothing defines.
+        if !matches!(target, "jruby" | "spinel")
+            && let crate::expr::ExprNode::Send { recv: Some(recv), method, .. } = &*expr.node
+            && matches!(&*recv.node, crate::expr::ExprNode::Const { path } if path.iter().map(|s| s.as_str()).skip_while(|s| s.is_empty()).eq(["Regexp"]))
+        {
+            emit::diagnostics::report_unsupported(
+                expr.span,
+                target,
+                "Regexp",
+                format!("`Regexp.{}` is Ruby's Regexp class, which the {target} emit does not map (a regexp literal it does)", method.as_str()),
+            );
+        }
         if !matches!(target, "jruby" | "spinel")
             && let crate::expr::ExprNode::Const { path } = &*expr.node
             && let ["Regexp", flag @ ("IGNORECASE" | "EXTENDED" | "MULTILINE")] = path.iter().map(|s| s.as_str()).skip_while(|s| s.is_empty()).collect::<Vec<_>>()[..]
