@@ -49,6 +49,8 @@ mod controller_sibling_classes;
 mod i18n_locales;
 #[path = "emit_and_run/i18n_runtime.rs"]
 mod i18n_runtime;
+#[path = "emit_and_run/helper_translate.rs"]
+mod helper_translate;
 #[path = "emit_and_run/i18n_subtree.rs"]
 mod i18n_subtree;
 #[path = "emit_and_run/i18n_plural_rules.rs"]

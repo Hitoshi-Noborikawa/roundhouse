@@ -602,6 +602,13 @@ pub fn apply_i18n_translate_lowering(app: &mut App) {
         }
         rewrite(body, &catalog, Site::Other)
     });
+    // An `app/helpers` module's instance methods run in the view: their bare `t` is ActionView's, with no template for a lazy key.
+    let helpers: std::collections::HashSet<crate::ident::ClassId> = app.helper_method_index.values().cloned().collect();
+    for lc in app.library_classes.iter_mut().filter(|lc| helpers.contains(&lc.name)) {
+        for m in lc.methods.iter_mut().filter(|m| m.receiver == crate::dialect::MethodReceiver::Instance) {
+            rewrite(&mut m.body, &catalog, Site::View(None));
+        }
+    }
     for controller in &mut app.controllers {
         let Some(scope) = controllers.get(&controller.name) else { continue };
         for item in &mut controller.body {
@@ -667,6 +674,22 @@ fn translates(app: &App, controller: &crate::dialect::Controller) -> bool {
 
 fn rewrite(expr: &mut Expr, catalog: &Catalog, site: Site<'_>) {
     expr.node.for_each_child_mut(&mut |c| rewrite(c, catalog, site));
+    // Folded as the view's `t` it is, without the `raw` a controller body has no helper for: nothing renders this copy.
+    if expr.decisions & crate::expr::HELPER_COPY_TRANSLATE != 0 {
+        expr.decisions &= !crate::expr::HELPER_COPY_TRANSLATE;
+        rewrite_one(expr, catalog, Site::View(None));
+        if let ExprNode::Send { recv: None, method, args, .. } = &*expr.node
+            && method.as_str() == "raw"
+            && args.len() == 1
+        {
+            *expr = args[0].clone();
+        }
+        return;
+    }
+    rewrite_one(expr, catalog, site);
+}
+
+fn rewrite_one(expr: &mut Expr, catalog: &Catalog, site: Site<'_>) {
     if let Some(spelled) = with_locale(expr) {
         *expr = spelled;
         return;

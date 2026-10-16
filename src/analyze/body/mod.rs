@@ -357,6 +357,7 @@ pub struct BodyTyper<'a> {
     inquirers: Option<&'a std::collections::HashSet<Symbol>>,
     /// The app's translations; Rails' English when absent.
     i18n: Option<&'a crate::i18n::Catalog>,
+    helper_modules: Option<&'a std::collections::HashSet<ClassId>>,
 }
 
 impl<'a> BodyTyper<'a> {
@@ -480,11 +481,12 @@ impl<'a> BodyTyper<'a> {
     }
 
     pub fn new(classes: &'a HashMap<ClassId, ClassInfo>) -> Self {
-        Self { classes, const_resolver: None, typed_constants: None, data_factories: None, inquirers: None, i18n: None }
+        Self { classes, const_resolver: None, typed_constants: None, data_factories: None, inquirers: None, i18n: None, helper_modules: None }
     }
 
-    pub(crate) fn with_i18n(mut self, catalog: &'a crate::i18n::Catalog) -> Self {
+    pub(crate) fn with_i18n(mut self, catalog: &'a crate::i18n::Catalog, helper_modules: &'a std::collections::HashSet<ClassId>) -> Self {
         self.i18n = Some(catalog);
+        self.helper_modules = Some(helper_modules);
         self
     }
 
@@ -1965,8 +1967,14 @@ impl<'a> BodyTyper<'a> {
                     (false, true) => self.translating_controller(ctx.self_ty.as_ref()),
                     _ => None,
                 };
+                // An `app/helpers` module runs in the view, so its `t` is ActionView's (with no template for a lazy key).
+                let in_helper = !ctx.class_side
+                    && matches!(ctx.self_ty.as_ref(), Some(Ty::Class { id, .. }) if self.helper_modules.is_some_and(|h| h.contains(id)));
+                let helper_copy = expr.decisions & crate::expr::HELPER_COPY_TRANSLATE != 0;
                 let site = match (&scope, ctx.in_view) {
                     (_, true) => crate::lower::i18n_translate::Site::View(ctx.view_name.as_ref().map(|v| v.as_str())),
+                    _ if helper_copy => crate::lower::i18n_translate::Site::View(None),
+                    (None, false) if in_helper => crate::lower::i18n_translate::Site::View(None),
                     (Some(scope), false) => crate::lower::i18n_translate::Site::Controller(scope),
                     (None, false) => crate::lower::i18n_translate::Site::Other,
                 };

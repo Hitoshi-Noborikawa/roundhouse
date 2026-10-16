@@ -2243,6 +2243,7 @@ end
     let late_sources = super::sources::drain();
     super::sources::assert_snapshot_matches(&[], &late_sources);
     super::unreachable_views::mark(&mut app);
+    super::uncalled_helper_copies::mark(&mut app);
     Ok(app)
 }
 

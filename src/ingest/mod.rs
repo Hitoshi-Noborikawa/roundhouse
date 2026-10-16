@@ -17,6 +17,7 @@
 
 mod alba;
 mod unreachable_views;
+mod uncalled_helper_copies;
 mod pagy;
 mod graphql_ruby;
 mod guarded_include;
