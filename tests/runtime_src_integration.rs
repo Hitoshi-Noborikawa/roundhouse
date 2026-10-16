@@ -1072,7 +1072,14 @@ fn every_runtime_method_body_concretely_typed() {
     // reached it and Spinel refused the `Hash[String, _]` declaration);
     // the key's `to_s` in `query_pairs` is read twice (+2 in
     // active_support_ext.rb).
-    const CEILING: usize = 773;
+    // MEASURED 776 on 2026-10-16: transactional saves (connection.rb).
+    // A touch remembers the `updated_at` it wrote beside the Dirty
+    // snapshot rather than inside it, and `changes_to_save` reads it
+    // back: the column-dependent attribute value, gradual as the
+    // snapshot's own values are (+2); and `transaction`'s branch that
+    // runs inside a transaction opened beneath ActiveRecord answers the
+    // block's untyped value, as the others do (+1).
+    const CEILING: usize = 776;
     assert!(
         total_gradual <= CEILING,
         "{total_gradual} Ty::Untyped sites exceeds ceiling of {CEILING}",
