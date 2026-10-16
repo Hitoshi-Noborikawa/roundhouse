@@ -683,13 +683,20 @@ pub fn ingest_app_with_vfs<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResult
     };
     let nested_app_roots: Vec<PathBuf> = roots.iter().skip(1).map(|root| dir.join(root)).collect();
     let mut support_seen: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
+    let boot_required = boot_required_files(vfs, dir);
+    let mut support_batches: Vec<(String, PathBuf, Vec<PathBuf>)> = Vec::new();
     for sub in support_roots(vfs, dir, &roots, &path_gems, &lib_ignores) {
-        let sub = sub.as_str();
-        let support_dir = dir.join(sub);
+        let support_dir = dir.join(&sub);
         if !vfs.is_dir(&support_dir) {
             continue;
         }
         let Ok(entries) = read_rb_files(vfs, &support_dir) else { continue };
+        support_batches.push((sub, support_dir, entries));
+    }
+    // Last, so a file a support root already reached is ingested once.
+    support_batches.push((String::new(), dir.to_path_buf(), boot_required.clone()));
+    for (sub, support_dir, entries) in support_batches {
+        let sub = sub.as_str();
         for entry in entries {
             if sub == "lib" && ignored_lib_file(&entry) {
                 continue;
@@ -2237,6 +2244,12 @@ end
     collect_binary_assets(vfs, dir, &mut app);
     let mut require_roots: Vec<String> = roots.iter().map(|r| r.display().to_string()).collect();
     require_roots.extend(support_roots(vfs, dir, &roots, &path_gems, &lib_ignores));
+    require_roots.extend(
+        boot_required
+            .iter()
+            .filter_map(|file| file.strip_prefix(dir).ok())
+            .map(|file| file.display().to_string()),
+    );
     app.app_requires = collect_app_requires(vfs, dir, &require_roots);
     // Generated re-ingest labels never register real sources. No later
     // pass may append source-backed FileIds beyond the indexed snapshot.
@@ -6938,6 +6951,80 @@ fn support_roots<V: Vfs + ?Sized>(
     out.retain(|root| !lib_ignores.iter().any(|ignored| ignored == root));
     out.sort();
     out.dedup();
+    out
+}
+
+/// Files `config/application.rb` and `config/environment.rb` load with a
+/// literal top-level `require_relative`, in file order.
+///
+/// Rails runs both files top to bottom before any initializer, so a
+/// constant defined in a file they load is defined for the whole process.
+/// An app that keeps boot-time settings in `config/site_settings.rb` and
+/// writes `require_relative "site_settings"` beside `require "rails/all"`
+/// has nothing in an autoload path, and no support root reached the file:
+/// every reference to its constants reported `constant not supported`
+/// (#1013).
+///
+/// `boot`, `application` and `environment` are the boot chain itself, not
+/// support code. A target must be an existing `.rb` file inside the app,
+/// reached without a symbolic link. A computed path, or one outside the
+/// app, is not followed; survey mode records it as a gap.
+fn boot_required_files<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> Vec<PathBuf> {
+    let config_dir = dir.join("config");
+    let boot_chain = ["boot.rb", "application.rb", "environment.rb"].map(|name| config_dir.join(name));
+    let mut out = Vec::new();
+    for name in ["application.rb", "environment.rb"] {
+        let file = config_dir.join(name);
+        let Ok(source) = vfs.read(&file) else { continue };
+        let parsed = ruby_prism::parse(&source);
+        let Some(program) = parsed.node().as_program_node() else { continue };
+        for statement in program.statements().body().iter() {
+            let Some(call) = statement.as_call_node() else { continue };
+            if call.receiver().is_some()
+                || call.block().is_some()
+                || super::util::constant_id_str(&call.name()) != "require_relative"
+            {
+                continue;
+            }
+            let arguments: Vec<_> =
+                call.arguments().map(|a| a.arguments().iter().collect()).unwrap_or_default();
+            let target = (arguments.len() == 1)
+                .then(|| super::util::string_value(&arguments[0]))
+                .flatten()
+                .and_then(|request| normalize_engine_library_require(dir, &config_dir, &request))
+                .map(|mut target| {
+                    if target.extension().is_none() {
+                        target.set_extension("rb");
+                    }
+                    target
+                });
+            match target {
+                Some(target) if boot_chain.contains(&target) => {}
+                Some(target)
+                    if target.extension().is_some_and(|e| e == "rb")
+                        && vfs.exists(&target)
+                        && !vfs.is_dir(&target)
+                        && !path_has_symlink_component(vfs, dir, &target) =>
+                {
+                    if !out.contains(&target) {
+                        out.push(target);
+                    }
+                }
+                _ => {
+                    if survey::is_active() {
+                        let location = statement.location();
+                        let text = String::from_utf8_lossy(location.as_slice());
+                        survey::record(&super::IngestError::Unsupported {
+                            file: file.display().to_string(),
+                            message: format!(
+                                "require_relative not followed (not a literal path to a Ruby file inside the app): `{text}`"
+                            ),
+                        });
+                    }
+                }
+            }
+        }
+    }
     out
 }
 
