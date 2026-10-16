@@ -2320,6 +2320,16 @@ module RequestDispatch
       content_or_opts = opts
       opts = nil
     end
+    # Rails' substitution values: a `?` in an attribute predicate
+    # (`"#row[data-n=?]", value`) takes the argument after the selector,
+    # and the equality test, if any, is the argument after that. Read as
+    # the content string instead, the value was looked for in the
+    # element's text and the predicate matched a literal "?".
+    if selector.to_s.include?("=?]") && content_or_opts.is_a?(String)
+      selector = selector.to_s.sub("=?]", "=\"#{content_or_opts}\"]")
+      content_or_opts = opts
+      opts = nil
+    end
     nodes = Dom.select(Dom.parse(body), selector)
     options = content_or_opts.is_a?(Hash) ? content_or_opts : opts
     if options.is_a?(Hash) && options[:count] == 0

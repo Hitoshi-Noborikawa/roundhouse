@@ -1386,23 +1386,19 @@ counts as enqueued too, and `assert_enqueued_email_with` checks that a
 mail went out, not the mailer, action, or arguments — the narrowing
 `assert_enqueued_with` already documents for jobs.
 
-### `remote_connections.disconnect` selects an empty set
+### `remote_connections.disconnect` selects an empty set on spinel
 
+On the CRuby overlay `disconnect` broadcasts on the selected identifier's
+internal channel and the matching sockets close themselves (see "An open
+socket outlives the authorization that opened it" below). On spinel
 `ActionCable.server.remote_connections.where(current_user: user)
-.disconnect` returns without closing anything. A remote connection is
-selected by its connection *identifiers*, and no connection in this
-runtime ever registers one: Turbo's streams subscribe by signed stream
-name through `Cable::Connection#handle_message`, and channel
-subscription dispatch — the half that would run `identified_by
-:current_user` — is not implemented. The selected set is genuinely
-empty, so the no-op is accurate rather than a stub.
+.disconnect` still returns without closing or broadcasting anything: no
+tep socket registers its identifier anywhere a broadcast could find it.
 
 **What it costs.** campfire calls this from `User#deactivate` and
-`User#reset_remote_connections`: a deactivated or banned user's live
-socket stays open. Nothing in the corpus's own tests can observe it
-(they assert on the database rows the same method deletes), which is
-exactly why it is written down here. When subscription dispatch lands,
-`ActionCable::RemoteConnections#where` is where the real selection goes.
+`User#reset_remote_connections`: on spinel a deactivated or banned
+user's live socket stays open, and campfire's room-destroy test, which
+asserts the internal-channel broadcast, fails there.
 
 ### A raw cable payload is JSON TEXT on spinel, a Hash on CRuby
 
@@ -2330,23 +2326,28 @@ methods the two lanes exclude are the same list, kept in both files.
 
 `ActionCable.server.remote_connections.where(current_user: user)
 .disconnect(reconnect: true)` — campfire's `User#deactivate` and
-`#reset_remote_connections` — selects an empty set and returns.
+`#reset_remote_connections` — closes that user's sockets on the CRuby
+lane and on no other.
 
-**Why.** Nothing indexes live connections by user. `Cable::Reactor`'s
-table is keyed by socket, and the identity a connection carries is read
-off it rather than looked up by it. Closing the gap means an index the
-reactor maintains on attach and drops on close, plus a posted close per
-hit.
+**The CRuby overlay does what Rails does.** `RemoteConnection#disconnect`
+broadcasts `{type: "disconnect", reconnect:}` on the internal channel
+`action_cable/<connection identifier>` (the identifier is Rails'
+`connection_gid`: each identifier's `to_gid_param`, sorted, joined by
+`:`). An identified `Cable::Connection` subscribes to its own internal
+channel when it starts, and `Cable::Registry.deliver` hands a message on
+it to `process_internal_message`, which sends the client
+`{"type":"disconnect","reason":"remote","reconnect":…}` and closes the
+socket. The client then replays its subscriptions, and membership is
+checked again at SUBSCRIBE time.
 
-**What it costs.** Membership is checked at SUBSCRIBE time, which is
-exactly the window campfire's `RoomMessagesChannel` comment calls out:
-"revoking a membership disconnects the user with `reconnect: true`, and
-the client then replays its subscriptions on the fresh socket." The
-replay is now authorized on the CRuby lane — a revoked member's
-resubscribe is refused. The disconnect that would FORCE that replay is
-what does not happen, so an already-open socket keeps delivering to a
-user whose membership was just revoked, until they reconnect for some
-other reason.
+**Spinel still selects an empty set.** `runtime/spinel/action_cable.rb`
+neither broadcasts nor subscribes: the tep lane's sockets are fds in
+`Tep::Broadcast`, with no index from identity to driver, so a
+broadcast on the internal channel would reach nobody. An already-open
+socket there keeps delivering to a user whose membership was just
+revoked, until they reconnect for some other reason, and campfire's
+`test_a_room_destroyed_later_resets_the_connections_of_its_former_members…`
+stays red on that lane because the broadcast it asserts is not made.
 
 ### Rich text renders EMPTY on a target with no safe-list sanitizer
 

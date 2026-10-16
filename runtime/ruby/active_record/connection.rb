@@ -207,6 +207,10 @@ module ActiveRecord
   end
 
   class Connection
+    def self.shared
+      @shared ||= Connection.new
+    end
+
     # This runtime's only backend. Lobsters branches on this to pick
     # its upsert dialect; the SQLite arm is the one we execute.
     def adapter_name
@@ -398,10 +402,15 @@ module ActiveRecord
       _adapter_exists_by_id?(key)
     end
 
-    # Stateless facade — every member delegates straight to `Db`, so a
-    # fresh instance per call is cheap and dodges class-ivar state.
+    # Stateless facade — every member delegates straight to `Db`. One
+    # instance per process, as Rails hands every caller (and every
+    # model class) the same connection object: a test that stubs
+    # `ActiveRecord::Base.connection.transaction_open?` must see that
+    # stub through `connection_pool.with_connection`, which a fresh
+    # instance per call would lose. Held on Connection, not on Base, so
+    # `User.connection` and `ActiveRecord::Base.connection` agree.
     def self.connection
-      ActiveRecord::Connection.new
+      ActiveRecord::Connection.shared
     end
 
     # Rails' `Model.sanitize_sql(["insert … values (?, ?)", a, b])` —

@@ -39,6 +39,8 @@ module ActiveRecord
   end
 
   class Connection
+    self.@shared: Connection?
+    def self.shared: () -> Connection
     def adapter_name: () -> String
     def quote: (String | Symbol | Integer | Float | bool | nil value) -> String
     def quote_string: (String str) -> String
