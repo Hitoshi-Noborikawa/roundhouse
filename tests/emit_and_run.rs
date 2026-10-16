@@ -15351,6 +15351,62 @@ end
 }
 
 
+// ---------------------------------------------------------------------
+// vite_typescript_tag / vite_javascript_tag: extra HTML options are
+// passed through to the script tag, the way vite_rails does. Without
+// this, a call like `vite_typescript_tag "gadget.ts", crossorigin:
+// "anonymous"` was an ingest gap for the whole call — on a large real
+// app that gap blocked every route that reached the view.
+// ---------------------------------------------------------------------
+
+#[test]
+fn vite_tag_html_options_pass_through_to_the_script_tag() {
+    const MANIFEST: &str = r#"{
+  "entrypoints/gadget.ts": {"file": "assets/gadget-abc.js", "src": "entrypoints/gadget.ts", "isEntry": true},
+  "entrypoints/widget.ts": {"file": "assets/widget-xyz.js", "src": "entrypoints/widget.ts", "isEntry": true}
+}
+"#;
+    emit_and_run::real_blog()
+        .write("public/vite/.vite/manifest.json", MANIFEST)
+        .write("public/vite/assets/gadget-abc.js", "console.log('gadget');\n")
+        .write("public/vite/assets/widget-xyz.js", "console.log('widget');\n")
+        .edit(
+            "app/views/layouts/application.html.erb",
+            "    <%= javascript_importmap_tags %>\n",
+            "    <%= javascript_importmap_tags %>\n    <%= vite_typescript_tag \"gadget.ts\", crossorigin: \"anonymous\", defer: true %>\n    <%= vite_typescript_tag \"widget.ts\", data: { turbo_track: \"reload\" } %>\n",
+        )
+        .edit(
+            "config/routes.rb",
+            "  root \"articles#index\"\n",
+            "  root \"articles#index\"\n  get \"/vite_options\", to: \"vite_options#show\"\n",
+        )
+        .write(
+            "app/controllers/vite_options_controller.rb",
+            "class ViteOptionsController < ApplicationController\n  def show\n  end\nend\n",
+        )
+        .write("app/views/vite_options/show.html.erb", "<p>vite options probe</p>\n")
+        .write(
+            "test/controllers/vite_options_controller_test.rb",
+            r##"require "test_helper"
+
+class ViteOptionsControllerTest < ActionDispatch::IntegrationTest
+  test "crossorigin, defer and a data hash pass through like vite_rails" do
+    get "/vite_options"
+    assert_response :success
+    assert_includes response.body,
+      %(<script src="/vite/assets/gadget-abc.js" crossorigin="anonymous" type="module" defer="defer"></script>)
+    assert_includes response.body,
+      %(<script src="/vite/assets/widget-xyz.js" crossorigin="" type="module" data-turbo-track="reload"></script>)
+    assert_no_match(/vite_typescript_tag/, response.body)
+  end
+end
+"##,
+        )
+        .run_test("test/controllers/vite_options_controller_test.rb")
+        .assert_passes();
+}
+
+
 
 // ---------------------------------------------------------------------
 // friendly_id: `Article.friendly.find` (slugged + history)

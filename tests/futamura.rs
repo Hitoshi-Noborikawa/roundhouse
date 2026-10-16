@@ -310,6 +310,50 @@ end
     fs::remove_dir_all(&out).unwrap();
 }
 
+/// Companion to `ingest_gap_in_a_rendered_layout_blocks_the_route`: on a
+/// large real app, a layout's `vite_typescript_tag "sign_up.ts",
+/// crossorigin: "anonymous"` was exactly this shape — a manifest entry
+/// resolves, but the extra `crossorigin:` keyword made the whole call an
+/// ingest gap, so the gap in the rendered layout blocked every route
+/// (301 of 314 on that app). With the pass-through modeled, the same
+/// layout lowers cleanly and the route clears.
+#[test]
+fn a_vite_tag_with_a_crossorigin_option_does_not_block_the_route() {
+    let src = scratch("layout-crossorigin-src");
+    let out = scratch("layout-crossorigin-out");
+    write(&src, "Gemfile", b"source \"https://rubygems.org\"\ngem \"rails\"\n");
+    write(&src, "config/routes.rb", b"Rails.application.routes.draw do\n  get \"widgets\" => \"widgets#index\"\nend\n");
+    write(&src, "app/controllers/application_controller.rb", b"class ApplicationController < ActionController::Base\nend\n");
+    write(&src, "app/controllers/widgets_controller.rb", br#"class WidgetsController < ApplicationController
+  def index
+    @name = "hi"
+  end
+end
+"#);
+    write(&src, "app/views/widgets/index.html.erb", b"<%= @name %>\n");
+    write(
+        &src,
+        "public/vite/.vite/manifest.json",
+        br#"{"entrypoints/application.ts": {"file": "assets/application-abc.js", "isEntry": true}}"#,
+    );
+    write(&src, "app/views/layouts/application.html.erb", b"<html><head><%= vite_typescript_tag \"application\", crossorigin: \"anonymous\" %></head><body><%= yield %></body></html>\n");
+
+    let run = Command::new(env!("CARGO_BIN_EXE_roundhouse"))
+        .args(["--target", "futamura", "--survey", "-o"])
+        .arg(&out)
+        .arg(&src)
+        .env("ROUNDHOUSE_FUTAMURA_LEDGER", "1")
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&run.stderr);
+    assert!(run.status.success(), "{stderr}");
+    assert!(stderr.contains("whole-route: 1 GET action(s) served by the lowered app; 0 left to Rails"), "{stderr}");
+    assert!(!stderr.contains("vite_typescript_tag"), "{stderr}");
+
+    fs::remove_dir_all(&src).unwrap();
+    fs::remove_dir_all(&out).unwrap();
+}
+
 /// A gap in a parent controller's class body (here an `around_action`
 /// block shape the ingester refuses, round-tripped as `Unknown` rather
 /// than lowered into the filter chain) must block every subclass route,

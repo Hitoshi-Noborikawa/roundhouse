@@ -5611,6 +5611,60 @@ fn a_vite_tag_without_a_manifest_entry_is_a_survey_gap() {
     );
 }
 
+/// On a large real app, `vite_typescript_tag 'sign_up.ts', crossorigin:
+/// 'anonymous'` was an ingest gap for the whole call — the extra keyword
+/// alone, not a missing manifest entry — which blocked every route that
+/// reached the view. `crossorigin:`, a boolean attribute (`defer:`) and a
+/// `data:` hash all pass through the way vite_rails forwards them to
+/// `javascript_include_tag`, so none of this is a gap any more.
+#[test]
+fn vite_tag_html_options_pass_through_without_a_survey_gap() {
+    let layout = (
+        "app/views/layouts/application.html.erb",
+        "<html><head><%= vite_javascript_tag \"application\", crossorigin: \"anonymous\", defer: true, data: { turbo_track: \"reload\" } %></head><body><%= yield %></body></html>\n",
+    );
+    let (messages, gaps) = vite_check(&[layout, VITE_MANIFEST]);
+    assert!(messages.iter().all(|m| !m.contains("vite_")), "{messages:#?}");
+    assert!(gaps.is_empty(), "{gaps:#?}");
+}
+
+/// `skip_preload_tags:`/`skip_style_tags:`/`media:` and the like change
+/// which tags get emitted, not just which attributes they carry —
+/// approximating them would silently produce the wrong markup, so they
+/// still gap the whole call, but the survey message now names the
+/// specific option rather than a blanket "options ... are not modeled".
+#[test]
+fn a_structural_vite_tag_option_still_gaps_by_name() {
+    let layout = (
+        "app/views/layouts/application.html.erb",
+        "<html><head><%= vite_javascript_tag \"application\", skip_preload_tags: true %></head><body><%= yield %></body></html>\n",
+    );
+    let (_, gaps) = vite_check(&[layout, VITE_MANIFEST]);
+    assert!(
+        gaps.iter().any(|g| g.contains("`vite_javascript_tag`: option `skip_preload_tags` is not modeled")),
+        "{gaps:#?}"
+    );
+}
+
+/// `aria:` needs its own array/boolean token-join rules we don't model
+/// yet — dropping just that option (rather than gapping the whole call,
+/// as an unrepresentable value in `crossorigin:`/`type:` still does) is
+/// what keeps a single odd option from blocking a route that otherwise
+/// has nothing wrong with it.
+#[test]
+fn an_unrepresentable_vite_tag_option_is_dropped_not_a_whole_call_gap() {
+    let layout = (
+        "app/views/layouts/application.html.erb",
+        "<html><head><%= vite_javascript_tag \"application\", crossorigin: \"anonymous\", aria: { hidden: true } %></head><body><%= yield %></body></html>\n",
+    );
+    let (messages, gaps) = vite_check(&[layout, VITE_MANIFEST]);
+    assert!(messages.iter().all(|m| !m.contains("vite_")), "{messages:#?}");
+    assert!(
+        gaps.iter().any(|g| g.contains("`vite_javascript_tag`: option(s) `aria` are not modeled and were dropped")),
+        "{gaps:#?}"
+    );
+}
+
 /// `include ActionView::RecordIdentifier` is admitted on a model and on a
 /// plain library class (no "includes unresolved" refusal), and `dom_id` /
 /// `dom_class` — the module's public surface — type as String there.
