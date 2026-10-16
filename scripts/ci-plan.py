@@ -93,6 +93,7 @@ SPINEL_TESTS = [
     "render_json_encoder_spinel",
     "url_helpers_absolute_spinel",
     "jbuilder_extract_attributes_spinel",
+    "hash_to_query_symbol_keys_spinel",
 ]
 # Seconds each suite took in spinel-framework (full run 38665931779), for
 # balancing its shards; a suite not listed counts as one Spinel build.
