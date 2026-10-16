@@ -201,22 +201,48 @@ module ActiveRecord
   # `connection.raw_connection` — see `Connection#raw_connection`.
   class RawConnection
     # SQLite3::Database#transaction: BEGIN in the given mode, the block,
-    # COMMIT; ROLLBACK and re-raise on an exception. Like the gem's, it
-    # sits below ActiveRecord, so `transaction_open?` does not see it.
+    # COMMIT; ROLLBACK and re-raise on an exception.
+    #
+    # When SQLite is already in a transaction — the test shim's fixture
+    # BEGIN, or a raw transaction this method already opened — a second
+    # BEGIN fails ("cannot start a transaction within a transaction")
+    # and a COMMIT would end the outer one. Nest a savepoint and
+    # release it, or roll back to it, so the outer transaction stays
+    # open. `Room::MessagesCount.with_immediate_write` takes this path
+    # inside a fixture example, because that frame is hidden from
+    # `transaction_open?` (see active_record_db_config.rb).
     def transaction(mode = :deferred)
-      Db.exec("BEGIN #{mode.to_s.upcase} TRANSACTION")
-      begin
-        result = yield
-      rescue Exception => e
+      if Db.transaction_open?
+        name = "rh_raw_#{Db._txn_depth}"
+        Db.exec("SAVEPOINT #{name}")
         begin
-          Db.exec("ROLLBACK")
-        rescue StandardError
-          # SQLite may have ended the transaction itself already.
+          result = yield
+        rescue Exception => e
+          begin
+            Db.exec("ROLLBACK TO SAVEPOINT #{name}")
+            Db.exec("RELEASE SAVEPOINT #{name}")
+          rescue StandardError
+            # SQLite may have ended the transaction itself already.
+          end
+          raise e
         end
-        raise e
+        Db.exec("RELEASE SAVEPOINT #{name}")
+        result
+      else
+        Db.exec("BEGIN #{mode.to_s.upcase} TRANSACTION")
+        begin
+          result = yield
+        rescue Exception => e
+          begin
+            Db.exec("ROLLBACK")
+          rescue StandardError
+            # SQLite may have ended the transaction itself already.
+          end
+          raise e
+        end
+        Db.exec("COMMIT")
+        result
       end
-      Db.exec("COMMIT")
-      result
     end
   end
 

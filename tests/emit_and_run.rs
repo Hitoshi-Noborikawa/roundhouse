@@ -936,6 +936,14 @@ class DestroyBatchTest < ActiveSupport::TestCase
     assert_equal 0, Comment.where(article_id: article.id).count
     assert_not Article.exists?(article.id)
   end
+
+  test "the fixture transaction does not look open to caches" do
+    assert_not Article.connection.transaction_open?
+    Article.transaction do
+      assert Article.connection.transaction_open?
+    end
+    assert_not Article.connection.transaction_open?
+  end
 end
 "##,
         )
@@ -969,6 +977,14 @@ class DestroyBatchCommitTest < ActiveSupport::TestCase
     assert_equal 0, releases
     assert_equal 0, Comment.where(article_id: article.id).count
     assert_not Article.exists?(article.id)
+  end
+
+  test "a real transaction looks open, and the example itself does not" do
+    assert_not Article.connection.transaction_open?
+    Article.transaction do
+      assert Article.connection.transaction_open?
+    end
+    assert_not Article.connection.transaction_open?
   end
 end
 "##,

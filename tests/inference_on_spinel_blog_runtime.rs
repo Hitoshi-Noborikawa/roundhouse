@@ -409,7 +409,12 @@ fn untyped_subexpressions_baseline() {
     // `_commit_enlisted_from` (37 -> 44, the extra `from` reads). Same
     // unmodeled `Db` accessors as the depth counter; the RBS-paired
     // gate types them.
-    const CEILING: usize = 787;
+    // Raw `transaction` savepoints when SQLite is already open (the
+    // fixture BEGIN must not be a second BEGIN): 787 -> 794, MEASURED.
+    // The seven new sites are that branch's `Db.transaction_open?`,
+    // `Db._txn_depth`, and `Db.exec` calls, unmodeled here like the
+    // other `Db` reads. The RBS-paired gate types the method.
+    const CEILING: usize = 794;
     assert!(
         existing_untyped <= CEILING && like_untyped <= LIKE_CEILING,
         "{} untyped sub-expressions on spinel-blog runtime — exceeds ledger: \

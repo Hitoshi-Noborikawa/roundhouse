@@ -136,7 +136,8 @@
       "owner": "compiler",
       "match": "expected no query matching /action_text_rich_texts",
       "match_test": "MessagesCachingTest#test_cached_pages_skip_presentation_queries",
-      "note": "room_test's fixture transaction BEGINs around the example. Campfire turns response caching off while `FragmentCache.transaction_open?` is true, so the second GET of the watercooler runs the presentation queries the test forbids. The file was 4/4 before that BEGIN and is 3/4 with it. The other three caching tests stay green."
+      "note": "room_test's fixture transaction BEGINs around the example. Campfire turns response caching off while `FragmentCache.transaction_open?` is true, so the second GET of the watercooler runs the presentation queries the test forbids.",
+      "at_zero": "The fixture frame is hidden from `transaction_open?`, and an uncommitted write moves the observer's data_version, so the cached page is dropped when the example edits a message. messages_caching_test is 4/4. The rule stays as a regression tripwire."
     },
     {
       "slug": "presentation-preload-introspection",

@@ -1963,17 +1963,21 @@ jobs:
       # non-joinable fixture transaction makes each destroy its own
       # savepoint (room_test 11/11); the CRuby pool pins that
       # connection so the request sees the uncommitted rows.
-      # messages_caching went 4/4 -> 3/4: the fixture BEGIN makes
-      # `FragmentCache.transaction_open?` true, so the second GET
-      # runs presentation queries. Still red, and outside this floor:
-      # ActiveRecord::Tasks 0/4, deferred preload 9/10,
-      # messages_caching 3/4, Object#extend 13/14. A parallel run can
-      # lose a channel file to Errno::EEXIST on `tmp/test`; those
-      # files are green serially and are counted here.
+      # messages_caching went 4/4 -> 3/4 on that measurement: the
+      # fixture BEGIN made `FragmentCache.transaction_open?` true.
+      #
+      # 577/82 -> 578/83. That frame is hidden from
+      # `transaction_open?`, and an uncommitted write moves the
+      # observer's data_version, so messages_caching is 4/4 again.
+      # room_test stays 11/11; `use_transactional_tests = false` still
+      # COMMITs. Still red, and outside this floor: ActiveRecord::Tasks
+      # 0/4, deferred preload 9/10, Object#extend 13/14. A parallel
+      # run can lose a channel file to Errno::EEXIST on `tmp/test`;
+      # those files are green serially and are counted here.
         env:
-          # Tip Campfire suite floor — 577/82 at CAMPFIRE_SHA 11d3fb9c.
-          FLOOR_TESTS: 577
-          FLOOR_FILES: 82
+          # Tip Campfire suite floor — 578/83 at CAMPFIRE_SHA 11d3fb9c.
+          FLOOR_TESTS: 578
+          FLOOR_FILES: 83
         run: |
           set -euo pipefail
           tests=$(awk -F'|' '{p += $3} END {print p+0}' /tmp/campfire-tally.txt)

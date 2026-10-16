@@ -321,6 +321,26 @@ module Db
     conn.transaction_active? && conn.instance_variable_get(:@rh_snapshot) != :open
   end
 
+  # ResponseCache watches `PRAGMA data_version` on a second, read-only
+  # connection. SQLite bumps that only when a transaction commits, so a
+  # fixture example's INSERT leaves the cached page in place and the
+  # next GET renders the rows from before the write. This counter moves
+  # on every real write; `SQLite3::Database#get_first_value` adds it to
+  # the pragma so the page is dropped. Transaction control does not
+  # count: the fixture BEGIN and its savepoints run before the example
+  # reads, and counting them would not change the answer between two
+  # GETs that write nothing.
+  def self.write_generation
+    @write_generation.nil? ? 0 : @write_generation
+  end
+
+  def self.note_data_write(sql)
+    word = sql.lstrip.split(" ").first.to_s.upcase
+    return nil if word == "BEGIN" || word == "COMMIT" || word == "ROLLBACK" || word == "SAVEPOINT" || word == "RELEASE" || word == "END"
+    @write_generation = write_generation + 1
+    nil
+  end
+
   # A request run on a connection this process did not open: the host
   # Rails app's own, lent by `--target futamura`'s whole-route bridge
   # (src/emit/futamura/routes.rb). No pool is configured in that mode.
@@ -659,6 +679,7 @@ module Db
 
   # exec's write path; the block runs the statement on the connection.
   def self.write(sql)
+    note_data_write(sql)
     # Any exec is (per the Db contract) DDL or a write — Rails
     # invalidates the whole query cache on write; so do we.
     qcache = Fiber[:rh_qcache]
@@ -1603,3 +1624,22 @@ module Db
     column_int(handle, idx) != 0
   end
 end
+
+# See Db.note_data_write. The ruby lane uses the sqlite3 gem's own
+# Database, which is what ResponseCache observes; spinel has its own
+# SQLite3::Database and does not load this file.
+module SQLite3
+  module DataVersionGeneration
+    def get_first_value(*args)
+      value = super
+      sql = args[0]
+      if !sql.nil? && sql == "PRAGMA data_version"
+        base = value.is_a?(Integer) ? value : 0
+        base + Db.write_generation
+      else
+        value
+      end
+    end
+  end
+end
+SQLite3::Database.prepend(SQLite3::DataVersionGeneration)
