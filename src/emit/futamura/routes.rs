@@ -30,7 +30,7 @@ use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 
 use crate::App;
 use crate::diagnostic::{Diagnostic, Severity};
-use crate::dialect::{LibraryClass, MethodReceiver};
+use crate::dialect::{ControllerBodyItem, LibraryClass, MethodReceiver};
 use crate::expr::{Expr, ExprNode, Literal, Pattern};
 use crate::ident::Symbol;
 use crate::lower::routes::FlatRoute;
@@ -57,10 +57,18 @@ struct Index<'a> {
     classes: HashMap<String, Vec<&'a LibraryClass>>,
     /// method name -> every (class, side) defining it, for fan-out.
     by_name: HashMap<Symbol, Vec<(String, bool)>>,
+    /// INTERIM (see `enqueue_send`'s fallback): the analyzer's own type
+    /// for every expression in the app's controller bodies, from before
+    /// `routes::plan`'s own re-lowering re-types them from scratch and
+    /// loses framework/private-helper receiver types (G2/G3, tracked
+    /// upstream as rubys/roundhouse#58). Keyed by exact source span
+    /// (file, start, end), since the re-lowering reads the same spans
+    /// without moving them.
+    analyzer_stamps: HashMap<(u32, u32, u32), Ty>,
 }
 
 impl<'a> Index<'a> {
-    fn new(lcs: &'a [LibraryClass]) -> Self {
+    fn new(lcs: &'a [LibraryClass], analyzer_stamps: HashMap<(u32, u32, u32), Ty>) -> Self {
         let mut classes: HashMap<String, Vec<&'a LibraryClass>> = HashMap::new();
         let mut by_name: HashMap<Symbol, Vec<(String, bool)>> = HashMap::new();
         for lc in lcs {
@@ -72,7 +80,7 @@ impl<'a> Index<'a> {
                     .push((lc.name.0.as_str().to_string(), is_class_side(&m.receiver)));
             }
         }
-        Index { classes, by_name }
+        Index { classes, by_name, analyzer_stamps }
     }
 
     /// Every body of `class`'s `name` on one side (a reopened class or a
@@ -254,7 +262,7 @@ pub fn plan(lowered: &App, diags: &[Diagnostic], gaps: &[(String, String)]) -> R
         lcs
     });
     lcs.extend(lowered.library_classes.iter().cloned());
-    let index = Index::new(&lcs);
+    let index = Index::new(&lcs, analyzer_stamps(lowered));
     // Controllers: their actions keep the app's spans under a
     // re-synthesized header.
     let controllers: HashSet<String> = lowered.controllers.iter().map(|c| c.name.0.as_str().to_string()).collect();
@@ -679,7 +687,32 @@ fn enqueue_send(
             // framework object, whose methods are the runtime's.
             Some(_) if rooted_in_framework(index, class, class_side, recv.as_ref().unwrap()) => {}
             Some((_, ty)) => {
-                let classes = ty.map(classes_of).unwrap_or_default();
+                // INTERIM (rubys/roundhouse#58, G2/G3): `routes::plan`'s
+                // own re-lowering re-types every body from scratch and
+                // loses the analyzer's type for values that come from a
+                // framework helper (Devise's `current_<scope>`) or the
+                // app's own private helpers (pinned `Untyped` on purpose
+                // by #810), reading back as the open `Var`/`Bottom`
+                // sentinel or `Untyped`. Only in that case, fall back to
+                // the analyzer's own stamp for this exact receiver span
+                // (`lowered.controllers`, never re-lowered) — but only
+                // when the analyzer itself considers it resolved, never
+                // a `Var`/`Bottom`/`Untyped` of its own and never a
+                // union with an unresolved member, so a wrong guess can
+                // never make the planner skip a real dispatch target.
+                // Remove this once G2/G3 are settled upstream.
+                let needs_fallback = ty.is_none_or(|t| t.is_open() || t.is_unknown());
+                let classes = if needs_fallback {
+                    let r = recv.as_ref().unwrap();
+                    index
+                        .analyzer_stamps
+                        .get(&(r.span.file.0, r.span.start, r.span.end))
+                        .filter(|t| !t.is_open() && !t.is_unknown() && !t.mentions_unknown())
+                        .map(classes_of)
+                        .unwrap_or_else(|| ty.map(classes_of).unwrap_or_default())
+                } else {
+                    ty.map(classes_of).unwrap_or_default()
+                };
                 if classes.is_empty() {
                     fan_out(method, &mut push);
                 } else {
@@ -738,6 +771,39 @@ fn rooted_in_framework(index: &Index, class: &str, class_side: bool, e: &Expr) -
         ExprNode::Send { recv: None, method, .. } => index.lookup(class, method, class_side).is_none(),
         _ => false,
     }
+}
+
+/// INTERIM (see `enqueue_send`'s fallback, rubys/roundhouse#58): every
+/// expression's type as the analyzer itself left it on `app.controllers`
+/// — the app's own action and private-helper bodies — keyed by exact
+/// source span. `routes::plan` re-lowers these same bodies into fresh
+/// `LibraryClass`es through `emit::ruby::lowered_controller_lcs_with_layout`,
+/// which reads `app.controllers` by shared reference and re-types a
+/// *clone* of each body from scratch (`lower::typing::type_method_body`);
+/// it never mutates `app.controllers` itself, so the analyzer's original
+/// stamps survive here untouched. The two trees share spans because the
+/// lowering only re-types in place — it does not move or resynthesize
+/// expression spans — so a span found here names the same source
+/// location as its counterpart in the re-lowered body.
+fn analyzer_stamps(app: &App) -> HashMap<(u32, u32, u32), Ty> {
+    let mut out = HashMap::new();
+    let mut record = |e: &Expr| {
+        if let Some(ty) = &e.ty {
+            if e.span.file.0 != 0 {
+                out.entry((e.span.file.0, e.span.start, e.span.end)).or_insert_with(|| ty.clone());
+            }
+        }
+    };
+    for c in &app.controllers {
+        for item in &c.body {
+            match item {
+                ControllerBodyItem::Action { action, .. } => visit(&action.body, &mut record),
+                ControllerBodyItem::ClassMethod { method, .. } => visit(&method.body, &mut record),
+                _ => {}
+            }
+        }
+    }
+    out
 }
 
 /// App classes a typed receiver can be. Empty means "unknown": fan out.
