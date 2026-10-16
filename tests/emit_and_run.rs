@@ -2902,6 +2902,43 @@ fn dry_struct_classes_run_lowered() {
     assert!(run.stdout.contains("dry-struct clock contract passed"));
 }
 
+/// `/(?<name>..)/ =~ str` assigns each named group to a local (nil when
+/// nothing matches) and answers the match's index: as a statement, as an
+/// `if` condition, and as a method's value. Checked against CRuby.
+#[test]
+fn named_capture_matches_assign_their_locals() {
+    let run = emit_and_run::real_blog()
+        .write("lib/matcher.rb", r##"class Matcher
+  def self.map_name(html)
+    /usemap=\s*['"]#(?<map_name>\S+?)['"]/m =~ html
+    map_name
+  end
+
+  def self.pair(text)
+    if /(?<a>\d+)-(?<b>\d+)/ =~ text
+      [a, b]
+    else
+      [a, b, :none]
+    end
+  end
+
+  def self.index(text)
+    /(?<w>x)/ =~ text
+  end
+end
+"##)
+        .run_ruby(r##"raise "map" unless Matcher.map_name(%(<img usemap="#m1">)) == "m1"
+raise "map none" unless Matcher.map_name("none").nil?
+raise "pair" unless Matcher.pair("1-2") == ["1", "2"]
+raise "pair none" unless Matcher.pair("x") == [nil, nil, :none]
+raise "index" unless Matcher.index("abx") == 2
+raise "index none" unless Matcher.index("q").nil?
+puts "named captures passed"
+"##);
+    run.assert_passes();
+    assert!(run.stdout.contains("named captures passed"));
+}
+
 #[test]
 fn dry_monads_results_run_lowered() {
     let run = dry_monads::overlay().run_ruby(&dry_monads::assertions());
