@@ -99,6 +99,7 @@ SPINEL_TESTS = [
     "jbuilder_extract_attributes_spinel",
     "hash_to_query_symbol_keys_spinel",
     "storage_proxy_path_spinel",
+    "filter_block_params_spinel",
 ]
 # Seconds each suite took in spinel-framework (main run 38936441376, its
 # test binary's compile included), for balancing its shards; a suite not
