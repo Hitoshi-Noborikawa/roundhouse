@@ -867,6 +867,26 @@ module ActiveStorage
       service_route("proxy", disposition)
     end
 
+    # Rails' `Blob::Servable`, with activestorage 8.1.4's default
+    # lists: an uploaded type a browser would RUN (HTML, SVG, XML, ...)
+    # is served as `application/octet-stream`, and any type outside the
+    # inline list is an attachment whatever the URL asks. The content
+    # type is the uploader's word, so serving it inline as declared lets
+    # an upload script the app's origin.
+    def content_type_for_serving
+      ActiveStorage.content_types_to_serve_as_binary.include?(@content_type) ? "application/octet-stream" : @content_type
+    end
+
+    # "attachment" when Rails forces it, "" when the caller's
+    # disposition stands.
+    def forced_disposition_for_serving
+      if ActiveStorage.content_types_to_serve_as_binary.include?(@content_type) || !ActiveStorage.content_types_allowed_inline.include?(@content_type)
+        "attachment"
+      else
+        ""
+      end
+    end
+
     def service_route(kind, disposition)
       base = "/rails/active_storage/blobs/" + kind + "/" + signed_id + "/" +
              ActiveStorage.url_filename(@filename)
@@ -929,9 +949,12 @@ module ActiveStorage
       [parts[0].to_s, parts[1].to_s]
     end
 
+    # Rails' `Blob#url` signs `forced_disposition_for_serving ||
+    # disposition`, so a forced attachment holds on the disk route too.
     def self.disk_url(blob, disposition)
+      forced = blob.forced_disposition_for_serving
       ActiveStorage::Current.base_url + "/rails/active_storage/disk/" +
-        encode(blob.key, disposition) + "/" + ActiveStorage.url_filename(blob.filename.to_s)
+        encode(blob.key, forced == "" ? disposition : forced) + "/" + ActiveStorage.url_filename(blob.filename.to_s)
     end
 
     # The token a direct upload's PUT carries (Rails' `DiskService#
@@ -1008,6 +1031,21 @@ module ActiveStorage
   # the last path segment (`*filename`, cosmetic — the key is in the
   # signed id). URI-component encoded so a name with a space or a
   # slash cannot break the path.
+  # activestorage 8.1.4's `content_types_to_serve_as_binary` and
+  # `content_types_allowed_inline` defaults (engine.rb), read by
+  # `Blob#content_type_for_serving` / `#forced_disposition_for_serving`.
+  def self.content_types_to_serve_as_binary
+    ["text/html", "image/svg+xml", "application/postscript",
+     "application/x-shockwave-flash", "text/xml", "application/xml",
+     "application/xhtml+xml", "application/mathml+xml", "text/cache-manifest"]
+  end
+
+  def self.content_types_allowed_inline
+    ["image/webp", "image/avif", "image/png", "image/gif", "image/jpeg",
+     "image/tiff", "image/bmp", "image/vnd.adobe.photoshop",
+     "image/vnd.microsoft.icon", "application/pdf"]
+  end
+
   def self.url_filename(filename)
     ActionView::ViewHelpers.url_encode_component(filename)
   end

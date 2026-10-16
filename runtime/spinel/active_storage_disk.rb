@@ -369,9 +369,11 @@ module ActiveStorage
           head(:not_found)
           return nil
         end
-        disposition = Params.str(@params, "disposition", "inline") == "attachment" ? "attachment" : "inline"
+        forced = blob.forced_disposition_for_serving
+        asked = forced == "" ? Params.str(@params, "disposition", "inline") : forced
+        disposition = asked == "attachment" ? "attachment" : "inline"
         headers["Cache-Control"] = "max-age=3155695200, public, immutable"
-        send_data(service.download(blob.key), type: blob.content_type, disposition: disposition)
+        send_data(service.download(blob.key), type: blob.content_type_for_serving, disposition: disposition)
         headers["Content-Disposition"] = disposition + "; filename=\"" +
           ActiveStorage.url_filename(blob.filename.to_s) + "\""
         nil
@@ -555,7 +557,7 @@ module ActiveStorage
         return nil
       end
       headers["Cache-Control"] = "max-age=3600, public"
-      send_data(service.download(key), type: blob.content_type, disposition: disposition)
+      send_data(service.download(key), type: blob.content_type_for_serving, disposition: disposition)
       # send_data writes only `inline`/`attachment`; restore the
       # sanitized filename after that overwrite.
       headers["Content-Disposition"] = (disposition == "attachment" ? "attachment" : "inline") + "; filename=\"" +

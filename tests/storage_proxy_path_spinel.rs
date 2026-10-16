@@ -146,3 +146,61 @@ fn storage_proxy_and_redirect_paths_match_rails_on_spinel() {
         ))
         .assert_passes();
 }
+
+/// Rails 8.1.4 never serves an uploaded active type inline: the Blob's
+/// `content_type_for_serving` turns `content_types_to_serve_as_binary`
+/// (HTML, SVG, XML, ...) into `application/octet-stream`, and
+/// `forced_disposition_for_serving` makes anything outside
+/// `content_types_allowed_inline` an attachment, whatever the URL asks.
+/// Both serving routes apply it: the proxy, and the redirect's disk
+/// URL. The expectations are activestorage 8.1.4's answers for the same
+/// four uploads on both routes (the disk route reached through the 302).
+const SERVING_SCRIPT: &str = r#"
+[
+  ["page.html", "text/html", "application/octet-stream", "attachment"],
+  ["pic.svg", "image/svg+xml", "application/octet-stream", "attachment"],
+  ["pic.png", "image/png", "image/png", "inline"],
+  ["notes.txt", "text/plain", "text/plain", "attachment"],
+].each do |row|
+  doc = Doc.create!(name: row[0])
+  doc.file.attach("<b>bytes</b>", row[0], row[1])
+  sid = doc.file.blob.signed_id
+
+  proxy = ActiveStorage::Blobs::ProxyController.new
+  proxy.params = {"signed_id" => sid, "filename" => row[0], "disposition" => "inline"}
+  proxy.process_action(:show)
+  raise row[0] + " proxy type " + proxy.content_type.to_s unless proxy.content_type == row[2]
+  disposition = proxy.headers["Content-Disposition"].to_s
+  raise row[0] + " proxy disposition " + disposition unless disposition.start_with?(row[3] + ";")
+
+  redirect = ActiveStorage::Blobs::RedirectController.new
+  redirect.params = {"signed_id" => sid, "filename" => row[0]}
+  redirect.process_action(:show)
+  parts = redirect.location.to_s.split("/")
+  disk = ActiveStorage::DiskController.new
+  disk.params = {"encoded_key" => parts[parts.length - 2], "filename" => parts[parts.length - 1]}
+  disk.process_action(:show)
+  raise row[0] + " disk status " + disk.status.to_s unless disk.status == 200
+  raise row[0] + " disk type " + disk.content_type.to_s unless disk.content_type == row[2]
+  disposition = disk.headers["Content-Disposition"].to_s
+  raise row[0] + " disk disposition " + disposition unless disposition.start_with?(row[3] + ";")
+end
+puts "serving rules passed"
+"#;
+
+#[test]
+fn active_content_types_are_served_as_rails_serves_them_on_cruby() {
+    app()
+        .run_ruby(&format!("require_relative \"app/models/doc\"\n{SERVING_SCRIPT}"))
+        .assert_passes();
+}
+
+#[test]
+#[ignore = "requires the Spinel toolchain"]
+fn active_content_types_are_served_as_rails_serves_them_on_spinel() {
+    app()
+        .run_spinel_with_rbs(&format!(
+            "Db.configure(\":memory:\")\nSchema.statements.each {{ |sql| Db.exec(sql) }}\nActiveRecord.adapter = SqliteAdapter\n{SERVING_SCRIPT}"
+        ))
+        .assert_passes();
+}
