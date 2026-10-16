@@ -186,6 +186,9 @@ pub struct ClassInfo {
     pub overridden_attributes: std::collections::HashSet<Symbol>,
     /// Methods callable on the class itself: `Post.all`, `Post.find(id)`.
     pub class_methods: HashMap<Symbol, Ty>,
+    /// Catalog entries and source methods can have the same gradual
+    /// return type, so a call-site refinement needs their provenance.
+    pub source_class_methods: std::collections::HashSet<Symbol>,
     /// Source declares its own class-side `new`, whose result need not be self.
     pub declares_constructor: bool,
     /// Which of `class_methods` had their return type inferred FROM a

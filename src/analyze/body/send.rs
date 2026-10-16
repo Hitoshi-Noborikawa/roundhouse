@@ -58,7 +58,7 @@ impl<'a> BodyTyper<'a> {
     /// The class-side registration in `analyze/mod.rs` types these
     /// `Array<Untyped>` because "column type unknowable from the name
     /// alone" — true of the METHOD, false of the CALL. Here the column
-    /// is a Symbol literal and the model is known, so the schema
+    /// is a literal Symbol or String and the model is known, so the schema
     /// answers: `sessions.pluck(:ip_address)` is `Array[Str]`, not an
     /// open var.
     ///
@@ -70,10 +70,8 @@ impl<'a> BodyTyper<'a> {
     /// strict target cannot compile ([[feedback_types_are_performance_
     /// avoid_bags]]).
     ///
-    /// MULTI-COLUMN `pluck(:a, :b)` is not claimed: Rails answers an
-    /// Array of tuples, which is `Ty::Array<Ty::Array<...>>` only if
-    /// the columns share a type. The registered `Array<Untyped>`
-    /// stands for that form.
+    /// Multiple columns produce a tuple in argument order, preserving
+    /// each column's type even when the columns have different types.
     fn column_projection(
         &self,
         model: &ClassId,
@@ -83,12 +81,39 @@ impl<'a> BodyTyper<'a> {
         if !matches!(method.as_str(), "pluck" | "pick") {
             return None;
         }
-        let [arg] = args else { return None };
-        let ExprNode::Lit { value: crate::expr::Literal::Sym { value: col } } = &*arg.node else {
+        if args.is_empty() {
             return None;
-        };
+        }
+        let mut current = Some(model);
+        for _ in 0..32 {
+            let Some(id) = current else { break };
+            let Some(class) = self.classes().get(id) else { break };
+            if class.source_class_methods.contains(method) {
+                return None;
+            }
+            current = class.parent.as_ref();
+        }
         let cls = self.classes().get(model)?;
-        let col_ty = cls.instance_methods.get(col)?.clone();
+        let columns = args
+            .iter()
+            .map(|arg| {
+                let name = match &*arg.node {
+                    ExprNode::Lit { value: crate::expr::Literal::Sym { value } } => value.clone(),
+                    ExprNode::Lit { value: crate::expr::Literal::Str { value } } => Symbol::from(value.as_str()),
+                    _ => return None,
+                };
+                if cls.attributes.fields.is_empty() {
+                    cls.instance_methods.get(&name).cloned()
+                } else {
+                    cls.attributes.fields.get(&name).cloned()
+                }
+            })
+            .collect::<Option<Vec<_>>>()?;
+        let col_ty = if columns.len() == 1 {
+            columns.into_iter().next()?
+        } else {
+            Ty::Tuple { elems: columns.into() }
+        };
         Some(match method.as_str() {
             // `pick` is `pluck(...).first` — the column value, or nil
             // when the relation is empty.
@@ -1632,6 +1657,12 @@ impl<'a> BodyTyper<'a> {
                         }
                     }
                     if !instance_side && let Some(ty) = cls.class_methods.get(method) {
+                        if call_args.len() > 1 && cls.table.is_some()
+                            && matches!(ty, Ty::Array { elem } if matches!(elem.as_ref(), Ty::Untyped))
+                            && let Some(projected) = self.column_projection(id, method, call_args)
+                        {
+                            return projected;
+                        }
                         return unwrap_fn_ret(&subst(ty));
                     }
                     if let Some(ty) = cls.instance_methods.get(method) {
