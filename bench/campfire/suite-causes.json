@@ -67,7 +67,8 @@
       "title": "`ActionView::Base` unnamed in fragment/cache tests",
       "owner": "compiler",
       "match": "uninitialized constant ActionView::Base",
-      "note": "`FragmentRenderingTest#test_message_controls_survive_creator_edits…` names `ActionView::Base` (cache lookup / fragment store identity). The constant is not on the emit; sibling fragment fails share the same file's cache story."
+      "note": "`FragmentRenderingTest#test_message_controls_survive_creator_edits…` names `ActionView::Base` (cache lookup / fragment store identity). The constant is not on the emit; sibling fragment fails share the same file's cache story.",
+      "at_zero": "served by the ActionView::Base#form_with peel (b513fa665): fragment_rendering_test is 9/9 on Campfire 11d3fb9. The rule stays as a regression tripwire."
     },
     {
       "slug": "native-validators-304",
@@ -84,7 +85,8 @@
       "owner": "compiler",
       "match": ".",
       "match_test": "FragmentRenderingTest#",
-      "note": "Five fails in one file: `assert_same` on the bounded MemoryStore, jbuilder HTML token state, detached-broadcast `to_html` on nil, cross-room content-validated hits, plus the `ActionView::Base` constant (also matched above when that message wins). Shared view/cache runtime — largest file-green opportunity on the tip suite."
+      "note": "Five fails in one file: `assert_same` on the bounded MemoryStore, jbuilder HTML token state, detached-broadcast `to_html` on nil, cross-room content-validated hits, plus the `ActionView::Base` constant (also matched above when that message wins). Shared view/cache runtime — largest file-green opportunity on the tip suite.",
+      "at_zero": "fragment_rendering_test is 9/9 on Campfire 11d3fb9 after ActionView::Base#form_with (b513fa665). The rule stays as a regression tripwire."
     },
     {
       "slug": "message-creation-tx",
@@ -125,7 +127,16 @@
       "owner": "compiler",
       "match": ".",
       "match_test": "RoomTest#(test_a_room_destroyed_later|test_each_message_is_destroyed_in_its_own_transaction)",
-      "note": "`assert_broadcast_on` for connection reset after late destroy, and per-message destroy transaction interleaving. Shared cable recording + destroy batching."
+      "note": "`assert_broadcast_on` for connection reset after late destroy, and per-message destroy transaction interleaving. Shared cable recording + destroy batching.",
+      "at_zero": "served by the room-destroy peel (6e3405f50): a non-joinable fixture transaction opens a savepoint per destroy, and room_test is 11/11. `use_transactional_tests = false` still COMMITs. The rule stays as a regression tripwire."
+    },
+    {
+      "slug": "messages-caching-fixture-txn",
+      "title": "Cached message page still queries while the fixture transaction is open",
+      "owner": "compiler",
+      "match": "expected no query matching /action_text_rich_texts",
+      "match_test": "MessagesCachingTest#test_cached_pages_skip_presentation_queries",
+      "note": "room_test's fixture transaction BEGINs around the example. Campfire turns response caching off while `FragmentCache.transaction_open?` is true, so the second GET of the watercooler runs the presentation queries the test forbids. The file was 4/4 before that BEGIN and is 3/4 with it. The other three caching tests stay green."
     },
     {
       "slug": "presentation-preload-introspection",

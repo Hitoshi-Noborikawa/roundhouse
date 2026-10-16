@@ -1956,16 +1956,24 @@ jobs:
       # Content-Security-Policy (cached_responses 13/13). ruby-vips
       # loads after boot, so Nokogiri keeps the libxml that accepts
       # `*:` and css-class() (messages_helper 17/17, boosts 5/5,
-      # rooms_refreshes 1/1). Still red, and outside this floor:
-      # ActiveRecord::Tasks 0/4, ActionView::Base 8/9, deferred
-      # preload 9/10, room destroy 10/11, Object#extend 13/14.
-      # A parallel run can lose a channel file to Errno::EEXIST on
-      # `tmp/test`; those files are green serially and are counted
-      # here.
+      # rooms_refreshes 1/1).
+      #
+      # 576/81 -> 577/82. `ActionView::Base#form_with` runs when a
+      # template form site runs (fragment_rendering 9/9). A
+      # non-joinable fixture transaction makes each destroy its own
+      # savepoint (room_test 11/11); the CRuby pool pins that
+      # connection so the request sees the uncommitted rows.
+      # messages_caching went 4/4 -> 3/4: the fixture BEGIN makes
+      # `FragmentCache.transaction_open?` true, so the second GET
+      # runs presentation queries. Still red, and outside this floor:
+      # ActiveRecord::Tasks 0/4, deferred preload 9/10,
+      # messages_caching 3/4, Object#extend 13/14. A parallel run can
+      # lose a channel file to Errno::EEXIST on `tmp/test`; those
+      # files are green serially and are counted here.
         env:
-          # Tip Campfire suite floor — 576/81 at CAMPFIRE_SHA 11d3fb9c.
-          FLOOR_TESTS: 576
-          FLOOR_FILES: 81
+          # Tip Campfire suite floor — 577/82 at CAMPFIRE_SHA 11d3fb9c.
+          FLOOR_TESTS: 577
+          FLOOR_FILES: 82
         run: |
           set -euo pipefail
           tests=$(awk -F'|' '{p += $3} END {print p+0}' /tmp/campfire-tally.txt)
