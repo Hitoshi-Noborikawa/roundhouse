@@ -90,14 +90,168 @@ module ActiveSupport
       @subscribers.any? { |pattern, _| pattern === name }
     end
 
+    # A one-argument callback gets an `Event`, as Rails hands one to a
+    # subscriber whose block or callable takes one (`->(event) {
+    # event.payload[:hits] }`); any other arity gets the five arguments.
     def self.instrument(name, payload)
       return unless listening?(name)
       now = Time.now
-      @subscribers.each do |pattern, callback|
-        callback.call(name, now, now, nil, payload) if pattern === name
+      @subscribers.dup.each do |pattern, callback|
+        next unless pattern === name
+        if callback.arity == 1
+          callback.call(Event.new(name, now, now, nil, payload))
+        else
+          callback.call(name, now, now, nil, payload)
+        end
+      end
+    end
+
+    class Event
+      attr_reader :name, :time, :end, :transaction_id, :payload
+
+      def initialize(name, start, ending, transaction_id, payload)
+        @name = name
+        @time = start
+        @end = ending
+        @transaction_id = transaction_id
+        @payload = payload
+      end
+    end
+
+    # `subscribed(callback, name) { … }` for every event this file
+    # reports, not just SQL: subscribed for the block, unsubscribed
+    # after, as Rails does. SQL keeps the shared harness's capture,
+    # which reads every statement and is not an instrument call here.
+    class << self
+      alias_method :__rh_shared_subscribed, :subscribed
+
+      def subscribed(callback, name, &block)
+        return __rh_shared_subscribed(callback, name, &block) if name == "sql.active_record"
+        subscriber = subscribe(name, callback)
+        begin
+          block.call
+        ensure
+          unsubscribe(subscriber)
+        end
       end
     end
   end
+end
+
+# ActiveSupport's own store reports what Rails' does: `cache_read` with
+# the normalized key and `hit`, `cache_write`, and `cache_read_multi`
+# with the keys asked for and the ones found (`hits`) — the events
+# campfire's fragment tests subscribe to. A fetch is a read, then on a
+# miss a write, as Rails instruments it.
+module ActiveSupport
+  module Cache
+    class MemoryStore
+      module Instrumented
+        def read(name, options = nil)
+          key = ActiveSupport::Cache.expanded_key(name)
+          hit = exist?(name)
+          value = super
+          ActiveSupport::Notifications.instrument("cache_read.active_support", { key: key, hit: hit })
+          value
+        end
+
+        def write(name, value, options = nil)
+          stored = super
+          ActiveSupport::Notifications.instrument("cache_write.active_support", { key: ActiveSupport::Cache.expanded_key(name) })
+          stored
+        end
+
+        def fetch(name)
+          key = ActiveSupport::Cache.expanded_key(name)
+          hit = exist?(name)
+          ActiveSupport::Notifications.instrument("cache_read.active_support", { key: key, hit: hit, super_operation: :fetch })
+          super
+        end
+
+        def read_multi(*names)
+          found = super
+          ActiveSupport::Notifications.instrument("cache_read_multi.active_support", {
+            key: names.map { |name| ActiveSupport::Cache.expanded_key(name) },
+            hits: found.keys.map { |name| ActiveSupport::Cache.expanded_key(name) }
+          })
+          found
+        end
+      end
+      prepend Instrumented
+    end
+  end
+end
+
+# Rails' collection renderer reports `render_collection.action_view`
+# once per collection: the partial's template file, the element count,
+# and — under collection caching — how many fragments were served from
+# the store. The runtime's hook carries the facts; this reports them.
+module ActionView
+  module ViewHelpers
+    class << self
+      alias_method :__rh_collection_rendered, :collection_rendered
+
+      def collection_rendered(identifier, hits)
+        ActiveSupport::Notifications.instrument("render_collection.action_view", {
+          identifier: File.join(Dir.pwd, identifier),
+          count: hits.length,
+          cache_hits: hits.count { |hit| !hit.nil? }
+        })
+        __rh_collection_rendered(identifier, hits)
+      end
+    end
+  end
+end
+
+# The integration session's cookie jar is Rack::Test's, which answers nil
+# for a cookie the browser does not hold — `assert_not cookies[
+# "_campfire_session"]` asks exactly that. The runtime's controller-side
+# jar answers "" (typed String, see action_controller/cookies.rb); the
+# test's view of the browser reads nil. A deleted cookie (written back
+# as "") is one the browser dropped.
+module TestCookieReads
+  def [](key)
+    value = to_h[key.to_s]
+    value.nil? || value == "" ? nil : super
+  end
+end
+
+module RequestDispatch
+  module NilCookieReads
+    def cookies
+      jar = super
+      jar.extend(TestCookieReads) unless jar.is_a?(TestCookieReads)
+      jar
+    end
+  end
+  prepend NilCookieReads
+end
+
+# rails-dom-testing's `assert_select` hands its block the matched
+# elements; the shared harness's string scanner has no elements to
+# hand. Here they are Nokogiri's, selected from the same root.
+module RequestDispatch
+  module SelectedElements
+    def assert_select(selector_or_root, content_or_opts = nil, opts = nil, &block)
+      return super unless block
+      super(selector_or_root, content_or_opts, opts, &nil)
+      if selector_or_root.is_a?(String)
+        root = Nokogiri::HTML5.fragment(@__response.body.to_s)
+        selector = selector_or_root
+        substitute = content_or_opts
+      else
+        root = selector_or_root
+        root = Nokogiri::HTML5.fragment(root.to_s) if root.is_a?(String)
+        selector = content_or_opts
+        substitute = opts
+      end
+      if selector.include?("?") && (substitute.is_a?(String) || substitute.is_a?(Numeric))
+        selector = selector.sub("?", substitute.to_s.inspect)
+      end
+      block.call(root.css(selector))
+    end
+  end
+  prepend SelectedElements
 end
 
 module Rails

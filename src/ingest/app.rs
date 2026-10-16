@@ -1412,6 +1412,9 @@ end
                 }
                 app.module_mixins.extend(mixins);
                 app.initializer_filters.extend(extract_initializer_filters(&bytes, &path_str));
+                if let Some(store) = extract_collection_cache_store(&bytes, &path_str) {
+                    app.collection_cache_store = Some(store);
+                }
                 app.sql_functions
                     .extend(super::sql_functions::extract_sql_functions(&bytes, &path_str));
             }
@@ -8824,6 +8827,47 @@ pub(super) fn extract_initializer_filters(source: &[u8], file: &str) -> Vec<crat
             }
         }
         out.push(InitializerFilter { target: Symbol::from(target), method: Symbol::from(method), only });
+    }
+    out
+}
+
+/// `ActionView::PartialRenderer.collection_cache = <Const>.<reader>` in a
+/// `config/initializers/` file, bare or inside `to_prepare` (campfire's
+/// `fragment_cache.rb` points it at `FragmentCache.store`). The same
+/// discipline as the mixin reader: a constant receiver and an
+/// argument-less, blockless method on it, readable off the parse.
+/// Anything else (a computed store, `ActiveSupport::Cache.lookup_store`
+/// with arguments) is not recorded, and the initializer ledger reports
+/// the statement. The last assignment wins, as at boot.
+pub(super) fn extract_collection_cache_store(source: &[u8], file: &str) -> Option<crate::app::CollectionCacheStore> {
+    let result = super::prism::parse(source, file);
+    let root = result.node();
+    let src = String::from_utf8_lossy(source).into_owned();
+    let program = root.as_program_node()?;
+
+    let mut out = None;
+    for stmt in initializer_statements(&program) {
+        let Some(call) = stmt.as_call_node() else { continue };
+        if super::util::constant_id_str(&call.name()) != "collection_cache=" {
+            continue;
+        }
+        let Some(recv) = call.receiver() else { continue };
+        if constant_text(&recv, &src).as_deref() != Some("ActionView::PartialRenderer") {
+            continue;
+        }
+        let Some(args) = call.arguments() else { continue };
+        let args: Vec<_> = args.arguments().iter().collect();
+        let [value] = args.as_slice() else { continue };
+        let Some(read) = value.as_call_node() else { continue };
+        if read.arguments().is_some() || read.block().is_some() {
+            continue;
+        }
+        let Some(store_recv) = read.receiver() else { continue };
+        let Some(receiver) = constant_text(&store_recv, &src) else { continue };
+        out = Some(crate::app::CollectionCacheStore {
+            receiver: Symbol::from(receiver),
+            reader: Symbol::from(super::util::constant_id_str(&read.name())),
+        });
     }
     out
 }

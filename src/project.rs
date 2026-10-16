@@ -4964,7 +4964,7 @@ fn apply_rails_version(files: &mut [(String, String)], app: &App) {
 fn apply_module_mixins(files: &mut Vec<(String, String)>, app: &App, form: MixinForm) {
     use std::fmt::Write;
 
-    if app.module_mixins.is_empty() && app.initializer_filters.is_empty() {
+    if app.module_mixins.is_empty() && app.initializer_filters.is_empty() && app.collection_cache_store.is_none() {
         return;
     }
     let mut block = String::from(match form {
@@ -5044,6 +5044,20 @@ fn apply_module_mixins(files: &mut Vec<(String, String)>, app: &App, form: Mixin
             let _ = writeln!(block, "    return nil if performed?");
         }
         let _ = writeln!(block, "    nil\n  end\nend");
+    }
+    // The store cached collections read, as the app's initializer points
+    // it (`lower::module_mixins` kept it only when the reader resolves).
+    // Here for the same reason as a mixin: it names an app constant, so
+    // it runs once every class has loaded, where `to_prepare` runs it.
+    if let Some(store) = &app.collection_cache_store {
+        let _ = writeln!(
+            block,
+            "\n# `ActionView::PartialRenderer.collection_cache` as config/initializers/\n\
+             # assigns it (generated — see apply_module_mixins).\n\
+             ActionView::PartialRenderer.collection_cache = {}.{}",
+            store.receiver.as_str(),
+            store.reader.as_str()
+        );
     }
     for (path, content) in files.iter_mut() {
         if path == "boot.rb" {

@@ -35,8 +35,11 @@
 //!   8. `json.<key> obj, partial: P, as: V`
 //!                                       → one pair whose value is a
 //!                                       partial render of ONE object
-//!   9. `json.cache! key do … end`      → transparent: the block's
-//!                                       statements ARE the object's
+//!   9. `json.cache! key do … end`      → Jbuilder's fragment cache
+//!                                       when it wraps the whole
+//!                                       template; otherwise transparent:
+//!                                       the block's statements ARE the
+//!                                       object's
 //!  10. `if c … else … end` and the `if`/`unless` modifiers around any
 //!      of the above                    → the same `if`, each branch's
 //!                                       pairs appended inside it
@@ -59,14 +62,17 @@
 //! (6)-(9) arrived together with campfire's bot API, which is six
 //! jbuilder templates written in exactly that dialect.
 //!
-//! `cache!` is the one with a SEMANTIC gap behind it, so say it plainly:
-//! Jbuilder's is a fragment cache keyed on the record, and the emit has
-//! no fragment cache to put the rendered JSON in. Rendering the block
-//! every time is correct output at the wrong cost, which is the same
-//! trade `<% cache %>` already takes on the ERB side. Reading it as an
-//! ordinary `json.<key>` pair — which is what the classifier did before
-//! this — was neither: it emitted a literal `"cache!"` key holding the
-//! whole record.
+//! `cache!` is Jbuilder's fragment cache keyed on the record. A template
+//! that is one `cache!` around everything it writes is cached as Jbuilder
+//! caches it, through the controller's `perform_caching` and
+//! `combined_fragment_cache_key` and `JbuilderTemplate`'s read/write pair
+//! (`walk_cached_template`); the strict targets' runtime never caches, so
+//! there it renders every time. Any other `cache!` (among sibling pairs,
+//! nested, with options) is still read transparently: correct output at
+//! the wrong cost, the trade the ERB `<% cache %>` takes when it cannot
+//! build a key. Reading it as an ordinary `json.<key>` pair, which is
+//! what the classifier did before either, was neither: it emitted a
+//! literal `"cache!"` key holding the whole record.
 //!
 //! Still deferred: `json.key_format!`, `json.ignore_nil!` and
 //! `json.child!`.
@@ -353,6 +359,7 @@ fn build_library_class(
         sound_merges: Default::default(),
         partials: partials.clone(),
         partial_key,
+        template: format!("{dir}/{base}"),
     };
 
     let mut body_stmts: Vec<Expr> = Vec::new();
@@ -651,6 +658,10 @@ struct Ctx {
     /// This template's own `partial_key` when it is a partial: the
     /// key its ivar parameters are under (`PartialParams::ivar_param`).
     partial_key: Option<(String, String)>,
+    /// The template's path under app/views without extensions
+    /// (`messages/_message`): what a `json.cache!` key names it by,
+    /// where Rails names it by its digest path.
+    template: String,
 }
 
 /// Classification of a single top-level statement in a jbuilder
@@ -761,7 +772,108 @@ enum JbStmt<'a> {
 }
 
 fn walk_template(body: &Expr, ctx: &Ctx) -> Vec<Expr> {
+    if let Some(cached) = walk_cached_template(body, ctx) {
+        return cached;
+    }
     emit_object(&flatten_cache_blocks(stmts_of(body)), ctx)
+}
+
+/// A template that is ONE `json.cache! key do … end` around everything
+/// it writes (campfire's message, boost and user partials): Jbuilder's
+/// fragment cache, as `JbuilderTemplate#cache!` runs it.
+///
+/// ```ruby
+/// if ActionView::ViewHelpers.jbuilder_caching?
+///   k = ActionView::ViewHelpers.jbuilder_cache_key("messages/_message", message)
+///   hit = ActionView::ViewHelpers.jbuilder_fragment_read(k)
+///   if hit.nil?
+///     cap = String.new
+///     … the block's object, into cap …
+///     io << ActionView::ViewHelpers.jbuilder_fragment_write(k, cap)
+///   else
+///     io << hit
+///   end
+/// else
+///   … the block's object, into io …
+/// end
+/// ```
+///
+/// The cached value is the object's JSON text where Jbuilder caches the
+/// object's Hash: the template writes nothing else, so the two are the
+/// same fragment. The key is built only when the controller caches, as
+/// Jbuilder builds it only then (an app's `combined_fragment_cache_key`
+/// may read the request). A `cache!` among other statements, with
+/// options, or nested, stays transparent (`flatten_cache_blocks`): the
+/// block renders every time.
+fn walk_cached_template(body: &Expr, ctx: &Ctx) -> Option<Vec<Expr>> {
+    let stmts = stmts_of(body);
+    let [only] = stmts.as_slice() else { return None };
+    let ExprNode::Send { recv: Some(recv), method, args, block: Some(block), .. } = &*only.node else {
+        return None;
+    };
+    if method.as_str() != "cache!" || !is_json_receiver(recv) {
+        return None;
+    }
+    let [key] = args.as_slice() else { return None };
+    if matches!(&*key.node, ExprNode::Hash { .. }) {
+        return None;
+    }
+    let ExprNode::Lambda { body: inner, .. } = &*block.node else { return None };
+    let inner_stmts = flatten_cache_blocks(stmts_of(inner));
+
+    let n = ctx.temps.get();
+    ctx.temps.set(n + 1);
+    let key_var = Symbol::from(format!("__jb_key{n}"));
+    let hit_var = Symbol::from(format!("__jb_hit{n}"));
+    let cap = format!("__jb_io{n}");
+    let cap_ctx = Ctx { accumulator: cap.clone(), ..ctx.clone() };
+
+    let helpers = || const_path(&[Symbol::from("ActionView"), Symbol::from("ViewHelpers")]);
+    let assign = |name: &Symbol, value: Expr| {
+        Expr::new(
+            Span::synthetic(),
+            ExprNode::Assign { target: LValue::Var { id: VarId(0), name: name.clone() }, value },
+        )
+    };
+    let if_expr = |cond: Expr, then_branch: Expr, else_branch: Expr| {
+        Expr::new(Span::synthetic(), ExprNode::If { cond, then_branch, else_branch })
+    };
+
+    let mut miss = vec![assign_accumulator_string_new(&cap)];
+    miss.extend(emit_object(&inner_stmts, &cap_ctx));
+    let mut cap_result = var_ref(Symbol::from(cap.as_str()));
+    cap_result.hint = Some(IrHint::StringBuilderResult);
+    miss.push(io_append_call(
+        &ctx.accumulator,
+        send(Some(helpers()), "jbuilder_fragment_write", vec![var_ref(key_var.clone()), cap_result], None, true),
+    ));
+    let cached = seq(vec![
+        assign(
+            &key_var,
+            send(
+                Some(helpers()),
+                "jbuilder_cache_key",
+                vec![lit_str(ctx.template.clone()), key.clone()],
+                None,
+                true,
+            ),
+        ),
+        assign(
+            &hit_var,
+            send(Some(helpers()), "jbuilder_fragment_read", vec![var_ref(key_var.clone())], None, true),
+        ),
+        if_expr(
+            send(Some(var_ref(hit_var.clone())), "nil?", Vec::new(), None, false),
+            seq(miss),
+            io_append_call(&ctx.accumulator, var_ref(hit_var.clone())),
+        ),
+    ]);
+    let uncached = seq(emit_object(&inner_stmts, ctx));
+    Some(vec![if_expr(
+        send(Some(helpers()), "jbuilder_caching?", Vec::new(), None, false),
+        cached,
+        uncached,
+    )])
 }
 
 /// A template body's top-level statements. A one-statement template is
