@@ -858,7 +858,17 @@ module ActiveStorage
     # The blob's own route: `rails_blob_path(blob)`. A `disposition` of
     # "attachment" rides as the query Rails puts it in.
     def redirect_url(disposition)
-      base = "/rails/active_storage/blobs/redirect/" + signed_id + "/" +
+      service_route("redirect", disposition)
+    end
+
+    # `rails_storage_proxy_path(blob)`: the engine's other blob route,
+    # whose controller answers with the bytes instead of a redirect.
+    def proxy_url(disposition)
+      service_route("proxy", disposition)
+    end
+
+    def service_route(kind, disposition)
+      base = "/rails/active_storage/blobs/" + kind + "/" + signed_id + "/" +
              ActiveStorage.url_filename(@filename)
       disposition == "" ? base : base + "?disposition=" + disposition
     end
@@ -1699,6 +1709,7 @@ end
 # controllers), which is why the URL shapes here are Rails' own:
 #
 #   /rails/active_storage/blobs/redirect/:signed_id/*filename
+#   /rails/active_storage/blobs/proxy/:signed_id/*filename
 #   /rails/active_storage/representations/redirect/:signed_blob_id/:variation_key/*filename
 #   /rails/active_storage/disk/:encoded_key/*filename
 #   /rails/active_storage/direct_uploads              (POST)
@@ -1725,6 +1736,33 @@ module RouteHelpers
 
   def self.rails_blob_url(attachment, disposition: nil, only_path: nil)
     rails_blob_path(attachment, disposition: disposition, only_path: only_path)
+  end
+
+  # The engine's two `direct` routes over a blob. `rails_storage_redirect`
+  # is the route `rails_blob` resolves to under Rails' default
+  # `resolve_model_to_route`; `rails_storage_proxy` names the proxy
+  # route, which serves the bytes through the app. Rails' blocks take
+  # whatever answers `signed_id`: the Blob itself or its attachment.
+  def self.rails_storage_proxy_path(model, disposition: nil, only_path: nil)
+    b = storage_blob(model)
+    b.nil? ? "" : b.proxy_url(disposition.to_s)
+  end
+
+  def self.rails_storage_proxy_url(model, disposition: nil, only_path: nil)
+    rails_storage_proxy_path(model, disposition: disposition, only_path: only_path)
+  end
+
+  def self.rails_storage_redirect_path(model, disposition: nil, only_path: nil)
+    b = storage_blob(model)
+    b.nil? ? "" : b.redirect_url(disposition.to_s)
+  end
+
+  def self.rails_storage_redirect_url(model, disposition: nil, only_path: nil)
+    rails_storage_redirect_path(model, disposition: disposition, only_path: only_path)
+  end
+
+  def self.storage_blob(model)
+    model.is_a?(ActiveStorage::Blob) ? model : model.blob
   end
 
   def self.rails_representation_path(variant, only_path: nil)
