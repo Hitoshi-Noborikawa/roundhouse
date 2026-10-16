@@ -1970,6 +1970,11 @@ impl<'a> BodyTyper<'a> {
                     (Some(scope), false) => crate::lower::i18n_translate::Site::Controller(scope),
                     (None, false) => crate::lower::i18n_translate::Site::Other,
                 };
+                if translate
+                    && crate::lower::i18n_translate::tree_answer(catalog, recv.as_ref(), method.as_str(), args, block.as_ref()).is_some()
+                {
+                    return Ty::Hash { key: std::sync::Arc::new(Ty::Sym), value: std::sync::Arc::new(Ty::Untyped) };
+                }
                 if translate && let Some(resolved) = crate::lower::i18n_translate::resolves(
                     catalog, recv.as_ref(), method.as_str(), args, block.as_ref(), site,
                 ) {

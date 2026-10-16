@@ -47,6 +47,8 @@ mod controller_sibling_classes;
 mod i18n_locales;
 #[path = "emit_and_run/i18n_runtime.rs"]
 mod i18n_runtime;
+#[path = "emit_and_run/i18n_subtree.rs"]
+mod i18n_subtree;
 #[path = "emit_and_run/i18n_plural_rules.rs"]
 mod i18n_plural_rules;
 #[path = "emit_and_run/rails_i18n_locales.rs"]

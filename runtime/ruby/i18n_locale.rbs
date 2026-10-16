@@ -42,6 +42,9 @@ module I18n
   def self.plural_num: (Array[String] rule, Hash[String, Float] ops) -> Float
   def self.plural_step: () -> Integer
   def self.runtime_rules: () -> Hash[String, Array[String]]
+  def self.runtime_opaque: () -> Hash[String, bool]
+  def self.translate_tree: (String full, Hash[Symbol, untyped] options) -> Hash[Symbol, untyped]
+  def self.insert_tree: (Hash[Symbol, untyped] tree, Array[String] path, String value) -> nil
   def self.runtime_chain: (String loc) -> Array[String]
   def self.interpolate_runtime: (String text, Hash[Symbol, untyped] options, bool html) -> String
   def self.runtime_leaves: () -> Hash[String, String]
