@@ -1002,6 +1002,7 @@ class Results(unittest.TestCase):
                         "shard-0": "success",
                         "shard-1": "success",
                         "shard-2": "success",
+                        "shard-3": "success",
                     },
                 }
                 for j in plan["jobs"]
@@ -1109,11 +1110,11 @@ class Results(unittest.TestCase):
                     self.assertEqual(ci.check_results(plan, needs), ([], False))
 
     def test_each_spinel_toolchain_shard_must_actually_pass_for_completion(self):
-        # The suite is a three-shard matrix; each shard writes its own output
+        # The suite is a four-shard matrix; each shard writes its own output
         # key, so one shard's success cannot stand in for the other's.
         plan = ci.select([], spinel_lane=True)
         self.assertIn("spinel-toolchain", plan["jobs"])
-        for shard in ["shard-0", "shard-1", "shard-2"]:
+        for shard in ["shard-0", "shard-1", "shard-2", "shard-3"]:
             for status in ["failure", "cancelled", "", None]:
                 with self.subTest(shard=shard, status=status):
                     needs = self.needs(plan)
@@ -1126,8 +1127,8 @@ class Results(unittest.TestCase):
 
     def test_each_spinel_framework_shard_must_actually_pass_for_completion(self):
         plan = ci.select([], spinel_lane=True)
-        self.assertEqual(len(plan["spinel_framework_shards"]), 3)
-        for shard in ["shard-0", "shard-1", "shard-2"]:
+        self.assertEqual(len(plan["spinel_framework_shards"]), 4)
+        for shard in ["shard-0", "shard-1", "shard-2", "shard-3"]:
             for status in ["failure", "cancelled", "", None]:
                 with self.subTest(shard=shard, status=status):
                     needs = self.needs(plan)
@@ -1138,9 +1139,30 @@ class Results(unittest.TestCase):
                         outputs[shard] = status
                     self.assertEqual(ci.check_results(plan, needs), ([], False))
 
+    def test_spinel_toolchain_shards_cover_each_test_once_and_split_the_heavy_ones(self):
+        tests = [f"t{i:02}" for i in range(50)] + list(ci.SPINEL_TOOLCHAIN_SECONDS)
+        shards = [ci.spinel_toolchain_shard(tests, k) for k in range(ci.SPINEL_TOOLCHAIN_SHARDS)]
+        self.assertEqual(sorted(t for s in shards for t in s), sorted(tests))
+        self.assertTrue(all(s == sorted(s) for s in shards))
+        heavy = [sum(t in ci.SPINEL_TOOLCHAIN_SECONDS for t in s) for s in shards]
+        self.assertEqual(max(heavy), 1)
+        loads = [
+            sum(ci.SPINEL_TOOLCHAIN_SECONDS.get(t, ci.SPINEL_TOOLCHAIN_DEFAULT_SECONDS) for t in s)
+            for s in shards
+        ]
+        loads[-1] += ci.SPINEL_TOOLCHAIN_TAIL_SECONDS
+        self.assertLess(max(loads) - min(loads), max(ci.SPINEL_TOOLCHAIN_SECONDS.values()))
+
+    def test_toolchain_shard_prints_nothing_for_an_empty_selection(self):
+        out = subprocess.run(
+            ["python3", spec.origin, "toolchain-shard", "--shard", "0"],
+            input="", capture_output=True, text=True, check=True,
+        ).stdout
+        self.assertEqual(out, "")
+
     def test_spinel_framework_shards_cover_each_selected_suite_once(self):
         shards = ci.spinel_framework_shards(ci.SPINEL_TESTS)
-        self.assertEqual([s["shard"] for s in shards], [0, 1, 2])
+        self.assertEqual([s["shard"] for s in shards], [0, 1, 2, 3])
         self.assertEqual(
             sorted(t for s in shards for t in s["tests"]), sorted(ci.SPINEL_TESTS)
         )

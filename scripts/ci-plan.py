@@ -13,6 +13,7 @@ import json
 import os
 import re
 import subprocess
+import sys
 from collections import namedtuple
 from pathlib import Path
 
@@ -97,28 +98,40 @@ SPINEL_TESTS = [
     "hash_to_query_symbol_keys_spinel",
     "storage_proxy_path_spinel",
 ]
-# Seconds each suite took in spinel-framework (full run 38665931779), for
-# balancing its shards; a suite not listed counts as one Spinel build.
+# Seconds each suite took in spinel-framework (main run 38936441376, its
+# test binary's compile included), for balancing its shards; a suite not
+# listed counts as one Spinel build.
 SPINEL_TEST_SECONDS = {
-    "date_columns_spinel": 45,
-    "framework_tests_spinel": 77,
-    "param_binds": 174,
-    "param_binds_values": 79,
-    "param_binds_cleanup": 88,
-    "spinel_stmt_cache_lru": 113,
-    "db_sqlite_concurrency": 14,
-    "spinel_pg_db": 11,
-    "pessimistic_locking": 46,
-    "not_found_parity_spinel": 118,
-    # Upstream run 38915016729: the transactional-saves cases tripled it.
-    "spinel_transaction_connection": 339,
+    "spinel_transaction_connection": 501,
+    "spinel_stmt_cache_lru": 203,
+    "param_binds": 181,
+    "not_found_parity_spinel": 169,
+    "param_binds_values": 126,
+    "param_binds_cleanup": 86,
+    "framework_tests_spinel": 78,
+    "date_columns_spinel": 62,
+    "postgres_json_types_spinel": 61,
+    "around_block_filter_spinel": 57,
+    "pessimistic_locking": 54,
+    "render_json_encoder_spinel": 54,
+    "jbuilder_array_value_spinel": 52,
+    "jbuilder_extract_attributes_spinel": 52,
+    "hash_to_query_symbol_keys_spinel": 51,
+    "open_telemetry_stub_spinel": 50,
+    "storage_proxy_path_spinel": 46,
+    "plain_class_optional_keywords_spinel": 41,
+    "url_helpers_absolute_spinel": 38,
+    "routes_segment_pattern_spinel": 37,
+    "generated_columns_spinel": 36,
+    "db_sqlite_concurrency": 23,
+    "spinel_pg_db": 19,
+    "spinel_net_http_start": 10,
     **dict.fromkeys(
         [
             "spinel_web_push_crypto",
             "spinel_db_lease",
             "param_binds_planner",
             "spinel_param_builder",
-            "spinel_net_http_start",
             "rails_compat_vectors_spinel",
             "active_job_payload",
         ],
@@ -126,7 +139,17 @@ SPINEL_TEST_SECONDS = {
     ),
 }
 SPINEL_TEST_DEFAULT_SECONDS = 40
-SPINEL_FRAMEWORK_SHARDS = 3
+SPINEL_FRAMEWORK_SHARDS = 4
+# Not balanced by count: these three take two to three times a typical test (local run, 2026-10-17).
+SPINEL_TOOLCHAIN_SECONDS = {
+    "real_blog_spinel_tests_pass": 265,
+    "identical_cli_emission_reuses_native_build_but_changed_ruby_rebuilds": 187,
+    "finite_concern_class_configuration_runs_natively": 133,
+}
+SPINEL_TOOLCHAIN_DEFAULT_SECONDS = 80
+SPINEL_TOOLCHAIN_SHARDS = 4
+# tiny_api's gate runs alone after the suite on the last shard, so its 111s counts once per test thread.
+SPINEL_TOOLCHAIN_TAIL_SECONDS = 111 * 4
 # Inputs of the ActiveJob payload gate (tests/active_job_payload.rs):
 # the files its driver loads beside it.
 ACTIVE_JOB_PAYLOAD_INPUTS = {
@@ -687,6 +710,19 @@ def spinel_framework_shards(tests, count=SPINEL_FRAMEWORK_SHARDS):
     return [{"shard": i, "tests": [t for t in tests if t in shard]} for i, shard in enumerate(shards)]
 
 
+def spinel_toolchain_shard(tests, shard, count=SPINEL_TOOLCHAIN_SHARDS):
+    """This shard's tests: longest first onto the lightest shard, by name order within it."""
+    loads = [0] * count
+    loads[-1] = SPINEL_TOOLCHAIN_TAIL_SECONDS
+    mine = []
+    for test in sorted(tests, key=lambda t: (-SPINEL_TOOLCHAIN_SECONDS.get(t, SPINEL_TOOLCHAIN_DEFAULT_SECONDS), t)):
+        i = loads.index(min(loads))
+        loads[i] += SPINEL_TOOLCHAIN_SECONDS.get(test, SPINEL_TOOLCHAIN_DEFAULT_SECONDS)
+        if i == shard:
+            mine.append(test)
+    return sorted(mine)
+
+
 def finish(
     jobs,
     extra,
@@ -919,7 +955,7 @@ def _advisory_complete(job, need, advisory, plan=None):
         return False
     keys = {
         "campfire-spinel-compare": ["default", "minor-gc", "verify-gen"],
-        "spinel-toolchain": ["shard-0", "shard-1", "shard-2"],
+        "spinel-toolchain": [f"shard-{i}" for i in range(SPINEL_TOOLCHAIN_SHARDS)],
         "spinel-framework": [
             f"shard-{s['shard']}"
             for s in (plan or {}).get("spinel_framework_shards", [])
@@ -943,8 +979,14 @@ def write_outputs(values):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("command", choices=["plan", "gate", "compact-gate"])
+    parser.add_argument("command", choices=["plan", "gate", "compact-gate", "toolchain-shard"])
+    parser.add_argument("--shard", type=int)
     args = parser.parse_args()
+    if args.command == "toolchain-shard":
+        tests = [line.strip() for line in sys.stdin if line.strip()]
+        for test in spinel_toolchain_shard(tests, args.shard):
+            print(test)
+        return False
     if args.command != "plan":
         raw_plan = os.environ.get("CI_PLAN", "")
         if not raw_plan.strip():
