@@ -53,9 +53,9 @@ fn python_framework_units_emit() {
     println!("\n  STRANGLER READINESS: {valid}/{total} framework files transpile to valid Python\n");
 }
 
-/// `CONTROLLER_CONFIG_SLOT = [ControllerConfig()]` is a module constant,
-/// so the loader used to emit it above every class. Python runs that
-/// line at import, before `class ControllerConfig` exists.
+/// Python runs module constants at import and method bodies later, so
+/// the class block is emitted first. `ControllerConfig()` must not run
+/// before `class ControllerConfig`.
 #[test]
 fn python_controller_config_slot_follows_its_class() {
     use roundhouse::runtime_loader::python_units_subset;
@@ -64,14 +64,10 @@ fn python_controller_config_slot_follows_its_class() {
     let body = &units[0].content;
     let class_at = body.find("class ControllerConfig:").expect("ControllerConfig class");
     let slot_at = body.find("CONTROLLER_CONFIG_SLOT = ").expect("config slot");
+    let last_class = body.rfind("\nclass ").expect("a class");
     assert!(
-        class_at < slot_at,
-        "ControllerConfig must be defined before its slot initializer constructs it:\n{body}"
-    );
-    let between = &body[class_at..slot_at];
-    assert!(
-        between.contains("\n    def ") || between.contains("\n    pass"),
-        "the slot initializer must follow the class body, not split it:\n{between}"
+        last_class < slot_at && class_at < slot_at,
+        "classes come first, then the constant block:\n{body}"
     );
     let slot_line = body[slot_at..].lines().next().unwrap_or("");
     assert!(

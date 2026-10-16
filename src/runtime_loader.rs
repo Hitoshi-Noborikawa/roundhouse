@@ -1853,89 +1853,38 @@ fn py_format_constant(name: &str, value: &Expr) -> String {
 
 /// Python resolves cross-file refs through `from app.x import Y` (like
 /// TS through imports); bodies emit flat at module top, so there is no
-/// namespace to wrap. Constants still emit ahead of every class so a
-/// method can read them, which is right for `FORGERY_SLOT` and wrong
-/// for a constant whose initializer *calls* a class in this file:
-/// `CONTROLLER_CONFIG_SLOT = [ControllerConfig()]` runs at import, and
-/// the class statement has not executed yet (`NameError`). Those lines
-/// move to just after the class they construct. Call-time reads of the
-/// other constants are unchanged.
+/// namespace to wrap. The shared dump still prints constants and then
+/// classes, which Crystal and TypeScript need and Python does not:
+/// a method looks a global up when it is called, but a constant
+/// initializer runs at import. `CONTROLLER_CONFIG_SLOT =
+/// [ControllerConfig()]` therefore has to follow `class
+/// ControllerConfig`. Rotate the two blocks. A file with no class
+/// (module mode) is left as emitted.
 fn py_wrap_namespace(_namespace: &str, body: &str) -> String {
-    let lines: Vec<&str> = body.lines().collect();
-    let mut class_at: Vec<(usize, String)> = Vec::new();
-    for (i, line) in lines.iter().enumerate() {
-        let Some(rest) = line.strip_prefix("class ") else {
-            continue;
-        };
-        let name = rest.split(['(', ':']).next().unwrap_or("").trim();
-        if !name.is_empty() {
-            class_at.push((i, name.to_string()));
+    let class_at = if body.starts_with("class ") {
+        0
+    } else {
+        match body.find("\nclass ") {
+            Some(i) => i + 1,
+            None => return body.to_string(),
         }
-    }
-    if class_at.is_empty() {
+    };
+    if class_at == 0 {
         return body.to_string();
     }
-    let mut defer: Vec<(usize, usize)> = Vec::new();
-    for (i, line) in lines.iter().enumerate() {
-        if line.is_empty() || line.starts_with(' ') || line.starts_with('\t') {
-            continue;
-        }
-        let mut after: Option<usize> = None;
-        for (class_line, name) in &class_at {
-            if *class_line <= i {
-                continue;
-            }
-            let needle = format!("{name}(");
-            if line.contains(&needle) {
-                after = Some(after.map_or(*class_line, |prev: usize| prev.max(*class_line)));
-            }
-        }
-        if let Some(class_line) = after {
-            defer.push((i, class_line));
-        }
-    }
-    if defer.is_empty() {
+    let constants = body[..class_at].trim_end_matches(|c: char| c == '\n' || c == '\r');
+    if constants.is_empty() {
         return body.to_string();
     }
-    let deferred_at: std::collections::HashSet<usize> = defer.iter().map(|(i, _)| *i).collect();
-    // The class statement's body is every following indented line. The
-    // constant has to follow that body: a top-level assignment between
-    // `class ControllerConfig:` and its methods ends the class.
-    let mut block_end_at: std::collections::HashMap<usize, Vec<usize>> =
-        std::collections::HashMap::new();
-    for (const_line, class_line) in &defer {
-        let mut end = *class_line;
-        let mut i = class_line + 1;
-        while i < lines.len() {
-            let line = lines[i];
-            if line.is_empty() || line.starts_with(' ') || line.starts_with('\t') {
-                if !line.is_empty() {
-                    end = i;
-                }
-                i += 1;
-                continue;
-            }
-            break;
-        }
-        block_end_at.entry(end).or_default().push(*const_line);
+    let mut out = String::with_capacity(body.len() + 2);
+    out.push_str(&body[class_at..]);
+    if !out.ends_with('\n') {
+        out.push('\n');
     }
-    let mut out: Vec<String> = Vec::with_capacity(lines.len() + defer.len());
-    for (i, line) in lines.iter().enumerate() {
-        if deferred_at.contains(&i) {
-            continue;
-        }
-        out.push((*line).to_string());
-        if let Some(const_lines) = block_end_at.get(&i) {
-            for const_line in const_lines {
-                out.push(lines[*const_line].to_string());
-            }
-        }
-    }
-    let mut rendered = out.join("\n");
-    if body.ends_with('\n') {
-        rendered.push('\n');
-    }
-    rendered
+    out.push('\n');
+    out.push_str(constants);
+    out.push('\n');
+    out
 }
 
 /// Python runtime transpile table. Mirrors `TYPESCRIPT_RUNTIME` 1:1 by
