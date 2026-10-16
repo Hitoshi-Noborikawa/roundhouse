@@ -147,6 +147,10 @@ module Db
     st.execute("PRAGMA busy_timeout=5000")
     # Not SQLite's default (off): Rails' DEFAULT_PRAGMAS turn it on, as db.rb's PRAGMAS do.
     st.execute("PRAGMA foreign_keys=ON")
+    # The app's own `pragmas:` from config/database.yml, after the pins
+    # above (generated: `project::apply_database_pragmas`).
+    # >>> generated: database-pragmas
+    # <<< generated: database-pragmas
     st.close
     Conn.new(raw)
   end

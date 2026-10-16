@@ -3331,6 +3331,7 @@ fn ruby_family_runtime_files(
                 "runtime/db.rb".to_string(),
                 format!("{TIME_PARSING_REQUIRE}{db_jruby}"),
             ));
+            apply_database_pragmas(&mut files, app);
             apply_jruby_gemfile(&mut files)?;
         }
     }
@@ -4397,6 +4398,56 @@ fn apply_instantiate_named(files: &mut [(String, String)], app: &App) {
         let Some(rel_end) = content[start..].find(TAIL) else { continue };
         let end = start + rel_end + TAIL.len();
         content.replace_range(start..end, &generated);
+    }
+}
+
+/// `config/database.yml`'s `pragmas:` (`App::database_pragmas`, see
+/// `ingest::database_yml`) into each SQLite Db shim's connection open,
+/// after the shim's own pins: one arm per environment that names any,
+/// keyed on the parked `Rails.env_name` (unset reads as development,
+/// as `Rails.env` does). A span replace between markers; an app with
+/// no pragmas leaves the region empty. Each shim has its own way to
+/// run a statement on the handle it just opened, so the call is picked
+/// by which shim the file is.
+fn apply_database_pragmas(files: &mut [(String, String)], app: &App) {
+    const MARK: &str = "# >>> generated: database-pragmas\n";
+    const TAIL_MARK: &str = "# <<< generated: database-pragmas\n";
+    if app.database_pragmas.is_empty() {
+        return;
+    }
+    for (path, content) in files.iter_mut() {
+        if !path.starts_with("runtime/db") || !path.ends_with(".rb") {
+            continue;
+        }
+        let Some(mark) = content.find(MARK) else { continue };
+        let line_start = content[..mark].rfind('\n').map_or(0, |i| i + 1);
+        let indent = content[line_start..mark].to_string();
+        let Some(rel_end) = content[mark..].find(TAIL_MARK) else { continue };
+        let end = mark + rel_end + TAIL_MARK.len();
+        let exec = |stmt: &str| {
+            let lit = crate::emit::ruby::expr::ruby_str_literal(stmt);
+            if content.contains("SQL.sqlite3_exec(dbh") {
+                format!("SQL.sqlite3_exec(dbh, {lit}, nil, nil, nil)")
+            } else if content.contains("st = raw.create_statement") {
+                format!("st.execute({lit})")
+            } else {
+                format!("db.execute({lit})")
+            }
+        };
+        let mut generated = format!("{MARK}{indent}case Rails.env_name.to_s\n");
+        for (env, statements) in &app.database_pragmas {
+            let names = if env == "development" {
+                format!("{}, \"\"", crate::emit::ruby::expr::ruby_str_literal(env))
+            } else {
+                crate::emit::ruby::expr::ruby_str_literal(env)
+            };
+            generated.push_str(&format!("{indent}when {names}\n"));
+            for stmt in statements {
+                generated.push_str(&format!("{indent}  {}\n", exec(stmt)));
+            }
+        }
+        generated.push_str(&format!("{indent}end\n{indent}{TAIL_MARK}"));
+        content.replace_range(mark..end, &generated);
     }
 }
 
@@ -6681,6 +6732,9 @@ fn spinel_files(app: &App, fixture: &Path) -> Result<(Vec<(String, String)>, Vec
     // a method nothing defined.
     apply_global_id_locate(&mut files, app);
     apply_instantiate_named(&mut files, app);
+    // Every SQLite shim in the base set (db.rb, db_cruby.rb); the JDBC one
+    // is read in later, by `ruby_family_runtime_files`.
+    apply_database_pragmas(&mut files, app);
     apply_attachable_locate(&mut files, app);
     // Same reason: both lanes require `runtime/job_registry.rb`.
     apply_job_registry(&mut files, app);

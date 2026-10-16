@@ -1047,6 +1047,10 @@ class DbPool
       # should still serve, slower, rather than fail to boot — and a pragma
       # that silently did nothing is what the numbers above would reveal.
       PRAGMAS.each { |p| SQL.sqlite3_exec(dbh, p, nil, nil, nil) }
+      # The app's own `pragmas:` from config/database.yml, after PRAGMAS
+      # (generated: `project::apply_database_pragmas`).
+      # >>> generated: database-pragmas
+      # <<< generated: database-pragmas
       @conns.push(DbConn.new(dbh))
       @free.push(i)
       i += 1

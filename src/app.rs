@@ -391,6 +391,12 @@ pub struct App {
     /// [`SqlFunction`].
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub sql_functions: Vec<SqlFunction>,
+    /// `config/database.yml`'s per-environment `pragmas:` for the
+    /// primary database, as `PRAGMA name = value` statements the Db
+    /// shims run on every connection after their own (see
+    /// `ingest::database_yml`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub database_pragmas: Vec<(String, Vec<String>)>,
     /// The app's `Rails::Application` subclass from
     /// `config/application.rb` (e.g. `Lobsters::Application`),
     /// reparented at ingest onto `Rails::Application` itself. Its
@@ -878,6 +884,7 @@ impl App {
             initializer_filters: Vec::new(),
             app_requires: Vec::new(),
             sql_functions: Vec::new(),
+            database_pragmas: Vec::new(),
             rails_application: None,
             concern_filters: HashMap::new(),
             graphql_types: Vec::new(),

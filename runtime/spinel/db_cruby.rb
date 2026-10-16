@@ -176,6 +176,11 @@ module Db
     # in an initializer), per connection as Rails' adapter registers
     # them. Defined only when the app has some (runtime/sql_functions.rb
     # is generated for it).
+    # The app's own `pragmas:` from config/database.yml, after the pins
+    # above so its value wins, as Rails merges them over DEFAULT_PRAGMAS
+    # (generated: `project::apply_database_pragmas`).
+    # >>> generated: database-pragmas
+    # <<< generated: database-pragmas
     SqlFunctions.install(db) if defined?(SqlFunctions)
     db
   end
