@@ -345,6 +345,9 @@ fn build_library_class(
             .map(|h| h.name.as_str().to_string())
             .collect(),
         models: known_models.iter().cloned().collect(),
+        model_columns: std::rc::Rc::new(
+            known_models.iter().map(|m| (m.clone(), columns_for_model(m, app))).collect(),
+        ),
         temps: Default::default(),
         key_marks: Default::default(),
         sound_merges: Default::default(),
@@ -623,6 +626,13 @@ struct Ctx {
     /// template SOLO, with only framework stubs registered, so
     /// `boost.message.room` has no type to ask.
     models: std::collections::HashSet<String>,
+    /// Each of those models' column-type tables, for an element of a
+    /// collection the template names by its model (`array!(widgets,
+    /// :created_at)` reads `Widget`'s columns as `arg_columns` reads
+    /// the template argument's).
+    model_columns: std::rc::Rc<
+        std::collections::HashMap<String, std::collections::HashMap<Symbol, crate::schema::ColumnType>>,
+    >,
     /// Counter for the method's synthesized collection locals
     /// (`__col0`, `__col1`, …), shared by every clone of the template's
     /// `Ctx` so two collection blocks never bind the same name.
@@ -716,6 +726,12 @@ enum JbStmt<'a> {
         item_var: Symbol,
         body: &'a Expr,
     },
+    /// `json.array! col, :a, :b` — the same array, each element the
+    /// object `json.extract!(element, :a, :b)` writes.
+    ArrayExtract {
+        collection: &'a Expr,
+        attrs: Vec<Symbol>,
+    },
     /// `Recv.call(args) do … end` on anything but `json`, whose block
     /// reaches `json` — a tenant scope, `I18n.with_locale`, a gem
     /// helper. The call stays as written; its block's pairs belong to
@@ -729,6 +745,16 @@ enum JbStmt<'a> {
     /// literal Hash with literal keys is its pairs, written at compile
     /// time; any other value is walked when the template runs.
     Merge { value: &'a Expr },
+    /// `json.extract!(obj, *attrs)` / `json.(obj, params[:f])`: an
+    /// attribute list that is not all literal names, so the keys are
+    /// not known when the template is lowered. Jbuilder writes one pair
+    /// per name, whatever the list holds. Reported, never dropped.
+    ExtractDynamic,
+    /// `json.array! col, :a, fields: :b`: a Hash among the arguments that
+    /// is not `partial:` + `as:` options. Jbuilder takes it for an
+    /// attribute name and raises (`TypeError: {fields: :b} is not a
+    /// symbol nor a string`). Reported, never dropped.
+    ArrayHashArgument,
     /// Unrecognized DSL or non-Send statement. Surfaces as an empty io
     /// append so the lowered body stays well-formed.
     Unknown,
@@ -806,7 +832,7 @@ fn emit_object_filled(raw_stmts: &[&Expr], ctx: &Ctx) -> (Vec<Expr>, bool) {
         // `[]`); a partial's object is empty when the partial may set
         // nothing.
         let filled = match only {
-            JbStmt::ArrayPartial { .. } | JbStmt::ArrayBlock { .. } => true,
+            JbStmt::ArrayPartial { .. } | JbStmt::ArrayBlock { .. } | JbStmt::ArrayExtract { .. } => true,
             JbStmt::Partial { partial_path, .. } => partial_always_filled(partial_path, ctx),
             _ => false,
         };
@@ -821,6 +847,7 @@ fn emit_object_filled(raw_stmts: &[&Expr], ctx: &Ctx) -> (Vec<Expr>, bool) {
             JbStmt::ArrayBlock { collection, item_var, body } => {
                 Some(emit_array_block(collection, item_var, body, ctx))
             }
+            JbStmt::ArrayExtract { collection, attrs } => Some(emit_array_extract(collection, attrs, ctx)),
             JbStmt::PartialRecord { arg, as_name } => {
                 record_partial_path(arg, as_name.as_ref(), &ctx.resource_dir, &ctx.models)
                     .map(|(partial_path, local)| {
@@ -864,7 +891,10 @@ fn emit_object_filled(raw_stmts: &[&Expr], ctx: &Ctx) -> (Vec<Expr>, bool) {
 /// the walker writes as an empty append (`JbStmt::Unknown`).
 fn has_unlowered(stmts: &[&Expr], ctx: &Ctx) -> bool {
     stmts.iter().any(|s| match classify(s) {
-        JbStmt::Unknown | JbStmt::ArrayPartial { .. } | JbStmt::ArrayBlock { .. } => true,
+        JbStmt::Unknown
+        | JbStmt::ArrayPartial { .. }
+        | JbStmt::ArrayBlock { .. }
+        | JbStmt::ArrayExtract { .. } => true,
         JbStmt::PartialRecord { arg, as_name } => {
             record_partial_path(arg, as_name.as_ref(), &ctx.resource_dir, &ctx.models).is_none()
         }
@@ -876,7 +906,7 @@ fn has_unlowered(stmts: &[&Expr], ctx: &Ctx) -> bool {
                 || rescues.iter().any(|r| has_unlowered(&branch_stmts(&r.body), ctx))
         }
         JbStmt::Around { body, .. } => has_unlowered(&branch_stmts(body), ctx),
-        JbStmt::AroundUnlowered => true,
+        JbStmt::AroundUnlowered | JbStmt::ExtractDynamic | JbStmt::ArrayHashArgument => true,
         JbStmt::Merge { value } => !merge_lowers(s, value, ctx),
         _ => false,
     })
@@ -1159,7 +1189,7 @@ fn emit_pairs(
                     None => out.push(io_append_lit(&ctx.accumulator, "")),
                 }
             }
-            JbStmt::ArrayPartial { .. } | JbStmt::ArrayBlock { .. } => {
+            JbStmt::ArrayPartial { .. } | JbStmt::ArrayBlock { .. } | JbStmt::ArrayExtract { .. } => {
                 // An array is not merged into an object (jbuilder raises
                 // a MergeError once the object has a pair): drop a
                 // marker rather than emit malformed JSON.
@@ -1226,6 +1256,30 @@ fn emit_pairs(
                     src.span,
                     "jbuilder block on a non-json call",
                     "the block reaches `json` but its parameters or form cannot be lowered",
+                ));
+            }
+            JbStmt::ExtractDynamic => {
+                crate::ingest::survey::record(&crate::ingest::IngestError::Unsupported {
+                    file: String::new(),
+                    message: "jbuilder: `json.extract!`, `json.call` or `json.array!` with an attribute list that is not all literal names"
+                        .to_string(),
+                });
+                out.push(unsupported_stmt(
+                    src.span,
+                    "jbuilder extract! with dynamic attributes",
+                    "only literal attribute names are lowered; a splat, a param, an ivar or a constant names keys known only at run time",
+                ));
+            }
+            JbStmt::ArrayHashArgument => {
+                crate::ingest::survey::record(&crate::ingest::IngestError::Unsupported {
+                    file: String::new(),
+                    message: "jbuilder: `json.array!` with a Hash argument that is not `partial:` and `as:` options"
+                        .to_string(),
+                });
+                out.push(unsupported_stmt(
+                    src.span,
+                    "jbuilder array! with a Hash that is not partial options",
+                    "Jbuilder takes the Hash for an attribute name and raises TypeError; only `partial:` with `as:` is an option",
                 ));
             }
             JbStmt::Merge { value } if merge_lowers(src, value, ctx) => {
@@ -1616,17 +1670,12 @@ fn classify<'a>(stmt: &'a Expr) -> JbStmt<'a> {
             let Some((obj, rest)) = args.split_first() else {
                 return JbStmt::Unknown;
             };
-            let mut attrs: Vec<Symbol> = Vec::new();
-            for a in rest {
-                if let ExprNode::Lit {
-                    value: Literal::Sym { value },
-                } = &*a.node
-                {
-                    attrs.push(value.clone());
-                } else {
-                    return JbStmt::Unknown;
-                }
-            }
+            // Silently writing nothing for this statement is a 200 with
+            // keys missing; a list that is not all literal names is
+            // refused instead.
+            let Some(attrs) = literal_attribute_names(rest) else {
+                return JbStmt::ExtractDynamic;
+            };
             JbStmt::Extract { obj, attrs }
         }
         // `json.merge!(hash)`: Jbuilder merges the hash's pairs into
@@ -1647,6 +1696,26 @@ fn classify<'a>(stmt: &'a Expr) -> JbStmt<'a> {
                 if let Some((item_var, body)) = item_block(block) {
                     return JbStmt::ArrayBlock { collection, item_var, body };
                 }
+            }
+            // `json.array! col, :a, :b` — no options, attribute names:
+            // Jbuilder extracts them from each element
+            // (`_map_collection` over `extract!`).
+            let rest = &args[1..];
+            // JbuilderTemplate#array! reads its FIRST extra argument as
+            // options only when it holds both `partial:` and `as:`
+            // (`_partial_options?`); any other Hash is an attribute name
+            // to `_extract`, which raises. Refused rather than dropped.
+            let partial_options = rest.first().and_then(|a| extract_hash(a)).is_some_and(|opts| {
+                hash_get_value(opts, "partial").is_some() && hash_get_value(opts, "as").is_some()
+            });
+            if block.is_none() && !partial_options && rest.iter().any(|a| extract_hash(a).is_some()) {
+                return JbStmt::ArrayHashArgument;
+            }
+            if block.is_none() && !rest.is_empty() && !rest.iter().any(|a| extract_hash(a).is_some()) {
+                return match literal_attribute_names(rest) {
+                    Some(attrs) => JbStmt::ArrayExtract { collection, attrs },
+                    None => JbStmt::ExtractDynamic,
+                };
             }
             let Some(opts) = args.iter().skip(1).find_map(extract_hash) else {
                 return JbStmt::Unknown;
@@ -1866,6 +1935,81 @@ fn mentions_json(e: &Expr) -> bool {
     let mut found = false;
     e.node.for_each_child(&mut |c| found = found || mentions_json(c));
     found
+}
+
+/// The names of an `extract!`/`array!` attribute list, when every one is
+/// a literal: a Symbol, or a String, which Jbuilder writes as given just
+/// the same. A String is taken only when it is a method name the
+/// lowered `record.<name>` read can spell. `None` for anything else.
+fn literal_attribute_names(args: &[Expr]) -> Option<Vec<Symbol>> {
+    args.iter()
+        .map(|a| match &*a.node {
+            ExprNode::Lit { value: Literal::Sym { value } } => Some(value.clone()),
+            ExprNode::Lit { value: Literal::Str { value } } if is_plain_method_name(value) => {
+                Some(Symbol::from(value.as_str()))
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+fn is_plain_method_name(name: &str) -> bool {
+    let body = name.strip_suffix(['?', '!']).unwrap_or(name);
+    let mut chars = body.chars();
+    chars.next().is_some_and(|c| c == '_' || c.is_ascii_lowercase())
+        && chars.all(|c| c == '_' || c.is_ascii_alphanumeric())
+}
+
+/// `json.array! col, :a, :b`: `emit_array_block` over the element
+/// block `{ |__item| json.extract!(__item, :a, :b) }`, which is what
+/// Jbuilder runs for each element.
+///
+/// Only over a collection whose elements are known to be records: one
+/// the template names by a model (`widgets`, typed `Array[Widget]` as
+/// the template's parameter is). The element then reads its temporal
+/// columns from their storage text, as the template argument's do.
+/// Jbuilder reads a Hash element with `fetch` instead, and a collection
+/// of anything else is not known to answer `element.a`, so any other
+/// collection is refused rather than lowered to a read that raises.
+fn emit_array_extract(collection: &Expr, attrs: &[Symbol], ctx: &Ctx) -> Vec<Expr> {
+    let models: Vec<String> = ctx.models.iter().cloned().collect();
+    let model = match &*collection.node {
+        ExprNode::Var { name, .. } => Some(name.as_str()),
+        ExprNode::Send { recv: None, method, args, block: None, .. } if args.is_empty() => {
+            Some(method.as_str())
+        }
+        _ => None,
+    }
+    .and_then(|name| match crate::lower::view_to_library::ivar_ty(name, &models) {
+        crate::ty::Ty::Array { elem } => match &*elem {
+            crate::ty::Ty::Class { id, .. } => Some(id.0.as_str().to_string()),
+            _ => None,
+        },
+        _ => None,
+    });
+    let Some(model) = model else {
+        crate::ingest::survey::record(&crate::ingest::IngestError::Unsupported {
+            file: String::new(),
+            message: "jbuilder: `json.array!` with attribute names over a collection whose elements are not known to be records"
+                .to_string(),
+        });
+        return vec![unsupported_stmt(
+            collection.span,
+            "jbuilder array! with attribute names over an untyped collection",
+            "only a collection named by its model (`@widgets`) is lowered; Jbuilder reads a Hash element with fetch and other elements by method",
+        )];
+    };
+    let item = Symbol::from("__item");
+    let mut args = vec![var_ref(item.clone())];
+    args.extend(attrs.iter().map(|a| {
+        Expr::new(Span::synthetic(), ExprNode::Lit { value: Literal::Sym { value: a.clone() } })
+    }));
+    let json = send(None, "json", Vec::new(), None, false);
+    let body = send(Some(json), "extract!", args, None, true);
+    let mut inner = ctx.clone();
+    inner.arg_name = item.as_str().to_string();
+    inner.arg_columns = ctx.model_columns.get(&model).cloned().unwrap_or_default();
+    emit_array_block(collection, &item, &body, &inner)
 }
 
 fn is_json_receiver(recv: &Expr) -> bool {
@@ -2370,7 +2514,11 @@ fn partial_params(app: &App) -> PartialParams {
 /// call counts as possibly empty.
 fn template_always_filled(stmts: &[&Expr]) -> bool {
     let mut dsl = stmts.iter().map(|s| classify(s)).filter(|c| !matches!(c, JbStmt::Local));
-    if let (Some(JbStmt::ArrayPartial { .. } | JbStmt::ArrayBlock { .. }), None) = (dsl.next(), dsl.next()) {
+    if let (
+        Some(JbStmt::ArrayPartial { .. } | JbStmt::ArrayBlock { .. } | JbStmt::ArrayExtract { .. }),
+        None,
+    ) = (dsl.next(), dsl.next())
+    {
         return true;
     }
     sets_a_pair(stmts)
