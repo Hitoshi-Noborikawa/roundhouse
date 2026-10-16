@@ -5859,6 +5859,24 @@ fn report_unsupported_bundled_constants(app: &App, target: BuildTarget) {
                 format!("Regexp::{flag} is Ruby's option bit, which the {target} emit has no Regexp to read"),
             );
         }
+        // Typed as IO for the Ruby family; a strict emit spelled them as names its runtime does not define.
+        if !matches!(target, "jruby" | "spinel")
+            && let Some(name) = match &*expr.node {
+                crate::expr::ExprNode::Const { path } => match path.iter().map(|s| s.as_str()).skip_while(|s| s.is_empty()).collect::<Vec<_>>()[..] {
+                    [n @ ("STDIN" | "STDOUT" | "STDERR")] => Some(n.to_string()),
+                    _ => None,
+                },
+                crate::expr::ExprNode::Var { name, .. } if matches!(name.as_str(), "$stdin" | "$stdout" | "$stderr") => Some(name.as_str().to_string()),
+                _ => None,
+            }
+        {
+            emit::diagnostics::report_unsupported(
+                expr.span,
+                target,
+                "bundled_constant",
+                format!("`{name}` is Ruby's process stream, which the {target} emit does not map"),
+            );
+        }
         // `runtime/ruby/active_record/connection.rb` carries `upsert_all`; no strict runtime transpiles it.
         if !matches!(target, "jruby" | "spinel")
             && let crate::expr::ExprNode::Send { recv: Some(_), method, .. } = &*expr.node
