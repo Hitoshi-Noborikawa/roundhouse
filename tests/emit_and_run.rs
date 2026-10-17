@@ -53,6 +53,8 @@ mod i18n_runtime;
 mod helper_translate;
 #[path = "emit_and_run/helper_escape.rs"]
 mod helper_escape;
+#[path = "emit_and_run/helper_escape_args.rs"]
+mod helper_escape_args;
 #[path = "emit_and_run/class_new_constants.rs"]
 mod class_new_constants;
 #[path = "emit_and_run/i18n_subtree.rs"]
