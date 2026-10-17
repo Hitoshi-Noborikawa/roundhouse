@@ -1162,7 +1162,7 @@ class Results(unittest.TestCase):
 
     def test_recorded_seconds_balance_shards_and_the_tables_cover_the_rest(self):
         timings = ci.load_spinel_timings(json.dumps({
-            "toolchain": {"t00": 900, "t01": "slow", "t02": -1, "t03": True, ci.SPINEL_TOOLCHAIN_TAIL: 1},
+            "toolchain": {"t00": 900, "t01": "slow", "t02": -1, "t03": True, "t04": float("inf"), ci.SPINEL_TOOLCHAIN_TAIL: 1},
             "framework": {"spinel_pg_db": 2000},
             "other": {"x": 1},
         }))
@@ -1197,6 +1197,8 @@ class Results(unittest.TestCase):
                 {"kind": "framework", "name": "d", "seconds": 30, "ok": True},
                 {"kind": "elsewhere", "name": "e", "seconds": 30, "ok": True},
                 {"kind": "framework", "name": "f", "seconds": "30", "ok": True},
+                {"kind": "framework", "name": "g", "seconds": float("nan"), "ok": True},
+                {"kind": [], "name": "h", "seconds": 30, "ok": True},
             ],
         )
         self.assertEqual(merged, {"toolchain": {"a": 150, "b": 50}, "framework": {"d": 30}})
@@ -1222,6 +1224,7 @@ class Results(unittest.TestCase):
                 sorted((r["name"], r["ok"]) for r in records),
                 [("a", True), ("b", False), ("tail", True)],
             )
+            self.assertTrue(all(r["seconds"] >= 1 for r in records))
             Path(f"{tmp}/previous.json").write_text('{"toolchain": {"tail": 3}}')
             for previous in [f"{tmp}/previous.json", f"{tmp}/missing.json"]:
                 with self.subTest(previous=previous):

@@ -10,6 +10,7 @@ advisory Spinel (unless a focus label is already set).
 
 import argparse
 import json
+import math
 import os
 import re
 import subprocess
@@ -701,6 +702,10 @@ def select(
     )
 
 
+def positive_seconds(value):
+    return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value) and value > 0
+
+
 def load_spinel_timings(raw):
     """Recorded seconds per kind and test; anything malformed counts as unrecorded."""
     try:
@@ -713,7 +718,7 @@ def load_spinel_timings(raw):
         kind: {
             name: seconds
             for name, seconds in data[kind].items()
-            if isinstance(seconds, (int, float)) and not isinstance(seconds, bool) and seconds > 0
+            if positive_seconds(seconds)
         }
         for kind in SPINEL_TIMING_KINDS
         if isinstance(data.get(kind), dict)
@@ -768,7 +773,7 @@ def record_timing(kind, name, seconds, ok):
     if out := os.environ.get("CI_SPINEL_TIMINGS_OUT"):
         Path(out).parent.mkdir(parents=True, exist_ok=True)
         with open(out, "a") as f:
-            f.write(json.dumps({"kind": kind, "name": name, "seconds": round(seconds), "ok": ok}) + "\n")
+            f.write(json.dumps({"kind": kind, "name": name, "seconds": max(round(seconds), 1), "ok": ok}) + "\n")
 
 
 def run_timed(kind, name, command):
@@ -794,9 +799,9 @@ def merge_timings(previous, records, weight=0.5):
     merged = {kind: dict(previous.get(kind, {})) for kind in SPINEL_TIMING_KINDS}
     for record in records:
         kind, name, seconds = record.get("kind"), record.get("name"), record.get("seconds")
-        if kind not in merged or not isinstance(name, str) or record.get("ok") is not True:
+        if not isinstance(kind, str) or kind not in merged or not isinstance(name, str):
             continue
-        if not isinstance(seconds, (int, float)) or isinstance(seconds, bool) or seconds <= 0:
+        if record.get("ok") is not True or not positive_seconds(seconds):
             continue
         last = merged[kind].get(name)
         merged[kind][name] = round(last + (seconds - last) * weight) if last else round(seconds)
@@ -1191,7 +1196,7 @@ def main():
         plan["reasons"].append(reason)
     timings = spinel_timings_from_env()
     plan["spinel_framework_shards"] = spinel_framework_shards(plan["spinel_tests"] or [], timings=timings)
-    if not timings:
+    if not any(timings.values()):
         plan["reasons"].append("No recorded Spinel test seconds: shards balanced by the static tables")
     spinel = os.environ.get("CI_SPINEL_REVISION", "")
     if plan["spinel"] and not spinel:
