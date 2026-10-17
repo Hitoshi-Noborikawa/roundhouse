@@ -735,7 +735,7 @@ pub(crate) fn lowered_view_lcs(app: &App) -> (Vec<&crate::dialect::View>, Vec<Li
     // application rebuilt the scope/assoc/helper registries for every
     // template, which is quadratic in app size (the mastodon playground
     // transpile blew its budget on it).
-    let vctx = crate::lower::ViewLowerCtx::new(app);
+    let vctx = crate::lower::ViewLowerCtx::new(app).observe_form_with_entry();
     let html_views: Vec<&crate::dialect::View> = app
         .views
         .iter()
