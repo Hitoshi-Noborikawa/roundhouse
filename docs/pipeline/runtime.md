@@ -4931,3 +4931,34 @@ Found 2026-10-07 probing `request.format` on a from-scratch Rails API
 app under `--target spinel`; reproduces identically under `--target
 ruby`, since both lanes consume the same `controller_to_library`
 universal IR.
+
+### A readable `content_security_policy` block sends no CSP header on `futamura`'s lowered path
+
+TEMPORARY, pending rubys/roundhouse#58: `content_security_policy` is
+not modelled on any target — no directive builder exists, and no
+emitter writes the header. On the ordinary ruby-family and strict
+targets that is simply a dropped class-body macro, surveyed like any
+other. On `--target futamura`'s whole-route replacement
+(`src/emit/futamura/routes.rs`) it used to be more than that: every
+ingest gap blocks the route it is attributed to, and a
+`content_security_policy do |p| … end` block — however ordinary —
+earned the same "controller class-body block not recognized" gap as
+a construct nobody has read yet, which blocks every route on every
+controller that inherits or includes it. On an app that sets its CSP
+once, high in the controller hierarchy, that is most of the app.
+
+Until (1) on #58 (modelling the directive builders) lands, a block
+this ingest can read well enough to know it does nothing but build a
+policy object — every statement a direct call on the block's own
+parameter, naming a known CSP directive, with symbol/string/simple-
+literal arguments, in a controller's own class body or a concern's
+`included do` — is recorded as a named divergence instead
+(`ingest::app::csp_block_is_recognized`,
+`ingest::app::CSP_DIVERGENCE_MESSAGE`): it still shows in `--survey`
+and `check --continue`, but `project::futamura_whole_route` excludes
+it from the gaps `routes::plan` blocks on. **The lowered app sends no
+`Content-Security-Policy` header from these routes, same as it always
+has — this only stops treating that as a reason to keep the route on
+Rails.** A block this ingest cannot read as cleanly — a dynamic
+directive, a conditional, any other code — keeps the blocking gap,
+unchanged, wherever it appears.
