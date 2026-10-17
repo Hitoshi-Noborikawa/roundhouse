@@ -84,14 +84,8 @@ impl<'a> BodyTyper<'a> {
         if args.is_empty() {
             return None;
         }
-        let mut current = Some(model);
-        for _ in 0..32 {
-            let Some(id) = current else { break };
-            let Some(class) = self.classes().get(id) else { break };
-            if class.source_class_methods.contains(method) {
-                return None;
-            }
-            current = class.parent.as_ref();
+        if super::ClassInfo::source_class_method(self.classes(), model, method) {
+            return None;
         }
         let cls = self.classes().get(model)?;
         let columns = args
@@ -102,10 +96,15 @@ impl<'a> BodyTyper<'a> {
                     ExprNode::Lit { value: crate::expr::Literal::Str { value } } => Symbol::from(value.as_str()),
                     _ => return None,
                 };
-                if cls.attributes.fields.is_empty() {
-                    cls.instance_methods.get(&name).cloned()
+                let name = if name.as_str() == "id" {
+                    cls.primary_key.as_ref().unwrap_or(&name)
                 } else {
-                    cls.attributes.fields.get(&name).cloned()
+                    &name
+                };
+                if cls.attributes.fields.is_empty() {
+                    cls.instance_methods.get(name).cloned()
+                } else {
+                    cls.attributes.fields.get(name).cloned()
                 }
             })
             .collect::<Option<Vec<_>>>()?;
@@ -120,6 +119,38 @@ impl<'a> BodyTyper<'a> {
             "pick" => Ty::Union { variants: vec![col_ty, Ty::Nil].into() },
             _ => Ty::Array { elem: std::sync::Arc::new(col_ty) },
         })
+    }
+
+    pub(super) fn reader_projection(&self, recv: &Ty, columns: &[Symbol]) -> Option<Ty> {
+        let id = match recv {
+            Ty::Array { elem } => match elem.as_ref() {
+                Ty::Class { id, .. } => id,
+                _ => return None,
+            },
+            Ty::Relation { of } => of,
+            Ty::Union { variants } => {
+                let projected = variants.iter().map(|ty| self.reader_projection(ty, columns))
+                    .collect::<Option<Vec<_>>>()?;
+                return Some(union_many(projected));
+            }
+            _ => return None,
+        };
+        let fields = columns.iter().map(|name| {
+            let mut current = Some(id);
+            for _ in 0..32 {
+                let class = self.classes().get(current?)?;
+                if let Some(ty) = class.instance_methods.get(name) {
+                    return Some(match ty {
+                        Ty::Fn { ret, .. } => ret.as_ref().clone(),
+                        value => value.clone(),
+                    });
+                }
+                current = class.parent.as_ref();
+            }
+            None
+        }).collect::<Option<Vec<_>>>()?;
+        let elem = if fields.len() == 1 { fields.into_iter().next()? } else { Ty::Tuple { elems: fields.into() } };
+        Some(Ty::Array { elem: std::sync::Arc::new(elem) })
     }
 
     /// Rails' per-column dynamic finders (`find_by_<attr>`,
@@ -1657,7 +1688,7 @@ impl<'a> BodyTyper<'a> {
                         }
                     }
                     if !instance_side && let Some(ty) = cls.class_methods.get(method) {
-                        if call_args.len() > 1 && cls.table.is_some()
+                        if cls.table.is_some()
                             && matches!(ty, Ty::Array { elem } if matches!(elem.as_ref(), Ty::Untyped))
                             && let Some(projected) = self.column_projection(id, method, call_args)
                         {

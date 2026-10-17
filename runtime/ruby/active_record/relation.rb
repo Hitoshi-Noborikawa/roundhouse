@@ -1959,6 +1959,7 @@ module ActiveRecord
       projections = []
       columns.each_with_index do |col, index|
         name = sql_ident(col)
+        name = @model.primary_key.to_s if name == "id"
         name = "#{@table}.#{name}" unless name.include?(".")
         projections << "#{name} AS v#{index}"
       end

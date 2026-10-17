@@ -88,6 +88,7 @@ use crate::ty::{ParamKind, Row, Ty};
 
 pub struct Analyzer {
     classes: HashMap<ClassId, ClassInfo>,
+    materialized_associations: std::collections::HashSet<Symbol>,
     /// Inferred parameter types per (class, method). Empty after
     /// `Analyzer::new`; populated by `unify_params_from_call_sites`
     /// during the fixpoint loop in `analyze`. Consulted when seeding
@@ -262,6 +263,9 @@ impl Analyzer {
             let mut cls = ClassInfo::default();
             cls.table = Some(model.table.clone());
             cls.attributes = model.attributes.clone();
+            cls.primary_key = model.primary_key.clone().or_else(|| app.schema.tables.get(&model.table.0)
+                .and_then(|table| table.columns.iter().find(|column| column.primary_key))
+                .map(|column| column.name.clone()));
             // The key's type as the schema declares it (#90): the
             // attribute row already carries it under the key column's
             // name — `id`, or the column `create_table primary_key:`
@@ -1191,6 +1195,7 @@ impl Analyzer {
             .collect();
 
         Self {
+            materialized_associations: crate::lower::assoc_pluck::materialized_assoc_names(app),
             classes,
             inferred_params: HashMap::new(),
             declared_signatures: app
@@ -1223,6 +1228,7 @@ impl Analyzer {
     /// Cheap — just a struct with a reference.
     fn body_typer(&self) -> BodyTyper<'_> {
         let typer = BodyTyper::new(&self.classes)
+            .with_materialized_associations(&self.materialized_associations)
             .with_inquirers(&self.inquirers)
             .with_i18n(&self.i18n, &self.helper_modules)
             .with_typed_constants(&self.typed_constants)
