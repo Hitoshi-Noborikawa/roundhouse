@@ -16434,3 +16434,5 @@ puts "nokogiri html5 helper passed"
 mod proc_new_and_std_streams;
 #[path = "emit_and_run/helper_diagnostics.rs"]
 mod helper_diagnostics;
+#[path = "emit_and_run/value_seq_order.rs"]
+mod value_seq_order;
