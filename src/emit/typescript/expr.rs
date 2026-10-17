@@ -2343,6 +2343,10 @@ fn js_send_inner(
                     };
                     return Js::call(span, Js::ident(span, "String"), vec![value]);
                 }
+                // `Number(2.5)` is 2.5; a Float's `to_i` truncates.
+                "to_i" if matches!(strip_nullable(r.ty.as_ref()), Some(Ty::Float)) => {
+                    return Js::method_call(span, synth_ident("Math"), "trunc", vec![js_expr(r)]);
+                }
                 "to_i" => return Js::call(span, Js::ident(span, "Number"), vec![js_expr(r)]),
                 "to_sym" => return js_expr(r),
                 _ => {}
@@ -2804,6 +2808,73 @@ fn js_send_inner(
                 }
                 _ => {}
             },
+            Some(Ty::Int | Ty::Float) => {
+                let is_float = matches!(recv_ty, Some(Ty::Float));
+                let n = || js_expr(r);
+                let zero = || Js::num(Span::synthetic(), "0");
+                let math = |f: &str, xs: Vec<Js>| Js::method_call(Span::synthetic(), synth_ident("Math"), f, xs);
+                match (method, args.len()) {
+                    ("odd?", 0) => {
+                        return Js::binary(span, "!==", Js::binary(Span::synthetic(), "%", n(), Js::num(Span::synthetic(), "2")), zero());
+                    }
+                    ("even?", 0) => {
+                        return Js::binary(span, "===", Js::binary(Span::synthetic(), "%", n(), Js::num(Span::synthetic(), "2")), zero());
+                    }
+                    ("zero?", 0) => return Js::binary(span, "===", n(), zero()),
+                    ("positive?", 0) => return Js::binary(span, ">", n(), zero()),
+                    ("negative?", 0) => return Js::binary(span, "<", n(), zero()),
+                    ("abs", 0) => return math("abs", vec![n()]),
+                    ("to_f", 0) => return n(),
+                    ("pred", 0) => return Js::binary(span, "-", n(), Js::num(Span::synthetic(), "1")),
+                    ("succ", 0) => return Js::binary(span, "+", n(), Js::num(Span::synthetic(), "1")),
+                    ("fdiv", 1) => return Js::binary(span, "/", n(), js_expr(&args[0])),
+                    ("floor" | "ceil", 0) => return math(method, vec![n()]),
+                    ("round", 0) if !is_float => return n(),
+                    // Ruby rounds half away from zero; `Math.round(-2.5)` is -2.
+                    ("round", 0) => {
+                        return with_array(span, r, |x| {
+                            Js::binary(
+                                Span::synthetic(),
+                                "*",
+                                math("sign", vec![x.clone()]),
+                                math("round", vec![math("abs", vec![x])]),
+                            )
+                        });
+                    }
+                    ("<=>", 1) => {
+                        let other = js_expr(&args[0]);
+                        let cmp = Js::synth(JsExpr::Arrow {
+                            params: vec![js_param("__a"), js_param("__b")],
+                            body: ArrowBody::Expr(Js::synth(JsExpr::Ternary {
+                                cond: Js::binary(Span::synthetic(), "<", synth_ident("__a"), synth_ident("__b")),
+                                then: Js::num(Span::synthetic(), "-1"),
+                                else_: Js::synth(JsExpr::Ternary {
+                                    cond: Js::binary(Span::synthetic(), ">", synth_ident("__a"), synth_ident("__b")),
+                                    then: Js::num(Span::synthetic(), "1"),
+                                    else_: zero(),
+                                }),
+                            })),
+                            is_async: false,
+                        });
+                        return Js::call(span, cmp, vec![n(), other]);
+                    }
+                    ("clamp", 2) => {
+                        return math("min", vec![math("max", vec![n(), js_expr(&args[0])]), js_expr(&args[1])]);
+                    }
+                    ("between?", 2) => {
+                        let (lo, hi) = (js_expr(&args[0]), js_expr(&args[1]));
+                        return with_array(span, r, |x| {
+                            Js::binary(
+                                Span::synthetic(),
+                                "&&",
+                                Js::binary(Span::synthetic(), ">=", x.clone(), lo),
+                                Js::binary(Span::synthetic(), "<=", x, hi),
+                            )
+                        });
+                    }
+                    _ => {}
+                }
+            }
             // String receiver: predicate forms parallel Array's; the
             // case-shift helpers map to JS String methods.
             Some(Ty::Str) => match method {
@@ -3191,7 +3262,18 @@ fn js_send_inner(
                     return Js::method_call(span, js_expr(r), "add", vec![js_expr(&args[0])]);
                 }
                 Ty::Array { .. } => {
-                    return Js::method_call(span, js_expr(r), "push", vec![js_expr(&args[0])]);
+                    // `out << a << b` appends both to `out`; JS `push` answers a length, not the Array to chain on.
+                    let mut appended = vec![&args[0]];
+                    let mut base = r;
+                    while let ExprNode::Send { recv: Some(inner), method: m, args: a, block: None, .. } = &*base.node {
+                        if m.as_str() != "<<" || a.len() != 1 || !matches!(strip_nullable(inner.ty.as_ref()), Some(Ty::Array { .. })) {
+                            break;
+                        }
+                        appended.push(&a[0]);
+                        base = inner;
+                    }
+                    appended.reverse();
+                    return Js::method_call(span, js_expr(base), "push", appended.into_iter().map(js_expr).collect());
                 }
                 // Ruby's `str << x` appends in place. TS strings
                 // are immutable, but the receiver is always a

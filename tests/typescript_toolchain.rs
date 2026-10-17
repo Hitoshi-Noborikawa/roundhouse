@@ -309,3 +309,17 @@ fn real_blog_array_methods_run_under_tsx() {
     );
     assert_eq!(out, array_methods::EXPECTED);
 }
+
+#[test]
+#[ignore]
+fn real_blog_number_methods_run_under_tsx() {
+    // Integer and Float methods, the operators Ruby defines differently
+    // (`/`, `%`, `<=>`, half-away rounding) and a chained `<<`.
+    let (emitted, errors) = array_methods::overlay().emit(roundhouse::project::BuildTarget::Typescript);
+    assert!(errors.is_empty(), "{errors:?}");
+    let out = run_under_tsx(
+        &emitted,
+        "import { NumberProbe } from \"./app/models/number_probe.js\";\nconsole.log(JSON.stringify(NumberProbe.run(7, 2, 2.5, [0])));\n",
+    );
+    assert_eq!(out, array_methods::NUMBER_EXPECTED);
+}

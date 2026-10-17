@@ -1,5 +1,6 @@
-//! Array methods the TypeScript emit translates, on a typed `Integer` and
-//! `String` Array, with the empty-Array and not-found answers Ruby gives.
+//! Array and number methods the TypeScript emit translates, on typed
+//! receivers, with the empty-Array, not-found and negative answers Ruby
+//! gives.
 
 use super::emit_and_run::{self, Overlay};
 
@@ -28,12 +29,29 @@ end
 #[allow(dead_code)]
 pub const EXPECTED: &str = "[6,12,0,[2,3],[1,3],[1],[2,3,4],2,null,[1,1,2,2,3,3],[1,2],[1,2,3],3,1,null,null,[1,2],[1,2,3],[2,3],[],[2,3],[],[1,2,3],2,2,16,6,null,1,null,2,1,[0,2,6]]";
 
+pub const NUMBER_PROBE: &str = r#"class NumberProbe
+  def self.run(n, m, f, out)
+    out << 1 << 2
+    acc = []
+    n.times { |i| acc.push(i) }
+    [out, acc, n / m, n % m, -n % m, n ** 2, f / 2, n.to_s, f.to_i, n.odd?, n.even?, n.zero?, n.positive?, n.negative?,
+     (-n).abs, n.pred, n.succ, n.fdiv(2), f.floor, f.ceil, f.round, (-f).round, n.round, n.clamp(0, 2), n.between?(1, 3),
+     n <=> m, m <=> n, n <=> 7, n == m]
+  end
+end
+"#;
+
+/// `JSON.generate(NumberProbe.run(7, 2, 2.5, [0]))` under CRuby.
+#[allow(dead_code)]
+pub const NUMBER_EXPECTED: &str = "[[0,1,2],[0,1,2,3,4,5,6],3,1,1,49,1.25,\"7\",2,true,false,false,true,false,7,6,8,3.5,2,3,3,-3,7,2,false,1,-1,0,false]";
+
 pub fn overlay() -> Overlay {
     emit_and_run::real_blog()
         .write("app/models/array_probe.rb", PROBE)
+        .write("app/models/number_probe.rb", NUMBER_PROBE)
         .edit(
             "app/controllers/articles_controller.rb",
             "  def index\n",
-            "  def index\n    @probe = ArrayProbe.run([1, 2, 3], [\"a\", \"b\"])\n",
+            "  def index\n    @probe = ArrayProbe.run([1, 2, 3], [\"a\", \"b\"])\n    @numbers = NumberProbe.run(7, 2, 2.5, [0])\n",
         )
 }
