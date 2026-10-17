@@ -162,6 +162,8 @@ mod active_support_extensions;
 mod routing_redirect_host;
 #[path = "emit_and_run/time_find_zone.rs"]
 mod time_find_zone;
+#[path = "emit_and_run/time_to_date.rs"]
+mod time_to_date;
 #[path = "emit_and_run/concurrent_map.rs"]
 mod concurrent_map;
 #[path = "emit_and_run/request_optional_port.rs"]
