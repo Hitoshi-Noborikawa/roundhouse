@@ -389,13 +389,11 @@ def cmd_verify(argv)
     hosted_error = e.message
   end
   build_env = { 'CARGO_BUILD_JOBS' => jobs }
-  # Leave incremental compilation to Cargo unless the caller already set it.
-  # CI cold builds stay on the rust-cache policy, not on this local loop.
-  build_env['CARGO_INCREMENTAL'] = ENV['CARGO_INCREMENTAL'] if ENV.key?('CARGO_INCREMENTAL')
-  # Record caller-selected size/speed tradeoffs without inventing a profile
-  # or overriding Cargo configuration when these settings are absent.
-  %w[CARGO_PROFILE_DEV_DEBUG CARGO_PROFILE_TEST_DEBUG CARGO_PROFILE_DEV_STRIP CARGO_PROFILE_TEST_STRIP
-    CARGO_PROFILE_DEV_OPT_LEVEL CARGO_PROFILE_TEST_OPT_LEVEL].each do |key|
+  # Pass caller settings through. Do not invent values: CARGO_INCREMENTAL in
+  # particular stays unset here, so this loop does not force a cold build.
+  # CI cold builds stay on the rust-cache policy.
+  %w[CARGO_INCREMENTAL CARGO_PROFILE_DEV_DEBUG CARGO_PROFILE_TEST_DEBUG CARGO_PROFILE_DEV_STRIP
+    CARGO_PROFILE_TEST_STRIP CARGO_PROFILE_DEV_OPT_LEVEL CARGO_PROFILE_TEST_OPT_LEVEL].each do |key|
     build_env[key] = ENV[key] if ENV.key?(key)
   end
   missing = %w[real-blog store].reject { |name| File.directory?(File.join(ROUNDHOUSE_ROOT, 'fixtures', name)) }

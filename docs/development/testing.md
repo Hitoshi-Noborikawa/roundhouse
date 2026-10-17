@@ -67,6 +67,9 @@ bin/rh verify --toolchain ruby --json > /tmp/verification.json
   library suite or the contract filters. `--toolchain` already selects
   ignored tests in `<target>_toolchain`.
 - `--plan` is read-only: no Cargo, installs, tests, or verification lock.
+  With no `--test`, `--toolchain`, `--contract`, or `--lib`, it is only a
+  hosted-coverage preview and reports no local checks. A run without
+  `--plan` and without one of those selectors exits with an error.
 - `--base REF` compares the current working tree with that exact commit
   (default `HEAD`), including non-ignored untracked files. It neither fetches
   nor finds a merge base. The hosted selection preview is informational,

@@ -213,7 +213,11 @@ class RhVerifyTest < Minitest::Test
     }
     out, err, status = invoke('--plan', '--json')
     assert status.success?, err
-    settings.each_key { |key| refute JSON.parse(out)['build_environment'].key?(key) }
+    report = JSON.parse(out)
+    assert_equal 'planned', report['status']
+    assert_empty report['checks']
+    settings.each_key { |key| refute report['build_environment'].key?(key) }
+    refute report['build_environment'].key?('CARGO_INCREMENTAL')
     out, err, status = invoke('--json', '--lib', env: settings)
     assert status.success?, err
     settings.each { |key, value| assert_equal value, JSON.parse(out)['build_environment'][key] }
