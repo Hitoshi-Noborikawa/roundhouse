@@ -22,10 +22,10 @@ fn strict_targets_ledger_the_shell_out() {
     use roundhouse::project::{target_files, BuildTarget};
 
     let files = [
-        ("db/schema.rb", "ActiveRecord::Schema.define(version: 1) do\n  create_table :articles do |t|\n    t.string :title\n  end\nend\n"),
+        ("db/schema.rb", "ActiveRecord::Schema.define(version: 1) do\n  create_table :articles do |t|\n    t.string :title\n    t.integer :author_id\n  end\n  create_table :comments do |t|\n    t.integer :article_id\n    t.string :host\n  end\nend\n"),
         ("config/routes.rb", "Rails.application.routes.draw do\n  resources :articles, only: :index\nend\n"),
         ("app/models/application_record.rb", "class ApplicationRecord < ActiveRecord::Base\n  primary_abstract_class\nend\n"),
-        ("app/models/article.rb", "class Article < ApplicationRecord\n  def host\n    `hostname`.strip\n  end\nend\n"),
+        ("app/models/article.rb", "class Article < ApplicationRecord\n  belongs_to :author, default: -> { `whoami`.strip }\n  has_many :comments, -> { where(host: `hostname`.strip) }\n  def host\n    `hostname`.strip\n  end\nend\n"),
         ("app/controllers/application_controller.rb", "class ApplicationController < ActionController::Base\nend\n"),
     ];
     let tree: HashMap<PathBuf, Vec<u8>> = files.into_iter().map(|(p, c)| (p.into(), c.into())).collect();
@@ -51,7 +51,12 @@ fn strict_targets_ledger_the_shell_out() {
     ] {
         let (files, diags) = roundhouse::emit::diagnostics::scope(|| target_files(&app, std::path::Path::new("."), target));
         files.expect("target files");
-        assert!(shell(&diags), "{target:?} did not ledger the shell-out: {diags:?}");
+        let n = diags.iter().filter(|d| {
+            d.severity == Severity::Error
+                && matches!(&d.kind, DiagnosticKind::Unsupported { construct, .. } if construct.as_str() == "shell_command")
+        }).count();
+        // Method body, belongs_to default, and has_many scope.
+        assert_eq!(n, 3, "{target:?} ledgered {n} shell-outs, not the three sites: {diags:?}");
     }
     for target in [BuildTarget::Ruby, BuildTarget::Jruby, BuildTarget::Spinel] {
         let (files, diags) = roundhouse::emit::diagnostics::scope(|| target_files(&app, std::path::Path::new("."), target));
