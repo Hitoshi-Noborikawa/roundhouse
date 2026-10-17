@@ -19,6 +19,9 @@ require_relative "action_controller/current"
 # lives in the entry point instead leaves those lists to guess.
 require_relative "message_digest"
 require_relative "action_controller/message_verifier"
+# `cookies.encrypted` and the session store: the verifier's envelope
+# under AES-256-GCM rather than an HMAC.
+require_relative "action_controller/message_encryptor"
 # Masked CSRF tokens + verify. After Current (session) and the
 # digest primitives it consumes.
 require_relative "action_controller/authenticity_token"

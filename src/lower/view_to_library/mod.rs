@@ -1194,6 +1194,17 @@ pub fn insert_db_stub(
             Ty::Str,
         ),
     );
+    // AES-256-GCM, the encrypted cookie jar's cipher: encrypt answers the
+    // ciphertext followed by the tag, decrypt the plaintext or "".
+    let bytes = |n: &str| (Symbol::from(n), Ty::Str);
+    digest_info.class_methods.insert(
+        Symbol::from("aes_256_gcm_encrypt"),
+        fn_sig(vec![bytes("key"), bytes("iv"), bytes("plain")], Ty::Str),
+    );
+    digest_info.class_methods.insert(
+        Symbol::from("aes_256_gcm_decrypt"),
+        fn_sig(vec![bytes("key"), bytes("iv"), bytes("ct"), bytes("tag")], Ty::Str),
+    );
     classes.insert(ClassId(Symbol::from("MessageDigest")), digest_info);
 
     // ActiveSupport's temporal intrinsics — the same situation as Db:
