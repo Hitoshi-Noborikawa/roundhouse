@@ -103,6 +103,20 @@ end
 }
 
 #[test]
+fn an_immediately_invoked_lambda_loads_its_child_first() {
+    assert_runs(&[("app/services/gauge.rb", r#"class Gauge
+  PREFIX = "start"
+  TEXT = -> { Reading::TEXT }.call
+  PROC = proc { Reading::COPY }.call
+  class Reading
+    TEXT = Gauge::PREFIX
+    COPY = TEXT
+  end
+end
+"#)], "gauge.rb", "raise unless Gauge::TEXT == \"start\" && Gauge::PROC == \"start\"");
+}
+
+#[test]
 fn a_stored_lambda_does_not_load_a_child_before_later_parent_constants() {
     assert_runs(&[("app/services/gauge.rb", r#"class Gauge
   TEXT = -> { Reading::TEXT }

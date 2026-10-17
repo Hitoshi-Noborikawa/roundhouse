@@ -661,7 +661,35 @@ fn nested_names_in_paths(owner: &LibraryClass, paths: &BTreeSet<Vec<String>>, na
     out
 }
 
+/// Body of an immediately invoked lambda or proc: `-> { … }.call`,
+/// `lambda { … }.call`, `proc { … }.call`. A stored closure runs later;
+/// one invoked in the same expression runs while the parent statement
+/// loads, so its constant reads are load-time.
+fn invoked_lambda_body(expr: &Expr) -> Option<&Expr> {
+    let ExprNode::Send { recv: Some(recv), method, .. } = &*expr.node else {
+        return None;
+    };
+    if method.as_str() != "call" {
+        return None;
+    }
+    match &*recv.node {
+        ExprNode::Lambda { body, .. } => Some(body),
+        ExprNode::Send { recv: None, method, args, block: Some(block), .. }
+            if args.is_empty() && matches!(method.as_str(), "lambda" | "proc") =>
+        {
+            Some(match &*block.node {
+                ExprNode::Lambda { body, .. } => body,
+                _ => block,
+            })
+        }
+        _ => None,
+    }
+}
+
 fn walk_load_time_paths(expr: &Expr, owner: &LibraryClass, visited: &mut BTreeSet<String>, paths: &mut BTreeSet<Vec<String>>) {
+    if let Some(body) = invoked_lambda_body(expr) {
+        walk_load_time_paths(body, owner, visited, paths);
+    }
     if let ExprNode::Lambda { .. } = &*expr.node {
         return;
     }
