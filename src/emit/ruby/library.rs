@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 use super::super::EmittedFile;
 use crate::App;
 use crate::dialect::{AccessorKind, LibraryClass, LibraryClassOrigin, MethodDef, MethodReceiver, MethodVisibility};
-use crate::expr::{Expr, ExprNode, InterpPart, LValue, Literal};
+use crate::expr::{Expr, ExprNode, LValue, Literal};
 use crate::ident::{ClassId, Symbol, VarId};
 use crate::span::Span;
 use crate::ty::Ty;
@@ -9455,124 +9455,10 @@ fn relpath(from_dir: &Path, to_anchor: &str) -> String {
 }
 
 pub(super) fn walk_const_paths(e: &Expr, out: &mut BTreeSet<Vec<String>>) {
-    match &*e.node {
-        ExprNode::Const { path } => {
-            out.insert(path.iter().map(|s| s.as_str().to_string()).collect());
-        }
-        ExprNode::Send { recv, args, block, .. } => {
-            if let Some(r) = recv {
-                walk_const_paths(r, out);
-            }
-            for a in args {
-                walk_const_paths(a, out);
-            }
-            if let Some(b) = block {
-                walk_const_paths(b, out);
-            }
-        }
-        ExprNode::Apply { fun, args, block } => {
-            walk_const_paths(fun, out);
-            for a in args {
-                walk_const_paths(a, out);
-            }
-            if let Some(b) = block {
-                walk_const_paths(b, out);
-            }
-        }
-        ExprNode::Hash { entries, .. } => {
-            for (k, v) in entries {
-                walk_const_paths(k, out);
-                walk_const_paths(v, out);
-            }
-        }
-        ExprNode::Array { elements, .. } => {
-            for el in elements {
-                walk_const_paths(el, out);
-            }
-        }
-        ExprNode::StringInterp { parts } => {
-            for p in parts {
-                if let InterpPart::Expr { expr } = p {
-                    walk_const_paths(expr, out);
-                }
-            }
-        }
-        ExprNode::BoolOp { left, right, .. } => {
-            walk_const_paths(left, out);
-            walk_const_paths(right, out);
-        }
-        ExprNode::Let { value, body, .. } => {
-            walk_const_paths(value, out);
-            walk_const_paths(body, out);
-        }
-        ExprNode::Lambda { body, .. } => walk_const_paths(body, out),
-        // A type-assertion wrapper is transparent to reference edges —
-        // the broadcast lowerings wrap their `Views::…` payload render
-        // in `Cast { …, Str }`, and skipping it dropped the model →
-        // views require.
-        ExprNode::Cast { value, .. } => walk_const_paths(value, out),
-        ExprNode::If { cond, then_branch, else_branch } => {
-            walk_const_paths(cond, out);
-            walk_const_paths(then_branch, out);
-            walk_const_paths(else_branch, out);
-        }
-        ExprNode::Case { scrutinee, arms } => {
-            walk_const_paths(scrutinee, out);
-            for arm in arms {
-                walk_const_paths(&arm.body, out);
-            }
-        }
-        ExprNode::Seq { exprs } => {
-            for e in exprs {
-                walk_const_paths(e, out);
-            }
-        }
-        ExprNode::Assign { value, .. } => walk_const_paths(value, out),
-        ExprNode::Yield { args } => {
-            for a in args {
-                walk_const_paths(a, out);
-            }
-        }
-        ExprNode::Raise { value } => walk_const_paths(value, out),
-        ExprNode::RescueModifier { expr, fallback } => {
-            walk_const_paths(expr, out);
-            walk_const_paths(fallback, out);
-        }
-        ExprNode::Return { value } => walk_const_paths(value, out),
-        ExprNode::Super { args: Some(args) } => {
-            for a in args {
-                walk_const_paths(a, out);
-            }
-        }
-        ExprNode::BeginRescue { body, rescues, else_branch, ensure, .. } => {
-            walk_const_paths(body, out);
-            for r in rescues {
-                walk_const_paths(&r.body, out);
-            }
-            if let Some(e) = else_branch {
-                walk_const_paths(e, out);
-            }
-            if let Some(e) = ensure {
-                walk_const_paths(e, out);
-            }
-        }
-        ExprNode::Next { value: Some(v) } => walk_const_paths(v, out),
-        ExprNode::MultiAssign { value, .. } => walk_const_paths(value, out),
-        ExprNode::While { cond, body, .. } => {
-            walk_const_paths(cond, out);
-            walk_const_paths(body, out);
-        }
-        ExprNode::Range { begin, end, .. } => {
-            if let Some(b) = begin {
-                walk_const_paths(b, out);
-            }
-            if let Some(e) = end {
-                walk_const_paths(e, out);
-            }
-        }
-        // Leaves and uninteresting nodes pass through.
-        _ => {}
+    if let ExprNode::Const { path } = &*e.node {
+        out.insert(path.iter().map(|s| s.as_str().to_string()).collect());
     }
+    e.node.for_each_child(&mut |child| walk_const_paths(child, out));
 }
 
 // has_secure_password synthesis moved to the shared model lowering
