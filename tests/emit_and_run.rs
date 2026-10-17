@@ -164,6 +164,8 @@ mod time_find_zone;
 mod concurrent_map;
 #[path = "emit_and_run/request_optional_port.rs"]
 mod request_optional_port;
+#[path = "emit_and_run/request_port.rs"]
+mod request_port;
 #[path = "emit_and_run/action_dispatch_request_put.rs"]
 mod action_dispatch_request_put;
 #[path = "emit_and_run/controller_url_helpers.rs"]
