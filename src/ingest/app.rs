@@ -10108,9 +10108,10 @@ pub(super) fn queue_adapter_line(line: &str) -> Option<Option<String>> {
     let rest = line
         .strip_prefix("Rails.application.config.active_job.queue_adapter")
         .or_else(|| line.strip_prefix("config.active_job.queue_adapter"))?;
-    // An assignment, not the `==` or `=~` operators.
+    // An assignment, not the `==` or `=~` operators or a rightward
+    // assignment (`=> name`), which reads the setting.
     let value = rest.trim_start().strip_prefix('=')?;
-    if value.starts_with(['=', '~']) {
+    if value.starts_with(['=', '~', '>']) {
         return None;
     }
     let value = value.trim();

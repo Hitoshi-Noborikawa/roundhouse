@@ -66,7 +66,7 @@ fn a_hash_inside_the_quotes_is_not_a_comment() {
 #[test]
 fn a_comparison_does_not_set_it() {
     let app = application(
-        "    config.active_job.queue_adapter = :sidekiq\n    puts 1 if config.active_job.queue_adapter == :async\n    config.active_job.queue_adapter == :async\n    config.active_job.queue_adapter =~ /async/\n",
+        "    config.active_job.queue_adapter = :sidekiq\n    puts 1 if config.active_job.queue_adapter == :async\n    config.active_job.queue_adapter == :async\n    config.active_job.queue_adapter =~ /async/\n    config.active_job.queue_adapter => observed_adapter\n",
     );
     assert_eq!(adapter(&[("config/application.rb", &app)]).as_deref(), Some("sidekiq"));
 }
