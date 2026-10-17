@@ -684,7 +684,7 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
     for exc in [
         "Exception", "StandardError", "RuntimeError", "ArgumentError",
         "TypeError", "NameError", "NoMethodError", "IndexError",
-        "KeyError", "RangeError", "IOError", "NotImplementedError",
+        "KeyError", "RangeError", "IOError", "IO::TimeoutError", "NotImplementedError",
         "FrozenError", "ZeroDivisionError", "StopIteration",
         "ThreadError", "ClosedQueueError", "RegexpError",
         // CRuby's bundled libraries and Spinel's uri/net/json packages
