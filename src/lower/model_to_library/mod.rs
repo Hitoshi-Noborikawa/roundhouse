@@ -1406,6 +1406,27 @@ fn push_user_methods(methods: &mut Vec<MethodDef>, model: &Model) {
                     && selected_source_methods.contains(&existing.name_span)
                     && existing.name_span.file == method.name_span.file
                     && method.name_span.start > existing.name_span.start;
+            // A column's accessor yields to the model's own, as Rails' generated attribute methods do; its `super` is the column.
+            let existing_is_column = existing.signature.is_some()
+                && matches!(existing.kind, AccessorKind::AttributeReader | AccessorKind::AttributeWriter);
+            // (`ingest::column_accessors` has already written its `super` as the attribute.)
+            if incoming_is_real && existing_is_column && !method.name_span.is_synthetic() {
+                // The synthesized writer stays, under the name hydration writes through (`schema::hydration_setter`): a loaded row does not run the model's writer.
+                let raw = (existing.kind == AccessorKind::AttributeWriter).then(|| {
+                    let mut raw = existing.clone();
+                    raw.name = crate::ident::Symbol::from(format!("_write_{}_raw", existing.name.as_str().trim_end_matches('=')));
+                    raw
+                });
+                selected_source_methods.remove(&existing.name_span);
+                if let Some(raw) = raw
+                    && !methods.iter().any(|m| m.name == raw.name && m.receiver == raw.receiver)
+                {
+                    methods.push(raw);
+                }
+                methods[idx] = method.clone();
+                selected_source_methods.insert(method.name_span);
+                continue;
+            }
             if incoming_is_real && (existing_is_attr_half || incoming_is_later_delegate) {
                 selected_source_methods.remove(&existing.name_span);
                 methods[idx] = method.clone();

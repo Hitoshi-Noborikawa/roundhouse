@@ -16536,3 +16536,5 @@ mod value_seq_order;
 mod typescript_error_class;
 #[path = "emit_and_run/class_macros.rs"]
 mod class_macros;
+#[path = "emit_and_run/accessor_override.rs"]
+mod accessor_override;

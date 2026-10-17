@@ -2182,6 +2182,7 @@ end
     super::model_macros::expand_model_macros(&mut app, &sources)?;
     // After the concern-macro expansion: a concern's macros are that one's to expand or refuse.
     super::class_macros::expand_class_macros(&mut app, &sources);
+    super::column_accessors::rewrite_super(&mut app);
     // After the splice, so a class method a concern contributed gets
     // the same treatment as one written in the model.
     qualify_model_class_method_ar_calls(&mut app);

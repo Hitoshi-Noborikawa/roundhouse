@@ -112,7 +112,7 @@ pub(crate) fn expand_class_macros(app: &mut App, sources: &[SourceFile]) {
                         return Err(format!("`{}` is defined twice", m.name.as_str()));
                     }
                     if m.receiver == MethodReceiver::Instance && reserved.get_or_insert_with(|| synthesized_names(app, model_index)).contains(&m.name) {
-                        return Err(format!("`{}` is also a method the model's columns or declarations define", m.name.as_str()));
+                        return Err(format!("`{}` is also a method the model's associations or declarations define", m.name.as_str()));
                     }
                 }
                 Ok(())
@@ -155,8 +155,8 @@ pub(crate) fn expand_class_macros(app: &mut App, sources: &[SourceFile]) {
 }
 
 /// The instance methods the model lowering synthesizes for this model
-/// (columns, associations, declarations), which a generated `def` of the
-/// same name would collide with.
+/// (associations, declarations), which a generated `def` of the same
+/// name would collide with.
 fn synthesized_names(app: &App, model_index: usize) -> HashSet<Symbol> {
     let model = &app.models[model_index];
     let mut specs = crate::lower::controller_to_library::params::collect_specs(&app.controllers);
@@ -167,6 +167,13 @@ fn synthesized_names(app: &App, model_index: usize) -> HashSet<Symbol> {
         .into_keys()
         .collect();
     out.extend(synthesized.iter().filter(|m| m.receiver == MethodReceiver::Instance).map(|m| m.name.clone()));
+    // Not a column's accessor: a model's own one wins over it (`push_user_methods`), as a generated one does in Ruby.
+    if let Some(table) = app.schema.tables.get(&model.table.0) {
+        for c in &table.columns {
+            out.remove(&c.name);
+            out.remove(&Symbol::from(format!("{}=", c.name.as_str())));
+        }
+    }
     out
 }
 
