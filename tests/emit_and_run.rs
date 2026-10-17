@@ -4887,6 +4887,102 @@ class ArticlesControllerTest < ActionDispatch::IntegrationTest
 end
 "##;
 
+/// `notice.present?` in the scaffold views lowers to the shared nil
+/// guard `!(notice || "").empty?`. Each target has to keep the coalesce
+/// whole as the receiver and leave `notice` readable for the paragraph
+/// after it: Kotlin printed `notice ?: "".isEmpty()`, Elixir
+/// `notice || "" == ""` (never true for a notice), and Rust moved
+/// `notice` into `unwrap_or`.
+fn notice_guard_app() -> emit_and_run::Overlay {
+    emit_and_run::real_blog().edit(
+        CONTROLLER_TEST,
+        "    assert_redirected_to article_url(Article.last)\n",
+        "    assert_redirected_to article_url(Article.last)\n    \
+           get article_url(Article.last)\n    \
+           assert_select \"#notice\", \"Article was successfully created.\"\n",
+    )
+}
+
+#[test]
+fn a_nullable_present_guard_test_passes() {
+    notice_guard_app().run_test(CONTROLLER_TEST).assert_passes();
+}
+
+/// Rust and Elixir test clients do not carry the flash to the next
+/// request, so these render the index view with and without a notice.
+#[test]
+#[ignore = "requires the Rust toolchain; compiles and executes an emitted app"]
+fn a_nullable_present_guard_runs_on_rust() {
+    let (emitted, errors) = emit_and_run::real_blog().emit(roundhouse::project::BuildTarget::Rust);
+    assert!(errors.is_empty(), "{errors:?}");
+    std::fs::create_dir_all(emitted.join("tests")).unwrap();
+    std::fs::write(emitted.join("tests/notice_guard.rs"), r#"
+use app::views::Articles;
+
+#[test]
+fn a_present_notice_is_shown_and_an_absent_one_is_not() {
+    let shown = Articles::index(vec![], Some("Saved".to_string()), None);
+    assert!(shown.contains("id=\"notice\">Saved</p>"), "{shown}");
+    for absent in [None, Some(String::new())] {
+        let page = Articles::index(vec![], absent, None);
+        assert!(!page.contains("id=\"notice\""), "{page}");
+    }
+}
+"#).unwrap();
+    let output = std::process::Command::new("cargo")
+        .args(["test", "--test", "notice_guard"])
+        .env_remove("CARGO_TARGET_DIR")
+        .current_dir(&*emitted)
+        .output()
+        .expect("run the emitted Rust project's test");
+    assert!(output.status.success(), "{}\n{}\n{}", emitted.display(),
+        String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+}
+
+#[test]
+#[ignore = "requires Gradle; builds and runs an emitted app"]
+fn a_nullable_present_guard_runs_on_kotlin() {
+    let (emitted, errors) = notice_guard_app().emit(roundhouse::project::BuildTarget::Kotlin);
+    assert!(errors.is_empty(), "{errors:?}");
+    let mut gradle = std::process::Command::new("gradle");
+    gradle.args(["test", "--console=plain", "--no-daemon"]).current_dir(&*emitted);
+    if let Ok(java_home) = std::env::var("KOTLIN_JAVA_HOME").or_else(|_| std::env::var("JAVA_HOME")) {
+        gradle.env("JAVA_HOME", java_home);
+    }
+    let output = gradle.output().expect("run gradle test");
+    assert!(output.status.success(), "{}\n{}\n{}", emitted.display(),
+        String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+}
+
+#[test]
+#[ignore = "requires Elixir; builds and runs an emitted app"]
+fn a_nullable_present_guard_runs_on_elixir() {
+    let (emitted, errors) = emit_and_run::real_blog().emit(roundhouse::project::BuildTarget::Elixir);
+    assert!(errors.is_empty(), "{errors:?}");
+    std::fs::write(emitted.join("test/notice_guard_test.exs"), r#"defmodule NoticeGuardTest do
+  use ExUnit.Case
+
+  test "a present notice is shown and an absent one is not" do
+    shown = IO.iodata_to_binary(Views.Articles.index([], "Saved"))
+    assert shown =~ ~s(id="notice">Saved</p>)
+    for absent <- [nil, ""] do
+      refute IO.iodata_to_binary(Views.Articles.index([], absent)) =~ ~s(id="notice")
+    end
+  end
+end
+"#).unwrap();
+    for (args, env) in [(&["deps.get"][..], Some("test")), (&["test"][..], None)] {
+        let mut mix = std::process::Command::new("mix");
+        mix.args(args).current_dir(&*emitted).env("MIX_HOME", emitted.join(".mix"));
+        if let Some(env) = env {
+            mix.env("MIX_ENV", env);
+        }
+        let output = mix.output().expect("run mix");
+        assert!(output.status.success(), "mix {args:?} in {}\n{}\n{}", emitted.display(),
+            String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+    }
+}
+
 /// The Rust project builds the writer and answers what Rails' `serializable_hash` writes.
 #[test]
 #[ignore = "requires the Rust toolchain; compiles and executes an emitted app"]

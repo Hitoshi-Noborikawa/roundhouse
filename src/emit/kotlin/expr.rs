@@ -1213,12 +1213,13 @@ fn emit_bool_op(op: BoolOpKind, left: &Expr, right: &Expr, e: &Expr) -> String {
         BoolOpKind::And => format!("{l} && {r}"),
         // `||` is logical-or for Bool results, but Ruby's `x || default`
         // nil-coalescing idiom maps to Kotlin's `?:` when the result
-        // isn't a Bool.
+        // isn't a Bool. `?:` binds looser than a call, so the coalesce is
+        // parenthesized to stay whole as a receiver (`(x ?: "").isEmpty()`).
         BoolOpKind::Or => {
             if matches!(e.ty.as_ref(), Some(crate::ty::Ty::Bool)) {
                 format!("{l} || {r}")
             } else {
-                format!("{l} ?: {r}")
+                format!("({l} ?: {r})")
             }
         }
     }
