@@ -38,7 +38,7 @@ fn usage() -> &'static str {
 Usage: roundhouse --target LANG [INPUT] [-o OUT]
        roundhouse --site [INPUT] [-o OUT]
        roundhouse --archives LANG,LANG [INPUT] [-o OUT]
-       roundhouse check [--continue] [APP]
+       roundhouse check [--continue] [--inventory PATH] [--hotspots] [APP]
        roundhouse lsp
        roundhouse mcp [APP]
        roundhouse --help | --version
@@ -49,7 +49,8 @@ the multi-target Pages site.
 Subcommands (each takes --help):
   check                Analyze APP (default .) and print the diagnostics;
                        exit 1 on errors. --continue keeps going past
-                       unsupported constructs and prints a punch list.
+                       unsupported constructs, prints a punch list and a
+                       ranked hotspot report. --inventory PATH writes JSON.
   lsp                  Serve the Language Server over stdio.
   mcp                  Serve the MCP tools over stdio for APP (default .).
 
@@ -85,7 +86,8 @@ Examples:
   roundhouse --site                                   # → ./_site/
   roundhouse -t ruby --survey --allow-unsupported ~/git/mastodon
                                                       # partly-covered app
-  roundhouse check --continue ~/git/mastodon          # diagnostics + punch list
+  roundhouse check --continue ~/git/mastodon          # diagnostics + hotspots
+  roundhouse check --continue --inventory /tmp/i.json ~/git/jsp  # JSON worklist
   roundhouse mcp ~/git/campfire                       # an agent's MCP server
 "
 }
@@ -347,7 +349,7 @@ fn run_transpile(
     // lowering of the same app, from the ingest shape; built before the
     // analysis below mutates `app`.
     let whole_route = if target == BuildTarget::Futamura {
-        Some(project::futamura_whole_route(&app, input)?)
+        Some(project::futamura_whole_route(&app, input, &survey_gaps)?)
     } else {
         None
     };
@@ -381,9 +383,12 @@ fn run_transpile(
     // identifies its gem and the defining source has a matching literal
     // top-level require. Keep check's source diagnostic and all strict-target
     // refusals unchanged.
-    if target == BuildTarget::Ruby {
-        let supported_includes = roundhouse::gems::statically_resolved_external_includes(&app);
-        let external_namespaces = roundhouse::gems::locked_external_gem_namespaces(&app);
+    if matches!(target, BuildTarget::Ruby | BuildTarget::Jruby) {
+        let (external_namespaces, supported_includes) = if target == BuildTarget::Ruby {
+            (roundhouse::gems::locked_external_gem_namespaces(&app), roundhouse::gems::statically_resolved_external_includes(&app))
+        } else {
+            (roundhouse::gems::native_extension_gem_namespaces(&app), Default::default())
+        };
         analyze_diags.retain(|diagnostic| match &diagnostic.kind {
             roundhouse::diagnostic::DiagnosticKind::Unsupported {
                 construct, detail, ..
@@ -442,6 +447,26 @@ fn run_transpile(
             Some(wr) => project::futamura_target_files(&app, input, Some(wr)),
             None => project::target_files(&app, input, target),
         });
+
+    // Same attribution pass as `analyze_diags` above, run again here:
+    // model-to-library lowering (where an unresolved `alias` is caught,
+    // `lower::model_to_library::resolve_model_aliases`) runs a SECOND
+    // time inside `target_files` itself, to build the actual emitted
+    // method bodies — `analyze_and_lower`'s own lowering pass above
+    // isn't wrapped in `emit::diagnostics::scope`, so a push from
+    // there is silently dropped, and this is the first (and only)
+    // place such a diagnostic is ever collected. Without this second
+    // call, `--survey` (no `--allow-unsupported`) still hard-failed on
+    // an unresolved alias — the Error severity from `diags` alone
+    // gates the exit code below — and it never reached the gap
+    // ledger, which undercounted the app's real gap total.
+    if survey {
+        roundhouse::analyze::attribution::attribute_analysis_gaps(
+            &mut diags,
+            &app,
+            &mut survey_gaps,
+        );
+    }
 
     // Prism syntax errors recorded during ingest join the emit-gap
     // inventory: same `Diagnostic` shape, same print/policy/gate
@@ -518,7 +543,23 @@ fn run_transpile(
     // this is the most useful thing in the run, and printing it after
     // the early `return Err` would mean never printing it at all.
     if !survey_gaps.is_empty() {
-        let notes = analyze_diags.iter().filter(|d| d.severity == Severity::Info).count();
+        // `attribute_analysis_gaps` runs twice (once over `analyze_diags`,
+        // once over the emit-phase `diags` — see the call sites above) and
+        // an attributed note can land in EITHER vector, or only in `diags`
+        // when the construct is caught solely during emit (an unresolved
+        // model alias, today's only such case — `resolve_model_aliases`'s
+        // push only ever reaches `diags`' `emit::diagnostics::scope`, never
+        // `analyze_diags`). Counting `analyze_diags` alone could report 0
+        // attributed notes for a run that plainly has some. Count both,
+        // deduped by (span, message) so a construct caught in both passes
+        // for the same source line isn't counted twice.
+        let mut seen = std::collections::HashSet::new();
+        let notes = analyze_diags
+            .iter()
+            .chain(diags.iter())
+            .filter(|d| d.severity == Severity::Info)
+            .filter(|d| seen.insert((d.span, d.message.clone())))
+            .count();
         eprintln!();
         eprint!("{}", roundhouse::ingest::survey::render_report(&survey_gaps));
         eprintln!(

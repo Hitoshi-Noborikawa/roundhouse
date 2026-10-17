@@ -1056,12 +1056,12 @@ mod tests {
                 .into_iter()
                 .map(|(n, ty)| TyParam {
                     name: Symbol::from(n),
-                    ty,
+                    ty: ty.into(),
                     kind: ParamKind::Required,
                 })
                 .collect(),
             block: None,
-            ret: Box::new(ret),
+            ret: std::sync::Arc::new(ret),
             effects: EffectSet::pure(),
         }
     }
@@ -1073,6 +1073,7 @@ mod tests {
             parent: None,
             parent_span: Default::default(),
             includes: vec![],
+            include_spans: Vec::new(),
             methods,
             nullable_columns: Vec::new(),
             origin: None,

@@ -1619,6 +1619,12 @@ fn emit_send(
                     format!("({rs}.Length != 0)")
                 };
             }
+            // An element that is never nil or false makes `none?` mean no elements at all
+            "none?" if matches!(
+                r.ty.as_ref(),
+                Some(crate::ty::Ty::Array { elem })
+                    if matches!(**elem, crate::ty::Ty::Str | crate::ty::Ty::Int | crate::ty::Ty::Float | crate::ty::Ty::Sym)
+            ) => return format!("({rs}.Count == 0)"),
             "upcase" => return format!("{rs}.ToUpperInvariant()"),
             "downcase" => return format!("{rs}.ToLowerInvariant()"),
             "strip" => return format!("{rs}.Trim()"),
@@ -1884,7 +1890,17 @@ fn emit_if_stmt(cond: &Expr, then_branch: &Expr, else_branch: &Expr) -> String {
     if let Some((var, ty)) = narrowing_guard(cond) {
         let patvar = format!("{var}As{}", sanitize_type(&ty));
         let then = rename_word(&emit_stmt(then_branch), &var, &patvar);
-        let head = format!("if ({var} is {ty} {patvar}) {{\n{}\n}}", indent(&then));
+        let test = match ty.as_str() {
+            // Not `is IEnumerable<object?>`: a `List<long>` is not one, so match the non-generic interface.
+            "Array" => format!(
+                "{var} is System.Collections.IList {var}AsIList && new RhArrayView({var}AsIList) is var {patvar}"
+            ),
+            "Hash" => format!(
+                "{var} is System.Collections.IDictionary {var}AsIDictionary && new RhHashView({var}AsIDictionary) is var {patvar}"
+            ),
+            _ => format!("{var} is {ty} {patvar}"),
+        };
+        let head = format!("if ({test}) {{\n{}\n}}", indent(&then));
         if is_empty_branch(else_branch) {
             return head;
         }
@@ -1910,8 +1926,12 @@ fn narrowing_guard(cond: &Expr) -> Option<(String, String)> {
             if let (ExprNode::Var { name, .. }, ExprNode::Const { path }) =
                 (&*r.node, &*args[0].node)
             {
-                if let Some(t) = is_a_cast_type(path.last().map(|s| s.as_str()).unwrap_or("")) {
+                let last = path.last().map(|s| s.as_str()).unwrap_or("");
+                if let Some(t) = is_a_cast_type(last) {
                     return Some((camel(name.as_str()), t));
+                }
+                if matches!(last, "Array" | "Hash") {
+                    return Some((camel(name.as_str()), last.to_string()));
                 }
             }
         }

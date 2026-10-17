@@ -140,6 +140,32 @@ impl Model {
         })
     }
 
+    /// The association on this model, the `through:` model, that
+    /// supplies the rows of `through_assoc`. This is Rails'
+    /// `source_reflection_names`: the `source:` name when it is given,
+    /// and otherwise the singular name, then the name itself. `None`
+    /// when no candidate is declared here, or when both are (Rails
+    /// raises `AmbiguousSourceReflectionForThroughAssociation`). Never
+    /// match the source by class: a model can have two associations to
+    /// one class, and each one gives other rows.
+    pub fn through_source(&self, through_assoc: &Association) -> Option<&Association> {
+        let Association::HasMany { name, source, .. } = through_assoc else { return None };
+        let mut candidates = match source {
+            Some(source) => vec![source.clone()],
+            None => vec![Symbol::from(crate::naming::singularize(name.as_str())), name.clone()],
+        };
+        candidates.dedup();
+        // A later declaration of a name replaces an earlier one, as in Rails.
+        let found = candidates
+            .iter()
+            .filter_map(|c| self.associations().filter(|a| a.name() == c).last())
+            .collect::<Vec<_>>();
+        match found.as_slice() {
+            [one] => Some(one),
+            _ => None,
+        }
+    }
+
     /// Like `associations()`, but paired with each declaration's source
     /// span — for lowerers that stamp synthesized methods with the
     /// `has_many`/`belongs_to` line they came from.
@@ -267,6 +293,27 @@ pub enum ModelBodyItem {
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         leading_blank_line: bool,
     },
+    /// `alias new old` (keyword form), kept unresolved until after
+    /// synthesis. The model walk only sees hand-written `def`s and
+    /// enum-generated methods — columns, associations, `attr_accessor`
+    /// and `attribute` are synthesized later, in
+    /// `lower::model_to_library` — so resolving here would wrongly
+    /// refuse an alias naming any of those. `lower_model_to_library_class`
+    /// resolves it in body order (snapshot semantics: `old` is read as
+    /// defined AT THIS POINT, not as finally defined) and copies the
+    /// resolved `MethodDef` under `new`; an alias it can't resolve stays
+    /// a refusal (gap in survey mode, error in strict mode), same as an
+    /// ordinary unsupported construct.
+    Alias {
+        new: Symbol,
+        old: Symbol,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        leading_comments: Vec<Comment>,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        leading_blank_line: bool,
+        #[serde(default, skip_serializing_if = "Span::is_synthetic")]
+        span: Span,
+    },
 }
 
 impl ModelBodyItem {
@@ -277,7 +324,8 @@ impl ModelBodyItem {
         match self {
             Self::Association { span, .. }
             | Self::Validation { span, .. }
-            | Self::Callback { span, .. } => *span,
+            | Self::Callback { span, .. }
+            | Self::Alias { span, .. } => *span,
             Self::Scope { scope, .. } => scope.body.span,
             Self::Method { method, .. } => method.body.span,
             Self::Unknown { expr, .. } => expr.span,
@@ -293,7 +341,8 @@ impl ModelBodyItem {
             | Self::Scope { leading_comments, .. }
             | Self::Callback { leading_comments, .. }
             | Self::Method { leading_comments, .. }
-            | Self::Unknown { leading_comments, .. } => leading_comments,
+            | Self::Unknown { leading_comments, .. }
+            | Self::Alias { leading_comments, .. } => leading_comments,
         }
     }
 
@@ -304,7 +353,8 @@ impl ModelBodyItem {
             | Self::Scope { leading_comments, .. }
             | Self::Callback { leading_comments, .. }
             | Self::Method { leading_comments, .. }
-            | Self::Unknown { leading_comments, .. } => leading_comments,
+            | Self::Unknown { leading_comments, .. }
+            | Self::Alias { leading_comments, .. } => leading_comments,
         }
     }
 
@@ -315,7 +365,8 @@ impl ModelBodyItem {
             | Self::Scope { leading_blank_line, .. }
             | Self::Callback { leading_blank_line, .. }
             | Self::Method { leading_blank_line, .. }
-            | Self::Unknown { leading_blank_line, .. } => *leading_blank_line,
+            | Self::Unknown { leading_blank_line, .. }
+            | Self::Alias { leading_blank_line, .. } => *leading_blank_line,
         }
     }
 
@@ -326,7 +377,8 @@ impl ModelBodyItem {
             | Self::Scope { leading_blank_line, .. }
             | Self::Callback { leading_blank_line, .. }
             | Self::Method { leading_blank_line, .. }
-            | Self::Unknown { leading_blank_line, .. } => *leading_blank_line = v,
+            | Self::Unknown { leading_blank_line, .. }
+            | Self::Alias { leading_blank_line, .. } => *leading_blank_line = v,
         }
     }
 }
@@ -389,6 +441,17 @@ pub enum Association {
         #[serde(default, skip_serializing_if = "is_false")]
         foreign_key_explicit: bool,
         through: Option<Symbol>,
+        /// The `source:` option as written. It names the association on
+        /// the `through:` model that supplies the rows. Read it through
+        /// [`Model::through_source`], which also covers an omitted
+        /// `source:`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        source: Option<Symbol>,
+        /// Written with `class_name:` or `source_type:`. Otherwise app
+        /// assembly sets the `target` of a `through:` association to the
+        /// class of its source association, as Rails does.
+        #[serde(default, skip_serializing_if = "is_false")]
+        class_explicit: bool,
         dependent: Dependent,
         /// `has_many :notifications, as: :notifiable` — this side is
         /// one implementor of the named polymorphic interface; rows
@@ -542,6 +605,12 @@ pub enum ValidationRule {
         /// the Rails default text.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         message: Option<String>,
+        /// `allow_nil:` on the validator. `None` is Rails' default:
+        /// a nil value fails `:minimum` and is skipped for a lone
+        /// `:maximum`. `Some(true)` skips the check when the value
+        /// is nil. `Some(false)` fails both bounds on nil.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        allow_nil: Option<bool>,
     },
     Format { pattern: String },
     Numericality { only_integer: bool, gt: Option<f64>, lt: Option<f64> },
@@ -900,6 +969,15 @@ pub struct LibraryClass {
     /// (e.g. `Enumerable`).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub includes: Vec<ClassId>,
+    /// Span of each `include` call in `includes`, same length and
+    /// order. Ingest drops the call's own span once it resolves the
+    /// name (most of the time it's never needed again), so an
+    /// unresolved include had nowhere to point a diagnostic at; this
+    /// gives it one. Synthesized classes and a literal `LibraryClass`
+    /// built by a lowering (not ingested from source) carry an empty
+    /// vec, same as a missing `parent_span`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub include_spans: Vec<Span>,
     /// All instance + class methods in the class. `attr_reader` /
     /// `attr_writer` / `attr_accessor` are lowered to synthetic
     /// `MethodDef`s at ingest time (not preserved as attr declarations
@@ -969,6 +1047,15 @@ pub struct LibraryClass {
 }
 
 impl LibraryClass {
+    /// The members and the `Data.define` span of a class that a
+    /// file-level `X = Data.define(…)` creates.
+    pub fn data_define(&self) -> Option<(&[Symbol], Span)> {
+        match &self.origin {
+            Some(LibraryClassOrigin::DataDefine { members, span }) => Some((members, *span)),
+            _ => None,
+        }
+    }
+
     /// Direct source `@ivar` / compound `@ivar` writes — the shapes that
     /// need source-ordered emission. Synthetic `mattr_*` / `cattr_*` `@@`
     /// seeds and other framework initialization stay on the partitioned
@@ -988,6 +1075,18 @@ impl LibraryClass {
                 )
         })
     }
+}
+
+/// One property of a [`LibraryClassOrigin::RepresentableDecorator`].
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct RepresentableField {
+    /// The property name; its value is read by `representable_<name>`.
+    pub name: Symbol,
+    /// The JSON key (`as:`, else the name).
+    pub key: String,
+    /// The representer `extend:` names, when the value is rendered by
+    /// another one.
+    pub nested: Option<ClassId>,
 }
 
 /// What synthesized a `LibraryClass`. Used by per-target collapsers to
@@ -1010,6 +1109,15 @@ pub enum LibraryClassOrigin {
     /// alone. This remains a source library class, not a model/params sibling.
     AlbaResource {
         declaration_span: Span,
+    },
+    /// A `Representable::Decorator` expanded to ordinary methods before
+    /// inference (`ingest::representable`): `representable_<name>`
+    /// readers, `to_hash`, `as_json_str`. `fields` lets
+    /// `lower::as_json_poro` settle each value's JSON encoder from its
+    /// analyzed type.
+    RepresentableDecorator {
+        declaration_span: Span,
+        fields: Vec<RepresentableField>,
     },
     /// Per-resource params holder synthesized from a controller's
     /// `permit([:f1, :f2, …])` declaration. `resource` is the singular
@@ -1046,6 +1154,26 @@ pub enum LibraryClassOrigin {
     /// (`ingest::dry_struct`). Carried so a target can tell the coercions
     /// it generated from the app's own code.
     DryStruct,
+    /// A `Dry::Initializer` class given its constructor and readers
+    /// (`ingest::dry_initializer`), for the same reason.
+    DryInitializer,
+    /// A `Dry::Validation::Contract` given its `call`, a `Dry::Schema`
+    /// constant's class, or what they share (`ingest::dry_validation`).
+    DryValidation,
+    /// dry-monads' Result and do-notation stand-ins (`ingest::dry_monads`).
+    DryMonads,
+    /// The class a file-level `X = Data.define(:a, :b)` creates, in a
+    /// file that declares nothing else. `members` are the literal
+    /// Symbol members in declaration order; `span` is the
+    /// `Data.define` call. The statements of a `do … end` block are the
+    /// class body, and its constants are the class's `constants`. Ruby
+    /// runs the block with `self` as the class, but with the top level
+    /// as its lexical scope. Ruby and Spinel emit the factory again;
+    /// other targets have no Data representation and reject it.
+    DataDefine {
+        members: Vec<Symbol>,
+        span: Span,
+    },
 }
 
 /// A graphql-ruby object type (a class descending from
@@ -1895,9 +2023,10 @@ pub struct View {
     /// for the overwhelmingly common headerless partial/view.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub strict_locals: Option<Vec<Param>>,
-    /// Ingested for the analyzer only — a mailer's `.text.erb` variant
-    /// and the mailer layout: templates whose Ruby the type checks and
-    /// the IDE should see, but which no emitter renders yet.
+    /// Ingested for the analyzer only: a template whose Ruby the type
+    /// checks and the IDE should see, but which no emitter renders. No
+    /// ingest sets it today (a mailer's `.text.erb` renders, through
+    /// `lower::mailer_templates`).
     /// `session::analyze_and_lower` drops them before lowering;
     /// `check`, the LSP and the MCP keep them.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -2104,16 +2233,16 @@ impl Fixture {
     pub(crate) fn accessor_signature(&self, models: &[Model]) -> Ty {
         let class = self.class_id();
         let ret = models.iter().find(|model| model.name == class)
-            .map(|model| Ty::Class { id: model.name.clone(), args: vec![] })
+            .map(|model| Ty::Class { id: model.name.clone(), args: vec![].into() })
             .unwrap_or(Ty::Untyped);
         Ty::Fn {
             params: vec![crate::ty::Param {
                 name: Symbol::from("name"),
-                ty: Ty::Sym,
+                ty: Ty::Sym.into(),
                 kind: crate::ty::ParamKind::Required,
-            }],
+            }].into(),
             block: None,
-            ret: Box::new(ret),
+            ret: std::sync::Arc::new(ret),
             effects: EffectSet::pure(),
         }
     }
@@ -2125,10 +2254,24 @@ pub fn enum_reads_label(model: &Model, column: &Symbol) -> bool {
 }
 
 // Not every string mapping: one whose labels are its values (`%w[…].index_by(&:itself)`) reads the column as it is.
+// One `nil` value is the label of a NULL column (`unknown: nil`): Rails' `EnumType#deserialize` is `mapping.key(value)`.
 pub fn enum_mapping_reads_label(m: &[(String, crate::expr::Literal)]) -> bool {
     use crate::expr::Literal;
-    !m.is_empty()
+    let nils = m.iter().filter(|(_, v)| matches!(v, Literal::Nil)).count();
+    let m: Vec<&(String, Literal)> = m.iter().filter(|(_, v)| !matches!(v, Literal::Nil)).collect();
+    // A mapping of the `nil` entry alone (`{ unknown: nil }`) reads its label too:
+    // NULL is `"unknown"`, and a stored value no label names reads as nil.
+    if nils == 1 && m.is_empty() {
+        return true;
+    }
+    nils <= 1
+        && !m.is_empty()
         && (m.iter().all(|(_, v)| matches!(v, Literal::Int { .. }))
             || (m.iter().all(|(_, v)| matches!(v, Literal::Str { .. }))
-                && m.iter().any(|(l, v)| !matches!(v, Literal::Str { value } if value == l))))
+                && (nils == 1 || m.iter().any(|(l, v)| !matches!(v, Literal::Str { value } if value == l)))))
+}
+
+/// The label an enum mapping gives a NULL column (`unknown: nil`), if any.
+pub fn enum_nil_label(m: &[(String, crate::expr::Literal)]) -> Option<&str> {
+    m.iter().find(|(_, v)| matches!(v, crate::expr::Literal::Nil)).map(|(l, _)| l.as_str())
 }

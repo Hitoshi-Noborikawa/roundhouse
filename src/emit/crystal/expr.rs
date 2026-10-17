@@ -1980,7 +1980,7 @@ mod equal_identity_tests {
     }
 
     fn class(name: &str) -> Ty {
-        Ty::Class { id: crate::ident::ClassId(Symbol::from(name)), args: vec![] }
+        Ty::Class { id: crate::ident::ClassId(Symbol::from(name)), args: vec![].into() }
     }
 
     fn send(recv: Expr, arg: Expr) -> Expr {

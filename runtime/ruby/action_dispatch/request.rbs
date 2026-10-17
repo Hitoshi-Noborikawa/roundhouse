@@ -34,9 +34,12 @@ module ActionDispatch
     @body: String
     @body_io: RequestBody?
     @env: Hash[String, untyped]
+    @path_parameters: RequestPathParameters
     @user_agent: String
     @session_options: Hash[Symbol, bool]
     @params: Hash[String, untyped]
+    @csp_ready: bool
+    @content_security_policy: ContentSecurityPolicy?
 
     def remote_ip: () -> String
     def remote_ip=: (String) -> String
@@ -59,6 +62,10 @@ module ActionDispatch
     def raw_post: () -> String
     def env: () -> Hash[String, untyped]
     def env=: (Hash[String, untyped]) -> Hash[String, untyped]
+    def headers: () -> ActionDispatch::Http::Headers
+    def path_parameters: () -> RequestPathParameters
+    def path_parameters=: (Hash[String, String]) -> RequestPathParameters
+    def authorization: () -> String?
     def request_parameters: () -> Hash[String, Roundhouse::ParamValue]
     def request_parameters=: (Hash[String, Roundhouse::ParamValue]) -> Hash[String, Roundhouse::ParamValue]
     def query_parameters: () -> Hash[String, Roundhouse::ParamValue]
@@ -66,6 +73,7 @@ module ActionDispatch
     def initialize: () -> void
     def get?: () -> bool
     def post?: () -> bool
+    def put?: () -> bool
     def head?: () -> bool
     def xhr?: () -> bool
     def inertia?: () -> bool
@@ -74,16 +82,19 @@ module ActionDispatch
     def ssl?: () -> bool
     def protocol: () -> String
     def optional_port: () -> Integer?
+    def port: () -> Integer
     def base_url: () -> String
+    def host_with_port: () -> String
+    def content_security_policy: () -> ContentSecurityPolicy?
     def original_url: () -> String
     def url: () -> String
     def referrer: () -> String
     def user_agent: () -> String
-    def headers: () -> ActionDispatch::Http::Headers
     def session_options: () -> Hash[Symbol, bool]
     def session_skip?: () -> bool
     def user_agent=: (String) -> String
     def params: () -> Hash[String, untyped]
+    def filtered_parameters: () -> Hash[String, untyped]
     def params=: (Hash[String, untyped]) -> Hash[String, untyped]
     def self.for: (Hash[String, untyped] env, ?Hash[String, untyped] params) -> Request
   end

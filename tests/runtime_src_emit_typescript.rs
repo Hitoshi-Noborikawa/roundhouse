@@ -99,7 +99,7 @@ fn errors_rb_transpiles_to_typescript_classes() {
     let classes = parse_library_with_rbs(&ruby, &rbs, "runtime/ruby/active_record/errors.rb")
         .expect("parse_library_with_rbs");
 
-    assert_eq!(classes.len(), 7, "expected 7 classes; got {}", classes.len());
+    assert_eq!(classes.len(), 23, "expected 23 classes; got {}", classes.len());
 
     let not_found = classes
         .iter()
@@ -107,7 +107,7 @@ fn errors_rb_transpiles_to_typescript_classes() {
         .expect("ActiveRecord::RecordNotFound");
     let nf_ts = emit_library_class(not_found).expect("emit RecordNotFound");
     assert!(
-        nf_ts.contains("export class RecordNotFound extends Error"),
+        nf_ts.contains("export class RecordNotFound extends ActiveRecordError"),
         "RecordNotFound: {nf_ts}"
     );
 
@@ -117,7 +117,7 @@ fn errors_rb_transpiles_to_typescript_classes() {
         .expect("ActiveRecord::ValueTooLong");
     let tl_ts = emit_library_class(too_long).expect("emit ValueTooLong");
     assert!(
-        tl_ts.contains("export class ValueTooLong extends Error"),
+        tl_ts.contains("export class ValueTooLong extends StatementInvalid"),
         "ValueTooLong: {tl_ts}"
     );
 
@@ -127,7 +127,7 @@ fn errors_rb_transpiles_to_typescript_classes() {
         .expect("ActiveRecord::RecordNotUnique");
     let nu_ts = emit_library_class(not_unique).expect("emit RecordNotUnique");
     assert!(
-        nu_ts.contains("export class RecordNotUnique extends Error"),
+        nu_ts.contains("export class RecordNotUnique extends WrappedDatabaseException"),
         "RecordNotUnique: {nu_ts}"
     );
 
@@ -137,7 +137,7 @@ fn errors_rb_transpiles_to_typescript_classes() {
         .expect("ActiveRecord::RecordInvalid");
     let inv_ts = emit_library_class(invalid).expect("emit RecordInvalid");
     assert!(
-        inv_ts.contains("export class RecordInvalid extends Error"),
+        inv_ts.contains("export class RecordInvalid extends ActiveRecordError"),
         "missing class header: {inv_ts}"
     );
     assert!(

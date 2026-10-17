@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 # ActionDispatch::Request — the request-object surface controllers,
 # filters, and helpers reach (`request.remote_ip`, `request.referer`,
 # `request.xhr?`, `request.env[...]`, `request.get?`). Typed fields the
@@ -13,6 +14,7 @@
 # Request (CGI-env-backed, runtime/action_dispatch_request.rb) and must
 # not blend the two shapes.
 require_relative "headers"
+require_relative "request_path_parameters"
 
 module ActionDispatch
   # `request.body` — the raw body as Rails hands it back: an IO, not the
@@ -154,6 +156,7 @@ module ActionDispatch
       @env = {}
       @request_parameters = {}
       @query_parameters = {}
+      @path_parameters = RequestPathParameters.new({})
       # `@params` too, and for a reason `@env` shows: `Request.for`
       # COPIES into both (`params.each { |k, v| r.params[k] = v }`),
       # which READS the slot before anything writes it. Unset, that read
@@ -172,6 +175,11 @@ module ActionDispatch
       # defect `@params` had, one read away from surfacing.
       @user_agent = +""
       @session_options = {}
+      # Memo for `content_security_policy`. False until the first read
+      # copies the app default; a later read returns that same object so
+      # a before_action and the header writer share the narrowed policy.
+      @csp_ready = false
+      @content_security_policy = nil
     end
 
     # Rack's per-request session options. The one key the corpus writes
@@ -222,12 +230,30 @@ module ActionDispatch
       @body
     end
 
+    # Rails checks the ordinary Rack Authorization key, legacy server
+    # spellings, and the CGI redirect fallback.
+    def authorization
+      ActionDispatch::Http::Headers.authorization(@env)
+    end
+
+    def path_parameters
+      @path_parameters
+    end
+
+    def path_parameters=(values)
+      @path_parameters = RequestPathParameters.new(values)
+    end
+
     def get?
       @request_method == "GET"
     end
 
     def post?
       @request_method == "POST"
+    end
+
+    def put?
+      @request_method == "PUT"
     end
 
     # `head?` sits beside `get?` because Rails' "is this a safe
@@ -291,6 +317,22 @@ module ActionDispatch
       port
     end
 
+    def port
+      authority = @env.fetch("HTTP_X_FORWARDED_HOST", "").to_s.split(",").last.to_s.strip
+      if authority.empty?
+        authority = @host
+        if !@env.key?("HTTP_HOST") && (@env.key?("SERVER_NAME") || !authority.include?(":"))
+          authority = "#{authority}:#{@env.fetch("SERVER_PORT", "").to_s}"
+        end
+      end
+      sep = authority.rindex(":")
+      unless sep.nil?
+        value = authority[(sep + 1)..].to_s
+        return value.to_i if value.match?(/\A[0-9]+\z/)
+      end
+      ssl? ? 443 : 80
+    end
+
     # `request.protocol` — the scheme WITH its `://`, as Rails spells it.
     def protocol
       ssl? ? "https://" : "http://"
@@ -304,6 +346,27 @@ module ActionDispatch
       default = ssl? ? ":443" : ":80"
       host = @host.end_with?(default) ? @host[0, @host.length - default.length].to_s : @host
       protocol + host
+    end
+
+    # `request.host_with_port` — `base_url` without the scheme. Rails
+    # drops the scheme's standard port, which `base_url` already did.
+    def host_with_port
+      b = base_url
+      p = protocol
+      return "" if b.length < p.length
+      b[p.length..].to_s
+    end
+
+    # The app's default policy, duplicated per request. Nil when the
+    # app configured none (or DISABLE_CONTENT_SECURITY_POLICY). The
+    # first read memoizes so a before_action that narrows the policy
+    # and the later header write see one object.
+    def content_security_policy
+      return @content_security_policy if @csp_ready
+      @csp_ready = true
+      src = Rails.application.content_security_policy
+      @content_security_policy = src.nil? ? nil : src.dup
+      @content_security_policy
     end
 
     # Absolute URL of this request. Feed templates interpolate it as
@@ -347,6 +410,18 @@ module ActionDispatch
 
     def params=(value)
       @params = value
+    end
+
+    # Rails' `filtered_parameters`: the request's parameters, path
+    # parameters last (with the route's controller and action), with the
+    # value of every key the app's `config.filter_parameters` names
+    # replaced by "[FILTERED]", for an app that logs them itself
+    # (`Rails.logger` does not filter; only Rails' own request log does).
+    def filtered_parameters
+      all = {}
+      @params.each { |k, v| all[k] = v }
+      @path_parameters.to_h.each { |k, v| all[k] = v }
+      ActiveSupport::ParameterFilter.new(Rails.application.config_filter_parameters).filter(all)
     end
 
     # Build a request from a CGI/Rack-shaped env hash.

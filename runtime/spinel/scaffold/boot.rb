@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 # Boot chain — every `require_relative` the app needs, in the order it
 # needs them, and NOTHING that starts anything.
 #
@@ -31,15 +32,18 @@ require_relative "runtime/db"
 require_relative "runtime/base64"
 # Module-only Shellwords — packages/shellwords reopens String/Array and
 # poisons String#split (PolyArray → C compile fail). See
-# runtime/spinel/shellwords.rb; defining the module drops BUNDLED's
-# require "shellwords".
-require_relative "runtime/shellwords"
+# runtime/spinel/shellwords_spinel.rb; defining the module drops
+# BUNDLED's library row. Not named shellwords.rb: that stem on
+# runtime/ would answer a bare require and hide stdlib
+# String#shellescape on every target that shares the tree.
+require_relative "runtime/shellwords_spinel"
 require_relative "runtime/json_impl"
 # JsonBuilder — the JSON encoding primitives the Jbuilder lowerer
 # emits calls to (`Views::Articles.article_json` etc.). Separate from
 # `runtime/json.rb`'s `JSON.generate` shim: this module exposes
 # `JsonBuilder.encode_value` / `encode_string` for per-value encoding.
 require_relative "runtime/json_builder"
+require_relative "runtime/action_controller_json_render"
 # Params — narrowing accessors over the recursive request-params tree
 # (`Roundhouse::ParamValue`). The synthesized `<Resource>Params.from_raw`
 # calls these instead of open-coding `is_a?` narrowing per field, so the
@@ -95,18 +99,18 @@ Rails.secret_key_base = LocalSecret.resolve(ENV["SECRET_KEY_BASE"])
 # stub reopen when the source app has none); loads right after the
 # runtime shim it reopens.
 require_relative "config/application"
-# Pin the process zone to the app's config.time_zone before anything
-# renders. Rails presents every AR temporal value in that zone
+# The app's config.time_zone becomes the runtime's default zone before
+# anything renders. Rails presents every AR temporal value in that zone
 # REGARDLESS of the host's — `parse_db_time` hydrates the stored UTC
-# instant and lands it here with `.getlocal`, so strftime/iso8601/pubDate
-# offsets match Rails on any host. `config_time_zone` is a framework
-# default in runtime/rails.rb that the app's reopen (required just above)
-# overrides when ingest found a `config.time_zone` line, so this call
-# resolves statically — no respond_to? guard, which the strict target
-# could not take anyway. Twin of the overlay main.rb's pin.
-ENV["TZ"] = ActiveSupport::RAILS_TZ_TO_IANA.fetch(
-  Rails.application.config_time_zone, Rails.application.config_time_zone
-)
+# instant and `ActiveSupport.present` lands it in this zone, so
+# strftime/iso8601/pubDate offsets match Rails on any host - while the
+# process zone stays the host's, so `Time.now` is local time as in Rails.
+# `config_time_zone` is a framework default in runtime/rails.rb that the
+# app's reopen (required just above) overrides when ingest found a
+# `config.time_zone` line, so this call resolves statically - no
+# respond_to? guard, which the strict target could not take anyway.
+# Twin of the overlay boot's.
+ActiveSupport.set_default_zone(Rails.application.config_time_zone)
 require_relative "runtime/active_record"
 # Default as_json → _as_json_only. Date-column rewrite is injected only
 # when app_uses_date (see project::spinel_files); Campfire omits Date.
@@ -165,6 +169,8 @@ require_relative "runtime/active_job"
 # ActiveJob payload codecs: after the module and its DeserializationError,
 # and after global_id_locator, whose URI parser the record reader uses.
 require_relative "runtime/active_job_serialization"
+# The app's payload jobs (generated), and the drain's payload arm.
+require_relative "runtime/job_registry"
 # Per-request state per THREAD -- reopens Current, the view slots, the
 # broadcast log, the job queue and the store memo (see the file).
 require_relative "runtime/thread_state"
@@ -260,6 +266,9 @@ require_relative "runtime/action_controller_fragment_caching"
 # Rails 8.1.4's full ActionController::Head options hash is a Ruby-family
 # feature; strict non-Ruby targets keep the bounded shared implementation.
 require_relative "runtime/action_controller_head"
+# Rails 8.1.4 `send_data(filename:)`: the Content-Disposition escaping
+# works over UTF-8 bytes, so it is a Ruby-family reopen as well.
+require_relative "runtime/action_controller_send_data"
 # The app/models.rb aggregator (generated — see apply_models_aggregator)
 # loads every model/support class. Model files only require their own
 # LOAD-time deps (superclass, class-body consts); method-body references

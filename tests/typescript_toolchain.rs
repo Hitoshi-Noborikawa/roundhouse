@@ -15,7 +15,14 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use roundhouse::analyze::Analyzer;
+#[path = "support/emit_and_run.rs"]
+#[allow(dead_code)]
+mod emit_and_run;
+#[path = "support/nested_classes.rs"]
+mod nested_classes;
+#[path = "support/array_methods.rs"]
+mod array_methods;
+
 use roundhouse::emit::typescript;
 use roundhouse::ingest::ingest_app;
 
@@ -30,7 +37,8 @@ fn generate_project(fixture_path: &Path, out: &Path) {
     std::fs::create_dir_all(out).expect("create scratch");
 
     let mut app = ingest_app(fixture_path).expect("ingest");
-    Analyzer::new(&app).analyze(&mut app);
+    // Emit from the post-analyze lowered IR, as `roundhouse --target typescript` does
+    roundhouse::session::analyze_and_lower(&mut app);
     let files = typescript::emit(&app);
 
     for file in &files {
@@ -53,7 +61,8 @@ fn generate_project_with_profile(
     std::fs::create_dir_all(out).expect("create scratch");
 
     let mut app = ingest_app(fixture_path).expect("ingest");
-    Analyzer::new(&app).analyze(&mut app);
+    // Emit from the post-analyze lowered IR, as `roundhouse --target typescript` does
+    roundhouse::session::analyze_and_lower(&mut app);
     let files = typescript::emit_with_profile(&app, profile);
 
     for file in &files {
@@ -200,13 +209,11 @@ fn assert_node_test_passes(fixture: &str, scratch: &Path) {
         String::from_utf8_lossy(&install.stderr),
     );
 
-    // Shell invocation so glob expansion picks up every test file —
-    // passing the directory confuses tsx/node:test when there's no
-    // index entry. tsx registers a module loader so `.ts` imports
-    // resolve at run time.
-    let output = Command::new("sh")
-        .arg("-c")
-        .arg("./node_modules/.bin/tsx --test test/*.test.ts")
+    // The emitted `npm test` script is the suite (recursive find,
+    // fail closed when nothing matches). A second finder here is how
+    // the harness and package.json drifted.
+    let output = Command::new("npm")
+        .arg("test")
         .current_dir(scratch)
         .output()
         .expect("run node --test via tsx");
@@ -254,4 +261,65 @@ fn real_blog_libsql_node_test_passes() {
     let scratch = scratch_dir("real-blog-libsql-node");
     generate_project_with_profile(fixture, &scratch, &DeploymentProfile::node_async());
     assert_node_test_passes("real-blog (libsql)", &scratch);
+}
+
+/// Install the emitted project's packages, run `script` under tsx from its
+/// root, and answer what it printed.
+fn run_under_tsx(emitted: &Path, script: &str) -> String {
+    let install = Command::new("npm")
+        .args(["install", "--silent", "--no-audit", "--no-fund"])
+        .current_dir(emitted)
+        .output()
+        .expect("run npm install");
+    assert!(install.status.success(), "{}", String::from_utf8_lossy(&install.stderr));
+    std::fs::write(emitted.join("check.ts"), script).unwrap();
+    let run = Command::new("npx")
+        .args(["tsx", "check.ts"])
+        .current_dir(emitted)
+        .output()
+        .expect("run tsx");
+    assert!(run.status.success(), "{}", String::from_utf8_lossy(&run.stderr));
+    String::from_utf8_lossy(&run.stdout).trim().to_string()
+}
+
+#[test]
+#[ignore]
+fn real_blog_nested_classes_run_under_tsx() {
+    // Classes nested under a class and a module, raised, rescued and
+    // built from another file, answer as CRuby does.
+    let (emitted, errors) = nested_classes::overlay().emit(roundhouse::project::BuildTarget::Typescript);
+    assert!(errors.is_empty(), "{errors:?}");
+    let out = run_under_tsx(
+        &emitted,
+        "import { Report } from \"./app/models/report.js\";\nconsole.log(Report.summary());\n",
+    );
+    assert_eq!(out, nested_classes::SUMMARY);
+}
+
+#[test]
+#[ignore]
+fn real_blog_array_methods_run_under_tsx() {
+    // The Array methods the emit translates answer as CRuby does,
+    // empty-Array and not-found answers included.
+    let (emitted, errors) = array_methods::overlay().emit(roundhouse::project::BuildTarget::Typescript);
+    assert!(errors.is_empty(), "{errors:?}");
+    let out = run_under_tsx(
+        &emitted,
+        "import { ArrayProbe } from \"./app/models/array_probe.js\";\nconsole.log(JSON.stringify(ArrayProbe.run([1, 2, 3], [\"a\", \"b\"])));\n",
+    );
+    assert_eq!(out, array_methods::EXPECTED);
+}
+
+#[test]
+#[ignore]
+fn real_blog_number_methods_run_under_tsx() {
+    // Integer and Float methods, the operators Ruby defines differently
+    // (`/`, `%`, `<=>`, half-away rounding) and a chained `<<`.
+    let (emitted, errors) = array_methods::overlay().emit(roundhouse::project::BuildTarget::Typescript);
+    assert!(errors.is_empty(), "{errors:?}");
+    let out = run_under_tsx(
+        &emitted,
+        "import { NumberProbe } from \"./app/models/number_probe.js\";\nconsole.log(JSON.stringify(NumberProbe.run(7, 2, 2.5, [0])));\n",
+    );
+    assert_eq!(out, array_methods::NUMBER_EXPECTED);
 }
