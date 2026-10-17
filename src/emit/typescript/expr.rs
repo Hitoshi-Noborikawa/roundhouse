@@ -1187,7 +1187,6 @@ pub(super) fn emit_expr(e: &Expr) -> String {
     super::printer::render_expr(&js_expr(e))
 }
 
-/// Build a JavaScript expression with its source span and shared primitive behavior.
 /// Print one string-kernel call. The Ruby name stays in the table.
 fn js_string_kernel(
     span: Span,
@@ -1212,6 +1211,7 @@ fn js_string_kernel(
     }
 }
 
+/// Build a JavaScript expression with its source span and shared primitive behavior.
 pub(super) fn js_expr(e: &Expr) -> Js {
     if let Some(s) = crate::emit::shared::utf8_chr::emit(e, crate::emit::shared::utf8_chr::Target::TypeScript, emit_expr) {
         return Js::new(e.span, JsExpr::Raw(s));
