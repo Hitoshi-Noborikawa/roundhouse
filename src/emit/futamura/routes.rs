@@ -876,24 +876,24 @@ impl Facts {
             }
         }
         // Load time: constants, class-level initializers, class-body calls.
-        // A class body runs with the class itself as `self`, so a body
-        // that uses `self` (`register(self)`, `self.new`) or calls
-        // anything receiverless (`register(new)`, a class method that
-        // stores `self`) can hand the class object, or an instance of
-        // it, to anyone: the class is live.
+        // A class body runs with the class itself as `self`: one that
+        // builds an instance (`register(new)`), passes `self` on as a
+        // value (`register(self)`), or calls an app class method (whose
+        // body may keep `self`) can hand the class object, or an
+        // instance of it, to anyone, so the class is live. A module body
+        // (a concern's `included do … end` runs on the includer) makes
+        // every class under the module live.
         for lc in lcs {
             let own = lc.name.0.as_str();
             for e in load_time(lc) {
-                visit(e, &mut |n| {
-                    if escapes_self(n) {
-                        if lc.is_module {
-                            // A concern's `included do … end` runs with
-                            // the including class as `self`.
-                            always.extend(index.tree(own).into_iter().filter(|t| t != own && !index.is_module(t)));
-                        } else {
-                            always.push(own.to_string());
-                        }
+                if escapes_self(index, own, e) {
+                    if lc.is_module {
+                        always.extend(index.tree(own).into_iter().filter(|t| t != own && !index.is_module(t)));
+                    } else {
+                        always.push(own.to_string());
                     }
+                }
+                visit(e, &mut |n| {
                     if let Some(ty) = &n.ty {
                         always.extend(classes_of(ty).into_iter().filter(|c| index.classes.contains_key(c)));
                     }
@@ -993,10 +993,34 @@ fn builds_own_instance(e: &Expr) -> bool {
             && recv.as_ref().is_none_or(|r| matches!(&*r.node, ExprNode::SelfRef)))
 }
 
-/// Does `e`, in a class body, hand on `self` (the class object)? A
-/// `self` reference, or a receiverless call, which runs on `self`.
-fn escapes_self(e: &Expr) -> bool {
-    matches!(&*e.node, ExprNode::SelfRef | ExprNode::Send { recv: None, .. })
+/// Does `e`, in `class`'s body, hand on `self` (the class object, or an
+/// instance it builds)? A `new` / `allocate` on it, a receiverless or
+/// `self.` call to an app class method (in a module body, any app class
+/// method by that name: `self` there may be the includer), or `self`
+/// used as a value rather than a receiver. A framework class-body call
+/// (`include`, `delegate`, `attr_reader`) keeps nothing app code can
+/// read back.
+fn escapes_self(index: &Index, class: &str, e: &Expr) -> bool {
+    let module = index.is_module(class);
+    let (mut selves, mut receivers, mut escapes) = (0usize, 0usize, false);
+    visit(e, &mut |n| match &*n.node {
+        ExprNode::SelfRef => selves += 1,
+        ExprNode::Send { recv, method, .. } if recv.as_ref().is_none_or(|r| matches!(&*r.node, ExprNode::SelfRef)) => {
+            if recv.is_some() {
+                receivers += 1;
+            }
+            let app_method = if module {
+                index.by_name.get(method).into_iter().flatten().any(|(_, side)| *side)
+            } else {
+                index.lookup(class, method, true).is_some()
+            };
+            if builds_own_instance(n) || app_method {
+                escapes = true;
+            }
+        }
+        _ => {}
+    });
+    escapes || selves > receivers
 }
 
 /// The expressions a class runs once, when it loads.

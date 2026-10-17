@@ -1224,6 +1224,24 @@ fn rta_a_class_body_that_hands_on_self_makes_the_class_live() {
     assert!(stderr.contains("app/lib/gadget.rb:8") && stderr.contains("Gadget#call"), "{stderr}");
 }
 
+/// Precision: a class body that only makes framework calls (`include`,
+/// `attr_reader`) hands nothing on, so `Gadget` stays dead and the
+/// untyped `call` on a `Widget` still clears.
+#[test]
+fn rta_a_class_body_of_framework_calls_keeps_the_class_dead() {
+    let stderr = rta_ledger(
+        "rta-body-framework",
+        "    @name = { w: pick }[:w].call",
+        "",
+        &[(
+            "app/lib/gadget.rb",
+            "class Gadget\n  include Comparable\n  attr_reader :size\n\n  def call\n    Frobnicator::Spinner.new.spin\n  end\nend\n",
+        )],
+    );
+    assert!(stderr.contains("whole-route: 1 GET action(s) served by the lowered app; 0 left to Rails"), "{stderr}");
+    assert!(!stderr.contains("Frobnicator"), "{stderr}");
+}
+
 /// Ruby passes each subclass to its parent's `inherited` hook when the
 /// subclass loads, with nothing in the subclass' body to show for it:
 /// every class under an app `inherited` hook is live.
