@@ -37,7 +37,15 @@ fn app_with(routes: &str) -> roundhouse::App {
     .map(|(p, c)| (PathBuf::from(p), c.into_bytes()))
     .collect();
     let mut app = ingest_app_from_tree(tree).expect("ingest");
-    roundhouse::session::analyze_and_lower(&mut app);
+    let diagnostics = roundhouse::session::analyze_and_lower(&mut app);
+    assert!(
+        !diagnostics.iter().any(|diagnostic| matches!(
+            &diagnostic.kind,
+            roundhouse::diagnostic::DiagnosticKind::UnresolvedType { name: Some(name), .. }
+                if name.as_str() == "location"
+        )),
+        "the generated routing helper has a known String parameter: {diagnostics:#?}"
+    );
     app
 }
 
@@ -83,6 +91,14 @@ fn the_synthesized_controller_stays_out_of_the_apps_filter_stack() {
         "got:\n{emitted}"
     );
     assert!(!emitted.contains("authenticate"), "got:\n{emitted}");
+}
+
+#[test]
+fn routing_redirects_override_only_the_controller_host_policy() {
+    let app = app_with("  get \"/outside\", to: redirect(\"https://other.test/landing\")\n");
+    let emitted = redirect_controller(&app);
+    assert!(emitted.contains("def same_host_location(location)"), "{emitted}");
+    assert!(emitted.contains("redirect_to(\"https://other.test/landing\", status: :moved_permanently)"), "{emitted}");
 }
 
 #[test]

@@ -154,6 +154,8 @@ mod controller_response_body;
 mod render_to_string_partial_ivar;
 #[path = "emit_and_run/active_support_extensions.rs"]
 mod active_support_extensions;
+#[path = "emit_and_run/routing_redirect_host.rs"]
+mod routing_redirect_host;
 #[path = "emit_and_run/concurrent_map.rs"]
 mod concurrent_map;
 #[path = "emit_and_run/request_optional_port.rs"]
