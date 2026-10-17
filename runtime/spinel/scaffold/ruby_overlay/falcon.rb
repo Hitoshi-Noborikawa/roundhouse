@@ -34,6 +34,9 @@ require "rack/builder"
 ROOT = __dir__
 URL = "http://#{ENV.fetch("BIND", "0.0.0.0")}:#{ENV.fetch("PORT", "3000")}"
 COUNT = Integer(ENV.fetch("WEB_CONCURRENCY", Etc.nprocessors.to_s))
+# ROUNDHOUSE_CHECKPOINTER=0, for A/B measurement, leaves checkpoints to
+# config.ru's per-worker thread, as under Puma.
+CHECKPOINTER = ENV["ROUNDHOUSE_CHECKPOINTER"] != "0"
 
 # async-container's controller owns the children: INT/TERM stop them
 # (gracefully first) before the parent exits, so the port is free when
@@ -51,10 +54,29 @@ class FalconController < Async::Container::Controller
       Sync do
         Dir.chdir(ROOT)
         app, = Rack::Builder.parse_file(File.join(ROOT, "config.ru"))
+        # The WAL checkpoints run in the checkpointer process below, not
+        # on a thread here that would freeze this event loop
+        # (db.rb's checkpoint_in_own_process!).
+        Db.checkpoint_in_own_process! if CHECKPOINTER && defined?(Db) && Db.respond_to?(:checkpoint_in_own_process!)
+        # Jobs drain on this worker's event loop, not on a thread that
+        # would take the GVL from it (active_job_cruby.rb's start_drainer).
+        if defined?(ActiveJob) && ActiveJob.respond_to?(:start_drainer)
+          ActiveJob.start_drainer { |work| Async(transient: true) { work.call } }
+        end
         front = ThrusterCache::Front.new(Protocol::Rack::Adapter.new(app))
         server = Falcon::Server.new(front, bound, protocol: endpoint.protocol, scheme: endpoint.scheme)
         instance.ready!
         server.run.wait
+      end
+    end
+    # One more process, serving nothing: the WAL checkpointer.
+    if CHECKPOINTER
+      container.spawn(name: "checkpointer", restart: true) do |instance|
+        Dir.chdir(ROOT)
+        Rack::Builder.parse_file(File.join(ROOT, "config.ru"))
+        instance.ready!
+        Db.run_checkpointer
+        sleep
       end
     end
     $stdout.puts "falcon: #{COUNT} workers on #{URL}"

@@ -48,8 +48,23 @@ fn calendar_methods_on_a_time_ground_to_module_functions() {
 }
 
 #[test]
+fn time_find_zone_uses_the_nullable_time_zone_lookup() {
+    assert_eq!(emit("Time.find_zone(\"Tokyo\")"), "ActiveSupport::TimeZone.lookup(\"Tokyo\")");
+    assert_eq!(emit("::Time.find_zone(nil)"), "ActiveSupport::TimeZone.lookup(nil)");
+}
+
+#[test]
 fn a_nullable_reader_grounds_too() {
     assert_eq!(emit("ends_at.end_of_day"), "ActiveSupport.end_of_day(self.ends_at)");
+}
+
+#[test]
+fn time_to_date_uses_the_receivers_civil_day() {
+    assert_eq!(emit("starts_at.to_date"), "ActiveSupport.date_current(self.starts_at)");
+    assert_eq!(
+        emit("starts_at.in_time_zone(\"Tokyo\").to_date"),
+        "ActiveSupport.date_current(ActiveSupport.in_time_zone(self.starts_at, \"Tokyo\"))"
+    );
 }
 
 #[test]

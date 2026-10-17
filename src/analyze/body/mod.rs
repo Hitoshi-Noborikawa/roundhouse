@@ -357,6 +357,7 @@ pub struct BodyTyper<'a> {
     inquirers: Option<&'a std::collections::HashSet<Symbol>>,
     /// The app's translations; Rails' English when absent.
     i18n: Option<&'a crate::i18n::Catalog>,
+    helper_modules: Option<&'a std::collections::HashSet<ClassId>>,
 }
 
 impl<'a> BodyTyper<'a> {
@@ -446,6 +447,21 @@ impl<'a> BodyTyper<'a> {
         None
     }
 
+    /// Whether `recv` is a model class, whose setter is `ActiveRecord::Base`'s.
+    fn is_model_class(&self, recv: Option<&Ty>) -> bool {
+        let Some(Ty::Class { id, .. }) = recv else { return false };
+        let mut current = id;
+        for _ in 0..32 {
+            // Not `ActiveRecord::Base` alone: the registry leaves `ApplicationRecord`'s parent unset.
+            if matches!(current.0.as_str(), "ActiveRecord::Base" | "ApplicationRecord") {
+                return true;
+            }
+            let Some(parent) = self.classes.get(current).and_then(|c| c.parent.as_ref()) else { return false };
+            current = parent;
+        }
+        false
+    }
+
     fn app_defines(&self, self_ty: Option<&Ty>, method: &Symbol) -> bool {
         let Some(Ty::Class { id, .. }) = self_ty else { return false };
         let mut stack = vec![id];
@@ -465,11 +481,12 @@ impl<'a> BodyTyper<'a> {
     }
 
     pub fn new(classes: &'a HashMap<ClassId, ClassInfo>) -> Self {
-        Self { classes, const_resolver: None, typed_constants: None, data_factories: None, inquirers: None, i18n: None }
+        Self { classes, const_resolver: None, typed_constants: None, data_factories: None, inquirers: None, i18n: None, helper_modules: None }
     }
 
-    pub(crate) fn with_i18n(mut self, catalog: &'a crate::i18n::Catalog) -> Self {
+    pub(crate) fn with_i18n(mut self, catalog: &'a crate::i18n::Catalog, helper_modules: &'a std::collections::HashSet<ClassId>) -> Self {
         self.i18n = Some(catalog);
+        self.helper_modules = Some(helper_modules);
         self
     }
 
@@ -513,6 +530,19 @@ impl<'a> BodyTyper<'a> {
     pub fn analyze_expr(&self, expr: &mut Expr, ctx: &Ctx) -> Ty {
         let ty = self.compute(expr, ctx);
         expr.ty = Some(ty.clone());
+        // Not accepted silently: the runtime's setter keeps nothing, so every save would still stamp.
+        if expr.diagnostic.is_none()
+            && let ExprNode::Send { recv: Some(recv), method, args, .. } = &*expr.node
+            && method.as_str() == "record_timestamps="
+            && !matches!(args.first().map(|a| &*a.node), Some(ExprNode::Lit { value: Literal::Bool { value: true } }))
+            && self.is_model_class(recv.ty.as_ref())
+        {
+            expr.diagnostic = Some(crate::diagnostic::DiagnosticKind::Unsupported {
+                target: None,
+                construct: Symbol::from("record_timestamps"),
+                detail: "turning a model's timestamp stamping off is not modeled: its saves would still stamp them (`upsert_all(…, record_timestamps: false)` is)".to_string(),
+            });
+        }
         expr.decisions &= !crate::expr::CLASS_OBJECT_VALUE;
         if self.is_class_object(expr, ctx) { expr.decisions |= crate::expr::CLASS_OBJECT_VALUE; }
         diagnostic::detect_diagnostic(expr);
@@ -1937,11 +1967,22 @@ impl<'a> BodyTyper<'a> {
                     (false, true) => self.translating_controller(ctx.self_ty.as_ref()),
                     _ => None,
                 };
+                // An `app/helpers` module runs in the view, so its `t` is ActionView's (with no template for a lazy key).
+                let in_helper = !ctx.class_side
+                    && matches!(ctx.self_ty.as_ref(), Some(Ty::Class { id, .. }) if self.helper_modules.is_some_and(|h| h.contains(id)));
+                let helper_copy = expr.decisions & crate::expr::HELPER_COPY_TRANSLATE != 0;
                 let site = match (&scope, ctx.in_view) {
                     (_, true) => crate::lower::i18n_translate::Site::View(ctx.view_name.as_ref().map(|v| v.as_str())),
+                    _ if helper_copy => crate::lower::i18n_translate::Site::View(None),
+                    (None, false) if in_helper => crate::lower::i18n_translate::Site::View(None),
                     (Some(scope), false) => crate::lower::i18n_translate::Site::Controller(scope),
                     (None, false) => crate::lower::i18n_translate::Site::Other,
                 };
+                if translate
+                    && crate::lower::i18n_translate::tree_answer(catalog, recv.as_ref(), method.as_str(), args, block.as_ref()).is_some()
+                {
+                    return Ty::Hash { key: std::sync::Arc::new(Ty::Sym), value: std::sync::Arc::new(Ty::Untyped) };
+                }
                 if translate && let Some(resolved) = crate::lower::i18n_translate::resolves(
                     catalog, recv.as_ref(), method.as_str(), args, block.as_ref(), site,
                 ) {

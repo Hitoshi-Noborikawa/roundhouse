@@ -566,7 +566,7 @@ pub fn ingest_app_with_vfs<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResult
                             let outer = model.name.clone();
                             app.models.push(model);
                             if let Some(classes) =
-                                unwrap_or_record(ingest_nested_library_classes(&source, &path_str))?
+                                unwrap_or_record(ingest_nested_library_classes(&source, &path_str, outer.0.as_str()))?
                             {
                                 let nested = nested_under(&outer, classes);
                                 let (concern_items, concern_enum_decls, concern_guarded) =
@@ -683,13 +683,20 @@ pub fn ingest_app_with_vfs<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResult
     };
     let nested_app_roots: Vec<PathBuf> = roots.iter().skip(1).map(|root| dir.join(root)).collect();
     let mut support_seen: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
+    let boot_required = boot_required_files(vfs, dir);
+    let mut support_batches: Vec<(String, PathBuf, Vec<PathBuf>)> = Vec::new();
     for sub in support_roots(vfs, dir, &roots, &path_gems, &lib_ignores) {
-        let sub = sub.as_str();
-        let support_dir = dir.join(sub);
+        let support_dir = dir.join(&sub);
         if !vfs.is_dir(&support_dir) {
             continue;
         }
         let Ok(entries) = read_rb_files(vfs, &support_dir) else { continue };
+        support_batches.push((sub, support_dir, entries));
+    }
+    // Last, so a file a support root already reached is ingested once.
+    support_batches.push((String::new(), dir.to_path_buf(), boot_required.clone()));
+    for (sub, support_dir, entries) in support_batches {
+        let sub = sub.as_str();
         for entry in entries {
             if sub == "lib" && ignored_lib_file(&entry) {
                 continue;
@@ -732,7 +739,7 @@ pub fn ingest_app_with_vfs<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResult
                         // an alias naming one (an enum predicate, say)
                         // would hard-fail here and drop every genuinely
                         // nested class in the file too.
-                        if let Ok(classes) = ingest_nested_library_classes(&source, &path_str) {
+                        if let Ok(classes) = ingest_nested_library_classes(&source, &path_str, outer.0.as_str()) {
                             let nested = nested_under(&outer, classes);
                             let (concern_items, concern_enum_decls, concern_guarded) =
                                 ingest_concern_model_items_with_constants(
@@ -951,6 +958,18 @@ pub fn ingest_app_with_vfs<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResult
                 }
             }
         }
+        // `config.content_security_policy do |policy| … end`. The
+        // request copies this per call; nil (the runtime default) when
+        // the initializer is absent or DISABLE_CONTENT_SECURITY_POLICY
+        // is set. Sources are quoted here (`:self` → "'self'") because
+        // the runtime setter stores the list it is given.
+        if let Ok(init) = vfs.read(&dir.join("config/initializers/content_security_policy.rb")) {
+            if let Some(method) = content_security_policy_method(&String::from_utf8_lossy(&init)) {
+                if let Ok(mut synth) = crate::runtime_src::parse_methods(&method) {
+                    methods.append(&mut synth);
+                }
+            }
+        }
         // The forgery check's verification strategy (Rails main's
         // Fetch Metadata rule; see `read_forgery_verification_strategy`).
         // Only a non-default answer is synthesized; the runtime default
@@ -1085,6 +1104,61 @@ end
   [{replacement}]
 end
 "
+                )) {
+                    methods.append(&mut synth);
+                }
+            }
+        }
+        // `config.filter_parameters += [:passw, …]` — the keys Rails
+        // masks in `request.filtered_parameters`. Application body
+        // first, then the initializers in load order, as Rails runs
+        // them. (Rails also copies the list into
+        // `ActiveSupport.filter_parameters` for the event reporter; the
+        // runtime's stays the reporter's own, as before.) Synthesized as
+        // `config_filter_parameters` on the reopen, over the framework
+        // default (`[]`) in runtime/ruby/rails.rb. A Regexp, Proc or
+        // computed operand is not read; the survey names it.
+        {
+            let mut names: Vec<String> = Vec::new();
+            let mut seen = false;
+            let mut fold = |bytes: &[u8], file: &Path| {
+                for line in extract_filter_parameters(bytes) {
+                    match line {
+                        FilterParametersLine::Literal { replace, names: more } => {
+                            seen = true;
+                            if replace {
+                                names.clear();
+                            }
+                            names.extend(more);
+                        }
+                        FilterParametersLine::Computed { replace } => {
+                            // A computed `=` still replaces what came before
+                            // it; only its own operand goes unread.
+                            if replace {
+                                seen = true;
+                                names.clear();
+                            }
+                            survey::record(&IngestError::Unsupported {
+                                file: file.display().to_string(),
+                                message: "config.filter_parameters is not a list of Symbol or String literals; request.filtered_parameters does not apply it".to_string(),
+                            })
+                        }
+                    }
+                }
+            };
+            fold(&source, &app_config_path);
+            let init_dir = dir.join("config/initializers");
+            if vfs.is_dir(&init_dir) {
+                for entry in read_rb_files(vfs, &init_dir)? {
+                    if let Ok(bytes) = vfs.read(&entry) {
+                        fold(&bytes, &entry);
+                    }
+                }
+            }
+            if seen {
+                let literal = names.iter().map(|n| format!("{n:?}")).collect::<Vec<_>>().join(", ");
+                if let Ok(mut synth) = crate::runtime_src::parse_methods(&format!(
+                    "def config_filter_parameters\n  [{literal}]\nend\n"
                 )) {
                     methods.append(&mut synth);
                 }
@@ -1359,11 +1433,17 @@ end
                 }
                 app.module_mixins.extend(mixins);
                 app.initializer_filters.extend(extract_initializer_filters(&bytes, &path_str));
+                if let Some(store) = extract_collection_cache_store(&bytes, &path_str) {
+                    app.collection_cache_store = Some(store);
+                }
                 app.sql_functions
                     .extend(super::sql_functions::extract_sql_functions(&bytes, &path_str));
             }
         }
     }
+    // `config/database.yml`'s `pragmas:`, run on each connection after
+    // the Db shim's own (see `database_yml`).
+    app.database_pragmas = super::database_yml::database_pragmas(vfs, dir);
 
     // Each controller's lexical nesting, for resolving its superclass
     // once every controller is known (see
@@ -1729,6 +1809,13 @@ end
                 &importmap_path.display().to_string(),
             ))? {
                 if !importmap.pins.is_empty() {
+                    if let Some(method) = importmap_json_method(&importmap.pins) {
+                        if let Some(rails_app) = app.rails_application.as_mut() {
+                            if let Ok(mut synth) = crate::runtime_src::parse_methods(&method) {
+                                rails_app.methods.append(&mut synth);
+                            }
+                        }
+                    }
                     app.importmap = Some(importmap);
                 }
             }
@@ -1842,10 +1929,21 @@ end
             }
         }
     }
-    let gem_files = match &app.gem_lock {
+    let (mut gem_files, missing_gems) = match &app.gem_lock {
         Some(lock) => crate::i18n::gems::gem_locale_files(vfs, dir, lock, &path_gem_dirs(vfs, dir)),
-        None => Vec::new(),
+        None => (Vec::new(), Vec::new()),
     };
+    let application_rb = vfs.read_to_string(&dir.join("config/application.rb")).unwrap_or_default();
+    let configured = application_rb.lines().map(str::trim).filter(|l| !l.starts_with('#')).find_map(available_locales_line).and_then(Result::ok);
+    gem_files.retain(|(path, _)| crate::i18n::rails_i18n::loads(path, &application_rb, configured.as_deref()));
+    for gem in missing_gems.iter().filter(|g| !g.starts_with("rails-i18n ") || crate::i18n::rails_i18n::enables(&application_rb, "locale")) {
+        warn_i18n(format!("{gem} is in Gemfile.lock but installed in no gem root (BUNDLE_PATH, GEM_HOME, GEM_PATH): its locale files are not read, so a key only it defines answers as a missing translation"));
+    }
+    if let Some(version) = app.gem_lock.as_ref().and_then(|l| l.version_of("rails-i18n")) {
+        if version != crate::i18n::rails_i18n::RULES_VERSION && crate::i18n::rails_i18n::enables(&application_rb, "pluralization") {
+            warn_i18n(format!("rails-i18n {version}: plural rules are read as rails-i18n {}'s, which may differ from this version's", crate::i18n::rails_i18n::RULES_VERSION));
+        }
+    }
     let (catalog, problems) = crate::i18n::Catalog::load_with_gems(&default_locale(vfs, dir), &gem_files, &mut files);
     for (file, problem) in problems {
         survey::record(&IngestError::Unsupported { file, message: format!("locale file not loaded: {problem}") });
@@ -2167,11 +2265,19 @@ end
     collect_binary_assets(vfs, dir, &mut app);
     let mut require_roots: Vec<String> = roots.iter().map(|r| r.display().to_string()).collect();
     require_roots.extend(support_roots(vfs, dir, &roots, &path_gems, &lib_ignores));
+    require_roots.extend(
+        boot_required
+            .iter()
+            .filter_map(|file| file.strip_prefix(dir).ok())
+            .map(|file| file.display().to_string()),
+    );
     app.app_requires = collect_app_requires(vfs, dir, &require_roots);
     // Generated re-ingest labels never register real sources. No later
     // pass may append source-backed FileIds beyond the indexed snapshot.
     let late_sources = super::sources::drain();
     super::sources::assert_snapshot_matches(&[], &late_sources);
+    super::unreachable_views::mark(&mut app);
+    super::uncalled_helper_copies::mark(&mut app);
     Ok(app)
 }
 
@@ -3550,6 +3656,89 @@ fn expr_calls_respond_with(expr: &crate::expr::Expr) -> bool {
     found
 }
 
+/// Rails' `ActionDispatch::ContentSecurityPolicy` directive names — the
+/// methods a `content_security_policy do |p| … end` block calls on its
+/// block parameter to build the policy Rails would send as a response
+/// header.
+const CSP_DIRECTIVES: &[&str] = &[
+    "base_uri",
+    "block_all_mixed_content",
+    "child_src",
+    "connect_src",
+    "default_src",
+    "font_src",
+    "form_action",
+    "frame_ancestors",
+    "frame_src",
+    "img_src",
+    "manifest_src",
+    "media_src",
+    "navigate_to",
+    "object_src",
+    "plugin_types",
+    "prefetch_src",
+    "report_uri",
+    "require_trusted_types_for",
+    "sandbox",
+    "script_src",
+    "script_src_attr",
+    "script_src_elem",
+    "style_src",
+    "style_src_attr",
+    "style_src_elem",
+    "trusted_types",
+    "upgrade_insecure_requests",
+    "worker_src",
+];
+
+/// The message `csp_block_is_unrecognized`'s SENDER (`report_unrecognized_
+/// controller_macros` below) records for a `content_security_policy` block
+/// this module cannot read — kept as a constant so
+/// `project::futamura_whole_route`'s gap filter and this recorder can't
+/// drift apart. See that filter's doc comment for why the message, not the
+/// `IngestError` variant, is what tells the two kinds of record apart: both
+/// are `IngestError::Unsupported`, and only one of them blocks a route.
+pub(crate) const CSP_DIVERGENCE_MESSAGE: &str =
+    "content_security_policy: not emitted, the lowered app sends no CSP header";
+
+/// Is `blk` a `content_security_policy` block roundhouse can read well
+/// enough to know it does nothing but build a policy object — every
+/// statement a direct call on the block's own parameter, naming a known
+/// CSP directive, with symbol/string/simple-literal arguments? Rails'
+/// directive builders are themselves not modelled (the lowered app sends
+/// no `Content-Security-Policy` header either way — tracked as a
+/// TEMPORARY divergence on rubys/roundhouse#58 until CSP is modelled), so
+/// this is never about faithfully building the policy; it's about telling
+/// a block this predictable (no conditionals, no dynamic nonce generator,
+/// no method-call argument) apart from one that might be doing something
+/// this ingest gap would otherwise hide without a trace.
+pub(crate) fn csp_block_is_recognized(blk: &crate::expr::Expr) -> bool {
+    use crate::expr::ExprNode;
+    let ExprNode::Lambda { params, rest_param, block_param, extra_params, body, .. } = &*blk.node
+    else {
+        return false;
+    };
+    if rest_param.is_some() || block_param.is_some() || !extra_params.is_empty() {
+        return false;
+    }
+    let [p] = params.as_slice() else { return false };
+    fn stmt_ok(stmt: &crate::expr::Expr, param: &crate::ident::Symbol) -> bool {
+        use crate::expr::ExprNode;
+        let ExprNode::Send { recv: Some(recv), method, args, block: None, .. } = &*stmt.node
+        else {
+            return false;
+        };
+        let ExprNode::Var { name, .. } = &*recv.node else { return false };
+        name == param
+            && CSP_DIRECTIVES.contains(&method.as_str())
+            && args.iter().all(|a| matches!(&*a.node, ExprNode::Lit { .. }))
+    }
+    match &*body.node {
+        ExprNode::Seq { exprs } => exprs.iter().all(|s| stmt_ok(s, p)),
+        _ => stmt_ok(body, p),
+    }
+}
+
 /// A receiverless, blockless call left in a controller's class body
 /// after every consumer has run is a macro roundhouse does not
 /// recognize — `rate_limit`, say. Its effect (a guard, a filter, a
@@ -3621,6 +3810,30 @@ fn report_unrecognized_controller_macros(app: &App) {
                     ) && (super::controller::lambda_filter_target(expr).is_some()
                         || super::controller::next_restructure_refusal(expr)));
                 if claimed {
+                    continue;
+                }
+                // INTERIM (rubys/roundhouse#58, CSP option 2): a BARE
+                // `content_security_policy do |p| … end` whose
+                // directives this ingest can read is a recorded
+                // DIVERGENCE, not a blocking gap — see
+                // `csp_block_is_recognized` and
+                // `CSP_DIVERGENCE_MESSAGE`. `args.is_empty()` excludes
+                // `content_security_policy only: :player do …`: Rails
+                // scopes that policy to one action, which this ingest
+                // does not model at all (every action on the
+                // controller would wrongly get the same policy, or
+                // none), so it keeps today's gap regardless of how
+                // plain the block is. Anything stranger (a dynamic
+                // directive, conditionals, other code in the block)
+                // also keeps today's gap below, unchanged.
+                if method.as_str() == "content_security_policy"
+                    && args.is_empty()
+                    && block.as_ref().is_some_and(csp_block_is_recognized)
+                {
+                    survey::record(&IngestError::Unsupported {
+                        file: file_of(expr.span.file),
+                        message: CSP_DIVERGENCE_MESSAGE.to_string(),
+                    });
                     continue;
                 }
                 survey::record(&IngestError::Unsupported {
@@ -6464,7 +6677,7 @@ fn walk_erb<V: Vfs + ?Sized>(
                     || !stem.contains('.')
                     || matches!(
                         format,
-                        Some("turbo_stream" | "svg" | "text" | "json" | "js" | "pdf" | "csv" | "txt" | "css")
+                        Some("turbo_stream" | "svg" | "text" | "json" | "js" | "pdf" | "csv" | "txt" | "css" | "md")
                     )
                     // Feeds: `.rss.builder` / `.atom.builder` (lobsters'
                     // `home/stories.rss.builder`), lowered as
@@ -6868,6 +7081,80 @@ fn support_roots<V: Vfs + ?Sized>(
     out.retain(|root| !lib_ignores.iter().any(|ignored| ignored == root));
     out.sort();
     out.dedup();
+    out
+}
+
+/// Files `config/application.rb` and `config/environment.rb` load with a
+/// literal top-level `require_relative`, in file order.
+///
+/// Rails runs both files top to bottom before any initializer, so a
+/// constant defined in a file they load is defined for the whole process.
+/// An app that keeps boot-time settings in `config/site_settings.rb` and
+/// writes `require_relative "site_settings"` beside `require "rails/all"`
+/// has nothing in an autoload path, and no support root reached the file:
+/// every reference to its constants reported `constant not supported`
+/// (#1013).
+///
+/// `boot`, `application` and `environment` are the boot chain itself, not
+/// support code. A target must be an existing `.rb` file inside the app,
+/// reached without a symbolic link. A computed path, or one outside the
+/// app, is not followed; survey mode records it as a gap.
+fn boot_required_files<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> Vec<PathBuf> {
+    let config_dir = dir.join("config");
+    let boot_chain = ["boot.rb", "application.rb", "environment.rb"].map(|name| config_dir.join(name));
+    let mut out = Vec::new();
+    for name in ["application.rb", "environment.rb"] {
+        let file = config_dir.join(name);
+        let Ok(source) = vfs.read(&file) else { continue };
+        let parsed = ruby_prism::parse(&source);
+        let Some(program) = parsed.node().as_program_node() else { continue };
+        for statement in program.statements().body().iter() {
+            let Some(call) = statement.as_call_node() else { continue };
+            if call.receiver().is_some()
+                || call.block().is_some()
+                || super::util::constant_id_str(&call.name()) != "require_relative"
+            {
+                continue;
+            }
+            let arguments: Vec<_> =
+                call.arguments().map(|a| a.arguments().iter().collect()).unwrap_or_default();
+            let target = (arguments.len() == 1)
+                .then(|| super::util::string_value(&arguments[0]))
+                .flatten()
+                .and_then(|request| normalize_engine_library_require(dir, &config_dir, &request))
+                .map(|mut target| {
+                    if target.extension().is_none() {
+                        target.set_extension("rb");
+                    }
+                    target
+                });
+            match target {
+                Some(target) if boot_chain.contains(&target) => {}
+                Some(target)
+                    if target.extension().is_some_and(|e| e == "rb")
+                        && vfs.exists(&target)
+                        && !vfs.is_dir(&target)
+                        && !path_has_symlink_component(vfs, dir, &target) =>
+                {
+                    if !out.contains(&target) {
+                        out.push(target);
+                    }
+                }
+                _ => {
+                    if survey::is_active() {
+                        let location = statement.location();
+                        let text = String::from_utf8_lossy(location.as_slice());
+                        survey::record(&super::IngestError::Unsupported {
+                            file: file.display().to_string(),
+                            message: format!(
+                                "require_relative not followed (not a literal path to a Ruby file inside the app): `{text}`"
+                            ),
+                        });
+                    }
+                }
+            }
+        }
+    }
     out
 }
 
@@ -8761,6 +9048,47 @@ pub(super) fn extract_initializer_filters(source: &[u8], file: &str) -> Vec<crat
     out
 }
 
+/// `ActionView::PartialRenderer.collection_cache = <Const>.<reader>` in a
+/// `config/initializers/` file, bare or inside `to_prepare` (campfire's
+/// `fragment_cache.rb` points it at `FragmentCache.store`). The same
+/// discipline as the mixin reader: a constant receiver and an
+/// argument-less, blockless method on it, readable off the parse.
+/// Anything else (a computed store, `ActiveSupport::Cache.lookup_store`
+/// with arguments) is not recorded, and the initializer ledger reports
+/// the statement. The last assignment wins, as at boot.
+pub(super) fn extract_collection_cache_store(source: &[u8], file: &str) -> Option<crate::app::CollectionCacheStore> {
+    let result = super::prism::parse(source, file);
+    let root = result.node();
+    let src = String::from_utf8_lossy(source).into_owned();
+    let program = root.as_program_node()?;
+
+    let mut out = None;
+    for stmt in initializer_statements(&program) {
+        let Some(call) = stmt.as_call_node() else { continue };
+        if super::util::constant_id_str(&call.name()) != "collection_cache=" {
+            continue;
+        }
+        let Some(recv) = call.receiver() else { continue };
+        if constant_text(&recv, &src).as_deref() != Some("ActionView::PartialRenderer") {
+            continue;
+        }
+        let Some(args) = call.arguments() else { continue };
+        let args: Vec<_> = args.arguments().iter().collect();
+        let [value] = args.as_slice() else { continue };
+        let Some(read) = value.as_call_node() else { continue };
+        if read.arguments().is_some() || read.block().is_some() {
+            continue;
+        }
+        let Some(store_recv) = read.receiver() else { continue };
+        let Some(receiver) = constant_text(&store_recv, &src) else { continue };
+        out = Some(crate::app::CollectionCacheStore {
+            receiver: Symbol::from(receiver),
+            reader: Symbol::from(super::util::constant_id_str(&read.name())),
+        });
+    }
+    out
+}
+
 /// The source text of a node that is a constant or a constant path
 /// (`Foo`, `Turbo::StreamsChannel`), or None for anything else. Read as
 /// TEXT rather than resolved: the receiver may name a class this tree
@@ -8942,6 +9270,119 @@ fn extract_app_namespace(source: &[u8]) -> Option<String> {
         }
     }
     None
+}
+
+/// `config.content_security_policy do |policy| policy.script_src :self end`,
+/// including the `unless ENV["DISABLE_CONTENT_SECURITY_POLICY"]` guard
+/// when the file has one. `None` when the block names no literal source.
+pub(super) fn content_security_policy_method(source: &str) -> Option<String> {
+    let start = source.find("content_security_policy")?;
+    let mut directives: Vec<(String, Vec<String>)> = Vec::new();
+    for line in source[start..].lines() {
+        let line = line.trim();
+        if line.starts_with('#') {
+            continue;
+        }
+        if line.starts_with("end") {
+            break;
+        }
+        let Some(rest) = line.strip_prefix("policy.") else { continue };
+        let name_end = rest.find(|c: char| !c.is_ascii_alphanumeric() && c != '_').unwrap_or(rest.len());
+        let name = &rest[..name_end];
+        if name.is_empty() {
+            continue;
+        }
+        let args = rest[name_end..].trim().trim_end_matches(')');
+        let mut sources = Vec::new();
+        for arg in args.split(',') {
+            let arg = arg.trim().trim_end_matches(',');
+            if arg.is_empty() {
+                continue;
+            }
+            let quoted = if let Some(sym) = arg.strip_prefix(':') {
+                match sym {
+                    "self" => "'self'".to_string(),
+                    "none" => "'none'".to_string(),
+                    "unsafe_inline" => "'unsafe-inline'".to_string(),
+                    "unsafe_eval" => "'unsafe-eval'".to_string(),
+                    "https" => "https:".to_string(),
+                    "http" => "http:".to_string(),
+                    // An unknown symbol is not a source we can quote.
+                    // Dropping it keeps the directive honest; inventing
+                    // the bare word would ship a policy the app did not write.
+                    _ => continue,
+                }
+            } else if arg.len() >= 2
+                && ((arg.starts_with('"') && arg.ends_with('"'))
+                    || (arg.starts_with('\'') && arg.ends_with('\'')))
+            {
+                arg[1..arg.len() - 1].to_string()
+            } else {
+                continue;
+            };
+            sources.push(quoted);
+        }
+        if !sources.is_empty() {
+            directives.push((name.replace('_', "-"), sources));
+        }
+    }
+    if directives.is_empty() {
+        return None;
+    }
+    let guarded = source.contains("DISABLE_CONTENT_SECURITY_POLICY");
+    let mut body = String::from("def content_security_policy\n");
+    if guarded {
+        body.push_str("  return nil if ENV[\"DISABLE_CONTENT_SECURITY_POLICY\"] == \"true\"\n");
+    }
+    body.push_str("  policy = ActionDispatch::ContentSecurityPolicy.new\n");
+    for (name, sources) in directives {
+        let list = sources.iter().map(|s| format!("{s:?}")).collect::<Vec<_>>().join(", ");
+        body.push_str(&format!("  policy.set_directive({name:?}, [{list}])\n"));
+    }
+    body.push_str("  policy\nend\n");
+    Some(body)
+}
+
+/// Pretty `{"imports":{…}}` for `Rails.application.importmap_json`.
+///
+/// The bytes are the script body `javascript_importmap_tags` embeds
+/// (`action_view/view_helpers.rb`: 2-space indent, one pin per line,
+/// `": "` between name and path). Campfire hashes that body into
+/// `script-src`. A compact encoding is a different hash, and the
+/// browser then blocks the page's own import map. Pin paths are
+/// already `/assets/…` from importmap ingest, in the same order
+/// `Importmap.pins` emits.
+pub(super) fn importmap_json_method(pins: &[crate::app::ImportmapPin]) -> Option<String> {
+    if pins.is_empty() {
+        return None;
+    }
+    let mut json = String::from("{\n  \"imports\": {\n");
+    for (i, pin) in pins.iter().enumerate() {
+        if i > 0 {
+            json.push_str(",\n");
+        }
+        json.push_str("    \"");
+        json.push_str(&json_escape(&pin.name));
+        json.push_str("\": \"");
+        json.push_str(&json_escape(&pin.path));
+        json.push('"');
+    }
+    json.push_str("\n  }\n}");
+    Some(format!("def importmap_json\n  {json:?}\nend\n"))
+}
+
+fn json_escape(s: &str) -> String {
+    let mut out = String::new();
+    for c in s.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            c => out.push(c),
+        }
+    }
+    out
 }
 
 pub(super) fn extract_session_cookie_key(source: &[u8]) -> Option<String> {
@@ -9220,6 +9661,101 @@ pub(super) fn extract_variable_content_type_exclusions(source: &[u8]) -> Vec<Str
         out.extend(body[..close].split_whitespace().map(|s| s.to_string()));
     }
     out
+}
+
+/// One `config.filter_parameters` statement, as
+/// [`extract_filter_parameters`] reads it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum FilterParametersLine {
+    /// `+= [...]` (`replace: false`) or `= [...]` (`replace: true`) of
+    /// Symbol and String literals, each as its String.
+    Literal { replace: bool, names: Vec<String> },
+    /// Any other operand: a Regexp, a Proc, a computed list. `replace`
+    /// is true for a plain `=`, which still discards the names before it.
+    Computed { replace: bool },
+}
+
+/// The `config.filter_parameters` statements of a file, in source order
+/// (`Rails.application.config.filter_parameters += [:passw, :email]` in
+/// `filter_parameter_logging.rb`, or `config.filter_parameters += [...]`
+/// in the Application body). Line-scanned like the other config reads;
+/// the list may span lines, so the scan continues to its closing
+/// bracket. `%i[...]` and `%w[...]` lists count as literals.
+pub(crate) fn extract_filter_parameters(source: &[u8]) -> Vec<FilterParametersLine> {
+    let source = String::from_utf8_lossy(source);
+    let mut out = Vec::new();
+    let mut lines = source.lines();
+    while let Some(line) = lines.next() {
+        let t = line.trim_start();
+        if t.starts_with('#') {
+            continue;
+        }
+        let Some(idx) = t.find("config.filter_parameters") else { continue };
+        let rest = t[idx + "config.filter_parameters".len()..].trim_start();
+        let (replace, rest) = if let Some(r) = rest.strip_prefix("+=") {
+            (false, r)
+        } else if let Some(r) = rest.strip_prefix('=').filter(|r| !r.starts_with('=')) {
+            (true, r)
+        } else {
+            out.push(FilterParametersLine::Computed { replace: false });
+            continue;
+        };
+        let mut text = rest.trim().to_string();
+        if text.is_empty() {
+            if let Some(next) = lines.next() {
+                text.push_str(next.trim());
+            }
+        }
+        let opens = text.starts_with('[') || text.starts_with("%i[") || text.starts_with("%w[");
+        if opens {
+            while !text.contains(']') {
+                let Some(next) = lines.next() else { break };
+                text.push(' ');
+                text.push_str(next.trim());
+            }
+        }
+        out.push(filter_parameter_list(&text).map_or(FilterParametersLine::Computed { replace }, |names| {
+            FilterParametersLine::Literal { replace, names }
+        }));
+    }
+    out
+}
+
+/// The names of a `[:a, "b"]`, `%i[a b]` or `%w[a b]` literal that is
+/// the whole operand (nothing but a comment after it).
+fn filter_parameter_list(text: &str) -> Option<Vec<String>> {
+    let (words, body) = if let Some(b) = text.strip_prefix("%i[").or_else(|| text.strip_prefix("%w[")) {
+        (true, b)
+    } else {
+        (false, text.strip_prefix('[')?)
+    };
+    let close = body.find(']')?;
+    let after = body[close + 1..].trim();
+    if !(after.is_empty() || after.starts_with('#')) {
+        return None;
+    }
+    let inner = &body[..close];
+    if words {
+        return Some(inner.split_whitespace().map(str::to_string).collect());
+    }
+    inner
+        .split(',')
+        .map(str::trim)
+        .filter(|e| !e.is_empty())
+        .map(|e| {
+            let name = if let Some(sym) = e.strip_prefix(':') {
+                sym
+            } else if e.len() >= 2
+                && ((e.starts_with('"') && e.ends_with('"')) || (e.starts_with('\'') && e.ends_with('\'')))
+            {
+                &e[1..e.len() - 1]
+            } else {
+                return None;
+            };
+            let plain = !name.is_empty() && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '.');
+            plain.then(|| name.to_string())
+        })
+        .collect()
 }
 
 /// `(Vips.block_untrusted(true) seen, operations named by Vips.block(
@@ -10244,6 +10780,13 @@ pub(super) fn fallbacks_line(line: &str, default: &str) -> Option<Result<Option<
     })
 }
 
+/// A warning about what the app's i18n reads from its gems.
+fn warn_i18n(detail: String) {
+    let mut d = crate::diagnostic::Diagnostic::unsupported(crate::span::Span::synthetic(), None, "I18n", detail);
+    d.severity = crate::diagnostic::Severity::Warning;
+    super::prism::push(d);
+}
+
 /// Each locale's own plural rule: rails-i18n adds its pluralization
 /// module unless `config.rails_i18n.enabled_modules` leaves it out, and
 /// `config/locales/plurals.rb` is a file I18n's Pluralization backend
@@ -10421,5 +10964,28 @@ mod locale_tests {
         assert_eq!(locale_literal("\"fr#CA\" # comment").as_deref(), Some("fr#CA"));
         assert_eq!(locale_literal("'ja'").as_deref(), Some("ja"));
         assert_eq!(locale_literal("ENV[\"LOCALE\"]"), None);
+    }
+}
+
+#[cfg(test)]
+mod importmap_json_tests {
+    use super::importmap_json_method;
+    use crate::app::ImportmapPin;
+
+    #[test]
+    fn importmap_json_is_the_pretty_script_body() {
+        let pins = vec![
+            ImportmapPin { name: "application".into(), path: "/assets/application.js".into() },
+            ImportmapPin {
+                name: "@hotwired/turbo-rails".into(),
+                path: "/assets/turbo.js".into(),
+            },
+        ];
+        let method = importmap_json_method(&pins).expect("pins");
+        let json = "{\n  \"imports\": {\n    \"application\": \"/assets/application.js\",\n    \"@hotwired/turbo-rails\": \"/assets/turbo.js\"\n  }\n}";
+        assert!(
+            method.contains(&format!("{json:?}")),
+            "CSP hashes this string; it has to be the importmap script body:\n{method}"
+        );
     }
 }

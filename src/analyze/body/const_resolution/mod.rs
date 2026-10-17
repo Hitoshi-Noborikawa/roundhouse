@@ -56,6 +56,10 @@ const CORE_VALUE_CONSTS: &[(&str, &str, fn() -> Ty)] = &[
     ("Float", "MAX", || Ty::Float),
     ("Float", "MIN", || Ty::Float),
     ("IO", "NULL", || Ty::Str),
+    // `Regexp.new(selector, Regexp::IGNORECASE)` — lobsters' domain selectors.
+    ("Regexp", "IGNORECASE", || Ty::Int),
+    ("Regexp", "EXTENDED", || Ty::Int),
+    ("Regexp", "MULTILINE", || Ty::Int),
     ("File", "NULL", || Ty::Str),
     // `File.open(path, File::RDWR | File::CREAT, 0644)` and
     // `file.flock(File::LOCK_EX | File::LOCK_NB)` — campfire's WAL
@@ -95,6 +99,15 @@ const CORE_VALUE_CONSTS: &[(&str, &str, fn() -> Ty)] = &[
     ("OpenSSL::SSL", "VERIFY_PEER", || Ty::Int),
 ];
 
+/// Ruby's top-level value Consts: `STDERR.puts "…"` (discourse's
+/// warnings) reads the process's own stream, which `$stderr` is only
+/// until something reassigns it.
+const CORE_TOP_CONSTS: &[&str] = &["STDIN", "STDOUT", "STDERR"];
+
+fn io_ty() -> Ty {
+    Ty::Class { id: ClassId(Symbol::from("IO")), args: vec![].into() }
+}
+
 /// Classes that own rows in `CORE_VALUE_CONSTS`, with their RBS parents.
 const CORE_VALUE_CLASSES: &[(&str, &str)] = &[
     ("Float", "Numeric"),
@@ -102,6 +115,7 @@ const CORE_VALUE_CLASSES: &[(&str, &str)] = &[
     ("File", "IO"),
     ("Encoding", "Object"),
     ("OpenSSL::SSL", "Object"),
+    ("Regexp", "Object"),
 ];
 
 fn encoding_ty() -> Ty {
@@ -139,6 +153,10 @@ fn core_rbs() -> &'static str {
             }
             out.push_str("end\n");
         }
+        for name in CORE_TOP_CONSTS {
+            out.push_str(name);
+            out.push_str(": IO\n");
+        }
         out
     })
     .as_str()
@@ -146,6 +164,9 @@ fn core_rbs() -> &'static str {
 
 /// The type of a value constant `core_rbs()` declares, as Ruby defines it.
 fn core_value_type(name: &str) -> Option<Ty> {
+    if CORE_TOP_CONSTS.contains(&name.trim_start_matches("Object::")) {
+        return Some(io_ty());
+    }
     CORE_VALUE_CONSTS.iter().find_map(|(owner, field, ty)| {
         let need = owner.len() + 2 + field.len();
         (name.len() == need

@@ -101,7 +101,7 @@ fn json_actions_for(
 
 /// Each action's templates in the TEXT formats the implicit render
 /// negotiates beyond html and json, in test order: `turbo_stream`, then
-/// `js`. Same scan `json_actions_for` does for jbuilder.
+/// `js`, then `md`. Same scan `json_actions_for` does for jbuilder.
 ///
 /// Turbo negotiates `text/vnd.turbo-stream.html` on a form submission
 /// and Rails renders `<action>.turbo_stream.erb` for it; without the
@@ -126,7 +126,7 @@ fn text_format_actions_for(controller: &Controller, views: &[crate::dialect::Vie
     // controller's module has to go through to match a view name.
     let dir = crate::naming::underscore(&module);
     let prefix = format!("{dir}/");
-    for fmt in ["turbo_stream", "js"] {
+    for fmt in ["turbo_stream", "js", "md"] {
         for v in views {
             if v.format.as_str() != fmt || v.jbuilder {
                 continue;
@@ -983,7 +983,7 @@ fn subclass_template_hooks(
         let hook = rewrites::subclass_template_hook_name(&stem);
         // `show_json` → (`show`, `format: :json`); `show` → (`show`, none).
         let (template, format) = match stem.rsplit_once('_') {
-            Some((t, f)) if matches!(f, "json" | "turbo_stream" | "svg") => (t.to_string(), Some(f.to_string())),
+            Some((t, f)) if matches!(f, "json" | "turbo_stream" | "svg" | "md") => (t.to_string(), Some(f.to_string())),
             _ => (stem.clone(), None),
         };
         for (methods, controller) in all_methods.iter_mut() {
@@ -1399,20 +1399,26 @@ fn build_methods(
             all_controllers,
             &dispatcher_bodies(&preamble, &wraps, &rescues),
         );
-        methods.insert(
-            dispatcher_at,
-            synthesize_process_action(
-                &preamble,
-                &publics_inlined,
-                &inherited,
-                controller.name.0.clone(),
-                &deferred_tails,
-                &rescues,
-                &wraps,
-                reads,
-                &missing,
-            ),
+        let mut dispatcher = synthesize_process_action(
+            &preamble,
+            &publics_inlined,
+            &inherited,
+            controller.name.0.clone(),
+            &deferred_tails,
+            &rescues,
+            &wraps,
+            reads,
+            &missing,
         );
+        // Block-form filters are inlined into `process_action` after
+        // `rewrite_controller_route_helpers` has already run on action
+        // bodies. A CSP block calls `service_worker_path(format: :js)`,
+        // which `route_format_suffix` renamed. The rewrite is idempotent
+        // on nodes it has already touched, so every dispatcher gets it —
+        // the next block filter that names a helper would otherwise stay bare.
+        dispatcher.body =
+            rewrite_controller_route_helpers(&dispatcher.body, &shadows, route_id_segments);
+        methods.insert(dispatcher_at, dispatcher);
     }
     // The empty set for both non-public loops below: `is_public: false`
     // already suppresses the implicit render, so there is never one to
@@ -2786,6 +2792,9 @@ fn action_to_method(
     }
     if text_formats.contains(&"js") {
         variants.push("js");
+    }
+    if text_formats.contains(&"md") {
+        variants.push("md");
     }
     // An overriding `<x>_params` yields its parent's params class —
     // see `lower_overriding_params_helper`.
