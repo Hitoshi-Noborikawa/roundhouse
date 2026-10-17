@@ -91,6 +91,7 @@ SPINEL_TESTS = [
     "routes_segment_pattern_spinel",
     "open_telemetry_stub_spinel",
     "around_block_filter_spinel",
+    "before_action_return_spinel",
     "plain_class_optional_keywords_spinel",
     "jbuilder_array_value_spinel",
     "active_job_payload",
