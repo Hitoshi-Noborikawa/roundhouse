@@ -1726,8 +1726,46 @@ fn report_typescript_array_sends(app: &App, target: BuildTarget) {
     if !matches!(target, BuildTarget::Typescript | BuildTarget::TypescriptWorker) {
         return;
     }
+    // (model, reader) of each collection association: its reader answers a CollectionProxy.
+    let proxies: std::collections::HashSet<(&str, &str)> = app
+        .models
+        .iter()
+        .flat_map(|m| {
+            m.associations().filter_map(move |a| match a {
+                crate::dialect::Association::HasMany { name, .. }
+                | crate::dialect::Association::HasAndBelongsToMany { name, .. } => {
+                    Some((m.name.0.as_str(), name.as_str()))
+                }
+                _ => None,
+            })
+        })
+        .collect();
     let models: std::collections::HashSet<&str> = app.models.iter().map(|m| m.name.0.as_str()).collect();
-    fn visit(expr: &crate::expr::Expr, target: BuildTarget, models: &std::collections::HashSet<&str>) {
+    struct Records<'a> {
+        proxies: std::collections::HashSet<(&'a str, &'a str)>,
+        models: std::collections::HashSet<&'a str>,
+    }
+    /// A query chain off a model class or a collection reader (`Post.where(…)`,
+    /// `product.subscribers.where(…)`): a Relation or CollectionProxy that types as
+    /// an Array of the model. `to_a` and `records` end it in a real Array.
+    fn is_query(e: &crate::expr::Expr, records: &Records) -> bool {
+        use crate::expr::ExprNode;
+        use crate::ty::Ty;
+        match &*e.node {
+            ExprNode::Const { path } => records.models.contains(path.iter().map(|s| s.as_str()).collect::<Vec<_>>().join("::").as_str()),
+            ExprNode::Send { recv: Some(owner), method, .. } => {
+                if matches!(method.as_str(), "to_a" | "records" | "load" | "entries") {
+                    return false;
+                }
+                let reader = matches!(owner.ty.as_ref(), Some(Ty::Class { id, .. })
+                    if records.proxies.contains(&(id.0.as_str(), method.as_str())));
+                reader || is_query(owner, records)
+            }
+            _ => false,
+        }
+    }
+    let records = Records { proxies, models };
+    fn visit(expr: &crate::expr::Expr, target: BuildTarget, records: &Records) {
         use crate::expr::ExprNode;
         use crate::ty::Ty;
         if let ExprNode::Send { recv: Some(r), method, args, block, .. } = &*expr.node {
@@ -1744,8 +1782,7 @@ fn report_typescript_array_sends(app: &App, target: BuildTarget) {
             // Already refused by name in `report_ruby_only_sends`.
             let ruby_only = matches!(method.as_str(), "fetch" | "each_slice" | "each_cons" | "lazy" | "with_object");
             // A has_many reader types as an Array of its model, but answers a CollectionProxy (`build`, `create!`).
-            let records = elem.is_some_and(|e| matches!(&**e, Ty::Class { id, .. } if models.contains(id.0.as_str())));
-            if let Some(elem) = elem.filter(|_| !records) {
+            if let Some(elem) = elem.filter(|_| !is_query(r, records)) {
                 let argc = args.len() + usize::from(block.is_some());
                 if !ruby_only && !crate::emit::typescript::array_method_handled(method.as_str(), argc, block.as_ref(), elem) {
                     crate::emit::diagnostics::report_unsupported(
@@ -1773,9 +1810,9 @@ fn report_typescript_array_sends(app: &App, target: BuildTarget) {
                 }
             }
         }
-        expr.node.for_each_child(&mut |child| visit(child, target, models));
+        expr.node.for_each_child(&mut |child| visit(child, target, records));
     }
-    crate::lower::for_each_emit_body_ref(app, &mut |expr| visit(expr, target, &models));
+    crate::lower::for_each_emit_body_ref(app, &mut |expr| visit(expr, target, &records));
 }
 
 /// `case/in` is not equivalent to the targets' existing `case/when`

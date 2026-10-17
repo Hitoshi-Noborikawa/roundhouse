@@ -21,14 +21,15 @@ fn translated_array_and_number_methods_emit_without_errors() {
 
 #[test]
 fn an_untranslated_array_or_number_method_is_refused_on_typescript_only() {
-    let probe = "class Untranslated\n  def self.run(xs, n, flags, by)\n    [xs.zip(xs), xs.tally, xs.group_by { |x| x > 1 }, n.digits, n.round(1), xs.all?, flags.any?, xs.select(&by)]\n  end\nend\n";
+    let probe = "class Untranslated\n  def self.run(xs, n, flags, by, records)\n    [xs.zip(xs), xs.tally, xs.group_by { |x| x > 1 }, n.digits, n.round(1), xs.all?, flags.any?, xs.select(&by), xs.pop(2), records.each_slice(1), records.partition { |r| r.id > 1 }]\n  end\nend\n";
     let app = || {
         emit_and_run::real_blog()
             .write("app/models/untranslated.rb", probe)
-            .edit("app/controllers/articles_controller.rb", "  def index\n", "  def index\n    @u = Untranslated.run([1, 2], 3, [true, nil], ->(x) { x > 1 })\n")
+            .edit("app/controllers/articles_controller.rb", "  def index\n", "  def index\n    @u = Untranslated.run([1, 2], 3, [true, nil], ->(x) { x > 1 }, Article.all.to_a)\n")
     };
     let (_emitted, errors) = app().emit(BuildTarget::Typescript);
-    for name in ["Array#zip", "Array#tally", "Array#group_by", "Integer#digits", "Integer#round", "Array#all?", "Array#any?", "Array#select"] {
+    // `records` is an Array of Article from `to_a`, not a query: its `partition` is refused too.
+    for name in ["Array#zip", "Array#tally", "Array#group_by", "Integer#digits", "Integer#round", "Array#all?", "Array#any?", "Array#select", "Array#pop", "Array#partition"] {
         assert!(errors.iter().any(|e| e.contains(name)), "{name}: {errors:?}");
     }
     let (_emitted, errors) = app().emit(BuildTarget::Ruby);

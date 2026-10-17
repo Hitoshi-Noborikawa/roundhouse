@@ -330,8 +330,11 @@ pub(crate) fn array_method_handled(method: &str, argc: usize, block: Option<&Exp
         "max" | "min" => argc == 0 && matches!(elem, Ty::Int | Ty::Float),
         "size" | "length" | "empty?" | "reverse" | "to_a" | "to_h" | "sort" | "compact" | "uniq" | "dup"
         | "clone" | "nil?" | "present?" | "blank?" | "freeze" => argc == 0,
-        "push" | "pop" | "shift" | "unshift" | "<<" | "[]" | "[]=" | "==" | "!=" | "+" | "-" | "&" | "|"
-        | "is_a?" | "kind_of?" => block.is_none(),
+        // JS `pop(n)` / `shift(n)` ignore `n`, where Ruby answers the last or first n.
+        "pop" | "shift" => argc == 0,
+        "push" | "unshift" => block.is_none(),
+        "[]" | "<<" | "==" | "!=" | "+" | "-" | "&" | "|" | "is_a?" | "kind_of?" => block.is_none() && argc == 1,
+        "[]=" => block.is_none() && argc == 2,
         _ => false,
     }
 }
