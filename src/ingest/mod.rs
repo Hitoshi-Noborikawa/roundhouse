@@ -16,6 +16,8 @@
 //! cross-cutting Prism AST helpers live in [`util`].
 
 mod alba;
+mod unreachable_views;
+mod uncalled_helper_copies;
 mod pagy;
 mod graphql_ruby;
 mod guarded_include;
@@ -28,6 +30,7 @@ mod dry_monads;
 mod dry_validation;
 mod representable;
 mod action_cable_config;
+pub(crate) mod database_yml;
 mod public_file_server_config;
 pub mod allow_browser;
 pub mod app;

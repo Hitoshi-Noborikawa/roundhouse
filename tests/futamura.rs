@@ -310,6 +310,50 @@ end
     fs::remove_dir_all(&out).unwrap();
 }
 
+/// Companion to `ingest_gap_in_a_rendered_layout_blocks_the_route`: on a
+/// large real app, a layout's `vite_typescript_tag "sign_up.ts",
+/// crossorigin: "anonymous"` was exactly this shape — a manifest entry
+/// resolves, but the extra `crossorigin:` keyword made the whole call an
+/// ingest gap, so the gap in the rendered layout blocked every route
+/// (301 of 314 on that app). With the pass-through modeled, the same
+/// layout lowers cleanly and the route clears.
+#[test]
+fn a_vite_tag_with_a_crossorigin_option_does_not_block_the_route() {
+    let src = scratch("layout-crossorigin-src");
+    let out = scratch("layout-crossorigin-out");
+    write(&src, "Gemfile", b"source \"https://rubygems.org\"\ngem \"rails\"\n");
+    write(&src, "config/routes.rb", b"Rails.application.routes.draw do\n  get \"widgets\" => \"widgets#index\"\nend\n");
+    write(&src, "app/controllers/application_controller.rb", b"class ApplicationController < ActionController::Base\nend\n");
+    write(&src, "app/controllers/widgets_controller.rb", br#"class WidgetsController < ApplicationController
+  def index
+    @name = "hi"
+  end
+end
+"#);
+    write(&src, "app/views/widgets/index.html.erb", b"<%= @name %>\n");
+    write(
+        &src,
+        "public/vite/.vite/manifest.json",
+        br#"{"entrypoints/application.ts": {"file": "assets/application-abc.js", "isEntry": true}}"#,
+    );
+    write(&src, "app/views/layouts/application.html.erb", b"<html><head><%= vite_typescript_tag \"application\", crossorigin: \"anonymous\" %></head><body><%= yield %></body></html>\n");
+
+    let run = Command::new(env!("CARGO_BIN_EXE_roundhouse"))
+        .args(["--target", "futamura", "--survey", "-o"])
+        .arg(&out)
+        .arg(&src)
+        .env("ROUNDHOUSE_FUTAMURA_LEDGER", "1")
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&run.stderr);
+    assert!(run.status.success(), "{stderr}");
+    assert!(stderr.contains("whole-route: 1 GET action(s) served by the lowered app; 0 left to Rails"), "{stderr}");
+    assert!(!stderr.contains("vite_typescript_tag"), "{stderr}");
+
+    fs::remove_dir_all(&src).unwrap();
+    fs::remove_dir_all(&out).unwrap();
+}
+
 /// A gap in a parent controller's class body (here an `around_action`
 /// block shape the ingester refuses, round-tripped as `Unknown` rather
 /// than lowered into the filter chain) must block every subclass route,
@@ -666,6 +710,308 @@ end
 
     fs::remove_dir_all(&src).unwrap();
     fs::remove_dir_all(&out).unwrap();
+}
+
+/// INTERIM planner fallback (rubys/roundhouse#58, G2/G3): `routes::plan`
+/// re-lowers every controller body from scratch
+/// (`lower::typing::type_method_body`), which loses the analyzer's type
+/// for a local bound to a framework helper's result (Devise's
+/// `current_<scope>`) and for the app's own private helpers (pinned
+/// `Untyped` on purpose by #810). Untyped, the planner's `enqueue_send`
+/// fans a send out to every app method of that name — here, an unrelated
+/// `Gadget`'s unsupported body — blocking routes that never actually
+/// reach it. Three shapes of the same gap, all now covered by falling
+/// back to the analyzer's own (closed) stamp for the receiver's span:
+/// a local assigned from `current_user`, `current_user&.x` directly, and
+/// a private helper's result used with `&.`. A fourth action keeps the
+/// control: a receiver with no closed type on *either* side (a fully
+/// dynamic `send`) must still fan out and stay blocked, so the fallback
+/// never masks a genuinely unresolved call.
+#[test]
+fn planner_falls_back_to_the_analyzers_type_for_framework_and_private_helper_receivers() {
+    let src = scratch("stamps-src");
+    let out = scratch("stamps-out");
+    write(&src, "Gemfile", b"source \"https://rubygems.org\"\ngem \"rails\"\n");
+    write(&src, "config/routes.rb", br#"Rails.application.routes.draw do
+  get "widgets/a" => "widgets#action_a"
+  get "widgets/b" => "widgets#action_b"
+  get "widgets/c" => "widgets#action_c"
+  get "widgets/d" => "widgets#action_d"
+end
+"#);
+    write(&src, "db/schema.rb", br#"ActiveRecord::Schema.define do
+  create_table "users", force: :cascade do |t|
+    t.string "email", null: false
+  end
+  create_table "widgets", force: :cascade do |t|
+    t.string "name"
+  end
+end
+"#);
+    write(&src, "app/models/application_record.rb", b"class ApplicationRecord < ActiveRecord::Base\n  primary_abstract_class\nend\n");
+    // Declaring `devise` makes `current_user` resolve to `User | nil`
+    // in the analyzer's own registry (`analyze/registry/controllers.rs`).
+    write(&src, "app/models/user.rb", b"class User < ApplicationRecord\n  devise :database_authenticatable, :registerable\nend\n");
+    write(&src, "app/models/widget.rb", b"class Widget < ApplicationRecord\nend\n");
+    write(&src, "app/controllers/application_controller.rb", b"class ApplicationController < ActionController::Base\nend\n");
+    write(&src, "app/controllers/widgets_controller.rb", br#"class WidgetsController < ApplicationController
+  def action_a
+    u = current_user
+    @email = u&.email
+  end
+
+  def action_b
+    @email = current_user&.email
+  end
+
+  def action_c
+    @name = current_widget&.name
+  end
+
+  def action_d
+    target = [:current_widget].sample
+    @thing = send(target)&.email
+  end
+
+  private
+
+  def current_widget
+    Widget.first
+  end
+end
+"#);
+    write(&src, "app/views/widgets/action_a.html.erb", b"<%= @email %>\n");
+    write(&src, "app/views/widgets/action_b.html.erb", b"<%= @email %>\n");
+    write(&src, "app/views/widgets/action_c.html.erb", b"<%= @name %>\n");
+    write(&src, "app/views/widgets/action_d.html.erb", b"<%= @thing %>\n");
+    // Unrelated: defines both receiver method names with an unsupported
+    // body. Before the fix, every action's untyped receiver fans out
+    // here; after, only the genuinely dynamic `action_d` still does.
+    write(&src, "app/lib/gadget.rb", br#"class Gadget
+  def email
+    Frobnicator::Spinner.new.spin
+  end
+
+  def name
+    Frobnicator::Spinner.new.spin
+  end
+end
+"#);
+
+    let run = Command::new(env!("CARGO_BIN_EXE_roundhouse"))
+        .args(["--target", "futamura", "--survey", "-o"])
+        .arg(&out)
+        .arg(&src)
+        .env("ROUNDHOUSE_FUTAMURA_LEDGER", "1")
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&run.stderr);
+    assert!(run.status.success(), "{stderr}");
+    assert!(stderr.contains("whole-route: 3 GET action(s) served by the lowered app; 1 left to Rails"), "{stderr}");
+    for cleared in ["widgets#action_a", "widgets#action_b", "widgets#action_c"] {
+        assert!(stderr.contains(&format!("lowered     {cleared}")), "{stderr}");
+    }
+    // The control: a fully dynamic `send` still has no closed type on
+    // either side, so it still fans out to `Gadget` and stays blocked.
+    let residue = stderr.lines().find(|l| l.contains("rails ") && l.contains("widgets#action_d")).unwrap_or_else(|| panic!("{stderr}"));
+    assert!(residue.contains("Gadget#email") && residue.contains("Frobnicator"), "{residue}");
+    // None of the three cleared routes' call chains reach Gadget.
+    for cleared in ["action_a", "action_b", "action_c"] {
+        assert!(
+            stderr.lines().find(|l| l.contains(cleared)).unwrap().matches("Gadget").count() == 0,
+            "{stderr}"
+        );
+    }
+
+    fs::remove_dir_all(&src).unwrap();
+    fs::remove_dir_all(&out).unwrap();
+}
+
+/// The whole-route planner must reach every app method a route can run,
+/// or it clears a route that runs unsupported code. Each fixture below
+/// has one `widgets#index` route whose action reaches `Frobnicator`, a
+/// constant the lowered app cannot resolve, through one call shape the
+/// walk used to miss, and so must stay with Rails.
+fn reach_ledger(name: &str, action: &str, helpers: &str, extra: &[(&str, &str)]) -> String {
+    let src = scratch(&format!("{name}-src"));
+    let out = scratch(&format!("{name}-out"));
+    write(&src, "Gemfile", b"source \"https://rubygems.org\"\ngem \"rails\"\n");
+    write(&src, "config/routes.rb", b"Rails.application.routes.draw do\n  get \"widgets\" => \"widgets#index\"\nend\n");
+    write(&src, "app/controllers/application_controller.rb", b"class ApplicationController < ActionController::Base\nend\n");
+    let controller = format!(
+        "class WidgetsController < ApplicationController\n{helpers}\n  def index\n{action}\n  end\n\n  private\n\n  def pick\n    Widget.new\n  end\nend\n"
+    );
+    write(&src, "app/controllers/widgets_controller.rb", controller.as_bytes());
+    write(&src, "app/views/widgets/index.html.erb", b"<%= @name %>\n");
+    write(&src, "app/lib/widget.rb", b"class Widget\nend\n");
+    for (path, body) in extra {
+        write(&src, path, body.as_bytes());
+    }
+    let run = Command::new(env!("CARGO_BIN_EXE_roundhouse"))
+        .args(["--target", "futamura", "--survey", "-o"])
+        .arg(&out)
+        .arg(&src)
+        .env("ROUNDHOUSE_FUTAMURA_LEDGER", "1")
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&run.stderr).into_owned();
+    assert!(run.status.success(), "{stderr}");
+    fs::remove_dir_all(&src).unwrap();
+    fs::remove_dir_all(&out).unwrap();
+    stderr
+}
+
+const GADGET: (&str, &str) = ("app/lib/gadget.rb", "class Gadget\n  def call\n    Frobnicator::Spinner.new.spin\n  end\nend\n");
+
+fn assert_left_to_rails(stderr: &str, via: &str) {
+    assert!(stderr.contains("whole-route: 0 GET action(s) served by the lowered app; 1 left to Rails"), "{stderr}");
+    let residue = stderr.lines().find(|l| l.contains("rails ") && l.contains("widgets#index")).unwrap_or_else(|| panic!("{stderr}"));
+    assert!(residue.contains("Frobnicator") && residue.contains(via), "{residue}");
+}
+
+/// A record out of a relation is an app object: the walk used to skip
+/// any send on a framework call's result (`ActiveRecord::Relation.new(
+/// Post).where(…)…`, as the lowering spells it), and cleared the route.
+#[test]
+fn a_send_on_a_record_from_a_relation_is_followed() {
+    let stderr = reach_ledger(
+        "reach-relation",
+        "    @name = Post.where(title: \"x\").to_a.sample.call",
+        "",
+        &[
+            (
+                "db/schema.rb",
+                "ActiveRecord::Schema.define do\n  create_table \"posts\", force: :cascade do |t|\n    t.string \"title\", null: false\n  end\nend\n",
+            ),
+            ("app/models/application_record.rb", "class ApplicationRecord < ActiveRecord::Base\n  primary_abstract_class\nend\n"),
+            ("app/models/post.rb", "class Post < ApplicationRecord\n  def call\n    Frobnicator::Spinner.new.spin\n  end\nend\n"),
+        ],
+    );
+    assert_left_to_rails(&stderr, "Post#call");
+}
+
+/// A value read back from the cache is whatever some request stored:
+/// the walk used to skip the send because `Rails.cache` is the
+/// framework's.
+#[test]
+fn a_send_on_a_value_from_the_cache_is_followed() {
+    let stderr = reach_ledger("reach-cache", "    @name = Rails.cache.read(\"gadget\").call", "", &[GADGET]);
+    assert_left_to_rails(&stderr, "Gadget#call");
+}
+
+/// A class-side `method_missing` answers a name no class method defines
+/// (`Setting.some_key`).
+#[test]
+fn a_class_side_method_missing_is_followed() {
+    let stderr = reach_ledger(
+        "reach-cmissing",
+        "    @name = Gizmo.anything",
+        "",
+        &[("app/lib/gizmo.rb", "class Gizmo\n  def self.method_missing(name, *args)\n    Frobnicator::Spinner.new.spin\n  end\nend\n")],
+    );
+    assert_left_to_rails(&stderr, "Gizmo.method_missing");
+}
+
+/// An instance-side `method_missing` answers an untyped send of a name
+/// its class does not define. (A typed `Gizmo.new.anything` needs no
+/// test here: the analysis already refuses it.)
+#[test]
+fn an_instance_side_method_missing_is_followed() {
+    let stderr = reach_ledger(
+        "reach-imissing",
+        "    @name = Rails.cache.read(\"k\").anything",
+        "",
+        &[("app/lib/gizmo.rb", "class Gizmo\n  def method_missing(name, *args)\n    Frobnicator::Spinner.new.spin\n  end\nend\n")],
+    );
+    assert_left_to_rails(&stderr, "Gizmo#method_missing");
+}
+
+/// A typed value's class may answer a send directly on one side
+/// (class or instance) while the other side has no definition of it
+/// but does have its own `method_missing`. A hit on one side must not
+/// suppress the other side's `method_missing` — each side is checked
+/// on its own.
+#[test]
+fn a_hit_on_one_side_does_not_suppress_the_other_sides_method_missing() {
+    // `foo` is an instance method, so `w.foo` is a direct hit on the
+    // instance side; the class side has no `foo` but does have its own
+    // `method_missing`. The instance hit must not suppress that check.
+    // (`@name` stays a literal: rendering an untyped ivar would call
+    // `to_s` and sweep in any class with an INSTANCE `method_missing`
+    // through the unrelated general fan-out, masking this bug — this
+    // repro needs the class-side one, which that fan-out never touches.)
+    let stderr = reach_ledger(
+        "reach-mixed-sides",
+        "    w = Widget.new\n    w.foo\n    @name = \"ok\"",
+        "",
+        &[(
+            "app/lib/widget.rb",
+            "class Widget\n  def foo\n  end\n\n  def self.method_missing(name, *args)\n    Frobnicator::Spinner.new.spin\n  end\nend\n",
+        )],
+    );
+    assert_left_to_rails(&stderr, "Widget.method_missing");
+}
+
+/// `"#{x}"` calls `x.to_s`.
+#[test]
+fn string_interpolation_calls_to_s() {
+    let stderr = reach_ledger(
+        "reach-interp",
+        "    @name = \"<#{{ w: pick }[:w]}>\"",
+        "",
+        &[("app/lib/gadget.rb", "class Gadget\n  def to_s\n    Frobnicator::Spinner.new.spin\n  end\nend\n")],
+    );
+    assert_left_to_rails(&stderr, "Gadget#to_s");
+}
+
+/// `x.public_send(:call)` is `x.call`.
+#[test]
+fn public_send_with_a_literal_name_is_that_call() {
+    let stderr = reach_ledger("reach-public-send", "    @name = Gadget.new.public_send(:call)", "", &[GADGET]);
+    assert_left_to_rails(&stderr, "Gadget#call");
+}
+
+/// A constant holding an object, not a class: a send on it dispatches
+/// on what it holds.
+#[test]
+fn a_send_on_a_value_constant_is_followed() {
+    let stderr = reach_ledger("reach-value-const", "    @name = SPARE.call", "  SPARE = Gadget.new\n", &[GADGET]);
+    assert_left_to_rails(&stderr, "Gadget#call");
+}
+
+/// A top-level value constant dispatches even when its own name also
+/// matches a namespaced class by its last segment (`Admin::SPARE`):
+/// the planner cannot tell which one a bare path like `SPARE` names,
+/// so it has to reach through both, not just whichever it finds.
+#[test]
+fn a_value_constant_dispatches_despite_a_namespaced_class_of_the_same_last_segment() {
+    // Referenced bare from the view (not from inside `WidgetsController`,
+    // whose own scope would otherwise get prefixed onto the path ahead
+    // of the match): the path stays plain `SPARE`, which also matches
+    // `Admin::SPARE` by its last segment.
+    let stderr = reach_ledger(
+        "reach-value-const-collision",
+        "    @name = \"ok\"",
+        "  SPARE = Gadget.new\n",
+        &[
+            GADGET,
+            ("app/lib/admin/spare.rb", "module Admin\n  class SPARE\n  end\nend\n"),
+            ("app/views/widgets/index.html.erb", "<%= SPARE.call %>\n"),
+        ],
+    );
+    assert_left_to_rails(&stderr, "Gadget#call");
+}
+
+/// A parameter's default value runs in the method.
+#[test]
+fn a_parameter_default_is_walked() {
+    let stderr = reach_ledger(
+        "reach-default",
+        "    label\n    @name = \"hi\"",
+        "  def label(text = Gadget.new.call)\n    text\n  end\n",
+        &[GADGET],
+    );
+    assert_left_to_rails(&stderr, "Gadget#call");
 }
 
 /// A minimal app whose `ruby` emit refuses one association (a `through:`

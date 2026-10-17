@@ -33,6 +33,10 @@ mod time_zone_default;
 mod view_presence_url_encode;
 #[path = "emit_and_run/controller_translate.rs"]
 mod controller_translate;
+#[path = "emit_and_run/mailer_templates.rs"]
+mod mailer_templates;
+#[path = "emit_and_run/unreachable_views.rs"]
+mod unreachable_views;
 #[path = "emit_and_run/job_rest_params.rs"]
 mod job_rest_params;
 #[path = "emit_and_run/regexp_constants.rs"]
@@ -45,6 +49,16 @@ mod controller_sibling_classes;
 mod i18n_locales;
 #[path = "emit_and_run/i18n_runtime.rs"]
 mod i18n_runtime;
+#[path = "emit_and_run/helper_translate.rs"]
+mod helper_translate;
+#[path = "emit_and_run/helper_escape.rs"]
+mod helper_escape;
+#[path = "emit_and_run/helper_escape_args.rs"]
+mod helper_escape_args;
+#[path = "emit_and_run/class_new_constants.rs"]
+mod class_new_constants;
+#[path = "emit_and_run/i18n_subtree.rs"]
+mod i18n_subtree;
 #[path = "emit_and_run/i18n_plural_rules.rs"]
 mod i18n_plural_rules;
 #[path = "emit_and_run/rails_i18n_locales.rs"]
@@ -138,10 +152,14 @@ mod class_side_default;
 mod helper_anonymous_rest;
 #[path = "emit_and_run/controller_response_body.rs"]
 mod controller_response_body;
+#[path = "emit_and_run/response_redirect.rs"]
+mod response_redirect;
 #[path = "emit_and_run/render_to_string_partial_ivar.rs"]
 mod render_to_string_partial_ivar;
 #[path = "emit_and_run/active_support_extensions.rs"]
 mod active_support_extensions;
+#[path = "emit_and_run/time_find_zone.rs"]
+mod time_find_zone;
 #[path = "emit_and_run/concurrent_map.rs"]
 mod concurrent_map;
 #[path = "emit_and_run/request_optional_port.rs"]
@@ -150,6 +168,10 @@ mod request_optional_port;
 mod action_dispatch_request_put;
 #[path = "emit_and_run/controller_url_helpers.rs"]
 mod controller_url_helpers;
+#[path = "emit_and_run/url_helpers_only_path.rs"]
+mod url_helpers_only_path;
+#[path = "emit_and_run/url_helpers_absolute.rs"]
+mod url_helpers_absolute;
 #[path = "emit_and_run/route_default_segment_args.rs"]
 mod route_default_segment_args;
 #[path = "emit_and_run/keyed_collection_cache.rs"]
@@ -425,6 +447,25 @@ puts "to_sql subquery passed"
         );
     run.assert_passes();
     assert!(run.stdout.contains("to_sql subquery passed"));
+}
+
+/// `ActiveRecord::Base.connection` is one object, whichever class asks
+/// and however often, as Rails' leased connection is: campfire's record
+/// cache test stubs `transaction_open?` on it and reads the stub back
+/// through `connection_pool.with_connection`.
+#[test]
+fn the_connection_is_one_object_for_every_caller() {
+    let run = emit_and_run::real_blog().run_ruby(
+        r#"conn = ActiveRecord::Base.connection
+raise "fresh per call" unless conn.equal?(ActiveRecord::Base.connection)
+raise "per model" unless conn.equal?(Article.connection)
+pooled = ActiveRecord::Base.connection_pool.with_connection { |c| c }
+raise "pool yields another" unless conn.equal?(pooled)
+puts "one connection passed"
+"#,
+    );
+    run.assert_passes();
+    assert!(run.stdout.contains("one connection passed"));
 }
 
 /// A has_many reader followed by `to_sql` is rooted as the association's
@@ -796,6 +837,178 @@ puts "savepoints passed"
         );
     run.assert_passes();
     assert!(run.stdout.contains("savepoints passed"));
+}
+
+/// A save runs in a transaction, and its commit callbacks wait for the
+/// COMMIT, as Rails' do:
+/// - an exception from an `after_save` rolls the row back and propagates;
+/// - an `after_create_commit` runs after the outermost COMMIT, outside
+///   the transaction, once per record however often it was saved;
+/// - a ROLLBACK drops the held callbacks and makes the record new again;
+/// - `touch` is an update to the commit callbacks;
+/// - `article.comments.new` hands the article itself to the comment's
+///   `belongs_to` (the automatic inverse), so a singleton method on the
+///   owner is what the comment reaches.
+/// (campfire's `Message::CreationTest` and `MessageCreationCommitTest`.)
+#[test]
+fn saves_are_transactional_and_commit_callbacks_wait_for_the_commit() {
+    emit_and_run::real_blog()
+        .edit(
+            "app/models/article.rb",
+            "  validates :title, presence: true\n",
+            "  validates :title, presence: true
+
+  LOG = []
+  after_save { raise \"after_save failed\" if title == \"explode\" }
+  after_create_commit { LOG << \"create #{title} open=#{Article.connection.transaction_open?}\" }
+  after_update_commit { LOG << \"update #{title}\" }
+",
+        )
+        .write(
+            "test/models/transactional_save_test.rb",
+            r##"require "test_helper"
+
+class TransactionalSaveTest < ActiveSupport::TestCase
+  # This example checks a real COMMIT, the way campfire's
+  # MessageCreationCommitTest does. The harness wraps other examples
+  # in a non-joinable fixture transaction.
+  self.use_transactional_tests = false
+
+  setup { Article::LOG.clear }
+
+  test "an exception from after_save rolls the insert back" do
+    count = Article.count
+    article = Article.new(title: "explode", body: "A sufficiently long article body.")
+    assert_raises(RuntimeError) { article.save! }
+    assert_equal count, Article.count
+    assert_equal [], Article::LOG
+  end
+
+  test "commit callbacks run once, after the outermost commit" do
+    article = nil
+    Article.transaction do
+      article = Article.create!(title: "Held", body: "A sufficiently long article body.")
+      article.update!(body: "Another sufficiently long body.")
+      assert_equal [], Article::LOG
+    end
+    assert_equal [ "create Held open=false" ], Article::LOG
+  end
+
+  test "a rollback drops the held callbacks and the record is new again" do
+    count = Article.count
+    article = Article.new(title: "Dropped", body: "A sufficiently long article body.")
+    Article.transaction do
+      article.save!
+      raise ActiveRecord::Rollback
+    end
+    assert_equal count, Article.count
+    assert_equal [], Article::LOG
+    assert article.new_record?
+  end
+
+  test "touch runs the update commit callbacks" do
+    article = Article.create!(title: "Touched", body: "A sufficiently long article body.")
+    Article::LOG.clear
+    article.touch
+    assert_equal [ "update Touched" ], Article::LOG
+  end
+
+  test "an association constructor hands the owner to the inverse" do
+    article = Article.create!(title: "Owner", body: "A sufficiently long article body.")
+    comment = article.comments.new(commenter: "Ann", body: "Hello there")
+    assert_same article, comment.article
+    assert_equal article.id, comment.article_id
+  end
+end
+"##,
+        )
+        .run_test("test/models/transactional_save_test.rb")
+        .assert_passes();
+}
+
+/// Campfire's room destroy counts one `RELEASE SAVEPOINT` per record
+/// (`messages.find_each(&:destroy)` plus the room) because Rails runs
+/// the example inside a non-joinable fixture transaction, so each
+/// `destroy` opens its own savepoint. With
+/// `use_transactional_tests = false` those are real `COMMIT`s, which is
+/// what lets another connection write between them in production.
+#[test]
+fn each_destroy_is_its_own_transaction() {
+    emit_and_run::real_blog()
+        .write(
+            "test/models/destroy_batch_test.rb",
+            r##"require "test_helper"
+
+class DestroyBatchTest < ActiveSupport::TestCase
+  test "each destroy releases its own savepoint inside the test transaction" do
+    article = Article.create!(title: "Batch", body: "A sufficiently long article body.")
+    2.times { |i| article.comments.create!(commenter: "Ann", body: "Note #{i}") }
+    n = article.comments.count
+    releases = 0
+    count = ->(*, payload) { releases += 1 if payload[:sql].start_with?("RELEASE SAVEPOINT") }
+    ActiveSupport::Notifications.subscribed(count, "sql.active_record") do
+      article.comments.find_each(&:destroy)
+      article.destroy
+    end
+    assert_equal n + 1, releases
+    assert_equal 0, Comment.where(article_id: article.id).count
+    assert_not Article.exists?(article.id)
+  end
+
+  test "the fixture transaction does not look open to caches" do
+    assert_not Article.connection.transaction_open?
+    Article.transaction do
+      assert Article.connection.transaction_open?
+    end
+    assert_not Article.connection.transaction_open?
+  end
+end
+"##,
+        )
+        .run_test("test/models/destroy_batch_test.rb")
+        .assert_passes();
+
+    emit_and_run::real_blog()
+        .write(
+            "test/models/destroy_batch_commit_test.rb",
+            r##"require "test_helper"
+
+class DestroyBatchCommitTest < ActiveSupport::TestCase
+  self.use_transactional_tests = false
+
+  test "each destroy commits on its own when the example is not wrapped" do
+    article = Article.create!(title: "Batch", body: "A sufficiently long article body.")
+    2.times { |i| article.comments.create!(commenter: "Ann", body: "Note #{i}") }
+    n = article.comments.count
+    commits = 0
+    releases = 0
+    count = ->(*, payload) do
+      sql = payload[:sql]
+      commits += 1 if sql.start_with?("COMMIT")
+      releases += 1 if sql.start_with?("RELEASE SAVEPOINT")
+    end
+    ActiveSupport::Notifications.subscribed(count, "sql.active_record") do
+      article.comments.find_each(&:destroy)
+      article.destroy
+    end
+    assert_equal n + 1, commits
+    assert_equal 0, releases
+    assert_equal 0, Comment.where(article_id: article.id).count
+    assert_not Article.exists?(article.id)
+  end
+
+  test "a real transaction looks open, and the example itself does not" do
+    assert_not Article.connection.transaction_open?
+    Article.transaction do
+      assert Article.connection.transaction_open?
+    end
+    assert_not Article.connection.transaction_open?
+  end
+end
+"##,
+        )
+        .run_test("test/models/destroy_batch_commit_test.rb")
+        .assert_passes();
 }
 
 /// `rescue URI::Error` catches `URI.parse`'s `URI::InvalidURIError`, and
@@ -2879,6 +3092,43 @@ fn dry_struct_classes_run_lowered() {
     assert!(run.stdout.contains("dry-struct clock contract passed"));
 }
 
+/// `/(?<name>..)/ =~ str` assigns each named group to a local (nil when
+/// nothing matches) and answers the match's index: as a statement, as an
+/// `if` condition, and as a method's value. Checked against CRuby.
+#[test]
+fn named_capture_matches_assign_their_locals() {
+    let run = emit_and_run::real_blog()
+        .write("lib/matcher.rb", r##"class Matcher
+  def self.map_name(html)
+    /usemap=\s*['"]#(?<map_name>\S+?)['"]/m =~ html
+    map_name
+  end
+
+  def self.pair(text)
+    if /(?<a>\d+)-(?<b>\d+)/ =~ text
+      [a, b]
+    else
+      [a, b, :none]
+    end
+  end
+
+  def self.index(text)
+    /(?<w>x)/ =~ text
+  end
+end
+"##)
+        .run_ruby(r##"raise "map" unless Matcher.map_name(%(<img usemap="#m1">)) == "m1"
+raise "map none" unless Matcher.map_name("none").nil?
+raise "pair" unless Matcher.pair("1-2") == ["1", "2"]
+raise "pair none" unless Matcher.pair("x") == [nil, nil, :none]
+raise "index" unless Matcher.index("abx") == 2
+raise "index none" unless Matcher.index("q").nil?
+puts "named captures passed"
+"##);
+    run.assert_passes();
+    assert!(run.stdout.contains("named captures passed"));
+}
+
 #[test]
 fn dry_monads_results_run_lowered() {
     let run = dry_monads::overlay().run_ruby(&dry_monads::assertions());
@@ -3601,7 +3851,8 @@ fn a_send_whose_selector_every_caller_names_dispatches_statically_on_spinel() {
 /// and assert_response's failure message. Rails 8.2-era tests write all
 /// of them: basecamp/once-campfire#301 checks `img[src*='install-edge']`,
 /// #303 checks `input[type=checkbox]:not([checked])` and passes a message
-/// to assert_response.
+/// to assert_response. A `?` in a predicate is Rails' substitution value
+/// (campfire's sidebar test: `"#row[data-sorted-list-number=?]", epoch`).
 #[test]
 fn assert_select_attribute_operators_and_negation_run() {
     emit_and_run::real_blog()
@@ -3618,6 +3869,7 @@ class ArticleSelectorsControllerTest < ActionDispatch::IntegrationTest
     assert_select "a[href^='/articles/']"
     assert_select "a[href*='articles']"
     assert_select "h1[class]:not([hidden])"
+    assert_select "a[href=?]", edit_article_path(article)
   end
 end
 "#,
@@ -6026,6 +6278,60 @@ end
         .assert_passes();
 }
 
+/// A template `form_with` enters `ActionView::Base#form_with` when the
+/// site runs, and a fragment-cache hit does not enter it again. The
+/// markup stays the lowered expansion's; the instance call is what
+/// `any_instance.expects(:form_with)` counts (campfire's
+/// `FragmentRenderingTest` message-controls example).
+#[test]
+fn cached_form_with_enters_action_view_base_only_on_miss() {
+    emit_and_run::real_blog()
+        .write(
+            "app/views/articles/_cached_form.html.erb",
+            "<% cache article do %><%= form_with model: article do |form| %><%= form.text_field :title %><% end %><% end %>\n",
+        )
+        .run_ruby(
+            r#"
+module ActionView
+  class Base
+    def self.entries
+      @entries.nil? ? 0 : @entries
+    end
+
+    def self.note!
+      @entries = entries + 1
+      nil
+    end
+
+    def form_with
+      ActionView::Base.note!
+    end
+  end
+end
+
+article = Article.create!(title: "Cached form", body: "Body text here")
+ActionController::Base.perform_caching = true
+ActionController::Base.cache_store = ActiveSupport::Cache::MemoryStore.new
+ActionController::Current.controller = ActionController::Base.new
+
+first = Views::Articles.cached_form(article)
+raise "form missing on miss: #{first.inspect}" unless first.include?("<form") && first.include?("Cached form")
+raise "miss did not enter form_with (#{ActionView::Base.entries})" unless ActionView::Base.entries == 1
+
+second = Views::Articles.cached_form(article)
+raise "form missing on hit: #{second.inspect}" unless second.include?("<form") && second.include?("Cached form")
+raise "cache hit re-entered form_with (#{ActionView::Base.entries})" unless ActionView::Base.entries == 1
+
+article.update!(title: "Cached form edited")
+third = Views::Articles.cached_form(article)
+raise "edited form missing: #{third.inspect}" unless third.include?("Cached form edited")
+raise "key change did not enter form_with (#{ActionView::Base.entries})" unless ActionView::Base.entries == 2
+puts "cached form_with entry passed"
+"#,
+        )
+        .assert_passes();
+}
+
 /// `offset(n).exists?` asks for a row past the first n (campfire's
 /// `paged?`, basecamp/once-campfire#297) where a COUNT ignored the offset;
 /// and the caching knobs campfire's messages caching test turns
@@ -8303,6 +8609,7 @@ end
 <i id="rp-health"><%= route_of("/up") %></i>
 <i id="rp-disk"><%= route_of("/rails/active_storage/disk/k/x.png") %></i>
 <i id="rp-blob"><%= route_of("/rails/active_storage/blobs/redirect/abc/x.png") %></i>
+<i id="rp-proxy"><%= route_of("/rails/active_storage/blobs/proxy/abc/x.png") %></i>
 <i id="rp-no-root"><%= route_of("/") %></i>
 "#,
         r#"    assert_match(/<i id="rp-namespaced">controller=admin\/articles action=index<\/i>/, response.body)
@@ -8311,6 +8618,7 @@ end
     assert_match(/<i id="rp-health">controller=rails\/health action=show<\/i>/, response.body)
     assert_match(/<i id="rp-disk">controller=active_storage\/disk action=show encoded_key=k filename=x format=png<\/i>/, response.body)
     assert_match(/<i id="rp-blob">controller=active_storage\/blobs\/redirect action=show signed_id=abc filename=x format=png<\/i>/, response.body)
+    assert_match(/<i id="rp-proxy">controller=active_storage\/blobs\/proxy action=show signed_id=abc filename=x format=png<\/i>/, response.body)
     assert_match(/<i id="rp-no-root">none: No route matches (&quot;|")\/(&quot;|")<\/i>/, response.body)
 "#,
     );
@@ -15347,6 +15655,118 @@ end
 }
 
 
+// ---------------------------------------------------------------------
+// vite_typescript_tag / vite_javascript_tag: extra HTML options are
+// passed through to the script tag, the way vite_rails does. Without
+// this, a call like `vite_typescript_tag "gadget.ts", crossorigin:
+// "anonymous"` was an ingest gap for the whole call — on a large real
+// app that gap blocked every route that reached the view.
+// ---------------------------------------------------------------------
+
+#[test]
+fn vite_tag_html_options_pass_through_to_the_script_tag() {
+    const MANIFEST: &str = r#"{
+  "entrypoints/gadget.ts": {"file": "assets/gadget-abc.js", "src": "entrypoints/gadget.ts", "isEntry": true},
+  "entrypoints/widget.ts": {"file": "assets/widget-xyz.js", "src": "entrypoints/widget.ts", "isEntry": true}
+}
+"#;
+    emit_and_run::real_blog()
+        .write("public/vite/.vite/manifest.json", MANIFEST)
+        .write("public/vite/assets/gadget-abc.js", "console.log('gadget');\n")
+        .write("public/vite/assets/widget-xyz.js", "console.log('widget');\n")
+        .edit(
+            "app/views/layouts/application.html.erb",
+            "    <%= javascript_importmap_tags %>\n",
+            "    <%= javascript_importmap_tags %>\n    <%= vite_typescript_tag \"gadget.ts\", crossorigin: \"anonymous\", defer: true %>\n    <%= vite_typescript_tag \"widget.ts\", data: { turbo_track: \"reload\" } %>\n",
+        )
+        .edit(
+            "config/routes.rb",
+            "  root \"articles#index\"\n",
+            "  root \"articles#index\"\n  get \"/vite_options\", to: \"vite_options#show\"\n",
+        )
+        .write(
+            "app/controllers/vite_options_controller.rb",
+            "class ViteOptionsController < ApplicationController\n  def show\n  end\nend\n",
+        )
+        .write("app/views/vite_options/show.html.erb", "<p>vite options probe</p>\n")
+        .write(
+            "test/controllers/vite_options_controller_test.rb",
+            r##"require "test_helper"
+
+class ViteOptionsControllerTest < ActionDispatch::IntegrationTest
+  test "crossorigin, defer and a data hash pass through like vite_rails" do
+    get "/vite_options"
+    assert_response :success
+    assert_includes response.body,
+      %(<script src="/vite/assets/gadget-abc.js" crossorigin="anonymous" type="module" defer="defer"></script>)
+    assert_includes response.body,
+      %(<script src="/vite/assets/widget-xyz.js" crossorigin="" type="module" data-turbo-track="reload"></script>)
+    assert_no_match(/vite_typescript_tag/, response.body)
+  end
+end
+"##,
+        )
+        .run_test("test/controllers/vite_options_controller_test.rb")
+        .assert_passes();
+}
+
+/// `crossorigin:`/`type:` overrides are a plain (non-boolean) attribute in
+/// Rails' `TagBuilder#tag_options`: a `"` or `&` in the value must be
+/// html-escaped like any other attribute text, `nil` omits the attribute
+/// entirely rather than rendering `=""`, and `false` (not `nil`, not
+/// `true`) renders the literal string `"false"`.
+#[test]
+fn vite_tag_crossorigin_and_type_overrides_escape_nil_and_false_like_rails() {
+    const MANIFEST: &str = r#"{
+  "entrypoints/sprocket.ts": {"file": "assets/sprocket-abc.js", "src": "entrypoints/sprocket.ts", "isEntry": true},
+  "entrypoints/doohickey.ts": {"file": "assets/doohickey-abc.js", "src": "entrypoints/doohickey.ts", "isEntry": true},
+  "entrypoints/gizmo.ts": {"file": "assets/gizmo-abc.js", "src": "entrypoints/gizmo.ts", "isEntry": true}
+}
+"#;
+    emit_and_run::real_blog()
+        .write("public/vite/.vite/manifest.json", MANIFEST)
+        .write("public/vite/assets/sprocket-abc.js", "console.log('sprocket');\n")
+        .write("public/vite/assets/doohickey-abc.js", "console.log('doohickey');\n")
+        .write("public/vite/assets/gizmo-abc.js", "console.log('gizmo');\n")
+        .edit(
+            "app/views/layouts/application.html.erb",
+            "    <%= javascript_importmap_tags %>\n",
+            "    <%= javascript_importmap_tags %>\n    <%= vite_typescript_tag 'sprocket.ts', type: 'a\"b&c' %>\n    <%= vite_typescript_tag 'doohickey.ts', crossorigin: nil, type: nil %>\n    <%= vite_typescript_tag 'gizmo.ts', crossorigin: false %>\n",
+        )
+        .edit(
+            "config/routes.rb",
+            "  root \"articles#index\"\n",
+            "  root \"articles#index\"\n  get \"/vite_escaping\", to: \"vite_escaping#show\"\n",
+        )
+        .write(
+            "app/controllers/vite_escaping_controller.rb",
+            "class ViteEscapingController < ApplicationController\n  def show\n  end\nend\n",
+        )
+        .write("app/views/vite_escaping/show.html.erb", "<p>vite escaping probe</p>\n")
+        .write(
+            "test/controllers/vite_escaping_controller_test.rb",
+            r##"require "test_helper"
+
+class ViteEscapingControllerTest < ActionDispatch::IntegrationTest
+  test "crossorigin/type overrides escape, omit nil, and render false like Rails" do
+    get "/vite_escaping"
+    assert_response :success
+    assert_includes response.body,
+      %(<script src="/vite/assets/sprocket-abc.js" crossorigin="" type="a&quot;b&amp;c"></script>)
+    assert_includes response.body,
+      %(<script src="/vite/assets/doohickey-abc.js"></script>)
+    assert_includes response.body,
+      %(<script src="/vite/assets/gizmo-abc.js" crossorigin="false" type="module"></script>)
+    assert_no_match(/vite_typescript_tag/, response.body)
+  end
+end
+"##,
+        )
+        .run_test("test/controllers/vite_escaping_controller_test.rb")
+        .assert_passes();
+}
+
+
 
 // ---------------------------------------------------------------------
 // friendly_id: `Article.friendly.find` (slugged + history)
@@ -15954,3 +16374,43 @@ fn cruby_rake_load_path_keeps_rubys_own_libraries() {
     let (emitted, _) = emit_and_run::real_blog().emit(BuildTarget::Ruby);
     assert!(emitted.join("test/models/article_broadcasts_test.rb").exists());
 }
+
+/// campfire's `MessagesHelper#auto_link_text`: `sanitize` with the
+/// caller's lists, `Nokogiri::HTML5.fragment`, its text nodes by XPath,
+/// `replace` with a parsed fragment, and `to_html(preserve_newline:)`.
+/// The Ruby tree loads the real nokogiri gem behind the façade's types.
+#[test]
+fn nokogiri_html5_fragment_text_nodes_are_rewritten_and_serialized() {
+    let run = emit_and_run::real_blog()
+        .write(
+            "app/helpers/articles_helper.rb",
+            r#"module ArticlesHelper
+  LINK_TAGS = %w[a div pre]
+  LINK_ATTRIBUTES = %w[href]
+
+  def link_words(html)
+    fragment = Nokogiri::HTML5.fragment(sanitize(html, tags: LINK_TAGS, attributes: LINK_ATTRIBUTES))
+    fragment.xpath(".//text()[not(ancestor::a)]").each do |node|
+      if node.text.match?(/go/)
+        text = node.to_html
+        linked = text.sub("go", "<a href=\"/go\">go</a>")
+        node.replace Nokogiri::HTML5.fragment(linked) unless linked == text
+      end
+    end
+    fragment.to_html(preserve_newline: true)
+  end
+end
+"#,
+        )
+        .run_ruby(
+            r#"out = ArticlesHelper.link_words("<div onclick=\"x()\">go <em>on</em> <a href=\"/k\">go</a></div><pre>\n\n\ngo</pre>")
+want = "<div><a href=\"/go\">go</a> on <a href=\"/k\">go</a></div><pre>\n\n<a href=\"/go\">go</a></pre>"
+raise "link_words: #{out.inspect}" unless out == want
+puts "nokogiri html5 helper passed"
+"#,
+        );
+    run.assert_passes();
+    assert!(run.stdout.contains("nokogiri html5 helper passed"));
+}
+#[path = "emit_and_run/proc_new_and_std_streams.rs"]
+mod proc_new_and_std_streams;
