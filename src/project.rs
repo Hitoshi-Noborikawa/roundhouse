@@ -1717,6 +1717,104 @@ fn report_ruby_only_sends(app: &App, target: BuildTarget) {
     crate::lower::for_each_emit_body_ref(app, &mut |expr| visit(expr, target, &kernel));
 }
 
+/// A send on a typed Array or number receiver that the TypeScript emit has
+/// no translation for: it writes the Ruby name on the JS value
+/// (`xs.zip(ys)`, `n.digits` as a property read), which throws or reads
+/// `undefined`. `emit::typescript::array_method_handled` and
+/// `numeric_method_handled` name what it does translate.
+fn report_typescript_array_sends(app: &App, target: BuildTarget) {
+    if !matches!(target, BuildTarget::Typescript | BuildTarget::TypescriptWorker) {
+        return;
+    }
+    // (model, reader) of each collection association: its reader answers a CollectionProxy.
+    let proxies: std::collections::HashSet<(&str, &str)> = app
+        .models
+        .iter()
+        .flat_map(|m| {
+            m.associations().filter_map(move |a| match a {
+                crate::dialect::Association::HasMany { name, .. }
+                | crate::dialect::Association::HasAndBelongsToMany { name, .. } => {
+                    Some((m.name.0.as_str(), name.as_str()))
+                }
+                _ => None,
+            })
+        })
+        .collect();
+    let models: std::collections::HashSet<&str> = app.models.iter().map(|m| m.name.0.as_str()).collect();
+    struct Records<'a> {
+        proxies: std::collections::HashSet<(&'a str, &'a str)>,
+        models: std::collections::HashSet<&'a str>,
+    }
+    /// A query chain off a model class or a collection reader (`Post.where(…)`,
+    /// `product.subscribers.where(…)`): a Relation or CollectionProxy that types as
+    /// an Array of the model. `to_a` and `records` end it in a real Array.
+    fn is_query(e: &crate::expr::Expr, records: &Records) -> bool {
+        use crate::expr::ExprNode;
+        use crate::ty::Ty;
+        match &*e.node {
+            ExprNode::Const { path } => records.models.contains(path.iter().map(|s| s.as_str()).collect::<Vec<_>>().join("::").as_str()),
+            ExprNode::Send { recv: Some(owner), method, .. } => {
+                if matches!(method.as_str(), "to_a" | "records" | "load" | "entries") {
+                    return false;
+                }
+                let reader = matches!(owner.ty.as_ref(), Some(Ty::Class { id, .. })
+                    if records.proxies.contains(&(id.0.as_str(), method.as_str())));
+                reader || is_query(owner, records)
+            }
+            _ => false,
+        }
+    }
+    let records = Records { proxies, models };
+    fn visit(expr: &crate::expr::Expr, target: BuildTarget, records: &Records) {
+        use crate::expr::ExprNode;
+        use crate::ty::Ty;
+        if let ExprNode::Send { recv: Some(r), method, args, block, .. } = &*expr.node {
+            let elem = match r.ty.as_ref() {
+                Some(Ty::Array { elem }) => Some(elem),
+                Some(Ty::Union { variants }) if variants.len() == 2 && variants.iter().any(|v| matches!(v, Ty::Nil)) => {
+                    variants.iter().find_map(|v| match v {
+                        Ty::Array { elem } => Some(elem),
+                        _ => None,
+                    })
+                }
+                _ => None,
+            };
+            // Already refused by name in `report_ruby_only_sends`.
+            let ruby_only = matches!(method.as_str(), "fetch" | "each_slice" | "each_cons" | "lazy" | "with_object");
+            // A has_many reader types as an Array of its model, but answers a CollectionProxy (`build`, `create!`).
+            if let Some(elem) = elem.filter(|_| !is_query(r, records)) {
+                let argc = args.len() + usize::from(block.is_some());
+                if !ruby_only && !crate::emit::typescript::array_method_handled(method.as_str(), argc, block.as_ref(), elem) {
+                    crate::emit::diagnostics::report_unsupported(
+                        expr.span,
+                        target.as_str(),
+                        format!("Array#{}", method.as_str()).as_str(),
+                        "the TypeScript emit has no translation for it and would call the Ruby name on a JS Array",
+                    );
+                }
+            }
+            let number = match r.ty.as_ref() {
+                Some(Ty::Int) => Some("Integer"),
+                Some(Ty::Float) => Some("Float"),
+                _ => None,
+            };
+            if let Some(class) = number {
+                let argc = args.len() + usize::from(block.is_some());
+                if !crate::emit::typescript::numeric_method_handled(method.as_str(), argc, block.as_ref()) {
+                    crate::emit::diagnostics::report_unsupported(
+                        expr.span,
+                        target.as_str(),
+                        format!("{class}#{}", method.as_str()).as_str(),
+                        "the TypeScript emit has no translation for it and would call the Ruby name on a JS number",
+                    );
+                }
+            }
+        }
+        expr.node.for_each_child(&mut |child| visit(child, target, records));
+    }
+    crate::lower::for_each_emit_body_ref(app, &mut |expr| visit(expr, target, &records));
+}
+
 /// `case/in` is not equivalent to the targets' existing `case/when`
 /// renderers, even for nil or a plain binding. Refuse before file emission
 /// rather than lose bindings, skip evaluation, or turn a test into a wildcard.
@@ -1981,6 +2079,7 @@ fn target_files_inner(
     report_native_ruby_syntax(app, target);
     report_self_bindings(app, target);
     report_ruby_only_sends(app, target);
+    report_typescript_array_sends(app, target);
     report_dry_struct_stdlib(app, target);
     // Full forwarding currently has a native Ruby contract only. A
     // declaration must be gated even when its body never forwards.
