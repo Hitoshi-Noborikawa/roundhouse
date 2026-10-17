@@ -48,7 +48,7 @@ fn a_spinel_tree_on_sidekiq_gets_spinel_redis() {
     let manifest = read(&emitted, "spin.toml");
     assert!(
         manifest.contains(
-            "redis = { git = \"https://github.com/baron-hines/spinel-redis\", ref = \"roundhouse-phase2-1\" }"
+            "redis = { git = \"https://github.com/rubys/spinel-redis\", ref = \"v0.2.0\" }"
         ),
         "{manifest}"
     );

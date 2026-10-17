@@ -9338,9 +9338,9 @@ fn spin_shape(files: Vec<(String, String)>) -> Result<Vec<(String, String)>, Str
             "# Redis, for queue_adapter :sidekiq: jobs are pushed in Sidekiq's\n\
              # format for a Sidekiq process to run. spinel-redis, pure Ruby over\n\
              # sp_net. Git form, pinned to a tag because `ref` takes a branch\n\
-             # or tag, never a SHA; the tag carries the url:, AUTH, zadd and\n\
-             # pipelined this push needs, which the index's redis does not yet.\n\
-             redis = { git = \"https://github.com/baron-hines/spinel-redis\", ref = \"roundhouse-phase2-1\" }\n",
+             # or tag, never a SHA; 0.2.0 carries the url:, AUTH, zadd and\n\
+             # pipelined this push needs, and the index lists only 0.1.0.\n\
+             redis = { git = \"https://github.com/rubys/spinel-redis\", ref = \"v0.2.0\" }\n",
         );
     }
     files.push(("spin.toml".to_string(), manifest));
