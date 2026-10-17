@@ -943,6 +943,16 @@ fn source_mutations(app: &App, resolver: &ConstResolver) -> Mutations {
             );
         }
     }
+    let shadows = std::mem::take(&mut scan.mutations.constructor_shadows);
+    for (owner, file, offset) in shadows {
+        let mut names = HashSet::new();
+        expand(&owner, &scan.aliases, &mut HashSet::new(), &mut names, true);
+        for name in names {
+            scan.mutations
+                .constructor_shadows
+                .push((name, file, offset));
+        }
+    }
     scan.mutations
 }
 

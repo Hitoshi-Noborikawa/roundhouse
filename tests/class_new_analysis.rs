@@ -710,6 +710,39 @@ fn lexical_const_set_of_class_shadows_only_later_factories() {
             .class_registry()
             .contains_key(&ClassId(Symbol::from("Owner::Failure")))
     );
+
+    // The receiver may be an alias of the namespace. Ruby still defines
+    // Owner::Class, so a later factory in Owner must not see ::Class.
+    for (alias, shadow) in [
+        ("Alias = Owner", "Alias.const_set(:Class, Object)"),
+        ("Core, Other = Owner, nil", "Core.const_set(:Class, Object)"),
+        ("Alias ||= Owner", "Alias.const_set(:Class, Object)"),
+    ] {
+        let refused =
+            format!("class Owner; end\n{alias}\n{shadow}\nclass Owner\n  Failure = Class.new\nend");
+        let (source, analyzer) = analyzed(ingest(&refused, "Owner::Failure.new", None), true);
+        assert!(
+            !errors(&source).is_empty(),
+            "{alias}: {:?}",
+            errors(&source)
+        );
+        assert!(
+            !analyzer
+                .class_registry()
+                .contains_key(&ClassId(Symbol::from("Owner::Failure"))),
+            "{alias}"
+        );
+        let output = std::process::Command::new("ruby")
+            .args(["-e", &format!("{refused}\nOwner::Failure.new")])
+            .output()
+            .unwrap();
+        assert!(!output.status.success(), "{alias}");
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains("NoMethodError"),
+            "{alias}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
 }
 
 #[test]
