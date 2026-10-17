@@ -25,8 +25,11 @@ class EncryptedCookieJarTest < Minitest::Test
   end
 
   def test_a_value_round_trips_with_its_type
+    # A Hash is written through the options form, as in Rails: a bare Hash
+    # IS the options, and without :value it stores nil (actionpack 8.1.4).
     value = { "theme" => "dark", "size" => 3, "tags" => ["a", 1, nil, true] }
-    assert_equal value, read(written(value))
+    assert_equal value, read(written({ value: value }))
+    assert_nil read(written(value))
     assert_equal 42, read(written(42))
     assert_equal "ada", read(written("ada"))
   end
