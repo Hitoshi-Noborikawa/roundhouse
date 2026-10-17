@@ -729,8 +729,9 @@ fn js_begin_rescue_stmt(
 /// resolve.
 fn rescue_binding_alias(rc: &RescueClause) -> Vec<JsStmt> {
     match &rc.binding {
-        Some(name) => vec![const_decl(name.as_str(), synth_ident("e"))],
-        None => vec![],
+        // `const e = e;` reads the binding it declares: a ReferenceError at run time.
+        Some(name) if name.as_str() != "e" => vec![const_decl(name.as_str(), synth_ident("e"))],
+        _ => vec![],
     }
 }
 
