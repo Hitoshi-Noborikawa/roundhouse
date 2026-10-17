@@ -600,7 +600,7 @@ fn model_class(model: &Model, methods: Vec<MethodDef>, table: Option<&Table>) ->
 fn collect_class_attr_initializers(model: &Model) -> Vec<Expr> {
     use crate::ingest::library_class::{mattr_nil_seed, mattr_seed};
 
-    model
+    let mut out: Vec<Expr> = model
         .class_attr_defaults
         .iter()
         .map(|(name, value)| {
@@ -610,7 +610,25 @@ fn collect_class_attr_initializers(model: &Model) -> Vec<Expr> {
                 mattr_seed(name, value.clone())
             }
         })
-        .collect()
+        .collect();
+    // The class body's own writes to its class instance variables (`@registry ||= []`, `@registry << …`), in order.
+    for item in &model.body {
+        if let crate::dialect::ModelBodyItem::Unknown { expr, .. } = item
+            && writes_class_ivar(expr)
+        {
+            out.push(expr.clone());
+        }
+    }
+    out
+}
+
+pub(crate) fn writes_class_ivar(expr: &Expr) -> bool {
+    match &*expr.node {
+        ExprNode::Assign { target: crate::expr::LValue::Ivar { .. }, .. }
+        | ExprNode::OpAssign { target: crate::expr::LValue::Ivar { .. }, .. } => true,
+        ExprNode::Send { recv: Some(r), block: None, .. } => matches!(&*r.node, ExprNode::Ivar { .. }),
+        _ => false,
+    }
 }
 
 /// Class-level `NAME = <expr>` constants declared in a model body (e.g.
