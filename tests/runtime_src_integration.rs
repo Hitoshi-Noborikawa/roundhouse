@@ -1089,7 +1089,11 @@ fn every_runtime_method_body_concretely_typed() {
     // nil), as ActionMailer's `Mail::Message` normalizes them (+5 in
     // action_mailer.rb).
     // MEASURED 784 on 2026-10-17: both of those, on the same 776 base.
-    const CEILING: usize = 784;
+    // MEASURED 791 on 2026-10-17: `cookies.encrypted` (`EncryptedCookieJar`
+    // in action_controller/cookies.rb) reads and writes JSON values, so its
+    // `[]`, `[]=` and `value_of` carry an untyped value by contract, as Rails'
+    // encrypted jar answers whatever the cookie holds (+7 on the 784 base).
+    const CEILING: usize = 791;
     assert!(
         total_gradual <= CEILING,
         "{total_gradual} Ty::Untyped sites exceeds ceiling of {CEILING}",
