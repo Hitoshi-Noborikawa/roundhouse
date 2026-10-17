@@ -66,9 +66,21 @@ fn retained_factories_have_exact_identity_parent_and_constructor() {
     let (source, analyzer) = analyzed(app, true);
     // A blockless one-argument factory is a real class at ingest. No-arg
     // and empty-block factories stay check-only.
-    assert!(main_analyzer.class_registry().contains_key(&ClassId(Symbol::from("Owner::Failure"))));
-    assert!(!main_analyzer.class_registry().contains_key(&ClassId(Symbol::from("Owner::Plain"))));
-    assert!(!main_analyzer.class_registry().contains_key(&ClassId(Symbol::from("Owner::Empty"))));
+    assert!(
+        main_analyzer
+            .class_registry()
+            .contains_key(&ClassId(Symbol::from("Owner::Failure")))
+    );
+    assert!(
+        !main_analyzer
+            .class_registry()
+            .contains_key(&ClassId(Symbol::from("Owner::Plain")))
+    );
+    assert!(
+        !main_analyzer
+            .class_registry()
+            .contains_key(&ClassId(Symbol::from("Owner::Empty")))
+    );
     assert!(errors(&main).is_empty(), "{:?}", errors(&main));
     assert!(errors(&source).is_empty(), "{:?}", errors(&source));
     for (name, parent) in [
@@ -516,7 +528,10 @@ end
     );
 
     let output = std::process::Command::new("ruby")
-        .args(["-e", &format!("{declarations}\np Owner::Child.new\nOwner::Child.new.message")])
+        .args([
+            "-e",
+            &format!("{declarations}\np Owner::Child.new\nOwner::Child.new.message"),
+        ])
         .output()
         .unwrap();
     assert!(!output.status.success());
@@ -644,6 +659,57 @@ fn ruby_constructor_redefinitions_expose_the_known_limits() {
             );
         }
     }
+}
+
+#[test]
+fn lexical_const_set_of_class_shadows_only_later_factories() {
+    for shadow in [
+        "const_set(:Class, Object)",
+        "self.const_set(:Class, Object)",
+        "send(:const_set, :Class, Object)",
+    ] {
+        let refused = format!("class Owner\n  {shadow}\n  Failure = Class.new\nend");
+        let (source, analyzer) = analyzed(ingest(&refused, "Owner::Failure.new", None), true);
+        assert!(
+            !errors(&source).is_empty(),
+            "{shadow}: {:?}",
+            errors(&source)
+        );
+        assert!(
+            !analyzer
+                .class_registry()
+                .contains_key(&ClassId(Symbol::from("Owner::Failure"))),
+            "{shadow}"
+        );
+        let output = std::process::Command::new("ruby")
+            .args(["-e", &format!("{refused}\nOwner::Failure.new")])
+            .output()
+            .unwrap();
+        assert!(!output.status.success(), "{shadow}");
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains("NoMethodError"),
+            "{shadow}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    let reopened = "class Owner; end\nOwner.const_set(:Class, Object)\nclass Owner\n  Failure = Class.new\nend";
+    let (source, analyzer) = analyzed(ingest(reopened, "Owner::Failure.new", None), true);
+    assert!(!errors(&source).is_empty(), "{:?}", errors(&source));
+    assert!(
+        !analyzer
+            .class_registry()
+            .contains_key(&ClassId(Symbol::from("Owner::Failure")))
+    );
+
+    // A shadow after the call does not rewrite the class already created.
+    let kept = "class Owner\n  Failure = Class.new\nend\nOwner.const_set(:Class, Object)";
+    let (source, analyzer) = analyzed(ingest(kept, "Owner::Failure.new", None), true);
+    assert!(errors(&source).is_empty(), "{:?}", errors(&source));
+    assert!(
+        analyzer
+            .class_registry()
+            .contains_key(&ClassId(Symbol::from("Owner::Failure")))
+    );
 }
 
 #[test]
@@ -1198,8 +1264,12 @@ fn attr_on_constructor_lookup_path_refuses_factories() {
             ),
             true,
         );
-        assert!(analyzer.class_registry().contains_key(&ClassId(Symbol::from("Owner::Child"))),
-                "{declaration}");
+        assert!(
+            analyzer
+                .class_registry()
+                .contains_key(&ClassId(Symbol::from("Owner::Child"))),
+            "{declaration}"
+        );
     }
 }
 

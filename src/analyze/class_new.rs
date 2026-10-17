@@ -76,14 +76,24 @@ pub(super) fn register(
     }
     // Ingest also records class << self methods, before their inferred method
     // types have been populated in the registry used for admission.
-    let inherited_hooks: HashSet<_> = app.library_classes
+    let inherited_hooks: HashSet<_> = app
+        .library_classes
         .iter()
-        .flat_map(|class| class.methods.iter().map(move |method| (&class.name, method)))
-        .chain(app.models.iter().flat_map(|model| {
-            model.methods().map(move |method| (&model.name, method))
-        }))
+        .flat_map(|class| {
+            class
+                .methods
+                .iter()
+                .map(move |method| (&class.name, method))
+        })
+        .chain(
+            app.models
+                .iter()
+                .flat_map(|model| model.methods().map(move |method| (&model.name, method))),
+        )
         .chain(app.controllers.iter().flat_map(|controller| {
-            controller.class_methods().map(move |method| (&controller.name, method))
+            controller
+                .class_methods()
+                .map(move |method| (&controller.name, method))
         }))
         .filter(|(_, method)| {
             method.receiver == MethodReceiver::Class && method.name.as_str() == "inherited"
@@ -130,6 +140,7 @@ pub(super) fn register(
             || !resolver.sole_namespace(value.span.file, id.0.as_str())
             || resolver.has_source_singleton_body(id.0.as_str())
             || mutations.targets(id.0.as_str())
+            || constructor_shadowed(&mutations, value.span, id.0.as_str())
         {
             continue;
         }
@@ -137,7 +148,13 @@ pub(super) fn register(
             continue;
         };
         if has_unsupported_ancestry(
-            &id, parent, classes, resolver, &parents, &mutations, &inherited_hooks,
+            &id,
+            parent,
+            classes,
+            resolver,
+            &parents,
+            &mutations,
+            &inherited_hooks,
         ) {
             continue;
         }
@@ -149,7 +166,13 @@ pub(super) fn register(
                 ..ClassInfo::default()
             },
         );
-        factories.insert(value.span, Ty::Class { id, args: vec![].into() });
+        factories.insert(
+            value.span,
+            Ty::Class {
+                id,
+                args: vec![].into(),
+            },
+        );
     }
     // Main marks an ordinary subclass of a positional Struct superclass.
     // Inherit that constructor fact through factory parents too, after every
@@ -262,9 +285,9 @@ fn has_unsupported_ancestry(
             || mutations.targets(id.0.as_str())
             || inherited_hooks.contains(&id)
             || resolver.source_singleton_method(id.0.as_str(), "inherited")
-            || classes.get(&id).is_some_and(|info| {
-                info.class_methods.contains_key(&Symbol::from("inherited"))
-            })
+            || classes
+                .get(&id)
+                .is_some_and(|info| info.class_methods.contains_key(&Symbol::from("inherited")))
         {
             return true;
         }
@@ -288,6 +311,9 @@ struct Mutations {
     constants: HashSet<String>,
     constant_namespaces: HashSet<String>,
     constructors: HashSet<String>,
+    /// `const_set(:Class, …)` under a namespace, at this source offset.
+    /// A factory later in that namespace is not a call to `::Class.new`.
+    constructor_shadows: Vec<(String, crate::span::FileId, u32)>,
 }
 
 impl Mutations {
@@ -456,6 +482,7 @@ fn source_mutations(app: &App, resolver: &ConstResolver) -> Mutations {
                 &String::from_utf8_lossy(node.name().as_slice()),
                 &args,
                 false,
+                node.location().start_offset() as u32,
             );
             ruby_prism::visit_call_node(self, node);
         }
@@ -515,12 +542,13 @@ fn source_mutations(app: &App, resolver: &ConstResolver) -> Mutations {
             method: &str,
             args: &[ruby_prism::Node<'_>],
             reflective: bool,
+            offset: u32,
         ) {
             match method {
                 "call" | "[]" | "===" => {
                     if let Some((receiver, name)) = receiver.and_then(method_reference) {
                         if let Some(name) = name {
-                            self.call_mutation(receiver, &name, args, true);
+                            self.call_mutation(receiver, &name, args, true, offset);
                         } else {
                             self.namespace_mutation(receiver);
                         }
@@ -530,14 +558,14 @@ fn source_mutations(app: &App, resolver: &ConstResolver) -> Mutations {
                     if let Some(name) = args.first().and_then(literal_name) {
                         // Forward every literal layer, retaining the original
                         // receiver and the remaining method arguments.
-                        self.call_mutation(receiver, &name, &args[1..], true);
+                        self.call_mutation(receiver, &name, &args[1..], true, offset);
                     } else {
                         self.namespace_mutation(receiver);
                     }
                 }
                 "const_set" | "remove_const" => {
                     let name = args.first().and_then(literal_name);
-                    self.constant_mutation(receiver, name.as_deref());
+                    self.constant_mutation(receiver, name.as_deref(), offset);
                 }
                 "define_method"
                 | "define_singleton_method"
@@ -775,12 +803,21 @@ fn source_mutations(app: &App, resolver: &ConstResolver) -> Mutations {
             &mut self,
             receiver: Option<ruby_prism::Node<'_>>,
             name: Option<&str>,
+            offset: u32,
         ) {
             for owner in self.receiver_targets(receiver) {
                 if owner == "Class" {
                     self.mutations.namespaces.insert(owner.clone());
                 }
                 if let Some(name) = name {
+                    if name == "Class" {
+                        // Ruby resolves `Class` to this nested constant for
+                        // every later factory in the namespace. A binding
+                        // after the factory does not rewrite the call.
+                        self.mutations
+                            .constructor_shadows
+                            .push((owner.clone(), self.file, offset));
+                    }
                     self.mutations.constants.insert(if owner == "Object" {
                         name.to_owned()
                     } else {
@@ -907,6 +944,19 @@ fn source_mutations(app: &App, resolver: &ConstResolver) -> Mutations {
         }
     }
     scan.mutations
+}
+
+/// A `const_set(:Class, …)` earlier in this file, on the factory's
+/// namespace or one that encloses it, hides `::Class`.
+fn constructor_shadowed(mutations: &Mutations, span: Span, factory: &str) -> bool {
+    mutations
+        .constructor_shadows
+        .iter()
+        .any(|(owner, file, offset)| {
+            *file == span.file
+                && *offset < span.start
+                && (factory == owner || factory.starts_with(&format!("{owner}::")))
+        })
 }
 
 fn empty_source_block(app: &App, span: Span) -> bool {
