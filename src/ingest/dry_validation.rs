@@ -1057,9 +1057,21 @@ fn read_rule(
                 _ => Macro::Maybe,
             };
             // A schema where the type goes (`filled(AddressContract.schema)`):
-            // a Hash of its keys.
-            if let Some(referenced) = spec.and_then(|s| schema_ref(s, owner, cx, schemas).ok()) {
-                let mut schema = referenced.clone();
+            // a Hash of its keys. `X.schema` can be nothing else, so its
+            // failure is the reason; a constant may be a type instead, and
+            // the schema's failure is the reason only if it is not.
+            let as_schema = match spec.map(|s| &*s.node) {
+                Some(ExprNode::Send { method, args, .. }) if method.as_str() == "schema" && args.is_empty() => {
+                    Some(schema_ref(spec.unwrap(), owner, cx, schemas))
+                }
+                Some(ExprNode::Const { .. }) => match schema_ref(spec.unwrap(), owner, cx, schemas) {
+                    Ok(found) => Some(Ok(found)),
+                    Err(reason) => ty_of(spec).is_err().then_some(Err(reason)),
+                },
+                _ => None,
+            };
+            if let Some(referenced) = as_schema {
+                let mut schema = referenced?.clone();
                 if let Some(s) = nested_block(block)? {
                     schema.extend(&s);
                 }
