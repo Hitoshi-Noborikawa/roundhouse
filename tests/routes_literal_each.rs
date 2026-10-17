@@ -198,3 +198,89 @@ end
             .assert_passes();
     }
 }
+
+/// A `mount` of a real literal-source engine, written once inside a
+/// literal-each loop (rubys/roundhouse#1027, CodeRabbit on #1027).
+/// `ingest_literal_each` walks the loop body with `ingest_route_body`
+/// directly, without raising `mount_scope_depth` the way every other
+/// block walker does (`if`/`unless` arms, `constraints`/`member`/
+/// `collection`/`devise_scope`, and the generic `block_entries` for
+/// `namespace`/`scope`/concern blocks all increment it before
+/// recursing). So a `mount` inside the loop is read as if it were
+/// top-level: on a 2+-element loop the first iteration's mount
+/// succeeds and claims the engine in `mounted_engines`, and the second
+/// then hits the check meant for two *separate* top-level `mount`
+/// statements of the same engine, reporting "mounting the same engine
+/// class more than once" — even though this is one `mount` call,
+/// executed twice by the loop. Rails would not boot this app either
+/// (both mounts get the same default route name, from the same engine
+/// class, since this feature does not compose `as:`), but it fails
+/// the same way on every iteration, not after silently serving the
+/// first one. Matching that, and matching every sibling block walker,
+/// a `mount` inside the loop is a located gap on every iteration, not
+/// a partial mount.
+#[test]
+fn a_mount_inside_a_literal_each_loop_is_a_located_gap_on_every_iteration() {
+    let root = std::env::temp_dir().join(format!(
+        "roundhouse-routes-literal-each-mount-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+    ));
+    let app_dir = root.join("app");
+    for (path, source) in [
+        (
+            "app/controllers/widgets_controller.rb",
+            "class WidgetsController < ActionController::Base\n  def index\n    render plain: \"widgets\"\n  end\nend\n",
+        ),
+        ("db/schema.rb", "ActiveRecord::Schema[8.1].define do\nend\n"),
+        (
+            "Gemfile.lock",
+            "PATH\n  remote: vendor/catalog\n  specs:\n    catalog (0.1.0)\n\nDEPENDENCIES\n  catalog!\n",
+        ),
+        (
+            "vendor/catalog/lib/catalog/engine.rb",
+            "module Catalog\n  class Engine < Rails::Engine\n    isolate_namespace Catalog\n  end\nend\n",
+        ),
+        (
+            "vendor/catalog/app/controllers/catalog/products_controller.rb",
+            "module Catalog\n  class ProductsController < ActionController::Base\n    def index\n      render plain: \"products\"\n    end\n  end\nend\n",
+        ),
+        (
+            "vendor/catalog/config/routes.rb",
+            "Catalog::Engine.routes.draw do\n  get \"/products\", to: \"products#index\"\nend\n",
+        ),
+        (
+            "config/routes.rb",
+            "Rails.application.routes.draw do\n  get \"/widgets\", to: \"widgets#index\"\n  %w[a b].each { |x| mount Catalog::Engine, at: \"/catalog\" }\nend\n",
+        ),
+    ] {
+        let file = app_dir.join(path);
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        std::fs::write(file, source).unwrap();
+    }
+
+    let (built, _) = roundhouse::ingest::prism::scope(|| roundhouse::ingest::ingest_app(&app_dir));
+    let _ = std::fs::remove_dir_all(&root);
+    let app = built.expect("ingest the app (mount gaps are diagnostics, not IngestErrors)");
+
+    let gaps: Vec<&str> = app.routes.diagnostics.iter().map(|d| d.message.as_str()).collect();
+    assert_eq!(
+        gaps.iter().filter(|m| m.contains("only top-level literal engine mounts are composed")).count(),
+        2,
+        "every iteration's mount is a located gap, not just a second/duplicate one: {gaps:?}"
+    );
+    assert!(
+        !gaps.iter().any(|m| m.contains("mounting the same engine class more than once")),
+        "the loop's mount must not be read as two separate top-level mounts: {gaps:?}"
+    );
+
+    let routes = flatten_routes(&app);
+    assert!(
+        routes.iter().any(|r| r.path == "/widgets"),
+        "the unlooped sibling route survives: {routes:?}"
+    );
+    assert!(
+        !routes.iter().any(|r| r.path.starts_with("/catalog")),
+        "neither loop iteration's mount should partially succeed: {routes:?}"
+    );
+}

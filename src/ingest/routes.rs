@@ -1674,12 +1674,25 @@ fn ingest_literal_each(
     let Some(param) = param else {
         return Ok(Vec::new());
     };
+    // A loop body is a block, like `if`/`unless` arms, `constraints`/
+    // `member`/`collection`/`devise_scope` and the generic
+    // `block_entries` for `namespace`/`scope`/concern blocks — every
+    // one of them raises `mount_scope_depth` before recursing. Without
+    // it here, a `mount` inside the loop read as top-level: on a
+    // 2+-element loop the first iteration's mount succeeded and the
+    // second then hit the check meant for two separate top-level
+    // mounts of the same engine ("mounting the same engine class more
+    // than once"), so one source `mount` executed twice by the loop
+    // silently half-worked instead of being a located gap on every
+    // iteration (rubys/roundhouse#1027 review).
     let mut entries = Vec::new();
     for element in elements {
         let Some(body) = block.body() else { break };
         eval::push_inherited_frame();
         eval::bind(&param, element);
-        let walked = ingest_route_body(body, file, parent, cx);
+        let walked = cx.with_mount_scope(cx.mount_scope_depth.get() + 1, || {
+            ingest_route_body(body, file, parent, cx)
+        });
         eval::pop_frame();
         entries.extend(walked?);
     }
