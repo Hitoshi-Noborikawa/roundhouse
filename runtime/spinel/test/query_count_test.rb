@@ -130,18 +130,20 @@ class QueryCountTest < ActionDispatch::IntegrationTest
     raise "expected an unloaded relation to query once, got #{sql.length}" unless sql.length == 1
   end
 
-  # The flip side: chaining after a terminal (`rel.where(...)` mutates
-  # and returns the same object) must drop the cache — serving the
-  # pre-refinement rows would be a correctness bug, not a perf feature.
+  # The flip side: chaining after a terminal answers a new relation
+  # without the cache, so it re-queries, and the loaded receiver keeps
+  # its own rows (Rails).
   def test_rechaining_a_loaded_relation_requeries
     rel = ActiveRecord::Relation.new(Article).order("id")
     ids = rel.map { |a| a.id }
     raise "fixture seeded no articles" if ids.length == 0
-    rel.where("id = #{ids[0]}")
-    fresh = rel.to_a
+    fresh = rel.where("id = #{ids[0]}").to_a
     unless fresh.length == 1
       raise "expected re-chained relation to re-query and return 1 row, " \
             "got #{fresh.length} — stale loaded records served"
+    end
+    unless rel.to_a.length == ids.length
+      raise "expected the loaded receiver to keep its #{ids.length} rows"
     end
   end
 end
