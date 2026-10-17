@@ -4094,6 +4094,12 @@ pre-5.2 cookie without metadata), CRuby and the spinel binary alike.
   / `cookies_serializer` (`:marshal`, `:hybrid`), and the
   `{"_rails":{"data":…}}` envelope no cookie jar writes. An app that
   sets them gets the defaults here.
+- **`expires:` on a write is dropped:** `cookies.encrypted[:t] = {
+  value: x, expires: 1.hour }` sends no `Expires` and puts no `exp` in
+  the envelope, so the cookie reads for as long as the browser keeps
+  it. Rails records the expiry inside the encrypted envelope, so a
+  copied short-lived cookie stops reading server-side. Only
+  `.permanent` sets one. The signed jar has the same gap.
 - **The session cookie** is still the signed one (see "Not
   implemented" in the vectors entry above): `cookies.encrypted[<session
   key>]` reads nil in an emitted app until the session store writes

@@ -316,7 +316,9 @@ What differs from Rails, and why:
   `cookies.encrypted` is Rails' jar (AES-256-GCM, the "authenticated
   encrypted cookie" key from `SECRET_KEY_BASE`, JSON values), so a value
   either side encrypted reads on the other; the session store does not
-  use it yet.
+  use it yet. An `expires:` given with a signed or encrypted write is
+  dropped: no `Expires` is sent and the value carries no expiry, so it
+  reads for as long as the browser keeps it.
 - **An unset `SECRET_KEY_BASE` is generated, not fatal.** Rails
   development keeps a generated key in `tmp/local_secret.txt`, and
   production refuses to boot without one. The ruby family generates the
