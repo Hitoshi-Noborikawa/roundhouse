@@ -33,6 +33,10 @@ mod time_zone_default;
 mod view_presence_url_encode;
 #[path = "emit_and_run/controller_translate.rs"]
 mod controller_translate;
+#[path = "emit_and_run/mailer_templates.rs"]
+mod mailer_templates;
+#[path = "emit_and_run/unreachable_views.rs"]
+mod unreachable_views;
 #[path = "emit_and_run/job_rest_params.rs"]
 mod job_rest_params;
 #[path = "emit_and_run/regexp_constants.rs"]
@@ -45,6 +49,14 @@ mod controller_sibling_classes;
 mod i18n_locales;
 #[path = "emit_and_run/i18n_runtime.rs"]
 mod i18n_runtime;
+#[path = "emit_and_run/helper_translate.rs"]
+mod helper_translate;
+#[path = "emit_and_run/helper_escape.rs"]
+mod helper_escape;
+#[path = "emit_and_run/class_new_constants.rs"]
+mod class_new_constants;
+#[path = "emit_and_run/i18n_subtree.rs"]
+mod i18n_subtree;
 #[path = "emit_and_run/i18n_plural_rules.rs"]
 mod i18n_plural_rules;
 #[path = "emit_and_run/rails_i18n_locales.rs"]
@@ -16357,3 +16369,5 @@ puts "nokogiri html5 helper passed"
     run.assert_passes();
     assert!(run.stdout.contains("nokogiri html5 helper passed"));
 }
+#[path = "emit_and_run/proc_new_and_std_streams.rs"]
+mod proc_new_and_std_streams;

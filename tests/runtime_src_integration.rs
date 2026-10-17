@@ -1084,7 +1084,12 @@ fn every_runtime_method_body_concretely_typed() {
     // block's untyped value the same way the outer arm does (+3 in
     // connection.rb: the `yield`, the local it is stored in, and the
     // value the method returns).
-    const CEILING: usize = 779;
+    // MEASURED 781 on 2026-10-17: a mailer's address headers read
+    // `mail`'s opts, whatever the action put there (a String, an Array,
+    // nil), as ActionMailer's `Mail::Message` normalizes them (+5 in
+    // action_mailer.rb).
+    // MEASURED 784 on 2026-10-17: both of those, on the same 776 base.
+    const CEILING: usize = 784;
     assert!(
         total_gradual <= CEILING,
         "{total_gradual} Ty::Untyped sites exceeds ceiling of {CEILING}",

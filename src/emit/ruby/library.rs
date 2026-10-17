@@ -2851,6 +2851,7 @@ pub(crate) fn apply_helper_lowering(lcs: &mut [LibraryClass], app: &App) {
     // whether some unrelated file existed.
     let helper_modules: BTreeSet<ClassId> =
         app.helper_method_index.values().cloned().collect();
+    PLAIN_HELPERS.with(|p| *p.borrow_mut() = plain_text_helpers(&app.library_classes, &helper_modules, &app.html_safe_methods));
     // Generated route-helper names (`active_path`, `story_path`, …) —
     // bare calls to these in layout/helper bodies resolve to the
     // generated `RouteHelpers` module. (The view walker rewrites route
@@ -3682,6 +3683,82 @@ fn strip_to_s(e: &Expr) -> &Expr {
     e
 }
 
+thread_local! {
+    /// `(module, method)` of the app helpers whose every return is plain
+    /// text (`plain_text_helpers`), set per `apply_helper_lowering` run.
+    static PLAIN_HELPERS: std::cell::RefCell<std::collections::HashSet<(String, String)>> = Default::default();
+}
+
+/// The app helper methods whose every return is plain text — a String
+/// literal, an interpolation, a number, or another such helper's
+/// result — which Rails escapes in a template like any String. Anything
+/// the walk cannot read stays out, keeping the safe default below, and so
+/// does a method whose `.html_safe` was erased (`App::html_safe_methods`).
+fn plain_text_helpers(
+    lcs: &[LibraryClass],
+    helper_modules: &BTreeSet<ClassId>,
+    html_safe: &BTreeSet<Symbol>,
+) -> std::collections::HashSet<(String, String)> {
+    fn tails<'a>(e: &'a Expr, out: &mut Vec<&'a Expr>) {
+        match &*e.node {
+            ExprNode::Seq { exprs } => match exprs.last() {
+                Some(last) => tails(last, out),
+                None => out.push(e),
+            },
+            ExprNode::If { then_branch, else_branch, .. } => {
+                tails(then_branch, out);
+                tails(else_branch, out);
+            }
+            ExprNode::Case { arms, .. } => {
+                for arm in arms {
+                    tails(&arm.body, out);
+                }
+                out.push(e);
+            }
+            ExprNode::Return { value } => tails(value, out),
+            _ => out.push(e),
+        }
+    }
+    fn returns<'a>(e: &'a Expr, out: &mut Vec<&'a Expr>) {
+        e.node.for_each_child(&mut |c| returns(c, out));
+        if let ExprNode::Return { value } = &*e.node {
+            tails(value, out);
+        }
+    }
+    let methods: Vec<(String, &crate::dialect::MethodDef)> = lcs
+        .iter()
+        .filter(|lc| helper_modules.contains(&lc.name))
+        .flat_map(|lc| lc.methods.iter().map(move |m| (lc.name.0.as_str().to_string(), m)))
+        .collect();
+    let mut plain: std::collections::HashSet<(String, String)> = std::collections::HashSet::new();
+    loop {
+        let before = plain.len();
+        for (module, m) in &methods {
+            let key = (module.clone(), m.name.as_str().to_string());
+            // Not one `lower::html_safe` or the tag builder recorded: its `.html_safe` mark was erased, not absent.
+            if plain.contains(&key) || html_safe.contains(&m.name) {
+                continue;
+            }
+            let mut out = Vec::new();
+            tails(&m.body, &mut out);
+            returns(&m.body, &mut out);
+            let is_plain = |e: &Expr| match &*e.node {
+                ExprNode::Lit { value: Literal::Str { .. } | Literal::Int { .. } | Literal::Float { .. } } => true,
+                ExprNode::StringInterp { .. } => true,
+                ExprNode::Send { recv: None, method, .. } => methods.iter().any(|(md, other)| md == module && other.name == *method)
+                    && plain.contains(&(module.clone(), method.as_str().to_string())),
+                _ => false,
+            };
+            if !out.is_empty() && out.iter().all(|e| is_plain(e)) {
+                plain.insert(key);
+            }
+        }
+        if plain.len() == before {
+            return plain;
+        }
+    }
+}
+
 /// Calls whose result Rails treats as an html_safe buffer: tag-producing
 /// framework helpers, `raw`, and app-helper module functions (which
 /// compose those). The view walker's default `html_escape(<call>.to_s)`
@@ -3744,7 +3821,9 @@ fn is_html_safe_call(e: &Expr, index: &HashMap<Symbol, ClassId>) -> bool {
                 | "time_zone_options_for_select"
         );
     }
+    // Not every app helper: one whose every return is plain text is a String Rails escapes.
     index.values().any(|cid| cid.0.as_str() == joined)
+        && !PLAIN_HELPERS.with(|p| p.borrow().contains(&(joined.clone(), method.as_str().to_string())))
 }
 
 /// `<Const ending in Base>.helpers` — the Rails idiom

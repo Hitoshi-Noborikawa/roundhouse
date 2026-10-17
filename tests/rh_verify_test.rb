@@ -11,7 +11,8 @@ class RhVerifyTest < Minitest::Test
     GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_PREFIX].to_h { |key| [key, nil] }.freeze
 
   def setup
-    @root = Dir.mktmpdir('rh-verify-')
+    # Resolved: the child reports Dir.pwd, a realpath (macOS /var -> /private/var).
+    @root = File.realpath(Dir.mktmpdir('rh-verify-'))
     %w[bin scripts tests src/emit docs/guide fixtures/real-blog fixtures/store mocks].each do |dir|
       FileUtils.mkdir_p(File.join(@root, dir))
     end

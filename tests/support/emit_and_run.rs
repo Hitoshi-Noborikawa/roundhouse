@@ -392,7 +392,9 @@ pub fn ruby() -> Command {
 fn scratch_dir() -> PathBuf {
     static NEXT: AtomicUsize = AtomicUsize::new(0);
     loop {
-        let dir = std::env::temp_dir().join(format!(
+        // Resolved, so paths a child Ruby reports (`__dir__` is a realpath)
+        // match on macOS, where $TMPDIR sits under /var -> /private/var.
+        let dir = std::env::temp_dir().canonicalize().unwrap().join(format!(
             "roundhouse-emit-and-run-{}-{}",
             std::process::id(),
             NEXT.fetch_add(1, Ordering::Relaxed)
