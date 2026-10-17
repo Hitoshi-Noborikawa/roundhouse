@@ -154,7 +154,6 @@ pub(super) fn emit_library_class_decls(app: &App) -> Vec<EmittedFile> {
     apply_datetime_lowering(&mut lcs, app);
     apply_boolean_lowering(&mut lcs, app);
     apply_hydration_nil_lowering(&mut lcs, app);
-    apply_nilsafe_empty_lowering(&mut lcs);
     apply_time_format_lowering(&mut lcs);
     // Same rooting the view pipeline applies, for the same reason one
     // step over: a class nested in a namespace that SHADOWS what it
@@ -5773,14 +5772,6 @@ fn widen_fk_zero_guards(expr: &mut Expr, fks: &BTreeSet<Symbol>) {
     );
 }
 
-/// Ruby-family pre-emit pass, companion to
-/// `apply_hydration_nil_lowering`: once nullable columns hydrate to
-/// real nil, the `.empty?` forms the predicate lowering synthesized
-/// from `present?`/`blank?` (which assumed never-nil reads) crash.
-/// Rewrite `<recv>.empty?` → `(<recv> || "").empty?` — single
-/// evaluation, transparent for arrays/strings that are never nil, and
-/// nil reads get Rails' blank-when-nil semantics. Only the
-/// zero-arg `empty?` shape is touched.
 /// `<time>.rfc2822` → `ActiveSupport.rfc2822(<time>)`.
 ///
 /// `Time#rfc2822` is stdlib `time`, not core Ruby — `require "time"`
@@ -5864,14 +5855,6 @@ fn rewrite_rfc2822(expr: &mut Expr) {
         block: None,
         parenthesized: true,
     };
-}
-
-pub(crate) fn apply_nilsafe_empty_lowering(lcs: &mut [LibraryClass]) {
-    for lc in lcs.iter_mut() {
-        for m in &mut lc.methods {
-            rewrite_empty_nilsafe(&mut m.body);
-        }
-    }
 }
 
 /// `::`-root a view body's constant references when the view's own
@@ -6122,51 +6105,6 @@ fn rewrite_render_options_assign(expr: &mut Expr) {
         let span = value.span;
         *value = Expr::new(span, ExprNode::Lit { value: Literal::Str { value: name } });
     }
-}
-
-fn rewrite_empty_nilsafe(expr: &mut Expr) {
-    expr.node.for_each_child_mut(&mut |c| rewrite_empty_nilsafe(c));
-    let ExprNode::Send { recv: Some(r), method, args, .. } = &mut *expr.node else {
-        return;
-    };
-    if method.as_str() != "empty?" || !args.is_empty() {
-        return;
-    }
-    // THE GUARD GOES ON THE VALUE, NOT ON THE STRIP. `lower::blank`
-    // grounds a String `blank?` as `r.strip.empty?` (ActiveSupport's
-    // is a whitespace match, not `empty?`), so the receiver of
-    // `empty?` is now `r.strip` at half the sites — and `nil.strip`
-    // raises before any guard wrapped around it could answer. Descend
-    // one link so a nullable column still reads `(r || "").strip.empty?`.
-    // This is the interaction the whitespace form used to be deferred
-    // behind; four lines is the whole of it.
-    let target: &mut Expr = match &mut *r.node {
-        ExprNode::Send { recv: Some(inner), method, args, .. }
-            if method.as_str() == "strip" && args.is_empty() =>
-        {
-            inner
-        }
-        _ => r,
-    };
-    // Idempotence: an already-guarded `(x || "").empty?` keeps its shape.
-    if matches!(&*target.node, ExprNode::BoolOp { right, .. }
-        if matches!(&*right.node, ExprNode::Lit { value: Literal::Str { value } } if value.is_empty()))
-    {
-        return;
-    }
-    let guarded = Expr::new(
-        target.span,
-        ExprNode::BoolOp {
-            op: crate::expr::BoolOpKind::Or,
-            surface: crate::expr::BoolOpSurface::Symbol,
-            left: target.clone(),
-            right: Expr::new(
-                target.span,
-                ExprNode::Lit { value: Literal::Str { value: String::new() } },
-            ),
-        },
-    );
-    *target = guarded;
 }
 
 /// True when a reader body is exactly `@<name>` — the untouched
