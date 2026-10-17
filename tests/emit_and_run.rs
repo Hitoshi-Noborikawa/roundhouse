@@ -154,16 +154,22 @@ mod helper_anonymous_rest;
 mod controller_response_body;
 #[path = "emit_and_run/response_redirect.rs"]
 mod response_redirect;
+#[path = "emit_and_run/constructor_unrelated_mutations.rs"]
+mod constructor_unrelated_mutations;
 #[path = "emit_and_run/render_to_string_partial_ivar.rs"]
 mod render_to_string_partial_ivar;
 #[path = "emit_and_run/active_support_extensions.rs"]
 mod active_support_extensions;
 #[path = "emit_and_run/time_find_zone.rs"]
 mod time_find_zone;
+#[path = "emit_and_run/time_to_date.rs"]
+mod time_to_date;
 #[path = "emit_and_run/concurrent_map.rs"]
 mod concurrent_map;
 #[path = "emit_and_run/request_optional_port.rs"]
 mod request_optional_port;
+#[path = "emit_and_run/request_port.rs"]
+mod request_port;
 #[path = "emit_and_run/action_dispatch_request_put.rs"]
 mod action_dispatch_request_put;
 #[path = "emit_and_run/controller_url_helpers.rs"]
@@ -210,6 +216,8 @@ mod action_text_markdown;
 mod ordinalize;
 #[path = "emit_and_run/autoload_once_paths.rs"]
 mod autoload_once_paths;
+#[path = "emit_and_run/config_require_relative.rs"]
+mod config_require_relative;
 #[path = "emit_and_run/defined_const_fold.rs"]
 mod defined_const_fold;
 #[path = "emit_and_run/job_payload.rs"]

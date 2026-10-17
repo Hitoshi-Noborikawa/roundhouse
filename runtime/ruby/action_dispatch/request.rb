@@ -317,6 +317,22 @@ module ActionDispatch
       port
     end
 
+    def port
+      authority = @env.fetch("HTTP_X_FORWARDED_HOST", "").to_s.split(",").last.to_s.strip
+      if authority.empty?
+        authority = @host
+        if !@env.key?("HTTP_HOST") && (@env.key?("SERVER_NAME") || !authority.include?(":"))
+          authority = "#{authority}:#{@env.fetch("SERVER_PORT", "").to_s}"
+        end
+      end
+      sep = authority.rindex(":")
+      unless sep.nil?
+        value = authority[(sep + 1)..].to_s
+        return value.to_i if value.match?(/\A[0-9]+\z/)
+      end
+      ssl? ? 443 : 80
+    end
+
     # `request.protocol` — the scheme WITH its `://`, as Rails spells it.
     def protocol
       ssl? ? "https://" : "http://"
