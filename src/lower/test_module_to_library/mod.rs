@@ -145,6 +145,20 @@ pub fn lower_test_modules_with_inner(
     // `crate::lower::routes::helper_id_segments`.
     route_id_segments: &std::collections::HashMap<String, Vec<bool>>,
 ) -> Vec<LoweredTestModule> {
+    lower_test_modules_with_inner_opts(test_modules, fixtures, models, extras, route_id_segments, false)
+}
+
+/// `lower_test_modules_with_inner`, with `owner_objects` for the Ruby
+/// family: an association constructor hands its owner OBJECT to the
+/// automatic inverse (see `rewrite_assoc_create_with_models_in_place`).
+pub fn lower_test_modules_with_inner_opts(
+    test_modules: &[TestModule],
+    fixtures: &[Fixture],
+    models: &[Model],
+    extras: Vec<(ClassId, ClassInfo)>,
+    route_id_segments: &std::collections::HashMap<String, Vec<bool>>,
+    owner_objects: bool,
+) -> Vec<LoweredTestModule> {
     let mut classes: HashMap<ClassId, ClassInfo> = HashMap::new();
     for (id, info) in extras {
         classes.insert(id, info);
@@ -203,7 +217,7 @@ pub fn lower_test_modules_with_inner(
                 new_sym.clone(),
                 crate::lower::typing::fn_sig(
                     vec![],
-                    Ty::Class { id: inner.name.clone(), args: Vec::new() },
+                    Ty::Class { id: inner.name.clone(), args: Vec::new().into() },
                 ),
             );
             info.class_method_kinds
@@ -264,7 +278,7 @@ pub fn lower_test_modules_with_inner(
             info.instance_methods.entry(sym.clone()).or_insert_with(|| sig());
             info.instance_method_kinds
                 .entry(sym)
-                .or_insert(AccessorKind::Method);
+                .or_insert(minitest_kind(name));
         }
         // Mix in fixture helpers — `articles(:one)` returns Article.
         for (helper_name, sig) in &fixture_helpers {
@@ -355,7 +369,7 @@ pub fn lower_test_modules_with_inner(
                 continue;
             }
             if let Some(Ty::Fn { ret, .. }) = &mut method.signature {
-                *ret = Box::new(body_ty);
+                *ret = std::sync::Arc::new(body_ty);
             }
             if let Some(sig) = &method.signature {
                 lifted.push((method.name.clone(), sig.clone()));
@@ -404,7 +418,7 @@ pub fn lower_test_modules_with_inner(
             // `lowered_real_blog_typing_residual` enforces a
             // 0-untyped ceiling.
             let mut rewritten = crate::lower::seeds_to_library::
-                rewrite_assoc_create_with_models_in_place(&mut method.body, models);
+                rewrite_assoc_create_with_models_in_place(&mut method.body, models, owner_objects);
             // A record standing where a route helper wants an id.
             // Type-directed, so it must be here and not back where the
             // `RouteHelpers.` receiver was added: at THAT point a test
@@ -538,7 +552,7 @@ fn type_inner_class(
     // A parent signature may name its receiver (`-> instance`); the
     // receiver is this inner class, so substitute on adoption rather
     // than emit a self type as a declaration.
-    let self_ty = Ty::Class { id: inner.name.clone(), args: Vec::new() };
+    let self_ty = Ty::Class { id: inner.name.clone(), args: Vec::new().into() };
     let parent_methods: HashMap<Symbol, Ty> = inner
         .parent
         .as_ref()
@@ -628,12 +642,12 @@ fn type_inner_class(
         if let Some(ivar_ty) = writer_ivar {
             if let Some(Ty::Fn { params, ret, .. }) = &mut method.signature {
                 if let Some(first) = params.first_mut() {
-                    first.ty = ivar_ty.clone();
+                    first.ty = ivar_ty.clone().into();
                 }
-                *ret = Box::new(ivar_ty);
+                *ret = std::sync::Arc::new(ivar_ty);
             }
         } else if let Some(Ty::Fn { ret, .. }) = &mut method.signature {
-            *ret = Box::new(if method.name.as_str() == "initialize" {
+            *ret = std::sync::Arc::new(if method.name.as_str() == "initialize" {
                 Ty::Nil
             } else {
                 method.body.ty.clone().unwrap_or(Ty::Untyped)
@@ -682,13 +696,13 @@ fn signature_from_params(
                     }
                 }
             }
-            TyParam { name: p.name.clone(), ty, kind: p.ty_kind() }
+            TyParam { name: p.name.clone(), ty: ty.into(), kind: p.ty_kind() }
         })
         .collect();
     Ty::Fn {
-        params: ty_params,
+        params: ty_params.into(),
         block: None,
-        ret: Box::new(ret),
+        ret: std::sync::Arc::new(ret),
         effects: EffectSet::pure(),
     }
 }
@@ -843,14 +857,14 @@ fn build_library_class(
                 .iter()
                 .map(|p| crate::ty::Param {
                     name: p.name.clone(),
-                    ty: Ty::Untyped,
+                    ty: Ty::Untyped.into(),
                     kind: p.ty_kind(),
                 })
                 .collect();
             m.signature = Some(Ty::Fn {
-                params: ty_params,
+                params: ty_params.into(),
                 block: None,
-                ret: Box::new(Ty::Nil),
+                ret: std::sync::Arc::new(Ty::Nil),
                 effects: crate::effect::EffectSet::pure(),
             });
         }
@@ -863,6 +877,7 @@ fn build_library_class(
         parent: tm.parent.clone(),
         parent_span: Default::default(),
         includes: tm.includes.clone(),
+        include_spans: Vec::new(),
         methods,
         nullable_columns: Vec::new(),
         origin: None,
@@ -1042,6 +1057,11 @@ const MINITEST_INSTANCE_METHODS: &[(&str, SigBuilder)] = &[
     ("flash", || crate::lower::typing::fn_sig(vec![], Ty::Untyped)),
 ];
 
+/// `response` is a reader: every test runtime keeps it as a field (TypeScript's `response: any`, Python's `TestResponse`), so a call to it fails.
+fn minitest_kind(name: &str) -> AccessorKind {
+    if name == "response" { AccessorKind::AttributeReader } else { AccessorKind::Method }
+}
+
 fn fn_sig_one(p: Ty, ret: Ty) -> Ty {
     crate::lower::typing::fn_sig(vec![(Symbol::from("arg"), p)], ret)
 }
@@ -1072,20 +1092,20 @@ fn fn_sig_two(a: Ty, b: Ty, ret: Ty) -> Ty {
 /// The SIGNED jar really is nullable — verification can fail — so it
 /// answers `Str | Nil` and grounds through the union arm instead.
 fn cookie_jar_ty() -> Ty {
-    Ty::Class { id: ClassId(Symbol::from("ActionController::CookieJar")), args: vec![] }
+    Ty::Class { id: ClassId(Symbol::from("ActionController::CookieJar")), args: vec![].into() }
 }
 
 fn permanent_cookie_jar_ty() -> Ty {
-    Ty::Class { id: ClassId(Symbol::from("ActionController::PermanentCookieJar")), args: vec![] }
+    Ty::Class { id: ClassId(Symbol::from("ActionController::PermanentCookieJar")), args: vec![].into() }
 }
 
 fn signed_cookie_jar_ty() -> Ty {
-    Ty::Class { id: ClassId(Symbol::from("ActionController::SignedCookieJar")), args: vec![] }
+    Ty::Class { id: ClassId(Symbol::from("ActionController::SignedCookieJar")), args: vec![].into() }
 }
 
 fn insert_cookie_jar_baseline(classes: &mut HashMap<ClassId, ClassInfo>) {
     use crate::lower::typing::fn_sig;
-    let str_hash_arg = || Ty::Hash { key: Box::new(Ty::Str), value: Box::new(Ty::Str) };
+    let str_hash_arg = || Ty::Hash { key: std::sync::Arc::new(Ty::Str), value: std::sync::Arc::new(Ty::Str) };
     let str_hash = str_hash_arg();
     let key = || (Symbol::from("key"), Ty::Untyped);
     let value = || (Symbol::from("value"), Ty::Untyped);
@@ -1114,7 +1134,7 @@ fn insert_cookie_jar_baseline(classes: &mut HashMap<ClassId, ClassInfo>) {
         // cookie answers nil, which is what campfire's
         // `Session.find_signed(cookies.signed[:session_token])` is
         // written against.
-        ("[]", fn_sig(vec![key()], Ty::Union { variants: vec![Ty::Str, Ty::Nil] })),
+        ("[]", fn_sig(vec![key()], Ty::Union { variants: vec![Ty::Str, Ty::Nil].into() })),
         ("[]=", fn_sig(vec![key(), value()], Ty::Untyped)),
         ("delete", fn_sig(vec![key()], Ty::Str)),
         ("permanent", fn_sig(vec![], signed_cookie_jar_ty())),
@@ -1182,7 +1202,7 @@ fn insert_minitest_test_baseline(classes: &mut HashMap<ClassId, ClassInfo>) {
     for (name, sig) in MINITEST_INSTANCE_METHODS.iter() {
         let sym = Symbol::from(*name);
         info.instance_methods.insert(sym.clone(), sig());
-        info.instance_method_kinds.insert(sym, AccessorKind::Method);
+        info.instance_method_kinds.insert(sym, minitest_kind(name));
     }
     classes.insert(
         ClassId(Symbol::from("Minitest::Test")),

@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 # Ruby-family-only ViewHelpers extensions — a reopen, same pattern as
 # active_record/connection.rb: NOT listed in runtime_loader's strict-
 # target tables (the scaffold dir-walk ships it to spinel/CRuby/JRuby
@@ -11,13 +12,38 @@ require_relative "../action_view_number_helper"
 module ActionView
   module ViewHelpers
     # `content_security_policy_nonce` — the per-request CSP script
-    # nonce Rails interpolates into `<script nonce=…>`. The CSP HEADER
-    # pipeline isn't modeled (no Content-Security-Policy response
-    # header is emitted), so the nonce is inert to browsers; a stable
-    # token keeps the layout's interpolation rendering without pulling
-    # a randomness primitive into every target runtime.
+    # nonce Rails interpolates into `<script nonce=…>`. No app in the
+    # corpus sets a nonce generator (campfire's policy is hash-based,
+    # so the page stays cacheable), and a stable token keeps a layout
+    # that does interpolate one rendering without a randomness primitive.
     def self.content_security_policy_nonce
       "roundhouse-nonce"
+    end
+
+    # Rails' `csp_meta_tag`: a `<meta name="csp-nonce">` when a policy
+    # is configured, nothing when it is not. The content attribute is
+    # the nonce, and Rails' tag helper omits a nil one — campfire
+    # configures no generator, so the tag is the name alone. ` />` is
+    # `tag("meta")`'s void spelling; the compare canonicalizer drops
+    # the slash.
+    #
+    # The signal is `Rails.application.content_security_policy`, the
+    # object the request duplicates. This unit's require list does not
+    # load `ActionController::Current`, and a strict target's helper
+    # has no request, so the universal body stays "". `@csp_policy_for_test`
+    # is the stand-in a unit test sets: spinel cannot reopen
+    # `Application`, and `Rails.application` is a fresh instance per
+    # call. Production leaves the flag false.
+    @csp_policy_for_test = false
+
+    def self.csp_policy_for_test=(present)
+      @csp_policy_for_test = present
+    end
+
+    def self.csp_meta_tag
+      return "<meta name=\"csp-nonce\" />" if @csp_policy_for_test
+      return "" if Rails.application.content_security_policy.nil?
+      "<meta name=\"csp-nonce\" />"
     end
 
     # The ruby family's `url_for_path` (see the universal body in
@@ -52,19 +78,21 @@ module ActionView
 
     # Rails `class_names` (alias of `token_list`): strings/arrays add
     # their tokens, hash entries contribute their key when the value is
-    # truthy (`class_names("nav", current_page: cur == path)`), nil and
-    # blank tokens drop. Joined with single spaces.
+    # truthy (`class_names("nav", current_page: cur == path)`), nested
+    # arrays recurse, and nil, false and blank tokens drop. Joined with
+    # single spaces.
     def self.class_names(*args)
       tokens = []
       args.each do |arg|
         if arg.is_a?(Hash)
-          arg.each { |k, v| tokens << k.to_s if v }
-        elsif arg.is_a?(Array)
-          arg.each do |a|
-            s = a.to_s
-            tokens << s unless s.strip.empty?
+          arg.each do |k, v|
+            key = k.to_s
+            tokens << key if v && !key.strip.empty?
           end
-        elsif !arg.nil?
+        elsif arg.is_a?(Array)
+          s = class_names(*arg)
+          tokens << s unless s.empty?
+        elsif arg
           s = arg.to_s
           tokens << s unless s.strip.empty?
         end
@@ -468,6 +496,17 @@ module ActionView
       sanitize_engine(html.to_s, tags, attributes)
     end
 
+    # `sanitize(html, tags:, attributes:)` written in a view or helper —
+    # the caller's allow-lists, as `sanitize_allowing`, but the VIEW
+    # form: the CRuby overlay answers a safe buffer here, as it does for
+    # `sanitize`, where `sanitize_allowing` (a content filter's) stays a
+    # plain String. The keyword call is rewritten to this one at emit
+    # (emit/ruby/library.rs), since `sanitize`'s arity is fixed. campfire's
+    # `MessagesHelper#auto_link_text` is the caller.
+    def self.sanitize_with(html, tags, attributes)
+      sanitize_engine(html.to_s, tags, attributes)
+    end
+
     # ── the safe-list engine and its rule tables ─────────────────────
     #
     # Every table below is PORTED from the gems named above, not
@@ -651,6 +690,18 @@ module ActionView
                 i = after
               else
                 name = sanitize_tag_name(raw)
+                # The parser drops ONE newline (LF, CR, or CRLF) right
+                # after a <pre> or <listing> start tag, kept or stripped,
+                # so the gem's output has lost it — measured:
+                # "<pre>\n\nx</pre>" sanitizes to "<pre>\nx</pre>".
+                # campfire's auto_link_text test pins it.
+                if name == "pre" || name == "listing"
+                  if s[after, 2] == "\r\n"
+                    after = after + 2
+                  elsif s[after, 1] == "\n" || s[after, 1] == "\r"
+                    after = after + 1
+                  end
+                end
                 if name == "svg" || name == "math"
                   # Foreign content is PRUNED whole — children, text and
                   # all — matching the gem's namespace rule. A

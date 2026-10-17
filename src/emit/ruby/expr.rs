@@ -21,10 +21,26 @@ thread_local! {
     /// see the comment there. Off everywhere else, so ordinary app and
     /// library bodies keep reading the way they always have.
     static IN_CORE_CLASS_REOPEN: Cell<bool> = const { Cell::new(false) };
+    /// True while emitting the futamura whole-route box's own internal
+    /// copy of the `ruby` target (`project::futamura_whole_route`). An
+    /// include the analyzer could not resolve is guarded there
+    /// (`include X if defined?(X)`) rather than written plain: the
+    /// planner blocks only the routes that reach the including file, so
+    /// the box must still LOAD when such a route is never served from
+    /// it. The CLI's own `--target ruby` leaves this off and stays
+    /// fail-loud — an app meant to run on its own should not silently
+    /// swallow a mixin it could not resolve.
+    static FUTAMURA_BOX: Cell<bool> = const { Cell::new(false) };
     /// Direct, locked unknown-gem namespaces admitted by the Ruby project
     /// emitter. Other targets retain their constant refusal.
     static EXTERNAL_GEM_NAMESPACES: RefCell<std::collections::BTreeSet<String>> = const {
         RefCell::new(std::collections::BTreeSet::new())
+    };
+    /// `gems::statically_resolved_external_includes` of the app being
+    /// emitted, computed once with the namespaces above: it scans every
+    /// class, and asked per class it was most of Mastodon's emit.
+    static EXTERNAL_INCLUDES: RefCell<std::collections::BTreeMap<String, Vec<String>>> = const {
+        RefCell::new(std::collections::BTreeMap::new())
     };
     /// The emitted path (relative to the output root) of the file being
     /// rendered. A `SOURCE_FILE_PATH` literal anchors on it; `None`
@@ -78,17 +94,39 @@ pub(super) fn with_core_class_reopen<R>(yes: bool, f: impl FnOnce() -> R) -> R {
     r
 }
 
+/// Run `f` while emitting futamura's internal `ruby` copy. See
+/// `FUTAMURA_BOX`.
+pub(crate) fn with_futamura_box<R>(f: impl FnOnce() -> R) -> R {
+    let prev = FUTAMURA_BOX.with(|c| c.replace(true));
+    let r = f();
+    FUTAMURA_BOX.with(|c| c.set(prev));
+    r
+}
+
+pub(super) fn in_futamura_box() -> bool {
+    FUTAMURA_BOX.with(Cell::get)
+}
+
 pub(super) fn with_external_gem_namespaces<R>(
     namespaces: &std::collections::BTreeSet<String>,
+    includes: std::collections::BTreeMap<String, Vec<String>>,
     f: impl FnOnce() -> R,
 ) -> R {
     let previous = EXTERNAL_GEM_NAMESPACES
         .with(|current| std::mem::replace(&mut *current.borrow_mut(), namespaces.clone()));
+    let previous_includes = EXTERNAL_INCLUDES.with(|current| current.replace(includes));
     let result = f();
     EXTERNAL_GEM_NAMESPACES.with(|current| {
         *current.borrow_mut() = previous;
     });
+    EXTERNAL_INCLUDES.with(|current| current.replace(previous_includes));
     result
+}
+
+/// The literal requires that carry an external include (`detail` is its
+/// "X includes unresolved Y" key), when the emit admitted them.
+pub(super) fn external_include_features(detail: &str) -> Vec<String> {
+    EXTERNAL_INCLUDES.with(|includes| includes.borrow().get(detail).cloned().unwrap_or_default())
 }
 
 pub(crate) fn external_gem_namespace_is_enabled(namespace: &str) -> bool {
@@ -367,7 +405,9 @@ fn emit_node(n: &ExprNode) -> String {
             // group so the assign value is the last expression — bare
             // newlines end the statement after the first line.
             let rhs = emit_expr(value);
-            let rhs = if is_multi_seq(value) {
+            // `x = (y if c)`: bare, `x = y if c` assigns only when `c`
+            // holds, where the `if` without an else gives nil.
+            let rhs = if is_multi_seq(value) || assigns_as_modifier_if(value) {
                 format!("({rhs})")
             } else {
                 rhs
@@ -378,6 +418,10 @@ fn emit_node(n: &ExprNode) -> String {
         // `target += value`, etc. Preserves source short-circuit
         // semantics (and Rails dirty-tracking on `||=`).
         ExprNode::OpAssign { target, op, value } => {
+            // `x ||= (y if c)`, every form below: bare, the modifier
+            // guards the assignment.
+            let rhs = emit_expr(value);
+            let rhs = if assigns_as_modifier_if(value) { format!("({rhs})") } else { rhs };
             // `ENV[k] ||= v`: spinel models ENV only as a call receiver,
             // and an op-assign target reads it as a value. Expand to the
             // read-then-write Ruby defines it as.
@@ -387,7 +431,7 @@ fn emit_node(n: &ExprNode) -> String {
                 if matches!(&*index.node, ExprNode::Lit { value: Literal::Str { .. } })
                     && matches!(&*recv.node, ExprNode::Const { path } if path.len() == 1 && path[0].as_str() == "ENV") {
                     let k = emit_expr(index);
-                    let v = emit_expr(value);
+                    let v = rhs.clone();
                     let infix = op.as_ruby().trim_end_matches('=');
                     return match infix {
                         "||" | "&&" => format!("(ENV[{k}] {infix} (ENV[{k}] = {v}))"),
@@ -413,13 +457,10 @@ fn emit_node(n: &ExprNode) -> String {
                 ) {
                     let r = emit_expr(recv);
                     let infix = op.as_ruby().trim_end_matches('=');
-                    return format!(
-                        "{r}.{name} = {r}.{name} {infix} {}",
-                        emit_expr(value)
-                    );
+                    return format!("{r}.{name} = {r}.{name} {infix} {rhs}");
                 }
             }
-            format!("{} {} {}", emit_lvalue(target), op.as_ruby(), emit_expr(value))
+            format!("{} {} {}", emit_lvalue(target), op.as_ruby(), rhs)
         }
         ExprNode::Yield { args } => {
             let args_s: Vec<String> = args.iter().map(emit_arg).collect();
@@ -843,6 +884,7 @@ fn emit_string_interp(parts: &[crate::expr::InterpPart]) -> String {
                     '\r' => out.push_str("\\r"),
                     '\t' => out.push_str("\\t"),
                     '#' => out.push_str("\\#"),
+                    c if c.is_control() => out.push_str(&format!("\\u{{{:x}}}", c as u32)),
                     other => out.push(other),
                 }
             }
@@ -1044,6 +1086,13 @@ fn renders_as_trailing_modifier(e: &Expr) -> bool {
         ExprNode::RescueModifier { .. } => true,
         _ => false,
     }
+}
+
+/// Does `e` emit as a modifier `if`? On an assignment's right it would
+/// guard the assignment itself (`x = y if c`); `rescue` does not, Ruby
+/// binds it to the value.
+fn assigns_as_modifier_if(e: &Expr) -> bool {
+    matches!(&*e.node, ExprNode::If { .. }) && renders_as_trailing_modifier(e)
 }
 
 /// Would `r`, emitted as a bare method-call receiver (`<r>.method`),
@@ -1357,7 +1406,11 @@ pub(super) fn emit_send_base(
             format!("{}.{attr} = {}", emit_postfix_recv(r), args_s[0])
         }
         (None, _) => {
-            if args_s.is_empty() {
+            // A capitalized name without parens reads as a constant:
+            // `Success()` is a call, `Success` is not.
+            if args_s.is_empty() && method.as_str().starts_with(|c: char| c.is_ascii_uppercase()) {
+                format!("{method}()")
+            } else if args_s.is_empty() {
                 method.to_string()
             } else if parenthesized || first_arg_opens_block(&args_s) {
                 format!("{method}({})", args_s.join(", "))
@@ -1918,6 +1971,47 @@ mod tests {
             },
         );
         assert!(emit_expr(&call).starts_with("j(if "), "got {}", emit_expr(&call));
+    }
+
+    /// A modifier `if` on an assignment's right is parenthesized in every
+    /// form: bare, it would guard the assignment (`x = y if c` leaves `x`
+    /// as it was where the `if` gives nil).
+    #[test]
+    fn an_assigned_modifier_if_is_parenthesized() {
+        let modifier = || {
+            Expr::new(
+                Span::default(),
+                ExprNode::If {
+                    cond: send(None, "c", vec![]),
+                    then_branch: lit_str("y"),
+                    else_branch: Expr::new(Span::default(), ExprNode::Lit { value: Literal::Nil }),
+                },
+            )
+        };
+        let var = || crate::expr::LValue::Var { id: crate::ident::VarId(0), name: Symbol::from("x") };
+        let assign = Expr::new(Span::default(), ExprNode::Assign { target: var(), value: modifier() });
+        assert_eq!(emit_expr(&assign), "x = (\"y\" if c)");
+        let env = Expr::new(
+            Span::default(),
+            ExprNode::OpAssign {
+                target: crate::expr::LValue::Index {
+                    recv: Expr::new(Span::default(), ExprNode::Const { path: vec![Symbol::from("ENV")] }),
+                    index: lit_str("K"),
+                },
+                op: crate::expr::OpAssignOp::OrOr,
+                value: modifier(),
+            },
+        );
+        assert!(emit_expr(&env).contains("(ENV[\"K\"] = (\"y\" if c))"), "got {}", emit_expr(&env));
+        let attr = Expr::new(
+            Span::default(),
+            ExprNode::OpAssign {
+                target: crate::expr::LValue::Attr { recv: self_ref(), name: Symbol::from("n") },
+                op: crate::expr::OpAssignOp::Add,
+                value: modifier(),
+            },
+        );
+        assert!(emit_expr(&attr).ends_with("+ (\"y\" if c)"), "got {}", emit_expr(&attr));
     }
 
     fn self_ref() -> Expr {

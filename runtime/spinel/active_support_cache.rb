@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 # `ActiveSupport::Cache.expand_cache_key` and `ActiveSupport::Cache::
 # MemoryStore` — ported from activesupport 8.1 (cache.rb,
 # cache/memory_store.rb) for the ruby family and spinel, where campfire's
@@ -79,7 +80,11 @@ module ActiveSupport
         @lock = Mutex.new
       end
 
-      def read(name)
+      # `options` is Rails' entry-options Hash; none is modeled (see the
+      # header), so a call carrying one raises rather than being read
+      # with it ignored. `nil` or `{}` is the call Jbuilder makes.
+      def read(name, options = nil)
+        MemoryStore.reject_options(options)
         key = ActiveSupport::Cache.expanded_key(name)
         _, value = @lock.synchronize { read_locked(key) }
         MemoryStore.copy(value)
@@ -90,7 +95,8 @@ module ActiveSupport
         @lock.synchronize { @data.key?(key) }
       end
 
-      def write(name, value)
+      def write(name, value, options = nil)
+        MemoryStore.reject_options(options)
         key = ActiveSupport::Cache.expanded_key(name)
         payload = MemoryStore.copy(value)
         @lock.synchronize do
@@ -192,6 +198,11 @@ module ActiveSupport
         return value if value.nil? || value.equal?(true) || value.equal?(false)
         return value if value.instance_of?(Integer) || value.instance_of?(Float) || value.instance_of?(Symbol)
         raise ArgumentError, "MemoryStore cannot safely copy this value type"
+      end
+
+      def self.reject_options(options)
+        return nil if options.nil? || options.empty?
+        raise ArgumentError, "MemoryStore does not carry entry options (#{options.keys.join(", ")})"
       end
 
       def self.bytes(value)

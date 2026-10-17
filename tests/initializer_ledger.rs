@@ -110,6 +110,37 @@ fn a_to_prepare_block_is_unwrapped_like_the_recognizers_and_only_the_unread_stat
     assert_eq!(location(&ledger[0]), "config/initializers/prepare.rb:3:3");
 }
 
+// A statement's node carries offsets into its whole file, past the end of
+// the statement's own text once anything comes before it. The recognizers
+// that read a constant receiver slice the file, not that text.
+
+#[test]
+fn a_prepended_module_new_after_other_statements_is_reported_not_a_panic() {
+    let (_, ledger) = ingest(&[(
+        "config/initializers/document.rb",
+        "# Extensions for the JSON:API document.\n\
+         # They run once the app's classes are loaded,\n\
+         # after every other initializer has run.\n\
+         \n\
+         Rails.application.config.to_prepare do\n  Audit.record_boot\n  \
+         Document.prepend(Module.new do\n    def to_hash\n      super\n    end\n  end)\nend\n",
+    )]);
+    let locations: Vec<&str> = ledger.iter().map(location).collect();
+    assert_eq!(locations, ["config/initializers/document.rb:6:3", "config/initializers/document.rb:7:3"]);
+}
+
+#[test]
+fn a_content_helper_allow_list_after_other_statements_is_read() {
+    let (_, ledger) = ingest(&[(
+        "config/initializers/rich_text.rb",
+        "# Allow video embeds in rich text.\n\
+         \n\
+         Rails.application.config.to_prepare do\n  Audit.record_boot\n  \
+         ActionText::ContentHelper.allowed_tags = Set[\"video\"]\nend\n",
+    )]);
+    assert_eq!(statements(&ledger), ["Audit.record_boot"]);
+}
+
 #[test]
 fn an_after_initialize_hook_is_one_unconsumed_statement() {
     let (_, ledger) = ingest(&[(
@@ -169,6 +200,10 @@ fn every_recognizer_that_reads_an_initializer_keeps_its_statement_out_of_the_led
             "ActiveSupport::Inflector.inflections(:en) do |inflect|\n  inflect.acronym \"API\"\n  inflect.irregular \"person\", \"people\"\nend\n",
         ),
         ("config/initializers/mapper.rb", "ActionDispatch::Routing::Mapper.prepend Extras\n"),
+        (
+            "config/initializers/cable.rb",
+            "Rails.application.config.action_cable.allowed_request_origins = [\"https://a.example\", /https:\\/\\/b/]\n",
+        ),
         (
             "config/initializers/content.rb",
             "ActionText::ContentHelper.allowed_tags = ActionText::ContentHelper.allowed_tags | %w[mark]\n",
@@ -238,7 +273,7 @@ fn application_rb_reports_config_statements_nothing_reads() {
         "config/application.rb",
         "require_relative \"boot\"\nrequire \"rails/all\"\n\nmodule Shop\n  class Application < Rails::Application\n    \
          config.load_defaults 8.1\n    config.time_zone = \"Central Time (US & Canada)\"\n    \
-         config.eager_load = true\n    config.i18n.fallbacks = true\n    \
+         config.eager_load = true\n    config.i18n.enforce_available_locales = false\n    \
          config.after_initialize do\n      Warmup.run\n    end\n\n    def read_only?\n      false\n    end\n  end\nend\n",
     )]);
     // time_zone and the method still ingest ...
@@ -246,7 +281,7 @@ fn application_rb_reports_config_statements_nothing_reads() {
     assert!(application.methods.iter().any(|m| m.name.as_str() == "config_time_zone"));
     assert!(application.methods.iter().any(|m| m.name.as_str() == "read_only?"));
     // ... load_defaults / time_zone are consumed, eager_load is inert, defs are methods.
-    assert_eq!(statements(&ledger), ["config.i18n.fallbacks =", "config.after_initialize"]);
+    assert_eq!(statements(&ledger), ["config.i18n.enforce_available_locales =", "config.after_initialize"]);
     assert_eq!(owner(&ledger[0]), "host config/application.rb");
     assert_eq!(location(&ledger[1]), "config/application.rb:10:5");
 }
@@ -402,6 +437,7 @@ fn a_statement_the_ledger_calls_consumed_has_its_recognizers_effect_on_the_app()
         ),
         ("config/initializers/kaminari.rb", "Kaminari.configure do |config|\n  config.default_per_page = 10\nend\n"),
         ("config/initializers/lift.rb", "Rails.application.config.app_version = \"1\"\n"),
+        ("config/initializers/cable.rb", "Rails.application.config.action_cable.allow_same_origin_as_host = false\n"),
     ]);
     assert!(ledger.is_empty(), "{:?}", statements(&ledger));
     assert!(!app.time_formats.is_empty());
@@ -415,5 +451,10 @@ fn a_statement_the_ledger_calls_consumed_has_its_recognizers_effect_on_the_app()
         .iter()
         .map(|m| m.name.as_str())
         .collect();
-    assert!(names.contains(&"default_per_page") && names.contains(&"app_version"), "{names:?}");
+    assert!(
+        names.contains(&"default_per_page")
+            && names.contains(&"app_version")
+            && names.contains(&"action_cable_allow_same_origin_as_host"),
+        "{names:?}"
+    );
 }

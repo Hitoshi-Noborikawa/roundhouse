@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 require "json"
 # Tep::Request -- what the handler reads off the wire.
 module Tep
@@ -16,6 +17,10 @@ module Tep
     # hashes above keep only a repeated key's last value, and cannot say
     # `ids[]=1&ids[]=2`.
     attr_accessor :raw_query, :body_fields, :json_body_params
+    # True when a JSON body does not parse: Rails raises
+    # ActionDispatch::Http::Parameters::ParseError and answers 400
+    # (`Main.request_body_params` returns nil for it).
+    attr_accessor :json_body_malformed
     attr_accessor :remote_host
     attr_accessor :ivars
 
@@ -32,6 +37,7 @@ module Tep
       # multipart text fields stay in the String-only `body_fields` map;
       # multipart files stay in `uploads` below.
       @json_body_params = {}
+      @json_body_malformed = false
       @req_headers  = Tep.str_hash   # downcased header names; renamed
                                      # from `headers` to avoid sharing
                                      # an ivar slot with Response (spinel
@@ -210,9 +216,9 @@ module Tep
           @uploads[k] = v
         end
       elsif json? && @raw_body.length > 0
-        # Rails answers a malformed body 400 before the action runs;
-        # here the params stay empty and the action's own `require`
-        # refuses it.
+        # Rails answers a malformed body 400 before the action runs:
+        # the params stay empty and `json_body_malformed` makes the
+        # dispatcher answer 400 (`Main.request_body_params`).
         begin
           parsed = JSON.parse(@raw_body)
           if parsed.is_a?(Hash)
@@ -225,7 +231,7 @@ module Tep
             @json_body_params["_json"] = parsed
           end
         rescue JSON::ParserError
-          nil
+          @json_body_malformed = true
         end
       end
       nil

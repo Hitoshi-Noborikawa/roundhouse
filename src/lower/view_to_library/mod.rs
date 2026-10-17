@@ -265,6 +265,9 @@ pub struct ViewLowerCtx<'a> {
     /// Helper methods that are a thin wrapper around a BUILDER-YIELDING
     /// form helper (see [`form_wrapper_helpers`]).
     form_wrappers: std::rc::Rc<std::collections::HashMap<String, FormWrapperHelper>>,
+    /// See the ViewCtx field of the same name. Off unless the emitter
+    /// opts in with [`ViewLowerCtx::observe_form_with_entry`].
+    form_with_entry: bool,
 }
 
 impl<'a> ViewLowerCtx<'a> {
@@ -336,16 +339,59 @@ impl<'a> ViewLowerCtx<'a> {
             strict_locals: std::rc::Rc::new(strict_locals_by_key(&app.views)),
             collection_element_locals: std::rc::Rc::new(collection_element_locals(&app.views, app)),
             form_wrappers: std::rc::Rc::new(form_wrapper_helpers(app)),
+            form_with_entry: false,
         }
     }
 
+    /// Open each template `form_with` site with the
+    /// `ActionView::Base.new.form_with` entry. Only the Ruby family
+    /// ships `ActionView::Base` (`runtime/ruby/action_view/base.rb`):
+    /// the call exists so a mocha spy on the view context observes the
+    /// site, and the strict targets have neither the class nor mocha.
+    pub fn observe_form_with_entry(mut self) -> Self {
+        self.form_with_entry = true;
+        self
+    }
+
     pub fn lower(&self, view: &View) -> LibraryClass {
-        build_library_class(view, self, /*type_body=*/ true)
+        plain_text(view, build_library_class(view, self, /*type_body=*/ true))
     }
 
     pub(crate) fn lower_untyped(&self, view: &View) -> LibraryClass {
-        build_library_class(view, self, /*type_body=*/ false)
+        plain_text(view, build_library_class(view, self, /*type_body=*/ false))
     }
+}
+
+/// A text/plain template (`.text.erb`, `.txt.erb`) writes `<%= x %>` as
+/// it is: Rails' ERB handler escapes every other format but this one
+/// (`escape_ignore_list`), so the walker's `html_escape` comes back off.
+fn plain_text(view: &View, mut lc: LibraryClass) -> LibraryClass {
+    if !matches!(view.format.as_str(), "text" | "txt") {
+        return lc;
+    }
+    fn unescape(e: &mut Expr) {
+        e.node.for_each_child_mut(&mut |c| unescape(c));
+        let ExprNode::Send { recv: Some(recv), method, args, .. } = &*e.node else { return };
+        let helpers = matches!(&*recv.node, ExprNode::Const { path } if path.iter().map(|p| p.as_str()).eq(["ActionView", "ViewHelpers"]));
+        if !helpers || method.as_str() != "html_escape" || args.len() != 1 {
+            return;
+        }
+        let arg = args[0].clone();
+        let span = e.span;
+        let already_string = matches!(&*arg.node, ExprNode::Send { method, args, .. } if method.as_str() == "to_s" && args.is_empty())
+            || matches!(arg.ty, Some(crate::ty::Ty::Str));
+        *e = if already_string {
+            arg
+        } else {
+            let mut s = Expr::new(span, ExprNode::Send { recv: Some(arg), method: Symbol::from("to_s"), args: vec![], block: None, parenthesized: false });
+            s.ty = Some(crate::ty::Ty::Str);
+            s
+        };
+    }
+    for m in &mut lc.methods {
+        unescape(&mut m.body);
+    }
+    lc
 }
 
 pub fn lower_view_to_library_class(view: &View, app: &App) -> LibraryClass {
@@ -655,14 +701,14 @@ fn build_library_class(view: &View, lx: &ViewLowerCtx, type_body: bool) -> Libra
         });
         sig_params.push(TyParam {
             name: record.name.clone(),
-            ty: declared_local_ty(view, sl[0].name.as_str(), &known_models, lx.app),
+            ty: declared_local_ty(view, sl[0].name.as_str(), &known_models, lx.app).into(),
             kind: ParamKind::Required,
         });
         for iv in &closure {
             new_params.push(Param::positional(Symbol::from(iv.clone())));
             sig_params.push(TyParam {
                 name: Symbol::from(iv.clone()),
-                ty: closure_ivar_ty(view, &ivar_of(iv), &known_models, lx.app),
+                ty: closure_ivar_ty(view, &ivar_of(iv), &known_models, lx.app).into(),
                 kind: ParamKind::Required,
             });
         }
@@ -675,9 +721,9 @@ fn build_library_class(view: &View, lx: &ViewLowerCtx, type_body: bool) -> Libra
             sig_params.push(TyParam {
                 name: p.name.clone(),
                 ty: if is_bool_default {
-                    Ty::Bool
+                    Ty::Bool.into()
                 } else {
-                    declared_local_ty(view, p.name.as_str(), &known_models, lx.app)
+                    declared_local_ty(view, p.name.as_str(), &known_models, lx.app).into()
                 },
                 // These are Ruby KEYWORD params (`show_story: false`), not
                 // positionals — strict targets (rust unpack_trailing_kwargs,
@@ -703,14 +749,14 @@ fn build_library_class(view: &View, lx: &ViewLowerCtx, type_body: bool) -> Libra
             .map(|p| p.name.as_str().to_string())
             .collect();
         for tp in &sig_params {
-            if matches!(tp.ty, crate::ty::Ty::Untyped) {
+            if matches!(*tp.ty, crate::ty::Ty::Untyped) {
                 nullable.insert(tp.name.as_str().to_string());
             }
         }
         signature = Some(Ty::Fn {
-            params: sig_params,
+            params: sig_params.into(),
             block: None,
-            ret: Box::new(Ty::Str),
+            ret: std::sync::Arc::new(Ty::Str),
             effects: crate::effect::EffectSet::default(),
         });
         locals = std::iter::once(record_name.clone())
@@ -740,6 +786,7 @@ fn build_library_class(view: &View, lx: &ViewLowerCtx, type_body: bool) -> Libra
         i18n: lx.i18n.clone(),
         route_helper_arity: lx.route_helper_arity.clone(),
         form_wrappers: lx.form_wrappers.clone(),
+        form_with_entry: lx.form_with_entry,
         stylesheets: app.stylesheets.clone(),
         lexxy: app.gem_lock.as_ref().is_some_and(|lock| lock.has("lexxy")),
         lexxy_editor_adapter: app.gem_lock.as_ref().is_some_and(lexxy_uses_editor_adapter),
@@ -857,6 +904,7 @@ fn build_library_class(view: &View, lx: &ViewLowerCtx, type_body: bool) -> Libra
         parent: None,
         parent_span: Default::default(),
         includes: Vec::new(),
+        include_spans: Vec::new(),
         methods: vec![method],
         nullable_columns: Vec::new(),
         origin: None,
@@ -878,11 +926,11 @@ pub fn insert_params_stub(
 
     let param_value = Ty::Class {
         id: ClassId(Symbol::from("Roundhouse::ParamValue")),
-        args: vec![],
+        args: vec![].into(),
     };
     let hash = Ty::Hash {
-        key: Box::new(Ty::Str),
-        value: Box::new(param_value),
+        key: std::sync::Arc::new(Ty::Str),
+        value: std::sync::Arc::new(param_value),
     };
     let mut info = crate::analyze::ClassInfo::default();
     info.class_methods.insert(
@@ -988,56 +1036,56 @@ pub fn insert_db_stub(
         Symbol::from("column_int_opt"),
         fn_sig(
             vec![(Symbol::from("stmt"), Ty::Int), (Symbol::from("i"), Ty::Int)],
-            Ty::Union { variants: vec![Ty::Int, Ty::Nil] },
+            Ty::Union { variants: vec![Ty::Int, Ty::Nil].into() },
         ),
     );
     db_info.class_methods.insert(
         Symbol::from("column_float_opt"),
         fn_sig(
             vec![(Symbol::from("stmt"), Ty::Int), (Symbol::from("i"), Ty::Int)],
-            Ty::Union { variants: vec![Ty::Float, Ty::Nil] },
+            Ty::Union { variants: vec![Ty::Float, Ty::Nil].into() },
         ),
     );
     db_info.class_methods.insert(
         Symbol::from("column_text_opt"),
         fn_sig(
             vec![(Symbol::from("stmt"), Ty::Int), (Symbol::from("i"), Ty::Int)],
-            Ty::Union { variants: vec![Ty::Str, Ty::Nil] },
+            Ty::Union { variants: vec![Ty::Str, Ty::Nil].into() },
         ),
     );
     db_info.class_methods.insert(
         Symbol::from("column_bool_opt"),
         fn_sig(
             vec![(Symbol::from("stmt"), Ty::Int), (Symbol::from("i"), Ty::Int)],
-            Ty::Union { variants: vec![Ty::Bool, Ty::Nil] },
+            Ty::Union { variants: vec![Ty::Bool, Ty::Nil].into() },
         ),
     );
     // Nullable-column writes: nil renders the SQL keyword NULL.
     db_info.class_methods.insert(
         Symbol::from("escape_string_opt"),
         fn_sig(
-            vec![(Symbol::from("s"), Ty::Union { variants: vec![Ty::Str, Ty::Nil] })],
+            vec![(Symbol::from("s"), Ty::Union { variants: vec![Ty::Str, Ty::Nil].into() })],
             Ty::Str,
         ),
     );
     db_info.class_methods.insert(
         Symbol::from("escape_int_opt"),
         fn_sig(
-            vec![(Symbol::from("n"), Ty::Union { variants: vec![Ty::Int, Ty::Nil] })],
+            vec![(Symbol::from("n"), Ty::Union { variants: vec![Ty::Int, Ty::Nil].into() })],
             Ty::Str,
         ),
     );
     db_info.class_methods.insert(
         Symbol::from("escape_float_opt"),
         fn_sig(
-            vec![(Symbol::from("f"), Ty::Union { variants: vec![Ty::Float, Ty::Nil] })],
+            vec![(Symbol::from("f"), Ty::Union { variants: vec![Ty::Float, Ty::Nil].into() })],
             Ty::Str,
         ),
     );
     db_info.class_methods.insert(
         Symbol::from("escape_bool_opt"),
         fn_sig(
-            vec![(Symbol::from("b"), Ty::Union { variants: vec![Ty::Bool, Ty::Nil] })],
+            vec![(Symbol::from("b"), Ty::Union { variants: vec![Ty::Bool, Ty::Nil].into() })],
             Ty::Str,
         ),
     );
@@ -1101,6 +1149,36 @@ pub fn insert_db_stub(
         Symbol::from("_txn_depth="),
         fn_sig(vec![(Symbol::from("value"), Ty::Int)], Ty::Int),
     );
+    // Bit `depth - 1` records whether that frame can be joined. A
+    // fixture transaction is not joinable, so a nested save or
+    // destroy opens a savepoint (connection.rb). Same boxed accessor
+    // as the depth so the body stays concretely typed.
+    db_info.class_methods.insert(
+        Symbol::from("_txn_joinable_bits"),
+        fn_sig(vec![], Ty::Int),
+    );
+    db_info.class_methods.insert(
+        Symbol::from("_txn_joinable_bits="),
+        fn_sig(vec![(Symbol::from("value"), Ty::Int)], Ty::Int),
+    );
+    // Whether the connection holds a transaction — one ActiveRecord
+    // opened or one opened beneath it (connection.rb's
+    // `self.transaction` joins the latter instead of nesting a BEGIN).
+    db_info.class_methods.insert(Symbol::from("transaction_open?"), fn_sig(vec![], Ty::Bool));
+    // The open transaction's enlisted writes (connection.rb's
+    // `_commit_enlisted`), boxed per thread the same way.
+    db_info.class_methods.insert(
+        Symbol::from("_txn_records"),
+        fn_sig(
+            vec![],
+            Ty::Array {
+                elem: std::sync::Arc::new(Ty::Class {
+                    id: ClassId(Symbol::from("ActiveRecord::EnlistedRecord")),
+                    args: vec![].into(),
+                }),
+            },
+        ),
+    );
     classes.insert(ClassId(Symbol::from("Db")), db_info);
 
     // MessageDigest — the keyed-digest primitive surface, same
@@ -1161,12 +1239,12 @@ pub fn insert_db_stub(
     let as_info = classes
         .entry(ClassId(Symbol::from("ActiveSupport")))
         .or_default();
-    let str_or_nil = || Ty::Union { variants: vec![Ty::Str, Ty::Nil] };
+    let str_or_nil = || Ty::Union { variants: vec![Ty::Str, Ty::Nil].into() };
     let time_or_nil = || Ty::Union {
         variants: vec![
-            Ty::Class { id: ClassId(Symbol::from("Time")), args: vec![] },
+            Ty::Class { id: ClassId(Symbol::from("Time")), args: vec![].into() },
             Ty::Nil,
-        ],
+        ].into(),
     };
     as_info.class_methods.insert(
         Symbol::from("parse_db_time"),
@@ -1250,7 +1328,7 @@ pub(crate) fn insert_framework_stubs(
     // ViewHelpers — every output helper returns String; setters return Nil.
     let mut vh = crate::analyze::ClassInfo::default();
     let untyped = Ty::Untyped;
-    let any_hash = Ty::Hash { key: Box::new(Ty::Sym), value: Box::new(Ty::Untyped) };
+    let any_hash = Ty::Hash { key: std::sync::Arc::new(Ty::Sym), value: std::sync::Arc::new(Ty::Untyped) };
     let html_helpers = [
         "turbo_stream_from",
         "link_to",
@@ -1291,6 +1369,7 @@ pub(crate) fn insert_framework_stubs(
         "tag",
         "content_tag",
         "concat",
+        "class_names",
     ];
     for name in html_helpers {
         // Loose signature: variadic kwargs (Untyped) → String. The
@@ -1339,7 +1418,7 @@ pub(crate) fn insert_framework_stubs(
     // runtime semantics (`@slots.fetch(slot, nil)`). The Option<String>
     // shape lets the rust coerce path (Family 7) thread through to
     // `html_escape(content_for_get(:title))` without manual coercions.
-    let option_string = Ty::Union { variants: vec![Ty::Str, Ty::Nil] };
+    let option_string = Ty::Union { variants: vec![Ty::Str, Ty::Nil].into() };
     for name in ["content_for_get", "get_slot"] {
         vh.class_methods.insert(
             Symbol::from(name),
@@ -1423,6 +1502,20 @@ pub(crate) fn insert_framework_stubs(
     // resolve through the same key.
     classes.insert(ClassId(Symbol::from("ActionView::ViewHelpers")), vh);
 
+    // `ActionView::Base.new.form_with` is the cache-observable entry
+    // planted at each Ruby-family form site (`form_with::form_with_entry`).
+    // The method returns nil; the markup is the expansion that
+    // follows. `.new` already types as an instance of the receiver.
+    // Without this stub the zero-arg call stays `Ty::Var`, and the
+    // lowered real-blog residual is no longer zero.
+    let mut av_base = crate::analyze::ClassInfo::default();
+    av_base.instance_methods.insert(
+        Symbol::from("form_with"),
+        fn_sig(vec![], Ty::Nil),
+    );
+    tag_all_method(&mut av_base);
+    classes.insert(ClassId(Symbol::from("ActionView::Base")), av_base);
+
     // RouteHelpers — every `_path` / `_url` helper returns String.
     // Catch-all: the typer's `Class { id }` lookup returns Untyped if
     // the method isn't in the table; we can't enumerate every
@@ -1484,7 +1577,7 @@ pub(crate) fn insert_framework_stubs(
     jb.class_methods.insert(
         Symbol::from("encode_string"),
         fn_sig(
-            vec![(Symbol::from("s"), Ty::Union { variants: vec![Ty::Str, Ty::Nil] })],
+            vec![(Symbol::from("s"), Ty::Union { variants: vec![Ty::Str, Ty::Nil].into() })],
             Ty::Str,
         ),
     );
@@ -1504,7 +1597,7 @@ pub(crate) fn insert_framework_stubs(
     // untyped — which the strict targets then index wrongly.
     if !classes.contains_key(&ClassId(Symbol::from("ActiveRecord"))) {
         use crate::lower::typing::fn_sig;
-        let int_array = || crate::ty::Ty::Array { elem: Box::new(crate::ty::Ty::Int) };
+        let int_array = || crate::ty::Ty::Array { elem: std::sync::Arc::new(crate::ty::Ty::Int) };
         let mut ar = crate::analyze::ClassInfo::default();
         ar.class_methods.insert(
             Symbol::from("lower_bound"),
@@ -1547,15 +1640,15 @@ pub(crate) fn insert_framework_stubs(
     // marking the param `KeywordRest` so the body-typer's
     // normalize_trailing_kwargs leaves the call's `kwargs: true` flag
     // alone (preserves the bare named-args call shape across targets).
-    let opts_ty = Ty::Hash { key: Box::new(Ty::Sym), value: Box::new(Ty::Untyped) };
+    let opts_ty = Ty::Hash { key: std::sync::Arc::new(Ty::Sym), value: std::sync::Arc::new(Ty::Untyped) };
     let bc_sig = Ty::Fn {
         params: vec![crate::ty::Param {
             name: Symbol::from("opts"),
-            ty: opts_ty,
+            ty: opts_ty.into(),
             kind: crate::ty::ParamKind::KeywordRest,
-        }],
+        }].into(),
         block: None,
-        ret: Box::new(Ty::Nil),
+        ret: std::sync::Arc::new(Ty::Nil),
         effects: crate::effect::EffectSet::pure(),
     };
     for name in ["prepend", "replace", "remove", "append"] {
@@ -1595,11 +1688,11 @@ pub(crate) fn insert_framework_stubs(
         let mut fields = indexmap::IndexMap::new();
         fields.insert(Symbol::from("name"), Ty::Str);
         fields.insert(Symbol::from("path"), Ty::Str);
-        Ty::Record { row: crate::ty::Row { fields, rest: None } }
+        Ty::Record { row: crate::ty::Row { fields: fields.into(), rest: None } }
     };
     im.class_methods.insert(
         Symbol::from("pins"),
-        fn_sig(vec![], Ty::Array { elem: Box::new(pin_record_ty) }),
+        fn_sig(vec![], Ty::Array { elem: std::sync::Arc::new(pin_record_ty) }),
     );
     im.class_methods.insert(
         Symbol::from("entry"),
@@ -1629,13 +1722,13 @@ pub(crate) fn insert_framework_stubs(
     ec.instance_methods.insert(Symbol::from("length"), fn_sig(vec![], Ty::Int));
     ec.instance_methods.insert(
         Symbol::from("full_messages"),
-        fn_sig(vec![], Ty::Array { elem: Box::new(Ty::Str) }),
+        fn_sig(vec![], Ty::Array { elem: std::sync::Arc::new(Ty::Str) }),
     );
     ec.instance_methods.insert(
         Symbol::from("[]"),
         fn_sig(
             vec![(Symbol::from("attr"), Ty::Sym)],
-            Ty::Array { elem: Box::new(Ty::Str) },
+            Ty::Array { elem: std::sync::Arc::new(Ty::Str) },
         ),
     );
     tag_all_method(&mut ec);
@@ -1654,7 +1747,7 @@ pub(crate) fn insert_framework_stubs(
     // emits these as Send-`[]` / Send-`[]=` calls and the typer
     // resolves them through this stub.
     let mut flash_cls = crate::analyze::ClassInfo::default();
-    let nullable_str = Ty::Union { variants: vec![Ty::Str, Ty::Nil] };
+    let nullable_str = Ty::Union { variants: vec![Ty::Str, Ty::Nil].into() };
     flash_cls.instance_methods.insert(
         Symbol::from("[]"),
         fn_sig(vec![(Symbol::from("key"), Ty::Sym)], nullable_str.clone()),
@@ -1699,7 +1792,7 @@ pub(crate) fn insert_framework_stubs(
     );
     flash_cls.instance_methods.insert(
         Symbol::from("to_h"),
-        fn_sig(vec![], Ty::Hash { key: Box::new(Ty::Str), value: Box::new(Ty::Str) }),
+        fn_sig(vec![], Ty::Hash { key: std::sync::Arc::new(Ty::Str), value: std::sync::Arc::new(Ty::Str) }),
     );
     flash_cls.instance_methods.insert(
         Symbol::from("notice"),
@@ -1762,7 +1855,7 @@ pub(crate) fn insert_framework_stubs(
         Symbol::from("to_h"),
         fn_sig(
             vec![],
-            Ty::Hash { key: Box::new(Ty::Untyped), value: Box::new(Ty::Untyped) },
+            Ty::Hash { key: std::sync::Arc::new(Ty::Untyped), value: std::sync::Arc::new(Ty::Untyped) },
         ),
     );
     tag_all_method(&mut session_cls);
@@ -1816,13 +1909,13 @@ fn type_method_body(method: &mut MethodDef) {
     let mut ctx = crate::analyze::Ctx::default();
     if let Some(crate::ty::Ty::Fn { params, .. }) = &method.signature {
         for (param, sig) in method.params.iter().zip(params.iter()) {
-            ctx.local_bindings.insert(param.name.clone(), sig.ty.clone());
+            ctx.local_bindings.insert(param.name.clone(), (*sig.ty).clone());
         }
     }
     if let Some(enclosing) = &method.enclosing_class {
         ctx.self_ty = Some(crate::ty::Ty::Class {
             id: crate::ident::ClassId(enclosing.clone()),
-            args: vec![],
+            args: vec![].into(),
         });
     }
     typer.analyze_expr(&mut method.body, &ctx);
@@ -1861,20 +1954,20 @@ pub(crate) fn build_view_signature(
         // otherwise Array<Untyped>.
         if model_known {
             Some(Ty::Array {
-                elem: Box::new(Ty::Class {
+                elem: std::sync::Arc::new(Ty::Class {
                     id: crate::ident::ClassId(crate::ident::Symbol::from(model_class.as_str())),
-                    args: vec![],
+                    args: vec![].into(),
                 }),
             })
         } else {
-            Some(Ty::Array { elem: Box::new(Ty::Untyped) })
+            Some(Ty::Array { elem: std::sync::Arc::new(Ty::Untyped) })
         }
     } else {
         // Show / edit / new / partial: arg is the model itself.
         if model_known {
             Some(Ty::Class {
                 id: crate::ident::ClassId(crate::ident::Symbol::from(model_class.as_str())),
-                args: vec![],
+                args: vec![].into(),
             })
         } else {
             Some(Ty::Untyped)
@@ -1885,7 +1978,7 @@ pub(crate) fn build_view_signature(
     if let Some(t) = arg_ty {
         sig_params.push(TyParam {
             name: crate::ident::Symbol::from(arg_name),
-            ty: t,
+            ty: t.into(),
             kind: ParamKind::Required,
         });
     }
@@ -1893,15 +1986,15 @@ pub(crate) fn build_view_signature(
     for n in extra_params {
         sig_params.push(TyParam {
             name: crate::ident::Symbol::from(n.as_str()),
-            ty: Ty::Union { variants: vec![Ty::Str, Ty::Nil] },
+            ty: Ty::Union { variants: vec![Ty::Str, Ty::Nil].into() }.into(),
             kind: ParamKind::Optional,
         });
     }
 
     Some(Ty::Fn {
-        params: sig_params,
+        params: sig_params.into(),
         block: None,
-        ret: Box::new(Ty::Str),
+        ret: std::sync::Arc::new(Ty::Str),
         effects: crate::effect::EffectSet::default(),
     })
 }
@@ -2740,12 +2833,20 @@ fn view_key_of(v: &View) -> Option<ViewKey> {
 /// generic dispatch previously wrapped layouts body-only; a layout
 /// reading @user had no way to receive it there.)
 pub fn layout_wrap_expr(app: &crate::App, inner: Expr) -> Option<Expr> {
+    layout_wrap_expr_with(app, &view_ivar_closures(&app.views, &app.controllers), inner)
+}
+
+/// `layout_wrap_expr` over closures the caller computed once for every render it wraps.
+pub(crate) fn layout_wrap_expr_with(
+    app: &crate::App,
+    closures: &std::collections::HashMap<ViewKey, Vec<Symbol>>,
+    inner: Expr,
+) -> Option<Expr> {
     let key: ViewKey = ("Layouts".to_string(), "application".to_string());
     let layout = app
         .views
         .iter()
         .find(|v| v.format.as_str() == "html" && view_key_of(v).as_ref() == Some(&key))?;
-    let closures = view_ivar_closures(&app.views, &app.controllers);
     let ivars = closures.get(&key).cloned().unwrap_or_default();
     let span = inner.span;
     let ivar = |name: &Symbol| Expr::new(span, ExprNode::Ivar { name: name.clone() });
@@ -3387,10 +3488,10 @@ pub(crate) fn ivar_ty(name: &str, known_models: &[String]) -> crate::ty::Ty {
     if known_models.iter().any(|m| m == &cam) {
         let model = Ty::Class {
             id: crate::ident::ClassId(crate::ident::Symbol::from(cam.as_str())),
-            args: vec![],
+            args: vec![].into(),
         };
         if crate::naming::singularize(name) != name {
-            Ty::Array { elem: Box::new(model) }
+            Ty::Array { elem: std::sync::Arc::new(model) }
         } else {
             model
         }
@@ -3411,7 +3512,7 @@ pub(crate) fn record_arg_ty(dir: &str, is_layout: bool, known_models: &[String])
     if known_models.iter().any(|m| m == &model_class) {
         Ty::Class {
             id: crate::ident::ClassId(crate::ident::Symbol::from(model_class.as_str())),
-            args: vec![],
+            args: vec![].into(),
         }
     } else {
         Ty::Untyped
@@ -3433,21 +3534,21 @@ pub(crate) fn build_view_signature_from(
     for (n, t) in typed {
         sig_params.push(TyParam {
             name: crate::ident::Symbol::from(n.as_str()),
-            ty: t.clone(),
+            ty: t.clone().into(),
             kind: ParamKind::Required,
         });
     }
     for n in extra_params {
         sig_params.push(TyParam {
             name: crate::ident::Symbol::from(n.as_str()),
-            ty: Ty::Union { variants: vec![Ty::Str, Ty::Nil] },
+            ty: Ty::Union { variants: vec![Ty::Str, Ty::Nil].into() }.into(),
             kind: ParamKind::Optional,
         });
     }
     Some(Ty::Fn {
-        params: sig_params,
+        params: sig_params.into(),
         block: None,
-        ret: Box::new(Ty::Str),
+        ret: std::sync::Arc::new(Ty::Str),
         effects: crate::effect::EffectSet::default(),
     })
 }
@@ -4145,6 +4246,10 @@ pub(super) struct ViewCtx {
     /// to the wrapped call so the form-builder macro-inline can see
     /// both halves at once.
     pub(super) form_wrappers: std::rc::Rc<std::collections::HashMap<String, FormWrapperHelper>>,
+    /// Begin each `form_with` expansion with the
+    /// `ActionView::Base.new.form_with` entry (Ruby family only — see
+    /// `form_with::form_with_entry`).
+    pub(super) form_with_entry: bool,
     /// Stylesheet logical names ingested from `app/assets/stylesheets/`
     /// + `app/assets/builds/`. Used by the `stylesheet_link_tag(:app,
     /// ...)` expansion: a `:app` symbol arg fans out to one call per

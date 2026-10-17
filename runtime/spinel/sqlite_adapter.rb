@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 # Generic ActiveRecord adapter facade routed through the `Db.*` primitive
 # surface. Implements the 10-method contract that AR Base's `_adapter_*`
 # defaults call into when a model hasn't received the lowerer's Level-3

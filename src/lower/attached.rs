@@ -235,7 +235,7 @@ fn grounded_io_call(
     );
     let ct_var = || syn(
         ExprNode::Var { id: crate::ident::VarId(0), name: ct_name.clone() },
-        Ty::Union { variants: vec![Ty::Str, Ty::Nil] },
+        Ty::Union { variants: vec![Ty::Str, Ty::Nil].into() },
     );
     let initial_ct = content_type.unwrap_or_else(|| syn(ExprNode::Lit { value: Literal::Nil }, Ty::Nil));
     let ret_ty = if method == "create_and_upload!" { blob_class_ty() } else { Ty::Nil };
@@ -260,7 +260,7 @@ fn grounded_io_call(
                     target: crate::expr::LValue::Var { id: crate::ident::VarId(0), name: ct_name.clone() },
                     value: initial_ct,
                 },
-                Ty::Union { variants: vec![Ty::Str, Ty::Nil] },
+                Ty::Union { variants: vec![Ty::Str, Ty::Nil].into() },
             ),
             syn(
                 ExprNode::If {
@@ -322,11 +322,11 @@ fn attach_blob_from_attachable(recv: Expr, attachable: Expr) -> ExprNode {
     let recv_name = Symbol::from("_attach_recv");
     let blob = Symbol::from("_attachable_blob");
     let blob_ty = Ty::Union {
-        variants: vec![blob_class_ty(), Ty::Nil],
+        variants: vec![blob_class_ty(), Ty::Nil].into(),
     };
     let recv_ty = recv.ty.clone().unwrap_or_else(|| Ty::Class {
         id: ClassId(Symbol::from("ActiveStorage::Attached")),
-        args: vec![],
+        args: vec![].into(),
     });
     let recv_var = || typed(
         ExprNode::Var { id: crate::ident::VarId(0), name: recv_name.clone() },
@@ -391,7 +391,7 @@ fn attach_blob_from_attachable(recv: Expr, attachable: Expr) -> ExprNode {
 fn blob_class_ty() -> Ty {
     Ty::Class {
         id: ClassId(Symbol::from("ActiveStorage::Blob")),
-        args: vec![],
+        args: vec![].into(),
     }
 }
 
@@ -836,7 +836,7 @@ fn push_purge_on_destroy(methods: &mut Vec<MethodDef>, model: &Model) {
 /// The type of `attachment_changes`: attribute name -> the blob the
 /// writer staged.
 pub fn attachment_changes_ty() -> Ty {
-    Ty::Hash { key: Box::new(Ty::Str), value: Box::new(blob_class_ty()) }
+    Ty::Hash { key: std::sync::Arc::new(Ty::Str), value: std::sync::Arc::new(blob_class_ty()) }
 }
 
 /// ```ruby
@@ -1004,7 +1004,7 @@ fn push_reader(methods: &mut Vec<MethodDef>, model: &Model, attr: &Symbol) {
             var(&fresh),
         ],
     });
-    let attached_ty = Ty::Class { id: attached_class(), args: vec![] };
+    let attached_ty = Ty::Class { id: attached_class(), args: vec![].into() };
     methods.push(MethodDef {
         visibility: crate::dialect::MethodVisibility::Public,
         unsupported_formals: None,
@@ -1039,7 +1039,7 @@ fn push_reader(methods: &mut Vec<MethodDef>, model: &Model, attr: &Symbol) {
         body: syn(ExprNode::Seq {
             exprs: vec![
                 syn(ExprNode::Assign {
-                    target: crate::expr::LValue::Ivar { name: cache },
+                    target: crate::expr::LValue::Ivar { name: cache.clone() },
                     value: var(&att),
                 }),
                 syn(ExprNode::Lit { value: Literal::Nil }),
@@ -1053,6 +1053,47 @@ fn push_reader(methods: &mut Vec<MethodDef>, model: &Model, attr: &Symbol) {
         mutates_self: true,
         block_param: None,
     });
+
+    // `def <attr>_attachment_loaded?; !@<attr>_cache.nil?; end` — Rails'
+    // `association(:<attr>_attachment).loaded?`, the flat predicate
+    // `lower::assoc_loaded` rewrites that spelling onto. The proxy is
+    // cached by the preload and by the first read, both of which Rails
+    // counts as loading the attachment.
+    methods.push(MethodDef {
+        visibility: crate::dialect::MethodVisibility::Public,
+        unsupported_formals: None,
+        has_anonymous_block: false,
+        name_span: crate::span::Span::synthetic(),
+        name: attachment_loaded_name(attr),
+        receiver: MethodReceiver::Instance,
+        params: Vec::new(),
+        body: syn(ExprNode::Send {
+            recv: Some(syn(ExprNode::Send {
+                recv: Some(syn(ExprNode::Ivar { name: cache })),
+                method: Symbol::from("nil?"),
+                args: vec![],
+                block: None,
+                parenthesized: false,
+            })),
+            method: Symbol::from("!"),
+            args: vec![],
+            block: None,
+            parenthesized: false,
+        }),
+        signature: Some(super::model_to_library::fn_sig(vec![], Ty::Bool)),
+        effects: EffectSet::default(),
+        enclosing_class: Some(model.name.0.clone()),
+        kind: AccessorKind::Method,
+        is_async: false,
+        mutates_self: false,
+        block_param: None,
+    });
+}
+
+/// `<attr>_attachment_loaded?` — the flat loaded flag of a
+/// `has_one_attached :<attr>`.
+pub fn attachment_loaded_name(attr: &Symbol) -> Symbol {
+    Symbol::from(format!("{}_loaded?", attachment_assoc_name(attr).as_str()))
 }
 
 /// ```ruby
@@ -1289,7 +1330,7 @@ fn push_many_reader(methods: &mut Vec<MethodDef>, model: &Model, attr: &Symbol) 
             var(&fresh),
         ],
     });
-    let many_ty = Ty::Class { id: attached_many_class(), args: vec![] };
+    let many_ty = Ty::Class { id: attached_many_class(), args: vec![].into() };
     methods.push(MethodDef {
         visibility: crate::dialect::MethodVisibility::Public,
         unsupported_formals: None,

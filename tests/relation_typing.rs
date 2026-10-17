@@ -200,13 +200,13 @@ fn relation_terminals_produce_array_representation_types() {
     assert_eq!(
         ivar_ty(&app, "first"),
         Ty::Union {
-            variants: vec![Ty::Class { id: story(), args: vec![] }, Ty::Nil]
+            variants: vec![Ty::Class { id: story(), args: vec![].into() }, Ty::Nil].into()
         },
     );
     assert_eq!(ivar_ty(&app, "count"), Ty::Int);
     assert_eq!(
         ivar_ty(&app, "list"),
-        Ty::Array { elem: Box::new(Ty::Class { id: story(), args: vec![] }) },
+        Ty::Array { elem: std::sync::Arc::new(Ty::Class { id: story(), args: vec![].into() }) },
     );
 }
 
@@ -218,7 +218,7 @@ fn counted_first_and_last_type_as_arrays() {
     // .last(100)` was typed as one `Message?` and the controller ivar
     // then disagreed with the `Array[Message]` the view declares.
     let app = analyzed_app();
-    let stories = Ty::Array { elem: Box::new(Ty::Class { id: story(), args: vec![] }) };
+    let stories = Ty::Array { elem: std::sync::Arc::new(Ty::Class { id: story(), args: vec![].into() }) };
     assert_eq!(ivar_ty(&app, "first_n"), stories);
     assert_eq!(ivar_ty(&app, "last_n"), stories);
     assert_eq!(ivar_ty(&app, "class_last_n"), stories);
@@ -236,7 +236,7 @@ fn counted_last_with_a_constant_count_types_as_array_through_a_scope() {
     // local, N+1 chains through it opaque, and the room page's own
     // partial unreachable to the dead-view walk.
     let app = analyzed_app();
-    let stories = Ty::Array { elem: Box::new(Ty::Class { id: story(), args: vec![] }) };
+    let stories = Ty::Array { elem: std::sync::Arc::new(Ty::Class { id: story(), args: vec![].into() }) };
     assert_eq!(ivar_ty(&app, "last_page"), stories);
     assert_eq!(ivar_ty(&app, "page_before"), stories);
     assert_eq!(ivar_ty(&app, "page_around"), stories);
@@ -277,7 +277,7 @@ fn relation_typed_scope_delegates_on_array_representation_receiver() {
     let app = analyzed_app();
     assert_eq!(
         ivar_ty(&app, "mixed"),
-        Ty::Array { elem: Box::new(Ty::Class { id: story(), args: vec![] }) },
+        Ty::Array { elem: std::sync::Arc::new(Ty::Class { id: story(), args: vec![].into() }) },
     );
 }
 
@@ -289,7 +289,7 @@ fn terminal_tailed_scope_keeps_legacy_array_seed() {
     let app = analyzed_app();
     assert_eq!(
         ivar_ty(&app, "terminal_scope"),
-        Ty::Array { elem: Box::new(Ty::Class { id: story(), args: vec![] }) },
+        Ty::Array { elem: std::sync::Arc::new(Ty::Class { id: story(), args: vec![].into() }) },
     );
 }
 
@@ -297,10 +297,11 @@ fn terminal_tailed_scope_keeps_legacy_array_seed() {
 fn assoc_collection_build_rewrites_to_fk_preset_constructor() {
     // Ruby-lane lowering (relation-type-plan R5): `story.comments
     // .build` on a TYPED owner rewrites to the target constructor
-    // with the association FK preset — `Comment.new(story_id:
-    // story.id)` — instead of calling `build` on the folded Array
-    // reader. Owner typing is what disambiguates assoc names
-    // declared on several models.
+    // with the association preset — `Comment.new(story: story)`, the
+    // owner handed to the automatic inverse `belongs_to :story` as
+    // Rails sets it (its writer presets the FK) — instead of calling
+    // `build` on the folded Array reader. Owner typing is what
+    // disambiguates assoc names declared on several models.
     let app = analyzed_app();
     let controllers = roundhouse::emit::ruby::emit_lowered_controllers(&app);
     let src: String = controllers
@@ -309,7 +310,7 @@ fn assoc_collection_build_rewrites_to_fk_preset_constructor() {
         .collect::<Vec<_>>()
         .join("\n");
     assert!(
-        src.contains("Comment.new(story_id: story.id)"),
+        src.contains("Comment.new(story: story)"),
         "expected FK-preset constructor rewrite in emitted controller:\n{src}",
     );
 }
@@ -348,9 +349,9 @@ fn view_iteration_over_materialized_list_still_types_element() {
 #[test]
 fn find_result_depends_on_the_id_container() {
     let app = analyzed_app();
-    let record = Ty::Class { id: story(), args: vec![] };
+    let record = Ty::Class { id: story(), args: vec![].into() };
     assert_eq!(ivar_ty(&app, "found_one"), record);
-    let records = Ty::Array { elem: Box::new(record) };
+    let records = Ty::Array { elem: std::sync::Arc::new(record) };
     assert_eq!(ivar_ty(&app, "found_many"), records);
     assert_eq!(ivar_ty(&app, "found_normalized"), records);
     assert_eq!(ivar_ty(&app, "found_array_repr"), records);
