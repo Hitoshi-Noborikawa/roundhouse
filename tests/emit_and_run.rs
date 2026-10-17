@@ -160,6 +160,8 @@ mod constructor_unrelated_mutations;
 mod render_to_string_partial_ivar;
 #[path = "emit_and_run/active_support_extensions.rs"]
 mod active_support_extensions;
+#[path = "emit_and_run/routing_redirect_host.rs"]
+mod routing_redirect_host;
 #[path = "emit_and_run/time_find_zone.rs"]
 mod time_find_zone;
 #[path = "emit_and_run/time_to_date.rs"]

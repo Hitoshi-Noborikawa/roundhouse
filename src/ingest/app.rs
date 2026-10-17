@@ -1579,6 +1579,13 @@ end
                 // it keeps the redirect out of every emitter's route kind.
                 if !routes.redirects.is_empty() {
                     app.controllers.push(synthesize_redirect_controller(&routes.redirects));
+                    // The inherited runtime calls this helper, outside app call-site inference.
+                    let signatures = crate::rbs::parse_app_signatures(
+                        "class RoundhouseRedirectsController\n  def same_host_location: (String location) -> String\nend\n",
+                    ).expect("routing redirect policy signature parses");
+                    for (owner, methods) in signatures {
+                        app.rbs_signatures.entry(owner).or_default().extend(methods);
+                    }
                 }
                 app.routes = routes;
                 synthesize_rails_health_controller(&mut app);
@@ -8290,7 +8297,7 @@ fn synthesize_redirect_controller(
     use crate::expr::{Expr, ExprNode, Literal};
     use crate::span::Span;
 
-    let body = redirects
+    let mut body: Vec<_> = redirects
         .iter()
         .map(|redirect| {
             // Built from Ruby source so the action body is ingested the
@@ -8386,6 +8393,16 @@ fn synthesize_redirect_controller(
             }
         })
         .collect();
+
+    // Routing redirects do not use ActionController's open-redirect policy.
+    // Keep the exception on this controller instead of weakening redirect_to.
+    let policy = super::controller::ingest_controller(
+        b"class RoundhouseRedirectsController < ActionController::Base\nprivate\ndef same_host_location(location)\n  location\nend\nend\n",
+        "<routing-redirect>",
+    )
+    .expect("routing redirect policy parses")
+    .expect("routing redirect policy is a controller");
+    body.extend(policy.body);
 
     crate::dialect::Controller {
         name: crate::ident::ClassId(Symbol::from(super::routes::REDIRECT_CONTROLLER)),
