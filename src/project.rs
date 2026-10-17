@@ -3861,8 +3861,11 @@ fn i18n_table_text(app: &App) -> String {
         for locale in &locales {
             let Some(c) = catalog.catalog_for(locale) else { continue };
             // In the files' order, not the catalog's sorted one: `translate_tree` builds its Hash from them as they come.
-            for (key, text) in c.ordered_entries() {
-                out.push_str(&format!("L\u{1f}{locale}.{key}\u{1f}{text}\u{1f}.\u{1e}"));
+            for (key, text) in c.ordered_nodes() {
+                match text {
+                    Some(text) => out.push_str(&format!("L\u{1f}{locale}.{key}\u{1f}{text}\u{1f}.\u{1e}")),
+                    None => out.push_str(&format!("M\u{1f}{locale}.{key}\u{1f}.\u{1e}")),
+                }
             }
             for key in &c.opaque {
                 out.push_str(&format!("O\u{1f}{locale}.{key}\u{1f}.\u{1e}"));
