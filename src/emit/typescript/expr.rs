@@ -309,21 +309,29 @@ fn synth_ident(name: &str) -> Js {
 /// Array or with the generic rewrites (`nil?`, `present?`, `is_a?`, …).
 /// `project::report_typescript_array_sends` refuses the rest, which the
 /// fallback would emit as a property or method the JS Array lacks.
-pub(crate) fn array_method_handled(method: &str, argc: usize, block: bool, numeric_elem: bool) -> bool {
-    let block_only = block && argc == 1;
+pub(crate) fn array_method_handled(method: &str, argc: usize, block: Option<&Expr>, elem: &Ty) -> bool {
+    // The translations above match a literal block (`Lambda`); a `&blk` or `&method(:m)` block reaches the fallback.
+    let lambda = block.is_some_and(is_block) && argc == 1;
+    let any_block = block.is_some() && argc == 1;
+    // Blockless `any?`/`none?` count elements: right only when no element can be nil or false.
+    let never_falsy = matches!(elem, Ty::Str | Ty::Int | Ty::Float | Ty::Sym);
     match method {
-        "each" | "map" | "collect" | "flat_map" | "select" | "filter" | "find_all" | "reject" | "find"
-        | "detect" | "each_with_index" | "sort_by" => block_only,
-        "sum" | "any?" | "all?" => argc == 0 || block_only,
-        "inject" | "reduce" => block && (argc == 1 || argc == 2),
-        "count" => argc <= 1,
-        "first" | "last" | "join" => !block && argc <= 1,
-        "take" | "drop" | "index" | "find_index" | "include?" => argc == 1,
-        "max" | "min" => argc == 0 && numeric_elem,
-        "size" | "length" | "empty?" | "none?" | "reverse" | "to_a" | "to_h" | "sort" | "compact" | "uniq"
-        | "dup" | "clone" | "nil?" | "present?" | "blank?" | "freeze" => argc == 0,
+        "each" | "map" | "find" | "sort_by" => any_block,
+        "collect" | "flat_map" | "select" | "filter" | "find_all" | "reject" | "detect" | "each_with_index"
+        | "all?" => lambda,
+        "any?" | "none?" => lambda || (argc == 0 && never_falsy),
+        "sum" => argc == 0 || lambda,
+        "inject" | "reduce" => block.is_some_and(is_block) && (argc == 1 || argc == 2),
+        "count" | "index" | "find_index" => {
+            argc == 0 && method == "count" || (argc == 1 && (block.is_none() || lambda))
+        }
+        "first" | "last" | "join" => block.is_none() && argc <= 1,
+        "take" | "drop" | "include?" => block.is_none() && argc == 1,
+        "max" | "min" => argc == 0 && matches!(elem, Ty::Int | Ty::Float),
+        "size" | "length" | "empty?" | "reverse" | "to_a" | "to_h" | "sort" | "compact" | "uniq" | "dup"
+        | "clone" | "nil?" | "present?" | "blank?" | "freeze" => argc == 0,
         "push" | "pop" | "shift" | "unshift" | "<<" | "[]" | "[]=" | "==" | "!=" | "+" | "-" | "&" | "|"
-        | "is_a?" | "kind_of?" => !block,
+        | "is_a?" | "kind_of?" => block.is_none(),
         _ => false,
     }
 }
@@ -331,13 +339,13 @@ pub(crate) fn array_method_handled(method: &str, argc: usize, block: bool, numer
 /// `array_method_handled` for an Integer or Float receiver: the numeric
 /// arm of `js_send`, the operators, and the generic `to_s` / `to_i` /
 /// `times` rewrites.
-pub(crate) fn numeric_method_handled(method: &str, argc: usize, block: bool) -> bool {
+pub(crate) fn numeric_method_handled(method: &str, argc: usize, block: Option<&Expr>) -> bool {
     match method {
-        "times" => block && argc == 1,
+        "times" => block.is_some_and(is_block) && argc == 1,
         "odd?" | "even?" | "zero?" | "positive?" | "negative?" | "abs" | "to_f" | "to_i" | "to_s" | "pred"
         | "succ" | "floor" | "ceil" | "round" | "-@" | "+@" | "nil?" | "present?" | "blank?" | "freeze" => argc == 0,
         "fdiv" | "<=>" | "+" | "-" | "*" | "/" | "%" | "**" | "==" | "!=" | "<" | ">" | "<=" | ">=" | "is_a?"
-        | "kind_of?" => argc == 1 && !block,
+        | "kind_of?" => argc == 1 && block.is_none(),
         "clamp" | "between?" => argc == 2,
         _ => false,
     }

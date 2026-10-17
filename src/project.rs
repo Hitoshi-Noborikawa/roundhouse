@@ -1747,10 +1747,7 @@ fn report_typescript_array_sends(app: &App, target: BuildTarget) {
             let records = elem.is_some_and(|e| matches!(&**e, Ty::Class { id, .. } if models.contains(id.0.as_str())));
             if let Some(elem) = elem.filter(|_| !records) {
                 let argc = args.len() + usize::from(block.is_some());
-                let numeric = matches!(**elem, Ty::Int | Ty::Float);
-                if !ruby_only
-                    && !crate::emit::typescript::array_method_handled(method.as_str(), argc, block.is_some(), numeric)
-                {
+                if !ruby_only && !crate::emit::typescript::array_method_handled(method.as_str(), argc, block.as_ref(), elem) {
                     crate::emit::diagnostics::report_unsupported(
                         expr.span,
                         target.as_str(),
@@ -1766,7 +1763,7 @@ fn report_typescript_array_sends(app: &App, target: BuildTarget) {
             };
             if let Some(class) = number {
                 let argc = args.len() + usize::from(block.is_some());
-                if !crate::emit::typescript::numeric_method_handled(method.as_str(), argc, block.is_some()) {
+                if !crate::emit::typescript::numeric_method_handled(method.as_str(), argc, block.as_ref()) {
                     crate::emit::diagnostics::report_unsupported(
                         expr.span,
                         target.as_str(),
