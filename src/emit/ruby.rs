@@ -337,10 +337,9 @@ pub(crate) fn apply_model_lowering(mut lcs: &mut [LibraryClass], app: &App) {
     library::apply_boolean_lowering(&mut lcs, app);
     // NULL fidelity: nullable columns hydrate to nil (not 0/"") and fk
     // 0-sentinel guards widen to accept nil (no-op for schemas with no
-    // nullable columns); synthesized `.empty?` predicate forms in
-    // model bodies tolerate the nil.
+    // nullable columns). A string `blank?` already carries `(r || "")`
+    // in the shared IR (`lower::blank`).
     library::apply_hydration_nil_lowering(&mut lcs, app);
-    library::apply_nilsafe_empty_lowering(&mut lcs);
     library::apply_time_format_lowering(&mut lcs, app);
     library::apply_dynamic_render_options_lowering(&mut lcs);
     // Runtime-Relation eager loading: per-model `preload_associations`
@@ -516,7 +515,6 @@ pub fn emit_lowered_controllers(app: &App) -> Vec<EmittedFile> {
     // A helper handed `raw(x)` retargets to a `_raw` clone in which
     // that argument's escaping comes off (no-op without such a site).
     library::apply_raw_helper_monomorphization(&mut lcs, app);
-    library::apply_nilsafe_empty_lowering(&mut lcs);
     library::apply_time_format_lowering(&mut lcs, app);
     library::apply_dynamic_render_options_lowering(&mut lcs);
     // Layout wrap at render call sites — the seam where the @ivars a
@@ -561,7 +559,6 @@ pub(crate) fn lowered_controller_lcs_with_layout(app: &App) -> Vec<LibraryClass>
     // A helper handed `raw(x)` retargets to a `_raw` clone in which
     // that argument's escaping comes off (no-op without such a site).
     library::apply_raw_helper_monomorphization(&mut lcs, app);
-    library::apply_nilsafe_empty_lowering(&mut lcs);
     library::apply_time_format_lowering(&mut lcs, app);
     library::apply_dynamic_render_options_lowering(&mut lcs);
     library::apply_layout_lowering(&mut lcs, app);
@@ -763,9 +760,6 @@ pub(crate) fn lowered_view_lcs(app: &App) -> (Vec<&crate::dialect::View>, Vec<Li
     library::apply_raw_helper_monomorphization(&mut lcs, app);
     library::apply_time_current_lowering(&mut lcs, app);
     library::apply_duration_lowering(&mut lcs, app);
-    // Nullable columns hydrate to nil on the Ruby tree — synthesized
-    // `.empty?` predicate forms in view bodies must tolerate it.
-    library::apply_nilsafe_empty_lowering(&mut lcs);
     library::apply_time_format_lowering(&mut lcs, app);
     library::apply_dynamic_render_options_lowering(&mut lcs);
     // A view whose own namespace shadows a top-level app class
