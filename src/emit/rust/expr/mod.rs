@@ -16,7 +16,6 @@ use control::{emit_bool_op, emit_case, emit_if, emit_return, emit_seq, emit_whil
 use literal::{attach_block, emit_array, emit_closure, emit_hash, emit_string_interp};
 pub(super) use literal::emit_literal;
 use send::{cast_via_value_for_union, coerce_arg_for_field_ty, emit_send};
-pub(crate) use send::dispatch_method_by_recv_ty;
 pub(super) use send::coerce_arg_for_param_ty;
 pub(super) use util::sanitize_ident;
 use util::{indent, is_copy_ty, is_option_of, peel_nil, value_narrowing_coercion};

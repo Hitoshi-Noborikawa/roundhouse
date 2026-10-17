@@ -3232,17 +3232,13 @@ fn js_send_inner(
     // where receiver type is `any`. Hash receivers reach the
     // type-aware branch and emit as `in`, so they don't fall through
     // here.
-    // Untyped receivers still rewrite the two kernel rows that this
-    // fallback already rewrote. The spelling comes from the table.
-    let (mapped_name, force_parens) = match crate::catalog::string_kernel::lookup(method, args.len())
-    {
-        Some(entry) if entry.untyped_typescript => match entry.typescript {
-            crate::catalog::string_kernel::TsSpell::Method0(name)
-            | crate::catalog::string_kernel::TsSpell::Method1(name) => (name, true),
-            _ => (method, false),
-        },
-        _ => (method, false),
-    };
+    // Untyped receivers still rewrite `strip` and `include?`. The
+    // spelling comes from the string kernel.
+    let (mapped_name, force_parens) =
+        match crate::catalog::string_kernel::untyped_typescript_method(method, args.len()) {
+            Some(name) => (name, true),
+            None => (method, false),
+        };
     let ts_m = ts_method_name(mapped_name);
     match recv {
         None => {

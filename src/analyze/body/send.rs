@@ -3376,7 +3376,7 @@ pub(crate) fn string_answers(method: &Symbol) -> bool {
     universal_method(method).is_some() || !matches!(str_method(method), Ty::Var { .. })
 }
 
-pub(crate) fn str_method(method: &Symbol) -> Ty {
+pub(super) fn str_method(method: &Symbol) -> Ty {
     // The mirrored kernel lives in `catalog::string_kernel`. This
     // ladder keeps every other String method.
     if let Some(ty) = crate::catalog::string_kernel::return_ty(method.as_str()) {

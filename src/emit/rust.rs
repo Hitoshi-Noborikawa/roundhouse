@@ -23,7 +23,6 @@ mod shared;
 pub(crate) mod ty;
 
 pub use runtime_method::emit_method;
-pub(crate) use expr::dispatch_method_by_recv_ty;
 
 pub(crate) use ctx::EmitCtx;
 
