@@ -4549,10 +4549,8 @@ impl Analyzer {
                 continue;
             }
             let seeded = if param.rest && !param.keyword && !param.forwarding {
-                match rest_element(observed.map(|v| v.get(i..).unwrap_or_default()).unwrap_or_default()) {
-                    Ty::Untyped => None,
-                    elem => Some(Ty::Array { elem: std::sync::Arc::new(elem) }),
-                }
+                let elem = rest_element(observed.map(|v| v.get(i..).unwrap_or_default()).unwrap_or_default());
+                Some(Ty::Array { elem: std::sync::Arc::new(elem) })
             } else {
                 param_ty_with_default(observed.and_then(|v| v.get(i)).cloned(), param)
             };
