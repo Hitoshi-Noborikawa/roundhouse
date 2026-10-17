@@ -15,6 +15,12 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+#[path = "support/emit_and_run.rs"]
+#[allow(dead_code)]
+mod emit_and_run;
+#[path = "support/nested_classes.rs"]
+mod nested_classes;
+
 use roundhouse::emit::typescript;
 use roundhouse::ingest::ingest_app;
 
@@ -253,4 +259,31 @@ fn real_blog_libsql_node_test_passes() {
     let scratch = scratch_dir("real-blog-libsql-node");
     generate_project_with_profile(fixture, &scratch, &DeploymentProfile::node_async());
     assert_node_test_passes("real-blog (libsql)", &scratch);
+}
+
+#[test]
+#[ignore]
+fn real_blog_nested_classes_run_under_tsx() {
+    // Classes nested under a class and a module, raised, rescued and
+    // built from another file, answer as CRuby does.
+    let (emitted, errors) = nested_classes::overlay().emit(roundhouse::project::BuildTarget::Typescript);
+    assert!(errors.is_empty(), "{errors:?}");
+    let install = Command::new("npm")
+        .args(["install", "--silent", "--no-audit", "--no-fund"])
+        .current_dir(&emitted)
+        .output()
+        .expect("run npm install");
+    assert!(install.status.success(), "{}", String::from_utf8_lossy(&install.stderr));
+    std::fs::write(
+        emitted.join("nested_check.ts"),
+        "import { Report } from \"./app/models/report.js\";\nconsole.log(Report.summary());\n",
+    )
+    .unwrap();
+    let run = Command::new("npx")
+        .args(["tsx", "nested_check.ts"])
+        .current_dir(&emitted)
+        .output()
+        .expect("run tsx");
+    assert!(run.status.success(), "{}", String::from_utf8_lossy(&run.stderr));
+    assert_eq!(String::from_utf8_lossy(&run.stdout).trim(), nested_classes::SUMMARY);
 }

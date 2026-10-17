@@ -3684,21 +3684,34 @@ fn strip_to_s(e: &Expr) -> &Expr {
 }
 
 thread_local! {
-    /// `(module, method)` of the app helpers whose every return is plain
-    /// text (`plain_text_helpers`), set per `apply_helper_lowering` run.
-    static PLAIN_HELPERS: std::cell::RefCell<std::collections::HashSet<(String, String)>> = Default::default();
+    /// What each app helper `(module, method)` returns, when the walk can
+    /// read it (`plain_text_helpers`), set per `apply_helper_lowering` run.
+    static PLAIN_HELPERS: std::cell::RefCell<HashMap<(String, String), HelperReturn>> = Default::default();
+}
+
+/// A helper's return as a template sees it.
+#[derive(Clone, Debug, PartialEq)]
+enum HelperReturn {
+    /// Plain text on every path: Rails escapes it.
+    Plain,
+    /// Plain text or one of these positional arguments as given: safe
+    /// exactly when each such argument is.
+    Args(Vec<usize>),
 }
 
 /// The app helper methods whose every return is plain text — a String
 /// literal, an interpolation, a number, or another such helper's
-/// result — which Rails escapes in a template like any String. Anything
-/// the walk cannot read stays out, keeping the safe default below, and so
-/// does a method whose `.html_safe` was erased (`App::html_safe_methods`).
+/// result — which Rails escapes in a template like any String, and those
+/// that may instead hand back a required positional argument
+/// (`def label(v) = v || "—"`), which Rails escapes unless the argument
+/// was safe. Anything the walk cannot read stays out, keeping the safe
+/// default below, and so does a method whose `.html_safe` was erased
+/// (`App::html_safe_methods`).
 fn plain_text_helpers(
     lcs: &[LibraryClass],
     helper_modules: &BTreeSet<ClassId>,
     html_safe: &BTreeSet<Symbol>,
-) -> std::collections::HashSet<(String, String)> {
+) -> HashMap<(String, String), HelperReturn> {
     fn tails<'a>(e: &'a Expr, out: &mut Vec<&'a Expr>) {
         match &*e.node {
             ExprNode::Seq { exprs } => match exprs.last() {
@@ -3730,13 +3743,13 @@ fn plain_text_helpers(
         .filter(|lc| helper_modules.contains(&lc.name))
         .flat_map(|lc| lc.methods.iter().map(move |m| (lc.name.0.as_str().to_string(), m)))
         .collect();
-    let mut plain: std::collections::HashSet<(String, String)> = std::collections::HashSet::new();
+    let mut read: HashMap<(String, String), HelperReturn> = HashMap::new();
     loop {
-        let before = plain.len();
+        let before = read.len();
         for (module, m) in &methods {
             let key = (module.clone(), m.name.as_str().to_string());
             // Not one `lower::html_safe` or the tag builder recorded: its `.html_safe` mark was erased, not absent.
-            if plain.contains(&key) || html_safe.contains(&m.name) {
+            if read.contains_key(&key) || html_safe.contains(&m.name) {
                 continue;
             }
             let mut out = Vec::new();
@@ -3746,15 +3759,47 @@ fn plain_text_helpers(
                 ExprNode::Lit { value: Literal::Str { .. } | Literal::Int { .. } | Literal::Float { .. } } => true,
                 ExprNode::StringInterp { .. } => true,
                 ExprNode::Send { recv: None, method, .. } => methods.iter().any(|(md, other)| md == module && other.name == *method)
-                    && plain.contains(&(module.clone(), method.as_str().to_string())),
+                    && read.get(&(module.clone(), method.as_str().to_string())) == Some(&HelperReturn::Plain),
                 _ => false,
             };
-            if !out.is_empty() && out.iter().all(|e| is_plain(e)) {
-                plain.insert(key);
+            // An optional or rest positional shifts which argument binds which parameter by the call's arity.
+            let fixed_arity = m.params.iter().all(|p| p.keyword || (p.default.is_none() && !p.rest && !p.forwarding));
+            let positional = |e: &Expr| match &*e.node {
+                ExprNode::Var { name, .. } if fixed_arity => {
+                    m.params.iter().position(|p| p.name == *name && !p.keyword)
+                }
+                _ => None,
+            };
+            let arg_or_plain = |e: &Expr| -> Option<Option<usize>> {
+                if is_plain(e) {
+                    return Some(None);
+                }
+                if let Some(i) = positional(e) {
+                    return Some(Some(i));
+                }
+                match &*e.node {
+                    ExprNode::BoolOp { op: crate::expr::BoolOpKind::Or, left, right, .. } => {
+                        match (positional(left), is_plain(right)) {
+                            (Some(i), true) => Some(Some(i)),
+                            _ => None,
+                        }
+                    }
+                    _ => None,
+                }
+            };
+            if out.is_empty() {
+                continue;
             }
+            let Some(each) = out.iter().map(|e| arg_or_plain(e)).collect::<Option<Vec<_>>>() else {
+                continue;
+            };
+            let mut args: Vec<usize> = each.into_iter().flatten().collect();
+            args.sort_unstable();
+            args.dedup();
+            read.insert(key, if args.is_empty() { HelperReturn::Plain } else { HelperReturn::Args(args) });
         }
-        if plain.len() == before {
-            return plain;
+        if read.len() == before {
+            return read;
         }
     }
 }
@@ -3770,7 +3815,7 @@ fn plain_text_helpers(
 /// return tag-helper compositions, and per-method safety inference can
 /// refine this when a counterexample shows up.
 fn is_html_safe_call(e: &Expr, index: &HashMap<Symbol, ClassId>) -> bool {
-    let ExprNode::Send { recv: Some(r), method, .. } = &*e.node else {
+    let ExprNode::Send { recv: Some(r), method, args, .. } = &*e.node else {
         return false;
     };
     let ExprNode::Const { path } = &*r.node else {
@@ -3822,8 +3867,20 @@ fn is_html_safe_call(e: &Expr, index: &HashMap<Symbol, ClassId>) -> bool {
         );
     }
     // Not every app helper: one whose every return is plain text is a String Rails escapes.
-    index.values().any(|cid| cid.0.as_str() == joined)
-        && !PLAIN_HELPERS.with(|p| p.borrow().contains(&(joined.clone(), method.as_str().to_string())))
+    if !index.values().any(|cid| cid.0.as_str() == joined) {
+        return false;
+    }
+    match PLAIN_HELPERS.with(|p| p.borrow().get(&(joined.clone(), method.as_str().to_string())).cloned()) {
+        None => true,
+        Some(HelperReturn::Plain) => false,
+        Some(HelperReturn::Args(idxs)) => idxs.iter().all(|&i| {
+            args.get(i).is_some_and(|a| {
+                let a = strip_to_s(a);
+                // An interpolation may be a tag helper the walker inlined (`link_to` → `"<a href=…>"`).
+                matches!(&*a.node, ExprNode::StringInterp { .. }) || is_html_safe_call(a, index)
+            })
+        }),
+    }
 }
 
 /// `<Const ending in Base>.helpers` — the Rails idiom
