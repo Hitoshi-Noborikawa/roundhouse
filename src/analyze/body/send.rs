@@ -1193,7 +1193,11 @@ impl<'a> BodyTyper<'a> {
         // own `call` (a callable app class, an untyped proc).
         if method.as_str() == "call" {
             if let Some(Ty::Fn { ret, .. }) = recv_ty {
-                return (**ret).clone();
+                // Not left a type variable: `call` is known, and what the body answers is the body's own sends' to report.
+                return match &**ret {
+                    Ty::Var { .. } => Ty::Untyped,
+                    ret => ret.clone(),
+                };
             }
         }
         // `then` / `yield_self` are the receiver-identity pair's mirror:

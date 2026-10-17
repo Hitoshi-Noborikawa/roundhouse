@@ -32,3 +32,15 @@ fn sentry_is_known_only_with_its_gem() {
     let (_emitted, errors) = helper("  def report(e)\n    Sentry.capture_exception(e)\n  end\n").emit(BuildTarget::Ruby);
     assert!(errors.iter().any(|e| e.contains("capture_exception")), "{errors:#?}");
 }
+
+/// campfire's `MessagesHelper#text_message_presentation` wraps a view
+/// helper in a lambda and calls it: `call` is known, and the body's bare
+/// view helper is the gradual escape a view's is, not a dispatch miss.
+/// The helper is included by one controller, which is not its `self`.
+#[test]
+fn a_lambda_over_a_view_helper_is_called_cleanly() {
+    let (_emitted, errors) = helper("  def presented(text)\n    render = -> do\n      auto_link(text)\n    end\n    render.call\n  end\n")
+        .edit("app/controllers/articles_controller.rb", "class ArticlesController < ApplicationController\n", "class ArticlesController < ApplicationController\n  include ProbeHelper\n")
+        .emit(BuildTarget::Ruby);
+    assert!(errors.is_empty(), "{errors:#?}");
+}
