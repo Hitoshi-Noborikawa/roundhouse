@@ -821,6 +821,9 @@ pub fn ingest_app_with_vfs<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResult
                     .is_some_and(|stem| stem.ends_with("_helper"));
                 match ingest_library_classes(&source, &path_str) {
                     Ok(classes) => {
+                        if is_helper_module {
+                            app.helper_modules.extend(classes.iter().map(|lc| lc.name.clone()));
+                        }
                         for lc in classes.iter().filter(|_| is_helper_module) {
                             // Rails resolves a helper's `include`d
                             // modules into the same view surface —

@@ -2003,7 +2003,7 @@ impl<'a> BodyTyper<'a> {
                 // An `app/helpers` module runs in the view, so its `t` is ActionView's (with no template for a lazy key).
                 let in_helper = !ctx.class_side
                     && matches!(ctx.self_ty.as_ref(), Some(Ty::Class { id, .. }) if self.helper_modules.is_some_and(|h| h.contains(id)));
-                let helper_copy = expr.decisions & crate::expr::HELPER_COPY_TRANSLATE != 0;
+                let helper_copy = expr.decisions & (crate::expr::HELPER_COPY_TRANSLATE | crate::expr::HELPER_BODY_TRANSLATE) != 0;
                 let site = match (&scope, ctx.in_view) {
                     (_, true) => crate::lower::i18n_translate::Site::View(ctx.view_name.as_ref().map(|v| v.as_str())),
                     _ if helper_copy => crate::lower::i18n_translate::Site::View(None),

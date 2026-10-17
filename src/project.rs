@@ -1049,6 +1049,23 @@ fn report_unemitted_library_classes(app: &App, target: BuildTarget) {
     }
 }
 
+/// Every Ruby exception class is JavaScript's `Error` on the TypeScript
+/// targets, so an app class named `Error` emits `class Error extends
+/// Error`, which reads the class it is declaring.
+fn report_typescript_error_class(app: &App, target: BuildTarget) {
+    if !matches!(target, BuildTarget::Typescript | BuildTarget::TypescriptWorker) {
+        return;
+    }
+    for lc in app.library_classes.iter().filter(|lc| lc.origin.is_none() && !lc.is_module && lc.name.0.as_str() == "Error") {
+        emit::diagnostics::report_unsupported(
+            lc.parent_span,
+            target.as_str(),
+            "class named Error",
+            format!("an app class named `Error` shadows the `Error` the {} emit maps every Ruby exception to", target.as_str()),
+        );
+    }
+}
+
 /// A mailer and the `ActionMailer` runtime it delivers through ship on
 /// the Ruby family only; elsewhere `Mailer.action(…)` reached nothing,
 /// or a view of the same name.
@@ -2073,6 +2090,7 @@ fn target_files_inner(
     reject_unsupported_forwarded_procs(app, target)?;
     report_unsupported_keys(app, target);
     report_unemitted_library_classes(app, target);
+    report_typescript_error_class(app, target);
     report_controller_sibling_classes(app, target);
     report_mailers(app, target);
     report_sqlite_index_predicates(app, target);
@@ -3861,8 +3879,11 @@ fn i18n_table_text(app: &App) -> String {
         for locale in &locales {
             let Some(c) = catalog.catalog_for(locale) else { continue };
             // In the files' order, not the catalog's sorted one: `translate_tree` builds its Hash from them as they come.
-            for (key, text) in c.ordered_entries() {
-                out.push_str(&format!("L\u{1f}{locale}.{key}\u{1f}{text}\u{1f}.\u{1e}"));
+            for (key, text) in c.ordered_nodes() {
+                match text {
+                    Some(text) => out.push_str(&format!("L\u{1f}{locale}.{key}\u{1f}{text}\u{1f}.\u{1e}")),
+                    None => out.push_str(&format!("M\u{1f}{locale}.{key}\u{1f}.\u{1e}")),
+                }
             }
             for key in &c.opaque {
                 out.push_str(&format!("O\u{1f}{locale}.{key}\u{1f}.\u{1e}"));
