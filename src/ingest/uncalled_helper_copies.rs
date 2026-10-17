@@ -25,6 +25,15 @@ use crate::ident::Symbol;
 
 pub(super) fn mark(app: &mut App) {
     let helpers: HashSet<_> = app.helper_method_index.values().cloned().collect();
+    // After the splice, so the controllers' copies keep their own reading.
+    for lc in app.library_classes.iter_mut().filter(|lc| helpers.contains(&lc.name)) {
+        for m in &mut lc.methods {
+            for default in m.params.iter_mut().filter_map(|p| p.default.as_mut()) {
+                mark_with(default, crate::expr::HELPER_BODY_TRANSLATE);
+            }
+            mark_with(&mut m.body, crate::expr::HELPER_BODY_TRANSLATE);
+        }
+    }
     if helpers.is_empty() || app.concern_spliced_actions.is_empty() {
         return;
     }
@@ -53,11 +62,15 @@ pub(super) fn mark(app: &mut App) {
 }
 
 fn mark_translate(e: &mut Expr) {
-    e.node.for_each_child_mut(&mut |c| mark_translate(c));
+    mark_with(e, crate::expr::HELPER_COPY_TRANSLATE);
+}
+
+fn mark_with(e: &mut Expr, bit: u64) {
+    e.node.for_each_child_mut(&mut |c| mark_with(c, bit));
     if let ExprNode::Send { recv: None, method, .. } = &*e.node
         && matches!(method.as_str(), "t" | "translate")
     {
-        e.decisions |= crate::expr::HELPER_COPY_TRANSLATE;
+        e.decisions |= bit;
     }
 }
 

@@ -462,6 +462,12 @@ pub struct App {
     /// are reported as warnings, since Rails never runs them.
     #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
     pub unreachable_views: BTreeSet<Symbol>,
+    /// The `app/helpers` modules' diagnostics, taken before the
+    /// post-analyze lowerings rewrite their bodies; `None` until then,
+    /// and on a path that never lowers (`check`), where they are
+    /// computed from the bodies as they stand.
+    #[serde(skip)]
+    pub helper_diagnostics: Option<Vec<crate::diagnostic::Diagnostic>>,
     /// The class-side twin of `concern_spliced_actions`: concern methods
     /// `splice_concern_class_methods_into_includers` copied onto a model
     /// or library class, keyed includer → method → the source module.
@@ -915,6 +921,7 @@ impl App {
             graphql_signatures: Vec::new(),
             concern_spliced_actions: HashMap::new(),
             unreachable_views: BTreeSet::new(),
+            helper_diagnostics: None,
             concern_spliced_class_methods: HashMap::new(),
             concern_model_items: HashMap::new(),
             concern_guarded_items: HashMap::new(),

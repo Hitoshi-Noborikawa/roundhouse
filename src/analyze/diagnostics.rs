@@ -184,6 +184,10 @@ pub fn diagnose_with_coverage(app: &App) -> (Vec<Diagnostic>, PreloadCoverage) {
     for view in &app.views {
         diagnose_expr(&view.body, &mut out);
     }
+    match &app.helper_diagnostics {
+        Some(taken) => out.extend(taken.iter().cloned()),
+        None => out.extend(diagnose_helper_modules(app)),
+    }
     for class in &app.library_classes {
         for initializer in &class.class_ivar_initializers {
             diagnose_expr(initializer, &mut out);
@@ -236,6 +240,38 @@ pub fn diagnose_with_coverage(app: &App) -> (Vec<Diagnostic>, PreloadCoverage) {
         }
     }
     (out, coverage)
+}
+
+/// An `app/helpers` module runs in the view, so it is checked as one,
+/// not under the library policy.
+pub fn diagnose_helper_modules(app: &App) -> Vec<Diagnostic> {
+    let helper_modules: std::collections::HashSet<&crate::ident::ClassId> = app.helper_method_index.values().collect();
+    let mut helper_out = Vec::new();
+    for class in app.library_classes.iter().filter(|c| helper_modules.contains(&c.name)) {
+        for method in &class.methods {
+            for default in method.params.iter().filter_map(|p| p.default.as_ref()) {
+                diagnose_expr(default, &mut helper_out);
+            }
+            diagnose_expr(&method.body, &mut helper_out);
+        }
+    }
+    // Not errors: the ivar is the rendering view's, which the emitted helper reads as Rails does (only its type is unseeded);
+    // and nullable primitive arithmetic raises where Rails raises, as the library policy already holds.
+    fn nullable_primitive(ty: &Ty) -> bool {
+        matches!(ty, Ty::Union { variants } if variants.iter().any(|v| matches!(v, Ty::Nil))
+            && variants.iter().all(|v| matches!(v, Ty::Nil | Ty::Int | Ty::Float | Ty::Str)))
+    }
+    for d in &mut helper_out {
+        let soft = match &d.kind {
+            DiagnosticKind::IvarUnresolved { .. } => true,
+            DiagnosticKind::IncompatibleBinop { lhs_ty, .. } => nullable_primitive(lhs_ty),
+            _ => false,
+        };
+        if soft {
+            d.severity = crate::diagnostic::Severity::Warning;
+        }
+    }
+    helper_out
 }
 
 /// A type is "unknown" if it's `None` or `Ty::Var(n)` (a placeholder the
