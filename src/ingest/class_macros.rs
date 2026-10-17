@@ -36,11 +36,11 @@ use crate::App;
 use crate::dialect::{MethodDef, MethodReceiver, MethodVisibility, ModelBodyItem, Param};
 use crate::expr::{Expr, ExprNode, LValue, Literal};
 use crate::ident::{ClassId, Symbol};
-use crate::span::Span;
+use crate::span::{SourceFile, Span};
 
 const MAX_DEPTH: usize = 8;
 
-pub(crate) fn expand_class_macros(app: &mut App) {
+pub(crate) fn expand_class_macros(app: &mut App, sources: &[SourceFile]) {
     let parents: HashMap<ClassId, ClassId> = app
         .models
         .iter()
@@ -60,10 +60,32 @@ pub(crate) fn expand_class_macros(app: &mut App) {
         }
         let constants = literal_constants(app, &ancestors);
         let model = &app.models[model_index];
+        // Not one this can follow: a class that redefines the definers, or a macro also called where the class body does not always run it.
+        let redefined = table.contains_key(&Symbol::from("define_method")) || table.contains_key(&Symbol::from("define_singleton_method"));
+        let mut nested: HashSet<Symbol> = HashSet::new();
+        for item in &model.body {
+            let ModelBodyItem::Unknown { expr, .. } = item else { continue };
+            let root = match &*expr.node {
+                ExprNode::Send { method, .. } => Some(method),
+                _ => None,
+            };
+            let mut first = true;
+            visit(expr, &mut |e| {
+                if let ExprNode::Send { recv, method, .. } = &*e.node
+                    && macros.contains(method)
+                    && recv.as_ref().is_none_or(|r| matches!(&*r.node, ExprNode::SelfRef))
+                    && !(first && root == Some(method))
+                {
+                    nested.insert(method.clone());
+                }
+                first = false;
+            });
+        }
         let own: HashSet<(Symbol, MethodReceiver)> = model.methods().map(|m| (m.name.clone(), m.receiver)).collect();
         let prefix = slot_prefix(model.name.0.as_str());
         let mut counter = 0usize;
         let mut defined: HashSet<(Symbol, MethodReceiver)> = HashSet::new();
+        let mut reserved: Option<HashSet<Symbol>> = None;
         let mut expansions: HashMap<usize, Vec<ModelBodyItem>> = HashMap::new();
         for (index, item) in model.body.iter().enumerate() {
             let ModelBodyItem::Unknown { expr, .. } = item else { continue };
@@ -71,9 +93,15 @@ pub(crate) fn expand_class_macros(app: &mut App) {
             if !macros.contains(method) || recv.as_ref().is_some_and(|r| !matches!(&*r.node, ExprNode::SelfRef)) {
                 continue;
             }
-            let mut run = Run { table: &table, constants: &constants, prefix: &prefix, counter, out: Vec::new(), methods: Vec::new(), strings: HashMap::new(), owner: model.name.0.clone() };
+            let mut run = Run { table: &table, constants: &constants, prefix: &prefix, counter, out: Vec::new(), methods: Vec::new(), aliases: Vec::new(), strings: HashMap::new(), owner: model.name.0.clone(), sources };
             let result = if block.is_some() {
                 Err("it is passed a block".to_string())
+            } else if redefined {
+                Err("the class redefines `define_method`".to_string())
+            } else if nested.contains(method) {
+                Err("it is also called where the class body may not run it".to_string())
+            } else if !call_syntax_kept(expr, sources) {
+                Err("its arguments use a splat or a block argument".to_string())
             } else {
                 run.call(method, args, &HashMap::new(), 0)
             }
@@ -82,6 +110,9 @@ pub(crate) fn expand_class_macros(app: &mut App) {
                     let key = (m.name.clone(), m.receiver);
                     if own.contains(&key) || !defined.insert(key) {
                         return Err(format!("`{}` is defined twice", m.name.as_str()));
+                    }
+                    if m.receiver == MethodReceiver::Instance && reserved.get_or_insert_with(|| synthesized_names(app, model_index)).contains(&m.name) {
+                        return Err(format!("`{}` is also a method the model's columns or declarations define", m.name.as_str()));
                     }
                 }
                 Ok(())
@@ -95,6 +126,7 @@ pub(crate) fn expand_class_macros(app: &mut App) {
                         .map(|expr| ModelBodyItem::Unknown { expr, leading_comments: Vec::new(), leading_blank_line: false })
                         .collect();
                     items.extend(run.methods.into_iter().map(|method| ModelBodyItem::Method { method, leading_comments: Vec::new(), leading_blank_line: false }));
+                    items.extend(run.aliases.into_iter().map(|(new, old, span)| ModelBodyItem::Alias { new, old, leading_comments: Vec::new(), leading_blank_line: false, span }));
                     expansions.insert(index, items);
                 }
                 Err(why) => {
@@ -120,6 +152,22 @@ pub(crate) fn expand_class_macros(app: &mut App) {
         }
         model.body = body;
     }
+}
+
+/// The instance methods the model lowering synthesizes for this model
+/// (columns, associations, declarations), which a generated `def` of the
+/// same name would collide with.
+fn synthesized_names(app: &App, model_index: usize) -> HashSet<Symbol> {
+    let model = &app.models[model_index];
+    let mut specs = crate::lower::controller_to_library::params::collect_specs(&app.controllers);
+    specs.mark_file_fields(&app.models);
+    let synthesized = crate::lower::model_to_library::build_methods(model, &app.models, &app.schema, &specs);
+    let mut out: HashSet<Symbol> = crate::lower::model_to_library::build_class_info(model, &synthesized, app.schema.tables.get(&model.table.0))
+        .instance_methods
+        .into_keys()
+        .collect();
+    out.extend(synthesized.iter().filter(|m| m.receiver == MethodReceiver::Instance).map(|m| m.name.clone()));
+    out
 }
 
 fn ancestors(app: &App, parents: &HashMap<ClassId, ClassId>, model: &ClassId) -> Vec<ClassId> {
@@ -227,9 +275,11 @@ struct Run<'a> {
     /// Class-body statements, in the order the macro runs them.
     out: Vec<Expr>,
     methods: Vec<MethodDef>,
+    aliases: Vec<(Symbol, Symbol, Span)>,
     /// One constant per captured String, so every method shares it.
     strings: HashMap<(String, usize), Symbol>,
     owner: Symbol,
+    sources: &'a [SourceFile],
 }
 
 type Env = HashMap<Symbol, Val>;
@@ -240,6 +290,9 @@ impl Run<'_> {
             return Err("its calls nest too deep".into());
         }
         let def = self.table.get(name).ok_or_else(|| format!("`{}` is not one of the class's methods", name.as_str()))?;
+        if !super::model_macros::supported_source_signature(def, self.sources) {
+            return Err(format!("`{}`'s parameters are not ones it binds", name.as_str()));
+        }
         let mut bound = self.bind(def, args, env)?;
         let statements: Vec<Expr> = match &*def.body.node {
             ExprNode::Seq { exprs } => exprs.clone(),
@@ -306,6 +359,18 @@ impl Run<'_> {
                 env.insert(name.clone(), v);
                 Ok(false)
             }
+            ExprNode::OpAssign { target: LValue::Var { name, .. }, op: crate::expr::OpAssignOp::OrOr, value } => {
+                let current = env.get(name).cloned().ok_or_else(|| format!("`{}` is not bound", name.as_str()))?;
+                match self.truthy(&current) {
+                    Some(true) => {}
+                    Some(false) => {
+                        let v = self.eval(value, env)?;
+                        env.insert(name.clone(), v);
+                    }
+                    None => return Err("a `||=` depends on a value known only when it runs".into()),
+                }
+                Ok(false)
+            }
             ExprNode::If { cond, then_branch, else_branch } => match {
                 let v = self.eval(cond, env)?;
                 self.truthy(&v)
@@ -321,7 +386,17 @@ impl Run<'_> {
                         let receiver = if method.as_str() == "define_method" { MethodReceiver::Instance } else { MethodReceiver::Class };
                         let [name] = args.as_slice() else { return Err("a definition is given other than one name".into()) };
                         let Some(block) = block else { return Err("a definition has no block".into()) };
+                        if !definition_syntax_kept(st, self.sources) {
+                            return Err("a definition uses syntax the expansion would erase".into());
+                        }
                         self.define(receiver, name, block, env).map(|()| false)
+                    }
+                    "alias_method" => {
+                        let [new_name, old_name] = args.as_slice() else { return Err("an alias is not given two names".into()) };
+                        let new_name = self.literal_name(new_name, env)?;
+                        let old_name = self.literal_name(old_name, env)?;
+                        self.aliases.push((new_name, old_name, st.span));
+                        Ok(false)
                     }
                     "raise" | "fail" => Err("it raises".into()),
                     _ if self.table.contains_key(method) && block.is_none() => {
@@ -341,15 +416,19 @@ impl Run<'_> {
         }
     }
 
-    fn define(&mut self, receiver: MethodReceiver, name: &Expr, block: &Expr, env: &Env) -> Result<(), String> {
-        let name = match self.eval(name, env)? {
-            Val::Lit(e) => match &*e.node {
-                ExprNode::Lit { value: Literal::Sym { value } } => value.clone(),
-                ExprNode::Lit { value: Literal::Str { value } } => Symbol::from(value.as_str()),
-                _ => return Err("a defined name is not a name".into()),
+    fn literal_name(&mut self, name: &Expr, env: &Env) -> Result<Symbol, String> {
+        match self.fold(name, env) {
+            Some(Val::Lit(e)) => match &*e.node {
+                ExprNode::Lit { value: Literal::Sym { value } } => Ok(value.clone()),
+                ExprNode::Lit { value: Literal::Str { value } } => Ok(Symbol::from(value.as_str())),
+                _ => Err("a defined name is not a name".into()),
             },
-            Val::Slot { .. } => return Err("a defined name is known only when it runs".into()),
-        };
+            _ => Err("a defined name is known only when it runs".into()),
+        }
+    }
+
+    fn define(&mut self, receiver: MethodReceiver, name: &Expr, block: &Expr, env: &Env) -> Result<(), String> {
+        let name = self.literal_name(name, env)?;
         if !valid_def_name(&name) {
             return Err(format!("`{}` is not a method name", name.as_str()));
         }
@@ -377,10 +456,16 @@ impl Run<'_> {
         }
         let body = self.substitute(body, env, &shadow)?;
         let template = self.table.values().next().expect("a macro was found").clone();
+        // Ruby makes these private whatever defines them.
+        let visibility = if receiver == MethodReceiver::Instance && matches!(name.as_str(), "initialize" | "initialize_copy" | "initialize_dup" | "initialize_clone") {
+            MethodVisibility::Private
+        } else {
+            MethodVisibility::Public
+        };
         self.methods.push(MethodDef {
             name,
             receiver,
-            visibility: MethodVisibility::Public,
+            visibility,
             params: method_params,
             unsupported_formals: None,
             has_anonymous_block: false,
@@ -511,6 +596,12 @@ impl Run<'_> {
             return;
         }
         e.node.for_each_child_mut(&mut |c| self.substitute_in(c, env, shadow, failed));
+        // Only a name being spelled (`:"#{name}="`): other folds read the macro owner's constants, not this body's.
+        if (matches!(&*e.node, ExprNode::StringInterp { .. }) || matches!(&*e.node, ExprNode::Send { method, .. } if method.as_str() == "to_sym"))
+            && let Some(Val::Lit(folded)) = self.fold(e, &Env::new())
+        {
+            *e = folded;
+        }
         collapse_literal_send(e);
     }
 
@@ -534,6 +625,57 @@ impl Run<'_> {
             Val::Slot { name, .. } => const_read(span, name.clone()),
         }
     }
+}
+
+fn source_text<'s>(span: Span, sources: &'s [SourceFile]) -> Option<&'s [u8]> {
+    let source = span.file.0.checked_sub(1).and_then(|i| sources.get(i as usize))?;
+    source.text.as_bytes().get(span.start as usize..span.end as usize)
+}
+
+/// The call as written has no splat, double splat or block argument,
+/// which the IR would have flattened into ordinary arguments.
+fn call_syntax_kept(call: &Expr, sources: &[SourceFile]) -> bool {
+    let Some(text) = source_text(call.span, sources) else { return false };
+    let parsed = ruby_prism::parse(text);
+    if parsed.errors().next().is_some() {
+        return false;
+    }
+    struct Erased(bool);
+    impl<'pr> ruby_prism::Visit<'pr> for Erased {
+        fn visit_branch_node_enter(&mut self, node: ruby_prism::Node<'pr>) {
+            self.0 |= node.as_splat_node().is_some() || node.as_assoc_splat_node().is_some() || node.as_block_argument_node().is_some();
+        }
+    }
+    let mut erased = Erased(false);
+    ruby_prism::Visit::visit(&mut erased, &parsed.node());
+    !erased.0
+}
+
+/// A `define_method` as written has no splat, nested `def`, `defined?`,
+/// and its block takes plain parameters: what the IR would have erased
+/// into a simpler, different definition.
+fn definition_syntax_kept(statement: &Expr, sources: &[SourceFile]) -> bool {
+    let Some(text) = source_text(statement.span, sources) else { return false };
+    let parsed = ruby_prism::parse(text);
+    if parsed.errors().next().is_some() {
+        return false;
+    }
+    struct Erased(bool);
+    impl<'pr> ruby_prism::Visit<'pr> for Erased {
+        fn visit_branch_node_enter(&mut self, node: ruby_prism::Node<'pr>) {
+            self.0 |= node.as_splat_node().is_some()
+                || node.as_assoc_splat_node().is_some()
+                || node.as_def_node().is_some()
+                || node.as_defined_node().is_some()
+                || node.as_multi_target_node().is_some()
+                || node.as_keyword_rest_parameter_node().is_some()
+                || node.as_rest_parameter_node().is_some()
+                || node.as_block_parameter_node().is_some();
+        }
+    }
+    let mut erased = Erased(false);
+    ruby_prism::Visit::visit(&mut erased, &parsed.node());
+    !erased.0
 }
 
 /// A synthetic span, not the capture's: Rubydex indexed the source, which has no such constant, and the class's own constants answer it.
