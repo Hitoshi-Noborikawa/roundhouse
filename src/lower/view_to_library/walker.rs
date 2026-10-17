@@ -1776,6 +1776,7 @@ mod tests {
             i18n: Default::default(),
             route_helper_arity: Default::default(),
             form_wrappers: Default::default(),
+            form_with_entry: false,
             stylesheets: Vec::new(),
             lexxy: false,
             lexxy_editor_adapter: false,

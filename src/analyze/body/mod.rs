@@ -354,12 +354,14 @@ pub struct BodyTyper<'a> {
     const_resolver: Option<std::sync::Arc<ConstResolver>>,
     typed_constants: Option<&'a IdentityHashMap<DeclarationId, Ty>>,
     data_factories: Option<&'a HashMap<crate::span::Span, Ty>>,
+    class_factories: Option<&'a HashMap<crate::span::Span, Ty>>,
     /// Methods whose value is an ActiveSupport inquirer (see
     /// [`crate::analyze::inquiry`]); empty for the bare constructor,
     /// which the runtime-source typer and tests use.
     inquirers: Option<&'a std::collections::HashSet<Symbol>>,
     /// The app's translations; Rails' English when absent.
     i18n: Option<&'a crate::i18n::Catalog>,
+    helper_modules: Option<&'a std::collections::HashSet<ClassId>>,
 }
 
 impl<'a> BodyTyper<'a> {
@@ -483,11 +485,12 @@ impl<'a> BodyTyper<'a> {
     }
 
     pub fn new(classes: &'a HashMap<ClassId, ClassInfo>) -> Self {
-        Self { classes, const_resolver: None, typed_constants: None, data_factories: None, inquirers: None, i18n: None }
+        Self { classes, const_resolver: None, typed_constants: None, data_factories: None, class_factories: None, inquirers: None, i18n: None, helper_modules: None }
     }
 
-    pub(crate) fn with_i18n(mut self, catalog: &'a crate::i18n::Catalog) -> Self {
+    pub(crate) fn with_i18n(mut self, catalog: &'a crate::i18n::Catalog, helper_modules: &'a std::collections::HashSet<ClassId>) -> Self {
         self.i18n = Some(catalog);
+        self.helper_modules = Some(helper_modules);
         self
     }
 
@@ -508,6 +511,11 @@ impl<'a> BodyTyper<'a> {
 
     pub(super) fn with_data_factories(mut self, factories: &'a HashMap<crate::span::Span, Ty>) -> Self {
         self.data_factories = Some(factories);
+        self
+    }
+
+    pub(super) fn with_class_factories(mut self, factories: &'a HashMap<crate::span::Span, Ty>) -> Self {
+        self.class_factories = Some(factories);
         self
     }
 
@@ -737,6 +745,9 @@ impl<'a> BodyTyper<'a> {
 
     /// Identity evidence for Module protocol, independent of nominal instance type.
     fn is_class_object(&self, expr: &Expr, ctx: &Ctx) -> bool {
+        if self.class_factories.is_some_and(|factories| factories.contains_key(&expr.span)) {
+            return true;
+        }
         match &*expr.node {
             ExprNode::SelfRef => ctx.class_side,
             ExprNode::Var { name, .. } => ctx.class_objects.contains(name),
@@ -1409,6 +1420,22 @@ impl<'a> BodyTyper<'a> {
             ExprNode::Defined { .. } => union_of(Ty::Str, Ty::Nil),
 
             ExprNode::Send { recv, method, args, block, parenthesized } => {
+                if let Some(ty) = self.class_factories.and_then(|factories| factories.get(&expr_span)) {
+                    expr.diagnostic = None;
+                    if let Some(recv) = recv { self.analyze_expr(recv, ctx); }
+                    // A literal superclass is declaration metadata, just as
+                    // in an ordinary class header. An external parent need
+                    // not resolve as a supported value expression in main.
+                    if let Ty::Class { id, .. } = ty
+                        && let Some(parent) = self.classes.get(id).and_then(|info| info.parent.as_ref())
+                    {
+                        for arg in args.iter_mut() {
+                            arg.ty = Some(Ty::Class { id: parent.clone(), args: vec![].into() });
+                            arg.diagnostic = None;
+                        }
+                    }
+                    return ty.clone();
+                }
                 if matches!(&expr.diagnostic, Some(crate::diagnostic::DiagnosticKind::Unsupported { construct, .. })
                     if matches!(construct.as_str(), "Module protocol" | "ActiveModel::Errors" | "ActiveModel::Error" | "Rails" | "ActiveRecord::Base" | "String extension" | "Hash extension" | "not_nil!" | "Object extension" | "Module callback argument"))
                 { expr.diagnostic = None; }
@@ -1968,11 +1995,22 @@ impl<'a> BodyTyper<'a> {
                     (false, true) => self.translating_controller(ctx.self_ty.as_ref()),
                     _ => None,
                 };
+                // An `app/helpers` module runs in the view, so its `t` is ActionView's (with no template for a lazy key).
+                let in_helper = !ctx.class_side
+                    && matches!(ctx.self_ty.as_ref(), Some(Ty::Class { id, .. }) if self.helper_modules.is_some_and(|h| h.contains(id)));
+                let helper_copy = expr.decisions & crate::expr::HELPER_COPY_TRANSLATE != 0;
                 let site = match (&scope, ctx.in_view) {
                     (_, true) => crate::lower::i18n_translate::Site::View(ctx.view_name.as_ref().map(|v| v.as_str())),
+                    _ if helper_copy => crate::lower::i18n_translate::Site::View(None),
+                    (None, false) if in_helper => crate::lower::i18n_translate::Site::View(None),
                     (Some(scope), false) => crate::lower::i18n_translate::Site::Controller(scope),
                     (None, false) => crate::lower::i18n_translate::Site::Other,
                 };
+                if translate
+                    && crate::lower::i18n_translate::tree_answer(catalog, recv.as_ref(), method.as_str(), args, block.as_ref()).is_some()
+                {
+                    return Ty::Hash { key: std::sync::Arc::new(Ty::Sym), value: std::sync::Arc::new(Ty::Untyped) };
+                }
                 if translate && let Some(resolved) = crate::lower::i18n_translate::resolves(
                     catalog, recv.as_ref(), method.as_str(), args, block.as_ref(), site,
                 ) {

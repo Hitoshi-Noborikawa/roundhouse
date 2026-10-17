@@ -221,6 +221,20 @@ pub fn diagnose_with_coverage(app: &App) -> (Vec<Diagnostic>, PreloadCoverage) {
     // distinct starts, they survive on their own again.
     let mut seen = std::collections::HashSet::new();
     out.retain(|d| seen.insert((d.span.file, d.span.start, d.code(), d.message.clone())));
+    // A template no request reaches (`ingest::unreachable_views`): its errors stay visible, as warnings.
+    if !app.unreachable_views.is_empty() {
+        let files: std::collections::HashSet<crate::span::FileId> = app
+            .views
+            .iter()
+            .filter(|v| app.unreachable_views.contains(&v.name))
+            .map(|v| v.body.span.file)
+            .collect();
+        for d in &mut out {
+            if d.severity == crate::diagnostic::Severity::Error && files.contains(&d.span.file) {
+                d.severity = crate::diagnostic::Severity::Warning;
+            }
+        }
+    }
     (out, coverage)
 }
 

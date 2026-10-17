@@ -20,7 +20,7 @@ pub fn ingest_expr(node: &Node<'_>, file: &str) -> IngestResult<Expr> {
     // ingester keeps going. Errors are recorded into the per-thread
     // collector for the post-run punch list. See `survey.rs`.
     match ingest_expr_strict(node, file) {
-        Ok(e) => Ok(e),
+        Ok(e) => Ok(proc_new_as_proc(e)),
         Err(err) if super::survey::is_active() => {
             super::survey::record(&err);
             Ok(Expr::new(
@@ -32,6 +32,20 @@ pub fn ingest_expr(node: &Node<'_>, file: &str) -> IngestResult<Expr> {
     }
 }
 
+
+/// `Proc.new { … }` is Kernel's `proc { … }`: the same Proc from the same
+/// block, which the pipeline already carries.
+fn proc_new_as_proc(mut e: Expr) -> Expr {
+    if let ExprNode::Send { recv, method, args, block: Some(_), .. } = &mut *e.node
+        && method.as_str() == "new"
+        && args.is_empty()
+        && recv.as_ref().is_some_and(|r| matches!(&*r.node, ExprNode::Const { path } if path.iter().map(|s| s.as_str()).filter(|s| !s.is_empty()).eq(["Proc"])))
+    {
+        *recv = None;
+        *method = Symbol::from("proc");
+    }
+    e
+}
 
 /// Extract one multi-write target — `a`, `@a`, `recv.attr`, or
 /// `recv[i]` (e.g. `link['href'], title = attrs`) — as an `LValue`. Shared by the
@@ -2364,6 +2378,82 @@ fn ingest_expr_node(node: &Node<'_>, file: &str) -> IngestResult<Expr> {
                 None => None,
             };
             ExprNode::Range { begin, end, exclusive: r.is_exclude_end() }
+        }
+        // `/(?<name>..)/ =~ str`: Ruby assigns each named group to a local
+        // of that name (nil on no match) and answers the match's index.
+        // As `Regexp#match`, which sets `$~` the same way:
+        //   __mw = re.match(str); name = __mw ? __mw[:name] : nil
+        //   __mw ? __mw.begin(0) : nil
+        n if n.as_match_write_node().is_some() => {
+            let mw = n.as_match_write_node().unwrap();
+            let call = mw.call();
+            let (Some(regex), Some(args)) = (call.receiver(), call.arguments()) else {
+                return Err(IngestError::Unsupported {
+                    file: file.into(),
+                    message: "a named-capture match without its operands".into(),
+                });
+            };
+            let args: Vec<Node<'_>> = args.arguments().iter().collect();
+            let [subject] = args.as_slice() else {
+                return Err(IngestError::Unsupported {
+                    file: file.into(),
+                    message: "a named-capture match with more than one operand".into(),
+                });
+            };
+            let stem = format!("__mw_{}", span.start);
+            let mut name = stem.clone();
+            let mut suffix = 0;
+            while super::sources::generated_local_is_reserved(&n.location(), &name) {
+                suffix += 1;
+                name = format!("{stem}_{suffix}");
+            }
+            let tmp = Symbol::from(name);
+            let var = |name: &Symbol| Expr::new(span, ExprNode::Var { id: crate::ident::VarId(0), name: name.clone() });
+            let nil = || Expr::new(span, ExprNode::Lit { value: Literal::Nil });
+            let send = |recv: Expr, method: &str, args: Vec<Expr>| {
+                Expr::new(
+                    span,
+                    ExprNode::Send {
+                        recv: Some(recv),
+                        method: Symbol::from(method),
+                        args,
+                        block: None,
+                        parenthesized: true,
+                    },
+                )
+            };
+            let assign = |name: &Symbol, value: Expr| {
+                Expr::new(
+                    span,
+                    ExprNode::Assign {
+                        target: crate::expr::LValue::Var { id: crate::ident::VarId(0), name: name.clone() },
+                        value,
+                    },
+                )
+            };
+            let matched = send(ingest_expr(&regex, file)?, "match", vec![ingest_expr(subject, file)?]);
+            let mut exprs = vec![assign(&tmp, matched)];
+            for target in mw.targets().iter() {
+                let Some(local) = target.as_local_variable_target_node() else {
+                    return Err(IngestError::Unsupported {
+                        file: file.into(),
+                        message: "a named-capture match into a non-local target".into(),
+                    });
+                };
+                let local = Symbol::from(String::from_utf8_lossy(local.name().as_slice()).as_ref());
+                let group = Expr::new(span, ExprNode::Lit { value: Literal::Sym { value: local.clone() } });
+                let read = Expr::new(
+                    span,
+                    ExprNode::If { cond: var(&tmp), then_branch: send(var(&tmp), "[]", vec![group]), else_branch: nil() },
+                );
+                exprs.push(assign(&local, read));
+            }
+            let zero = Expr::new(span, ExprNode::Lit { value: Literal::Int { value: 0 } });
+            exprs.push(Expr::new(
+                span,
+                ExprNode::If { cond: var(&tmp), then_branch: send(var(&tmp), "begin", vec![zero]), else_branch: nil() },
+            ));
+            ExprNode::Seq { exprs }
         }
         n if n.as_regular_expression_node().is_some() => {
             let r = n.as_regular_expression_node().unwrap();

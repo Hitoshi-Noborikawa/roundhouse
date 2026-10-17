@@ -1518,11 +1518,18 @@ pub(super) fn expand_build(
     // The `.to_h` wrap is added by the params-helpers pass when <arg>
     // is a `<x>_params` call — keeping the two concerns separate avoids
     // double-wrapping if <arg> already has `.to_h` for some reason.
+    // A braceless keyword hash (`comments.new(body: nil)`) needs its
+    // braces as an assignment's right-hand side, or the emitted
+    // `attrs = body: nil` is a syntax error.
+    let mut value = arg.clone();
+    if let ExprNode::Hash { kwargs, .. } = &mut *value.node {
+        *kwargs = false;
+    }
     let attrs_assign = Expr::new(
         span,
         ExprNode::Assign {
             target: LValue::Var { id: VarId(0), name: Symbol::from("attrs") },
-            value: arg.clone(),
+            value,
         },
     );
 
@@ -2366,7 +2373,7 @@ fn polymorphic_path(ivar_name: &Symbol, span: Span) -> Expr {
 /// The `Rails.application.routes.url_helpers` receiver chain — Rails'
 /// spelling for reaching a path helper from somewhere with no helper
 /// mixin (a model, a job, a test body).
-fn is_rails_url_helpers_chain(e: &Expr) -> bool {
+pub(crate) fn is_rails_url_helpers_chain(e: &Expr) -> bool {
     let mut node = &*e.node;
     for step in ["url_helpers", "routes", "application"] {
         let ExprNode::Send { recv: Some(r), method, args, block: None, .. } = node else {
