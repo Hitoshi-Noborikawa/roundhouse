@@ -244,9 +244,7 @@ module Db
   # effectively thread-local (each worker thread's root fiber).
   def self.current_dbh
     h = Fiber[:db_handle]
-    # A child thread copies this fiber's storage, including a lease it
-    # does not hold. The owner thread is the only one that may use it.
-    return h if !h.nil? && Fiber[:db_owner] == Thread.current
+    return h if lease_visible?
     # Only the UNLEASED path pays the fork check — boot, tests, and
     # single-threaded dev. Under a lease the line above has already
     # returned, so the per-query cost of all this is zero.
@@ -302,7 +300,19 @@ module Db
   # re-entrant, and a second lease on a thread that holds one would
   # rebind the connection and, on release, unbind the outer lease's.
   def self.in_lease?
-    !Fiber[:db_handle].nil? && Fiber[:db_owner] == Thread.current
+    lease_visible?
+  end
+
+  # A child thread copies fiber storage. An ordinary lease belongs to
+  # the thread that checked it out, so the child takes a connection of
+  # its own (a snapshot stays isolated, and a writer blocked on its
+  # parent's transaction hears SQLITE_BUSY). A fixture BEGIN is
+  # different: the pin is the example's transaction, and threads the
+  # example starts have to read and write that same connection.
+  def self.lease_visible?
+    return false if Fiber[:db_handle].nil?
+    return true if Fiber[:db_owner] == Thread.current
+    Fiber[:db_txn_pin] == true
   end
 
   # `ActiveRecord::Base.connection_db_config` answers from these

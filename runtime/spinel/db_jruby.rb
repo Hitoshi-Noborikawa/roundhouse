@@ -162,9 +162,7 @@ module Db
   # thread-local (each worker thread's root fiber).
   def self.current_dbh
     c = Fiber[:db_handle]
-    # A child thread copies this fiber's storage, including a lease it
-    # does not hold. The owner thread is the only one that may use it.
-    return c if !c.nil? && Fiber[:db_owner] == Thread.current
+    return c if lease_visible?
     @free[0]
   end
 
@@ -212,7 +210,16 @@ module Db
   # re-entrant, and a second lease on a thread that holds one would
   # rebind the connection and, on release, unbind the outer lease's.
   def self.in_lease?
-    !Fiber[:db_handle].nil? && Fiber[:db_owner] == Thread.current
+    lease_visible?
+  end
+
+  # Same rule as db_cruby.rb. An ordinary lease stays with its owner
+  # thread. A fixture BEGIN pin is shared with threads the example
+  # starts, so they see the uncommitted rows.
+  def self.lease_visible?
+    return false if Fiber[:db_handle].nil?
+    return true if Fiber[:db_owner] == Thread.current
+    Fiber[:db_txn_pin] == true
   end
 
   # `ActiveRecord::Base.connection_db_config` answers from these
