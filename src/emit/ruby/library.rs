@@ -2984,7 +2984,7 @@ pub(crate) fn apply_helper_lowering(lcs: &mut [LibraryClass], app: &App) {
     // whether some unrelated file existed.
     let helper_modules: BTreeSet<ClassId> =
         app.helper_method_index.values().cloned().collect();
-    PLAIN_HELPERS.with(|p| *p.borrow_mut() = plain_text_helpers(&app.library_classes, &helper_modules, &app.html_safe_methods));
+    PLAIN_HELPERS.with(|p| *p.borrow_mut() = plain_text_helpers(&app.library_classes, &helper_modules, &app.html_safe_method_owners));
     // Generated route-helper names (`active_path`, `story_path`, …) —
     // bare calls to these in layout/helper bodies resolve to the
     // generated `RouteHelpers` module. (The view walker rewrites route
@@ -3843,7 +3843,7 @@ enum HelperReturn {
 fn plain_text_helpers(
     lcs: &[LibraryClass],
     helper_modules: &BTreeSet<ClassId>,
-    html_safe: &BTreeSet<Symbol>,
+    html_safe: &BTreeSet<(String, String)>,
 ) -> HashMap<(String, String), HelperReturn> {
     fn tails<'a>(e: &'a Expr, out: &mut Vec<&'a Expr>) {
         match &*e.node {
@@ -3882,7 +3882,7 @@ fn plain_text_helpers(
         for (module, m) in &methods {
             let key = (module.clone(), m.name.as_str().to_string());
             // Not one `lower::html_safe` or the tag builder recorded: its `.html_safe` mark was erased, not absent.
-            if read.contains_key(&key) || html_safe.contains(&m.name) {
+            if read.contains_key(&key) || html_safe.contains(&key) {
                 continue;
             }
             let mut out = Vec::new();

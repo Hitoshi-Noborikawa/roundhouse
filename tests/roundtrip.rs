@@ -182,6 +182,7 @@ fn tiny_blog_round_trips() {
         partial_local_types: std::collections::HashMap::new(),
         view_ivar_types: std::collections::HashMap::new(),
         html_safe_methods: std::collections::BTreeSet::new(),
+        html_safe_method_owners: Default::default(),
         time_formats: std::collections::BTreeMap::new(),
         generated_helper_methods: std::collections::BTreeMap::new(),
         module_mixins: Vec::new(),
