@@ -1280,7 +1280,12 @@ fn build_methods_with_finder_inputs(
     // one of these (last-def-wins) — exactly the collapse snapshot
     // semantics needs to see THROUGH, not after.
     let pre_user_methods = methods.clone();
-    push_user_methods(&mut methods, model);
+    let columns: HashSet<crate::ident::Symbol> = schema
+        .tables
+        .get(&model.table.0)
+        .map(|t| t.columns.iter().map(|c| c.name.clone()).collect())
+        .unwrap_or_default();
+    push_user_methods(&mut methods, model, &columns);
     // friendly_id — `friendly`, its configuration and the slug
     // `to_param`. After the user methods (their own wins), before the
     // `to_param` default below.
@@ -1358,7 +1363,7 @@ fn build_methods_with_finder_inputs(
 ///     an earlier real method, but only when that method was already
 ///     selected from the model body; generated framework methods are not
 ///     reordered by source spans.
-fn push_user_methods(methods: &mut Vec<MethodDef>, model: &Model) {
+fn push_user_methods(methods: &mut Vec<MethodDef>, model: &Model, columns: &HashSet<crate::ident::Symbol>) {
     use crate::dialect::{AccessorKind, ModelBodyItem};
     use crate::expr::{ExprNode, LValue};
     let mut selected_source_methods = HashSet::new();
@@ -1406,17 +1411,21 @@ fn push_user_methods(methods: &mut Vec<MethodDef>, model: &Model) {
                     && selected_source_methods.contains(&existing.name_span)
                     && existing.name_span.file == method.name_span.file
                     && method.name_span.start > existing.name_span.start;
-            // A column's accessor yields to the model's own, as Rails' generated attribute methods do; its `super` is the column.
+            // A table column's accessor yields to the model's own, as Rails' generated attribute methods do; not a signed virtual one (`has_secure_password`'s `confirmation=`).
             let existing_is_column = existing.signature.is_some()
-                && matches!(existing.kind, AccessorKind::AttributeReader | AccessorKind::AttributeWriter);
-            // (`ingest::column_accessors` has already written its `super` as the attribute.)
+                && matches!(existing.kind, AccessorKind::AttributeReader | AccessorKind::AttributeWriter)
+                && columns.contains(&crate::ident::Symbol::from(existing.name.as_str().trim_end_matches('=')));
             if incoming_is_real && existing_is_column && !method.name_span.is_synthetic() {
-                // The synthesized writer stays, under the name hydration writes through (`schema::hydration_setter`): a loaded row does not run the model's writer.
-                let raw = (existing.kind == AccessorKind::AttributeWriter).then(|| {
+                // The synthesized accessor stays, under the name the override's `super` (`ingest::column_accessors`) and hydration (`schema::hydration_setter`) reach it by.
+                let raw = {
                     let mut raw = existing.clone();
-                    raw.name = crate::ident::Symbol::from(format!("_write_{}_raw", existing.name.as_str().trim_end_matches('=')));
-                    raw
-                });
+                    let column = existing.name.as_str().trim_end_matches('=');
+                    raw.name = crate::ident::Symbol::from(match existing.kind {
+                        AccessorKind::AttributeWriter => format!("_write_{column}_raw"),
+                        _ => format!("_read_{column}_raw"),
+                    });
+                    Some(raw)
+                };
                 selected_source_methods.remove(&existing.name_span);
                 if let Some(raw) = raw
                     && !methods.iter().any(|m| m.name == raw.name && m.receiver == raw.receiver)

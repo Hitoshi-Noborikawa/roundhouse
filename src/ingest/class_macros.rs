@@ -748,7 +748,6 @@ fn collect_locals(e: &Expr, out: &mut HashSet<Symbol>) {
         ExprNode::Assign { target: LValue::Var { name, .. }, .. } | ExprNode::OpAssign { target: LValue::Var { name, .. }, .. } => {
             out.insert(name.clone());
         }
-        ExprNode::Lambda { params, .. } => out.extend(params.iter().cloned()),
         _ => {}
     });
 }

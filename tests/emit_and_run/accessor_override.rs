@@ -37,3 +37,17 @@ fn an_association_accessor_override_is_reported() {
         .emit(BuildTarget::Ruby);
     assert!(errors.iter().any(|e| e.contains("`Article#comments` overrides the accessor its association defines")), "{errors:#?}");
 }
+
+/// The override's `super` is the generated writer, `normalizes` included,
+/// not a `[]=` the model defines.
+#[test]
+fn an_override_s_super_runs_the_generated_writer() {
+    emit_and_run::real_blog()
+        .edit(
+            "app/models/article.rb",
+            "  validates :title, presence: true\n",
+            "  validates :title, presence: true\n  normalizes :title, with: ->(t) { t.strip }\n\n  def title=(value)\n    super(value.to_s + \"!  \")\n  end\n",
+        )
+        .run_ruby("a = Article.new(title: \"  hi\", body: \"a body long enough\")\nraise a.title.inspect unless a.title == \"hi!\"\nputs \"normalized\"\n")
+        .assert_passes();
+}

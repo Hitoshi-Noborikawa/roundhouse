@@ -30,6 +30,7 @@ const BASE: &str = r###"class SettingsBase < ApplicationRecord
       @defined_settings << { key: key, default: default, type: type }
 
       define_singleton_method(key) do |scope: nil|
+        [1].each { |key| key.to_s }
         result = stored(key)
         result = default if result.nil?
         convert(type, result)
