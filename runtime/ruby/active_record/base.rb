@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 require_relative "errors"
 require "time"
 
@@ -175,16 +176,21 @@ module ActiveRecord
 
   # One error as Rails' `ActiveModel::Error` holds it: the attribute, the
   # error type (the message itself when `errors.add` was given a String),
-  # and the message without the attribute's name.
+  # the message without the attribute's name, the full message
+  # `errors` lists for it, whether the type is a Symbol, and whether
+  # Rails' `details` keeps nothing beside the type (no `count:` or `value:`).
   # Not `ActiveModel::Error`: the strict targets emit the class unqualified, beside their own `Error`.
   class ErrorDetail
     # `kind`, not Rails' `type`: a field named `type` does not compile in Rust or Go
-    attr_reader :attribute, :kind, :message
+    attr_reader :attribute, :kind, :message, :full_message, :symbolic, :optionless
 
-    def initialize(attribute, kind, message)
+    def initialize(attribute, kind, message, full_message, symbolic, optionless)
       @attribute = attribute
       @kind = kind
       @message = message
+      @full_message = full_message
+      @symbolic = symbolic
+      @optionless = optionless
     end
   end
 
@@ -199,60 +205,83 @@ module ActiveRecord
     def self.sanitize_sql_like(value, escape_character = "\\")
       source = value
       if escape_character != "%" && escape_character != "_" && !escape_character.empty?
-        doubled = ""
-        index = 0
-        while index < value.length
-          if value[index, escape_character.length] == escape_character
-            doubled += escape_character + escape_character
-            index += escape_character.length
-          else
-            doubled += value[index, 1]
-            index += 1
-          end
-        end
-        source = doubled
+        source = like_escapes_doubled(value, escape_character)
       end
+      like_wildcards_marked(source, escape_character)
+    end
 
+    # The helpers below hold one counter loop each, accumulating with `x = x + y` rather than `+=`: the Elixir emit turns only that shape into recursion.
+    # `gsub(escape_character, '\0\0')`: every escape character doubled.
+    def self.like_escapes_doubled(value, escape_character)
+      doubled = ""
+      index = 0
+      while index < value.length
+        piece = value[index, 1]
+        step = 1
+        if value[index, escape_character.length] == escape_character
+          piece = escape_character + escape_character
+          step = escape_character.length
+        end
+        doubled = doubled + piece
+        index += step
+      end
+      doubled
+    end
+
+    # `gsub(/(?=[%_])/, escape_character)`: the expanded replacement before each wildcard.
+    def self.like_wildcards_marked(source, escape_character)
       result = ""
       index = 0
       while index < source.length
         character = source[index, 1]
         if character == "%" || character == "_"
-          # gsub replacement escapes expand against a zero-width match here.
-          replacement_index = 0
-          while replacement_index < escape_character.length
-            replacement = escape_character[replacement_index, 1]
-            if replacement == "\\" && replacement_index + 1 < escape_character.length
-              replacement = escape_character[replacement_index + 1, 1]
-              if replacement == "\\"
-                result += replacement
-              elsif replacement == "`"
-                result += source[0, index]
-              elsif replacement == "'"
-                result += source[index, source.length - index]
-              elsif replacement == "k" && escape_character[replacement_index + 2, 1] == "<"
-                group_name = ""
-                group_index = replacement_index + 3
-                while group_index < escape_character.length && escape_character[group_index, 1] != ">"
-                  group_name += escape_character[group_index, 1]
-                  group_index += 1
-                end
-                raise RuntimeError, "invalid group name reference format" if group_index == escape_character.length
-                raise IndexError, "undefined group name reference: " + group_name
-              elsif !"0123456789&+".include?(replacement)
-                result += "\\" + replacement
-              end
-              replacement_index += 2
-            else
-              result += replacement
-              replacement_index += 1
-            end
-          end
+          result = result + like_replacement(source, index, escape_character)
         end
-        result += character
+        result = result + character
         index += 1
       end
       result
+    end
+
+    # gsub replacement escapes expand against a zero-width match at `index`.
+    def self.like_replacement(source, index, escape_character)
+      result = ""
+      replacement_index = 0
+      while replacement_index < escape_character.length
+        replacement = escape_character[replacement_index, 1]
+        step = 1
+        if replacement == "\\" && replacement_index + 1 < escape_character.length
+          step = 2
+          replacement = escape_character[replacement_index + 1, 1]
+          if replacement == "\\"
+            result = result + replacement
+          elsif replacement == "`"
+            result = result + source[0, index]
+          elsif replacement == "'"
+            result = result + source[index, source.length - index]
+          elsif replacement == "k" && escape_character[replacement_index + 2, 1] == "<"
+            like_group_reference(escape_character, replacement_index + 3)
+          elsif !"0123456789&+".include?(replacement)
+            result = result + "\\" + replacement
+          end
+        else
+          result = result + replacement
+        end
+        replacement_index += step
+      end
+      result
+    end
+
+    # A named group reference raises: the zero-width match has no groups.
+    def self.like_group_reference(escape_character, start)
+      group_name = ""
+      group_index = start
+      while group_index < escape_character.length && escape_character[group_index, 1] != ">"
+        group_name = group_name + escape_character[group_index, 1]
+        group_index += 1
+      end
+      raise RuntimeError, "invalid group name reference format" if group_index == escape_character.length
+      raise IndexError, "undefined group name reference: " + group_name
     end
 
     # No `attr_accessor :id` and no `@id` here — the key lives on each
@@ -315,6 +344,13 @@ module ActiveRecord
     def error_messages_for(attribute)
       out = []
       error_details.each { |error| out << error.message if error.attribute == attribute }
+      out
+    end
+
+    # Not `errors`, the full messages: Rails renders a record's errors keyed by attribute, as `errors.as_json` answers.
+    def errors_json
+      out = {}
+      error_details.each { |error| out[error.attribute] = error_messages_for(error.attribute) }
       out
     end
 
@@ -884,6 +920,16 @@ module ActiveRecord
       # done, as Rails runs them after the transaction: an
       # `after_update_commit` reads what `after_save` wrote (an
       # attachment, a rich-text body), not the record half saved.
+      _save_committed(was_new)
+      true
+    end
+
+    # A save's commit callbacks. Here they run at once, since a strict
+    # target has no transaction for them to wait on; the ruby-family
+    # reopen (connection.rb) holds them until the enclosing
+    # transaction's COMMIT, and drops them on its ROLLBACK, as Rails
+    # does.
+    def _save_committed(was_new)
       if was_new
         after_create_commit
       else
@@ -891,7 +937,12 @@ module ActiveRecord
       end
       after_save_commit
       after_commit
-      true
+    end
+
+    # `destroy`'s half of the same seam.
+    def _destroy_committed
+      after_destroy_commit
+      after_commit
     end
 
     # A row inserted raw, as Rails' fixture loader (`insert_fixtures_set`)
@@ -1117,8 +1168,8 @@ module ActiveRecord
     # its Message, and Message's own `belongs_to :room, touch: true`
     # is registered on `after_touch` — so without this call the
     # cascade stops one level short and a room's `updated_at` never
-    # moves. (Rails also fires the commit callbacks here; this runtime
-    # still does not, and that half of the divergence stands.)
+    # moves. (Rails also fires the commit callbacks here; the ruby-family
+    # reopen in connection.rb does, the strict targets still do not.)
     #
     # The bare form writes `updated_at` ALONE (`_adapter_touch`), as
     # Rails' `touch` does. Writing the whole row put back every column
@@ -1161,8 +1212,7 @@ module ActiveRecord
       @persisted = false
       @destroyed = true
       after_destroy
-      after_destroy_commit
-      after_commit
+      _destroy_committed
       self
     end
 

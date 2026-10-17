@@ -19,107 +19,129 @@ use crate::ident::{ClassId, Symbol};
 use crate::span::Span;
 use crate::ty::Ty;
 
-use super::{fn_sig, seq};
+use super::{fn_sig, seq, ErrorsReaders};
 
-pub(super) fn push_validate_method(methods: &mut Vec<MethodDef>, model: &Model, models: &[Model]) {
+pub(super) fn push_validate_method(
+    methods: &mut Vec<MethodDef>,
+    model: &Model,
+    models: &[Model],
+    errors_readers: ErrorsReaders,
+) {
     let msgs = Messages(Some(model));
     let mut stmts: Vec<Expr> = Vec::new();
 
-    for (span, v) in model.spanned_validations() {
-        // Column type from the model's attributes row (when present).
-        // Lets the per-rule generator skip dead `is_a?(Array)` branches
-        // for fields the schema declares as `Str` — tsc narrows
-        // `Array.isArray(stringField)` to `never` and rejects the
-        // subsequent `.length` access.
-        let attr_ty = model.attributes.fields.get(&v.attribute);
-        // `validates :user, presence: true` on a `belongs_to :user` (or
-        // `has_one`) names the ASSOCIATION, and Rails asks its reader —
-        // `user.blank?`, nil for a record. There is no `@user` slot: the
-        // writer sets `@user_id` and caches the record, so the column
-        // check below read an ivar nothing writes and rejected every
-        // record. The 2023 lobsters snapshot's ReadRibbon validates this
-        // way, and its story page (reached once `around_action` ran)
-        // could never save a ribbon.
-        let is_assoc = model.associations().any(|a| {
-            matches!(a, Association::BelongsTo { name, .. } | Association::HasOne { name, .. }
-                if name == &v.attribute)
-        });
-        for rule in &v.rules {
-            if is_assoc && matches!(rule, ValidationRule::Presence) {
-                let reader = Expr::new(
-                    Span::synthetic(),
-                    ExprNode::Send {
-                        recv: None,
-                        method: v.attribute.clone(),
-                        args: vec![],
-                        block: None,
-                        parenthesized: false,
-                    },
-                );
-                let mut check = if_with_nil_else(
-                    send(reader, "nil?", vec![]),
-                    errors_push(v.attribute.as_str(), msgs.error(v.attribute.as_str(), "blank", &Default::default())),
-                );
-                check.inherit_span(span);
-                stmts.push(check);
-                continue;
+    // One pass in declaration order: Rails checks a `belongs_to` where it is declared, among the `validates`, so its error lists there.
+    for item in &model.body {
+        let span = item.span();
+        match item {
+            crate::dialect::ModelBodyItem::Validation { validation: v, .. } => {
+                // Column type from the model's attributes row (when present).
+                // Lets the per-rule generator skip dead `is_a?(Array)` branches
+                // for fields the schema declares as `Str` — tsc narrows
+                // `Array.isArray(stringField)` to `never` and rejects the
+                // subsequent `.length` access.
+                let attr_ty = model.attributes.fields.get(&v.attribute);
+                // `validates :user, presence: true` on a `belongs_to :user` (or
+                // `has_one`) names the ASSOCIATION, and Rails asks its reader —
+                // `user.blank?`, nil for a record. There is no `@user` slot: the
+                // writer sets `@user_id` and caches the record, so the column
+                // check below read an ivar nothing writes and rejected every
+                // record. The 2023 lobsters snapshot's ReadRibbon validates this
+                // way, and its story page (reached once `around_action` ran)
+                // could never save a ribbon.
+                let is_assoc = model.associations().any(|a| {
+                    matches!(a, Association::BelongsTo { name, .. } | Association::HasOne { name, .. }
+                        if name == &v.attribute)
+                });
+                for rule in &v.rules {
+                    if is_assoc && matches!(rule, ValidationRule::Presence) {
+                        let reader = Expr::new(
+                            Span::synthetic(),
+                            ExprNode::Send {
+                                recv: None,
+                                method: v.attribute.clone(),
+                                args: vec![],
+                                block: None,
+                                parenthesized: false,
+                            },
+                        );
+                        let mut check = if_with_nil_else(
+                            send(reader, "nil?", vec![]),
+                            errors_push(v.attribute.as_str(), msgs.error(v.attribute.as_str(), "blank", &Default::default())),
+                        );
+                        check.inherit_span(span);
+                        stmts.push(check);
+                        continue;
+                    }
+                    for mut check in validation_rule_to_calls(msgs, &v.attribute, rule, attr_ty) {
+                        // Each expanded check attributes to its `validates` line.
+                        check.inherit_span(span);
+                        stmts.push(check);
+                    }
+                }
             }
-            for mut check in validation_rule_to_calls(msgs, &v.attribute, rule, attr_ty) {
-                // Each expanded check attributes to its `validates` line.
-                check.inherit_span(span);
-                stmts.push(check);
+            crate::dialect::ModelBodyItem::Association { assoc, .. } => {
+                // Rails 5+ default: every `belongs_to` requires the associated
+                // record to exist before save. Emit `validates_belongs_to(:assoc,
+                // @<fk>, <Target>)` per non-optional belongs_to. The runtime
+                // helper short-circuits when the FK is unset (nil/0) and queries
+                // `<Target>.exists?(fk_value)` otherwise (by the association's
+                // `primary_key:` when it names a column other than the target's key).
+                if let Association::BelongsTo {
+                    name, target, foreign_key, optional: false, polymorphic, primary_key, ..
+                } = assoc
+                {
+                    // The foreign key holds the association's primary key; the
+                    // existence lookup goes by that column when it is not the
+                    // target's own key (`primary_key: "uuid"`).
+                    let assoc_pk =
+                        crate::lower::scope_chain::association_primary_key(models, target, primary_key.as_ref());
+                    let own_pk = crate::lower::scope_chain::association_primary_key(models, target, None);
+                    let lookup_pk = (assoc_pk != own_pk).then_some(&assoc_pk);
+                    let mut check =
+                        inline_belongs_to_check(msgs, name, foreign_key, target, lookup_pk, *polymorphic);
+                    check.inherit_span(span);
+                    stmts.push(check);
+                }
             }
-        }
-    }
-
-    // Rails 5+ default: every `belongs_to` requires the associated
-    // record to exist before save. Emit `validates_belongs_to(:assoc,
-    // @<fk>, <Target>)` per non-optional belongs_to. The runtime
-    // helper short-circuits when the FK is unset (nil/0) and queries
-    // `<Target>.exists?(fk_value)` otherwise (by the association's
-    // `primary_key:` when it names a column other than the target's key).
-    for (span, assoc) in model.spanned_associations() {
-        if let Association::BelongsTo {
-            name, target, foreign_key, optional: false, polymorphic, primary_key, ..
-        } = assoc
-        {
-            // The foreign key holds the association's primary key; the
-            // existence lookup goes by that column when it is not the
-            // target's own key (`primary_key: "uuid"`).
-            let assoc_pk =
-                crate::lower::scope_chain::association_primary_key(models, target, primary_key.as_ref());
-            let own_pk = crate::lower::scope_chain::association_primary_key(models, target, None);
-            let lookup_pk = (assoc_pk != own_pk).then_some(&assoc_pk);
-            let mut check =
-                inline_belongs_to_check(msgs, name, foreign_key, target, lookup_pk, *polymorphic);
-            check.inherit_span(span);
-            stmts.push(check);
+            _ => {}
         }
     }
 
     stmts.extend(secure_password_checks(model));
 
-    if stmts.is_empty() {
+    // An ActiveModel class with no rule still has `errors`: `errors.add`
+    // in its own methods needs the same surface a validating one gets.
+    let active_model = model.parent.is_none() && includes_active_model_validations(model);
+    if stmts.is_empty() && !active_model {
         return;
     }
 
-    methods.push(MethodDef {
-        visibility: crate::dialect::MethodVisibility::Public,
-        unsupported_formals: None,
-        has_anonymous_block: false,
-        name_span: crate::span::Span::synthetic(),
-        name: Symbol::from("validate"),
-        receiver: MethodReceiver::Instance,
-        params: Vec::new(),
-        body: seq(stmts),
-        signature: Some(fn_sig(vec![], Ty::Nil)),
-        effects: EffectSet::default(),
-        enclosing_class: Some(model.name.0.clone()),
-        kind: AccessorKind::Method,
-        is_async: false,
+    // Empty synth must not shadow a source `def validate`:
+    // `push_user_methods` keeps Method synthesizers over source defs, so
+    // pushing here would drop the user's body on the newly opened
+    // ruleless ActiveModel path. Still emit the surface below.
+    let source_validate =
+        super::model_defines_instance_method(model, &Symbol::from("validate"));
+    if !(stmts.is_empty() && source_validate) {
+        methods.push(MethodDef {
+            visibility: crate::dialect::MethodVisibility::Public,
+            unsupported_formals: None,
+            has_anonymous_block: false,
+            name_span: crate::span::Span::synthetic(),
+            name: Symbol::from("validate"),
+            receiver: MethodReceiver::Instance,
+            params: Vec::new(),
+            body: seq(stmts),
+            signature: Some(fn_sig(vec![], Ty::Nil)),
+            effects: EffectSet::default(),
+            enclosing_class: Some(model.name.0.clone()),
+            kind: AccessorKind::Method,
+            is_async: false,
             mutates_self: false,
             block_param: None,
-    });
+        });
+    }
 
     // A validating model OUTSIDE the ActiveRecord hierarchy (`class
     // Search` + `include ActiveModel::Validations`, no superclass)
@@ -127,7 +149,7 @@ pub(super) fn push_validate_method(methods: &mut Vec<MethodDef>, model: &Model, 
     // synthesize the same pair here. Skipped when the source defines
     // either name itself.
     if model.parent.is_none() {
-        push_active_model_validation_surface(methods, model);
+        push_active_model_validation_surface(methods, model, errors_readers);
     }
 }
 
@@ -253,10 +275,8 @@ pub(super) fn push_active_model_constructor(methods: &mut Vec<MethodDef>, model:
     ));
 }
 
-/// `include ActiveModel::Model` in the class body. The narrower
-/// `ActiveModel::Validations` brings `valid?`/`errors` and no
-/// constructor, so the two are not interchangeable here.
-fn includes_active_model_model(model: &Model) -> bool {
+/// Bare `include ActiveModel::<leaf>` in the class body for any of `modules`.
+fn includes_active_model(model: &Model, modules: &[&str]) -> bool {
     model.body.iter().any(|item| {
         let crate::dialect::ModelBodyItem::Unknown { expr, .. } = item else { return false };
         let ExprNode::Send { recv: None, method, args, .. } = &*expr.node else {
@@ -266,8 +286,21 @@ fn includes_active_model_model(model: &Model) -> bool {
             && args.iter().any(|a| matches!(&*a.node,
                 ExprNode::Const { path } if path.len() == 2
                     && path[0].as_str() == "ActiveModel"
-                    && path[1].as_str() == "Model"))
+                    && modules.contains(&path[1].as_str())))
     })
+}
+
+/// `include ActiveModel::Validations` or `include ActiveModel::Model`
+/// (which includes it) in the class body.
+fn includes_active_model_validations(model: &Model) -> bool {
+    includes_active_model(model, &["Validations", "Model"])
+}
+
+/// `include ActiveModel::Model` in the class body. The narrower
+/// `ActiveModel::Validations` brings `valid?`/`errors` and no
+/// constructor, so the two are not interchangeable here.
+fn includes_active_model_model(model: &Model) -> bool {
+    includes_active_model(model, &["Model"])
 }
 
 /// `before_validation :sanitize_fields` in the model body. Only the
@@ -284,7 +317,7 @@ fn declares_before_validation(model: &Model) -> bool {
 
 /// `valid?` + `errors` mirroring the runtime Base implementations,
 /// for `include ActiveModel::Validations` classes with no superclass.
-fn push_active_model_validation_surface(methods: &mut Vec<MethodDef>, model: &Model) {
+fn push_active_model_validation_surface(methods: &mut Vec<MethodDef>, model: &Model, errors_readers: ErrorsReaders) {
     let defines = |name: &str| {
         model.body.iter().any(|item| matches!(
             item,
@@ -387,8 +420,8 @@ fn push_active_model_validation_surface(methods: &mut Vec<MethodDef>, model: &Mo
             name: Symbol::from("errors"),
             receiver: MethodReceiver::Instance,
             params: Vec::new(),
-            body: errors_read(),
-            signature: Some(fn_sig(vec![], Ty::Array { elem: Box::new(Ty::Str) })),
+            body: errors_reader(span, errors_readers, "errors", Ty::Array { elem: std::sync::Arc::new(Ty::Str) }),
+            signature: Some(fn_sig(vec![], Ty::Array { elem: std::sync::Arc::new(Ty::Str) })),
             effects: EffectSet::default(),
             enclosing_class: Some(model.name.0.clone()),
             kind: AccessorKind::Method,
@@ -406,7 +439,7 @@ fn push_active_model_validation_surface(methods: &mut Vec<MethodDef>, model: &Mo
             name: Symbol::from("error_details"),
             receiver: MethodReceiver::Instance,
             params: Vec::new(),
-            body: Expr::new(span, ExprNode::Ivar { name: Symbol::from("error_details") }),
+            body: errors_reader(span, errors_readers, "error_details", crate::lower::errors_add::error_details_ty()),
             signature: Some(fn_sig(vec![], crate::lower::errors_add::error_details_ty())),
             effects: EffectSet::default(),
             enclosing_class: Some(model.name.0.clone()),
@@ -424,8 +457,8 @@ fn push_active_model_validation_surface(methods: &mut Vec<MethodDef>, model: &Mo
             name: Symbol::from("error_messages_for"),
             receiver: MethodReceiver::Instance,
             params: vec![crate::dialect::Param::positional(Symbol::from("attribute"))],
-            body: error_messages_for_body(span),
-            signature: Some(fn_sig(vec![(Symbol::from("attribute"), Ty::Str)], Ty::Array { elem: Box::new(Ty::Str) })),
+            body: error_messages_for_body(span, errors_readers),
+            signature: Some(fn_sig(vec![(Symbol::from("attribute"), Ty::Str)], Ty::Array { elem: std::sync::Arc::new(Ty::Str) })),
             effects: EffectSet::default(),
             enclosing_class: Some(model.name.0.clone()),
             kind: AccessorKind::Method,
@@ -436,10 +469,32 @@ fn push_active_model_validation_surface(methods: &mut Vec<MethodDef>, model: &Mo
     }
 }
 
-/// `out = []; @error_details.each { |e| out << e.message if e.attribute == attribute }; out`,
-/// the body `ActiveRecord::Base#error_messages_for` has in the shared runtime.
-fn error_messages_for_body(span: Span) -> Expr {
-    let str_array = Ty::Array { elem: Box::new(Ty::Str) };
+/// `@<name> ||= []`, created on first read as Rails' `errors` is, so an
+/// `errors.add` before any `valid?` has a list to add to; `@<name>` for
+/// `ErrorsReaders::FieldRead`.
+fn errors_reader(span: Span, errors_readers: ErrorsReaders, name: &str, ty: Ty) -> Expr {
+    if errors_readers == ErrorsReaders::FieldRead {
+        return Expr::new(span, ExprNode::Ivar { name: Symbol::from(name) });
+    }
+    let mut empty = Expr::new(span, ExprNode::Array { elements: vec![], style: ArrayStyle::default() });
+    empty.ty = Some(ty.clone());
+    let mut read = Expr::new(
+        span,
+        ExprNode::OpAssign {
+            target: crate::expr::LValue::Ivar { name: Symbol::from(name) },
+            op: crate::expr::OpAssignOp::OrOr,
+            value: empty,
+        },
+    );
+    read.ty = Some(ty);
+    read
+}
+
+/// `out = []; error_details.each { |e| out << e.message if e.attribute == attribute }; out`,
+/// the body `ActiveRecord::Base#error_messages_for` has in the shared runtime
+/// (`@error_details.each` for `ErrorsReaders::FieldRead`).
+fn error_messages_for_body(span: Span, errors_readers: ErrorsReaders) -> Expr {
+    let str_array = Ty::Array { elem: std::sync::Arc::new(Ty::Str) };
     let typed = |node: ExprNode, ty: Ty| {
         let mut e = Expr::new(span, node);
         e.ty = Some(ty);
@@ -449,7 +504,7 @@ fn error_messages_for_body(span: Span) -> Expr {
     let call = |recv: Expr, method: &str, args: Vec<Expr>, ty: Ty| {
         typed(ExprNode::Send { recv: Some(recv), method: Symbol::from(method), args, block: None, parenthesized: false }, ty)
     };
-    let error_ty = Ty::Class { id: ClassId(Symbol::from("ActiveRecord::ErrorDetail")), args: vec![] };
+    let error_ty = Ty::Class { id: ClassId(Symbol::from("ActiveRecord::ErrorDetail")), args: vec![].into() };
     let error = || var("e", error_ty.clone());
     let picked = typed(
         ExprNode::If {
@@ -470,7 +525,13 @@ fn error_messages_for_body(span: Span) -> Expr {
             block_style: crate::expr::BlockStyle::Brace,
         },
     );
-    let details = typed(ExprNode::Ivar { name: Symbol::from("error_details") }, crate::lower::errors_add::error_details_ty());
+    let details_read = match errors_readers {
+        ErrorsReaders::FieldRead => ExprNode::Ivar { name: Symbol::from("error_details") },
+        ErrorsReaders::CreatedOnFirstRead => {
+            ExprNode::Send { recv: None, method: Symbol::from("error_details"), args: vec![], block: None, parenthesized: false }
+        }
+    };
+    let details = typed(details_read, crate::lower::errors_add::error_details_ty());
     let each = typed(
         ExprNode::Send { recv: Some(details), method: Symbol::from("each"), args: vec![], block: Some(block), parenthesized: false },
         crate::lower::errors_add::error_details_ty(),
@@ -595,7 +656,10 @@ fn inline_belongs_to_check(
             ExprNode::Lit { value: Literal::Int { value: 0 } },
         )],
     );
-    let push_err = errors_push(assoc_name.as_str(), msgs.error(assoc_name.as_str(), "required", &Default::default()));
+    // Not a `:required` error: Rails' `belongs_to` validates presence with `message: :required`, so the type stays `:blank`.
+    let mut message = msgs.error(assoc_name.as_str(), "required", &Default::default());
+    message.kind = "blank".to_string();
+    let push_err = errors_push(assoc_name.as_str(), message);
     if polymorphic {
         return if_with_nil_else(bool_op(BoolOpKind::Or, nil_check, zero_check), push_err);
     }
@@ -1119,6 +1183,8 @@ impl Messages<'_> {
             full: parts(i18n.full_error(attr, kind, opts)),
             kind: kind.to_string(),
             bare: parts(i18n.error(attr, kind, opts)),
+            // The others carry `count:`, `value:` or `attribute:` beside the type in Rails' `details`.
+            optionless: matches!(kind, "blank" | "present" | "required" | "accepted" | "password_too_long"),
         }
     }
 }
@@ -1127,6 +1193,7 @@ pub(crate) struct Message {
     full: Expr,
     kind: String,
     bare: Expr,
+    optionless: bool,
 }
 
 // ── IR helpers ────────────────────────────────────────────────
@@ -1176,7 +1243,7 @@ fn errors_push(attribute: &str, msg: Message) -> Expr {
         },
     );
     let kind = Expr::new(Span::synthetic(), ExprNode::Lit { value: Literal::Str { value: msg.kind } });
-    crate::lower::errors_add::attributed_push(send(errors_call, "<<", vec![msg.full]), None, attribute, kind, msg.bare, Span::synthetic())
+    crate::lower::errors_add::attributed_push(send(errors_call, "<<", vec![msg.full]), None, attribute, kind, true, msg.optionless, msg.bare, Span::synthetic())
 }
 
 fn if_with_nil_else(cond: Expr, then_branch: Expr) -> Expr {
@@ -1285,7 +1352,7 @@ mod tests {
 
     #[test]
     fn presence_array_typed_attr_drops_is_a_string_branch() {
-        let expr = inline_presence_check(Messages::default(), &attr(), Some(&Ty::Array { elem: Box::new(Ty::Str) }));
+        let expr = inline_presence_check(Messages::default(), &attr(), Some(&Ty::Array { elem: std::sync::Arc::new(Ty::Str) }));
         let dbg = format!("{:?}", expr);
         assert!(
             !dbg.contains("\"String\""),

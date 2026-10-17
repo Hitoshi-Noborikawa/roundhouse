@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 # ActiveSupport::Duration for the spinel (AOT) tree.
 #
 # The value class HALF of the CRuby overlay's
@@ -169,6 +170,10 @@ module ActiveSupport
     # method on this lane.
     def <=>(other)
       @seconds <=> (other.is_a?(Duration) ? other.seconds : other)
+    end
+
+    def coerce(other)
+      [other, @seconds]
     end
 
     def <(other)

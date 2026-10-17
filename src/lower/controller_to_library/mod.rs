@@ -101,7 +101,7 @@ fn json_actions_for(
 
 /// Each action's templates in the TEXT formats the implicit render
 /// negotiates beyond html and json, in test order: `turbo_stream`, then
-/// `js`. Same scan `json_actions_for` does for jbuilder.
+/// `js`, then `md`. Same scan `json_actions_for` does for jbuilder.
 ///
 /// Turbo negotiates `text/vnd.turbo-stream.html` on a form submission
 /// and Rails renders `<action>.turbo_stream.erb` for it; without the
@@ -126,7 +126,7 @@ fn text_format_actions_for(controller: &Controller, views: &[crate::dialect::Vie
     // controller's module has to go through to match a view name.
     let dir = crate::naming::underscore(&module);
     let prefix = format!("{dir}/");
-    for fmt in ["turbo_stream", "js"] {
+    for fmt in ["turbo_stream", "js", "md"] {
         for v in views {
             if v.format.as_str() != fmt || v.jbuilder {
                 continue;
@@ -485,8 +485,8 @@ pub fn lower_controllers_with_arel_views_assocs_and_routes(
     framework_ivars.insert(
         Symbol::from("params"),
         Ty::Hash {
-            key: Box::new(Ty::Str),
-            value: Box::new(Ty::Untyped),
+            key: std::sync::Arc::new(Ty::Str),
+            value: std::sync::Arc::new(Ty::Untyped),
         },
     );
     // `@flash` is also framework-guaranteed: the render-rewrite emits
@@ -500,7 +500,7 @@ pub fn lower_controllers_with_arel_views_assocs_and_routes(
         Symbol::from("flash"),
         Ty::Class {
             id: ClassId(Symbol::from("ActionDispatch::Flash")),
-            args: vec![],
+            args: vec![].into(),
         },
     );
     // `@session` ditto — per Phase 2.5(b), typed as the per-app
@@ -510,7 +510,7 @@ pub fn lower_controllers_with_arel_views_assocs_and_routes(
         Symbol::from("session"),
         Ty::Class {
             id: ClassId(Symbol::from("ActionDispatch::Session")),
-            args: vec![],
+            args: vec![].into(),
         },
     );
 
@@ -608,6 +608,7 @@ pub fn lower_controllers_with_arel_views_assocs_and_routes(
             parent: controller.parent.clone(),
             parent_span: controller.parent_span,
             includes: Vec::new(),
+            include_spans: Vec::new(),
             methods,
             nullable_columns: Vec::new(),
             origin: None,
@@ -691,6 +692,7 @@ pub fn lower_controller_to_library_class(controller: &Controller) -> LibraryClas
         parent: controller.parent.clone(),
         parent_span: controller.parent_span,
         includes: Vec::new(),
+        include_spans: Vec::new(),
         methods,
         nullable_columns: Vec::new(),
         origin: None,
@@ -981,7 +983,7 @@ fn subclass_template_hooks(
         let hook = rewrites::subclass_template_hook_name(&stem);
         // `show_json` → (`show`, `format: :json`); `show` → (`show`, none).
         let (template, format) = match stem.rsplit_once('_') {
-            Some((t, f)) if matches!(f, "json" | "turbo_stream" | "svg") => (t.to_string(), Some(f.to_string())),
+            Some((t, f)) if matches!(f, "json" | "turbo_stream" | "svg" | "md") => (t.to_string(), Some(f.to_string())),
             _ => (stem.clone(), None),
         };
         for (methods, controller) in all_methods.iter_mut() {
@@ -1397,20 +1399,26 @@ fn build_methods(
             all_controllers,
             &dispatcher_bodies(&preamble, &wraps, &rescues),
         );
-        methods.insert(
-            dispatcher_at,
-            synthesize_process_action(
-                &preamble,
-                &publics_inlined,
-                &inherited,
-                controller.name.0.clone(),
-                &deferred_tails,
-                &rescues,
-                &wraps,
-                reads,
-                &missing,
-            ),
+        let mut dispatcher = synthesize_process_action(
+            &preamble,
+            &publics_inlined,
+            &inherited,
+            controller.name.0.clone(),
+            &deferred_tails,
+            &rescues,
+            &wraps,
+            reads,
+            &missing,
         );
+        // Block-form filters are inlined into `process_action` after
+        // `rewrite_controller_route_helpers` has already run on action
+        // bodies. A CSP block calls `service_worker_path(format: :js)`,
+        // which `route_format_suffix` renamed. The rewrite is idempotent
+        // on nodes it has already touched, so every dispatcher gets it —
+        // the next block filter that names a helper would otherwise stay bare.
+        dispatcher.body =
+            rewrite_controller_route_helpers(&dispatcher.body, &shadows, route_id_segments);
+        methods.insert(dispatcher_at, dispatcher);
     }
     // The empty set for both non-public loops below: `is_public: false`
     // already suppresses the implicit render, so there is never one to
@@ -1566,15 +1574,33 @@ fn synthesize_controller_string_method(
 }
 
 /// Names a controller marks with `helper_method :x` whose public
-/// method body is IVAR-FREE (pure over its arguments) — the set the
-/// view-call rewrite and the class-side clone above serve. Shared with
-/// ingest, which registers these in `app.helper_method_index`.
+/// method body is pure over its arguments - the set the view-call
+/// rewrite and the class-side clone above serve. Shared with ingest,
+/// which registers these in `app.helper_method_index`.
+///
+/// Pure means it reads no instance state: no ivar, and none of the
+/// request's state the controller instance carries (`session`,
+/// `cookies`, `request`, `params`, ...). In Rails a helper method runs
+/// on the controller that handles the request; a class-side clone has no
+/// request, and a clone of an `authenticated?` that reads
+/// `session[:authenticated_at]` read `session` off the class, which no
+/// target can compile.
 pub(crate) fn controller_helper_method_names(controller: &Controller) -> Vec<Symbol> {
     use crate::expr::Literal;
+
+    const REQUEST_STATE: &[&str] = &[
+        "session", "cookies", "request", "response", "params", "flash", "headers",
+        "reset_session", "request_forgery_protection_token", "form_authenticity_token",
+    ];
 
     fn has_ivar(e: &Expr) -> bool {
         if matches!(&*e.node, ExprNode::Ivar { .. }) {
             return true;
+        }
+        if let ExprNode::Send { recv: None, method, .. } = &*e.node {
+            if REQUEST_STATE.contains(&method.as_str()) {
+                return true;
+            }
         }
         let mut found = false;
         e.node.for_each_child(&mut |c| {
@@ -2123,17 +2149,24 @@ fn body_calls_method(body: &Expr, name: &Symbol) -> bool {
     found
 }
 
-/// Rewrite a receiverless OPTIONS-ONLY render — `formats:` and/or
-/// `layout:`, nothing else — to `render(:<template>, <options>)`.
+/// Rewrite a receiverless OPTIONS-ONLY render — `formats:`, `layout:`
+/// and/or a resolvable `content_type:`, nothing else — to
+/// `render(:<template>, <options>)`.
 ///
-/// Both options say "this action's own template, rendered this way":
-/// `formats: :svg` in another format (respelled as the internal singular
-/// `format:` marker), `layout: false` without the layout (kept as is —
-/// the Ruby emit's layout pass honors and strips it, as it does for a
-/// partial). campfire's autocompletion endpoint answers its Lexxy mention
-/// prompt with `format.html { render layout: false }` since the Lexxy
-/// merge; left alone, that `render` reached `Base#render(body, …)` with
-/// no body and raised on every HTML request.
+/// All three options say "this action's own template, rendered this
+/// way": `formats: :svg` in another format (respelled as the internal
+/// singular `format:` marker), `layout: false` without the layout
+/// (kept as is — the Ruby emit's layout pass honors and strips it, as
+/// it does for a partial), `content_type: "text/css"` / `content_type:
+/// :css` the same as `formats:` when the value names (or reverse-maps
+/// to, via `format_for_mime`) a format with a template — Mastodon's
+/// `custom_css#show` writes `render content_type: :css` with no
+/// template name at all. campfire's autocompletion endpoint answers
+/// its Lexxy mention prompt with `format.html { render layout: false
+/// }` since the Lexxy merge; left alone, that `render` reached
+/// `Base#render(body, …)` with no body and raised on every HTML
+/// request — the same shape an unresolved `content_type:`-only render
+/// raised on every request to `custom_css#show`.
 fn resolve_formats_only_render(e: &mut Expr, template: &Symbol) {
     e.node.for_each_child_mut(&mut |c| resolve_formats_only_render(c, template));
     let ExprNode::Send { recv: None, method, args, block: None, .. } = &mut *e.node else {
@@ -2157,6 +2190,30 @@ fn resolve_formats_only_render(e: &mut Expr, template: &Symbol) {
                 options.push((sym("format"), sym(fmt.as_str())));
             }
             "layout" => options.push((k.clone(), v.clone())),
+            // `content_type: :css` names the format directly, the same
+            // as `formats:` above (and real Rails accepts a Mime::Type
+            // symbol there, which is what Mastodon's source writes).
+            // `content_type: "text/css"` is a MIME string instead —
+            // resolved through the same reverse table
+            // `mime_for_format`'s own arm feeds, so the two can't
+            // disagree about what a format's canonical MIME is. A
+            // value this can't resolve (a charset-qualified string, an
+            // interpolated expression, an unlisted MIME) declines —
+            // the render stays as written and keeps failing loudly,
+            // rather than a guess silently mislabeling the response.
+            "content_type" => {
+                let fmt = match &*v.node {
+                    ExprNode::Lit { value: Literal::Sym { value } } => value.clone(),
+                    ExprNode::Lit { value: Literal::Str { value } } => {
+                        match crate::lower::controller::body::format_for_mime(value) {
+                            Some(f) => Symbol::from(f),
+                            None => return,
+                        }
+                    }
+                    _ => return,
+                };
+                options.push((sym("format"), sym(fmt.as_str())));
+            }
             _ => return,
         }
     }
@@ -2391,7 +2448,7 @@ fn calls_super(body: &Expr) -> bool {
 /// per-arg types lands when a routing-table-aware typer surfaces.
 fn insert_baseline_controller_methods(info: &mut crate::analyze::ClassInfo) {
     use crate::lower::typing::fn_sig;
-    let any_hash = Ty::Hash { key: Box::new(Ty::Sym), value: Box::new(Ty::Untyped) };
+    let any_hash = Ty::Hash { key: std::sync::Arc::new(Ty::Sym), value: std::sync::Arc::new(Ty::Untyped) };
 
     // Terminals — render/redirect/head/render_404 all return Nil.
     // The framework runtime declares these with named keyword params
@@ -2407,11 +2464,11 @@ fn insert_baseline_controller_methods(info: &mut crate::analyze::ClassInfo) {
         Ty::Fn {
             params: vec![crate::ty::Param {
                 name: Symbol::from("opts"),
-                ty: any_hash.clone(),
+                ty: any_hash.clone().into(),
                 kind: crate::ty::ParamKind::KeywordRest,
-            }],
+            }].into(),
             block: None,
-            ret: Box::new(Ty::Nil),
+            ret: std::sync::Arc::new(Ty::Nil),
             effects: crate::effect::EffectSet::pure(),
         }
     };
@@ -2420,17 +2477,17 @@ fn insert_baseline_controller_methods(info: &mut crate::analyze::ClassInfo) {
             params: vec![
                 crate::ty::Param {
                     name: Symbol::from(first_name),
-                    ty: first_ty,
+                    ty: first_ty.into(),
                     kind: crate::ty::ParamKind::Required,
                 },
                 crate::ty::Param {
                     name: Symbol::from("opts"),
-                    ty: any_hash.clone(),
+                    ty: any_hash.clone().into(),
                     kind: crate::ty::ParamKind::KeywordRest,
                 },
-            ],
+            ].into(),
             block: None,
-            ret: Box::new(Ty::Nil),
+            ret: std::sync::Arc::new(Ty::Nil),
             effects: crate::effect::EffectSet::pure(),
         }
     };
@@ -2461,7 +2518,7 @@ fn insert_baseline_controller_methods(info: &mut crate::analyze::ClassInfo) {
     // its parameters. `runtime/ruby/action_controller/base.rb` defines
     // all three; without these entries a strict target cannot resolve
     // the sends that reach them.
-    let str_or_nil = Ty::Union { variants: vec![Ty::Str, Ty::Nil] };
+    let str_or_nil = Ty::Union { variants: vec![Ty::Str, Ty::Nil].into() };
     info.instance_methods
         .entry(Symbol::from("response_body"))
         .or_insert_with(|| fn_sig(vec![], Ty::Str));
@@ -2736,6 +2793,9 @@ fn action_to_method(
     if text_formats.contains(&"js") {
         variants.push("js");
     }
+    if text_formats.contains(&"md") {
+        variants.push("md");
+    }
     // An overriding `<x>_params` yields its parent's params class —
     // see `lower_overriding_params_helper`.
     let formats_template =
@@ -2807,7 +2867,7 @@ fn action_to_method(
         let spec = self::params::first_permit_in(&a.body)
             .and_then(|(resource, fields)| params_specs.find(&resource, &fields));
         if let Some(spec) = spec {
-            Ty::Class { id: spec.class_id.clone(), args: vec![] }
+            Ty::Class { id: spec.class_id.clone(), args: vec![].into() }
         } else {
             // No recognized permit list: the `_params` suffix is a naming
             // convention, not a contract. A guard filter named
@@ -2928,7 +2988,7 @@ fn union_with(a: Ty, b: Ty) -> Ty {
             out.push(v);
         }
     }
-    if out.len() == 1 { out.pop().unwrap() } else { Ty::Union { variants: out } }
+    if out.len() == 1 { out.pop().unwrap() } else { Ty::Union { variants: out.into() } }
 }
 
 /// Each signature slot takes the kind its `def` declares. A param with

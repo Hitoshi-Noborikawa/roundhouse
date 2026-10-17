@@ -282,6 +282,7 @@ mod tests {
             parent: None,
             parent_span: Default::default(),
             includes: vec![],
+            include_spans: Vec::new(),
             methods: vec![out],
             nullable_columns: Vec::new(),
             origin: None,
@@ -335,6 +336,7 @@ mod tests {
             parent: None,
             parent_span: Default::default(),
             includes: vec![],
+            include_spans: Vec::new(),
             methods: vec![transform_method(m)],
             nullable_columns: Vec::new(),
             origin: None,
@@ -392,6 +394,7 @@ mod tests {
             parent: None,
             parent_span: Default::default(),
             includes: vec![],
+            include_spans: Vec::new(),
             methods: vec![transform_method(m)],
             nullable_columns: Vec::new(),
             origin: None,
@@ -446,6 +449,7 @@ mod tests {
             parent: None,
             parent_span: Default::default(),
             includes: vec![],
+            include_spans: Vec::new(),
             methods: vec![transform_method(m)],
             nullable_columns: Vec::new(),
             origin: None,
@@ -504,6 +508,7 @@ mod tests {
             parent: None,
             parent_span: Default::default(),
             includes: vec![],
+            include_spans: Vec::new(),
             methods: vec![transform_method(m)],
             nullable_columns: Vec::new(),
             origin: None,
@@ -523,7 +528,7 @@ mod tests {
         use crate::ty::Ty;
         // `acc[k] = v` where `acc` is a Flash struct → Flash.put.
         let mut acc = var(&s("acc"));
-        acc.ty = Some(Ty::Class { id: ClassId(s("ActionDispatch::Flash")), args: vec![] });
+        acc.ty = Some(Ty::Class { id: ClassId(s("ActionDispatch::Flash")), args: vec![].into() });
         let index_set = syn(ExprNode::Send {
             recv: Some(acc),
             method: s("[]="),
@@ -554,6 +559,7 @@ mod tests {
             parent: None,
             parent_span: Default::default(),
             includes: vec![],
+            include_spans: Vec::new(),
             methods: vec![transform_method(m)],
             nullable_columns: Vec::new(),
             origin: None,

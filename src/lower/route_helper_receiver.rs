@@ -79,6 +79,10 @@ use std::collections::{HashMap, HashSet};
 const ENGINE_MOUNTED_HELPERS: &[&str] = &[
     "rails_blob_path",
     "rails_blob_url",
+    "rails_storage_proxy_path",
+    "rails_storage_proxy_url",
+    "rails_storage_redirect_path",
+    "rails_storage_redirect_url",
     "rails_representation_path",
     "rails_representation_url",
 ];
@@ -229,6 +233,7 @@ mod tests {
             parent: None,
             parent_span: Default::default(),
             includes: Vec::new(),
+            include_spans: Vec::new(),
             methods,
             nullable_columns: Vec::new(),
             origin: None,

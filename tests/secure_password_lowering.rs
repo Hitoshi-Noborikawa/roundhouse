@@ -47,10 +47,11 @@ fn secure_password_synthesizes_authenticate_and_accessors() {
                 variants: vec![
                     Ty::Class {
                         id: user.name.clone(),
-                        args: vec![],
+                        args: vec![].into(),
                     },
                     Ty::Bool,
-                ],
+                ]
+                .into(),
             };
             assert_eq!(
                 ret.as_ref(),

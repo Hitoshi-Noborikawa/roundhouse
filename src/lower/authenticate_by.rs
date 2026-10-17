@@ -244,12 +244,12 @@ fn argument_entries(arg: &Expr) -> Option<Vec<(Expr, Expr)>> {
 
 fn optional(class: &ClassId) -> Ty {
     Ty::Union {
-        variants: vec![Ty::Class { id: class.clone(), args: vec![] }, Ty::Nil],
+        variants: vec![Ty::Class { id: class.clone(), args: vec![].into() }, Ty::Nil].into(),
     }
 }
 
 fn build(plan: &Plan, span: Span) -> Vec<Expr> {
-    let self_ty = Ty::Class { id: plan.class.clone(), args: vec![] };
+    let self_ty = Ty::Class { id: plan.class.clone(), args: vec![].into() };
     let typed = |node: ExprNode, ty: Ty| {
         let mut e = Expr::new(span, node);
         e.ty = Some(ty);
@@ -310,7 +310,7 @@ fn build(plan: &Plan, span: Span) -> Vec<Expr> {
     // Every declared password must verify. `authenticate` answers the
     // record or `false`, so the calls compose with `&&` directly —
     // the same truthiness the surface API is built on.
-    let auth_ty = Ty::Union { variants: vec![self_ty.clone(), Ty::Bool] };
+    let auth_ty = Ty::Union { variants: vec![self_ty.clone(), Ty::Bool].into() };
     let mut check: Option<Expr> = None;
     for (attr, plaintext) in &plan.passwords {
         let call = typed(

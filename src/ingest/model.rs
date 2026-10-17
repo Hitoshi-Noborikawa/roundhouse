@@ -2973,6 +2973,13 @@ fn parse_association(
         })
         .unwrap_or_default();
 
+    // Rails takes the class of a `through:` association from its source
+    // association when no `class_name:` or `source_type:` names it.
+    // Ingest reads one model at a time, so app assembly does the
+    // lookup (`resolve_through_targets`).
+    let class_explicit = class_name.is_some() || source_type.is_some();
+    let source_name = source.as_deref().map(Symbol::from);
+
     match method {
         "has_many" => Some(Association::HasMany {
             name: name.clone(),
@@ -3002,6 +3009,12 @@ fn parse_association(
             // would otherwise be the polymorphic association name
             // ("Reference") — a phantom class. Already CamelCase, so no
             // transform.
+            //
+            // The camelized name is only a first guess for a `through:`
+            // association: `resolve_through_targets` replaces it with
+            // the class of the source association once every model is
+            // ingested (`source: :remarks` on `has_many :remarks,
+            // class_name: "Comment"` → Comment, not Remark).
             target: class_name
                 .map(|s| ClassId(Symbol::from(s.as_str())))
                 .or_else(|| source_type.map(|s| ClassId(Symbol::from(s.as_str()))))
@@ -3017,6 +3030,8 @@ fn parse_association(
                 }),
             foreign_key_explicit,
             through: through.map(|s| Symbol::from(s.as_str())),
+            source: source_name,
+            class_explicit,
             dependent: dependent.unwrap_or_default(),
             as_interface: as_interface.as_deref().map(Symbol::from),
             scope,
@@ -3246,7 +3261,7 @@ pub(crate) fn row_from_table(table: &Table) -> Row {
     for col in &table.columns {
         fields.insert(col.name.clone(), ty_of_column_slot(col));
     }
-    Row { fields, rest: None }
+    Row { fields: fields.into(), rest: None }
 }
 
 /// The attributes-row type for a column: `ty_of_column` widened with
@@ -3259,7 +3274,7 @@ pub(crate) fn row_from_table(table: &Table) -> Row {
 fn ty_of_column_slot(col: &crate::schema::Column) -> Ty {
     let base = ty_of_column(&col.col_type);
     if col.nullable && !col.primary_key {
-        Ty::Union { variants: vec![base, Ty::Nil] }
+        Ty::Union { variants: vec![base, Ty::Nil].into() }
     } else {
         base
     }

@@ -186,7 +186,7 @@ pub fn apply_job_class_side(app: &mut App) -> Vec<Diagnostic> {
 
         let (param_tys, ret_ty): (Vec<Option<Ty>>, Option<Ty>) = match &perform.signature {
             Some(Ty::Fn { params, ret, .. }) if params.len() == perform.params.len() => (
-                params.iter().map(|p| Some(p.ty.clone())).collect(),
+                params.iter().map(|p| Some((*p.ty).clone())).collect(),
                 Some((**ret).clone()),
             ),
             _ => (vec![None; perform.params.len()], None),
@@ -212,6 +212,10 @@ pub fn apply_job_class_side(app: &mut App) -> Vec<Diagnostic> {
                         },
                     );
                     v.ty = ty.clone();
+                    if p.rest {
+                        v.ty = Some(Ty::Array { elem: std::sync::Arc::new(ty.clone().unwrap_or(Ty::Untyped)) });
+                        return Expr::new(span, ExprNode::Splat { value: v });
+                    }
                     v
                 })
                 .collect();
@@ -225,7 +229,7 @@ pub fn apply_job_class_side(app: &mut App) -> Vec<Diagnostic> {
                     parenthesized: false,
                 },
             );
-            new_call.ty = Some(Ty::Class { id: lc.name.clone(), args: vec![] });
+            new_call.ty = Some(Ty::Class { id: lc.name.clone(), args: vec![].into() });
             let mut body = Expr::new(
                 span,
                 ExprNode::Send {
@@ -437,6 +441,12 @@ pub fn apply_job_class_side(app: &mut App) -> Vec<Diagnostic> {
             w.name = Symbol::from(entry);
             w.receiver = crate::dialect::MethodReceiver::Class;
             w.body = body;
+            // Not `perform`'s signature whole: the enqueueing wrapper answers nil, whatever `perform` returns.
+            if matches!(entry, "perform_later" | "perform_async")
+                && let Some(Ty::Fn { params, block, effects, .. }) = &perform.signature
+            {
+                w.signature = Some(Ty::Fn { params: params.clone(), block: block.clone(), ret: std::sync::Arc::new(Ty::Nil), effects: effects.clone() });
+            }
             wrappers.push(w);
         }
 
@@ -455,11 +465,11 @@ pub fn apply_job_class_side(app: &mut App) -> Vec<Diagnostic> {
             w.signature = Some(Ty::Fn {
                 params: vec![crate::ty::Param {
                     name: Symbol::from("options"),
-                    ty: Ty::Untyped,
+                    ty: Ty::Untyped.into(),
                     kind: crate::ty::ParamKind::Required,
-                }],
+                }].into(),
                 block: None,
-                ret: Box::new(Ty::Untyped),
+                ret: std::sync::Arc::new(Ty::Untyped),
                 effects: crate::effect::EffectSet::pure(),
             });
             w.body = body;

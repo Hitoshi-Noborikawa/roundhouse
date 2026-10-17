@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 require_relative "../action_dispatch/flash"
 require_relative "../action_dispatch/session"
 require_relative "../action_view"
@@ -57,6 +58,30 @@ module ActionController
   def self.csrf_token_valid?(given, expected)
     return true if expected.empty?
     given.length > 0 && given == expected
+  end
+
+  # `ApplicationController.config.relative_url_root`. One object for
+  # the process: `Rails.application` is not the controller, and a
+  # test assigns the class reader then an instance reads it back.
+  class ControllerConfig
+    def initialize
+      @relative_url_root = +""
+    end
+
+    def relative_url_root
+      @relative_url_root
+    end
+
+    def relative_url_root=(value)
+      @relative_url_root = value
+      @relative_url_root
+    end
+  end
+
+  CONTROLLER_CONFIG_SLOT = [ControllerConfig.new]
+
+  def self.controller_config
+    CONTROLLER_CONFIG_SLOT[0]
   end
 
   # WHATWG URL-parser preprocessing: drop tab/CR/LF/NUL anywhere, then
@@ -712,6 +737,12 @@ module ActionController
     # The dispatcher sets it; false keeps every other request on the
     # html path.
     attr_accessor :accepts_any_format
+    # Rails' `request.should_apply_vary_header?`: the response format
+    # was negotiated from the request's Accept header (no `format`
+    # param, a non-browser Accept, or an XHR). The dispatcher sets it;
+    # `render` and `send_data` then answer `Vary: Accept`. False keeps
+    # every target that does not set it as it was.
+    attr_accessor :vary_on_accept
     # Rails' `request.path_parameters`: the matched route's own segments
     # (`{"length" => "1y"}` on `/top/1y`), not the query string. The
     # dispatcher assigns it; a `url_for` options hash reads it to fill a
@@ -765,6 +796,7 @@ module ActionController
       @request_format = :html
       @query_string = +""
       @accepts_any_format = false
+      @vary_on_accept = false
       @content_type = "text/html; charset=utf-8"
       @content_type_explicit = false
       @headers = ActionController::HeaderStore.new
@@ -880,6 +912,18 @@ module ActionController
       @performed = true
       @content_type = content_type unless content_type.nil?
       @location = ActionController.sanitize_location(location) unless location.nil?
+      apply_vary_header
+      nil
+    end
+
+    # Rails' `_set_vary_header`, which every `render` runs (`send_data`
+    # renders too): `Vary: Accept` when the format was negotiated from
+    # the Accept header and the action set no Vary of its own. A
+    # redirect or a `head` does not render, so it carries none.
+    def apply_vary_header
+      return nil unless @vary_on_accept
+      vary = @headers["Vary"]
+      @headers["Vary"] = "Accept" if vary.nil? || vary.strip.empty?
       nil
     end
 
@@ -935,6 +979,10 @@ module ActionController
       self
     end
 
+    def redirect?
+      @status == 301 || @status == 302 || @status == 303 || @status == 307 || @status == 308
+    end
+
     # Rails' `self.response_body =` (campfire's MessagesController and
     # CachedResponses serve a prebuilt page this way). A body is a
     # response, so the before_action halting check sees it; nil clears
@@ -964,114 +1012,19 @@ module ActionController
     # the controller struct as an implicit first argument and calls it
     # `record`, so a same-named parameter of our own emits
     # `def fresh_when(_record, _record)`.
+    # ---- conditional GET (strict-target stubs) ---------------------
+    #
+    # Full `fresh_when` / `stale?` / If-None-Match matching lives in
+    # `current.rb`'s Base reopen, next to `attr_accessor :request`.
+    # Strict targets have no Request seat on Base yet; always-render /
+    # always-stale is the same contract these stubs had before #829,
+    # and keeps rust/kotlin/… emit compiling. The Ruby/Spinel path
+    # overrides the stubs when a Request is parked.
     def fresh_when(subject)
-      etag_src = fresh_when_etag_source(subject)
-      return if etag_src.nil?
-      tag = weak_etag_for(etag_src)
-      response.headers["ETag"] = tag
-      # RFC 9110 §15.4.5: 304 is only for conditional GET/HEAD.
-      req = request
-      return if !req.nil? && req.request_method != "GET" && req.request_method != "HEAD"
-      inm = request_if_none_match
-      return if inm.nil?
-      head(:not_modified) if if_none_match_matches?(inm, tag)
     end
 
     def stale?(etag: nil)
-      return true if etag.nil?
-      return true unless etag.is_a?(String)
-      tag = weak_etag_for(etag)
-      response.headers["ETag"] = tag
-      # Same GET/HEAD gate as fresh_when — a matching INM on POST must
-      # not report fresh and skip the action body.
-      req = request
-      return true if !req.nil? && req.request_method != "GET" && req.request_method != "HEAD"
-      inm = request_if_none_match
-      return true if inm.nil?
-      !if_none_match_matches?(inm, tag)
-    end
-
-    def fresh_when_etag_source(subject)
-      return nil if subject.nil?
-      if subject.is_a?(Hash)
-        v = subject[:etag]
-        return v.to_s unless v.nil?
-        v = subject["etag"]
-        return v.to_s unless v.nil?
-        return nil
-      end
-      return subject if subject.is_a?(String)
-      nil
-    end
-
-    def weak_etag_for(src)
-      "W/\"" + src + "\""
-    end
-
-    def request_if_none_match
-      req = request
-      return nil if req.nil?
-      value = req.headers["If-None-Match"]
-      return nil if value.nil?
-      text = value.to_s
-      return nil if text.empty?
-      text
-    end
-
-    def if_none_match_matches?(inm, tag)
-      want = normalize_etag(tag)
-      return false if want.nil?
-      parts = if_none_match_members(inm)
-      if_none_match_parts_match?(parts, 0, want)
-    end
-
-    def if_none_match_parts_match?(parts, i, want)
-      return false if i >= parts.length
-      part = parts[i]
-      return true if part == "*"
-      got = normalize_etag(part)
-      return true if !got.nil? && got == want
-      if_none_match_parts_match?(parts, i + 1, want)
-    end
-
-    # Split an If-None-Match list on commas that sit outside quotes so
-    # an opaque-tag like `"a,b"` stays one member. Recursion — not a
-    # counter `while`: Elixir while_to_recursion rejects this body's
-    # quote-state / buffer shape (headers are short).
-    def if_none_match_members(inm)
-      if_none_match_members_at(inm.to_s, 0, "", false, [])
-    end
-
-    def if_none_match_members_at(s, i, buf, in_quote, out)
-      if i >= s.length
-        part = buf.strip
-        out << part unless part.empty?
-        return out
-      end
-      ch = s[i, 1]
-      if ch == "\""
-        nxt = false
-        nxt = true unless in_quote
-        return if_none_match_members_at(s, i + 1, buf + ch, nxt, out)
-      end
-      if ch == "," && !in_quote
-        part = buf.strip
-        out << part unless part.empty?
-        return if_none_match_members_at(s, i + 1, "", false, out)
-      end
-      if_none_match_members_at(s, i + 1, buf + ch, in_quote, out)
-    end
-
-    # Entity-tag → opaque-tag for weak comparison. Unquoted tokens are
-    # not validators and never match.
-    def normalize_etag(value)
-      s = value.to_s.strip
-      return "*" if s == "*"
-      if s.length >= 2 && (s[0, 2] == "W/" || s[0, 2] == "w/")
-        s = s[2, s.length].to_s.strip
-      end
-      return nil unless s.length >= 2 && s[0, 1] == "\"" && s[s.length - 1, 1] == "\""
-      s[1, s.length - 2].to_s
+      true
     end
 
     # `expires_in 1.year, public: true` — Rails' Cache-Control writer,
@@ -1122,16 +1075,33 @@ module ActionController
       @headers
     end
 
+    # `config.relative_url_root` inside a controller instance. The
+    # class reader is the same object (`controller_config.rb`); the
+    # typed-runtime gate keys signatures by method name, so the two
+    # `config` methods cannot share this file.
+    def config
+      ActionController.controller_config
+    end
+
+    # `importmap.to_json(resolver: helpers)`. The map's paths are
+    # already resolved at ingest, so the resolver is accepted and
+    # unused. `self` is enough for the call to evaluate.
+    def helpers
+      self
+    end
+
     # `send_data data, type:, disposition:` — a binary response body
     # (lobsters streams avatar PNGs). Same buffering contract as
     # render. `disposition` is retained as a Content-Disposition
-    # response header.
+    # response header. The Ruby family and Spinel reopen it with
+    # `filename:` (runtime/spinel/action_controller_send_data.rb).
     def send_data(data, type: "application/octet-stream", disposition: "attachment")
       @body = data
       @content_type = type
       @performed = true
       disp = disposition.to_s == "inline" ? "inline" : "attachment"
       @headers["Content-Disposition"] = disp
+      apply_vary_header
       nil
     end
 

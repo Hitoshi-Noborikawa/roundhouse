@@ -25,6 +25,15 @@ module ActionController
   def self.masked_authenticity_token: () -> String
   def self.csrf_token_valid?: (String given, String expected) -> bool
 
+  class ControllerConfig
+    @relative_url_root: String
+    def initialize: () -> void
+    def relative_url_root: () -> String
+    def relative_url_root=: (String value) -> String
+  end
+
+  def self.controller_config: () -> ControllerConfig
+
   class HeaderStore
     @keys: Array[String]
     @lower: Array[String]
@@ -138,6 +147,10 @@ module ActionController
     def query_string=: (String) -> String
     def accepts_any_format: () -> bool
     def accepts_any_format=: (bool) -> bool
+    def vary_on_accept: () -> bool
+    def vary_on_accept=: (bool) -> bool
+    # Rails' `_set_vary_header` (render, send_data); see the .rb.
+    def apply_vary_header: () -> nil
     def path_parameters: () -> Hash[String, String]
     def path_parameters=: (Hash[String, String]) -> Hash[String, String]
     @headers: ActionController::HeaderStore
@@ -207,16 +220,10 @@ module ActionController
     # signature in runtime/spinel/action_controller_head.rbs.
     def head: (Symbol status, ?content_type: String?, ?location: String?) -> void
     def response: () -> Base
+    def redirect?: () -> bool
+    # Strict stubs; Ruby/Spinel reopen in current.rb fills these in.
     def fresh_when: (untyped subject) -> void
     def stale?: (?etag: untyped) -> bool
-    def fresh_when_etag_source: (untyped subject) -> String?
-    def weak_etag_for: (String src) -> String
-    def request_if_none_match: () -> String?
-    def if_none_match_matches?: (String inm, String tag) -> bool
-    def if_none_match_parts_match?: (Array[String] parts, Integer i, String want) -> bool
-    def if_none_match_members: (String inm) -> Array[String]
-    def if_none_match_members_at: (String s, Integer i, String buf, bool in_quote, Array[String] out) -> Array[String]
-    def normalize_etag: (String value) -> String?
     # Integer SECONDS on every duration-shaped keyword —
     # `lower::duration::rewrite_expires_in` grounds the corpus' `1.year`
     # / `1.week` / `stale_while_revalidate: 30.seconds` /
@@ -229,6 +236,8 @@ module ActionController
     def cache_control_max_age: () -> Integer
     def cache_control_public: () -> bool
     def headers: () -> ActionController::HeaderStore
+    def config: () -> ControllerConfig
+    def helpers: () -> Base
     def send_data: (String data, ?type: String, ?disposition: String) -> void
     def verify_authenticity_token: () -> void
     def verified_request?: () -> bool

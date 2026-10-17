@@ -56,6 +56,10 @@ const CORE_VALUE_CONSTS: &[(&str, &str, fn() -> Ty)] = &[
     ("Float", "MAX", || Ty::Float),
     ("Float", "MIN", || Ty::Float),
     ("IO", "NULL", || Ty::Str),
+    // `Regexp.new(selector, Regexp::IGNORECASE)` — lobsters' domain selectors.
+    ("Regexp", "IGNORECASE", || Ty::Int),
+    ("Regexp", "EXTENDED", || Ty::Int),
+    ("Regexp", "MULTILINE", || Ty::Int),
     ("File", "NULL", || Ty::Str),
     // `File.open(path, File::RDWR | File::CREAT, 0644)` and
     // `file.flock(File::LOCK_EX | File::LOCK_NB)` — campfire's WAL
@@ -80,6 +84,10 @@ const CORE_VALUE_CONSTS: &[(&str, &str, fn() -> Ty)] = &[
     ("File", "PATH_SEPARATOR", || Ty::Str),
     ("File", "NOFOLLOW", || Ty::Int),
     ("File", "NONBLOCK", || Ty::Int),
+    ("File", "NOCTTY", || Ty::Int),
+    ("File", "SYNC", || Ty::Int),
+    ("File", "DSYNC", || Ty::Int),
+    ("File", "BINARY", || Ty::Int),
     ("Encoding", "UTF_8", encoding_ty),
     ("Encoding", "BINARY", encoding_ty),
     ("Encoding", "ASCII_8BIT", encoding_ty),
@@ -91,6 +99,15 @@ const CORE_VALUE_CONSTS: &[(&str, &str, fn() -> Ty)] = &[
     ("OpenSSL::SSL", "VERIFY_PEER", || Ty::Int),
 ];
 
+/// Ruby's top-level value Consts: `STDERR.puts "…"` (discourse's
+/// warnings) reads the process's own stream, which `$stderr` is only
+/// until something reassigns it.
+const CORE_TOP_CONSTS: &[&str] = &["STDIN", "STDOUT", "STDERR"];
+
+fn io_ty() -> Ty {
+    Ty::Class { id: ClassId(Symbol::from("IO")), args: vec![].into() }
+}
+
 /// Classes that own rows in `CORE_VALUE_CONSTS`, with their RBS parents.
 const CORE_VALUE_CLASSES: &[(&str, &str)] = &[
     ("Float", "Numeric"),
@@ -98,10 +115,11 @@ const CORE_VALUE_CLASSES: &[(&str, &str)] = &[
     ("File", "IO"),
     ("Encoding", "Object"),
     ("OpenSSL::SSL", "Object"),
+    ("Regexp", "Object"),
 ];
 
 fn encoding_ty() -> Ty {
-    Ty::Class { id: ClassId(Symbol::from("Encoding")), args: vec![] }
+    Ty::Class { id: ClassId(Symbol::from("Encoding")), args: vec![].into() }
 }
 
 fn rbs_type_name(ty: &Ty) -> &'static str {
@@ -135,6 +153,10 @@ fn core_rbs() -> &'static str {
             }
             out.push_str("end\n");
         }
+        for name in CORE_TOP_CONSTS {
+            out.push_str(name);
+            out.push_str(": IO\n");
+        }
         out
     })
     .as_str()
@@ -142,6 +164,9 @@ fn core_rbs() -> &'static str {
 
 /// The type of a value constant `core_rbs()` declares, as Ruby defines it.
 fn core_value_type(name: &str) -> Option<Ty> {
+    if CORE_TOP_CONSTS.contains(&name.trim_start_matches("Object::")) {
+        return Some(io_ty());
+    }
     CORE_VALUE_CONSTS.iter().find_map(|(owner, field, ty)| {
         let need = owner.len() + 2 + field.len();
         (name.len() == need
@@ -185,6 +210,8 @@ pub(crate) struct ConstResolver {
     /// Each source class or module that others are nested in by name,
     /// with those nested ones (`A` to `A::B` and `A::B::C`).
     nested_namespaces: HashMap<Box<str>, Vec<Box<str>>>,
+    /// The names `has_source_namespace` answers yes for, gathered once.
+    source_namespaces: HashSet<Box<str>>,
     /// Includes paths, full text and order because answers use file IDs
     /// and byte offsets. Retain no second copy of the source snapshot.
     source_fingerprint: u64,
@@ -395,7 +422,15 @@ impl ConstResolver {
         declared.sort_unstable();
         declared.dedup();
         let nested_namespaces = nested_namespaces_index(&declared);
-        Self { files, nested_namespaces, source_fingerprint: source_fingerprint(sources) }
+        let class_definitions: HashSet<&str> = declared.into_iter().collect();
+        let mut source_namespaces: HashSet<Box<str>> = files.iter().flatten()
+            .flat_map(|file| file.namespace_definitions.iter().cloned()).collect();
+        for (alias, target) in files.iter().flatten().flat_map(|file| file.runtime_namespace_aliases.iter()) {
+            if class_definitions.contains(alias.as_ref()) {
+                source_namespaces.insert(target.clone());
+            }
+        }
+        Self { files, nested_namespaces, source_namespaces, source_fingerprint: source_fingerprint(sources) }
     }
 
     fn file(&self, file: FileId) -> Option<&FileAnswers> {
@@ -444,6 +479,23 @@ impl ConstResolver {
             .references
             .get(&start)
             .map(Option::as_ref)
+    }
+
+    /// App and runtime sources define this reference; RBI declarations do
+    /// not enter this graph and cannot establish source ownership.
+    pub(crate) fn has_definition(&self, span: Span, path: &[Symbol]) -> bool {
+        self.reference(span, path).is_some_and(|resolved| resolved.is_some())
+    }
+
+    /// Exact resolved source names for declaration edges without expression
+    /// spans. The borrowed identifiers remain owned by this snapshot.
+    pub(crate) fn defined_names(&self) -> HashSet<&str> {
+        self.files.iter().flatten().flat_map(|file| file.references.values()).filter_map(|resolved| {
+            match resolved.as_ref()? {
+                ResolvedConstant::Namespace { class, .. } => Some(class.0.as_str()),
+                ResolvedConstant::Value { name, .. } => Some(name.0.as_str()),
+            }
+        }).collect()
     }
 
     /// Exact source-resolved namespace, also used by ingest admission gates
@@ -499,13 +551,7 @@ impl ConstResolver {
     }
 
     pub(crate) fn has_source_namespace(&self, name: &str) -> bool {
-        self.files.iter().flatten().any(|file| file.namespace_definitions.contains(name))
-            || self.files.iter().flatten().any(|file| {
-                file.runtime_namespace_aliases.iter().any(|(alias, target)| {
-                    target.as_ref() == name && self.files.iter().flatten()
-                        .any(|source| source.class_definitions.contains(alias.as_ref()))
-                })
-            })
+        self.source_namespaces.contains(name)
     }
 
     pub(crate) fn is_runtime_class(&self, span: Span, path: &[Symbol], name: &str) -> bool {
@@ -862,6 +908,35 @@ fn answer_file(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn source_namespace_index_matches_original_file_and_runtime_alias_scan() {
+        for reopen in [false, true] {
+            let mut sources = vec![
+                SourceFile { path: "nested.rb".into(), text: "module Catalog\n class Reader; end\nend\n".into() },
+                SourceFile { path: "alias.rb".into(), text: "DataAlias = Data\nValue = 3\n".into() },
+            ];
+            if reopen {
+                sources.push(SourceFile { path: "reopen.rb".into(), text: "class DataAlias\n def marker; 1; end\nend\n".into() });
+            }
+            let resolver = ConstResolver::from_app_sources(&sources);
+            let mut queries = vec!["Catalog", "Catalog::Reader", "DataAlias", "Data", "Value", "Missing"];
+            queries.extend(resolver.files.iter().flatten().flat_map(|file|
+                file.namespace_definitions.iter().map(|name| name.as_ref())));
+            queries.extend(resolver.files.iter().flatten().flat_map(|file|
+                file.runtime_namespace_aliases.values().map(|name| name.as_ref())));
+            for name in queries {
+                let scanned = resolver.files.iter().flatten().any(|file| file.namespace_definitions.contains(name))
+                    || resolver.files.iter().flatten().any(|file| {
+                        file.runtime_namespace_aliases.iter().any(|(alias, target)| {
+                            target.as_ref() == name && resolver.files.iter().flatten()
+                                .any(|source| source.class_definitions.contains(alias.as_ref()))
+                        })
+                    });
+                assert_eq!(resolver.has_source_namespace(name), scanned, "{name}, reopen={reopen}");
+            }
+        }
+    }
 
     #[test]
     fn prepared_answers_require_the_same_paths_text_and_file_order() {

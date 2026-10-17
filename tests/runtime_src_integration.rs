@@ -632,7 +632,7 @@ fn every_runtime_method_body_is_fully_typed() {
                 .into_iter()
                 .map(|(name, ty)| {
                     let ret_ty = match ty {
-                        Ty::Fn { ret, .. } => *ret,
+                        Ty::Fn { ret, .. } => std::sync::Arc::unwrap_or_clone(ret),
                         other => other,
                     };
                     (name, ret_ty)
@@ -832,7 +832,7 @@ fn every_runtime_method_body_concretely_typed() {
             let entry = class_registry.entry(short_id(&class_id)).or_default();
             for (name, ty) in methods {
                 let ret_ty = match ty {
-                    Ty::Fn { ret, .. } => *ret,
+                    Ty::Fn { ret, .. } => std::sync::Arc::unwrap_or_clone(ret),
                     other => other,
                 };
                 entry.instance_methods.insert(name, ret_ty);
@@ -1044,7 +1044,52 @@ fn every_runtime_method_body_concretely_typed() {
     // `ActiveStorage::AttachedMany#map` (the proxy's Enumerable reads for a
     // jbuilder block over `record.pictures`) adds 1, MEASURED: the value
     // of its `yield`, the same block-return escape `#each` carries.
-    const CEILING: usize = 718;
+    // MEASURED 734 on 2026-10-14: ActiveRecord's statement-error hierarchy
+    // (`ActiveRecordError`, `StatementInvalid` and the fourteen below them)
+    // adds one gradual site per class, its `super(message)` into the
+    // exception initializer, as the existing exception classes carry (+16
+    // in active_record/errors.rb).
+    // `JsonBuilder.encode_value`'s Array branch (`json.tags([a, nil])` as
+    // a JSON array) adds 2, MEASURED: the `map` over the untyped value
+    // and its untyped element handed back to `encode_value`, the same
+    // gradual input every other branch of that method reads.
+    // Its Hash branch (a Hash element as a JSON object) adds 3, MEASURED:
+    // the `keys` of the untyped Hash, a key's `to_s` and its value read
+    // back into `encode_value`.
+    // MEASURED 754 on 2026-10-15: `I18n.translate_runtime` (a `t` whose
+    // key, scope, default or options are known only when it runs) reads
+    // the caller's options Hash as the gem does: its `:scope`, `:default`,
+    // `:count`, `:locale` and each interpolation value are whatever the
+    // caller passed (+15 in i18n_locale.rb).
+    // MEASURED 770 on 2026-10-16: a locale's own plural rule reads the
+    // count the caller passed, an Integer, a Float or whatever else, as
+    // rails-i18n's and CLDR's rules do (+16 in i18n_locale.rb).
+    // MEASURED 771 on 2026-10-15: `Request#filtered_parameters` copies
+    // the request's params, whose values are whatever the request sent,
+    // into the Hash it filters (+1 in action_dispatch/request.rb).
+    // MEASURED 773 on 2026-10-16: `ActiveSupport.to_query` takes any
+    // Hash key, as Rails' `Hash#to_query` does (a Symbol-keyed literal
+    // reached it and Spinel refused the `Hash[String, _]` declaration);
+    // the key's `to_s` in `query_pairs` is read twice (+2 in
+    // active_support_ext.rb).
+    // MEASURED 776 on 2026-10-16: transactional saves (connection.rb).
+    // A touch remembers the `updated_at` it wrote beside the Dirty
+    // snapshot rather than inside it, and `changes_to_save` reads it
+    // back: the column-dependent attribute value, gradual as the
+    // snapshot's own values are (+2); and `transaction`'s branch that
+    // runs inside a transaction opened beneath ActiveRecord answers the
+    // block's untyped value, as the others do (+1).
+    // MEASURED 779 on 2026-10-16: `RawConnection#transaction` nests a
+    // savepoint when SQLite is already open. That arm answers the
+    // block's untyped value the same way the outer arm does (+3 in
+    // connection.rb: the `yield`, the local it is stored in, and the
+    // value the method returns).
+    // MEASURED 781 on 2026-10-17: a mailer's address headers read
+    // `mail`'s opts, whatever the action put there (a String, an Array,
+    // nil), as ActionMailer's `Mail::Message` normalizes them (+5 in
+    // action_mailer.rb).
+    // MEASURED 784 on 2026-10-17: both of those, on the same 776 base.
+    const CEILING: usize = 784;
     assert!(
         total_gradual <= CEILING,
         "{total_gradual} Ty::Untyped sites exceeds ceiling of {CEILING}",
@@ -1105,8 +1150,8 @@ fn empty_html_opts_emits_string_keyed_maps_on_csharp_and_kotlin() {
         ExprNode::Hash { entries: vec![], kwargs: false },
     );
     arg.ty = Some(Ty::Hash {
-        key: Box::new(Ty::Untyped),
-        value: Box::new(Ty::Untyped),
+        key: std::sync::Arc::new(Ty::Untyped),
+        value: std::sync::Arc::new(Ty::Untyped),
     });
     let emitted = roundhouse::emit::kotlin::emit_expr_for_runtime(&arg);
     assert_eq!(

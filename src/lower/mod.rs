@@ -47,6 +47,9 @@ pub mod seeds_to_library;
 pub mod test_module_to_library;
 pub mod create_block;
 pub mod as_json_poro;
+mod as_json_record;
+pub use as_json_writer::WRITER_METHOD as JSON_WRITER_METHOD;
+mod as_json_value;
 pub mod active_model_model;
 pub mod enumerable_ext;
 mod fused;
@@ -87,6 +90,7 @@ pub mod sti_is_a;
 pub mod dead_default;
 pub mod errors_add;
 pub mod errors_full_messages;
+pub mod errors_safe_nav;
 pub mod human_attribute_name;
 pub mod i18n_translate;
 pub mod assoc_attr_key;
@@ -96,6 +100,7 @@ pub mod errors_index;
 pub mod job_class_side;
 pub mod job_payload;
 pub mod mailer_class_side;
+pub mod mailer_templates;
 pub mod as_json_shape;
 pub mod as_json_writer;
 pub mod as_json_super;
@@ -319,6 +324,8 @@ const POST_ANALYZE_PASS_ORDER: &[(&str, &[&str])] = &[
     // ledger residue for (or rewrite inside) code that cannot run.
     ("bool_fold", &[]),
     ("association_new", &["bool_fold"]),
+    // Before every `errors` rewrite, which match an `errors` send as the receiver.
+    ("errors_safe_nav", &["bool_fold"]),
     // Refuses `**h` into flattened optional keywords while the splat is
     // still a `KeywordSplat`; `forwarding_keywords` erases it to `h`.
     ("flattened_keyword_splats", &["bool_fold"]),
@@ -656,6 +663,7 @@ const POST_ANALYZE_PASS_ORDER: &[(&str, &[&str])] = &[
     // or reads; no constraints.
     ("current_set", &[]),
     ("mailer_class_side", &[]),
+    ("mailer_templates", &[]),
     ("job_class_side", &[]),
     ("send_static_dispatch", &[]),
     // Grounds the plural duration-unit calls that send_static_dispatch
@@ -800,6 +808,8 @@ pub fn apply_post_analyze_lowerings(
     ran!("bool_fold");
     association_new::apply_association_new_lowering(app);
     ran!("association_new");
+    errors_safe_nav::apply_errors_safe_nav_lowering(app);
+    ran!("errors_safe_nav");
     // Before the first `forwarding::apply` erases `**h` into a
     // positional `h`, after which `f(x, **h)` and `f(x, h)` are one tree.
     diags.extend(helper_kwargs::refuse_flattened_keyword_splats(app));
@@ -1005,6 +1015,8 @@ pub fn apply_post_analyze_lowerings(
     ran!("current_set");
     diags.extend(mailer_class_side::apply_mailer_class_side(app));
     ran!("mailer_class_side");
+    diags.extend(mailer_templates::apply_mailer_templates(app));
+    ran!("mailer_templates");
     diags.extend(job_class_side::apply_job_class_side(app));
     ran!("job_class_side");
     diags.extend(crate::timings::phase("post-analyze: send_dispatch", || {
@@ -1575,7 +1587,7 @@ pub use controller::{
 };
 pub use controller_test::{
     classify_assert_select, classify_controller_test_send, classify_url_expr,
-    flatten_params_pairs, test_body_stmts, AssertSelectKind, ControllerTestSend, UrlArg,
+    flatten_params_pairs, setup_fixture, test_body_stmts, AssertSelectKind, ControllerTestSend, UrlArg,
     UrlHelperCall,
 };
 pub use fixtures::{
@@ -1632,6 +1644,7 @@ pub fn module_funcs_to_library_class(
         parent: None,
         parent_span: Default::default(),
         includes: Vec::new(),
+        include_spans: Vec::new(),
         methods,
         nullable_columns: Vec::new(),
         origin: None,

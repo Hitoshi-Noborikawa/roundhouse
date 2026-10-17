@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 require_relative "active_record/errors"
 require_relative "active_record/connection_not_established"
 require_relative "active_record/connection_pool"
@@ -18,3 +19,4 @@ require_relative "active_record/token_for"
 require_relative "active_record/friendly_id"
 require_relative "active_record/arel"
 require_relative "active_record/relation"
+require_relative "active_record/preloading"

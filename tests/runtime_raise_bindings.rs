@@ -14,9 +14,10 @@ fn sanitize_sql_like_only(
     classes
         .into_iter()
         .map(|mut class| {
-            class
-                .methods
-                .retain(|method| method.name.as_str() == "sanitize_sql_like");
+            class.methods.retain(|method| {
+                method.name.as_str() == "sanitize_sql_like"
+                    || method.name.as_str().starts_with("like_")
+            });
             class
         })
         .collect()
@@ -97,7 +98,12 @@ fn emitted_rust_like_escaping_compiles_and_runs_with_a_deadline() {
     let start = base
         .find("    pub fn sanitize_sql_like(")
         .expect("sanitizer");
-    let end = start + base[start..].find("\n    }\n").expect("method end") + 6;
+    // The sanitizer and its `like_*` helpers, which follow it in source order.
+    let last = start
+        + base[start..]
+            .find("    pub fn like_group_reference(")
+            .expect("last helper");
+    let end = last + base[last..].find("\n    }\n").expect("method end") + 6;
     let method = &base[start..end];
     let cases = [
         ("", "\\", ""),
@@ -200,5 +206,36 @@ fn main() {{
             panic!("emitted sanitizer exceeded its 3-second deadline");
         }
         std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+/// A runtime method whose Ruby body is a bare `nil` answers nil on Swift, not a crash.
+#[test]
+fn swift_bare_nil_bodies_return_nil() {
+    let files = roundhouse::emit::swift::emit(&roundhouse::App::default());
+    for (path, method) in [
+        (
+            "Sources/App/ActiveRecordBase.swift",
+            "func klass() -> Any? {",
+        ),
+        (
+            "Sources/App/ActiveRecordBase.swift",
+            "func macro() -> Any? {",
+        ),
+        (
+            "Sources/App/ActionControllerBase.swift",
+            "func requestForCsrf() -> Any? {",
+        ),
+    ] {
+        let source = &files
+            .iter()
+            .find(|file| file.path == std::path::Path::new(path))
+            .unwrap_or_else(|| panic!("{path}"))
+            .content;
+        let start = source
+            .find(method)
+            .unwrap_or_else(|| panic!("{method} in {path}"));
+        let body = &source[start..start + source[start..].find("\n    }\n").expect("method end")];
+        assert!(body.contains("return nil"), "{body}");
     }
 }

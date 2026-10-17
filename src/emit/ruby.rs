@@ -23,6 +23,7 @@ const SPINEL_TEST_HELPER: &str =
 
 pub(crate) mod expr;
 mod library;
+pub(crate) use library::install_lookup_indexes;
 mod rbs;
 pub mod shake;
 mod shared;
@@ -183,7 +184,7 @@ fn relax_from_stmt_handle(lc: &mut LibraryClass) {
         if m.name.as_str() == "from_stmt" && m.receiver == MethodReceiver::Class {
             if let Some(crate::ty::Ty::Fn { params, .. }) = m.signature.as_mut() {
                 if let Some(p) = params.first_mut() {
-                    p.ty = crate::ty::Ty::Untyped;
+                    p.ty = crate::ty::Ty::Untyped.into();
                 }
             }
         }
@@ -235,6 +236,7 @@ pub(crate) fn materialize_models(
         materialization,
         crate::lower::model_to_library::FinderInputs::Request,
         true,
+        crate::lower::model_to_library::ErrorsReaders::CreatedOnFirstRead,
     ).0;
     (lcs, params_specs)
 }
@@ -321,6 +323,10 @@ pub(crate) fn apply_model_lowering(mut lcs: &mut [LibraryClass], app: &App) {
     // Date/DateTime/Time column accessors coerce to/from real `Time`
     // (no-op for apps with no temporal columns).
     library::apply_datetime_lowering(&mut lcs, app);
+    library::apply_rich_text_content_memo(&mut lcs);
+    // `ActionText::RichText belongs_to :record, touch: true`: a saved
+    // rich text touches the record it was read through.
+    library::apply_rich_text_record_touch(&mut lcs, app);
     // has_secure_password (authenticate + plaintext accessors, bcrypt
     // contract) and typed_store virtual-attribute accessors are
     // synthesized by the shared model lowering
@@ -836,6 +842,7 @@ fn jbuilder_view_output_path(view_name: &str) -> PathBuf {
 /// which would have CRuby double-run every test if combined with the
 /// shim).
 pub fn emit_spinel(app: &App) -> Vec<EmittedFile> {
+    let _indexes = library::install_lookup_indexes(app);
     let mut files = Vec::new();
     files.extend(emit_lowered_schema_pair(app));
     // routes.rb gets a require-relative header prepended (see
@@ -1055,12 +1062,13 @@ pub fn emit_spinel(app: &App) -> Vec<EmittedFile> {
         // as the Ruby family's jbuilder `_url` does (see the pass).
         let test_modules =
             crate::lower::test_module_to_library::ruby_family_absolute_test_urls(&app.test_modules);
-        let mut test_lowered = crate::lower::lower_test_modules_with_inner(
+        let mut test_lowered = crate::lower::test_module_to_library::lower_test_modules_with_inner_opts(
             &test_modules,
             &app.fixtures,
             &app.models,
             fixture_extras,
             &crate::lower::routes::helper_id_segments(app),
+            true,
         );
         // A test body writes the same relation chains an app body does —
         // `@room.messages.ordered`, `user.push_subscriptions.find_by(…)`,
@@ -1095,6 +1103,14 @@ pub fn emit_spinel(app: &App) -> Vec<EmittedFile> {
             // into a seeded Relation. See the module.
             crate::lower::records_to_relation_arg::rewrite_test_classes(&mut test_lcs, app);
             library::apply_scope_lowering(&mut test_lcs, app);
+            // A route-helper argument as the helper's SIGNATURE takes
+            // it, as app bodies get it: a String-typed segment (a slug,
+            // or one typed by its `scope defaults:` text) takes
+            // `id.to_s`, not the Integer `project_route_helper_ids`
+            // left. campfire's `user_profile_url(users(:jason))` reached
+            // `?String user_id` as an Integer, and Spinel refused the
+            // contradicted seed.
+            library::apply_route_param_lowering(&mut test_lcs, app);
             // `1.minute.ago` in a class a test file carries (campfire's
             // `PushServiceTestHelper.sign`), as library classes get it.
             library::apply_duration_lowering(&mut test_lcs, app);
@@ -1421,10 +1437,34 @@ fn render_autorun_shim(lc: &LibraryClass, reset_lines: &[String]) -> String {
         "\n# Spinel AOT autorun shim — see emit/ruby.rs::render_autorun_shim.\n",
     );
     // An Integer counter and per-failure `puts`, deliberately: no
-    // array accumulator and no block, so the shim leans on nothing
-    // beyond `begin/rescue`, `+`, `to_s` and string concatenation —
-    // the surface spinel-AOT already compiles in lowered test bodies
-    // (`assert_raises`) and `runtime/spinel`.
+    // array accumulator and no block in the runner, so that loop leans
+    // on nothing beyond `begin/rescue`, `+`, `to_s` and string
+    // concatenation. The fixture-transaction wrapper is a method: its
+    // block sits in a `def`, the shape spinel already compiles in
+    // lowered test bodies.
+    //
+    // Rails' `use_transactional_tests` (default true) runs the example
+    // inside a non-joinable transaction, so each `save`/`destroy` is a
+    // SAVEPOINT. `TestBase.use_transactional_tests` is that default; a
+    // class that sets the flag false overrides the class method.
+    // Framework tests are not `TestBase` subclasses and have no such
+    // method — call the example directly rather than raising
+    // `NoMethodError` before it runs.
+    if !test_methods.is_empty() {
+        writeln!(s, "class {class_name}").unwrap();
+        for tm in &test_methods {
+            writeln!(s, "  def __txn_{tm}").unwrap();
+            writeln!(s, "    if self.class.respond_to?(:use_transactional_tests) && self.class.use_transactional_tests").unwrap();
+            writeln!(s, "      ActiveRecord::Base.transaction(joinable: false) do").unwrap();
+            writeln!(s, "        {tm}").unwrap();
+            writeln!(s, "      end").unwrap();
+            writeln!(s, "    else").unwrap();
+            writeln!(s, "      {tm}").unwrap();
+            writeln!(s, "    end").unwrap();
+            writeln!(s, "  end").unwrap();
+        }
+        writeln!(s, "end").unwrap();
+    }
     writeln!(s, "__failed = 0").unwrap();
     writeln!(s, "__skipped = 0").unwrap();
     for tm in &test_methods {
@@ -1441,11 +1481,16 @@ fn render_autorun_shim(lc: &LibraryClass, reset_lines: &[String]) -> String {
         // that fails to load is a per-test error in Rails. Outside
         // the guard it would abort the file and hide every test
         // behind it — the exact failure mode this shim exists to end.
-        for line in reset_lines {
-            writeln!(s, "  {line}").unwrap();
+        // Rails' fixture setup: loaded with referential integrity off, then checked. Not around an empty list: a framework test has nothing to reset and loads neither Db nor the helper.
+        if !reset_lines.is_empty() {
+            writeln!(s, "  FixtureLoader.with_foreign_keys_deferred do").unwrap();
+            for line in reset_lines {
+                writeln!(s, "    {line}").unwrap();
+            }
+            writeln!(s, "  end").unwrap();
         }
         writeln!(s, "  __t.setup").unwrap();
-        writeln!(s, "  __t.{tm}").unwrap();
+        writeln!(s, "  __t.__txn_{tm}").unwrap();
         // `rescue Exception`, not a bare rescue: a bare one catches
         // StandardError, and an assertion library may deliberately put
         // its failure OUTSIDE that. `Mocha::ExpectationError <
@@ -1465,14 +1510,21 @@ fn render_autorun_shim(lc: &LibraryClass, reset_lines: &[String]) -> String {
         // counting it passed claims a check that never ran. So it is
         // reported on its own line and taken out of BOTH sides of the
         // tally by `scripts/campfire-suite`.
-        writeln!(s, "rescue TestSkipped => __e").unwrap();
-        writeln!(s, "  __ok = false").unwrap();
-        writeln!(s, "  __skipped = __skipped + 1").unwrap();
-        writeln!(s, "  puts {:?} + __e.message", format!("SKIP {class_name}#{tm}: ")).unwrap();
+        // One `rescue Exception`. `TestSkipped < Exception`, and a
+        // framework file never loads the helper that defines that
+        // class — naming it in its own rescue arm raised
+        // `NameError` while handling an ordinary failure. The class
+        // name is the skip signal the helper's `skip` raises.
         writeln!(s, "rescue Exception => __e").unwrap();
-        writeln!(s, "  __ok = false").unwrap();
-        writeln!(s, "  __failed = __failed + 1").unwrap();
-        writeln!(s, "  puts {:?} + __e.message", format!("FAIL {class_name}#{tm}: ")).unwrap();
+        writeln!(s, "  if __e.class.name == \"TestSkipped\"").unwrap();
+        writeln!(s, "    __ok = false").unwrap();
+        writeln!(s, "    __skipped = __skipped + 1").unwrap();
+        writeln!(s, "    puts {:?} + __e.message", format!("SKIP {class_name}#{tm}: ")).unwrap();
+        writeln!(s, "  else").unwrap();
+        writeln!(s, "    __ok = false").unwrap();
+        writeln!(s, "    __failed = __failed + 1").unwrap();
+        writeln!(s, "    puts {:?} + __e.message", format!("FAIL {class_name}#{tm}: ")).unwrap();
+        writeln!(s, "  end").unwrap();
         writeln!(s, "end").unwrap();
         // Teardown gets a guard of its OWN, for the reason the comment
         // above gives for the reset lines: unguarded, a raise here
@@ -1682,8 +1734,8 @@ fn render_test_helper(fixture_lcs: &[LibraryClass], truncate_lines: &[String]) -
 
     // (2) Per-test isolation. `_adapter_truncate` exists only on models
     // with a backing schema table; the caller applies that gate.
-    const TRUNCATE_BLOCK: &str = "    Article._adapter_truncate if defined?(Article)
-    Comment._adapter_truncate if defined?(Comment)";
+    const TRUNCATE_BLOCK: &str = "      Article._adapter_truncate if defined?(Article)
+      Comment._adapter_truncate if defined?(Comment)";
 
     // (3) Fixture loading — spinel's AOT model has no runtime constant
     // table, so the scan is materialized at emit time.
@@ -1741,11 +1793,11 @@ fn render_test_helper(fixture_lcs: &[LibraryClass], truncate_lines: &[String]) -
 
     // (2)
     let truncate = if truncate_lines.is_empty() {
-        String::from("    # no table-backed models")
+        String::from("      # no table-backed models")
     } else {
         truncate_lines
             .iter()
-            .map(|line| format!("    {line}"))
+            .map(|line| format!("      {line}"))
             .collect::<Vec<_>>()
             .join("\n")
     };

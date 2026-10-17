@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 # ActiveJob under the transpiled runtime: the adapter is `:inline` —
 # there is no queue daemon in-process, so the class-side entries
 # (`perform_later`, `set(...).perform_later`) are synthesized by
@@ -167,6 +168,13 @@ module ActiveJob
   def self.enqueue_payload(json)
     enqueue(-> { perform_payload(json)
     nil })
+  end
+
+  # A payload whose job asks to be enqueued after commit. This default
+  # holds nothing; the Ruby-family job registry redefines it to hold the
+  # payload while `Model.transaction` is open.
+  def self.enqueue_payload_after_commit(json)
+    enqueue_payload(json)
   end
 
   def self.pending_count
