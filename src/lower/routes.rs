@@ -609,7 +609,9 @@ fn collect_flat_routes(spec: &RouteSpec, out: &mut Vec<FlatRoute>, ctx: &Ctx) {
             // `path:` moves the URL segment only; the helpers and the
             // controller below still come from `name`.
             let segment = path_segment.as_deref().unwrap_or(name.as_str());
-            let resource_path = format!("/{segment}");
+            // `path: "/"` (an empty segment) mounts the resource at its
+            // scope's root: `/ping`, not `//ping`.
+            let resource_path = slash_segment(segment);
             // `param: :task_id` renames the member segment (#84). The
             // action table is written with `:id`; substitute here so
             // the path, the helper's param list and the controller's
@@ -698,10 +700,14 @@ fn collect_flat_routes(spec: &RouteSpec, out: &mut Vec<FlatRoute>, ctx: &Ctx) {
                     continue;
                 }
                 let member = suffix.replace(":id", &format!(":{id_param}"));
+                // Empty for an index or show mounted with `path: "/"`; it
+                // stays empty through the nesting (`/account`, not
+                // `/account/`) and is the root `/` only at the very top.
                 let path = format!("{resource_path}{member}");
                 let (nested_path, nested_params) =
                     nest_path(&path, &ctx.parents, ResourceScope::Nested);
                 let full_path = prefix_path(&ctx.ns_path, &nested_path);
+                let full_path = if full_path.is_empty() { "/".to_string() } else { full_path };
                 // A scope PATH can carry a dynamic segment of its own
                 // (`scope path: ":bot_key"`), and it is a helper
                 // argument like any other. `nest_path` only knows the
@@ -881,6 +887,9 @@ fn defaults_for(ctx: &Ctx, params: &[String]) -> Vec<(String, String)> {
 /// segments; guard the bare-`/` and missing-slash edges (`root` inside
 /// a namespace, `get "health"` with no leading slash).
 fn prefix_path(ns: &str, path: &str) -> String {
+    // A root scope (`scope path: "/"`) contributes nothing, and a scope
+    // never ends in a slash: Rails normalizes `//new` to `/new`.
+    let ns = ns.trim_end_matches('/');
     if ns.is_empty() {
         if path.starts_with('/') || path.is_empty() {
             path.to_string()
@@ -905,9 +914,22 @@ fn qualify_controller(module_prefix: &str, controller: &ClassId) -> ClassId {
     if controller.0.as_str() == crate::ingest::routes::REDIRECT_CONTROLLER {
         return controller.clone();
     }
+    // `devise_for`'s default (no `controllers:` override) is a
+    // placeholder, not a qualified class: Devise substitutes the
+    // enclosing scope's module for its own `"devise"` default
+    // (`Devise::Mapping#default_controllers`) rather than nesting under
+    // it, which the generic concatenation below would do.
+    if let Some(resolved) =
+        crate::ingest::devise_routes::resolve_default_controller(module_prefix, controller.0.as_str())
+    {
+        return ClassId(Symbol::from(resolved));
+    }
     // A leading `::` is a target written with a leading slash
     // (`to: "/errors#routing"`): Rails resolves it from the top level,
-    // outside the enclosing `namespace`.
+    // outside the enclosing `namespace`. `devise_for … controllers:`
+    // overrides are marked the same way — Devise resets the scope's
+    // module before applying them, so no enclosing scope re-qualifies
+    // them either.
     if let Some(absolute) = controller.0.as_str().strip_prefix("::") {
         return ClassId(Symbol::from(absolute));
     }
@@ -916,6 +938,12 @@ fn qualify_controller(module_prefix: &str, controller: &ClassId) -> ClassId {
     } else {
         ClassId(Symbol::from(format!("{module_prefix}{}", controller.0.as_str())))
     }
+}
+
+/// `/<segment>`, or nothing for the empty segment of a resource mounted
+/// at its scope's root (`resources :x, path: "/"`).
+fn slash_segment(segment: &str) -> String {
+    if segment.is_empty() { String::new() } else { format!("/{segment}") }
 }
 
 /// Prepend a scope's `/<parent>/:parent_id` prefix to a child path.
@@ -935,14 +963,13 @@ fn nest_path(
     let mut prefix = String::new();
     let mut params: Vec<String> = Vec::new();
     for frame in outer {
-        prefix.push('/');
-        prefix.push_str(&frame.segment);
+        prefix.push_str(&slash_segment(&frame.segment));
         if frame.has_id {
             prefix.push_str(&format!("/:{}_{}", frame.singular, frame.param));
             params.push(format!("{}_{}", frame.singular, frame.param));
         }
     }
-    let (parent, parent_plural) = (innermost.singular.as_str(), innermost.segment.as_str());
+    let (parent, parent_plural) = (innermost.singular.as_str(), slash_segment(&innermost.segment));
     let prefix = &prefix;
     // Rails joins route segments with `/` unconditionally. A bare-verb
     // shortcut arrives here already slash-prefixed (`/reply`), but an
@@ -951,7 +978,7 @@ fn nest_path(
     // at `/rooms/:room_id/@:message_id`. Concatenating raw glued it onto
     // the id (`/rooms/:room_id@:message_id`) and the route never matched.
     let owned_path;
-    let path: &str = if path.starts_with('/') {
+    let path: &str = if path.is_empty() || path.starts_with('/') {
         path
     } else {
         owned_path = format!("/{path}");
@@ -967,16 +994,16 @@ fn nest_path(
         // `/comments/:id/comments/:id` (measured against Rails 8.1).
         ResourceScope::Member => {
             params.push(innermost.param.clone());
-            (format!("{prefix}/{parent_plural}/:{}{path}", innermost.param), params)
+            (format!("{prefix}{parent_plural}/:{}{path}", innermost.param), params)
         }
         // `collection do get "search" end` → `/photos/search` (no id);
         // `get "/(:name)"` → `/photos(/:name)`, never a bare `/:name`.
-        ResourceScope::Collection => (format!("{prefix}/{parent_plural}{path}"), params),
+        ResourceScope::Collection => (format!("{prefix}{parent_plural}{path}"), params),
         // Bare verb declared directly in the block, or a nested resource's
         // own actions: Rails nests under the parent's `/:<singular>_id`
         // — unless the parent is SINGULAR, which has no id to nest under.
         ResourceScope::Nested => {
-            let mut full = format!("{prefix}/{parent_plural}");
+            let mut full = format!("{prefix}{parent_plural}");
             if innermost.has_id {
                 full.push_str(&format!("/:{parent}_{}", innermost.param));
                 params.push(format!("{parent}_{}", innermost.param));

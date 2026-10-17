@@ -21,6 +21,18 @@ fn rewrite(expr: &mut Expr) {
 }
 
 pub(crate) fn rewrite_node(expr: &mut Expr) {
+    if let ExprNode::Send { recv: Some(r), method, args, block: None, .. } = &mut *expr.node {
+        let time_class = matches!(&*r.node, ExprNode::Const { path }
+            if path.last().is_some_and(|s| s.as_str() == "Time")
+                && path.iter().rev().skip(1).all(|s| s.as_str().is_empty()));
+        if time_class && method.as_str() == "find_zone" && args.len() == 1 {
+            *r = Expr::new(r.span, ExprNode::Const {
+                path: vec![Symbol::from("ActiveSupport"), Symbol::from("TimeZone")],
+            });
+            *method = Symbol::from("lookup");
+            return;
+        }
+    }
     // Not `TimeZone[name]`: a class-side index is an operator on the strict targets; the runtime port answers it as `lookup`.
     if let ExprNode::Send { recv: Some(r), method, args, block: None, .. } = &mut *expr.node {
         if method.as_str() == "[]" && args.len() == 1 && is_time_zone_class(r) {
@@ -98,6 +110,11 @@ pub(crate) fn rewrite_node(expr: &mut Expr) {
         return;
     }
     if !is_time_value(r) {
+        return;
+    }
+    if method.as_str() == "to_date" && args.is_empty() {
+        *expr.node = active_support_call("date_current", vec![r.clone()]);
+        expr.ty = Some(Ty::Date);
         return;
     }
     if method.as_str() == "in_time_zone" && args.len() <= 1 {
@@ -389,7 +406,7 @@ fn zone_name_arg(zone: &Expr) -> Expr {
         return zone.clone();
     }
     let mut name = Expr::new(Span::synthetic(), active_support_call("zone_name", vec![zone.clone()]));
-    name.ty = Some(Ty::Union { variants: vec![Ty::Str, Ty::Nil] });
+    name.ty = Some(Ty::Union { variants: vec![Ty::Str, Ty::Nil].into() });
     name
 }
 
@@ -424,7 +441,7 @@ fn active_support_call(method: &str, args: Vec<Expr>) -> ExprNode {
     );
     recv.ty = Some(Ty::Class {
         id: ClassId(Symbol::from("ActiveSupport")),
-        args: vec![],
+        args: vec![].into(),
     });
     ExprNode::Send {
         recv: Some(recv),

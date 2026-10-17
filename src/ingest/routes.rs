@@ -13,7 +13,10 @@
 //! forces a recognizer. Not-modeled ≠ absent: a dropped entry is a
 //! ledger line, never a silently empty route table. Engine mounts recover
 //! in every mode with a located error carried on the route table; strict
-//! emission refuses it unless explicitly overridden.
+//! emission refuses it unless explicitly overridden. A route-body
+//! statement that is not a call and is not a walked `if`/`unless` or a
+//! local write (`case`, and the rest) records that same gap; `if` and
+//! `unless` are kept, both arms, so they are not gaps.
 //!
 //! `devise_scope` is path-transparent and its routes are kept. The
 //! authentication guards (`authenticate`, `authenticated`, and
@@ -1039,6 +1042,8 @@ fn ingest_route_stmts<'pr>(
         // A conditional around routes (`if Rails.env.development?`) is
         // decided at boot, not here: both arms are walked, so the
         // helpers of every environment's table exist in the model.
+        // Includes the modifier form `get "/x" if flag`. A mount inside
+        // is nested, so the runtime cable exemption does not apply.
         if let Some(cond) = stmt.as_if_node() {
             let mut arms: Vec<Node<'pr>> = Vec::new();
             if let Some(body) = cond.statements() {
@@ -1077,7 +1082,18 @@ fn ingest_route_stmts<'pr>(
             eval::bind(constant_id_str(&write.name()), value);
             continue;
         }
-        let Some(call) = stmt.as_call_node() else { continue };
+        // `case` / `case in`, and any other non-call, used to fall
+        // through a bare `continue`: the routes inside vanished with
+        // no record. Same treatment as an unknown DSL call. The
+        // predicate is not evaluated.
+        let Some(call) = stmt.as_call_node() else {
+            let err = non_call_route_stmt(&stmt, file);
+            if super::survey::is_active() {
+                super::survey::record(&err);
+                continue;
+            }
+            return Err(err);
+        };
         // `Dir.glob('rest_routes/**/*.rb', base: 'config/routes').each
         // do |r| draw(r.sub(/\.rb$/, '')) end` (and `Dir[...]`) — the
         // idiom a Mastodon-class app uses to mass-`draw` a whole
@@ -1100,7 +1116,37 @@ fn ingest_route_stmts<'pr>(
             }
         }
 
+        // `%w[alpha beta].each { |page| get page, to: "pages##{page}" }`
+        // — Rails evaluates `routes.rb` as Ruby, so a loop draws one
+        // route per element. A literal Array of Strings or Symbols is
+        // unrolled here, the block parameter bound in the evaluator's
+        // frame, where the path / `to:` / resource-name readers already
+        // look (`rstring` / `rsymbol`).
+        if let Some(elements) = literal_each_elements(&call) {
+            match ingest_literal_each(&call, elements, file, parent, cx) {
+                Ok(new_entries) => entries.extend(new_entries),
+                Err(err) if super::survey::is_active() => super::survey::record(&err),
+                Err(err) => return Err(err),
+            }
+            continue;
+        }
+
         if call.receiver().is_some() {
+            // Any other receiver-bearing call with a block (`PAGES.each`,
+            // `3.times`, `.each_with_index`) holds routes the walker
+            // cannot evaluate. Skipping it, as below, dropped them with
+            // no record; it is a gap, like an unknown DSL call. The
+            // nested `routes.draw` the skip exists for is left to it.
+            if call.block().is_some_and(|b| b.as_block_node().is_some())
+                && constant_id_str(&call.name()) != "draw"
+            {
+                let err = receiver_block_route_stmt(&call, file);
+                if super::survey::is_active() {
+                    super::survey::record(&err);
+                    continue;
+                }
+                return Err(err);
+            }
             if constant_id_str(&call.name()) == "mount" {
                 route_mount_gap(
                     &call,
@@ -1528,6 +1574,137 @@ fn block_constraints_hash(args: &ruby_prism::ArgumentsNode<'_>) -> IndexMap<Symb
         }
     }
     out
+}
+
+/// The `Unsupported` error for a route-body statement that is not a
+/// call and not a form the walker already keeps (`if`/`unless`, a
+/// local write). Names the construct and its line so the ledger entry
+/// points at the routes that went missing. The line comes from this
+/// parse's bytes first: a test or a re-ingest can register a second
+/// text under the same path, and `line_at` keeps the first.
+fn non_call_route_stmt(stmt: &Node<'_>, file: &str) -> IngestError {
+    let location = stmt.location();
+    let line = super::sources::line_at_parse(&location)
+        .or_else(|| super::sources::line_at(file, location.start_offset()))
+        .map(|line| format!(", line {line}"))
+        .unwrap_or_default();
+    let construct = match conditional_keyword(stmt) {
+        Some(keyword) => format!("conditional `{keyword}` block (predicate not statically known)"),
+        None => "non-call statement".to_string(),
+    };
+    IngestError::Unsupported {
+        file: file.into(),
+        message: format!("unsupported routes DSL: {construct}{line}"),
+    }
+}
+
+/// The `Unsupported` error for a receiver-bearing call with a block that
+/// the walker cannot evaluate (`PAGES.each { … }`, `3.times { … }`),
+/// naming the method and its line, as `non_call_route_stmt` does.
+fn receiver_block_route_stmt(call: &ruby_prism::CallNode<'_>, file: &str) -> IngestError {
+    let location = call.location();
+    let line = super::sources::line_at_parse(&location)
+        .or_else(|| super::sources::line_at(file, location.start_offset()))
+        .map(|line| format!(", line {line}"))
+        .unwrap_or_default();
+    IngestError::Unsupported {
+        file: file.into(),
+        message: format!(
+            "unsupported routes DSL: `.{}` block on a receiver that is not a literal Array of Strings or Symbols{line}",
+            constant_id_str(&call.name())
+        ),
+    }
+}
+
+/// The elements of `[…].each { |x| … }` when the receiver is an Array
+/// literal (`%w[…]`, `%i[…]`, `[:a, "b"]`) of String or Symbol literals,
+/// the call takes no arguments and its block exactly one required
+/// parameter. `None` for any other shape.
+fn literal_each_elements(call: &ruby_prism::CallNode<'_>) -> Option<Vec<eval::RVal>> {
+    if constant_id_str(&call.name()) != "each" || call.arguments().is_some() {
+        return None;
+    }
+    let array = call.receiver()?.as_array_node()?;
+    let block = call.block()?.as_block_node()?;
+    let params = block.parameters()?.as_block_parameters_node()?.parameters()?;
+    if params.requireds().iter().count() != 1
+        || params.optionals().iter().count() != 0
+        || params.rest().is_some()
+        || params.posts().iter().count() != 0
+        || params.keywords().iter().count() != 0
+        || params.keyword_rest().is_some()
+        || params.block().is_some()
+    {
+        return None;
+    }
+    params.requireds().iter().next()?.as_required_parameter_node()?;
+    array
+        .elements()
+        .iter()
+        .map(|el| {
+            if el.as_string_node().is_none() && el.as_symbol_node().is_none() {
+                return None;
+            }
+            eval::value(&el)
+        })
+        .collect()
+}
+
+/// Walk the block of a `literal_each_elements` loop once per element.
+/// Each walk gets a frame that copies the enclosing one (a loop inside a
+/// `concern` still reads `options`) with the block parameter bound to
+/// the element.
+fn ingest_literal_each(
+    call: &ruby_prism::CallNode<'_>,
+    elements: Vec<eval::RVal>,
+    file: &str,
+    parent: Option<&str>,
+    cx: &Ctx<'_>,
+) -> IngestResult<Vec<RouteSpec>> {
+    let Some(block) = call.block().and_then(|b| b.as_block_node()) else {
+        return Ok(Vec::new());
+    };
+    let param = block
+        .parameters()
+        .and_then(|p| p.as_block_parameters_node())
+        .and_then(|p| p.parameters())
+        .and_then(|p| p.requireds().iter().next())
+        .and_then(|r| r.as_required_parameter_node())
+        .map(|r| constant_id_str(&r.name()).to_string());
+    let Some(param) = param else {
+        return Ok(Vec::new());
+    };
+    // A loop body is a block, like `if`/`unless` arms, `constraints`/
+    // `member`/`collection`/`devise_scope` and the generic
+    // `block_entries` for `namespace`/`scope`/concern blocks — every
+    // one of them raises `mount_scope_depth` before recursing. Without
+    // it here, a `mount` inside the loop read as top-level: on a
+    // 2+-element loop the first iteration's mount succeeded and the
+    // second then hit the check meant for two separate top-level
+    // mounts of the same engine ("mounting the same engine class more
+    // than once"), so one source `mount` executed twice by the loop
+    // silently half-worked instead of being a located gap on every
+    // iteration (rubys/roundhouse#1027 review).
+    let mut entries = Vec::new();
+    for element in elements {
+        let Some(body) = block.body() else { break };
+        eval::push_inherited_frame();
+        eval::bind(&param, element);
+        let walked = cx.with_mount_scope(cx.mount_scope_depth.get() + 1, || {
+            ingest_route_body(body, file, parent, cx)
+        });
+        eval::pop_frame();
+        entries.extend(walked?);
+    }
+    Ok(entries)
+}
+
+fn conditional_keyword(stmt: &Node<'_>) -> Option<&'static str> {
+    if stmt.as_case_node().is_some() || stmt.as_case_match_node().is_some() {
+        Some("case")
+    } else {
+        None
+    }
 }
 
 /// Redirect routes collected during the entry walk.
@@ -2416,6 +2593,16 @@ mod eval {
         FRAMES.with(|f| f.borrow_mut().push(HashMap::new()));
     }
 
+    /// A frame that starts as a copy of the enclosing one: a block body
+    /// (a literal-Array loop) still sees what its scope bound.
+    pub(super) fn push_inherited_frame() {
+        FRAMES.with(|f| {
+            let mut frames = f.borrow_mut();
+            let top = frames.last().cloned().unwrap_or_default();
+            frames.push(top);
+        });
+    }
+
     pub(super) fn pop_frame() {
         FRAMES.with(|f| {
             f.borrow_mut().pop();
@@ -3237,19 +3424,12 @@ fn ingest_resources_route(
                             ),
                         });
                     }
-                    // `path: ""` / `path: "/"` mounts the resource at the
-                    // root (`GET /` is `index`, `/:id` is `show`). That
-                    // is not the resource name, so refuse it rather
-                    // than fall back to `/parts`.
+                    // `path: ""` / `path: "/"` mounts the resource at its
+                    // scope's root (`GET /` is `index`, `/:id` is
+                    // `show`, a collection route `/ping`): an empty
+                    // segment, which the flattener leaves out of the
+                    // path. The helpers still come from the name.
                     let segment = raw.trim_matches('/');
-                    if segment.is_empty() {
-                        return Err(IngestError::Unsupported {
-                            file: file.into(),
-                            message: format!(
-                                "resources :{name_str} `path: {raw:?}` mounts the resource at the root"
-                            ),
-                        });
-                    }
                     path = Some(segment.to_string());
                 }
                 // `concerns: :c` / `concerns: [:a, :b]` replays those

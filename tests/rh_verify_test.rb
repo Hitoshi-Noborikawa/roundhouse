@@ -12,7 +12,8 @@ class RhVerifyTest < Minitest::Test
     GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_PREFIX].to_h { |key| [key, nil] }.freeze
 
   def setup
-    @root = Dir.mktmpdir('rh-verify-')
+    # Resolved: the child reports Dir.pwd, a realpath (macOS /var -> /private/var).
+    @root = File.realpath(Dir.mktmpdir('rh-verify-'))
     %w[bin scripts tests src/emit docs/guide fixtures/real-blog fixtures/store mocks].each do |dir|
       FileUtils.mkdir_p(File.join(@root, dir))
     end
@@ -51,6 +52,12 @@ class RhVerifyTest < Minitest::Test
           dev_strip: ENV['CARGO_PROFILE_DEV_STRIP'], test_strip: ENV['CARGO_PROFILE_TEST_STRIP'],
           dev_opt: ENV['CARGO_PROFILE_DEV_OPT_LEVEL'], test_opt: ENV['CARGO_PROFILE_TEST_OPT_LEVEL'],
           git_dir: ENV['GIT_DIR'], git_work_tree: ENV['GIT_WORK_TREE'])
+      end
+      if (exact = ARGV.index('--exact'))
+        ARGV[(exact + 1)..].take_while { |arg| !arg.start_with?('--') }.each do |name|
+          next if ENV['VERIFY_OMIT_EXACT'] == name
+          puts "test \#{name} ... ok"
+        end
       end
       puts 'child stdout'
       warn 'child stderr'
@@ -196,6 +203,24 @@ class RhVerifyTest < Minitest::Test
     assert_equal %w[failed not-run], report['checks'].map { |c| c['status'] }
     assert_equal 1, calls.length
     assert_equal 24_000_000 * 1024, report['disk_space']['after']['workspace']['available_bytes']
+  end
+
+  def test_full_suite_failures_preserve_exit_status_and_release_the_lock
+    { 'nextest' => %w[failed not-run], '--doc' => %w[passed failed] }.each do |failure, statuses|
+      out, err, status = invoke('--all', '--json', env: { 'VERIFY_FAIL' => failure })
+      assert_equal 17, status.exitstatus, err
+      report = JSON.parse(out)
+      assert_equal 'failed', report['status']
+      assert_equal statuses, report['checks'].map { |check| check['status'] }
+      assert_includes report['scope'], 'complete default suite'
+      assert_includes report['scope'], 'ignored tests excluded'
+    end
+    out, err, status = invoke('--all', '--json')
+    assert status.success?, err
+    report = JSON.parse(out)
+    assert_equal 'passed', report['status']
+    assert_equal '1', report['build_environment']['CARGO_INCREMENTAL']
+    assert_equal @root, report['build_environment']['ROUNDHOUSE_TEST_BUNDLE_ROOT']
   end
 
   def test_explicit_environment_is_respected
@@ -380,6 +405,8 @@ class RhVerifyTest < Minitest::Test
 
   def test_invalid_inputs_never_start_cargo
     [%w[--test ../example], %w[--toolchain unknown], %w[--jobs 0],
+     %w[--all --test example], %w[--all --toolchain ruby], %w[--all --ignored],
+     %w[--all --lib], %w[--all --contract],
      %w[--base nonexistent], %w[--base --help], %w[--ignored], %w[extra],
      %w[--contract]].each do |args|
       _out, err, status = invoke(*args)
@@ -388,7 +415,7 @@ class RhVerifyTest < Minitest::Test
     end
     _out, err, status = invoke
     assert_equal 2, status.exitstatus
-    assert_includes err, 'select --test, --toolchain, --contract, or --lib'
+    assert_includes err, 'select --test, --toolchain, --contract, --lib, or --all'
     assert_empty calls
   end
 
@@ -446,5 +473,17 @@ class RhVerifyTest < Minitest::Test
     ], calls.map { |c| c['args'] }
     assert calls.all? { |c| c['incremental'] == '1' && c['jobs'] == Etc.nprocessors.to_s }
     assert_equal 3, calls.length
+  end
+
+  def test_contract_exact_filter_that_matches_nothing_fails
+    write_contract_suites
+    out, err, status = invoke('--json', '--contract', env: { 'VERIFY_OMIT_EXACT' => 'ingests_without_errors' })
+    assert_equal 1, status.exitstatus
+    report = JSON.parse(out)
+    assert_equal 'failed', report['status']
+    assert_equal %w[failed not-run], report['checks'].map { |check| check['status'] }
+    assert_equal 1, report['checks'].first['exit']
+    assert_includes err, 'contract filter matched no test: ingests_without_errors'
+    assert_equal 1, calls.length
   end
 end

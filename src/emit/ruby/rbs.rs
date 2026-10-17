@@ -91,11 +91,24 @@ fn render_class(lc: &LibraryClass, classes: &[LibraryClass]) -> String {
         let pad = "  ".repeat(depth - 1);
         match lc.parent.as_ref() {
             Some(p) => writeln!(s, "{pad}class {last} < {}", p.0.as_str()).unwrap(),
+            None if lc.data_define().is_some() => writeln!(s, "{pad}class {last} < ::Data").unwrap(),
             None => writeln!(s, "{pad}class {last}").unwrap(),
         }
     }
 
     let body_pad = "  ".repeat(depth);
+
+    if let Some((members, _)) = lc.data_define() {
+        writeln!(s, "{body_pad}def self.new: (*untyped, **untyped) -> instance").unwrap();
+        // A `def` in the `Data.define` block replaces the reader, and RBS
+        // rejects a second declaration of one method.
+        let defined = |member: &crate::ident::Symbol| {
+            lc.methods.iter().any(|m| m.receiver == MethodReceiver::Instance && m.name == *member)
+        };
+        for member in members.iter().filter(|member| !defined(member)) {
+            writeln!(s, "{body_pad}def `{}`: () -> untyped", member.as_str()).unwrap();
+        }
+    }
 
     for inc in &lc.includes {
         writeln!(s, "{body_pad}include {}", inc.0.as_str()).unwrap();
@@ -274,7 +287,7 @@ fn render_typed_params(params: &[Param], enclosing: &[&str]) -> String {
         let name = p.name.as_str();
         // IR keyword-rest params name the collected Hash, while RBS
         // **T names the type of each keyword value (see rbs ingestion).
-        let param_ty = match (&p.kind, &p.ty) {
+        let param_ty = match (&p.kind, &*p.ty) {
             (ParamKind::KeywordRest, Ty::Hash { value, .. }) => &**value,
             _ => &p.ty,
         };
@@ -488,10 +501,10 @@ mod tests {
 
     #[test]
     fn keyword_rest_renders_values_not_a_nested_hash() {
-        let hash = Ty::Hash { key: Box::new(Ty::Sym), value: Box::new(Ty::Str) };
+        let hash = Ty::Hash { key: std::sync::Arc::new(Ty::Sym), value: std::sync::Arc::new(Ty::Str) };
         let params = [
-            Param { name: Symbol::from("mapping"), ty: hash.clone(), kind: ParamKind::Required },
-            Param { name: Symbol::from("opts"), ty: hash, kind: ParamKind::KeywordRest },
+            Param { name: Symbol::from("mapping"), ty: hash.clone().into(), kind: ParamKind::Required },
+            Param { name: Symbol::from("opts"), ty: hash.into(), kind: ParamKind::KeywordRest },
         ];
         assert_eq!(render_typed_params(&params, &[]), "Hash[Symbol, String] mapping, **String opts");
     }

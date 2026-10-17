@@ -28,6 +28,7 @@ mod broadcasts;
 mod inertia;
 mod process_action;
 pub mod params;
+mod permit_splat;
 pub mod params_wrapper;
 pub mod rewrites;
 pub mod util;
@@ -100,7 +101,7 @@ fn json_actions_for(
 
 /// Each action's templates in the TEXT formats the implicit render
 /// negotiates beyond html and json, in test order: `turbo_stream`, then
-/// `js`. Same scan `json_actions_for` does for jbuilder.
+/// `js`, then `md`. Same scan `json_actions_for` does for jbuilder.
 ///
 /// Turbo negotiates `text/vnd.turbo-stream.html` on a form submission
 /// and Rails renders `<action>.turbo_stream.erb` for it; without the
@@ -125,7 +126,7 @@ fn text_format_actions_for(controller: &Controller, views: &[crate::dialect::Vie
     // controller's module has to go through to match a view name.
     let dir = crate::naming::underscore(&module);
     let prefix = format!("{dir}/");
-    for fmt in ["turbo_stream", "js"] {
+    for fmt in ["turbo_stream", "js", "md"] {
         for v in views {
             if v.format.as_str() != fmt || v.jbuilder {
                 continue;
@@ -315,6 +316,11 @@ pub fn lower_controllers_with_arel_views_assocs_and_routes(
     // purely shape-directed — what it was before this table existed.
     let empty_segments = std::collections::HashMap::new();
     let route_id_segments = route_id_segments.unwrap_or(&empty_segments);
+    // `permit(*helper)` with a helper answering a literal Symbol list is
+    // the same permit written inline; inline it before anything reads
+    // the permit lists (`permit_splat`).
+    let inlined = self::permit_splat::inline_permit_splats(controllers);
+    let controllers: &[Controller] = inlined.as_deref().unwrap_or(controllers);
     // Scan source-shape action bodies for `permit(...)` declarations.
     // Each unique resource yields one `<Resource>Params` synthesized
     // class plus the (resource, fields, class_id) record we need to
@@ -322,6 +328,7 @@ pub fn lower_controllers_with_arel_views_assocs_and_routes(
     let mut params_specs = self::params::collect_specs(controllers);
     params_specs.mark_file_fields(models);
     params_specs.mark_keyed_associations(models);
+    params_specs.mark_model_resources(models, schema);
     let params_lcs = self::params::synthesize_params_classes(&params_specs);
 
     // The view↔controller ivar contract: each action view's read-ivars,
@@ -478,8 +485,8 @@ pub fn lower_controllers_with_arel_views_assocs_and_routes(
     framework_ivars.insert(
         Symbol::from("params"),
         Ty::Hash {
-            key: Box::new(Ty::Str),
-            value: Box::new(Ty::Untyped),
+            key: std::sync::Arc::new(Ty::Str),
+            value: std::sync::Arc::new(Ty::Untyped),
         },
     );
     // `@flash` is also framework-guaranteed: the render-rewrite emits
@@ -493,7 +500,7 @@ pub fn lower_controllers_with_arel_views_assocs_and_routes(
         Symbol::from("flash"),
         Ty::Class {
             id: ClassId(Symbol::from("ActionDispatch::Flash")),
-            args: vec![],
+            args: vec![].into(),
         },
     );
     // `@session` ditto — per Phase 2.5(b), typed as the per-app
@@ -503,7 +510,7 @@ pub fn lower_controllers_with_arel_views_assocs_and_routes(
         Symbol::from("session"),
         Ty::Class {
             id: ClassId(Symbol::from("ActionDispatch::Session")),
-            args: vec![],
+            args: vec![].into(),
         },
     );
 
@@ -521,6 +528,9 @@ pub fn lower_controllers_with_arel_views_assocs_and_routes(
     let permitted_fields = self::params::permitted_field_tys(&params_specs);
 
     let mut out = Vec::new();
+    // Params classes a kept `update(<params object>)` reads `to_attrs`
+    // of (`params::hand_update_the_attrs`).
+    let mut wants_to_attrs: std::collections::BTreeSet<ClassId> = Default::default();
     crate::timings::phase("lower: controllers type", || {
     for (mut methods, controller) in all_methods {
         // Surveyed over the WHOLE controller before any body is
@@ -550,9 +560,10 @@ pub fn lower_controllers_with_arel_views_assocs_and_routes(
             // Bracket, broadcast, and arel all need the first typing
             // pass and do not consume each other's newly-stamped types,
             // so they share one follow-up type when any of them fires.
-            let mut rewritten = self::params::rewrite_typed_bracket_to_field_in_place(
+            let bracket_rewritten = self::params::rewrite_typed_bracket_to_field_in_place(
                 &mut method.body, &permitted_fields,
             );
+            let mut rewritten = bracket_rewritten;
             rewritten |= self::broadcasts::rewrite_broadcast_to_in_place(
                 &mut method.body,
                 views_module_name(controller).as_deref(),
@@ -570,6 +581,23 @@ pub fn lower_controllers_with_arel_views_assocs_and_routes(
             if rewritten {
                 crate::lower::typing::type_method_body(method, &classes, &framework_ivars);
             }
+            // `helper[:field].humanize` was an untyped read when the
+            // String inflections were grounded; the bracket rewrite just
+            // made it `helper.field`, a String. Ground them now, then type
+            // the grounded calls.
+            if bracket_rewritten
+                && crate::lower::string_inflections::ground_in_place(&mut method.body)
+            {
+                crate::lower::typing::type_method_body(method, &classes, &framework_ivars);
+            }
+        }
+        // After every body is typed: whether a helper answers the params
+        // object is its body's type, which its declared signature does
+        // not say (`permitted.to_h.except(:k)` is still declared the
+        // params class).
+        let answers = self::params::helper_answers(&methods);
+        for method in &mut methods {
+            self::params::hand_update_the_attrs(&mut method.body, &params_specs, &answers, &mut wants_to_attrs);
         }
         methods.extend(collect_attr_accessor_methods(controller));
         apply_alias_methods(controller, &mut methods);
@@ -580,6 +608,7 @@ pub fn lower_controllers_with_arel_views_assocs_and_routes(
             parent: controller.parent.clone(),
             parent_span: controller.parent_span,
             includes: Vec::new(),
+            include_spans: Vec::new(),
             methods,
             nullable_columns: Vec::new(),
             origin: None,
@@ -597,6 +626,15 @@ pub fn lower_controllers_with_arel_views_assocs_and_routes(
     // seed, the typer leaves it as `TyVar(0)` and the strict residual
     // check fails.
     let mut params_lcs = params_lcs;
+    for params_lc in &mut params_lcs {
+        if wants_to_attrs.contains(&params_lc.name)
+            && !params_lc.methods.iter().any(|m| m.name.as_str() == "to_attrs")
+        {
+            if let Some(spec) = params_specs.by_class(&params_lc.name) {
+                params_lc.methods.push(self::params::synth_to_attrs(&spec.class_id, &spec.fields));
+            }
+        }
+    }
     for params_lc in &mut params_lcs {
         let mut params_ivars: std::collections::HashMap<Symbol, Ty> =
             std::collections::HashMap::new();
@@ -654,6 +692,7 @@ pub fn lower_controller_to_library_class(controller: &Controller) -> LibraryClas
         parent: controller.parent.clone(),
         parent_span: controller.parent_span,
         includes: Vec::new(),
+        include_spans: Vec::new(),
         methods,
         nullable_columns: Vec::new(),
         origin: None,
@@ -944,7 +983,7 @@ fn subclass_template_hooks(
         let hook = rewrites::subclass_template_hook_name(&stem);
         // `show_json` → (`show`, `format: :json`); `show` → (`show`, none).
         let (template, format) = match stem.rsplit_once('_') {
-            Some((t, f)) if matches!(f, "json" | "turbo_stream" | "svg") => (t.to_string(), Some(f.to_string())),
+            Some((t, f)) if matches!(f, "json" | "turbo_stream" | "svg" | "md") => (t.to_string(), Some(f.to_string())),
             _ => (stem.clone(), None),
         };
         for (methods, controller) in all_methods.iter_mut() {
@@ -1360,20 +1399,26 @@ fn build_methods(
             all_controllers,
             &dispatcher_bodies(&preamble, &wraps, &rescues),
         );
-        methods.insert(
-            dispatcher_at,
-            synthesize_process_action(
-                &preamble,
-                &publics_inlined,
-                &inherited,
-                controller.name.0.clone(),
-                &deferred_tails,
-                &rescues,
-                &wraps,
-                reads,
-                &missing,
-            ),
+        let mut dispatcher = synthesize_process_action(
+            &preamble,
+            &publics_inlined,
+            &inherited,
+            controller.name.0.clone(),
+            &deferred_tails,
+            &rescues,
+            &wraps,
+            reads,
+            &missing,
         );
+        // Block-form filters are inlined into `process_action` after
+        // `rewrite_controller_route_helpers` has already run on action
+        // bodies. A CSP block calls `service_worker_path(format: :js)`,
+        // which `route_format_suffix` renamed. The rewrite is idempotent
+        // on nodes it has already touched, so every dispatcher gets it —
+        // the next block filter that names a helper would otherwise stay bare.
+        dispatcher.body =
+            rewrite_controller_route_helpers(&dispatcher.body, &shadows, route_id_segments);
+        methods.insert(dispatcher_at, dispatcher);
     }
     // The empty set for both non-public loops below: `is_public: false`
     // already suppresses the implicit render, so there is never one to
@@ -1529,15 +1574,33 @@ fn synthesize_controller_string_method(
 }
 
 /// Names a controller marks with `helper_method :x` whose public
-/// method body is IVAR-FREE (pure over its arguments) — the set the
-/// view-call rewrite and the class-side clone above serve. Shared with
-/// ingest, which registers these in `app.helper_method_index`.
+/// method body is pure over its arguments - the set the view-call
+/// rewrite and the class-side clone above serve. Shared with ingest,
+/// which registers these in `app.helper_method_index`.
+///
+/// Pure means it reads no instance state: no ivar, and none of the
+/// request's state the controller instance carries (`session`,
+/// `cookies`, `request`, `params`, ...). In Rails a helper method runs
+/// on the controller that handles the request; a class-side clone has no
+/// request, and a clone of an `authenticated?` that reads
+/// `session[:authenticated_at]` read `session` off the class, which no
+/// target can compile.
 pub(crate) fn controller_helper_method_names(controller: &Controller) -> Vec<Symbol> {
     use crate::expr::Literal;
+
+    const REQUEST_STATE: &[&str] = &[
+        "session", "cookies", "request", "response", "params", "flash", "headers",
+        "reset_session", "request_forgery_protection_token", "form_authenticity_token",
+    ];
 
     fn has_ivar(e: &Expr) -> bool {
         if matches!(&*e.node, ExprNode::Ivar { .. }) {
             return true;
+        }
+        if let ExprNode::Send { recv: None, method, .. } = &*e.node {
+            if REQUEST_STATE.contains(&method.as_str()) {
+                return true;
+            }
         }
         let mut found = false;
         e.node.for_each_child(&mut |c| {
@@ -2086,17 +2149,24 @@ fn body_calls_method(body: &Expr, name: &Symbol) -> bool {
     found
 }
 
-/// Rewrite a receiverless OPTIONS-ONLY render — `formats:` and/or
-/// `layout:`, nothing else — to `render(:<template>, <options>)`.
+/// Rewrite a receiverless OPTIONS-ONLY render — `formats:`, `layout:`
+/// and/or a resolvable `content_type:`, nothing else — to
+/// `render(:<template>, <options>)`.
 ///
-/// Both options say "this action's own template, rendered this way":
-/// `formats: :svg` in another format (respelled as the internal singular
-/// `format:` marker), `layout: false` without the layout (kept as is —
-/// the Ruby emit's layout pass honors and strips it, as it does for a
-/// partial). campfire's autocompletion endpoint answers its Lexxy mention
-/// prompt with `format.html { render layout: false }` since the Lexxy
-/// merge; left alone, that `render` reached `Base#render(body, …)` with
-/// no body and raised on every HTML request.
+/// All three options say "this action's own template, rendered this
+/// way": `formats: :svg` in another format (respelled as the internal
+/// singular `format:` marker), `layout: false` without the layout
+/// (kept as is — the Ruby emit's layout pass honors and strips it, as
+/// it does for a partial), `content_type: "text/css"` / `content_type:
+/// :css` the same as `formats:` when the value names (or reverse-maps
+/// to, via `format_for_mime`) a format with a template — Mastodon's
+/// `custom_css#show` writes `render content_type: :css` with no
+/// template name at all. campfire's autocompletion endpoint answers
+/// its Lexxy mention prompt with `format.html { render layout: false
+/// }` since the Lexxy merge; left alone, that `render` reached
+/// `Base#render(body, …)` with no body and raised on every HTML
+/// request — the same shape an unresolved `content_type:`-only render
+/// raised on every request to `custom_css#show`.
 fn resolve_formats_only_render(e: &mut Expr, template: &Symbol) {
     e.node.for_each_child_mut(&mut |c| resolve_formats_only_render(c, template));
     let ExprNode::Send { recv: None, method, args, block: None, .. } = &mut *e.node else {
@@ -2120,6 +2190,30 @@ fn resolve_formats_only_render(e: &mut Expr, template: &Symbol) {
                 options.push((sym("format"), sym(fmt.as_str())));
             }
             "layout" => options.push((k.clone(), v.clone())),
+            // `content_type: :css` names the format directly, the same
+            // as `formats:` above (and real Rails accepts a Mime::Type
+            // symbol there, which is what Mastodon's source writes).
+            // `content_type: "text/css"` is a MIME string instead —
+            // resolved through the same reverse table
+            // `mime_for_format`'s own arm feeds, so the two can't
+            // disagree about what a format's canonical MIME is. A
+            // value this can't resolve (a charset-qualified string, an
+            // interpolated expression, an unlisted MIME) declines —
+            // the render stays as written and keeps failing loudly,
+            // rather than a guess silently mislabeling the response.
+            "content_type" => {
+                let fmt = match &*v.node {
+                    ExprNode::Lit { value: Literal::Sym { value } } => value.clone(),
+                    ExprNode::Lit { value: Literal::Str { value } } => {
+                        match crate::lower::controller::body::format_for_mime(value) {
+                            Some(f) => Symbol::from(f),
+                            None => return,
+                        }
+                    }
+                    _ => return,
+                };
+                options.push((sym("format"), sym(fmt.as_str())));
+            }
             _ => return,
         }
     }
@@ -2354,7 +2448,7 @@ fn calls_super(body: &Expr) -> bool {
 /// per-arg types lands when a routing-table-aware typer surfaces.
 fn insert_baseline_controller_methods(info: &mut crate::analyze::ClassInfo) {
     use crate::lower::typing::fn_sig;
-    let any_hash = Ty::Hash { key: Box::new(Ty::Sym), value: Box::new(Ty::Untyped) };
+    let any_hash = Ty::Hash { key: std::sync::Arc::new(Ty::Sym), value: std::sync::Arc::new(Ty::Untyped) };
 
     // Terminals — render/redirect/head/render_404 all return Nil.
     // The framework runtime declares these with named keyword params
@@ -2370,11 +2464,11 @@ fn insert_baseline_controller_methods(info: &mut crate::analyze::ClassInfo) {
         Ty::Fn {
             params: vec![crate::ty::Param {
                 name: Symbol::from("opts"),
-                ty: any_hash.clone(),
+                ty: any_hash.clone().into(),
                 kind: crate::ty::ParamKind::KeywordRest,
-            }],
+            }].into(),
             block: None,
-            ret: Box::new(Ty::Nil),
+            ret: std::sync::Arc::new(Ty::Nil),
             effects: crate::effect::EffectSet::pure(),
         }
     };
@@ -2383,17 +2477,17 @@ fn insert_baseline_controller_methods(info: &mut crate::analyze::ClassInfo) {
             params: vec![
                 crate::ty::Param {
                     name: Symbol::from(first_name),
-                    ty: first_ty,
+                    ty: first_ty.into(),
                     kind: crate::ty::ParamKind::Required,
                 },
                 crate::ty::Param {
                     name: Symbol::from("opts"),
-                    ty: any_hash.clone(),
+                    ty: any_hash.clone().into(),
                     kind: crate::ty::ParamKind::KeywordRest,
                 },
-            ],
+            ].into(),
             block: None,
-            ret: Box::new(Ty::Nil),
+            ret: std::sync::Arc::new(Ty::Nil),
             effects: crate::effect::EffectSet::pure(),
         }
     };
@@ -2424,7 +2518,7 @@ fn insert_baseline_controller_methods(info: &mut crate::analyze::ClassInfo) {
     // its parameters. `runtime/ruby/action_controller/base.rb` defines
     // all three; without these entries a strict target cannot resolve
     // the sends that reach them.
-    let str_or_nil = Ty::Union { variants: vec![Ty::Str, Ty::Nil] };
+    let str_or_nil = Ty::Union { variants: vec![Ty::Str, Ty::Nil].into() };
     info.instance_methods
         .entry(Symbol::from("response_body"))
         .or_insert_with(|| fn_sig(vec![], Ty::Str));
@@ -2699,6 +2793,9 @@ fn action_to_method(
     if text_formats.contains(&"js") {
         variants.push("js");
     }
+    if text_formats.contains(&"md") {
+        variants.push("md");
+    }
     // An overriding `<x>_params` yields its parent's params class —
     // see `lower_overriding_params_helper`.
     let formats_template =
@@ -2766,11 +2863,22 @@ fn action_to_method(
     //     permits `:user`, and one resource can carry several lists.
     //   - Other private actions default to Nil; refine when a
     //     forcing fixture surfaces.
-    let ret_ty = if !is_public && method_name.ends_with("_params") {
+    // Routing redirects override `same_host_location` so an author-written
+    // external location is allowed. The only caller is the inherited
+    // runtime `redirect_to`, which app call-site inference never sees, so
+    // the parameter would stay `Untyped`. Kotlin, C#, and Swift then emit
+    // `Any?` / `object?` against Base's `(String) -> String` and the
+    // override does not compile. The contract is the same String the
+    // runtime signature declares.
+    let host_policy = controller.name.0.as_str() == crate::ingest::routes::REDIRECT_CONTROLLER
+        && a.name.as_str() == "same_host_location";
+    let ret_ty = if host_policy {
+        Ty::Str
+    } else if !is_public && method_name.ends_with("_params") {
         let spec = self::params::first_permit_in(&a.body)
             .and_then(|(resource, fields)| params_specs.find(&resource, &fields));
         if let Some(spec) = spec {
-            Ty::Class { id: spec.class_id.clone(), args: vec![] }
+            Ty::Class { id: spec.class_id.clone(), args: vec![].into() }
         } else {
             // No recognized permit list: the `_params` suffix is a naming
             // convention, not a contract. A guard filter named
@@ -2811,6 +2919,8 @@ fn action_to_method(
         .map(|(i, p)| {
             let ty = if p.rest {
                 Ty::Untyped
+            } else if host_policy {
+                Ty::Str
             } else {
                 unified
                     .and_then(|v| v.get(i))
@@ -2891,7 +3001,7 @@ fn union_with(a: Ty, b: Ty) -> Ty {
             out.push(v);
         }
     }
-    if out.len() == 1 { out.pop().unwrap() } else { Ty::Union { variants: out } }
+    if out.len() == 1 { out.pop().unwrap() } else { Ty::Union { variants: out.into() } }
 }
 
 /// Each signature slot takes the kind its `def` declares. A param with
