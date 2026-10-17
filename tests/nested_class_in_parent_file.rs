@@ -103,6 +103,38 @@ end
 }
 
 #[test]
+fn a_load_time_call_reads_a_child_from_a_parameter_default() {
+    assert_runs(&[("app/services/gauge.rb", r#"class Gauge
+  def self.text(value = Reading::TEXT)
+    value
+  end
+  def initialize(value = Reading::COPY)
+    @value = value
+  end
+  VALUE = text
+  BUILTIN = new
+  class Reading
+    TEXT = "start"
+    COPY = "end"
+  end
+end
+"#)], "gauge.rb", "raise unless Gauge::VALUE == \"start\" && Gauge::BUILTIN.instance_variable_get(:@value) == \"end\"");
+}
+
+#[test]
+fn an_immediately_invoked_lambda_reads_a_child_from_its_default() {
+    assert_runs(&[("app/services/gauge.rb", r#"class Gauge
+  VALUE = ->(x = Reading::TEXT) { x }.call
+  PROC = -> { Reading::COPY }[]
+  class Reading
+    TEXT = "start"
+    COPY = "end"
+  end
+end
+"#)], "gauge.rb", "raise unless Gauge::VALUE == \"start\" && Gauge::PROC == \"end\"");
+}
+
+#[test]
 fn an_immediately_invoked_lambda_loads_its_child_first() {
     assert_runs(&[("app/services/gauge.rb", r#"class Gauge
   PREFIX = "start"

@@ -661,34 +661,43 @@ fn nested_names_in_paths(owner: &LibraryClass, paths: &BTreeSet<Vec<String>>, na
     out
 }
 
-/// Body of an immediately invoked lambda or proc: `-> { … }.call`,
-/// `lambda { … }.call`, `proc { … }.call`. A stored closure runs later;
-/// one invoked in the same expression runs while the parent statement
-/// loads, so its constant reads are load-time.
-fn invoked_lambda_body(expr: &Expr) -> Option<&Expr> {
+/// Lambda or proc invoked in this expression: `-> { … }.call`,
+/// `lambda { … }.call`, `proc { … }[]`. A stored closure runs later;
+/// one invoked here runs while the parent statement loads.
+fn invoked_lambda(expr: &Expr) -> Option<&Expr> {
     let ExprNode::Send { recv: Some(recv), method, .. } = &*expr.node else {
         return None;
     };
-    if method.as_str() != "call" {
+    if !matches!(method.as_str(), "call" | "[]") {
         return None;
     }
     match &*recv.node {
-        ExprNode::Lambda { body, .. } => Some(body),
+        ExprNode::Lambda { .. } => Some(recv),
         ExprNode::Send { recv: None, method, args, block: Some(block), .. }
             if args.is_empty() && matches!(method.as_str(), "lambda" | "proc") =>
         {
-            Some(match &*block.node {
-                ExprNode::Lambda { body, .. } => body,
-                _ => block,
-            })
+            Some(block)
         }
         _ => None,
     }
 }
 
+fn walk_param_defaults(params: &[crate::dialect::Param], owner: &LibraryClass, visited: &mut BTreeSet<String>, paths: &mut BTreeSet<Vec<String>>) {
+    for param in params {
+        if let Some(default) = &param.default {
+            walk_load_time_paths(default, owner, visited, paths);
+        }
+    }
+}
+
 fn walk_load_time_paths(expr: &Expr, owner: &LibraryClass, visited: &mut BTreeSet<String>, paths: &mut BTreeSet<Vec<String>>) {
-    if let Some(body) = invoked_lambda_body(expr) {
-        walk_load_time_paths(body, owner, visited, paths);
+    if let Some(lambda) = invoked_lambda(expr) {
+        if let ExprNode::Lambda { extra_params, body, .. } = &*lambda.node {
+            walk_param_defaults(extra_params, owner, visited, paths);
+            walk_load_time_paths(body, owner, visited, paths);
+        } else {
+            walk_load_time_paths(lambda, owner, visited, paths);
+        }
     }
     if let ExprNode::Lambda { .. } = &*expr.node {
         return;
@@ -705,6 +714,10 @@ fn walk_load_time_paths(expr: &Expr, owner: &LibraryClass, visited: &mut BTreeSe
         let called = if method.as_str() == "new" { "initialize" } else { method.as_str() };
         if own && visited.insert(called.to_string()) {
             for method in owner.methods.iter().filter(|method| method.name.as_str() == called) {
+                walk_param_defaults(&method.params, owner, visited, paths);
+                if let Some(block) = &method.block_param {
+                    walk_param_defaults(std::slice::from_ref(block), owner, visited, paths);
+                }
                 walk_load_time_paths(&method.body, owner, visited, paths);
             }
         }
