@@ -3778,14 +3778,22 @@ fn report_unrecognized_controller_macros(app: &App) {
                 if claimed {
                     continue;
                 }
-                // INTERIM (rubys/roundhouse#58, CSP option 2): a
-                // `content_security_policy` block whose directives this
-                // ingest can read is a recorded DIVERGENCE, not a
-                // blocking gap — see `csp_block_is_recognized` and
-                // `CSP_DIVERGENCE_MESSAGE`. Anything stranger (a
-                // dynamic directive, conditionals, other code in the
-                // block) keeps today's gap below, unchanged.
+                // INTERIM (rubys/roundhouse#58, CSP option 2): a BARE
+                // `content_security_policy do |p| … end` whose
+                // directives this ingest can read is a recorded
+                // DIVERGENCE, not a blocking gap — see
+                // `csp_block_is_recognized` and
+                // `CSP_DIVERGENCE_MESSAGE`. `args.is_empty()` excludes
+                // `content_security_policy only: :player do …`: Rails
+                // scopes that policy to one action, which this ingest
+                // does not model at all (every action on the
+                // controller would wrongly get the same policy, or
+                // none), so it keeps today's gap regardless of how
+                // plain the block is. Anything stranger (a dynamic
+                // directive, conditionals, other code in the block)
+                // also keeps today's gap below, unchanged.
                 if method.as_str() == "content_security_policy"
+                    && args.is_empty()
                     && block.as_ref().is_some_and(csp_block_is_recognized)
                 {
                     survey::record(&IngestError::Unsupported {

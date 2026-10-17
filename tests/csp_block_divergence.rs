@@ -170,3 +170,90 @@ end
     fs::remove_dir_all(&src).unwrap();
     fs::remove_dir_all(&out).unwrap();
 }
+
+/// A `content_security_policy only: :show do |p| … end` whose block is
+/// otherwise as plain as the recognized shape (a real app's controllers
+/// scope a policy to one action exactly this way): the `only:` keyword
+/// scopes the policy to one action, which this ingest does not model,
+/// so it must not be mistaken for the bare, every-action form. It
+/// keeps today's gap and still blocks.
+#[test]
+fn a_scoped_only_csp_block_in_a_controller_still_records_the_gap_and_still_blocks() {
+    let src = scratch("only-src");
+    let out = scratch("only-out");
+    write(&src, "Gemfile", b"source \"https://rubygems.org\"\ngem \"rails\"\n");
+    write(&src, "config/routes.rb", b"Rails.application.routes.draw do\n  get \"widgets\" => \"widgets#index\"\nend\n");
+    write(&src, "app/controllers/application_controller.rb", b"class ApplicationController < ActionController::Base\nend\n");
+    write(&src, "app/controllers/widgets_controller.rb", br#"class WidgetsController < ApplicationController
+  content_security_policy only: :index do |policy|
+    policy.frame_ancestors(false)
+  end
+
+  def index
+    @name = "hi"
+  end
+end
+"#);
+    write(&src, "app/views/widgets/index.html.erb", b"<%= @name %>\n");
+
+    let run = Command::new(env!("CARGO_BIN_EXE_roundhouse"))
+        .args(["--target", "futamura", "--survey", "-o"])
+        .arg(&out)
+        .arg(&src)
+        .env("ROUNDHOUSE_FUTAMURA_LEDGER", "1")
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&run.stderr);
+    assert!(run.status.success(), "{stderr}");
+    assert!(stderr.contains(GENERIC_GAP), "{stderr}");
+    assert!(!stderr.contains(DIVERGENCE), "{stderr}");
+    assert!(stderr.contains("whole-route: 0 GET action(s) served by the lowered app; 1 left to Rails"), "{stderr}");
+
+    fs::remove_dir_all(&src).unwrap();
+    fs::remove_dir_all(&out).unwrap();
+}
+
+/// The same `only:`-scoped shape via a concern's `included do`: still no
+/// divergence recorded (matching the unchanged, silent-drop treatment
+/// every other unrecognized concern statement gets).
+#[test]
+fn a_scoped_only_csp_block_in_a_concerns_included_do_records_no_divergence() {
+    let src = scratch("only-concern-src");
+    let out = scratch("only-concern-out");
+    write(&src, "Gemfile", b"source \"https://rubygems.org\"\ngem \"rails\"\n");
+    write(&src, "config/routes.rb", b"Rails.application.routes.draw do\n  get \"widgets\" => \"widgets#index\"\nend\n");
+    write(&src, "app/controllers/application_controller.rb", b"class ApplicationController < ActionController::Base\nend\n");
+    write(&src, "app/controllers/concerns/csp_setup.rb", br#"module CspSetup
+  extend ActiveSupport::Concern
+
+  included do
+    content_security_policy only: :index do |policy|
+      policy.frame_ancestors(false)
+    end
+  end
+end
+"#);
+    write(&src, "app/controllers/widgets_controller.rb", br#"class WidgetsController < ApplicationController
+  include CspSetup
+
+  def index
+    @name = "hi"
+  end
+end
+"#);
+    write(&src, "app/views/widgets/index.html.erb", b"<%= @name %>\n");
+
+    let run = Command::new(env!("CARGO_BIN_EXE_roundhouse"))
+        .args(["--target", "futamura", "--survey", "-o"])
+        .arg(&out)
+        .arg(&src)
+        .env("ROUNDHOUSE_FUTAMURA_LEDGER", "1")
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&run.stderr);
+    assert!(run.status.success(), "{stderr}");
+    assert!(!stderr.contains(DIVERGENCE), "{stderr}");
+
+    fs::remove_dir_all(&src).unwrap();
+    fs::remove_dir_all(&out).unwrap();
+}

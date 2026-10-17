@@ -4059,8 +4059,13 @@ fn block_form_concern_filter(stmt: &ruby_prism::Node<'_>, file: &str) -> Option<
 /// recognize: dropped with no gap, unchanged from today.
 fn record_concern_csp_divergence(stmt: &ruby_prism::Node<'_>, file: &str) {
     let Some(call) = stmt.as_call_node() else { return };
+    // `arguments().is_some()` excludes `content_security_policy only:
+    // :player do … end` — Rails scopes that policy to one action,
+    // which this ingest doesn't model, so it keeps today's (silent)
+    // drop regardless of how plain the block looks.
     if call.receiver().is_some()
         || constant_id_str(&call.name()) != "content_security_policy"
+        || call.arguments().is_some()
         || call.block().is_none()
     {
         return;
