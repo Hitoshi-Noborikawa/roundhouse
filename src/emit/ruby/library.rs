@@ -240,10 +240,10 @@ pub(super) fn emit_library_class_decls(app: &App) -> Vec<EmittedFile> {
             // Makefile's dependency list.
             let file_stem = crate::naming::underscore(lc.name.0.as_str());
             let out_path = PathBuf::from(format!("app/models/{file_stem}.rb"));
-            let mut files = emit_library_class_pair(lc, app, out_path);
-            if let Some(kids) = children.get(lc.name.0.as_str()) {
-                splice_nested(&mut files, lc, kids, app);
-            }
+            let mut files = match children.get(lc.name.0.as_str()) {
+                Some(kids) => emit_library_class_with_nested(lc, kids, app, out_path),
+                None => emit_library_class_pair(lc, app, out_path),
+            };
             for block in &data_blocks {
                 splice_data_block(&mut files, block, app);
             }
@@ -440,9 +440,8 @@ fn spliced_after_header(content: &str, header_indent: &str, blocks: &[String]) -
     inserted.then(|| out.join("\n"))
 }
 
-/// Put each nested class's block inside its parent's file, before the
-/// parent's own body — the order the source has, and the only one that
-/// works when the parent's class body references them.
+/// Put each nested class's block inside its parent's file, immediately
+/// before its first load-time reference, or at the end of the body.
 ///
 /// The child is rendered by the same function as before and its outer
 /// wrapper removed by COUNT, not by pattern: the parent's name has D
@@ -456,12 +455,12 @@ fn spliced_after_header(content: &str, header_indent: &str, blocks: &[String]) -
 /// the tree lost every nested class while the `.rb` kept them all.
 /// Spelled nested inside the parent's `class`, which is what the
 /// standalone sidecar's `module Parent` wrapper said too.
-fn splice_nested(
-    files: &mut [EmittedFile],
+fn emit_library_class_with_nested(
     parent: &LibraryClass,
     kids: &[&LibraryClass],
     app: &App,
-) {
+    out_path: PathBuf,
+) -> Vec<EmittedFile> {
     let depth = parent.name.0.as_str().split("::").count();
     // Order the children so a superclass precedes its subclass. They
     // share one file now, so `class Image < Sound::ImageStruct` runs
@@ -503,7 +502,7 @@ fn splice_nested(
         ordered
     };
     let kids = &kids[..];
-    let mut blocks: Vec<String> = Vec::new();
+    let mut blocks: Vec<NestedBlock> = Vec::new();
     let mut sidecar_blocks: Vec<String> = Vec::new();
     let mut hoisted: Vec<String> = Vec::new();
     for kid in kids {
@@ -556,7 +555,11 @@ fn splice_nested(
             .filter(|l| !l.starts_with("require"))
             .collect();
         let Some(block) = child_block(&body, depth, kid.name.0.as_str()) else { continue };
-        blocks.push(block);
+        blocks.push(NestedBlock {
+            name: kid.name.0.as_str().to_string(),
+            requires: nested_dependencies(kid, kids),
+            content: block,
+        });
         // The sidecar `emit_library_class_pair` would have written for
         // the child's own file, minus the same wrapper. Its type names
         // were resolved inside the child's enclosing segments, which
@@ -569,39 +572,17 @@ fn splice_nested(
         }
     }
     if blocks.is_empty() {
-        return;
+        return emit_library_class_pair(parent, app, out_path);
     }
     let own_header_indent = "  ".repeat(depth - 1);
-    let Some(rb) = files.iter_mut().find(|f| f.path.extension().is_some_and(|e| e == "rb")) else {
-        return;
-    };
-    // The parent opens either nested (`module WebPush` / `  class
-    // Connections`), its header `depth - 1` levels in, or compact
-    // (`class WebPush::Connections`) at the margin with a body one level
-    // in. The blocks are cut at the nested body's indentation, so the
-    // compact form takes them `depth - 1` levels shallower. Without this
-    // arm the splice found no header and the children, already left out
-    // of the tree as files of their own, were silently gone.
-    // The blocks are cut at column 0 (`child_block`); each header form
-    // wants them at its own body's indentation.
+    let mut rb = emit_library_class_decl_with_nested(parent, app, out_path.clone(), &[], &blocks);
     let compact = |blocks: &[String]| -> Vec<String> {
         blocks.iter().map(|b| indent_lines(b, 1)).collect()
     };
-    let blocks: Vec<String> = blocks.iter().map(|b| indent_lines(b, depth)).collect();
     let sidecar_blocks: Vec<String> = sidecar_blocks.iter().map(|b| indent_lines(b, depth)).collect();
-    let raw_blocks: Vec<String> = blocks.iter().map(|b| dedent_lines(b, depth)).collect();
     let raw_sidecar: Vec<String> = sidecar_blocks.iter().map(|b| dedent_lines(b, depth)).collect();
     let compact_header = format!("class {}", parent.name.0.as_str());
-    let (spliced, compact_form) = match spliced_after_header(&rb.content, &own_header_indent, &blocks) {
-        Some(spliced) => (spliced, false),
-        None if rb.content.lines().any(|l| l == compact_header || l.starts_with(&format!("{compact_header} "))) => {
-            match spliced_after_header(&rb.content, "", &compact(&raw_blocks)) {
-                Some(spliced) => (spliced, true),
-                None => return,
-            }
-        }
-        None => return,
-    };
+    let compact_form = rb.content.lines().any(|l| l == compact_header || l.starts_with(&format!("{compact_header} ")));
     // A require the parent's own file already carries is not repeated.
     hoisted.retain(|r| !rb.content.lines().any(|l| l == r));
     let mut content = String::new();
@@ -612,17 +593,13 @@ fn splice_nested(
     if !hoisted.is_empty() {
         content.push('\n');
     }
-    content.push_str(&spliced);
-    content.push('\n');
+    content.push_str(&rb.content);
     rb.content = content;
 
     // Only once the `.rb` took the body: a sidecar must describe the
     // file beside it, and a child left out of the one stays out of the
     // other.
-    let Some(rbs) = files.iter_mut().find(|f| f.path.extension().is_some_and(|e| e == "rbs"))
-    else {
-        return;
-    };
+    let mut rbs = super::rbs::emit_library_class_rbs(parent, &out_path);
     let (indent, sidecar_blocks) = if compact_form {
         (String::new(), compact(&raw_sidecar))
     } else {
@@ -630,6 +607,162 @@ fn splice_nested(
     };
     if let Some(spliced) = spliced_after_header(&rbs.content, &indent, &sidecar_blocks) {
         rbs.content = format!("{spliced}\n");
+    }
+    vec![rb, rbs]
+}
+
+struct NestedBlock {
+    name: String,
+    requires: BTreeSet<String>,
+    content: String,
+}
+
+fn nested_dependencies(kid: &LibraryClass, kids: &[&LibraryClass]) -> BTreeSet<String> {
+    let mut paths = BTreeSet::new();
+    for value in kid.constants.iter().map(|(_, value)| value)
+        .chain(&kid.class_ivar_initializers).chain(&kid.unknown_calls)
+    {
+        walk_load_time_paths(value, kid, &mut BTreeSet::new(), &mut paths);
+    }
+    for class in kid.parent.iter().chain(&kid.includes) {
+        paths.insert(class.0.as_str().split("::").map(str::to_string).collect());
+    }
+    let names: BTreeSet<String> = kids.iter().map(|class| class.name.0.as_str().to_string())
+        .collect();
+    nested_names_in_paths(kid, &paths, &names)
+}
+
+fn nested_names_in_paths(owner: &LibraryClass, paths: &BTreeSet<Vec<String>>, names: &BTreeSet<String>) -> BTreeSet<String> {
+    let local: BTreeSet<&str> = owner.constants.iter().map(|(name, _)| name.as_str()).collect();
+    let mut out = BTreeSet::new();
+    for path in paths {
+        if path.len() == 1 && local.contains(path[0].as_str()) {
+            continue;
+        }
+        let rooted = path.first().is_some_and(String::is_empty);
+        let path = path.iter().filter(|part| !part.is_empty()).cloned().collect::<Vec<_>>().join("::");
+        let mut scope = Some(owner.name.0.as_str());
+        let mut candidates = Vec::new();
+        if !rooted {
+            while let Some(prefix) = scope {
+                candidates.push(format!("{prefix}::{path}"));
+                scope = prefix.rsplit_once("::").map(|(outer, _)| outer);
+            }
+        }
+        candidates.push(path);
+        if let Some(name) = candidates.iter().find_map(|candidate| {
+            names.iter().filter(|name| name.as_str() != owner.name.0.as_str()
+                && (candidate == *name || candidate.starts_with(&format!("{name}::"))))
+                .max_by_key(|name| name.len()).cloned()
+        }) {
+            out.insert(name);
+        }
+    }
+    out
+}
+
+/// Lambda or proc invoked in this expression: `-> { … }.call`,
+/// `lambda { … }.call`, `proc { … }[]`. A stored closure runs later;
+/// one invoked here runs while the parent statement loads.
+fn invoked_lambda(expr: &Expr) -> Option<&Expr> {
+    let ExprNode::Send { recv: Some(recv), method, .. } = &*expr.node else {
+        return None;
+    };
+    if !matches!(method.as_str(), "call" | "[]") {
+        return None;
+    }
+    match &*recv.node {
+        ExprNode::Lambda { .. } => Some(recv),
+        ExprNode::Send { recv: None, method, args, block: Some(block), .. }
+            if args.is_empty() && matches!(method.as_str(), "lambda" | "proc") =>
+        {
+            Some(block)
+        }
+        _ => None,
+    }
+}
+
+fn walk_param_defaults(params: &[crate::dialect::Param], owner: &LibraryClass, visited: &mut BTreeSet<String>, paths: &mut BTreeSet<Vec<String>>) {
+    for param in params {
+        if let Some(default) = &param.default {
+            walk_load_time_paths(default, owner, visited, paths);
+        }
+    }
+}
+
+fn walk_load_time_paths(expr: &Expr, owner: &LibraryClass, visited: &mut BTreeSet<String>, paths: &mut BTreeSet<Vec<String>>) {
+    if let Some(lambda) = invoked_lambda(expr) {
+        if let ExprNode::Lambda { extra_params, body, .. } = &*lambda.node {
+            walk_param_defaults(extra_params, owner, visited, paths);
+            walk_load_time_paths(body, owner, visited, paths);
+        } else {
+            walk_load_time_paths(lambda, owner, visited, paths);
+        }
+    }
+    if let ExprNode::Lambda { .. } = &*expr.node {
+        return;
+    }
+    if let ExprNode::Const { path } = &*expr.node {
+        paths.insert(path.iter().map(|part| part.as_str().to_string()).collect());
+    }
+    if let ExprNode::Send { recv, method, args, block, .. } = &*expr.node {
+        let own = recv.is_none() || recv.as_ref().is_some_and(|recv| match &*recv.node {
+            ExprNode::SelfRef => true,
+            ExprNode::Const { path } => path.iter().map(|part| part.as_str()).filter(|part| !part.is_empty()).collect::<Vec<_>>().join("::") == owner.name.0.as_str(),
+            _ => false,
+        });
+        let called = if method.as_str() == "new" { "initialize" } else { method.as_str() };
+        if own && visited.insert(called.to_string()) {
+            for method in owner.methods.iter().filter(|method| method.name.as_str() == called) {
+                walk_param_defaults(&method.params, owner, visited, paths);
+                if let Some(block) = &method.block_param {
+                    walk_param_defaults(std::slice::from_ref(block), owner, visited, paths);
+                }
+                walk_load_time_paths(&method.body, owner, visited, paths);
+            }
+        }
+        for value in recv.iter().chain(args) {
+            walk_load_time_paths(value, owner, visited, paths);
+        }
+        let stores_block = matches!(method.as_str(), "proc" | "lambda")
+            || (method.as_str() == "new" && matches!(recv.as_ref().map(|recv| &*recv.node),
+                Some(ExprNode::Const { path }) if path.len() == 1 && path[0].as_str() == "Proc"));
+        if !stores_block {
+            if let Some(block) = block {
+                let body = match &*block.node { ExprNode::Lambda { body, .. } => body, _ => block };
+                walk_load_time_paths(body, owner, visited, paths);
+            }
+        }
+        return;
+    }
+    expr.node.for_each_child(&mut |child| walk_load_time_paths(child, owner, visited, paths));
+}
+
+struct NestedEmitter<'a> {
+    pending: Vec<&'a NestedBlock>,
+    names: BTreeSet<String>,
+}
+
+impl NestedEmitter<'_> {
+    fn write_names(&mut self, out: &mut String, depth: usize, names: &BTreeSet<String>) {
+        while let Some(at) = self.pending.iter().position(|block| names.contains(&block.name)) {
+            let block = self.pending.remove(at);
+            self.write_names(out, depth, &block.requires);
+            writeln!(out, "{}", indent_lines(&block.content, depth)).unwrap();
+        }
+    }
+
+    fn write_expr(&mut self, out: &mut String, depth: usize, owner: &LibraryClass, expr: &Expr) {
+        if self.pending.is_empty() { return; }
+        let mut paths = BTreeSet::new();
+        walk_load_time_paths(expr, owner, &mut BTreeSet::new(), &mut paths);
+        self.write_names(out, depth, &nested_names_in_paths(owner, &paths, &self.names));
+    }
+
+    fn write_include(&mut self, out: &mut String, depth: usize, owner: &LibraryClass, include: &ClassId) {
+        if self.pending.is_empty() { return; }
+        let paths = BTreeSet::from([include.0.as_str().split("::").map(str::to_string).collect()]);
+        self.write_names(out, depth, &nested_names_in_paths(owner, &paths, &self.names));
     }
 }
 
@@ -7287,6 +7420,16 @@ pub(super) fn emit_library_class_decl_with_synthesized(
     out_path: PathBuf,
     synthesized_siblings: &[(String, String)],
 ) -> EmittedFile {
+    emit_library_class_decl_with_nested(lc, app, out_path, synthesized_siblings, &[])
+}
+
+fn emit_library_class_decl_with_nested(
+    lc: &LibraryClass,
+    app: &App,
+    out_path: PathBuf,
+    synthesized_siblings: &[(String, String)],
+    nested: &[NestedBlock],
+) -> EmittedFile {
     let guarded = read_statement_cleanup(lc);
     let lc = guarded.as_ref();
     // The one chokepoint every library-shape file goes through, and the
@@ -7297,7 +7440,7 @@ pub(super) fn emit_library_class_decl_with_synthesized(
     let path = out_path.clone();
     super::expr::with_emitted_file(&path, || {
         super::expr::with_core_class_reopen(is_core_class_name(lc.name.0.as_str()), || {
-            emit_library_class_decl_inner(lc, app, out_path, synthesized_siblings)
+            emit_library_class_decl_inner(lc, app, out_path, synthesized_siblings, nested)
         })
     })
 }
@@ -7342,6 +7485,7 @@ fn emit_library_class_decl_inner(
     app: &App,
     out_path: PathBuf,
     synthesized_siblings: &[(String, String)],
+    nested: &[NestedBlock],
 ) -> EmittedFile {
     let name = lc.name.0.as_str();
     let out_dir = out_path
@@ -7784,6 +7928,10 @@ fn emit_library_class_decl_inner(
         }
     };
     open_header(&mut s, data_factory.as_deref());
+    let nested = std::cell::RefCell::new(NestedEmitter {
+        pending: nested.iter().collect(),
+        names: nested.iter().map(|block| block.name.clone()).collect(),
+    });
 
     for require in &nested_include_requires {
         writeln!(s, "{body_pad}require_relative {require:?}").unwrap();
@@ -7812,6 +7960,7 @@ fn emit_library_class_decl_inner(
         if positioned.iter().any(|(_, p)| *p == inc) {
             continue;
         }
+        nested.borrow_mut().write_include(&mut s, depth, lc, inc);
         writeln!(s, "{body_pad}{}", include_line(inc)).unwrap();
     }
     if lc.includes.len() > positioned.len() && !lc.methods.is_empty() {
@@ -7831,6 +7980,7 @@ fn emit_library_class_decl_inner(
     let render_constants = |s: &mut String, which: &[usize]| {
         for &i in which {
             let (cname, value) = &lc.constants[i];
+            nested.borrow_mut().write_expr(s, depth, lc, value);
             let rendered = super::emit_expr(&top_level(value));
             if let Some(factory) = app.library_classes.iter().find(|class| {
                 matches!(class.origin, Some(LibraryClassOrigin::DataFactory { declaration_span })
@@ -7876,6 +8026,7 @@ fn emit_library_class_decl_inner(
             match item {
                 BodyItem::Constant(i, _) => render_constants(s, &[*i]),
                 BodyItem::Initializer(expr) if ordered_body => {
+                    nested.borrow_mut().write_expr(s, depth, lc, expr);
                     for line in super::emit_expr(&top_level(expr)).lines() {
                         writeln!(s, "{body_pad}{line}").unwrap();
                     }
@@ -7958,6 +8109,7 @@ fn emit_library_class_decl_inner(
         own
     };
     for call in &replayed {
+        nested.borrow_mut().write_expr(&mut s, depth, lc, call);
         for line in super::emit_expr(call).lines() {
             if line.is_empty() {
                 writeln!(s).unwrap();
@@ -7981,6 +8133,7 @@ fn emit_library_class_decl_inner(
             }
             first = false;
             for (_, inc) in positioned.iter().filter(|(at, _)| *at == index) {
+                nested.borrow_mut().write_include(&mut s, depth, lc, inc);
                 writeln!(s, "{body_pad}{}", include_line(inc)).unwrap();
                 writeln!(s).unwrap();
             }
@@ -7988,6 +8141,7 @@ fn emit_library_class_decl_inner(
         }
         for (_, inc) in positioned.iter().filter(|(at, _)| *at >= lc.methods.len()) {
             writeln!(s).unwrap();
+            nested.borrow_mut().write_include(&mut s, depth, lc, inc);
             writeln!(s, "{body_pad}{}", include_line(inc)).unwrap();
         }
     }
@@ -8011,6 +8165,7 @@ fn emit_library_class_decl_inner(
         writeln!(s).unwrap();
     }
     for init in lc.class_ivar_initializers.iter().filter(|init| remaining_inits(init)) {
+        nested.borrow_mut().write_expr(&mut s, depth, lc, init);
         for line in super::emit_expr(&top_level(init)).lines() {
             writeln!(s, "{body_pad}{line}").unwrap();
         }
@@ -8022,6 +8177,9 @@ fn emit_library_class_decl_inner(
         }
         render_constants(&mut s, &deferred);
     }
+
+    let remaining = nested.borrow().names.clone();
+    nested.borrow_mut().write_names(&mut s, depth, &remaining);
 
     for i in (0..depth).rev() {
         writeln!(s, "{}end", "  ".repeat(i)).unwrap();

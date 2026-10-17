@@ -1442,14 +1442,18 @@ fn render_autorun_shim(lc: &LibraryClass, reset_lines: &[String]) -> String {
     // inside a non-joinable transaction, so each `save`/`destroy` is a
     // SAVEPOINT. `TestBase.use_transactional_tests` is that default; a
     // class that sets the flag false overrides the class method.
-    // Framework tests are not `TestBase` subclasses and have no such
-    // method — call the example directly rather than raising
-    // `NoMethodError` before it runs.
-    if !test_methods.is_empty() {
+    //
+    // Only an app suite has fixture reset lines, and only that suite
+    // loads the helper that defines the method. Spinel rejects the call
+    // when no class in the program defines it; `respond_to?` does not
+    // make the reference optional. A framework file has nothing to reset
+    // and no such method, so it calls the example directly.
+    let transactional = !reset_lines.is_empty();
+    if transactional && !test_methods.is_empty() {
         writeln!(s, "class {class_name}").unwrap();
         for tm in &test_methods {
             writeln!(s, "  def __txn_{tm}").unwrap();
-            writeln!(s, "    if self.class.respond_to?(:use_transactional_tests) && self.class.use_transactional_tests").unwrap();
+            writeln!(s, "    if self.class.use_transactional_tests").unwrap();
             writeln!(s, "      ActiveRecord::Base.transaction(joinable: false) do").unwrap();
             writeln!(s, "        {tm}").unwrap();
             writeln!(s, "      end").unwrap();
@@ -1485,7 +1489,11 @@ fn render_autorun_shim(lc: &LibraryClass, reset_lines: &[String]) -> String {
             writeln!(s, "  end").unwrap();
         }
         writeln!(s, "  __t.setup").unwrap();
-        writeln!(s, "  __t.__txn_{tm}").unwrap();
+        if transactional {
+            writeln!(s, "  __t.__txn_{tm}").unwrap();
+        } else {
+            writeln!(s, "  __t.{tm}").unwrap();
+        }
         // `rescue Exception`, not a bare rescue: a bare one catches
         // StandardError, and an assertion library may deliberately put
         // its failure OUTSIDE that. `Mocha::ExpectationError <
