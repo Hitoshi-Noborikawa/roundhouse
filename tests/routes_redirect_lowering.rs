@@ -107,8 +107,8 @@ fn routing_redirects_override_only_the_controller_host_policy() {
 #[test]
 fn routing_redirect_host_policy_keeps_the_base_string_signature() {
     let app = app_with("  get \"/outside\", to: redirect(\"https://other.test/landing\")\n");
-    let method = app
-        .library_classes
+    let classes = roundhouse::lower::lower_controllers_to_library_classes(&app.controllers, Vec::new());
+    let method = classes
         .iter()
         .find(|class| class.name.0.as_str() == "RoundhouseRedirectsController")
         .and_then(|class| class.methods.iter().find(|method| method.name.as_str() == "same_host_location"))
@@ -123,31 +123,28 @@ fn routing_redirect_host_policy_keeps_the_base_string_signature() {
         }
         other => panic!("host policy signature: {other:?}"),
     }
-    let kotlin = roundhouse::emit::kotlin::emit(&app);
-    let kotlin = kotlin
-        .iter()
-        .find(|file| file.path.display().to_string().contains("RoundhouseRedirectsController"))
-        .expect("kotlin redirect controller");
+    let controller_file = |files: Vec<roundhouse::emit::EmittedFile>, needle: &str| {
+        files
+            .into_iter()
+            .find(|file| file.path.display().to_string().contains(needle))
+            .unwrap_or_else(|| panic!("no emitted file matching {needle}"))
+    };
+    let kotlin = controller_file(
+        roundhouse::emit::kotlin::emit(&app),
+        "RoundhouseRedirectsController",
+    );
     assert!(
         kotlin.content.contains("override fun sameHostLocation(location: String): String"),
         "{}",
         kotlin.content
     );
-    let csharp = roundhouse::emit::csharp::emit(&app);
-    let csharp = csharp
-        .iter()
-        .find(|file| file.content.contains("SameHostLocation"))
-        .expect("csharp host policy");
+    let csharp = controller_file(roundhouse::emit::csharp::emit(&app), "RoundhouseRedirectsController");
     assert!(
         csharp.content.contains("override string SameHostLocation(string location)"),
         "{}",
         csharp.content
     );
-    let swift = roundhouse::emit::swift::emit(&app);
-    let swift = swift
-        .iter()
-        .find(|file| file.content.contains("sameHostLocation"))
-        .expect("swift host policy");
+    let swift = controller_file(roundhouse::emit::swift::emit(&app), "RoundhouseRedirectsController");
     assert!(
         swift.content.contains("override func sameHostLocation(_ location: String) -> String"),
         "{}",
