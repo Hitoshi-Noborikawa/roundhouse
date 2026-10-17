@@ -475,6 +475,24 @@ fn try_rewrite(expr: &mut Expr, defs: &AppDefinitions, diags: &mut Vec<Diagnosti
         // `Object#blank?` branches on the VALUE, and so does the
         // runtime predicate: hand it the read.
         let grounding = if is_params_read(r) { Grounding::Runtime } else { classify(r.ty.as_ref(), defs) };
+        // An IVAR read keeps its nil arm whatever its stamp says. An
+        // unassigned ivar reads nil, and the controller-wide ivar
+        // environment strips Nil on purpose (the find-then-guard idiom,
+        // `analyze/mod.rs`), so a non-nil stamp there is not a proof.
+        // A blank predicate is how the app spells that nil guard:
+        // campfire's `CachedResponses#perform_caching` reads
+        // `@response_cache_version.present?`, which a detached
+        // `ApplicationController.new` never assigned, and grounding it
+        // as `!@response_cache_version.empty?` raised on nil.
+        let grounding = match (grounding, &*r.node) {
+            (Grounding::Container { nilable: false, whitespace }, ExprNode::Ivar { .. }) => {
+                Grounding::Container { nilable: true, whitespace }
+            }
+            (Grounding::NeverBlank { nilable: false }, ExprNode::Ivar { .. }) => {
+                Grounding::NeverBlank { nilable: true }
+            }
+            (g, _) => g,
+        };
         (pred, grounding, r.ty.clone(), is_effect_free_reader(r))
     };
     // An ASSIGNMENT receiver — lobsters' login does

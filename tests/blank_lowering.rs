@@ -121,6 +121,33 @@ end
     assert!(diags.is_empty(), "{diags:?}");
 }
 
+/// An ivar read keeps its nil guard even when its stamp is non-nil:
+/// an unassigned ivar reads nil, and campfire's detached
+/// `ApplicationController.new.perform_caching` raised on
+/// `!@response_cache_version.empty?`.
+#[test]
+fn ivar_present_keeps_the_nil_guard_under_a_non_nil_stamp() {
+    let (out, diags) = lower_and_emit(
+        r#"
+class Util
+  def initialize
+    @parts = [1, 2]
+    @count = 3
+  end
+
+  def check
+    return "yes" if @parts.present? && @count.present?
+    "no"
+  end
+end
+"#,
+    );
+    assert!(!out.contains("present?"), "site should be grounded:\n{out}");
+    assert!(out.contains("@parts.nil?"), "collection ivar needs the nil guard:\n{out}");
+    assert!(out.contains("@count.nil?"), "scalar ivar must not fold to true:\n{out}");
+    assert!(diags.is_empty(), "{diags:?}");
+}
+
 #[test]
 fn string_presence_becomes_conditional() {
     let (out, diags) = lower_and_emit(
