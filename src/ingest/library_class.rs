@@ -68,7 +68,7 @@ pub fn ingest_library_classes(
     source: &[u8],
     file: &str,
 ) -> IngestResult<Vec<LibraryClass>> {
-    ingest_library_classes_impl(source, file, true)
+    ingest_library_classes_impl(source, file, None)
 }
 
 /// Like [`ingest_library_classes`], but only classes/modules NESTED
@@ -88,25 +88,40 @@ pub fn ingest_library_classes(
 /// top-level declarations avoids that spurious failure entirely,
 /// rather than chasing down every way the library walk might refuse
 /// something the model walk already accepted.
+///
+/// The one top-level declaration it does take is a compact name under
+/// the model, `module Outer::Uploads` written beside `class Outer`:
+/// nested by name, though not by lexical scope. Writebook's
+/// `ActionText::Markdown::Uploads` concern is written this way.
 pub fn ingest_nested_library_classes(
     source: &[u8],
     file: &str,
+    outer: &str,
 ) -> IngestResult<Vec<LibraryClass>> {
-    ingest_library_classes_impl(source, file, false)
+    ingest_library_classes_impl(source, file, Some(outer))
 }
 
+/// `nested_in`: `None` walks every declaration; `Some(outer)` walks
+/// only nested ones and top-level compact names under `outer`.
 fn ingest_library_classes_impl(
     source: &[u8],
     file: &str,
-    include_top_level: bool,
+    nested_in: Option<&str>,
 ) -> IngestResult<Vec<LibraryClass>> {
+    let walked = |scope: &[String], path: Option<Vec<String>>| match nested_in {
+        None => true,
+        Some(_) if !scope.is_empty() => true,
+        Some(outer) => path.is_some_and(|path| {
+            path.join("::").strip_prefix(outer).is_some_and(|rest| rest.starts_with("::"))
+        }),
+    };
     super::sources::register(file, &String::from_utf8_lossy(source));
     let result = super::prism::parse(source, file);
     let root = result.node();
     let mut out = Vec::new();
     for (scope, class) in find_all_classes_with_scope(&root)
         .into_iter()
-        .filter(|(scope, _)| include_top_level || !scope.is_empty())
+        .filter(|(scope, class)| walked(scope, class_name_path(class)))
     {
         let (mut lc, struct_base) = library_class_and_struct_base(&class, &scope, file)?;
         // BEFORE the class it serves: a superclass has to be defined
@@ -128,7 +143,7 @@ fn ingest_library_classes_impl(
     }
     for (scope, module) in find_all_modules_with_scope(&root)
         .into_iter()
-        .filter(|(scope, _)| include_top_level || !scope.is_empty())
+        .filter(|(scope, module)| walked(scope, module_name_path(module)))
     {
         // A nested `ClassMethods` is not a namespace of its own — it's
         // ActiveSupport::Concern's class-side carrier, already folded
