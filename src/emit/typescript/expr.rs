@@ -322,8 +322,23 @@ pub(crate) fn array_method_handled(method: &str, argc: usize, block: bool, numer
         "max" | "min" => argc == 0 && numeric_elem,
         "size" | "length" | "empty?" | "none?" | "reverse" | "to_a" | "to_h" | "sort" | "compact" | "uniq"
         | "dup" | "clone" | "nil?" | "present?" | "blank?" | "freeze" => argc == 0,
-        "push" | "pop" | "shift" | "unshift" | "<<" | "[]" | "[]=" | "==" | "!=" | "+" | "-" | "is_a?"
-        | "kind_of?" => !block,
+        "push" | "pop" | "shift" | "unshift" | "<<" | "[]" | "[]=" | "==" | "!=" | "+" | "-" | "&" | "|"
+        | "is_a?" | "kind_of?" => !block,
+        _ => false,
+    }
+}
+
+/// `array_method_handled` for an Integer or Float receiver: the numeric
+/// arm of `js_send`, the operators, and the generic `to_s` / `to_i` /
+/// `times` rewrites.
+pub(crate) fn numeric_method_handled(method: &str, argc: usize, block: bool) -> bool {
+    match method {
+        "times" => block && argc == 1,
+        "odd?" | "even?" | "zero?" | "positive?" | "negative?" | "abs" | "to_f" | "to_i" | "to_s" | "pred"
+        | "succ" | "floor" | "ceil" | "round" | "-@" | "+@" | "nil?" | "present?" | "blank?" | "freeze" => argc == 0,
+        "fdiv" | "<=>" | "+" | "-" | "*" | "/" | "%" | "**" | "==" | "!=" | "<" | ">" | "<=" | ">=" | "is_a?"
+        | "kind_of?" => argc == 1 && !block,
+        "clamp" | "between?" => argc == 2,
         _ => false,
     }
 }

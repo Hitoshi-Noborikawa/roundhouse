@@ -1717,10 +1717,11 @@ fn report_ruby_only_sends(app: &App, target: BuildTarget) {
     crate::lower::for_each_emit_body_ref(app, &mut |expr| visit(expr, target, &kernel));
 }
 
-/// A send on a typed Array receiver that the TypeScript emit has no
-/// translation for: it writes the Ruby name on the JS Array (`xs.zip(ys)`,
-/// `xs.tally` as a property read), which throws or reads `undefined`.
-/// `emit::typescript::array_method_handled` names what it does translate.
+/// A send on a typed Array or number receiver that the TypeScript emit has
+/// no translation for: it writes the Ruby name on the JS value
+/// (`xs.zip(ys)`, `n.digits` as a property read), which throws or reads
+/// `undefined`. `emit::typescript::array_method_handled` and
+/// `numeric_method_handled` name what it does translate.
 fn report_typescript_array_sends(app: &App, target: BuildTarget) {
     if !matches!(target, BuildTarget::Typescript | BuildTarget::TypescriptWorker) {
         return;
@@ -1755,6 +1756,22 @@ fn report_typescript_array_sends(app: &App, target: BuildTarget) {
                         target.as_str(),
                         format!("Array#{}", method.as_str()).as_str(),
                         "the TypeScript emit has no translation for it and would call the Ruby name on a JS Array",
+                    );
+                }
+            }
+            let number = match r.ty.as_ref() {
+                Some(Ty::Int) => Some("Integer"),
+                Some(Ty::Float) => Some("Float"),
+                _ => None,
+            };
+            if let Some(class) = number {
+                let argc = args.len() + usize::from(block.is_some());
+                if !crate::emit::typescript::numeric_method_handled(method.as_str(), argc, block.is_some()) {
+                    crate::emit::diagnostics::report_unsupported(
+                        expr.span,
+                        target.as_str(),
+                        format!("{class}#{}", method.as_str()).as_str(),
+                        "the TypeScript emit has no translation for it and would call the Ruby name on a JS number",
                     );
                 }
             }
