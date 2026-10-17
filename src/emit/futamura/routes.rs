@@ -876,9 +876,24 @@ impl Facts {
             }
         }
         // Load time: constants, class-level initializers, class-body calls.
+        // A class body runs with the class itself as `self`, so a body
+        // that uses `self` (`register(self)`, `self.new`) or calls
+        // anything receiverless (`register(new)`, a class method that
+        // stores `self`) can hand the class object, or an instance of
+        // it, to anyone: the class is live.
         for lc in lcs {
+            let own = lc.name.0.as_str();
             for e in load_time(lc) {
                 visit(e, &mut |n| {
+                    if escapes_self(n) {
+                        if lc.is_module {
+                            // A concern's `included do … end` runs with
+                            // the including class as `self`.
+                            always.extend(index.tree(own).into_iter().filter(|t| t != own && !index.is_module(t)));
+                        } else {
+                            always.push(own.to_string());
+                        }
+                    }
                     if let Some(ty) = &n.ty {
                         always.extend(classes_of(ty).into_iter().filter(|c| index.classes.contains_key(c)));
                     }
@@ -886,6 +901,19 @@ impl Facts {
                         always.extend(index.app_classes_named(path).into_iter().filter(|c| !index.is_module(c)));
                     }
                 });
+            }
+        }
+        // Ruby hands every subclass to the parent's `inherited` hook, and
+        // every class that includes or extends a module to its
+        // `included` / `extended` hook, when that class loads, with no
+        // expression in the subclass' own body to show for it: an app
+        // hook may keep the class object, so the whole tree under its
+        // definer is live.
+        for hook in ["inherited", "included", "extended"] {
+            for (c, class_side) in index.by_name.get(&Symbol::from(hook)).into_iter().flatten() {
+                if *class_side {
+                    always.extend(index.tree(c).into_iter().filter(|t| t != c && !index.is_module(t)));
+                }
             }
         }
         always.sort();
@@ -956,6 +984,21 @@ impl Facts {
     }
 }
 
+/// `new` / `allocate` on the class whose class-side body is being
+/// walked, receiverless or on `self`: an instance of that class (or of
+/// the subclass the call came in on).
+fn builds_own_instance(e: &Expr) -> bool {
+    matches!(&*e.node, ExprNode::Send { recv, method, .. }
+        if matches!(method.as_str(), "new" | "allocate")
+            && recv.as_ref().is_none_or(|r| matches!(&*r.node, ExprNode::SelfRef)))
+}
+
+/// Does `e`, in a class body, hand on `self` (the class object)? A
+/// `self` reference, or a receiverless call, which runs on `self`.
+fn escapes_self(e: &Expr) -> bool {
+    matches!(&*e.node, ExprNode::SelfRef | ExprNode::Send { recv: None, .. })
+}
+
 /// The expressions a class runs once, when it loads.
 fn load_time(lc: &LibraryClass) -> impl Iterator<Item = &Expr> {
     lc.constants.iter().map(|(_, e)| e).chain(lc.class_ivar_initializers.iter()).chain(lc.unknown_calls.iter())
@@ -1014,7 +1057,7 @@ fn observe(index: &Index, facts: &Facts, e: &Expr, class: &str, class_side: bool
         }
         ExprNode::Send { recv, method, args, .. } => {
             let m = method.as_str();
-            if recv.is_none() && class_side && matches!(m, "new" | "allocate") {
+            if class_side && builds_own_instance(e) {
                 s.live.push(class.to_string());
             }
             if UNBOUNDED_METHODS.contains(&m) {

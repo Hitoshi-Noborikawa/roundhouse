@@ -1176,6 +1176,73 @@ fn rta_a_class_from_data_falls_back_to_full_fan_out() {
     assert!(stderr.contains("rta         widgets#index: full fan-out: `constantize` in WidgetsController#index"), "{stderr}");
 }
 
+/// A registry the app fills at load time, read back on the route
+/// (`Registry.items.first`): nothing in the route names the class
+/// whose object it holds.
+const REGISTRY: (&str, &str) = (
+    "app/lib/registry.rb",
+    "class Registry\n  ITEMS = []\n\n  def self.items\n    ITEMS\n  end\nend\n",
+);
+
+fn registering_gadget(arg: &str) -> String {
+    format!(
+        "class Gadget\n  def self.register(x)\n    Registry::ITEMS << x\n  end\n  register({arg})\n\n  def call\n    Frobnicator::Spinner.new.spin\n  end\nend\n"
+    )
+}
+
+/// A class body runs with the class as `self`: `register(new)` builds
+/// a `Gadget` at load time and hands it on, written receiverless or on
+/// `self`, with `new` or `allocate`. The `Gadget` is live, so the
+/// untyped `call` on what the registry holds reaches `Gadget#call`.
+#[test]
+fn rta_a_class_body_that_builds_its_own_instance_makes_it_live() {
+    for arg in ["new", "allocate", "self.new", "self.allocate"] {
+        let gadget = registering_gadget(arg);
+        let stderr = rta_ledger(
+            &format!("rta-body-{}", arg.replace('.', "-")),
+            "    @name = Registry.items.first.call",
+            "",
+            &[REGISTRY, ("app/lib/gadget.rb", &gadget)],
+        );
+        assert!(stderr.contains("whole-route: 0 GET action(s) served by the lowered app; 1 left to Rails"), "{arg}: {stderr}");
+        assert!(stderr.contains("app/lib/gadget.rb:8") && stderr.contains("Gadget#call"), "{arg}: {stderr}");
+    }
+}
+
+/// `register(self)` hands on the class object itself: whoever holds it
+/// can build one (`Registry.items.first.new.call`).
+#[test]
+fn rta_a_class_body_that_hands_on_self_makes_the_class_live() {
+    let gadget = registering_gadget("self");
+    let stderr = rta_ledger(
+        "rta-body-self",
+        "    @name = Registry.items.first.new.call",
+        "",
+        &[REGISTRY, ("app/lib/gadget.rb", &gadget)],
+    );
+    assert!(stderr.contains("whole-route: 0 GET action(s) served by the lowered app; 1 left to Rails"), "{stderr}");
+    assert!(stderr.contains("app/lib/gadget.rb:8") && stderr.contains("Gadget#call"), "{stderr}");
+}
+
+/// Ruby passes each subclass to its parent's `inherited` hook when the
+/// subclass loads, with nothing in the subclass' body to show for it:
+/// every class under an app `inherited` hook is live.
+#[test]
+fn rta_an_inherited_hook_makes_every_subclass_live() {
+    let stderr = rta_ledger(
+        "rta-inherited",
+        "    @name = Registry.items.first.new.call",
+        "",
+        &[
+            REGISTRY,
+            ("app/lib/base.rb", "class Base\n  def self.inherited(k)\n    Registry::ITEMS << k\n  end\nend\n"),
+            ("app/lib/gadget.rb", "class Gadget < Base\n  def call\n    Frobnicator::Spinner.new.spin\n  end\nend\n"),
+        ],
+    );
+    assert!(stderr.contains("whole-route: 0 GET action(s) served by the lowered app; 1 left to Rails"), "{stderr}");
+    assert!(stderr.contains("app/lib/gadget.rb:3") && stderr.contains("Gadget#call"), "{stderr}");
+}
+
 /// A class-side `method_missing` answers a name no class defines
 /// (`Setting.some_key`): the walk follows it, so an error behind it
 /// blocks the route. (This is already covered independently of RTA's
