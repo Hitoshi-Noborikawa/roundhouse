@@ -3224,6 +3224,29 @@ fn dry_validation_load_paths_stay_in_the_app_and_refusals_fail_strict_ingest() {
     assert!(ledger.iter().all(|e| !e.contains("FarContract")), "{ledger:#?}");
 }
 
+/// A schema reference that does not resolve (`filled(MissingContract.schema)`)
+/// is ledgered as the missing schema, not as an unread type.
+#[test]
+fn dry_validation_an_unresolved_schema_reference_names_the_schema() {
+    let tree: std::collections::HashMap<std::path::PathBuf, Vec<u8>> = [
+        (
+            "app/contracts/checkout_contract.rb",
+            "class CheckoutContract < Dry::Validation::Contract\n  params do\n    required(:address).filled(MissingContract.schema)\n  end\nend\n",
+        ),
+        ("config/routes.rb", "Rails.application.routes.draw do\nend\n"),
+    ]
+    .into_iter()
+    .map(|(p, s)| (std::path::PathBuf::from(p), s.as_bytes().to_vec()))
+    .collect();
+    roundhouse::ingest::survey::activate();
+    roundhouse::ingest::ingest_app_from_tree(tree).expect("survey ingest");
+    let ledger: Vec<String> = roundhouse::ingest::survey::drain().iter().map(|e| e.to_string()).collect();
+    assert!(
+        ledger.iter().any(|e| e.contains("CheckoutContract") && e.contains("schema `MissingContract.schema`")),
+        "{ledger:#?}"
+    );
+}
+
 /// `:time` and `:date_time` coerce with `Time.parse` and `DateTime`,
 /// which Spinel's tree does not have: reported for it, not emitted to
 /// fail. The fixture's dates and decimals are not.
