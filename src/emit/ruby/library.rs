@@ -3762,11 +3762,12 @@ fn plain_text_helpers(
                     && read.get(&(module.clone(), method.as_str().to_string())) == Some(&HelperReturn::Plain),
                 _ => false,
             };
-            // A defaulted, keyword or rest parameter: the value it holds is not one a call site shows.
+            // An optional or rest positional shifts which argument binds which parameter by the call's arity.
+            let fixed_arity = m.params.iter().all(|p| p.keyword || (p.default.is_none() && !p.rest && !p.forwarding));
             let positional = |e: &Expr| match &*e.node {
-                ExprNode::Var { name, .. } => m.params.iter().position(|p| {
-                    p.name == *name && p.default.is_none() && !p.keyword && !p.rest && !p.forwarding
-                }),
+                ExprNode::Var { name, .. } if fixed_arity => {
+                    m.params.iter().position(|p| p.name == *name && !p.keyword)
+                }
                 _ => None,
             };
             let arg_or_plain = |e: &Expr| -> Option<Option<usize>> {
