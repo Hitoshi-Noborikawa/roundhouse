@@ -2941,6 +2941,26 @@ fn oj_unmodeled_options_are_refused() {
     let ledger: Vec<String> = roundhouse::ingest::survey::drain().iter().map(|e| e.to_string()).collect();
     assert!(ledger.iter().any(|e| e.contains("Oj not lowered: `Oj.dump` option `indent: 2`")), "{ledger:#?}");
     assert!(app.library_classes.iter().all(|lc| lc.name.0.as_str() != "Oj"));
+    // A mode that may not be set, and a mode this does not read.
+    for (init, use_, expected) in [
+        ("if ENV[\"X\"]\n  Oj.mimic_JSON\nend\n", "Oj.load(v)", "`Oj.mimic_JSON` not at an initializer's top level"),
+        ("Oj.optimize_rails\n", "Oj.load(v)", "`Oj.optimize_rails` without `Oj.mimic_JSON`"),
+        ("::Oj.mimic_JSON()\n", "Oj.safe_load(v)", "`Oj.safe_load`"),
+    ] {
+        let tree: std::collections::HashMap<std::path::PathBuf, Vec<u8>> = [
+            ("config/initializers/oj.rb".to_string(), init.to_string()),
+            ("lib/reader.rb".to_string(), format!("class Reader\n  def self.read(v)\n    {use_}\n  end\nend\n")),
+            ("config/routes.rb".to_string(), "Rails.application.routes.draw do\nend\n".to_string()),
+        ]
+        .into_iter()
+        .map(|(p, s)| (std::path::PathBuf::from(p), s.into_bytes()))
+        .collect();
+        roundhouse::ingest::survey::activate();
+        let app = roundhouse::ingest::ingest_app_from_tree(tree).expect("survey ingest");
+        let ledger: Vec<String> = roundhouse::ingest::survey::drain().iter().map(|e| e.to_string()).collect();
+        assert!(ledger.iter().any(|e| e.contains(expected)), "{init}: {ledger:#?}");
+        assert!(app.library_classes.iter().all(|lc| lc.name.0.as_str() != "Oj"), "{init}: lowered");
+    }
 }
 
 const OJ_LIB: &str = r##"class Payload
@@ -2978,7 +2998,8 @@ const OJ_LIB: &str = r##"class Payload
 end
 "##;
 
-const OJ_ASSERTIONS: &str = r##"raise "dump" unless Payload.encode({a: 1, "b" => :c, d: nil, e: [1, "x", 1.5, true]}) == %({"a":1,"b":"c","d":null,"e":[1,"x",1.5,true]})
+const OJ_ASSERTIONS: &str = r##"require "stringio"
+raise "dump" unless Payload.encode({a: 1, "b" => :c, d: nil, e: [1, "x", 1.5, true]}) == %({"a":1,"b":"c","d":null,"e":[1,"x",1.5,true]})
 raise "dump compat" unless Payload.encode_compat({a: {b: :c}}) == %({"a":{"b":"c"}})
 raise "dump braceless" unless Payload.encode_braceless(5) == %({"response":5})
 raise "dump nil" unless Payload.encode(nil) == "null"
@@ -2988,6 +3009,10 @@ raise "load nil" unless Payload.decode(nil).nil?
 raise "load integer" unless Payload.decode(5) == 5
 raise "load symbols" unless Payload.decode_symbols(%({"a":{"b":1}})) == {a: {b: 1}}
 raise "parse error" unless Payload.guarded("{x") == :json_rescued
+raise "load array" unless Payload.decode([1]) == [1]
+raise "load hash" unless Payload.guarded({"a" => 1}) == :json_rescued
+raise "load symbol" unless Payload.guarded(:x) == :json_rescued
+raise "load io" unless Payload.decode(StringIO.new(%([1,{"a":null}]))) == [1, {"a" => nil}]
 puts "oj passed"
 "##;
 

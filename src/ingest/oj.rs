@@ -6,14 +6,19 @@
 //! - `Oj.dump(obj)` encodes as `obj.to_json` does (`mode: :compat` and
 //!   `:rails` the same);
 //! - `Oj.generate(obj)` is `JSON.generate(obj)`;
-//! - `Oj.load(json)` is `JSON.parse(json)`, `symbol_keys:` (or
-//!   `symbolize_names:`) symbolizing; nil and a non-String are answered
-//!   as given;
+//! - `Oj.load(json)` is `JSON.parse(json)`, an IO's or StringIO's content
+//!   read first, `symbol_keys:` (or `symbolize_names:`) symbolizing; nil,
+//!   a number, true/false and an Array are answered as given, anything
+//!   else (a Hash, a Symbol, another object) fails to parse;
 //! - a parse failure raises `JSON::ParserError`, which `Oj::ParseError`
 //!   does not catch.
 //!
-//! Each call is read: any other Oj method or option refuses the whole
-//! lowering, since what it does is not modeled. Without `mimic_JSON`, Oj
+//! The mode is read from the initializers' top-level statements: a
+//! `mimic_JSON` or `optimize_rails` call anywhere else (a branch, a method,
+//! a block) may not run, and refuses; so does `optimize_rails` alone.
+//! Each call is read: any other Oj method or option (`safe_load`, the
+//! strict parser, among them) refuses the whole lowering, since what it
+//! does is not modeled. Without `mimic_JSON`, Oj
 //! is in its `:object` mode (`":sym"` keys, `"^o"` objects), not modeled
 //! either: `Oj` stays unknown and its uses stay errors.
 //!
@@ -36,15 +41,37 @@ pub(super) fn lower_oj(
     if !sources.iter().any(|s| s.text.contains("Oj")) {
         return Ok(());
     }
-    let mimic = initializers
-        .iter()
-        .flat_map(|text| text.lines())
-        .map(str::trim)
-        .any(|line| line == "Oj.mimic_JSON" || line == "::Oj.mimic_JSON" || line.starts_with("Oj.mimic_JSON("));
+    // The mode an initializer sets, read from its calls: only one made at
+    // the top level, where it runs whatever else does, is known to run.
+    let mut mimic = false;
+    let mut optimize = false;
+    let mut refusals = Vec::new();
+    for text in initializers.iter().filter(|t| t.contains("Oj")) {
+        let calls = mode_calls(text);
+        for (method, top) in calls {
+            match (method.as_str(), top) {
+                ("mimic_JSON", true) => mimic = true,
+                ("optimize_rails", true) => optimize = true,
+                (m, _) => refusals.push(IngestError::Unsupported {
+                    file: "config/initializers".into(),
+                    message: format!("Oj not lowered: `Oj.{m}` not at an initializer's top level"),
+                }),
+            }
+        }
+    }
     if !mimic {
+        // Without mimic_JSON nothing here models what optimize_rails does.
+        if optimize {
+            survey::continue_or_fail(IngestError::Unsupported {
+                file: "config/initializers".into(),
+                message: "Oj not lowered: `Oj.optimize_rails` without `Oj.mimic_JSON`".into(),
+            })?;
+        }
+        for err in refusals {
+            survey::continue_or_fail(err)?;
+        }
         return Ok(());
     }
-    let mut refusals = Vec::new();
     for source in sources.iter().filter(|s| s.text.contains("Oj")) {
         refusals.extend(unmodeled_calls(&source.text).into_iter().map(|reason| IngestError::Unsupported {
             file: source.path.clone(),
@@ -80,7 +107,9 @@ fn unmodeled_calls(text: &str) -> Vec<String> {
                 let args: Vec<ruby_prism::Node<'_>> =
                     node.arguments().map(|a| a.arguments().iter().collect()).unwrap_or_default();
                 let allowed: &[&str] = match method.as_str() {
-                    "load" | "safe_load" => &["symbol_keys", "symbolize_names"],
+                    // `safe_load` is the strict parser: nil, a number and a
+                    // bad document fail there as `load` does not.
+                    "load" => &["symbol_keys", "symbolize_names"],
                     "dump" | "generate" => &["mode"],
                     "mimic_JSON" | "optimize_rails" => &[],
                     other => {
@@ -126,6 +155,38 @@ fn unmodeled_calls(text: &str) -> Vec<String> {
     finder.found
 }
 
+/// `Oj.mimic_JSON` / `Oj.optimize_rails` calls in an initializer, and
+/// whether each is a top-level statement.
+fn mode_calls(text: &str) -> Vec<(String, bool)> {
+    struct Finder {
+        top: Vec<usize>,
+        found: Vec<(String, bool)>,
+    }
+    impl<'pr> ruby_prism::Visit<'pr> for Finder {
+        fn visit_call_node(&mut self, node: &ruby_prism::CallNode<'pr>) {
+            let on_oj = node.receiver().is_some_and(|r| {
+                matches!(String::from_utf8_lossy(r.location().as_slice()).as_ref(), "Oj" | "::Oj")
+            });
+            let method = String::from_utf8_lossy(node.name().as_slice()).to_string();
+            if on_oj && matches!(method.as_str(), "mimic_JSON" | "optimize_rails") {
+                let at = node.location().start_offset();
+                let top = self.top.contains(&at) && node.arguments().is_none() && node.block().is_none();
+                self.found.push((method, top));
+            }
+            ruby_prism::visit_call_node(self, node);
+        }
+    }
+    let parsed = ruby_prism::parse(text.as_bytes());
+    let root = parsed.node();
+    let top: Vec<usize> = root
+        .as_program_node()
+        .map(|p| p.statements().body().iter().map(|s| s.location().start_offset()).collect())
+        .unwrap_or_default();
+    let mut finder = Finder { top, found: Vec::new() };
+    ruby_prism::Visit::visit(&mut finder, &root);
+    finder.found
+}
+
 /// What the lowered calls reach once Oj is not there.
 fn stand_ins() -> Vec<LibraryClass> {
     const SOURCE: &str = r#"module Oj
@@ -136,12 +197,11 @@ fn stand_ins() -> Vec<LibraryClass> {
   end
 
   def self.load(json, options = {})
-    return json unless json.is_a?(String)
-    JSON.parse(json, symbolize_names: options[:symbol_keys] == true || options[:symbolize_names] == true)
-  end
-
-  def self.safe_load(json)
-    load(json)
+    return json if json.nil? || json.is_a?(Numeric) || json == true || json == false || json.is_a?(Array)
+    source = json.is_a?(IO) || json.class.name == "StringIO" ? json.read : json
+    # Anything else fails to parse, a JSON::ParserError as JSON's own.
+    source = "" unless source.is_a?(String)
+    JSON.parse(source, symbolize_names: options[:symbol_keys] == true || options[:symbolize_names] == true)
   end
 
   def self.dump(obj, options = {})

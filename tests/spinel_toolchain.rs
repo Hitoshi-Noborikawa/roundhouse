@@ -611,6 +611,9 @@ raise "load nil" unless Payload.decode(nil).nil?
 raise "load integer" unless Payload.decode(5) == 5
 raise "load symbols" unless Payload.decode_symbols(%({"a":{"b":1}})) == {a: {b: 1}}
 raise "parse error" unless Payload.guarded("{x") == :json_rescued
+raise "load array" unless Payload.decode([1]) == [1]
+raise "load hash" unless Payload.guarded({"a" => 1}) == :json_rescued
+raise "load symbol" unless Payload.guarded(:x) == :json_rescued
 puts "oj passed"
 "##);
     run.assert_passes();
