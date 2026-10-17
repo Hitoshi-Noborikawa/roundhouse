@@ -795,10 +795,37 @@ module ActiveRecord
     #                      <version> is nil (an unsaved record, or no
     #                      updated_at column)
     def cache_key
-      return "#{self.class.table_name}/new" if new_record?
-      "#{self.class.table_name}/#{id}"
+      tbl = self.class.table_name
+      return "#{tbl}/new" if new_record?
+      rid = id
+      "#{tbl}/#{rid}"
     end
 
+    # Reads `updated_at` through `self[:updated_at]`, not the bare
+    # per-model-synthesized `updated_at` reader: that reader is not a
+    # method Base itself declares (every concrete model synthesizes its
+    # own), so a bare call from Base's OWN body has no declared return
+    # type to seed from and came back an unresolved type variable — the
+    # hand-RBS-typed surface this file is held to requires every
+    # sub-expression resolve to SOME type, concrete or the declared
+    # gradual escape, never an unresolved `Ty::Var`
+    # (`every_runtime_method_body_is_fully_typed`,
+    # `inference_on_spinel_blog_runtime_with_rbs`'s zero-untyped
+    # ceiling).
+    #
+    # `[]` is the established escape for exactly this (`fill_timestamps`
+    # below writes `self[:updated_at] = now` for the identical reason,
+    # the write side of this same problem). Base's own `[]` is typed
+    # `Str` in the catalog — a known, already-accepted approximation
+    # ("Imprecise for non-string columns (`article[:id]` is actually
+    # Int), but matches the existing declared shape", `catalog/mod.rs`)
+    # for the STATIC type only: the CONCRETE per-model `[]` the lowerer
+    # synthesizes (`model_to_library/schema.rs`) answers the REAL column
+    # value through a `case` on the attribute name, declared `Untyped`
+    # there — so `self[:updated_at]` is the real `updated_at` value,
+    # genuinely, dispatched dynamically; `Str` only describes what Base
+    # itself can promise about a call it cannot resolve concretely.
+    #
     # `updated_at.to_i` (epoch seconds), not Rails' `to_fs(:usec)`
     # microsecond string — the same tradeoff `Relation#cache_version`
     # documents: a cache key only needs the SAME string back for the
@@ -807,7 +834,7 @@ module ActiveRecord
     # roundhouse record needs to invalidate a stale fragment).
     def cache_version
       return nil unless has_attribute?(:updated_at)
-      ts = updated_at
+      ts = self[:updated_at]
       ts.nil? ? nil : ts.to_i.to_s
     end
 

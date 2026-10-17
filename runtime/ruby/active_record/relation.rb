@@ -1175,7 +1175,9 @@ module ActiveRecord
     def cache_key(timestamp_column = "updated_at")
       timestamp_column = timestamp_column.to_s
       @cache_keys ||= {}
-      @cache_keys[timestamp_column] ||= "#{@model.table_name}/query-#{fnv1a_hex(to_sql)}"
+      tbl = @model.table_name
+      digest = fnv1a_hex(to_sql)
+      @cache_keys[timestamp_column] ||= "#{tbl}/query-#{digest}"
     end
 
     def cache_version(timestamp_column = "updated_at")
@@ -1187,7 +1189,9 @@ module ActiveRecord
     def compute_cache_version(timestamp_column)
       size = count
       timestamp = maximum(timestamp_column.to_sym)
-      timestamp.nil? ? size.to_s : "#{size}-#{timestamp.to_i}"
+      return size.to_s if timestamp.nil?
+      epoch = timestamp.to_i
+      "#{size}-#{epoch}"
     end
     private :compute_cache_version
 
@@ -1199,15 +1203,37 @@ module ActiveRecord
       "#{cache_key}-#{cache_version}"
     end
 
-    # A small stable hash (FNV-1a, 64-bit, hex-encoded) — deliberately
-    # not a crypto digest; see `cache_key` above for why one isn't used.
+    # A small stable hash, hex-encoded — deliberately not a crypto
+    # digest; see `cache_key` above for why one isn't used.
+    #
+    # NOT FNV-1a's actual 64-bit algorithm, on purpose. FNV-1a relies on
+    # unsigned 64-bit WRAPAROUND (`& 0xFFFFFFFFFFFFFFFF` after each
+    # multiply) — natural in MRI's arbitrary-precision Integer, but
+    # Spinel compiles this file too, and both an XOR/multiply chain
+    # built to touch the full 64-bit range AND a 64-bit literal/shift
+    # that could exceed `i64::MAX` get its type inference to promote the
+    # accumulator to `Bigint` (`sp_Bigint *`), which then cannot mix
+    # with the plain `sp_int` bytes `getbyte` returns — measured as a C
+    # compile error (`sp_bigint_xor` "makes pointer from integer without
+    # a cast") and, before that, roundhouse's own ingest of this file
+    # (`inference_on_spinel_blog_runtime`) refusing a literal that
+    # "does not fit in a 64-bit integer" for the ORIGINAL
+    # `0xcbf29ce484222325` offset basis and `0xFFFFFFFFFFFFFFFF` mask.
+    #
+    # A bounded rolling hash sidesteps both: every intermediate value
+    # (`h < modulus`, `h * 31 + byte < modulus * 31 + 255`) stays
+    # comfortably inside `i64::MAX` by construction — no wraparound, no
+    # promotion, nothing for either ingest path to refuse. `modulus` is
+    # just large and odd, not prime; this only has to be STABLE for a
+    # given string and CHEAP to collide rarely at fragment-cache sizes,
+    # not cryptographically strong.
     def fnv1a_hex(str)
-      h = 0xcbf29ce484222325
+      modulus = 1_000_000_000_000_037
+      h = 0
       i = 0
       n = str.bytesize
       while i < n
-        h ^= str.getbyte(i)
-        h = (h * 0x100000001b3) & 0xFFFFFFFFFFFFFFFF
+        h = (h * 31 + str.getbyte(i)) % modulus
         i += 1
       end
       h.to_s(16).rjust(16, "0")
