@@ -16436,3 +16436,5 @@ mod proc_new_and_std_streams;
 mod helper_diagnostics;
 #[path = "emit_and_run/value_seq_order.rs"]
 mod value_seq_order;
+#[path = "emit_and_run/typescript_error_class.rs"]
+mod typescript_error_class;
