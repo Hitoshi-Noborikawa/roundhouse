@@ -1150,7 +1150,7 @@ class Results(unittest.TestCase):
             sum(ci.SPINEL_TOOLCHAIN_SECONDS.get(t, ci.SPINEL_TOOLCHAIN_DEFAULT_SECONDS) for t in s)
             for s in shards
         ]
-        loads[-1] += ci.SPINEL_TOOLCHAIN_TAIL_SECONDS
+        loads[-1] += ci.SPINEL_TOOLCHAIN_TAIL_SECONDS * ci.SPINEL_TOOLCHAIN_THREADS
         self.assertLess(max(loads) - min(loads), max(ci.SPINEL_TOOLCHAIN_SECONDS.values()))
 
     def test_toolchain_shard_prints_nothing_for_an_empty_selection(self):
@@ -1159,6 +1159,91 @@ class Results(unittest.TestCase):
             input="", capture_output=True, text=True, check=True,
         ).stdout
         self.assertEqual(out, "")
+
+    def test_recorded_seconds_balance_shards_and_the_tables_cover_the_rest(self):
+        timings = ci.load_spinel_timings(json.dumps({
+            "toolchain": {"t00": 900, "t01": "slow", "t02": -1, "t03": True, "t04": float("inf"), "t05": 10**1000, ci.SPINEL_TOOLCHAIN_TAIL: 1},
+            "framework": {"spinel_pg_db": 2000},
+            "other": {"x": 1},
+        }))
+        self.assertEqual(timings, {"toolchain": {"t00": 900, ci.SPINEL_TOOLCHAIN_TAIL: 1}, "framework": {"spinel_pg_db": 2000}})
+        self.assertEqual(ci.spinel_toolchain_seconds("t00", timings), 900)
+        self.assertEqual(ci.spinel_toolchain_seconds("t01", timings), ci.SPINEL_TOOLCHAIN_DEFAULT_SECONDS)
+        self.assertEqual(
+            ci.spinel_toolchain_seconds("real_blog_spinel_tests_pass", timings),
+            ci.SPINEL_TOOLCHAIN_SECONDS["real_blog_spinel_tests_pass"],
+        )
+        tests = [f"t{i:02}" for i in range(12)]
+        shards = [ci.spinel_toolchain_shard(tests, k, timings=timings) for k in range(4)]
+        self.assertEqual(sorted(t for s in shards for t in s), tests)
+        self.assertIn(["t00"], shards)
+        alone = [s for s in ci.spinel_framework_shards(ci.SPINEL_TESTS, timings=timings) if "spinel_pg_db" in s["tests"]]
+        self.assertEqual(alone[0]["tests"], ["spinel_pg_db"])
+        for raw in ["", "not json", "[]", '{"toolchain": []}']:
+            with self.subTest(raw=raw):
+                self.assertEqual(ci.load_spinel_timings(raw), {})
+                self.assertEqual(
+                    ci.spinel_toolchain_shard(tests, 0, timings=ci.load_spinel_timings(raw)),
+                    ci.spinel_toolchain_shard(tests, 0),
+                )
+
+    def test_merge_averages_passing_records_into_the_last_seconds(self):
+        merged = ci.merge_timings(
+            {"toolchain": {"a": 100, "b": 50}},
+            [
+                {"kind": "toolchain", "name": "a", "seconds": 200, "ok": True},
+                {"kind": "toolchain", "name": "b", "seconds": 5, "ok": False},
+                {"kind": "toolchain", "name": "c", "seconds": 0, "ok": True},
+                {"kind": "framework", "name": "d", "seconds": 30, "ok": True},
+                {"kind": "elsewhere", "name": "e", "seconds": 30, "ok": True},
+                {"kind": "framework", "name": "f", "seconds": "30", "ok": True},
+                {"kind": "framework", "name": "g", "seconds": float("nan"), "ok": True},
+                {"kind": [], "name": "h", "seconds": 30, "ok": True},
+            ],
+        )
+        self.assertEqual(merged, {"toolchain": {"a": 150, "b": 50}, "framework": {"d": 30}})
+
+    def test_timing_commands_record_runs_and_keep_failures(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            env = {**os.environ, "CI_SPINEL_TIMINGS_OUT": f"{tmp}/runs/toolchain-0.jsonl"}
+            run = subprocess.run(
+                ["python3", spec.origin, "run-tests", "--kind", "toolchain", "--parallel", "2",
+                 "--", "sh", "-c", '[ "$2" != b ]', "sh", "--exact"],
+                input="a\nb\n", capture_output=True, text=True, env=env,
+            )
+            self.assertEqual(run.returncode, 1)
+            self.assertIn("::error::b failed", run.stdout)
+            timed = subprocess.run(
+                ["python3", spec.origin, "timed", "--kind", "toolchain", "--name", "tail",
+                 "--", "sh", "-c", "sleep 1"],
+                env=env,
+            )
+            self.assertEqual(timed.returncode, 0)
+            records = [json.loads(line) for line in Path(env["CI_SPINEL_TIMINGS_OUT"]).read_text().splitlines()]
+            self.assertEqual(
+                sorted((r["name"], r["ok"]) for r in records),
+                [("a", True), ("b", False), ("tail", True)],
+            )
+            self.assertTrue(all(r["seconds"] >= 1 for r in records))
+            Path(f"{tmp}/previous.json").write_text('{"toolchain": {"tail": 3}}')
+            for previous in [f"{tmp}/previous.json", f"{tmp}/missing.json"]:
+                with self.subTest(previous=previous):
+                    subprocess.run(
+                        ["python3", spec.origin, "merge-timings", "--previous", previous,
+                         "--records", f"{tmp}/runs", "--out", f"{tmp}/out/merged.json"],
+                        check=True, capture_output=True,
+                    )
+                    merged = json.loads(Path(f"{tmp}/out/merged.json").read_text())
+                    self.assertEqual(merged["toolchain"]["tail"], 2 if previous.endswith("previous.json") else 1)
+
+    def test_toolchain_tests_run_outside_cargo_with_its_stack_size(self):
+        import tomllib
+        root = Path(__file__).parents[1]
+        stack = tomllib.loads((root / ".cargo/config.toml").read_text())["env"]["RUST_MIN_STACK"]
+        workflow = (root / ".github/workflows/ci.yml").read_text()
+        job = re.search(r"(?ms)^  spinel-toolchain:\n(.*?)(?=^  [\w-]+:|\Z)", workflow).group(1)
+        self.assertIn("run-tests --kind toolchain", job)
+        self.assertIn(f'RUST_MIN_STACK: "{stack}"', job)
 
     def test_spinel_framework_shards_cover_each_selected_suite_once(self):
         shards = ci.spinel_framework_shards(ci.SPINEL_TESTS)
