@@ -1495,6 +1495,14 @@ impl<'a> BodyTyper<'a> {
                         for a in args.iter_mut() { self.analyze_expr(a, ctx); }
                         return Ty::Str;
                     }
+                    // Kernel#` - a backtick / `%x{}` shell-out (ingest
+                    // spells the literal as this call): the command's
+                    // standard output, a String, with `$?` set. An app class
+                    // that defines its own ` is dispatched to it instead.
+                    if method.as_str() == "`" && args.len() == 1 && !self.app_defines_on_side(ctx.self_ty.as_ref(), method, ctx.instance_body) {
+                        for a in args.iter_mut() { self.analyze_expr(a, ctx); }
+                        return Ty::Str;
+                    }
                 }
 
                 // Self-dispatch annotation. When `recv == None` and the

@@ -140,6 +140,10 @@ mod delegate_association;
 mod io_process_constants_contract;
 #[path = "emit_and_run/io_process_constants.rs"]
 mod io_process_constants;
+#[path = "support/backticks.rs"]
+mod backticks_contract;
+#[path = "emit_and_run/backticks.rs"]
+mod backticks;
 #[path = "support/json_params.rs"]
 mod json_params_contract;
 #[path = "emit_and_run/json_params.rs"]

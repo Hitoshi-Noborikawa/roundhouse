@@ -6088,6 +6088,22 @@ fn report_unsupported_bundled_constants(app: &App, target: BuildTarget) {
                 "the pagy gem's `pagy` is only available on the ruby family and spinel".to_string(),
             );
         }
+        // Kernel#` is the backtick / `%x` shell-out. The ruby family and
+        // spinel emit it as a literal and run it; every other target would
+        // spell a method named "`" and fail to compile. One gate, not a
+        // per-emitter shell.
+        if let crate::expr::ExprNode::Send { method, .. } = &*expr.node
+            && method.as_str() == "`"
+            && !matches!(target, "spinel" | "jruby" | "futamura")
+            && !expr.span.is_synthetic()
+        {
+            emit::diagnostics::report_unsupported(
+                expr.span,
+                target,
+                "shell_command",
+                format!("Kernel#` (a backtick / %x shell-out) is only available on the ruby family and spinel"),
+            );
+        }
         // A mapped JSON call does not emit a Ruby module object. Skip
         // only that exact receiver, not its arguments (which can still
         // contain unsupported class values) or unmapped method calls.
@@ -6210,18 +6226,29 @@ fn report_unsupported_bundled_constants(app: &App, target: BuildTarget) {
             }
         }
     }
-    // The immutable app-body survey also excludes association extensions.
+    // The immutable app-body survey also excludes association extensions,
+    // scope lambdas, and belongs_to defaults. Those expressions are
+    // copied into synthesized methods only while emitting, after this gate.
     for model in &app.models {
         for item in &model.body {
-            if let crate::dialect::ModelBodyItem::Association {
-                assoc: crate::dialect::Association::HasMany { extension, .. }, ..
-            } = item {
-                for method in extension {
-                    visit(&method.body);
-                    for param in &method.params {
-                        if let Some(default) = &param.default {
-                            visit(default);
-                        }
+            let crate::dialect::ModelBodyItem::Association { assoc, .. } = item else { continue };
+            let (scope, default, extension) = match assoc {
+                crate::dialect::Association::BelongsTo { default, .. } => (None, default.as_ref(), &[][..]),
+                crate::dialect::Association::HasMany { scope, extension, .. } => (scope.as_ref(), None, extension.as_slice()),
+                crate::dialect::Association::HasOne { scope, .. } => (scope.as_ref(), None, &[][..]),
+                crate::dialect::Association::HasAndBelongsToMany { .. } => (None, None, &[][..]),
+            };
+            if let Some(scope) = scope {
+                visit(scope);
+            }
+            if let Some(default) = default {
+                visit(default);
+            }
+            for method in extension {
+                visit(&method.body);
+                for param in &method.params {
+                    if let Some(default) = &param.default {
+                        visit(default);
                     }
                 }
             }
