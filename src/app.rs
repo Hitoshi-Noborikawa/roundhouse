@@ -473,6 +473,11 @@ pub struct App {
     /// computed from the bodies as they stand.
     #[serde(skip)]
     pub helper_diagnostics: Option<Vec<crate::diagnostic::Diagnostic>>,
+    /// Every `app/helpers/**/*_helper.rb` module, including one whose
+    /// method names a later helper all redefines (and so owns in
+    /// `helper_method_index`).
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub helper_modules: BTreeSet<ClassId>,
     /// The class-side twin of `concern_spliced_actions`: concern methods
     /// `splice_concern_class_methods_into_includers` copied onto a model
     /// or library class, keyed includer → method → the source module.
@@ -928,6 +933,7 @@ impl App {
             concern_spliced_actions: HashMap::new(),
             unreachable_views: BTreeSet::new(),
             helper_diagnostics: None,
+            helper_modules: BTreeSet::new(),
             concern_spliced_class_methods: HashMap::new(),
             concern_model_items: HashMap::new(),
             concern_guarded_items: HashMap::new(),

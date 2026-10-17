@@ -44,3 +44,20 @@ fn a_lambda_over_a_view_helper_is_called_cleanly() {
         .emit(BuildTarget::Ruby);
     assert!(errors.is_empty(), "{errors:#?}");
 }
+
+/// A helper whose every method a later helper redefines is still checked.
+#[test]
+fn a_shadowed_helper_module_is_still_checked() {
+    let (_emitted, errors) = emit_and_run::real_blog()
+        .write("app/helpers/a_probe_helper.rb", "module AProbeHelper\n  def shouted(title)\n    title.to_s.no_such_method_here\n  end\nend\n")
+        .write("app/helpers/b_probe_helper.rb", "module BProbeHelper\n  def shouted(title)\n    title.to_s\n  end\nend\n")
+        .emit(BuildTarget::Ruby);
+    assert!(errors.iter().any(|e| e.contains("no known method `no_such_method_here` on String")), "{errors:#?}");
+}
+
+/// Nil is not the only way `String? + Integer` fails, so it stays an error.
+#[test]
+fn nullable_arithmetic_that_fails_anyway_stays_an_error() {
+    let (_emitted, errors) = helper("  ORDER = %w[ a b ]\n\n  def broken(x)\n    ORDER.first + 1\n  end\n").emit(BuildTarget::Ruby);
+    assert!(errors.iter().any(|e| e.contains("incompatible operand types")), "{errors:#?}");
+}

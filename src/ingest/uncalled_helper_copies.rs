@@ -28,7 +28,8 @@ use crate::ident::{ClassId, Symbol};
 pub(super) fn mark(app: &mut App) {
     let helpers: HashSet<_> = app.helper_method_index.values().cloned().collect();
     // After the splice, so the controllers' copies keep their own reading.
-    for lc in app.library_classes.iter_mut().filter(|lc| helpers.contains(&lc.name)) {
+    let modules: HashSet<_> = helpers.iter().chain(app.helper_modules.iter()).cloned().collect();
+    for lc in app.library_classes.iter_mut().filter(|lc| modules.contains(&lc.name)) {
         for m in &mut lc.methods {
             for default in m.params.iter_mut().filter_map(|p| p.default.as_mut()) {
                 mark_with(default, crate::expr::HELPER_BODY_TRANSLATE);

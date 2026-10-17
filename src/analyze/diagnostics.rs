@@ -245,7 +245,7 @@ pub fn diagnose_with_coverage(app: &App) -> (Vec<Diagnostic>, PreloadCoverage) {
 /// An `app/helpers` module runs in the view, so it is checked as one,
 /// not under the library policy.
 pub fn diagnose_helper_modules(app: &App) -> Vec<Diagnostic> {
-    let helper_modules: std::collections::HashSet<&crate::ident::ClassId> = app.helper_method_index.values().collect();
+    let helper_modules: std::collections::HashSet<&crate::ident::ClassId> = app.helper_method_index.values().chain(app.helper_modules.iter()).collect();
     let mut helper_out = Vec::new();
     for class in app.library_classes.iter().filter(|c| helper_modules.contains(&c.name)) {
         for method in &class.methods {
@@ -257,14 +257,27 @@ pub fn diagnose_helper_modules(app: &App) -> Vec<Diagnostic> {
     }
     // Not errors: the ivar is the rendering view's, which the emitted helper reads as Rails does (only its type is unseeded);
     // and nullable primitive arithmetic raises where Rails raises, as the library policy already holds.
-    fn nullable_primitive(ty: &Ty) -> bool {
-        matches!(ty, Ty::Union { variants } if variants.iter().any(|v| matches!(v, Ty::Nil))
-            && variants.iter().all(|v| matches!(v, Ty::Nil | Ty::Int | Ty::Float | Ty::Str)))
+    // Only where the value, once not nil, takes the operation: `String? + Integer` fails whatever it holds.
+    fn nil_is_the_only_miss(op: &str, lhs: &Ty, rhs: &Ty) -> bool {
+        let Ty::Union { variants } = lhs else { return false };
+        let numeric = |t: &Ty| matches!(t, Ty::Int | Ty::Float);
+        let present: Vec<&Ty> = variants.iter().filter(|v| !matches!(v, Ty::Nil)).collect();
+        variants.iter().any(|v| matches!(v, Ty::Nil))
+            && !present.is_empty()
+            && present.iter().all(|v| match v {
+                Ty::Int | Ty::Float => numeric(rhs) && matches!(op, "+" | "-" | "*" | "/" | "%" | "**" | "<" | ">" | "<=" | ">="),
+                Ty::Str => match op {
+                    "+" | "<" | ">" | "<=" | ">=" => matches!(rhs, Ty::Str),
+                    "*" => matches!(rhs, Ty::Int),
+                    _ => false,
+                },
+                _ => false,
+            })
     }
     for d in &mut helper_out {
         let soft = match &d.kind {
             DiagnosticKind::IvarUnresolved { .. } => true,
-            DiagnosticKind::IncompatibleBinop { lhs_ty, .. } => nullable_primitive(lhs_ty),
+            DiagnosticKind::IncompatibleBinop { op, lhs_ty, rhs_ty } => nil_is_the_only_miss(op.as_str(), lhs_ty, rhs_ty),
             _ => false,
         };
         if soft {
