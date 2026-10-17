@@ -26,6 +26,7 @@ advisory jobs and the scheduled Full cycle for the multi-target ledger.
 | **Draft or ready** + focus label(s) | Ruby floor plus **only** the selected focus lanes (required) |
 | **Draft or ready** + `ci:full` | Full validation (all targets, WASM, Spinel); extras stay advisory |
 | **Push to canonical `main`** | Ruby floor plus the full Spinel suite (advisory except `campfire-archive-build`) and `campfire-latest` (advisory); extra-language SDKs wait for the schedule |
+| **Push to `main`** with a `[ci full]` line in a pushed commit's message | Full validation, as `ci:full` would plan it; extras stay advisory |
 | **Scheduled / manual Full validation** | Full validation (the extra-language ledger and publication cycle) |
 
 PRs without a special label run a Ruby floor: fixture preparation, unit
@@ -189,6 +190,13 @@ path, and floating-pin catch-up.
 - **A newer head:** needs a new run. Reruns retain the original SHA and
   coverage; rerunning an old compact run neither tests the new head nor
   expands its matrix.
+- **Full validation of a push to `main`:** put `[ci full]` on a line of its
+  own in a pushed commit's message, outside the subject. Committers land on
+  `main` without a PR, so there is no label to set. The run plans like
+  `ci:full` and names the commit in the plan's reasons. Only a whole line
+  counts, so prose that names the marker does not trigger it. Pull requests
+  ignore the marker and keep the maintainer-applied label. A later push
+  still cancels the run, and plans from its own commits only.
 - **Manual full validation:** Actions → **Full validation** → **Run workflow**.
   Leave `publish` unchecked. This executes freshly on the chosen ref; a
   branch-head dispatch is not a substitute for a PR merge-tree check.

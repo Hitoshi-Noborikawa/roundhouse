@@ -271,6 +271,26 @@ CoverageLabels = namedtuple(
 )
 
 
+# A committer pushing to main has no PR to label. A line reading exactly
+# `[ci full]` in a pushed commit's message plans like `ci:full`. Only a
+# whole line counts, so prose that names the marker does not trigger it,
+# and only a push to main honors it: a PR author controls their messages,
+# and `ci:full` there stays a maintainer's label.
+CI_FULL_MARKER = "[ci full]"
+
+
+def full_marker_commit(event, event_name, ref):
+    """The first pushed commit whose message requests full validation."""
+    if event_name != "push" or ref != "refs/heads/main":
+        return None
+    commits = event.get("commits") or [event.get("head_commit") or {}]
+    for commit in commits:
+        lines = (commit.get("message") or "").splitlines()
+        if any(line.strip() == CI_FULL_MARKER for line in lines):
+            return commit.get("id") or ""
+    return None
+
+
 def parse_coverage_labels(names, *, env_full=False):
     """Interpret PR/env coverage labels into a structured request."""
     labels = set(names)
@@ -1156,7 +1176,8 @@ def main():
         {label["name"] for label in pr.get("labels", [])},
         env_full=os.environ.get("CI_FULL") == "true",
     )
-    full = coverage.full
+    marker = full_marker_commit(event, event_name, os.environ.get("GITHUB_REF"))
+    full = coverage.full or marker is not None
     focus_extras = coverage.focus_extras
     focus_jruby = coverage.focus_jruby
     focus_spinel = coverage.focus_spinel
@@ -1219,6 +1240,8 @@ def main():
     )
     if reason:
         plan["reasons"].append(reason)
+    if marker is not None and not coverage.full:
+        plan["reasons"].append(f"{CI_FULL_MARKER} in commit {marker[:12]}".rstrip())
     timings = spinel_timings_from_env()
     plan["spinel_framework_shards"] = spinel_framework_shards(plan["spinel_tests"] or [], timings=timings)
     if not any(timings.values()):
