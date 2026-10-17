@@ -1162,7 +1162,7 @@ class Results(unittest.TestCase):
 
     def test_recorded_seconds_balance_shards_and_the_tables_cover_the_rest(self):
         timings = ci.load_spinel_timings(json.dumps({
-            "toolchain": {"t00": 900, "t01": "slow", "t02": -1, "t03": True, "t04": float("inf"), ci.SPINEL_TOOLCHAIN_TAIL: 1},
+            "toolchain": {"t00": 900, "t01": "slow", "t02": -1, "t03": True, "t04": float("inf"), "t05": 10**1000, ci.SPINEL_TOOLCHAIN_TAIL: 1},
             "framework": {"spinel_pg_db": 2000},
             "other": {"x": 1},
         }))

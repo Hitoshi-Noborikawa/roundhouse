@@ -10,7 +10,6 @@ advisory Spinel (unless a focus label is already set).
 
 import argparse
 import json
-import math
 import os
 import re
 import subprocess
@@ -703,7 +702,8 @@ def select(
 
 
 def positive_seconds(value):
-    return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value) and value > 0
+    # A bound, not math.isfinite: a huge JSON integer overflows its float conversion; NaN and inf fail it too.
+    return isinstance(value, (int, float)) and not isinstance(value, bool) and 0 < value < 86400
 
 
 def load_spinel_timings(raw):
