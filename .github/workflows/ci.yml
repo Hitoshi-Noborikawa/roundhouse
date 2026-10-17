@@ -2213,6 +2213,8 @@ jobs:
         env:
           CI_SPINEL_TIMINGS: ${{ needs.plan.outputs.spinel-timings }}
           CI_SPINEL_TIMINGS_OUT: ${{ runner.temp }}/spinel-timings/toolchain-${{ matrix.shard }}.jsonl
+          # The binary runs outside cargo, so .cargo/config.toml's [env] stack size is not applied.
+          RUST_MIN_STACK: "33554432"
         run: |
           mapfile -t mine < <(cargo test --test spinel_toolchain -- --ignored --list --format terse | sed -n 's/: test$//p' | python3 scripts/ci-plan.py toolchain-shard --shard ${{ matrix.shard }})
           test "${#mine[@]}" -gt 0

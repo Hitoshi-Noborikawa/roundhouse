@@ -1233,6 +1233,15 @@ class Results(unittest.TestCase):
                     merged = json.loads(Path(f"{tmp}/out/merged.json").read_text())
                     self.assertEqual(merged["toolchain"]["tail"], 2 if previous.endswith("previous.json") else 1)
 
+    def test_toolchain_tests_run_outside_cargo_with_its_stack_size(self):
+        import tomllib
+        root = Path(__file__).parents[1]
+        stack = tomllib.loads((root / ".cargo/config.toml").read_text())["env"]["RUST_MIN_STACK"]
+        workflow = (root / ".github/workflows/ci.yml").read_text()
+        job = re.search(r"(?ms)^  spinel-toolchain:\n(.*?)(?=^  [\w-]+:|\Z)", workflow).group(1)
+        self.assertIn("run-tests --kind toolchain", job)
+        self.assertIn(f'RUST_MIN_STACK: "{stack}"', job)
+
     def test_spinel_framework_shards_cover_each_selected_suite_once(self):
         shards = ci.spinel_framework_shards(ci.SPINEL_TESTS)
         self.assertEqual([s["shard"] for s in shards], [0, 1, 2, 3])
