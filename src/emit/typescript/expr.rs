@@ -303,6 +303,30 @@ fn synth_ident(name: &str) -> Js {
     Js::synth(JsExpr::Ident(name.into()))
 }
 
+fn is_block(e: &Expr) -> bool {
+    matches!(&*e.node, ExprNode::Lambda { .. })
+}
+
+/// `(<param>) => <body>`.
+fn arrow1(param: &str, body: Js) -> Js {
+    Js::synth(JsExpr::Arrow { params: vec![js_param(param)], body: ArrowBody::Expr(body), is_async: false })
+}
+
+/// `((__a) => <body(__a)>)(<recv>)` — the receiver evaluated once.
+fn with_array(span: Span, recv: &Expr, body: impl FnOnce(Js) -> Js) -> Js {
+    Js::call(span, arrow1("__a", body(synth_ident("__a"))), vec![js_expr(recv)])
+}
+
+/// `<a>.reduce((s, x) => s + x, 0)` — Ruby's `sum` of an empty Array is 0.
+fn array_sum(a: Js) -> Js {
+    let add = Js::synth(JsExpr::Arrow {
+        params: vec![js_param("__s"), js_param("__x")],
+        body: ArrowBody::Expr(Js::binary(Span::synthetic(), "+", synth_ident("__s"), synth_ident("__x"))),
+        is_async: false,
+    });
+    Js::method_call(Span::synthetic(), a, "reduce", vec![add, Js::num(Span::synthetic(), "0")])
+}
+
 fn js_param(name: impl Into<String>) -> JsParam {
     JsParam { name: name.into(), optional: false, ty: None, default: None }
 }
@@ -2627,6 +2651,116 @@ fn js_send_inner(
                         vec![]
                     };
                     return Js::method_call(span, copy, "sort", cmp);
+                }
+                // Each below reads the receiver once through `__a`, and a
+                // block reaches JS as the arrow it already emits as.
+                "sum" if args.is_empty() => {
+                    return with_array(span, r, |a| array_sum(a));
+                }
+                "sum" if args.len() == 1 && is_block(&args[0]) => {
+                    let f = js_expr(&args[0]);
+                    return with_array(span, r, |a| array_sum(Js::method_call(Span::synthetic(), a, "map", vec![f])));
+                }
+                "select" | "filter" | "find_all" if args.len() == 1 && is_block(&args[0]) => {
+                    return Js::method_call(span, js_expr(r), "filter", vec![js_expr(&args[0])]);
+                }
+                "reject" if args.len() == 1 && is_block(&args[0]) => {
+                    let f = js_expr(&args[0]);
+                    let not_f = arrow1("__x", Js::unary(Span::synthetic(), "!", Js::call(Span::synthetic(), f, vec![synth_ident("__x")])));
+                    return Js::method_call(span, js_expr(r), "filter", vec![not_f]);
+                }
+                "collect" if args.len() == 1 && is_block(&args[0]) => {
+                    return Js::method_call(span, js_expr(r), "map", vec![js_expr(&args[0])]);
+                }
+                "detect" if args.len() == 1 && is_block(&args[0]) => {
+                    return Js::method_call(span, js_expr(r), "find", vec![js_expr(&args[0])]);
+                }
+                "flat_map" if args.len() == 1 && is_block(&args[0]) => {
+                    return Js::method_call(span, js_expr(r), "flatMap", vec![js_expr(&args[0])]);
+                }
+                // `forEach` hands the callback (element, index), the block's two parameters.
+                "each_with_index" if args.len() == 1 && is_block(&args[0]) => {
+                    return Js::method_call(span, js_expr(r), "forEach", vec![js_expr(&args[0])]);
+                }
+                "compact" if args.is_empty() => {
+                    let not_nil = arrow1("__x", Js::binary(Span::synthetic(), "!=", synth_ident("__x"), Js::synth(JsExpr::Null)));
+                    return Js::method_call(span, js_expr(r), "filter", vec![not_nil]);
+                }
+                "uniq" if args.is_empty() => {
+                    let set = Js::synth(JsExpr::New { callee: synth_ident("Set"), args: vec![js_expr(r)] });
+                    return Js::new(span, JsExpr::Array(vec![Js::synth(JsExpr::Spread(set))]));
+                }
+                "max" | "min" if args.is_empty() && matches!(**elem, Ty::Int | Ty::Float) => {
+                    let pick = if method == "max" { "max" } else { "min" };
+                    return with_array(span, r, |a| {
+                        Js::synth(JsExpr::Ternary {
+                            cond: Js::member(Span::synthetic(), a.clone(), "length"),
+                            then: Js::method_call(Span::synthetic(), synth_ident("Math"), pick, vec![Js::synth(JsExpr::Spread(a))]),
+                            else_: Js::synth(JsExpr::Null),
+                        })
+                    });
+                }
+                "first" | "take" if args.len() == 1 && !is_block(&args[0]) => {
+                    return Js::method_call(span, js_expr(r), "slice", vec![Js::num(Span::synthetic(), "0"), js_expr(&args[0])]);
+                }
+                "last" if args.len() == 1 && !is_block(&args[0]) => {
+                    // `slice(-n)` is the whole Array for n = 0, where Ruby answers [].
+                    let n = js_expr(&args[0]);
+                    return with_array(span, r, |a| {
+                        let from = Js::method_call(
+                            Span::synthetic(),
+                            synth_ident("Math"),
+                            "max",
+                            vec![Js::binary(Span::synthetic(), "-", Js::member(Span::synthetic(), a.clone(), "length"), n), Js::num(Span::synthetic(), "0")],
+                        );
+                        Js::method_call(Span::synthetic(), a, "slice", vec![from])
+                    });
+                }
+                "dup" | "clone" if args.is_empty() => {
+                    return Js::new(span, JsExpr::Array(vec![Js::synth(JsExpr::Spread(js_expr(r)))]));
+                }
+                "drop" if args.len() == 1 && !is_block(&args[0]) => {
+                    return Js::method_call(span, js_expr(r), "slice", vec![js_expr(&args[0])]);
+                }
+                "count" if args.len() == 1 => {
+                    let pred = if is_block(&args[0]) {
+                        js_expr(&args[0])
+                    } else {
+                        arrow1("__x", Js::binary(Span::synthetic(), "===", synth_ident("__x"), js_expr(&args[0])))
+                    };
+                    let kept = Js::method_call(Span::synthetic(), js_expr(r), "filter", vec![pred]);
+                    return Js::member(span, kept, "length");
+                }
+                "inject" | "reduce" if args.len() == 2 && is_block(&args[1]) => {
+                    return Js::method_call(span, js_expr(r), "reduce", vec![js_expr(&args[1]), js_expr(&args[0])]);
+                }
+                // An empty Array's `inject` is nil; JS `reduce` without a seed throws on one.
+                "inject" | "reduce" if args.len() == 1 && is_block(&args[0]) => {
+                    let f = js_expr(&args[0]);
+                    return with_array(span, r, |a| {
+                        Js::synth(JsExpr::Ternary {
+                            cond: Js::member(Span::synthetic(), a.clone(), "length"),
+                            then: Js::method_call(Span::synthetic(), a, "reduce", vec![f]),
+                            else_: Js::synth(JsExpr::Null),
+                        })
+                    });
+                }
+                "index" | "find_index" if args.len() == 1 => {
+                    let found = if is_block(&args[0]) {
+                        Js::method_call(Span::synthetic(), js_expr(r), "findIndex", vec![js_expr(&args[0])])
+                    } else {
+                        Js::method_call(Span::synthetic(), js_expr(r), "indexOf", vec![js_expr(&args[0])])
+                    };
+                    let nil_if_absent = Js::synth(JsExpr::Arrow {
+                        params: vec![js_param("__i")],
+                        body: ArrowBody::Expr(Js::synth(JsExpr::Ternary {
+                            cond: Js::binary(Span::synthetic(), "<", synth_ident("__i"), Js::num(Span::synthetic(), "0")),
+                            then: Js::synth(JsExpr::Null),
+                            else_: synth_ident("__i"),
+                        })),
+                        is_async: false,
+                    });
+                    return Js::call(span, nil_if_absent, vec![found]);
                 }
                 // Ruby's `Array#join` with no args uses `$,` as the
                 // separator (defaults to nil → ""). JS's

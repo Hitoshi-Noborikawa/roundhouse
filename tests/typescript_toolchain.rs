@@ -20,6 +20,8 @@ use std::process::Command;
 mod emit_and_run;
 #[path = "support/nested_classes.rs"]
 mod nested_classes;
+#[path = "support/array_methods.rs"]
+mod array_methods;
 
 use roundhouse::emit::typescript;
 use roundhouse::ingest::ingest_app;
@@ -261,6 +263,25 @@ fn real_blog_libsql_node_test_passes() {
     assert_node_test_passes("real-blog (libsql)", &scratch);
 }
 
+/// Install the emitted project's packages, run `script` under tsx from its
+/// root, and answer what it printed.
+fn run_under_tsx(emitted: &Path, script: &str) -> String {
+    let install = Command::new("npm")
+        .args(["install", "--silent", "--no-audit", "--no-fund"])
+        .current_dir(emitted)
+        .output()
+        .expect("run npm install");
+    assert!(install.status.success(), "{}", String::from_utf8_lossy(&install.stderr));
+    std::fs::write(emitted.join("check.ts"), script).unwrap();
+    let run = Command::new("npx")
+        .args(["tsx", "check.ts"])
+        .current_dir(emitted)
+        .output()
+        .expect("run tsx");
+    assert!(run.status.success(), "{}", String::from_utf8_lossy(&run.stderr));
+    String::from_utf8_lossy(&run.stdout).trim().to_string()
+}
+
 #[test]
 #[ignore]
 fn real_blog_nested_classes_run_under_tsx() {
@@ -268,22 +289,23 @@ fn real_blog_nested_classes_run_under_tsx() {
     // built from another file, answer as CRuby does.
     let (emitted, errors) = nested_classes::overlay().emit(roundhouse::project::BuildTarget::Typescript);
     assert!(errors.is_empty(), "{errors:?}");
-    let install = Command::new("npm")
-        .args(["install", "--silent", "--no-audit", "--no-fund"])
-        .current_dir(&emitted)
-        .output()
-        .expect("run npm install");
-    assert!(install.status.success(), "{}", String::from_utf8_lossy(&install.stderr));
-    std::fs::write(
-        emitted.join("nested_check.ts"),
+    let out = run_under_tsx(
+        &emitted,
         "import { Report } from \"./app/models/report.js\";\nconsole.log(Report.summary());\n",
-    )
-    .unwrap();
-    let run = Command::new("npx")
-        .args(["tsx", "nested_check.ts"])
-        .current_dir(&emitted)
-        .output()
-        .expect("run tsx");
-    assert!(run.status.success(), "{}", String::from_utf8_lossy(&run.stderr));
-    assert_eq!(String::from_utf8_lossy(&run.stdout).trim(), nested_classes::SUMMARY);
+    );
+    assert_eq!(out, nested_classes::SUMMARY);
+}
+
+#[test]
+#[ignore]
+fn real_blog_array_methods_run_under_tsx() {
+    // The Array methods the emit translates answer as CRuby does,
+    // empty-Array and not-found answers included.
+    let (emitted, errors) = array_methods::overlay().emit(roundhouse::project::BuildTarget::Typescript);
+    assert!(errors.is_empty(), "{errors:?}");
+    let out = run_under_tsx(
+        &emitted,
+        "import { ArrayProbe } from \"./app/models/array_probe.js\";\nconsole.log(JSON.stringify(ArrayProbe.run([1, 2, 3], [\"a\", \"b\"])));\n",
+    );
+    assert_eq!(out, array_methods::EXPECTED);
 }
