@@ -60,7 +60,7 @@ mod narrowing;
 mod pagy;
 mod send;
 pub(crate) use send::PARAM_VALUE;
-pub(crate) use send::{indexed_pluck, string_answers};
+pub(crate) use send::{indexed_pluck, str_method, string_answers};
 
 /// Typed constants for generated expressions without Ruby source spans.
 /// The class's constants shadow the shared app registry. Source-backed

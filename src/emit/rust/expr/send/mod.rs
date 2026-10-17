@@ -9,6 +9,7 @@ use crate::expr::{Expr, ExprNode};
 
 mod coerce;
 mod dispatch;
+pub(crate) use dispatch::dispatch_method_by_recv_ty;
 mod index;
 mod ops;
 

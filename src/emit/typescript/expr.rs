@@ -1188,6 +1188,30 @@ pub(super) fn emit_expr(e: &Expr) -> String {
 }
 
 /// Build a JavaScript expression with its source span and shared primitive behavior.
+/// Print one string-kernel call. The Ruby name stays in the table.
+fn js_string_kernel(
+    span: Span,
+    recv: &Expr,
+    args: &[Expr],
+    entry: &crate::catalog::string_kernel::StringKernel,
+) -> Js {
+    use crate::catalog::string_kernel::TsSpell;
+    match entry.typescript {
+        TsSpell::LengthEqZero => Js::binary(
+            span,
+            "===",
+            Js::member(span, js_expr(recv), "length"),
+            Js::num(span, "0"),
+        ),
+        TsSpell::Member(prop) => Js::member(span, js_expr(recv), prop),
+        TsSpell::Method0(name) => Js::method_call(span, js_expr(recv), name, vec![]),
+        TsSpell::Method1(name) => {
+            Js::method_call(span, js_expr(recv), name, vec![js_expr(&args[0])])
+        }
+        TsSpell::Number => Js::call(span, Js::ident(span, "Number"), vec![js_expr(recv)]),
+    }
+}
+
 pub(super) fn js_expr(e: &Expr) -> Js {
     if let Some(s) = crate::emit::shared::utf8_chr::emit(e, crate::emit::shared::utf8_chr::Target::TypeScript, emit_expr) {
         return Js::new(e.span, JsExpr::Raw(s));
@@ -2278,7 +2302,12 @@ fn js_send_inner(
                     };
                     return Js::call(span, Js::ident(span, "String"), vec![value]);
                 }
-                "to_i" => return Js::call(span, Js::ident(span, "Number"), vec![js_expr(r)]),
+                // String receivers answer `to_i` from `string_kernel`
+                // in the `Ty::Str` arm below. This arm is every other
+                // receiver.
+                "to_i" if !matches!(r.ty.as_ref(), Some(Ty::Str)) => {
+                    return Js::call(span, Js::ident(span, "Number"), vec![js_expr(r)])
+                }
                 "to_sym" => return js_expr(r),
                 _ => {}
             }
@@ -2622,24 +2651,11 @@ fn js_send_inner(
             },
             // String receiver: predicate forms parallel Array's; the
             // case-shift helpers map to JS String methods.
-            Some(Ty::Str) => match method {
-                "empty?" if args.is_empty() => {
-                    return Js::binary(
-                        span,
-                        "===",
-                        Js::member(span, js_expr(r), "length"),
-                        Js::num(span, "0"),
-                    );
+            Some(Ty::Str) => {
+                if let Some(entry) = crate::catalog::string_kernel::lookup(method, args.len()) {
+                    return js_string_kernel(span, r, args, entry);
                 }
-                "size" | "length" if args.is_empty() => {
-                    return Js::member(span, js_expr(r), "length");
-                }
-                "upcase" if args.is_empty() => {
-                    return Js::method_call(span, js_expr(r), "toUpperCase", vec![]);
-                }
-                "downcase" if args.is_empty() => {
-                    return Js::method_call(span, js_expr(r), "toLowerCase", vec![]);
-                }
+                match method {
                 "capitalize" if args.is_empty() => {
                     // JS has no built-in capitalize. Match Ruby's
                     // semantics: uppercase the first char, lowercase
@@ -2675,9 +2691,6 @@ fn js_send_inner(
                     });
                     return Js::call(span, shell, vec![js_expr(r)]);
                 }
-                "strip" if args.is_empty() => {
-                    return Js::method_call(span, js_expr(r), "trim", vec![]);
-                }
                 "reverse" if args.is_empty() => {
                     let chars = Js::method_call(
                         span,
@@ -2699,30 +2712,6 @@ fn js_send_inner(
                         js_expr(r),
                         "split",
                         vec![Js::str(Span::synthetic(), "")],
-                    );
-                }
-                "start_with?" if args.len() == 1 => {
-                    return Js::method_call(
-                        span,
-                        js_expr(r),
-                        "startsWith",
-                        vec![js_expr(&args[0])],
-                    );
-                }
-                "end_with?" if args.len() == 1 => {
-                    return Js::method_call(
-                        span,
-                        js_expr(r),
-                        "endsWith",
-                        vec![js_expr(&args[0])],
-                    );
-                }
-                "include?" if args.len() == 1 => {
-                    return Js::method_call(
-                        span,
-                        js_expr(r),
-                        "includes",
-                        vec![js_expr(&args[0])],
                     );
                 }
                 // `s.sub(pat, repl)` → `s.replace(pat, repl)` (first
@@ -2834,6 +2823,7 @@ fn js_send_inner(
                     }
                 }
                 _ => {}
+                }
             },
             // Hash → JS plain-object. `.merge` becomes object spread;
             // `.key?` becomes the `in` operator; `.empty?` counts keys;
@@ -3242,9 +3232,15 @@ fn js_send_inner(
     // where receiver type is `any`. Hash receivers reach the
     // type-aware branch and emit as `in`, so they don't fall through
     // here.
-    let (mapped_name, force_parens) = match method {
-        "strip" => ("trim", true),
-        "include?" => ("includes", true),
+    // Untyped receivers still rewrite the two kernel rows that this
+    // fallback already rewrote. The spelling comes from the table.
+    let (mapped_name, force_parens) = match crate::catalog::string_kernel::lookup(method, args.len())
+    {
+        Some(entry) if entry.untyped_typescript => match entry.typescript {
+            crate::catalog::string_kernel::TsSpell::Method0(name)
+            | crate::catalog::string_kernel::TsSpell::Method1(name) => (name, true),
+            _ => (method, false),
+        },
         _ => (method, false),
     };
     let ts_m = ts_method_name(mapped_name);

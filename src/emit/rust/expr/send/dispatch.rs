@@ -210,7 +210,7 @@ fn ruby_to_s_emit(recv: &Expr, recv_s: &str, ufcs: bool) -> String {
 /// this level. Where Ruby methods return Integer (`.length`, `.size`,
 /// `.count`), the bridge inserts `(... as i64)` so downstream
 /// arithmetic compiles without per-callsite widens.
-pub(super) fn dispatch_method_by_recv_ty(
+pub(crate) fn dispatch_method_by_recv_ty(
     recv: &Expr,
     method: &str,
     args: &[Expr],
@@ -329,65 +329,32 @@ pub(super) fn dispatch_method_by_recv_ty(
             )),
             _ => None,
         },
-        Some(Ty::Str) | Some(Ty::Sym) => match method {
-            "empty?" if args.is_empty() => Some(format!("{recv_s}.is_empty()")),
-            "size" | "length" if args.is_empty() => {
-                // `as i64` cast — non-primary. Decide pass stamps
-                // `NEEDS_PARENS` on this Send for chained-recv use;
-                // consumer wraps. Arg/let-RHS positions stay bare.
-                Some(format!("{recv_s}.chars().count() as i64"))
+        Some(Ty::Str) | Some(Ty::Sym) => {
+            // String kernel, also the Symbol arm this match has always
+            // shared. Spellings live in `catalog::string_kernel`.
+            if let Some(entry) = crate::catalog::string_kernel::lookup(method, args.len()) {
+                return Some(crate::catalog::string_kernel::render_rust(entry, &recv_s, &args_s));
             }
-            // `str.to_i` → Ruby semantics: parse leading digits, 0 on
-            // parse failure / non-numeric input. Rust's `parse::<i64>`
-            // is stricter (full-string match); `unwrap_or(0)` covers
-            // the failure path. `&str` and `String` both expose
-            // `.parse()` so this works uniformly across the recv-Ty
-            // Str/Sym arms.
-            "to_i" if args.is_empty() => {
-                // Method chain (already primary). No outer wrap
-                // needed — `.parse::<i64>().unwrap_or(0).method()`
-                // chains correctly. Defensive wrap retired by Stage 1
-                // of #22.
-                Some(format!("{recv_s}.parse::<i64>().unwrap_or(0)"))
+            match method {
+                "to_f" if args.is_empty() => Some(format!("{recv_s}.parse::<f64>().unwrap_or(0.0)")),
+                // `reverse` on String — codepoint reversal via chars().
+                "reverse" if args.is_empty() => {
+                    Some(format!("{recv_s}.chars().rev().collect::<String>()"))
+                }
+                // `chars` returns Array<String> in Ruby; mirror with
+                // `Vec<String>` (each char converted to a one-char String).
+                "chars" if args.is_empty() => Some(format!(
+                    "{recv_s}.chars().map(|c| c.to_string()).collect::<Vec<String>>()"
+                )),
+                // `String#match?(re)` → `re.is_match(str)`. Rust has no
+                // `str::match_pred`; the Regex is the natural receiver
+                // (mirrors the TypeScript `re.test(s)` flip).
+                "match?" if args.len() == 1 => {
+                    Some(format!("{}.is_match(&*({recv_s}))", args_s[0]))
+                }
+                _ => None,
             }
-            "to_f" if args.is_empty() => {
-                Some(format!("{recv_s}.parse::<f64>().unwrap_or(0.0)"))
-            }
-            "upcase" if args.is_empty() => Some(format!("{recv_s}.to_uppercase()")),
-            "downcase" if args.is_empty() => Some(format!("{recv_s}.to_lowercase()")),
-            // `strip` → `trim()` returns &str; `.to_string()` forces
-            // owned to match Ruby's `String#strip` return shape.
-            "strip" if args.is_empty() => Some(format!("{recv_s}.trim().to_string()")),
-            // `reverse` on String — codepoint reversal via chars().
-            "reverse" if args.is_empty() => Some(format!(
-                "{recv_s}.chars().rev().collect::<String>()"
-            )),
-            // `chars` returns Array<String> in Ruby; mirror with
-            // `Vec<String>` (each char converted to a one-char String).
-            "chars" if args.is_empty() => Some(format!(
-                "{recv_s}.chars().map(|c| c.to_string()).collect::<Vec<String>>()"
-            )),
-            // The argument is borrowed as `&*(…)`: `str`'s pattern
-            // methods take `&str` (and `char`), not `String`, so a
-            // computed argument (`ap.start_with?(pp[0, n])`) did not
-            // compile. `&*` is a no-op reborrow on a literal `&str`.
-            "start_with?" if args.len() == 1 => {
-                Some(format!("{recv_s}.starts_with(&*({}))", args_s[0]))
-            }
-            "end_with?" if args.len() == 1 => {
-                Some(format!("{recv_s}.ends_with(&*({}))", args_s[0]))
-            }
-            "include?" if args.len() == 1 => {
-                Some(format!("{recv_s}.contains(&*({}))", args_s[0]))
-            }
-            // `String#match?(re)` → `re.is_match(str)`. Rust has no
-            // `str::match_pred`; the Regex is the natural receiver
-            // (mirrors the TypeScript `re.test(s)` flip).
-            "match?" if args.len() == 1 => {
-                Some(format!("{}.is_match(&*({recv_s}))", args_s[0]))
-            }
-            _ => None,
-        },
+        }
         // `Regexp#match?(str)` → `re.is_match(str)` when the receiver
         // is already the pattern (validations, flipped call sites).
         Some(Ty::Class { id, .. }) if id.0.as_str() == "Regexp" => match method {
