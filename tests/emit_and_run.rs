@@ -166,6 +166,8 @@ mod time_find_zone;
 mod concurrent_map;
 #[path = "emit_and_run/request_optional_port.rs"]
 mod request_optional_port;
+#[path = "emit_and_run/request_port.rs"]
+mod request_port;
 #[path = "emit_and_run/action_dispatch_request_put.rs"]
 mod action_dispatch_request_put;
 #[path = "emit_and_run/controller_url_helpers.rs"]
@@ -212,6 +214,8 @@ mod action_text_markdown;
 mod ordinalize;
 #[path = "emit_and_run/autoload_once_paths.rs"]
 mod autoload_once_paths;
+#[path = "emit_and_run/config_require_relative.rs"]
+mod config_require_relative;
 #[path = "emit_and_run/defined_const_fold.rs"]
 mod defined_const_fold;
 #[path = "emit_and_run/job_payload.rs"]
