@@ -629,15 +629,17 @@ fn mutates_constructor_lookup_method(
                     .iter()
                     .any(|module| super::constant_names_class(arg, module))
         }),
-        "define_method"
-        | "define_singleton_method"
-        | "class_eval"
+        "define_method" | "define_singleton_method" => args.first().is_none_or(|arg| {
+            literal_method_name(arg).is_none_or(|name| matches!(name, "new" | "initialize"))
+        }),
+        "remove_method" | "undef_method" => args.iter().any(|arg| {
+            literal_method_name(arg).is_none_or(|name| matches!(name, "new" | "initialize"))
+        }),
+        "class_eval"
         | "module_eval"
         | "instance_eval"
         | "class_exec"
-        | "instance_exec"
-        | "remove_method"
-        | "undef_method" => true,
+        | "instance_exec" => true,
         "alias_method" => args.iter().any(|arg| {
             literal_method_name(arg).is_some_and(|name| matches!(name, "new" | "initialize"))
         }),
