@@ -244,7 +244,9 @@ module Db
   # effectively thread-local (each worker thread's root fiber).
   def self.current_dbh
     h = Fiber[:db_handle]
-    return h if !h.nil?
+    # A child thread copies this fiber's storage, including a lease it
+    # does not hold. The owner thread is the only one that may use it.
+    return h if !h.nil? && Fiber[:db_owner] == Thread.current
     # Only the UNLEASED path pays the fork check — boot, tests, and
     # single-threaded dev. Under a lease the line above has already
     # returned, so the per-query cost of all this is zero.
@@ -300,7 +302,7 @@ module Db
   # re-entrant, and a second lease on a thread that holds one would
   # rebind the connection and, on release, unbind the outer lease's.
   def self.in_lease?
-    !Fiber[:db_handle].nil?
+    !Fiber[:db_handle].nil? && Fiber[:db_owner] == Thread.current
   end
 
   # `ActiveRecord::Base.connection_db_config` answers from these
@@ -335,7 +337,13 @@ module Db
   end
 
   def self.note_data_write(sql)
-    word = sql.lstrip.split(" ").first.to_s.upcase
+    return nil if sql.nil?
+    # A bound blob may carry a NUL. Splitting that as UTF-8 raises
+    # ArgumentError and aborts the write. The first word is ASCII
+    # either way; anything else is a real write.
+    bytes = sql.to_s.b
+    bytes = bytes.sub(/\A[ \t\r\n]+/, "")
+    word = bytes.split(" ".b, 2).first.to_s.upcase
     return nil if word == "BEGIN" || word == "COMMIT" || word == "ROLLBACK" || word == "SAVEPOINT" || word == "RELEASE" || word == "END"
     @write_generation = write_generation + 1
     nil
@@ -360,6 +368,7 @@ module Db
   # began it (it holds the write permit), never the host's.
   def self.with_lent_connection(conn)
     outer = Fiber[:db_handle]
+    outer_owner = Fiber[:db_owner]
     as_hash = conn.results_as_hash
     conn.results_as_hash = false
     unless conn.instance_variable_get(:@rh_sql_functions)
@@ -367,6 +376,7 @@ module Db
       conn.instance_variable_set(:@rh_sql_functions, true)
     end
     Fiber[:db_handle] = conn
+    Fiber[:db_owner] = Thread.current
     request_failed = false
     begin
       yield
@@ -400,6 +410,7 @@ module Db
         cleanup_error ||= e
       ensure
         Fiber[:db_handle] = outer
+        Fiber[:db_owner] = outer_owner
         conn.results_as_hash = as_hash
       end
       raise cleanup_error if cleanup_error && !request_failed
@@ -466,6 +477,10 @@ module Db
       h = @pool.checkout
     end
     Fiber[:db_handle] = h
+    Fiber[:db_owner] = Thread.current
+    # A thread spawned inside a pinned transaction copies `db_txn_pin`.
+    # This checkout is its own lease, not that pin.
+    Fiber[:db_txn_pin] = false
     request_failed = false
     begin
       prepare_for_checkpointer(h) if @checkpoint_wanted
@@ -495,6 +510,7 @@ module Db
         cleanup_error ||= e
       ensure
         Fiber[:db_handle] = nil
+        Fiber[:db_owner] = nil
         begin
           if (open.nil? || open.empty?) && !h.transaction_active?
             @mutex.synchronize do
@@ -657,14 +673,16 @@ module Db
       conn = @pool.checkout
     end
     Fiber[:db_handle] = conn
+    Fiber[:db_owner] = Thread.current
     Fiber[:db_txn_pin] = true
     conn
   end
 
   def self.release_txn_pin_if_idle(conn)
-    return nil unless Fiber[:db_txn_pin] == true
+    return nil unless Fiber[:db_txn_pin] == true && Fiber[:db_owner] == Thread.current
     return nil if conn.transaction_active?
     Fiber[:db_handle] = nil
+    Fiber[:db_owner] = nil
     Fiber[:db_txn_pin] = false
     @mutex.synchronize do
       # Unleased work uses `free[0]`. Commit callbacks run after
