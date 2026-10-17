@@ -1788,21 +1788,21 @@ pub(crate) fn push_scope_methods(
 
         // Rails relations are immutable, so every implicit-self root in
         // a scope body starts from the scope as it was on entry:
-        // `where(a).or(where(b))` is `a OR b`. Ours mutate in place, and
-        // the rewrite roots each of those on the one threaded `__rel`,
-        // so the receiver's `where(a)` landed on the argument too and
-        // the query became `(a AND b) OR (a AND b)`. When the body reads
-        // the relation more than once, each read takes its own copy.
-        // (A single read keeps the bare `__rel`; the entry spawn below
-        // already protects the caller's relation.)
+        // `where(a).or(where(b))` is `a OR b`. The rewrite roots each of
+        // those on the one threaded `__rel`. Chain methods now answer a
+        // new relation (#1041), so these copies no longer change the
+        // query; they cost one clone per extra read and can go once
+        // nothing reaches a scope body through a bang method.
+        // (A single read keeps the bare `__rel`.)
         if count_var_reads(&mut body, &rel_param) > 1 {
             spawn_each_var_read(&mut body, &rel_param, &model.name);
         }
 
         // Rails scopes spawn on entry: `rel.visible.with_direct_rooms`
         // must not leave joins/orders on `rel.visible` for a sibling
-        // `rel.visible.with_ordered_room`. Our chain methods mutate in
-        // place, so the scope method itself takes a copy first.
+        // `rel.visible.with_ordered_room`. Chain methods fork on their
+        // own since #1041; the entry copy is kept for the bang methods
+        // (`where!`, `order!`), which still write in place.
         let span = body.span;
         let rel_ty = Ty::Relation {
             of: model.name.clone(),

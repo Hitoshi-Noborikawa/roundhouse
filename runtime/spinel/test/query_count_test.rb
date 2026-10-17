@@ -146,6 +146,24 @@ class QueryCountTest < ActionDispatch::IntegrationTest
       raise "expected the loaded receiver to keep its #{ids.length} rows"
     end
   end
+
+  # A chain method that changes no query state (`references`, `per` with
+  # no size) still answers a relation that queries again, as Rails'
+  # `initialize_copy` resets the loaded rows: a fork does not keep
+  # serving the rows its receiver had loaded.
+  def test_a_query_state_free_fork_of_a_loaded_relation_requeries
+    rel = ActiveRecord::Relation.new(Article).order("id")
+    ids = rel.map { |a| a.id }
+    raise "fixture seeded no articles" if ids.length == 0
+    sql = Db.capture_sql do
+      rel.references(:comments).to_a
+      rel.per(nil).to_a
+    end
+    unless sql.length == 2
+      raise "expected each fork of a loaded relation to query once, " \
+            "got #{sql.length}:\n#{sql.join("\n")}"
+    end
+  end
 end
 
 # Self-driving footer — the hand-written counterpart to the emitted
@@ -175,4 +193,8 @@ __t5 = QueryCountTest.new
 __t5.setup
 __t5.test_ordering_a_loaded_relation_sorts_in_memory
 __t5.teardown
-puts "QueryCountTest: 5 tests passed"
+__t6 = QueryCountTest.new
+__t6.setup
+__t6.test_a_query_state_free_fork_of_a_loaded_relation_requeries
+__t6.teardown
+puts "QueryCountTest: 6 tests passed"

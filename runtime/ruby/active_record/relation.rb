@@ -111,6 +111,16 @@ module ActiveRecord
       clone
     end
 
+    # A fork that queries again, as every Rails query method's is
+    # (`initialize_copy` resets the loaded rows): for a chain method
+    # that changes no query state, so a reload of the receiver is not
+    # answered from rows the fork kept.
+    def unloaded_spawn
+      fork = spawn
+      fork.unload_records
+      fork
+    end
+
     def own_lists
       if @shared_lists
         @shared_lists = false
@@ -177,7 +187,7 @@ module ActiveRecord
       attrs
     end
 
-    # ---- chain methods (return self) --------------------------------
+    # ---- chain methods (return a new relation) ----------------------
 
     # `with_recursive(parents: [base, step])` — a recursive common table
     # expression, each named part the UNION ALL of its relations (Rails
@@ -757,7 +767,7 @@ module ActiveRecord
     # `per(0)` is `limit(0)`.
     def per(num)
       text = num.to_s
-      return spawn unless text.match?(/\A\d/)
+      return unloaded_spawn unless text.match?(/\A\d/)
       n = text.to_i
       return limit(0) if n == 0
       page_now = current_page
@@ -1020,7 +1030,7 @@ module ActiveRecord
     # stay chainable (lobsters' filters page).
     def references(*names)
       names
-      spawn
+      unloaded_spawn
     end
 
     # `merge(other)` — fold another relation's WHEREs in. v1 handles the

@@ -17,6 +17,7 @@ module ActiveRecord
     # Rails' Relation#spawn — copy query state onto a fresh Relation so
     # a scope fork cannot mutate its caller's accumulators.
     def spawn: () -> Relation
+    def unloaded_spawn: () -> Relation
     def own_lists: () -> Relation
     def take_query_lists: (
         Array[String] wheres,
