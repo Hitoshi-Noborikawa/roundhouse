@@ -1858,10 +1858,26 @@ pub fn futamura_whole_route(
     // placeholder and keeps going), so they never reach `diags` above;
     // carried separately for `routes::plan` to attribute to the routes
     // whose controller or view they belong to.
+    //
+    // One recorded gap is excluded on purpose: `ingest::app::
+    // CSP_DIVERGENCE_MESSAGE` names a `content_security_policy` block
+    // this ingest can read well enough to know it does nothing but
+    // build a policy object (INTERIM, rubys/roundhouse#58, CSP option
+    // 2 — see `ingest::app::csp_block_is_recognized`'s doc comment).
+    // It still belongs in the survey's punch list (recorded the same
+    // way every other gap is, via `IngestError::Unsupported`, so
+    // `--survey` and `check --continue` show it), but it must not
+    // reach `routes::plan`'s gap-blocking: the directive builders
+    // aren't modelled either way, so the lowered app sends no CSP
+    // header, but that is a recorded DIVERGENCE, not a reason to keep
+    // every route behind it on Rails.
     let gaps = gaps
         .iter()
         .filter_map(|g| match g {
             crate::ingest::IngestError::Unsupported { file, message } => {
+                if message == crate::ingest::app::CSP_DIVERGENCE_MESSAGE {
+                    return None;
+                }
                 Some((file.clone(), message.clone()))
             }
             crate::ingest::IngestError::Io(_) | crate::ingest::IngestError::Parse { .. } => None,
