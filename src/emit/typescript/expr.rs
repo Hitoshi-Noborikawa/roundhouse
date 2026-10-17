@@ -140,6 +140,17 @@ pub(crate) struct ClassShape {
 }
 
 std::thread_local! {
+    static NESTED_CLASS_NAMES: std::cell::RefCell<HashSet<String>> =
+        std::cell::RefCell::new(HashSet::new());
+}
+
+/// The app's nested classes (`Importer::TooBig`), whose `.new` is a
+/// constructor although its receiver renders dotted (`Importer.TooBig`).
+pub(crate) fn set_nested_class_names(names: impl IntoIterator<Item = String>) {
+    NESTED_CLASS_NAMES.with(|cell| *cell.borrow_mut() = names.into_iter().collect());
+}
+
+std::thread_local! {
     static CLASS_SHAPES: std::cell::RefCell<HashMap<String, ClassShape>> =
         std::cell::RefCell::new(HashMap::new());
 }
@@ -2088,7 +2099,11 @@ fn js_send_inner(
         // `new Views.Articles(...)` would invoke an object as a
         // constructor, which TS rejects at runtime. Fall through to
         // the regular member-call form for those.
-        if !recv_s.contains('.') {
+        let nested_class = matches!(&*recv.unwrap().node, ExprNode::Const { path }
+            if NESTED_CLASS_NAMES.with(|n| {
+                n.borrow().contains(&path.iter().map(|s| s.as_str()).collect::<Vec<_>>().join("::"))
+            }));
+        if !recv_s.contains('.') || nested_class {
             if args.is_empty() {
                 match recv_s.as_str() {
                     "String" => return Js::str(span, ""),
