@@ -955,6 +955,10 @@ module ActionController
       self
     end
 
+    def redirect?
+      @status == 301 || @status == 302 || @status == 303 || @status == 307 || @status == 308
+    end
+
     # Rails' `self.response_body =` (campfire's MessagesController and
     # CachedResponses serve a prebuilt page this way). A body is a
     # response, so the before_action halting check sees it; nil clears

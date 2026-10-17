@@ -64,6 +64,20 @@ class ActionControllerBaseTest < Minitest::Test
     assert_equal "text/vnd.turbo-stream.html", @controller.content_type
   end
 
+  def test_response_redirect_predicate_matches_redirect_statuses
+    [301, 302, 303, 307, 308].each do |status|
+      controller = TestController.new
+      controller.instance_variable_set(:@status, status)
+      assert controller.response.redirect?, "status #{status}"
+    end
+
+    [200, 204, 299, 300, 304, 305, 306, 309, 399, 400, 500].each do |status|
+      controller = TestController.new
+      controller.instance_variable_set(:@status, status)
+      refute controller.response.redirect?, "status #{status}"
+    end
+  end
+
   def test_media_type_drops_the_content_type_parameters
     @controller.response.content_type = "text/html; charset=utf-8"
     assert_equal "text/html", @controller.media_type

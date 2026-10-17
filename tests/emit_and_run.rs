@@ -150,6 +150,8 @@ mod class_side_default;
 mod helper_anonymous_rest;
 #[path = "emit_and_run/controller_response_body.rs"]
 mod controller_response_body;
+#[path = "emit_and_run/response_redirect.rs"]
+mod response_redirect;
 #[path = "emit_and_run/render_to_string_partial_ivar.rs"]
 mod render_to_string_partial_ivar;
 #[path = "emit_and_run/active_support_extensions.rs"]
