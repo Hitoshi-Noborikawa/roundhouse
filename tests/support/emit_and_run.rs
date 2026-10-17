@@ -258,6 +258,24 @@ impl Overlay {
         (scratch, source)
     }
 
+    /// The errors `roundhouse check` reports for the overlaid app: analysis
+    /// alone, with no lowering, so a call the lowering would answer still
+    /// reads as written.
+    pub fn check_errors(self) -> Vec<String> {
+        let (scratch, source) = self.materialize();
+        let (app, ingest_diags) = roundhouse::ingest::prism::scope(|| ingest_app(&source));
+        let mut app = app.expect("ingest the overlaid fixture");
+        roundhouse::analyze::Analyzer::new(&app).analyze(&mut app);
+        let errors = ingest_diags
+            .into_iter()
+            .chain(diagnose(&app))
+            .filter(|d| d.severity == Severity::Error)
+            .map(|d| format!("{:?}: {}", d.span, d.message))
+            .collect();
+        let _ = std::fs::remove_dir_all(&scratch);
+        errors
+    }
+
     /// The warnings ingesting the overlaid app reports.
     pub fn ingest_warnings(self) -> Vec<String> {
         let (scratch, source) = self.materialize();

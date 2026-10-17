@@ -16538,3 +16538,5 @@ mod typescript_error_class;
 mod class_macros;
 #[path = "emit_and_run/accessor_override.rs"]
 mod accessor_override;
+#[path = "emit_and_run/reset_counters.rs"]
+mod reset_counters;
