@@ -9205,9 +9205,9 @@ fn spin_shape(files: Vec<(String, String)>) -> Result<Vec<(String, String)>, Str
              #\n\
              # `ref` is a clone `--branch`, so it takes a branch or tag,\n\
              # never a commit SHA (`git clone --branch <sha>` fails with\n\
-             # `Remote branch ... not found`). spinel-bcrypt publishes no\n\
-             # tags today, so this tracks `main`.\n\
-             bcrypt = { git = \"https://github.com/rubys/spinel-bcrypt\", ref = \"main\" }\n",
+             # `Remote branch ... not found`). It names the release tag, so\n\
+             # a build doesn't pick up whatever lands on `main` next.\n\
+             bcrypt = { git = \"https://github.com/rubys/spinel-bcrypt\", ref = \"v0.1.1\" }\n",
         );
     }
     if needs_vips {
@@ -9221,7 +9221,7 @@ fn spin_shape(files: Vec<(String, String)>) -> Result<Vec<(String, String)>, Str
              # on Debian/Ubuntu, `brew install vips` on macOS) and loadable\n\
              # at run time (`libvips42`). Git form for the reason bcrypt\n\
              # gives above: matz/spin-index#7 is the registration.\n\
-             ruby-vips = { git = \"https://github.com/rubys/spinel-ruby-vips\", ref = \"main\" }\n",
+             ruby-vips = { git = \"https://github.com/rubys/spinel-ruby-vips\", ref = \"v0.2.0\" }\n",
         );
     }
     if needs_rqrcode {
@@ -9233,7 +9233,7 @@ fn spin_shape(files: Vec<(String, String)>) -> Result<Vec<(String, String)>, Str
              # matrix and exporter over Nayuki's qrcodegen, carried in the\n\
              # package — no system library. Git form for the reason bcrypt\n\
              # gives above: matz/spin-index#8 is the registration.\n\
-             rqrcode = { git = \"https://github.com/rubys/spinel-rqrcode\", ref = \"main\" }\n",
+             rqrcode = { git = \"https://github.com/rubys/spinel-rqrcode\", ref = \"v0.1.0\" }\n",
         );
     }
     if needs_nokogiri {
@@ -9243,8 +9243,8 @@ fn spin_shape(files: Vec<(String, String)>) -> Result<Vec<(String, String)>, Str
         manifest.push_str(
             "# HTML parsing, CSS/XPath and serialization: the nokogiri gem's\n\
              # surface over libxml2 2.13.9 with Nokogiri's patches, carried in\n\
-             # the package. Git form until matz/spin-index#10/#11 land.\n\
-             nokogiri = { git = \"https://github.com/rubys/spinel-nokogiri\", ref = \"main\" }\n",
+             # the package. Git form until matz/spin-index#14 lands.\n\
+             nokogiri = { git = \"https://github.com/rubys/spinel-nokogiri\", ref = \"v0.3.1\" }\n",
         );
     }
     if needs_commonmarker {
@@ -9255,7 +9255,7 @@ fn spin_shape(files: Vec<(String, String)>) -> Result<Vec<(String, String)>, Str
             "# Markdown: the commonmarker gem's surface over cmark-gfm\n\
              # 0.29.0.gfm.13, carried in the package. Git form until\n\
              # matz/spin-index#9 lands.\n\
-             commonmarker = { git = \"https://github.com/rubys/spinel-commonmarker\", ref = \"main\" }\n",
+             commonmarker = { git = \"https://github.com/rubys/spinel-commonmarker\", ref = \"v0.1.0\" }\n",
         );
     }
     files.push(("spin.toml".to_string(), manifest));
