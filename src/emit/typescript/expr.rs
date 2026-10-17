@@ -303,6 +303,31 @@ fn synth_ident(name: &str) -> Js {
     Js::synth(JsExpr::Ident(name.into()))
 }
 
+/// Whether a send on a typed Array receiver, with `argc` arguments
+/// counting its block, emits as a JS expression that answers what Ruby
+/// does: the Array arm of `js_send` above, or a name it shares with JS
+/// Array or with the generic rewrites (`nil?`, `present?`, `is_a?`, …).
+/// `project::report_typescript_array_sends` refuses the rest, which the
+/// fallback would emit as a property or method the JS Array lacks.
+pub(crate) fn array_method_handled(method: &str, argc: usize, block: bool, numeric_elem: bool) -> bool {
+    let block_only = block && argc == 1;
+    match method {
+        "each" | "map" | "collect" | "flat_map" | "select" | "filter" | "find_all" | "reject" | "find"
+        | "detect" | "each_with_index" | "sort_by" => block_only,
+        "sum" | "any?" | "all?" => argc == 0 || block_only,
+        "inject" | "reduce" => block && (argc == 1 || argc == 2),
+        "count" => argc <= 1,
+        "first" | "last" | "join" => !block && argc <= 1,
+        "take" | "drop" | "index" | "find_index" | "include?" => argc == 1,
+        "max" | "min" => argc == 0 && numeric_elem,
+        "size" | "length" | "empty?" | "none?" | "reverse" | "to_a" | "to_h" | "sort" | "compact" | "uniq"
+        | "dup" | "clone" | "nil?" | "present?" | "blank?" | "freeze" => argc == 0,
+        "push" | "pop" | "shift" | "unshift" | "<<" | "[]" | "[]=" | "==" | "!=" | "+" | "-" | "is_a?"
+        | "kind_of?" => !block,
+        _ => false,
+    }
+}
+
 fn is_block(e: &Expr) -> bool {
     matches!(&*e.node, ExprNode::Lambda { .. })
 }

@@ -1,0 +1,36 @@
+//! Array methods on the TypeScript emit. The emit translated a handful
+//! (`each`, `map`, `size`, `sort_by`, …) and wrote every other Ruby name
+//! on the JS Array as-is: `xs.sum` read `undefined`, `xs.select(...)`
+//! threw, and nothing reported either. The common ones now translate
+//! (run against CRuby in
+//! `typescript_toolchain::real_blog_array_methods_run_under_tsx`), and
+//! the rest are refused by name.
+
+#[path = "support/emit_and_run.rs"]
+mod emit_and_run;
+#[path = "support/array_methods.rs"]
+mod array_methods;
+
+use roundhouse::project::BuildTarget;
+
+#[test]
+fn translated_array_methods_emit_without_errors() {
+    let (_emitted, errors) = array_methods::overlay().emit(BuildTarget::Typescript);
+    assert!(errors.is_empty(), "{errors:?}");
+}
+
+#[test]
+fn an_untranslated_array_method_is_refused_on_typescript_only() {
+    let probe = "class Untranslated\n  def self.run(xs)\n    [xs.zip(xs), xs.tally, xs.group_by { |x| x > 1 }]\n  end\nend\n";
+    let app = || {
+        emit_and_run::real_blog()
+            .write("app/models/untranslated.rb", probe)
+            .edit("app/controllers/articles_controller.rb", "  def index\n", "  def index\n    @u = Untranslated.run([1, 2])\n")
+    };
+    let (_emitted, errors) = app().emit(BuildTarget::Typescript);
+    for name in ["Array#zip", "Array#tally", "Array#group_by"] {
+        assert!(errors.iter().any(|e| e.contains(name)), "{name}: {errors:?}");
+    }
+    let (_emitted, errors) = app().emit(BuildTarget::Ruby);
+    assert!(errors.is_empty(), "{errors:?}");
+}
