@@ -48,6 +48,10 @@ mod class_configuration;
 mod dry_initializer;
 #[path = "support/data_factory.rs"]
 mod data_factory;
+#[path = "support/relation_fork.rs"]
+mod relation_fork_contract;
+#[path = "spinel_toolchain/relation_fork.rs"]
+mod relation_fork;
 #[path = "support/dry_struct.rs"]
 mod dry_struct;
 #[path = "support/dry_validation.rs"]
