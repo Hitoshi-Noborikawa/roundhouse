@@ -56,6 +56,8 @@ mod model_delegate;
 pub mod thread_mattr;
 pub mod model;
 mod delegated_type;
+mod class_macros;
+mod column_accessors;
 mod model_macros;
 pub mod on_load_reopen;
 pub mod prism;

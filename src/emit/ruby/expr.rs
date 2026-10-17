@@ -201,7 +201,8 @@ fn is_mutable_string_literal(e: &Expr) -> bool {
 /// call path makes the same call through `recv_needs_parens`.
 fn emit_postfix_recv(r: &Expr) -> String {
     let s = emit_expr(r);
-    if is_mutable_string_literal(r) { format!("({s})") } else { s }
+    // `(@values ||= {})[key]` bare is `@values ||= {}[key]`: the index binds to the default.
+    if recv_needs_parens(r) { format!("({s})") } else { s }
 }
 
 /// True when an If's else-branch carries no statements: an empty `Seq`

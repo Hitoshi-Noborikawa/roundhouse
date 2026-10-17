@@ -2180,6 +2180,9 @@ end
     // After the splice: `include Discard::Model` can arrive through a concern.
     super::discard::expand_discard_models(&mut app)?;
     super::model_macros::expand_model_macros(&mut app, &sources)?;
+    // After the concern-macro expansion: a concern's macros are that one's to expand or refuse.
+    super::class_macros::expand_class_macros(&mut app, &sources);
+    super::column_accessors::rewrite_super(&mut app);
     // After the splice, so a class method a concern contributed gets
     // the same treatment as one written in the model.
     qualify_model_class_method_ar_calls(&mut app);
@@ -2284,6 +2287,8 @@ end
     // pass may append source-backed FileIds beyond the indexed snapshot.
     let late_sources = super::sources::drain();
     super::sources::assert_snapshot_matches(&[], &late_sources);
+    // Before analysis too, so `check` types the recount the emit writes (`Origin.reset_counters(id, :stories)`), rather than reporting a method the lowering answers.
+    crate::lower::reset_counters::apply_reset_counters_lowering(&mut app);
     super::unreachable_views::mark(&mut app);
     super::uncalled_helper_copies::mark(&mut app);
     Ok(app)

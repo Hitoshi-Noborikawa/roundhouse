@@ -16563,3 +16563,9 @@ mod helper_diagnostics;
 mod value_seq_order;
 #[path = "emit_and_run/typescript_error_class.rs"]
 mod typescript_error_class;
+#[path = "emit_and_run/class_macros.rs"]
+mod class_macros;
+#[path = "emit_and_run/accessor_override.rs"]
+mod accessor_override;
+#[path = "emit_and_run/reset_counters.rs"]
+mod reset_counters;

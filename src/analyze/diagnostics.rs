@@ -151,6 +151,7 @@ pub fn diagnose_with_coverage(app: &App) -> (Vec<Diagnostic>, PreloadCoverage) {
         }
     }
     out.extend(attribute_macro_refusals(app));
+    out.extend(overridden_synthesized_accessors(app));
     // A filter's return value is Rails' to discard (`around_action
     // :switch_locale` → `I18n.with_locale(locale, &action)`): nothing
     // escapes from its tail, so an `untyped` there is not a gradual
@@ -240,6 +241,43 @@ pub fn diagnose_with_coverage(app: &App) -> (Vec<Diagnostic>, PreloadCoverage) {
         }
     }
     (out, coverage)
+}
+
+/// A model's own `def author` / `def author=` over an association's
+/// accessor: Rails calls the model's, the model lowering keeps the
+/// synthesized one (`push_user_methods`; a column's yields), so the
+/// definition is reported rather than dropped without a word.
+fn overridden_synthesized_accessors(app: &App) -> Vec<Diagnostic> {
+    let mut out = Vec::new();
+    for model in &app.models {
+        let mut taken: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for item in &model.body {
+            if let crate::dialect::ModelBodyItem::Association { assoc, .. } = item {
+                taken.insert(assoc.name().as_str().to_string());
+                taken.insert(format!("{}=", assoc.name().as_str()));
+            }
+        }
+        for m in model.methods().filter(|m| {
+            m.receiver == crate::dialect::MethodReceiver::Instance
+                && matches!(m.kind, crate::dialect::AccessorKind::Method)
+                && !m.name_span.is_synthetic()
+        }) {
+            if !taken.contains(m.name.as_str()) {
+                continue;
+            }
+            out.push(Diagnostic::unsupported(
+                m.name_span,
+                None,
+                "accessor override",
+                format!(
+                    "`{}#{}` overrides the accessor its association defines, and the emitted model keeps that accessor, so this definition does not run",
+                    model.name.0.as_str(),
+                    m.name.as_str()
+                ),
+            ));
+        }
+    }
+    out
 }
 
 /// An `app/helpers` module runs in the view, so it is checked as one,
