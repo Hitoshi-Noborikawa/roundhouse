@@ -53,6 +53,8 @@ mod i18n_runtime;
 mod helper_translate;
 #[path = "emit_and_run/helper_escape.rs"]
 mod helper_escape;
+#[path = "emit_and_run/helper_escape_args.rs"]
+mod helper_escape_args;
 #[path = "emit_and_run/class_new_constants.rs"]
 mod class_new_constants;
 #[path = "emit_and_run/i18n_subtree.rs"]
@@ -150,12 +152,16 @@ mod class_side_default;
 mod helper_anonymous_rest;
 #[path = "emit_and_run/controller_response_body.rs"]
 mod controller_response_body;
+#[path = "emit_and_run/response_redirect.rs"]
+mod response_redirect;
 #[path = "emit_and_run/render_to_string_partial_ivar.rs"]
 mod render_to_string_partial_ivar;
 #[path = "emit_and_run/active_support_extensions.rs"]
 mod active_support_extensions;
 #[path = "emit_and_run/routing_redirect_host.rs"]
 mod routing_redirect_host;
+#[path = "emit_and_run/time_find_zone.rs"]
+mod time_find_zone;
 #[path = "emit_and_run/concurrent_map.rs"]
 mod concurrent_map;
 #[path = "emit_and_run/request_optional_port.rs"]
@@ -865,6 +871,11 @@ fn saves_are_transactional_and_commit_callbacks_wait_for_the_commit() {
             r##"require "test_helper"
 
 class TransactionalSaveTest < ActiveSupport::TestCase
+  # This example checks a real COMMIT, the way campfire's
+  # MessageCreationCommitTest does. The harness wraps other examples
+  # in a non-joinable fixture transaction.
+  self.use_transactional_tests = false
+
   setup { Article::LOG.clear }
 
   test "an exception from after_save rolls the insert back" do
@@ -914,6 +925,91 @@ end
 "##,
         )
         .run_test("test/models/transactional_save_test.rb")
+        .assert_passes();
+}
+
+/// Campfire's room destroy counts one `RELEASE SAVEPOINT` per record
+/// (`messages.find_each(&:destroy)` plus the room) because Rails runs
+/// the example inside a non-joinable fixture transaction, so each
+/// `destroy` opens its own savepoint. With
+/// `use_transactional_tests = false` those are real `COMMIT`s, which is
+/// what lets another connection write between them in production.
+#[test]
+fn each_destroy_is_its_own_transaction() {
+    emit_and_run::real_blog()
+        .write(
+            "test/models/destroy_batch_test.rb",
+            r##"require "test_helper"
+
+class DestroyBatchTest < ActiveSupport::TestCase
+  test "each destroy releases its own savepoint inside the test transaction" do
+    article = Article.create!(title: "Batch", body: "A sufficiently long article body.")
+    2.times { |i| article.comments.create!(commenter: "Ann", body: "Note #{i}") }
+    n = article.comments.count
+    releases = 0
+    count = ->(*, payload) { releases += 1 if payload[:sql].start_with?("RELEASE SAVEPOINT") }
+    ActiveSupport::Notifications.subscribed(count, "sql.active_record") do
+      article.comments.find_each(&:destroy)
+      article.destroy
+    end
+    assert_equal n + 1, releases
+    assert_equal 0, Comment.where(article_id: article.id).count
+    assert_not Article.exists?(article.id)
+  end
+
+  test "the fixture transaction does not look open to caches" do
+    assert_not Article.connection.transaction_open?
+    Article.transaction do
+      assert Article.connection.transaction_open?
+    end
+    assert_not Article.connection.transaction_open?
+  end
+end
+"##,
+        )
+        .run_test("test/models/destroy_batch_test.rb")
+        .assert_passes();
+
+    emit_and_run::real_blog()
+        .write(
+            "test/models/destroy_batch_commit_test.rb",
+            r##"require "test_helper"
+
+class DestroyBatchCommitTest < ActiveSupport::TestCase
+  self.use_transactional_tests = false
+
+  test "each destroy commits on its own when the example is not wrapped" do
+    article = Article.create!(title: "Batch", body: "A sufficiently long article body.")
+    2.times { |i| article.comments.create!(commenter: "Ann", body: "Note #{i}") }
+    n = article.comments.count
+    commits = 0
+    releases = 0
+    count = ->(*, payload) do
+      sql = payload[:sql]
+      commits += 1 if sql.start_with?("COMMIT")
+      releases += 1 if sql.start_with?("RELEASE SAVEPOINT")
+    end
+    ActiveSupport::Notifications.subscribed(count, "sql.active_record") do
+      article.comments.find_each(&:destroy)
+      article.destroy
+    end
+    assert_equal n + 1, commits
+    assert_equal 0, releases
+    assert_equal 0, Comment.where(article_id: article.id).count
+    assert_not Article.exists?(article.id)
+  end
+
+  test "a real transaction looks open, and the example itself does not" do
+    assert_not Article.connection.transaction_open?
+    Article.transaction do
+      assert Article.connection.transaction_open?
+    end
+    assert_not Article.connection.transaction_open?
+  end
+end
+"##,
+        )
+        .run_test("test/models/destroy_batch_commit_test.rb")
         .assert_passes();
 }
 
@@ -2996,6 +3092,43 @@ fn dry_struct_classes_run_lowered() {
     assert!(run.stdout.contains("dry-struct contract passed"));
     assert!(run.stdout.contains("dry-struct stamp contract passed"));
     assert!(run.stdout.contains("dry-struct clock contract passed"));
+}
+
+/// `/(?<name>..)/ =~ str` assigns each named group to a local (nil when
+/// nothing matches) and answers the match's index: as a statement, as an
+/// `if` condition, and as a method's value. Checked against CRuby.
+#[test]
+fn named_capture_matches_assign_their_locals() {
+    let run = emit_and_run::real_blog()
+        .write("lib/matcher.rb", r##"class Matcher
+  def self.map_name(html)
+    /usemap=\s*['"]#(?<map_name>\S+?)['"]/m =~ html
+    map_name
+  end
+
+  def self.pair(text)
+    if /(?<a>\d+)-(?<b>\d+)/ =~ text
+      [a, b]
+    else
+      [a, b, :none]
+    end
+  end
+
+  def self.index(text)
+    /(?<w>x)/ =~ text
+  end
+end
+"##)
+        .run_ruby(r##"raise "map" unless Matcher.map_name(%(<img usemap="#m1">)) == "m1"
+raise "map none" unless Matcher.map_name("none").nil?
+raise "pair" unless Matcher.pair("1-2") == ["1", "2"]
+raise "pair none" unless Matcher.pair("x") == [nil, nil, :none]
+raise "index" unless Matcher.index("abx") == 2
+raise "index none" unless Matcher.index("q").nil?
+puts "named captures passed"
+"##);
+    run.assert_passes();
+    assert!(run.stdout.contains("named captures passed"));
 }
 
 #[test]
@@ -6144,6 +6277,60 @@ end
 "#,
         )
         .run_test("test/models/article_queries_test.rb")
+        .assert_passes();
+}
+
+/// A template `form_with` enters `ActionView::Base#form_with` when the
+/// site runs, and a fragment-cache hit does not enter it again. The
+/// markup stays the lowered expansion's; the instance call is what
+/// `any_instance.expects(:form_with)` counts (campfire's
+/// `FragmentRenderingTest` message-controls example).
+#[test]
+fn cached_form_with_enters_action_view_base_only_on_miss() {
+    emit_and_run::real_blog()
+        .write(
+            "app/views/articles/_cached_form.html.erb",
+            "<% cache article do %><%= form_with model: article do |form| %><%= form.text_field :title %><% end %><% end %>\n",
+        )
+        .run_ruby(
+            r#"
+module ActionView
+  class Base
+    def self.entries
+      @entries.nil? ? 0 : @entries
+    end
+
+    def self.note!
+      @entries = entries + 1
+      nil
+    end
+
+    def form_with
+      ActionView::Base.note!
+    end
+  end
+end
+
+article = Article.create!(title: "Cached form", body: "Body text here")
+ActionController::Base.perform_caching = true
+ActionController::Base.cache_store = ActiveSupport::Cache::MemoryStore.new
+ActionController::Current.controller = ActionController::Base.new
+
+first = Views::Articles.cached_form(article)
+raise "form missing on miss: #{first.inspect}" unless first.include?("<form") && first.include?("Cached form")
+raise "miss did not enter form_with (#{ActionView::Base.entries})" unless ActionView::Base.entries == 1
+
+second = Views::Articles.cached_form(article)
+raise "form missing on hit: #{second.inspect}" unless second.include?("<form") && second.include?("Cached form")
+raise "cache hit re-entered form_with (#{ActionView::Base.entries})" unless ActionView::Base.entries == 1
+
+article.update!(title: "Cached form edited")
+third = Views::Articles.cached_form(article)
+raise "edited form missing: #{third.inspect}" unless third.include?("Cached form edited")
+raise "key change did not enter form_with (#{ActionView::Base.entries})" unless ActionView::Base.entries == 2
+puts "cached form_with entry passed"
+"#,
+        )
         .assert_passes();
 }
 

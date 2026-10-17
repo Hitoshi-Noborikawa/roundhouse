@@ -67,7 +67,8 @@
       "title": "`ActionView::Base` unnamed in fragment/cache tests",
       "owner": "compiler",
       "match": "uninitialized constant ActionView::Base",
-      "note": "`FragmentRenderingTest#test_message_controls_survive_creator_edits…` names `ActionView::Base` (cache lookup / fragment store identity). The constant is not on the emit; sibling fragment fails share the same file's cache story."
+      "note": "`FragmentRenderingTest#test_message_controls_survive_creator_edits…` names `ActionView::Base` (cache lookup / fragment store identity). The constant is not on the emit; sibling fragment fails share the same file's cache story.",
+      "at_zero": "served by the ActionView::Base#form_with peel (b513fa665): fragment_rendering_test is 9/9 on Campfire 11d3fb9. The rule stays as a regression tripwire."
     },
     {
       "slug": "native-validators-304",
@@ -84,7 +85,8 @@
       "owner": "compiler",
       "match": ".",
       "match_test": "FragmentRenderingTest#",
-      "note": "Five fails in one file: `assert_same` on the bounded MemoryStore, jbuilder HTML token state, detached-broadcast `to_html` on nil, cross-room content-validated hits, plus the `ActionView::Base` constant (also matched above when that message wins). Shared view/cache runtime — largest file-green opportunity on the tip suite."
+      "note": "Five fails in one file: `assert_same` on the bounded MemoryStore, jbuilder HTML token state, detached-broadcast `to_html` on nil, cross-room content-validated hits, plus the `ActionView::Base` constant (also matched above when that message wins). Shared view/cache runtime — largest file-green opportunity on the tip suite.",
+      "at_zero": "fragment_rendering_test is 9/9 on Campfire 11d3fb9 after ActionView::Base#form_with (b513fa665). The rule stays as a regression tripwire."
     },
     {
       "slug": "message-creation-tx",
@@ -92,7 +94,8 @@
       "owner": "compiler",
       "match": ".",
       "match_test": "(Message::CreationTest|MessageCreationCommitTest|Message::SearchableTest)#",
-      "note": "Creation commit ordering, failed index/unread rollback, outer rollback restoring counter/jobs, and searchable reindex word replace. High density if one AR transaction / after_create_commit seam is wrong."
+      "note": "Creation commit ordering, failed index/unread rollback, outer rollback restoring counter/jobs, and searchable reindex word replace. High density if one AR transaction / after_create_commit seam is wrong.",
+      "at_zero": "served by d5bbeaaaa (transactional saves, deferred commit callbacks, automatic inverses) on 448bfea2e; the three files measure 15/15 (was 10/15, five fails, on 61a8f105f). The rule stays as a regression tripwire."
     },
     {
       "slug": "sqlite-wal-checkpoint",
@@ -124,7 +127,17 @@
       "owner": "compiler",
       "match": ".",
       "match_test": "RoomTest#(test_a_room_destroyed_later|test_each_message_is_destroyed_in_its_own_transaction)",
-      "note": "`assert_broadcast_on` for connection reset after late destroy, and per-message destroy transaction interleaving. Shared cable recording + destroy batching."
+      "note": "`assert_broadcast_on` for connection reset after late destroy, and per-message destroy transaction interleaving. Shared cable recording + destroy batching.",
+      "at_zero": "served by the room-destroy peel (6e3405f50): a non-joinable fixture transaction opens a savepoint per destroy, and room_test is 11/11. `use_transactional_tests = false` still COMMITs. The rule stays as a regression tripwire."
+    },
+    {
+      "slug": "messages-caching-fixture-txn",
+      "title": "Cached message page still queries while the fixture transaction is open",
+      "owner": "compiler",
+      "match": "expected no query matching /action_text_rich_texts",
+      "match_test": "MessagesCachingTest#test_cached_pages_skip_presentation_queries",
+      "note": "room_test's fixture transaction BEGINs around the example. Campfire turns response caching off while `FragmentCache.transaction_open?` is true, so the second GET of the watercooler runs the presentation queries the test forbids.",
+      "at_zero": "The fixture frame is hidden from `transaction_open?`, and an uncommitted write moves the observer's data_version, so the cached page is dropped when the example edits a message. messages_caching_test is 4/4. The rule stays as a regression tripwire."
     },
     {
       "slug": "presentation-preload-introspection",

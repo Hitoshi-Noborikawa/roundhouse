@@ -54,7 +54,7 @@ env:
   # Mastodon (AGPL) is the scale case.
   MASTODON_SHA: 163f96cee4dea23365bff9b433871e68d20d9ee7
   RUBY_BENCH_SHA: d771f81f1ce9db51376e03ca7b8e6a83160556d4
-  CAMPFIRE_SHA: edbc779f4dfc9b26c36310881711ddc976a9dfc8
+  CAMPFIRE_SHA: 11d3fb9ce01faad3384807563053ba86126f747e
   # rubys/spinel-pg, the PostgreSQL driver the Spinel Db shim
   # (runtime/spinel/db_pg.rb) is tested against in spinel-framework.
   # Pinned like the apps above; bump deliberately.
@@ -81,6 +81,7 @@ jobs:
       campfire-latest-revision: ${{ steps.plan.outputs.campfire-latest-revision }}
       spinel-tests: ${{ steps.plan.outputs.spinel-tests }}
       spinel-framework-shards: ${{ steps.plan.outputs.spinel-framework-shards }}
+      spinel-timings: ${{ steps.plan.outputs.spinel-timings }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -88,12 +89,21 @@ jobs:
           # bases that are not a parent (stale event SHA, push before) are
           # fetched by the planner, not by cloning full history.
           fetch-depth: 2
+      # The latest seconds spinel-timings saved; without them the plan falls back to ci-plan.py's tables.
+      - name: Restore recorded Spinel test seconds
+        continue-on-error: true
+        uses: actions/cache/restore@v6
+        with:
+          path: .ci-timings/spinel-timings.json
+          key: spinel-timings-${{ github.run_id }}
+          restore-keys: spinel-timings-
       - name: Select required coverage from the event's actual tree
         id: plan
         env:
           CI_FULL: ${{ inputs.full || false }}
           CI_PUBLISH: ${{ inputs.publish || false }}
           CI_SPINEL_REVISION: ${{ inputs.spinel_revision }}
+          CI_SPINEL_TIMINGS_FILE: .ci-timings/spinel-timings.json
           GH_TOKEN: ${{ github.token }}
         run: python3 scripts/ci-plan.py plan
 
@@ -995,21 +1005,31 @@ jobs:
           # Inputs of spinel_pg_db only; it fails without them.
           SPINEL_PG_DIR: ${{ github.workspace }}/spinel-pg
           DATABASE_URL: postgres://postgres:postgres@127.0.0.1:5432/postgres
+          CI_SPINEL_TIMINGS_OUT: ${{ runner.temp }}/spinel-timings/framework-${{ matrix.shard }}.jsonl
         run: |
           test -n "$TESTS"
           status=0
           for suite in $TESTS; do
+            timed=(python3 scripts/ci-plan.py timed --kind framework --name "$suite" --)
             case "$suite" in
               param_binds|param_binds_values|param_binds_cleanup)
                 # These suites also contain JRuby tests, run in compare-jruby.
-                cargo test --test "$suite" -- --ignored --nocapture _spinel || status=1
+                "${timed[@]}" cargo test --test "$suite" -- --ignored --nocapture _spinel || status=1
                 ;;
               *)
-                cargo test --test "$suite" -- --ignored --nocapture || status=1
+                "${timed[@]}" cargo test --test "$suite" -- --ignored --nocapture || status=1
                 ;;
             esac
           done
           exit "$status"
+      - name: Upload recorded test seconds
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: spinel-timings-framework-${{ matrix.shard }}
+          path: ${{ runner.temp }}/spinel-timings
+          if-no-files-found: ignore
+          retention-days: 3
       - name: Report actual advisory execution
         id: result
         if: always()
@@ -1943,12 +1963,41 @@ jobs:
       # and will keep that file red for as long as a compiled target
       # has no per-object method table — or until upstream takes
       # basecamp/once-campfire#280, #279's twin for this file.
+      #
+      # 555/74 -> 568/77 on the CAMPFIRE_SHA bump to `11d3fb9c`
+      # (2026-10-16: enforcing script CSP). 16 commits past `edbc779f`.
+      # Measured on the ruby lane against that tree: 568 of 584 tests,
+      # 77 of 86 files. Message creation is already green on this
+      # compiler (`d5bbeaaaa`; `message-creation-tx` is `at_zero`).
+      # The blocking job keeps the constant. It does not follow
+      # Campfire main.
+      #
+      # 568/77 -> 576/81. Cached pages write the narrowed script
+      # Content-Security-Policy (cached_responses 13/13). ruby-vips
+      # loads after boot, so Nokogiri keeps the libxml that accepts
+      # `*:` and css-class() (messages_helper 17/17, boosts 5/5,
+      # rooms_refreshes 1/1).
+      #
+      # 576/81 -> 577/82. `ActionView::Base#form_with` runs when a
+      # template form site runs (fragment_rendering 9/9). A
+      # non-joinable fixture transaction makes each destroy its own
+      # savepoint (room_test 11/11); the CRuby pool pins that
+      # connection so the request sees the uncommitted rows.
+      # messages_caching went 4/4 -> 3/4 on that measurement: the
+      # fixture BEGIN made `FragmentCache.transaction_open?` true.
+      #
+      # 577/82 -> 578/83. That frame is hidden from
+      # `transaction_open?`, and an uncommitted write moves the
+      # observer's data_version, so messages_caching is 4/4 again.
+      # room_test stays 11/11; `use_transactional_tests = false` still
+      # COMMITs. Still red, and outside this floor: ActiveRecord::Tasks
+      # 0/4, deferred preload 9/10, Object#extend 13/14. A parallel
+      # run can lose a channel file to Errno::EEXIST on `tmp/test`;
+      # those files are green serially and are counted here.
         env:
-          # Tip Campfire suite floor — 555/74 via hygiene + conditional GET
-          # (strict suite emit, ActiveStorage.paths + timed poster,
-          # NullRelation, fresh_when ETag → 304).
-          FLOOR_TESTS: 555
-          FLOOR_FILES: 74
+          # Tip Campfire suite floor — 578/83 at CAMPFIRE_SHA 11d3fb9c.
+          FLOOR_TESTS: 578
+          FLOOR_FILES: 83
         run: |
           set -euo pipefail
           tests=$(awk -F'|' '{p += $3} END {print p+0}' /tmp/campfire-tally.txt)
@@ -2188,18 +2237,36 @@ jobs:
           ruby-version: ${{ env.MRI_RUBY }}
           bundler-cache: true
           working-directory: ./runtime/spinel/scaffold
+      # One process per test, as many as libtest's threads, so each test's seconds are its own.
       - name: cargo test --test spinel_toolchain -- --ignored (${{ matrix.shard }})
+        env:
+          CI_SPINEL_TIMINGS: ${{ needs.plan.outputs.spinel-timings }}
+          CI_SPINEL_TIMINGS_OUT: ${{ runner.temp }}/spinel-timings/toolchain-${{ matrix.shard }}.jsonl
+          # The binary runs outside cargo, so .cargo/config.toml's [env] stack size is not applied.
+          RUST_MIN_STACK: "33554432"
         run: |
           mapfile -t mine < <(cargo test --test spinel_toolchain -- --ignored --list --format terse | sed -n 's/: test$//p' | python3 scripts/ci-plan.py toolchain-shard --shard ${{ matrix.shard }})
           test "${#mine[@]}" -gt 0
-          cargo test --test spinel_toolchain -- --ignored --nocapture --exact "${mine[@]}"
+          bin=$(cargo test --test spinel_toolchain --no-run --message-format=json | jq -r 'select(.target.name == "spinel_toolchain" and .executable != null) | .executable')
+          test -x "$bin"
+          printf '%s\n' "${mine[@]}" | python3 scripts/ci-plan.py run-tests --kind toolchain --parallel "$(nproc)" -- "$bin" --ignored --nocapture --exact
       # fixtures/tiny-api, the API-only app (#321): `spin build` of the
       # app entry, HTTP requests to the binary, and the model script
       # compiled natively. Filtered by name, so the ignored test named
       # after an open issue (#163) is not selected.
       - name: cargo test --test tiny_api spinel_gate_ -- --ignored
         if: ${{ !cancelled() && matrix.shard == 3 }}
-        run: cargo test --test tiny_api spinel_gate_ -- --ignored --nocapture
+        env:
+          CI_SPINEL_TIMINGS_OUT: ${{ runner.temp }}/spinel-timings/toolchain-${{ matrix.shard }}.jsonl
+        run: python3 scripts/ci-plan.py timed --kind toolchain --name tiny_api -- cargo test --test tiny_api spinel_gate_ -- --ignored --nocapture
+      - name: Upload recorded test seconds
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: spinel-timings-toolchain-${{ matrix.shard }}
+          path: ${{ runner.temp }}/spinel-timings
+          if-no-files-found: ignore
+          retention-days: 3
 
       # On failure, capture spinel's actual generated C for the failing
       # controller test. The failure is at RUNTIME (the C compiles under
@@ -3889,6 +3956,36 @@ jobs:
 
   # Report actual per-archive outcomes, including failed/unavailable advisory
   # consumers. A report is not a passing validation or an execution receipt.
+  # Only main saves: a PR's cache would not reach other PRs, and its failures are not main's.
+  spinel-timings:
+    needs: [plan, spinel-framework, spinel-toolchain]
+    if: ${{ !cancelled() && needs.plan.result == 'success' && github.ref == 'refs/heads/main' && github.event_name != 'pull_request' && (contains(fromJSON(needs.plan.outputs.jobs), 'spinel-toolchain') || contains(fromJSON(needs.plan.outputs.jobs), 'spinel-framework')) }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v7
+      - name: Restore recorded Spinel test seconds
+        continue-on-error: true
+        uses: actions/cache/restore@v6
+        with:
+          path: .ci-timings/spinel-timings.json
+          key: spinel-timings-${{ github.run_id }}
+          restore-keys: spinel-timings-
+      - name: Collect this run's test seconds
+        continue-on-error: true
+        uses: actions/download-artifact@v8
+        with:
+          pattern: spinel-timings-*
+          path: spinel-timings
+          merge-multiple: true
+      - name: Average them into the recorded seconds
+        run: python3 scripts/ci-plan.py merge-timings --previous .ci-timings/spinel-timings.json --records spinel-timings --out .ci-timings/spinel-timings.json
+      - name: Save recorded Spinel test seconds
+        uses: actions/cache/save@v6
+        with:
+          path: .ci-timings/spinel-timings.json
+          key: spinel-timings-${{ github.run_id }}-${{ github.run_attempt }}
+
   archive-results:
     needs: [plan, build-site, campfire-archive-build, smoke, spinel-smoke, campfire-smoke, campfire-smoke-docker]
     if: ${{ !cancelled() && needs.plan.result == 'success' && contains(fromJSON(needs.plan.outputs.jobs), 'archive-results') }}
@@ -4047,7 +4144,7 @@ jobs:
   # Informational validation summary; no branch-protection or merge policy.
   ci-summary:
     name: CI summary
-    needs: [plan, generate-fixture, unit-build, unit, build-roundhouse, store-check, compare, compare-ruby, compare-ruby-next, browser-smoke-typescript, campfire-conformance, campfire-compare, campfire-latest, compact-required, compare-extra, compare-jruby, build-wasm, browser-smoke-ide, build-site, smoke, smoke-extra, spinel-build, spinel-framework, campfire-spinel-build, campfire-spinel-compare, campfire-spinel-db, spinel-toolchain, spinel-compare, spinel-smoke, campfire-archive-build, campfire-smoke, campfire-smoke-docker, archive-results, assemble-site]
+    needs: [plan, generate-fixture, unit-build, unit, build-roundhouse, store-check, compare, compare-ruby, compare-ruby-next, browser-smoke-typescript, campfire-conformance, campfire-compare, campfire-latest, compact-required, compare-extra, compare-jruby, build-wasm, browser-smoke-ide, build-site, smoke, smoke-extra, spinel-build, spinel-framework, campfire-spinel-build, campfire-spinel-compare, campfire-spinel-db, spinel-toolchain, spinel-compare, spinel-smoke, campfire-archive-build, campfire-smoke, campfire-smoke-docker, spinel-timings, archive-results, assemble-site]
     # Report selected failures and expected skips; stop on workflow cancellation.
     if: ${{ !cancelled() && needs.plan.result == 'success' }}
     runs-on: ubuntu-latest

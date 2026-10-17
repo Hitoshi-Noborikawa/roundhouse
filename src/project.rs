@@ -1717,6 +1717,104 @@ fn report_ruby_only_sends(app: &App, target: BuildTarget) {
     crate::lower::for_each_emit_body_ref(app, &mut |expr| visit(expr, target, &kernel));
 }
 
+/// A send on a typed Array or number receiver that the TypeScript emit has
+/// no translation for: it writes the Ruby name on the JS value
+/// (`xs.zip(ys)`, `n.digits` as a property read), which throws or reads
+/// `undefined`. `emit::typescript::array_method_handled` and
+/// `numeric_method_handled` name what it does translate.
+fn report_typescript_array_sends(app: &App, target: BuildTarget) {
+    if !matches!(target, BuildTarget::Typescript | BuildTarget::TypescriptWorker) {
+        return;
+    }
+    // (model, reader) of each collection association: its reader answers a CollectionProxy.
+    let proxies: std::collections::HashSet<(&str, &str)> = app
+        .models
+        .iter()
+        .flat_map(|m| {
+            m.associations().filter_map(move |a| match a {
+                crate::dialect::Association::HasMany { name, .. }
+                | crate::dialect::Association::HasAndBelongsToMany { name, .. } => {
+                    Some((m.name.0.as_str(), name.as_str()))
+                }
+                _ => None,
+            })
+        })
+        .collect();
+    let models: std::collections::HashSet<&str> = app.models.iter().map(|m| m.name.0.as_str()).collect();
+    struct Records<'a> {
+        proxies: std::collections::HashSet<(&'a str, &'a str)>,
+        models: std::collections::HashSet<&'a str>,
+    }
+    /// A query chain off a model class or a collection reader (`Post.where(…)`,
+    /// `product.subscribers.where(…)`): a Relation or CollectionProxy that types as
+    /// an Array of the model. `to_a` and `records` end it in a real Array.
+    fn is_query(e: &crate::expr::Expr, records: &Records) -> bool {
+        use crate::expr::ExprNode;
+        use crate::ty::Ty;
+        match &*e.node {
+            ExprNode::Const { path } => records.models.contains(path.iter().map(|s| s.as_str()).collect::<Vec<_>>().join("::").as_str()),
+            ExprNode::Send { recv: Some(owner), method, .. } => {
+                if matches!(method.as_str(), "to_a" | "records" | "load" | "entries") {
+                    return false;
+                }
+                let reader = matches!(owner.ty.as_ref(), Some(Ty::Class { id, .. })
+                    if records.proxies.contains(&(id.0.as_str(), method.as_str())));
+                reader || is_query(owner, records)
+            }
+            _ => false,
+        }
+    }
+    let records = Records { proxies, models };
+    fn visit(expr: &crate::expr::Expr, target: BuildTarget, records: &Records) {
+        use crate::expr::ExprNode;
+        use crate::ty::Ty;
+        if let ExprNode::Send { recv: Some(r), method, args, block, .. } = &*expr.node {
+            let elem = match r.ty.as_ref() {
+                Some(Ty::Array { elem }) => Some(elem),
+                Some(Ty::Union { variants }) if variants.len() == 2 && variants.iter().any(|v| matches!(v, Ty::Nil)) => {
+                    variants.iter().find_map(|v| match v {
+                        Ty::Array { elem } => Some(elem),
+                        _ => None,
+                    })
+                }
+                _ => None,
+            };
+            // Already refused by name in `report_ruby_only_sends`.
+            let ruby_only = matches!(method.as_str(), "fetch" | "each_slice" | "each_cons" | "lazy" | "with_object");
+            // A has_many reader types as an Array of its model, but answers a CollectionProxy (`build`, `create!`).
+            if let Some(elem) = elem.filter(|_| !is_query(r, records)) {
+                let argc = args.len() + usize::from(block.is_some());
+                if !ruby_only && !crate::emit::typescript::array_method_handled(method.as_str(), argc, block.as_ref(), elem) {
+                    crate::emit::diagnostics::report_unsupported(
+                        expr.span,
+                        target.as_str(),
+                        format!("Array#{}", method.as_str()).as_str(),
+                        "the TypeScript emit has no translation for it and would call the Ruby name on a JS Array",
+                    );
+                }
+            }
+            let number = match r.ty.as_ref() {
+                Some(Ty::Int) => Some("Integer"),
+                Some(Ty::Float) => Some("Float"),
+                _ => None,
+            };
+            if let Some(class) = number {
+                let argc = args.len() + usize::from(block.is_some());
+                if !crate::emit::typescript::numeric_method_handled(method.as_str(), argc, block.as_ref()) {
+                    crate::emit::diagnostics::report_unsupported(
+                        expr.span,
+                        target.as_str(),
+                        format!("{class}#{}", method.as_str()).as_str(),
+                        "the TypeScript emit has no translation for it and would call the Ruby name on a JS number",
+                    );
+                }
+            }
+        }
+        expr.node.for_each_child(&mut |child| visit(child, target, records));
+    }
+    crate::lower::for_each_emit_body_ref(app, &mut |expr| visit(expr, target, &records));
+}
+
 /// `case/in` is not equivalent to the targets' existing `case/when`
 /// renderers, even for nil or a plain binding. Refuse before file emission
 /// rather than lose bindings, skip evaluation, or turn a test into a wildcard.
@@ -1858,10 +1956,26 @@ pub fn futamura_whole_route(
     // placeholder and keeps going), so they never reach `diags` above;
     // carried separately for `routes::plan` to attribute to the routes
     // whose controller or view they belong to.
+    //
+    // One recorded gap is excluded on purpose: `ingest::app::
+    // CSP_DIVERGENCE_MESSAGE` names a `content_security_policy` block
+    // this ingest can read well enough to know it does nothing but
+    // build a policy object (INTERIM, rubys/roundhouse#58, CSP option
+    // 2 — see `ingest::app::csp_block_is_recognized`'s doc comment).
+    // It still belongs in the survey's punch list (recorded the same
+    // way every other gap is, via `IngestError::Unsupported`, so
+    // `--survey` and `check --continue` show it), but it must not
+    // reach `routes::plan`'s gap-blocking: the directive builders
+    // aren't modelled either way, so the lowered app sends no CSP
+    // header, but that is a recorded DIVERGENCE, not a reason to keep
+    // every route behind it on Rails.
     let gaps = gaps
         .iter()
         .filter_map(|g| match g {
             crate::ingest::IngestError::Unsupported { file, message } => {
+                if message == crate::ingest::app::CSP_DIVERGENCE_MESSAGE {
+                    return None;
+                }
                 Some((file.clone(), message.clone()))
             }
             crate::ingest::IngestError::Io(_) | crate::ingest::IngestError::Parse { .. } => None,
@@ -1965,6 +2079,7 @@ fn target_files_inner(
     report_native_ruby_syntax(app, target);
     report_self_bindings(app, target);
     report_ruby_only_sends(app, target);
+    report_typescript_array_sends(app, target);
     report_dry_struct_stdlib(app, target);
     // Full forwarding currently has a native Ruby contract only. A
     // declaration must be gated even when its body never forwards.
@@ -7200,8 +7315,15 @@ fn apply_test_gem_wiring(files: &mut Vec<(String, String)>) {
             // otherwise inherit WebMock's, and once a test disables
             // WebMock to reach a real server its `start` breaks.
             const BOOT: &str = "require_relative \"../boot\"\n";
+            // ruby-vips loads the system libxml. Nokogiri's packaged
+            // libxml (the one with the wildcard-namespace patch that
+            // `*:a` and `css-class()` need) is loaded when boot
+            // requires nokogiri. A `require "vips"` above that line
+            // binds the process to libxml 2.9 and every HTML5 CSS
+            // wildcard raises `Invalid expression`.
+            let after_boot = *gem == "webmock" || *gem == "ruby-vips";
             match helper.find(BOOT) {
-                Some(at) if *gem == "webmock" => helper.insert_str(at + BOOT.len(), &format!("{line}\n")),
+                Some(at) if after_boot => helper.insert_str(at + BOOT.len(), &format!("{line}\n")),
                 _ => insert_require_line(helper, &line),
             }
         }
@@ -10046,6 +10168,35 @@ mod tests {
         apply_test_gem_wiring(&mut files);
         let gemfile = &files.iter().find(|(p, _)| p == "Gemfile").unwrap().1;
         assert!(gemfile.contains("webmock"), "a test body's demand stands:\n{gemfile}");
+    }
+
+    /// `require "vips"` after boot. ruby-vips pulls in the system
+    /// libxml; Nokogiri has to load its packaged one first or `*:a`
+    /// and `css-class()` raise `Invalid expression`.
+    #[test]
+    fn vips_require_follows_boot() {
+        let mut files = vec![
+            (
+                "test/test_helper.rb".to_string(),
+                "require_relative \"../boot\"\n".to_string(),
+            ),
+            (
+                "test/models/avatar_test.rb".to_string(),
+                "class AvatarTest < TestBase\n  def test_pixels\n    Vips::Image.new_from_buffer(body, \"\")\n  end\nend\n"
+                    .to_string(),
+            ),
+            ("Gemfile".to_string(), "source \"https://rubygems.org\"\n".to_string()),
+        ];
+        apply_test_gem_wiring(&mut files);
+        let helper = &files.iter().find(|(p, _)| p == "test/test_helper.rb").unwrap().1;
+        let boot = helper.find("require_relative \"../boot\"\n").expect("boot");
+        let vips = helper.find("require \"vips\"\n").expect("vips require");
+        assert!(
+            boot < vips,
+            "vips must load after boot so Nokogiri's libxml wins:\n{helper}"
+        );
+        let gemfile = &files.iter().find(|(p, _)| p == "Gemfile").unwrap().1;
+        assert!(gemfile.contains("ruby-vips"), "{gemfile}");
     }
 
     #[test]

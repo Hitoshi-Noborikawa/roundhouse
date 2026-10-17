@@ -1079,11 +1079,17 @@ fn every_runtime_method_body_concretely_typed() {
     // snapshot's own values are (+2); and `transaction`'s branch that
     // runs inside a transaction opened beneath ActiveRecord answers the
     // block's untyped value, as the others do (+1).
+    // MEASURED 779 on 2026-10-16: `RawConnection#transaction` nests a
+    // savepoint when SQLite is already open. That arm answers the
+    // block's untyped value the same way the outer arm does (+3 in
+    // connection.rb: the `yield`, the local it is stored in, and the
+    // value the method returns).
     // MEASURED 781 on 2026-10-17: a mailer's address headers read
     // `mail`'s opts, whatever the action put there (a String, an Array,
     // nil), as ActionMailer's `Mail::Message` normalizes them (+5 in
     // action_mailer.rb).
-    const CEILING: usize = 781;
+    // MEASURED 784 on 2026-10-17: both of those, on the same 776 base.
+    const CEILING: usize = 784;
     assert!(
         total_gradual <= CEILING,
         "{total_gradual} Ty::Untyped sites exceeds ceiling of {CEILING}",
