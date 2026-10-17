@@ -112,6 +112,11 @@ pub(crate) fn rewrite_node(expr: &mut Expr) {
     if !is_time_value(r) {
         return;
     }
+    if method.as_str() == "to_date" && args.is_empty() {
+        *expr.node = active_support_call("date_current", vec![r.clone()]);
+        expr.ty = Some(Ty::Date);
+        return;
+    }
     if method.as_str() == "in_time_zone" && args.len() <= 1 {
         let grounded = match args.first() {
             Some(zone) => active_support_call("in_time_zone", vec![r.clone(), zone_name_arg(zone)]),
