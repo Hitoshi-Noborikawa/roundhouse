@@ -69,7 +69,11 @@ fn python_controller_config_slot_follows_its_class() {
         last_class < slot_at && class_at < slot_at,
         "classes come first, then the constant block:\n{body}"
     );
-    let slot_line = body[slot_at..].lines().next().unwrap_or("");
+    // `slot_at` points at `C`, so a slice from there hides leading
+    // spaces. The line has to start at the preceding newline or the
+    // assertion would pass for an indented class variable.
+    let slot_line_start = body[..slot_at].rfind('\n').map_or(0, |i| i + 1);
+    let slot_line = body[slot_line_start..].lines().next().unwrap_or("");
     assert!(
         !slot_line.starts_with(' '),
         "the slot stays a module constant, got {slot_line:?}"
