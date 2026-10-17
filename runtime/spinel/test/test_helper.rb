@@ -930,8 +930,9 @@ end
 # (`SchemaSetup.reset!` if defined).
 # What `skip` raises. Minitest's own is `Minitest::Skip < Exception`,
 # deliberately outside StandardError so a test's `rescue => e` cannot
-# swallow it; same rule here, and the autorun shim rescues this arm
-# BEFORE its `rescue Exception` so a skip is never counted a failure.
+# swallow it; same rule here. The autorun shim's `rescue Exception`
+# treats an exception whose class name is `TestSkipped` as a skip, so
+# a framework file that never loads this helper still runs.
 class TestSkipped < Exception
 end
 
@@ -1031,6 +1032,15 @@ module ActiveRecord
 end
 
 class TestBase
+  # Rails wraps each example in a non-joinable transaction
+  # (`use_transactional_tests`, default true) so a nested `save` or
+  # `destroy` is a SAVEPOINT. Campfire's room-destroy test counts those
+  # releases. A class that must see a real COMMIT sets this false
+  # (`MessageCreationCommitTest`).
+  def self.use_transactional_tests
+    true
+  end
+
   # Rails puts both of these on `ActiveSupport::TestCase` itself, so a
   # test that never writes `include ActiveJob::TestHelper` still has
   # `perform_enqueued_jobs` — campfire's `User::BotTest` is exactly

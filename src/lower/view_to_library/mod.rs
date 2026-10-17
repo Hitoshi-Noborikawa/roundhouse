@@ -1134,6 +1134,18 @@ pub fn insert_db_stub(
         Symbol::from("_txn_depth="),
         fn_sig(vec![(Symbol::from("value"), Ty::Int)], Ty::Int),
     );
+    // Bit `depth - 1` records whether that frame can be joined. A
+    // fixture transaction is not joinable, so a nested save or
+    // destroy opens a savepoint (connection.rb). Same boxed accessor
+    // as the depth so the body stays concretely typed.
+    db_info.class_methods.insert(
+        Symbol::from("_txn_joinable_bits"),
+        fn_sig(vec![], Ty::Int),
+    );
+    db_info.class_methods.insert(
+        Symbol::from("_txn_joinable_bits="),
+        fn_sig(vec![(Symbol::from("value"), Ty::Int)], Ty::Int),
+    );
     // Whether the connection holds a transaction — one ActiveRecord
     // opened or one opened beneath it (connection.rb's
     // `self.transaction` joins the latter instead of nesting a BEGIN).
@@ -1474,6 +1486,20 @@ pub(crate) fn insert_framework_stubs(
     // entry. Lowerer-synthesized refs (`view_helpers_call`) also
     // resolve through the same key.
     classes.insert(ClassId(Symbol::from("ActionView::ViewHelpers")), vh);
+
+    // `ActionView::Base.new.form_with` is the cache-observable entry
+    // planted at each expanded form site (`observe_form_with_entry`).
+    // The method returns nil; the markup is the expansion that
+    // follows. `.new` already types as an instance of the receiver.
+    // Without this stub the zero-arg call stays `Ty::Var`, and the
+    // lowered real-blog residual is no longer zero.
+    let mut av_base = crate::analyze::ClassInfo::default();
+    av_base.instance_methods.insert(
+        Symbol::from("form_with"),
+        fn_sig(vec![], Ty::Nil),
+    );
+    tag_all_method(&mut av_base);
+    classes.insert(ClassId(Symbol::from("ActionView::Base")), av_base);
 
     // RouteHelpers — every `_path` / `_url` helper returns String.
     // Catch-all: the typer's `Class { id }` lookup returns Untyped if
