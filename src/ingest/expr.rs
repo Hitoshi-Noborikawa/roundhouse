@@ -2676,15 +2676,31 @@ fn ingest_expr_node(node: &Node<'_>, file: &str) -> IngestResult<Expr> {
             let implicit = n.as_implicit_node().unwrap();
             return ingest_expr(&implicit.value(), file);
         }
-        // `def`/`def self.X` at expression position — appears inside
+        // `def`/`def self.X` at expression position — inside
         // `Class.new(Parent) do ... end` blocks (anonymous-class
-        // idiom). Roundhouse's IR has no first-class "method def as
-        // expression" node; lift it to a no-op so the surrounding
-        // statement sequence still ingests. The behavioral fidelity
-        // gap (the resulting anonymous class won't carry the
-        // overridden methods) surfaces at runtime, not at ingest.
+        // idiom), or nested in another method's body. Roundhouse's IR has no first-class "method def as
+        // expression" node. The site still ingests, so the surrounding
+        // statement sequence does, but as a REFUSAL rather than a nil:
+        // a bare nil dropped the method silently, and campfire's
+        // `Class.new(WebPush::Connections::HTTP) { private def
+        // begin_transport ... }` emitted as `{ private nil }` with no
+        // diagnostic, a class missing the one method it was made for.
+        // The stamp is an error in app code (`analyze::diagnostics`),
+        // renders as a raise, and stubs a test that reaches it
+        // (`lower::nested_def`).
         n if n.as_def_node().is_some() => {
-            ExprNode::Lit { value: Literal::Nil }
+            let def = n.as_def_node().unwrap();
+            let name = String::from_utf8_lossy(def.name().as_slice()).into_owned();
+            let mut stub = Expr::new(span, ExprNode::Lit { value: Literal::Nil });
+            stub.diagnostic = Some(crate::diagnostic::DiagnosticKind::Unsupported {
+                target: None,
+                construct: Symbol::from(crate::diagnostic::NESTED_DEF),
+                detail: format!(
+                    "`def {name}` nested in a block or method body defines a method at run time; \
+                     no IR node carries it, so the site raises"
+                ),
+            });
+            return Ok(stub);
         }
         // Backticks / `%x{…}` - a shell-out. Ruby evaluates the literal
         // as a call of `Kernel#\`` with the (interpolated) command

@@ -137,6 +137,7 @@ pub mod has_json;
 pub mod serialize;
 pub mod assoc_loaded;
 pub mod object_extend;
+pub mod nested_def;
 pub mod param_rebind;
 pub mod to_sgid;
 pub mod cable_test_case;
@@ -638,6 +639,10 @@ const POST_ANALYZE_PASS_ORDER: &[(&str, &[&str])] = &[
     // `obj.extend Mod` on an instance -> a raise stub with the report.
     // Consumes a shape no pass produces or reads; no constraints.
     ("object_extend", &[]),
+    // A test reaching an ingest-stamped nested `def` -> the whole
+    // test a raise stub with the report. Reads only that stamp, which
+    // no pass produces or removes; no constraints.
+    ("nested_def", &[]),
     // A parameter written after its binder (`user = users(user) unless
     // user.is_a? User`, `id = id.to_i`) -> a fresh local, so AOT does
     // not pin the caller's type onto the later write. Reads an Assign
@@ -1002,6 +1007,8 @@ pub fn apply_post_analyze_lowerings(
     ran!("assoc_attr_key");
     diags.extend(object_extend::apply_object_extend_stub(app));
     ran!("object_extend");
+    diags.extend(nested_def::apply_nested_def_test_stub(app));
+    ran!("nested_def");
     param_rebind::apply_param_rebind_lowering(app);
     ran!("param_rebind");
     diags.extend(to_sgid::apply_to_sgid_lowering(app));
