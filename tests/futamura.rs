@@ -926,6 +926,32 @@ fn an_instance_side_method_missing_is_followed() {
     assert_left_to_rails(&stderr, "Gizmo#method_missing");
 }
 
+/// A typed value's class may answer a send directly on one side
+/// (class or instance) while the other side has no definition of it
+/// but does have its own `method_missing`. A hit on one side must not
+/// suppress the other side's `method_missing` — each side is checked
+/// on its own.
+#[test]
+fn a_hit_on_one_side_does_not_suppress_the_other_sides_method_missing() {
+    // `foo` is an instance method, so `w.foo` is a direct hit on the
+    // instance side; the class side has no `foo` but does have its own
+    // `method_missing`. The instance hit must not suppress that check.
+    // (`@name` stays a literal: rendering an untyped ivar would call
+    // `to_s` and sweep in any class with an INSTANCE `method_missing`
+    // through the unrelated general fan-out, masking this bug — this
+    // repro needs the class-side one, which that fan-out never touches.)
+    let stderr = reach_ledger(
+        "reach-mixed-sides",
+        "    w = Widget.new\n    w.foo\n    @name = \"ok\"",
+        "",
+        &[(
+            "app/lib/widget.rb",
+            "class Widget\n  def foo\n  end\n\n  def self.method_missing(name, *args)\n    Frobnicator::Spinner.new.spin\n  end\nend\n",
+        )],
+    );
+    assert_left_to_rails(&stderr, "Widget.method_missing");
+}
+
 /// `"#{x}"` calls `x.to_s`.
 #[test]
 fn string_interpolation_calls_to_s() {
@@ -950,6 +976,29 @@ fn public_send_with_a_literal_name_is_that_call() {
 #[test]
 fn a_send_on_a_value_constant_is_followed() {
     let stderr = reach_ledger("reach-value-const", "    @name = SPARE.call", "  SPARE = Gadget.new\n", &[GADGET]);
+    assert_left_to_rails(&stderr, "Gadget#call");
+}
+
+/// A top-level value constant dispatches even when its own name also
+/// matches a namespaced class by its last segment (`Admin::SPARE`):
+/// the planner cannot tell which one a bare path like `SPARE` names,
+/// so it has to reach through both, not just whichever it finds.
+#[test]
+fn a_value_constant_dispatches_despite_a_namespaced_class_of_the_same_last_segment() {
+    // Referenced bare from the view (not from inside `WidgetsController`,
+    // whose own scope would otherwise get prefixed onto the path ahead
+    // of the match): the path stays plain `SPARE`, which also matches
+    // `Admin::SPARE` by its last segment.
+    let stderr = reach_ledger(
+        "reach-value-const-collision",
+        "    @name = \"ok\"",
+        "  SPARE = Gadget.new\n",
+        &[
+            GADGET,
+            ("app/lib/admin/spare.rb", "module Admin\n  class SPARE\n  end\nend\n"),
+            ("app/views/widgets/index.html.erb", "<%= SPARE.call %>\n"),
+        ],
+    );
     assert_left_to_rails(&stderr, "Gadget#call");
 }
 

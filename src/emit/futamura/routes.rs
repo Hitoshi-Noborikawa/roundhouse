@@ -776,8 +776,12 @@ fn enqueue_send(
                 }
                 // An app constant that holds a value (`SPARE =
                 // Gadget.new`), not a class: a send on it dispatches on
-                // whatever it holds.
-                if named.is_empty() && path.last().is_some_and(|l| index.value_consts.contains(l.as_str())) {
+                // whatever it holds. Checked regardless of whether
+                // `named` also matched some namespaced class by the
+                // same last segment (`Admin::SPARE`) — the planner
+                // cannot tell which one the path actually names, so it
+                // reaches through both.
+                if path.last().is_some_and(|l| index.value_consts.contains(l.as_str())) {
                     fan_out(method, &mut push);
                 }
             }
@@ -816,19 +820,21 @@ fn enqueue_send(
                     fan_out(method, &mut push);
                 } else {
                     for c in classes {
-                        let hits: Vec<MethodKey> =
-                            [false, true].into_iter().filter_map(|side| index.lookup(&c, method, side)).collect();
-                        if hits.is_empty() {
-                            // Neither side defines it: whichever
-                            // `method_missing` the value answers with.
-                            for side in [false, true] {
-                                if let Some(k) = index.lookup(&c, &Symbol::from("method_missing"), side) {
-                                    push(k);
+                        // Each side on its own: a class-side hit says
+                        // nothing about whether the instance side
+                        // defines it too (`Ty::Class` carries both the
+                        // class object and an instance of it), so a hit
+                        // on one side must never suppress the other
+                        // side's own `method_missing`.
+                        for side in [false, true] {
+                            match index.lookup(&c, method, side) {
+                                Some(k) => push(k),
+                                None => {
+                                    if let Some(k) = index.lookup(&c, &Symbol::from("method_missing"), side) {
+                                        push(k);
+                                    }
                                 }
                             }
-                        }
-                        for k in hits {
-                            push(k);
                         }
                     }
                 }
