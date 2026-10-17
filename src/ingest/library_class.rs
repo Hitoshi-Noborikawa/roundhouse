@@ -4013,7 +4013,8 @@ fn forgery_macro_name(stmt: &ruby_prism::Node<'_>) -> Option<&'static str> {
 /// inlines a before_action body, so this rewrites the call into that
 /// shape and replaces the `|policy|` parameter with
 /// `request.content_security_policy` (memoized, so the header writer
-/// sees the same object).
+/// sees the same object). A bare block of literal directive calls is
+/// not rewritten: `record_concern_csp_divergence` records that shape.
 fn content_security_policy_filter(
     stmt: &ruby_prism::Node<'_>,
     file: &str,
@@ -4027,6 +4028,19 @@ fn content_security_policy_filter(
         return None;
     }
     let mut expr = ingest_expr(stmt, file).ok()?;
+    // A bare block of literal directive calls is main's futamura
+    // divergence (`csp_block_is_recognized`): recording it, and not
+    // splicing a filter, is what keeps that route on the lowered app
+    // without claiming a header. Campfire's concern is
+    // `content_security_policy if: -> { … } do |policy|`, which carries
+    // arguments, so it still lowers here.
+    if call.arguments().is_none() {
+        if let crate::expr::ExprNode::Send { block: Some(blk), .. } = &*expr.node {
+            if super::app::csp_block_is_recognized(blk) {
+                return None;
+            }
+        }
+    }
     if !rewrite_csp_call_to_before_action(&mut expr) {
         return None;
     }
