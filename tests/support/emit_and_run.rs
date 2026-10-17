@@ -268,10 +268,13 @@ impl Overlay {
 
     fn emit_app_tree(self, target: BuildTarget) -> (PathBuf, roundhouse::App, Vec<Diagnostic>) {
         let (scratch, source) = self.materialize();
-        let mut app = ingest_app(&source).expect("ingest the overlaid fixture");
+        // As the CLI does: an error ingest reports gates the emit too.
+        let (app, ingest_diags) = roundhouse::ingest::prism::scope(|| ingest_app(&source));
+        let mut app = app.expect("ingest the overlaid fixture");
         let lower_diags = roundhouse::session::analyze_and_lower(&mut app);
-        let mut errors: Vec<_> = diagnose(&app)
+        let mut errors: Vec<_> = ingest_diags
             .into_iter()
+            .chain(diagnose(&app))
             .chain(lower_diags)
             .filter(|d| d.severity == Severity::Error)
             .collect();
