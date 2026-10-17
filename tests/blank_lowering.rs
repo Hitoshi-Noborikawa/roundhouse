@@ -485,12 +485,45 @@ end
     assert!(!printed.contains("blank?"), "{printed}");
 }
 
+fn is_nil_guarded_empty(expr: &roundhouse::Expr) -> bool {
+    let roundhouse::ExprNode::Send { recv: Some(guard), method, args, .. } = &*expr.node else {
+        return false;
+    };
+    if method.as_str() != "empty?" || !args.is_empty() {
+        return false;
+    }
+    let roundhouse::ExprNode::BoolOp {
+        op: roundhouse::expr::BoolOpKind::Or,
+        right,
+        ..
+    } = &*guard.node
+    else {
+        return false;
+    };
+    matches!(
+        &*right.node,
+        roundhouse::ExprNode::Lit { value: roundhouse::Literal::Str { value } } if value.is_empty()
+    )
+}
+
+fn count_nil_guarded_empties(expr: &roundhouse::Expr) -> usize {
+    let mut n = 0;
+    fn rec(e: &roundhouse::Expr, n: &mut usize) {
+        if is_nil_guarded_empty(e) {
+            *n += 1;
+        }
+        e.node.for_each_child(&mut |c| rec(c, n));
+    }
+    rec(expr, &mut n);
+    n
+}
+
 #[test]
-fn view_blank_and_present_use_the_string_form() {
+fn view_blank_and_present_guard_nil_without_strip() {
     let mut tree = std::collections::HashMap::new();
     tree.insert(
         std::path::PathBuf::from("app/views/articles/index.html.erb"),
-        b"<% if notice.blank? %>blank<% end %>\n<% if notice.present? %>here<% end %>\n<% if @articles.any? %>rows<% end %>\n"
+        b"<% if notice.blank? %>blank<% end %>\n<% if notice.present? %>here<% end %>\n<% if @posts.blank? %>none<% end %>\n<% if @articles.any? %>rows<% end %>\n"
             .to_vec(),
     );
     let app = roundhouse::ingest::ingest_app_from_tree(tree).expect("ingest view");
@@ -499,18 +532,22 @@ fn view_blank_and_present_use_the_string_form() {
     let body = &lc.methods.first().expect("view method").body;
     let printed = roundhouse::emit::ruby::emit_expr(body);
     assert_eq!(
+        count_nil_guarded_empties(body),
+        3,
+        "notice blank?, notice present?, and @posts.blank? each carry (recv || \"\").empty? in the IR:\n{printed}"
+    );
+    assert_eq!(
         count_string_blank_tests(body),
-        2,
-        "blank? and present? each lower to the string form; any? does not:\n{printed}"
+        0,
+        "an untyped view receiver must not strip; an array has no strip:\n{printed}"
     );
     assert!(
-        printed.contains("(notice || \"\").strip.empty?"),
+        printed.contains("(notice || \"\").empty?") && printed.contains("(posts || \"\").empty?"),
         "view blank?/present? print the IR guard:\n{printed}"
     );
-    assert!(!printed.contains("notice.blank?"), "{printed}");
-    assert!(!printed.contains("notice.present?"), "{printed}");
+    assert!(!printed.contains("notice.blank?") && !printed.contains("notice.present?"), "{printed}");
     assert!(
-        printed.contains("articles.empty?") && !printed.contains("articles.strip"),
-        "any? stays a collection empty?:\n{printed}"
+        printed.contains("articles.empty?") && !printed.contains("(articles ||"),
+        "any? stays a collection empty? with no nil-guard wrap:\n{printed}"
     );
 }

@@ -1,9 +1,9 @@
-//! Predicate cond rewrite. `blank?` / `present?` become the shared
-//! string form `(recv || "").strip.empty?` (`lower::blank::string_blank_test`),
-//! the same IR a typed string send already carries, nil guard included.
-//! `any?` / `empty?` / `none?` stay collection `empty?` (a `strip` on an
-//! array is a different program), with a nil-safe variant for
-//! known-nullable locals. A record reference has no `empty?`, so
+//! Predicate cond rewrite. `blank?` / `present?` become
+//! `(recv || "").empty?`: the nil guard from `lower::blank::or_empty_string`,
+//! without `strip`. A template receiver is untyped, so the string arm's
+//! `strip` would raise on an array, hash, or relation. `any?` /
+//! `empty?` / `none?` stay collection `empty?`, with a nil-safe variant
+//! for known-nullable locals. A record reference has no `empty?`, so
 //! `blank?` / `present?` on one stay a nil test.
 
 use crate::expr::{Expr, ExprNode};
@@ -12,25 +12,26 @@ use super::send;
 
 /// Rewrite Rails-style emptiness predicates. Applied to the cond of
 /// every template-level `if`:
-///   `recv.present?`  →  `!((recv || "").strip.empty?)`
-///   `recv.blank?`    →  `(recv || "").strip.empty?`
+///   `recv.present?`  →  `!((recv || "").empty?)`
+///   `recv.blank?`    →  `(recv || "").empty?`
 ///   `recv.any?`      →  `!recv.empty?`
 ///   `recv.empty?` / `recv.none?`  →  `recv.empty?`
 /// Recursive through `BoolOp` so `a.present? && b.any?` rewrites both
 /// sides; other shapes pass through unchanged.
 ///
-/// `blank?` / `present?` do not take a second nil-check. The string
-/// form's `|| ""` already answers nil, and it is the same node the
-/// typed string arm builds. `any?` / `empty?` / `none?` still grow a
-/// nil-check when `recv` is a known-nullable local (a view's
-/// extra_param with a `nil` default) or a nilable-scalar reader
-/// (`nilable_reads`: typed_store attributes with no default):
+/// `blank?` / `present?` do not take a second nil-check, and they do
+/// not `strip`. The `|| ""` already answers nil, and it is the same
+/// guard the typed string arm wraps around `strip`. A view has no
+/// receiver type: `strip` on `@posts` or `article.errors` raises.
+/// Whitespace-only flash text stays the pre-existing view gap.
+/// `any?` / `empty?` / `none?` still grow a nil-check when `recv` is a
+/// known-nullable local (a view's extra_param with a `nil` default) or
+/// a nilable-scalar reader (`nilable_reads`: typed_store attributes
+/// with no default):
 ///   `notice.any?`    →  `!notice.nil? && !notice.empty?`
 ///   `notice.empty?`  →  `notice.nil? || notice.empty?`
 /// Without that check a collection predicate NoMethodErrors when the
-/// controller omits the kwarg. A flash `notice.present?` does not need
-/// it: `(notice || "").strip.empty?` is blank for both nil and
-/// whitespace.
+/// controller omits the kwarg.
 ///
 /// When `recv` reads a record REFERENCE — a `belongs_to`/`has_one`
 /// reader (`story.domain`) or a foreign-key column (`ms.domain_id`),
@@ -109,14 +110,19 @@ pub(super) fn rewrite_predicates(
                 };
             }
             match method.as_str() {
-                // Same IR as `lower::blank`'s string arm, including the
-                // nil guard. Not the collection `empty?` form below.
+                // Nil guard in the IR, no `strip`: the receiver is untyped.
                 "present?" | "blank?" => {
-                    let blank = crate::lower::blank::string_blank_test(rewritten_recv);
+                    let span = rewritten_recv.span;
+                    let guarded = crate::lower::blank::or_empty_string(
+                        span,
+                        rewritten_recv,
+                        crate::ty::Ty::Untyped,
+                    );
+                    let empty_call = send(Some(guarded), "empty?", Vec::new(), None, false);
                     return if method.as_str() == "present?" {
-                        send(None, "!", vec![blank], None, false)
+                        send(None, "!", vec![empty_call], None, false)
                     } else {
-                        blank
+                        empty_call
                     };
                 }
                 "any?" => {

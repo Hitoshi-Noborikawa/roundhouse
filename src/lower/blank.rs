@@ -47,13 +47,13 @@
 //! Emitters print that node. Ruby does not wrap `empty?` again on the
 //! way out.
 //!
-//! View conditions call the same helper for `blank?` and `present?`
-//! (`string_blank_test`, from `view_to_library::predicates`). `any?`,
-//! `empty?` and `none?` stay a collection `empty?`: those names are not
-//! the string predicate, and a `strip` on an array would be a different
-//! program. This pass still does not walk view bodies. The ruby/spinel
-//! view lowering calls the helper itself; the other view emitters match
-//! the original predicate names.
+//! View conditions have no receiver type, so they do not call this
+//! string form. `blank?` / `present?` there become `(recv || "").empty?`
+//! — the same nil guard, without `strip`, because an array, hash, or
+//! relation answers `blank?` with `empty?` and has no `strip`. `any?`,
+//! `empty?` and `none?` stay a collection `empty?`. This pass still
+//! does not walk view bodies. The other view emitters match the
+//! original predicate names.
 //!
 //! Residue policy: a receiver the pass can't ground — `untyped`, an
 //! open inference var, a multi-variant union — keeps its dynamic call
@@ -85,12 +85,13 @@ pub fn apply_blank_lowering(app: &mut App) -> Vec<Diagnostic> {
     let mut diags = Vec::new();
 
     // View bodies are deliberately NOT walked (`for_each_hook_body`
-    // excludes them). `view_to_library::predicates` calls
-    // `string_blank_test` for `blank?` / `present?`, so the ruby/spinel
-    // view IR is this string form. The python/rust view emitters still
-    // match the ORIGINAL names; rewriting under them breaks the ones
-    // with closed vocabularies (python's unemittable-cond fallback is a
-    // silent `False`; the flash-notice smoke caught it).
+    // excludes them). `view_to_library::predicates` builds
+    // `(recv || "").empty?` for `blank?` / `present?` with no `strip`:
+    // a template receiver is untyped, and `strip` on an array raises.
+    // The python/rust view emitters still match the ORIGINAL names;
+    // rewriting under them breaks the ones with closed vocabularies
+    // (python's unemittable-cond fallback is a silent `False`; the
+    // flash-notice smoke caught it).
     super::for_each_hook_body(app, &mut |body| {
         walk(body, &defs, &mut diags);
     });
@@ -881,12 +882,25 @@ fn plain_empty(span: crate::span::Span, r: Expr) -> Expr {
     send0(span, r, "empty?", Ty::Bool)
 }
 
-/// `(recv || "").strip.empty?` — the string blankness test, nil guard
-/// included. View predicate folding calls this so a template `blank?`
-/// / `present?` is the same IR a typed string send lowers to.
-pub(crate) fn string_blank_test(recv: Expr) -> Expr {
-    let span = recv.span;
-    blank_str(span, recv)
+/// `(left || "")`. `result_ty` is `String` on the typed string arm,
+/// where the value after the guard is a string. A view passes
+/// `Untyped`: the receiver may be an array, and a `String` stamp would
+/// describe a collection as a string.
+pub(crate) fn or_empty_string(span: crate::span::Span, left: Expr, result_ty: Ty) -> Expr {
+    mk(
+        span,
+        ExprNode::BoolOp {
+            op: crate::expr::BoolOpKind::Or,
+            surface: crate::expr::BoolOpSurface::Symbol,
+            left,
+            right: mk(
+                span,
+                ExprNode::Lit { value: Literal::Str { value: String::new() } },
+                Ty::Str,
+            ),
+        },
+        result_ty,
+    )
 }
 
 /// `(r || "").strip.empty?` — ActiveSupport's `String#blank?`, which is a
@@ -901,20 +915,7 @@ pub(crate) fn string_blank_test(recv: Expr) -> Expr {
 /// operand keeps the receiver's own type, so a nilable string stays
 /// nilable for an emitter that lowers `||` through `Option`.
 fn blank_str(span: crate::span::Span, r: Expr) -> Expr {
-    let guarded = mk(
-        span,
-        ExprNode::BoolOp {
-            op: crate::expr::BoolOpKind::Or,
-            surface: crate::expr::BoolOpSurface::Symbol,
-            left: r,
-            right: mk(
-                span,
-                ExprNode::Lit { value: Literal::Str { value: String::new() } },
-                Ty::Str,
-            ),
-        },
-        Ty::Str,
-    );
+    let guarded = or_empty_string(span, r, Ty::Str);
     plain_empty(span, send0(span, guarded, "strip", Ty::Str))
 }
 

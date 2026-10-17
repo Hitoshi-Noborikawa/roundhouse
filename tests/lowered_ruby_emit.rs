@@ -1421,14 +1421,18 @@ fn lowered_index_view_auto_escapes_bare_interpolation() {
 
 #[test]
 fn lowered_index_view_rewrites_present_to_negated_empty() {
-    // Rails-style `notice.present?` lowers to the shared string form
-    // `!((notice || "").strip.empty?)`. The unary-not is a send, so the
-    // surface is `! (notice || "").strip.empty?`, not `notice.empty?.!`.
+    // Rails-style `notice.present?` lowers to `!((notice || "").empty?)`.
+    // No `strip`: the view receiver is untyped. The unary-not is a send,
+    // so the surface is `! (notice || "").empty?`, not `notice.empty?.!`.
     let files = lowered_real_blog_views();
     let src = find(&files, "app/views/articles/index.rb");
     assert!(
-        src.contains("! (notice || \"\").strip.empty?"),
-        "expected `! (notice || \"\").strip.empty?`; got:\n{src}",
+        src.contains("! (notice || \"\").empty?"),
+        "expected `! (notice || \"\").empty?`; got:\n{src}",
+    );
+    assert!(
+        !src.contains("notice.strip"),
+        "view present? must not strip an untyped receiver:\n{src}",
     );
     assert!(
         !src.contains("notice.present?"),

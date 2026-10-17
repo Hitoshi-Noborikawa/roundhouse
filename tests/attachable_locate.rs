@@ -365,7 +365,7 @@ fn a_content_type_attachable_renders_through_its_own_from_node() {
     // `link_to_if` is an `if` over the two `link_to` halves, the label
     // escaped once in each.
     assert!(
-        partial.contains("if ! (opengraph_embed.href || \"\").strip.empty?"),
+        partial.contains("if ! (opengraph_embed.href || \"\").empty?"),
         "{partial}"
     );
     assert!(partial.contains("ActionView::ViewHelpers.link_to(ActionView::ViewHelpers.truncate("), "{partial}");
