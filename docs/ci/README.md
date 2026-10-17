@@ -117,14 +117,16 @@ so fix rounds only queue the lanes under repair — and those lanes are
 | Label | Selects (required while focused) |
 |---|---|
 | `ci:crystal` … `ci:python` | That language's `compare-extra` **and** `smoke-extra` (+ `build-site` / archives / `archive-results`) |
+| `ci:rust` / `ci:typescript` | That language's `compare` and floor `smoke` (+ `build-site` / archives). Each label is its own leg |
 | `ci:extras` | All seven of the above |
 | `ci:jruby` | `compare-jruby` + floor `smoke` jruby (+ site/archives) |
 | `ci:spinel` | CORE Spinel (`spinel-build`, `spinel-toolchain`, `spinel-compare`) + `spinel-framework` (+ site/archives). Not the heavy Campfire Spinel suite (`campfire-spinel-*`); not folded into `ci:extras`. |
 
 **Narrow semantics:** with any focus label set and `ci:full` **not** set, the
 plan is the Ruby floor (`BASE`) plus only the selected focus lanes. Path
-ownership does not expand the plan. Unrelated extras / WASM / rust·ts
-`compare` / full Spinel11 stay off. `ci:full` still wins as the
+ownership does not expand the plan. Unrelated extras / WASM / full
+Spinel11 stay off, and rust·ts `compare` stays off unless `ci:rust` or
+`ci:typescript` is set. `ci:full` still wins as the
 full ledger (extras remain advisory there).
 
 **Rust vs TypeScript:** selecting one no longer forces both `compare` matrix
