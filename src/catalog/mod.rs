@@ -182,6 +182,9 @@ pub enum ReturnKind {
     /// (`article[:id]` is actually Int), but matches the existing
     /// declared shape and isn't worse than today.
     Str,
+    /// Returns `Str | Nil`. Example: `Base#cache_version` — nil on a
+    /// model with no `updated_at` column.
+    StrOrNil,
     /// Reference to a concrete class by dotted-name path
     /// (e.g. `"ActiveModel::Errors"`). Analyzer instantiates as
     /// `Ty::Class { id: ClassId(<path>), args: vec![].into() }`.
@@ -1061,6 +1064,34 @@ pub const AR_CATALOG: &[CatalogedMethod] = &[
     },
     CatalogedMethod {
         name: "[]=",
+        receiver: ReceiverContext::Instance,
+        effect: EffectClass::Pure,
+        chain: ChainKind::NotApplicable,
+        return_kind: Some(ReturnKind::Str),
+    },
+    // `cache_key` / `cache_version` / `cache_key_with_version`
+    // (`runtime/ruby/active_record/base.rb`): a single record's half
+    // of the fragment-cache key Relation's own trio answers for a
+    // collection — see the `cache_key`/`cache_version`/
+    // `cache_key_with_version` entries under `ReceiverContext::Relation`
+    // below for the companion case and why both are cataloged here
+    // rather than parsed from base.rbs/relation.rbs.
+    CatalogedMethod {
+        name: "cache_key",
+        receiver: ReceiverContext::Instance,
+        effect: EffectClass::Pure,
+        chain: ChainKind::NotApplicable,
+        return_kind: Some(ReturnKind::Str),
+    },
+    CatalogedMethod {
+        name: "cache_version",
+        receiver: ReceiverContext::Instance,
+        effect: EffectClass::Pure,
+        chain: ChainKind::NotApplicable,
+        return_kind: Some(ReturnKind::StrOrNil),
+    },
+    CatalogedMethod {
+        name: "cache_key_with_version",
         receiver: ReceiverContext::Instance,
         effect: EffectClass::Pure,
         chain: ChainKind::NotApplicable,
