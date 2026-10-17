@@ -182,6 +182,41 @@ module I18n
     in_view && !html ? ActionView::ViewHelpers.html_escape(out) : out
   end
 
+  # A node of Strings as I18n answers it: a nested Hash keyed by Symbols,
+  # in the files' order, from the first locale of the chain that has it.
+  def self.translate_tree(full, options)
+    loc = options.key?(:locale) ? locale_name(options[:locale]) : locale.to_s
+    leaves = runtime_leaves
+    runtime_chain(loc).each do |l|
+      next unless runtime_nodes.key?(l + "." + full)
+      prefix = l + "." + full + "."
+      tree = {}
+      leaves.each do |k, v|
+        next unless k.start_with?(prefix)
+        insert_tree(tree, k[prefix.length, k.length - prefix.length].to_s.split("."), v)
+      end
+      return tree
+    end
+    {}
+  end
+
+  def self.insert_tree(tree, path, value)
+    node = tree
+    i = 0
+    while i < path.length - 1
+      key = path[i].to_s.to_sym
+      child = node[key]
+      unless child.is_a?(Hash)
+        child = {}
+        node[key] = child
+      end
+      node = child
+      i += 1
+    end
+    node[path[path.length - 1].to_s.to_sym] = value
+    nil
+  end
+
   def self.scope_text(scope)
     return "" if scope.nil?
     return scope.map { |part| part.to_s }.join(".") if scope.is_a?(Array)
@@ -200,6 +235,7 @@ module I18n
     runtime_chain(loc).each do |l|
       text = leaves[l + "." + full]
       return text unless text.nil?
+      raise NotImplementedError, "I18n.t(\"#{full}\") answers a value that is not a String, which is not supported" if runtime_opaque.key?(l + "." + full)
       next unless runtime_nodes.key?(l + "." + full)
       return plural_form(leaves, l, l + "." + full, count) unless count.nil?
       subtree_translation(full)
@@ -439,9 +475,15 @@ module I18n
     @runtime_rules || {}
   end
 
+  def self.runtime_opaque
+    load_translation_table if @runtime_opaque.nil?
+    @runtime_opaque || {}
+  end
+
   def self.load_translation_table
     table = {}
     rules = {}
+    opaque = {}
     entries = []
     keys = {}
     leaves = {}
@@ -463,6 +505,8 @@ module I18n
           nodes[parts[0, j].join(".")] = true
           j -= 1
         end
+      elsif kind == "O"
+        opaque[fields[1]] = true
       elsif kind == "R"
         rules[fields[1]] = fields[2].to_s.split(" ")
       elsif kind == "F"
@@ -482,6 +526,7 @@ module I18n
     @runtime_nodes = nodes
     @runtime_chains = chains
     @runtime_rules = rules
+    @runtime_opaque = opaque
     @translation_entries = entries
     @translation_table = table
     nil

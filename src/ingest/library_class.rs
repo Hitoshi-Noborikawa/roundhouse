@@ -68,7 +68,7 @@ pub fn ingest_library_classes(
     source: &[u8],
     file: &str,
 ) -> IngestResult<Vec<LibraryClass>> {
-    ingest_library_classes_impl(source, file, true)
+    ingest_library_classes_impl(source, file, None)
 }
 
 /// Like [`ingest_library_classes`], but only classes/modules NESTED
@@ -88,25 +88,40 @@ pub fn ingest_library_classes(
 /// top-level declarations avoids that spurious failure entirely,
 /// rather than chasing down every way the library walk might refuse
 /// something the model walk already accepted.
+///
+/// The one top-level declaration it does take is a compact name under
+/// the model, `module Outer::Uploads` written beside `class Outer`:
+/// nested by name, though not by lexical scope. Writebook's
+/// `ActionText::Markdown::Uploads` concern is written this way.
 pub fn ingest_nested_library_classes(
     source: &[u8],
     file: &str,
+    outer: &str,
 ) -> IngestResult<Vec<LibraryClass>> {
-    ingest_library_classes_impl(source, file, false)
+    ingest_library_classes_impl(source, file, Some(outer))
 }
 
+/// `nested_in`: `None` walks every declaration; `Some(outer)` walks
+/// only nested ones and top-level compact names under `outer`.
 fn ingest_library_classes_impl(
     source: &[u8],
     file: &str,
-    include_top_level: bool,
+    nested_in: Option<&str>,
 ) -> IngestResult<Vec<LibraryClass>> {
+    let walked = |scope: &[String], path: Option<Vec<String>>| match nested_in {
+        None => true,
+        Some(_) if !scope.is_empty() => true,
+        Some(outer) => path.is_some_and(|path| {
+            path.join("::").strip_prefix(outer).is_some_and(|rest| rest.starts_with("::"))
+        }),
+    };
     super::sources::register(file, &String::from_utf8_lossy(source));
     let result = super::prism::parse(source, file);
     let root = result.node();
     let mut out = Vec::new();
     for (scope, class) in find_all_classes_with_scope(&root)
         .into_iter()
-        .filter(|(scope, _)| include_top_level || !scope.is_empty())
+        .filter(|(scope, class)| walked(scope, class_name_path(class)))
     {
         let (mut lc, struct_base) = library_class_and_struct_base(&class, &scope, file)?;
         // BEFORE the class it serves: a superclass has to be defined
@@ -117,15 +132,18 @@ fn ingest_library_classes_impl(
         let owner = lc.name.clone();
         let structs = struct_constant_classes(&owner, class.body(), file)?;
         lc.constants.retain(|(name, _)| !structs.iter().any(|(s, _)| s == name));
+        let made = class_new_constant_classes(&owner, class.body(), file);
+        lc.constants.retain(|(name, _)| !made.iter().any(|(s, _)| s == name));
         out.extend(super::data_factory::collect(class.body(), &owner, file)?);
         out.push(lc);
         out.extend(data_block_classes(class.body(), &owner, file)?);
         // Not before the owner: the struct is named under it, so the owner has to exist first.
         out.extend(structs.into_iter().map(|(_, s)| s));
+        out.extend(made.into_iter().map(|(_, c)| c));
     }
     for (scope, module) in find_all_modules_with_scope(&root)
         .into_iter()
-        .filter(|(scope, _)| include_top_level || !scope.is_empty())
+        .filter(|(scope, module)| walked(scope, module_name_path(module)))
     {
         // A nested `ClassMethods` is not a namespace of its own — it's
         // ActiveSupport::Concern's class-side carrier, already folded
@@ -140,10 +158,13 @@ fn ingest_library_classes_impl(
         let owner = lc.name.clone();
         let structs = struct_constant_classes(&owner, module.body(), file)?;
         lc.constants.retain(|(name, _)| !structs.iter().any(|(s, _)| s == name));
+        let made = class_new_constant_classes(&owner, module.body(), file);
+        lc.constants.retain(|(name, _)| !made.iter().any(|(s, _)| s == name));
         out.extend(super::data_factory::collect(module.body(), &owner, file)?);
         out.push(lc);
         out.extend(data_block_classes(module.body(), &owner, file)?);
         out.extend(structs.into_iter().map(|(_, s)| s));
+        out.extend(made.into_iter().map(|(_, c)| c));
     }
     if out.is_empty() {
         if let Some(lc) = file_data_class(&root, file)? {
@@ -1505,6 +1526,59 @@ fn struct_constant_spec<'pr>(value: &ruby_prism::Node<'pr>) -> Option<StructCons
 
 /// The classes `owner`'s body defines through `X = Struct.new(…)`, with
 /// the constant names they replace.
+/// `Error = Class.new(StandardError)` in a class or module body: the
+/// class it defines, as `class Error < StandardError; end` would, under
+/// the owner (`Owner::Error`). A parent written bare that names an
+/// earlier such class of the same owner (`FunctionExecutionError =
+/// Class.new(Error)`) is that one, as Ruby's lexical lookup finds it.
+/// Only the block-less form with one constant argument.
+fn class_new_constant_classes(owner: &ClassId, body: Option<ruby_prism::Node<'_>>, file: &str) -> Vec<(Symbol, LibraryClass)> {
+    let mut out: Vec<(Symbol, LibraryClass)> = Vec::new();
+    let Some(body) = body else { return out };
+    for stmt in flatten_statements(body) {
+        let Some(cw) = stmt.as_constant_write_node() else { continue };
+        let value = cw.value();
+        let Some(call) = value.as_call_node() else { continue };
+        if constant_id_str(&call.name()) != "new" || call.block().is_some() {
+            continue;
+        }
+        let Some(recv) = call.receiver() else { continue };
+        if constant_path_of(&recv).map(|p| p.into_iter().filter(|s| !s.is_empty()).collect::<Vec<_>>()) != Some(vec!["Class".to_string()]) {
+            continue;
+        }
+        let args: Vec<ruby_prism::Node<'_>> = call.arguments().map(|a| a.arguments().iter().collect()).unwrap_or_default();
+        let [parent_node] = args.as_slice() else { continue };
+        let Some(written) = constant_path_of(parent_node) else { continue };
+        let rooted = parent_node.as_constant_path_node().is_some_and(|p| super::util::constant_path_is_rooted(&p));
+        let written: Vec<String> = written.into_iter().filter(|s| !s.is_empty()).collect();
+        let parent = match written.as_slice() {
+            [one] if !rooted && out.iter().any(|(n, _)| n.as_str() == one) => format!("{}::{one}", owner.0.as_str()),
+            // Kept `::`-rooted: emitted inside the owner, a bare name would resolve to the sibling.
+            _ if rooted => format!("::{}", written.join("::")),
+            _ => written.join("::"),
+        };
+        let name = Symbol::from(constant_id_str(&cw.name()));
+        out.push((
+            name.clone(),
+            LibraryClass {
+                name: ClassId(Symbol::from(format!("{}::{}", owner.0.as_str(), name.as_str()))),
+                is_module: false,
+                parent: Some(ClassId(Symbol::from(parent))),
+                parent_span: super::util::node_span(parent_node, file),
+                includes: Vec::new(),
+                include_spans: Vec::new(),
+                methods: Vec::new(),
+                nullable_columns: Vec::new(),
+                origin: None,
+                constants: Vec::new(),
+                unknown_calls: Vec::new(),
+                class_ivar_initializers: Vec::new(),
+            },
+        ));
+    }
+    out
+}
+
 fn struct_constant_classes(
     owner: &ClassId,
     body: Option<ruby_prism::Node<'_>>,
@@ -3904,6 +3978,8 @@ pub fn ingest_concern_filters(
                                     "controller concern macro not recognized: `{name}` (its effect is dropped from the output)"
                                 ),
                             });
+                        } else {
+                            record_concern_csp_divergence(&inner, file);
                         }
                     }
                 }
@@ -3968,6 +4044,40 @@ fn block_form_concern_filter(stmt: &ruby_prism::Node<'_>, file: &str) -> Option<
         block: Some(expr),
         prepend: false,
     })
+}
+
+/// A `content_security_policy do |p| … end` statement inside a
+/// concern's `included do` block, read the same way a controller's own
+/// class-body declaration is (`ingest::app::csp_block_is_recognized`) —
+/// INTERIM, rubys/roundhouse#58 CSP option 2: until CSP is modelled, a
+/// block whose directives this ingest can read is a recorded
+/// divergence rather than a silent drop, and never blocks a route (no
+/// item from it is spliced into any includer's body, so there is
+/// nothing here for `routes::plan`'s gap-blocking to attribute to one —
+/// see that module's doc comment on concern-only gaps). A stranger
+/// form is left exactly as every OTHER statement this loop doesn't
+/// recognize: dropped with no gap, unchanged from today.
+fn record_concern_csp_divergence(stmt: &ruby_prism::Node<'_>, file: &str) {
+    let Some(call) = stmt.as_call_node() else { return };
+    // `arguments().is_some()` excludes `content_security_policy only:
+    // :player do … end` — Rails scopes that policy to one action,
+    // which this ingest doesn't model, so it keeps today's (silent)
+    // drop regardless of how plain the block looks.
+    if call.receiver().is_some()
+        || constant_id_str(&call.name()) != "content_security_policy"
+        || call.arguments().is_some()
+        || call.block().is_none()
+    {
+        return;
+    }
+    let Ok(expr) = ingest_expr(stmt, file) else { return };
+    let crate::expr::ExprNode::Send { block: Some(blk), .. } = &*expr.node else { return };
+    if super::app::csp_block_is_recognized(blk) {
+        super::survey::record(&super::IngestError::Unsupported {
+            file: file.to_string(),
+            message: super::app::CSP_DIVERGENCE_MESSAGE.to_string(),
+        });
+    }
 }
 
 /// Model DSL declared inside a concern module's `included do` block —

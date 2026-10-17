@@ -566,7 +566,7 @@ pub fn ingest_app_with_vfs<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResult
                             let outer = model.name.clone();
                             app.models.push(model);
                             if let Some(classes) =
-                                unwrap_or_record(ingest_nested_library_classes(&source, &path_str))?
+                                unwrap_or_record(ingest_nested_library_classes(&source, &path_str, outer.0.as_str()))?
                             {
                                 let nested = nested_under(&outer, classes);
                                 let (concern_items, concern_enum_decls, concern_guarded) =
@@ -732,7 +732,7 @@ pub fn ingest_app_with_vfs<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResult
                         // an alias naming one (an enum predicate, say)
                         // would hard-fail here and drop every genuinely
                         // nested class in the file too.
-                        if let Ok(classes) = ingest_nested_library_classes(&source, &path_str) {
+                        if let Ok(classes) = ingest_nested_library_classes(&source, &path_str, outer.0.as_str()) {
                             let nested = nested_under(&outer, classes);
                             let (concern_items, concern_enum_decls, concern_guarded) =
                                 ingest_concern_model_items_with_constants(
@@ -1088,6 +1088,61 @@ end
                 }
             }
         }
+        // `config.filter_parameters += [:passw, …]` — the keys Rails
+        // masks in `request.filtered_parameters`. Application body
+        // first, then the initializers in load order, as Rails runs
+        // them. (Rails also copies the list into
+        // `ActiveSupport.filter_parameters` for the event reporter; the
+        // runtime's stays the reporter's own, as before.) Synthesized as
+        // `config_filter_parameters` on the reopen, over the framework
+        // default (`[]`) in runtime/ruby/rails.rb. A Regexp, Proc or
+        // computed operand is not read; the survey names it.
+        {
+            let mut names: Vec<String> = Vec::new();
+            let mut seen = false;
+            let mut fold = |bytes: &[u8], file: &Path| {
+                for line in extract_filter_parameters(bytes) {
+                    match line {
+                        FilterParametersLine::Literal { replace, names: more } => {
+                            seen = true;
+                            if replace {
+                                names.clear();
+                            }
+                            names.extend(more);
+                        }
+                        FilterParametersLine::Computed { replace } => {
+                            // A computed `=` still replaces what came before
+                            // it; only its own operand goes unread.
+                            if replace {
+                                seen = true;
+                                names.clear();
+                            }
+                            survey::record(&IngestError::Unsupported {
+                                file: file.display().to_string(),
+                                message: "config.filter_parameters is not a list of Symbol or String literals; request.filtered_parameters does not apply it".to_string(),
+                            })
+                        }
+                    }
+                }
+            };
+            fold(&source, &app_config_path);
+            let init_dir = dir.join("config/initializers");
+            if vfs.is_dir(&init_dir) {
+                for entry in read_rb_files(vfs, &init_dir)? {
+                    if let Ok(bytes) = vfs.read(&entry) {
+                        fold(&bytes, &entry);
+                    }
+                }
+            }
+            if seen {
+                let literal = names.iter().map(|n| format!("{n:?}")).collect::<Vec<_>>().join(", ");
+                if let Ok(mut synth) = crate::runtime_src::parse_methods(&format!(
+                    "def config_filter_parameters\n  [{literal}]\nend\n"
+                )) {
+                    methods.append(&mut synth);
+                }
+            }
+        }
         // `Vips.block_untrusted(true)` / `Vips.block("<op>", true)` —
         // an initializer setting libvips' loader policy before any
         // upload is decoded (any app that stores user uploads; campfire
@@ -1357,11 +1412,17 @@ end
                 }
                 app.module_mixins.extend(mixins);
                 app.initializer_filters.extend(extract_initializer_filters(&bytes, &path_str));
+                if let Some(store) = extract_collection_cache_store(&bytes, &path_str) {
+                    app.collection_cache_store = Some(store);
+                }
                 app.sql_functions
                     .extend(super::sql_functions::extract_sql_functions(&bytes, &path_str));
             }
         }
     }
+    // `config/database.yml`'s `pragmas:`, run on each connection after
+    // the Db shim's own (see `database_yml`).
+    app.database_pragmas = super::database_yml::database_pragmas(vfs, dir);
 
     // Each controller's lexical nesting, for resolving its superclass
     // once every controller is known (see
@@ -2181,6 +2242,8 @@ end
     // pass may append source-backed FileIds beyond the indexed snapshot.
     let late_sources = super::sources::drain();
     super::sources::assert_snapshot_matches(&[], &late_sources);
+    super::unreachable_views::mark(&mut app);
+    super::uncalled_helper_copies::mark(&mut app);
     Ok(app)
 }
 
@@ -3559,6 +3622,89 @@ fn expr_calls_respond_with(expr: &crate::expr::Expr) -> bool {
     found
 }
 
+/// Rails' `ActionDispatch::ContentSecurityPolicy` directive names — the
+/// methods a `content_security_policy do |p| … end` block calls on its
+/// block parameter to build the policy Rails would send as a response
+/// header.
+const CSP_DIRECTIVES: &[&str] = &[
+    "base_uri",
+    "block_all_mixed_content",
+    "child_src",
+    "connect_src",
+    "default_src",
+    "font_src",
+    "form_action",
+    "frame_ancestors",
+    "frame_src",
+    "img_src",
+    "manifest_src",
+    "media_src",
+    "navigate_to",
+    "object_src",
+    "plugin_types",
+    "prefetch_src",
+    "report_uri",
+    "require_trusted_types_for",
+    "sandbox",
+    "script_src",
+    "script_src_attr",
+    "script_src_elem",
+    "style_src",
+    "style_src_attr",
+    "style_src_elem",
+    "trusted_types",
+    "upgrade_insecure_requests",
+    "worker_src",
+];
+
+/// The message `csp_block_is_unrecognized`'s SENDER (`report_unrecognized_
+/// controller_macros` below) records for a `content_security_policy` block
+/// this module cannot read — kept as a constant so
+/// `project::futamura_whole_route`'s gap filter and this recorder can't
+/// drift apart. See that filter's doc comment for why the message, not the
+/// `IngestError` variant, is what tells the two kinds of record apart: both
+/// are `IngestError::Unsupported`, and only one of them blocks a route.
+pub(crate) const CSP_DIVERGENCE_MESSAGE: &str =
+    "content_security_policy: not emitted, the lowered app sends no CSP header";
+
+/// Is `blk` a `content_security_policy` block roundhouse can read well
+/// enough to know it does nothing but build a policy object — every
+/// statement a direct call on the block's own parameter, naming a known
+/// CSP directive, with symbol/string/simple-literal arguments? Rails'
+/// directive builders are themselves not modelled (the lowered app sends
+/// no `Content-Security-Policy` header either way — tracked as a
+/// TEMPORARY divergence on rubys/roundhouse#58 until CSP is modelled), so
+/// this is never about faithfully building the policy; it's about telling
+/// a block this predictable (no conditionals, no dynamic nonce generator,
+/// no method-call argument) apart from one that might be doing something
+/// this ingest gap would otherwise hide without a trace.
+pub(crate) fn csp_block_is_recognized(blk: &crate::expr::Expr) -> bool {
+    use crate::expr::ExprNode;
+    let ExprNode::Lambda { params, rest_param, block_param, extra_params, body, .. } = &*blk.node
+    else {
+        return false;
+    };
+    if rest_param.is_some() || block_param.is_some() || !extra_params.is_empty() {
+        return false;
+    }
+    let [p] = params.as_slice() else { return false };
+    fn stmt_ok(stmt: &crate::expr::Expr, param: &crate::ident::Symbol) -> bool {
+        use crate::expr::ExprNode;
+        let ExprNode::Send { recv: Some(recv), method, args, block: None, .. } = &*stmt.node
+        else {
+            return false;
+        };
+        let ExprNode::Var { name, .. } = &*recv.node else { return false };
+        name == param
+            && CSP_DIRECTIVES.contains(&method.as_str())
+            && args.iter().all(|a| matches!(&*a.node, ExprNode::Lit { .. }))
+    }
+    match &*body.node {
+        ExprNode::Seq { exprs } => exprs.iter().all(|s| stmt_ok(s, p)),
+        _ => stmt_ok(body, p),
+    }
+}
+
 /// A receiverless, blockless call left in a controller's class body
 /// after every consumer has run is a macro roundhouse does not
 /// recognize — `rate_limit`, say. Its effect (a guard, a filter, a
@@ -3630,6 +3776,30 @@ fn report_unrecognized_controller_macros(app: &App) {
                     ) && (super::controller::lambda_filter_target(expr).is_some()
                         || super::controller::next_restructure_refusal(expr)));
                 if claimed {
+                    continue;
+                }
+                // INTERIM (rubys/roundhouse#58, CSP option 2): a BARE
+                // `content_security_policy do |p| … end` whose
+                // directives this ingest can read is a recorded
+                // DIVERGENCE, not a blocking gap — see
+                // `csp_block_is_recognized` and
+                // `CSP_DIVERGENCE_MESSAGE`. `args.is_empty()` excludes
+                // `content_security_policy only: :player do …`: Rails
+                // scopes that policy to one action, which this ingest
+                // does not model at all (every action on the
+                // controller would wrongly get the same policy, or
+                // none), so it keeps today's gap regardless of how
+                // plain the block is. Anything stranger (a dynamic
+                // directive, conditionals, other code in the block)
+                // also keeps today's gap below, unchanged.
+                if method.as_str() == "content_security_policy"
+                    && args.is_empty()
+                    && block.as_ref().is_some_and(csp_block_is_recognized)
+                {
+                    survey::record(&IngestError::Unsupported {
+                        file: file_of(expr.span.file),
+                        message: CSP_DIVERGENCE_MESSAGE.to_string(),
+                    });
                     continue;
                 }
                 survey::record(&IngestError::Unsupported {
@@ -8770,6 +8940,47 @@ pub(super) fn extract_initializer_filters(source: &[u8], file: &str) -> Vec<crat
     out
 }
 
+/// `ActionView::PartialRenderer.collection_cache = <Const>.<reader>` in a
+/// `config/initializers/` file, bare or inside `to_prepare` (campfire's
+/// `fragment_cache.rb` points it at `FragmentCache.store`). The same
+/// discipline as the mixin reader: a constant receiver and an
+/// argument-less, blockless method on it, readable off the parse.
+/// Anything else (a computed store, `ActiveSupport::Cache.lookup_store`
+/// with arguments) is not recorded, and the initializer ledger reports
+/// the statement. The last assignment wins, as at boot.
+pub(super) fn extract_collection_cache_store(source: &[u8], file: &str) -> Option<crate::app::CollectionCacheStore> {
+    let result = super::prism::parse(source, file);
+    let root = result.node();
+    let src = String::from_utf8_lossy(source).into_owned();
+    let program = root.as_program_node()?;
+
+    let mut out = None;
+    for stmt in initializer_statements(&program) {
+        let Some(call) = stmt.as_call_node() else { continue };
+        if super::util::constant_id_str(&call.name()) != "collection_cache=" {
+            continue;
+        }
+        let Some(recv) = call.receiver() else { continue };
+        if constant_text(&recv, &src).as_deref() != Some("ActionView::PartialRenderer") {
+            continue;
+        }
+        let Some(args) = call.arguments() else { continue };
+        let args: Vec<_> = args.arguments().iter().collect();
+        let [value] = args.as_slice() else { continue };
+        let Some(read) = value.as_call_node() else { continue };
+        if read.arguments().is_some() || read.block().is_some() {
+            continue;
+        }
+        let Some(store_recv) = read.receiver() else { continue };
+        let Some(receiver) = constant_text(&store_recv, &src) else { continue };
+        out = Some(crate::app::CollectionCacheStore {
+            receiver: Symbol::from(receiver),
+            reader: Symbol::from(super::util::constant_id_str(&read.name())),
+        });
+    }
+    out
+}
+
 /// The source text of a node that is a constant or a constant path
 /// (`Foo`, `Turbo::StreamsChannel`), or None for anything else. Read as
 /// TEXT rather than resolved: the receiver may name a class this tree
@@ -9229,6 +9440,101 @@ pub(super) fn extract_variable_content_type_exclusions(source: &[u8]) -> Vec<Str
         out.extend(body[..close].split_whitespace().map(|s| s.to_string()));
     }
     out
+}
+
+/// One `config.filter_parameters` statement, as
+/// [`extract_filter_parameters`] reads it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum FilterParametersLine {
+    /// `+= [...]` (`replace: false`) or `= [...]` (`replace: true`) of
+    /// Symbol and String literals, each as its String.
+    Literal { replace: bool, names: Vec<String> },
+    /// Any other operand: a Regexp, a Proc, a computed list. `replace`
+    /// is true for a plain `=`, which still discards the names before it.
+    Computed { replace: bool },
+}
+
+/// The `config.filter_parameters` statements of a file, in source order
+/// (`Rails.application.config.filter_parameters += [:passw, :email]` in
+/// `filter_parameter_logging.rb`, or `config.filter_parameters += [...]`
+/// in the Application body). Line-scanned like the other config reads;
+/// the list may span lines, so the scan continues to its closing
+/// bracket. `%i[...]` and `%w[...]` lists count as literals.
+pub(crate) fn extract_filter_parameters(source: &[u8]) -> Vec<FilterParametersLine> {
+    let source = String::from_utf8_lossy(source);
+    let mut out = Vec::new();
+    let mut lines = source.lines();
+    while let Some(line) = lines.next() {
+        let t = line.trim_start();
+        if t.starts_with('#') {
+            continue;
+        }
+        let Some(idx) = t.find("config.filter_parameters") else { continue };
+        let rest = t[idx + "config.filter_parameters".len()..].trim_start();
+        let (replace, rest) = if let Some(r) = rest.strip_prefix("+=") {
+            (false, r)
+        } else if let Some(r) = rest.strip_prefix('=').filter(|r| !r.starts_with('=')) {
+            (true, r)
+        } else {
+            out.push(FilterParametersLine::Computed { replace: false });
+            continue;
+        };
+        let mut text = rest.trim().to_string();
+        if text.is_empty() {
+            if let Some(next) = lines.next() {
+                text.push_str(next.trim());
+            }
+        }
+        let opens = text.starts_with('[') || text.starts_with("%i[") || text.starts_with("%w[");
+        if opens {
+            while !text.contains(']') {
+                let Some(next) = lines.next() else { break };
+                text.push(' ');
+                text.push_str(next.trim());
+            }
+        }
+        out.push(filter_parameter_list(&text).map_or(FilterParametersLine::Computed { replace }, |names| {
+            FilterParametersLine::Literal { replace, names }
+        }));
+    }
+    out
+}
+
+/// The names of a `[:a, "b"]`, `%i[a b]` or `%w[a b]` literal that is
+/// the whole operand (nothing but a comment after it).
+fn filter_parameter_list(text: &str) -> Option<Vec<String>> {
+    let (words, body) = if let Some(b) = text.strip_prefix("%i[").or_else(|| text.strip_prefix("%w[")) {
+        (true, b)
+    } else {
+        (false, text.strip_prefix('[')?)
+    };
+    let close = body.find(']')?;
+    let after = body[close + 1..].trim();
+    if !(after.is_empty() || after.starts_with('#')) {
+        return None;
+    }
+    let inner = &body[..close];
+    if words {
+        return Some(inner.split_whitespace().map(str::to_string).collect());
+    }
+    inner
+        .split(',')
+        .map(str::trim)
+        .filter(|e| !e.is_empty())
+        .map(|e| {
+            let name = if let Some(sym) = e.strip_prefix(':') {
+                sym
+            } else if e.len() >= 2
+                && ((e.starts_with('"') && e.ends_with('"')) || (e.starts_with('\'') && e.ends_with('\'')))
+            {
+                &e[1..e.len() - 1]
+            } else {
+                return None;
+            };
+            let plain = !name.is_empty() && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '.');
+            plain.then(|| name.to_string())
+        })
+        .collect()
 }
 
 /// `(Vips.block_untrusted(true) seen, operations named by Vips.block(
