@@ -9,8 +9,12 @@
 #
 # One connection per process: opened at the first push (after a
 # prefork or a Puma fork, so a child never writes on its parent's
-# socket), keyed by pid, and shared by the request threads under one
-# lock. A push is one round trip, so the lock is held briefly.
+# socket), keyed by pid, and shared by the request threads. LOCK covers
+# the commands on that one socket, held for a push's single round trip.
+# The connect itself happens outside LOCK, so a Redis host that is slow
+# to answer holds up only the threads waiting for a connection, not
+# every push. Two threads that race to connect each open one; the first
+# installed is kept and the other closed.
 #
 # One reconnect: on a connection error the connection is dropped, a new
 # one opened, and the push sent once more, as redis-client's
@@ -25,25 +29,25 @@ module SidekiqRedis
   LOCK = Mutex.new
 
   def self.push(url, queue, json)
-    LOCK.synchronize do
-      begin
-        send_push(connection(url), queue, json)
-      rescue Redis::BaseConnectionError
-        drop
-        send_push(connection(url), queue, json)
-      end
+    conn = acquire(url)
+    begin
+      LOCK.synchronize { send_push(conn, queue, json) }
+    rescue Redis::BaseConnectionError
+      discard(conn)
+      conn = acquire(url)
+      LOCK.synchronize { send_push(conn, queue, json) }
     end
     nil
   end
 
   def self.schedule(url, at, json)
-    LOCK.synchronize do
-      begin
-        connection(url).zadd("schedule", at, json)
-      rescue Redis::BaseConnectionError
-        drop
-        connection(url).zadd("schedule", at, json)
-      end
+    conn = acquire(url)
+    begin
+      LOCK.synchronize { conn.zadd("schedule", at, json) }
+    rescue Redis::BaseConnectionError
+      discard(conn)
+      conn = acquire(url)
+      LOCK.synchronize { conn.zadd("schedule", at, json) }
     end
     nil
   end
@@ -56,25 +60,58 @@ module SidekiqRedis
     nil
   end
 
-  def self.connection(url)
-    if CONN_PID[0] != Process.pid || CONN.length == 0
-      CONN.clear
-      CONN.push(Redis.new(url: url))
-      CONN_PID[0] = Process.pid
+  # This process's connection, connecting outside LOCK when there is
+  # none yet.
+  def self.acquire(url)
+    pid = Process.pid
+    held = LOCK.synchronize { current(pid) }
+    if held.length == 0
+      fresh = Redis.new(url: url)
+      held = LOCK.synchronize { install(pid, fresh) }
     end
-    CONN[0]
+    held[0]
   end
 
-  def self.drop
-    if CONN.length > 0 && CONN_PID[0] == Process.pid
-      begin
-        CONN[0].close
-      rescue StandardError
-        nil
+  # Under LOCK: the connection as a zero- or one-element Array, after
+  # forgetting one a parent process opened.
+  def self.current(pid)
+    if CONN_PID[0] != pid
+      CONN.clear
+      CONN_PID[0] = pid
+    end
+    CONN.dup
+  end
+
+  # Under LOCK: keep `fresh` unless another thread installed one first.
+  def self.install(pid, fresh)
+    if CONN_PID[0] == pid && CONN.length > 0
+      close_quietly(fresh)
+    else
+      CONN.clear
+      CONN.push(fresh)
+      CONN_PID[0] = pid
+    end
+    CONN.dup
+  end
+
+  # Drop `conn` after a connection error, unless another thread already
+  # replaced it. Under LOCK, so no push is using the socket as it closes.
+  def self.discard(conn)
+    LOCK.synchronize do
+      if CONN.length > 0 && CONN[0].equal?(conn)
+        CONN.clear
+        close_quietly(conn)
       end
     end
-    CONN.clear
-    CONN_PID[0] = 0
+    nil
+  end
+
+  def self.close_quietly(conn)
+    begin
+      conn.close
+    rescue StandardError
+      nil
+    end
     nil
   end
 end
