@@ -549,24 +549,6 @@ fn is_stdlib_time_clock(e: &Expr) -> bool {
     }
 }
 
-/// Ruby prints `iso8601` for a grounded time format. Re-analysis after the
-/// rename can widen the receiver to a union that still contains `Time`
-/// (`minimum(:starts_at) || Time.utc` becomes `String | Time`).
-pub(crate) fn ruby_prints_iso8601(recv: &Expr) -> bool {
-    if is_time_rfc3339_receiver(recv) {
-        return true;
-    }
-    fn contains_time(ty: &Ty) -> bool {
-        match ty {
-            Ty::Time => true,
-            Ty::Class { id, .. } if id.0.as_str() == "Time" => true,
-            Ty::Union { variants } => variants.iter().any(contains_time),
-            _ => false,
-        }
-    }
-    recv.ty.as_ref().is_some_and(contains_time)
-}
-
 /// A zero-arg `to_rfc3339` on this receiver is the grounded time format.
 /// Emitters use the same test so an application method of that name
 /// keeps normal dispatch.

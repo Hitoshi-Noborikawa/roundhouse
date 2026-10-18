@@ -371,9 +371,12 @@ fn crystal_clock_spelling_is_in_the_ir() {
     let custom_py = roundhouse::emit::python::emit_expr_for_runtime(&custom);
     assert!(!custom_py.contains("isoformat"), "{custom_py}");
     // `minimum` re-analysis widens `minimum || Time.current` after the
-    // rename. Ruby still has to print `iso8601`.
+    // rename. The format bit still makes Ruby print `iso8601`.
     let either = emit("(Event.where(name: name).minimum(:starts_at) || Time.current).iso8601");
     assert!(either.contains("iso8601") && !either.contains("to_rfc3339"), "{either}");
+    // A source `to_rfc3339` on a mixed union is not that grounded call.
+    let mixed = emit("(starts_at || name).to_rfc3339");
+    assert!(mixed.contains("to_rfc3339") && !mixed.contains("iso8601"), "{mixed}");
 
     let column = lowered_probe("starts_at.iso8601");
     let column_py = roundhouse::emit::python::emit_expr_for_runtime(&column);
