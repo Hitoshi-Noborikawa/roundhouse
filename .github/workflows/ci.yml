@@ -2049,14 +2049,19 @@ jobs:
       # `transaction_open?`, and an uncommitted write moves the
       # observer's data_version, so messages_caching is 4/4 again.
       # room_test stays 11/11; `use_transactional_tests = false` still
-      # COMMITs. Still red, and outside this floor: ActiveRecord::Tasks
-      # 0/4, deferred preload 9/10, Object#extend 13/14. A parallel
-      # run can lose a channel file to Errno::EEXIST on `tmp/test`;
-      # those files are green serially and are counted here.
+      # COMMITs. A parallel run can lose a channel file to
+      # Errno::EEXIST on `tmp/test`; those files are green serially
+      # and are counted here.
+      #
+      # 578/83 -> 579/84. `Relation#load_records` runs `includes`
+      # unless `skip_preloading!` (`4f81f1caa`). `message_test` is
+      # 10/10. Measured on main `5fd52283e`, run 39158256985, Campfire
+      # `11d3fb9`: 579 of 584 tests, 84 of 86 files. Still red:
+      # `ActiveRecord::Tasks` 0/4 and `Object#extend` 13/14.
         env:
-          # Tip Campfire suite floor — 578/83 at CAMPFIRE_SHA 11d3fb9c.
-          FLOOR_TESTS: 578
-          FLOOR_FILES: 83
+          # Tip Campfire suite floor — 579/84 at CAMPFIRE_SHA 11d3fb9c.
+          FLOOR_TESTS: 579
+          FLOOR_FILES: 84
         run: |
           set -euo pipefail
           tests=$(awk -F'|' '{p += $3} END {print p+0}' /tmp/campfire-tally.txt)
