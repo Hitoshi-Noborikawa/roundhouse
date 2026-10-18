@@ -14,11 +14,11 @@ use super::as_json_shape::{JsonPair, PairValue, ShapeError};
 use super::as_json_writer::{writer_method, PairEncoding};
 
 // Not the columns alone: these add to `attribute_names` or change what a column's reader answers.
-const ATTRIBUTE_MACROS: &[&str] =
+pub(super) const ATTRIBUTE_MACROS: &[&str] =
     &["attribute", "serialize", "store", "store_accessor", "encrypts", "composed_of"];
 
 // Not read from the declaration: an app that renames the inheritance column or ignores columns keeps the runtime encoder.
-const COLUMN_SETTERS: &[&str] = &["inheritance_column=", "ignored_columns=", "ignored_columns"];
+pub(super) const COLUMN_SETTERS: &[&str] = &["inheritance_column=", "ignored_columns=", "ignored_columns"];
 
 pub(super) fn column_writer(
     model: &Model,
@@ -114,7 +114,8 @@ pub(super) fn column_writer_with(
         if !matches!(encoding_for(&ty)?, PairEncoding::Scalar(_)) {
             return Err("a `methods:` value is not a JSON scalar");
         }
-        pairs.push(JsonPair { key: name.clone(), value: PairValue::Reader(name.clone()), cond: None });
+        // Not a `Reader`: that reads a column, which Python spells as an attribute, where a `methods:` name is called.
+        pairs.push(JsonPair { key: name.clone(), value: PairValue::Computed(super::as_json_writer::self_call(name.as_str())), cond: None });
     }
     let mut writer = writer_method(&model.name, &pairs, Some(table), &[])?;
     writer.name = crate::ident::Symbol::from(opts.method_name());

@@ -1138,6 +1138,9 @@ fn emit_expr_inner(e: &Expr) -> String {
                             );
                             let iter_chain = if was_option {
                                 ".iter().flatten()"
+                            } else if matches!(&*r.node, ExprNode::Ivar { .. }) {
+                                // `into_iter` would move the field out of `self`, which the method only borrows.
+                                ".iter().cloned()"
                             } else {
                                 ".into_iter()"
                             };

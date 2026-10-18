@@ -1056,7 +1056,44 @@ fn every_runtime_method_body_concretely_typed() {
     // Its Hash branch (a Hash element as a JSON object) adds 3, MEASURED:
     // the `keys` of the untyped Hash, a key's `to_s` and its value read
     // back into `encode_value`.
-    const CEILING: usize = 739;
+    // MEASURED 754 on 2026-10-15: `I18n.translate_runtime` (a `t` whose
+    // key, scope, default or options are known only when it runs) reads
+    // the caller's options Hash as the gem does: its `:scope`, `:default`,
+    // `:count`, `:locale` and each interpolation value are whatever the
+    // caller passed (+15 in i18n_locale.rb).
+    // MEASURED 770 on 2026-10-16: a locale's own plural rule reads the
+    // count the caller passed, an Integer, a Float or whatever else, as
+    // rails-i18n's and CLDR's rules do (+16 in i18n_locale.rb).
+    // MEASURED 771 on 2026-10-15: `Request#filtered_parameters` copies
+    // the request's params, whose values are whatever the request sent,
+    // into the Hash it filters (+1 in action_dispatch/request.rb).
+    // MEASURED 773 on 2026-10-16: `ActiveSupport.to_query` takes any
+    // Hash key, as Rails' `Hash#to_query` does (a Symbol-keyed literal
+    // reached it and Spinel refused the `Hash[String, _]` declaration);
+    // the key's `to_s` in `query_pairs` is read twice (+2 in
+    // active_support_ext.rb).
+    // MEASURED 776 on 2026-10-16: transactional saves (connection.rb).
+    // A touch remembers the `updated_at` it wrote beside the Dirty
+    // snapshot rather than inside it, and `changes_to_save` reads it
+    // back: the column-dependent attribute value, gradual as the
+    // snapshot's own values are (+2); and `transaction`'s branch that
+    // runs inside a transaction opened beneath ActiveRecord answers the
+    // block's untyped value, as the others do (+1).
+    // MEASURED 779 on 2026-10-16: `RawConnection#transaction` nests a
+    // savepoint when SQLite is already open. That arm answers the
+    // block's untyped value the same way the outer arm does (+3 in
+    // connection.rb: the `yield`, the local it is stored in, and the
+    // value the method returns).
+    // MEASURED 781 on 2026-10-17: a mailer's address headers read
+    // `mail`'s opts, whatever the action put there (a String, an Array,
+    // nil), as ActionMailer's `Mail::Message` normalizes them (+5 in
+    // action_mailer.rb).
+    // MEASURED 784 on 2026-10-17: both of those, on the same 776 base.
+    // MEASURED 791 on 2026-10-17: `cookies.encrypted` (`EncryptedCookieJar`
+    // in action_controller/cookies.rb) reads and writes JSON values, so its
+    // `[]`, `[]=` and `value_of` carry an untyped value by contract, as Rails'
+    // encrypted jar answers whatever the cookie holds (+7 on the 784 base).
+    const CEILING: usize = 791;
     assert!(
         total_gradual <= CEILING,
         "{total_gradual} Ty::Untyped sites exceeds ceiling of {CEILING}",

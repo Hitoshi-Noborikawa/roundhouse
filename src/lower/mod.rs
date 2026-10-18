@@ -67,7 +67,7 @@ pub mod default_self_recv;
 mod attr_or_assign;
 mod system_exception;
 mod case_class_narrow;
-mod reset_counters;
+pub(crate) mod reset_counters;
 mod perform_all_later;
 pub mod authenticate_by;
 pub mod group_count;
@@ -100,6 +100,7 @@ pub mod errors_index;
 pub mod job_class_side;
 pub mod job_payload;
 pub mod mailer_class_side;
+pub mod mailer_templates;
 pub mod as_json_shape;
 pub mod as_json_writer;
 pub mod as_json_super;
@@ -136,6 +137,7 @@ pub mod has_json;
 pub mod serialize;
 pub mod assoc_loaded;
 pub mod object_extend;
+pub mod nested_def;
 pub mod param_rebind;
 pub mod to_sgid;
 pub mod cable_test_case;
@@ -199,7 +201,6 @@ pub mod view;
 pub mod view_buffer_passing;
 pub mod tag_block_passing;
 pub mod lazy_model_state;
-pub mod deferred_preload;
 pub mod view_to_library;
 
 pub use blank::apply_blank_lowering;
@@ -638,6 +639,10 @@ const POST_ANALYZE_PASS_ORDER: &[(&str, &[&str])] = &[
     // `obj.extend Mod` on an instance -> a raise stub with the report.
     // Consumes a shape no pass produces or reads; no constraints.
     ("object_extend", &[]),
+    // A test reaching an ingest-stamped nested `def` -> the whole
+    // test a raise stub with the report. Reads only that stamp, which
+    // no pass produces or removes; no constraints.
+    ("nested_def", &[]),
     // A parameter written after its binder (`user = users(user) unless
     // user.is_a? User`, `id = id.to_i`) -> a fresh local, so AOT does
     // not pin the caller's type onto the later write. Reads an Assign
@@ -662,6 +667,7 @@ const POST_ANALYZE_PASS_ORDER: &[(&str, &[&str])] = &[
     // or reads; no constraints.
     ("current_set", &[]),
     ("mailer_class_side", &[]),
+    ("mailer_templates", &[]),
     ("job_class_side", &[]),
     ("send_static_dispatch", &[]),
     // Grounds the plural duration-unit calls that send_static_dispatch
@@ -1001,6 +1007,8 @@ pub fn apply_post_analyze_lowerings(
     ran!("assoc_attr_key");
     diags.extend(object_extend::apply_object_extend_stub(app));
     ran!("object_extend");
+    diags.extend(nested_def::apply_nested_def_test_stub(app));
+    ran!("nested_def");
     param_rebind::apply_param_rebind_lowering(app);
     ran!("param_rebind");
     diags.extend(to_sgid::apply_to_sgid_lowering(app));
@@ -1013,6 +1021,8 @@ pub fn apply_post_analyze_lowerings(
     ran!("current_set");
     diags.extend(mailer_class_side::apply_mailer_class_side(app));
     ran!("mailer_class_side");
+    diags.extend(mailer_templates::apply_mailer_templates(app));
+    ran!("mailer_templates");
     diags.extend(job_class_side::apply_job_class_side(app));
     ran!("job_class_side");
     diags.extend(crate::timings::phase("post-analyze: send_dispatch", || {
@@ -1583,7 +1593,7 @@ pub use controller::{
 };
 pub use controller_test::{
     classify_assert_select, classify_controller_test_send, classify_url_expr,
-    flatten_params_pairs, test_body_stmts, AssertSelectKind, ControllerTestSend, UrlArg,
+    flatten_params_pairs, setup_fixture, test_body_stmts, AssertSelectKind, ControllerTestSend, UrlArg,
     UrlHelperCall,
 };
 pub use fixtures::{
@@ -1640,6 +1650,7 @@ pub fn module_funcs_to_library_class(
         parent: None,
         parent_span: Default::default(),
         includes: Vec::new(),
+        include_spans: Vec::new(),
         methods,
         nullable_columns: Vec::new(),
         origin: None,

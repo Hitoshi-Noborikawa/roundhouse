@@ -472,6 +472,16 @@ module Rails
       "header_or_legacy_token"
     end
 
+    # `config.public_file_server.headers`: what the static file server
+    # adds to every `public/` (and `/assets/`) response — the
+    # `Cache-Control` a browser, or a cache in front of the app, keeps a
+    # stylesheet by. Rails' default sends nothing extra; ingest lifts an
+    # app's own Hash into an override on the reopen
+    # (src/ingest/public_file_server_config.rs).
+    def public_file_server_headers
+      {}
+    end
+
     # Action Cable's three origin settings, as the `/cable` handshake
     # check reads them (runtime/spinel/request_forgery_protection.rb):
     # Rails' defaults. Ingest lifts an app's `config.action_cable.*`
@@ -603,6 +613,15 @@ module Rails
       "UTC"
     end
 
+    # `config.filter_parameters`: the keys `request.filtered_parameters`
+    # masks (Rails' `rails new` initializer lists `:passw`, `:token`,
+    # ...). Same framework-default shape as `config_time_zone` above:
+    # Rails' default list is empty, and ingest lifts an app's Symbol and
+    # String filters, each as its String, into an override on the reopen.
+    def config_filter_parameters
+      []
+    end
+
     # `config.active_storage.variable_content_types -= %w[…]` — the
     # image types an app REMOVES from Rails' default variable list
     # (campfire: bmp/ico/psd). Same framework-default shape as the two
@@ -651,6 +670,56 @@ module Rails
     # none.
     def default_per_page
       25
+    end
+
+    # `Rails.application.config.assets.prefix`. A fresh object each
+    # call is enough: the prefix is a constant, and
+    # `Rails.application` itself is a fresh object per call.
+    def config
+      FrameworkConfig.new
+    end
+
+    # No policy unless an initializer says so. Ingest overrides this
+    # on the app's reopen when `config.content_security_policy` is set.
+    def content_security_policy
+      nil
+    end
+
+    # `Rails.application.importmap`. Paths are already `/assets/…`
+    # from ingest; `to_json` ignores the resolver. The string is the
+    # pretty script body the layout embeds, because a CSP hash of a
+    # compact encoding does not match the page.
+    def importmap
+      ImportmapMap.new
+    end
+
+    # Override on the app reopen when `config/importmap.rb` has pins.
+    # That override is the pretty script body. This default is only
+    # the empty map an app with no pins would hash, and no page embeds it.
+    def importmap_json
+      "{\"imports\":{}}"
+    end
+  end
+
+  class AssetConfig
+    def prefix
+      "/assets"
+    end
+  end
+
+  class FrameworkConfig
+    def initialize
+      @assets = AssetConfig.new
+    end
+
+    def assets
+      @assets
+    end
+  end
+
+  class ImportmapMap
+    def to_json(resolver: nil)
+      Rails.application.importmap_json
     end
   end
 end

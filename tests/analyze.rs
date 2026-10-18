@@ -3399,6 +3399,28 @@ end
 }
 
 #[test]
+fn an_enqueued_job_types_perform_and_its_rest_parameter() {
+    // `NotifyMessageJob.perform_later(@message)` runs
+    // `NotifyMessageJob#perform(*messages)`: what callers enqueue types
+    // `perform`, a `*rest` parameter is the Array of it, and so the mailer
+    // each element reaches and its template's ivar are typed (lobsters).
+    let app = app_from_files(&[
+        ("app/models/application_record.rb", "class ApplicationRecord < ActiveRecord::Base\nend\n"),
+        ("app/models/message.rb", "class Message < ApplicationRecord\n  def announce\n    NotifyJob.perform_later(self)\n  end\nend\n"),
+        ("app/jobs/application_job.rb", "class ApplicationJob < ActiveJob::Base\nend\n"),
+        (
+            "app/jobs/notify_job.rb",
+            "class NotifyJob < ApplicationJob\n  def perform(*messages)\n    messages.each do |message|\n      deliver(message)\n    end\n  end\n\n  def deliver(message)\n    NoticeMailer.notify(message).deliver_now\n  end\nend\n",
+        ),
+        ("app/mailers/application_mailer.rb", "class ApplicationMailer < ActionMailer::Base\nend\n"),
+        ("app/mailers/notice_mailer.rb", "class NoticeMailer < ApplicationMailer\n  def notify(message)\n    @message = message\n    mail(to: \"a@example.com\", subject: \"hi\")\n  end\nend\n"),
+        ("app/views/notice_mailer/notify.text.erb", "<%= @message.id %>\n"),
+    ]);
+    let unresolved = ivar_unresolved_names(&app);
+    assert!(!unresolved.iter().any(|n| n == "message"), "@message should resolve through the job; unresolved = {unresolved:?}");
+}
+
+#[test]
 fn active_record_base_and_class_side_finders_resolve() {
     // Two class-side AR gaps:
     //  (1) `ActiveRecord::Base.transaction { ... }` /
@@ -4783,12 +4805,12 @@ end
     assert_eq!(ty("form.object.try(:name)", 12), "String?");
 }
 
-/// `.text.erb` templates are ingested for the analyzer (their Ruby
-/// types, the IDE sees them) and dropped before lowering. A `.json.erb`
-/// is not: it lowers through the view path as `<action>_json` (campfire's
-/// PWA manifest), and is no jbuilder.
+/// `.text.erb` templates are typed (the IDE sees them) and lower through
+/// the view path as `<action>_text`, which a mailer's `mail` renders. A
+/// `.json.erb` lowers as `<action>_json` (campfire's PWA manifest), and
+/// is no jbuilder.
 #[test]
-fn text_erb_templates_are_analysis_only_and_json_erb_is_rendered() {
+fn text_erb_and_json_erb_templates_are_rendered() {
     let mut app = app_from_files(&[
         ("app/mailers/application_mailer.rb", "class ApplicationMailer < ActionMailer::Base\nend\n"),
         ("app/mailers/product_mailer.rb", "class ProductMailer < ApplicationMailer\n  def in_stock\n    @name = \"x\"\n  end\nend\n"),
@@ -4803,7 +4825,9 @@ fn text_erb_templates_are_analysis_only_and_json_erb_is_rendered() {
         .filter(|v| v.analysis_only)
         .map(|v| format!("{}.{}", v.name.as_str(), v.format.as_str()))
         .collect();
-    assert_eq!(analysis_only, vec!["product_mailer/in_stock.text"]);
+    assert!(analysis_only.is_empty(), "{analysis_only:?}");
+    let text = app.views.iter().find(|v| v.name.as_str() == "product_mailer/in_stock" && v.format.as_str() == "text").expect("text view");
+    assert!(roundhouse::lower::view::lowers_through_view_path(text));
     let manifest = app.views.iter().find(|v| v.name.as_str() == "pwa/manifest").expect("manifest ingested");
     assert!(!manifest.jbuilder, "a json.erb is text, not jbuilder");
     assert!(roundhouse::lower::view::lowers_through_view_path(manifest));
@@ -5589,6 +5613,60 @@ fn a_vite_tag_without_a_manifest_entry_is_a_survey_gap() {
     );
 }
 
+/// On a large real app, `vite_typescript_tag 'sign_up.ts', crossorigin:
+/// 'anonymous'` was an ingest gap for the whole call — the extra keyword
+/// alone, not a missing manifest entry — which blocked every route that
+/// reached the view. `crossorigin:`, a boolean attribute (`defer:`) and a
+/// `data:` hash all pass through the way vite_rails forwards them to
+/// `javascript_include_tag`, so none of this is a gap any more.
+#[test]
+fn vite_tag_html_options_pass_through_without_a_survey_gap() {
+    let layout = (
+        "app/views/layouts/application.html.erb",
+        "<html><head><%= vite_javascript_tag \"application\", crossorigin: \"anonymous\", defer: true, data: { turbo_track: \"reload\" } %></head><body><%= yield %></body></html>\n",
+    );
+    let (messages, gaps) = vite_check(&[layout, VITE_MANIFEST]);
+    assert!(messages.iter().all(|m| !m.contains("vite_")), "{messages:#?}");
+    assert!(gaps.is_empty(), "{gaps:#?}");
+}
+
+/// `skip_preload_tags:`/`skip_style_tags:`/`media:` and the like change
+/// which tags get emitted, not just which attributes they carry —
+/// approximating them would silently produce the wrong markup, so they
+/// still gap the whole call, but the survey message now names the
+/// specific option rather than a blanket "options ... are not modeled".
+#[test]
+fn a_structural_vite_tag_option_still_gaps_by_name() {
+    let layout = (
+        "app/views/layouts/application.html.erb",
+        "<html><head><%= vite_javascript_tag \"application\", skip_preload_tags: true %></head><body><%= yield %></body></html>\n",
+    );
+    let (_, gaps) = vite_check(&[layout, VITE_MANIFEST]);
+    assert!(
+        gaps.iter().any(|g| g.contains("`vite_javascript_tag`: option `skip_preload_tags` is not modeled")),
+        "{gaps:#?}"
+    );
+}
+
+/// `aria:` needs its own array/boolean token-join rules we don't model
+/// yet — dropping just that option (rather than gapping the whole call,
+/// as an unrepresentable value in `crossorigin:`/`type:` still does) is
+/// what keeps a single odd option from blocking a route that otherwise
+/// has nothing wrong with it.
+#[test]
+fn an_unrepresentable_vite_tag_option_is_dropped_not_a_whole_call_gap() {
+    let layout = (
+        "app/views/layouts/application.html.erb",
+        "<html><head><%= vite_javascript_tag \"application\", crossorigin: \"anonymous\", aria: { hidden: true } %></head><body><%= yield %></body></html>\n",
+    );
+    let (messages, gaps) = vite_check(&[layout, VITE_MANIFEST]);
+    assert!(messages.iter().all(|m| !m.contains("vite_")), "{messages:#?}");
+    assert!(
+        gaps.iter().any(|g| g.contains("`vite_javascript_tag`: option(s) `aria` are not modeled and were dropped")),
+        "{gaps:#?}"
+    );
+}
+
 /// `include ActionView::RecordIdentifier` is admitted on a model and on a
 /// plain library class (no "includes unresolved" refusal), and `dom_id` /
 /// `dom_class` — the module's public surface — type as String there.
@@ -5630,6 +5708,31 @@ fn record_identifier_include_is_admitted_and_dom_calls_are_strings() {
         .expect("Presenter");
     let row = presenter.methods.iter().find(|m| m.name.as_str() == "row").expect("row");
     assert_eq!(row.body.ty, Some(Ty::Str), "Presenter#row");
+}
+
+/// A backtick literal is `Kernel#``: a String, unless the class defines
+/// its own ` (Ruby dispatches the literal to it), whose return wins.
+#[test]
+fn a_backtick_types_as_string_unless_the_class_defines_its_own() {
+    let app = app_from_files(&[
+        (
+            "app/models/application_record.rb",
+            "class ApplicationRecord < ActiveRecord::Base\n  primary_abstract_class\nend\n",
+        ),
+        (
+            "lib/shells.rb",
+            "class Shell\n  def run\n    `ls`\n  end\nend\n\nclass FakeShell\n  def `(cmd)\n    [cmd]\n  end\n\n  def run\n    `ls`\n  end\nend\n\nclass ClassOnly\n  def self.`(cmd)\n    [cmd]\n  end\n\n  def run\n    `ls`\n  end\nend\n\nclass InstanceOnly\n  def `(cmd)\n    [cmd]\n  end\n\n  def self.run\n    `ls`\n  end\nend\n",
+        ),
+    ]);
+    let run = |name: &str| {
+        let class = app.library_classes.iter().find(|c| c.name.0.as_str() == name).expect(name);
+        class.methods.iter().find(|m| m.name.as_str() == "run").expect("run").body.ty.clone()
+    };
+    assert_eq!(run("Shell"), Some(Ty::Str), "Shell#run");
+    assert!(matches!(run("FakeShell"), Some(Ty::Array { .. })), "FakeShell#run: {:?}", run("FakeShell"));
+    // A method on the other side is not an override of this call.
+    assert_eq!(run("ClassOnly"), Some(Ty::Str), "ClassOnly#run");
+    assert_eq!(run("InstanceOnly"), Some(Ty::Str), "InstanceOnly.run");
 }
 
 /// Only the BARE `dom_id` is the mixed-in helper (emit qualifies bare

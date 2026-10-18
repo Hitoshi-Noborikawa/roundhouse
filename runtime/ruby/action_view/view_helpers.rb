@@ -305,6 +305,44 @@ module ActionView
       value
     end
 
+    # Every element's fragment in one lookup, as Rails' collection
+    # renderer asks its `collection_cache.read_multi`: the hits in the
+    # order of `names`, `nil` for a miss.
+    def self.collection_fragment_read_multi(names)
+      names.map { |name| ActionView::ViewHelpers.collection_fragment_read(name) }
+    end
+
+    # Told once a cached collection has rendered: the partial's template
+    # (`app/views/messages/_message.html.erb`) and what the store
+    # answered for each element. Rails reports the same facts as its
+    # `render_collection.action_view` event; nothing listens here, and
+    # the ruby family's test support reports them.
+    def self.collection_rendered(_identifier, _hits)
+      nil
+    end
+
+    # A jbuilder template wrapped in `json.cache! key do … end` reads and
+    # writes its JSON through these (`lower::jbuilder_to_library`,
+    # `walk_cached_template`). Caching is off here, so the lowering
+    # renders the block; the ruby family and spinel reopen them with the
+    # controller and Jbuilder's own `_read_fragment_cache` /
+    # `_write_fragment_cache`.
+    def self.jbuilder_caching?
+      false
+    end
+
+    def self.jbuilder_cache_key(template, _key)
+      template
+    end
+
+    def self.jbuilder_fragment_read(_key)
+      nil
+    end
+
+    def self.jbuilder_fragment_write(_key, value)
+      value
+    end
+
     def self.to_query(params)
       to_query_pairs(params, "")
     end
@@ -419,8 +457,22 @@ module ActionView
       return s if s.length <= length
       cutoff = length - omission.length
       return omission if cutoff <= 0
-      cutoff = s.rindex(separator, cutoff) || cutoff if separator
+      unless separator.nil?
+        found = rindex_at_or_before(s, separator, cutoff)
+        cutoff = found if found >= 0
+      end
       "#{s[0, cutoff]}#{omission}"
+    end
+
+    # Not `s.rindex(sub, pos)`, which no strict target's runtime answers, and -1 rather than nil, which Go and C# do not narrow from a local.
+    def self.rindex_at_or_before(s, sub, pos)
+      i = s.length - sub.length
+      i = pos if pos < i
+      while i >= 0
+        return i if s[i, sub.length] == sub
+        i -= 1
+      end
+      -1
     end
 
     # Rails 8.1.4's ActionView::TextHelper#word_wrap for positive widths.
@@ -857,10 +909,12 @@ module ActionView
       ActionController.masked_authenticity_token
     end
   
-    # Empty in dev mode without a CSP nonce configured, mirroring Rails'
-    # behavior and the other targets' runtimes (Rust / Python / Elixir
-    # all return "" here). Production deployment with CSP wired would
-    # plug a real nonce in.
+    # Empty when no policy is configured. The ruby family reopens this
+    # in `view_helpers_ext.rb` and emits the meta tag Rails'
+    # `csp_meta_tag` emits once `Rails.application.content_security_policy`
+    # is set (the object a request duplicates). Strict targets have no
+    # request in a view helper, so they stay empty — the same split as
+    # `url_for_path`.
     def self.csp_meta_tag
       ""
     end

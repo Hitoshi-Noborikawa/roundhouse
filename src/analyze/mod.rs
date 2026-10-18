@@ -28,6 +28,7 @@ mod enum_raw_input;
 mod body;
 mod class_configuration;
 mod data;
+mod class_new;
 pub(crate) use body::{indexed_pluck, lexical_class, string_answers};
 pub(crate) use body::ConstResolverTask;
 pub use body::PreparedConstResolver;
@@ -58,7 +59,7 @@ pub mod inquiry;
 pub mod indifferent;
 pub use inferred_types::inferred_types;
 pub use inquiry::inquirer_methods;
-pub use diagnostics::{diagnose, diagnose_with_coverage, unknown_receiver_sends, UnknownReceiverSend};
+pub use diagnostics::{diagnose, diagnose_helper_modules, diagnose_with_coverage, unknown_receiver_sends, UnknownReceiverSend};
 
 pub use body::{BodyTyper, ClassInfo, ConstScope, Ctx};
 pub(crate) use body::PARAM_VALUE;
@@ -124,6 +125,9 @@ pub struct Analyzer {
     inquirers: std::collections::HashSet<Symbol>,
     /// The app's translations, for `t` / `I18n.t` (see `crate::i18n`).
     i18n: crate::i18n::Catalog,
+    /// `app/helpers` modules, whose bodies run in a view and take
+    /// ActionView's `t`.
+    helper_modules: std::collections::HashSet<ClassId>,
     /// Per-(controller, method) ivar bindings AS REFINED by Phase B,
     /// carried across fixpoint rounds.
     ///
@@ -147,6 +151,8 @@ pub struct Analyzer {
     typed_constants: IdentityHashMap<DeclarationId, Ty>,
     /// Literal Data constants on library classes, keyed by source span.
     data_factories: HashMap<crate::span::Span, Ty>,
+    /// Opt-in source analysis; the emit pipeline never registers these facts.
+    class_factories: HashMap<crate::span::Span, Ty>,
     /// Registered Data factories that use the generated initializer, so
     /// `.new` call-site types do not manufacture a source `initialize`.
     data_factories_without_custom_initialize: HashSet<ClassId>,
@@ -182,6 +188,14 @@ impl Analyzer {
     /// the default preserves the status quo.
     pub fn new(app: &App) -> Self {
         Self::with_adapter(app, Box::new(SqliteAdapter))
+    }
+
+    /// Source consumers may recover retained Class.new identities. Emission
+    /// keeps using `new`, preserving its typed IR, refusal stubs and signatures.
+    pub fn for_source(app: &App) -> Self {
+        let mut analyzer = Self::new(app);
+        analyzer.class_factories = class_new::register(app, &analyzer.const_resolver, &mut analyzer.classes);
+        analyzer
     }
 
     /// Build an analyzer with a specific database adapter. Use this
@@ -497,6 +511,10 @@ impl Analyzer {
             // `serialize :col, coder: …` — the column reads back as the
             // coder's object, not the storage text.
             register_serialized_columns(&model.body, &mut cls.instance_methods);
+            // A project extension's attribute macros (`crate::extensions`):
+            // gem column DSLs whose attributes read back as the DSL's own
+            // value object.
+            register_attribute_macros(&model.body, &app.extensions, &mut cls.instance_methods);
             // `attribute :name, :type` virtual attributes (ActiveModel) —
             // backed by something other than a schema column, so absent
             // from `model.attributes` above.
@@ -969,6 +987,9 @@ impl Analyzer {
         registry::ar::register(&mut classes);
         registry::ar::register_action_text(&mut classes);
         registry::ar::register_action_cable(&mut classes);
+        if app.gem_lock.as_ref().is_some_and(|lock| lock.has("sentry-ruby")) {
+            registry::ar::register_sentry(&mut classes);
+        }
 
         // ActiveModel::Validations / Model modules + the ActiveModel::Errors
         // collection and individual ActiveModel::Error classes — see
@@ -1046,6 +1067,10 @@ impl Analyzer {
             if !includes.is_empty() {
                 cls.includes = includes;
             }
+            for sibling in &controller.sibling_classes {
+                let id = ClassId(sibling.name.clone());
+                classes.entry(id).or_default().parent = Some(ClassId(sibling.parent.clone()));
+            }
         }
 
         // Classes a locked gem's RBI declares. After everything the app
@@ -1063,6 +1088,11 @@ impl Analyzer {
             .chain(app.library_classes.iter().map(|lc| &lc.name))
         {
             if let Some(info) = classes.get_mut(id) {
+                info.app_declared = true;
+            }
+        }
+        for sibling in app.controllers.iter().flat_map(|c| &c.sibling_classes) {
+            if let Some(info) = classes.get_mut(&ClassId(sibling.name.clone())) {
                 info.app_declared = true;
             }
         }
@@ -1174,10 +1204,12 @@ impl Analyzer {
             refined_action_bindings: HashMap::new(),
             inquirers: inquiry::inquirer_methods(app),
             i18n: app.i18n.clone(),
+            helper_modules: app.helper_method_index.values().cloned().collect(),
             const_resolver,
             source_indexed: !app.sources.is_empty(),
             typed_constants: IdentityHashMap::default(),
             data_factories,
+            class_factories: HashMap::new(),
             data_factories_without_custom_initialize,
             view_seeds: None,
             callers_by_target: HashMap::new(),
@@ -1192,9 +1224,10 @@ impl Analyzer {
     fn body_typer(&self) -> BodyTyper<'_> {
         let typer = BodyTyper::new(&self.classes)
             .with_inquirers(&self.inquirers)
-            .with_i18n(&self.i18n)
+            .with_i18n(&self.i18n, &self.helper_modules)
             .with_typed_constants(&self.typed_constants)
             .with_data_factories(&self.data_factories);
+        let typer = typer.with_class_factories(&self.class_factories);
         if self.source_indexed { typer.with_const_resolver(self.const_resolver.clone()) } else { typer }
     }
 
@@ -1269,7 +1302,7 @@ impl Analyzer {
         // An unresolvable include is a load-time error, not an open method
         // surface. Keep it in the class-body ledger even when no method is called.
         for class in &mut app.library_classes {
-            for included in &class.includes {
+            for (i, included) in class.includes.iter().enumerate() {
                 let known = self.classes.contains_key(included)
                     || body::lexical_class(included, class.name.0.as_str(), &self.classes).is_some()
                     || body::RUBY_TOP_LEVEL.contains(&included.0.as_str())
@@ -1283,7 +1316,11 @@ impl Analyzer {
                 if class.unknown_calls.iter().any(|call| matches!(&call.diagnostic,
                     Some(crate::diagnostic::DiagnosticKind::Unsupported { construct, detail: old, .. })
                     if construct.as_str() == "include" && old == &detail)) { continue; }
-                let mut refusal = crate::expr::Expr::new(crate::span::Span::synthetic(),
+                // The call's own span, carried alongside `includes` since
+                // #58 — `Span::synthetic()` when ingest didn't record one
+                // (an older cache, or a lowering-synthesized class).
+                let span = class.include_spans.get(i).copied().unwrap_or_default();
+                let mut refusal = crate::expr::Expr::new(span,
                     crate::expr::ExprNode::Lit { value: crate::expr::Literal::Nil });
                 refusal.diagnostic = Some(crate::diagnostic::DiagnosticKind::Unsupported {
                     target: None, construct: Symbol::from("include"), detail,
@@ -1660,17 +1697,6 @@ impl Analyzer {
             }
         }
 
-        if let Ok(name) = std::env::var("RH_DEBUG_CLASS") {
-            let id = ClassId(Symbol::from(name.as_str()));
-            if let Some(ci) = self.classes.get(&id) {
-                for ((c, m, side), v) in &self.inferred_params {
-                    if c == &id {
-                        let sep = if *side == MethodReceiver::Class { "." } else { "#" };
-                    }
-                }
-            } else {
-            }
-        }
         // Direct-helper bodies last: they are the one app-authored
         // expression the fixpoint above never touches, and typing them
         // needs the registry it produces.
@@ -1932,17 +1958,12 @@ impl Analyzer {
                     .iter()
                     .enumerate()
                     .map(|(i, p)| {
-                        // A rest slot stays untyped. `collect_send_sites`
-                        // records argument types BY POSITION, so the
-                        // slot under a `*streams` sees only whatever
-                        // landed in that one position — the second and
-                        // later varargs of the same call are recorded
-                        // against positions that have no param at all.
-                        // `Utils.silence_stream(STDOUT, STDERR)` unified
-                        // to `*STDERR streams`, a declaration about
-                        // every vararg made from one of them.
+                        // Not the slot's own position alone: the second
+                        // and later varargs of a call land on positions
+                        // past it, so `Utils.silence_stream(STDOUT,
+                        // STDERR)` once declared `*STDERR streams`.
                         let ty = if p.rest {
-                            Ty::Untyped
+                            rest_element(inferred.map(|v| v.get(i..).unwrap_or_default()).unwrap_or_default())
                         } else {
                             param_ty_with_default(inferred.and_then(|v| v.get(i)).cloned(), p)
                                 .unwrap_or(Ty::Untyped)
@@ -2165,6 +2186,7 @@ impl Analyzer {
                 .with_inquirers(&self.inquirers)
                 .with_typed_constants(&resolved)
                 .with_data_factories(&self.data_factories);
+            let typer = typer.with_class_factories(&self.class_factories);
             let typer = if self.source_indexed { typer.with_const_resolver(self.const_resolver.clone()) } else { typer };
             for (self_ty, name, id, value, production) in entries.iter_mut() {
                 let ctx = Ctx {
@@ -3882,7 +3904,7 @@ impl Analyzer {
                     self.body_typer().analyze_expr(initializer, &class_ctx);
                 }
                 for (_, value) in &mut lc.constants {
-                    if self.data_factories.contains_key(&value.span) {
+                    if self.data_factories.contains_key(&value.span) || self.class_factories.contains_key(&value.span) {
                         self.body_typer().analyze_expr(value, &class_ctx);
                     }
                 }
@@ -4526,8 +4548,14 @@ impl Analyzer {
                 ctx.local_bindings.insert(param.name.clone(), Ty::Untyped);
                 continue;
             }
-            let from_sites = observed.and_then(|v| v.get(i)).cloned();
-            let seeded = param_ty_with_default(from_sites, param);
+            let seeded = if param.rest && !param.keyword && !param.forwarding {
+                match rest_element(observed.map(|v| v.get(i..).unwrap_or_default()).unwrap_or_default()) {
+                    Ty::Untyped => None,
+                    elem => Some(Ty::Array { elem: std::sync::Arc::new(elem) }),
+                }
+            } else {
+                param_ty_with_default(observed.and_then(|v| v.get(i)).cloned(), param)
+            };
             let ty = prefer_declared(
                 self.declared_param_ty(class_id, &method.name, positional, &param.name),
                 seeded,
@@ -5672,6 +5700,17 @@ impl Analyzer {
     ) {
         let mut observations = Vec::new();
         for (class_id, method, arg_tys, kw_tys, recv) in sites {
+            // `Job.perform_later(x)` runs `Job#perform(x)`: ActiveJob serializes the arguments and hands them back as they were.
+            let method = match method.as_str() {
+                "perform_later" | "perform_now"
+                    if recv == SiteRecv::Class
+                        && !defined.contains(&(class_id.clone(), method.clone(), MethodReceiver::Class))
+                        && self.classes.get(&class_id).is_some_and(|c| c.class_methods.contains_key(&method)) =>
+                {
+                    Symbol::from("perform")
+                }
+                _ => method,
+            };
             let want = if recv == SiteRecv::Instance { MethodReceiver::Instance } else { MethodReceiver::Class };
             let on_side = self.inherited_param_owner(defined, class_id.clone(), &method, Some(want));
             // Not the nearest `def` of either side: `Child.fetch` reaches `Grand.fetch` past a `Base#fetch`.
@@ -6216,9 +6255,15 @@ impl Analyzer {
                     _ => SiteRecv::Instance,
                 };
                 if !recv_classes.is_empty() {
+                    // Past a `*list` the positions are unknown: its elements land wherever its length puts them.
+                    let spread = args.iter().position(|a| matches!(&*a.node, ExprNode::Splat { .. })).unwrap_or(args.len());
                     let arg_tys: Vec<Ty> = args
                         .iter()
-                        .map(|a| {
+                        .enumerate()
+                        .map(|(at, a)| {
+                            if at >= spread {
+                                return Ty::Untyped;
+                            }
                             let t = a.ty.clone().unwrap_or(Ty::Var { var: crate::ident::TyVar(0) });
                             // Template call sites are evidence of what
                             // callers pass; an `Untyped` arg there
@@ -7348,6 +7393,17 @@ fn block_filter_gates(call: &Expr) -> (Vec<Symbol>, Vec<Symbol>) {
 /// every observation is joined: `bound` doesn't distribute over the
 /// join, so bounding after each pairwise join made a slot depend on
 /// the order its call sites were visited in (#617).
+/// What every vararg a `*rest` slot collects was observed as: the join
+/// of the positions from the slot on, `Untyped` when any is unknown or
+/// none was seen.
+fn rest_element(observed: &[Ty]) -> Ty {
+    let seen: Vec<&Ty> = observed.iter().filter(|t| !matches!(t, Ty::Var { .. })).collect();
+    if seen.is_empty() || seen.iter().any(|t| matches!(t, Ty::Untyped)) {
+        return Ty::Untyped;
+    }
+    seen.into_iter().cloned().reduce(unify_param_ty).unwrap_or(Ty::Untyped)
+}
+
 pub(crate) fn fold_param_observations(
     rows: &mut HashMap<ParamKey, Vec<Ty>>,
     observations: Vec<(ParamKey, Vec<Ty>)>,
@@ -8722,6 +8778,8 @@ fn register_has_rich_text(model: &crate::dialect::Model, methods: &mut HashMap<S
         let content = Ty::Class { id: rich_text::content_class(), args: vec![].into() };
         methods.insert(Symbol::from("body"), content);
         methods.entry(Symbol::from("body=")).or_insert(Ty::Str);
+        // `push_record_methods` defines it: the column as stored.
+        methods.entry(Symbol::from("body_before_type_cast")).or_insert(Ty::Str);
         for (name, ret) in [
             ("to_s", Ty::Str),
             ("to_plain_text", Ty::Str),
@@ -8878,6 +8936,50 @@ fn register_serialized_columns(body: &[ModelBodyItem], methods: &mut HashMap<Sym
         for name in args.iter().map_while(symbol_arg) {
             methods.insert(name.clone(), Ty::Untyped);
             methods.insert(Symbol::from(format!("{}=", name.as_str())), Ty::Untyped);
+        }
+    }
+}
+
+/// A project extension's `attribute_macros` (`crate::extensions`): a
+/// class-body DSL call such as `price_column :amount, currency: :usd` or
+/// `bag_columns attributes: [:total, :tax]` whose symbol arguments name
+/// attributes. The schema holds a number, but the attribute reads back as
+/// the DSL's value object, which is not modeled here. That is an unmodeled
+/// gem boundary, so the reader and writer are gradual rather than the
+/// storage type. `insert`, as for `serialize`: this deliberately overrides
+/// the schema-derived type.
+fn register_attribute_macros(
+    body: &[ModelBodyItem],
+    extensions: &crate::extensions::Extensions,
+    methods: &mut HashMap<Symbol, Ty>,
+) {
+    use crate::extensions::MacroAttributes;
+    if extensions.attribute_macros.is_empty() {
+        return;
+    }
+    for item in body {
+        let ModelBodyItem::Unknown { expr, .. } = item else { continue };
+        let ExprNode::Send { recv: None, method, args, .. } = &*expr.node else { continue };
+        let Some(spec) = extensions.attribute_macro(method.as_str()) else { continue };
+        let mut names: Vec<Symbol> = Vec::new();
+        match &spec.attributes {
+            MacroAttributes::Positional => names.extend(args.iter().map_while(symbol_arg).cloned()),
+            MacroAttributes::HashKey(key) => {
+                for arg in args {
+                    let ExprNode::Hash { entries, .. } = &*arg.node else { continue };
+                    for (k, v) in entries {
+                        if symbol_arg(k).is_some_and(|k| k.as_str() == key) {
+                            if let ExprNode::Array { elements, .. } = &*v.node {
+                                names.extend(elements.iter().filter_map(symbol_arg).cloned());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        for name in names {
+            methods.insert(Symbol::from(format!("{}=", name.as_str())), Ty::Untyped);
+            methods.insert(name, Ty::Untyped);
         }
     }
 }
