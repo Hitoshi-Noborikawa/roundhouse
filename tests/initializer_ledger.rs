@@ -246,10 +246,10 @@ fn a_spelling_the_recognizer_does_not_read_stays_in_the_ledger() {
 
 #[test]
 fn a_recognizer_that_does_not_apply_leaves_its_statement_in_the_ledger() {
-    // `session_store` is read only from session_store.rb; a time format only
+    // The long forgery setting spelling is unread; a time format is read only
     // at the top level; `config.x` assignments only at the top or in configure.
     let (_, ledger) = ingest(&[
-        ("config/initializers/other.rb", "Rails.application.config.session_store :cookie_store, key: \"_app\"\n"),
+        ("config/initializers/other.rb", "Rails.application.config.action_controller.forgery_protection_verification_strategy = :header_only\n"),
         (
             "config/initializers/nested.rb",
             "Rails.application.config.to_prepare do\n  Time::DATE_FORMATS[:short_date] = \"%b %e\"\n  Rails.application.config.app_version = \"1\"\nend\n",
@@ -260,11 +260,23 @@ fn a_recognizer_that_does_not_apply_leaves_its_statement_in_the_ledger() {
     assert_eq!(
         got,
         [
+            "Rails.application.config.action_controller.forgery_protection_verification_strat",
             "Rails.application.config.app_version =",
-            "Rails.application.config.session_store",
             "Time::DATE_FORMATS[] =",
         ]
     );
+}
+
+#[test]
+fn a_session_store_in_another_initializer_reaches_the_cookie_key() {
+    let (app, ledger) = ingest(&[(
+        "config/initializers/other.rb",
+        "Rails.application.config.session_store :cookie_store, key: \"_app\"\n",
+    )]);
+    assert!(ledger.is_empty());
+    let application = app.rails_application.expect("initializer application reopen");
+    let method = application.methods.iter().find(|m| m.name.as_str() == "session_cookie_key").unwrap();
+    assert!(roundhouse::emit::ruby::emit_method(method).contains("_app"));
 }
 
 #[test]
