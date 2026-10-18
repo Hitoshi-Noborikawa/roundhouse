@@ -1320,7 +1320,7 @@ fn emit_send(recv: Option<&Expr>, method: &str, args: &[Expr]) -> String {
     // idiom `Time.now.utc.iso8601` maps to
     // `DateTime.to_iso8601(DateTime.utc_now())`: `.utc` is the identity
     // (already UTC) and `.iso8601` wraps in `DateTime.to_iso8601`.
-    if method == "now" && args.is_empty() {
+    if matches!(method, "now" | "utc") && args.is_empty() {
         if let Some(r) = recv {
             if let ExprNode::Const { path } = &*r.node {
                 if path.last().map(|s| s.as_str()) == Some("Time") {
@@ -1334,7 +1334,7 @@ fn emit_send(recv: Option<&Expr>, method: &str, args: &[Expr]) -> String {
             return emit_expr(r);
         }
     }
-    if method == "iso8601" && args.is_empty() {
+    if matches!(method, "iso8601" | "to_rfc3339") && args.is_empty() {
         if let Some(r) = recv {
             return format!("DateTime.to_iso8601({})", emit_expr(r));
         }

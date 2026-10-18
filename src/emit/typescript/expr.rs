@@ -2262,6 +2262,20 @@ fn js_send_inner(
             }
         }
     }
+    // Lowered clock: `Time.utc` (no args) is `Time.now.utc` after
+    // `time_calendar`. Same `new Date()` as `Time.now`.
+    if method == "utc" && args.is_empty() {
+        if let Some(r) = recv {
+            if let ExprNode::Const { path } = &*r.node {
+                if path.last().is_some_and(|s| s.as_str() == "Time") {
+                    return Js::new(
+                        span,
+                        JsExpr::New { callee: Js::ident(span, "Date"), args: vec![] },
+                    );
+                }
+            }
+        }
+    }
     // Ruby stdlib `JSON.generate(x)` → JS `JSON.stringify(x)`. Same
     // semantics for the framework runtime's use cases. The companion
     // `JSON.parse` is identical in both languages — passes through
@@ -2335,7 +2349,7 @@ fn js_send_inner(
     }
     // `<date>.iso8601` → `.toISOString()` — produces the Z-suffix
     // ISO-8601 string Ruby's Time#iso8601 does.
-    if method == "iso8601" && args.is_empty() && recv.is_some() {
+    if matches!(method, "iso8601" | "to_rfc3339") && args.is_empty() && recv.is_some() {
         return Js::method_call(span, js_expr(recv.unwrap()), "toISOString", vec![]);
     }
     // Ruby has both `Regexp#match?(str)` and `String#match?(re)`.

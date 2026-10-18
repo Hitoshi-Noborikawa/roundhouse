@@ -1289,6 +1289,21 @@ pub(super) fn emit_send_base(
             return literal;
         }
     }
+    // `time_calendar` stores Crystal's clock spelling (`Time.utc`,
+    // `to_rfc3339`). MRI `Time.utc` requires a year, and Time has
+    // `iso8601` rather than `to_rfc3339`, so the ruby target prints the
+    // MRI names of that same IR. `Time.utc(year, …)` and `iso8601(n)`
+    // are different calls and stay as written.
+    if m == "to_rfc3339" && args.is_empty() && recv.is_some() {
+        return emit_send_base(recv, &Symbol::from("iso8601"), args, parenthesized);
+    }
+    if m == "utc" && args.is_empty() {
+        if let Some(r) = recv {
+            if matches!(&*r.node, ExprNode::Const { path } if path.last().is_some_and(|s| s.as_str() == "Time")) {
+                return format!("{}.now.utc", emit_expr(r));
+            }
+        }
+    }
     // `...` is a send argument packet, never an index or infix operand.
     // Preserve explicit call syntax even for operator/setter method names
     // and `self`, before any surface-syntax prettification below.

@@ -264,3 +264,79 @@ fn a_temporal_reader_presents_its_memo_on_every_read() {
         "{out}"
     );
 }
+
+fn lowered_probe(body: &str) -> roundhouse::expr::Expr {
+    let tree = [
+        ("db/schema.rb", SCHEMA.to_string()),
+        (
+            "app/models/event.rb",
+            format!("class Event < ApplicationRecord\n  def probe\n    {body}\n  end\nend\n"),
+        ),
+    ]
+    .into_iter()
+    .map(|(p, s)| (std::path::PathBuf::from(p), s.into_bytes()))
+    .collect();
+    let mut app = ingest_app_from_tree(tree).expect("ingest");
+    roundhouse::session::analyze_and_lower(&mut app);
+    let model = app.models.iter().find(|m| m.name.0.as_str() == "Event").expect("Event");
+    for item in &model.body {
+        if let roundhouse::dialect::ModelBodyItem::Method { method, .. } = item {
+            if method.name.as_str() == "probe" {
+                return method.body.clone();
+            }
+        }
+    }
+    panic!("no probe");
+}
+
+/// Method names as the lowerer left them, before any emitter prints.
+fn ir_shape(e: &roundhouse::expr::Expr) -> String {
+    use roundhouse::expr::ExprNode;
+    match &*e.node {
+        ExprNode::Send { recv, method, args, .. } => {
+            let recv = recv.as_ref().map(|r| format!("{}.", ir_shape(r))).unwrap_or_default();
+            let args: Vec<String> = args.iter().map(ir_shape).collect();
+            if args.is_empty() {
+                format!("{recv}{}", method.as_str())
+            } else {
+                format!("{recv}{}({})", method.as_str(), args.join(", "))
+            }
+        }
+        ExprNode::Const { path } => path.iter().map(|s| s.as_str()).collect::<Vec<_>>().join("::"),
+        ExprNode::Lit { value: roundhouse::expr::Literal::Int { value } } => value.to_string(),
+        ExprNode::Var { name, .. } => name.as_str().to_string(),
+        other => format!("{other:?}"),
+    }
+}
+
+/// Fails when `Time.now.utc` / zero-arg `iso8601` are renamed only while
+/// Crystal prints. The IR already has Crystal's spelling; Crystal's
+/// printer does not match on the old names.
+#[test]
+fn crystal_clock_spelling_is_in_the_ir() {
+    let clock = lowered_probe("Time.now.utc.iso8601");
+    assert_eq!(ir_shape(&clock), "Time.utc.to_rfc3339", "rename stayed in an emitter");
+    assert_eq!(
+        roundhouse::emit::crystal::emit_expr_for_runtime(&clock),
+        "Time.utc.to_rfc3339"
+    );
+    // MRI cannot run the IR spelling. Ruby emit prints it back.
+    assert_eq!(
+        roundhouse::emit::ruby::emit_expr(&clock),
+        "Time.now.utc.iso8601"
+    );
+
+    let current = lowered_probe("Time.current");
+    assert_eq!(ir_shape(&current), "Time.utc");
+
+    let ctor = lowered_probe("Time.utc(2020, 1, 2)");
+    assert_eq!(ir_shape(&ctor), "Time.utc(2020, 1, 2)");
+    let ctor_crystal = roundhouse::emit::crystal::emit_expr_for_runtime(&ctor);
+    assert!(
+        ctor_crystal.starts_with("Time.utc(") && !ctor_crystal.contains("now"),
+        "{ctor_crystal}"
+    );
+
+    let fraction = lowered_probe("starts_at.iso8601(3)");
+    assert_eq!(ir_shape(&fraction), "starts_at.iso8601(3)");
+}

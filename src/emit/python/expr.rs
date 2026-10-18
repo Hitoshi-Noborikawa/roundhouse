@@ -1140,23 +1140,24 @@ pub(super) fn emit_send(recv: Option<&Expr>, method: &str, args: &[Expr], parent
     // timestamp columns; `.utc` is then a no-op (the value is already
     // UTC) and `.iso8601` becomes `.isoformat()`. `import datetime` is
     // injected for active_record_base via the runtime-loader import list.
-    if method == "now" && args.is_empty() {
+    if matches!(method, "now" | "utc") && args.is_empty() {
         if let Some(r) = recv {
             if let ExprNode::Const { path } = &*r.node {
-                if path.len() == 1 && path[0].as_str() == "Time" {
+                if path.last().is_some_and(|s| s.as_str() == "Time") {
                     return "datetime.datetime.now(datetime.timezone.utc)".to_string();
                 }
             }
         }
     }
     // `<time>.utc` → no-op: the `Time.now` mapping is already UTC-aware.
+    // The class-method clock `Time.utc` was handled above.
     if method == "utc" && args.is_empty() {
         if let Some(r) = recv {
             return emit_expr(r);
         }
     }
-    // `<time>.iso8601` → `.isoformat()` (ISO-8601 timestamp string).
-    if method == "iso8601" && args.is_empty() {
+    // `<time>.iso8601` / lowered `to_rfc3339` → `.isoformat()`.
+    if matches!(method, "iso8601" | "to_rfc3339") && args.is_empty() {
         if let Some(r) = recv {
             return format!("{}.isoformat()", emit_expr(r));
         }

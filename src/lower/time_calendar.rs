@@ -21,6 +21,14 @@ fn rewrite(expr: &mut Expr) {
 }
 
 pub(crate) fn rewrite_node(expr: &mut Expr) {
+    // Crystal prints these names literally. The rewrite used to live in
+    // `emit/crystal/expr.rs` (`Time.now.utc` → `Time.utc`, zero-arg
+    // `iso8601` → `to_rfc3339`). Doing it here means every later pass and
+    // every emitter sees one spelling. MRI has no zero-arg `Time.utc` clock
+    // and no `Time#to_rfc3339`, so ruby emit prints the MRI names of this
+    // same IR. Runs after children, and again after `time_current`, which
+    // manufactures `Time.now.utc` from `Time.current`.
+    ground_crystal_time_bridge(expr);
     if let ExprNode::Send { recv: Some(r), method, args, block: None, .. } = &mut *expr.node {
         let time_class = matches!(&*r.node, ExprNode::Const { path }
             if path.last().is_some_and(|s| s.as_str() == "Time")
@@ -472,6 +480,75 @@ fn active_support_call(method: &str, args: Vec<Expr>) -> ExprNode {
         parenthesized: !args.is_empty(),
         args,
         block: None,
+    }
+}
+
+/// `Time.now.utc` (zero args, `Time` constant) → `Time.utc`.
+/// Zero-arg `iso8601` → `to_rfc3339`.
+///
+/// Same match the Crystal emitter used to apply at print time, including
+/// `iso8601` on a non-Time receiver and `::Time`. `Time.utc(year, …)` and
+/// `iso8601(n)` stay: Crystal's clock is the no-arg class method, and an
+/// explicit fraction is a different call.
+pub(crate) fn ground_crystal_time_bridge(expr: &mut Expr) {
+    enum Step {
+        Iso,
+        Clock(Expr),
+    }
+    let step = match &*expr.node {
+        ExprNode::Send { recv: Some(r), method, args, block: None, .. } => {
+            if method.as_str() == "iso8601" && args.is_empty() {
+                Step::Iso
+            } else if method.as_str() == "utc" && args.is_empty() {
+                match time_now_const(r) {
+                    Some(time) => Step::Clock(time),
+                    None => return,
+                }
+            } else {
+                return;
+            }
+        }
+        _ => return,
+    };
+    match step {
+        Step::Iso => {
+            if let ExprNode::Send { method, .. } = &mut *expr.node {
+                *method = Symbol::from("to_rfc3339");
+            }
+        }
+        Step::Clock(time) => {
+            *expr.node = ExprNode::Send {
+                recv: Some(time),
+                method: Symbol::from("utc"),
+                args: vec![],
+                block: None,
+                parenthesized: false,
+            };
+        }
+    }
+}
+
+/// Walk `expr` after a pass that can still emit `Time.now.utc` or
+/// `iso8601` (`time_current`, including `to_fs(:iso8601)`).
+pub(crate) fn ground_crystal_time_bridge_tree(expr: &mut Expr) {
+    expr.node.for_each_child_mut(&mut ground_crystal_time_bridge_tree);
+    ground_crystal_time_bridge(expr);
+}
+
+/// The `Time` constant under `Time.now`, cloned so the clock send can
+/// reuse it as `Time.utc`.
+fn time_now_const(now_send: &Expr) -> Option<Expr> {
+    let ExprNode::Send { recv: Some(inner), method, args, block: None, .. } = &*now_send.node else {
+        return None;
+    };
+    if method.as_str() != "now" || !args.is_empty() {
+        return None;
+    }
+    let ExprNode::Const { path } = &*inner.node else { return None };
+    if path.last().is_some_and(|s| s.as_str() == "Time") {
+        Some(inner.clone())
+    } else {
+        None
     }
 }
 

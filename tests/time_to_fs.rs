@@ -101,9 +101,11 @@ fn the_older_spelling_lowers_identically() {
 
 /// Two of Rails' entries are one-line lambdas over a method the
 /// pipeline already handles, so they cost a rename, not a format.
+/// `:iso8601` lands on `to_rfc3339`, the spelling `time_calendar`
+/// gives every zero-arg `iso8601`.
 #[test]
 fn the_lambda_builtins_that_are_just_a_method_become_that_method() {
-    assert_eq!(stamp("created_at.to_fs(:iso8601)", vec![]), "created_at.iso8601");
+    assert_eq!(stamp("created_at.to_fs(:iso8601)", vec![]), "created_at.to_rfc3339");
     assert_eq!(stamp("created_at.to_fs(:rfc2822)", vec![]), "created_at.rfc2822");
 }
 
