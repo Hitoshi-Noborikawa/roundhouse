@@ -136,6 +136,7 @@ pub mod including;
 pub mod enum_symbols;
 pub mod has_json;
 pub mod serialize;
+pub mod column_slot;
 pub mod assoc_loaded;
 pub mod object_extend;
 pub mod nested_def;
