@@ -449,7 +449,7 @@ fn rewrite_hook_node(
     super::save_without_validation::rewrite_node(e);
     super::random_formatter::rewrite_node(e);
     super::number_to_fs::rewrite_node(e);
-    super::string_core_ext::rewrite_node(e, super::string_core_ext::Walk::Hooks);
+    super::string_core_ext::rewrite_fused_node(e);
     super::to_json::rewrite_node(e);
     super::preloader::rewrite_node(e);
     super::bigdecimal::rewrite_node(e);
@@ -498,7 +498,7 @@ fn rewrite_view_node(
     super::array_ordinal::rewrite_node(e);
     super::random_formatter::rewrite_node(e);
     super::number_to_fs::rewrite_node(e);
-    super::string_core_ext::rewrite_node(e, super::string_core_ext::Walk::Views);
+    super::string_core_ext::rewrite_fused_node(e);
     super::to_json::rewrite_node(e);
     super::preloader::rewrite_node(e);
     super::bigdecimal::rewrite_node(e);

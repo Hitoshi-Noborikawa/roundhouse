@@ -18,7 +18,7 @@ use crate::ty::Ty;
 
 /// Receiver the analyzer must have stamped.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum ReceiverShape {
+enum ReceiverShape {
     /// Exactly `Ty::Str`. `parameterize` does not accept `String | nil`.
     String,
     /// `Ty::Str`, or a union of only `Str` and `Nil` that contains `Str`.
@@ -44,56 +44,36 @@ impl ReceiverShape {
     }
 }
 
-/// Where a row is grounded. Hooks and views share the inflection rows.
-/// `parameterize` is model bodies only, so a view keeps the call.
+/// Where a row is grounded. The fused hook walk, the fused view walk,
+/// and the controller retype share `Fused`. `parameterize` is
+/// `ModelBodies` only, so a view keeps the call.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Coverage {
-    HooksAndViews,
-    ModelBodies,
-}
-
-/// Which walk applies a row. The name still lives only in the table.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Walk {
-    /// Fused hook bodies and the controller retype.
-    Hooks,
-    /// Fused view bodies.
-    Views,
-    /// Model methods and unknown model-body expressions.
+enum Site {
+    Fused,
     ModelBodies,
 }
 
 /// One string core-ext method.
-pub(crate) struct StringCoreExt {
-    pub name: &'static str,
-    pub receiver: ReceiverShape,
-    pub arity: usize,
-    pub runtime_receiver: &'static [&'static str],
-    pub runtime_name: &'static str,
-    pub coverage: Coverage,
+struct StringCoreExt {
+    name: &'static str,
+    receiver: ReceiverShape,
+    arity: usize,
+    runtime_receiver: &'static [&'static str],
+    runtime_name: &'static str,
+    site: Site,
     /// Inflection rows stamp `Ty::Str`. `parameterize` left the analyzer's type.
-    pub stamp_string: bool,
-}
-
-impl StringCoreExt {
-    fn applies(&self, walk: Walk) -> bool {
-        match (self.coverage, walk) {
-            (Coverage::HooksAndViews, Walk::Hooks | Walk::Views) => true,
-            (Coverage::ModelBodies, Walk::ModelBodies) => true,
-            _ => false,
-        }
-    }
+    stamp_string: bool,
 }
 
 /// The string family. Names are not repeated in the rewrite.
-pub(crate) const STRING_CORE_EXT: &[StringCoreExt] = &[
+const STRING_CORE_EXT: &[StringCoreExt] = &[
     StringCoreExt {
         name: "humanize",
         receiver: ReceiverShape::StringOrNil,
         arity: 0,
         runtime_receiver: &["ActiveSupport"],
         runtime_name: "humanize",
-        coverage: Coverage::HooksAndViews,
+        site: Site::Fused,
         stamp_string: true,
     },
     StringCoreExt {
@@ -102,7 +82,7 @@ pub(crate) const STRING_CORE_EXT: &[StringCoreExt] = &[
         arity: 0,
         runtime_receiver: &["ActiveSupport"],
         runtime_name: "titleize",
-        coverage: Coverage::HooksAndViews,
+        site: Site::Fused,
         stamp_string: true,
     },
     StringCoreExt {
@@ -111,7 +91,7 @@ pub(crate) const STRING_CORE_EXT: &[StringCoreExt] = &[
         arity: 0,
         runtime_receiver: &["ActiveSupport"],
         runtime_name: "underscore",
-        coverage: Coverage::HooksAndViews,
+        site: Site::Fused,
         stamp_string: true,
     },
     StringCoreExt {
@@ -120,7 +100,7 @@ pub(crate) const STRING_CORE_EXT: &[StringCoreExt] = &[
         arity: 0,
         runtime_receiver: &["ActiveSupport"],
         runtime_name: "demodulize",
-        coverage: Coverage::HooksAndViews,
+        site: Site::Fused,
         stamp_string: true,
     },
     StringCoreExt {
@@ -129,7 +109,7 @@ pub(crate) const STRING_CORE_EXT: &[StringCoreExt] = &[
         arity: 0,
         runtime_receiver: &["ActiveSupport"],
         runtime_name: "singularize",
-        coverage: Coverage::HooksAndViews,
+        site: Site::Fused,
         stamp_string: true,
     },
     // ActiveSupport's `String#remove` takes one or more patterns; the
@@ -140,7 +120,7 @@ pub(crate) const STRING_CORE_EXT: &[StringCoreExt] = &[
         arity: 1,
         runtime_receiver: &["ActiveSupport"],
         runtime_name: "remove",
-        coverage: Coverage::HooksAndViews,
+        site: Site::Fused,
         stamp_string: true,
     },
     StringCoreExt {
@@ -149,7 +129,7 @@ pub(crate) const STRING_CORE_EXT: &[StringCoreExt] = &[
         arity: 0,
         runtime_receiver: &["ActiveSupport", "Inflector"],
         runtime_name: "ordinalize",
-        coverage: Coverage::HooksAndViews,
+        site: Site::Fused,
         stamp_string: true,
     },
     // Zero-arg `String#parameterize` → `Inflector.parameterize(recv)`.
@@ -160,7 +140,7 @@ pub(crate) const STRING_CORE_EXT: &[StringCoreExt] = &[
         arity: 0,
         runtime_receiver: &["Inflector"],
         runtime_name: "parameterize",
-        coverage: Coverage::ModelBodies,
+        site: Site::ModelBodies,
         stamp_string: false,
     },
 ];
@@ -173,10 +153,10 @@ pub fn apply_parameterize_grounding(app: &mut App) {
         for item in &mut model.body {
             match item {
                 crate::dialect::ModelBodyItem::Method { method, .. } => {
-                    walk(&mut method.body, Walk::ModelBodies);
+                    walk(&mut method.body, Site::ModelBodies);
                 }
                 crate::dialect::ModelBodyItem::Unknown { expr, .. } => {
-                    walk(expr, Walk::ModelBodies);
+                    walk(expr, Site::ModelBodies);
                 }
                 _ => {}
             }
@@ -189,23 +169,27 @@ pub fn apply_parameterize_grounding(app: &mut App) {
 /// (untyped) into `helper.field` (String).
 pub(crate) fn ground_in_place(expr: &mut Expr) -> bool {
     let mut changed = false;
-    walk_flag(expr, Walk::Hooks, &mut changed);
+    walk_flag(expr, Site::Fused, &mut changed);
     changed
 }
 
-fn walk(expr: &mut Expr, site: Walk) {
+fn walk(expr: &mut Expr, site: Site) {
     let mut changed = false;
     walk_flag(expr, site, &mut changed);
 }
 
-fn walk_flag(expr: &mut Expr, site: Walk, changed: &mut bool) {
+fn walk_flag(expr: &mut Expr, site: Site, changed: &mut bool) {
     expr.node
         .for_each_child_mut(&mut |child| walk_flag(child, site, changed));
     *changed |= rewrite_node(expr, site);
 }
 
-/// Grounds one call on `site`. Fused walks the tree and calls this per node.
-pub(crate) fn rewrite_node(expr: &mut Expr, site: Walk) -> bool {
+/// Fused hook and view walks. Both see the `Site::Fused` rows.
+pub(crate) fn rewrite_fused_node(expr: &mut Expr) -> bool {
+    rewrite_node(expr, Site::Fused)
+}
+
+fn rewrite_node(expr: &mut Expr, site: Site) -> bool {
     let Some(matched) = match_rule(expr, site) else {
         return false;
     };
@@ -229,7 +213,7 @@ struct Matched {
     stamp_string: bool,
 }
 
-fn match_rule(expr: &Expr, site: Walk) -> Option<Matched> {
+fn match_rule(expr: &Expr, site: Site) -> Option<Matched> {
     let ExprNode::Send {
         recv: Some(receiver),
         method,
@@ -243,7 +227,7 @@ fn match_rule(expr: &Expr, site: Walk) -> Option<Matched> {
     let name = method.as_str();
     let rule = STRING_CORE_EXT
         .iter()
-        .find(|rule| rule.name == name && rule.applies(site))?;
+        .find(|rule| rule.name == name && rule.site == site)?;
     if args.len() != rule.arity || !rule.receiver.matches(receiver.ty.as_ref()) {
         return None;
     }
@@ -288,7 +272,8 @@ mod tests {
         let mut seen = std::collections::BTreeSet::new();
         for rule in STRING_CORE_EXT {
             assert!(seen.insert(rule.name), "duplicate row {}", rule.name);
-            assert_eq!(rule.runtime_name, rule.name);
+            assert!(!rule.runtime_name.is_empty(), "{}", rule.name);
+            assert!(!rule.runtime_receiver.is_empty(), "{}", rule.name);
         }
         assert_eq!(seen, NAMES.iter().copied().collect());
     }
@@ -296,21 +281,17 @@ mod tests {
     #[test]
     fn the_rewrite_does_not_hardcode_a_name() {
         let src = include_str!("string_core_ext.rs");
-        let (head, after) = src
-            .split_once("pub(crate) const STRING_CORE_EXT")
-            .expect("table");
-        let after_table = after.split_once("];").expect("end of table").1;
-        let outside = format!(
-            "{head}{}",
-            after_table.split("#[cfg(test)]").next().expect("tests")
-        );
+        let body = src
+            .split_once("fn match_rule")
+            .expect("match_rule")
+            .1
+            .split_once("\n#[cfg(test)]")
+            .expect("tests")
+            .0;
         let fused = include_str!("fused.rs");
         for name in NAMES {
             let needle = format!("\"{name}\"");
-            assert!(
-                !outside.contains(&needle),
-                "{name} is hardcoded outside the table"
-            );
+            assert!(!body.contains(&needle), "{name} is hardcoded in match_rule");
             assert!(!fused.contains(&needle), "fused hardcodes {name}");
         }
         assert!(
@@ -378,7 +359,7 @@ mod tests {
     #[test]
     fn rows_ground_on_their_walk_only() {
         let mut humanize = call(Some(Ty::Str), "humanize", 0);
-        assert!(rewrite_node(&mut humanize, Walk::Views));
+        assert!(rewrite_node(&mut humanize, Site::Fused));
         assert_eq!(
             const_path(&humanize).as_deref(),
             Some(&["ActiveSupport".to_string()][..])
@@ -392,28 +373,27 @@ mod tests {
             "humanize",
             0,
         );
-        assert!(rewrite_node(&mut nullable, Walk::Hooks));
+        assert!(rewrite_node(&mut nullable, Site::Fused));
 
         let mut ordinal = call(Some(Ty::Int), "ordinalize", 0);
-        assert!(rewrite_node(&mut ordinal, Walk::Views));
+        assert!(rewrite_node(&mut ordinal, Site::Fused));
         assert_eq!(
             const_path(&ordinal).as_deref(),
             Some(&["ActiveSupport".to_string(), "Inflector".to_string()][..])
         );
 
         let mut remove = call(Some(Ty::Str), "remove", 1);
-        assert!(rewrite_node(&mut remove, Walk::Hooks));
+        assert!(rewrite_node(&mut remove, Site::Fused));
         let mut multi = call(Some(Ty::Str), "remove", 2);
-        assert!(!rewrite_node(&mut multi, Walk::Hooks));
+        assert!(!rewrite_node(&mut multi, Site::Fused));
 
         let mut parameterize = call(Some(Ty::Str), "parameterize", 0);
         let original_ty = parameterize.ty.clone();
         assert!(
-            !rewrite_node(&mut parameterize, Walk::Views),
-            "views skip parameterize"
+            !rewrite_node(&mut parameterize, Site::Fused),
+            "the fused walk skips parameterize"
         );
-        assert!(!rewrite_node(&mut parameterize, Walk::Hooks));
-        assert!(rewrite_node(&mut parameterize, Walk::ModelBodies));
+        assert!(rewrite_node(&mut parameterize, Site::ModelBodies));
         assert_eq!(
             const_path(&parameterize).as_deref(),
             Some(&["Inflector".to_string()][..])
@@ -427,7 +407,7 @@ mod tests {
             "parameterize",
             0,
         );
-        assert!(!rewrite_node(&mut union, Walk::ModelBodies));
+        assert!(!rewrite_node(&mut union, Site::ModelBodies));
     }
 
     #[test]
