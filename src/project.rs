@@ -1761,11 +1761,11 @@ fn report_ruby_only_sends(app: &App, target: BuildTarget) {
     crate::lower::for_each_emit_body_ref(app, &mut |expr| visit(expr, target, &kernel));
 }
 
-/// A send on a typed Array or number receiver that the TypeScript emit has
+/// A send on a typed Array, number or String receiver that the TypeScript emit has
 /// no translation for: it writes the Ruby name on the JS value
 /// (`xs.zip(ys)`, `n.digits` as a property read), which throws or reads
-/// `undefined`. `emit::typescript::array_method_handled` and
-/// `numeric_method_handled` name what it does translate.
+/// `undefined`. `emit::typescript::array_method_handled`,
+/// `numeric_method_handled` and `string_method_handled` name what it does translate.
 fn report_typescript_array_sends(app: &App, target: BuildTarget) {
     if !matches!(target, BuildTarget::Typescript | BuildTarget::TypescriptWorker) {
         return;
@@ -1852,6 +1852,21 @@ fn report_typescript_array_sends(app: &App, target: BuildTarget) {
                         "the TypeScript emit has no translation for it and would call the Ruby name on a JS number",
                     );
                 }
+            }
+            let string = match r.ty.as_ref() {
+                Some(Ty::Str) => true,
+                Some(Ty::Union { variants }) => {
+                    variants.len() == 2 && variants.iter().any(|v| matches!(v, Ty::Nil)) && variants.iter().any(|v| matches!(v, Ty::Str))
+                }
+                _ => false,
+            };
+            if string && !crate::emit::typescript::string_method_handled(method.as_str(), args, block.as_ref()) {
+                crate::emit::diagnostics::report_unsupported(
+                    expr.span,
+                    target.as_str(),
+                    format!("String#{}", method.as_str()).as_str(),
+                    "the TypeScript emit has no translation for it and would call the Ruby name on a JS string",
+                );
             }
         }
         expr.node.for_each_child(&mut |child| visit(child, target, records));
