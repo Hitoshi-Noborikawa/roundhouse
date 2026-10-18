@@ -9,10 +9,11 @@ use std::collections::{BTreeMap, HashSet};
 use crate::dialect::Action;
 use crate::expr::{ArrayStyle, Expr, ExprNode, LValue, Literal};
 use crate::ident::{Symbol, VarId};
+use crate::lower::scope_chain::{AssocBuildTarget, AssocRegistry};
 use crate::span::Span;
 use crate::ty::Ty;
 
-use super::params::{AssocTarget, ParamsSpec, ParamsSpecs};
+use super::params::{ParamsSpec, ParamsSpecs};
 use super::util::{map_expr, map_expr_mut};
 
 // ---------------------------------------------------------------------------
@@ -1126,10 +1127,14 @@ fn merge_or_append_kwarg(args: &mut Vec<Expr>, key: &str, value: &str, span: Spa
 //     return
 //   end
 //
-// <Target> and <foreign_key> are the declaration's class and foreign
-// key. An association no model declares keeps the name-derived form
-// (`<Singular>`, `<parent>_id`); one declared in a way this cannot
-// reproduce is left as written.
+// <Target> and <foreign_key> are the class and foreign key of the
+// declaration the parent's model reads (its own, else its nearest
+// superclass's; the last one when a model declares the name twice, as
+// with a concern's `has_many` and the model's own after the `include`).
+// An association no model declares keeps the name-derived form
+// (`<Singular>`, `<parent>_id`). One declared in a way this cannot
+// reproduce, one whose extension defines this call (`find`, `build`, …),
+// or one the parent's model does not declare is left as written.
 //
 // One Assign expands to a Seq of multiple Exprs — the outer Seq the
 // emitter walks for line-per-statement output flattens implicitly.
@@ -1139,6 +1144,7 @@ pub(super) fn rewrite_assoc_through_parent_typed(
     expr: &Expr,
     privs: &[Action],
     params_specs: &ParamsSpecs,
+    assocs: &AssocRegistry,
 ) -> Expr {
     let helper_specs = super::params::helper_spec_map(privs, params_specs);
     map_expr(expr, &|e| {
@@ -1205,21 +1211,23 @@ pub(super) fn rewrite_assoc_through_parent_typed(
             return None;
         };
         // The class and foreign key come from the declaration
-        // (`class_name:`, `foreign_key:`) on the parent's analyzed class,
-        // the parent's value from `.id`. A declaration that expansion
-        // cannot reproduce (`primary_key:`, `through:`, `as:`, a scope
-        // that changes what is built) is declined, and the typed
-        // association seed handles or refuses the call instead.
+        // (`class_name:`, `foreign_key:`) the parent's analyzed class
+        // reads, the parent's value from `.id`. A declaration that
+        // expansion cannot reproduce (`primary_key:`, `through:`, `as:`,
+        // a scope that changes what is built or found), an extension
+        // method by this call's name, or a parent model without the
+        // association is declined, and the typed association seed
+        // handles or refuses the call instead.
         let owner = match inner_recv.ty.clone().map(Ty::strip_nil) {
             Some(Ty::Class { id, .. }) => Some(id),
             _ => None,
         };
-        let (model_class, fk) = match params_specs.assoc_target(assoc_method, owner.as_ref()) {
-            AssocTarget::Declared { target, foreign_key } => {
+        let (model_class, fk) = match assocs.build_target(owner.as_ref(), assoc_method, outer_method) {
+            AssocBuildTarget::Declared { target, foreign_key } => {
                 (target.0.as_str().to_string(), foreign_key.as_str().to_string())
             }
-            AssocTarget::Unreproducible => return None,
-            AssocTarget::Undeclared => (
+            AssocBuildTarget::Declined => return None,
+            AssocBuildTarget::Undeclared => (
                 crate::naming::singularize_camelize(assoc_method.as_str()),
                 format!("{}_id", parent_name.as_str()),
             ),

@@ -1253,6 +1253,44 @@ pub struct AssocRegistry {
     /// association names produces different flattened names, which is
     /// also correct.
     assoc_extension: std::collections::HashSet<(Symbol, Symbol)>,
+    /// `(model, has_many / has_one name)` -> what the controller's
+    /// parent-ivar rewrite expands `@parent.<name>.build` / `.find` to
+    /// (see [`Self::build_target`]). One entry per owner: a declaration
+    /// repeated on the same model (a concern's `has_many` spliced at the
+    /// `include`, then the model's own) replaces the earlier one, as it
+    /// does in Rails and in the reader the model lowerer emits last.
+    assoc_builds: HashMap<(ClassId, Symbol), AssocBuild>,
+    /// model -> its superclass, so `Story < Article` builds and finds
+    /// through the associations Article declares.
+    model_parents: HashMap<ClassId, ClassId>,
+}
+
+/// One `has_many` / `has_one` declaration, as the parent-ivar rewrite
+/// reads it (see [`AssocRegistry::build_target`]).
+struct AssocBuild {
+    target: ClassId,
+    foreign_key: Symbol,
+    /// Whether `<target>.new(<foreign_key> => parent.id)` is what Rails
+    /// builds through it, and `<target>.find` checked against the key
+    /// what it finds.
+    reproducible: bool,
+    /// The methods its extension block defines. The proxy calls those
+    /// in place of Rails' own, so a call by one of these names is not
+    /// expanded.
+    extension: Vec<Symbol>,
+}
+
+/// What `@<parent>.<assoc>.<call>` builds or finds through, for the
+/// controller's parent-ivar rewrite.
+pub enum AssocBuildTarget {
+    /// The declared class and foreign key.
+    Declared { target: ClassId, foreign_key: Symbol },
+    /// Declared in a way the rewrite does not reproduce, not declared on
+    /// the parent's model, or declared differently on several models
+    /// when the parent's model is not known.
+    Declined,
+    /// No model declares it.
+    Undeclared,
 }
 
 impl AssocRegistry {
@@ -1324,6 +1362,75 @@ impl AssocRegistry {
             .and_then(|m| self.has_many_owner_key.get(&(m.clone(), assoc.clone())))
             .cloned()
             .unwrap_or_else(|| Symbol::from("id"))
+    }
+    fn is_model(&self, class: &ClassId) -> bool {
+        self.tables.contains_key(class)
+    }
+    /// The class in `model`'s superclass chain, `model` first, nearest
+    /// declaring a `has_many` / `has_one` named `assoc`: the one whose
+    /// declaration `model.<assoc>` reads.
+    fn declaring_class<'a>(&'a self, model: &'a ClassId, assoc: &Symbol) -> Option<&'a ClassId> {
+        std::iter::successors(Some(model), |class| self.model_parents.get(*class))
+            .take(self.model_parents.len() + 1)
+            .find(|class| self.assoc_builds.contains_key(&((*class).clone(), assoc.clone())))
+    }
+    /// What `<parent>.<assoc>.<call>` (`build`, `create`, `create!`,
+    /// `find`, `find_by`) builds or finds through, given the parent's
+    /// class when the analyzer typed it.
+    ///
+    /// A parent typed as a model reads the declaration on that model or
+    /// the nearest superclass declaring it. A model none of whose chain
+    /// declares it has no such association, whatever other models
+    /// declare: `@tag.comments` is not Article's, keyed on `article_id`.
+    /// Only a parent of no known model takes the declaration every
+    /// declarer agrees on, each owner counted once by the declaration it
+    /// keeps. The ivar's name says nothing about its class (`@post` may
+    /// hold an Article), so a name declared differently on several
+    /// models, with no model to choose by, is not guessed at.
+    ///
+    /// The answer is per call: an extension defining `find` declines
+    /// `find`, so the extension runs, and leaves `build` expanded.
+    pub fn build_target(
+        &self,
+        owner: Option<&ClassId>,
+        assoc: &Symbol,
+        call: &Symbol,
+    ) -> AssocBuildTarget {
+        let expands = |b: &AssocBuild| b.reproducible && !b.extension.contains(call);
+        let decl = match owner.filter(|class| self.is_model(class)) {
+            Some(model) => {
+                let Some(class) = self.declaring_class(model, assoc) else {
+                    return AssocBuildTarget::Declined;
+                };
+                &self.assoc_builds[&(class.clone(), assoc.clone())]
+            }
+            None => {
+                let mut decls = self
+                    .assoc_builds
+                    .iter()
+                    .filter(|((_, name), _)| name == assoc)
+                    .map(|(_, b)| b);
+                let Some(first) = decls.next() else {
+                    return AssocBuildTarget::Undeclared;
+                };
+                let agrees = |b: &AssocBuild| {
+                    (&b.target, &b.foreign_key, expands(b))
+                        == (&first.target, &first.foreign_key, expands(first))
+                };
+                if !decls.all(agrees) {
+                    return AssocBuildTarget::Declined;
+                }
+                first
+            }
+        };
+        if expands(decl) {
+            AssocBuildTarget::Declared {
+                target: decl.target.clone(),
+                foreign_key: decl.foreign_key.clone(),
+            }
+        } else {
+            AssocBuildTarget::Declined
+        }
     }
 }
 
@@ -1440,10 +1547,24 @@ pub fn build_assoc_registry(models: &[Model]) -> AssocRegistry {
     let mut reg = AssocRegistry::default();
     for m in models {
         reg.tables.insert(m.name.clone(), m.table.0.as_str().to_string());
+        if let Some(parent) = &m.parent {
+            reg.model_parents.insert(m.name.clone(), parent.clone());
+        }
     }
     for m in models {
         let own = reg.table_for(&m.name);
         for a in m.associations() {
+            if let Association::HasMany { name, target, foreign_key, .. }
+            | Association::HasOne { name, target, foreign_key, .. } = a
+            {
+                // A redeclaration replaces what the earlier one recorded:
+                // the arms below record only what this one declares.
+                let key = (m.name.clone(), name.clone());
+                reg.has_many_fk.remove(&key);
+                reg.has_many_unseedable.remove(&key);
+                reg.has_many_owner_key.remove(&key);
+                reg.assoc_builds.insert(key, assoc_build(a, target, foreign_key));
+            }
             match a {
                 Association::BelongsTo {
                     name, target, foreign_key, primary_key, polymorphic, polymorphic_targets, foreign_type, ..
@@ -1521,15 +1642,6 @@ pub fn build_assoc_registry(models: &[Model]) -> AssocRegistry {
                             format!("{t} {name} ON {name}.{foreign_key} = {own}.{owner_key}"),
                         );
                     }
-                    let entry = (target.clone(), foreign_key.clone());
-                    reg.has_many_by_name
-                        .entry(name.clone())
-                        .and_modify(|t| {
-                            if t.as_ref() != Some(&entry) {
-                                *t = None;
-                            }
-                        })
-                        .or_insert(Some(entry));
                 }
                 Association::HasOne { name, target, foreign_key, .. } => {
                     let owner_key = a.owner_key();
@@ -1598,7 +1710,43 @@ pub fn build_assoc_registry(models: &[Model]) -> AssocRegistry {
             }
         }
     }
+    // By name once every owner is down to the declaration it keeps, so a
+    // model redeclaring a name is one declarer, not two disagreeing ones.
+    for ((_, name), entry) in &reg.has_many_fk {
+        reg.has_many_by_name
+            .entry(name.clone())
+            .and_modify(|t| {
+                if t.as_ref() != Some(entry) {
+                    *t = None;
+                }
+            })
+            .or_insert_with(|| Some(entry.clone()));
+    }
     reg
+}
+
+/// What the parent-ivar rewrite reads off one `has_many` / `has_one`
+/// (see [`AssocRegistry::build_target`]). A declaration the rewrite's
+/// `<Target>.new(fk => parent.id)` cannot reproduce is recorded as
+/// such: a custom `primary_key:` (the key matches another owner
+/// column), `through:`, `as:` (the rows are keyed by the type column
+/// too), and a scope that does more than order or eager-load (Rails
+/// builds with its `where` values; see [`scope_is_build_neutral`]). A
+/// scope lambda taking the owner is dropped at ingest, so it reads as
+/// no scope here. A `has_one` is never a collection proxy, so `.build`
+/// / `.find` on its reader is not an association call either.
+fn assoc_build(a: &Association, target: &ClassId, foreign_key: &Symbol) -> AssocBuild {
+    let (reproducible, extension) = match a {
+        Association::HasMany { through, as_interface, scope, extension, .. } => (
+            through.is_none()
+                && as_interface.is_none()
+                && scope.as_ref().is_none_or(scope_is_build_neutral)
+                && a.owner_key().as_str() == "id",
+            extension.iter().map(|x| x.name.clone()).collect(),
+        ),
+        _ => (false, Vec::new()),
+    };
+    AssocBuild { target: target.clone(), foreign_key: foreign_key.clone(), reproducible, extension }
 }
 
 /// True when any model declares a scope (the whole pass is a no-op
@@ -2579,9 +2727,9 @@ fn counted_terminal(method: &Symbol, args: &[Expr], block: Option<&Expr>) -> Opt
 /// None, so every `@room.messages.<scope>` chain in the app silently kept
 /// the arel-folded Array and NoMethodError'd at runtime.
 ///
-/// Only consulted when the owner carries no stamped type. The guard is
-/// two-sided: the name must be an ingested model AND that model must
-/// declare this association, so `@room.messages` resolves to
+/// Only consulted when the owner's stamped type is not a model. The
+/// guard is two-sided: the name must be an ingested model AND that model
+/// must declare this association, so `@room.messages` resolves to
 /// (Message, room_id) while `@user.messages` resolves to
 /// (Message, creator_id) — each right, neither guessed. That is also
 /// why the same rule can read a local (`user.sessions`) and a one-hop
@@ -2604,9 +2752,11 @@ fn owner_model_from_name(owner: &Expr, models: &HashSet<ClassId>) -> Option<Clas
 }
 
 /// The `(owner model, target, foreign key)` a `<owner>.<has_many>` read
-/// resolves to — the three rungs above, with no judgment about whether
-/// the seed can REPRODUCE the association (that is
-/// `AssocRegistry::is_unseedable`, and only the rewriter needs it).
+/// resolves to — the three rungs above (a stamped model is read up its
+/// superclass chain, and the class declaring the association is the
+/// owner model), with no judgment about whether the seed can REPRODUCE
+/// the association (that is `AssocRegistry::is_unseedable`, and only the
+/// rewriter needs it).
 ///
 /// Public because the strong-params binding scan asks the same question
 /// for a different purpose: `@room.messages.create_with_attachment!(
@@ -2619,18 +2769,19 @@ pub fn assoc_read_target(
     models: &HashSet<ClassId>,
     assocs: &AssocRegistry,
 ) -> Option<(Option<ClassId>, ClassId, Symbol)> {
-    let typed = match owner.ty.as_ref().map(|t| t.peel_nilable()) {
-        Some(crate::ty::Ty::Class { id, .. }) => assocs
-            .has_many_fk(id, aname)
-            .cloned()
-            .map(|hit| (Some(id.clone()), hit)),
-        _ => None,
-    };
-    typed
-        .or_else(|| {
-            owner_model_from_name(owner, models)
-                .and_then(|m| assocs.has_many_fk(&m, aname).cloned().map(|hit| (Some(m), hit)))
-        })
+    // An owner typed as a model reads its own chain's declaration and
+    // nothing else: a model none of whose chain declares the name does
+    // not have it, and the other two rungs would hand it another
+    // model's foreign key (`@tag.comments` filtered by `article_id`).
+    if let Some(crate::ty::Ty::Class { id, .. }) = owner.ty.as_ref().map(|t| t.peel_nilable()) {
+        if assocs.is_model(id) {
+            let class = assocs.declaring_class(id, aname)?;
+            let (target, fk) = assocs.has_many_fk(class, aname)?.clone();
+            return Some((Some(class.clone()), target, fk));
+        }
+    }
+    owner_model_from_name(owner, models)
+        .and_then(|m| assocs.has_many_fk(&m, aname).cloned().map(|hit| (Some(m), hit)))
         .or_else(|| assocs.has_many_by_name(aname).cloned().map(|hit| (None, hit)))
         .map(|(owner_model, (target, fk))| (owner_model, target, fk))
 }
@@ -2707,8 +2858,8 @@ fn assoc_owner_seed(
 ) -> Option<(ClassId, Symbol, Expr)> {
     // Resolution is `assoc_read_target`'s three rungs — the owner's
     // stamped type (which disambiguates an assoc name declared on
-    // several models), then the owner's NAME, then the assoc name when
-    // it is unique across models.
+    // several models, and alone decides for a model), then the owner's
+    // NAME, then the assoc name when it is unique across models.
     //
     // What is this function's OWN judgment is the seedability filter:
     // each rung carries the OWNER it resolved through so the check can
@@ -5280,6 +5431,26 @@ mod tests {
         )
             .expect("ingest")
             .expect("model")
+    }
+
+    #[test]
+    fn a_redeclared_has_many_seeds_from_the_later_declaration() {
+        // A concern's `has_many :comments` spliced at the `include`, then
+        // the model's own: Rails keeps the later one, and so does every
+        // seed fact, not only the target and foreign key.
+        let article = ingest(
+            "class Article < ApplicationRecord\n  has_many :comments, -> { where(spam: false) }, primary_key: :uuid\n  has_many :comments, foreign_key: :legacy_article_id\nend\n",
+            "app/models/article.rb",
+        );
+        let assocs = build_assoc_registry(&[article]);
+        let (article, comments) = (ClassId(Symbol::from("Article")), Symbol::from("comments"));
+        assert!(!assocs.is_unseedable(Some(&article), &comments));
+        assert!(!assocs.is_unseedable(None, &comments));
+        assert_eq!(assocs.has_many_owner_key(Some(&article), &comments).as_str(), "id");
+        assert_eq!(
+            assocs.has_many_by_name(&comments).map(|(_, fk)| fk.as_str()),
+            Some("legacy_article_id")
+        );
     }
 
     #[test]

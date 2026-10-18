@@ -58,10 +58,16 @@ pub fn apply_association_new_lowering(app: &mut App) {
                     _ => {}
                 }
             }
+            // An extension defining `new` is what the proxy's `new` runs,
+            // not the alias of `build`, so that call stays `new` and
+            // reaches the extension.
             let names = model
                 .associations()
                 .filter_map(|assoc| match assoc {
-                    Association::HasMany { name, target, .. } if !overrides.contains(name) => {
+                    Association::HasMany { name, target, extension, .. }
+                        if !overrides.contains(name)
+                            && !extension.iter().any(|m| m.name.as_str() == "new") =>
+                    {
                         Some((name.clone(), target.clone()))
                     }
                     _ => None,
