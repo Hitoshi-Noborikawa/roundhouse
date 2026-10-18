@@ -96,11 +96,16 @@ pub const HELPER_BODY_TRANSLATE: u64 = 1 << 18;
 /// replays where the source has it (`ingest::app_extension_calls`).
 pub const REPLAYED_CLASS_BODY: u64 = 1 << 19;
 
+/// A model's `private :has_role?` naming a method its body does not
+/// define (generated, a superclass's or a gem's): kept as a statement for
+/// the lowering to apply and the analyzer to enforce.
+pub const INHERITED_VISIBILITY: u64 = 1 << 20;
+
 /// `time_calendar` renamed a zero-arg `iso8601` to `to_rfc3339`. Later
 /// re-analysis can widen the receiver (`minimum(:col) || Time.utc`), so
 /// emitters cannot rediscover the rename from the type alone. Ruby prints
 /// `iso8601`; the other targets keep their time-format mapping.
-pub const GROUNDED_TIME_FORMAT: u64 = 1 << 20;
+pub const GROUNDED_TIME_FORMAT: u64 = 1 << 21;
 
 /// Whether `expr` is a [`SELF_BINDING`] cast.
 pub fn is_self_binding(expr: &Expr) -> bool {
