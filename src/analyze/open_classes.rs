@@ -39,8 +39,11 @@ impl OpenClasses {
         }
         // A module's instance methods that (through its other instance methods) define a computed name on `self`.
         let mut reaching: HashMap<&str, (HashSet<Symbol>, Span)> = HashMap::new();
+        let mut reopenings: std::collections::BTreeMap<&str, HashMap<&Symbol, &MethodDef>> = Default::default();
         for lc in app.library_classes.iter().filter(|lc| lc.is_module && lc.origin.is_none()) {
-            let methods: HashMap<&Symbol, &MethodDef> = lc.methods.iter().filter(|m| m.receiver == MethodReceiver::Instance).map(|m| (&m.name, m)).collect();
+            reopenings.entry(lc.name.0.as_str()).or_default().extend(lc.methods.iter().filter(|m| m.receiver == MethodReceiver::Instance).map(|m| (&m.name, m)));
+        }
+        for (module, methods) in reopenings {
             let mut found: HashMap<Symbol, Span> = HashMap::new();
             for (name, def) in &methods {
                 if let Some(span) = computed_definitions(&def.body).into_iter().find(|(singleton, _)| *singleton).map(|(_, s)| s) {
@@ -50,7 +53,7 @@ impl OpenClasses {
             if found.is_empty() {
                 continue;
             }
-            let span = *found.values().next().expect("one");
+            let span = *found.values().min_by_key(|s| (s.file.0, s.start)).expect("one");
             loop {
                 let before = found.len();
                 for (name, def) in &methods {
@@ -62,7 +65,7 @@ impl OpenClasses {
                     break;
                 }
             }
-            reaching.insert(lc.name.0.as_str(), (found.into_keys().collect(), span));
+            reaching.insert(module, (found.into_keys().collect(), span));
         }
         if reaching.is_empty() {
             return out;

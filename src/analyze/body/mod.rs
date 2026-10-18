@@ -1410,7 +1410,17 @@ impl<'a> BodyTyper<'a> {
                     Some(r) => Some(self.analyze_expr(r, ctx)),
                     None => ctx.self_ty.clone(),
                 };
-                self.dispatch(recv_ty.as_ref(), name, None, &[])
+                let instance_receiver = recv.as_ref().map_or(ctx.instance_body, |r| self.is_instance(r, ctx))
+                    && recv_ty.as_ref().is_some_and(instance_shaped);
+                let dispatched = self.dispatch(recv_ty.as_ref(), name, None, &[]);
+                if matches!(dispatched, Ty::Var { .. })
+                    && let Some(Ty::Class { id, .. }) = recv_ty.as_ref()
+                    && self.open_classes.is_some_and(|o| o.open(id, !instance_receiver).is_some())
+                {
+                    Ty::Untyped
+                } else {
+                    dispatched
+                }
             }
 
             ExprNode::Apply { fun, args, block } => {

@@ -20,15 +20,14 @@ use crate::dialect::{MethodReceiver, ModelBodyItem};
 use crate::expr::ExprNode;
 
 pub(super) fn mark(app: &mut App) {
-    let modules: Vec<(String, HashSet<String>)> = app
-        .library_classes
-        .iter()
-        .filter(|lc| lc.is_module && lc.origin.is_none())
-        .map(|lc| {
-            let methods = lc.methods.iter().filter(|m| m.receiver == MethodReceiver::Instance).map(|m| m.name.as_str().to_string()).collect();
-            (lc.name.0.as_str().to_string(), methods)
-        })
-        .collect();
+    let mut openings: std::collections::BTreeMap<String, (usize, HashSet<String>)> = Default::default();
+    for lc in app.library_classes.iter().filter(|lc| lc.is_module && lc.origin.is_none()) {
+        let entry = openings.entry(lc.name.0.as_str().to_string()).or_default();
+        entry.0 += 1;
+        entry.1.extend(lc.methods.iter().filter(|m| m.receiver == MethodReceiver::Instance).map(|m| m.name.as_str().to_string()));
+    }
+    // Not replayed through a reopened module: the Ruby emit keeps only one opening's methods, so the replayed call would raise at load.
+    let modules: Vec<(String, HashSet<String>)> = openings.into_iter().filter(|(_, (n, _))| *n == 1).map(|(name, (_, methods))| (name, methods)).collect();
     for model in &mut app.models {
         let owner = model.name.0.as_str().to_string();
         let mut extended: Vec<usize> = Vec::new();
@@ -40,9 +39,19 @@ pub(super) fn mark(app: &mut App) {
                     .iter()
                     .map(|a| match &*a.node {
                         ExprNode::Const { path } => {
+                            let rooted = path.first().is_some_and(|s| s.as_str().is_empty());
                             let written = path.iter().map(|s| s.as_str()).filter(|s| !s.is_empty()).collect::<Vec<_>>().join("::");
-                            let nested = format!("{owner}::{written}");
-                            modules.iter().position(|(n, _)| *n == nested).or_else(|| modules.iter().position(|(n, _)| *n == written))
+                            let at = |name: &str| modules.iter().position(|(n, _)| n == name);
+                            if rooted {
+                                at(&written)
+                            } else if let Some(nested) = at(&format!("{owner}::{written}")) {
+                                Some(nested)
+                            } else {
+                                // The model's lexical nesting is not recorded, so a module an enclosing namespace could supply makes the top-level one ambiguous.
+                                let namespaces = owner.match_indices("::").map(|(i, _)| &owner[..i]);
+                                let shadowed = namespaces.into_iter().any(|ns| at(&format!("{ns}::{written}")).is_some());
+                                if shadowed { None } else { at(&written) }
+                            }
                         }
                         _ => None,
                     })
