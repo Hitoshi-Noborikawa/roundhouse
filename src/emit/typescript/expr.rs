@@ -1616,14 +1616,25 @@ pub(super) fn js_expr(e: &Expr) -> Js {
             Js::ident(e.span, "this"),
             ts_field_name(name.as_str()),
         ),
-        ExprNode::Send { recv, method, args, block, parenthesized } => js_send_with_block(
-            e.span,
-            recv.as_ref(),
-            method.as_str(),
-            args,
-            block.as_ref(),
-            *parenthesized,
-        ),
+        ExprNode::Send { recv, method, args, block, parenthesized } => {
+            if e.decisions & crate::expr::GROUNDED_TIME_FORMAT != 0
+                && method.as_str() == "to_rfc3339"
+                && args.is_empty()
+                && block.is_none()
+            {
+                if let Some(r) = recv {
+                    return Js::method_call(e.span, js_expr(r), "toISOString", vec![]);
+                }
+            }
+            js_send_with_block(
+                e.span,
+                recv.as_ref(),
+                method.as_str(),
+                args,
+                block.as_ref(),
+                *parenthesized,
+            )
+        }
         ExprNode::Assign { target, value } => {
             // Expression-position assignment — preserve the side effect.
             // JS `a = b` is an expression that both assigns and yields
@@ -2514,10 +2525,14 @@ fn js_send_inner(
     // `Time.now` → `new Date()`. Ruby's Time class has no JS
     // analog; JS Date covers the use cases the framework runtime
     // needs (`utc`, `iso8601`).
-    if method == "now" && args.is_empty() {
+    // `Time.now` and the lowered clock `Time.utc` (no args) are both
+    // `new Date()`. `::Time` counts; a namespaced `Foo::Time` does not.
+    if matches!(method, "now" | "utc") && args.is_empty() {
         if let Some(r) = recv {
             if let ExprNode::Const { path } = &*r.node {
-                if path.len() == 1 && path[0].as_str() == "Time" {
+                if path.last().is_some_and(|s| s.as_str() == "Time")
+                    && path.iter().rev().skip(1).all(|s| s.as_str().is_empty())
+                {
                     return Js::new(
                         span,
                         JsExpr::New { callee: Js::ident(span, "Date"), args: vec![] },
@@ -2599,7 +2614,12 @@ fn js_send_inner(
     }
     // `<date>.iso8601` → `.toISOString()` — produces the Z-suffix
     // ISO-8601 string Ruby's Time#iso8601 does.
-    if method == "iso8601" && args.is_empty() && recv.is_some() {
+    // Zero-arg `iso8601` on a time is `to_rfc3339` after `time_calendar`.
+    // An application method of that name keeps normal dispatch.
+    if method == "to_rfc3339"
+        && args.is_empty()
+        && recv.is_some_and(crate::lower::time_calendar::is_time_rfc3339_receiver)
+    {
         return Js::method_call(span, js_expr(recv.unwrap()), "toISOString", vec![]);
     }
     // Ruby has both `Regexp#match?(str)` and `String#match?(re)`.

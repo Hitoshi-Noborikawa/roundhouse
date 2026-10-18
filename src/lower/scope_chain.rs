@@ -3516,8 +3516,24 @@ fn rewrite_send(expr: &mut Expr, ctx: &Ctx, locals: &mut Locals) -> Option<Class
         rewrite(b, &arg_ctx, locals);
     }
 
-    let put = |span: crate::span::Span, recv, method, args, block, parenthesized| -> Expr {
-        syn(span, ExprNode::Send { recv, method, args, block, parenthesized })
+    // Rebuilding the send drops `decisions`. A grounded `iso8601` is
+    // marked `GROUNDED_TIME_FORMAT` because a later re-analysis can widen
+    // the receiver (`minimum || Time.utc` → `String | Time`). Keep that
+    // bit when this send is still the zero-arg format call.
+    let grounded = expr.decisions & crate::expr::GROUNDED_TIME_FORMAT;
+    let put = |span: crate::span::Span,
+               recv: Option<Expr>,
+               method: Symbol,
+               args: Vec<Expr>,
+               block: Option<Expr>,
+               parenthesized: bool|
+     -> Expr {
+        let keep = grounded != 0 && method.as_str() == "to_rfc3339" && args.is_empty();
+        let mut out = syn(span, ExprNode::Send { recv, method, args, block, parenthesized });
+        if keep {
+            out.decisions |= grounded;
+        }
+        out
     };
 
     match recv {
