@@ -16569,3 +16569,5 @@ mod class_macros;
 mod accessor_override;
 #[path = "emit_and_run/reset_counters.rs"]
 mod reset_counters;
+#[path = "emit_and_run/console_only_definitions.rs"]
+mod console_only_definitions;
