@@ -6603,8 +6603,9 @@ impl Analyzer {
 /// - both empty → applies to all actions on the controller
 /// Does this scope/class-method body *return* a relation? True iff
 /// the body's tail expression is a query-builder chain: the outermost
-/// (tail) hop is a chain builder (a Relation-context `Builder` in the
-/// catalog), a same-model scope call, or a relation root
+/// (tail) hop is a chain builder ([`crate::catalog::is_relation_builder_name`],
+/// or a Relation-context builder once the receiver is already a chain),
+/// a same-model scope call, or a relation root
 /// (`all`/`unscoped`/`none`), and the receiver spine walks down
 /// through such hops to a recognizable root — implicit self, `self`,
 /// or a constant naming this model. Deliberately conservative:
@@ -6636,12 +6637,16 @@ fn body_tail_yields_relation(
         let ExprNode::Send { recv, method, block, .. } = &*e.node else {
             return false;
         };
-        let is_builder = crate::catalog::lookup(
-            method.as_str(),
-            crate::catalog::ReceiverContext::Relation,
-        )
-        .map(|entry| matches!(entry.chain, crate::catalog::ChainKind::Builder))
-        .unwrap_or(false);
+        // Name-only builders, including aliases (`where!`, `order!`,
+        // `left_joins`, `without`). A Relation builder that is also an
+        // Instance method (`reload`) counts only once the receiver is
+        // already a chain, so a bare `reload` is not a relation root.
+        let continuing = matches!(
+            recv,
+            Some(r) if !matches!(&*r.node, ExprNode::SelfRef | ExprNode::Const { .. })
+        );
+        let is_builder = crate::catalog::is_relation_builder_name(method.as_str())
+            || (continuing && crate::catalog::is_relation_context_builder(method.as_str()));
         let is_scope = scope_names.contains(method);
         let is_root_call = matches!(method.as_str(), "all" | "unscoped");
         if !(is_builder || is_scope || is_root_call) {
