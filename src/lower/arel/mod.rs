@@ -122,11 +122,12 @@ pub(crate) fn rewrite_arel_in_expr_with_ruby_values(
     changed
 }
 
-const RELATION_REFINERS: &[&str] = &[
-    "where", "not", "joins", "left_outer_joins", "left_joins", "order", "group", "having",
-    "limit", "offset", "merge", "includes", "preload", "eager_load", "references", "distinct",
-    "select", "where!", "order!", "reorder", "rewhere",
-];
+/// A catalog Builder (any receiver) or a [`crate::catalog::BUILDER_ALIASES`]
+/// spelling. Hydrating the receiver of one of these to an Array strands
+/// the call. Same set as [`crate::lower::scope_chain::is_relation_chain_method`].
+pub(crate) fn is_relation_refiner(method: &str) -> bool {
+    crate::catalog::is_relation_builder_name(method)
+}
 
 /// A finder terminates a relation but still needs that relation as its
 /// receiver. If the whole call cannot lift, hydrating only its receiver
@@ -135,7 +136,7 @@ const RELATION_REFINERS: &[&str] = &[
 /// Rails' per-column dynamic finders (`find_by_id`, `find_by_email!`, …)
 /// are the same shape as `find_by` and need the same treatment (#558).
 fn requires_relation_receiver(method: &str) -> bool {
-    RELATION_REFINERS.contains(&method)
+    is_relation_refiner(method)
         || matches!(method, "find_by" | "find_by!" | "sole" | "find_sole_by")
         // Not a lifted SELECT: Array answers none of the bulk writes, so the hydrated rows would raise NoMethodError.
         || matches!(method, "delete_all" | "update_all" | "destroy_all" | "touch_all")

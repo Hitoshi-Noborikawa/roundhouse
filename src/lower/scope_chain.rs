@@ -2198,68 +2198,16 @@ pub fn mentions_bare_chain_start(expr: &Expr) -> bool {
 }
 
 /// Relation methods that return a Relation — calls on them stay on the
-/// receiver and the chain keeps its model. Terminals / Enumerable methods
-/// (`to_a`/`first`/`map`/`pluck`/…) are deliberately absent: they end the
+/// receiver and the chain keeps its model. Membership is the catalog's
+/// [`crate::catalog::ChainKind::Builder`] names plus [`crate::catalog::BUILDER_ALIASES`]
+/// (`left_joins`, `where!`, `order!`, `without`). Terminals / Enumerable
+/// methods (`to_a`/`first`/`map`/`pluck`/…) are absent: they end the
 /// relation, so model-tracking stops after them (a scope can't follow).
-fn is_relation_chain_method(name: &str) -> bool {
-    matches!(
-        name,
-        "where"
-            | "not"
-            | "order_sql"
-            | "reorder_sql"
-            | "order"
-            | "limit"
-            | "offset"
-            | "group"
-            | "having"
-            | "joins"
-            | "left_outer_joins"
-            | "left_joins"
-            | "select"
-            | "distinct"
-            | "includes"
-            | "preload"
-            | "eager_load"
-            | "references"
-            | "merge"
-            | "none"
-            // Recursive CTE / FROM source (`Comment#parents`).
-            | "with_recursive"
-            | "from"
-            // `excluding` (Rails 7 `where.not(id: …)` in one hop).
-            // Listed here so an association read that continues into it
-            // is ROOTED as a relation: campfire's
-            // `user.searches.excluding(…).destroy_all` otherwise left
-            // the has_many reader answering an Array, and every hop
-            // after it wanted a different method — `excluding`, then
-            // `destroy_all`, then the next. Chasing those onto Array is
-            // how ActiveRecord semantics leak into core; rooting the
-            // chain once puts all of them on Relation, which already
-            // defines them.
-            | "excluding"
-            // `without` is `excluding`'s ALIAS, on Relation and on
-            // Enumerable both, and Rails apps write whichever reads
-            // better at the site. Listing one and not the other is the
-            // shape that drifts: campfire's refreshes controller writes
-            // `@room.messages.without(@new_messages).with_creator`, and
-            // with only `excluding` here the chain stayed on the
-            // reader's folded Array — where `without` exists (the AS
-            // core_ext) and answers an Array, so the NEXT hop
-            // (`with_creator`, a scope) was the one that failed.
-            | "without"
-            // `reorder` replaces the ordering gathered so far — a chain
-            // hop like `order`. campfire's `last_page_of_matches`
-            // (basecamp/once-campfire#304) writes it at implicit self
-            // inside a class method that runs against a relation, and
-            // without it here that body never rooted on `__rel` and the
-            // search paged every message in the table.
-            | "reorder"
-            // `unscope(where: :col)` drops the conditions on a column
-            // (`Discard::Model`'s `with_discarded` is exactly that). An
-            // Array has no `unscope`, so the site can only mean Relation.
-            | "unscope"
-    )
+///
+/// `all` is a terminal in the catalog and is checked separately at the
+/// call sites that seed a relation from it.
+pub(crate) fn is_relation_chain_method(name: &str) -> bool {
+    crate::catalog::is_relation_builder_name(name)
 }
 
 /// True when `e` is a Relation this pass has already rooted — the
