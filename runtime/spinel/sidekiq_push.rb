@@ -25,10 +25,13 @@
 # unless the lowering wrote a `JobRegistry.push_<job>` call, which it
 # does only under `:sidekiq`.
 #
-# The Redis URL is Sidekiq's: `ENV[ENV["REDIS_PROVIDER"]]`, else
-# `REDIS_URL`, else `redis://localhost:6379/0`, read at the first push
-# in each process. Errors reach the caller, as in Rails: a down Redis
-# makes `perform_later` raise.
+# The Redis URL is the app's own `Sidekiq.configure_client` `url:`
+# (`JobRegistry.sidekiq_redis_url`) when it gives one. Only without it
+# does the push fall back to Sidekiq's `ENV[ENV["REDIS_PROVIDER"]]`,
+# then `REDIS_URL`, then `redis://localhost:6379/0`. A `password:` from
+# the same block overrides one in the URL, as redis-rb's option does.
+# Both are read at the first push in each process. Errors reach the
+# caller, as in Rails: a down Redis makes `perform_later` raise.
 module SidekiqPush
   DEFAULT_URL = "redis://localhost:6379/0"
   URL = [""]
@@ -162,7 +165,8 @@ module SidekiqPush
     Process.clock_gettime(Process::CLOCK_REALTIME, :millisecond)
   end
 
-  # Sidekiq's `determine_redis_provider`, then its default.
+  # The app's `configure_client` URL, else Sidekiq's
+  # `determine_redis_provider`, else its default.
   def self.url
     if URL_PID[0] != Process.pid
       URL[0] = resolve_url
@@ -172,6 +176,10 @@ module SidekiqPush
   end
 
   def self.resolve_url
+    configured = JobRegistry.sidekiq_redis_url
+    if configured != ""
+      return configured
+    end
     provider = ENV["REDIS_PROVIDER"].to_s
     if provider.include?(":")
       raise ArgumentError.new("REDIS_PROVIDER should be set to the name of the variable which contains the Redis URL, not a URL itself")
@@ -182,6 +190,35 @@ module SidekiqPush
     end
     env = ENV["REDIS_URL"].to_s
     env == "" ? DEFAULT_URL : env
+  end
+
+  # The app's `configure_client` `password:`, `""` for none (the URL's
+  # own password, if any, then stands).
+  def self.password
+    JobRegistry.sidekiq_redis_password
+  end
+
+  # A `configure_client` setting read from the environment, for the
+  # registry's generated `sidekiq_redis_url` and `_password`:
+  # `ENV["NAME"]`, `""` when unset.
+  def self.setting(name)
+    ENV[name].to_s
+  end
+
+  # `ENV.fetch("NAME", "default")`. An empty variable counts as unset.
+  def self.setting_or(name, default)
+    value = ENV[name].to_s
+    value == "" ? default : value
+  end
+
+  # `ENV.fetch("NAME")`, which raises when the variable is unset, as the
+  # app's initializer would at boot.
+  def self.required_setting(name)
+    value = ENV[name].to_s
+    if value == ""
+      raise KeyError.new("key not found: \"" + name + "\" (Sidekiq.configure_client's Redis setting)")
+    end
+    value
   end
 
   # The URL with its password replaced by REDACTED, for the boot line,

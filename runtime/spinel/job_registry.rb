@@ -21,7 +21,9 @@
 #
 # `sidekiq?` says whether the app is on `queue_adapter :sidekiq` with a
 # payload job, so the tree pushes jobs to Redis (`runtime/sidekiq_push.rb`)
-# and carries a real Redis client; the server logs where at boot.
+# and carries a real Redis client. `sidekiq_redis_url` and
+# `sidekiq_redis_password` are the app's `Sidekiq.configure_client`
+# settings, `""` for one it doesn't give.
 #
 # Dispatch is a `case` over the class name, never `constantize`, for
 # the reason the locator gives: a class computed from a wire string is
@@ -38,6 +40,14 @@ module JobRegistry
 
   def self.sidekiq?
     false
+  end
+
+  def self.sidekiq_redis_url
+    ""
+  end
+
+  def self.sidekiq_redis_password
+    ""
   end
   # <<< generated: job-registry
 end

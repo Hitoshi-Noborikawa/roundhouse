@@ -4633,6 +4633,26 @@ const SIDEKIQ_REGISTRY_FLAG: &str = "  def self.sidekiq?\n    true\n  end\n";
 /// raising façade at `runtime/sidekiq_redis.rb` on every Ruby-family lane.
 const SIDEKIQ_REDIS_CLIENT: &str = "runtime/spinel/sidekiq/sidekiq_redis.rb";
 
+/// The body of `JobRegistry.sidekiq_redis_url` or `_password` for one
+/// `configure_client` setting: `""` when the app gives none, so the push
+/// falls back to the environment. `SidekiqPush.setting` reads a variable
+/// when the push first needs it, as Sidekiq reads it at boot.
+fn redis_setting_source(setting: Option<&crate::app::RedisSetting>) -> String {
+    use crate::app::RedisSetting;
+    use crate::emit::ruby::expr::ruby_str_literal;
+    match setting {
+        None => "\"\"".to_string(),
+        Some(RedisSetting::Literal(value)) => ruby_str_literal(value),
+        Some(RedisSetting::Env(name)) => format!("SidekiqPush.setting({})", ruby_str_literal(name)),
+        Some(RedisSetting::EnvFetch { name, default: None }) => {
+            format!("SidekiqPush.required_setting({})", ruby_str_literal(name))
+        }
+        Some(RedisSetting::EnvFetch { name, default: Some(default) }) => {
+            format!("SidekiqPush.setting_or({}, {})", ruby_str_literal(name), ruby_str_literal(default))
+        }
+    }
+}
+
 fn apply_job_registry(files: &mut [(String, String)], app: &App) {
     const HEAD: &str = "  # >>> generated: job-registry\n";
     const TAIL: &str = "  # <<< generated: job-registry\n";
@@ -4641,8 +4661,13 @@ fn apply_job_registry(files: &mut [(String, String)], app: &App) {
     } else {
         "  def self.sidekiq?\n    false\n  end\n".to_string()
     };
+    let redis = format!(
+        "\n  def self.sidekiq_redis_url\n    {}\n  end\n\n  def self.sidekiq_redis_password\n    {}\n  end\n",
+        redis_setting_source(app.sidekiq_redis.url.as_ref()),
+        redis_setting_source(app.sidekiq_redis.password.as_ref()),
+    );
     let generated = format!(
-        "{HEAD}{}\n{flag}{TAIL}",
+        "{HEAD}{}\n{flag}{redis}{TAIL}",
         crate::lower::job_payload::registry_source(&app.job_plans)
     );
     for (path, content) in files.iter_mut() {

@@ -176,6 +176,7 @@ fn tiny_blog_round_trips() {
         unreachable_views: std::collections::BTreeSet::new(),
         job_plans: Vec::new(),
         queue_adapter: None,
+        sidekiq_redis: Default::default(),
         attachable_unsigned_models: Vec::new(),
         pending_attachment_on_load: Vec::new(),
         load_hook_class_macros: Vec::new(),

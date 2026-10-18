@@ -66,10 +66,20 @@ module SidekiqRedis
     pid = Process.pid
     held = LOCK.synchronize { current(pid) }
     if held.length == 0
-      fresh = Redis.new(url: url)
+      fresh = open(url, SidekiqPush.password)
       held = LOCK.synchronize { install(pid, fresh) }
     end
     held[0]
+  end
+
+  # A new connection. A `configure_client` `password:` overrides the
+  # URL's, as the explicit option does on both clients.
+  def self.open(url, password)
+    if password == ""
+      Redis.new(url: url)
+    else
+      Redis.new(url: url, password: password)
+    end
   end
 
   # Under LOCK: the connection as a zero- or one-element Array, after

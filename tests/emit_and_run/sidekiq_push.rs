@@ -145,3 +145,31 @@ fn a_failed_push_at_commit_runs_the_record_callbacks_first() {
     run.assert_passes();
     assert!(run.stdout.contains("failed push passed"), "{}", run.stdout);
 }
+
+const CONFIGURE_CLIENT: &str = "Sidekiq.configure_client do |config|\n  config.redis = { url: ENV.fetch(\"JOBS_REDIS_URL\", \"redis://jobs:6379/1\"), password: ENV[\"JOBS_REDIS_PASSWORD\"] }\nend\n";
+
+/// The app's `configure_client` settings reach the registry the push
+/// reads them from, on every Ruby-family lane; an app without them gets
+/// `""`, so the push falls back to REDIS_PROVIDER, REDIS_URL, localhost.
+#[test]
+fn configure_client_settings_reach_the_registry() {
+    for target in [BuildTarget::Spinel, BuildTarget::Ruby] {
+        let (emitted, errors) =
+            on_sidekiq().write("config/initializers/sidekiq.rb", CONFIGURE_CLIENT).emit(target);
+        assert!(errors.is_empty(), "{errors:#?}");
+        let registry = read(&emitted, "runtime/job_registry.rb");
+        assert!(
+            registry.contains(
+                "  def self.sidekiq_redis_url\n    SidekiqPush.setting_or(\"JOBS_REDIS_URL\", \"redis://jobs:6379/1\")\n  end\n"
+            ),
+            "{registry}"
+        );
+        assert!(
+            registry.contains("  def self.sidekiq_redis_password\n    SidekiqPush.setting(\"JOBS_REDIS_PASSWORD\")\n  end\n"),
+            "{registry}"
+        );
+    }
+    let (emitted, _) = on_sidekiq().emit(BuildTarget::Ruby);
+    let registry = read(&emitted, "runtime/job_registry.rb");
+    assert!(registry.contains("  def self.sidekiq_redis_url\n    \"\"\n  end\n"), "{registry}");
+}

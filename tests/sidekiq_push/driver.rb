@@ -144,5 +144,25 @@ check("redacted password", SidekiqPush.redacted_url("redis://app:hunter2@cache:6
 check("redacted bare password", SidekiqPush.redacted_url("redis://:hunter2@cache") == "redis://:REDACTED@cache", SidekiqPush.redacted_url("redis://:hunter2@cache"))
 check("no password to redact", SidekiqPush.redacted_url("redis://cache:6379/0") == "redis://cache:6379/0", SidekiqPush.redacted_url("redis://cache:6379/0"))
 
+# configure_client's settings, read from the environment. An app that
+# gives none (this registry's `""`) falls back to REDIS_URL.
+ENV["SK_TEST_SET"] = "redis://set:6379/1"
+ENV.delete("SK_TEST_UNSET")
+check("ENV[] setting", SidekiqPush.setting("SK_TEST_SET") == "redis://set:6379/1", SidekiqPush.setting("SK_TEST_SET"))
+check("ENV[] setting, unset", SidekiqPush.setting("SK_TEST_UNSET") == "", SidekiqPush.setting("SK_TEST_UNSET"))
+check("ENV.fetch default", SidekiqPush.setting_or("SK_TEST_UNSET", "redis://dflt:6379/2") == "redis://dflt:6379/2", SidekiqPush.setting_or("SK_TEST_UNSET", "redis://dflt:6379/2"))
+check("ENV.fetch, set", SidekiqPush.setting_or("SK_TEST_SET", "redis://dflt:6379/2") == "redis://set:6379/1", SidekiqPush.setting_or("SK_TEST_SET", "redis://dflt:6379/2"))
+raised = false
+begin
+  SidekiqPush.required_setting("SK_TEST_UNSET")
+rescue KeyError
+  raised = true
+end
+check("ENV.fetch without default raises", raised, "no KeyError")
+ENV["REDIS_PROVIDER"] = ""
+ENV["REDIS_URL"] = "redis://fallback:6379/3"
+check("no configure_client url: falls back", SidekiqPush.resolve_url == "redis://fallback:6379/3", SidekiqPush.resolve_url)
+check("no configure_client password", SidekiqPush.password == "", SidekiqPush.password)
+
 SidekiqPush.stop_recording
 puts "done"

@@ -24,6 +24,10 @@ module SidekiqPush
   def self.now_ms: () -> Integer
   def self.url: () -> String
   def self.resolve_url: () -> String
+  def self.password: () -> String
+  def self.setting: (String name) -> String
+  def self.setting_or: (String name, String default) -> String
+  def self.required_setting: (String name) -> String
   def self.redacted_url: (String value) -> String
   def self.announce: () -> nil
   def self.start_recording: () -> nil
