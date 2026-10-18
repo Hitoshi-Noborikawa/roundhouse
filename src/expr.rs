@@ -86,6 +86,11 @@ pub const REVERSE_MERGE: u64 = 1 << 16;
 /// calls: it only ever runs in the view, so it is ActionView's `t`.
 pub const HELPER_COPY_TRANSLATE: u64 = 1 << 17;
 
+/// A `t` in an `app/helpers` module's own body (or a parameter default),
+/// which the analyzer types with an includer as `self`: ActionView's `t`
+/// all the same.
+pub const HELPER_BODY_TRANSLATE: u64 = 1 << 18;
+
 /// Whether `expr` is a [`SELF_BINDING`] cast.
 pub fn is_self_binding(expr: &Expr) -> bool {
     expr.decisions & SELF_BINDING != 0

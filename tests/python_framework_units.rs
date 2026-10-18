@@ -53,37 +53,11 @@ fn python_framework_units_emit() {
     println!("\n  STRANGLER READINESS: {valid}/{total} framework files transpile to valid Python\n");
 }
 
-/// Python runs module constants at import and method bodies later, so
-/// the class block is emitted first. `ControllerConfig()` must not run
-/// before `class ControllerConfig`.
-#[test]
-fn python_controller_config_slot_follows_its_class() {
-    use roundhouse::runtime_loader::python_units_subset;
-    let units = python_units_subset(&["app/action_controller_base.py"], |_path, classes| classes)
-        .expect("python_units_subset");
-    let body = &units[0].content;
-    let class_at = body.find("class ControllerConfig:").expect("ControllerConfig class");
-    let slot_at = body.find("CONTROLLER_CONFIG_SLOT = ").expect("config slot");
-    let last_class = body.rfind("\nclass ").expect("a class");
-    assert!(
-        last_class < slot_at && class_at < slot_at,
-        "classes come first, then the constant block:\n{body}"
-    );
-    // `slot_at` points at `C`, so a slice from there hides leading
-    // spaces. The line has to start at the preceding newline or the
-    // assertion would pass for an indented class variable.
-    let slot_line_start = body[..slot_at].rfind('\n').map_or(0, |i| i + 1);
-    let slot_line = body[slot_line_start..].lines().next().unwrap_or("");
-    assert!(
-        !slot_line.starts_with(' '),
-        "the slot stays a module constant, got {slot_line:?}"
-    );
-}
-
 /// A default argument is evaluated while the class body runs, so a
 /// constant it names has to be bound before `class ViewHelpers`.
-/// `CONTROLLER_CONFIG_SLOT` still follows its class (the test above);
-/// `EMPTY_HTML_OPTS` does not name a class and stays in front.
+/// `EMPTY_HTML_OPTS` does not name a class and stays in front (the
+/// constants that do name one follow it — see `runtime_loader`'s
+/// `py_wrap_namespace` unit test).
 #[test]
 fn python_default_arg_constant_precedes_its_class() {
     use roundhouse::runtime_loader::python_units_subset;

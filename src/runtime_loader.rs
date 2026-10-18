@@ -1856,9 +1856,8 @@ fn py_format_constant(name: &str, value: &Expr) -> String {
 /// namespace to wrap. The shared dump still prints constants and then
 /// classes, which Crystal and TypeScript need and Python does not:
 /// a method looks a global up when it is called, but a constant
-/// initializer runs at import. `CONTROLLER_CONFIG_SLOT =
-/// [ControllerConfig()]` therefore has to follow `class
-/// ControllerConfig`. A default argument is also evaluated while the
+/// initializer runs at import. `SLOT = [Config()]` therefore has to
+/// follow `class Config`. A default argument is also evaluated while the
 /// class body runs, so `opts = EMPTY_HTML_OPTS` has to see that
 /// constant *before* the class. Move only the constants whose value
 /// names a class in this file; leave the rest ahead of the class. A
@@ -2112,4 +2111,26 @@ where
         }
     }
     Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::py_wrap_namespace;
+
+    /// Python runs a module constant at import and a method body later:
+    /// a constant that constructs a class in this file follows that
+    /// class's body, and one that does not stays in front of it.
+    #[test]
+    fn py_constant_constructing_a_class_follows_it() {
+        let body = "SLOT = [Config()]\nLIMIT = 3\n\nclass Config:\n    def root(self):\n        return \"\"\n";
+        let out = py_wrap_namespace("", body);
+        let limit_at = out.find("LIMIT = 3").expect("LIMIT");
+        let class_at = out.find("class Config:").expect("class");
+        let body_at = out.find("        return").expect("class body");
+        let slot_at = out.find("SLOT = [Config()]").expect("SLOT");
+        assert!(limit_at < class_at, "{out}");
+        assert!(body_at < slot_at, "the slot follows the class body, not inside it:\n{out}");
+        let slot_line_start = out[..slot_at].rfind('\n').map_or(0, |i| i + 1);
+        assert_eq!(slot_line_start, slot_at, "the slot stays a module constant:\n{out}");
+    }
 }

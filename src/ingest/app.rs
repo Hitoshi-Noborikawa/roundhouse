@@ -821,6 +821,9 @@ pub fn ingest_app_with_vfs<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResult
                     .is_some_and(|stem| stem.ends_with("_helper"));
                 match ingest_library_classes(&source, &path_str) {
                     Ok(classes) => {
+                        if is_helper_module {
+                            app.helper_modules.extend(classes.iter().map(|lc| lc.name.clone()));
+                        }
                         for lc in classes.iter().filter(|_| is_helper_module) {
                             // Rails resolves a helper's `include`d
                             // modules into the same view surface —
@@ -2183,6 +2186,9 @@ end
     // After the splice: `include Discard::Model` can arrive through a concern.
     super::discard::expand_discard_models(&mut app)?;
     super::model_macros::expand_model_macros(&mut app, &sources)?;
+    // After the concern-macro expansion: a concern's macros are that one's to expand or refuse.
+    super::class_macros::expand_class_macros(&mut app, &sources);
+    super::column_accessors::rewrite_super(&mut app);
     // After the splice, so a class method a concern contributed gets
     // the same treatment as one written in the model.
     qualify_model_class_method_ar_calls(&mut app);
@@ -2287,6 +2293,8 @@ end
     // pass may append source-backed FileIds beyond the indexed snapshot.
     let late_sources = super::sources::drain();
     super::sources::assert_snapshot_matches(&[], &late_sources);
+    // Before analysis too, so `check` types the recount the emit writes (`Origin.reset_counters(id, :stories)`), rather than reporting a method the lowering answers.
+    crate::lower::reset_counters::apply_reset_counters_lowering(&mut app);
     super::unreachable_views::mark(&mut app);
     super::uncalled_helper_copies::mark(&mut app);
     Ok(app)

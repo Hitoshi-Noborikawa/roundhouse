@@ -265,6 +265,9 @@ pub struct ViewLowerCtx<'a> {
     /// Helper methods that are a thin wrapper around a BUILDER-YIELDING
     /// form helper (see [`form_wrapper_helpers`]).
     form_wrappers: std::rc::Rc<std::collections::HashMap<String, FormWrapperHelper>>,
+    /// See the ViewCtx field of the same name. Off unless the emitter
+    /// opts in with [`ViewLowerCtx::observe_form_with_entry`].
+    form_with_entry: bool,
 }
 
 impl<'a> ViewLowerCtx<'a> {
@@ -336,7 +339,18 @@ impl<'a> ViewLowerCtx<'a> {
             strict_locals: std::rc::Rc::new(strict_locals_by_key(&app.views)),
             collection_element_locals: std::rc::Rc::new(collection_element_locals(&app.views, app)),
             form_wrappers: std::rc::Rc::new(form_wrapper_helpers(app)),
+            form_with_entry: false,
         }
+    }
+
+    /// Open each template `form_with` site with the
+    /// `ActionView::Base.new.form_with` entry. Only the Ruby family
+    /// ships `ActionView::Base` (`runtime/ruby/action_view/base.rb`):
+    /// the call exists so a mocha spy on the view context observes the
+    /// site, and the strict targets have neither the class nor mocha.
+    pub fn observe_form_with_entry(mut self) -> Self {
+        self.form_with_entry = true;
+        self
     }
 
     pub fn lower(&self, view: &View) -> LibraryClass {
@@ -772,6 +786,7 @@ fn build_library_class(view: &View, lx: &ViewLowerCtx, type_body: bool) -> Libra
         i18n: lx.i18n.clone(),
         route_helper_arity: lx.route_helper_arity.clone(),
         form_wrappers: lx.form_wrappers.clone(),
+        form_with_entry: lx.form_with_entry,
         stylesheets: app.stylesheets.clone(),
         lexxy: app.gem_lock.as_ref().is_some_and(|lock| lock.has("lexxy")),
         lexxy_editor_adapter: app.gem_lock.as_ref().is_some_and(lexxy_uses_editor_adapter),
@@ -1206,6 +1221,17 @@ pub fn insert_db_stub(
             Ty::Str,
         ),
     );
+    // AES-256-GCM, the encrypted cookie jar's cipher: encrypt answers the
+    // ciphertext followed by the tag, decrypt the plaintext or "".
+    let bytes = |n: &str| (Symbol::from(n), Ty::Str);
+    digest_info.class_methods.insert(
+        Symbol::from("aes_256_gcm_encrypt"),
+        fn_sig(vec![bytes("key"), bytes("iv"), bytes("plain")], Ty::Str),
+    );
+    digest_info.class_methods.insert(
+        Symbol::from("aes_256_gcm_decrypt"),
+        fn_sig(vec![bytes("key"), bytes("iv"), bytes("ct"), bytes("tag")], Ty::Str),
+    );
     classes.insert(ClassId(Symbol::from("MessageDigest")), digest_info);
 
     // ActiveSupport's temporal intrinsics — the same situation as Db:
@@ -1488,7 +1514,7 @@ pub(crate) fn insert_framework_stubs(
     classes.insert(ClassId(Symbol::from("ActionView::ViewHelpers")), vh);
 
     // `ActionView::Base.new.form_with` is the cache-observable entry
-    // planted at each expanded form site (`observe_form_with_entry`).
+    // planted at each Ruby-family form site (`form_with::form_with_entry`).
     // The method returns nil; the markup is the expansion that
     // follows. `.new` already types as an instance of the receiver.
     // Without this stub the zero-arg call stays `Ty::Var`, and the
@@ -4231,6 +4257,10 @@ pub(super) struct ViewCtx {
     /// to the wrapped call so the form-builder macro-inline can see
     /// both halves at once.
     pub(super) form_wrappers: std::rc::Rc<std::collections::HashMap<String, FormWrapperHelper>>,
+    /// Begin each `form_with` expansion with the
+    /// `ActionView::Base.new.form_with` entry (Ruby family only — see
+    /// `form_with::form_with_entry`).
+    pub(super) form_with_entry: bool,
     /// Stylesheet logical names ingested from `app/assets/stylesheets/`
     /// + `app/assets/builds/`. Used by the `stylesheet_link_tag(:app,
     /// ...)` expansion: a `:app` symbol arg fans out to one call per
