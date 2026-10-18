@@ -166,6 +166,14 @@ pub fn emit_expr(e: &Expr) -> String {
     if is_mutable_string_literal(e) {
         return format!("+{}", emit_node(&e.node));
     }
+    // The bit survives a later re-analysis that widens the receiver type.
+    if e.decisions & crate::expr::GROUNDED_TIME_FORMAT != 0 {
+        if let ExprNode::Send { recv, method, args, parenthesized, block: None } = &*e.node {
+            if method.as_str() == "to_rfc3339" && args.is_empty() {
+                return emit_send_base(recv.as_ref(), &Symbol::from("iso8601"), args, *parenthesized);
+            }
+        }
+    }
     emit_node(&e.node)
 }
 
@@ -1298,7 +1306,7 @@ pub(super) fn emit_send_base(
     // `to_rfc3339`. An application method of that name is left as written.
     if m == "to_rfc3339" && args.is_empty() {
         if let Some(r) = recv {
-            if crate::lower::time_calendar::is_time_rfc3339_receiver(r) {
+            if crate::lower::time_calendar::ruby_prints_iso8601(r) {
                 return emit_send_base(Some(r), &Symbol::from("iso8601"), args, parenthesized);
             }
         }

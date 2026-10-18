@@ -1616,14 +1616,25 @@ pub(super) fn js_expr(e: &Expr) -> Js {
             Js::ident(e.span, "this"),
             ts_field_name(name.as_str()),
         ),
-        ExprNode::Send { recv, method, args, block, parenthesized } => js_send_with_block(
-            e.span,
-            recv.as_ref(),
-            method.as_str(),
-            args,
-            block.as_ref(),
-            *parenthesized,
-        ),
+        ExprNode::Send { recv, method, args, block, parenthesized } => {
+            if e.decisions & crate::expr::GROUNDED_TIME_FORMAT != 0
+                && method.as_str() == "to_rfc3339"
+                && args.is_empty()
+                && block.is_none()
+            {
+                if let Some(r) = recv {
+                    return Js::method_call(e.span, js_expr(r), "toISOString", vec![]);
+                }
+            }
+            js_send_with_block(
+                e.span,
+                recv.as_ref(),
+                method.as_str(),
+                args,
+                block.as_ref(),
+                *parenthesized,
+            )
+        }
         ExprNode::Assign { target, value } => {
             // Expression-position assignment — preserve the side effect.
             // JS `a = b` is an expression that both assigns and yields

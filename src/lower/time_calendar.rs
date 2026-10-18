@@ -494,6 +494,7 @@ pub(crate) fn ground_crystal_time_bridge(expr: &mut Expr) {
     };
     if method.as_str() == "iso8601" && args.is_empty() && is_time_rfc3339_receiver(r) {
         *method = Symbol::from("to_rfc3339");
+        expr.decisions |= crate::expr::GROUNDED_TIME_FORMAT;
         return;
     }
     if method.as_str() != "utc" || !args.is_empty() {
@@ -546,6 +547,24 @@ fn is_stdlib_time_clock(e: &Expr) -> bool {
         "utc" => is_stdlib_time_clock(r),
         _ => false,
     }
+}
+
+/// Ruby prints `iso8601` for a grounded time format. Re-analysis after the
+/// rename can widen the receiver to a union that still contains `Time`
+/// (`minimum(:starts_at) || Time.utc` becomes `String | Time`).
+pub(crate) fn ruby_prints_iso8601(recv: &Expr) -> bool {
+    if is_time_rfc3339_receiver(recv) {
+        return true;
+    }
+    fn contains_time(ty: &Ty) -> bool {
+        match ty {
+            Ty::Time => true,
+            Ty::Class { id, .. } if id.0.as_str() == "Time" => true,
+            Ty::Union { variants } => variants.iter().any(contains_time),
+            _ => false,
+        }
+    }
+    recv.ty.as_ref().is_some_and(contains_time)
 }
 
 /// A zero-arg `to_rfc3339` on this receiver is the grounded time format.

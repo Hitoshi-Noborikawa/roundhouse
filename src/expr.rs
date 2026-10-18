@@ -96,6 +96,12 @@ pub const HELPER_BODY_TRANSLATE: u64 = 1 << 18;
 /// replays where the source has it (`ingest::app_extension_calls`).
 pub const REPLAYED_CLASS_BODY: u64 = 1 << 19;
 
+/// `time_calendar` renamed a zero-arg `iso8601` to `to_rfc3339`. Later
+/// re-analysis can widen the receiver (`minimum(:col) || Time.utc`), so
+/// emitters cannot rediscover the rename from the type alone. Ruby prints
+/// `iso8601`; the other targets keep their time-format mapping.
+pub const GROUNDED_TIME_FORMAT: u64 = 1 << 20;
+
 /// Whether `expr` is a [`SELF_BINDING`] cast.
 pub fn is_self_binding(expr: &Expr) -> bool {
     expr.decisions & SELF_BINDING != 0

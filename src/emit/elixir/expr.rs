@@ -742,10 +742,21 @@ pub(super) fn emit_expr(e: &Expr) -> String {
         // A bare module-state `@ivar` read → the whole process-dictionary
         // store. (Element/method access is intercepted in `emit_send`.)
         ExprNode::Ivar { name } => ivar_pd_get_typed(name.as_str(), e.ty.as_ref()),
-        ExprNode::Send { recv, method, args, block, .. } => match block {
-            Some(blk) => emit_block_call(recv.as_ref(), method.as_str(), args, blk),
-            None => emit_send(recv.as_ref(), method.as_str(), args),
-        },
+        ExprNode::Send { recv, method, args, block, .. } => {
+            if e.decisions & crate::expr::GROUNDED_TIME_FORMAT != 0
+                && method.as_str() == "to_rfc3339"
+                && args.is_empty()
+                && block.is_none()
+            {
+                if let Some(r) = recv {
+                    return format!("DateTime.to_iso8601({})", emit_expr(r));
+                }
+            }
+            match block {
+                Some(blk) => emit_block_call(recv.as_ref(), method.as_str(), args, blk),
+                None => emit_send(recv.as_ref(), method.as_str(), args),
+            }
+        }
         ExprNode::Return { value } => emit_expr(value),
         // `next` inside a fold yields the accumulator unchanged (`next v`
         // yields `v`). Outside a fold there's no accumulator to yield —

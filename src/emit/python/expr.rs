@@ -857,6 +857,14 @@ pub(super) fn emit_expr(e: &Expr) -> String {
             }
         }
         ExprNode::Send { recv, method, args, parenthesized, .. } => {
+            if e.decisions & crate::expr::GROUNDED_TIME_FORMAT != 0
+                && method.as_str() == "to_rfc3339"
+                && args.is_empty()
+            {
+                if let Some(r) = recv {
+                    return format!("{}.isoformat()", emit_expr(r));
+                }
+            }
             emit_send(recv.as_ref(), method.as_str(), args, *parenthesized)
         }
         ExprNode::Assign { target: _, value } => emit_expr(value),
