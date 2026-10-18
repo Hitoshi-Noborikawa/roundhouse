@@ -492,7 +492,7 @@ pub(crate) fn ground_crystal_time_bridge(expr: &mut Expr) {
     let ExprNode::Send { recv: Some(r), method, args, block: None, .. } = &mut *expr.node else {
         return;
     };
-    if method.as_str() == "iso8601" && args.is_empty() && time_iso8601_receiver(r) {
+    if method.as_str() == "iso8601" && args.is_empty() && is_time_rfc3339_receiver(r) {
         *method = Symbol::from("to_rfc3339");
         return;
     }
@@ -548,7 +548,10 @@ fn is_stdlib_time_clock(e: &Expr) -> bool {
     }
 }
 
-fn time_iso8601_receiver(recv: &Expr) -> bool {
+/// A zero-arg `to_rfc3339` on this receiver is the grounded time format.
+/// Emitters use the same test so an application method of that name
+/// keeps normal dispatch.
+pub(crate) fn is_time_rfc3339_receiver(recv: &Expr) -> bool {
     if is_root_time_const(recv) {
         return false;
     }

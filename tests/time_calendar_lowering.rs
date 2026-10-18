@@ -361,6 +361,22 @@ fn crystal_clock_spelling_is_in_the_ir() {
     assert_eq!(ir_shape(&lowered_probe("due_on.iso8601")), "due_on.iso8601");
     let unknown = ir_shape(&lowered_probe("mystery.iso8601"));
     assert!(unknown.ends_with("iso8601") && !unknown.contains("to_rfc3339"), "{unknown}");
+
+    // Emitters map `to_rfc3339` only for a time. An application method
+    // of that name stays a call. The clock still prints MRI's `iso8601`.
+    let custom = lowered_probe("mystery.to_rfc3339");
+    assert_eq!(ir_shape(&custom), "mystery.to_rfc3339");
+    let custom_ruby = roundhouse::emit::ruby::emit_expr(&custom);
+    assert!(custom_ruby.contains("to_rfc3339"), "{custom_ruby}");
+    let custom_py = roundhouse::emit::python::emit_expr_for_runtime(&custom);
+    assert!(!custom_py.contains("isoformat"), "{custom_py}");
+    let column = lowered_probe("starts_at.iso8601");
+    let column_py = roundhouse::emit::python::emit_expr_for_runtime(&column);
+    assert!(column_py.contains("isoformat"), "{column_py}");
+    assert!(
+        roundhouse::emit::ruby::emit_expr(&column).contains("iso8601"),
+        "time column should print MRI iso8601"
+    );
 }
 
 /// Test-module constants are outside `for_each_test_body`. The Crystal

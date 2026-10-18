@@ -1294,8 +1294,14 @@ pub(super) fn emit_send_base(
     // `iso8601` rather than `to_rfc3339`, so the ruby target prints the
     // MRI names of that same IR. `Time.utc(year, …)` and `iso8601(n)`
     // are different calls and stay as written.
-    if m == "to_rfc3339" && args.is_empty() && recv.is_some() {
-        return emit_send_base(recv, &Symbol::from("iso8601"), args, parenthesized);
+    // The IR spelling of a time `iso8601`. MRI has `iso8601`, not
+    // `to_rfc3339`. An application method of that name is left as written.
+    if m == "to_rfc3339" && args.is_empty() {
+        if let Some(r) = recv {
+            if crate::lower::time_calendar::is_time_rfc3339_receiver(r) {
+                return emit_send_base(Some(r), &Symbol::from("iso8601"), args, parenthesized);
+            }
+        }
     }
     if m == "utc" && args.is_empty() {
         if let Some(r) = recv {

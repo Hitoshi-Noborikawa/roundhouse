@@ -1337,9 +1337,13 @@ fn emit_send(recv: Option<&Expr>, method: &str, args: &[Expr]) -> String {
             return emit_expr(r);
         }
     }
+    // Zero-arg `iso8601` on a time is `to_rfc3339` after `time_calendar`.
+    // An application method of that name keeps normal dispatch.
     if method == "to_rfc3339" && args.is_empty() {
         if let Some(r) = recv {
-            return format!("DateTime.to_iso8601({})", emit_expr(r));
+            if crate::lower::time_calendar::is_time_rfc3339_receiver(r) {
+                return format!("DateTime.to_iso8601({})", emit_expr(r));
+            }
         }
     }
 

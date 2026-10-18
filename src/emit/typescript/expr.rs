@@ -2603,8 +2603,12 @@ fn js_send_inner(
     }
     // `<date>.iso8601` → `.toISOString()` — produces the Z-suffix
     // ISO-8601 string Ruby's Time#iso8601 does.
-    // Zero-arg `iso8601` is `to_rfc3339` after `time_calendar`.
-    if method == "to_rfc3339" && args.is_empty() && recv.is_some() {
+    // Zero-arg `iso8601` on a time is `to_rfc3339` after `time_calendar`.
+    // An application method of that name keeps normal dispatch.
+    if method == "to_rfc3339"
+        && args.is_empty()
+        && recv.is_some_and(crate::lower::time_calendar::is_time_rfc3339_receiver)
+    {
         return Js::method_call(span, js_expr(recv.unwrap()), "toISOString", vec![]);
     }
     // Ruby has both `Regexp#match?(str)` and `String#match?(re)`.

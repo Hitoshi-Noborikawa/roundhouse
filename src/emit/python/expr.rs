@@ -1159,10 +1159,13 @@ pub(super) fn emit_send(recv: Option<&Expr>, method: &str, args: &[Expr], parent
             return emit_expr(r);
         }
     }
-    // Zero-arg `iso8601` is `to_rfc3339` after `time_calendar`.
+    // Zero-arg `iso8601` on a time is `to_rfc3339` after `time_calendar`.
+    // An application method of that name keeps normal dispatch.
     if method == "to_rfc3339" && args.is_empty() {
         if let Some(r) = recv {
-            return format!("{}.isoformat()", emit_expr(r));
+            if crate::lower::time_calendar::is_time_rfc3339_receiver(r) {
+                return format!("{}.isoformat()", emit_expr(r));
+            }
         }
     }
     // Ruby's binary operators ride the Send channel (`a == b` is
