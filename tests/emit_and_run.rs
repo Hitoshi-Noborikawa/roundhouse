@@ -16656,3 +16656,5 @@ mod open_classes;
 mod parameterized_mailer;
 #[path = "emit_and_run/private_calls.rs"]
 mod private_calls;
+#[path = "emit_and_run/inherited_visibility.rs"]
+mod inherited_visibility;
