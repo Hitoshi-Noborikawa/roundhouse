@@ -378,7 +378,7 @@ pub(crate) fn string_method_handled(method: &str, args: &[Expr], block: Option<&
         "squeeze" => char_sets(args).is_some(),
         "tr" => argc == 2 && tr_plan(&args[0], &args[1]).is_some(),
         "delete_prefix" | "delete_suffix" => argc == 1,
-        "split" => argc <= 1,
+        "split" => argc == 0 || (argc == 1 && literal_str(&args[0]).is_some()),
         "index" | "rindex" => argc == 1 && matches!(strip_nullable(args[0].ty.as_ref()), Some(Ty::Str)),
         "[]" | "slice" => argc == 2 || (argc == 1 && int_or_range(&args[0])),
         "match" | "match?" | "==" | "!=" | "+" | "*" | "<" | ">" | "<=" | ">=" | "<<" | "is_a?" | "kind_of?"
@@ -3209,11 +3209,27 @@ fn js_send_inner(
                     return Js::method_call(span, js_expr(r), "replace", vec![eol, Js::str(Span::synthetic(), "")]);
                 }
                 // Ruby's blank-separated split drops the empty fields JS `split(/\s+/)` keeps at either end.
-                "split" if args.is_empty() => {
+                "split" if args.is_empty() || literal_str(&args[0]) == Some(" ") => {
                     let ws = Js::synth(JsExpr::Regex { pattern: "\\s+".into(), flags: String::new() });
                     let fields = Js::method_call(Span::synthetic(), js_expr(r), "split", vec![ws]);
                     let non_empty = arrow1("__x", Js::binary(Span::synthetic(), "!==", synth_ident("__x"), Js::str(Span::synthetic(), "")));
                     return Js::method_call(span, fields, "filter", vec![non_empty]);
+                }
+                // Ruby drops the trailing empty fields JS `split` keeps, so `"".split(",")` is [].
+                "split" if args.len() == 1 && literal_str(&args[0]).is_some() => {
+                    let fields = Js::method_call(Span::synthetic(), js_expr(r), "split", vec![js_expr(&args[0])]);
+                    let kept = Js::synth(JsExpr::Arrow {
+                        params: vec![js_param("__n"), js_param("__x"), js_param("__i")],
+                        body: ArrowBody::Expr(Js::synth(JsExpr::Ternary {
+                            cond: Js::binary(Span::synthetic(), "!==", synth_ident("__x"), Js::str(Span::synthetic(), "")),
+                            then: Js::binary(Span::synthetic(), "+", synth_ident("__i"), Js::num(Span::synthetic(), "1")),
+                            else_: synth_ident("__n"),
+                        })),
+                        is_async: false,
+                    });
+                    let end = Js::method_call(Span::synthetic(), synth_ident("__a"), "reduce", vec![kept, Js::num(Span::synthetic(), "0")]);
+                    let trim = arrow1("__a", Js::method_call(Span::synthetic(), synth_ident("__a"), "slice", vec![Js::num(Span::synthetic(), "0"), end]));
+                    return Js::call(span, trim, vec![fields]);
                 }
                 "ljust" | "rjust" if args.len() == 1 || args.len() == 2 => {
                     let pad = if method == "ljust" { "padEnd" } else { "padStart" };

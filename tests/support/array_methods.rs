@@ -53,14 +53,15 @@ pub const STRING_PROBE: &str = r#"class StringProbe
      s.tr("a-y", "b-z"), s.tr("el", "ip"), s.tr("^l", "*"), s.tr("lo", ""), s.tr("hel", "x"), t.tr("-", "_"), s.tr("a-z", "A-Z"), s.tr("ll", "xy"),
      s.lstrip, s.rstrip, t.chomp, s.chomp, s.delete_prefix("he"), s.delete_prefix("x"), s.delete_suffix("lo"), s.delete_suffix("x"),
      s.index("l"), s.index("z"), s.rindex("l"), s.rindex("z"), s.slice(1), s.slice(1, 2), s.slice(1..2), s.slice(9),
-     "  a  b ".split, "".split, s.freeze, s.dup, s.itself]
+     "  a  b ".split, "".split, s.freeze, s.dup, s.itself,
+     "a,b,,".split(","), "".split(","), ",a".split(","), "  a  b ".split(" "), "a--b--".split("--"), s.split(""), s.split("l")]
   end
 end
 "#;
 
 /// `JSON.generate(StringProbe.run("hello", "  aa--bbb-\n", "*"))` under CRuby.
 #[allow(dead_code)]
-pub const STRING_EXPECTED: &str = r#"["  hello  ","*-hello*-*","hello","*hello**","hello..","helloaba","  hello","xyxyhello","hello",2,5,3,1,0,3,0,"helo"," a-b-\n","helo","  a--b-\n","heo","hell","ll","  aabbb\n","ifmmp","hippo","**ll*","he","xxxxo","  aa__bbb_\n","HELLO","heyyo","hello","hello","  aa--bbb-","hello","llo","hello","hel","hello",2,null,3,null,"e","el","el",null,["a","b"],[],"hello","hello","hello"]"#;
+pub const STRING_EXPECTED: &str = r#"["  hello  ","*-hello*-*","hello","*hello**","hello..","helloaba","  hello","xyxyhello","hello",2,5,3,1,0,3,0,"helo"," a-b-\n","helo","  a--b-\n","heo","hell","ll","  aabbb\n","ifmmp","hippo","**ll*","he","xxxxo","  aa__bbb_\n","HELLO","heyyo","hello","hello","  aa--bbb-","hello","llo","hello","hel","hello",2,null,3,null,"e","el","el",null,["a","b"],[],"hello","hello","hello",["a","b"],[],["","a"],["a","b"],["a","b"],["h","e","l","l","o"],["he","","o"]]"#;
 
 pub fn overlay() -> Overlay {
     emit_and_run::real_blog()

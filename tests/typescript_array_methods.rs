@@ -39,7 +39,7 @@ fn an_untranslated_array_or_number_method_is_refused_on_typescript_only() {
 #[test]
 fn an_untranslated_string_method_is_refused_on_typescript_only() {
     // A spec only known at run time, an empty pad Ruby raises on, and names JS strings lack.
-    let probe = "class Untranslated\n  def self.run(s, t)\n    [s.count(t), s.tr(t, \"x\"), s.center(4, \"\"), s.swapcase, s.succ, s.lines, s.scan(/l/), s =~ /l/, s.split(\",\", 2), s.to_f]\n  end\nend\n";
+    let probe = "class Untranslated\n  def self.run(s, t)\n    [s.count(t), s.tr(t, \"x\"), s.center(4, \"\"), s.swapcase, s.succ, s.lines, s.scan(/l/), s =~ /l/, s.split(\",\", 2), s.to_f, s.split(t), s.split(/l/)]\n  end\nend\n";
     let app = || {
         emit_and_run::real_blog()
             .write("app/models/untranslated.rb", probe)
@@ -49,6 +49,8 @@ fn an_untranslated_string_method_is_refused_on_typescript_only() {
     for name in ["String#count", "String#tr", "String#center", "String#swapcase", "String#succ", "String#lines", "String#scan", "String#=~", "String#split", "String#to_f"] {
         assert!(errors.iter().any(|e| e.contains(name)), "{name}: {errors:?}");
     }
+    // `split` with a limit, a separator only known at run time, and a regex.
+    assert_eq!(errors.iter().filter(|e| e.contains("String#split")).count(), 3, "{errors:?}");
     let (_emitted, errors) = app().emit(BuildTarget::Ruby);
     assert!(errors.is_empty(), "{errors:?}");
 }
