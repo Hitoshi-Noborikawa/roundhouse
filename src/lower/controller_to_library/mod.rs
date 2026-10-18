@@ -586,7 +586,7 @@ pub fn lower_controllers_with_arel_views_assocs_and_routes(
             // made it `helper.field`, a String. Ground them now, then type
             // the grounded calls.
             if bracket_rewritten
-                && crate::lower::string_inflections::ground_in_place(&mut method.body)
+                && crate::lower::string_core_ext::ground_in_place(&mut method.body)
             {
                 crate::lower::typing::type_method_body(method, &classes, &framework_ivars);
             }
