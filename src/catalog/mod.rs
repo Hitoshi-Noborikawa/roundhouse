@@ -1868,20 +1868,40 @@ pub(crate) const BUILDER_ALIASES: &[(&str, &str)] = &[
 ];
 
 /// True when `name` is a [`ChainKind::Builder`] entry, on any receiver,
-/// or an alias of one ([`BUILDER_ALIASES`]).
+/// or an alias of one ([`BUILDER_ALIASES`]), and every catalog entry for
+/// that name agrees.
 ///
-/// This is the single membership test for `lower::scope_chain`'s
-/// relation-chain hops and for `lower::arel`'s relation refiners. A
-/// terminal (`first`, `all`, `pluck`) stays out: those end the relation.
+/// This is the membership test for name-only chain hops and for arel
+/// refiners. A terminal (`first`, `all`, `pluck`) stays out. So does a
+/// name that is a Builder on one receiver and something else on another:
+/// `reload` is a Relation builder and an Instance read that returns the
+/// record. Treating every `reload` as a relation hop keeps
+/// `article = Model.where(…).find { … }; article.reload` on the runtime
+/// relation, and `find` then ignores the block.
 pub(crate) fn is_relation_builder_name(name: &str) -> bool {
     let canonical = BUILDER_ALIASES
         .iter()
         .find(|(alias, _)| *alias == name)
         .map(|(_, canonical)| *canonical)
         .unwrap_or(name);
-    AR_CATALOG
-        .iter()
-        .any(|entry| entry.chain == ChainKind::Builder && entry.name == canonical)
+    let mut saw_builder = false;
+    for entry in AR_CATALOG.iter().filter(|entry| entry.name == canonical) {
+        if entry.chain != ChainKind::Builder {
+            return false;
+        }
+        saw_builder = true;
+    }
+    saw_builder
+}
+
+/// True when the Relation-context entry for `name` is a Builder.
+///
+/// Callers that already know the receiver is a relation use this so
+/// `relation.reload` stays a hop. Name-only sites keep
+/// [`is_relation_builder_name`], which rejects `reload`.
+pub(crate) fn is_relation_context_builder(name: &str) -> bool {
+    lookup(name, ReceiverContext::Relation)
+        .is_some_and(|entry| entry.chain == ChainKind::Builder)
 }
 
 /// Look up a method in the catalog by name + receiver context.
@@ -2179,16 +2199,33 @@ mod tests {
 
     #[test]
     fn relation_chain_and_refiners_match_builder_entries() {
-        // Both directions. A Builder entry (any receiver) or a
-        // [`BUILDER_ALIASES`] spelling is a chain hop and a refiner.
-        // A catalog name that is not a Builder is neither. Reintroducing
-        // a hand list on either side fails one of the two asserts.
-        let mut builders: BTreeSet<&str> = BTreeSet::new();
+        // Both directions. A name whose every catalog entry is a Builder,
+        // or a [`BUILDER_ALIASES`] spelling of such a name, is a chain hop
+        // and a refiner. Any other catalog name is neither. A mixed name
+        // (`reload`: Relation builder, Instance read) is neither.
+        // Reintroducing a hand list on either side fails one of the asserts.
+        let mut uniform_builder: std::collections::BTreeMap<&str, bool> =
+            std::collections::BTreeMap::new();
         for entry in AR_CATALOG {
-            if entry.chain == ChainKind::Builder {
-                builders.insert(entry.name);
+            let is_builder = entry.chain == ChainKind::Builder;
+            uniform_builder
+                .entry(entry.name)
+                .and_modify(|all| *all &= is_builder)
+                .or_insert(is_builder);
+        }
+        let mut builders: BTreeSet<&str> = BTreeSet::new();
+        for (name, all_builder) in &uniform_builder {
+            if *all_builder {
+                builders.insert(*name);
             }
         }
+        assert_eq!(
+            uniform_builder.get("reload"),
+            Some(&false),
+            "reload should stay a mixed chain kind so the predicate cannot treat every reload as a relation hop",
+        );
+        assert!(!is_relation_builder_name("reload"));
+        assert!(is_relation_context_builder("reload"));
         let mut seen_alias: BTreeSet<&str> = BTreeSet::new();
         for (alias, canonical) in BUILDER_ALIASES {
             assert!(
