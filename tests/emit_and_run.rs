@@ -355,6 +355,77 @@ end
         .assert_passes();
 }
 
+/// `stub_const` is lowered to a value stack beside the constant, so it
+/// means the same on a target that resolves constants at build time:
+/// reads see the stub inside the block, nested stubs unwind in order,
+/// and a raising block still restores. The CRuby harness also has a
+/// `const_set` helper; the emitted text shows this ran through the
+/// lowering instead.
+#[test]
+fn stub_const_replaces_a_constant_for_its_block_and_restores_it() {
+    let run = emit_and_run::real_blog()
+        .write(
+            "app/models/page_limits.rb",
+            "class PageLimits\n  SIZE = 40\n\n  def self.size\n    SIZE\n  end\nend\n",
+        )
+        .edit(
+            "app/models/article.rb",
+            "  validates :body, presence: true, length: { minimum: 10 }\n",
+            concat!(
+                "  validates :body, presence: true, length: { minimum: 10 }\n\n",
+                "  EXCERPT = 12\n\n",
+                "  def excerpt\n    body[0, EXCERPT]\n  end\n",
+            ),
+        )
+        .write(
+            "test/models/stub_const_test.rb",
+            r#"require "test_helper"
+
+class StubConstTest < ActiveSupport::TestCase
+  test "a stub holds for its block, nests, and is put back" do
+    assert_equal 40, PageLimits.size
+    stub_const(PageLimits, :SIZE, 2) do
+      assert_equal 2, PageLimits.size
+      stub_const(PageLimits, :SIZE, 3) do
+        assert_equal 3, PageLimits.size
+      end
+      assert_equal 2, PageLimits.size
+    end
+    assert_equal 40, PageLimits.size
+  end
+
+  test "a raising block still restores the constant" do
+    assert_raises(RuntimeError) do
+      stub_const(PageLimits, :SIZE, 5) { raise "boom" }
+    end
+    assert_equal 40, PageLimits.size
+  end
+
+  test "a model's own constant is stubbed where the model reads it" do
+    article = Article.new(title: "Stubbed", body: "A sufficiently long article body.")
+    assert_equal "A sufficient", article.excerpt
+    stub_const(Article, :EXCERPT, 3) do
+      assert_equal "A s", article.excerpt
+    end
+    assert_equal "A sufficient", article.excerpt
+  end
+end
+"#,
+        )
+        .run_test("test/models/stub_const_test.rb");
+    run.assert_passes();
+    let test = std::fs::read_to_string(run.emitted.join("test/models/stub_const_test.rb"))
+        .expect("emitted stub_const test");
+    assert!(!test.contains("stub_const("), "{test}");
+    assert!(test.contains("PageLimits::SIZE_STUB_STACK.push(2)"), "{test}");
+    let limits = std::fs::read_to_string(run.emitted.join("app/models/page_limits.rb"))
+        .expect("emitted PageLimits");
+    assert!(limits.contains("SIZE_STUB_STACK = [PageLimits::SIZE]"), "{limits}");
+    let article = std::fs::read_to_string(run.emitted.join("app/models/article.rb"))
+        .expect("emitted Article");
+    assert!(article.contains("Article::EXCERPT_STUB_STACK.last"), "{article}");
+}
+
 /// The same anonymous keyword packet survives defaulting, local-name
 /// collisions, and a virtual override in emitted CRuby. Effectful input
 /// values also stay left-to-right and run once.

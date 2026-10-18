@@ -81,6 +81,7 @@ pub mod assoc_pluck;
 pub mod try_guard;
 pub mod class_body_new;
 pub mod mocha;
+pub mod stub_const;
 pub mod webmock;
 pub mod global_id_locate;
 pub mod record_snapshot;
@@ -387,6 +388,7 @@ const POST_ANALYZE_PASS_ORDER: &[(&str, &[&str])] = &[
     // constraints.
     ("class_body_new", &[]),
     ("mocha", &[]),
+    ("stub_const", &[]),
     // Independent context-heavy send rewrites: one fused tree walk in
     // `fused::apply_fused_context_rewrites`. Empty runs_after — they
     // match disjoint method names and do not consume each other's
@@ -875,6 +877,8 @@ pub fn apply_post_analyze_lowerings(
         mocha::apply_mocha_lowering(app);
     });
     ran!("mocha");
+    stub_const::apply_stub_const_lowering(app);
+    ran!("stub_const");
     crate::timings::phase("post-analyze: fused context rewrites", || {
         fused::apply_fused_context_rewrites(app);
     });
