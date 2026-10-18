@@ -2064,6 +2064,8 @@ end
 
     enum_constants.validate_consumed_sources(&app, &sources, &enum_input_files)?;
     keep_initializer_defined(&mut app, dir, &sources, initializer_defined);
+    // `self.queue_adapter =` on ApplicationJob (see `App::queue_adapter`).
+    apply_application_job_queue_adapter(&mut app);
     // The ledger of boot statements no recognizer above read. A warning
     // per statement, in the ingest diagnostic channel; no `App` field.
     super::initializer_ledger::record(
@@ -10179,6 +10181,49 @@ fn read_queue_adapter<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> Option<String> {
         }
     }
     adapter
+}
+
+/// `self.queue_adapter = :name` in `ApplicationJob`'s class body. Rails
+/// keeps the adapter per job class, and ApplicationJob's covers every
+/// job that inherits it, so it overrides the config files' setting, the
+/// last assignment winning, and a value that isn't a literal leaves the
+/// adapter unknown, as in `read_queue_adapter`. Another job class's own
+/// setting is not honored yet: its jobs follow the app's adapter, with a
+/// warning.
+fn apply_application_job_queue_adapter(app: &mut App) {
+    let mut set: Option<Option<String>> = None;
+    for lc in &app.library_classes {
+        let name = lc.name.0.as_str();
+        for call in &lc.unknown_calls {
+            let Some(value) = job_queue_adapter(call) else { continue };
+            if name == "ApplicationJob" {
+                set = Some(value);
+            } else {
+                warn_sidekiq(format!(
+                    "`self.queue_adapter =` in {name} is not honored yet (only ApplicationJob's is read); its jobs use the app's adapter"
+                ));
+            }
+        }
+    }
+    if let Some(value) = set {
+        app.queue_adapter = value;
+    }
+}
+
+/// The adapter a job class-body `self.queue_adapter = …` names: the
+/// literal's name, `Some(None)` for a value that isn't a Symbol or
+/// String literal, `None` for any other call.
+fn job_queue_adapter(call: &crate::expr::Expr) -> Option<Option<String>> {
+    use crate::expr::{ExprNode, Literal};
+    let ExprNode::Send { method, args, .. } = &*call.node else { return None };
+    if method.as_str() != "queue_adapter=" || args.len() != 1 {
+        return None;
+    }
+    Some(match &*args[0].node {
+        ExprNode::Lit { value: Literal::Sym { value } } => Some(value.as_str().to_string()),
+        ExprNode::Lit { value: Literal::Str { value } } => Some(value.clone()),
+        _ => None,
+    })
 }
 
 /// `App::sidekiq_redis`: the `Sidekiq.configure_client` Redis settings

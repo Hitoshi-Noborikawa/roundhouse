@@ -145,3 +145,38 @@ fn the_ledger_still_reports_a_sidekiq_line() {
     assert_eq!(ledger("Rails.application.config.active_job.queue_adapter = :sidekiq\n").len(), 1);
     assert_eq!(ledger("Rails.application.config.active_job.queue_adapter = :resque\n").len(), 1);
 }
+
+fn job(name: &str, parent: &str, body: &str) -> String {
+    format!("class {name} < {parent}\n{body}end\n")
+}
+
+#[test]
+fn application_job_overrides_the_config_files() {
+    let prod = production("  config.active_job.queue_adapter = :solid_queue\n");
+    let base = job("ApplicationJob", "ActiveJob::Base", "  self.queue_adapter = :sidekiq\n");
+    assert_eq!(
+        adapter(&[("config/environments/production.rb", &prod), ("app/jobs/application_job.rb", &base)]).as_deref(),
+        Some("sidekiq")
+    );
+    let base = job("ApplicationJob", "ActiveJob::Base", "  self.queue_adapter = \"async\"\n");
+    let app = application("    config.active_job.queue_adapter = :sidekiq\n");
+    assert_eq!(
+        adapter(&[("config/application.rb", &app), ("app/jobs/application_job.rb", &base)]).as_deref(),
+        Some("async")
+    );
+}
+
+#[test]
+fn a_single_job_s_adapter_is_warned_about_and_not_honored() {
+    let app = application("    config.active_job.queue_adapter = :sidekiq\n");
+    let base = job("ApplicationJob", "ActiveJob::Base", "");
+    let own = job("ReportJob", "ApplicationJob", "  self.queue_adapter = :async\n\n  def perform\n  end\n");
+    let (app, diags) = ingest(&[
+        ("config/application.rb", &app),
+        ("app/jobs/application_job.rb", &base),
+        ("app/jobs/report_job.rb", &own),
+    ]);
+    assert_eq!(app.queue_adapter.as_deref(), Some("sidekiq"));
+    let warnings: Vec<_> = diags.iter().filter(|d| d.message.contains("in ReportJob is not honored yet")).collect();
+    assert_eq!(warnings.len(), 1, "{diags:#?}");
+}

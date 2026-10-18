@@ -265,7 +265,9 @@ pub struct App {
     /// (`config.active_job.queue_adapter = :sidekiq` gives `"sidekiq"`).
     /// Read at ingest from `config/application.rb`, then
     /// `config/environments/production.rb`, then `config/initializers`,
-    /// the last setting winning; `None` when nothing sets it or the last
+    /// the last setting winning, then from `self.queue_adapter =` in
+    /// `ApplicationJob`, which covers every job and so overrides them;
+    /// `None` when nothing sets it or the last
     /// setting isn't a literal. Only `"sidekiq"` changes what is emitted
     /// (jobs are pushed to Redis on the Ruby family); any other adapter
     /// keeps the in-process queue.

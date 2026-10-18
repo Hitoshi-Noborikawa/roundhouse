@@ -173,3 +173,21 @@ fn configure_client_settings_reach_the_registry() {
     let registry = read(&emitted, "runtime/job_registry.rb");
     assert!(registry.contains("  def self.sidekiq_redis_url\n    \"\"\n  end\n"), "{registry}");
 }
+
+/// `self.queue_adapter = :sidekiq` in ApplicationJob puts the whole app
+/// on Sidekiq, with no config-file setting.
+#[test]
+fn application_job_on_sidekiq_gets_a_redis_client() {
+    let (emitted, errors) = emit_and_run::real_blog()
+        .write("app/jobs/article_job.rb", JOB)
+        .edit("app/models/article.rb", "  validates :title, presence: true\n", ENQUEUE)
+        .edit(
+            "app/jobs/application_job.rb",
+            "class ApplicationJob < ActiveJob::Base\n",
+            "class ApplicationJob < ActiveJob::Base\n  self.queue_adapter = :sidekiq\n",
+        )
+        .emit(BuildTarget::Ruby);
+    assert!(errors.is_empty(), "{errors:#?}");
+    assert!(read(&emitted, "Gemfile").contains("gem \"redis\""));
+    assert!(read(&emitted, "runtime/job_registry.rb").contains("  def self.sidekiq?\n    true\n  end\n"));
+}
