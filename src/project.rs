@@ -5422,6 +5422,47 @@ fn apply_cruby_test_support(files: &mut [(String, String)]) {
     }
 }
 
+/// Rails-dom-testing's `css_select` for a spinel tree that carries the
+/// real Nokogiri (spinel-nokogiri): the elements of the last response
+/// matching `selector`, as Nokogiri nodes, parsed the way the CRuby
+/// overlay parses them (`test_support_cruby.rb`). Only when a test calls
+/// it — a tree without the package has nothing to answer it with, and
+/// there the call stays the compile error it is.
+/// The helper itself. A string here rather than a file under
+/// `runtime/spinel/test/`: every file there ships into the emitted
+/// `test/`, where `spin test` builds it as a program of its own.
+const SPINEL_CSS_SELECT: &str = r#"
+# Rails-dom-testing's `css_select`: the elements of the last response
+# matching `selector`, as Nokogiri nodes (`node["id"]`). Appended to a
+# spinel tree's harness only when it carries spinel-nokogiri and a test
+# calls it (`project::apply_spinel_css_select`); the CRuby tree has its
+# own in test_support_cruby.rb. rails-dom-testing parses with HTML5.
+require "nokogiri"
+
+class TestBase
+  def css_select(selector)
+    Nokogiri::HTML5.fragment(@__response.body.to_s).css(selector).to_a
+  end
+end
+"#;
+
+fn apply_spinel_css_select(files: &mut [(String, String)]) {
+    let called = files
+        .iter()
+        .any(|(p, c)| p.starts_with("test/") && p.ends_with(".rb") && c.contains("css_select("));
+    if !called {
+        return;
+    }
+    if let Some((_, helper)) = files.iter_mut().find(|(p, _)| p == "test/test_helper.rb") {
+        if !helper.contains("def css_select(") {
+            if !helper.ends_with('\n') {
+                helper.push('\n');
+            }
+            helper.push_str(SPINEL_CSS_SELECT);
+        }
+    }
+}
+
 fn patch_harness_dispatch(content: &mut String, generated: &str) {
     const HEAD: &str = "    controller = case matched.controller\n";
     const TAIL: &str = "                 end";
@@ -8751,7 +8792,7 @@ fn apply_bundled_gem_wiring(files: &mut [(String, String)]) {
 /// Constant → bundled library that provides it. One table, read by
 /// both the pass that writes the requires and the gate that checks a
 /// tree for missing ones — a second copy is how the rule drifts.
-const BUNDLED: [(&str, &str); 26] = [
+const BUNDLED: [(&str, &str); 27] = [
     // INERT in our trees, and deliberately: `runtime/spinel/base64.rb`
     // defines `Base64` without requiring the library, which the second
     // condition below reads as "the program defines it" and drops the
@@ -8824,6 +8865,11 @@ const BUNDLED: [(&str, &str); 26] = [
     // makes its lock directory. A default gem on CRuby/JRuby (Rails has
     // loaded it); spinel takes `packages/fileutils`.
     ("FileUtils", "fileutils"),
+    // `Dir.mktmpdir` — campfire's WAL checkpointer test makes its lock
+    // directory under one. Not a constant (Dir is core), so the row names
+    // the call: `Dir` has `mktmpdir` only after `require "tmpdir"`, which
+    // a booted Rails app has done and spinel's `packages/tmpdir` answers.
+    ("Dir.mktmpdir", "tmpdir"),
     // `OpenSSL::HMAC.digest` - a default gem on CRuby/JRuby, spinel's
     // `packages/openssl`; an app that signs a payload without HTTP never
     // loads it through net/http.
@@ -9258,6 +9304,7 @@ fn spin_shape(files: Vec<(String, String)>) -> Result<Vec<(String, String)>, Str
                 .to_string();
         }
         files.retain(|(p, _)| p != "runtime/nokogiri_facade.rbs" && p != "runtime/nokogiri_spinel.rbs");
+        apply_spinel_css_select(&mut files);
     }
 
     // redis: the same swap, for a tree on queue_adapter :sidekiq with a
