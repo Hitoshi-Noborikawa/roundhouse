@@ -339,6 +339,50 @@ end
     }
 }
 
+/// A union arm whose chain declares no `comments` has no such reader,
+/// so a parent named after the arm that declares it is that arm, for
+/// the rewrite and the seed alike (campfire's `@room` typed `Membership
+/// | Room`). The name does not choose between arms declaring it
+/// differently, nor name a model outside the union.
+#[test]
+fn a_union_typed_parent_named_after_its_declaring_arm_reads_that_arm() {
+    use roundhouse::ident::Symbol;
+    use roundhouse::lower::scope_chain::assoc_read_target;
+
+    let reg = registry(
+        r#"
+ActiveRecord::Schema[8.1].define(version: 1) do
+  create_table "articles", force: :cascade do |t|
+  end
+  create_table "posts", force: :cascade do |t|
+  end
+  create_table "tags", force: :cascade do |t|
+  end
+  create_table "comments", force: :cascade do |t|
+    t.integer "article_id"
+    t.integer "post_id"
+  end
+end
+"#,
+        &[
+            ("class Article < ApplicationRecord\n  has_many :comments\nend\n", "app/models/article.rb"),
+            ("class Post < ApplicationRecord\n  has_many :comments\nend\n", "app/models/post.rb"),
+            ("class Tag < ApplicationRecord\nend\n", "app/models/tag.rb"),
+        ],
+    );
+    let seed = |written: &str| {
+        assoc_read_target(&owner(written), &Symbol::from("comments"), &reg)
+            .map(|(model, _, fk)| (model.map(|m| m.0.as_str().to_string()), fk.as_str().to_string()))
+    };
+    assert_eq!(comments(&reg, "@article: Tag | Article", "build"), comment_by("article_id"));
+    assert_eq!(comments(&reg, "@article: Tag | Article", "find"), comment_by("article_id"));
+    assert_eq!(seed("@article: Tag | Article"), Some((Some("Article".to_string()), "article_id".to_string())));
+    for written in ["@tag: Tag | Article", "@post: Tag | Article", "@article: Article | Post"] {
+        assert_eq!(comments(&reg, written, "build"), Declined, "{written}");
+        assert_eq!(seed(written), None, "{written}");
+    }
+}
+
 /// A model declaring `comments` twice keeps the later declaration, for
 /// a typed parent and as one declarer among the rest for an untyped one.
 #[test]
@@ -953,4 +997,63 @@ fn a_nested_create_bang_through_a_declared_foreign_key_uses_that_key() {
     assert!(controller.contains("Comment.from_params"), "{controller}");
     assert!(controller.lines().any(|l| l.contains("reviewed_article_id") && l.contains("@article.id")), "{controller}");
     assert!(!controller.contains("@article.reviews.create!("), "{controller}");
+}
+
+/// Campfire's `@membership, @room = RecordCache.fetch(…) { [membership,
+/// membership.room] }` types `@room` as `Membership | Room`, as this
+/// types `@article` `Comment | Article`. Only the Article arm has
+/// `comments`, and the ivar is named after it, so a concern's class
+/// method called through the association (campfire's
+/// `@room.messages.create_with_attachment!(message_params)`) runs
+/// against the article's comments: it takes the relation, the foreign
+/// key is preset, and the params arrive as an attribute hash. The
+/// `find` in `destroy` is checked against the same key.
+#[test]
+fn a_class_method_through_an_association_on_a_union_typed_owner_named_after_its_arm_takes_the_scope() {
+    let (find, replace) = CREATED_UNDER_THE_ARTICLE;
+    emit_and_run::real_blog()
+        .write(
+            "app/models/comment/noting.rb",
+            "module Comment::Noting\n  extend ActiveSupport::Concern\n\n  module ClassMethods\n    def create_noted!(attributes)\n      create!(attributes)\n    end\n  end\nend\n",
+        )
+        .edit("app/models/comment.rb", "class Comment < ApplicationRecord\n", "class Comment < ApplicationRecord\n  include Noting\n\n")
+        .edit(
+            "app/controllers/comments_controller.rb",
+            "      @article = Article.find(params.expect(:article_id))",
+            "      @first_comment, @article = [ Comment.first, Article.find(params.expect(:article_id)) ]",
+        )
+        .edit(
+            "app/controllers/comments_controller.rb",
+            "    @comment = @article.comments.build(comment_params)\n    if @comment.save\n      redirect_to @article, notice: \"Comment was successfully created.\"\n    else\n      redirect_to @article, alert: \"Could not create comment.\"\n    end\n  end",
+            "    @comment = @article.comments.create_noted!(comment_params)\n    redirect_to @article, notice: \"Comment was successfully created.\"\n  rescue ActiveRecord::RecordInvalid\n    redirect_to @article, alert: \"Could not create comment.\"\n  end",
+        )
+        .edit("test/controllers/comments_controller_test.rb", find, replace)
+        .run_test("test/controllers/comments_controller_test.rb")
+        .assert_passes();
+}
+
+/// The same union-typed `@article` reading `comments` through a scope
+/// and through a class method that queries: each reads the article's
+/// comments alone. Destroying article one's only comment leaves it
+/// none while article two keeps its own.
+#[test]
+fn a_scope_and_a_query_class_method_through_an_association_on_a_union_typed_owner_read_its_rows() {
+    emit_and_run::real_blog()
+        .edit(
+            "app/models/comment.rb",
+            "class Comment < ApplicationRecord\n",
+            "class Comment < ApplicationRecord\n  scope :recent, -> { order(created_at: :desc) }\n\n  def self.tally\n    count\n  end\n\n",
+        )
+        .edit(
+            "app/controllers/comments_controller.rb",
+            "      @article = Article.find(params.expect(:article_id))",
+            "      @first_comment, @article = [ Comment.first, Article.find(params.expect(:article_id)) ]",
+        )
+        .edit(
+            "app/controllers/comments_controller.rb",
+            "    @comment.destroy\n    redirect_to @article, notice: \"Comment was successfully deleted.\"",
+            "    @comment.destroy\n    if @article.comments.tally == 0 && @article.comments.recent.first.nil?\n      redirect_to @article, notice: \"Comment was successfully deleted.\"\n    else\n      head :conflict\n    end",
+        )
+        .run_test("test/controllers/comments_controller_test.rb")
+        .assert_passes();
 }

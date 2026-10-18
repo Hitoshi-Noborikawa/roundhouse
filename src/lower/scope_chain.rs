@@ -1434,12 +1434,18 @@ impl AssocRegistry {
     fn is_model(&self, class: &ClassId) -> bool {
         self.tables.contains_key(class)
     }
-    /// The models a value of type `ty` may be, `nil` aside: its class, or
-    /// every arm of a union. `None` unless each is a model, which is when
-    /// only their own declarations answer for it.
-    fn owner_models<'t>(&self, ty: Option<&'t crate::ty::Ty>) -> Option<Vec<&'t ClassId>> {
+    /// The models `owner` may be, `nil` aside, for a `<owner>.<assoc>`
+    /// read: its type's class, or every arm of a union. `None` unless
+    /// each is a model, which is when only their own declarations answer
+    /// for it.
+    ///
+    /// A union can be narrowed by the owner's name (see
+    /// [`Self::named_arm`]): `@room` typed `Membership | Room` is the
+    /// Room, as campfire's `@membership, @room = RecordCache.fetch(…)`
+    /// types it.
+    fn owner_models<'t>(&self, owner: &'t Expr, assoc: &Symbol) -> Option<Vec<&'t ClassId>> {
         use crate::ty::Ty;
-        let arms: Vec<&Ty> = match ty? {
+        let arms: Vec<&Ty> = match owner.ty.as_ref()? {
             Ty::Union { variants } => variants.iter().filter(|v| !matches!(v, Ty::Nil)).collect(),
             other => vec![other],
         };
@@ -1450,7 +1456,28 @@ impl AssocRegistry {
                 _ => None,
             })
             .collect::<Option<Vec<_>>>()?;
+        if let Some(arm) = self.named_arm(owner, &models, assoc) {
+            return Some(vec![arm]);
+        }
         (!models.is_empty()).then_some(models)
+    }
+    /// The arm of a union-typed owner that its name camelizes to, when
+    /// that arm's chain declares `assoc` and no other arm declares it
+    /// differently. An arm declaring nothing by the name has no such
+    /// reader, so it is not the owner of a `<owner>.<assoc>` read that
+    /// runs, and it does not stand in the way. An arm declaring it
+    /// differently might be, and keeps the union undecided.
+    fn named_arm<'t>(&self, owner: &Expr, models: &[&'t ClassId], assoc: &Symbol) -> Option<&'t ClassId> {
+        if models.len() < 2 {
+            return None;
+        }
+        let named = owner_model_from_name(owner, self)?;
+        let arm = *models.iter().find(|m| **m == named)?;
+        let class = self.declaring_class(arm, assoc)?;
+        models
+            .iter()
+            .all(|m| self.declaring_class(m, assoc).is_none_or(|c| c == class))
+            .then_some(arm)
     }
     /// The class in `model`'s superclass chain, `model` first, nearest
     /// declaring an association named `assoc`: the one whose declaration
@@ -1489,7 +1516,10 @@ impl AssocRegistry {
     /// an Article) is each of them, and expands only when every one
     /// reads the same expansion, from whichever declaration (the seed,
     /// which names the owner model, needs one declaring class for all of
-    /// them; see `assoc_read_target`).
+    /// them; see `assoc_read_target`). One named after an arm declaring
+    /// the association (`@article` assigned a Tag or an Article) is that
+    /// arm, unless another arm declares it differently (see
+    /// [`Self::owner_models`]).
     ///
     /// A parent of no known model resolves as the seed resolves it: by
     /// its name when that names a model whose chain declares the
@@ -1508,7 +1538,7 @@ impl AssocRegistry {
             return AssocBuildTarget::Undeclared;
         }
         let read = |class: &ClassId| self.assoc_builds[&(class.clone(), assoc.clone())].expansion_for(call);
-        let expansions: Vec<Option<&(ClassId, Symbol)>> = match self.owner_models(owner.ty.as_ref()) {
+        let expansions: Vec<Option<&(ClassId, Symbol)>> = match self.owner_models(owner, assoc) {
             Some(models) => {
                 models.into_iter().map(|model| self.declaring_class(model, assoc).and_then(read)).collect()
             }
@@ -2960,8 +2990,9 @@ pub fn assoc_read_target(
     // not have it, and the other two rungs would hand it another
     // model's foreign key (`@tag.comments` filtered by `article_id`).
     // One typed as a union of models reads the declaration they all
-    // share, or none.
-    if let Some(owners) = assocs.owner_models(owner.ty.as_ref()) {
+    // share, or none, once its name has had the chance to pick the arm
+    // it is (`owner_models`).
+    if let Some(owners) = assocs.owner_models(owner, aname) {
         let mut classes = owners.into_iter().map(|m| assocs.declaring_class(m, aname));
         let class = classes.next().flatten()?;
         if !classes.all(|c| c == Some(class)) {
@@ -4269,7 +4300,7 @@ fn rewrite_send(expr: &mut Expr, ctx: &Ctx, locals: &mut Locals) -> Option<Class
                         .as_ref()
                         .filter(|m| ctx.assocs.is_model(m))
                         .map(|m| vec![m]),
-                    _ => ctx.assocs.owner_models(ir.ty.as_ref()),
+                    _ => ctx.assocs.owner_models(ir, aname),
                 };
                 if aargs.is_empty()
                     && ctx.assocs.is_assoc_extension(None, aname, &method)
