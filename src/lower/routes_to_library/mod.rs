@@ -360,7 +360,6 @@ pub fn lower_routes_to_library_functions(app: &App) -> Vec<LibraryFunction> {
     // gets lowered.
     for f in &mut funcs {
         crate::lower::time_current::rewrite_time_current(&mut f.body, &app.time_formats);
-        crate::lower::time_calendar::ground_crystal_time_bridge_tree(&mut f.body);
     }
     funcs
 }

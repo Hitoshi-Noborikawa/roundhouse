@@ -1156,8 +1156,8 @@ pub(super) fn emit_send(recv: Option<&Expr>, method: &str, args: &[Expr], parent
             return emit_expr(r);
         }
     }
-    // `<time>.iso8601` / lowered `to_rfc3339` → `.isoformat()`.
-    if matches!(method, "iso8601" | "to_rfc3339") && args.is_empty() {
+    // Zero-arg `iso8601` is `to_rfc3339` after `time_calendar`.
+    if method == "to_rfc3339" && args.is_empty() {
         if let Some(r) = recv {
             return format!("{}.isoformat()", emit_expr(r));
         }

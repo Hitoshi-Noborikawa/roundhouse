@@ -93,7 +93,7 @@ pub(super) fn try_stdlib_class_method(
     if recv_is_time(r) {
         match (method, args.len()) {
             ("utc" | "to_time", 0) => return Some(emit_expr(r)),
-            ("iso8601" | "rfc3339" | "to_rfc3339", 0) => {
+            ("rfc3339" | "to_rfc3339", 0) => {
                 return Some(format!("{}.to_rfc3339()", emit_expr(r)))
             }
             ("rfc2822", 0) => return Some(format!("{}.to_rfc2822()", emit_expr(r))),

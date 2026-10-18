@@ -80,10 +80,6 @@ pub fn apply_fused_context_rewrites(app: &mut App) {
     super::for_each_hook_body(app, &mut |body| {
         walk_postorder(body, &mut |e| {
             super::time_current::rewrite_node(e, &formats);
-            // `Time.current` just became `Time.now.utc`. The crystal
-            // clock spelling has to see that, not only the source form
-            // `time_calendar` already rewrote.
-            super::time_calendar::ground_crystal_time_bridge(e);
             super::global_id_locate::rewrite_node(e, &mut gid_models, &mut gid_signed);
             super::assoc_pluck::rewrite_node(e, &materialized);
             super::try_guard::rewrite_node(e, &try_definers, &try_parents);
@@ -92,7 +88,6 @@ pub fn apply_fused_context_rewrites(app: &mut App) {
     super::for_each_test_body(app, &mut |body| {
         walk_postorder(body, &mut |e| {
             super::time_current::rewrite_node(e, &formats);
-            super::time_calendar::ground_crystal_time_bridge(e);
             super::webmock::rewrite_node(e);
             // Same Array wall as hook bodies: campfire's destroy test
             // plucks `room.memberships` for the enqueued job's args.

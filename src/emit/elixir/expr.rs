@@ -1334,7 +1334,7 @@ fn emit_send(recv: Option<&Expr>, method: &str, args: &[Expr]) -> String {
             return emit_expr(r);
         }
     }
-    if matches!(method, "iso8601" | "to_rfc3339") && args.is_empty() {
+    if method == "to_rfc3339" && args.is_empty() {
         if let Some(r) = recv {
             return format!("DateTime.to_iso8601({})", emit_expr(r));
         }
@@ -3082,10 +3082,9 @@ mod tests {
 
     #[test]
     fn time_now_utc_iso8601_maps_to_datetime() {
-        // Time.now.utc.iso8601 → DateTime.to_iso8601(DateTime.utc_now())
-        let now = call(const_path("Time"), "now", vec![]);
-        let utc = call(now, "utc", vec![]);
-        let iso = call(utc, "iso8601", vec![]);
+        // Lowered `Time.utc.to_rfc3339` → DateTime.to_iso8601(DateTime.utc_now())
+        let utc = call(const_path("Time"), "utc", vec![]);
+        let iso = call(utc, "to_rfc3339", vec![]);
         assert_eq!(emit_expr(&iso), "DateTime.to_iso8601(DateTime.utc_now())");
     }
 
