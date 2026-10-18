@@ -11,8 +11,9 @@
 //!
 //!   SIDEKIQ_LIVE_REDIS_URL=redis://127.0.0.1:6379/15 \
 //!   SPINEL_REDIS_DIR=/path/to/spinel-redis \
-//!   cargo test --test sidekiq_push_live -- --ignored --nocapture
+//!   cargo test --test sidekiq_push_live -- --ignored --nocapture --test-threads=1
 //!
+//! One thread: both tests flush and fill the same scratch database.
 //! SIDEKIQ_LIVE_REDIS_URL must name a scratch database: each test
 //! flushes it. The CRuby test needs the `redis` (~> 5.4) and `sidekiq`
 //! (8.1.x) gems; the Spinel test also needs `spinel` and a spinel-redis

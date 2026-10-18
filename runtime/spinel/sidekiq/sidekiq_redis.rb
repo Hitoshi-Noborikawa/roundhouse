@@ -72,14 +72,21 @@ module SidekiqRedis
     held[0]
   end
 
-  # A new connection. A `configure_client` `password:` overrides the
-  # URL's, as the explicit option does on both clients.
+  # A new connection, connected and authenticated here, outside LOCK:
+  # redis-rb connects at its first command, so the PING makes that
+  # happen now rather than inside LOCK at the first push (spinel-redis
+  # connects in its constructor already). A `configure_client`
+  # `password:` overrides the URL's, as the explicit option does on both
+  # clients.
   def self.open(url, password)
-    if password == ""
-      Redis.new(url: url)
-    else
-      Redis.new(url: url, password: password)
+    conn = password == "" ? Redis.new(url: url) : Redis.new(url: url, password: password)
+    begin
+      conn.ping
+    rescue StandardError => e
+      close_quietly(conn)
+      raise e
     end
+    conn
   end
 
   # Under LOCK: the connection as a zero- or one-element Array, after
