@@ -30,6 +30,11 @@ impl<'a> Owners<'a> {
             define(&lc.name, &mut lc.methods.iter().filter(|m| !lc.is_module || m.receiver == MethodReceiver::Class));
         }
         for model in &app.models {
+            for (class_side, name, visibility) in crate::lower::model_to_library::inherited_visibility(model) {
+                out.defined.entry((&model.name, class_side, name)).or_insert(visibility);
+            }
+        }
+        for model in &app.models {
             if let Some(p) = &model.parent {
                 out.parents.insert(&model.name, p);
             }

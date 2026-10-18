@@ -572,7 +572,8 @@ pub fn lower_model_to_library_class(model: &Model, schema: &Schema) -> LibraryCl
 
 /// Canonical class envelope for both production lowering and ownership
 /// observation. Typing and method selection remain the caller's job.
-fn model_class(model: &Model, methods: Vec<MethodDef>, table: Option<&Table>) -> LibraryClass {
+fn model_class(model: &Model, mut methods: Vec<MethodDef>, table: Option<&Table>) -> LibraryClass {
+    apply_inherited_visibility(model, &mut methods);
     LibraryClass {
         name: model.name.clone(),
         is_module: false,
@@ -617,6 +618,43 @@ fn collect_class_attr_initializers(model: &Model) -> Vec<Expr> {
             && writes_class_ivar(expr)
         {
             out.push(expr.clone());
+        }
+    }
+    out
+}
+
+/// `private :comments` on a method the lowering synthesizes; a name it does not synthesize (a gem's) has no method here to mark.
+fn apply_inherited_visibility(model: &Model, methods: &mut [MethodDef]) {
+    for (class_side, name, visibility) in inherited_visibility(model) {
+        let side = if class_side { MethodReceiver::Class } else { MethodReceiver::Instance };
+        for m in methods.iter_mut().filter(|m| m.name.as_str() == name && m.receiver == side) {
+            m.visibility = visibility;
+        }
+    }
+}
+
+/// `(class side, name, visibility)` per name a model's `private :x` gives a method its body does not define.
+pub(crate) fn inherited_visibility(model: &Model) -> Vec<(bool, &str, crate::dialect::MethodVisibility)> {
+    let mut out = Vec::new();
+    for item in &model.body {
+        let crate::dialect::ModelBodyItem::Unknown { expr, .. } = item else { continue };
+        if expr.decisions & crate::expr::INHERITED_VISIBILITY == 0 {
+            continue;
+        }
+        let ExprNode::Send { method: marker, args, .. } = &*expr.node else { continue };
+        let visibility = match marker.as_str() {
+            "public" | "public_class_method" => crate::dialect::MethodVisibility::Public,
+            "protected" => crate::dialect::MethodVisibility::Protected,
+            _ => crate::dialect::MethodVisibility::Private,
+        };
+        let class_side = marker.as_str().ends_with("_class_method");
+        for arg in args {
+            let name = match &*arg.node {
+                ExprNode::Lit { value: Literal::Sym { value } } => value.as_str(),
+                ExprNode::Lit { value: Literal::Str { value } } => value.as_str(),
+                _ => continue,
+            };
+            out.push((class_side, name, visibility));
         }
     }
     out
@@ -692,6 +730,10 @@ fn report_unclaimed_unknowns(model: &Model, schema: &Schema) {
         let crate::dialect::ModelBodyItem::Unknown { expr, .. } = item else { continue };
         // Replayed where the source has it (`ingest::app_extension_calls`).
         if expr.decisions & crate::expr::REPLAYED_CLASS_BODY != 0 {
+            continue;
+        }
+        // Claimed by `apply_inherited_visibility` and `analyze::private_calls`.
+        if expr.decisions & crate::expr::INHERITED_VISIBILITY != 0 {
             continue;
         }
         // Class-scope constants — claimed by analyze::extract_const_assignments.

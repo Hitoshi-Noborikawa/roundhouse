@@ -96,6 +96,11 @@ pub const HELPER_BODY_TRANSLATE: u64 = 1 << 18;
 /// replays where the source has it (`ingest::app_extension_calls`).
 pub const REPLAYED_CLASS_BODY: u64 = 1 << 19;
 
+/// A model's `private :has_role?` naming a method its body does not
+/// define (generated, a superclass's or a gem's): kept as a statement for
+/// the lowering to apply and the analyzer to enforce.
+pub const INHERITED_VISIBILITY: u64 = 1 << 20;
+
 /// Whether `expr` is a [`SELF_BINDING`] cast.
 pub fn is_self_binding(expr: &Expr) -> bool {
     expr.decisions & SELF_BINDING != 0

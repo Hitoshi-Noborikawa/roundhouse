@@ -1793,6 +1793,13 @@ pub(crate) fn app_method(
             {
                 return true;
             }
+            // Not the framework's public surface once the app changed its visibility.
+            if crate::lower::model_to_library::inherited_visibility(model)
+                .iter()
+                .any(|(class_side, n, _)| *n == name.as_str() && *class_side == (side == crate::dialect::MethodReceiver::Class))
+            {
+                return true;
+            }
             if crate::analyze::model_includes(model)
                 .iter()
                 .any(|inc| visit(app, inc, name, side, seen))
