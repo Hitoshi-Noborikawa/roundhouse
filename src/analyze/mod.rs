@@ -2663,6 +2663,7 @@ impl Analyzer {
                         action.block_param.as_ref(),
                         action.rest_param.as_ref(),
                     );
+                    self.analyze_action_defaults(action, &mctx);
                     self.body_typer().analyze_expr(&mut action.body, &mctx);
                 }
             }
@@ -3215,6 +3216,7 @@ impl Analyzer {
                             action.block_param.as_ref(),
                             action.rest_param.as_ref(),
                         );
+                        self.analyze_action_defaults(action, &inner_ctx);
                         self.body_typer().analyze_expr(&mut action.body, &inner_ctx);
                     }
                 }
@@ -3736,6 +3738,7 @@ impl Analyzer {
                         action.block_param.as_ref(),
                         action.rest_param.as_ref(),
                     );
+                    self.analyze_action_defaults(action, &inner_ctx);
                     self.body_typer().analyze_expr(&mut action.body, &inner_ctx);
                 }
             }
@@ -4663,6 +4666,15 @@ impl Analyzer {
                 .insert(rest.clone(), Ty::Array { elem: std::sync::Arc::new(Ty::Untyped) });
         }
         ctx
+    }
+
+    fn analyze_action_defaults(&self, action: &mut crate::dialect::Action, ctx: &Ctx) {
+        for (_, default) in &mut action.opt_params {
+            self.body_typer().analyze_expr(default, ctx);
+        }
+        for default in action.kw_params.iter_mut().filter_map(|(_, d)| d.as_mut()) {
+            self.body_typer().analyze_expr(default, ctx);
+        }
     }
 
     fn capture_inference_sig(&self) -> InferenceSig {

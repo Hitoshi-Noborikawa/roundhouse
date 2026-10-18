@@ -3106,6 +3106,22 @@ pub(crate) fn apply_helper_lowering(lcs: &mut [LibraryClass], app: &App) {
                 MethodReceiver::Instance => inherited_instance.iter().cloned(),
                 MethodReceiver::Class => inherited_class.iter().cloned(),
             });
+            for default in m.params.iter_mut().filter_map(|p| p.default.as_mut()) {
+                rewrite_url_helpers_absolute(default);
+                rewrite_helper_calls(
+                    default,
+                    &app.helper_method_index,
+                    &route_helpers,
+                    &url_helper_classes,
+                    rewrite_request,
+                    &own_methods,
+                    &own_params,
+                    &app.view_visible_controller_methods,
+                );
+                if is_helper_module {
+                    rewrite_helper_ivars(default, &helper_ivars);
+                }
+            }
             rewrite_helper_calls(
                 &mut m.body,
                 &app.helper_method_index,

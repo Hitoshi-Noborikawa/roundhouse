@@ -169,9 +169,15 @@ pub fn diagnose_with_coverage(app: &App) -> (Vec<Diagnostic>, PreloadCoverage) {
         .collect();
     for controller in &app.controllers {
         for action in controller.actions() {
+            for default in action.opt_params.iter().map(|(_, d)| d).chain(action.kw_params.iter().filter_map(|(_, d)| d.as_ref())) {
+                diagnose_expr(default, &mut out);
+            }
             diagnose_expr_in(&action.body, &mut out, !filter_targets.contains(&action.name));
         }
         for method in controller.class_methods() {
+            for default in method.params.iter().filter_map(|p| p.default.as_ref()) {
+                diagnose_expr(default, &mut out);
+            }
             diagnose_expr(&method.body, &mut out);
         }
     }
