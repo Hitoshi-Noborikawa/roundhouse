@@ -60,19 +60,22 @@ pub fn apply_association_new_lowering(app: &mut App) {
             }
             // An extension defining `new` is what the proxy's `new` runs,
             // not the alias of `build`, so that call stays `new` and
-            // reaches the extension.
-            let names = model
-                .associations()
-                .filter_map(|assoc| match assoc {
+            // reaches the extension. The last declaration of a name is
+            // the reader, so it alone decides.
+            let mut names = HashMap::new();
+            for assoc in model.associations() {
+                match assoc {
                     Association::HasMany { name, target, extension, .. }
-                        if !overrides.contains(name)
-                            && !extension.iter().any(|m| m.name.as_str() == "new") =>
+                        if !extension.iter().any(|m| m.name.as_str() == "new") =>
                     {
-                        Some((name.clone(), target.clone()))
+                        names.insert(name.clone(), target.clone());
                     }
-                    _ => None,
-                })
-                .collect();
+                    _ => {
+                        names.remove(assoc.name());
+                    }
+                }
+            }
+            names.retain(|name, _| !overrides.contains(name));
             (model.name.clone(), names)
         })
         .collect();

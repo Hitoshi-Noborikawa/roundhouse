@@ -1142,7 +1142,8 @@ fn merge_or_append_kwarg(args: &mut Vec<Expr>, key: &str, value: &str, span: Spa
 // An association no model declares keeps the name-derived form
 // (`<Singular>`, `<parent>_id`). One declared in a way this cannot
 // reproduce, one whose extension defines this call (`find`, `build`, …),
-// or one the parent's model does not declare is left as written.
+// or one the parent's model does not declare (or, for a parent typed as
+// a union of models, does not declare alike) is left as written.
 //
 // One Assign expands to a Seq of multiple Exprs — the outer Seq the
 // emitter walks for line-per-statement output flattens implicitly.
@@ -1224,13 +1225,9 @@ pub(super) fn rewrite_assoc_through_parent_typed(
         // expansion cannot reproduce (`primary_key:`, `through:`, `as:`,
         // a scope that changes what is built or found), an extension
         // method by this call's name, or a parent model without the
-        // association is declined, and the typed association seed
-        // handles or refuses the call instead.
-        let owner = match inner_recv.ty.clone().map(Ty::strip_nil) {
-            Some(Ty::Class { id, .. }) => Some(id),
-            _ => None,
-        };
-        let (model_class, fk) = match assocs.build_target(owner.as_ref(), assoc_method, outer_method) {
+        // association (any of a union's) is declined, and the typed
+        // association seed handles or refuses the call instead.
+        let (model_class, fk) = match assocs.build_target(inner_recv.ty.as_ref(), assoc_method, outer_method) {
             AssocBuildTarget::Declared { target, foreign_key } => {
                 (target.0.as_str().to_string(), foreign_key.as_str().to_string())
             }

@@ -149,7 +149,8 @@ fn registry(schema: &str, sources: &[(&str, &str)]) -> roundhouse::lower::scope_
 }
 
 /// The foreign key `<owner>.comments.<call>` expands with, `None` when
-/// the rewrite declines it.
+/// the rewrite declines it. An owner written `"Tag | Article"` is typed
+/// as that union.
 fn comments_key(
     reg: &roundhouse::lower::scope_chain::AssocRegistry,
     owner: Option<&str>,
@@ -157,8 +158,13 @@ fn comments_key(
 ) -> Option<String> {
     use roundhouse::ident::{ClassId, Symbol};
     use roundhouse::lower::scope_chain::AssocBuildTarget;
+    use roundhouse::ty::Ty;
 
-    let owner = owner.map(|o| ClassId(Symbol::from(o)));
+    let owner = owner.map(|o| {
+        let mut arms: Vec<Ty> =
+            o.split(" | ").map(|c| Ty::Class { id: ClassId(Symbol::from(c)), args: vec![].into() }).collect();
+        if arms.len() == 1 { arms.remove(0) } else { Ty::Union { variants: arms.into() } }
+    });
     match reg.build_target(owner.as_ref(), &Symbol::from("comments"), &Symbol::from(call)) {
         AssocBuildTarget::Declared { target, foreign_key } => {
             assert_eq!(target.0.as_str(), "Comment");
@@ -196,6 +202,8 @@ end
     assert_eq!(comments_key(&reg, Some("Article"), "build").as_deref(), Some("article_id"));
     assert_eq!(comments_key(&reg, Some("Post"), "build").as_deref(), Some("post_id"));
     assert_eq!(comments_key(&reg, Some("Story"), "find").as_deref(), Some("article_id"));
+    assert_eq!(comments_key(&reg, Some("Story | Article"), "build").as_deref(), Some("article_id"));
+    assert_eq!(comments_key(&reg, Some("Article | Post"), "build"), None);
     assert_eq!(comments_key(&reg, None, "build"), None);
 }
 
@@ -224,6 +232,7 @@ end
     );
     assert_eq!(comments_key(&reg, Some("Tag"), "build"), None);
     assert_eq!(comments_key(&reg, Some("Tag"), "find"), None);
+    assert_eq!(comments_key(&reg, Some("Tag | Article"), "build"), None);
     for owner in [None, Some("Current")] {
         assert_eq!(comments_key(&reg, owner, "build").as_deref(), Some("article_id"), "{owner:?}");
     }
@@ -453,6 +462,64 @@ fn a_nested_build_and_find_on_a_model_without_the_association_do_not_borrow_anot
     );
 }
 
+/// `@owner` holding a Tag or an Article: only the Article has
+/// `comments`, so neither the rewrite nor the association seed builds
+/// a Comment under the Tag's id as its `article_id`.
+#[test]
+fn a_nested_build_on_a_union_of_models_does_not_borrow_one_arms_key() {
+    let (emitted, _errors) = emit_and_run::real_blog()
+        .edit(
+            "db/schema.rb",
+            "  add_foreign_key \"comments\", \"articles\"",
+            "  create_table \"tags\", force: :cascade do |t|\n    t.string \"name\"\n  end\n\n  add_foreign_key \"comments\", \"articles\"",
+        )
+        .write("app/models/tag.rb", "class Tag < ApplicationRecord\nend\n")
+        .edit(
+            "app/controllers/comments_controller.rb",
+            "    @comment = @article.comments.build(comment_params)",
+            "    @owner = params[:tag] ? Tag.find(1) : @article\n    @comment = @owner.comments.build(comment_params)",
+        )
+        .emit(roundhouse::project::BuildTarget::Ruby);
+    let controller = std::fs::read_to_string(emitted.join("app/controllers/comments_controller.rb"))
+        .expect("emitted controller");
+    assert!(controller.contains("@owner.comments.build("), "{controller}");
+    assert!(
+        !controller.lines().any(|l| l.contains("article_id") && l.contains("@owner.id")),
+        "{controller}"
+    );
+}
+
+/// Post's `comments` extension defines `count`; Article's is Rails'
+/// own. `@article.comments.count` counts Article's comments rather than
+/// calling a `comments_count` Article does not have.
+#[test]
+fn a_typed_owner_ignores_another_models_extension() {
+    let (find, replace) = CREATED_UNDER_THE_ARTICLE;
+    emit_and_run::real_blog()
+        .edit(
+            "db/schema.rb",
+            "    t.integer \"article_id\", null: false\n",
+            "    t.integer \"article_id\", null: false\n    t.integer \"post_id\"\n",
+        )
+        .edit(
+            "db/schema.rb",
+            "  add_foreign_key \"comments\", \"articles\"",
+            "  create_table \"posts\", force: :cascade do |t|\n    t.string \"title\"\n  end\n\n  add_foreign_key \"comments\", \"articles\"",
+        )
+        .write(
+            "app/models/post.rb",
+            "class Post < ApplicationRecord\n  has_many :comments do\n    def count\n      0\n    end\n  end\nend\n",
+        )
+        .edit(
+            "app/controllers/comments_controller.rb",
+            "    @comment = @article.comments.build(comment_params)\n",
+            "    @comment = @article.comments.build(comment_params)\n    @comment_count = @article.comments.count\n",
+        )
+        .edit("test/controllers/comments_controller_test.rb", find, replace)
+        .run_test("test/controllers/comments_controller_test.rb")
+        .assert_passes();
+}
+
 /// An extension defining `find` is the method `@article.remarks.find`
 /// runs: that call reaches it (flattened to `remarks_find`), and
 /// `build`, which the extension leaves alone, still expands.
@@ -518,6 +585,28 @@ fn a_nested_new_through_an_extension_defining_new_reaches_the_extension() {
             "app/models/article.rb",
             "  has_many :comments, dependent: :destroy",
             "  has_many :comments, dependent: :destroy\n  has_many :remarks, class_name: \"Comment\" do\n    def new(attributes = {})\n      Comment.new(commenter: \"amy\")\n    end\n  end",
+        )
+        .edit(
+            "app/controllers/comments_controller.rb",
+            "@article.comments.build(comment_params)",
+            "@article.remarks.new(comment_params)",
+        )
+        .emit(roundhouse::project::BuildTarget::Ruby);
+    let controller = std::fs::read_to_string(emitted.join("app/controllers/comments_controller.rb"))
+        .expect("emitted controller");
+    assert!(controller.contains("@article.remarks_new("), "{controller}");
+    assert!(!controller.contains("Comment.from_params"), "{controller}");
+}
+
+/// The extension defining `new` comes with the later declaration of
+/// `remarks`, the one whose reader runs, so `new` still reaches it.
+#[test]
+fn a_nested_new_through_a_redeclared_extension_defining_new_reaches_the_extension() {
+    let (emitted, _errors) = emit_and_run::real_blog()
+        .edit(
+            "app/models/article.rb",
+            "  has_many :comments, dependent: :destroy",
+            "  has_many :comments, dependent: :destroy\n  has_many :remarks, class_name: \"Comment\"\n  has_many :remarks, class_name: \"Comment\" do\n    def new(attributes = {})\n      Comment.new(commenter: \"amy\")\n    end\n  end",
         )
         .edit(
             "app/controllers/comments_controller.rb",
