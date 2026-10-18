@@ -2663,6 +2663,7 @@ impl Analyzer {
                         action.block_param.as_ref(),
                         action.rest_param.as_ref(),
                     );
+                    self.analyze_action_defaults(action, &mctx, &ctrl_id, origin);
                     self.body_typer().analyze_expr(&mut action.body, &mctx);
                 }
             }
@@ -3215,6 +3216,7 @@ impl Analyzer {
                             action.block_param.as_ref(),
                             action.rest_param.as_ref(),
                         );
+                        self.analyze_action_defaults(action, &inner_ctx, &ctrl_name, origin);
                         self.body_typer().analyze_expr(&mut action.body, &inner_ctx);
                     }
                 }
@@ -3736,6 +3738,7 @@ impl Analyzer {
                         action.block_param.as_ref(),
                         action.rest_param.as_ref(),
                     );
+                    self.analyze_action_defaults(action, &inner_ctx, &ctrl_name, origin);
                     self.body_typer().analyze_expr(&mut action.body, &inner_ctx);
                 }
             }
@@ -4663,6 +4666,43 @@ impl Analyzer {
                 .insert(rest.clone(), Ty::Array { elem: std::sync::Arc::new(Ty::Untyped) });
         }
         ctx
+    }
+
+    fn analyze_action_defaults(&self, action: &mut crate::dialect::Action, ctx: &Ctx, class_id: &ClassId, origin: Option<&ClassId>) {
+        let observed = |slot: usize| {
+            [Some(class_id), origin]
+                .into_iter()
+                .flatten()
+                .filter_map(|c| self.inferred_params.get(&(c.clone(), action.name.clone(), MethodReceiver::Instance)))
+                .filter_map(|v| v.get(slot).cloned())
+                .filter(|t| !matches!(t, Ty::Var { .. }))
+                .reduce(unify_param_ty)
+        };
+        let required = action.params.fields.len();
+        let observed: Vec<Option<Ty>> = (0..action.opt_params.len()).map(|j| observed(required + j)).collect();
+        let mut ctx = ctx.clone();
+        for ((name, default), seen) in action.opt_params.iter_mut().zip(observed) {
+            self.body_typer().analyze_expr(default, &ctx);
+            if !ctx.local_bindings.contains_key(name) {
+                let own = default.ty.clone().filter(|t| !matches!(t, Ty::Var { .. }));
+                let ty = match (seen, own) {
+                    (Some(seen), Some(own)) => Some(unify_param_ty(seen, own)),
+                    (seen, own) => seen.or(own),
+                };
+                if let Some(ty) = ty {
+                    ctx.local_bindings.insert(name.clone(), ty);
+                }
+            }
+        }
+        for (name, default) in action.kw_params.iter_mut() {
+            let Some(default) = default else { continue };
+            self.body_typer().analyze_expr(default, &ctx);
+            if !ctx.local_bindings.contains_key(name)
+                && let Some(ty) = default.ty.clone().filter(|t| !matches!(t, Ty::Var { .. }))
+            {
+                ctx.local_bindings.insert(name.clone(), ty);
+            }
+        }
     }
 
     fn capture_inference_sig(&self) -> InferenceSig {
@@ -5618,11 +5658,17 @@ impl Analyzer {
         for controller in &app.controllers {
             for action in controller.actions() {
                 let from = sites.len();
-                self.collect_send_sites(&action.body, Some(&controller.name), false, helpers, &mut sites);
+                let defaults = action.opt_params.iter().map(|(_, d)| d).chain(action.kw_params.iter().filter_map(|(_, d)| d.as_ref()));
+                for body in defaults.chain(std::iter::once(&action.body)) {
+                    self.collect_send_sites(body, Some(&controller.name), false, helpers, &mut sites);
+                }
                 self.record_callers(&controller.name, &sites[from..]);
             }
             for method in controller.class_methods() {
                 let from = sites.len();
+                for default in method.params.iter().filter_map(|p| p.default.as_ref()) {
+                    self.collect_send_sites(default, Some(&controller.name), true, helpers, &mut sites);
+                }
                 self.collect_send_sites(&method.body, Some(&controller.name), true, helpers, &mut sites);
                 self.record_callers(&controller.name, &sites[from..]);
             }
