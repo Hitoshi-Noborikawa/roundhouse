@@ -339,4 +339,57 @@ fn crystal_clock_spelling_is_in_the_ir() {
 
     let fraction = lowered_probe("starts_at.iso8601(3)");
     assert_eq!(ir_shape(&fraction), "starts_at.iso8601(3)");
+
+    // A namespaced constant is not the stdlib clock.
+    let namespaced = lowered_probe("Foo::Time.now.utc");
+    assert_eq!(ir_shape(&namespaced), "Foo::Time.now.utc");
+    // Ruby prints the chain. An unknown constant is a raise, not `Foo::Time.utc`.
+    let ruby = roundhouse::emit::ruby::emit_expr(&namespaced);
+    assert!(ruby.contains(".now.utc"), "{ruby}");
+    let py = roundhouse::emit::python::emit_expr_for_runtime(&namespaced);
+    assert!(!py.contains("datetime.datetime.now"), "{py}");
+
+    let rooted = lowered_probe("::Time.now.utc");
+    assert_eq!(ir_shape(&rooted), "::Time.utc");
+    assert_eq!(roundhouse::emit::ruby::emit_expr(&rooted), "::Time.now.utc");
+
+    // Zero-arg iso8601 follows the receiver: a time column, not a string,
+    // a date, or an untyped call.
+    assert_eq!(ir_shape(&lowered_probe("starts_at.iso8601")), "starts_at.to_rfc3339");
+    assert_eq!(ir_shape(&lowered_probe("ends_at.iso8601")), "ends_at.to_rfc3339");
+    assert_eq!(ir_shape(&lowered_probe("name.iso8601")), "name.iso8601");
+    assert_eq!(ir_shape(&lowered_probe("due_on.iso8601")), "due_on.iso8601");
+    let unknown = ir_shape(&lowered_probe("mystery.iso8601"));
+    assert!(unknown.ends_with("iso8601") && !unknown.contains("to_rfc3339"), "{unknown}");
+}
+
+/// Test-module constants are outside `for_each_test_body`. The Crystal
+/// emitter no longer rewrites the clock, so the constant walk has to.
+#[test]
+fn a_test_module_constant_gets_the_clock_bridge() {
+    let tree = [(
+        "test/models/clock_test.rb",
+        "class ClockTest < ActiveSupport::TestCase\n  \
+         STAMP = Time.now.utc.iso8601\n  \
+         OTHER = Foo::Time.now.utc\nend\n",
+    )]
+    .into_iter()
+    .map(|(p, s)| (std::path::PathBuf::from(p), s.as_bytes().to_vec()))
+    .collect();
+    let mut app = ingest_app_from_tree(tree).expect("ingest");
+    roundhouse::session::analyze_and_lower(&mut app);
+    let tm = app
+        .test_modules
+        .iter()
+        .find(|t| t.name.0.as_str() == "ClockTest")
+        .expect("ClockTest");
+    let value = |name: &str| {
+        &tm.constants
+            .iter()
+            .find(|(n, _)| n.as_str() == name)
+            .unwrap_or_else(|| panic!("{name} missing: {:?}", tm.constants.iter().map(|(n, _)| n.as_str()).collect::<Vec<_>>()))
+            .1
+    };
+    assert_eq!(ir_shape(value("STAMP")), "Time.utc.to_rfc3339");
+    assert_eq!(ir_shape(value("OTHER")), "Foo::Time.now.utc");
 }

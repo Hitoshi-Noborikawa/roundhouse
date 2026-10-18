@@ -1323,7 +1323,10 @@ fn emit_send(recv: Option<&Expr>, method: &str, args: &[Expr]) -> String {
     if matches!(method, "now" | "utc") && args.is_empty() {
         if let Some(r) = recv {
             if let ExprNode::Const { path } = &*r.node {
-                if path.last().map(|s| s.as_str()) == Some("Time") {
+                // Bare `Time` and rooted `::Time`. `Foo::Time.now` keeps its own method.
+                if path.last().map(|s| s.as_str()) == Some("Time")
+                    && path.iter().rev().skip(1).all(|s| s.as_str().is_empty())
+                {
                     return "DateTime.utc_now()".to_string();
                 }
             }

@@ -2506,6 +2506,7 @@ fn is_time_utc_clock(recv: Option<&Expr>) -> bool {
     let Some(const_expr) = time_recv else { return false };
     let ExprNode::Const { path } = &*const_expr.node else { return false };
     path.last().map(|s| s.as_str()) == Some("Time")
+        && path.iter().rev().skip(1).all(|s| s.as_str().is_empty())
 }
 
 /// Recognize `recv.is_a?(Const)` and return `(recv, last-segment of

@@ -1299,7 +1299,11 @@ pub(super) fn emit_send_base(
     }
     if m == "utc" && args.is_empty() {
         if let Some(r) = recv {
-            if matches!(&*r.node, ExprNode::Const { path } if path.last().is_some_and(|s| s.as_str() == "Time")) {
+            // Bare `Time` and rooted `::Time`. `Foo::Time.utc` is that class's method.
+            if matches!(&*r.node, ExprNode::Const { path }
+                if path.last().is_some_and(|s| s.as_str() == "Time")
+                    && path.iter().rev().skip(1).all(|s| s.as_str().is_empty()))
+            {
                 return format!("{}.now.utc", emit_expr(r));
             }
         }

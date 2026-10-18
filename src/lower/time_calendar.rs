@@ -479,18 +479,20 @@ fn active_support_call(method: &str, args: Vec<Expr>) -> ExprNode {
     }
 }
 
-/// `Time.now.utc` (zero args, `Time` constant) → `Time.utc`.
-/// Zero-arg `iso8601` → `to_rfc3339`.
+/// `Time.now.utc` (zero args, bare or root `Time`) → `Time.utc`.
+/// Zero-arg `iso8601` on a time value, or on that clock, → `to_rfc3339`.
 ///
-/// Same match the Crystal emitter used to apply at print time, including
-/// `iso8601` on a non-Time receiver and `::Time`. `Time.utc(year, …)` and
-/// `iso8601(n)` stay: Crystal's clock is the no-arg class method, and an
-/// explicit fraction is a different call.
+/// `Foo::Time` is a different constant: `Foo::Time.now.utc` stays a chain.
+/// An unknown receiver, a `Date`, and an application class keep `iso8601`
+/// — those targets print the method name, and only `Time` grew
+/// `to_rfc3339`. `Time.utc(year, …)` and `iso8601(n)` stay: Crystal's
+/// clock is the no-arg class method, and an explicit fraction is a
+/// different call.
 pub(crate) fn ground_crystal_time_bridge(expr: &mut Expr) {
     let ExprNode::Send { recv: Some(r), method, args, block: None, .. } = &mut *expr.node else {
         return;
     };
-    if method.as_str() == "iso8601" && args.is_empty() {
+    if method.as_str() == "iso8601" && args.is_empty() && time_iso8601_receiver(r) {
         *method = Symbol::from("to_rfc3339");
         return;
     }
@@ -518,12 +520,39 @@ fn time_now_const(now_send: &Expr) -> Option<Expr> {
     if method.as_str() != "now" || !args.is_empty() {
         return None;
     }
-    let ExprNode::Const { path } = &*inner.node else { return None };
-    if path.last().is_some_and(|s| s.as_str() == "Time") {
-        Some(inner.clone())
-    } else {
-        None
+    if is_root_time_const(inner) { Some(inner.clone()) } else { None }
+}
+
+/// Bare `Time` and rooted `::Time`. A namespaced `Foo::Time` is not the
+/// stdlib clock — same rule as the TypeScript emitter.
+fn is_root_time_const(e: &Expr) -> bool {
+    matches!(&*e.node, ExprNode::Const { path }
+        if path.last().is_some_and(|s| s.as_str() == "Time")
+            && path.iter().rev().skip(1).all(|s| s.as_str().is_empty()))
+}
+
+/// `Time.now` / `Time.utc` / `Time.now.utc`, including the rooted form.
+/// The type stamp is missing on some synthesized chains; the shape is
+/// still the stdlib clock.
+fn is_stdlib_time_clock(e: &Expr) -> bool {
+    let ExprNode::Send { recv: Some(r), method, args, block: None, .. } = &*e.node else {
+        return false;
+    };
+    if !args.is_empty() {
+        return false;
     }
+    match method.as_str() {
+        "now" | "utc" if is_root_time_const(r) => true,
+        "utc" => is_stdlib_time_clock(r),
+        _ => false,
+    }
+}
+
+fn time_iso8601_receiver(recv: &Expr) -> bool {
+    if is_root_time_const(recv) {
+        return false;
+    }
+    is_time_value(recv) || is_stdlib_time_clock(recv)
 }
 
 fn is_time_const(e: &Expr) -> bool {
