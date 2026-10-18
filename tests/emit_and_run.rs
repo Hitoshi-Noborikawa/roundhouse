@@ -85,6 +85,8 @@ mod vary_accept_contract;
 mod vary_accept;
 #[path = "emit_and_run/strong_params.rs"]
 mod strong_params;
+#[path = "emit_and_run/parameter_defaults.rs"]
+mod parameter_defaults;
 #[path = "emit_and_run/params_wrapper.rs"]
 mod params_wrapper;
 #[path = "support/stdlib_rnp.rs"]

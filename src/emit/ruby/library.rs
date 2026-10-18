@@ -3203,6 +3203,9 @@ fn helper_read_ivars(app: &App) -> std::collections::BTreeSet<Symbol> {
             continue;
         }
         for m in &lc.methods {
+            for default in m.params.iter().filter_map(|p| p.default.as_ref()) {
+                collect_ivar_reads(default, &mut out);
+            }
             collect_ivar_reads(&m.body, &mut out);
         }
     }
