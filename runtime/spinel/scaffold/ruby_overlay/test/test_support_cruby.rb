@@ -31,7 +31,7 @@ end
 # selector's LAST compound and keeps no per-element attributes, so a
 # descendant selector read from it would answer for the whole page.
 # A spinel tree that carries spinel-nokogiri gets the same helper
-# (runtime/spinel/test/css_select.rb).
+# (`project::SPINEL_CSS_SELECT`).
 require "nokogiri"
 
 # rails-dom-testing parses with HTML5 where Nokogiri has the parser and

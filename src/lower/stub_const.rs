@@ -13,12 +13,14 @@
 //! `NAME_STUB_STACK = [Owner::NAME]`; every read of `Owner::NAME` becomes
 //! `Owner::NAME_STUB_STACK.last`, and the call becomes
 //!
-//!     Owner::NAME_STUB_STACK.push(value)
-//!     begin
-//!       <block body>
-//!     ensure
-//!       Owner::NAME_STUB_STACK.pop
-//!     end
+//! ```text
+//! Owner::NAME_STUB_STACK.push(value)
+//! begin
+//!   <block body>
+//! ensure
+//!   Owner::NAME_STUB_STACK.pop
+//! end
+//! ```
 //!
 //! which is Rails' replace-and-restore, nested blocks and a raising
 //! block included. Reads are matched on the analyzer-qualified path, so

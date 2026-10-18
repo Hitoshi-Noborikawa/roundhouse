@@ -5369,6 +5369,24 @@ fn apply_cruby_test_support(files: &mut [(String, String)]) {
 /// overlay parses them (`test_support_cruby.rb`). Only when a test calls
 /// it — a tree without the package has nothing to answer it with, and
 /// there the call stays the compile error it is.
+/// The helper itself. A string here rather than a file under
+/// `runtime/spinel/test/`: every file there ships into the emitted
+/// `test/`, where `spin test` builds it as a program of its own.
+const SPINEL_CSS_SELECT: &str = r#"
+# Rails-dom-testing's `css_select`: the elements of the last response
+# matching `selector`, as Nokogiri nodes (`node["id"]`). Appended to a
+# spinel tree's harness only when it carries spinel-nokogiri and a test
+# calls it (`project::apply_spinel_css_select`); the CRuby tree has its
+# own in test_support_cruby.rb. rails-dom-testing parses with HTML5.
+require "nokogiri"
+
+class TestBase
+  def css_select(selector)
+    Nokogiri::HTML5.fragment(@__response.body.to_s).css(selector).to_a
+  end
+end
+"#;
+
 fn apply_spinel_css_select(files: &mut [(String, String)]) {
     let called = files
         .iter()
@@ -5381,7 +5399,7 @@ fn apply_spinel_css_select(files: &mut [(String, String)]) {
             if !helper.ends_with('\n') {
                 helper.push('\n');
             }
-            helper.push_str(include_str!("../runtime/spinel/test/css_select.rb"));
+            helper.push_str(SPINEL_CSS_SELECT);
         }
     }
 }
