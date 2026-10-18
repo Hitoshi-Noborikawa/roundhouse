@@ -2719,19 +2719,6 @@ fn date_method(method: &Symbol, args: &[crate::expr::Expr]) -> Option<Ty> {
     })
 }
 
-/// `first(n)` / `last(n)` — the COUNTED form. Ruby's `Array#first(n)`,
-/// Rails' `Relation#last(n)` and `Model.first(n)` all answer an Array of
-/// up to n elements, where the bare form answers one element or nil.
-/// Every method table here is keyed by name alone and so typed the
-/// counted form as `elem | nil`; campfire's searches controller then
-/// carried `Message?` for `reachable_messages.search(q).last(100)`, the
-/// controller ivar joined that with the other branch's `Message.none`,
-/// and the emitted view signature — which the LOWERER got right
-/// (`last_n`, declared `Array[untyped]`) — disagreed with the analyzer
-/// about the same value. Gated on one non-block argument that is an
-/// Integer (or not yet typed): `first { … }` and `first` stay as they
-/// were. Mirrors `lower::scope_chain::counted_terminal`, which renames
-/// the call for the runtime for the same reason.
 /// `Array#[]` / `slice` return a *sub-array* (`Array<elem> | Nil`) when
 /// indexed by a `Range` or a `(start, length)` pair, but a single
 /// *element* (`elem | Nil`) for a lone integer. `array_method` sees only
@@ -2752,16 +2739,29 @@ fn sub_array_slice(method: &Symbol, args: &[crate::expr::Expr], elem: &Ty) -> Op
     })
 }
 
-fn counted_first_last(method: &Symbol, args: &[crate::expr::Expr]) -> bool {
-    // `take(n)` is the same counted terminal as `first(n)`: the Rails
-    // tutorial seeds with `User.order(:created_at).take(6)` and then
-    // `.each`es the result.
-    matches!(method.as_str(), "first" | "last" | "take" | "sample")
-        && args.len() == 1
-        && matches!(
-            args[0].ty.as_ref(),
-            None | Some(Ty::Int) | Some(Ty::Untyped) | Some(Ty::Var { .. })
-        )
+/// `first(n)` / `last(n)` — the counted form. Ruby's `Array#first(n)`,
+/// Rails' `Relation#last(n)` and `Model.first(n)` all answer an Array of
+/// up to n elements, where the bare form answers one element or nil.
+/// The name and arity come from [`crate::catalog::counted_relation_terminal`],
+/// which `scope_chain::counted_terminal` and
+/// `relation_counted_terminal` read too. `take(n)` / `sample(n)` are
+/// counted here only; the runtime does not rename them. This dispatch
+/// does not see the block node, so a block is not part of the question
+/// — the renamers pass it and then refuse.
+pub(crate) fn counted_first_last(method: &Symbol, args: &[crate::expr::Expr]) -> bool {
+    // `take(n)` / `sample(n)` answer an Array too. They are not the
+    // relation rename: the runtime keeps those names. `first` / `last`
+    // go through the shared predicate so the renamers cannot spell a
+    // different arity.
+    let [arg] = args else { return false };
+    if !matches!(
+        arg.ty.as_ref(),
+        None | Some(Ty::Int) | Some(Ty::Untyped) | Some(Ty::Var { .. })
+    ) {
+        return false;
+    }
+    crate::catalog::counted_relation_terminal(method.as_str(), args.len(), false).is_some()
+        || matches!(method.as_str(), "take" | "sample")
 }
 
 fn array_find(method: &Symbol, args: &[crate::expr::Expr], block_ret: Option<&Ty>) -> bool {
