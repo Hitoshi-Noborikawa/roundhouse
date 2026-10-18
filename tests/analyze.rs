@@ -5771,3 +5771,15 @@ fn a_method_reference_to_a_computed_name_reads_untyped() {
     let limits = article.methods().find(|m| m.name.as_str() == "limits").expect("limits");
     assert_eq!(limits.body.ty, Some(Ty::Array { elem: std::sync::Arc::new(Ty::Untyped) }), "{:?}", limits.body.ty);
 }
+
+#[test]
+fn a_private_marker_on_a_generated_enum_predicate_is_enforced() {
+    let app = app_from_files(&[
+        ("db/schema.rb", "ActiveRecord::Schema.define do\n  create_table :articles do |t|\n    t.integer :status\n  end\nend\n"),
+        ("app/models/application_record.rb", "class ApplicationRecord < ActiveRecord::Base\n  self.abstract_class = true\nend\n"),
+        ("app/models/article.rb", "class Article < ApplicationRecord\n  enum :status, { draft: 0, published: 1 }\n  private :draft?\nend\n"),
+        ("app/models/probe.rb", "class Probe\n  def self.run\n    Article.new.draft?\n  end\nend\n"),
+    ]);
+    let found = diagnose(&app).iter().any(|d| d.message.contains("private method `draft?` called on Article"));
+    assert!(found, "{:#?}", diagnose(&app).iter().map(|d| d.message.clone()).collect::<Vec<_>>());
+}

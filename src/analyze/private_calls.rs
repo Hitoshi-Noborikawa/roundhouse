@@ -31,7 +31,7 @@ impl<'a> Owners<'a> {
         }
         for model in &app.models {
             for (class_side, name, visibility) in crate::lower::model_to_library::inherited_visibility(model) {
-                out.defined.entry((&model.name, class_side, name)).or_insert(visibility);
+                out.defined.insert((&model.name, class_side, name), visibility);
             }
         }
         for model in &app.models {

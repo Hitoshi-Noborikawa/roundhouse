@@ -250,6 +250,14 @@ impl Visibility {
         Ok(out)
     }
 
+    // Not dropped with the nested scope that wrote it: `class << self; private :recent; end` has no body statement to carry it.
+    pub(super) fn uncarried_inherited(&self, carried: &std::collections::HashSet<usize>, file: &str) -> IngestResult<()> {
+        match self.inherited.iter().find(|(_, _, at)| !carried.contains(at)) {
+            Some((_, name, _)) => Err(Self::undefined(file, name)),
+            None => Ok(()),
+        }
+    }
+
     pub(super) fn names_inherited(&self, statement: &Node<'_>) -> bool {
         let offset = statement.location().start_offset();
         self.inherited.iter().any(|(_, _, at)| *at == offset)

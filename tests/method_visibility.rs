@@ -266,6 +266,11 @@ fn an_inherited_visibility_change_is_carried_by_a_model() {
         );
         assert!(ingest_library_class(source.as_bytes(), "thing.rb").is_err(), "library accepted {body}");
     }
+    let nested = "class Thing < ApplicationRecord\nclass << self\n  private :inherited\nend\nend";
+    assert!(
+        ingest_model(nested.as_bytes(), "thing.rb", &Schema::default(), &Default::default()).is_err(),
+        "a marker in `class << self` has no statement to carry it"
+    );
 }
 
 #[test]
