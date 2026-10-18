@@ -16640,3 +16640,11 @@ mod class_macros;
 mod accessor_override;
 #[path = "emit_and_run/reset_counters.rs"]
 mod reset_counters;
+#[path = "emit_and_run/console_only_definitions.rs"]
+mod console_only_definitions;
+#[path = "emit_and_run/open_classes.rs"]
+mod open_classes;
+#[path = "emit_and_run/parameterized_mailer.rs"]
+mod parameterized_mailer;
+#[path = "emit_and_run/private_calls.rs"]
+mod private_calls;

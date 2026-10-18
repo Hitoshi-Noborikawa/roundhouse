@@ -44,7 +44,9 @@ mod ivar_set;
 pub(crate) use ivar_set::controller_name_of;
 mod effects;
 mod diagnostics;
+pub mod open_classes;
 pub(crate) mod forwarding;
+mod private_calls;
 mod filter_targets;
 pub mod graphql;
 mod harvest_return;
@@ -128,6 +130,7 @@ pub struct Analyzer {
     /// `app/helpers` modules, whose bodies run in a view and take
     /// ActionView's `t`.
     helper_modules: std::collections::HashSet<ClassId>,
+    open_classes: open_classes::OpenClasses,
     /// Per-(controller, method) ivar bindings AS REFINED by Phase B,
     /// carried across fixpoint rounds.
     ///
@@ -1205,6 +1208,7 @@ impl Analyzer {
             inquirers: inquiry::inquirer_methods(app),
             i18n: app.i18n.clone(),
             helper_modules: app.helper_method_index.values().cloned().collect(),
+            open_classes: open_classes::OpenClasses::of(app),
             const_resolver,
             source_indexed: !app.sources.is_empty(),
             typed_constants: IdentityHashMap::default(),
@@ -1225,6 +1229,7 @@ impl Analyzer {
         let typer = BodyTyper::new(&self.classes)
             .with_inquirers(&self.inquirers)
             .with_i18n(&self.i18n, &self.helper_modules)
+            .with_open_classes(&self.open_classes)
             .with_typed_constants(&self.typed_constants)
             .with_data_factories(&self.data_factories);
         let typer = typer.with_class_factories(&self.class_factories);

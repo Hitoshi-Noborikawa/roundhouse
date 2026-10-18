@@ -1066,6 +1066,33 @@ fn report_typescript_error_class(app: &App, target: BuildTarget) {
     }
 }
 
+/// A model's class-body `extend AppModule` and the calls after it to the
+/// module's methods (`ingest::app_extension_calls`) are replayed by the
+/// Ruby family's emit; no other target carries a class body's own code.
+fn report_replayed_class_bodies(app: &App, target: BuildTarget) {
+    if matches!(target, BuildTarget::Blog | BuildTarget::Ruby | BuildTarget::Jruby | BuildTarget::Spinel | BuildTarget::Roda | BuildTarget::Futamura) {
+        return;
+    }
+    for model in &app.models {
+        for item in &model.body {
+            if let crate::dialect::ModelBodyItem::Unknown { expr, .. } = item
+                && expr.decisions & crate::expr::REPLAYED_CLASS_BODY != 0
+            {
+                let name = match &*expr.node {
+                    crate::expr::ExprNode::Send { method, .. } => method.as_str().to_string(),
+                    _ => "call".to_string(),
+                };
+                emit::diagnostics::report_unsupported(
+                    expr.span,
+                    target.as_str(),
+                    "class body",
+                    format!("`{name}` in the body of `{}` runs the app's own module code as the class loads, which the {} emit does not carry", model.name.0.as_str(), target.as_str()),
+                );
+            }
+        }
+    }
+}
+
 /// A mailer and the `ActionMailer` runtime it delivers through ship on
 /// the Ruby family only; elsewhere `Mailer.action(…)` reached nothing,
 /// or a view of the same name.
@@ -2091,6 +2118,7 @@ fn target_files_inner(
     report_unsupported_keys(app, target);
     report_unemitted_library_classes(app, target);
     report_typescript_error_class(app, target);
+    report_replayed_class_bodies(app, target);
     report_controller_sibling_classes(app, target);
     report_mailers(app, target);
     report_sqlite_index_predicates(app, target);
@@ -6055,6 +6083,20 @@ fn report_unsupported_bundled_constants(app: &App, target: BuildTarget) {
                 target,
                 "bundled_constant",
                 format!("`{name}` is Ruby's process stream, which the {target} emit does not map"),
+            );
+        }
+        // A name computed when it runs: the Ruby family defines it then, which no compiled target can.
+        if !matches!(target, "jruby")
+            && let crate::expr::ExprNode::Send { recv, method, args, .. } = &*expr.node
+            && matches!(method.as_str(), "define_method" | "define_singleton_method")
+            && recv.as_ref().is_none_or(|r| matches!(&*r.node, crate::expr::ExprNode::SelfRef))
+            && !args.first().is_some_and(|a| matches!(&*a.node, crate::expr::ExprNode::Lit { value: crate::expr::Literal::Sym { .. } | crate::expr::Literal::Str { .. } }))
+        {
+            emit::diagnostics::report_unsupported(
+                expr.span,
+                target,
+                "runtime-defined method",
+                format!("`{}` with a name computed when it runs, which the {target} emit cannot define ahead of time", method.as_str()),
             );
         }
         // `runtime/ruby/active_record/connection.rb` carries `upsert_all`; no strict runtime transpiles it.

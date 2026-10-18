@@ -588,7 +588,7 @@ fn model_class(model: &Model, methods: Vec<MethodDef>, table: Option<&Table>) ->
         nullable_columns: nullable_column_names(table),
         origin: None,
         constants: collect_model_constants(model),
-        unknown_calls: Vec::new(),
+        unknown_calls: replayed_class_body(model),
         class_ivar_initializers: collect_class_attr_initializers(model),
     }
 }
@@ -620,6 +620,18 @@ fn collect_class_attr_initializers(model: &Model) -> Vec<Expr> {
         }
     }
     out
+}
+
+/// The class-body statements the Ruby family replays (`ingest::app_extension_calls`), in source order.
+fn replayed_class_body(model: &Model) -> Vec<Expr> {
+    model
+        .body
+        .iter()
+        .filter_map(|item| match item {
+            crate::dialect::ModelBodyItem::Unknown { expr, .. } if expr.decisions & crate::expr::REPLAYED_CLASS_BODY != 0 => Some(expr.clone()),
+            _ => None,
+        })
+        .collect()
 }
 
 pub(crate) fn writes_class_ivar(expr: &Expr) -> bool {
@@ -678,6 +690,10 @@ fn report_unclaimed_unknowns(model: &Model, schema: &Schema) {
 
     for item in &model.body {
         let crate::dialect::ModelBodyItem::Unknown { expr, .. } = item else { continue };
+        // Replayed where the source has it (`ingest::app_extension_calls`).
+        if expr.decisions & crate::expr::REPLAYED_CLASS_BODY != 0 {
+            continue;
+        }
         // Class-scope constants — claimed by analyze::extract_const_assignments.
         if matches!(&*expr.node, ExprNode::Assign { target: LValue::Const { .. }, .. }) {
             continue;

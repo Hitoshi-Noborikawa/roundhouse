@@ -1987,6 +1987,9 @@ fn is_class_methods_bridge(def: &ruby_prism::DefNode<'_>) -> bool {
 /// drop the name. A modifier (`return x if x`) has no statement body,
 /// so it is not this shape.
 fn reject_conditional_accessor(node: &ruby_prism::Node<'_>, file: &str) -> IngestResult<()> {
+    if super::visibility::console_only(node) {
+        return Ok(());
+    }
     fn body_declares(body: Option<ruby_prism::Node<'_>>) -> bool {
         body.is_some_and(|body| {
             flatten_statements(body).iter().any(|stmt| {
