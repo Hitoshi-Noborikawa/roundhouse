@@ -129,7 +129,9 @@ fn solid_queue_is_stored_and_changes_nothing_else() {
 }
 
 #[test]
-fn the_ledger_reads_a_sidekiq_line_and_still_reports_other_adapters() {
+/// Jobs still run in process until `perform_later` pushes, so the
+/// ledger keeps reporting a `:sidekiq` line as it does any adapter.
+fn the_ledger_still_reports_a_sidekiq_line() {
     let ledger = |init: &str| -> Vec<String> {
         let (_, diags) = ingest(&[("config/initializers/active_job.rb", init)]);
         diags
@@ -140,6 +142,6 @@ fn the_ledger_reads_a_sidekiq_line_and_still_reports_other_adapters() {
             })
             .collect()
     };
-    assert!(ledger("Rails.application.config.active_job.queue_adapter = :sidekiq\n").is_empty());
+    assert_eq!(ledger("Rails.application.config.active_job.queue_adapter = :sidekiq\n").len(), 1);
     assert_eq!(ledger("Rails.application.config.active_job.queue_adapter = :resque\n").len(), 1);
 }
