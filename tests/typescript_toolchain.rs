@@ -323,3 +323,17 @@ fn real_blog_number_methods_run_under_tsx() {
     );
     assert_eq!(out, array_methods::NUMBER_EXPECTED);
 }
+
+#[test]
+#[ignore]
+fn real_blog_string_methods_run_under_tsx() {
+    // Width padding, character-set specs (`a-z`, `^l`, intersections) and
+    // the not-found answers Ruby gives.
+    let (emitted, errors) = array_methods::overlay().emit(roundhouse::project::BuildTarget::Typescript);
+    assert!(errors.is_empty(), "{errors:?}");
+    let out = run_under_tsx(
+        &emitted,
+        "import { StringProbe } from \"./app/models/string_probe.js\";\nconsole.log(JSON.stringify(StringProbe.run(\"hello\", \"  aa--bbb-\\n\", \"*\")));\n",
+    );
+    assert_eq!(out, array_methods::STRING_EXPECTED);
+}

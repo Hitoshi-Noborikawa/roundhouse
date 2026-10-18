@@ -354,6 +354,127 @@ pub(crate) fn numeric_method_handled(method: &str, argc: usize, block: Option<&E
     }
 }
 
+pub(crate) fn string_method_handled(method: &str, args: &[Expr], block: Option<&Expr>) -> bool {
+    let argc = args.len();
+    // The shared bytes bridge takes a literal `&nil` block and refuses the other shapes itself.
+    if method == "bytes" {
+        return true;
+    }
+    if block.is_some() {
+        return matches!(method, "sub" | "gsub") && argc == 1;
+    }
+    if crate::catalog::string_kernel::lookup(method, argc).is_some() {
+        return true;
+    }
+    let int_or_range = |e: &Expr| matches!(strip_nullable(e.ty.as_ref()), Some(Ty::Int)) || matches!(&*e.node, ExprNode::Range { .. });
+    match method {
+        "capitalize" | "reverse" | "chars" | "bytes" | "to_s" | "to_sym" | "to_str" | "html_safe" | "nil?" | "present?"
+        | "blank?" | "presence" | "freeze" | "dup" | "clone" | "itself" | "lstrip" | "rstrip" | "chomp" | "class" => {
+            argc == 0
+        }
+        "sub" | "gsub" => argc == 2,
+        "center" | "ljust" | "rjust" => (argc == 1 || argc == 2) && args.get(1).and_then(literal_str) != Some(""),
+        "count" | "delete" => argc >= 1 && char_sets(args).is_some(),
+        "squeeze" => char_sets(args).is_some(),
+        "tr" => argc == 2 && tr_plan(&args[0], &args[1]).is_some(),
+        "delete_prefix" | "delete_suffix" => argc == 1,
+        "split" => argc <= 1,
+        "index" | "rindex" => argc == 1 && matches!(strip_nullable(args[0].ty.as_ref()), Some(Ty::Str)),
+        "[]" | "slice" => argc == 2 || (argc == 1 && int_or_range(&args[0])),
+        "match" | "match?" | "==" | "!=" | "+" | "*" | "<" | ">" | "<=" | ">=" | "<<" | "is_a?" | "kind_of?"
+        | "equal?" => argc == 1,
+        _ => false,
+    }
+}
+
+fn literal_str(e: &Expr) -> Option<&str> {
+    match &*e.node {
+        ExprNode::Lit { value: Literal::Str { value } } => Some(value.as_str()),
+        _ => None,
+    }
+}
+
+fn char_sets(args: &[Expr]) -> Option<Vec<super::char_set::CharSet>> {
+    args.iter().map(|a| literal_str(a).and_then(super::char_set::parse)).collect()
+}
+
+fn char_set_regex(args: &[Expr], squeeze: bool) -> Option<Js> {
+    let sets = char_sets(args)?;
+    let pattern = match (squeeze, sets.is_empty()) {
+        (true, true) => "(.)\\1+".to_string(),
+        (true, false) => format!("({})\\1+", super::char_set::intersection(&sets)),
+        (false, _) => super::char_set::intersection(&sets),
+    };
+    let flags = if squeeze && sets.is_empty() { "gsu" } else { "gu" };
+    Some(Js::synth(JsExpr::Regex { pattern, flags: flags.into() }))
+}
+
+enum TrPlan {
+    Replace { pattern: String, with: String },
+    Map { pattern: String, from: Vec<char>, to: Vec<char> },
+}
+
+fn tr_plan(from: &Expr, to: &Expr) -> Option<TrPlan> {
+    let from = super::char_set::parse(literal_str(from)?)?;
+    let to_set = super::char_set::parse(literal_str(to)?)?;
+    let mut to_chars = Vec::new();
+    // Only `from` negates: a leading `^` in `to` is the character itself.
+    if to_set.negated {
+        to_chars.push('^');
+    }
+    to_chars.extend(to_set.expand()?);
+    let pattern = from.class();
+    let Some(&last) = to_chars.last() else {
+        return Some(TrPlan::Replace { pattern, with: String::new() });
+    };
+    if from.negated {
+        return Some(TrPlan::Replace { pattern, with: last.to_string() });
+    }
+    let mut map: Vec<(char, char)> = Vec::new();
+    for (i, c) in from.expand()?.into_iter().enumerate() {
+        let target = to_chars.get(i).copied().unwrap_or(last);
+        // A character listed twice in `from` takes its last mapping, as Ruby's does.
+        map.retain(|(k, _)| *k != c);
+        map.push((c, target));
+    }
+    if map.iter().all(|(_, t)| *t == last) {
+        return Some(TrPlan::Replace { pattern, with: last.to_string() });
+    }
+    let (from, to) = map.into_iter().unzip();
+    Some(TrPlan::Map { pattern, from, to })
+}
+
+fn js_tr(span: Span, recv: &Expr, plan: TrPlan) -> Js {
+    let regex = |pattern: String| Js::synth(JsExpr::Regex { pattern, flags: "gu".into() });
+    let chars = |cs: Vec<char>| Js::synth(JsExpr::Array(cs.into_iter().map(|c| Js::str(Span::synthetic(), c.to_string())).collect()));
+    match plan {
+        TrPlan::Replace { pattern, with } => {
+            Js::method_call(span, js_expr(recv), "replace", vec![regex(pattern), Js::str(Span::synthetic(), with)])
+        }
+        TrPlan::Map { pattern, from, to } => {
+            let at = Js::method_call(Span::synthetic(), chars(from), "indexOf", vec![synth_ident("__c")]);
+            let lookup = arrow1("__c", Js::index(Span::synthetic(), chars(to), at));
+            Js::method_call(span, js_expr(recv), "replace", vec![regex(pattern), lookup])
+        }
+    }
+}
+
+fn arrow2(a: &str, b: &str, body: Js) -> Js {
+    Js::synth(JsExpr::Arrow { params: vec![js_param(a), js_param(b)], body: ArrowBody::Expr(body), is_async: false })
+}
+
+fn nil_if_negative(found: Js) -> Js {
+    let pick = arrow1(
+        "__i",
+        Js::synth(JsExpr::Ternary {
+            cond: Js::binary(Span::synthetic(), "<", synth_ident("__i"), Js::num(Span::synthetic(), "0")),
+            then: Js::synth(JsExpr::Null),
+            else_: synth_ident("__i"),
+        }),
+    );
+    Js::call(Span::synthetic(), pick, vec![found])
+}
+
 fn is_block(e: &Expr) -> bool {
     matches!(&*e.node, ExprNode::Lambda { .. })
 }
@@ -2937,6 +3058,93 @@ fn js_send_inner(
                     return js_string_kernel(span, r, args, entry);
                 }
                 match method {
+                "freeze" | "dup" | "clone" | "itself" | "to_str" if args.is_empty() => return js_expr(r),
+                "lstrip" if args.is_empty() => return Js::method_call(span, js_expr(r), "trimStart", vec![]),
+                "rstrip" if args.is_empty() => return Js::method_call(span, js_expr(r), "trimEnd", vec![]),
+                "chomp" if args.is_empty() => {
+                    let eol = Js::synth(JsExpr::Regex { pattern: "(?:\\r\\n|\\n|\\r)$".into(), flags: String::new() });
+                    return Js::method_call(span, js_expr(r), "replace", vec![eol, Js::str(Span::synthetic(), "")]);
+                }
+                // Ruby's blank-separated split drops the empty fields JS `split(/\s+/)` keeps at either end.
+                "split" if args.is_empty() => {
+                    let ws = Js::synth(JsExpr::Regex { pattern: "\\s+".into(), flags: String::new() });
+                    let fields = Js::method_call(Span::synthetic(), js_expr(r), "split", vec![ws]);
+                    let non_empty = arrow1("__x", Js::binary(Span::synthetic(), "!==", synth_ident("__x"), Js::str(Span::synthetic(), "")));
+                    return Js::method_call(span, fields, "filter", vec![non_empty]);
+                }
+                "ljust" | "rjust" if args.len() == 1 || args.len() == 2 => {
+                    let pad = if method == "ljust" { "padEnd" } else { "padStart" };
+                    return Js::method_call(span, js_expr(r), pad, args.iter().map(js_expr).collect());
+                }
+                "center" if args.len() == 1 || args.len() == 2 => {
+                    let pad = args.get(1).map(js_expr).unwrap_or_else(|| Js::str(Span::synthetic(), " "));
+                    let len = || Js::member(Span::synthetic(), synth_ident("__s"), "length");
+                    let left = Js::method_call(
+                        Span::synthetic(),
+                        synth_ident("Math"),
+                        "floor",
+                        vec![Js::binary(Span::synthetic(), "/", Js::binary(Span::synthetic(), "-", synth_ident("__w"), len()), Js::num(Span::synthetic(), "2"))],
+                    );
+                    let padded = Js::method_call(
+                        Span::synthetic(),
+                        Js::method_call(Span::synthetic(), synth_ident("__s"), "padStart", vec![Js::binary(Span::synthetic(), "+", len(), left), synth_ident("__p")]),
+                        "padEnd",
+                        vec![synth_ident("__w"), synth_ident("__p")],
+                    );
+                    let shell = Js::synth(JsExpr::Arrow {
+                        params: vec![js_param("__s"), js_param("__w"), js_param("__p")],
+                        body: ArrowBody::Expr(padded),
+                        is_async: false,
+                    });
+                    return Js::call(span, shell, vec![js_expr(r), js_expr(&args[0]), pad]);
+                }
+                "count" if !args.is_empty() => {
+                    if let Some(re) = char_set_regex(args, false) {
+                        let hits = Js::method_call(Span::synthetic(), js_expr(r), "match", vec![re]);
+                        let hits = Js::binary(Span::synthetic(), "??", hits, Js::synth(JsExpr::Array(vec![])));
+                        return Js::member(span, hits, "length");
+                    }
+                }
+                "delete" if !args.is_empty() => {
+                    if let Some(re) = char_set_regex(args, false) {
+                        return Js::method_call(span, js_expr(r), "replace", vec![re, Js::str(Span::synthetic(), "")]);
+                    }
+                }
+                "squeeze" => {
+                    if let Some(re) = char_set_regex(args, true) {
+                        return Js::method_call(span, js_expr(r), "replace", vec![re, Js::str(Span::synthetic(), "$1")]);
+                    }
+                }
+                "delete_prefix" if args.len() == 1 => {
+                    let cut = Js::synth(JsExpr::Ternary {
+                        cond: Js::method_call(Span::synthetic(), synth_ident("__s"), "startsWith", vec![synth_ident("__p")]),
+                        then: Js::method_call(Span::synthetic(), synth_ident("__s"), "slice", vec![Js::member(Span::synthetic(), synth_ident("__p"), "length")]),
+                        else_: synth_ident("__s"),
+                    });
+                    return Js::call(span, arrow2("__s", "__p", cut), vec![js_expr(r), js_expr(&args[0])]);
+                }
+                "delete_suffix" if args.len() == 1 => {
+                    let keep = Js::binary(
+                        Span::synthetic(),
+                        "-",
+                        Js::member(Span::synthetic(), synth_ident("__s"), "length"),
+                        Js::member(Span::synthetic(), synth_ident("__p"), "length"),
+                    );
+                    let cut = Js::synth(JsExpr::Ternary {
+                        cond: Js::method_call(Span::synthetic(), synth_ident("__s"), "endsWith", vec![synth_ident("__p")]),
+                        then: Js::method_call(Span::synthetic(), synth_ident("__s"), "slice", vec![Js::num(Span::synthetic(), "0"), keep]),
+                        else_: synth_ident("__s"),
+                    });
+                    return Js::call(span, arrow2("__s", "__p", cut), vec![js_expr(r), js_expr(&args[0])]);
+                }
+                "index" | "rindex" if args.len() == 1 && matches!(strip_nullable(args[0].ty.as_ref()), Some(Ty::Str)) => {
+                    let find = if method == "index" { "indexOf" } else { "lastIndexOf" };
+                    let found = Js::method_call(Span::synthetic(), js_expr(r), find, vec![js_expr(&args[0])]);
+                    let mut js = nil_if_negative(found);
+                    js.span = span;
+                    return js;
+                }
+                "slice" => return js_send_inner(span, recv, "[]", args, true),
                 "capitalize" if args.is_empty() => {
                     // JS has no built-in capitalize. Match Ruby's
                     // semantics: uppercase the first char, lowercase
@@ -3071,36 +3279,9 @@ fn js_send_inner(
                     };
                     return Js::method_call(span, js_expr(r), method, vec![pat_js, repl_js]);
                 }
-                // `s.tr(from, to)` — character translation. Limited
-                // to single-char from/to (covers framework Ruby's
-                // `inner_k.to_s.tr("_", "-")` shape). Multi-char
-                // and ranges aren't yet supported; the call falls
-                // through to the generic dispatch (and tsc errors)
-                // so the gap surfaces instead of silently miscompiling.
                 "tr" if args.len() == 2 => {
-                    if let (
-                        ExprNode::Lit { value: Literal::Str { value: from } },
-                        ExprNode::Lit { value: Literal::Str { value: to } },
-                    ) = (&*args[0].node, &*args[1].node)
-                    {
-                        if from.chars().count() == 1 && to.chars().count() == 1 {
-                            // Escape the `from` char for use inside a
-                            // regex character class.
-                            let c = from.chars().next().unwrap();
-                            let escaped = match c {
-                                '\\' | '/' | '^' | '$' | '.' | '|' | '?' | '*' | '+' | '('
-                                | ')' | '[' | ']' | '{' | '}' => format!("\\{c}"),
-                                _ => c.to_string(),
-                            };
-                            let pat =
-                                Js::synth(JsExpr::Regex { pattern: escaped, flags: "g".into() });
-                            return Js::method_call(
-                                span,
-                                js_expr(r),
-                                "replace",
-                                vec![pat, Js::str(args[1].span, to.clone())],
-                            );
-                        }
+                    if let Some(plan) = tr_plan(&args[0], &args[1]) {
+                        return js_tr(span, r, plan);
                     }
                 }
                 _ => {}
