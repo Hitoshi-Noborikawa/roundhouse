@@ -16571,3 +16571,5 @@ mod accessor_override;
 mod reset_counters;
 #[path = "emit_and_run/console_only_definitions.rs"]
 mod console_only_definitions;
+#[path = "emit_and_run/open_classes.rs"]
+mod open_classes;

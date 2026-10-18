@@ -152,6 +152,7 @@ pub fn diagnose_with_coverage(app: &App) -> (Vec<Diagnostic>, PreloadCoverage) {
     }
     out.extend(attribute_macro_refusals(app));
     out.extend(overridden_synthesized_accessors(app));
+    out.extend(runtime_defined_surfaces(app));
     // A filter's return value is Rails' to discard (`around_action
     // :switch_locale` → `I18n.with_locale(locale, &action)`): nothing
     // escapes from its tail, so an `untyped` there is not a gradual
@@ -241,6 +242,31 @@ pub fn diagnose_with_coverage(app: &App) -> (Vec<Diagnostic>, PreloadCoverage) {
         }
     }
     (out, coverage)
+}
+
+/// One warning per class that defines methods under computed names: the
+/// sends the registry does not know there answer untyped
+/// (`analyze::open_classes`), so what they return is not checked.
+fn runtime_defined_surfaces(app: &App) -> Vec<Diagnostic> {
+    let open = super::open_classes::OpenClasses::of(app);
+    let mut out: Vec<Diagnostic> = open
+        .classes()
+        .map(|(class, class_side, span)| {
+            let kind = DiagnosticKind::GradualUntyped { expr_kind: Symbol::new("runtime-defined method") };
+            Diagnostic {
+                span: *span,
+                severity: crate::diagnostic::Severity::Warning,
+                kind,
+                message: format!(
+                    "`{}` defines {} methods under names computed when it runs, so a call to one the source does not declare answers untyped",
+                    class.0.as_str(),
+                    if class_side { "class" } else { "instance" }
+                ),
+            }
+        })
+        .collect();
+    out.sort_by_key(|d| (d.span.file.0, d.span.start, d.message.clone()));
+    out
 }
 
 /// A model's own `def author` / `def author=` over an association's

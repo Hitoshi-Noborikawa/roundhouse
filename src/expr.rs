@@ -91,6 +91,11 @@ pub const HELPER_COPY_TRANSLATE: u64 = 1 << 17;
 /// all the same.
 pub const HELPER_BODY_TRANSLATE: u64 = 1 << 18;
 
+/// A model's class-body `extend AppModule`, or a call after it to that
+/// module's own method (`load_settings(…)`): app code the Ruby family
+/// replays where the source has it (`ingest::app_extension_calls`).
+pub const REPLAYED_CLASS_BODY: u64 = 1 << 19;
+
 /// Whether `expr` is a [`SELF_BINDING`] cast.
 pub fn is_self_binding(expr: &Expr) -> bool {
     expr.decisions & SELF_BINDING != 0
