@@ -5363,6 +5363,29 @@ fn apply_cruby_test_support(files: &mut [(String, String)]) {
     }
 }
 
+/// Rails-dom-testing's `css_select` for a spinel tree that carries the
+/// real Nokogiri (spinel-nokogiri): the elements of the last response
+/// matching `selector`, as Nokogiri nodes, parsed the way the CRuby
+/// overlay parses them (`test_support_cruby.rb`). Only when a test calls
+/// it — a tree without the package has nothing to answer it with, and
+/// there the call stays the compile error it is.
+fn apply_spinel_css_select(files: &mut [(String, String)]) {
+    let called = files
+        .iter()
+        .any(|(p, c)| p.starts_with("test/") && p.ends_with(".rb") && c.contains("css_select("));
+    if !called {
+        return;
+    }
+    if let Some((_, helper)) = files.iter_mut().find(|(p, _)| p == "test/test_helper.rb") {
+        if !helper.contains("def css_select(") {
+            if !helper.ends_with('\n') {
+                helper.push('\n');
+            }
+            helper.push_str(include_str!("../runtime/spinel/test/css_select.rb"));
+        }
+    }
+}
+
 fn patch_harness_dispatch(content: &mut String, generated: &str) {
     const HEAD: &str = "    controller = case matched.controller\n";
     const TAIL: &str = "                 end";
@@ -9180,6 +9203,7 @@ fn spin_shape(files: Vec<(String, String)>) -> Result<Vec<(String, String)>, Str
                 .to_string();
         }
         files.retain(|(p, _)| p != "runtime/nokogiri_facade.rbs" && p != "runtime/nokogiri_spinel.rbs");
+        apply_spinel_css_select(&mut files);
     }
 
     // commonmarker: no façade to swap (Markdowner's own façade stands aside
