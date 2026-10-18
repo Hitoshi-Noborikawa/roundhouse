@@ -3557,8 +3557,8 @@ fn is_view_helpers_const(e: &Expr) -> bool {
 /// could mutate it; the three below all interpolate into a new String.
 ///
 /// `stylesheet_link_tag` / `javascript_include_tag` map a literal name to
-/// an undigested `/assets/` path (the `image_path` note explains why no
-/// digests), so they are pure over their literals the way `image_tag`
+/// a path through the immutable emitted asset table, so they are pure
+/// over their literals the way `image_tag`
 /// is; `javascript_importmap_tags` is pure over the importmap table,
 /// which is the one non-literal argument this list admits (see
 /// `HOISTABLE_CONST_READERS`). campfire's layout pays all three on every
