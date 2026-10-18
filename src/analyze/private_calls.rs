@@ -25,8 +25,9 @@ impl<'a> Owners<'a> {
         for model in &app.models {
             define(&model.name, &mut model.methods());
         }
-        for lc in app.library_classes.iter().filter(|lc| !lc.is_module) {
-            define(&lc.name, &mut lc.methods.iter());
+        for lc in &app.library_classes {
+            // Not a module's instance side: whether an includer's call reaches it depends on the includer.
+            define(&lc.name, &mut lc.methods.iter().filter(|m| !lc.is_module || m.receiver == MethodReceiver::Class));
         }
         for model in &app.models {
             if let Some(p) = &model.parent {
@@ -71,6 +72,9 @@ pub(crate) fn diagnose(app: &App) -> Vec<Diagnostic> {
     }
     for view in &app.views {
         visit(&view.body);
+    }
+    if let Some(seeds) = &app.seeds {
+        visit(seeds);
     }
     out
 }

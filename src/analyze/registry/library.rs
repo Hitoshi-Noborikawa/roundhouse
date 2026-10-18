@@ -207,6 +207,7 @@ pub(in crate::analyze) fn register(
             id: ClassId(Symbol::from("ActionMailer::MessageDelivery")),
             args: vec![].into(),
         };
+        let own_with = crate::lower::mailer_class_side::defines_with(app);
         for lc in &app.library_classes {
             if !is_mailer(&lc.name) {
                 continue;
@@ -228,7 +229,7 @@ pub(in crate::analyze) fn register(
                     .entry(method.name.clone())
                     .or_insert_with(|| delivery_ty.clone());
             }
-            if !lc.methods.iter().any(|m| m.receiver == crate::dialect::MethodReceiver::Class && m.name.as_str() == "with") {
+            if !own_with.contains(lc.name.0.as_str()) {
                 cls.class_methods
                     .entry(Symbol::from("with"))
                     .or_insert_with(|| Ty::Class { id: lc.name.clone(), args: vec![].into() });
