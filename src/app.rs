@@ -261,6 +261,25 @@ pub struct App {
     /// `project::apply_job_registry`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub job_plans: Vec<crate::lower::job_payload::JobPlan>,
+    /// The ActiveJob queue adapter the app configures, as a name
+    /// (`config.active_job.queue_adapter = :sidekiq` gives `"sidekiq"`).
+    /// Read at ingest from `config/application.rb`, then
+    /// `config/environments/production.rb`, then `config/initializers`,
+    /// the last setting winning, then from `self.queue_adapter =` in
+    /// `ApplicationJob`, which covers every job and so overrides them;
+    /// `None` when nothing sets it or the last
+    /// setting isn't a literal. Only `"sidekiq"` changes what is emitted
+    /// (jobs are pushed to Redis on the Ruby family); any other adapter
+    /// keeps the in-process queue.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub queue_adapter: Option<String>,
+    /// The Redis the app's `Sidekiq.configure_client` block names
+    /// (`config.redis = { url: …, password: … }`), read at ingest from
+    /// `config/initializers`. It is the source of truth for where jobs
+    /// are pushed; `REDIS_PROVIDER`, `REDIS_URL` and localhost are only
+    /// the fallback when it names no URL. Other keys are not read.
+    #[serde(default, skip_serializing_if = "SidekiqRedisConfig::is_empty")]
+    pub sidekiq_redis: SidekiqRedisConfig,
     /// Model names whose attachment sgid the app resolves even when
     /// its SIGNATURE fails — campfire's `%w[ User ]`, read by
     /// [`crate::ingest::on_load_reopen`] from the `from_node` reopen
@@ -912,6 +931,8 @@ impl App {
             global_id_locate_models: BTreeSet::new(),
             global_id_locate_signed_models: BTreeSet::new(),
             job_plans: Vec::new(),
+            queue_adapter: None,
+            sidekiq_redis: SidekiqRedisConfig::default(),
             attachable_unsigned_models: Vec::new(),
             pending_attachment_on_load: Vec::new(),
             load_hook_class_macros: Vec::new(),
@@ -986,4 +1007,29 @@ mod includer_guard_tests {
         assert!(g.admits("Billing::Article"));
         assert!(!g.admits("BillingArticle"));
     }
+}
+
+/// `App::sidekiq_redis`: the `url:` and `password:` of the app's
+/// `Sidekiq.configure_client` Redis settings, each `None` when the block
+/// doesn't give it in a form ingest reads.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct SidekiqRedisConfig {
+    pub url: Option<RedisSetting>,
+    pub password: Option<RedisSetting>,
+}
+
+impl SidekiqRedisConfig {
+    pub fn is_empty(&self) -> bool {
+        self.url.is_none() && self.password.is_none()
+    }
+}
+
+/// A Redis setting's value, in the forms ingest reads: a String literal,
+/// `ENV["NAME"]`, or `ENV.fetch("NAME")` with or without a String
+/// default. The emitted runtime reads the variable when it first pushes.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub enum RedisSetting {
+    Literal(String),
+    Env(String),
+    EnvFetch { name: String, default: Option<String> },
 }

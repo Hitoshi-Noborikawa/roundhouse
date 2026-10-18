@@ -884,6 +884,10 @@ pub fn ingest_app_with_vfs<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResult
     // not abort ingest.
     // Rails' ParamsWrapper default (see `App::wrap_parameters_by_default`).
     app.wrap_parameters_by_default = read_wrap_parameters_by_default(vfs, dir);
+    // The ActiveJob queue adapter (see `App::queue_adapter`).
+    app.queue_adapter = read_queue_adapter(vfs, dir);
+    // Where Sidekiq pushes (see `App::sidekiq_redis`).
+    app.sidekiq_redis = read_sidekiq_redis(vfs, dir);
     let app_config_path = dir.join("config/application.rb");
     if let Ok(source) = vfs.read(&app_config_path) {
         app.loaded_frameworks =
@@ -2063,6 +2067,8 @@ end
 
     enum_constants.validate_consumed_sources(&app, &sources, &enum_input_files)?;
     keep_initializer_defined(&mut app, dir, &sources, initializer_defined);
+    // `self.queue_adapter =` on ApplicationJob (see `App::queue_adapter`).
+    apply_application_job_queue_adapter(&mut app);
     // The ledger of boot statements no recognizer above read. A warning
     // per statement, in the ingest diagnostic channel; no `App` field.
     super::initializer_ledger::record(
@@ -10103,6 +10109,283 @@ fn read_wrap_parameters_by_default<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> bool
         }
     }
     default
+}
+
+/// The adapter a trimmed, non-comment config line sets
+/// `config.active_job.queue_adapter` to, as a name: `= :sidekiq` and
+/// `= "sidekiq"` both give `"sidekiq"`. `Some(None)` when the line sets
+/// it to something that isn't a literal (`ENV.fetch(...)`), `None` when
+/// the line doesn't set it. One definition for the lift and the
+/// initializer ledger.
+pub(super) fn queue_adapter_line(line: &str) -> Option<Option<String>> {
+    let rest = line
+        .strip_prefix("Rails.application.config.active_job.queue_adapter")
+        .or_else(|| line.strip_prefix("config.active_job.queue_adapter"))?;
+    // An assignment, not the `==` or `=~` operators or a rightward
+    // assignment (`=> name`), which reads the setting.
+    let value = rest.trim_start().strip_prefix('=')?;
+    if value.starts_with(['=', '~', '>']) {
+        return None;
+    }
+    let value = value.trim();
+    // Drop a trailing comment, with or without a space before its `#`,
+    // but not a `#` inside a quoted value.
+    let value = match value.chars().next() {
+        Some(q @ ('"' | '\'')) => match value[1..].find(q) {
+            Some(at) => {
+                let (quoted, after) = value.split_at(at + 2);
+                let after = after.trim_start();
+                if !after.is_empty() && !after.starts_with('#') {
+                    return Some(None);
+                }
+                quoted
+            }
+            None => value,
+        },
+        _ => match value.find('#') {
+            Some(at) => value[..at].trim(),
+            None => value,
+        },
+    };
+    let name = if let Some(sym) = value.strip_prefix(':') {
+        sym
+    } else if value.len() >= 2
+        && ((value.starts_with('"') && value.ends_with('"'))
+            || (value.starts_with('\'') && value.ends_with('\'')))
+    {
+        &value[1..value.len() - 1]
+    } else {
+        return Some(None);
+    };
+    let literal = !name.is_empty()
+        && name.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_');
+    Some(literal.then(|| name.to_string()))
+}
+
+/// `App::queue_adapter`: `config/application.rb`, then
+/// `config/environments/production.rb`, then `config/initializers`, by
+/// line scan as `read_forgery_verification_strategy` reads them. The
+/// last setting wins, and a last setting that isn't a literal leaves the
+/// adapter unknown (`None`) rather than falling back to an earlier one.
+fn read_queue_adapter<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> Option<String> {
+    let mut adapter: Option<String> = None;
+    for sub in ["config/application.rb", "config/environments/production.rb", "config/initializers"] {
+        let path = dir.join(sub);
+        let paths = if vfs.is_dir(&path) {
+            read_rb_files(vfs, &path).unwrap_or_default()
+        } else {
+            vec![path]
+        };
+        for p in paths {
+            let Ok(source) = vfs.read(&p) else { continue };
+            for line in String::from_utf8_lossy(&source).lines() {
+                let line = line.trim();
+                if line.starts_with('#') {
+                    continue;
+                }
+                if let Some(set) = queue_adapter_line(line) {
+                    adapter = set;
+                }
+            }
+        }
+    }
+    adapter
+}
+
+/// `self.queue_adapter = :name` in `ApplicationJob`'s class body. Rails
+/// keeps the adapter per job class, and ApplicationJob's covers every
+/// job that inherits it, so it overrides the config files' setting, the
+/// last assignment winning, and a value that isn't a literal leaves the
+/// adapter unknown, as in `read_queue_adapter`. Another job class's own
+/// setting is not honored yet: its jobs follow the app's adapter, with a
+/// warning.
+fn apply_application_job_queue_adapter(app: &mut App) {
+    let mut set: Option<Option<String>> = None;
+    for lc in &app.library_classes {
+        let name = lc.name.0.as_str();
+        for call in &lc.unknown_calls {
+            let Some(value) = job_queue_adapter(call) else { continue };
+            if name == "ApplicationJob" {
+                set = Some(value);
+            } else {
+                warn_sidekiq(format!(
+                    "`self.queue_adapter =` in {name} is not honored yet (only ApplicationJob's is read); its jobs use the app's adapter"
+                ));
+            }
+        }
+    }
+    if let Some(value) = set {
+        app.queue_adapter = value;
+    }
+}
+
+/// The adapter a job class-body `self.queue_adapter = …` names: the
+/// literal's name, `Some(None)` for a value that isn't a Symbol or
+/// String literal, `None` for any other call.
+fn job_queue_adapter(call: &crate::expr::Expr) -> Option<Option<String>> {
+    use crate::expr::{ExprNode, Literal};
+    let ExprNode::Send { method, args, .. } = &*call.node else { return None };
+    if method.as_str() != "queue_adapter=" || args.len() != 1 {
+        return None;
+    }
+    Some(match &*args[0].node {
+        ExprNode::Lit { value: Literal::Sym { value } } => Some(value.as_str().to_string()),
+        ExprNode::Lit { value: Literal::Str { value } } => Some(value.clone()),
+        _ => None,
+    })
+}
+
+/// `App::sidekiq_redis`: the `Sidekiq.configure_client` Redis settings
+/// in `config/initializers`, the last block that sets them winning, as it
+/// does when Rails runs the initializers in order.
+fn read_sidekiq_redis<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> crate::app::SidekiqRedisConfig {
+    let mut config = crate::app::SidekiqRedisConfig::default();
+    let init = dir.join("config/initializers");
+    if !vfs.is_dir(&init) {
+        return config;
+    }
+    for path in read_rb_files(vfs, &init).unwrap_or_default() {
+        let Ok(source) = vfs.read(&path) else { continue };
+        if let Some(found) = sidekiq_client_redis(&source, &path.display().to_string()) {
+            config = found;
+        }
+    }
+    config
+}
+
+/// The `url:` and `password:` a file's `Sidekiq.configure_client do
+/// |config| config.redis = { … } end` gives, `None` when the file has no
+/// such assignment. Only those two keys are read, each as a String
+/// literal, `ENV["NAME"]` or `ENV.fetch("NAME"[, "default"])`. Any other
+/// key, a value in another form, or a `config.redis =` that isn't a Hash
+/// literal is a warning: the push then takes that setting from the
+/// environment fallbacks, or not at all.
+pub(super) fn sidekiq_client_redis(source: &[u8], file: &str) -> Option<crate::app::SidekiqRedisConfig> {
+    let src = String::from_utf8_lossy(source);
+    // Cheap skip before parsing, as `kaminari_default_per_page` does.
+    if !src.contains("configure_client") {
+        return None;
+    }
+    let result = super::prism::parse(source, file);
+    let root = result.node();
+    let program = root.as_program_node()?;
+    let text = |node: &Node<'_>| {
+        let loc = node.location();
+        src[loc.start_offset()..loc.end_offset()].to_string()
+    };
+    let mut found = None;
+    for stmt in initializer_statements(&program) {
+        let Some(call) = stmt.as_call_node() else { continue };
+        if super::util::constant_id_str(&call.name()) != "configure_client" {
+            continue;
+        }
+        let Some(recv) = call.receiver() else { continue };
+        if !matches!(constant_text(&recv, &src).as_deref(), Some("Sidekiq" | "::Sidekiq")) {
+            continue;
+        }
+        let Some(block) = call.block().and_then(|b| b.as_block_node()) else { continue };
+        let Some(param) = block
+            .parameters()
+            .and_then(|p| p.as_block_parameters_node())
+            .and_then(|p| p.parameters())
+            .and_then(|p| p.requireds().iter().next())
+            .and_then(|p| p.as_required_parameter_node())
+        else {
+            continue;
+        };
+        let param = super::util::constant_id_str(&param.name());
+        let Some(body) = block.body().and_then(|b| b.as_statements_node()) else { continue };
+        for inner in body.body().iter() {
+            let Some(assign) = inner.as_call_node() else { continue };
+            if super::util::constant_id_str(&assign.name()) != "redis=" {
+                continue;
+            }
+            let on_param = assign
+                .receiver()
+                .and_then(|r| r.as_local_variable_read_node())
+                .is_some_and(|r| super::util::constant_id_str(&r.name()) == param);
+            if !on_param {
+                continue;
+            }
+            let Some(args) = assign.arguments() else { continue };
+            let args: Vec<_> = args.arguments().iter().collect();
+            let [value] = args.as_slice() else { continue };
+            let mut config = crate::app::SidekiqRedisConfig::default();
+            let Some(hash) = value.as_hash_node() else {
+                warn_sidekiq(format!(
+                    "`{param}.redis = {}` in {file} is not a Hash literal, so it is not read; jobs are pushed to REDIS_PROVIDER, REDIS_URL or localhost",
+                    text(value)
+                ));
+                found = Some(config);
+                continue;
+            };
+            for element in hash.elements().iter() {
+                let Some(pair) = element.as_assoc_node() else {
+                    warn_sidekiq(format!("`{}` in {file}'s Sidekiq Redis settings is not read", text(&element)));
+                    continue;
+                };
+                let Some(key) = super::util::symbol_value(&pair.key()) else {
+                    warn_sidekiq(format!("`{}` in {file}'s Sidekiq Redis settings is not read", text(&element)));
+                    continue;
+                };
+                if key != "url" && key != "password" {
+                    warn_sidekiq(format!(
+                        "Sidekiq Redis setting `{key}:` in {file} is not supported yet (only url: and password: are read); it is ignored"
+                    ));
+                    continue;
+                }
+                let value = pair.value();
+                let Some(setting) = redis_setting(&value, &src) else {
+                    warn_sidekiq(format!(
+                        "Sidekiq Redis `{key}: {}` in {file} is not a String literal, ENV[\"NAME\"] or ENV.fetch(\"NAME\"); it is ignored",
+                        text(&value)
+                    ));
+                    continue;
+                };
+                if key == "url" {
+                    config.url = Some(setting);
+                } else {
+                    config.password = Some(setting);
+                }
+            }
+            found = Some(config);
+        }
+    }
+    found
+}
+
+/// A Redis setting's value as `RedisSetting` reads it.
+fn redis_setting(node: &Node<'_>, src: &str) -> Option<crate::app::RedisSetting> {
+    use crate::app::RedisSetting;
+    if let Some(literal) = string_literal_value(node) {
+        return Some(RedisSetting::Literal(literal));
+    }
+    let call = node.as_call_node()?;
+    let recv = call.receiver()?;
+    if !matches!(constant_text(&recv, src).as_deref(), Some("ENV" | "::ENV")) {
+        return None;
+    }
+    if call.block().is_some() {
+        return None;
+    }
+    let args: Vec<_> = call.arguments().map(|a| a.arguments().iter().collect()).unwrap_or_default();
+    let strings: Option<Vec<String>> = args.iter().map(string_literal_value).collect();
+    let strings = strings?;
+    match (super::util::constant_id_str(&call.name()), strings.as_slice()) {
+        ("[]", [name]) => Some(RedisSetting::Env(name.clone())),
+        ("fetch", [name]) => Some(RedisSetting::EnvFetch { name: name.clone(), default: None }),
+        ("fetch", [name, default]) => {
+            Some(RedisSetting::EnvFetch { name: name.clone(), default: Some(default.clone()) })
+        }
+        _ => None,
+    }
+}
+
+/// A warning about what ingest reads from the app's Sidekiq settings.
+fn warn_sidekiq(detail: String) {
+    let mut d = crate::diagnostic::Diagnostic::unsupported(crate::span::Span::synthetic(), None, "Sidekiq", detail);
+    d.severity = crate::diagnostic::Severity::Warning;
+    super::prism::push(d);
 }
 
 /// What a trimmed, non-comment config line sets the app-wide

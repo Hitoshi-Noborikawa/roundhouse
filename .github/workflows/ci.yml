@@ -59,6 +59,10 @@ env:
   # (runtime/spinel/db_pg.rb) is tested against in spinel-framework.
   # Pinned like the apps above; bump deliberately.
   SPINEL_PG_SHA: f48735c91aa8cde258299e1189957972667a0d1f
+  # rubys/spinel-redis, the Redis client the Sidekiq push runs on in a
+  # Spinel tree, tested against a live Redis in sidekiq-live. A tag, the
+  # same ref the emitted spin.toml pins (src/project.rs); bump both together.
+  SPINEL_REDIS_REF: v0.2.0
 
 jobs:
   plan:
@@ -1036,6 +1040,61 @@ jobs:
         env:
           STATUS: ${{ job.status }}
         run: echo "shard-${{ matrix.shard }}=$STATUS" >> "$GITHUB_OUTPUT"
+
+  # Sidekiq pushes against a real Redis (tests/sidekiq_push_live.rs): the
+  # push runtime over redis-rb under CRuby, and over spinel-redis compiled
+  # by Spinel, each read back through real Sidekiq's API. Planned only
+  # when the push runtime, its client or the gate changes. Advisory like
+  # the other Spinel jobs, since the Spinel half tracks spinel-build.
+  sidekiq-live:
+    name: sidekiq-live
+    needs: [spinel-build, plan]
+    if: ${{ !cancelled() && contains(fromJSON(needs.plan.outputs.jobs), 'sidekiq-live') && needs.spinel-build.outputs.artifact-id != '' }}
+    # Spelled out: the advisory-outputs anchor is defined further down.
+    outputs:
+      execution: ${{ steps.result.outputs.status }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+
+    continue-on-error: ${{ needs.plan.outputs.spinel-advisory == 'true' }}
+    services:
+      redis:
+        image: mirror.gcr.io/library/redis
+        ports: ['6379:6379']
+    env:
+      CARGO_PROFILE_TEST_OPT_LEVEL: "0"
+    steps:
+      - uses: actions/checkout@v7
+      - name: Check out spinel-redis (pinned)
+        uses: actions/checkout@v7
+        with:
+          repository: rubys/spinel-redis
+          ref: ${{ env.SPINEL_REDIS_REF }}
+          path: spinel-redis
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: ${{ env.MRI_RUBY }}
+      - name: Install the redis and sidekiq gems
+        run: |
+          gem install --no-document redis -v '~> 5.4'
+          gem install --no-document sidekiq -v 8.1.7
+      - uses: ./.github/actions/setup-rust
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/download-artifact@v8
+        with:
+          name: spinel-dist
+          path: spinel-dist
+      - name: Stage spinel binaries
+        run: |
+          chmod +x spinel-dist/spinel spinel-dist/spin spinel-dist/spinel_rbs_extract
+          echo "$PWD/spinel-dist" >> $GITHUB_PATH
+      # One thread: both tests flush and fill the same scratch database.
+      - name: Run the live Sidekiq gates
+        env:
+          SIDEKIQ_LIVE_REDIS_URL: redis://127.0.0.1:6379/15
+          SPINEL_REDIS_DIR: ${{ github.workspace }}/spinel-redis
+        run: cargo test --test sidekiq_push_live -- --ignored --nocapture --test-threads=1
+      - *advisory-result
 
   # Campfire conformance — ONCE Campfire's OWN test suite, run against a
   # roundhouse emit of it. The C4 rung of the coverage ladder, and the
@@ -4144,7 +4203,7 @@ jobs:
   # Informational validation summary; no branch-protection or merge policy.
   ci-summary:
     name: CI summary
-    needs: [plan, generate-fixture, unit-build, unit, build-roundhouse, store-check, compare, compare-ruby, compare-ruby-next, browser-smoke-typescript, campfire-conformance, campfire-compare, campfire-latest, compact-required, compare-extra, compare-jruby, build-wasm, browser-smoke-ide, build-site, smoke, smoke-extra, spinel-build, spinel-framework, campfire-spinel-build, campfire-spinel-compare, campfire-spinel-db, spinel-toolchain, spinel-compare, spinel-smoke, campfire-archive-build, campfire-smoke, campfire-smoke-docker, spinel-timings, archive-results, assemble-site]
+    needs: [plan, generate-fixture, unit-build, unit, build-roundhouse, store-check, compare, compare-ruby, compare-ruby-next, browser-smoke-typescript, campfire-conformance, campfire-compare, campfire-latest, compact-required, compare-extra, compare-jruby, build-wasm, browser-smoke-ide, build-site, smoke, smoke-extra, spinel-build, spinel-framework, sidekiq-live, campfire-spinel-build, campfire-spinel-compare, campfire-spinel-db, spinel-toolchain, spinel-compare, spinel-smoke, campfire-archive-build, campfire-smoke, campfire-smoke-docker, spinel-timings, archive-results, assemble-site]
     # Report selected failures and expected skips; stop on workflow cancellation.
     if: ${{ !cancelled() && needs.plan.result == 'success' }}
     runs-on: ubuntu-latest

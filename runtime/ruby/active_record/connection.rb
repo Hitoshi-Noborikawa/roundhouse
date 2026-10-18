@@ -747,8 +747,15 @@ module ActiveRecord
               ActiveRecord::TransactionHooks.rolled_back
               raise e
             end
-            ActiveRecord::TransactionHooks.committed
-            ActiveRecord::Base._commit_enlisted
+            # The records' commit callbacks first, then the held jobs,
+            # as Rails enqueues after them. A job that fails to enqueue
+            # (a Sidekiq push to a down Redis) raises after both, so no
+            # callback is skipped or left to fire at a later COMMIT.
+            begin
+              ActiveRecord::Base._commit_enlisted
+            ensure
+              ActiveRecord::TransactionHooks.committed
+            end
           end
         end
       end

@@ -101,7 +101,25 @@ SPINEL_TESTS = [
     "hash_to_query_symbol_keys_spinel",
     "storage_proxy_path_spinel",
     "filter_block_params_spinel",
+    "sidekiq_push",
 ]
+# Inputs of the Sidekiq push gate (tests/sidekiq_push.rs): the files its
+# driver loads beside it.
+SIDEKIQ_PUSH_INPUTS = {
+    "runtime/ruby/active_job.rb",
+    "runtime/spinel/active_job_serialization.rb",
+    "runtime/spinel/global_id_locator.rb",
+    "runtime/spinel/base64.rb",
+    "runtime/spinel/sidekiq_push.rb",
+    "runtime/spinel/sidekiq_redis.rb",
+    "runtime/spinel/job_registry.rb",
+}
+# Inputs of the live Sidekiq gate (tests/sidekiq_push_live.rs, the
+# sidekiq-live job): the push runtime, its real Redis client, and the gate.
+SIDEKIQ_LIVE_INPUTS = (SIDEKIQ_PUSH_INPUTS - {"runtime/spinel/sidekiq_redis.rb"}) | {
+    "runtime/spinel/sidekiq/sidekiq_redis.rb",
+    "tests/sidekiq_push_live.rs",
+}
 # Seconds each suite took in spinel-framework (main run 38936441376, its
 # test binary's compile included), for balancing its shards; a suite not
 # listed counts as one Spinel build.
@@ -138,6 +156,7 @@ SPINEL_TEST_SECONDS = {
             "spinel_param_builder",
             "rails_compat_vectors_spinel",
             "active_job_payload",
+            "sidekiq_push",
         ],
         5,
     ),
@@ -224,6 +243,7 @@ SPINEL11 = [
     "campfire-archive-build",
     "campfire-smoke",
     "campfire-smoke-docker",
+    "sidekiq-live",
 ]
 # Main-push / unknown-input Spinel suite (advisory). PR `ci:spinel` uses the
 # narrower CORE focus lane (built in focus_plan) and makes those jobs required.
@@ -503,6 +523,8 @@ def native_coverage(path):
         suites.update(owned_tests)
     if path in ACTIVE_JOB_PAYLOAD_INPUTS or path.startswith("tests/active_job_payload/"):
         suites.add("active_job_payload")
+    if path in SIDEKIQ_PUSH_INPUTS or path.startswith("tests/sidekiq_push/"):
+        suites.add("sidekiq_push")
     if (
         path.startswith(("tests/rails_compat/", "tests/params_vectors/"))
         or path == "tests/rails_compat_vectors.rb"
@@ -627,6 +649,10 @@ def select(
             jobs_selected.update(CORE)
         if native:
             reasons.append(f"{path}: native Spinel core")
+        if path in SIDEKIQ_LIVE_INPUTS or path.startswith("tests/sidekiq_push_live/"):
+            spinel = True
+            jobs_selected.add("sidekiq-live")
+            reasons.append(f"{path}: live Sidekiq gate")
         if target in TARGETS or target == "spinel":
             owners = (
                 {"ruby", "jruby", "spinel"}
