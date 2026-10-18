@@ -46,6 +46,7 @@ mod effects;
 mod diagnostics;
 pub mod open_classes;
 pub(crate) mod forwarding;
+mod private_calls;
 mod filter_targets;
 pub mod graphql;
 mod harvest_return;

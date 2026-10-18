@@ -16575,3 +16575,5 @@ mod console_only_definitions;
 mod open_classes;
 #[path = "emit_and_run/parameterized_mailer.rs"]
 mod parameterized_mailer;
+#[path = "emit_and_run/private_calls.rs"]
+mod private_calls;

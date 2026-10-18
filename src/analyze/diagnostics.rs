@@ -199,6 +199,7 @@ pub fn diagnose_with_coverage(app: &App) -> (Vec<Diagnostic>, PreloadCoverage) {
         diagnose_expr(seeds, &mut out);
     }
     out.extend(super::forwarding::diagnose(app));
+    out.extend(super::private_calls::diagnose(app));
     out.extend(super::filter_targets::diagnose(app));
 
     // Static N+1 pass (#64): missing-preload warnings over the typed
