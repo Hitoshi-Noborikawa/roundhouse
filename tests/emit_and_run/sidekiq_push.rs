@@ -98,3 +98,50 @@ fn an_app_on_sidekiq_with_no_jobs_gets_no_redis() {
     assert!(read(&emitted, "runtime/sidekiq_redis.rb").contains("this tree has no Redis client"));
     assert!(!read(&emitted, "spin.toml").contains("spinel-redis"));
 }
+
+const COMMIT_CALLBACK: &str = r#"  validates :title, presence: true
+
+  COMMITTED = []
+  after_create_commit :note_committed
+
+  def note_committed
+    COMMITTED << title
+  end
+
+  def enqueue_job
+    ArticleJob.perform_later(self)
+  end
+"#;
+
+const FAILED_PUSH_SCRIPT: &str = r#"SidekiqRedis.define_singleton_method(:push) { |_url, _queue, _json| raise "redis down" }
+begin
+  Article.transaction do
+    Article.create!(title: "Pushed title", body: "A long enough article body.")
+    SidekiqPush.enqueue_after_commit("ArticleJob", "default", 0.0, "{}")
+  end
+  raise "the failed push was swallowed"
+rescue RuntimeError => e
+  raise e unless e.message == "redis down"
+end
+raise "after_commit skipped: #{Article::COMMITTED.inspect}" unless Article::COMMITTED == ["Pushed title"]
+Article.transaction do
+  Article.create!(title: "Next title", body: "Another long enough body.")
+end
+raise "after_commit fired again: #{Article::COMMITTED.inspect}" unless Article::COMMITTED == ["Pushed title", "Next title"]
+puts "failed push passed"
+"#;
+
+/// A held push that fails at COMMIT raises after the data is committed,
+/// as an error in a Rails `after_commit` does, but the records'
+/// `after_commit` callbacks have run first: none is skipped, and none
+/// waits to fire at the thread's next COMMIT. Rails enqueues after the
+/// record callbacks too.
+#[test]
+fn a_failed_push_at_commit_runs_the_record_callbacks_first() {
+    let run = emit_and_run::real_blog()
+        .write("app/jobs/article_job.rb", JOB)
+        .edit("app/models/article.rb", "  validates :title, presence: true\n", COMMIT_CALLBACK)
+        .run_ruby(FAILED_PUSH_SCRIPT);
+    run.assert_passes();
+    assert!(run.stdout.contains("failed push passed"), "{}", run.stdout);
+}
