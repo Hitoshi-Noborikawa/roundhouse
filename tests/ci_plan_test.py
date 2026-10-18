@@ -144,6 +144,25 @@ class Routing(unittest.TestCase):
             any("campfire" in job for job in plan["jobs"] if job not in ci.BASE)
         )
 
+    def test_sidekiq_live_runs_only_when_the_push_or_its_client_changes(self):
+        for path in [
+            "runtime/spinel/sidekiq_push.rb",
+            "runtime/spinel/sidekiq/sidekiq_redis.rb",
+            "runtime/ruby/active_job.rb",
+            "tests/sidekiq_push_live.rs",
+            "tests/sidekiq_push_live/reader.rb",
+        ]:
+            with self.subTest(path=path):
+                plan = ci.select([path])
+                self.assertIn("sidekiq-live", plan["jobs"])
+                self.assertIn("spinel-build", plan["jobs"])
+                self.assertIn("sidekiq-live", plan["advisory"])
+                self.assertNotIn("sidekiq-live", plan["required"])
+        for path in ["runtime/spinel/sidekiq_redis.rb", "runtime/spinel/db.rb", "src/ingest/app.rs"]:
+            with self.subTest(path=path):
+                self.assertNotIn("sidekiq-live", ci.select([path])["jobs"])
+        self.assertIn("sidekiq-live", ci.select([], full=True)["jobs"])
+
     def test_shared_runtime_rb_and_rbs_select_framework_native_coverage(self):
         for path in ["runtime/ruby/active_record.rb", "runtime/ruby/test/model.rbs"]:
             with self.subTest(path=path):

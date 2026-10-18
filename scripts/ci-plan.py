@@ -113,6 +113,12 @@ SIDEKIQ_PUSH_INPUTS = {
     "runtime/spinel/sidekiq_redis.rb",
     "runtime/spinel/job_registry.rb",
 }
+# Inputs of the live Sidekiq gate (tests/sidekiq_push_live.rs, the
+# sidekiq-live job): the push runtime, its real Redis client, and the gate.
+SIDEKIQ_LIVE_INPUTS = (SIDEKIQ_PUSH_INPUTS - {"runtime/spinel/sidekiq_redis.rb"}) | {
+    "runtime/spinel/sidekiq/sidekiq_redis.rb",
+    "tests/sidekiq_push_live.rs",
+}
 # Seconds each suite took in spinel-framework (main run 38936441376, its
 # test binary's compile included), for balancing its shards; a suite not
 # listed counts as one Spinel build.
@@ -236,6 +242,7 @@ SPINEL11 = [
     "campfire-archive-build",
     "campfire-smoke",
     "campfire-smoke-docker",
+    "sidekiq-live",
 ]
 # Main-push / unknown-input Spinel suite (advisory). PR `ci:spinel` uses the
 # narrower CORE focus lane (built in focus_plan) and makes those jobs required.
@@ -599,6 +606,10 @@ def select(
             jobs_selected.update(CORE)
         if native:
             reasons.append(f"{path}: native Spinel core")
+        if path in SIDEKIQ_LIVE_INPUTS or path.startswith("tests/sidekiq_push_live/"):
+            spinel = True
+            jobs_selected.add("sidekiq-live")
+            reasons.append(f"{path}: live Sidekiq gate")
         if target in TARGETS or target == "spinel":
             owners = (
                 {"ruby", "jruby", "spinel"}
