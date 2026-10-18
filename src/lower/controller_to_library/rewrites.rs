@@ -1121,7 +1121,7 @@ fn merge_or_append_kwarg(args: &mut Vec<Expr>, key: &str, value: &str, span: Spa
 // to children of the parent. Spinel doesn't have association proxies;
 // the parent linkage has to be made explicit at the call site.
 //
-//   @x = @parent.<assoc>.build(<args>)
+//   @x = @parent.<assoc>.build(<args>)   (or `.new(<args>)`)
 //   ─────────────────────────────────────────────────────────────────
 //   attrs = <args>.to_h
 //   attrs[:<foreign_key>] = @parent.id
@@ -1139,11 +1139,20 @@ fn merge_or_append_kwarg(args: &mut Vec<Expr>, key: &str, value: &str, span: Spa
 // declaration the parent's model reads (its own, else its nearest
 // superclass's; the last one when a model declares the name twice, as
 // with a concern's `has_many` and the model's own after the `include`).
-// An association no model declares keeps the name-derived form
-// (`<Singular>`, `<parent>_id`). One declared in a way this cannot
-// reproduce, one whose extension defines this call (`find`, `build`, …),
-// or one the parent's model does not declare (or, for a parent typed as
-// a union of models, does not declare alike) is left as written.
+// A parent of no known model reads the declaration of the model its name
+// gives, when that model has the association, else the one every
+// declarer agrees on. An association no model declares keeps the
+// name-derived form (`<Singular>`, `<parent>_id`). One declared in a way
+// this call cannot reproduce (a scope that changes what it builds or
+// finds), one whose extension defines this call (`find`, `build`, …), or
+// one the parent's model does not declare (or, for a parent typed as a
+// union of models, does not declare alike) is left as written.
+//
+// A `.new` here is one `association_new` left as written. Where the
+// extension defines `build`, the proxy's `new` is Rails' own `build`
+// still, so it expands as one; an extension defining `new` declines it,
+// and a read not analyzed as the target's collection is left alone, as
+// `association_new` leaves it.
 //
 // One Assign expands to a Seq of multiple Exprs — the outer Seq the
 // emitter walks for line-per-statement output flattens implicitly.
@@ -1179,7 +1188,7 @@ pub(super) fn rewrite_assoc_through_parent_typed(
             return None;
         };
         let kind = match outer_method.as_str() {
-            "build" => AssocKind::Build,
+            "build" | "new" => AssocKind::Build,
             // Rails' `create` on an association is `build` + save, over
             // an attribute HASH. A typed params object handed to the
             // runtime's `create` would be indexed like a Hash and
@@ -1221,22 +1230,29 @@ pub(super) fn rewrite_assoc_through_parent_typed(
         };
         // The class and foreign key come from the declaration
         // (`class_name:`, `foreign_key:`) the parent's analyzed class
-        // reads, the parent's value from `.id`. A declaration that
-        // expansion cannot reproduce (`primary_key:`, `through:`, `as:`,
-        // a scope that changes what is built or found), an extension
-        // method by this call's name, or a parent model without the
-        // association (any of a union's) is declined, and the typed
-        // association seed handles or refuses the call instead.
-        let (model_class, fk) = match assocs.build_target(inner_recv.ty.as_ref(), assoc_method, outer_method) {
+        // (or, untyped, its name) reads, the parent's value from `.id`.
+        // A declaration that expansion cannot reproduce (`primary_key:`,
+        // `through:`, `as:`, a scope that changes what this call builds
+        // or finds), an extension method by this call's name, or a
+        // parent model without the association (any of a union's) is
+        // declined, and the typed association seed handles or refuses
+        // the call instead.
+        let (model_class, fk) = match assocs.build_target(inner_recv, assoc_method, outer_method) {
             AssocBuildTarget::Declared { target, foreign_key } => {
                 (target.0.as_str().to_string(), foreign_key.as_str().to_string())
             }
             AssocBuildTarget::Declined => return None,
+            AssocBuildTarget::Undeclared if outer_method.as_str() == "new" => return None,
             AssocBuildTarget::Undeclared => (
                 crate::naming::singularize_camelize(assoc_method.as_str()),
                 format!("{}_id", parent_name.as_str()),
             ),
         };
+        // `association_new`'s guard, for the `.new` it left: a method
+        // named like an association may return an unrelated class.
+        if outer_method.as_str() == "new" && !reads_collection_of(outer_recv, &model_class) {
+            return None;
+        }
         Some(match kind {
             AssocKind::Build => {
                 let lhs = lhs.expect("checked above");
@@ -1384,6 +1400,18 @@ fn match_params_helper<'a>(
 /// "Feedback"` building from `comment_params` has none to call.
 fn has_typed_factory(model_class: &str, spec: &ParamsSpec) -> bool {
     crate::naming::snake_case(model_class) == spec.resource.as_str()
+}
+
+/// Whether `read` is analyzed as a collection of `model_class`, the
+/// reader of an association to it.
+fn reads_collection_of(read: &Expr, model_class: &str) -> bool {
+    match read.ty.as_ref().map(Ty::peel_nilable) {
+        Some(Ty::Array { elem }) => {
+            matches!(elem.peel_nilable(), Ty::Class { id, .. } if id.0.as_str() == model_class)
+        }
+        Some(Ty::Relation { of }) => of.0.as_str() == model_class,
+        _ => false,
+    }
 }
 
 enum AssocKind {

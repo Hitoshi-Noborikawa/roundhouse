@@ -148,35 +148,63 @@ fn registry(schema: &str, sources: &[(&str, &str)]) -> roundhouse::lower::scope_
     roundhouse::lower::scope_chain::build_assoc_registry(&models)
 }
 
-/// The foreign key `<owner>.comments.<call>` expands with, `None` when
-/// the rewrite declines it. An owner written `"Tag | Article"` is typed
-/// as that union.
-fn comments_key(
-    reg: &roundhouse::lower::scope_chain::AssocRegistry,
-    owner: Option<&str>,
-    call: &str,
-) -> Option<String> {
+/// An owner expression: `"@story"` is an ivar of no analyzed type,
+/// `"@parent: Article"` one analyzed as Article, and `"@owner: Tag |
+/// Article"` one analyzed as that union.
+fn owner(written: &str) -> roundhouse::expr::Expr {
+    use roundhouse::expr::{Expr, ExprNode};
     use roundhouse::ident::{ClassId, Symbol};
-    use roundhouse::lower::scope_chain::AssocBuildTarget;
     use roundhouse::ty::Ty;
 
-    let owner = owner.map(|o| {
+    let (name, ty) = match written.split_once(": ") {
+        Some((name, ty)) => (name, Some(ty)),
+        None => (written, None),
+    };
+    let mut owner = Expr::new(
+        roundhouse::span::Span::synthetic(),
+        ExprNode::Ivar { name: Symbol::from(name.trim_start_matches('@')) },
+    );
+    owner.ty = ty.map(|ty| {
         let mut arms: Vec<Ty> =
-            o.split(" | ").map(|c| Ty::Class { id: ClassId(Symbol::from(c)), args: vec![].into() }).collect();
+            ty.split(" | ").map(|c| Ty::Class { id: ClassId(Symbol::from(c)), args: vec![].into() }).collect();
         if arms.len() == 1 { arms.remove(0) } else { Ty::Union { variants: arms.into() } }
     });
-    match reg.build_target(owner.as_ref(), &Symbol::from("comments"), &Symbol::from(call)) {
-        AssocBuildTarget::Declared { target, foreign_key } => {
-            assert_eq!(target.0.as_str(), "Comment");
-            Some(foreign_key.as_str().to_string())
-        }
-        AssocBuildTarget::Declined => None,
-        AssocBuildTarget::Undeclared => panic!("comments is declared"),
+    owner
+}
+
+/// What `<owner>.<assoc>.<call>` builds or finds through.
+fn resolve(
+    reg: &roundhouse::lower::scope_chain::AssocRegistry,
+    written: &str,
+    assoc: &str,
+    call: &str,
+) -> roundhouse::lower::scope_chain::AssocBuildTarget {
+    use roundhouse::ident::Symbol;
+    reg.build_target(&owner(written), &Symbol::from(assoc), &Symbol::from(call))
+}
+
+/// What `<owner>.comments.<call>` builds or finds through.
+fn comments(
+    reg: &roundhouse::lower::scope_chain::AssocRegistry,
+    written: &str,
+    call: &str,
+) -> roundhouse::lower::scope_chain::AssocBuildTarget {
+    resolve(reg, written, "comments", call)
+}
+
+/// A `Comment` built or found under `foreign_key`.
+fn comment_by(foreign_key: &str) -> roundhouse::lower::scope_chain::AssocBuildTarget {
+    use roundhouse::ident::{ClassId, Symbol};
+    roundhouse::lower::scope_chain::AssocBuildTarget::Declared {
+        target: ClassId(Symbol::from("Comment")),
+        foreign_key: Symbol::from(foreign_key),
     }
 }
 
-/// The parent's class picks between declarations; without one, the
-/// name alone does not. A subclass finds the declaration it inherits.
+use roundhouse::lower::scope_chain::AssocBuildTarget::{Declined, Undeclared};
+
+/// The parent's class picks between declarations, whatever its name. A
+/// subclass finds the declaration it inherits.
 #[test]
 fn the_declaration_is_resolved_by_the_parent_class_not_the_ivar_name() {
     let reg = registry(
@@ -199,12 +227,59 @@ end
             ("class Story < Article\nend\n", "app/models/story.rb"),
         ],
     );
-    assert_eq!(comments_key(&reg, Some("Article"), "build").as_deref(), Some("article_id"));
-    assert_eq!(comments_key(&reg, Some("Post"), "build").as_deref(), Some("post_id"));
-    assert_eq!(comments_key(&reg, Some("Story"), "find").as_deref(), Some("article_id"));
-    assert_eq!(comments_key(&reg, Some("Story | Article"), "build").as_deref(), Some("article_id"));
-    assert_eq!(comments_key(&reg, Some("Article | Post"), "build"), None);
-    assert_eq!(comments_key(&reg, None, "build"), None);
+    assert_eq!(comments(&reg, "@post: Article", "build"), comment_by("article_id"));
+    assert_eq!(comments(&reg, "@article: Post", "build"), comment_by("post_id"));
+    assert_eq!(comments(&reg, "@parent: Story", "find"), comment_by("article_id"));
+    assert_eq!(comments(&reg, "@parent: Story | Article", "build"), comment_by("article_id"));
+    assert_eq!(comments(&reg, "@parent: Article | Post", "build"), Declined);
+    assert_eq!(comments(&reg, "@parent", "build"), Declined);
+}
+
+/// A parent of no known model resolves by its name when the name is a
+/// model that (itself or through a superclass) declares the association,
+/// as the association seed resolves it, so a typed-params build and a
+/// kwargs build on the same parent agree. A name that is no model, or a
+/// model without the association, leaves only the declarers' agreement.
+#[test]
+fn an_untyped_parent_resolves_by_its_name_like_the_seed() {
+    use roundhouse::ident::Symbol;
+    use roundhouse::lower::scope_chain::assoc_read_target;
+
+    let reg = registry(
+        r#"
+ActiveRecord::Schema[8.1].define(version: 1) do
+  create_table "articles", force: :cascade do |t|
+    t.string "type"
+  end
+  create_table "users", force: :cascade do |t|
+  end
+  create_table "tags", force: :cascade do |t|
+  end
+  create_table "comments", force: :cascade do |t|
+    t.integer "article_id"
+    t.integer "user_id"
+  end
+end
+"#,
+        &[
+            ("class Article < ApplicationRecord\n  has_many :comments\nend\n", "app/models/article.rb"),
+            ("class Story < Article\nend\n", "app/models/story.rb"),
+            ("class User < ApplicationRecord\n  has_many :comments\nend\n", "app/models/user.rb"),
+            ("class Tag < ApplicationRecord\nend\n", "app/models/tag.rb"),
+        ],
+    );
+    let seed = |written: &str| {
+        assoc_read_target(&owner(written), &Symbol::from("comments"), &reg)
+            .map(|(model, _, fk)| (model.map(|m| m.0.as_str().to_string()), fk.as_str().to_string()))
+    };
+    assert_eq!(comments(&reg, "@user", "build"), comment_by("user_id"));
+    assert_eq!(seed("@user"), Some((Some("User".to_string()), "user_id".to_string())));
+    assert_eq!(comments(&reg, "@story", "build"), comment_by("article_id"));
+    assert_eq!(seed("@story"), Some((Some("Article".to_string()), "article_id".to_string())));
+    for written in ["@parent", "@tag"] {
+        assert_eq!(comments(&reg, written, "build"), Declined, "{written}");
+        assert_eq!(seed(written), None, "{written}");
+    }
 }
 
 /// A parent typed as a model whose chain does not declare the name has
@@ -230,11 +305,37 @@ end
             ("class Tag < ApplicationRecord\nend\n", "app/models/tag.rb"),
         ],
     );
-    assert_eq!(comments_key(&reg, Some("Tag"), "build"), None);
-    assert_eq!(comments_key(&reg, Some("Tag"), "find"), None);
-    assert_eq!(comments_key(&reg, Some("Tag | Article"), "build"), None);
-    for owner in [None, Some("Current")] {
-        assert_eq!(comments_key(&reg, owner, "build").as_deref(), Some("article_id"), "{owner:?}");
+    assert_eq!(comments(&reg, "@tag: Tag", "build"), Declined);
+    assert_eq!(comments(&reg, "@tag: Tag", "find"), Declined);
+    assert_eq!(comments(&reg, "@owner: Tag | Article", "build"), Declined);
+    for written in ["@parent", "@parent: Current", "@tag"] {
+        assert_eq!(comments(&reg, written, "build"), comment_by("article_id"), "{written}");
+    }
+}
+
+/// A name no model declares (an association from a `with_options` block
+/// or a custom macro, which the registry does not see) is `Undeclared`,
+/// for the rewrite's name-derived form, even on a parent typed as a
+/// model. One another model declares stays declined for a model that
+/// does not (above).
+#[test]
+fn a_name_no_model_declares_is_undeclared_on_any_parent() {
+    let reg = registry(
+        r#"
+ActiveRecord::Schema[8.1].define(version: 1) do
+  create_table "articles", force: :cascade do |t|
+  end
+  create_table "comments", force: :cascade do |t|
+    t.integer "article_id"
+  end
+end
+"#,
+        &[("class Article < ApplicationRecord\nend\n", "app/models/article.rb")],
+    );
+    for written in ["@article: Article", "@article", "@owner: Article | Article"] {
+        for call in ["build", "find", "find_by"] {
+            assert_eq!(comments(&reg, written, call), Undeclared, "{written}.comments.{call}");
+        }
     }
 }
 
@@ -258,8 +359,8 @@ end
             "app/models/article.rb",
         )],
     );
-    for owner in [Some("Article"), None] {
-        assert_eq!(comments_key(&reg, owner, "build").as_deref(), Some("legacy_article_id"), "{owner:?}");
+    for written in ["@parent: Article", "@parent"] {
+        assert_eq!(comments(&reg, written, "build"), comment_by("legacy_article_id"), "{written}");
     }
 }
 
@@ -282,9 +383,49 @@ end
             "app/models/article.rb",
         )],
     );
-    for owner in [Some("Article"), None] {
-        assert_eq!(comments_key(&reg, owner, "find"), None, "{owner:?}");
-        assert_eq!(comments_key(&reg, owner, "build").as_deref(), Some("article_id"), "{owner:?}");
+    for written in ["@parent: Article", "@parent"] {
+        assert_eq!(comments(&reg, written, "find"), Declined, "{written}");
+        assert_eq!(comments(&reg, written, "build"), comment_by("article_id"), "{written}");
+    }
+}
+
+/// A scope is judged per call. Ordering decides which match `find_by`
+/// takes, so it declines `find_by` alone; what `build` makes and the row
+/// `find(id)` names do not depend on it. Eager loading, `references` and
+/// `readonly` change none of them; a `where` changes all of them.
+#[test]
+fn a_scope_declines_only_the_calls_it_changes() {
+    let reg = registry(
+        r#"
+ActiveRecord::Schema[8.1].define(version: 1) do
+  create_table "articles", force: :cascade do |t|
+  end
+  create_table "comments", force: :cascade do |t|
+    t.integer "article_id"
+    t.string "commenter"
+    t.datetime "created_at"
+  end
+end
+"#,
+        &[(
+            "class Article < ApplicationRecord\n  has_many :ordered, -> { order(created_at: :desc) }, class_name: \"Comment\"\n  has_many :reordered, -> { includes(:article).reorder(:id) }, class_name: \"Comment\"\n  has_many :locked, -> { readonly }, class_name: \"Comment\"\n  has_many :referenced, -> { includes(:article).references(:article) }, class_name: \"Comment\"\n  has_many :filtered, -> { where(commenter: \"amy\") }, class_name: \"Comment\"\nend\n",
+            "app/models/article.rb",
+        )],
+    );
+    let builds_and_finds = ["build", "new", "create", "create!", "find"];
+    for assoc in ["ordered", "reordered"] {
+        for call in builds_and_finds {
+            assert_eq!(resolve(&reg, "@article: Article", assoc, call), comment_by("article_id"), "{assoc}.{call}");
+        }
+        assert_eq!(resolve(&reg, "@article: Article", assoc, "find_by"), Declined, "{assoc}.find_by");
+    }
+    for assoc in ["locked", "referenced"] {
+        for call in builds_and_finds.iter().chain(&["find_by"]) {
+            assert_eq!(resolve(&reg, "@article: Article", assoc, call), comment_by("article_id"), "{assoc}.{call}");
+        }
+    }
+    for call in builds_and_finds.iter().chain(&["find_by"]) {
+        assert_eq!(resolve(&reg, "@article: Article", "filtered", call), Declined, "filtered.{call}");
     }
 }
 
@@ -464,7 +605,9 @@ fn a_nested_build_and_find_on_a_model_without_the_association_do_not_borrow_anot
 
 /// `@owner` holding a Tag or an Article: only the Article has
 /// `comments`, so neither the rewrite nor the association seed builds
-/// a Comment under the Tag's id as its `article_id`.
+/// or finds a Comment under the Tag's id as its `article_id`. The
+/// kwargs build and the `find` reach the seed, which the rewrite leaves
+/// them to.
 #[test]
 fn a_nested_build_on_a_union_of_models_does_not_borrow_one_arms_key() {
     let (emitted, _errors) = emit_and_run::real_blog()
@@ -477,14 +620,21 @@ fn a_nested_build_on_a_union_of_models_does_not_borrow_one_arms_key() {
         .edit(
             "app/controllers/comments_controller.rb",
             "    @comment = @article.comments.build(comment_params)",
-            "    @owner = params[:tag] ? Tag.find(1) : @article\n    @comment = @owner.comments.build(comment_params)",
+            "    @owner = params[:tag] ? Tag.find(1) : @article\n    @comment = @owner.comments.build(comment_params)\n    @draft = @owner.comments.build(commenter: \"amy\")",
+        )
+        .edit(
+            "app/controllers/comments_controller.rb",
+            "    @comment = @article.comments.find(params.expect(:id))",
+            "    @owner = params[:tag] ? Tag.find(1) : @article\n    @comment = @owner.comments.find(params.expect(:id))",
         )
         .emit(roundhouse::project::BuildTarget::Ruby);
     let controller = std::fs::read_to_string(emitted.join("app/controllers/comments_controller.rb"))
         .expect("emitted controller");
-    assert!(controller.contains("@owner.comments.build("), "{controller}");
+    assert!(controller.contains("@owner.comments.build(self.comment_params)"), "{controller}");
+    assert!(controller.contains("@owner.comments.build(commenter: \"amy\")"), "{controller}");
+    assert!(controller.contains("@owner.comments.find("), "{controller}");
     assert!(
-        !controller.lines().any(|l| l.contains("article_id") && l.contains("@owner.id")),
+        !controller.lines().any(|l| l.contains("article_id") && l.contains("@owner.id") || l.contains("article: @owner")),
         "{controller}"
     );
 }
@@ -618,4 +768,189 @@ fn a_nested_new_through_a_redeclared_extension_defining_new_reaches_the_extensio
         .expect("emitted controller");
     assert!(controller.contains("@article.remarks_new("), "{controller}");
     assert!(!controller.contains("Comment.from_params"), "{controller}");
+}
+
+/// `has_many :remarks, -> { order(created_at: :desc) }`: Rails' `find_by`
+/// takes the first match in that order, which `Comment.find_by(…,
+/// article_id:)` would not, so the rewrite declines `find_by` while
+/// `build` and `find` still expand.
+#[test]
+fn a_nested_find_by_through_an_ordering_scope_is_not_expanded() {
+    let (emitted, _errors) = emit_and_run::real_blog()
+        .edit(
+            "app/models/article.rb",
+            "  has_many :comments, dependent: :destroy",
+            "  has_many :comments, dependent: :destroy\n  has_many :remarks, -> { order(created_at: :desc) }, class_name: \"Comment\"",
+        )
+        .edit(
+            "app/controllers/comments_controller.rb",
+            "@article.comments.build(comment_params)",
+            "@article.remarks.build(comment_params)",
+        )
+        .edit(
+            "app/controllers/comments_controller.rb",
+            "    @comment = @article.comments.find(params.expect(:id))",
+            "    @comment = @article.remarks.find(params.expect(:id))\n    @latest = @article.remarks.find_by(commenter: @comment.commenter)",
+        )
+        .emit(roundhouse::project::BuildTarget::Ruby);
+    let controller = std::fs::read_to_string(emitted.join("app/controllers/comments_controller.rb"))
+        .expect("emitted controller");
+    assert!(controller.contains("@article.remarks.find_by("), "{controller}");
+    assert!(!controller.contains("Comment.find_by("), "{controller}");
+    assert!(controller.contains("Comment.from_params"), "{controller}");
+    assert!(controller.contains("Comment.find("), "{controller}");
+}
+
+/// `@story` of no analyzed type, while Story and Article both declare
+/// `comments`: the name says Story, as it does for the association seed,
+/// so the typed-params build expands under `story_id` rather than being
+/// left on the reader.
+#[test]
+fn a_nested_build_on_an_untyped_parent_named_after_a_declarer_uses_its_key() {
+    let (emitted, _errors) = emit_and_run::real_blog()
+        .edit(
+            "db/schema.rb",
+            "    t.integer \"article_id\", null: false\n",
+            "    t.integer \"article_id\"\n    t.integer \"story_id\"\n",
+        )
+        .edit(
+            "db/schema.rb",
+            "  add_foreign_key \"comments\", \"articles\"",
+            "  create_table \"stories\", force: :cascade do |t|\n    t.string \"title\"\n  end\n\n  add_foreign_key \"comments\", \"articles\"",
+        )
+        .write("app/models/story.rb", "class Story < ApplicationRecord\n  has_many :comments\nend\n")
+        .edit(
+            "app/controllers/comments_controller.rb",
+            "@article.comments.build(comment_params)",
+            "@story.comments.build(comment_params)",
+        )
+        .emit(roundhouse::project::BuildTarget::Ruby);
+    let controller = std::fs::read_to_string(emitted.join("app/controllers/comments_controller.rb"))
+        .expect("emitted controller");
+    assert!(controller.contains("Comment.from_params"), "{controller}");
+    assert!(controller.lines().any(|l| l.contains("story_id") && l.contains("@story.id")), "{controller}");
+    assert!(!controller.contains("@story.comments.build("), "{controller}");
+}
+
+/// An extension defining `build` does not change `new`: Rails binds the
+/// proxy's `new` to its own `build` where the alias is defined, so
+/// `@article.remarks.new(comment_params)` builds a Comment of the
+/// declaration with those params, not what the extension's `build`
+/// makes.
+#[test]
+fn a_nested_new_through_an_extension_defining_build_builds_through_the_declaration() {
+    let (find, replace) = CREATED_UNDER_THE_ARTICLE;
+    emit_and_run::real_blog()
+        .edit(
+            "app/models/article.rb",
+            "  has_many :comments, dependent: :destroy",
+            "  has_many :comments, dependent: :destroy\n  has_many :remarks, class_name: \"Comment\" do\n    def build(attributes = {})\n      Comment.new(commenter: \"amy\")\n    end\n  end",
+        )
+        .edit(
+            "app/controllers/comments_controller.rb",
+            "@article.comments.build(comment_params)",
+            "@article.remarks.new(comment_params)",
+        )
+        .edit("test/controllers/comments_controller_test.rb", find, replace)
+        .run_test("test/controllers/comments_controller_test.rb")
+        .assert_passes();
+}
+
+/// `Article < Publication`, an abstract base declaring `comments`:
+/// `@article.comments` is the association Article inherits, so its `new`
+/// is `build` there too, and the seed presets the declared key.
+#[test]
+fn a_new_through_an_inherited_association_is_build() {
+    let (emitted, _errors) = emit_and_run::real_blog()
+        .write(
+            "app/models/publication.rb",
+            "class Publication < ApplicationRecord\n  self.abstract_class = true\n  has_many :comments, foreign_key: :article_id, dependent: :destroy\nend\n",
+        )
+        .edit(
+            "app/models/article.rb",
+            "class Article < ApplicationRecord\n  has_many :comments, dependent: :destroy\n",
+            "class Article < Publication\n",
+        )
+        .edit(
+            "app/controllers/comments_controller.rb",
+            "    @comment = @article.comments.build(comment_params)\n",
+            "    @comment = @article.comments.build(comment_params)\n    draft = @article.comments.new(commenter: \"amy\")\n",
+        )
+        .emit(roundhouse::project::BuildTarget::Ruby);
+    let controller = std::fs::read_to_string(emitted.join("app/controllers/comments_controller.rb"))
+        .expect("emitted controller");
+    assert!(
+        controller.contains("draft = Comment.new(commenter: \"amy\", article_id: @article.id)"),
+        "{controller}"
+    );
+}
+
+/// `create` and `find_by` through `class_name:` and `foreign_key:`:
+/// create presets the declared key, and `find_by` finds nothing for a
+/// comment the key does not tie to this article, even one whose
+/// `article_id` does.
+#[test]
+fn a_nested_create_and_find_by_through_a_declared_foreign_key_use_that_key() {
+    emit_and_run::real_blog()
+        .edit(
+            "db/schema.rb",
+            "    t.integer \"article_id\", null: false\n",
+            "    t.integer \"article_id\"\n    t.integer \"reviewed_article_id\"\n",
+        )
+        .edit("app/models/comment.rb", "  belongs_to :article\n", "  belongs_to :article, optional: true\n")
+        .edit(
+            "app/models/article.rb",
+            "  has_many :comments, dependent: :destroy",
+            "  has_many :comments, dependent: :destroy\n  has_many :reviews, class_name: \"Comment\", foreign_key: :reviewed_article_id",
+        )
+        .edit(
+            "app/controllers/comments_controller.rb",
+            "    @comment = @article.comments.build(comment_params)\n    if @comment.save",
+            "    @comment = @article.reviews.create(comment_params)\n    if @comment.persisted?",
+        )
+        .edit(
+            "app/controllers/comments_controller.rb",
+            "    @comment = @article.comments.find(params.expect(:id))\n    @comment.destroy\n    redirect_to @article, notice: \"Comment was successfully deleted.\"",
+            "    @comment = @article.reviews.find_by(id: params.expect(:id))\n    if @comment\n      @comment.destroy\n      redirect_to @article, notice: \"Comment was successfully deleted.\"\n    else\n      head :not_found\n    end",
+        )
+        .edit(
+            "test/controllers/comments_controller_test.rb",
+            "    assert_redirected_to article_url(@article)\n  end\n\n  test \"should not create comment with invalid params\" do",
+            "    assert_redirected_to article_url(@article)\n    assert_equal @article.id, Comment.last.reviewed_article_id\n    assert_nil Comment.last.article_id\n  end\n\n  test \"should not create comment with invalid params\" do",
+        )
+        .edit(
+            "test/controllers/comments_controller_test.rb",
+            "  test \"should destroy comment\" do\n    assert_difference(\"Comment.count\", -1) do\n      delete article_comment_url(@article, @comment)\n    end\n    assert_redirected_to article_url(@article)\n  end",
+            "  test \"should destroy comment\" do\n    review = Comment.create!(commenter: \"Rev\", body: \"A review.\", reviewed_article_id: @article.id)\n    assert_difference(\"Comment.count\", -1) do\n      delete article_comment_url(@article, review)\n    end\n    assert_redirected_to article_url(@article)\n  end\n\n  test \"should not destroy a comment reviewing another article\" do\n    assert_no_difference(\"Comment.count\") do\n      delete article_comment_url(@article, @comment)\n    end\n    assert_response :not_found\n  end",
+        )
+        .run_test("test/controllers/comments_controller_test.rb")
+        .assert_passes();
+}
+
+/// `create!` through the same declaration: the typed factory of the
+/// declared class, saved with the declared key preset.
+#[test]
+fn a_nested_create_bang_through_a_declared_foreign_key_uses_that_key() {
+    let (emitted, _errors) = emit_and_run::real_blog()
+        .edit(
+            "db/schema.rb",
+            "    t.integer \"article_id\", null: false\n",
+            "    t.integer \"article_id\"\n    t.integer \"reviewed_article_id\"\n",
+        )
+        .edit(
+            "app/models/article.rb",
+            "  has_many :comments, dependent: :destroy",
+            "  has_many :comments, dependent: :destroy\n  has_many :reviews, class_name: \"Comment\", foreign_key: :reviewed_article_id",
+        )
+        .edit(
+            "app/controllers/comments_controller.rb",
+            "@article.comments.build(comment_params)",
+            "@article.reviews.create!(comment_params)",
+        )
+        .emit(roundhouse::project::BuildTarget::Ruby);
+    let controller = std::fs::read_to_string(emitted.join("app/controllers/comments_controller.rb"))
+        .expect("emitted controller");
+    assert!(controller.contains("Comment.from_params"), "{controller}");
+    assert!(controller.lines().any(|l| l.contains("reviewed_article_id") && l.contains("@article.id")), "{controller}");
+    assert!(!controller.contains("@article.reviews.create!("), "{controller}");
 }
