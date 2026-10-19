@@ -211,6 +211,18 @@ module ActiveRecord
     # open. `Room::MessagesCount.with_immediate_write` takes this path
     # inside a fixture example, because that frame is hidden from
     # `transaction_open?` (see active_record_db_config.rb).
+    # ROLLBACK TO plus RELEASE. A SQLite error here means the transaction
+    # already ended; the caller's exception is the one that matters.
+    def self._rollback_savepoint(name)
+      begin
+        Db.exec("ROLLBACK TO SAVEPOINT #{name}")
+        Db.exec("RELEASE SAVEPOINT #{name}")
+      rescue StandardError
+        # SQLite may already have ended the transaction itself.
+      end
+      nil
+    end
+
     def transaction(mode = :deferred)
       if Db.transaction_open?
         name = "rh_raw_#{Db._txn_depth}"
@@ -218,12 +230,7 @@ module ActiveRecord
         begin
           result = yield
         rescue Exception => e
-          begin
-            Db.exec("ROLLBACK TO SAVEPOINT #{name}")
-            Db.exec("RELEASE SAVEPOINT #{name}")
-          rescue StandardError
-            # SQLite may have ended the transaction itself already.
-          end
+          RawConnection._rollback_savepoint(name)
           raise e
         end
         Db.exec("RELEASE SAVEPOINT #{name}")
@@ -650,26 +657,14 @@ module ActiveRecord
             # outer transaction carries on and commits.
             Db._txn_depth = depth
             unless savepoint.nil?
-              begin
-                Db.exec("ROLLBACK TO SAVEPOINT #{savepoint}")
-                Db.exec("RELEASE SAVEPOINT #{savepoint}")
-              rescue StandardError
-                # SQLite may already have ended the whole transaction; the
-                # Rollback still answers nil, as the outer ROLLBACK's does.
-              end
+              RawConnection._rollback_savepoint(savepoint)
               ActiveRecord::Base._rollback_enlisted(mark)
             end
             result = nil
           rescue Exception => e
             Db._txn_depth = depth
             unless savepoint.nil?
-              begin
-                Db.exec("ROLLBACK TO SAVEPOINT #{savepoint}")
-                Db.exec("RELEASE SAVEPOINT #{savepoint}")
-              rescue StandardError
-                # SQLite may already have ended the whole transaction (see
-                # the outer ROLLBACK below); that must not hide `e`.
-              end
+              RawConnection._rollback_savepoint(savepoint)
               ActiveRecord::Base._rollback_enlisted(mark)
             end
             raise e

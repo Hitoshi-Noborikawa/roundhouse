@@ -419,7 +419,10 @@ fn untyped_subexpressions_baseline() {
     // had headroom the later runtime no longer uses.
     // MEASURED 766 on 2026-10-19: commit and rollback share
     // `_take_enlisted`, so the `Db._txn_records` slice is read once.
-    const CEILING: usize = 766;
+    // MEASURED 765 on 2026-10-19: the savepoint ROLLBACK TO / RELEASE
+    // pair lives in `RawConnection._rollback_savepoint`, called from
+    // the raw transaction and both rescue arms of `Base.transaction`.
+    const CEILING: usize = 765;
     assert!(
         existing_untyped <= CEILING && like_untyped <= LIKE_CEILING,
         "{} untyped sub-expressions on spinel-blog runtime — exceeds ledger: \

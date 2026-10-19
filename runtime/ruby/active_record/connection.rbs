@@ -35,6 +35,7 @@ module ActiveRecord
   end
 
   class RawConnection
+    def self._rollback_savepoint: (String name) -> nil
     def transaction: (?Symbol mode) { () -> untyped } -> untyped
   end
 
