@@ -5801,6 +5801,9 @@ pub const RUBY_FAMILY_RUNTIME_CONSTANTS: &[&str] = &[
     "ActiveSupport::Notifications",
     "ActiveSupport::Notifications::Event",
     "ActiveSupport::ConfigurationFile",
+    // `runtime/ruby/active_job.rb`.
+    "ActiveJob::EnqueueError",
+    "ActiveJob::Continuable",
 ];
 
 /// Availability policy for class/module *values* that inference

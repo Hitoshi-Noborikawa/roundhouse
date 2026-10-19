@@ -562,6 +562,11 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
     register_stdlib_class(classes, "ActiveSupport::ConfigurationFile", &[
         ("parse", Ty::Untyped),
     ], &[]);
+    {
+        let continuable = classes.entry(ClassId(Symbol::from("ActiveJob::Continuable"))).or_default();
+        continuable.is_module = true;
+        continuable.instance_methods.insert(Symbol::from("step"), Ty::Untyped);
+    }
     register_stdlib_class(classes, "ActiveSupport::Cache", &[
         ("expand_cache_key", Ty::Str),
     ], &[]);
@@ -859,6 +864,7 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
         ("ActiveRecord::ConnectionTimeoutError", None),
         ("ActiveRecord::Encryption::Errors::Decryption", None),
         ("ActiveRecord::Encryption::Errors::Configuration", None),
+        ("ActiveJob::EnqueueError", None),
         // Names overlap `project::RUBY_FAMILY_RUNTIME_CONSTANTS` (emit
         // ledger). Keep extras here — inference needs the readers.
         ("ActionController::ParameterMissing", Some(("param", Ty::Str))),
@@ -1240,6 +1246,7 @@ pub(crate) const BUILTIN_BLOCK_VALUE_METHODS: &[(&str, &str)] = &[
     ("ActiveSupport::Cache::MemoryStore", "fetch"),
     ("ActiveSupport::Cache::NullStore", "fetch"),
     ("ActiveSupport::Notifications", "subscribed"),
+    ("ActiveJob::Continuable", "step"),
 ];
 
 fn register_stdlib_class(

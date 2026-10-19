@@ -45,8 +45,23 @@ raise got.inspect unless got == [nil, "12", nil, 1, 12]
 }
 
 #[test]
-fn support_constants_run() {
+fn support_and_job_constants_run() {
     shell()
+        .write(
+            "app/jobs/step_job.rb",
+            r#"class StepJob
+  include ActiveJob::Continuable
+
+  def self.enqueue_failed
+    raise ActiveJob::EnqueueError, "full"
+  end
+
+  def run
+    [step(:one) { 1 }, step(:one) { 2 }]
+  end
+end
+"#,
+        )
         .write(
             "app/models/surface.rb",
             r#"class Surface
@@ -82,6 +97,13 @@ raise Surface.cached.inspect unless Surface.cached == [nil, "fresh"]
 path = "config/probe.yml"
 File.write(path, "size: <%= 1 + 1 %>\n")
 raise Surface.config(path).inspect unless Surface.config(path)["size"] == 2
+begin
+  StepJob.enqueue_failed
+  raise "enqueue did not fail"
+rescue ActiveJob::EnqueueError => error
+  raise error.message unless error.message == "full"
+end
+raise StepJob.new.run.inspect unless StepJob.new.run == [1, nil]
 "#,
         )
         .assert_passes();

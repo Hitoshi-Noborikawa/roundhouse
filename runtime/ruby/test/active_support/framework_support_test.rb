@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 require_relative "../test_helper"
 require "tmpdir"
+require "active_job"
 require "spinel/active_support_cache"
 
 class FrameworkSupportTest < Minitest::Test
@@ -52,4 +53,18 @@ class FrameworkSupportTest < Minitest::Test
     File.delete(path) if path && File.exist?(path)
   end
 
+  def test_enqueue_error_and_continuable_steps
+    error = assert_raises(ActiveJob::EnqueueError) { raise ActiveJob::EnqueueError, "full" }
+    assert_equal "full", error.message
+
+    job = Class.new do
+      include ActiveJob::Continuable
+      def run
+        first = step(:one) { 1 }
+        second = step("one") { 2 }
+        [first, second]
+      end
+    end
+    assert_equal [1, nil], job.new.run
+  end
 end

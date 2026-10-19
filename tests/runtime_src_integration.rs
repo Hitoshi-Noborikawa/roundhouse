@@ -1157,7 +1157,9 @@ fn every_runtime_method_body_concretely_typed() {
     // MEASURED 815 on 2026-10-19: `Notifications` fans a callback and a
     // payload out (+23 in active_support_notifications.rb).
     // `IsolatedExecutionState` reads the thread-local slot (+1, 791 -> 815).
-    const CEILING: usize = 815;
+    // MEASURED 819 on 2026-10-19: `Continuable#step` answers the block
+    // (+4 in active_job.rb, 815 -> 819).
+    const CEILING: usize = 819;
     assert!(
         total_gradual <= CEILING,
         "{total_gradual} Ty::Untyped sites exceeds ceiling of {CEILING}"
