@@ -37,6 +37,13 @@ class ArelNodesTest < Minitest::Test
     assert_equal "id = 4 AND label = 'a''b'", sql.to_s
   end
 
+  def test_a_positional_node_keeps_its_own_question_mark
+    sql = Arel.sql("id = ? AND label = ?", Arel.sql("COALESCE(name, ?)"), 7)
+    assert_equal "id = COALESCE(name, ?) AND label = 7", sql.to_s
+    quoted = Arel.sql("note = '?' AND id = ?", 4)
+    assert_equal "note = '?' AND id = 4", quoted.to_s
+  end
+
   def test_not_case_and_named_function
     predicate = "active = 1"
     expr = Arel::Nodes::Not.new(predicate)

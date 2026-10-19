@@ -46,6 +46,7 @@ end
       Arel::Nodes::Case.new.when(Arel.sql("title = 'x'")).then(1).else(nil).to_s,
       Arel::Nodes::NamedFunction.new(:COUNT, [Arel.star]).to_s,
       Arel.sql("(title)::text = :title", title: "Ada").to_s,
+      Arel.sql("rank = ? AND title = ?", Arel.sql("COALESCE(rank, ?)"), 7).to_s,
     ]
   end
 end
@@ -68,6 +69,7 @@ want = [
   "CASE WHEN title = 'x' THEN 1 ELSE NULL END",
   "COUNT(*)",
   "(title)::text = 'Ada'",
+  "rank = COALESCE(rank, ?) AND title = 7",
 ]
 raise "fragments #{sql.inspect}" unless sql == want
 begin

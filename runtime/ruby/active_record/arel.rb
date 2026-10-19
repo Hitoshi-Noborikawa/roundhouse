@@ -22,8 +22,11 @@ module Arel
     if !positional.empty? && Nodes.count_questions(text) != positional.length
       raise BindError, "wrong number of bind variables (#{positional.length} for #{Nodes.count_questions(text)})"
     end
-    positional.each do |bind|
-      text = Nodes.replace_question(text, Nodes.embed(bind))
+    # One pass over the original fragment. A bind can be a node whose
+    # own SQL still contains `?` (a bind-free `Arel.sql` keeps that
+    # text); scanning the already-mutated string would fill those.
+    unless positional.empty?
+      text = Nodes.replace_questions(text, positional.map { |bind| Nodes.embed(bind) })
     end
     names = named.keys.map(&:to_s).sort_by { |key| -key.length }
     names.each do |key|
@@ -139,18 +142,24 @@ module Arel
 
     # The first `?` outside a single-quoted string.
     def self.replace_question(text, literal)
+      replace_questions(text, [literal])
+    end
+
+    # Each `?` outside a single-quoted string, in order. Replacement
+    # text is copied as-is, so a `?` inside an embedded fragment stays.
+    def self.replace_questions(text, literals)
       out = ""
       i = 0
-      found = false
+      bind_index = 0
       quoted = false
       while i < text.length
         ch = text[i]
         if ch == "'"
           quoted = !quoted
           out += ch
-        elsif !found && !quoted && ch == "?"
-          out += literal
-          found = true
+        elsif !quoted && ch == "?" && bind_index < literals.length
+          out += literals[bind_index]
+          bind_index += 1
         else
           out += ch
         end
