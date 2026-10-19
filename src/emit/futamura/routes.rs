@@ -68,6 +68,10 @@ struct Index<'a> {
     /// class -> itself and everything above it (parents and included
     /// modules, transitively), app or not.
     ancestors: HashMap<String, HashSet<String>>,
+    /// class -> the app modules its body `extend`s (kept as a
+    /// class-body call, not a relation, by ingest): their instance
+    /// methods answer on the class side.
+    extends: HashMap<String, Vec<String>>,
     /// INTERIM (see `enqueue_send`'s fallback): the analyzer's own type
     /// for every expression in the app's controller bodies, from before
     /// `routes::plan`'s own re-lowering re-types them from scratch and
@@ -104,6 +108,7 @@ impl<'a> Index<'a> {
             by_last,
             children: HashMap::new(),
             ancestors: HashMap::new(),
+            extends: HashMap::new(),
             analyzer_stamps,
             missing: Vec::new(),
         };
@@ -132,6 +137,22 @@ impl<'a> Index<'a> {
             list.sort();
             list.dedup();
         }
+        let mut extends: HashMap<String, Vec<String>> = HashMap::new();
+        for (name, lcs) in &index.classes {
+            for e in lcs.iter().flat_map(|lc| lc.unknown_calls.iter()) {
+                if let ExprNode::Send { recv: None, method, args, .. } = &*e.node {
+                    if method.as_str() == "extend" {
+                        for a in args {
+                            if let ExprNode::Const { path } = &*a.node {
+                                let ms = index.app_classes_named(path).into_iter().filter(|m| index.is_module(m));
+                                extends.entry(name.clone()).or_default().extend(ms);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        index.extends = extends;
         for name in index.classes.keys() {
             let mut seen: HashSet<String> = HashSet::new();
             let mut stack = vec![name.clone()];
@@ -150,6 +171,29 @@ impl<'a> Index<'a> {
         missing.sort();
         index.missing = missing;
         index
+    }
+
+    /// Every class (not module) a module or class can be handed by a
+    /// hook or a body running on it: below it through `parent` or
+    /// `include`, and every class that `extend`s it, with the classes
+    /// below those.
+    fn below(&self, m: &str) -> Vec<String> {
+        let mut out: Vec<String> = self
+            .ancestors
+            .iter()
+            .filter(|(n, anc)| n.as_str() != m && anc.contains(m) && !self.is_module(n))
+            .map(|(n, _)| n.clone())
+            .collect();
+        for (c, ms) in &self.extends {
+            if c != m && ms.iter().any(|x| x == m) {
+                out.extend(self.below(c));
+                out.push(c.clone());
+            }
+        }
+        out.retain(|c| self.classes.contains_key(c) && !self.is_module(c));
+        out.sort();
+        out.dedup();
+        out
     }
 
     /// `class` and every class below it.
@@ -191,6 +235,13 @@ impl<'a> Index<'a> {
             let Some(lcs) = self.classes.get(&c) else { continue };
             if !self.bodies(&c, name, class_side).is_empty() {
                 return Some((c, name.clone(), class_side));
+            }
+            if class_side {
+                for m in self.extends.get(&c).into_iter().flatten() {
+                    if let Some(k) = self.lookup(m, name, false) {
+                        return Some(k);
+                    }
+                }
             }
             for lc in lcs {
                 for inc in &lc.includes {
@@ -888,7 +939,7 @@ impl Facts {
             for e in load_time(lc) {
                 if escapes_self(index, own, e) {
                     if lc.is_module {
-                        always.extend(index.tree(own).into_iter().filter(|t| t != own && !index.is_module(t)));
+                        always.extend(index.below(own));
                     } else {
                         always.push(own.to_string());
                     }
@@ -912,7 +963,7 @@ impl Facts {
         for hook in ["inherited", "included", "extended"] {
             for (c, class_side) in index.by_name.get(&Symbol::from(hook)).into_iter().flatten() {
                 if *class_side {
-                    always.extend(index.tree(c).into_iter().filter(|t| t != c && !index.is_module(t)));
+                    always.extend(index.below(c));
                 }
             }
         }

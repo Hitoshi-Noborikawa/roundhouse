@@ -1261,6 +1261,45 @@ fn rta_an_inherited_hook_makes_every_subclass_live() {
     assert!(stderr.contains("app/lib/gadget.rb:3") && stderr.contains("Gadget#call"), "{stderr}");
 }
 
+/// `Gadget` gets into the registry through a module, with nothing in
+/// its own body but `include` / `extend`: the module's `included` /
+/// `extended` hook, or an extended module's method that the class body
+/// calls. Each makes `Gadget` live.
+#[test]
+fn rta_a_module_that_hands_on_its_includer_makes_it_live() {
+    let cases = [
+        (
+            "included-hook",
+            "module Registrable\n  def self.included(base)\n    Registry::ITEMS << base\n  end\nend\n",
+            "include Registrable",
+        ),
+        (
+            "extended-hook",
+            "module Registrable\n  def self.extended(base)\n    Registry::ITEMS << base\n  end\nend\n",
+            "extend Registrable",
+        ),
+        (
+            "extended-method",
+            "module Registrable\n  def register\n    Registry::ITEMS << self\n  end\nend\n",
+            "extend Registrable\n  register",
+        ),
+    ];
+    let mut failed = Vec::new();
+    for (name, module, body) in cases {
+        let gadget = format!("class Gadget\n  {body}\n\n  def call\n    Frobnicator::Spinner.new.spin\n  end\nend\n");
+        let stderr = rta_ledger(
+            &format!("rta-module-{name}"),
+            "    @name = Registry.items.first.new.call",
+            "",
+            &[REGISTRY, ("app/lib/registrable.rb", module), ("app/lib/gadget.rb", &gadget)],
+        );
+        if !(stderr.contains("whole-route: 0 GET action(s) served by the lowered app; 1 left to Rails") && stderr.contains("Gadget#call")) {
+            failed.push(format!("{name}: {stderr}"));
+        }
+    }
+    assert!(failed.is_empty(), "{}", failed.join("\n\n"));
+}
+
 /// A class-side `method_missing` answers a name no class defines
 /// (`Setting.some_key`): the walk follows it, so an error behind it
 /// blocks the route. (This is already covered independently of RTA's
