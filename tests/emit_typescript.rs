@@ -306,8 +306,6 @@ fn length_validation_emits_with_options_object() {
                     message: None,
                     allow_nil: None,
                 }],
-                if_method: None,
-                unless_method: None,
                 if_cond: None,
                 unless_cond: None,
             },

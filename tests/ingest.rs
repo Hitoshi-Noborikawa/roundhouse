@@ -1481,20 +1481,22 @@ end
     );
     assert!(warnings.is_empty(), "{warnings:?}");
     let rules = validation_rules(&model);
+    let pred = |cond: &Option<roundhouse::Expr>, name: &str| {
+        matches!(cond, Some(e) if matches!(&*e.node, ExprNode::Send { recv: None, method, args, .. } if method.as_str() == name && args.is_empty()))
+    };
     let label = rules.iter().find(|v| v.attribute.as_str() == "label").unwrap();
-    assert_eq!(label.if_method.as_ref().map(|s| s.as_str()), Some("live?"));
-    assert!(label.unless_method.is_none());
+    assert!(pred(&label.if_cond, "live?"), "{:?}", label.if_cond);
+    assert!(label.unless_cond.is_none());
     let extra = rules.iter().find(|v| v.attribute.as_str() == "extra").unwrap();
-    assert_eq!(extra.unless_method.as_ref().map(|s| s.as_str()), Some("draft?"));
+    assert!(pred(&extra.unless_cond, "draft?"), "{:?}", extra.unless_cond);
     let note = rules.iter().find(|v| v.attribute.as_str() == "note").unwrap();
-    assert_eq!(note.if_method.as_ref().map(|s| s.as_str()), Some("live?"));
+    assert!(pred(&note.if_cond, "live?"), "{:?}", note.if_cond);
 }
 
 /// Issue #985: a zero-arity lambda/proc `if:`/`unless:` lowers to a
 /// guard EXPRESSION (`if_cond`/`unless_cond`), the same body shape
 /// `callback_condition` already accepts for a callback's `if:`/
-/// `unless:` — not the Symbol-only `if_method`/`unless_method`
-/// #1077 added. `:name` is the call-level `->`, `:code` the call-level
+/// `unless:`. `:name` is the call-level `->`, `:code` the call-level
 /// `lambda { }` spelling, and `:note` the RULE-level nested-hash form
 /// (`presence: { if: -> { … } }`), all three on the one guard slot
 /// `push_condition`'s call sites share with the Symbol form.
@@ -1513,18 +1515,15 @@ end
     let rules = validation_rules(&model);
 
     let name = rules.iter().find(|v| v.attribute.as_str() == "name").unwrap();
-    assert!(name.if_method.is_none());
     assert!(name.if_cond.is_none());
-    assert!(name.unless_method.is_none());
     assert!(
         matches!(&name.unless_cond, Some(e) if matches!(&*e.node, ExprNode::Send { recv: Some(_), method, .. } if method.as_str() == "in?")),
         "{:?}", name.unless_cond
     );
 
     let code = rules.iter().find(|v| v.attribute.as_str() == "code").unwrap();
-    assert!(code.if_method.is_none());
     assert!(
-        matches!(&code.if_cond, Some(e) if matches!(&*e.node, ExprNode::Send { recv: None, method, .. } if method.as_str() == "==") || matches!(&*e.node, ExprNode::Send { .. })),
+        matches!(&code.if_cond, Some(e) if matches!(&*e.node, ExprNode::Send { recv: Some(_), method, args, .. } if method.as_str() == "==" && args.len() == 1)),
         "{:?}", code.if_cond
     );
 
@@ -1533,7 +1532,6 @@ end
     // Symbol condition (`if: :live?`) already produces, so the two
     // forms reach the lowerer the same way.
     let note = rules.iter().find(|v| v.attribute.as_str() == "note").unwrap();
-    assert!(note.if_method.is_none());
     assert!(
         matches!(&note.if_cond, Some(e) if matches!(&*e.node, ExprNode::Send { recv: None, method, args, .. } if method.as_str() == "live?" && args.is_empty())),
         "{:?}", note.if_cond
@@ -1556,6 +1554,103 @@ end
     assert!(validation_rules(&model).is_empty(), "{:?}", validation_rules(&model));
     assert!(warnings.iter().any(|m| m.contains("if:")), "{warnings:?}");
     assert!(gaps.iter().any(|m| m.contains("if:")), "{gaps:?}");
+}
+
+/// A name bound by a nested block is not a captured class-body local.
+/// The block is still in the spliced guard, so the validation runs.
+#[test]
+fn nested_block_parameter_lambda_condition_is_a_guard() {
+    let (model, warnings, _) = ingest_widget(
+        r#"
+class Widget < ApplicationRecord
+  validates :name, presence: true, if: -> { tags.any? { |tag| tag.blank? } }
+  validates :code, presence: true, if: -> { tags.any? { _1.blank? } }
+  validates :note, presence: true, if: -> { tags.any? { it.blank? } }
+end
+"#,
+    );
+    assert!(warnings.is_empty(), "{warnings:?}");
+    for attr in ["name", "code", "note"] {
+        let rule = validation_rules(&model)
+            .into_iter()
+            .find(|v| v.attribute.as_str() == attr)
+            .unwrap_or_else(|| panic!("{attr} missing"));
+        assert!(
+            rule.if_cond.is_some() || rule.unless_cond.is_some(),
+            "{attr} dropped its nested-block condition: {rule:?}"
+        );
+    }
+}
+
+/// `|; tmp|` is a block local the lowered block does not declare.
+/// Accepting the read would emit a bare `tmp` inside `valid?`.
+#[test]
+fn block_local_in_a_lambda_condition_stays_a_gap() {
+    let (model, warnings, gaps) = ingest_widget(
+        r#"
+class Widget < ApplicationRecord
+  validates :color, presence: true, unless: -> { tags.any? { |; tmp| tmp.nil? } }
+end
+"#,
+    );
+    assert!(validation_rules(&model).is_empty(), "{:?}", validation_rules(&model));
+    assert!(warnings.iter().any(|m| m.contains("unless:")), "{warnings:?}");
+    assert!(gaps.iter().any(|m| m.contains("unless:")), "{gaps:?}");
+}
+
+/// A class-body local captured by the lambda is not in scope once the
+/// body is spliced into `def validate`. Leaving it there raises
+/// `NameError` on save. The call stays the reported gap.
+#[test]
+fn captured_local_lambda_condition_on_validates_stays_a_gap() {
+    let (model, warnings, gaps) = ingest_widget(
+        r#"
+class Widget < ApplicationRecord
+  required = true
+  validates :name, presence: true, if: -> { required }
+end
+"#,
+    );
+    assert!(validation_rules(&model).is_empty(), "{:?}", validation_rules(&model));
+    assert!(warnings.iter().any(|m| m.contains("if:")), "{warnings:?}");
+    assert!(gaps.iter().any(|m| m.contains("if:")), "{gaps:?}");
+}
+
+/// Survey mode substitutes `nil` for an expression it cannot ingest
+/// (an integer wider than i64) and still returns that expression.
+/// Accepting it would guard the check with `nil`, so a validation
+/// Rails runs would never run. The call stays a gap.
+#[test]
+fn survey_recovered_lambda_condition_on_validates_stays_a_gap() {
+    let (model, warnings, gaps) = ingest_widget(
+        r#"
+class Widget < ApplicationRecord
+  validates :name, presence: true, if: -> { 9223372036854775808 }
+end
+"#,
+    );
+    assert!(validation_rules(&model).is_empty(), "{:?}", validation_rules(&model));
+    assert!(warnings.iter().any(|m| m.contains("if:")), "{warnings:?}");
+    assert!(gaps.iter().any(|m| m.contains("if:")), "{gaps:?}");
+}
+
+/// Ruby keeps the last value when a hash key is repeated. A Symbol
+/// followed by a lambda must leave the lambda, not the predicate.
+#[test]
+fn duplicate_if_key_keeps_the_last_condition() {
+    let (model, warnings, _) = ingest_widget(
+        r#"
+class Widget < ApplicationRecord
+  validates :name, presence: true, if: :live?, if: -> { false }
+end
+"#,
+    );
+    assert!(warnings.is_empty(), "{warnings:?}");
+    let name = validation_rules(&model).into_iter().find(|v| v.attribute.as_str() == "name").unwrap();
+    assert!(
+        matches!(&name.if_cond, Some(e) if matches!(&*e.node, ExprNode::Lit { value: Literal::Bool { value: false } })),
+        "{:?}", name.if_cond
+    );
 }
 
 #[test]

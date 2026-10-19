@@ -124,6 +124,78 @@ puts "arity-1 lambda stays a gap"
         .assert_passes();
 }
 
+/// A parameter of a block nested in the lambda is bound by that block
+/// after splicing. The guard runs; it is not reported as a gap.
+const NESTED_BLOCK_MODEL: &str = r#"class Widget < ApplicationRecord
+  validates :name, presence: true, if: -> { tags.any? { |tag| tag == "need" } }
+
+  def tags
+    [status]
+  end
+end
+"#;
+
+#[test]
+fn nested_block_parameter_in_a_lambda_condition_runs() {
+    let warnings = emit_and_run::empty_app()
+        .write("app/models/application_record.rb", APPLICATION_RECORD)
+        .write("db/schema.rb", SCHEMA)
+        .write("app/models/widget.rb", NESTED_BLOCK_MODEL)
+        .ingest_warnings();
+    assert!(warnings.is_empty(), "{warnings:?}");
+
+    emit_and_run::empty_app()
+        .write("app/models/application_record.rb", APPLICATION_RECORD)
+        .write("db/schema.rb", SCHEMA)
+        .write("app/models/widget.rb", NESTED_BLOCK_MODEL)
+        .run_ruby(r##"
+idle = Widget.new(status: "draft", name: "")
+raise "nested block guard should skip presence: #{idle.errors.inspect}" unless idle.valid?
+
+need = Widget.new(status: "need", name: "")
+raise "nested block guard should require name: #{need.errors.inspect}" if need.valid?
+raise "need errors: #{need.errors.inspect}" unless need.errors == ["Name can't be blank"]
+
+filled = Widget.new(status: "need", name: "n")
+raise "filled need should be valid: #{filled.errors.inspect}" unless filled.valid?
+puts "nested block parameter passed"
+"##)
+        .assert_passes();
+}
+
+/// A lambda that reads a class-body local would splice that name into
+/// `def validate`, where it is not defined. The call stays a gap: the
+/// attribute saves blank instead of raising NameError on `valid?`.
+const CAPTURED_LOCAL_MODEL: &str = r#"class Widget < ApplicationRecord
+  required = true
+  validates :name, presence: true, if: -> { required }
+end
+"#;
+
+#[test]
+fn captured_local_lambda_condition_stays_a_reported_gap() {
+    let warnings = emit_and_run::empty_app()
+        .write("app/models/application_record.rb", APPLICATION_RECORD)
+        .write("db/schema.rb", SCHEMA)
+        .write("app/models/widget.rb", CAPTURED_LOCAL_MODEL)
+        .ingest_warnings();
+    assert!(
+        warnings.iter().any(|m| m.contains("if:")),
+        "missing if: gap warning in {warnings:?}"
+    );
+
+    emit_and_run::empty_app()
+        .write("app/models/application_record.rb", APPLICATION_RECORD)
+        .write("db/schema.rb", SCHEMA)
+        .write("app/models/widget.rb", CAPTURED_LOCAL_MODEL)
+        .run_ruby(r##"
+live = Widget.new(status: "live", name: "")
+raise "captured-local lambda condition should stay a gap (unconditional pass)" unless live.valid?
+puts "captured local stays a gap"
+"##)
+        .assert_passes();
+}
+
 /// Every backend target this build ships sees the lowered guard
 /// (`validates`'s `if_cond`/`unless_cond`, built the same way a
 /// callback's condition is) and emits it cleanly — not just the Ruby

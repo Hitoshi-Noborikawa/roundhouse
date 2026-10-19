@@ -72,23 +72,13 @@ pub(super) fn push_validate_method(
                     } else {
                         validation_rule_to_calls(msgs, &v.attribute, rule, attr_ty)
                     };
-                    if v.if_method.is_some()
-                        || v.unless_method.is_some()
-                        || v.if_cond.is_some()
-                        || v.unless_cond.is_some()
-                    {
+                    if v.if_cond.is_some() || v.unless_cond.is_some() {
                         let body = if produced.len() == 1 {
                             produced.pop().unwrap()
                         } else {
                             seq(produced)
                         };
-                        produced = vec![with_condition_guard(
-                            body,
-                            &v.if_method,
-                            &v.if_cond,
-                            &v.unless_method,
-                            &v.unless_cond,
-                        )];
+                        produced = vec![with_condition_guard(body, &v.if_cond, &v.unless_cond)];
                     }
                     for mut check in produced {
                         // Each expanded check attributes to its `validates` line.
@@ -712,9 +702,8 @@ fn inline_belongs_to_check(
     if_with_nil_else(cond, push_err)
 }
 
-/// `if: :pred` / `unless: :pred`. Both given: the check runs only when
-/// `if:` holds and `unless:` does not — the `unless` guard nests inside
-/// the `if`.
+/// `validate :method, if: :pred` / `unless: :pred`. The Symbol becomes
+/// the same receiverless call `validates`'s expression guard uses.
 fn with_method_guard(body: Expr, if_method: &Option<Symbol>, unless_method: &Option<Symbol>) -> Expr {
     let bare = |m: &Symbol| {
         Expr::new(
@@ -728,54 +717,16 @@ fn with_method_guard(body: Expr, if_method: &Option<Symbol>, unless_method: &Opt
             },
         )
     };
-    let nil = || Expr::new(Span::synthetic(), ExprNode::Lit { value: Literal::Nil });
-    let guarded = match unless_method {
-        Some(method) => Expr::new(
-            Span::synthetic(),
-            ExprNode::If { cond: bare(method), then_branch: nil(), else_branch: body },
-        ),
-        None => body,
-    };
-    match if_method {
-        Some(method) => Expr::new(
-            Span::synthetic(),
-            ExprNode::If { cond: bare(method), then_branch: guarded, else_branch: nil() },
-        ),
-        None => guarded,
-    }
+    with_condition_guard(body, &if_method.as_ref().map(bare), &unless_method.as_ref().map(bare))
 }
 
-/// `if: :pred` / `if: -> { … }` / `unless: …`. Generalizes
-/// `with_method_guard` to a condition that is either a Symbol predicate
-/// or a lowered guard expression (`validates`'s `if_cond`/`unless_cond`,
-/// built from a zero-arity lambda/proc the same way a callback's
-/// condition is — see `callback_condition` in `ingest/model.rs`). A
-/// Symbol resolves to exactly the bare receiverless call
-/// `with_method_guard` already emitted, so the Symbol path's output is
-/// unchanged. Both given: the check runs only when `if:` holds and
-/// `unless:` does not — the `unless` guard nests inside the `if`.
-fn with_condition_guard(
-    body: Expr,
-    if_method: &Option<Symbol>,
-    if_cond: &Option<Expr>,
-    unless_method: &Option<Symbol>,
-    unless_cond: &Option<Expr>,
-) -> Expr {
-    let bare = |m: &Symbol| {
-        Expr::new(
-            Span::synthetic(),
-            ExprNode::Send {
-                recv: None,
-                method: m.clone(),
-                args: Vec::new(),
-                block: None,
-                parenthesized: false,
-            },
-        )
-    };
+/// `if:` / `unless:` on `validates`. Both given: the check runs only
+/// when `if:` holds and `unless:` does not — the `unless` guard nests
+/// inside the `if`.
+fn with_condition_guard(body: Expr, if_cond: &Option<Expr>, unless_cond: &Option<Expr>) -> Expr {
     let nil = || Expr::new(Span::synthetic(), ExprNode::Lit { value: Literal::Nil });
-    let if_expr = if_method.as_ref().map(bare).or_else(|| if_cond.clone());
-    let unless_expr = unless_method.as_ref().map(bare).or_else(|| unless_cond.clone());
+    let if_expr = if_cond.clone();
+    let unless_expr = unless_cond.clone();
     let guarded = match unless_expr {
         Some(cond) => Expr::new(
             Span::synthetic(),
