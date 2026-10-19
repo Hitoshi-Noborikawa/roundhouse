@@ -15,6 +15,8 @@ mod arel_nodes;
 mod database_tasks;
 #[path = "emit_and_run/framework_exceptions.rs"]
 mod framework_exceptions;
+#[path = "emit_and_run/preloader_runtime.rs"]
+mod preloader_runtime;
 #[path = "emit_and_run/date_calendar_duration.rs"]
 mod date_calendar_duration;
 #[path = "emit_and_run/interval_columns.rs"]

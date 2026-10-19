@@ -1146,7 +1146,12 @@ fn every_runtime_method_body_concretely_typed() {
     // the message through `super`, the same two gradual sites
     // `RecordNotSaved#initialize` already carries (+2 in
     // active_record/errors.rb, 776 -> 778).
-    const CEILING: usize = 778;
+    // MEASURED 781 on 2026-10-19: `Associations::Preloader` keeps the
+    // association spec the caller passed (a Symbol, an Array, or a
+    // Hash) and hands it to `Preloading.records`. The parameter, the
+    // ivar, and the read in `call` are that spec (+3 in
+    // active_record/preloading.rb, 778 -> 781).
+    const CEILING: usize = 781;
     assert!(
         total_gradual <= CEILING,
         "{total_gradual} Ty::Untyped sites exceeds ceiling of {CEILING}"

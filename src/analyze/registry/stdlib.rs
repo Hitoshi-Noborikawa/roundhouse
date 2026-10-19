@@ -831,6 +831,11 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
         let methods: Vec<(&str, Ty)> = methods;
         register_stdlib_class(classes, exc, &[], &methods);
     }
+    // `Associations::Preloader#call` — the ruby-family class in
+    // preloading.rb. A two-keyword call is rewritten before it runs.
+    register_stdlib_class(classes, "ActiveRecord::Associations::Preloader", &[], &[
+        ("call", Ty::Nil),
+    ]);
     // `ActiveModel::Type::Boolean.new.cast(v)`: nil for a blank value, else the boolean.
     // `ActiveSupport::TimeZone` is `runtime/ruby/active_support_ext.rb`'s port; `[]` is typed in dispatch, by its argument.
     {

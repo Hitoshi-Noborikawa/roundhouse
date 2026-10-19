@@ -9971,8 +9971,19 @@ fn expr_mentions_includes(expr: &Expr) -> bool {
         if *found {
             return;
         }
-        if let ExprNode::Send { recv: Some(_), method, .. } = &*e.node {
-            if matches!(method.as_str(), "includes" | "preload" | "eager_load") {
+        if let ExprNode::Send { recv: Some(recv), method, .. } = &*e.node {
+            if matches!(method.as_str(), "includes" | "preload" | "eager_load" | "preload_associations") {
+                *found = true;
+                return;
+            }
+            // `Preloader.new(...).call` lowers to `Preloading.records`
+            // when the records are not one known model. That call is
+            // the only mention, and the batch loaders have to exist
+            // for it.
+            if method.as_str() == "records"
+                && matches!(&*recv.node, ExprNode::Const { path }
+                    if path.iter().map(|s| s.as_str()).filter(|s| !s.is_empty()).eq(["ActiveRecord", "Preloading"]))
+            {
                 *found = true;
                 return;
             }

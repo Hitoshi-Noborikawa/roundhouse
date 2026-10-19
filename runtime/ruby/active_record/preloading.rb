@@ -2,6 +2,27 @@
 
 module ActiveRecord
   # Not in base.rb: the strict targets have no `record.class` dispatch to a class method, so only the ruby family and spinel load this.
+  module Associations
+    # `Preloader.new(records:, associations:).call`. The two-keyword
+    # form is rewritten to `Preloading.records` before it runs; this
+    # class is the call `check` resolves, and the form that also passes
+    # `scope:`, which the rewrite does not take. A scope is refused
+    # rather than dropped.
+    class Preloader
+      def initialize(records:, associations:, scope: nil)
+        raise ArgumentError, "Preloader scope is not supported" unless scope.nil?
+        @records = records
+        @associations = associations
+      end
+
+      def call
+        specs = @associations.is_a?(Array) ? @associations : [@associations]
+        Preloading.records(@records, specs)
+        nil
+      end
+    end
+  end
+
   module Preloading
     def self.records(records, specs)
       records.each_with_index do |record, i|
