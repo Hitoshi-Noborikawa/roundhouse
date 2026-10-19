@@ -3269,6 +3269,8 @@ fn oj_unmodeled_options_are_refused() {
     // unmodeled; an option value oj rejects is a refusal of that call.
     for (init, use_, expected, unmodeled) in [
         ("if ENV[\"X\"]\n  Oj.mimic_JSON\nend\n", "Oj.load(v)", "`Oj.mimic_JSON` not at an initializer's top level", true),
+        ("Oj.mimic_JSON if ENV[\"X\"]\n", "Oj.load(v)", "`Oj.mimic_JSON` not at an initializer's top level", true),
+        ("Oj.mimic_JSON rescue nil\n", "Oj.load(v)", "`Oj.mimic_JSON` not at an initializer's top level", true),
         ("Oj.optimize_rails\n", "Oj.load(v)", "`Oj.optimize_rails` without `Oj.mimic_JSON`", true),
         ("Oj.mimic_JSON\n", "Oj.load(v, symbol_keys: \"true\")", "`Oj.load` option `symbol_keys: \"true\"`", false),
     ] {

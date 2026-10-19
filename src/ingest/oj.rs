@@ -171,7 +171,8 @@ fn unmodeled_calls(text: &str) -> Vec<String> {
 /// whether each is a top-level statement.
 fn mode_calls(text: &str) -> Vec<(String, bool)> {
     struct Finder {
-        top: Vec<usize>,
+        // Whole ranges: a modifier (`Oj.mimic_JSON if …`) starts where its call does.
+        top: Vec<(usize, usize)>,
         found: Vec<(String, bool)>,
     }
     impl<'pr> ruby_prism::Visit<'pr> for Finder {
@@ -181,7 +182,7 @@ fn mode_calls(text: &str) -> Vec<(String, bool)> {
             });
             let method = String::from_utf8_lossy(node.name().as_slice()).to_string();
             if on_oj && matches!(method.as_str(), "mimic_JSON" | "optimize_rails") {
-                let at = node.location().start_offset();
+                let at = (node.location().start_offset(), node.location().end_offset());
                 let top = self.top.contains(&at) && node.arguments().is_none() && node.block().is_none();
                 self.found.push((method, top));
             }
@@ -190,9 +191,15 @@ fn mode_calls(text: &str) -> Vec<(String, bool)> {
     }
     let parsed = ruby_prism::parse(text.as_bytes());
     let root = parsed.node();
-    let top: Vec<usize> = root
+    let top: Vec<(usize, usize)> = root
         .as_program_node()
-        .map(|p| p.statements().body().iter().map(|s| s.location().start_offset()).collect())
+        .map(|p| {
+            p.statements()
+                .body()
+                .iter()
+                .map(|s| (s.location().start_offset(), s.location().end_offset()))
+                .collect()
+        })
         .unwrap_or_default();
     let mut finder = Finder { top, found: Vec::new() };
     ruby_prism::Visit::visit(&mut finder, &root);
