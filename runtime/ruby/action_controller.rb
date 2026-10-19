@@ -12,7 +12,8 @@ require_relative "action_controller/api"
 # Per-request context statics (Current.request / .controller) + the
 # controller's `request` accessor — a reopen file outside the strict-
 # target tables (base.rb transpiles everywhere; a Request-typed field
-# must not).
+# must not). `fresh_when` / `stale?` live in conditional_get.rb, which
+# loads after this file so the accessor is already on Base.
 require_relative "action_controller/current"
 # Controller-level `cookies` CookieJar — another reopen outside the
 # strict-target tables (a CookieJar-typed field must not transpile to
@@ -39,9 +40,9 @@ require_relative "action_controller/cookies"
 # transpiles everywhere; this Hash-subscript surface over it does
 # not).
 require_relative "action_controller/cache_control"
-# Rack::ETag and Rack::ConditionalGet over the buffered response
-# (`commit_conditional_get!`), the step after `commit_cache_control!`
-# in both wire paths. Ruby-family only, as the file above.
+# Conditional GET: `commit_conditional_get!` (the step after
+# `commit_cache_control!` in both wire paths) plus `fresh_when` /
+# `stale?`. Ruby-family only, as the file above.
 require_relative "action_controller/conditional_get"
 # The error `Params.require_key` raises; travels with its consumer for
 # the same reason message_digest does.
