@@ -14,7 +14,16 @@ mod emit_and_run;
 /// in place and call `unload_records` (which drops the loaded-records
 /// memo), but until this fix never cleared the cache-key memos too — a
 /// second `cache_key_with_version` call on a since-narrowed relation
-/// answered the digest of the OLD SQL. Two relations over the same
+/// answered the digest of the OLD SQL.
+///
+/// Compares `rel.cache_key` directly, not the combined
+/// `cache_key_with_version` (roundhouse #1034, CodeRabbit): `where!
+/// (id: b.id)` ADDS to the existing `id: a.id`, so the narrowed
+/// relation matches NO row — its `cache_version` changes from a
+/// one-row count to a zero-row count regardless of whether
+/// `@cache_keys` still held the stale digest, so comparing the
+/// combined key could pass on a row-count change alone while the
+/// digest memo itself stayed stale. Two relations over the same
 /// table, narrowed to disjoint single rows, must answer DIFFERENT
 /// keys; mutating one relation object through both `where!`s must
 /// answer those same two different keys, not the first one twice.
@@ -35,12 +44,12 @@ fn a_mutated_relation_does_not_reuse_a_stale_cache_key() {
         )
         .write("app/models/widget.rb", "class Widget < ApplicationRecord\nend\n")
         .run_ruby(
-            "a = Widget.create!(name: \"a\")\nb = Widget.create!(name: \"b\")\nrel = Widget.where(id: a.id)\nfirst = rel.cache_key_with_version\nrel.where!(id: b.id)\nsecond = rel.cache_key_with_version\nputs first\nputs second\nputs(first == second ? \"SAME\" : \"DIFFERENT\")\n",
+            "a = Widget.create!(name: \"a\")\nb = Widget.create!(name: \"b\")\nrel = Widget.where(id: a.id)\nfirst = rel.cache_key\nrel.where!(id: b.id)\nsecond = rel.cache_key\nputs first\nputs second\nputs(first == second ? \"SAME\" : \"DIFFERENT\")\n",
         );
     run.assert_passes();
     assert!(
         run.stdout.contains("DIFFERENT"),
-        "a relation narrowed after the first cache_key_with_version call must not answer the stale digest: stdout: {}\nstderr: {}",
+        "a relation narrowed after the first cache_key call must not answer the stale digest: stdout: {}\nstderr: {}",
         run.stdout,
         run.stderr
     );
