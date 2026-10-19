@@ -152,9 +152,15 @@ fn a_local_lambda_call_types_its_parameters_from_the_call() {
             .collect::<Vec<_>>()
             .join("\n");
         assert!(
-            src.contains("double(4") || src.contains("func(n int64)"),
+            src.contains("double(4"),
             "{target:?} did not invoke the lambda:\n{src}"
         );
+        if target == roundhouse::project::BuildTarget::Go {
+            assert!(
+                src.contains("func(n int64)"),
+                "{target:?} did not declare the lambda:\n{src}"
+            );
+        }
         assert!(!src.contains("double.call") && !src.contains("double.Call"), "{target:?}:\n{src}");
     }
 }
@@ -187,12 +193,12 @@ fn a_lambda_call_inside_another_lambda_seeds_both() {
         assert_eq!(*params[0].ty, roundhouse::ty::Ty::Int);
         assert_eq!(*ret, roundhouse::ty::Ty::Int);
     }
-    assert!(call_tys(&body).iter().all(|ty| ty == &roundhouse::ty::Ty::Int), "call results");
+    assert_eq!(call_tys(&body), vec![roundhouse::ty::Ty::Int; 2], "call results");
 }
 
 #[test]
 fn a_block_reassignment_keeps_the_lambda_out_of_later_calls() {
-    let source = "class Article < ApplicationRecord\n  def self.plain_lambda\n    f = ->(x) { x * 2 }\n    [1].each { |i| f = i }\n    f.call(4)\n  end\nend\n";
+    let source = "class Article < ApplicationRecord\n  def self.plain_lambda\n    f = ->(x) { x * 2 }\n    f.call(4)\n    [1].each { |i| f = i }\n    f.call(4)\n  end\nend\n";
     let ty = plain_lambda_result(&source);
     assert!(!matches!(ty, roundhouse::ty::Ty::Int), "block write still called the lambda: {ty:?}");
 }
@@ -213,7 +219,7 @@ fn an_uninvoked_lambda_body_does_not_retire_the_outer_lambda() {
 
 #[test]
 fn an_invoked_lambda_reassignment_keeps_the_old_lambda_out() {
-    let source = "class Article < ApplicationRecord\n  def self.plain_lambda\n    f = ->(x) { x * 2 }\n    run = ->(n) { f = n }\n    run.call(1)\n    f.call(4)\n  end\nend\n";
+    let source = "class Article < ApplicationRecord\n  def self.plain_lambda\n    f = ->(x) { x * 2 }\n    f.call(4)\n    run = ->(n) { f = n }\n    run.call(1)\n    f.call(4)\n  end\nend\n";
     let ty = plain_lambda_result(&source);
     assert!(!matches!(ty, roundhouse::ty::Ty::Int), "invoked lambda still called f: {ty:?}");
 }
@@ -234,7 +240,7 @@ fn a_multiassign_reassignment_keeps_the_lambda_out_of_later_reads() {
 }
 
 #[test]
-fn a_nested_reassignment_keeps_the_lambda_out_of_later_reads() {
+fn an_if_reassignment_joins_the_lambda_with_the_write() {
     let source = "class Article < ApplicationRecord\n  def self.plain_lambda\n    flag = true\n    f = ->(x) { x * 2 }\n    if flag\n      f = 1\n    end\n    f.call(4)\n    f\n  end\nend\n";
     let tree = std::collections::HashMap::from([
         (std::path::PathBuf::from("db/schema.rb"), b"ActiveRecord::Schema.define(version: 1) do\n  create_table :articles do |t|\n    t.string :title\n  end\nend\n".to_vec()),
@@ -245,11 +251,19 @@ fn a_nested_reassignment_keeps_the_lambda_out_of_later_reads() {
     roundhouse::session::analyze_and_lower(&mut app);
     let body = app.models.iter().flat_map(|m| m.methods()).find(|m| m.name.as_str() == "plain_lambda").expect("method").body.clone();
     let ty = result_ty(&body).unwrap_or_else(|| panic!("no result type"));
+    let roundhouse::ty::Ty::Union { variants } = &ty else {
+        panic!("expected Proc | Integer, got {ty:?}");
+    };
+    assert_eq!(variants.len(), 2, "{ty:?}");
+    assert!(variants.contains(&roundhouse::ty::Ty::Int), "{ty:?}");
     assert!(
-        matches!(ty, roundhouse::ty::Ty::Union { .. } | roundhouse::ty::Ty::Int),
-        "later read of f: {ty:?}"
+        variants.iter().any(|v| matches!(v, roundhouse::ty::Ty::Fn { .. })),
+        "{ty:?}"
     );
-    assert!(!matches!(ty, roundhouse::ty::Ty::Fn { .. }), "later read of f: {ty:?}");
+    assert!(
+        !variants.contains(&roundhouse::ty::Ty::Nil),
+        "else path substituted nil: {ty:?}"
+    );
 }
 
 #[test]
@@ -306,6 +320,7 @@ fn a_nil_seed_reassigned_from_a_lambda_call_includes_the_result() {
     let body = app.models.iter().flat_map(|m| m.methods()).find(|m| m.name.as_str() == "plain_lambda").expect("method").body.clone();
     let ty = result_ty(&body).unwrap_or_else(|| panic!("no result type on {}", body.node.kind_str()));
     let roundhouse::ty::Ty::Union { variants } = &ty else { panic!("expected Nil | Integer, got {ty:?}") };
+    assert_eq!(variants.len(), 2, "{ty:?}");
     assert!(variants.contains(&roundhouse::ty::Ty::Int), "{ty:?}");
     assert!(variants.contains(&roundhouse::ty::Ty::Nil), "{ty:?}");
     assert!(!variants.iter().any(|v| matches!(v, roundhouse::ty::Ty::Untyped)), "{ty:?}");

@@ -279,11 +279,13 @@ pub(super) fn remember(
 
 /// A write that runs in this statement replaces the stored lambda, so a
 /// later `.call` must not retype that lambda and put it back into the
-/// local. A lambda that is only created stays a barrier. A block on a
-/// call runs with the call, and so does the body of a stored lambda this
-/// statement invokes. The statement's own direct `name = …` is
-/// `remember`'s job. Returns the names removed, so the caller can drop
-/// the stale function binding.
+/// local. Returns the names removed from the map. The caller drops those
+/// bindings only when this statement is not a join: an `if` that writes
+/// the name on one side has to keep the lambda for the other side, or
+/// that side becomes nil. A lambda that is only created stays a barrier.
+/// A block on a call runs with the call, and so does the body of a stored
+/// lambda this statement invokes. The statement's own direct `name = …`
+/// is `remember`'s job.
 pub(super) fn forget_nested_writes(
     lambdas: &mut HashMap<Symbol, Stored>,
     exprs: &[Expr],

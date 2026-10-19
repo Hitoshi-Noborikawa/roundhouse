@@ -2579,8 +2579,24 @@ impl<'a> BodyTyper<'a> {
                     // epilogue. Those read this statement's types, and a
                     // `.call` in it may have just given the lambda its
                     // parameter types.
-                    for name in lambda_local::forget_nested_writes(&mut lambda_locals, exprs, i) {
-                        local_ctx.local_bindings.remove(&name);
+                    let retired = lambda_local::forget_nested_writes(&mut lambda_locals, exprs, i);
+                    // A join reads the binding it was given for the side
+                    // that does not write the name. Dropping it here makes
+                    // that side nil. Every other statement replaced the
+                    // lambda, and leaving the proc in the binding makes a
+                    // later `.call` return the proc's result.
+                    let joins = matches!(
+                        &*exprs[i].node,
+                        ExprNode::If { .. }
+                            | ExprNode::Case { .. }
+                            | ExprNode::While { .. }
+                            | ExprNode::BeginRescue { .. }
+                            | ExprNode::BoolOp { .. }
+                    );
+                    if !joins {
+                        for name in retired {
+                            local_ctx.local_bindings.remove(&name);
+                        }
                     }
                     self.refine_lambda_locals(exprs, i, &mut local_ctx, &mut lambda_locals, &mut last);
                     let e = &mut exprs[i];
