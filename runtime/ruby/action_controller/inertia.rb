@@ -258,7 +258,12 @@ module ActionController
         headers["X-Inertia-Location"] = url
         head(:conflict)
       else
-        head(:found, location: url)
+        # `head`'s Ruby overlay takes an options Hash, not `location:`.
+        # Set the header target after `head` marks the response performed.
+        # `redirect_to` would refuse another host, which is the case this
+        # method exists for.
+        head(:found)
+        @location = ActionController.sanitize_location(url)
       end
       nil
     end
