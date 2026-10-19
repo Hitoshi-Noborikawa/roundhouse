@@ -81,6 +81,7 @@ pub mod assoc_pluck;
 pub mod try_guard;
 pub mod class_body_new;
 pub mod mocha;
+pub mod stub_const;
 pub mod webmock;
 pub mod global_id_locate;
 pub mod record_snapshot;
@@ -104,14 +105,13 @@ pub mod mailer_templates;
 pub mod as_json_shape;
 pub mod as_json_writer;
 pub mod as_json_super;
-pub mod parameterize;
+pub mod string_core_ext;
 pub mod random_formatter;
 pub mod bigdecimal;
 pub mod range_enumerable;
 pub mod preloader;
 pub mod to_json;
 pub mod number_to_fs;
-pub mod string_inflections;
 pub mod attribute_aliases;
 pub mod presence_in;
 pub mod relation_ivar_materialize;
@@ -135,6 +135,7 @@ pub mod including;
 pub mod enum_symbols;
 pub mod has_json;
 pub mod serialize;
+pub mod column_slot;
 pub mod assoc_loaded;
 pub mod object_extend;
 pub mod nested_def;
@@ -219,7 +220,7 @@ pub use attachables_grep::apply_attachables_grep_lowering;
 pub use errors_index::apply_errors_index_lowering;
 pub use mailer_class_side::apply_mailer_class_side;
 pub use as_json_super::apply_as_json_super_grounding;
-pub use parameterize::apply_parameterize_grounding;
+pub use string_core_ext::apply_parameterize_grounding;
 pub use random_formatter::apply_random_formatter_grounding;
 pub use to_json::apply_to_json_lowering;
 pub use number_to_fs::apply_number_to_fs_grounding;
@@ -387,6 +388,7 @@ const POST_ANALYZE_PASS_ORDER: &[(&str, &[&str])] = &[
     // constraints.
     ("class_body_new", &[]),
     ("mocha", &[]),
+    ("stub_const", &[]),
     // Independent context-heavy send rewrites: one fused tree walk in
     // `fused::apply_fused_context_rewrites`. Empty runs_after — they
     // match disjoint method names and do not consume each other's
@@ -867,7 +869,7 @@ pub fn apply_post_analyze_lowerings(
     ran!("as_json_super");
     secure_password::apply_secure_password_super(app);
     ran!("secure_password_super");
-    parameterize::apply_parameterize_grounding(app);
+    string_core_ext::apply_parameterize_grounding(app);
     ran!("parameterize");
     diags.extend(class_body_new::apply_class_body_new_lowering(app));
     ran!("class_body_new");
@@ -875,6 +877,8 @@ pub fn apply_post_analyze_lowerings(
         mocha::apply_mocha_lowering(app);
     });
     ran!("mocha");
+    stub_const::apply_stub_const_lowering(app);
+    ran!("stub_const");
     crate::timings::phase("post-analyze: fused context rewrites", || {
         fused::apply_fused_context_rewrites(app);
     });

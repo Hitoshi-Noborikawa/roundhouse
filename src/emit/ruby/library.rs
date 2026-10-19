@@ -3106,6 +3106,22 @@ pub(crate) fn apply_helper_lowering(lcs: &mut [LibraryClass], app: &App) {
                 MethodReceiver::Instance => inherited_instance.iter().cloned(),
                 MethodReceiver::Class => inherited_class.iter().cloned(),
             });
+            for default in m.params.iter_mut().filter_map(|p| p.default.as_mut()) {
+                rewrite_url_helpers_absolute(default);
+                rewrite_helper_calls(
+                    default,
+                    &app.helper_method_index,
+                    &route_helpers,
+                    &url_helper_classes,
+                    rewrite_request,
+                    &own_methods,
+                    &own_params,
+                    &app.view_visible_controller_methods,
+                );
+                if is_helper_module {
+                    rewrite_helper_ivars(default, &helper_ivars);
+                }
+            }
             rewrite_helper_calls(
                 &mut m.body,
                 &app.helper_method_index,
@@ -3187,6 +3203,9 @@ fn helper_read_ivars(app: &App) -> std::collections::BTreeSet<Symbol> {
             continue;
         }
         for m in &lc.methods {
+            for default in m.params.iter().filter_map(|p| p.default.as_ref()) {
+                collect_ivar_reads(default, &mut out);
+            }
             collect_ivar_reads(&m.body, &mut out);
         }
     }
@@ -7333,6 +7352,17 @@ fn module_adapter_preserves_parameter_declaration_facts() {
         Some(crate::dialect::UnsupportedFormal::Destructured));
 }
 
+thread_local! {
+    static RENDERED: std::cell::RefCell<Option<Vec<LibraryClass>>> = const { std::cell::RefCell::new(None) };
+}
+
+pub fn record_rendered<T>(f: impl FnOnce() -> T) -> (T, Vec<LibraryClass>) {
+    let previous = RENDERED.with(|r| r.borrow_mut().replace(Vec::new()));
+    let out = f();
+    let rendered = RENDERED.with(|r| std::mem::replace(&mut *r.borrow_mut(), previous)).unwrap_or_default();
+    (out, rendered)
+}
+
 /// Emit a single library-shape file. `out_path` is the project-root-relative
 /// destination for the file; the require resolver computes paths relative to
 /// `out_path`'s parent, so files emitted to `app/views/<plural>/` get
@@ -7358,6 +7388,11 @@ pub(super) fn emit_library_class_decl_with_synthesized(
     out_path: PathBuf,
     synthesized_siblings: &[(String, String)],
 ) -> EmittedFile {
+    RENDERED.with(|rendered| {
+        if let Some(rendered) = rendered.borrow_mut().as_mut() {
+            rendered.push(lc.clone());
+        }
+    });
     emit_library_class_decl_with_nested(lc, app, out_path, synthesized_siblings, &[])
 }
 
@@ -7460,8 +7495,13 @@ fn emit_library_class_decl_inner(
     // macro calls: those initializers must run after all collected methods.
     // A `Data.define` block is source too: its `@ivar` writes and
     // constants run in the order that the block gives them.
+    let replayed_in_place: Vec<&Expr> = lc
+        .unknown_calls
+        .iter()
+        .filter(|call| call.decisions & crate::expr::REPLAYED_CLASS_BODY != 0 && !call.span.is_synthetic())
+        .collect();
     let ordered_body = (lc.origin.is_none() || lc.data_define().is_some())
-        && lc.has_source_ivar_initializers()
+        && (lc.has_source_ivar_initializers() || !replayed_in_place.is_empty())
         && !app.controllers.iter().any(|controller| controller.name == lc.name);
     let (mut eager, mut deferred, initializers_call_self) = partition_deferred_constants(lc);
     let load_time_bodies = initializers_call_self || !deferred.is_empty();
@@ -7617,6 +7657,10 @@ fn emit_library_class_decl_inner(
     }).map(|init| {
         (init.span.start, BodyItem::Initializer(init))
     }));
+    // Where the source has them: a method defined before the call is the macro's to override, one after it overrides the macro's.
+    if ordered_body {
+        body.extend(replayed_in_place.iter().map(|call| (call.span.start, BodyItem::Initializer(call))));
+    }
     // Concern-spliced and other foreign-file methods keep foreign
     // `name_span` offsets; interleave only same-file declarations.
     let body_file = lc.class_ivar_initializers.iter().find_map(|init| {
@@ -7627,7 +7671,7 @@ fn emit_library_class_decl_inner(
                     | ExprNode::OpAssign { target: LValue::Ivar { .. }, .. }
             ))
         .then_some(init.span.file)
-    });
+    }).or_else(|| replayed_in_place.first().map(|call| call.span.file));
     let method_in_ordered_body = |m: &MethodDef| {
         ordered_body
             && !m.name_span.is_synthetic()
@@ -8037,6 +8081,9 @@ fn emit_library_class_decl_inner(
             // A payload job's `queue_as` and `discard_on
             // ActiveJob::DeserializationError` are not dropped: the plan
             // carries them (`lower::job_payload`).
+            if call.decisions & crate::expr::REPLAYED_CLASS_BODY != 0 && ordered_body {
+                continue;
+            }
             if !own.iter().any(|c| std::ptr::eq(*c, call))
                 && !is_preserved_external_include(call)
                 && !crate::lower::job_payload::modelled_class_body_call(app, lc, call)

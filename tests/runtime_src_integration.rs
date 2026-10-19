@@ -1093,7 +1093,10 @@ fn every_runtime_method_body_concretely_typed() {
     // in action_controller/cookies.rb) reads and writes JSON values, so its
     // `[]`, `[]=` and `value_of` carry an untyped value by contract, as Rails'
     // encrypted jar answers whatever the cookie holds (+7 on the 784 base).
-    const CEILING: usize = 791;
+    // MEASURED 793 on 2026-10-19: the class-side query fallbacks
+    // (`Model.maximum(:x)` through `all`, connection.rb) answer the column's
+    // value as `Relation#maximum` / `#pick` do, whatever the column holds (+2).
+    const CEILING: usize = 793;
     assert!(
         total_gradual <= CEILING,
         "{total_gradual} Ty::Untyped sites exceeds ceiling of {CEILING}",

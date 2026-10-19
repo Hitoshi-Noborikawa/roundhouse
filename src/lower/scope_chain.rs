@@ -2122,6 +2122,13 @@ pub(crate) fn app_method(
             {
                 return true;
             }
+            // Not the framework's public surface once the app changed its visibility.
+            if crate::lower::model_to_library::inherited_visibility(model)
+                .iter()
+                .any(|(class_side, n, _)| *n == name.as_str() && *class_side == (side == crate::dialect::MethodReceiver::Class))
+            {
+                return true;
+            }
             if crate::analyze::model_includes(model)
                 .iter()
                 .any(|inc| visit(app, inc, name, side, seen))
@@ -2527,68 +2534,16 @@ pub fn mentions_bare_chain_start(expr: &Expr) -> bool {
 }
 
 /// Relation methods that return a Relation — calls on them stay on the
-/// receiver and the chain keeps its model. Terminals / Enumerable methods
-/// (`to_a`/`first`/`map`/`pluck`/…) are deliberately absent: they end the
+/// receiver and the chain keeps its model. Membership is the catalog's
+/// [`crate::catalog::ChainKind::Builder`] names plus [`crate::catalog::BUILDER_ALIASES`]
+/// (`left_joins`, `where!`, `order!`, `without`). Terminals / Enumerable
+/// methods (`to_a`/`first`/`map`/`pluck`/…) are absent: they end the
 /// relation, so model-tracking stops after them (a scope can't follow).
-fn is_relation_chain_method(name: &str) -> bool {
-    matches!(
-        name,
-        "where"
-            | "not"
-            | "order_sql"
-            | "reorder_sql"
-            | "order"
-            | "limit"
-            | "offset"
-            | "group"
-            | "having"
-            | "joins"
-            | "left_outer_joins"
-            | "left_joins"
-            | "select"
-            | "distinct"
-            | "includes"
-            | "preload"
-            | "eager_load"
-            | "references"
-            | "merge"
-            | "none"
-            // Recursive CTE / FROM source (`Comment#parents`).
-            | "with_recursive"
-            | "from"
-            // `excluding` (Rails 7 `where.not(id: …)` in one hop).
-            // Listed here so an association read that continues into it
-            // is ROOTED as a relation: campfire's
-            // `user.searches.excluding(…).destroy_all` otherwise left
-            // the has_many reader answering an Array, and every hop
-            // after it wanted a different method — `excluding`, then
-            // `destroy_all`, then the next. Chasing those onto Array is
-            // how ActiveRecord semantics leak into core; rooting the
-            // chain once puts all of them on Relation, which already
-            // defines them.
-            | "excluding"
-            // `without` is `excluding`'s ALIAS, on Relation and on
-            // Enumerable both, and Rails apps write whichever reads
-            // better at the site. Listing one and not the other is the
-            // shape that drifts: campfire's refreshes controller writes
-            // `@room.messages.without(@new_messages).with_creator`, and
-            // with only `excluding` here the chain stayed on the
-            // reader's folded Array — where `without` exists (the AS
-            // core_ext) and answers an Array, so the NEXT hop
-            // (`with_creator`, a scope) was the one that failed.
-            | "without"
-            // `reorder` replaces the ordering gathered so far — a chain
-            // hop like `order`. campfire's `last_page_of_matches`
-            // (basecamp/once-campfire#304) writes it at implicit self
-            // inside a class method that runs against a relation, and
-            // without it here that body never rooted on `__rel` and the
-            // search paged every message in the table.
-            | "reorder"
-            // `unscope(where: :col)` drops the conditions on a column
-            // (`Discard::Model`'s `with_discarded` is exactly that). An
-            // Array has no `unscope`, so the site can only mean Relation.
-            | "unscope"
-    )
+///
+/// `all` is a terminal in the catalog and is checked separately at the
+/// call sites that seed a relation from it.
+pub(crate) fn is_relation_chain_method(name: &str) -> bool {
+    crate::catalog::is_relation_builder_name(name)
 }
 
 /// True when `e` is a Relation this pass has already rooted — the
@@ -2621,10 +2576,8 @@ fn is_relation_expr(e: &Expr, ctx: &Ctx, locals: &Locals) -> bool {
                 return true;
             }
             let hop = is_relation_chain_method(name)
-                || matches!(
-                    name,
-                    "where_scope" | "preloaded" | "skip_preloading!" | "page" | "per"
-                );
+                || crate::catalog::is_relation_context_builder(name)
+                || matches!(name, "where_scope" | "preloaded" | "skip_preloading!" | "page" | "per");
             hop && is_relation_expr(r, ctx, locals)
         }
         _ => false,
@@ -2919,12 +2872,10 @@ fn is_relation_terminal(name: &str, args: &[Expr], block: Option<&Expr>) -> bool
     }
 }
 
-/// `first(n)` / `last(n)` on a relation are DIFFERENT METHODS from the
+/// `first(n)` / `last(n)` on a relation are different methods from the
 /// bare forms — they answer an Array of up to n records where `first`
 /// answers one record or nil. The runtime splits them (`first_n` /
-/// `last_n`) instead of overloading on arity, because one method cannot
-/// carry both return types on a strict target; this renames the call
-/// site to match.
+/// `last_n`). The spelling is [`crate::catalog::counted_relation_terminal`].
 ///
 /// Only ever called where the receiver has already been proven to be a
 /// relation. That gate is the whole point: `Array#first(n)` and
@@ -2934,15 +2885,9 @@ fn is_relation_terminal(name: &str, args: &[Expr], block: Option<&Expr>) -> bool
 ///
 /// A block form is excluded: `first { … }` is Enumerable#detect, a
 /// different method again.
-fn counted_terminal(method: &Symbol, args: &[Expr], block: Option<&Expr>) -> Option<Symbol> {
-    if args.len() != 1 || block.is_some() {
-        return None;
-    }
-    match method.as_str() {
-        "first" => Some(Symbol::from("first_n")),
-        "last" => Some(Symbol::from("last_n")),
-        _ => None,
-    }
+pub(crate) fn counted_terminal(method: &Symbol, args: &[Expr], block: Option<&Expr>) -> Option<Symbol> {
+    crate::catalog::counted_relation_terminal(method.as_str(), args.len(), block.is_some())
+        .map(Symbol::from)
 }
 
 /// `@room` names the model `Room` — the naming convention
@@ -3909,8 +3854,24 @@ fn rewrite_send(expr: &mut Expr, ctx: &Ctx, locals: &mut Locals) -> Option<Class
         rewrite(b, &arg_ctx, locals);
     }
 
-    let put = |span: crate::span::Span, recv, method, args, block, parenthesized| -> Expr {
-        syn(span, ExprNode::Send { recv, method, args, block, parenthesized })
+    // Rebuilding the send drops `decisions`. A grounded `iso8601` is
+    // marked `GROUNDED_TIME_FORMAT` because a later re-analysis can widen
+    // the receiver (`minimum || Time.utc` → `String | Time`). Keep that
+    // bit when this send is still the zero-arg format call.
+    let grounded = expr.decisions & crate::expr::GROUNDED_TIME_FORMAT;
+    let put = |span: crate::span::Span,
+               recv: Option<Expr>,
+               method: Symbol,
+               args: Vec<Expr>,
+               block: Option<Expr>,
+               parenthesized: bool|
+     -> Expr {
+        let keep = grounded != 0 && method.as_str() == "to_rfc3339" && args.is_empty();
+        let mut out = syn(span, ExprNode::Send { recv, method, args, block, parenthesized });
+        if keep {
+            out.decisions |= grounded;
+        }
+        out
     };
 
     match recv {
@@ -4824,7 +4785,9 @@ fn rewrite_send(expr: &mut Expr, ctx: &Ctx, locals: &mut Locals) -> Option<Class
                     *expr = put(span, Some(const_expr(span, &mr)), method, new_args, block, true);
                     return None;
                 }
-                if is_relation_chain_method(method.as_str()) {
+                if is_relation_chain_method(method.as_str())
+                    || crate::catalog::is_relation_context_builder(method.as_str())
+                {
                     let aliases = lower_relation_args(&mr, &method, &mut args, ctx);
                     let mut r = r;
                     apply_join_aliases(&mut r, &mr, &aliases, ctx);

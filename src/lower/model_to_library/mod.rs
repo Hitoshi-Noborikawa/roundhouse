@@ -10,8 +10,9 @@
 //! Rails DSL.
 //!
 //! This module is pure: input is one `Model` plus the app `Schema`, output
-//! is one `LibraryClass`. No side-effects, no per-target choices. Per-Rails-
-//! idiom lowering is a separate function so each can be tested in
+//! is one `LibraryClass`. No side-effects; target capabilities are supplied
+//! by the caller. Per-Rails-idiom lowering is a separate function so each
+//! can be tested in
 //! isolation (skeleton, schema columns, has_many, belongs_to, validates,
 //! callbacks, …).
 //!
@@ -254,7 +255,7 @@ pub(crate) fn lower_models_inner(
 ) -> (Vec<LibraryClass>, HashMap<ClassId, crate::analyze::ClassInfo>) {
     lower_models_inner_with_ruby_values(
         models, schema, extra_class_infos, params_specs, unfolded, materialization,
-        finder_inputs, false, ErrorsReaders::FieldRead,
+        finder_inputs, false, false, ErrorsReaders::FieldRead,
     )
 }
 
@@ -267,13 +268,14 @@ pub(crate) fn lower_models_inner_with_ruby_values(
     materialization: Materialization<'_>,
     finder_inputs: FinderInputs,
     ruby_read_values: bool,
+    param_binds: bool,
     errors_readers: ErrorsReaders,
 ) -> (Vec<LibraryClass>, HashMap<ClassId, crate::analyze::ClassInfo>) {
     let mut all_methods: Vec<(Vec<MethodDef>, ClassId, Option<&Table>, &Model)> = Vec::new();
     let mut classes: HashMap<ClassId, crate::analyze::ClassInfo> = HashMap::new();
     let _body_names = schema::share_model_body_names(models, &Default::default());
     for model in models {
-        let methods = build_methods_with_finder_inputs(model, models, schema, params_specs, finder_inputs, errors_readers);
+        let methods = build_methods_with_finder_inputs(model, models, schema, params_specs, finder_inputs, param_binds, errors_readers);
         let table = schema.tables.get(&model.table.0);
         // Register actual production definitions, even for unselected
         // models and when source overrides hide framework ownership.
@@ -292,7 +294,7 @@ pub(crate) fn lower_models_inner_with_ruby_values(
                             if matches!(method.as_str(), "attr_accessor" | "attr_reader" | "attr_writer")),
                     _ => true,
                 });
-                let mut methods = build_methods_with_finder_inputs(&definitions, models, schema, params_specs, finder_inputs, errors_readers);
+                let mut methods = build_methods_with_finder_inputs(&definitions, models, schema, params_specs, finder_inputs, param_binds, errors_readers);
                 // Preserve original source inputs for late derivations
                 // (e.g. raw helpers) without treating them as framework
                 // claims. Both kinds traverse the canonical Arel/typer.
@@ -412,6 +414,7 @@ pub(crate) fn lower_models_inner_with_ruby_values(
                 crate::lower::arel::rewrite_arel_in_expr_with_ruby_values(
                     &mut method.body, schema, &classes, &[], ruby_read_values,
                     &HashSet::new(),
+                    crate::lower::arel::SqliteVisitor { param_binds },
                 );
             }
             type_method_body(method, &classes, table, Some(model));
@@ -572,7 +575,8 @@ pub fn lower_model_to_library_class(model: &Model, schema: &Schema) -> LibraryCl
 
 /// Canonical class envelope for both production lowering and ownership
 /// observation. Typing and method selection remain the caller's job.
-fn model_class(model: &Model, methods: Vec<MethodDef>, table: Option<&Table>) -> LibraryClass {
+fn model_class(model: &Model, mut methods: Vec<MethodDef>, table: Option<&Table>) -> LibraryClass {
+    apply_inherited_visibility(model, &mut methods);
     LibraryClass {
         name: model.name.clone(),
         is_module: false,
@@ -588,7 +592,7 @@ fn model_class(model: &Model, methods: Vec<MethodDef>, table: Option<&Table>) ->
         nullable_columns: nullable_column_names(table),
         origin: None,
         constants: collect_model_constants(model),
-        unknown_calls: Vec::new(),
+        unknown_calls: replayed_class_body(model),
         class_ivar_initializers: collect_class_attr_initializers(model),
     }
 }
@@ -620,6 +624,55 @@ fn collect_class_attr_initializers(model: &Model) -> Vec<Expr> {
         }
     }
     out
+}
+
+/// `private :comments` on a method the lowering synthesizes; a name it does not synthesize (a gem's) has no method here to mark.
+fn apply_inherited_visibility(model: &Model, methods: &mut [MethodDef]) {
+    for (class_side, name, visibility) in inherited_visibility(model) {
+        let side = if class_side { MethodReceiver::Class } else { MethodReceiver::Instance };
+        for m in methods.iter_mut().filter(|m| m.name.as_str() == name && m.receiver == side) {
+            m.visibility = visibility;
+        }
+    }
+}
+
+/// `(class side, name, visibility)` per name a model's `private :x` gives a method its body does not define.
+pub(crate) fn inherited_visibility(model: &Model) -> Vec<(bool, &str, crate::dialect::MethodVisibility)> {
+    let mut out = Vec::new();
+    for item in &model.body {
+        let crate::dialect::ModelBodyItem::Unknown { expr, .. } = item else { continue };
+        if expr.decisions & crate::expr::INHERITED_VISIBILITY == 0 {
+            continue;
+        }
+        let ExprNode::Send { method: marker, args, .. } = &*expr.node else { continue };
+        let visibility = match marker.as_str() {
+            "public" | "public_class_method" => crate::dialect::MethodVisibility::Public,
+            "protected" => crate::dialect::MethodVisibility::Protected,
+            _ => crate::dialect::MethodVisibility::Private,
+        };
+        let class_side = marker.as_str().ends_with("_class_method");
+        for arg in args {
+            let name = match &*arg.node {
+                ExprNode::Lit { value: Literal::Sym { value } } => value.as_str(),
+                ExprNode::Lit { value: Literal::Str { value } } => value.as_str(),
+                _ => continue,
+            };
+            out.push((class_side, name, visibility));
+        }
+    }
+    out
+}
+
+/// The class-body statements the Ruby family replays (`ingest::app_extension_calls`), in source order.
+fn replayed_class_body(model: &Model) -> Vec<Expr> {
+    model
+        .body
+        .iter()
+        .filter_map(|item| match item {
+            crate::dialect::ModelBodyItem::Unknown { expr, .. } if expr.decisions & crate::expr::REPLAYED_CLASS_BODY != 0 => Some(expr.clone()),
+            _ => None,
+        })
+        .collect()
 }
 
 pub(crate) fn writes_class_ivar(expr: &Expr) -> bool {
@@ -678,6 +731,14 @@ fn report_unclaimed_unknowns(model: &Model, schema: &Schema) {
 
     for item in &model.body {
         let crate::dialect::ModelBodyItem::Unknown { expr, .. } = item else { continue };
+        // Replayed where the source has it (`ingest::app_extension_calls`).
+        if expr.decisions & crate::expr::REPLAYED_CLASS_BODY != 0 {
+            continue;
+        }
+        // Claimed by `apply_inherited_visibility` and `analyze::private_calls`.
+        if expr.decisions & crate::expr::INHERITED_VISIBILITY != 0 {
+            continue;
+        }
         // Class-scope constants — claimed by analyze::extract_const_assignments.
         if matches!(&*expr.node, ExprNode::Assign { target: LValue::Const { .. }, .. }) {
             continue;
@@ -1109,7 +1170,7 @@ pub(crate) fn build_methods(
     schema: &Schema,
     params_specs: &crate::lower::controller_to_library::params::ParamsSpecs,
 ) -> Vec<MethodDef> {
-    build_methods_with_finder_inputs(model, models, schema, params_specs, FinderInputs::Scalar, ErrorsReaders::FieldRead)
+    build_methods_with_finder_inputs(model, models, schema, params_specs, FinderInputs::Scalar, false, ErrorsReaders::FieldRead)
 }
 
 /// Return the instance method surface synthesized for a model, for ingest
@@ -1134,6 +1195,7 @@ fn build_methods_with_finder_inputs(
     schema: &Schema,
     params_specs: &crate::lower::controller_to_library::params::ParamsSpecs,
     finder_inputs: FinderInputs,
+    param_binds: bool,
     errors_readers: ErrorsReaders,
 ) -> Vec<MethodDef> {
     // No-op outside an emit diagnostics scope, so the many direct
@@ -1169,7 +1231,7 @@ fn build_methods_with_finder_inputs(
             methods.push(adapter_emit::synth_find_primary_key_input(&model.name, table));
             methods.push(adapter_emit::synth_exists_primary_key_input(&model.name, table));
         }
-        push_adapter_methods(&mut methods, model, table, schema);
+        push_adapter_methods(&mut methods, model, table, schema, param_binds);
         // `from_params(p: <Resource>Params)` — typed factory matching the
         // (resource, fields) tuple a controller's `permit(...)` declared.
         // Skipped silently when the model isn't permitted by any
@@ -2750,7 +2812,10 @@ fn type_method_body(
     // Opt-in to `recv: Some(SelfRef)` rewriting on bare Sends —
     // matches the pattern view_to_library uses.
     ctx.annotate_self_dispatch = true;
-    let body_ty = typer.analyze_expr(&mut method.body, &ctx);
+    let mut body_ty = typer.analyze_expr(&mut method.body, &ctx);
+    if crate::lower::enumerable_ext::rewrite_squish_body(&mut method.body) {
+        body_ty = typer.analyze_expr(&mut method.body, &ctx);
+    }
     backfill_scalar_signature(method, body_ty);
 }
 

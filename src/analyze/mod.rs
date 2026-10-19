@@ -30,6 +30,8 @@ mod class_configuration;
 mod data;
 mod class_new;
 pub(crate) use body::{indexed_pluck, lexical_class, string_answers};
+#[cfg(test)]
+pub(crate) use body::counted_first_last;
 pub(crate) use body::ConstResolverTask;
 pub use body::PreparedConstResolver;
 pub mod async_color;
@@ -44,7 +46,9 @@ mod ivar_set;
 pub(crate) use ivar_set::controller_name_of;
 mod effects;
 mod diagnostics;
+pub mod open_classes;
 pub(crate) mod forwarding;
+mod private_calls;
 mod filter_targets;
 pub mod graphql;
 mod harvest_return;
@@ -128,6 +132,7 @@ pub struct Analyzer {
     /// `app/helpers` modules, whose bodies run in a view and take
     /// ActionView's `t`.
     helper_modules: std::collections::HashSet<ClassId>,
+    open_classes: open_classes::OpenClasses,
     /// Per-(controller, method) ivar bindings AS REFINED by Phase B,
     /// carried across fixpoint rounds.
     ///
@@ -1205,6 +1210,7 @@ impl Analyzer {
             inquirers: inquiry::inquirer_methods(app),
             i18n: app.i18n.clone(),
             helper_modules: app.helper_method_index.values().cloned().collect(),
+            open_classes: open_classes::OpenClasses::of(app),
             const_resolver,
             source_indexed: !app.sources.is_empty(),
             typed_constants: IdentityHashMap::default(),
@@ -1225,6 +1231,7 @@ impl Analyzer {
         let typer = BodyTyper::new(&self.classes)
             .with_inquirers(&self.inquirers)
             .with_i18n(&self.i18n, &self.helper_modules)
+            .with_open_classes(&self.open_classes)
             .with_typed_constants(&self.typed_constants)
             .with_data_factories(&self.data_factories);
         let typer = typer.with_class_factories(&self.class_factories);
@@ -2658,6 +2665,7 @@ impl Analyzer {
                         action.block_param.as_ref(),
                         action.rest_param.as_ref(),
                     );
+                    self.analyze_action_defaults(action, &mctx, &ctrl_id, origin);
                     self.body_typer().analyze_expr(&mut action.body, &mctx);
                 }
             }
@@ -3210,6 +3218,7 @@ impl Analyzer {
                             action.block_param.as_ref(),
                             action.rest_param.as_ref(),
                         );
+                        self.analyze_action_defaults(action, &inner_ctx, &ctrl_name, origin);
                         self.body_typer().analyze_expr(&mut action.body, &inner_ctx);
                     }
                 }
@@ -3731,6 +3740,7 @@ impl Analyzer {
                         action.block_param.as_ref(),
                         action.rest_param.as_ref(),
                     );
+                    self.analyze_action_defaults(action, &inner_ctx, &ctrl_name, origin);
                     self.body_typer().analyze_expr(&mut action.body, &inner_ctx);
                 }
             }
@@ -4658,6 +4668,43 @@ impl Analyzer {
                 .insert(rest.clone(), Ty::Array { elem: std::sync::Arc::new(Ty::Untyped) });
         }
         ctx
+    }
+
+    fn analyze_action_defaults(&self, action: &mut crate::dialect::Action, ctx: &Ctx, class_id: &ClassId, origin: Option<&ClassId>) {
+        let observed = |slot: usize| {
+            [Some(class_id), origin]
+                .into_iter()
+                .flatten()
+                .filter_map(|c| self.inferred_params.get(&(c.clone(), action.name.clone(), MethodReceiver::Instance)))
+                .filter_map(|v| v.get(slot).cloned())
+                .filter(|t| !matches!(t, Ty::Var { .. }))
+                .reduce(unify_param_ty)
+        };
+        let required = action.params.fields.len();
+        let observed: Vec<Option<Ty>> = (0..action.opt_params.len()).map(|j| observed(required + j)).collect();
+        let mut ctx = ctx.clone();
+        for ((name, default), seen) in action.opt_params.iter_mut().zip(observed) {
+            self.body_typer().analyze_expr(default, &ctx);
+            if !ctx.local_bindings.contains_key(name) {
+                let own = default.ty.clone().filter(|t| !matches!(t, Ty::Var { .. }));
+                let ty = match (seen, own) {
+                    (Some(seen), Some(own)) => Some(unify_param_ty(seen, own)),
+                    (seen, own) => seen.or(own),
+                };
+                if let Some(ty) = ty {
+                    ctx.local_bindings.insert(name.clone(), ty);
+                }
+            }
+        }
+        for (name, default) in action.kw_params.iter_mut() {
+            let Some(default) = default else { continue };
+            self.body_typer().analyze_expr(default, &ctx);
+            if !ctx.local_bindings.contains_key(name)
+                && let Some(ty) = default.ty.clone().filter(|t| !matches!(t, Ty::Var { .. }))
+            {
+                ctx.local_bindings.insert(name.clone(), ty);
+            }
+        }
     }
 
     fn capture_inference_sig(&self) -> InferenceSig {
@@ -5613,11 +5660,17 @@ impl Analyzer {
         for controller in &app.controllers {
             for action in controller.actions() {
                 let from = sites.len();
-                self.collect_send_sites(&action.body, Some(&controller.name), false, helpers, &mut sites);
+                let defaults = action.opt_params.iter().map(|(_, d)| d).chain(action.kw_params.iter().filter_map(|(_, d)| d.as_ref()));
+                for body in defaults.chain(std::iter::once(&action.body)) {
+                    self.collect_send_sites(body, Some(&controller.name), false, helpers, &mut sites);
+                }
                 self.record_callers(&controller.name, &sites[from..]);
             }
             for method in controller.class_methods() {
                 let from = sites.len();
+                for default in method.params.iter().filter_map(|p| p.default.as_ref()) {
+                    self.collect_send_sites(default, Some(&controller.name), true, helpers, &mut sites);
+                }
                 self.collect_send_sites(&method.body, Some(&controller.name), true, helpers, &mut sites);
                 self.record_callers(&controller.name, &sites[from..]);
             }
@@ -6552,8 +6605,9 @@ impl Analyzer {
 /// - both empty → applies to all actions on the controller
 /// Does this scope/class-method body *return* a relation? True iff
 /// the body's tail expression is a query-builder chain: the outermost
-/// (tail) hop is a chain builder (a Relation-context `Builder` in the
-/// catalog), a same-model scope call, or a relation root
+/// (tail) hop is a chain builder ([`crate::catalog::is_relation_builder_name`],
+/// or a Relation-context builder once the receiver is already a chain),
+/// a same-model scope call, or a relation root
 /// (`all`/`unscoped`/`none`), and the receiver spine walks down
 /// through such hops to a recognizable root — implicit self, `self`,
 /// or a constant naming this model. Deliberately conservative:
@@ -6585,12 +6639,16 @@ fn body_tail_yields_relation(
         let ExprNode::Send { recv, method, block, .. } = &*e.node else {
             return false;
         };
-        let is_builder = crate::catalog::lookup(
-            method.as_str(),
-            crate::catalog::ReceiverContext::Relation,
-        )
-        .map(|entry| matches!(entry.chain, crate::catalog::ChainKind::Builder))
-        .unwrap_or(false);
+        // Name-only builders, including aliases (`where!`, `order!`,
+        // `left_joins`, `without`). A Relation builder that is also an
+        // Instance method (`reload`) counts only once the receiver is
+        // already a chain, so a bare `reload` is not a relation root.
+        let continuing = matches!(
+            recv,
+            Some(r) if !matches!(&*r.node, ExprNode::SelfRef | ExprNode::Const { .. })
+        );
+        let is_builder = crate::catalog::is_relation_builder_name(method.as_str())
+            || (continuing && crate::catalog::is_relation_context_builder(method.as_str()));
         let is_scope = scope_names.contains(method);
         let is_root_call = matches!(method.as_str(), "all" | "unscoped");
         if !(is_builder || is_scope || is_root_call) {
@@ -6713,10 +6771,13 @@ fn body_tail_terminal_kind(
     // `scope :last_page, -> { ordered.last(PAGE_SIZE) }` passes a
     // concern constant, and the scope seeded `Message | nil`, which
     // every `@messages` in the app then carried into its views. Same
-    // rule as `body::send::counted_first_last`, which types the call
-    // where it can see the argument's type; here only its presence is
-    // needed.
-    if matches!(method.as_str(), "first" | "last" | "take") && args.len() == 1 {
+    // predicate as `body::send::counted_first_last`. That one also
+    // sees the argument's type; here only the argument's presence is
+    // needed. `take(n)` is counted for the scope's return and is not
+    // renamed.
+    if crate::catalog::counted_relation_terminal(method.as_str(), args.len(), false).is_some()
+        || (method.as_str() == "take" && args.len() == 1)
+    {
         return Some(crate::catalog::ReturnKind::ArrayOfSelf);
     }
     entry.return_kind
