@@ -1641,12 +1641,25 @@ module ActiveRecord
     # `catalog/mod.rs`) for the STATIC type only: the CONCRETE per-model
     # `[]` the lowerer synthesizes (`model_to_library/schema.rs`)
     # answers the REAL column value through a `case` on the attribute
-    # name, declared `Untyped` there — so `self[:updated_at]` is the
-    # real `updated_at` value, genuinely, dispatched dynamically; `Str`
-    # only describes what Base itself can promise about a call it
-    # cannot resolve concretely.
+    # name, declared `Untyped` there — but for a `datetime`/`timestamp`
+    # column (`ColumnSlot::index_read`, `index_reads_logical: false`:
+    # only `date` reads its logical value through `[]`) that REAL value
+    # is the RAW STORED TEXT, not a hydrated `Time` — the same storage
+    # `@updated_at_raw` ivar `format_db_time` writes. `Str` is therefore
+    # exactly what `self[:updated_at]` answers here, not merely an
+    # approximation of it.
     #
-    # `updated_at.to_f` (seconds with a fractional part), not Rails'
+    # Parse it with `ActiveSupport.parse_db_time` BEFORE calling `to_f`
+    # (roundhouse #1034, CodeRabbit): a raw timestamp string's `to_f`
+    # parses only its leading digits — `"2026-10-19 14:17:00".to_f` is
+    # `2026.0`, the year alone, because `String#to_f` stops at the first
+    # byte that cannot continue a float literal and `-` after 4 digits
+    # does not qualify as a continuation. Every update within the same
+    # YEAR then answered the identical `cache_version`, not merely the
+    # same SECOND the first fix (below) addressed for the already-parsed
+    # `Time` `Relation#compute_cache_version` aggregates through `MAX()`.
+    #
+    # `parsed.to_f` (seconds with a fractional part), not Rails'
     # `to_fs(:usec)` string — the same tradeoff `Relation#
     # compute_cache_version` documents, and the same fix (roundhouse
     # #1034, CodeRabbit: `to_i` truncated to whole seconds, so two
@@ -1656,7 +1669,9 @@ module ActiveRecord
     def cache_version
       return nil unless has_attribute?(:updated_at)
       ts = self[:updated_at]
-      ts.nil? ? nil : ts.to_f.to_s
+      return nil if ts.nil?
+      parsed = ActiveSupport.parse_db_time(ts)
+      parsed.nil? ? nil : parsed.to_f.to_s
     end
 
     def cache_key_with_version
