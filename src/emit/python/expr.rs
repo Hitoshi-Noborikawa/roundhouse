@@ -1671,16 +1671,21 @@ pub(super) fn emit_literal(lit: &Literal) -> String {
 fn python_regex_flag_expr(flags: &str) -> String {
     let mut parts: Vec<&str> = Vec::new();
     if flags.contains('i') { parts.push("re.IGNORECASE"); }
-    // Ruby's `m` is "dot matches newline" — Python's `re.DOTALL`, not
-    // `re.MULTILINE` (which instead shifts `^`/`$` to line boundaries,
-    // a Ruby regex always does unflagged and Python's `re` never does).
-    if flags.contains('m') { parts.push("re.DOTALL"); }
+    // Ruby's `m` is "dot matches newline" — Python's `re.DOTALL`. Ruby's
+    // `^`/`$` are line anchors with or without `m`, which in Python is
+    // `re.MULTILINE`, so a flagged `m` needs both.
+    if flags.contains('m') { parts.push("re.DOTALL"); parts.push("re.MULTILINE"); }
     if flags.contains('x') { parts.push("re.VERBOSE"); }
     parts.join(" | ")
 }
 
 #[cfg(test)]
 mod regex_flag_tests {
+    #[test]
+    fn rubys_m_keeps_line_anchors_as_well_as_dotall() {
+        assert_eq!(python_regex_flag_expr("m"), "re.DOTALL | re.MULTILINE");
+    }
+
     use super::python_regex_flag_expr;
 
     #[test]
@@ -1693,11 +1698,10 @@ mod regex_flag_tests {
         // `re.MULTILINE` shifts `^`/`$` to line boundaries — a
         // different flag from Ruby's `m` (dot matches newline), which
         // is `re.DOTALL`.
-        assert_eq!(python_regex_flag_expr("m"), "re.DOTALL");
-    }
+            }
 
     #[test]
     fn ignore_case_and_dot_matches_newline_combine() {
-        assert_eq!(python_regex_flag_expr("im"), "re.IGNORECASE | re.DOTALL");
+        assert_eq!(python_regex_flag_expr("im"), "re.IGNORECASE | re.DOTALL | re.MULTILINE");
     }
 }

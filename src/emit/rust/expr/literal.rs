@@ -478,6 +478,11 @@ pub(crate) fn emit_literal(lit: &Literal) -> String {
 
 #[cfg(test)]
 mod regex_flag_tests {
+    #[test]
+    fn rubys_m_keeps_line_anchors_as_well_as_dotall() {
+        assert_eq!(emit_literal(&regex("^b.c$", "m")), r#"regex::Regex::new("(?sm)^b.c$").unwrap()"#);
+    }
+
     use super::emit_literal;
     use crate::expr::Literal;
 
@@ -510,7 +515,7 @@ mod regex_flag_tests {
         // newline) is Rust's `s`.
         assert_eq!(
             emit_literal(&regex("a.b", "m")),
-            r#"regex::Regex::new("(?s)a.b").unwrap()"#
+            r#"regex::Regex::new("(?sm)a.b").unwrap()"#
         );
     }
 
@@ -518,7 +523,7 @@ mod regex_flag_tests {
     fn ignore_case_and_dot_matches_newline_combine() {
         assert_eq!(
             emit_literal(&regex("a.b", "im")),
-            r#"regex::Regex::new("(?is)a.b").unwrap()"#
+            r#"regex::Regex::new("(?ism)a.b").unwrap()"#
         );
     }
 }

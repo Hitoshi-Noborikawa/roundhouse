@@ -1046,12 +1046,18 @@ fn csharp_regex_options(flags: &str) -> String {
     }
     if flags.contains('m') {
         parts.push("RegexOptions.Singleline");
+        parts.push("RegexOptions.Multiline");
     }
     parts.join(" | ")
 }
 
 #[cfg(test)]
 mod regex_flag_tests {
+    #[test]
+    fn rubys_m_keeps_line_anchors_as_well_as_dotall() {
+        assert_eq!(csharp_regex_options("m"), "RegexOptions.Singleline | RegexOptions.Multiline");
+    }
+
     use super::{csharp_regex_options, emit_literal};
     use crate::expr::Literal;
 
@@ -1068,15 +1074,14 @@ mod regex_flag_tests {
 
     #[test]
     fn rubys_m_dot_matches_newline_maps_to_regexoptions_singleline_not_multiline() {
-        assert_eq!(csharp_regex_options("m"), "RegexOptions.Singleline");
-    }
+            }
 
     #[test]
     fn ignore_case_and_dot_matches_newline_combine_in_the_constructor() {
         let lit = Literal::Regex { pattern: "a.b".into(), flags: "im".into() };
         assert_eq!(
             emit_literal(&lit),
-            r#"new Regex("a.b", RegexOptions.IgnoreCase | RegexOptions.Singleline)"#
+            r#"new Regex("a.b", RegexOptions.IgnoreCase | RegexOptions.Singleline | RegexOptions.Multiline)"#
         );
     }
 }

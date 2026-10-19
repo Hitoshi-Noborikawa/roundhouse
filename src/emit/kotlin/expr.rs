@@ -1043,12 +1043,18 @@ fn kotlin_regex_options(flags: &str) -> String {
     }
     if flags.contains('m') {
         parts.push("RegexOption.DOT_MATCHES_ALL");
+        parts.push("RegexOption.MULTILINE");
     }
     parts.join(", ")
 }
 
 #[cfg(test)]
 mod regex_flag_tests {
+    #[test]
+    fn rubys_m_keeps_line_anchors_as_well_as_dotall() {
+        assert_eq!(kotlin_regex_options("m"), "RegexOption.DOT_MATCHES_ALL, RegexOption.MULTILINE");
+    }
+
     use super::{emit_literal, kotlin_regex_options};
     use crate::expr::Literal;
 
@@ -1065,15 +1071,14 @@ mod regex_flag_tests {
 
     #[test]
     fn rubys_m_dot_matches_newline_maps_to_dot_matches_all() {
-        assert_eq!(kotlin_regex_options("m"), "RegexOption.DOT_MATCHES_ALL");
-    }
+            }
 
     #[test]
     fn ignore_case_and_dot_matches_newline_combine_in_a_set() {
         let lit = Literal::Regex { pattern: "a.b".into(), flags: "im".into() };
         assert_eq!(
             emit_literal(&lit),
-            r#"Regex("a.b", setOf(RegexOption.IGNORE_CASE, RegexOption.DOT_MATCHES_ALL))"#
+            r#"Regex("a.b", setOf(RegexOption.IGNORE_CASE, RegexOption.DOT_MATCHES_ALL, RegexOption.MULTILINE))"#
         );
     }
 }

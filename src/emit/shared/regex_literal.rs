@@ -14,7 +14,8 @@
 
 /// Ruby's `m` flag is "dot matches newline" (what most other regex
 /// flavors spell `s` / `DOTALL`); Ruby has no flag for "`^`/`$` match
-/// at line boundaries" at all (that's always on, unflagged). A target
+/// at line boundaries" at all (that's always on, unflagged), so a
+/// flagged `m` maps to both `s` and the target's own `m`. A target
 /// whose own `m` flag means the PCRE-style "`^`/`$` at line
 /// boundaries" instead — Rust's `regex` crate, Go's `regexp` (both
 /// RE2 syntax), and JS — silently changes a flagged pattern's meaning
@@ -27,7 +28,20 @@
 /// mapping) but is left alone here rather than silently dropped on the
 /// off chance some other caller passes it.
 pub fn translate_ruby_flags_for_re2_style_m(flags: &str) -> String {
-    flags.chars().map(|c| if c == 'm' { 's' } else { c }).collect()
+    // Ruby's `^`/`$` are line anchors whether or not `m` is given, so a
+    // flagged `m` needs the target's line-anchor mode (`m`) as well as
+    // its dot-matches-newline (`s`). (An unflagged pattern's `^`/`$` is
+    // the same gap, left as it was: changing it would change every
+    // regex's emit.)
+    let mut out = String::new();
+    for c in flags.chars() {
+        if c == 'm' {
+            out.push_str("sm");
+        } else {
+            out.push(c);
+        }
+    }
+    out
 }
 
 /// Escape unescaped `/` so `pattern` can sit inside `/…/` delimiters.
@@ -50,6 +64,16 @@ pub fn escape_regex_delimiters(pattern: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    /// Ruby's `^`/`$` are always line anchors; its `m` only adds
+    /// dot-matches-newline. A flagged `m` keeps both on RE2-style
+    /// engines: `/^b.c$/m` matches "a\nb\nc\nd".
+    #[test]
+    fn rubys_m_maps_to_dotall_and_line_anchors() {
+        assert_eq!(translate_ruby_flags_for_re2_style_m("m"), "sm");
+        assert_eq!(translate_ruby_flags_for_re2_style_m("im"), "ism");
+        assert_eq!(translate_ruby_flags_for_re2_style_m("i"), "i");
+    }
+
     use super::*;
 
     #[test]

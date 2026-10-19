@@ -3471,6 +3471,11 @@ pub(super) fn emit_literal(lit: &Literal) -> String {
 
 #[cfg(test)]
 mod regex_flag_tests {
+    #[test]
+    fn rubys_m_keeps_line_anchors_as_well_as_dotall() {
+        assert_eq!(emit_literal(&regex("^b.c$", "m")), r#"regexp.MustCompile("(?sm)^b.c$")"#);
+    }
+
     use super::emit_literal;
     use crate::expr::Literal;
 
@@ -3492,7 +3497,7 @@ mod regex_flag_tests {
     fn rubys_m_dot_matches_newline_maps_to_gos_s_not_m() {
         // Go's own `m` flag shifts `^`/`$` to line boundaries — Ruby's
         // `m` (dot matches newline) is Go's `s`.
-        assert_eq!(emit_literal(&regex("a.b", "m")), r#"regexp.MustCompile("(?s)a.b")"#);
+        assert_eq!(emit_literal(&regex("a.b", "m")), r#"regexp.MustCompile("(?sm)a.b")"#);
     }
 }
 

@@ -1480,12 +1480,18 @@ fn swift_regex_options(flags: &str) -> String {
     }
     if flags.contains('m') {
         parts.push(".dotMatchesLineSeparators");
+        parts.push(".anchorsMatchLines");
     }
     parts.join(", ")
 }
 
 #[cfg(test)]
 mod regex_flag_tests {
+    #[test]
+    fn rubys_m_keeps_line_anchors_as_well_as_dotall() {
+        assert_eq!(swift_regex_options("m"), ".dotMatchesLineSeparators, .anchorsMatchLines");
+    }
+
     use super::{emit_literal, swift_regex_options};
     use crate::expr::Literal;
 
@@ -1502,15 +1508,14 @@ mod regex_flag_tests {
 
     #[test]
     fn rubys_m_dot_matches_newline_maps_to_dot_matches_line_separators() {
-        assert_eq!(swift_regex_options("m"), ".dotMatchesLineSeparators");
-    }
+            }
 
     #[test]
     fn ignore_case_and_dot_matches_newline_combine_in_the_options_array() {
         let lit = Literal::Regex { pattern: "a.b".into(), flags: "im".into() };
         assert_eq!(
             emit_literal(&lit),
-            r#"try! NSRegularExpression(pattern: "a.b", options: [.caseInsensitive, .dotMatchesLineSeparators])"#
+            r#"try! NSRegularExpression(pattern: "a.b", options: [.caseInsensitive, .dotMatchesLineSeparators, .anchorsMatchLines])"#
         );
     }
 }
