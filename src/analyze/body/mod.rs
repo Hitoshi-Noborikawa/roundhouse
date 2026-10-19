@@ -1923,7 +1923,7 @@ impl<'a> BodyTyper<'a> {
                     return ty;
                 }
                 if let (Some(receiver), Some(materialized)) = (recv.as_ref(), self.materialized_associations)
-                    && let Some(columns) = crate::lower::assoc_pluck::reader_columns(receiver, method, args, block.as_ref(), materialized)
+                    && let Some(columns) = super::assoc_pluck::reader_columns(receiver, method, args, block.as_ref(), materialized)
                     && let Some(projected) = receiver.ty.as_ref().and_then(|ty| self.reader_projection(ty, &columns))
                 {
                     return projected;

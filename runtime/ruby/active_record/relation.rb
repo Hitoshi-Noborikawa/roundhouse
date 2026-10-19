@@ -1959,8 +1959,22 @@ module ActiveRecord
       projections = []
       columns.each_with_index do |col, index|
         name = sql_ident(col)
-        name = @model.primary_key.to_s if name == "id"
-        name = "#{@table}.#{name}" unless name.include?(".")
+        # Same rule as `schema::pluck_argument`. A real `id` column is
+        # what `pluck(:id)` selects. `:id` aliases the primary key only
+        # when that column is absent, which is also why a bare `pluck`
+        # must not rename `id` and project the key twice.
+        if name == "id" && !@model.schema_columns.include?(:id)
+          name = @model.primary_key.to_s
+        end
+        # `sql_ident` accepts a reserved word. Quote after substitution,
+        # each part of a qualified name on its own. `@table` is already
+        # `_table_sql`.
+        if name.include?(".")
+          table, column = name.split(".", 2)
+          name = "#{ActiveRecord.adapter.quote_column_name(table)}.#{ActiveRecord.adapter.quote_column_name(column)}"
+        else
+          name = "#{@table}.#{ActiveRecord.adapter.quote_column_name(name)}"
+        end
         projections << "#{name} AS v#{index}"
       end
       prior = @select_sql

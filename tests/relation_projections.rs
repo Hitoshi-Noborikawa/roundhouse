@@ -70,15 +70,19 @@ fn source_projection_overrides_keep_their_return_types() {
         ),
         (
             "app/models/application_record.rb",
-            "class ApplicationRecord < ActiveRecord::Base\n  self.abstract_class = true\n  def self.pluck(*columns)\n    []\n  end\nend\n",
+            "class ApplicationRecord < ActiveRecord::Base\n  self.abstract_class = true\n  def self.pluck(*columns)\n    []\n  end\n  def self.pick(*columns)\n    7\n  end\nend\n",
         ),
         (
             "app/models/widget.rb",
-            "class Widget < ApplicationRecord\n  def self.pick(*columns)\n    7\n  end\nend\n",
+            "class Widget < ApplicationRecord\n  def self.pick(*columns)\n    \"leaf\"\n  end\nend\n",
+        ),
+        (
+            "app/models/plain.rb",
+            "class Plain < ApplicationRecord\nend\n",
         ),
         (
             "app/controllers/widgets_controller.rb",
-            "class WidgetsController < ActionController::Base\n  def rows\n    @value = Widget.pluck(:id, :name)\n  end\n  def first_row\n    @value = Widget.pick(:id, :name)\n  end\nend\n",
+            "class WidgetsController < ActionController::Base\n  def rows\n    @value = Plain.pluck(:id, :name)\n  end\n  def ancestor_pick\n    @value = Plain.pick(:name)\n  end\n  def first_row\n    @value = Widget.pick(:id, :name)\n  end\nend\n",
         ),
     ];
     let tree = files
@@ -94,7 +98,8 @@ fn source_projection_overrides_keep_their_return_types() {
                 elem: std::sync::Arc::new(Ty::Untyped),
             },
         ),
-        ("first_row", Ty::Int),
+        ("ancestor_pick", Ty::Int),
+        ("first_row", Ty::Str),
     ] {
         let action = app.controllers[0]
             .actions()

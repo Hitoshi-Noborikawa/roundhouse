@@ -27,6 +27,15 @@ const FILES: &[(&str, &str)] = &[
   create_table :keyed_widgets, primary_key: :identifier, id: :string do |t|
     t.string :name, null: false
   end
+  create_table :labeled_widgets, id: false do |t|
+    t.integer :id, null: false
+    t.string :identifier, null: false
+    t.string :name, null: false
+  end
+  create_table :ranked_items, id: false do |t|
+    t.integer :id, null: false
+    t.string :order, null: false
+  end
 end
 "#,
     ),
@@ -92,10 +101,44 @@ end
         "class KeyedWidget < ApplicationRecord\nend\n",
     ),
     (
+        "app/models/labeled_widget.rb",
+        "class LabeledWidget < ApplicationRecord\n  self.primary_key = \"identifier\"\nend\n",
+    ),
+    (
+        "app/models/ranked_item.rb",
+        "class RankedItem < ApplicationRecord\nend\n",
+    ),
+    (
+        "app/models/key_reader.rb",
+        r#"class KeyReader < ApplicationRecord
+  def self.inlined_ids
+    LabeledWidget.ids
+  end
+
+  def self.inlined_override
+    SpecialWidget.pluck(:name)
+  end
+
+  def self.inlined_names
+    Widget.where(name: "stored name").pluck(:name)
+  end
+end
+"#,
+    ),
+    (
         "app/models/special_widget.rb",
         r#"class SpecialWidget < Widget
   def self.pluck(*columns)
     ["override"]
+  end
+end
+"#,
+    ),
+    (
+        "app/models/special_pick.rb",
+        r#"class SpecialPick < Widget
+  def self.pick(*columns)
+    "override"
   end
 end
 "#,
@@ -137,6 +180,38 @@ end
 
   def self.overridden_rows
     SpecialWidget.pluck(:id, :name)
+  end
+
+  def self.overridden_pick
+    SpecialPick.pick(:name)
+  end
+
+  def self.relation_special_names
+    SpecialWidget.all.pluck(:name)
+  end
+
+  def self.class_pick
+    Widget.pick(:name)
+  end
+
+  def self.label_ids
+    LabeledWidget.pluck(:id)
+  end
+
+  def self.label_rows
+    LabeledWidget.pluck(:id, :name)
+  end
+
+  def self.label_all
+    LabeledWidget.pluck
+  end
+
+  def self.label_keys
+    LabeledWidget.ids
+  end
+
+  def self.orders
+    RankedItem.pluck(:order, :id)
   end
 end
 "#,
@@ -213,6 +288,15 @@ fn materialized_readers_and_sql_projections_have_different_types() {
         ("ProjectionProbe", "relation_names", array(Ty::Str)),
         ("ProjectionProbe", "overridden_names", array(Ty::Str)),
         ("ProjectionProbe", "overridden_rows", array(Ty::Str)),
+        ("ProjectionProbe", "overridden_pick", Ty::Str),
+        ("ProjectionProbe", "relation_special_names", array(Ty::Str)),
+        ("KeyReader", "inlined_ids", array(Ty::Str)),
+        ("KeyReader", "inlined_override", array(Ty::Str)),
+        ("ProjectionProbe", "class_pick", nilable(Ty::Str)),
+        ("ProjectionProbe", "label_ids", array(Ty::Int)),
+        ("ProjectionProbe", "label_keys", array(Ty::Str)),
+        ("ProjectionProbe", "label_rows", array(tuple(vec![Ty::Int, Ty::Str]))),
+        ("ProjectionProbe", "orders", array(tuple(vec![Ty::Str, Ty::Int]))),
     ] {
         assert_eq!(
             method(&app, class, name).ty.as_ref(),
@@ -333,6 +417,23 @@ raise "relation key rows" unless ProjectionProbe.relation_key_rows == Projection
 raise "requested key alias pick" unless ProjectionProbe.key_pick == expected_keys[2]
 raise "class override" unless ProjectionProbe.overridden_names == ["override"]
 raise "class override rows" unless ProjectionProbe.overridden_rows == ["override"]
+raise "class pick override" unless ProjectionProbe.overridden_pick == "override"
+raise "class pick" unless ProjectionProbe.class_pick == "stored name"
+ActiveRecord.adapter.execute_ddl("INSERT INTO labeled_widgets (id, identifier, name) VALUES (4, 'key-4', 'labeled')")
+ActiveRecord.adapter.execute_ddl("INSERT INTO ranked_items (id, \"order\") VALUES (1, 'kept')")
+raise "id column class" unless ProjectionProbe.label_ids == [4]
+raise "id column rows" unless ProjectionProbe.label_rows == [[4, "labeled"]]
+raise "bare pluck keeps id" unless ProjectionProbe.label_all == [[4, "key-4", "labeled"]]
+raise "ids stays the key" unless ProjectionProbe.label_keys == ["key-4"]
+raise "model method ids" unless KeyReader.inlined_ids == ["key-4"]
+raise "model method override" unless KeyReader.inlined_override == ["override"]
+raise "model method sql pluck" unless KeyReader.inlined_names == ["stored name"]
+labeled = ActiveRecord::Relation.new(LabeledWidget)
+raise "id column runtime" unless labeled.pluck(:id) == [4]
+raise "bare runtime pluck keeps id" unless labeled.pluck == [[4, "key-4", "labeled"]]
+raise "reserved column" unless ProjectionProbe.orders == [["kept", 1]]
+raise "reserved runtime column" unless ActiveRecord::Relation.new(RankedItem).pluck(:order) == ["kept"]
+raise "qualified reserved column" unless ActiveRecord::Relation.new(RankedItem).pluck(:"ranked_items.order") == ["kept"]
 relation = ActiveRecord::Relation.new(KeyedWidget)
 raise "requested runtime key alias id" unless relation.pluck(:id) == expected_keys[0]
 raise "requested runtime key alias row" unless relation.pluck(:id, :name) == expected_keys[1]

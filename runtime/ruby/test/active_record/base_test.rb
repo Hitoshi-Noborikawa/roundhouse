@@ -172,6 +172,38 @@ class BaseTest < Minitest::Test
     assert_nil Item.where(id: -1).pick(:id, :title)
   end
 
+  # An integer `id` column plus another primary key: Rails 8.1.4 selects
+  # the `id` column from `pluck(:id)` and keeps it in a bare `pluck`.
+  # `ids` is still the primary key.
+  class Labeled < ActiveRecord::Base
+    def self.table_name = "labeled_widgets"
+    def self.schema_columns = [:id, :identifier, :name]
+    def self.primary_key = "identifier"
+    # Hand-written models do not get the lowered string-key cast.
+    # The primary key is text, so `ids` must keep "key-4".
+    def self._string_primary_key = true
+  end
+
+  def test_pluck_id_selects_the_id_column_when_that_column_exists
+    Db.exec("CREATE TABLE labeled_widgets (id INTEGER, identifier TEXT, name TEXT)")
+    Db.exec("INSERT INTO labeled_widgets (id, identifier, name) VALUES (4, 'key-4', 'labeled')")
+    relation = ActiveRecord::Relation.new(Labeled)
+
+    assert_equal [4], relation.pluck(:id)
+    assert_equal [[4, "labeled"]], relation.pluck(:id, :name)
+    assert_equal [[4, "key-4", "labeled"]], relation.pluck
+    assert_equal ["key-4"], relation.ids
+  end
+
+  def test_pluck_quotes_a_reserved_word_column
+    Db.exec("ALTER TABLE items ADD COLUMN \"order\" TEXT")
+    Db.exec("INSERT INTO items (title, \"order\") VALUES ('First', 'kept')")
+    relation = ActiveRecord::Relation.new(Item).order(:id)
+
+    assert_equal ["kept"], relation.pluck(:order)
+    assert_equal [["kept", "First"]], relation.pluck(:"items.order", :title)
+  end
+
   # ── persistence-state predicates ────────────────────────────
 
   def test_new_record_starts_unpersisted

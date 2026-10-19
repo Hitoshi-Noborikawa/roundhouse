@@ -84,9 +84,6 @@ impl<'a> BodyTyper<'a> {
         if args.is_empty() {
             return None;
         }
-        if super::ClassInfo::source_class_method(self.classes(), model, method) {
-            return None;
-        }
         let cls = self.classes().get(model)?;
         let columns = args
             .iter()
@@ -96,15 +93,15 @@ impl<'a> BodyTyper<'a> {
                     ExprNode::Lit { value: crate::expr::Literal::Str { value } } => Symbol::from(value.as_str()),
                     _ => return None,
                 };
-                let name = if name.as_str() == "id" {
-                    cls.primary_key.as_ref().unwrap_or(&name)
-                } else {
-                    &name
-                };
+                let name = crate::schema::pluck_argument(
+                    name,
+                    cls.attributes.fields.contains_key(&Symbol::from("id")),
+                    cls.primary_key.as_ref(),
+                );
                 if cls.attributes.fields.is_empty() {
-                    cls.instance_methods.get(name).cloned()
+                    cls.instance_methods.get(&name).cloned()
                 } else {
-                    cls.attributes.fields.get(name).cloned()
+                    cls.attributes.fields.get(&name).cloned()
                 }
             })
             .collect::<Option<Vec<_>>>()?;
@@ -1021,6 +1018,19 @@ impl<'a> BodyTyper<'a> {
         None
     }
 
+    fn source_ancestor(&self, of: &ClassId, method: &Symbol) -> Option<ClassId> {
+        let mut current = self.classes().get(of)?.parent.clone();
+        for _ in 0..32 {
+            let id = current?;
+            let cls = self.classes().get(&id)?;
+            if cls.source_class_methods.contains(method) {
+                return Some(id);
+            }
+            current = cls.parent.clone();
+        }
+        None
+    }
+
     fn defines_instance_method(&self, of: &ClassId, method: &Symbol) -> bool {
         let mut current = Some(of.clone());
         for _ in 0..32 {
@@ -1688,11 +1698,33 @@ impl<'a> BodyTyper<'a> {
                         }
                     }
                     if !instance_side && let Some(ty) = cls.class_methods.get(method) {
-                        if cls.table.is_some()
-                            && matches!(ty, Ty::Array { elem } if matches!(elem.as_ref(), Ty::Untyped))
+                        // Same projection the relation arm uses. A source
+                        // `def self.pluck` / `pick` declines only this
+                        // class send; `Model.all.pluck` is still the
+                        // relation method.
+                        let source_here = cls.source_class_methods.contains(method);
+                        let source_ancestor = self.source_ancestor(id, method);
+                        if cid == id
+                            && !source_here
+                            && source_ancestor.is_none()
                             && let Some(projected) = self.column_projection(id, method, call_args)
                         {
                             return projected;
+                        }
+                        // The catalog seed lives on every model, so the
+                        // walk stops here even when the source method is
+                        // an ancestor's. That ancestor's harvested return
+                        // is the call.
+                        if cid == id
+                            && !source_here
+                            && let Some(defined) = source_ancestor
+                            && let Some(ancestor_ty) = self
+                                .classes()
+                                .get(&defined)
+                                .and_then(|ancestor| ancestor.class_methods.get(method))
+                            && !gradual_array(ancestor_ty)
+                        {
+                            return unwrap_fn_ret(&subst(ancestor_ty));
                         }
                         return unwrap_fn_ret(&subst(ty));
                     }
@@ -3734,6 +3766,18 @@ pub(super) fn float_method(method: &Symbol) -> Ty {
 /// `parse_app_signatures` stores full function types
 /// (`Ty::Fn { ret: ..., .. }`). Dispatch wants the return-type form
 /// in both cases.
+/// `[]` harvests as `Array[Var]`, the same gradual answer as the
+/// catalog `Array[Untyped]` seed. A caller learns nothing from the swap.
+/// A real return (`7`, an `Array[Str]`) is not this.
+fn gradual_array(ty: &Ty) -> bool {
+    match ty {
+        Ty::Untyped | Ty::Var { .. } => true,
+        Ty::Array { elem } => matches!(elem.as_ref(), Ty::Untyped | Ty::Var { .. }),
+        Ty::Fn { ret, .. } => gradual_array(ret),
+        _ => false,
+    }
+}
+
 fn unwrap_fn_ret(ty: &Ty) -> Ty {
     match ty {
         Ty::Fn { ret, .. } => (**ret).clone(),

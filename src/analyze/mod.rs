@@ -24,6 +24,7 @@
 //! Each of those comes when a fixture forces it.
 
 mod alba;
+pub(crate) mod assoc_pluck;
 mod enum_raw_input;
 mod body;
 mod class_configuration;
@@ -272,12 +273,15 @@ impl Analyzer {
             // named — and `ids` / `id` follow it rather than assuming
             // an integer. No key in the row (a schema-less test model)
             // keeps Rails' default.
-            let key_ty = app
-                .schema
-                .tables
-                .get(&model.table.0)
-                .and_then(|t| t.columns.iter().find(|c| c.primary_key))
-                .and_then(|c| model.attributes.fields.get(&c.name).cloned())
+            // `ids` selects `primary_key`, which may be a column the schema
+            // did not flag (`id: false` plus `self.primary_key = "identifier"`).
+            // The attribute row is that column's type. A missing key stays
+            // Rails' integer default. An `id` column registered below still
+            // overwrites the instance reader when that column exists.
+            let key_ty = cls
+                .primary_key
+                .as_ref()
+                .and_then(|name| model.attributes.fields.get(name).cloned())
                 .unwrap_or(Ty::Int);
 
             // AR class-method signatures sourced from the shared

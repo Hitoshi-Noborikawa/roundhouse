@@ -313,20 +313,22 @@ fn apply_pluck(
     if !matches!(sel.columns, ColumnSpec::All) {
         return None;
     }
-    let column = match method.as_str() {
-        // `ids` is `pluck(:id)` with the column named by Rails, not by
-        // the call site — so it takes no args.
-        "ids" if args.is_empty() => Symbol::from("id"),
-        "pluck" if args.len() == 1 => column_name_arg(&args[0])?,
-        _ => return None,
-    };
     let table = schema.tables.get(&sel.table.0)?;
-    let column = if column.as_str() == "id" {
-        primary_key.cloned().or_else(|| {
-            table.columns.iter().find(|col| col.primary_key).map(|col| col.name.clone())
-        }).unwrap_or(column)
-    } else {
-        column
+    let schema_key = table.columns.iter().find(|col| col.primary_key).map(|col| &col.name);
+    let primary_key = primary_key.or(schema_key);
+    let id_is_column = table.columns.iter().any(|col| col.name.as_str() == "id");
+    let column = match method.as_str() {
+        // `ids` is the primary key, not a column named `id`.
+        "ids" if args.is_empty() => {
+            crate::schema::pluck_argument(Symbol::from("id"), false, primary_key)
+        }
+        // `pluck(:id)` keeps a real `id` column. The alias applies only
+        // when that column is absent — `schema::pluck_argument`.
+        "pluck" if args.len() == 1 => {
+            let requested = column_name_arg(&args[0])?;
+            crate::schema::pluck_argument(requested, id_is_column, primary_key)
+        }
+        _ => return None,
     };
     if !table.columns.iter().any(|c| c.name == column) {
         return None;

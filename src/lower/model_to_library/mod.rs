@@ -2054,6 +2054,19 @@ fn build_class_info_with_finder_inputs(
     let mut info = crate::analyze::ClassInfo::default();
     info.table = Some(model.table.clone());
     info.parent = model.parent.clone();
+    // The analyzer's registry is not this map. Arel's `ids` / `pluck`
+    // and the source-method decline read these two fields, so they have
+    // to be filled here or a model method inlines `SELECT id` and a
+    // `def self.pluck` becomes SQL.
+    info.primary_key = model.primary_key.clone().or_else(|| {
+        table.and_then(|t| t.columns.iter().find(|column| column.primary_key).map(|column| column.name.clone()))
+    });
+    for item in &model.body {
+        let crate::dialect::ModelBodyItem::Method { method, .. } = item else { continue };
+        if method.receiver == MethodReceiver::Class {
+            info.source_class_methods.insert(method.name.clone());
+        }
+    }
 
     // Attributes row from schema columns.
     if let Some(t) = table {
