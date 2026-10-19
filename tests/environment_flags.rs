@@ -107,6 +107,14 @@ spoof.request = ActionDispatch::Request.new({
 })
 spoof.redirect_to "/login"
 raise "public peer keeps Host: #{spoof.location.inspect}" unless spoof.location == "http://blog.test/login"
+blank = ActionController::Base.new
+blank.request = ActionDispatch::Request.new({
+  "HTTP_HOST" => "blog.test",
+  "HTTP_X_FORWARDED_HOST" => "evil.com",
+  "REMOTE_ADDR" => ""
+})
+blank.redirect_to "/login"
+raise "blank peer keeps Host: #{blank.location.inspect}" unless blank.location == "http://blog.test/login"
 raise "url keeps Host" unless spoof.request.url == "http://blog.test/login"
 
 headed = ActionController::Base.new

@@ -186,6 +186,10 @@ class ActionDispatchRequestTest < Minitest::Test
       "HTTP_HOST" => "chat.test", "HTTP_X_FORWARDED_HOST" => "evil.com", "REMOTE_ADDR" => "203.0.113.5"
     })
     assert_equal "chat.test", req.host
+    blank = ActionDispatch::Request.for({
+      "HTTP_HOST" => "chat.test", "HTTP_X_FORWARDED_HOST" => "evil.com", "REMOTE_ADDR" => ""
+    })
+    assert_equal "chat.test", blank.host
     assert_equal "http://chat.test", req.base_url
     assert_equal 80, req.port
   end
