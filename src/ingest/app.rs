@@ -2080,6 +2080,7 @@ end
     keep_initializer_defined(&mut app, dir, &sources, initializer_defined);
     // `self.queue_adapter =` on ApplicationJob (see `App::queue_adapter`).
     apply_application_job_queue_adapter(&mut app);
+    super::propshaft::ingest(vfs, dir, &mut app)?;
     // The ledger of boot statements no recognizer above read. A warning
     // per statement, in the ingest diagnostic channel; no `App` field.
     super::initializer_ledger::record(
@@ -2141,6 +2142,9 @@ end
     // Before the concern splices: they read `library_classes`, and this
     // turns `Current`'s metaprogrammed surface into real methods first.
     super::current_attributes::lower_current_attributes(&mut app);
+    // `attribute :x, :type` under `include ActiveModel::Attributes` -> real
+    // casting accessors, before anything reads the class's methods.
+    super::active_model_attributes::lower_active_model_attributes(&mut app);
     super::thread_mattr::lower_thread_mattr(&mut app);
     // Alba declarations become ordinary property-reading methods before
     // inference; validate complete original resource bodies, not just IR.

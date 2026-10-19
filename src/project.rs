@@ -749,14 +749,20 @@ pub fn target_readme(target: BuildTarget) -> String {
 /// The three lines are matched exactly so a drift in the sidecar is a
 /// build error here, not a silent narrowing.
 fn widen_key_contract(app: &App, files: &mut [(String, String)]) -> Result<(), String> {
+    let string_key = |col: &crate::schema::Column| {
+        !matches!(
+            col.col_type,
+            crate::schema::ColumnType::Integer | crate::schema::ColumnType::BigInt
+        )
+    };
     let has_string_key = app.schema.tables.values().any(|t| {
-        t.columns.iter().any(|c| {
-            c.primary_key
-                && !matches!(
-                    c.col_type,
-                    crate::schema::ColumnType::Integer | crate::schema::ColumnType::BigInt
-                )
-        })
+        t.columns.iter().any(|c| c.primary_key && string_key(c))
+    }) || app.models.iter().any(|model| {
+        let Some(name) = &model.primary_key else { return false };
+        app.schema
+            .tables
+            .get(&model.table.0)
+            .is_some_and(|table| table.columns.iter().any(|c| &c.name == name && string_key(c)))
     });
     if !has_string_key {
         return Ok(());
@@ -768,6 +774,7 @@ fn widen_key_contract(app: &App, files: &mut [(String, String)]) -> Result<(), S
     for (narrow, wide) in [
         ("    def id: () -> Integer\n", "    def id: () -> (Integer | String)\n"),
         ("    def id=: (Integer) -> Integer\n", "    def id=: (Integer | String) -> (Integer | String)\n"),
+        ("    def _primary_key_value: () -> Integer\n", "    def _primary_key_value: () -> (Integer | String)\n"),
         ("    def _adapter_insert: () -> Integer\n", "    def _adapter_insert: () -> (Integer | String)\n"),
     ] {
         if !text.contains(narrow) {
@@ -6056,6 +6063,12 @@ const RUBY_SPINEL_ONLY_METHODS: &[(&str, &str)] = &[
     // `lower::errors_index`'s `errors.to_hash`, `messages`,
     // `attribute_names`, `delete`, `details`, `import` and `merge!`: the helpers are
     // `runtime/ruby/active_support_ext.rb`, which no strict target loads.
+    // The ActiveModel::Attributes writers call the same module. Flattening
+    // the include is not a claim that a strict target can run the cast.
+    ("ActiveSupport", "cast_string"),
+    ("ActiveSupport", "cast_integer"),
+    ("ActiveSupport", "cast_boolean"),
+    ("ActiveSupport", "cast_datetime"),
     ("ActiveSupport", "errors_to_hash"),
     ("ActiveSupport", "errors_messages"),
     ("ActiveSupport", "errors_attribute_names"),
@@ -8559,6 +8572,51 @@ fn apply_makefile_asset_list(files: &mut [(String, String)], app: &App) {
 /// uses Tailwind iff `tailwind` is one of its stylesheet stems, which is
 /// exactly what `app/assets/builds/tailwind.css` (tailwindcss-rails'
 /// output path) puts there.
+fn propshaft_stylesheet_asset_name(app: &App, stem: &str) -> Option<String> {
+    let propshaft = app
+        .gem_lock
+        .as_ref()
+        .is_some_and(|lock| lock.has("propshaft"))
+        && app.rails_application.as_ref().is_some_and(|class| {
+            class
+                .methods
+                .iter()
+                .any(|method| method.name.as_str() == "propshaft_asset_path")
+        });
+    if !propshaft {
+        return None;
+    }
+    let prefix = format!("static/assets/{stem}-");
+    app.binary_assets
+        .iter()
+        .find(|(path, _)| path.starts_with(&prefix) && path.ends_with(".css"))
+        .map(|(path, _)| path["static/assets/".len()..].to_string())
+}
+
+fn insert_propshaft_stylesheet_copy_rules(makefile: &mut String, app: &App) {
+    const ANCHOR: &str = "$(ASSETS)/%.css: app/assets/stylesheets/%.css";
+    let Some(at) = makefile.find(ANCHOR) else {
+        return;
+    };
+    let mut rules = String::new();
+    for stem in &app.stylesheets {
+        if stem == "tailwind" {
+            continue;
+        }
+        let Some(out) = propshaft_stylesheet_asset_name(app, stem) else {
+            continue;
+        };
+        rules.push_str(&format!(
+            "$(ASSETS)/{out}: app/assets/stylesheets/{stem}.css\n\
+             \t@mkdir -p $(dir $@)\n\
+             \tcp $< $@\n\n"
+        ));
+    }
+    if !rules.is_empty() {
+        makefile.insert_str(at, &rules);
+    }
+}
+
 fn apply_makefile_stylesheet_list(files: &mut [(String, String)], app: &App) {
     const BLOG_LIST: &str = "ASSET_CSS := $(ASSETS)/application.css \\\n\
                              \x20            $(ASSETS)/tailwind.css";
@@ -8576,7 +8634,11 @@ fn apply_makefile_stylesheet_list(files: &mut [(String, String)], app: &App) {
             "ASSET_CSS := {}",
             app.stylesheets
                 .iter()
-                .map(|s| format!("$(ASSETS)/{s}.css"))
+                .map(|s| {
+                    propshaft_stylesheet_asset_name(app, s)
+                        .map(|name| format!("$(ASSETS)/{name}"))
+                        .unwrap_or_else(|| format!("$(ASSETS)/{s}.css"))
+                })
                 .collect::<Vec<_>>()
                 .join(" \\\n             ")
         )
@@ -8589,9 +8651,17 @@ fn apply_makefile_stylesheet_list(files: &mut [(String, String)], app: &App) {
         if content.contains(BLOG_LIST) {
             *content = content.replace(BLOG_LIST, &list);
         }
-        if !uses_tailwind {
+        if uses_tailwind {
+            if let Some(digested) = propshaft_stylesheet_asset_name(app, "tailwind") {
+                *content = content.replace(
+                    "$(ASSETS)/tailwind.css: app/assets/tailwind.css",
+                    &format!("$(ASSETS)/{digested}: app/assets/tailwind.css"),
+                );
+            }
+        } else {
             strip_tailwind_rule(content);
         }
+        insert_propshaft_stylesheet_copy_rules(content, app);
     }
 }
 
