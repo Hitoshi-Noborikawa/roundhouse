@@ -2750,14 +2750,10 @@ fn resolve_through_chain(
     };
     // How the join model's rows tie back to the owner: directly by the
     // sibling's fk, or through the sibling's own chain.
+    // Owner edge is the sibling's foreign key. `through_writer_join`
+    // copies that same key; asking it again cannot change the edge.
     let (back_joins, edge_table, edge_fk) = match thr_through {
-        None => {
-            let owner_fk = match crate::lower::model_to_library::through_writer_join(model, models, name) {
-                crate::lower::model_to_library::ThroughWriterJoin::Resolved(_, owner_fk, _, _) => owner_fk,
-                _ => thr_fk.clone(),
-            };
-            (Vec::new(), pluralize_snake(thr_target.0.as_str()), owner_fk)
-        }
+        None => (Vec::new(), pluralize_snake(thr_target.0.as_str()), thr_fk.clone()),
         Some(_) => resolve_through_chain(models, model, thr, depth + 1)?,
     };
     let thr_model = models.iter().find(|m| &m.name == thr_target)?;
@@ -9900,13 +9896,10 @@ fn preload_targets(model: &crate::dialect::Model, app: &App) -> Vec<(String, Pre
                 else {
                     continue;
                 };
-                let Some(thr_model) = app.models.iter().find(|m| &m.name == thr_target) else {
+                // A missing join model is not batched through the convention fallback.
+                if !app.models.iter().any(|m| &m.name == thr_target) {
                     continue;
-                };
-                let Some(Association::BelongsTo { polymorphic: false, .. }) = thr_model.through_source(assoc)
-                else {
-                    continue;
-                };
+                }
                 let crate::lower::model_to_library::ThroughWriterJoin::Resolved(_, owner_fk, src_fk, _) =
                     crate::lower::model_to_library::through_writer_join(model, &app.models, name)
                 else {

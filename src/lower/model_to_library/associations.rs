@@ -124,7 +124,9 @@ pub(crate) fn through_writer_join(
     // that class twice (`source_article` and `target_article`).
     let src_fk = model.associations().find(|a| a.name() == through_name).and_then(|assoc| {
         match join_model.through_source(assoc) {
-            Some(Association::BelongsTo { foreign_key, .. }) => Some(foreign_key.clone()),
+            Some(Association::BelongsTo { foreign_key, polymorphic: false, .. }) => {
+                Some(foreign_key.clone())
+            }
             _ => None,
         }
     });
@@ -2290,14 +2292,34 @@ fn dependent_rows_statement(model: &Model, assoc: &Association) -> Option<Expr> 
     Some(statement)
 }
 
+/// Destroy the join rows for the targets the reader returns:
+/// `name.each { |__target| Join.where(owner_fk: @id, src_fk: __target.id).each { |__row| __row.destroy } }`.
+/// The source key keeps a second through association on the same sibling
+/// from deleting the other's rows, and the reader carries the association scope.
 fn through_join_destroy(
     owner: &ClassId,
+    name: &Symbol,
     join_class: &ClassId,
     owner_fk: &Symbol,
+    src_fk: &Symbol,
     owner_as: Option<&Symbol>,
 ) -> Expr {
+    let target = Symbol::from("__target");
     let id_ivar = Expr::new(Span::synthetic(), ExprNode::Ivar { name: Symbol::from("id") });
-    let mut entries = vec![(lit_sym(owner_fk.clone()), id_ivar)];
+    let target_id = Expr::new(
+        Span::synthetic(),
+        ExprNode::Send {
+            recv: Some(var_ref(target.clone())),
+            method: Symbol::from("id"),
+            args: vec![],
+            block: None,
+            parenthesized: false,
+        },
+    );
+    let mut entries = vec![
+        (lit_sym(owner_fk.clone()), id_ivar),
+        (lit_sym(src_fk.clone()), target_id),
+    ];
     if let Some(intf) = owner_as {
         entries.push((
             lit_sym(Symbol::from(format!("{intf}_type"))),
@@ -2318,7 +2340,7 @@ fn through_join_destroy(
         },
     );
     let row = Symbol::from("__row");
-    let block = Expr::new(
+    let row_block = Expr::new(
         Span::synthetic(),
         ExprNode::Lambda {
             extra_params: Vec::new(),
@@ -2338,13 +2360,43 @@ fn through_join_destroy(
             block_style: crate::expr::BlockStyle::Brace,
         },
     );
-    Expr::new(
+    let rows = Expr::new(
         Span::synthetic(),
         ExprNode::Send {
             recv: Some(where_call),
             method: Symbol::from("each"),
             args: vec![],
-            block: Some(block),
+            block: Some(row_block),
+            parenthesized: false,
+        },
+    );
+    let target_block = Expr::new(
+        Span::synthetic(),
+        ExprNode::Lambda {
+            extra_params: Vec::new(),
+            rest_param: None,
+            params: vec![target],
+            block_param: None,
+            body: rows,
+            block_style: crate::expr::BlockStyle::Brace,
+        },
+    );
+    Expr::new(
+        Span::synthetic(),
+        ExprNode::Send {
+            recv: Some(Expr::new(
+                Span::synthetic(),
+                ExprNode::Send {
+                    recv: None,
+                    method: name.clone(),
+                    args: vec![],
+                    block: None,
+                    parenthesized: false,
+                },
+            )),
+            method: Symbol::from("each"),
+            args: vec![],
+            block: Some(target_block),
             parenthesized: false,
         },
     )
@@ -2366,18 +2418,31 @@ pub(super) fn push_dependent_destroy(
         if let Association::HasMany { name, dependent, through, .. } = assoc {
             if matches!(dependent, Dependent::Destroy) {
                 if through.is_some() {
-                    match through_joins.get(name) {
-                        Some(ThroughWriterJoin::Resolved(join_class, owner_fk, _, thr_as)) => {
+                    // A refused through association has no reader. Cascading
+                    // anyway would delete rows the refusal exists to avoid.
+                    let has_reader = model_defines_instance_method(model, name)
+                        || methods.iter().any(|m| {
+                            m.name == *name && m.receiver == MethodReceiver::Instance
+                        });
+                    if has_reader {
+                        if let Some(ThroughWriterJoin::Resolved(
+                            join_class,
+                            owner_fk,
+                            src_fk,
+                            thr_as,
+                        )) = through_joins.get(name)
+                        {
                             let mut cascade = through_join_destroy(
                                 &model.name,
+                                name,
                                 join_class,
                                 owner_fk,
+                                src_fk,
                                 thr_as.as_ref(),
                             );
                             cascade.inherit_span(span);
                             stmts.push(cascade);
                         }
-                        Some(ThroughWriterJoin::Nested(_)) | Some(ThroughWriterJoin::NoJoin) | None => {}
                     }
                     continue;
                 }

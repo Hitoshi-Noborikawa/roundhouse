@@ -107,11 +107,15 @@ fn dependent_destroy_uses_that_join() {
     assert!(before.contains("Link"), "destroy the join model:\n{before}");
     assert!(
         before.contains("source_article_id") && before.contains("target_article_id"),
-        "each collection destroys its own owner fk:\n{before}"
+        "each collection names both of its join keys:\n{before}"
     );
     assert!(
-        !before.contains("linked_articles") && !before.contains("linking_articles"),
-        "must not destroy the target articles:\n{before}"
+        before.contains("linked_articles") && before.contains("linking_articles"),
+        "destroy walks the reader, so a scope on the association applies:\n{before}"
+    );
+    assert!(
+        before.contains("__row") && before.contains("destroy"),
+        "destroy the join row, not the target:\n{before}"
     );
 }
 
