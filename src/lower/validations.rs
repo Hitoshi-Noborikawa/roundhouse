@@ -74,6 +74,10 @@ pub enum Check {
     /// Value must appear in the set of literal values.
     /// Default message: `"is not included in the list"`.
     Inclusion { values: Vec<InclusionValue> },
+    /// Numeric `inclusion: { in: begin..end }`. `Range#include?` covers
+    /// every number between the endpoints, so this is not a value list.
+    /// Default message: `"is not included in the list"`.
+    Cover { begin: f64, end: f64, exclusive: bool },
     /// String must match the regex.
     /// Default message: `"is invalid"`.
     Format { pattern: String },
@@ -104,7 +108,7 @@ impl Check {
             Check::GreaterThan { threshold } => format!("must be greater than {threshold}"),
             Check::LessThan { threshold } => format!("must be less than {threshold}"),
             Check::OnlyInteger => "must be an integer".into(),
-            Check::Inclusion { .. } => "is not included in the list".into(),
+            Check::Inclusion { .. } | Check::Cover { .. } => "is not included in the list".into(),
             Check::Format { .. } => "is invalid".into(),
             Check::Uniqueness { .. } => "has already been taken".into(),
             Check::Custom { .. } => String::new(),
@@ -182,7 +186,14 @@ fn expand_rule(rule: &ValidationRule, out: &mut Vec<Check>) {
                 out.push(Check::LessThan { threshold: *n });
             }
         }
-        ValidationRule::Inclusion { values } => {
+        ValidationRule::Inclusion { values, range } => {
+            if let Some(range) = range {
+                out.push(Check::Cover {
+                    begin: range.begin,
+                    end: range.end,
+                    exclusive: range.exclusive,
+                });
+            }
             let vs: Vec<InclusionValue> = values
                 .iter()
                 .filter_map(lit_to_inclusion_value)

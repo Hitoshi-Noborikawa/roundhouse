@@ -10,7 +10,7 @@
 
 use crate::expr::{Expr, ExprNode};
 
-use super::super::util::peel_nil;
+use super::super::util::{is_option_ty, peel_nil};
 use super::super::{emit_expr, in_constructor, ivar_field_ty};
 use super::coerce::coerce_arg_for_field_ty;
 
@@ -268,9 +268,88 @@ pub(super) fn try_binary_operator(
         // turbofish (`i64<y, …>`). Decide pass stamps the bit;
         // `wrap_if_needs_parens` adds the paren only where needed.
         let lhs = super::super::wrap_if_needs_parens(r, emit_expr(r));
+        if let Some(cmp) = numeric_cmp(method, r, &lhs, &args[0]) {
+            return Some(cmp);
+        }
         return Some(format!("{} {} {}", lhs, method, emit_expr(&args[0])));
     }
     None
+}
+
+/// Column slots are `Option<i64>` / `Option<f64>`. A bound literal is
+/// often the other numeric type (`@price <= 0.0`). Unwrap and promote
+/// so the comparison type-checks; `||` / `&&` still skip the unwrap
+/// when a `nil?` guard is the left operand.
+fn numeric_cmp(method: &str, lhs: &Expr, lhs_s: &str, rhs: &Expr) -> Option<String> {
+    if !matches!(method, "==" | "!=" | "<" | ">" | "<=" | ">=") {
+        return None;
+    }
+    let (lk, lo) = numeric_kind(lhs)?;
+    let (rk, ro) = numeric_kind(rhs)?;
+    // `Option<i64> == Option<i64>` already type-checks. Unwrap only
+    // when one side is a bare number or the numeric kinds differ.
+    if lk == rk && lo == ro {
+        return None;
+    }
+    let as_float = lk == NumKind::Float || rk == NumKind::Float;
+    let side = |_expr: &Expr, rendered: &str, kind: NumKind, optional: bool| {
+        let base = if optional {
+            format!("({rendered}).clone().unwrap()")
+        } else {
+            rendered.to_string()
+        };
+        if as_float && kind == NumKind::Int {
+            format!("({base} as f64)")
+        } else {
+            base
+        }
+    };
+    let rhs_s = emit_expr(rhs);
+    Some(format!(
+        "{} {} {}",
+        side(lhs, lhs_s, lk, lo),
+        method,
+        side(rhs, &rhs_s, rk, ro)
+    ))
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum NumKind {
+    Int,
+    Float,
+}
+
+fn numeric_kind(expr: &Expr) -> Option<(NumKind, bool)> {
+    use crate::expr::Literal;
+    use crate::ty::Ty;
+    if let ExprNode::Lit { value } = &*expr.node {
+        return match value {
+            Literal::Int { .. } => Some((NumKind::Int, false)),
+            Literal::Float { .. } => Some((NumKind::Float, false)),
+            _ => None,
+        };
+    }
+    // Only a column slot is emitted as `Option<T>`. An index read is
+    // typed `T | nil` and rendered as `T`, so unwrapping it does not
+    // type-check.
+    if let ExprNode::Ivar { name } = &*expr.node {
+        let ty = ivar_field_ty(name.as_str())?;
+        let optional = is_option_ty(&ty);
+        return match peel_nil(&ty) {
+            Ty::Int => Some((NumKind::Int, optional)),
+            Ty::Float => Some((NumKind::Float, optional)),
+            _ => None,
+        };
+    }
+    let ty = expr.ty.clone()?;
+    if is_option_ty(&ty) {
+        return None;
+    }
+    match peel_nil(&ty) {
+        Ty::Int => Some((NumKind::Int, false)),
+        Ty::Float => Some((NumKind::Float, false)),
+        _ => None,
+    }
 }
 
 /// Unary `!` — `!cond` in Ruby lowers as `Send { recv: cond, method:
