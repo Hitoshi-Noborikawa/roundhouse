@@ -255,24 +255,33 @@ fn static_is_a(recv: &Expr, recv_s: &str, class_name: &str) -> Option<String> {
     let optional = super::util::is_option_ty(&ty);
     let peeled = super::util::peel_nil(&ty);
     let present = if optional { format!("{recv_s}.is_some()") } else { "true".to_string() };
-    match (peeled, class_name) {
+    let answer = match (peeled, class_name) {
         (Ty::Int, "Integer" | "Numeric") => Some(present),
         (Ty::Int, "Float" | "String") => Some("false".to_string()),
         (Ty::Float, "Numeric" | "Float") => Some(present),
-        (Ty::Float, "String") => Some("false".to_string()),
-        // `2.0.is_a?(Integer)` is false in Ruby; a whole float still
-        // passes `only_integer` the way `to_i == self` does.
-        (Ty::Float, "Integer") => {
-            let inner = if optional {
-                format!("{recv_s}.clone().unwrap_or(f64::NAN)")
-            } else {
-                recv_s.to_string()
-            };
-            Some(format!("{{ let __n = {inner}; __n == __n.trunc() }}"))
-        }
+        // `2.0.is_a?(Integer)` is false. `only_integer` uses this check.
+        (Ty::Float, "Integer" | "String") => Some("false".to_string()),
         (Ty::Str | Ty::Sym, "String") => Some(present),
         (Ty::Str | Ty::Sym, "Integer" | "Float" | "Numeric") => Some("false".to_string()),
         _ => None,
+    }?;
+    Some(keep_receiver(recv, recv_s, answer))
+}
+
+/// A folded `true` / `false` never mentions the receiver. An ivar or
+/// literal has no side effect to keep; a call does.
+fn keep_receiver(recv: &Expr, recv_s: &str, answer: String) -> String {
+    let pure = matches!(
+        &*recv.node,
+        ExprNode::Ivar { .. }
+            | ExprNode::Lit { .. }
+            | ExprNode::Var { .. }
+            | ExprNode::Const { .. }
+    );
+    if pure || answer.contains(recv_s) {
+        answer
+    } else {
+        format!("{{ let _ = {recv_s}; {answer} }}")
     }
 }
 

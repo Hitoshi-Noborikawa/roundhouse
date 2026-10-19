@@ -429,12 +429,16 @@ pub(super) fn dispatch_method_by_recv_ty(
         // is already the pattern (validations, flipped call sites).
         Some(Ty::Class { id, .. }) if id.0.as_str() == "Regexp" => match method {
             "match?" if args.len() == 1 => {
-                let arg = if expr_is_option(&args[0]) {
-                    format!("({}).clone().unwrap()", args_s[0])
+                // `Regexp#match?(nil)` is false. Unwrapping an absent
+                // column panics.
+                if expr_is_option(&args[0]) {
+                    Some(format!(
+                        "{}.as_deref().is_some_and(|__s| {recv_s}.is_match(__s))",
+                        args_s[0]
+                    ))
                 } else {
-                    args_s[0].clone()
-                };
-                Some(format!("{recv_s}.is_match(&*({arg}))"))
+                    Some(format!("{recv_s}.is_match(&*({}))", args_s[0]))
+                }
             }
             _ => None,
         },

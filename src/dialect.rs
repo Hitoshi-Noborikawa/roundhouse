@@ -638,6 +638,13 @@ pub enum ValidationRule {
         gt: Option<f64>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         lt: Option<f64>,
+        /// `greater_than_or_equal_to:` / `less_than_or_equal_to:`.
+        /// The store guide uses the inclusive floor. Strict bounds stay
+        /// `gt` / `lt`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        gte: Option<f64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        lte: Option<f64>,
     },
     Inclusion {
         values: Vec<Literal>,

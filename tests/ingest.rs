@@ -1418,6 +1418,8 @@ class Widget < ApplicationRecord
   validates :code, format: { with: /\A[A-Z]{3}\z/ }
   validates :stock, inclusion: { in: 1..3 }
   validates_numericality_of :max_stock, greater_than: 0, less_than: 50
+  validates :inventory_count, numericality: { greater_than_or_equal_to: 0 }
+  validates_numericality_of :cap, less_than_or_equal_to: 5
   validates_inclusion_of :kind, in: %w[one two]
   validates_format_of :sku, with: /\A\d{2}\z/
 end
@@ -1451,6 +1453,16 @@ end
         }
         other => panic!("expected a numeric range, got {other:?}"),
     }
+    let inventory = rules.iter().find(|v| v.attribute.as_str() == "inventory_count").unwrap();
+    assert!(matches!(
+        &inventory.rules[0],
+        ValidationRule::Numericality { gte: Some(n), lte: None, .. } if *n == 0.0
+    ));
+    let cap = rules.iter().find(|v| v.attribute.as_str() == "cap").unwrap();
+    assert!(matches!(
+        &cap.rules[0],
+        ValidationRule::Numericality { lte: Some(n), gte: None, .. } if *n == 5.0
+    ));
     assert!(rules.iter().any(|v| v.attribute.as_str() == "max_stock"));
     assert!(rules.iter().any(|v| v.attribute.as_str() == "kind"));
     assert!(rules.iter().any(|v| v.attribute.as_str() == "sku"));
@@ -1486,8 +1498,7 @@ class Widget < ApplicationRecord
   validates :name, presence: true, uniqueness: true
   validates :stock, comparison: { less_than_or_equal_to: :max_stock }
   validates :price, numericality: { greater_than: 0, odd: true }
-  validates :inventory_count, numericality: { greater_than_or_equal_to: 0 }
-  validates_numericality_of :cap, less_than_or_equal_to: 5
+  validates :bounded, numericality: { equal_to: 1, other_than: 2 }
   validates :tag, presence: true, length: { maximum: 4, is: 2 }
   validates :note, presence: true, if: -> { status == "live" }
   validates :color, presence: true, unless: -> { false }
@@ -1503,8 +1514,8 @@ end
         "uniqueness",
         "comparison",
         "numericality: odd",
-        "numericality: greater_than_or_equal_to",
-        "numericality: less_than_or_equal_to",
+        "numericality: equal_to",
+        "numericality: other_than",
         "length: is",
         "if:",
         "unless:",

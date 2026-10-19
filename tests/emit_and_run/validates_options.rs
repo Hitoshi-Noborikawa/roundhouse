@@ -1,13 +1,13 @@
 use super::emit_and_run;
 
 /// Issue #985. Numericality (`only_integer`, `greater_than`,
-/// `less_than`), inclusion, and format already lowered; ingest was
-/// dropping the keys, so `create!` saved records Rails rejects. Each
-/// wired option is pinned here, including the `validates_*_of`
-/// spelling. Symbol `if:` / `unless:` use the same guard as
-/// `validate :method`. Inclusive numericality bounds, uniqueness,
-/// comparison, `length: is:`, and a lambda condition stay diagnostics
-/// and are not enforced.
+/// `less_than`, and the inclusive pair the store ships), inclusion,
+/// and format already lowered; ingest was dropping the keys, so
+/// `create!` saved records Rails rejects. Each wired option is pinned
+/// here, including the `validates_*_of` spelling. Symbol `if:` /
+/// `unless:` use the same guard as `validate :method`. `equal_to`,
+/// `other_than`, uniqueness, comparison, `length: is:`, and a lambda
+/// condition stay diagnostics and are not enforced.
 const MODEL: &str = r#"class Article < ApplicationRecord
   has_many :comments, dependent: :destroy
 
@@ -19,7 +19,9 @@ const MODEL: &str = r#"class Article < ApplicationRecord
   validates :body, presence: true, length: { minimum: 10 }
   validates :price, numericality: { greater_than: 0, less_than: 100 }
   validates :inventory_count, numericality: { greater_than_or_equal_to: 0 }
+  validates_numericality_of :ceiling, greater_than_or_equal_to: 1, less_than_or_equal_to: 10
   validates :rating, numericality: { only_integer: true, greater_than: 0 }
+  validates :parity, numericality: { equal_to: 1, other_than: 2 }
   validates :color, inclusion: { in: %w[red blue] }
   validates :stock, inclusion: { in: 1..3 }
   validates :score, inclusion: { in: 1..3 }
@@ -46,7 +48,7 @@ end
 
 const SCHEMA_FIND: &str =
     "    t.string \"title\"\n    t.text \"body\"\n    t.datetime \"created_at\", null: false\n";
-const SCHEMA_REPLACE: &str = "    t.string \"title\"\n    t.text \"body\"\n    t.integer \"price\", default: 0\n    t.integer \"inventory_count\", default: 0\n    t.float \"rating\"\n    t.string \"color\"\n    t.integer \"stock\", default: 0\n    t.float \"score\"\n    t.integer \"max_stock\", default: 0\n    t.string \"code\"\n    t.string \"kind\"\n    t.string \"sku\"\n    t.string \"label\"\n    t.string \"extra\"\n    t.string \"note\"\n    t.string \"status\", default: \"draft\"\n    t.string \"tag\"\n    t.integer \"level\", default: 0\n    t.integer \"cap\", default: 0\n    t.datetime \"created_at\", null: false\n";
+const SCHEMA_REPLACE: &str = "    t.string \"title\"\n    t.text \"body\"\n    t.integer \"price\", default: 0\n    t.integer \"inventory_count\", default: 0\n    t.integer \"ceiling\", default: 1\n    t.float \"rating\"\n    t.integer \"parity\", default: 0\n    t.string \"color\"\n    t.integer \"stock\", default: 0\n    t.float \"score\"\n    t.integer \"max_stock\", default: 0\n    t.string \"code\"\n    t.string \"kind\"\n    t.string \"sku\"\n    t.string \"label\"\n    t.string \"extra\"\n    t.string \"note\"\n    t.string \"status\", default: \"draft\"\n    t.string \"tag\"\n    t.integer \"level\", default: 0\n    t.integer \"cap\", default: 0\n    t.datetime \"created_at\", null: false\n";
 
 #[test]
 fn validates_numericality_inclusion_and_format_reject_on_save() {
@@ -56,7 +58,7 @@ fn validates_numericality_inclusion_and_format_reject_on_save() {
         .run_ruby(r##"
 base = {
   title: "Ok", body: "0123456789", price: 5, rating: 2, color: "red", stock: 2, score: 1.5,
-  inventory_count: 0,
+  inventory_count: 0, ceiling: 1, parity: 9,
   code: "ABC", max_stock: 10, kind: "one", sku: "12", status: "draft",
   label: "", extra: "", note: "", tag: "toolong", level: 9, cap: 1
 }
@@ -90,9 +92,20 @@ raise "max_stock 0: #{stock_cap.inspect}" unless stock_cap.any? { |m| m.include?
 _, stock_hi = messages(base.merge(max_stock: 50))
 raise "max_stock 50: #{stock_hi.inspect}" unless stock_hi.any? { |m| m.include?("less than 50") }
 refute_save(base.merge(title: "Price", price: 0), "greater than 0")
-# greater_than_or_equal_to is not lowered. The call warns and does not run.
-valid, msgs = messages(base.merge(title: "Floor", inventory_count: -1))
-raise "inclusive bound ran: #{msgs.inspect}" unless valid
+# Inclusive bounds, including validates_numericality_of. 0 is inside >= 0.
+valid, msgs = messages(base.merge(title: "Zero", inventory_count: 0, ceiling: 10))
+raise "inclusive edge rejected: #{msgs.inspect}" unless valid
+_, stocked = messages(base.merge(inventory_count: -1))
+raise "inventory -1: #{stocked.inspect}" unless stocked.any? { |m| m.include?("greater than or equal to 0") }
+_, ceil_lo = messages(base.merge(ceiling: 0))
+raise "ceiling 0: #{ceil_lo.inspect}" unless ceil_lo.any? { |m| m.include?("greater than or equal to 1") }
+_, ceil_hi = messages(base.merge(ceiling: 11))
+raise "ceiling 11: #{ceil_hi.inspect}" unless ceil_hi.any? { |m| m.include?("less than or equal to 10") }
+refute_save(base.merge(title: "Neg", inventory_count: -1), "greater than or equal to 0")
+refute_save(base.merge(title: "Ceil", ceiling: 11), "less than or equal to 10")
+# equal_to / other_than are not lowered. The call warns and does not run.
+valid, msgs = messages(base.merge(title: "Parity", parity: 2))
+raise "equal_to ran: #{msgs.inspect}" unless valid
 
 # inclusion: array and integer range, and validates_inclusion_of.
 _, color = messages(base.merge(color: "green"))
@@ -143,7 +156,8 @@ puts "validates options passed"
         .write("app/models/article.rb", MODEL)
         .ingest_warnings();
     for needle in [
-        "greater_than_or_equal_to",
+        "equal_to",
+        "other_than",
         "uniqueness",
         "comparison",
         "length: is",

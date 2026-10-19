@@ -277,9 +277,9 @@ pub(super) fn try_binary_operator(
 }
 
 /// Column slots are `Option<i64>` / `Option<f64>`. A bound literal is
-/// often the other numeric type (`@price <= 0.0`). Unwrap and promote
-/// so the comparison type-checks; `||` / `&&` still skip the unwrap
-/// when a `nil?` guard is the left operand.
+/// often the other numeric type (`@price <= 0.0`). Ordered comparisons
+/// unwrap so the check type-checks; the numericality `if` guards nil
+/// before those runs. Equality does not unwrap: `nil == n` is false.
 fn numeric_cmp(method: &str, lhs: &Expr, lhs_s: &str, rhs: &Expr) -> Option<String> {
     if !matches!(method, "==" | "!=" | "<" | ">" | "<=" | ">=") {
         return None;
@@ -292,25 +292,75 @@ fn numeric_cmp(method: &str, lhs: &Expr, lhs_s: &str, rhs: &Expr) -> Option<Stri
         return None;
     }
     let as_float = lk == NumKind::Float || rk == NumKind::Float;
-    let side = |_expr: &Expr, rendered: &str, kind: NumKind, optional: bool| {
+    let rhs_s = emit_expr(rhs);
+    // `nil == 5` is false and `nil != 5` is true. Unwrapping the
+    // Option panics on the absent column.
+    if matches!(method, "==" | "!=") {
+        return Some(numeric_equality(method, lhs_s, lk, lo, &rhs_s, rk, ro, as_float));
+    }
+    let side = |rendered: &str, kind: NumKind, optional: bool| {
         let base = if optional {
             format!("({rendered}).clone().unwrap()")
         } else {
             rendered.to_string()
         };
-        if as_float && kind == NumKind::Int {
-            format!("({base} as f64)")
-        } else {
-            base
-        }
+        promote(&base, kind, as_float)
     };
-    let rhs_s = emit_expr(rhs);
     Some(format!(
         "{} {} {}",
-        side(lhs, lhs_s, lk, lo),
+        side(lhs_s, lk, lo),
         method,
-        side(rhs, &rhs_s, rk, ro)
+        side(&rhs_s, rk, ro)
     ))
+}
+
+fn promote(rendered: &str, kind: NumKind, as_float: bool) -> String {
+    if as_float && kind == NumKind::Int {
+        format!("({rendered} as f64)")
+    } else {
+        rendered.to_string()
+    }
+}
+
+/// Equality against an `Option` column. `None` matches only `None`.
+fn numeric_equality(
+    method: &str,
+    lhs_s: &str,
+    lk: NumKind,
+    lo: bool,
+    rhs_s: &str,
+    rk: NumKind,
+    ro: bool,
+    as_float: bool,
+) -> String {
+    let on_none = if method == "==" { "false" } else { "true" };
+    match (lo, ro) {
+        (false, false) => format!(
+            "{} {} {}",
+            promote(lhs_s, lk, as_float),
+            method,
+            promote(rhs_s, rk, as_float)
+        ),
+        (true, false) => format!(
+            "{{ match ({lhs_s}).clone() {{ Some(__v) => {} {method} {}, None => {on_none} }} }}",
+            promote("__v", lk, as_float),
+            promote(rhs_s, rk, as_float)
+        ),
+        (false, true) => format!(
+            "{{ match ({rhs_s}).clone() {{ Some(__v) => {} {method} {}, None => {on_none} }} }}",
+            promote(lhs_s, lk, as_float),
+            promote("__v", rk, as_float)
+        ),
+        (true, true) => format!(
+            "{{ match (({lhs_s}).clone(), ({rhs_s}).clone()) {{ \
+             (Some(__a), Some(__b)) => {} {method} {}, \
+             (None, None) => {}, \
+             _ => {on_none} }} }}",
+            promote("__a", lk, as_float),
+            promote("__b", rk, as_float),
+            method == "=="
+        ),
+    }
 }
 
 #[derive(Clone, Copy, PartialEq)]
