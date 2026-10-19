@@ -164,14 +164,11 @@ fn included_do_marker_mixed_with_an_untracked_call_inside_a_conditional_stays_re
     );
 }
 
-/// Splicing `included do`'s plain defs onto the includer's own emitted
-/// body is a separate, pre-existing gap (reproduces identically with no
-/// marker at all, e.g. the `Hooked` module in
-/// `tests/binop_member_guard.rs`) — not something this fix changes.
-/// Documented here so a future fix to THAT gap does not mistake this
-/// test's silence for a claim it already works.
+/// `included do`'s plain defs land on the includer's own emitted body,
+/// with their visibility. That they run is
+/// `emit_and_run::defs_in_an_included_block_run_on_the_includer`.
 #[test]
-fn included_do_defs_are_not_yet_spliced_into_the_model_body() {
+fn included_do_defs_are_spliced_into_the_model_body() {
     use roundhouse::emit::ruby;
 
     let app = gadget_app("    def polish = \"#{shine}!\"\n\n    private\n\n    def shine = \"shiny\"\n")
@@ -182,9 +179,6 @@ fn included_do_defs_are_not_yet_spliced_into_the_model_body() {
         .find(|f| f.path.to_string_lossy().ends_with("app/models/gadget.rb"))
         .map(|f| f.content.clone())
         .expect("gadget.rb");
-    assert!(
-        !gadget_rb.contains("def polish") && !gadget_rb.contains("def shine"),
-        "if this starts failing, `included do` splicing has landed — update/remove this test \
-         and add a true CRuby `Gadget.new.polish == \"shiny!\"` / private-`shine` proof instead:\n{gadget_rb}"
-    );
+    assert!(gadget_rb.contains("def polish") && gadget_rb.contains("def shine"), "{gadget_rb}");
+    assert!(gadget_rb.contains("private :shine") && !gadget_rb.contains("private :polish"), "{gadget_rb}");
 }
