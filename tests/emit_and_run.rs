@@ -8084,6 +8084,53 @@ fn an_include_from_an_included_block_takes_precedence_over_its_concern() {
         .assert_passes();
 }
 
+/// `def`s in a concern's `included do` are includer methods, instance and
+/// class side: they keep their visibility, and one over a column reader
+/// wins and reads the column through `super`.
+#[test]
+fn defs_in_an_included_block_run_on_the_includer() {
+    emit_and_run::real_blog()
+        .write(
+            "app/models/concerns/shouty.rb",
+            "module Shouty\n  extend ActiveSupport::Concern\n\n  included do\n    class << self\n      def loud\n        \"L\"\n      end\n    end\n\n    def self.quiet\n      \"q\"\n    end\n\n    def shout(times = 1)\n      title.upcase * times\n    end\n\n    def body\n      super + \"!\"\n    end\n\n    def peek\n      secret\n    end\n\n    private\n\n    def secret\n      \"hidden\"\n    end\n  end\nend\n",
+        )
+        .edit(
+            "app/models/article.rb",
+            "class Article < ApplicationRecord\n",
+            "class Article < ApplicationRecord\n  include Shouty\n",
+        )
+        .run_ruby(
+            "a = Article.create!(title: \"Hi\", body: \"Body text here\")\n\
+             raise a.shout(2) unless a.shout(2) == \"HIHI\"\n\
+             raise a.body unless a.body == \"Body text here!\"\n\
+             raise a.peek unless a.peek == \"hidden\"\n\
+             raise \"secret is public\" if a.respond_to?(:secret)\n\
+             raise \"class side\" unless Article.loud + Article.quiet == \"Lq\"",
+        )
+        .assert_passes();
+}
+
+/// Where hoisting would change which definition wins, the def keeps its
+/// nested-def refusal: the module defines the name too, the block
+/// includes a module that sits ahead of the concern, or a `class << self`
+/// holds a statement the hoist would drop.
+#[test]
+fn included_block_defs_that_would_lose_their_precedence_stay_refused() {
+    for concern in [
+        "module Shouty\n  extend ActiveSupport::Concern\n  included do\n    def shout\n      \"block\"\n    end\n  end\n\n  def shout\n    \"module\"\n  end\nend\n",
+        "module Shouty\n  extend ActiveSupport::Concern\n  included do\n    include Comparable\n    def shout\n      \"block\"\n    end\n  end\nend\n",
+        "module Shouty\n  extend ActiveSupport::Concern\n  included do\n    class << self\n      %i[a b].each { |n| define_method(n) { n } }\n      def shout\n        \"block\"\n      end\n    end\n  end\nend\n",
+        "module Shouty\n  extend ActiveSupport::Concern\n  class_methods do\n    def loud\n      \"carrier\"\n    end\n  end\n  included do\n    def self.loud\n      \"block\"\n    end\n  end\nend\n",
+        "module Shouty\n  extend ActiveSupport::Concern\n  module ClassMethods\n    def loud\n      \"carrier\"\n    end\n  end\n  included do\n    class << self\n      def loud\n        \"block\"\n      end\n    end\n  end\nend\n",
+    ] {
+        let errors = emit_and_run::real_blog()
+            .write("app/models/concerns/shouty.rb", concern)
+            .edit("app/models/article.rb", "class Article < ApplicationRecord\n", "class Article < ApplicationRecord\n  include Shouty\n")
+            .check_errors();
+        assert!(errors.iter().any(|e| e.contains("nested def")), "{concern}: {errors:?}");
+    }
+}
+
 /// The inner concern's own `included do` runs on the includer too: its
 /// scope is declared on the model.
 #[test]
