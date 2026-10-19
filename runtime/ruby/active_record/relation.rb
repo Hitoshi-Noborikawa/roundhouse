@@ -1257,7 +1257,7 @@ module ActiveRecord
 
     # The records whose id is (`keep`) or is not in `ids`.
     def id_filter(records, ids, keep)
-      records.select { |r| ids.include?(r.id) == keep }
+      records.select { |r| ids.include?(r._primary_key_value) == keep }
     end
 
     def set_operand(other)
@@ -1269,19 +1269,19 @@ module ActiveRecord
     end
 
     def ids_of(records)
-      records.map { |r| r.id }
+      records.map { |r| r._primary_key_value }
     end
 
     # Loaded: scan the cache. Unloaded: exists?(id), not ids (ORDER BY).
     def include?(record)
       return false if record.nil?
-      rid = record.id
+      rid = record._primary_key_value
       return false if rid.nil?
       key = @model._cast_primary_key(rid)
       return false if key.nil?
       loaded = @records
       unless loaded.nil?
-        return loaded.any? { |x| x.id == key }
+        return loaded.any? { |x| x._primary_key_value == key }
       end
       exists?(key)
     end
@@ -2076,7 +2076,7 @@ module ActiveRecord
       cached = @records
       unless cached.nil?
         # `preloaded` may seed integer primary keys, not only records.
-        return cached.map { |row| row.is_a?(Base) ? row.id : row }
+        return cached.map { |row| row.is_a?(Base) ? row._primary_key_value : row }
       end
       prior = @select_sql
       key = @model.primary_key
@@ -2264,7 +2264,7 @@ module ActiveRecord
         raise RecordNotFound.new("Couldn't find all #{Inflector.pluralize_word(@model.name, 2)} with '#{@model.primary_key}': (#{listed}) (found #{rows.length} results, but was looking for #{expected}).", @model.name, @model.primary_key, ids)
       end
       if @orders.empty?
-        keys.map { |key| rows.find { |row| row.id == key } }
+        keys.map { |key| rows.find { |row| row._primary_key_value == key } }
       else
         rows
       end
@@ -2623,7 +2623,7 @@ module ActiveRecord
         # scalar elements escape as-is. An empty list is Rails' none
         # predicate (`1=0`): never `IN ()`. Pure — NullRelation is set by
         # `mark_null!` from `none` / lasting positive `where` only.
-        ids = val.map { |x| x.is_a?(Base) ? x.id : x }
+        ids = val.map { |x| x.is_a?(Base) ? x._primary_key_value : x }
         if ids.empty?
           "1=0"
         else
@@ -2637,7 +2637,7 @@ module ActiveRecord
         # static `v && v.id` narrowing was dropped in favor of this
         # runtime dispatch: hash values from untyped scope params can
         # be a record OR a collection, and only the runtime knows.
-        "#{qcol} = #{bind_literal(val.id)}"
+        "#{qcol} = #{bind_literal(val._primary_key_value)}"
       else
         "#{qcol} = #{bind_literal(val)}"
       end

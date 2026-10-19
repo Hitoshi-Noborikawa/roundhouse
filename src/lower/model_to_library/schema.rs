@@ -425,13 +425,24 @@ pub(super) fn push_schema_methods(
     methods.push(synth_initialize(owner, table, model, models));
 
     // def id; @identifier; end / def id=(value); @identifier = value; end
-    // — when the key column is not called `id`. Rails' `record.id`
-    // reads the primary-key attribute whatever its column is named,
-    // and the base's `attr_accessor :id` would answer the unsaved
-    // sentinel instead (#90).
-    if let Some(key) = table.columns.iter().find(|c| c.primary_key && c.name.as_str() != "id") {
+    // — when the key column is not called `id` and the table has no
+    // `id` column. That alias is `record.id` for a renamed key (#90).
+    // An `id` column that sits beside the key keeps its own reader and
+    // writer; `pluck(:id)` and `record.id` are that column.
+    let has_id_column = table.columns.iter().any(|c| c.name.as_str() == "id");
+    if !has_id_column
+        && let Some(key) = table.columns.iter().find(|c| c.primary_key && c.name.as_str() != "id")
+    {
         methods.push(synth_key_alias_reader(owner, key));
         methods.push(synth_key_alias_writer(owner, key));
+    }
+    // Loaded `ids` reads `_primary_key_value`, not `id`, so the key
+    // and a coexisting `id` column stay distinct.
+    if key_name != "id"
+        && !super::associations::model_defines_instance_method(model, &Symbol::from("_primary_key_value"))
+        && let Some(col) = table.columns.iter().find(|c| c.name.as_str() == key_name)
+    {
+        methods.push(synth_primary_key_value(owner, col));
     }
 
     // def attributes; { col: @col, ... } excluding id; end
@@ -1175,6 +1186,33 @@ fn synth_key_alias_reader(owner: &ClassId, key: &Column) -> MethodDef {
         effects: EffectSet::default(),
         enclosing_class: Some(owner.0.clone()),
         kind: AccessorKind::AttributeReader,
+        is_async: false,
+        mutates_self: false,
+        block_param: None,
+    }
+}
+
+/// `def _primary_key_value; @<key>; end` — loaded `ids` reads this,
+/// so a coexisting `id` column is not the key.
+fn synth_primary_key_value(owner: &ClassId, key: &Column) -> MethodDef {
+    let key_ty = super::ty_of_column_slot(key);
+    let body = with_ty(
+        Expr::new(Span::synthetic(), ExprNode::Ivar { name: col_storage_name(key) }),
+        key_ty.clone(),
+    );
+    MethodDef {
+        visibility: crate::dialect::MethodVisibility::Public,
+        unsupported_formals: None,
+        has_anonymous_block: false,
+        name_span: crate::span::Span::synthetic(),
+        name: Symbol::from("_primary_key_value"),
+        receiver: MethodReceiver::Instance,
+        params: vec![],
+        body,
+        signature: Some(fn_sig(vec![], key_ty)),
+        effects: EffectSet::default(),
+        enclosing_class: Some(owner.0.clone()),
+        kind: AccessorKind::Method,
         is_async: false,
         mutates_self: false,
         block_param: None,

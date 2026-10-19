@@ -749,14 +749,20 @@ pub fn target_readme(target: BuildTarget) -> String {
 /// The three lines are matched exactly so a drift in the sidecar is a
 /// build error here, not a silent narrowing.
 fn widen_key_contract(app: &App, files: &mut [(String, String)]) -> Result<(), String> {
+    let string_key = |col: &crate::schema::Column| {
+        !matches!(
+            col.col_type,
+            crate::schema::ColumnType::Integer | crate::schema::ColumnType::BigInt
+        )
+    };
     let has_string_key = app.schema.tables.values().any(|t| {
-        t.columns.iter().any(|c| {
-            c.primary_key
-                && !matches!(
-                    c.col_type,
-                    crate::schema::ColumnType::Integer | crate::schema::ColumnType::BigInt
-                )
-        })
+        t.columns.iter().any(|c| c.primary_key && string_key(c))
+    }) || app.models.iter().any(|model| {
+        let Some(name) = &model.primary_key else { return false };
+        app.schema
+            .tables
+            .get(&model.table.0)
+            .is_some_and(|table| table.columns.iter().any(|c| &c.name == name && string_key(c)))
     });
     if !has_string_key {
         return Ok(());
@@ -768,6 +774,7 @@ fn widen_key_contract(app: &App, files: &mut [(String, String)]) -> Result<(), S
     for (narrow, wide) in [
         ("    def id: () -> Integer\n", "    def id: () -> (Integer | String)\n"),
         ("    def id=: (Integer) -> Integer\n", "    def id=: (Integer | String) -> (Integer | String)\n"),
+        ("    def _primary_key_value: () -> Integer\n", "    def _primary_key_value: () -> (Integer | String)\n"),
         ("    def _adapter_insert: () -> Integer\n", "    def _adapter_insert: () -> (Integer | String)\n"),
     ] {
         if !text.contains(narrow) {

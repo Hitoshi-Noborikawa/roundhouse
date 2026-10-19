@@ -36,6 +36,10 @@ const FILES: &[(&str, &str)] = &[
     t.integer :id, null: false
     t.string :order, null: false
   end
+  create_table :flagged_labels, primary_key: :identifier, id: :string do |t|
+    t.integer :id, null: false
+    t.string :name, null: false
+  end
 end
 "#,
     ),
@@ -107,6 +111,10 @@ end
     (
         "app/models/ranked_item.rb",
         "class RankedItem < ApplicationRecord\nend\n",
+    ),
+    (
+        "app/models/flagged_label.rb",
+        "class FlaggedLabel < ApplicationRecord\nend\n",
     ),
     (
         "app/models/key_reader.rb",
@@ -425,6 +433,16 @@ raise "id column class" unless ProjectionProbe.label_ids == [4]
 raise "id column rows" unless ProjectionProbe.label_rows == [[4, "labeled"]]
 raise "bare pluck keeps id" unless ProjectionProbe.label_all == [[4, "key-4", "labeled"]]
 raise "ids stays the key" unless ProjectionProbe.label_keys == ["key-4"]
+loaded = LabeledWidget.all
+loaded_rows = loaded.to_a
+raise "id reader stays the column" unless loaded_rows[0].id == 4
+raise "loaded ids stays the key" unless loaded.ids == ["key-4"]
+ActiveRecord.adapter.execute_ddl("INSERT INTO flagged_labels (id, identifier, name) VALUES (4, 'key-4', 'flagged')")
+flagged = FlaggedLabel.all
+raise "flagged pluck id" unless flagged.pluck(:id) == [4]
+flagged_rows = flagged.to_a
+raise "flagged id reader stays the column" unless flagged_rows[0].id == 4
+raise "flagged loaded ids stays the key" unless flagged.ids == ["key-4"]
 raise "model method ids" unless KeyReader.inlined_ids == ["key-4"]
 raise "model method override" unless KeyReader.inlined_override == ["override"]
 raise "model method sql pluck" unless KeyReader.inlined_names == ["stored name"]
