@@ -268,6 +268,11 @@ fn ruby_family_runtime_constants_are_ledgered_on_other_targets() {
       head :not_found
     end
   end
+
+  def surface
+    [Arel::Nodes, Arel::Nodes::Node, Arel::Nodes::SqlLiteral, Arel::Nodes::Quoted,
+     Arel::Nodes::Not, Arel::Nodes::Case, Arel::Nodes::NamedFunction]
+  end
 end
 "#),
     ].into_iter().map(|(path, text)| (PathBuf::from(path), text.as_bytes().to_vec())).collect();

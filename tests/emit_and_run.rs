@@ -9,6 +9,8 @@
 mod emit_and_run;
 #[path = "emit_and_run/active_model_attributes.rs"]
 mod active_model_attributes;
+#[path = "emit_and_run/arel_nodes.rs"]
+mod arel_nodes;
 #[path = "emit_and_run/database_tasks.rs"]
 mod database_tasks;
 #[path = "emit_and_run/date_calendar_duration.rs"]
