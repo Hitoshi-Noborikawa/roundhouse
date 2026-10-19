@@ -1134,10 +1134,17 @@ fn every_runtime_method_body_concretely_typed() {
     // MEASURED 772 on 2026-10-19: `deep_dup` asks a Hash key's class
     // once and defers every other key. The second pass no longer
     // repeats that `is_a?` pair (776 -> 772).
-    const CEILING: usize = 772;
+    // MEASURED 776 on 2026-10-19 after merging main's 772.
+    // `ActiveRecord::Tasks` yields the connection (or nothing) to the
+    // caller's block. A `yield` outside a view is untyped, the same
+    // block-return escape `transaction` carries (+4 in
+    // active_record/tasks.rb: `with_connection`,
+    // `with_temporary_connection`, and `with_temporary_pool`'s yield
+    // plus the begin that answers it).
+    const CEILING: usize = 776;
     assert!(
         total_gradual <= CEILING,
-        "{total_gradual} Ty::Untyped sites exceeds ceiling of {CEILING}",
+        "{total_gradual} Ty::Untyped sites exceeds ceiling of {CEILING}"
     );
 }
 

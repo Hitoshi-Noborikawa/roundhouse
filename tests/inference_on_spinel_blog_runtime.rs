@@ -429,7 +429,14 @@ fn untyped_subexpressions_baseline() {
     // MEASURED 631 on 2026-10-19: save and destroy share
     // `_enlist_or_run`, so the `Db._txn_depth` / `Db._txn_records`
     // walk is read once.
-    const CEILING: usize = 631;
+    // MEASURED 837 on 2026-10-19 after merging main (`sanitize_sql_like`
+    // stays 3). Main's ledger was 631. `ActiveRecord::Tasks` and the
+    // Rake subset add the unseeded-parameter and `Db` reads this probe
+    // does not type; the RBS-paired probe types the same files.
+    // MEASURED 844 on 2026-10-19: schema load plans every statement
+    // before the first DROP, and migrate refuses a schema dump before
+    // it rewrites a table. Those helpers are unseeded here.
+    const CEILING: usize = 844;
     assert!(
         existing_untyped <= CEILING && like_untyped <= LIKE_CEILING,
         "{} untyped sub-expressions on spinel-blog runtime — exceeds ledger: \
