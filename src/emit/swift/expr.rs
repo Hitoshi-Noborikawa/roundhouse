@@ -2585,6 +2585,10 @@ fn emit_send(
     args: &[Expr],
     block: Option<&Expr>,
 ) -> String {
+    if let Some(recv) = crate::emit::shared::fn_call::function_receiver(recv, method, block) {
+        let args_s: Vec<String> = args.iter().map(emit_expr).collect();
+        return format!("{}({})", emit_expr(recv), args_s.join(", "));
+    }
     let args_s: Vec<String> = args.iter().map(emit_expr).collect();
 
     // Temporal reader intrinsic: `ActiveSupport.parse_db_time(s)` parses a

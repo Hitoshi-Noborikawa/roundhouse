@@ -53,6 +53,7 @@ fn forwarded_block_may_be_nil(ty: &Ty) -> bool {
 
 mod diagnostic;
 mod const_resolution;
+mod lambda_local;
 pub(crate) use const_resolution::{ConstResolver, ConstResolverTask};
 pub use const_resolution::PreparedConstResolver;
 use const_resolution::ResolvedConstant;
@@ -362,6 +363,9 @@ pub struct BodyTyper<'a> {
     i18n: Option<&'a crate::i18n::Catalog>,
     helper_modules: Option<&'a std::collections::HashSet<ClassId>>,
     open_classes: Option<&'a crate::analyze::open_classes::OpenClasses>,
+    /// Parameter types for the lambda assignment currently being retyped
+    /// from its `.call` sites. Empty during an ordinary walk.
+    lambda_seeds: std::cell::RefCell<Option<lambda_local::Seeds>>,
 }
 
 impl<'a> BodyTyper<'a> {
@@ -485,7 +489,106 @@ impl<'a> BodyTyper<'a> {
     }
 
     pub fn new(classes: &'a HashMap<ClassId, ClassInfo>) -> Self {
-        Self { classes, const_resolver: None, typed_constants: None, data_factories: None, class_factories: None, inquirers: None, i18n: None, helper_modules: None, open_classes: None }
+        Self { classes, const_resolver: None, typed_constants: None, data_factories: None, class_factories: None, inquirers: None, i18n: None, helper_modules: None, open_classes: None, lambda_seeds: std::cell::RefCell::new(None) }
+    }
+
+    /// Retype lambdas stored in this sequence once a later statement has
+    /// called them. Evidence is re-read from the statement and from every
+    /// stored lambda after each retype, so `run = ->(x) { add.call(x) }`
+    /// seeds `add` once `x` is known. The call statement is retyped once
+    /// at the end so its result sees the new returns.
+    fn refine_lambda_locals(
+        &self,
+        exprs: &mut [Expr],
+        stmt: usize,
+        local_ctx: &mut Ctx,
+        lambdas: &mut HashMap<Symbol, lambda_local::Stored>,
+        last: &mut Ty,
+    ) {
+        let mut stmt_dirty = false;
+        loop {
+            let names: Vec<Symbol> = lambdas.keys().cloned().collect();
+            let mut seeded = Vec::new();
+            for name in &names {
+                let evidence = lambda_call_evidence(exprs, stmt, lambdas, name);
+                let Some(stored) = lambdas.get_mut(name) else { continue };
+                if lambda_local::merge(stored, &evidence) {
+                    seeded.push(name.clone());
+                }
+            }
+            if seeded.is_empty() {
+                break;
+            }
+            stmt_dirty = true;
+            self.retype_seeded_lambdas(exprs, local_ctx, lambdas, seeded);
+        }
+        if !stmt_dirty {
+            return;
+        }
+        // The statement is the lambda assignment itself. It was retyped
+        // with its seeds above; analyzing it again would type the lambda
+        // with none.
+        if lambdas.values().any(|stored| stored.index == stmt) {
+            *last = exprs[stmt].ty.clone().unwrap_or_else(unknown);
+            return;
+        }
+        *last = self.analyze_expr(&mut exprs[stmt], local_ctx);
+    }
+
+    /// Retype each seeded lambda, then any lambda whose body calls one
+    /// whose type just changed. `merge` only unions, and a retype is
+    /// skipped once the type stops moving, so the fuel cap is a backstop.
+    fn retype_seeded_lambdas(
+        &self,
+        exprs: &mut [Expr],
+        local_ctx: &mut Ctx,
+        lambdas: &HashMap<Symbol, lambda_local::Stored>,
+        seeded: Vec<Symbol>,
+    ) {
+        let mut pending = seeded;
+        let mut fuel = lambdas.len().saturating_mul(lambdas.len()).saturating_add(1);
+        while let Some(name) = pending.pop() {
+            if fuel == 0 {
+                break;
+            }
+            fuel -= 1;
+            if !self.retype_stored_lambda(exprs, local_ctx, lambdas, &name) {
+                continue;
+            }
+            for (other, stored) in lambdas.iter() {
+                if other == &name || pending.contains(other) {
+                    continue;
+                }
+                if !lambda_local::calls_in(&exprs[stored.index], &name).is_empty() {
+                    pending.push(other.clone());
+                }
+            }
+        }
+    }
+
+    /// Retype one stored lambda. False when its type did not change.
+    fn retype_stored_lambda(
+        &self,
+        exprs: &mut [Expr],
+        local_ctx: &mut Ctx,
+        lambdas: &HashMap<Symbol, lambda_local::Stored>,
+        name: &Symbol,
+    ) -> bool {
+        let Some(stored) = lambdas.get(name) else { return false };
+        let index = stored.index;
+        let mut ctx = stored.ctx.clone();
+        let seeds = lambda_local::seeds_of(stored);
+        for (other, ty) in &local_ctx.local_bindings {
+            if lambdas.contains_key(other) {
+                ctx.local_bindings.insert(other.clone(), ty.clone());
+            }
+        }
+        *self.lambda_seeds.borrow_mut() = Some(seeds);
+        let ty = self.analyze_expr(&mut exprs[index], &ctx);
+        *self.lambda_seeds.borrow_mut() = None;
+        let changed = local_ctx.local_bindings.get(name) != Some(&ty);
+        local_ctx.local_bindings.insert(name.clone(), ty);
+        changed
     }
 
     pub(crate) fn with_open_classes(mut self, open: &'a crate::analyze::open_classes::OpenClasses) -> Self {
@@ -1344,13 +1447,19 @@ impl<'a> BodyTyper<'a> {
                 for name in params.iter().chain(rest_param.iter()).chain(block_param.iter()) {
                     inner.class_objects.remove(name);
                 }
+                // Call-site evidence for a lambda stored in a local. Taken
+                // here so a nested lambda does not consume it. Block
+                // parameters still arrive through `ctx` from `block_ctx_for`.
+                let seeds = self.lambda_seeds.borrow_mut().take();
+                if let Some(seeds) = &seeds {
+                    seeds.bind_positionals(&mut inner, params);
+                }
                 // Optional, keyword and keyword-rest parameters bind in the
                 // body like any local: an optional as its default's type,
                 // `**opts` as a Symbol-keyed Hash, a required keyword as
-                // untyped (no caller evidence here, the same gradual answer a
-                // block parameter gets). A default is typed in the lambda's
-                // own scope as filled so far, so it reads an earlier extra
-                // parameter (`c = b`) rather than an outer local.
+                // untyped until a `.call` site names it. A default is typed
+                // in the lambda's own scope as filled so far, so it reads an
+                // earlier extra parameter (`c = b`) rather than an outer local.
                 for param in extra_params.iter_mut() {
                     let ty = match (&mut param.default, param.keyword && param.rest) {
                         (_, true) => Ty::Hash { key: std::sync::Arc::new(Ty::Sym), value: std::sync::Arc::new(Ty::Untyped) },
@@ -1363,16 +1472,20 @@ impl<'a> BodyTyper<'a> {
                     inner.class_objects.remove(&param.name);
                     inner.local_bindings.insert(param.name.clone(), ty);
                 }
+                if let Some(seeds) = &seeds {
+                    seeds.bind_keywords(&mut inner, extra_params);
+                }
                 let body_ty = self.analyze_expr(body, &inner);
-                // Synthesize a `Fn` type from the body's type. Param
-                // types aren't tracked here (they were seeded into the
-                // outer Ctx by block_ctx_for from the receiver
-                // signature); the lambda's *own* type just records the
-                // body's return type so callers can walk past the
-                // Lambda node without seeing Var. Effects default to
-                // pure; full effect inference is future work.
+                // A block's parameter types were seeded into `ctx` and are
+                // not repeated here. A stored lambda records the types its
+                // `.call` sites supplied, so the value's type is
+                // `^(Integer) -> Integer` rather than `^() -> untyped`.
+                let fn_params = match &seeds {
+                    Some(seeds) => seeds.fn_params(params),
+                    None => Vec::new(),
+                };
                 Ty::Fn {
-                    params: Vec::new().into(),
+                    params: fn_params.into(),
                     block: None,
                     ret: std::sync::Arc::new(body_ty),
                     effects: crate::effect::EffectSet::pure(),
@@ -2363,6 +2476,10 @@ impl<'a> BodyTyper<'a> {
                 // Statement index of each live empty-hash seed (`attrs =
                 // {}`) — the Hash counterpart of `array_seed_idx`.
                 let mut hash_seed_idx: HashMap<(bool, Symbol), usize> = HashMap::new();
+                // Lambdas assigned to locals in this sequence. Later
+                // `.call` sites refine their parameter types and the
+                // assignment is retyped. A reassignment drops the entry.
+                let mut lambda_locals: HashMap<Symbol, lambda_local::Stored> = HashMap::new();
                 for i in 0..exprs.len() {
                     let read_structurally_later = match &*exprs[i].node {
                         ExprNode::Assign { target: LValue::Var { name, .. }, .. } => {
@@ -2371,33 +2488,44 @@ impl<'a> BodyTyper<'a> {
                         _ => false,
                     };
                     let tail = i + 1 == exprs.len();
-                    let e = &mut exprs[i];
-                    if !tail {
-                        mark_discarded(e);
-                    }
-                    if !matches!(&*e.node, ExprNode::Assign { target: LValue::Var { .. }, .. }) {
-                        forget_class_object_writes(e, &mut local_ctx);
-                    }
-                    last = self.analyze_expr(e, &local_ctx);
-                    // A self binding gives `self` its declared type from
-                    // the next statement to the end of this body, blocks
-                    // inside included. It changes only how `self` types:
-                    // which class a method defined below belongs to is
-                    // settled at ingest, lexically. A class-object binding
-                    // puts `self` on the class side, as in a `def self.x`.
-                    if crate::expr::is_self_binding(e) {
-                        if local_ctx.lexical_self.is_none() {
-                            local_ctx.lexical_self = local_ctx.self_ty.clone();
+                    {
+                        let e = &mut exprs[i];
+                        if !tail {
+                            mark_discarded(e);
                         }
-                        local_ctx.self_ty = e.ty.clone();
-                        local_ctx.class_side = e.decisions & crate::expr::SELF_BINDING_CLASS_OBJECT != 0;
+                        if !matches!(&*e.node, ExprNode::Assign { target: LValue::Var { .. }, .. }) {
+                            forget_class_object_writes(e, &mut local_ctx);
+                        }
+                        last = self.analyze_expr(e, &local_ctx);
+                        // A self binding gives `self` its declared type from
+                        // the next statement to the end of this body, blocks
+                        // inside included. It changes only how `self` types:
+                        // which class a method defined below belongs to is
+                        // settled at ingest, lexically. A class-object binding
+                        // puts `self` on the class side, as in a `def self.x`.
+                        if crate::expr::is_self_binding(e) {
+                            if local_ctx.lexical_self.is_none() {
+                                local_ctx.lexical_self = local_ctx.self_ty.clone();
+                            }
+                            local_ctx.self_ty = e.ty.clone();
+                            local_ctx.class_side = e.decisions & crate::expr::SELF_BINDING_CLASS_OBJECT != 0;
+                        }
+                        if let ExprNode::Assign { target: LValue::Var { name, .. }, value } = &*e.node {
+                            let proven = self.is_class_object(value, &local_ctx);
+                            forget_class_object_writes(value, &mut local_ctx);
+                            local_ctx.class_objects.remove(name);
+                            if proven { local_ctx.class_objects.insert(name.clone()); }
+                            // Before the binding insert below: the lambda body
+                            // was typed in this `local_ctx`, without its own name.
+                            lambda_local::remember(&mut lambda_locals, i, e, &local_ctx);
+                        }
                     }
-                    if let ExprNode::Assign { target: LValue::Var { name, .. }, value } = &*e.node {
-                        let proven = self.is_class_object(value, &local_ctx);
-                        forget_class_object_writes(value, &mut local_ctx);
-                        local_ctx.class_objects.remove(name);
-                        if proven { local_ctx.class_objects.insert(name.clone()); }
-                    }
+                    // Before the binding insert and the seed/narrowing
+                    // epilogue. Those read this statement's types, and a
+                    // `.call` in it may have just given the lambda its
+                    // parameter types.
+                    self.refine_lambda_locals(exprs, i, &mut local_ctx, &mut lambda_locals, &mut last);
+                    let e = &mut exprs[i];
                     if let ExprNode::Assign { target, value } = &*e.node {
                         let slot = match target {
                             LValue::Ivar { name } => Some((true, name.clone())),
@@ -3131,6 +3259,22 @@ fn kernel_array_elem(arg: &Ty) -> Option<Ty> {
 
 pub(super) fn unknown() -> Ty {
     Ty::Var { var: TyVar(0) }
+}
+
+fn lambda_call_evidence(
+    exprs: &[Expr],
+    stmt: usize,
+    lambdas: &HashMap<Symbol, lambda_local::Stored>,
+    name: &Symbol,
+) -> Vec<lambda_local::Evidence> {
+    let mut evidence = lambda_local::calls_in(&exprs[stmt], name);
+    for (other, stored) in lambdas {
+        if other == name || stored.index == stmt {
+            continue;
+        }
+        evidence.extend(lambda_local::calls_in(&exprs[stored.index], name));
+    }
+    evidence
 }
 
 /// Stamp the expected type onto an empty Hash/Array literal so the

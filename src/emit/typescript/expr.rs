@@ -2199,6 +2199,9 @@ fn js_send_inner(
     args: &[Expr],
     parenthesized: bool,
 ) -> Js {
+    if let Some(recv) = crate::emit::shared::fn_call::function_receiver(recv, method, None) {
+        return Js::call(span, js_expr(recv), args.iter().map(js_expr).collect());
+    }
     // Temporal reader intrinsic: `ActiveSupport.parse_db_time(s)` parses
     // stored ISO-8601 text into a native `Date` (nil-safe: `string | null`
     // → `Date | null`). Maps to the hand-written `RhDateTime.parse`

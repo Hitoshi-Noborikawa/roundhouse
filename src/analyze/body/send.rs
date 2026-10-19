@@ -1191,7 +1191,7 @@ impl<'a> BodyTyper<'a> {
         // runtime site) answers the function's declared return. Only
         // a `Ty::Fn` receiver claims this; anything else keeps its
         // own `call` (a callable app class, an untyped proc).
-        if method.as_str() == "call" {
+        if matches!(method.as_str(), "call" | "[]") {
             if let Some(Ty::Fn { ret, .. }) = recv_ty {
                 // Not left a type variable: `call` is known, and what the body answers is the body's own sends' to report.
                 return match &**ret {
