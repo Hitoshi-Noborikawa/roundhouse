@@ -5503,6 +5503,24 @@ fn render_inertia_always_prop_is_not_a_survey_gap() {
 }
 
 #[test]
+fn inertia_once_merge_and_lazy_props_stay_survey_gaps() {
+    for source in [
+        "class WidgetsController < ApplicationController\n  def index\n    render inertia: \"widgets/index\", props: { row: InertiaRails.once { 1 } }\n  end\nend\n",
+        "class WidgetsController < ApplicationController\n  def index\n    render inertia: \"widgets/index\", props: { row: InertiaRails.merge { 1 } }\n  end\nend\n",
+        "class WidgetsController < ApplicationController\n  def index\n    render inertia: \"widgets/index\", props: { row: InertiaRails.lazy { 1 } }\n  end\nend\n",
+        "class WidgetsController < ApplicationController\n  def index\n    render inertia: \"widgets/index\", props: { row: InertiaRails.scroll { 1 } }\n  end\nend\n",
+    ] {
+        let mut files = INERTIA_APP.to_vec();
+        files[5] = ("app/controllers/widgets_controller.rb", source);
+        let (_, gaps) = inertia_check(&files);
+        assert!(
+            gaps.iter().any(|g| g.contains("prop type other than `optional`/`defer`/`always`")),
+            "{source}\n{gaps:#?}"
+        );
+    }
+}
+
+#[test]
 fn render_inertia_with_computed_props_has_no_survey_gap() {
     let mut files = INERTIA_APP.to_vec();
     files[5] = (
