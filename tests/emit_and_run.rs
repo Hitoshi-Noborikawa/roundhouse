@@ -15784,6 +15784,74 @@ end
 }
 
 #[test]
+fn inertia_preserve_fragment_reaches_the_next_visit_once() {
+    emit_and_run::real_blog()
+        .edit(
+            "config/routes.rb",
+            "  root \"articles#index\"\n",
+            "  root \"articles#index\"\n  get \"/pages/show\", to: \"pages#show\"\n  patch \"/pages\", to: \"pages#update\"\n  patch \"/pages/drop\", to: \"pages#drop\"\n",
+        )
+        .write(
+            "config/initializers/inertia_rails.rb",
+            "InertiaRails.configure do |config|\n  config.version = \"v1\"\n  config.use_script_element_for_initial_page = true\nend\n",
+        )
+        .write(
+            "app/controllers/pages_controller.rb",
+            r#"class PagesController < ApplicationController
+  def show
+    render inertia: "pages/show", props: { title: "kept" }
+  end
+
+  def update
+    redirect_to "/pages/show", inertia: { preserve_fragment: true }
+  end
+
+  def drop
+    redirect_to "/pages/show", inertia: { preserve_fragment: false }
+  end
+end
+"#,
+        )
+        .write(
+            "test/controllers/pages_controller_test.rb",
+            r#"require "test_helper"
+
+class PagesControllerTest < ActionDispatch::IntegrationTest
+  INERTIA = { "X-Inertia" => "true", "X-Inertia-Version" => "v1" }
+
+  test "preserve_fragment is on the next visit and then gone" do
+    patch "/pages", headers: INERTIA
+    assert_response 303
+    get "/pages/show", headers: INERTIA
+    assert_equal true, response.parsed_body["preserveFragment"]
+    get "/pages/show", headers: INERTIA
+    assert_nil response.parsed_body["preserveFragment"]
+  end
+
+  test "a stale version keeps preserve_fragment for the full-page reload" do
+    patch "/pages", headers: INERTIA
+    get "/pages/show", headers: { "X-Inertia" => "true", "X-Inertia-Version" => "v0" }
+    assert_response 409
+    get "/pages/show"
+    assert_includes response.body, %("preserveFragment":true)
+    get "/pages/show"
+    refute_includes response.body, "preserveFragment"
+  end
+
+  test "a false flag does not preserve the fragment" do
+    patch "/pages/drop", headers: INERTIA
+    assert_response 303
+    get "/pages/show", headers: INERTIA
+    assert_nil response.parsed_body["preserveFragment"]
+  end
+end
+"#,
+        )
+        .run_test("test/controllers/pages_controller_test.rb")
+        .assert_passes();
+}
+
+#[test]
 fn render_inertia_answers_html_and_json_visits() {
     emit_and_run::real_blog()
         .edit(

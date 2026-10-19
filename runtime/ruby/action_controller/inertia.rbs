@@ -12,6 +12,7 @@ module ActionController
     @deferred_groups: Array[String]
     @deferred_keys: Array[String]
     @clear_history: bool
+    @preserve_fragment: bool
 
     def initialize: () -> void
     def version: () -> String
@@ -22,9 +23,11 @@ module ActionController
     def optional?: (String key) -> bool
     def deferred?: (String key, String group) -> bool
     def mark_clear_history: () -> nil
+    def mark_preserve_fragment: () -> nil
     def mark_shared: (String key) -> nil
     def prop_json: (String key, String json) -> nil
     def page_json: (String url, String? notice, String? alert) -> String
+    def preserve_fragment_json: () -> String
     def flash_json: (String? notice, String? alert) -> String
     def shared_json: () -> String
     def deferred_json: () -> String
@@ -41,6 +44,7 @@ module ActionController
     def inertia_stale_version?: (String version) -> bool
     def inertia_errors_json: (String json) -> nil
     def inertia_clear_history: (bool flag) -> nil
+    def inertia_preserve_fragment: (bool flag) -> nil
     def inertia_url: () -> String
     def render_inertia_json: (?status: Symbol) -> nil
     def inertia_redirect_see_other: () -> nil

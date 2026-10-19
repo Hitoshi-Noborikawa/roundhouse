@@ -19,6 +19,7 @@ module ActionController
       @deferred_groups = []
       @deferred_keys = []
       @clear_history = false
+      @preserve_fragment = false
     end
 
     def start_page(component, version, encrypt_history, partial_component, partial_data, partial_except)
@@ -34,6 +35,7 @@ module ActionController
       @deferred_groups = []
       @deferred_keys = []
       @clear_history = false
+      @preserve_fragment = false
       nil
     end
 
@@ -78,6 +80,11 @@ module ActionController
       nil
     end
 
+    def mark_preserve_fragment
+      @preserve_fragment = true
+      nil
+    end
+
     def mark_shared(key)
       @shared_keys << key unless @shared_keys.include?(key)
       nil
@@ -108,7 +115,15 @@ module ActionController
       out = out + ",\"encryptHistory\":" + (@encrypt_history ? "true" : "false")
       out = out + ",\"clearHistory\":" + (@clear_history ? "true" : "false")
       out = out + flash_json(notice, alert)
+      out = out + preserve_fragment_json
       out + shared_json + deferred_json + "}"
+    end
+
+    # Omitted when false, matching inertia-rails: the key is present only
+    # after a redirect that asked to keep the URL fragment.
+    def preserve_fragment_json
+      return "" unless @preserve_fragment
+      ",\"preserveFragment\":true"
     end
 
     def flash_json(notice, alert)
@@ -202,6 +217,10 @@ module ActionController
         session.delete("inertia_clear_history")
         page.mark_clear_history
       end
+      if session["inertia_preserve_fragment"] == "true"
+        session.delete("inertia_preserve_fragment")
+        page.mark_preserve_fragment
+      end
       nil
     end
 
@@ -222,6 +241,11 @@ module ActionController
     # an earlier redirect already stored.
     def inertia_clear_history(flag)
       session["inertia_clear_history"] = "true" if flag
+      nil
+    end
+
+    def inertia_preserve_fragment(flag)
+      session["inertia_preserve_fragment"] = "true" if flag
       nil
     end
 

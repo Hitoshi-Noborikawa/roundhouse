@@ -680,6 +680,7 @@ fn redirect_replacement(e: &Expr) -> Option<Expr> {
     };
     let mut errors = None;
     let mut clear_history = None;
+    let mut preserve_fragment = None;
     for (k, v) in inertia_entries {
         match literal_key(k).as_deref() {
             Some("errors") => errors = Some(v.clone()),
@@ -696,10 +697,22 @@ fn redirect_replacement(e: &Expr) -> Option<Expr> {
                 };
                 clear_history = Some(v.clone());
             }
+            // `redirect_to path, inertia: { preserve_fragment: true }` —
+            // the next visit's page object carries `preserveFragment`, once.
+            Some("preserve_fragment") => {
+                let ExprNode::Lit { value: Literal::Bool { .. } } = &*v.node else {
+                    record_gap(
+                        e.span,
+                        "`inertia:` redirect `preserve_fragment:` that is not `true` or `false`; the call is left as written",
+                    );
+                    return None;
+                };
+                preserve_fragment = Some(v.clone());
+            }
             _ => {
                 record_gap(
                     e.span,
-                    "`inertia:` redirect option other than `errors:` or `clear_history:`; the call is left as written",
+                    "`inertia:` redirect option other than `errors:`, `clear_history:`, or `preserve_fragment:`; the call is left as written",
                 );
                 return None;
             }
@@ -719,6 +732,9 @@ fn redirect_replacement(e: &Expr) -> Option<Expr> {
     }
     if let Some(flag) = clear_history {
         stmts.push(call(span, None, "inertia_clear_history", vec![flag]));
+    }
+    if let Some(flag) = preserve_fragment {
+        stmts.push(call(span, None, "inertia_preserve_fragment", vec![flag]));
     }
     let kept: Vec<(Expr, Expr)> = entries
         .iter()
