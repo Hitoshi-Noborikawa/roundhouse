@@ -1924,7 +1924,8 @@ fn redirect_expression_is_string(expr: &crate::expr::Expr) -> bool {
 /// A redirect block's value is a string. Locals count once this block
 /// has assigned them a string (`base = "/widgets/#{params[:id]}"`, then
 /// `query.empty? ? base : "#{base}?#{query}"`). Each branch of an `if`
-/// sees the assignments from before it, not from the other branch.
+/// sees the assignments from before it, not from the other branch. A
+/// name both branches assign a string is visible after the `if`.
 fn redirect_expression_is_string_in(
     expr: &crate::expr::Expr,
     strings: &mut HashSet<Symbol>,
@@ -1937,8 +1938,14 @@ fn redirect_expression_is_string_in(
         ExprNode::If { then_branch, else_branch, .. } => {
             let mut then_strings = strings.clone();
             let mut else_strings = strings.clone();
-            redirect_expression_is_string_in(then_branch, &mut then_strings)
-                && redirect_expression_is_string_in(else_branch, &mut else_strings)
+            let then_ok = redirect_expression_is_string_in(then_branch, &mut then_strings);
+            let else_ok = redirect_expression_is_string_in(else_branch, &mut else_strings);
+            // A name both branches still treat as a string is a string
+            // after the `if`. A name written on only one side stays local
+            // to that side.
+            strings.clear();
+            strings.extend(then_strings.intersection(&else_strings).cloned());
+            then_ok && else_ok
         }
         ExprNode::Assign { target: LValue::Var { name, .. }, value } => {
             let ok = redirect_expression_is_string_in(value, strings);
@@ -1950,19 +1957,26 @@ fn redirect_expression_is_string_in(
             ok
         }
         ExprNode::Send { method, recv, args, .. } => {
-            // `present?` is rewritten to `!(...).strip.empty?` before this
-            // check. The result is a string when that call's argument is.
-            if method.as_str() == "!" {
-                return args.iter().any(|arg| redirect_expression_is_string_in(arg, strings));
+            // `strip` returns a string. `empty?`, `present?`, and `!`
+            // return booleans (`present?` lowers to `!(...).strip.empty?`),
+            // so a redirect whose value is that predicate stays unsupported.
+            if matches!(method.as_str(), "!" | "empty?" | "present?") {
+                for arg in args {
+                    redirect_expression_is_string_in(arg, strings);
+                }
+                if let Some(recv) = recv {
+                    redirect_expression_is_string_in(recv, strings);
+                }
+                return false;
             }
-            if matches!(method.as_str(), "strip" | "empty?") {
-                return recv.as_ref().is_some_and(|recv| redirect_expression_is_string_in(recv, strings))
-                    || args.iter().any(|arg| redirect_expression_is_string_in(arg, strings));
+            if method.as_str() == "strip" {
+                let recv_ok = recv.as_ref().is_some_and(|recv| redirect_expression_is_string_in(recv, strings));
+                for arg in args {
+                    redirect_expression_is_string_in(arg, strings);
+                }
+                return recv_ok;
             }
-            matches!(
-                method.as_str(),
-                "query_string" | "path" | "fullpath" | "to_s" | "+" | "[]" | "present?"
-            )
+            matches!(method.as_str(), "query_string" | "path" | "fullpath" | "to_s" | "+" | "[]")
         }
         ExprNode::Seq { exprs } => {
             let mut last = false;

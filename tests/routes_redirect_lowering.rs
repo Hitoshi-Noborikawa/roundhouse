@@ -278,6 +278,43 @@ fn engine_routes_stay_explicit_gaps() {
 }
 
 #[test]
+fn an_if_publishes_a_string_assigned_on_both_branches() {
+    let app = app_with(
+        "  get \"/reports\", to: \"reports#index\"\n  get \"/branched\", to: redirect { |request|\n    if request.query_string.empty?\n      path = \"/reports\"\n    else\n      path = \"/reports?#{request.query_string}\"\n    end\n    path\n  }\n  get \"/half\", to: redirect { |request|\n    if request.query_string.empty?\n      path = \"/reports\"\n    end\n    path\n  }\n  get \"/flag\", to: redirect { |request| request.query_string.empty? }\n  get \"/present\", to: redirect { |request| request.query_string.present? }\n  get \"/stripped\", to: redirect { |request| request.query_string.strip }\n",
+    );
+    let emitted = redirect_controller(&app);
+    assert!(
+        emitted.contains("def branched") && emitted.contains("query_string"),
+        "a string assigned on both branches is the redirect; got:\n{emitted}"
+    );
+    assert!(
+        !app.routes.entries.iter().any(|entry| matches!(
+            entry,
+            roundhouse::dialect::RouteSpec::Explicit { path, .. } if path == "/half"
+        )),
+        "one branch leaves the name unset; routes = {:?}",
+        app.routes.entries
+    );
+    assert!(
+        !app.routes.entries.iter().any(|entry| matches!(
+            entry,
+            roundhouse::dialect::RouteSpec::Explicit { path, .. } if path == "/flag"
+        )),
+        "empty? is a boolean, not a string; routes = {:?}",
+        app.routes.entries
+    );
+    assert!(
+        !app.routes.entries.iter().any(|entry| matches!(
+            entry,
+            roundhouse::dialect::RouteSpec::Explicit { path, .. } if path == "/present"
+        )),
+        "present? is a boolean, not a string; routes = {:?}",
+        app.routes.entries
+    );
+    assert!(emitted.contains("def stripped"), "strip stays a string; got:\n{emitted}");
+}
+
+#[test]
 fn a_block_redirect_is_still_dropped_with_its_ledger_line() {
     // There is no literal to serve, so the #82 contract stands.
     let app = app_with(
