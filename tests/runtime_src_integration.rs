@@ -1096,13 +1096,18 @@ fn every_runtime_method_body_concretely_typed() {
     // MEASURED 793 on 2026-10-19: the class-side query fallbacks
     // (`Model.maximum(:x)` through `all`, connection.rb) answer the column's
     // value as `Relation#maximum` / `#pick` do, whatever the column holds (+2).
-    // MEASURED 808 on 2026-10-19: a computed Inertia props hash is whatever
-    // the helper returned. `merge_inertia_props` walks it, `apply_inertia_prop`
-    // reads a Proc or an `InertiaRails::Prop`, and `instance_exec` is Kernel's
-    // method (`super`), typed `untyped` because this registry does not know
-    // Kernel. The session flags are read back from an untyped session value
-    // (+15 in action_controller/inertia.rb).
-    const CEILING: usize = 808;
+    // MEASURED 797 on 2026-10-19: a computed prop value is whatever the
+    // helper put in the hash. `apply_inertia_prop` reads that untyped value
+    // for `is_a?(InertiaRails::Prop)`, for `is_a?(Proc)`, and again to encode
+    // a plain value (+3 in action_controller/inertia.rb). `inertia_exec`
+    // calls Kernel#instance_exec; the block result is untyped, so that
+    // send stays (+1). Down from 808: the props hash is
+    // `Hash[String | Symbol, untyped]` (the walk's key reads dropped), the
+    // stored proc and the controller are typed, encoding happens inside
+    // `inertia_exec` (no separate `inertia_prop_json` read), and
+    // `instance_exec` is abstract instead of a `super` wrapper. Session
+    // flag reads are not gradual sites.
+    const CEILING: usize = 797;
     assert!(
         total_gradual <= CEILING,
         "{total_gradual} Ty::Untyped sites exceeds ceiling of {CEILING}",

@@ -49,11 +49,13 @@ module ActionController
     def inertia_url: () -> String
     def render_inertia_json: (?status: Symbol) -> nil
     def inertia_redirect_see_other: () -> nil
-    def merge_inertia_props: (untyped hash) -> nil
+    def merge_inertia_props: (Hash[String | Symbol, untyped] hash) -> nil
     def apply_inertia_prop: (ActionController::InertiaPage page, String name, untyped raw) -> nil
-    def inertia_prop_json: (untyped value) -> String
-    def instance_exec: (*untyped args) -> untyped
-    def inertia_exec: (untyped work) -> untyped
+    # Kernel's method. No body here: a `super` wrapper is untyped because
+    # parent lookup is not modeled. The block result stays untyped.
+    %a{abstract}
+    def instance_exec: () { () -> untyped } -> untyped
+    def inertia_exec: (^() -> untyped work) -> String
     def inertia_root_html: (bool use_script_element) -> String
   end
 end
@@ -62,13 +64,13 @@ module InertiaRails
   class Prop
     @kind: String
     @group: String
-    @block: untyped
+    @block: (^() -> untyped)?
 
     def initialize: (String kind, String group) -> void
     def kind: () -> String
     def group: () -> String
-    def store: (untyped work) -> nil
-    def call: (untyped controller) -> untyped
+    def store: (^() -> untyped work) -> nil
+    def call: (ActionController::Base controller) -> String
   end
 
   def self.optional: () { () -> untyped } -> InertiaRails::Prop

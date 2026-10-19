@@ -314,44 +314,33 @@ module ActionController
         kind = raw.kind
         if kind == "defer"
           if page.deferred?(name, raw.group)
-            page.prop_json(name, inertia_prop_json(raw.call(self)))
+            page.prop_json(name, raw.call(self))
           end
         elsif kind == "optional"
           if page.optional?(name)
-            page.prop_json(name, inertia_prop_json(raw.call(self)))
+            page.prop_json(name, raw.call(self))
           end
         elsif kind == "always"
-          page.prop_json(name, inertia_prop_json(raw.call(self)))
+          page.prop_json(name, raw.call(self))
         end
       elsif raw.is_a?(Proc)
         if page.eager?(name)
-          page.prop_json(name, inertia_prop_json(inertia_exec(raw)))
+          page.prop_json(name, inertia_exec(raw))
         end
       elsif page.eager?(name)
-        page.prop_json(name, inertia_prop_json(raw))
+        # Same encoder a literal prop is lowered to. It walks a Hash or
+        # Array and calls `as_json` on a record. The method lives in the
+        # JSON runtime, so this file does not define it.
+        page.prop_json(name, ActionController::JsonRender.encode(raw))
       end
       nil
     end
 
-    # Same encoder the literal-prop lowerer emits (`JsonRender.encode`).
-    # It walks a Hash or Array and calls `as_json` on a record. The method
-    # itself is the spinel/CRuby JSON runtime, declared abstract on
-    # JsonBuilder's signature so this file does not replace it.
-    def inertia_prop_json(value)
-      ActionController::JsonRender.encode(value)
-    end
-
-    # Kernel's method, named on this class so a computed prop can run
-    # with the controller as `self`. A literal `-> { }` is inlined in
-    # the action and already sees the controller's ivars; `super`
-    # forwards the block the same way. The runtime typer does not know
-    # Kernel, and an unknown call would be a `Ty::Var`.
-    def instance_exec(*args)
-      super
-    end
-
+    # Kernel's `instance_exec`, declared on Base. The block runs with
+    # the controller as `self` and returns whatever the prop computed;
+    # this encodes that value once.
     def inertia_exec(work)
-      instance_exec(&work)
+      ActionController::JsonRender.encode(instance_exec(&work))
     end
 
     def inertia_root_html(use_script_element)
