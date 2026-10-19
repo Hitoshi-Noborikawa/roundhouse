@@ -1,11 +1,13 @@
 use super::emit_and_run;
 
-/// Issue #985. Numericality, inclusion, and format already lowered;
-/// ingest was dropping the keys, so `create!` saved records Rails
-/// rejects. Each option is pinned here, including the `validates_*_of`
+/// Issue #985. Numericality (`only_integer`, `greater_than`,
+/// `less_than`), inclusion, and format already lowered; ingest was
+/// dropping the keys, so `create!` saved records Rails rejects. Each
+/// wired option is pinned here, including the `validates_*_of`
 /// spelling. Symbol `if:` / `unless:` use the same guard as
-/// `validate :method`. Uniqueness, comparison, `length: is:`, and a
-/// lambda condition are not enforced.
+/// `validate :method`. Inclusive numericality bounds, uniqueness,
+/// comparison, `length: is:`, and a lambda condition stay diagnostics
+/// and are not enforced.
 const MODEL: &str = r#"class Article < ApplicationRecord
   has_many :comments, dependent: :destroy
 
@@ -88,8 +90,9 @@ raise "max_stock 0: #{stock_cap.inspect}" unless stock_cap.any? { |m| m.include?
 _, stock_hi = messages(base.merge(max_stock: 50))
 raise "max_stock 50: #{stock_hi.inspect}" unless stock_hi.any? { |m| m.include?("less than 50") }
 refute_save(base.merge(title: "Price", price: 0), "greater than 0")
-_, stocked = messages(base.merge(inventory_count: -1))
-raise "inventory -1: #{stocked.inspect}" unless stocked.any? { |m| m.include?("greater than or equal to 0") }
+# greater_than_or_equal_to is not lowered. The call warns and does not run.
+valid, msgs = messages(base.merge(title: "Floor", inventory_count: -1))
+raise "inclusive bound ran: #{msgs.inspect}" unless valid
 
 # inclusion: array and integer range, and validates_inclusion_of.
 _, color = messages(base.merge(color: "green"))
@@ -135,4 +138,20 @@ puts "validates options passed"
         "{}",
         run.stdout
     );
+    let warnings = emit_and_run::real_blog()
+        .edit("db/schema.rb", SCHEMA_FIND, SCHEMA_REPLACE)
+        .write("app/models/article.rb", MODEL)
+        .ingest_warnings();
+    for needle in [
+        "greater_than_or_equal_to",
+        "uniqueness",
+        "comparison",
+        "length: is",
+        "if:",
+    ] {
+        assert!(
+            warnings.iter().any(|message| message.contains(needle)),
+            "missing warning {needle} in {warnings:?}"
+        );
+    }
 }

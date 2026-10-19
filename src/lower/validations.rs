@@ -68,10 +68,6 @@ pub enum Check {
     /// Numeric value must be < `threshold`.
     /// Default message: `"must be less than {threshold}"`.
     LessThan { threshold: f64 },
-    /// Numeric value must be ≥ `threshold`.
-    GreaterThanOrEqual { threshold: f64 },
-    /// Numeric value must be ≤ `threshold`.
-    LessThanOrEqual { threshold: f64 },
     /// Value must be an integer (no fractional part).
     /// Default message: `"must be an integer"`.
     OnlyInteger,
@@ -111,12 +107,6 @@ impl Check {
                 .unwrap_or_else(|| format!("is too long (maximum is {n} characters)")),
             Check::GreaterThan { threshold } => format!("must be greater than {threshold}"),
             Check::LessThan { threshold } => format!("must be less than {threshold}"),
-            Check::GreaterThanOrEqual { threshold } => {
-                format!("must be greater than or equal to {threshold}")
-            }
-            Check::LessThanOrEqual { threshold } => {
-                format!("must be less than or equal to {threshold}")
-            }
             Check::OnlyInteger => "must be an integer".into(),
             Check::Inclusion { .. } | Check::Cover { .. } => "is not included in the list".into(),
             Check::Format { .. } => "is invalid".into(),
@@ -185,7 +175,7 @@ fn expand_rule(rule: &ValidationRule, out: &mut Vec<Check>) {
         ValidationRule::Format { pattern } => {
             out.push(Check::Format { pattern: pattern.clone() });
         }
-        ValidationRule::Numericality { only_integer, gt, lt, gte, lte } => {
+        ValidationRule::Numericality { only_integer, gt, lt } => {
             if *only_integer {
                 out.push(Check::OnlyInteger);
             }
@@ -194,12 +184,6 @@ fn expand_rule(rule: &ValidationRule, out: &mut Vec<Check>) {
             }
             if let Some(n) = lt {
                 out.push(Check::LessThan { threshold: *n });
-            }
-            if let Some(n) = gte {
-                out.push(Check::GreaterThanOrEqual { threshold: *n });
-            }
-            if let Some(n) = lte {
-                out.push(Check::LessThanOrEqual { threshold: *n });
             }
         }
         ValidationRule::Inclusion { values, range } => {
