@@ -2041,6 +2041,11 @@ impl<'a> BodyTyper<'a> {
                 {
                     return Ty::Hash { key: std::sync::Arc::new(Ty::Sym), value: std::sync::Arc::new(Ty::Untyped) };
                 }
+                if translate
+                    && let Some((_, _, ty)) = crate::lower::i18n_translate::value_answer(catalog, recv.as_ref(), method.as_str(), args, block.as_ref(), site)
+                {
+                    return ty;
+                }
                 if translate && let Some(resolved) = crate::lower::i18n_translate::resolves(
                     catalog, recv.as_ref(), method.as_str(), args, block.as_ref(), site,
                 ) {

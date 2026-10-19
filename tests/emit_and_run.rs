@@ -69,6 +69,8 @@ mod helper_escape_args;
 mod class_new_constants;
 #[path = "emit_and_run/i18n_subtree.rs"]
 mod i18n_subtree;
+#[path = "emit_and_run/i18n_values.rs"]
+mod i18n_values;
 #[path = "emit_and_run/i18n_plural_rules.rs"]
 mod i18n_plural_rules;
 #[path = "emit_and_run/rails_i18n_locales.rs"]

@@ -4009,7 +4009,8 @@ fn i18n_table_text(app: &App) -> String {
                 }
             }
             for key in &c.opaque {
-                out.push_str(&format!("O\u{1f}{locale}.{key}\u{1f}.\u{1e}"));
+                let fields = c.values.get(key).map_or_else(|| vec!["?".to_string()], |v| v.fields());
+                out.push_str(&format!("O\u{1f}{locale}.{key}\u{1f}{}\u{1f}.\u{1e}", fields.join("\u{1f}")));
             }
         }
         for variant in catalog.variants(&locales) {
