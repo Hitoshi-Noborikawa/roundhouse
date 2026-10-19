@@ -1131,7 +1131,10 @@ fn every_runtime_method_body_concretely_typed() {
     // MEASURED 776 on 2026-10-19: `deliver` asks once whether the
     // event name is a String or a Symbol. `resolve_payload` uses that
     // bool, so the second pair of `is_a?` reads is gone (779 -> 776).
-    const CEILING: usize = 776;
+    // MEASURED 772 on 2026-10-19: `deep_dup` asks a Hash key's class
+    // once and defers every other key. The second pass no longer
+    // repeats that `is_a?` pair (776 -> 772).
+    const CEILING: usize = 772;
     assert!(
         total_gradual <= CEILING,
         "{total_gradual} Ty::Untyped sites exceeds ceiling of {CEILING}",

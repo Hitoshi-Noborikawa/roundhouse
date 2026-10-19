@@ -137,12 +137,25 @@ module ActiveSupport
     case value
     when Array then value.map { |item| ActiveSupport.deep_dup(item) }
     when Hash
-      # A fresh Hash, not `dup`: the two passes below put String and
-      # Symbol keys first and every other key after them, which is where
-      # Rails' delete-and-store lands, and a literal stays a typed Hash.
+      # A fresh Hash, not `dup`: String and Symbol keys first, every
+      # other key after them. The key class is read once; the second
+      # pass used to ask it again.
       out = {}
-      value.each { |key, item| out[key] = ActiveSupport.deep_dup(item) if key.is_a?(String) || key.is_a?(Symbol) }
-      value.each { |key, item| out[ActiveSupport.deep_dup(key)] = ActiveSupport.deep_dup(item) unless key.is_a?(String) || key.is_a?(Symbol) }
+      deferred_keys = []
+      deferred_items = []
+      value.each do |key, item|
+        if key.is_a?(String) || key.is_a?(Symbol)
+          out[key] = ActiveSupport.deep_dup(item)
+        else
+          deferred_keys << key
+          deferred_items << item
+        end
+      end
+      i = 0
+      while i < deferred_keys.length
+        out[ActiveSupport.deep_dup(deferred_keys[i])] = ActiveSupport.deep_dup(deferred_items[i])
+        i += 1
+      end
       out
     else
       # Not duplicable? (core_ext/object/duplicable.rb): the value itself.
