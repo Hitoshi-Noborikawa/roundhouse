@@ -1126,12 +1126,6 @@ module ActionController
       nil
     end
 
-    # Relative locations (`/path`, not `//host`) pass. An absolute URL
-    # must name this request's host; a missing request refuses any host.
-    # The port does not count, as in Rails' `_url_host_allowed?`
-    # (`URI(url).host == request.host`): `redirect_to articles_url` from
-    # a `Host: blog.test:80` request names `http://blog.test/articles`,
-    # the standard port dropped, and is the same host.
     # A single-slash path (`/login`, not protocol-relative `//host`)
     # joined to the request's protocol and host. Anything else — an
     # absolute URL, `//host`, a path with no host to join — is unchanged.
@@ -1140,6 +1134,12 @@ module ActionController
       url_from_path(loc)
     end
 
+    # Relative locations (`/path`, not `//host`) pass. An absolute URL
+    # must name this request's host; a missing request refuses any host.
+    # The port does not count, as in Rails' `_url_host_allowed?`
+    # (`URI(url).host == request.host`): `redirect_to articles_url` from
+    # a `Host: blog.test:80` request names `http://blog.test/articles`,
+    # the standard port dropped, and is the same host.
     def same_host_location(loc)
       host = ActionController.location_host(loc)
       return loc if host.empty?

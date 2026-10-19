@@ -94,6 +94,20 @@ fwd.request = ActionDispatch::Request.new({
 })
 fwd.redirect_to "/login"
 raise "forwarded host: #{fwd.location.inspect}" unless fwd.location == "http://public.test/login"
+raise "url uses that host" unless fwd.request.url == "http://public.test/"
+fwd.redirect_to fwd.request.url
+raise "return path matches the public url" unless fwd.location == "http://public.test/"
+
+spoof = ActionController::Base.new
+spoof.request = ActionDispatch::Request.new({
+  "HTTP_HOST" => "blog.test",
+  "HTTP_X_FORWARDED_HOST" => "evil.com\" onclick=\"x",
+  "REMOTE_ADDR" => "203.0.113.5",
+  "PATH_INFO" => "/login"
+})
+spoof.redirect_to "/login"
+raise "public peer keeps Host: #{spoof.location.inspect}" unless spoof.location == "http://blog.test/login"
+raise "url keeps Host" unless spoof.request.url == "http://blog.test/login"
 
 headed = ActionController::Base.new
 headed.request = c.request

@@ -387,7 +387,7 @@ module Main
     end
     if is_redirect
       [controller.status,
-       %(<a href="#{controller.location}">Redirecting</a>),
+       %(<a href="#{ActionView::ViewHelpers.html_escape(controller.location.to_s)}">Redirecting</a>),
        "text/html; charset=utf-8", controller.location, out_cookies, extra_headers, secure_cookies, samesite_cookies, httponly_cookies, expires_cookies]
     else
       # The controller body IS the full page: the Ruby emit path's

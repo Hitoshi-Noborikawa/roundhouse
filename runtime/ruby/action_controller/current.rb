@@ -20,12 +20,10 @@ module ActionController
     def request_host_for_redirect
       r = @request
       return "" if r.nil?
-      # Rails' `raw_host_with_port`: the last `X-Forwarded-Host` value
-      # is the client-facing authority. Proxies append, so the last
-      # entry is the one the browser used. Absent, the Host header.
-      forwarded = r.env.fetch("HTTP_X_FORWARDED_HOST", "").to_s.split(",").last.to_s.strip
-      return forwarded unless forwarded.empty?
-      r.host.to_s
+      # Same authority as `request.host` / `request.url`
+      # (`Request#raw_host_with_port`): last `X-Forwarded-Host` from a
+      # loopback or private peer, otherwise the Host header.
+      r.raw_host_with_port.to_s
     end
 
     def request_protocol_for_url

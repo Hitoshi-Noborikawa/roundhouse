@@ -5197,6 +5197,34 @@ fn apply_rails_version(files: &mut [(String, String)], app: &App) {
     }
 }
 
+/// `AppEnvironment` at the end of boot.rb. `assume_ssl?(env)` is
+/// `config.assume_ssl = true` in that environment (Rails'
+/// `ActionDispatch::AssumeSSL`). `serving_assume_ssl?` reads
+/// `RAILS_ENV` (development when unset) so both dispatchers share one
+/// check. Always defined, so a tree with the flag off still answers
+/// false.
+fn apply_environment_flags(files: &mut [(String, String)], app: &App) {
+    const MARK: &str = "# Per-environment flags, from config/environments/*.rb";
+    let Some((_, boot)) = files.iter_mut().find(|(p, _)| p == "boot.rb") else {
+        return;
+    };
+    if boot.contains(MARK) {
+        return;
+    }
+    let cond = if app.assume_ssl_envs.is_empty() {
+        "false".to_string()
+    } else {
+        app.assume_ssl_envs.iter().map(|e| format!("env == {e:?}")).collect::<Vec<_>>().join(" || ")
+    };
+    boot.push_str(&format!(
+        "\n{MARK} (see project.rs::apply_environment_flags).\n\
+         module AppEnvironment\n  def self.assume_ssl?(env)\n    {cond}\n  end\n  \
+         def self.serving_assume_ssl?\n    name = ENV[\"RAILS_ENV\"].to_s\n    \
+         if name.empty?\n      name = \"development\"\n    end\n    \
+         assume_ssl?(name)\n  end\nend\n"
+    ));
+}
+
 /// THE FORM DIFFERS BY TARGET, and the reason is spinel's, not ours.
 /// `X.prepend Y` through an explicit receiver is refused outright there
 /// — "the class graph, ancestor chain, and method/ivar layout are baked
@@ -5223,34 +5251,6 @@ fn apply_rails_version(files: &mut [(String, String)], app: &App) {
 /// emitted — it is landed, tested by `overlay_cable_dispatch`, and
 /// CRuby has no quarrel with it. One form each, each the one its target
 /// accepts.
-/// `AppEnvironment` at the end of boot.rb. `assume_ssl?(env)` is
-/// `config.assume_ssl = true` in that environment (Rails'
-/// `ActionDispatch::AssumeSSL`). `serving_assume_ssl?` reads
-/// `RAILS_ENV` (development when unset) so both dispatchers share one
-/// check. Always defined, so a tree with the flag off still answers
-/// false.
-fn apply_environment_flags(files: &mut [(String, String)], app: &App) {
-    const MARK: &str = "# Per-environment flags, from config/environments/*.rb";
-    let Some((_, boot)) = files.iter_mut().find(|(p, _)| p == "boot.rb") else {
-        return;
-    };
-    if boot.contains(MARK) {
-        return;
-    }
-    let cond = if app.assume_ssl_envs.is_empty() {
-        "false".to_string()
-    } else {
-        app.assume_ssl_envs
-            .iter()
-            .map(|e| format!("env == {e:?}"))
-            .collect::<Vec<_>>()
-            .join(" || ")
-    };
-    boot.push_str(&format!(
-        "\n{MARK} (see project.rs::apply_environment_flags).\nmodule AppEnvironment\n  def self.assume_ssl?(env)\n    {cond}\n  end\n  def self.serving_assume_ssl?\n    name = ENV[\"RAILS_ENV\"].to_s\n    if name.empty?\n      name = \"development\"\n    end\n    assume_ssl?(name)\n  end\nend\n"
-    ));
-}
-
 fn apply_module_mixins(files: &mut Vec<(String, String)>, app: &App, form: MixinForm) {
     use std::fmt::Write;
 
