@@ -21,6 +21,7 @@ require_relative "active_record/friendly_id"
 require_relative "active_record/arel"
 require_relative "active_record/relation"
 require_relative "active_record/preloading"
+require_relative "active_record/types"
 # Database tasks (`db:schema:load`, `prepare_all`, `migrate`). After
 # connection.rb: the task runner calls `Connection`. The readers load
 # before `tasks.rb`, which prepends the app rake file onto the methods

@@ -5791,6 +5791,10 @@ pub const RUBY_FAMILY_RUNTIME_CONSTANTS: &[&str] = &[
     // `runtime/ruby/active_record/preloading.rb`. The two-keyword call
     // lowers away; the class value does not ship on a strict target.
     "ActiveRecord::Associations::Preloader",
+    // `runtime/ruby/active_record/types.rb`. Boolean stays on the cast
+    // lowerer; these two classes are the ruby-family casters.
+    "ActiveRecord::Type::String",
+    "ActiveRecord::Type::Integer",
 ];
 
 /// Availability policy for class/module *values* that inference

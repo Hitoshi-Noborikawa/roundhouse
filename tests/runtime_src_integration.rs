@@ -1151,7 +1151,10 @@ fn every_runtime_method_body_concretely_typed() {
     // Hash) and hands it to `Preloading.records`. The parameter, the
     // ivar, and the read in `call` are that spec (+3 in
     // active_record/preloading.rb, 778 -> 781).
-    const CEILING: usize = 781;
+    // MEASURED 791 on 2026-10-19: `Type::String` and `Type::Integer`
+    // read the value the caller passed, whatever it is (+10 in
+    // active_record/types.rb, 781 -> 791).
+    const CEILING: usize = 791;
     assert!(
         total_gradual <= CEILING,
         "{total_gradual} Ty::Untyped sites exceeds ceiling of {CEILING}"

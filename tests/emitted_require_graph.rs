@@ -275,7 +275,8 @@ fn ruby_family_runtime_constants_are_ledgered_on_other_targets() {
      ActiveRecord::ConnectionFailed, ActiveRecord::ConnectionTimeoutError,
      ActiveRecord::Encryption::Errors::Decryption,
      ActiveRecord::Encryption::Errors::Configuration,
-     ActiveRecord::Associations::Preloader]
+     ActiveRecord::Associations::Preloader,
+     ActiveRecord::Type::String, ActiveRecord::Type::Integer]
   end
 end
 "#),

@@ -852,6 +852,14 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
     // Not answered here beyond `new`: the dispatch arm for `ActiveSupport::StringInquirer` types its predicates and String surface.
     register_stdlib_class(classes, "ActiveSupport::StringInquirer", &[("new", Ty::Str)], &[]);
     // `ActiveRecord::Type::Boolean` is a subclass with the same casting; `deserialize` casts the same way for a boolean.
+    register_stdlib_class(classes, "ActiveRecord::Type::String", &[], &[
+        ("cast", Ty::Union { variants: vec![Ty::Str, Ty::Nil].into() }),
+        ("deserialize", Ty::Union { variants: vec![Ty::Str, Ty::Nil].into() }),
+    ]);
+    register_stdlib_class(classes, "ActiveRecord::Type::Integer", &[], &[
+        ("cast", Ty::Union { variants: vec![Ty::Int, Ty::Nil].into() }),
+        ("deserialize", Ty::Union { variants: vec![Ty::Int, Ty::Nil].into() }),
+    ]);
     for name in ["ActiveModel::Type::Boolean", "ActiveRecord::Type::Boolean"] {
         register_stdlib_class(classes, name, &[], &[
             ("cast", Ty::Union { variants: vec![Ty::Bool, Ty::Nil].into() }),
