@@ -1096,7 +1096,13 @@ fn every_runtime_method_body_concretely_typed() {
     // MEASURED 793 on 2026-10-19: the class-side query fallbacks
     // (`Model.maximum(:x)` through `all`, connection.rb) answer the column's
     // value as `Relation#maximum` / `#pick` do, whatever the column holds (+2).
-    const CEILING: usize = 793;
+    // MEASURED 808 on 2026-10-19: a computed Inertia props hash is whatever
+    // the helper returned. `merge_inertia_props` walks it, `apply_inertia_prop`
+    // reads a Proc or an `InertiaRails::Prop`, and `instance_exec` is Kernel's
+    // method (`super`), typed `untyped` because this registry does not know
+    // Kernel. The session flags are read back from an untyped session value
+    // (+15 in action_controller/inertia.rb).
+    const CEILING: usize = 808;
     assert!(
         total_gradual <= CEILING,
         "{total_gradual} Ty::Untyped sites exceeds ceiling of {CEILING}",
