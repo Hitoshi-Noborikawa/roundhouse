@@ -136,6 +136,48 @@ end
 }
 
 #[test]
+fn qualified_class_constant_uses_ruby_nesting() {
+    // `class Billing::Other` nests only that class, so `Scale` is `::Scale`.
+    // `module Billing; class Other` would see `Billing::Scale`.
+    let source = r#"
+class Scale
+  def initialize(scale: 1)
+    @scale = scale
+  end
+  def call
+    @scale
+  end
+end
+class Billing::Scale
+  def initialize(scale: 9)
+    @scale = scale + 10
+  end
+  def call
+    @scale
+  end
+end
+class Billing::Other
+  def self.anon(**)
+    Scale.new(**).call
+  end
+end
+"#;
+    let errors = check_errors(source);
+    assert!(errors.is_empty(), "{errors:?}");
+    let out = emitted(&app_from(source));
+    assert!(
+        out.contains("def initialize(scale: 1)") || out.contains("def initialize(scale:1)"),
+        "the callee keeps its keyword:\n{out}"
+    );
+    assert!(
+        !out.contains("scale: 9") && !out.contains("scale:9"),
+        "the unreached namesake stays flattened:\n{out}"
+    );
+    let got = ruby_eval(&out, "puts Billing::Other.anon(scale: 3)\nputs Billing::Other.anon\n");
+    assert_eq!(got, "3\n1\n", "{out}");
+}
+
+#[test]
 fn check_restores_constant_new_before_typing() {
     let source = r#"
 class Probe
