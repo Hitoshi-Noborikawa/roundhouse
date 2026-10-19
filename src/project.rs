@@ -1749,7 +1749,8 @@ fn report_self_bindings(app: &App, target: BuildTarget) {
 
 /// Sends the analyzer types for every target but whose runtime only the
 /// Ruby family has: `Array#fetch`, `each_slice`, `each_cons`, an
-/// enumerator's `with_object`, `Array[...]` and `Hash[...]`, `include?` on
+/// enumerator's `with_object`, `Array[...]` and `Hash[...]`,
+/// `Array.try_convert` (what a nested splat desugars to), `include?` on
 /// a `Class`/`Module` value (Module's ancestry query, which the other
 /// targets' `include?` is not), Kernel's `Rational(...)`, which a
 /// rational literal ingests as, and Kernel's `Integer(...)` and
@@ -1781,6 +1782,10 @@ fn report_ruby_only_sends(app: &App, target: BuildTarget) {
                 (Some(r), "[]") => match &*r.node {
                     ExprNode::Const { path } if path.len() == 1 && path[0].as_str() == "Array" => Some("Array[]"),
                     ExprNode::Const { path } if path.len() == 1 && path[0].as_str() == "Hash" => Some("Hash[]"),
+                    _ => None,
+                },
+                (Some(r), "try_convert") => match &*r.node {
+                    ExprNode::Const { path } if path.len() == 1 && path[0].as_str() == "Array" => Some("Array.try_convert"),
                     _ => None,
                 },
                 (Some(_), "fetch") if matches!(recv_ty, Some(Ty::Array { .. })) => Some("Array#fetch"),
