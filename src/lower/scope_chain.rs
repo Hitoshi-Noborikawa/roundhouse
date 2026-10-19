@@ -1929,6 +1929,26 @@ pub fn build_assoc_registry(models: &[Model]) -> AssocRegistry {
             })
             .or_insert_with(|| Some(entry.clone()));
     }
+    // A declaration with no direct foreign key (`through:`, `has_one`,
+    // `belongs_to`, `has_and_belongs_to_many`) is not in `has_many_fk`,
+    // so the loop above never sees it. One direct `has_many :comments`
+    // beside `has_many :comments, through: :posts` would otherwise look
+    // unique, and the seed would filter `Comment` by `article_id` after
+    // the controller rewrite had declined the same call. The name is
+    // ambiguous. A direct `has_many` that merely cannot be seeded
+    // (`primary_key:`, a row-changing scope) stays: it is in
+    // `has_many_fk`, and `is_unseedable` is what refuses the seed.
+    let hidden: Vec<Symbol> = reg
+        .assoc_builds
+        .iter()
+        .filter(|((model, name), _)| !reg.has_many_fk.contains_key(&(model.clone(), name.clone())))
+        .map(|((_, name), _)| name.clone())
+        .collect();
+    for name in hidden {
+        if reg.has_many_by_name.contains_key(&name) {
+            reg.has_many_by_name.insert(name, None);
+        }
+    }
     reg
 }
 
