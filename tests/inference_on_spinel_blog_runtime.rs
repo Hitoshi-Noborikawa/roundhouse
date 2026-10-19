@@ -417,7 +417,9 @@ fn untyped_subexpressions_baseline() {
     // other `Db` reads. The RBS-paired gate types the method.
     // Remeasured 780 on 2026-10-19 against this tree: the 794 constant
     // had headroom the later runtime no longer uses.
-    const CEILING: usize = 780;
+    // MEASURED 766 on 2026-10-19: commit and rollback share
+    // `_take_enlisted`, so the `Db._txn_records` slice is read once.
+    const CEILING: usize = 766;
     assert!(
         existing_untyped <= CEILING && like_untyped <= LIKE_CEILING,
         "{} untyped sub-expressions on spinel-blog runtime — exceeds ledger: \

@@ -1408,15 +1408,23 @@ module ActiveRecord
       _commit_enlisted_from(0)
     end
 
-    # Run commit callbacks for the writes enlisted at and after `from`,
-    # and drop them from the list. Writes enlisted earlier stay for the
-    # parent transaction. Called for the outermost COMMIT (`from` 0)
-    # and for a savepoint whose parent is not joinable.
-    def self._commit_enlisted_from(from)
+    # The writes enlisted at and after `from`, dropped from the list.
+    # nil when that range is empty. Commit and rollback both start here.
+    def self._take_enlisted(from)
       records = Db._txn_records
       return nil if records.length <= from
       held = records[from, records.length - from]
       records.pop while records.length > from
+      held
+    end
+
+    # Run commit callbacks for the writes enlisted at and after `from`.
+    # Writes enlisted earlier stay for the parent transaction. Called
+    # for the outermost COMMIT (`from` 0) and for a savepoint whose
+    # parent is not joinable.
+    def self._commit_enlisted_from(from)
+      held = _take_enlisted(from)
+      return nil if held.nil?
       seen = []
       held.each do |entry|
         record = entry.record
@@ -1438,10 +1446,8 @@ module ActiveRecord
     # the database now has it -- a create is a new record again, a
     # destroy persisted again -- as Rails' `rolledback!` restores them.
     def self._rollback_enlisted(from)
-      records = Db._txn_records
-      return nil if records.length <= from
-      undone = records[from, records.length - from]
-      records.pop while records.length > from
+      undone = _take_enlisted(from)
+      return nil if undone.nil?
       undone.each { |entry| entry.record._restore_after_rollback(entry.kind) }
       nil
     end

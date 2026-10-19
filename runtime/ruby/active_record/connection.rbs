@@ -168,6 +168,7 @@ module ActiveRecord
     def self._txn_parent_joinable?: (Integer depth) -> bool
     def self._txn_note_joinable: (Integer depth, bool joinable) -> nil
     def self._commit_enlisted: () -> nil
+    def self._take_enlisted: (Integer from) -> Array[ActiveRecord::EnlistedRecord]?
     def self._commit_enlisted_from: (Integer from) -> nil
     def self._rollback_enlisted: (Integer from) -> nil
     def _restore_after_rollback: (Integer kind) -> nil
