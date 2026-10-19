@@ -679,15 +679,31 @@ fn redirect_replacement(e: &Expr) -> Option<Expr> {
         return None;
     };
     let mut errors = None;
+    let mut clear_history = None;
     for (k, v) in inertia_entries {
-        if literal_key(k).as_deref() != Some("errors") {
-            record_gap(
-                e.span,
-                "`inertia:` redirect option other than `errors:`; the call is left as written",
-            );
-            return None;
+        match literal_key(k).as_deref() {
+            Some("errors") => errors = Some(v.clone()),
+            // `redirect_to path, inertia: { clear_history: true }` — the
+            // next visit's page object carries `clearHistory`, once.
+            // Only a boolean literal: the runtime flag is `bool`.
+            Some("clear_history") => {
+                let ExprNode::Lit { value: Literal::Bool { .. } } = &*v.node else {
+                    record_gap(
+                        e.span,
+                        "`inertia:` redirect `clear_history:` that is not `true` or `false`; the call is left as written",
+                    );
+                    return None;
+                };
+                clear_history = Some(v.clone());
+            }
+            _ => {
+                record_gap(
+                    e.span,
+                    "`inertia:` redirect option other than `errors:` or `clear_history:`; the call is left as written",
+                );
+                return None;
+            }
         }
-        errors = Some(v.clone());
     }
     let span = e.span;
     let mut stmts = Vec::new();
@@ -700,6 +716,9 @@ fn redirect_replacement(e: &Expr) -> Option<Expr> {
             call(errors.span, Some(errors), "to_hash", Vec::new())
         };
         stmts.push(call(span, None, "inertia_errors", vec![errors]));
+    }
+    if let Some(flag) = clear_history {
+        stmts.push(call(span, None, "inertia_clear_history", vec![flag]));
     }
     let kept: Vec<(Expr, Expr)> = entries
         .iter()
