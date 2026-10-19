@@ -601,6 +601,12 @@ fn oj_under_mimic_json_runs_as_json_natively() {
   rescue JSON::ParserError
     :json_rescued
   end
+
+  def self.guarded_symbols(text)
+    Oj.load(text, symbol_keys: true)
+  rescue JSON::ParserError
+    :bad
+  end
 end
 "##)
         .run_spinel(r##"raise "generate" unless Payload.generated({a: :b, h: "<&>", n: [1.5, nil, true]}) == %({"a":"b","h":"<&>","n":[1.5,null,true]})
@@ -612,6 +618,14 @@ raise "load integer" unless Payload.decode(5) == 5
 raise "load symbols" unless Payload.decode_symbols(%({"a":{"b":1}})) == {a: {b: 1}}
 raise "parse error" unless Payload.guarded("{x") == :json_rescued
 raise "load array" unless Payload.decode([1]) == [1]
+raise "load array nil" unless Payload.guarded([nil]) == :json_rescued
+raise "load array symbol" unless Payload.guarded([:a]) == :json_rescued
+raise "load array hash" unless Payload.guarded([{"a" => 1}]) == :json_rescued
+raise "load array symbols" unless Payload.decode_symbols(%([{"a":1}])) == [{a: 1}]
+raise "load bad array symbols" unless Payload.guarded_symbols([{"a" => 1}]) == :bad
+raise "load rational" unless Payload.guarded(Rational(1, 2)) == :json_rescued
+raise "load infinity" unless Payload.decode(Float::INFINITY).infinite?
+raise "load nan" unless Payload.decode(Float::NAN).nan?
 raise "load hash" unless Payload.guarded({"a" => 1}) == :json_rescued
 raise "load symbol" unless Payload.guarded(:x) == :json_rescued
 puts "oj passed"

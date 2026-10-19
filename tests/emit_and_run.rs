@@ -3274,6 +3274,7 @@ fn oj_unmodeled_options_are_refused() {
         ("Oj.mimic_JSON if ENV[\"X\"]\n", "Oj.load(v)", "`Oj.mimic_JSON` not at an initializer's top level", true),
         ("Oj.mimic_JSON rescue nil\n", "Oj.load(v)", "`Oj.mimic_JSON` not at an initializer's top level", true),
         ("Oj.optimize_rails\n", "Oj.load(v)", "`Oj.optimize_rails` without `Oj.mimic_JSON`", true),
+        ("Oj.mimic_JSON(mode: :compat)\n", "Oj.load(v)", "`Oj.mimic_JSON` not at an initializer's top level", true),
         ("Oj.mimic_JSON\n", "Oj.load(v, symbol_keys: \"true\")", "`Oj.load` option `symbol_keys: \"true\"`", false),
     ] {
         let tree: std::collections::HashMap<std::path::PathBuf, Vec<u8>> = [
@@ -3292,6 +3293,26 @@ fn oj_unmodeled_options_are_refused() {
             assert!(app.library_classes.iter().all(|lc| lc.name.0.as_str() != "Oj"), "{init}: lowered");
         }
     }
+    // Empty parentheses are the same top-level call as the bare form.
+    let tree: std::collections::HashMap<std::path::PathBuf, Vec<u8>> = [
+        ("config/initializers/oj.rb".to_string(), "Oj.mimic_JSON()\n".to_string()),
+        ("lib/reader.rb".to_string(), "class Reader\n  def self.read(v)\n    Oj.load(v)\n  end\nend\n".to_string()),
+        ("config/routes.rb".to_string(), "Rails.application.routes.draw do\nend\n".to_string()),
+    ]
+    .into_iter()
+    .map(|(p, s)| (std::path::PathBuf::from(p), s.into_bytes()))
+    .collect();
+    roundhouse::ingest::survey::activate();
+    let app = roundhouse::ingest::ingest_app_from_tree(tree).expect("survey ingest");
+    let ledger: Vec<String> = roundhouse::ingest::survey::drain().iter().map(|e| e.to_string()).collect();
+    assert!(
+        ledger.iter().all(|e| !e.contains("mimic_JSON")),
+        "empty parentheses were refused: {ledger:#?}"
+    );
+    assert!(
+        app.library_classes.iter().any(|lc| lc.name.0.as_str() == "Oj"),
+        "Oj.mimic_JSON() did not install the stand-in"
+    );
 }
 
 const OJ_LIB: &str = r##"class Payload
@@ -3320,6 +3341,12 @@ const OJ_LIB: &str = r##"class Payload
   rescue JSON::ParserError
     :json_rescued
   end
+
+  def self.guarded_symbols(text)
+    Oj.load(text, symbol_keys: true)
+  rescue JSON::ParserError
+    :bad
+  end
 end
 "##;
 
@@ -3333,6 +3360,17 @@ raise "load integer" unless Payload.decode(5) == 5
 raise "load symbols" unless Payload.decode_symbols(%({"a":{"b":1}})) == {a: {b: 1}}
 raise "parse error" unless Payload.guarded("{x") == :json_rescued
 raise "load array" unless Payload.decode([1]) == [1]
+raise "load array nil" unless Payload.guarded([nil]) == :json_rescued
+raise "load array symbol" unless Payload.guarded([:a]) == :json_rescued
+raise "load array hash" unless Payload.guarded([{"a" => 1}]) == :json_rescued
+raise "load array symbols" unless Payload.decode_symbols(%([{"a":1}])) == [{a: 1}]
+raise "load bad array symbols" unless Payload.guarded_symbols([{"a" => 1}]) == :bad
+raise "load rational" unless Payload.guarded(Rational(1, 2)) == :json_rescued
+raise "load infinity" unless Payload.decode(Float::INFINITY).infinite?
+raise "load nan" unless Payload.decode(Float::NAN).nan?
+require "bigdecimal"
+raise "load bigdecimal" unless Payload.decode(BigDecimal("2.5")) == 2.5
+raise "load bigdecimal class" unless Payload.decode(BigDecimal("2.5")).is_a?(Float)
 raise "load hash" unless Payload.guarded({"a" => 1}) == :json_rescued
 raise "load symbol" unless Payload.guarded(:x) == :json_rescued
 raise "load io" unless Payload.decode(StringIO.new(%([1,{"a":null}]))) == [1, {"a" => nil}]
@@ -3356,10 +3394,33 @@ fn oj_stand_in_is_ruby_only() {
     let _ = std::fs::remove_dir_all(&dir);
     for (path, text) in [
         ("config/initializers/oj.rb", "Oj.mimic_JSON\nOj.optimize_rails\n"),
-        ("config/routes.rb", "Rails.application.routes.draw do\n  get \"/posts\", to: \"posts#index\"\nend\n"),
+        (
+            "db/schema.rb",
+            "ActiveRecord::Schema.define do\n  create_table \"posts\", force: :cascade do |t|\n    t.string \"title\"\n    t.bigint \"author_id\"\n  end\n  create_table \"comments\", force: :cascade do |t|\n    t.text \"body\"\n    t.bigint \"post_id\"\n  end\nend\n",
+        ),
+        (
+            "config/routes.rb",
+            "Rails.application.routes.draw do\n  get \"/posts\", to: \"posts#index\"\n  direct :payload do\n    Oj.load('{\"a\":1}', symbol_keys: true)\n  end\nend\n",
+        ),
+        (
+            "app/models/post.rb",
+            "class Post < ApplicationRecord\n  has_many :comments, -> { where(body: Oj.load('{\"a\":1}')) }\n  has_one :pin, -> { where(body: Oj.load('{\"b\":2}')) }, class_name: \"Comment\"\n  belongs_to :author, class_name: \"Post\", optional: true, default: -> { Oj.generate({a: \"<&>\"}) }\nend\n",
+        ),
+        (
+            "app/models/comment.rb",
+            "class Comment < ApplicationRecord\n  belongs_to :post\nend\n",
+        ),
         (
             "app/controllers/posts_controller.rb",
-            "class PostsController < ApplicationController\n  def index\n    Oj.generate({a: \"<&>\"})\n    Oj.load('{\"a\":1}', symbol_keys: true)\n    render plain: \"ok\"\n  end\nend\n",
+            "class PostsController < ApplicationController\n  def index\n    Oj.generate({a: \"<&>\"})\n    Oj.load('{\"a\":1}', symbol_keys: true)\n    render plain: \"ok\"\n  end\n\n  def self.only_rescue\n    raise \"x\"\n  rescue Oj::ParseError\n    :oj\n  end\nend\n",
+        ),
+        (
+            "test/models/post_test.rb",
+            "class PostTest < ActiveSupport::TestCase\n  PAYLOAD = Oj.generate({a: \"<&>\"})\n  class Inner\n    def self.read\n      Oj.load('{\"a\":1}', symbol_keys: true)\n    end\n  end\nend\n",
+        ),
+        (
+            "test/fixtures/posts.yml",
+            "one:\n  title: <%= Oj.generate({a: 1}) %>\n",
         ),
     ] {
         let full = dir.join(path);
@@ -3377,6 +3438,8 @@ fn oj_stand_in_is_ruby_only() {
     let stand_in = ruby.1.get("app/models/oj.rb").map(String::as_str).unwrap_or("");
     assert!(stand_in.contains("def self.load"), "ruby emit dropped the stand-in:\n{stand_in}");
     assert!(stand_in.contains("JSON.parse(source)"), "ruby stand-in is not the one-argument parse:\n{stand_in}");
+    assert!(stand_in.contains("json.is_a?(Integer)"), "ruby stand-in still passes every Numeric through:\n{stand_in}");
+    assert!(!stand_in.contains("json.is_a?(Array)"), "ruby stand-in still returns every Array:\n{stand_in}");
     assert!(!stand_in.contains("def self.dump"), "ruby stand-in gained dump:\n{stand_in}");
     for target in [
         roundhouse::project::BuildTarget::Python,
@@ -3403,11 +3466,19 @@ fn oj_stand_in_is_ruby_only() {
         let hits: Vec<_> = files
             .iter()
             .filter(|(path, text)| {
-                !path.ends_with(".map") && (text.contains("Oj.load") || text.contains("Oj.generate"))
+                !path.ends_with(".map")
+                    && (text.contains("Oj.load") || text.contains("Oj.generate") || text.contains("Oj::"))
             })
             .map(|(path, _)| path.clone())
             .collect::<Vec<_>>();
         assert!(hits.is_empty(), "{target:?} emitted an Oj call in {hits:?}");
+        for site in ["Oj.load", "Oj.generate", "Oj::ParseError"] {
+            assert!(
+                errors.iter().any(|e| e.contains(site)),
+                "{target:?} did not refuse {site}:\n{}",
+                errors.join("\n")
+            );
+        }
     }
     let _ = std::fs::remove_dir_all(&dir);
 }

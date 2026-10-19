@@ -7,8 +7,11 @@
 //!   and `NaN` a `JSON::GeneratorError`);
 //! - `Oj.load(json)` is `JSON.parse(json)`, an IO's or StringIO's content
 //!   read first, `symbol_keys:` (or `symbolize_names:`) symbolizing; nil,
-//!   a number, true/false and an Array are answered as given, anything
-//!   else (a Hash, a Symbol, another object) fails to parse;
+//!   true/false, an Integer and a Float are answered as given (so
+//!   `Infinity` stays a Float). Anything else is parsed from its string
+//!   form: `[1]` is `[1]`, `[nil]`, a Hash, a Symbol, a Rational and an
+//!   Array of hashes raise `JSON::ParserError`, and a BigDecimal is the
+//!   Float its string parses as;
 //! - a parse failure raises `JSON::ParserError`, which `Oj::ParseError`
 //!   does not catch.
 //!
@@ -187,7 +190,11 @@ fn mode_calls(text: &str) -> Vec<(String, bool)> {
             let method = String::from_utf8_lossy(node.name().as_slice()).to_string();
             if on_oj && matches!(method.as_str(), "mimic_JSON" | "optimize_rails") {
                 let at = (node.location().start_offset(), node.location().end_offset());
-                let top = self.top.contains(&at) && node.arguments().is_none() && node.block().is_none();
+                // `Oj.mimic_JSON()` is the same call as `Oj.mimic_JSON`: Prism
+                // gives the parentheses an empty arguments node.
+                let bare = node.block().is_none()
+                    && node.arguments().is_none_or(|args| args.arguments().iter().next().is_none());
+                let top = self.top.contains(&at) && bare;
                 self.found.push((method, top));
             }
             ruby_prism::visit_call_node(self, node);
@@ -220,9 +227,10 @@ fn stand_ins() -> Vec<LibraryClass> {
   end
 
   def self.load(json, options = {})
-    return json if json.nil? || json.is_a?(Numeric) || json == true || json == false || json.is_a?(Array)
-    source = json.is_a?(IO) || json.class.name == "StringIO" ? json.read : json
-    # Anything else fails to parse, a JSON::ParserError as JSON's own.
+    return json if json.nil? || json == true || json == false || json.is_a?(Integer) || json.is_a?(Float)
+    source = json.is_a?(IO) || json.class.name == "StringIO" ? json.read : json.to_s
+    # A read that is not a String, and anything whose string is not JSON,
+    # fails as JSON's own JSON::ParserError.
     source = "" unless source.is_a?(String)
     # The one-argument parse every target maps; the keys symbolized after.
     value = JSON.parse(source)
