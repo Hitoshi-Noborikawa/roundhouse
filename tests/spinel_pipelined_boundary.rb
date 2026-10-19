@@ -157,14 +157,12 @@ SERVERS.each_key do |server|
 end
 
 # Bounds are measured at the connection-owned buffer, not on TCP input size.
-if Tep.const_defined?(:InputBuffer)
-  class Tep::InputBuffer
-    attr_reader :high_water
-    alias keep_without_measurement keep_pending_input
-    def keep_pending_input(bytes)
-      @high_water = [@high_water || 0, bytes.bytesize].max
-      keep_without_measurement(bytes)
-    end
+class Tep::InputBuffer
+  attr_reader :high_water
+  alias keep_without_measurement keep_pending_input
+  def keep_pending_input(bytes)
+    @high_water = [@high_water || 0, bytes.bytesize].max
+    keep_without_measurement(bytes)
   end
 end
 
@@ -174,16 +172,12 @@ SERVERS.each_key do |server|
   APP.reset
   Sock.closes = 0
   # Explicit handle_one calls keep the buffer available for inspection.
-  input = Tep.const_defined?(:InputBuffer) ? Tep::InputBuffer.new : nil
+  input = Tep::InputBuffer.new
   1000.times do
-    if input
-      case server
-      when "threaded" then Tep::Server::Threaded.handle_one(7, ReadyIO.new, input)
-      when "scheduled" then Tep::Server::Scheduled.handle_one(7, input)
-      when "blocking" then Tep::Server.new(APP).handle_one(7, input)
-      end
-    else
-      SERVERS.fetch(server).call(7)
+    case server
+    when "threaded" then Tep::Server::Threaded.handle_one(7, ReadyIO.new, input)
+    when "scheduled" then Tep::Server::Scheduled.handle_one(7, input)
+    when "blocking" then Tep::Server.new(APP).handle_one(7, input)
     end
   end
   check("#{server}: a long pipeline dispatches every request", APP.paths == ["/next"] * 1000)

@@ -44,7 +44,7 @@ module Tep
       # Those bytes are the WebSocket stream, so they are parsed before
       # the loop waits for anything further.
       #
-      # The caller (Tep::Server::Scheduled.write_response) owns the
+      # The caller (Tep::Server::Threaded.write_response) owns the
       # fd lifecycle -- run() never calls sphttp_close. On clean
       # close OR error the server's handle_connection closes the fd
       # via its usual exit path, after retiring the driver. Every exit
