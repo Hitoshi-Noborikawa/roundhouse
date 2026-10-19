@@ -976,38 +976,45 @@ fn native_result(source: &str, script: &str, expected: &str) {
 }
 
 #[test]
-fn anonymous_block_and_virtual_destination_losses_are_refused() {
-    for (source, script, expected, refusal) in [
-        (
-            "class Probe; def self.leaf; yield; end; def self.target(&); __blk=7; leaf(&); end; def self.call(...); target(...); end; end",
-            "puts Probe.call {23}",
-            "23\n",
-            "anonymous block",
-        ),
+fn anonymous_block_destination_is_refused() {
+    let source = "class Probe; def self.leaf; yield; end; def self.target(&); __blk=7; leaf(&); end; def self.call(...); target(...); end; end";
+    let script = "puts Probe.call {23}";
+    native_result(source, script, "23\n");
+    let run = emit_and_run::real_blog()
+        .write("app/lib/probe.rb", source)
+        .run_ruby(script);
+    assert!(
+        run.errors.iter().any(|e| e.contains("anonymous block")),
+        "anonymous block: {:?}; actual={}; stderr={}",
+        run.errors,
+        run.stdout,
+        run.stderr
+    );
+}
+
+#[test]
+fn anonymous_forwarding_preserves_an_override_keyword_default() {
+    // The override's default differs from the required keyword on the
+    // method `...` lexically calls. Restoring both source contracts lets
+    // Ruby bind the packet, so this is a run, not a subclass-contract refusal.
+    for (source, script, expected) in [
         (
             "class Parent; def call(...); target(...); end; def target(a,b,factor:); (a-b)*factor; end; end; class Child < Parent; def target(a,b,factor:2); (a-b)*factor; end; end",
             "puts Child.new.call(11,4,factor:3)",
             "21\n",
-            "subclass contract",
         ),
         (
             "module Relay; def call(...); target(...); end; def target(a,b,factor:); (a-b)*factor; end; end; class Child; include Relay; def target(a,b,factor:2); (a-b)*factor; end; end",
             "puts Child.new.call(11,4,factor:3)",
             "21\n",
-            "subclass contract",
         ),
     ] {
         native_result(source, script, expected);
         let run = emit_and_run::real_blog()
             .write("app/lib/probe.rb", source)
             .run_ruby(script);
-        assert!(
-            run.errors.iter().any(|e| e.contains(refusal)),
-            "{refusal}: {:?}; actual={}; stderr={}",
-            run.errors,
-            run.stdout,
-            run.stderr
-        );
+        run.assert_passes();
+        assert_eq!(run.stdout, expected, "stderr={}", run.stderr);
     }
 }
 
