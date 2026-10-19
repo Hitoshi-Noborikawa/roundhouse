@@ -242,6 +242,8 @@ mod defined_const_fold;
 mod job_payload;
 #[path = "emit_and_run/sidekiq_push.rs"]
 mod sidekiq_adapter;
+#[path = "emit_and_run/silent_lowerings.rs"]
+mod silent_lowerings;
 
 #[test]
 fn markdown_templates_render_with_their_mime_type_and_erb_escaping() {
