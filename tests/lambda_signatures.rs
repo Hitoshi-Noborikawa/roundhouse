@@ -191,6 +191,34 @@ fn a_lambda_call_inside_another_lambda_seeds_both() {
 }
 
 #[test]
+fn a_block_reassignment_keeps_the_lambda_out_of_later_calls() {
+    let source = "class Article < ApplicationRecord\n  def self.plain_lambda\n    f = ->(x) { x * 2 }\n    [1].each { |i| f = i }\n    f.call(4)\n  end\nend\n";
+    let ty = plain_lambda_result(&source);
+    assert!(!matches!(ty, roundhouse::ty::Ty::Int), "block write still called the lambda: {ty:?}");
+}
+
+#[test]
+fn a_block_parameter_does_not_retire_the_outer_lambda() {
+    let source = "class Article < ApplicationRecord\n  def self.plain_lambda\n    f = ->(x) { x * 2 }\n    [1].each { |f| f = 1 }\n    f.call(4)\n  end\nend\n";
+    let ty = plain_lambda_result(&source);
+    assert!(matches!(ty, roundhouse::ty::Ty::Int), "shadowed block param: {ty:?}");
+}
+
+#[test]
+fn an_uninvoked_lambda_body_does_not_retire_the_outer_lambda() {
+    let source = "class Article < ApplicationRecord\n  def self.plain_lambda\n    f = ->(x) { x * 2 }\n    holder = -> { f = 1 }\n    f.call(4)\n  end\nend\n";
+    let ty = plain_lambda_result(&source);
+    assert!(matches!(ty, roundhouse::ty::Ty::Int), "created lambda: {ty:?}");
+}
+
+#[test]
+fn an_invoked_lambda_reassignment_keeps_the_old_lambda_out() {
+    let source = "class Article < ApplicationRecord\n  def self.plain_lambda\n    f = ->(x) { x * 2 }\n    run = ->(n) { f = n }\n    run.call(1)\n    f.call(4)\n  end\nend\n";
+    let ty = plain_lambda_result(&source);
+    assert!(!matches!(ty, roundhouse::ty::Ty::Int), "invoked lambda still called f: {ty:?}");
+}
+
+#[test]
 fn a_multiassign_reassignment_keeps_the_lambda_out_of_later_reads() {
     let source = "class Article < ApplicationRecord\n  def self.plain_lambda\n    f = ->(x) { x * 2 }\n    f, rest = [1, 2]\n    f.call(4)\n    f\n  end\nend\n";
     let tree = std::collections::HashMap::from([
@@ -281,6 +309,18 @@ fn a_nil_seed_reassigned_from_a_lambda_call_includes_the_result() {
     assert!(variants.contains(&roundhouse::ty::Ty::Int), "{ty:?}");
     assert!(variants.contains(&roundhouse::ty::Ty::Nil), "{ty:?}");
     assert!(!variants.iter().any(|v| matches!(v, roundhouse::ty::Ty::Untyped)), "{ty:?}");
+}
+
+fn plain_lambda_result(source: &str) -> roundhouse::ty::Ty {
+    let tree = std::collections::HashMap::from([
+        (std::path::PathBuf::from("db/schema.rb"), b"ActiveRecord::Schema.define(version: 1) do\n  create_table :articles do |t|\n    t.string :title\n  end\nend\n".to_vec()),
+        (std::path::PathBuf::from("config/routes.rb"), b"Rails.application.routes.draw do\nend\n".to_vec()),
+        (std::path::PathBuf::from("app/models/article.rb"), source.as_bytes().to_vec()),
+    ]);
+    let mut app = roundhouse::ingest::ingest_app_from_tree(tree).expect("ingest");
+    roundhouse::session::analyze_and_lower(&mut app);
+    let body = app.models.iter().flat_map(|m| m.methods()).find(|m| m.name.as_str() == "plain_lambda").expect("method").body.clone();
+    result_ty(&body).unwrap_or_else(|| panic!("no result type"))
 }
 
 fn result_ty(expr: &roundhouse::expr::Expr) -> Option<roundhouse::ty::Ty> {

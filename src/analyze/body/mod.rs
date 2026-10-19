@@ -2579,7 +2579,9 @@ impl<'a> BodyTyper<'a> {
                     // epilogue. Those read this statement's types, and a
                     // `.call` in it may have just given the lambda its
                     // parameter types.
-                    lambda_local::forget_nested_writes(&mut lambda_locals, &exprs[i]);
+                    for name in lambda_local::forget_nested_writes(&mut lambda_locals, exprs, i) {
+                        local_ctx.local_bindings.remove(&name);
+                    }
                     self.refine_lambda_locals(exprs, i, &mut local_ctx, &mut lambda_locals, &mut last);
                     let e = &mut exprs[i];
                     if let ExprNode::Assign { target, value } = &*e.node {

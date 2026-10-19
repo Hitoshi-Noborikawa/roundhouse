@@ -277,36 +277,109 @@ pub(super) fn remember(
     }
 }
 
-/// A write in this statement replaces the stored lambda, so a later
-/// `.call` must not retype that lambda and put it back into the local.
-/// Writes inside a lambda body run later, when the lambda is called, and
-/// do not retire it. The statement's own direct `name = …` is
-/// `remember`'s job; every other local write form retires the name.
-pub(super) fn forget_nested_writes(lambdas: &mut HashMap<Symbol, Stored>, expr: &Expr) {
+/// A write that runs in this statement replaces the stored lambda, so a
+/// later `.call` must not retype that lambda and put it back into the
+/// local. A lambda that is only created stays a barrier. A block on a
+/// call runs with the call, and so does the body of a stored lambda this
+/// statement invokes. The statement's own direct `name = …` is
+/// `remember`'s job. Returns the names removed, so the caller can drop
+/// the stale function binding.
+pub(super) fn forget_nested_writes(
+    lambdas: &mut HashMap<Symbol, Stored>,
+    exprs: &[Expr],
+    index: usize,
+) -> Vec<Symbol> {
     if lambdas.is_empty() {
-        return;
+        return Vec::new();
     }
+    let expr = &exprs[index];
     let mut names = Vec::new();
-    collect_executed_assigns(expr, true, &mut names);
-    for name in names {
-        lambdas.remove(&name);
+    let none = std::collections::HashSet::new();
+    collect_executed_assigns(expr, true, &none, &mut names);
+    let mut seen = std::collections::HashSet::new();
+    let mut queue: Vec<Symbol> = lambdas
+        .keys()
+        .filter(|name| !calls_in(expr, name).is_empty())
+        .cloned()
+        .collect();
+    while let Some(name) = queue.pop() {
+        if !seen.insert(name.clone()) {
+            continue;
+        }
+        let Some(value) = stored_lambda_expr(exprs, lambdas, &name) else {
+            continue;
+        };
+        collect_executed_lambda(value, &none, &mut names);
+        for other in lambdas.keys() {
+            if !seen.contains(other) && !calls_in(value, other).is_empty() {
+                queue.push(other.clone());
+            }
+        }
     }
+    names.retain(|name| lambdas.remove(name).is_some());
+    names
 }
 
-fn collect_executed_assigns(expr: &Expr, root: bool, out: &mut Vec<Symbol>) {
+fn stored_lambda_expr<'a>(
+    exprs: &'a [Expr],
+    lambdas: &HashMap<Symbol, Stored>,
+    name: &Symbol,
+) -> Option<&'a Expr> {
+    let stored = lambdas.get(name)?;
+    let (bound, value) = direct_var_assign(exprs.get(stored.index)?)?;
+    (bound == name).then_some(value)
+}
+
+fn collect_executed_assigns(
+    expr: &Expr,
+    root: bool,
+    shadowed: &std::collections::HashSet<Symbol>,
+    out: &mut Vec<Symbol>,
+) {
     match &*expr.node {
         ExprNode::Lambda { .. } => return,
         ExprNode::Assign { target: LValue::Var { name, .. }, value } => {
-            if !root {
+            if !root && !shadowed.contains(name) {
                 out.push(name.clone());
             }
-            collect_executed_assigns(value, false, out);
+            collect_executed_assigns(value, false, shadowed, out);
+            return;
+        }
+        ExprNode::Send { recv, args, block, .. } => {
+            if let Some(recv) = recv {
+                collect_executed_assigns(recv, false, shadowed, out);
+            }
+            for arg in args {
+                collect_executed_assigns(arg, false, shadowed, out);
+            }
+            if let Some(block) = block {
+                collect_executed_lambda(block, shadowed, out);
+            }
             return;
         }
         _ => {}
     }
-    push_other_local_writes(expr, out);
-    expr.node.for_each_child(&mut |child| collect_executed_assigns(child, false, out));
+    push_other_local_writes(expr, shadowed, out);
+    expr.node.for_each_child(&mut |child| collect_executed_assigns(child, false, shadowed, out));
+}
+
+/// An attached block or an invoked lambda runs now. Its parameters
+/// shadow the outer local of the same name.
+fn collect_executed_lambda(
+    expr: &Expr,
+    outer: &std::collections::HashSet<Symbol>,
+    out: &mut Vec<Symbol>,
+) {
+    let ExprNode::Lambda { params, rest_param, extra_params, block_param, body, .. } = &*expr.node else {
+        collect_executed_assigns(expr, false, outer, out);
+        return;
+    };
+    let mut shadowed = outer.clone();
+    shadowed.extend(params.iter().cloned());
+    shadowed.extend(rest_param.iter().cloned());
+    shadowed.extend(block_param.iter().cloned());
+    shadowed.extend(extra_params.iter().map(|p| p.name.clone()));
+    collect_executed_assigns(body, false, &shadowed, out);
 }
 
 /// The subexpression evaluated before `name` is written, when this node
@@ -347,15 +420,23 @@ fn binds_name(pattern: &crate::expr::MatchPattern, name: &Symbol) -> bool {
     names.iter().any(|n| n == name)
 }
 
-fn push_other_local_writes(expr: &Expr, out: &mut Vec<Symbol>) {
+fn push_other_local_writes(
+    expr: &Expr,
+    shadowed: &std::collections::HashSet<Symbol>,
+    out: &mut Vec<Symbol>,
+) {
     match &*expr.node {
         ExprNode::OpAssign { target: LValue::Var { name, .. }, .. } | ExprNode::Let { name, .. } => {
-            out.push(name.clone());
+            if !shadowed.contains(name) {
+                out.push(name.clone());
+            }
         }
         ExprNode::MultiAssign { targets, .. } => {
             for target in targets {
                 if let LValue::Var { name, .. } = target {
-                    out.push(name.clone());
+                    if !shadowed.contains(name) {
+                        out.push(name.clone());
+                    }
                 }
             }
         }
