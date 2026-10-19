@@ -2080,6 +2080,7 @@ end
     keep_initializer_defined(&mut app, dir, &sources, initializer_defined);
     // `self.queue_adapter =` on ApplicationJob (see `App::queue_adapter`).
     apply_application_job_queue_adapter(&mut app);
+    super::propshaft::ingest(vfs, dir, &mut app)?;
     // The ledger of boot statements no recognizer above read. A warning
     // per statement, in the ingest diagnostic channel; no `App` field.
     super::initializer_ledger::record(
