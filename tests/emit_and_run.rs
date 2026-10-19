@@ -242,6 +242,8 @@ mod defined_const_fold;
 mod job_payload;
 #[path = "emit_and_run/sidekiq_push.rs"]
 mod sidekiq_adapter;
+#[path = "emit_and_run/silent_lowerings.rs"]
+mod silent_lowerings;
 
 #[test]
 fn markdown_templates_render_with_their_mime_type_and_erb_escaping() {
@@ -9883,6 +9885,63 @@ end
         .assert_passes();
 }
 
+/// Temporal and JSON columns share one storage slot: text in the
+/// database, a native or decoded value at the public reader, and a
+/// normalizing writer for `create!`, `[]=`, and reload.
+#[test]
+fn column_slot_temporal_and_json_round_trip() {
+    emit_and_run::real_blog()
+        .edit(
+            "db/schema.rb",
+            "create_table \"articles\", force: :cascade do |t|",
+            "create_table \"articles\", force: :cascade do |t|\n    t.datetime \"reviewed_at\"\n    t.date \"published_on\"\n    t.json \"metadata\"\n    t.jsonb \"payload\"",
+        )
+        .write(
+            "test/models/article_column_slot_test.rb",
+            r#"require "test_helper"
+
+class ArticleColumnSlotTest < ActiveSupport::TestCase
+  test "temporal text and json text share the slot boundary" do
+    reviewed = Time.utc(2020, 1, 2, 3, 4, 5)
+    published = Date.new(2020, 1, 2)
+    metadata = [{ "name" => "Ada", "enabled" => true }]
+    payload = { "on" => true }
+    article = Article.create!(
+      title: "Slot",
+      body: "A body long enough to validate.",
+      reviewed_at: reviewed,
+      published_on: published,
+      metadata: metadata,
+      payload: payload
+    )
+    article = Article.find(article.id)
+
+    assert_equal reviewed, article.reviewed_at
+    assert_equal "2020-01-02 03:04:05.000000", article.reviewed_at_raw
+    assert_equal published, article.published_on
+    assert_equal published, article[:published_on]
+    assert_equal metadata, article.metadata
+    assert_equal metadata, article[:metadata]
+    assert_equal metadata, article.attributes["metadata"]
+    assert_equal payload, article.payload
+    assert_equal payload, article[:payload]
+
+    article[:reviewed_at] = Time.utc(2021, 2, 3, 4, 5, 6)
+    article[:metadata] = { "name" => "Grace" }
+    article.save!
+    reloaded = Article.find(article.id)
+    assert_equal Time.utc(2021, 2, 3, 4, 5, 6), reloaded.reviewed_at
+    assert_equal "2021-02-03 04:05:06.000000", reloaded.reviewed_at_raw
+    assert_equal({ "name" => "Grace" }, reloaded.metadata)
+    assert_equal published, reloaded.published_on
+  end
+end
+"#,
+        )
+        .run_test("test/models/article_column_slot_test.rb")
+        .assert_passes();
+}
+
 /// Not the column default: `enum …, default:` is the value Rails gives an unset attribute, and a value the caller passes still wins.
 #[test]
 fn an_enum_default_option_seeds_a_new_record() {
@@ -16658,3 +16717,5 @@ mod parameterized_mailer;
 mod private_calls;
 #[path = "emit_and_run/inherited_visibility.rs"]
 mod inherited_visibility;
+#[path = "emit_and_run/class_side_relations.rs"]
+mod class_side_relations;

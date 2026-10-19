@@ -2543,12 +2543,10 @@ fn is_relation_terminal(name: &str, args: &[Expr], block: Option<&Expr>) -> bool
     }
 }
 
-/// `first(n)` / `last(n)` on a relation are DIFFERENT METHODS from the
+/// `first(n)` / `last(n)` on a relation are different methods from the
 /// bare forms — they answer an Array of up to n records where `first`
 /// answers one record or nil. The runtime splits them (`first_n` /
-/// `last_n`) instead of overloading on arity, because one method cannot
-/// carry both return types on a strict target; this renames the call
-/// site to match.
+/// `last_n`). The spelling is [`crate::catalog::counted_relation_terminal`].
 ///
 /// Only ever called where the receiver has already been proven to be a
 /// relation. That gate is the whole point: `Array#first(n)` and
@@ -2558,15 +2556,9 @@ fn is_relation_terminal(name: &str, args: &[Expr], block: Option<&Expr>) -> bool
 ///
 /// A block form is excluded: `first { … }` is Enumerable#detect, a
 /// different method again.
-fn counted_terminal(method: &Symbol, args: &[Expr], block: Option<&Expr>) -> Option<Symbol> {
-    if args.len() != 1 || block.is_some() {
-        return None;
-    }
-    match method.as_str() {
-        "first" => Some(Symbol::from("first_n")),
-        "last" => Some(Symbol::from("last_n")),
-        _ => None,
-    }
+pub(crate) fn counted_terminal(method: &Symbol, args: &[Expr], block: Option<&Expr>) -> Option<Symbol> {
+    crate::catalog::counted_relation_terminal(method.as_str(), args.len(), block.is_some())
+        .map(Symbol::from)
 }
 
 /// `@room` names the model `Room` — the naming convention

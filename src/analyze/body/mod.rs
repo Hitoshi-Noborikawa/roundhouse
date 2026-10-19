@@ -61,6 +61,8 @@ mod pagy;
 mod send;
 pub(crate) use send::PARAM_VALUE;
 pub(crate) use send::{indexed_pluck, string_answers};
+#[cfg(test)]
+pub(crate) use send::counted_first_last;
 
 /// Typed constants for generated expressions without Ruby source spans.
 /// The class's constants shadow the shared app registry. Source-backed

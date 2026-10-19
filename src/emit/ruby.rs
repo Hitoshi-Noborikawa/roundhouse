@@ -128,6 +128,8 @@ pub fn emit_method(m: &MethodDef) -> String {
 /// Complementary to `emit`; skips Rails-app artifacts (controllers,
 /// routes, views, fixtures, importmap, schema) and emits only one
 /// `.rb` file per `LibraryClass`. Mirrors `typescript::emit_library`.
+pub use library::record_rendered;
+
 pub fn emit_library(app: &App) -> Vec<EmittedFile> {
     library::emit_library_class_decls(app)
 }
