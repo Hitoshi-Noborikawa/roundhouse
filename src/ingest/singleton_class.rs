@@ -195,7 +195,7 @@ fn walk_statement(
         // Copies the method as it stands, like the library-class walk.
         "alias_method" => match alias_source(&call, &out.methods, true) {
             Some((to, source)) => {
-                let mut copy =
+                let copy =
                     super::library_class::copy_aliased_method(&out.methods[source], to.as_str());
                 out.methods.push(copy);
                 Ok(())
