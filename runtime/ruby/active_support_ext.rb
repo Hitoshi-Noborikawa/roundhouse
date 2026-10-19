@@ -126,14 +126,13 @@ module ActiveSupport
   end
 
   # ActiveSupport's `deep_dup` (core_ext/object/deep_dup.rb). One walk,
-  # also what `ErrorReporter` hands each subscriber: a Hash is `dup`'d
-  # and each value copied, and a key that is neither String nor Symbol
-  # is copied and stored after the String/Symbol ones, as Rails'
-  # delete-and-store does. An Array copies each element. A Method, an
-  # UnboundMethod, a Singleton, or anything that answers `duplicable?`
-  # with false is itself; anything else is its `dup` (an Integer's,
-  # nil's or a Symbol's is itself). `lower::symbolize_keys` routes a
-  # typed Hash or Array receiver here.
+  # also what `ErrorReporter` hands each subscriber. A Hash is copied
+  # into a fresh Hash: String and Symbol keys first, every other key
+  # after them, which is where Rails' delete-and-store lands. An Array
+  # copies each element. A Method, an UnboundMethod, a Singleton, or
+  # anything that answers `duplicable?` with false is itself; anything
+  # else is its `dup` (an Integer's, nil's or a Symbol's is itself).
+  # `lower::symbolize_keys` routes a typed Hash or Array receiver here.
   def self.deep_dup(value)
     case value
     when Array then value.map { |item| ActiveSupport.deep_dup(item) }
