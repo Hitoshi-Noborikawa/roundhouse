@@ -1317,6 +1317,43 @@ fn a_class_side_method_missing_is_reached() {
     assert!(stderr.contains("whole-route: 0 GET action(s) served by the lowered app; 1 left to Rails"), "{stderr}");
 }
 
+/// INTERIM (rubys/roundhouse#58, same re-lowering as the fallback above):
+/// a send whose receiver is typed to ANOTHER class's value constant
+/// (`Gadget::DEFAULT`, with `class Gadget; DEFAULT = Gadget.new; ...`)
+/// re-lowers as `Ty::Class { id: "Gadget::DEFAULT" }` — a class that
+/// doesn't exist, since the re-lowering only seeds the enclosing class's
+/// own constants. Left unguarded, `index.lookup` finds nothing for that
+/// made-up id and the send dispatches to NOTHING instead of falling back
+/// to RTA, an unsound clear. Each case below reads `Gadget::DEFAULT` a
+/// different way (out of a Hash literal, through a local, out of an
+/// Array literal) and must still reach `Gadget#call`.
+///
+/// The top-level counterpart (`DEFAULT_GADGET = Gadget.new`, read back
+/// bare) was tried too: the re-lowering does mistype it the same way,
+/// but a bare top-level constant is already a construct the main
+/// analysis diagnoses as unsupported on its own (`constant not
+/// supported: DEFAULT_GADGET`, independent of this guard), so that
+/// route is already blocked before the planner's RTA fallback ever
+/// matters — not a case that can show this bug.
+#[test]
+fn typed_send_on_another_classs_value_constant_falls_back_to_rta() {
+    let gadget = "class Gadget\n  DEFAULT = Gadget.new\n\n  def call\n    Frobnicator::Spinner.new.spin\n  end\nend\n";
+    let cases = [
+        ("hash", "    @name = { w: Gadget::DEFAULT }[:w].call"),
+        ("local", "    x = Gadget::DEFAULT\n    @name = x.call"),
+        ("array", "    @name = [Gadget::DEFAULT].first.call"),
+    ];
+    let mut failed = Vec::new();
+    for (name, action) in cases {
+        let stderr = rta_ledger(&format!("rta-unknown-class-{name}"), action, "", &[("app/lib/gadget.rb", gadget)]);
+        let ok = stderr.contains("whole-route: 0 GET action(s) served by the lowered app; 1 left to Rails") && stderr.contains("Gadget#call");
+        if !ok {
+            failed.push(format!("{name}: {stderr}"));
+        }
+    }
+    assert!(failed.is_empty(), "{}", failed.join("\n\n"));
+}
+
 /// A minimal app whose `ruby` emit refuses one association (a `through:`
 /// hop keyed on a non-id column, Mastodon's `Status.reblogged_by_accounts`).
 fn app_with_a_ruby_refusal(src: &Path) {
