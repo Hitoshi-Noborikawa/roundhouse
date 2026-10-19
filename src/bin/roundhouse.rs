@@ -442,11 +442,22 @@ fn run_transpile(
     // Each gap still degrades to a stub in the emitted output, so a
     // single run surfaces the whole inventory instead of dying on the
     // first one.
-    let (files_result, mut diags) =
+    let ((files_result, mut diags), rendered) = roundhouse::emit::ruby::record_rendered(|| {
         roundhouse::emit::diagnostics::scope(|| match &whole_route {
             Some(wr) => project::futamura_target_files(&app, input, Some(wr)),
             None => project::target_files(&app, input, target),
-        });
+        })
+    });
+    if std::env::var_os("ROUNDHOUSE_AUDIT").is_some()
+        && let Ok(files) = &files_result
+    {
+        let started = std::time::Instant::now();
+        let findings = roundhouse::emit::audit::audit(&rendered, files);
+        for d in &findings {
+            eprintln!("{}", d.render(&app.sources));
+        }
+        eprintln!("roundhouse: audit: {} send(s) resolve to no emitted method ({:?})", findings.len(), started.elapsed());
+    }
 
     // Same attribution pass as `analyze_diags` above, run again here:
     // model-to-library lowering (where an unresolved `alias` is caught,
