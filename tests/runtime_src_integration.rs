@@ -1141,7 +1141,12 @@ fn every_runtime_method_body_concretely_typed() {
     // active_record/tasks.rb: `with_connection`,
     // `with_temporary_connection`, and `with_temporary_pool`'s yield
     // plus the begin that answers it).
-    const CEILING: usize = 776;
+    // MEASURED 778 on 2026-10-19: `RecordNotDestroyed#initialize` takes
+    // the record the caller passed, whatever model it is, and forwards
+    // the message through `super`, the same two gradual sites
+    // `RecordNotSaved#initialize` already carries (+2 in
+    // active_record/errors.rb, 776 -> 778).
+    const CEILING: usize = 778;
     assert!(
         total_gradual <= CEILING,
         "{total_gradual} Ty::Untyped sites exceeds ceiling of {CEILING}"

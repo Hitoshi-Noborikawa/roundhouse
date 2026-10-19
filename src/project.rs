@@ -5781,6 +5781,13 @@ pub const RUBY_FAMILY_RUNTIME_CONSTANTS: &[&str] = &[
     "Arel::Nodes::Not",
     "Arel::Nodes::Case",
     "Arel::Nodes::NamedFunction",
+    // `runtime/ruby/active_record/connection_not_established.rb` and
+    // `encryption_errors.rb`. A rescue of ConnectionNotEstablished
+    // catches the two children. Strict targets do not load the files.
+    "ActiveRecord::ConnectionFailed",
+    "ActiveRecord::ConnectionTimeoutError",
+    "ActiveRecord::Encryption::Errors::Decryption",
+    "ActiveRecord::Encryption::Errors::Configuration",
 ];
 
 /// Availability policy for class/module *values* that inference

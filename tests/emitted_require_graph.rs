@@ -271,7 +271,10 @@ fn ruby_family_runtime_constants_are_ledgered_on_other_targets() {
 
   def surface
     [Arel::Nodes, Arel::Nodes::Node, Arel::Nodes::SqlLiteral, Arel::Nodes::Quoted,
-     Arel::Nodes::Not, Arel::Nodes::Case, Arel::Nodes::NamedFunction]
+     Arel::Nodes::Not, Arel::Nodes::Case, Arel::Nodes::NamedFunction,
+     ActiveRecord::ConnectionFailed, ActiveRecord::ConnectionTimeoutError,
+     ActiveRecord::Encryption::Errors::Decryption,
+     ActiveRecord::Encryption::Errors::Configuration]
   end
 end
 "#),

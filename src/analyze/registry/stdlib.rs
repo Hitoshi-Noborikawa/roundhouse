@@ -809,7 +809,13 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
         // Not `ActiveRecord::Base`: no instance surface is registered there, so `e.record.errors` would still fail.
         ("ActiveRecord::RecordInvalid", Some(("record", Ty::Untyped))),
         ("ActiveRecord::RecordNotSaved", Some(("record", Ty::Untyped))),
+        ("ActiveRecord::RecordNotDestroyed", Some(("record", Ty::Untyped))),
         ("ActiveRecord::ReadOnlyRecord", None),
+        ("ActiveRecord::ConnectionNotEstablished", None),
+        ("ActiveRecord::ConnectionFailed", None),
+        ("ActiveRecord::ConnectionTimeoutError", None),
+        ("ActiveRecord::Encryption::Errors::Decryption", None),
+        ("ActiveRecord::Encryption::Errors::Configuration", None),
         // Names overlap `project::RUBY_FAMILY_RUNTIME_CONSTANTS` (emit
         // ledger). Keep extras here — inference needs the readers.
         ("ActionController::ParameterMissing", Some(("param", Ty::Str))),

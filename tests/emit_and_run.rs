@@ -13,6 +13,8 @@ mod active_model_attributes;
 mod arel_nodes;
 #[path = "emit_and_run/database_tasks.rs"]
 mod database_tasks;
+#[path = "emit_and_run/framework_exceptions.rs"]
+mod framework_exceptions;
 #[path = "emit_and_run/date_calendar_duration.rs"]
 mod date_calendar_duration;
 #[path = "emit_and_run/interval_columns.rs"]
