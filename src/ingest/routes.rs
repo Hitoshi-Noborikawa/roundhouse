@@ -3349,6 +3349,13 @@ fn ingest_resources_route(
     let mut path: Option<String> = None;
     let mut concern_names: Vec<String> = Vec::new();
     let mut only_none = false;
+    // `constraints: { id: /.../ }` — read the same way
+    // `ingest_explicit_route` reads it (#857), so a member/nested route
+    // this resource generates carries the same per-param regex Rails
+    // applies to every route with that segment. Merged into `nested`
+    // and into this node's own `constraints` field below, once the
+    // block body has been ingested.
+    let mut constraints: IndexMap<Symbol, String> = IndexMap::new();
     for arg in iter {
         let Some(kh) = arg.as_keyword_hash_node() else { continue };
         for el in kh.elements().iter() {
@@ -3456,6 +3463,26 @@ fn ingest_resources_route(
                         None => rname(&value).into_iter().collect(),
                     };
                 }
+                // `constraints: { id: /[A-Z]{2}\d+/ }` — per-param regex
+                // restriction, same shape and same reader as
+                // `ingest_explicit_route`'s `"constraints"` arm (#857).
+                // A pattern outside the supported subset is not refused
+                // HERE: it rides through to `lower::routes`, which
+                // already refuses (with a diagnostic) any flattened
+                // route whose constraint doesn't compile, the same
+                // fail-closed path `constraints:` on an explicit route
+                // already takes.
+                "constraints" => {
+                    if let Some(h) = value.as_hash_node() {
+                        for el in h.elements().iter() {
+                            let Some(a) = el.as_assoc_node() else { continue };
+                            let Some(param) = symbol_value(&a.key()) else { continue };
+                            if let Some(src) = regex_source(&a.value()) {
+                                constraints.insert(Symbol::from(param.as_str()), src);
+                            }
+                        }
+                    }
+                }
                 // `shallow:` lands when a fixture demands it.
                 _ => {}
             }
@@ -3477,6 +3504,14 @@ fn ingest_resources_route(
             run_concerns(&concern_names, &none, file, Some(name_str.as_str()), cx)
         })?);
     }
+    // Push the inline `constraints:` kwarg down into every `member do`/
+    // `collection do` route and nested resource this call's block
+    // flattens to — the same merge an enclosing `constraints(...) do
+    // … end` block already runs on ITS `nested` (merge_outer_constraints
+    // above). Without this, `resources :x, constraints: { id: /.../ }
+    // do member { ... } end` reads the option (above) but never reaches
+    // the member route it was meant to narrow (#857).
+    merge_outer_constraints(&mut nested, &constraints);
 
     Ok(RouteSpec::Resources {
         name,
@@ -3488,7 +3523,7 @@ fn ingest_resources_route(
         controller,
         param,
         path,
-        constraints: IndexMap::new(),
+        constraints,
     })
 }
 
