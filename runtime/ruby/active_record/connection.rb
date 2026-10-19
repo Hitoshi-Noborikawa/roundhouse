@@ -1070,6 +1070,159 @@ module ActiveRecord
       ActiveRecord::Relation.new(self).first
     end
 
+    # Not left to the lowerings: they re-root only the class-side shapes they recognize, and Rails' `Querying` hands every one of these to `all`.
+    def self.delete_by(conditions)
+      ActiveRecord::Relation.new(self).delete_by(conditions)
+    end
+
+    def self.destroy_by(conditions)
+      ActiveRecord::Relation.new(self).destroy_by(conditions)
+    end
+
+    def self.distinct(value = true)
+      ActiveRecord::Relation.new(self).distinct(value)
+    end
+
+    def self.eager_load(*names)
+      ActiveRecord::Relation.new(self).eager_load(*names)
+    end
+
+    def self.excluding(*records)
+      ActiveRecord::Relation.new(self).excluding(*records)
+    end
+
+    def self.find_each
+      ActiveRecord::Relation.new(self).find_each { |value| yield value }
+    end
+
+    def self.find_in_batches
+      ActiveRecord::Relation.new(self).find_in_batches { |value| yield value }
+    end
+
+    def self.first_or_initialize
+      ActiveRecord::Relation.new(self).first_or_initialize
+    end
+
+    def self.first!
+      ActiveRecord::Relation.new(self).first!
+    end
+
+    def self.from(source)
+      ActiveRecord::Relation.new(self).from(source)
+    end
+
+    def self.group(*parts)
+      ActiveRecord::Relation.new(self).group(*parts)
+    end
+
+    def self.having(condition, *args)
+      ActiveRecord::Relation.new(self).having(condition, *args)
+    end
+
+    def self.ids
+      ActiveRecord::Relation.new(self).ids
+    end
+
+    def self.includes(*names)
+      ActiveRecord::Relation.new(self).includes(*names)
+    end
+
+    def self.joins(spec)
+      ActiveRecord::Relation.new(self).joins(spec)
+    end
+
+    def self.left_joins(spec)
+      ActiveRecord::Relation.new(self).left_joins(spec)
+    end
+
+    def self.left_outer_joins(spec)
+      ActiveRecord::Relation.new(self).left_outer_joins(spec)
+    end
+
+    def self.limit(n)
+      ActiveRecord::Relation.new(self).limit(n)
+    end
+
+    def self.many?
+      ActiveRecord::Relation.new(self).many?
+    end
+
+    def self.maximum(expr)
+      ActiveRecord::Relation.new(self).maximum(expr)
+    end
+
+    def self.merge(other)
+      ActiveRecord::Relation.new(self).merge(other)
+    end
+
+    def self.minimum(expr)
+      ActiveRecord::Relation.new(self).minimum(expr)
+    end
+
+    def self.offset(n)
+      ActiveRecord::Relation.new(self).offset(n)
+    end
+
+    def self.one?
+      ActiveRecord::Relation.new(self).one?
+    end
+
+    def self.or(other)
+      ActiveRecord::Relation.new(self).or(other)
+    end
+
+    def self.order(*parts)
+      ActiveRecord::Relation.new(self).order(*parts)
+    end
+
+    def self.pick(col)
+      ActiveRecord::Relation.new(self).pick(col)
+    end
+
+    def self.pluck(col)
+      ActiveRecord::Relation.new(self).pluck(col)
+    end
+
+    def self.preload(*names)
+      ActiveRecord::Relation.new(self).preload(*names)
+    end
+
+    def self.references(*names)
+      ActiveRecord::Relation.new(self).references(*names)
+    end
+
+    def self.reorder(*parts)
+      ActiveRecord::Relation.new(self).reorder(*parts)
+    end
+
+    def self.select(*specs)
+      ActiveRecord::Relation.new(self).select(*specs)
+    end
+
+    def self.sum(expr)
+      ActiveRecord::Relation.new(self).sum(expr)
+    end
+
+    def self.touch_all(name = nil)
+      ActiveRecord::Relation.new(self).touch_all(name)
+    end
+
+    def self.unscope(where: nil)
+      ActiveRecord::Relation.new(self).unscope(where: where)
+    end
+
+    def self.update_all(updates)
+      ActiveRecord::Relation.new(self).update_all(updates)
+    end
+
+    def self.with_recursive(ctes)
+      ActiveRecord::Relation.new(self).with_recursive(ctes)
+    end
+
+    def self.without(*records)
+      ActiveRecord::Relation.new(self).without(*records)
+    end
+
     # `User.take` — the Rails 8 authentication generator's tests set up
     # with it (`setup { @user = User.take }`), so the Rails Guides store
     # reaches here. Same row as `first` under SQLite; see Relation#take.
