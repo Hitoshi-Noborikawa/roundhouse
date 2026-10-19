@@ -12,12 +12,11 @@
 //! `polish`/`shine` do, but because `private` appears below the class
 //! body at all.
 //!
-//! Splicing `included do`'s defs onto the includer's own emitted body is
-//! a separate, pre-existing gap this fix does not touch — confirmed
-//! below (`gadget_rb` contains neither `polish` nor `shine` even once
-//! ingest succeeds, with or without the marker) — so the regression
-//! proof here is ingest succeeding where it used to fail loud, which is
-//! the whole of what `src/ingest/visibility.rs` controls.
+//! Splicing `included do`'s defs onto the includer's emitted body (with
+//! visibility) is covered by `included_do_defs_are_spliced_into_the_model_body`
+//! and `emit_and_run::defs_in_an_included_block_run_on_the_includer`. The
+//! regression proof in the marker tests here is ingest succeeding where it
+//! used to fail loud, which is what `src/ingest/visibility.rs` controls.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -83,13 +82,8 @@ fn included_do_protected_is_applied_not_rejected() {
 /// def domain_match_confirmed?; …; end; end`) `marker_mixed_with_unmodeled_call`
 /// otherwise rejected: not because `desc`/`long_desc` generate
 /// anything, just because they weren't on its allowlist. Like the three
-/// `included_do_*_is_applied_not_rejected` tests above, and for the same
-/// reason (`included_do_defs_are_not_yet_spliced_into_the_model_body`'s
-/// pre-existing, unrelated gap — confirmed by probing `GadgetTools`'s own
-/// `LibraryClass.methods`, which stays empty whether or not a def's
-/// `included do` block ingests clean), the regression proof available
-/// today is ingest succeeding where it used to fail loud, not a
-/// per-method visibility read-back.
+/// `included_do_*_is_applied_not_rejected` tests above, the regression
+/// proof available today is ingest succeeding where it used to fail loud.
 #[test]
 fn included_do_marker_coexists_with_bare_thor_annotations() {
     gadget_app(

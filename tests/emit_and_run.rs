@@ -7811,6 +7811,8 @@ fn included_block_defs_that_would_lose_their_precedence_stay_refused() {
         "module Shouty\n  extend ActiveSupport::Concern\n  included do\n    def shout\n      \"block\"\n    end\n  end\n\n  def shout\n    \"module\"\n  end\nend\n",
         "module Shouty\n  extend ActiveSupport::Concern\n  included do\n    include Comparable\n    def shout\n      \"block\"\n    end\n  end\nend\n",
         "module Shouty\n  extend ActiveSupport::Concern\n  included do\n    class << self\n      %i[a b].each { |n| define_method(n) { n } }\n      def shout\n        \"block\"\n      end\n    end\n  end\nend\n",
+        "module Shouty\n  extend ActiveSupport::Concern\n  class_methods do\n    def loud\n      \"carrier\"\n    end\n  end\n  included do\n    def self.loud\n      \"block\"\n    end\n  end\nend\n",
+        "module Shouty\n  extend ActiveSupport::Concern\n  module ClassMethods\n    def loud\n      \"carrier\"\n    end\n  end\n  included do\n    class << self\n      def loud\n        \"block\"\n      end\n    end\n  end\nend\n",
     ] {
         let errors = emit_and_run::real_blog()
             .write("app/models/concerns/shouty.rb", concern)

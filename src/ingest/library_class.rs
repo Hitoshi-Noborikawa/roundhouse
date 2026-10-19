@@ -2064,6 +2064,18 @@ fn only_defs(body: Option<ruby_prism::Node<'_>>) -> bool {
     })
 }
 
+/// Names declared in `class_methods do` / `module ClassMethods` on a concern.
+fn concern_carrier_def_names(body: Option<ruby_prism::Node<'_>>, names: &mut HashSet<String>) {
+    let Some(body) = body else { return };
+    for stmt in flatten_statements(body) {
+        let definition = visibility::definition(&stmt).map(|d| d.as_node());
+        let Some(def) = definition.as_ref().unwrap_or(&stmt).as_def_node() else { continue };
+        if def.receiver().is_none() {
+            names.insert(constant_id_str(&def.name()).to_string());
+        }
+    }
+}
+
 /// Collect a declaration's methods, constants, and supported DSL expansions
 /// using its resolved visibility. Custom Data constants retain only their call
 /// heads here; the factory collector owns lifting and validating their blocks.
@@ -2140,6 +2152,24 @@ fn walk_decl_body_with_visibility<'pr>(
                 def.receiver().is_none().then(|| constant_id_str(&def.name()).to_string())
             })
             .collect()
+    });
+    let concern_class_defs: Option<HashSet<String>> = concern_direct_defs.as_ref().map(|_| {
+        let mut names = HashSet::new();
+        for stmt in &statements {
+            if let Some(m) = stmt.as_module_node()
+                && module_name_path(&m).as_deref() == Some(&["ClassMethods".to_string()])
+            {
+                concern_carrier_def_names(m.body(), &mut names);
+            }
+            if let Some(call) = stmt.as_call_node()
+                && call.receiver().is_none()
+                && constant_id_str(&call.name()) == "class_methods"
+                && let Some(block) = call.block().and_then(|b| b.as_block_node())
+            {
+                concern_carrier_def_names(block.body(), &mut names);
+            }
+        }
+        names
     });
     for statement in statements {
         // An `if` / `unless` around a `def`, a visibility marker, or an
@@ -2432,11 +2462,20 @@ fn walk_decl_body_with_visibility<'pr>(
                     for inner in inner_stmts {
                         // `class << self` here opens the includer's singleton:
                         // class methods, as from `class_methods do`.
-                        // ponytail: the includer's own singleton beats a
-                        // `class_methods` copy of the same name; not checked.
                         if let Some(sc) = inner.as_singleton_class_node()
                             && sc.expression().as_self_node().is_some()
                             && only_defs(sc.body())
+                            && concern_class_defs.as_ref().is_none_or(|carrier| {
+                                let Some(body) = sc.body() else { return true };
+                                !flatten_statements(body).iter().any(|stmt| {
+                                    let definition = visibility::definition(stmt).map(|d| d.as_node());
+                                    let Some(def) = definition.as_ref().unwrap_or(stmt).as_def_node() else {
+                                        return false;
+                                    };
+                                    def.receiver().is_none()
+                                        && carrier.contains(constant_id_str(&def.name()))
+                                })
+                            })
                         {
                             out.extend(walk_decl_body_with_visibility(sc.body(), owner, file, DeclBodyMode::SingletonClass, visibility)?);
                             hoisted.push((inner.location().start_offset() as u32, inner.location().end_offset() as u32));
@@ -2445,7 +2484,11 @@ fn walk_decl_body_with_visibility<'pr>(
                         let definition = visibility::definition(&inner).map(|d| d.as_node());
                         let Some(def) = definition.as_ref().unwrap_or(&inner).as_def_node() else { continue };
                         let class_side = def.receiver().is_some_and(|r| r.as_self_node().is_some());
-                        if (def.receiver().is_some() && !class_side) || (!class_side && direct_defs.contains(constant_id_str(&def.name()))) {
+                        let name = constant_id_str(&def.name());
+                        if (def.receiver().is_some() && !class_side)
+                            || (!class_side && direct_defs.contains(name))
+                            || (class_side && concern_class_defs.as_ref().is_some_and(|c| c.contains(name)))
+                        {
                             continue;
                         }
                         let mut m = ingest_library_method(&def, owner, file)?;
