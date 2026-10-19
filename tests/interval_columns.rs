@@ -144,17 +144,19 @@ fn a_strict_target_refuses_an_interval_column() {
     );
     let mut app = ingest_app_from_tree(tree).expect("ingest");
     roundhouse::session::analyze_and_lower(&mut app);
-    let (_, diags) = roundhouse::emit::diagnostics::scope(|| {
-        roundhouse::project::target_files(&app, std::path::Path::new("."), BuildTarget::Go)
-    });
-    let errors: Vec<_> = diags
-        .into_iter()
-        .filter(|d| d.severity == Severity::Error)
-        .map(|d| d.message)
-        .collect();
-    assert!(
-        errors.iter().any(|message| message.contains("interval")),
-        "Go must not emit an interval column quietly:\n{}",
-        errors.join("\n")
-    );
+    for target in [BuildTarget::Go, BuildTarget::Roda] {
+        let (_, diags) = roundhouse::emit::diagnostics::scope(|| {
+            roundhouse::project::target_files(&app, std::path::Path::new("."), target)
+        });
+        let errors: Vec<_> = diags
+            .into_iter()
+            .filter(|d| d.severity == Severity::Error)
+            .map(|d| d.message)
+            .collect();
+        assert!(
+            errors.iter().any(|message| message.contains("interval")),
+            "{target:?} must not emit an interval column quietly:\n{}",
+            errors.join("\n")
+        );
+    }
 }

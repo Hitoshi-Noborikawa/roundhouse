@@ -6149,12 +6149,14 @@ fn report_unavailable_class_value(
 /// lowers-added exception Consts surveyed from a throwaway controller
 /// lower (emit still lowers controllers after this gate today).
 fn report_unsupported_bundled_constants(app: &App, target: BuildTarget) {
-    if matches!(target, BuildTarget::Blog | BuildTarget::Ruby | BuildTarget::Roda) {
-        return;
-    }
     // Column readers are synthesized inside the emitter, after this walk,
     // so a Send match never sees them. The schema column is the fact.
-    if !matches!(target, BuildTarget::Jruby | BuildTarget::Spinel) {
+    // Ruby, JRuby, and Spinel ship the interval intrinsics. Roda is Sequel:
+    // it has no parser, so a text column typed as Duration is not a runtime.
+    if !matches!(
+        target,
+        BuildTarget::Blog | BuildTarget::Ruby | BuildTarget::Jruby | BuildTarget::Spinel
+    ) {
         for table in app.schema.tables.values() {
             for column in &table.columns {
                 if column.col_type == crate::schema::ColumnType::Interval {
@@ -6172,6 +6174,9 @@ fn report_unsupported_bundled_constants(app: &App, target: BuildTarget) {
                 }
             }
         }
+    }
+    if matches!(target, BuildTarget::Blog | BuildTarget::Ruby | BuildTarget::Roda) {
+        return;
     }
     fn visit(expr: &crate::expr::Expr, app: &App, target: &str) {
         // Spinel matches this exception by its rescue name, but does not
