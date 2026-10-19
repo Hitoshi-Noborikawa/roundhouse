@@ -1,8 +1,8 @@
 //! ActiveSupport's core_ext reopens, grounded to a runtime function
 //! instead of a reopen.
 //!
-//! Rails ships `index_by`, `many?`, `to_sentence` and `sole` on
-//! `Enumerable`/`Array`, and `squish` on `String`, by reopening the
+//! Rails ships `index_by`, `index_with`, `many?`, `to_sentence` and `sole` on
+//! `Enumerable`/`Array`, and `squish` and `truncate` on `String`, by reopening the
 //! builtin — which is a shape
 //! only the CRuby overlay can host: the transpiled runtimes cannot
 //! reopen a builtin, and spinel AOT cannot dispatch a user-defined
@@ -135,6 +135,12 @@ pub(crate) fn rewrite_node(expr: &mut Expr) -> bool {
     if method.as_str() == "pluck" && block.is_none() {
         return ground_indexed_pluck(expr);
     }
+    if method.as_str() == "index_with" {
+        return ground_index_with(expr);
+    }
+    if method.as_str() == "truncate" && block.is_none() {
+        return ground_string_truncate(expr);
+    }
     let wants_block = match method.as_str() {
         "index_by" => true,
         "many?" => block.is_some(),
@@ -250,6 +256,73 @@ pub(crate) fn rewrite_node(expr: &mut Expr) -> bool {
     true
 }
 
+/// `list.index_with(v|{…}|&blk)` → `to_h` with a `[key, value]` block, so the
+/// Hash is typed at the call site. Value form binds once (`__index_with_value =
+/// v`) so every key shares the object Rails evaluates before iteration.
+/// Array / Relation / Tuple only: a Hash (or gradual receiver that may be one)
+/// yields pairs to `index_with` but keys alone to `to_h`.
+fn ground_index_with(expr: &mut Expr) -> bool {
+    let span = expr.span;
+    let ExprNode::Send { recv, method, args, block, .. } = &*expr.node else { return false };
+    if method.as_str() != "index_with" { return false; }
+    let Some(receiver) = recv.as_ref() else { return false };
+    if !matches!(receiver.ty.as_ref(), Some(Ty::Array { .. } | Ty::Relation { .. } | Ty::Tuple { .. })) {
+        return false;
+    }
+    // Rename like pluck when a source Var is named `__index_with_key`.
+    let key_for = |e: &Expr| match &*e.node {
+        ExprNode::Var { name, .. } if name.as_str() == "__index_with_key" => Symbol::from("__index_with_elem"),
+        _ => Symbol::from("__index_with_key"),
+    };
+    let key_read = |key: &Symbol| Expr::new(span, ExprNode::Var { id: crate::ident::VarId(0), name: key.clone() });
+    let pair = |k: Expr, v: Expr| {
+        Expr::new(span, ExprNode::Array { elements: vec![k, v], style: Default::default() })
+    };
+    let lambda = |params: Vec<Symbol>, body: Expr, style: crate::expr::BlockStyle| {
+        Expr::new(span, ExprNode::Lambda {
+            params, rest_param: None, extra_params: Vec::new(), block_param: None, body, block_style: style,
+        })
+    };
+    let (new_block, bind) = match (args.as_slice(), block.as_ref().map(|b| &*b.node)) {
+        ([v], None) => {
+            let key = key_for(v);
+            let bound = bind_once_as(span, v, "__index_with_value", false);
+            (lambda(vec![key.clone()], pair(key_read(&key), bound.read), Default::default()), Some(bound.assign))
+        }
+        ([], Some(ExprNode::Lambda { params, rest_param: None, extra_params, block_param: None, body, block_style }))
+            if params.len() == 1 && extra_params.is_empty() =>
+        {
+            let p = Expr::new(span, ExprNode::Var { id: crate::ident::VarId(0), name: params[0].clone() });
+            (lambda(params.clone(), pair(p, body.clone()), *block_style), None)
+        }
+        ([], Some(ExprNode::Var { .. })) => {
+            let blk = block.as_ref().expect("matched Some");
+            let key = key_for(blk);
+            let call = Expr::new(span, ExprNode::Send {
+                recv: Some(blk.clone()), method: Symbol::from("call"),
+                args: vec![key_read(&key)], block: None, parenthesized: true,
+            });
+            (lambda(vec![key.clone()], pair(key_read(&key), call), Default::default()), None)
+        }
+        _ => return false,
+    };
+    let mut to_h = Expr::new(span, ExprNode::Send {
+        recv: Some(receiver.clone()), method: Symbol::from("to_h"),
+        args: Vec::new(), block: Some(new_block), parenthesized: false,
+    });
+    to_h.ty = expr.ty.clone();
+    *expr = match bind {
+        Some(assign) => {
+            let ty = to_h.ty.clone();
+            let mut seq = Expr::new(span, ExprNode::Seq { exprs: vec![assign, to_h] });
+            seq.ty = ty;
+            seq
+        }
+        None => to_h,
+    };
+    true
+}
+
 /// Not a reader call per key, as `lower::assoc_pluck` writes for records:
 /// a Hash answers a key only through `[]`, which is what ActiveSupport's
 /// `pluck` sends to every element.
@@ -349,7 +422,7 @@ fn empty_array(span: crate::span::Span) -> Expr {
     // A later pass reads assignment types. An untyped `[]` is invisible
     // to it, so a controller ivar assigned both this and a Relation
     // would keep the Relation.
-    empty.ty = Some(Ty::Array { elem: Box::new(Ty::Untyped) });
+    empty.ty = Some(Ty::Array { elem: std::sync::Arc::new(Ty::Untyped) });
     empty
 }
 
@@ -360,7 +433,7 @@ fn fold_array_wrap(span: crate::span::Span, arg: &Expr) -> Option<Expr> {
             span,
             ExprNode::Array { elements: vec![value], style: Default::default() },
         );
-        wrapped.ty = Some(Ty::Array { elem: Box::new(Ty::Untyped) });
+        wrapped.ty = Some(Ty::Array { elem: std::sync::Arc::new(Ty::Untyped) });
         wrapped
     };
     match arg.ty.as_ref() {
@@ -368,8 +441,18 @@ fn fold_array_wrap(span: crate::span::Span, arg: &Expr) -> Option<Expr> {
         Some(Ty::Array { .. }) => Some(arg.clone()),
         Some(Ty::Union { variants }) => fold_union_wrap(span, arg, variants),
         None => None,
+        // An open type may hold nil, an Array or anything else at run
+        // time (a json column, an untyped helper's value): the same
+        // three-way branch Rails takes, made explicit.
+        Some(t) if is_open(t) => fold_union_wrap(span, arg, &[Ty::Nil, t.clone()]),
         Some(_) => Some(one(arg.clone())),
     }
+}
+
+/// A type that says nothing about the value's shape: wrapping it as
+/// one element would wrap an Array a second time.
+fn is_open(ty: &Ty) -> bool {
+    matches!(ty, Ty::Untyped | Ty::Var { .. })
 }
 
 /// `Array | Nil` is `[]` or the array. `String | Nil` is `[]` or
@@ -385,7 +468,7 @@ fn fold_union_wrap(span: crate::span::Span, arg: &Expr, variants: &[Ty]) -> Opti
     if arrays.len() > 1 || (!others.is_empty() && !arrays.is_empty()) {
         return None;
     }
-    if !has_nil && arrays.is_empty() {
+    if !has_nil && arrays.is_empty() && !others.iter().any(|t| is_open(t)) {
         return Some(Expr::new(
             span,
             ExprNode::Array { elements: vec![arg.clone()], style: Default::default() },
@@ -396,12 +479,40 @@ fn fold_union_wrap(span: crate::span::Span, arg: &Expr, variants: &[Ty]) -> Opti
     let when_nil = empty_array(span);
     let when_present = if arrays.len() == 1 {
         read.clone()
+    } else if others.iter().any(|t| is_open(t)) {
+        // `x.is_a?(Array) ? x : [x]`: Rails' `to_ary` for a real
+        // Array, one element for anything else.
+        let mut test = Expr::new(
+            span,
+            ExprNode::Send {
+                recv: Some(read.clone()),
+                method: crate::ident::Symbol::from("is_a?"),
+                args: vec![Expr::new(
+                    span,
+                    ExprNode::Const { path: vec![crate::ident::Symbol::from("Array")] },
+                )],
+                block: None,
+                parenthesized: true,
+            },
+        );
+        test.ty = Some(Ty::Bool);
+        let mut wrapped = Expr::new(
+            span,
+            ExprNode::Array { elements: vec![read.clone()], style: Default::default() },
+        );
+        wrapped.ty = Some(Ty::Array { elem: std::sync::Arc::new(Ty::Untyped) });
+        let mut branch = Expr::new(
+            span,
+            ExprNode::If { cond: test, then_branch: read.clone(), else_branch: wrapped },
+        );
+        branch.ty = Some(Ty::Array { elem: std::sync::Arc::new(Ty::Untyped) });
+        branch
     } else {
         let mut wrapped = Expr::new(
             span,
             ExprNode::Array { elements: vec![read.clone()], style: Default::default() },
         );
-        wrapped.ty = Some(Ty::Array { elem: Box::new(Ty::Untyped) });
+        wrapped.ty = Some(Ty::Array { elem: std::sync::Arc::new(Ty::Untyped) });
         wrapped
     };
     let mut cond = Expr::new(
@@ -423,7 +534,7 @@ fn fold_union_wrap(span: crate::span::Span, arg: &Expr, variants: &[Ty]) -> Opti
             else_branch: when_present,
         },
     );
-    branch.ty = Some(Ty::Array { elem: Box::new(Ty::Untyped) });
+    branch.ty = Some(Ty::Array { elem: std::sync::Arc::new(Ty::Untyped) });
     Some(Expr::new(
         span,
         ExprNode::Seq { exprs: vec![bound.assign, branch] },
@@ -436,22 +547,104 @@ struct Bound {
 }
 
 fn bind_once(span: crate::span::Span, arg: &Expr) -> Bound {
-    if matches!(&*arg.node, ExprNode::Var { .. } | ExprNode::Lit { .. }) {
+    bind_once_as(span, arg, "__array_wrap", true)
+}
+
+/// Bind `arg` to `name`. `skip_simple` reuses a Var/Lit as the read (Array.wrap);
+/// `index_with` passes false so every key shares one object, as Rails does.
+fn bind_once_as(span: crate::span::Span, arg: &Expr, name: &str, skip_simple: bool) -> Bound {
+    if skip_simple && matches!(&*arg.node, ExprNode::Var { .. } | ExprNode::Lit { .. }) {
         return Bound { assign: Expr::new(span, ExprNode::Seq { exprs: vec![] }), read: arg.clone() };
     }
-    let name = crate::ident::Symbol::from("__array_wrap");
-    let read = Expr::new(
-        span,
-        ExprNode::Var { id: crate::ident::VarId(0), name: name.clone() },
-    );
-    let assign = Expr::new(
-        span,
-        ExprNode::Assign {
-            target: crate::expr::LValue::Var { id: crate::ident::VarId(0), name },
-            value: arg.clone(),
-        },
-    );
+    let name = crate::ident::Symbol::from(name);
+    let read = Expr::new(span, ExprNode::Var { id: crate::ident::VarId(0), name: name.clone() });
+    let assign = Expr::new(span, ExprNode::Assign {
+        target: crate::expr::LValue::Var { id: crate::ident::VarId(0), name },
+        value: arg.clone(),
+    });
     Bound { assign, read }
+}
+
+/// ActiveSupport's `String#truncate(truncate_to, omission:, separator:)`
+/// → `ActiveSupport.truncate(text, truncate_to, omission, separator)`,
+/// an absent option passed as `nil` (the module function reads `nil`
+/// the way Rails reads a missing key). Only a receiver the analyzer
+/// typed String goes: `truncate` is a name a model or an adapter
+/// could own too.
+///
+/// Left as written, visible rather than guessed at: an options argument
+/// that is not a literal keyword Hash of those two keys, and a
+/// separator that is not a String (a Regexp; the module function's
+/// parameter is a String on every target). Arguments keep their
+/// evaluation order: the options are reordered to the positional
+/// order only when neither value can have an effect.
+fn ground_string_truncate(expr: &mut Expr) -> bool {
+    let span = expr.span;
+    let ExprNode::Send { recv, args, parenthesized, .. } = &mut *expr.node else {
+        return false;
+    };
+    if !matches!(recv.as_ref().and_then(|r| r.ty.as_ref()), Some(Ty::Str)) {
+        return false;
+    }
+    let nil = || {
+        let mut lit = Expr::new(span, ExprNode::Lit { value: crate::expr::Literal::Nil });
+        lit.ty = Some(Ty::Nil);
+        lit
+    };
+    let (omission, separator) = match args.as_slice() {
+        [_] => (nil(), nil()),
+        [_, options] => {
+            let ExprNode::Hash { entries, .. } = &*options.node else { return false };
+            let mut omission = None;
+            let mut separator = None;
+            for (k, v) in entries {
+                let ExprNode::Lit { value: crate::expr::Literal::Sym { value: key } } = &*k.node else {
+                    return false;
+                };
+                let slot = match key.as_str() {
+                    "omission" => &mut omission,
+                    "separator" => &mut separator,
+                    _ => return false,
+                };
+                if slot.is_some() {
+                    return false;
+                }
+                *slot = Some(v.clone());
+            }
+            if let Some(sep) = &separator {
+                if !matches!(sep.ty.as_ref(), Some(Ty::Str | Ty::Nil)) {
+                    return false;
+                }
+            }
+            let reordered = entries.len() == 2
+                && matches!(&*entries[0].0.node,
+                    ExprNode::Lit { value: crate::expr::Literal::Sym { value } } if value.as_str() == "separator");
+            if reordered && !entries.iter().all(|(_, v)| is_effect_free(v)) {
+                return false;
+            }
+            (omission.unwrap_or_else(nil), separator.unwrap_or_else(nil))
+        }
+        _ => return false,
+    };
+    let truncate_to = args[0].clone();
+    let receiver = recv.take().expect("checked above");
+    *recv = Some(Expr::new(
+        span,
+        ExprNode::Const { path: vec![Symbol::from("ActiveSupport")] },
+    ));
+    *args = vec![receiver, truncate_to, omission, separator];
+    *parenthesized = true;
+    expr.ty = Some(Ty::Str);
+    true
+}
+
+/// A value whose evaluation cannot be observed, so moving it past a
+/// sibling argument changes nothing.
+fn is_effect_free(e: &Expr) -> bool {
+    matches!(
+        &*e.node,
+        ExprNode::Lit { .. } | ExprNode::Var { .. } | ExprNode::Ivar { .. } | ExprNode::Const { .. }
+    )
 }
 
 /// words_connector, two_words_connector, last_word_connector — Rails'
@@ -528,6 +721,81 @@ mod tests {
     use super::*;
     use crate::span::Span;
 
+    fn var(name: &str) -> Expr {
+        Expr::new(Span::synthetic(), ExprNode::Var { id: crate::ident::VarId(0), name: Symbol::from(name) })
+    }
+
+    fn index_with_on(receiver_ty: Option<Ty>, value: Expr) -> Expr {
+        let mut list = var("list");
+        list.ty = receiver_ty;
+        Expr::new(Span::synthetic(), ExprNode::Send {
+            recv: Some(list), method: Symbol::from("index_with"), args: vec![value], block: None, parenthesized: true,
+        })
+    }
+
+    fn int(value: i64) -> Expr {
+        Expr::new(Span::synthetic(), ExprNode::Lit { value: crate::expr::Literal::Int { value } })
+    }
+
+    fn strs() -> Option<Ty> { Some(Ty::Array { elem: std::sync::Arc::new(Ty::Str) }) }
+
+    /// Value form rewrites to a bind-once Seq whose last expr is `to_h`.
+    fn grounded_to_h(e: &Expr) -> &Expr {
+        match &*e.node {
+            ExprNode::Seq { exprs } => exprs.last().expect("bind-once Seq"),
+            ExprNode::Send { method, .. } if method.as_str() == "to_h" => e,
+            other => panic!("expected to_h grounding, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn index_with_on_an_array_binds_once_into_to_h() {
+        for v in [int(0), var("default")] {
+            let mut e = index_with_on(strs(), v);
+            assert!(rewrite_node(&mut e));
+            assert_eq!(method_of(grounded_to_h(&e)), "to_h");
+        }
+    }
+
+    #[test]
+    fn index_with_on_a_hash_stays_as_written() {
+        // `{a: 1}.index_with(0)` keys by the pair; `to_h` would key by `:a`.
+        let hash = Ty::Hash { key: std::sync::Arc::new(Ty::Sym), value: std::sync::Arc::new(Ty::Int) };
+        for ty in [hash.clone(), Ty::Union { variants: vec![hash, Ty::Nil].into() }] {
+            let mut e = index_with_on(Some(ty), int(0));
+            assert!(!rewrite_node(&mut e));
+            assert_eq!(method_of(&e), "index_with");
+        }
+    }
+
+    #[test]
+    fn index_with_on_an_unknown_or_untyped_receiver_stays_as_written() {
+        // Gradual receivers may be a Hash; rewriting would key by the element alone.
+        for (ty, v) in [(None, int(0)), (None, var("default")), (Some(Ty::Untyped), int(0))] {
+            let mut e = index_with_on(ty, v);
+            assert!(!rewrite_node(&mut e));
+            assert_eq!(method_of(&e), "index_with");
+        }
+    }
+
+    #[test]
+    fn index_with_renames_the_key_when_the_value_would_shadow() {
+        let mut e = index_with_on(strs(), var("__index_with_key"));
+        assert!(rewrite_node(&mut e));
+        let ExprNode::Send { block: Some(b), .. } = &*grounded_to_h(&e).node else { panic!("to_h") };
+        let ExprNode::Lambda { params, .. } = &*b.node else { panic!("lambda") };
+        assert_eq!(params[0].as_str(), "__index_with_elem");
+    }
+
+    #[test]
+    fn index_with_binds_a_fresh_object_once() {
+        let empty = Expr::new(Span::synthetic(), ExprNode::Array { elements: Vec::new(), style: Default::default() });
+        let mut e = index_with_on(strs(), empty);
+        assert!(rewrite_node(&mut e));
+        assert!(matches!(&*e.node, ExprNode::Seq { exprs } if exprs.len() == 2));
+        assert_eq!(method_of(grounded_to_h(&e)), "to_h");
+    }
+
     fn many_on(ty: Ty) -> Expr {
         let mut members = Expr::new(
             Span::synthetic(),
@@ -547,7 +815,7 @@ mod tests {
     }
 
     fn array_of_users() -> Ty {
-        Ty::Array { elem: Box::new(Ty::Class { id: crate::ident::ClassId(Symbol::from("User")), args: vec![] }) }
+        Ty::Array { elem: std::sync::Arc::new(Ty::Class { id: crate::ident::ClassId(Symbol::from("User")), args: vec![].into() }) }
     }
 
     fn method_of(e: &Expr) -> String {
@@ -628,7 +896,7 @@ mod tests {
     /// `Array | untyped`, and the Array half has no `many?` on spinel.
     #[test]
     fn many_on_an_array_or_untyped_union_is_a_size_test() {
-        let mut e = many_on(Ty::Union { variants: vec![array_of_users(), Ty::Untyped] });
+        let mut e = many_on(Ty::Union { variants: vec![array_of_users(), Ty::Untyped].into() });
         rewrite(&mut e);
         assert_eq!(method_of(&e), ">");
         let ExprNode::Send { recv: Some(size), .. } = &*e.node else { panic!() };
@@ -716,7 +984,7 @@ mod tests {
     /// A union with a variant that has no `size` (nil) is left alone.
     #[test]
     fn many_on_a_nilable_array_union_is_untouched() {
-        let mut e = many_on(Ty::Union { variants: vec![array_of_users(), Ty::Nil] });
+        let mut e = many_on(Ty::Union { variants: vec![array_of_users(), Ty::Nil].into() });
         rewrite(&mut e);
         assert_eq!(method_of(&e), "many?");
         let ExprNode::Send { recv: Some(r), .. } = &*e.node else { panic!() };
@@ -735,7 +1003,7 @@ mod tests {
     /// `Array | untyped` union reads through `to_a`, typed as the Array half.
     #[test]
     fn first_n_on_an_array_or_untyped_union_reads_through_to_a() {
-        let mut e = first_n_on(Ty::Union { variants: vec![array_of_users(), Ty::Untyped] });
+        let mut e = first_n_on(Ty::Union { variants: vec![array_of_users(), Ty::Untyped].into() });
         rewrite(&mut e);
         assert_eq!(method_of(&e), "first");
         let ExprNode::Send { recv: Some(to_a), args, .. } = &*e.node else { panic!() };
@@ -754,7 +1022,7 @@ mod tests {
     }
 
     fn sentence_on(options: Vec<(&str, &str)>) -> Expr {
-        let mut e = many_on(Ty::Array { elem: Box::new(Ty::Str) });
+        let mut e = many_on(Ty::Array { elem: std::sync::Arc::new(Ty::Str) });
         let ExprNode::Send { method, args, .. } = &mut *e.node else { panic!() };
         *method = Symbol::from("to_sentence");
         if !options.is_empty() {
@@ -835,5 +1103,92 @@ mod tests {
         let ExprNode::Send { recv: Some(r), .. } = &*e.node else { panic!() };
         assert!(matches!(&*r.node, ExprNode::Const { path } if path[0].as_str() == "ActiveSupport"));
         assert_eq!(string_args(&e), [", ", "+", ", and "]);
+    }
+
+    fn truncate_on(receiver_ty: Option<Ty>, options: Vec<(&str, Expr)>) -> Expr {
+        let mut text = var("text");
+        text.ty = receiver_ty;
+        let mut args = vec![int(27)];
+        if !options.is_empty() {
+            let entries = options
+                .into_iter()
+                .map(|(k, v)| {
+                    let key = Expr::new(Span::synthetic(), ExprNode::Lit { value: crate::expr::Literal::Sym { value: Symbol::from(k) } });
+                    (key, v)
+                })
+                .collect();
+            args.push(Expr::new(Span::synthetic(), ExprNode::Hash { entries, kwargs: true }));
+        }
+        Expr::new(Span::synthetic(), ExprNode::Send {
+            recv: Some(text), method: Symbol::from("truncate"), args, block: None, parenthesized: true,
+        })
+    }
+
+    fn str_lit(value: &str) -> Expr {
+        let mut e = Expr::new(Span::synthetic(), ExprNode::Lit { value: crate::expr::Literal::Str { value: value.to_string() } });
+        e.ty = Some(Ty::Str);
+        e
+    }
+
+    fn arg_kinds(e: &Expr) -> Vec<String> {
+        let ExprNode::Send { args, .. } = &*e.node else { panic!("not a Send") };
+        args.iter()
+            .map(|a| match &*a.node {
+                ExprNode::Lit { value: crate::expr::Literal::Str { value } } => value.clone(),
+                ExprNode::Lit { value: crate::expr::Literal::Nil } => "nil".to_string(),
+                ExprNode::Lit { value: crate::expr::Literal::Int { value } } => value.to_string(),
+                ExprNode::Var { name, .. } => name.as_str().to_string(),
+                other => format!("{other:?}"),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn string_truncate_grounds_with_positional_options() {
+        let mut bare = truncate_on(Some(Ty::Str), vec![]);
+        assert!(rewrite_node(&mut bare));
+        assert_eq!(arg_kinds(&bare), ["text", "27", "nil", "nil"]);
+        assert_eq!(bare.ty, Some(Ty::Str));
+
+        let mut separator = truncate_on(Some(Ty::Str), vec![("separator", str_lit(" "))]);
+        assert!(rewrite_node(&mut separator));
+        assert_eq!(arg_kinds(&separator), ["text", "27", "nil", " "]);
+
+        // Literal values cannot observe their order, so a separator
+        // written first still reaches its positional slot.
+        let mut both = truncate_on(Some(Ty::Str), vec![("separator", str_lit(" ")), ("omission", str_lit("~"))]);
+        assert!(rewrite_node(&mut both));
+        assert_eq!(arg_kinds(&both), ["text", "27", "~", " "]);
+        let ExprNode::Send { recv: Some(r), method, .. } = &*both.node else { panic!() };
+        assert_eq!(method.as_str(), "truncate");
+        assert!(matches!(&*r.node, ExprNode::Const { path } if path[0].as_str() == "ActiveSupport"));
+    }
+
+    #[test]
+    fn string_truncate_stays_as_written_when_grounding_would_change_it() {
+        // Not proven a String: a model or an adapter may own `truncate`.
+        for ty in [None, Some(Ty::Untyped)] {
+            let mut e = truncate_on(ty, vec![]);
+            assert!(!rewrite_node(&mut e));
+        }
+        // A Regexp separator does not fit the String parameter.
+        let mut regexp = Expr::new(Span::synthetic(), ExprNode::Lit {
+            value: crate::expr::Literal::Regex { pattern: "\\s".to_string(), flags: String::new() },
+        });
+        regexp.ty = Some(Ty::Class { id: crate::ident::ClassId(Symbol::from("Regexp")), args: vec![].into() });
+        let mut e = truncate_on(Some(Ty::Str), vec![("separator", regexp)]);
+        assert!(!rewrite_node(&mut e));
+        // An option Rails does not read, and a reorder past an effect.
+        let mut unknown = truncate_on(Some(Ty::Str), vec![("length", int(3))]);
+        assert!(!rewrite_node(&mut unknown));
+        let call = |name: &str| {
+            let mut c = Expr::new(Span::synthetic(), ExprNode::Send {
+                recv: None, method: Symbol::from(name), args: vec![], block: None, parenthesized: false,
+            });
+            c.ty = Some(Ty::Str);
+            c
+        };
+        let mut effects = truncate_on(Some(Ty::Str), vec![("separator", call("sep")), ("omission", call("mark"))]);
+        assert!(!rewrite_node(&mut effects));
     }
 }

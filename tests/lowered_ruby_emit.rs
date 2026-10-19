@@ -145,19 +145,20 @@ fn article_renders_validate_with_inline_checks() {
     // docs/archive/rust-migration-plan.md) — no helper-call into the
     // Validations runtime module. Error messages become string-literal
     // constants; the type-erased `value: untyped` channel is gone.
-    // Each message is pushed with the attribute it is on.
+    // Each message is pushed with the error Rails records for it.
     assert!(
-        src.contains("self.errors << \"Title can't be blank\"\n      self.error_attributes << \"title\""),
+        src.contains("self.errors << \"Title can't be blank\"\n      self.error_details << ActiveRecord::ErrorDetail.new(\"title\", \"blank\", \"can't be blank\", \"Title can't be blank\", true, true)"),
         "{src}",
     );
     assert!(
-        src.contains("self.errors << \"Body can't be blank\"\n      self.error_attributes << \"body\""),
+        src.contains("self.errors << \"Body can't be blank\"\n      self.error_details << ActiveRecord::ErrorDetail.new(\"body\", \"blank\", \"can't be blank\", \"Body can't be blank\", true, true)"),
         "{src}",
     );
-    // Length is now also inline (third slice of Phase 2.5(a)).
-    // Expansion: `unless @body.nil?; len = ...; if len < N; errors << "..."; …; end; end`.
-    // Message matches Rails' full_messages: humanized attribute +
-    // "characters" suffix (see model_to_library::validations::humanize).
+    // Length is inline. A nil body fails the minimum (Rails does not
+    // skip it); a present body compares `len`. Message matches Rails'
+    // full_messages: humanized attribute + "characters" suffix
+    // (see model_to_library::validations::humanize). Attributed push
+    // pairs each message with `error_attributes`.
     assert!(
         src.contains(
             r#"errors << "Body is too short (minimum is 10 characters)""#
@@ -194,11 +195,11 @@ fn article_renders_residualized_fill_timestamps() {
     // nil — a fixture's `created_at: 36.minutes.ago` survives the
     // insert — while an UPDATE restamps `updated_at` unconditionally.
     assert!(
-        src.contains("if !(creating) || @updated_at_raw.nil? || (@updated_at_raw || \"\").empty?\n      @__t_updated_at = nil\n      @updated_at_raw = now"),
+        src.contains("if !(creating) || @updated_at_raw.nil? || @updated_at_raw.empty?\n      @__t_updated_at = nil\n      @updated_at_raw = now"),
         "{src}",
     );
     assert!(
-        src.contains("if creating && (@created_at_raw.nil? || (@created_at_raw || \"\").empty?)\n      @__t_created_at = nil\n      @created_at_raw = now"),
+        src.contains("if creating && (@created_at_raw.nil? || @created_at_raw.empty?)\n      @__t_created_at = nil\n      @created_at_raw = now"),
         "{src}",
     );
     // The runtime schema probe must be fully residualized away.
@@ -535,18 +536,11 @@ fn schema_emits_create_index_lines_for_table_indexes() {
     );
 }
 
+/// Not dropped: Rails' SQLite schema carries the constraint and its adapter turns `foreign_keys` on, so a row naming a missing parent raises `InvalidForeignKey` there.
 #[test]
-fn schema_drops_foreign_key_constraints() {
-    // Real-blog has `add_foreign_key "comments", "articles"` — but the
-    // spinel runtime models relationships at the app layer (e.g.
-    // belongs_to lowers to `Article.find_by(id: @article_id)`), so the
-    // DB-level constraint is dropped per yagni-on-round-trip:
-    // structural compile-equivalence, not source-equivalence.
+fn schema_keeps_foreign_key_constraints() {
     let src = lowered_real_blog_schema();
-    assert!(
-        !src.contains("FOREIGN KEY") && !src.contains("REFERENCES"),
-        "spinel schema should not emit FK constraints; got:\n{src}",
-    );
+    assert!(src.contains("FOREIGN KEY (article_id) REFERENCES articles (id)"), "{src}");
 }
 
 #[test]
@@ -1420,19 +1414,18 @@ fn lowered_index_view_auto_escapes_bare_interpolation() {
 
 #[test]
 fn lowered_index_view_rewrites_present_to_negated_empty() {
-    // Rails-style `notice.present?` lowers to `! recv.empty?` in spinel
-    // shape (collection emptiness rather than the Rails predicate). The
-    // unary-not is emitted via `Send { recv: None, method: "!", args:
-    // [empty_call] }` so the surface form is `! notice.empty?`, not
-    // `notice.empty?.!`.
+    // Rails-style `notice.present?` lowers to `!((notice || "").empty?)`.
+    // No `strip`: the view receiver is untyped. The unary-not is a send,
+    // so the surface is `! (notice || "").empty?`, not `notice.empty?.!`.
     let files = lowered_real_blog_views();
     let src = find(&files, "app/views/articles/index.rb");
-    // The Ruby path additionally guards the receiver (`(notice ||
-    // "").empty?`) — nullable columns hydrate to real nil there
-    // (apply_nilsafe_empty_lowering).
     assert!(
         src.contains("! (notice || \"\").empty?"),
         "expected `! (notice || \"\").empty?`; got:\n{src}",
+    );
+    assert!(
+        !src.contains("notice.strip"),
+        "view present? must not strip an untyped receiver:\n{src}",
     );
     assert!(
         !src.contains("notice.present?"),
@@ -1442,12 +1435,11 @@ fn lowered_index_view_rewrites_present_to_negated_empty() {
         !src.contains("notice.empty?.!"),
         "unary-! should not render as method-call form; got:\n{src}",
     );
-    // Same rewrite applies to `@articles.any?` (after ivar rewrite to
-    // `articles.any?`) — the `<% if @articles.any? %>` branch, with
-    // the same nil-safe receiver guard.
+    // `@articles.any?` is a collection predicate, so it stays `empty?`
+    // with no string nil-guard and no `strip`.
     assert!(
-        src.contains("! (articles || \"\").empty?"),
-        "expected `! (articles || \"\").empty?` rewrite of `@articles.any?`; got:\n{src}",
+        src.contains("! articles.empty?"),
+        "expected `! articles.empty?` rewrite of `@articles.any?`; got:\n{src}",
     );
 }
 
@@ -1727,11 +1719,10 @@ fn lowered_form_partial_form_with_inline_expansion() {
 fn lowered_form_partial_errors_predicate_rewrite() {
     let files = lowered_real_blog_views();
     let src = find(&files, "app/views/articles/_form.rb");
-    // `<% if article.errors.any? %>` → `if ! (article.errors ||
-    // "").empty?` (predicate-cond rewrite through the receiver chain,
-    // plus the Ruby path's nil-safe receiver guard).
+    // `<% if article.errors.any? %>` → `if ! article.errors.empty?`.
+    // `any?` is a collection predicate, so it stays `empty?`.
     assert!(
-        src.contains("if ! (article.errors || \"\").empty?"),
+        src.contains("if ! article.errors.empty?"),
         "expected predicate-rewrite on errors.any?; got:\n{src}",
     );
     assert!(

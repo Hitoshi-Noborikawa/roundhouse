@@ -1,35 +1,8 @@
+# frozen_string_literal: true
 # Multi-id finder misses need the pluralizer even without app view helpers.
 require_relative "../inflector"
 
 module ActiveRecord
-  # A Relation's `includes`/`preload`, deferred until a record asks.
-  #
-  # `load_records` used to batch-load every included association the
-  # moment the rows arrived. On a page whose records only feed a cached
-  # collection (campfire's room page: 40 messages, their rich text,
-  # creators, boosts and attachments), the cache key needs each record's
-  # id and updated_at, and on a hit nothing reads an association at all:
-  # the batch loads were most of the page's database time. Now each record
-  # carries this object, and the first association read on any of them
-  # (an emitted reader calls `_await_preload`) runs the same batched
-  # preload for the whole group, once. A miss issues the same queries as
-  # before, later; a hit issues none of them.
-  class PendingPreload
-    def initialize(model, records, specs)
-      @model = model
-      @records = records
-      @specs = specs
-      @done = false
-    end
-
-    def run
-      return nil if @done
-      @done = true
-      @model.preload_associations(@records, @specs)
-      nil
-    end
-  end
-
   # A lazy, chainable query builder — the metaprogramming-free analog of
   # ActiveRecord::Relation. Lowered model code drives it: `scope`s become
   # class methods that take/return a Relation, associations return one,
@@ -45,18 +18,18 @@ module ActiveRecord
   # Database access and value escaping go through `ActiveRecord.adapter`
   # (the `AdapterInterface`) rather than the raw `Db` primitive, so the
   # whole class types against the same adapter contract `Base` uses — no
-  # target-specific surface leaks in here. Chain methods mutate and return
-  # `self`; lowered chains are linear (build then terminate), so a fresh
-  # Relation per chain start is enough isolation.
+  # target-specific surface leaks in here. Chain methods answer a new
+  # relation (`spawn` plus an in-place `*!` step) and leave the receiver
+  # as it was, as in Rails, so two relations derived from one base never
+  # see each other's clauses.
   #
   # Terminals memoize: the first `to_a` loads and caches the records
   # (Rails' loaded-relation contract), so `map` + `each` + `empty?` on
   # the same relation hit the database once, not once per call — and
   # record mutations made between terminals (lobsters' current_vote
-  # stamping) survive to the render. Every chain method drops the cache:
-  # app code does re-chain after a terminal (`rel = rel.where(...)`
-  # returns this same object, mutated), and a stale cache there would
-  # serve the pre-refinement rows.
+  # stamping) survive to the render. A chain method answers a relation
+  # without the receiver's cache (or, for `order`, a sorted copy of it),
+  # and the receiver keeps its own.
   class Relation
     def initialize(model)
       @model = model
@@ -72,9 +45,17 @@ module ActiveRecord
       @offset = nil
       @includes = []
       @skip_preloading = false
+      # Rails' NullRelation flag: `Model.none` and `where(id: [])` must not
+      # hit the database. Chain methods call `unload_records`, which keeps
+      # an empty loaded cache when `@null` is set so terminals stay quiet.
+      @null = false
       @records = nil
       @scope_attributes = {}
       @where_cols = []
+      # Parallel to `@wheres`: true when that clause forced NullRelation
+      # (`none` / empty IN). Unscope clears `@null` only when none remain —
+      # never by scanning SQL text (a value like title "1=0" must not stick).
+      @where_null = []
       @opaque_wheres = false
       @hash_columns = []
       @from = nil
@@ -83,9 +64,38 @@ module ActiveRecord
       @friendly = false
     end
 
+    # Drop the loaded-records memo. A null relation keeps `[]` so a later
+    # `to_a` / `ids` / `exists?` does not re-query through `(1 = 0)`.
+    def unload_records
+      @records = @null ? [] : nil
+    end
+
+    # Rails NullRelation — set only from `none` / a lasting non-negated
+    # empty-IN `where`, never from the pure predicate builder.
+    def null_relation?
+      @null
+    end
+
+    def mark_null!
+      @null = true
+      unload_records
+    end
+
+    # True when a hash condition contains an empty IN list (`id: []`).
+    def hash_has_empty_in?(condition)
+      condition.each do |_key, val|
+        if val.is_a?(Array)
+          return true if val.empty?
+        elsif val.is_a?(Hash)
+          return true if hash_has_empty_in?(val)
+        end
+      end
+      false
+    end
+
     # Rails' `Relation#spawn`: a new relation that shares this one's
-    # query state but not its accumulator arrays. Chain methods still
-    # mutate in place; scopes call `spawn` on entry so a fork like
+    # query state but not its accumulator arrays. Every chain method
+    # starts with it, and scopes call it on entry, so a fork like
     # campfire's sidebar (`visible.with_direct_rooms` beside
     # `visible.with_ordered_room.without_direct_rooms`) does not let
     # one branch's joins/orders/wheres pollute the other.
@@ -101,12 +111,23 @@ module ActiveRecord
       clone
     end
 
+    # A fork that queries again, as every Rails query method's is
+    # (`initialize_copy` resets the loaded rows): for a chain method
+    # that changes no query state, so a reload of the receiver is not
+    # answered from rows the fork kept.
+    def unloaded_spawn
+      fork = spawn
+      fork.unload_records
+      fork
+    end
+
     def own_lists
       if @shared_lists
         @shared_lists = false
         take_query_lists(
           @wheres,
           @where_cols,
+          @where_null,
           @joins,
           @orders,
           @groups,
@@ -121,9 +142,10 @@ module ActiveRecord
 
     # List accumulators go through copy_* so inference types the
     # parameters. Scalars come from `clone` (shallow ivar copy).
-    def take_query_lists(wheres, where_cols, joins, orders, groups, havings, ctes, includes, attrs)
+    def take_query_lists(wheres, where_cols, where_null, joins, orders, groups, havings, ctes, includes, attrs)
       @wheres = copy_string_list(wheres)
       @where_cols = copy_cols_list(where_cols)
+      @where_null = copy_bool_list(where_null)
       @joins = copy_string_list(joins)
       @orders = copy_string_list(orders)
       @groups = copy_string_list(groups)
@@ -135,6 +157,12 @@ module ActiveRecord
     end
 
     def copy_string_list(xs)
+      out = []
+      xs.each { |x| out << x }
+      out
+    end
+
+    def copy_bool_list(xs)
       out = []
       xs.each { |x| out << x }
       out
@@ -159,7 +187,7 @@ module ActiveRecord
       attrs
     end
 
-    # ---- chain methods (return self) --------------------------------
+    # ---- chain methods (return a new relation) ----------------------
 
     # `with_recursive(parents: [base, step])` — a recursive common table
     # expression, each named part the UNION ALL of its relations (Rails
@@ -167,8 +195,12 @@ module ActiveRecord
     # from it. lobsters walks a comment's ancestors this way on the reply
     # page (`Comment#parents`).
     def with_recursive(ctes)
+      spawn.with_recursive!(ctes)
+    end
+
+    def with_recursive!(ctes)
       own_lists
-      @records = nil
+      unload_records
       ctes.each do |name, parts|
         # Build the UNION list with pushes rather than `map.join`: the
         # body typer's Array#map still returns Untyped, so the join
@@ -184,7 +216,11 @@ module ActiveRecord
     # table. The String form only: Rails also takes a relation (a
     # subquery) there, which no corpus call writes.
     def from(source)
-      @records = nil
+      spawn.from!(source)
+    end
+
+    def from!(source)
+      unload_records
       @from = source
       self
     end
@@ -196,6 +232,11 @@ module ActiveRecord
     # `account_id`. Non-seedable values (arrays, ranges, nested hashes,
     # relations, qualified keys) filter only.
     def where(condition = nil, *args)
+      spawn.where_args!(condition, args)
+    end
+
+    # The in-place step of `where` / `where!`, the binds as one list.
+    def where_args!(condition, args)
       merge_seedable_scope(condition) if condition.is_a?(Hash)
       add_condition(condition, args, false)
       self
@@ -206,6 +247,11 @@ module ActiveRecord
     # association seed uses this so the FK is recorded even when the
     # ordinary `where` path would refuse it as non-seedable.
     def where_scope(condition)
+      spawn.where_scope!(condition)
+    end
+
+    def where_scope!(condition)
+      own_lists
       @scope_attributes = condition
       add_condition(condition, [], false)
       self
@@ -233,8 +279,9 @@ module ActiveRecord
     # `where.not(...)` is lowered to `not(...)` on the relation: negate the
     # condition back onto this relation. Negated predicates never seed.
     def not(condition = nil, *args)
-      add_condition(condition, args, true)
-      self
+      rel = spawn
+      rel.add_condition(condition, args, true)
+      rel
     end
 
     # Rails' `excluding(…)` — everything in this relation except what is
@@ -250,9 +297,15 @@ module ActiveRecord
     # branch, and wrapped in an array it would reach the IN-list branch
     # and escape a Relation object into the SQL text.
     def excluding(*records)
-      val = records.length == 1 ? records[0] : records
+      spawn.excluding_value!(records.length == 1 ? records[0] : records)
+    end
+
+    def excluding_value!(val)
       own_lists
-      @records = nil
+      unload_records
+      # Empty exclusion is a no-op (Rails). Never mark_null!: `NOT (1=0)`
+      # is always true — sticky null would invert the relation.
+      return self if val.is_a?(Array) && val.empty?
       pred = column_predicate(@model.primary_key.to_s, val)
       push_where("NOT (#{pred})") unless pred.empty?
       self
@@ -272,13 +325,22 @@ module ActiveRecord
     # the receiver's structural clauses are kept here. An empty side is
     # an always-true condition (matches Rails: no filter to OR against).
     def or(other)
-      @records = nil
+      # Rails NullRelation#or: left-null yields the other side; right-null
+      # (including both-null) leaves the receiver.
+      return other.spawn if @null && !other.null_relation?
+      spawn.or!(other)
+    end
+
+    def or!(other)
+      return self if other.null_relation?
+      unload_records
       mine = @wheres.length > 0 ? @wheres.join(" AND ") : "1=1"
       other_wheres = other.where_clauses
       theirs = other_wheres.length > 0 ? other_wheres.join(" AND ") : "1=1"
       @opaque_wheres = true
       @wheres = ["((#{mine}) OR (#{theirs}))"]
       @where_cols = [[]]
+      @where_null = [false]
       self
     end
 
@@ -288,7 +350,7 @@ module ActiveRecord
     # know whether there is one to pop. The chain methods ignore it.
     def add_condition(condition, args, negate)
       own_lists
-      @records = nil
+      unload_records
       return false if condition.nil?
       @hash_columns = []
       sql = if condition.is_a?(Hash)
@@ -298,27 +360,32 @@ module ActiveRecord
       end
       return false if sql == ""
       clause = negate ? "NOT (#{sql})" : "(#{sql})"
-      push_where_cols(clause, @hash_columns)
+      empty_in = !negate && condition.is_a?(Hash) && hash_has_empty_in?(condition)
+      push_where_cols(clause, @hash_columns, empty_in)
+      # Empty IN is NullRelation only on a lasting positive where — never
+      # under `not` / temporary find_by·exists? (those restore via caller).
+      mark_null! if empty_in
       true
     end
 
-    # `@wheres` and `@where_cols` are parallel lists: entry i of the
-    # second names the columns a hash-built clause i constrains (empty
-    # for raw SQL, `or` composites, merged clauses). Every push and pop
-    # goes through these two so the lists cannot drift apart, and
-    # `unscope(where:)` reads the columns by position -- never by
-    # matching clause text, which a raw string can equal.
+    # `@wheres`, `@where_cols`, and `@where_null` are parallel lists:
+    # entry i of cols names the columns a hash-built clause i constrains
+    # (empty for raw SQL / `or` / merge); `@where_null[i]` is true when
+    # that clause forced NullRelation. Every push and pop goes through
+    # these so the lists cannot drift apart.
     def push_where(sql)
-      push_where_cols(sql, [])
+      push_where_cols(sql, [], false)
     end
 
-    def push_where_cols(sql, cols)
+    def push_where_cols(sql, cols, null_clause = false)
       @wheres << sql
       @where_cols << cols.map { |c| c }
+      @where_null << null_clause
       self
     end
 
     def pop_where
+      @where_null.pop
       @where_cols.pop
       @wheres.pop
     end
@@ -335,6 +402,10 @@ module ActiveRecord
     # instead of dropping the other columns' conditions. Raw-SQL
     # clauses are never touched, as in Rails.
     def unscope(where: nil)
+      spawn.unscope!(where: where)
+    end
+
+    def unscope!(where: nil)
       own_lists
       @records = nil
       if @opaque_wheres
@@ -354,6 +425,7 @@ module ActiveRecord
       end
       kept = []
       kept_cols = []
+      kept_null = []
       @wheres.each_with_index do |clause, idx|
         cols = @where_cols[idx]
         hit = false
@@ -373,10 +445,29 @@ module ActiveRecord
         unless hit
           kept << clause
           kept_cols << cols
+          kept_null << @where_null[idx]
         end
       end
       @wheres = kept
       @where_cols = kept_cols
+      @where_null = kept_null
+      # Clear NullRelation when no forcing clause remains (Thermos M1).
+      # Tracked structurally — never by searching SQL text for `1=0`.
+      # Index walk (not Enumerable#any?) so strict targets keep one
+      # counter while, matching the rest of this file.
+      if @null
+        forced = false
+        wi = 0
+        wn = @where_null.length
+        while wi < wn
+          forced = true if @where_null[wi]
+          wi += 1
+        end
+        @null = false unless forced
+      end
+      # Retained null must keep the empty cache (`[]`), not `nil`, or a
+      # limited `size` path would query again (CodeRabbit).
+      unload_records
       self
     end
 
@@ -397,6 +488,13 @@ module ActiveRecord
     # order, the same order SQLite hands back for tied keys -- and a
     # page sorted here matches one sorted by the database byte for byte.
     def order(*parts)
+      spawn.order_parts!(parts)
+    end
+
+    # The in-place step of `order` / `order!` / `reorder`. The loaded
+    # cache is sorted into a new array, so the receiver of `order` keeps
+    # its own rows and order.
+    def order_parts!(parts)
       own_lists
       terms = parts.map { |p| order_term(p) }
       terms.each { |t| @orders << t }
@@ -413,10 +511,11 @@ module ActiveRecord
         sorted << loaded[i]
         i += 1
       end
-      if sort_in_place!(sorted, terms)
+      # The whole ordering: appended terms only break the earlier terms' ties.
+      if sort_in_place!(sorted, @orders)
         @records = sorted
       else
-        @records = nil
+        unload_records
       end
       self
     end
@@ -428,15 +527,20 @@ module ActiveRecord
     # call; the bare String `order` still validates. A loaded relation
     # reads again rather than guess at a fragment's sort.
     def order_sql(fragment)
+      spawn.order_sql!(fragment)
+    end
+
+    def order_sql!(fragment)
       own_lists
       @orders << fragment
-      @records = nil
+      unload_records
       self
     end
 
     def reorder_sql(fragment)
-      @orders = []
-      order_sql(fragment)
+      rel = spawn
+      rel.clear_ordering
+      rel.order_sql!(fragment)
     end
 
     # Rails requires at least one argument to the public `reorder` API.
@@ -453,42 +557,25 @@ module ActiveRecord
     # `order` when the records are already loaded.
     def reorder(*parts)
       raise ArgumentError, "The method .reorder() must contain arguments." if parts.empty?
-      @orders = []
-      order(*parts)
+      spawn.reorder_parts!(parts)
     end
 
-    # Rails' mutating spellings. This Relation's chain methods already
-    # mutate in place and return self, so the bang forms are the same
-    # operation under a second name (bodies duplicated rather than
-    # splat-forwarded — strict targets inline, not forward, rest args).
+    # Keeps a loaded cache for the in-memory resort, as `order` does.
+    def reorder_parts!(parts)
+      own_lists
+      @orders = []
+      order_parts!(parts)
+    end
+
+    # Rails' mutating spellings: the in-place step without the `spawn`.
+    # The rest args reach the step as one list (strict targets inline,
+    # not forward, rest args).
     def where!(condition = nil, *args)
-      add_condition(condition, args, false)
-      self
+      where_args!(condition, args)
     end
 
     def order!(*parts)
-      own_lists
-      terms = parts.map { |p| order_term(p) }
-      terms.each { |t| @orders << t }
-      loaded = @records
-      return self if loaded.nil?
-      # An explicit copy rather than `dup`: built by pushes, the copy has
-      # the records array's own type where a `dup` of a nilable read does
-      # not, and it is assigned back into `@records` below. An index loop
-      # rather than `each`, whose block parameter the typer cannot derive
-      # from a receiver it only knows as nilable.
-      sorted = []
-      i = 0
-      while i < loaded.length
-        sorted << loaded[i]
-        i += 1
-      end
-      if sort_in_place!(sorted, terms)
-        @records = sorted
-      else
-        @records = nil
-      end
-      self
+      order_parts!(parts)
     end
 
     # Sort `sorted` (a copy of the loaded records) by `terms` in place;
@@ -617,7 +704,11 @@ module ActiveRecord
     # not an integer) and `offset` is `build_arel`'s `to_i`. nil clears
     # either, as in Rails.
     def limit(n)
-      @records = nil
+      spawn.limit!(n)
+    end
+
+    def limit!(n)
+      unload_records
       # Split rather than `n.nil? ? nil : sql_limit(n)`: Spinel cannot
       # unify nil with Integer in a conditional expression.
       if n.nil?
@@ -629,7 +720,11 @@ module ActiveRecord
     end
 
     def offset(n)
-      @records = nil
+      spawn.offset!(n)
+    end
+
+    def offset!(n)
+      unload_records
       if n.nil?
         @offset = nil
       else
@@ -656,8 +751,7 @@ module ActiveRecord
       per_page = Rails.application.default_per_page
       n = num.to_s.to_i
       n = 1 if n < 1
-      limit(per_page)
-      offset((n - 1) * per_page)
+      limit(per_page).offset!((n - 1) * per_page)
     end
 
     # Same builder as `page` under the `paginate` spelling. A
@@ -673,12 +767,11 @@ module ActiveRecord
     # `per(0)` is `limit(0)`.
     def per(num)
       text = num.to_s
-      return self unless text.match?(/\A\d/)
+      return unloaded_spawn unless text.match?(/\A\d/)
       n = text.to_i
       return limit(0) if n == 0
       page_now = current_page
-      limit(n)
-      offset((page_now - 1) * n)
+      limit(n).offset!((page_now - 1) * n)
     end
 
     def limit_value
@@ -744,8 +837,12 @@ module ActiveRecord
     end
 
     def group(*parts)
+      spawn.group_parts!(parts)
+    end
+
+    def group_parts!(parts)
       own_lists
-      @records = nil
+      unload_records
       # Symbols qualify against this relation's table (Rails renders
       # `GROUP BY "tags"."id"`), so a grouped column stays unambiguous
       # once a join brings in a second table carrying the same column
@@ -758,8 +855,12 @@ module ActiveRecord
     end
 
     def having(condition, *args)
+      spawn.having_args!(condition, args)
+    end
+
+    def having_args!(condition, args)
       own_lists
-      @records = nil
+      unload_records
       @havings << substitute_binds(condition.to_s, args)
       self
     end
@@ -787,19 +888,19 @@ module ActiveRecord
     # where appending both made SQLite reject every column of the joined
     # table as ambiguous.
     def joins(spec)
+      spawn.joins!(spec)
+    end
+
+    def joins!(spec)
       own_lists
-      @records = nil
+      unload_records
       frag = join_fragment(spec)
       @joins << frag unless @joins.include?(frag)
       self
     end
 
     def left_outer_joins(spec)
-      own_lists
-      @records = nil
-      frag = join_fragment(spec)
-      @joins << frag unless @joins.include?(frag)
-      self
+      spawn.joins!(spec)
     end
 
     def join_fragment(spec)
@@ -845,7 +946,11 @@ module ActiveRecord
     # the query. Raise instead.
     def select(*specs)
       raise ArgumentError, "select: no columns (a block form reached the projection)" if specs.empty?
-      @records = nil
+      spawn.select_specs!(specs)
+    end
+
+    def select_specs!(specs)
+      unload_records
       cols = []
       specs.each do |spec|
         cols << (spec.is_a?(Symbol) ? "#{@table}.#{spec}" : spec.to_s)
@@ -854,10 +959,24 @@ module ActiveRecord
       self
     end
 
-    def distinct
-      @records = nil
-      @distinct = true
+    # Rails' `QueryMethods#distinct(value = true)`: any truthy value
+    # turns DISTINCT on (`distinct(:name)` is not a column list; it is
+    # `distinct(true)`), `false` turns it off.
+    def distinct(value = true)
+      spawn.distinct!(value)
+    end
+
+    def distinct!(value = true)
+      unload_records
+      @distinct = value ? true : false
       self
+    end
+
+    # Rails' `Relation#all`: the relation itself, as a new relation, so a
+    # chain written for a class (`Widget.all`) also reads on a scope or an
+    # association reader (`owner.widgets.active.all`).
+    def all
+      spawn
     end
 
     # `includes`/`preload`/`eager_load` — eager-load hints. The specs
@@ -867,15 +986,16 @@ module ActiveRecord
     # into the `_preload_<assoc>` caches). Models without a synthesized
     # override inherit Base's no-op and stay lazy (correct, just N+1).
     def includes(*names)
-      own_lists
-      @records = nil
-      names.each { |n| @includes << n }
-      self
+      spawn.include_names!(names)
     end
 
     def preload(*names)
+      spawn.include_names!(names)
+    end
+
+    def include_names!(names)
       own_lists
-      @records = nil
+      unload_records
       names.each { |n| @includes << n }
       self
     end
@@ -886,7 +1006,7 @@ module ActiveRecord
     # `preload_associations`. campfire's message pages load this way and
     # preload only the messages its fragment cache missed.
     def skip_preloading!
-      @records = nil
+      unload_records
       @skip_preloading = true
       self
     end
@@ -900,10 +1020,7 @@ module ActiveRecord
     end
 
     def eager_load(*names)
-      own_lists
-      @records = nil
-      names.each { |n| @includes << n }
-      self
+      spawn.include_names!(names)
     end
 
     # `references(:assoc)` — Rails' marker that a string condition
@@ -913,18 +1030,23 @@ module ActiveRecord
     # stay chainable (lobsters' filters page).
     def references(*names)
       names
-      self
+      unloaded_spawn
     end
 
     # `merge(other)` — fold another relation's WHEREs in. v1 handles the
     # common case (merging a same-table scope's conditions).
     def merge(other)
+      spawn.merge!(other)
+    end
+
+    def merge!(other)
       own_lists
-      @records = nil
+      unload_records
       other.where_clauses.each do |w|
         push_where(w)
         @opaque_wheres = true
       end
+      mark_null! if other.null_relation?
       self
     end
 
@@ -942,16 +1064,21 @@ module ActiveRecord
     end
 
     def none
+      spawn.none!
+    end
+
+    def none!
       own_lists
-      @records = nil
-      push_where("(1 = 0)")
+      unload_records
+      push_where_cols("(1 = 0)", [], true)
+      mark_null!
       self
     end
 
     # `reload` — drop the loaded records; the next terminal re-queries and
     # reflects committed changes.
     def reload
-      @records = nil
+      unload_records
       self
     end
 
@@ -1021,7 +1148,9 @@ module ActiveRecord
     # straight from the statement (`_hydrate_all`) — the positions are
     # fixed at compile time, so no String-keyed Hash per row. An
     # explicit `select` can project anything, and keeps the Hash path.
+    # Recorded `includes` run here unless `skip_preloading!` is set.
     def load_records
+      return [] if @null
       records = if @select_sql.nil?
         @model._hydrate_all(select_sql_with(@model._columns_sql))
       else
@@ -1029,8 +1158,7 @@ module ActiveRecord
         rows.map { |row| @model.instantiate(row) }
       end
       if @includes.length > 0 && !@skip_preloading && records.length > 0
-        pending = ActiveRecord::PendingPreload.new(@model, records, @includes.dup)
-        records.each { |record| record._pend_preload(pending) }
+        @model.preload_associations(records, @includes.dup)
       end
       records
     end
@@ -1312,7 +1440,7 @@ module ActiveRecord
       # loaded-relation cache a later `each`/`map` reads, and a cache
       # holding the single row `first` asked for would answer those with
       # one row out of many. Same terminal rule as `pluck`.
-      @records = nil
+      unload_records
       rows.length == 0 ? nil : rows[0]
     end
 
@@ -1356,7 +1484,7 @@ module ActiveRecord
       @limit = n
       rows = to_a
       @limit = prior
-      @records = nil
+      unload_records
       rows
     end
 
@@ -1395,7 +1523,7 @@ module ActiveRecord
       rows = to_a
       @limit = prior_limit
       @orders = prior_orders
-      @records = nil
+      unload_records
       out = []
       i = rows.length - 1
       while i >= 0
@@ -1456,6 +1584,7 @@ module ActiveRecord
     end
 
     def count
+      return 0 if @null
       rows = ActiveRecord.adapter.select_rows(bound_count_sql)
       rows.length == 0 ? 0 : rows[0]["n"].to_i
     end
@@ -1465,6 +1594,7 @@ module ActiveRecord
     # (lobsters' hotness math); an Integer-column caller would want
     # column typing here, ledgered when one appears.
     def sum(expr)
+      return 0.0 if @null
       term = expr.is_a?(Symbol) ? "#{@table}.#{expr}" : expr.to_s
       sql = "SELECT COALESCE(SUM(#{term}), 0) AS n FROM #{@table}"
       sql = "#{sql} #{@joins.join(" ")}" if @joins.length > 0
@@ -1485,13 +1615,15 @@ module ActiveRecord
     end
 
     def extreme(expr, function)
+      # Grouped extrema answer a Hash (possibly empty); ungrouped null is nil.
+      return {} if @null && @groups.length > 0
+      return nil if @null
       column = expr.to_s.to_sym
       raise ArgumentError, "unknown aggregate column: #{expr}" unless @model.schema_columns.include?(column)
       return grouped_extreme(column.to_s, function) if @groups.length > 0
-      scoped = spawn
       projection = "#{function}(#{@table}.#{ActiveRecord.adapter.quote_column_name(column)}) AS value"
       projection = "#{@select_sql}, #{projection}" if @havings.length > 0 && !@select_sql.nil?
-      scoped.select(projection)
+      scoped = select(projection)
       scoped.clear_ordering
       rows = ActiveRecord.adapter.select_rows(scoped.bound_sql)
       return nil if rows.length == 0
@@ -1512,9 +1644,8 @@ module ActiveRecord
         selects << "#{group} AS #{name}"
       end
       selects << "#{function}(#{@table}.#{ActiveRecord.adapter.quote_column_name(column)}) AS value"
-      scoped = spawn
       selects.unshift(@select_sql) if @havings.length > 0 && !@select_sql.nil?
-      scoped.select(selects.join(", "))
+      scoped = select(selects.join(", "))
       scoped.clear_ordering
       rows = ActiveRecord.adapter.select_rows(scoped.bound_sql)
       grouped = {}
@@ -1585,6 +1716,7 @@ module ActiveRecord
     # as `to_sql` so the Hash only contains surviving groups, and a
     # distinct projection counts distinct values per group (#343).
     def group_count
+      return {} if @null
       key = @groups.join(", ")
       # DISTINCT uses a subquery so a multi-column / aliased `select`
       # never lands inside SQLite's one-expression COUNT(DISTINCT …).
@@ -1626,11 +1758,13 @@ module ActiveRecord
 
     # Loaded: cache length. Unloaded: exists? (SELECT 1 LIMIT 1).
     def empty?
+      return true if @null
       r = @records
       r.nil? ? !exists? : r.length == 0
     end
 
     def any?
+      return false if @null
       r = @records
       r.nil? ? exists? : r.length > 0
     end
@@ -1684,6 +1818,7 @@ module ActiveRecord
     # and `nil` stay distinct without an untyped default.
     def exists?(*conditions)
       raise ArgumentError, "wrong number of arguments (given #{conditions.length}, expected 0..1)" if conditions.length > 1
+      return false if @null
       return false if @limit == 0
       if conditions.empty?
         r = @records
@@ -1713,6 +1848,7 @@ module ActiveRecord
     # How many probe rows `exists_sql(n)` returns. Shared by `exists?`,
     # `one?`, and `many?` so cardinality questions never hydrate.
     def probe_existence(n)
+      return 0 if @null
       return 0 if @limit == 0
       ActiveRecord.adapter.select_rows(bound_exists_sql(n)).length
     end
@@ -1722,6 +1858,7 @@ module ActiveRecord
     # Does not mutate the relation — `offset(n).exists?` would, and a
     # loaded `exists?` would ignore that offset.
     def more_than?(n)
+      return false if @null
       return true if n < 0
       sql = "#{cte_prefix}SELECT 1 AS one FROM #{from_source}"
       sql = "#{sql} #{@joins.join(" ")}" if @joins.length > 0
@@ -1761,6 +1898,7 @@ module ActiveRecord
     # Rails contract: no callbacks, no per-row loads, returns the
     # affected-row count. ORDER/LIMIT don't apply to bulk ops.
     def delete_all
+      return 0 if @null
       sql = "DELETE FROM #{@table}#{scoped_write_where}"
       ActiveRecord.adapter.execute_ddl(sql)
       ActiveRecord.adapter.changes
@@ -1798,6 +1936,7 @@ module ActiveRecord
     # (`update_all("hits = hits + 1")`) is trusted verbatim, same as
     # Rails. Returns the affected-row count.
     def update_all(updates)
+      return 0 if @null
       set_sql = if updates.is_a?(Hash)
         parts = []
         updates.each do |key, val|
@@ -1807,7 +1946,10 @@ module ActiveRecord
       else
         updates.to_s
       end
-      sql = "UPDATE #{@table} SET #{set_sql}#{scoped_write_where}"
+      # The table quoted, as Rails' Arel renders it (`UPDATE "memberships"
+      # SET ...`): a test that picks the statement out of the SQL log
+      # (campfire's creation-commit test) matches that spelling.
+      sql = "UPDATE \"#{@table}\" SET #{set_sql}#{scoped_write_where}"
       ActiveRecord.adapter.execute_ddl(sql)
       ActiveRecord.adapter.changes
     end
@@ -1820,12 +1962,13 @@ module ActiveRecord
     # Rails' `*names`: that is every corpus call, and a splat of names
     # would reach the SQL untyped.
     def touch_all(name = nil)
+      return 0 if @null
       now = ActiveRecord.adapter.escape_value(ActiveSupport.db_now)
       parts = []
       parts.push("updated_at = #{now}") if @model.schema_columns.include?(:updated_at)
       parts.push("#{name} = #{now}") unless name.nil?
       return 0 if parts.empty?
-      ActiveRecord.adapter.execute_ddl("UPDATE #{@table} SET #{parts.join(", ")}#{scoped_write_where}")
+      ActiveRecord.adapter.execute_ddl("UPDATE \"#{@table}\" SET #{parts.join(", ")}#{scoped_write_where}")
       ActiveRecord.adapter.changes
     end
 
@@ -1873,6 +2016,7 @@ module ActiveRecord
     # plucks the user ids, then hands the SAME relation to `grant_to`,
     # which built memberships for user 0.
     def pluck(col)
+      return [] if @null
       prior = @select_sql
       @select_sql = "#{@table}.#{col} AS v"
       rows = ActiveRecord.adapter.select_rows(bound_sql)
@@ -1895,6 +2039,12 @@ module ActiveRecord
     # `@model.primary_key` (not a hard-coded `id` column) and casts the
     # way `find` does, so uuid / string keys survive (#310).
     def ids
+      return [] if @null
+      cached = @records
+      unless cached.nil?
+        # `preloaded` may seed integer primary keys, not only records.
+        return cached.map { |row| row.is_a?(Base) ? row.id : row }
+      end
       prior = @select_sql
       key = @model.primary_key
       @select_sql = "#{@table}.#{key} AS v"
@@ -1939,6 +2089,11 @@ module ActiveRecord
     # declared `friendly_id` (lower::friendly_id) has the class-side
     # configuration `friendly_find` reads; any other raises there.
     def friendly
+      rel = spawn
+      rel.friendly!
+    end
+
+    def friendly!
       @friendly = true
       self
     end
@@ -2092,14 +2247,28 @@ module ActiveRecord
     # back 200, complete and well-formed, with an empty message list —
     # which is exactly the failure the app's own tests cannot see.
     #
+    # Borrow a predicate for a terminal (`find_by` / `find_sole_by`):
+    # push via `add_condition`, run the body, then restore `@wheres`,
+    # `@null`, and `@records` so empty IN cannot stick NullRelation and
+    # a loaded relation keeps its memo whether the body returns or raises.
+    def with_borrowed_condition(conditions)
+      prior_null = @null
+      prior_records = @records
+      pushed = add_condition(conditions, [], false)
+      begin
+        yield
+      ensure
+        pop_where if pushed
+        @null = prior_null
+        @records = prior_records
+      end
+    end
+
     # `add_condition` answers whether it pushed — a nil or empty
     # condition pushes nothing — so the pop is guarded by that rather
     # than issued unconditionally.
     def find_by(conditions)
-      pushed = add_condition(conditions, [], false)
-      record = first
-      pop_where if pushed
-      record
+      with_borrowed_condition(conditions) { first }
     end
 
     # `find_by!` — `find_by` that raises `RecordNotFound` on no match.
@@ -2144,36 +2313,17 @@ module ActiveRecord
       @limit = sole_probe_limit(prior_limit)
       rows = to_a
       @limit = prior_limit
-      @records = nil
+      unload_records
       raise RecordNotFound.new("Couldn't find #{@model.name}", @model.name, @model.primary_key) if rows.length == 0
       raise SoleRecordExceeded, "Wanted only one #{@model.name}" if rows.length > 1
       rows[0]
     end
 
-    # `find_sole_by(conditions)` — Rails' `where(conditions).sole`. A
-    # terminal, so its predicate is popped as in `find_by`; popped in an
-    # `ensure` because `sole` raises on the two answers that are not one
-    # record, and a caller that rescues must get the relation back as
-    # it was.
-    #
-    # `add_condition` unconditionally clears `@records` — it has no way
-    # to know in advance whether the new predicate still matches a
-    # loaded set — so a relation that was loaded before this call loses
-    # its memo the moment the temporary condition is pushed. The
-    # `ensure` restores the ORIGINAL `@records` saved before that push,
-    # not whatever `sole`'s own probe leaves behind, so a loaded
-    # relation's records are intact afterward whether `sole` returns or
-    # raises.
+    # `find_sole_by(conditions)` — Rails' `where(conditions).sole`.
+    # Shares `with_borrowed_condition` with `find_by` so empty IN cannot
+    # sticky-null the receiver after the sole probe (which may raise).
     def find_sole_by(conditions)
-      prior_records = @records
-      pushed = add_condition(conditions, [], false)
-      begin
-        record = sole
-      ensure
-        pop_where if pushed
-        @records = prior_records
-      end
-      record
+      with_borrowed_condition(conditions) { sole }
     end
 
     # NO `new` HERE, AND NOT BY OVERSIGHT. Rails builds records through
@@ -2437,9 +2587,15 @@ module ActiveRecord
       elsif val.is_a?(Array)
         # Record elements read their id — Rails' IN-of-records form
         # (`where(comment: comments)`, lobsters Vote.comments_flags);
-        # scalar elements escape as-is.
+        # scalar elements escape as-is. An empty list is Rails' none
+        # predicate (`1=0`): never `IN ()`. Pure — NullRelation is set by
+        # `mark_null!` from `none` / lasting positive `where` only.
         ids = val.map { |x| x.is_a?(Base) ? x.id : x }
-        "#{qcol} IN (#{escape_list(ids)})"
+        if ids.empty?
+          "1=0"
+        else
+          "#{qcol} IN (#{escape_list(ids)})"
+        end
       elsif val.nil?
         "#{qcol} IS NULL"
       elsif val.is_a?(Base)

@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 # Tep::Server -- accept loop. Single-threaded inside one process;
 # the perf model is "fork N workers, each runs its own Server"
 # (-w workers) using SO_REUSEPORT so the kernel load-balances.
@@ -67,14 +68,14 @@ module Tep
     def run(port, workers, quiet)
       if !quiet
         puts Tep.display_name + " (" + RUBY_ENGINE +
-             ") listening on http://0.0.0.0:" + port.to_s +
+             ") listening on http://" + (Tep::APP.bind_host.empty? ? "0.0.0.0" : Tep::APP.bind_host) + ":" + port.to_s +
              ", pid " + Sock.sphttp_getpid.to_s
         puts "  blocking accept loop, one request at a time per process; " +
              "processes: " + Tep.processes_desc(workers)
       end
 
       if workers <= 1
-        sfd = Sock.sphttp_listen(port, 0)
+        sfd = Sock.sphttp_listen_on(Tep::APP.bind_host, port, 0)
         if sfd < 0
           $stderr.puts Tep.display_name + ": cannot bind to port " +
                        port.to_s + " (already in use?)"
@@ -90,7 +91,7 @@ module Tep
       while i < workers
         pid = Sock.sphttp_fork
         if pid == 0
-          sfd = Sock.sphttp_listen(port, 1)
+          sfd = Sock.sphttp_listen_on(Tep::APP.bind_host, port, 1)
           if sfd < 0
             puts Tep.display_name + ": worker " + Sock.sphttp_getpid.to_s +
                  " bind failed"

@@ -1349,13 +1349,6 @@ fn emit_send(
                 (Some("ActiveSupport"), "parse_db_time") if args.len() == 1 => {
                     return format!("Roundhouse.RhDateTime.Parse({})", args_s[0]);
                 }
-                // `ActiveSupport.errors_for(errors, attributes, attribute, prefix)` (runtime/ruby/active_support_ext.rb): the messages added on `attribute`, without their prefix.
-                (Some("ActiveSupport"), "errors_for") if args.len() == 4 => {
-                    return format!(
-                        "((System.Func<string, string, List<string>>)((attribute, prefix) => ({}).Zip({}, (m, a) => (m, a)).Where(p => p.a == attribute).Select(p => p.m.StartsWith(prefix, System.StringComparison.Ordinal) ? p.m.Substring(prefix.Length) : p.m).ToList()))({}, {})",
-                        args_s[0], args_s[1], args_s[2], args_s[3]
-                    );
-                }
                 // Temporal writer intrinsic: `ActiveSupport.db_now` — current
                 // UTC time in Rails' exact storage form ("YYYY-MM-DD
                 // HH:MM:SS.ffffff"). `fill_timestamps` stamps with it.
@@ -1897,7 +1890,17 @@ fn emit_if_stmt(cond: &Expr, then_branch: &Expr, else_branch: &Expr) -> String {
     if let Some((var, ty)) = narrowing_guard(cond) {
         let patvar = format!("{var}As{}", sanitize_type(&ty));
         let then = rename_word(&emit_stmt(then_branch), &var, &patvar);
-        let head = format!("if ({var} is {ty} {patvar}) {{\n{}\n}}", indent(&then));
+        let test = match ty.as_str() {
+            // Not `is IEnumerable<object?>`: a `List<long>` is not one, so match the non-generic interface.
+            "Array" => format!(
+                "{var} is System.Collections.IList {var}AsIList && new RhArrayView({var}AsIList) is var {patvar}"
+            ),
+            "Hash" => format!(
+                "{var} is System.Collections.IDictionary {var}AsIDictionary && new RhHashView({var}AsIDictionary) is var {patvar}"
+            ),
+            _ => format!("{var} is {ty} {patvar}"),
+        };
+        let head = format!("if ({test}) {{\n{}\n}}", indent(&then));
         if is_empty_branch(else_branch) {
             return head;
         }
@@ -1923,8 +1926,12 @@ fn narrowing_guard(cond: &Expr) -> Option<(String, String)> {
             if let (ExprNode::Var { name, .. }, ExprNode::Const { path }) =
                 (&*r.node, &*args[0].node)
             {
-                if let Some(t) = is_a_cast_type(path.last().map(|s| s.as_str()).unwrap_or("")) {
+                let last = path.last().map(|s| s.as_str()).unwrap_or("");
+                if let Some(t) = is_a_cast_type(last) {
                     return Some((camel(name.as_str()), t));
+                }
+                if matches!(last, "Array" | "Hash") {
+                    return Some((camel(name.as_str()), last.to_string()));
                 }
             }
         }

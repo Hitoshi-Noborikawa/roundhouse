@@ -36,7 +36,7 @@ fn push_schema_symbol_list(
                 style: ArrayStyle::Brackets,
             },
         ),
-        Ty::Array { elem: Box::new(Ty::Sym) },
+        Ty::Array { elem: std::sync::Arc::new(Ty::Sym) },
     );
     methods.push(MethodDef {
         visibility: crate::dialect::MethodVisibility::Public,
@@ -47,7 +47,7 @@ fn push_schema_symbol_list(
         receiver: MethodReceiver::Class,
         params: Vec::new(),
         body,
-        signature: Some(fn_sig(vec![], Ty::Array { elem: Box::new(Ty::Sym) })),
+        signature: Some(fn_sig(vec![], Ty::Array { elem: std::sync::Arc::new(Ty::Sym) })),
         effects: EffectSet::default(),
         enclosing_class: Some(owner.0.clone()),
         kind: AccessorKind::Method,
@@ -94,7 +94,7 @@ pub(super) fn push_schema_methods(
         model,
         &table.columns.iter().map(|c| (c.name.clone(), super::ty_of_column_slot(c))).collect(),
     );
-    let mut demanded: Option<std::collections::HashSet<Symbol>> = None;
+    let mut demanded: Option<std::rc::Rc<std::collections::HashSet<Symbol>>> = None;
     for col in &table.columns {
         methods.push(synth_attr_reader(owner, col, model));
         if model.enums.contains_key(&col.name) {
@@ -156,7 +156,7 @@ pub(super) fn push_schema_methods(
             // have to learn (rust's hand-written model impl, go's
             // call-form list), for an answer that is the constant
             // false/nil on those lanes anyway.
-            let demanded = demanded.get_or_insert_with(|| model_body_names(models));
+            let demanded = demanded.get_or_insert_with(|| demanded_names(models));
             for (name, runtime, ret) in pending_change_methods(col) {
                 if demanded.contains(&name)
                     && !super::associations::model_defines_instance_method(model, &name)
@@ -180,7 +180,7 @@ pub(super) fn push_schema_methods(
             continue;
         };
         let Some(col) = table.columns.iter().find(|c| c.name == *foreign_key) else { continue };
-        let demanded = demanded.get_or_insert_with(|| model_body_names(models));
+        let demanded = demanded.get_or_insert_with(|| demanded_names(models));
         let prev = Symbol::from(format!("{}_previously_changed?", name.as_str()));
         if demanded.contains(&prev) && !super::associations::model_defines_instance_method(model, &prev) {
             methods.push(synth_column_dirty_pred(owner, col, prev));
@@ -562,7 +562,7 @@ fn synth_attributes_before_type_cast(owner: &ClassId, table: &Table) -> MethodDe
             (key, value)
         })
         .collect();
-    let ret = Ty::Hash { key: Box::new(Ty::Str), value: Box::new(Ty::Untyped) };
+    let ret = Ty::Hash { key: std::sync::Arc::new(Ty::Str), value: std::sync::Arc::new(Ty::Untyped) };
     let body = with_ty(Expr::new(Span::synthetic(), ExprNode::Hash { entries, kwargs: false }), ret.clone());
     MethodDef {
         visibility: crate::dialect::MethodVisibility::Public,
@@ -830,6 +830,9 @@ fn hydration_setter(model: &Model, col: &Column) -> Symbol {
         enum_storage_writer(col)
     } else if is_generic_json_col(col, model) {
         json_storage_writer(col)
+    } else if super::model_defines_writer(model, &col.name) && !is_temporal_col(col) {
+        // The model's own `<col>=` is what assignment runs, not what a row loads through.
+        Symbol::from(format!("_write_{}_raw", col.name.as_str()))
     } else {
         col_storage_setter(col)
     }
@@ -999,7 +1002,7 @@ fn synth_attr_reader(owner: &ClassId, col: &Column, model: &Model) -> MethodDef 
     // native seam; the target boundary rejects unsupported Date seams
     // before an emitter can silently substitute a timestamp carrier.
     let (body, ret_ty) = if let Some(label) = enum_label_read(model, col) {
-        (label, Ty::Union { variants: vec![Ty::Str, Ty::Nil] })
+        (label, Ty::Union { variants: vec![Ty::Str, Ty::Nil].into() })
     } else if is_temporal_col(col) {
         // Nilable: a stored value can be absent (NULL / unset), so the
         // parse short-circuits to nil. Date?/Time? is the honest static type
@@ -1007,7 +1010,7 @@ fn synth_attr_reader(owner: &ClassId, col: &Column, model: &Model) -> MethodDef 
         // storage ivar.
         (
             temporal_reader_body(col),
-            Ty::Union { variants: vec![temporal_seam(col).0, Ty::Nil] },
+            Ty::Union { variants: vec![temporal_seam(col).0, Ty::Nil].into() },
         )
     } else if is_generic_json_col(col, model) {
         (json_reader_body(col), Ty::Untyped)
@@ -1143,7 +1146,7 @@ fn temporal_reader_body(col: &Column) -> Expr {
                 parenthesized: true,
             },
         ),
-        Ty::Union { variants: vec![temporal_seam(col).0, Ty::Nil] },
+        Ty::Union { variants: vec![temporal_seam(col).0, Ty::Nil].into() },
     )
 }
 
@@ -1220,8 +1223,8 @@ fn synth_temporal_writer(owner: &ClassId, col: &Column) -> MethodDef {
     let value_param = Symbol::from("value");
     let (value_ty, text_ty) = if col.nullable {
         (
-            Ty::Union { variants: vec![temporal_seam(col).0, Ty::Nil] },
-            Ty::Union { variants: vec![Ty::Str, Ty::Nil] },
+            Ty::Union { variants: vec![temporal_seam(col).0, Ty::Nil].into() },
+            Ty::Union { variants: vec![Ty::Str, Ty::Nil].into() },
         )
     } else {
         (temporal_seam(col).0, Ty::Str)
@@ -1520,12 +1523,12 @@ fn synth_instantiate(owner: &ClassId, fire_after_initialize: bool) -> MethodDef 
     stmts.push(var_ref(instance));
     let body = seq(stmts);
 
-    let owner_ty = Ty::Class { id: owner.clone(), args: vec![] };
+    let owner_ty = Ty::Class { id: owner.clone(), args: vec![].into() };
     // Adapter rows are String-keyed across all targets (Crystal/TS can't
     // dynamically create Symbols at runtime; Spinel adapters skip the
     // historical `to_sym` step). Matches `synth_row_from_raw`. Internal
     // narrowing happens in the body.
-    let row_ty = Ty::Hash { key: Box::new(Ty::Str), value: Box::new(Ty::Untyped) };
+    let row_ty = Ty::Hash { key: std::sync::Arc::new(Ty::Str), value: std::sync::Arc::new(Ty::Untyped) };
     MethodDef {
         visibility: crate::dialect::MethodVisibility::Public,
         unsupported_formals: None,
@@ -1631,8 +1634,8 @@ pub(super) fn push_from_params_method(
 
     stmts.push(var_ref(instance));
 
-    let owner_ty = Ty::Class { id: owner.clone(), args: vec![] };
-    let params_ty = Ty::Class { id: params_class_id.clone(), args: vec![] };
+    let owner_ty = Ty::Class { id: owner.clone(), args: vec![].into() };
+    let params_ty = Ty::Class { id: params_class_id.clone(), args: vec![].into() };
     methods.push(MethodDef {
         visibility: crate::dialect::MethodVisibility::Public,
         unsupported_formals: None,
@@ -1701,7 +1704,7 @@ pub(super) fn push_create_from_params_method(
 ) {
     let p = Symbol::from("p");
     let instance = Symbol::from("instance");
-    let owner_ty = Ty::Class { id: owner.clone(), args: vec![] };
+    let owner_ty = Ty::Class { id: owner.clone(), args: vec![].into() };
 
     let from_params_call = Expr::new(
         Span::synthetic(),
@@ -1734,7 +1737,7 @@ pub(super) fn push_create_from_params_method(
         var_ref(instance),
     ];
 
-    let params_ty = Ty::Class { id: params_class_id.clone(), args: vec![] };
+    let params_ty = Ty::Class { id: params_class_id.clone(), args: vec![].into() };
     methods.push(MethodDef {
         visibility: crate::dialect::MethodVisibility::Public,
         unsupported_formals: None,
@@ -1887,8 +1890,8 @@ fn synth_from_row(owner: &ClassId, table: &Table, model: &Model) -> MethodDef {
     // not fire it on the empty shell.
     stmts.push(var_ref(instance));
 
-    let owner_ty = Ty::Class { id: owner.clone(), args: vec![] };
-    let row_ty = Ty::Class { id: row_class, args: vec![] };
+    let owner_ty = Ty::Class { id: owner.clone(), args: vec![].into() };
+    let row_ty = Ty::Class { id: row_class, args: vec![].into() };
     MethodDef {
         visibility: crate::dialect::MethodVisibility::Public,
         unsupported_formals: None,
@@ -2014,7 +2017,7 @@ fn synth_from_stmt(owner: &ClassId, table: &Table, model: &Model) -> MethodDef {
     }
     stmts.push(var_ref(instance));
 
-    let owner_ty = Ty::Class { id: owner.clone(), args: vec![] };
+    let owner_ty = Ty::Class { id: owner.clone(), args: vec![].into() };
     MethodDef {
         visibility: crate::dialect::MethodVisibility::Public,
         unsupported_formals: None,
@@ -2156,6 +2159,67 @@ fn pending_change_methods(col: &Column) -> Vec<(Symbol, &'static str, Ty)> {
     ]
 }
 
+#[cfg(test)]
+pub(crate) mod lookup_test_support {
+    use std::cell::Cell;
+    thread_local! {
+        pub(crate) static UNCACHED: Cell<bool> = const { Cell::new(false) };
+        pub(crate) static BUILDS: Cell<usize> = const { Cell::new(0) };
+        pub(crate) static MODEL_VISITS: Cell<usize> = const { Cell::new(0) };
+    }
+}
+
+/// [`model_body_names`] of one models slice, shared by every
+/// [`push_schema_methods`] over that slice while a
+/// [`share_model_body_names`] guard lives. Computed per call, the names
+/// walked every model body once per model with a column: quadratic in
+/// the number of models.
+#[derive(Default)]
+pub(crate) struct ModelBodyNames(std::rc::Rc<std::cell::OnceCell<std::rc::Rc<std::collections::HashSet<Symbol>>>>);
+
+type SharedBodyNames = (usize, usize, std::rc::Rc<std::cell::OnceCell<std::rc::Rc<std::collections::HashSet<Symbol>>>>);
+
+thread_local! {
+    static MODEL_BODY_NAMES: std::cell::RefCell<Option<SharedBodyNames>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Restores the previously shared names when dropped. It borrows the
+/// slice, so the slice cannot change while its names are shared.
+pub(crate) struct ModelBodyNamesGuard<'a>(Option<SharedBodyNames>, std::marker::PhantomData<&'a [Model]>);
+
+impl Drop for ModelBodyNamesGuard<'_> {
+    fn drop(&mut self) {
+        let previous = self.0.take();
+        MODEL_BODY_NAMES.with(|slot| *slot.borrow_mut() = previous);
+    }
+}
+
+/// Share `cache`'s [`model_body_names`] of `models` with every
+/// [`push_schema_methods`] over `models` (the same slice) for the
+/// guard's life.
+pub(crate) fn share_model_body_names<'a>(models: &'a [Model], cache: &ModelBodyNames) -> ModelBodyNamesGuard<'a> {
+    let shared = (models.as_ptr() as usize, models.len(), cache.0.clone());
+    let previous = MODEL_BODY_NAMES.with(|slot| slot.borrow_mut().replace(shared));
+    ModelBodyNamesGuard(previous, std::marker::PhantomData)
+}
+
+/// [`model_body_names`] of `models`: the shared names when `models` is
+/// the shared slice.
+fn demanded_names(models: &[Model]) -> std::rc::Rc<std::collections::HashSet<Symbol>> {
+    #[cfg(test)]
+    if lookup_test_support::UNCACHED.get() { return std::rc::Rc::new(model_body_names(models)); }
+    let shared = MODEL_BODY_NAMES.with(|slot| {
+        slot.borrow()
+            .as_ref()
+            .filter(|(ptr, len, _)| *ptr == models.as_ptr() as usize && *len == models.len())
+            .map(|(_, _, cell)| cell.clone())
+    });
+    match shared {
+        Some(cell) => cell.get_or_init(|| std::rc::Rc::new(model_body_names(models))).clone(),
+        None => std::rc::Rc::new(model_body_names(models)),
+    }
+}
+
 /// Every method name a model body SENDS or names as a Symbol (`if:
 /// :will_save_change_to_email?`, `before_save :x, if: …`), across all
 /// the models — the demand set for the pending-change synthesis. The
@@ -2165,6 +2229,8 @@ fn pending_change_methods(col: &Column) -> Vec<(Symbol, &'static str, Ty)> {
 /// `<col>_changed?` is not seen; that is a runtime NoMethodError, the
 /// state every such call was in before this synthesis existed.
 fn model_body_names(models: &[Model]) -> std::collections::HashSet<Symbol> {
+    #[cfg(test)]
+    lookup_test_support::BUILDS.with(|n| n.set(n.get() + 1));
     use crate::dialect::ModelBodyItem;
     fn walk(e: &Expr, out: &mut std::collections::HashSet<Symbol>) {
         match &*e.node {
@@ -2180,6 +2246,8 @@ fn model_body_names(models: &[Model]) -> std::collections::HashSet<Symbol> {
     }
     let mut out = std::collections::HashSet::new();
     for model in models {
+        #[cfg(test)]
+        lookup_test_support::MODEL_VISITS.with(|n| n.set(n.get() + 1));
         for item in &model.body {
             match item {
                 ModelBodyItem::Method { method, .. } => walk(&method.body, &mut out),
@@ -2755,7 +2823,7 @@ fn synth_initialize(owner: &ClassId, table: &Table, model: &Model, models: &[Mod
                 Span::synthetic(),
                 ExprNode::Cast {
                     value: lookup.clone(),
-                    target_ty: Ty::Class { id: target.clone(), args: vec![] },
+                    target_ty: Ty::Class { id: target.clone(), args: vec![].into() },
                 },
             );
             let id_read = with_ty(
@@ -2979,13 +3047,13 @@ fn synth_initialize(owner: &ClassId, table: &Table, model: &Model, models: &[Mod
                     },
                 ));
             }
-            let elem = Ty::Class { id: target.clone(), args: vec![] };
+            let elem = Ty::Class { id: target.clone(), args: vec![].into() };
             let empty = with_ty(
                 Expr::new(
                     Span::synthetic(),
                     ExprNode::Array { elements: vec![], style: ArrayStyle::Brackets },
                 ),
-                Ty::Array { elem: Box::new(elem) },
+                Ty::Array { elem: std::sync::Arc::new(elem) },
             );
             stmts.push(Expr::new(
                 Span::synthetic(),
@@ -3053,13 +3121,13 @@ fn synth_initialize(owner: &ClassId, table: &Table, model: &Model, models: &[Mod
         Span::synthetic(),
         ExprNode::Hash { entries: Vec::new(), kwargs: false },
     );
-    let attrs_ty = Ty::Hash { key: Box::new(Ty::Sym), value: Box::new(Ty::Untyped) };
+    let attrs_ty = Ty::Hash { key: std::sync::Arc::new(Ty::Sym), value: std::sync::Arc::new(Ty::Untyped) };
     let signature = Ty::Fn {
         params: vec![crate::ty::Param {
-            name: attrs.clone(), ty: attrs_ty, kind: crate::ty::ParamKind::Optional,
-        }],
+            name: attrs.clone(), ty: attrs_ty.into(), kind: crate::ty::ParamKind::Optional,
+        }].into(),
         block: None,
-        ret: Box::new(Ty::Nil),
+        ret: std::sync::Arc::new(Ty::Nil),
         effects: EffectSet::default(),
     };
     MethodDef {
@@ -3118,7 +3186,7 @@ fn synth_attributes(owner: &ClassId, table: &Table, model: &Model) -> MethodDef 
     // Hash<Str, ?> — value type is a union of column types; collapsing to
     // Untyped is the conservative approximation. Refining to a Record
     // (row-polymorphic) is a follow-up if downstream wants per-key types.
-    let hash_ty = Ty::Hash { key: Box::new(Ty::Str), value: Box::new(Ty::Untyped) };
+    let hash_ty = Ty::Hash { key: std::sync::Arc::new(Ty::Str), value: std::sync::Arc::new(Ty::Untyped) };
     let body = with_ty(
         Expr::new(
             Span::synthetic(),
@@ -3324,14 +3392,14 @@ fn enum_label_read(model: &Model, col: &Column) -> Option<Expr> {
                 parenthesized: true,
             },
         ),
-        Ty::Union { variants: vec![Ty::Str, Ty::Nil] },
+        Ty::Union { variants: vec![Ty::Str, Ty::Nil].into() },
     );
     // A NULL column reads as the mapping's `nil` label when it has one.
     let read = match nil_label {
         Some(label) => nil_guarded_as(col, stored, call, with_ty(lit_str(label), Ty::Str)),
         None => nil_guarded(col, stored, call),
     };
-    Some(with_ty(read, Ty::Union { variants: vec![Ty::Str, Ty::Nil] }))
+    Some(with_ty(read, Ty::Union { variants: vec![Ty::Str, Ty::Nil].into() }))
 }
 
 /// The mapping's `nil` entry's label (`unknown: nil`), if any.
@@ -3375,7 +3443,7 @@ fn enum_arrays(model: &Model, col: &Column) -> Option<(Expr, Expr, Ty)> {
     let array = |elems: Vec<Expr>, of: Ty| {
         with_ty(
             Expr::new(Span::synthetic(), ExprNode::Array { elements: elems, style: Default::default() }),
-            Ty::Array { elem: Box::new(of) },
+            Ty::Array { elem: std::sync::Arc::new(of) },
         )
     };
     Some((array(labels, Ty::Str), array(values, value_ty.clone()), value_ty))
@@ -3407,11 +3475,11 @@ fn enum_int_call(model: &Model, col: &Column, text: Expr) -> Option<Expr> {
             .collect::<Option<Vec<_>>>()?;
         args.push(with_ty(
             Expr::new(Span::synthetic(), ExprNode::Array { elements: texts, style: Default::default() }),
-            Ty::Array { elem: Box::new(Ty::Str) },
+            Ty::Array { elem: std::sync::Arc::new(Ty::Str) },
         ));
     }
     args.push(attr);
-    let ret = if nullable { Ty::Union { variants: vec![value_ty, Ty::Nil] } } else { value_ty };
+    let ret = if nullable { Ty::Union { variants: vec![value_ty, Ty::Nil].into() } } else { value_ty };
     let call = with_ty(
         Expr::new(
             Span::synthetic(),
@@ -3601,7 +3669,7 @@ fn synth_index_write(owner: &ClassId, table: &Table, model: &Model) -> MethodDef
             Ty::Union { variants: vs }
         }
         single => Ty::Union {
-            variants: vec![single.clone(), Ty::Nil],
+            variants: vec![single.clone(), Ty::Nil].into(),
         },
     };
 
@@ -3781,7 +3849,7 @@ fn column_union_ty(table: &Table) -> Ty {
     if variants.len() == 1 {
         variants.into_iter().next().unwrap()
     } else {
-        Ty::Union { variants }
+        Ty::Union { variants: variants.into() }
     }
 }
 
@@ -3887,8 +3955,8 @@ fn synth_update_typed(
         stmts.push(Expr::new(Span::synthetic(), ExprNode::SelfRef));
     }
 
-    let params_ty = Ty::Class { id: params_class_id.clone(), args: vec![] };
-    let ret_ty = if bang { Ty::Class { id: owner.clone(), args: vec![] } } else { Ty::Bool };
+    let params_ty = Ty::Class { id: params_class_id.clone(), args: vec![].into() };
+    let ret_ty = if bang { Ty::Class { id: owner.clone(), args: vec![].into() } } else { Ty::Bool };
     MethodDef {
         visibility: crate::dialect::MethodVisibility::Public,
         unsupported_formals: None,
@@ -4207,8 +4275,8 @@ fn synth_update_hash(
         stmts.push(Expr::new(Span::synthetic(), ExprNode::SelfRef));
     }
 
-    let attrs_ty = Ty::Hash { key: Box::new(Ty::Sym), value: Box::new(Ty::Untyped) };
-    let ret_ty = if bang { Ty::Class { id: owner.clone(), args: vec![] } } else { Ty::Bool };
+    let attrs_ty = Ty::Hash { key: std::sync::Arc::new(Ty::Sym), value: std::sync::Arc::new(Ty::Untyped) };
+    let ret_ty = if bang { Ty::Class { id: owner.clone(), args: vec![].into() } } else { Ty::Bool };
     MethodDef {
         visibility: crate::dialect::MethodVisibility::Public,
         unsupported_formals: None,

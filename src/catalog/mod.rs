@@ -44,6 +44,7 @@
 use std::collections::BTreeSet;
 
 pub mod gems;
+pub mod string_kernel;
 pub use gems::{GemClass, GemTy, GEM_CATALOG};
 
 /// One cataloged method. Static-lifetime strings keep entries
@@ -183,7 +184,7 @@ pub enum ReturnKind {
     Str,
     /// Reference to a concrete class by dotted-name path
     /// (e.g. `"ActiveModel::Errors"`). Analyzer instantiates as
-    /// `Ty::Class { id: ClassId(<path>), args: vec![] }`.
+    /// `Ty::Class { id: ClassId(<path>), args: vec![].into() }`.
     /// Used by `#errors` to reference the ActiveModel::Errors
     /// class without needing it to be a user-defined model.
     ClassRef(&'static str),
@@ -757,19 +758,22 @@ pub const AR_CATALOG: &[CatalogedMethod] = &[
         chain: ChainKind::NotApplicable,
         return_kind: Some(ReturnKind::ClassRef("ActiveRecord::Result")),
     },
+    // The runtime's `upsert_all` answers the affected-row count, not
+    // Rails' `ActiveRecord::Result` (ledgered in docs/pipeline/runtime.md
+    // beside `insert_all`'s); typed as what the emitted code returns.
     CatalogedMethod {
         name: "upsert",
         receiver: ReceiverContext::Class,
         effect: EffectClass::DbWrite,
         chain: ChainKind::NotApplicable,
-        return_kind: None,
+        return_kind: Some(ReturnKind::Int),
     },
     CatalogedMethod {
         name: "upsert_all",
         receiver: ReceiverContext::Class,
         effect: EffectClass::DbWrite,
         chain: ChainKind::NotApplicable,
-        return_kind: None,
+        return_kind: Some(ReturnKind::Int),
     },
     CatalogedMethod {
         name: "touch_all",

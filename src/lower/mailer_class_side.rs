@@ -29,15 +29,10 @@ use crate::expr::{Expr, ExprNode};
 use crate::ident::Symbol;
 use crate::ty::Ty;
 
-/// Synthesize class-side wrappers on every mailer class. Returns the
-/// residue ledger: instance methods left unwrapped, with the reason.
-pub fn apply_mailer_class_side(app: &mut App) -> Vec<Diagnostic> {
-    let mut diags = Vec::new();
-
-    // Transitive parent-chain closure: ApplicationMailer names
-    // ActionMailer::Base directly, BanNotification names
-    // ApplicationMailer. Iterate to fixpoint since ingest order is
-    // arbitrary.
+/// Every mailer class: transitive parent-chain closure, since
+/// ApplicationMailer names ActionMailer::Base directly, BanNotification
+/// names ApplicationMailer, and ingest order is arbitrary.
+pub(crate) fn mailer_names(app: &App) -> BTreeSet<String> {
     let mut mailers: BTreeSet<String> = BTreeSet::new();
     loop {
         let mut changed = false;
@@ -58,10 +53,20 @@ pub fn apply_mailer_class_side(app: &mut App) -> Vec<Diagnostic> {
             break;
         }
     }
+    mailers
+}
+
+/// Synthesize class-side wrappers on every mailer class. Returns the
+/// residue ledger: instance methods left unwrapped, with the reason.
+pub fn apply_mailer_class_side(app: &mut App) -> Vec<Diagnostic> {
+    let mut diags = Vec::new();
+
+    let mailers = mailer_names(app);
     if mailers.is_empty() {
         return diags;
     }
 
+    let parameterized = parameterized_mailers(app, &mailers);
     for lc in app.library_classes.iter_mut() {
         if !mailers.contains(lc.name.0.as_str()) {
             continue;
@@ -102,7 +107,7 @@ pub fn apply_mailer_class_side(app: &mut App) -> Vec<Diagnostic> {
             // failures.
             let (param_tys, ret_ty): (Vec<Option<Ty>>, Option<Ty>) = match &m.signature {
                 Some(Ty::Fn { params, ret, .. }) if params.len() == m.params.len() => (
-                    params.iter().map(|p| Some(p.ty.clone())).collect(),
+                    params.iter().map(|p| Some((*p.ty).clone())).collect(),
                     Some((**ret).clone()),
                 ),
                 _ => (vec![None; m.params.len()], None),
@@ -136,7 +141,7 @@ pub fn apply_mailer_class_side(app: &mut App) -> Vec<Diagnostic> {
                     parenthesized: false,
                 },
             );
-            new_call.ty = Some(Ty::Class { id: lc.name.clone(), args: vec![] });
+            new_call.ty = Some(Ty::Class { id: lc.name.clone(), args: vec![].into() });
             let mut body = Expr::new(
                 span,
                 ExprNode::Send {
@@ -155,9 +160,90 @@ pub fn apply_mailer_class_side(app: &mut App) -> Vec<Diagnostic> {
             w.body = body;
             wrappers.push(w);
         }
+        if parameterized.contains(lc.name.0.as_str()) && !class_side.contains("with") {
+            wrappers.push(parameterized_constructor(&lc.name));
+        }
         lc.methods.extend(wrappers);
     }
     diags
+}
+
+// Not on every mailer: a target without the ActionMailer runtime has no `_with_params` to call.
+fn parameterized_mailers(app: &App, mailers: &BTreeSet<String>) -> BTreeSet<String> {
+    fn visit(e: &Expr, mailers: &BTreeSet<String>, out: &mut BTreeSet<String>) {
+        if let ExprNode::Send { recv: Some(recv), method, .. } = &*e.node
+            && method.as_str() == "with"
+            && let ExprNode::Const { path } = &*recv.node
+        {
+            let name = path.iter().map(|s| s.as_str()).filter(|s| !s.is_empty()).collect::<Vec<_>>().join("::");
+            if mailers.contains(&name) {
+                out.insert(name);
+            }
+        }
+        e.node.for_each_child(&mut |c| visit(c, mailers, out));
+    }
+    let mut out = BTreeSet::new();
+    for model in &app.models {
+        model.methods().for_each(|m| visit(&m.body, mailers, &mut out));
+    }
+    for controller in &app.controllers {
+        controller.actions().for_each(|a| visit(&a.body, mailers, &mut out));
+    }
+    for lc in &app.library_classes {
+        lc.methods.iter().for_each(|m| visit(&m.body, mailers, &mut out));
+    }
+    if let Some(seeds) = &app.seeds {
+        visit(seeds, mailers, &mut out);
+    }
+    out
+}
+
+// Not Rails' proxy class: the class-side wrappers already build the mail eagerly, so `with` hands back the mailer itself.
+fn parameterized_constructor(mailer: &crate::ident::ClassId) -> crate::dialect::MethodDef {
+    let span = crate::span::Span::synthetic();
+    let instance = Ty::Class { id: mailer.clone(), args: vec![].into() };
+    let params_ty = Ty::Hash { key: Ty::Sym.into(), value: Ty::Untyped.into() };
+    let params = Symbol::from("params");
+    let mut arg = Expr::new(span, ExprNode::Var { id: crate::ident::VarId(0), name: params.clone() });
+    arg.ty = Some(params_ty.clone());
+    let mut new_call = Expr::new(
+        span,
+        ExprNode::Send { recv: None, method: Symbol::from("new"), args: vec![], block: None, parenthesized: false },
+    );
+    new_call.ty = Some(instance.clone());
+    let mut body = Expr::new(
+        span,
+        ExprNode::Send {
+            recv: Some(new_call),
+            method: Symbol::from("_with_params"),
+            args: vec![arg],
+            block: None,
+            parenthesized: true,
+        },
+    );
+    body.ty = Some(instance.clone());
+    crate::dialect::MethodDef {
+        visibility: crate::dialect::MethodVisibility::Public,
+        unsupported_formals: None,
+        has_anonymous_block: false,
+        name_span: span,
+        name: Symbol::from("with"),
+        receiver: crate::dialect::MethodReceiver::Class,
+        params: vec![crate::dialect::Param::positional(params.clone())],
+        body,
+        signature: Some(Ty::Fn {
+            params: vec![crate::ty::Param { name: params, ty: params_ty.into(), kind: crate::ty::ParamKind::Required }].into(),
+            block: None,
+            ret: instance.into(),
+            effects: Default::default(),
+        }),
+        effects: Default::default(),
+        enclosing_class: Some(mailer.0.clone()),
+        kind: crate::dialect::AccessorKind::Method,
+        is_async: false,
+        mutates_self: false,
+        block_param: None,
+    }
 }
 
 fn residue(m: &crate::dialect::MethodDef, reason: &str) -> Diagnostic {

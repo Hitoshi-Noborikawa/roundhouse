@@ -78,8 +78,28 @@ module ActiveRecord
   # metaprogramming. Per-model subclasses define their own column
   # accessors, attributes hash, and `[]/[]=` indexers; Base supplies
   # the shared CRUD + lifecycle protocol.
+  class ErrorDetail
+    @attribute: String
+    @kind: String
+    @message: String
+    @full_message: String
+    @symbolic: bool
+    @optionless: bool
+    def attribute: () -> String
+    def kind: () -> String
+    def message: () -> String
+    def full_message: () -> String
+    def symbolic: () -> bool
+    def optionless: () -> bool
+    def initialize: (String attribute, String kind, String message, String full_message, bool symbolic, bool optionless) -> void
+  end
+
   class Base
     def self.sanitize_sql_like: (String value, ?String escape_character) -> String
+    def self.like_escapes_doubled: (String value, String escape_character) -> String
+    def self.like_wildcards_marked: (String source, String escape_character) -> String
+    def self.like_replacement: (String source, Integer index, String escape_character) -> String
+    def self.like_group_reference: (String escape_character, Integer start) -> void
 
     EMPTY_ATTRS: Hash[Symbol, untyped]
     HYDRATE_ATTRS: Hash[Symbol, untyped]
@@ -114,8 +134,10 @@ module ActiveRecord
     # it as a pointer and the message is swept while the array holds it.
     @errors: Array[String]
     def errors: () -> Array[String]
-    @error_attributes: Array[String]
-    def error_attributes: () -> Array[String]
+    @error_details: Array[ErrorDetail]
+    def error_details: () -> Array[ErrorDetail]
+    def error_messages_for: (String attribute) -> Array[String]
+    def errors_json: () -> Hash[String, Array[String]]
 
     def initialize: (?Hash[Symbol, untyped] attrs) -> void
 
@@ -252,6 +274,8 @@ module ActiveRecord
     # self either way (idempotent on already-destroyed records).
     def save: () -> bool
     def save_after_validation: () -> bool
+    def _save_committed: (bool was_new) -> void
+    def _destroy_committed: () -> void
     def _insert_row: () -> bool
     def save!: () -> Base
     def destroy: () -> Base

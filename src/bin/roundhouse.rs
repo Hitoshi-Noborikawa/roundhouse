@@ -38,7 +38,7 @@ fn usage() -> &'static str {
 Usage: roundhouse --target LANG [INPUT] [-o OUT]
        roundhouse --site [INPUT] [-o OUT]
        roundhouse --archives LANG,LANG [INPUT] [-o OUT]
-       roundhouse check [--continue] [APP]
+       roundhouse check [--continue] [--inventory PATH] [--hotspots] [APP]
        roundhouse lsp
        roundhouse mcp [APP]
        roundhouse --help | --version
@@ -49,7 +49,8 @@ the multi-target Pages site.
 Subcommands (each takes --help):
   check                Analyze APP (default .) and print the diagnostics;
                        exit 1 on errors. --continue keeps going past
-                       unsupported constructs and prints a punch list.
+                       unsupported constructs, prints a punch list and a
+                       ranked hotspot report. --inventory PATH writes JSON.
   lsp                  Serve the Language Server over stdio.
   mcp                  Serve the MCP tools over stdio for APP (default .).
 
@@ -85,7 +86,8 @@ Examples:
   roundhouse --site                                   # → ./_site/
   roundhouse -t ruby --survey --allow-unsupported ~/git/mastodon
                                                       # partly-covered app
-  roundhouse check --continue ~/git/mastodon          # diagnostics + punch list
+  roundhouse check --continue ~/git/mastodon          # diagnostics + hotspots
+  roundhouse check --continue --inventory /tmp/i.json ~/git/jsp  # JSON worklist
   roundhouse mcp ~/git/campfire                       # an agent's MCP server
 "
 }
@@ -347,7 +349,7 @@ fn run_transpile(
     // lowering of the same app, from the ingest shape; built before the
     // analysis below mutates `app`.
     let whole_route = if target == BuildTarget::Futamura {
-        Some(project::futamura_whole_route(&app, input)?)
+        Some(project::futamura_whole_route(&app, input, &survey_gaps)?)
     } else {
         None
     };
@@ -381,9 +383,12 @@ fn run_transpile(
     // identifies its gem and the defining source has a matching literal
     // top-level require. Keep check's source diagnostic and all strict-target
     // refusals unchanged.
-    if target == BuildTarget::Ruby {
-        let supported_includes = roundhouse::gems::statically_resolved_external_includes(&app);
-        let external_namespaces = roundhouse::gems::locked_external_gem_namespaces(&app);
+    if matches!(target, BuildTarget::Ruby | BuildTarget::Jruby) {
+        let (external_namespaces, supported_includes) = if target == BuildTarget::Ruby {
+            (roundhouse::gems::locked_external_gem_namespaces(&app), roundhouse::gems::statically_resolved_external_includes(&app))
+        } else {
+            (roundhouse::gems::native_extension_gem_namespaces(&app), Default::default())
+        };
         analyze_diags.retain(|diagnostic| match &diagnostic.kind {
             roundhouse::diagnostic::DiagnosticKind::Unsupported {
                 construct, detail, ..

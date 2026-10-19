@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 # Copied verbatim to <out>/test/test_helper.rb (by `make ruby-transpile`
 # or `tests/ruby_toolchain.rs`). `__dir__` is `<out>/test/`, so the
 # `require_relative` paths walk up one level to reach `runtime/`, `config/`,
@@ -21,6 +22,18 @@
 # the future Spinel-AOT target's tree will contain its own
 # `runtime/db.rb` (FFI-backed). Same require path, target-appropriate
 # implementation.
+# Signed stream names in the view suite are vectors. boot.rb asks
+# LocalSecret, and an unset SECRET_KEY_BASE is a fresh random key, so
+# those vectors would move every run. Pin one known key before that
+# resolve. Assignment, not ||=: an empty string is not a pin
+# (LocalSecret treats "" as unset) and a secret inherited from the
+# parent process would sign the vectors with a different key.
+ENV["SECRET_KEY_BASE"] = "roundhouse-test-secret"
+# Rails' own test_helper opens with `ENV["RAILS_ENV"] ||= "test"`, and
+# boot.rb parks it as `Rails.env`. Without it a test process reads as
+# development: `Rails.env.test?` gates (campfire's WAL checkpointer
+# `start(enabled: !Rails.env.test?)`) take the serving branch.
+ENV["RAILS_ENV"] = "test" if ENV["RAILS_ENV"].nil?
 require_relative "../runtime/base64"
 require_relative "../runtime/json_impl"
 require_relative "../runtime/db"
@@ -149,9 +162,11 @@ module SchemaSetup
   # truncate call from `ActiveRecord.adapter.truncate(t)` to
   # `<Model>._adapter_truncate` is the per-model dispatch.
   def self.reset!
-    Article._adapter_truncate if defined?(Article)
-    Comment._adapter_truncate if defined?(Comment)
-    FixtureLoader.load_all!
+    FixtureLoader.with_foreign_keys_deferred do
+      Article._adapter_truncate if defined?(Article)
+      Comment._adapter_truncate if defined?(Comment)
+      FixtureLoader.load_all!
+    end
   end
 end
 
@@ -188,6 +203,17 @@ module FixtureLoader
   # Filter by `*Fixtures` suffix BEFORE `const_get` so deprecated
   # constants like Ruby 3.4's `SortedSet` (which raises on access via
   # autoload) don't get touched while scanning for fixture modules.
+  # Rails' fixture setup: loaded with referential integrity off, then checked (`verify_foreign_keys_for_fixtures`). Not Db's alone: a framework test runs this helper with no Db loaded.
+  def self.with_foreign_keys_deferred
+    if defined?(Db)
+      Db.without_foreign_keys { yield }
+      Db.check_foreign_keys!
+    else
+      yield
+    end
+    nil
+  end
+
   def self.load_all!
     Object.constants.sort.each do |c|
       next unless c.to_s.end_with?("Fixtures")
@@ -721,6 +747,26 @@ module ActionCable
     def assert_no_broadcasts(stream, &block)
       assert_broadcasts(stream, 0, &block)
     end
+
+    # `assert_broadcast_on stream, data`: some broadcast to `stream` —
+    # during the block, or so far in this test without one — carries
+    # `data`. Compared as Rails compares it, after a JSON round trip:
+    # `data` goes through the same encoder a broadcast does, and both
+    # sides are parsed, so key order and symbol keys do not matter. The
+    # log holds each publish as its JSON text on this tree.
+    def assert_broadcast_on(stream, data, &block)
+      entries =
+        if block
+          capture_broadcasts_on(stream, &block)
+        else
+          Broadcasts.log.select { |entry| entry[:stream] == stream }
+        end
+      want = JSON.parse(ActionCable.payload_json(data))
+      payloads = entries.map { |entry| entry[:payload] }.compact
+      return if payloads.any? { |payload| JSON.parse(payload.to_s) == want }
+      raise "assert_broadcast_on failed: no broadcast to #{stream.inspect} carried #{JSON.generate(want)}; " \
+            "got #{payloads.inspect}"
+    end
   end
 end
 
@@ -904,8 +950,9 @@ end
 # (`SchemaSetup.reset!` if defined).
 # What `skip` raises. Minitest's own is `Minitest::Skip < Exception`,
 # deliberately outside StandardError so a test's `rescue => e` cannot
-# swallow it; same rule here, and the autorun shim rescues this arm
-# BEFORE its `rescue Exception` so a skip is never counted a failure.
+# swallow it; same rule here. The autorun shim's `rescue Exception`
+# treats an exception whose class name is `TestSkipped` as a skip, so
+# a framework file that never loads this helper still runs.
 class TestSkipped < Exception
 end
 
@@ -917,22 +964,13 @@ end
 # The runtime fragment-caches message partials in its own store; these
 # give the test the settings it reads and restores. A fresh
 # `ActiveSupport::Cache::MemoryStore` (runtime/active_support_cache.rb) is
-# a `Rails::Cache`, so it can stand in for `Rails.cache` here.
+# a `Rails::Cache`, so it can stand in for `Rails.cache` here. The
+# third knob, `ActionView::PartialRenderer.collection_cache`, is the
+# runtime's own (runtime/action_controller_fragment_caching.rb): the
+# store cached collections really read.
 module Rails
   def self.cache=(store)
     @cache_store = store
-  end
-end
-
-module ActionView
-  class PartialRenderer
-    def self.collection_cache
-      @collection_cache
-    end
-
-    def self.collection_cache=(store)
-      @collection_cache = store
-    end
   end
 end
 
@@ -1014,6 +1052,15 @@ module ActiveRecord
 end
 
 class TestBase
+  # Rails wraps each example in a non-joinable transaction
+  # (`use_transactional_tests`, default true) so a nested `save` or
+  # `destroy` is a SAVEPOINT. Campfire's room-destroy test counts those
+  # releases. A class that must see a real COMMIT sets this false
+  # (`MessageCreationCommitTest`).
+  def self.use_transactional_tests
+    true
+  end
+
   # Rails puts both of these on `ActiveSupport::TestCase` itself, so a
   # test that never writes `include ActiveJob::TestHelper` still has
   # `perform_enqueued_jobs` — campfire's `User::BotTest` is exactly
@@ -1167,6 +1214,18 @@ class TestBase
     ensure
       travel_back
     end
+  end
+
+  # Rails' `stub_const`, for the sites `lower::stub_const` could not
+  # make static: a stub that changes the constant's type (`TIME_LIMIT =
+  # 10` stubbed with `0.2`), or one whose owner the pass did not find.
+  # This tree resolves constants at build time and has no `const_set`,
+  # so the stub cannot take effect; the test FAILS, saying so, rather
+  # than running its block against the unstubbed value. The CRuby tree
+  # replaces this with the real helper (test_support_cruby.rb).
+  def stub_const(mod, constant, _value)
+    raise "stub_const(#{mod}, #{constant.inspect}) has no compiled form here: " \
+          "the stub changes the constant's type, or names a constant the lowering could not find"
   end
 
   # Minitest's `assert_nothing_raised`: the block runs, and an exception
@@ -1827,6 +1886,7 @@ module RequestDispatch
     # after the body parse. campfire's fetch-metadata test posts
     # `_method: "delete"` cross-site and expects the DELETE route's
     # forgery refusal, not "No route matches POST".
+    wire_method = method
     if method == "POST" && params.is_a?(Hash)
       override = (params[:_method] || params["_method"]).to_s.upcase
       method = override if override == "PUT" || override == "PATCH" || override == "DELETE"
@@ -1847,40 +1907,49 @@ module RequestDispatch
     # check is inline at the call site (not inside stringify_keys) so
     # the helper itself stays strictly typed as `(Hash) -> Hash`.
     #
-    # `stringify_keys(matched.path_params)` (rather than `path_params
-    # .dup`) seeds `merged` as `Hash[String, untyped]` — needed so the
-    # nested-Hash branch of the ternary below has a slot wide enough
-    # to hold a Hash value. `path_params.dup` keeps the StrStrHash
-    # shape, which spinel then refuses to assign a Hash into.
-    merged = stringify_keys(matched.path_params)
+    # `stringify_keys({})` (rather than `path_params.dup` or `{}`)
+    # seeds each Hash below as `Hash[String, untyped]` — needed so the
+    # nested-Hash branch has a slot wide enough to hold a Hash value.
+    # `path_params.dup` keeps the StrStrHash shape, which spinel then
+    # refuses to assign a Hash into.
     # `post url, params: "Hello Bot World!"` — Rails' integration tests
     # take a STRING `params:` as the raw request BODY, not as a
     # parameter hash. campfire's bot endpoint is written that way (a bot
     # POSTs plain text and the controller reads `request.body`), and the
     # harness iterated it: `undefined method 'each' for an instance of
     # String`, every test in the file.
-    # Query-string pairs are parameters too, and they arrive UNDER the
-    # explicit `params:` — Rails merges the request's own parameters
-    # first and lets the caller's hash win on a collision.
     # `CgiIo.parse_form_into` — THE SAME PARSER the production
     # dispatcher uses on `QUERY_STRING` (`parse_request` calls it on
     # exactly this string), so the harness cannot disagree with
     # production about what a query string means. Not `CGI.parse`: Ruby
     # 4.0 no longer ships it, and a hand-rolled split would be a second
     # copy of a table this tree already owns.
-    CgiIo.parse_form_into(query, merged) unless query.empty?
+    from_query = stringify_keys({})
+    CgiIo.parse_form_into(query, from_query) unless query.empty?
+    from_caller = stringify_keys({})
     request_body = +""
     if params.is_a?(String)
       request_body = params.to_s
     else
       params.each do |k, v|
         if v.is_a?(Hash)
-          merged[k.to_s] = stringify_keys(v)
+          from_caller[k.to_s] = stringify_keys(v)
         else
-          merged[k.to_s] = v
+          from_caller[k.to_s] = v
         end
       end
     end
+    # Not one order for every verb: Rack::Test appends a GET's `params:` to its query string, so they win there, while any other verb sends them as the body and Rails' `request_parameters.merge(query_parameters)` lets the query win.
+    merged = stringify_keys({})
+    if wire_method == "GET"
+      from_query.each { |k, v| merged[k] = v }
+      from_caller.each { |k, v| merged[k] = v }
+    else
+      from_caller.each { |k, v| merged[k] = v }
+      from_query.each { |k, v| merged[k] = v }
+    end
+    # Rails' `params.merge!(path_parameters)`: the route's own segments win over both.
+    matched.path_params.each { |k, v| merged[k.to_s] = v }
     controller.params  = merged
     controller.path_parameters = matched.path_params
     controller.session = @__session ||= ActionDispatch::Session.new
@@ -2281,6 +2350,16 @@ module RequestDispatch
     else
       body = selector_or_root.to_s
       selector = content_or_opts
+      content_or_opts = opts
+      opts = nil
+    end
+    # Rails' substitution values: a `?` in an attribute predicate
+    # (`"#row[data-n=?]", value`) takes the argument after the selector,
+    # and the equality test, if any, is the argument after that. Read as
+    # the content string instead, the value was looked for in the
+    # element's text and the predicate matched a literal "?".
+    if selector.to_s.include?("=?]") && content_or_opts.is_a?(String)
+      selector = selector.to_s.sub("=?]", "=\"#{content_or_opts}\"]")
       content_or_opts = opts
       opts = nil
     end

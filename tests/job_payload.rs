@@ -296,3 +296,41 @@ fn unattributable_calls_and_tableless_models_keep_the_proc() {
     let fallback = retry.fallback.as_ref().expect("self.class.perform_later is unattributable");
     assert!(fallback.reason.contains("doesn't name the job class"), "{fallback:?}");
 }
+
+/// The list reader a rest of records gets calls only readers the
+/// Spinel runtime defines. The runtime renamed `Arguments.count` to
+/// `arg_count` (a second user `count(x)` breaks Spinel's poly
+/// `adapter.count`), and a stale `count(args)` here makes every
+/// `--target spinel` build of such an app refuse with "unsupported
+/// call: CallNode `count`".
+#[test]
+fn the_rest_reader_calls_only_runtime_readers() {
+    let app = app();
+    let src = registry_source(&app.job_plans);
+
+    assert!(
+        src.contains("(from...ActiveJob::Arguments.arg_count(args)).map { |j| locate_message_at(args, j) }"),
+        "{src}"
+    );
+    assert!(!src.contains("Arguments.count("), "{src}");
+
+    let runtime = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("runtime/spinel/active_job_serialization.rb"),
+    )
+    .expect("read the ActiveJob runtime");
+    let arguments: Vec<&str> = runtime
+        .lines()
+        .skip_while(|l| l.trim_end() != "  module Arguments")
+        .take_while(|l| l.trim_end() != "  end")
+        .filter_map(|l| l.trim_start().strip_prefix("def self."))
+        .map(|l| l.split(|c: char| c == '(' || c.is_whitespace()).next().unwrap_or(""))
+        .collect();
+    assert!(arguments.contains(&"gid_parts"), "parsed the Arguments module: {arguments:?}");
+    for call in src.split("ActiveJob::Arguments.").skip(1) {
+        let name: String = call.chars().take_while(|c| c.is_alphanumeric() || *c == '_').collect();
+        assert!(
+            arguments.contains(&name.as_str()),
+            "the registry calls ActiveJob::Arguments.{name}, which the runtime doesn't define:\n{src}"
+        );
+    }
+}

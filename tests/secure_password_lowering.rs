@@ -7,6 +7,7 @@
 use roundhouse::dialect::MethodReceiver;
 use roundhouse::ingest::ingest_app_from_tree;
 use roundhouse::lower::lower_model_to_library_class;
+use roundhouse::ty::Ty;
 
 fn app_with(model_src: &str) -> roundhouse::App {
     let files: Vec<(&str, &str)> = vec![
@@ -40,6 +41,26 @@ fn secure_password_synthesizes_authenticate_and_accessors() {
         abody.contains("BCrypt") && abody.contains("password_digest"),
         "authenticate must compare through BCrypt::Password over the digest: {abody}",
     );
+    match auth.signature.as_ref().expect("authenticate signature") {
+        Ty::Fn { ret, .. } => {
+            let expected = Ty::Union {
+                variants: vec![
+                    Ty::Class {
+                        id: user.name.clone(),
+                        args: vec![].into(),
+                    },
+                    Ty::Bool,
+                ]
+                .into(),
+            };
+            assert_eq!(
+                ret.as_ref(),
+                &expected,
+                "authenticate returns the user on success and false otherwise",
+            );
+        }
+        other => panic!("expected a function signature, got {other:?}"),
+    }
 
     assert!(find("password").is_some(), "plaintext reader synthesized");
     let writer = find("password=").expect("plaintext writer synthesized");

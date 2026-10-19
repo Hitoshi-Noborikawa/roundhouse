@@ -74,22 +74,23 @@ pub fn name() -> &'static str {
 thread_local! {
     static VALIDATION_ERRORS: std::cell::RefCell<Vec<String>> =
         std::cell::RefCell::new(Vec::new());
-    // The attribute each message above is on, index for index.
-    static VALIDATION_ERROR_ATTRIBUTES: std::cell::RefCell<Vec<String>> =
+    // The (attribute, kind, message, full message, symbolic, optionless) each message above records, index for index.
+    // Tuples, not `ErrorDetail`: this file also compiles alone, without the transpiled base.
+    static VALIDATION_ERROR_DETAILS: std::cell::RefCell<Vec<(String, String, String, String, bool, bool)>> =
         std::cell::RefCell::new(Vec::new());
 }
 
 pub fn validation_errors_clear() {
     VALIDATION_ERRORS.with(|c| c.borrow_mut().clear());
-    VALIDATION_ERROR_ATTRIBUTES.with(|c| c.borrow_mut().clear());
+    VALIDATION_ERROR_DETAILS.with(|c| c.borrow_mut().clear());
 }
 
-pub fn validation_error_attributes_push(attribute: String) {
-    VALIDATION_ERROR_ATTRIBUTES.with(|c| c.borrow_mut().push(attribute));
+pub fn validation_error_details_push(attribute: String, kind: String, message: String, full_message: String, symbolic: bool, optionless: bool) {
+    VALIDATION_ERROR_DETAILS.with(|c| c.borrow_mut().push((attribute, kind, message, full_message, symbolic, optionless)));
 }
 
-pub fn validation_error_attributes_snapshot() -> Vec<String> {
-    VALIDATION_ERROR_ATTRIBUTES.with(|c| c.borrow().clone())
+pub fn validation_error_details_snapshot() -> Vec<(String, String, String, String, bool, bool)> {
+    VALIDATION_ERROR_DETAILS.with(|c| c.borrow().clone())
 }
 
 pub fn validation_errors_push(msg: String) {

@@ -47,6 +47,9 @@ pub mod seeds_to_library;
 pub mod test_module_to_library;
 pub mod create_block;
 pub mod as_json_poro;
+mod as_json_record;
+pub use as_json_writer::WRITER_METHOD as JSON_WRITER_METHOD;
+mod as_json_value;
 pub mod active_model_model;
 pub mod enumerable_ext;
 mod fused;
@@ -64,7 +67,7 @@ pub mod default_self_recv;
 mod attr_or_assign;
 mod system_exception;
 mod case_class_narrow;
-mod reset_counters;
+pub(crate) mod reset_counters;
 mod perform_all_later;
 pub mod authenticate_by;
 pub mod group_count;
@@ -78,6 +81,7 @@ pub mod assoc_pluck;
 pub mod try_guard;
 pub mod class_body_new;
 pub mod mocha;
+pub mod stub_const;
 pub mod webmock;
 pub mod global_id_locate;
 pub mod record_snapshot;
@@ -87,6 +91,7 @@ pub mod sti_is_a;
 pub mod dead_default;
 pub mod errors_add;
 pub mod errors_full_messages;
+pub mod errors_safe_nav;
 pub mod human_attribute_name;
 pub mod i18n_translate;
 pub mod assoc_attr_key;
@@ -96,6 +101,7 @@ pub mod errors_index;
 pub mod job_class_side;
 pub mod job_payload;
 pub mod mailer_class_side;
+pub mod mailer_templates;
 pub mod as_json_shape;
 pub mod as_json_writer;
 pub mod as_json_super;
@@ -132,6 +138,7 @@ pub mod has_json;
 pub mod serialize;
 pub mod assoc_loaded;
 pub mod object_extend;
+pub mod nested_def;
 pub mod param_rebind;
 pub mod to_sgid;
 pub mod cable_test_case;
@@ -195,7 +202,6 @@ pub mod view;
 pub mod view_buffer_passing;
 pub mod tag_block_passing;
 pub mod lazy_model_state;
-pub mod deferred_preload;
 pub mod view_to_library;
 
 pub use blank::apply_blank_lowering;
@@ -319,6 +325,8 @@ const POST_ANALYZE_PASS_ORDER: &[(&str, &[&str])] = &[
     // ledger residue for (or rewrite inside) code that cannot run.
     ("bool_fold", &[]),
     ("association_new", &["bool_fold"]),
+    // Before every `errors` rewrite, which match an `errors` send as the receiver.
+    ("errors_safe_nav", &["bool_fold"]),
     // Refuses `**h` into flattened optional keywords while the splat is
     // still a `KeywordSplat`; `forwarding_keywords` erases it to `h`.
     ("flattened_keyword_splats", &["bool_fold"]),
@@ -380,6 +388,7 @@ const POST_ANALYZE_PASS_ORDER: &[(&str, &[&str])] = &[
     // constraints.
     ("class_body_new", &[]),
     ("mocha", &[]),
+    ("stub_const", &[]),
     // Independent context-heavy send rewrites: one fused tree walk in
     // `fused::apply_fused_context_rewrites`. Empty runs_after — they
     // match disjoint method names and do not consume each other's
@@ -598,10 +607,7 @@ const POST_ANALYZE_PASS_ORDER: &[(&str, &[&str])] = &[
     ("normalizes", &["authenticate_by"]),
     ("dead_default", &[]),
     ("errors_add", &[]),
-    // `errors[:field]` -> `ActiveSupport.errors_for(errors, "Field ")`.
-    // AFTER `errors_add`, so a hand-written `errors.add(:field, …)` in
-    // the same body has already baked its humanized prefix — the
-    // projection this pass emits reads that text.
+    // `errors[:field]` -> `error_messages_for("field")`.
     ("errors_index", &["errors_add"]),
     ("human_attribute_name", &[]),
     ("i18n_translate", &[]),
@@ -635,6 +641,10 @@ const POST_ANALYZE_PASS_ORDER: &[(&str, &[&str])] = &[
     // `obj.extend Mod` on an instance -> a raise stub with the report.
     // Consumes a shape no pass produces or reads; no constraints.
     ("object_extend", &[]),
+    // A test reaching an ingest-stamped nested `def` -> the whole
+    // test a raise stub with the report. Reads only that stamp, which
+    // no pass produces or removes; no constraints.
+    ("nested_def", &[]),
     // A parameter written after its binder (`user = users(user) unless
     // user.is_a? User`, `id = id.to_i`) -> a fresh local, so AOT does
     // not pin the caller's type onto the later write. Reads an Assign
@@ -659,6 +669,7 @@ const POST_ANALYZE_PASS_ORDER: &[(&str, &[&str])] = &[
     // or reads; no constraints.
     ("current_set", &[]),
     ("mailer_class_side", &[]),
+    ("mailer_templates", &[]),
     ("job_class_side", &[]),
     ("send_static_dispatch", &[]),
     // Grounds the plural duration-unit calls that send_static_dispatch
@@ -803,6 +814,8 @@ pub fn apply_post_analyze_lowerings(
     ran!("bool_fold");
     association_new::apply_association_new_lowering(app);
     ran!("association_new");
+    errors_safe_nav::apply_errors_safe_nav_lowering(app);
+    ran!("errors_safe_nav");
     // Before the first `forwarding::apply` erases `**h` into a
     // positional `h`, after which `f(x, **h)` and `f(x, h)` are one tree.
     diags.extend(helper_kwargs::refuse_flattened_keyword_splats(app));
@@ -864,6 +877,8 @@ pub fn apply_post_analyze_lowerings(
         mocha::apply_mocha_lowering(app);
     });
     ran!("mocha");
+    stub_const::apply_stub_const_lowering(app);
+    ran!("stub_const");
     crate::timings::phase("post-analyze: fused context rewrites", || {
         fused::apply_fused_context_rewrites(app);
     });
@@ -996,6 +1011,8 @@ pub fn apply_post_analyze_lowerings(
     ran!("assoc_attr_key");
     diags.extend(object_extend::apply_object_extend_stub(app));
     ran!("object_extend");
+    diags.extend(nested_def::apply_nested_def_test_stub(app));
+    ran!("nested_def");
     param_rebind::apply_param_rebind_lowering(app);
     ran!("param_rebind");
     diags.extend(to_sgid::apply_to_sgid_lowering(app));
@@ -1008,6 +1025,8 @@ pub fn apply_post_analyze_lowerings(
     ran!("current_set");
     diags.extend(mailer_class_side::apply_mailer_class_side(app));
     ran!("mailer_class_side");
+    diags.extend(mailer_templates::apply_mailer_templates(app));
+    ran!("mailer_templates");
     diags.extend(job_class_side::apply_job_class_side(app));
     ran!("job_class_side");
     diags.extend(crate::timings::phase("post-analyze: send_dispatch", || {
@@ -1578,7 +1597,7 @@ pub use controller::{
 };
 pub use controller_test::{
     classify_assert_select, classify_controller_test_send, classify_url_expr,
-    flatten_params_pairs, test_body_stmts, AssertSelectKind, ControllerTestSend, UrlArg,
+    flatten_params_pairs, setup_fixture, test_body_stmts, AssertSelectKind, ControllerTestSend, UrlArg,
     UrlHelperCall,
 };
 pub use fixtures::{
@@ -1635,6 +1654,7 @@ pub fn module_funcs_to_library_class(
         parent: None,
         parent_span: Default::default(),
         includes: Vec::new(),
+        include_spans: Vec::new(),
         methods,
         nullable_columns: Vec::new(),
         origin: None,

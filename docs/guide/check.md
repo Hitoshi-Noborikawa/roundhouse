@@ -7,6 +7,7 @@ a terminal and a CI job: one command, one exit code.
 
 ```sh
 roundhouse check --continue /path/to/your/rails/app
+roundhouse check --continue --inventory /tmp/app-inventory.json /path/to/your/rails/app
 ```
 
 Nothing is booted and nothing is installed. The analyzer reads
@@ -49,6 +50,13 @@ An engine also contributes its `app/` tree when its `lib/` declares
 a `Rails::Engine` subclass.
 Roundhouse identifies that superclass from the Ruby syntax tree.
 It does not require a folder named `components`, `packs`, or `lib`.
+
+An optional [`roundhouse.yml`](roundhouse-yml.md) at the app root adds
+test folders and lists project extensions. An extension can declare a
+gem's attribute macros, such as `price_column :amount`. The attributes
+then read untyped, and `check` reports one error at the macro rather
+than a `send_dispatch_failed` at every use of the value object. A
+mistake in the file or an extension stops ingest, and `check` exits 2.
 
 Roundhouse rejects paths outside the application and paths with parent-directory references.
 It accepts absolute paths inside the application.
@@ -135,7 +143,11 @@ same table:
   they wrap so its own inferred type flows on; the annotation on those is discarded.
   `T.must(x)` lowers to the check sorbet-runtime makes, `x` unless it
   is nil and a `TypeError` otherwise, so what follows reads `x` with nil
-  removed; `T.must_because` stays refused.
+  removed. `T.must_because(x) { reason }` lowers the same way, with
+  sorbet's message — `"Unexpected `nil` because "` followed by the
+  block's value — and the reason evaluated only on the nil path. A
+  reason that is not a literal block, a forwarded `&blk` or one taking
+  parameters, has no message to inline and stays refused.
   `T.bind(self, Type)`, and its RBS inline form, a `#: self as Type`
   line, give `self` that type from that statement to the end of the
   enclosing body, blocks inside it included: sends on `self`, implicit
@@ -212,6 +224,15 @@ roundhouse-check: fixtures/store — 0 parse error(s), 0 error(s), 0 warning(s),
 Exit status 0. Everything the analyzer saw, it typed. The send counts are
 not errors: they are sends on a receiver the analyzer could not type,
 which nothing checked (see below).
+
+For the compiled Spinel request surface, supported controller APIs include
+`request.headers` (`[]`, `fetch`, and `key?`, with case-insensitive HTTP
+header and Rack env spellings), `request.authorization`, and route-only
+`request.path_parameters`. Incoming headers are mapped to Rack env names,
+including `CONTENT_TYPE` and `CONTENT_LENGTH`; HTTP Token/Bearer and Basic
+authentication helpers are available, with Token and Bearer schemes
+case-insensitive. See [Rails coverage](rails-coverage.md#action-controller)
+for the feature-level boundary.
 
 ## Reading the output of a real app
 
@@ -308,6 +329,21 @@ roundhouse check --unknown-sends /path/to/your/rails/app
 ingest skipped, bucketed by kind, most frequent first, with the files
 it occurred in. This is roundhouse's own to-do list for your app.
 Nothing in it is a problem with your code.
+
+**The hotspot report** — printed with `--continue` by default (opt out
+with `--no-hotspots`, force on with `--hotspots`): ranked error buckets
+for the peel loop. Each bucket has a stable wall identity (for example
+`billing-ivar-@subscription`, `pay-unmodeled`, `engine-route-mount`),
+a count, and up to five examples with `path:line:col`, the diagnostic
+message, and a short source snippet. Survey gaps that name a peel shape
+join the ranking. Warnings stay out: they are the coverage ledger, not
+the worklist.
+
+**`--inventory PATH`** — write the same findings as machine-readable
+JSON (`schema: 1`): summary counts, unknown gems, every diagnostic with
+path/line/code/message/snippet/wall, survey gaps, and the ranked
+`hotspots` array. Personal apps and agents should cluster this file
+instead of scraping stderr.
 
 **The gem census** — printed when there is a `Gemfile.lock`: each
 direct dependency classified as *framework* (Rails and its plumbing),

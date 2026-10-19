@@ -213,7 +213,16 @@ pub(super) fn throws_lookup(type_name: &str, method_camel: &str) -> bool {
 }
 
 fn is_error_class_name(name: &str) -> bool {
-    ERROR_CLASSES.with(|m| m.borrow().contains(name))
+    let mut cur = name.to_string();
+    loop {
+        if ERROR_CLASSES.with(|m| m.borrow().contains(&cur)) {
+            return true;
+        }
+        match CLASS_PARENTS.with(|m| m.borrow().get(&cur).cloned()) {
+            Some(p) => cur = p,
+            None => return false,
+        }
+    }
 }
 
 /// Ruby's `Module#<` family. `RecordNotFound < StandardError` is a
@@ -871,21 +880,19 @@ pub(super) fn begin_method(body: &Expr, returns_value: bool) {
     count_assigns(body, &mut counts, &mut nil_types, &mut mutated);
     DECLARED.with(|d| d.borrow_mut().clear());
 
-    // Var-hoist (Kotlin's scan_hoist): a local FIRST assigned inside a
-    // nested scope but assigned more than once needs a typed `var`
-    // declaration at the method top — Swift scopes the nested decl to
-    // its branch.
-    let mut hoist_info: HashMap<String, (usize, usize, Option<crate::ty::Ty>)> = HashMap::new();
-    scan_hoist(body, 0, &mut hoist_info);
+    // Var-hoist (`emit::shared::hoist`, shared with Kotlin): a local
+    // FIRST assigned inside a nested scope but assigned more than once
+    // needs a typed `var` declaration at the method top — Swift scopes
+    // the nested decl to its branch. The type is the first non-nil one.
     let mut hoisted: Vec<(String, String, String)> = Vec::new();
-    for (n, (first_depth, count, ty)) in hoist_info {
-        if first_depth > 0 && count > 1 {
-            let (st, d) = hoist_decl(ty.as_ref());
-            DECLARED.with(|dset| {
-                dset.borrow_mut().insert(n.clone());
-            });
-            hoisted.push((n, st, d));
-        }
+    for h in crate::emit::shared::hoist::hoisted_locals(body) {
+        let n = camel(&h.name);
+        let ty = h.tys.iter().flatten().next();
+        let (st, d) = hoist_decl(ty);
+        DECLARED.with(|dset| {
+            dset.borrow_mut().insert(n.clone());
+        });
+        hoisted.push((n, st, d));
     }
     hoisted.sort();
     HOISTED.with(|h| *h.borrow_mut() = hoisted);
@@ -982,56 +989,6 @@ pub(super) fn container_scan(e: &Expr) -> HashMap<String, String> {
     let mut out = HashMap::new();
     scan_container_types(e, &mut out);
     out
-}
-
-/// Hoist-scan walk: branch bodies (If/While/Case/Lambda) are depth+1,
-/// Seq and conditions stay at the current depth.
-fn scan_hoist(
-    e: &Expr,
-    depth: usize,
-    info: &mut HashMap<String, (usize, usize, Option<crate::ty::Ty>)>,
-) {
-    match &*e.node {
-        ExprNode::Assign { target: LValue::Var { name, .. }, value } => {
-            let cn = camel(name.as_str());
-            let entry = info.entry(cn).or_insert((depth, 0, None));
-            entry.1 += 1;
-            if entry.2.is_none() {
-                if let Some(t) = value.ty.as_ref() {
-                    if !matches!(t, crate::ty::Ty::Nil) {
-                        entry.2 = Some(t.clone());
-                    }
-                }
-            }
-            scan_hoist(value, depth, info);
-        }
-        ExprNode::Seq { exprs } => {
-            for x in exprs {
-                scan_hoist(x, depth, info);
-            }
-        }
-        ExprNode::If { cond, then_branch, else_branch } => {
-            scan_hoist(cond, depth, info);
-            scan_hoist(then_branch, depth + 1, info);
-            scan_hoist(else_branch, depth + 1, info);
-        }
-        ExprNode::While { cond, body, .. } => {
-            scan_hoist(cond, depth, info);
-            scan_hoist(body, depth + 1, info);
-        }
-        ExprNode::Case { scrutinee, arms } => {
-            scan_hoist(scrutinee, depth, info);
-            for a in arms {
-                scan_hoist(&a.body, depth + 1, info);
-            }
-        }
-        ExprNode::Lambda { body, .. } => scan_hoist(body, depth + 1, info),
-        _ => {
-            for c in children(e) {
-                scan_hoist(c, depth, info);
-            }
-        }
-    }
 }
 
 /// Declaration type + default for a hoisted local.
@@ -1622,7 +1579,11 @@ fn emit_string_interp(parts: &[InterpPart]) -> String {
 
 fn emit_bool_op(op: BoolOpKind, left: &Expr, right: &Expr, e: &Expr) -> String {
     let l = emit_expr(left);
-    let r = group_try_rhs(&emit_expr(right));
+    // Swift does not narrow across `||`: past `x == nil`, the right operand reads `x!`.
+    let r = match (op, nil_checked_local(left)) {
+        (BoolOpKind::Or, Some(n)) if !rebinds(right, &n) => group_try_rhs(&with_narrowed_local(&n, right)),
+        _ => group_try_rhs(&emit_expr(right)),
+    };
     match op {
         // `true && "hot"` is a value, not a Bool: the right operand when
         // the left holds, else the left's `false`.
@@ -2050,6 +2011,36 @@ fn reassigned_nil_guard(stmt: &Expr) -> Option<(String, String)> {
     };
     let line = format!("if {n} == nil{more} {{\n{}\n}}", indent(&emit_expr(then_branch)));
     Some((n, line))
+}
+
+/// Does `e` bind the local `name` again (a block parameter, an assignment)? A read of that one is not the checked local.
+fn rebinds(e: &Expr, name: &str) -> bool {
+    let binds = match &*e.node {
+        ExprNode::Lambda { params, rest_param, .. } => {
+            params.iter().chain(rest_param.iter()).any(|p| camel(p.as_str()) == name)
+        }
+        _ => false,
+    };
+    binds || writes_local(e, name) || children(e).into_iter().any(|c| rebinds(c, name))
+}
+
+/// The optional local `x` of an `x.nil?` check.
+fn nil_checked_local(e: &Expr) -> Option<String> {
+    let ExprNode::Send { recv: Some(r), method, args, .. } = &*e.node else {
+        return None;
+    };
+    if method.as_str() != "nil?" || !args.is_empty() {
+        return None;
+    }
+    let ExprNode::Var { name, .. } = &*r.node else {
+        return None;
+    };
+    let optionalish = matches!(
+        r.ty.as_ref(),
+        Some(crate::ty::Ty::Union { variants })
+            if variants.iter().any(|v| matches!(v, crate::ty::Ty::Nil))
+    );
+    optionalish.then(|| camel(name.as_str()))
 }
 
 /// Emit `e` with the local `name` read force-unwrapped.
@@ -2508,9 +2499,14 @@ fn emit_cast(value: &Expr, target_ty: &crate::ty::Ty) -> String {
 }
 
 fn emit_lambda(params: &[crate::ident::Symbol], body: &Expr) -> String {
+    // A local the block declares is the block's own (Ruby scopes it the
+    // same way), so a sibling block assigning the same name declares its
+    // own too. See `emit::shared::hoist`.
+    let outer = DECLARED.with(|d| d.borrow().clone());
     IN_LAMBDA.with(|d| *d.borrow_mut() += 1);
     let body_s = emit_expr(body);
     IN_LAMBDA.with(|d| *d.borrow_mut() -= 1);
+    DECLARED.with(|d| *d.borrow_mut() = outer);
     if params.is_empty() {
         format!("{{ {body_s} }}")
     } else {
@@ -2606,17 +2602,6 @@ fn emit_send(
         }
     }
 
-    // `ActiveSupport.errors_for(errors, attributes, attribute, prefix)` (runtime/ruby/active_support_ext.rb): the messages added on `attribute`, without their prefix.
-    if method == "errors_for" && args.len() == 4 {
-        if let Some(ExprNode::Const { path }) = recv.map(|r| &*r.node) {
-            if path.last().map(|s| s.as_str()) == Some("ActiveSupport") {
-                return format!(
-                    "({{ (attribute: String, prefix: String) -> [String] in zip({}, {}).filter {{ $0.1 == attribute }}.map {{ $0.0.hasPrefix(prefix) ? String($0.0.dropFirst(prefix.count)) : $0.0 }} }}({}, {}))",
-                    args_s[0], args_s[1], args_s[2], args_s[3]
-                );
-            }
-        }
-    }
 
     // Temporal writer intrinsic: `ActiveSupport.db_now` — current UTC time
     // in Rails' exact storage form ("YYYY-MM-DD HH:MM:SS.ffffff").
@@ -3203,7 +3188,7 @@ mod equal_identity_tests {
         let mut recv = var(name);
         recv.ty = Some(Ty::Class {
             id: ClassId(Symbol::from("ActionController::HeaderStore")),
-            args: vec![],
+            args: vec![].into(),
         });
         recv
     }
@@ -3224,9 +3209,78 @@ mod equal_identity_tests {
     #[test]
     fn equal_on_a_hash_stays_a_call() {
         let mut recv = var("attrs");
-        recv.ty = Some(Ty::Hash { key: Box::new(Ty::Str), value: Box::new(Ty::Untyped) });
+        recv.ty = Some(Ty::Hash { key: std::sync::Arc::new(Ty::Str), value: std::sync::Arc::new(Ty::Untyped) });
         let out = emit_expr(&send(recv, "equal?", var("sentinel")));
         assert!(out.contains("equalPred"), "{out}");
         assert!(!out.contains("==="), "{out}");
+    }
+}
+
+#[cfg(test)]
+mod nil_or_narrowing_tests {
+    use super::*;
+    use crate::expr::{BoolOpKind, BoolOpSurface, Expr, ExprNode};
+    use crate::ident::{Symbol, VarId};
+    use crate::span::Span;
+    use crate::ty::Ty;
+
+    fn optional_str(name: &str) -> Expr {
+        let mut e = Expr::new(Span::synthetic(), ExprNode::Var { id: VarId(0), name: Symbol::from(name) });
+        e.ty = Some(Ty::Union { variants: vec![Ty::Str, Ty::Nil].into() });
+        e
+    }
+
+    fn call(recv: Expr, method: &str) -> Expr {
+        Expr::new(
+            Span::synthetic(),
+            ExprNode::Send { recv: Some(recv), method: Symbol::from(method), args: vec![], block: None, parenthesized: false },
+        )
+    }
+
+    fn or(left: Expr, right: Expr) -> Expr {
+        let mut e = Expr::new(
+            Span::synthetic(),
+            ExprNode::BoolOp { op: BoolOpKind::Or, surface: BoolOpSurface::Symbol, left, right },
+        );
+        e.ty = Some(Ty::Bool);
+        e
+    }
+
+    #[test]
+    fn the_right_of_a_nil_check_reads_the_local_unwrapped() {
+        let mut stripped = call(optional_str("vary"), "strip");
+        stripped.ty = Some(Ty::Str);
+        let out = emit_expr(&or(call(optional_str("vary"), "nil?"), call(stripped, "empty?")));
+        assert!(out.contains("vary!.trimmingCharacters"), "{out}");
+        assert!(out.starts_with("(vary == nil) ||"), "{out}");
+    }
+
+    #[test]
+    fn a_block_parameter_of_the_same_name_is_not_the_checked_local() {
+        let mut lambda = Expr::new(
+            Span::synthetic(),
+            ExprNode::Lambda {
+                params: vec![Symbol::from("vary")],
+                rest_param: None,
+                extra_params: vec![],
+                block_param: None,
+                body: call(optional_str("vary"), "empty?"),
+                block_style: Default::default(),
+            },
+        );
+        lambda.ty = Some(Ty::Bool);
+        let mut any = Expr::new(
+            Span::synthetic(),
+            ExprNode::Send { recv: Some(optional_str("list")), method: Symbol::from("any?"), args: vec![], block: Some(lambda), parenthesized: false },
+        );
+        any.ty = Some(Ty::Bool);
+        let out = emit_expr(&or(call(optional_str("vary"), "nil?"), any));
+        assert!(!out.contains("vary!"), "{out}");
+    }
+
+    #[test]
+    fn a_left_that_is_not_a_nil_check_leaves_the_right_alone() {
+        let out = emit_expr(&or(call(optional_str("a"), "empty?"), call(optional_str("vary"), "empty?")));
+        assert!(!out.contains("vary!"), "{out}");
     }
 }

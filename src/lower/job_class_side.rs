@@ -58,6 +58,7 @@ pub fn apply_job_class_side(app: &mut App) -> Vec<Diagnostic> {
     }
     let workers = sidekiq_workers(app);
     let wrapped = workers_with_positional_perform(app, &workers);
+    let has_perform = workers_with_any_perform(app, &workers);
     let delay_folds = without_delayed_enqueue_overrides(app, &wrapped);
     if jobs.is_empty() && workers.is_empty() {
         return diags;
@@ -106,6 +107,21 @@ pub fn apply_job_class_side(app: &mut App) -> Vec<Diagnostic> {
             continue;
         }
         if is_worker {
+            // A worker with no `perform` anywhere in its own chain is an
+            // abstract base, not an entry point: strip its Sidekiq wiring
+            // quietly, as a wrapped worker's is stripped below, and
+            // generate no wrapper. A concrete subclass that defines its
+            // own positional `perform` is still wrapped (`wrapped`
+            // walks the same chain), so this only drops the base's own
+            // dead include and options.
+            if !has_perform.contains(lc.name.0.as_str()) {
+                lc.includes.retain(|inc| !SIDEKIQ_MODULES.contains(&inc.0.as_str()));
+                lc.unknown_calls.retain(|call| {
+                    !matches!(&*call.node, ExprNode::Send { recv: None, method, .. }
+                        if SIDEKIQ_CLASS_MACROS.contains(&method.as_str()))
+                });
+                continue;
+            }
             // The include and options stay on a worker no wrapper is generated for, so it reads as the unsupported class it is.
             if !wrapped.contains(lc.name.0.as_str()) {
                 let span = lc
@@ -170,7 +186,7 @@ pub fn apply_job_class_side(app: &mut App) -> Vec<Diagnostic> {
 
         let (param_tys, ret_ty): (Vec<Option<Ty>>, Option<Ty>) = match &perform.signature {
             Some(Ty::Fn { params, ret, .. }) if params.len() == perform.params.len() => (
-                params.iter().map(|p| Some(p.ty.clone())).collect(),
+                params.iter().map(|p| Some((*p.ty).clone())).collect(),
                 Some((**ret).clone()),
             ),
             _ => (vec![None; perform.params.len()], None),
@@ -196,6 +212,10 @@ pub fn apply_job_class_side(app: &mut App) -> Vec<Diagnostic> {
                         },
                     );
                     v.ty = ty.clone();
+                    if p.rest {
+                        v.ty = Some(Ty::Array { elem: std::sync::Arc::new(ty.clone().unwrap_or(Ty::Untyped)) });
+                        return Expr::new(span, ExprNode::Splat { value: v });
+                    }
                     v
                 })
                 .collect();
@@ -209,7 +229,7 @@ pub fn apply_job_class_side(app: &mut App) -> Vec<Diagnostic> {
                     parenthesized: false,
                 },
             );
-            new_call.ty = Some(Ty::Class { id: lc.name.clone(), args: vec![] });
+            new_call.ty = Some(Ty::Class { id: lc.name.clone(), args: vec![].into() });
             let mut body = Expr::new(
                 span,
                 ExprNode::Send {
@@ -421,6 +441,12 @@ pub fn apply_job_class_side(app: &mut App) -> Vec<Diagnostic> {
             w.name = Symbol::from(entry);
             w.receiver = crate::dialect::MethodReceiver::Class;
             w.body = body;
+            // Not `perform`'s signature whole: the enqueueing wrapper answers nil, whatever `perform` returns.
+            if matches!(entry, "perform_later" | "perform_async")
+                && let Some(Ty::Fn { params, block, effects, .. }) = &perform.signature
+            {
+                w.signature = Some(Ty::Fn { params: params.clone(), block: block.clone(), ret: std::sync::Arc::new(Ty::Nil), effects: effects.clone() });
+            }
             wrappers.push(w);
         }
 
@@ -439,11 +465,11 @@ pub fn apply_job_class_side(app: &mut App) -> Vec<Diagnostic> {
             w.signature = Some(Ty::Fn {
                 params: vec![crate::ty::Param {
                     name: Symbol::from("options"),
-                    ty: Ty::Untyped,
+                    ty: Ty::Untyped.into(),
                     kind: crate::ty::ParamKind::Required,
-                }],
+                }].into(),
                 block: None,
-                ret: Box::new(Ty::Untyped),
+                ret: std::sync::Arc::new(Ty::Untyped),
                 effects: crate::effect::EffectSet::pure(),
             });
             w.body = body;
@@ -548,6 +574,94 @@ fn workers_with_positional_perform(app: &App, workers: &BTreeSet<String>) -> BTr
                 break;
             }
             cur = c.parent.as_ref().and_then(|p| by_name.get(p.0.as_str()).copied());
+        }
+    }
+    out
+}
+
+/// Whether `name`'s own class chain (itself, then ancestors) defines an
+/// instance `perform` at all, regardless of its parameter shape —
+/// including one provided by an included module rather than the class
+/// body itself. Library classes never get concern methods spliced into
+/// `methods` the way models and controllers do (`ingest::app`'s
+/// `splice_concerns_into_models`/`_controllers` has no library-class
+/// twin), so a worker's own `perform` from a mixin is invisible unless
+/// this walks `includes` too.
+///
+/// Tells an abstract base worker (no `perform` anywhere — never an
+/// entry point) apart from one whose `perform` exists somewhere (on
+/// itself, an ancestor, or a mixin) but isn't positional — that case
+/// still goes through `workers_with_positional_perform` and the
+/// existing "without a positional perform" refusal, exactly as before;
+/// this function does not widen wrapping to mixin-provided `perform`s,
+/// only widens what counts as "a perform exists".
+///
+/// An explicit superclass that isn't in `app.library_classes` is
+/// treated the same as an unresolved include: it may provide
+/// `perform`, so the worker is not stripped as abstract.
+fn workers_with_any_perform(app: &App, workers: &BTreeSet<String>) -> BTreeSet<String> {
+    let by_name: std::collections::HashMap<&str, &crate::dialect::LibraryClass> =
+        app.library_classes.iter().map(|lc| (lc.name.0.as_str(), lc)).collect();
+
+    fn defines_instance_perform(c: &crate::dialect::LibraryClass) -> bool {
+        c.methods.iter().any(|m| {
+            m.receiver == crate::dialect::MethodReceiver::Instance && m.name.as_str() == "perform"
+        })
+    }
+
+    // Whether an include target provides `perform`: the Sidekiq marker
+    // modules that make the class a worker in the first place never
+    // do, so they're excluded up front — otherwise every worker would
+    // read as "maybe performs" through its own `include Sidekiq::
+    // Worker`. Any OTHER include that resolves to an ingested library
+    // class answers via its own methods or (transitively) its own
+    // includes. An include this app never ingested — a gem module, or
+    // any other name ingest didn't resolve to a library class — is
+    // unknown, so this is conservative: it may as well provide
+    // `perform`, so the class takes the existing refusal path rather
+    // than being silently stripped.
+    fn include_provides_perform(
+        id: &crate::ident::ClassId,
+        by_name: &std::collections::HashMap<&str, &crate::dialect::LibraryClass>,
+        seen: &mut std::collections::HashSet<crate::ident::ClassId>,
+    ) -> bool {
+        if SIDEKIQ_MODULES.contains(&id.0.as_str()) {
+            return false;
+        }
+        if !seen.insert(id.clone()) {
+            return false;
+        }
+        let Some(c) = by_name.get(id.0.as_str()).copied() else {
+            return true;
+        };
+        defines_instance_perform(c)
+            || c.includes.iter().any(|inc| include_provides_perform(inc, by_name, seen))
+    }
+
+    let mut out = BTreeSet::new();
+    for name in workers {
+        let mut cur = by_name.get(name.as_str()).copied();
+        let mut seen = std::collections::HashSet::new();
+        for _ in 0..32 {
+            let Some(c) = cur else { break };
+            let found = defines_instance_perform(c)
+                || c.includes.iter().any(|inc| include_provides_perform(inc, &by_name, &mut seen));
+            if found {
+                out.insert(name.clone());
+                break;
+            }
+            // No parent declared → end of chain (true abstract base if
+            // nothing above provided perform). An explicit parent that
+            // isn't ingested is unknown — same conservatism as an
+            // unresolved include: count as a possible perform provider.
+            let Some(parent) = c.parent.as_ref() else {
+                break;
+            };
+            if !by_name.contains_key(parent.0.as_str()) {
+                out.insert(name.clone());
+                break;
+            }
+            cur = by_name.get(parent.0.as_str()).copied();
         }
     }
     out

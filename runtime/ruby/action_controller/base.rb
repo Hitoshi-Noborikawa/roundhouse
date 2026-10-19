@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 require_relative "../action_dispatch/flash"
 require_relative "../action_dispatch/session"
 require_relative "../action_view"
@@ -712,6 +713,12 @@ module ActionController
     # The dispatcher sets it; false keeps every other request on the
     # html path.
     attr_accessor :accepts_any_format
+    # Rails' `request.should_apply_vary_header?`: the response format
+    # was negotiated from the request's Accept header (no `format`
+    # param, a non-browser Accept, or an XHR). The dispatcher sets it;
+    # `render` and `send_data` then answer `Vary: Accept`. False keeps
+    # every target that does not set it as it was.
+    attr_accessor :vary_on_accept
     # Rails' `request.path_parameters`: the matched route's own segments
     # (`{"length" => "1y"}` on `/top/1y`), not the query string. The
     # dispatcher assigns it; a `url_for` options hash reads it to fill a
@@ -765,6 +772,7 @@ module ActionController
       @request_format = :html
       @query_string = +""
       @accepts_any_format = false
+      @vary_on_accept = false
       @content_type = "text/html; charset=utf-8"
       @content_type_explicit = false
       @headers = ActionController::HeaderStore.new
@@ -880,6 +888,18 @@ module ActionController
       @performed = true
       @content_type = content_type unless content_type.nil?
       @location = ActionController.sanitize_location(location) unless location.nil?
+      apply_vary_header
+      nil
+    end
+
+    # Rails' `_set_vary_header`, which every `render` runs (`send_data`
+    # renders too): `Vary: Accept` when the format was negotiated from
+    # the Accept header and the action set no Vary of its own. A
+    # redirect or a `head` does not render, so it carries none.
+    def apply_vary_header
+      return nil unless @vary_on_accept
+      vary = @headers["Vary"]
+      @headers["Vary"] = "Accept" if vary.nil? || vary.strip.empty?
       nil
     end
 
@@ -896,6 +916,11 @@ module ActionController
     # Location on another origin.
     def redirect_to(path, notice: nil, alert: nil, status: :found)
       loc = ActionController.sanitize_location(path)
+      # Rails' `_compute_redirect_to_location`: a path becomes the
+      # request's absolute URL. `head location:` does not come through
+      # here, so a 201 Location stays as the action wrote it. With no
+      # host in scope `url_from_path` returns the path unchanged.
+      loc = absolute_redirect_location(loc)
       loc = same_host_location(loc)
       @location = loc
       @status   = resolve_status(status)
@@ -935,6 +960,10 @@ module ActionController
       self
     end
 
+    def redirect?
+      @status == 301 || @status == 302 || @status == 303 || @status == 307 || @status == 308
+    end
+
     # Rails' `self.response_body =` (campfire's MessagesController and
     # CachedResponses serve a prebuilt page this way). A body is a
     # response, so the before_action halting check sees it; nil clears
@@ -949,39 +978,29 @@ module ActionController
       @body
     end
 
-    # ---- conditional GET: ALWAYS FRESH -----------------------------
+    # ---- conditional GET -------------------------------------------
     #
     # Rails' `fresh_when` / `stale?` compare the client's
-    # `If-None-Match` / `If-Modified-Since` against an ETag or
-    # timestamp and answer 304 on a match. Neither half of that
-    # comparison exists here: this controller has no request object
-    # (only `@request_format`), so there is nothing to read the
-    # conditional headers FROM. Although the extra-header store is sent
-    # with the response, `fresh_when` does not populate validators in it.
+    # `If-None-Match` against an ETag and answer 304 on a match.
+    # Campfire's `MessagesController#index` spells
+    # `fresh_when etag: Digest::SHA256.hexdigest(body), template: false`
+    # (Ruby 3 packs those keywords into one Hash argument), and
+    # `CachedResponsesTest` asserts the second GET with that ETag is
+    # `:not_modified`. Record-shaped `stale?(etag: record)` stays
+    # always-stale until a cache_key seam is modeled.
     #
-    # What IS available is the answer Rails gives when a client sends
-    # no conditional header at all: the response is stale, render it.
-    # That is this implementation, and it is a subset rather than a
-    # stub — always-render is semantically CORRECT for every request,
-    # it just never earns the 304. The cost is bandwidth, not
-    # behavior, which is why it can ship ahead of the plumbing.
-    #
-    # Monomorphic on the shapes the corpus writes — `fresh_when
-    # @messages` and `stale?(etag: record)`. Rails accepts several more
-    # (`fresh_when(etag:, last_modified:)`, `stale?(record)`); each
-    # would be its own method here when a call site asks, rather than
-    # one method with a union parameter no target can narrow.
-    # Empty body, not `nil`: the same no-op idiom
-    # `Base.preload_associations` uses. A body that is only a bare `nil`
-    # gives Rust an `Option` with nothing to infer its parameter from
-    # (`E0282: type annotations needed` on a lone `None;`), where an
-    # empty body is a plain `void`.
     # The parameter is NOT named `record`: the Elixir emitter prepends
     # the controller struct as an implicit first argument and calls it
     # `record`, so a same-named parameter of our own emits
-    # `def fresh_when(_record, _record)` — a duplicate match variable,
-    # which that target's `--warnings-as-errors` build rejects. Every
-    # other method here already avoids the name; this one found out why.
+    # `def fresh_when(_record, _record)`.
+    # ---- conditional GET (strict-target stubs) ---------------------
+    #
+    # Full `fresh_when` / `stale?` / If-None-Match matching lives in
+    # `current.rb`'s Base reopen, next to `attr_accessor :request`.
+    # Strict targets have no Request seat on Base yet; always-render /
+    # always-stale is the same contract these stubs had before #829,
+    # and keeps rust/kotlin/… emit compiling. The Ruby/Spinel path
+    # overrides the stubs when a Request is parked.
     def fresh_when(subject)
     end
 
@@ -1037,16 +1056,25 @@ module ActionController
       @headers
     end
 
+    # `importmap.to_json(resolver: helpers)`. The map's paths are
+    # already resolved at ingest, so the resolver is accepted and
+    # unused. `self` is enough for the call to evaluate.
+    def helpers
+      self
+    end
+
     # `send_data data, type:, disposition:` — a binary response body
     # (lobsters streams avatar PNGs). Same buffering contract as
     # render. `disposition` is retained as a Content-Disposition
-    # response header.
+    # response header. The Ruby family and Spinel reopen it with
+    # `filename:` (runtime/spinel/action_controller_send_data.rb).
     def send_data(data, type: "application/octet-stream", disposition: "attachment")
       @body = data
       @content_type = type
       @performed = true
       disp = disposition.to_s == "inline" ? "inline" : "attachment"
       @headers["Content-Disposition"] = disp
+      apply_vary_header
       nil
     end
 
@@ -1104,6 +1132,14 @@ module ActionController
     # (`URI(url).host == request.host`): `redirect_to articles_url` from
     # a `Host: blog.test:80` request names `http://blog.test/articles`,
     # the standard port dropped, and is the same host.
+    # A single-slash path (`/login`, not protocol-relative `//host`)
+    # joined to the request's protocol and host. Anything else — an
+    # absolute URL, `//host`, a path with no host to join — is unchanged.
+    def absolute_redirect_location(loc)
+      return loc unless loc.start_with?("/") && !loc.start_with?("//")
+      url_from_path(loc)
+    end
+
     def same_host_location(loc)
       host = ActionController.location_host(loc)
       return loc if host.empty?
