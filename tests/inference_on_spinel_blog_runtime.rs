@@ -436,6 +436,13 @@ fn untyped_subexpressions_baseline() {
     // MEASURED 844 on 2026-10-19: schema load plans every statement
     // before the first DROP, and migrate refuses a schema dump before
     // it rewrites a table. Those helpers are unseeded here.
+    // This probe has no RBS, so a new parameter read is a var. The
+    // framework-surface classes add `Arel.sql`'s bind walk,
+    // `Arel::Nodes` (`SqlLiteral`, `Quoted`, `Not`, `Case`,
+    // `NamedFunction`), `Associations::Preloader`, `Type::String`,
+    // `Type::Integer`, and `RecordNotDestroyed`. The RBS-paired
+    // runtime gate still has zero vars in those methods. The ceiling
+    // below is remeasured on the merged tree.
     const CEILING: usize = 844;
     assert!(
         existing_untyped <= CEILING && like_untyped <= LIKE_CEILING,
