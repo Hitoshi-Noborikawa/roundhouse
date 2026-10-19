@@ -308,6 +308,8 @@ fn length_validation_emits_with_options_object() {
                 }],
                 if_method: None,
                 unless_method: None,
+                if_cond: None,
+                unless_cond: None,
             },
             leading_comments: vec![],
             leading_blank_line: false,
