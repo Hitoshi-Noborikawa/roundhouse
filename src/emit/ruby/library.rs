@@ -2735,7 +2735,7 @@ fn resolve_through_chain(
     if depth > 4 {
         return None;
     }
-    let Association::HasMany { target, through: Some(thr_name), .. } = assoc else {
+    let Association::HasMany { name, target, through: Some(thr_name), .. } = assoc else {
         return None;
     };
     // The through association on the owner (`:votes`, `:taggings`, `:tags`).
@@ -2750,6 +2750,8 @@ fn resolve_through_chain(
     };
     // How the join model's rows tie back to the owner: directly by the
     // sibling's fk, or through the sibling's own chain.
+    // Owner edge is the sibling's foreign key. `through_writer_join`
+    // copies that same key; asking it again cannot change the edge.
     let (back_joins, edge_table, edge_fk) = match thr_through {
         None => (Vec::new(), pluralize_snake(thr_target.0.as_str()), thr_fk.clone()),
         Some(_) => resolve_through_chain(models, model, thr, depth + 1)?,
@@ -2762,9 +2764,19 @@ fn resolve_through_chain(
         // The source belongs_to on the join model (`Vote.belongs_to
         // :story`). A polymorphic one needs a type predicate this join
         // does not write, so it stays on the shared reader.
-        Association::BelongsTo { foreign_key: src_fk, polymorphic: false, .. } => vec![format!(
-            "INNER JOIN {thr_table} ON {thr_table}.{src_fk} = {target_table}.id{owner_type}"
-        )],
+        Association::BelongsTo { foreign_key: src_fk, polymorphic: false, .. } => {
+            let src_fk = if thr_through.is_none() {
+                match crate::lower::model_to_library::through_writer_join(model, models, name) {
+                    crate::lower::model_to_library::ThroughWriterJoin::Resolved(_, _, src_fk, _) => src_fk,
+                    _ => return None,
+                }
+            } else {
+                src_fk.clone()
+            };
+            vec![format!(
+                "INNER JOIN {thr_table} ON {thr_table}.{src_fk} = {target_table}.id{owner_type}"
+            )]
+        }
         // The source is a plain `has_many` on the join model, so the
         // foreign key is on the TARGET table and the join points the
         // other way (campfire: `has_many :reachable_messages, through:
@@ -9877,20 +9889,19 @@ fn preload_targets(model: &crate::dialect::Model, app: &App) -> Vec<(String, Pre
                         None => continue,
                     },
                 };
-                let Some(Association::HasMany {
-                    target: thr_target, foreign_key: thr_fk, as_interface, ..
-                }) =
+                let Some(Association::HasMany { target: thr_target, as_interface, .. }) =
                     model.associations().find(|a| {
                         matches!(a, Association::HasMany { name, .. } if name == thr_name)
                     })
                 else {
                     continue;
                 };
-                let Some(thr_model) = app.models.iter().find(|m| &m.name == thr_target) else {
+                // A missing join model is not batched through the convention fallback.
+                if !app.models.iter().any(|m| &m.name == thr_target) {
                     continue;
-                };
-                let Some(Association::BelongsTo { foreign_key: src_fk, polymorphic: false, .. }) =
-                    thr_model.through_source(assoc)
+                }
+                let crate::lower::model_to_library::ThroughWriterJoin::Resolved(_, owner_fk, src_fk, _) =
+                    crate::lower::model_to_library::through_writer_join(model, &app.models, name)
                 else {
                     continue;
                 };
@@ -9904,7 +9915,7 @@ fn preload_targets(model: &crate::dialect::Model, app: &App) -> Vec<(String, Pre
                         join: format!(
                             "INNER JOIN {thr_table} ON {thr_table}.{src_fk} = {target_table}.id{owner_type}"
                         ),
-                        group_col: format!("{thr_table}.{thr_fk}"),
+                        group_col: format!("{thr_table}.{owner_fk}"),
                         order: order.map(|o| o.to_string()),
                         string_key: owner_string_key,
                     },
