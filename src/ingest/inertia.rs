@@ -555,6 +555,7 @@ fn render_replacement(e: &Expr, ctx: &RenderCtx) -> Option<Expr> {
         ),
     };
     let mut props: Vec<Prop> = Vec::new();
+    let mut dynamic_props: Option<Expr> = None;
     let mut status: Option<Expr> = None;
     for (k, v) in entries {
         match literal_key(k).as_deref() {
@@ -562,7 +563,14 @@ fn render_replacement(e: &Expr, ctx: &RenderCtx) -> Option<Expr> {
             Some("status") => status = Some(v.clone()),
             Some("props") => {
                 let ExprNode::Hash { entries: pairs, .. } = &*v.node else {
-                    return unsupported("with `props:` that is not a Hash literal");
+                    // `props: page_props` is a value. `merge_inertia_props`
+                    // evaluates a Proc on the controller and gates
+                    // `InertiaRails.optional` / `.defer` / `.always` the way
+                    // a literal hash gates optional and defer. A literal
+                    // hash stays the path that can see those wrappers in
+                    // the AST.
+                    dynamic_props = Some(v.clone());
+                    continue;
                 };
                 for (pk, pv) in pairs {
                     let Some(key) = literal_key(pk) else {
@@ -602,6 +610,9 @@ fn render_replacement(e: &Expr, ctx: &RenderCtx) -> Option<Expr> {
     }
     for p in props {
         stmts.push(prop_stmt(span, &p, false));
+    }
+    if let Some(value) = dynamic_props {
+        stmts.push(call(span, None, "merge_inertia_props", vec![value]));
     }
     let status_kw = |s: &Expr| (sym(span, "status"), s.clone());
     let json = call(

@@ -295,6 +295,60 @@ module ActionController
       nil
     end
 
+    def merge_inertia_props(hash)
+      raise TypeError, "inertia props must be a Hash" unless hash.is_a?(Hash)
+      page = inertia_page
+      hash.keys.each do |key|
+        apply_inertia_prop(page, key.to_s, hash[key])
+      end
+      nil
+    end
+
+    def apply_inertia_prop(page, name, raw)
+      if raw.is_a?(InertiaRails::Prop)
+        kind = raw.kind
+        if kind == "defer"
+          if page.deferred?(name, raw.group)
+            page.prop_json(name, inertia_prop_json(raw.call(self)))
+          end
+        elsif kind == "optional"
+          if page.optional?(name)
+            page.prop_json(name, inertia_prop_json(raw.call(self)))
+          end
+        elsif kind == "always"
+          page.prop_json(name, inertia_prop_json(raw.call(self)))
+        end
+      elsif raw.is_a?(Proc)
+        if page.eager?(name)
+          page.prop_json(name, inertia_prop_json(inertia_exec(raw)))
+        end
+      elsif page.eager?(name)
+        page.prop_json(name, inertia_prop_json(raw))
+      end
+      nil
+    end
+
+    # Same encoder the literal-prop lowerer emits (`JsonRender.encode`).
+    # It walks a Hash or Array and calls `as_json` on a record. The method
+    # itself is the spinel/CRuby JSON runtime, declared abstract on
+    # JsonBuilder's signature so this file does not replace it.
+    def inertia_prop_json(value)
+      ActionController::JsonRender.encode(value)
+    end
+
+    # Kernel's method, named on this class so a computed prop can run
+    # with the controller as `self`. A literal `-> { }` is inlined in
+    # the action and already sees the controller's ivars; `super`
+    # forwards the block the same way. The runtime typer does not know
+    # Kernel, and an unknown call would be a `Ty::Var`.
+    def instance_exec(*args)
+      super
+    end
+
+    def inertia_exec(work)
+      instance_exec(&work)
+    end
+
     def inertia_root_html(use_script_element)
       headers["Vary"] = "X-Inertia"
       json = JsonBuilder.escape_html_entities(inertia_page.page_json(inertia_url, flash[:notice], flash[:alert]))
@@ -304,5 +358,55 @@ module ActionController
         "<div id=\"app\" data-page=\"" + ActionView::ViewHelpers.html_escape(json) + "\"></div>"
       end
     end
+  end
+end
+
+# The objects a computed props hash can hold. A literal hash never
+# builds these: the lowerer sees `-> { }`, `InertiaRails.optional`,
+# `.defer`, and `.always` and emits the gate itself. A helper that
+# returns the same wrappers builds them here, and `merge_inertia_props`
+# reads `kind`.
+module InertiaRails
+  class Prop
+    def initialize(kind, group)
+      @kind = kind
+      @group = group
+      @block = nil
+    end
+
+    def kind
+      @kind
+    end
+
+    def group
+      @group
+    end
+
+    def store(work)
+      @block = work
+      nil
+    end
+
+    def call(controller)
+      controller.inertia_exec(@block)
+    end
+  end
+
+  def self.optional(&block)
+    prop = Prop.new("optional", "")
+    prop.store(block)
+    prop
+  end
+
+  def self.defer(group: "default", &block)
+    prop = Prop.new("defer", group)
+    prop.store(block)
+    prop
+  end
+
+  def self.always(&block)
+    prop = Prop.new("always", "")
+    prop.store(block)
+    prop
   end
 end

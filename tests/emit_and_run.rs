@@ -15641,6 +15641,109 @@ raise "nil receiver" unless Presenter.label(nil).nil?
 }
 
 #[test]
+fn render_inertia_computed_props_answer_json_and_html() {
+    emit_and_run::real_blog()
+        .edit(
+            "config/routes.rb",
+            "  root \"articles#index\"\n",
+            "  root \"articles#index\"\n  get \"/pages/computed\", to: \"pages#computed\"\n  get \"/pages/local\", to: \"pages#local\"\n  get \"/pages/bad\", to: \"pages#bad\"\n",
+        )
+        .write(
+            "config/initializers/inertia_rails.rb",
+            "InertiaRails.configure do |config|\n  config.use_script_element_for_initial_page = true\nend\n",
+        )
+        .write(
+            "app/controllers/pages_controller.rb",
+            r#"class PagesController < ApplicationController
+  def computed
+    @stamp = "from-ivar"
+    render inertia: "pages/computed", props: computed_props
+  end
+
+  def local
+    props = { title: "from-local", n: 2 }
+    render inertia: "pages/local", props: props
+  end
+
+  def bad
+    render inertia: "pages/bad", props: "nope"
+  end
+
+  private
+    def computed_props
+      {
+        title: "from-method",
+        n: 1,
+        label: -> { @stamp },
+        secret: InertiaRails.optional { "opt" },
+        stats: InertiaRails.defer { { total: 3 } },
+        kept: InertiaRails.always { "yes" },
+        when: Time.utc(2026, 10, 19, 11, 22, 0)
+      }
+    end
+end
+"#,
+        )
+        .write(
+            "test/controllers/pages_controller_test.rb",
+            r#"require "test_helper"
+
+class PagesControllerTest < ActionDispatch::IntegrationTest
+  test "a method hash evaluates lambdas and defers the rest" do
+    get "/pages/computed", headers: { "X-Inertia" => "true" }
+    assert_response :success
+    page = response.parsed_body
+    assert_equal "from-method", page["props"]["title"]
+    assert_equal 1, page["props"]["n"]
+    assert_equal "from-ivar", page["props"]["label"]
+    assert_equal "yes", page["props"]["kept"]
+    assert_equal "2026-10-19T11:22:00.000Z", page["props"]["when"]
+    assert_nil page["props"]["secret"]
+    assert_nil page["props"]["stats"]
+    assert_equal({ "default" => ["stats"] }, page["deferredProps"])
+  end
+
+  test "a partial reload evaluates the requested optional and deferred props" do
+    get "/pages/computed", headers: {
+      "X-Inertia" => "true",
+      "X-Inertia-Partial-Component" => "pages/computed",
+      "X-Inertia-Partial-Data" => "secret,stats"
+    }
+    assert_response :success
+    assert_equal({ "secret" => "opt", "stats" => { "total" => 3 }, "kept" => "yes" }, response.parsed_body["props"])
+    assert_nil response.parsed_body["deferredProps"]
+  end
+
+  test "a local hash is the page props" do
+    get "/pages/local"
+    assert_response :success
+    assert_includes response.body, %("title":"from-local")
+    assert_includes response.body, %("n":2)
+  end
+
+  test "a partial reload keeps the requested prop and an always prop" do
+    get "/pages/computed", headers: {
+      "X-Inertia" => "true",
+      "X-Inertia-Partial-Component" => "pages/computed",
+      "X-Inertia-Partial-Data" => "n"
+    }
+    assert_response :success
+    assert_equal({ "n" => 1, "kept" => "yes" }, response.parsed_body["props"])
+  end
+
+  test "a non-hash is not an empty page" do
+    assert_raises(TypeError) do
+      get "/pages/bad", headers: { "X-Inertia" => "true" }
+    end
+  end
+end
+"#,
+        )
+        .run_test("test/controllers/pages_controller_test.rb")
+        .assert_passes();
+}
+
+#[test]
 fn render_inertia_computed_component_answers_json_and_partial_reload() {
     emit_and_run::real_blog()
         .edit(
