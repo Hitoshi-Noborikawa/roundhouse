@@ -456,9 +456,7 @@ fn model_alias_method_copy(call: &ruby_prism::CallNode<'_>, body: &[ModelBodyIte
     if calls_super(&source.body) {
         return None;
     }
-    let mut copy = source.clone();
-    copy.name = Symbol::from(to.as_str());
-    Some(copy)
+    Some(super::library_class::copy_aliased_method(source, to.as_str()))
 }
 
 /// Classify one class-body statement into its `ModelBodyItem` variant.
