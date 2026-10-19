@@ -193,6 +193,31 @@ fn relax_from_stmt_handle(lc: &mut LibraryClass) {
     }
 }
 
+/// `BuildTarget::Ruby.param_binds_enabled(None)`. Ruby binds are opt-in,
+/// so an unset override is off. `project` is not part of the wasm crate.
+fn ruby_param_binds_default() -> bool {
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        crate::project::BuildTarget::Ruby.param_binds_enabled(None)
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        false
+    }
+}
+
+/// `BuildTarget::Spinel.param_binds_enabled(None)`. Spinel binds default on.
+fn spinel_param_binds_default() -> bool {
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        crate::project::BuildTarget::Spinel.param_binds_enabled(None)
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        true
+    }
+}
+
 /// Model IR before Ruby adaptation. Admission uses this same registry,
 /// demand survey and body typer without rendering files or RBS.
 pub(crate) fn materialize_models(
@@ -200,7 +225,7 @@ pub(crate) fn materialize_models(
     materialization: crate::lower::model_to_library::Materialization<'_>,
 ) -> (Vec<LibraryClass>, crate::lower::controller_to_library::params::ParamsSpecs) {
     materialize_models_with_param_binds(
-        app, materialization, crate::project::BuildTarget::Ruby.param_binds_enabled(None),
+        app, materialization, ruby_param_binds_default(),
     )
 }
 
@@ -269,7 +294,7 @@ fn emit_lowered_models_with_param_binds(app: &App, param_binds: bool) -> Vec<Emi
 pub(crate) fn lowered_model_lcs(
     app: &App,
 ) -> (Vec<LibraryClass>, crate::lower::controller_to_library::params::ParamsSpecs) {
-    lowered_model_lcs_with_param_binds(app, crate::project::BuildTarget::Ruby.param_binds_enabled(None))
+    lowered_model_lcs_with_param_binds(app, ruby_param_binds_default())
 }
 
 fn lowered_model_lcs_with_param_binds(
@@ -526,7 +551,7 @@ pub fn emit_lowered_routes(app: &App) -> EmittedFile {
 /// `app/models/<name>.rb` because they're plain holders, not request
 /// handlers.
 pub fn emit_lowered_controllers(app: &App) -> Vec<EmittedFile> {
-    emit_lowered_controllers_with_param_binds(app, crate::project::BuildTarget::Ruby.param_binds_enabled(None))
+    emit_lowered_controllers_with_param_binds(app, ruby_param_binds_default())
 }
 
 fn emit_lowered_controllers_with_param_binds(app: &App, param_binds: bool) -> Vec<EmittedFile> {
@@ -584,7 +609,7 @@ pub(crate) fn emit_lowered_controllers_with_layout_and_param_binds(
 /// The controller classes `emit_lowered_controllers_with_layout`
 /// writes, before rendering. Shared with `emit::futamura::routes`.
 pub(crate) fn lowered_controller_lcs_with_layout(app: &App) -> Vec<LibraryClass> {
-    lowered_controller_lcs_with_layout_and_param_binds(app, crate::project::BuildTarget::Ruby.param_binds_enabled(None))
+    lowered_controller_lcs_with_layout_and_param_binds(app, ruby_param_binds_default())
 }
 
 fn lowered_controller_lcs_with_layout_and_param_binds(app: &App, param_binds: bool) -> Vec<LibraryClass> {
@@ -873,7 +898,7 @@ fn jbuilder_view_output_path(view_name: &str) -> PathBuf {
 /// which would have CRuby double-run every test if combined with the
 /// shim).
 pub fn emit_spinel(app: &App) -> Vec<EmittedFile> {
-    emit_spinel_with_param_binds(app, crate::project::BuildTarget::Spinel.param_binds_enabled(None))
+    emit_spinel_with_param_binds(app, spinel_param_binds_default())
 }
 
 /// Ruby-family emit with the build target's resolved bind policy.
