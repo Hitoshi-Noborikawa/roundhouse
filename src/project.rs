@@ -1502,7 +1502,8 @@ fn report_self_bindings(app: &App, target: BuildTarget) {
 
 /// Sends the analyzer types for every target but whose runtime only the
 /// Ruby family has: `Array#fetch`, `each_slice`, `each_cons`, an
-/// enumerator's `with_object`, `Array[...]` and `Hash[...]`, `include?` on
+/// enumerator's `with_object`, `Array[...]` and `Hash[...]`,
+/// `Array.try_convert` (what a nested splat desugars to), `include?` on
 /// a `Class`/`Module` value (Module's ancestry query, which the other
 /// targets' `include?` is not), Kernel's `Rational(...)`, which a
 /// rational literal ingests as, and Kernel's `Integer(...)` and
@@ -1534,6 +1535,10 @@ fn report_ruby_only_sends(app: &App, target: BuildTarget) {
                 (Some(r), "[]") => match &*r.node {
                     ExprNode::Const { path } if path.len() == 1 && path[0].as_str() == "Array" => Some("Array[]"),
                     ExprNode::Const { path } if path.len() == 1 && path[0].as_str() == "Hash" => Some("Hash[]"),
+                    _ => None,
+                },
+                (Some(r), "try_convert") => match &*r.node {
+                    ExprNode::Const { path } if path.len() == 1 && path[0].as_str() == "Array" => Some("Array.try_convert"),
                     _ => None,
                 },
                 (Some(_), "fetch") if matches!(recv_ty, Some(Ty::Array { .. })) => Some("Array#fetch"),
@@ -5921,6 +5926,32 @@ fn report_unavailable_class_value(
 /// lowers-added exception Consts surveyed from a throwaway controller
 /// lower (emit still lowers controllers after this gate today).
 fn report_unsupported_bundled_constants(app: &App, target: BuildTarget) {
+    // Column readers are synthesized inside the emitter, after this walk,
+    // so a Send match never sees them. The schema column is the fact.
+    // Ruby, JRuby, and Spinel ship the interval intrinsics. Roda is Sequel:
+    // it has no parser, so a text column typed as Duration is not a runtime.
+    if !matches!(
+        target,
+        BuildTarget::Blog | BuildTarget::Ruby | BuildTarget::Jruby | BuildTarget::Spinel
+    ) {
+        for table in app.schema.tables.values() {
+            for column in &table.columns {
+                if column.col_type == crate::schema::ColumnType::Interval {
+                    emit::diagnostics::report_unsupported(
+                        crate::span::Span::synthetic(),
+                        target.as_str(),
+                        "interval",
+                        format!(
+                            "PostgreSQL interval column `{}.{}` lowers to ActiveSupport interval intrinsics; the {} runtime has no interval column runtime",
+                            table.name.as_str(),
+                            column.name.as_str(),
+                            target.as_str()
+                        ),
+                    );
+                }
+            }
+        }
+    }
     if matches!(target, BuildTarget::Blog | BuildTarget::Ruby | BuildTarget::Roda) {
         return;
     }
@@ -5970,6 +6001,21 @@ fn report_unsupported_bundled_constants(app: &App, target: BuildTarget) {
                     target,
                     "duration",
                     format!("ActiveSupport::Duration is the Ruby-family runtime's value class; the {target} runtime ships none"),
+                );
+            }
+            // Interval columns lower to these intrinsics. Ruby, JRuby, and
+            // Spinel ship them; a strict target must not emit a call it
+            // cannot run.
+            if let crate::expr::ExprNode::Send { recv: Some(recv), method, .. } = &*expr.node
+                && matches!(method.as_str(), "parse_db_interval" | "format_db_interval")
+                && matches!(&*recv.node, crate::expr::ExprNode::Const { path }
+                    if path.iter().map(|s| s.as_str()).skip_while(|s| s.is_empty()).eq(["ActiveSupport"]))
+            {
+                emit::diagnostics::report_unsupported(
+                    expr.span,
+                    target,
+                    "interval",
+                    format!("PostgreSQL interval columns use ActiveSupport.{}; the {target} runtime has no interval column runtime", method.as_str()),
                 );
             }
         }
@@ -6390,6 +6436,12 @@ fn spinel_files(app: &App, fixture: &Path, param_binds: bool) -> Result<(Vec<(St
         files.push((
             "sig/runtime/active_support_time_parsing.rbs".to_string(),
             rbs,
+        ));
+        let interval_rbs = crate::runtime_files::read_to_string("runtime/spinel/active_support_interval.rbs")
+            .map_err(|e| format!("read runtime/spinel/active_support_interval.rbs: {e}"))?;
+        files.push((
+            "sig/runtime/active_support_interval.rbs".to_string(),
+            interval_rbs,
         ));
     }
 
@@ -7983,8 +8035,7 @@ fn apply_locked_external_gem_wiring(files: &mut Vec<(String, String)>, app: &App
     };
     let mut eager_requires = Vec::new();
     for gem in needed {
-        let namespace = crate::gems::namespace_of(&gem.name).to_ascii_lowercase();
-        if namespace == gem.name {
+        if crate::gems::loads_by_gem_name(&gem.name) {
             eager_requires.push(gem.name.clone());
         }
         let version = gem.version.as_deref();

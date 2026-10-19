@@ -169,6 +169,9 @@ pub mod session_options;
 pub mod status_literal;
 pub mod to_param_residue;
 pub mod relation_residue;
+/// Host-only: the Oj emit gate reads `project::BuildTarget`, which the
+/// wasm build excludes. The playground has no emit gate to raise it for.
+#[cfg(not(target_arch = "wasm32"))]
 pub mod oj;
 pub mod params_residue;
 pub mod params_permit;

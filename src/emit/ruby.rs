@@ -1942,6 +1942,12 @@ mod method_sig_tests {
     use crate::ident::Symbol;
     use crate::span::Span;
 
+    #[test]
+    fn unbound_param_binds_follow_the_target_policy() {
+        assert!(!crate::build_target::BuildTarget::Ruby.param_binds_enabled(None));
+        assert!(crate::build_target::BuildTarget::Spinel.param_binds_enabled(None));
+    }
+
     // `def get_from_cache(opts = {}, &block)` — an optional positional with
     // a default plus a captured block param must both round-trip into the
     // emitted signature (regression: both were dropped → `def f` + arity
