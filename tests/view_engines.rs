@@ -206,5 +206,13 @@ fn extra_marker_whitespace_does_not_shift_offsets_into_a_character() {
                 "{source:?}: c_off {c_off} translated to {e_off}, not a char boundary"
             );
         }
+        // The expression's first byte maps to its first character in the
+        // template (column 4, after the marker and both spaces), not to
+        // the space after the marker.
+        let expr = "'ク'.size";
+        let c_start = ruby.find(expr).unwrap_or_else(|| panic!("{source:?}: {expr} not in {ruby:?}")) as u32;
+        let e_start = translate_offset(&map, c_start) as usize;
+        let col = source[..e_start].chars().count() + 1;
+        assert_eq!((e_start, col), (3, 4), "{source:?}: expression start maps to byte {e_start}, column {col}");
     }
 }
