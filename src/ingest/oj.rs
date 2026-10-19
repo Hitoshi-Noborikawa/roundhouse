@@ -3,9 +3,8 @@
 //! An app that calls `Oj.mimic_JSON` in an initializer (with
 //! `Oj.optimize_rails`, as a Rails app does) gets Oj's compat mode:
 //!
-//! - `Oj.dump(obj)` encodes as `obj.to_json` does (`mode: :compat` and
-//!   `:rails` the same);
-//! - `Oj.generate(obj)` is `JSON.generate(obj)`;
+//! - `Oj.generate(obj)` is `JSON.generate(obj)` (`<>&` raw, `Infinity`
+//!   and `NaN` a `JSON::GeneratorError`);
 //! - `Oj.load(json)` is `JSON.parse(json)`, an IO's or StringIO's content
 //!   read first, `symbol_keys:` (or `symbolize_names:`) symbolizing; nil,
 //!   a number, true/false and an Array are answered as given, anything
@@ -16,16 +15,20 @@
 //! The mode is read from the initializers' top-level statements: a
 //! `mimic_JSON` or `optimize_rails` call anywhere else (a branch, a method,
 //! a block) may not run, and refuses; so does `optimize_rails` alone.
-//! Each call is read: any other Oj method or option (`safe_load`, the
-//! strict parser, among them) refuses the whole lowering, since what it
-//! does is not modeled. Without `mimic_JSON`, Oj
+//! Each call is read. One this does not model is a refusal of its own,
+//! through `survey::continue_or_fail`: a method the stand-in does not
+//! define (`dump`, `safe_load`, the strict parser, and the rest), or an
+//! option it would ignore (anything but `symbol_keys:`/`symbolize_names:`
+//! valued true, false or nil on `load`). Strict ingest fails on it; survey
+//! mode ledgers it and lowers the calls that are modeled. Without `mimic_JSON`, Oj
 //! is in its `:object` mode (`":sym"` keys, `"^o"` objects), not modeled
 //! either: `Oj` stays unknown and its uses stay errors.
 //!
-//! Checked against oj 3.17 with ActiveSupport.
-//! ponytail: `Oj.dump` keeps `<>&` and writes `Infinity` where Rails'
-//! `to_json` escapes them and writes `null`; `to_json` is what the
-//! emitted tree has.
+//! `Oj.dump` is refused: under `mimic_JSON` it is compat (`<>&` raw,
+//! `Infinity`/`NaN` written), with `mode: :rails` Rails' encoder (`<>&`
+//! escaped, `null`), and the emitted tree's `to_json` is neither.
+//!
+//! Checked against oj 3.17.3 with ActiveSupport.
 
 use crate::App;
 use crate::dialect::{LibraryClass, LibraryClassOrigin};
@@ -78,11 +81,10 @@ pub(super) fn lower_oj(
             message: format!("Oj not lowered: {reason}"),
         }));
     }
-    if !refusals.is_empty() {
-        for err in refusals {
-            survey::continue_or_fail(err)?;
-        }
-        return Ok(());
+    // Each call it does not model is a refusal of its own: strict ingest
+    // fails on it, survey mode ledgers it and lowers the rest.
+    for err in refusals {
+        survey::continue_or_fail(err)?;
     }
     if app.library_classes.iter().any(|lc| lc.name.0.as_str() == "Oj") {
         return Ok(());
@@ -110,11 +112,20 @@ fn unmodeled_calls(text: &str) -> Vec<String> {
                     // `safe_load` is the strict parser: nil, a number and a
                     // bad document fail there as `load` does not.
                     "load" => &["symbol_keys", "symbolize_names"],
-                    "dump" | "generate" => &["mode"],
+                    "generate" => &[],
                     "mimic_JSON" | "optimize_rails" => &[],
+                    // `mimic_JSON` makes it compat (`<>&` raw, `Infinity` and
+                    // `NaN` as written); `mode: :rails` is Rails' encoder.
+                    // The emitted tree's `to_json` is neither.
+                    "dump" => {
+                        self.found.push("`Oj.dump`: neither its compat nor its rails encoding is modeled".into());
+                        ruby_prism::visit_call_node(self, node);
+                        return;
+                    }
                     other => {
                         self.found.push(format!("`Oj.{other}`"));
-                        &[]
+                        ruby_prism::visit_call_node(self, node);
+                        return;
                     }
                 };
                 // The object is the first argument, a braceless Hash
@@ -130,8 +141,9 @@ fn unmodeled_calls(text: &str) -> Vec<String> {
                                 let key = text_of(&pair.key());
                                 let key = key.trim_end_matches(':').trim_start_matches(':');
                                 let value = text_of(&pair.value());
-                                let ok = allowed.contains(&key)
-                                    && (key != "mode" || matches!(value.as_str(), ":compat" | ":rails"));
+                                // oj raises ArgumentError for a value other
+                                // than true, false or nil.
+                                let ok = allowed.contains(&key) && matches!(value.as_str(), "true" | "false" | "nil");
                                 if !ok {
                                     self.found.push(format!("`Oj.{method}` option `{key}: {value}`"));
                                 }
@@ -201,14 +213,22 @@ fn stand_ins() -> Vec<LibraryClass> {
     source = json.is_a?(IO) || json.class.name == "StringIO" ? json.read : json
     # Anything else fails to parse, a JSON::ParserError as JSON's own.
     source = "" unless source.is_a?(String)
-    JSON.parse(source, symbolize_names: options[:symbol_keys] == true || options[:symbolize_names] == true)
+    # The one-argument parse every target maps; the keys symbolized after.
+    value = JSON.parse(source)
+    options[:symbol_keys] == true || options[:symbolize_names] == true ? symbolized(value) : value
   end
 
-  def self.dump(obj, options = {})
-    obj.to_json
+  def self.symbolized(value)
+    if value.is_a?(Hash)
+      out = {}
+      value.keys.each { |key| out[key.to_sym] = symbolized(value[key]) }
+      return out
+    end
+    return value.map { |element| symbolized(element) } if value.is_a?(Array)
+    value
   end
 
-  def self.generate(obj, options = {})
+  def self.generate(obj)
     JSON.generate(obj)
   end
 

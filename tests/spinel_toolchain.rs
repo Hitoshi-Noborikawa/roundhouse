@@ -576,20 +576,14 @@ fn oj_under_mimic_json_runs_as_json_natively() {
     let run = emit_and_run::real_blog()
         .write("config/initializers/oj.rb", "# frozen_string_literal: true\n\nOj.mimic_JSON\nOj.optimize_rails\n")
         .write("lib/payload.rb", r##"class Payload
-  def self.encode(value)
-    Oj.dump(value)
-  end
-
-  def self.encode_compat(value)
-    Oj.dump(value, mode: :compat)
-  end
-
-  def self.encode_braceless(value)
-    Oj.dump(response: value)
-  end
-
   def self.generated(value)
     Oj.generate(value)
+  end
+
+  def self.generated_or(value)
+    Oj.generate(value)
+  rescue JSON::GeneratorError
+    :not_finite
   end
 
   def self.decode(text)
@@ -609,11 +603,9 @@ fn oj_under_mimic_json_runs_as_json_natively() {
   end
 end
 "##)
-        .run_spinel(r##"raise "dump" unless Payload.encode({a: 1, "b" => :c, d: nil, e: [1, "x", 1.5, true]}) == %({"a":1,"b":"c","d":null,"e":[1,"x",1.5,true]})
-raise "dump compat" unless Payload.encode_compat({a: {b: :c}}) == %({"a":{"b":"c"}})
-raise "dump braceless" unless Payload.encode_braceless(5) == %({"response":5})
-raise "dump nil" unless Payload.encode(nil) == "null"
-raise "generate" unless Payload.generated({a: :b}) == %({"a":"b"})
+        .run_spinel(r##"raise "generate" unless Payload.generated({a: :b, h: "<&>", n: [1.5, nil, true]}) == %({"a":"b","h":"<&>","n":[1.5,null,true]})
+raise "generate infinity" unless Payload.generated_or({x: Float::INFINITY}) == :not_finite
+raise "generate nan" unless Payload.generated_or({x: Float::NAN}) == :not_finite
 raise "load" unless Payload.decode(%({"a":[1,2.5,null,true],"b":{"c":"d"}})) == {"a" => [1, 2.5, nil, true], "b" => {"c" => "d"}}
 raise "load nil" unless Payload.decode(nil).nil?
 raise "load integer" unless Payload.decode(5) == 5

@@ -3192,7 +3192,8 @@ fn dry_struct_classes_run_lowered() {
 }
 
 /// Oj under `Oj.mimic_JSON` + `Oj.optimize_rails` (the initializer a Rails
-/// app writes): dump as `to_json`, generate as `JSON.generate`, load as
+/// app writes): generate as `JSON.generate` (`<>&` raw, `Infinity` and
+/// `NaN` a `JSON::GeneratorError`), load as
 /// `JSON.parse` (nil and a non-String as given, `symbol_keys:`), and a
 /// parse failure a `JSON::ParserError` that `Oj::ParseError` does not
 /// catch. Checked against oj 3.17 with ActiveSupport.
@@ -3201,6 +3202,38 @@ fn oj_under_mimic_json_runs_as_json() {
     let run = oj_overlay(emit_and_run::real_blog()).run_ruby(OJ_ASSERTIONS);
     run.assert_passes();
     assert!(run.stdout.contains("oj passed"));
+}
+
+/// A call the stand-in does not model is a refusal of its own, ledgered
+/// (strict ingest fails on it): `Oj.dump` (its compat and rails encoding
+/// both unmodeled), `Oj.safe_load` (the strict parser). In survey mode
+/// `Oj.load` beside it is still lowered.
+#[test]
+fn oj_unmodeled_calls_are_refused_one_by_one() {
+    for (call, expected) in [
+        ("Oj.dump(v)", "`Oj.dump`: neither its compat nor its rails encoding is modeled"),
+        ("Oj.dump(v, mode: :rails)", "`Oj.dump`: neither its compat nor its rails encoding is modeled"),
+        ("Oj.safe_load(v)", "`Oj.safe_load`"),
+    ] {
+        let tree: std::collections::HashMap<std::path::PathBuf, Vec<u8>> = [
+            ("config/initializers/oj.rb".to_string(), "Oj.mimic_JSON\n".to_string()),
+            (
+                "lib/codec.rb".to_string(),
+                format!("class Codec\n  def self.out(v)\n    {call}\n  end\n\n  def self.in(v)\n    Oj.load(v)\n  end\nend\n"),
+            ),
+            ("config/routes.rb".to_string(), "Rails.application.routes.draw do\nend\n".to_string()),
+        ]
+        .into_iter()
+        .map(|(p, s)| (std::path::PathBuf::from(p), s.into_bytes()))
+        .collect();
+        assert!(roundhouse::ingest::ingest_app_from_tree(tree.clone()).is_err(), "{call}: strict ingest passed");
+        roundhouse::ingest::survey::activate();
+        let app = roundhouse::ingest::ingest_app_from_tree(tree).expect("survey ingest");
+        let ledger: Vec<String> = roundhouse::ingest::survey::drain().iter().map(|e| e.to_string()).collect();
+        assert!(ledger.iter().any(|e| e.contains(expected)), "{call}: {ledger:#?}");
+        let oj = app.library_classes.iter().find(|lc| lc.name.0.as_str() == "Oj").expect("load still lowered");
+        assert!(oj.methods.iter().all(|m| !matches!(m.name.as_str(), "dump" | "safe_load")), "{call}: modeled");
+    }
 }
 
 /// Without `Oj.mimic_JSON` Oj is in its `:object` mode, not modeled: its
@@ -3213,12 +3246,14 @@ fn oj_without_mimic_json_stays_unsupported() {
     assert!(errors.iter().any(|e| e.contains("Oj")), "{errors:#?}");
 }
 
-/// An Oj method or option the lowering does not read refuses it, ledgered.
+/// An option the lowering does not read is a refusal (ledgered, strict
+/// ingest fails); a mode that may not be set, or `optimize_rails` alone,
+/// leaves Oj unmodeled.
 #[test]
 fn oj_unmodeled_options_are_refused() {
     let tree: std::collections::HashMap<std::path::PathBuf, Vec<u8>> = [
         ("config/initializers/oj.rb", "Oj.mimic_JSON\n"),
-        ("lib/pretty.rb", "class Pretty\n  def self.show(v)\n    Oj.dump(v, indent: 2)\n  end\nend\n"),
+        ("lib/pretty.rb", "class Pretty\n  def self.show(v)\n    Oj.load(v, bigdecimal_load: :float)\n  end\nend\n"),
         ("config/routes.rb", "Rails.application.routes.draw do\nend\n"),
     ]
     .into_iter()
@@ -3228,13 +3263,14 @@ fn oj_unmodeled_options_are_refused() {
     roundhouse::ingest::survey::activate();
     let app = roundhouse::ingest::ingest_app_from_tree(tree).expect("survey ingest");
     let ledger: Vec<String> = roundhouse::ingest::survey::drain().iter().map(|e| e.to_string()).collect();
-    assert!(ledger.iter().any(|e| e.contains("Oj not lowered: `Oj.dump` option `indent: 2`")), "{ledger:#?}");
-    assert!(app.library_classes.iter().all(|lc| lc.name.0.as_str() != "Oj"));
-    // A mode that may not be set, and a mode this does not read.
-    for (init, use_, expected) in [
-        ("if ENV[\"X\"]\n  Oj.mimic_JSON\nend\n", "Oj.load(v)", "`Oj.mimic_JSON` not at an initializer's top level"),
-        ("Oj.optimize_rails\n", "Oj.load(v)", "`Oj.optimize_rails` without `Oj.mimic_JSON`"),
-        ("::Oj.mimic_JSON()\n", "Oj.safe_load(v)", "`Oj.safe_load`"),
+    assert!(ledger.iter().any(|e| e.contains("Oj not lowered: `Oj.load` option `bigdecimal_load: :float`")), "{ledger:#?}");
+    let _ = app;
+    // A mode that may not be set or that this does not read leaves Oj
+    // unmodeled; an option value oj rejects is a refusal of that call.
+    for (init, use_, expected, unmodeled) in [
+        ("if ENV[\"X\"]\n  Oj.mimic_JSON\nend\n", "Oj.load(v)", "`Oj.mimic_JSON` not at an initializer's top level", true),
+        ("Oj.optimize_rails\n", "Oj.load(v)", "`Oj.optimize_rails` without `Oj.mimic_JSON`", true),
+        ("Oj.mimic_JSON\n", "Oj.load(v, symbol_keys: \"true\")", "`Oj.load` option `symbol_keys: \"true\"`", false),
     ] {
         let tree: std::collections::HashMap<std::path::PathBuf, Vec<u8>> = [
             ("config/initializers/oj.rb".to_string(), init.to_string()),
@@ -3248,25 +3284,21 @@ fn oj_unmodeled_options_are_refused() {
         let app = roundhouse::ingest::ingest_app_from_tree(tree).expect("survey ingest");
         let ledger: Vec<String> = roundhouse::ingest::survey::drain().iter().map(|e| e.to_string()).collect();
         assert!(ledger.iter().any(|e| e.contains(expected)), "{init}: {ledger:#?}");
-        assert!(app.library_classes.iter().all(|lc| lc.name.0.as_str() != "Oj"), "{init}: lowered");
+        if unmodeled {
+            assert!(app.library_classes.iter().all(|lc| lc.name.0.as_str() != "Oj"), "{init}: lowered");
+        }
     }
 }
 
 const OJ_LIB: &str = r##"class Payload
-  def self.encode(value)
-    Oj.dump(value)
-  end
-
-  def self.encode_compat(value)
-    Oj.dump(value, mode: :compat)
-  end
-
-  def self.encode_braceless(value)
-    Oj.dump(response: value)
-  end
-
   def self.generated(value)
     Oj.generate(value)
+  end
+
+  def self.generated_or(value)
+    Oj.generate(value)
+  rescue JSON::GeneratorError
+    :not_finite
   end
 
   def self.decode(text)
@@ -3288,11 +3320,9 @@ end
 "##;
 
 const OJ_ASSERTIONS: &str = r##"require "stringio"
-raise "dump" unless Payload.encode({a: 1, "b" => :c, d: nil, e: [1, "x", 1.5, true]}) == %({"a":1,"b":"c","d":null,"e":[1,"x",1.5,true]})
-raise "dump compat" unless Payload.encode_compat({a: {b: :c}}) == %({"a":{"b":"c"}})
-raise "dump braceless" unless Payload.encode_braceless(5) == %({"response":5})
-raise "dump nil" unless Payload.encode(nil) == "null"
-raise "generate" unless Payload.generated({a: :b}) == %({"a":"b"})
+raise "generate" unless Payload.generated({a: :b, h: "<&>", n: [1.5, nil, true]}) == %({"a":"b","h":"<&>","n":[1.5,null,true]})
+raise "generate infinity" unless Payload.generated_or({x: Float::INFINITY}) == :not_finite
+raise "generate nan" unless Payload.generated_or({x: Float::NAN}) == :not_finite
 raise "load" unless Payload.decode(%({"a":[1,2.5,null,true],"b":{"c":"d"}})) == {"a" => [1, 2.5, nil, true], "b" => {"c" => "d"}}
 raise "load nil" unless Payload.decode(nil).nil?
 raise "load integer" unless Payload.decode(5) == 5
@@ -16778,3 +16808,5 @@ mod parameterized_mailer;
 mod private_calls;
 #[path = "emit_and_run/inherited_visibility.rs"]
 mod inherited_visibility;
+
+
