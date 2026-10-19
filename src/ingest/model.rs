@@ -378,6 +378,7 @@ pub(super) fn ingest_model_with_enum_constants(
                 file,
                 leading,
                 Some(&mut class_attr_defaults),
+                &class_consts,
             ) {
                 Ok(items) => items,
                 Err(err) if super::survey::is_active() => {
@@ -494,6 +495,7 @@ pub(super) fn ingest_model_body_items(
     file: &str,
     leading_comments: Vec<Comment>,
     class_attr_defaults: Option<&mut IndexMap<Symbol, Expr>>,
+    class_consts: &ClassConsts,
 ) -> IngestResult<Vec<ModelBodyItem>> {
     use crate::dialect::{Validation, ValidationRule};
     let span = Span {
@@ -512,7 +514,7 @@ pub(super) fn ingest_model_body_items(
             };
             if name == "validates" || of_kind.is_some() {
                 let kind = of_kind.unwrap_or(ValidatesKind::Map);
-                match parse_validates_call(&call, file, kind) {
+                match parse_validates_call(&call, file, kind, class_consts) {
                     ParsedValidates::Gap => return Ok(Vec::new()),
                     ParsedValidates::Modeled(parsed) if !parsed.is_empty() => {
                         return Ok(validation_items(parsed, leading_comments, span));
@@ -1454,6 +1456,10 @@ pub(super) struct ClassConsts {
     /// `NAME = %i[…]` / `%w[…]` — the bare labels, for the idioms that
     /// derive a mapping from them (`NAME.index_by(&:to_s)`).
     labels: std::collections::HashMap<String, Vec<String>>,
+    /// `NAME = /pattern/flags`, `.freeze`d, aliased, or an interpolation
+    /// of one other folded regex constant — `(pattern, flags)`. Used to
+    /// resolve `validates …, format: { with: NAME }` (#985 follow-up).
+    regexes: std::collections::HashMap<String, (String, String)>,
 }
 
 impl ClassConsts {
@@ -1463,6 +1469,9 @@ impl ClassConsts {
             let Some(cw) = stmt.as_constant_write_node() else { continue };
             let name = constant_id_str(&cw.name()).to_string();
             let value = cw.value();
+            if let Some(re) = out.regex(&value) {
+                out.regexes.insert(name.clone(), re);
+            }
             if let Some(lit) = out.scalar(&value) {
                 out.scalars.insert(name, lit);
                 continue;
@@ -1478,6 +1487,79 @@ impl ClassConsts {
             }
         }
         out
+    }
+
+    /// A regex literal the class body can fold: a bare `/pattern/flags`
+    /// literal (`.freeze`d or not), a reference to another folded regex
+    /// constant (`OTHER_RE = NAME_RE`), or an interpolation of exactly
+    /// one other folded regex constant whose flags agree with the
+    /// outer literal's. Ruby embeds a nested `Regexp` in an
+    /// interpolated one as `(?flags-off:…)`; that group is only
+    /// equivalent to a plain substitution when the inner and outer
+    /// flags are identical, so a mismatch (or any other interpolated
+    /// shape) resolves to `None` rather than a wrong pattern.
+    pub(super) fn regex(&self, node: &Node<'_>) -> Option<(String, String)> {
+        if let Some(call) = node.as_call_node() {
+            if constant_id_str(&call.name()) == "freeze" && call.arguments().is_none() {
+                return self.regex(&call.receiver()?);
+            }
+            return None;
+        }
+        if let Some(cr) = node.as_constant_read_node() {
+            return self.regexes.get(constant_id_str(&cr.name())).cloned();
+        }
+        if node.as_regular_expression_node().is_some() {
+            return super::util::regexp_literal_flags(node);
+        }
+        self.interpolated_regex(node)
+    }
+
+    /// `/pattern#{CONST}pattern/flags` — folds when the embedded part
+    /// is itself a single expression this table can resolve to a regex
+    /// whose flags match the outer literal's, wrapping its source in a
+    /// non-capturing group (`(?:…)`), which is then exactly equivalent
+    /// on every target this build emits to. Any other embedded shape
+    /// (a different flag set, a non-regex constant, a method call)
+    /// leaves the whole constant unresolved.
+    fn interpolated_regex(&self, node: &Node<'_>) -> Option<(String, String)> {
+        let ir = node.as_interpolated_regular_expression_node()?;
+        if ir.is_once()
+            || ir.is_euc_jp()
+            || ir.is_windows_31j()
+            || ir.is_utf_8()
+            || ir.is_ascii_8bit()
+        {
+            return None;
+        }
+        let mut flags = String::new();
+        if ir.is_ignore_case() {
+            flags.push('i');
+        }
+        if ir.is_multi_line() {
+            flags.push('m');
+        }
+        if ir.is_extended() {
+            flags.push('x');
+        }
+        let mut pattern = String::new();
+        for part in ir.parts().iter() {
+            if let Some(sn) = part.as_string_node() {
+                pattern.push_str(&String::from_utf8_lossy(sn.unescaped()));
+                continue;
+            }
+            let es = part.as_embedded_statements_node()?;
+            let stmts = es.statements()?;
+            let body: Vec<Node<'_>> = stmts.body().iter().collect();
+            let [only] = body.as_slice() else { return None };
+            let (inner_pattern, inner_flags) = self.regex(only)?;
+            if inner_flags != flags {
+                return None;
+            }
+            pattern.push_str("(?:");
+            pattern.push_str(&inner_pattern);
+            pattern.push(')');
+        }
+        Some((pattern, flags))
     }
 
     /// A scalar the class body can fold: a string, a symbol (stored as

@@ -84,6 +84,7 @@ pub(super) fn parse_validates_call(
     call: &ruby_prism::CallNode<'_>,
     file: &str,
     kind: ValidatesKind,
+    class_consts: &super::ClassConsts,
 ) -> ParsedValidates {
     use crate::dialect::{Validation, ValidationRule};
     if call.block().is_some() {
@@ -158,7 +159,7 @@ pub(super) fn parse_validates_call(
                             push_condition(&value, file, &mut call_unless_cond, "unless", &mut gaps)
                         }
                         "on" | "strict" | "message" => gaps.push(key),
-                        other => match parse_validator(other, &value, file) {
+                        other => match parse_validator(other, &value, file, class_consts) {
                             RuleParse::Skip => {}
                             RuleParse::Rule(built) => drafts.push(built),
                             RuleParse::Gap(more) => gaps.extend(more),
@@ -177,6 +178,7 @@ pub(super) fn parse_validates_call(
                     &mut call_unless_cond,
                     &mut drafts,
                     &mut gaps,
+                    class_consts,
                 );
             }
         }
@@ -381,6 +383,7 @@ fn parse_of_options<'a>(
     call_unless_cond: &mut Option<Expr>,
     drafts: &mut Vec<BuiltRule>,
     gaps: &mut Vec<String>,
+    class_consts: &super::ClassConsts,
 ) {
     use crate::dialect::ValidationRule;
     let mut only_integer = false;
@@ -389,7 +392,7 @@ fn parse_of_options<'a>(
     let mut gte: Option<f64> = None;
     let mut lte: Option<f64> = None;
     let mut inclusion: Option<InclusionSpec> = None;
-    let mut pattern: Option<String> = None;
+    let mut pattern: Option<(String, String)> = None;
     let mut saw_rule_key = false;
     for el in elements.iter() {
         let Some(assoc) = el.as_assoc_node() else {
@@ -462,8 +465,8 @@ fn parse_of_options<'a>(
             }
             "with" if matches!(kind, ValidatesKind::Format) => {
                 saw_rule_key = true;
-                match bare_regexp(&value) {
-                    Some(text) => pattern = Some(text),
+                match resolve_format_regex(&value, class_consts) {
+                    Some(resolved) => pattern = Some(resolved),
                     None => gaps.push("format: with".to_string()),
                 }
             }
@@ -501,7 +504,7 @@ fn parse_of_options<'a>(
             }
         },
         ValidatesKind::Format => match pattern {
-            Some(pattern) => ValidationRule::Format { pattern, flags: String::new() },
+            Some((pattern, flags)) => ValidationRule::Format { pattern, flags },
             None => {
                 gaps.push("format: with".to_string());
                 return;
@@ -512,7 +515,7 @@ fn parse_of_options<'a>(
     drafts.push(BuiltRule::bare(rule));
 }
 
-fn parse_validator(key: &str, value: &Node<'_>, file: &str) -> RuleParse {
+fn parse_validator(key: &str, value: &Node<'_>, file: &str, class_consts: &super::ClassConsts) -> RuleParse {
     use crate::dialect::ValidationRule;
     match key {
         "presence" => parse_bool_or_hash(value, ValidationRule::Presence, "presence", file),
@@ -520,7 +523,7 @@ fn parse_validator(key: &str, value: &Node<'_>, file: &str) -> RuleParse {
         "length" => parse_length_rule(value, file),
         "numericality" => parse_numericality(value, file),
         "inclusion" => parse_inclusion(value, file),
-        "format" => parse_format(value, file),
+        "format" => parse_format(value, file, class_consts),
         other => RuleParse::Gap(vec![other.to_string()]),
     }
 }
@@ -705,19 +708,23 @@ fn parse_inclusion(value: &Node<'_>, file: &str) -> RuleParse {
     }
 }
 
-fn parse_format(value: &Node<'_>, file: &str) -> RuleParse {
+fn parse_format(value: &Node<'_>, file: &str, class_consts: &super::ClassConsts) -> RuleParse {
     use crate::dialect::ValidationRule;
-    if let Some(pattern) = bare_regexp(value) {
-        return RuleParse::Rule(BuiltRule::bare(ValidationRule::Format { pattern, flags: String::new() }));
+    if let Some((pattern, flags)) = resolve_format_regex(value, class_consts) {
+        return RuleParse::Rule(BuiltRule::bare(ValidationRule::Format { pattern, flags }));
     }
-    if value.as_regular_expression_node().is_some() {
-        // A flagged literal (`/a/i`) is not the pattern the lowerer emits.
+    if value.as_regular_expression_node().is_some()
+        || value.as_interpolated_regular_expression_node().is_some()
+    {
+        // A flagged literal with a flag no target can reproduce exactly
+        // (`/a/x`), or an interpolation this build can't flatten, is not
+        // the pattern the lowerer emits.
         return RuleParse::Gap(vec!["format: with".to_string()]);
     }
     let Some(elements) = hash_elements(value) else {
         return RuleParse::Gap(vec!["format".to_string()]);
     };
-    let mut pattern = None;
+    let mut pattern: Option<(String, String)> = None;
     let mut built = BuiltRule::bare(ValidationRule::Format {
         pattern: String::new(),
         flags: String::new(),
@@ -734,8 +741,8 @@ fn parse_format(value: &Node<'_>, file: &str) -> RuleParse {
         };
         let child = assoc.value();
         match key.as_str() {
-            "with" => match bare_regexp(&child) {
-                Some(text) => pattern = Some(text),
+            "with" => match resolve_format_regex(&child, class_consts) {
+                Some(resolved) => pattern = Some(resolved),
                 None => gaps.push("format: with".to_string()),
             },
             "if" => push_condition(&child, file, &mut built.if_cond, "if", &mut gaps),
@@ -753,11 +760,35 @@ fn parse_format(value: &Node<'_>, file: &str) -> RuleParse {
         return RuleParse::Gap(gaps);
     }
     match pattern {
-        Some(pattern) => {
-            built.rule = ValidationRule::Format { pattern, flags: String::new() };
+        Some((pattern, flags)) => {
+            built.rule = ValidationRule::Format { pattern, flags };
             RuleParse::Rule(built)
         }
         None => RuleParse::Gap(vec!["format: with".to_string()]),
+    }
+}
+
+/// Resolve a `format: { with: … }` value (or a bare `format: /…/`
+/// shorthand) to the regex literal it names, restricted to the flag
+/// combinations every emit target this build ships can reproduce with
+/// Ruby's exact meaning: no flags, `i` (case-insensitive) alone, `m`
+/// (Ruby's dot-matches-newline) alone, or both together. `x`
+/// (extended) has no faithful JS equivalent and `o` / an encoding flag
+/// changes match semantics in ways no target mirrors, so either one
+/// stays a gap rather than silently dropping. The value can be a
+/// direct `/pattern/flags` literal, a model constant assigned one
+/// (`NAME_RE`, `.freeze`d or aliased), or a constant assigned an
+/// interpolation of exactly one other such constant whose flags agree
+/// (`ClassConsts::regex` flattens that case).
+fn resolve_format_regex(
+    node: &Node<'_>,
+    class_consts: &super::ClassConsts,
+) -> Option<(String, String)> {
+    let (pattern, flags) = class_consts.regex(node)?;
+    if flags.chars().all(|c| matches!(c, 'i' | 'm')) {
+        Some((pattern, flags))
+    } else {
+        None
     }
 }
 
@@ -899,20 +930,3 @@ fn literal_atom(node: &Node<'_>) -> Option<Literal> {
     node.as_nil_node().is_some().then_some(Literal::Nil)
 }
 
-/// The pattern the format check emits, with no flags. A flag would
-/// change the match and the lowerer writes an unflagged literal.
-fn bare_regexp(node: &Node<'_>) -> Option<String> {
-    let regexp = node.as_regular_expression_node()?;
-    if regexp.is_ignore_case()
-        || regexp.is_multi_line()
-        || regexp.is_extended()
-        || regexp.is_once()
-        || regexp.is_euc_jp()
-        || regexp.is_windows_31j()
-        || regexp.is_utf_8()
-        || regexp.is_ascii_8bit()
-    {
-        return None;
-    }
-    Some(String::from_utf8_lossy(regexp.unescaped()).into_owned())
-}
