@@ -70,12 +70,17 @@ fn time_zone_all_skips_a_name_with_no_zone_file() {
     let tzdir = zoneinfo_missing("Pacific/Apia"); // "Samoa" in ZONE_NAMES
     let script = format!(
         r#"
-ENV["TZDIR"] = {tzdir:?}
+ENV["TZDIR"] = "/usr/share/zoneinfo"
+full_names = ActiveSupport::TimeZone.all.map(&:name)
+raise "fixture needs Samoa to resolve with the full TZDIR" unless full_names.include?("Samoa")
 
-all = ActiveSupport::TimeZone.all
-names = all.map(&:name)
+ENV["TZDIR"] = {tzdir:?}
+names = ActiveSupport::TimeZone.all.map(&:name)
+
 raise "Samoa should be left out" if names.include?("Samoa")
-raise "expected 151 zones, got #{{all.size}}" unless all.size == 151
+only_in_full = full_names - names
+raise "expected exactly Samoa to disappear, got #{{only_in_full.inspect}}" unless only_in_full == ["Samoa"]
+raise "no zone should appear that wasn't already there" unless (names - full_names).empty?
 raise "other zones still resolve" unless names.include?("Tokyo")
 
 raise "lookup should return nil" unless ActiveSupport::TimeZone.lookup("Samoa").nil?
