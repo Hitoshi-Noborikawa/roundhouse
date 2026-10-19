@@ -1558,5 +1558,110 @@ module ActiveRecord
       pair = changes_to_save[name]
       pair.nil? ? attributes[name] : pair[0]
     end
+
+    # ---- cache_key / cache_version / cache_key_with_version ---------
+    #
+    # Lives HERE, not base.rb, for the same reason as the rest of this
+    # file (see the class comment above): base.rb is transpiled into
+    # every strict target's runtime, and `self[:updated_at]` below
+    # compiles to whatever each target represents an untyped value as
+    # (Rust: `serde_json::Value`), which has no `.to_i` — roundhouse
+    # #1034's compare(rust)/compare-extra(kotlin,swift)/smoke(rust)/
+    # smoke-extra(swift) all failed to compile their OWN runtime
+    # library over this before it moved here. No real_blog app code on
+    # a strict target calls `Base#cache_key_with_version` (ActiveRecord
+    # there is base.rb's bare validation/errors surface, not a
+    # queryable model), so moving it out costs strict targets nothing
+    # they had.
+    #
+    # Placed at the END of this reopen, after every other method,
+    # simply because this is where the rebase onto main landed it —
+    # this block originally sat right after `_pend_preload`/
+    # `_await_preload`, a deferred-preload mechanism main removed
+    # (replaced by `Relation#preload_associations`/`_preload_<assoc>`)
+    # between this PR's fork point and the rebase. The first rebase
+    # attempt's conflict resolution wrongly kept `_pend_preload`/
+    # `_await_preload` (their diff hunk's "ours" side was empty, which
+    # read as "nothing to merge" rather than "main deleted this"), which
+    # left `ActiveRecord::PendingPreload` referenced with no class
+    # anywhere left to declare it — confirmed by grepping the whole
+    # tree, `.rb`/`.rbs`/`.rs` alike, for `PendingPreload` and finding
+    # only this file. That orphaned pair is gone now; nothing else in
+    # the tree ever called them.
+    #
+    # Rails' `ActiveRecord::Integration` (`active_record/integration.rb`):
+    # a single record's half of the same fragment-cache key Relation's
+    # `cache_key_with_version` (`relation.rb`) answers for a collection.
+    # A jbuilder `cache!` key naming one record — `json.cache!([
+    # current_account, @widget]) do … end`, `current_account` a
+    # `helper_method` answering a record — calls this the same way an
+    # app controller or view does, and `cache!`'s `key` is a plain
+    # positional parameter (jbuilder 2.15.1's `jbuilder_template.rb`),
+    # so it is evaluated whether or not the controller is caching.
+    #
+    # Exact Rails parity except the timestamp rendering (see below):
+    # `id` and `table_name` are real facts here, not a digest over SQL
+    # text the way Relation's collection key has to approximate, so
+    # there is nothing to trade off on the key/version SHAPE itself —
+    # only on how the updated_at TIMESTAMP inside it is written.
+    #
+    # Rails always takes the `cache_versioning = true` shape (the
+    # default since Rails 5.2; this runtime never models it as
+    # configurable), under which `cache_key` carries no timestamp at
+    # all and `cache_version` carries it alone:
+    #   new record       cache_key "<table>/new",   cache_version nil
+    #   saved record      cache_key "<table>/<id>",
+    #                      cache_version "<updated_at>" (nil without an
+    #                      updated_at column)
+    #   cache_key_with_version   "<key>-<version>", or just <key> when
+    #                      <version> is nil (an unsaved record, or no
+    #                      updated_at column)
+    def cache_key
+      tbl = self.class.table_name
+      return "#{tbl}/new" if new_record?
+      rid = id
+      "#{tbl}/#{rid}"
+    end
+
+    # Reads `updated_at` through `self[:updated_at]`, not the bare
+    # per-model-synthesized `updated_at` reader: that reader is not a
+    # method Base itself declares (every concrete model synthesizes its
+    # own), so a bare call from this body has no declared return type
+    # to seed from and came back an unresolved type variable in the
+    # hand-RBS-typed `every_runtime_method_body_is_fully_typed` gate,
+    # which allows the declared `Untyped` gradual escape but not a true
+    # inference gap.
+    #
+    # `[]` is the established escape for exactly this (`fill_timestamps`,
+    # base.rb, writes `self[:updated_at] = now` for the identical
+    # reason, the write side of this same problem). Base's own `[]` is
+    # typed `Str` in the catalog — a known, already-accepted
+    # approximation ("Imprecise for non-string columns (`article[:id]`
+    # is actually Int), but matches the existing declared shape",
+    # `catalog/mod.rs`) for the STATIC type only: the CONCRETE per-model
+    # `[]` the lowerer synthesizes (`model_to_library/schema.rs`)
+    # answers the REAL column value through a `case` on the attribute
+    # name, declared `Untyped` there — so `self[:updated_at]` is the
+    # real `updated_at` value, genuinely, dispatched dynamically; `Str`
+    # only describes what Base itself can promise about a call it
+    # cannot resolve concretely.
+    #
+    # `updated_at.to_f` (seconds with a fractional part), not Rails'
+    # `to_fs(:usec)` string — the same tradeoff `Relation#
+    # compute_cache_version` documents, and the same fix (roundhouse
+    # #1034, CodeRabbit: `to_i` truncated to whole seconds, so two
+    # updates inside the same second answered the same
+    # `cache_key_with_version`). `Time#to_f` is confirmed directly
+    # against the installed Spinel compiler.
+    def cache_version
+      return nil unless has_attribute?(:updated_at)
+      ts = self[:updated_at]
+      ts.nil? ? nil : ts.to_f.to_s
+    end
+
+    def cache_key_with_version
+      version = cache_version
+      version.nil? ? cache_key : "#{cache_key}-#{version}"
+    end
   end
 end
