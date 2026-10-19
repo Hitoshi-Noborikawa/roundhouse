@@ -19,9 +19,10 @@ use crate::expr::{Expr, ExprNode, InterpPart};
 /// `@flash[:alert]` at the matching positions — without it, the
 /// controller would need view-specific signature knowledge to decide
 /// whether to pass each flash slot. Cost is two unused locals per
-/// view that doesn't reference flash; emit-side it's negligible.
-pub(super) fn collect_extra_params(body: &Expr, arg_name: &str) -> Vec<String> {
-    let mut out: Vec<String> = vec!["notice".to_string(), "alert".to_string()];
+/// view that doesn't reference flash; emit-side it's negligible. They
+/// go by the names `flash` gives them (see `flash_locals`).
+pub(super) fn collect_extra_params(body: &Expr, arg_name: &str, flash: &[String; 2]) -> Vec<String> {
+    let mut out: Vec<String> = flash.to_vec();
     // `action_name`/`controller_name` are controller context Rails exposes
     // to views. Unlike flash, they're collected only when the view
     // actually references them (kept right after notice/alert, in a fixed

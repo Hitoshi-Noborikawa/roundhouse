@@ -441,7 +441,9 @@ fn build_library_class(view: &View, lx: &ViewLowerCtx, type_body: bool) -> Libra
         .and_then(|k| lx.closures.get(&k).cloned())
         .unwrap_or_default();
     let ivar_locals = view_ivar_locals(view, &closure_raw);
-    let rewritten = rewrite_ivars_to_locals(&view.body, &ivar_locals);
+    let keys = view_key_of(view).and_then(|k| lx.locals_keys.get(&k));
+    let (body, flash) = flash_locals(view, &ivar_locals, &arg_name, keys.map(Vec::as_slice));
+    let rewritten = rewrite_ivars_to_locals(&body, &ivar_locals);
 
     // (No trim pass here: erubi's `<% %>`-on-its-own-line rule is
     // applied lexically in `src/erb.rs`, where the tag's own line is
@@ -456,7 +458,7 @@ fn build_library_class(view: &View, lx: &ViewLowerCtx, type_body: bool) -> Libra
     // `alert`, etc. (Rails flash helpers parsed as bare Sends/Vars),
     // plus names referenced inside `defined?(name)` Sends (partial-
     // local optionality markers in ERB).
-    let extra_params = collect_extra_params(&rewritten, &arg_name);
+    let extra_params = collect_extra_params(&rewritten, &arg_name, &flash);
 
     // Rewrite `defined?(name)` marker Sends to `!name.nil?` checks.
     // Runs AFTER collect_extra_params so the inner Var name has been
@@ -2587,8 +2589,10 @@ pub(crate) fn partial_call_contracts(
         let record = singularize(last_segment(dir));
         let closure_raw: Vec<Symbol> = closures.get(&key).cloned().unwrap_or_default();
         let ivar_locals = view_ivar_locals(view, &closure_raw);
-        let rewritten = rewrite_ivars_to_locals(&view.body, &ivar_locals);
-        let mut extras = collect_extra_params(&rewritten, &record);
+        let keys = keys_map.get(&key).map(Vec::as_slice);
+        let (body, flash) = flash_locals(view, &ivar_locals, &record, keys);
+        let rewritten = rewrite_ivars_to_locals(&body, &ivar_locals);
+        let mut extras = collect_extra_params(&rewritten, &record, &flash);
         // The def side names each closure param by `ivar_locals` and
         // skips the one the record covers. The caller passes `@<ivar>`
         // for the rest, so the contract keeps the RAW ivar name: the
@@ -2770,8 +2774,10 @@ pub(super) fn partial_extras_map(
         let key = (camelize_path(&snake_case(dir)), stem.to_string());
         let closure_raw: Vec<Symbol> = closures.get(&key).cloned().unwrap_or_default();
         let ivar_locals = view_ivar_locals(view, &closure_raw);
-        let rewritten = rewrite_ivars_to_locals(&view.body, &ivar_locals);
-        let mut extras = collect_extra_params(&rewritten, &arg_name);
+        let keys = keys_map.get(&key).map(Vec::as_slice);
+        let (body, flash) = flash_locals(view, &ivar_locals, &arg_name, keys);
+        let rewritten = rewrite_ivars_to_locals(&body, &ivar_locals);
+        let mut extras = collect_extra_params(&rewritten, &arg_name, &flash);
         // locals-key params — mirrors the def site's append exactly.
         let closure: Vec<String> =
             closure_raw.iter().map(|s| ivar_local(&ivar_locals, s.as_str())).collect();
@@ -3090,7 +3096,25 @@ fn collect_render_keys(
             }
         }
     }
+    if let Some(k) = turbo_stream_partial_key(e, dir) {
+        out.push(k);
+    }
     e.node.for_each_child(&mut |c| collect_render_keys(c, dir, pools, out));
+}
+
+/// The partial a `turbo_stream.<action> target, partial: "x"` call
+/// renders, which the walker lowers through the same partial call a
+/// `render` gets, so it is an edge like any other.
+///
+/// Not the positional form (`turbo_stream.append target, @message`): the
+/// walker renders `@message`'s partial only when it is a record, which
+/// it tells from a String by analyzed types this graph does not have.
+/// An edge for a String would thread an unrelated partial's ivars into
+/// the caller.
+fn turbo_stream_partial_key(e: &Expr, dir: &str) -> Option<ViewKey> {
+    let ExprNode::Send { recv, method, args, block: None, .. } = &*e.node else { return None };
+    let ts = self::helpers::turbo_stream_partial(recv.as_ref(), method.as_str(), args)?;
+    Some(partial_name_to_key(ts.partial, dir))
 }
 
 /// Resolve a partial-name string to its `(module, method)` ViewKey.
@@ -3645,6 +3669,82 @@ fn view_ivar_locals(view: &View, closure: &[Symbol]) -> IvarLocals {
     let mut names: Vec<&str> = closure.iter().map(|s| s.as_str()).collect();
     collect(&view.body, &mut names);
     ivar_local_names(names)
+}
+
+/// The names `view`'s flash params go by, and its body with its flash
+/// reads renamed to match.
+///
+/// Every template takes the flash pair as trailing params
+/// (`collect_extra_params`), and `@notice` reads as the local `notice`,
+/// so a view reading both read them through one local: the flash param
+/// was dropped while every caller still passed it. The ivar keeps its
+/// name, which every site threading it relies on. The flash takes the
+/// first of `notice_`, `notice__`, … that no name of the view has: none
+/// its body spells or binds, and none it is handed (its `record`, the
+/// locals `keys` its callers pass, its `local_assigns` keys).
+///
+/// Only the flash reads move, a bare `notice` call: a local a block or
+/// an assignment binds reads as a `Var` and keeps its name. A view handed
+/// a `notice` local reads that, not the flash, so it keeps its names, as
+/// does a strict-locals partial, which takes no flash.
+fn flash_locals<'a>(
+    view: &'a View,
+    ivar_locals: &IvarLocals,
+    record: &str,
+    keys: Option<&[String]>,
+) -> (std::borrow::Cow<'a, Expr>, [String; 2]) {
+    use std::collections::HashSet;
+    fn names(e: &Expr, out: &mut HashSet<String>, handed: &mut HashSet<String>) {
+        match &*e.node {
+            ExprNode::Var { name, .. }
+            | ExprNode::Assign { target: LValue::Var { name, .. }, .. }
+            | ExprNode::OpAssign { target: LValue::Var { name, .. }, .. }
+            | ExprNode::Send { recv: None, method: name, .. } => {
+                out.insert(name.as_str().to_string());
+            }
+            ExprNode::Lambda { params, rest_param, extra_params, block_param, .. } => {
+                let bound = params.iter().chain(rest_param).chain(block_param);
+                out.extend(bound.chain(extra_params.iter().map(|p| &p.name)).map(|p| p.as_str().to_string()));
+            }
+            _ => {}
+        }
+        if let Some(k) = local_assigns_key(e) {
+            handed.insert(k);
+        }
+        e.node.for_each_child(&mut |c| names(c, out, handed));
+    }
+    fn rename(e: &mut Expr, from: &str, to: &Symbol) {
+        if let ExprNode::Send { recv: None, method, args, block: None, .. } = &mut *e.node {
+            if args.is_empty() && method.as_str() == from {
+                *method = to.clone();
+            }
+        }
+        e.node.for_each_child_mut(&mut |c| rename(c, from, to));
+    }
+    let mut flash = ["notice".to_string(), "alert".to_string()];
+    let shadowed = |n: &String| ivar_locals.values().any(|l| l == n);
+    if view.strict_locals.is_some() || !flash.iter().any(shadowed) {
+        return (std::borrow::Cow::Borrowed(&view.body), flash);
+    }
+    let mut handed: HashSet<String> =
+        std::iter::once(record).chain(keys.into_iter().flatten().map(String::as_str)).map(str::to_string).collect();
+    let mut taken: HashSet<String> = ivar_locals.values().cloned().collect();
+    names(&view.body, &mut taken, &mut handed);
+    taken.extend(handed.iter().cloned());
+    let mut body = std::borrow::Cow::Borrowed(&view.body);
+    for n in &mut flash {
+        if !shadowed(n) || handed.contains(n.as_str()) {
+            continue;
+        }
+        let mut local = format!("{n}_");
+        while taken.contains(&local) {
+            local.push('_');
+        }
+        rename(body.to_mut(), n, &Symbol::from(local.as_str()));
+        taken.insert(local.clone());
+        *n = local;
+    }
+    (body, flash)
 }
 
 /// Rewrite every `@ivar` read (and Ivar-LValue assign) under `expr`
