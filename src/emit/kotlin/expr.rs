@@ -1015,13 +1015,66 @@ fn emit_literal(lit: &Literal) -> String {
         Literal::Str { value } => format!("\"{}\"", escape_str(value)),
         // No symbol type in Kotlin → string.
         Literal::Sym { value } => format!("\"{}\"", escape_str(value.as_str())),
-        Literal::Regex { pattern, .. } => {
+        Literal::Regex { pattern, flags } => {
             // Ruby `/[\r\n\0\t]/` carries a backslash-zero NUL escape.
             // Java `Pattern` rejects `\0` (octal needs more digits); use
             // `\u0000` which both Kotlin's string literal and Pattern accept.
             let normalized = normalize_java_regex_nul(pattern);
-            format!("Regex(\"{}\")", escape_str(&normalized))
+            let options = kotlin_regex_options(flags);
+            if options.is_empty() {
+                format!("Regex(\"{}\")", escape_str(&normalized))
+            } else {
+                format!("Regex(\"{}\", setOf({options}))", escape_str(&normalized))
+            }
         }
+    }
+}
+
+/// Ruby regex flags this build can reproduce exactly: `i` →
+/// `RegexOption.IGNORE_CASE`. Ruby's `m` (dot-matches-newline) is
+/// `RegexOption.DOT_MATCHES_ALL` — there's no "`^`/`$` at line
+/// boundaries" option here because Kotlin's `Regex` (via Java's
+/// `Pattern`) has no literal flag for it either. Any other flag
+/// character stays an ingest-time gap, so none reaches here.
+fn kotlin_regex_options(flags: &str) -> String {
+    let mut parts: Vec<&str> = Vec::new();
+    if flags.contains('i') {
+        parts.push("RegexOption.IGNORE_CASE");
+    }
+    if flags.contains('m') {
+        parts.push("RegexOption.DOT_MATCHES_ALL");
+    }
+    parts.join(", ")
+}
+
+#[cfg(test)]
+mod regex_flag_tests {
+    use super::{emit_literal, kotlin_regex_options};
+    use crate::expr::Literal;
+
+    #[test]
+    fn no_flags_drop_the_options_set() {
+        let lit = Literal::Regex { pattern: "a.b".into(), flags: "".into() };
+        assert_eq!(emit_literal(&lit), r#"Regex("a.b")"#);
+    }
+
+    #[test]
+    fn ignore_case_maps_to_regexoption_ignore_case() {
+        assert_eq!(kotlin_regex_options("i"), "RegexOption.IGNORE_CASE");
+    }
+
+    #[test]
+    fn rubys_m_dot_matches_newline_maps_to_dot_matches_all() {
+        assert_eq!(kotlin_regex_options("m"), "RegexOption.DOT_MATCHES_ALL");
+    }
+
+    #[test]
+    fn ignore_case_and_dot_matches_newline_combine_in_a_set() {
+        let lit = Literal::Regex { pattern: "a.b".into(), flags: "im".into() };
+        assert_eq!(
+            emit_literal(&lit),
+            r#"Regex("a.b", setOf(RegexOption.IGNORE_CASE, RegexOption.DOT_MATCHES_ALL))"#
+        );
     }
 }
 

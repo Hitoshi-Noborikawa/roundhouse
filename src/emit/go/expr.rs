@@ -3455,6 +3455,9 @@ pub(super) fn emit_literal(lit: &Literal) -> String {
             // Empty flags → bare pattern (Go's `(?)` is a parse
             // error; the `(?<flags>)` group requires at least one
             // flag char). With flags, prepend the standard prefix.
+            // Ruby's `m` (dot-matches-newline) is Go's `s`, not `m`
+            // (Go's `m` shifts `^`/`$` to line boundaries instead).
+            let flags = crate::emit::shared::regex_literal::translate_ruby_flags_for_re2_style_m(flags);
             let go_pattern = ruby_regex_to_go(pattern);
             let full = if flags.is_empty() {
                 go_pattern
@@ -3463,6 +3466,33 @@ pub(super) fn emit_literal(lit: &Literal) -> String {
             };
             format!("regexp.MustCompile({})", go_str_literal(&full))
         }
+    }
+}
+
+#[cfg(test)]
+mod regex_flag_tests {
+    use super::emit_literal;
+    use crate::expr::Literal;
+
+    fn regex(pattern: &str, flags: &str) -> Literal {
+        Literal::Regex { pattern: pattern.to_string(), flags: flags.to_string() }
+    }
+
+    #[test]
+    fn empty_flags_render_a_bare_pattern_not_an_invalid_group() {
+        assert_eq!(emit_literal(&regex("a.b", "")), r#"regexp.MustCompile("a.b")"#);
+    }
+
+    #[test]
+    fn ignore_case_passes_through_as_go_i() {
+        assert_eq!(emit_literal(&regex("a.b", "i")), r#"regexp.MustCompile("(?i)a.b")"#);
+    }
+
+    #[test]
+    fn rubys_m_dot_matches_newline_maps_to_gos_s_not_m() {
+        // Go's own `m` flag shifts `^`/`$` to line boundaries — Ruby's
+        // `m` (dot matches newline) is Go's `s`.
+        assert_eq!(emit_literal(&regex("a.b", "m")), r#"regexp.MustCompile("(?s)a.b")"#);
     }
 }
 

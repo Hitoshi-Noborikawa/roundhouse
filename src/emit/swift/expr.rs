@@ -1453,9 +1453,65 @@ fn emit_literal(lit: &Literal) -> String {
         Literal::Str { value } => format!("\"{}\"", escape_str(value)),
         // No symbol type in Swift → string.
         Literal::Sym { value } => format!("\"{}\"", escape_str(value.as_str())),
-        Literal::Regex { pattern, .. } => {
-            format!("try! NSRegularExpression(pattern: \"{}\")", escape_str(pattern))
+        Literal::Regex { pattern, flags } => {
+            let options = swift_regex_options(flags);
+            if options.is_empty() {
+                format!("try! NSRegularExpression(pattern: \"{}\")", escape_str(pattern))
+            } else {
+                format!(
+                    "try! NSRegularExpression(pattern: \"{}\", options: [{options}])",
+                    escape_str(pattern)
+                )
+            }
         }
+    }
+}
+
+/// Ruby regex flags this build can reproduce exactly: `i` →
+/// `.caseInsensitive`. Ruby's `m` (dot-matches-newline) is
+/// `.dotMatchesLineSeparators` — `NSRegularExpression` has no literal
+/// flag for "`^`/`$` at line boundaries" (that's `.anchorsMatchLines`,
+/// which isn't what Ruby's `m` means). Any other flag character stays
+/// an ingest-time gap, so none reaches here.
+fn swift_regex_options(flags: &str) -> String {
+    let mut parts: Vec<&str> = Vec::new();
+    if flags.contains('i') {
+        parts.push(".caseInsensitive");
+    }
+    if flags.contains('m') {
+        parts.push(".dotMatchesLineSeparators");
+    }
+    parts.join(", ")
+}
+
+#[cfg(test)]
+mod regex_flag_tests {
+    use super::{emit_literal, swift_regex_options};
+    use crate::expr::Literal;
+
+    #[test]
+    fn no_flags_drop_the_options_argument() {
+        let lit = Literal::Regex { pattern: "a.b".into(), flags: "".into() };
+        assert_eq!(emit_literal(&lit), r#"try! NSRegularExpression(pattern: "a.b")"#);
+    }
+
+    #[test]
+    fn ignore_case_maps_to_case_insensitive() {
+        assert_eq!(swift_regex_options("i"), ".caseInsensitive");
+    }
+
+    #[test]
+    fn rubys_m_dot_matches_newline_maps_to_dot_matches_line_separators() {
+        assert_eq!(swift_regex_options("m"), ".dotMatchesLineSeparators");
+    }
+
+    #[test]
+    fn ignore_case_and_dot_matches_newline_combine_in_the_options_array() {
+        let lit = Literal::Regex { pattern: "a.b".into(), flags: "im".into() };
+        assert_eq!(
+            emit_literal(&lit),
+            r#"try! NSRegularExpression(pattern: "a.b", options: [.caseInsensitive, .dotMatchesLineSeparators])"#
+        );
     }
 }
 

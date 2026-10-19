@@ -501,7 +501,7 @@ fn parse_of_options<'a>(
             }
         },
         ValidatesKind::Format => match pattern {
-            Some(pattern) => ValidationRule::Format { pattern },
+            Some(pattern) => ValidationRule::Format { pattern, flags: String::new() },
             None => {
                 gaps.push("format: with".to_string());
                 return;
@@ -708,7 +708,7 @@ fn parse_inclusion(value: &Node<'_>, file: &str) -> RuleParse {
 fn parse_format(value: &Node<'_>, file: &str) -> RuleParse {
     use crate::dialect::ValidationRule;
     if let Some(pattern) = bare_regexp(value) {
-        return RuleParse::Rule(BuiltRule::bare(ValidationRule::Format { pattern }));
+        return RuleParse::Rule(BuiltRule::bare(ValidationRule::Format { pattern, flags: String::new() }));
     }
     if value.as_regular_expression_node().is_some() {
         // A flagged literal (`/a/i`) is not the pattern the lowerer emits.
@@ -720,6 +720,7 @@ fn parse_format(value: &Node<'_>, file: &str) -> RuleParse {
     let mut pattern = None;
     let mut built = BuiltRule::bare(ValidationRule::Format {
         pattern: String::new(),
+        flags: String::new(),
     });
     let mut gaps = Vec::new();
     for el in elements.iter() {
@@ -753,7 +754,7 @@ fn parse_format(value: &Node<'_>, file: &str) -> RuleParse {
     }
     match pattern {
         Some(pattern) => {
-            built.rule = ValidationRule::Format { pattern };
+            built.rule = ValidationRule::Format { pattern, flags: String::new() };
             RuleParse::Rule(built)
         }
         None => RuleParse::Gap(vec!["format: with".to_string()]),

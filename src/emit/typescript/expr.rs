@@ -4086,17 +4086,55 @@ pub(super) fn js_literal(span: Span, lit: &Literal) -> Js {
             // string-boundary in practice (no `m` → no per-line shift),
             // matching Ruby `\A` / `\z` for the framework's use cases
             // (validates_format_of, route param matching, etc.).
+            //
+            // Ruby's `m` flag is "dot matches newline" — JS's own `m`
+            // is "`^`/`$` match at line boundaries" (which would also
+            // break the anchor translation above). JS's dotall flag is
+            // spelled `s`, so Ruby `m` maps there instead.
             Js::new(
                 span,
                 JsExpr::Regex {
                     pattern: translate_ruby_regex_anchors(pattern),
-                    flags: flags.clone(),
+                    flags: crate::emit::shared::regex_literal::translate_ruby_flags_for_re2_style_m(flags),
                 },
             )
         }
     }
 }
 
+#[cfg(test)]
+mod regex_flag_tests {
+    use super::js_literal;
+    use crate::expr::Literal;
+    use crate::span::Span;
+
+    fn flags_of(pattern: &str, flags: &str) -> String {
+        let lit = Literal::Regex { pattern: pattern.to_string(), flags: flags.to_string() };
+        match *js_literal(Span::synthetic(), &lit).node {
+            super::JsExpr::Regex { flags, .. } => flags,
+            other => panic!("expected JsExpr::Regex, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn ignore_case_passes_through_as_js_i() {
+        assert_eq!(flags_of("a.b", "i"), "i");
+    }
+
+    #[test]
+    fn rubys_m_dot_matches_newline_maps_to_js_s_not_m() {
+        // JS's own `m` flag shifts `^`/`$` to line boundaries (and
+        // would also break the `\A`/`\z` anchor translation, which
+        // assumes no `m` flag is ever emitted). Ruby's `m` (dot
+        // matches newline) is JS's `s`.
+        assert_eq!(flags_of("a.b", "m"), "s");
+    }
+
+    #[test]
+    fn ignore_case_and_dot_matches_newline_combine() {
+        assert_eq!(flags_of("a.b", "im"), "is");
+    }
+}
 
 /// Classify a `gsub` pattern into the JS pattern expression and the
 /// method name (`replace` vs `replaceAll`).

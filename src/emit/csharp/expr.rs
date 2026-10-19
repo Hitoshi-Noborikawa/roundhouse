@@ -1022,7 +1022,62 @@ fn emit_literal(lit: &Literal) -> String {
         }
         Literal::Str { value } => format!("\"{}\"", escape_str(value)),
         Literal::Sym { value } => format!("\"{}\"", escape_str(value.as_str())),
-        Literal::Regex { pattern, .. } => format!("new Regex(\"{}\")", escape_str(pattern)),
+        Literal::Regex { pattern, flags } => {
+            let options = csharp_regex_options(flags);
+            if options.is_empty() {
+                format!("new Regex(\"{}\")", escape_str(pattern))
+            } else {
+                format!("new Regex(\"{}\", {options})", escape_str(pattern))
+            }
+        }
+    }
+}
+
+/// Ruby regex flags this build can reproduce exactly on .NET: `i` is
+/// `RegexOptions.IgnoreCase`. Ruby's `m` (dot-matches-newline) is
+/// `RegexOptions.Singleline` — .NET's own `RegexOptions.Multiline`
+/// instead shifts `^`/`$` to line boundaries, a different flag Ruby
+/// doesn't have. Any other flag character stays an ingest-time gap
+/// (`ValidationRule::Format` never carries one), so none reaches here.
+fn csharp_regex_options(flags: &str) -> String {
+    let mut parts: Vec<&str> = Vec::new();
+    if flags.contains('i') {
+        parts.push("RegexOptions.IgnoreCase");
+    }
+    if flags.contains('m') {
+        parts.push("RegexOptions.Singleline");
+    }
+    parts.join(" | ")
+}
+
+#[cfg(test)]
+mod regex_flag_tests {
+    use super::{csharp_regex_options, emit_literal};
+    use crate::expr::Literal;
+
+    #[test]
+    fn no_flags_drop_the_options_argument() {
+        let lit = Literal::Regex { pattern: "a.b".into(), flags: "".into() };
+        assert_eq!(emit_literal(&lit), r#"new Regex("a.b")"#);
+    }
+
+    #[test]
+    fn ignore_case_maps_to_regexoptions_ignorecase() {
+        assert_eq!(csharp_regex_options("i"), "RegexOptions.IgnoreCase");
+    }
+
+    #[test]
+    fn rubys_m_dot_matches_newline_maps_to_regexoptions_singleline_not_multiline() {
+        assert_eq!(csharp_regex_options("m"), "RegexOptions.Singleline");
+    }
+
+    #[test]
+    fn ignore_case_and_dot_matches_newline_combine_in_the_constructor() {
+        let lit = Literal::Regex { pattern: "a.b".into(), flags: "im".into() };
+        assert_eq!(
+            emit_literal(&lit),
+            r#"new Regex("a.b", RegexOptions.IgnoreCase | RegexOptions.Singleline)"#
+        );
     }
 }
 

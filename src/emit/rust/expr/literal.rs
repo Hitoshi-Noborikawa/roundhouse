@@ -463,6 +463,9 @@ pub(crate) fn emit_literal(lit: &Literal) -> String {
         Literal::Str { value } => format!("{value:?}"),
         Literal::Sym { value } => format!("{:?}", value.as_str()),
         Literal::Regex { pattern, flags } => {
+            // Ruby's `m` (dot-matches-newline) is Rust's `s`, not `m`
+            // (Rust's `m` shifts `^`/`$` to line boundaries instead).
+            let flags = crate::emit::shared::regex_literal::translate_ruby_flags_for_re2_style_m(flags);
             let source = if flags.is_empty() {
                 pattern.clone()
             } else {
@@ -470,5 +473,52 @@ pub(crate) fn emit_literal(lit: &Literal) -> String {
             };
             format!("regex::Regex::new({source:?}).unwrap()")
         }
+    }
+}
+
+#[cfg(test)]
+mod regex_flag_tests {
+    use super::emit_literal;
+    use crate::expr::Literal;
+
+    fn regex(pattern: &str, flags: &str) -> Literal {
+        Literal::Regex { pattern: pattern.to_string(), flags: flags.to_string() }
+    }
+
+    #[test]
+    fn empty_flags_render_a_bare_pattern_not_an_invalid_group() {
+        // `regex::Regex::new("(?)…")` is a parse error — empty flags
+        // must not grow an empty `(?...)` prefix.
+        assert_eq!(
+            emit_literal(&regex("a.b", "")),
+            r#"regex::Regex::new("a.b").unwrap()"#
+        );
+    }
+
+    #[test]
+    fn ignore_case_passes_through_as_rust_i() {
+        assert_eq!(
+            emit_literal(&regex("a.b", "i")),
+            r#"regex::Regex::new("(?i)a.b").unwrap()"#
+        );
+    }
+
+    #[test]
+    fn rubys_m_dot_matches_newline_maps_to_rusts_s_not_m() {
+        // Rust's own `m` flag shifts `^`/`$` to line boundaries — a
+        // different flag Ruby doesn't have. Ruby's `m` (dot matches
+        // newline) is Rust's `s`.
+        assert_eq!(
+            emit_literal(&regex("a.b", "m")),
+            r#"regex::Regex::new("(?s)a.b").unwrap()"#
+        );
+    }
+
+    #[test]
+    fn ignore_case_and_dot_matches_newline_combine() {
+        assert_eq!(
+            emit_literal(&regex("a.b", "im")),
+            r#"regex::Regex::new("(?is)a.b").unwrap()"#
+        );
     }
 }

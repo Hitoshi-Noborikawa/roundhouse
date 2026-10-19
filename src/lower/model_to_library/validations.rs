@@ -570,7 +570,9 @@ fn validation_rule_to_calls(msgs: Messages, attr: &Symbol, rule: &ValidationRule
             attr_ty,
             *allow_nil,
         ),
-        ValidationRule::Format { pattern } => vec![inline_format_check(msgs, attr, pattern)],
+        ValidationRule::Format { pattern, flags } => {
+            vec![inline_format_check(msgs, attr, pattern, flags)]
+        }
         ValidationRule::Numericality { only_integer, gt, lt, gte, lte } => {
             inline_numericality_check(msgs, attr, *only_integer, *gt, *lt, *gte, *lte)
         }
@@ -956,12 +958,12 @@ fn inline_inclusion_check(
 ///   end
 /// The runtime helper's `with.nil?` guard is unnecessary — the
 /// pattern is a known literal at lower time.
-fn inline_format_check(msgs: Messages, attr: &Symbol, pattern: &str) -> Expr {
+fn inline_format_check(msgs: Messages, attr: &Symbol, pattern: &str, flags: &str) -> Expr {
     let attr_ivar = ivar(attr);
     let regex_lit = Expr::new(
         Span::synthetic(),
         ExprNode::Lit {
-            value: Literal::Regex { pattern: pattern.to_string(), flags: String::new() },
+            value: Literal::Regex { pattern: pattern.to_string(), flags: flags.to_string() },
         },
     );
     let is_string = is_a_check(&attr_ivar, "String");
@@ -1570,8 +1572,21 @@ mod tests {
 
     #[test]
     fn format_emits_invalid_error() {
-        let expr = inline_format_check(Messages::default(), &attr(), "[A-Z]+");
+        let expr = inline_format_check(Messages::default(), &attr(), "[A-Z]+", "");
         assert_eq!(collect_error_messages(&expr), vec!["Title is invalid"]);
+    }
+
+    /// The regex literal `inline_format_check` builds carries the
+    /// flags it's given — before this, `Literal::Regex { flags: .. }`
+    /// was always hardcoded empty, so a model's `i`/`m` flag never
+    /// reached any emit target even once ingest stopped refusing it.
+    #[test]
+    fn format_check_carries_flags_into_the_regex_literal() {
+        let expr = inline_format_check(Messages::default(), &attr(), "a.b", "im");
+        assert!(
+            format!("{expr:?}").contains(r#"Regex { pattern: "a.b", flags: "im" }"#),
+            "{expr:#?}"
+        );
     }
 
     #[test]

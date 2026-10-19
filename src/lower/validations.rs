@@ -82,9 +82,14 @@ pub enum Check {
     /// every number between the endpoints, so this is not a value list.
     /// Default message: `"is not included in the list"`.
     Cover { begin: f64, end: f64, exclusive: bool },
-    /// String must match the regex.
+    /// String must match the regex. `flags` is Ruby's own flag
+    /// characters (`i`, `m`, or both — see `ValidationRule::Format`).
     /// Default message: `"is invalid"`.
-    Format { pattern: String },
+    Format {
+        pattern: String,
+        #[serde(default)]
+        flags: String,
+    },
     /// String must be unique in the table (evaluator hits the DB).
     /// Default message: `"has already been taken"`.
     Uniqueness { scope: Vec<Symbol>, case_sensitive: bool },
@@ -182,8 +187,8 @@ fn expand_rule(rule: &ValidationRule, out: &mut Vec<Check>) {
                 out.push(Check::MaxLength { n: *n, message: message.clone() });
             }
         }
-        ValidationRule::Format { pattern } => {
-            out.push(Check::Format { pattern: pattern.clone() });
+        ValidationRule::Format { pattern, flags } => {
+            out.push(Check::Format { pattern: pattern.clone(), flags: flags.clone() });
         }
         ValidationRule::Numericality { only_integer, gt, lt, gte, lte } => {
             if *only_integer {

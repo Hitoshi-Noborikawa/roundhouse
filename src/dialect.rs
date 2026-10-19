@@ -636,7 +636,17 @@ pub enum ValidationRule {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         allow_nil: Option<bool>,
     },
-    Format { pattern: String },
+    Format {
+        pattern: String,
+        /// Ruby regex flags, restricted at ingest to the combinations
+        /// every emit target can reproduce with Ruby's exact meaning:
+        /// `i` (case-insensitive), `m` (Ruby's dot-matches-newline), or
+        /// both — never `x` (extended) or an encoding/`o` flag, which
+        /// stay a `format: with` survey gap instead. `#[serde(default)]`
+        /// so JSON written before this field existed still loads.
+        #[serde(default)]
+        flags: String,
+    },
     Numericality {
         only_integer: bool,
         #[serde(default, skip_serializing_if = "Option::is_none")]
