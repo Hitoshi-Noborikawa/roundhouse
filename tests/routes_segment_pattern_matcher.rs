@@ -76,6 +76,20 @@ fn lookahead_constraint_refuses_the_whole_route() {
 }
 
 #[test]
+fn hex_and_newline_escapes_refuse_the_whole_route() {
+    for source in [
+        r#"  get "/t/:token", to: "widgets#show", constraints: { token: /\h{32}/ }"#,
+        r#"  get "/t/:token", to: "widgets#show", constraints: { token: /\n/ }"#,
+    ] {
+        let r = routes(source);
+        assert!(
+            find(&r, HttpMethod::Get, "/t/:token").is_none(),
+            "an alphanumeric escape is not the literal character; the route must be ABSENT: {source}\n{r:?}"
+        );
+    }
+}
+
+#[test]
 fn backreference_constraint_refuses_the_whole_route() {
     let r = routes(
         r#"

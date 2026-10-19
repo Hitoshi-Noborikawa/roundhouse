@@ -2571,6 +2571,25 @@ fn nested_multi_write_refuses_a_reordered_last_write() {
 }
 
 #[test]
+fn a_leading_group_does_not_reuse_the_statement_temp() {
+    use roundhouse::emit::ruby::emit_expr;
+    let source = "(a, *b), c = [[1, 2, 3], 9]";
+    let result = ruby_prism::parse(source.as_bytes());
+    let stmt = result.node().as_program_node().unwrap().statements().body().iter().next().unwrap();
+    let expr = roundhouse::ingest::ingest_expr(&stmt, "<snippet>").unwrap();
+    let emitted = emit_expr(&expr);
+    let last = emitted.lines().last().unwrap_or("");
+    assert!(
+        last.contains("__mv_"),
+        "the expression must answer the whole RHS, not the first group:\n{emitted}"
+    );
+    assert!(
+        !last.contains("__mt_"),
+        "the group temp must not be the expression value:\n{emitted}"
+    );
+}
+
+#[test]
 fn multi_write_temporary_does_not_capture_a_user_target() {
     let source = "a, *__mw_0, c = [11, 22, 33]";
     let result = ruby_prism::parse(source.as_bytes());

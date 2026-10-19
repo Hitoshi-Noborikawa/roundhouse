@@ -1891,14 +1891,17 @@ fn redirect_block(block: ruby_prism::BlockNode<'_>, status: u16) -> Option<(Stri
 /// serve the route at the wrong status. A string or an unknown symbol
 /// is not a redirect this can serve.
 fn redirect_status_code(node: &Node<'_>) -> Option<u16> {
-    if let Some(code) = node
+    let code = if let Some(code) = node
         .as_integer_node()
         .and_then(|i| super::util::integer_i64(&i.value()))
         .and_then(|i| u16::try_from(i).ok())
     {
-        return Some(code);
-    }
-    let code = crate::lower::status_literal::status_sym_code(&symbol_value(node)?)?;
+        code
+    } else {
+        crate::lower::status_literal::status_sym_code(&symbol_value(node)?)?
+    };
+    // `redirect_status_symbol` maps every other code to
+    // `:moved_permanently`. Accepting 200 or 418 here would serve 301.
     matches!(code, 300 | 301 | 302 | 303 | 304 | 307 | 308).then_some(code)
 }
 

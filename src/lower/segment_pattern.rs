@@ -570,12 +570,16 @@ impl Parser {
     }
 
     fn parse_escape(&mut self) -> Option<Ast> {
-        match self.bump()? {
-            'A' | 'z' | 'Z' | 'b' | 'B' | 'k' | 'w' | 's' | 'D' | 'S' | 'W' => None,
-            '1'..='9' => None,
-            'd' => Some(Ast::Leaf(class_item(('0'..='9').collect(), false, false))),
-            escaped => Some(Ast::Leaf(literal_item(escaped.to_string()))),
+        let escaped = self.bump()?;
+        if escaped == 'd' {
+            return Some(Ast::Leaf(class_item(('0'..='9').collect(), false, false)));
         }
+        // `\h`, `\n`, `\w`, `\1`, and the rest are not "the character
+        // after the slash". Only a non-alphanumeric escape is literal.
+        if escaped.is_ascii_alphanumeric() {
+            return None;
+        }
+        Some(Ast::Leaf(literal_item(escaped.to_string())))
     }
 
     fn parse_atom(&mut self) -> Option<Ast> {

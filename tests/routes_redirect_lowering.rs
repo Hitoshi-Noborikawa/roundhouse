@@ -175,6 +175,21 @@ fn routing_redirect_host_policy_keeps_the_base_string_signature() {
 }
 
 #[test]
+fn an_integer_status_outside_the_redirect_set_is_not_served() {
+    let app = app_with(
+        "  get \"/reports\", to: \"reports#index\"\n  get \"/nope\", to: redirect(\"/reports\", status: 200)\n  get \"/teapot\", to: redirect(\"/reports\", status: 418)\n  get \"/old\", to: redirect(\"/reports\", status: 301)\n",
+    );
+    let emitted = redirect_controller(&app);
+    assert!(!emitted.contains("def nope"), "200 is not a redirect code; got:\n{emitted}");
+    assert!(!emitted.contains("def teapot"), "418 is not a redirect code; got:\n{emitted}");
+    assert!(emitted.contains("def old"), "301 stays a redirect; got:\n{emitted}");
+    assert!(
+        emitted.contains("redirect_to(\"/reports\", status: :moved_permanently)"),
+        "{emitted}"
+    );
+}
+
+#[test]
 fn an_explicit_verb_redirect_carries_its_status_and_its_own_action() {
     let app = app_with(
         "  get \"/reports\", to: \"reports#index\"\n  get \"/admin\", to: redirect(\"/reports\")\n  get \"/old\", to: redirect(\"/reports\", status: 302)\n  root to: redirect(\"/reports\")\n",

@@ -535,7 +535,11 @@ fn ingest_multi_write(
     // expression still answers the RHS, as Ruby's does. A splat inside
     // the group is `desugar_rest_targets`, not a second `MultiAssign`.
     if mw.rest().is_none() && mw.lefts().iter().any(|l| l.as_multi_target_node().is_some()) {
-        let rhs = nested_temp(&mw.as_node(), span);
+        // The group at column 0 shares this node's start offset, so it
+        // cannot reuse `__mt_`. Overwriting that temp drops the RHS the
+        // expression has to answer.
+        let loc = mw.as_node().location();
+        let rhs = fresh_reserved_local(&loc, &format!("__mv_{}", loc.start_offset()));
         let rhs_read =
             || Expr::new(span, ExprNode::Var { id: crate::ident::VarId(0), name: rhs.clone() });
         let mut exprs = vec![Expr::new(
