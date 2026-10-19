@@ -146,3 +146,18 @@ fn initialize_sets_stale_only_when_the_decision_writes() {
         "a writer needs its flag:\n{init}"
     );
 }
+
+/// The initialize skip reads `ThroughJoins::writer`. A second join
+/// matcher in that block — another `through_writer_join` call, or a
+/// `belongs_to` / foreign-key scan — is the drift this pin refuses.
+#[test]
+fn schema_stale_skip_does_not_match_the_join() {
+    let src = include_str!("../src/lower/model_to_library/schema.rs");
+    let start = src
+        .find("through_joins.writer")
+        .expect("stale skip reads the shared decision");
+    let window = &src[start..(start + 600).min(src.len())];
+    assert!(!window.contains("through_writer_join"), "{window}");
+    assert!(!window.contains("BelongsTo"), "{window}");
+    assert!(!window.contains("foreign_key"), "{window}");
+}

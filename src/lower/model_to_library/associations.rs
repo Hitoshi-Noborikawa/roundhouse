@@ -60,6 +60,11 @@ impl ThroughJoins {
     pub(super) fn get(&self, name: &Symbol) -> Option<&ThroughWriterJoin> {
         self.by_name.get(name)
     }
+
+    /// A collection writer, and its `_stale` flag, exists for this name.
+    pub(super) fn writer(&self, name: &Symbol) -> bool {
+        matches!(self.get(name), Some(ThroughWriterJoin::Resolved(..)))
+    }
 }
 
 /// Resolve one through association's join. `through_name` is that
