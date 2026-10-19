@@ -30,6 +30,8 @@ mod class_configuration;
 mod data;
 mod class_new;
 pub(crate) use body::{indexed_pluck, lexical_class, string_answers};
+#[cfg(test)]
+pub(crate) use body::counted_first_last;
 pub(crate) use body::ConstResolverTask;
 pub use body::PreparedConstResolver;
 pub mod async_color;
@@ -6769,10 +6771,13 @@ fn body_tail_terminal_kind(
     // `scope :last_page, -> { ordered.last(PAGE_SIZE) }` passes a
     // concern constant, and the scope seeded `Message | nil`, which
     // every `@messages` in the app then carried into its views. Same
-    // rule as `body::send::counted_first_last`, which types the call
-    // where it can see the argument's type; here only its presence is
-    // needed.
-    if matches!(method.as_str(), "first" | "last" | "take") && args.len() == 1 {
+    // predicate as `body::send::counted_first_last`. That one also
+    // sees the argument's type; here only the argument's presence is
+    // needed. `take(n)` is counted for the scope's return and is not
+    // renamed.
+    if crate::catalog::counted_relation_terminal(method.as_str(), args.len(), false).is_some()
+        || (method.as_str() == "take" && args.len() == 1)
+    {
         return Some(crate::catalog::ReturnKind::ArrayOfSelf);
     }
     entry.return_kind

@@ -1894,6 +1894,36 @@ pub(crate) fn is_relation_builder_name(name: &str) -> bool {
     saw_builder
 }
 
+/// Counted `first(n)` / `last(n)` on a relation: one positional argument
+/// and no block. The runtime spells these `first_n` / `last_n` because
+/// one method cannot return both a record and an Array.
+///
+/// The name is a catalog terminal on both the class and the relation,
+/// and [`is_relation_builder_name`] rejects it. `take(n)` is the same
+/// terminal shape and stays `take` — this predicate does not rename it.
+/// Enumerable `Array#first(n)` and `String#split.last(n)` share the
+/// call shape; a caller renames only after it has proved a relation.
+pub(crate) fn counted_relation_terminal(
+    name: &str,
+    argc: usize,
+    has_block: bool,
+) -> Option<&'static str> {
+    if argc != 1 || has_block || is_relation_builder_name(name) {
+        return None;
+    }
+    let runtime = match name {
+        "first" => "first_n",
+        "last" => "last_n",
+        _ => return None,
+    };
+    let class = lookup(name, ReceiverContext::Class)?;
+    let relation = lookup(name, ReceiverContext::Relation)?;
+    if class.chain != ChainKind::Terminal || relation.chain != ChainKind::Terminal {
+        return None;
+    }
+    Some(runtime)
+}
+
 /// True when the Relation-context entry for `name` is a Builder.
 ///
 /// Callers that already know the receiver is a relation use this so
