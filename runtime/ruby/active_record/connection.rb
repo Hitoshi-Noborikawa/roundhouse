@@ -1362,20 +1362,21 @@ module ActiveRecord
     # so an `after_create_commit` that enqueues a job never queues one
     # for a row a rollback removed.
     def _save_committed(was_new)
-      kind = was_new ? 0 : 1
+      _enlist_or_run(was_new ? 0 : 1)
+    end
+
+    def _destroy_committed
+      _enlist_or_run(2)
+    end
+
+    # Outside a transaction the commit callbacks run now. Inside one the
+    # write is enlisted until the outermost COMMIT. Save and destroy
+    # share this `Db` walk; only the callback kind differs.
+    def _enlist_or_run(kind)
       if Db._txn_depth == 0
         _run_commit_callbacks(kind)
       else
         Db._txn_records << ActiveRecord::EnlistedRecord.new(self, kind)
-      end
-      nil
-    end
-
-    def _destroy_committed
-      if Db._txn_depth == 0
-        _run_commit_callbacks(2)
-      else
-        Db._txn_records << ActiveRecord::EnlistedRecord.new(self, 2)
       end
       nil
     end

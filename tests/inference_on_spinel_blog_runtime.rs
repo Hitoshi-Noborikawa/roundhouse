@@ -426,7 +426,10 @@ fn untyped_subexpressions_baseline() {
     // Remeasured 634 on 2026-10-19 after merging main. The analyzer's
     // narrowing and the pluck rest-arg removed sites this constant
     // still counted; 765 had that headroom.
-    const CEILING: usize = 634;
+    // MEASURED 631 on 2026-10-19: save and destroy share
+    // `_enlist_or_run`, so the `Db._txn_depth` / `Db._txn_records`
+    // walk is read once.
+    const CEILING: usize = 631;
     assert!(
         existing_untyped <= CEILING && like_untyped <= LIKE_CEILING,
         "{} untyped sub-expressions on spinel-blog runtime — exceeds ledger: \
