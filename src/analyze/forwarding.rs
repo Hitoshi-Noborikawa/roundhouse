@@ -199,7 +199,7 @@ fn walk(
             .params
             .iter()
             .any(|p| p.keyword && p.rest && p.name.as_str().is_empty() && !p.forwarding);
-        let resolved = destination(app, contracts, Some((owner, enclosing)), e);
+        let resolved = destination(app, contracts, Some((owner, enclosing)), e, None);
         let reason = if !source_ok {
             Some("anonymous keyword forwarding has no enclosing anonymous keyword-rest declaration")
         } else if enclosing.unsupported_formals.is_some()
@@ -242,7 +242,7 @@ fn walk(
             contract_error(
                 Some((owner, enclosing)),
                 e,
-                destination(app, contracts, Some((owner, enclosing)), e)
+                destination(app, contracts, Some((owner, enclosing)), e, None)
                     .map(|resolved| (resolved.method, resolved.model)),
                 contracts,
             )
@@ -350,6 +350,7 @@ fn destination<'a>(
     contracts: &SourceContractIndex<'a>,
     context: Option<(&ClassId, &MethodDef)>,
     e: &Expr,
+    resolver: Option<&super::body::ConstResolver>,
 ) -> Option<ResolvedDestination<'a>> {
     let owner_dependent = match &*e.node {
         ExprNode::Send { recv: None, .. } | ExprNode::Super { .. } => true,
@@ -370,10 +371,13 @@ fn destination<'a>(
             };
             // Held for the lookup below: the const arm returns a reference
             // into this value, and the other arms borrow `ty` or the owner.
+            // Before typing, `ty` is empty. The same resolver the body typer
+            // uses names the class; a fragment counter does not.
             let written_const = match recv.as_ref() {
-                Some(r) if r.ty.is_none() && matches!(&*r.node, ExprNode::Const { .. }) => {
-                    source_constant_class(contracts, context, r)
-                }
+                Some(r) if r.ty.is_none() => resolver.and_then(|resolver| match &*r.node {
+                    ExprNode::Const { path } => resolver.namespace(r.span, path).cloned(),
+                    _ => None,
+                }),
                 _ => None,
             };
             let class = match recv {
@@ -637,7 +641,7 @@ fn keyword_calls_with_index(
                 // scanning receiver provenance and hierarchies for each of
                 // their keyword calls in a large application.
                 if matches!(&*e.node, ExprNode::Super { .. })
-                    && destination(app, contracts, context, e).is_none()
+                    && destination(app, contracts, context, e, None).is_none()
                 {
                     // An absent full selector does not prove that erasing **
                     // matches an external parent's native keyword ABI.
@@ -646,7 +650,7 @@ fn keyword_calls_with_index(
                     KeywordPolicy::Legacy
                 }
             } else {
-                let resolved = destination(app, contracts, context, e);
+                let resolved = destination(app, contracts, context, e, None);
                 if resolved
                     .as_ref()
                     .is_some_and(|d| d.method.params.iter().any(|p| p.forwarding))
@@ -750,35 +754,6 @@ fn has_source_packet(args: &[Expr]) -> bool {
                 | ExprNode::ForwardKeywordsWithPairs { .. }
         )
     })
-}
-
-/// A `Const` receiver whose type is not filled yet. Walk the enclosing
-/// class outward, the same way `lexical_class` does, and stop at a source
-/// fragment. An unknown constant stays unresolved.
-fn source_constant_class(
-    contracts: &SourceContractIndex<'_>,
-    context: Option<(&ClassId, &MethodDef)>,
-    expr: &Expr,
-) -> Option<ClassId> {
-    let ExprNode::Const { path } = &*expr.node else {
-        return None;
-    };
-    let absolute = path.first().is_some_and(|seg| seg.as_str().is_empty());
-    let name = path
-        .iter()
-        .map(|seg| seg.as_str())
-        .filter(|seg| !seg.is_empty())
-        .collect::<Vec<_>>()
-        .join("::");
-    if name.is_empty() {
-        return None;
-    }
-    let written = ClassId(Symbol::from(name.as_str()));
-    if absolute {
-        return contracts.owns(&written).then_some(written);
-    }
-    let scope = context.map(|(owner, _)| owner.0.as_str()).unwrap_or("");
-    super::body::lexical_class(&written, scope, &contracts.fragments)
 }
 
 fn constant_names_class(expr: &Expr, class: &ClassId) -> bool {
@@ -1061,10 +1036,6 @@ impl<'a> SourceContractIndex<'a> {
     /// re-bind, so a reopened owner stays refused.
     fn reopened(&self, owner: &ClassId) -> bool {
         self.fragments.get(owner).copied().unwrap_or(0) > 1
-    }
-
-    fn owns(&self, owner: &ClassId) -> bool {
-        self.fragments.contains_key(owner)
     }
 
     fn parent(&self, owner: &ClassId) -> Option<&'a ClassId> {

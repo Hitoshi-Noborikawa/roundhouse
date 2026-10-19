@@ -21,19 +21,20 @@ use crate::expr::{Expr, ExprNode};
 use crate::ident::ClassId;
 use crate::span::Span;
 
+use super::super::body::ConstResolver;
 use super::{
     SourceContractIndex, controller_defs, destination, has_forwarding, has_source_packet, methods,
     virtual_destinations,
 };
 
-pub(crate) fn restore_anonymous_forward_contracts(app: &mut App) {
+pub(crate) fn restore_anonymous_forward_contracts(app: &mut App, resolver: &ConstResolver) {
     let actions = controller_defs(app);
     let contracts = SourceContractIndex::new(app, &actions);
     let mut spans = HashSet::new();
     for (owner, method) in methods(app).chain(actions.iter().map(|(c, m)| (c, m))) {
-        note_anonymous_restores(app, &contracts, owner, method, &method.body, &mut spans);
+        note_anonymous_restores(app, resolver, &contracts, owner, method, &method.body, &mut spans);
         for default in method.params.iter().filter_map(|p| p.default.as_ref()) {
-            note_anonymous_restores(app, &contracts, owner, method, default, &mut spans);
+            note_anonymous_restores(app, resolver, &contracts, owner, method, default, &mut spans);
         }
     }
     drop(contracts);
@@ -45,6 +46,7 @@ pub(crate) fn restore_anonymous_forward_contracts(app: &mut App) {
 
 fn note_anonymous_restores(
     app: &App,
+    resolver: &ConstResolver,
     contracts: &SourceContractIndex<'_>,
     owner: &ClassId,
     enclosing: &MethodDef,
@@ -52,7 +54,9 @@ fn note_anonymous_restores(
     spans: &mut HashSet<Span>,
 ) {
     if anonymous_packet(enclosing, e) && source_packet_is_declared(enclosing, e) {
-        if let Some(resolved) = destination(app, contracts, Some((owner, enclosing)), e) {
+        if let Some(resolved) =
+            destination(app, contracts, Some((owner, enclosing)), e, Some(resolver))
+        {
             if let Ok(virtuals) = virtual_destinations(contracts, Some((owner, enclosing)), e) {
                 let mut candidates = vec![(resolved.lookup_owner.clone(), resolved.method)];
                 candidates.extend(
@@ -89,7 +93,7 @@ fn note_anonymous_restores(
         }
     }
     e.node.for_each_child(&mut |c| {
-        note_anonymous_restores(app, contracts, owner, enclosing, c, spans)
+        note_anonymous_restores(app, resolver, contracts, owner, enclosing, c, spans)
     });
 }
 
