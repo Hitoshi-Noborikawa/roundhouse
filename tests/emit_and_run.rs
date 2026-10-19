@@ -258,6 +258,8 @@ mod sidekiq_adapter;
 mod silent_lowerings;
 #[path = "emit_and_run/validates_options.rs"]
 mod validates_options;
+#[path = "emit_and_run/validates_lambda_conditions.rs"]
+mod validates_lambda_conditions;
 
 #[test]
 fn markdown_templates_render_with_their_mime_type_and_erb_escaping() {

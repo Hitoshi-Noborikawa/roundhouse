@@ -72,13 +72,23 @@ pub(super) fn push_validate_method(
                     } else {
                         validation_rule_to_calls(msgs, &v.attribute, rule, attr_ty)
                     };
-                    if v.if_method.is_some() || v.unless_method.is_some() {
+                    if v.if_method.is_some()
+                        || v.unless_method.is_some()
+                        || v.if_cond.is_some()
+                        || v.unless_cond.is_some()
+                    {
                         let body = if produced.len() == 1 {
                             produced.pop().unwrap()
                         } else {
                             seq(produced)
                         };
-                        produced = vec![with_method_guard(body, &v.if_method, &v.unless_method)];
+                        produced = vec![with_condition_guard(
+                            body,
+                            &v.if_method,
+                            &v.if_cond,
+                            &v.unless_method,
+                            &v.unless_cond,
+                        )];
                     }
                     for mut check in produced {
                         // Each expanded check attributes to its `validates` line.
@@ -730,6 +740,53 @@ fn with_method_guard(body: Expr, if_method: &Option<Symbol>, unless_method: &Opt
         Some(method) => Expr::new(
             Span::synthetic(),
             ExprNode::If { cond: bare(method), then_branch: guarded, else_branch: nil() },
+        ),
+        None => guarded,
+    }
+}
+
+/// `if: :pred` / `if: -> { … }` / `unless: …`. Generalizes
+/// `with_method_guard` to a condition that is either a Symbol predicate
+/// or a lowered guard expression (`validates`'s `if_cond`/`unless_cond`,
+/// built from a zero-arity lambda/proc the same way a callback's
+/// condition is — see `callback_condition` in `ingest/model.rs`). A
+/// Symbol resolves to exactly the bare receiverless call
+/// `with_method_guard` already emitted, so the Symbol path's output is
+/// unchanged. Both given: the check runs only when `if:` holds and
+/// `unless:` does not — the `unless` guard nests inside the `if`.
+fn with_condition_guard(
+    body: Expr,
+    if_method: &Option<Symbol>,
+    if_cond: &Option<Expr>,
+    unless_method: &Option<Symbol>,
+    unless_cond: &Option<Expr>,
+) -> Expr {
+    let bare = |m: &Symbol| {
+        Expr::new(
+            Span::synthetic(),
+            ExprNode::Send {
+                recv: None,
+                method: m.clone(),
+                args: Vec::new(),
+                block: None,
+                parenthesized: false,
+            },
+        )
+    };
+    let nil = || Expr::new(Span::synthetic(), ExprNode::Lit { value: Literal::Nil });
+    let if_expr = if_method.as_ref().map(bare).or_else(|| if_cond.clone());
+    let unless_expr = unless_method.as_ref().map(bare).or_else(|| unless_cond.clone());
+    let guarded = match unless_expr {
+        Some(cond) => Expr::new(
+            Span::synthetic(),
+            ExprNode::If { cond, then_branch: nil(), else_branch: body },
+        ),
+        None => body,
+    };
+    match if_expr {
+        Some(cond) => Expr::new(
+            Span::synthetic(),
+            ExprNode::If { cond, then_branch: guarded, else_branch: nil() },
         ),
         None => guarded,
     }

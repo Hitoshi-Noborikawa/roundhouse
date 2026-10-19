@@ -305,10 +305,14 @@ fn model_for(model: &Model, schema: &Schema) -> String {
                 lines.push(format!("  {}", association_line(assoc)));
             }
             ModelBodyItem::Validation { validation, .. } => {
-                // A Symbol `if:` / `unless:` is lowered on the library
-                // path. Emitting the Sequel helper with no guard would
-                // check records Rails skips.
-                if validation.if_method.is_some() || validation.unless_method.is_some() {
+                // A Symbol or lambda `if:` / `unless:` is lowered on the
+                // library path. Emitting the Sequel helper with no guard
+                // would check records Rails skips.
+                if validation.if_method.is_some()
+                    || validation.unless_method.is_some()
+                    || validation.if_cond.is_some()
+                    || validation.unless_cond.is_some()
+                {
                     validate_lines.push(format!(
                         "    # ROUNDHOUSE-TODO: conditional validation on :{} not emitted",
                         validation.attribute

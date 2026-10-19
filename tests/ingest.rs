@@ -1490,6 +1490,74 @@ end
     assert_eq!(note.if_method.as_ref().map(|s| s.as_str()), Some("live?"));
 }
 
+/// Issue #985: a zero-arity lambda/proc `if:`/`unless:` lowers to a
+/// guard EXPRESSION (`if_cond`/`unless_cond`), the same body shape
+/// `callback_condition` already accepts for a callback's `if:`/
+/// `unless:` — not the Symbol-only `if_method`/`unless_method`
+/// #1077 added. `:name` is the call-level `->`, `:code` the call-level
+/// `lambda { }` spelling, and `:note` the RULE-level nested-hash form
+/// (`presence: { if: -> { … } }`), all three on the one guard slot
+/// `push_condition`'s call sites share with the Symbol form.
+#[test]
+fn lambda_if_and_unless_guard_the_validation_with_an_expression() {
+    let (model, warnings, _) = ingest_widget(
+        r#"
+class Widget < ApplicationRecord
+  validates :name, presence: true, unless: -> { status.in?(%w[draft]) }
+  validates :code, presence: true, if: lambda { status == "live" }
+  validates :note, presence: { if: -> { live? } }
+end
+"#,
+    );
+    assert!(warnings.is_empty(), "{warnings:?}");
+    let rules = validation_rules(&model);
+
+    let name = rules.iter().find(|v| v.attribute.as_str() == "name").unwrap();
+    assert!(name.if_method.is_none());
+    assert!(name.if_cond.is_none());
+    assert!(name.unless_method.is_none());
+    assert!(
+        matches!(&name.unless_cond, Some(e) if matches!(&*e.node, ExprNode::Send { recv: Some(_), method, .. } if method.as_str() == "in?")),
+        "{:?}", name.unless_cond
+    );
+
+    let code = rules.iter().find(|v| v.attribute.as_str() == "code").unwrap();
+    assert!(code.if_method.is_none());
+    assert!(
+        matches!(&code.if_cond, Some(e) if matches!(&*e.node, ExprNode::Send { recv: None, method, .. } if method.as_str() == "==") || matches!(&*e.node, ExprNode::Send { .. })),
+        "{:?}", code.if_cond
+    );
+
+    // The rule-level lambda (`presence: { if: -> { live? } }`) lowers
+    // to a receiverless call on the record — exactly the shape a
+    // Symbol condition (`if: :live?`) already produces, so the two
+    // forms reach the lowerer the same way.
+    let note = rules.iter().find(|v| v.attribute.as_str() == "note").unwrap();
+    assert!(note.if_method.is_none());
+    assert!(
+        matches!(&note.if_cond, Some(e) if matches!(&*e.node, ExprNode::Send { recv: None, method, args, .. } if method.as_str() == "live?" && args.is_empty())),
+        "{:?}", note.if_cond
+    );
+}
+
+/// An arity>0 lambda is not the zero-arity body shape
+/// `callback_condition` accepts (its parameter would be unbound once
+/// spliced into `def validate`), so it stays the reported gap it
+/// always was — distinct from the now-supported zero-arity form above.
+#[test]
+fn arity_one_lambda_condition_on_validates_stays_a_gap() {
+    let (model, warnings, gaps) = ingest_widget(
+        r#"
+class Widget < ApplicationRecord
+  validates :name, presence: true, if: ->(w) { w.live? }
+end
+"#,
+    );
+    assert!(validation_rules(&model).is_empty(), "{:?}", validation_rules(&model));
+    assert!(warnings.iter().any(|m| m.contains("if:")), "{warnings:?}");
+    assert!(gaps.iter().any(|m| m.contains("if:")), "{gaps:?}");
+}
+
 #[test]
 fn unmodeled_validates_options_warn_and_drop_the_whole_call() {
     let (model, warnings, gaps) = ingest_widget(
@@ -1500,8 +1568,13 @@ class Widget < ApplicationRecord
   validates :price, numericality: { greater_than: 0, odd: true }
   validates :bounded, numericality: { equal_to: 1, other_than: 2 }
   validates :tag, presence: true, length: { maximum: 4, is: 2 }
-  validates :note, presence: true, if: -> { status == "live" }
-  validates :color, presence: true, unless: -> { false }
+  # An arity>0 lambda would splice an unbound parameter into `def
+  # validate`; a String condition names a method Rails resolves at
+  # runtime that this build does not model. Both stay the reported gap
+  # a zero-arity lambda/proc `if:`/`unless:` no longer is (see
+  # `validates_lambda_conditions.rs`).
+  validates :note, presence: true, if: ->(w) { w.live? }
+  validates :color, presence: true, unless: "a string condition"
 end
 "#,
     );

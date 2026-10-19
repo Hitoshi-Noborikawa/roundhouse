@@ -2181,7 +2181,15 @@ fn model_body_names(models: &[Model]) -> std::collections::HashSet<Symbol> {
                     out.insert(new.clone());
                     out.insert(old.clone());
                 }
-                ModelBodyItem::Association { .. } | ModelBodyItem::Validation { .. } => {}
+                ModelBodyItem::Validation { validation, .. } => {
+                    if let Some(c) = &validation.if_cond {
+                        walk(c, &mut out);
+                    }
+                    if let Some(c) = &validation.unless_cond {
+                        walk(c, &mut out);
+                    }
+                }
+                ModelBodyItem::Association { .. } => {}
             }
         }
     }

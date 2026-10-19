@@ -465,6 +465,8 @@ fn parse_validation_helper(call: &ruby_prism::CallNode<'_>) -> Option<Vec<Valida
                         rules: vec![ValidationRule::Presence],
                         if_method: None,
                         unless_method: None,
+                        if_cond: None,
+                        unless_cond: None,
                     })
                     .collect()
             })
@@ -494,6 +496,8 @@ fn parse_validation_helper(call: &ruby_prism::CallNode<'_>) -> Option<Vec<Valida
                         }],
                         if_method: None,
                         unless_method: None,
+                        if_cond: None,
+                        unless_cond: None,
                     })
                     .collect()
             })
