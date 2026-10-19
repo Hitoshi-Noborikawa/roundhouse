@@ -1101,7 +1101,9 @@ fn every_runtime_method_body_concretely_typed() {
     // non-duplicable leaf (Method, UnboundMethod, Singleton, and
     // `duplicable?` answering false). The reporter method's 26 sites
     // leave; the shared method grows by that leaf (22 -> 32).
-    const CEILING: usize = 777;
+    // MEASURED 776 on 2026-10-19: `query_pairs` reads an untyped Hash
+    // key's `to_s` once. The name uses that String in both arms.
+    const CEILING: usize = 776;
     assert!(
         total_gradual <= CEILING,
         "{total_gradual} Ty::Untyped sites exceeds ceiling of {CEILING}",

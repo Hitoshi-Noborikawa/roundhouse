@@ -223,7 +223,9 @@ module ActiveSupport
     hash.each do |key, item|
       empty_container = (item.is_a?(Hash) && item.empty?) || (item.is_a?(Array) && item.empty?)
       next if empty_container
-      name = namespace.empty? ? key.to_s : "#{namespace}[#{key.to_s}]"
+      # One `to_s` of the untyped key. The ceiling counts each read.
+      key_text = key.to_s
+      name = namespace.empty? ? key_text : "#{namespace}[#{key_text}]"
       pairs << query_value(name, item)
     end
     pairs = pairs.sort unless namespace.include?("[]")
