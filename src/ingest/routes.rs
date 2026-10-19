@@ -2977,6 +2977,19 @@ fn regex_source(node: &Node<'_>) -> Option<String> {
     Some(String::from_utf8_lossy(r.content_loc().as_slice()).into_owned())
 }
 
+/// `true` when a `constraints:` regex literal carries a modifier
+/// (`/i`, `/x`, `/m`) that `regex_source`'s raw-source text can't
+/// express on its own. Rails applies the modifier when it matches a
+/// request; the segment-pattern compiler `lower::routes` hands the
+/// source to (`compile_seg_patterns`) only ever matches
+/// case-sensitively, so lowering `/[a-z]+/i`'s source without the
+/// modifier would silently accept a different set of paths than Rails
+/// does (#857/#1087). Full modifier support is a follow-up.
+fn regex_has_unsupported_modifiers(node: &Node<'_>) -> bool {
+    node.as_regular_expression_node()
+        .is_some_and(|r| r.is_ignore_case() || r.is_extended() || r.is_multi_line())
+}
+
 fn ingest_explicit_route(
     call: &ruby_prism::CallNode<'_>,
     method: HttpMethod,
@@ -3119,13 +3132,38 @@ fn ingest_explicit_route(
                     // router's Integer matcher; the rest let the roda
                     // converter disambiguate two routes that share a
                     // path+verb and differ only by the constraint (#67).
+                    // A value that isn't a literal regex can't be
+                    // lowered at all; refuse rather than drop the
+                    // constraint silently (#1087, same as the
+                    // `resources`/`resource` reader).
                     "constraints" => {
                         if let Some(h) = value.as_hash_node() {
                             for el in h.elements().iter() {
                                 let Some(a) = el.as_assoc_node() else { continue };
                                 let Some(param) = symbol_value(&a.key()) else { continue };
-                                if let Some(src) = regex_source(&a.value()) {
-                                    constraints.insert(Symbol::from(param.as_str()), src);
+                                let constraint_value = a.value();
+                                match regex_source(&constraint_value) {
+                                    Some(_) if regex_has_unsupported_modifiers(&constraint_value) => {
+                                        return Err(IngestError::Unsupported {
+                                            file: file.into(),
+                                            message: format!(
+                                                "route {:?} constraints: {param}: regex modifiers (/i, /x, /m) are not carried into the lowered constraint",
+                                                path.as_deref().unwrap_or("?")
+                                            ),
+                                        });
+                                    }
+                                    Some(src) => {
+                                        constraints.insert(Symbol::from(param.as_str()), src);
+                                    }
+                                    None => {
+                                        return Err(IngestError::Unsupported {
+                                            file: file.into(),
+                                            message: format!(
+                                                "route {:?} constraints: {param} is not a literal regex",
+                                                path.as_deref().unwrap_or("?")
+                                            ),
+                                        });
+                                    }
                                 }
                             }
                         }
@@ -3466,19 +3504,43 @@ fn ingest_resources_route(
                 // `constraints: { id: /[A-Z]{2}\d+/ }` — per-param regex
                 // restriction, same shape and same reader as
                 // `ingest_explicit_route`'s `"constraints"` arm (#857).
-                // A pattern outside the supported subset is not refused
-                // HERE: it rides through to `lower::routes`, which
-                // already refuses (with a diagnostic) any flattened
-                // route whose constraint doesn't compile, the same
-                // fail-closed path `constraints:` on an explicit route
-                // already takes.
+                // A value that isn't a literal regex (a method call, a
+                // Proc, a bare string) can't be lowered at all; refuse
+                // it HERE rather than silently emitting the route
+                // without that param's constraint (a member route could
+                // then accept a sibling collection path with no
+                // diagnostic). A literal regex that compiles still
+                // rides through to `lower::routes`, which already
+                // refuses (with a diagnostic) any flattened route whose
+                // constraint source doesn't compile as a segment
+                // pattern, the same fail-closed path `constraints:` on
+                // an explicit route already takes.
                 "constraints" => {
                     if let Some(h) = value.as_hash_node() {
                         for el in h.elements().iter() {
                             let Some(a) = el.as_assoc_node() else { continue };
                             let Some(param) = symbol_value(&a.key()) else { continue };
-                            if let Some(src) = regex_source(&a.value()) {
-                                constraints.insert(Symbol::from(param.as_str()), src);
+                            let constraint_value = a.value();
+                            match regex_source(&constraint_value) {
+                                Some(_) if regex_has_unsupported_modifiers(&constraint_value) => {
+                                    return Err(IngestError::Unsupported {
+                                        file: file.into(),
+                                        message: format!(
+                                            "resources :{name_str} constraints: {param}: regex modifiers (/i, /x, /m) are not carried into the lowered constraint"
+                                        ),
+                                    });
+                                }
+                                Some(src) => {
+                                    constraints.insert(Symbol::from(param.as_str()), src);
+                                }
+                                None => {
+                                    return Err(IngestError::Unsupported {
+                                        file: file.into(),
+                                        message: format!(
+                                            "resources :{name_str} constraints: {param} is not a literal regex"
+                                        ),
+                                    });
+                                }
                             }
                         }
                     }

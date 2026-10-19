@@ -1,0 +1,94 @@
+//! CodeRabbit on rubys/roundhouse#1087 (which added `constraints:` on
+//! `resources`/`resource`, #857): two gaps in the per-param regex
+//! reader `regex_source` shares between `resources`/`resource` and an
+//! explicit route (`get`/`post`/…).
+//!
+//! 1. A `constraints:` value that isn't a literal regex (a method
+//!    call, a constant, a bare string, …) made `regex_source` return
+//!    `None`; the reader then just skipped that param with no
+//!    diagnostic, so the route lowered with no constraint on it at
+//!    all. A member route could then accept a sibling collection path
+//!    with nothing refusing it. Fixed: an unparseable value is now a
+//!    located `IngestError::Unsupported` gap.
+//!
+//! 2. `regex_source` returns only the pattern body between the
+//!    delimiters, dropping any modifier (`/i`, `/x`, `/m`). A
+//!    constraint like `/[a-z]+/i` would therefore lower identically to
+//!    `/[a-z]+/`, matching a different set of paths than Rails does.
+//!    Minimum fix in this PR: a regex constraint carrying a modifier is
+//!    refused as a located `Unsupported` gap instead of being lowered
+//!    without it. Full modifier support (plumbing the flag through
+//!    `lower::routes`'s segment-pattern compiler) is a follow-up.
+//!
+//! Both gaps are exercised on BOTH readers: `resources`/`resource`'s
+//! inline kwarg (`ingest_resources_route`) and an explicit route's own
+//! `constraints:` kwarg (`ingest_explicit_route`), since both call the
+//! same `regex_source` and had the identical gap.
+
+use roundhouse::dialect::RouteTable;
+use roundhouse::ingest::{ingest_routes, IngestError};
+
+fn ingest(source: &str) -> Result<RouteTable, IngestError> {
+    ingest_routes(format!("Rails.application.routes.draw do\n{source}\nend\n").as_bytes(), "config/routes.rb")
+}
+
+fn expect_unsupported(source: &str, needle: &str) {
+    match ingest(source) {
+        Ok(_) => panic!("expected an Unsupported ingest error for {source:?}, got Ok"),
+        Err(err) => {
+            let msg = err.to_string();
+            assert!(
+                msg.contains(needle),
+                "error message {msg:?} does not mention {needle:?} (source: {source:?})"
+            );
+        }
+    }
+}
+
+// --- Finding 1: an unparseable constraints: value ------------------
+
+#[test]
+fn resources_constraints_with_an_unparseable_value_is_a_located_gap() {
+    expect_unsupported(
+        r#"resources :widgets, constraints: { id: ID_PATTERN }"#,
+        "is not a literal regex",
+    );
+}
+
+#[test]
+fn explicit_route_constraints_with_an_unparseable_value_is_a_located_gap() {
+    expect_unsupported(
+        r#"get "/widgets/:id", to: "widgets#show", constraints: { id: ID_PATTERN }"#,
+        "is not a literal regex",
+    );
+}
+
+// --- Finding 2: a regex constraint carrying a modifier --------------
+
+#[test]
+fn resources_constraints_regex_with_a_modifier_is_refused() {
+    expect_unsupported(r#"resources :widgets, constraints: { id: /[a-z]+/i }"#, "regex modifiers");
+}
+
+#[test]
+fn explicit_route_constraints_regex_with_a_modifier_is_refused() {
+    expect_unsupported(
+        r#"get "/widgets/:id", to: "widgets#show", constraints: { id: /[a-z]+/i }"#,
+        "regex modifiers",
+    );
+}
+
+// --- Control: a plain regex constraint (no modifier) still works ----
+
+#[test]
+fn resources_constraints_plain_regex_still_lowers() {
+    let table = ingest(r#"resources :widgets, constraints: { id: /[a-z]+/ }"#).expect("plain regex constraint must ingest");
+    assert!(!table.entries.is_empty(), "resources call must still produce routes");
+}
+
+#[test]
+fn explicit_route_constraints_plain_regex_still_lowers() {
+    let table = ingest(r#"get "/widgets/:id", to: "widgets#show", constraints: { id: /[a-z]+/ }"#)
+        .expect("plain regex constraint must ingest");
+    assert!(!table.entries.is_empty(), "explicit route must still ingest");
+}
