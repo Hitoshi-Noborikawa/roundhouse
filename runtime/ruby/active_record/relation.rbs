@@ -199,11 +199,13 @@ module ActiveRecord
     # `||=` first-write rather than freezing on `initialize`'s absence.
     @cache_keys: Hash[String, String]?
     @cache_versions: Hash[String, String]?
+    CACHE_KEY_DIGEST_KEY: String
     def cache_key: (?(String | Symbol) timestamp_column) -> String
     def cache_version: (?(String | Symbol) timestamp_column) -> String
     def compute_cache_version: (String timestamp_column) -> String
+    def windowed_cache_version: (String timestamp_column, bool has_column) -> String
     def cache_key_with_version: () -> String
-    def fnv1a_hex: (String str) -> String
+    def query_digest_hex: (String str) -> String
 
     def to_a: () -> Array[Base]
     def load_records: () -> Array[Base]
