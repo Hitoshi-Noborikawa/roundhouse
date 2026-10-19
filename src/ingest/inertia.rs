@@ -23,6 +23,7 @@ enum PropKind {
     Eager,
     Optional,
     Deferred,
+    Always,
 }
 
 struct Prop {
@@ -257,7 +258,7 @@ fn expand_shares(app: &mut App) -> Vec<(ClassId, Vec<Symbol>)> {
                 if is_inertia_share(expr) {
                     record_gap(
                         expr.span,
-                        "`inertia_share` with a block, `if:`/`unless:`/`only:`/`except:`, a non-literal key or an InertiaRails prop type other than `optional`/`defer` is not lowered; its shared props are dropped from the output",
+                        "`inertia_share` with a block, `if:`/`unless:`/`only:`/`except:`, a non-literal key or an InertiaRails prop type other than `optional`/`defer`/`always` is not lowered; its shared props are dropped from the output",
                     );
                 }
                 continue;
@@ -406,6 +407,13 @@ fn classify_prop_value(v: &Expr) -> PropValue {
             group: String::new(),
             body,
         },
+        // Included on a partial reload even when the client did not ask
+        // for the key. inertia-rails' AlwaysProp is not a third gate.
+        "always" if args.is_empty() => PropValue::Wrapped {
+            kind: PropKind::Always,
+            group: String::new(),
+            body,
+        },
         "defer" => {
             let mut group = "default".to_string();
             match args.as_slice() {
@@ -473,20 +481,23 @@ fn desugar(e: &mut Expr, ctx: &mut RenderCtx) {
 fn prop_stmt(span: Span, p: &Prop, shared: bool) -> Expr {
     let page = || call(span, None, "inertia_page", Vec::new());
     let key = str_lit(span, &p.key);
-    let guard = match p.kind {
-        PropKind::Eager => call(span, Some(page()), "eager?", vec![key.clone()]),
-        PropKind::Optional => call(span, Some(page()), "optional?", vec![key.clone()]),
-        PropKind::Deferred => {
-            call(
+    let set = call(span, Some(page()), "prop", vec![key.clone(), p.value.clone()]);
+    let gated = if p.kind == PropKind::Always {
+        set
+    } else {
+        let guard = match p.kind {
+            PropKind::Eager => call(span, Some(page()), "eager?", vec![key.clone()]),
+            PropKind::Optional => call(span, Some(page()), "optional?", vec![key.clone()]),
+            PropKind::Deferred => call(
                 span,
                 Some(page()),
                 "deferred?",
                 vec![key.clone(), str_lit(span, &p.group)],
-            )
-        }
+            ),
+            PropKind::Always => unreachable!("always is not gated"),
+        };
+        if_expr(span, guard, set, nil(span))
     };
-    let set = call(span, Some(page()), "prop", vec![key.clone(), p.value.clone()]);
-    let gated = if_expr(span, guard, set, nil(span));
     if shared {
         let mark = call(span, Some(page()), "mark_shared", vec![key]);
         Expr::new(
@@ -578,7 +589,7 @@ fn render_replacement(e: &Expr, ctx: &RenderCtx) -> Option<Expr> {
                     };
                     let Ok((kind, group, value)) = decode_prop_value(pv) else {
                         return unsupported(
-                            "with an InertiaRails prop type other than `optional`/`defer`",
+                            "with an InertiaRails prop type other than `optional`/`defer`/`always`",
                         );
                     };
                     props.push(Prop {

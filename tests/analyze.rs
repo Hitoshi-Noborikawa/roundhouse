@@ -5491,6 +5491,18 @@ fn inertia_share_and_render_inertia_analyze_without_errors_or_survey_gaps() {
 }
 
 #[test]
+fn render_inertia_always_prop_is_not_a_survey_gap() {
+    let mut files = INERTIA_APP.to_vec();
+    files[5] = (
+        "app/controllers/widgets_controller.rb",
+        "class WidgetsController < ApplicationController\n  def index\n    render inertia: \"widgets/index\", props: { kept: InertiaRails.always { \"yes\" } }\n  end\nend\n",
+    );
+    let (errors, gaps) = inertia_check(&files);
+    assert!(errors.is_empty(), "{errors:#?}");
+    assert!(gaps.is_empty(), "{gaps:#?}");
+}
+
+#[test]
 fn render_inertia_with_computed_props_has_no_survey_gap() {
     let mut files = INERTIA_APP.to_vec();
     files[5] = (

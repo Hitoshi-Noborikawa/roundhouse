@@ -15641,6 +15641,47 @@ raise "nil receiver" unless Presenter.label(nil).nil?
 }
 
 #[test]
+fn render_inertia_always_prop_survives_a_partial_reload() {
+    emit_and_run::real_blog()
+        .edit(
+            "config/routes.rb",
+            "  root \"articles#index\"\n",
+            "  root \"articles#index\"\n  get \"/pages/show\", to: \"pages#show\"\n",
+        )
+        .write(
+            "app/controllers/pages_controller.rb",
+            r#"class PagesController < ApplicationController
+  def show
+    render inertia: "pages/show", props: {
+      n: 1,
+      kept: InertiaRails.always { "yes" }
+    }
+  end
+end
+"#,
+        )
+        .write(
+            "test/controllers/pages_controller_test.rb",
+            r#"require "test_helper"
+
+class PagesControllerTest < ActionDispatch::IntegrationTest
+  test "always is present when the partial reload did not ask for it" do
+    get "/pages/show", headers: {
+      "X-Inertia" => "true",
+      "X-Inertia-Partial-Component" => "pages/show",
+      "X-Inertia-Partial-Data" => "n"
+    }
+    assert_response :success
+    assert_equal({ "n" => 1, "kept" => "yes" }, response.parsed_body["props"])
+  end
+end
+"#,
+        )
+        .run_test("test/controllers/pages_controller_test.rb")
+        .assert_passes();
+}
+
+#[test]
 fn render_inertia_computed_props_answer_json_and_html() {
     emit_and_run::real_blog()
         .edit(
