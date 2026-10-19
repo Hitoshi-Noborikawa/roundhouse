@@ -1529,7 +1529,7 @@ mod tests {
             Literal::Str { value: "a".into() },
             Literal::Str { value: "b".into() },
         ];
-        let expr = inline_inclusion_check(Messages::default(), &attr(), &values);
+        let expr = inline_inclusion_check(Messages::default(), &attr(), &values, None);
         assert_eq!(
             collect_error_messages(&expr),
             vec!["Title is not included in the list"],
