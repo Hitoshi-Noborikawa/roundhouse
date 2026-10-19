@@ -253,17 +253,18 @@ module ActionController
     # answer is 409 with X-Inertia-Location. A non-Inertia request is a
     # normal 302. `redirect_to` refuses another host, and this method
     # exists to send one, so the location is set directly.
+    #
+    # One sanitized value for both answers. HeaderStore and the CGI writer
+    # drop a value that still contains CR or LF, which would make the 409
+    # unreadable to the client. `head` does not take `location:`.
     def inertia_location(url)
+      target = ActionController.sanitize_location(url)
       if inertia_request?
-        headers["X-Inertia-Location"] = url
+        headers["X-Inertia-Location"] = target
         head(:conflict)
       else
-        # `head`'s Ruby overlay takes an options Hash, not `location:`.
-        # Set the header target after `head` marks the response performed.
-        # `redirect_to` would refuse another host, which is the case this
-        # method exists for.
         head(:found)
-        @location = ActionController.sanitize_location(url)
+        @location = target
       end
       nil
     end

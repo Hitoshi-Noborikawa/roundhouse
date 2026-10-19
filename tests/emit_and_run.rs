@@ -16006,13 +16006,17 @@ fn inertia_location_is_a_conflict_for_an_inertia_visit() {
         .edit(
             "config/routes.rb",
             "  root \"articles#index\"\n",
-            "  root \"articles#index\"\n  get \"/pages/away\", to: \"pages#away\"\n",
+            "  root \"articles#index\"\n  get \"/pages/away\", to: \"pages#away\"\n  get \"/pages/away_break\", to: \"pages#away_break\"\n",
         )
         .write(
             "app/controllers/pages_controller.rb",
             r#"class PagesController < ApplicationController
   def away
     inertia_location "https://example.com/away"
+  end
+
+  def away_break
+    inertia_location "https://example.com/away\r\nSet-Cookie: x=1"
   end
 end
 "#,
@@ -16032,6 +16036,15 @@ class PagesControllerTest < ActionDispatch::IntegrationTest
     get "/pages/away"
     assert_response 302
     assert_equal "https://example.com/away", response.headers["Location"]
+  end
+
+  test "a line break is removed before either location is written" do
+    get "/pages/away_break", headers: { "X-Inertia" => "true" }
+    assert_response 409
+    assert_equal "https://example.com/awaySet-Cookie: x=1", response.headers["X-Inertia-Location"]
+    get "/pages/away_break"
+    assert_response 302
+    assert_equal "https://example.com/awaySet-Cookie: x=1", response.headers["Location"]
   end
 end
 "#,
