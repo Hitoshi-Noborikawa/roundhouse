@@ -189,6 +189,8 @@ pub(super) fn parse_validates_call(
             only_integer: false,
             gt: None,
             lt: None,
+            gte: None,
+            lte: None,
         }));
     } else if !matches!(kind, ValidatesKind::Map) && !attrs.is_empty() {
         gaps.push(match kind {
@@ -370,6 +372,8 @@ fn parse_of_options<'a>(
     let mut only_integer = false;
     let mut gt: Option<f64> = None;
     let mut lt: Option<f64> = None;
+    let mut gte: Option<f64> = None;
+    let mut lte: Option<f64> = None;
     let mut inclusion: Option<InclusionSpec> = None;
     let mut pattern: Option<String> = None;
     let mut saw_rule_key = false;
@@ -417,6 +421,20 @@ fn parse_of_options<'a>(
                     None => gaps.push("numericality: less_than".to_string()),
                 }
             }
+            "greater_than_or_equal_to" if matches!(kind, ValidatesKind::Numericality) => {
+                saw_rule_key = true;
+                match number_value(&value) {
+                    Some(n) => gte = Some(n),
+                    None => gaps.push("numericality: greater_than_or_equal_to".to_string()),
+                }
+            }
+            "less_than_or_equal_to" if matches!(kind, ValidatesKind::Numericality) => {
+                saw_rule_key = true;
+                match number_value(&value) {
+                    Some(n) => lte = Some(n),
+                    None => gaps.push("numericality: less_than_or_equal_to".to_string()),
+                }
+            }
             "in" | "within" if matches!(kind, ValidatesKind::Inclusion) => {
                 saw_rule_key = true;
                 match inclusion_values(&value) {
@@ -450,6 +468,8 @@ fn parse_of_options<'a>(
             only_integer,
             gt,
             lt,
+            gte,
+            lte,
         },
         ValidatesKind::Inclusion => match inclusion {
             Some(spec) => inclusion_rule(spec),
@@ -539,6 +559,8 @@ fn parse_numericality(value: &Node<'_>) -> RuleParse {
             only_integer: false,
             gt: None,
             lt: None,
+            gte: None,
+            lte: None,
         }));
     }
     if super::super::util::bool_value(value) == Some(false) {
@@ -550,10 +572,14 @@ fn parse_numericality(value: &Node<'_>) -> RuleParse {
     let mut only_integer = false;
     let mut gt = None;
     let mut lt = None;
+    let mut gte = None;
+    let mut lte = None;
     let mut built = BuiltRule::bare(ValidationRule::Numericality {
         only_integer: false,
         gt: None,
         lt: None,
+        gte: None,
+        lte: None,
     });
     let mut gaps = Vec::new();
     for el in elements.iter() {
@@ -579,6 +605,14 @@ fn parse_numericality(value: &Node<'_>) -> RuleParse {
                 Some(n) => lt = Some(n),
                 None => gaps.push("numericality: less_than".to_string()),
             },
+            "greater_than_or_equal_to" => match number_value(&child) {
+                Some(n) => gte = Some(n),
+                None => gaps.push("numericality: greater_than_or_equal_to".to_string()),
+            },
+            "less_than_or_equal_to" => match number_value(&child) {
+                Some(n) => lte = Some(n),
+                None => gaps.push("numericality: less_than_or_equal_to".to_string()),
+            },
             "if" => push_symbol_condition(&child, &mut built.if_method, "if", &mut gaps),
             "unless" => {
                 push_symbol_condition(&child, &mut built.unless_method, "unless", &mut gaps)
@@ -597,6 +631,8 @@ fn parse_numericality(value: &Node<'_>) -> RuleParse {
         only_integer,
         gt,
         lt,
+        gte,
+        lte,
     };
     RuleParse::Rule(built)
 }

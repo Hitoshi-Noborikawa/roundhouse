@@ -632,7 +632,19 @@ pub enum ValidationRule {
         allow_nil: Option<bool>,
     },
     Format { pattern: String },
-    Numericality { only_integer: bool, gt: Option<f64>, lt: Option<f64> },
+    Numericality {
+        only_integer: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        gt: Option<f64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        lt: Option<f64>,
+        /// `greater_than_or_equal_to:` / `less_than_or_equal_to:`.
+        /// The strict bounds stay `gt` / `lt`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        gte: Option<f64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        lte: Option<f64>,
+    },
     Inclusion {
         values: Vec<Literal>,
         /// `in: 1..3` / `1...3`. Numeric `Range#include?` is `cover?`,

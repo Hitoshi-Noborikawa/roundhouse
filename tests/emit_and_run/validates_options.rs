@@ -16,6 +16,7 @@ const MODEL: &str = r#"class Article < ApplicationRecord
   validates :title, presence: true
   validates :body, presence: true, length: { minimum: 10 }
   validates :price, numericality: { greater_than: 0, less_than: 100 }
+  validates :inventory_count, numericality: { greater_than_or_equal_to: 0 }
   validates :rating, numericality: { only_integer: true, greater_than: 0 }
   validates :color, inclusion: { in: %w[red blue] }
   validates :stock, inclusion: { in: 1..3 }
@@ -43,7 +44,7 @@ end
 
 const SCHEMA_FIND: &str =
     "    t.string \"title\"\n    t.text \"body\"\n    t.datetime \"created_at\", null: false\n";
-const SCHEMA_REPLACE: &str = "    t.string \"title\"\n    t.text \"body\"\n    t.integer \"price\", default: 0\n    t.float \"rating\"\n    t.string \"color\"\n    t.integer \"stock\", default: 0\n    t.float \"score\"\n    t.integer \"max_stock\", default: 0\n    t.string \"code\"\n    t.string \"kind\"\n    t.string \"sku\"\n    t.string \"label\"\n    t.string \"extra\"\n    t.string \"note\"\n    t.string \"status\", default: \"draft\"\n    t.string \"tag\"\n    t.integer \"level\", default: 0\n    t.integer \"cap\", default: 0\n    t.datetime \"created_at\", null: false\n";
+const SCHEMA_REPLACE: &str = "    t.string \"title\"\n    t.text \"body\"\n    t.integer \"price\", default: 0\n    t.integer \"inventory_count\", default: 0\n    t.float \"rating\"\n    t.string \"color\"\n    t.integer \"stock\", default: 0\n    t.float \"score\"\n    t.integer \"max_stock\", default: 0\n    t.string \"code\"\n    t.string \"kind\"\n    t.string \"sku\"\n    t.string \"label\"\n    t.string \"extra\"\n    t.string \"note\"\n    t.string \"status\", default: \"draft\"\n    t.string \"tag\"\n    t.integer \"level\", default: 0\n    t.integer \"cap\", default: 0\n    t.datetime \"created_at\", null: false\n";
 
 #[test]
 fn validates_numericality_inclusion_and_format_reject_on_save() {
@@ -53,6 +54,7 @@ fn validates_numericality_inclusion_and_format_reject_on_save() {
         .run_ruby(r##"
 base = {
   title: "Ok", body: "0123456789", price: 5, rating: 2, color: "red", stock: 2, score: 1.5,
+  inventory_count: 0,
   code: "ABC", max_stock: 10, kind: "one", sku: "12", status: "draft",
   label: "", extra: "", note: "", tag: "toolong", level: 9, cap: 1
 }
@@ -86,6 +88,8 @@ raise "max_stock 0: #{stock_cap.inspect}" unless stock_cap.any? { |m| m.include?
 _, stock_hi = messages(base.merge(max_stock: 50))
 raise "max_stock 50: #{stock_hi.inspect}" unless stock_hi.any? { |m| m.include?("less than 50") }
 refute_save(base.merge(title: "Price", price: 0), "greater than 0")
+_, stocked = messages(base.merge(inventory_count: -1))
+raise "inventory -1: #{stocked.inspect}" unless stocked.any? { |m| m.include?("greater than or equal to 0") }
 
 # inclusion: array and integer range, and validates_inclusion_of.
 _, color = messages(base.merge(color: "green"))

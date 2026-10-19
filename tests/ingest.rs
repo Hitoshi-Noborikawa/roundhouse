@@ -1418,6 +1418,7 @@ class Widget < ApplicationRecord
   validates :code, format: { with: /\A[A-Z]{3}\z/ }
   validates :stock, inclusion: { in: 1..3 }
   validates_numericality_of :max_stock, greater_than: 0, less_than: 50
+  validates :inventory_count, numericality: { greater_than_or_equal_to: 0 }
   validates_inclusion_of :kind, in: %w[one two]
   validates_format_of :sku, with: /\A\d{2}\z/
 end
@@ -1451,6 +1452,11 @@ end
         }
         other => panic!("expected a numeric range, got {other:?}"),
     }
+    let inventory = rules.iter().find(|v| v.attribute.as_str() == "inventory_count").unwrap();
+    assert!(matches!(
+        &inventory.rules[0],
+        ValidationRule::Numericality { gte: Some(n), .. } if *n == 0.0
+    ));
     assert!(rules.iter().any(|v| v.attribute.as_str() == "max_stock"));
     assert!(rules.iter().any(|v| v.attribute.as_str() == "kind"));
     assert!(rules.iter().any(|v| v.attribute.as_str() == "sku"));
@@ -1489,7 +1495,6 @@ class Widget < ApplicationRecord
   validates :tag, presence: true, length: { maximum: 4, is: 2 }
   validates :note, presence: true, if: -> { status == "live" }
   validates :color, presence: true, unless: -> { false }
-  validates_numericality_of :rating, greater_than_or_equal_to: 1
 end
 "#,
     );
