@@ -45,6 +45,7 @@ end
       Arel::Nodes::Not.new(Arel.sql("title = 'x'")).to_s,
       Arel::Nodes::Case.new.when(Arel.sql("title = 'x'")).then(1).else(nil).to_s,
       Arel::Nodes::NamedFunction.new(:COUNT, [Arel.star]).to_s,
+      Arel.sql("(title)::text = :title", title: "Ada").to_s,
     ]
   end
 end
@@ -66,8 +67,15 @@ want = [
   "NOT (title = 'x')",
   "CASE WHEN title = 'x' THEN 1 ELSE NULL END",
   "COUNT(*)",
+  "(title)::text = 'Ada'",
 ]
 raise "fragments #{sql.inspect}" unless sql == want
+ordered = Note.order(Arel.sql("CASE WHEN title = :name THEN 1 ELSE 0 END", name: "Ada")).map(&:title)
+raise "ordered #{ordered.inspect}" unless ordered == ["Bea", "Ada"]
+seen = []
+ActiveSupport::Notifications.subscribe("sql.active_record") { |*args| seen << args[4][:sql] }
+Note.count
+raise "sql #{seen.inspect}" if seen.empty?
 "#,
         )
         .assert_passes();

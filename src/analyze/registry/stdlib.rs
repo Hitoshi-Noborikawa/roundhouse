@@ -334,6 +334,7 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
     {
         let db = classes.entry(ClassId(Symbol::from("Db"))).or_default();
         db.class_methods.entry(Symbol::from("capture_sql")).or_insert(Ty::Array { elem: std::sync::Arc::new(Ty::Str) });
+        db.class_methods.entry(Symbol::from("escape_string")).or_insert(Ty::Str);
     }
     register_stdlib_class(classes, "YAML", &[
         ("load", Ty::Untyped), ("load_file", Ty::Untyped),

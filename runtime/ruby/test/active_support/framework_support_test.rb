@@ -29,6 +29,13 @@ class FrameworkSupportTest < Minitest::Test
     assert_equal ["b"], events
     done = ActiveSupport::Notifications.subscribed(->(_, _, _, _, _) {}, "other", monotonic: true) { "done" }
     assert_equal "done", done
+
+    event = nil
+    ActiveSupport::Notifications.subscribe("clock") { |found| event = found }
+    ActiveSupport::Notifications.instrument("clock") { "ticked" }
+    assert_equal "clock", event.name
+    assert_equal true, event.duration >= 0
+    assert_equal true, event.end.to_f >= event.time.to_f
   end
 
   def test_null_store_does_not_keep_a_value

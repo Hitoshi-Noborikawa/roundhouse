@@ -1159,7 +1159,11 @@ fn every_runtime_method_body_concretely_typed() {
     // `IsolatedExecutionState` reads the thread-local slot (+1, 791 -> 815).
     // MEASURED 819 on 2026-10-19: `Continuable#step` answers the block
     // (+4 in active_job.rb, 815 -> 819).
-    const CEILING: usize = 819;
+    // MEASURED 825 on 2026-10-19: `Notifications.sql` is the statement
+    // `Db.record_query` hands it, and `Event` keeps the span
+    // `instrument` computed so `duration` is milliseconds (+6 in
+    // active_support_notifications.rb, 819 -> 825).
+    const CEILING: usize = 825;
     assert!(
         total_gradual <= CEILING,
         "{total_gradual} Ty::Untyped sites exceeds ceiling of {CEILING}"

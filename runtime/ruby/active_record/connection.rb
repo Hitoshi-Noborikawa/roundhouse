@@ -268,17 +268,7 @@ module ActiveRecord
     # `Db.escape_string` already wraps in single quotes (sqlite literal
     # syntax with '' doubling).
     def quote(value)
-      if value.nil?
-        "NULL"
-      elsif value.is_a?(Integer) || value.is_a?(Float)
-        value.to_s
-      elsif value.is_a?(TrueClass)
-        "1"
-      elsif value.is_a?(FalseClass)
-        "0"
-      else
-        Db.escape_string(value.to_s)
-      end
+      Arel::Nodes.quote_scalar(value)
     end
 
     # Rails `quote_string`: escaped but UNquoted (callers embed it

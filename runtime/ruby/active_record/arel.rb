@@ -108,14 +108,15 @@ module Arel
       end
     end
 
-    # A SQL literal. nil, numbers, and booleans stay bare; every other
-    # value is a single-quoted string with quotes doubled.
+    # A SQL literal. nil, numbers, and booleans stay bare. Strings go
+    # through `Db.escape_string`, the same literal `Connection#quote`
+    # used to build itself, so a NUL or a binary value stays one literal.
     def self.quote_scalar(value)
       return "NULL" if value.nil?
       return value.to_s if value.is_a?(Integer) || value.is_a?(Float)
       return "1" if value == true
       return "0" if value == false
-      "'" + value.to_s.gsub("'", "''") + "'"
+      Db.escape_string(value.to_s)
     end
 
     # `Arel::Nodes.build_quoted(value)` — the quoted form of one value,
@@ -157,11 +158,12 @@ module Arel
       quoted = false
       while i < text.length
         ch = text[i]
+        prev = i > 0 ? text[i - 1] : ""
         if ch == "'"
           quoted = !quoted
           out += ch
           i += 1
-        elsif !quoted && text[i, n] == mark && name_boundary?(text[i + n, 1])
+        elsif !quoted && prev != ":" && text[i, n] == mark && name_boundary?(text[i + n, 1])
           out += literal
           i += n
         else

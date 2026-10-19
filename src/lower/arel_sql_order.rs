@@ -8,8 +8,8 @@
 //! text the caller wrote — campfire's
 //! `reorder(Arel.sql("+messages.created_at"))`, SQLite's unary plus that
 //! keeps the planner off an index. A bare String `order` keeps its
-//! column check. A call with binds is not this rewrite: `Arel.sql`
-//! substitutes them and the relation reads the node's `to_s`.
+//! column check. A call with binds is not this rewrite. `Arel.sql`
+//! substitutes them, and `order_term` keeps an `Arel::Nodes::Node`.
 //!
 //! Only a call ON A RELATION (a chain, or the implicit receiver of a
 //! scope body) is renamed: a model constant's `order` is the class

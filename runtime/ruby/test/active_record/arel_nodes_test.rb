@@ -22,6 +22,11 @@ class ArelNodesTest < Minitest::Test
     assert_equal "2 > 1", sql.to_s
   end
 
+  def test_a_cast_is_not_a_named_bind
+    sql = Arel.sql("(period)::date = :date", date: "2024-01-01")
+    assert_equal "(period)::date = '2024-01-01'", sql.to_s
+  end
+
   def test_a_placeholder_inside_a_string_literal_stays
     sql = Arel.sql("note = 'keep :name' AND name = :name", name: "Ada")
     assert_equal "note = 'keep :name' AND name = 'Ada'", sql.to_s
