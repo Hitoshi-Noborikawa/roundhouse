@@ -240,6 +240,13 @@ fn a_multiassign_reassignment_keeps_the_lambda_out_of_later_reads() {
 }
 
 #[test]
+fn an_if_block_write_does_not_keep_the_stale_lambda() {
+    let source = "class Article < ApplicationRecord\n  def self.plain_lambda\n    flag = true\n    f = ->(x) { x * 2 }\n    f.call(4)\n    if flag\n      [1].each { f = 1 }\n    end\n    f.call(2)\n  end\nend\n";
+    let ty = plain_lambda_result(&source);
+    assert!(!matches!(ty, roundhouse::ty::Ty::Int), "block inside if kept the lambda: {ty:?}");
+}
+
+#[test]
 fn an_if_reassignment_joins_the_lambda_with_the_write() {
     let source = "class Article < ApplicationRecord\n  def self.plain_lambda\n    flag = true\n    f = ->(x) { x * 2 }\n    if flag\n      f = 1\n    end\n    f.call(4)\n    f\n  end\nend\n";
     let tree = std::collections::HashMap::from([

@@ -2581,10 +2581,10 @@ impl<'a> BodyTyper<'a> {
                     // parameter types.
                     let retired = lambda_local::forget_nested_writes(&mut lambda_locals, exprs, i);
                     // A join reads the binding it was given for the side
-                    // that does not write the name. Dropping it here makes
-                    // that side nil. Every other statement replaced the
-                    // lambda, and leaving the proc in the binding makes a
-                    // later `.call` return the proc's result.
+                    // that does not write the name. Dropping a write
+                    // `flow_locals` can see makes that side nil. A write it
+                    // cannot see (a block) leaves the old proc in place, and
+                    // a later `.call` returns the proc's result.
                     let joins = matches!(
                         &*exprs[i].node,
                         ExprNode::If { .. }
@@ -2593,8 +2593,13 @@ impl<'a> BodyTyper<'a> {
                             | ExprNode::BeginRescue { .. }
                             | ExprNode::BoolOp { .. }
                     );
-                    if !joins {
-                        for name in retired {
+                    let mut unknown_join = std::collections::HashSet::new();
+                    if joins {
+                        let mut flowed = HashMap::new();
+                        let _ = flow_locals(&exprs[i], &local_ctx.local_bindings, &mut flowed, &mut unknown_join);
+                    }
+                    for name in retired {
+                        if !joins || unknown_join.contains(&name) {
                             local_ctx.local_bindings.remove(&name);
                         }
                     }
