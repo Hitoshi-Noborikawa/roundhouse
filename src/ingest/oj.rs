@@ -29,6 +29,10 @@
 //! escaped, `null`), and the emitted tree's `to_json` is neither.
 //!
 //! Checked against oj 3.17.3 with ActiveSupport.
+//!
+//! Ruby, JRuby and Spinel emit this class. `lower::oj` refuses the same
+//! calls on every other transpile target, so they are not written against
+//! a class those targets never emit.
 
 use crate::App;
 use crate::dialect::{LibraryClass, LibraryClassOrigin};

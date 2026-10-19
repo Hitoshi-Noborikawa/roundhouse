@@ -3343,6 +3343,90 @@ fn oj_overlay(overlay: emit_and_run::Overlay) -> emit_and_run::Overlay {
         .write("lib/payload.rb", OJ_LIB)
 }
 
+/// The stand-in is one Ruby class. Ruby emits it and stays clean. Python,
+/// Crystal, TypeScript and the other strict targets refuse the call in one
+/// place: no `Oj.load` / `Oj.generate` written against a missing class, and
+/// not the incidental `String#read` or missing-`JSON` errors the class body
+/// would raise.
+#[test]
+fn oj_stand_in_is_ruby_only() {
+    let dir = std::env::temp_dir().join(format!("rh-oj-targets-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    for (path, text) in [
+        ("config/initializers/oj.rb", "Oj.mimic_JSON\nOj.optimize_rails\n"),
+        ("config/routes.rb", "Rails.application.routes.draw do\n  get \"/posts\", to: \"posts#index\"\nend\n"),
+        (
+            "app/controllers/posts_controller.rb",
+            "class PostsController < ApplicationController\n  def index\n    Oj.generate({a: \"<&>\"})\n    Oj.load('{\"a\":1}', symbol_keys: true)\n    render plain: \"ok\"\n  end\nend\n",
+        ),
+    ] {
+        let full = dir.join(path);
+        std::fs::create_dir_all(full.parent().unwrap()).unwrap();
+        std::fs::write(full, text).unwrap();
+    }
+    let mut app = roundhouse::ingest::ingest_app(&dir).expect("ingest");
+    let lower_diags = roundhouse::session::analyze_and_lower(&mut app);
+    assert!(
+        lower_diags.iter().all(|d| d.severity != roundhouse::diagnostic::Severity::Error),
+        "ingest lowered with errors: {lower_diags:?}"
+    );
+    let ruby = oj_target_errors_and_text(&app, &dir, roundhouse::project::BuildTarget::Ruby);
+    assert!(ruby.0.is_empty(), "ruby refused a stand-in it emits:\n{}", ruby.0.join("\n"));
+    let stand_in = ruby.1.get("app/models/oj.rb").map(String::as_str).unwrap_or("");
+    assert!(stand_in.contains("def self.load"), "ruby emit dropped the stand-in:\n{stand_in}");
+    assert!(stand_in.contains("JSON.parse(source)"), "ruby stand-in is not the one-argument parse:\n{stand_in}");
+    assert!(!stand_in.contains("def self.dump"), "ruby stand-in gained dump:\n{stand_in}");
+    for target in [
+        roundhouse::project::BuildTarget::Python,
+        roundhouse::project::BuildTarget::Crystal,
+        roundhouse::project::BuildTarget::Typescript,
+        roundhouse::project::BuildTarget::Rust,
+        roundhouse::project::BuildTarget::Go,
+        roundhouse::project::BuildTarget::Elixir,
+        roundhouse::project::BuildTarget::CSharp,
+        roundhouse::project::BuildTarget::Kotlin,
+        roundhouse::project::BuildTarget::Swift,
+    ] {
+        let (errors, files) = oj_target_errors_and_text(&app, &dir, target);
+        assert!(
+            errors.iter().any(|e| e.contains("does not emit") && e.contains("missing class")),
+            "{target:?} did not refuse Oj:\n{}",
+            errors.join("\n")
+        );
+        assert!(
+            !errors.iter().any(|e| e.contains("String#read") || e.contains("JSON is not available")),
+            "{target:?} refused Oj for the wrong reason:\n{}",
+            errors.join("\n")
+        );
+        let hits: Vec<_> = files
+            .iter()
+            .filter(|(path, text)| {
+                !path.ends_with(".map") && (text.contains("Oj.load") || text.contains("Oj.generate"))
+            })
+            .map(|(path, _)| path.clone())
+            .collect::<Vec<_>>();
+        assert!(hits.is_empty(), "{target:?} emitted an Oj call in {hits:?}");
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+fn oj_target_errors_and_text(
+    app: &roundhouse::App,
+    dir: &std::path::Path,
+    target: roundhouse::project::BuildTarget,
+) -> (Vec<String>, std::collections::HashMap<String, String>) {
+    let (files, diags) = roundhouse::emit::diagnostics::scope(|| {
+        roundhouse::project::target_files(app, dir, target)
+    });
+    let errors = diags
+        .into_iter()
+        .filter(|d| d.severity == roundhouse::diagnostic::Severity::Error)
+        .map(|d| d.message)
+        .collect();
+    let files = files.unwrap_or_default().into_iter().collect();
+    (errors, files)
+}
+
 /// `/(?<name>..)/ =~ str` assigns each named group to a local (nil when
 /// nothing matches) and answers the match's index: as a statement, as an
 /// `if` condition, and as a method's value. Checked against CRuby.

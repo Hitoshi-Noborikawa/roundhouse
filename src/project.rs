@@ -2088,6 +2088,18 @@ fn target_files_inner(
         }
         None => app,
     };
+    // One gate for the Oj stand-in: ruby, jruby and spinel keep the class
+    // ingest installed. Every other transpile target drops it here, before
+    // the bundled-constant and TypeScript walks, so a missing `JSON` or
+    // `String#read` inside the class is not a second, incidental error.
+    let without_oj;
+    let app = match crate::lower::oj::without_unrun_stand_in(app, target) {
+        Some(trimmed) => {
+            without_oj = trimmed;
+            &without_oj
+        }
+        None => app,
+    };
     if target == BuildTarget::Roda {
         if let Some((table, column)) = app.schema.tables.values().find_map(|table| {
             table
