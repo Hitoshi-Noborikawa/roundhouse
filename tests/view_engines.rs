@@ -160,7 +160,12 @@ fn haml_continuation_offsets_translate_to_char_boundaries() {
             " ".repeat(indent)
         );
         let (ruby, map) = ViewEngine::Haml.compile_fn()(&source);
-        for c_off in 0..=ruby.len() as u32 {
+        // Only offsets that are themselves char boundaries of the compiled
+        // Ruby are offsets a real diagnostic span could ever carry (Prism
+        // never splits a UTF-8 character); a raw mid-character byte index
+        // can validly translate to another mid-character byte index when
+        // the segment's compiled and template text happen to be identical.
+        for c_off in (0..=ruby.len() as u32).filter(|&o| ruby.is_char_boundary(o as usize)) {
             let e_off = translate_offset(&map, c_off);
             assert!(
                 e_off as usize <= source.len(),
@@ -170,6 +175,35 @@ fn haml_continuation_offsets_translate_to_char_boundaries() {
             assert!(
                 source.is_char_boundary(e_off as usize),
                 "indent {indent}: c_off {c_off} translated to {e_off}, not a char boundary in:\n{source}"
+            );
+        }
+    }
+}
+
+/// roundhouse#1048's "Related" note: `Compiler::line` mapped an `=`/`-`
+/// line's expression with `e_start` fixed right after the marker
+/// (`e_base + 1`), but passed the FULLY TRIMMED expression (leading
+/// whitespace stripped) as the mapped text — so a line with 2+ spaces
+/// after the marker (`=  expr`) mapped every offset too early by the
+/// stripped width. That shift is constant, so it is invisible at a
+/// segment's own endpoints but splits a character at some offset in
+/// between whenever a multi-byte char sits close enough to the marker.
+#[test]
+fn extra_marker_whitespace_does_not_shift_offsets_into_a_character() {
+    use roundhouse::erb::translate_offset;
+
+    for source in ["=  'ク'.size\n", "-  'ク'.size\n"] {
+        let (ruby, map) = ViewEngine::Haml.compile_fn()(source);
+        for c_off in (0..=ruby.len() as u32).filter(|&o| ruby.is_char_boundary(o as usize)) {
+            let e_off = translate_offset(&map, c_off);
+            assert!(
+                e_off as usize <= source.len(),
+                "{source:?}: c_off {c_off} translated to {e_off}, past template end {}",
+                source.len()
+            );
+            assert!(
+                source.is_char_boundary(e_off as usize),
+                "{source:?}: c_off {c_off} translated to {e_off}, not a char boundary"
             );
         }
     }

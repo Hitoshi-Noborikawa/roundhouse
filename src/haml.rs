@@ -28,6 +28,17 @@ pub(crate) const VOID_ELEMENTS: &[&str] = &[
     "track", "wbr",
 ];
 
+/// Byte width of `s`'s leading ASCII/Unicode whitespace — the amount
+/// `trim()`/`trim_start()` strips off the front. Callers that pass a
+/// post-trim expression to a span-mapped helper (`output`/`silent`) add
+/// this to the pre-trim `e_start` so the mapped range starts at the
+/// expression's real first byte rather than at the marker (`=`/`-`/…)
+/// itself — otherwise `=  expr` (2+ spaces after the marker) maps every
+/// offset too early by the stripped width (roundhouse#1048).
+fn leading_ws_len(s: &str) -> usize {
+    s.len() - s.trim_start().len()
+}
+
 /// Ruby control-flow continuations: at the same indent as their opener,
 /// they continue the block (emit inline, keep the frame) rather than
 /// closing it.
@@ -247,17 +258,28 @@ impl Compiler {
             }
             b'/' => self.html_comment(content[1..].trim(), indent),
             b':' => self.filter(content[1..].trim(), indent),
-            b'=' => self.output(content[1..].trim(), false, indent, e_base + 1),
-            b'~' => self.output(content[1..].trim(), false, indent, e_base + 1),
+            b'=' => {
+                let rest = &content[1..];
+                self.output(rest.trim(), false, indent, e_base + 1 + leading_ws_len(rest))
+            }
+            b'~' => {
+                let rest = &content[1..];
+                self.output(rest.trim(), false, indent, e_base + 1 + leading_ws_len(rest))
+            }
             b'&' if content.starts_with("&=") => {
-                self.output(content[2..].trim(), false, indent, e_base + 2)
+                let rest = &content[2..];
+                self.output(rest.trim(), false, indent, e_base + 2 + leading_ws_len(rest))
             }
             b'!' if content.starts_with("!=") => {
                 // Raw (unescaped) output. v1 emits the same `.to_s` form;
                 // the escape distinction is a conformance follow-on.
-                self.output(content[2..].trim(), true, indent, e_base + 2)
+                let rest = &content[2..];
+                self.output(rest.trim(), true, indent, e_base + 2 + leading_ws_len(rest))
             }
-            b'-' => self.silent(content[1..].trim_start(), indent, e_base + 1),
+            b'-' => {
+                let rest = &content[1..];
+                self.silent(rest.trim_start(), indent, e_base + 1 + leading_ws_len(rest))
+            }
             b'%' => self.element(content, indent, e_base),
             // `.`/`#` start an implicit-div shortcut only when followed by a
             // name char; otherwise the line is text — notably `#{expr}`
