@@ -101,7 +101,7 @@ fn json_actions_for(
 
 /// Each action's templates in the TEXT formats the implicit render
 /// negotiates beyond html and json, in test order: `turbo_stream`, then
-/// `js`. Same scan `json_actions_for` does for jbuilder.
+/// `js`, then `md`. Same scan `json_actions_for` does for jbuilder.
 ///
 /// Turbo negotiates `text/vnd.turbo-stream.html` on a form submission
 /// and Rails renders `<action>.turbo_stream.erb` for it; without the
@@ -126,7 +126,7 @@ fn text_format_actions_for(controller: &Controller, views: &[crate::dialect::Vie
     // controller's module has to go through to match a view name.
     let dir = crate::naming::underscore(&module);
     let prefix = format!("{dir}/");
-    for fmt in ["turbo_stream", "js"] {
+    for fmt in ["turbo_stream", "js", "md"] {
         for v in views {
             if v.format.as_str() != fmt || v.jbuilder {
                 continue;
@@ -586,7 +586,7 @@ pub fn lower_controllers_with_arel_views_assocs_and_routes(
             // made it `helper.field`, a String. Ground them now, then type
             // the grounded calls.
             if bracket_rewritten
-                && crate::lower::string_inflections::ground_in_place(&mut method.body)
+                && crate::lower::string_core_ext::ground_in_place(&mut method.body)
             {
                 crate::lower::typing::type_method_body(method, &classes, &framework_ivars);
             }
@@ -608,6 +608,7 @@ pub fn lower_controllers_with_arel_views_assocs_and_routes(
             parent: controller.parent.clone(),
             parent_span: controller.parent_span,
             includes: Vec::new(),
+            include_spans: Vec::new(),
             methods,
             nullable_columns: Vec::new(),
             origin: None,
@@ -691,6 +692,7 @@ pub fn lower_controller_to_library_class(controller: &Controller) -> LibraryClas
         parent: controller.parent.clone(),
         parent_span: controller.parent_span,
         includes: Vec::new(),
+        include_spans: Vec::new(),
         methods,
         nullable_columns: Vec::new(),
         origin: None,
@@ -981,7 +983,7 @@ fn subclass_template_hooks(
         let hook = rewrites::subclass_template_hook_name(&stem);
         // `show_json` → (`show`, `format: :json`); `show` → (`show`, none).
         let (template, format) = match stem.rsplit_once('_') {
-            Some((t, f)) if matches!(f, "json" | "turbo_stream" | "svg") => (t.to_string(), Some(f.to_string())),
+            Some((t, f)) if matches!(f, "json" | "turbo_stream" | "svg" | "md") => (t.to_string(), Some(f.to_string())),
             _ => (stem.clone(), None),
         };
         for (methods, controller) in all_methods.iter_mut() {
@@ -1241,17 +1243,21 @@ fn build_methods(
     // inlining — drop them from the emitted methods. Filter targets
     // that are also called from action bodies (e.g., `_params`
     // helpers — actually those don't appear in before_filters, but
-    // be defensive) stay. A guarded filter (`if:`/`unless:`) is never
-    // inlined (`inline_before_filters` skips it; see
-    // `filter_is_guarded`) — its target is still called by name from
-    // the preamble, so it's excluded here even when another,
-    // unguarded, before_action on the same controller also names it.
-    let guarded_target_names: std::collections::HashSet<&Symbol> =
-        before_filters.iter().filter(|f| filter_is_guarded(f)).map(|f| &f.target).collect();
+    // be defensive) stay. A guarded filter (`if:`/`unless:`), or one
+    // whose target returns early, is never inlined
+    // (`inline_before_filters` skips it; see `filter_is_spliceable`):
+    // its target is still called by name from the preamble, so it's
+    // excluded here even when another, spliceable, before_action on the
+    // same controller also names it.
+    let called_target_names: std::collections::HashSet<&Symbol> = before_filters
+        .iter()
+        .filter(|f| !filter_is_spliceable(f, &privs))
+        .map(|f| &f.target)
+        .collect();
     let filter_target_names: std::collections::HashSet<&Symbol> = before_filters
         .iter()
         .map(|f| &f.target)
-        .filter(|t| !guarded_target_names.contains(*t))
+        .filter(|t| !called_target_names.contains(*t))
         .collect();
     // A subclassed controller keeps its filter targets: descendants
     // inherit the before_action and their preambles call the target
@@ -1397,20 +1403,26 @@ fn build_methods(
             all_controllers,
             &dispatcher_bodies(&preamble, &wraps, &rescues),
         );
-        methods.insert(
-            dispatcher_at,
-            synthesize_process_action(
-                &preamble,
-                &publics_inlined,
-                &inherited,
-                controller.name.0.clone(),
-                &deferred_tails,
-                &rescues,
-                &wraps,
-                reads,
-                &missing,
-            ),
+        let mut dispatcher = synthesize_process_action(
+            &preamble,
+            &publics_inlined,
+            &inherited,
+            controller.name.0.clone(),
+            &deferred_tails,
+            &rescues,
+            &wraps,
+            reads,
+            &missing,
         );
+        // Block-form filters are inlined into `process_action` after
+        // `rewrite_controller_route_helpers` has already run on action
+        // bodies. A CSP block calls `service_worker_path(format: :js)`,
+        // which `route_format_suffix` renamed. The rewrite is idempotent
+        // on nodes it has already touched, so every dispatcher gets it —
+        // the next block filter that names a helper would otherwise stay bare.
+        dispatcher.body =
+            rewrite_controller_route_helpers(&dispatcher.body, &shadows, route_id_segments);
+        methods.insert(dispatcher_at, dispatcher);
     }
     // The empty set for both non-public loops below: `is_public: false`
     // already suppresses the implicit render, so there is never one to
@@ -1566,15 +1578,33 @@ fn synthesize_controller_string_method(
 }
 
 /// Names a controller marks with `helper_method :x` whose public
-/// method body is IVAR-FREE (pure over its arguments) — the set the
-/// view-call rewrite and the class-side clone above serve. Shared with
-/// ingest, which registers these in `app.helper_method_index`.
+/// method body is pure over its arguments - the set the view-call
+/// rewrite and the class-side clone above serve. Shared with ingest,
+/// which registers these in `app.helper_method_index`.
+///
+/// Pure means it reads no instance state: no ivar, and none of the
+/// request's state the controller instance carries (`session`,
+/// `cookies`, `request`, `params`, ...). In Rails a helper method runs
+/// on the controller that handles the request; a class-side clone has no
+/// request, and a clone of an `authenticated?` that reads
+/// `session[:authenticated_at]` read `session` off the class, which no
+/// target can compile.
 pub(crate) fn controller_helper_method_names(controller: &Controller) -> Vec<Symbol> {
     use crate::expr::Literal;
+
+    const REQUEST_STATE: &[&str] = &[
+        "session", "cookies", "request", "response", "params", "flash", "headers",
+        "reset_session", "request_forgery_protection_token", "form_authenticity_token",
+    ];
 
     fn has_ivar(e: &Expr) -> bool {
         if matches!(&*e.node, ExprNode::Ivar { .. }) {
             return true;
+        }
+        if let ExprNode::Send { recv: None, method, .. } = &*e.node {
+            if REQUEST_STATE.contains(&method.as_str()) {
+                return true;
+            }
         }
         let mut found = false;
         e.node.for_each_child(&mut |c| {
@@ -1632,6 +1662,24 @@ fn filter_is_guarded(f: &Filter) -> bool {
         || f.unless_cond_expr.is_some()
 }
 
+/// May `f`'s target body be spliced into the actions it applies to?
+/// Not when the filter is guarded (`filter_is_guarded`), and not when
+/// its target method leaves early with `return`: spliced into an action,
+/// that `return` would leave the ACTION, while in Rails it ends only the
+/// filter method and the chain goes on unless the filter rendered or
+/// redirected. `def require_login; return if logged_in?; redirect_to
+/// login_path; end` then answered a signed-in request with an empty 200
+/// instead of running the action. Such a filter stays a call in the
+/// preamble, where its `return` ends the call and `return if
+/// performed?` decides the halt, as Rails does.
+fn filter_is_spliceable(f: &Filter, privs: &[Action]) -> bool {
+    !filter_is_guarded(f)
+        && !privs
+            .iter()
+            .find(|a| a.name == f.target)
+            .is_some_and(|a| crate::lower::model_to_library::contains_return(&a.body))
+}
+
 /// May this controller's own filters be inlined into its action bodies
 /// at all?
 ///
@@ -1669,11 +1717,11 @@ fn own_filter_inlining_is_ordered(controller: &Controller, privs: &[Action]) -> 
     let own_priv = |target: &Symbol| privs.iter().any(|a| &a.name == target);
     let mut seen_inlinable = false;
     for f in controller.filters().filter(|f| matches!(f.kind, FilterKind::Before)) {
-        // A guarded own-private filter is never inlined (see
-        // `filter_is_guarded`) — it stays in the preamble exactly like
-        // an ancestor-target filter, so it doesn't count as "inlinable"
-        // for this ordering check either.
-        if own_priv(&f.target) && !filter_is_guarded(f) {
+        // A guarded or early-returning own-private filter is never
+        // inlined (see `filter_is_spliceable`): it stays in the
+        // preamble exactly like an ancestor-target filter, so it doesn't
+        // count as "inlinable" for this ordering check either.
+        if own_priv(&f.target) && filter_is_spliceable(f, privs) {
             seen_inlinable = true;
         } else if seen_inlinable {
             return false;
@@ -1696,6 +1744,9 @@ fn own_filter_inlining_is_ordered(controller: &Controller, privs: &[Action]) -> 
 /// every response publicly cacheable). A guarded filter is left for
 /// `build_filter_preamble`, which already turns `if:`/`unless:` into a
 /// runtime condition (`cond_from_guards`) around the dispatch call.
+/// A filter whose target leaves early with `return` is left there too
+/// (`filter_is_spliceable`): spliced in, its `return` would leave the
+/// action.
 ///
 /// A prepended body that can render/redirect/head is followed by
 /// `return if performed?`, exactly as the preamble does for the filters
@@ -1712,7 +1763,7 @@ fn inline_before_filters(
     let action_name = &action.name;
     let mut prepended: Vec<Expr> = Vec::new();
     for f in filters {
-        if !filter_applies(f, action_name) || filter_is_guarded(f) {
+        if !filter_applies(f, action_name) || !filter_is_spliceable(f, privs) {
             continue;
         }
         // Look up the filter's target action by name in privs.
@@ -1938,7 +1989,7 @@ fn build_filter_preamble(
                     if is_own
                         && own_privs_inlined
                         && own_priv_targets.contains(&filter.target)
-                        && !filter_is_guarded(filter)
+                        && filter_is_spliceable(filter, own_privs)
                     {
                         continue; // inlined into action bodies upstream
                     }
@@ -2123,17 +2174,24 @@ fn body_calls_method(body: &Expr, name: &Symbol) -> bool {
     found
 }
 
-/// Rewrite a receiverless OPTIONS-ONLY render — `formats:` and/or
-/// `layout:`, nothing else — to `render(:<template>, <options>)`.
+/// Rewrite a receiverless OPTIONS-ONLY render — `formats:`, `layout:`
+/// and/or a resolvable `content_type:`, nothing else — to
+/// `render(:<template>, <options>)`.
 ///
-/// Both options say "this action's own template, rendered this way":
-/// `formats: :svg` in another format (respelled as the internal singular
-/// `format:` marker), `layout: false` without the layout (kept as is —
-/// the Ruby emit's layout pass honors and strips it, as it does for a
-/// partial). campfire's autocompletion endpoint answers its Lexxy mention
-/// prompt with `format.html { render layout: false }` since the Lexxy
-/// merge; left alone, that `render` reached `Base#render(body, …)` with
-/// no body and raised on every HTML request.
+/// All three options say "this action's own template, rendered this
+/// way": `formats: :svg` in another format (respelled as the internal
+/// singular `format:` marker), `layout: false` without the layout
+/// (kept as is — the Ruby emit's layout pass honors and strips it, as
+/// it does for a partial), `content_type: "text/css"` / `content_type:
+/// :css` the same as `formats:` when the value names (or reverse-maps
+/// to, via `format_for_mime`) a format with a template — Mastodon's
+/// `custom_css#show` writes `render content_type: :css` with no
+/// template name at all. campfire's autocompletion endpoint answers
+/// its Lexxy mention prompt with `format.html { render layout: false
+/// }` since the Lexxy merge; left alone, that `render` reached
+/// `Base#render(body, …)` with no body and raised on every HTML
+/// request — the same shape an unresolved `content_type:`-only render
+/// raised on every request to `custom_css#show`.
 fn resolve_formats_only_render(e: &mut Expr, template: &Symbol) {
     e.node.for_each_child_mut(&mut |c| resolve_formats_only_render(c, template));
     let ExprNode::Send { recv: None, method, args, block: None, .. } = &mut *e.node else {
@@ -2157,6 +2215,30 @@ fn resolve_formats_only_render(e: &mut Expr, template: &Symbol) {
                 options.push((sym("format"), sym(fmt.as_str())));
             }
             "layout" => options.push((k.clone(), v.clone())),
+            // `content_type: :css` names the format directly, the same
+            // as `formats:` above (and real Rails accepts a Mime::Type
+            // symbol there, which is what Mastodon's source writes).
+            // `content_type: "text/css"` is a MIME string instead —
+            // resolved through the same reverse table
+            // `mime_for_format`'s own arm feeds, so the two can't
+            // disagree about what a format's canonical MIME is. A
+            // value this can't resolve (a charset-qualified string, an
+            // interpolated expression, an unlisted MIME) declines —
+            // the render stays as written and keeps failing loudly,
+            // rather than a guess silently mislabeling the response.
+            "content_type" => {
+                let fmt = match &*v.node {
+                    ExprNode::Lit { value: Literal::Sym { value } } => value.clone(),
+                    ExprNode::Lit { value: Literal::Str { value } } => {
+                        match crate::lower::controller::body::format_for_mime(value) {
+                            Some(f) => Symbol::from(f),
+                            None => return,
+                        }
+                    }
+                    _ => return,
+                };
+                options.push((sym("format"), sym(fmt.as_str())));
+            }
             _ => return,
         }
     }
@@ -2736,6 +2818,9 @@ fn action_to_method(
     if text_formats.contains(&"js") {
         variants.push("js");
     }
+    if text_formats.contains(&"md") {
+        variants.push("md");
+    }
     // An overriding `<x>_params` yields its parent's params class —
     // see `lower_overriding_params_helper`.
     let formats_template =
@@ -2803,7 +2888,18 @@ fn action_to_method(
     //     permits `:user`, and one resource can carry several lists.
     //   - Other private actions default to Nil; refine when a
     //     forcing fixture surfaces.
-    let ret_ty = if !is_public && method_name.ends_with("_params") {
+    // Routing redirects override `same_host_location` so an author-written
+    // external location is allowed. The only caller is the inherited
+    // runtime `redirect_to`, which app call-site inference never sees, so
+    // the parameter would stay `Untyped`. Kotlin, C#, and Swift then emit
+    // `Any?` / `object?` against Base's `(String) -> String` and the
+    // override does not compile. The contract is the same String the
+    // runtime signature declares.
+    let host_policy = controller.name.0.as_str() == crate::ingest::routes::REDIRECT_CONTROLLER
+        && a.name.as_str() == "same_host_location";
+    let ret_ty = if host_policy {
+        Ty::Str
+    } else if !is_public && method_name.ends_with("_params") {
         let spec = self::params::first_permit_in(&a.body)
             .and_then(|(resource, fields)| params_specs.find(&resource, &fields));
         if let Some(spec) = spec {
@@ -2848,6 +2944,8 @@ fn action_to_method(
         .map(|(i, p)| {
             let ty = if p.rest {
                 Ty::Untyped
+            } else if host_policy {
+                Ty::Str
             } else {
                 unified
                     .and_then(|v| v.get(i))

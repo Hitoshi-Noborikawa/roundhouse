@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 # ActiveSupport blank-predicate reopen — ruby-family surface only
 # (inflector_ext.rb pattern): shipped to the scaffold trees via the
 # project.rs stems list, NOT in the runtime_loader tables, so the
@@ -108,6 +109,10 @@ module ActiveSupport
     def self.utc_zone?
       zone = ActiveSupport.current_zone
       name = zone.nil? ? Rails.application.config_time_zone : zone.name
+      utc_zone_name?(name)
+    end
+
+    def self.utc_zone_name?(name)
       UTC_ZONE_NAMES.include?(name)
     end
 
@@ -452,6 +457,31 @@ module ActiveSupport
     text
   end
 
+  # AS `String#truncate(truncate_to, omission: "...", separator: nil)`
+  # (core_ext/string/filters.rb), with the options positional: the
+  # result is at most `truncate_to` characters including the omission,
+  # unless the omission alone is longer, in which case it is the
+  # omission. A separator cuts at its last occurrence that still leaves
+  # room for the omission; when it does not occur there, the cut is
+  # where it would have been without one. `nil` for either option means
+  # what Rails' `options[:omission] || "..."` and `if
+  # options[:separator]` make it mean. A String reopen the transpiled
+  # runtimes cannot host - same home and same rule as `squish` above.
+  def self.truncate(text, truncate_to, omission, separator)
+    return text.dup unless text.length > truncate_to
+
+    mark = omission || "..."
+    room = truncate_to - mark.length
+    return mark.dup if room <= 0
+
+    stop = room
+    if separator
+      found = text.rindex(separator, room)
+      stop = found if found
+    end
+    text[0, stop] + mark
+  end
+
   # AS `Enumerable#sole`: THE one element, and a raise for any other
   # count — Rails' `SoleItemExpectedError` with its two messages. A
   # core_ext reopen (`Enumerable`) the transpiled runtimes cannot host,
@@ -538,6 +568,108 @@ module ActiveSupport
     text = value.to_s
     return nil if text == ""
     !%w[0 f F false FALSE off OFF].include?(text)
+  end
+
+  # ActiveModel::Type::String#cast_value. `true`/`false` are the frozen
+  # `"t"`/`"f"`; a String is copied so a later mutation is not the
+  # attribute; anything else is `to_s`.
+  def self.cast_string(value)
+    if value.nil?
+      nil
+    elsif value == true
+      "t".freeze
+    elsif value == false
+      "f".freeze
+    elsif value.is_a?(String)
+      value.dup
+    else
+      value.to_s
+    end
+  end
+
+  # ActiveModel::Type::Integer, through `Helpers::Numeric#cast`. A blank
+  # string is nil. A Float that is not finite is nil (`to_i` raises
+  # `FloatDomainError`). Any other string is `to_i` of its first 16
+  # bytes, Rails' `byteslice(0, limit * 4)` at the default 4-byte limit.
+  # A value of another class raises `TypeError`; Rails would call `to_i`.
+  def self.cast_integer(value)
+    if value.nil?
+      nil
+    elsif value == true
+      1
+    elsif value == false
+      0
+    elsif value.is_a?(Integer)
+      value
+    elsif value.is_a?(Float)
+      # Not `finite?`, which not every target's Float answers. NaN and
+      # the infinities are the floats for which `v - v` is not 0.0.
+      if value - value != 0.0
+        nil
+      else
+        value.to_i
+      end
+    elsif value.is_a?(String)
+      ActiveSupport.integer_from_string(value)
+    else
+      raise TypeError, "can't cast #{value.class} to an integer"
+    end
+  end
+
+  # `String#blank?` is `/\A[[:space:]]*\z/`, which raises ArgumentError
+  # on invalid UTF-8 — the integer writer does, in `presence`, before
+  # it slices. One character at a time, the form `squish` already
+  # lowers. A string that is not blank is `to_i` of its first 16 bytes.
+  def self.integer_from_string(value)
+    i = 0
+    while i < value.length
+      unless value[i].match?(/[[:space:]]/)
+        return ActiveSupport.integer_from_bytes(value.bytes)
+      end
+      i = i + 1
+    end
+    nil
+  end
+
+  # `byteslice(0, 16).to_i`. Strict targets lower `String#bytes`, not
+  # `byteslice`. For a string `blank?` accepted, the two slices' `to_i`
+  # are the same integer: `to_i` reads only an ASCII prefix, and a
+  # non-ASCII byte stops it. Underscores between digits count, as
+  # Ruby's `to_i` does (`"1_0"` is 10, `"1__0"` is 1).
+  def self.integer_from_bytes(raw)
+    limit = raw.length
+    limit = 16 if limit > 16
+    i = 0
+    while i < limit
+      b = raw[i]
+      break if b.nil? || (b != 32 && b != 9 && b != 10 && b != 11 && b != 12 && b != 13)
+      i = i + 1
+    end
+    sign = 1
+    if i < limit
+      b = raw[i]
+      if !b.nil? && (b == 43 || b == 45)
+        sign = -1 if b == 45
+        i = i + 1
+      end
+    end
+    n = 0
+    digits = 0
+    while i < limit
+      b = raw[i]
+      break if b.nil?
+      if b == 95
+        nxt = raw[i + 1]
+        break if digits == 0 || nxt.nil? || nxt < 48 || nxt > 57
+        i = i + 1
+        next
+      end
+      break if b < 48 || b > 57
+      n = n * 10 + (b - 48)
+      digits = digits + 1
+      i = i + 1
+    end
+    n * sign
   end
 
   # AS `Array#to_sentence`: "", "a", "a and b", "a, b, and c" with the
@@ -1023,8 +1155,32 @@ module ActiveSupport
     sign * (h * 3600 + mi * 60 + s)
   end
 
+  # The app's `config.time_zone` (Rails' default `Time.zone`), set once at
+  # boot by `set_default_zone`; empty until then, which presents in the
+  # host's zone. Rails keeps the process zone alone: `Time.now` is the
+  # host's local time and only `Time.current` and Active Record values are
+  # in the configured zone. The boot used to pin `ENV["TZ"]` to the
+  # configured zone instead, which made `Time.now` the configured zone
+  # too (an app that names a file after `Time.now.strftime` on a Warsaw
+  # host gets the Warsaw time from Rails).
+  DEFAULT_ZONE = []
+
+  # UTC needs no tzdata: a zone with no transitions and offset 0, so a
+  # container without /usr/share/zoneinfo still boots on Rails' default.
+  def self.set_default_zone(name)
+    iana = ZONE_NAMES[name.to_s] || name.to_s
+    DEFAULT_ZONE.clear
+    if iana == "UTC" || iana == "Etc/UTC" || iana == "Etc/UCT" || iana == "GMT" || iana == "Etc/GMT"
+      DEFAULT_ZONE << TimeZoneData.new(name.to_s, [], [], 0, [], [])
+    else
+      DEFAULT_ZONE << find_zone!(name)
+    end
+    nil
+  end
+
   def self.current_zone
-    Thread.current[:rh_time_zone]
+    zone = Thread.current[:rh_time_zone]
+    zone.nil? ? DEFAULT_ZONE[0] : zone
   end
 
   def self.use_zone(zone)
@@ -1039,7 +1195,12 @@ module ActiveSupport
 
   def self.present(t)
     zone = current_zone
-    zone.nil? ? t.getlocal : t.getlocal(zone.offset_at(t.to_i))
+    zone.nil? ? t.getlocal : present_in_zone(t, zone)
+  end
+
+  def self.present_in_zone(t, zone)
+    return t.getutc if ActiveSupport::JSON.utc_zone_name?(zone.name)
+    t.getlocal(zone.offset_at(t.to_i))
   end
 
   def self.present_db(t)
@@ -1049,7 +1210,7 @@ module ActiveSupport
 
   def self.in_time_zone(t, zone)
     return present(t) if zone.nil?
-    t.getlocal(find_zone!(zone).offset_at(t.to_i))
+    present_in_zone(t, find_zone!(zone))
   end
 
   def self.zone_name(zone)
@@ -1067,7 +1228,7 @@ module ActiveSupport
     return Time.at(Time.local(y, mo, d, h, mi, s).to_i, nsec, :nsec) if zone.nil?
     guess = Time.utc(y, mo, d, h, mi, s).to_i
     epoch = guess - zone.offset_at(guess - zone.offset_at(guess))
-    Time.at(epoch, nsec, :nsec).getlocal(zone.offset_at(epoch))
+    present_in_zone(Time.at(epoch, nsec, :nsec), zone)
   end
 
   # Not `number.to_s` with commas everywhere: only an all-digit integer part takes them, so `1.0e+20` and `Infinity` pass through.
@@ -1186,7 +1347,7 @@ module ActiveSupport
 
     def now
       t = Time.now
-      t.getlocal(@data.offset_at(t.to_i))
+      ActiveSupport.present_in_zone(t, @data)
     end
   end
 end

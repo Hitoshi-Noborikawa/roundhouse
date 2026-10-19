@@ -259,18 +259,6 @@ fn unsupported_accessor_shapes_are_reported_only_for_includers() {
     }
 }
 
-/// Receiver-bearing calls and unrelated DSL keep their existing path;
-/// recognizing attr_* must not start treating arbitrary calls as macros.
-#[test]
-fn unrelated_calls_are_not_accessor_candidates() {
-    for declaration in ["self.attr_accessor :scratch", "Other.attr_accessor :scratch", "unknown_macro :scratch"] {
-        let source = format!("module DraftState\n  extend ActiveSupport::Concern\n  included {{ {declaration} }}\nend\n");
-        let (items, enums) = roundhouse::ingest::library_class::ingest_concern_model_items(source.as_bytes(), "draft_state.rb");
-        assert!(items.is_empty(), "must not claim unrelated {declaration}: {items:?}");
-        assert!(enums.is_empty());
-    }
-}
-
 /// Newly accepted accessors must be rejected, not silently publicized
 /// or used to replace a different generated storage contract.
 #[test]
@@ -288,6 +276,7 @@ fn accessor_contexts_fail_strict_ingest_and_are_not_carried_in_survey() {
         ("attr_accessor :scratch\n    private :scratch", "include DraftState"),
         ("with_options if: false do\n      attr_accessor :scratch\n    end", "include DraftState"),
         ("attr_accessor :scratch\n    def scratch\n      'included override'\n    end", "include DraftState"),
+        ("attr_accessor :scratch\n    unknown_macro :scratch", "include DraftState"),
         ("attr_accessor :scratch", "def scratch\n    'earlier'\n  end\n  include DraftState"),
         ("attr_accessor :scratch", "def scratch=(value)\n    @scratch = value\n  end\n  include DraftState"),
         ("attr_accessor :body", "include DraftState"),
@@ -331,7 +320,6 @@ fn accessor_contexts_fail_strict_ingest_and_are_not_carried_in_survey() {
 fn source_visibility_refusals_precede_concern_accessor_admission() {
     use roundhouse::ingest::survey;
     for marker in [
-        "private :scratch=", "private \"scratch=\"", "protected \"scratch\"",
         "private :scratch if true", "with_options do\n    protected :scratch=\n  end",
         "private [:scratch].first",
     ] {
@@ -353,6 +341,26 @@ fn source_visibility_refusals_precede_concern_accessor_admission() {
         files.insert("app/models/message.rb".into(), model.replace("include DraftState", "").into_bytes());
         assert_eq!(ingest_app_from_tree(files).unwrap_err().to_string(), error,
             "the marker is unsupported even without a carried accessor");
+    }
+}
+
+/// A static marker naming the concern's accessor is the model's own
+/// visibility change on a method its body does not define: carried, and
+/// applied to the accessor the lowering synthesizes.
+#[test]
+fn a_marker_on_a_concern_accessor_applies_to_it() {
+    for (marker, name, keyword) in [
+        ("private :scratch=", "scratch=", "private"),
+        ("private \"scratch=\"", "scratch=", "private"),
+        ("protected \"scratch\"", "scratch", "protected"),
+    ] {
+        let app = ingest_app_from_tree(tree(&[
+            ("db/schema.rb", "ActiveRecord::Schema.define do\n  create_table :messages do |t|\n    t.string :body\n  end\nend\n"),
+            ("app/models/concerns/draft_state.rb", "module DraftState\n  extend ActiveSupport::Concern\n  included { attr_accessor :scratch }\nend\n"),
+            ("app/models/message.rb", &format!("class Message < ApplicationRecord\n  include DraftState\n  {marker}\nend\n")),
+        ])).unwrap_or_else(|e| panic!("{marker}: {e}"));
+        let src = ruby::emit_lowered_models(&app).into_iter().find(|file| file.path.to_string_lossy().ends_with("message.rb")).unwrap().content;
+        assert!(src.contains(&format!("{keyword} :{name}")) || src.contains(&format!("{keyword}\n\n  def {name}")), "{marker}:\n{src}");
     }
 }
 

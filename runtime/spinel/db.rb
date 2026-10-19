@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 # Primitive Db surface — the layer that per-model adapter code sits on
 # top of. The contract is database-agnostic; this file is the
 # SQLite-via-libsqlite3-FFI implementation, the runtime spinel-compiled
@@ -1021,6 +1022,8 @@ class DbPool
     # on OS or power failure. That is the guarantee campfire ships with,
     # so it is the one to match.
     "PRAGMA synchronous=NORMAL",
+    # Not SQLite's default (off): Rails' DEFAULT_PRAGMAS turn it on, so a row naming a missing parent raises InvalidForeignKey.
+    "PRAGMA foreign_keys=ON",
   ].freeze
 
   def initialize(path, n)
@@ -1044,6 +1047,10 @@ class DbPool
       # should still serve, slower, rather than fail to boot — and a pragma
       # that silently did nothing is what the numbers above would reveal.
       PRAGMAS.each { |p| SQL.sqlite3_exec(dbh, p, nil, nil, nil) }
+      # The app's own `pragmas:` from config/database.yml, after PRAGMAS
+      # (generated: `project::apply_database_pragmas`).
+      # >>> generated: database-pragmas
+      # <<< generated: database-pragmas
       @conns.push(DbConn.new(dbh))
       @free.push(i)
       i += 1
@@ -1339,6 +1346,29 @@ module Db
     Thread.current[:ar_txn_depth] = value
   end
 
+  # Bit `depth - 1` of this integer is whether that frame can be joined.
+  # Same thread slot as the depth. See runtime/ruby/db.rbs.
+  def self._txn_joinable_bits
+    bits = Thread.current[:ar_txn_joinable_bits]
+    bits.nil? ? 0 : bits
+  end
+
+  def self._txn_joinable_bits=(value)
+    Thread.current[:ar_txn_joinable_bits] = value
+  end
+
+  # The open transaction's enlisted writes (connection.rb), held in the
+  # same per-thread storage as the depth.
+  def self._txn_records
+    records = Thread.current[:ar_txn_records]
+    if records.nil?
+      records = [ActiveRecord::EnlistedRecord.new(ActiveRecord::Base.new, 0)]
+      records.clear
+      Thread.current[:ar_txn_records] = records
+    end
+    records
+  end
+
   # Request-scoped connection lease for the thread-per-connection
   # server. Leases a connection index (parking on the pool's condition
   # variable while none is free), binds its DbConn to this thread's
@@ -1360,6 +1390,37 @@ module Db
   # rebind the connection and, on release, unbind the outer lease's.
   def self.in_lease?
     !Thread.current[:db_conn].nil?
+  end
+
+  # Rails' SQLite `disable_referential_integrity`: fixtures load and tables empty in any order. Not foreign_keys=OFF alone: that pragma is a no-op inside a transaction, where defer_foreign_keys moves the check to COMMIT instead.
+  def self.without_foreign_keys
+    Db.with_connection do
+      Db.exec("PRAGMA defer_foreign_keys = ON")
+      Db.exec("PRAGMA foreign_keys = OFF")
+      result = nil
+      begin
+        result = yield
+      ensure
+        Db.exec("PRAGMA defer_foreign_keys = OFF")
+        Db.exec("PRAGMA foreign_keys = ON")
+      end
+      result
+    end
+  end
+
+  # Rails' `check_all_foreign_keys_valid!`, which its fixture loader runs after a load (`verify_foreign_keys_for_fixtures`).
+  def self.check_foreign_keys!
+    tables = []
+    Db.with_connection do
+      st = Db.prepare("PRAGMA foreign_key_check")
+      while Db.step?(st)
+        table = Db.column_text(st, 0)
+        tables << table unless tables.include?(table)
+      end
+      Db.finalize(st)
+    end
+    raise ActiveRecord::StatementInvalid, "Foreign key violations found: " + tables.join(", ") unless tables.empty?
+    nil
   end
 
   def self.with_connection

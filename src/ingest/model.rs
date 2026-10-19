@@ -324,7 +324,8 @@ pub(super) fn ingest_model_with_enum_constants(
     let mut enum_defaults: IndexMap<Symbol, Literal> = IndexMap::new();
     let mut class_attr_defaults: IndexMap<Symbol, Expr> = IndexMap::new();
     let mut primary_key: Option<Symbol> = None;
-    let visibility = Visibility::resolve(class.body().as_ref(), file, None)?;
+    let visibility = Visibility::resolve_carrying_inherited(class.body().as_ref(), file, None)?;
+    let mut carried_markers: std::collections::HashSet<usize> = std::collections::HashSet::new();
     if let Some(class_body) = class.body() {
         let mut prev_end: Option<usize> = None;
         // Constants the class body assigns, for `enum :x, CONST` and for
@@ -337,6 +338,12 @@ pub(super) fn ingest_model_with_enum_constants(
             let stmt = definition.as_ref().unwrap_or(&statement);
             if stmt.as_def_node().is_none() && statement.as_call_node().is_some_and(|c| visibility::marker(&c)) {
                 prev_end = Some(statement.location().end_offset());
+                if visibility.names_inherited(&statement) {
+                    carried_markers.insert(statement.location().start_offset());
+                    let mut expr = ingest_expr(&statement, file)?;
+                    expr.decisions |= crate::expr::INHERITED_VISIBILITY;
+                    body.push(ModelBodyItem::Unknown { expr, leading_comments: Vec::new(), leading_blank_line: false });
+                }
                 continue;
             }
             // Explicit names override convention before schema binding.
@@ -585,6 +592,7 @@ pub(super) fn ingest_model_with_enum_constants(
             prev_end = Some(stmt.location().end_offset());
         }
     }
+    visibility.uncarried_inherited(&carried_markers, file)?;
 
     let parent_span = class
         .superclass()
@@ -2973,6 +2981,13 @@ fn parse_association(
         })
         .unwrap_or_default();
 
+    // Rails takes the class of a `through:` association from its source
+    // association when no `class_name:` or `source_type:` names it.
+    // Ingest reads one model at a time, so app assembly does the
+    // lookup (`resolve_through_targets`).
+    let class_explicit = class_name.is_some() || source_type.is_some();
+    let source_name = source.as_deref().map(Symbol::from);
+
     match method {
         "has_many" => Some(Association::HasMany {
             name: name.clone(),
@@ -3002,6 +3017,12 @@ fn parse_association(
             // would otherwise be the polymorphic association name
             // ("Reference") — a phantom class. Already CamelCase, so no
             // transform.
+            //
+            // The camelized name is only a first guess for a `through:`
+            // association: `resolve_through_targets` replaces it with
+            // the class of the source association once every model is
+            // ingested (`source: :remarks` on `has_many :remarks,
+            // class_name: "Comment"` → Comment, not Remark).
             target: class_name
                 .map(|s| ClassId(Symbol::from(s.as_str())))
                 .or_else(|| source_type.map(|s| ClassId(Symbol::from(s.as_str()))))
@@ -3017,6 +3038,8 @@ fn parse_association(
                 }),
             foreign_key_explicit,
             through: through.map(|s| Symbol::from(s.as_str())),
+            source: source_name,
+            class_explicit,
             dependent: dependent.unwrap_or_default(),
             as_interface: as_interface.as_deref().map(Symbol::from),
             scope,

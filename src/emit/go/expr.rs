@@ -1113,10 +1113,11 @@ pub(super) fn emit_send(
     // class-method fallback and emit `Time_now()` (undefined) so the
     // gap stays loud. The literal `time.RFC3339` triggers the `time`
     // import via `super::needed_imports`.
-    if method == "iso8601" && args.is_empty() {
-        if is_time_now_utc_chain(recv) {
-            return "time.Now().UTC().Format(time.RFC3339)".to_string();
-        }
+    // Lowered `Time.utc.to_rfc3339` — Crystal's spelling of the old
+    // `Time.now.utc.iso8601` chain. Partial clocks stay unmatched so a
+    // missing lower shows up as an undefined `Time_utc` call.
+    if method == "to_rfc3339" && args.is_empty() && is_time_utc_clock(recv) {
+        return "time.Now().UTC().Format(time.RFC3339)".to_string();
     }
 
     // Ruby `recv.field = v` lowers in the IR as `Send { recv, method:
@@ -1423,7 +1424,13 @@ pub(super) fn emit_send(
     if method == "keys" && args.is_empty() {
         if let Some(r) = recv {
             let recv_s = emit_expr(ctx, r);
-            let (k_ty, _v_ty) = hash_kv_go_tys(r.ty.as_ref());
+            let (mut k_ty, _v_ty) = hash_kv_go_tys(r.ty.as_ref());
+            // An `is_a?(Hash)` assertion binds a `map[string]any`, whatever key type the analyzer left untyped.
+            let asserted_map = matches!(&*r.node, ExprNode::Var { name, .. }
+                if ctx.var_renames.get(name.as_str()).map(String::as_str) == Some(assert_ident_for("map[string]any")));
+            if asserted_map {
+                k_ty = "string".to_string();
+            }
             return format!(
                 "func() []{k_ty} {{\n\
                  \t_ks := make([]{k_ty}, 0, len({recv_s}))\n\
@@ -1892,7 +1899,7 @@ pub(super) fn emit_send(
     // through the Self back-pointer so subclass overrides fire — same
     // mechanism as `self.class.X` above and `self[k]=v` / `self[k]`
     // earlier in this function. Modeler membership gates which methods
-    // qualify; non-polymorphic methods (Save, NewRecord, FillTimestamps,
+    // qualify; non-polymorphic methods (Save, NewRecord,
     // OpResolveStatus) stay on the static binding because they're not
     // overridden by subclasses.
     if let Some(r) = recv {
@@ -2218,6 +2225,12 @@ pub(super) fn emit_send(
                 if is_known_class_method(method) {
                     return format!("{recv_s}.{go_m}()");
                 }
+                // Not a field: the written-down `render json:` encoder is a method on every model it serializes.
+                if method == crate::lower::JSON_WRITER_METHOD
+                    || method.starts_with(&format!("{}__", crate::lower::JSON_WRITER_METHOD))
+                {
+                    return format!("{recv_s}.{go_m}()");
+                }
                 // Temporal-reader read (`article.created_at`, stamped
                 // `Time | Nil`): the struct carries no `CreatedAt`
                 // field — the shared lowering split storage into the
@@ -2481,43 +2494,19 @@ fn is_nil_lit(e: &Expr) -> bool {
     matches!(&*e.node, ExprNode::Lit { value: Literal::Nil })
 }
 
-/// True iff `recv` is exactly the chain `Time.now.utc` — paired with
-/// an outer `.iso8601()` Send to produce
-/// `time.Now().UTC().Format(time.RFC3339)`. Walks two nested Sends
-/// (`.utc` outer, `.now` inner) then verifies the receiver is the
-/// top-level `Time` constant.
-fn is_time_now_utc_chain(recv: Option<&Expr>) -> bool {
+/// `Time.utc` with no args — the lowered form of `Time.now.utc`.
+fn is_time_utc_clock(recv: Option<&Expr>) -> bool {
     let Some(utc_expr) = recv else { return false };
-    let ExprNode::Send {
-        recv: now_recv,
-        method: utc_method,
-        args: utc_args,
-        ..
-    } = &*utc_expr.node
-    else {
+    let ExprNode::Send { recv: time_recv, method, args, .. } = &*utc_expr.node else {
         return false;
     };
-    if utc_method.as_str() != "utc" || !utc_args.is_empty() {
-        return false;
-    }
-    let Some(now_expr) = now_recv else { return false };
-    let ExprNode::Send {
-        recv: time_recv,
-        method: now_method,
-        args: now_args,
-        ..
-    } = &*now_expr.node
-    else {
-        return false;
-    };
-    if now_method.as_str() != "now" || !now_args.is_empty() {
+    if method.as_str() != "utc" || !args.is_empty() {
         return false;
     }
     let Some(const_expr) = time_recv else { return false };
-    let ExprNode::Const { path } = &*const_expr.node else {
-        return false;
-    };
+    let ExprNode::Const { path } = &*const_expr.node else { return false };
     path.last().map(|s| s.as_str()) == Some("Time")
+        && path.iter().rev().skip(1).all(|s| s.as_str().is_empty())
 }
 
 /// Recognize `recv.is_a?(Const)` and return `(recv, last-segment of
@@ -3173,6 +3162,8 @@ fn is_modeler_member(name: &str) -> bool {
             | "_adapter_update"
             | "_adapter_touch"
             | "_adapter_delete"
+            // Not Base's: a model's own keeps a timestamp already set, as Rails does, and writes the stored text Base's `self[:col] = now` loses in Go's `time.Time` assertion.
+            | "fill_timestamps"
             // Validation + callbacks — Save() drives `valid?` →
             // `self.validate`; create/update/destroy paths drive
             // `after_*_commit` and `before_destroy`. Subclasses (Article,

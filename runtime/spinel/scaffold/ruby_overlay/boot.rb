@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 # Boot chain — every `require_relative` the app needs, in the order it
 # needs them, and NOTHING that starts anything.
 #
@@ -224,6 +225,12 @@ require_relative "runtime/active_job"
 # ActiveJob payload codecs: after the module and its DeserializationError,
 # and after global_id_locator, whose URI parser the record reader uses.
 require_relative "runtime/active_job_serialization"
+# Sidekiq pushes for an app on queue_adapter :sidekiq: the Redis
+# connection (a raising façade unless the tree is on :sidekiq), then the
+# envelope and the after-commit hold. Before job_registry, whose COMMIT
+# and ROLLBACK edges flush and drop the held pushes.
+require_relative "runtime/sidekiq_redis"
+require_relative "runtime/sidekiq_push"
 # The app's payload jobs (generated), and the drain's payload arm.
 require_relative "runtime/job_registry"
 # Per-request state per THREAD -- reopens Current, the view slots, the
@@ -286,18 +293,20 @@ end
 # as it did — the comment was believed and the order was not measured.
 # The spinel scaffold's boot.rb had it right; only this one was wrong.
 require_relative "runtime/active_storage_processor"
-# Pin the process zone to the app's config.time_zone (ingest
+# The app's config.time_zone becomes the runtime's default zone (ingest
 # synthesizes `config_time_zone` from the one config-DSL line the
 # render layer must honor; absent → "UTC", Rails' default). Rails
 # presents every AR temporal value in this zone REGARDLESS of the
-# host's zone — parse_db_time hydrates UTC then `.getlocal` lands
-# here, so strftime/iso8601/pubDate offsets match Rails on any host.
+# host's zone - parse_db_time hydrates UTC then `ActiveSupport.present`
+# lands it here, so strftime/iso8601/pubDate offsets match Rails on any
+# host - and leaves the process zone alone, so `Time.now` stays the
+# host's local time, as in Rails.
 tz_name = if Rails.application.respond_to?(:config_time_zone)
   Rails.application.config_time_zone
 else
   "UTC"
 end
-ENV["TZ"] = ActiveSupport::RAILS_TZ_TO_IANA.fetch(tz_name, tz_name)
+ActiveSupport.set_default_zone(tz_name)
 # Rails' fragment caching through the controller: reopens
 # `ActionView::ViewHelpers.fragment_read/_write`, so after every file that
 # defines them.
@@ -305,6 +314,9 @@ require_relative "runtime/action_controller_fragment_caching"
 # Rails 8.1.4's full ActionController::Head options hash is a Ruby-family
 # feature; strict non-Ruby targets keep the bounded shared implementation.
 require_relative "runtime/action_controller_head"
+# Rails 8.1.4 `send_data(filename:)`: the Content-Disposition escaping
+# works over UTF-8 bytes, so it is a Ruby-family reopen as well.
+require_relative "runtime/action_controller_send_data"
 # The app/models.rb aggregator (generated — see apply_models_aggregator)
 # loads every model/support class. Model files only require their own
 # LOAD-time deps (superclass, class-body consts); method-body references

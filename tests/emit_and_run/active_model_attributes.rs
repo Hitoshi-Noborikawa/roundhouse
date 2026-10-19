@@ -28,12 +28,31 @@ raise "integer: #{e.subject_id.inspect}" unless e.subject_id == 42
 raise "boolean: #{e.flagged.inspect}" unless e.flagged == false
 raise "date-only: #{e.timestamp.inspect}" unless e.timestamp == Time.utc(2026, 10, 14) && e.timestamp.utc?
 raise "strftime: #{e.timestamp.strftime("%Y-%m-%d")}" unless e.timestamp.strftime("%Y-%m-%d") == "2026-10-14"
+raise "integer setter: #{(e.subject_id = "08").inspect}" unless (e.subject_id = "08") == "08" && e.subject_id == 8
+raise "boolean setter: #{(e.flagged = "0").inspect}" unless (e.flagged = "0") == "0" && e.flagged == false
 e.subject_id = ""
 raise "blank integer: #{e.subject_id.inspect}" unless e.subject_id.nil?
+e.subject_id = "\u00A0"
+raise "nbsp integer: #{e.subject_id.inspect}" unless e.subject_id.nil?
+e.subject_id = "1_0"
+raise "underscore: #{e.subject_id.inspect}" unless e.subject_id == 10
+e.subject_id = "1__0"
+raise "double underscore: #{e.subject_id.inspect}" unless e.subject_id == 1
+e.subject_id = Float::INFINITY
+raise "infinity: #{e.subject_id.inspect}" unless e.subject_id.nil?
+e.subject_id = Float::NAN
+raise "nan: #{e.subject_id.inspect}" unless e.subject_id.nil?
+e.subject_id = 3.9
+raise "truncate: #{e.subject_id.inspect}" unless e.subject_id == 3
 e.subject_id = "12345678901234567890"
 raise "integer limit: #{e.subject_id.inspect}" unless e.subject_id == 1234567890123456
+e.subject_id = "111111111111111é999"
+raise "byte limit: #{e.subject_id.inspect}" unless e.subject_id == 111111111111111
 e.subject_id = 7
 raise "integer kept: #{e.subject_id.inspect}" unless e.subject_id == 7
+e.event_name = true
+raise "true string: #{e.event_name.inspect} frozen=#{e.event_name.frozen?}" unless e.event_name == "t" && e.event_name.frozen?
+raise "string setter: #{(e.event_name = 12).inspect}" unless (e.event_name = 12) == 12 && e.event_name == "12"
 e.event_name = nil
 raise "nil string: #{e.event_name.inspect}" unless e.event_name.nil?
 e.flagged = ""
@@ -64,18 +83,78 @@ fn active_model_attributes_read_nil_and_cast_on_write_on_spinel() {
     assert!(run.stdout.contains("ActiveModel::Attributes contract passed"), "{}", run.stdout);
 }
 
-/// A declaration this lowering does not reproduce (here a `default:`)
-/// leaves the class as written, and `check` still reports the include.
+/// A declaration this lowering does not reproduce leaves the class as
+/// written, and `check` still reports the include. Options, a block, a
+/// receiver, and a trailing `#:` are each enough, including when the
+/// class also has one plain `attribute :name, :string`.
 #[test]
 fn active_model_attributes_with_options_stay_reported() {
-    let (_emitted, errors) = emit_and_run::real_blog()
-        .write(
-            "app/lib/signal_event.rb",
-            "class SignalEvent\n  include ActiveModel::Attributes\n\n  attribute :event_name, :string, default: \"view\"\nend\n",
-        )
-        .emit(roundhouse::project::BuildTarget::Ruby);
-    assert!(
-        errors.iter().any(|e| e.contains("SignalEvent includes unresolved ActiveModel::Attributes")),
-        "{errors:?}"
-    );
+    let bodies = [
+        "attribute :event_name, :string, default: \"view\"\n",
+        "attribute :event_name, :string do\n  end\n",
+        "self.attribute :event_name, :string\n",
+        "attribute :event_name, :string #: String\n",
+        "attribute :event_name, :string\n  attribute :subject_id, :integer do\n  end\n",
+        "attribute :event_name, :string\n  self.attribute :subject_id, :integer\n",
+        "attribute :event_name, :string\n  attribute :subject_id, :integer #: Integer\n",
+    ];
+    for body in bodies {
+        let source = format!("class SignalEvent\n  include ActiveModel::Attributes\n\n  {body}end\n");
+        let (_emitted, errors) = emit_and_run::real_blog()
+            .write("app/lib/signal_event.rb", &source)
+            .emit(roundhouse::project::BuildTarget::Ruby);
+        assert!(
+            errors.iter().any(|e| e.contains("SignalEvent includes unresolved ActiveModel::Attributes")),
+            "{body}\n{errors:?}"
+        );
+    }
+}
+
+/// The ruby-family class calls `ActiveSupport.cast_integer` and does
+/// not call `Float#finite?`. Rust and Go do not emit a plain class, and
+/// they still say so: the include is gone, the class is not silent.
+#[test]
+fn active_model_attributes_are_clean_without_finite() {
+    fn generated_class(dir: &std::path::Path) -> String {
+        let mut stack = vec![dir.to_path_buf()];
+        let mut out = String::new();
+        while let Some(path) = stack.pop() {
+            let Ok(entries) = std::fs::read_dir(&path) else { continue };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    stack.push(path);
+                    continue;
+                }
+                if path.to_string_lossy().to_ascii_lowercase().contains("signal_event") {
+                    out.push_str(&std::fs::read_to_string(&path).unwrap_or_default());
+                }
+            }
+        }
+        out
+    }
+    for target in [
+        roundhouse::project::BuildTarget::Ruby,
+        roundhouse::project::BuildTarget::Typescript,
+    ] {
+        let (emitted, errors) = event().emit(target);
+        assert!(
+            errors.iter().all(|e| !e.contains("unresolved ActiveModel::Attributes")),
+            "{target:?}: {errors:?}"
+        );
+        let class = generated_class(emitted.as_ref());
+        assert!(class.contains("cast_integer"), "{target:?} writer does not call cast_integer:\n{class}");
+        assert!(!class.contains("finite?"), "{target:?} writer calls finite?:\n{class}");
+    }
+    for target in [roundhouse::project::BuildTarget::Rust, roundhouse::project::BuildTarget::Go] {
+        let (_emitted, errors) = event().emit(target);
+        assert!(
+            errors.iter().all(|e| !e.contains("unresolved ActiveModel::Attributes")),
+            "{target:?}: {errors:?}"
+        );
+        assert!(
+            errors.iter().any(|e| e.contains("plain Ruby class") && e.contains("SignalEvent")),
+            "{target:?} dropped the class without saying so: {errors:?}"
+        );
+    }
 }

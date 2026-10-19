@@ -141,6 +141,7 @@ fn module_singleton_shape() {
         parent: None,
         parent_span: Default::default(),
         includes: vec![],
+        include_spans: Vec::new(),
         methods: vec![reader, writer],
         nullable_columns: Vec::new(),
         origin: None,
@@ -270,6 +271,7 @@ fn module_singleton_does_not_fire_on_plain_class() {
         parent: None,
         parent_span: Default::default(),
         includes: vec![],
+        include_spans: Vec::new(),
         methods: vec![reader],
         nullable_columns: Vec::new(),
         origin: None,
@@ -399,6 +401,7 @@ fn raise_panic_peephole() {
         parent: None,
         parent_span: Default::default(),
         includes: vec![],
+        include_spans: Vec::new(),
         methods: vec![fail_method, abort_method],
         nullable_columns: Vec::new(),
         origin: None,
@@ -435,18 +438,13 @@ fn raise_panic_peephole() {
     );
 }
 
-/// `Time.now.utc.iso8601` chain — used by `ActiveRecord::Base#fill_timestamps`
-/// to stamp `created_at` / `updated_at` with a UTC ISO-8601 string. Ruby
-/// chains three Sends; Go's stdlib provides no element-wise analog
-/// (`time.Time` has no `.utc` method, formatting goes through
-/// `Format(layout)`), so the outermost-Send peephole rewrites the whole
-/// chain to `time.Now().UTC().Format(time.RFC3339)` in one shot. The
-/// `time.RFC3339` literal triggers `time` import injection via
+/// Lowered `Time.utc.to_rfc3339` — the IR form of the old
+/// `Time.now.utc.iso8601` clock. Go has no element-wise analog, so the
+/// outermost send becomes `time.Now().UTC().Format(time.RFC3339)`.
+/// The `time.RFC3339` literal triggers `time` import injection via
 /// `needed_imports`.
 #[test]
 fn time_now_utc_iso8601_peephole() {
-    // Body: `Time.now.utc.iso8601` — outermost Send is `.iso8601`
-    // on `.utc` on `.now` on `Const(Time)`.
     let chain = Expr::new(
         Span::synthetic(),
         ExprNode::Send {
@@ -455,16 +453,7 @@ fn time_now_utc_iso8601_peephole() {
                 ExprNode::Send {
                     recv: Some(Expr::new(
                         Span::synthetic(),
-                        ExprNode::Send {
-                            recv: Some(Expr::new(
-                                Span::synthetic(),
-                                ExprNode::Const { path: vec![Symbol::from("Time")] },
-                            )),
-                            method: Symbol::from("now"),
-                            args: vec![],
-                            block: None,
-                            parenthesized: false,
-                        },
+                        ExprNode::Const { path: vec![Symbol::from("Time")] },
                     )),
                     method: Symbol::from("utc"),
                     args: vec![],
@@ -472,7 +461,7 @@ fn time_now_utc_iso8601_peephole() {
                     parenthesized: false,
                 },
             )),
-            method: Symbol::from("iso8601"),
+            method: Symbol::from("to_rfc3339"),
             args: vec![],
             block: None,
             parenthesized: false,
@@ -506,6 +495,7 @@ fn time_now_utc_iso8601_peephole() {
         parent: None,
         parent_span: Default::default(),
         includes: vec![],
+        include_spans: Vec::new(),
         methods: vec![stamp],
         nullable_columns: Vec::new(),
         origin: None,
@@ -520,7 +510,7 @@ fn time_now_utc_iso8601_peephole() {
     // exact rewrite so a partial-chain change in the future is loud.
     assert!(
         emitted.contains("time.Now().UTC().Format(time.RFC3339)"),
-        "Time.now.utc.iso8601 chain missing Go rewrite:\n{emitted}",
+        "Time.utc.to_rfc3339 missing Go rewrite:\n{emitted}",
     );
     // Regression guard: the generic Const-recv class-method fallback
     // would otherwise emit `Time_now()` (an undefined bare function).
@@ -593,6 +583,7 @@ fn include_array_recv_routes_to_slices_contains() {
         parent: None,
         parent_span: Default::default(),
         includes: vec![],
+        include_spans: Vec::new(),
         methods: vec![probe],
         nullable_columns: Vec::new(),
         origin: None,
@@ -674,6 +665,7 @@ fn negative_index_rewrites_to_len_minus_n() {
         parent: None,
         parent_span: Default::default(),
         includes: vec![],
+        include_spans: Vec::new(),
         methods: vec![last_method],
         nullable_columns: Vec::new(),
         origin: None,
@@ -844,6 +836,7 @@ fn class_reflection_rewrites() {
         parent: None,
         parent_span: Default::default(),
         includes: vec![],
+        include_spans: Vec::new(),
         methods: vec![lookup_cols, lookup_name, diag],
         nullable_columns: Vec::new(),
         origin: None,
@@ -937,6 +930,7 @@ fn bare_new_in_class_method_resolves_to_constructor() {
         parent: None,
         parent_span: Default::default(),
         includes: vec![],
+        include_spans: Vec::new(),
         methods: vec![create],
         nullable_columns: Vec::new(),
         origin: None,
@@ -1088,6 +1082,7 @@ fn implicit_self_method_call_resolution() {
         parent: None,
         parent_span: Default::default(),
         includes: vec![],
+        include_spans: Vec::new(),
         methods: vec![status_reader, notify, tick],
         nullable_columns: Vec::new(),
         origin: None,
@@ -1185,6 +1180,7 @@ fn each_array_block_shape() {
         parent: None,
         parent_span: Default::default(),
         includes: vec![],
+        include_spans: Vec::new(),
         methods: vec![method],
         nullable_columns: Vec::new(),
         origin: None,
@@ -1272,6 +1268,7 @@ fn each_hash_block_shape() {
         parent: None,
         parent_span: Default::default(),
         includes: vec![],
+        include_spans: Vec::new(),
         methods: vec![method],
         nullable_columns: Vec::new(),
         origin: None,
@@ -1356,6 +1353,7 @@ fn map_array_block_shape() {
         parent: None,
         parent_span: Default::default(),
         includes: vec![],
+        include_spans: Vec::new(),
         methods: vec![method],
         nullable_columns: Vec::new(),
         origin: None,
@@ -1462,6 +1460,7 @@ fn empty_body_with_nonvoid_return_synthesizes_zero_value() {
         parent: None,
         parent_span: Default::default(),
         includes: vec![],
+        include_spans: Vec::new(),
         methods: vec![m1, m2],
         nullable_columns: Vec::new(),
         origin: None,
@@ -1577,6 +1576,7 @@ fn typed_empty_literals_back_propagate() {
         parent: None,
         parent_span: Default::default(),
         includes: vec![],
+        include_spans: Vec::new(),
         methods: vec![errors, lookup],
         nullable_columns: Vec::new(),
         origin: None,
@@ -1867,6 +1867,7 @@ fn nil_check_to_comma_ok_rewrites_pair() {
         parent: None,
         parent_span: Default::default(),
         includes: vec![],
+        include_spans: Vec::new(),
         methods: vec![method],
         nullable_columns: Vec::new(),
         origin: None,
@@ -1961,6 +1962,7 @@ fn nil_check_to_comma_ok_skips_non_hash_receiver() {
         parent: None,
         parent_span: Default::default(),
         includes: vec![],
+        include_spans: Vec::new(),
         methods: vec![method],
         nullable_columns: Vec::new(),
         origin: None,

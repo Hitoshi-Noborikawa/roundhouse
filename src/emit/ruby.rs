@@ -23,6 +23,7 @@ const SPINEL_TEST_HELPER: &str =
 
 pub(crate) mod expr;
 mod library;
+pub(crate) use library::install_lookup_indexes;
 mod rbs;
 pub mod shake;
 mod shared;
@@ -127,6 +128,8 @@ pub fn emit_method(m: &MethodDef) -> String {
 /// Complementary to `emit`; skips Rails-app artifacts (controllers,
 /// routes, views, fixtures, importmap, schema) and emits only one
 /// `.rb` file per `LibraryClass`. Mirrors `typescript::emit_library`.
+pub use library::record_rendered;
+
 pub fn emit_library(app: &App) -> Vec<EmittedFile> {
     library::emit_library_class_decls(app)
 }
@@ -322,6 +325,10 @@ pub(crate) fn apply_model_lowering(mut lcs: &mut [LibraryClass], app: &App) {
     // Date/DateTime/Time column accessors coerce to/from real `Time`
     // (no-op for apps with no temporal columns).
     library::apply_datetime_lowering(&mut lcs, app);
+    library::apply_rich_text_content_memo(&mut lcs);
+    // `ActionText::RichText belongs_to :record, touch: true`: a saved
+    // rich text touches the record it was read through.
+    library::apply_rich_text_record_touch(&mut lcs, app);
     // has_secure_password (authenticate + plaintext accessors, bcrypt
     // contract) and typed_store virtual-attribute accessors are
     // synthesized by the shared model lowering
@@ -332,10 +339,9 @@ pub(crate) fn apply_model_lowering(mut lcs: &mut [LibraryClass], app: &App) {
     library::apply_boolean_lowering(&mut lcs, app);
     // NULL fidelity: nullable columns hydrate to nil (not 0/"") and fk
     // 0-sentinel guards widen to accept nil (no-op for schemas with no
-    // nullable columns); synthesized `.empty?` predicate forms in
-    // model bodies tolerate the nil.
+    // nullable columns). A string `blank?` already carries `(r || "")`
+    // in the shared IR (`lower::blank`).
     library::apply_hydration_nil_lowering(&mut lcs, app);
-    library::apply_nilsafe_empty_lowering(&mut lcs);
     library::apply_time_format_lowering(&mut lcs, app);
     library::apply_dynamic_render_options_lowering(&mut lcs);
     // Runtime-Relation eager loading: per-model `preload_associations`
@@ -351,11 +357,6 @@ pub(crate) fn apply_model_lowering(mut lcs: &mut [LibraryClass], app: &App) {
     // that same cache and would have nothing to prepend itself to if it
     // ran first.
     library::apply_belongs_to_memoization(&mut lcs, app);
-    // Every association reader waits on its record's pending preload
-    // (`lower::deferred_preload`): a Relation's includes run when a record
-    // first reads an association, not when the rows arrive. After the two
-    // passes above, which put the `@<name>_loaded` guard it looks for.
-    crate::lower::deferred_preload::apply(&mut lcs, app);
     // A has_many cache is made on first read rather than at construction,
     // and the constructor's `attrs = {}` default is one shared frozen Hash
     // (`lower::lazy_model_state`) — nine Arrays and a Hash per hydrated
@@ -516,7 +517,6 @@ pub fn emit_lowered_controllers(app: &App) -> Vec<EmittedFile> {
     // A helper handed `raw(x)` retargets to a `_raw` clone in which
     // that argument's escaping comes off (no-op without such a site).
     library::apply_raw_helper_monomorphization(&mut lcs, app);
-    library::apply_nilsafe_empty_lowering(&mut lcs);
     library::apply_time_format_lowering(&mut lcs, app);
     library::apply_dynamic_render_options_lowering(&mut lcs);
     // Layout wrap at render call sites — the seam where the @ivars a
@@ -561,7 +561,6 @@ pub(crate) fn lowered_controller_lcs_with_layout(app: &App) -> Vec<LibraryClass>
     // A helper handed `raw(x)` retargets to a `_raw` clone in which
     // that argument's escaping comes off (no-op without such a site).
     library::apply_raw_helper_monomorphization(&mut lcs, app);
-    library::apply_nilsafe_empty_lowering(&mut lcs);
     library::apply_time_format_lowering(&mut lcs, app);
     library::apply_dynamic_render_options_lowering(&mut lcs);
     library::apply_layout_lowering(&mut lcs, app);
@@ -735,7 +734,7 @@ pub(crate) fn lowered_view_lcs(app: &App) -> (Vec<&crate::dialect::View>, Vec<Li
     // application rebuilt the scope/assoc/helper registries for every
     // template, which is quadratic in app size (the mastodon playground
     // transpile blew its budget on it).
-    let vctx = crate::lower::ViewLowerCtx::new(app);
+    let vctx = crate::lower::ViewLowerCtx::new(app).observe_form_with_entry();
     let html_views: Vec<&crate::dialect::View> = app
         .views
         .iter()
@@ -763,9 +762,6 @@ pub(crate) fn lowered_view_lcs(app: &App) -> (Vec<&crate::dialect::View>, Vec<Li
     library::apply_raw_helper_monomorphization(&mut lcs, app);
     library::apply_time_current_lowering(&mut lcs, app);
     library::apply_duration_lowering(&mut lcs, app);
-    // Nullable columns hydrate to nil on the Ruby tree — synthesized
-    // `.empty?` predicate forms in view bodies must tolerate it.
-    library::apply_nilsafe_empty_lowering(&mut lcs);
     library::apply_time_format_lowering(&mut lcs, app);
     library::apply_dynamic_render_options_lowering(&mut lcs);
     // A view whose own namespace shadows a top-level app class
@@ -837,6 +833,7 @@ fn jbuilder_view_output_path(view_name: &str) -> PathBuf {
 /// which would have CRuby double-run every test if combined with the
 /// shim).
 pub fn emit_spinel(app: &App) -> Vec<EmittedFile> {
+    let _indexes = library::install_lookup_indexes(app);
     let mut files = Vec::new();
     files.extend(emit_lowered_schema_pair(app));
     // routes.rb gets a require-relative header prepended (see
@@ -1056,12 +1053,13 @@ pub fn emit_spinel(app: &App) -> Vec<EmittedFile> {
         // as the Ruby family's jbuilder `_url` does (see the pass).
         let test_modules =
             crate::lower::test_module_to_library::ruby_family_absolute_test_urls(&app.test_modules);
-        let mut test_lowered = crate::lower::lower_test_modules_with_inner(
+        let mut test_lowered = crate::lower::test_module_to_library::lower_test_modules_with_inner_opts(
             &test_modules,
             &app.fixtures,
             &app.models,
             fixture_extras,
             &crate::lower::routes::helper_id_segments(app),
+            true,
         );
         // A test body writes the same relation chains an app body does —
         // `@room.messages.ordered`, `user.push_subscriptions.find_by(…)`,
@@ -1430,10 +1428,38 @@ fn render_autorun_shim(lc: &LibraryClass, reset_lines: &[String]) -> String {
         "\n# Spinel AOT autorun shim — see emit/ruby.rs::render_autorun_shim.\n",
     );
     // An Integer counter and per-failure `puts`, deliberately: no
-    // array accumulator and no block, so the shim leans on nothing
-    // beyond `begin/rescue`, `+`, `to_s` and string concatenation —
-    // the surface spinel-AOT already compiles in lowered test bodies
-    // (`assert_raises`) and `runtime/spinel`.
+    // array accumulator and no block in the runner, so that loop leans
+    // on nothing beyond `begin/rescue`, `+`, `to_s` and string
+    // concatenation. The fixture-transaction wrapper is a method: its
+    // block sits in a `def`, the shape spinel already compiles in
+    // lowered test bodies.
+    //
+    // Rails' `use_transactional_tests` (default true) runs the example
+    // inside a non-joinable transaction, so each `save`/`destroy` is a
+    // SAVEPOINT. `TestBase.use_transactional_tests` is that default; a
+    // class that sets the flag false overrides the class method.
+    //
+    // Only an app suite has fixture reset lines, and only that suite
+    // loads the helper that defines the method. Spinel rejects the call
+    // when no class in the program defines it; `respond_to?` does not
+    // make the reference optional. A framework file has nothing to reset
+    // and no such method, so it calls the example directly.
+    let transactional = !reset_lines.is_empty();
+    if transactional && !test_methods.is_empty() {
+        writeln!(s, "class {class_name}").unwrap();
+        for tm in &test_methods {
+            writeln!(s, "  def __txn_{tm}").unwrap();
+            writeln!(s, "    if self.class.use_transactional_tests").unwrap();
+            writeln!(s, "      ActiveRecord::Base.transaction(joinable: false) do").unwrap();
+            writeln!(s, "        {tm}").unwrap();
+            writeln!(s, "      end").unwrap();
+            writeln!(s, "    else").unwrap();
+            writeln!(s, "      {tm}").unwrap();
+            writeln!(s, "    end").unwrap();
+            writeln!(s, "  end").unwrap();
+        }
+        writeln!(s, "end").unwrap();
+    }
     writeln!(s, "__failed = 0").unwrap();
     writeln!(s, "__skipped = 0").unwrap();
     for tm in &test_methods {
@@ -1450,11 +1476,20 @@ fn render_autorun_shim(lc: &LibraryClass, reset_lines: &[String]) -> String {
         // that fails to load is a per-test error in Rails. Outside
         // the guard it would abort the file and hide every test
         // behind it — the exact failure mode this shim exists to end.
-        for line in reset_lines {
-            writeln!(s, "  {line}").unwrap();
+        // Rails' fixture setup: loaded with referential integrity off, then checked. Not around an empty list: a framework test has nothing to reset and loads neither Db nor the helper.
+        if !reset_lines.is_empty() {
+            writeln!(s, "  FixtureLoader.with_foreign_keys_deferred do").unwrap();
+            for line in reset_lines {
+                writeln!(s, "    {line}").unwrap();
+            }
+            writeln!(s, "  end").unwrap();
         }
         writeln!(s, "  __t.setup").unwrap();
-        writeln!(s, "  __t.{tm}").unwrap();
+        if transactional {
+            writeln!(s, "  __t.__txn_{tm}").unwrap();
+        } else {
+            writeln!(s, "  __t.{tm}").unwrap();
+        }
         // `rescue Exception`, not a bare rescue: a bare one catches
         // StandardError, and an assertion library may deliberately put
         // its failure OUTSIDE that. `Mocha::ExpectationError <
@@ -1474,14 +1509,21 @@ fn render_autorun_shim(lc: &LibraryClass, reset_lines: &[String]) -> String {
         // counting it passed claims a check that never ran. So it is
         // reported on its own line and taken out of BOTH sides of the
         // tally by `scripts/campfire-suite`.
-        writeln!(s, "rescue TestSkipped => __e").unwrap();
-        writeln!(s, "  __ok = false").unwrap();
-        writeln!(s, "  __skipped = __skipped + 1").unwrap();
-        writeln!(s, "  puts {:?} + __e.message", format!("SKIP {class_name}#{tm}: ")).unwrap();
+        // One `rescue Exception`. `TestSkipped < Exception`, and a
+        // framework file never loads the helper that defines that
+        // class — naming it in its own rescue arm raised
+        // `NameError` while handling an ordinary failure. The class
+        // name is the skip signal the helper's `skip` raises.
         writeln!(s, "rescue Exception => __e").unwrap();
-        writeln!(s, "  __ok = false").unwrap();
-        writeln!(s, "  __failed = __failed + 1").unwrap();
-        writeln!(s, "  puts {:?} + __e.message", format!("FAIL {class_name}#{tm}: ")).unwrap();
+        writeln!(s, "  if __e.class.name == \"TestSkipped\"").unwrap();
+        writeln!(s, "    __ok = false").unwrap();
+        writeln!(s, "    __skipped = __skipped + 1").unwrap();
+        writeln!(s, "    puts {:?} + __e.message", format!("SKIP {class_name}#{tm}: ")).unwrap();
+        writeln!(s, "  else").unwrap();
+        writeln!(s, "    __ok = false").unwrap();
+        writeln!(s, "    __failed = __failed + 1").unwrap();
+        writeln!(s, "    puts {:?} + __e.message", format!("FAIL {class_name}#{tm}: ")).unwrap();
+        writeln!(s, "  end").unwrap();
         writeln!(s, "end").unwrap();
         // Teardown gets a guard of its OWN, for the reason the comment
         // above gives for the reset lines: unguarded, a raise here
@@ -1691,8 +1733,8 @@ fn render_test_helper(fixture_lcs: &[LibraryClass], truncate_lines: &[String]) -
 
     // (2) Per-test isolation. `_adapter_truncate` exists only on models
     // with a backing schema table; the caller applies that gate.
-    const TRUNCATE_BLOCK: &str = "    Article._adapter_truncate if defined?(Article)
-    Comment._adapter_truncate if defined?(Comment)";
+    const TRUNCATE_BLOCK: &str = "      Article._adapter_truncate if defined?(Article)
+      Comment._adapter_truncate if defined?(Comment)";
 
     // (3) Fixture loading — spinel's AOT model has no runtime constant
     // table, so the scan is materialized at emit time.
@@ -1750,11 +1792,11 @@ fn render_test_helper(fixture_lcs: &[LibraryClass], truncate_lines: &[String]) -
 
     // (2)
     let truncate = if truncate_lines.is_empty() {
-        String::from("    # no table-backed models")
+        String::from("      # no table-backed models")
     } else {
         truncate_lines
             .iter()
-            .map(|line| format!("    {line}"))
+            .map(|line| format!("      {line}"))
             .collect::<Vec<_>>()
             .join("\n")
     };

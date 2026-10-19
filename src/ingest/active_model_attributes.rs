@@ -14,15 +14,20 @@
 //! is flattened here, once in the IR, as `current_attributes` does. Each
 //! writer casts as the declared `ActiveModel::Type` does in Rails 8.1:
 //!
-//! * `:string`: nil stays nil, `true`/`false` are `"t"`/`"f"`, a String
-//!   is copied, anything else is `to_s`;
-//! * `:integer`: nil, `true` 1, `false` 0, an Integer as is, a finite
-//!   Float truncated (a non-finite one nil), a blank String nil and any
-//!   other String `to_i` of its first 16 bytes (Rails' 4-byte limit);
+//! * `:string`: `ActiveSupport.cast_string` — nil stays nil,
+//!   `true`/`false` are `"t"`/`"f"`, a String is copied, anything else
+//!   is `to_s`;
+//! * `:integer`: `ActiveSupport.cast_integer` — nil, `true` 1, `false` 0,
+//!   an Integer as is, a finite Float truncated (a non-finite one nil),
+//!   a blank String nil and any other String `to_i` of its first 16
+//!   bytes (Rails' 4-byte limit);
 //! * `:boolean`: `ActiveSupport.cast_boolean`, the existing seam;
 //! * `:datetime`: `ActiveSupport.cast_datetime`, per tree beside
 //!   `parse_time` (the CRuby/JRuby overlay is Rails' algorithm; Spinel's
 //!   reads an ISO 8601 subset and raises on any other string).
+//!
+//! The writer returns the argument it was given. Rails'
+//! `AttributeSet#write_from_user` does, and `obj.n = "08"` is `"08"`.
 //!
 //! A value of another class raises `TypeError` where Rails would call
 //! `to_i` (integer) or keep it (datetime): the static targets cannot ask
@@ -30,12 +35,12 @@
 //!
 //! A class is left as it was, include and all (so `check` still reports
 //! it), when anything here would be a guess: an `attribute` call with
-//! no type, another type, options or a block; a class that defines
-//! `initialize` or one of the accessors itself (Rails' would reach
-//! the generated one through `super`); a superclass, which may declare
-//! attributes of its own; or a class that also includes
-//! `ActiveModel::Model`/`API`/`AttributeAssignment`, whose constructor
-//! assigns through these writers.
+//! no type, another type, options, a block, a receiver, or a trailing
+//! `#:` cast; a class that defines `initialize` or one of the accessors
+//! itself (Rails' would reach the generated one through `super`); a
+//! superclass, which may declare attributes of its own; or a class that
+//! also includes `ActiveModel::Model`/`API`/`AttributeAssignment`, whose
+//! constructor assigns through these writers.
 
 use crate::dialect::{LibraryClass, MethodReceiver};
 use crate::expr::{ExprNode, Literal};
@@ -67,19 +72,12 @@ impl AttrType {
         }
     }
 
-    /// The right-hand side of the writer's ivar assignment.
+    /// The cast call. The bodies live on `ActiveSupport`, beside
+    /// `cast_boolean`, so every target compiles the same method.
     fn cast(self) -> &'static str {
         match self {
-            AttrType::String => {
-                "if value.nil?\n      nil\n    elsif value == true\n      \"t\".freeze\n    elsif value == false\n      \"f\".freeze\n    \
-                 elsif value.is_a?(String)\n      value.dup\n    else\n      value.to_s\n    end"
-            }
-            AttrType::Integer => {
-                "if value.nil?\n      nil\n    elsif value == true\n      1\n    elsif value == false\n      0\n    \
-                 elsif value.is_a?(Integer)\n      value\n    elsif value.is_a?(Float)\n      value.finite? ? value.to_i : nil\n    \
-                 elsif value.is_a?(String)\n      value.match?(/\\A[[:space:]]*\\z/) ? nil : value[0, 16].to_i\n    \
-                 else\n      raise TypeError, \"can't cast #{value.class} to an integer\"\n    end"
-            }
+            AttrType::String => "ActiveSupport.cast_string(value)",
+            AttrType::Integer => "ActiveSupport.cast_integer(value)",
             AttrType::Boolean => "ActiveSupport.cast_boolean(value)",
             AttrType::DateTime => "ActiveSupport.cast_datetime(value)",
         }
@@ -130,14 +128,18 @@ fn declared_attributes(lc: &LibraryClass) -> Option<Vec<(Symbol, AttrType)>> {
     }
     let mut attrs: Vec<(Symbol, AttrType)> = Vec::new();
     for call in &lc.unknown_calls {
-        let Some(args) = attribute_call(call) else { continue };
-        let [name, ty] = args else { return None };
-        let (Some(name), Some(ty)) = (sym(name), sym(ty)) else { return None };
-        let ty = AttrType::from_symbol(ty.as_str())?;
-        if attrs.iter().any(|(n, _)| *n == name) {
-            return None;
+        match attribute_declaration(call) {
+            AttributeDecl::Absent => {}
+            // A block, a receiver, a trailing `#:`, options, or another
+            // type: dropping it would keep the include removed.
+            AttributeDecl::Refuse => return None,
+            AttributeDecl::Take(name, ty) => {
+                if attrs.iter().any(|(n, _)| *n == name) {
+                    return None;
+                }
+                attrs.push((name, ty));
+            }
         }
-        attrs.push((name, ty));
     }
     if attrs.is_empty() {
         return None;
@@ -157,7 +159,43 @@ fn declared_attributes(lc: &LibraryClass) -> Option<Vec<(Symbol, AttrType)>> {
     Some(attrs)
 }
 
-/// The arguments of a receiverless, blockless `attribute` call.
+enum AttributeDecl {
+    Absent,
+    Refuse,
+    Take(Symbol, AttrType),
+}
+
+/// One `attribute` declaration. A trailing `#:` is a cast around the
+/// call (`current_attributes` unwraps those). Here the type is the
+/// second symbol, so a cast, a receiver, or a block is a shape this
+/// pass would drop.
+fn attribute_declaration(call: &crate::expr::Expr) -> AttributeDecl {
+    let (expr, cast) = match &*call.node {
+        ExprNode::Cast { value, .. } => (value, true),
+        _ => (call, false),
+    };
+    let ExprNode::Send { recv, method, args, block, .. } = &*expr.node else {
+        return AttributeDecl::Absent;
+    };
+    if method.as_str() != "attribute" {
+        return AttributeDecl::Absent;
+    }
+    if cast || recv.is_some() || block.is_some() {
+        return AttributeDecl::Refuse;
+    }
+    let [name, ty] = args.as_slice() else {
+        return AttributeDecl::Refuse;
+    };
+    let (Some(name), Some(ty)) = (sym(name), sym(ty)) else {
+        return AttributeDecl::Refuse;
+    };
+    match AttrType::from_symbol(ty.as_str()) {
+        Some(ty) => AttributeDecl::Take(name, ty),
+        None => AttributeDecl::Refuse,
+    }
+}
+
+/// The arguments of a declaration this pass consumes.
 fn attribute_call(call: &crate::expr::Expr) -> Option<&[crate::expr::Expr]> {
     let ExprNode::Send { recv: None, method, args, block: None, .. } = &*call.node else {
         return None;
@@ -185,7 +223,12 @@ fn synthesized_source(lc: &LibraryClass, attrs: &[(Symbol, AttrType)]) -> String
     for (name, ty) in attrs {
         let a = name.as_str();
         body.push_str(&format!("  def {a}\n    @{a}\n  end\n\n"));
-        body.push_str(&format!("  def {a}=(value)\n    @{a} = {}\n  end\n\n", ty.cast()));
+        // The last expression is the assigned argument, as
+        // `AttributeSet#write_from_user` returns it.
+        body.push_str(&format!(
+            "  def {a}=(value)\n    @{a} = {}\n    value\n  end\n\n",
+            ty.cast()
+        ));
     }
     format!("class {class}\n{body}end\n")
 }
