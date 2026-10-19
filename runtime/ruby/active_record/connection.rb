@@ -1092,11 +1092,21 @@ module ActiveRecord
     end
 
     def self.find_each
-      ActiveRecord::Relation.new(self).find_each { |value| yield value }
+      relation = ActiveRecord::Relation.new(self)
+      records = relation.loaded_records
+      i = 0
+      n = records.length
+      while i < n
+        yield records[i]
+        i += 1
+      end
+      relation
     end
 
     def self.find_in_batches
-      ActiveRecord::Relation.new(self).find_in_batches { |value| yield value }
+      relation = ActiveRecord::Relation.new(self)
+      yield relation.loaded_records
+      relation
     end
 
     def self.first_or_initialize
