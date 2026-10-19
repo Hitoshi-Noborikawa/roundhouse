@@ -82,6 +82,60 @@ fn ruby_eval(source: &str, script: &str) -> String {
 }
 
 #[test]
+fn constant_callee_restores_keywords_without_a_typed_receiver() {
+    let source = r#"
+class Flat
+  def initialize(scale: 2)
+    @scale = scale
+  end
+  def call
+    @scale
+  end
+end
+class Other
+  def self.anon(**)
+    Flat.new(**).call
+  end
+end
+module Billing
+  class Scale
+    def initialize(scale: 9)
+      @scale = scale + 10
+    end
+    def call
+      @scale
+    end
+  end
+  class Other
+    def self.anon(**)
+      Scale.new(**).call
+    end
+  end
+end
+class Scale
+  def initialize(scale: 1)
+    @scale = scale
+  end
+  def call
+    @scale
+  end
+end
+"#;
+    let errors = check_errors(source);
+    assert!(errors.is_empty(), "{errors:?}");
+    let app = app_from(source);
+    let out = emitted(&app);
+    assert!(out.contains("def initialize(scale:"), "{out}");
+    assert!(out.contains("Flat.new(**)"), "{out}");
+    assert!(out.contains("Scale.new(**)"), "{out}");
+    let got = ruby_eval(
+        &out,
+        "puts Other.anon(scale: 6)\nputs Other.anon\nputs Billing::Other.anon(scale: 3)\nputs Billing::Other.anon\n",
+    );
+    assert_eq!(got, "6\n2\n13\n19\n", "{out}");
+}
+
+#[test]
 fn check_restores_constant_new_before_typing() {
     let source = r#"
 class Probe

@@ -700,7 +700,7 @@ fn a_forwarded_anonymous_rest_stays_unsupported() {
 }
 
 #[test]
-fn custom_new_is_not_admitted_as_the_initializer_contract() {
+fn custom_new_keeps_its_own_keyword_contract() {
     let source = "class Factory; def self.new(factor: 2); factor; end; def initialize; end; end; class Probe; def call(...); Factory.new(...); end; end";
     let native = Command::new("ruby")
         .args(["-e", &format!("{source}; puts Probe.new.call(factor: 3)")])
@@ -708,13 +708,34 @@ fn custom_new_is_not_admitted_as_the_initializer_contract() {
         .unwrap();
     assert!(native.status.success());
     assert_eq!(String::from_utf8_lossy(&native.stdout), "3\n");
-    let errors: Vec<_> = diagnose(&analyzed(source))
+    let app = analyzed(source);
+    let errors: Vec<_> = diagnose(&app)
         .into_iter()
         .filter(|d| d.severity == Severity::Error)
         .collect();
+    assert!(errors.is_empty(), "{errors:?}");
+    let factory = app
+        .library_classes
+        .iter()
+        .find(|class| class.name.0.as_str() == "Factory")
+        .unwrap();
+    let constructor = factory
+        .methods
+        .iter()
+        .find(|method| method.name.as_str() == "new" && method.receiver == roundhouse::dialect::MethodReceiver::Class)
+        .unwrap();
     assert!(
-        errors.iter().any(|d| d.message.contains("flattened")),
-        "{errors:?}"
+        constructor.params.iter().any(|param| param.keyword && param.name.as_str() == "factor"),
+        "custom new keeps factor:"
+    );
+    let initialize = factory
+        .methods
+        .iter()
+        .find(|method| method.name.as_str() == "initialize")
+        .unwrap();
+    assert!(
+        initialize.params.iter().all(|param| !param.keyword),
+        "initialize is not given the custom new contract"
     );
 }
 

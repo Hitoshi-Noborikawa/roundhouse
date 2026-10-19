@@ -368,6 +368,14 @@ fn destination<'a>(
                 Some(ExprNode::Const { .. }) => MethodReceiver::Class,
                 _ => MethodReceiver::Instance,
             };
+            // Held for the lookup below: the const arm returns a reference
+            // into this value, and the other arms borrow `ty` or the owner.
+            let written_const = match recv.as_ref() {
+                Some(r) if r.ty.is_none() && matches!(&*r.node, ExprNode::Const { .. }) => {
+                    source_constant_class(contracts, context, r)
+                }
+                _ => None,
+            };
             let class = match recv {
                 None => context.map(|(owner, _)| owner),
                 Some(r) if matches!(&*r.node, ExprNode::SelfRef) => context.map(|(owner, _)| owner),
@@ -378,6 +386,7 @@ fn destination<'a>(
                         // Do not admit the base contract for that source name.
                         constant_names_class(r, id).then_some(id)
                     }
+                    (ExprNode::Const { .. }, None) => written_const.as_ref(),
                     (_, Some(Ty::Class { id, .. })) => Some(id),
                     _ => None,
                 },
@@ -743,6 +752,35 @@ fn has_source_packet(args: &[Expr]) -> bool {
     })
 }
 
+/// A `Const` receiver whose type is not filled yet. Walk the enclosing
+/// class outward, the same way `lexical_class` does, and stop at a source
+/// fragment. An unknown constant stays unresolved.
+fn source_constant_class(
+    contracts: &SourceContractIndex<'_>,
+    context: Option<(&ClassId, &MethodDef)>,
+    expr: &Expr,
+) -> Option<ClassId> {
+    let ExprNode::Const { path } = &*expr.node else {
+        return None;
+    };
+    let absolute = path.first().is_some_and(|seg| seg.as_str().is_empty());
+    let name = path
+        .iter()
+        .map(|seg| seg.as_str())
+        .filter(|seg| !seg.is_empty())
+        .collect::<Vec<_>>()
+        .join("::");
+    if name.is_empty() {
+        return None;
+    }
+    let written = ClassId(Symbol::from(name.as_str()));
+    if absolute {
+        return contracts.owns(&written).then_some(written);
+    }
+    let scope = context.map(|(owner, _)| owner.0.as_str()).unwrap_or("");
+    super::body::lexical_class(&written, scope, &contracts.fragments)
+}
+
 fn constant_names_class(expr: &Expr, class: &ClassId) -> bool {
     let ExprNode::Const { path } = &*expr.node else {
         return false;
@@ -1023,6 +1061,10 @@ impl<'a> SourceContractIndex<'a> {
     /// re-bind, so a reopened owner stays refused.
     fn reopened(&self, owner: &ClassId) -> bool {
         self.fragments.get(owner).copied().unwrap_or(0) > 1
+    }
+
+    fn owns(&self, owner: &ClassId) -> bool {
+        self.fragments.contains_key(owner)
     }
 
     fn parent(&self, owner: &ClassId) -> Option<&'a ClassId> {
