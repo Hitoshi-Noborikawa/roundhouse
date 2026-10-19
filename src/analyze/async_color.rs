@@ -750,6 +750,7 @@ mod tests {
             parent: None,
             parent_span: Default::default(),
             includes: Vec::new(),
+            include_spans: Vec::new(),
             methods,
             nullable_columns: Vec::new(),
             origin: None,
@@ -968,7 +969,7 @@ mod tests {
         );
         let block = Expr::new(
             Span::synthetic(),
-            ExprNode::Lambda { rest_param: None,
+            ExprNode::Lambda { extra_params: Vec::new(), rest_param: None,
                 params: vec![Symbol::from("x")],
                 block_param: None,
                 body: block_body,

@@ -94,6 +94,27 @@ pub(super) fn emit_form_tag_inline(args: &[Expr], block: &Expr, ctx: &ViewCtx) -
     out
 }
 
+/// `ActionView::Base.new.form_with` — the view-context entry a template
+/// `form_with` site makes before its macro-expanded markup. Placed in
+/// the expansion itself, so a `<% cache %>` hit that skips the body
+/// skips the call too. See `runtime/ruby/action_view/base.rb`.
+///
+/// Ruby family only (`ViewCtx::form_with_entry`): no strict target
+/// ships `ActionView::Base`, and none has a spy to observe the call.
+fn form_with_entry(ctx: &ViewCtx) -> Option<Expr> {
+    if !ctx.form_with_entry {
+        return None;
+    }
+    let base = Expr::new(
+        Span::synthetic(),
+        ExprNode::Const {
+            path: vec![Symbol::from("ActionView"), Symbol::from("Base")],
+        },
+    );
+    let instance = send(Some(base), "new", Vec::new(), None, false);
+    Some(send(Some(instance), "form_with", Vec::new(), None, false))
+}
+
 /// `<%= form_with url: …, method: :delete, id: … %>` with NO block.
 ///
 /// Rails renders an EMPTY `<form>` — open tag, `_method` override, CSRF
@@ -164,7 +185,8 @@ pub(super) fn emit_form_with_blockless(args: &[Expr], ctx: &ViewCtx) -> Option<V
         opts_entries: entries,
         id_prefix: String::new(),
     };
-    Some(vec![
+    let mut out: Vec<Expr> = form_with_entry(ctx).into_iter().collect();
+    out.extend([
         emit_open_form_tag(&comps, ctx, false),
         accumulator_append_call(
             view_helpers_call("method_override_input", vec![method]),
@@ -174,7 +196,8 @@ pub(super) fn emit_form_with_blockless(args: &[Expr], ctx: &ViewCtx) -> Option<V
             view_helpers_call("csrf_token_hidden_input", Vec::new()),
             ctx,
         ),
-    ])
+    ]);
+    Some(out)
 }
 
 /// Inline-expand `<%= form_with(opts) do |form| ...inner... %>` at
@@ -187,9 +210,21 @@ pub(super) fn emit_form_with_inline(
     block: &Expr,
     ctx: &ViewCtx,
 ) -> Vec<Expr> {
-    let ExprNode::Lambda { params, body, .. } = &*block.node else {
+    let ExprNode::Lambda { extra_params, params, body, .. } = &*block.node else {
         return vec![accumulator_append_call(lit_str(String::new()), ctx)];
     };
+    if !extra_params.is_empty() {
+        // A builder block with optional or keyword parameters has no
+        // lowering here, and a view has no dynamic path to fall back to:
+        // report it (the transpile fails) rather than render nothing.
+        crate::emit::diagnostics::push(crate::diagnostic::Diagnostic::unsupported(
+            block.span,
+            None,
+            crate::ident::Symbol::from("builder block with optional or keyword parameters"),
+            "a form or tag builder block takes only required parameters here",
+        ));
+        return vec![accumulator_append_call(lit_str(String::new()), ctx)];
+    }
     let form_param = params
         .first()
         .cloned()
@@ -205,7 +240,7 @@ pub(super) fn emit_form_with_inline(
         return vec![accumulator_append_call(lit_str(String::new()), ctx)];
     };
 
-    let mut out: Vec<Expr> = Vec::new();
+    let mut out: Vec<Expr> = form_with_entry(ctx).into_iter().collect();
 
     // Bind locals before emitting the open tag so the open-tag's
     // action interp can read them. `<form_param>_record` holds the
@@ -480,9 +515,21 @@ pub(super) fn emit_tag_builder_inline(
     block: &Expr,
     ctx: &ViewCtx,
 ) -> Vec<Expr> {
-    let ExprNode::Lambda { params, body, .. } = &*block.node else {
+    let ExprNode::Lambda { extra_params, params, body, .. } = &*block.node else {
         return vec![accumulator_append_call(lit_str(String::new()), ctx)];
     };
+    if !extra_params.is_empty() {
+        // A builder block with optional or keyword parameters has no
+        // lowering here, and a view has no dynamic path to fall back to:
+        // report it (the transpile fails) rather than render nothing.
+        crate::emit::diagnostics::push(crate::diagnostic::Diagnostic::unsupported(
+            block.span,
+            None,
+            crate::ident::Symbol::from("builder block with optional or keyword parameters"),
+            "a form or tag builder block takes only required parameters here",
+        ));
+        return vec![accumulator_append_call(lit_str(String::new()), ctx)];
+    }
 
     // The builder's attributes come from the (single) trailing opts hash.
     let mut opts: Vec<(Expr, Expr)> = Vec::new();
@@ -1271,7 +1318,7 @@ pub(super) fn rewrite_errors_each_body(body: &Expr, var_name: &str) -> Expr {
                 })
                 .collect(),
         },
-        ExprNode::Lambda { rest_param, params, block_param, body, block_style } => ExprNode::Lambda { rest_param: rest_param.clone(),
+        ExprNode::Lambda { rest_param, extra_params, params, block_param, body, block_style } => ExprNode::Lambda { rest_param: rest_param.clone(), extra_params: extra_params.clone(),
             params: params.clone(),
             block_param: block_param.clone(),
             body: rewrite_errors_each_body(body, var_name),
@@ -1439,6 +1486,7 @@ mod tests {
         let out = emit_form_with_blockless(&args, &ctx).expect("url-only form_with lowers");
         let text = emitted_text(&out);
         assert!(text.contains("<form action="), "{text}");
+        assert!(text.contains("<form_with>"), "{text}");
         assert!(text.contains("method_override_input"), "{text}");
         assert!(text.contains("csrf_token_hidden_input"), "{text}");
     }
@@ -1500,15 +1548,20 @@ mod tests {
             bool_readers: Default::default(),
             store_readers: Default::default(),
             route_helper_names: Default::default(),
+            i18n: Default::default(),
             route_helper_arity: Default::default(),
             form_wrappers: Default::default(),
+            form_with_entry: true,
             stylesheets: Vec::new(),
             lexxy: false,
+            lexxy_editor_adapter: false,
             partial_ivars: Default::default(),
             multipart_partials: Default::default(),
             dyn_pools: Default::default(),
             partial_extras: Default::default(),
             strict_locals: Default::default(),
+            str_ivars: Default::default(),
+            ivar_locals: Default::default(),
             ivar_models: Rc::new(
                 ivar_models
                     .iter()

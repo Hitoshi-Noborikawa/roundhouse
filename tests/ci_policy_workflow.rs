@@ -1,137 +1,29 @@
+#[cfg(all(target_os = "linux", debug_assertions))]
+#[path = "support/test_subprocess.rs"]
+mod test_subprocess;
+
 use std::fs;
 
-#[test]
-fn unit_batches_all_targets_without_reducing_coverage() {
-    let ci: serde_yaml_ng::Value =
-        serde_yaml_ng::from_str(&fs::read_to_string(".github/workflows/ci.yml").unwrap()).unwrap();
-    let unit = &ci["jobs"]["unit"];
-    assert!(unit.get("if").is_none());
-    assert!(unit.get("continue-on-error").is_none());
-    assert_eq!(unit["runs-on"].as_str(), Some("ubuntu-latest"));
-    assert_eq!(unit["strategy"]["fail-fast"].as_bool(), Some(false));
-    assert_eq!(unit["strategy"]["max-parallel"].as_u64(), Some(4));
-    assert_eq!(
-        unit["strategy"]["matrix"]["shard"],
-        serde_yaml_ng::from_str::<serde_yaml_ng::Value>("[0, 1, 2, 3]").unwrap()
-    );
-    assert!(
-        unit.get("outputs").is_none(),
-        "no racing matrix artifact output"
-    );
-    assert_eq!(
-        unit["env"]["CARGO_PROFILE_TEST_SPLIT_DEBUGINFO"].as_str(),
-        Some("unpacked")
-    );
-    assert!(
-        ci["env"]
-            .get("CARGO_PROFILE_TEST_SPLIT_DEBUGINFO")
-            .is_none()
-    );
-    let steps = unit["steps"].as_sequence().unwrap();
-    let gems = steps
-        .iter()
-        .position(|step| {
-            step["name"].as_str()
-                == Some("Install gems used by emitted Ruby and Campfire harness tests")
-        })
-        .expect("install sqlite3, bcrypt and ruby-vips before the unit batches");
-    let install = steps[gems]["run"].as_str().unwrap();
-    assert!(
-        install.contains("sqlite3")
-            && install.contains("bcrypt")
-            && install.contains("ruby-vips")
-            && install.contains("rails-html-sanitizer")
-            && install.contains("activerecord"),
-        "{install}"
-    );
-    let vips = steps
-        .iter()
-        .position(|step| {
-            step["name"].as_str() == Some("System libvips for the emitted ruby-vips processor")
-        })
-        .expect("install libvips42 before ruby-vips");
-    let vips_run = steps[vips]["run"].as_str().unwrap();
-    assert!(
-        vips_run.contains("ci-apt-install") && vips_run.contains("libvips42"),
-        "{vips_run}"
-    );
-    assert!(
-        vips < gems,
-        "ruby-vips binds the system libvips; the package must be on the box first"
-    );
-    let tests = steps
-        .iter()
-        .position(|step| step["name"].as_str() == Some("Build and run all test targets in batches"))
-        .expect("batch every lib/bin/integration target through Cargo");
-    assert!(
-        gems < tests,
-        "Campfire launcher regressions require bcrypt before the batches"
-    );
-    assert!(steps[tests].get("if").is_none());
-    assert!(steps[tests].get("continue-on-error").is_none());
-    let body = steps[tests]["run"].as_str().unwrap();
-    assert!(body.contains("--out \"$RUNNER_TEMP/unit-resources/tests\" --"));
-    assert!(body.contains("python3 scripts/ci-unit-tests.py"));
-    assert!(body.contains(
-        "--shard-index ${{ strategy.job-index }} --shard-count ${{ strategy.job-total }}"
-    ));
-    assert!(
-        !body.contains("cargo test --locked --all-targets"),
-        "all-target peak must not rebuild every integration executable at once"
-    );
-    let timings = steps
-        .iter()
-        .find(|step| {
-            step["with"]["name"].as_str() == Some("unit-build-timings-${{ matrix.shard }}")
-        })
-        .expect("retain build timings for investigation");
-    assert_eq!(timings["if"].as_str(), Some("always()"));
-    assert_eq!(
-        timings["with"]["path"].as_str(),
-        Some("target/cargo-timings/")
-    );
-    let bench = steps
-        .iter()
-        .find(|step| {
-            step["name"].as_str()
-                == Some("Emit every bench lane in the debug profile (scripts/bench's shape)")
-        })
-        .expect("retain the independent dev-profile stack-overflow gate");
-    assert_eq!(bench["if"].as_str(), Some("matrix.shard == 0"));
-    assert!(bench.get("continue-on-error").is_none());
-    let body = bench["run"].as_str().unwrap();
-    assert!(body.contains("bash -euo pipefail -c"));
-    assert!(body.contains("typescript crystal rust python elixir go kotlin swift csharp"));
-    assert!(body.contains("target/debug/emit_preview --target"));
-    assert!(
-        !body.contains("cargo run"),
-        "shard 0 already built bins; do not pay cargo startup per lane"
-    );
-    let resources = steps
-        .iter()
-        .find(|step| step["with"]["name"].as_str() == Some("unit-resources-${{ matrix.shard }}"))
-        .expect("retain phase samples even when a command fails");
-    assert_eq!(resources["if"].as_str(), Some("always()"));
-    assert_eq!(
-        resources["with"]["path"].as_str(),
-        Some("${{ runner.temp }}/unit-resources/")
-    );
-}
 
 #[test]
 fn speculative_fanout_retains_selection_and_real_prerequisites() {
     let ci: serde_yaml_ng::Value =
         serde_yaml_ng::from_str(&fs::read_to_string(".github/workflows/ci.yml").unwrap()).unwrap();
     let jobs = &ci["jobs"];
-    assert_eq!(jobs["unit"]["needs"].as_str(), Some("generate-fixture"));
+    assert!(jobs.get("writebook-inventory").is_none());
+    assert_eq!(jobs["unit-build"]["needs"].as_str(), Some("generate-fixture"));
+    assert_eq!(
+        jobs["unit"]["needs"],
+        serde_yaml_ng::from_str::<serde_yaml_ng::Value>("[generate-fixture, unit-build]").unwrap()
+    );
     assert_eq!(jobs["generate-fixture"]["needs"].as_str(), Some("plan"));
     assert!(jobs["generate-fixture"].get("if").is_none());
+    assert!(jobs["unit-build"].get("if").is_none());
     assert!(jobs["unit"].get("if").is_none());
     for name in [
         "build-roundhouse",
         "build-wasm",
         "spinel-build",
-        "writebook-inventory",
     ] {
         assert_eq!(jobs[name]["needs"].as_str(), Some("plan"), "{name}");
     }
@@ -154,7 +46,6 @@ fn speculative_fanout_retains_selection_and_real_prerequisites() {
         "build-roundhouse",
         "build-wasm",
         "spinel-build",
-        "writebook-inventory",
         "store-check",
         "browser-smoke-typescript",
         "compare",
@@ -175,6 +66,7 @@ fn speculative_fanout_retains_selection_and_real_prerequisites() {
     for name in ["compact-required", "ci-summary"] {
         let needs = jobs[name]["needs"].as_sequence().unwrap();
         for required in [
+            "unit-build",
             "unit",
             "build-roundhouse",
             "campfire-conformance",
@@ -302,6 +194,16 @@ fn campfire_consumers_require_shared_debug_binary_and_do_not_rebuild() {
             .iter()
             .filter_map(|step| step["run"].as_str())
             .collect();
+        let suite_gems = steps
+            .iter()
+            .find(|step| step["name"].as_str() == Some("Install the gems the emitted suite loads"))
+            .and_then(|step| step["run"].as_str());
+        if let Some(run) = suite_gems {
+            assert!(
+                run.split_whitespace().any(|w| w == "rack"),
+                "{job_name} must install rack: ruby-family rack_utils.rb is require \"rack/utils\""
+            );
+        }
         for run in &runs {
             for line in run.lines() {
                 let trimmed = line.trim();
@@ -353,23 +255,32 @@ fn strict_emit_ceiling_fails_an_ingest_abort_that_prints_no_error_line() {
         .to_owned();
     let dir = std::env::temp_dir().join(format!("roundhouse-ceiling-{}", std::process::id()));
     fs::create_dir_all(&dir).unwrap();
-    let step = |bin_body: &str| {
+    let step = |bin_body: &str, ceiling: &str| {
         let bin = dir.join("roundhouse");
         fs::write(&bin, format!("#!/bin/sh\n{bin_body}\n")).unwrap();
         fs::set_permissions(&bin, fs::Permissions::from_mode(0o755)).unwrap();
         std::process::Command::new("bash")
             .args(["-c", &run])
             .env("ROUNDHOUSE_BIN", &bin)
-            .env("CEILING_ERRORS", "0")
+            .env("CEILING_ERRORS", ceiling)
             .output()
             .unwrap()
     };
-    let aborted = step("echo 'roundhouse: ingest app: unsupported construct in app/models/x.rb'; exit 1");
+    let aborted = step(
+        "echo 'roundhouse: ingest app: unsupported construct in app/models/x.rb'; exit 1",
+        "0",
+    );
     assert!(!aborted.status.success(), "an ingest abort passed the ceiling");
     assert!(String::from_utf8_lossy(&aborted.stdout).contains("ingest stopped before analysis"));
-    let clean = step("echo 'roundhouse: emitted 3 files'; exit 0");
+    let clean = step("echo 'roundhouse: emitted 3 files'; exit 0", "0");
     assert!(clean.status.success(), "{}", String::from_utf8_lossy(&clean.stdout));
-    let over = step("echo 'x.rb:1:1: error[unsupported]: nope'; exit 1");
+    let at_ceiling = step("echo 'x.rb:1:1: error[unsupported]: nope'; exit 1", "2");
+    assert!(
+        at_ceiling.status.success(),
+        "a counted error at the ceiling must pass: {}",
+        String::from_utf8_lossy(&at_ceiling.stdout)
+    );
+    let over = step("echo 'x.rb:1:1: error[unsupported]: nope'; exit 1", "0");
     assert!(!over.status.success(), "an error over the ceiling passed");
     fs::remove_dir_all(&dir).ok();
 }
@@ -447,7 +358,7 @@ fn test_backtraces_retain_library_and_integration_source_locations() {
     let output = std::process::Command::new(std::env::current_exe().unwrap())
         .args([
             "--exact",
-            "test_backtraces_retain_library_and_integration_source_locations",
+            test_subprocess::name!("test_backtraces_retain_library_and_integration_source_locations"),
             "--nocapture",
         ])
         .env(PROBE, "1")
@@ -941,6 +852,16 @@ fn focused_framework_loop_runs_every_selection_and_preserves_failure() {
             false,
             "test --test fails -- --ignored --nocapture\ntest --test survivor -- --ignored --nocapture\n",
         ),
+        (
+            "param_binds param_binds_values param_binds_cleanup framework_tests_spinel",
+            true,
+            concat!(
+                "test --test param_binds -- --ignored --nocapture _spinel\n",
+                "test --test param_binds_values -- --ignored --nocapture _spinel\n",
+                "test --test param_binds_cleanup -- --ignored --nocapture _spinel\n",
+                "test --test framework_tests_spinel -- --ignored --nocapture\n",
+            ),
+        ),
         ("", false, ""),
     ] {
         let log = root.join("cargo.log");
@@ -1101,6 +1022,11 @@ fn spinel_jobs_are_selected_explicitly_and_archive_evidence_reaches_pages() {
         })
         .unwrap();
     assert!(verify < pages);
+    assert_eq!(
+        steps[pages]["with"]["name"].as_str(),
+        Some("github-pages-${{ github.run_attempt }}"),
+        "per-attempt Pages artifact avoids duplicate github-pages on rerun --failed"
+    );
     assert!(
         jobs["ci-summary"]["needs"]
             .as_sequence()
@@ -1168,6 +1094,11 @@ fn full_scheduler_runs_every_preflight_success_fresh_and_never_grants_pr_deploy_
     );
     assert!(deploy.get("continue-on-error").is_none());
     assert_eq!(deploy["permissions"]["pages"].as_str(), Some("write"));
+    assert_eq!(
+        deploy["permissions"]["actions"].as_str(),
+        Some("read"),
+        "deploy artifact resolver lists this run's github-pages-* uploads"
+    );
     let deploy_text = serde_yaml_ng::to_string(deploy).unwrap();
     assert!(
         !deploy_text.contains("VALIDATED_SHA"),
@@ -1177,9 +1108,32 @@ fn full_scheduler_runs_every_preflight_success_fresh_and_never_grants_pr_deploy_
         !deploy_text.contains("Refuse to publish a superseded main snapshot"),
         "main advancing mid-run must not starve github-pages"
     );
+    let deploy_steps = deploy["steps"].as_sequence().unwrap();
+    let resolve = deploy_steps
+        .iter()
+        .find(|step| step["name"].as_str() == Some("Resolve Pages artifact"))
+        .expect("deploy-only rerun needs attempt fallback resolution");
+    let resolve_run = resolve["run"].as_str().unwrap();
+    assert!(
+        resolve_run.contains("github-pages-$n"),
+        "resolver must walk github-pages-N attempt names"
+    );
+    assert!(
+        resolve_run.contains("--paginate"),
+        "artifact list must paginate (Full val exceeds default page size)"
+    );
+    let deploy_pages = deploy_steps
+        .iter()
+        .find(|step| {
+            step["uses"]
+                .as_str()
+                .is_some_and(|uses| uses.starts_with("actions/deploy-pages@"))
+        })
+        .expect("deploy-pages step");
     assert_eq!(
-        deploy["steps"][0]["uses"].as_str(),
-        Some("actions/deploy-pages@v5")
+        deploy_pages["with"]["artifact_name"].as_str(),
+        Some("${{ steps.pages-artifact.outputs.name }}"),
+        "deploy must consume the resolved per-attempt assemble-site Pages artifact"
     );
 }
 

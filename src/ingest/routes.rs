@@ -1,6 +1,7 @@
 //! `config/routes.rb` — parse the `Rails.application.routes.draw do … end`
 //! DSL into a `RouteTable`. Recognizes verb shortcuts (`get`/`post`/…),
 //! `root`, `resources`/`resource`, `namespace`/`scope`, `concern`/`concerns`,
+//! `with_options` (replayed into each call it wraps),
 //! and the file-inclusion forms — `draw(:name)`, `load(path)`,
 //! `instance_eval(File.read(path))` — over split files under
 //! `config/routes/`.
@@ -12,7 +13,10 @@
 //! forces a recognizer. Not-modeled ≠ absent: a dropped entry is a
 //! ledger line, never a silently empty route table. Engine mounts recover
 //! in every mode with a located error carried on the route table; strict
-//! emission refuses it unless explicitly overridden.
+//! emission refuses it unless explicitly overridden. A route-body
+//! statement that is not a call and is not a walked `if`/`unless` or a
+//! local write (`case`, and the rest) records that same gap; `if` and
+//! `unless` are kept, both arms, so they are not gaps.
 //!
 //! `devise_scope` is path-transparent and its routes are kept. The
 //! authentication guards (`authenticate`, `authenticated`, and
@@ -172,7 +176,9 @@ pub(super) fn ingest_routes_with_engines(
     // table whatever scope the `load` call was written inside.
     entries.extend(cx.hoisted.take());
 
-    Ok(RouteTable { entries, direct_helpers, redirects: redirect_sink::drain(), diagnostics: cx.diagnostics.take() })
+    let mut diagnostics = cx.diagnostics.take();
+    diagnostics.extend(refused_route_diagnostics(&entries, source, file));
+    Ok(RouteTable { entries, direct_helpers, redirects: redirect_sink::drain(), diagnostics })
 }
 
 /// The `draw do … end` calls that are statements of the program itself
@@ -284,6 +290,41 @@ fn runtime_cable_mount(call: &ruby_prism::CallNode<'_>) -> bool {
         }
     }
     server && path.as_deref() == Some("/cable") && call.block().is_none()
+}
+
+/// One located `unsupported` per route the router leaves out of its
+/// dispatch table because a `constraints:` requirement is outside the
+/// segment-pattern subset (`lower::segment_pattern`). The URL helper is
+/// still generated, so links to the route keep working; a request for it
+/// is not served. Located at the regex literal when it can be found.
+fn refused_route_diagnostics(entries: &[RouteSpec], source: &[u8], file: &str) -> Vec<Diagnostic> {
+    let mut seen = HashSet::new();
+    let mut out = Vec::new();
+    for route in crate::lower::routes::flatten_route_entries(entries) {
+        let Some((param, rx)) = &route.refused else { continue };
+        let verb = format!("{:?}", route.method).to_uppercase();
+        if !seen.insert((verb.clone(), route.path.clone())) {
+            continue;
+        }
+        let needle = format!("/{rx}/");
+        let (start, end) = source
+            .windows(needle.len())
+            .position(|w| w == needle.as_bytes())
+            .map(|at| (at as u32, (at + needle.len()) as u32))
+            .unwrap_or((0, 0));
+        out.push(Diagnostic::unsupported(
+            Span { file: super::sources::file_id(file), start, end },
+            None,
+            "route constraint",
+            format!(
+                "{verb} {} is not dispatched: `{param}:` requirement `{rx}` is outside the \
+                 router's segment-pattern subset (no lookahead, backreference, alternation, \
+                 anchors, or backtracking); its URL helper is still generated",
+                route.path
+            ),
+        ));
+    }
+    out
 }
 
 /// Attach a located unsupported-mount diagnostic and the matching survey
@@ -543,7 +584,7 @@ fn engine_route_helper_methods(entries: &[RouteSpec]) -> HashSet<String> {
         entries: entries.to_vec(),
     });
     let mut methods = HashSet::new();
-    for route in crate::lower::flatten_routes(&app) {
+    for route in crate::lower::routes::flatten_routes_for_helpers(&app) {
         if !route.named || route.as_name.is_empty() {
             continue;
         }
@@ -1001,6 +1042,8 @@ fn ingest_route_stmts<'pr>(
         // A conditional around routes (`if Rails.env.development?`) is
         // decided at boot, not here: both arms are walked, so the
         // helpers of every environment's table exist in the model.
+        // Includes the modifier form `get "/x" if flag`. A mount inside
+        // is nested, so the runtime cable exemption does not apply.
         if let Some(cond) = stmt.as_if_node() {
             let mut arms: Vec<Node<'pr>> = Vec::new();
             if let Some(body) = cond.statements() {
@@ -1039,7 +1082,18 @@ fn ingest_route_stmts<'pr>(
             eval::bind(constant_id_str(&write.name()), value);
             continue;
         }
-        let Some(call) = stmt.as_call_node() else { continue };
+        // `case` / `case in`, and any other non-call, used to fall
+        // through a bare `continue`: the routes inside vanished with
+        // no record. Same treatment as an unknown DSL call. The
+        // predicate is not evaluated.
+        let Some(call) = stmt.as_call_node() else {
+            let err = non_call_route_stmt(&stmt, file);
+            if super::survey::is_active() {
+                super::survey::record(&err);
+                continue;
+            }
+            return Err(err);
+        };
         // `Dir.glob('rest_routes/**/*.rb', base: 'config/routes').each
         // do |r| draw(r.sub(/\.rb$/, '')) end` (and `Dir[...]`) — the
         // idiom a Mastodon-class app uses to mass-`draw` a whole
@@ -1062,7 +1116,37 @@ fn ingest_route_stmts<'pr>(
             }
         }
 
+        // `%w[alpha beta].each { |page| get page, to: "pages##{page}" }`
+        // — Rails evaluates `routes.rb` as Ruby, so a loop draws one
+        // route per element. A literal Array of Strings or Symbols is
+        // unrolled here, the block parameter bound in the evaluator's
+        // frame, where the path / `to:` / resource-name readers already
+        // look (`rstring` / `rsymbol`).
+        if let Some(elements) = literal_each_elements(&call) {
+            match ingest_literal_each(&call, elements, file, parent, cx) {
+                Ok(new_entries) => entries.extend(new_entries),
+                Err(err) if super::survey::is_active() => super::survey::record(&err),
+                Err(err) => return Err(err),
+            }
+            continue;
+        }
+
         if call.receiver().is_some() {
+            // Any other receiver-bearing call with a block (`PAGES.each`,
+            // `3.times`, `.each_with_index`) holds routes the walker
+            // cannot evaluate. Skipping it, as below, dropped them with
+            // no record; it is a gap, like an unknown DSL call. The
+            // nested `routes.draw` the skip exists for is left to it.
+            if call.block().is_some_and(|b| b.as_block_node().is_some())
+                && constant_id_str(&call.name()) != "draw"
+            {
+                let err = receiver_block_route_stmt(&call, file);
+                if super::survey::is_active() {
+                    super::survey::record(&err);
+                    continue;
+                }
+                return Err(err);
+            }
             if constant_id_str(&call.name()) == "mount" {
                 route_mount_gap(
                     &call,
@@ -1077,6 +1161,15 @@ fn ingest_route_stmts<'pr>(
             continue;
         }
         let method = constant_id_str(&call.name()).to_string();
+
+        if method == "with_options" {
+            match ingest_with_options(&call, &[], file, parent, cx) {
+                Ok(inner) => entries.extend(inner),
+                Err(err) if super::survey::is_active() => super::survey::record(&err),
+                Err(err) => return Err(err),
+            }
+            continue;
+        }
 
         // Block-wrapping DSLs we passthrough by flattening their
         // block contents into the outer entry list:
@@ -1117,6 +1210,20 @@ fn ingest_route_stmts<'pr>(
                         if let Some(scope) = scope {
                             retag_scope(&mut inner, scope);
                         }
+                        // `constraints(slug: %r{[^@/.]+}) do … end` — the
+                        // block's own per-param regex requirements, merged
+                        // DOWN into every route the block flattens to
+                        // (transitively, through nested scopes/resources).
+                        // A lambda/object arg (`constraints(SomeGuard.new)`)
+                        // yields no hash here, so it changes nothing — that
+                        // request-based shape stays unenforced, as before.
+                        if method == "constraints" {
+                            let block_constraints = call
+                                .arguments()
+                                .map(|args| block_constraints_hash(&args))
+                                .unwrap_or_default();
+                            merge_outer_constraints(&mut inner, &block_constraints);
+                        }
                         entries.extend(inner);
                     }
                 }
@@ -1142,6 +1249,251 @@ fn ingest_route_stmts<'pr>(
     Ok(entries)
 }
 
+/// One option a `with_options` block hands to the calls inside it: the
+/// symbol key, the source of its `key: value` pair, and whether the value
+/// is a hash literal (the one case `deep_merge` would combine).
+#[derive(Clone)]
+struct MergedOption {
+    key: String,
+    source: String,
+    hash_value: bool,
+}
+
+fn with_options_gap(file: &str, detail: &str) -> IngestError {
+    IngestError::Unsupported {
+        file: file.into(),
+        message: format!("with_options: {detail}"),
+    }
+}
+
+/// The `key: value` pairs of a literal option hash, or `None` when the hash
+/// splats (`**opts`): its keys are then unknown. A non-symbol key is `None`
+/// under `symbol_keys_only`, and otherwise skipped (`get "/p" => "c#a"`:
+/// a string key never collides with a merged symbol key).
+fn literal_option_pairs(node: &Node<'_>, symbol_keys_only: bool) -> Option<Vec<MergedOption>> {
+    let elements = if let Some(hash) = node.as_keyword_hash_node() {
+        hash.elements()
+    } else {
+        node.as_hash_node()?.elements()
+    };
+    let mut pairs = Vec::new();
+    for element in elements.iter() {
+        let assoc = element.as_assoc_node()?;
+        let Some(key) = symbol_value(&assoc.key()) else {
+            if symbol_keys_only {
+                return None;
+            }
+            continue;
+        };
+        let location = assoc.location();
+        pairs.push(MergedOption {
+            key,
+            source: String::from_utf8_lossy(location.as_slice()).into_owned(),
+            hash_value: assoc.value().as_hash_node().is_some()
+                || assoc.value().as_keyword_hash_node().is_some(),
+        });
+    }
+    Some(pairs)
+}
+
+/// `inner` deep-merged over `outer`, as `Hash#deep_merge` orders it: an
+/// inner key replaces the outer one in place, new keys follow. Two hash
+/// values under one key would be merged key by key; that is declined
+/// rather than guessed.
+fn deep_merge_options(
+    outer: &[MergedOption],
+    inner: Vec<MergedOption>,
+    file: &str,
+) -> IngestResult<Vec<MergedOption>> {
+    let mut merged = outer.to_vec();
+    for option in inner {
+        match merged.iter_mut().find(|o| o.key == option.key) {
+            Some(existing) if existing.hash_value && option.hash_value => {
+                return Err(with_options_gap(
+                    file,
+                    &format!("deep-merging two hashes under `{}:` is not composed", option.key),
+                ));
+            }
+            Some(existing) => *existing = option,
+            None => merged.push(option),
+        }
+    }
+    Ok(merged)
+}
+
+/// `with_options to: "accounts#show" do get "/@:username" … end` —
+/// ActiveSupport's `Object#with_options`. A block without parameters is
+/// `instance_eval`ed on an `OptionMerger`, which deep-merges the options
+/// into the trailing hash of every call it receives (the call's own keys
+/// win) or appends them as keywords when there is none. That is replayed
+/// here: each call is re-read with the merged options written into its
+/// source, keeping its byte offsets, and walked as if it had been spelled
+/// that way.
+///
+/// A call that has its own block is declined: the block's closure still
+/// sees the merger as `self`, so Rails merges the options into the calls
+/// nested in it too (`member`, `get` inside `resources`), a fan-out this
+/// replay does not model. Nested `with_options` compose. Non-call
+/// statements, receiver-qualified calls, and a sole lambda argument (which
+/// `OptionMerger` wraps instead of merging) are declined.
+fn ingest_with_options(
+    call: &ruby_prism::CallNode<'_>,
+    outer: &[MergedOption],
+    file: &str,
+    parent: Option<&str>,
+    cx: &Ctx<'_>,
+) -> IngestResult<Vec<RouteSpec>> {
+    let Some(block) = call.block().and_then(|b| b.as_block_node()) else {
+        return Err(with_options_gap(file, "only the block form is composed"));
+    };
+    if block.parameters().is_some() {
+        return Err(with_options_gap(
+            file,
+            "a block with a parameter (`|options|`) is not composed",
+        ));
+    }
+    let args: Vec<Node<'_>> = call
+        .arguments()
+        .map(|a| a.arguments().iter().collect())
+        .unwrap_or_default();
+    let [options] = args.as_slice() else {
+        return Err(with_options_gap(file, "expects exactly one literal option hash"));
+    };
+    let Some(own) = literal_option_pairs(options, true) else {
+        return Err(with_options_gap(
+            file,
+            "options must be a literal hash with symbol keys and no splat",
+        ));
+    };
+    let merged = deep_merge_options(outer, own, file)?;
+    let Some(body) = block.body() else { return Ok(Vec::new()) };
+
+    let mut entries = Vec::new();
+    for stmt in flatten_statements(body) {
+        let result = match stmt.as_call_node() {
+            Some(inner)
+                if inner.receiver().is_none()
+                    && constant_id_str(&inner.name()) == "with_options" =>
+            {
+                ingest_with_options(&inner, &merged, file, parent, cx)
+            }
+            Some(inner) if inner.receiver().is_none() && inner.block().is_none() => {
+                ingest_with_options_call(&inner, &merged, file, parent, cx)
+            }
+            Some(inner) if inner.receiver().is_none() => Err(with_options_gap(
+                file,
+                &format!(
+                    "`{}` with a block is not composed (Rails merges the options into its nested calls too)",
+                    constant_id_str(&inner.name())
+                ),
+            )),
+            _ => Err(with_options_gap(
+                file,
+                "only receiverless route calls inside the block are composed",
+            )),
+        };
+        match result {
+            Ok(inner) => entries.extend(inner),
+            Err(err) if super::survey::is_active() => super::survey::record(&err),
+            Err(err) => return Err(err),
+        }
+    }
+    Ok(entries)
+}
+
+/// One call inside a `with_options` block, re-read with `options` merged
+/// into its trailing hash.
+fn ingest_with_options_call(
+    call: &ruby_prism::CallNode<'_>,
+    options: &[MergedOption],
+    file: &str,
+    parent: Option<&str>,
+    cx: &Ctx<'_>,
+) -> IngestResult<Vec<RouteSpec>> {
+    let args: Vec<Node<'_>> = call
+        .arguments()
+        .map(|a| a.arguments().iter().collect())
+        .unwrap_or_default();
+    if let [only] = args.as_slice() {
+        if only.as_lambda_node().is_some() {
+            return Err(with_options_gap(
+                file,
+                "a call whose only argument is a lambda is not composed",
+            ));
+        }
+    }
+    // A braced positional hash (`get "/p", { to: "c#a" }`) is not read
+    // as options by the route ingesters, so merging into it would claim
+    // options that never reach the route.
+    if args.last().is_some_and(|a| a.as_hash_node().is_some()) {
+        return Err(with_options_gap(file, "a positional option hash is not composed"));
+    }
+    let trailing = args.last().filter(|a| a.as_keyword_hash_node().is_some());
+    let own = match trailing {
+        Some(hash) => match literal_option_pairs(hash, false) {
+            Some(pairs) => pairs,
+            None => {
+                return Err(with_options_gap(
+                    file,
+                    "a call whose options splat (`**opts`) is not composed",
+                ));
+            }
+        },
+        None => Vec::new(),
+    };
+    let mut added = Vec::new();
+    for option in options {
+        match own.iter().find(|o| o.key == option.key) {
+            Some(existing) if existing.hash_value && option.hash_value => {
+                return Err(with_options_gap(
+                    file,
+                    &format!("deep-merging two hashes under `{}:` is not composed", option.key),
+                ));
+            }
+            Some(_) => {}
+            None => added.push(option.source.as_str()),
+        }
+    }
+
+    let walk = |stmt: Node<'_>| {
+        cx.with_mount_scope(cx.mount_scope_depth.get() + 1, || {
+            ingest_route_stmts(std::iter::once(stmt), file, parent, cx)
+        })
+    };
+    if added.is_empty() {
+        return walk(call.as_node());
+    }
+    let added = added.join(", ");
+    let (offset, text) = match args.last() {
+        Some(last) => (last.location().end_offset(), format!(", {added}")),
+        None => match call.closing_loc() {
+            Some(close) => (close.start_offset(), added),
+            None => match call.message_loc() {
+                Some(name) => (name.end_offset(), format!(" {added}")),
+                None => return Err(with_options_gap(file, "call has no name to merge into")),
+            },
+        },
+    };
+    let location = call.location();
+    let start = location.start_offset();
+    let original = location.as_slice();
+    // Pad to the call's own offset so diagnostics still point into the
+    // route file; only what follows the insertion point shifts.
+    let mut source = vec![b' '; start];
+    source.extend_from_slice(&original[..offset - start]);
+    source.extend_from_slice(text.as_bytes());
+    source.extend_from_slice(&original[offset - start..]);
+    let result = super::prism::parse(&source, file);
+    let root = result.node();
+    let Some(stmt) = root
+        .as_program_node()
+        .and_then(|p| p.statements().body().iter().next())
+    else {
+        return Err(with_options_gap(file, "merged call did not re-parse"));
+    };
+    walk(stmt)
+}
+
 /// Apply a `member do`/`collection do` scope to every explicit route in
 /// `entries`, looking through the facet-less scopes a wrapper (`routing_method
 /// :x do`, `concerns`, a conditional's arm) leaves in between.
@@ -1154,6 +1506,204 @@ fn retag_scope(entries: &mut [RouteSpec], scope: ResourceScope) {
             }
             _ => {}
         }
+    }
+}
+
+/// Merge an enclosing `constraints(...) do … end` block's per-param
+/// regex requirements into every route it flattens to, transitively
+/// through nested scopes/namespaces/resources. Matches Rails 8.1's
+/// merge rule: a key the route (or a closer-nested block, already
+/// folded in by the time this runs — see below) set for itself WINS;
+/// `outer` only fills params nothing closer has already claimed.
+///
+/// Recursion order makes "innermost wins" fall out for free: a nested
+/// `constraints(...) do … end` runs this same merge for ITS OWN block
+/// before returning its entries up to the enclosing call, so by the
+/// time the outer block merges here, any param the inner block set is
+/// already present on the child's `constraints` map and `or_insert`
+/// leaves it alone.
+fn merge_outer_constraints(entries: &mut [RouteSpec], outer: &IndexMap<Symbol, String>) {
+    if outer.is_empty() {
+        return;
+    }
+    for entry in entries {
+        match entry {
+            RouteSpec::Explicit { constraints, .. } => {
+                for (k, v) in outer {
+                    constraints.entry(k.clone()).or_insert_with(|| v.clone());
+                }
+            }
+            RouteSpec::Resources { constraints, nested, .. } => {
+                for (k, v) in outer {
+                    constraints.entry(k.clone()).or_insert_with(|| v.clone());
+                }
+                merge_outer_constraints(nested, outer);
+            }
+            RouteSpec::Scope { entries, .. } => {
+                merge_outer_constraints(entries, outer);
+            }
+            RouteSpec::Root { .. } => {}
+        }
+    }
+}
+
+/// The param→regex-source map from a `constraints(...)` call's own
+/// arguments — the block-level counterpart of the route-level
+/// `constraints:` kwarg hash parsed in `ingest_explicit_route`. Accepts
+/// both the bare-kwargs spelling (`constraints(slug: /.../)`, an
+/// implicit keyword hash) and an explicit Hash literal
+/// (`constraints({slug: /.../})`). A non-hash arg — the request-based
+/// `constraints(SomeGuard.new)` shape — yields an empty map, which is
+/// exactly "change nothing": that shape stays unenforced, as before.
+fn block_constraints_hash(args: &ruby_prism::ArgumentsNode<'_>) -> IndexMap<Symbol, String> {
+    let mut out = IndexMap::new();
+    for arg in args.arguments().iter() {
+        let elements: Vec<Node<'_>> = if let Some(kh) = arg.as_keyword_hash_node() {
+            kh.elements().iter().collect()
+        } else if let Some(h) = arg.as_hash_node() {
+            h.elements().iter().collect()
+        } else {
+            continue;
+        };
+        for el in elements {
+            let Some(assoc) = el.as_assoc_node() else { continue };
+            let Some(param) = symbol_value(&assoc.key()) else { continue };
+            if let Some(src) = regex_source(&assoc.value()) {
+                out.insert(Symbol::from(param.as_str()), src);
+            }
+        }
+    }
+    out
+}
+
+/// The `Unsupported` error for a route-body statement that is not a
+/// call and not a form the walker already keeps (`if`/`unless`, a
+/// local write). Names the construct and its line so the ledger entry
+/// points at the routes that went missing. The line comes from this
+/// parse's bytes first: a test or a re-ingest can register a second
+/// text under the same path, and `line_at` keeps the first.
+fn non_call_route_stmt(stmt: &Node<'_>, file: &str) -> IngestError {
+    let location = stmt.location();
+    let line = super::sources::line_at_parse(&location)
+        .or_else(|| super::sources::line_at(file, location.start_offset()))
+        .map(|line| format!(", line {line}"))
+        .unwrap_or_default();
+    let construct = match conditional_keyword(stmt) {
+        Some(keyword) => format!("conditional `{keyword}` block (predicate not statically known)"),
+        None => "non-call statement".to_string(),
+    };
+    IngestError::Unsupported {
+        file: file.into(),
+        message: format!("unsupported routes DSL: {construct}{line}"),
+    }
+}
+
+/// The `Unsupported` error for a receiver-bearing call with a block that
+/// the walker cannot evaluate (`PAGES.each { … }`, `3.times { … }`),
+/// naming the method and its line, as `non_call_route_stmt` does.
+fn receiver_block_route_stmt(call: &ruby_prism::CallNode<'_>, file: &str) -> IngestError {
+    let location = call.location();
+    let line = super::sources::line_at_parse(&location)
+        .or_else(|| super::sources::line_at(file, location.start_offset()))
+        .map(|line| format!(", line {line}"))
+        .unwrap_or_default();
+    IngestError::Unsupported {
+        file: file.into(),
+        message: format!(
+            "unsupported routes DSL: `.{}` block on a receiver that is not a literal Array of Strings or Symbols{line}",
+            constant_id_str(&call.name())
+        ),
+    }
+}
+
+/// The elements of `[…].each { |x| … }` when the receiver is an Array
+/// literal (`%w[…]`, `%i[…]`, `[:a, "b"]`) of String or Symbol literals,
+/// the call takes no arguments and its block exactly one required
+/// parameter. `None` for any other shape.
+fn literal_each_elements(call: &ruby_prism::CallNode<'_>) -> Option<Vec<eval::RVal>> {
+    if constant_id_str(&call.name()) != "each" || call.arguments().is_some() {
+        return None;
+    }
+    let array = call.receiver()?.as_array_node()?;
+    let block = call.block()?.as_block_node()?;
+    let params = block.parameters()?.as_block_parameters_node()?.parameters()?;
+    if params.requireds().iter().count() != 1
+        || params.optionals().iter().count() != 0
+        || params.rest().is_some()
+        || params.posts().iter().count() != 0
+        || params.keywords().iter().count() != 0
+        || params.keyword_rest().is_some()
+        || params.block().is_some()
+    {
+        return None;
+    }
+    params.requireds().iter().next()?.as_required_parameter_node()?;
+    array
+        .elements()
+        .iter()
+        .map(|el| {
+            if el.as_string_node().is_none() && el.as_symbol_node().is_none() {
+                return None;
+            }
+            eval::value(&el)
+        })
+        .collect()
+}
+
+/// Walk the block of a `literal_each_elements` loop once per element.
+/// Each walk gets a frame that copies the enclosing one (a loop inside a
+/// `concern` still reads `options`) with the block parameter bound to
+/// the element.
+fn ingest_literal_each(
+    call: &ruby_prism::CallNode<'_>,
+    elements: Vec<eval::RVal>,
+    file: &str,
+    parent: Option<&str>,
+    cx: &Ctx<'_>,
+) -> IngestResult<Vec<RouteSpec>> {
+    let Some(block) = call.block().and_then(|b| b.as_block_node()) else {
+        return Ok(Vec::new());
+    };
+    let param = block
+        .parameters()
+        .and_then(|p| p.as_block_parameters_node())
+        .and_then(|p| p.parameters())
+        .and_then(|p| p.requireds().iter().next())
+        .and_then(|r| r.as_required_parameter_node())
+        .map(|r| constant_id_str(&r.name()).to_string());
+    let Some(param) = param else {
+        return Ok(Vec::new());
+    };
+    // A loop body is a block, like `if`/`unless` arms, `constraints`/
+    // `member`/`collection`/`devise_scope` and the generic
+    // `block_entries` for `namespace`/`scope`/concern blocks — every
+    // one of them raises `mount_scope_depth` before recursing. Without
+    // it here, a `mount` inside the loop read as top-level: on a
+    // 2+-element loop the first iteration's mount succeeded and the
+    // second then hit the check meant for two separate top-level
+    // mounts of the same engine ("mounting the same engine class more
+    // than once"), so one source `mount` executed twice by the loop
+    // silently half-worked instead of being a located gap on every
+    // iteration (rubys/roundhouse#1027 review).
+    let mut entries = Vec::new();
+    for element in elements {
+        let Some(body) = block.body() else { break };
+        eval::push_inherited_frame();
+        eval::bind(&param, element);
+        let walked = cx.with_mount_scope(cx.mount_scope_depth.get() + 1, || {
+            ingest_route_body(body, file, parent, cx)
+        });
+        eval::pop_frame();
+        entries.extend(walked?);
+    }
+    Ok(entries)
+}
+
+fn conditional_keyword(stmt: &Node<'_>) -> Option<&'static str> {
+    if stmt.as_case_node().is_some() || stmt.as_case_match_node().is_some() {
+        Some("case")
+    } else {
+        None
     }
 }
 
@@ -2043,6 +2593,16 @@ mod eval {
         FRAMES.with(|f| f.borrow_mut().push(HashMap::new()));
     }
 
+    /// A frame that starts as a copy of the enclosing one: a block body
+    /// (a literal-Array loop) still sees what its scope bound.
+    pub(super) fn push_inherited_frame() {
+        FRAMES.with(|f| {
+            let mut frames = f.borrow_mut();
+            let top = frames.last().cloned().unwrap_or_default();
+            frames.push(top);
+        });
+    }
+
     pub(super) fn pop_frame() {
         FRAMES.with(|f| {
             f.borrow_mut().pop();
@@ -2436,6 +2996,7 @@ fn ingest_explicit_route(
     let mut as_name: Option<Symbol> = None;
     let mut action_kwarg: Option<String> = None;
     let mut controller_kwarg: Option<String> = None;
+    let mut defaults_format: Option<String> = None;
     // The INLINE spelling of `member do … end` / `collection do … end`.
     // Rails accepts both, and campfire writes `delete :clear, on:
     // :collection`; only the block form was recognized, so the route was
@@ -2539,6 +3100,17 @@ fn ingest_explicit_route(
                     // `expand_match_via` once the entry is built. Other
                     // string-value options become routing constraints.
                     "via" => {}
+                    "defaults" => {
+                        if let Some(defaults) = value.as_hash_node() {
+                            for entry in defaults.elements().iter() {
+                                if let Some(pair) = entry.as_assoc_node()
+                                    && symbol_value(&pair.key()).as_deref() == Some("format")
+                                {
+                                    defaults_format = rname(&pair.value());
+                                }
+                            }
+                        }
+                    }
                     // `constraints: { id: /\d+/, tag: /[^,.\/]+/ }` —
                     // per-param regex restrictions. Capture each param's
                     // regex SOURCE (raw text between the delimiters, so
@@ -2566,6 +3138,10 @@ fn ingest_explicit_route(
                 }
             }
         }
+    }
+
+    if let Some(format) = defaults_format {
+        constraints.insert(Symbol::from("format"), format);
     }
 
     if let Some((location, status, keep_query)) = redirect_target {
@@ -2864,19 +3440,12 @@ fn ingest_resources_route(
                             ),
                         });
                     }
-                    // `path: ""` / `path: "/"` mounts the resource at the
-                    // root (`GET /` is `index`, `/:id` is `show`). That
-                    // is not the resource name, so refuse it rather
-                    // than fall back to `/parts`.
+                    // `path: ""` / `path: "/"` mounts the resource at its
+                    // scope's root (`GET /` is `index`, `/:id` is
+                    // `show`, a collection route `/ping`): an empty
+                    // segment, which the flattener leaves out of the
+                    // path. The helpers still come from the name.
                     let segment = raw.trim_matches('/');
-                    if segment.is_empty() {
-                        return Err(IngestError::Unsupported {
-                            file: file.into(),
-                            message: format!(
-                                "resources :{name_str} `path: {raw:?}` mounts the resource at the root"
-                            ),
-                        });
-                    }
                     path = Some(segment.to_string());
                 }
                 // `concerns: :c` / `concerns: [:a, :b]` replays those
@@ -2919,6 +3488,7 @@ fn ingest_resources_route(
         controller,
         param,
         path,
+        constraints: IndexMap::new(),
     })
 }
 

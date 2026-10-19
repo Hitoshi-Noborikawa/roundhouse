@@ -18,7 +18,8 @@ pub(crate) use constructor::ConstructorContract;
 
 pub(super) fn diagnose(app: &App) -> Vec<Diagnostic> {
     let mut out = Vec::new();
-    let contracts = SourceContractIndex::new(app);
+    let actions = controller_defs(app);
+    let contracts = SourceContractIndex::new(app, &actions);
     let scoped = if app
         .models
         .iter()
@@ -30,7 +31,7 @@ pub(super) fn diagnose(app: &App) -> Vec<Diagnostic> {
     } else {
         vec![]
     };
-    for (owner, method) in methods(app) {
+    for (owner, method) in methods(app).chain(actions.iter().map(|(c, m)| (c, m))) {
         if let Some(formal) = method.unsupported_formals {
             out.push(Diagnostic::unsupported(
                 method.name_span,
@@ -77,12 +78,71 @@ pub(super) fn diagnose(app: &App) -> Vec<Diagnostic> {
             walk(app, &contracts, owner, method, default, &mut out);
         }
     }
-    for (span, policy) in keyword_calls_with_index(app, &contracts) {
+    for (span, policy) in keyword_calls_with_index(app, &contracts, &actions) {
         if matches!(
             policy,
             KeywordPolicy::Refuse | KeywordPolicy::RefuseOrdinarySuper
         ) {
             out.push(keyword_refusal(span, policy));
+        }
+    }
+    out
+}
+
+/// Every controller action as the `MethodDef` `controller_to_library`
+/// builds from it (`Action::formal_params`). Controllers lower after
+/// these checks run; without this view an action's `**` or `...` would
+/// forward unverified, into a destination whose keywords ingest
+/// flattened as readily as into one that kept them. The body is copied
+/// only when it carries an argument packet, the one thing the checks
+/// walk it for; the rest serve as lookup destinations.
+pub(crate) fn controller_defs(app: &App) -> Vec<(ClassId, MethodDef)> {
+    fn has_packet(e: &Expr) -> bool {
+        if matches!(
+            &*e.node,
+            ExprNode::ForwardArgs
+                | ExprNode::ForwardKeywords
+                | ExprNode::ForwardKeywordsWithPairs { .. }
+                | ExprNode::KeywordSplat { .. }
+        ) {
+            return true;
+        }
+        let mut found = false;
+        e.node.for_each_child(&mut |c| found = found || has_packet(c));
+        found
+    }
+    let mut out = Vec::new();
+    for controller in &app.controllers {
+        for action in controller.actions() {
+            let params = action.formal_params();
+            let body = if has_packet(&action.body)
+                || params.iter().any(|p| p.default.as_ref().is_some_and(has_packet))
+            {
+                action.body.clone()
+            } else {
+                Expr::new(action.body.span, ExprNode::Seq { exprs: vec![] })
+            };
+            out.push((
+                controller.name.clone(),
+                MethodDef {
+                    name: action.name.clone(),
+                    receiver: MethodReceiver::Instance,
+                    visibility: crate::dialect::MethodVisibility::Public,
+                    params,
+                    unsupported_formals: None,
+                    // `def f(&)` binds the sentinel name ingest gives it.
+                    has_anonymous_block: action.block_param.as_ref().is_some_and(|b| b.as_str() == "__blk"),
+                    block_param: action.block_param.clone().map(crate::dialect::Param::positional),
+                    name_span: action.name_span,
+                    body,
+                    signature: None,
+                    effects: action.effects.clone(),
+                    enclosing_class: Some(controller.name.0.clone()),
+                    kind: crate::dialect::AccessorKind::Method,
+                    is_async: false,
+                    mutates_self: false,
+                },
+            ));
         }
     }
     out
@@ -515,8 +575,9 @@ pub(crate) fn keyword_refusal(span: Span, policy: KeywordPolicy) -> Diagnostic {
 /// Classify before projection. Source copies sharing a span must agree:
 /// a cloned concern body can have different contracts in two includers.
 pub(crate) fn keyword_calls(app: &App) -> HashMap<Span, KeywordPolicy> {
-    let contracts = SourceContractIndex::new(app);
-    keyword_calls_with_index(app, &contracts)
+    let actions = controller_defs(app);
+    let contracts = SourceContractIndex::new(app, &actions);
+    keyword_calls_with_index(app, &contracts, &actions)
 }
 
 pub(crate) fn keyword_calls_and_constructor_contracts(
@@ -525,8 +586,11 @@ pub(crate) fn keyword_calls_and_constructor_contracts(
     HashMap<Span, KeywordPolicy>,
     HashMap<ClassId, ConstructorContract<'_>>,
 ) {
-    let mut contracts = SourceContractIndex::new(app);
-    let plans = keyword_calls_with_index(app, &contracts);
+    // The plans read the controller actions too; the constructor
+    // contracts outlive this call and borrow `app` alone, so they get an
+    // index of their own (a controller is never a constructor).
+    let plans = keyword_calls(app);
+    let mut contracts = SourceContractIndex::new(app, &[]);
     constructor::index_unmodeled_lookup_mutations(app, &mut contracts);
     (
         plans,
@@ -537,6 +601,7 @@ pub(crate) fn keyword_calls_and_constructor_contracts(
 fn keyword_calls_with_index(
     app: &App,
     contracts: &SourceContractIndex<'_>,
+    actions: &[(ClassId, MethodDef)],
 ) -> HashMap<Span, KeywordPolicy> {
     fn visit(
         app: &App,
@@ -610,7 +675,7 @@ fn keyword_calls_with_index(
             .for_each_child(&mut |c| visit(app, contracts, context, c, plans, fallback));
     }
     let mut plans = HashMap::new();
-    for (owner, method) in methods(app) {
+    for (owner, method) in methods(app).chain(actions.iter().map(|(c, m)| (c, m))) {
         visit(
             app,
             contracts,
@@ -680,9 +745,12 @@ fn constant_names_class(expr: &Expr, class: &ClassId) -> bool {
     let ExprNode::Const { path } = &*expr.node else {
         return false;
     };
+    // `::Shop::Refund` names `Shop::Refund`: the leading `::` is an empty
+    // first segment, not part of the name.
     let spelling = path
         .iter()
         .map(|p| p.as_str())
+        .filter(|p| !p.is_empty())
         .collect::<Vec<_>>()
         .join("::");
     class.0.as_str() == spelling || class.0.as_str().ends_with(&format!("::{spelling}"))
@@ -770,6 +838,7 @@ struct SourceContractIndex<'a> {
     parents: HashMap<ClassId, &'a ClassId>,
     includes: HashMap<ClassId, Vec<ClassId>>,
     modules: HashSet<ClassId>,
+    data_factories: HashSet<ClassId>,
     unmodeled_constructor_lookup: HashSet<ClassId>,
     fragments: HashMap<ClassId, usize>,
     instance: HashMap<(ClassId, Symbol), (&'a MethodDef, bool)>,
@@ -788,11 +857,12 @@ impl<'a> SourceContractIndex<'a> {
     /// checks: full forwarders and declarations reached by source argument
     /// packets. This bounds the model-synthesis survey without omitting
     /// inherited contracts selected through sends or explicit packet `super`.
-    fn new(app: &'a App) -> Self {
+    fn new(app: &'a App, actions: &'a [(ClassId, MethodDef)]) -> Self {
         let mut index = Self {
             parents: HashMap::new(),
             includes: HashMap::new(),
             modules: HashSet::new(),
+            data_factories: HashSet::new(),
             unmodeled_constructor_lookup: HashSet::new(),
             fragments: HashMap::new(),
             instance: HashMap::new(),
@@ -807,6 +877,9 @@ impl<'a> SourceContractIndex<'a> {
             class_owners.insert(class.name.clone());
             if class.is_module {
                 index.modules.insert(class.name.clone());
+            }
+            if matches!(class.origin, Some(crate::dialect::LibraryClassOrigin::DataFactory { .. })) {
+                index.data_factories.insert(class.name.clone());
             }
             index.add_fragment(
                 &class.name,
@@ -839,10 +912,19 @@ impl<'a> SourceContractIndex<'a> {
                 index.add_methods(&module.name, module.helpers.iter(), false);
             }
         }
+        // Controllers' spliced concern methods are already among their
+        // actions, so the includes add nothing a lookup could find.
+        for controller in &app.controllers {
+            index.add_fragment(&controller.name, controller.parent.as_ref(), std::iter::empty());
+        }
+        for (owner, method) in actions {
+            index.add_methods(owner, std::iter::once(method), false);
+        }
         // Includes association-extension methods, matching the public method
         // inventory used by the former conservative selector scan.
         index.full_selectors.extend(
             methods(app)
+                .chain(actions.iter().map(|(c, m)| (c, m)))
                 .filter(|(_, method)| method.params.iter().any(|p| p.forwarding))
                 .map(|(_, method)| method.name.clone()),
         );
@@ -1044,6 +1126,10 @@ impl<'a> SourceContractIndex<'a> {
             .and_then(|parent| self.declaration(parent, name, receiver, seen))
     }
 
+    /// Find the source declaration governing a call, falling back from class-side
+    /// `new` to instance-side `initialize` for ordinary constructors. Data factories
+    /// are excluded from that fallback because their constructor normalizes arguments
+    /// before invoking the initializer; the two call contracts are not interchangeable.
     fn effective_call(
         &self,
         owner: &ClassId,
@@ -1052,7 +1138,8 @@ impl<'a> SourceContractIndex<'a> {
     ) -> Option<(&'a MethodDef, bool)> {
         self.declaration(owner, name, receiver, &mut HashSet::new())
             .or_else(|| {
-                (name.as_str() == "new" && receiver == MethodReceiver::Class)
+                (name.as_str() == "new" && receiver == MethodReceiver::Class
+                    && !self.data_factories.contains(owner))
                     .then(|| {
                         self.declaration(
                             owner,

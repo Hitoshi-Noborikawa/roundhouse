@@ -117,14 +117,20 @@ module Db
   def self.shard_count: () -> Integer
   def self.pool_for_thread: () -> PgPool
   def self.current_conn: () -> PgConn
+  def self.database_path: () -> String
+  def self.adapter_name: () -> String
+  def self.transaction_open?: () -> bool
   def self.in_lease?: () -> bool
   def self.pin_transaction: (PgConn conn) -> nil
   def self.with_connection: [T] () { () -> T } -> T
+  def self.without_foreign_keys: [T] () { () -> T } -> T
+  def self.check_foreign_keys!: () -> nil
   def self.read_snapshot_begin: () -> bool
   def self.read_snapshot_end: () -> bool
   def self.checkpoint_in_background!: () -> nil
   def self.query_cache_begin: () -> nil
   def self.query_cache_end: () -> nil
+  def self.query_cache_enabled?: () -> bool
   def self.seed_from_file: (String src_path) -> bot
   def self.ran_stmt: (Integer stmt) -> PgStmt
   def self.column_count: (Integer stmt) -> Integer

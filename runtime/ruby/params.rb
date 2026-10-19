@@ -1,9 +1,10 @@
+# frozen_string_literal: true
 # Narrowing accessors for the recursive request-params tree.
 #
-# `Roundhouse::ParamValue` is `String | Hash[String, ParamValue] |
-# Array[ParamValue]`, realized per target (Crystal alias, TS union,
-# rust `serde_json::Value`, Go `any`). Until now that per-target file
-# carried a TYPE AND NO OPERATIONS, so every consumer had to narrow at
+# `Roundhouse::ParamValue` is `String | Integer | Float | bool | nil |
+# Hash[String, ParamValue] | Array[ParamValue]`, realized per target
+# (Crystal alias, TS union, rust `serde_json::Value`, Go `any`). Until
+# now that per-target file carried a TYPE AND NO OPERATIONS, so every consumer had to narrow at
 # its own call site with `is_a?` — and each emitter recognized that as
 # an IDIOM (a type test in `If`-condition position returning the
 # narrowed value) rather than modeling the type test itself.
@@ -83,12 +84,19 @@ module Params
   # IS a plain Hash here, and `require` on one reaches Kernel's private
   # method — "private method 'require' called for an instance of Hash",
   # which is how this gap announced itself in four tests.
+  #
+  # "Blank" is Rails' `require` test, `value.present? || value == false`:
+  # nil, a whitespace-only string, and an EMPTY hash or array raise too.
+  # The empty hash is the one that matters: ParamsWrapper wraps a JSON
+  # body with nothing to wrap (an empty body, `{}`, only keys the model
+  # lacks) as `key => {}`, and Rails 8.1 answers that with 400 rather
+  # than letting the action run on no parameters.
   def self.require_key(params, key)
-    value = params.fetch(key, "")
-    if value.is_a?(String) && value.empty?
+    unless params.key?(key)
       raise(ActionController::ParameterMissing.new(key))
     end
-    unless params.key?(key)
+    value = params.fetch(key, "")
+    if value != false && ActiveSupport.blank?(value)
       raise(ActionController::ParameterMissing.new(key))
     end
     value

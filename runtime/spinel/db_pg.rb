@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 # Primitive Db surface over PostgreSQL, for spinel-compiled binaries.
 #
 # The same `module Db` contract as runtime/spinel/db.rb (SQLite over
@@ -705,6 +706,7 @@ end
 module Db
   # Shards (see configure); empty until configured.
   @pools = []
+  @database = ""
   @assign_lock = Mutex.new
   @next_pool = 0
   # Named statements kept per connection (db.rb's DbConn::CAP).
@@ -734,6 +736,7 @@ module Db
     per = n / stripes
     per = 1 if per < 1
     config = PgConfig.new(url.to_s)
+    @database = config.database
     pools = []
     i = 0
     while i < stripes
@@ -789,8 +792,79 @@ module Db
     Db.pool.first
   end
 
+  # `ActiveRecord::Base.connection_db_config` answers from these
+  # (runtime/spinel/active_record_db_config.rb): the database this
+  # process configured, the adapter name Rails would report for it, and
+  # whether the holder is inside a transaction of its own — the request
+  # read snapshot is the shim's, not the app's, so it does not count.
+  def self.database_path
+    @database
+  end
+
+  def self.adapter_name
+    "postgresql"
+  end
+
+  def self.transaction_open?
+    st = current_conn.status
+    st == PG::PQTRANS_INTRANS || st == PG::PQTRANS_INERROR
+  end
+
   def self.in_lease?
     !Thread.current[:db_conn].nil?
+  end
+
+  # `ActiveRecord::Base.transaction`'s per-thread nesting depth
+  # (connection.rb) — see the contract note in runtime/ruby/db.rbs.
+  #
+  # #693 regression on Postgres: connection.rb's self.transaction reads
+  # Db._txn_depth unconditionally, as its very first statement, even for
+  # a flat (non-nested) transaction — not just to decide whether to
+  # join one already open. db_pg.rb never defined these two methods (#693
+  # added them only to db.rb, the SQLite shim, to box the depth counter
+  # for db.rb's own zero-residual RBS probe), so ANY Model.transaction
+  # on the PostgreSQL shim raised NoMethodError. Same per-thread storage
+  # (Thread.current[:ar_txn_depth]) as db.rb, so the two shims share the
+  # same key shape even though they never share a thread.
+  def self._txn_depth
+    d = Thread.current[:ar_txn_depth]
+    d.nil? ? 0 : d
+  end
+
+  def self._txn_depth=(value)
+    Thread.current[:ar_txn_depth] = value
+  end
+
+  # Bit `depth - 1` of this integer is whether that frame can be joined.
+  # Same thread slot as the depth. See runtime/ruby/db.rbs.
+  def self._txn_joinable_bits
+    bits = Thread.current[:ar_txn_joinable_bits]
+    bits.nil? ? 0 : bits
+  end
+
+  def self._txn_joinable_bits=(value)
+    Thread.current[:ar_txn_joinable_bits] = value
+  end
+
+  # The open transaction's enlisted writes (connection.rb), held in the
+  # same per-thread storage as the depth.
+  def self._txn_records
+    records = Thread.current[:ar_txn_records]
+    if records.nil?
+      records = [ActiveRecord::EnlistedRecord.new(ActiveRecord::Base.new, 0)]
+      records.clear
+      Thread.current[:ar_txn_records] = records
+    end
+    records
+  end
+
+  # Not PostgreSQL's DISABLE TRIGGER: its DDL here carries no foreign keys yet (emit::shared::schema_sql), so a fixture load has nothing to defer.
+  def self.without_foreign_keys
+    yield
+  end
+
+  def self.check_foreign_keys!
+    nil
   end
 
   # Request-scoped lease. Handles left open by the block are released
@@ -798,7 +872,13 @@ module Db
   def self.with_connection
     # Re-entrant: a nested lease, or one inside a transaction a BEGIN
     # outside any lease pinned, keeps the thread's connection.
-    return yield if !Thread.current[:db_conn].nil?
+    #
+    # Do not write `return yield if …`: Spinel tip (ea683750+) mis-emits
+    # `sp_oint_arg` around a raising block's int dummy on that form.
+    unless Thread.current[:db_conn].nil?
+      result = yield
+      return result
+    end
     pool = Db.pool_for_thread
     idx = pool.lease
     conn = pool.conn(idx)
@@ -875,6 +955,10 @@ module Db
     nil
   end
 
+  def self.query_cache_enabled?
+    false
+  end
+
   # A page-level copy of a SQLite file has no PostgreSQL meaning. Seed
   # with pg_restore or psql before boot instead.
   def self.seed_from_file(src_path)
@@ -887,8 +971,23 @@ module Db
   def self.exec(sql)
     record_query(sql)
     conn = current_conn
-    conn.exec(sql)
-    Db.pin_transaction(conn)
+    # A COMMIT or ROLLBACK that itself raises — the backend's session
+    # ended (a lost connection, an idle-in-transaction timeout) rather
+    # than the statement failing cleanly — must not skip
+    # pin_transaction: without it, the pin this thread took at BEGIN
+    # leaks, and Db.current_conn stays wedged on the dead connection for
+    # the rest of the thread's life instead of falling back to a fresh
+    # one (roundhouse#693 fixed the same bug in db.rb's Db.exec). A bare
+    # begin/ensure with no rescue clause is the one shape Spinel
+    # (matz/spinel#8182) runs the ensure for even when the exception
+    # propagates uncaught; pin_transaction reads conn.status itself to
+    # decide whether to release, which is right whether the write
+    # succeeded or raised.
+    begin
+      conn.exec(sql)
+    ensure
+      Db.pin_transaction(conn)
+    end
     # A value, not nil, for the same reason as db.rb: `result = yield`
     # in with_connection cannot hold a void.
     true
@@ -897,8 +996,30 @@ module Db
   # A BEGIN outside a lease binds its connection to this thread until
   # the transaction ends, so a lease taken inside it (with_connection)
   # writes through the same session instead of committing on another.
+  #
+  # Released on PQTRANS_UNKNOWN as well as PQTRANS_IDLE: UNKNOWN is what
+  # a dead session (the backend was terminated, or the socket dropped)
+  # reports once a command on it has failed — found running self.exec's
+  # own begin/ensure fix above against a connection killed mid-BEGIN:
+  # without this, a COMMIT/ROLLBACK that raises because the SESSION
+  # ended, not because the statement failed, left `conn.status` at
+  # UNKNOWN, which the elsif branch below misread as "still open" and
+  # re-pinned — the exact leak the begin/ensure was meant to close. A
+  # dead connection has nothing left to protect, same as an idle one.
+  #
+  # UNKNOWN also drops the connection before clearing the pin. The
+  # unleased fallback (Db.current_conn -> Db.pool.first) is this SAME
+  # PgConn object, and PgConn#client only reopens a fresh session when
+  # @client is nil — left undropped, releasing just the pin here fixes
+  # the leak but leaves the connection itself dead: every LATER
+  # unleased Db.exec on this thread would still hit the same broken
+  # socket ("pg: connection lost") instead of reconnecting. Caught by
+  # CodeRabbit on #766 — case_26's own manual `.drop` after its
+  # assertions was masking exactly this gap.
   def self.pin_transaction(conn)
-    if conn.status == PG::PQTRANS_IDLE
+    status = conn.status
+    if status == PG::PQTRANS_IDLE || status == PG::PQTRANS_UNKNOWN
+      conn.drop if status == PG::PQTRANS_UNKNOWN
       Thread.current[:db_conn] = nil if Thread.current[:db_txn_pin] == true
       Thread.current[:db_txn_pin] = false
     elsif !Db.in_lease?
@@ -923,9 +1044,24 @@ module Db
   # A read through the connection's cached named statement for `sql`.
   def self.prepare(sql)
     sql = sql.to_s
+    return prepare_marked(sql) if sql.include?("\x01")
+    prepare_plain(sql)
+  end
+
+  # Prepare without re-entering prepare_marked. Post-inline SQL may
+  # still contain \x01 inside string literals (unmarked values).
+  def self.prepare_plain(sql)
     record_query(sql)
     h = current_conn.open_stmt(sql, true)
     h
+  end
+
+  # A Relation read with its values marked for binding (db_cruby.rb's
+  # `prepare_marked`). PostgreSQL spells placeholders $1, $2…, not the
+  # `?` the lift writes, so it runs with its values written in, as it
+  # did before binding.
+  def self.prepare_marked(marked)
+    prepare_plain(ActiveRecord::Relation.inline_sql(marked))
   end
 
   # Reads with too many SQL shapes to cache run as the unnamed statement.
@@ -1237,6 +1373,14 @@ module Db
     return "NULL" if ids.empty?
 
     ids.map { |i| i.to_i.to_s }.join(", ")
+  end
+
+  # The same `IN (...)` batch over string keys (a uuid primary key): each
+  # key quoted as a literal, never `to_i`'d to its leading digits.
+  def self.escape_string_list(ids)
+    return "NULL" if ids.empty?
+
+    ids.map { |i| escape_string(i.to_s) }.join(", ")
   end
 end
 

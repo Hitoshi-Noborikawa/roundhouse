@@ -36,6 +36,8 @@
 //! `cargo check` while `check` reports no error. The emitted Ruby runs
 //! (`tests/recursive_type_bound.rs`).
 
+use std::sync::Arc;
+
 use crate::ty::{Param, Row, Ty};
 
 use super::body;
@@ -139,8 +141,8 @@ fn cut(ty: &Ty, levels: usize) -> Ty {
     }
     let inner = |t: &Ty| cut(t, levels - 1);
     match ty {
-        Ty::Array { elem } => Ty::Array { elem: Box::new(inner(elem)) },
-        Ty::Hash { key, value } => Ty::Hash { key: Box::new(inner(key)), value: Box::new(inner(value)) },
+        Ty::Array { elem } => Ty::Array { elem: Arc::new(inner(elem)) },
+        Ty::Hash { key, value } => Ty::Hash { key: Arc::new(inner(key)), value: Arc::new(inner(value)) },
         Ty::Tuple { elems } => Ty::Tuple { elems: elems.iter().map(inner).collect() },
         Ty::Record { row } => Ty::Record {
             row: Row {
@@ -152,10 +154,10 @@ fn cut(ty: &Ty, levels: usize) -> Ty {
         Ty::Fn { params, block, ret, effects } => Ty::Fn {
             params: params
                 .iter()
-                .map(|p| Param { name: p.name.clone(), ty: inner(&p.ty), kind: p.kind.clone() })
+                .map(|p| Param { name: p.name.clone(), ty: Arc::new(inner(&p.ty)), kind: p.kind.clone() })
                 .collect(),
-            block: block.as_ref().map(|b| Box::new(inner(b))),
-            ret: Box::new(inner(ret)),
+            block: block.as_ref().map(|b| Arc::new(inner(b))),
+            ret: Arc::new(inner(ret)),
             effects: effects.clone(),
         },
         other => other.clone(),
@@ -168,11 +170,11 @@ mod tests {
     use crate::ident::{ClassId, Symbol};
 
     fn arr(elem: Ty) -> Ty {
-        Ty::Array { elem: Box::new(elem) }
+        Ty::Array { elem: Arc::new(elem) }
     }
 
     fn str_hash(value: Ty) -> Ty {
-        Ty::Hash { key: Box::new(Ty::Str), value: Box::new(value) }
+        Ty::Hash { key: Arc::new(Ty::Str), value: Arc::new(value) }
     }
 
     fn nested_arrays(depth: usize) -> Ty {
@@ -189,7 +191,7 @@ mod tests {
 
     #[test]
     fn the_early_exit_check_agrees_with_the_full_measure() {
-        let samples = [Ty::Int, nested_arrays(5), json_like(2), json_like(6), str_hash(Ty::Tuple { elems: vec![] })];
+        let samples = [Ty::Int, nested_arrays(5), json_like(2), json_like(6), str_hash(Ty::Tuple { elems: vec![].into() })];
         for ty in &samples {
             let (depth, nodes) = measure(ty);
             for levels in 0..8 {
@@ -235,7 +237,7 @@ mod tests {
 
     #[test]
     fn a_leaf_union_wider_than_the_node_bound_is_untyped() {
-        let classes = (0..MAX_NODES).map(|i| Ty::Class { id: ClassId(Symbol::from(format!("C{i}").as_str())), args: vec![] });
+        let classes = (0..MAX_NODES).map(|i| Ty::Class { id: ClassId(Symbol::from(format!("C{i}").as_str())), args: vec![].into() });
         let wide = body::union_many(classes.chain([arr(Ty::Int)]).collect());
         assert!(measure(&wide).1 > MAX_NODES);
         assert_eq!(bound(wide), Ty::Untyped);
@@ -273,6 +275,67 @@ mod tests {
         );
         super::super::extract_ivar_assignments(&index_write, &mut ivars);
         assert_eq!(measure(&ivars[&Symbol::from("g")]).0, MAX_DEPTH);
+    }
+
+    /// `bound` doesn't distribute over the join, so applying it after
+    /// every write made an ivar slot depend on the order of its
+    /// writes: with a 10-deep Array and two Hashes of 300 classes each,
+    /// one order cut the slot to `untyped` and another kept the deep
+    /// Array (#617). The bound applies once per slot, after the walk.
+    fn wide_hash(prefix: &str) -> Ty {
+        let classes = (0..300).map(|i| Ty::Class { id: ClassId(Symbol::from(format!("{prefix}{i}").as_str())), args: vec![].into() });
+        str_hash(body::union_many(classes.collect()))
+    }
+
+    fn bound_order_writers() -> [Ty; 3] {
+        [nested_arrays(10), wide_hash("A"), wide_hash("B")]
+    }
+
+    #[test]
+    fn an_ivar_slot_is_bounded_once_after_its_writes() {
+        let write = |ty: Ty| {
+            let mut value = crate::expr::Expr::new(
+                crate::span::Span::synthetic(),
+                crate::expr::ExprNode::Lit { value: crate::expr::Literal::Nil },
+            );
+            value.ty = Some(ty);
+            crate::expr::Expr::new(
+                crate::span::Span::synthetic(),
+                crate::expr::ExprNode::Assign { target: crate::expr::LValue::Ivar { name: Symbol::from("h") }, value },
+            )
+        };
+        let harvest = |order: [usize; 3]| {
+            let writers = bound_order_writers();
+            let body = crate::expr::Expr::new(
+                crate::span::Span::synthetic(),
+                crate::expr::ExprNode::Seq { exprs: order.iter().map(|&i| write(writers[i].clone())).collect() },
+            );
+            let mut ivars = std::collections::HashMap::new();
+            super::super::extract_ivar_assignments(&body, &mut ivars);
+            ivars.remove(&Symbol::from("h")).unwrap()
+        };
+        let first = harvest([0, 1, 2]);
+        for order in [[1, 2, 0], [2, 0, 1], [0, 2, 1]] {
+            assert_eq!(harvest(order), first, "writes in order {order:?}");
+        }
+    }
+
+    /// The same for a parameter row: its call sites' observations are
+    /// joined first and the row is bounded once.
+    #[test]
+    fn a_param_slot_is_bounded_once_after_its_observations() {
+        let key = (ClassId(Symbol::from("C")), Symbol::from("m"), crate::dialect::MethodReceiver::Instance);
+        let fold = |order: [usize; 3]| {
+            let writers = bound_order_writers();
+            let mut rows = std::collections::HashMap::new();
+            let observations = order.iter().map(|&i| (key.clone(), vec![writers[i].clone()])).collect();
+            super::super::fold_param_observations(&mut rows, observations);
+            rows.remove(&key).unwrap()
+        };
+        let first = fold([0, 1, 2]);
+        for order in [[1, 2, 0], [2, 0, 1], [0, 2, 1]] {
+            assert_eq!(fold(order), first, "observations in order {order:?}");
+        }
     }
 
     #[test]

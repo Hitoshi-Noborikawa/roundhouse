@@ -24,6 +24,10 @@ pub(super) struct Visibility {
     changed: HashSet<(bool, String)>,
     accessors: HashSet<(bool, String)>,
     defaults: HashMap<usize, MethodVisibility>,
+    inherited: Vec<(bool, String, usize)>,
+    /// Walking a concern's `ClassMethods` carrier, whose body is the
+    /// includers' class side rather than a singleton of its own.
+    carrier: bool,
 }
 
 pub(super) fn marker(call: &CallNode<'_>) -> bool {
@@ -47,6 +51,128 @@ pub(super) fn definition<'pr>(node: &Node<'pr>) -> Option<ruby_prism::DefNode<'p
         }
     }
     node.as_def_node()
+}
+
+/// Does this `included do … end` body mix a visibility marker (bare or
+/// named — either spelling makes the marker's reach matter) with some
+/// OTHER receiverless call this file's visibility tracking does not
+/// itself attribute a method to? `def`s and the marker calls themselves
+/// are always fine; `attr_reader`/`attr_writer`/`attr_accessor`,
+/// `alias_method`, and nested `class_methods`/`included`/
+/// `module_function` are the declaration forms `Visibility::walk`
+/// already tracks, so they're fine too. Anything else — `delegate`,
+/// `scope`, `has_many`, an arbitrary DSL block — might generate a
+/// method whose visibility this walk cannot verify, so its presence
+/// alongside a marker is reported, not silently accepted.
+/// Declaration forms `Visibility::walk` already attributes a method
+/// (or methods) to, besides a plain `def`. Anything else — `delegate`,
+/// `scope`, `has_many`, an arbitrary DSL — might generate a method
+/// whose visibility this walk cannot verify.
+const TRACKED_DECLARATIONS: &[&str] = &[
+    "attr_reader",
+    "attr_writer",
+    "attr_accessor",
+    "alias_method",
+    "class_methods",
+    "included",
+    "module_function",
+];
+
+/// Thor's command-annotation DSL: these describe the NEXT command and
+/// define no methods of their own, so a visibility marker coexisting
+/// with one is never the soundness hole `marker_mixed_with_unmodeled_call`
+/// otherwise guards against — but only the bare, receiverless spelling
+/// Thor's own DSL uses; see [`marker_mixed_with_unmodeled_call`] for why
+/// a self-qualified or conditionally-guarded one still isn't exempt.
+const THOR_DSL_ANNOTATIONS: &[&str] = &["desc", "long_desc", "option", "method_option", "class_option"];
+
+/// Does this `included do … end` body mix a visibility marker (bare or
+/// named — either spelling makes the marker's reach matter) with some
+/// OTHER call, ANYWHERE in the body (including inside `if`/`unless`
+/// branches, and however deeply elsif-chained), that this file's
+/// visibility tracking does not itself attribute a method to? `def`s
+/// and the marker calls themselves are always fine, on any receiver;
+/// [`TRACKED_DECLARATIONS`] are fine too, but ONLY when sent to the
+/// includer itself — bare (implicit `self`) or an explicit `self.` —
+/// since a call on some OTHER receiver (`Other.attr_accessor`) cannot
+/// be generating a method on THIS class regardless of what it's named.
+///
+/// A top-level, bare [`THOR_DSL_ANNOTATIONS`] call is ALSO exempt — but
+/// narrowly: only that exact shape. `self.desc …` isn't a spelling
+/// Thor's DSL itself produces, so it stays an ordinary unmodeled call
+/// (same bucket as any other `self.`-qualified mystery), and one nested
+/// inside an `if`/`unless` reaches [`statement_has_unmodeled_call`]
+/// through [`branch_has_unmodeled_call`]'s own recursion, never through
+/// this exemption, so it stays refused too — conditionally annotating a
+/// Thor command isn't a shape its DSL produces either.
+fn marker_mixed_with_unmodeled_call(body: &Node<'_>) -> bool {
+    let Some(statements) = body.as_statements_node() else { return false };
+    let stmts = flatten_statements(statements.as_node());
+    let has_marker = stmts.iter().any(|stmt| {
+        stmt.as_call_node().is_some_and(|c| c.receiver().is_none() && marker(&c))
+    });
+    if !has_marker {
+        return false;
+    }
+    stmts.iter().any(|stmt| !is_bare_thor_annotation(stmt) && statement_has_unmodeled_call(stmt))
+}
+
+/// A direct, receiverless call naming one of [`THOR_DSL_ANNOTATIONS`] —
+/// the one shape Thor's own DSL produces. Checked only at the top level
+/// of an `included do` body; see `marker_mixed_with_unmodeled_call`'s
+/// doc comment for why a self-qualified or nested spelling does not
+/// qualify.
+fn is_bare_thor_annotation(stmt: &Node<'_>) -> bool {
+    stmt.as_call_node().is_some_and(|c| {
+        c.receiver().is_none() && THOR_DSL_ANNOTATIONS.contains(&constant_id_str(&c.name()))
+    })
+}
+
+/// A single statement, or (recursively) anything reachable through an
+/// `if`/`unless` branch it opens — an includer guard around a
+/// method-generating call is exactly as effective as one written
+/// directly in the block.
+fn statement_has_unmodeled_call(stmt: &Node<'_>) -> bool {
+    if stmt.as_def_node().is_some() {
+        return false;
+    }
+    if let Some(call) = stmt.as_call_node() {
+        if marker(&call) {
+            return false;
+        }
+        let targets_includer = call.receiver().is_none_or(|r| r.as_self_node().is_some());
+        if !targets_includer {
+            return false;
+        }
+        return !TRACKED_DECLARATIONS.contains(&constant_id_str(&call.name()));
+    }
+    branch_has_unmodeled_call(stmt)
+}
+
+/// Descend into an `if`/`unless` node's branches (both arms, and an
+/// elsif chain) looking for [`statement_has_unmodeled_call`]. Anything
+/// that is not itself an `if`/`unless` node is not a branch at all —
+/// `false`, same as `statement_has_unmodeled_call`'s own fallthrough.
+fn branch_has_unmodeled_call(node: &Node<'_>) -> bool {
+    let body_has = |body: Option<ruby_prism::StatementsNode<'_>>| {
+        body.is_some_and(|s| flatten_statements(s.as_node()).iter().any(statement_has_unmodeled_call))
+    };
+    if let Some(branch) = node.as_if_node() {
+        body_has(branch.statements())
+            || branch.subsequent().is_some_and(|sub| {
+                if let Some(else_node) = sub.as_else_node() {
+                    body_has(else_node.statements())
+                } else {
+                    // `elsif` — another `IfNode`, chained via `subsequent`.
+                    branch_has_unmodeled_call(&sub)
+                }
+            })
+    } else if let Some(branch) = node.as_unless_node() {
+        body_has(branch.statements())
+            || branch.else_clause().is_some_and(|clause| body_has(clause.statements()))
+    } else {
+        false
+    }
 }
 
 impl Visibility {
@@ -93,6 +219,18 @@ impl Visibility {
         file: &str,
         module_owner: Option<&ClassId>,
     ) -> IngestResult<Self> {
+        let out = Self::resolve_carrying_inherited(body, file, module_owner)?;
+        match out.inherited.first() {
+            Some((_, name, _)) => Err(Self::undefined(file, name)),
+            None => Ok(out),
+        }
+    }
+
+    pub(super) fn resolve_carrying_inherited(
+        body: Option<&Node<'_>>,
+        file: &str,
+        module_owner: Option<&ClassId>,
+    ) -> IngestResult<Self> {
         let mut out = Self::default();
         if let Some(body) = body {
             let Some(statements) = body.as_statements_node() else {
@@ -103,7 +241,33 @@ impl Visibility {
             };
             out.walk(Some(statements.as_node()), false, file, module_owner)?;
         }
+        // Ruby raises NameError at the marker for a later `def` or one only on the other side, so those are no inherited method.
+        if let Some((_, name, _)) = out.inherited.iter().find(|(class_side, name, _)| {
+            out.known.contains_key(&(*class_side, name.clone())) || out.known.contains_key(&(!*class_side, name.clone()))
+        }) {
+            return Err(Self::undefined(file, name));
+        }
         Ok(out)
+    }
+
+    // Not dropped with the nested scope that wrote it: `class << self; private :recent; end` has no body statement to carry it.
+    pub(super) fn uncarried_inherited(&self, carried: &std::collections::HashSet<usize>, file: &str) -> IngestResult<()> {
+        match self.inherited.iter().find(|(_, _, at)| !carried.contains(at)) {
+            Some((_, name, _)) => Err(Self::undefined(file, name)),
+            None => Ok(()),
+        }
+    }
+
+    pub(super) fn names_inherited(&self, statement: &Node<'_>) -> bool {
+        let offset = statement.location().start_offset();
+        self.inherited.iter().any(|(_, _, at)| *at == offset)
+    }
+
+    fn undefined(file: &str, name: &str) -> IngestError {
+        Self::unsupported(
+            file,
+            format!("visibility change for `{name}` requires an already defined local method (not forward or inherited)"),
+        )
     }
 
     /// `private_class_method` / `public_class_method` named this method
@@ -190,15 +354,12 @@ impl Visibility {
         class_side: bool,
         visibility: MethodVisibility,
         file: &str,
+        statement: usize,
     ) -> IngestResult<()> {
         let key = (class_side, name.clone());
         let Some(positions) = self.known.get(&key) else {
-            return Err(Self::unsupported(
-                file,
-                format!(
-                    "visibility change for `{name}` requires an already defined local method (not forward or inherited)"
-                ),
-            ));
+            self.inherited.push((class_side, name, statement));
+            return Ok(());
         };
         let [position] = positions.as_slice() else {
             return Err(Self::unsupported(
@@ -214,9 +375,54 @@ impl Visibility {
     fn walk_carrier(&mut self, body: Option<Node<'_>>, file: &str) -> IngestResult<()> {
         // A Concern's ClassMethods module is NOT the concern's own singleton
         // class. Their methods only share a bucket after flattening.
-        let mut carrier = Self::default();
+        let mut carrier = Self { carrier: true, ..Self::default() };
         carrier.walk(body, true, file, None)?;
+        if let Some((_, name, _)) = carrier.inherited.first() {
+            return Err(Self::undefined(file, name));
+        }
         self.values.extend(carrier.values);
+        Ok(())
+    }
+
+    /// `included do … end` runs under `class_eval` on the includer: its
+    /// defs land on the includer's INSTANCE side, not a singleton of
+    /// their own. Walk it as its own lexical scope that starts public —
+    /// the same bucket-isolation `walk_carrier` gives `class_methods do
+    /// … end`, just on the instance side (`class_side: false`).
+    ///
+    /// Narrowly scoped to defs and the markers themselves (plus the
+    /// declaration helpers `walk` already tracks — `attr_*`,
+    /// `alias_method`, nested `class_methods`/`included`/
+    /// `module_function`): a marker's effect on anything else this body
+    /// might generate a method from (`delegate :email, to: :author`,
+    /// `scope`, `has_many`, an arbitrary DSL) is NOT modeled, and
+    /// silently proceeding would risk shipping that method PUBLIC where
+    /// the source marks it private — `attachment_model_lowering.rs`'s
+    /// `a_private_delegate_in_an_included_block_is_rejected_at_ingest`
+    /// is exactly that case. So a marker coexisting with any other
+    /// receiverless, non-marker call keeps the same blanket rejection
+    /// this whole block used to raise for ANY marker, same as a named
+    /// marker (`private :helper`) naming something NOT defined within
+    /// this same `included do` (the one-sided-accessor shape a
+    /// separate, already-deferred gap owns) — any error here folds back
+    /// to that one message rather than surfacing a new, more specific
+    /// one that would read as a second construct now being claimed
+    /// supported.
+    fn walk_included(&mut self, body: Option<Node<'_>>, file: &str) -> IngestResult<()> {
+        if body.as_ref().is_some_and(marker_mixed_with_unmodeled_call) {
+            return Err(Self::unsupported(
+                file,
+                "conditional or dynamic visibility declarations are not modeled",
+            ));
+        }
+        let mut included = Self::default();
+        included
+            .walk(body, false, file, None)
+            .map_err(|_| Self::unsupported(file, "conditional or dynamic visibility declarations are not modeled"))?;
+        if !included.inherited.is_empty() {
+            return Err(Self::unsupported(file, "conditional or dynamic visibility declarations are not modeled"));
+        }
+        self.values.extend(included.values);
         Ok(())
     }
 
@@ -266,6 +472,9 @@ impl Visibility {
     }
 
     fn reject_dynamic_declarations(node: &Node<'_>, file: &str) -> IngestResult<()> {
+        if console_only(node) {
+            return Ok(());
+        }
         struct Declarations {
             invalid: bool,
             reject_defs: bool,
@@ -307,9 +516,18 @@ impl Visibility {
                 self.invalid |= self.reject_defs;
             }
         }
+        // A def inside a call's block belongs to that block's owner, not
+        // to this class: a DSL block (has_many extensions), or the class
+        // a constant is assigned from — `ContentKey = Data.define(:digest)
+        // do def cache_key … end end` (campfire's FragmentCache),
+        // `Struct.new(…) do … end`.
+        let owns_defs = node.as_call_node().is_some()
+            || node
+                .as_constant_write_node()
+                .is_some_and(|w| w.value().as_call_node().is_some_and(|c| c.block().is_some()));
         let mut declarations = Declarations {
             invalid: false,
-            reject_defs: node.as_call_node().is_none(),
+            reject_defs: !owns_defs,
         };
         ruby_prism::Visit::visit(&mut declarations, node);
         if declarations.invalid {
@@ -321,6 +539,9 @@ impl Visibility {
         Ok(())
     }
 
+    /// Resolve static method visibility within one lexical body, starting public.
+    /// Nested classes and recognized Data factory blocks have separate declaration
+    /// passes, so their methods and visibility markers do not affect this scope.
     fn walk(
         &mut self,
         body: Option<Node<'_>>,
@@ -392,7 +613,7 @@ impl Visibility {
                         let class_copy = named_class
                             && !self.known.contains_key(&(false, name.clone()))
                             && self.known.contains_key(&(true, name.clone()));
-                        self.change(name, class_side || named_class || class_copy, visibility, file)?;
+                        self.change(name, class_side || named_class || class_copy, visibility, file, offset)?;
                     }
                     continue;
                 } else {
@@ -466,6 +687,16 @@ impl Visibility {
                 continue;
             }
             if let Some(sc) = node.as_singleton_class_node() {
+                if self.carrier && class_side && sc.expression().as_self_node().is_some() {
+                    // Not the includers' class side: the carrier module's
+                    // own singleton, whose hooks Ruby runs when
+                    // `ActiveSupport::Concern` extends an includer with it.
+                    return Err(Self::unsupported(
+                        file,
+                        "`class << self` in a concern's `ClassMethods` defines the carrier module's own \
+                         singleton methods (such as an `extended` hook), which are not modeled",
+                    ));
+                }
                 if class_side || sc.expression().as_self_node().is_none() {
                     return Err(Self::unsupported(
                         file,
@@ -479,6 +710,9 @@ impl Visibility {
             if node.as_class_node().is_some() {
                 continue;
             }
+            if super::data_factory::declaration(node).is_some() {
+                continue;
+            }
             if let Some(module) = node.as_module_node() {
                 if module_name_path(&module).as_deref() == Some(&["ClassMethods".to_string()]) {
                     self.walk_carrier(module.body(), file)?;
@@ -486,6 +720,14 @@ impl Visibility {
                 continue;
             }
             let Some(call) = node.as_call_node() else {
+                // `X = Data.define(:a) do def … end` defines X's methods,
+                // not this body's; `library_class::data_block_classes`
+                // gives them a class of their own.
+                if node.as_constant_write_node().is_some_and(|cw| {
+                    super::library_class::data_define_block(&cw.value()).is_some()
+                }) {
+                    continue;
+                }
                 // A `def` is handled above. Anything else — an `if` that
                 // wraps a definition, a modifier that does not — still
                 // has to be rejected when it hides a marker or a `def`.
@@ -548,6 +790,18 @@ impl Visibility {
                 if let Some(block) = call.block().and_then(|b| b.as_block_node()) {
                     self.walk_carrier(block.body(), file)?;
                 }
+            } else if name == "included" {
+                // The accessor-shape special case above already handled
+                // (and skipped) its candidate; any other `included do …
+                // end` is a plain lexical scope on the includer's
+                // instance side. A bodyless `included` (no block) has
+                // nothing to walk and falls back to the dynamic-marker
+                // check, same as any other unrecognized call.
+                if let Some(block) = call.block().and_then(|b| b.as_block_node()) {
+                    self.walk_included(block.body(), file)?;
+                } else {
+                    Self::reject_dynamic_declarations(node, file)?;
+                }
             } else if matches!(name, "attr_reader" | "attr_writer" | "attr_accessor") {
                 if let Some(args) = call.arguments() {
                     for arg in args.arguments().iter() {
@@ -583,4 +837,21 @@ impl Visibility {
         }
         Ok(())
     }
+}
+
+/// `if defined?(Rails::Console) … end` with no `else`: what it declares
+/// exists only under `rails console`, never in the app a target emits
+/// (a server or its tests), so the branch declares nothing there.
+pub(super) fn console_only(node: &Node<'_>) -> bool {
+    let Some(branch) = node.as_if_node() else { return false };
+    if branch.subsequent().is_some() {
+        return false;
+    }
+    let Some(defined) = branch.predicate().as_defined_node() else { return false };
+    let Some(path) = defined.value().as_constant_path_node() else { return false };
+    let parent_is_rails = path.parent().is_some_and(|p| {
+        p.as_constant_read_node().is_some_and(|c| c.name().as_slice() == b"Rails")
+            || p.as_constant_path_node().is_some_and(|cp| cp.parent().is_none() && cp.name().is_some_and(|n| n.as_slice() == b"Rails"))
+    });
+    parent_is_rails && path.name().is_some_and(|n| n.as_slice() == b"Console")
 }

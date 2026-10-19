@@ -69,7 +69,7 @@ fn module_singleton_shape() {
     // gives in real ingest.
     let adapter_ty = Ty::Class {
         id: ClassId(Symbol::from("AdapterInterface")),
-        args: vec![],
+        args: vec![].into(),
     };
     let reader = MethodDef {
         visibility: roundhouse::dialect::MethodVisibility::Public,
@@ -84,9 +84,9 @@ fn module_singleton_shape() {
             ExprNode::Ivar { name: Symbol::from("adapter") },
         ),
         signature: Some(Ty::Fn {
-            params: vec![],
+            params: vec![].into(),
             block: None,
-            ret: Box::new(adapter_ty.clone()),
+            ret: std::sync::Arc::new(adapter_ty.clone()),
             effects: EffectSet::default(),
         }),
         effects: EffectSet::default(),
@@ -121,11 +121,11 @@ fn module_singleton_shape() {
         signature: Some(Ty::Fn {
             params: vec![TyParam {
                 name: Symbol::from("value"),
-                ty: adapter_ty.clone(),
+                ty: adapter_ty.clone().into(),
                 kind: ParamKind::Required,
-            }],
+            }].into(),
             block: None,
-            ret: Box::new(adapter_ty.clone()),
+            ret: std::sync::Arc::new(adapter_ty.clone()),
             effects: EffectSet::default(),
         }),
         effects: EffectSet::default(),
@@ -141,6 +141,7 @@ fn module_singleton_shape() {
         parent: None,
         parent_span: Default::default(),
         includes: vec![],
+        include_spans: Vec::new(),
         methods: vec![reader, writer],
         nullable_columns: Vec::new(),
         origin: None,
@@ -237,7 +238,7 @@ fn hand_written_runtime_present() {
 fn module_singleton_does_not_fire_on_plain_class() {
     let attr_ty = Ty::Class {
         id: ClassId(Symbol::from("AdapterInterface")),
-        args: vec![],
+        args: vec![].into(),
     };
     let reader = MethodDef {
         visibility: roundhouse::dialect::MethodVisibility::Public,
@@ -252,9 +253,9 @@ fn module_singleton_does_not_fire_on_plain_class() {
             ExprNode::Ivar { name: Symbol::from("adapter") },
         ),
         signature: Some(Ty::Fn {
-            params: vec![],
+            params: vec![].into(),
             block: None,
-            ret: Box::new(attr_ty.clone()),
+            ret: std::sync::Arc::new(attr_ty.clone()),
             effects: EffectSet::default(),
         }),
         effects: EffectSet::default(),
@@ -270,6 +271,7 @@ fn module_singleton_does_not_fire_on_plain_class() {
         parent: None,
         parent_span: Default::default(),
         includes: vec![],
+        include_spans: Vec::new(),
         methods: vec![reader],
         nullable_columns: Vec::new(),
         origin: None,
@@ -338,11 +340,11 @@ fn raise_panic_peephole() {
         signature: Some(Ty::Fn {
             params: vec![TyParam {
                 name: Symbol::from("msg"),
-                ty: Ty::Str,
+                ty: Ty::Str.into(),
                 kind: ParamKind::Required,
-            }],
+            }].into(),
             block: None,
-            ret: Box::new(Ty::Nil),
+            ret: std::sync::Arc::new(Ty::Nil),
             effects: EffectSet::default(),
         }),
         effects: EffectSet::default(),
@@ -379,11 +381,11 @@ fn raise_panic_peephole() {
         signature: Some(Ty::Fn {
             params: vec![TyParam {
                 name: Symbol::from("msg"),
-                ty: Ty::Str,
+                ty: Ty::Str.into(),
                 kind: ParamKind::Required,
-            }],
+            }].into(),
             block: None,
-            ret: Box::new(Ty::Nil),
+            ret: std::sync::Arc::new(Ty::Nil),
             effects: EffectSet::default(),
         }),
         effects: EffectSet::default(),
@@ -399,6 +401,7 @@ fn raise_panic_peephole() {
         parent: None,
         parent_span: Default::default(),
         includes: vec![],
+        include_spans: Vec::new(),
         methods: vec![fail_method, abort_method],
         nullable_columns: Vec::new(),
         origin: None,
@@ -435,18 +438,13 @@ fn raise_panic_peephole() {
     );
 }
 
-/// `Time.now.utc.iso8601` chain — used by `ActiveRecord::Base#fill_timestamps`
-/// to stamp `created_at` / `updated_at` with a UTC ISO-8601 string. Ruby
-/// chains three Sends; Go's stdlib provides no element-wise analog
-/// (`time.Time` has no `.utc` method, formatting goes through
-/// `Format(layout)`), so the outermost-Send peephole rewrites the whole
-/// chain to `time.Now().UTC().Format(time.RFC3339)` in one shot. The
-/// `time.RFC3339` literal triggers `time` import injection via
+/// Lowered `Time.utc.to_rfc3339` — the IR form of the old
+/// `Time.now.utc.iso8601` clock. Go has no element-wise analog, so the
+/// outermost send becomes `time.Now().UTC().Format(time.RFC3339)`.
+/// The `time.RFC3339` literal triggers `time` import injection via
 /// `needed_imports`.
 #[test]
 fn time_now_utc_iso8601_peephole() {
-    // Body: `Time.now.utc.iso8601` — outermost Send is `.iso8601`
-    // on `.utc` on `.now` on `Const(Time)`.
     let chain = Expr::new(
         Span::synthetic(),
         ExprNode::Send {
@@ -455,16 +453,7 @@ fn time_now_utc_iso8601_peephole() {
                 ExprNode::Send {
                     recv: Some(Expr::new(
                         Span::synthetic(),
-                        ExprNode::Send {
-                            recv: Some(Expr::new(
-                                Span::synthetic(),
-                                ExprNode::Const { path: vec![Symbol::from("Time")] },
-                            )),
-                            method: Symbol::from("now"),
-                            args: vec![],
-                            block: None,
-                            parenthesized: false,
-                        },
+                        ExprNode::Const { path: vec![Symbol::from("Time")] },
                     )),
                     method: Symbol::from("utc"),
                     args: vec![],
@@ -472,7 +461,7 @@ fn time_now_utc_iso8601_peephole() {
                     parenthesized: false,
                 },
             )),
-            method: Symbol::from("iso8601"),
+            method: Symbol::from("to_rfc3339"),
             args: vec![],
             block: None,
             parenthesized: false,
@@ -488,9 +477,9 @@ fn time_now_utc_iso8601_peephole() {
         params: vec![],
         body: chain,
         signature: Some(Ty::Fn {
-            params: vec![],
+            params: vec![].into(),
             block: None,
-            ret: Box::new(Ty::Str),
+            ret: std::sync::Arc::new(Ty::Str),
             effects: EffectSet::default(),
         }),
         effects: EffectSet::default(),
@@ -506,6 +495,7 @@ fn time_now_utc_iso8601_peephole() {
         parent: None,
         parent_span: Default::default(),
         includes: vec![],
+        include_spans: Vec::new(),
         methods: vec![stamp],
         nullable_columns: Vec::new(),
         origin: None,
@@ -520,7 +510,7 @@ fn time_now_utc_iso8601_peephole() {
     // exact rewrite so a partial-chain change in the future is loud.
     assert!(
         emitted.contains("time.Now().UTC().Format(time.RFC3339)"),
-        "Time.now.utc.iso8601 chain missing Go rewrite:\n{emitted}",
+        "Time.utc.to_rfc3339 missing Go rewrite:\n{emitted}",
     );
     // Regression guard: the generic Const-recv class-method fallback
     // would otherwise emit `Time_now()` (an undefined bare function).
@@ -547,7 +537,7 @@ fn include_array_recv_routes_to_slices_contains() {
         Span::synthetic(),
         ExprNode::Var { id: VarId(0), name: Symbol::from("cols") },
     );
-    cols_var.ty = Some(Ty::Array { elem: Box::new(Ty::Sym) });
+    cols_var.ty = Some(Ty::Array { elem: std::sync::Arc::new(Ty::Sym) });
     let body = Expr::new(
         Span::synthetic(),
         ExprNode::Send {
@@ -573,11 +563,11 @@ fn include_array_recv_routes_to_slices_contains() {
         signature: Some(Ty::Fn {
             params: vec![TyParam {
                 name: Symbol::from("cols"),
-                ty: Ty::Array { elem: Box::new(Ty::Sym) },
+                ty: Ty::Array { elem: std::sync::Arc::new(Ty::Sym) }.into(),
                 kind: ParamKind::Required,
-            }],
+            }].into(),
             block: None,
-            ret: Box::new(Ty::Bool),
+            ret: std::sync::Arc::new(Ty::Bool),
             effects: EffectSet::default(),
         }),
         effects: EffectSet::default(),
@@ -593,6 +583,7 @@ fn include_array_recv_routes_to_slices_contains() {
         parent: None,
         parent_span: Default::default(),
         includes: vec![],
+        include_spans: Vec::new(),
         methods: vec![probe],
         nullable_columns: Vec::new(),
         origin: None,
@@ -654,11 +645,11 @@ fn negative_index_rewrites_to_len_minus_n() {
         signature: Some(Ty::Fn {
             params: vec![TyParam {
                 name: Symbol::from("records"),
-                ty: Ty::Array { elem: Box::new(Ty::Str) },
+                ty: Ty::Array { elem: std::sync::Arc::new(Ty::Str) }.into(),
                 kind: ParamKind::Required,
-            }],
+            }].into(),
             block: None,
-            ret: Box::new(Ty::Str),
+            ret: std::sync::Arc::new(Ty::Str),
             effects: EffectSet::default(),
         }),
         effects: EffectSet::default(),
@@ -674,6 +665,7 @@ fn negative_index_rewrites_to_len_minus_n() {
         parent: None,
         parent_span: Default::default(),
         includes: vec![],
+        include_spans: Vec::new(),
         methods: vec![last_method],
         nullable_columns: Vec::new(),
         origin: None,
@@ -789,9 +781,9 @@ fn class_reflection_rewrites() {
         params: vec![],
         body: class_name_chain,
         signature: Some(Ty::Fn {
-            params: vec![],
+            params: vec![].into(),
             block: None,
-            ret: Box::new(Ty::Str),
+            ret: std::sync::Arc::new(Ty::Str),
             effects: EffectSet::default(),
         }),
         effects: EffectSet::default(),
@@ -826,9 +818,9 @@ fn class_reflection_rewrites() {
         params: vec![],
         body: bare_name,
         signature: Some(Ty::Fn {
-            params: vec![],
+            params: vec![].into(),
             block: None,
-            ret: Box::new(Ty::Str),
+            ret: std::sync::Arc::new(Ty::Str),
             effects: EffectSet::default(),
         }),
         effects: EffectSet::default(),
@@ -844,6 +836,7 @@ fn class_reflection_rewrites() {
         parent: None,
         parent_span: Default::default(),
         includes: vec![],
+        include_spans: Vec::new(),
         methods: vec![lookup_cols, lookup_name, diag],
         nullable_columns: Vec::new(),
         origin: None,
@@ -917,11 +910,11 @@ fn bare_new_in_class_method_resolves_to_constructor() {
         signature: Some(Ty::Fn {
             params: vec![TyParam {
                 name: Symbol::from("attrs"),
-                ty: Ty::Untyped,
+                ty: Ty::Untyped.into(),
                 kind: ParamKind::Required,
-            }],
+            }].into(),
             block: None,
-            ret: Box::new(Ty::Class { id: ClassId(Symbol::from("Widget")), args: vec![] }),
+            ret: std::sync::Arc::new(Ty::Class { id: ClassId(Symbol::from("Widget")), args: vec![].into() }),
             effects: EffectSet::default(),
         }),
         effects: EffectSet::default(),
@@ -937,6 +930,7 @@ fn bare_new_in_class_method_resolves_to_constructor() {
         parent: None,
         parent_span: Default::default(),
         includes: vec![],
+        include_spans: Vec::new(),
         methods: vec![create],
         nullable_columns: Vec::new(),
         origin: None,
@@ -987,9 +981,9 @@ fn implicit_self_method_call_resolution() {
             ExprNode::Ivar { name: Symbol::from("status") },
         ),
         signature: Some(Ty::Fn {
-            params: vec![],
+            params: vec![].into(),
             block: None,
-            ret: Box::new(Ty::Str),
+            ret: std::sync::Arc::new(Ty::Str),
             effects: EffectSet::default(),
         }),
         effects: EffectSet::default(),
@@ -1011,9 +1005,9 @@ fn implicit_self_method_call_resolution() {
         params: vec![],
         body: Expr::new(Span::synthetic(), ExprNode::Lit { value: roundhouse::Literal::Nil }),
         signature: Some(Ty::Fn {
-            params: vec![],
+            params: vec![].into(),
             block: None,
-            ret: Box::new(Ty::Nil),
+            ret: std::sync::Arc::new(Ty::Nil),
             effects: EffectSet::default(),
         }),
         effects: EffectSet::default(),
@@ -1070,9 +1064,9 @@ fn implicit_self_method_call_resolution() {
             ExprNode::Seq { exprs: vec![s_assign, notify_call, s_return] },
         ),
         signature: Some(Ty::Fn {
-            params: vec![],
+            params: vec![].into(),
             block: None,
-            ret: Box::new(Ty::Str),
+            ret: std::sync::Arc::new(Ty::Str),
             effects: EffectSet::default(),
         }),
         effects: EffectSet::default(),
@@ -1088,6 +1082,7 @@ fn implicit_self_method_call_resolution() {
         parent: None,
         parent_span: Default::default(),
         includes: vec![],
+        include_spans: Vec::new(),
         methods: vec![status_reader, notify, tick],
         nullable_columns: Vec::new(),
         origin: None,
@@ -1139,7 +1134,7 @@ fn each_array_block_shape() {
     // real call site lands in GO_RUNTIME).
     let block = Expr::new(
         Span::synthetic(),
-        ExprNode::Lambda { rest_param: None,
+        ExprNode::Lambda { extra_params: Vec::new(), rest_param: None,
             params: vec![Symbol::from("x")],
             block_param: None,
             body: Expr::new(
@@ -1185,6 +1180,7 @@ fn each_array_block_shape() {
         parent: None,
         parent_span: Default::default(),
         includes: vec![],
+        include_spans: Vec::new(),
         methods: vec![method],
         nullable_columns: Vec::new(),
         origin: None,
@@ -1226,7 +1222,7 @@ fn each_hash_block_shape() {
     let h_param = Symbol::from("h");
     let block = Expr::new(
         Span::synthetic(),
-        ExprNode::Lambda { rest_param: None,
+        ExprNode::Lambda { extra_params: Vec::new(), rest_param: None,
             params: vec![Symbol::from("k"), Symbol::from("v")],
             block_param: None,
             body: Expr::new(
@@ -1272,6 +1268,7 @@ fn each_hash_block_shape() {
         parent: None,
         parent_span: Default::default(),
         includes: vec![],
+        include_spans: Vec::new(),
         methods: vec![method],
         nullable_columns: Vec::new(),
         origin: None,
@@ -1310,7 +1307,7 @@ fn map_array_block_shape() {
     // IIFE shape, range vars, and the append-tail wiring.
     let block = Expr::new(
         Span::synthetic(),
-        ExprNode::Lambda { rest_param: None,
+        ExprNode::Lambda { extra_params: Vec::new(), rest_param: None,
             params: vec![Symbol::from("x")],
             block_param: None,
             body: Expr::new(
@@ -1356,6 +1353,7 @@ fn map_array_block_shape() {
         parent: None,
         parent_span: Default::default(),
         includes: vec![],
+        include_spans: Vec::new(),
         methods: vec![method],
         nullable_columns: Vec::new(),
         origin: None,
@@ -1422,9 +1420,9 @@ fn empty_body_with_nonvoid_return_synthesizes_zero_value() {
         params: vec![],
         body,
         signature: Some(Ty::Fn {
-            params: vec![],
+            params: vec![].into(),
             block: None,
-            ret: Box::new(ret),
+            ret: std::sync::Arc::new(ret),
             effects: EffectSet::default(),
         }),
         effects: EffectSet::default(),
@@ -1462,6 +1460,7 @@ fn empty_body_with_nonvoid_return_synthesizes_zero_value() {
         parent: None,
         parent_span: Default::default(),
         includes: vec![],
+        include_spans: Vec::new(),
         methods: vec![m1, m2],
         nullable_columns: Vec::new(),
         origin: None,
@@ -1508,7 +1507,7 @@ fn typed_empty_literals_back_propagate() {
             Span::synthetic(),
             ExprNode::Array { elements: vec![], style: Default::default() },
         );
-        e.ty = Some(Ty::Array { elem: Box::new(elem) });
+        e.ty = Some(Ty::Array { elem: std::sync::Arc::new(elem) });
         e
     };
     // Helper: build a typed-empty Hash Expr.
@@ -1517,7 +1516,7 @@ fn typed_empty_literals_back_propagate() {
             Span::synthetic(),
             ExprNode::Hash { entries: vec![], kwargs: false },
         );
-        e.ty = Some(Ty::Hash { key: Box::new(k), value: Box::new(v) });
+        e.ty = Some(Ty::Hash { key: std::sync::Arc::new(k), value: std::sync::Arc::new(v) });
         e
     };
 
@@ -1534,9 +1533,9 @@ fn typed_empty_literals_back_propagate() {
         params: vec![],
         body: typed_array_lit(Ty::Str),
         signature: Some(Ty::Fn {
-            params: vec![],
+            params: vec![].into(),
             block: None,
-            ret: Box::new(Ty::Array { elem: Box::new(Ty::Str) }),
+            ret: std::sync::Arc::new(Ty::Array { elem: std::sync::Arc::new(Ty::Str) }),
             effects: EffectSet::default(),
         }),
         effects: EffectSet::default(),
@@ -1558,9 +1557,9 @@ fn typed_empty_literals_back_propagate() {
         params: vec![],
         body: typed_hash_lit(Ty::Str, Ty::Str),
         signature: Some(Ty::Fn {
-            params: vec![],
+            params: vec![].into(),
             block: None,
-            ret: Box::new(Ty::Hash { key: Box::new(Ty::Str), value: Box::new(Ty::Str) }),
+            ret: std::sync::Arc::new(Ty::Hash { key: std::sync::Arc::new(Ty::Str), value: std::sync::Arc::new(Ty::Str) }),
             effects: EffectSet::default(),
         }),
         effects: EffectSet::default(),
@@ -1577,6 +1576,7 @@ fn typed_empty_literals_back_propagate() {
         parent: None,
         parent_span: Default::default(),
         includes: vec![],
+        include_spans: Vec::new(),
         methods: vec![errors, lookup],
         nullable_columns: Vec::new(),
         origin: None,
@@ -1796,8 +1796,8 @@ fn nil_check_to_comma_ok_rewrites_pair() {
     // gate fires.
     let span = Span::synthetic();
     let other_ty = Ty::Hash {
-        key: Box::new(Ty::Str),
-        value: Box::new(Ty::Str),
+        key: std::sync::Arc::new(Ty::Str),
+        value: std::sync::Arc::new(Ty::Str),
     };
     let mut other_var = Expr::new(span, ExprNode::Var {
         id: VarId(0),
@@ -1867,6 +1867,7 @@ fn nil_check_to_comma_ok_rewrites_pair() {
         parent: None,
         parent_span: Default::default(),
         includes: vec![],
+        include_spans: Vec::new(),
         methods: vec![method],
         nullable_columns: Vec::new(),
         origin: None,
@@ -1903,7 +1904,7 @@ fn nil_check_to_comma_ok_skips_non_hash_receiver() {
     let span = Span::synthetic();
     // Receiver typed as a Class — should NOT match.
     let mut self_ref = Expr::new(span, ExprNode::SelfRef);
-    self_ref.ty = Some(Ty::Class { id: ClassId(Symbol::from("StubFlash")), args: vec![] });
+    self_ref.ty = Some(Ty::Class { id: ClassId(Symbol::from("StubFlash")), args: vec![].into() });
 
     let index_send = Expr::new(span, ExprNode::Send {
         recv: Some(self_ref),
@@ -1961,6 +1962,7 @@ fn nil_check_to_comma_ok_skips_non_hash_receiver() {
         parent: None,
         parent_span: Default::default(),
         includes: vec![],
+        include_spans: Vec::new(),
         methods: vec![method],
         nullable_columns: Vec::new(),
         origin: None,

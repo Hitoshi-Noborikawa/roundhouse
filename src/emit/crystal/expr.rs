@@ -186,6 +186,29 @@ fn is_empty_branch(e: &Expr) -> bool {
         || matches!(&*e.node, ExprNode::Lit { value: Literal::Nil })
 }
 
+/// A postfix `if` (`x if c`) is a syntax error as a Crystal call
+/// argument, array element, or hash value — wrap it. Mirrors
+/// `src/emit/ruby/expr.rs`.
+fn renders_as_trailing_modifier(e: &Expr) -> bool {
+    match &*e.node {
+        ExprNode::If { then_branch, else_branch, .. } => {
+            is_empty_branch(else_branch)
+                && !matches!(&*then_branch.node, ExprNode::Seq { .. })
+                && !emit_expr(then_branch).contains('\n')
+        }
+        ExprNode::RescueModifier { .. } => true,
+        _ => false,
+    }
+}
+
+fn emit_arg(e: &Expr) -> String {
+    if renders_as_trailing_modifier(e) {
+        format!("({})", emit_expr(e))
+    } else {
+        emit_expr(e)
+    }
+}
+
 /// Map Ruby stdlib type names that don't exist in Crystal to their
 /// Crystal analogs. `Integer` (abstract integer in Ruby) maps to
 /// `Int` (abstract integer in Crystal — parent of Int8…Int128).
@@ -368,7 +391,7 @@ fn emit_node(n: &ExprNode) -> String {
             }
         }
         ExprNode::Apply { fun, args, block } => {
-            let args_s: Vec<String> = args.iter().map(emit_expr).collect();
+            let args_s: Vec<String> = args.iter().map(emit_arg).collect();
             let base = format!("{}.call({})", emit_expr(fun), args_s.join(", "));
             if let Some(b) = block {
                 format!("{base} {{ {} }}", emit_expr(b))
@@ -639,6 +662,9 @@ fn emit_node(n: &ExprNode) -> String {
         ExprNode::Return { value } => {
             if matches!(&*value.node, ExprNode::Lit { value: crate::expr::Literal::Nil }) {
                 "return".to_string()
+            } else if matches!(&*value.node, ExprNode::If { .. }) {
+                // `return if ...` would parse as a modifier `if`.
+                format!("return ({})", emit_expr(value))
             } else {
                 format!("return {}", emit_expr(value))
             }
@@ -646,7 +672,7 @@ fn emit_node(n: &ExprNode) -> String {
         ExprNode::Super { args } => match args {
             None => "super".to_string(),
             Some(args) => {
-                let args_s: Vec<String> = args.iter().map(emit_expr).collect();
+                let args_s: Vec<String> = args.iter().map(emit_arg).collect();
                 format!("super({})", args_s.join(", "))
             }
         },
@@ -851,7 +877,7 @@ fn emit_array(elements: &[Expr], _style: &crate::expr::ArrayStyle) -> String {
         // sites surface a Crystal error.
         return "[] of String".to_string();
     }
-    let parts: Vec<String> = elements.iter().map(emit_expr).collect();
+    let parts: Vec<String> = elements.iter().map(emit_arg).collect();
     format!("[{}]", parts.join(", "))
 }
 
@@ -1052,7 +1078,10 @@ fn emit_hash_forced(entries: &[(Expr, Expr)]) -> String {
     let parts: Vec<String> = entries
         .iter()
         .map(|(k, v)| {
-            let v_s = emit_expr_with_form_hint_forced(v);
+            let mut v_s = emit_expr_with_form_hint_forced(v);
+            if renders_as_trailing_modifier(v) {
+                v_s = format!("({v_s})");
+            }
             if let ExprNode::Lit { value: Literal::Sym { value } } = &*k.node {
                 let name = value.as_str();
                 if is_simple_ident(name) {
@@ -1094,11 +1123,11 @@ fn emit_hash(entries: &[(Expr, Expr)], kwargs: bool) -> String {
                 if let ExprNode::Lit { value: Literal::Sym { value } } = &*k.node {
                     let name = value.as_str();
                     if is_simple_ident(name) {
-                        return format!("{name}: {}", emit_expr(v));
+                        return format!("{name}: {}", emit_arg(v));
                     }
-                    return format!("{:?}: {}", name, emit_expr(v));
+                    return format!("{:?}: {}", name, emit_arg(v));
                 }
-                format!("{} => {}", emit_expr(k), emit_expr(v))
+                format!("{} => {}", emit_expr(k), emit_arg(v))
             })
             .collect();
         return parts.join(", ");
@@ -1129,7 +1158,7 @@ fn emit_hash(entries: &[(Expr, Expr)], kwargs: bool) -> String {
                 let ExprNode::Lit { value: Literal::Sym { value } } = &*k.node else {
                     unreachable!()
                 };
-                format!("{}: {}", value.as_str(), emit_expr(v))
+                format!("{}: {}", value.as_str(), emit_arg(v))
             })
             .collect();
         return format!("{{{}}}", parts.join(", "));
@@ -1144,11 +1173,11 @@ fn emit_hash(entries: &[(Expr, Expr)], kwargs: bool) -> String {
                 // use the bare form (`:foo`). Same convention Ruby
                 // and Crystal share.
                 if is_simple_ident(name) {
-                    return format!(":{name} => {}", emit_expr(v));
+                    return format!(":{name} => {}", emit_arg(v));
                 }
-                return format!(":{name:?} => {}", emit_expr(v));
+                return format!(":{name:?} => {}", emit_arg(v));
             }
-            format!("{} => {}", emit_expr(k), emit_expr(v))
+            format!("{} => {}", emit_expr(k), emit_arg(v))
         })
         .collect();
     format!("{{ {} }}", parts.join(", "))
@@ -1177,6 +1206,82 @@ fn is_simple_ident(s: &str) -> bool {
     true
 }
 
+fn peeled_ty(e: &Expr) -> Option<&crate::ty::Ty> {
+    e.ty.as_ref().map(|t| t.peel_nilable())
+}
+
+/// Crystal `Reference` (classes, `String`, `Array`, `Hash`). Structs
+/// (`Int64`, `Float64`, `Bool`, `Symbol`, `Time`, `Tuple`, `NamedTuple`)
+/// are not.
+fn crystal_reference(ty: &crate::ty::Ty) -> bool {
+    use crate::ty::Ty;
+    match ty {
+        Ty::Str | Ty::Array { .. } | Ty::Hash { .. } => true,
+        Ty::Class { id, .. } => !matches!(
+            id.0.as_str(),
+            "Integer"
+                | "Float"
+                | "Numeric"
+                | "TrueClass"
+                | "FalseClass"
+                | "NilClass"
+                | "Symbol"
+                | "Time"
+                | "Date"
+                | "Rational"
+                | "Complex"
+        ),
+        _ => false,
+    }
+}
+
+/// A Crystal struct. `same?` is not defined on these. `Nil` is included
+/// so a nil receiver does not become `nil.same?`; `Reference#same?`
+/// still accepts a nil argument, which the call site handles first.
+fn crystal_struct(ty: &crate::ty::Ty) -> bool {
+    use crate::ty::Ty;
+    match ty {
+        Ty::Int | Ty::Float | Ty::Bool | Ty::Sym | Ty::Nil | Ty::Time | Ty::Date
+        | Ty::Tuple { .. }
+        | Ty::Record { .. } => true,
+        Ty::Class { id, .. } => matches!(
+            id.0.as_str(),
+            "Integer"
+                | "Float"
+                | "Numeric"
+                | "TrueClass"
+                | "FalseClass"
+                | "NilClass"
+                | "Symbol"
+                | "Time"
+                | "Date"
+                | "Rational"
+                | "Complex"
+        ),
+        _ => false,
+    }
+}
+
+/// Ruby immediates, whose `equal?` is the same predicate as `==`
+/// against another value of that kind.
+fn immediate_kind(ty: &crate::ty::Ty) -> Option<&'static str> {
+    use crate::ty::Ty;
+    match ty {
+        Ty::Int => Some("int"),
+        Ty::Bool => Some("bool"),
+        Ty::Sym => Some("sym"),
+        Ty::Nil => Some("nil"),
+        Ty::Class { id, .. } => match id.0.as_str() {
+            "Integer" => Some("int"),
+            "TrueClass" | "FalseClass" => Some("bool"),
+            "Symbol" => Some("sym"),
+            "NilClass" => Some("nil"),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
 pub(super) fn emit_send_base(
     recv: Option<&Expr>,
     method: &Symbol,
@@ -1185,12 +1290,18 @@ pub(super) fn emit_send_base(
 ) -> String {
     let args_s: Vec<String> = args
         .iter()
-        .map(|a| emit_expr_with_form_hint(a, force_hash_form_for_arg(recv, method)))
+        .map(|a| {
+            let s = emit_expr_with_form_hint(a, force_hash_form_for_arg(recv, method));
+            if renders_as_trailing_modifier(a) {
+                format!("({s})")
+            } else {
+                s
+            }
+        })
         .collect();
-    // Ruby → Crystal method-name translations. Crystal stdlib
-    // collections (Array, String, Hash) use `size` not `length`;
-    // Ruby has both as aliases. Translate at the call site so
-    // emitted code is Crystal-idiomatic.
+    // Ruby → Crystal method-name translations. `length` → `size`
+    // (Array, String, and Hash) is the string kernel's Crystal
+    // spelling, applied by name below.
     // Ruby's `raise Klass, "msg"` is a 2-arg form that Crystal doesn't
     // accept (Crystal's `raise` is single-arg: an Exception or a
     // String). Translate `raise X, "msg"` to `raise X.new("msg")`
@@ -1212,6 +1323,48 @@ pub(super) fn emit_send_base(
             return format!("!({})", emit_expr(r));
         }
     }
+    // `equal?` is object identity. Crystal's predicate is
+    // `Reference#same?(other)` (the argument may also be `Nil`).
+    // Structs such as `Int64` have no `same?`. Two immediates of the
+    // same kind use `==`, which is that identity. Anything else is
+    // unsupported: a value-type `equal?` is not `==` (a float compared
+    // with itself by value is not the same object).
+    if method.as_str() == "equal?" && args.len() == 1 {
+        if let Some(r) = recv {
+            let recv_ty = peeled_ty(r);
+            let arg_ty = peeled_ty(&args[0]);
+            let recv_s = emit_expr(r);
+            let recv_s = if needs_recv_parens(r) { format!("({recv_s})") } else { recv_s };
+            if recv_ty.is_some_and(crystal_reference)
+                && arg_ty.is_some_and(|t| crystal_reference(t) || matches!(t, crate::ty::Ty::Nil))
+            {
+                return format!("{recv_s}.same?({})", args_s[0]);
+            }
+            if let (Some(rk), Some(ak)) = (recv_ty.and_then(immediate_kind), arg_ty.and_then(immediate_kind)) {
+                if rk == ak {
+                    return format!("({recv_s} == {})", args_s[0]);
+                }
+            }
+            // `nil` is one object. `nil.equal?(x)` is `x` being nil,
+            // which Crystal's `==` already is. `nil.same?` does not exist.
+            if recv_ty.is_some_and(|t| immediate_kind(t) == Some("nil")) {
+                return format!("({recv_s} == {})", args_s[0]);
+            }
+            if recv_ty.is_some_and(crystal_struct) || arg_ty.is_some_and(crystal_struct) {
+                return crate::emit::diagnostics::report_unsupported(
+                    r.span,
+                    "crystal",
+                    "equal?",
+                    "Crystal same? is reference identity; a value-type operand has no same?",
+                );
+            }
+            // Untyped or absent. The strict targets' class and Hash
+            // identity calls (assert_same, the hydrate sentinel) land
+            // here when a local has no IR type, and Crystal types that
+            // variable as a Reference. A proven struct took the arm above.
+            return format!("{recv_s}.same?({})", args_s[0]);
+        }
+    }
     // Cross-target nil-safe Hash read: Ruby `h.fetch(key, nil)` returns
     // the value or nil for missing key. Crystal's `Hash#fetch(K, V)`
     // works for Hash recv — but the same source file may be reached
@@ -1224,6 +1377,12 @@ pub(super) fn emit_send_base(
     // default arg is the literal `nil` so the source intent is
     // unambiguous; other defaults flow through the standard
     // `recv.fetch(K, default)` emit.
+    if method.as_str() == "pop" && args.is_empty() {
+        if let Some(r) = recv {
+            let recv_s = emit_expr(r);
+            return format!("{recv_s}.pop");
+        }
+    }
     if method.as_str() == "fetch" && args.len() == 2 {
         if let ExprNode::Lit { value: Literal::Nil } = &*args[1].node {
             if let Some(r) = recv {
@@ -1245,35 +1404,6 @@ pub(super) fn emit_send_base(
                     return r#""""#.to_string();
                 }
             }
-        }
-    }
-    // Ruby `Time` stdlib → Crystal `Time` stdlib bridges.
-    //
-    // - `Time.now.utc` (Ruby: current time, then convert to UTC) →
-    //   `Time.utc` (Crystal: class method returning current UTC time).
-    //   Detected as the outer `.utc` Send whose receiver is `Time.now`.
-    // - `<expr>.iso8601` (Ruby: ISO-8601 string) → `<expr>.to_rfc3339`
-    //   (Crystal's spelling of the same format).
-    // Both come from `runtime/ruby/active_record/base.rb`'s
-    // `fill_timestamps` chain `Time.now.utc.iso8601`. Spinel/Ruby pass
-    // through; only Crystal needs the rewrite since its stdlib uses
-    // different method names.
-    if method.as_str() == "utc" && args.is_empty() {
-        if let Some(r) = recv {
-            if let ExprNode::Send { recv: Some(inner), method: inner_m, args: inner_args, .. } = &*r.node {
-                if inner_m.as_str() == "now" && inner_args.is_empty() {
-                    if let ExprNode::Const { path } = &*inner.node {
-                        if path.last().map(|s| s.as_str()) == Some("Time") {
-                            return "Time.utc".to_string();
-                        }
-                    }
-                }
-            }
-        }
-    }
-    if method.as_str() == "iso8601" && args.is_empty() {
-        if let Some(r) = recv {
-            return format!("{}.to_rfc3339", emit_expr(r));
         }
     }
     // Ruby `JSON.generate(obj)` → Crystal `obj.to_json`. Both produce
@@ -1299,7 +1429,6 @@ pub(super) fn emit_send_base(
         Some(r) if matches!(&*r.node, ExprNode::Const { path } if path.last().map(|s| s.as_str()) == Some("Base64"))
     );
     let m = match method.as_str() {
-        "length" => "size",
         // Ruby `Array#count` (no args) → element count. Crystal's
         // `Enumerable#count` requires either an item to match or a
         // block — `arr.count` (no args) doesn't compile. Rewrite to
@@ -1320,13 +1449,6 @@ pub(super) fn emit_send_base(
         // `key?` explicitly as part of their API, so skip the
         // rewrite when the receiver is one of those.
         "key?" if !is_framework_hash_recv(recv) => "has_key?",
-        // Crystal: starts_with? / ends_with? / includes? (note plural).
-        // `include?` is method-only — the bare `include` Ruby keyword
-        // for module mixin lowers to `LibraryClass::includes`, not
-        // a Send, so it's never seen here.
-        "start_with?" => "starts_with?",
-        "end_with?" => "ends_with?",
-        "include?" => "includes?",
         // Ruby `Regexp#match?(str)` → Crystal `Regex#matches?(str)`
         // (note plural). Both predicate-only forms — return Bool.
         // No receiver-type narrowing here: the only Ruby class with
@@ -1340,7 +1462,13 @@ pub(super) fn emit_send_base(
         "decode64" if base64_recv => "decode",
         "urlsafe_encode64" if base64_recv => "urlsafe_encode",
         "urlsafe_decode64" if base64_recv => "urlsafe_decode",
-        other => other,
+        // String-kernel renames (`length` → `size`, `include?` →
+        // `includes?`, `start_with?` → `starts_with?`, `end_with?` →
+        // `ends_with?`) and every kernel name Crystal already spelled
+        // the same way. The old match applied these to every receiver,
+        // so the lookup is by name. `include` the mixin keyword is not
+        // a Send.
+        name => crate::catalog::string_kernel::crystal_name(name).unwrap_or(name),
     };
     // Ruby's `String#to_sym` dynamically creates Symbols; Crystal
     // doesn't allow runtime Symbol creation. Drop the call entirely
@@ -1526,6 +1654,11 @@ pub(super) fn emit_send_base(
                 // `return i` where `i = hay.size - n` was Int32.
                 if method == "size" {
                     format!("{recv_s}.{method}.to_i64")
+                } else if method == "to_i"
+                    && matches!(r.ty.as_ref(), Some(Ty::Str | Ty::Float))
+                {
+                    // `String#to_i` / `Float64#to_i` are `Int32` too.
+                    format!("{recv_s}.to_i64")
                 } else {
                     format!("{recv_s}.{method}")
                 }
@@ -1796,5 +1929,66 @@ fn emit_pattern(p: &Pattern) -> String {
             }
             format!("{{ {} }}", parts.join(", "))
         }
+    }
+}
+
+#[cfg(test)]
+mod equal_identity_tests {
+    use super::*;
+    use crate::expr::{Expr, ExprNode};
+    use crate::ident::{Symbol, VarId};
+    use crate::span::Span;
+
+    use crate::ty::Ty;
+
+    fn var(name: &str, ty: Option<Ty>) -> Expr {
+        let mut e = Expr::new(
+            Span::synthetic(),
+            ExprNode::Var { id: VarId(0), name: Symbol::from(name) },
+        );
+        e.ty = ty;
+        e
+    }
+
+    fn class(name: &str) -> Ty {
+        Ty::Class { id: crate::ident::ClassId(Symbol::from(name)), args: vec![].into() }
+    }
+
+    fn send(recv: Expr, arg: Expr) -> Expr {
+        Expr::new(
+            Span::synthetic(),
+            ExprNode::Send {
+                recv: Some(recv),
+                method: Symbol::from("equal?"),
+                args: vec![arg],
+                block: None,
+                parenthesized: true,
+            },
+        )
+    }
+
+    #[test]
+    fn equal_on_a_class_is_same() {
+        let out = emit_expr(&send(var("store", Some(class("ActionController::HeaderStore"))), var("result", Some(class("ActionController::HeaderStore")))));
+        assert_eq!(out, "store.same?(result)");
+    }
+
+    #[test]
+    fn equal_on_integers_is_value_identity() {
+        let out = emit_expr(&send(var("a", Some(Ty::Int)), var("b", Some(Ty::Int))));
+        assert_eq!(out, "(a == b)");
+    }
+
+    #[test]
+    fn equal_without_a_type_stays_same() {
+        let out = emit_expr(&send(var("store", None), var("result", None)));
+        assert_eq!(out, "store.same?(result)");
+    }
+
+    #[test]
+    fn equal_on_a_float_is_unsupported() {
+        let out = emit_expr(&send(var("a", Some(Ty::Float)), var("b", Some(Ty::Float))));
+        assert!(!out.contains("same?"), "{out}");
+        assert!(out.contains("equal?"), "{out}");
     }
 }

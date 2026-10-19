@@ -242,7 +242,7 @@ pub(super) fn synthesize_process_action(
                 recv: None,
                 method: f.target.clone(),
                 args: vec![],
-                block: Some(syn(ExprNode::Lambda {
+                block: Some(syn(ExprNode::Lambda { extra_params: Vec::new(),
                     params: vec![],
                     rest_param: None,
                     block_param: None,
@@ -291,6 +291,14 @@ pub(super) fn synthesize_process_action(
                 PreambleStmt::Lead { body } => body.clone(),
             });
         }
+        // Rails writes the CSP header in middleware, after the
+        // controller — including an around_action that served a cached
+        // page and did not yield. Only a chain that narrowed (or
+        // consulted) `content_security_policy` pays for the call;
+        // `write_header` no-ops when the request has no policy.
+        if chain_mentions_csp(preamble, wraps) {
+            stmts.push(csp_header_stmt());
+        }
     }
 
     let mut body = match stmts.len() {
@@ -307,17 +315,19 @@ pub(super) fn synthesize_process_action(
     // source order, so the clauses are emitted reversed.
     if !rescues.is_empty() {
         let exc = Symbol::from("__rescued");
+        let mut clauses: Vec<RescueClause> = rescues
+            .iter()
+            .rev()
+            .map(|h| RescueClause {
+                classes: h.classes.clone(),
+                binding: Some(exc.clone()),
+                body: h.body.clone(),
+            })
+            .collect();
+        clauses.extend(cause_fallback_clause(rescues, &exc));
         body = syn(ExprNode::BeginRescue {
             body,
-            rescues: rescues
-                .iter()
-                .rev()
-                .map(|h| RescueClause {
-                    classes: h.classes.clone(),
-                    binding: Some(exc.clone()),
-                    body: h.body.clone(),
-                })
-                .collect(),
+            rescues: clauses,
             else_branch: None,
             ensure: None,
             implicit: false,
@@ -344,6 +354,16 @@ pub(super) fn synthesize_process_action(
     // of gap (map_expr walks If / Seq / Lambda / BeginRescue). The
     // transform is idempotent on already-rewritten action-arm Sends.
     body = rewrites::rewrite_request_format(&body);
+    // `params` the same way, and for the same reason. Rails runs a block
+    // or lambda filter, an `if:`/`unless:` lambda and a `rescue_from`
+    // block with `instance_exec` on the controller, so `params` there is
+    // the Parameters the action reads. Left raw, `params[:id]` was a
+    // Symbol-keyed read on the String-keyed `@params` Hash and answered
+    // nil: `Widget.find(nil)` became a 404, and `head :forbidden if
+    // params[:deny] == "1"` never fired (rubys/roundhouse#998). The
+    // action arms are already rewritten and carry `@params`, which the
+    // pass leaves alone.
+    body = rewrites::rewrite_params(&body);
 
     let param_sym = Symbol::from(param);
     MethodDef {
@@ -370,6 +390,97 @@ pub(super) fn synthesize_process_action(
         mutates_self: reads_action_name,
         block_param: None,
     }
+}
+
+/// Rails' `rescue_with_handler` falls back to the exception's `cause`
+/// (then the cause's cause) when no handler names the exception
+/// itself, and calls the handler it finds with that cause. An error
+/// raised inside a `rescue` gets the rescued one as its cause, so a
+/// handler for the original error still answers:
+///
+/// ```ruby
+/// rescue StandardError => __unhandled
+///   __rescued = __unhandled.cause
+///   until __rescued.nil? || __rescued.is_a?(A) || __rescued.is_a?(B)
+///     __rescued = __rescued.cause
+///   end
+///   if __rescued.is_a?(B) then <B's handler>   # last declared wins
+///   elsif __rescued.is_a?(A) then <A's handler>
+///   else raise __unhandled
+///   end
+/// ```
+///
+/// After the per-class clauses, so an exception a handler names is
+/// still caught by its own clause first. `StandardError`, not Rails'
+/// `Exception`: what an app wraps and re-raises is an application
+/// error. No clause when a handler already covers every
+/// `StandardError` (the fallback could never run).
+fn cause_fallback_clause(rescues: &[RescueHandler], exc: &Symbol) -> Option<RescueClause> {
+    let catch_all = rescues.iter().flat_map(|h| h.classes.iter()).any(|c| {
+        matches!(&*c.node, ExprNode::Const { path }
+            if path.len() == 1 && matches!(path[0].as_str(), "StandardError" | "Exception"))
+    });
+    if catch_all {
+        return None;
+    }
+    let unhandled = "__unhandled";
+    let rescued = || var_ref(exc.as_str());
+    let cause_of = |recv: Expr| {
+        syn(ExprNode::Send { recv: Some(recv), method: Symbol::from("cause"), args: vec![], block: None, parenthesized: false })
+    };
+    let assign_rescued = |value: Expr| {
+        syn(ExprNode::Assign {
+            target: crate::expr::LValue::Var { id: VarId(0), name: exc.clone() },
+            value,
+        })
+    };
+    let is_a = |class: &Expr| {
+        syn(ExprNode::Send {
+            recv: Some(rescued()),
+            method: Symbol::from("is_a?"),
+            args: vec![class.clone()],
+            block: None,
+            parenthesized: true,
+        })
+    };
+    let or = |left: Expr, right: Expr| {
+        syn(ExprNode::BoolOp { op: crate::expr::BoolOpKind::Or, surface: Default::default(), left, right })
+    };
+    let matches_any = |classes: &[Expr]| {
+        let mut tests = classes.iter().map(is_a);
+        let first = tests.next().expect("a rescue_from names at least one class");
+        tests.fold(first, or)
+    };
+    let all_classes: Vec<Expr> = rescues.iter().flat_map(|h| h.classes.iter().cloned()).collect();
+    let nil_check = syn(ExprNode::Send {
+        recv: Some(rescued()),
+        method: Symbol::from("nil?"),
+        args: vec![],
+        block: None,
+        parenthesized: false,
+    });
+    let walk = syn(ExprNode::While {
+        cond: or(nil_check, matches_any(&all_classes)),
+        body: assign_rescued(cause_of(rescued())),
+        until_form: true,
+    });
+    let reraise = syn(ExprNode::Send {
+        recv: None,
+        method: Symbol::from("raise"),
+        args: vec![var_ref(unhandled)],
+        block: None,
+        parenthesized: false,
+    });
+    let dispatch = rescues.iter().fold(reraise, |else_branch, h| {
+        syn(ExprNode::If { cond: matches_any(&h.classes), then_branch: h.body.clone(), else_branch })
+    });
+    Some(RescueClause {
+        classes: vec![syn(ExprNode::Const { path: vec![Symbol::from("StandardError")] })],
+        binding: Some(Symbol::from(unhandled)),
+        body: syn(ExprNode::Seq {
+            exprs: vec![assign_rescued(cause_of(var_ref(unhandled))), walk, dispatch],
+        }),
+    })
 }
 
 /// `return if performed?` — the halting check after a filter that can
@@ -618,6 +729,56 @@ fn case_dispatch(
 // Synthetic-Expr helpers — every node a synthesized span and default
 // effects/ty so the rest of the pipeline doesn't choke on them.
 // ---------------------------------------------------------------------------
+
+fn chain_mentions_csp(preamble: &[PreambleStmt], wraps: &WrapFilters) -> bool {
+    preamble.iter().chain(&wraps.after).any(|stmt| match stmt {
+        PreambleStmt::Block { body, if_cond_expr, unless_cond_expr, .. } => {
+            expr_calls(body, "content_security_policy")
+                || if_cond_expr.as_ref().is_some_and(|e| expr_calls(e, "content_security_policy"))
+                || unless_cond_expr
+                    .as_ref()
+                    .is_some_and(|e| expr_calls(e, "content_security_policy"))
+        }
+        PreambleStmt::Call { filter, .. } => {
+            filter.if_cond_expr.as_ref().is_some_and(|e| expr_calls(e, "content_security_policy"))
+                || filter
+                    .unless_cond_expr
+                    .as_ref()
+                    .is_some_and(|e| expr_calls(e, "content_security_policy"))
+        }
+        PreambleStmt::Lead { body } => expr_calls(body, "content_security_policy"),
+    })
+}
+
+pub(super) fn expr_calls(expr: &Expr, name: &str) -> bool {
+    let mut found = false;
+    fn walk(e: &Expr, name: &str, found: &mut bool) {
+        if *found {
+            return;
+        }
+        if let ExprNode::Send { method, .. } = &*e.node {
+            if method.as_str() == name {
+                *found = true;
+                return;
+            }
+        }
+        e.node.for_each_child(&mut |child| walk(child, name, found));
+    }
+    walk(expr, name, &mut found);
+    found
+}
+
+fn csp_header_stmt() -> Expr {
+    syn(ExprNode::Send {
+        recv: Some(syn(ExprNode::Const {
+            path: vec![Symbol::from("ActionDispatch"), Symbol::from("ContentSecurityPolicy")],
+        })),
+        method: Symbol::from("write_header"),
+        args: vec![syn(ExprNode::SelfRef)],
+        block: None,
+        parenthesized: true,
+    })
+}
 
 fn syn(node: ExprNode) -> Expr {
     Expr::new(Span::synthetic(), node)

@@ -83,28 +83,44 @@ pub fn rewrite_assoc_create(expr: &Expr) -> Expr {
 }
 
 pub fn rewrite_assoc_create_with_models(expr: &Expr, models: &[crate::dialect::Model]) -> Expr {
-    crate::lower::controller_to_library::util::map_expr(expr, &|e| assoc_create_rewrite(e, models))
+    crate::lower::controller_to_library::util::map_expr(expr, &|e| assoc_create_rewrite(e, models, false))
 }
 
 /// In-place twin. Returns whether any node changed so the test
 /// lowerer can skip a follow-up typing pass.
+///
+/// `owner_objects` (the Ruby family only): when the association has an
+/// automatic inverse (`scope_chain::automatic_inverse`), the owner goes
+/// in as the OBJECT under the `belongs_to` name (`room: room`) rather
+/// than as `room_id: room.id`, as Rails sets the inverse — the record's
+/// reader then answers that same owner. A strict target's attrs bag
+/// cannot hold a record (see `synth_initialize`), so the others keep
+/// the key.
 pub fn rewrite_assoc_create_with_models_in_place(
     expr: &mut Expr,
     models: &[crate::dialect::Model],
+    owner_objects: bool,
 ) -> bool {
     crate::lower::controller_to_library::util::map_expr_mut(expr, &|e| {
-        assoc_create_rewrite(e, models)
+        assoc_create_rewrite(e, models, owner_objects)
     })
 }
 
-fn assoc_create_rewrite(e: &Expr, models: &[crate::dialect::Model]) -> Option<Expr> {
-    let declared_target = |parent: &str, assoc: &str| -> Option<String> {
+fn assoc_create_rewrite(
+    e: &Expr,
+    models: &[crate::dialect::Model],
+    owner_objects: bool,
+) -> Option<Expr> {
+    // (target class, declared foreign key, owner column it matches).
+    // The key and column are the declaration's own: a `foreign_key:` or
+    // `primary_key:` is not derivable from the owner's name and `id`.
+    let declared_target = |parent: &str, assoc: &str| -> Option<(String, Symbol, Symbol)> {
         let model = models.iter().find(|m| m.name.0.as_str() == parent)?;
         model.associations().find_map(|a| match a {
-            crate::dialect::Association::HasMany { name, target, .. }
+            crate::dialect::Association::HasMany { name, target, foreign_key, .. }
                 if name.as_str() == assoc =>
             {
-                Some(target.0.as_str().to_string())
+                Some((target.0.as_str().to_string(), foreign_key.clone(), a.owner_key()))
             }
             _ => None,
         })
@@ -148,42 +164,86 @@ fn assoc_create_rewrite(e: &Expr, models: &[crate::dialect::Model]) -> Option<Ex
         Some(Ty::Class { id, .. }) => id.0.as_str().to_string(),
         _ => return None,
     };
-    let assoc_class = declared_target(&parent_class, assoc_method.as_str())
-        .unwrap_or_else(|| crate::naming::singularize_camelize(assoc_method.as_str()));
-    let fk = format!("{}_id", crate::naming::snake_case(&parent_class));
+    let declared = declared_target(&parent_class, assoc_method.as_str());
+    let inverse = if owner_objects {
+        models.iter().find(|m| m.name.0.as_str() == parent_class).and_then(|owner| {
+            owner
+                .associations()
+                .find(|a| matches!(a, crate::dialect::Association::HasMany { name, .. } if name == assoc_method))
+                .and_then(|a| crate::lower::scope_chain::automatic_inverse(models, owner, a))
+        })
+    } else {
+        None
+    };
+    let default_fk = format!("{}_id", crate::naming::snake_case(&parent_class));
+    // An association declaring `primary_key:` matches the owner's
+    // column, not `id`; its foreign key is the declared one.
+    let (assoc_class, fk, owner_key) = match declared {
+        Some((target, fk, owner_key)) => (target, fk.to_string(), owner_key),
+        None => (
+            crate::naming::singularize_camelize(assoc_method.as_str()),
+            default_fk,
+            Symbol::from("id"),
+        ),
+    };
 
-    // Build the FK-id expr: `<parent_expr>.id`.
+    // Build the FK-id expr: `<parent_expr>.<owner key>` (`id` by default).
     let parent_id = Expr::new(
         parent_expr.span,
         ExprNode::Send {
             recv: Some(parent_expr.clone()),
-            method: Symbol::from("id"),
+            method: owner_key,
             args: vec![],
             block: None,
             parenthesized: false,
         },
     );
-    let fk_entry = (
-        Expr::new(
-            e.span,
-            ExprNode::Lit { value: crate::expr::Literal::Sym { value: Symbol::from(fk) } },
+    let fk_entry = match inverse {
+        Some(bt) => (
+            Expr::new(e.span, ExprNode::Lit { value: crate::expr::Literal::Sym { value: bt } }),
+            parent_expr.clone(),
         ),
-        parent_id,
-    );
+        None => (
+            Expr::new(
+                e.span,
+                ExprNode::Lit { value: crate::expr::Literal::Sym { value: Symbol::from(fk) } },
+            ),
+            parent_id,
+        ),
+    };
 
     // Merge FK entry with original kwargs/hash. Real-blog's
     // `article.comments.create!(commenter:, body:)` parses the
-    // trailing kwargs as a single Hash arg.
-    let merged_hash = match outer_args.first().map(|a| (&*a.node, a.span)) {
-        Some((ExprNode::Hash { entries, kwargs }, span)) => {
-            let mut new_entries = vec![fk_entry];
-            new_entries.extend(entries.iter().cloned());
-            Expr::new(span, ExprNode::Hash { entries: new_entries, kwargs: *kwargs })
-        }
-        _ => Expr::new(
-            e.span,
-            ExprNode::Hash { entries: vec![fk_entry], kwargs: true },
-        ),
+    // trailing kwargs as a single Hash arg. The FK goes LAST: the
+    // association's scope wins over the caller's attributes in Rails.
+    // Any other single argument is an attribute Hash held in a value —
+    // campfire's `rooms(:pets).messages.create!(attributes)` — and the
+    // FK merges onto it. That arm used to fall through to the FK alone,
+    // DROPPING the caller's attributes (every message the helper made
+    // failed "Creator must exist"). Two or more arguments decline.
+    let merged_hash = match outer_args.as_slice() {
+        [] => Expr::new(e.span, ExprNode::Hash { entries: vec![fk_entry], kwargs: true }),
+        [arg] => match &*arg.node {
+            ExprNode::Hash { entries, kwargs } => {
+                let mut new_entries = entries.clone();
+                new_entries.push(fk_entry);
+                Expr::new(arg.span, ExprNode::Hash { entries: new_entries, kwargs: *kwargs })
+            }
+            _ => Expr::new(
+                arg.span,
+                ExprNode::Send {
+                    recv: Some(arg.clone()),
+                    method: Symbol::from("merge"),
+                    args: vec![Expr::new(
+                        e.span,
+                        ExprNode::Hash { entries: vec![fk_entry], kwargs: true },
+                    )],
+                    block: None,
+                    parenthesized: true,
+                },
+            ),
+        },
+        _ => return None,
     };
 
     Some(Expr::new(

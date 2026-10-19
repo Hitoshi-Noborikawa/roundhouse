@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 # Primitive Db surface — JRuby variant. Same `module Db` contract as
   # The query cache keeps results up to this many rows — see db.rb.
   QC_CAPTURE_ROWS = 16
@@ -14,6 +15,9 @@
 #   Db.close                   — close all connections
 #   Db.exec(sql)               — run DDL / INSERT / UPDATE / DELETE
 #   Db.prepare(sql)            — prepare a SELECT, returns a stmt handle
+#   Db.bind_int(stmt, i, value) — bind an integer at a one-based position
+#   Db.bind_text(stmt, i, value) — bind text at a one-based position
+#   Db.bind_bool(stmt, i, value) — bind a boolean as SQLite's 0/1
 #   Db.step?(stmt)             — advance, returns true if a row arrived
 #   Db.column_int(stmt, i)     — read int column at zero-based index
 #   Db.column_text(stmt, i)    — read text column at zero-based index
@@ -35,10 +39,8 @@
 # no lock either — same invariant db_cruby.rb relies on.
 #
 # JDBC notes: column indices are 1-based (we add 1 to the zero-based
-# contract index). `column_count`/`column_name` read the
-# PreparedStatement's metadata, which the sqlite-jdbc driver resolves at
-# prepare time — `sqlite_adapter.rb` calls `column_count` before the
-# first `step?`, so we must not depend on a ResultSet existing yet.
+# contract index). Execution is deferred until `step?` or a metadata
+# read so all parameters can be bound after `prepare` returns.
 
 require "jdbc/sqlite3"
 Jdbc::SQLite3.load_driver
@@ -58,16 +60,20 @@ module Db
   STMT_CACHE_CAP = 128
 
   # A pooled connection plus its prepared-statement cache. The cache is
-  # keyed by composed SQL (the lowerer inlines literals) → JDBC
+  # keyed by SQL (including placeholders for bound values) → JDBC
   # PreparedStatement. Because `with_connection` leases a Conn to exactly
   # one thread for a request's duration, the cache needs no lock.
   class Conn
     attr_reader :raw, :stmt_cache, :open_statements
+    # Whether a BEGIN this lane ran is still open. JDBC's autocommit flag
+    # does not see a BEGIN issued as SQL, so `exec` keeps it.
+    attr_accessor :in_txn
 
     def initialize(raw)
       @raw = raw
       @stmt_cache = {}
       @open_statements = {}.compare_by_identity
+      @in_txn = false
     end
   end
 
@@ -139,6 +145,12 @@ module Db
     st.execute("PRAGMA journal_mode=WAL")
     st.execute("PRAGMA synchronous=NORMAL")
     st.execute("PRAGMA busy_timeout=5000")
+    # Not SQLite's default (off): Rails' DEFAULT_PRAGMAS turn it on, as db.rb's PRAGMAS do.
+    st.execute("PRAGMA foreign_keys=ON")
+    # The app's own `pragmas:` from config/database.yml, after the pins
+    # above (generated: `project::apply_database_pragmas`).
+    # >>> generated: database-pragmas
+    # <<< generated: database-pragmas
     st.close
     Conn.new(raw)
   end
@@ -150,8 +162,43 @@ module Db
   # thread-local (each worker thread's root fiber).
   def self.current_dbh
     c = Fiber[:db_handle]
-    return c unless c.nil?
+    return c if lease_visible?
     @free[0]
+  end
+
+  # `ActiveRecord::Base.transaction`'s per-thread nesting depth
+  # (connection.rb) — see the contract note in runtime/ruby/db.rbs.
+  # Mirrors db_cruby.rb: `Fiber[:k]` for the same reason `current_dbh`
+  # above uses it.
+  def self._txn_depth
+    d = Fiber[:ar_txn_depth]
+    d.nil? ? 0 : d
+  end
+
+  def self._txn_depth=(value)
+    Fiber[:ar_txn_depth] = value
+  end
+
+  # Bit `depth - 1` of this integer is whether that frame can be joined.
+  # Same fiber slot as the depth. See runtime/ruby/db.rbs.
+  def self._txn_joinable_bits
+    bits = Fiber[:ar_txn_joinable_bits]
+    bits.nil? ? 0 : bits
+  end
+
+  def self._txn_joinable_bits=(value)
+    Fiber[:ar_txn_joinable_bits] = value
+  end
+
+  # The open transaction's enlisted writes (connection.rb), held in the
+  # same per-thread storage as the depth.
+  def self._txn_records
+    records = Fiber[:ar_txn_records]
+    if records.nil?
+      records = []
+      Fiber[:ar_txn_records] = records
+    end
+    records
   end
 
   # Request-scoped connection lease. Mirrors db_cruby.rb: checks out a
@@ -163,10 +210,80 @@ module Db
   # re-entrant, and a second lease on a thread that holds one would
   # rebind the connection and, on release, unbind the outer lease's.
   def self.in_lease?
-    !Fiber[:db_handle].nil?
+    lease_visible?
+  end
+
+  # Same rule as db_cruby.rb. An ordinary lease stays with its owner
+  # thread. A fixture BEGIN pin is shared with threads the example
+  # starts, so they see the uncommitted rows.
+  def self.lease_visible?
+    return false if Fiber[:db_handle].nil?
+    return true if Fiber[:db_owner] == Thread.current
+    Fiber[:db_txn_pin] == true
+  end
+
+  # `ActiveRecord::Base.connection_db_config` answers from these
+  # (runtime/spinel/active_record_db_config.rb): the database this
+  # process configured, the adapter name Rails would report for it, and
+  # whether the holder is inside a transaction of its own — the request
+  # read snapshot is the shim's, not the app's, so it does not count.
+  def self.database_path
+    @path
+  end
+
+  def self.adapter_name
+    "sqlite3"
+  end
+
+  def self.transaction_open?
+    current_dbh.in_txn
+  end
+
+  # Rails' SQLite `disable_referential_integrity`: fixtures load and tables empty in any order. Not foreign_keys=OFF alone: that pragma is a no-op inside a transaction, where defer_foreign_keys moves the check to COMMIT instead.
+  def self.without_foreign_keys(&block)
+    on_lease { foreign_keys_off(&block) }
+  end
+
+  def self.foreign_keys_off
+    Db.exec("PRAGMA defer_foreign_keys = ON")
+    Db.exec("PRAGMA foreign_keys = OFF")
+    result = nil
+    begin
+      result = yield
+    ensure
+      Db.exec("PRAGMA defer_foreign_keys = OFF")
+      Db.exec("PRAGMA foreign_keys = ON")
+    end
+    result
+  end
+
+  # Not a lease of its own when the caller holds one: with a pool of one handle, the second checkout waits for the first forever.
+  def self.on_lease(&block)
+    in_lease? ? yield : Db.with_connection(&block)
+  end
+
+  # Rails' `check_all_foreign_keys_valid!`, which its fixture loader runs after a load (`verify_foreign_keys_for_fixtures`).
+  def self.check_foreign_keys!
+    tables = []
+    on_lease do
+      st = Db.prepare("PRAGMA foreign_key_check")
+      while Db.step?(st)
+        table = Db.column_text(st, 0)
+        tables << table unless tables.include?(table)
+      end
+      Db.finalize(st)
+    end
+    raise ActiveRecord::StatementInvalid, "Foreign key violations found: " + tables.join(", ") unless tables.empty?
+    nil
   end
 
   def self.with_connection
+    # Re-entrant, as db_cruby.rb. A BEGIN outside a lease pins its
+    # connection; a second checkout would miss those uncommitted rows.
+    if in_lease?
+      result = yield
+      return result
+    end
     conn = nil
     @mutex.synchronize do
       while @free.empty?
@@ -179,6 +296,8 @@ module Db
       conn = @free.pop
     end
     Fiber[:db_handle] = conn
+    Fiber[:db_owner] = Thread.current
+    Fiber[:db_txn_pin] = false
     request_failed = false
     begin
       yield
@@ -193,6 +312,7 @@ module Db
         cleanup_error = e
       ensure
         Fiber[:db_handle] = nil
+        Fiber[:db_owner] = nil
         begin
           if conn.open_statements.empty?
             @mutex.synchronize do
@@ -274,20 +394,61 @@ module Db
     raise error if error
   end
 
+  # A BEGIN outside a lease binds its connection until COMMIT or
+  # ROLLBACK, as db_cruby.rb's `reserve_txn_connection` does. The test
+  # shim's fixture transaction is that BEGIN; a later `with_connection`
+  # has to see its uncommitted rows.
+  def self.reserve_txn_connection
+    conn = nil
+    @mutex.synchronize do
+      while @free.empty?
+        if @missing_connections > 0
+          replace_connection
+        else
+          @cv.wait(@mutex)
+        end
+      end
+      conn = @free.pop
+    end
+    Fiber[:db_handle] = conn
+    Fiber[:db_owner] = Thread.current
+    Fiber[:db_txn_pin] = true
+    conn
+  end
+
+  def self.release_txn_pin_if_idle(conn)
+    return nil unless Fiber[:db_txn_pin] == true && Fiber[:db_owner] == Thread.current
+    return nil if conn.in_txn
+    Fiber[:db_handle] = nil
+    Fiber[:db_owner] = nil
+    Fiber[:db_txn_pin] = false
+    @mutex.synchronize do
+      @free.unshift(conn)
+      @cv.signal
+    end
+    nil
+  end
+
   def self.exec(sql)
     record_query(sql)
     # Any exec is (per the Db contract) DDL or a write — Rails
     # invalidates the whole query cache on write; so do we.
     qcache = Fiber[:rh_qcache]
     qcache.clear unless qcache.nil?
-    st = current_dbh.raw.create_statement
+    word = sql.strip.split(" ", 2).first.to_s.upcase
+    reserve_txn_connection if word == "BEGIN" && !in_lease?
+    conn = current_dbh
+    st = conn.raw.create_statement
     begin
       st.execute(sql)
-    rescue StandardError => e
-      raise ActiveRecord::RecordNotUnique, e.message if Db.unique_violation?(e.message)
-      raise
+      conn.in_txn = true if word == "BEGIN"
+      rollback_to_savepoint = word == "ROLLBACK" && sql.strip.upcase.start_with?("ROLLBACK TO ")
+      conn.in_txn = false if word == "COMMIT" || word == "END" || (word == "ROLLBACK" && !rollback_to_savepoint)
+    rescue Java::JavaSql::SQLException => e
+      Db.raise_statement_error(e.message, e.message.include?("SQLITE_BUSY"))
     ensure
       st.close
+      release_txn_pin_if_idle(conn)
     end
     nil
   end
@@ -321,9 +482,8 @@ module Db
           rs.close
         end
       end
-    rescue StandardError => e
-      raise ActiveRecord::RecordNotUnique, e.message if Db.unique_violation?(e.message)
-      raise
+    rescue Java::JavaSql::SQLException => e
+      Db.raise_statement_error(e.message, e.message.include?("SQLITE_BUSY"))
     ensure
       st.close
     end
@@ -383,15 +543,34 @@ module Db
     message.to_s.include?("UNIQUE constraint failed")
   end
 
+  # Not the driver's own exception: Rails translates every statement error into ActiveRecord's hierarchy (sqlite3_adapter `translate_exception`), keyed on SQLite's own message as `unique_violation?` is.
+  def self.raise_statement_error(message, busy)
+    raise ActiveRecord::RecordNotUnique, message if unique_violation?(message)
+    raise ActiveRecord::NotNullViolation, message if message.include?("NOT NULL constraint failed")
+    raise ActiveRecord::InvalidForeignKey, message if message.include?("FOREIGN KEY constraint failed")
+    raise ActiveRecord::CheckViolation, message if message.include?("CHECK constraint failed")
+    raise ActiveRecord::StatementTimeout, message if busy
+    raise ActiveRecord::StatementInvalid, message
+  end
+
   # Prepared-statement cache (roundhouse#12). A cache hit reuses the open
   # PreparedStatement only when idle. Xerial's `executeQuery` in `step?`
   # resets the cursor before execution; release clears old parameters.
   # `finalize` closes the ResultSet and keeps the cached statement. Busy
   # hits and over-cap statements are transient, closed on finalize.
-  # Key is the composed SQL — inlined
-  # literals key id-bearing queries per-id (fine for the bench;
-  # STMT_CACHE_CAP bounds growth).
+  # Placeholder queries reuse one cached statement across bound values;
+  # STMT_CACHE_CAP bounds growth for other SQL shapes.
   def self.prepare(sql)
+    return prepare_marked(sql) if sql.include?("\x01")
+    prepare_plain(sql)
+  rescue Java::JavaSql::SQLException => e
+    Db.raise_statement_error(e.message, e.message.include?("SQLITE_BUSY"))
+  end
+
+  # Prepare without re-entering prepare_marked. Post-lift SQL may still
+  # contain \x01 inside string literals (unmarked bind_literal values);
+  # those bytes are data and must not be stripped or re-dispatched.
+  def self.prepare_plain(sql)
     # A `?`-bearing SQL string is a placeholder query (roundhouse#12):
     # its result depends on binds set after prepare, which are not in
     # the key, so it never joins the result-replay cache.
@@ -427,6 +606,38 @@ module Db
     st.open[pstmt] = st
     st.sql = sql
     st.capture = { rows: [], names: nil, eof: false } if !qcache.nil? && !parameterized
+    st
+  end
+
+  # A Relation read with its hash-condition values marked for binding;
+  # see db_cruby.rb's `prepare_marked`. `stmt.sql` stays the placeholder
+  # SQL (the statement cache's key); the capture carries the result-cache
+  # key, the read with its values written in, which `finalize` publishes
+  # under and a promoting replay re-runs.
+  def self.prepare_marked(marked)
+    binds = ActiveRecord::Relation.lift_binds(marked)
+    sql = binds[0].to_s
+    key = binds[1].to_s
+    return prepare_plain(key) if binds.length <= 2
+    qcache = Fiber[:rh_qcache]
+    cacheable = !qcache.nil? && !key.include?("?")
+    if cacheable && (hit = qcache[key])
+      st = Stmt.new(nil, false)
+      st.sql = key
+      st.replay = hit
+      return st
+    end
+    st = prepare_plain(sql)
+    i = 2
+    while i < binds.length
+      if binds[i] == "i"
+        bind_int(st, i / 2, binds[i + 1].to_i)
+      else
+        bind_text(st, i / 2, binds[i + 1])
+      end
+      i += 2
+    end
+    st.capture = { rows: [], names: nil, eof: false, key: key } if cacheable
     st
   end
 
@@ -539,6 +750,11 @@ module Db
     Fiber[:rh_qcache] = nil
   end
 
+  # Is the replay cache on for this fiber? (`ActiveRecord::Base.uncached`)
+  def self.query_cache_enabled?
+    !Fiber[:rh_qcache].nil?
+  end
+
   # The request read snapshot and background checkpoints are
   # implemented in the CRuby and Spinel shims (db_cruby.rb, db.rb), not
   # yet in this one. Here they
@@ -626,7 +842,7 @@ module Db
   # a partial one (eof false): the next identical SELECT replays the
   # consumed prefix and promotes past it only if it wants more. Then
   # close the ResultSet (if a query ran); a cached PreparedStatement
-  # stays open for reuse, a transient one is closed.
+  # stays open with no bound values for reuse, a transient one is closed.
   def self.finalize(stmt)
     return nil if stmt.pstmt.nil?
     if (c = stmt.capture)
@@ -634,8 +850,9 @@ module Db
       # consumer would find an empty, eof-less prefix and promote, which
       # is correct but pointless — leave it out.
       qcache = Fiber[:rh_qcache]
-      if !c[:names].nil? && !qcache.nil? && !qcache.key?(stmt.sql)
-        qcache[stmt.sql] = c
+      key = c[:key] || stmt.sql
+      if !c[:names].nil? && !qcache.nil? && !qcache.key?(key)
+        qcache[key] = c
       end
     end
     release_statement(stmt)
@@ -706,16 +923,12 @@ module Db
     rescue StandardError
       # Failed closes remain owned until lease cleanup quarantines them.
     end
+    Db.raise_statement_error(error.message, error.message.include?("SQLITE_BUSY")) if error.is_a?(Java::JavaSql::SQLException)
     raise error
   end
 
-  # Non-optional integer binds share the JDBC setter with the optional
-  # path; the lowerer emits `bind_int` for required columns.
-  def self.bind_int(handle, idx, value)
-    bind_int_opt(handle, idx, value)
-  end
-
-  # Optional read predicates occupy one slot whether nil or present.
+  # Optional primitives preserve nil for callers binding a SQL NULL.
+  # Generated nullable equality uses IS NULL without a slot, or = ? with a slot.
   def self.bind_int_opt(handle, idx, value)
     ps = handle.pstmt
     raise "statement is not bindable" if ps.nil? || handle.executed
@@ -741,23 +954,25 @@ module Db
   end
 
   def self.bind_bool_opt(handle, idx, value)
-    ps = handle.pstmt
-    raise "statement is not bindable" if ps.nil? || handle.executed
-    if value.nil?
-      ps.set_null(idx, Java::JavaSql::Types::INTEGER)
-    else
-      ps.set_long(idx, value ? 1 : 0)
-    end
-  rescue StandardError => error
-    statement_failed(handle, "bind", error)
+    bind_bool(handle, idx, value)
   end
 
-  # Match this shim's inline writer, including ASCII-only BINARY strings
-  # remaining TEXT. set_bytes keeps NUL and non-ASCII binary data out of
-  # Java String decoding; both JDBC setters copy the Ruby value at bind time.
+  # Bind positions are one-based. Keep the full SQLite integer width.
+  def self.bind_int(stmt, idx, value)
+    raise "statement is not bindable" if stmt.pstmt.nil? || stmt.executed
+    if value.nil?
+      stmt.pstmt.set_null(idx, Java::JavaSql::Types::INTEGER)
+    else
+      stmt.pstmt.set_long(idx, value)
+    end
+  rescue StandardError => error
+    statement_failed(stmt, "bind", error)
+  end
+
+  # Match the inline writer, including ASCII-only BINARY strings as TEXT.
   def self.bind_text(stmt, idx, value)
     pstmt = stmt.pstmt
-    return nil if pstmt.nil?
+    raise "statement is not bindable" if pstmt.nil? || stmt.executed
     value = value.to_s
     if value.include?("\0") || (value.encoding == Encoding::BINARY && !value.ascii_only?)
       pstmt.set_bytes(idx, value.to_java_bytes)
@@ -771,12 +986,14 @@ module Db
   # SQLite boolean values are integers, with NULL distinct from false/0.
   def self.bind_bool(stmt, idx, value)
     pstmt = stmt.pstmt
-    return nil if pstmt.nil?
+    raise "statement is not bindable" if pstmt.nil? || stmt.executed
     if value.nil?
       pstmt.set_null(idx, Java::JavaSql::Types::INTEGER)
     else
       pstmt.set_int(idx, value ? 1 : 0)
     end
+  rescue StandardError => error
+    statement_failed(stmt, "bind", error)
   end
 
   def self.last_insert_rowid
@@ -819,10 +1036,9 @@ module Db
     @query_log.push(sql) unless @query_log.nil?
   end
 
-  # SQL-value escaping primitives — copied verbatim from db_cruby.rb. The
-  # contract across all shims is "inline values into SQL" (the FFI shim
-  # can't construct SQLITE_TRANSIENT for bind params), and the lowerer
-  # controls every string that flows here.
+  # SQL-value escaping primitives — copied verbatim from db_cruby.rb.
+  # Writes and queries without bound parameters inline their values;
+  # the lowerer controls every string that flows here.
   # BYTES go out as a hex BLOB literal, `X'…'`. A NUL cannot ride a
   # quoted literal at all (it ends the SQL text: "unrecognized token"),
   # and a binary value stored as TEXT sorts before every BLOB, so a
@@ -863,6 +1079,14 @@ module Db
     return "NULL" if ids.empty?
 
     ids.map { |i| i.to_i.to_s }.join(", ")
+  end
+
+  # The same `IN (...)` batch over string keys (a uuid primary key): each
+  # key quoted as a literal, never `to_i`'d to its leading digits.
+  def self.escape_string_list(ids)
+    return "NULL" if ids.empty?
+
+    ids.map { |i| escape_string(i.to_s) }.join(", ")
   end
 
   def self.escape_bool(b)

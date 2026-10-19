@@ -79,6 +79,7 @@ module ActionCable
     def capture_broadcasts_on: (String stream) { () -> void } -> Array[Hash[Symbol, untyped]]
     def assert_broadcasts: (String stream, Integer count) { () -> void } -> void
     def assert_no_broadcasts: (String stream) { () -> void } -> void
+    def assert_broadcast_on: (String stream, untyped data) ?{ () -> void } -> void
   end
 end
 
@@ -141,6 +142,12 @@ class ActionResponse
     ?content_type: String,
     ?cache_control_max_age: Integer,
     ?cache_control_public: bool,
+    # Declared in the same position as the Ruby `initialize` — see the
+    # `cookies:` comment above about why order here must track order
+    # there. nil for `relation_find_test.rb`'s bare responses, which
+    # never touch Cache-Control; `cache_control` falls back to the two
+    # legacy readers above when this is nil.
+    ?cache_control_store: ActionController::CacheControlStore?,
     # The comment above about an OPTIONAL parameter behind a missing
     # one applies to this entry too: `headers:` was in the Ruby
     # `initialize` and not here.
@@ -160,6 +167,9 @@ end
 
 class TestBase
   def initialize: () -> void
+  # Rails' default: each example runs inside a non-joinable transaction.
+  # A class sets this false when it has to see a real COMMIT.
+  def self.use_transactional_tests: () -> bool
   def setup: () -> void
   def teardown: () -> void
   def file_fixture: (String name) -> Pathname
@@ -193,7 +203,9 @@ class TestBase
   # convenience — declaring it required would misdescribe every
   # blockless call the corpus makes.
   def travel_to: (untyped target) ?{ () -> void } -> void
-  def travel: (untyped duration) -> void
+  def travel: (untyped duration) ?{ () -> void } -> void
+  def freeze_time: () ?{ () -> void } -> void
+  def stub_const: (untyped mod, Symbol constant, untyped value) ?{ () -> void } -> void
   def travel_back: () -> void
 
   # `assert_difference -> { Model.count }, +1 do … end`. The expression

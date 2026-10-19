@@ -564,13 +564,18 @@ fn declaration_only_forwarders_are_gated_on_unverified_targets() {
     }
 }
 
+/// A controller method keeps its `...` / `**` (`Action::anonymous_formal`);
+/// a test entrypoint, which nothing calls with arguments, still refuses.
 #[test]
-fn unpreserved_controller_and_test_entry_declarations_are_rejected() {
-    for formal in ["...", "**"] {
+fn controller_declarations_are_kept_and_test_entry_declarations_are_rejected() {
+    use roundhouse::dialect::AnonymousFormal;
+    for (formal, kept) in [("...", AnonymousFormal::Forwarding), ("**", AnonymousFormal::KeywordRest)] {
         let source = format!("class ProbeController < ApplicationController\n def call({formal})\n 11\n end\nend");
         let controller = roundhouse::ingest::ingest_controller(source.as_bytes(), "probe_controller.rb")
-            .expect_err("controller forwarding is outside this slice");
-        assert!(controller.to_string().contains("forwarding declaration"));
+            .expect("a controller method keeps its anonymous formal")
+            .expect("one controller");
+        let call = controller.actions().find(|a| a.name.as_str() == "call").expect("call");
+        assert_eq!(call.anonymous_formal, Some(kept), "{formal}");
         for name in ["setup", "test_forwarding"] {
             let source = format!("class ProbeTest < ActiveSupport::TestCase\n def {name}({formal})\n 11\n end\nend");
             let err = roundhouse::ingest::ingest_test_file(source.as_bytes(), "probe_test.rb")
@@ -662,26 +667,21 @@ fn an_unforwarded_anonymous_rest_is_a_represented_formal() {
 
 /// A nested `def` binds its own parameters, so a bare `*` inside it
 /// forwards its own rest and does not make the outer `*` forwarded.
+///
+/// The nested `def` itself is refused (`nested def`, no IR node carries
+/// it): the one error is that refusal, not a forwarding one. This test
+/// used to run the emit too, and passed only because ingest dropped the
+/// nested `def` without a word; `Probe.new.nested` was never there.
 #[test]
 fn a_nested_def_forwarding_its_own_rest_leaves_the_outer_rest_represented() {
     let source = "class Probe; def target(*); def nested(*) = inner(*); 7; end; def inner(*a) = a.size; end";
-    let script = "puts Probe.new.target; puts Probe.new.target(1, 2, 3)";
-    let native = Command::new("ruby")
-        .args(["-e", &format!("{source}; {script}")])
-        .output()
-        .unwrap();
-    assert!(native.status.success());
-    assert_eq!(String::from_utf8_lossy(&native.stdout), "7\n7\n");
-    let errors: Vec<_> = diagnose(&analyzed(source))
+    let errors: Vec<String> = diagnose(&analyzed(source))
         .into_iter()
         .filter(|d| d.severity == Severity::Error)
+        .map(|d| d.message)
         .collect();
-    assert!(errors.is_empty(), "{errors:?}");
-    let run = emit_and_run::real_blog()
-        .write("app/lib/probe.rb", source)
-        .run_ruby(script);
-    run.assert_passes();
-    assert_eq!(run.stdout, "7\n7\n");
+    assert_eq!(errors.len(), 1, "{errors:?}");
+    assert!(errors[0].contains("nested def"), "{errors:?}");
 }
 
 /// A body that forwards the anonymous rest (`g(*)`) keeps the recorded

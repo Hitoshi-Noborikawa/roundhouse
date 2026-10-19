@@ -53,6 +53,26 @@ fn rewrite(expr: &mut Expr, models: &[Model], schema: &crate::schema::Schema) {
         }) else {
             return;
         };
+        // The count is keyed on the argument id, but a `primary_key:`
+        // association matches `owner.<key>`, which that id cannot supply
+        // without a lookup. Refuse rather than count the wrong children.
+        if let Some(k) = owner
+            .associations()
+            .find(|asc| asc.name() == assoc)
+            .and_then(super::assoc_primary_key::custom_primary_key)
+        {
+            crate::emit::diagnostics::push(crate::diagnostic::Diagnostic::unsupported(
+                expr.span,
+                None,
+                "association_primary_key",
+                format!(
+                    "`reset_counters` over `{}.{}`, which declares `primary_key: :{k}`: \
+                     the children are matched on that column, not the id argument",
+                    owner.name.0, assoc
+                ),
+            ));
+            return;
+        }
         let column = format!("{}_count", assoc.as_str());
         if !table.columns.iter().any(|c| c.name.as_str() == column) {
             return;
@@ -96,10 +116,11 @@ fn send(recv: Expr, method: &str, args: Vec<Expr>, span: Span) -> Expr {
 
 /// `Model.where(key: value)`, typed as the model's relation.
 fn where_eq(model: &ClassId, key: &Symbol, value: &Expr, span: Span) -> Expr {
-    let class = Expr::new(
+    let mut class = Expr::new(
         span,
         ExprNode::Const { path: model.0.as_str().split("::").map(Symbol::from).collect() },
     );
+    class.decisions |= crate::expr::GENERATED_CONST_REF;
     let cond = Expr::new(
         span,
         ExprNode::Hash { entries: vec![(sym(key.as_str(), span), value.clone())], kwargs: true },

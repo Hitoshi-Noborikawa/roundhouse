@@ -660,6 +660,8 @@ fn py_const_path(path: &[crate::ident::Symbol]) -> String {
         Some("ActionDispatch" | "ActionController" | "ActionView") if path.len() >= 2 => {
             path.last().unwrap().to_string()
         }
+        // A sibling of `Base` in active_record_base.py, not an attribute of its `ActiveRecord` class
+        Some("ActiveRecord") if path.len() == 2 && path[1].as_str() == "ErrorDetail" => "ErrorDetail".to_string(),
         _ => path
             .iter()
             .map(|s| s.to_string())
@@ -855,6 +857,14 @@ pub(super) fn emit_expr(e: &Expr) -> String {
             }
         }
         ExprNode::Send { recv, method, args, parenthesized, .. } => {
+            if e.decisions & crate::expr::GROUNDED_TIME_FORMAT != 0
+                && method.as_str() == "to_rfc3339"
+                && args.is_empty()
+            {
+                if let Some(r) = recv {
+                    return format!("{}.isoformat()", emit_expr(r));
+                }
+            }
             emit_send(recv.as_ref(), method.as_str(), args, *parenthesized)
         }
         ExprNode::Assign { target: _, value } => emit_expr(value),
@@ -1138,25 +1148,32 @@ pub(super) fn emit_send(recv: Option<&Expr>, method: &str, args: &[Expr], parent
     // timestamp columns; `.utc` is then a no-op (the value is already
     // UTC) and `.iso8601` becomes `.isoformat()`. `import datetime` is
     // injected for active_record_base via the runtime-loader import list.
-    if method == "now" && args.is_empty() {
+    if matches!(method, "now" | "utc") && args.is_empty() {
         if let Some(r) = recv {
             if let ExprNode::Const { path } = &*r.node {
-                if path.len() == 1 && path[0].as_str() == "Time" {
+                // Bare `Time` and rooted `::Time`. `Foo::Time.now` keeps its own method.
+                if path.last().is_some_and(|s| s.as_str() == "Time")
+                    && path.iter().rev().skip(1).all(|s| s.as_str().is_empty())
+                {
                     return "datetime.datetime.now(datetime.timezone.utc)".to_string();
                 }
             }
         }
     }
     // `<time>.utc` → no-op: the `Time.now` mapping is already UTC-aware.
+    // The class-method clock `Time.utc` was handled above.
     if method == "utc" && args.is_empty() {
         if let Some(r) = recv {
             return emit_expr(r);
         }
     }
-    // `<time>.iso8601` → `.isoformat()` (ISO-8601 timestamp string).
-    if method == "iso8601" && args.is_empty() {
+    // Zero-arg `iso8601` on a time is `to_rfc3339` after `time_calendar`.
+    // An application method of that name keeps normal dispatch.
+    if method == "to_rfc3339" && args.is_empty() {
         if let Some(r) = recv {
-            return format!("{}.isoformat()", emit_expr(r));
+            if crate::lower::time_calendar::is_time_rfc3339_receiver(r) {
+                return format!("{}.isoformat()", emit_expr(r));
+            }
         }
     }
     // Ruby's binary operators ride the Send channel (`a == b` is
@@ -1447,6 +1464,8 @@ fn map_builtin_method(recv: &str, method: &str, ty: Option<&Ty>, args_s: &[Strin
     let is_str = matches!(ty, Some(Ty::Str | Ty::Sym));
     let is_array = matches!(ty, Some(Ty::Array { .. }));
     let is_seq = matches!(ty, Some(Ty::Str | Ty::Sym | Ty::Array { .. } | Ty::Hash { .. }));
+    let never_falsy_elems =
+        matches!(ty, Some(Ty::Array { elem }) if matches!(**elem, Ty::Str | Ty::Int | Ty::Float | Ty::Sym));
     Some(match method {
         // Universal Ruby conversions → Python builtins (which accept any
         // value). Skipped on known user classes, which may define their
@@ -1462,6 +1481,9 @@ fn map_builtin_method(recv: &str, method: &str, ty: Option<&Ty>, args_s: &[Strin
         // to seq types so Flash#empty?/Session#empty? (user methods) keep
         // their own definitions.
         "empty?" if no_args && is_seq => format!("len({recv}) == 0"),
+        // An element that is never nil or false makes `any?` / `none?` a question of size
+        "any?" if no_args && never_falsy_elems => format!("len({recv}) > 0"),
+        "none?" if no_args && never_falsy_elems => format!("len({recv}) == 0"),
         "to_h" if no_args && matches!(ty, Some(Ty::Hash { .. })) => format!("dict({recv})"),
         "to_a" if no_args && matches!(ty, Some(Ty::Array { .. })) => format!("list({recv})"),
         // Ruby's single-element `Array#push(x)` is Python's `list.append`.

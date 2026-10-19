@@ -180,11 +180,12 @@ fn bundled_class_constants_are_ledgered_only_on_targets_without_them() {
         ("config/routes.rb", "Rails.application.routes.draw do\nend\n"),
         ("app/controllers/probes_controller.rb", r#"class ProbesController < ActionController::Base
   def index
-    [URI::HTTP, URI::HTTPS, URI::InvalidURIError, Net::OpenTimeout, Net::ReadTimeout,
+    [URI::HTTP, URI::HTTPS, URI::Error, URI::InvalidURIError, SocketError, Net::OpenTimeout, Net::ReadTimeout,
      Net::HTTPRedirection, Net::HTTPOK, StringIO, OpenSSL::OpenSSLError,
      Rails::HTML5::SafeListSanitizer, JSON, JSON::ParserError, Struct, Mutex,
      Queue, SizedQueue, Thread::Queue, Thread::SizedQueue, Thread::Mutex,
-     ThreadError, ClosedQueueError, Comparable, Enumerable, JSON::GeneratorError]
+     ThreadError, ClosedQueueError, Comparable, Enumerable, JSON::GeneratorError,
+     Monitor, ConditionVariable, Thread::ConditionVariable, UNIXServer, UNIXSocket, Open3, Find]
   end
 end
 "#),
@@ -221,12 +222,13 @@ end
             assert_eq!(gaps[0].severity, roundhouse::diagnostic::Severity::Error);
             assert!(!gaps[0].span.is_synthetic(), "{gaps:?}");
         } else {
-            assert_eq!(gaps.len(), 24, "{target:?}: {gaps:?}");
-            for name in ["URI::HTTP", "URI::HTTPS", "URI::InvalidURIError", "Net::OpenTimeout", "Net::ReadTimeout",
+            assert_eq!(gaps.len(), 33, "{target:?}: {gaps:?}");
+            for name in ["URI::HTTP", "URI::HTTPS", "URI::Error", "URI::InvalidURIError", "SocketError", "Net::OpenTimeout", "Net::ReadTimeout",
                 "Net::HTTPRedirection", "Net::HTTPOK", "StringIO", "OpenSSL::OpenSSLError",
                 "Rails::HTML5::SafeListSanitizer", "JSON", "JSON::ParserError", "Struct", "Mutex",
                 "Queue", "SizedQueue", "Thread::Queue", "Thread::SizedQueue", "Thread::Mutex",
-                "ThreadError", "ClosedQueueError", "Comparable", "Enumerable", "JSON::GeneratorError"] {
+                "ThreadError", "ClosedQueueError", "Comparable", "Enumerable", "JSON::GeneratorError",
+                "Monitor", "ConditionVariable", "Thread::ConditionVariable", "UNIXServer", "UNIXSocket", "Open3", "Find"] {
                 let gap = gaps.iter().find(|d| d.message.contains(name)).expect(name);
                 assert_eq!(gap.severity, roundhouse::diagnostic::Severity::Error);
                 assert!(!gap.span.is_synthetic(), "{gap:?}");
@@ -254,6 +256,8 @@ fn ruby_family_runtime_constants_are_ledgered_on_other_targets() {
     raise ActionController::RoutingError.new("page out of bounds", []) if params[:page] == "0"
     raise ActionController::UnknownFormat.new("no format") if params[:page] == "1"
     raise ActionController::ParameterMissing.new("page") if params[:page] == "2"
+    raise ActionController::BadRequest.new("bad page") if params[:page] == "3"
+    raise ActionController::InvalidAuthenticityToken if params[:page] == "4"
     head :ok
   end
 

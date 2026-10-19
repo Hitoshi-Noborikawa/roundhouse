@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 require_relative "../test_helper"
 
 # Direct unit tests for `runtime/ruby/action_controller/base.rb`.
@@ -63,6 +64,21 @@ class ActionControllerBaseTest < Minitest::Test
     assert_equal "text/vnd.turbo-stream.html", @controller.content_type
   end
 
+  def test_response_redirect_predicate_matches_redirect_statuses
+    # `head` names the status: `instance_variable_set` has no strict-target counterpart.
+    %i[moved_permanently found see_other temporary_redirect permanent_redirect].each do |status|
+      controller = TestController.new
+      controller.head(status)
+      assert controller.response.redirect?, "status #{status}"
+    end
+
+    %i[ok no_content im_used multiple_choices not_modified use_proxy bad_request internal_server_error].each do |status|
+      controller = TestController.new
+      controller.head(status)
+      refute controller.response.redirect?, "status #{status}"
+    end
+  end
+
   def test_media_type_drops_the_content_type_parameters
     @controller.response.content_type = "text/html; charset=utf-8"
     assert_equal "text/html", @controller.media_type
@@ -79,6 +95,35 @@ class ActionControllerBaseTest < Minitest::Test
     @controller.response.response_body = nil
     assert_equal "", @controller.body
     refute @controller.performed?
+  end
+
+  def test_header_merge_drops_nil_values
+    @controller.headers.merge!({ "X-Empty" => nil })
+    assert_equal 0, @controller.headers.size
+  end
+
+  # Rack/Rails semantics a block-form `around_action` relies on when its
+  # `ensure` does `response.headers.merge!(some_hash)`: every valid key
+  # is SET (an existing one overwritten, in place, by name), and the
+  # call answers the store itself so it can be chained.
+  def test_header_merge_sets_each_key_and_returns_self
+    @controller.headers.store_value("X-Quota-Remaining", "1")
+    result = @controller.headers.merge!({ "X-Quota-Remaining" => "5", "X-New" => "ok" })
+    assert_same @controller.headers, result
+    assert_equal "5", @controller.headers["X-Quota-Remaining"]
+    assert_equal "ok", @controller.headers["X-New"]
+    assert_equal 2, @controller.headers.size
+  end
+
+  def test_header_delete_keeps_later_headers_in_the_indexed_range
+    @controller.headers.store_value("X-First", "first")
+    @controller.headers.store_value("X-Delete", "gone")
+    @controller.headers.store_value("X-Last", "last")
+    @controller.headers.delete("X-Delete")
+
+    assert_equal 2, @controller.headers.size
+    assert_equal "X-Last", @controller.headers.key_at(1)
+    assert_equal "last", @controller.headers.val_at(1)
   end
 
   # `render(..., status: 422)` (Integer literal) is no longer part of the
@@ -125,21 +170,31 @@ class ActionControllerBaseTest < Minitest::Test
 
   # ── head ────────────────────────────────────────────────────
 
-  def test_head_sets_status_and_clears_body
-    # body= isn't an attr_writer (only reader); populate via render,
-    # then head must clear. (The original test guarded a pre-set with
-    # `respond_to?(:body=)` — a no-op since the writer doesn't exist
-    # — and TS has no respond_to?, so drop the guard.)
-    @controller.render("partial output")
-    assert_equal "partial output", @controller.body
-
-    @controller.head(:no_content)
+  def test_head_on_an_unperformed_controller_sets_status_and_empty_body
+    assert_nil @controller.head(:no_content)
     assert_equal 204, @controller.status
     assert_equal "", @controller.body
+    assert_equal "", @controller.content_type
+    assert @controller.performed?
+    refute @controller.head_response?
   end
 
-  # `head(404)` (Integer literal) — same contraction as render's status:
-  # parameter. Symbol-only now.
+  def test_head_uses_media_type_without_charset
+    @controller.head(:ok)
+    assert_equal "text/html", @controller.content_type
+
+    other = TestController.new
+    other.head(:ok, content_type: "text/plain; charset=utf-8")
+    assert_equal "text/plain", other.content_type
+  end
+
+  def test_head_does_not_replace_an_already_performed_response
+    @controller.render("existing body")
+
+    assert_raises(ArgumentError) { @controller.head(:no_content) }
+    assert_equal "existing body", @controller.body
+    assert_equal 200, @controller.status
+  end
 
   # ── resolve_status ──────────────────────────────────────────
 

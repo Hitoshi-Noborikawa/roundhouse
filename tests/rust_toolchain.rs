@@ -20,7 +20,6 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use roundhouse::analyze::Analyzer;
 use roundhouse::emit::rust;
 use roundhouse::ingest::ingest_app;
 
@@ -35,7 +34,8 @@ fn generate_project(fixture_path: &Path, out: &Path) {
     std::fs::create_dir_all(out).expect("create scratch");
 
     let mut app = ingest_app(fixture_path).expect("ingest");
-    Analyzer::new(&app).analyze(&mut app);
+    // Emit from the post-analyze lowered IR, as `roundhouse --target rust` does
+    roundhouse::session::analyze_and_lower(&mut app);
     let files = rust::emit(&app);
 
     for file in &files {
@@ -206,7 +206,7 @@ use app::router::Router;
 fn routed_captures_and_checked_bytes() {
     for (input, expected) in [("abc", "abc"), ("+%2B", "++"), ("%00", "\0"), ("%2500", "%00"), ("%C3%A9", "é")] {
         let path = format!("/echo/{input}");
-        let hit = Router::match_pattern("/echo/:value", &path, "").expect("route");
+        let hit = Router::match_pattern("/echo/:value", &path, "", "").expect("route");
         assert_eq!(hit["value"], expected);
     }
     assert_eq!(Router::capture_byte(vec![0, 255], 0), 0);

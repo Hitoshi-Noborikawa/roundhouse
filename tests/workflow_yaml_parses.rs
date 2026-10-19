@@ -187,6 +187,13 @@ fn campfire_docker_recipe_avoids_a_frontend_pull_and_ships_executable_boot() {
             & 0o777,
         0o755
     );
+    // Published `-p` only reaches non-loopback; #865's development default
+    // is localhost, so the image must pin BINDING (campfire-smoke-docker
+    // went red on every tip after 4f9c0410 until this landed).
+    assert!(
+        dockerfile.contains("ENV BINDING=0.0.0.0\n"),
+        "Dockerfile must publish on 0.0.0.0:\n{dockerfile}"
+    );
     fs::remove_dir_all(root).unwrap();
 }
 
@@ -262,6 +269,12 @@ fn campfire_docker_smoke_caches_apt_for_eight_hours_and_always_builds() {
     assert!(
         script.contains("GET /first_run") && script.contains("GET /account/logo"),
         "HTTP checks must always run"
+    );
+    assert!(
+        script.contains("seq 1 90")
+            && script.contains("did not become ready")
+            && script.contains("http_code"),
+        "readiness must wait longer than 30s and retry status curls (curl exit 56 flake)"
     );
     assert!(
         !script.contains("sccache") && !script.contains("CCACHE"),
@@ -987,8 +1000,11 @@ fn campfire_failure_capture_keeps_the_original_exit_and_actual_c() {
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let root =
-            std::env::temp_dir().join(format!("campfire-ci {}-{unique}", std::process::id()));
+        // Canonical: macOS's temp dir is a symlink, and the script reports the real path.
+        let root = std::env::temp_dir()
+            .canonicalize()
+            .unwrap()
+            .join(format!("campfire-ci {}-{unique}", std::process::id()));
         let source = root.join("build/campfire-compare-spinel");
         fs::create_dir_all(source.join("app/models")).unwrap();
         fs::create_dir_all(source.join("sig")).unwrap();
@@ -1219,11 +1235,6 @@ fn pr_reuse_never_masks_validation_failures_or_changes_the_job_graph() {
                 assert_eq!(job["needs"][1].as_str(), Some("plan"));
                 &["build", "check"]
             }
-            "writebook-inventory" => {
-                assert!(job.get("continue-on-error").is_none());
-                assert_eq!(job["needs"].as_str(), Some("plan"));
-                &["inventory", "report"]
-            }
             "browser-smoke-typescript" => {
                 assert!(job.get("continue-on-error").is_none());
                 assert_eq!(job["needs"][0].as_str(), Some("generate-fixture"));
@@ -1280,8 +1291,7 @@ fn pr_reuse_never_masks_validation_failures_or_changes_the_job_graph() {
             "browser-smoke-typescript",
             "smoke",
             "smoke-extra",
-            "store-check",
-            "writebook-inventory"
+            "store-check"
         ]
     );
     assert!(ci["on"].get("pull_request_target").is_none());
@@ -1398,7 +1408,7 @@ fn pr_reuse_receipts_are_checked_against_adversarial_inputs() {
 fn reused_checks_keep_cargo_dependencies_locked_and_upload_only_execution_receipts() {
     let ci: serde_yaml_ng::Value =
         serde_yaml_ng::from_str(&fs::read_to_string(".github/workflows/ci.yml").unwrap()).unwrap();
-    for (name, expected_cargo_commands) in [("store-check", 1), ("writebook-inventory", 1)] {
+    for (name, expected_cargo_commands) in [("store-check", 1)] {
         let steps = ci["jobs"][name]["steps"].as_sequence().unwrap();
         let commands: Vec<_> = steps
             .iter()

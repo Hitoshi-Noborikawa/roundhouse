@@ -4,6 +4,8 @@
 
 #[path = "support/emit_and_run.rs"]
 mod emit_and_run;
+#[path = "support/test_subprocess.rs"]
+mod test_subprocess;
 
 use roundhouse::project::BuildTarget;
 use std::process::Command;
@@ -217,19 +219,26 @@ Db.close
         );
         success(Command::new(dir.join("bind_values")).current_dir(&*dir));
     } else {
-        success(Command::new("ruby").arg("bind_values.rb").current_dir(&*dir));
+        let ruby = if target == BuildTarget::Jruby { "jruby" } else { "ruby" };
+        success(Command::new(ruby).arg("bind_values.rb").current_dir(&*dir));
     }
 }
 
 #[test]
 fn typed_values_ruby() {
-    emitted("typed_values_ruby", BuildTarget::Ruby);
+    emitted(test_subprocess::name!("typed_values_ruby"), BuildTarget::Ruby);
 }
 
 #[test]
 #[ignore = "requires Spinel (SPINEL=/path/to/spinel)"]
 fn typed_values_spinel() {
-    emitted("typed_values_spinel", BuildTarget::Spinel);
+    emitted(test_subprocess::name!("typed_values_spinel"), BuildTarget::Spinel);
+}
+
+#[test]
+#[ignore = "requires JRuby 10+ and jdbc-sqlite3"]
+fn typed_values_jruby() {
+    emitted(test_subprocess::name!("typed_values_jruby"), BuildTarget::Jruby);
 }
 
 #[test]
@@ -255,7 +264,7 @@ fn date_predicates_ruby() {
     if std::env::var_os("ROUNDHOUSE_BINDS_CHILD").is_none() {
         for mode in ["0", "1"] {
             success(Command::new(std::env::current_exe().unwrap())
-                .args(["--exact", "date_predicates_ruby", "--nocapture"])
+                .args(["--exact", test_subprocess::name!("date_predicates_ruby"), "--nocapture"])
                 .env("ROUNDHOUSE_BINDS_CHILD", "1").env("ROUNDHOUSE_PARAM_BINDS", mode));
         }
         return;

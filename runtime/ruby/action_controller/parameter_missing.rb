@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 # ActionController::ParameterMissing — raised by `Params.require_key`
 # when a required parameter is absent or blank, and RESCUED by app code
 # as a normal path (a controller turns it into a 400 rather than letting
@@ -29,6 +30,20 @@ module ActionController
   # through it — an undefined name there turns every other error the
   # action raises into a NameError that hides the real one.
   class UnpermittedParameters < StandardError
+  end
+
+  # Raised by app code to answer 400; the dispatchers rescue it beside `ParameterMissing`, as Rails' rescue_responses do.
+  class BadRequest < StandardError
+    def initialize(msg = "ActionController::BadRequest")
+      super(msg)
+    end
+  end
+
+  # Raised by app code to answer 422; the dispatchers map it the way Rails' rescue_responses do.
+  class InvalidAuthenticityToken < StandardError
+    def initialize(msg = "ActionController::InvalidAuthenticityToken")
+      super(msg)
+    end
   end
 
   class UnknownFormat < StandardError
