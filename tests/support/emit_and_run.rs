@@ -258,6 +258,24 @@ impl Overlay {
         (scratch, source)
     }
 
+    /// The errors `roundhouse check` reports for the overlaid app: analysis
+    /// alone, with no lowering, so a call the lowering would answer still
+    /// reads as written.
+    pub fn check_errors(self) -> Vec<String> {
+        let (scratch, source) = self.materialize();
+        let (app, ingest_diags) = roundhouse::ingest::prism::scope(|| ingest_app(&source));
+        let mut app = app.expect("ingest the overlaid fixture");
+        roundhouse::analyze::Analyzer::new(&app).analyze(&mut app);
+        let errors = ingest_diags
+            .into_iter()
+            .chain(diagnose(&app))
+            .filter(|d| d.severity == Severity::Error)
+            .map(|d| format!("{:?}: {}", d.span, d.message))
+            .collect();
+        let _ = std::fs::remove_dir_all(&scratch);
+        errors
+    }
+
     /// The warnings ingesting the overlaid app reports.
     pub fn ingest_warnings(self) -> Vec<String> {
         let (scratch, source) = self.materialize();
@@ -268,10 +286,13 @@ impl Overlay {
 
     fn emit_app_tree(self, target: BuildTarget) -> (PathBuf, roundhouse::App, Vec<Diagnostic>) {
         let (scratch, source) = self.materialize();
-        let mut app = ingest_app(&source).expect("ingest the overlaid fixture");
+        // As the CLI does: an error ingest reports gates the emit too.
+        let (app, ingest_diags) = roundhouse::ingest::prism::scope(|| ingest_app(&source));
+        let mut app = app.expect("ingest the overlaid fixture");
         let lower_diags = roundhouse::session::analyze_and_lower(&mut app);
-        let mut errors: Vec<_> = diagnose(&app)
+        let mut errors: Vec<_> = ingest_diags
             .into_iter()
+            .chain(diagnose(&app))
             .chain(lower_diags)
             .filter(|d| d.severity == Severity::Error)
             .collect();
@@ -392,7 +413,9 @@ pub fn ruby() -> Command {
 fn scratch_dir() -> PathBuf {
     static NEXT: AtomicUsize = AtomicUsize::new(0);
     loop {
-        let dir = std::env::temp_dir().join(format!(
+        // Resolved, so paths a child Ruby reports (`__dir__` is a realpath)
+        // match on macOS, where $TMPDIR sits under /var -> /private/var.
+        let dir = std::env::temp_dir().canonicalize().unwrap().join(format!(
             "roundhouse-emit-and-run-{}-{}",
             std::process::id(),
             NEXT.fetch_add(1, Ordering::Relaxed)
