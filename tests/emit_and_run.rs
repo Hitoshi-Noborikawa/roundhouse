@@ -15852,6 +15852,46 @@ end
 }
 
 #[test]
+fn inertia_location_is_a_conflict_for_an_inertia_visit() {
+    emit_and_run::real_blog()
+        .edit(
+            "config/routes.rb",
+            "  root \"articles#index\"\n",
+            "  root \"articles#index\"\n  get \"/pages/away\", to: \"pages#away\"\n",
+        )
+        .write(
+            "app/controllers/pages_controller.rb",
+            r#"class PagesController < ApplicationController
+  def away
+    inertia_location "https://example.com/away"
+  end
+end
+"#,
+        )
+        .write(
+            "test/controllers/pages_controller_test.rb",
+            r#"require "test_helper"
+
+class PagesControllerTest < ActionDispatch::IntegrationTest
+  test "an Inertia visit is a 409 with the external url" do
+    get "/pages/away", headers: { "X-Inertia" => "true" }
+    assert_response 409
+    assert_equal "https://example.com/away", response.headers["X-Inertia-Location"]
+  end
+
+  test "a normal visit redirects to the external url" do
+    get "/pages/away"
+    assert_response 302
+    assert_equal "https://example.com/away", response.headers["Location"]
+  end
+end
+"#,
+        )
+        .run_test("test/controllers/pages_controller_test.rb")
+        .assert_passes();
+}
+
+#[test]
 fn render_inertia_answers_html_and_json_visits() {
     emit_and_run::real_blog()
         .edit(

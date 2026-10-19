@@ -5589,6 +5589,18 @@ fn inertia_preserve_fragment_redirect_is_not_a_survey_gap() {
 }
 
 #[test]
+fn inertia_location_is_a_controller_method() {
+    let mut files = INERTIA_APP.to_vec();
+    files[5] = (
+        "app/controllers/widgets_controller.rb",
+        "class WidgetsController < ApplicationController\n  def show\n    inertia_location \"https://example.com/away\"\n  end\nend\n",
+    );
+    let (errors, gaps) = inertia_check(&files);
+    assert!(errors.is_empty(), "{errors:#?}");
+    assert!(gaps.is_empty(), "{gaps:#?}");
+}
+
+#[test]
 fn an_inertia_share_that_is_not_lowered_is_one_survey_gap() {
     for share in [
         "  inertia_share do\n    { widgetCount: Widget.count }\n  end\n",

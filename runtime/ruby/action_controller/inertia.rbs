@@ -45,6 +45,7 @@ module ActionController
     def inertia_errors_json: (String json) -> nil
     def inertia_clear_history: (bool flag) -> nil
     def inertia_preserve_fragment: (bool flag) -> nil
+    def inertia_location: (String url) -> nil
     def inertia_url: () -> String
     def render_inertia_json: (?status: Symbol) -> nil
     def inertia_redirect_see_other: () -> nil

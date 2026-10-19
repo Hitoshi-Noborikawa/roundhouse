@@ -249,6 +249,20 @@ module ActionController
       nil
     end
 
+    # An Inertia visit cannot follow an external redirect. The protocol
+    # answer is 409 with X-Inertia-Location. A non-Inertia request is a
+    # normal 302. `redirect_to` refuses another host, and this method
+    # exists to send one, so the location is set directly.
+    def inertia_location(url)
+      if inertia_request?
+        headers["X-Inertia-Location"] = url
+        head(:conflict)
+      else
+        head(:found, location: url)
+      end
+      nil
+    end
+
     def inertia_url
       req = request
       return "/" if req.nil?
