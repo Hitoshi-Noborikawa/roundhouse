@@ -167,9 +167,9 @@ fn walk_stmt(stmt: &Expr, ctx: &ViewCtx) -> Vec<Expr> {
             )]
         }
         // Conditional branching at the template level. Cond goes
-        // through `rewrite_predicates` so Rails-style `.present?` /
-        // `.any?` / `.none?` / `.blank?` collapse to the
-        // `.empty?`-based forms spinel's runtime expects.
+        // through `rewrite_predicates`: `.blank?` / `.present?` become
+        // `(recv || "").empty?`, and `.any?` / `.none?` / `.empty?`
+        // become collection `empty?`.
         ExprNode::If { cond, then_branch, else_branch } => {
             let then_seq = walk_body(then_branch, ctx);
             let then_body = if then_seq.len() == 1 {

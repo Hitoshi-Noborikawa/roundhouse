@@ -144,6 +144,25 @@ class Routing(unittest.TestCase):
             any("campfire" in job for job in plan["jobs"] if job not in ci.BASE)
         )
 
+    def test_sidekiq_live_runs_only_when_the_push_or_its_client_changes(self):
+        for path in [
+            "runtime/spinel/sidekiq_push.rb",
+            "runtime/spinel/sidekiq/sidekiq_redis.rb",
+            "runtime/ruby/active_job.rb",
+            "tests/sidekiq_push_live.rs",
+            "tests/sidekiq_push_live/reader.rb",
+        ]:
+            with self.subTest(path=path):
+                plan = ci.select([path])
+                self.assertIn("sidekiq-live", plan["jobs"])
+                self.assertIn("spinel-build", plan["jobs"])
+                self.assertIn("sidekiq-live", plan["advisory"])
+                self.assertNotIn("sidekiq-live", plan["required"])
+        for path in ["runtime/spinel/sidekiq_redis.rb", "runtime/spinel/db.rb", "src/ingest/app.rs"]:
+            with self.subTest(path=path):
+                self.assertNotIn("sidekiq-live", ci.select([path])["jobs"])
+        self.assertIn("sidekiq-live", ci.select([], full=True)["jobs"])
+
     def test_shared_runtime_rb_and_rbs_select_framework_native_coverage(self):
         for path in ["runtime/ruby/active_record.rb", "runtime/ruby/test/model.rbs"]:
             with self.subTest(path=path):
@@ -376,6 +395,60 @@ class Routing(unittest.TestCase):
             self.assertIn("compare-extra", plan["jobs"])
             self.assertTrue(set(ci.SPINEL11).issubset(plan["jobs"]))
 
+    def test_a_ci_full_marker_line_on_a_main_push_plans_full(self):
+        main = {"GITHUB_EVENT_NAME": "push", "GITHUB_REF": "refs/heads/main"}
+        changed = {"return_value": (["src/emit/go.rs"], None)}
+        # The marker on an earlier commit of a multi-commit push counts.
+        event = {
+            "before": "0" * 40,
+            "commits": [
+                {"id": "a" * 40, "message": "Fix a lowering\n\n[ci full]\n\nCo-Authored-By: x"},
+                {"id": "b" * 40, "message": "Follow-up"},
+            ],
+        }
+        plan = self.run_planner(event, main, changed)["plan"]
+        self.assertIn("compare-extra", plan["jobs"])
+        self.assertEqual(plan["smoke_extra"], list(ci.EXTRA_COMPARE_TARGETS))
+        self.assertTrue(plan["extras_advisory"])
+        self.assertTrue(set(ci.SPINEL11).issubset(plan["jobs"]))
+        self.assertIn(f"[ci full] in commit {'a' * 12}", plan["reasons"])
+
+    def test_a_ci_full_marker_must_be_a_line_of_its_own(self):
+        main = {"GITHUB_EVENT_NAME": "push", "GITHUB_REF": "refs/heads/main"}
+        changed = {"return_value": (["src/emit/go.rs"], None)}
+        for message in (
+            "Add the [ci full] marker",
+            "Document it\n\nA line reading `[ci full]` asks for full validation.",
+            "[ci full] in the subject",
+        ):
+            event = {"before": "0" * 40, "head_commit": {"id": "c" * 40, "message": message}}
+            plan = self.run_planner(event, main, changed)["plan"]
+            self.assertEqual(plan["jobs"], ci.SPINEL_LANE, message)
+            self.assertNotIn("compare-extra", plan["jobs"], message)
+
+    def test_a_ci_full_marker_is_ignored_off_a_main_push(self):
+        message = {"id": "d" * 40, "message": "Fix\n\n[ci full]\n"}
+        pr = {
+            "pull_request": {"number": 1, "labels": [], "draft": False},
+            "commits": [message],
+            "head_commit": message,
+        }
+        outputs = self.run_planner(
+            pr,
+            {"GITHUB_EVENT_NAME": "pull_request", "GITHUB_REF": "refs/pull/1/merge"},
+            {"return_value": (["src/emit/go.rs"], None)},
+        )
+        self.assertNotIn("campfire-latest", outputs["plan"]["jobs"])
+        self.assertFalse(outputs["plan"]["wasm"])
+        self.assertEqual(outputs["plan"]["smoke_extra"], ["go"])
+        branch = self.run_planner(
+            {"before": "0" * 40, "commits": [message]},
+            {"GITHUB_EVENT_NAME": "push", "GITHUB_REF": "refs/heads/topic"},
+            {"return_value": (["src/emit/go.rs"], None)},
+        )
+        self.assertFalse(branch["plan"]["wasm"])
+        self.assertEqual(branch["plan"]["smoke_extra"], ["go"])
+
     def test_unknown_changed_inputs_keep_ruby_and_spinel(self):
         with tempfile.TemporaryDirectory() as directory:
             event = Path(directory) / "event.json"
@@ -578,6 +651,7 @@ class Routing(unittest.TestCase):
                 "spinel_db_lease",
                 *ci.PARAM_BIND_TESTS,
                 "spinel_stmt_cache_lru",
+                "stmt_stats",
                 "db_sqlite_concurrency",
             ],
         )
@@ -588,6 +662,7 @@ class Routing(unittest.TestCase):
                 "spinel_db_lease",
                 *ci.PARAM_BIND_TESTS,
                 "spinel_stmt_cache_lru",
+                "stmt_stats",
                 "db_sqlite_concurrency",
             ],
         )
@@ -683,6 +758,13 @@ class Routing(unittest.TestCase):
                     self.assertEqual(plan["spinel_tests"], [suite])
                     self.assertIn("spinel-framework", plan["jobs"])
 
+    def test_statement_stats_drivers_select_the_native_harness(self):
+        for path in ["tests/stmt_stats.rs", "tests/stmt_stats.rb"]:
+            with self.subTest(path=path):
+                plan = ci.select([path])
+                self.assertEqual(plan["spinel_tests"], ["stmt_stats"])
+                self.assertIn("spinel-framework", plan["jobs"])
+
     def test_jdbc_bind_inputs_select_the_jruby_contract_job(self):
         for path in [
             "tests/param_binds_jruby.rb",
@@ -747,24 +829,34 @@ class Routing(unittest.TestCase):
                 "spinel_web_push_crypto",
                 "rails_compat_vectors_spinel",
                 "active_job_payload",
+                "sidekiq_push",
             ],
-            # The payload gate's driver loads these beside it.
-            "runtime/ruby/active_job.rb": ["framework_tests_spinel", "active_job_payload"],
+            # The payload and Sidekiq push gates' drivers load these beside them.
+            "runtime/ruby/active_job.rb": [
+                "framework_tests_spinel",
+                "active_job_payload",
+                "sidekiq_push",
+            ],
             "runtime/spinel/active_job_serialization.rb": [
                 "framework_tests_spinel",
                 "active_job_payload",
+                "sidekiq_push",
             ],
             "runtime/spinel/global_id_locator.rb": [
                 "framework_tests_spinel",
                 "active_job_payload",
+                "sidekiq_push",
             ],
+            "runtime/spinel/sidekiq_push.rb": ["framework_tests_spinel", "sidekiq_push"],
             "tests/active_job_payload/driver.rb": ["active_job_payload"],
             "tests/active_job_payload/rails.json": ["active_job_payload"],
+            "tests/sidekiq_push/driver.rb": ["sidekiq_push"],
+            "tests/sidekiq_push/sidekiq.json": ["sidekiq_push"],
             "tests/spinel_db_lease.rb": ["spinel_db_lease"],
             "tests/spinel_stmt_cache_lru.rb": ["spinel_stmt_cache_lru"],
             "tests/support/db_concurrency_spinel.rb": ["db_sqlite_concurrency"],
             "runtime/spinel/db.rb": [
-                "spinel_db_lease", *ci.PARAM_BIND_TESTS, "spinel_stmt_cache_lru",
+                "spinel_db_lease", *ci.PARAM_BIND_TESTS, "spinel_stmt_cache_lru", "stmt_stats",
                 "db_sqlite_concurrency",
             ],
             "runtime/spinel/sqlite_adapter.rb": [
@@ -772,10 +864,11 @@ class Routing(unittest.TestCase):
                 "spinel_db_lease",
                 *ci.PARAM_BIND_TESTS,
                 "spinel_stmt_cache_lru",
+                "stmt_stats",
                 "db_sqlite_concurrency",
             ],
             "runtime/spinel/active_support_time_parsing.rb": [
-                "spinel_db_lease", *ci.PARAM_BIND_TESTS, "spinel_stmt_cache_lru",
+                "spinel_db_lease", *ci.PARAM_BIND_TESTS, "spinel_stmt_cache_lru", "stmt_stats",
                 "db_sqlite_concurrency", "spinel_pg_db",
             ],
             # The PostgreSQL shim owns only its own gate, not the SQLite
@@ -787,7 +880,7 @@ class Routing(unittest.TestCase):
             "tests/spinel_pg_db_cases.rb": ["spinel_pg_db"],
             "runtime/ruby/db.rbs": [
                 "framework_tests_spinel",
-                "spinel_db_lease", *ci.PARAM_BIND_TESTS, "spinel_stmt_cache_lru",
+                "spinel_db_lease", *ci.PARAM_BIND_TESTS, "spinel_stmt_cache_lru", "stmt_stats",
                 "db_sqlite_concurrency", "spinel_pg_db",
             ],
             "runtime/spinel/date.rb": ["date_columns_spinel"],
@@ -839,6 +932,7 @@ class Routing(unittest.TestCase):
                 "spinel_db_lease",
                 *ci.PARAM_BIND_TESTS,
                 "spinel_stmt_cache_lru",
+                "stmt_stats",
                 "db_sqlite_concurrency",
             ],
         )

@@ -61,6 +61,8 @@ mod pagy;
 mod send;
 pub(crate) use send::PARAM_VALUE;
 pub(crate) use send::{indexed_pluck, string_answers};
+#[cfg(test)]
+pub(crate) use send::counted_first_last;
 
 /// Typed constants for generated expressions without Ruby source spans.
 /// The class's constants shadow the shared app registry. Source-backed
@@ -378,6 +380,7 @@ pub struct BodyTyper<'a> {
     /// The app's translations; Rails' English when absent.
     i18n: Option<&'a crate::i18n::Catalog>,
     helper_modules: Option<&'a std::collections::HashSet<ClassId>>,
+    open_classes: Option<&'a crate::analyze::open_classes::OpenClasses>,
 }
 
 impl<'a> BodyTyper<'a> {
@@ -501,11 +504,27 @@ impl<'a> BodyTyper<'a> {
     }
 
     pub fn new(classes: &'a HashMap<ClassId, ClassInfo>) -> Self {
-        Self { classes, materialized_associations: None, const_resolver: None, typed_constants: None, data_factories: None, class_factories: None, inquirers: None, i18n: None, helper_modules: None }
+        Self {
+            classes,
+            materialized_associations: None,
+            const_resolver: None,
+            typed_constants: None,
+            data_factories: None,
+            class_factories: None,
+            inquirers: None,
+            i18n: None,
+            helper_modules: None,
+            open_classes: None,
+        }
     }
 
     pub(crate) fn with_materialized_associations(mut self, names: &'a std::collections::HashSet<Symbol>) -> Self {
         self.materialized_associations = Some(names);
+        self
+    }
+
+    pub(crate) fn with_open_classes(mut self, open: &'a crate::analyze::open_classes::OpenClasses) -> Self {
+        self.open_classes = Some(open);
         self
     }
 
@@ -1428,7 +1447,17 @@ impl<'a> BodyTyper<'a> {
                     Some(r) => Some(self.analyze_expr(r, ctx)),
                     None => ctx.self_ty.clone(),
                 };
-                self.dispatch(recv_ty.as_ref(), name, None, &[])
+                let instance_receiver = recv.as_ref().map_or(ctx.instance_body, |r| self.is_instance(r, ctx))
+                    && recv_ty.as_ref().is_some_and(instance_shaped);
+                let dispatched = self.dispatch(recv_ty.as_ref(), name, None, &[]);
+                if matches!(dispatched, Ty::Var { .. })
+                    && let Some(Ty::Class { id, .. }) = recv_ty.as_ref()
+                    && self.open_classes.is_some_and(|o| o.open(id, !instance_receiver).is_some())
+                {
+                    Ty::Untyped
+                } else {
+                    dispatched
+                }
             }
 
             ExprNode::Apply { fun, args, block } => {
@@ -1516,6 +1545,14 @@ impl<'a> BodyTyper<'a> {
                     // args (the runtime's number_with_precision builds
                     // its format string dynamically).
                     if matches!(method.as_str(), "format" | "sprintf") {
+                        for a in args.iter_mut() { self.analyze_expr(a, ctx); }
+                        return Ty::Str;
+                    }
+                    // Kernel#` - a backtick / `%x{}` shell-out (ingest
+                    // spells the literal as this call): the command's
+                    // standard output, a String, with `$?` set. An app class
+                    // that defines its own ` is dispatched to it instead.
+                    if method.as_str() == "`" && args.len() == 1 && !self.app_defines_on_side(ctx.self_ty.as_ref(), method, ctx.instance_body) {
                         for a in args.iter_mut() { self.analyze_expr(a, ctx); }
                         return Ty::Str;
                     }
@@ -1930,8 +1967,15 @@ impl<'a> BodyTyper<'a> {
                 }
                 let instance_receiver = recv.as_ref().map_or(ctx.instance_body, |r| self.is_instance(r, ctx))
                     && recv_ty.as_ref().is_some_and(instance_shaped);
-                let dispatched =
+                let mut dispatched =
                     self.dispatch_on(recv_ty.as_ref(), method, block_ret.as_ref(), args, instance_receiver);
+                // Not a dispatch miss: a class that defines methods under computed names answers what its own code defines when it runs.
+                if matches!(dispatched, Ty::Var { .. })
+                    && let Some(Ty::Class { id, .. }) = recv_ty.as_ref()
+                    && self.open_classes.is_some_and(|o| o.open(id, !instance_receiver).is_some())
+                {
+                    dispatched = Ty::Untyped;
+                }
                 // Not left to the positional constructor: since Ruby 3.2 a Struct takes keywords too, which it would bind to its first member.
                 if method.as_str() == "new"
                     && expr.diagnostic.is_none()
@@ -2025,7 +2069,7 @@ impl<'a> BodyTyper<'a> {
                 // An `app/helpers` module runs in the view, so its `t` is ActionView's (with no template for a lazy key).
                 let in_helper = !ctx.class_side
                     && matches!(ctx.self_ty.as_ref(), Some(Ty::Class { id, .. }) if self.helper_modules.is_some_and(|h| h.contains(id)));
-                let helper_copy = expr.decisions & crate::expr::HELPER_COPY_TRANSLATE != 0;
+                let helper_copy = expr.decisions & (crate::expr::HELPER_COPY_TRANSLATE | crate::expr::HELPER_BODY_TRANSLATE) != 0;
                 let site = match (&scope, ctx.in_view) {
                     (_, true) => crate::lower::i18n_translate::Site::View(ctx.view_name.as_ref().map(|v| v.as_str())),
                     _ if helper_copy => crate::lower::i18n_translate::Site::View(None),

@@ -22,6 +22,8 @@ mod emit_and_run;
 mod nested_classes;
 #[path = "support/array_methods.rs"]
 mod array_methods;
+#[path = "support/truthiness.rs"]
+mod truthiness;
 
 use roundhouse::emit::typescript;
 use roundhouse::ingest::ingest_app;
@@ -322,4 +324,31 @@ fn real_blog_number_methods_run_under_tsx() {
         "import { NumberProbe } from \"./app/models/number_probe.js\";\nconsole.log(JSON.stringify(NumberProbe.run(7, 2, 2.5, [0])));\n",
     );
     assert_eq!(out, array_methods::NUMBER_EXPECTED);
+}
+
+#[test]
+#[ignore]
+fn real_blog_string_methods_run_under_tsx() {
+    // Width padding, character-set specs (`a-z`, `^l`, intersections) and
+    // the not-found answers Ruby gives.
+    let (emitted, errors) = array_methods::overlay().emit(roundhouse::project::BuildTarget::Typescript);
+    assert!(errors.is_empty(), "{errors:?}");
+    let out = run_under_tsx(
+        &emitted,
+        "import { StringProbe } from \"./app/models/string_probe.js\";\nconsole.log(JSON.stringify(StringProbe.run(\"hello\", \"  aa--bbb-\\n\", \"*\")));\n",
+    );
+    assert_eq!(out, array_methods::STRING_EXPECTED);
+}
+
+#[test]
+#[ignore]
+fn real_blog_ruby_truthiness_runs_under_tsx() {
+    // `0` and `""` are true, `0 || 5` is 0, and a predicate block keeps them.
+    let (emitted, errors) = truthiness::overlay().emit(roundhouse::project::BuildTarget::Typescript);
+    assert!(errors.is_empty(), "{errors:?}");
+    let out = run_under_tsx(
+        &emitted,
+        "import { TruthProbe } from \"./app/models/truth_probe.js\";\nconsole.log(JSON.stringify(TruthProbe.run(0, \"\", null, false, [], [\"\", \"a\"])));\n",
+    );
+    assert_eq!(out, truthiness::EXPECTED);
 }

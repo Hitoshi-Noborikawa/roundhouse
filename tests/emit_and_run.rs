@@ -7,6 +7,10 @@
 
 #[path = "support/emit_and_run.rs"]
 mod emit_and_run;
+#[path = "emit_and_run/date_calendar_duration.rs"]
+mod date_calendar_duration;
+#[path = "emit_and_run/utc_zone_time.rs"]
+mod utc_zone_time;
 #[path = "emit_and_run/discard.rs"]
 mod discard;
 #[path = "emit_and_run/pay_exceptions.rs"]
@@ -43,6 +47,10 @@ mod job_rest_params;
 mod regexp_constants;
 #[path = "emit_and_run/upsert.rs"]
 mod upsert;
+#[path = "support/relation_fork.rs"]
+mod relation_fork_contract;
+#[path = "emit_and_run/relation_fork.rs"]
+mod relation_fork;
 #[path = "emit_and_run/controller_sibling_classes.rs"]
 mod controller_sibling_classes;
 #[path = "emit_and_run/i18n_locales.rs"]
@@ -77,6 +85,8 @@ mod vary_accept_contract;
 mod vary_accept;
 #[path = "emit_and_run/strong_params.rs"]
 mod strong_params;
+#[path = "emit_and_run/parameter_defaults.rs"]
+mod parameter_defaults;
 #[path = "emit_and_run/params_wrapper.rs"]
 mod params_wrapper;
 #[path = "support/stdlib_rnp.rs"]
@@ -140,6 +150,10 @@ mod delegate_association;
 mod io_process_constants_contract;
 #[path = "emit_and_run/io_process_constants.rs"]
 mod io_process_constants;
+#[path = "support/backticks.rs"]
+mod backticks_contract;
+#[path = "emit_and_run/backticks.rs"]
+mod backticks;
 #[path = "support/json_params.rs"]
 mod json_params_contract;
 #[path = "emit_and_run/json_params.rs"]
@@ -210,6 +224,8 @@ mod conditional_get;
 mod nil_body_length;
 #[path = "emit_and_run/inline_filter_guard.rs"]
 mod inline_filter_guard;
+#[path = "emit_and_run/before_action_return.rs"]
+mod before_action_return;
 #[path = "emit_and_run/sti_global_id.rs"]
 mod sti_global_id;
 #[path = "support/campfire_caches.rs"]
@@ -228,6 +244,10 @@ mod config_require_relative;
 mod defined_const_fold;
 #[path = "emit_and_run/job_payload.rs"]
 mod job_payload;
+#[path = "emit_and_run/sidekiq_push.rs"]
+mod sidekiq_adapter;
+#[path = "emit_and_run/silent_lowerings.rs"]
+mod silent_lowerings;
 
 #[test]
 fn markdown_templates_render_with_their_mime_type_and_erb_escaping() {
@@ -347,6 +367,77 @@ end
         )
         .run_test("test/models/generated_column_article_test.rb")
         .assert_passes();
+}
+
+/// `stub_const` is lowered to a value stack beside the constant, so it
+/// means the same on a target that resolves constants at build time:
+/// reads see the stub inside the block, nested stubs unwind in order,
+/// and a raising block still restores. The CRuby harness also has a
+/// `const_set` helper; the emitted text shows this ran through the
+/// lowering instead.
+#[test]
+fn stub_const_replaces_a_constant_for_its_block_and_restores_it() {
+    let run = emit_and_run::real_blog()
+        .write(
+            "app/models/page_limits.rb",
+            "class PageLimits\n  SIZE = 40\n\n  def self.size\n    SIZE\n  end\nend\n",
+        )
+        .edit(
+            "app/models/article.rb",
+            "  validates :body, presence: true, length: { minimum: 10 }\n",
+            concat!(
+                "  validates :body, presence: true, length: { minimum: 10 }\n\n",
+                "  EXCERPT = 12\n\n",
+                "  def excerpt\n    body[0, EXCERPT]\n  end\n",
+            ),
+        )
+        .write(
+            "test/models/stub_const_test.rb",
+            r#"require "test_helper"
+
+class StubConstTest < ActiveSupport::TestCase
+  test "a stub holds for its block, nests, and is put back" do
+    assert_equal 40, PageLimits.size
+    stub_const(PageLimits, :SIZE, 2) do
+      assert_equal 2, PageLimits.size
+      stub_const(PageLimits, :SIZE, 3) do
+        assert_equal 3, PageLimits.size
+      end
+      assert_equal 2, PageLimits.size
+    end
+    assert_equal 40, PageLimits.size
+  end
+
+  test "a raising block still restores the constant" do
+    assert_raises(RuntimeError) do
+      stub_const(PageLimits, :SIZE, 5) { raise "boom" }
+    end
+    assert_equal 40, PageLimits.size
+  end
+
+  test "a model's own constant is stubbed where the model reads it" do
+    article = Article.new(title: "Stubbed", body: "A sufficiently long article body.")
+    assert_equal "A sufficient", article.excerpt
+    stub_const(Article, :EXCERPT, 3) do
+      assert_equal "A s", article.excerpt
+    end
+    assert_equal "A sufficient", article.excerpt
+  end
+end
+"#,
+        )
+        .run_test("test/models/stub_const_test.rb");
+    run.assert_passes();
+    let test = std::fs::read_to_string(run.emitted.join("test/models/stub_const_test.rb"))
+        .expect("emitted stub_const test");
+    assert!(!test.contains("stub_const("), "{test}");
+    assert!(test.contains("PageLimits::SIZE_STUB_STACK.push(2)"), "{test}");
+    let limits = std::fs::read_to_string(run.emitted.join("app/models/page_limits.rb"))
+        .expect("emitted PageLimits");
+    assert!(limits.contains("SIZE_STUB_STACK = [PageLimits::SIZE]"), "{limits}");
+    let article = std::fs::read_to_string(run.emitted.join("app/models/article.rb"))
+        .expect("emitted Article");
+    assert!(article.contains("Article::EXCERPT_STUB_STACK.last"), "{article}");
 }
 
 /// The same anonymous keyword packet survives defaulting, local-name
@@ -3224,6 +3315,29 @@ fn dry_validation_load_paths_stay_in_the_app_and_refusals_fail_strict_ingest() {
     assert!(ledger.iter().all(|e| !e.contains("FarContract")), "{ledger:#?}");
 }
 
+/// A schema reference that does not resolve (`filled(MissingContract.schema)`)
+/// is ledgered as the missing schema, not as an unread type.
+#[test]
+fn dry_validation_an_unresolved_schema_reference_names_the_schema() {
+    let tree: std::collections::HashMap<std::path::PathBuf, Vec<u8>> = [
+        (
+            "app/contracts/checkout_contract.rb",
+            "class CheckoutContract < Dry::Validation::Contract\n  params do\n    required(:address).filled(MissingContract.schema)\n  end\nend\n",
+        ),
+        ("config/routes.rb", "Rails.application.routes.draw do\nend\n"),
+    ]
+    .into_iter()
+    .map(|(p, s)| (std::path::PathBuf::from(p), s.as_bytes().to_vec()))
+    .collect();
+    roundhouse::ingest::survey::activate();
+    roundhouse::ingest::ingest_app_from_tree(tree).expect("survey ingest");
+    let ledger: Vec<String> = roundhouse::ingest::survey::drain().iter().map(|e| e.to_string()).collect();
+    assert!(
+        ledger.iter().any(|e| e.contains("CheckoutContract") && e.contains("schema `MissingContract.schema`")),
+        "{ledger:#?}"
+    );
+}
+
 /// `:time` and `:date_time` coerce with `Time.parse` and `DateTime`,
 /// which Spinel's tree does not have: reported for it, not emitted to
 /// fail. The fixture's dates and decimals are not.
@@ -4886,6 +5000,102 @@ class ArticlesControllerTest < ActionDispatch::IntegrationTest
   end
 end
 "##;
+
+/// `notice.present?` in the scaffold views lowers to the shared nil
+/// guard `!(notice || "").empty?`. Each target has to keep the coalesce
+/// whole as the receiver and leave `notice` readable for the paragraph
+/// after it: Kotlin printed `notice ?: "".isEmpty()`, Elixir
+/// `notice || "" == ""` (never true for a notice), and Rust moved
+/// `notice` into `unwrap_or`.
+fn notice_guard_app() -> emit_and_run::Overlay {
+    emit_and_run::real_blog().edit(
+        CONTROLLER_TEST,
+        "    assert_redirected_to article_url(Article.last)\n",
+        "    assert_redirected_to article_url(Article.last)\n    \
+           get article_url(Article.last)\n    \
+           assert_select \"#notice\", \"Article was successfully created.\"\n",
+    )
+}
+
+#[test]
+fn a_nullable_present_guard_test_passes() {
+    notice_guard_app().run_test(CONTROLLER_TEST).assert_passes();
+}
+
+/// Rust and Elixir test clients do not carry the flash to the next
+/// request, so these render the index view with and without a notice.
+#[test]
+#[ignore = "requires the Rust toolchain; compiles and executes an emitted app"]
+fn a_nullable_present_guard_runs_on_rust() {
+    let (emitted, errors) = emit_and_run::real_blog().emit(roundhouse::project::BuildTarget::Rust);
+    assert!(errors.is_empty(), "{errors:?}");
+    std::fs::create_dir_all(emitted.join("tests")).unwrap();
+    std::fs::write(emitted.join("tests/notice_guard.rs"), r#"
+use app::views::Articles;
+
+#[test]
+fn a_present_notice_is_shown_and_an_absent_one_is_not() {
+    let shown = Articles::index(vec![], Some("Saved".to_string()), None);
+    assert!(shown.contains("id=\"notice\">Saved</p>"), "{shown}");
+    for absent in [None, Some(String::new())] {
+        let page = Articles::index(vec![], absent, None);
+        assert!(!page.contains("id=\"notice\""), "{page}");
+    }
+}
+"#).unwrap();
+    let output = std::process::Command::new("cargo")
+        .args(["test", "--test", "notice_guard"])
+        .env_remove("CARGO_TARGET_DIR")
+        .current_dir(&*emitted)
+        .output()
+        .expect("run the emitted Rust project's test");
+    assert!(output.status.success(), "{}\n{}\n{}", emitted.display(),
+        String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+}
+
+#[test]
+#[ignore = "requires Gradle; builds and runs an emitted app"]
+fn a_nullable_present_guard_runs_on_kotlin() {
+    let (emitted, errors) = notice_guard_app().emit(roundhouse::project::BuildTarget::Kotlin);
+    assert!(errors.is_empty(), "{errors:?}");
+    let mut gradle = std::process::Command::new("gradle");
+    gradle.args(["test", "--console=plain", "--no-daemon"]).current_dir(&*emitted);
+    if let Ok(java_home) = std::env::var("KOTLIN_JAVA_HOME").or_else(|_| std::env::var("JAVA_HOME")) {
+        gradle.env("JAVA_HOME", java_home);
+    }
+    let output = gradle.output().expect("run gradle test");
+    assert!(output.status.success(), "{}\n{}\n{}", emitted.display(),
+        String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+}
+
+#[test]
+#[ignore = "requires Elixir; builds and runs an emitted app"]
+fn a_nullable_present_guard_runs_on_elixir() {
+    let (emitted, errors) = emit_and_run::real_blog().emit(roundhouse::project::BuildTarget::Elixir);
+    assert!(errors.is_empty(), "{errors:?}");
+    std::fs::write(emitted.join("test/notice_guard_test.exs"), r#"defmodule NoticeGuardTest do
+  use ExUnit.Case
+
+  test "a present notice is shown and an absent one is not" do
+    shown = IO.iodata_to_binary(Views.Articles.index([], "Saved"))
+    assert shown =~ ~s(id="notice">Saved</p>)
+    for absent <- [nil, ""] do
+      refute IO.iodata_to_binary(Views.Articles.index([], absent)) =~ ~s(id="notice")
+    end
+  end
+end
+"#).unwrap();
+    for (args, env) in [(&["deps.get"][..], Some("test")), (&["test"][..], None)] {
+        let mut mix = std::process::Command::new("mix");
+        mix.args(args).current_dir(&*emitted).env("MIX_HOME", emitted.join(".mix"));
+        if let Some(env) = env {
+            mix.env("MIX_ENV", env);
+        }
+        let output = mix.output().expect("run mix");
+        assert!(output.status.success(), "mix {args:?} in {}\n{}\n{}", emitted.display(),
+            String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+    }
+}
 
 /// The Rust project builds the writer and answers what Rails' `serializable_hash` writes.
 #[test]
@@ -7279,7 +7489,7 @@ raise "beyond-offset poisoned" unless beyond.to_sql == prior_sql
 paged = ActiveRecord::Relation.new(Article).where("title != 'outside'").limit(1).offset(1)
 raise "input slicing" unless paged.find([b.id, a.id]).map(&:title) == ["zebra"]
 raise "pagination poisoned" unless paged.to_a.map(&:title) == ["apple"]
-ordered.limit(1).offset(1)
+ordered = ordered.limit(1).offset(1)
 raise "ordered pagination" unless ordered.find([b.id, a.id]).map(&:title) == ["zebra"]
 selected = ActiveRecord::Relation.new(Article).select(:title)
 prior_sql = selected.to_sql
@@ -7569,6 +7779,53 @@ fn an_include_from_an_included_block_takes_precedence_over_its_concern() {
             "a = Article.create!(title: \"Hi\", body: \"Body text here\")\nraise a.shout unless a.shout == \"inner\"",
         )
         .assert_passes();
+}
+
+/// `def`s in a concern's `included do` are includer methods, instance and
+/// class side: they keep their visibility, and one over a column reader
+/// wins and reads the column through `super`.
+#[test]
+fn defs_in_an_included_block_run_on_the_includer() {
+    emit_and_run::real_blog()
+        .write(
+            "app/models/concerns/shouty.rb",
+            "module Shouty\n  extend ActiveSupport::Concern\n\n  included do\n    class << self\n      def loud\n        \"L\"\n      end\n    end\n\n    def self.quiet\n      \"q\"\n    end\n\n    def shout(times = 1)\n      title.upcase * times\n    end\n\n    def body\n      super + \"!\"\n    end\n\n    def peek\n      secret\n    end\n\n    private\n\n    def secret\n      \"hidden\"\n    end\n  end\nend\n",
+        )
+        .edit(
+            "app/models/article.rb",
+            "class Article < ApplicationRecord\n",
+            "class Article < ApplicationRecord\n  include Shouty\n",
+        )
+        .run_ruby(
+            "a = Article.create!(title: \"Hi\", body: \"Body text here\")\n\
+             raise a.shout(2) unless a.shout(2) == \"HIHI\"\n\
+             raise a.body unless a.body == \"Body text here!\"\n\
+             raise a.peek unless a.peek == \"hidden\"\n\
+             raise \"secret is public\" if a.respond_to?(:secret)\n\
+             raise \"class side\" unless Article.loud + Article.quiet == \"Lq\"",
+        )
+        .assert_passes();
+}
+
+/// Where hoisting would change which definition wins, the def keeps its
+/// nested-def refusal: the module defines the name too, the block
+/// includes a module that sits ahead of the concern, or a `class << self`
+/// holds a statement the hoist would drop.
+#[test]
+fn included_block_defs_that_would_lose_their_precedence_stay_refused() {
+    for concern in [
+        "module Shouty\n  extend ActiveSupport::Concern\n  included do\n    def shout\n      \"block\"\n    end\n  end\n\n  def shout\n    \"module\"\n  end\nend\n",
+        "module Shouty\n  extend ActiveSupport::Concern\n  included do\n    include Comparable\n    def shout\n      \"block\"\n    end\n  end\nend\n",
+        "module Shouty\n  extend ActiveSupport::Concern\n  included do\n    class << self\n      %i[a b].each { |n| define_method(n) { n } }\n      def shout\n        \"block\"\n      end\n    end\n  end\nend\n",
+        "module Shouty\n  extend ActiveSupport::Concern\n  class_methods do\n    def loud\n      \"carrier\"\n    end\n  end\n  included do\n    def self.loud\n      \"block\"\n    end\n  end\nend\n",
+        "module Shouty\n  extend ActiveSupport::Concern\n  module ClassMethods\n    def loud\n      \"carrier\"\n    end\n  end\n  included do\n    class << self\n      def loud\n        \"block\"\n      end\n    end\n  end\nend\n",
+    ] {
+        let errors = emit_and_run::real_blog()
+            .write("app/models/concerns/shouty.rb", concern)
+            .edit("app/models/article.rb", "class Article < ApplicationRecord\n", "class Article < ApplicationRecord\n  include Shouty\n")
+            .check_errors();
+        assert!(errors.iter().any(|e| e.contains("nested def")), "{concern}: {errors:?}");
+    }
 }
 
 /// The inner concern's own `included do` runs on the includer too: its
@@ -7944,7 +8201,7 @@ unordered = ActiveRecord::Relation.new(Article).offset(1)
 raise "excluded invalid input" unless unordered.find(["bogus", 31]).map(&:id) == [31]
 ordered = ActiveRecord::Relation.new(Article).order(:id).limit(1)
 raise "ordered limit cardinality" unless ordered.find(["bogus", 31]).map(&:id) == [31]
-ordered.offset(1)
+ordered = ordered.offset(1)
 begin
   ordered.find(["bogus", 31])
   raise "invalid input dropped from expected size"
@@ -9676,6 +9933,63 @@ end
 "#,
         )
         .run_test("test/models/article_json_column_test.rb")
+        .assert_passes();
+}
+
+/// Temporal and JSON columns share one storage slot: text in the
+/// database, a native or decoded value at the public reader, and a
+/// normalizing writer for `create!`, `[]=`, and reload.
+#[test]
+fn column_slot_temporal_and_json_round_trip() {
+    emit_and_run::real_blog()
+        .edit(
+            "db/schema.rb",
+            "create_table \"articles\", force: :cascade do |t|",
+            "create_table \"articles\", force: :cascade do |t|\n    t.datetime \"reviewed_at\"\n    t.date \"published_on\"\n    t.json \"metadata\"\n    t.jsonb \"payload\"",
+        )
+        .write(
+            "test/models/article_column_slot_test.rb",
+            r#"require "test_helper"
+
+class ArticleColumnSlotTest < ActiveSupport::TestCase
+  test "temporal text and json text share the slot boundary" do
+    reviewed = Time.utc(2020, 1, 2, 3, 4, 5)
+    published = Date.new(2020, 1, 2)
+    metadata = [{ "name" => "Ada", "enabled" => true }]
+    payload = { "on" => true }
+    article = Article.create!(
+      title: "Slot",
+      body: "A body long enough to validate.",
+      reviewed_at: reviewed,
+      published_on: published,
+      metadata: metadata,
+      payload: payload
+    )
+    article = Article.find(article.id)
+
+    assert_equal reviewed, article.reviewed_at
+    assert_equal "2020-01-02 03:04:05.000000", article.reviewed_at_raw
+    assert_equal published, article.published_on
+    assert_equal published, article[:published_on]
+    assert_equal metadata, article.metadata
+    assert_equal metadata, article[:metadata]
+    assert_equal metadata, article.attributes["metadata"]
+    assert_equal payload, article.payload
+    assert_equal payload, article[:payload]
+
+    article[:reviewed_at] = Time.utc(2021, 2, 3, 4, 5, 6)
+    article[:metadata] = { "name" => "Grace" }
+    article.save!
+    reloaded = Article.find(article.id)
+    assert_equal Time.utc(2021, 2, 3, 4, 5, 6), reloaded.reviewed_at
+    assert_equal "2021-02-03 04:05:06.000000", reloaded.reviewed_at_raw
+    assert_equal({ "name" => "Grace" }, reloaded.metadata)
+    assert_equal published, reloaded.published_on
+  end
+end
+"#,
+        )
+        .run_test("test/models/article_column_slot_test.rb")
         .assert_passes();
 }
 
@@ -12850,7 +13164,7 @@ controller.request = ActionDispatch::TestRequest.create("HTTP_HOST" => "app.exam
 controller.request_method = "GET"
 controller.params = { "back" => "/home" }
 controller.process_action(:bounce)
-raise "relative redirect lost: #{controller.location.inspect}" unless controller.location == "/home"
+raise "relative redirect stays a path: #{controller.location.inspect}" unless controller.location == "http://app.example/home"
 
 controller = WidgetsController.new
 controller.request = ActionDispatch::TestRequest.create("HTTP_HOST" => "app.example")
@@ -16432,3 +16746,27 @@ puts "nokogiri html5 helper passed"
 }
 #[path = "emit_and_run/proc_new_and_std_streams.rs"]
 mod proc_new_and_std_streams;
+#[path = "emit_and_run/helper_diagnostics.rs"]
+mod helper_diagnostics;
+#[path = "emit_and_run/value_seq_order.rs"]
+mod value_seq_order;
+#[path = "emit_and_run/typescript_error_class.rs"]
+mod typescript_error_class;
+#[path = "emit_and_run/class_macros.rs"]
+mod class_macros;
+#[path = "emit_and_run/accessor_override.rs"]
+mod accessor_override;
+#[path = "emit_and_run/reset_counters.rs"]
+mod reset_counters;
+#[path = "emit_and_run/console_only_definitions.rs"]
+mod console_only_definitions;
+#[path = "emit_and_run/open_classes.rs"]
+mod open_classes;
+#[path = "emit_and_run/parameterized_mailer.rs"]
+mod parameterized_mailer;
+#[path = "emit_and_run/private_calls.rs"]
+mod private_calls;
+#[path = "emit_and_run/inherited_visibility.rs"]
+mod inherited_visibility;
+#[path = "emit_and_run/class_side_relations.rs"]
+mod class_side_relations;

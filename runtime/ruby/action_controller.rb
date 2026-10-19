@@ -25,6 +25,9 @@ require_relative "action_controller/current"
 # lives in the entry point instead leaves those lists to guess.
 require_relative "message_digest"
 require_relative "action_controller/message_verifier"
+# `cookies.encrypted` and the session store: the verifier's envelope
+# under AES-256-GCM rather than an HMAC.
+require_relative "action_controller/message_encryptor"
 # Masked CSRF tokens + verify. After Current (session) and the
 # digest primitives it consumes.
 require_relative "action_controller/authenticity_token"
@@ -40,6 +43,10 @@ require_relative "action_controller/cache_control"
 # (`commit_conditional_get!`), the step after `commit_cache_control!`
 # in both wire paths. Ruby-family only, as the file above.
 require_relative "action_controller/conditional_get"
+# Rails' `config.action_dispatch.default_headers` (the load_defaults
+# 7.0+ set), filled onto the buffered response after the action so an
+# action header wins. Both wire paths call `commit_default_headers!`.
+require_relative "action_controller/default_headers"
 # The error `Params.require_key` raises; travels with its consumer for
 # the same reason message_digest does.
 require_relative "action_controller/parameter_missing"
