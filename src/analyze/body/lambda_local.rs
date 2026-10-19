@@ -182,11 +182,12 @@ fn walk(expr: &Expr, name: &Symbol, out: &mut Vec<Evidence>, stop: &mut bool) {
     if *stop {
         return;
     }
+    if let Some(before) = value_before_local_write(expr, name) {
+        walk(before, name, out, stop);
+        *stop = true;
+        return;
+    }
     match &*expr.node {
-        ExprNode::Assign { target: LValue::Var { name: bound, .. }, value } if bound == name => {
-            walk(value, name, out, stop);
-            *stop = true;
-        }
         ExprNode::Lambda { params, rest_param, extra_params, block_param, body, .. } => {
             let shadows = params.iter().chain(rest_param.iter()).chain(block_param.iter()).any(|p| p == name)
                 || extra_params.iter().any(|p| &p.name == name);
@@ -276,11 +277,11 @@ pub(super) fn remember(
     }
 }
 
-/// A nested assignment runs as part of this statement, so the stored
-/// lambda is no longer the only value a later `.call` can reach.
-/// Assignments inside a lambda body run later, when the lambda is
-/// called, and do not retire it. The statement's own direct assignment
-/// is `remember`'s job.
+/// A write in this statement replaces the stored lambda, so a later
+/// `.call` must not retype that lambda and put it back into the local.
+/// Writes inside a lambda body run later, when the lambda is called, and
+/// do not retire it. The statement's own direct `name = …` is
+/// `remember`'s job; every other local write form retires the name.
 pub(super) fn forget_nested_writes(lambdas: &mut HashMap<Symbol, Stored>, expr: &Expr) {
     if lambdas.is_empty() {
         return;
@@ -294,13 +295,83 @@ pub(super) fn forget_nested_writes(lambdas: &mut HashMap<Symbol, Stored>, expr: 
 
 fn collect_executed_assigns(expr: &Expr, root: bool, out: &mut Vec<Symbol>) {
     match &*expr.node {
+        ExprNode::Lambda { .. } => return,
         ExprNode::Assign { target: LValue::Var { name, .. }, value } => {
             if !root {
                 out.push(name.clone());
             }
             collect_executed_assigns(value, false, out);
+            return;
         }
-        ExprNode::Lambda { .. } => {}
-        _ => expr.node.for_each_child(&mut |child| collect_executed_assigns(child, false, out)),
+        _ => {}
+    }
+    push_other_local_writes(expr, out);
+    expr.node.for_each_child(&mut |child| collect_executed_assigns(child, false, out));
+}
+
+/// The subexpression evaluated before `name` is written, when this node
+/// writes it. Calls there still see the stored lambda. Calls after the
+/// write do not.
+fn value_before_local_write<'a>(expr: &'a Expr, name: &Symbol) -> Option<&'a Expr> {
+    match &*expr.node {
+        ExprNode::Assign { target: LValue::Var { name: bound, .. }, value }
+        | ExprNode::OpAssign { target: LValue::Var { name: bound, .. }, value, .. }
+        | ExprNode::Let { name: bound, value, .. }
+            if bound == name =>
+        {
+            Some(value)
+        }
+        ExprNode::MultiAssign { targets, value }
+            if targets.iter().any(|t| matches!(t, LValue::Var { name: n, .. } if n == name)) =>
+        {
+            Some(value)
+        }
+        ExprNode::MatchRequired { value, pattern, .. } | ExprNode::MatchPredicate { value, pattern, .. } => {
+            binds_name(pattern, name).then_some(value)
+        }
+        ExprNode::CaseMatch { scrutinee, arms, .. } => {
+            arms.iter().any(|arm| binds_name(&arm.pattern, name)).then_some(scrutinee)
+        }
+        ExprNode::BeginRescue { body, rescues, .. }
+            if rescues.iter().any(|r| r.binding.as_ref() == Some(name)) =>
+        {
+            Some(body)
+        }
+        _ => None,
+    }
+}
+
+fn binds_name(pattern: &crate::expr::MatchPattern, name: &Symbol) -> bool {
+    let mut names = Vec::new();
+    pattern.bound_names(&mut names);
+    names.iter().any(|n| n == name)
+}
+
+fn push_other_local_writes(expr: &Expr, out: &mut Vec<Symbol>) {
+    match &*expr.node {
+        ExprNode::OpAssign { target: LValue::Var { name, .. }, .. } | ExprNode::Let { name, .. } => {
+            out.push(name.clone());
+        }
+        ExprNode::MultiAssign { targets, .. } => {
+            for target in targets {
+                if let LValue::Var { name, .. } = target {
+                    out.push(name.clone());
+                }
+            }
+        }
+        ExprNode::CaseMatch { arms, .. } => {
+            for arm in arms {
+                arm.pattern.bound_names(out);
+            }
+        }
+        ExprNode::MatchRequired { pattern, .. } | ExprNode::MatchPredicate { pattern, .. } => {
+            pattern.bound_names(out);
+        }
+        ExprNode::BeginRescue { rescues, .. } => {
+            for rescue in rescues {
+                out.extend(rescue.binding.iter().cloned());
+            }
+        }
+        _ => {}
     }
 }

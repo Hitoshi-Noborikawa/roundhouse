@@ -191,6 +191,21 @@ fn a_lambda_call_inside_another_lambda_seeds_both() {
 }
 
 #[test]
+fn a_multiassign_reassignment_keeps_the_lambda_out_of_later_reads() {
+    let source = "class Article < ApplicationRecord\n  def self.plain_lambda\n    f = ->(x) { x * 2 }\n    f, rest = [1, 2]\n    f.call(4)\n    f\n  end\nend\n";
+    let tree = std::collections::HashMap::from([
+        (std::path::PathBuf::from("db/schema.rb"), b"ActiveRecord::Schema.define(version: 1) do\n  create_table :articles do |t|\n    t.string :title\n  end\nend\n".to_vec()),
+        (std::path::PathBuf::from("config/routes.rb"), b"Rails.application.routes.draw do\nend\n".to_vec()),
+        (std::path::PathBuf::from("app/models/article.rb"), source.as_bytes().to_vec()),
+    ]);
+    let mut app = roundhouse::ingest::ingest_app_from_tree(tree).expect("ingest");
+    roundhouse::session::analyze_and_lower(&mut app);
+    let body = app.models.iter().flat_map(|m| m.methods()).find(|m| m.name.as_str() == "plain_lambda").expect("method").body.clone();
+    let ty = result_ty(&body).unwrap_or_else(|| panic!("no result type"));
+    assert!(matches!(ty, roundhouse::ty::Ty::Int), "later read of f: {ty:?}");
+}
+
+#[test]
 fn a_nested_reassignment_keeps_the_lambda_out_of_later_reads() {
     let source = "class Article < ApplicationRecord\n  def self.plain_lambda\n    flag = true\n    f = ->(x) { x * 2 }\n    if flag\n      f = 1\n    end\n    f.call(4)\n    f\n  end\nend\n";
     let tree = std::collections::HashMap::from([
