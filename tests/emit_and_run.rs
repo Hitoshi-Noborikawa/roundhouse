@@ -15698,6 +15698,7 @@ fn render_inertia_computed_props_answer_json_and_html() {
             r#"class PagesController < ApplicationController
   def computed
     @stamp = "from-ivar"
+    @article = Article.find_by!(title: "Getting Started with Rails")
     render inertia: "pages/computed", props: computed_props
   end
 
@@ -15719,7 +15720,9 @@ fn render_inertia_computed_props_answer_json_and_html() {
         secret: InertiaRails.optional { "opt" },
         stats: InertiaRails.defer { { total: 3 } },
         kept: InertiaRails.always { "yes" },
-        when: Time.utc(2026, 10, 19, 11, 22, 0)
+        when: Time.utc(2026, 10, 19, 11, 22, 0),
+        row: { article: @article },
+        rows: [@article]
       }
     end
 end
@@ -15739,6 +15742,8 @@ class PagesControllerTest < ActionDispatch::IntegrationTest
     assert_equal "from-ivar", page["props"]["label"]
     assert_equal "yes", page["props"]["kept"]
     assert_equal "2026-10-19T11:22:00.000Z", page["props"]["when"]
+    assert_equal "Getting Started with Rails", page["props"]["row"]["article"]["title"]
+    assert_equal "Getting Started with Rails", page["props"]["rows"][0]["title"]
     assert_nil page["props"]["secret"]
     assert_nil page["props"]["stats"]
     assert_equal({ "default" => ["stats"] }, page["deferredProps"])
