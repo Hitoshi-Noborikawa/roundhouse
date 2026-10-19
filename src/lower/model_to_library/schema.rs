@@ -98,11 +98,11 @@ pub(super) fn push_schema_methods(
     let mut demanded: Option<std::rc::Rc<std::collections::HashSet<Symbol>>> = None;
     for col in &table.columns {
         let slot = ColumnSlot::classify(col, model);
-        // A source reader replaces the generated one. `push_user_methods`
-        // drops a later duplicate, so the synthesized reader must yield.
-        if !super::associations::model_defines_instance_method(model, &col.name) {
-            methods.push(synth_attr_reader(owner, col, model));
-        }
+        // Always synthesize the column reader. A source `def` of the same
+        // name renames this one to `_read_<col>_raw` in `push_user_methods`,
+        // which is what `super` in that def calls. Skipping it here leaves
+        // that call with no method.
+        methods.push(synth_attr_reader(owner, col, model));
         if model.enums.contains_key(&col.name) {
             methods.push(synth_enum_storage_writer(owner, col));
         }
