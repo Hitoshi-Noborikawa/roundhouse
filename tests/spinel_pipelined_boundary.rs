@@ -33,7 +33,7 @@ fn pipelined_requests_keep_their_byte_boundaries() {
         failed.join("\n")
     );
     assert!(
-        stdout.lines().any(|line| line == "996/996 checks pass"),
+        stdout.lines().any(|line| line == "998/998 checks pass"),
         "fewer checks ran than expected\n=== stdout ===\n{stdout}"
     );
 }

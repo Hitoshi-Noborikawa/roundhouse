@@ -233,7 +233,7 @@ module Tep
 
         # The writer returns the keep-alive decision it actually sends.
         keep_alive = req.keep_alive? && !res.halted_close?
-        Tep::Server::Threaded.write_response(client, io, req, res, keep_alive)
+        Tep::Server::Threaded.write_response(client, io, req, res, keep_alive, input)
       end
 
       # Request reader. Returns the accumulated blob once "\r\n\r\n" is
@@ -265,7 +265,7 @@ module Tep
       end
 
       # Body-shape mirror of Tep::Server#write_response.
-      def self.write_response(client, io, req, res, keep_alive)
+      def self.write_response(client, io, req, res, keep_alive, input = InputBuffer.new)
         # WebSocket upgrade branch. Set by res.start_websocket in the
         # user's handler after a successful Handshake.check. Writes the
         # 101 Switching Protocols head, then hands the fd (and this
@@ -284,8 +284,10 @@ module Tep
           # `ensure`, because handle_connection now closes the fd on the
           # way out of a raise too, and an unretired driver would write
           # into whatever socket reuses that number.
+          # Surplus after the upgrade headers is the first WebSocket
+          # frame when it shared the request's recv.
           begin
-            conn.run
+            conn.run(input.take_pending_input)
           ensure
             res.ws_driver.retire
           end

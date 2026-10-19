@@ -25,8 +25,15 @@ end
 
 # Keep the upgrade handoff synchronous without a WebSocket transport here.
 # The native probe separately checks the real handshake and close frame.
+# `handed` is the suffix the server passed into the receive loop.
 class Tep::WebSocket::Connection
-  def run; end
+  class << self
+    attr_accessor :handed
+  end
+  alias run_from_socket run
+  def run(pending = +"".b)
+    self.class.handed = pending
+  end
 end
 
 class Wire
@@ -195,6 +202,47 @@ SERVERS.each_key do |server|
         APP.paths == ["/next"] && Sock.wire.out.scan(/HTTP\/1\.\d (\d{3})/).flatten == ["200", "413"])
   check("#{server}: an oversized successor never drains", Sock.wire.recvs == 1)
 end
+
+# A masked text frame ("hi", mask key 0) sharing the upgrade recv.
+# FIN+text, MASK+len 2, then the key and the masked payload.
+frame = "\x81\x82\x00\x00\x00\x00hi".b
+upgrade_with_frame = upgrade_first + frame
+Sock.wire = Wire.new(upgrade_with_frame)
+Sock.closes = 0
+APP.reset
+Tep::WebSocket::Connection.handed = nil
+Tep::Server::Threaded.handle_connection(7)
+check("threaded: a frame buffered with the upgrade is handed to the receive loop",
+      Tep::WebSocket::Connection.handed == frame,
+      Tep::WebSocket::Connection.handed.inspect)
+
+class CapturingHandler < Tep::WebSocket::Handler
+  attr_reader :data
+  def handle_event(event)
+    @data = event.data
+    0
+  end
+end
+
+# The harness does not load the broadcast registry. The idle close that
+# follows a delivered frame still notifies it.
+module Tep
+  module Broadcast
+    def self.unsubscribe_fd(_fd) = 0
+  end
+  module Presence
+    def self.untrack_by_fd(_fd) = 0
+  end
+end
+
+Sock.wire = Wire.new("".b)
+driver = Tep::WebSocket::Driver.new(7)
+handler = CapturingHandler.new
+driver.set_on_message(handler)
+Tep::WebSocket::Connection.new(driver, ReadyIO.new).run_from_socket(frame)
+check("a complete buffered frame is delivered before the next recv",
+      handler.data == "hi" && Sock.wire.recvs == 0,
+      "data=#{handler.data.inspect} recvs=#{Sock.wire.recvs}")
 
 puts "#{CHECKS.count(true)}/#{CHECKS.length} checks pass"
 puts "done"
