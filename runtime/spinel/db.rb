@@ -419,6 +419,9 @@ end
 
 class DbConn
   CAP = 128
+  # Distinct prepared SQL retained for RH_STMT_STATS. Past this, the snapshot
+  # keeps the cap and sets distinct_sql_capped instead of storing every string.
+  STAT_SQL_CAP = 4096
   STMT_STATS_DEST = ENV.fetch("RH_STMT_STATS", "")
   STMT_STATS = STMT_STATS_DEST != "" && STMT_STATS_DEST != "0"
 
@@ -468,6 +471,7 @@ class DbConn
     @stat_qc_misses = 0
     @stat_qc_bypasses = 0
     @stat_sql = nil
+    @stat_sql_capped = false
     @stat_sql = {} if STMT_STATS
   end
 
@@ -619,7 +623,7 @@ class DbConn
     if STMT_STATS
       @stat_misses += 1
       @stat_transient += 1 if !cached
-      @stat_sql[sql] = true
+      remember_stat_sql(sql)
       @stat_peak = @entries.length if @entries.length > @stat_peak
     end
     st
@@ -1007,6 +1011,17 @@ class DbConn
     nil
   end
 
+  # Keep distinct SQL only while diagnostics are on, and only up to the cap.
+  def remember_stat_sql(sql)
+    return nil if @stat_sql[sql]
+    if @stat_sql.length >= STAT_SQL_CAP
+      @stat_sql_capped = true
+      return nil
+    end
+    @stat_sql[sql] = true
+    nil
+  end
+
   # Stmt#release read this counter while a transient or failed cached
   # pointer was still alive. It can now be collected without rereading it.
   def stats_released(entry)
@@ -1036,6 +1051,7 @@ class DbConn
       " prepare_failures=" + @stat_failures.to_s +
       " entries=" + @entries.length.to_s + " peak_entries=" + @stat_peak.to_s +
       " distinct_sql=" + @stat_sql.length.to_s +
+      " distinct_sql_capped=" + (@stat_sql_capped ? "1" : "0") +
       " trims=" + @stat_trims.to_s + " evictions=" + @stat_evictions.to_s +
       " finalizations=" + @stat_finalizations.to_s +
       " transient_prepares=" + @stat_transient.to_s +
@@ -1045,7 +1061,11 @@ class DbConn
     if STMT_STATS_DEST == "1"
       $stderr.puts line
     else
-      File.open(STMT_STATS_DEST, "a") { |file| file.puts line }
+      begin
+        File.open(STMT_STATS_DEST, "a") { |file| file.puts line }
+      rescue StandardError => e
+        $stderr.puts "RH_STMT_STATS write failed: " + e.message
+      end
     end
     nil
   end

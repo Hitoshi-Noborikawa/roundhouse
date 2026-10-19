@@ -248,10 +248,13 @@ Each `RH_STMT_STATS` line reports:
   Statement-cache hit rate is `hits / (hits + misses)`; replay hits do not reach
   that cache. `misses` includes transient prepares and `transient_prepares` counts
   that subset, including busy-hit readers and partial-replay promotions.
-- `entries`, `peak_entries`, and `distinct_sql` (all-time distinct successfully
-  prepared SQL strings on that connection, including transient reads). Tracking
-  distinct SQL is unbounded diagnostic memory, enabled only with this flag.
-  SQL text and bind values are not printed.
+- `entries`, `peak_entries`, and `distinct_sql` (distinct successfully
+  prepared SQL strings retained for that connection, including transient reads).
+  The connection keeps at most `STAT_SQL_CAP` (4096) of those strings.
+  `distinct_sql` is that retained count. `distinct_sql_capped=1` means further
+  distinct SQL was prepared and not stored, so the count is the cap rather than
+  the true total. Disabled diagnostics store nothing. SQL text and bind values
+  are not printed.
 - `trims` (boundaries exceeding CAP), `evictions` (cached statements dropped), and
   `finalizations` (real SQLite finalizations, including transient release, failed
   cleanup and pool close). Logical `Db.finalize` resets a cached statement and
@@ -268,7 +271,7 @@ Each `RH_STMT_STATS` line reports:
 Counters are cumulative; subtract snapshots to measure a phase. The native cache's
 128-entry cap is soft within a request, with least-recently-used trimming at lease
 boundaries after every outstanding cursor is released. Summing per-connection
-`distinct_sql` is not a count of globally unique SQL strings. The diagnostic is
+`distinct_sql` is not a count of globally unique SQL strings. A capped connection reports 4096, not the prepares it stopped storing. The diagnostic is
 implemented for compiled Spinel; CRuby and JRuby do not emit these summaries.
 
 ## Emitter ↔ runtime contract

@@ -2,11 +2,33 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 struct ScratchDir(PathBuf);
 impl Drop for ScratchDir {
     fn drop(&mut self) {
         let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+/// A killed run can leave `roundhouse-stmt-stats-<pid>` behind. Reserve a new
+/// directory with `create_dir` so a reused pid cannot reopen that stale tree.
+fn reserve_scratch() -> PathBuf {
+    static NEXT: AtomicUsize = AtomicUsize::new(0);
+    let base = option_env!("CARGO_TARGET_TMPDIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(std::env::temp_dir);
+    loop {
+        let dir = base.join(format!(
+            "roundhouse-stmt-stats-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        match std::fs::create_dir(&dir) {
+            Ok(()) => return dir,
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => panic!("create scratch directory {}: {error}", dir.display()),
+        }
     }
 }
 
@@ -23,8 +45,7 @@ fn counters(line: &str) -> HashMap<&str, usize> {
 #[ignore = "requires Spinel (SPINEL=/path/to/spinel)"]
 fn statement_stats_are_opt_in_and_count_cached_transient_and_bound_reads() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let dir = std::env::temp_dir().join(format!("roundhouse-stmt-stats-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
+    let dir = reserve_scratch();
     let _cleanup = ScratchDir(dir.clone());
     for name in ["db.rb", "active_support_time_parsing.rb"] {
         std::fs::copy(root.join("runtime/spinel").join(name), dir.join(name)).unwrap();
@@ -128,6 +149,8 @@ fn statement_stats_are_opt_in_and_count_cached_transient_and_bound_reads() {
         assert_eq!(values[7]["executions"], 14);
         assert_eq!(values[7]["finalizations"], 6);
         assert_eq!(values[7]["evictions"], 1);
+        assert_eq!(values[8]["distinct_sql_capped"], 0);
+        assert!(values[8]["distinct_sql"] > 128, "{stats}");
         assert_eq!(values[8]["entries"], 128);
         assert_eq!(values[8]["trims"], 1);
         assert_eq!(values[8]["prepare_failures"], 1);
