@@ -1799,9 +1799,9 @@ pub(super) fn rewrite_update_to_typed_variant(
         // The variant exists only on the model the resource is named
         // after. With none (a record wrapped under another key), the
         // call stays Rails' `update` / `update!`; once the body is typed,
-        // `params::hand_update_the_attrs` gives it the attribute Hash
+        // `typed_update::hand_update_the_attrs` gives it the attribute Hash
         // when the argument turns out to be the params object (#856).
-        if !params_specs.has_typed_update(spec) {
+        if !super::typed_update::has_typed_update(params_specs, spec) {
             return None;
         }
         Some(Expr::new(
