@@ -42,7 +42,8 @@ use crate::schema::{Column, ColumnType, Schema, Table};
 use crate::span::Span;
 use crate::ty::{Row, Ty};
 
-use self::associations::{push_association_methods, push_dependent_destroy};
+use self::associations::{push_association_methods, push_dependent_destroy, ThroughJoins};
+pub(crate) use self::associations::{ThroughWriterJoin, through_writer_join};
 pub(crate) use self::associations::model_defines_instance_method;
 pub(crate) use self::markers::attribute_api_decls;
 pub(crate) use self::markers::block_callback_shape;
@@ -1202,6 +1203,7 @@ fn build_methods_with_finder_inputs(
     // test callers of the lowering entries are unaffected.
     report_unclaimed_unknowns(model, schema);
 
+    let through_joins = ThroughJoins::decide(model, models);
     let mut methods: Vec<MethodDef> = Vec::new();
 
     if let Some(table) = schema.tables.get(&model.table.0) {
@@ -1222,7 +1224,7 @@ fn build_methods_with_finder_inputs(
         let writable_fields =
             permitted_fields.map(|fields| writable_permit_fields(model, table, fields));
         let permitted_fields = writable_fields.as_deref();
-        push_schema_methods(&mut methods, model, models, table);
+        push_schema_methods(&mut methods, model, models, table, &through_joins);
         // Per-model Level-3 adapter primitives (`_adapter_find_by_id`, etc.)
         // — typed methods that go directly from SQL composition to typed
         // model instances over the `Sqlite` primitive surface. See
@@ -1295,8 +1297,8 @@ fn build_methods_with_finder_inputs(
     }
 
     push_validate_method(&mut methods, model, models, errors_readers);
-    push_association_methods(&mut methods, model, models);
-    push_dependent_destroy(&mut methods, model);
+    push_association_methods(&mut methods, model, models, &through_joins);
+    push_dependent_destroy(&mut methods, model, &through_joins);
     push_unknown_marker_methods(&mut methods, model);
     push_attr_accessor_methods(&mut methods, model);
     // AFTER the accessors: the constructor assigns exactly what they
@@ -1420,7 +1422,7 @@ fn build_methods_with_finder_inputs(
 ///     `def parsed_url; … URI.parse …; end`; keeping the bare
 ///     `@parsed_url` reader left the ivar untyped/unread and Spinel's
 ///     strict emit failed with `error[ivar_unresolved]`.
-///   * Column / association / scope synthesizers still win over a
+///   * Column writers / association / scope synthesizers still win over a
 ///     duplicate body name. A later source-level `delegate` may replace
 ///     an earlier real method, but only when that method was already
 ///     selected from the model body; generated framework methods are not
@@ -1439,9 +1441,8 @@ fn push_user_methods(methods: &mut Vec<MethodDef>, model: &Model, columns: &Hash
             let incoming_is_real = matches!(method.kind, AccessorKind::Method);
             // Only bare-ivar attr_* halves (attr_accessor/reader/writer
             // synth, which carry no signature) yield to a later real
-            // `def`. Schema column AttributeReaders are also bare
-            // `@col` reads for scalar columns, but they stamp a
-            // signature — keep those winning (documented above).
+            // `def`. Schema column writers carry a signature and keep
+            // their storage casts.
             let existing_is_attr_half = existing.signature.is_none()
                 && match existing.kind {
                     AccessorKind::AttributeReader => {
@@ -2165,6 +2166,19 @@ fn build_class_info_with_finder_inputs(
     let mut info = crate::analyze::ClassInfo::default();
     info.table = Some(model.table.clone());
     info.parent = model.parent.clone();
+    // The analyzer's registry is not this map. Arel's `ids` / `pluck`
+    // and the source-method decline read these two fields, so they have
+    // to be filled here or a model method inlines `SELECT id` and a
+    // `def self.pluck` becomes SQL.
+    info.primary_key = model.primary_key.clone().or_else(|| {
+        table.and_then(|t| t.columns.iter().find(|column| column.primary_key).map(|column| column.name.clone()))
+    });
+    for item in &model.body {
+        let crate::dialect::ModelBodyItem::Method { method, .. } = item else { continue };
+        if method.receiver == MethodReceiver::Class {
+            info.source_class_methods.insert(method.name.clone());
+        }
+    }
 
     // Attributes row from schema columns.
     if let Some(t) = table {

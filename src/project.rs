@@ -749,14 +749,20 @@ pub fn target_readme(target: BuildTarget) -> String {
 /// The three lines are matched exactly so a drift in the sidecar is a
 /// build error here, not a silent narrowing.
 fn widen_key_contract(app: &App, files: &mut [(String, String)]) -> Result<(), String> {
+    let string_key = |col: &crate::schema::Column| {
+        !matches!(
+            col.col_type,
+            crate::schema::ColumnType::Integer | crate::schema::ColumnType::BigInt
+        )
+    };
     let has_string_key = app.schema.tables.values().any(|t| {
-        t.columns.iter().any(|c| {
-            c.primary_key
-                && !matches!(
-                    c.col_type,
-                    crate::schema::ColumnType::Integer | crate::schema::ColumnType::BigInt
-                )
-        })
+        t.columns.iter().any(|c| c.primary_key && string_key(c))
+    }) || app.models.iter().any(|model| {
+        let Some(name) = &model.primary_key else { return false };
+        app.schema
+            .tables
+            .get(&model.table.0)
+            .is_some_and(|table| table.columns.iter().any(|c| &c.name == name && string_key(c)))
     });
     if !has_string_key {
         return Ok(());
@@ -768,6 +774,7 @@ fn widen_key_contract(app: &App, files: &mut [(String, String)]) -> Result<(), S
     for (narrow, wide) in [
         ("    def id: () -> Integer\n", "    def id: () -> (Integer | String)\n"),
         ("    def id=: (Integer) -> Integer\n", "    def id=: (Integer | String) -> (Integer | String)\n"),
+        ("    def _primary_key_value: () -> Integer\n", "    def _primary_key_value: () -> (Integer | String)\n"),
         ("    def _adapter_insert: () -> Integer\n", "    def _adapter_insert: () -> (Integer | String)\n"),
     ] {
         if !text.contains(narrow) {
@@ -2128,6 +2135,18 @@ fn target_files_inner(
         Some(trimmed) => {
             without_health = trimmed;
             &without_health
+        }
+        None => app,
+    };
+    // One gate for the Oj stand-in: ruby, jruby and spinel keep the class
+    // ingest installed. Every other transpile target drops it here, before
+    // the bundled-constant and TypeScript walks, so a missing `JSON` or
+    // `String#read` inside the class is not a second, incidental error.
+    let without_oj;
+    let app = match crate::lower::oj::without_unrun_stand_in(app, target) {
+        Some(trimmed) => {
+            without_oj = trimmed;
+            &without_oj
         }
         None => app,
     };
@@ -3773,6 +3792,9 @@ fn ruby_family_runtime_files(
     // gets the block exactly once; this is the ruby family's turn, and
     // the ruby family is the one that can run the lines.
     apply_module_mixins(&mut files, app, MixinForm::ExplicitReceiver);
+    // Overlay boot replaced the spinel boot, so the flags written into
+    // that file in `spinel_files` are gone. Write them again here.
+    apply_environment_flags(&mut files, app);
     apply_app_requires(&mut files, app, RequireTarget::RubyFamily);
     apply_rails_version(&mut files, app);
     // Overlay boot replaces the spinel boot wholesale (see comment above
@@ -3994,7 +4016,8 @@ fn i18n_table_text(app: &App) -> String {
                 }
             }
             for key in &c.opaque {
-                out.push_str(&format!("O\u{1f}{locale}.{key}\u{1f}.\u{1e}"));
+                let fields = c.values.get(key).map_or_else(|| vec!["?".to_string()], |v| v.fields());
+                out.push_str(&format!("O\u{1f}{locale}.{key}\u{1f}{}\u{1f}.\u{1e}", fields.join("\u{1f}")));
             }
         }
         for variant in catalog.variants(&locales) {
@@ -5260,6 +5283,34 @@ fn apply_rails_version(files: &mut [(String, String)], app: &App) {
     }
 }
 
+/// `AppEnvironment` at the end of boot.rb. `assume_ssl?(env)` is
+/// `config.assume_ssl = true` in that environment (Rails'
+/// `ActionDispatch::AssumeSSL`). `serving_assume_ssl?` reads
+/// `RAILS_ENV` (development when unset) so both dispatchers share one
+/// check. Always defined, so a tree with the flag off still answers
+/// false.
+fn apply_environment_flags(files: &mut [(String, String)], app: &App) {
+    const MARK: &str = "# Per-environment flags, from config/environments/*.rb";
+    let Some((_, boot)) = files.iter_mut().find(|(p, _)| p == "boot.rb") else {
+        return;
+    };
+    if boot.contains(MARK) {
+        return;
+    }
+    let cond = if app.assume_ssl_envs.is_empty() {
+        "false".to_string()
+    } else {
+        app.assume_ssl_envs.iter().map(|e| format!("env == {e:?}")).collect::<Vec<_>>().join(" || ")
+    };
+    boot.push_str(&format!(
+        "\n{MARK} (see project.rs::apply_environment_flags).\n\
+         module AppEnvironment\n  def self.assume_ssl?(env)\n    {cond}\n  end\n  \
+         def self.serving_assume_ssl?\n    name = ENV[\"RAILS_ENV\"].to_s\n    \
+         if name.empty?\n      name = \"development\"\n    end\n    \
+         assume_ssl?(name)\n  end\nend\n"
+    ));
+}
+
 /// THE FORM DIFFERS BY TARGET, and the reason is spinel's, not ours.
 /// `X.prepend Y` through an explicit receiver is refused outright there
 /// — "the class graph, ancestor chain, and method/ivar layout are baked
@@ -6007,6 +6058,12 @@ const RUBY_SPINEL_ONLY_METHODS: &[(&str, &str)] = &[
     // `lower::errors_index`'s `errors.to_hash`, `messages`,
     // `attribute_names`, `delete`, `details`, `import` and `merge!`: the helpers are
     // `runtime/ruby/active_support_ext.rb`, which no strict target loads.
+    // The ActiveModel::Attributes writers call the same module. Flattening
+    // the include is not a claim that a strict target can run the cast.
+    ("ActiveSupport", "cast_string"),
+    ("ActiveSupport", "cast_integer"),
+    ("ActiveSupport", "cast_boolean"),
+    ("ActiveSupport", "cast_datetime"),
     ("ActiveSupport", "errors_to_hash"),
     ("ActiveSupport", "errors_messages"),
     ("ActiveSupport", "errors_attribute_names"),
@@ -7204,6 +7261,7 @@ fn spinel_files(app: &App, fixture: &Path, param_binds: bool) -> Result<(Vec<(St
     apply_models_aggregator(&mut files);
     apply_route_helpers_demand(&mut files);
     apply_module_mixins(&mut files, app, MixinForm::Reopen);
+    apply_environment_flags(&mut files, app);
     apply_app_requires(&mut files, app, RequireTarget::Spinel);
     apply_rails_version(&mut files, app);
     // All three scaffold targets (spinel + the ruby/jruby trees derived

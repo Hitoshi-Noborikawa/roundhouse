@@ -1096,17 +1096,39 @@ fn every_runtime_method_body_concretely_typed() {
     // MEASURED 793 on 2026-10-19: the class-side query fallbacks
     // (`Model.maximum(:x)` through `all`, connection.rb) answer the column's
     // value as `Relation#maximum` / `#pick` do, whatever the column holds (+2).
-    // MEASURED 777 on 2026-10-19: ErrorReporter no longer keeps a second
+    // MEASURED 794 on 2026-10-19: a local assigned on some paths through
+    // a branch now reads as the join of them. In
+    // `ActionText::Fragment#flush_pending_removals`, `cursor = finish if
+    // finish > cursor` makes `cursor` Integer | whatever `finish` is, and
+    // `finish = range[1]` is already gradual, so `cursor < @html.length`
+    // is too (+1 in action_text.rb). `cursor` used to read as Integer from
+    // its `0` seed, narrower than the code allows.
+    // MEASURED 798 on 2026-10-19: that site plus the four computed Inertia
+    // prop reads. A computed prop value is whatever the helper put in the
+    // hash. `apply_inertia_prop` reads that untyped value for
+    // `is_a?(InertiaRails::Prop)`, for `is_a?(Proc)`, and again to encode
+    // a plain value (+3 in action_controller/inertia.rb). `inertia_exec`
+    // calls Kernel#instance_exec; the block result is untyped, so that
+    // send stays (+1). Down from 808 on the 793 base: the props hash is
+    // `Hash[String | Symbol, untyped]` (the walk's key reads dropped), the
+    // stored proc and the controller are typed, encoding happens inside
+    // `inertia_exec` (no separate `inertia_prop_json` read), and
+    // `instance_exec` is abstract instead of a `super` wrapper. Session
+    // flag reads are not gradual sites. The four sites stay.
+    // MEASURED 777 on the 793 base: ErrorReporter no longer keeps a second
     // `deep_dup`. `ActiveSupport.deep_dup` is that walk, including the
     // non-duplicable leaf (Method, UnboundMethod, Singleton, and
     // `duplicable?` answering false). The reporter method's 26 sites
     // leave; the shared method grows by that leaf (22 -> 32).
-    // MEASURED 776 on 2026-10-19: `query_pairs` reads an untyped Hash
+    // MEASURED 776 on that base: `query_pairs` reads an untyped Hash
     // key's `to_s` once. The name uses that String in both arms.
-    // MEASURED 774 on 2026-10-19: `ParameterFilter#value_for_key` reads
+    // MEASURED 774 on that base: `ParameterFilter#value_for_key` reads
     // its untyped key's `to_s` once. The dotted path and the regexp
     // both use that String (776 -> 774).
-    const CEILING: usize = 774;
+    // MEASURED 779 on 2026-10-19 after merging main's 798: the shared
+    // `deep_dup` and the two `to_s` binds still remove the same 19
+    // sites (798 -> 779).
+    const CEILING: usize = 779;
     assert!(
         total_gradual <= CEILING,
         "{total_gradual} Ty::Untyped sites exceeds ceiling of {CEILING}",

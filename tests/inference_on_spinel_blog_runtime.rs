@@ -383,12 +383,13 @@ fn untyped_subexpressions_baseline() {
     // `Nil`, which is the honest "unknown" the RBS already says
     // (`?untyped`) rather than a type that silently zeroed `presence`.
 
-    // `sanitize_sql_like` itself, without its String parameter RBS:
-    // the `value` read, the `source` store, the escape call's `value`,
-    // and the wildcard call's `source`. MEASURED 4 on 2026-10-19
-    // (the old 27 counted the helper bodies, which the existing
-    // ledger now owns).
-    const LIKE_CEILING: usize = 4;
+    // `sanitize_sql_like` itself, without its String parameter RBS.
+    // MEASURED 4 on 2026-10-19 (the old 27 counted the helper bodies,
+    // which the existing ledger now owns). Remeasured 3 after merging
+    // main: the `source = value` assign, the `value` read, and the
+    // escape call's `value`. The wildcard call's `source` is no longer
+    // a var on this analyzer.
+    const LIKE_CEILING: usize = 3;
     let existing_untyped = all_untyped.len() - like_untyped;
     eprintln!("inference-only ledger: existing={existing_untyped}, sanitize_sql_like={like_untyped}");
     // Transactional saves (connection.rb: `save`/`destroy`/`touch` in a
@@ -422,7 +423,10 @@ fn untyped_subexpressions_baseline() {
     // MEASURED 765 on 2026-10-19: the savepoint ROLLBACK TO / RELEASE
     // pair lives in `RawConnection._rollback_savepoint`, called from
     // the raw transaction and both rescue arms of `Base.transaction`.
-    const CEILING: usize = 765;
+    // Remeasured 634 on 2026-10-19 after merging main. The analyzer's
+    // narrowing and the pluck rest-arg removed sites this constant
+    // still counted; 765 had that headroom.
+    const CEILING: usize = 634;
     assert!(
         existing_untyped <= CEILING && like_untyped <= LIKE_CEILING,
         "{} untyped sub-expressions on spinel-blog runtime — exceeds ledger: \
