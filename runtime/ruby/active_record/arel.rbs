@@ -1,4 +1,7 @@
 module Arel
+  class BindError < StandardError
+  end
+
   def self.sql: (String fragment, *(Arel::Nodes::Node | String | Integer | Float | bool | nil) positional, **(Arel::Nodes::Node | String | Integer | Float | bool | nil) named) -> Arel::Nodes::SqlLiteral
 
   def self.star: () -> String
@@ -46,6 +49,9 @@ module Arel
     def self.replace_question: (String text, String literal) -> String
     def self.replace_named: (String text, String key, String literal) -> String
     def self.name_boundary?: (String? ch) -> bool
+    def self.count_questions: (String text) -> Integer
+    def self.unbound_name: (String text) -> String?
+    def self.name_start?: (String? ch) -> bool
 
     class Node
       def to_s: () -> String

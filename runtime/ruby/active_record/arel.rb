@@ -6,6 +6,11 @@
 # the relation's SELECT so `.exists` can splice it into an enclosing
 # WHERE as a correlated subquery (`where.not(<rel>.arel.exists)`).
 module Arel
+  # A bind that does not match the fragment. Rails raises this from
+  # `Arel.sql` before the SQL is handed to the connection.
+  class BindError < StandardError
+  end
+
   # A caller-authored fragment. With no binds this is that text, wrapped
   # so a later bind can tell it from a value that still needs quoting
   # (`scope_evidence: Arel.sql(...)`). Named binds (`:key`) and positional
@@ -14,12 +19,19 @@ module Arel
   # runtime's relation is the SQL text, so the substitution happens now.
   def self.sql(fragment, *positional, **named)
     text = fragment.to_s
+    if !positional.empty? && Nodes.count_questions(text) != positional.length
+      raise BindError, "wrong number of bind variables (#{positional.length} for #{Nodes.count_questions(text)})"
+    end
     positional.each do |bind|
       text = Nodes.replace_question(text, Nodes.embed(bind))
     end
     names = named.keys.map(&:to_s).sort_by { |key| -key.length }
     names.each do |key|
       text = Nodes.replace_named(text, key, Nodes.embed(named[key.to_sym]))
+    end
+    if !positional.empty? || !named.empty?
+      missing = Nodes.unbound_name(text)
+      raise BindError, "missing value for :#{missing}" unless missing.nil?
     end
     Nodes::SqlLiteral.new(text)
   end
@@ -179,6 +191,52 @@ module Arel
       ch.match?(/[^0-9A-Za-z_]/)
     end
 
+    # `?` marks outside a single-quoted string. A bind count has to
+    # match this before `sql` will build a literal.
+    def self.count_questions(text)
+      count = 0
+      i = 0
+      quoted = false
+      while i < text.length
+        ch = text[i]
+        if ch == "'"
+          quoted = !quoted
+        elsif !quoted && ch == "?"
+          count += 1
+        end
+        i += 1
+      end
+      count
+    end
+
+    # The first `:name` still in `text` after substitution, outside a
+    # string and not the second colon of a PostgreSQL cast.
+    def self.unbound_name(text)
+      i = 0
+      quoted = false
+      while i < text.length
+        ch = text[i]
+        prev = i > 0 ? text[i - 1] : ""
+        nxt = text[i + 1, 1]
+        if ch == "'"
+          quoted = !quoted
+          i += 1
+        elsif !quoted && ch == ":" && prev != ":" && name_start?(nxt)
+          j = i + 1
+          j += 1 while j < text.length && !name_boundary?(text[j, 1])
+          return text[i + 1, j - i - 1]
+        else
+          i += 1
+        end
+      end
+      nil
+    end
+
+    def self.name_start?(ch)
+      return false if ch.nil? || ch == ""
+      ch.match?(/[A-Za-z_]/)
+    end
+
     class Node
       def to_s
         ""
@@ -221,9 +279,8 @@ module Arel
 
     # `Case.new.when(pred).then(value)` — each pair is one WHEN, and
     # `else` is optional. `when` / `then` / `else` return the case so
-    # they chain. A node renders as its SQL; a number stays numeric;
-    # nil is NULL; any other value is its text, not a quoted literal
-    # (`then(1)`, `then(column)`).
+    # they chain. A node renders as its SQL. Every other value is
+    # quoted the way `Nodes.quote_scalar` quotes a bind.
     class Case < Node
       def initialize
         @predicates = []
@@ -233,7 +290,7 @@ module Arel
       end
 
       def when(predicate)
-        @pending = predicate.to_s
+        @pending = Case.fragment(predicate)
         self
       end
 
@@ -250,9 +307,8 @@ module Arel
       end
 
       def self.fragment(value)
-        return "NULL" if value.nil?
-        return value.to_s if value.is_a?(Integer) || value.is_a?(Float) || value.is_a?(Node)
-        value.to_s
+        return value.to_s if value.is_a?(Node)
+        Nodes.quote_scalar(value)
       end
 
       def to_s

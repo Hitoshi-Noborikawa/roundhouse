@@ -339,6 +339,7 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
     register_stdlib_class(classes, "YAML", &[
         ("load", Ty::Untyped), ("load_file", Ty::Untyped),
         ("safe_load", Ty::Untyped), ("safe_load_file", Ty::Untyped),
+        ("unsafe_load", Ty::Untyped),
         ("dump", Ty::Str),
     ], &[]);
     // Framework modules an app `include`s that emit already handles

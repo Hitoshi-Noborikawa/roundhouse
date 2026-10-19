@@ -1163,7 +1163,10 @@ fn every_runtime_method_body_concretely_typed() {
     // `Db.record_query` hands it, and `Event` keeps the span
     // `instrument` computed so `duration` is milliseconds (+6 in
     // active_support_notifications.rb, 819 -> 825).
-    const CEILING: usize = 825;
+    // MEASURED 834 on 2026-10-19: the per-thread SQL guard, the
+    // one-argument SQL event, and the blank/unsupported integer cast
+    // read those same gradual values (825 -> 834).
+    const CEILING: usize = 834;
     assert!(
         total_gradual <= CEILING,
         "{total_gradual} Ty::Untyped sites exceeds ceiling of {CEILING}"

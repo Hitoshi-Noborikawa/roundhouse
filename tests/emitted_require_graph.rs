@@ -297,14 +297,37 @@ end
         let (files, diags) = roundhouse::emit::diagnostics::scope(|| {
             target_files(&app, Path::new("."), target)
         });
-        files.expect("target files");
+        let emitted = files.expect("target files");
+        let has_configuration = emitted
+            .iter()
+            .any(|(path, _)| path == "runtime/active_support_configuration_file.rb");
+        let rails = emitted.iter().find(|(path, _)| path == "runtime/rails.rb");
+        if target == BuildTarget::Spinel {
+            assert!(!has_configuration, "spinel must not boot the YAML configuration file");
+            let rails = rails.expect("runtime/rails.rb");
+            assert!(
+                !rails.1.contains("active_support_configuration_file"),
+                "spinel rails.rb still requires the YAML configuration file"
+            );
+        }
+        if matches!(target, BuildTarget::Ruby | BuildTarget::Jruby) {
+            assert!(has_configuration, "{target:?} dropped ConfigurationFile");
+        }
         let gaps: Vec<_> = diags.iter().filter(|d| matches!(
             &d.kind,
             roundhouse::diagnostic::DiagnosticKind::Unsupported { construct, .. }
                 if construct.as_str() == "ruby_family_runtime_constant"
         )).collect();
-        if matches!(target, BuildTarget::Ruby | BuildTarget::Jruby | BuildTarget::Spinel) {
+        if matches!(target, BuildTarget::Ruby | BuildTarget::Jruby) {
             assert!(gaps.is_empty(), "{target:?}: {gaps:?}");
+            continue;
+        }
+        if target == BuildTarget::Spinel {
+            assert_eq!(gaps.len(), 1, "{gaps:?}");
+            assert!(
+                gaps[0].message.contains("ActiveSupport::ConfigurationFile"),
+                "{gaps:?}"
+            );
             continue;
         }
         assert_eq!(gaps.len(), RUBY_FAMILY_RUNTIME_CONSTANTS.len(), "{target:?}: {gaps:?}");

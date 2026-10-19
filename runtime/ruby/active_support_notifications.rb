@@ -56,12 +56,12 @@ module ActiveSupport
     # One statement from `Db.record_query`. A subscriber that itself
     # queries does not re-enter, or the callback would notify itself.
     def self.sql(statement)
-      return nil if @publishing_sql
-      @publishing_sql = true
+      return nil if Thread.current[:active_support_publishing_sql] == true
+      Thread.current[:active_support_publishing_sql] = true
       begin
         instrument("sql.active_record", { sql: statement, name: "SQL" }) { 0 }
       ensure
-        @publishing_sql = false
+        Thread.current[:active_support_publishing_sql] = false
       end
       nil
     end
@@ -73,7 +73,13 @@ module ActiveSupport
         statements = Db.capture_sql { result = yield }
         i = 0
         while i < statements.length
-          callback.call(name, nil, nil, nil, { sql: statements[i], name: "SQL" })
+          payload = { sql: statements[i], name: "SQL" }
+          if callback.arity == 1
+            now = Time.now
+            callback.call(Event.new(name, now, now, nil, payload, 0.0))
+          else
+            callback.call(name, nil, nil, nil, payload)
+          end
           i += 1
         end
         return result

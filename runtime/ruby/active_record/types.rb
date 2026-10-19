@@ -8,6 +8,8 @@ module ActiveRecord
     class String
       def cast(value)
         return nil if value.nil?
+        return "t" if value == true
+        return "f" if value == false
         value.to_s
       end
 
@@ -18,10 +20,17 @@ module ActiveRecord
 
     class Integer
       def cast(value)
-        return nil if value.nil? || value == ""
+        return nil if value.nil?
         return 1 if value == true
         return 0 if value == false
         return value if value.is_a?(::Integer)
+        # `::String`: this module also defines `Type::String`, and a bare
+        # `String` constant resolves to that class.
+        if value.is_a?(::String)
+          return nil if value.strip.empty?
+          return value.to_i
+        end
+        return nil unless value.respond_to?(:to_i)
         value.to_i
       end
 

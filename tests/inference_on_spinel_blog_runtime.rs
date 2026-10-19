@@ -441,8 +441,9 @@ fn untyped_subexpressions_baseline() {
     // `Arel::Nodes` (`SqlLiteral`, `Quoted`, `Not`, `Case`,
     // `NamedFunction`), `Associations::Preloader`, `Type::String`,
     // `Type::Integer`, and `RecordNotDestroyed`. The RBS-paired
-    // runtime gate still has zero vars in those methods. The ceiling
-    // below is remeasured on the merged tree.
+    // runtime gate still has zero vars in those methods.
+    // Unmatched-bind checks and quoted CASE values read the same
+    // untyped parameters again. Remeasured on the merged tree.
     const CEILING: usize = 844;
     assert!(
         existing_untyped <= CEILING && like_untyped <= LIKE_CEILING,

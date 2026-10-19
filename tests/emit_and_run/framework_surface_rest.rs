@@ -26,8 +26,12 @@ fn active_record_string_and_integer_types_cast() {
   def self.values
     [
       ActiveRecord::Type::String.new.cast(nil),
+      ActiveRecord::Type::String.new.cast(true),
+      ActiveRecord::Type::String.new.cast(false),
       ActiveRecord::Type::String.new.cast(12),
       ActiveRecord::Type::Integer.new.cast(""),
+      ActiveRecord::Type::Integer.new.cast("  "),
+      ActiveRecord::Type::Integer.new.cast(:no),
       ActiveRecord::Type::Integer.new.cast(true),
       ActiveRecord::Type::Integer.new.deserialize("12"),
     ]
@@ -38,7 +42,7 @@ end
         .run_ruby(
             r#"
 got = Caster.values
-raise got.inspect unless got == [nil, "12", nil, 1, 12]
+raise got.inspect unless got == [nil, "t", "f", "12", nil, nil, nil, 1, 12]
 "#,
         )
         .assert_passes();
@@ -97,6 +101,13 @@ raise Surface.cached.inspect unless Surface.cached == [nil, "fresh"]
 path = "config/probe.yml"
 File.write(path, "size: <%= 1 + 1 %>\n")
 raise Surface.config(path).inspect unless Surface.config(path)["size"] == 2
+File.write(path, "adapter: :redis\n")
+raise Surface.config(path).inspect unless Surface.config(path)["adapter"] == :redis
+sqls = []
+ActiveSupport::Notifications.subscribed(->(event) { sqls << event.payload[:sql] }, "sql.active_record") do
+  Db.record_query("SELECT 1")
+end
+raise sqls.inspect unless sqls == ["SELECT 1"]
 begin
   StepJob.enqueue_failed
   raise "enqueue did not fail"

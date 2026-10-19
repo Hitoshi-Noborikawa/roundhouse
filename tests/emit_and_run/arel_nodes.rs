@@ -70,6 +70,18 @@ want = [
   "(title)::text = 'Ada'",
 ]
 raise "fragments #{sql.inspect}" unless sql == want
+begin
+  Arel.sql("title = ?", "Ada", "Bea")
+  raise "extra bind was accepted"
+rescue Arel::BindError
+end
+begin
+  Arel.sql("title = :missing", name: "Ada")
+  raise "missing named bind was accepted"
+rescue Arel::BindError
+end
+quoted_case = Arel::Nodes::Case.new.when("title = 'x'").then("high").else(nil).to_s
+raise quoted_case unless quoted_case == "CASE WHEN 'title = ''x''' THEN 'high' ELSE NULL END"
 ordered = Note.order(Arel.sql("CASE WHEN title = :name THEN 1 ELSE 0 END", name: "Ada")).map(&:title)
 raise "ordered #{ordered.inspect}" unless ordered == ["Bea", "Ada"]
 seen = []

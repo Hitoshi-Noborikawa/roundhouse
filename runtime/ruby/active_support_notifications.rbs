@@ -1,7 +1,6 @@
 module ActiveSupport
   module Notifications
     SUBSCRIBERS: Array[Array[untyped]]
-    @publishing_sql: bool
 
     def self.subscribe: (String | Regexp pattern, ?untyped? callback, ?monotonic: bool) ?{ () -> untyped } -> Array[untyped]
     def self.unsubscribe: (Array[untyped] subscriber) -> nil

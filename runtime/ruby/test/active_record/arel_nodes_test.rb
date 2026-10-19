@@ -41,10 +41,20 @@ class ArelNodesTest < Minitest::Test
     predicate = "active = 1"
     expr = Arel::Nodes::Not.new(predicate)
     assert_equal "NOT (active = 1)", expr.to_s
-    cse = Arel::Nodes::Case.new.when(predicate).then(1).else(nil)
+    cse = Arel::Nodes::Case.new.when(Arel.sql(predicate)).then(1).else(nil)
     assert_equal "CASE WHEN active = 1 THEN 1 ELSE NULL END", cse.to_s
+    quoted = Arel::Nodes::Case.new.when("active = 1").then("high").else("low")
+    assert_equal "CASE WHEN 'active = 1' THEN 'high' ELSE 'low' END", quoted.to_s
     fn = Arel::Nodes::NamedFunction.new("COUNT", [cse])
     assert_equal "COUNT(CASE WHEN active = 1 THEN 1 ELSE NULL END)", fn.to_s
+  end
+
+  def test_unmatched_binds_are_refused
+    assert_raises(Arel::BindError) { Arel.sql("id = ?", 1, 2) }
+    assert_raises(Arel::BindError) { Arel.sql("id = ? AND label = ?", 1) }
+    assert_raises(Arel::BindError) { Arel.sql("id = :id", name: 1) }
+    sql = Arel.sql("id = :id", id: 1, extra: 2)
+    assert_equal "id = 1", sql.to_s
   end
 
   def test_a_sql_literal_bind_is_embedded_not_quoted

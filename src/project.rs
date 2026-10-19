@@ -2089,6 +2089,7 @@ fn target_files_inner(
         BuildTarget::Blog => blog_files(fixture),
         BuildTarget::Futamura => futamura_files(fixture),
         BuildTarget::Spinel => spinel_files_with_source_markers(app, fixture, param_binds).and_then(|(mut files, _)| {
+            drop_yaml_configuration_file(&mut files);
             spinel_relation_model_handle(&mut files)?;
             widen_spinel_hash_config_arrays(&mut files);
             spin_shape(files)
@@ -2422,6 +2423,40 @@ fn ensure_readme(
 /// The fingerprinted stylesheet Propshaft will request for a baked
 /// logical file such as `tailwind.css`. Nested paths stay put: the
 /// asset graph bakes those under the logical name the importmap uses.
+fn propshaft_content_digest(content: &str) -> String {
+    use sha1::Digest;
+    let digest = format!("{:x}", sha1::Sha1::digest(content.as_bytes()));
+    digest[..8].to_string()
+}
+
+/// Write `content` at the fingerprint of those bytes and point every
+/// Propshaft lookup of the ingest-time name at that path. The old
+/// fingerprinted path stays free so `write_binary_assets` can still
+/// materialize the source-compiled bytes there.
+fn place_baked_stylesheet(files: &mut Vec<(String, String)>, app: &App, rel: &str, content: &str) {
+    let Some(old) = baked_propshaft_name(app, rel) else {
+        return;
+    };
+    let Some(stem) = rel.strip_suffix(".css") else {
+        return;
+    };
+    let name = format!("{stem}-{}", propshaft_content_digest(content));
+    let digested = format!("{name}.css");
+    let digested_path = format!("static/assets/{digested}");
+    if !files.iter().any(|(path, _)| path == &digested_path) {
+        files.push((digested_path, content.to_string()));
+    }
+    if digested != old {
+        let old_url = format!("/assets/{old}");
+        let new_url = format!("/assets/{digested}");
+        for (_, file) in files.iter_mut() {
+            if file.contains(&old_url) {
+                *file = file.replace(&old_url, &new_url);
+            }
+        }
+    }
+}
+
 fn baked_propshaft_name(app: &App, rel: &str) -> Option<String> {
     let stem = rel.strip_suffix(".css")?;
     if stem.contains('/') {
@@ -2469,18 +2504,13 @@ fn ensure_static_assets(
     for (rel, content) in injected {
         let path = format!("static/assets/{rel}");
         if !files.iter().any(|(p, _)| p == &path) {
-            files.push((path.clone(), content.clone()));
+            files.push((path, content.clone()));
         }
-        // Propshaft links the fingerprinted name (`tailwind-be38fee9.css`).
-        // The MRI Makefile builds that name; jruby and the other baked
-        // targets do not run it, so the prebuilt file has to sit at the
-        // name the layout requests or the stylesheet 404s.
-        if let Some(digested) = baked_propshaft_name(app, &rel) {
-            let digested_path = format!("static/assets/{digested}");
-            if digested_path != path && !files.iter().any(|(p, _)| p == &digested_path) {
-                files.push((digested_path, content));
-            }
-        }
+        // The layout asks for the fingerprinted name. That name has to be
+        // the digest of these bytes, not of the unbuilt source Propshaft
+        // hashed at ingest, or the archive serves CSS that does not match
+        // its fingerprint.
+        place_baked_stylesheet(&mut files, app, &rel, &content);
     }
     files.sort_by(|a, b| a.0.cmp(&b.0));
     files
@@ -5785,8 +5815,9 @@ pub const RUBY_FAMILY_RUNTIME_CONSTANTS: &[&str] = &[
     // lowerer; these two classes are the ruby-family casters.
     "ActiveRecord::Type::String",
     "ActiveRecord::Type::Integer",
-    // Thread-local state, the notification fan-out, and YAML config.
-    // ruby family and spinel, required from rails.rb.
+    // Thread-local state and the notification fan-out. ruby family and
+    // spinel, required from rails.rb. ConfigurationFile parses YAML, which
+    // Spinel does not ship, so that class stays on the ruby family.
     "ActiveSupport::IsolatedExecutionState",
     "ActiveSupport::Notifications",
     "ActiveSupport::Notifications::Event",
@@ -5808,6 +5839,9 @@ fn unavailable_class_module_construct(name: &str, target: &str) -> Option<&'stat
     // but recognizes GeneratorError only as a literal rescue name, and
     // its `packages/net` stops short of net/protocol's `HTTPBadResponse`.
     if target == "spinel" {
+        if name == "ActiveSupport::ConfigurationFile" {
+            return Some("ruby_family_runtime_constant");
+        }
         return if matches!(name, "JSON::GeneratorError" | "Net::HTTPBadResponse") {
             Some("bundled_constant")
         } else {
@@ -7182,6 +7216,22 @@ fn spinel_files(app: &App, fixture: &Path, param_binds: bool) -> Result<(Vec<(St
 /// ivar with the base's `Page`, which spinel refuses as a class-layout
 /// conflict (and which a Rails app without the gem never has). campfire,
 /// which paginates through it, keeps both.
+/// `ConfigurationFile.parse` loads YAML. Spinel's require gate treats
+/// `require "yaml"` as fatal (`SPINEL_LACKS`), and `rails.rb` would
+/// pull that file into every Spinel boot. The ruby family keeps both.
+fn drop_yaml_configuration_file(files: &mut Vec<(String, String)>) {
+    const REQUIRE: &str = "require_relative \"active_support_configuration_file\"\n";
+    if let Some((_, rails)) = files.iter_mut().find(|(path, _)| path == "runtime/rails.rb") {
+        if rails.contains(REQUIRE) {
+            *rails = rails.replacen(REQUIRE, "", 1);
+        }
+    }
+    files.retain(|(path, _)| {
+        path != "runtime/active_support_configuration_file.rb"
+            && path != "sig/runtime/active_support_configuration_file.rbs"
+    });
+}
+
 fn apply_pagination_demand(files: &mut Vec<(String, String)>) -> Result<(), String> {
     let wanted = files.iter().any(|(p, c)| {
         (p.starts_with("app/") || p.starts_with("test/")) && p.ends_with(".rb") && c.contains("set_page_and_extract_portion_from")
@@ -10654,6 +10704,28 @@ mod tests {
             Some("tailwind-be38fee9.css")
         );
         assert_eq!(baked_propshaft_name(&app, "controllers/index.js"), None);
+    }
+
+    #[test]
+    fn baked_css_fingerprint_is_the_injected_bytes() {
+        let mut app = App::new();
+        app.binary_assets
+            .push(("static/assets/tailwind-be38fee9.css".into(), b"source".to_vec()));
+        let css = "compiled-tailwind {}\n";
+        let mut files = vec![(
+            "config/application.rb".to_string(),
+            "def propshaft_asset_path(source)\nwhen \"tailwind.css\"\n\"/assets/tailwind-be38fee9.css\"\nend\nend\n"
+                .to_string(),
+        )];
+        place_baked_stylesheet(&mut files, &app, "tailwind.css", css);
+        let digested = format!("tailwind-{}.css", propshaft_content_digest(css));
+        assert!(files.iter().any(|(path, body)| {
+            path == &format!("static/assets/{digested}") && body == css
+        }));
+        assert!(!files.iter().any(|(path, _)| path == "static/assets/tailwind-be38fee9.css"));
+        let ruby = &files.iter().find(|(path, _)| path == "config/application.rb").unwrap().1;
+        assert!(ruby.contains(&format!("/assets/{digested}")));
+        assert!(!ruby.contains("be38fee9"));
     }
 
     /// Both dispatchers reset the app's `CurrentAttributes` subclass.

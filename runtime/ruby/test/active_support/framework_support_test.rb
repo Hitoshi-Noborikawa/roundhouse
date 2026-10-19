@@ -56,8 +56,33 @@ class FrameworkSupportTest < Minitest::Test
     File.write(path, "size: <%= 1 + 1 %>\n")
     loaded = ActiveSupport::ConfigurationFile.parse(path)
     assert_equal 2, loaded["size"]
+    File.write(path, "adapter: :redis\n")
+    assert_equal :redis, ActiveSupport::ConfigurationFile.parse(path)["adapter"]
   ensure
     File.delete(path) if path && File.exist?(path)
+  end
+
+  def test_subscribed_sql_accepts_an_event
+    skip "Db is not loaded" unless defined?(Db)
+    sqls = []
+    result = ActiveSupport::Notifications.subscribed(->(event) { sqls << event.payload[:sql] }, "sql.active_record") do
+      Db.record_query("SELECT 1")
+      "done"
+    end
+    assert_equal "done", result
+    assert_equal ["SELECT 1"], sqls
+  end
+
+  def test_sql_reentry_guard_is_per_thread
+    seen = []
+    subscriber = ActiveSupport::Notifications.subscribe("sql.active_record") { |*args| seen << args[4][:sql] }
+    Thread.current[:active_support_publishing_sql] = true
+    ActiveSupport::Notifications.sql("hidden")
+    Thread.new { ActiveSupport::Notifications.sql("visible") }.join
+    assert_equal ["visible"], seen
+  ensure
+    Thread.current[:active_support_publishing_sql] = false
+    ActiveSupport::Notifications.unsubscribe(subscriber) if subscriber
   end
 
   def test_enqueue_error_and_continuable_steps
