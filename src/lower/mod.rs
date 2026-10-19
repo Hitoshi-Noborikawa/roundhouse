@@ -1243,6 +1243,18 @@ pub(crate) fn for_each_owned_hook_body(
                         f(cond);
                     }
                 }
+                // `validates :attr, …, if: -> { … }` / `unless: …` — a
+                // lambda guard is a general expression, same as a
+                // callback's, and needs the same passes (`.in?`
+                // rewriting, attribute aliasing, …) to see it.
+                crate::dialect::ModelBodyItem::Validation { validation, .. } => {
+                    if let Some(cond) = &mut validation.if_cond {
+                        f(cond);
+                    }
+                    if let Some(cond) = &mut validation.unless_cond {
+                        f(cond);
+                    }
+                }
                 // Unrecognized class-body exprs (constant procs and
                 // friends) round-trip verbatim into the emit — their
                 // sites are just as reachable.
@@ -1388,6 +1400,14 @@ pub(crate) fn for_each_hook_body_ref(
                 }
                 crate::dialect::ModelBodyItem::Callback { callback, .. } => {
                     if let Some(cond) = &callback.condition {
+                        f(cond);
+                    }
+                }
+                crate::dialect::ModelBodyItem::Validation { validation, .. } => {
+                    if let Some(cond) = &validation.if_cond {
+                        f(cond);
+                    }
+                    if let Some(cond) = &validation.unless_cond {
                         f(cond);
                     }
                 }

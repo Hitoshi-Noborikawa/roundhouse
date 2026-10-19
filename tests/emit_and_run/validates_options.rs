@@ -5,9 +5,12 @@ use super::emit_and_run;
 /// and format already lowered; ingest was dropping the keys, so
 /// `create!` saved records Rails rejects. Each wired option is pinned
 /// here, including the `validates_*_of` spelling. Symbol `if:` /
-/// `unless:` use the same guard as `validate :method`. `equal_to`,
-/// `other_than`, uniqueness, comparison, `length: is:`, and a lambda
-/// condition stay diagnostics and are not enforced.
+/// `unless:` use the same guard as `validate :method`, and (the
+/// lambda-condition follow-up) a zero-arity lambda `if:` now guards the
+/// same way — `:note` below, with dedicated coverage in
+/// `validates_lambda_conditions.rs`. `equal_to`, `other_than`,
+/// uniqueness, comparison, and `length: is:` stay diagnostics and are
+/// not enforced.
 const MODEL: &str = r#"class Article < ApplicationRecord
   has_many :comments, dependent: :destroy
 
@@ -132,12 +135,17 @@ valid, msgs = messages(base.merge(title: "Draft"))
 raise "draft rejected: #{msgs.inspect}" unless valid
 _, live_blank = messages(base.merge(title: "Live", status: "live"))
 raise "live blank: #{live_blank.inspect}" unless live_blank.any? { |m| m.include?("Label") } && live_blank.any? { |m| m.include?("Extra") }
-valid, msgs = messages(base.merge(title: "LiveOk", status: "live", label: "x", extra: "y"))
+valid, msgs = messages(base.merge(title: "LiveOk", status: "live", label: "x", extra: "y", note: "z"))
 raise "live filled rejected: #{msgs.inspect}" unless valid
 
-# Lambda if:, uniqueness:, comparison:, and length: is: are not enforced.
-valid, msgs = messages(base.merge(title: "Lambda", status: "live", label: "x", extra: "y", note: ""))
-raise "lambda condition ran: #{msgs.inspect}" unless valid
+# Lambda if: guards :note the same way the Symbol forms above guard
+# :label / :extra.
+_, lambda_blank = messages(base.merge(title: "Lambda", status: "live", label: "x", extra: "y", note: ""))
+raise "lambda condition not enforced: #{lambda_blank.inspect}" unless lambda_blank.any? { |m| m.include?("Note") }
+valid, msgs = messages(base.merge(title: "LambdaOk", status: "live", label: "x", extra: "y", note: "z"))
+raise "lambda condition filled rejected: #{msgs.inspect}" unless valid
+
+# uniqueness:, comparison:, and length: is: are not enforced.
 Article.create!(base.merge(title: "Taken", label: "x", extra: "y"))
 Article.create!(base.merge(title: "Taken"))
 valid, msgs = messages(base.merge(title: "Compared"))
@@ -161,7 +169,6 @@ puts "validates options passed"
         "uniqueness",
         "comparison",
         "length: is",
-        "if:",
     ] {
         assert!(
             warnings.iter().any(|message| message.contains(needle)),

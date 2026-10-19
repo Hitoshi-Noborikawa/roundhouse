@@ -8,7 +8,7 @@ use ruby_prism::Node;
 
 use crate::Symbol;
 use crate::dialect::{Comment, ModelBodyItem};
-use crate::expr::Literal;
+use crate::expr::{Expr, Literal};
 use crate::span::Span;
 
 use super::super::IngestError;
@@ -63,17 +63,13 @@ pub(super) enum ParsedValidates {
 
 struct BuiltRule {
     rule: crate::dialect::ValidationRule,
-    if_method: Option<Symbol>,
-    unless_method: Option<Symbol>,
+    if_cond: Option<Expr>,
+    unless_cond: Option<Expr>,
 }
 
 impl BuiltRule {
     fn bare(rule: crate::dialect::ValidationRule) -> Self {
-        Self {
-            rule,
-            if_method: None,
-            unless_method: None,
-        }
+        Self { rule, if_cond: None, unless_cond: None }
     }
 }
 
@@ -129,8 +125,8 @@ pub(super) fn parse_validates_call(
 
     let mut allow_blank = false;
     let mut allow_nil: Option<bool> = None;
-    let mut call_if: Option<Symbol> = None;
-    let mut call_unless: Option<Symbol> = None;
+    let mut call_if_cond: Option<Expr> = None;
+    let mut call_unless_cond: Option<Expr> = None;
     let mut drafts: Vec<BuiltRule> = Vec::new();
 
     if let Some(node) = &option_node {
@@ -157,12 +153,12 @@ pub(super) fn parse_validates_call(
                             Some(flag) => allow_nil = Some(flag),
                             None => gaps.push("allow_nil".to_string()),
                         },
-                        "if" => push_symbol_condition(&value, &mut call_if, "if", &mut gaps),
+                        "if" => push_condition(&value, file, &mut call_if_cond, "if", &mut gaps),
                         "unless" => {
-                            push_symbol_condition(&value, &mut call_unless, "unless", &mut gaps)
+                            push_condition(&value, file, &mut call_unless_cond, "unless", &mut gaps)
                         }
                         "on" | "strict" | "message" => gaps.push(key),
-                        other => match parse_validator(other, &value) {
+                        other => match parse_validator(other, &value, file) {
                             RuleParse::Skip => {}
                             RuleParse::Rule(built) => drafts.push(built),
                             RuleParse::Gap(more) => gaps.extend(more),
@@ -174,10 +170,11 @@ pub(super) fn parse_validates_call(
                 parse_of_options(
                     kind,
                     &elements,
+                    file,
                     &mut allow_blank,
                     &mut allow_nil,
-                    &mut call_if,
-                    &mut call_unless,
+                    &mut call_if_cond,
+                    &mut call_unless_cond,
                     &mut drafts,
                     &mut gaps,
                 );
@@ -247,19 +244,19 @@ pub(super) fn parse_validates_call(
             out.push(Validation {
                 attribute: attr.clone(),
                 rules: Vec::new(),
-                if_method: call_if.clone(),
-                unless_method: call_unless.clone(),
+                if_cond: call_if_cond.clone(),
+                unless_cond: call_unless_cond.clone(),
             });
             continue;
         }
         let mut grouped: Option<Validation> = None;
         for draft in &drafts {
             // A condition inside the rule hash replaces the call-level
-            // one for that key. The other key still merges in.
-            let if_method = draft.if_method.clone().or_else(|| call_if.clone());
-            let unless_method = draft.unless_method.clone().or_else(|| call_unless.clone());
+            // one for that key — the other key still merges in.
+            let if_cond = draft.if_cond.clone().or_else(|| call_if_cond.clone());
+            let unless_cond = draft.unless_cond.clone().or_else(|| call_unless_cond.clone());
             if let Some(current) = grouped.as_mut() {
-                if current.if_method == if_method && current.unless_method == unless_method {
+                if current.if_cond == if_cond && current.unless_cond == unless_cond {
                     current.rules.push(draft.rule.clone());
                     continue;
                 }
@@ -268,8 +265,8 @@ pub(super) fn parse_validates_call(
             grouped = Some(Validation {
                 attribute: attr.clone(),
                 rules: vec![draft.rule.clone()],
-                if_method,
-                unless_method,
+                if_cond,
+                unless_cond,
             });
         }
         if let Some(validation) = grouped {
@@ -279,16 +276,32 @@ pub(super) fn parse_validates_call(
     ParsedValidates::Modeled(out)
 }
 
-fn push_symbol_condition(
+/// `if:` / `unless:` — the same reader a callback uses. A Symbol is the
+/// predicate called on the record; a zero-arity lambda/proc contributes
+/// its body. A later value for the same key replaces the earlier one,
+/// matching Ruby's last-duplicate-key-wins rule. Anything the reader
+/// rejects (an arity>0 lambda, a String, an unsupported array, a
+/// captured local, a body survey mode had to stub with `nil`) stays a
+/// reported gap.
+fn push_condition(
     value: &Node<'_>,
-    slot: &mut Option<Symbol>,
+    file: &str,
+    cond_slot: &mut Option<Expr>,
     option: &str,
     gaps: &mut Vec<String>,
 ) {
-    match symbol_value(value) {
-        Some(name) => *slot = Some(Symbol::from(name.as_str())),
-        None => gaps.push(option.to_string()),
+    // Survey mode turns an unsupported expression into `nil` and still
+    // returns it. A guard built from that placeholder skips or runs
+    // checks Rails would not. The expression error stays on the survey
+    // ledger; the validates call is the reported gap.
+    let before = super::super::survey::recorded().len();
+    if let Some(cond) = super::callback_condition(value, file)
+        && super::super::survey::recorded().len() == before
+    {
+        *cond_slot = Some(cond);
+        return;
     }
+    gaps.push(option.to_string());
 }
 
 /// `allow_blank: true` skips every validator when the value is blank.
@@ -361,10 +374,11 @@ fn hash_elements<'a>(node: &Node<'a>) -> Option<ruby_prism::NodeList<'a>> {
 fn parse_of_options<'a>(
     kind: ValidatesKind,
     elements: &ruby_prism::NodeList<'a>,
+    file: &str,
     allow_blank: &mut bool,
     allow_nil: &mut Option<bool>,
-    call_if: &mut Option<Symbol>,
-    call_unless: &mut Option<Symbol>,
+    call_if_cond: &mut Option<Expr>,
+    call_unless_cond: &mut Option<Expr>,
     drafts: &mut Vec<BuiltRule>,
     gaps: &mut Vec<String>,
 ) {
@@ -397,8 +411,8 @@ fn parse_of_options<'a>(
                 Some(flag) => *allow_nil = Some(flag),
                 None => gaps.push("allow_nil".to_string()),
             },
-            "if" => push_symbol_condition(&value, call_if, "if", gaps),
-            "unless" => push_symbol_condition(&value, call_unless, "unless", gaps),
+            "if" => push_condition(&value, file, call_if_cond, "if", gaps),
+            "unless" => push_condition(&value, file, call_unless_cond, "unless", gaps),
             "on" | "strict" | "message" => gaps.push(key),
             "only_integer" if matches!(kind, ValidatesKind::Numericality) => {
                 saw_rule_key = true;
@@ -498,15 +512,15 @@ fn parse_of_options<'a>(
     drafts.push(BuiltRule::bare(rule));
 }
 
-fn parse_validator(key: &str, value: &Node<'_>) -> RuleParse {
+fn parse_validator(key: &str, value: &Node<'_>, file: &str) -> RuleParse {
     use crate::dialect::ValidationRule;
     match key {
-        "presence" => parse_bool_or_hash(value, ValidationRule::Presence, "presence"),
-        "absence" => parse_bool_or_hash(value, ValidationRule::Absence, "absence"),
-        "length" => parse_length_rule(value),
-        "numericality" => parse_numericality(value),
-        "inclusion" => parse_inclusion(value),
-        "format" => parse_format(value),
+        "presence" => parse_bool_or_hash(value, ValidationRule::Presence, "presence", file),
+        "absence" => parse_bool_or_hash(value, ValidationRule::Absence, "absence", file),
+        "length" => parse_length_rule(value, file),
+        "numericality" => parse_numericality(value, file),
+        "inclusion" => parse_inclusion(value, file),
+        "format" => parse_format(value, file),
         other => RuleParse::Gap(vec![other.to_string()]),
     }
 }
@@ -516,6 +530,7 @@ fn parse_bool_or_hash(
     value: &Node<'_>,
     rule: crate::dialect::ValidationRule,
     name: &str,
+    file: &str,
 ) -> RuleParse {
     match super::super::util::bool_value(value) {
         Some(true) => return RuleParse::Rule(BuiltRule::bare(rule)),
@@ -538,9 +553,9 @@ fn parse_bool_or_hash(
         };
         let child = assoc.value();
         match key.as_str() {
-            "if" => push_symbol_condition(&child, &mut built.if_method, "if", &mut gaps),
+            "if" => push_condition(&child, file, &mut built.if_cond, "if", &mut gaps),
             "unless" => {
-                push_symbol_condition(&child, &mut built.unless_method, "unless", &mut gaps)
+                push_condition(&child, file, &mut built.unless_cond, "unless", &mut gaps)
             }
             "allow_nil" => match super::super::util::bool_value(&child) {
                 Some(false) => {}
@@ -556,7 +571,7 @@ fn parse_bool_or_hash(
     }
 }
 
-fn parse_numericality(value: &Node<'_>) -> RuleParse {
+fn parse_numericality(value: &Node<'_>, file: &str) -> RuleParse {
     use crate::dialect::ValidationRule;
     if super::super::util::bool_value(value) == Some(true) {
         return RuleParse::Rule(BuiltRule::bare(ValidationRule::Numericality {
@@ -618,9 +633,9 @@ fn parse_numericality(value: &Node<'_>) -> RuleParse {
                 None => gaps.push("numericality: less_than_or_equal_to".to_string()),
             },
             "equal_to" | "other_than" => gaps.push(format!("numericality: {key}")),
-            "if" => push_symbol_condition(&child, &mut built.if_method, "if", &mut gaps),
+            "if" => push_condition(&child, file, &mut built.if_cond, "if", &mut gaps),
             "unless" => {
-                push_symbol_condition(&child, &mut built.unless_method, "unless", &mut gaps)
+                push_condition(&child, file, &mut built.unless_cond, "unless", &mut gaps)
             }
             "allow_nil" => match super::super::util::bool_value(&child) {
                 Some(false) => {}
@@ -642,7 +657,7 @@ fn parse_numericality(value: &Node<'_>) -> RuleParse {
     RuleParse::Rule(built)
 }
 
-fn parse_inclusion(value: &Node<'_>) -> RuleParse {
+fn parse_inclusion(value: &Node<'_>, file: &str) -> RuleParse {
     if let Some(spec) = inclusion_values(value) {
         return RuleParse::Rule(BuiltRule::bare(inclusion_rule(spec)));
     }
@@ -667,9 +682,9 @@ fn parse_inclusion(value: &Node<'_>) -> RuleParse {
                 Some(spec) => values = Some(spec),
                 None => gaps.push("inclusion: in".to_string()),
             },
-            "if" => push_symbol_condition(&child, &mut built.if_method, "if", &mut gaps),
+            "if" => push_condition(&child, file, &mut built.if_cond, "if", &mut gaps),
             "unless" => {
-                push_symbol_condition(&child, &mut built.unless_method, "unless", &mut gaps)
+                push_condition(&child, file, &mut built.unless_cond, "unless", &mut gaps)
             }
             "allow_nil" => match super::super::util::bool_value(&child) {
                 Some(false) => {}
@@ -690,7 +705,7 @@ fn parse_inclusion(value: &Node<'_>) -> RuleParse {
     }
 }
 
-fn parse_format(value: &Node<'_>) -> RuleParse {
+fn parse_format(value: &Node<'_>, file: &str) -> RuleParse {
     use crate::dialect::ValidationRule;
     if let Some(pattern) = bare_regexp(value) {
         return RuleParse::Rule(BuiltRule::bare(ValidationRule::Format { pattern }));
@@ -722,9 +737,9 @@ fn parse_format(value: &Node<'_>) -> RuleParse {
                 Some(text) => pattern = Some(text),
                 None => gaps.push("format: with".to_string()),
             },
-            "if" => push_symbol_condition(&child, &mut built.if_method, "if", &mut gaps),
+            "if" => push_condition(&child, file, &mut built.if_cond, "if", &mut gaps),
             "unless" => {
-                push_symbol_condition(&child, &mut built.unless_method, "unless", &mut gaps)
+                push_condition(&child, file, &mut built.unless_cond, "unless", &mut gaps)
             }
             "allow_nil" => match super::super::util::bool_value(&child) {
                 Some(false) => {}
@@ -748,7 +763,7 @@ fn parse_format(value: &Node<'_>) -> RuleParse {
 /// `length: { minimum: N, maximum: M }`. `is:`, `in:`, and `within:`
 /// change which lengths Rails accepts; they are a gap, not a silent
 /// drop beside a bound this build does lower.
-fn parse_length_rule(value: &ruby_prism::Node<'_>) -> RuleParse {
+fn parse_length_rule(value: &ruby_prism::Node<'_>, file: &str) -> RuleParse {
     use crate::dialect::ValidationRule;
     let Some(elements) = hash_elements(value) else {
         return RuleParse::Gap(vec!["length".to_string()]);
@@ -794,9 +809,9 @@ fn parse_length_rule(value: &ruby_prism::Node<'_>) -> RuleParse {
                 Some(text) => message = Some(text),
                 None => gaps.push("length: message".to_string()),
             },
-            "if" => push_symbol_condition(&child, &mut built.if_method, "if", &mut gaps),
+            "if" => push_condition(&child, file, &mut built.if_cond, "if", &mut gaps),
             "unless" => {
-                push_symbol_condition(&child, &mut built.unless_method, "unless", &mut gaps)
+                push_condition(&child, file, &mut built.unless_cond, "unless", &mut gaps)
             }
             "is" | "in" | "within" => gaps.push(format!("length: {key}")),
             other => gaps.push(format!("length: {other}")),

@@ -540,8 +540,8 @@ pub(super) fn ingest_model_body_items(
                         .map(|attribute| Validation {
                             attribute,
                             rules: vec![rule.clone()],
-                            if_method: None,
-                            unless_method: None,
+                            if_cond: None,
+                            unless_cond: None,
                         })
                         .collect()
                 } else {
@@ -928,8 +928,8 @@ pub(super) fn ingest_model_body_item(
                                 unless_method: unless_method.clone(),
                             })
                             .collect(),
-                        if_method: None,
-                        unless_method: None,
+                        if_cond: None,
+                        unless_cond: None,
                     },
                     leading_comments,
                     leading_blank_line: false,
@@ -2238,10 +2238,18 @@ fn callback_condition(value: &ruby_prism::Node<'_>, file: &str) -> Option<Expr> 
 ///   `it` are parameters too);
 /// * exactly one statement, with no `return`/`next`/`break`/`redo`/
 ///   `retry` — inside the hook a `return` exits the whole callback chain;
-/// * no local writes — they would leak into the hook's scope. That
-///   includes a local bound through a target: a multi-write
-///   `(a, b = …)`, a `=> t` match-write, a `rescue => e`; and any
-///   multi-write declines, its targets being locals or not.
+/// * no local reads or writes of a name bound outside the expression.
+///   A read of a local captured from the class body
+///   (`flag = true; if: -> { flag }`) becomes a bare name inside
+///   `def validate` / the hook and raises `NameError`. A name bound by
+///   a nested block or lambda (`tags.any? { |tag| tag.blank? }`,
+///   `{ _1 }`, `{ it }`) stays: that binding is still in the spliced
+///   expression. A block local (`{ |; tmp| tmp }`) is not — the
+///   lowered block drops that declaration, so the read would be a
+///   bare name. A write would leak into the
+///   hook's scope. That includes a local bound through a target: a
+///   multi-write `(a, b = …)`, a `=> t` match-write, a `rescue => e`;
+///   and any multi-write declines, its targets being locals or not.
 ///
 /// Anything else declines (`None`), and the callback falls back to the
 /// unsupported-DSL warning, as it did before conditions were modelled.
@@ -2262,38 +2270,124 @@ fn simple_condition_body<'pr>(
         return None;
     }
 
-    struct Escapes(bool);
+    struct Escapes {
+        bad: bool,
+        /// Names bound by nested blocks and lambdas still in scope.
+        bound: Vec<String>,
+    }
+    impl<'pr> Escapes {
+        fn push_binding(&mut self, name: &str) {
+            self.bound.push(name.to_string());
+        }
+
+        fn bind_parameters(&mut self, params: Option<ruby_prism::Node<'pr>>) {
+            let Some(params) = params else { return };
+            if params.as_it_parameters_node().is_some() {
+                self.push_binding("it");
+                return;
+            }
+            if let Some(numbered) = params.as_numbered_parameters_node() {
+                for n in 1..=numbered.maximum() {
+                    self.push_binding(&format!("_{n}"));
+                }
+                return;
+            }
+            let Some(block_params) = params.as_block_parameters_node() else { return };
+            // `|; tmp|` declares a local the lowered block does not
+            // keep. A read of that name would emit as a bare `tmp`.
+            let Some(pn) = block_params.parameters() else { return };
+            let bind_list = |this: &mut Self, list: ruby_prism::NodeList<'pr>| {
+                for node in list.iter() {
+                    this.bind_parameter(&node);
+                }
+            };
+            bind_list(self, pn.requireds());
+            bind_list(self, pn.optionals());
+            bind_list(self, pn.posts());
+            bind_list(self, pn.keywords());
+            if let Some(rest) = pn.rest() {
+                self.bind_parameter(&rest);
+            }
+            if let Some(rest) = pn.keyword_rest() {
+                self.bind_parameter(&rest);
+            }
+            if let Some(block) = pn.block() {
+                if let Some(name) = block.name() {
+                    self.push_binding(&constant_id_str(&name));
+                }
+            }
+        }
+
+        fn bind_parameter(&mut self, node: &ruby_prism::Node<'pr>) {
+            let name = if let Some(param) = node.as_required_parameter_node() {
+                Some(constant_id_str(&param.name()))
+            } else if let Some(param) = node.as_optional_parameter_node() {
+                Some(constant_id_str(&param.name()))
+            } else if let Some(param) = node.as_rest_parameter_node() {
+                param.name().as_ref().map(constant_id_str)
+            } else if let Some(param) = node.as_required_keyword_parameter_node() {
+                Some(constant_id_str(&param.name()))
+            } else if let Some(param) = node.as_optional_keyword_parameter_node() {
+                Some(constant_id_str(&param.name()))
+            } else if let Some(param) = node.as_keyword_rest_parameter_node() {
+                param.name().as_ref().map(constant_id_str)
+            } else {
+                None
+            };
+            if let Some(name) = name {
+                self.push_binding(&name);
+            }
+        }
+    }
     impl<'pr> ruby_prism::Visit<'pr> for Escapes {
-        fn visit_return_node(&mut self, _: &ruby_prism::ReturnNode<'pr>) { self.0 = true; }
-        fn visit_next_node(&mut self, _: &ruby_prism::NextNode<'pr>) { self.0 = true; }
-        fn visit_break_node(&mut self, _: &ruby_prism::BreakNode<'pr>) { self.0 = true; }
-        fn visit_redo_node(&mut self, _: &ruby_prism::RedoNode<'pr>) { self.0 = true; }
-        fn visit_retry_node(&mut self, _: &ruby_prism::RetryNode<'pr>) { self.0 = true; }
+        fn visit_block_node(&mut self, node: &ruby_prism::BlockNode<'pr>) {
+            let mark = self.bound.len();
+            self.bind_parameters(node.parameters());
+            ruby_prism::visit_block_node(self, node);
+            self.bound.truncate(mark);
+        }
+        fn visit_lambda_node(&mut self, node: &ruby_prism::LambdaNode<'pr>) {
+            let mark = self.bound.len();
+            self.bind_parameters(node.parameters());
+            ruby_prism::visit_lambda_node(self, node);
+            self.bound.truncate(mark);
+        }
+        fn visit_local_variable_read_node(&mut self, node: &ruby_prism::LocalVariableReadNode<'pr>) {
+            let name = constant_id_str(&node.name());
+            if !self.bound.iter().any(|bound| bound == name) {
+                self.bad = true;
+            }
+        }
+        fn visit_return_node(&mut self, _: &ruby_prism::ReturnNode<'pr>) { self.bad = true; }
+        fn visit_next_node(&mut self, _: &ruby_prism::NextNode<'pr>) { self.bad = true; }
+        fn visit_break_node(&mut self, _: &ruby_prism::BreakNode<'pr>) { self.bad = true; }
+        fn visit_redo_node(&mut self, _: &ruby_prism::RedoNode<'pr>) { self.bad = true; }
+        fn visit_retry_node(&mut self, _: &ruby_prism::RetryNode<'pr>) { self.bad = true; }
         fn visit_local_variable_write_node(&mut self, _: &ruby_prism::LocalVariableWriteNode<'pr>) {
-            self.0 = true;
+            self.bad = true;
         }
         fn visit_local_variable_operator_write_node(
             &mut self,
             _: &ruby_prism::LocalVariableOperatorWriteNode<'pr>,
         ) {
-            self.0 = true;
+            self.bad = true;
         }
         fn visit_local_variable_or_write_node(&mut self, _: &ruby_prism::LocalVariableOrWriteNode<'pr>) {
-            self.0 = true;
+            self.bad = true;
         }
         fn visit_local_variable_and_write_node(&mut self, _: &ruby_prism::LocalVariableAndWriteNode<'pr>) {
-            self.0 = true;
+            self.bad = true;
         }
         fn visit_local_variable_target_node(&mut self, _: &ruby_prism::LocalVariableTargetNode<'pr>) {
-            self.0 = true;
+            self.bad = true;
         }
         fn visit_multi_write_node(&mut self, _: &ruby_prism::MultiWriteNode<'pr>) {
-            self.0 = true;
+            self.bad = true;
         }
     }
-    let mut v = Escapes(false);
+    let mut v = Escapes { bad: false, bound: Vec::new() };
     ruby_prism::Visit::visit(&mut v, &only);
-    if v.0 { None } else { Some(only) }
+    if v.bad { None } else { Some(only) }
 }
 
 fn negate_condition(cond: Expr) -> Expr {
