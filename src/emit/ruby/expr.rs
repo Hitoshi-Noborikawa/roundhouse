@@ -166,6 +166,15 @@ pub fn emit_expr(e: &Expr) -> String {
     if is_mutable_string_literal(e) {
         return format!("+{}", emit_node(&e.node));
     }
+    // Set when `iso8601` was grounded. Scope-chain rebuilds the send
+    // and can widen the receiver, so the type alone is not enough.
+    if e.decisions & crate::expr::GROUNDED_TIME_FORMAT != 0 {
+        if let ExprNode::Send { recv, method, args, parenthesized, block: None } = &*e.node {
+            if method.as_str() == "to_rfc3339" && args.is_empty() {
+                return emit_send_base(recv.as_ref(), &Symbol::from("iso8601"), args, *parenthesized);
+            }
+        }
+    }
     emit_node(&e.node)
 }
 
@@ -1287,6 +1296,31 @@ pub(super) fn emit_send_base(
     if m == "`" && args.len() == 1 && recv.is_none_or(|r| matches!(&*r.node, ExprNode::SelfRef)) {
         if let Some(literal) = emit_backtick_literal(&args[0]) {
             return literal;
+        }
+    }
+    // `time_calendar` stores Crystal's clock spelling (`Time.utc`,
+    // `to_rfc3339`). MRI `Time.utc` requires a year, and Time has
+    // `iso8601` rather than `to_rfc3339`, so the ruby target prints the
+    // MRI names of that same IR. `Time.utc(year, …)` and `iso8601(n)`
+    // are different calls and stay as written.
+    // The IR spelling of a time `iso8601`. MRI has `iso8601`, not
+    // `to_rfc3339`. An application method of that name is left as written.
+    if m == "to_rfc3339" && args.is_empty() {
+        if let Some(r) = recv {
+            if crate::lower::time_calendar::is_time_rfc3339_receiver(r) {
+                return emit_send_base(Some(r), &Symbol::from("iso8601"), args, parenthesized);
+            }
+        }
+    }
+    if m == "utc" && args.is_empty() {
+        if let Some(r) = recv {
+            // Bare `Time` and rooted `::Time`. `Foo::Time.utc` is that class's method.
+            if matches!(&*r.node, ExprNode::Const { path }
+                if path.last().is_some_and(|s| s.as_str() == "Time")
+                    && path.iter().rev().skip(1).all(|s| s.as_str().is_empty()))
+            {
+                return format!("{}.now.utc", emit_expr(r));
+            }
         }
     }
     // `...` is a send argument packet, never an index or infix operand.

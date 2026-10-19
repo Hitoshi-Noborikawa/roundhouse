@@ -109,8 +109,9 @@ fn server_source_for_active_profile() -> &'static str {
     }
 }
 
+mod char_set;
 mod expr;
-pub(crate) use expr::{array_method_handled, numeric_method_handled};
+pub(crate) use expr::{array_method_handled, numeric_method_handled, string_method_handled};
 pub mod js_ast;
 mod library;
 mod naming;

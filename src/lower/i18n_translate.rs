@@ -606,6 +606,9 @@ pub fn apply_i18n_translate_lowering(app: &mut App) {
     let helpers: std::collections::HashSet<crate::ident::ClassId> = app.helper_method_index.values().cloned().collect();
     for lc in app.library_classes.iter_mut().filter(|lc| helpers.contains(&lc.name)) {
         for m in lc.methods.iter_mut().filter(|m| m.receiver == crate::dialect::MethodReceiver::Instance) {
+            for default in m.params.iter_mut().filter_map(|p| p.default.as_mut()) {
+                rewrite_default(default, &catalog, Site::View(None));
+            }
             rewrite(&mut m.body, &catalog, Site::View(None));
         }
     }
@@ -615,14 +618,17 @@ pub fn apply_i18n_translate_lowering(app: &mut App) {
             match item {
                 crate::dialect::ControllerBodyItem::Action { action, .. } => {
                     for (_name, default) in &mut action.opt_params {
-                        rewrite(default, &catalog, Site::Controller(scope));
+                        rewrite_default(default, &catalog, Site::Controller(scope));
+                    }
+                    for default in action.kw_params.iter_mut().filter_map(|(_, d)| d.as_mut()) {
+                        rewrite_default(default, &catalog, Site::Controller(scope));
                     }
                     rewrite(&mut action.body, &catalog, Site::Controller(scope));
                 }
                 crate::dialect::ControllerBodyItem::ClassMethod { method, .. } => {
                     for p in &mut method.params {
                         if let Some(default) = &mut p.default {
-                            rewrite(default, &catalog, Site::Other);
+                            rewrite_default(default, &catalog, Site::Other);
                         }
                     }
                     rewrite(&mut method.body, &catalog, Site::Other);
@@ -670,6 +676,15 @@ fn translates(app: &App, controller: &crate::dialect::Controller) -> bool {
         });
     }
     false
+}
+
+// A parameter default has no statement ahead of it to hoist a `Seq` into, so a dynamic key's `__k = …; case __k …` keeps its own `begin`.
+fn rewrite_default(expr: &mut Expr, catalog: &Catalog, site: Site<'_>) {
+    rewrite(expr, catalog, site);
+    if matches!(&*expr.node, ExprNode::Seq { exprs } if exprs.len() > 1) {
+        let body = expr.clone();
+        *expr = Expr { ty: body.ty.clone(), ..Expr::new(body.span, ExprNode::BeginRescue { body, rescues: Vec::new(), else_branch: None, ensure: None, implicit: false }) };
+    }
 }
 
 fn rewrite(expr: &mut Expr, catalog: &Catalog, site: Site<'_>) {
