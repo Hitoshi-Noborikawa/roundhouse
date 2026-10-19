@@ -193,27 +193,6 @@ fn relax_from_stmt_handle(lc: &mut LibraryClass) {
     }
 }
 
-/// `BuildTarget::{Ruby,Spinel}.param_binds_enabled(None)`.
-///
-/// `project` is host-only. The wasm compiler still emits these targets,
-/// so the wasm answer is the same default: Ruby is opt-in (off) and
-/// Spinel is default-on.
-fn default_param_binds(spinel: bool) -> bool {
-    #[cfg(not(target_arch = "wasm32"))]
-    {
-        let target = if spinel {
-            crate::project::BuildTarget::Spinel
-        } else {
-            crate::project::BuildTarget::Ruby
-        };
-        return target.param_binds_enabled(None);
-    }
-    #[cfg(target_arch = "wasm32")]
-    {
-        spinel
-    }
-}
-
 /// Model IR before Ruby adaptation. Admission uses this same registry,
 /// demand survey and body typer without rendering files or RBS.
 pub(crate) fn materialize_models(
@@ -221,7 +200,9 @@ pub(crate) fn materialize_models(
     materialization: crate::lower::model_to_library::Materialization<'_>,
 ) -> (Vec<LibraryClass>, crate::lower::controller_to_library::params::ParamsSpecs) {
     materialize_models_with_param_binds(
-        app, materialization, default_param_binds(false),
+        app,
+        materialization,
+        crate::build_target::BuildTarget::Ruby.param_binds_enabled(None),
     )
 }
 
@@ -290,7 +271,10 @@ fn emit_lowered_models_with_param_binds(app: &App, param_binds: bool) -> Vec<Emi
 pub(crate) fn lowered_model_lcs(
     app: &App,
 ) -> (Vec<LibraryClass>, crate::lower::controller_to_library::params::ParamsSpecs) {
-    lowered_model_lcs_with_param_binds(app, default_param_binds(false))
+    lowered_model_lcs_with_param_binds(
+        app,
+        crate::build_target::BuildTarget::Ruby.param_binds_enabled(None),
+    )
 }
 
 fn lowered_model_lcs_with_param_binds(
@@ -547,7 +531,10 @@ pub fn emit_lowered_routes(app: &App) -> EmittedFile {
 /// `app/models/<name>.rb` because they're plain holders, not request
 /// handlers.
 pub fn emit_lowered_controllers(app: &App) -> Vec<EmittedFile> {
-    emit_lowered_controllers_with_param_binds(app, default_param_binds(false))
+    emit_lowered_controllers_with_param_binds(
+        app,
+        crate::build_target::BuildTarget::Ruby.param_binds_enabled(None),
+    )
 }
 
 fn emit_lowered_controllers_with_param_binds(app: &App, param_binds: bool) -> Vec<EmittedFile> {
@@ -605,7 +592,10 @@ pub(crate) fn emit_lowered_controllers_with_layout_and_param_binds(
 /// The controller classes `emit_lowered_controllers_with_layout`
 /// writes, before rendering. Shared with `emit::futamura::routes`.
 pub(crate) fn lowered_controller_lcs_with_layout(app: &App) -> Vec<LibraryClass> {
-    lowered_controller_lcs_with_layout_and_param_binds(app, default_param_binds(false))
+    lowered_controller_lcs_with_layout_and_param_binds(
+        app,
+        crate::build_target::BuildTarget::Ruby.param_binds_enabled(None),
+    )
 }
 
 fn lowered_controller_lcs_with_layout_and_param_binds(app: &App, param_binds: bool) -> Vec<LibraryClass> {
@@ -894,7 +884,10 @@ fn jbuilder_view_output_path(view_name: &str) -> PathBuf {
 /// which would have CRuby double-run every test if combined with the
 /// shim).
 pub fn emit_spinel(app: &App) -> Vec<EmittedFile> {
-    emit_spinel_with_param_binds(app, default_param_binds(true))
+    emit_spinel_with_param_binds(
+        app,
+        crate::build_target::BuildTarget::Spinel.param_binds_enabled(None),
+    )
 }
 
 /// Ruby-family emit with the build target's resolved bind policy.
@@ -1950,11 +1943,9 @@ mod method_sig_tests {
     use crate::span::Span;
 
     #[test]
-    fn default_param_binds_follow_the_unbound_target_policy() {
-        assert!(!super::default_param_binds(false));
-        assert!(super::default_param_binds(true));
-        assert!(!crate::project::BuildTarget::Ruby.param_binds_enabled(None));
-        assert!(crate::project::BuildTarget::Spinel.param_binds_enabled(None));
+    fn unbound_param_binds_follow_the_target_policy() {
+        assert!(!crate::build_target::BuildTarget::Ruby.param_binds_enabled(None));
+        assert!(crate::build_target::BuildTarget::Spinel.param_binds_enabled(None));
     }
 
     // `def get_from_cache(opts = {}, &block)` — an optional positional with
