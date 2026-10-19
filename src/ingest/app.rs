@@ -2078,11 +2078,21 @@ end
     super::propshaft::ingest(vfs, dir, &mut app)?;
     // The ledger of boot statements no recognizer above read. A warning
     // per statement, in the ingest diagnostic channel; no `App` field.
+    let app_namespaces: HashSet<String> = app
+        .models
+        .iter()
+        .map(|m| m.name.0.as_str())
+        .chain(app.library_classes.iter().map(|c| c.name.0.as_str()))
+        .chain(app.controllers.iter().map(|c| c.name.0.as_str()))
+        .map(|n| n.split("::").next().unwrap_or(n).to_string())
+        .collect();
     super::initializer_ledger::record(
         vfs,
         dir,
         &path_gems,
         &engine_routes.keys().cloned().collect::<HashSet<String>>(),
+        app.gem_lock.as_ref(),
+        &app_namespaces,
     );
     // Carrier provenance must not depend on where a module lives:
     // models, services, helpers and lib all use the same splice.

@@ -624,8 +624,9 @@ const FATES: &[(&str, GemFate)] = &[
     ("pry", GemFate::Infrastructure),
     ("pry-rails", GemFate::Infrastructure),
     ("puma", GemFate::Infrastructure),
-    ("rack-attack", GemFate::Infrastructure),
-    ("rack-cors", GemFate::Infrastructure),
+    // Not rack-attack or rack-cors: a middleware that throttles a request or
+    // writes its CORS headers changes what the app answers, and nothing in
+    // the app calls it for a dispatch failure to show that it is missing.
     ("rack-protection", GemFate::Infrastructure),
     ("rack-test", GemFate::Infrastructure),
     ("rails-controller-testing", GemFate::Infrastructure),
@@ -829,6 +830,41 @@ fn camelize(gem: &str) -> String {
             }
         })
         .collect()
+}
+
+/// The resolved specs whose namespace `constant_path` sits under. A gem's
+/// own spelling nests at its dashes (`rack-attack` → `Rack::Attack`); its
+/// conventional namespace and first segment count too, below that. The
+/// longest match wins, and ties at the same rank are all returned.
+pub fn lock_gems_owning_constant<'a>(lock: &'a Lockfile, constant_path: &str) -> Vec<&'a str> {
+    let path = constant_path.trim_start_matches("::");
+    // Not case-sensitive: `OmniAuth` is the omniauth gem's, `PgHero` pghero's.
+    let under = |ns: &str| {
+        path.len() >= ns.len()
+            && path.is_char_boundary(ns.len())
+            && path[..ns.len()].eq_ignore_ascii_case(ns)
+            && (path.len() == ns.len() || path[ns.len()..].starts_with("::"))
+    };
+    let mut best: Vec<&str> = Vec::new();
+    let mut best_rank = (0usize, false);
+    for (name, _) in &lock.specs {
+        let nested = name.split('-').map(camelize).collect::<Vec<_>>().join("::");
+        let rank = if under(&nested) {
+            (nested.len(), true)
+        } else if let Some(ns) = namespace_candidates(name).into_iter().filter(|ns| under(ns)).max_by_key(|ns| ns.len()) {
+            (ns.len(), false)
+        } else {
+            continue;
+        };
+        if rank > best_rank {
+            best_rank = rank;
+            best.clear();
+        }
+        if rank == best_rank && !best.contains(&name.as_str()) {
+            best.push(name.as_str());
+        }
+    }
+    best
 }
 
 /// The unique resolved unknown gem whose namespace `constant_path`
@@ -1309,6 +1345,16 @@ mod tests {
     fn git_activation_orders_dependencies_and_terminates_cycles() {
         let lock = Lockfile::parse("GIT\n  remote: https://example.invalid/parent.git\n  revision: 1111111111111111111111111111111111111111\n  specs:\n    parent (1.0)\n      child\n\nGIT\n  remote: https://example.invalid/child.git\n  revision: 2222222222222222222222222222222222222222\n  specs:\n    child (2.0)\n      parent\n\nGEM\n  specs:\n    client (3.0)\n      parent\n\nDEPENDENCIES\n  client\n");
         assert_eq!(lock.git_specs_in_closure(&["client", "parent"]), ["child", "parent"]);
+    }
+
+    #[test]
+    fn a_constant_belongs_to_the_gem_nested_deepest_over_it() {
+        let lock = Lockfile::parse("GEM\n  specs:\n    omniauth (2.1.2)\n    rack (3.1.8)\n    rack-attack (6.7.0)\n    rack-cors (2.0.2)\n    sentry-rails (5.0)\n    sentry-ruby (5.0)\n\nDEPENDENCIES\n  omniauth\n  rack-attack\n  rack-cors\n  sentry-rails\n  sentry-ruby\n");
+        assert_eq!(lock_gems_owning_constant(&lock, "Rack::Attack"), ["rack-attack"]);
+        assert_eq!(lock_gems_owning_constant(&lock, "Rack::Utils"), ["rack"]);
+        assert_eq!(lock_gems_owning_constant(&lock, "OmniAuth::Strategies"), ["omniauth"]);
+        assert_eq!(lock_gems_owning_constant(&lock, "Sentry"), ["sentry-rails", "sentry-ruby"]);
+        assert!(lock_gems_owning_constant(&lock, "Devise").is_empty());
     }
 
     #[test]
