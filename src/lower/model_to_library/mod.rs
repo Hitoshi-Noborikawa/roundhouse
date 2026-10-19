@@ -42,7 +42,8 @@ use crate::schema::{Column, ColumnType, Schema, Table};
 use crate::span::Span;
 use crate::ty::{Row, Ty};
 
-use self::associations::{push_association_methods, push_dependent_destroy};
+use self::associations::{push_association_methods, push_dependent_destroy, ThroughJoins};
+pub(crate) use self::associations::{ThroughWriterJoin, through_writer_join};
 pub(crate) use self::associations::model_defines_instance_method;
 pub(crate) use self::markers::attribute_api_decls;
 pub(crate) use self::markers::block_callback_shape;
@@ -1202,6 +1203,7 @@ fn build_methods_with_finder_inputs(
     // test callers of the lowering entries are unaffected.
     report_unclaimed_unknowns(model, schema);
 
+    let through_joins = ThroughJoins::decide(model, models);
     let mut methods: Vec<MethodDef> = Vec::new();
 
     if let Some(table) = schema.tables.get(&model.table.0) {
@@ -1222,7 +1224,7 @@ fn build_methods_with_finder_inputs(
         let writable_fields =
             permitted_fields.map(|fields| writable_permit_fields(model, table, fields));
         let permitted_fields = writable_fields.as_deref();
-        push_schema_methods(&mut methods, model, models, table);
+        push_schema_methods(&mut methods, model, models, table, &through_joins);
         // Per-model Level-3 adapter primitives (`_adapter_find_by_id`, etc.)
         // — typed methods that go directly from SQL composition to typed
         // model instances over the `Sqlite` primitive surface. See
@@ -1295,8 +1297,8 @@ fn build_methods_with_finder_inputs(
     }
 
     push_validate_method(&mut methods, model, models, errors_readers);
-    push_association_methods(&mut methods, model, models);
-    push_dependent_destroy(&mut methods, model);
+    push_association_methods(&mut methods, model, models, &through_joins);
+    push_dependent_destroy(&mut methods, model, &through_joins);
     push_unknown_marker_methods(&mut methods, model);
     push_attr_accessor_methods(&mut methods, model);
     // AFTER the accessors: the constructor assigns exactly what they

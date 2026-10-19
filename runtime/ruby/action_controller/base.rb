@@ -996,8 +996,8 @@ module ActionController
     # ---- conditional GET (strict-target stubs) ---------------------
     #
     # Full `fresh_when` / `stale?` / If-None-Match matching lives in
-    # `current.rb`'s Base reopen, next to `attr_accessor :request`.
-    # Strict targets have no Request seat on Base yet; always-render /
+    # `conditional_get.rb`'s Base reopen (ruby family only). Strict
+    # targets have no Request seat on Base yet; always-render /
     # always-stale is the same contract these stubs had before #829,
     # and keeps rust/kotlin/… emit compiling. The Ruby/Spinel path
     # overrides the stubs when a Request is parked.
