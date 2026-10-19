@@ -8447,9 +8447,6 @@ fn insert_propshaft_stylesheet_copy_rules(makefile: &mut String, app: &App) {
         rules.push_str(&format!(
             "$(ASSETS)/{out}: app/assets/stylesheets/{stem}.css\n\
              \t@mkdir -p $(dir $@)\n\
-             \tcp $< $@\n\n\
-             $(ASSETS)/{out}: app/assets/builds/{stem}.css\n\
-             \t@mkdir -p $(dir $@)\n\
              \tcp $< $@\n\n"
         ));
     }
