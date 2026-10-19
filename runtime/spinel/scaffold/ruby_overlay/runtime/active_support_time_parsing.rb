@@ -4,7 +4,12 @@
 begin
   require_relative "active_support_interval"
 rescue LoadError
-  require_relative "../../../active_support_interval"
+  # Source-tree fallback: the parser lives under runtime/spinel/, three
+  # directories up from this overlay. Emitted trees place the sibling
+  # beside this file, so the fallback never runs there. A computed path
+  # stays out of the static require graph, which only resolves literals.
+  rel = File.join("..", "..", "..", "active_support_interval")
+  require_relative rel
 end
 # Native date-only parsing plus UTC-safe timestamp parsing/stamping.
 #
