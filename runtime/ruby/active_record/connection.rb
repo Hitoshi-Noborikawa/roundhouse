@@ -1072,27 +1072,27 @@ module ActiveRecord
 
     # Not left to the lowerings: they re-root only the class-side shapes they recognize, and Rails' `Querying` hands every one of these to `all`.
     def self.delete_by(conditions)
-      ActiveRecord::Relation.new(self).delete_by(conditions)
+      all.delete_by(conditions)
     end
 
     def self.destroy_by(conditions)
-      ActiveRecord::Relation.new(self).destroy_by(conditions)
+      all.destroy_by(conditions)
     end
 
     def self.distinct(value = true)
-      ActiveRecord::Relation.new(self).distinct(value)
+      all.distinct(value)
     end
 
     def self.eager_load(*names)
-      ActiveRecord::Relation.new(self).eager_load(*names)
+      all.eager_load(*names)
     end
 
     def self.excluding(*records)
-      ActiveRecord::Relation.new(self).excluding(*records)
+      all.excluding(*records)
     end
 
     def self.find_each
-      relation = ActiveRecord::Relation.new(self)
+      relation = all
       records = relation.loaded_records
       i = 0
       n = records.length
@@ -1104,133 +1104,133 @@ module ActiveRecord
     end
 
     def self.find_in_batches
-      relation = ActiveRecord::Relation.new(self)
+      relation = all
       yield relation.loaded_records
       relation
     end
 
     def self.first_or_initialize
-      ActiveRecord::Relation.new(self).first_or_initialize
+      all.first_or_initialize
     end
 
     def self.first!
-      ActiveRecord::Relation.new(self).first!
+      all.first!
     end
 
     def self.from(source)
-      ActiveRecord::Relation.new(self).from(source)
+      all.from(source)
     end
 
     def self.group(*parts)
-      ActiveRecord::Relation.new(self).group(*parts)
+      all.group(*parts)
     end
 
     def self.having(condition, *args)
-      ActiveRecord::Relation.new(self).having(condition, *args)
+      all.having(condition, *args)
     end
 
     def self.ids
-      ActiveRecord::Relation.new(self).ids
+      all.ids
     end
 
     def self.includes(*names)
-      ActiveRecord::Relation.new(self).includes(*names)
+      all.includes(*names)
     end
 
     def self.joins(spec)
-      ActiveRecord::Relation.new(self).joins(spec)
+      all.joins(spec)
     end
 
     def self.left_joins(spec)
-      ActiveRecord::Relation.new(self).left_joins(spec)
+      all.left_joins(spec)
     end
 
     def self.left_outer_joins(spec)
-      ActiveRecord::Relation.new(self).left_outer_joins(spec)
+      all.left_outer_joins(spec)
     end
 
     def self.limit(n)
-      ActiveRecord::Relation.new(self).limit(n)
+      all.limit(n)
     end
 
     def self.many?
-      ActiveRecord::Relation.new(self).many?
+      all.many?
     end
 
     def self.maximum(expr)
-      ActiveRecord::Relation.new(self).maximum(expr)
+      all.maximum(expr)
     end
 
     def self.merge(other)
-      ActiveRecord::Relation.new(self).merge(other)
+      all.merge(other)
     end
 
     def self.minimum(expr)
-      ActiveRecord::Relation.new(self).minimum(expr)
+      all.minimum(expr)
     end
 
     def self.offset(n)
-      ActiveRecord::Relation.new(self).offset(n)
+      all.offset(n)
     end
 
     def self.one?
-      ActiveRecord::Relation.new(self).one?
+      all.one?
     end
 
     def self.or(other)
-      ActiveRecord::Relation.new(self).or(other)
+      all.or(other)
     end
 
     def self.order(*parts)
-      ActiveRecord::Relation.new(self).order(*parts)
+      all.order(*parts)
     end
 
     def self.pick(col)
-      ActiveRecord::Relation.new(self).pick(col)
+      all.pick(col)
     end
 
     def self.pluck(col)
-      ActiveRecord::Relation.new(self).pluck(col)
+      all.pluck(col)
     end
 
     def self.preload(*names)
-      ActiveRecord::Relation.new(self).preload(*names)
+      all.preload(*names)
     end
 
     def self.references(*names)
-      ActiveRecord::Relation.new(self).references(*names)
+      all.references(*names)
     end
 
     def self.reorder(*parts)
-      ActiveRecord::Relation.new(self).reorder(*parts)
+      all.reorder(*parts)
     end
 
     def self.select(*specs)
-      ActiveRecord::Relation.new(self).select(*specs)
+      all.select(*specs)
     end
 
     def self.sum(expr)
-      ActiveRecord::Relation.new(self).sum(expr)
+      all.sum(expr)
     end
 
     def self.touch_all(name = nil)
-      ActiveRecord::Relation.new(self).touch_all(name)
+      all.touch_all(name)
     end
 
     def self.unscope(where: nil)
-      ActiveRecord::Relation.new(self).unscope(where: where)
+      all.unscope(where: where)
     end
 
     def self.update_all(updates)
-      ActiveRecord::Relation.new(self).update_all(updates)
+      all.update_all(updates)
     end
 
     def self.with_recursive(ctes)
-      ActiveRecord::Relation.new(self).with_recursive(ctes)
+      all.with_recursive(ctes)
     end
 
     def self.without(*records)
-      ActiveRecord::Relation.new(self).without(*records)
+      all.without(*records)
     end
 
     # `User.take` — the Rails 8 authentication generator's tests set up

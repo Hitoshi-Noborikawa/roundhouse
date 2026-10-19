@@ -198,7 +198,10 @@ impl Index {
         let mut unknown = class_side
             && info.includes.iter().any(|m| {
                 let name = m.trim_start_matches("::");
-                self.resolve(m, &info.namespace).is_none() && (name == "Singleton" || !CORE_CONSTANTS.contains(&name))
+                match self.resolve(m, &info.namespace) {
+                    Some((_, held)) => held.singleton.contains("included") || held.singleton.contains("prepended"),
+                    None => name == "Singleton" || !CORE_CONSTANTS.contains(&name),
+                }
             });
         for m in mods {
             match self.lookup(m, &info.namespace, name, false, seen) {
@@ -280,7 +283,7 @@ pub fn audit(classes: &[crate::dialect::LibraryClass], files: &[(String, String)
     out
 }
 
-fn walk(expr: &Expr, owner: Option<(&str, bool)>, index: &Index, out: &mut Vec<Diagnostic>, seen: &mut HashSet<(crate::span::Span, String)>) {
+fn walk(expr: &Expr, owner: Option<(&str, bool)>, index: &Index, out: &mut Vec<Diagnostic>, seen: &mut HashSet<(crate::span::Span, String, bool, String)>) {
     if let ExprNode::Send { recv, method, .. } = &*expr.node
         && expr.diagnostic.is_none()
     {
@@ -303,7 +306,7 @@ fn walk(expr: &Expr, owner: Option<(&str, bool)>, index: &Index, out: &mut Vec<D
         };
         if let Some((class, class_side)) = target
             && index.defines(&class, method.as_str(), class_side) == Lookup::Missing
-            && seen.insert((expr.span, method.as_str().to_string()))
+            && seen.insert((expr.span, class.clone(), class_side, method.as_str().to_string()))
         {
             out.push(Diagnostic {
                 span: expr.span,
@@ -347,6 +350,18 @@ mod tests {
     fn a_reopened_core_class_is_not_audited() {
         let found = findings("class Time\n  def x\n    y\n  end\nend\n");
         assert!(found.is_empty(), "{found:?}");
+    }
+
+    #[test]
+    fn a_held_mixin_with_an_included_hook_leaves_the_class_side_unknown() {
+        let found = findings("module M\n  def self.included(base)\n    base.extend(Helpers)\n  end\nend\n\nclass A\n  include M\n\n  def self.x\n    y\n  end\nend\n");
+        assert!(found.is_empty(), "{found:?}");
+    }
+
+    #[test]
+    fn each_class_s_missing_method_is_reported_once() {
+        let found = findings("class A\n  def x\n    y\n  end\nend\n\nclass B\n  def x\n    y\n  end\nend\n");
+        assert!(found.iter().any(|m| m.contains("`A#y`")) && found.iter().any(|m| m.contains("`B#y`")), "{found:?}");
     }
 
     #[test]
