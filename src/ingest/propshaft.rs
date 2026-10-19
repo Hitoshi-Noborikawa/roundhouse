@@ -413,13 +413,23 @@ pub(super) fn ingest<V: Vfs + ?Sized>(
     if paths.is_empty() {
         return Ok(());
     }
+    // tailwindcss-rails layouts use `stylesheet_link_tag :app`, which Propshaft
+    // resolves to the compiled `builds/tailwind.css` logical name.
+    let mut lookups = paths.clone();
+    if paths.contains_key("tailwind.css") {
+        lookups
+            .entry("app.css".to_string())
+            .or_insert_with(|| paths["tailwind.css"].clone());
+    }
     let mut source = "def propshaft_asset_path(source)\ncase source\n".to_string();
-    for (logical, path) in &paths {
+    for (logical, path) in &lookups {
         source.push_str(&format!(
             "when {}\n{}\n",
             ruby_string(logical),
             ruby_string(&format!("/assets/{path}"))
         ));
+    }
+    for (logical, path) in &paths {
         app.binary_assets.push((
             format!("static/assets/{path}"),
             compile(logical, &assets[logical], &paths),

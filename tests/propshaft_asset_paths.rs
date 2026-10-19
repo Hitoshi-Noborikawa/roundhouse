@@ -181,6 +181,28 @@ fn dynamic_or_environment_dependent_versions_are_refused() {
 }
 
 #[test]
+fn tailwind_app_stylesheet_alias_resolves_to_the_compiled_build() {
+    emit_and_run::empty_app()
+        .write("Gemfile.lock", LOCK)
+        .write(
+            "config/application.rb",
+            "module AssetProbe\n  class Application < Rails::Application\n    config.load_defaults 8.1\n  end\nend\n",
+        )
+        .write("config/initializers/assets.rb", "Rails.application.config.assets.version = \"1.0\"\n")
+        .write("app/assets/builds/tailwind.css", "body{color:red}\n")
+        .run_ruby(
+            r#"
+app_path = Rails.application.propshaft_asset_path("app.css")
+tailwind_path = Rails.application.propshaft_asset_path("tailwind.css")
+raise "app.css alias missing" unless app_path == tailwind_path
+raise "expected digested tailwind path" unless app_path.start_with?("/assets/tailwind-")
+puts "tailwind :app alias resolves"
+"#,
+        )
+        .assert_passes();
+}
+
+#[test]
 fn apps_without_propshaft_keep_the_existing_asset_paths() {
     let mut files = tree(&[]);
     files.remove(&PathBuf::from("Gemfile.lock"));
