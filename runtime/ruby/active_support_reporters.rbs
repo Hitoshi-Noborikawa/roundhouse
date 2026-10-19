@@ -94,8 +94,7 @@ module ActiveSupport
     def deliver: (untyped name_or_object, untyped payload, Hash[untyped, untyped] kwargs, bool filter_payload, Integer depth) -> nil
     def payload_filter: () -> ParameterFilter
     def effective_filter_parameters: () -> Array[untyped]
-    def resolve_name: (untyped name_or_object) -> String?
-    def resolve_payload: (untyped name_or_object, untyped payload, Hash[untyped, untyped] kwargs, bool filter) -> untyped
+    def resolve_payload: (bool named, untyped name_or_object, untyped payload, Hash[untyped, untyped] kwargs, bool filter) -> untyped
     def symbolize: (Hash[untyped, untyped] hash) -> Hash[Symbol, untyped]
     def handle_unexpected_args: (untyped name_or_object, untyped payload, Hash[untyped, untyped] kwargs) -> nil
   end

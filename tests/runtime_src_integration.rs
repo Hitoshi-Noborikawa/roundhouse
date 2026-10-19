@@ -1128,7 +1128,10 @@ fn every_runtime_method_body_concretely_typed() {
     // MEASURED 779 on 2026-10-19 after merging main's 798: the shared
     // `deep_dup` and the two `to_s` binds still remove the same 19
     // sites (798 -> 779).
-    const CEILING: usize = 779;
+    // MEASURED 776 on 2026-10-19: `deliver` asks once whether the
+    // event name is a String or a Symbol. `resolve_payload` uses that
+    // bool, so the second pair of `is_a?` reads is gone (779 -> 776).
+    const CEILING: usize = 776;
     assert!(
         total_gradual <= CEILING,
         "{total_gradual} Ty::Untyped sites exceeds ceiling of {CEILING}",
