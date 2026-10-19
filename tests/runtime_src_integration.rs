@@ -1103,7 +1103,10 @@ fn every_runtime_method_body_concretely_typed() {
     // leave; the shared method grows by that leaf (22 -> 32).
     // MEASURED 776 on 2026-10-19: `query_pairs` reads an untyped Hash
     // key's `to_s` once. The name uses that String in both arms.
-    const CEILING: usize = 776;
+    // MEASURED 774 on 2026-10-19: `ParameterFilter#value_for_key` reads
+    // its untyped key's `to_s` once. The dotted path and the regexp
+    // both use that String (776 -> 774).
+    const CEILING: usize = 774;
     assert!(
         total_gradual <= CEILING,
         "{total_gradual} Ty::Untyped sites exceeds ceiling of {CEILING}",

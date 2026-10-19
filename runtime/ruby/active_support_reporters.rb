@@ -116,14 +116,16 @@ module ActiveSupport
     end
 
     def value_for_key(key, value, full_parent_key, original_params)
-      full_key = full_parent_key.nil? ? key.to_s : "#{full_parent_key}.#{key}"
+      # One `to_s` of the untyped key. The path and the regexp both use it.
+      key_text = key.to_s
+      full_key = full_parent_key.nil? ? key_text : "#{full_parent_key}.#{key_text}"
       # `=~`, not `match?`: Spinel types `r` as poly (the filters arrive
       # untyped), and a poly `match?` dispatch reaches PlatformAgent's
       # private `match?(pattern)` with a String, after which Spinel
       # compiles that method's own `String#match?` as an unconditional
       # NoMethodError (campfire's /rooms/1 under a Chrome user agent;
       # matz/spinel#8633).
-      if @regexps.any? { |r| !(r =~ key.to_s).nil? }
+      if @regexps.any? { |r| !(r =~ key_text).nil? }
         @mask
       elsif @deep_regexps.any? { |r| !(r =~ full_key).nil? }
         @mask
