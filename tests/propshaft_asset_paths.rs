@@ -46,6 +46,9 @@ raise unless h.asset_path("application.css", skip_pipeline: true) == "applicatio
 raise unless h.image_path("icons/icon.svg", skip_pipeline: true) == "icons/icon.svg"
 raise unless h.asset_path("/raw/icon.svg") == "/raw/icon.svg"
 raise unless h.image_path("https://example.test/icon.svg") == "https://example.test/icon.svg"
+raise unless h.image_url("icons/icon.svg") == "/assets/icons/icon-d6065022.svg"
+raise unless h.javascript_path("boot") == "/assets/boot-cf177f03.js"
+raise unless h.path_to_javascript("boot") == "/assets/boot-cf177f03.js"
 puts "Emitted asset helpers and page paths match Propshaft"
 "#).assert_passes();
 }

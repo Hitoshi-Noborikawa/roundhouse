@@ -963,14 +963,7 @@ module ActionView
     end
 
     def self.digested_asset_path(source)
-      cut = source.length
-      query = source.index("?")
-      cut = query if !query.nil? && query < cut
-      fragment = source.index("#")
-      cut = fragment if !fragment.nil? && fragment < cut
-      logical = source[0, cut].to_s
-      suffix = source[cut, source.length - cut].to_s
-      Rails.application.propshaft_asset_path(logical) + suffix
+      "/assets/#{source}"
     end
 
     # `url_for` STRING case — identity passthrough (Rails: a String
@@ -993,7 +986,7 @@ module ActionView
       return source if skip_pipeline
       return source if source.start_with?("/")
       return source if source.include?("://")
-      "/assets/#{source}"
+      digested_asset_path(source)
     end
 
     # `path_to_javascript "application"` → the asset path for a JS source.
@@ -1006,7 +999,7 @@ module ActionView
       return source if source.start_with?("/")
       return source if source.include?("://")
       name = source.include?(".") ? source : "#{source}.js"
-      "/assets/#{name}"
+      digested_asset_path(name)
     end
 
     # Alias of `path_to_javascript`. Inlined rather than delegating, so no
@@ -1018,7 +1011,7 @@ module ActionView
       return source if source.start_with?("/")
       return source if source.include?("://")
       name = source.include?(".") ? source : "#{source}.js"
-      "/assets/#{name}"
+      digested_asset_path(name)
     end
 
     # `<img>` tag for a source path + attribute opts. The source flows

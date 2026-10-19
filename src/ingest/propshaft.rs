@@ -248,13 +248,14 @@ fn ignored(name: &str, css: bool) -> bool {
 
 fn referenced(
     logical: &str,
-    regex: &Regex,
-    css: bool,
     assets: &BTreeMap<String, Vec<u8>>,
     seen: &mut HashSet<String>,
     refs: &mut Vec<String>,
 ) {
     let Some(bytes) = assets.get(logical) else {
+        return;
+    };
+    let Some((regex, css)) = pattern(logical) else {
         return;
     };
     let text = String::from_utf8_lossy(bytes);
@@ -272,7 +273,7 @@ fn referenced(
             && seen.insert(path.clone())
         {
             refs.push(path.clone());
-            referenced(&path, regex, css, assets, seen, refs);
+            referenced(&path, assets, seen, refs);
         }
     }
 }
@@ -286,9 +287,9 @@ fn digested_paths(assets: &BTreeMap<String, Vec<u8>>, version: &str) -> BTreeMap
             }
             let mut hash = Sha1::new();
             hash.update(bytes);
-            if let Some((regex, css)) = pattern(logical) {
+            if pattern(logical).is_some() {
                 let mut refs = Vec::new();
-                referenced(logical, regex, css, assets, &mut HashSet::new(), &mut refs);
+                referenced(logical, assets, &mut HashSet::new(), &mut refs);
                 for path in refs {
                     hash.update(&assets[&path]);
                 }
