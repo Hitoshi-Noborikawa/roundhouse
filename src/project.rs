@@ -5795,6 +5795,12 @@ pub const RUBY_FAMILY_RUNTIME_CONSTANTS: &[&str] = &[
     // lowerer; these two classes are the ruby-family casters.
     "ActiveRecord::Type::String",
     "ActiveRecord::Type::Integer",
+    // Thread-local state, the notification fan-out, and YAML config.
+    // ruby family and spinel, required from rails.rb.
+    "ActiveSupport::IsolatedExecutionState",
+    "ActiveSupport::Notifications",
+    "ActiveSupport::Notifications::Event",
+    "ActiveSupport::ConfigurationFile",
 ];
 
 /// Availability policy for class/module *values* that inference
@@ -5849,6 +5855,7 @@ fn unavailable_class_module_construct(name: &str, target: &str) -> Option<&'stat
         | "FileUtils" | "ActiveRecord::ConnectionAdapters::SQLite3Adapter"
         // runtime/spinel/active_support_cache.rb.
         | "ActiveSupport::Cache" | "ActiveSupport::Cache::MemoryStore"
+        | "ActiveSupport::Cache::NullStore"
         // rqrcode_core's / spinel-rqrcode's.
         | "RQRCodeCore::QRCodeRunTimeError" | "RQRCodeCore::QRCodeArgumentError"
         | "GC" | "OpenSSL::HMAC" | "CSV::MalformedCSVError"
@@ -6885,6 +6892,9 @@ fn spinel_files(app: &App, fixture: &Path, param_binds: bool) -> Result<(Vec<(St
         // `Rails.event` / `Rails.error`: the reporters, ParameterFilter and
         // ExecutionContext. rails.rb requires it, so it ships beside rails.
         "active_support_reporters",
+        "active_support_isolated_execution_state",
+        "active_support_notifications",
+        "active_support_configuration_file",
         "hash_deep_merge",
         "security_utils",
         "params",

@@ -1154,7 +1154,10 @@ fn every_runtime_method_body_concretely_typed() {
     // MEASURED 791 on 2026-10-19: `Type::String` and `Type::Integer`
     // read the value the caller passed, whatever it is (+10 in
     // active_record/types.rb, 781 -> 791).
-    const CEILING: usize = 791;
+    // MEASURED 815 on 2026-10-19: `Notifications` fans a callback and a
+    // payload out (+23 in active_support_notifications.rb).
+    // `IsolatedExecutionState` reads the thread-local slot (+1, 791 -> 815).
+    const CEILING: usize = 815;
     assert!(
         total_gradual <= CEILING,
         "{total_gradual} Ty::Untyped sites exceeds ceiling of {CEILING}"

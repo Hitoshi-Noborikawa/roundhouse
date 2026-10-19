@@ -1,9 +1,9 @@
-//! `ActiveRecord::Type::String` and `Type::Integer` cast on the ruby target.
+//! Type casters, thread-local state, notifications, the null cache,
+//! configuration files, and the ActiveJob constants, on the ruby target.
 
 use super::emit_and_run;
 
-#[test]
-fn active_record_string_and_integer_types_cast() {
+fn shell() -> emit_and_run::Overlay {
     emit_and_run::empty_app()
         .write(
             "app/models/application_record.rb",
@@ -15,6 +15,11 @@ fn active_record_string_and_integer_types_cast() {
         )
         .write("config/routes.rb", "Rails.application.routes.draw do\nend\n")
         .write("db/schema.rb", "ActiveRecord::Schema.define do\nend\n")
+}
+
+#[test]
+fn active_record_string_and_integer_types_cast() {
+    shell()
         .write(
             "app/models/caster.rb",
             r#"class Caster
@@ -34,6 +39,49 @@ end
             r#"
 got = Caster.values
 raise got.inspect unless got == [nil, "12", nil, 1, 12]
+"#,
+        )
+        .assert_passes();
+}
+
+#[test]
+fn support_constants_run() {
+    shell()
+        .write(
+            "app/models/surface.rb",
+            r#"class Surface
+  def self.state
+    ActiveSupport::IsolatedExecutionState[:box] = "kept"
+    ActiveSupport::IsolatedExecutionState[:box]
+  end
+
+  def self.heard
+    heard = []
+    ActiveSupport::Notifications.subscribe("demo") { |*args| heard << args[0] }
+    ActiveSupport::Notifications.instrument("demo") { "ok" }
+    heard
+  end
+
+  def self.cached
+    store = ActiveSupport::Cache::NullStore.new
+    store.write("k", "v")
+    [store.read("k"), store.fetch("k") { "fresh" }]
+  end
+
+  def self.config(path)
+    ActiveSupport::ConfigurationFile.parse(path)
+  end
+end
+"#,
+        )
+        .run_ruby(
+            r#"
+raise Surface.state.inspect unless Surface.state == "kept"
+raise Surface.heard.inspect unless Surface.heard == ["demo"]
+raise Surface.cached.inspect unless Surface.cached == [nil, "fresh"]
+path = "config/probe.yml"
+File.write(path, "size: <%= 1 + 1 %>\n")
+raise Surface.config(path).inspect unless Surface.config(path)["size"] == 2
 "#,
         )
         .assert_passes();

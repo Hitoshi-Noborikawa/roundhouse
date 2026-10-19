@@ -276,7 +276,9 @@ fn ruby_family_runtime_constants_are_ledgered_on_other_targets() {
      ActiveRecord::Encryption::Errors::Decryption,
      ActiveRecord::Encryption::Errors::Configuration,
      ActiveRecord::Associations::Preloader,
-     ActiveRecord::Type::String, ActiveRecord::Type::Integer]
+     ActiveRecord::Type::String, ActiveRecord::Type::Integer,
+     ActiveSupport::IsolatedExecutionState, ActiveSupport::Notifications,
+     ActiveSupport::Notifications::Event, ActiveSupport::ConfigurationFile]
   end
 end
 "#),
