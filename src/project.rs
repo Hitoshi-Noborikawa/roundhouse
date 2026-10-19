@@ -6816,6 +6816,8 @@ fn spinel_files(app: &App, fixture: &Path, param_binds: bool) -> Result<(Vec<(St
         // into its cache keys; per thread, the app's default until a
         // request sets one (see the file's header).
         "i18n_locale",
+        // The i18n gem's `I18n::Locale::Tag`, which `i18n_locale.rb` requires.
+        "i18n_locale_tag",
     ] {
         let rb = format!("runtime/ruby/{stem}.rb");
         let content = crate::runtime_files::read_to_string(&rb)?;
