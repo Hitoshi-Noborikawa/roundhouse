@@ -274,10 +274,8 @@ fn untyped_subexpressions_baseline() {
         app.library_classes.len()
     );
 
-    // Loose ceiling — current measurement plus headroom. Tighten as
-    // inference improves; failing low is a good thing (un-pin and
-    // record the new lower bound). The point of the bound is to
-    // catch regressions, not to lock in today's number.
+    // The constants sit on the measured residual. A later drop lowers
+    // them in the same commit; they are not a budget with headroom.
     // 2026-10-05: 500 -> 505, MEASURED after the request-key finder
     // refresh onto 132a26c7. With this same analyzer and collector,
     // pristine 4f5a1239 / 132a26c7 runtimes measure 470 / 476; the
@@ -385,9 +383,12 @@ fn untyped_subexpressions_baseline() {
     // `Nil`, which is the honest "unknown" the RBS already says
     // (`?untyped`) rather than a type that silently zeroed `presence`.
 
-    // This uncalled API adds 27 nodes without its String parameter RBS.
-    // Keep the existing-method ceiling and RBS-aware typing gates intact.
-    const LIKE_CEILING: usize = 27;
+    // `sanitize_sql_like` itself, without its String parameter RBS:
+    // the `value` read, the `source` store, the escape call's `value`,
+    // and the wildcard call's `source`. MEASURED 4 on 2026-10-19
+    // (the old 27 counted the helper bodies, which the existing
+    // ledger now owns).
+    const LIKE_CEILING: usize = 4;
     let existing_untyped = all_untyped.len() - like_untyped;
     eprintln!("inference-only ledger: existing={existing_untyped}, sanitize_sql_like={like_untyped}");
     // Transactional saves (connection.rb: `save`/`destroy`/`touch` in a
@@ -414,7 +415,9 @@ fn untyped_subexpressions_baseline() {
     // The seven new sites are that branch's `Db.transaction_open?`,
     // `Db._txn_depth`, and `Db.exec` calls, unmodeled here like the
     // other `Db` reads. The RBS-paired gate types the method.
-    const CEILING: usize = 794;
+    // Remeasured 780 on 2026-10-19 against this tree: the 794 constant
+    // had headroom the later runtime no longer uses.
+    const CEILING: usize = 780;
     assert!(
         existing_untyped <= CEILING && like_untyped <= LIKE_CEILING,
         "{} untyped sub-expressions on spinel-blog runtime — exceeds ledger: \
