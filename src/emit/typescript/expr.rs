@@ -1907,7 +1907,7 @@ fn js_send_with_block(
     parenthesized: bool,
 ) -> Js {
     let Some(blk) = block else {
-        return js_send(span, recv, method, args, parenthesized);
+        return js_send(span, recv, method, args, parenthesized, None);
     };
     let predicate = recv.and(ruby_predicate_block(method, blk));
     let blk = predicate.as_ref().unwrap_or(blk);
@@ -1976,7 +1976,10 @@ fn js_send_with_block(
     }
     let mut all_args: Vec<Expr> = args.to_vec();
     all_args.push(blk.clone());
-    js_send(span, recv, method, &all_args, true)
+    // The block is already in `all_args`. Passing it here keeps
+    // `function_receiver` from treating `.call` as a direct invocation
+    // and dropping the block into a positional argument.
+    js_send(span, recv, method, &all_args, true, Some(blk))
 }
 
 /// HOF rewrites for blocks containing async sends. Returns
@@ -2155,8 +2158,9 @@ fn js_send(
     method: &str,
     args: &[Expr],
     parenthesized: bool,
+    block: Option<&Expr>,
 ) -> Js {
-    let result = js_send_inner(span, recv, method, args, parenthesized);
+    let result = js_send_inner(span, recv, method, args, parenthesized, block);
     if !is_async_method_name(method) {
         return result;
     }
@@ -2198,7 +2202,11 @@ fn js_send_inner(
     method: &str,
     args: &[Expr],
     parenthesized: bool,
+    block: Option<&Expr>,
 ) -> Js {
+    if let Some(recv) = crate::emit::shared::fn_call::function_receiver(recv, method, block) {
+        return Js::call(span, js_expr(recv), args.iter().map(js_expr).collect());
+    }
     // Temporal reader intrinsic: `ActiveSupport.parse_db_time(s)` parses
     // stored ISO-8601 text into a native `Date` (nil-safe: `string | null`
     // → `Date | null`). Maps to the hand-written `RhDateTime.parse`
@@ -3323,7 +3331,7 @@ fn js_send_inner(
                     js.span = span;
                     return js;
                 }
-                "slice" => return js_send_inner(span, recv, "[]", args, true),
+                "slice" => return js_send_inner(span, recv, "[]", args, true, None),
                 "capitalize" if args.is_empty() => {
                     // JS has no built-in capitalize. Match Ruby's
                     // semantics: uppercase the first char, lowercase

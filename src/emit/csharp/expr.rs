@@ -1306,6 +1306,10 @@ fn emit_send(
     args: &[Expr],
     block: Option<&Expr>,
 ) -> String {
+    if let Some(recv) = crate::emit::shared::fn_call::function_receiver(recv, method, block) {
+        let args_s: Vec<String> = args.iter().map(emit_expr).collect();
+        return format!("{}({})", emit_expr(recv), args_s.join(", "));
+    }
     if recv.is_none() && args.is_empty() && block.is_none() && is_param(method) {
         return camel(method);
     }
