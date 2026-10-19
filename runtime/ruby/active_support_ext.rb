@@ -618,55 +618,61 @@ module ActiveSupport
 
   # `String#blank?` is `/\A[[:space:]]*\z/`, which raises ArgumentError
   # on invalid UTF-8 — the integer writer does, in `presence`, before
-  # it slices. One character at a time, the form `squish` already
-  # lowers. A string that is not blank is `to_i` of its first 16 bytes.
+  # it slices. One character at a time, the same scan `squish` lowers:
+  # a counter loop, no `break` or `next` (those stay a Ruby loop, and
+  # TypeScript turns `next` into `return`). A string that is not blank
+  # is `to_i` of its first 16 bytes.
   def self.integer_from_string(value)
     i = 0
+    blank = true
     while i < value.length
-      unless value[i].match?(/[[:space:]]/)
-        return ActiveSupport.integer_from_bytes(value.bytes)
-      end
+      blank = false unless value[i].match?(/[[:space:]]/)
       i = i + 1
     end
-    nil
+    return nil if blank
+    ActiveSupport.integer_from_bytes(value.bytes)
   end
 
   # `byteslice(0, 16).to_i`. Strict targets lower `String#bytes`, not
   # `byteslice`. For a string `blank?` accepted, the two slices' `to_i`
   # are the same integer: `to_i` reads only an ASCII prefix, and a
   # non-ASCII byte stops it. Underscores between digits count, as
-  # Ruby's `to_i` does (`"1_0"` is 10, `"1__0"` is 1).
+  # Ruby's `to_i` does (`"1_0"` is 10, `"1__0"` is 1). `phase` 3 ignores
+  # the rest of the window so the loop stays a counter (`i = i + 1`).
   def self.integer_from_bytes(raw)
     limit = raw.length
     limit = 16 if limit > 16
     i = 0
-    while i < limit
-      b = raw[i]
-      break if b.nil? || (b != 32 && b != 9 && b != 10 && b != 11 && b != 12 && b != 13)
-      i = i + 1
-    end
+    phase = 0
     sign = 1
-    if i < limit
-      b = raw[i]
-      if !b.nil? && (b == 43 || b == 45)
-        sign = -1 if b == 45
-        i = i + 1
-      end
-    end
     n = 0
     digits = 0
     while i < limit
       b = raw[i]
-      break if b.nil?
-      if b == 95
-        nxt = raw[i + 1]
-        break if digits == 0 || nxt.nil? || nxt < 48 || nxt > 57
-        i = i + 1
-        next
+      b = -1 if b.nil?
+      if phase == 0
+        if b == 43 || b == 45
+          sign = -1 if b == 45
+          phase = 2
+        elsif b >= 48 && b <= 57
+          n = n * 10 + (b - 48)
+          digits = digits + 1
+          phase = 2
+        elsif b != 32 && b != 9 && b != 10 && b != 11 && b != 12 && b != 13
+          phase = 3
+        end
+      elsif phase == 2
+        if b == 95
+          nxt = raw[i + 1]
+          nxt = -1 if nxt.nil?
+          phase = 3 if digits == 0 || nxt < 48 || nxt > 57
+        elsif b >= 48 && b <= 57
+          n = n * 10 + (b - 48)
+          digits = digits + 1
+        else
+          phase = 3
+        end
       end
-      break if b < 48 || b > 57
-      n = n * 10 + (b - 48)
-      digits = digits + 1
       i = i + 1
     end
     n * sign

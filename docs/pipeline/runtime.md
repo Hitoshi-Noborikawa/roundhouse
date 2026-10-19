@@ -904,6 +904,13 @@ A zoneless string is UTC only when `config.time_zone` is `"UTC"`. Rails'
 `Time.local`. The process zone stays the host's: boot does not pin
 `ENV["TZ"]` to `config.time_zone`.
 
+The four casts live in the ruby-family and Spinel runtime
+(`cast_string`, `cast_integer`, and `cast_boolean` in
+`runtime/ruby/active_support_ext.rb`, `cast_datetime` beside
+`parse_time`). A strict target does not load that runtime, so it
+reports each call rather than emitting a writer that names a method
+it does not have.
+
 ### `list.many?` becomes `ActiveSupport.many?(list)`
 
 Another `Enumerable` core_ext reopen the transpiled runtimes cannot host

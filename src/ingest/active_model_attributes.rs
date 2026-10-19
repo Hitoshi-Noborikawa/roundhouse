@@ -38,20 +38,23 @@
 //! no type, another type, options, a block, a receiver, or a trailing
 //! `#:` cast; a class that defines `initialize` or one of the accessors
 //! itself (Rails' would reach the generated one through `super`); a
-//! superclass, which may declare attributes of its own; or a class that
-//! also includes `ActiveModel::Model`/`API`/`AttributeAssignment`, whose
-//! constructor assigns through these writers.
+//! superclass, which may declare attributes of its own; any other
+//! `include` (that module's `initialize` would be skipped); or
+//! `ActiveModel::Model`/`API`/`AttributeAssignment`, whose constructor
+//! assigns through these writers.
+//!
+//! The synthesized `initialize` does not call `super`. After this pass
+//! the only ancestor is `Object`, and a bare `super` is not a
+//! constructor call on every target that emits the class (TypeScript
+//! rejects `super()` with no `extends`; Kotlin emits a comment). Values
+//! live in instance variables, so `dup` copies them; this is not
+//! `Attributes#initialize_dup`.
 
 use crate::dialect::{LibraryClass, MethodReceiver};
 use crate::expr::{ExprNode, Literal};
 use crate::ident::Symbol;
 
 const MODULE: &str = "ActiveModel::Attributes";
-
-/// Modules whose constructor would assign through the writers this pass
-/// generates; their combination is not lowered here.
-const ASSIGNING: &[&str] =
-    &["ActiveModel::Model", "ActiveModel::API", "ActiveModel::AttributeAssignment"];
 
 #[derive(Clone, Copy)]
 enum AttrType {
@@ -123,7 +126,10 @@ fn declared_attributes(lc: &LibraryClass) -> Option<Vec<(Symbol, AttrType)>> {
     if lc.is_module || lc.parent.is_some() {
         return None;
     }
-    if lc.includes.iter().any(|i| ASSIGNING.contains(&i.0.as_str())) {
+    // Any other include may define `initialize`. Flattening would put
+    // this `initialize` in front of it. A `super` call is not honest on
+    // every target that emits the class, so the include stays.
+    if lc.includes.iter().any(|i| i.0.as_str() != MODULE) {
         return None;
     }
     let mut attrs: Vec<(Symbol, AttrType)> = Vec::new();
@@ -215,6 +221,7 @@ fn synthesized_source(lc: &LibraryClass, attrs: &[(Symbol, AttrType)]) -> String
     let class = lc.name.0.as_str();
     // Rails' `initialize(*)` takes no attribute hash without
     // `ActiveModel::Model`; every attribute reads nil until written.
+    // No `super`: see the module comment.
     let mut body = String::from("  def initialize\n");
     for (name, _) in attrs {
         body.push_str(&format!("    @{} = nil\n", name.as_str()));

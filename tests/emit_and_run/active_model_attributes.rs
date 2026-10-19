@@ -85,8 +85,8 @@ fn active_model_attributes_read_nil_and_cast_on_write_on_spinel() {
 
 /// A declaration this lowering does not reproduce leaves the class as
 /// written, and `check` still reports the include. Options, a block, a
-/// receiver, and a trailing `#:` are each enough, including when the
-/// class also has one plain `attribute :name, :string`.
+/// receiver, a trailing `#:`, and any other `include` are each enough,
+/// including when the class also has one plain `attribute :name, :string`.
 #[test]
 fn active_model_attributes_with_options_stay_reported() {
     let bodies = [
@@ -97,6 +97,7 @@ fn active_model_attributes_with_options_stay_reported() {
         "attribute :event_name, :string\n  attribute :subject_id, :integer do\n  end\n",
         "attribute :event_name, :string\n  self.attribute :subject_id, :integer\n",
         "attribute :event_name, :string\n  attribute :subject_id, :integer #: Integer\n",
+        "include Enumerable\n  attribute :event_name, :string\n",
     ];
     for body in bodies {
         let source = format!("class SignalEvent\n  include ActiveModel::Attributes\n\n  {body}end\n");
@@ -111,8 +112,9 @@ fn active_model_attributes_with_options_stay_reported() {
 }
 
 /// The ruby-family class calls `ActiveSupport.cast_integer` and does
-/// not call `Float#finite?`. Rust and Go do not emit a plain class, and
-/// they still say so: the include is gone, the class is not silent.
+/// not call `Float#finite?`. TypeScript emits the same call and reports
+/// it: that runtime does not load `active_support_ext.rb`. Rust and Go
+/// do not emit a plain class, and they still say so.
 #[test]
 fn active_model_attributes_are_clean_without_finite() {
     fn generated_class(dir: &std::path::Path) -> String {
@@ -145,6 +147,13 @@ fn active_model_attributes_are_clean_without_finite() {
         let class = generated_class(emitted.as_ref());
         assert!(class.contains("cast_integer"), "{target:?} writer does not call cast_integer:\n{class}");
         assert!(!class.contains("finite?"), "{target:?} writer calls finite?:\n{class}");
+        assert!(!class.contains("super("), "{target:?} constructor calls super:\n{class}");
+        if target == roundhouse::project::BuildTarget::Typescript {
+            assert!(
+                errors.iter().any(|e| e.contains("ActiveSupport.cast_integer is only available")),
+                "{target:?} dropped the cast without saying so: {errors:?}"
+            );
+        }
     }
     for target in [roundhouse::project::BuildTarget::Rust, roundhouse::project::BuildTarget::Go] {
         let (_emitted, errors) = event().emit(target);
