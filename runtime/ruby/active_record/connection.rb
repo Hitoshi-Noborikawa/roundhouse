@@ -1070,6 +1070,169 @@ module ActiveRecord
       ActiveRecord::Relation.new(self).first
     end
 
+    # Not left to the lowerings: they re-root only the class-side shapes they recognize, and Rails' `Querying` hands every one of these to `all`.
+    def self.delete_by(conditions)
+      all.delete_by(conditions)
+    end
+
+    def self.destroy_by(conditions)
+      all.destroy_by(conditions)
+    end
+
+    def self.distinct(value = true)
+      all.distinct(value)
+    end
+
+    def self.eager_load(*names)
+      all.eager_load(*names)
+    end
+
+    def self.excluding(*records)
+      all.excluding(*records)
+    end
+
+    def self.find_each
+      relation = all
+      records = relation.loaded_records
+      i = 0
+      n = records.length
+      while i < n
+        yield records[i]
+        i += 1
+      end
+      relation
+    end
+
+    def self.find_in_batches
+      relation = all
+      yield relation.loaded_records
+      relation
+    end
+
+    def self.first_or_initialize
+      all.first_or_initialize
+    end
+
+    def self.first!
+      all.first!
+    end
+
+    def self.from(source)
+      all.from(source)
+    end
+
+    def self.group(*parts)
+      all.group(*parts)
+    end
+
+    def self.having(condition, *args)
+      all.having(condition, *args)
+    end
+
+    def self.ids
+      all.ids
+    end
+
+    def self.includes(*names)
+      all.includes(*names)
+    end
+
+    def self.joins(spec)
+      all.joins(spec)
+    end
+
+    def self.left_joins(spec)
+      all.left_joins(spec)
+    end
+
+    def self.left_outer_joins(spec)
+      all.left_outer_joins(spec)
+    end
+
+    def self.limit(n)
+      all.limit(n)
+    end
+
+    def self.many?
+      all.many?
+    end
+
+    def self.maximum(expr)
+      all.maximum(expr)
+    end
+
+    def self.merge(other)
+      all.merge(other)
+    end
+
+    def self.minimum(expr)
+      all.minimum(expr)
+    end
+
+    def self.offset(n)
+      all.offset(n)
+    end
+
+    def self.one?
+      all.one?
+    end
+
+    def self.or(other)
+      all.or(other)
+    end
+
+    def self.order(*parts)
+      all.order(*parts)
+    end
+
+    def self.pick(col)
+      all.pick(col)
+    end
+
+    def self.pluck(col)
+      all.pluck(col)
+    end
+
+    def self.preload(*names)
+      all.preload(*names)
+    end
+
+    def self.references(*names)
+      all.references(*names)
+    end
+
+    def self.reorder(*parts)
+      all.reorder(*parts)
+    end
+
+    def self.select(*specs)
+      all.select(*specs)
+    end
+
+    def self.sum(expr)
+      all.sum(expr)
+    end
+
+    def self.touch_all(name = nil)
+      all.touch_all(name)
+    end
+
+    def self.unscope(where: nil)
+      all.unscope(where: where)
+    end
+
+    def self.update_all(updates)
+      all.update_all(updates)
+    end
+
+    def self.with_recursive(ctes)
+      all.with_recursive(ctes)
+    end
+
+    def self.without(*records)
+      all.without(*records)
+    end
+
     # `User.take` — the Rails 8 authentication generator's tests set up
     # with it (`setup { @user = User.take }`), so the Rails Guides store
     # reaches here. Same row as `first` under SQLite; see Relation#take.
