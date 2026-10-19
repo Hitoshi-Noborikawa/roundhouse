@@ -5509,6 +5509,23 @@ fn render_inertia_with_a_computed_component_has_no_survey_gap() {
 }
 
 #[test]
+fn render_inertia_true_or_a_hash_stays_a_survey_gap() {
+    for source in [
+        "class WidgetsController < ApplicationController\n  def index\n    render inertia: true\n  end\nend\n",
+        "class WidgetsController < ApplicationController\n  def index\n    render inertia: { title: \"x\" }\n  end\nend\n",
+        "class WidgetsController < ApplicationController\n  def index\n    render inertia: nil\n  end\nend\n",
+    ] {
+        let mut files = INERTIA_APP.to_vec();
+        files[5] = ("app/controllers/widgets_controller.rb", source);
+        let (_, gaps) = inertia_check(&files);
+        assert!(
+            gaps.iter().any(|g| g.contains("component that is not a String or a String expression")),
+            "{source}\n{gaps:#?}"
+        );
+    }
+}
+
+#[test]
 fn an_inertia_share_that_is_not_lowered_is_one_survey_gap() {
     for share in [
         "  inertia_share do\n    { widgetCount: Widget.count }\n  end\n",
