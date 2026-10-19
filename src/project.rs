@@ -2089,7 +2089,6 @@ fn target_files_inner(
         BuildTarget::Blog => blog_files(fixture),
         BuildTarget::Futamura => futamura_files(fixture),
         BuildTarget::Spinel => spinel_files_with_source_markers(app, fixture, param_binds).and_then(|(mut files, _)| {
-            drop_yaml_configuration_file(&mut files);
             spinel_relation_model_handle(&mut files)?;
             widen_spinel_hash_config_arrays(&mut files);
             spin_shape(files)
@@ -6513,6 +6512,10 @@ fn spinel_files_with_source_markers(
             *content = emit::ruby::source_markers::finish(content);
         }
     }
+    // `spinel_base_files` (the toolchain tree) and `--target spinel`
+    // both come through here. The ruby family calls `spinel_files`
+    // directly and keeps `ConfigurationFile`.
+    drop_yaml_configuration_file(&mut files);
     Ok((files, stems))
 }
 

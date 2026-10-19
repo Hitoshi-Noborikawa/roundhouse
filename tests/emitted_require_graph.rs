@@ -341,6 +341,18 @@ end
             assert!(!gap.span.is_synthetic(), "{gap:?}");
         }
     }
+    // The toolchain lane compiles `spinel_base_files`, not `target_files`.
+    // That tree has to drop the YAML configuration file too.
+    let base = spinel_base_files(&app, Path::new(".")).expect("spinel base files");
+    assert!(
+        !base.iter().any(|(path, _)| path == "runtime/active_support_configuration_file.rb"),
+        "spinel base files still ship the YAML configuration file"
+    );
+    let rails = base.iter().find(|(path, _)| path == "runtime/rails.rb").expect("runtime/rails.rb");
+    assert!(
+        !rails.1.contains("active_support_configuration_file"),
+        "spinel base rails.rb still requires the YAML configuration file"
+    );
 }
 
 /// Both Spinel dispatchers rescue `ActionController::RoutingError` and
