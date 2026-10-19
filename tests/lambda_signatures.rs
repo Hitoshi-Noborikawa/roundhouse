@@ -191,6 +191,57 @@ fn a_lambda_call_inside_another_lambda_seeds_both() {
 }
 
 #[test]
+fn a_nested_reassignment_keeps_the_lambda_out_of_later_reads() {
+    let source = "class Article < ApplicationRecord\n  def self.plain_lambda\n    flag = true\n    f = ->(x) { x * 2 }\n    if flag\n      f = 1\n    end\n    f.call(4)\n    f\n  end\nend\n";
+    let tree = std::collections::HashMap::from([
+        (std::path::PathBuf::from("db/schema.rb"), b"ActiveRecord::Schema.define(version: 1) do\n  create_table :articles do |t|\n    t.string :title\n  end\nend\n".to_vec()),
+        (std::path::PathBuf::from("config/routes.rb"), b"Rails.application.routes.draw do\nend\n".to_vec()),
+        (std::path::PathBuf::from("app/models/article.rb"), source.as_bytes().to_vec()),
+    ]);
+    let mut app = roundhouse::ingest::ingest_app_from_tree(tree).expect("ingest");
+    roundhouse::session::analyze_and_lower(&mut app);
+    let body = app.models.iter().flat_map(|m| m.methods()).find(|m| m.name.as_str() == "plain_lambda").expect("method").body.clone();
+    let ty = result_ty(&body).unwrap_or_else(|| panic!("no result type"));
+    assert!(
+        matches!(ty, roundhouse::ty::Ty::Union { .. } | roundhouse::ty::Ty::Int),
+        "later read of f: {ty:?}"
+    );
+    assert!(!matches!(ty, roundhouse::ty::Ty::Fn { .. }), "later read of f: {ty:?}");
+}
+
+#[test]
+fn mutually_recursive_lambda_calls_finish() {
+    let source = "class Article < ApplicationRecord\n  def self.plain_lambda\n    f = nil\n    g = ->(y) { f.call([y]) }\n    f = ->(x) { g.call([x]) }\n    f.call(1)\n  end\nend\n";
+    let tree = std::collections::HashMap::from([
+        (std::path::PathBuf::from("db/schema.rb"), b"ActiveRecord::Schema.define(version: 1) do\n  create_table :articles do |t|\n    t.string :title\n  end\nend\n".to_vec()),
+        (std::path::PathBuf::from("config/routes.rb"), b"Rails.application.routes.draw do\nend\n".to_vec()),
+        (std::path::PathBuf::from("app/models/article.rb"), source.as_bytes().to_vec()),
+    ]);
+    let mut app = roundhouse::ingest::ingest_app_from_tree(tree).expect("ingest");
+    let _ = roundhouse::session::analyze_and_lower(&mut app);
+}
+
+#[test]
+fn a_block_on_call_stays_a_method_in_typescript() {
+    let source = "class Article < ApplicationRecord\n  def self.plain_lambda\n    double = ->(n) { n * 2 }\n    double.call(4) { }\n  end\nend\n";
+    let tree = std::collections::HashMap::from([
+        (std::path::PathBuf::from("db/schema.rb"), b"ActiveRecord::Schema.define(version: 1) do\n  create_table :articles do |t|\n    t.string :title\n  end\nend\n".to_vec()),
+        (std::path::PathBuf::from("config/routes.rb"), b"Rails.application.routes.draw do\nend\n".to_vec()),
+        (std::path::PathBuf::from("app/models/article.rb"), source.as_bytes().to_vec()),
+    ]);
+    let mut app = roundhouse::ingest::ingest_app_from_tree(tree).expect("ingest");
+    roundhouse::session::analyze_and_lower(&mut app);
+    let (files, _) = roundhouse::emit::diagnostics::scope(|| {
+        roundhouse::project::target_files(&app, std::path::Path::new("."), roundhouse::project::BuildTarget::Typescript)
+    });
+    let src = files.expect("files").iter().filter(|(path, _)| {
+        let path = path.to_lowercase();
+        path.contains("article") && !path.ends_with(".map") && !path.ends_with(".rbs")
+    }).map(|(_, text)| text.as_str()).collect::<Vec<_>>().join("\n");
+    assert!(src.contains("double.call"), "{src}");
+}
+
+#[test]
 fn a_nil_seed_reassigned_from_a_lambda_call_includes_the_result() {
     let source = "class Article < ApplicationRecord\n  def self.plain_lambda\n    x = nil\n    double = ->(n) { n * 2 }\n    x = double.call(4)\n    x\n  end\nend\n";
     let tree = std::collections::HashMap::from([

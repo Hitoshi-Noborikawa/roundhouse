@@ -275,3 +275,32 @@ pub(super) fn remember(
         lambdas.remove(name);
     }
 }
+
+/// A nested assignment runs as part of this statement, so the stored
+/// lambda is no longer the only value a later `.call` can reach.
+/// Assignments inside a lambda body run later, when the lambda is
+/// called, and do not retire it. The statement's own direct assignment
+/// is `remember`'s job.
+pub(super) fn forget_nested_writes(lambdas: &mut HashMap<Symbol, Stored>, expr: &Expr) {
+    if lambdas.is_empty() {
+        return;
+    }
+    let mut names = Vec::new();
+    collect_executed_assigns(expr, true, &mut names);
+    for name in names {
+        lambdas.remove(&name);
+    }
+}
+
+fn collect_executed_assigns(expr: &Expr, root: bool, out: &mut Vec<Symbol>) {
+    match &*expr.node {
+        ExprNode::Assign { target: LValue::Var { name, .. }, value } => {
+            if !root {
+                out.push(name.clone());
+            }
+            collect_executed_assigns(value, false, out);
+        }
+        ExprNode::Lambda { .. } => {}
+        _ => expr.node.for_each_child(&mut |child| collect_executed_assigns(child, false, out)),
+    }
+}

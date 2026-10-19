@@ -537,7 +537,15 @@ impl<'a> BodyTyper<'a> {
         last: &mut Ty,
     ) {
         let mut stmt_dirty = false;
+        // Mutual recursion can wrap a parameter in a deeper array every
+        // round (`f` calls `g` calls `f`). `merge` only unions, and that
+        // union does not stop the nesting, so the loop needs a fuel cap.
+        let mut rounds = lambdas.len().saturating_mul(4).saturating_add(4);
         loop {
+            if rounds == 0 {
+                break;
+            }
+            rounds -= 1;
             let names: Vec<Symbol> = lambdas.keys().cloned().collect();
             let mut seeded = Vec::new();
             for name in &names {
@@ -2571,6 +2579,7 @@ impl<'a> BodyTyper<'a> {
                     // epilogue. Those read this statement's types, and a
                     // `.call` in it may have just given the lambda its
                     // parameter types.
+                    lambda_local::forget_nested_writes(&mut lambda_locals, &exprs[i]);
                     self.refine_lambda_locals(exprs, i, &mut local_ctx, &mut lambda_locals, &mut last);
                     let e = &mut exprs[i];
                     if let ExprNode::Assign { target, value } = &*e.node {
