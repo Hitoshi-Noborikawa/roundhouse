@@ -512,6 +512,16 @@ module ActiveRecord
       own_lists
       terms = parts.map { |p| order_term(p) }
       terms.each { |t| @orders << t }
+      # `@orders` just changed `to_sql`, so any `cache_key`/`cache_version`
+      # memo taken before this call is for the OLD ordering (roundhouse
+      # #1034, CodeRabbit — the same stale-memo problem `unload_records`
+      # fixes for `@wheres`/`@limit`/etc, but this method does not always
+      # reach `unload_records`: the `loaded.nil?` branch returns early
+      # below, and the in-memory resort branch further down keeps
+      # `@records` without calling it either). Cleared unconditionally,
+      # before either branch, rather than duplicated in both.
+      @cache_keys = nil
+      @cache_versions = nil
       loaded = @records
       return self if loaded.nil?
       # An explicit copy rather than `dup`: built by pushes, the copy has
@@ -563,6 +573,11 @@ module ActiveRecord
     def clear_ordering
       @orders = []
       @records = nil
+      # Same stale-memo fix as `order_parts!`, same reason: this changes
+      # `to_sql` (drops the ORDER BY) without going through
+      # `unload_records`.
+      @cache_keys = nil
+      @cache_versions = nil
       self
     end
 
