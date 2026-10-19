@@ -137,3 +137,40 @@ fn ingest_contract_name_format_and_template_spans() {
         assert!(saw_real, "{:?}: expected template-coordinate spans", c.engine);
     }
 }
+
+/// roundhouse#1048: a trailing-comma Ruby continuation (`= expr,` / next
+/// line) is joined onto the first line before compiling, but the
+/// resulting segment's `e_end` was computed from the JOINED string's
+/// length — so it could run past the first source line's end. A
+/// compiled-Ruby offset deep in the continuation (e.g. the receiver of
+/// `@post.unknown`, placed well into the joined expr) then translates,
+/// via simple `e_start + delta` arithmetic, to a template byte offset
+/// that does not correspond to real template bytes at all — it can land
+/// inside a multi-byte character on the continuation line, which panics
+/// `SourceFile::line_col`. Every compiled-Ruby offset must translate to
+/// an in-bounds, char-boundary template offset, at every continuation
+/// indent the reporter hit.
+#[test]
+fn haml_continuation_offsets_translate_to_char_boundaries() {
+    use roundhouse::erb::translate_offset;
+
+    for indent in [4, 6, 10, 12, 16] {
+        let source = format!(
+            "= select_tag :status,\n{}options_for_select(['アクティブ', @post.unknown])\n",
+            " ".repeat(indent)
+        );
+        let (ruby, map) = ViewEngine::Haml.compile_fn()(&source);
+        for c_off in 0..=ruby.len() as u32 {
+            let e_off = translate_offset(&map, c_off);
+            assert!(
+                e_off as usize <= source.len(),
+                "indent {indent}: c_off {c_off} translated to {e_off}, past template end {}",
+                source.len()
+            );
+            assert!(
+                source.is_char_boundary(e_off as usize),
+                "indent {indent}: c_off {c_off} translated to {e_off}, not a char boundary in:\n{source}"
+            );
+        }
+    }
+}

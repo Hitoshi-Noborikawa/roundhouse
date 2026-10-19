@@ -117,21 +117,35 @@ pub fn compile_haml_mapped(source: &str) -> (String, Vec<ErbSegment>) {
         // Pull in trailing-comma Ruby continuations (e.g.
         // `= react_component :video,` or `%p= t key,` spanning several
         // lines). The joined code maps to the first line's range (spans
-        // clamp).
+        // clamp — below, once the line is compiled).
         let mut content = content.to_string();
+        let mut joined = false;
         if ruby_tail_can_continue(&content) {
             while content.trim_end().ends_with(',') && i < lines.len() {
                 let (_, cont_line) = lines[i];
                 i += 1;
                 content.push(' ');
                 content.push_str(cont_line.trim_start());
+                joined = true;
             }
         }
 
         let middle = content.starts_with('-')
             && is_middle_marker(content.trim_start_matches('-').trim_start());
         c.close_to(indent, middle);
+        let map_start = c.map.len();
         c.line(&content, indent, line_start);
+        if joined {
+            // The segments this line pushed were sized from the JOINED
+            // string, so `e_end` can run past the first source line's
+            // end (roundhouse#1048) — clamp it back so a translated
+            // offset never lands on bytes the continuation's own
+            // indentation/newline folding invented.
+            let first_line_end = (line_start + line.len()) as u32;
+            for seg in &mut c.map[map_start..] {
+                seg.e_end = seg.e_end.min(first_line_end);
+            }
+        }
     }
 
     while let Some(f) = c.stack.pop() {
