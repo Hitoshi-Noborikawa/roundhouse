@@ -613,7 +613,7 @@ module ActiveSupport
       @subscribers.each do |subscriber|
         begin
           unless !disabled.nil? && disabled.any? { |s| s === subscriber }
-            subscriber.report(error, handled: handled, severity: severity, context: deep_dup(full_context), source: source)
+            subscriber.report(error, handled: handled, severity: severity, context: ActiveSupport.deep_dup(full_context), source: source)
           end
         rescue StandardError => subscriber_error
           raise if @logger.nil?
@@ -649,32 +649,6 @@ module ActiveSupport
         Rails.logger.error(message)
       end
       nil
-    end
-
-    # Object#deep_dup (core_ext/object/deep_dup.rb): each subscriber gets
-    # its own copy of the context.
-    def deep_dup(value)
-      if value.is_a?(Hash)
-        copy = value.dup
-        value.each_pair do |key, item|
-          if key.is_a?(String) || key.is_a?(Symbol)
-            copy[key] = deep_dup(item)
-          else
-            copy.delete(key)
-            copy[deep_dup(key)] = deep_dup(item)
-          end
-        end
-        copy
-      elsif value.is_a?(Array)
-        value.map { |item| deep_dup(item) }
-      elsif value.is_a?(Method) || value.is_a?(UnboundMethod) || (defined?(::Singleton) && value.is_a?(::Singleton))
-        # Not duplicable? (core_ext/object/duplicable.rb): the value itself.
-        value
-      elsif value.respond_to?(:duplicable?) && !value.duplicable?
-        value
-      else
-        value.dup
-      end
     end
 
     def disabled_for_thread

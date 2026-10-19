@@ -1096,7 +1096,12 @@ fn every_runtime_method_body_concretely_typed() {
     // MEASURED 793 on 2026-10-19: the class-side query fallbacks
     // (`Model.maximum(:x)` through `all`, connection.rb) answer the column's
     // value as `Relation#maximum` / `#pick` do, whatever the column holds (+2).
-    const CEILING: usize = 793;
+    // MEASURED 777 on 2026-10-19: ErrorReporter no longer keeps a second
+    // `deep_dup`. `ActiveSupport.deep_dup` is that walk, including the
+    // non-duplicable leaf (Method, UnboundMethod, Singleton, and
+    // `duplicable?` answering false). The reporter method's 26 sites
+    // leave; the shared method grows by that leaf (22 -> 32).
+    const CEILING: usize = 777;
     assert!(
         total_gradual <= CEILING,
         "{total_gradual} Ty::Untyped sites exceeds ceiling of {CEILING}",

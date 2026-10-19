@@ -125,21 +125,35 @@ module ActiveSupport
     end
   end
 
-  # ActiveSupport's `deep_dup` (core_ext/object/deep_dup.rb), for a typed
-  # Hash or Array receiver (`lower::symbolize_keys` routes the call here).
-  # A Hash copies each value and, for keys that are neither String nor
-  # Symbol, the key too — re-inserted after the String/Symbol ones, as
-  # Rails' delete-and-store does. An Array copies each element. Any other
-  # value is its `dup` (an Integer's, nil's or a Symbol's is itself).
+  # ActiveSupport's `deep_dup` (core_ext/object/deep_dup.rb). One walk,
+  # also what `ErrorReporter` hands each subscriber: a Hash is `dup`'d
+  # and each value copied, and a key that is neither String nor Symbol
+  # is copied and stored after the String/Symbol ones, as Rails'
+  # delete-and-store does. An Array copies each element. A Method, an
+  # UnboundMethod, a Singleton, or anything that answers `duplicable?`
+  # with false is itself; anything else is its `dup` (an Integer's,
+  # nil's or a Symbol's is itself). `lower::symbolize_keys` routes a
+  # typed Hash or Array receiver here.
   def self.deep_dup(value)
     case value
     when Array then value.map { |item| ActiveSupport.deep_dup(item) }
     when Hash
+      # A fresh Hash, not `dup`: the two passes below put String and
+      # Symbol keys first and every other key after them, which is where
+      # Rails' delete-and-store lands, and a literal stays a typed Hash.
       out = {}
       value.each { |key, item| out[key] = ActiveSupport.deep_dup(item) if key.is_a?(String) || key.is_a?(Symbol) }
       value.each { |key, item| out[ActiveSupport.deep_dup(key)] = ActiveSupport.deep_dup(item) unless key.is_a?(String) || key.is_a?(Symbol) }
       out
-    else value.dup
+    else
+      # Not duplicable? (core_ext/object/duplicable.rb): the value itself.
+      if value.is_a?(Method) || value.is_a?(UnboundMethod) || (defined?(::Singleton) && value.is_a?(::Singleton))
+        value
+      elsif value.respond_to?(:duplicable?) && !value.duplicable?
+        value
+      else
+        value.dup
+      end
     end
   end
 
