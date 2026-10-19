@@ -749,14 +749,20 @@ pub fn target_readme(target: BuildTarget) -> String {
 /// The three lines are matched exactly so a drift in the sidecar is a
 /// build error here, not a silent narrowing.
 fn widen_key_contract(app: &App, files: &mut [(String, String)]) -> Result<(), String> {
+    let string_key = |col: &crate::schema::Column| {
+        !matches!(
+            col.col_type,
+            crate::schema::ColumnType::Integer | crate::schema::ColumnType::BigInt
+        )
+    };
     let has_string_key = app.schema.tables.values().any(|t| {
-        t.columns.iter().any(|c| {
-            c.primary_key
-                && !matches!(
-                    c.col_type,
-                    crate::schema::ColumnType::Integer | crate::schema::ColumnType::BigInt
-                )
-        })
+        t.columns.iter().any(|c| c.primary_key && string_key(c))
+    }) || app.models.iter().any(|model| {
+        let Some(name) = &model.primary_key else { return false };
+        app.schema
+            .tables
+            .get(&model.table.0)
+            .is_some_and(|table| table.columns.iter().any(|c| &c.name == name && string_key(c)))
     });
     if !has_string_key {
         return Ok(());
@@ -768,6 +774,7 @@ fn widen_key_contract(app: &App, files: &mut [(String, String)]) -> Result<(), S
     for (narrow, wide) in [
         ("    def id: () -> Integer\n", "    def id: () -> (Integer | String)\n"),
         ("    def id=: (Integer) -> Integer\n", "    def id=: (Integer | String) -> (Integer | String)\n"),
+        ("    def _primary_key_value: () -> Integer\n", "    def _primary_key_value: () -> (Integer | String)\n"),
         ("    def _adapter_insert: () -> Integer\n", "    def _adapter_insert: () -> (Integer | String)\n"),
     ] {
         if !text.contains(narrow) {
@@ -2128,6 +2135,18 @@ fn target_files_inner(
         Some(trimmed) => {
             without_health = trimmed;
             &without_health
+        }
+        None => app,
+    };
+    // One gate for the Oj stand-in: ruby, jruby and spinel keep the class
+    // ingest installed. Every other transpile target drops it here, before
+    // the bundled-constant and TypeScript walks, so a missing `JSON` or
+    // `String#read` inside the class is not a second, incidental error.
+    let without_oj;
+    let app = match crate::lower::oj::without_unrun_stand_in(app, target) {
+        Some(trimmed) => {
+            without_oj = trimmed;
+            &without_oj
         }
         None => app,
     };
@@ -3997,7 +4016,8 @@ fn i18n_table_text(app: &App) -> String {
                 }
             }
             for key in &c.opaque {
-                out.push_str(&format!("O\u{1f}{locale}.{key}\u{1f}.\u{1e}"));
+                let fields = c.values.get(key).map_or_else(|| vec!["?".to_string()], |v| v.fields());
+                out.push_str(&format!("O\u{1f}{locale}.{key}\u{1f}{}\u{1f}.\u{1e}", fields.join("\u{1f}")));
             }
         }
         for variant in catalog.variants(&locales) {
