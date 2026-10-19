@@ -840,37 +840,59 @@ pub(crate) fn lowered_view_lcs(app: &App) -> (Vec<&crate::dialect::View>, Vec<Li
 /// io-accumulator shape as html views; values flow through
 /// `JsonBuilder.encode_value`.
 pub fn emit_lowered_jbuilder_views(app: &App) -> Vec<EmittedFile> {
-    app.views
+    let jbuilder_views: Vec<&crate::dialect::View> = app.views.iter().filter(|v| v.jbuilder).collect();
+    // A jbuilder view is a module function exactly like an ERB one
+    // (`Views::<X>.<template>_json`, no controller instance), but
+    // unlike ERB views this tree never ran `apply_helper_lowering` on
+    // it — `emit_library_class_decls` (the ERB/model/controller path)
+    // is the only caller. A bare `helper_method`-marked call (Devise's
+    // `current_user`, an app's own `helper_method :platform`) stayed
+    // unrewritten and raised `NameError`/`NoMethodError` at the first
+    // render that reached it. Invisible for most jbuilder views because
+    // nothing in them typically calls one, and invisible inside
+    // `json.cache! key do … end` before roundhouse 981ce8e30
+    // specifically because the pre-981ce8e3 transparent `cache!`
+    // handling dropped the key expression on the floor rather than
+    // lowering it — so a key like `[current_user, @widgets]` was never
+    // even reached. 981ce8e30's whole-template `cache!`
+    // (`walk_cached_template`) lowers the key for real, which is what
+    // exposed the gap.
+    let mut lcs: Vec<LibraryClass> = jbuilder_views
         .iter()
-        .filter(|v| v.jbuilder)
-        .flat_map(|v| {
+        .map(|v| {
             let mut lc = crate::lower::lower_jbuilder_to_library_class(v, app);
             library::apply_zoned_json_time_lowering(std::slice::from_mut(&mut lc), app);
-            // A jbuilder view is a module function exactly like an ERB
-            // one (`Views::<X>.<template>_json`, no controller
-            // instance), but unlike ERB views this tree never ran
-            // `apply_helper_lowering` on it — `emit_library_class_decls`
-            // (the ERB/model/controller path) is the only caller. A
-            // bare `helper_method`-marked call (Devise's `current_user`,
-            // an app's own `helper_method :platform`) stayed unrewritten
-            // and raised `NameError`/`NoMethodError` at the first render
-            // that reached it. Invisible for most jbuilder views because
-            // nothing in them typically calls one, and invisible inside
-            // `json.cache! key do … end` before roundhouse 981ce8e30
-            // specifically because the pre-981ce8e3 transparent `cache!`
-            // handling dropped the key expression on the floor rather
-            // than lowering it — so a key like `[current_user,
-            // @widgets]` was never even reached. 981ce8e30's whole-
-            // template `cache!` (`walk_cached_template`) lowers the key
-            // for real, which is what exposed the gap. Run per-view, on
-            // this view's own one-method slice, matching
-            // `apply_zoned_json_time_lowering` just above — jbuilder
-            // views are emitted and merged into `app.library_classes`
-            // nowhere else, so there is no bulk slice to share this
-            // pass with.
-            library::apply_helper_lowering(std::slice::from_mut(&mut lc), app);
+            lc
+        })
+        .collect();
+    // ALL jbuilder views in ONE call, not one call per view (roundhouse
+    // #1034 CodeRabbit): `apply_helper_lowering`'s tail,
+    // `hoist_pure_helper_constants`, dedupes a hoisted helper constant's
+    // name against a `used` set it builds fresh FOR THE SLICE IT IS
+    // GIVEN. Two sibling jbuilder views reopening the same
+    // `Views::<Plural>` module (`index.json.jbuilder` and
+    // `show.json.jbuilder`) can each call the same hoistable helper
+    // with the same first string literal but different remaining
+    // options (`image_tag("boost.svg", alt: "…")` with a different
+    // `alt:` per view) — same derived name, different value. Called
+    // per-view (one-element slices), each call's `used` set starts
+    // empty and never learns about the OTHER view's allocation, so
+    // both mint the identical `HOISTED_IMAGE_TAG_BOOST_SVG` constant;
+    // at Ruby load time the second view's top-level assignment silently
+    // overwrites the first's, and whichever view loaded first renders
+    // the OTHER view's value. Calling it once over every jbuilder
+    // view's `LibraryClass` — matching how `emit_library_class_decls`
+    // already does for ERB views — gives the dedupe pass the same
+    // across-view visibility that path already had, so a collision is
+    // caught and suffixed instead of being invisible until load order
+    // picks a winner.
+    library::apply_helper_lowering(&mut lcs, app);
+    jbuilder_views
+        .iter()
+        .zip(lcs.iter())
+        .flat_map(|(v, lc)| {
             let out_path = jbuilder_view_output_path(v.name.as_str());
-            library::emit_library_class_pair(&lc, app, out_path)
+            library::emit_library_class_pair(lc, app, out_path)
         })
         .collect()
 }

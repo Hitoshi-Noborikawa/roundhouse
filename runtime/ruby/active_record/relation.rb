@@ -66,8 +66,22 @@ module ActiveRecord
 
     # Drop the loaded-records memo. A null relation keeps `[]` so a later
     # `to_a` / `ids` / `exists?` does not re-query through `(1 = 0)`.
+    #
+    # Also drops `@cache_keys`/`@cache_versions` (roundhouse #1034,
+    # CodeRabbit): `cache_key`/`cache_version` memoize by timestamp
+    # column, keyed off `to_sql` at the time of the FIRST call. Chain
+    # methods (`where`, `order`, …) mutate this same relation object in
+    # place and call `unload_records`, but until now never touched
+    # those two memos — `rel.cache_key; rel.where(...); rel.cache_key`
+    # answered the OLD digest, over SQL the relation no longer runs, on
+    # every one of those chain methods. `unload_records` already runs
+    # on exactly the chain methods that change `bound_sql`, so clearing
+    # the memos here (rather than duplicating that same call list) keeps
+    # them invalidated together by construction.
     def unload_records
       @records = @null ? [] : nil
+      @cache_keys = nil
+      @cache_versions = nil
     end
 
     # Rails NullRelation — set only from `none` / a lasting non-negated
@@ -1162,16 +1176,18 @@ module ActiveRecord
     # arithmetic, so it costs the strict targets nothing and needs no
     # new runtime primitive.
     #
-    # The version string is `"<count>-<max-updated-at-epoch-seconds>"`
+    # The version string is `"<count>-<max-updated-at-seconds.fraction>"`
     # rather than Rails' `<count>-<timestamp.to_fs(:usec)>`: `strftime`
     # with a microsecond directive and `Time#usec` are not proven on
     # every Time this runtime ships (Spinel's own Time is a compiler
-    # built-in, outside this tree), where `Time#to_i` already is (used
-    # by `active_support_ext.rb`, `spinel/fragment_cache.rb`, and
-    # others). A cache key only needs the SAME string back for the same
-    # query, and `to_i` already changes on every write (updated_at's
-    # precision floor the database returns is never finer than a
-    # roundhouse record needs to invalidate a stale fragment).
+    # built-in, outside this tree). `Time#to_f` IS — confirmed directly
+    # against the installed Spinel compiler (roundhouse #1034,
+    # CodeRabbit: `to_i` truncates to whole seconds, so two writes
+    # inside the same second answered the same version where Rails'
+    # finer timestamp would differ) — and keeps sub-second precision
+    # `to_i` dropped, at the cost of the digits past the decimal point
+    # not matching Rails' own `to_fs(:usec)` rendering (still not exact
+    # parity; just no longer the SAME second colliding).
     def cache_key(timestamp_column = "updated_at")
       timestamp_column = timestamp_column.to_s
       @cache_keys ||= {}
@@ -1186,11 +1202,21 @@ module ActiveRecord
       @cache_versions[timestamp_column] ||= compute_cache_version(timestamp_column)
     end
 
+    # Guards `@model.schema_columns.include?` BEFORE calling `maximum`
+    # (roundhouse #1034, CodeRabbit): `maximum` (`extreme`) raises
+    # `ArgumentError` for a column the model's schema doesn't have,
+    # which is exactly the "no updated_at column" case this method's
+    # own `cache_version` doc comment already promises answers nil —
+    # a model with no timestamp column raised on every
+    # `cache_key_with_version` call instead, caching on or off (`cache!`
+    # evaluates its key eagerly either way). Rails answers a count-only
+    # version here; `size.to_s` is that.
     def compute_cache_version(timestamp_column)
       size = count
+      return size.to_s unless @model.schema_columns.include?(timestamp_column.to_sym)
       timestamp = maximum(timestamp_column.to_sym)
       return size.to_s if timestamp.nil?
-      epoch = timestamp.to_i
+      epoch = timestamp.to_f
       "#{size}-#{epoch}"
     end
     private :compute_cache_version
