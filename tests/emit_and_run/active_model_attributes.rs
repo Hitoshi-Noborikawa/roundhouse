@@ -48,6 +48,10 @@ e.subject_id = "12345678901234567890"
 raise "integer limit: #{e.subject_id.inspect}" unless e.subject_id == 1234567890123456
 e.subject_id = "111111111111111é999"
 raise "byte limit: #{e.subject_id.inspect}" unless e.subject_id == 111111111111111
+e.subject_id = (" " * 10) + "99"
+raise "leading space: #{e.subject_id.inspect}" unless e.subject_id == 99
+e.subject_id = ("é" * 40) + "12"
+raise "long multibyte: #{e.subject_id.inspect}" unless e.subject_id == 0
 e.subject_id = 7
 raise "integer kept: #{e.subject_id.inspect}" unless e.subject_id == 7
 e.event_name = true

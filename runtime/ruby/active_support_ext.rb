@@ -620,17 +620,24 @@ module ActiveSupport
   # on invalid UTF-8 — the integer writer does, in `presence`, before
   # it slices. One character at a time, the same scan `squish` lowers:
   # a counter loop, no `break` or `next` (those stay a Ruby loop, and
-  # TypeScript turns `next` into `return`). A string that is not blank
-  # is `to_i` of its first 16 bytes.
+  # TypeScript turns `next` into `return`). `value[i]` on a multibyte
+  # string walks from the start, so the loop stops at the first
+  # character that is not space by moving `i` to the end, then taking
+  # the required `i = i + 1` step. A string that is not blank is `to_i`
+  # of its first 16 bytes. The first 16 characters are enough: `to_i`
+  # reads only an ASCII prefix, and 16 characters are at least 16 bytes.
   def self.integer_from_string(value)
     i = 0
+    n = value.length
     blank = true
-    while i < value.length
+    while i < n
       blank = false unless value[i].match?(/[[:space:]]/)
+      i = n unless blank
       i = i + 1
     end
     return nil if blank
-    ActiveSupport.integer_from_bytes(value.bytes)
+    prefix = n > 16 ? value[0, 16] : value
+    ActiveSupport.integer_from_bytes(prefix.bytes)
   end
 
   # `byteslice(0, 16).to_i`. Strict targets lower `String#bytes`, not
