@@ -1284,7 +1284,39 @@ module ActiveRecord
     # `size`'s own windowed count already uses (`cols = @distinct ?
     # "<table>.<pk>" : "1 AS …"`): projecting only the timestamp under
     # DISTINCT would count distinct TIMESTAMPS, not distinct ROWS.
+    #
+    # Two shapes refuse rather than silently answering a wrong window
+    # (roundhouse #1034, CodeRabbit round 3), same bounded policy as
+    # the GROUP BY refusal above:
+    #
+    # - A custom FROM source (`from("widgets AS recent")`): the
+    #   projection below always qualifies against `@table`, the
+    #   model's REAL table name. Once `from` aliases it, nothing in
+    #   the query's own FROM clause still answers to that name —
+    #   `widgets.updated_at` against a FROM of `widgets AS recent`
+    #   fails with an unknown-column error. Resolving it against
+    #   whatever arbitrary alias (or subquery) the caller wrote is not
+    #   worth the complexity. (`maximum`/`extreme` has this same
+    #   `@table`-vs-`from_source` mistake for a custom `from` with NO
+    #   window too — pre-existing, general-purpose code outside this
+    #   PR; filed separately rather than folded in here.)
+    # - An explicit `select(...)` combined with DISTINCT
+    #   (`select(:name).distinct.order(:id).limit(2)`): the pk+
+    #   timestamp substitution above replaces the caller's own
+    #   projection, so DISTINCT no longer collapses on the SAME
+    #   columns the real query would — a pk is already unique, so the
+    #   substituted DISTINCT is a no-op and the window silently covers
+    #   different rows than the real, narrower-projected query would
+    #   return. (Distinct with NO explicit select is unaffected: the
+    #   real projection is already the whole row, so collapsing on pk
+    #   alone changes nothing.)
     def windowed_cache_version(timestamp_column, has_column)
+      unless @from.nil?
+        raise ArgumentError, "cache_version does not support a custom FROM source under a limit/offset window"
+      end
+      if @distinct && !@select_sql.nil?
+        raise ArgumentError, "cache_version does not support an explicit select with distinct under a limit/offset window"
+      end
       return "0" if @null
       unless has_column
         cols = @distinct ? "#{@table}.#{@model.primary_key}" : "1 AS __rh_cache_one"
