@@ -106,6 +106,8 @@ mod action_controller_head;
 mod conditional_get_contract;
 #[path = "spinel_toolchain/conditional_get.rs"]
 mod conditional_get;
+#[path = "spinel_toolchain/response_headers.rs"]
+mod response_headers;
 #[path = "spinel_toolchain/action_dispatch_request_put.rs"]
 mod action_dispatch_request_put;
 #[path = "spinel_toolchain/strong_params.rs"]

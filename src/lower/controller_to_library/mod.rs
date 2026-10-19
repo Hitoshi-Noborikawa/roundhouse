@@ -2882,14 +2882,17 @@ fn action_to_method(
     //   - Other private actions default to Nil; refine when a
     //     forcing fixture surfaces.
     // Routing redirects override `same_host_location` so an author-written
-    // external location is allowed. The only caller is the inherited
-    // runtime `redirect_to`, which app call-site inference never sees, so
-    // the parameter would stay `Untyped`. Kotlin, C#, and Swift then emit
+    // external location is allowed, and `absolute_redirect_location` so
+    // a route `redirect("/path")` stays a path (Rails does not join a
+    // host there). The only caller is the inherited runtime
+    // `redirect_to`, which app call-site inference never sees, so the
+    // parameter would stay `Untyped`. Kotlin, C#, and Swift then emit
     // `Any?` / `object?` against Base's `(String) -> String` and the
     // override does not compile. The contract is the same String the
     // runtime signature declares.
     let host_policy = controller.name.0.as_str() == crate::ingest::routes::REDIRECT_CONTROLLER
-        && a.name.as_str() == "same_host_location";
+        && (a.name.as_str() == "same_host_location"
+            || a.name.as_str() == "absolute_redirect_location");
     let ret_ty = if host_policy {
         Ty::Str
     } else if !is_public && method_name.ends_with("_params") {
