@@ -2877,12 +2877,11 @@ fn synth_initialize(owner: &ClassId, table: &Table, model: &Model, models: &[Mod
             // every construction path (mirrors cache/loaded below).
             // Only when the writer itself will exist: a nested chain
             // gets no writer (see `through_writer_join`), so no flag.
-            let writer_synthesized = through.as_ref().is_some_and(|thr_name| {
-                matches!(
-                    super::associations::through_writer_join(model, models, thr_name, target),
+            let writer_synthesized = through.is_some()
+                && matches!(
+                    super::associations::through_writer_join(model, models, name),
                     super::associations::ThroughWriterJoin::Resolved(..)
-                )
-            });
+                );
             if writer_synthesized {
                 let false_lit = with_ty(
                     Expr::new(
