@@ -3825,3 +3825,40 @@ end
     );
     assert!(rules.iter().any(|v| v.attribute.as_str() == "mode"), "{rules:?}");
 }
+
+/// The taint rules cover String pieces of an interpolated regex or String
+/// constant: a piece mutated in place (`PIECE << "x"` before the regex is
+/// built, so Ruby's regex reads `[a-z]+x`) leaves every constant built from
+/// it unfoldable, directly or through an interpolated String chain.
+#[test]
+fn a_mutated_string_piece_leaves_the_interpolated_regex_unfoldable() {
+    let (model, warnings, _) = ingest_widget(
+        r##"
+class Widget < ApplicationRecord
+  PIECE = "[a-z]+"
+  PIECE << "x"
+  NAME_RE = /\A#{PIECE}\z/
+  BASE = "[a-z]"
+  BASE.concat("+")
+  PAT = "#{BASE}y"
+  CODE_RE = /\A#{PAT}\z/
+  KEPT = "[0-9]+"
+  KEPT_RE = /\A#{KEPT}\z/
+
+  validates :name, format: { with: NAME_RE }
+  validates :code, format: { with: CODE_RE }
+  validates :kept, format: { with: KEPT_RE }
+end
+"##,
+    );
+    let rules = validation_rules(&model);
+    for attr in ["name", "code"] {
+        assert!(rules.iter().all(|v| v.attribute.as_str() != attr), "no folded rule for {attr}: {rules:?}");
+        assert!(warnings.iter().any(|w| w.contains(&format!("validates :{attr}, format: with:"))), "{attr}: {warnings:?}");
+    }
+    assert!(
+        rules.iter().any(|v| v.attribute.as_str() == "kept"
+            && matches!(v.rules.as_slice(), [roundhouse::dialect::ValidationRule::Format { pattern, .. }] if pattern == r"\A[0-9]+\z")),
+        "an untouched piece still folds: {rules:?}"
+    );
+}
