@@ -3453,3 +3453,36 @@ end
         );
     }
 }
+
+/// `on: :create` / `:update` become a `self.persisted?` guard (negated for
+/// `:create`) ANDed with the call's `if:`; `on: [:create, :update]` is no
+/// guard; a custom context stays the reported gap.
+#[test]
+fn on_context_becomes_a_persisted_guard() {
+    let (model, warnings, _) = ingest_widget(
+        r#"
+class Widget < ApplicationRecord
+  validates :uri, presence: true, on: :create
+  validates :note, presence: true, on: :update
+  validates :code, presence: true, if: :live?, on: :create
+  validates :label, presence: true, on: [:create, :update]
+  validates :name, presence: true, on: :publish
+end
+"#,
+    );
+    let rules = validation_rules(&model);
+    let rule = |attr: &str| rules.iter().find(|v| v.attribute.as_str() == attr).copied();
+    let send_name = |e: &Expr| match &*e.node {
+        ExprNode::Send { method, .. } => method.as_str().to_string(),
+        other => format!("{other:?}"),
+    };
+    assert_eq!(rule("uri").and_then(|v| v.if_cond.as_ref()).map(send_name).as_deref(), Some("!"));
+    assert_eq!(rule("note").and_then(|v| v.if_cond.as_ref()).map(send_name).as_deref(), Some("persisted?"));
+    assert!(
+        matches!(rule("code").and_then(|v| v.if_cond.as_ref()).map(|e| &*e.node), Some(ExprNode::BoolOp { .. })),
+        "{:?}", rule("code")
+    );
+    assert!(rule("label").is_some_and(|v| v.if_cond.is_none()), "{:?}", rule("label"));
+    assert!(rule("name").is_none(), "a custom context stays a gap: {rules:?}");
+    assert!(warnings.iter().any(|w| w.contains("validates :name, on:")), "{warnings:?}");
+}
