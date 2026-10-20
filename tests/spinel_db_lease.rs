@@ -37,6 +37,7 @@ fn a_request_that_raises_releases_its_connection() {
     for (from, to) in [
         ("runtime/spinel/db.rb", "db.rb"),
         ("runtime/spinel/active_support_time_parsing.rb", "active_support_time_parsing.rb"),
+        ("runtime/spinel/active_support_interval.rb", "active_support_interval.rb"),
         ("tests/spinel_db_lease.rb", "driver.rb"),
     ] {
         std::fs::copy(root.join(from), scratch.join(to)).expect("copy");
