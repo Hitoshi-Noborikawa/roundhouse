@@ -105,6 +105,7 @@ SPINEL_TESTS = [
     "storage_proxy_path_spinel",
     "filter_block_params_spinel",
     "sidekiq_push",
+    "model_queries_spinel",
 ]
 # Inputs of the Sidekiq push gate (tests/sidekiq_push.rs): the files its
 # driver loads beside it.
