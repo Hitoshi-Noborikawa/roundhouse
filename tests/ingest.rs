@@ -3663,3 +3663,25 @@ end
         assert!(warnings.iter().any(|w| w.contains(gap)), "{gap}: {warnings:?}");
     }
 }
+
+/// `exclusion: { in: NAME }` reads a list constant too: inclusion and
+/// exclusion share `parse_set`.
+#[test]
+fn exclusion_in_a_list_constant_folds() {
+    let (model, warnings, _) = ingest_widget(
+        r#"
+class Widget < ApplicationRecord
+  RESERVED = %w[admin root].freeze
+
+  validates :name, exclusion: { in: RESERVED }
+end
+"#,
+    );
+    assert!(warnings.is_empty(), "{warnings:?}");
+    let rules = validation_rules(&model);
+    let rule = rules.iter().find(|v| v.attribute.as_str() == "name").unwrap_or_else(|| panic!("no rule for name: {rules:?}"));
+    assert!(
+        matches!(rule.rules.as_slice(), [roundhouse::dialect::ValidationRule::Exclusion { values, range: None }] if values.len() == 2),
+        "{:?}", rule.rules
+    );
+}
