@@ -44,6 +44,7 @@ pub(super) enum ValidatesKind {
     Map,
     Numericality,
     Inclusion,
+    Exclusion,
     Format,
 }
 
@@ -102,6 +103,7 @@ pub(super) fn parse_validates_call(
         ValidatesKind::Map => "validates",
         ValidatesKind::Numericality => "validates_numericality_of",
         ValidatesKind::Inclusion => "validates_inclusion_of",
+        ValidatesKind::Exclusion => "validates_exclusion_of",
         ValidatesKind::Format => "validates_format_of",
     };
 
@@ -167,7 +169,7 @@ pub(super) fn parse_validates_call(
                     }
                 }
             }
-            ValidatesKind::Numericality | ValidatesKind::Inclusion | ValidatesKind::Format => {
+            ValidatesKind::Numericality | ValidatesKind::Inclusion | ValidatesKind::Exclusion | ValidatesKind::Format => {
                 parse_of_options(
                     kind,
                     &elements,
@@ -194,6 +196,7 @@ pub(super) fn parse_validates_call(
     } else if !matches!(kind, ValidatesKind::Map) && !attrs.is_empty() {
         gaps.push(match kind {
             ValidatesKind::Inclusion => "inclusion".to_string(),
+            ValidatesKind::Exclusion => "exclusion".to_string(),
             ValidatesKind::Format => "format".to_string(),
             ValidatesKind::Numericality | ValidatesKind::Map => "options".to_string(),
         });
@@ -456,11 +459,11 @@ fn parse_of_options<'a>(
                 saw_rule_key = true;
                 gaps.push(format!("numericality: {key}"));
             }
-            "in" | "within" if matches!(kind, ValidatesKind::Inclusion) => {
+            "in" | "within" if matches!(kind, ValidatesKind::Inclusion | ValidatesKind::Exclusion) => {
                 saw_rule_key = true;
                 match inclusion_values(&value) {
                     Some(spec) => inclusion = Some(spec),
-                    None => gaps.push("inclusion: in".to_string()),
+                    None => gaps.push(format!("{}: in", set_label(&kind))),
                 }
             }
             "with" if matches!(kind, ValidatesKind::Format) => {
@@ -474,6 +477,7 @@ fn parse_of_options<'a>(
                 let prefix = match kind {
                     ValidatesKind::Numericality => "numericality",
                     ValidatesKind::Inclusion => "inclusion",
+                    ValidatesKind::Exclusion => "exclusion",
                     ValidatesKind::Format => "format",
                     ValidatesKind::Map => "validates",
                 };
@@ -492,14 +496,14 @@ fn parse_of_options<'a>(
             gte,
             lte,
         },
-        ValidatesKind::Inclusion => match inclusion {
-            Some(spec) => inclusion_rule(spec),
+        ValidatesKind::Inclusion | ValidatesKind::Exclusion => match inclusion {
+            Some(spec) => set_rule(spec, matches!(kind, ValidatesKind::Exclusion)),
             None if !saw_rule_key => {
-                gaps.push("inclusion".to_string());
+                gaps.push(set_label(&kind).to_string());
                 return;
             }
             None => {
-                gaps.push("inclusion: in".to_string());
+                gaps.push(format!("{}: in", set_label(&kind)));
                 return;
             }
         },
@@ -522,7 +526,8 @@ fn parse_validator(key: &str, value: &Node<'_>, file: &str, class_consts: &super
         "absence" => parse_bool_or_hash(value, ValidationRule::Absence, "absence", file),
         "length" => parse_length_rule(value, file, class_consts),
         "numericality" => parse_numericality(value, file, class_consts),
-        "inclusion" => parse_inclusion(value, file),
+        "inclusion" => parse_set(value, file, false),
+        "exclusion" => parse_set(value, file, true),
         "format" => parse_format(value, file, class_consts),
         other => RuleParse::Gap(vec![other.to_string()]),
     }
@@ -660,30 +665,33 @@ fn parse_numericality(value: &Node<'_>, file: &str, class_consts: &super::ClassC
     RuleParse::Rule(built)
 }
 
-fn parse_inclusion(value: &Node<'_>, file: &str) -> RuleParse {
+/// `inclusion:` or, with `exclusion`, `exclusion:` — the same `in:` /
+/// `within:` shapes, as a membership or a non-membership rule.
+fn parse_set(value: &Node<'_>, file: &str, exclusion: bool) -> RuleParse {
+    let label = if exclusion { "exclusion" } else { "inclusion" };
     if let Some(spec) = inclusion_values(value) {
-        return RuleParse::Rule(BuiltRule::bare(inclusion_rule(spec)));
+        return RuleParse::Rule(BuiltRule::bare(set_rule(spec, exclusion)));
     }
     let Some(elements) = hash_elements(value) else {
-        return RuleParse::Gap(vec!["inclusion".to_string()]);
+        return RuleParse::Gap(vec![label.to_string()]);
     };
     let mut values = None;
-    let mut built = BuiltRule::bare(inclusion_rule(InclusionSpec::List(Vec::new())));
+    let mut built = BuiltRule::bare(set_rule(InclusionSpec::List(Vec::new()), exclusion));
     let mut gaps = Vec::new();
     for el in elements.iter() {
         let Some(assoc) = el.as_assoc_node() else {
-            gaps.push("inclusion".to_string());
+            gaps.push(label.to_string());
             continue;
         };
         let Some(key) = symbol_value(&assoc.key()) else {
-            gaps.push("inclusion".to_string());
+            gaps.push(label.to_string());
             continue;
         };
         let child = assoc.value();
         match key.as_str() {
             "in" | "within" => match inclusion_values(&child) {
                 Some(spec) => values = Some(spec),
-                None => gaps.push("inclusion: in".to_string()),
+                None => gaps.push(format!("{label}: in")),
             },
             "if" => push_condition(&child, file, &mut built.if_cond, "if", &mut gaps),
             "unless" => {
@@ -693,7 +701,7 @@ fn parse_inclusion(value: &Node<'_>, file: &str) -> RuleParse {
                 Some(false) => {}
                 _ => gaps.push("allow_nil".to_string()),
             },
-            other => gaps.push(format!("inclusion: {other}")),
+            other => gaps.push(format!("{label}: {other}")),
         }
     }
     if !gaps.is_empty() {
@@ -701,10 +709,10 @@ fn parse_inclusion(value: &Node<'_>, file: &str) -> RuleParse {
     }
     match values {
         Some(spec) => {
-            built.rule = inclusion_rule(spec);
+            built.rule = set_rule(spec, exclusion);
             RuleParse::Rule(built)
         }
-        None => RuleParse::Gap(vec!["inclusion: in".to_string()]),
+        None => RuleParse::Gap(vec![format!("{label}: in")]),
     }
 }
 
@@ -885,14 +893,23 @@ enum InclusionSpec {
     Range(crate::dialect::InclusionRange),
 }
 
-fn inclusion_rule(spec: InclusionSpec) -> crate::dialect::ValidationRule {
+/// The membership (`inclusion:`) or non-membership (`exclusion:`) rule for
+/// an `in:` value.
+fn set_rule(spec: InclusionSpec, exclusion: bool) -> crate::dialect::ValidationRule {
     use crate::dialect::ValidationRule;
-    match spec {
-        InclusionSpec::List(values) => ValidationRule::Inclusion { values, range: None },
-        InclusionSpec::Range(range) => {
-            ValidationRule::Inclusion { values: Vec::new(), range: Some(range) }
-        }
+    let (values, range) = match spec {
+        InclusionSpec::List(values) => (values, None),
+        InclusionSpec::Range(range) => (Vec::new(), Some(range)),
+    };
+    if exclusion {
+        ValidationRule::Exclusion { values, range }
+    } else {
+        ValidationRule::Inclusion { values, range }
     }
+}
+
+fn set_label(kind: &ValidatesKind) -> &'static str {
+    if matches!(kind, ValidatesKind::Exclusion) { "exclusion" } else { "inclusion" }
 }
 
 /// An array is list membership. A numeric range stays a range:

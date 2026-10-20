@@ -579,6 +579,9 @@ fn validation_rule_to_calls(msgs: Messages, attr: &Symbol, rule: &ValidationRule
         ValidationRule::Inclusion { values, range } => {
             vec![inline_inclusion_check(msgs, attr, values, range.as_ref())]
         }
+        ValidationRule::Exclusion { values, range } => {
+            vec![inline_exclusion_check(msgs, attr, values, range.as_ref())]
+        }
         // `validate :validate_url` — a method the model defines, which
         // adds to `errors` itself. The synthesized `validate` just
         // calls it; everything else about the shape (when it runs, what
@@ -950,6 +953,51 @@ fn inline_inclusion_check(
     let push_err =
         errors_push(attr.as_str(), msgs.error(attr.as_str(), "inclusion", &Default::default()));
     if_with_nil_else(not_included, push_err)
+}
+
+/// Inline `validates :attr, exclusion: { in: … }`, Rails' "is reserved":
+///   if [v1, v2].include?(@attr)            # a value list
+///   if @attr.is_a?(Numeric) && @attr >= begin && @attr <= end   # a range
+///     errors << "attr is reserved"
+///   end
+/// `nil` is never reserved: it isn't in a literal list, and a numeric
+/// range's `cover?` is false for it (and for any non-numeric value).
+fn inline_exclusion_check(
+    msgs: Messages,
+    attr: &Symbol,
+    values: &[Literal],
+    range: Option<&crate::dialect::InclusionRange>,
+) -> Expr {
+    let attr_ivar = ivar(attr);
+    let reserved = if let Some(range) = range {
+        let begin = Expr::new(
+            Span::synthetic(),
+            ExprNode::Lit { value: Literal::Float { value: range.begin } },
+        );
+        let end = Expr::new(
+            Span::synthetic(),
+            ExprNode::Lit { value: Literal::Float { value: range.end } },
+        );
+        let numeric = is_a_check(&attr_ivar, "Numeric");
+        let from_begin = send(attr_ivar.clone(), ">=", vec![begin]);
+        let to_end = send(attr_ivar.clone(), if range.exclusive { "<" } else { "<=" }, vec![end]);
+        bool_op(BoolOpKind::And, numeric, bool_op(BoolOpKind::And, from_begin, to_end))
+    } else {
+        let array_lit = Expr::new(
+            Span::synthetic(),
+            ExprNode::Array {
+                elements: values
+                    .iter()
+                    .map(|lit| Expr::new(Span::synthetic(), ExprNode::Lit { value: lit.clone() }))
+                    .collect(),
+                style: ArrayStyle::Brackets,
+            },
+        );
+        send(array_lit, "include?", vec![attr_ivar])
+    };
+    let push_err =
+        errors_push(attr.as_str(), msgs.error(attr.as_str(), "exclusion", &Default::default()));
+    if_with_nil_else(reserved, push_err)
 }
 
 /// Inline `validates :attr, format: { with: /pattern/ }`.

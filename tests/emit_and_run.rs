@@ -284,6 +284,8 @@ mod validates_integer_constants;
 mod validation_callback_on;
 #[path = "emit_and_run/relation_from_aggregates.rs"]
 mod relation_from_aggregates;
+#[path = "emit_and_run/validates_exclusion.rs"]
+mod validates_exclusion;
 #[path = "emit_and_run/validates_lambda_conditions.rs"]
 mod validates_lambda_conditions;
 #[path = "emit_and_run/validates_format_flags.rs"]
