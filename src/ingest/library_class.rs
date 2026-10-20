@@ -1987,19 +1987,23 @@ fn is_class_methods_bridge(def: &ruby_prism::DefNode<'_>) -> bool {
 /// `base.extend AASM::ClassMethods` and then registers `base`.
 fn drop_class_methods_extend(def: &ruby_prism::DefNode<'_>, owner: &ClassId, m: &mut MethodDef) {
     let Some(param) = included_hook_parameter(def) else { return };
-    let ExprNode::Seq { exprs } = &mut *m.body.node else { return };
     let owner: Vec<&str> = owner.0.as_str().trim_start_matches("::").split("::").collect();
-    exprs.retain(|stmt| {
-        let ExprNode::Send { recv: Some(recv), method, args, block: None, .. } = &*stmt.node else { return true };
+    let is_redundant = |stmt: &Expr| {
+        let ExprNode::Send { recv: Some(recv), method, args, block: None, .. } = &*stmt.node else { return false };
         if method.as_str() != "extend" || !matches!(&*recv.node, ExprNode::Var { name, .. } if name.as_str() == param) {
-            return true;
+            return false;
         }
-        let [arg] = args.as_slice() else { return true };
-        let ExprNode::Const { path } = &*arg.node else { return true };
+        let [arg] = args.as_slice() else { return false };
+        let ExprNode::Const { path } = &*arg.node else { return false };
         let path: Vec<&str> = path.iter().map(|s| s.as_str()).filter(|s| !s.is_empty()).collect();
-        let Some((last, scope)) = path.split_last() else { return true };
-        !(*last == "ClassMethods" && owner.ends_with(scope))
-    });
+        let Some((last, scope)) = path.split_last() else { return false };
+        *last == "ClassMethods" && owner.ends_with(scope)
+    };
+    if let ExprNode::Seq { exprs } = &mut *m.body.node {
+        exprs.retain(|stmt| !is_redundant(stmt));
+    } else if is_redundant(&m.body) {
+        m.body = Expr::new(m.body.span, ExprNode::Lit { value: Literal::Nil });
+    }
 }
 
 /// `if enabled; attr_reader :token; end` is a declaration this walk

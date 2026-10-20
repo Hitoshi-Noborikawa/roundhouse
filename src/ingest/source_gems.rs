@@ -74,8 +74,14 @@ fn required_files<V: Vfs + ?Sized>(vfs: &V, gem: &Path, name: &str) -> Result<BT
 }
 
 fn requires(text: &str) -> Vec<(bool, String)> {
-    struct Finder(Vec<(bool, String)>);
+    struct Finder(Vec<(bool, String)>, usize);
     impl<'pr> ruby_prism::Visit<'pr> for Finder {
+        fn visit_def_node(&mut self, node: &ruby_prism::DefNode<'pr>) {
+            self.1 += 1;
+            ruby_prism::visit_def_node(self, node);
+            self.1 -= 1;
+        }
+
         fn visit_call_node(&mut self, node: &ruby_prism::CallNode<'pr>) {
             let method = node.name();
             let relative = match method.as_slice() {
@@ -86,7 +92,7 @@ fn requires(text: &str) -> Vec<(bool, String)> {
             let args: Vec<_> = node.arguments().map(|a| a.arguments().iter().collect()).unwrap_or_default();
             let feature = match (relative, args.as_slice()) {
                 (Some(_), [arg]) => arg.as_string_node(),
-                (None, [name, arg]) if method.as_slice() == b"autoload" && name.as_symbol_node().is_some() => {
+                (None, [name, arg]) if method.as_slice() == b"autoload" && self.1 == 0 && name.as_symbol_node().is_some() => {
                     arg.as_string_node()
                 }
                 _ => None,
@@ -98,7 +104,7 @@ fn requires(text: &str) -> Vec<(bool, String)> {
         }
     }
     let parsed = ruby_prism::parse(text.as_bytes());
-    let mut finder = Finder(Vec::new());
+    let mut finder = Finder(Vec::new(), 0);
     ruby_prism::Visit::visit(&mut finder, &parsed.node());
     finder.0
 }
@@ -225,7 +231,11 @@ mod tests {
         };
         write("app/.bundle/config", "---\nBUNDLE_PATH: \"vendor/bundle\"\n");
         let gem = "app/vendor/bundle/ruby/3.4.0/gems/widgets-1.0";
-        write(&format!("{gem}/lib/widgets.rb"), "module Widgets\n  autoload :Base, \"widgets/base\"\nend\n");
+        write(
+            &format!("{gem}/lib/widgets.rb"),
+            "module Widgets\n  autoload :Base, \"widgets/base\"\n  def self.later\n    autoload :Later, \"widgets/later\"\n  end\nend\n",
+        );
+        write(&format!("{gem}/lib/widgets/later.rb"), "module Widgets; class Later; end; end\n");
         write(&format!("{gem}/lib/widgets/base.rb"), "module Widgets; class Base; end; end\n");
         let lock = Lockfile::parse("GEM\n  remote: https://rubygems.org/\n  specs:\n    widgets (1.0)\n\nDEPENDENCIES\n  widgets\n");
         let gems = resolve(&crate::vfs::FsVfs::new(), &root.join("app"), Some(&lock), &["widgets".to_string()]).unwrap();

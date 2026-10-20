@@ -10741,12 +10741,26 @@ fn an_included_hook_that_extends_its_carrier_and_more_runs() {
   end
 end
 "#)
+        .write("app/services/labelled.rb", r#"module Labelled
+  def self.included(base)
+    base.extend Labelled::ClassMethods
+  end
+
+  module ClassMethods
+    def label_text
+      "label " + name
+    end
+  end
+end
+"#)
         .write("app/services/reading.rb", r#"class Reading
   include Tracking
+  include Labelled
 end
 "#)
         .run_ruby(r#"
 raise "carrier method: #{Reading.tracked_label.inspect}" unless Reading.tracked_label == "tracked Reading"
+raise "qualified bridge: #{Reading.label_text.inspect}" unless Reading.label_text == "label Reading"
 raise "hook body: #{Tracking::INCLUDERS.inspect}" unless Tracking::INCLUDERS == ["Reading"]
 "#)
         .assert_passes();
