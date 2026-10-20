@@ -276,8 +276,13 @@ mod sidekiq_adapter;
 mod silent_lowerings;
 #[path = "emit_and_run/validates_options.rs"]
 mod validates_options;
+<<<<<<< HEAD
 #[path = "emit_and_run/validates_integer_constants.rs"]
 mod validates_integer_constants;
+=======
+#[path = "emit_and_run/relation_from_aggregates.rs"]
+mod relation_from_aggregates;
+>>>>>>> rubys/main
 #[path = "emit_and_run/validates_lambda_conditions.rs"]
 mod validates_lambda_conditions;
 #[path = "emit_and_run/validates_format_flags.rs"]
@@ -17648,6 +17653,8 @@ mod console_only_definitions;
 mod open_classes;
 #[path = "emit_and_run/parameterized_mailer.rs"]
 mod parameterized_mailer;
+#[path = "emit_and_run/model_delegate_to_reader.rs"]
+mod model_delegate_to_reader;
 #[path = "emit_and_run/private_calls.rs"]
 mod private_calls;
 #[path = "emit_and_run/inherited_visibility.rs"]

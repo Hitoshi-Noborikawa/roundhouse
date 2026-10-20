@@ -1595,8 +1595,8 @@ module ActiveRecord
     # column typing here, ledgered when one appears.
     def sum(expr)
       return 0.0 if @null
-      term = expr.is_a?(Symbol) ? "#{@table}.#{expr}" : expr.to_s
-      sql = "SELECT COALESCE(SUM(#{term}), 0) AS n FROM #{@table}"
+      term = expr.is_a?(Symbol) ? aggregate_column(expr.to_s) : expr.to_s
+      sql = "#{cte_prefix}SELECT COALESCE(SUM(#{term}), 0) AS n FROM #{from_source}"
       sql = "#{sql} #{@joins.join(" ")}" if @joins.length > 0
       sql = "#{sql} WHERE #{@wheres.join(" AND ")}" if @wheres.length > 0
       rows = ActiveRecord.adapter.select_rows(sql)
@@ -1621,7 +1621,7 @@ module ActiveRecord
       column = expr.to_s.to_sym
       raise ArgumentError, "unknown aggregate column: #{expr}" unless @model.schema_columns.include?(column)
       return grouped_extreme(column.to_s, function) if @groups.length > 0
-      projection = "#{function}(#{@table}.#{ActiveRecord.adapter.quote_column_name(column)}) AS value"
+      projection = "#{function}(#{aggregate_column(column.to_s)}) AS value"
       projection = "#{@select_sql}, #{projection}" if @havings.length > 0 && !@select_sql.nil?
       scoped = select(projection)
       scoped.clear_ordering
@@ -1643,7 +1643,7 @@ module ActiveRecord
         names << name
         selects << "#{group} AS #{name}"
       end
-      selects << "#{function}(#{@table}.#{ActiveRecord.adapter.quote_column_name(column)}) AS value"
+      selects << "#{function}(#{aggregate_column(column)}) AS value"
       selects.unshift(@select_sql) if @havings.length > 0 && !@select_sql.nil?
       scoped = select(selects.join(", "))
       scoped.clear_ordering
@@ -2569,6 +2569,48 @@ module ActiveRecord
     def from_source
       src = @from
       src.nil? ? @table : src
+    end
+
+    # A calculation's column, as Rails' `aggregate_column` writes it: on
+    # this model's table when the FROM source is (or names) that table,
+    # else bare, so a subquery source (`from("(SELECT …) AS hi")`)
+    # aggregates its own column.
+    def aggregate_column(column)
+      quoted = ActiveRecord.adapter.quote_column_name(column)
+      from_names_table? ? "#{@table}.#{quoted}" : quoted
+    end
+
+    # Rails' `table_name_matches?(from)`: the source names this table, as
+    # `widgets` or `"widgets"` at the start or after whitespace that does
+    # not follow `FROM` (so a subquery's own `FROM widgets` doesn't
+    # count), and not as a `widgets.` qualifier. Case-insensitive, like
+    # Rails' regexp, written out with `index` rather than a lookbehind.
+    def from_names_table?
+      return true if @from.nil?
+      src = @from.to_s.downcase
+      table = @table.to_s.downcase
+      [table, "\"#{table}\""].each do |name|
+        at = src.index(name)
+        until at.nil?
+          after = at + name.length
+          bounded_left = name.start_with?("\"") || at == 0 || !word_char?(src[at - 1])
+          bounded_right = name.start_with?("\"") || after >= src.length || !word_char?(src[after])
+          not_qualifier = after >= src.length || src[after] != "."
+          if bounded_left && bounded_right && not_qualifier
+            return true if at == 0
+            if src[at - 1].match?(/\s/)
+              before = src[0, at - 1]
+              return true unless before.end_with?("from")
+            end
+          end
+          at = src.index(name, at + 1)
+        end
+      end
+      false
+    end
+
+    def word_char?(char)
+      char.match?(/\A[a-z0-9_]\z/)
     end
 
     # A hash of conditions ANDed: `{is_deleted: false, user_id: 3}` ->

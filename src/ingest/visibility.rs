@@ -194,7 +194,9 @@ impl Visibility {
                     .filter_map(|(_, module)| module.body()),
             );
         for body in bodies {
-            if let Ok(visibility) = Self::resolve(Some(&body), file, None) {
+            // Not `resolve`: forem's `private :has_role?` names a method rolify defines, which
+            // refuses the class body there but leaves the default at every later line known.
+            if let Ok(visibility) = Self::resolve_carrying_inherited(Some(&body), file, None) {
                 defaults.extend(visibility.defaults);
             }
             for statement in flatten_statements(body) {

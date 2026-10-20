@@ -27,23 +27,19 @@ advisory jobs and the scheduled Full cycle for the multi-target ledger.
 | **Draft or ready** + `ci:full` | Full validation (all targets, WASM, Spinel); extras stay advisory |
 | **Push to canonical `main`** | Ruby floor plus **path-owned** lanes (Spinel when the diff owns it); no always-on full Spinel suite. Extra-language SDKs and broad Spinel wait for Full |
 | **Push to `main`** with a `[ci full]` line in a pushed commit's message | Full validation, as `ci:full` would plan it; extras stay advisory |
-| **Scheduled / manual Full validation** | Full validation (extra-language ledger, broad Spinel suite, `campfire-latest`, publication cycle) |
+| **Scheduled / manual Full validation** | Full validation (extra-language ledger, broad Spinel suite, publication cycle) |
 
 PRs without a special label run a Ruby floor: fixture preparation, unit
 tests, Store analysis, the CRuby comparison against Rails (on `MRI_RUBY`, the
 supported minimum, with its runtime gates repeated on `MRI_RUBY_NEXT` in
 `compare-ruby-next`), and Campfire
 conformance/comparison. Campfire conformance is pinned (`CAMPFIRE_SHA`)
-and blocking; `campfire-latest` runs the same suite against
-basecamp/once-campfire `main` on that app's own Ruby on Full, and for
-unknown changed inputs on non-PR runs (never in a pull request's plan),
-advisory. It always surveys the strict emit and reports ingest gaps and
-strict-emit errors; it runs the suite, and reports tests against the pinned
-floor, only when the survey finds no ingest gap. `unit-build` compiles one
-archive of all library, binary, and integration tests. Four unit shards
-partition the active cases; ignored integrations still need selected
-toolchain lanes. Framework and toolchain suites also run inside comparison
-jobs. **Spinel is not part of `BASE`.**
+and blocking. Tip drift against basecamp/once-campfire `main` is not a
+standing CI job; survey tip only when deliberately bumping that pin.
+`unit-build` compiles one archive of all library, binary, and integration
+tests. Four unit shards partition the active cases; ignored integrations
+still need selected toolchain lanes. Framework and toolchain suites also
+run inside comparison jobs. **Spinel is not part of `BASE`.**
 
 That floor is the merge claim for ordinary analyzer, lowerer, and runtime
 work: the Ruby shape runs, and Campfire still matches Rails. Crystal, Go,
@@ -176,8 +172,8 @@ Swift, Kotlin, C#, Elixir, Python, Rust, TypeScript, WASM, or the
 extra-language smoke matrix. Broad Spinel and extra-target red are
 follow-up work on the three-hour scheduled Full validation cycle, not a
 merge gate for later unrelated Ruby PRs. That schedule remains the
-extra-language ledger, broad Spinel poll (unpinned `matz/spinel`),
-publication path, and floating-pin catch-up.
+extra-language ledger, broad Spinel poll (unpinned `matz/spinel`), and
+publication path.
 
 ## Request full, Spinel, focus, or fresh validation
 
