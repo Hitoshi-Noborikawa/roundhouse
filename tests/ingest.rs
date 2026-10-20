@@ -3795,3 +3795,33 @@ end
         );
     }
 }
+
+/// A call on a fresh value computed from a constant is not a mutation of
+/// it: `(FIELDS_LIMIT - used).times` and `MODES.map(&:upcase) << "x"`
+/// leave both constants foldable.
+#[test]
+fn a_call_on_a_value_computed_from_a_constant_keeps_it_foldable() {
+    let (model, _, _) = ingest_widget(
+        r#"
+class Widget < ApplicationRecord
+  FIELDS_LIMIT = 4
+  MODES = %w[a b]
+
+  validates :fields, length: { maximum: FIELDS_LIMIT }
+  validates :mode, inclusion: { in: MODES }
+
+  def pad(used)
+    (FIELDS_LIMIT - used).times { nil }
+    MODES.map(&:upcase) << "x"
+  end
+end
+"#,
+    );
+    let rules = validation_rules(&model);
+    assert!(
+        rules.iter().any(|v| v.attribute.as_str() == "fields"
+            && matches!(v.rules.as_slice(), [roundhouse::dialect::ValidationRule::Length { max: Some(4), .. }])),
+        "{rules:?}"
+    );
+    assert!(rules.iter().any(|v| v.attribute.as_str() == "mode"), "{rules:?}");
+}

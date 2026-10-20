@@ -1470,8 +1470,23 @@ struct ConstTaint {
     aliases: Vec<(String, String)>,
 }
 
+/// Methods whose result is a new object, never the receiver or one of its
+/// elements: a mutation of the result cannot reach the constant, so a
+/// receiver chain through one of them is no longer rooted at it
+/// (`(LIMIT - used).times`, `MODES.map(&:upcase) << "x"`). A method not
+/// listed may return the receiver itself (`to_a`, `tap`) or an element
+/// (`first`, `fetch`), and keeps the chain.
+const FRESH_RESULT_METHODS: &[&str] = &[
+    "+", "-", "*", "/", "%", "**", "<=>", "==", "!=", "<", "<=", ">", ">=", "&", "|", "^", "<<<", "~", "-@", "+@",
+    "map", "collect", "flat_map", "select", "filter", "reject", "filter_map", "sort", "sort_by", "uniq", "compact",
+    "reverse", "flatten", "dup", "clone", "size", "length", "count", "sum", "keys", "values", "join", "to_s",
+    "to_sym", "to_i", "to_f", "inspect", "index_by", "index_with", "group_by", "partition", "tally", "zip",
+    "include?", "member?", "key?", "any?", "all?", "none?", "empty?", "nil?", "frozen?", "is_a?",
+];
+
 /// The constant a receiver chain is rooted at: `MODES`, `MODES.to_a`,
-/// `Widget::MODES.first.dup` (the last segment of a path).
+/// `Widget::MODES.first` (the last segment of a path), unless the chain
+/// passes through a [`FRESH_RESULT_METHODS`] call.
 fn chain_root(node: &Node<'_>) -> Option<String> {
     if let Some(paren) = node.as_parentheses_node() {
         return chain_root(&paren.body()?);
@@ -1482,6 +1497,9 @@ fn chain_root(node: &Node<'_>) -> Option<String> {
         return chain_root(only);
     }
     if let Some(call) = node.as_call_node() {
+        if FRESH_RESULT_METHODS.contains(&constant_id_str(&call.name()).as_ref()) {
+            return None;
+        }
         return chain_root(&call.receiver()?);
     }
     if let Some(cr) = node.as_constant_read_node() {
