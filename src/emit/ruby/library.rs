@@ -8985,25 +8985,44 @@ fn replays_foreign_class_body(lc: &LibraryClass, app: &App, classes: &[LibraryCl
     })
 }
 
-/// The class-body calls of a plain class (no superclass, or a built-in one)
-/// that only the app's own code defines: `extend M` of an app module and
+/// The class-body calls of a class whose body this tree already models
+/// (one `replays_foreign_class_body` says is not a gem's — the caller
+/// only reaches this function in that `else` branch) that only the
+/// app's own code defines: `extend M`/`prepend M` of an app module and
 /// the bare calls after it to that module's methods (`extend SymbolEnum`
 /// then `symbol_enum :state, [:on, :off]`). No runtime base answers
-/// these, so the module is the receiver's and replaying the calls is what
-/// Ruby runs. They are written before the methods, like every replayed
-/// call, so a call to the class's own `def self.` (defined below it in
-/// the emitted body) is not one of them. Anything else stays dropped and
-/// reported (`replays_foreign_class_body`).
+/// these, so the module is the receiver's and replaying the calls is
+/// what Ruby runs — whether or not the class also has an ordinary
+/// app-local superclass: that superclass answers `replays_foreign_class_body`
+/// on its own, and has no bearing on whether THIS class's own `extend`/
+/// `prepend` of an unrelated module should replay. They are written
+/// before the methods, like every replayed call, so a call to the
+/// class's own `def self.` (defined below it in the emitted body) is
+/// not one of them. Anything else stays dropped and reported
+/// (`replays_foreign_class_body`).
 fn app_extension_calls<'a>(lc: &'a LibraryClass, app: &App, classes: &'a [LibraryClass]) -> Vec<&'a Expr> {
-    if lc.is_module || lc.parent.as_ref().is_some_and(|p| !is_core_class_name(p.0.as_str())) {
+    if lc.is_module {
         return Vec::new();
     }
     let app_module = |path: &[Symbol]| -> Option<&LibraryClass> {
-        let written = path.iter().map(|s| s.as_str()).collect::<Vec<_>>().join("::");
-        let nested = format!("{}::{written}", lc.name.0.as_str());
+        // `written_names` has already rewritten this path in place to
+        // Rubydex's resolved answer (or left it as written when Rubydex
+        // had none, or the call has no source span to resolve from —
+        // a synthesized class body). Reading it back here keeps this
+        // lookup from disagreeing with the analyzer's own
+        // `fold_extended_modules`, which asks Rubydex for the same
+        // span; the nested-under-this-class guess is kept only as a
+        // fallback for an unresolved path (e.g. `extend SymbolEnum`
+        // from a DSL this emitter itself expands, which never had a
+        // source span `written_names` could resolve).
+        // A rooted `::M` names the top-level M only: drop the empty
+        // leading segment for the lookup and skip the nested guess.
+        let rooted = path.first().is_some_and(|s| s.as_str().is_empty());
+        let written = path.iter().map(|s| s.as_str()).filter(|s| !s.is_empty()).collect::<Vec<_>>().join("::");
+        let nested = if rooted { written.clone() } else { format!("{}::{written}", lc.name.0.as_str()) };
         match NameIndex::current(app).filter(|index| index.covers(classes)) {
             Some(index) => index.library_classes.get(&written).into_iter().flatten()
-                .chain(index.library_classes.get(&nested).into_iter().flatten())
+                .chain(index.library_classes.get(&nested).into_iter().flatten().filter(|_| !rooted))
                 .copied()
                 .filter(|&j| {
                     let c = &classes[j];
@@ -9020,7 +9039,11 @@ fn app_extension_calls<'a>(lc: &'a LibraryClass, app: &App, classes: &'a [Librar
     let mut out = Vec::new();
     for call in &lc.unknown_calls {
         let ExprNode::Send { recv: None, method, args, .. } = &*call.node else { continue };
-        if method.as_str() == "extend" {
+        // `prepend M` replays the same way `extend M` does — the
+        // module is app-only and not otherwise modelled — but, unlike
+        // `extend`, does not put M's methods on the class side, so it
+        // does not feed the bare-macro-call follow-on below.
+        if matches!(method.as_str(), "extend" | "prepend") {
             let modules: Option<Vec<&LibraryClass>> = args
                 .iter()
                 .map(|a| match &*a.node {
@@ -9029,7 +9052,9 @@ fn app_extension_calls<'a>(lc: &'a LibraryClass, app: &App, classes: &'a [Librar
                 })
                 .collect();
             if let Some(modules) = modules.filter(|m| !m.is_empty()) {
-                extended.extend(modules);
+                if method.as_str() == "extend" {
+                    extended.extend(modules);
+                }
                 out.push(call);
             }
             continue;
