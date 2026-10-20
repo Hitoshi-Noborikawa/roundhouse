@@ -1166,6 +1166,7 @@ fn every_runtime_method_body_concretely_typed() {
     // MEASURED 834 on 2026-10-19: the per-thread SQL guard, the
     // one-argument SQL event, and the blank/unsupported integer cast
     // read those same gradual values (825 -> 834).
+    // Remeasured 834 on 2026-10-19 after rebasing onto main.
     const CEILING: usize = 834;
     assert!(
         total_gradual <= CEILING,
