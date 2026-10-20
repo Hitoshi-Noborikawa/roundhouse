@@ -3379,3 +3379,24 @@ end
         "{:?}", rule("rank").rules
     );
 }
+
+/// A constant reassigned to a value ingest can't fold no longer carries
+/// its earlier value: `NAME_LIMIT = 5` then `NAME_LIMIT = compute_limit`
+/// is the computed value in Rails, so the bound stays the reported gap
+/// rather than validating against 5.
+#[test]
+fn an_unfoldable_reassignment_drops_the_earlier_constant_value() {
+    let (model, warnings, _) = ingest_widget(
+        r#"
+class Widget < ApplicationRecord
+  NAME_LIMIT = 5
+  NAME_LIMIT = compute_limit
+
+  validates :name, length: { maximum: NAME_LIMIT }
+end
+"#,
+    );
+    let rules = validation_rules(&model);
+    assert!(!rules.iter().any(|v| v.attribute.as_str() == "name"), "no stale bound for name: {rules:?}");
+    assert!(warnings.iter().any(|w| w.contains("validates :name, length: maximum:")), "{warnings:?}");
+}

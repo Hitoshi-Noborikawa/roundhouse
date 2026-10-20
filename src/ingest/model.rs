@@ -1469,20 +1469,36 @@ impl ClassConsts {
             let Some(cw) = stmt.as_constant_write_node() else { continue };
             let name = constant_id_str(&cw.name()).to_string();
             let value = cw.value();
-            if let Some(re) = out.regex(&value) {
-                out.regexes.insert(name.clone(), re);
-            }
-            if let Some(lit) = out.scalar(&value) {
-                out.scalars.insert(name, lit);
-                continue;
-            }
-            if let Some(labels) = label_list(&value) {
-                out.labels.insert(name.clone(), labels);
-            }
+            // The right-hand side reads the constants as they stand
+            // before this write (Ruby evaluates it first)...
+            let regex = out.regex(&value);
+            let scalar = out.scalar(&value);
+            let labels = if scalar.is_none() { label_list(&value) } else { None };
             // A failure to ingest a value is not this pass's to report:
             // the constant is simply not usable as a mapping, and the
             // enum that names it says so.
-            if let Ok(Some(mapping)) = enum_label_values(&value, file, &out, &|_| None) {
+            let mapping = if scalar.is_none() {
+                enum_label_values(&value, file, &out, &|_| None).ok().flatten()
+            } else {
+                None
+            };
+            // ...and the write replaces whatever the constant held. A
+            // reassignment this pass can't fold (`LIMIT = 5` then
+            // `LIMIT = compute`) must not leave the earlier value behind.
+            out.regexes.remove(&name);
+            out.scalars.remove(&name);
+            out.labels.remove(&name);
+            out.mappings.remove(&name);
+            if let Some(re) = regex {
+                out.regexes.insert(name.clone(), re);
+            }
+            if let Some(lit) = scalar {
+                out.scalars.insert(name.clone(), lit);
+            }
+            if let Some(labels) = labels {
+                out.labels.insert(name.clone(), labels);
+            }
+            if let Some(mapping) = mapping {
                 out.mappings.insert(name, mapping);
             }
         }
