@@ -8,7 +8,7 @@ use ruby_prism::Node;
 
 use crate::Symbol;
 use crate::dialect::{Comment, ModelBodyItem};
-use crate::expr::{Expr, Literal};
+use crate::expr::{BoolOpKind, BoolOpSurface, Expr, ExprNode, Literal};
 use crate::span::Span;
 
 use super::super::IngestError;
@@ -130,6 +130,8 @@ pub(super) fn parse_validates_call(
     let mut allow_nil: Option<bool> = None;
     let mut call_if_cond: Option<Expr> = None;
     let mut call_unless_cond: Option<Expr> = None;
+    // `on: :create` / `:update`: a guard ANDed into every rule's `if`.
+    let mut on_guard: Option<Expr> = None;
     let mut drafts: Vec<BuiltRule> = Vec::new();
 
     if let Some(node) = &option_node {
@@ -160,7 +162,11 @@ pub(super) fn parse_validates_call(
                         "unless" => {
                             push_condition(&value, file, &mut call_unless_cond, "unless", &mut gaps)
                         }
-                        "on" | "strict" | "message" => gaps.push(key),
+                        "on" => match context_guard(&value) {
+                            Some(guard) => on_guard = guard,
+                            None => gaps.push(key),
+                        },
+                        "strict" | "message" => gaps.push(key),
                         other => match parse_validator(other, &value, file, class_consts) {
                             RuleParse::Skip => {}
                             RuleParse::Rule(built) => drafts.push(built),
@@ -178,6 +184,7 @@ pub(super) fn parse_validates_call(
                     &mut allow_nil,
                     &mut call_if_cond,
                     &mut call_unless_cond,
+                    &mut on_guard,
                     &mut drafts,
                     &mut gaps,
                     class_consts,
@@ -249,7 +256,7 @@ pub(super) fn parse_validates_call(
             out.push(Validation {
                 attribute: attr.clone(),
                 rules: Vec::new(),
-                if_cond: call_if_cond.clone(),
+                if_cond: and_guard(on_guard.clone(), call_if_cond.clone()),
                 unless_cond: call_unless_cond.clone(),
             });
             continue;
@@ -258,7 +265,7 @@ pub(super) fn parse_validates_call(
         for draft in &drafts {
             // A condition inside the rule hash replaces the call-level
             // one for that key — the other key still merges in.
-            let if_cond = draft.if_cond.clone().or_else(|| call_if_cond.clone());
+            let if_cond = and_guard(on_guard.clone(), draft.if_cond.clone().or_else(|| call_if_cond.clone()));
             let unless_cond = draft.unless_cond.clone().or_else(|| call_unless_cond.clone());
             if let Some(current) = grouped.as_mut() {
                 if current.if_cond == if_cond && current.unless_cond == unless_cond {
@@ -307,6 +314,69 @@ fn push_condition(
         return;
     }
     gaps.push(option.to_string());
+}
+
+/// `on:` as a guard on the record. Rails runs a validation in the context
+/// `valid?` / `save` use: `:create` for a new record, `:update` for a
+/// persisted one. So `on: :create` is `!self.persisted?`, `on: :update` is
+/// `self.persisted?`, and an array naming both is no guard at all
+/// (`Some(None)`). A custom context (`on: :publish`, run only by
+/// `valid?(:publish)`) is not modeled (`None`, a gap).
+///
+/// `self.persisted?` rather than a bare `new_record?`: `persisted?` is
+/// synthesized per model on every target, while `new_record?` lives on
+/// the runtime Base, which a rust or go struct does not inherit (the same
+/// spelling `model_to_library::markers` uses, for the same reason).
+fn context_guard(value: &Node<'_>) -> Option<Option<Expr>> {
+    let mut contexts: Vec<String> = Vec::new();
+    if let Some(array) = value.as_array_node() {
+        for element in array.elements().iter() {
+            contexts.push(symbol_value(&element)?);
+        }
+    } else {
+        contexts.push(symbol_value(value)?);
+    }
+    if contexts.is_empty() || contexts.iter().any(|c| c != "create" && c != "update") {
+        return None;
+    }
+    let create = contexts.iter().any(|c| c == "create");
+    let update = contexts.iter().any(|c| c == "update");
+    let persisted = Expr::new(
+        Span::synthetic(),
+        ExprNode::Send {
+            recv: Some(Expr::new(Span::synthetic(), ExprNode::SelfRef)),
+            method: Symbol::from("persisted?"),
+            args: Vec::new(),
+            block: None,
+            parenthesized: false,
+        },
+    );
+    Some(match (create, update) {
+        (true, true) => None,
+        (false, true) => Some(persisted),
+        _ => Some(Expr::new(
+            Span::synthetic(),
+            ExprNode::Send {
+                recv: Some(persisted),
+                method: Symbol::from("!"),
+                args: Vec::new(),
+                block: None,
+                parenthesized: false,
+            },
+        )),
+    })
+}
+
+/// Both guards hold (`on:`'s context guard and an `if:` condition), or
+/// whichever one is present.
+fn and_guard(a: Option<Expr>, b: Option<Expr>) -> Option<Expr> {
+    match (a, b) {
+        (Some(a), Some(b)) => Some(Expr::new(
+            Span::synthetic(),
+            ExprNode::BoolOp { op: BoolOpKind::And, surface: BoolOpSurface::Symbol, left: a, right: b },
+        )),
+        (a, b) => a.or(b),
+    }
 }
 
 /// `allow_blank: true` skips every validator when the value is blank.
@@ -384,6 +454,7 @@ fn parse_of_options<'a>(
     allow_nil: &mut Option<bool>,
     call_if_cond: &mut Option<Expr>,
     call_unless_cond: &mut Option<Expr>,
+    on_guard: &mut Option<Expr>,
     drafts: &mut Vec<BuiltRule>,
     gaps: &mut Vec<String>,
     class_consts: &super::ClassConsts,
@@ -419,7 +490,11 @@ fn parse_of_options<'a>(
             },
             "if" => push_condition(&value, file, call_if_cond, "if", gaps),
             "unless" => push_condition(&value, file, call_unless_cond, "unless", gaps),
-            "on" | "strict" | "message" => gaps.push(key),
+            "on" => match context_guard(&value) {
+                Some(guard) => *on_guard = guard,
+                None => gaps.push(key),
+            },
+            "strict" | "message" => gaps.push(key),
             "only_integer" if matches!(kind, ValidatesKind::Numericality) => {
                 saw_rule_key = true;
                 match super::super::util::bool_value(&value) {

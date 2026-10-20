@@ -3453,3 +3453,52 @@ end
         );
     }
 }
+
+/// `on: :create` / `:update` become a `self.persisted?` guard (negated for
+/// `:create`) ANDed with the call's `if:`; `on: [:create, :update]` is no
+/// guard; a custom context stays the reported gap.
+#[test]
+fn on_context_becomes_a_persisted_guard() {
+    let (model, warnings, _) = ingest_widget(
+        r#"
+class Widget < ApplicationRecord
+  validates :uri, presence: true, on: :create
+  validates :note, presence: true, on: :update
+  validates :code, presence: true, if: :live?, on: :create
+  validates :label, presence: true, on: [:create, :update]
+  validates :name, presence: true, on: :publish
+end
+"#,
+    );
+    let rules = validation_rules(&model);
+    let rule = |attr: &str| rules.iter().find(|v| v.attribute.as_str() == attr).copied();
+    // `self.persisted?`: a SelfRef receiver, no arguments, no block.
+    let is_self_persisted = |e: &Expr| {
+        matches!(&*e.node, ExprNode::Send { recv: Some(r), method, args, block: None, .. }
+            if method.as_str() == "persisted?" && args.is_empty() && matches!(&*r.node, ExprNode::SelfRef))
+    };
+    // `!self.persisted?`.
+    let is_not_self_persisted = |e: &Expr| {
+        matches!(&*e.node, ExprNode::Send { recv: Some(r), method, args, block: None, .. }
+            if method.as_str() == "!" && args.is_empty() && is_self_persisted(r))
+    };
+    // `live?`, the `if:` Symbol's predicate called on the record.
+    let is_live_call = |e: &Expr| {
+        matches!(&*e.node, ExprNode::Send { recv: None, method, args, block: None, .. }
+            if method.as_str() == "live?" && args.is_empty())
+    };
+    let uri = rule("uri").and_then(|v| v.if_cond.as_ref());
+    assert!(uri.is_some_and(is_not_self_persisted), "on: :create is !self.persisted?: {uri:?}");
+    let note = rule("note").and_then(|v| v.if_cond.as_ref());
+    assert!(note.is_some_and(is_self_persisted), "on: :update is self.persisted?: {note:?}");
+    // `on: :create` with `if: :live?`: both guards ANDed, in either order.
+    let code = rule("code").and_then(|v| v.if_cond.as_ref());
+    assert!(
+        code.is_some_and(|e| matches!(&*e.node, roundhouse::expr::ExprNode::BoolOp { op: roundhouse::expr::BoolOpKind::And, left, right, .. }
+            if (is_not_self_persisted(left) && is_live_call(right)) || (is_live_call(left) && is_not_self_persisted(right)))),
+        "{code:?}"
+    );
+    assert!(rule("label").is_some_and(|v| v.if_cond.is_none()), "{:?}", rule("label"));
+    assert!(rule("name").is_none(), "a custom context stays a gap: {rules:?}");
+    assert!(warnings.iter().any(|w| w.contains("validates :name, on:")), "{warnings:?}");
+}
