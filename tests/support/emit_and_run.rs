@@ -172,6 +172,19 @@ impl Overlay {
         self.run_spinel_with_flags(script, &[])
     }
 
+    /// `run_spinel` with a database: before the script's first line,
+    /// configure the default adapter on an in-memory SQLite database and
+    /// load the schema, as the emitted `test/test_helper.rb` does (and as
+    /// `run_ruby`'s `Main.configure_default_adapter!` does on CRuby).
+    /// Plain `run_spinel` boots libraries only, so any query there reads
+    /// an unconfigured adapter.
+    pub fn run_spinel_with_db(self, script: &str) -> Run {
+        let script = format!(
+            "SqliteAdapter.configure(\":memory:\")\nActiveRecord.adapter = SqliteAdapter\nSchema.statements.each {{ |sql| SqliteAdapter.execute_ddl(sql) }}\n{script}"
+        );
+        self.run_spinel_with_flags(&script, &[])
+    }
+
     /// Also enforce the emitted sidecars, as the shipped Makefile does.
     pub fn run_spinel_with_rbs(self, script: &str) -> Run {
         self.run_spinel_with_flags(script, &["--rbs", "."])
