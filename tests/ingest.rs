@@ -3472,15 +3472,31 @@ end
     );
     let rules = validation_rules(&model);
     let rule = |attr: &str| rules.iter().find(|v| v.attribute.as_str() == attr).copied();
-    let send_name = |e: &Expr| match &*e.node {
-        ExprNode::Send { method, .. } => method.as_str().to_string(),
-        other => format!("{other:?}"),
+    // `self.persisted?`: a SelfRef receiver, no arguments, no block.
+    let is_self_persisted = |e: &Expr| {
+        matches!(&*e.node, ExprNode::Send { recv: Some(r), method, args, block: None, .. }
+            if method.as_str() == "persisted?" && args.is_empty() && matches!(&*r.node, ExprNode::SelfRef))
     };
-    assert_eq!(rule("uri").and_then(|v| v.if_cond.as_ref()).map(send_name).as_deref(), Some("!"));
-    assert_eq!(rule("note").and_then(|v| v.if_cond.as_ref()).map(send_name).as_deref(), Some("persisted?"));
+    // `!self.persisted?`.
+    let is_not_self_persisted = |e: &Expr| {
+        matches!(&*e.node, ExprNode::Send { recv: Some(r), method, args, block: None, .. }
+            if method.as_str() == "!" && args.is_empty() && is_self_persisted(r))
+    };
+    // `live?`, the `if:` Symbol's predicate called on the record.
+    let is_live_call = |e: &Expr| {
+        matches!(&*e.node, ExprNode::Send { recv: None, method, args, block: None, .. }
+            if method.as_str() == "live?" && args.is_empty())
+    };
+    let uri = rule("uri").and_then(|v| v.if_cond.as_ref());
+    assert!(uri.is_some_and(is_not_self_persisted), "on: :create is !self.persisted?: {uri:?}");
+    let note = rule("note").and_then(|v| v.if_cond.as_ref());
+    assert!(note.is_some_and(is_self_persisted), "on: :update is self.persisted?: {note:?}");
+    // `on: :create` with `if: :live?`: both guards ANDed, in either order.
+    let code = rule("code").and_then(|v| v.if_cond.as_ref());
     assert!(
-        matches!(rule("code").and_then(|v| v.if_cond.as_ref()).map(|e| &*e.node), Some(ExprNode::BoolOp { .. })),
-        "{:?}", rule("code")
+        code.is_some_and(|e| matches!(&*e.node, roundhouse::expr::ExprNode::BoolOp { op: roundhouse::expr::BoolOpKind::And, left, right, .. }
+            if (is_not_self_persisted(left) && is_live_call(right)) || (is_live_call(left) && is_not_self_persisted(right)))),
+        "{code:?}"
     );
     assert!(rule("label").is_some_and(|v| v.if_cond.is_none()), "{:?}", rule("label"));
     assert!(rule("name").is_none(), "a custom context stays a gap: {rules:?}");
