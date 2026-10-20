@@ -1576,6 +1576,13 @@ impl ClassConsts {
             let stmts = es.statements()?;
             let body: Vec<Node<'_>> = stmts.body().iter().collect();
             let [only] = body.as_slice() else { return None };
+            // A folded String (or Integer) constant is spliced in as raw
+            // pattern source, as Ruby does (`/\A#{FRAGMENT}\z/.source ==
+            // "\\A" + FRAGMENT + "\\z"`), under the outer literal's flags.
+            if let Some(text) = self.text(only) {
+                pattern.push_str(&text);
+                continue;
+            }
             let (inner_pattern, inner_flags) = self.regex(only)?;
             if inner_flags != flags {
                 return None;
@@ -1587,10 +1594,42 @@ impl ClassConsts {
         Some((pattern, flags))
     }
 
+    /// The text an interpolated String or Integer piece contributes: a
+    /// folded String scalar as it is, an Integer as its digits (Ruby's
+    /// `to_s`). A Symbol constant folds as a String scalar too, and
+    /// interpolates as its name, as in Ruby.
+    fn text(&self, node: &Node<'_>) -> Option<String> {
+        if node.as_regular_expression_node().is_some() || node.as_interpolated_regular_expression_node().is_some() {
+            return None;
+        }
+        match self.scalar(node)? {
+            Literal::Str { value } => Some(value),
+            Literal::Int { value } => Some(value.to_string()),
+            _ => None,
+        }
+    }
+
     /// A scalar the class body can fold: a string, a symbol (stored as
     /// its string, which is what a string column holds), an integer,
-    /// or a constant already folded. `.freeze` is transparent.
+    /// a constant already folded, or a double-quoted interpolation whose
+    /// every piece is literal text or one of those (`"x[#{SEPARATORS}]"`).
+    /// `.freeze` is transparent.
     fn scalar(&self, node: &Node<'_>) -> Option<Literal> {
+        if let Some(interp) = node.as_interpolated_string_node() {
+            let mut value = String::new();
+            for part in interp.parts().iter() {
+                if let Some(sn) = part.as_string_node() {
+                    value.push_str(&String::from_utf8_lossy(sn.unescaped()));
+                    continue;
+                }
+                let es = part.as_embedded_statements_node()?;
+                let stmts = es.statements()?;
+                let body: Vec<Node<'_>> = stmts.body().iter().collect();
+                let [only] = body.as_slice() else { return None };
+                value.push_str(&self.text(only)?);
+            }
+            return Some(Literal::Str { value });
+        }
         if let Some(call) = node.as_call_node() {
             if constant_id_str(&call.name()) == "freeze" && call.arguments().is_none() {
                 return self.scalar(&call.receiver()?);

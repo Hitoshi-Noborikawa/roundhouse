@@ -298,6 +298,8 @@ mod validates_lambda_conditions;
 mod validates_format_flags;
 #[path = "emit_and_run/concern_included_constants.rs"]
 mod concern_included_constants;
+#[path = "emit_and_run/regex_string_interpolation.rs"]
+mod regex_string_interpolation;
 
 #[test]
 fn markdown_templates_render_with_their_mime_type_and_erb_escaping() {
