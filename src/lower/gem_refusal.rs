@@ -39,13 +39,20 @@ fn mentions_declarations(app: &App, root: &str) -> bool {
         class_id_under_root(lc.parent.as_ref(), root)
             || lc.includes.iter().any(|id| class_id_under_root(Some(id), root))
     }) || app.models.iter().any(|m| class_id_under_root(m.parent.as_ref(), root))
+        || app.controllers.iter().any(|c| {
+            class_id_under_root(c.parent.as_ref(), root)
+                || c.sibling_classes
+                    .iter()
+                    .any(|s| name_under_root(s.parent.as_str(), root))
+        })
 }
 
 fn class_id_under_root(id: Option<&ClassId>, root: &str) -> bool {
-    id.is_some_and(|id| {
-        let name = id.0.as_str();
-        name == root || name.starts_with(&format!("{root}::"))
-    })
+    id.is_some_and(|id| name_under_root(id.0.as_str(), root))
+}
+
+fn name_under_root(name: &str, root: &str) -> bool {
+    name == root || name.starts_with(&format!("{root}::"))
 }
 
 fn names_root(expr: &Expr, root: &str) -> bool {
@@ -92,6 +99,22 @@ fn refuse_declarations(app: &mut App, target: &str, refusal: &Refusal<'_>) {
             let name = model.parent.as_ref().unwrap().0.as_str().to_string();
             report_decl(model.parent_span, target, refusal, &name);
             model.parent = None;
+        }
+    }
+    for controller in &mut app.controllers {
+        if class_id_under_root(controller.parent.as_ref(), refusal.root) {
+            let name = controller.parent.as_ref().unwrap().0.as_str().to_string();
+            report_decl(controller.parent_span, target, refusal, &name);
+            controller.parent = None;
+        }
+        for sibling in &mut controller.sibling_classes {
+            if name_under_root(sibling.parent.as_str(), refusal.root) {
+                let name = sibling.parent.as_str().to_string();
+                report_decl(sibling.parent_span, target, refusal, &name);
+                // Empty-bodied siblings need some parent name for emit;
+                // Object is the terminal that does not name the gem.
+                sibling.parent = Symbol::from("Object");
+            }
         }
     }
 }

@@ -3756,6 +3756,59 @@ fn faraday_superclass_is_refused_off_ruby_and_jruby() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// A controller sibling (or the controller itself) whose only Faraday
+/// reference is the superclass is refused off the shipping targets —
+/// those parents live on `Controller`, not on a LibraryClass yet.
+#[test]
+fn faraday_controller_superclass_is_refused_off_ruby_and_jruby() {
+    let dir = std::env::temp_dir().join(format!("rh-faraday-ctrl-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    for (path, text) in [
+        (
+            "db/schema.rb",
+            "ActiveRecord::Schema.define do\n  create_table \"posts\", force: :cascade do |t|\n    t.string \"title\"\n  end\nend\n",
+        ),
+        ("config/routes.rb", "Rails.application.routes.draw do\n  get \"/posts\", to: \"posts#index\"\nend\n"),
+        ("app/models/post.rb", "class Post < ApplicationRecord\nend\n"),
+        (
+            "app/controllers/posts_controller.rb",
+            "class ApiBoom < Faraday::Error; end\nclass PostsController < ApplicationController\n  def index\n    render plain: ApiBoom.name\n  end\nend\n",
+        ),
+    ] {
+        let full = dir.join(path);
+        std::fs::create_dir_all(full.parent().unwrap()).unwrap();
+        std::fs::write(full, text).unwrap();
+    }
+    let mut app = roundhouse::ingest::ingest_app(&dir).expect("ingest");
+    let lower_diags = roundhouse::session::analyze_and_lower(&mut app);
+    assert!(
+        lower_diags.iter().all(|d| d.severity != roundhouse::diagnostic::Severity::Error),
+        "check is not clean: {lower_diags:?}"
+    );
+    for target in [roundhouse::project::BuildTarget::Ruby, roundhouse::project::BuildTarget::Jruby] {
+        let (errors, _) = oj_target_errors_and_text(&app, &dir, target);
+        assert!(!errors.iter().any(|e| e.contains("Faraday")), "{target:?} refused a sibling superclass it ships:\n{}", errors.join("\n"));
+    }
+    for target in [
+        roundhouse::project::BuildTarget::Spinel,
+        roundhouse::project::BuildTarget::Typescript,
+    ] {
+        let (errors, files) = oj_target_errors_and_text(&app, &dir, target);
+        assert!(
+            errors.iter().any(|e| e.contains("`Faraday::Error`") && e.contains("only the ruby and jruby trees ship")),
+            "{target:?} did not refuse Faraday::Error sibling superclass:\n{}",
+            errors.join("\n")
+        );
+        let hits: Vec<_> = files
+            .iter()
+            .filter(|(path, text)| !path.ends_with(".map") && text.contains("Faraday"))
+            .map(|(path, _)| path.clone())
+            .collect();
+        assert!(hits.is_empty(), "{target:?} emitted a Faraday sibling superclass in {hits:?}");
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// No other target has an HTTP client behind `Faraday`: each call and
 /// constant is refused there, and no `Faraday` reference is emitted.
 #[test]
