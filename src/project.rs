@@ -1916,6 +1916,14 @@ fn target_files_inner(
         }
         None => app,
     };
+    let with_closed_constantize;
+    let app = match crate::lower::constantize::lower_for_target(app, target) {
+        Some(lowered) => {
+            with_closed_constantize = lowered;
+            &with_closed_constantize
+        }
+        None => app,
+    };
     if target == BuildTarget::Roda {
         if let Some((table, column)) = app.schema.tables.values().find_map(|table| {
             table
