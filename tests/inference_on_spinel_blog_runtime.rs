@@ -446,7 +446,12 @@ fn untyped_subexpressions_baseline() {
     // untyped parameters again.
     // MEASURED 993 on 2026-10-19 after rebasing onto main's 844.
     // The framework-surface classes are unseeded on this probe.
-    const CEILING: usize = 993;
+    // MEASURED 1014 on 2026-10-20: `Relation#column_predicate` renders a
+    // Range as Rails' comparison (#1130). No Range type, so the range,
+    // its ends, and Array elements that may hold one are vars here
+    // (993 → 1014, +21 on this probe; the RBS-paired gate measures +12
+    // gradual sites in relation.rb and bumps its own ceiling to 846).
+    const CEILING: usize = 1014;
     assert!(
         existing_untyped <= CEILING && like_untyped <= LIKE_CEILING,
         "{} untyped sub-expressions on spinel-blog runtime — exceeds ledger: \
