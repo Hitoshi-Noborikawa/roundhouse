@@ -146,14 +146,34 @@ fn shared_debug_compiler_is_selected_and_built_without_waiting_for_tests() {
 fn campfire_consumers_require_shared_debug_binary_and_do_not_rebuild() {
     let ci: serde_yaml_ng::Value =
         serde_yaml_ng::from_str(&fs::read_to_string(".github/workflows/ci.yml").unwrap()).unwrap();
-    for job_name in ["campfire-compare", "campfire-conformance"] {
+    for job_name in [
+        "campfire-compare",
+        "campfire-conformance",
+        "campfire-spinel-build",
+        "campfire-spinel-db",
+    ] {
         let job = &ci["jobs"][job_name];
-        assert_eq!(job["needs"][0].as_str(), Some("build-roundhouse"));
-        assert_eq!(job["needs"][1].as_str(), Some("plan"));
-        let expected_if = format!(
-            "${{{{ contains(fromJSON(needs.plan.outputs.jobs), '{job_name}') && needs.build-roundhouse.outputs.roundhouse-bin-artifact-id != '' }}}}"
+        let needs: Vec<_> = job["needs"]
+            .as_sequence()
+            .unwrap()
+            .iter()
+            .filter_map(|n| n.as_str())
+            .collect();
+        assert!(
+            needs.contains(&"build-roundhouse") && needs.contains(&"plan"),
+            "{job_name}: {needs:?}"
         );
-        assert_eq!(job["if"].as_str(), Some(expected_if.as_str()), "{job_name}");
+        let if_expr = job["if"].as_str().unwrap();
+        assert!(
+            if_expr.contains(&format!(
+                "contains(fromJSON(needs.plan.outputs.jobs), '{job_name}')"
+            )),
+            "{job_name}: {if_expr}"
+        );
+        assert!(
+            if_expr.contains("needs.build-roundhouse.outputs.roundhouse-bin-artifact-id != ''"),
+            "{job_name}: {if_expr}"
+        );
         let steps = job["steps"].as_sequence().unwrap();
         assert!(
             steps.iter().all(|step| {
@@ -181,14 +201,22 @@ fn campfire_consumers_require_shared_debug_binary_and_do_not_rebuild() {
             .iter()
             .find(|step| step["name"].as_str() == Some("Stage shared debug roundhouse binary"))
             .unwrap_or_else(|| panic!("{job_name}: stage shared binary"));
-        let body = stage["run"].as_str().unwrap();
-        assert!(body.contains("chmod +x roundhouse-debug-bin/roundhouse"));
+        // Anchors must expand: every consumer keeps the stage body, not just the
+        // `&stage-roundhouse-debug-bin` definition on campfire-compare.
+        let body = stage["run"]
+            .as_str()
+            .unwrap_or_else(|| panic!("{job_name}: stage step missing run body after YAML load"));
         assert!(
-            body.contains("ROUNDHOUSE_BIN=${GITHUB_WORKSPACE}/roundhouse-debug-bin/roundhouse")
+            body.contains("chmod +x roundhouse-debug-bin/roundhouse"),
+            "{job_name}"
         );
-        assert!(body.contains("ROUNDHOUSE_BIN_TRACE=1"));
-        assert!(body.contains("source_sha=${GITHUB_SHA}"));
-        assert!(body.contains("profile=debug"));
+        assert!(
+            body.contains("ROUNDHOUSE_BIN=${GITHUB_WORKSPACE}/roundhouse-debug-bin/roundhouse"),
+            "{job_name}"
+        );
+        assert!(body.contains("ROUNDHOUSE_BIN_TRACE=1"), "{job_name}");
+        assert!(body.contains("source_sha=${GITHUB_SHA}"), "{job_name}");
+        assert!(body.contains("profile=debug"), "{job_name}");
         // No cargo in the job body outside comments.
         let runs: Vec<_> = steps
             .iter()
@@ -487,6 +515,7 @@ fn compact_and_extra_compare_share_commands_but_not_results() {
     let spinel_coe = "${{ needs.plan.outputs.spinel-advisory == 'true' }}";
     for name in [
         "spinel-build",
+        "spinel-toolchain-build",
         "spinel-toolchain",
         "spinel-compare",
         "spinel-framework",
@@ -497,6 +526,44 @@ fn compact_and_extra_compare_share_commands_but_not_results() {
             "{name} CoE must follow plan spinel-advisory"
         );
     }
+    let toolchain = &jobs["spinel-toolchain"];
+    let toolchain_needs: Vec<_> = toolchain["needs"]
+        .as_sequence()
+        .unwrap()
+        .iter()
+        .filter_map(|n| n.as_str())
+        .collect();
+    assert!(
+        toolchain_needs.contains(&"spinel-toolchain-build"),
+        "shards must wait on the compile-once producer: {toolchain_needs:?}"
+    );
+    assert!(
+        toolchain["if"]
+            .as_str()
+            .unwrap()
+            .contains("needs.spinel-toolchain-build.outputs.artifact-id != ''"),
+        "missing toolchain binaries must block shards, not cargo-rebuild"
+    );
+    let producer_steps = jobs["spinel-toolchain-build"]["steps"]
+        .as_sequence()
+        .unwrap();
+    assert!(
+        producer_steps.iter().any(|step| {
+            step["uses"]
+                .as_str()
+                .is_some_and(|u| u.contains("setup-rust"))
+        }),
+        "producer compiles with Rust"
+    );
+    assert!(
+        toolchain["steps"].as_sequence().unwrap().iter().all(|step| {
+            step["uses"]
+                .as_str()
+                .map(|u| !u.contains("setup-rust") && !u.contains("rust-cache"))
+                .unwrap_or(true)
+        }),
+        "toolchain shards must not recompile"
+    );
     assert_eq!(
         ci["jobs"]["plan"]["outputs"]["spinel-advisory"].as_str(),
         Some("${{ steps.plan.outputs.spinel-advisory }}")
