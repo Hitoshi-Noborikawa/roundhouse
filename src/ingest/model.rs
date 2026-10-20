@@ -509,6 +509,7 @@ pub(super) fn ingest_model_body_items(
             let of_kind = match name.as_str() {
                 "validates_numericality_of" => Some(ValidatesKind::Numericality),
                 "validates_inclusion_of" => Some(ValidatesKind::Inclusion),
+                "validates_exclusion_of" => Some(ValidatesKind::Exclusion),
                 "validates_format_of" => Some(ValidatesKind::Format),
                 _ => None,
             };

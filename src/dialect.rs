@@ -669,6 +669,15 @@ pub enum ValidationRule {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         range: Option<InclusionRange>,
     },
+    /// `exclusion: { in: […] }` / `validates_exclusion_of`: the value
+    /// must NOT be one of `values`, or, with `range`, must not be covered
+    /// by it. `nil` is reserved only when it's listed (no implicit
+    /// `allow_nil`), never by a range. Rails' message is "is reserved".
+    Exclusion {
+        values: Vec<Literal>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        range: Option<InclusionRange>,
+    },
     Custom {
         method: Symbol,
         /// `validate :m, if: :pred` / `unless: :pred` — the instance

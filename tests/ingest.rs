@@ -3400,3 +3400,56 @@ end
     assert!(!rules.iter().any(|v| v.attribute.as_str() == "name"), "no stale bound for name: {rules:?}");
     assert!(warnings.iter().any(|w| w.contains("validates :name, length: maximum:")), "{warnings:?}");
 }
+
+/// `exclusion: { in: … }` (list or numeric range) and
+/// `validates_exclusion_of … in:` become `Exclusion` rules, with no gap.
+#[test]
+fn exclusion_lowers_to_an_exclusion_rule() {
+    let (model, warnings, _) = ingest_widget(
+        r#"
+class Widget < ApplicationRecord
+  validates :status, exclusion: { in: %w[banned deleted] }
+  validates :level, exclusion: { in: 1..3 }
+  validates_exclusion_of :code, in: %w[root admin]
+end
+"#,
+    );
+    assert!(warnings.is_empty(), "{warnings:?}");
+    let rules = validation_rules(&model);
+    let rule = |attr: &str| rules.iter().find(|v| v.attribute.as_str() == attr).unwrap_or_else(|| panic!("no rule for {attr}: {rules:?}"));
+    assert!(
+        matches!(rule("status").rules.as_slice(), [roundhouse::dialect::ValidationRule::Exclusion { values, range: None }] if values.len() == 2),
+        "{:?}", rule("status").rules
+    );
+    assert!(
+        matches!(rule("level").rules.as_slice(), [roundhouse::dialect::ValidationRule::Exclusion { range: Some(r), .. }] if r.begin == 1.0 && r.end == 3.0 && !r.exclusive),
+        "{:?}", rule("level").rules
+    );
+    assert!(
+        matches!(rule("code").rules.as_slice(), [roundhouse::dialect::ValidationRule::Exclusion { values, .. }] if values.len() == 2),
+        "{:?}", rule("code").rules
+    );
+}
+
+/// `exclusion: false` / `inclusion: false` add no validator, as in Rails'
+/// `validates`, and the call's other rules on the same line still lower.
+#[test]
+fn a_false_set_option_is_skipped_not_a_gap() {
+    let (model, warnings, _) = ingest_widget(
+        r#"
+class Widget < ApplicationRecord
+  validates :status, presence: true, exclusion: false
+  validates :level, presence: true, inclusion: false
+end
+"#,
+    );
+    assert!(warnings.is_empty(), "{warnings:?}");
+    let rules = validation_rules(&model);
+    for attr in ["status", "level"] {
+        let rule = rules.iter().find(|v| v.attribute.as_str() == attr).unwrap_or_else(|| panic!("no rule for {attr}: {rules:?}"));
+        assert!(
+            matches!(rule.rules.as_slice(), [roundhouse::dialect::ValidationRule::Presence]),
+            "{attr}: {:?}", rule.rules
+        );
+    }
+}
