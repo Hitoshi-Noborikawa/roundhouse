@@ -1480,6 +1480,24 @@ impl ClassConsts {
         });
         let mut seen = std::collections::HashSet::new();
         for stmt in stmts {
+            // A compound write (`NAME -= …`, `+=`, `||=`, `&&=`) is a
+            // write too, never folded: the name holds two values over
+            // the body, so it is unfoldable from here on, as below.
+            let compound = stmt
+                .as_constant_operator_write_node()
+                .map(|n| n.name())
+                .or_else(|| stmt.as_constant_or_write_node().map(|n| n.name()))
+                .or_else(|| stmt.as_constant_and_write_node().map(|n| n.name()));
+            if let Some(name) = compound {
+                let name = constant_id_str(&name).to_string();
+                out.regexes.remove(&name);
+                out.lists.remove(&name);
+                out.scalars.remove(&name);
+                out.labels.remove(&name);
+                out.mappings.remove(&name);
+                seen.insert(name);
+                continue;
+            }
             let Some(cw) = stmt.as_constant_write_node() else { continue };
             let name = constant_id_str(&cw.name()).to_string();
             let value = cw.value();

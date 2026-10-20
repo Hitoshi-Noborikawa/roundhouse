@@ -3628,3 +3628,38 @@ end
         assert!(warnings.iter().any(|w| w.contains(gap)), "{gap}: {warnings:?}");
     }
 }
+
+/// A compound write (`-=`, `+=`, `||=`, `&&=`) to a constant is a write
+/// too: `MODES -= %w[closed]` after `validates` leaves Rails validating
+/// against the list as it stood at the macro, which the fold can't
+/// tell apart from the result. The name is unfoldable, as for a plain
+/// second write.
+#[test]
+fn a_compound_constant_write_is_a_second_write() {
+    let (model, warnings, _) = ingest_widget(
+        r#"
+class Widget < ApplicationRecord
+  MODES = %w[open closed]
+  NAME_LIMIT = 5
+  TITLE_LIMIT = 5
+  validates :mode, inclusion: { in: MODES }
+  validates :name, length: { maximum: NAME_LIMIT }
+  validates :title, length: { maximum: TITLE_LIMIT }
+  MODES -= %w[closed]
+  NAME_LIMIT += 5
+  TITLE_LIMIT ||= 10
+end
+"#,
+    );
+    let rules = validation_rules(&model);
+    for attr in ["mode", "name", "title"] {
+        assert!(rules.iter().all(|v| v.attribute.as_str() != attr), "no folded rule for {attr}: {rules:?}");
+    }
+    for gap in [
+        "validates :mode, inclusion: in:",
+        "validates :name, length: maximum:",
+        "validates :title, length: maximum:",
+    ] {
+        assert!(warnings.iter().any(|w| w.contains(gap)), "{gap}: {warnings:?}");
+    }
+}
