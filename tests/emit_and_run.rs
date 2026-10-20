@@ -3549,6 +3549,405 @@ fn oj_target_errors_and_text(
     (errors, files)
 }
 
+const FARADAY_LIB: &str = "class PingClient
+  def self.fetch(base, path)
+    conn = Faraday.new(url: base) do |c|
+      c.response :raise_error
+      c.options.timeout = 5
+      c.adapter Faraday.default_adapter
+    end
+    response = conn.get(path)
+    [response.status, response.body, response.success?]
+  rescue Faraday::ResourceNotFound => e
+    [e.response_status, :not_found]
+  rescue Faraday::Error => e
+    [nil, e.class.name]
+  end
+end
+";
+
+/// Ruby runs the real faraday gem: a connection with middleware, a
+/// response, and the error hierarchy it raises, against a local server.
+#[test]
+fn faraday_runs_as_the_real_gem_on_ruby() {
+    emit_and_run::real_blog()
+        .write("app/models/ping_client.rb", FARADAY_LIB)
+        .run_ruby(
+            r#"require "socket"
+server = TCPServer.new("127.0.0.1", 0)
+port = server.addr[1]
+Thread.new do
+  loop do
+    client = server.accept
+    line = client.gets.to_s
+    while (header = client.gets) && header != "\r\n"; end
+    if line.include?("/ok")
+      client.write "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok"
+    else
+      client.write "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+    end
+    client.close
+  end
+end
+base = "http://127.0.0.1:#{port}"
+r = PingClient.fetch(base, "/ok")
+raise r.inspect unless r == [200, "ok", true]
+r = PingClient.fetch(base, "/missing")
+raise r.inspect unless r == [404, :not_found]
+closed = TCPServer.new("127.0.0.1", 0)
+closed_port = closed.addr[1]
+closed.close
+r = PingClient.fetch("http://127.0.0.1:#{closed_port}", "/x")
+raise r.inspect unless r == [nil, "Faraday::ConnectionFailed"]"#,
+        )
+        .assert_passes();
+}
+
+/// faraday-multipart and faraday-retry run too: their middleware is named
+/// by a symbol, and the Gemfile declares the gems it needs.
+#[test]
+fn faraday_multipart_and_retry_run_as_the_real_gems_on_ruby() {
+    let run = emit_and_run::real_blog()
+        .write(
+            "lib/uploader.rb",
+            "class Uploader
+  def self.upload(base, text)
+    conn = Faraday.new(url: base) do |c|
+      c.request :multipart
+      c.adapter Faraday.default_adapter
+    end
+    part = Faraday::Multipart::FilePart.new(StringIO.new(text), \"text/plain\", \"a.txt\")
+    conn.post(\"/upload\", { file: part }).body
+  end
+
+  def self.flaky(base)
+    conn = Faraday.new(url: base) do |c|
+      c.request(:retry, max: 2, interval: 0, retry_statuses: [503])
+      c.adapter Faraday.default_adapter
+    end
+    conn.get(\"/flaky\").body
+  end
+end
+",
+        )
+        .run_ruby(
+            r#"require "socket"
+require "stringio"
+server = TCPServer.new("127.0.0.1", 0)
+port = server.addr[1]
+hits = 0
+Thread.new do
+  loop do
+    client = server.accept
+    line = client.gets.to_s
+    headers = {}
+    while (header = client.gets) && header != "\r\n"
+      name, value = header.split(":", 2)
+      headers[name.downcase] = value.strip
+    end
+    body = client.read(headers["content-length"].to_i)
+    reply = if line.include?("/upload")
+      headers["content-type"].start_with?("multipart/form-data") && body.include?("filename=\"a.txt\"") && body.include?("hello") ? "multipart" : "plain"
+    else
+      hits += 1
+      hits == 1 ? nil : "recovered"
+    end
+    if reply
+      client.write "HTTP/1.1 200 OK\r\nContent-Length: #{reply.bytesize}\r\nConnection: close\r\n\r\n#{reply}"
+    else
+      client.write "HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+    end
+    client.close
+  end
+end
+base = "http://127.0.0.1:#{port}"
+r = Uploader.upload(base, "hello")
+raise r.inspect unless r == "multipart"
+r = Uploader.flaky(base)
+raise [r, hits].inspect unless r == "recovered" && hits == 2"#,
+        );
+    run.assert_passes();
+    let gemfile = std::fs::read_to_string(run.emitted.join("Gemfile")).expect("Gemfile");
+    for gem in ["faraday", "faraday-multipart", "faraday-retry"] {
+        assert!(gemfile.contains(&format!("gem {gem:?}")), "Gemfile does not declare {gem}:\n{gemfile}");
+    }
+}
+
+/// A bare `Faraday` value (assignment / pass-through) still demands the
+/// gem on Ruby — `names_constant` would miss it; the RUNTIME_GEMS needle
+/// does not.
+#[test]
+fn faraday_as_a_value_declares_the_gem_on_ruby() {
+    let run = emit_and_run::real_blog()
+        .write(
+            "app/models/http_client_holder.rb",
+            "class HttpClientHolder\n  CLIENT = Faraday\n  def self.client\n    CLIENT\n  end\nend\n",
+        )
+        .run_ruby(
+            r#"c = HttpClientHolder.client
+raise c.inspect unless c.equal?(Faraday)"#,
+        );
+    run.assert_passes();
+    let gemfile = std::fs::read_to_string(run.emitted.join("Gemfile")).expect("Gemfile");
+    assert!(
+        gemfile.contains("gem \"faraday\""),
+        "Gemfile does not declare faraday for a bare Faraday value:\n{gemfile}"
+    );
+}
+
+/// An identifier that merely starts with `Faraday` must not demand the gem.
+#[test]
+fn faraday_holder_name_does_not_declare_the_gem_on_ruby() {
+    let run = emit_and_run::real_blog()
+        .write(
+            "app/models/faraday_holder.rb",
+            "class FaradayHolder\n  def self.label\n    \"FaradayHolder\"\n  end\nend\n",
+        )
+        .run_ruby(r#"raise FaradayHolder.label.inspect unless FaradayHolder.label == "FaradayHolder""#);
+    run.assert_passes();
+    let gemfile = std::fs::read_to_string(run.emitted.join("Gemfile")).expect("Gemfile");
+    assert!(
+        !gemfile.contains("gem \"faraday\""),
+        "Gemfile declared faraday for FaradayHolder alone:\n{gemfile}"
+    );
+}
+
+/// A superclass that is only `Faraday::…` (no call in a body) is refused
+/// off the shipping targets — `gem_refusal` used to see only emit bodies.
+#[test]
+fn faraday_superclass_is_refused_off_ruby_and_jruby() {
+    let dir = std::env::temp_dir().join(format!("rh-faraday-super-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    for (path, text) in [
+        (
+            "db/schema.rb",
+            "ActiveRecord::Schema.define do\n  create_table \"posts\", force: :cascade do |t|\n    t.string \"title\"\n  end\nend\n",
+        ),
+        ("config/routes.rb", "Rails.application.routes.draw do\n  get \"/posts\", to: \"posts#index\"\nend\n"),
+        ("app/models/post.rb", "class Post < ApplicationRecord\nend\n"),
+        (
+            "app/models/ping_client.rb",
+            "class PingClient < Faraday::Connection\nend\n",
+        ),
+        (
+            "app/controllers/posts_controller.rb",
+            "class PostsController < ApplicationController\n  def index\n    render plain: PingClient.name\n  end\nend\n",
+        ),
+    ] {
+        let full = dir.join(path);
+        std::fs::create_dir_all(full.parent().unwrap()).unwrap();
+        std::fs::write(full, text).unwrap();
+    }
+    let mut app = roundhouse::ingest::ingest_app(&dir).expect("ingest");
+    let lower_diags = roundhouse::session::analyze_and_lower(&mut app);
+    assert!(
+        lower_diags.iter().all(|d| d.severity != roundhouse::diagnostic::Severity::Error),
+        "check is not clean: {lower_diags:?}"
+    );
+    for target in [roundhouse::project::BuildTarget::Ruby, roundhouse::project::BuildTarget::Jruby] {
+        let (errors, files) = oj_target_errors_and_text(&app, &dir, target);
+        assert!(!errors.iter().any(|e| e.contains("Faraday")), "{target:?} refused a superclass it ships:\n{}", errors.join("\n"));
+        assert!(
+            files.get("Gemfile").is_some_and(|g| g.contains("gem \"faraday\"")),
+            "{target:?} Gemfile does not declare faraday for Faraday::Connection superclass"
+        );
+    }
+    for target in [
+        roundhouse::project::BuildTarget::Spinel,
+        roundhouse::project::BuildTarget::Roda,
+        roundhouse::project::BuildTarget::Python,
+    ] {
+        let (errors, files) = oj_target_errors_and_text(&app, &dir, target);
+        assert!(
+            errors.iter().any(|e| e.contains("`Faraday::Connection`") && e.contains("only the ruby and jruby trees ship")),
+            "{target:?} did not refuse Faraday::Connection superclass:\n{}",
+            errors.join("\n")
+        );
+        let hits: Vec<_> = files
+            .iter()
+            .filter(|(path, text)| !path.ends_with(".map") && path.contains("ping_client") && text.contains("Faraday"))
+            .map(|(path, _)| path.clone())
+            .collect();
+        assert!(hits.is_empty(), "{target:?} emitted a Faraday superclass in {hits:?}");
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A controller sibling (or the controller itself) whose only Faraday
+/// reference is the superclass is refused off the shipping targets —
+/// those parents live on `Controller`, not on a LibraryClass yet.
+#[test]
+fn faraday_controller_superclass_is_refused_off_ruby_and_jruby() {
+    let dir = std::env::temp_dir().join(format!("rh-faraday-ctrl-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    for (path, text) in [
+        (
+            "db/schema.rb",
+            "ActiveRecord::Schema.define do\n  create_table \"posts\", force: :cascade do |t|\n    t.string \"title\"\n  end\nend\n",
+        ),
+        ("config/routes.rb", "Rails.application.routes.draw do\n  get \"/posts\", to: \"posts#index\"\nend\n"),
+        ("app/models/post.rb", "class Post < ApplicationRecord\nend\n"),
+        (
+            "app/controllers/posts_controller.rb",
+            "class ApiBoom < Faraday::Error; end\nclass PostsController < ApplicationController\n  def index\n    render plain: ApiBoom.name\n  end\nend\n",
+        ),
+    ] {
+        let full = dir.join(path);
+        std::fs::create_dir_all(full.parent().unwrap()).unwrap();
+        std::fs::write(full, text).unwrap();
+    }
+    let mut app = roundhouse::ingest::ingest_app(&dir).expect("ingest");
+    let lower_diags = roundhouse::session::analyze_and_lower(&mut app);
+    assert!(
+        lower_diags.iter().all(|d| d.severity != roundhouse::diagnostic::Severity::Error),
+        "check is not clean: {lower_diags:?}"
+    );
+    for target in [roundhouse::project::BuildTarget::Ruby, roundhouse::project::BuildTarget::Jruby] {
+        let (errors, _) = oj_target_errors_and_text(&app, &dir, target);
+        assert!(!errors.iter().any(|e| e.contains("Faraday")), "{target:?} refused a sibling superclass it ships:\n{}", errors.join("\n"));
+    }
+    for target in [
+        roundhouse::project::BuildTarget::Spinel,
+        roundhouse::project::BuildTarget::Typescript,
+    ] {
+        let (errors, files) = oj_target_errors_and_text(&app, &dir, target);
+        assert!(
+            errors.iter().any(|e| e.contains("`Faraday::Error`") && e.contains("only the ruby and jruby trees ship")),
+            "{target:?} did not refuse Faraday::Error sibling superclass:\n{}",
+            errors.join("\n")
+        );
+        let hits: Vec<_> = files
+            .iter()
+            .filter(|(path, text)| !path.ends_with(".map") && text.contains("Faraday"))
+            .map(|(path, _)| path.clone())
+            .collect();
+        assert!(hits.is_empty(), "{target:?} emitted a Faraday sibling superclass in {hits:?}");
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A test class whose only Faraday reference is the superclass (or an
+/// include / inner class) is refused on Spinel — test modules are not
+/// LibraryClasses.
+#[test]
+fn faraday_test_module_superclass_is_refused_on_spinel() {
+    let dir = std::env::temp_dir().join(format!("rh-faraday-tm-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    for (path, text) in [
+        (
+            "db/schema.rb",
+            "ActiveRecord::Schema.define do\n  create_table \"posts\", force: :cascade do |t|\n    t.string \"title\"\n  end\nend\n",
+        ),
+        ("config/routes.rb", "Rails.application.routes.draw do\n  get \"/posts\", to: \"posts#index\"\nend\n"),
+        ("app/models/post.rb", "class Post < ApplicationRecord\nend\n"),
+        (
+            "app/controllers/posts_controller.rb",
+            "class PostsController < ApplicationController\n  def index\n    render plain: \"ok\"\n  end\nend\n",
+        ),
+        (
+            "test/models/post_test.rb",
+            "require \"test_helper\"\nclass PostTest < Faraday::Error\n  include Faraday::FlatParamsEncoder\n  class Boom < Faraday::Error; end\n  test \"name\" do\n    assert_equal \"PostTest\", PostTest.name\n  end\nend\n",
+        ),
+    ] {
+        let full = dir.join(path);
+        std::fs::create_dir_all(full.parent().unwrap()).unwrap();
+        std::fs::write(full, text).unwrap();
+    }
+    let mut app = roundhouse::ingest::ingest_app(&dir).expect("ingest");
+    let lower_diags = roundhouse::session::analyze_and_lower(&mut app);
+    assert!(
+        lower_diags.iter().all(|d| d.severity != roundhouse::diagnostic::Severity::Error),
+        "check is not clean: {lower_diags:?}"
+    );
+    let (errors, files) = oj_target_errors_and_text(
+        &app,
+        &dir,
+        roundhouse::project::BuildTarget::Spinel,
+    );
+    for site in ["`Faraday::Error`", "`Faraday::FlatParamsEncoder`"] {
+        assert!(
+            errors.iter().any(|e| e.contains(site) && e.contains("only the ruby and jruby trees ship")),
+            "Spinel did not refuse test-module {site}:\n{}",
+            errors.join("\n")
+        );
+    }
+    let hits: Vec<_> = files
+        .iter()
+        .filter(|(path, text)| !path.ends_with(".map") && path.contains("post_test") && text.contains("Faraday"))
+        .map(|(path, _)| path.clone())
+        .collect();
+    assert!(hits.is_empty(), "Spinel emitted Faraday in test module {hits:?}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// No other target has an HTTP client behind `Faraday`: each call and
+/// constant is refused there, and no `Faraday` reference is emitted.
+#[test]
+fn faraday_is_refused_off_ruby_and_jruby() {
+    let dir = std::env::temp_dir().join(format!("rh-faraday-targets-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    for (path, text) in [
+        (
+            "db/schema.rb",
+            "ActiveRecord::Schema.define do\n  create_table \"posts\", force: :cascade do |t|\n    t.string \"title\"\n  end\nend\n",
+        ),
+        ("config/routes.rb", "Rails.application.routes.draw do\n  get \"/posts\", to: \"posts#index\"\nend\n"),
+        ("app/models/post.rb", "class Post < ApplicationRecord\nend\n"),
+        ("app/models/ping_client.rb", FARADAY_LIB),
+        (
+            "app/controllers/posts_controller.rb",
+            "class PostsController < ApplicationController\n  def index\n    render plain: PingClient.fetch(\"http://example.test\", \"/ok\").inspect\n  end\nend\n",
+        ),
+    ] {
+        let full = dir.join(path);
+        std::fs::create_dir_all(full.parent().unwrap()).unwrap();
+        std::fs::write(full, text).unwrap();
+    }
+    let mut app = roundhouse::ingest::ingest_app(&dir).expect("ingest");
+    let lower_diags = roundhouse::session::analyze_and_lower(&mut app);
+    assert!(
+        lower_diags.iter().all(|d| d.severity != roundhouse::diagnostic::Severity::Error),
+        "check is not clean: {lower_diags:?}"
+    );
+    for target in [roundhouse::project::BuildTarget::Ruby, roundhouse::project::BuildTarget::Jruby] {
+        let (errors, files) = oj_target_errors_and_text(&app, &dir, target);
+        assert!(!errors.iter().any(|e| e.contains("Faraday")), "{target:?} refused the gem it ships:\n{}", errors.join("\n"));
+        assert!(
+            files.get("Gemfile").is_some_and(|g| g.contains("gem \"faraday\"")),
+            "{target:?} Gemfile does not declare faraday"
+        );
+    }
+    for target in [
+        roundhouse::project::BuildTarget::Spinel,
+        roundhouse::project::BuildTarget::Roda,
+        roundhouse::project::BuildTarget::Python,
+        roundhouse::project::BuildTarget::Crystal,
+        roundhouse::project::BuildTarget::Typescript,
+        roundhouse::project::BuildTarget::Rust,
+        roundhouse::project::BuildTarget::Go,
+        roundhouse::project::BuildTarget::Elixir,
+        roundhouse::project::BuildTarget::CSharp,
+        roundhouse::project::BuildTarget::Kotlin,
+        roundhouse::project::BuildTarget::Swift,
+    ] {
+        let (errors, files) = oj_target_errors_and_text(&app, &dir, target);
+        for site in ["`Faraday.new`", "`Faraday::ResourceNotFound`", "`Faraday::Error`"] {
+            assert!(
+                errors.iter().any(|e| e.contains(site) && e.contains("only the ruby and jruby trees ship")),
+                "{target:?} did not refuse {site}:\n{}",
+                errors.join("\n")
+            );
+        }
+        let hits: Vec<_> = files
+            .iter()
+            .filter(|(path, text)| !path.ends_with(".map") && path.contains("ping_client") && text.contains("Faraday"))
+            .map(|(path, _)| path.clone())
+            .collect();
+        assert!(hits.is_empty(), "{target:?} emitted a Faraday reference in {hits:?}");
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// `/(?<name>..)/ =~ str` assigns each named group to a local (nil when
 /// nothing matches) and answers the match's index: as a statement, as an
 /// `if` condition, and as a method's value. Checked against CRuby.

@@ -173,6 +173,10 @@ pub mod relation_residue;
 /// wasm build excludes. The playground has no emit gate to raise it for.
 #[cfg(not(target_arch = "wasm32"))]
 pub mod oj;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod faraday;
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) mod gem_refusal;
 pub mod constantize;
 pub mod params_residue;
 pub mod params_permit;

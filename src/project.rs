@@ -1916,6 +1916,16 @@ fn target_files_inner(
         }
         None => app,
     };
+    // Faraday runs as the real gem on ruby and jruby; every other target
+    // refuses each reference (`lower::faraday`).
+    let without_faraday;
+    let app = match crate::lower::faraday::without_unshipped_gem(app, target) {
+        Some(trimmed) => {
+            without_faraday = trimmed;
+            &without_faraday
+        }
+        None => app,
+    };
     let with_closed_constantize;
     let app = match crate::lower::constantize::lower_for_target(app, target) {
         Some(lowered) => {
