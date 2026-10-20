@@ -2324,6 +2324,7 @@ end
     }
     super::model_delegate::lower_model_delegates(&mut app);
     super::on_load_reopen::drain_pending(&mut app);
+    gap_numericality_allow_on_untyped(&mut app);
     app.const_resolver = const_resolver;
     // Admission needs complete controller permit demand and model DSL,
     // including declarations contributed by either kind of Concern,
@@ -2488,6 +2489,71 @@ fn walk_binary_assets<V: Vfs + ?Sized>(vfs: &V, root: &Path, dir: &Path, app: &m
 /// its DSL never ran; that's exactly the half this splice supplies).
 /// Strict targets get the DSL items the same way; module
 /// methods-via-include remain their separate, ledger-visible gap.
+/// `numericality:` with `allow_nil:` / `allow_blank:` on an attribute the
+/// model does not type as a number (no Integer/Float column: an
+/// `attr_accessor` of an `ActiveModel::Model` form, fed request Strings)
+/// stays the reported gap. The lowered check does not parse a String
+/// number (#1158), so on such an attribute it would reject `"30"` where
+/// Rails accepts it. Run after the concern splice, when every model's
+/// validations and columns are known.
+fn gap_numericality_allow_on_untyped(app: &mut App) {
+    use crate::dialect::{ModelBodyItem, ValidationRule};
+    let mut gaps: Vec<(crate::span::Span, String)> = Vec::new();
+    for model in &mut app.models {
+        let numeric = |attr: &crate::ident::Symbol| {
+            let ty = model.attributes.fields.get(attr);
+            let inner = match ty {
+                Some(crate::ty::Ty::Union { variants }) => {
+                    variants.iter().find(|v| !matches!(v, crate::ty::Ty::Nil)).cloned()
+                }
+                other => other.cloned(),
+            };
+            matches!(inner, Some(crate::ty::Ty::Int | crate::ty::Ty::Float))
+        };
+        let mut refused: Vec<(usize, crate::span::Span, String)> = Vec::new();
+        for (i, item) in model.body.iter().enumerate() {
+            let ModelBodyItem::Validation { validation, .. } = item else { continue };
+            if numeric(&validation.attribute) {
+                continue;
+            }
+            for rule in &validation.rules {
+                if let ValidationRule::Numericality { allow_nil, allow_blank, .. } = rule {
+                    let option = if *allow_blank == Some(true) {
+                        "allow_blank"
+                    } else if *allow_nil == Some(true) {
+                        "allow_nil"
+                    } else {
+                        continue;
+                    };
+                    refused.push((i, item.span(), format!("validates :{}, numericality: {option}:", validation.attribute.as_str())));
+                }
+            }
+        }
+        for (i, span, construct) in refused.iter().rev() {
+            if let ModelBodyItem::Validation { validation, .. } = &mut model.body[*i] {
+                validation.rules.retain(|r| {
+                    !matches!(r, ValidationRule::Numericality { allow_nil, allow_blank, .. }
+                        if *allow_nil == Some(true) || *allow_blank == Some(true))
+                });
+            }
+            gaps.push((*span, construct.clone()));
+        }
+    }
+    for (span, construct) in gaps {
+        let file = crate::ide::source(app, span.file).map(|s| s.path.clone()).unwrap_or_default();
+        let mut diagnostic = crate::diagnostic::Diagnostic::unsupported(
+            span,
+            None,
+            construct,
+            "an untyped attribute's String input is not parsed as a number (#1158); emitting the check would reject input Rails accepts",
+        );
+        diagnostic.severity = crate::diagnostic::Severity::Warning;
+        let message = diagnostic.message.clone();
+        super::prism::push(diagnostic);
+        survey::record(&IngestError::Unsupported { file, message });
+    }
+}
+
 fn splice_concerns_into_models(app: &mut App) {
     splice_concerns_into_models_named(app, &[]);
 }

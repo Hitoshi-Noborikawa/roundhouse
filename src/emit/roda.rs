@@ -357,7 +357,7 @@ fn model_for(model: &Model, schema: &Schema) -> String {
                                 validation.attribute
                             ));
                         }
-                        ValidationRule::Numericality { only_integer, gt, lt, gte, lte } => {
+                        ValidationRule::Numericality { only_integer, gt, lt, gte, lte, .. } => {
                             let helper =
                                 if *only_integer { "validates_integer" } else { "validates_numeric" };
                             validate_lines.push(format!(

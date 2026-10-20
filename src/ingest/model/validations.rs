@@ -204,6 +204,8 @@ pub(super) fn parse_validates_call(
             lt: None,
             gte: None,
             lte: None,
+            allow_nil: None,
+            allow_blank: None,
         }));
     } else if !matches!(kind, ValidatesKind::Map) && !attrs.is_empty() {
         gaps.push(match kind {
@@ -214,20 +216,27 @@ pub(super) fn parse_validates_call(
         });
     }
 
-    // Uniqueness stores both flags, so a call-level one applies to it
-    // (below) rather than refusing the call.
+    // Uniqueness and Numericality store both flags, so a call-level one
+    // applies to them (below) rather than refusing the call.
     let is_uniqueness = |draft: &BuiltRule| matches!(draft.rule, ValidationRule::Uniqueness { .. });
-    if allow_blank && drafts.iter().any(|draft| !blank_safe(&draft.rule) && !is_uniqueness(draft)) {
+    let is_numericality = |draft: &BuiltRule| matches!(draft.rule, ValidationRule::Numericality { .. });
+    if allow_blank
+        && drafts
+            .iter()
+            .any(|draft| !blank_safe(&draft.rule) && !is_uniqueness(draft) && !is_numericality(draft))
+    {
         gaps.push("allow_blank".to_string());
     }
     // Call-level `allow_nil: true` is Rails' skip-when-nil for every
-    // validator in the call. Length and Uniqueness store it. The other
+    // validator in the call. Length, Uniqueness and Numericality store it. The other
     // rules this build lowers reject nil, so applying them would reject
     // records Rails accepts.
     if allow_nil == Some(true)
         && drafts
             .iter()
-            .any(|draft| !matches!(draft.rule, ValidationRule::Length { .. }) && !is_uniqueness(draft))
+            .any(|draft| {
+                !matches!(draft.rule, ValidationRule::Length { .. }) && !is_uniqueness(draft) && !is_numericality(draft)
+            })
     {
         gaps.push("allow_nil".to_string());
     }
@@ -258,12 +267,22 @@ pub(super) fn parse_validates_call(
     }
     if let Some(flag) = allow_nil {
         for draft in &mut drafts {
-            if let ValidationRule::Length {
-                allow_nil: slot, ..
-            } = &mut draft.rule
+            if let ValidationRule::Length { allow_nil: slot, .. } | ValidationRule::Numericality { allow_nil: slot, .. } =
+                &mut draft.rule
             {
                 if slot.is_none() {
                     *slot = Some(flag);
+                }
+            }
+        }
+    }
+    // A call-level `allow_blank:` reaches the numericality validator as
+    // Rails passes it, under the validator's own key.
+    if allow_blank {
+        for draft in &mut drafts {
+            if let ValidationRule::Numericality { allow_blank: slot, .. } = &mut draft.rule {
+                if slot.is_none() {
+                    *slot = Some(true);
                 }
             }
         }
@@ -671,6 +690,8 @@ fn parse_of_options<'a>(
             lt,
             gte,
             lte,
+            allow_nil: None,
+            allow_blank: None,
         },
         ValidatesKind::Inclusion | ValidatesKind::Exclusion => match inclusion {
             Some(spec) => set_rule(spec, matches!(kind, ValidatesKind::Exclusion)),
@@ -765,6 +786,8 @@ fn parse_numericality(value: &Node<'_>, file: &str, class_consts: &super::ClassC
             lt: None,
             gte: None,
             lte: None,
+            allow_nil: None,
+            allow_blank: None,
         }));
     }
     if super::super::util::bool_value(value) == Some(false) {
@@ -778,12 +801,16 @@ fn parse_numericality(value: &Node<'_>, file: &str, class_consts: &super::ClassC
     let mut lt = None;
     let mut gte = None;
     let mut lte = None;
+    let mut allow_nil = None;
+    let mut allow_blank = None;
     let mut built = BuiltRule::bare(ValidationRule::Numericality {
         only_integer: false,
         gt: None,
         lt: None,
         gte: None,
         lte: None,
+        allow_nil: None,
+        allow_blank: None,
     });
     let mut gaps = Vec::new();
     for el in elements.iter() {
@@ -823,8 +850,12 @@ fn parse_numericality(value: &Node<'_>, file: &str, class_consts: &super::ClassC
                 push_condition(&child, file, &mut built.unless_cond, "unless", &mut gaps)
             }
             "allow_nil" => match super::super::util::bool_value(&child) {
-                Some(false) => {}
-                _ => gaps.push("allow_nil".to_string()),
+                Some(flag) => allow_nil = Some(flag),
+                None => gaps.push("allow_nil".to_string()),
+            },
+            "allow_blank" => match super::super::util::bool_value(&child) {
+                Some(flag) => allow_blank = Some(flag),
+                None => gaps.push("allow_blank".to_string()),
             },
             other => gaps.push(format!("numericality: {other}")),
         }
@@ -838,6 +869,8 @@ fn parse_numericality(value: &Node<'_>, file: &str, class_consts: &super::ClassC
         lt,
         gte,
         lte,
+        allow_nil,
+        allow_blank,
     };
     RuleParse::Rule(built)
 }

@@ -584,8 +584,28 @@ fn validation_rule_to_calls(msgs: Messages, attr: &Symbol, rule: &ValidationRule
         ValidationRule::Format { pattern, flags } => {
             vec![inline_format_check(msgs, attr, pattern, flags)]
         }
-        ValidationRule::Numericality { only_integer, gt, lt, gte, lte } => {
-            inline_numericality_check(msgs, attr, *only_integer, *gt, *lt, *gte, *lte)
+        ValidationRule::Numericality { only_integer, gt, lt, gte, lte, allow_nil, allow_blank } => {
+            let checks = inline_numericality_check(msgs, attr, *only_integer, *gt, *lt, *gte, *lte);
+            // Rails skips the validator for a nil value under allow_nil
+            // and a blank one under allow_blank (EachValidator#validate).
+            let skip = if *allow_blank == Some(true) {
+                Some(blank_cond(attr, attr_ty))
+            } else if *allow_nil == Some(true) {
+                Some(send(ivar(attr), "nil?", vec![]))
+            } else {
+                None
+            };
+            match skip {
+                Some(cond) => vec![Expr::new(
+                    Span::synthetic(),
+                    ExprNode::If {
+                        cond,
+                        then_branch: Expr::new(Span::synthetic(), ExprNode::Lit { value: Literal::Nil }),
+                        else_branch: seq(checks),
+                    },
+                )],
+                None => checks,
+            }
         }
         ValidationRule::Inclusion { values, range } => {
             vec![inline_inclusion_check(msgs, attr, values, range.as_ref())]
@@ -893,6 +913,18 @@ fn inline_presence_check(msgs: Messages, attr: &Symbol, attr_ty: Option<&Ty>) ->
         let push_err = errors_push(attr.as_str(), msgs.error(attr.as_str(), "blank", &Default::default()));
         return if_with_nil_else(cond, push_err);
     }
+    let cond = blank_cond(attr, attr_ty);
+    // `errors << "attr can't be blank"`
+    let push_err = errors_push(attr.as_str(), msgs.error(attr.as_str(), "blank", &Default::default()));
+    // The wrapping `if cond then push_err end` (Nil else).
+    if_with_nil_else(cond, push_err)
+}
+
+/// The presence check's blank test, `@attr.nil?` or empty by the
+/// column's type: a String or Array column's `empty?`, else the
+/// generic `is_a?(String)` / `is_a?(Array)` form. Shared with
+/// `numericality:`'s `allow_blank:` skip so "blank" means one thing.
+fn blank_cond(attr: &Symbol, attr_ty: Option<&Ty>) -> Expr {
     let attr_ivar = ivar(attr);
     // `@attr.nil?`
     let nil_check = send(attr_ivar.clone(), "nil?", vec![]);
@@ -945,10 +977,7 @@ fn inline_presence_check(msgs: Messages, attr: &Symbol, attr_ty: Option<&Ty>) ->
             )
         }
     };
-    // `errors << "attr can't be blank"`
-    let push_err = errors_push(attr.as_str(), msgs.error(attr.as_str(), "blank", &Default::default()));
-    // The wrapping `if cond then push_err end` (Nil else).
-    if_with_nil_else(cond, push_err)
+    cond
 }
 
 /// Inline `validates :attr, absence: true` — the negation of presence.
