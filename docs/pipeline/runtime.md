@@ -697,8 +697,9 @@ with every attribute it carried (`sgid`, `content_type`, `caption`,
 constant it names in Rails. A name computed at run time (pundit's
 `"#{model}Policy"`) or read off the wire would then reach every constant
 in the process, the reflection this pipeline does not emit. On the Ruby
-and JRuby targets `lower::constantize` rewrites each call into a `case`
-over the constants the app's own source defines: its models,
+and JRuby targets `lower::constantize` routes each call to one generated
+`RoundhouseConstants` lookup, a `case` over the constants the app's own
+source defines: its models,
 controllers and library classes, including the source of a gem the app
 keeps in its tree (`gem "pundit", path: "vendor/pundit"`). A name in
 that set answers what Rails answers. A name outside it (`"String"`,

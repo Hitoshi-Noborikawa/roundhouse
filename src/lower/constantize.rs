@@ -2,7 +2,7 @@ use std::collections::BTreeSet;
 
 use crate::App;
 use crate::build_target::BuildTarget;
-use crate::expr::{Arm, Expr, ExprNode, Literal, Pattern};
+use crate::expr::{Expr, ExprNode, Literal};
 use crate::ident::Symbol;
 use crate::span::Span;
 
@@ -23,11 +23,12 @@ pub fn lower_for_target(app: &App, target: BuildTarget) -> Option<App> {
     if !found {
         return None;
     }
-    let names = app_constants(app);
+    let runs = case_runs(target);
+    let lookup = runs.then(|| lookup_class(&app_constants(app)));
     let mut app = app.clone();
     let target_name = target.as_str();
-    let runs = case_runs(target);
-    crate::lower::for_each_emit_body(&mut app, &mut |body| rewrite(body, &names, runs, target_name));
+    crate::lower::for_each_emit_body(&mut app, &mut |body| rewrite(body, runs, target_name));
+    app.library_classes.extend(lookup.into_iter().flatten());
     Some(app)
 }
 
@@ -73,22 +74,33 @@ fn has_call(expr: &Expr) -> bool {
     found
 }
 
-fn rewrite(expr: &mut Expr, names: &BTreeSet<String>, runs: bool, target: &str) {
+const LOOKUP: &str = "RoundhouseConstants";
+
+fn rewrite(expr: &mut Expr, runs: bool, target: &str) {
     if is_snapshot_rebuild(expr) {
         if let ExprNode::Send { args, .. } = &mut *expr.node {
             for arg in args {
-                rewrite(arg, names, runs, target);
+                rewrite(arg, runs, target);
             }
         }
         return;
     }
-    expr.node.for_each_child_mut(&mut |child| rewrite(child, names, runs, target));
+    expr.node.for_each_child_mut(&mut |child| rewrite(child, runs, target));
     let Some(method) = constantize_method(expr) else { return };
     let span = expr.span;
     let ExprNode::Send { recv: Some(recv), .. } = &*expr.node else { return };
     let recv = recv.clone();
     *expr = if runs {
-        closed_case(span, recv, names, method == "safe_constantize")
+        Expr::new(
+            span,
+            ExprNode::Send {
+                recv: Some(Expr::new(span, ExprNode::Const { path: vec![Symbol::from(LOOKUP)] })),
+                method: Symbol::from(method),
+                args: vec![recv],
+                block: None,
+                parenthesized: true,
+            },
+        )
     } else {
         let text = crate::emit::diagnostics::report_unsupported(
             span,
@@ -103,33 +115,15 @@ fn rewrite(expr: &mut Expr, names: &BTreeSet<String>, runs: bool, target: &str) 
     };
 }
 
-fn closed_case(span: Span, recv: Expr, names: &BTreeSet<String>, safe: bool) -> Expr {
-    let mut arms: Vec<Arm> = names
-        .iter()
-        .map(|name| Arm {
-            pattern: Pattern::Lit { value: Literal::Str { value: name.clone() } },
-            guard: None,
-            body: Expr::new(span, ExprNode::Const { path: name.split("::").map(Symbol::from).collect() }),
-        })
-        .collect();
-    let fallback = if safe {
-        crate::lower::typing::nil_lit()
-    } else {
-        let message = Expr::new(span, ExprNode::Lit { value: Literal::Str { value: "uninitialized constant".into() } });
-        let error = Expr::new(
-            span,
-            ExprNode::Send {
-                recv: Some(Expr::new(span, ExprNode::Const { path: vec![Symbol::from("NameError")] })),
-                method: Symbol::from("new"),
-                args: vec![message],
-                block: None,
-                parenthesized: true,
-            },
-        );
-        Expr::new(span, ExprNode::Raise { value: error })
-    };
-    arms.push(Arm { pattern: Pattern::Wildcard, guard: None, body: fallback });
-    Expr::new(span, ExprNode::Case { scrutinee: recv, arms })
+// One shared `case`: inlined at every call site, a large app's emit grew thirteenfold
+fn lookup_class(names: &BTreeSet<String>) -> Vec<crate::dialect::LibraryClass> {
+    let mut source = format!("class {LOOKUP}\n  def self.safe_constantize(name)\n    case name\n");
+    for name in names {
+        source.push_str(&format!("    when {name:?} then {name}\n"));
+    }
+    source.push_str("    end\n  end\n\n  def self.constantize(name)\n");
+    source.push_str("    safe_constantize(name) || raise(NameError, \"uninitialized constant #{name}\")\n  end\nend\n");
+    crate::ingest::ingest_library_classes(source.as_bytes(), "<roundhouse constants>").expect("the constant lookup parses")
 }
 
 fn refusal(span: Span, text: &str) -> Expr {
