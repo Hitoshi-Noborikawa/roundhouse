@@ -1220,14 +1220,26 @@ fn ingest_route_stmts<'pr>(
                         // Non-literal / modified regex values refuse via
                         // the shared reader (same fail-closed policy as
                         // the `constraints:` kwarg on a route/resource).
+                        // Survey recovery matches the per-entry path below:
+                        // record the gap, drop THIS block's children, keep
+                        // sibling routes outside the block.
                         if method == "constraints" {
-                            let block_constraints = match call.arguments() {
-                                Some(args) => block_constraints_hash(&args, file)?,
-                                None => IndexMap::new(),
-                            };
-                            merge_outer_constraints(&mut inner, &block_constraints);
+                            match call.arguments() {
+                                None => entries.extend(inner),
+                                Some(args) => match block_constraints_hash(&args, file) {
+                                    Ok(block_constraints) => {
+                                        merge_outer_constraints(&mut inner, &block_constraints);
+                                        entries.extend(inner);
+                                    }
+                                    Err(err) if super::survey::is_active() => {
+                                        super::survey::record(&err);
+                                    }
+                                    Err(err) => return Err(err),
+                                },
+                            }
+                        } else {
+                            entries.extend(inner);
                         }
-                        entries.extend(inner);
                     }
                 }
             }

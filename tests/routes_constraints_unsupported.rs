@@ -123,3 +123,37 @@ end"#,
     .expect("plain regex block constraint must ingest");
     assert!(!table.entries.is_empty(), "block constraints must still produce routes");
 }
+
+// --- Survey recovery: block fail-closed must not zero sibling routes ----
+
+#[test]
+fn survey_mode_keeps_siblings_when_block_constraints_are_unsupported() {
+    use roundhouse::ingest::{prism, survey};
+
+    survey::activate();
+    let (result, _) = prism::scope(|| {
+        ingest(
+            r#"
+get "/ok", to: "widgets#ok"
+constraints(id: ID_PATTERN) do
+  get "/widgets/:id", to: "widgets#show"
+end
+get "/also", to: "widgets#also"
+"#,
+        )
+    });
+    let gaps = survey::drain();
+    let table = result.expect("survey ingest must keep walking after a bad constraints block");
+    assert_eq!(gaps.len(), 1, "exactly one survey gap: {gaps:?}");
+    assert!(
+        gaps.iter().any(|g| g.to_string().contains("is not a literal regex")),
+        "gap must name the unparseable value: {gaps:?}"
+    );
+    // Two sibling gets outside the block; the block's child is dropped.
+    assert_eq!(
+        table.entries.len(),
+        2,
+        "siblings outside the bad block must survive: {:?}",
+        table.entries
+    );
+}
