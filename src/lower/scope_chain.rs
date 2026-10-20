@@ -3269,15 +3269,14 @@ fn relation_new(span: crate::span::Span, model: &ClassId) -> Expr {
 ///
 /// Rails renders a Range condition as a comparison (`>=` / `<=`, `<`
 /// for an exclusive end, and either half alone for a beginless or
-/// endless range). The runtime `Relation` cannot: `column_predicate`
-/// dispatches on Relation / Array / nil / Base and falls through to
-/// `col = <value>` for everything else, so a Range compared equal to a
-/// column matches nothing — silently, which is the worst kind.
+/// endless range). The ruby-family runtime's `column_predicate` renders
+/// a Range too, for the dynamic call sites no lowering reaches, but the
+/// strict targets' runtimes have no Range: compared equal to a column,
+/// a range matches nothing — silently, which is the worst kind.
 ///
-/// Converted at the CALL SITE rather than taught to the runtime
-/// because there is no `Ty::Range` in the type system and no target
-/// ships a Range: a `val.is_a?(Range)` arm in `runtime/ruby` would
-/// have to compile on all eleven. Here the range is a literal, so what
+/// Converted at the CALL SITE rather than taught to every runtime
+/// because there is no `Ty::Range` in the type system and no strict
+/// target ships a Range. Here the range is a literal, so what
 /// crosses into the runtime is the raw fragment + binds it already
 /// understands (`substitute_binds`).
 ///
@@ -3446,13 +3445,13 @@ fn lower_relation_args(
         "where" | "not" | "find_by" | "find_by!" | "find_sole_by" | "destroy_by" | "delete_by"
         | "exists?" => {
             // `where(connected_at: TTL.ago..)` — a RANGE value. Rails
-            // renders `>=` / `<=` / `<` / BETWEEN; the runtime's
-            // `column_predicate` has no Range arm and falls through to
-            // `col = <the range object>`, which matches nothing and
-            // says nothing. Converted HERE, where the range is a
-            // literal, because the alternative is teaching every
+            // renders `>=` / `<=` / `<` / BETWEEN. Only the
+            // ruby-family runtime's `column_predicate` has a Range arm;
+            // compared for equality anywhere else, a range matches
+            // nothing and says nothing. Converted HERE, where the range
+            // is a literal, because the alternative is teaching every
             // target's runtime what a Range is — there is no `Ty::Range`
-            // and no target ships one.
+            // and no strict target ships one.
             //
             // Single-entry hashes only: a mixed hash would have to
             // compose the fragment with the other keys' predicates, and
@@ -5618,7 +5617,7 @@ mod tests {
     }
 
     /// A Range value compared for EQUALITY matched nothing, silently —
-    /// `column_predicate` has no Range arm and falls through to
+    /// a strict runtime has no Range arm and falls through to
     /// `col = <the range object>`. Both ends, one end, and neither.
     #[test]
     fn a_range_condition_becomes_comparisons() {
