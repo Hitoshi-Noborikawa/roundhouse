@@ -1,8 +1,9 @@
 //! Model queries in the Spinel binary, through `run_spinel_with_db`:
-//! the database setup the emitted `test/test_helper.rb` does, ahead of
-//! the script. Without it a query reads an unconfigured adapter and the
-//! binary fails with `undefined method 'first' for nil`. Needs a Spinel
-//! compiler, so `#[ignore]`d like its sibling suites; CI's
+//! the harness DB boot (`Db.configure` / `Db.exec` / assign adapter —
+//! same shape as emitted `test/test_helper.rb` and sibling Spinel BOOT
+//! pastes) ahead of the script. Without it a query reads an unconfigured
+//! adapter and the binary fails with `undefined method 'first' for nil`.
+//! Needs a Spinel compiler, so `#[ignore]`d like its sibling suites; CI's
 //! `spinel-framework` job runs it with `--ignored` (`scripts/ci-plan.py`'s
 //! `SPINEL_TESTS`).
 

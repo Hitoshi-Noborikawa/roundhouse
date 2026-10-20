@@ -173,14 +173,16 @@ impl Overlay {
     }
 
     /// `run_spinel` with a database: before the script's first line,
-    /// configure the default adapter on an in-memory SQLite database and
-    /// load the schema, as the emitted `test/test_helper.rb` does (and as
-    /// `run_ruby`'s `Main.configure_default_adapter!` does on CRuby).
-    /// Plain `run_spinel` boots libraries only, so any query there reads
-    /// an unconfigured adapter.
+    /// configure an in-memory SQLite database and load the schema with the
+    /// harness-standard boot (`Db.configure` / `Db.exec` / assign adapter),
+    /// matching emitted `test/test_helper.rb` and the BOOT pastes in sibling
+    /// Spinel suites. Plain `run_spinel` boots libraries only, so any query
+    /// there reads an unconfigured adapter. (CRuby `run_ruby` instead calls
+    /// `Main.configure_default_adapter!`, which uses the SqliteAdapter
+    /// spelling; Spinel contract consumers do not load `main.rb`.)
     pub fn run_spinel_with_db(self, script: &str) -> Run {
         let script = format!(
-            "SqliteAdapter.configure(\":memory:\")\nActiveRecord.adapter = SqliteAdapter\nSchema.statements.each {{ |sql| SqliteAdapter.execute_ddl(sql) }}\n{script}"
+            "Db.configure(\":memory:\")\nSchema.statements.each {{ |sql| Db.exec(sql) }}\nActiveRecord.adapter = SqliteAdapter\n{script}"
         );
         self.run_spinel_with_flags(&script, &[])
     }
