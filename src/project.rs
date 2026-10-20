@@ -1986,6 +1986,12 @@ fn target_files_inner(
     report_typescript_error_class(app, target);
     report_replayed_class_bodies(app, target);
     report_controller_sibling_classes(app, target);
+    // `validates …, uniqueness:` left out of a target with no runtime
+    // Relation: reported here, where the CLI and the MCP `wont_lower`
+    // both collect a target's gaps, so neither reports a clean emit.
+    for d in crate::lower::relation_residue::uniqueness_gaps_for_target(app, target) {
+        emit::diagnostics::push(d);
+    }
     report_mailers(app, target);
     report_sqlite_index_predicates(app, target);
     report_native_ruby_syntax(app, target);
