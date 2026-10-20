@@ -1478,6 +1478,7 @@ impl ClassConsts {
                     && constant_id_str(&call.name()) == "default_scope"
             })
         });
+        let mut seen = std::collections::HashSet::new();
         for stmt in stmts {
             let Some(cw) = stmt.as_constant_write_node() else { continue };
             let name = constant_id_str(&cw.name()).to_string();
@@ -1496,14 +1497,21 @@ impl ClassConsts {
             } else {
                 None
             };
-            // ...and the write replaces whatever the constant held. A
-            // reassignment this pass can't fold (`LIMIT = 5` then
-            // `LIMIT = compute`) must not leave the earlier value behind.
-            out.regexes.remove(&name);
-            out.lists.remove(&name);
-            out.scalars.remove(&name);
-            out.labels.remove(&name);
-            out.mappings.remove(&name);
+            // ...and a second write makes the name unfoldable in every
+            // map. Rails reads the constant as it stands when the macro
+            // naming it runs (`MODES = %w[open]`, `validates … in: MODES`,
+            // then `MODES = %w[closed]` validates against `open`), and
+            // this pass folds the whole body before any macro is read,
+            // so neither value is safe. Ruby warns "already initialized
+            // constant" for it; refusing beats a wrong value.
+            if !seen.insert(name.clone()) {
+                out.regexes.remove(&name);
+                out.lists.remove(&name);
+                out.scalars.remove(&name);
+                out.labels.remove(&name);
+                out.mappings.remove(&name);
+                continue;
+            }
             if let Some(re) = regex {
                 out.regexes.insert(name.clone(), re);
             }

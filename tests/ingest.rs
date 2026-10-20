@@ -3590,3 +3590,41 @@ end
     assert!(validation_rules(&model).iter().all(|v| v.attribute.as_str() != "mode"), "no stale list");
     assert!(warnings.iter().any(|w| w.contains("validates :mode, inclusion: in:")), "{warnings:?}");
 }
+
+/// A constant assigned more than once in the class body is not folded
+/// at all, whichever write comes last. Rails reads the constant as it
+/// stands when `validates` runs, so a reassignment after the macro
+/// (`MODES = %w[closed]` below it) leaves the validation on the first
+/// value, and one before it on the second. The fold sees the whole body
+/// at once and knows neither, so both validations stay the reported gap
+/// rather than validating against the wrong value. Ruby warns "already
+/// initialized constant" for each such write.
+#[test]
+fn a_constant_assigned_twice_is_not_folded() {
+    let (model, warnings, _) = ingest_widget(
+        r#"
+class Widget < ApplicationRecord
+  MODES = %w[open]
+  NAME_LIMIT = 5
+  TITLE_LIMIT = 5
+  TITLE_LIMIT = 10
+  validates :mode, inclusion: { in: MODES }
+  validates :name, length: { maximum: NAME_LIMIT }
+  validates :title, length: { maximum: TITLE_LIMIT }
+  MODES = %w[closed]
+  NAME_LIMIT = 10
+end
+"#,
+    );
+    let rules = validation_rules(&model);
+    for attr in ["mode", "name", "title"] {
+        assert!(rules.iter().all(|v| v.attribute.as_str() != attr), "no folded rule for {attr}: {rules:?}");
+    }
+    for gap in [
+        "validates :mode, inclusion: in:",
+        "validates :name, length: maximum:",
+        "validates :title, length: maximum:",
+    ] {
+        assert!(warnings.iter().any(|w| w.contains(gap)), "{gap}: {warnings:?}");
+    }
+}
