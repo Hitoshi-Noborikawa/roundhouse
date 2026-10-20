@@ -169,8 +169,10 @@ source_gems:
   `PATH` gem's is. Roundhouse reads the version
   `Gemfile.lock` resolves from where Bundler installed it (`BUNDLE_PATH`
   in `.bundle/config`, then `GEM_HOME` and `GEM_PATH`), and takes only the
-  files `require "<gem>"` loads from its `lib/`: literal `require` and
-  `require_relative` calls, followed from `lib/<gem>.rb`. Generators and
+  files `require "<gem>"` loads from its `lib/`: literal `require`,
+  `require_relative` and `autoload` calls, followed from `lib/<gem>.rb`.
+  An autoloaded file is compiled whether or not the app names its
+  constant. Generators and
   test helpers the entry file does not load stay out. What the code
   needs that Roundhouse does not support is reported as for the app's
   own code. The census lists the gem as `source`. Run `bundle install`
