@@ -1326,6 +1326,9 @@ module Db
 
   def self.record_query(sql)
     @query_log.push(sql) unless @query_log.nil?
+    if defined?(ActiveSupport::Notifications) && ActiveSupport::Notifications.respond_to?(:sql)
+      ActiveSupport::Notifications.sql(sql)
+    end
     if @sql_trace
       $stderr.puts "  SQL " + sql
     end

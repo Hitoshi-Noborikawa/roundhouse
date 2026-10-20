@@ -587,17 +587,22 @@ pub enum Dependent {
 pub struct Validation {
     pub attribute: Symbol,
     pub rules: Vec<ValidationRule>,
-    /// `validates :attr, …, if: :pred` — a Symbol condition, the same
-    /// form `validate :method, if: :pred` already lowers. `None` runs
-    /// the rules on every save. A lambda or any other condition is not
-    /// stored here; ingest refuses the whole call instead of checking
+    /// `if: :pred` / `if: -> { … }` / `if: lambda { … }` / `if: proc { … }`.
+    /// A Symbol and a zero-arity lambda/proc both become the guard
+    /// expression `callback_condition` already builds for a callback:
+    /// a Symbol is the predicate called on the record, and a lambda
+    /// body is spliced where Rails `instance_exec`s it with `self` the
+    /// record. `None` runs the rules on every save. When both this and
+    /// `unless_cond` are set, the rules run only when `if:` holds and
+    /// `unless:` does not. Anything else (an arity>0 lambda, a String,
+    /// a captured local, a body survey mode had to stub with `nil`) is
+    /// not stored; ingest refuses the whole call instead of checking
     /// unconditionally.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub if_method: Option<Symbol>,
-    /// `unless: :pred`. When both are set, the rules run only when
-    /// `if:` holds and `unless:` does not.
+    pub if_cond: Option<Expr>,
+    /// `unless:` — see `if_cond`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub unless_method: Option<Symbol>,
+    pub unless_cond: Option<Expr>,
 }
 
 /// Inclusive or exclusive numeric range from `inclusion: { in: 1..3 }`.

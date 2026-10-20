@@ -2078,11 +2078,21 @@ end
     super::propshaft::ingest(vfs, dir, &mut app)?;
     // The ledger of boot statements no recognizer above read. A warning
     // per statement, in the ingest diagnostic channel; no `App` field.
+    let app_namespaces: HashSet<String> = app
+        .models
+        .iter()
+        .map(|m| m.name.0.as_str())
+        .chain(app.library_classes.iter().map(|c| c.name.0.as_str()))
+        .chain(app.controllers.iter().map(|c| c.name.0.as_str()))
+        .map(|n| n.split("::").next().unwrap_or(n).to_string())
+        .collect();
     super::initializer_ledger::record(
         vfs,
         dir,
         &path_gems,
         &engine_routes.keys().cloned().collect::<HashSet<String>>(),
+        app.gem_lock.as_ref(),
+        &app_namespaces,
     );
     // Carrier provenance must not depend on where a module lives:
     // models, services, helpers and lib all use the same splice.
@@ -2317,6 +2327,9 @@ end
     super::app_extension_calls::mark(&mut app);
     super::unreachable_views::mark(&mut app);
     super::uncalled_helper_copies::mark(&mut app);
+    let (rake_tasks_source, rake_task_gaps) = super::rake_tasks::ingest(vfs, dir);
+    app.rake_tasks_source = rake_tasks_source;
+    app.rake_task_gaps = rake_task_gaps;
     Ok(app)
 }
 
@@ -3343,12 +3356,13 @@ pub(super) fn filter_registration_order(
 
 /// One ancestry snapshot for both class-body expansion paths. Direct include
 /// order is retained for the existing filter-macro lookup contract; transitive
-/// membership and inherited instance names serve finite class configuration.
+/// membership serves finite class configuration. Instance methods of the same
+/// name are a different method (`ParamKey` includes the receiver) and are not
+/// part of this snapshot.
 pub(super) struct ControllerConcernSurface {
     pub direct_includes: Vec<crate::ident::ClassId>,
     pub includes: Vec<crate::ident::ClassId>,
     pub inherited_includes: Vec<crate::ident::ClassId>,
-    pub instance_methods: std::collections::HashSet<Symbol>,
 }
 
 pub(super) struct ControllerConcernSurfaces {
@@ -3365,7 +3379,6 @@ pub(super) fn controller_concern_surfaces(app: &App) -> ControllerConcernSurface
     for controller in &app.controllers {
         let mut direct_includes = Vec::new();
         let mut inherited = Vec::new();
-        let mut instance_methods = std::collections::HashSet::new();
         let mut cur = Some(controller);
         let mut seen = std::collections::HashSet::new();
         while let Some(c) = cur {
@@ -3380,14 +3393,12 @@ pub(super) fn controller_concern_surfaces(app: &App) -> ControllerConcernSurface
                     direct_includes.push(inc);
                 }
             }
-            instance_methods.extend(c.actions().map(|a| a.name.clone()));
             cur = c.parent.as_ref().and_then(|p| app.controllers.iter().find(|o| &o.name == p));
         }
         controllers.insert(controller.name.clone(), ControllerConcernSurface {
             includes: filter_registration_order(&[direct_includes.clone()], &module_includes),
             inherited_includes: filter_registration_order(&[inherited], &module_includes),
             direct_includes,
-            instance_methods,
         });
     }
     ControllerConcernSurfaces { module_includes, controllers }

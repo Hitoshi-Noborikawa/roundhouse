@@ -126,6 +126,8 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
         base.class_methods
             .entry(Symbol::from("connection"))
             .or_insert_with(connection_ty);
+        base.class_methods.entry(Symbol::from("configurations")).or_insert(Ty::Untyped);
+        base.class_methods.entry(Symbol::from("configurations=")).or_insert(Ty::Untyped);
         for m in ["sanitize_sql", "sanitize_sql_array", "sanitize_sql_like"] {
             base.class_methods.entry(Symbol::from(m)).or_insert(Ty::Str);
         }
@@ -151,8 +153,12 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
         let config = classes
             .entry(ClassId(Symbol::from("ActiveRecord::DatabaseConfigurations::HashConfig")))
             .or_default();
-        for m in ["database", "adapter", "name", "env_name"] {
+        for m in ["database", "adapter", "name", "env_name", "schema_dump"] {
             config.instance_methods.entry(Symbol::from(m)).or_insert(Ty::Str);
+        }
+        config.instance_methods.entry(Symbol::from("configuration_hash")).or_insert(Ty::Untyped);
+        for m in ["seeds?", "database_tasks?"] {
+            config.instance_methods.entry(Symbol::from(m)).or_insert(Ty::Bool);
         }
         // The block's value: whatever the caller computes from the connection.
         classes
@@ -584,10 +590,34 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
         Ty::Class { id: ClassId(Symbol::from("Arel::SelectManager")), args: vec![].into() };
 
     // `Arel.sql(...)` / `Arel.star` — module-level node constructors.
+    // `sql` answers the literal it built (`Arel::Nodes::SqlLiteral`),
+    // which is the node `to_s` renders back to the fragment.
+    let sql_literal = Ty::Class { id: ClassId(Symbol::from("Arel::Nodes::SqlLiteral")), args: vec![].into() };
     let mut arel_mod = ClassInfo::default();
-    arel_mod.class_methods.insert(Symbol::from("sql"), arel_node.clone());
+    arel_mod.class_methods.insert(Symbol::from("sql"), sql_literal.clone());
     arel_mod.class_methods.insert(Symbol::from("star"), arel_node.clone());
     classes.insert(ClassId(Symbol::from("Arel")), arel_mod);
+
+    let quoted = Ty::Class { id: ClassId(Symbol::from("Arel::Nodes::Quoted")), args: vec![].into() };
+    let case_node = Ty::Class { id: ClassId(Symbol::from("Arel::Nodes::Case")), args: vec![].into() };
+    register_node(classes, "Arel::Nodes", &[("build_quoted", quoted.clone())], &[]);
+    register_node(classes, "Arel::Nodes::Node", &[], &[("to_s", Ty::Str), ("to_sql", Ty::Str)]);
+    register_node(classes, "Arel::Nodes::SqlLiteral", &[], &[("to_s", Ty::Str), ("to_sql", Ty::Str)]);
+    register_node(classes, "Arel::Nodes::Quoted", &[], &[("to_s", Ty::Str), ("to_sql", Ty::Str)]);
+    register_node(classes, "Arel::Nodes::Not", &[], &[("to_s", Ty::Str), ("to_sql", Ty::Str)]);
+    register_node(classes, "Arel::Nodes::NamedFunction", &[], &[("to_s", Ty::Str), ("to_sql", Ty::Str)]);
+    register_node(
+        classes,
+        "Arel::Nodes::Case",
+        &[],
+        &[
+            ("when", case_node.clone()),
+            ("then", case_node.clone()),
+            ("else", case_node),
+            ("to_s", Ty::Str),
+            ("to_sql", Ty::Str),
+        ],
+    );
 
     // `Model.arel_table` → table; `table[:col]` → attribute. A table
     // also delegates query-builder calls to a select manager
@@ -629,6 +659,22 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
         arel_select.instance_methods.insert(Symbol::from(m), arel_select_mgr.clone());
     }
     classes.insert(ClassId(Symbol::from("Arel::SelectManager")), arel_select);
+}
+
+fn register_node(
+    classes: &mut HashMap<ClassId, ClassInfo>,
+    name: &str,
+    class_methods: &[(&str, Ty)],
+    instance_methods: &[(&str, Ty)],
+) {
+    let mut info = ClassInfo::default();
+    for (method, ty) in class_methods {
+        info.class_methods.insert(Symbol::from(*method), ty.clone());
+    }
+    for (method, ty) in instance_methods {
+        info.instance_methods.insert(Symbol::from(*method), ty.clone());
+    }
+    classes.insert(ClassId(Symbol::from(name)), info);
 }
 
 /// Action Text's VALUE surface — `ActionText::Content` (the coder a

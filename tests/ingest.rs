@@ -1481,13 +1481,176 @@ end
     );
     assert!(warnings.is_empty(), "{warnings:?}");
     let rules = validation_rules(&model);
+    let pred = |cond: &Option<roundhouse::Expr>, name: &str| {
+        matches!(cond, Some(e) if matches!(&*e.node, ExprNode::Send { recv: None, method, args, .. } if method.as_str() == name && args.is_empty()))
+    };
     let label = rules.iter().find(|v| v.attribute.as_str() == "label").unwrap();
-    assert_eq!(label.if_method.as_ref().map(|s| s.as_str()), Some("live?"));
-    assert!(label.unless_method.is_none());
+    assert!(pred(&label.if_cond, "live?"), "{:?}", label.if_cond);
+    assert!(label.unless_cond.is_none());
     let extra = rules.iter().find(|v| v.attribute.as_str() == "extra").unwrap();
-    assert_eq!(extra.unless_method.as_ref().map(|s| s.as_str()), Some("draft?"));
+    assert!(pred(&extra.unless_cond, "draft?"), "{:?}", extra.unless_cond);
     let note = rules.iter().find(|v| v.attribute.as_str() == "note").unwrap();
-    assert_eq!(note.if_method.as_ref().map(|s| s.as_str()), Some("live?"));
+    assert!(pred(&note.if_cond, "live?"), "{:?}", note.if_cond);
+}
+
+/// Issue #985: a zero-arity lambda/proc `if:`/`unless:` lowers to a
+/// guard EXPRESSION (`if_cond`/`unless_cond`), the same body shape
+/// `callback_condition` already accepts for a callback's `if:`/
+/// `unless:`. `:name` is the call-level `->`, `:code` the call-level
+/// `lambda { }` spelling, and `:note` the RULE-level nested-hash form
+/// (`presence: { if: -> { … } }`), all three on the one guard slot
+/// `push_condition`'s call sites share with the Symbol form.
+#[test]
+fn lambda_if_and_unless_guard_the_validation_with_an_expression() {
+    let (model, warnings, _) = ingest_widget(
+        r#"
+class Widget < ApplicationRecord
+  validates :name, presence: true, unless: -> { status.in?(%w[draft]) }
+  validates :code, presence: true, if: lambda { status == "live" }
+  validates :note, presence: { if: -> { live? } }
+end
+"#,
+    );
+    assert!(warnings.is_empty(), "{warnings:?}");
+    let rules = validation_rules(&model);
+
+    let name = rules.iter().find(|v| v.attribute.as_str() == "name").unwrap();
+    assert!(name.if_cond.is_none());
+    assert!(
+        matches!(&name.unless_cond, Some(e) if matches!(&*e.node, ExprNode::Send { recv: Some(_), method, .. } if method.as_str() == "in?")),
+        "{:?}", name.unless_cond
+    );
+
+    let code = rules.iter().find(|v| v.attribute.as_str() == "code").unwrap();
+    assert!(
+        matches!(&code.if_cond, Some(e) if matches!(&*e.node, ExprNode::Send { recv: Some(_), method, args, .. } if method.as_str() == "==" && args.len() == 1)),
+        "{:?}", code.if_cond
+    );
+
+    // The rule-level lambda (`presence: { if: -> { live? } }`) lowers
+    // to a receiverless call on the record — exactly the shape a
+    // Symbol condition (`if: :live?`) already produces, so the two
+    // forms reach the lowerer the same way.
+    let note = rules.iter().find(|v| v.attribute.as_str() == "note").unwrap();
+    assert!(
+        matches!(&note.if_cond, Some(e) if matches!(&*e.node, ExprNode::Send { recv: None, method, args, .. } if method.as_str() == "live?" && args.is_empty())),
+        "{:?}", note.if_cond
+    );
+}
+
+/// An arity>0 lambda is not the zero-arity body shape
+/// `callback_condition` accepts (its parameter would be unbound once
+/// spliced into `def validate`), so it stays the reported gap it
+/// always was — distinct from the now-supported zero-arity form above.
+#[test]
+fn arity_one_lambda_condition_on_validates_stays_a_gap() {
+    let (model, warnings, gaps) = ingest_widget(
+        r#"
+class Widget < ApplicationRecord
+  validates :name, presence: true, if: ->(w) { w.live? }
+end
+"#,
+    );
+    assert!(validation_rules(&model).is_empty(), "{:?}", validation_rules(&model));
+    assert!(warnings.iter().any(|m| m.contains("if:")), "{warnings:?}");
+    assert!(gaps.iter().any(|m| m.contains("if:")), "{gaps:?}");
+}
+
+/// A name bound by a nested block is not a captured class-body local.
+/// The block is still in the spliced guard, so the validation runs.
+#[test]
+fn nested_block_parameter_lambda_condition_is_a_guard() {
+    let (model, warnings, _) = ingest_widget(
+        r#"
+class Widget < ApplicationRecord
+  validates :name, presence: true, if: -> { tags.any? { |tag| tag.blank? } }
+  validates :code, presence: true, if: -> { tags.any? { _1.blank? } }
+  validates :note, presence: true, if: -> { tags.any? { it.blank? } }
+end
+"#,
+    );
+    assert!(warnings.is_empty(), "{warnings:?}");
+    for attr in ["name", "code", "note"] {
+        let rule = validation_rules(&model)
+            .into_iter()
+            .find(|v| v.attribute.as_str() == attr)
+            .unwrap_or_else(|| panic!("{attr} missing"));
+        assert!(
+            rule.if_cond.is_some() || rule.unless_cond.is_some(),
+            "{attr} dropped its nested-block condition: {rule:?}"
+        );
+    }
+}
+
+/// `|; tmp|` is a block local the lowered block does not declare.
+/// Accepting the read would emit a bare `tmp` inside `valid?`.
+#[test]
+fn block_local_in_a_lambda_condition_stays_a_gap() {
+    let (model, warnings, gaps) = ingest_widget(
+        r#"
+class Widget < ApplicationRecord
+  validates :color, presence: true, unless: -> { tags.any? { |; tmp| tmp.nil? } }
+end
+"#,
+    );
+    assert!(validation_rules(&model).is_empty(), "{:?}", validation_rules(&model));
+    assert!(warnings.iter().any(|m| m.contains("unless:")), "{warnings:?}");
+    assert!(gaps.iter().any(|m| m.contains("unless:")), "{gaps:?}");
+}
+
+/// A class-body local captured by the lambda is not in scope once the
+/// body is spliced into `def validate`. Leaving it there raises
+/// `NameError` on save. The call stays the reported gap.
+#[test]
+fn captured_local_lambda_condition_on_validates_stays_a_gap() {
+    let (model, warnings, gaps) = ingest_widget(
+        r#"
+class Widget < ApplicationRecord
+  required = true
+  validates :name, presence: true, if: -> { required }
+end
+"#,
+    );
+    assert!(validation_rules(&model).is_empty(), "{:?}", validation_rules(&model));
+    assert!(warnings.iter().any(|m| m.contains("if:")), "{warnings:?}");
+    assert!(gaps.iter().any(|m| m.contains("if:")), "{gaps:?}");
+}
+
+/// Survey mode substitutes `nil` for an expression it cannot ingest
+/// (an integer wider than i64) and still returns that expression.
+/// Accepting it would guard the check with `nil`, so a validation
+/// Rails runs would never run. The call stays a gap.
+#[test]
+fn survey_recovered_lambda_condition_on_validates_stays_a_gap() {
+    let (model, warnings, gaps) = ingest_widget(
+        r#"
+class Widget < ApplicationRecord
+  validates :name, presence: true, if: -> { 9223372036854775808 }
+end
+"#,
+    );
+    assert!(validation_rules(&model).is_empty(), "{:?}", validation_rules(&model));
+    assert!(warnings.iter().any(|m| m.contains("if:")), "{warnings:?}");
+    assert!(gaps.iter().any(|m| m.contains("if:")), "{gaps:?}");
+}
+
+/// Ruby keeps the last value when a hash key is repeated. A Symbol
+/// followed by a lambda must leave the lambda, not the predicate.
+#[test]
+fn duplicate_if_key_keeps_the_last_condition() {
+    let (model, warnings, _) = ingest_widget(
+        r#"
+class Widget < ApplicationRecord
+  validates :name, presence: true, if: :live?, if: -> { false }
+end
+"#,
+    );
+    assert!(warnings.is_empty(), "{warnings:?}");
+    let name = validation_rules(&model).into_iter().find(|v| v.attribute.as_str() == "name").unwrap();
+    assert!(
+        matches!(&name.if_cond, Some(e) if matches!(&*e.node, ExprNode::Lit { value: Literal::Bool { value: false } })),
+        "{:?}", name.if_cond
+    );
 }
 
 #[test]
@@ -1500,8 +1663,13 @@ class Widget < ApplicationRecord
   validates :price, numericality: { greater_than: 0, odd: true }
   validates :bounded, numericality: { equal_to: 1, other_than: 2 }
   validates :tag, presence: true, length: { maximum: 4, is: 2 }
-  validates :note, presence: true, if: -> { status == "live" }
-  validates :color, presence: true, unless: -> { false }
+  # An arity>0 lambda would splice an unbound parameter into `def
+  # validate`; a String condition names a method Rails resolves at
+  # runtime that this build does not model. Both stay the reported gap
+  # a zero-arity lambda/proc `if:`/`unless:` no longer is (see
+  # `validates_lambda_conditions.rs`).
+  validates :note, presence: true, if: ->(w) { w.live? }
+  validates :color, presence: true, unless: "a string condition"
 end
 "#,
     );
@@ -2455,6 +2623,71 @@ fn backticks_ingest_as_the_kernel_call_and_round_trip() {
     }
 }
 
+/// `(month, *row)` in a block, and the same splat inside a nested
+/// multi-write. `MultiAssign` has no rest; the group is not an array
+/// literal, so the desugar coerces with `Array.try_convert` and then
+/// indexes. Nearby shapes: anonymous splat, post-rest, a deeper group,
+/// an ivar splat, and a splat group beside an outer name.
+#[test]
+fn nested_destructure_splat_ingests_and_round_trips() {
+    use roundhouse::emit::ruby::emit_expr;
+
+    let parse = |source: &str| {
+        let result = ruby_prism::parse(source.as_bytes());
+        assert_eq!(result.errors().count(), 0, "legal Ruby control: {source}");
+        let program = result.node();
+        roundhouse::ingest::ingest_expr(
+            &program.as_program_node().unwrap().statements().as_node(),
+            "<snippet>",
+        )
+        .unwrap_or_else(|err| panic!("{source}: {err}"))
+    };
+    for source in [
+        "rows.each_with_object({}) { |(month, *row), map| map[month] = row }",
+        "rows.each { |(month, *)| month }",
+        "rows.map { |(*row)| row }",
+        "rows.each { |(a, *b, c)| [a, b, c] }",
+        "->((month, *row)) { row }",
+        "a, (b, *c) = pairs",
+        "(a, *b), c = pairs",
+        "a, (b, (c, *d)) = pairs",
+        "a, (b, *c, d) = pairs",
+        "a, (@month, *@row) = pairs",
+        "x, (y, *z), *rest = pairs",
+    ] {
+        let expr = parse(source);
+        let emitted = emit_expr(&expr);
+        assert!(
+            emitted.contains("Array.try_convert"),
+            "nested splat must coerce with Array.try_convert, not require an array literal:\n{source}\n{emitted}"
+        );
+        if !source.contains(", *)") {
+            assert!(
+                emitted.contains(".drop("),
+                "a named rest must be the tail after the leading names:\n{source}\n{emitted}"
+            );
+        }
+        assert_eq!(expr, parse(&emitted), "round-trip IR must be stable for {source}:\n{emitted}");
+    }
+
+    // Depth-first Ruby writes the inner `x` last; the level-at-a-time
+    // desugar would leave the outer `x`. Same refusal as `(x, y), x = …`.
+    let result = ruby_prism::parse(b"(x, *y), x = [[1, 2], 3]");
+    let stmt = result.node().as_program_node().unwrap().statements().as_node();
+    let err = roundhouse::ingest::ingest_expr(&stmt, "<snippet>").expect_err("reordered last write");
+    assert!(err.to_string().contains("out of source order"), "{err}");
+    // The outer write stays last, which is the order the desugar keeps.
+    parse("x, (y, *x) = [1, [2, 3]]");
+
+    for source in ["(h[0], *x), h[0] = [[1, 2], 3]", "(A, *x), A = [[1, 2], 3]"] {
+        let result = ruby_prism::parse(source.as_bytes());
+        assert_eq!(result.errors().count(), 0, "{source}");
+        let stmt = result.node().as_program_node().unwrap().statements().as_node();
+        let err = roundhouse::ingest::ingest_expr(&stmt, "<snippet>").expect_err(source);
+        assert!(err.to_string().contains("out of source order"), "{source}: {err}");
+    }
+}
+
 #[test]
 fn multi_write_with_post_rest_targets_ingests_and_round_trips() {
     use roundhouse::emit::ruby::emit_expr;
@@ -2503,6 +2736,25 @@ fn nested_multi_write_refuses_a_reordered_last_write() {
         panic!("expected nested setter reordering to be unsupported");
     };
     assert!(message.contains("assignment-method targets"), "{message}");
+}
+
+#[test]
+fn a_leading_group_does_not_reuse_the_statement_temp() {
+    use roundhouse::emit::ruby::emit_expr;
+    let source = "(a, *b), c = [[1, 2, 3], 9]";
+    let result = ruby_prism::parse(source.as_bytes());
+    let stmt = result.node().as_program_node().unwrap().statements().body().iter().next().unwrap();
+    let expr = roundhouse::ingest::ingest_expr(&stmt, "<snippet>").unwrap();
+    let emitted = emit_expr(&expr);
+    let last = emitted.lines().last().unwrap_or("");
+    assert!(
+        last.contains("__mv_"),
+        "the expression must answer the whole RHS, not the first group:\n{emitted}"
+    );
+    assert!(
+        !last.contains("__mt_"),
+        "the group temp must not be the expression value:\n{emitted}"
+    );
 }
 
 #[test]

@@ -169,6 +169,9 @@ pub mod session_options;
 pub mod status_literal;
 pub mod to_param_residue;
 pub mod relation_residue;
+/// Host-only: the Oj emit gate reads `project::BuildTarget`, which the
+/// wasm build excludes. The playground has no emit gate to raise it for.
+#[cfg(not(target_arch = "wasm32"))]
 pub mod oj;
 pub mod params_residue;
 pub mod params_permit;
@@ -964,6 +967,7 @@ pub fn apply_post_analyze_lowerings(
     ran!("send_file");
     html_safe::apply_html_safe_lowering(app);
     ran!("html_safe");
+    diags.extend(crate::ingest::rake_tasks::gap_diagnostics(app));
     diags.extend(module_mixins::apply_module_mixins_lowering(app));
     ran!("module_mixins");
     transaction_ground::apply_transaction_grounding(app);
@@ -1240,6 +1244,18 @@ pub(crate) fn for_each_owned_hook_body(
                         f(cond);
                     }
                 }
+                // `validates :attr, …, if: -> { … }` / `unless: …` — a
+                // lambda guard is a general expression, same as a
+                // callback's, and needs the same passes (`.in?`
+                // rewriting, attribute aliasing, …) to see it.
+                crate::dialect::ModelBodyItem::Validation { validation, .. } => {
+                    if let Some(cond) = &mut validation.if_cond {
+                        f(cond);
+                    }
+                    if let Some(cond) = &mut validation.unless_cond {
+                        f(cond);
+                    }
+                }
                 // Unrecognized class-body exprs (constant procs and
                 // friends) round-trip verbatim into the emit — their
                 // sites are just as reachable.
@@ -1385,6 +1401,14 @@ pub(crate) fn for_each_hook_body_ref(
                 }
                 crate::dialect::ModelBodyItem::Callback { callback, .. } => {
                     if let Some(cond) = &callback.condition {
+                        f(cond);
+                    }
+                }
+                crate::dialect::ModelBodyItem::Validation { validation, .. } => {
+                    if let Some(cond) = &validation.if_cond {
+                        f(cond);
+                    }
+                    if let Some(cond) = &validation.unless_cond {
                         f(cond);
                     }
                 }

@@ -1846,7 +1846,11 @@ fn render_test_helper(fixture_lcs: &[LibraryClass], truncate_lines: &[String]) -
          # `config.action_controller.allow_forgery_protection = false`.\n\
          # boot.rb loaded the ruby family's forgery check; a test posts\n\
          # without a token, as Rails' own integration tests do.\n\
-         ActionController::Base.allow_forgery_protection = false",
+         ActionController::Base.allow_forgery_protection = false\n\
+         # One call for the process. `load_rake_tasks!` returns immediately\n\
+         # once the graph exists, so a file-scope `load_tasks` in a test\n\
+         # is not copied into the emit.\n\
+         Rails.application.load_tasks",
     );
 
     // (2)
@@ -1941,6 +1945,12 @@ mod method_sig_tests {
     use crate::expr::{Expr, ExprNode, Literal};
     use crate::ident::Symbol;
     use crate::span::Span;
+
+    #[test]
+    fn unbound_param_binds_follow_the_target_policy() {
+        assert!(!crate::build_target::BuildTarget::Ruby.param_binds_enabled(None));
+        assert!(crate::build_target::BuildTarget::Spinel.param_binds_enabled(None));
+    }
 
     // `def get_from_cache(opts = {}, &block)` — an optional positional with
     // a default plus a captured block param must both round-trip into the

@@ -268,17 +268,7 @@ module ActiveRecord
     # `Db.escape_string` already wraps in single quotes (sqlite literal
     # syntax with '' doubling).
     def quote(value)
-      if value.nil?
-        "NULL"
-      elsif value.is_a?(Integer) || value.is_a?(Float)
-        value.to_s
-      elsif value.is_a?(TrueClass)
-        "1"
-      elsif value.is_a?(FalseClass)
-        "0"
-      else
-        Db.escape_string(value.to_s)
-      end
+      Arel::Nodes.quote_scalar(value)
     end
 
     # Rails `quote_string`: escaped but UNquoted (callers embed it
@@ -831,8 +821,9 @@ module ActiveRecord
     # row every call and then trip the UNIQUE index on `key`.
     #
     # `on_duplicate:` replaces the generated SET clause with a raw
-    # fragment (`Arel.sql("value = value + 1")` — Arel.sql is the
-    # identity here, so it arrives as a String). Otherwise every
+    # fragment (`Arel.sql("value = value + 1")`). `Arel.sql` answers an
+    # `Arel::Nodes::SqlLiteral` whose `to_s` is that text, which the
+    # interpolation below reads. Otherwise every
     # non-conflict column is assigned from `excluded`, matching Rails.
     #
     # Timestamps as Rails 8.1's `record_timestamps` stamps them: an
