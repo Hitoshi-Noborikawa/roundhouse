@@ -1596,7 +1596,7 @@ module ActiveRecord
     def sum(expr)
       return 0.0 if @null
       term = expr.is_a?(Symbol) ? aggregate_column(expr.to_s) : expr.to_s
-      sql = "SELECT COALESCE(SUM(#{term}), 0) AS n FROM #{from_source}"
+      sql = "#{cte_prefix}SELECT COALESCE(SUM(#{term}), 0) AS n FROM #{from_source}"
       sql = "#{sql} #{@joins.join(" ")}" if @joins.length > 0
       sql = "#{sql} WHERE #{@wheres.join(" AND ")}" if @wheres.length > 0
       rows = ActiveRecord.adapter.select_rows(sql)

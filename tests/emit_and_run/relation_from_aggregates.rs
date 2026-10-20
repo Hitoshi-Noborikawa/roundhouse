@@ -12,8 +12,10 @@ use super::emit_and_run;
 /// An aliased table source (`from("widgets AS recent")`) still names the
 /// table, so Rails qualifies with it and the query raises
 /// `StatementInvalid` ("no such column: widgets.score"): the build must
-/// raise there too, not answer. Answers below are Rails 8.1.4's on the
-/// same rows (scores 3, 7, 5).
+/// raise there too, not answer. A `with_recursive(...)` CTE read through
+/// `from("name")` is such a source too, so `sum` must keep the WITH
+/// clause. Answers below are Rails 8.1.4's on the same rows (scores 3,
+/// 7, 5, each the previous one's child).
 const MODEL: &str = "class Widget < ApplicationRecord\nend\n";
 
 const APPLICATION_RECORD: &str =
@@ -22,6 +24,7 @@ const APPLICATION_RECORD: &str =
 const SCHEMA: &str = r#"ActiveRecord::Schema.define do
   create_table "widgets", force: :cascade do |t|
     t.integer "score"
+    t.integer "parent_id"
   end
 end
 "#;
@@ -33,7 +36,9 @@ fn app() -> emit_and_run::Overlay {
         .write("app/models/widget.rb", MODEL)
 }
 
-const ASSERTIONS: &str = r#"[3, 7, 5].each { |s| Widget.create!(score: s) }
+const ASSERTIONS: &str = r#"w1 = Widget.create!(score: 3)
+w2 = Widget.create!(score: 7, parent_id: w1.id)
+w3 = Widget.create!(score: 5, parent_id: w2.id)
 hi = "(SELECT * FROM widgets WHERE score > 4) AS hi"
 got = {
   plain_max: Widget.maximum(:score),
@@ -43,8 +48,11 @@ got = {
   sub_min: Widget.from(hi).minimum(:score),
   sub_sum: Widget.from(hi).sum(:score).to_i,
   sub_bare_alias_sum: Widget.from("(SELECT * FROM widgets WHERE score > 4) hi").sum(:score).to_i,
+  cte_sum: Widget.with_recursive(hi: [Widget.all.where("score > 4")]).from("hi").sum(:score).to_i,
+  cte_max: Widget.with_recursive(hi: [Widget.all.where("score > 4")]).from("hi").maximum(:score),
+  ancestors_sum: Widget.with_recursive(parents: [Widget.where(id: w3.id), Widget.joins("JOIN parents ON widgets.id = parents.parent_id")]).from("parents").sum(:score).to_i,
 }
-want = { plain_max: 7, plain_min: 3, plain_sum: 15, sub_max: 7, sub_min: 5, sub_sum: 12, sub_bare_alias_sum: 12 }
+want = { plain_max: 7, plain_min: 3, plain_sum: 15, sub_max: 7, sub_min: 5, sub_sum: 12, sub_bare_alias_sum: 12, cte_sum: 12, cte_max: 7, ancestors_sum: 15 }
 raise "aggregates: #{got.inspect}" unless got == want
 aliased = Widget.from("widgets AS recent")
 begin
