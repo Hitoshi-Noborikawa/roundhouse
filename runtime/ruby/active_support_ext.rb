@@ -1354,16 +1354,14 @@ module ActiveSupport
     # Rails' `zones_map` (`activesupport/lib/active_support/values/time_zone.rb`)
     # builds this by calling `self[name]` per mapped name and keeping only
     # the ones that resolve; `[]` itself rescues `TZInfo::InvalidTimezoneIdentifier`
-    # and returns nil for the rest. A host missing a legacy zone file (no
-    # `tzdata-legacy`) then just has fewer zones, not a raise.
+    # and returns nil for the rest. `lookup` is our spelling of that `[]`.
+    # A host missing a legacy zone file (no `tzdata-legacy`) then just has
+    # fewer zones, not a raise.
     def self.all
       zones = []
       ActiveSupport.rails_zone_names.each do |zone_name|
-        begin
-          zones << TimeZone.new(zone_name, ActiveSupport.find_zone!(zone_name))
-        rescue ArgumentError
-          next
-        end
+        zone = lookup(zone_name)
+        zones << zone unless zone.nil?
       end
       # Not `sort { |a, b| … }`: a block's parameters do not type on every target, and 152 zones sort cheaply in place.
       i = 1
