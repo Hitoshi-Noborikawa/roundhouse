@@ -134,3 +134,47 @@ fn the_cli_reports_uniqueness_only_where_it_is_not_lowered() {
     assert_eq!(rust, 4, "one warning per uniqueness rule on rust");
     assert_eq!(ruby, 0, "the ruby target lowers the check");
 }
+
+/// Rails excludes the record itself by the model's primary key
+/// (`finder_class.primary_key => id_in_database`), not by an `id`
+/// column: `"codes"."code" != ?` for `self.primary_key = "code"` over a
+/// table keyed by `code`, and `"keystores"."key" != ?` for a table that keeps
+/// its integer `id` but names `key` as the key. Rails 8.1.4 answers: a
+/// persisted record is valid (it does not collide with itself), and a
+/// new one with the same name is not.
+#[test]
+fn uniqueness_excludes_the_record_by_its_declared_primary_key() {
+    emit_and_run::empty_app()
+        .write("app/models/application_record.rb", APPLICATION_RECORD)
+        .write(
+            "db/schema.rb",
+            r#"ActiveRecord::Schema.define do
+  create_table "codes", id: :string, primary_key: "code", force: :cascade do |t|
+    t.string "name"
+  end
+
+  create_table "keystores", force: :cascade do |t|
+    t.string "key"
+    t.string "name"
+  end
+end
+"#,
+        )
+        .write(
+            "app/models/code.rb",
+            "class Code < ApplicationRecord\n  self.primary_key = \"code\"\n  validates :name, uniqueness: true\nend\n",
+        )
+        .write(
+            "app/models/keystore.rb",
+            "class Keystore < ApplicationRecord\n  self.primary_key = \"key\"\n  validates :name, uniqueness: true\nend\n",
+        )
+        .run_ruby(
+            r#"a = Code.create!(code: "a", name: "x")
+k = Keystore.create!(key: "k1", name: "x")
+got = [a.valid?, Code.new(code: "b", name: "x").valid?, k.valid?, Keystore.new(key: "k2", name: "x").valid?]
+raise "valid?: #{got.inspect}" unless got == [true, false, true, false]
+puts "primary key exclusion passed"
+"#,
+        )
+        .assert_passes();
+}

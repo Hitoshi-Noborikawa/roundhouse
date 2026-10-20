@@ -1309,7 +1309,19 @@ fn build_methods_with_finder_inputs(
         }
     }
 
-    push_validate_method(&mut methods, model, models, errors_readers, runtime_relation);
+    // The key a uniqueness check excludes the record by: `self.primary_key
+    // = "…"`, else a schema key other than `id`, else `id` (as `def
+    // self.primary_key` is chosen in `push_schema_methods`).
+    let primary_key = model
+        .primary_key
+        .clone()
+        .or_else(|| {
+            schema.tables.get(&model.table.0).and_then(|t| {
+                t.columns.iter().find(|c| c.primary_key && c.name.as_str() != "id").map(|c| c.name.clone())
+            })
+        })
+        .unwrap_or_else(|| Symbol::from("id"));
+    push_validate_method(&mut methods, model, models, errors_readers, runtime_relation, &primary_key);
     push_association_methods(&mut methods, model, models, &through_joins);
     push_dependent_destroy(&mut methods, model, &through_joins);
     push_unknown_marker_methods(&mut methods, model);

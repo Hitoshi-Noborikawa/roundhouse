@@ -27,6 +27,7 @@ pub(super) fn push_validate_method(
     models: &[Model],
     errors_readers: ErrorsReaders,
     runtime_relation: super::RuntimeRelation,
+    primary_key: &Symbol,
 ) {
     let msgs = Messages(Some(model));
     let mut stmts: Vec<Expr> = Vec::new();
@@ -73,7 +74,7 @@ pub(super) fn push_validate_method(
                     } else if let ValidationRule::Uniqueness { scope, case_sensitive, allow_nil, allow_blank } = rule {
                         match runtime_relation {
                             super::RuntimeRelation::Present => vec![inline_uniqueness_check(
-                                msgs, model, &v.attribute, scope, *case_sensitive, *allow_nil, *allow_blank,
+                                msgs, model, primary_key, &v.attribute, scope, *case_sensitive, *allow_nil, *allow_blank,
                             )],
                             // Reported per target by
                             // `relation_residue::uniqueness_gaps_for_target`.
@@ -644,20 +645,22 @@ fn validation_rule_to_calls(msgs: Messages, attr: &Symbol, rule: &ValidationRule
 /// catches the real error (an unset owner).
 /// Inline `validates :attr, uniqueness: …`, as Rails 8.1's
 /// `UniquenessValidator` queries (on a target with the runtime Relation):
-///   if Model.where(attr: @attr).not(id: id)[.where(scope_col: @scope_col)…].exists?
+///   if Model.where(attr: @attr).not(<pk>: @<pk>)[.where(scope_col: @scope_col)…].exists?
 ///     errors << "attr has already been taken"
 ///   end
 /// `case_sensitive: false` compares `LOWER(table.attr) = LOWER(?)`, except
 /// for a nil value, which Rails compares `IS NULL` either way. A nil value
 /// is checked like any other (two nils collide) unless `allow_nil:`, and a
-/// blank one (nil, or empty once stripped) unless `allow_blank:`. The `not(id: id)` is Rails'
-/// persisted-record exclusion; on a new record it is `id IS NOT NULL`,
+/// blank one (nil, or empty once stripped) unless `allow_blank:`. The `not(<pk>: @<pk>)` is Rails'
+/// persisted-record exclusion, by the model's declared primary key (`"codes"."code" != ?`
+/// under `self.primary_key = "code"`, even beside an `id` column); on a new record it is `<pk> IS NOT NULL`,
 /// which every stored row satisfies, so the answer is the same. A `scope:`
 /// naming a `belongs_to` reads its foreign key (and type column when
 /// polymorphic), as Rails resolves it.
 fn inline_uniqueness_check(
     msgs: Messages,
     model: &Model,
+    primary_key: &Symbol,
     attr: &Symbol,
     scope: &[Symbol],
     case_sensitive: bool,
@@ -695,17 +698,7 @@ fn inline_uniqueness_check(
             },
         )
     };
-    let id = Expr::new(
-        Span::synthetic(),
-        ExprNode::Send {
-            recv: Some(Expr::new(Span::synthetic(), ExprNode::SelfRef)),
-            method: Symbol::from("id"),
-            args: vec![],
-            block: None,
-            parenthesized: false,
-        },
-    );
-    relation = send(relation, "not", vec![hash("id", id)]);
+    relation = send(relation, "not", vec![hash(primary_key.as_str(), ivar(primary_key))]);
     for name in scope {
         let columns: Vec<Symbol> = match model.associations().find(|a| {
             matches!(a, Association::BelongsTo { name: n, .. } if n == name)
