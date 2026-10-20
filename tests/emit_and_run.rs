@@ -3809,6 +3809,60 @@ fn faraday_controller_superclass_is_refused_off_ruby_and_jruby() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// A test class whose only Faraday reference is the superclass (or an
+/// include / inner class) is refused on Spinel — test modules are not
+/// LibraryClasses.
+#[test]
+fn faraday_test_module_superclass_is_refused_on_spinel() {
+    let dir = std::env::temp_dir().join(format!("rh-faraday-tm-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    for (path, text) in [
+        (
+            "db/schema.rb",
+            "ActiveRecord::Schema.define do\n  create_table \"posts\", force: :cascade do |t|\n    t.string \"title\"\n  end\nend\n",
+        ),
+        ("config/routes.rb", "Rails.application.routes.draw do\n  get \"/posts\", to: \"posts#index\"\nend\n"),
+        ("app/models/post.rb", "class Post < ApplicationRecord\nend\n"),
+        (
+            "app/controllers/posts_controller.rb",
+            "class PostsController < ApplicationController\n  def index\n    render plain: \"ok\"\n  end\nend\n",
+        ),
+        (
+            "test/models/post_test.rb",
+            "require \"test_helper\"\nclass PostTest < Faraday::Error\n  include Faraday::FlatParamsEncoder\n  class Boom < Faraday::Error; end\n  test \"name\" do\n    assert_equal \"PostTest\", PostTest.name\n  end\nend\n",
+        ),
+    ] {
+        let full = dir.join(path);
+        std::fs::create_dir_all(full.parent().unwrap()).unwrap();
+        std::fs::write(full, text).unwrap();
+    }
+    let mut app = roundhouse::ingest::ingest_app(&dir).expect("ingest");
+    let lower_diags = roundhouse::session::analyze_and_lower(&mut app);
+    assert!(
+        lower_diags.iter().all(|d| d.severity != roundhouse::diagnostic::Severity::Error),
+        "check is not clean: {lower_diags:?}"
+    );
+    let (errors, files) = oj_target_errors_and_text(
+        &app,
+        &dir,
+        roundhouse::project::BuildTarget::Spinel,
+    );
+    for site in ["`Faraday::Error`", "`Faraday::FlatParamsEncoder`"] {
+        assert!(
+            errors.iter().any(|e| e.contains(site) && e.contains("only the ruby and jruby trees ship")),
+            "Spinel did not refuse test-module {site}:\n{}",
+            errors.join("\n")
+        );
+    }
+    let hits: Vec<_> = files
+        .iter()
+        .filter(|(path, text)| !path.ends_with(".map") && path.contains("post_test") && text.contains("Faraday"))
+        .map(|(path, _)| path.clone())
+        .collect();
+    assert!(hits.is_empty(), "Spinel emitted Faraday in test module {hits:?}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// No other target has an HTTP client behind `Faraday`: each call and
 /// constant is refused there, and no `Faraday` reference is emitted.
 #[test]

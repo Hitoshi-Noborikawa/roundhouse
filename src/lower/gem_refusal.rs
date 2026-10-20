@@ -35,15 +35,22 @@ pub(crate) fn mentions(app: &App, root: &str) -> bool {
 }
 
 fn mentions_declarations(app: &App, root: &str) -> bool {
-    app.library_classes.iter().any(|lc| {
+    let lc_mentions = |lc: &crate::dialect::LibraryClass| {
         class_id_under_root(lc.parent.as_ref(), root)
             || lc.includes.iter().any(|id| class_id_under_root(Some(id), root))
-    }) || app.models.iter().any(|m| class_id_under_root(m.parent.as_ref(), root))
+    };
+    app.library_classes.iter().any(lc_mentions)
+        || app.models.iter().any(|m| class_id_under_root(m.parent.as_ref(), root))
         || app.controllers.iter().any(|c| {
             class_id_under_root(c.parent.as_ref(), root)
                 || c.sibling_classes
                     .iter()
                     .any(|s| name_under_root(s.parent.as_str(), root))
+        })
+        || app.test_modules.iter().any(|tm| {
+            class_id_under_root(tm.parent.as_ref(), root)
+                || tm.includes.iter().any(|id| class_id_under_root(Some(id), root))
+                || tm.inner_classes.iter().any(lc_mentions)
         })
 }
 
@@ -71,28 +78,7 @@ pub(crate) fn refuse_references(app: &mut App, target: &str, refusal: &Refusal<'
 
 fn refuse_declarations(app: &mut App, target: &str, refusal: &Refusal<'_>) {
     for lc in &mut app.library_classes {
-        if class_id_under_root(lc.parent.as_ref(), refusal.root) {
-            let name = lc.parent.as_ref().unwrap().0.as_str().to_string();
-            report_decl(lc.parent_span, target, refusal, &name);
-            lc.parent = None;
-        }
-        let mut kept = Vec::new();
-        let mut kept_spans = Vec::new();
-        for (i, id) in lc.includes.iter().enumerate() {
-            if class_id_under_root(Some(id), refusal.root) {
-                let span = lc.include_spans.get(i).copied().unwrap_or(Span::synthetic());
-                report_decl(span, target, refusal, id.0.as_str());
-            } else {
-                kept.push(id.clone());
-                if let Some(span) = lc.include_spans.get(i) {
-                    kept_spans.push(*span);
-                }
-            }
-        }
-        lc.includes = kept;
-        if !lc.include_spans.is_empty() {
-            lc.include_spans = kept_spans;
-        }
+        refuse_library_class(lc, target, refusal);
     }
     for model in &mut app.models {
         if class_id_under_root(model.parent.as_ref(), refusal.root) {
@@ -116,6 +102,55 @@ fn refuse_declarations(app: &mut App, target: &str, refusal: &Refusal<'_>) {
                 sibling.parent = Symbol::from("Object");
             }
         }
+    }
+    for tm in &mut app.test_modules {
+        if class_id_under_root(tm.parent.as_ref(), refusal.root) {
+            let name = tm.parent.as_ref().unwrap().0.as_str().to_string();
+            // TestModule carries no parent_span; synthetic is the locus we have.
+            report_decl(Span::synthetic(), target, refusal, &name);
+            tm.parent = None;
+        }
+        tm.includes
+            .retain(|id| {
+                if class_id_under_root(Some(id), refusal.root) {
+                    report_decl(Span::synthetic(), target, refusal, id.0.as_str());
+                    false
+                } else {
+                    true
+                }
+            });
+        for lc in &mut tm.inner_classes {
+            refuse_library_class(lc, target, refusal);
+        }
+    }
+}
+
+fn refuse_library_class(
+    lc: &mut crate::dialect::LibraryClass,
+    target: &str,
+    refusal: &Refusal<'_>,
+) {
+    if class_id_under_root(lc.parent.as_ref(), refusal.root) {
+        let name = lc.parent.as_ref().unwrap().0.as_str().to_string();
+        report_decl(lc.parent_span, target, refusal, &name);
+        lc.parent = None;
+    }
+    let mut kept = Vec::new();
+    let mut kept_spans = Vec::new();
+    for (i, id) in lc.includes.iter().enumerate() {
+        if class_id_under_root(Some(id), refusal.root) {
+            let span = lc.include_spans.get(i).copied().unwrap_or(Span::synthetic());
+            report_decl(span, target, refusal, id.0.as_str());
+        } else {
+            kept.push(id.clone());
+            if let Some(span) = lc.include_spans.get(i) {
+                kept_spans.push(*span);
+            }
+        }
+    }
+    lc.includes = kept;
+    if !lc.include_spans.is_empty() {
+        lc.include_spans = kept_spans;
     }
 }
 
