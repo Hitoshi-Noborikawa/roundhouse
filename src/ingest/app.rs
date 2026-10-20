@@ -2473,28 +2473,13 @@ fn walk_binary_assets<V: Vfs + ?Sized>(vfs: &V, root: &Path, dir: &Path, app: &m
     }
 }
 
-/// Splice each concern's `included do` DSL items (already parsed into
-/// `App::concern_model_items` — validations, callbacks, associations,
-/// scopes, block-form lifecycle callbacks) into every model whose body
-/// has the matching `include <Concern>` line, right AFTER that line —
-/// so the model lowerer emits them exactly like the model's own
-/// declarations (lobsters' Token concern: `after_initialize` token
-/// generation + `validates :token`).
-///
-/// The `include` line itself is KEPT: the ruby-family emit re-emits it
-/// verbatim and emits the concern module as a real file, so Ruby's own
-/// include provides the module's constants (`User::VALID_USERNAME`)
-/// and instance methods at runtime — only the `included do` block is
-/// inert there (the emitted module has no ActiveSupport::Concern, so
-/// its DSL never ran; that's exactly the half this splice supplies).
-/// Strict targets get the DSL items the same way; module
-/// methods-via-include remain their separate, ledger-visible gap.
 /// `numericality:` with `allow_nil:` / `allow_blank:` on an attribute the
 /// model does not type as a number (no Integer/Float column: an
 /// `attr_accessor` of an `ActiveModel::Model` form, fed request Strings)
 /// stays the reported gap. The lowered check does not parse a String
 /// number (#1158), so on such an attribute it would reject `"30"` where
-/// Rails accepts it. Run after the concern splice, when every model's
+/// Rails accepts it. The whole `validates` call is refused, as an ingest
+/// refusal is. Run after the concern splice, when every model's
 /// validations and columns are known.
 fn gap_numericality_allow_on_untyped(app: &mut App) {
     use crate::dialect::{ModelBodyItem, ValidationRule};
@@ -2529,14 +2514,20 @@ fn gap_numericality_allow_on_untyped(app: &mut App) {
                 }
             }
         }
-        for (i, span, construct) in refused.iter().rev() {
-            if let ModelBodyItem::Validation { validation, .. } = &mut model.body[*i] {
-                validation.rules.retain(|r| {
-                    !matches!(r, ValidationRule::Numericality { allow_nil, allow_blank, .. }
-                        if *allow_nil == Some(true) || *allow_blank == Some(true))
-                });
+        // The whole `validates` call goes, as an ingest refusal
+        // (`ParsedValidates::Gap`) does: every Validation item it produced
+        // shares its span (one per attribute, and per-rule `if:`/`unless:`
+        // splits), so a `presence:` beside the numericality is not kept.
+        let calls: std::collections::HashSet<(crate::span::FileId, u32, u32)> =
+            refused.iter().map(|(_, span, _)| (span.file, span.start, span.end)).collect();
+        model.body.retain(|item| {
+            !matches!(item, ModelBodyItem::Validation { .. }) || {
+                let span = item.span();
+                !calls.contains(&(span.file, span.start, span.end))
             }
-            gaps.push((*span, construct.clone()));
+        });
+        for (_, span, construct) in refused {
+            gaps.push((span, construct));
         }
     }
     for (span, construct) in gaps {
@@ -2554,6 +2545,22 @@ fn gap_numericality_allow_on_untyped(app: &mut App) {
     }
 }
 
+/// Splice each concern's `included do` DSL items (already parsed into
+/// `App::concern_model_items` — validations, callbacks, associations,
+/// scopes, block-form lifecycle callbacks) into every model whose body
+/// has the matching `include <Concern>` line, right AFTER that line —
+/// so the model lowerer emits them exactly like the model's own
+/// declarations (lobsters' Token concern: `after_initialize` token
+/// generation + `validates :token`).
+///
+/// The `include` line itself is KEPT: the ruby-family emit re-emits it
+/// verbatim and emits the concern module as a real file, so Ruby's own
+/// include provides the module's constants (`User::VALID_USERNAME`)
+/// and instance methods at runtime — only the `included do` block is
+/// inert there (the emitted module has no ActiveSupport::Concern, so
+/// its DSL never ran; that's exactly the half this splice supplies).
+/// Strict targets get the DSL items the same way; module
+/// methods-via-include remain their separate, ledger-visible gap.
 fn splice_concerns_into_models(app: &mut App) {
     splice_concerns_into_models_named(app, &[]);
 }

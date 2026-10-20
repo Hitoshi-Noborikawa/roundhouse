@@ -61,7 +61,7 @@ fn on_an_untyped_attribute_the_options_stay_a_gap() {
         ("app/models/policy.rb", "class Policy < ApplicationRecord\n  validates :age, numericality: { only_integer: true }, allow_blank: true\nend\n"),
         (
             "app/models/settings_form.rb",
-            "class SettingsForm\n  include ActiveModel::Model\n  attr_accessor :age, :limit\n  validates :age, numericality: { only_integer: true }, allow_blank: true\n  validates :limit, numericality: { allow_nil: true }\nend\n",
+            "class SettingsForm\n  include ActiveModel::Model\n  attr_accessor :age, :limit, :count, :level\n  validates :age, numericality: { only_integer: true }, allow_blank: true\n  validates :limit, numericality: { allow_nil: true }\n  validates :count, presence: true, numericality: { allow_nil: true }\n  validates :level, presence: { if: :ready? }, numericality: { allow_nil: true }\n  def ready? = true\nend\n",
         ),
     ];
     let tree: HashMap<PathBuf, Vec<u8>> = files.into_iter().map(|(p, c)| (PathBuf::from(p), c.as_bytes().to_vec())).collect();
@@ -83,4 +83,16 @@ fn on_an_untyped_attribute_the_options_stay_a_gap() {
         assert!(gaps.iter().any(|g| g.contains(gap) && g.contains("settings_form.rb") && g.contains("#1158")), "{gap}: {gaps:?}");
     }
     assert!(!gaps.iter().any(|g| g.contains("policy.rb")), "{gaps:?}");
+    // The whole call goes, as an ingest refusal does: `presence:` beside
+    // the numericality is not kept, nor is the item a per-rule `if:` split
+    // off the same call.
+    let form = app.models.iter().find(|m| m.name.0.as_str() == "SettingsForm").expect("form");
+    for attr in ["count", "level"] {
+        assert!(
+            !form.body.iter().any(|item| matches!(item,
+                roundhouse::dialect::ModelBodyItem::Validation { validation, .. } if validation.attribute.as_str() == attr)),
+            "no validation left for {attr}: {:?}",
+            form.body
+        );
+    }
 }
