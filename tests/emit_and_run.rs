@@ -312,6 +312,8 @@ mod regex_string_interpolation;
 mod numericality_allow_nil_blank;
 #[path = "emit_and_run/stdlib_email_regexp.rs"]
 mod stdlib_email_regexp;
+#[path = "emit_and_run/constant_arithmetic_bounds.rs"]
+mod constant_arithmetic_bounds;
 
 #[test]
 fn markdown_templates_render_with_their_mime_type_and_erb_escaping() {

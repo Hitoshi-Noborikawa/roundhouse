@@ -592,8 +592,8 @@ fn validation_rule_to_calls(
         ValidationRule::Format { pattern, flags } => {
             vec![inline_format_check(msgs, attr, pattern, flags)]
         }
-        ValidationRule::Numericality { only_integer, gt, lt, gte, lte, allow_nil, allow_blank } => {
-            let checks = inline_numericality_check(msgs, attr, *only_integer, *gt, *lt, *gte, *lte);
+        ValidationRule::Numericality { only_integer, gt, lt, gte, lte, allow_nil, allow_blank, in_range } => {
+            let checks = inline_numericality_check(msgs, attr, *only_integer, *gt, *lt, *gte, *lte, in_range.as_ref());
             // Rails skips the validator for a nil value under allow_nil
             // and a blank one under allow_blank (EachValidator#validate).
             let skip = if *allow_blank == Some(true) {
@@ -1376,6 +1376,7 @@ fn inline_numericality_check(
     lt: Option<f64>,
     gte: Option<f64>,
     lte: Option<f64>,
+    in_range: Option<&crate::dialect::InclusionRange>,
 ) -> Vec<Expr> {
     let attr_ivar = ivar(attr);
     // `@attr.nil? || !@attr.is_a?(Numeric)` — the "not a number" guard.
@@ -1446,6 +1447,20 @@ fn inline_numericality_check(
         );
         else_stmts.push(if_with_nil_else(above, errors_push(attr.as_str(), msg)));
     }
+    // `in: a..b`: `@attr < a || @attr > b` (`>= b` for `a...b`), and
+    // Rails' message names the range as `Range#inspect` prints it.
+    if let Some(range) = in_range {
+        let float = |n: f64| Expr::new(Span::synthetic(), ExprNode::Lit { value: Literal::Float { value: n } });
+        let below = send(attr_ivar.clone(), "<", vec![float(range.begin)]);
+        let above = send(attr_ivar.clone(), if range.exclusive { ">=" } else { ">" }, vec![float(range.end)]);
+        let dots = if range.exclusive { "..." } else { ".." };
+        let msg = msgs.error(
+            attr.as_str(),
+            "in",
+            &ErrorOpts::count(format!("{}{dots}{}", format_float(range.begin), format_float(range.end))),
+        );
+        else_stmts.push(if_with_nil_else(bool_op(BoolOpKind::Or, below, above), errors_push(attr.as_str(), msg)));
+    }
     if only_integer {
         let is_int = is_a_check(&attr_ivar, "Integer");
         let not_int = Expr::new(
@@ -1480,7 +1495,9 @@ fn inline_numericality_check(
 /// agree across inline and helper-call paths.
 fn format_float(n: f64) -> String {
     if n == n.trunc() {
-        format!("{}", n as i64)
+        // Through `i128`: `2**63` is a whole f64 that `as i64` would
+        // saturate to `i64::MAX`.
+        format!("{}", n as i128)
     } else {
         format!("{n}")
     }
@@ -1879,14 +1896,14 @@ mod tests {
 
     #[test]
     fn numericality_bare_emits_nan_only() {
-        let exprs = inline_numericality_check(Messages::default(), &attr(), false, None, None, None, None);
+        let exprs = inline_numericality_check(Messages::default(), &attr(), false, None, None, None, None, None);
         let msgs: Vec<String> = exprs.iter().flat_map(collect_error_messages).collect();
         assert_eq!(msgs, vec!["Title is not a number"]);
     }
 
     #[test]
     fn numericality_with_gt_lt_and_only_integer_emits_all_messages() {
-        let exprs = inline_numericality_check(Messages::default(), &attr(), true, Some(0.0), Some(100.0), None, None);
+        let exprs = inline_numericality_check(Messages::default(), &attr(), true, Some(0.0), Some(100.0), None, None, None);
         let msgs: Vec<String> = exprs.iter().flat_map(collect_error_messages).collect();
         // Order matches the source order in inline_numericality_check:
         // nan-msg (then-branch), then gt → lt → only_integer in else.
@@ -1906,7 +1923,7 @@ mod tests {
         // `format_float` matches Ruby's default `to_s` shape for whole
         // numbers: 5.0 → "5", 0.5 → "0.5". Lock the contract so error
         // messages stay byte-stable across cruby and transpiled targets.
-        let exprs = inline_numericality_check(Messages::default(), &attr(), false, Some(0.5), None, None, None);
+        let exprs = inline_numericality_check(Messages::default(), &attr(), false, Some(0.5), None, None, None, None);
         let msgs: Vec<String> = exprs.iter().flat_map(collect_error_messages).collect();
         assert!(
             msgs.iter().any(|m| m == "Title must be greater than 0.5"),
