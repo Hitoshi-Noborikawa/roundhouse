@@ -74,8 +74,14 @@ fn required_files<V: Vfs + ?Sized>(vfs: &V, gem: &Path, name: &str) -> Result<BT
 }
 
 fn requires(text: &str) -> Vec<(bool, String)> {
-    struct Finder(Vec<(bool, String)>);
+    struct Finder(Vec<(bool, String)>, usize);
     impl<'pr> ruby_prism::Visit<'pr> for Finder {
+        fn visit_def_node(&mut self, node: &ruby_prism::DefNode<'pr>) {
+            self.1 += 1;
+            ruby_prism::visit_def_node(self, node);
+            self.1 -= 1;
+        }
+
         fn visit_call_node(&mut self, node: &ruby_prism::CallNode<'pr>) {
             let method = node.name();
             let relative = match method.as_slice() {
@@ -83,19 +89,22 @@ fn requires(text: &str) -> Vec<(bool, String)> {
                 b"require_relative" => Some(true),
                 _ => None,
             };
-            if let (Some(relative), None) = (relative, node.receiver()) {
-                let args: Vec<_> = node.arguments().map(|a| a.arguments().iter().collect()).unwrap_or_default();
-                if let [arg] = args.as_slice() {
-                    if let Some(s) = arg.as_string_node() {
-                        self.0.push((relative, String::from_utf8_lossy(s.unescaped()).into_owned()));
-                    }
+            let args: Vec<_> = node.arguments().map(|a| a.arguments().iter().collect()).unwrap_or_default();
+            let feature = match (relative, args.as_slice()) {
+                (Some(_), [arg]) => arg.as_string_node(),
+                (None, [name, arg]) if method.as_slice() == b"autoload" && self.1 == 0 && name.as_symbol_node().is_some() => {
+                    arg.as_string_node()
                 }
+                _ => None,
+            };
+            if let (Some(feature), None) = (feature, node.receiver()) {
+                self.0.push((relative == Some(true), String::from_utf8_lossy(feature.unescaped()).into_owned()));
             }
             ruby_prism::visit_call_node(self, node);
         }
     }
     let parsed = ruby_prism::parse(text.as_bytes());
-    let mut finder = Finder(Vec::new());
+    let mut finder = Finder(Vec::new(), 0);
     ruby_prism::Visit::visit(&mut finder, &parsed.node());
     finder.0
 }
@@ -208,6 +217,30 @@ mod tests {
         let gems = resolve(&crate::vfs::FsVfs::new(), &root.join("app"), Some(&lock), &["widgets".to_string()]).unwrap();
         let files: Vec<_> = gems[0].files.iter().map(|p| p.display().to_string()).collect();
         assert_eq!(files, vec!["lib/widgets/part.rb", "lib/widgets.rb"]);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn an_autoloaded_file_is_compiled_with_the_gem() {
+        let root = std::env::temp_dir().join(format!("rh-source-gems-autoload-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let write = |path: &str, text: &str| {
+            let full = root.join(path);
+            std::fs::create_dir_all(full.parent().unwrap()).unwrap();
+            std::fs::write(full, text).unwrap();
+        };
+        write("app/.bundle/config", "---\nBUNDLE_PATH: \"vendor/bundle\"\n");
+        let gem = "app/vendor/bundle/ruby/3.4.0/gems/widgets-1.0";
+        write(
+            &format!("{gem}/lib/widgets.rb"),
+            "module Widgets\n  autoload :Base, \"widgets/base\"\n  def self.later\n    autoload :Later, \"widgets/later\"\n  end\nend\n",
+        );
+        write(&format!("{gem}/lib/widgets/later.rb"), "module Widgets; class Later; end; end\n");
+        write(&format!("{gem}/lib/widgets/base.rb"), "module Widgets; class Base; end; end\n");
+        let lock = Lockfile::parse("GEM\n  remote: https://rubygems.org/\n  specs:\n    widgets (1.0)\n\nDEPENDENCIES\n  widgets\n");
+        let gems = resolve(&crate::vfs::FsVfs::new(), &root.join("app"), Some(&lock), &["widgets".to_string()]).unwrap();
+        let files: Vec<_> = gems[0].files.iter().map(|p| p.display().to_string()).collect();
+        assert_eq!(files, vec!["lib/widgets/base.rb", "lib/widgets.rb"]);
         let _ = std::fs::remove_dir_all(&root);
     }
 
