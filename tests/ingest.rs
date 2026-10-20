@@ -3430,3 +3430,26 @@ end
         "{:?}", rule("code").rules
     );
 }
+
+/// `exclusion: false` / `inclusion: false` add no validator, as in Rails'
+/// `validates`, and the call's other rules on the same line still lower.
+#[test]
+fn a_false_set_option_is_skipped_not_a_gap() {
+    let (model, warnings, _) = ingest_widget(
+        r#"
+class Widget < ApplicationRecord
+  validates :status, presence: true, exclusion: false
+  validates :level, presence: true, inclusion: false
+end
+"#,
+    );
+    assert!(warnings.is_empty(), "{warnings:?}");
+    let rules = validation_rules(&model);
+    for attr in ["status", "level"] {
+        let rule = rules.iter().find(|v| v.attribute.as_str() == attr).unwrap_or_else(|| panic!("no rule for {attr}: {rules:?}"));
+        assert!(
+            matches!(rule.rules.as_slice(), [roundhouse::dialect::ValidationRule::Presence]),
+            "{attr}: {:?}", rule.rules
+        );
+    }
+}

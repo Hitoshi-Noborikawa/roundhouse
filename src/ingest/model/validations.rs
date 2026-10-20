@@ -669,6 +669,11 @@ fn parse_numericality(value: &Node<'_>, file: &str, class_consts: &super::ClassC
 /// `within:` shapes, as a membership or a non-membership rule.
 fn parse_set(value: &Node<'_>, file: &str, exclusion: bool) -> RuleParse {
     let label = if exclusion { "exclusion" } else { "inclusion" };
+    // `exclusion: false` / `inclusion: false` — Rails' `validates` skips
+    // a validator whose options are false, keeping the call's other rules.
+    if super::super::util::bool_value(value) == Some(false) {
+        return RuleParse::Skip;
+    }
     if let Some(spec) = inclusion_values(value) {
         return RuleParse::Rule(BuiltRule::bare(set_rule(spec, exclusion)));
     }
