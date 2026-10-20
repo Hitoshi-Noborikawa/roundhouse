@@ -177,8 +177,11 @@ pub(crate) fn compiler_runtime_gems() -> &'static [(Marker, &'static str)] {
         // ruby-vips) already asked of the machine.
         (Marker::AnyText(&[VARIATION_MARKER]), "ruby-vips"),
         // The HTTP client an app calls. The real gem runs on this lane;
-        // the strict targets refuse it (`lower::faraday`).
-        (Marker::Constant("Faraday"), "faraday"),
+        // the strict targets refuse it (`lower::faraday`). `AnyText`
+        // (not `Constant`) so bare value uses (`CLIENT = Faraday`,
+        // `register(Faraday)`) demand the gem the same way `Faraday.new`
+        // and `Faraday::…` do — `names_constant` only matches punctuated forms.
+        (Marker::AnyText(&["Faraday"]), "faraday"),
         // Its middleware gems. `request :multipart` / `request :retry`
         // name no constant, and without the gem Faraday raises at the
         // first connection that registers them.

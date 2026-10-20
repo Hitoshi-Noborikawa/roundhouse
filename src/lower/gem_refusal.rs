@@ -6,11 +6,15 @@
 //! walks reports an incidental error that is not about the gem. So each
 //! call on the gem's root constant, and each `Root` / `Root::…` constant,
 //! becomes a `raise` on every emit body, and each records one unsupported
-//! diagnostic, so a clean check cannot claim the reference.
+//! diagnostic, so a clean check cannot claim the reference. Superclasses
+//! and `include` names live on the class, not in an emit body — those are
+//! refused the same way (diagnostic, then the name is dropped) so a
+//! catalog-typed parent cannot slip through as a silent emit.
 
 use crate::App;
 use crate::expr::{Expr, ExprNode, Literal};
-use crate::ident::Symbol;
+use crate::ident::{ClassId, Symbol};
+use crate::span::Span;
 
 pub(crate) struct Refusal<'a> {
     /// The top-level constant the gem owns (`Oj`, `Faraday`).
@@ -23,11 +27,25 @@ pub(crate) struct Refusal<'a> {
     pub raised: &'a str,
 }
 
-/// Whether any emit body names the root constant.
+/// Whether any emit body, superclass, or `include` names the root constant.
 pub(crate) fn mentions(app: &App, root: &str) -> bool {
     let mut found = false;
     crate::lower::for_each_emit_body_ref(app, &mut |body| found |= names_root(body, root));
-    found
+    found || mentions_declarations(app, root)
+}
+
+fn mentions_declarations(app: &App, root: &str) -> bool {
+    app.library_classes.iter().any(|lc| {
+        class_id_under_root(lc.parent.as_ref(), root)
+            || lc.includes.iter().any(|id| class_id_under_root(Some(id), root))
+    }) || app.models.iter().any(|m| class_id_under_root(m.parent.as_ref(), root))
+}
+
+fn class_id_under_root(id: Option<&ClassId>, root: &str) -> bool {
+    id.is_some_and(|id| {
+        let name = id.0.as_str();
+        name == root || name.starts_with(&format!("{root}::"))
+    })
 }
 
 fn names_root(expr: &Expr, root: &str) -> bool {
@@ -41,6 +59,50 @@ fn names_root(expr: &Expr, root: &str) -> bool {
 
 pub(crate) fn refuse_references(app: &mut App, target: &str, refusal: &Refusal<'_>) {
     crate::lower::for_each_emit_body(app, &mut |body| rewrite(body, target, refusal));
+    refuse_declarations(app, target, refusal);
+}
+
+fn refuse_declarations(app: &mut App, target: &str, refusal: &Refusal<'_>) {
+    for lc in &mut app.library_classes {
+        if class_id_under_root(lc.parent.as_ref(), refusal.root) {
+            let name = lc.parent.as_ref().unwrap().0.as_str().to_string();
+            report_decl(lc.parent_span, target, refusal, &name);
+            lc.parent = None;
+        }
+        let mut kept = Vec::new();
+        let mut kept_spans = Vec::new();
+        for (i, id) in lc.includes.iter().enumerate() {
+            if class_id_under_root(Some(id), refusal.root) {
+                let span = lc.include_spans.get(i).copied().unwrap_or(Span::synthetic());
+                report_decl(span, target, refusal, id.0.as_str());
+            } else {
+                kept.push(id.clone());
+                if let Some(span) = lc.include_spans.get(i) {
+                    kept_spans.push(*span);
+                }
+            }
+        }
+        lc.includes = kept;
+        if !lc.include_spans.is_empty() {
+            lc.include_spans = kept_spans;
+        }
+    }
+    for model in &mut app.models {
+        if class_id_under_root(model.parent.as_ref(), refusal.root) {
+            let name = model.parent.as_ref().unwrap().0.as_str().to_string();
+            report_decl(model.parent_span, target, refusal, &name);
+            model.parent = None;
+        }
+    }
+}
+
+fn report_decl(span: Span, target: &str, refusal: &Refusal<'_>, name: &str) {
+    crate::emit::diagnostics::report_unsupported(
+        span,
+        target,
+        refusal.construct,
+        format!("`{name}` {}", refusal.why),
+    );
 }
 
 fn rewrite(expr: &mut Expr, target: &str, refusal: &Refusal<'_>) {

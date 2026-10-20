@@ -3673,6 +3673,89 @@ raise [r, hits].inspect unless r == "recovered" && hits == 2"#,
     }
 }
 
+/// A bare `Faraday` value (assignment / pass-through) still demands the
+/// gem on Ruby — `names_constant` would miss it; the RUNTIME_GEMS needle
+/// does not.
+#[test]
+fn faraday_as_a_value_declares_the_gem_on_ruby() {
+    let run = emit_and_run::real_blog()
+        .write(
+            "app/models/faraday_holder.rb",
+            "class FaradayHolder\n  CLIENT = Faraday\n  def self.client\n    CLIENT\n  end\nend\n",
+        )
+        .run_ruby(
+            r#"c = FaradayHolder.client
+raise c.inspect unless c.equal?(Faraday)"#,
+        );
+    run.assert_passes();
+    let gemfile = std::fs::read_to_string(run.emitted.join("Gemfile")).expect("Gemfile");
+    assert!(
+        gemfile.contains("gem \"faraday\""),
+        "Gemfile does not declare faraday for a bare Faraday value:\n{gemfile}"
+    );
+}
+
+/// A superclass that is only `Faraday::…` (no call in a body) is refused
+/// off the shipping targets — `gem_refusal` used to see only emit bodies.
+#[test]
+fn faraday_superclass_is_refused_off_ruby_and_jruby() {
+    let dir = std::env::temp_dir().join(format!("rh-faraday-super-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    for (path, text) in [
+        (
+            "db/schema.rb",
+            "ActiveRecord::Schema.define do\n  create_table \"posts\", force: :cascade do |t|\n    t.string \"title\"\n  end\nend\n",
+        ),
+        ("config/routes.rb", "Rails.application.routes.draw do\n  get \"/posts\", to: \"posts#index\"\nend\n"),
+        ("app/models/post.rb", "class Post < ApplicationRecord\nend\n"),
+        (
+            "app/models/ping_client.rb",
+            "class PingClient < Faraday::Connection\nend\n",
+        ),
+        (
+            "app/controllers/posts_controller.rb",
+            "class PostsController < ApplicationController\n  def index\n    render plain: PingClient.name\n  end\nend\n",
+        ),
+    ] {
+        let full = dir.join(path);
+        std::fs::create_dir_all(full.parent().unwrap()).unwrap();
+        std::fs::write(full, text).unwrap();
+    }
+    let mut app = roundhouse::ingest::ingest_app(&dir).expect("ingest");
+    let lower_diags = roundhouse::session::analyze_and_lower(&mut app);
+    assert!(
+        lower_diags.iter().all(|d| d.severity != roundhouse::diagnostic::Severity::Error),
+        "check is not clean: {lower_diags:?}"
+    );
+    for target in [roundhouse::project::BuildTarget::Ruby, roundhouse::project::BuildTarget::Jruby] {
+        let (errors, files) = oj_target_errors_and_text(&app, &dir, target);
+        assert!(!errors.iter().any(|e| e.contains("Faraday")), "{target:?} refused a superclass it ships:\n{}", errors.join("\n"));
+        assert!(
+            files.get("Gemfile").is_some_and(|g| g.contains("gem \"faraday\"")),
+            "{target:?} Gemfile does not declare faraday for Faraday::Connection superclass"
+        );
+    }
+    for target in [
+        roundhouse::project::BuildTarget::Spinel,
+        roundhouse::project::BuildTarget::Roda,
+        roundhouse::project::BuildTarget::Python,
+    ] {
+        let (errors, files) = oj_target_errors_and_text(&app, &dir, target);
+        assert!(
+            errors.iter().any(|e| e.contains("`Faraday::Connection`") && e.contains("only the ruby and jruby trees ship")),
+            "{target:?} did not refuse Faraday::Connection superclass:\n{}",
+            errors.join("\n")
+        );
+        let hits: Vec<_> = files
+            .iter()
+            .filter(|(path, text)| !path.ends_with(".map") && path.contains("ping_client") && text.contains("Faraday"))
+            .map(|(path, _)| path.clone())
+            .collect();
+        assert!(hits.is_empty(), "{target:?} emitted a Faraday superclass in {hits:?}");
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// No other target has an HTTP client behind `Faraday`: each call and
 /// constant is refused there, and no `Faraday` reference is emitted.
 #[test]
