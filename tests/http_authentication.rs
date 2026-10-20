@@ -138,7 +138,7 @@ fn the_spinel_tree_defines_the_http_auth_helpers_and_reads_the_header() {
     // this must include Authorization for the auth helpers to see credentials.
     assert!(
         file(&files, "main.rb")
-            .contains("request_obj.env[ActionDispatch::Http::Headers.env_name(name)] = value"),
+            .contains("request_obj.env[ActionDispatch::Http::Headers.env_name_from_header(name)] = value"),
         "main.rb does not map parsed headers into the request env"
     );
     // The route's captures reach the request through `Main.route_parameters`,
