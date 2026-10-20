@@ -61,3 +61,39 @@ fn strict_targets_emit_the_skip_without_errors() {
         assert!(errors.is_empty(), "{target:?}: {errors:#?}");
     }
 }
+
+/// The Roda/Sequel emit passes the flags to Sequel's validation helpers.
+/// Their `allow_nil:` skips nil, and their `allow_blank:` skips Sequel's
+/// `blank_object?` values (nil, false, whitespace-only Strings, empty
+/// collections), which is Rails' `blank?`. Without the options Sequel
+/// validated values Rails skips. `rank`'s own `allow_nil: false` wins, so
+/// it carries no option.
+#[test]
+fn the_roda_emit_passes_allow_nil_and_allow_blank_to_sequel() {
+    use roundhouse::project::BuildTarget;
+    let (emitted, errors) = app().emit(BuildTarget::Roda);
+    assert!(errors.is_empty(), "{errors:#?}");
+    let mut model = None;
+    let mut stack = vec![emitted.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        for entry in std::fs::read_dir(&dir).unwrap().flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                stack.push(path);
+            } else if let Ok(text) = std::fs::read_to_string(&path) {
+                if text.contains("class Policy") && text.contains("validates_") {
+                    model = Some(text);
+                }
+            }
+        }
+    }
+    let model = model.expect("an emitted Policy model with Sequel validations");
+    for line in [
+        "validates_numeric :min_favs, allow_nil: true",
+        "validates_operator :>=, 1, :min_favs, allow_nil: true",
+        "validates_integer :age, allow_blank: true",
+        "validates_numeric :rank\n",
+    ] {
+        assert!(model.contains(line), "{line:?} in:\n{model}");
+    }
+}
