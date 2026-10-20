@@ -1463,6 +1463,10 @@ pub(super) struct ClassConsts {
     regexes: std::collections::HashMap<String, (String, String)>,
     /// The class body calls `default_scope` (bare or on `self`).
     default_scoped: bool,
+    /// `NAME = %w[…]` / `%i[…]` / `[…]` of literals, `.freeze`d or an
+    /// alias of another folded list: the literals with their kind kept
+    /// (a Symbol is not a String), for `inclusion: { in: NAME }`.
+    lists: std::collections::HashMap<String, Vec<Literal>>,
 }
 
 impl ClassConsts {
@@ -1481,6 +1485,7 @@ impl ClassConsts {
             // The right-hand side reads the constants as they stand
             // before this write (Ruby evaluates it first)...
             let regex = out.regex(&value);
+            let list = out.list(&value);
             let scalar = out.scalar(&value);
             let labels = if scalar.is_none() { label_list(&value) } else { None };
             // A failure to ingest a value is not this pass's to report:
@@ -1495,11 +1500,15 @@ impl ClassConsts {
             // reassignment this pass can't fold (`LIMIT = 5` then
             // `LIMIT = compute`) must not leave the earlier value behind.
             out.regexes.remove(&name);
+            out.lists.remove(&name);
             out.scalars.remove(&name);
             out.labels.remove(&name);
             out.mappings.remove(&name);
             if let Some(re) = regex {
                 out.regexes.insert(name.clone(), re);
+            }
+            if let Some(list) = list {
+                out.lists.insert(name.clone(), list);
             }
             if let Some(lit) = scalar {
                 out.scalars.insert(name.clone(), lit);
@@ -1512,6 +1521,23 @@ impl ClassConsts {
             }
         }
         out
+    }
+
+    /// A list of literals the class body can fold: an array literal
+    /// (`%w[…]`, `%i[…]`, `[…]`) whose every element is a String, Symbol,
+    /// Integer, Float, `true`/`false` or `nil` literal, `.freeze`d or not,
+    /// or another folded list constant.
+    pub(super) fn list(&self, node: &Node<'_>) -> Option<Vec<Literal>> {
+        if let Some(call) = node.as_call_node() {
+            if constant_id_str(&call.name()) == "freeze" && call.arguments().is_none() {
+                return self.list(&call.receiver()?);
+            }
+            return None;
+        }
+        if let Some(cr) = node.as_constant_read_node() {
+            return self.lists.get(constant_id_str(&cr.name())).cloned();
+        }
+        node.as_array_node()?.elements().iter().map(|el| list_atom(&el)).collect()
     }
 
     /// A regex literal the class body can fold: a bare `/pattern/flags`
@@ -1697,6 +1723,29 @@ impl ClassConsts {
 }
 
 /// The bare labels of a `%i[…]` / `%w[…]` array (optionally `.freeze`d).
+/// One literal element of a folded list, kind kept.
+fn list_atom(node: &Node<'_>) -> Option<Literal> {
+    if let Some(text) = string_value(node) {
+        return Some(Literal::Str { value: text });
+    }
+    if let Some(text) = symbol_value(node) {
+        return Some(Literal::Sym { value: Symbol::from(text.as_str()) });
+    }
+    if let Some(i) = node.as_integer_node() {
+        return Some(Literal::Int { value: super::util::integer_i64(&i.value())? });
+    }
+    if let Some(f) = node.as_float_node() {
+        return Some(Literal::Float { value: f.value() });
+    }
+    if node.as_true_node().is_some() {
+        return Some(Literal::Bool { value: true });
+    }
+    if node.as_false_node().is_some() {
+        return Some(Literal::Bool { value: false });
+    }
+    node.as_nil_node().is_some().then_some(Literal::Nil)
+}
+
 fn label_list(node: &Node<'_>) -> Option<Vec<String>> {
     if let Some(call) = node.as_call_node() {
         if constant_id_str(&call.name()) == "freeze" && call.arguments().is_none() {

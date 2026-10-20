@@ -3541,3 +3541,52 @@ end
     assert!(validation_rules(&model).iter().all(|v| v.attribute.as_str() != "uri"), "self.default_scope keeps the gap");
     assert!(warnings.iter().any(|w| w.contains("validates :uri, uniqueness:")), "{warnings:?}");
 }
+
+/// `inclusion: { in: NAME }` folds a list constant with each element's
+/// kind kept; a computed list (`in: ->(r) { … }`) stays the reported gap.
+#[test]
+fn inclusion_in_a_list_constant_folds_with_its_kinds() {
+    let (model, warnings, _) = ingest_widget(
+        r#"
+class Widget < ApplicationRecord
+  MODES = %w(open approved).freeze
+  KINDS = %i[a b]
+  validates :mode, inclusion: { in: MODES }
+  validates :kind, inclusion: { in: KINDS }
+  validates :tier, inclusion: { in: ->(w) { w.class::MODES } }
+end
+"#,
+    );
+    let rules = validation_rules(&model);
+    let rule = |attr: &str| rules.iter().find(|v| v.attribute.as_str() == attr).copied();
+    assert!(
+        matches!(rule("mode").map(|v| v.rules.as_slice()), Some([roundhouse::dialect::ValidationRule::Inclusion { values, range: None }])
+            if values == &vec![Literal::Str { value: "open".into() }, Literal::Str { value: "approved".into() }]),
+        "{:?}", rule("mode")
+    );
+    assert!(
+        matches!(rule("kind").map(|v| v.rules.as_slice()), Some([roundhouse::dialect::ValidationRule::Inclusion { values, .. }])
+            if matches!(values.as_slice(), [Literal::Sym { .. }, Literal::Sym { .. }])),
+        "{:?}", rule("kind")
+    );
+    assert!(rule("tier").is_none(), "a lambda list stays a gap: {rules:?}");
+    assert!(warnings.iter().any(|w| w.contains("validates :tier, inclusion: in:")), "{warnings:?}");
+}
+
+/// A list constant reassigned to something ingest can't fold no longer
+/// carries the earlier list (#1143's last-write rule): the inclusion stays
+/// the reported gap.
+#[test]
+fn an_unfoldable_list_reassignment_drops_the_earlier_list() {
+    let (model, warnings, _) = ingest_widget(
+        r#"
+class Widget < ApplicationRecord
+  MODES = %w(open approved)
+  MODES = load_modes
+  validates :mode, inclusion: { in: MODES }
+end
+"#,
+    );
+    assert!(validation_rules(&model).iter().all(|v| v.attribute.as_str() != "mode"), "no stale list");
+    assert!(warnings.iter().any(|w| w.contains("validates :mode, inclusion: in:")), "{warnings:?}");
+}

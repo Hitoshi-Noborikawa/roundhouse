@@ -282,6 +282,8 @@ mod silent_lowerings;
 mod validates_options;
 #[path = "emit_and_run/validates_uniqueness.rs"]
 mod validates_uniqueness;
+#[path = "emit_and_run/validates_inclusion_constants.rs"]
+mod validates_inclusion_constants;
 #[path = "emit_and_run/validates_integer_constants.rs"]
 mod validates_integer_constants;
 #[path = "emit_and_run/validation_callback_on.rs"]
