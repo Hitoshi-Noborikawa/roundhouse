@@ -9342,7 +9342,8 @@ fn require_path_for_parent(parent: &ClassId, app: &App, classes: &[LibraryClass]
     if is_model_or_library_class(raw, app, classes)
     {
         // underscore: namespaced parents nest (see emit_library_class_decls).
-        return Some(format!("app/models/{}", crate::naming::underscore(raw)));
+        let owner = file_owner(raw, app, classes);
+        return Some(format!("app/models/{}", crate::naming::underscore(&owner)));
     }
     if is_controller_named(raw, app) {
         return Some(format!("app/controllers/{}", crate::naming::underscore(raw)));

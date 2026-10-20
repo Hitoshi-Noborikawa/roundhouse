@@ -1387,6 +1387,7 @@ fn gem_holder(names: Vec<String>, lock: Option<&crate::gems::Lockfile>) -> Optio
     // As `GemCensus::of` labels it: a gem locked from a `PATH` source is in-repo.
     let fate_of = |n: &str| match lock {
         Some(l) if l.is_in_repo(n) => crate::gems::GemFate::InRepo,
+        Some(l) if l.is_source(n) => crate::gems::GemFate::Source,
         _ => crate::gems::fate_of(n),
     };
     let first = names.first()?;

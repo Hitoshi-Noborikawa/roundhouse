@@ -31,6 +31,8 @@ mod branch_local_join;
 mod utc_zone_time;
 #[path = "emit_and_run/discard.rs"]
 mod discard;
+#[path = "emit_and_run/pundit_source.rs"]
+mod pundit_source;
 #[path = "emit_and_run/pay_exceptions.rs"]
 mod pay_exceptions;
 #[path = "emit_and_run/net_http_patch.rs"]
