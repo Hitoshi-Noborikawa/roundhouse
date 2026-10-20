@@ -6,9 +6,11 @@
 # Rails' `ActiveSupport::Testing::ConstantStubbing#stub_const`, as Rails
 # writes it: the constant is REPLACED for the block and put back after,
 # so code that reads it at call time (`Message::Pagination::PAGE_SIZE`,
-# `Opengraph::Fetch::TIMEOUT`) sees the stub. A compiled tree resolves
-# constants at build time and has no `const_set`; there the helper is
-# absent and the call fails as the gap it is.
+# `Opengraph::Fetch::TIMEOUT`) sees the stub. Most sites never reach
+# this: `lower::stub_const` rewrites them to a value stack every target
+# shares. What is left is a stub that changes the constant's type, or
+# one read reflectively (`const_get`) — here the real helper answers
+# them; the spinel harness's fails the test saying why.
 class TestBase
   def stub_const(mod, constant, new_value)
     old_value = mod.const_get(constant, false)
@@ -28,6 +30,8 @@ end
 # Nokogiri; the shared harness's `Dom` is a scanner that matches a
 # selector's LAST compound and keeps no per-element attributes, so a
 # descendant selector read from it would answer for the whole page.
+# A spinel tree that carries spinel-nokogiri gets the same helper
+# (`project::SPINEL_CSS_SELECT`).
 require "nokogiri"
 
 # rails-dom-testing parses with HTML5 where Nokogiri has the parser and
@@ -53,8 +57,9 @@ module ActionCable
         else
           Broadcasts.log.select { |entry| entry[:stream] == stream }
         end
-      # The CRuby tree logs the Hash it publishes, the spinel tree the
-      # JSON text; both compare after the same round trip.
+      # The CRuby tree logs the Hash it publishes; the shared harness's
+      # version, which this replaces, reads the spinel tree's JSON text.
+      # Both compare after the same round trip.
       wire = ->(value) { ::JSON.parse(value.is_a?(String) ? value : ::JSON.generate(value)) }
       want = wire.(data)
       payloads = entries.map { |entry| entry[:payload] }.compact
@@ -65,82 +70,9 @@ module ActionCable
   end
 end
 
-# `ActiveSupport::Notifications.subscribe(pattern) { |name, start,
-# finish, id, payload| … }` / `unsubscribe(subscriber)` for the cache
-# events, `cache_read` / `cache_write.active_support` with the key in
-# the payload, which campfire's caching test reads to learn which
-# fragments were cached. The store's typed seam (`read_str` /
-# `write_str`, every view `cache` and `cached: true` render) reports
-# them while anyone listens. The keys are Rails' shape
-# (`views/messages/_message/messages/4-…`), template path included.
-# A pattern is a String (the exact name) or a Regexp, as in Rails.
-# The spinel tree has no subscriber list; there the call is the gap.
-module ActiveSupport
-  module Notifications
-    @subscribers = []
-
-    def self.subscribe(pattern, callback = nil, &block)
-      subscriber = [pattern, callback || block]
-      @subscribers << subscriber
-      subscriber
-    end
-
-    def self.unsubscribe(subscriber)
-      @subscribers.delete(subscriber)
-      nil
-    end
-
-    def self.listening?(name)
-      @subscribers.any? { |pattern, _| pattern === name }
-    end
-
-    # A one-argument callback gets an `Event`, as Rails hands one to a
-    # subscriber whose block or callable takes one (`->(event) {
-    # event.payload[:hits] }`); any other arity gets the five arguments.
-    def self.instrument(name, payload)
-      return unless listening?(name)
-      now = Time.now
-      @subscribers.dup.each do |pattern, callback|
-        next unless pattern === name
-        if callback.arity == 1
-          callback.call(Event.new(name, now, now, nil, payload))
-        else
-          callback.call(name, now, now, nil, payload)
-        end
-      end
-    end
-
-    class Event
-      attr_reader :name, :time, :end, :transaction_id, :payload
-
-      def initialize(name, start, ending, transaction_id, payload)
-        @name = name
-        @time = start
-        @end = ending
-        @transaction_id = transaction_id
-        @payload = payload
-      end
-    end
-
-    # `subscribed(callback, name) { … }` for every event this file
-    # reports, not just SQL: subscribed for the block, unsubscribed
-    # after, as Rails does. SQL keeps the shared harness's capture,
-    # which reads every statement and is not an instrument call here.
-    class << self
-      alias_method :__rh_shared_subscribed, :subscribed
-
-      def subscribed(callback, name, &block)
-        return __rh_shared_subscribed(callback, name, &block) if name == "sql.active_record"
-        subscriber = subscribe(name, callback)
-        begin
-          block.call
-        ensure
-          unsubscribe(subscriber)
-        end
-      end
-    end
-  end
-end
+# Cache events go through `ActiveSupport::Notifications` in
+# runtime/ruby/active_support_notifications.rb. This overlay used to
+# keep a second subscriber list; the store below only publishes.
 
 # ActiveSupport's own store reports what Rails' does: `cache_read` with
 # the normalized key and `hit`, `cache_write`, and `cache_read_multi`

@@ -660,16 +660,31 @@ fn call_syntax_kept(call: &Expr, sources: &[SourceFile]) -> bool {
 
 /// A `define_method` as written has no splat, nested `def`, `defined?`,
 /// and its block takes plain parameters: what the IR would have erased
-/// into a simpler, different definition.
+/// into a simpler, different definition. A splat in a rescue clause's
+/// class list (`rescue Timeout::Error, *ERRORS => e`) is not an argument
+/// splat: the IR keeps it as written, a `Splat` among the clause's
+/// classes, so it erases nothing.
 fn definition_syntax_kept(statement: &Expr, sources: &[SourceFile]) -> bool {
     let Some(text) = source_text(statement.span, sources) else { return false };
     let parsed = ruby_prism::parse(text);
     if parsed.errors().next().is_some() {
         return false;
     }
-    struct Erased(bool);
+    struct Erased(bool, std::collections::HashSet<usize>);
     impl<'pr> ruby_prism::Visit<'pr> for Erased {
+        fn visit_rescue_node(&mut self, node: &ruby_prism::RescueNode<'pr>) {
+            for e in node.exceptions().iter() {
+                if e.as_splat_node().is_some() {
+                    self.1.insert(e.location().start_offset());
+                }
+            }
+            ruby_prism::visit_rescue_node(self, node);
+        }
+
         fn visit_branch_node_enter(&mut self, node: ruby_prism::Node<'pr>) {
+            if node.as_splat_node().is_some() && self.1.contains(&node.location().start_offset()) {
+                return;
+            }
             self.0 |= node.as_splat_node().is_some()
                 || node.as_assoc_splat_node().is_some()
                 || node.as_def_node().is_some()
@@ -680,7 +695,7 @@ fn definition_syntax_kept(statement: &Expr, sources: &[SourceFile]) -> bool {
                 || node.as_block_parameter_node().is_some();
         }
     }
-    let mut erased = Erased(false);
+    let mut erased = Erased(false, Default::default());
     ruby_prism::Visit::visit(&mut erased, &parsed.node());
     !erased.0
 }

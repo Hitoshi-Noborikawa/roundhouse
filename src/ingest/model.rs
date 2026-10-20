@@ -23,204 +23,17 @@ use super::util::{
 };
 use super::{IngestError, IngestResult};
 
-/// Namespace module → the `table_name_prefix` it declares. Rails walks a
-/// model's `module_parents` looking for this and prepends what it finds,
-/// which is the ONLY thing that puts a namespace into a table name (the
-/// name itself is demodulized — see `naming::rails_table_name`).
-///
-/// campfire's `app/models/push.rb` is four lines and exists solely for
-/// this: without it `Push::Subscription` reads `subscriptions`, and its
-/// table is `push_subscriptions`.
-pub type TablePrefixes = std::collections::HashMap<String, String>;
-
 mod enum_constants;
 pub(in crate::ingest) use enum_constants::EnumConstants;
 
-/// Scan one file for `module <Ns>; def self.table_name_prefix; "<p>"; end`,
-/// or the same def inside the module's `class << self`.
-/// Deliberately narrow: only a module-level singleton def whose body is a
-/// single string literal. A computed prefix would have to run to be known,
-/// and nothing in the corpus writes one.
-pub fn ingest_table_name_prefixes(source: &[u8], file: &str) -> TablePrefixes {
-    fn literal_prefix(def: &ruby_prism::DefNode<'_>) -> Option<String> {
-        if constant_id_str(&def.name()) != "table_name_prefix" {
-            return None;
-        }
-        let stmts = flatten_statements(def.body()?);
-        if stmts.len() != 1 {
-            return None;
-        }
-        string_value(&stmts[0])
-    }
-    let result = super::prism::parse(source, file);
-    let root = result.node();
-    let mut out = TablePrefixes::new();
-    for (scope, module) in super::util::find_all_modules_with_scope(&root) {
-        let Some(name_path) = super::util::module_name_path(&module) else {
-            continue;
-        };
-        let mut full = scope;
-        full.extend(name_path);
-        let Some(body) = module.body() else { continue };
-        let stmts = flatten_statements(body);
-        // `extend self` makes every instance method a singleton one too, so a
-        // nested module can override an outer `ledger_` with a plain
-        // `def table_name_prefix = ""`.
-        let extends_self = stmts.iter().any(|s| {
-            s.as_call_node().is_some_and(|c| {
-                c.receiver().is_none()
-                    && constant_id_str(&c.name()) == "extend"
-                    && c.arguments().is_some_and(|a| {
-                        let args: Vec<_> = a.arguments().iter().collect();
-                        args.len() == 1 && args[0].as_self_node().is_some()
-                    })
-            })
-        });
-        for stmt in stmts {
-            if let Some(def) = stmt.as_def_node() {
-                let singleton = match def.receiver() {
-                    Some(r) => r.as_self_node().is_some(),
-                    None => extends_self,
-                };
-                if !singleton {
-                    continue;
-                }
-                if let Some(prefix) = literal_prefix(&def) {
-                    out.insert(full.join("::"), prefix);
-                }
-            } else if let Some(sclass) = stmt.as_singleton_class_node() {
-                if sclass.expression().as_self_node().is_none() {
-                    continue;
-                }
-                let Some(sbody) = sclass.body() else { continue };
-                for inner in flatten_statements(sbody) {
-                    let Some(def) = inner.as_def_node() else { continue };
-                    if def.receiver().is_some() {
-                        continue;
-                    }
-                    if let Some(prefix) = literal_prefix(&def) {
-                        out.insert(full.join("::"), prefix);
-                    }
-                }
-            }
-        }
-    }
-    out
-}
+mod table_prefix;
+pub use table_prefix::{
+    ingest_class_table_prefixes, ingest_isolated_namespace_prefixes, ingest_table_name_prefixes,
+    inherited_table_prefixes, TablePrefixes,
+};
 
-/// `isolate_namespace Billing` in an engine body: Rails defines
-/// `Billing.table_name_prefix` as the engine name and `_`
-/// (`billing_`), unless the module already declares one. A
-/// `Billing::Rate` with no `table_name` read `rates` without the
-/// prefix, a table no schema has, and every column read on it was
-/// `no known method`. The written module is the enclosing one it names
-/// (`module Billing; class Engine`), else the name as written.
-pub fn ingest_isolated_namespace_prefixes(source: &[u8], file: &str) -> TablePrefixes {
-    let result = super::prism::parse(source, file);
-    let root = result.node();
-    let mut out = TablePrefixes::default();
-    for (scope, class) in super::util::find_all_classes_with_scope(&root) {
-        let Some(body) = class.body() else { continue };
-        let mut nesting = scope;
-        nesting.extend(class_name_path(&class).unwrap_or_default());
-        for stmt in flatten_statements(body) {
-            let Some(call) = stmt.as_call_node() else { continue };
-            if call.receiver().is_some() || constant_id_str(&call.name()) != "isolate_namespace" {
-                continue;
-            }
-            let Some(arg) = call.arguments().and_then(|args| args.arguments().iter().next()) else { continue };
-            let Some(written) = constant_path_of(&arg) else { continue };
-            let rooted = arg.as_constant_path_node().is_some_and(|p| super::util::constant_path_is_rooted(&p));
-            let enclosing = (!rooted)
-                .then(|| nesting[..nesting.len().saturating_sub(1)].iter().rposition(|s| *s == written[0]))
-                .flatten();
-            let full = match enclosing {
-                Some(at) => nesting[..at].iter().chain(&written).cloned().collect::<Vec<_>>().join("::"),
-                None => written.join("::"),
-            };
-            let prefix = format!("{}_", crate::naming::underscore(&full).replace('/', "_"));
-            out.insert(full, prefix);
-        }
-    }
-    out
-}
-
-/// Each class one file declares with its own `self.table_name_prefix =
-/// "…"`, by full name. Rails keeps the prefix in a class attribute, so a
-/// model inherits it from its abstract base: an abstract
-/// `PrefixedRecord` that sets `legacy_` gives its
-/// models (`Line`, …) that name no table `legacy_lines`.
-pub fn ingest_class_table_prefixes(source: &[u8], file: &str) -> TablePrefixes {
-    let result = super::prism::parse(source, file);
-    let root = result.node();
-    let mut out = TablePrefixes::default();
-    for (mut scope, class) in super::util::find_all_classes_with_scope(&root) {
-        let Some(prefix) = class.body().and_then(explicit_table_prefix) else { continue };
-        let Some(path) = class_name_path(&class) else { continue };
-        scope.extend(path);
-        out.insert(scope.join("::"), prefix);
-    }
-    out
-}
-
-/// The prefix each abstract base passes down: its own, else its parent's.
-/// `pairs` are the pre-pass's `(abstract class, parent)` pairs; a bare
-/// parent is found the way Ruby finds it, the child's enclosing scopes first.
-pub fn inherited_table_prefixes(own: &TablePrefixes, pairs: &[(String, String)]) -> TablePrefixes {
-    let parents: std::collections::HashMap<&str, &str> = pairs.iter().map(|(c, p)| (c.as_str(), p.as_str())).collect();
-    let known = |name: &str| own.contains_key(name) || parents.contains_key(name);
-    let resolve = |child: &str, parent: &str| -> String {
-        let mut segments: Vec<&str> = child.split("::").collect();
-        segments.pop();
-        while !segments.is_empty() {
-            let candidate = format!("{}::{parent}", segments.join("::"));
-            if known(&candidate) {
-                return candidate;
-            }
-            segments.pop();
-        }
-        parent.to_string()
-    };
-    let mut out = TablePrefixes::default();
-    for (child, _) in pairs {
-        let mut at = child.clone();
-        // A cycle guard: the walk follows `parent` links, so a cyclic
-        // hierarchy must end somewhere.
-        for _ in 0..16 {
-            if let Some(prefix) = own.get(&at) {
-                out.insert(child.clone(), prefix.clone());
-                break;
-            }
-            let Some(parent) = parents.get(at.as_str()) else { break };
-            at = resolve(&at, parent);
-        }
-    }
-    out
-}
-
-/// `self.table_name_prefix = "three_d_secure_"` in a model body: the
-/// class's own prefix, which wins over any namespace module's.
-fn explicit_table_prefix(body: ruby_prism::Node<'_>) -> Option<String> {
-    explicit_class_setting(body, "table_name_prefix=")
-}
-
-fn explicit_class_setting(body: ruby_prism::Node<'_>, setter: &str) -> Option<String> {
-    for stmt in flatten_statements(body) {
-        let Some(call) = stmt.as_call_node() else { continue };
-        if constant_id_str(&call.name()) != setter {
-            continue;
-        }
-        if call.receiver().and_then(|r| r.as_self_node()).is_none() {
-            continue;
-        }
-        let args = call.arguments()?;
-        let first = args.arguments().iter().next()?;
-        if let Some(name) = string_value(&first).or_else(|| symbol_value(&first)) {
-            return Some(name);
-        }
-    }
-    None
-}
+mod validations;
+use validations::{parse_validates_call, validation_items, ParsedValidates, ValidatesKind};
 
 /// Parse a single model file. The first class definition is treated as the
 /// model; any schema-derived attributes are filled in from `schema`.
@@ -284,7 +97,7 @@ pub(super) fn ingest_model_with_enum_constants(
     } else {
         let mut segments: Vec<&str> = class_name.as_str().split("::").collect();
         segments.pop();
-        let mut prefix = class.body().and_then(explicit_table_prefix).unwrap_or_default();
+        let mut prefix = class.body().and_then(table_prefix::explicit_table_prefix).unwrap_or_default();
         let mut from_module = false;
         while prefix.is_empty() && !segments.is_empty() {
             if let Some(p) = prefixes.get(&segments.join("::")) {
@@ -324,7 +137,8 @@ pub(super) fn ingest_model_with_enum_constants(
     let mut enum_defaults: IndexMap<Symbol, Literal> = IndexMap::new();
     let mut class_attr_defaults: IndexMap<Symbol, Expr> = IndexMap::new();
     let mut primary_key: Option<Symbol> = None;
-    let visibility = Visibility::resolve(class.body().as_ref(), file, None)?;
+    let visibility = Visibility::resolve_carrying_inherited(class.body().as_ref(), file, None)?;
+    let mut carried_markers: std::collections::HashSet<usize> = std::collections::HashSet::new();
     if let Some(class_body) = class.body() {
         let mut prev_end: Option<usize> = None;
         // Constants the class body assigns, for `enum :x, CONST` and for
@@ -337,6 +151,12 @@ pub(super) fn ingest_model_with_enum_constants(
             let stmt = definition.as_ref().unwrap_or(&statement);
             if stmt.as_def_node().is_none() && statement.as_call_node().is_some_and(|c| visibility::marker(&c)) {
                 prev_end = Some(statement.location().end_offset());
+                if visibility.names_inherited(&statement) {
+                    carried_markers.insert(statement.location().start_offset());
+                    let mut expr = ingest_expr(&statement, file)?;
+                    expr.decisions |= crate::expr::INHERITED_VISIBILITY;
+                    body.push(ModelBodyItem::Unknown { expr, leading_comments: Vec::new(), leading_blank_line: false });
+                }
                 continue;
             }
             // Explicit names override convention before schema binding.
@@ -585,6 +405,7 @@ pub(super) fn ingest_model_with_enum_constants(
             prev_end = Some(stmt.location().end_offset());
         }
     }
+    visibility.uncarried_inherited(&carried_markers, file)?;
 
     let parent_span = class
         .superclass()
@@ -646,9 +467,7 @@ fn model_alias_method_copy(call: &ruby_prism::CallNode<'_>, body: &[ModelBodyIte
     if calls_super(&source.body) {
         return None;
     }
-    let mut copy = source.clone();
-    copy.name = Symbol::from(to.as_str());
-    Some(copy)
+    Some(super::library_class::copy_aliased_method(source, to.as_str()))
 }
 
 /// Classify one class-body statement into its `ModelBodyItem` variant.
@@ -664,10 +483,11 @@ fn model_alias_method_copy(call: &ruby_prism::CallNode<'_>, body: &[ModelBodyIte
 /// The `validates_*_of` family is the same declaration in Rails' older
 /// spelling — `validates_presence_of :a` IS `validates :a, presence:
 /// true` — so it lands here rather than growing a second rule table.
-/// BARE SYMBOLS ONLY: an options hash (`allow_nil:`, `if:`, `on:`)
-/// narrows or reshapes the check, and the call falls through to the
-/// unsupported-DSL ledger rather than being flattened into an
-/// unconditional one.
+/// Presence and absence stay BARE SYMBOLS ONLY: an options hash
+/// (`allow_nil:`, `if:`, `on:`) narrows the check, and that call falls
+/// through to the unsupported-DSL ledger rather than being flattened
+/// into an unconditional one. Numericality, inclusion, and format use
+/// the same option parse as `validates`.
 pub(super) fn ingest_model_body_items(
     stmt: &Node<'_>,
     owner: &ClassId,
@@ -684,14 +504,28 @@ pub(super) fn ingest_model_body_items(
     if let Some(call) = stmt.as_call_node() {
         if call.receiver().is_none() {
             let name = constant_id_str(&call.name()).to_string();
+            let of_kind = match name.as_str() {
+                "validates_numericality_of" => Some(ValidatesKind::Numericality),
+                "validates_inclusion_of" => Some(ValidatesKind::Inclusion),
+                "validates_format_of" => Some(ValidatesKind::Format),
+                _ => None,
+            };
+            if name == "validates" || of_kind.is_some() {
+                let kind = of_kind.unwrap_or(ValidatesKind::Map);
+                match parse_validates_call(&call, file, kind) {
+                    ParsedValidates::Gap => return Ok(Vec::new()),
+                    ParsedValidates::Modeled(parsed) if !parsed.is_empty() => {
+                        return Ok(validation_items(parsed, leading_comments, span));
+                    }
+                    ParsedValidates::Decline | ParsedValidates::Modeled(_) => {}
+                }
+            }
             let rule = match name.as_str() {
                 "validates_presence_of" => Some(ValidationRule::Presence),
                 "validates_absence_of" => Some(ValidationRule::Absence),
                 _ => None,
             };
-            let parsed: Vec<Validation> = if name == "validates" {
-                parse_validates(&call)
-            } else if let Some(rule) = rule.clone() {
+            let parsed: Vec<Validation> = if let Some(rule) = rule.clone() {
                 let args: Vec<Node<'_>> = call
                     .arguments()
                     .map(|a| a.arguments().iter().collect())
@@ -703,7 +537,12 @@ pub(super) fn ingest_model_body_items(
                 if attrs.len() == args.len() && !attrs.is_empty() {
                     attrs
                         .into_iter()
-                        .map(|attribute| Validation { attribute, rules: vec![rule.clone()] })
+                        .map(|attribute| Validation {
+                            attribute,
+                            rules: vec![rule.clone()],
+                            if_cond: None,
+                            unless_cond: None,
+                        })
                         .collect()
                 } else {
                     Vec::new()
@@ -712,22 +551,7 @@ pub(super) fn ingest_model_body_items(
                 Vec::new()
             };
             if parsed.len() > 1 || (rule.is_some() && !parsed.is_empty()) {
-                return Ok(parsed
-                    .into_iter()
-                    .enumerate()
-                    .map(|(i, validation)| ModelBodyItem::Validation {
-                        validation,
-                        // The declaration's comments belong to the
-                        // first of the items it expands to.
-                        leading_comments: if i == 0 {
-                            leading_comments.clone()
-                        } else {
-                            Vec::new()
-                        },
-                        leading_blank_line: false,
-                        span,
-                    })
-                    .collect());
+                return Ok(validation_items(parsed, leading_comments, span));
             }
             // `cattr_*` / `mattr_*` — same class-attr expansion library
             // ingest applies. Plain `attr_*` stays Unknown: concern
@@ -1104,49 +928,14 @@ pub(super) fn ingest_model_body_item(
                                 unless_method: unless_method.clone(),
                             })
                             .collect(),
+                        if_cond: None,
+                        unless_cond: None,
                     },
                     leading_comments,
                     leading_blank_line: false,
                     span,
                 });
             }
-        }
-        if method == "validates" {
-            let mut parsed = parse_validates(&call);
-            if let Some(first) = parsed.first().cloned() {
-                // `validates :attr` with multiple rules is one call; we
-                // only see one Validation per call today. If the call
-                // expanded to multiple (the multi-attribute form), they
-                // share leading comments only on the first.
-                let mut items = Vec::with_capacity(parsed.len());
-                items.push(ModelBodyItem::Validation {
-                    validation: first,
-                    leading_comments,
-                    leading_blank_line: false,
-                    span,
-                });
-                for v in parsed.drain(1..) {
-                    items.push(ModelBodyItem::Validation {
-                        validation: v,
-                        leading_comments: Vec::new(),
-                        leading_blank_line: false,
-                        span,
-                    });
-                }
-                // Degenerate: the caller expects ONE item. If parse_validates
-                // returned multiple, merge-ingest is a bit lossy — return
-                // the first and drop the tail (no real fixture triggers
-                // this yet; multi-attr validates is usually
-                // `validates :a, :b, rule: ...` and our current shape is
-                // one-Validation-per-attribute).
-                return Ok(items.into_iter().next().unwrap());
-            }
-            // No validation extracted — treat as Unknown so we don't lose it.
-            return Ok(ModelBodyItem::Unknown {
-                expr: ingest_expr(stmt, file)?,
-                leading_comments,
-                leading_blank_line: false,
-            });
         }
         if method == "scope" {
             if let Some(scope) = parse_scope(&call, file)? {
@@ -2449,10 +2238,18 @@ fn callback_condition(value: &ruby_prism::Node<'_>, file: &str) -> Option<Expr> 
 ///   `it` are parameters too);
 /// * exactly one statement, with no `return`/`next`/`break`/`redo`/
 ///   `retry` — inside the hook a `return` exits the whole callback chain;
-/// * no local writes — they would leak into the hook's scope. That
-///   includes a local bound through a target: a multi-write
-///   `(a, b = …)`, a `=> t` match-write, a `rescue => e`; and any
-///   multi-write declines, its targets being locals or not.
+/// * no local reads or writes of a name bound outside the expression.
+///   A read of a local captured from the class body
+///   (`flag = true; if: -> { flag }`) becomes a bare name inside
+///   `def validate` / the hook and raises `NameError`. A name bound by
+///   a nested block or lambda (`tags.any? { |tag| tag.blank? }`,
+///   `{ _1 }`, `{ it }`) stays: that binding is still in the spliced
+///   expression. A block local (`{ |; tmp| tmp }`) is not — the
+///   lowered block drops that declaration, so the read would be a
+///   bare name. A write would leak into the
+///   hook's scope. That includes a local bound through a target: a
+///   multi-write `(a, b = …)`, a `=> t` match-write, a `rescue => e`;
+///   and any multi-write declines, its targets being locals or not.
 ///
 /// Anything else declines (`None`), and the callback falls back to the
 /// unsupported-DSL warning, as it did before conditions were modelled.
@@ -2473,38 +2270,124 @@ fn simple_condition_body<'pr>(
         return None;
     }
 
-    struct Escapes(bool);
+    struct Escapes {
+        bad: bool,
+        /// Names bound by nested blocks and lambdas still in scope.
+        bound: Vec<String>,
+    }
+    impl<'pr> Escapes {
+        fn push_binding(&mut self, name: &str) {
+            self.bound.push(name.to_string());
+        }
+
+        fn bind_parameters(&mut self, params: Option<ruby_prism::Node<'pr>>) {
+            let Some(params) = params else { return };
+            if params.as_it_parameters_node().is_some() {
+                self.push_binding("it");
+                return;
+            }
+            if let Some(numbered) = params.as_numbered_parameters_node() {
+                for n in 1..=numbered.maximum() {
+                    self.push_binding(&format!("_{n}"));
+                }
+                return;
+            }
+            let Some(block_params) = params.as_block_parameters_node() else { return };
+            // `|; tmp|` declares a local the lowered block does not
+            // keep. A read of that name would emit as a bare `tmp`.
+            let Some(pn) = block_params.parameters() else { return };
+            let bind_list = |this: &mut Self, list: ruby_prism::NodeList<'pr>| {
+                for node in list.iter() {
+                    this.bind_parameter(&node);
+                }
+            };
+            bind_list(self, pn.requireds());
+            bind_list(self, pn.optionals());
+            bind_list(self, pn.posts());
+            bind_list(self, pn.keywords());
+            if let Some(rest) = pn.rest() {
+                self.bind_parameter(&rest);
+            }
+            if let Some(rest) = pn.keyword_rest() {
+                self.bind_parameter(&rest);
+            }
+            if let Some(block) = pn.block() {
+                if let Some(name) = block.name() {
+                    self.push_binding(&constant_id_str(&name));
+                }
+            }
+        }
+
+        fn bind_parameter(&mut self, node: &ruby_prism::Node<'pr>) {
+            let name = if let Some(param) = node.as_required_parameter_node() {
+                Some(constant_id_str(&param.name()))
+            } else if let Some(param) = node.as_optional_parameter_node() {
+                Some(constant_id_str(&param.name()))
+            } else if let Some(param) = node.as_rest_parameter_node() {
+                param.name().as_ref().map(constant_id_str)
+            } else if let Some(param) = node.as_required_keyword_parameter_node() {
+                Some(constant_id_str(&param.name()))
+            } else if let Some(param) = node.as_optional_keyword_parameter_node() {
+                Some(constant_id_str(&param.name()))
+            } else if let Some(param) = node.as_keyword_rest_parameter_node() {
+                param.name().as_ref().map(constant_id_str)
+            } else {
+                None
+            };
+            if let Some(name) = name {
+                self.push_binding(&name);
+            }
+        }
+    }
     impl<'pr> ruby_prism::Visit<'pr> for Escapes {
-        fn visit_return_node(&mut self, _: &ruby_prism::ReturnNode<'pr>) { self.0 = true; }
-        fn visit_next_node(&mut self, _: &ruby_prism::NextNode<'pr>) { self.0 = true; }
-        fn visit_break_node(&mut self, _: &ruby_prism::BreakNode<'pr>) { self.0 = true; }
-        fn visit_redo_node(&mut self, _: &ruby_prism::RedoNode<'pr>) { self.0 = true; }
-        fn visit_retry_node(&mut self, _: &ruby_prism::RetryNode<'pr>) { self.0 = true; }
+        fn visit_block_node(&mut self, node: &ruby_prism::BlockNode<'pr>) {
+            let mark = self.bound.len();
+            self.bind_parameters(node.parameters());
+            ruby_prism::visit_block_node(self, node);
+            self.bound.truncate(mark);
+        }
+        fn visit_lambda_node(&mut self, node: &ruby_prism::LambdaNode<'pr>) {
+            let mark = self.bound.len();
+            self.bind_parameters(node.parameters());
+            ruby_prism::visit_lambda_node(self, node);
+            self.bound.truncate(mark);
+        }
+        fn visit_local_variable_read_node(&mut self, node: &ruby_prism::LocalVariableReadNode<'pr>) {
+            let name = constant_id_str(&node.name());
+            if !self.bound.iter().any(|bound| bound == name) {
+                self.bad = true;
+            }
+        }
+        fn visit_return_node(&mut self, _: &ruby_prism::ReturnNode<'pr>) { self.bad = true; }
+        fn visit_next_node(&mut self, _: &ruby_prism::NextNode<'pr>) { self.bad = true; }
+        fn visit_break_node(&mut self, _: &ruby_prism::BreakNode<'pr>) { self.bad = true; }
+        fn visit_redo_node(&mut self, _: &ruby_prism::RedoNode<'pr>) { self.bad = true; }
+        fn visit_retry_node(&mut self, _: &ruby_prism::RetryNode<'pr>) { self.bad = true; }
         fn visit_local_variable_write_node(&mut self, _: &ruby_prism::LocalVariableWriteNode<'pr>) {
-            self.0 = true;
+            self.bad = true;
         }
         fn visit_local_variable_operator_write_node(
             &mut self,
             _: &ruby_prism::LocalVariableOperatorWriteNode<'pr>,
         ) {
-            self.0 = true;
+            self.bad = true;
         }
         fn visit_local_variable_or_write_node(&mut self, _: &ruby_prism::LocalVariableOrWriteNode<'pr>) {
-            self.0 = true;
+            self.bad = true;
         }
         fn visit_local_variable_and_write_node(&mut self, _: &ruby_prism::LocalVariableAndWriteNode<'pr>) {
-            self.0 = true;
+            self.bad = true;
         }
         fn visit_local_variable_target_node(&mut self, _: &ruby_prism::LocalVariableTargetNode<'pr>) {
-            self.0 = true;
+            self.bad = true;
         }
         fn visit_multi_write_node(&mut self, _: &ruby_prism::MultiWriteNode<'pr>) {
-            self.0 = true;
+            self.bad = true;
         }
     }
-    let mut v = Escapes(false);
+    let mut v = Escapes { bad: false, bound: Vec::new() };
     ruby_prism::Visit::visit(&mut v, &only);
-    if v.0 { None } else { Some(only) }
+    if v.bad { None } else { Some(only) }
 }
 
 fn negate_condition(cond: Expr) -> Expr {
@@ -2710,133 +2593,6 @@ fn spelled_lambda_parts<'a>(
     }
     let block = call.block()?.as_block_node()?;
     Some((block.parameters(), block.body()))
-}
-
-fn parse_validates(call: &ruby_prism::CallNode<'_>) -> Vec<crate::dialect::Validation> {
-    use crate::dialect::{Validation, ValidationRule};
-    let Some(args) = call.arguments() else { return vec![] };
-    let all_args = args.arguments();
-
-    let mut attrs: Vec<Symbol> = Vec::new();
-    let mut rules: Vec<ValidationRule> = Vec::new();
-    let mut allow_blank = false;
-    // Sibling of `length:`, as in `validates :body, length: { minimum: 10 }, allow_nil: true`.
-    // An `allow_nil` inside the length hash wins; this fills only a rule that did not say.
-    let mut allow_nil: Option<bool> = None;
-
-    for arg in all_args.iter() {
-        if let Some(sym) = symbol_value(&arg) {
-            attrs.push(Symbol::from(sym.as_str()));
-        } else if let Some(kh) = arg.as_keyword_hash_node() {
-            for el in kh.elements().iter() {
-                let Some(assoc) = el.as_assoc_node() else { continue };
-                let Some(key) = symbol_value(&assoc.key()) else { continue };
-                let value = assoc.value();
-                if key.as_str() == "allow_blank" {
-                    allow_blank = super::util::bool_value(&value).unwrap_or(false);
-                } else if key.as_str() == "allow_nil" {
-                    allow_nil = super::util::bool_value(&value);
-                } else if let Some(rule) = validation_rule_from_kv(&key, &value) {
-                    rules.push(rule);
-                }
-            }
-        }
-    }
-    if let Some(flag) = allow_nil {
-        for rule in &mut rules {
-            if let ValidationRule::Length { allow_nil: slot, .. } = rule {
-                if slot.is_none() {
-                    *slot = Some(flag);
-                }
-            }
-        }
-    }
-
-    // `presence: true, allow_blank: true` is a dead check: presence
-    // fails only when the value is blank, and allow_blank skips every
-    // validator on blank values — so it can never fire (Rails runs
-    // validations BEFORE before_save, so e.g. lobsters' `validates
-    // :session_token, allow_blank: true, presence: true` relies on
-    // this: the token is generated in a before_save). Dropping it here
-    // fixes both lowering paths at once. The remaining parsed rule
-    // kinds are blank-safe as emitted (MaxLength trivially passes on
-    // blank; Absence wants blank); when MinLength/Format/Uniqueness
-    // gain allow_blank fixtures they'll need a skip-when-blank guard
-    // on the check instead of a drop.
-    if allow_blank {
-        rules.retain(|r| !matches!(r, ValidationRule::Presence));
-    }
-
-    let mut out = Vec::new();
-    for attr in attrs {
-        out.push(Validation { attribute: attr, rules: rules.clone() });
-    }
-    out
-}
-
-fn validation_rule_from_kv(
-    key: &str,
-    value: &ruby_prism::Node<'_>,
-) -> Option<crate::dialect::ValidationRule> {
-    use super::util::bool_value;
-    use crate::dialect::ValidationRule;
-    match key {
-        "presence" => bool_value(value).filter(|b| *b).map(|_| ValidationRule::Presence),
-        "absence" => bool_value(value).filter(|b| *b).map(|_| ValidationRule::Absence),
-        "length" => parse_length_rule(value),
-        _ => None,
-    }
-}
-
-/// `length: { minimum: N, maximum: M }`. Either bound may be absent;
-/// the hash-value shape is the only one we accept today. The shorthand
-/// `length: 5` (exact length) isn't in any fixture yet and drops.
-fn parse_length_rule(value: &ruby_prism::Node<'_>) -> Option<crate::dialect::ValidationRule> {
-    use super::util::integer_value;
-    use crate::dialect::ValidationRule;
-    let hash = value.as_hash_node().or_else(|| {
-        // Rails idiomatically uses `{ ... }`, but a bare keyword-args
-        // shape (`length: { … }` parses as HashNode inside the kwargs,
-        // not KeywordHashNode). Keep KeywordHashNode as a fallback for
-        // defensive parsing.
-        None
-    });
-    let elements = if let Some(h) = hash {
-        h.elements()
-    } else if let Some(kh) = value.as_keyword_hash_node() {
-        kh.elements()
-    } else {
-        return None;
-    };
-
-    let mut min: Option<u32> = None;
-    let mut max: Option<u32> = None;
-    let mut allow_nil: Option<bool> = None;
-    for el in elements.iter() {
-        let Some(assoc) = el.as_assoc_node() else { continue };
-        let Some(key) = symbol_value(&assoc.key()) else { continue };
-        if key.as_str() == "allow_nil" {
-            allow_nil = super::util::bool_value(&assoc.value());
-            continue;
-        }
-        let Some(n) = integer_value(&assoc.value()) else { continue };
-        if n < 0 {
-            continue;
-        }
-        match key.as_str() {
-            "minimum" => min = Some(n as u32),
-            "maximum" => max = Some(n as u32),
-            // `is:` (exact), `in:` (range), `within:` land when a
-            // fixture demands them.
-            _ => {}
-        }
-    }
-
-    if min.is_none() && max.is_none() {
-        None
-    } else {
-        Some(ValidationRule::Length { min, max, message: None, allow_nil })
-    }
 }
 
 fn parse_association(
@@ -3307,6 +3063,12 @@ fn ty_of_column(t: &ColumnType) -> Ty {
         // separately in `lower::has_json`.
         ColumnType::Json | ColumnType::Jsonb => Ty::Untyped,
         ColumnType::Uuid => Ty::Str,
+        // Rails casts a PostgreSQL interval to ActiveSupport::Duration.
+        // Storage stays text (`lower::model_to_library::ty_of_column`).
+        ColumnType::Interval => Ty::Class {
+            id: crate::ident::ClassId(crate::ident::Symbol::from("ActiveSupport::Duration")),
+            args: vec![].into(),
+        },
         ColumnType::Reference { .. } => Ty::Int,
     }
 }

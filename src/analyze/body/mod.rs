@@ -53,6 +53,7 @@ fn forwarded_block_may_be_nil(ty: &Ty) -> bool {
 
 mod diagnostic;
 mod const_resolution;
+mod lambda_local;
 pub(crate) use const_resolution::{ConstResolver, ConstResolverTask};
 pub use const_resolution::PreparedConstResolver;
 use const_resolution::ResolvedConstant;
@@ -61,6 +62,8 @@ mod pagy;
 mod send;
 pub(crate) use send::PARAM_VALUE;
 pub(crate) use send::{indexed_pluck, string_answers};
+#[cfg(test)]
+pub(crate) use send::counted_first_last;
 
 /// Typed constants for generated expressions without Ruby source spans.
 /// The class's constants shadow the shared app registry. Source-backed
@@ -178,6 +181,7 @@ pub struct ClassInfo {
     pub constants: HashMap<Symbol, Ty>,
     /// If this class maps to a database table, which one.
     pub table: Option<crate::ident::TableRef>,
+    pub primary_key: Option<Symbol>,
     /// Instance-state shape (columns + attr_accessor).
     pub attributes: Row,
     /// Attributes of `attributes` that the app's own `def` replaces. A
@@ -186,6 +190,9 @@ pub struct ClassInfo {
     pub overridden_attributes: std::collections::HashSet<Symbol>,
     /// Methods callable on the class itself: `Post.all`, `Post.find(id)`.
     pub class_methods: HashMap<Symbol, Ty>,
+    /// Catalog entries and source methods can have the same gradual
+    /// return type, so a call-site refinement needs their provenance.
+    pub source_class_methods: std::collections::HashSet<Symbol>,
     /// Source declares its own class-side `new`, whose result need not be self.
     pub declares_constructor: bool,
     /// Which of `class_methods` had their return type inferred FROM a
@@ -288,6 +295,20 @@ pub struct ClassInfo {
 }
 
 impl ClassInfo {
+    pub(crate) fn source_class_method(
+        classes: &HashMap<ClassId, ClassInfo>, model: &ClassId, method: &Symbol,
+    ) -> bool {
+        let mut current = Some(model);
+        for _ in 0..32 {
+            let Some(class) = current.and_then(|id| classes.get(id)) else { return false };
+            if class.source_class_methods.contains(method) {
+                return true;
+            }
+            current = class.parent.as_ref();
+        }
+        false
+    }
+
     /// Whether `name` is one of this model's real SCHEMA TABLE columns.
     /// `attributes` is built once, straight off `Schema::tables` (see
     /// `ingest::model::row_from_table`), never merged with method-only
@@ -348,6 +369,7 @@ pub(crate) fn lexical_class<T>(
 /// without cloning.
 pub struct BodyTyper<'a> {
     classes: &'a HashMap<ClassId, ClassInfo>,
+    materialized_associations: Option<&'a std::collections::HashSet<Symbol>>,
     const_resolver: Option<std::sync::Arc<ConstResolver>>,
     typed_constants: Option<&'a IdentityHashMap<DeclarationId, Ty>>,
     data_factories: Option<&'a HashMap<crate::span::Span, Ty>>,
@@ -359,6 +381,10 @@ pub struct BodyTyper<'a> {
     /// The app's translations; Rails' English when absent.
     i18n: Option<&'a crate::i18n::Catalog>,
     helper_modules: Option<&'a std::collections::HashSet<ClassId>>,
+    open_classes: Option<&'a crate::analyze::open_classes::OpenClasses>,
+    /// Parameter types for the lambda assignment currently being retyped
+    /// from its `.call` sites. Empty during an ordinary walk.
+    lambda_seeds: std::cell::RefCell<Option<lambda_local::Seeds>>,
 }
 
 impl<'a> BodyTyper<'a> {
@@ -482,7 +508,136 @@ impl<'a> BodyTyper<'a> {
     }
 
     pub fn new(classes: &'a HashMap<ClassId, ClassInfo>) -> Self {
-        Self { classes, const_resolver: None, typed_constants: None, data_factories: None, class_factories: None, inquirers: None, i18n: None, helper_modules: None }
+        Self {
+            classes,
+            materialized_associations: None,
+            const_resolver: None,
+            typed_constants: None,
+            data_factories: None,
+            class_factories: None,
+            inquirers: None,
+            i18n: None,
+            helper_modules: None,
+            open_classes: None,
+            lambda_seeds: std::cell::RefCell::new(None),
+        }
+    }
+
+    /// Retype lambdas stored in this sequence once a later statement has
+    /// called them. Evidence is re-read from the statement and from every
+    /// stored lambda after each retype, so `run = ->(x) { add.call(x) }`
+    /// seeds `add` once `x` is known. The call statement is retyped once
+    /// at the end so its result sees the new returns.
+    fn refine_lambda_locals(
+        &self,
+        exprs: &mut [Expr],
+        stmt: usize,
+        local_ctx: &mut Ctx,
+        lambdas: &mut HashMap<Symbol, lambda_local::Stored>,
+        last: &mut Ty,
+    ) {
+        let mut stmt_dirty = false;
+        // Mutual recursion can wrap a parameter in a deeper array every
+        // round (`f` calls `g` calls `f`). `merge` only unions, and that
+        // union does not stop the nesting, so the loop needs a fuel cap.
+        let mut rounds = lambdas.len().saturating_mul(4).saturating_add(4);
+        loop {
+            if rounds == 0 {
+                break;
+            }
+            rounds -= 1;
+            let names: Vec<Symbol> = lambdas.keys().cloned().collect();
+            let mut seeded = Vec::new();
+            for name in &names {
+                let evidence = lambda_call_evidence(exprs, stmt, lambdas, name);
+                let Some(stored) = lambdas.get_mut(name) else { continue };
+                if lambda_local::merge(stored, &evidence) {
+                    seeded.push(name.clone());
+                }
+            }
+            if seeded.is_empty() {
+                break;
+            }
+            stmt_dirty = true;
+            self.retype_seeded_lambdas(exprs, local_ctx, lambdas, seeded);
+        }
+        if !stmt_dirty {
+            return;
+        }
+        // The statement is the lambda assignment itself. It was retyped
+        // with its seeds above; analyzing it again would type the lambda
+        // with none.
+        if lambdas.values().any(|stored| stored.index == stmt) {
+            *last = exprs[stmt].ty.clone().unwrap_or_else(unknown);
+            return;
+        }
+        *last = self.analyze_expr(&mut exprs[stmt], local_ctx);
+    }
+
+    /// Retype each seeded lambda, then any lambda whose body calls one
+    /// whose type just changed. `merge` only unions, and a retype is
+    /// skipped once the type stops moving, so the fuel cap is a backstop.
+    fn retype_seeded_lambdas(
+        &self,
+        exprs: &mut [Expr],
+        local_ctx: &mut Ctx,
+        lambdas: &HashMap<Symbol, lambda_local::Stored>,
+        seeded: Vec<Symbol>,
+    ) {
+        let mut pending = seeded;
+        let mut fuel = lambdas.len().saturating_mul(lambdas.len()).saturating_add(1);
+        while let Some(name) = pending.pop() {
+            if fuel == 0 {
+                break;
+            }
+            fuel -= 1;
+            if !self.retype_stored_lambda(exprs, local_ctx, lambdas, &name) {
+                continue;
+            }
+            for (other, stored) in lambdas.iter() {
+                if other == &name || pending.contains(other) {
+                    continue;
+                }
+                if !lambda_local::calls_in(&exprs[stored.index], &name).is_empty() {
+                    pending.push(other.clone());
+                }
+            }
+        }
+    }
+
+    /// Retype one stored lambda. False when its type did not change.
+    fn retype_stored_lambda(
+        &self,
+        exprs: &mut [Expr],
+        local_ctx: &mut Ctx,
+        lambdas: &HashMap<Symbol, lambda_local::Stored>,
+        name: &Symbol,
+    ) -> bool {
+        let Some(stored) = lambdas.get(name) else { return false };
+        let index = stored.index;
+        let mut ctx = stored.ctx.clone();
+        let seeds = lambda_local::seeds_of(stored);
+        for (other, ty) in &local_ctx.local_bindings {
+            if lambdas.contains_key(other) {
+                ctx.local_bindings.insert(other.clone(), ty.clone());
+            }
+        }
+        *self.lambda_seeds.borrow_mut() = Some(seeds);
+        let ty = self.analyze_expr(&mut exprs[index], &ctx);
+        *self.lambda_seeds.borrow_mut() = None;
+        let changed = local_ctx.local_bindings.get(name) != Some(&ty);
+        local_ctx.local_bindings.insert(name.clone(), ty);
+        changed
+    }
+
+    pub(crate) fn with_materialized_associations(mut self, names: &'a std::collections::HashSet<Symbol>) -> Self {
+        self.materialized_associations = Some(names);
+        self
+    }
+
+    pub(crate) fn with_open_classes(mut self, open: &'a crate::analyze::open_classes::OpenClasses) -> Self {
+        self.open_classes = Some(open);
+        self
     }
 
     pub(crate) fn with_i18n(mut self, catalog: &'a crate::i18n::Catalog, helper_modules: &'a std::collections::HashSet<ClassId>) -> Self {
@@ -537,17 +692,17 @@ impl<'a> BodyTyper<'a> {
         let ty = self.compute(expr, ctx);
         expr.ty = Some(ty.clone());
         // Not accepted silently: the runtime's setter keeps nothing, so every save would still stamp.
-        if expr.diagnostic.is_none()
+        if expr.diagnostic().is_none()
             && let ExprNode::Send { recv: Some(recv), method, args, .. } = &*expr.node
             && method.as_str() == "record_timestamps="
             && !matches!(args.first().map(|a| &*a.node), Some(ExprNode::Lit { value: Literal::Bool { value: true } }))
             && self.is_model_class(recv.ty.as_ref())
         {
-            expr.diagnostic = Some(crate::diagnostic::DiagnosticKind::Unsupported {
+            expr.set_diagnostic(Some(crate::diagnostic::DiagnosticKind::Unsupported {
                 target: None,
                 construct: Symbol::from("record_timestamps"),
                 detail: "turning a model's timestamp stamping off is not modeled: its saves would still stamp them (`upsert_all(…, record_timestamps: false)` is)".to_string(),
-            });
+            }));
         }
         expr.decisions &= !crate::expr::CLASS_OBJECT_VALUE;
         if self.is_class_object(expr, ctx) { expr.decisions |= crate::expr::CLASS_OBJECT_VALUE; }
@@ -857,7 +1012,7 @@ impl<'a> BodyTyper<'a> {
             ExprNode::Const { path } => {
                 // A later typing pass may resolve a value constant whose
                 // owner was unknown in an earlier constant fixpoint round.
-                expr.diagnostic = None;
+                crate::expr::ExprCold::set_diagnostic(&mut expr.cold, None);
                 let generated = expr_span.file.0 == 0
                     || expr.decisions & crate::expr::GENERATED_CONST_REF != 0;
                 // A real FileId outside the snapshot is an indexing
@@ -865,12 +1020,12 @@ impl<'a> BodyTyper<'a> {
                 if !generated && self.const_resolver.as_ref()
                     .is_some_and(|resolver| !resolver.has_registered_source(expr_span.file))
                 {
-                    expr.diagnostic = Some(crate::diagnostic::DiagnosticKind::Unsupported {
+                    crate::expr::ExprCold::set_diagnostic(&mut expr.cold, Some(crate::diagnostic::DiagnosticKind::Unsupported {
                         target: None,
                         construct: Symbol::from("constant"),
                         detail: format!("{}: missing source document for FileId({})",
                             written_class_id(path).0, expr_span.file.0),
-                    });
+                    }));
                     return unknown();
                 }
                 // Never search by suffix or borrow another scope's
@@ -1006,18 +1161,18 @@ impl<'a> BodyTyper<'a> {
                 };
                 // Not a class the emitted program has: the indifferent hash is a plain Hash there, so only its `new` is supported.
                 if matches!(&ty, Ty::Class { id, args } if args.is_empty() && id.0.as_str() == crate::analyze::indifferent::CLASS) {
-                    expr.diagnostic = Some(crate::diagnostic::DiagnosticKind::Unsupported {
+                    crate::expr::ExprCold::set_diagnostic(&mut expr.cold, Some(crate::diagnostic::DiagnosticKind::Unsupported {
                         target: None,
                         construct: Symbol::from("constant"),
                         detail: written_class_id(path).0.as_str().to_string(),
-                    });
+                    }));
                 }
                 if indexed_source && matches!(ty, Ty::Var { .. }) {
-                    expr.diagnostic = Some(crate::diagnostic::DiagnosticKind::Unsupported {
+                    crate::expr::ExprCold::set_diagnostic(&mut expr.cold, Some(crate::diagnostic::DiagnosticKind::Unsupported {
                         target: None,
                         construct: Symbol::from("constant"),
                         detail: written_class_id(path).0.as_str().to_string(),
-                    });
+                    }));
                 }
                 ty
             }
@@ -1336,13 +1491,19 @@ impl<'a> BodyTyper<'a> {
                 for name in params.iter().chain(rest_param.iter()).chain(block_param.iter()) {
                     inner.class_objects.remove(name);
                 }
+                // Call-site evidence for a lambda stored in a local. Taken
+                // here so a nested lambda does not consume it. Block
+                // parameters still arrive through `ctx` from `block_ctx_for`.
+                let seeds = self.lambda_seeds.borrow_mut().take();
+                if let Some(seeds) = &seeds {
+                    seeds.bind_positionals(&mut inner, params);
+                }
                 // Optional, keyword and keyword-rest parameters bind in the
                 // body like any local: an optional as its default's type,
                 // `**opts` as a Symbol-keyed Hash, a required keyword as
-                // untyped (no caller evidence here, the same gradual answer a
-                // block parameter gets). A default is typed in the lambda's
-                // own scope as filled so far, so it reads an earlier extra
-                // parameter (`c = b`) rather than an outer local.
+                // untyped until a `.call` site names it. A default is typed
+                // in the lambda's own scope as filled so far, so it reads an
+                // earlier extra parameter (`c = b`) rather than an outer local.
                 for param in extra_params.iter_mut() {
                     let ty = match (&mut param.default, param.keyword && param.rest) {
                         (_, true) => Ty::Hash { key: std::sync::Arc::new(Ty::Sym), value: std::sync::Arc::new(Ty::Untyped) },
@@ -1355,16 +1516,20 @@ impl<'a> BodyTyper<'a> {
                     inner.class_objects.remove(&param.name);
                     inner.local_bindings.insert(param.name.clone(), ty);
                 }
+                if let Some(seeds) = &seeds {
+                    seeds.bind_keywords(&mut inner, extra_params);
+                }
                 let body_ty = self.analyze_expr(body, &inner);
-                // Synthesize a `Fn` type from the body's type. Param
-                // types aren't tracked here (they were seeded into the
-                // outer Ctx by block_ctx_for from the receiver
-                // signature); the lambda's *own* type just records the
-                // body's return type so callers can walk past the
-                // Lambda node without seeing Var. Effects default to
-                // pure; full effect inference is future work.
+                // A block's parameter types were seeded into `ctx` and are
+                // not repeated here. A stored lambda records the types its
+                // `.call` sites supplied, so the value's type is
+                // `^(Integer) -> Integer` rather than `^() -> untyped`.
+                let fn_params = match &seeds {
+                    Some(seeds) => seeds.fn_params(params),
+                    None => Vec::new(),
+                };
                 Ty::Fn {
-                    params: Vec::new().into(),
+                    params: fn_params.into(),
                     block: None,
                     ret: std::sync::Arc::new(body_ty),
                     effects: crate::effect::EffectSet::pure(),
@@ -1404,7 +1569,17 @@ impl<'a> BodyTyper<'a> {
                     Some(r) => Some(self.analyze_expr(r, ctx)),
                     None => ctx.self_ty.clone(),
                 };
-                self.dispatch(recv_ty.as_ref(), name, None, &[])
+                let instance_receiver = recv.as_ref().map_or(ctx.instance_body, |r| self.is_instance(r, ctx))
+                    && recv_ty.as_ref().is_some_and(instance_shaped);
+                let dispatched = self.dispatch(recv_ty.as_ref(), name, None, &[]);
+                if matches!(dispatched, Ty::Var { .. })
+                    && let Some(Ty::Class { id, .. }) = recv_ty.as_ref()
+                    && self.open_classes.is_some_and(|o| o.open(id, !instance_receiver).is_some())
+                {
+                    Ty::Untyped
+                } else {
+                    dispatched
+                }
             }
 
             ExprNode::Apply { fun, args, block } => {
@@ -1418,7 +1593,7 @@ impl<'a> BodyTyper<'a> {
 
             ExprNode::Send { recv, method, args, block, parenthesized } => {
                 if let Some(ty) = self.class_factories.and_then(|factories| factories.get(&expr_span)) {
-                    expr.diagnostic = None;
+                    crate::expr::ExprCold::set_diagnostic(&mut expr.cold, None);
                     if let Some(recv) = recv { self.analyze_expr(recv, ctx); }
                     // A literal superclass is declaration metadata, just as
                     // in an ordinary class header. An external parent need
@@ -1428,19 +1603,19 @@ impl<'a> BodyTyper<'a> {
                     {
                         for arg in args.iter_mut() {
                             arg.ty = Some(Ty::Class { id: parent.clone(), args: vec![].into() });
-                            arg.diagnostic = None;
+                            arg.set_diagnostic(None);
                         }
                     }
                     return ty.clone();
                 }
-                if matches!(&expr.diagnostic, Some(crate::diagnostic::DiagnosticKind::Unsupported { construct, .. })
+                if matches!(&crate::expr::ExprCold::diagnostic(&expr.cold), Some(crate::diagnostic::DiagnosticKind::Unsupported { construct, .. })
                     if matches!(construct.as_str(), "Module protocol" | "ActiveModel::Errors" | "ActiveModel::Error" | "Rails" | "ActiveRecord::Base" | "String extension" | "Hash extension" | "not_nil!" | "Object extension" | "Module callback argument"))
-                { expr.diagnostic = None; }
+                { crate::expr::ExprCold::set_diagnostic(&mut expr.cold, None); }
                 expr.decisions &= !crate::expr::RESOLVED_DATA_FACTORY;
                 if let Some(ty) = self.data_factories.and_then(|factories| factories.get(&expr_span)) {
                     // Only admitted declarations establish a Data class identity.
                     expr.decisions |= crate::expr::RESOLVED_DATA_FACTORY;
-                    expr.diagnostic = None;
+                    crate::expr::ExprCold::set_diagnostic(&mut expr.cold, None);
                     if let Some(recv) = recv { self.analyze_expr(recv, ctx); }
                     for arg in args.iter_mut() { self.analyze_expr(arg, ctx); }
                     return ty.clone();
@@ -1534,8 +1709,7 @@ impl<'a> BodyTyper<'a> {
                         ty: ctx.self_ty.clone(),
                         effects: crate::effect::EffectSet::default(),
                         leading_blank_line: false,
-                        diagnostic: None,
-                        hint: None,
+                        cold: None,
                         decisions: 0,
                     });
                 }
@@ -1559,7 +1733,7 @@ impl<'a> BodyTyper<'a> {
                     && matches!(&*r.node, ExprNode::Const { .. })
                     && matches!(&r.ty, Some(Ty::Class { id, args }) if args.is_empty() && id.0.as_str() == crate::analyze::indifferent::CLASS)
                 {
-                    r.diagnostic = None;
+                    r.set_diagnostic(None);
                 }
                 // Not a value: Rails' `call` answers the loaders, which `preload_associations` does not.
                 if method.as_str() == "call" && args.is_empty() && block.is_none()
@@ -1626,13 +1800,13 @@ impl<'a> BodyTyper<'a> {
                     let mut refusal = None;
                     if let Some(ty) = self.pagy_call_ty(args, ctx, &mut refusal) {
                         if refusal.is_some() {
-                            expr.diagnostic = refusal;
+                            expr.set_diagnostic(refusal);
                         }
                         return ty;
                     }
                 }
                 if let Some(refusal) = self.pagy_object_refusal(recv_ty.as_ref(), method, args) {
-                    expr.diagnostic = Some(refusal);
+                    crate::expr::ExprCold::set_diagnostic(&mut expr.cold, Some(refusal));
                 }
                 if let Some(r) = recv.as_mut() {
                     if promotes_to_param_value(r, recv_ty.as_ref(), method, args, &ctx.local_bindings) {
@@ -1645,10 +1819,10 @@ impl<'a> BodyTyper<'a> {
                 if self.is_module_callback(recv_ty.as_ref(), method) {
                     if let Some(arg) = args.first() {
                         if !self.is_class_object(arg, ctx) {
-                            expr.diagnostic = Some(crate::diagnostic::DiagnosticKind::Unsupported {
+                            crate::expr::ExprCold::set_diagnostic(&mut expr.cold, Some(crate::diagnostic::DiagnosticKind::Unsupported {
                                 target: None, construct: Symbol::from("Module callback argument"),
                                 detail: format!("{} requires a proven class/module object argument", method),
-                            });
+                            }));
                         }
                     }
                 }
@@ -1704,21 +1878,21 @@ impl<'a> BodyTyper<'a> {
                     && let ExprNode::Lambda { body, .. } = &*b.node
                     && bytes_block_has_escaping_break(body)
                 {
-                    expr.diagnostic = Some(crate::diagnostic::DiagnosticKind::Unsupported {
+                    crate::expr::ExprCold::set_diagnostic(&mut expr.cold, Some(crate::diagnostic::DiagnosticKind::Unsupported {
                         target: None,
                         construct: Symbol::from("String#bytes block break"),
                         detail: "an escaping break can replace the receiver result; its return type is not modeled".into(),
-                    });
+                    }));
                 }
                 if method.as_str() == "new"
                     && matches!(&recv_ty, Some(Ty::Class { id, .. }) if id.0.as_str() == "Data")
                     && self.const_resolver.as_ref().is_some_and(|resolver| !resolver.has_source_namespace("Data"))
                 {
-                    expr.diagnostic = Some(crate::diagnostic::DiagnosticKind::Unsupported {
+                    expr.set_diagnostic(Some(crate::diagnostic::DiagnosticKind::Unsupported {
                         target: None,
                         construct: Symbol::from("Data.new"),
                         detail: "Data is abstract; construct a class returned by Data.define".into(),
-                    });
+                    }));
                     return unknown();
                 }
                 let unsupported_deep_merge = match method.as_str() {
@@ -1747,11 +1921,11 @@ impl<'a> BodyTyper<'a> {
                 if let Some((construct, detail)) = unsupported_deep_merge
                     && matches!(recv_ty, Some(Ty::Hash { .. }))
                 {
-                    expr.diagnostic = Some(crate::diagnostic::DiagnosticKind::Unsupported {
+                    expr.set_diagnostic(Some(crate::diagnostic::DiagnosticKind::Unsupported {
                         target: None,
                         construct: Symbol::from(construct),
                         detail: detail.into(),
-                    });
+                    }));
                     return unknown();
                 }
                 // Force `parenthesized: true` when dispatch resolves
@@ -1906,21 +2080,34 @@ impl<'a> BodyTyper<'a> {
                 {
                     return ty;
                 }
+                if let (Some(receiver), Some(materialized)) = (recv.as_ref(), self.materialized_associations)
+                    && let Some(columns) = super::assoc_pluck::reader_columns(receiver, method, args, block.as_ref(), materialized)
+                    && let Some(projected) = receiver.ty.as_ref().and_then(|ty| self.reader_projection(ty, &columns))
+                {
+                    return projected;
+                }
                 let instance_receiver = recv.as_ref().map_or(ctx.instance_body, |r| self.is_instance(r, ctx))
                     && recv_ty.as_ref().is_some_and(instance_shaped);
-                let dispatched =
+                let mut dispatched =
                     self.dispatch_on(recv_ty.as_ref(), method, block_ret.as_ref(), args, instance_receiver);
+                // Not a dispatch miss: a class that defines methods under computed names answers what its own code defines when it runs.
+                if matches!(dispatched, Ty::Var { .. })
+                    && let Some(Ty::Class { id, .. }) = recv_ty.as_ref()
+                    && self.open_classes.is_some_and(|o| o.open(id, !instance_receiver).is_some())
+                {
+                    dispatched = Ty::Untyped;
+                }
                 // Not left to the positional constructor: since Ruby 3.2 a Struct takes keywords too, which it would bind to its first member.
                 if method.as_str() == "new"
-                    && expr.diagnostic.is_none()
+                    && crate::expr::ExprCold::diagnostic(&expr.cold).is_none()
                     && matches!(args.last().map(|a| &*a.node), Some(ExprNode::Hash { kwargs: true, .. }))
                     && matches!(recv_ty.as_ref(), Some(Ty::Class { id, .. }) if self.classes.get(id).is_some_and(|c| c.positional_struct))
                 {
-                    expr.diagnostic = Some(crate::diagnostic::DiagnosticKind::Unsupported {
+                    crate::expr::ExprCold::set_diagnostic(&mut expr.cold, Some(crate::diagnostic::DiagnosticKind::Unsupported {
                         target: None,
                         construct: Symbol::from("Struct keyword construction"),
                         detail: "a `Struct.new(...)` superclass is built positionally; keyword arguments would land in its first member".to_string(),
-                    });
+                    }));
                 }
                 // `PTY.spawn(..., &maybe)` when `maybe` is nilable: Ruby
                 // may take the block (nil) or not (tuple). Presence was
@@ -2016,31 +2203,36 @@ impl<'a> BodyTyper<'a> {
                 {
                     return Ty::Hash { key: std::sync::Arc::new(Ty::Sym), value: std::sync::Arc::new(Ty::Untyped) };
                 }
+                if translate
+                    && let Some((_, _, ty)) = crate::lower::i18n_translate::value_answer(catalog, recv.as_ref(), method.as_str(), args, block.as_ref(), site)
+                {
+                    return ty;
+                }
                 if translate && let Some(resolved) = crate::lower::i18n_translate::resolves(
                     catalog, recv.as_ref(), method.as_str(), args, block.as_ref(), site,
                 ) {
                     if let Err(reason) = resolved {
-                        if expr.diagnostic.is_none() {
-                            expr.diagnostic = Some(crate::diagnostic::DiagnosticKind::Unsupported {
+                        if crate::expr::ExprCold::diagnostic(&expr.cold).is_none() {
+                            crate::expr::ExprCold::set_diagnostic(&mut expr.cold, Some(crate::diagnostic::DiagnosticKind::Unsupported {
                                 target: None,
                                 construct: Symbol::from("I18n"),
                                 detail: format!("`{method}` cannot be resolved from the app's locale: {reason}"),
-                            });
+                            }));
                         }
                     }
                     return Ty::Str;
                 }
                 if matches!(recv_ty.as_ref(), Some(Ty::Class { args: model, .. }) if !model.is_empty())
                     && crate::lower::view::wraps_field_errors(method.as_str())
-                    && expr.diagnostic.is_none()
+                    && crate::expr::ExprCold::diagnostic(&expr.cold).is_none()
                 {
                     let catalog = self.i18n.map_or(crate::i18n::Catalog::rails_default(), |c| c);
                     if let Some(file) = &catalog.field_error_proc {
-                        expr.diagnostic = Some(crate::diagnostic::DiagnosticKind::Unsupported {
+                        crate::expr::ExprCold::set_diagnostic(&mut expr.cold, Some(crate::diagnostic::DiagnosticKind::Unsupported {
                             target: None,
                             construct: Symbol::from("field_with_errors"),
                             detail: format!("`{method}` renders through the `field_error_proc` {file} sets, which is not modeled"),
-                        });
+                        }));
                     }
                 }
                 if method.as_str() == "human_attribute_name"
@@ -2130,11 +2322,11 @@ impl<'a> BodyTyper<'a> {
                                 if !matches!(id.0.as_str(), "Class" | "Module")));
                     if module_only && !class_object
                         && !self.owns_operator(recv_ty.as_ref(), method, false) {
-                        expr.diagnostic = Some(crate::diagnostic::DiagnosticKind::Unsupported {
+                        crate::expr::ExprCold::set_diagnostic(&mut expr.cold, Some(crate::diagnostic::DiagnosticKind::Unsupported {
                             target: None,
                             construct: Symbol::from("Module protocol"),
                             detail: format!("{} requires a proven class/module object receiver", method),
-                        });
+                        }));
                         return dispatched;
                     }
                     if let Some(t) = send::object_protocol_method(recv_ty.as_ref(), method, block_ret.as_ref(), class_object) {
@@ -2183,17 +2375,17 @@ impl<'a> BodyTyper<'a> {
                     let gem_ancestry = recv_ty
                         .clone()
                         .filter(|ty| gap == Some("Object extension") && matches!(ty, Ty::Class { id, .. } if self.has_unknown_ancestor(id)));
-                    if let Some(recv_ty) = gem_ancestry.filter(|_| expr.diagnostic.is_none()) {
-                        expr.diagnostic = Some(crate::diagnostic::DiagnosticKind::SendDispatchFailed {
+                    if let Some(recv_ty) = gem_ancestry.filter(|_| crate::expr::ExprCold::diagnostic(&expr.cold).is_none()) {
+                        crate::expr::ExprCold::set_diagnostic(&mut expr.cold, Some(crate::diagnostic::DiagnosticKind::SendDispatchFailed {
                             method: method.clone(),
                             recv_ty,
-                        });
-                    } else if let Some(owner) = gap.filter(|_| expr.diagnostic.is_none()) {
-                        expr.diagnostic = Some(crate::diagnostic::DiagnosticKind::Unsupported {
+                        }));
+                    } else if let Some(owner) = gap.filter(|_| crate::expr::ExprCold::diagnostic(&expr.cold).is_none()) {
+                        crate::expr::ExprCold::set_diagnostic(&mut expr.cold, Some(crate::diagnostic::DiagnosticKind::Unsupported {
                             target: None,
                             construct: Symbol::from(owner),
                             detail: format!("{} lacks a shared runtime/lowering implementation", method),
-                        });
+                        }));
                     }
                 }
                 dispatched
@@ -2338,6 +2530,10 @@ impl<'a> BodyTyper<'a> {
                 // Statement index of each live empty-hash seed (`attrs =
                 // {}`) — the Hash counterpart of `array_seed_idx`.
                 let mut hash_seed_idx: HashMap<(bool, Symbol), usize> = HashMap::new();
+                // Lambdas assigned to locals in this sequence. Later
+                // `.call` sites refine their parameter types and the
+                // assignment is retyped. A reassignment drops the entry.
+                let mut lambda_locals: HashMap<Symbol, lambda_local::Stored> = HashMap::new();
                 for i in 0..exprs.len() {
                     let read_structurally_later = match &*exprs[i].node {
                         ExprNode::Assign { target: LValue::Var { name, .. }, .. } => {
@@ -2346,33 +2542,68 @@ impl<'a> BodyTyper<'a> {
                         _ => false,
                     };
                     let tail = i + 1 == exprs.len();
-                    let e = &mut exprs[i];
-                    if !tail {
-                        mark_discarded(e);
-                    }
-                    if !matches!(&*e.node, ExprNode::Assign { target: LValue::Var { .. }, .. }) {
-                        forget_class_object_writes(e, &mut local_ctx);
-                    }
-                    last = self.analyze_expr(e, &local_ctx);
-                    // A self binding gives `self` its declared type from
-                    // the next statement to the end of this body, blocks
-                    // inside included. It changes only how `self` types:
-                    // which class a method defined below belongs to is
-                    // settled at ingest, lexically. A class-object binding
-                    // puts `self` on the class side, as in a `def self.x`.
-                    if crate::expr::is_self_binding(e) {
-                        if local_ctx.lexical_self.is_none() {
-                            local_ctx.lexical_self = local_ctx.self_ty.clone();
+                    {
+                        let e = &mut exprs[i];
+                        if !tail {
+                            mark_discarded(e);
                         }
-                        local_ctx.self_ty = e.ty.clone();
-                        local_ctx.class_side = e.decisions & crate::expr::SELF_BINDING_CLASS_OBJECT != 0;
+                        if !matches!(&*e.node, ExprNode::Assign { target: LValue::Var { .. }, .. }) {
+                            forget_class_object_writes(e, &mut local_ctx);
+                        }
+                        last = self.analyze_expr(e, &local_ctx);
+                        // A self binding gives `self` its declared type from
+                        // the next statement to the end of this body, blocks
+                        // inside included. It changes only how `self` types:
+                        // which class a method defined below belongs to is
+                        // settled at ingest, lexically. A class-object binding
+                        // puts `self` on the class side, as in a `def self.x`.
+                        if crate::expr::is_self_binding(e) {
+                            if local_ctx.lexical_self.is_none() {
+                                local_ctx.lexical_self = local_ctx.self_ty.clone();
+                            }
+                            local_ctx.self_ty = e.ty.clone();
+                            local_ctx.class_side = e.decisions & crate::expr::SELF_BINDING_CLASS_OBJECT != 0;
+                        }
+                        if let ExprNode::Assign { target: LValue::Var { name, .. }, value } = &*e.node {
+                            let proven = self.is_class_object(value, &local_ctx);
+                            forget_class_object_writes(value, &mut local_ctx);
+                            local_ctx.class_objects.remove(name);
+                            if proven { local_ctx.class_objects.insert(name.clone()); }
+                            // Before the binding insert below: the lambda body
+                            // was typed in this `local_ctx`, without its own name.
+                            lambda_local::remember(&mut lambda_locals, i, e, &local_ctx);
+                        }
                     }
-                    if let ExprNode::Assign { target: LValue::Var { name, .. }, value } = &*e.node {
-                        let proven = self.is_class_object(value, &local_ctx);
-                        forget_class_object_writes(value, &mut local_ctx);
-                        local_ctx.class_objects.remove(name);
-                        if proven { local_ctx.class_objects.insert(name.clone()); }
+                    // Before the binding insert and the seed/narrowing
+                    // epilogue. Those read this statement's types, and a
+                    // `.call` in it may have just given the lambda its
+                    // parameter types.
+                    let retired = lambda_local::forget_nested_writes(&mut lambda_locals, exprs, i);
+                    // A join reads the binding it was given for the side
+                    // that does not write the name. Dropping a write
+                    // `flow_locals` can see makes that side nil. A write it
+                    // cannot see (a block) leaves the old proc in place, and
+                    // a later `.call` returns the proc's result.
+                    let joins = matches!(
+                        &*exprs[i].node,
+                        ExprNode::If { .. }
+                            | ExprNode::Case { .. }
+                            | ExprNode::While { .. }
+                            | ExprNode::BeginRescue { .. }
+                            | ExprNode::BoolOp { .. }
+                    );
+                    let mut unknown_join = std::collections::HashSet::new();
+                    if joins {
+                        let mut flowed = HashMap::new();
+                        let _ = flow_locals(&exprs[i], &local_ctx.local_bindings, &mut flowed, &mut unknown_join);
                     }
+                    for name in retired {
+                        if !joins || unknown_join.contains(&name) {
+                            local_ctx.local_bindings.remove(&name);
+                        }
+                    }
+                    self.refine_lambda_locals(exprs, i, &mut local_ctx, &mut lambda_locals, &mut last);
+                    let e = &mut exprs[i];
                     if let ExprNode::Assign { target, value } = &*e.node {
                         let slot = match target {
                             LValue::Ivar { name } => Some((true, name.clone())),
@@ -2439,28 +2670,33 @@ impl<'a> BodyTyper<'a> {
                             }
                         }
                     }
-                    // A `begin … rescue … end` STATEMENT exports the
-                    // locals its body and rescue arms assign at their own
-                    // top level — Ruby's `begin` opens no scope — typed
-                    // as the assigned value OR what the name held before
-                    // (nil when it was unbound): the exception may come
-                    // before the assignment runs. Without this a local
-                    // assigned in one `begin` and read after it (`user =
-                    // User.find(id)` in a begin, `user.messages.create!`
-                    // below) read as unresolved, and everything keyed on
-                    // its type — the association constructor rewrite —
-                    // silently declined. Found by the model scenario
+                    // A branching STATEMENT (`if`/`unless`/ternary,
+                    // `case`, `while`, `begin … rescue`, `a && (x = …)`)
+                    // exports the locals it assigns: Ruby's control flow
+                    // opens no scope, so a local assigned on one path is
+                    // bound after the join on every path, holding nil
+                    // where it was never assigned. [`flow_locals`] walks
+                    // the paths and joins them. Without this, `if c; x =
+                    // 1; end; x` read `x` as unresolved, and `w = 0; if
+                    // c; w = "s"; end; w` read `w` as Int, which is wrong.
+                    // The `begin` case was found by the model scenario
                     // scripts/campfire-db-differential runs statement by
-                    // statement.
-                    if let ExprNode::BeginRescue { body, rescues, .. } = &*e.node {
-                        let mut exported: Vec<(Symbol, Ty)> = Vec::new();
-                        top_level_local_assigns(body, &mut exported);
-                        for rc in rescues.iter() {
-                            top_level_local_assigns(&rc.body, &mut exported);
-                        }
-                        for (name, ty) in exported {
-                            let prior = local_ctx.local_bindings.get(&name).cloned().unwrap_or(Ty::Nil);
-                            local_ctx.local_bindings.insert(name, union_of(prior, ty));
+                    // statement (`user = User.find(id)` in a begin,
+                    // `user.messages.create!` below).
+                    let mut flow_exported = std::collections::HashSet::new();
+                    if matches!(&*e.node,
+                        ExprNode::If { .. } | ExprNode::Case { .. } | ExprNode::While { .. }
+                            | ExprNode::BeginRescue { .. } | ExprNode::BoolOp { .. })
+                    {
+                        let mut flowed = HashMap::new();
+                        let mut unknown = std::collections::HashSet::new();
+                        if flow_locals(e, &local_ctx.local_bindings, &mut flowed, &mut unknown) {
+                            for (name, ty) in flowed {
+                                if !unknown.contains(&name) {
+                                    flow_exported.insert(name.clone());
+                                    local_ctx.local_bindings.insert(name, ty);
+                                }
+                            }
                         }
                     }
                     // Short-circuit compound assignment (`@x ||= y`,
@@ -2721,14 +2957,16 @@ impl<'a> BodyTyper<'a> {
                     // diverging-then narrowing below so that block can
                     // further tighten the now-bound local to non-nil on
                     // the fall-through path. A Var/Bottom RHS is skipped so
-                    // a good prior binding isn't clobbered.
+                    // a good prior binding isn't clobbered, and so is a name
+                    // [`flow_locals`] already joined: its answer includes the
+                    // branches' own writes and what the condition proved.
                     if let ExprNode::If { cond, .. } | ExprNode::While { cond, .. } =
                         &*e.node
                     {
                         let mut cond_assigns: HashMap<Symbol, Ty> = HashMap::new();
                         collect_var_assignments_into(cond, &mut cond_assigns);
                         for (name, ty) in cond_assigns {
-                            if ty.is_open() {
+                            if ty.is_open() || flow_exported.contains(&name) {
                                 continue;
                             }
                             local_ctx.local_bindings.insert(name, ty);
@@ -2947,13 +3185,13 @@ impl<'a> BodyTyper<'a> {
                 }
                 let missing = missing.into_inner();
                 if !missing.is_empty() {
-                    expr.diagnostic = Some(crate::diagnostic::DiagnosticKind::Unsupported {
+                    expr.set_diagnostic(Some(crate::diagnostic::DiagnosticKind::Unsupported {
                         target: None,
                         construct: Symbol::from("declared type"),
                         detail: format!("{} has no indexed declaration or modeled dependency", missing.join(", ")),
-                    });
-                } else if matches!(&expr.diagnostic, Some(crate::diagnostic::DiagnosticKind::Unsupported { construct, .. }) if construct.as_str() == "declared type") {
-                    expr.diagnostic = None;
+                    }));
+                } else if matches!(&expr.diagnostic(), Some(crate::diagnostic::DiagnosticKind::Unsupported { construct, .. }) if construct.as_str() == "declared type") {
+                    expr.set_diagnostic(None);
                 }
                 resolved
             }
@@ -3106,6 +3344,22 @@ fn kernel_array_elem(arg: &Ty) -> Option<Ty> {
 
 pub(super) fn unknown() -> Ty {
     Ty::Var { var: TyVar(0) }
+}
+
+fn lambda_call_evidence(
+    exprs: &[Expr],
+    stmt: usize,
+    lambdas: &HashMap<Symbol, lambda_local::Stored>,
+    name: &Symbol,
+) -> Vec<lambda_local::Evidence> {
+    let mut evidence = lambda_local::calls_in(&exprs[stmt], name);
+    for (other, stored) in lambdas {
+        if other == name || stored.index == stmt {
+            continue;
+        }
+        evidence.extend(lambda_local::calls_in(&exprs[stored.index], name));
+    }
+    evidence
 }
 
 /// Stamp the expected type onto an empty Hash/Array literal so the
@@ -3277,23 +3531,211 @@ fn collect_local_assignment_tys(expr: &Expr, out: &mut Vec<(Symbol, Ty)>) {
     expr.node.for_each_child(&mut |child| collect_local_assignment_tys(child, out));
 }
 
-/// The local assignments a statement list makes at ITS OWN level — the
-/// statement itself, or each statement of a `Seq` — with the value's
-/// stamped type. Blocks and nested bodies are not entered: a local first
-/// assigned inside a block does not outlive it. Open types are skipped,
-/// as in [`collect_local_assignment_tys`].
-fn top_level_local_assigns(expr: &Expr, out: &mut Vec<(Symbol, Ty)>) {
-    let stmts: Vec<&Expr> = match &*expr.node {
-        ExprNode::Seq { exprs } => exprs.iter().collect(),
-        _ => vec![expr],
-    };
-    for s in stmts {
-        if let ExprNode::Assign { target: LValue::Var { name, .. }, value } = &*s.node {
-            if let Some(t) = value.ty.clone() {
-                if !t.is_open() {
-                    out.push((name.clone(), t));
+/// Walk one statement's control flow forward, recording in `flowed` the
+/// type each local holds where the statement completes. `bound` is what
+/// the locals held before it; `flowed` carries only the names written
+/// since. Where paths join (`if`/`case` arms, a loop that may not run, the
+/// right side of `&&`/`||`, a `rescue` that may fire before the body's
+/// assignments), a name takes the union of every arriving path, with nil
+/// for a path on which it was never bound. Returns false when no path
+/// completes (`return`, `raise`, `next`, …); such a path joins nothing.
+///
+/// A write this walk does not model (inside a block, a pattern, a
+/// destructuring, or with a still-open type) puts the name in `unknown`,
+/// and the caller exports nothing for it: a join that missed one write
+/// would be a confident wrong type, worse than none.
+fn flow_locals(
+    expr: &Expr,
+    bound: &HashMap<Symbol, Ty>,
+    flowed: &mut HashMap<Symbol, Ty>,
+    unknown: &mut std::collections::HashSet<Symbol>,
+) -> bool {
+    // Each path is its writes plus what its condition narrowed. A
+    // narrowing stands in for the entry type on a path that does not
+    // write the name (`child = {} unless child.is_a?(Hash)` leaves a
+    // Hash either way), but only the writes decide which names join.
+    type Path = (HashMap<Symbol, Ty>, HashMap<Symbol, Ty>);
+    fn join(paths: Vec<Path>, bound: &HashMap<Symbol, Ty>) -> Option<HashMap<Symbol, Ty>> {
+        let mut names: Vec<&Symbol> = paths.iter().flat_map(|(w, _)| w.keys()).collect();
+        names.sort();
+        names.dedup();
+        let mut out = HashMap::new();
+        for name in names {
+            let mut tys = paths.iter().map(|(writes, narrowed)| {
+                writes.get(name).or_else(|| narrowed.get(name)).or_else(|| bound.get(name))
+                    .cloned().unwrap_or(Ty::Nil)
+            });
+            let first = tys.next()?;
+            out.insert(name.clone(), tys.fold(first, union_of));
+        }
+        (!paths.is_empty()).then_some(out)
+    }
+    fn unmodeled(expr: &Expr, unknown: &mut std::collections::HashSet<Symbol>) {
+        let mut names = Vec::new();
+        match &*expr.node {
+            ExprNode::Assign { target: LValue::Var { name, .. }, .. }
+            | ExprNode::OpAssign { target: LValue::Var { name, .. }, .. } => names.push(name.clone()),
+            ExprNode::MultiAssign { targets, .. } => {
+                for target in targets {
+                    if let LValue::Var { name, .. } = target { names.push(name.clone()); }
                 }
             }
+            ExprNode::CaseMatch { arms, .. } => {
+                for arm in arms { arm.pattern.bound_names(&mut names); }
+            }
+            ExprNode::MatchRequired { pattern, .. } | ExprNode::MatchPredicate { pattern, .. } => {
+                pattern.bound_names(&mut names)
+            }
+            ExprNode::BeginRescue { rescues, .. } => {
+                for rescue in rescues { names.extend(rescue.binding.iter().cloned()); }
+            }
+            _ => {}
+        }
+        unknown.extend(names);
+        expr.node.for_each_child(&mut |child| unmodeled(child, unknown));
+    }
+    let flow = |e: &Expr, flowed: &mut HashMap<Symbol, Ty>, unknown: &mut _| flow_locals(e, bound, flowed, unknown);
+    match &*expr.node {
+        ExprNode::Assign { target: LValue::Var { name, .. }, value } => {
+            if !flow(value, flowed, unknown) { return false; }
+            match value.ty.clone() {
+                Some(t) if !t.is_open() => { flowed.insert(name.clone(), t); }
+                _ => { unknown.insert(name.clone()); }
+            }
+            true
+        }
+        // The Seq arm's `||=` threading: union with what the name held.
+        ExprNode::OpAssign { target: LValue::Var { name, .. }, value, .. } => {
+            if !flow(value, flowed, unknown) { return false; }
+            match expr.ty.clone() {
+                Some(t) if !t.is_open() => {
+                    let merged = match flowed.get(name).or_else(|| bound.get(name)) {
+                        Some(prev) => union_of(prev.clone(), t),
+                        None => t,
+                    };
+                    flowed.insert(name.clone(), merged);
+                }
+                _ => { unknown.insert(name.clone()); }
+            }
+            true
+        }
+        ExprNode::Seq { exprs } => exprs.iter().all(|e| flow(e, flowed, unknown)),
+        ExprNode::If { cond, then_branch, else_branch } => {
+            if !flow(cond, flowed, unknown) { return false; }
+            let pred = narrowing::extract_narrowing_with(cond, &narrowing::Probe::without_members(&|_| None));
+            let mut paths = Vec::new();
+            for (branch, then_side) in [(then_branch, true), (else_branch, false)] {
+                let mut narrowed = match &pred {
+                    Some(p) => narrowing::narrow_locals(p, then_side, &|name| {
+                        flowed.get(name).or_else(|| bound.get(name)).cloned()
+                    }),
+                    None => HashMap::new(),
+                };
+                // A name written before the branch (in the condition
+                // itself: `return if !(story = find_story)`) holds what
+                // the condition proved about that write on this side.
+                let mut path = flowed.clone();
+                narrowed.retain(|name, ty| match path.get_mut(name) {
+                    Some(written) => { *written = ty.clone(); false }
+                    None => true,
+                });
+                if flow(branch, &mut path, unknown) { paths.push((path, narrowed)); }
+            }
+            match join(paths, bound) {
+                Some(joined) => { *flowed = joined; true }
+                None => false,
+            }
+        }
+        ExprNode::Case { scrutinee, arms } => {
+            if !flow(scrutinee, flowed, unknown) { return false; }
+            let mut paths = Vec::new();
+            for arm in arms {
+                let mut path = flowed.clone();
+                let completes = arm.guard.as_ref().is_none_or(|g| flow(g, &mut path, unknown))
+                    && flow(&arm.body, &mut path, unknown);
+                if completes { paths.push((path, HashMap::new())); }
+            }
+            // No catch-all arm: no arm may match, and the value is nil.
+            let exhaustive = arms.iter().any(|a| {
+                matches!(a.pattern, crate::expr::Pattern::Wildcard) && a.guard.is_none()
+            });
+            if !exhaustive { paths.push((flowed.clone(), HashMap::new())); }
+            match join(paths, bound) {
+                Some(joined) => { *flowed = joined; true }
+                None => false,
+            }
+        }
+        // The body may run zero times; `break`/`next` leave it with the
+        // writes made so far, so its end state joins whether or not it
+        // completes.
+        ExprNode::While { cond, body, .. } => {
+            if !flow(cond, flowed, unknown) { return false; }
+            let mut path = flowed.clone();
+            flow(body, &mut path, unknown);
+            *flowed = join(vec![(flowed.clone(), HashMap::new()), (path, HashMap::new())], bound).unwrap_or_default();
+            true
+        }
+        ExprNode::BoolOp { left, right, .. } => {
+            if !flow(left, flowed, unknown) { return false; }
+            let mut path = flowed.clone();
+            let mut paths = vec![(flowed.clone(), HashMap::new())];
+            if flow(right, &mut path, unknown) { paths.push((path, HashMap::new())); }
+            *flowed = join(paths, bound).unwrap_or_default();
+            true
+        }
+        // A rescue can fire before or after any of the body's writes, so
+        // it starts from the join of the entry and the body's end state.
+        ExprNode::BeginRescue { body, rescues, else_branch, ensure, .. } => {
+            let mut body_path = flowed.clone();
+            let mut completes = flow(body, &mut body_path, unknown);
+            if completes {
+                if let Some(eb) = else_branch {
+                    completes = flow(eb, &mut body_path, unknown);
+                }
+            }
+            let entry = join(vec![(flowed.clone(), HashMap::new()), (body_path.clone(), HashMap::new())], bound)
+                .unwrap_or_default();
+            let mut paths = Vec::new();
+            if completes { paths.push((body_path, HashMap::new())); }
+            for rescue in rescues {
+                unknown.extend(rescue.binding.iter().cloned());
+                let mut path = entry.clone();
+                if flow(&rescue.body, &mut path, unknown) { paths.push((path, HashMap::new())); }
+            }
+            let joined = join(paths, bound);
+            if let Some(ensure) = ensure {
+                let mut path = joined.clone().unwrap_or_else(|| entry.clone());
+                if !flow(ensure, &mut path, unknown) { return false; }
+                if joined.is_some() { *flowed = path; return true; }
+                return false;
+            }
+            match joined {
+                Some(joined) => { *flowed = joined; true }
+                None => false,
+            }
+        }
+        ExprNode::Send { recv, args, block, .. } => {
+            if let Some(r) = recv {
+                if !flow(r, flowed, unknown) { return false; }
+            }
+            for a in args {
+                if !flow(a, flowed, unknown) { return false; }
+            }
+            if let Some(b) = block { unmodeled(b, unknown); }
+            true
+        }
+        ExprNode::Return { value } | ExprNode::Raise { value } => {
+            flow(value, flowed, unknown);
+            false
+        }
+        ExprNode::Next { value } | ExprNode::Break { value } => {
+            if let Some(v) = value { flow(v, flowed, unknown); }
+            false
+        }
+        ExprNode::Retry | ExprNode::Redo => false,
+        _ => {
+            unmodeled(expr, unknown);
+            true
         }
     }
 }
@@ -4347,7 +4789,7 @@ mod tests {
         let typer = BodyTyper::new(&classes);
         typer.analyze_expr(&mut expr, &Ctx::default());
 
-        let diag = expr.diagnostic.as_ref().expect("diagnostic set");
+        let diag = expr.diagnostic().as_ref().expect("diagnostic set");
         match diag {
             crate::diagnostic::DiagnosticKind::IncompatibleBinop {
                 op,
@@ -4383,7 +4825,7 @@ mod tests {
         let typer = BodyTyper::new(&classes);
         typer.analyze_expr(&mut expr, &Ctx::default());
 
-        let diag = expr.diagnostic.as_ref().expect("diagnostic set");
+        let diag = expr.diagnostic().as_ref().expect("diagnostic set");
         match diag {
             crate::diagnostic::DiagnosticKind::IncompatibleBinop {
                 op,
@@ -4416,7 +4858,7 @@ mod tests {
         let typer = BodyTyper::new(&classes);
         typer.analyze_expr(&mut expr, &Ctx::default());
 
-        assert!(expr.diagnostic.is_none());
+        assert!(expr.diagnostic().is_none());
     }
 
     #[test]
@@ -4437,7 +4879,7 @@ mod tests {
         let typer = BodyTyper::new(&classes);
         typer.analyze_expr(&mut expr, &Ctx::default());
 
-        let diag = expr.diagnostic.as_ref().expect("diagnostic set");
+        let diag = expr.diagnostic().as_ref().expect("diagnostic set");
         match diag {
             crate::diagnostic::DiagnosticKind::IncompatibleBinop {
                 op, lhs_ty, rhs_ty,
@@ -4468,7 +4910,7 @@ mod tests {
         let typer = BodyTyper::new(&classes);
         typer.analyze_expr(&mut expr, &Ctx::default());
 
-        assert!(expr.diagnostic.is_none());
+        assert!(expr.diagnostic().is_none());
     }
 
     #[test]
@@ -4498,7 +4940,7 @@ mod tests {
         let typer = BodyTyper::new(&classes);
         typer.analyze_expr(&mut expr, &Ctx::default());
 
-        let diag = expr.diagnostic.as_ref().expect("diagnostic set");
+        let diag = expr.diagnostic().as_ref().expect("diagnostic set");
         assert!(matches!(
             diag,
             crate::diagnostic::DiagnosticKind::IncompatibleBinop { op, .. } if op.as_str() == "*"
@@ -4523,7 +4965,7 @@ mod tests {
         let typer = BodyTyper::new(&classes);
         typer.analyze_expr(&mut expr, &Ctx::default());
 
-        let diag = expr.diagnostic.as_ref().expect("diagnostic set");
+        let diag = expr.diagnostic().as_ref().expect("diagnostic set");
         assert!(matches!(
             diag,
             crate::diagnostic::DiagnosticKind::IncompatibleBinop { op, .. } if op.as_str() == "/"
@@ -4548,7 +4990,7 @@ mod tests {
         let typer = BodyTyper::new(&classes);
         typer.analyze_expr(&mut expr, &Ctx::default());
 
-        assert!(expr.diagnostic.is_none());
+        assert!(expr.diagnostic().is_none());
     }
 
     // ── union_of lattice laws ────────────────────────────────────────
@@ -5432,7 +5874,7 @@ fn is_ivar_params_rooted(e: &crate::expr::Expr, locals: &HashMap<Symbol, Ty>) ->
 fn rooted_in_refused_constant(expr: &Expr) -> bool {
     match &*expr.node {
         ExprNode::Const { .. } => matches!(
-            &expr.diagnostic,
+            &expr.diagnostic(),
             Some(crate::diagnostic::DiagnosticKind::Unsupported { construct, .. }) if construct.as_str() == "constant"
         ),
         ExprNode::Send { recv: Some(recv), .. } => rooted_in_refused_constant(recv),

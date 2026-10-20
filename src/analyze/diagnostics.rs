@@ -94,7 +94,7 @@ pub fn diagnose_with_coverage(app: &App) -> (Vec<Diagnostic>, PreloadCoverage) {
         }
     }
     fn collect_constants(expr: &Expr, out: &mut Vec<Diagnostic>) {
-        if let Some(kind @ DiagnosticKind::IncompatibleBinop { op, lhs_ty, .. }) = &expr.diagnostic {
+        if let Some(kind @ DiagnosticKind::IncompatibleBinop { op, lhs_ty, .. }) = &expr.diagnostic() {
             if nominal_class_operand(lhs_ty) {
             out.push(Diagnostic {
                 span: expr.span,
@@ -104,17 +104,17 @@ pub fn diagnose_with_coverage(app: &App) -> (Vec<Diagnostic>, PreloadCoverage) {
             });
             }
         }
-        if matches!(&expr.diagnostic,
+        if matches!(&expr.diagnostic(),
             Some(DiagnosticKind::Unsupported { .. }))
         {
-            if let Some(DiagnosticKind::Unsupported { target, construct, detail }) = &expr.diagnostic
+            if let Some(DiagnosticKind::Unsupported { target, construct, detail }) = &expr.diagnostic()
                 && construct.as_str() != crate::diagnostic::CONSTRUCTOR_KEYWORD_ARGUMENTS
             {
                 out.push(Diagnostic::unsupported(expr.span, target.clone(), construct.as_str(), detail.clone()));
             }
         }
         // Not dropped with the policy's other misses: the typer stamps it only in place of an Object-extension refusal.
-        if let Some(kind @ DiagnosticKind::SendDispatchFailed { method, recv_ty }) = &expr.diagnostic {
+        if let Some(kind @ DiagnosticKind::SendDispatchFailed { method, recv_ty }) = &expr.diagnostic() {
             out.push(Diagnostic {
                 span: expr.span,
                 severity: Diagnostic::default_severity(kind),
@@ -142,7 +142,7 @@ pub fn diagnose_with_coverage(app: &App) -> (Vec<Diagnostic>, PreloadCoverage) {
     for model in &app.models {
         for item in &model.body {
             if let crate::dialect::ModelBodyItem::Unknown { expr, .. } = item {
-                if let Some(DiagnosticKind::Unsupported { construct, detail, .. }) = &expr.diagnostic {
+                if let Some(DiagnosticKind::Unsupported { construct, detail, .. }) = &expr.diagnostic() {
                     if construct.as_str() == "include" {
                         out.push(Diagnostic::unsupported(expr.span, None, "include", detail.clone()));
                     }
@@ -152,6 +152,7 @@ pub fn diagnose_with_coverage(app: &App) -> (Vec<Diagnostic>, PreloadCoverage) {
     }
     out.extend(attribute_macro_refusals(app));
     out.extend(overridden_synthesized_accessors(app));
+    out.extend(runtime_defined_surfaces(app));
     // A filter's return value is Rails' to discard (`around_action
     // :switch_locale` → `I18n.with_locale(locale, &action)`): nothing
     // escapes from its tail, so an `untyped` there is not a gradual
@@ -168,9 +169,15 @@ pub fn diagnose_with_coverage(app: &App) -> (Vec<Diagnostic>, PreloadCoverage) {
         .collect();
     for controller in &app.controllers {
         for action in controller.actions() {
+            for default in action.opt_params.iter().map(|(_, d)| d).chain(action.kw_params.iter().filter_map(|(_, d)| d.as_ref())) {
+                diagnose_expr(default, &mut out);
+            }
             diagnose_expr_in(&action.body, &mut out, !filter_targets.contains(&action.name));
         }
         for method in controller.class_methods() {
+            for default in method.params.iter().filter_map(|p| p.default.as_ref()) {
+                diagnose_expr(default, &mut out);
+            }
             diagnose_expr(&method.body, &mut out);
         }
     }
@@ -198,6 +205,7 @@ pub fn diagnose_with_coverage(app: &App) -> (Vec<Diagnostic>, PreloadCoverage) {
         diagnose_expr(seeds, &mut out);
     }
     out.extend(super::forwarding::diagnose(app));
+    out.extend(super::private_calls::diagnose(app));
     out.extend(super::filter_targets::diagnose(app));
 
     // Static N+1 pass (#64): missing-preload warnings over the typed
@@ -241,6 +249,31 @@ pub fn diagnose_with_coverage(app: &App) -> (Vec<Diagnostic>, PreloadCoverage) {
         }
     }
     (out, coverage)
+}
+
+/// One warning per class that defines methods under computed names: the
+/// sends the registry does not know there answer untyped
+/// (`analyze::open_classes`), so what they return is not checked.
+fn runtime_defined_surfaces(app: &App) -> Vec<Diagnostic> {
+    let open = super::open_classes::OpenClasses::of(app);
+    let mut out: Vec<Diagnostic> = open
+        .classes()
+        .map(|(class, class_side, span)| {
+            let kind = DiagnosticKind::GradualUntyped { expr_kind: Symbol::new("runtime-defined method") };
+            Diagnostic {
+                span: *span,
+                severity: crate::diagnostic::Severity::Warning,
+                kind,
+                message: format!(
+                    "`{}` defines {} methods under names computed when it runs, so a call to one the source does not declare answers untyped",
+                    class.0.as_str(),
+                    if class_side { "class" } else { "instance" }
+                ),
+            }
+        })
+        .collect();
+    out.sort_by_key(|d| (d.span.file.0, d.span.start, d.message.clone()));
+    out
 }
 
 /// A model's own `def author` / `def author=` over an association's
@@ -420,7 +453,7 @@ pub fn unknown_receiver_sends(app: &App, classes: &HashMap<ClassId, ClassInfo>) 
                 && is_unknown_ty(expr.ty.as_ref())
                 && !method_registered_on(classes, r.ty.as_ref(), method);
             if (gradual || known_receiver || unknown)
-                && expr.diagnostic.is_none()
+                && expr.diagnostic().is_none()
                 && !expr.span.is_synthetic()
             {
                 out.push(UnknownReceiverSend { span: expr.span, method: method.clone(), gradual, known_receiver });
@@ -483,7 +516,7 @@ fn diagnose_expr_in(expr: &Expr, out: &mut Vec<Diagnostic>, value_used: bool) {
     // These are the IR-carried path: detection happens once at the
     // point of typing, and every reader (including this walker) sees
     // the same set.
-    if let Some(kind) = &expr.diagnostic {
+    if let Some(kind) = &expr.diagnostic() {
         let message = match kind {
             // Types render as a Ruby developer reads them (`Integer?`,
             // `Product`), not as the IR's Debug form — the message is
@@ -641,7 +674,7 @@ fn diagnose_expr_in(expr: &Expr, out: &mut Vec<Diagnostic>, value_used: bool) {
     // A node the compiler synthesized (an `attr_writer`'s `value`) has no
     // source position: there is nothing for the author to look at or fix.
     if is_unknown_ty(expr.ty.as_ref()) && !expr.span.is_synthetic()
-        && !matches!(expr.diagnostic, Some(DiagnosticKind::Unsupported { .. }))
+        && !matches!(expr.diagnostic(), Some(DiagnosticKind::Unsupported { .. }))
     {
         let report = matches!(
             &*expr.node,

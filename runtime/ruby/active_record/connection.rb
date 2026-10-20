@@ -211,6 +211,18 @@ module ActiveRecord
     # open. `Room::MessagesCount.with_immediate_write` takes this path
     # inside a fixture example, because that frame is hidden from
     # `transaction_open?` (see active_record_db_config.rb).
+    # ROLLBACK TO plus RELEASE. A SQLite error here means the transaction
+    # already ended; the caller's exception is the one that matters.
+    def self._rollback_savepoint(name)
+      begin
+        Db.exec("ROLLBACK TO SAVEPOINT #{name}")
+        Db.exec("RELEASE SAVEPOINT #{name}")
+      rescue StandardError
+        # SQLite may already have ended the transaction itself.
+      end
+      nil
+    end
+
     def transaction(mode = :deferred)
       if Db.transaction_open?
         name = "rh_raw_#{Db._txn_depth}"
@@ -218,12 +230,7 @@ module ActiveRecord
         begin
           result = yield
         rescue Exception => e
-          begin
-            Db.exec("ROLLBACK TO SAVEPOINT #{name}")
-            Db.exec("RELEASE SAVEPOINT #{name}")
-          rescue StandardError
-            # SQLite may have ended the transaction itself already.
-          end
+          RawConnection._rollback_savepoint(name)
           raise e
         end
         Db.exec("RELEASE SAVEPOINT #{name}")
@@ -261,17 +268,7 @@ module ActiveRecord
     # `Db.escape_string` already wraps in single quotes (sqlite literal
     # syntax with '' doubling).
     def quote(value)
-      if value.nil?
-        "NULL"
-      elsif value.is_a?(Integer) || value.is_a?(Float)
-        value.to_s
-      elsif value.is_a?(TrueClass)
-        "1"
-      elsif value.is_a?(FalseClass)
-        "0"
-      else
-        Db.escape_string(value.to_s)
-      end
+      Arel::Nodes.quote_scalar(value)
     end
 
     # Rails `quote_string`: escaped but UNquoted (callers embed it
@@ -650,26 +647,14 @@ module ActiveRecord
             # outer transaction carries on and commits.
             Db._txn_depth = depth
             unless savepoint.nil?
-              begin
-                Db.exec("ROLLBACK TO SAVEPOINT #{savepoint}")
-                Db.exec("RELEASE SAVEPOINT #{savepoint}")
-              rescue StandardError
-                # SQLite may already have ended the whole transaction; the
-                # Rollback still answers nil, as the outer ROLLBACK's does.
-              end
+              RawConnection._rollback_savepoint(savepoint)
               ActiveRecord::Base._rollback_enlisted(mark)
             end
             result = nil
           rescue Exception => e
             Db._txn_depth = depth
             unless savepoint.nil?
-              begin
-                Db.exec("ROLLBACK TO SAVEPOINT #{savepoint}")
-                Db.exec("RELEASE SAVEPOINT #{savepoint}")
-              rescue StandardError
-                # SQLite may already have ended the whole transaction (see
-                # the outer ROLLBACK below); that must not hide `e`.
-              end
+              RawConnection._rollback_savepoint(savepoint)
               ActiveRecord::Base._rollback_enlisted(mark)
             end
             raise e
@@ -747,8 +732,15 @@ module ActiveRecord
               ActiveRecord::TransactionHooks.rolled_back
               raise e
             end
-            ActiveRecord::TransactionHooks.committed
-            ActiveRecord::Base._commit_enlisted
+            # The records' commit callbacks first, then the held jobs,
+            # as Rails enqueues after them. A job that fails to enqueue
+            # (a Sidekiq push to a down Redis) raises after both, so no
+            # callback is skipped or left to fire at a later COMMIT.
+            begin
+              ActiveRecord::Base._commit_enlisted
+            ensure
+              ActiveRecord::TransactionHooks.committed
+            end
           end
         end
       end
@@ -829,8 +821,9 @@ module ActiveRecord
     # row every call and then trip the UNIQUE index on `key`.
     #
     # `on_duplicate:` replaces the generated SET clause with a raw
-    # fragment (`Arel.sql("value = value + 1")` — Arel.sql is the
-    # identity here, so it arrives as a String). Otherwise every
+    # fragment (`Arel.sql("value = value + 1")`). `Arel.sql` answers an
+    # `Arel::Nodes::SqlLiteral` whose `to_s` is that text, which the
+    # interpolation below reads. Otherwise every
     # non-conflict column is assigned from `excluded`, matching Rails.
     #
     # Timestamps as Rails 8.1's `record_timestamps` stamps them: an
@@ -1063,6 +1056,169 @@ module ActiveRecord
       ActiveRecord::Relation.new(self).first
     end
 
+    # Not left to the lowerings: they re-root only the class-side shapes they recognize, and Rails' `Querying` hands every one of these to `all`.
+    def self.delete_by(conditions)
+      all.delete_by(conditions)
+    end
+
+    def self.destroy_by(conditions)
+      all.destroy_by(conditions)
+    end
+
+    def self.distinct(value = true)
+      all.distinct(value)
+    end
+
+    def self.eager_load(*names)
+      all.eager_load(*names)
+    end
+
+    def self.excluding(*records)
+      all.excluding(*records)
+    end
+
+    def self.find_each
+      relation = all
+      records = relation.loaded_records
+      i = 0
+      n = records.length
+      while i < n
+        yield records[i]
+        i += 1
+      end
+      relation
+    end
+
+    def self.find_in_batches
+      relation = all
+      yield relation.loaded_records
+      relation
+    end
+
+    def self.first_or_initialize
+      all.first_or_initialize
+    end
+
+    def self.first!
+      all.first!
+    end
+
+    def self.from(source)
+      all.from(source)
+    end
+
+    def self.group(*parts)
+      all.group(*parts)
+    end
+
+    def self.having(condition, *args)
+      all.having(condition, *args)
+    end
+
+    def self.ids
+      all.ids
+    end
+
+    def self.includes(*names)
+      all.includes(*names)
+    end
+
+    def self.joins(spec)
+      all.joins(spec)
+    end
+
+    def self.left_joins(spec)
+      all.left_joins(spec)
+    end
+
+    def self.left_outer_joins(spec)
+      all.left_outer_joins(spec)
+    end
+
+    def self.limit(n)
+      all.limit(n)
+    end
+
+    def self.many?
+      all.many?
+    end
+
+    def self.maximum(expr)
+      all.maximum(expr)
+    end
+
+    def self.merge(other)
+      all.merge(other)
+    end
+
+    def self.minimum(expr)
+      all.minimum(expr)
+    end
+
+    def self.offset(n)
+      all.offset(n)
+    end
+
+    def self.one?
+      all.one?
+    end
+
+    def self.or(other)
+      all.or(other)
+    end
+
+    def self.order(*parts)
+      all.order(*parts)
+    end
+
+    def self.pick(col)
+      all.pick(col)
+    end
+
+    def self.pluck(col)
+      all.pluck(col)
+    end
+
+    def self.preload(*names)
+      all.preload(*names)
+    end
+
+    def self.references(*names)
+      all.references(*names)
+    end
+
+    def self.reorder(*parts)
+      all.reorder(*parts)
+    end
+
+    def self.select(*specs)
+      all.select(*specs)
+    end
+
+    def self.sum(expr)
+      all.sum(expr)
+    end
+
+    def self.touch_all(name = nil)
+      all.touch_all(name)
+    end
+
+    def self.unscope(where: nil)
+      all.unscope(where: where)
+    end
+
+    def self.update_all(updates)
+      all.update_all(updates)
+    end
+
+    def self.with_recursive(ctes)
+      all.with_recursive(ctes)
+    end
+
+    def self.without(*records)
+      all.without(*records)
+    end
+
     # `User.take` — the Rails 8 authentication generator's tests set up
     # with it (`setup { @user = User.take }`), so the Rails Guides store
     # reaches here. Same row as `first` under SQLite; see Relation#take.
@@ -1197,20 +1353,21 @@ module ActiveRecord
     # so an `after_create_commit` that enqueues a job never queues one
     # for a row a rollback removed.
     def _save_committed(was_new)
-      kind = was_new ? 0 : 1
+      _enlist_or_run(was_new ? 0 : 1)
+    end
+
+    def _destroy_committed
+      _enlist_or_run(2)
+    end
+
+    # Outside a transaction the commit callbacks run now. Inside one the
+    # write is enlisted until the outermost COMMIT. Save and destroy
+    # share this `Db` walk; only the callback kind differs.
+    def _enlist_or_run(kind)
       if Db._txn_depth == 0
         _run_commit_callbacks(kind)
       else
         Db._txn_records << ActiveRecord::EnlistedRecord.new(self, kind)
-      end
-      nil
-    end
-
-    def _destroy_committed
-      if Db._txn_depth == 0
-        _run_commit_callbacks(2)
-      else
-        Db._txn_records << ActiveRecord::EnlistedRecord.new(self, 2)
       end
       nil
     end
@@ -1238,15 +1395,23 @@ module ActiveRecord
       _commit_enlisted_from(0)
     end
 
-    # Run commit callbacks for the writes enlisted at and after `from`,
-    # and drop them from the list. Writes enlisted earlier stay for the
-    # parent transaction. Called for the outermost COMMIT (`from` 0)
-    # and for a savepoint whose parent is not joinable.
-    def self._commit_enlisted_from(from)
+    # The writes enlisted at and after `from`, dropped from the list.
+    # nil when that range is empty. Commit and rollback both start here.
+    def self._take_enlisted(from)
       records = Db._txn_records
       return nil if records.length <= from
       held = records[from, records.length - from]
       records.pop while records.length > from
+      held
+    end
+
+    # Run commit callbacks for the writes enlisted at and after `from`.
+    # Writes enlisted earlier stay for the parent transaction. Called
+    # for the outermost COMMIT (`from` 0) and for a savepoint whose
+    # parent is not joinable.
+    def self._commit_enlisted_from(from)
+      held = _take_enlisted(from)
+      return nil if held.nil?
       seen = []
       held.each do |entry|
         record = entry.record
@@ -1268,10 +1433,8 @@ module ActiveRecord
     # the database now has it -- a create is a new record again, a
     # destroy persisted again -- as Rails' `rolledback!` restores them.
     def self._rollback_enlisted(from)
-      records = Db._txn_records
-      return nil if records.length <= from
-      undone = records[from, records.length - from]
-      records.pop while records.length > from
+      undone = _take_enlisted(from)
+      return nil if undone.nil?
       undone.each { |entry| entry.record._restore_after_rollback(entry.kind) }
       nil
     end

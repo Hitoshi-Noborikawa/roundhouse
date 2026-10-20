@@ -555,6 +555,7 @@ const FATES: &[(&str, GemFate)] = &[
     ("mail", GemFate::Modeled),        // catalog/gems: Mail::Address; ActionMailer
     ("mocha", GemFate::Modeled),       // lower/mocha bridge
     ("nokogiri", GemFate::Modeled),    // catalog/gems: Nokogiri
+    ("oj", GemFate::Modeled),          // ingest/oj + lower/oj: under Oj.mimic_JSON, load/generate on ruby, jruby and spinel; dump and every other target refused
     ("pagy", GemFate::Modeled),        // registry/controllers + analyze/body/pagy + runtime action_controller/pagy.rb: pagy(scope[, limit: n]) offset paginator, Pagy#series_nav/info_tag/readers (English); other paginators/options/helpers refused
     ("pdf-reader", GemFate::Modeled),  // catalog/gems: PDF::Reader
     ("platform_agent", GemFate::Modeled), // useragent port
@@ -623,8 +624,9 @@ const FATES: &[(&str, GemFate)] = &[
     ("pry", GemFate::Infrastructure),
     ("pry-rails", GemFate::Infrastructure),
     ("puma", GemFate::Infrastructure),
-    ("rack-attack", GemFate::Infrastructure),
-    ("rack-cors", GemFate::Infrastructure),
+    // Not rack-attack or rack-cors: a middleware that throttles a request or
+    // writes its CORS headers changes what the app answers, and nothing in
+    // the app calls it for a dispatch failure to show that it is missing.
     ("rack-protection", GemFate::Infrastructure),
     ("rack-test", GemFate::Infrastructure),
     ("rails-controller-testing", GemFate::Infrastructure),
@@ -761,23 +763,28 @@ pub fn namespace_of(gem: &str) -> String {
         ("aws-sdk-core", "Aws"),
         ("bcrypt", "BCrypt"),
         ("cancancan", "CanCan"),
+        ("caxlsx", "Axlsx"),
         ("combine_pdf", "CombinePDF"),
+        ("duckdb", "DuckDB"),
         ("fast_excel", "FastExcel"),
         ("graphql", "GraphQL"),
         ("htmlentities", "HTMLEntities"),
         ("http", "HTTP"),
         ("i18n", "I18n"),
         ("jwt", "JWT"),
+        ("mcp", "MCP"),
         ("mini_magick", "MiniMagick"),
         ("net-http-persistent", "Net"),
         ("nokogiri", "Nokogiri"),
         ("oj", "Oj"),
         ("pdf-reader", "PDF"),
         ("pg", "PG"),
+        ("polars-df", "Polars"),
         ("rack-attack", "Rack"),
         ("rqrcode", "RQRCode"),
         ("rotp", "ROTP"),
         ("ruby-vips", "Vips"),
+        ("ruby_llm", "RubyLLM"),
         ("rubyzip", "Zip"),
         // sorbet-runtime's entire app-facing surface is `T` — `T.let`,
         // `T::Enum`, `T::Struct` — which the name-derived namespace
@@ -793,6 +800,24 @@ pub fn namespace_of(gem: &str) -> String {
         return (*ns).to_string();
     }
     camelize(gem)
+}
+
+/// Whether `boot.rb` should `require` a locked unknown gem by its own name
+/// once the emitted program names that gem's namespace.
+///
+/// A normal gem's entry file is `lib/<gem>.rb`, and the constant lowercases
+/// to that name (`duckdb` → `DuckDB`). The same file exists for three
+/// irregular constants: `caxlsx` (`lib/caxlsx.rb`), `polars-df`
+/// (`lib/polars-df.rb`), and `ruby_llm` (`lib/ruby_llm.rb`). Requiring the
+/// lowercased constant (`axlsx`, `polars`, `rubyllm`) is not that entry.
+///
+/// `rubyzip` is not in this set. `require "rubyzip"` is not a file; the gem
+/// loads as `zip`.
+pub fn loads_by_gem_name(gem: &str) -> bool {
+    if namespace_of(gem).eq_ignore_ascii_case(gem) {
+        return true;
+    }
+    matches!(gem, "caxlsx" | "polars-df" | "ruby_llm")
 }
 
 /// The top-level constants a gem might define, best guess first: the
@@ -828,6 +853,41 @@ fn camelize(gem: &str) -> String {
             }
         })
         .collect()
+}
+
+/// The resolved specs whose namespace `constant_path` sits under. A gem's
+/// own spelling nests at its dashes (`rack-attack` → `Rack::Attack`); its
+/// conventional namespace and first segment count too, below that. The
+/// longest match wins, and ties at the same rank are all returned.
+pub fn lock_gems_owning_constant<'a>(lock: &'a Lockfile, constant_path: &str) -> Vec<&'a str> {
+    let path = constant_path.trim_start_matches("::");
+    // Not case-sensitive: `OmniAuth` is the omniauth gem's, `PgHero` pghero's.
+    let under = |ns: &str| {
+        path.len() >= ns.len()
+            && path.is_char_boundary(ns.len())
+            && path[..ns.len()].eq_ignore_ascii_case(ns)
+            && (path.len() == ns.len() || path[ns.len()..].starts_with("::"))
+    };
+    let mut best: Vec<&str> = Vec::new();
+    let mut best_rank = (0usize, false);
+    for (name, _) in &lock.specs {
+        let nested = name.split('-').map(camelize).collect::<Vec<_>>().join("::");
+        let rank = if under(&nested) {
+            (nested.len(), true)
+        } else if let Some(ns) = namespace_candidates(name).into_iter().filter(|ns| under(ns)).max_by_key(|ns| ns.len()) {
+            (ns.len(), false)
+        } else {
+            continue;
+        };
+        if rank > best_rank {
+            best_rank = rank;
+            best.clear();
+        }
+        if rank == best_rank && !best.contains(&name.as_str()) {
+            best.push(name.as_str());
+        }
+    }
+    best
 }
 
 /// The unique resolved unknown gem whose namespace `constant_path`
@@ -1311,6 +1371,16 @@ mod tests {
     }
 
     #[test]
+    fn a_constant_belongs_to_the_gem_nested_deepest_over_it() {
+        let lock = Lockfile::parse("GEM\n  specs:\n    omniauth (2.1.2)\n    rack (3.1.8)\n    rack-attack (6.7.0)\n    rack-cors (2.0.2)\n    sentry-rails (5.0)\n    sentry-ruby (5.0)\n\nDEPENDENCIES\n  omniauth\n  rack-attack\n  rack-cors\n  sentry-rails\n  sentry-ruby\n");
+        assert_eq!(lock_gems_owning_constant(&lock, "Rack::Attack"), ["rack-attack"]);
+        assert_eq!(lock_gems_owning_constant(&lock, "Rack::Utils"), ["rack"]);
+        assert_eq!(lock_gems_owning_constant(&lock, "OmniAuth::Strategies"), ["omniauth"]);
+        assert_eq!(lock_gems_owning_constant(&lock, "Sentry"), ["sentry-rails", "sentry-ruby"]);
+        assert!(lock_gems_owning_constant(&lock, "Devise").is_empty());
+    }
+
+    #[test]
     fn graphql_owns_the_graphql_namespace() {
         // Name-derived, it would be `Graphql`; graphql-ruby's is `GraphQL`.
         assert_eq!(namespace_of("graphql"), "GraphQL");
@@ -1395,6 +1465,14 @@ BUNDLED WITH
         assert_eq!(namespace_of("front_matter_parser"), "FrontMatterParser");
         assert_eq!(namespace_of("aws-sdk-s3"), "Aws");
         assert_eq!(namespace_of("rubyzip"), "Zip");
+        assert_eq!(namespace_of("polars-df"), "Polars");
+        assert_eq!(namespace_of("ruby_llm"), "RubyLLM");
+        assert_eq!(namespace_of("caxlsx"), "Axlsx");
+        assert_eq!(namespace_of("duckdb"), "DuckDB");
+        assert_eq!(namespace_of("mcp"), "MCP");
+        for gem in ["polars-df", "ruby_llm", "caxlsx", "duckdb", "mcp", "rubyzip"] {
+            assert_eq!(fate_of(gem), GemFate::Unknown, "{gem} stays unmodeled");
+        }
         let census = GemCensus::of(&Lockfile::parse(LOCK));
         assert_eq!(gem_owning_constant(&census, "Redcarpet::Markdown"), Some("redcarpet"));
         assert_eq!(namespace_of("sorbet-runtime"), "T");
@@ -1416,6 +1494,119 @@ BUNDLED WITH
         let lock = Lockfile::parse(LOCK);
         assert_eq!(gem_claiming_method(&lock, "policy_scope"), Some("pundit"));
         assert_eq!(gem_claiming_method(&lock, "acts_as_list"), None, "acts-as-list is not in this lock");
+    }
+
+    #[test]
+    fn irregular_namespaces_pass_through_ruby_emit_for_any_lockfile() {
+        let lock = "\
+GEM
+  remote: https://rubygems.org/
+  specs:
+    caxlsx (4.2.0)
+    duckdb (1.3.1)
+    mcp (0.4.0)
+    polars-df (0.20.0)
+    ruby_llm (1.8.2)
+    rubyzip (2.3.2)
+
+DEPENDENCIES
+  caxlsx
+  duckdb
+  mcp
+  polars-df
+  ruby_llm
+  rubyzip
+";
+        let source = "\
+class Export
+  def run
+    Zip::File.open(\"a.zip\")
+    Polars::DataFrame.new
+    RubyLLM.chat
+    Axlsx::Package.new
+    DuckDB::Database.open
+    MCP::Server.new
+  end
+end
+";
+        let tree = [
+            ("Gemfile.lock", lock),
+            ("lib/export.rb", source),
+        ]
+        .into_iter()
+        .map(|(path, text)| (std::path::PathBuf::from(path), text.as_bytes().to_vec()))
+        .collect();
+        let app = crate::ingest::ingest_app_from_tree(tree).expect("ingest locked irregular gems");
+        let namespaces = locked_external_gem_namespaces(&app);
+        for name in ["Zip", "Polars", "RubyLLM", "Axlsx", "DuckDB", "MCP"] {
+            assert!(namespaces.contains(name), "{name} missing from {namespaces:?}");
+        }
+        for miss in ["Rubyzip", "PolarsDf", "RubyLlm", "Caxlsx", "Duckdb", "Mcp"] {
+            assert!(
+                !namespaces.contains(miss),
+                "camelized miss {miss} must not be the Ruby-emit pass-through key"
+            );
+        }
+        assert!(
+            !detail_names_external_namespace("Mcp::Tool", "MCP"),
+            "an app module Mcp is a different constant from the mcp gem"
+        );
+        let census = GemCensus::of(app.gem_lock.as_ref().expect("lock"));
+        for gem in ["caxlsx", "duckdb", "mcp", "polars-df", "ruby_llm", "rubyzip"] {
+            assert_eq!(
+                census.gems.iter().find(|g| g.name == gem).map(|g| g.fate),
+                Some(GemFate::Unknown),
+                "{gem} must stay unknown"
+            );
+        }
+        assert_eq!(gem_owning_constant(&census, "Polars::DataFrame"), Some("polars-df"));
+        assert_eq!(gem_owning_constant(&census, "RubyLLM::Chat"), Some("ruby_llm"));
+        assert_eq!(gem_owning_constant(&census, "Axlsx::Package"), Some("caxlsx"));
+        assert_eq!(gem_owning_constant(&census, "DuckDB::Database"), Some("duckdb"));
+        assert_eq!(gem_owning_constant(&census, "MCP::Server"), Some("mcp"));
+        assert_eq!(gem_owning_constant(&census, "Zip::File"), Some("rubyzip"));
+
+        let files = crate::project::target_files(&app, std::path::Path::new("."), crate::project::BuildTarget::Ruby)
+            .expect("emit Ruby project");
+        let export = files
+            .iter()
+            .find(|(_, content)| content.contains("class Export"))
+            .map(|(_, content)| content.as_str())
+            .expect("emitted Export");
+        for konst in ["Zip::File", "Polars::DataFrame", "RubyLLM.chat", "Axlsx::Package", "DuckDB::Database", "MCP::Server"] {
+            assert!(
+                export.contains(konst),
+                "Ruby emit must keep locked gem constant {konst}:\n{export}"
+            );
+        }
+        assert!(
+            !export.contains("PolarsDf") && !export.contains("RubyLlm") && !export.contains("Caxlsx"),
+            "emit must not rewrite the gem's real constant:\n{export}"
+        );
+        let gemfile = files.iter().find(|(path, _)| path == "Gemfile").expect("Gemfile").1.as_str();
+        for pin in [
+            "gem \"caxlsx\", \"= 4.2.0\"",
+            "gem \"duckdb\", \"= 1.3.1\"",
+            "gem \"mcp\", \"= 0.4.0\"",
+            "gem \"polars-df\", \"= 0.20.0\"",
+            "gem \"ruby_llm\", \"= 1.8.2\"",
+            "gem \"rubyzip\", \"= 2.3.2\"",
+        ] {
+            assert!(gemfile.contains(pin), "missing {pin} in\n{gemfile}");
+        }
+        let boot = files.iter().find(|(path, _)| path == "boot.rb").expect("boot.rb").1.as_str();
+        for feature in ["caxlsx", "duckdb", "mcp", "polars-df", "ruby_llm"] {
+            assert!(
+                boot.contains(&format!("require {feature:?}")),
+                "boot must load {feature} by gem name:\n{boot}"
+            );
+        }
+        assert!(
+            !boot.contains("require \"rubyzip\""),
+            "rubyzip has no rubyzip.rb entry; boot must not require that name:\n{boot}"
+        );
+        assert!(loads_by_gem_name("duckdb") && loads_by_gem_name("mcp"));
+        assert!(!loads_by_gem_name("rubyzip"));
     }
 
     #[test]

@@ -747,6 +747,26 @@ module ActionCable
     def assert_no_broadcasts(stream, &block)
       assert_broadcasts(stream, 0, &block)
     end
+
+    # `assert_broadcast_on stream, data`: some broadcast to `stream` —
+    # during the block, or so far in this test without one — carries
+    # `data`. Compared as Rails compares it, after a JSON round trip:
+    # `data` goes through the same encoder a broadcast does, and both
+    # sides are parsed, so key order and symbol keys do not matter. The
+    # log holds each publish as its JSON text on this tree.
+    def assert_broadcast_on(stream, data, &block)
+      entries =
+        if block
+          capture_broadcasts_on(stream, &block)
+        else
+          Broadcasts.log.select { |entry| entry[:stream] == stream }
+        end
+      want = JSON.parse(ActionCable.payload_json(data))
+      payloads = entries.map { |entry| entry[:payload] }.compact
+      return if payloads.any? { |payload| JSON.parse(payload.to_s) == want }
+      raise "assert_broadcast_on failed: no broadcast to #{stream.inspect} carried #{JSON.generate(want)}; " \
+            "got #{payloads.inspect}"
+    end
   end
 end
 
@@ -962,25 +982,10 @@ ActionController::Base.perform_caching = false
 
 # ---- Query assertions ------------------------------------------------
 #
-# Rails' `ActiveSupport::Notifications.subscribed(callback,
-# "sql.active_record") { … }` and the `ActiveRecord::Assertions::
-# QueryAssertions` built on it, over `Db.capture_sql`, which records
-# every statement a prepare/exec issues and skips a query-cache replay,
-# as Rails' counter skips CACHE events. The callback gets Rails' five
-# arguments; the payload carries `:sql` and `:name` ("SQL", since the
-# runtime does not name its queries). Called after the block rather than
-# during it, which no test can tell: they collect, then inspect.
-module ActiveSupport
-  module Notifications
-    def self.subscribed(callback, name, &block)
-      return block.call unless name == "sql.active_record"
-      result = nil
-      statements = Db.capture_sql { result = block.call }
-      statements.each { |sql| callback.call(name, nil, nil, nil, { sql: sql, name: "SQL" }) }
-      result
-    end
-  end
-end
+# `ActiveSupport::Notifications.subscribed` lives in
+# runtime/ruby/active_support_notifications.rb. SQL for that name drains
+# `Db.capture_sql` after the block. QueryAssertions below read the same
+# log directly and skip schema statements.
 
 module ActiveRecord
   module Assertions
@@ -1194,6 +1199,18 @@ class TestBase
     ensure
       travel_back
     end
+  end
+
+  # Rails' `stub_const`, for the sites `lower::stub_const` could not
+  # make static: a stub that changes the constant's type (`TIME_LIMIT =
+  # 10` stubbed with `0.2`), or one whose owner the pass did not find.
+  # This tree resolves constants at build time and has no `const_set`,
+  # so the stub cannot take effect; the test FAILS, saying so, rather
+  # than running its block against the unstubbed value. The CRuby tree
+  # replaces this with the real helper (test_support_cruby.rb).
+  def stub_const(mod, constant, _value)
+    raise "stub_const(#{mod}, #{constant.inspect}) has no compiled form here: " \
+          "the stub changes the constant's type, or names a constant the lowering could not find"
   end
 
   # Minitest's `assert_nothing_raised`: the block runs, and an exception

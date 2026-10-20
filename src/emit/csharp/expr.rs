@@ -885,7 +885,7 @@ pub fn emit_expr_for_runtime(e: &Expr) -> String {
 ///   - `Append` `io << chunk`     → `io.Append(chunk)`
 ///   - `Result` terminal `io`     → `io.ToString()`
 fn try_string_builder(e: &Expr) -> Option<String> {
-    match e.hint? {
+    match e.hint().as_ref()? {
         IrHint::MutableStringLiteral => None, // emitted as the plain literal
         IrHint::StringBuilderInit => {
             if let ExprNode::Assign { target: LValue::Var { name, .. }, .. } = &*e.node {
@@ -1306,6 +1306,10 @@ fn emit_send(
     args: &[Expr],
     block: Option<&Expr>,
 ) -> String {
+    if let Some(recv) = crate::emit::shared::fn_call::function_receiver(recv, method, block) {
+        let args_s: Vec<String> = args.iter().map(emit_expr).collect();
+        return format!("{}({})", emit_expr(recv), args_s.join(", "));
+    }
     if recv.is_none() && args.is_empty() && block.is_none() && is_param(method) {
         return camel(method);
     }

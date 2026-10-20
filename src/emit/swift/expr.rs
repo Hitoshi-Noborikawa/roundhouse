@@ -1171,7 +1171,7 @@ pub fn emit_expr(e: &Expr) -> String {
 /// append is amortized O(1)); mirrors `kotlin::expr::try_string_builder`.
 /// Non-hinted sites fall through to the normal walkers.
 fn try_string_builder(e: &Expr) -> Option<String> {
-    match e.hint? {
+    match e.hint().as_ref()? {
         crate::expr::IrHint::MutableStringLiteral => None, // emitted as the plain literal
         crate::expr::IrHint::StringBuilderInit => {
             if let ExprNode::Assign { target: LValue::Var { name, .. }, .. } = &*e.node {
@@ -2585,6 +2585,10 @@ fn emit_send(
     args: &[Expr],
     block: Option<&Expr>,
 ) -> String {
+    if let Some(recv) = crate::emit::shared::fn_call::function_receiver(recv, method, block) {
+        let args_s: Vec<String> = args.iter().map(emit_expr).collect();
+        return format!("{}({})", emit_expr(recv), args_s.join(", "));
+    }
     let args_s: Vec<String> = args.iter().map(emit_expr).collect();
 
     // Temporal reader intrinsic: `ActiveSupport.parse_db_time(s)` parses a

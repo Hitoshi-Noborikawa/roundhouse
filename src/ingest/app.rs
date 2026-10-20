@@ -19,7 +19,7 @@ use crate::Symbol;
 use crate::dialect::{LibraryClass, MethodReceiver, TestModule};
 use crate::vfs::{FsVfs, MapVfs, Vfs};
 
-use super::controller::ingest_controller_with_nesting;
+use super::controller::ingest_controller;
 use super::expr::ingest_ruby_program;
 use super::fixture::ingest_fixture_file;
 use super::jbuilder::ingest_jbuilder;
@@ -377,6 +377,17 @@ pub fn ingest_app_with_vfs<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResult
                 app.gem_boundary = super::rbi::load_gem_boundary(vfs, dir, lock, &app.extensions);
             }
         }
+    }
+
+    if let Ok(entries) = vfs.read_dir(&dir.join("config/environments")) {
+        let mut envs: Vec<String> = entries
+            .iter()
+            .filter(|p| p.extension().is_some_and(|e| e == "rb"))
+            .filter(|p| vfs.read_to_string(p).is_ok_and(|text| sets_assume_ssl(&text)))
+            .filter_map(|p| p.file_stem().map(|s| s.to_string_lossy().to_string()))
+            .collect();
+        envs.sort();
+        app.assume_ssl_envs = envs;
     }
 
     let schema_path = dir.join("db/schema.rb");
@@ -884,6 +895,10 @@ pub fn ingest_app_with_vfs<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResult
     // not abort ingest.
     // Rails' ParamsWrapper default (see `App::wrap_parameters_by_default`).
     app.wrap_parameters_by_default = read_wrap_parameters_by_default(vfs, dir);
+    // The ActiveJob queue adapter (see `App::queue_adapter`).
+    app.queue_adapter = read_queue_adapter(vfs, dir);
+    // Where Sidekiq pushes (see `App::sidekiq_redis`).
+    app.sidekiq_redis = read_sidekiq_redis(vfs, dir);
     let app_config_path = dir.join("config/application.rb");
     if let Ok(source) = vfs.read(&app_config_path) {
         app.loaded_frameworks =
@@ -1451,10 +1466,6 @@ end
     // the Db shim's own (see `database_yml`).
     app.database_pragmas = super::database_yml::database_pragmas(vfs, dir);
 
-    // Each controller's lexical nesting, for resolving its superclass
-    // once every controller is known (see
-    // `qualify_relative_controller_superclasses`).
-    let mut controller_nesting = std::collections::HashMap::new();
     for root in &roots {
         let controllers_dir = dir.join(root).join("controllers");
         if !vfs.is_dir(&controllers_dir) {
@@ -1464,10 +1475,9 @@ end
             let Some(source) = read_or_ledger(vfs, &entry)? else { continue };
             let path_str = entry.display().to_string();
             if let Some(maybe_controller) =
-                unwrap_or_record(ingest_controller_with_nesting(&source, &path_str))?
+                unwrap_or_record(ingest_controller(&source, &path_str))?
             {
-                if let Some((controller, nesting)) = maybe_controller {
-                    controller_nesting.insert(controller.name.clone(), nesting);
+                if let Some(controller) = maybe_controller {
                     // `helper_method :x` exposes controller methods to
                     // templates. The ARG-PURE ones (no ivar reads)
                     // register like app-helper functions — the bare
@@ -1587,7 +1597,7 @@ end
                     app.controllers.push(synthesize_redirect_controller(&routes.redirects));
                     // The inherited runtime calls this helper, outside app call-site inference.
                     let signatures = crate::rbs::parse_app_signatures(
-                        "class RoundhouseRedirectsController\n  def same_host_location: (String location) -> String\nend\n",
+                        "class RoundhouseRedirectsController\n  def same_host_location: (String location) -> String\n  def absolute_redirect_location: (String location) -> String\nend\n",
                     ).expect("routing redirect policy signature parses");
                     for (owner, methods) in signatures {
                         app.rbs_signatures.entry(owner).or_default().extend(methods);
@@ -2068,13 +2078,26 @@ end
 
     enum_constants.validate_consumed_sources(&app, &sources, &enum_input_files)?;
     keep_initializer_defined(&mut app, dir, &sources, initializer_defined);
+    // `self.queue_adapter =` on ApplicationJob (see `App::queue_adapter`).
+    apply_application_job_queue_adapter(&mut app);
+    super::propshaft::ingest(vfs, dir, &mut app)?;
     // The ledger of boot statements no recognizer above read. A warning
     // per statement, in the ingest diagnostic channel; no `App` field.
+    let app_namespaces: HashSet<String> = app
+        .models
+        .iter()
+        .map(|m| m.name.0.as_str())
+        .chain(app.library_classes.iter().map(|c| c.name.0.as_str()))
+        .chain(app.controllers.iter().map(|c| c.name.0.as_str()))
+        .map(|n| n.split("::").next().unwrap_or(n).to_string())
+        .collect();
     super::initializer_ledger::record(
         vfs,
         dir,
         &path_gems,
         &engine_routes.keys().cloned().collect::<HashSet<String>>(),
+        app.gem_lock.as_ref(),
+        &app_namespaces,
     );
     // Carrier provenance must not depend on where a module lives:
     // models, services, helpers and lib all use the same splice.
@@ -2088,14 +2111,6 @@ end
     // Registered source paths are prefixed with this (the fs walk
     // joins `dir`); map-VFS trees pass `""` and register app-relative.
     app.root = dir.display().to_string().trim_end_matches('/').to_string();
-
-    // A module-nested controller's relative superclass
-    // (`module Ns; class XController < BaseController`) names
-    // `Ns::BaseController` under Ruby's lexical lookup. Left bare, the
-    // parent matched no controller, the ancestry walk came back empty,
-    // and the whole filter chain (its own base's before_action AND
-    // ApplicationController's) vanished from the synthesized dispatcher.
-    qualify_relative_controller_superclasses(&mut app, &controller_nesting);
 
     // `app/models/post/summary.rb` often reopens `class Post` only to
     // hold `Post::Summary`. That reopen is a namespace, not a class of
@@ -2123,12 +2138,19 @@ end
     // `include`s (or nothing), now that every module of the app is
     // known; before the qualification below, which reads them.
     super::guarded_include::splice_guarded_includes(&mut app);
-    // Before the splice: it (and every later consumer) looks concerns up
-    // by ClassId, so the lexical-scope resolution has to have happened.
-    qualify_relative_includes(&mut app);
+    // Every superclass and mixin, as Rubydex resolved it, before the
+    // concern splices and every later consumer look them up by ClassId.
+    // A module-nested `class XController < BaseController` names
+    // `Ns::BaseController`; `include Avatar` inside `class User` names
+    // `User::Avatar`. The passes above leave both as written.
+    let const_resolver = crate::timings::phase("rubydex: wait", || const_resolver.finish());
+    super::written_names::resolve(&mut app, &sources, &const_resolver.for_sources(&sources));
     // Before the concern splices: they read `library_classes`, and this
     // turns `Current`'s metaprogrammed surface into real methods first.
     super::current_attributes::lower_current_attributes(&mut app);
+    // `attribute :x, :type` under `include ActiveModel::Attributes` -> real
+    // casting accessors, before anything reads the class's methods.
+    super::active_model_attributes::lower_active_model_attributes(&mut app);
     super::thread_mattr::lower_thread_mattr(&mut app);
     // Alba declarations become ordinary property-reading methods before
     // inference; validate complete original resource bodies, not just IR.
@@ -2162,6 +2184,19 @@ end
     })?;
     // After it: a contract result's `to_monad` is a Result.
     super::dry_monads::lower_dry_monads(&mut app, &sources)?;
+    // Oj reads its mode from the initializers (`Oj.mimic_JSON`).
+    {
+        let init_dir = dir.join("config/initializers");
+        let mut initializers = Vec::new();
+        if vfs.is_dir(&init_dir) {
+            for entry in read_rb_files(vfs, &init_dir)? {
+                if let Ok(text) = vfs.read_to_string(&entry) {
+                    initializers.push(text);
+                }
+            }
+        }
+        super::oj::lower_oj(&mut app, &sources, &initializers)?;
+    }
     super::dry_initializer::drop_type_constants(&mut app, &sources);
     // graphql-ruby object types: analyzer-only field methods, so
     // inference carries each type's record class down the schema.
@@ -2268,7 +2303,7 @@ end
     }
     super::model_delegate::lower_model_delegates(&mut app);
     super::on_load_reopen::drain_pending(&mut app);
-    app.const_resolver = crate::timings::phase("rubydex: wait", || const_resolver.finish());
+    app.const_resolver = const_resolver;
     // Admission needs complete controller permit demand and model DSL,
     // including declarations contributed by either kind of Concern,
     // and reuses the prepared resolver rather than rebuilding it.
@@ -2294,8 +2329,12 @@ end
     super::sources::assert_snapshot_matches(&[], &late_sources);
     // Before analysis too, so `check` types the recount the emit writes (`Origin.reset_counters(id, :stories)`), rather than reporting a method the lowering answers.
     crate::lower::reset_counters::apply_reset_counters_lowering(&mut app);
+    super::app_extension_calls::mark(&mut app);
     super::unreachable_views::mark(&mut app);
     super::uncalled_helper_copies::mark(&mut app);
+    let (rake_tasks_source, rake_task_gaps) = super::rake_tasks::ingest(vfs, dir);
+    app.rake_tasks_source = rake_tasks_source;
+    app.rake_task_gaps = rake_task_gaps;
     Ok(app)
 }
 
@@ -2966,8 +3005,11 @@ fn splice_concerns_into_controllers(app: &mut App) {
     use crate::ty::{Row, Ty};
 
     // Instance methods per concern module, the constants those bodies
-    // resolve lexically, and the modules it includes.
-    let mut module_methods: HashMap<crate::ident::ClassId, Vec<crate::dialect::MethodDef>> =
+    // resolve lexically, and the modules it includes. The methods are
+    // borrowed, not copied: this indexes every library class, most of
+    // which no controller includes, and a method that is spliced has
+    // its body cloned below anyway.
+    let mut module_methods: HashMap<crate::ident::ClassId, Vec<&crate::dialect::MethodDef>> =
         HashMap::new();
     let mut module_constants: HashMap<
         crate::ident::ClassId,
@@ -2981,7 +3023,6 @@ fn splice_concerns_into_controllers(app: &mut App) {
             lc.methods
                 .iter()
                 .filter(|m| matches!(m.receiver, MethodReceiver::Instance))
-                .cloned()
                 .collect(),
         );
         module_constants
@@ -3320,12 +3361,13 @@ pub(super) fn filter_registration_order(
 
 /// One ancestry snapshot for both class-body expansion paths. Direct include
 /// order is retained for the existing filter-macro lookup contract; transitive
-/// membership and inherited instance names serve finite class configuration.
+/// membership serves finite class configuration. Instance methods of the same
+/// name are a different method (`ParamKey` includes the receiver) and are not
+/// part of this snapshot.
 pub(super) struct ControllerConcernSurface {
     pub direct_includes: Vec<crate::ident::ClassId>,
     pub includes: Vec<crate::ident::ClassId>,
     pub inherited_includes: Vec<crate::ident::ClassId>,
-    pub instance_methods: std::collections::HashSet<Symbol>,
 }
 
 pub(super) struct ControllerConcernSurfaces {
@@ -3342,7 +3384,6 @@ pub(super) fn controller_concern_surfaces(app: &App) -> ControllerConcernSurface
     for controller in &app.controllers {
         let mut direct_includes = Vec::new();
         let mut inherited = Vec::new();
-        let mut instance_methods = std::collections::HashSet::new();
         let mut cur = Some(controller);
         let mut seen = std::collections::HashSet::new();
         while let Some(c) = cur {
@@ -3357,14 +3398,12 @@ pub(super) fn controller_concern_surfaces(app: &App) -> ControllerConcernSurface
                     direct_includes.push(inc);
                 }
             }
-            instance_methods.extend(c.actions().map(|a| a.name.clone()));
             cur = c.parent.as_ref().and_then(|p| app.controllers.iter().find(|o| &o.name == p));
         }
         controllers.insert(controller.name.clone(), ControllerConcernSurface {
             includes: filter_registration_order(&[direct_includes.clone()], &module_includes),
             inherited_includes: filter_registration_order(&[inherited], &module_includes),
             direct_includes,
-            instance_methods,
         });
     }
     ControllerConcernSurfaces { module_includes, controllers }
@@ -3994,30 +4033,14 @@ fn report_unrecognized_controller_macros(app: &App) {
 /// whose body holds one statement this can't read stays Unknown, whole,
 /// and is recorded as a gap.
 fn expand_class_body_macros(app: &mut App) -> IngestResult<()> {
-    use crate::dialect::{ControllerBodyItem, MethodReceiver};
+    use crate::dialect::{ControllerBodyItem, MethodDef, MethodReceiver};
     use crate::expr::ExprNode;
 
-    // Class-side methods of every module, by name — the macro table.
-    // Populated from library classes because that is where a concern's
-    // `class_methods do` / `module ClassMethods` bodies land.
-    let mut macros: HashMap<crate::ident::ClassId, Vec<crate::dialect::MethodDef>> = HashMap::new();
-    for lc in &app.library_classes {
-        let class_side: Vec<crate::dialect::MethodDef> = lc
-            .methods
-            .iter()
-            .filter(|m| matches!(m.receiver, MethodReceiver::Class))
-            .cloned()
-            .collect();
-        for method in class_side {
-            let methods = macros.entry(lc.name.clone()).or_default();
-            if let Some(prior) = methods.iter_mut().find(|m| m.name == method.name) {
-                *prior = method;
-            } else {
-                methods.push(method);
-            }
-        }
-    }
-    if macros.is_empty() {
+    // No class-side method means no macro to expand. Checked before the
+    // concern surface is built so an app with none skips that walk.
+    if !app.library_classes.iter().any(|lc| {
+        lc.methods.iter().any(|m| matches!(m.receiver, MethodReceiver::Class))
+    }) {
         return Ok(());
     }
 
@@ -4046,6 +4069,28 @@ fn expand_class_body_macros(app: &mut App) -> IngestResult<()> {
         })
         .collect();
 
+    // Class-side methods per library class — the macro table. Borrowed,
+    // not copied: this indexes every library class, most of which no
+    // controller includes, and a macro that expands substitutes from
+    // the borrowed body. A later reopening of the same name replaces
+    // the earlier def, as the owned table did. Library classes are only
+    // read here; the loop below mutates controllers.
+    let mut macros: HashMap<crate::ident::ClassId, Vec<&MethodDef>> = HashMap::new();
+    for lc in &app.library_classes {
+        for method in lc
+            .methods
+            .iter()
+            .filter(|m| matches!(m.receiver, MethodReceiver::Class))
+        {
+            let methods = macros.entry(lc.name.clone()).or_default();
+            if let Some(prior) = methods.iter_mut().find(|m| m.name == method.name) {
+                *prior = method;
+            } else {
+                methods.push(method);
+            }
+        }
+    }
+
     for controller in &mut app.controllers {
         let includes = &surfaces.controllers[&controller.name].direct_includes;
         if includes.is_empty() {
@@ -4067,7 +4112,7 @@ fn expand_class_body_macros(app: &mut App) -> IngestResult<()> {
         shadowed_macros.extend(inherited_class_methods[&controller.name].iter().cloned());
         // Shared with this controller's own hand-written block-form
         // `around_action` pass (`ingest::controller::
-        // ingest_controller_with_nesting`), which always runs first:
+        // ingest_controller`), which always runs first:
         // same owner-ident encoding, and a starting sequence number
         // picked up AFTER whatever it already placed, so a macro's own
         // block-form `around_action` never synthesizes the same method
@@ -4091,8 +4136,8 @@ fn expand_class_body_macros(app: &mut App) -> IngestResult<()> {
             let found = includes.iter().find_map(|inc| {
                 macros
                     .get(inc)
-                    .and_then(|ms| ms.iter().find(|m| &m.name == method))
-                    .map(|m| (inc.clone(), m.clone()))
+                    .and_then(|ms| ms.iter().copied().find(|m| &m.name == method))
+                    .map(|m| (inc.clone(), m))
             });
             let Some((module, macro_def)) = found else {
                 expanded.push(item);
@@ -4114,10 +4159,10 @@ fn expand_class_body_macros(app: &mut App) -> IngestResult<()> {
                 else {
                     return false;
                 };
-                other_method == method && stored_options_init(other_expr, &macro_def).is_none() && !args.is_empty()
+                other_method == method && stored_options_init(other_expr, macro_def).is_none() && !args.is_empty()
             });
-            if method_stores_keyword_rest(&macro_def) && !another_unreadable {
-                if let Some(init) = stored_options_init(expr, &macro_def) {
+            if method_stores_keyword_rest(macro_def) && !another_unreadable {
+                if let Some(init) = stored_options_init(expr, macro_def) {
                     survey::record(&IngestError::Unsupported {
                         file: controller.name.0.as_str().to_string(),
                         message: format!(
@@ -4136,7 +4181,7 @@ fn expand_class_body_macros(app: &mut App) -> IngestResult<()> {
             }
             // A keyword shape that can't be bound (see `substitute_params`) refuses the macro, like any other
             // statement that isn't filter DSL.
-            let Some(body) = substitute_params(&macro_def, args) else {
+            let Some(body) = substitute_params(macro_def, args) else {
                 survey::record(&IngestError::Unsupported {
                     file: format!("{}", controller.name.0.as_str()),
                     message: format!(
@@ -4300,7 +4345,7 @@ fn expand_class_body_macros(app: &mut App) -> IngestResult<()> {
 fn expand_nested_filter_macros(
     body: &crate::expr::Expr,
     module: &crate::ident::ClassId,
-    macros: &HashMap<crate::ident::ClassId, Vec<crate::dialect::MethodDef>>,
+    macros: &HashMap<crate::ident::ClassId, Vec<&crate::dialect::MethodDef>>,
     shadowed: &std::collections::HashSet<crate::ident::Symbol>,
     stack: &mut Vec<crate::ident::Symbol>,
 ) -> Option<crate::expr::Expr> {
@@ -4311,7 +4356,7 @@ fn expand_nested_filter_macros(
     fn expand_statements(
         body: &Expr,
         module: &crate::ident::ClassId,
-        macros: &HashMap<crate::ident::ClassId, Vec<crate::dialect::MethodDef>>,
+        macros: &HashMap<crate::ident::ClassId, Vec<&crate::dialect::MethodDef>>,
         shadowed: &std::collections::HashSet<crate::ident::Symbol>,
         stack: &mut Vec<crate::ident::Symbol>,
         remaining: &mut usize,
@@ -6003,187 +6048,6 @@ fn map_enum_labels(app: &mut App) {
         }
     }
     crate::lower::for_each_hook_body(app, &mut |expr| map_const_receiver_sites(expr, &tables));
-}
-
-/// Resolve a controller's relative superclass against Ruby's lexical
-/// scope. The superclass expression is evaluated in the nesting around
-/// the `class` keyword, so `module Ns; class XController <
-/// BaseController` tries `Ns::BaseController` before a top-level
-/// `BaseController`, while a top-level `class Ns::XController <
-/// BaseController` has only the top level in scope: the `Ns::` prefix
-/// names the class without opening `Ns`. Hence `nesting` (recorded at
-/// ingest, innermost first), never the segments of the class's name.
-///
-/// Rewrites only when a candidate names an ingested controller, so
-/// `ApplicationController` inside `module Ns` stays top-level. A
-/// superclass written qualified (`Admin::BaseController`) or rooted
-/// (`::BaseController`, recorded with an empty nesting) is left alone.
-fn qualify_relative_controller_superclasses(
-    app: &mut App,
-    nesting: &std::collections::HashMap<crate::ident::ClassId, Vec<String>>,
-) {
-    let known: std::collections::HashSet<crate::ident::ClassId> =
-        app.controllers.iter().map(|c| c.name.clone()).collect();
-    for controller in &mut app.controllers {
-        let Some(parent) = controller.parent.clone() else { continue };
-        let raw = parent.0.as_str();
-        if raw.contains("::") {
-            continue;
-        }
-        for scope in nesting.get(&controller.name).into_iter().flatten() {
-            let id = crate::ident::ClassId(crate::ident::Symbol::from(format!("{scope}::{raw}")));
-            // `module Admin; class NotesController < NotesController`
-            // names the top-level one: a class is never its own
-            // superclass.
-            if id == controller.name {
-                continue;
-            }
-            if known.contains(&id) {
-                controller.parent = Some(id);
-                break;
-            }
-        }
-    }
-}
-
-/// Resolve an `include <Const>` against Ruby's lexical scope.
-///
-/// Inside `class User`, `include Avatar` names `User::Avatar` when such
-/// a module exists, and only falls back to a top-level `Avatar`. The
-/// same walk covers a namespaced owner: in `module Auth; class
-/// SessionsController`, `include Concerns::RequireClient` names
-/// `Auth::SessionsController::Concerns::RequireClient`, then
-/// `Auth::Concerns::RequireClient`, then `Concerns::RequireClient`,
-/// innermost first, the way `Module.nesting` is consulted.
-///
-/// Campfire keeps every model concern that way —
-/// `app/models/user/{avatar,bannable,bot,mentionable,role,transferable}.rb`
-/// each declare `module User::Avatar` and friends — so the unqualified
-/// ClassId matched no ingested module and the whole mixed-in surface
-/// (`ban`, `create_bot!`, `active_bots`, `from_avatar_token`) dispatched
-/// into nothing. Shopify's customer-authentication controllers keep
-/// theirs one namespace up (`Auth::Concerns::RequireClient`, included
-/// as `Concerns::RequireClient`), so every ivar those concerns write
-/// (`@client_id`, `@redirect_uri`) read as `has no known type` in the
-/// includer.
-///
-/// Rewrites the IR node rather than resolving at each consumer:
-/// `model_includes` / `controller_includes` (analyze),
-/// `splice_concerns_into_models` above, and every emitter that
-/// re-emits the line then read one qualified path. Narrow trigger —
-/// only when some `<scope>::<Const>` actually names an ingested module,
-/// so apps whose concerns live at the top level
-/// (`app/models/concerns/…`) are untouched.
-fn qualify_relative_includes(app: &mut App) {
-    use crate::dialect::{ControllerBodyItem, ModelBodyItem};
-    use crate::expr::ExprNode;
-
-    let known: std::collections::HashSet<crate::ident::ClassId> = app
-        .library_classes
-        .iter()
-        .map(|lc| lc.name.clone())
-        .chain(app.concern_model_items.keys().cloned())
-        .collect();
-
-    /// `path` as written inside `owner`, when a nesting scope above it
-    /// (innermost first) defines it. `None` leaves the node alone.
-    fn resolve(
-        owner: &str,
-        path: &[crate::ident::Symbol],
-        known: &std::collections::HashSet<crate::ident::ClassId>,
-    ) -> Option<Vec<crate::ident::Symbol>> {
-        let scope: Vec<&str> = owner.split("::").collect();
-        let tail = path.iter().map(|s| s.as_str()).collect::<Vec<_>>().join("::");
-        for depth in (1..=scope.len()).rev() {
-            let candidate = format!("{}::{tail}", scope[..depth].join("::"));
-            if known.contains(&crate::ident::ClassId(crate::ident::Symbol::from(
-                candidate.as_str(),
-            ))) {
-                return Some(candidate.split("::").map(crate::ident::Symbol::from).collect());
-            }
-        }
-        None
-    }
-
-    fn rewrite_include(
-        expr: &mut crate::expr::Expr,
-        owner: &str,
-        known: &std::collections::HashSet<crate::ident::ClassId>,
-    ) {
-        let ExprNode::Send { recv: None, method, args, .. } = &mut *expr.node else {
-            return;
-        };
-        if method.as_str() != "include" {
-            return;
-        }
-        for arg in args.iter_mut() {
-            let ExprNode::Const { path } = &mut *arg.node else { continue };
-            if let Some(qualified) = resolve(owner, path, known) {
-                *path = qualified;
-            }
-        }
-    }
-
-    for model in &mut app.models {
-        let model_name = model.name.0.as_str().to_string();
-        for item in &mut model.body {
-            let ModelBodyItem::Unknown { expr, .. } = item else { continue };
-            rewrite_include(expr, &model_name, &known);
-        }
-    }
-
-    for controller in &mut app.controllers {
-        let name = controller.name.0.as_str().to_string();
-        for item in &mut controller.body {
-            let ControllerBodyItem::Unknown { expr, .. } = item else { continue };
-            rewrite_include(expr, &name, &known);
-        }
-    }
-
-    // Same rule for a module's own includes. campfire's
-    // `Authentication` concern opens with `include SessionLookup`,
-    // which is `Authentication::SessionLookup` — under Ruby's lexical
-    // lookup, and on disk at
-    // app/controllers/concerns/authentication/session_lookup.rb.
-    // Unqualified, the emitted `include SessionLookup` raises NameError
-    // at load time (and nothing pulls the file into the require graph).
-    //
-    // Past the lexical scopes Ruby searches the class's ancestors before
-    // the top level: `class Child < Base::Entity` opening with
-    // `include(WithIds)` means `Base::Entity::WithIds`.
-    let parents: HashMap<String, crate::ident::ClassId> = app
-        .library_classes
-        .iter()
-        .filter_map(|lc| Some((lc.name.0.as_str().to_string(), lc.parent.clone()?)))
-        .collect();
-    let join = |path: &[crate::ident::Symbol]| path.iter().map(|s| s.as_str()).collect::<Vec<_>>().join("::");
-    // A `Data.define` block resolves constants from the top level, so
-    // its includes are already absolute.
-    for lc in app.library_classes.iter_mut().filter(|lc| lc.data_define().is_none()) {
-        let owner = lc.name.0.as_str().to_string();
-        for inc in &mut lc.includes {
-            let path: Vec<crate::ident::Symbol> =
-                inc.0.as_str().split("::").map(crate::ident::Symbol::from).collect();
-            if let Some(qualified) = resolve(&owner, &path, &known) {
-                *inc = crate::ident::ClassId(crate::ident::Symbol::from(join(&qualified)));
-                continue;
-            }
-            let mut class = owner.clone();
-            // A cycle guard on the superclass walk.
-            for _ in 0..32 {
-                let Some(parent) = parents.get(&class) else { break };
-                let written: Vec<crate::ident::Symbol> =
-                    parent.0.as_str().split("::").map(crate::ident::Symbol::from).collect();
-                let ancestor = resolve(&class, &written, &known).map(|p| join(&p)).unwrap_or_else(|| join(&written));
-                let candidate = crate::ident::ClassId(crate::ident::Symbol::from(format!("{ancestor}::{}", inc.0)));
-                if known.contains(&candidate) {
-                    *inc = candidate;
-                    break;
-                }
-                class = ancestor;
-            }
-        }
-    }
 }
 
 /// Fill each `belongs_to …, polymorphic: true` association's target
@@ -8408,7 +8272,7 @@ fn synthesize_redirect_controller(
     // Routing redirects do not use ActionController's open-redirect policy.
     // Keep the exception on this controller instead of weakening redirect_to.
     let policy = super::controller::ingest_controller(
-        b"class RoundhouseRedirectsController < ActionController::Base\nprivate\ndef same_host_location(location)\n  location\nend\nend\n",
+        b"class RoundhouseRedirectsController < ActionController::Base\nprivate\ndef same_host_location(location)\n  location\nend\ndef absolute_redirect_location(location)\n  location\nend\nend\n",
         "<routing-redirect>",
     )
     .expect("routing redirect policy parses")
@@ -10050,6 +9914,283 @@ fn read_wrap_parameters_by_default<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> bool
     default
 }
 
+/// The adapter a trimmed, non-comment config line sets
+/// `config.active_job.queue_adapter` to, as a name: `= :sidekiq` and
+/// `= "sidekiq"` both give `"sidekiq"`. `Some(None)` when the line sets
+/// it to something that isn't a literal (`ENV.fetch(...)`), `None` when
+/// the line doesn't set it. One definition for the lift and the
+/// initializer ledger.
+pub(super) fn queue_adapter_line(line: &str) -> Option<Option<String>> {
+    let rest = line
+        .strip_prefix("Rails.application.config.active_job.queue_adapter")
+        .or_else(|| line.strip_prefix("config.active_job.queue_adapter"))?;
+    // An assignment, not the `==` or `=~` operators or a rightward
+    // assignment (`=> name`), which reads the setting.
+    let value = rest.trim_start().strip_prefix('=')?;
+    if value.starts_with(['=', '~', '>']) {
+        return None;
+    }
+    let value = value.trim();
+    // Drop a trailing comment, with or without a space before its `#`,
+    // but not a `#` inside a quoted value.
+    let value = match value.chars().next() {
+        Some(q @ ('"' | '\'')) => match value[1..].find(q) {
+            Some(at) => {
+                let (quoted, after) = value.split_at(at + 2);
+                let after = after.trim_start();
+                if !after.is_empty() && !after.starts_with('#') {
+                    return Some(None);
+                }
+                quoted
+            }
+            None => value,
+        },
+        _ => match value.find('#') {
+            Some(at) => value[..at].trim(),
+            None => value,
+        },
+    };
+    let name = if let Some(sym) = value.strip_prefix(':') {
+        sym
+    } else if value.len() >= 2
+        && ((value.starts_with('"') && value.ends_with('"'))
+            || (value.starts_with('\'') && value.ends_with('\'')))
+    {
+        &value[1..value.len() - 1]
+    } else {
+        return Some(None);
+    };
+    let literal = !name.is_empty()
+        && name.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_');
+    Some(literal.then(|| name.to_string()))
+}
+
+/// `App::queue_adapter`: `config/application.rb`, then
+/// `config/environments/production.rb`, then `config/initializers`, by
+/// line scan as `read_forgery_verification_strategy` reads them. The
+/// last setting wins, and a last setting that isn't a literal leaves the
+/// adapter unknown (`None`) rather than falling back to an earlier one.
+fn read_queue_adapter<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> Option<String> {
+    let mut adapter: Option<String> = None;
+    for sub in ["config/application.rb", "config/environments/production.rb", "config/initializers"] {
+        let path = dir.join(sub);
+        let paths = if vfs.is_dir(&path) {
+            read_rb_files(vfs, &path).unwrap_or_default()
+        } else {
+            vec![path]
+        };
+        for p in paths {
+            let Ok(source) = vfs.read(&p) else { continue };
+            for line in String::from_utf8_lossy(&source).lines() {
+                let line = line.trim();
+                if line.starts_with('#') {
+                    continue;
+                }
+                if let Some(set) = queue_adapter_line(line) {
+                    adapter = set;
+                }
+            }
+        }
+    }
+    adapter
+}
+
+/// `self.queue_adapter = :name` in `ApplicationJob`'s class body. Rails
+/// keeps the adapter per job class, and ApplicationJob's covers every
+/// job that inherits it, so it overrides the config files' setting, the
+/// last assignment winning, and a value that isn't a literal leaves the
+/// adapter unknown, as in `read_queue_adapter`. Another job class's own
+/// setting is not honored yet: its jobs follow the app's adapter, with a
+/// warning.
+fn apply_application_job_queue_adapter(app: &mut App) {
+    let mut set: Option<Option<String>> = None;
+    for lc in &app.library_classes {
+        let name = lc.name.0.as_str();
+        for call in &lc.unknown_calls {
+            let Some(value) = job_queue_adapter(call) else { continue };
+            if name == "ApplicationJob" {
+                set = Some(value);
+            } else {
+                warn_sidekiq(format!(
+                    "`self.queue_adapter =` in {name} is not honored yet (only ApplicationJob's is read); its jobs use the app's adapter"
+                ));
+            }
+        }
+    }
+    if let Some(value) = set {
+        app.queue_adapter = value;
+    }
+}
+
+/// The adapter a job class-body `self.queue_adapter = …` names: the
+/// literal's name, `Some(None)` for a value that isn't a Symbol or
+/// String literal, `None` for any other call.
+fn job_queue_adapter(call: &crate::expr::Expr) -> Option<Option<String>> {
+    use crate::expr::{ExprNode, Literal};
+    let ExprNode::Send { method, args, .. } = &*call.node else { return None };
+    if method.as_str() != "queue_adapter=" || args.len() != 1 {
+        return None;
+    }
+    Some(match &*args[0].node {
+        ExprNode::Lit { value: Literal::Sym { value } } => Some(value.as_str().to_string()),
+        ExprNode::Lit { value: Literal::Str { value } } => Some(value.clone()),
+        _ => None,
+    })
+}
+
+/// `App::sidekiq_redis`: the `Sidekiq.configure_client` Redis settings
+/// in `config/initializers`, the last block that sets them winning, as it
+/// does when Rails runs the initializers in order.
+fn read_sidekiq_redis<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> crate::app::SidekiqRedisConfig {
+    let mut config = crate::app::SidekiqRedisConfig::default();
+    let init = dir.join("config/initializers");
+    if !vfs.is_dir(&init) {
+        return config;
+    }
+    for path in read_rb_files(vfs, &init).unwrap_or_default() {
+        let Ok(source) = vfs.read(&path) else { continue };
+        if let Some(found) = sidekiq_client_redis(&source, &path.display().to_string()) {
+            config = found;
+        }
+    }
+    config
+}
+
+/// The `url:` and `password:` a file's `Sidekiq.configure_client do
+/// |config| config.redis = { … } end` gives, `None` when the file has no
+/// such assignment. Only those two keys are read, each as a String
+/// literal, `ENV["NAME"]` or `ENV.fetch("NAME"[, "default"])`. Any other
+/// key, a value in another form, or a `config.redis =` that isn't a Hash
+/// literal is a warning: the push then takes that setting from the
+/// environment fallbacks, or not at all.
+pub(super) fn sidekiq_client_redis(source: &[u8], file: &str) -> Option<crate::app::SidekiqRedisConfig> {
+    let src = String::from_utf8_lossy(source);
+    // Cheap skip before parsing, as `kaminari_default_per_page` does.
+    if !src.contains("configure_client") {
+        return None;
+    }
+    let result = super::prism::parse(source, file);
+    let root = result.node();
+    let program = root.as_program_node()?;
+    let text = |node: &Node<'_>| {
+        let loc = node.location();
+        src[loc.start_offset()..loc.end_offset()].to_string()
+    };
+    let mut found = None;
+    for stmt in initializer_statements(&program) {
+        let Some(call) = stmt.as_call_node() else { continue };
+        if super::util::constant_id_str(&call.name()) != "configure_client" {
+            continue;
+        }
+        let Some(recv) = call.receiver() else { continue };
+        if !matches!(constant_text(&recv, &src).as_deref(), Some("Sidekiq" | "::Sidekiq")) {
+            continue;
+        }
+        let Some(block) = call.block().and_then(|b| b.as_block_node()) else { continue };
+        let Some(param) = block
+            .parameters()
+            .and_then(|p| p.as_block_parameters_node())
+            .and_then(|p| p.parameters())
+            .and_then(|p| p.requireds().iter().next())
+            .and_then(|p| p.as_required_parameter_node())
+        else {
+            continue;
+        };
+        let param = super::util::constant_id_str(&param.name());
+        let Some(body) = block.body().and_then(|b| b.as_statements_node()) else { continue };
+        for inner in body.body().iter() {
+            let Some(assign) = inner.as_call_node() else { continue };
+            if super::util::constant_id_str(&assign.name()) != "redis=" {
+                continue;
+            }
+            let on_param = assign
+                .receiver()
+                .and_then(|r| r.as_local_variable_read_node())
+                .is_some_and(|r| super::util::constant_id_str(&r.name()) == param);
+            if !on_param {
+                continue;
+            }
+            let Some(args) = assign.arguments() else { continue };
+            let args: Vec<_> = args.arguments().iter().collect();
+            let [value] = args.as_slice() else { continue };
+            let mut config = crate::app::SidekiqRedisConfig::default();
+            let Some(hash) = value.as_hash_node() else {
+                warn_sidekiq(format!(
+                    "`{param}.redis = {}` in {file} is not a Hash literal, so it is not read; jobs are pushed to REDIS_PROVIDER, REDIS_URL or localhost",
+                    text(value)
+                ));
+                found = Some(config);
+                continue;
+            };
+            for element in hash.elements().iter() {
+                let Some(pair) = element.as_assoc_node() else {
+                    warn_sidekiq(format!("`{}` in {file}'s Sidekiq Redis settings is not read", text(&element)));
+                    continue;
+                };
+                let Some(key) = super::util::symbol_value(&pair.key()) else {
+                    warn_sidekiq(format!("`{}` in {file}'s Sidekiq Redis settings is not read", text(&element)));
+                    continue;
+                };
+                if key != "url" && key != "password" {
+                    warn_sidekiq(format!(
+                        "Sidekiq Redis setting `{key}:` in {file} is not supported yet (only url: and password: are read); it is ignored"
+                    ));
+                    continue;
+                }
+                let value = pair.value();
+                let Some(setting) = redis_setting(&value, &src) else {
+                    warn_sidekiq(format!(
+                        "Sidekiq Redis `{key}: {}` in {file} is not a String literal, ENV[\"NAME\"] or ENV.fetch(\"NAME\"); it is ignored",
+                        text(&value)
+                    ));
+                    continue;
+                };
+                if key == "url" {
+                    config.url = Some(setting);
+                } else {
+                    config.password = Some(setting);
+                }
+            }
+            found = Some(config);
+        }
+    }
+    found
+}
+
+/// A Redis setting's value as `RedisSetting` reads it.
+fn redis_setting(node: &Node<'_>, src: &str) -> Option<crate::app::RedisSetting> {
+    use crate::app::RedisSetting;
+    if let Some(literal) = string_literal_value(node) {
+        return Some(RedisSetting::Literal(literal));
+    }
+    let call = node.as_call_node()?;
+    let recv = call.receiver()?;
+    if !matches!(constant_text(&recv, src).as_deref(), Some("ENV" | "::ENV")) {
+        return None;
+    }
+    if call.block().is_some() {
+        return None;
+    }
+    let args: Vec<_> = call.arguments().map(|a| a.arguments().iter().collect()).unwrap_or_default();
+    let strings: Option<Vec<String>> = args.iter().map(string_literal_value).collect();
+    let strings = strings?;
+    match (super::util::constant_id_str(&call.name()), strings.as_slice()) {
+        ("[]", [name]) => Some(RedisSetting::Env(name.clone())),
+        ("fetch", [name]) => Some(RedisSetting::EnvFetch { name: name.clone(), default: None }),
+        ("fetch", [name, default]) => {
+            Some(RedisSetting::EnvFetch { name: name.clone(), default: Some(default.clone()) })
+        }
+        _ => None,
+    }
+}
+
+/// A warning about what ingest reads from the app's Sidekiq settings.
+fn warn_sidekiq(detail: String) {
+    let mut d = crate::diagnostic::Diagnostic::unsupported(crate::span::Span::synthetic(), None, "Sidekiq", detail);
+    d.severity = crate::diagnostic::Severity::Warning;
+    super::prism::push(d);
+}
+
 /// What a trimmed, non-comment config line sets the app-wide
 /// `wrap_parameters_by_default` to, or `None` when the line says nothing
 /// about it. One definition for the lift and the initializer ledger.
@@ -10840,6 +10981,19 @@ fn locale_literal(value: &str) -> Option<String> {
         _ => return None,
     };
     (!name.is_empty()).then(|| name.to_string())
+}
+
+/// `config.assume_ssl = true` on an uncommented line of an environment
+/// file. A trailing `#` comment after the value is Ruby, so it is cut
+/// before the comparison; a line that is itself a comment is not.
+pub(crate) fn sets_assume_ssl(text: &str) -> bool {
+    text.lines().any(|line| {
+        let t = line.trim();
+        t.strip_prefix("config.assume_ssl")
+            .map(|rest| rest.trim_start())
+            .and_then(|rest| rest.strip_prefix('='))
+            .is_some_and(|rest| rest.split('#').next().unwrap_or("").trim() == "true")
+    })
 }
 
 #[cfg(test)]
