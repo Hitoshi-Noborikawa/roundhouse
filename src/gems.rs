@@ -89,7 +89,7 @@ pub(crate) fn compiler_runtime_gems() -> &'static [(Marker, &'static str)] {
     // (constant an emitted body names, gem that defines it). Only gems
     // whose absence is a RUNTIME error belong here — the list is the
     // façade's, not a survey of what an app might like.
-    const RUNTIME_GEMS: [(Marker, &str); 19] = [
+    const RUNTIME_GEMS: [(Marker, &str); 20] = [
         (Marker::Constant("BCrypt"), "bcrypt"),
         (Marker::Constant("HTMLEntities"), "htmlentities"),
         (Marker::Constant("ROTP"), "rotp"),
@@ -177,11 +177,13 @@ pub(crate) fn compiler_runtime_gems() -> &'static [(Marker, &'static str)] {
         // ruby-vips) already asked of the machine.
         (Marker::AnyText(&[VARIATION_MARKER]), "ruby-vips"),
         // The HTTP client an app calls. The real gem runs on this lane;
-        // the strict targets refuse it (`lower::faraday`). `AnyText`
-        // (not `Constant`) so bare value uses (`CLIENT = Faraday`,
-        // `register(Faraday)`) demand the gem the same way `Faraday.new`
-        // and `Faraday::…` do — `names_constant` only matches punctuated forms.
-        (Marker::AnyText(&["Faraday"]), "faraday"),
+        // the strict targets refuse it (`lower::faraday`). `Constant`
+        // matches `Faraday.new` / `Faraday::…` / `rescue Faraday`; the
+        // `AnyText` needles catch bare value uses (`CLIENT = Faraday`,
+        // `register(Faraday)`) that `names_constant` skips — without
+        // matching identifiers like `FaradayHolder`.
+        (Marker::Constant("Faraday"), "faraday"),
+        (Marker::AnyText(&["= Faraday", "(Faraday)", "Faraday,", ", Faraday"]), "faraday"),
         // Its middleware gems. `request :multipart` / `request :retry`
         // name no constant, and without the gem Faraday raises at the
         // first connection that registers them.

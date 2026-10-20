@@ -3680,11 +3680,11 @@ raise [r, hits].inspect unless r == "recovered" && hits == 2"#,
 fn faraday_as_a_value_declares_the_gem_on_ruby() {
     let run = emit_and_run::real_blog()
         .write(
-            "app/models/faraday_holder.rb",
-            "class FaradayHolder\n  CLIENT = Faraday\n  def self.client\n    CLIENT\n  end\nend\n",
+            "app/models/http_client_holder.rb",
+            "class HttpClientHolder\n  CLIENT = Faraday\n  def self.client\n    CLIENT\n  end\nend\n",
         )
         .run_ruby(
-            r#"c = FaradayHolder.client
+            r#"c = HttpClientHolder.client
 raise c.inspect unless c.equal?(Faraday)"#,
         );
     run.assert_passes();
@@ -3692,6 +3692,23 @@ raise c.inspect unless c.equal?(Faraday)"#,
     assert!(
         gemfile.contains("gem \"faraday\""),
         "Gemfile does not declare faraday for a bare Faraday value:\n{gemfile}"
+    );
+}
+
+/// An identifier that merely starts with `Faraday` must not demand the gem.
+#[test]
+fn faraday_holder_name_does_not_declare_the_gem_on_ruby() {
+    let run = emit_and_run::real_blog()
+        .write(
+            "app/models/faraday_holder.rb",
+            "class FaradayHolder\n  def self.label\n    \"FaradayHolder\"\n  end\nend\n",
+        )
+        .run_ruby(r#"raise FaradayHolder.label.inspect unless FaradayHolder.label == "FaradayHolder""#);
+    run.assert_passes();
+    let gemfile = std::fs::read_to_string(run.emitted.join("Gemfile")).expect("Gemfile");
+    assert!(
+        !gemfile.contains("gem \"faraday\""),
+        "Gemfile declared faraday for FaradayHolder alone:\n{gemfile}"
     );
 }
 
