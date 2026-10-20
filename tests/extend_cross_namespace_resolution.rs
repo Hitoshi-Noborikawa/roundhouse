@@ -51,6 +51,10 @@ const PROBE: &str = r#"
 module Widget
   module Tools
     class Probe < Base
+      # Ruby's prepend puts the module ahead of the class's own method.
+      def pinger_configured?
+        false
+      end
       extend Beacon::Pinger
       prepend Beacon::Pinger
     end
@@ -64,6 +68,10 @@ const ROOTED: &str = r#"
 module Widget
   module Tools
     class Rooted < Base
+      # Ruby's prepend puts the module ahead of the class's own method.
+      def pinger_configured?
+        false
+      end
       extend ::Beacon::Pinger
       prepend ::Beacon::Pinger
     end
