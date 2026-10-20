@@ -6631,12 +6631,12 @@ fn walk_erb<V: Vfs + ?Sized>(
                     out.push((path, ViewEngine::Raw));
                 }
             }
-            // Template engines we don't ingest yet — they hold Ruby (or are
-            // pure Ruby, like `.json.ruby`) the analyzer never sees. Record
+            // Template engines we don't ingest yet — they hold Ruby the
+            // analyzer never sees (`.rabl`). Record
             // so the hole is visible to `--continue` and the LSP/MCP.
             // Moving one of these into `ViewEngine::from_extension` (above)
             // is the whole walker-side change to support a new engine.
-            Some("ruby" | "rabl") => {
+            Some("rabl") => {
                 record_skipped_view(&path, ext.expect("matched a Some arm"))?;
             }
             _ => {}
