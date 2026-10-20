@@ -6,8 +6,9 @@ use super::emit_and_run;
 /// own hash wins over the call-level option (`rank` keeps rejecting nil).
 /// These were reported gaps that refused the whole call. Answers are
 /// Rails 8.1.4's for the same model and records. The records hold values
-/// that need no type cast (Integers, Floats, nil, ""): a String number on
-/// a typed column is #1158. On an untyped attribute the options stay a gap
+/// that need no type cast (Integers, Floats, nil, "", a whitespace-only
+/// String and `false`, both blank to Rails): a String number on a typed
+/// column is #1158. On an untyped attribute the options stay a gap
 /// (tests/numericality_allow_options.rs).
 fn app() -> emit_and_run::Overlay {
     emit_and_run::empty_app()
@@ -36,6 +37,8 @@ fn numericality_skips_nil_and_blank_like_rails() {
   { min_favs: 5, age: "", rank: 1 },
   { min_favs: 0, age: 3, rank: nil },
   { min_favs: 2, age: 5.5, rank: 1 },
+  { min_favs: 2, age: "   ", rank: 1 },
+  { min_favs: 2, age: false, rank: 1 },
 ]
 got = rows.map do |attrs|
   p = Policy.new
@@ -43,7 +46,7 @@ got = rows.map do |attrs|
   p.valid?
   p.errors.to_a
 end
-want = [[], [], ["Min favs must be greater than or equal to 1", "Rank is not a number"], ["Age must be an integer"]]
+want = [[], [], ["Min favs must be greater than or equal to 1", "Rank is not a number"], ["Age must be an integer"], [], []]
 raise "policy errors: #{got.inspect}" unless got == want
 puts "numericality allow_nil/allow_blank passed"
 "##,
@@ -51,14 +54,23 @@ puts "numericality allow_nil/allow_blank passed"
         .assert_passes();
 }
 
-/// The skip lowers into the shared validation IR, so the strict targets
-/// emit it too: a `nil?` test on their optional field, and no emit error.
+/// The strict targets emit the skip too, with no emit error. Their numeric
+/// field is never a String, so `allow_blank`'s skip is the `nil?` test
+/// there: no `is_empty()` on an `i64` field (rustc E0599) the way the
+/// presence check's generic blank test would emit it.
 #[test]
 fn strict_targets_emit_the_skip_without_errors() {
     use roundhouse::project::BuildTarget;
     for target in [BuildTarget::Rust, BuildTarget::Typescript, BuildTarget::Go, BuildTarget::Crystal] {
-        let (_emitted, errors) = app().emit(target);
+        let (emitted, errors) = app().emit(target);
         assert!(errors.is_empty(), "{target:?}: {errors:#?}");
+        if target == BuildTarget::Rust {
+            let policy = std::fs::read_to_string(emitted.join("src/models/policy.rs")).expect("policy.rs");
+            let validate = &policy[policy.find("pub fn validate(").expect("validate")..];
+            let validate = &validate[..validate.find("\n    }\n").unwrap_or(validate.len())];
+            assert!(!validate.contains("is_empty"), "{validate}");
+            assert!(validate.contains("self.age.is_none()"), "{validate}");
+        }
     }
 }
 
