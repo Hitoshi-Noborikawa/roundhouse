@@ -3689,6 +3689,18 @@ fn is_recognized_wrap_parameters(method: &str, args: &[crate::expr::Expr]) -> bo
         && crate::lower::controller_to_library::params_wrapper::is_recognized_wrap_parameters_call(args)
 }
 
+/// `serialization_scope nil` (active_model_serializers'
+/// `ActionController::Serialization`): the serializers a render builds
+/// get no scope, so `current_user` is never called for one. Its only
+/// reader is a `render json: …, serializer:` render, which the lowering
+/// refuses (`refuse_serializer_options`), so no lowered action depends
+/// on it. A named scope (`serialization_scope :current_account`) stays
+/// the gap.
+fn is_serialization_scope_nil(method: &str, args: &[crate::expr::Expr]) -> bool {
+    method == "serialization_scope"
+        && matches!(args, [a] if matches!(&*a.node, crate::expr::ExprNode::Lit { value: crate::expr::Literal::Nil }))
+}
+
 /// Class-level `respond_to :json` is consumed as a no-op when nothing
 /// in this controller's ANCESTOR CHAIN (self included) calls
 /// `respond_with` — the only thing the responders gem's `respond_to`
@@ -3967,6 +3979,9 @@ fn report_unrecognized_controller_macros(app: &App) {
                 continue;
             }
             if is_recognized_wrap_parameters(method.as_str(), args) {
+                continue;
+            }
+            if is_serialization_scope_nil(method.as_str(), args) {
                 continue;
             }
             let file = file_of(expr.span.file);
