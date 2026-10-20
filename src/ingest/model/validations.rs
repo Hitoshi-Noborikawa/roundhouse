@@ -72,6 +72,8 @@ struct BuiltRule {
     /// A call-level `allow_nil: true` on a rule that stores no flag of its
     /// own (presence): the rule runs only when the attribute is not nil.
     nil_skip: bool,
+    /// A literal String `message:` in the rule's own hash.
+    message: Option<String>,
     /// The rule's own hash named `allow_nil:` / `allow_blank:`, which
     /// wins over the call-level option (Rails merges the call's options
     /// under each validator's own).
@@ -81,7 +83,7 @@ struct BuiltRule {
 
 impl BuiltRule {
     fn bare(rule: crate::dialect::ValidationRule) -> Self {
-        Self { rule, if_cond: None, unless_cond: None, on_guard: None, nil_skip: false, own_allow_nil: false, own_allow_blank: false }
+        Self { rule, if_cond: None, unless_cond: None, on_guard: None, nil_skip: false, message: None, own_allow_nil: false, own_allow_blank: false }
     }
 }
 
@@ -316,6 +318,7 @@ pub(super) fn parse_validates_call(
                 rules: Vec::new(),
                 if_cond: and_guard(on_guard.clone(), call_if_cond.clone()),
                 unless_cond: call_unless_cond.clone(),
+                message: None,
             });
             continue;
         }
@@ -330,7 +333,7 @@ pub(super) fn parse_validates_call(
             let if_cond = and_guard(rule_on, draft.if_cond.clone().or_else(|| call_if_cond.clone()));
             let unless_cond = draft.unless_cond.clone().or_else(|| call_unless_cond.clone());
             if let Some(current) = grouped.as_mut() {
-                if current.if_cond == if_cond && current.unless_cond == unless_cond {
+                if current.if_cond == if_cond && current.unless_cond == unless_cond && current.message == draft.message {
                     current.rules.push(draft.rule.clone());
                     continue;
                 }
@@ -341,6 +344,7 @@ pub(super) fn parse_validates_call(
                 rules: vec![draft.rule.clone()],
                 if_cond,
                 unless_cond,
+                message: draft.message.clone(),
             });
         }
         if let Some(validation) = grouped {
@@ -348,6 +352,34 @@ pub(super) fn parse_validates_call(
         }
     }
     ParsedValidates::Modeled(out)
+}
+
+/// `message: "…"` in a validator's own hash: Rails' text in place of the
+/// default (after a model-specific translation, which the message lookup
+/// still prefers). Only a literal String whose every `%{name}` the rule's
+/// errors always supply: `value`, `attribute`, `model`, and `count` where
+/// every error of the rule carries one (`counted`). Rails raises
+/// `I18n::MissingInterpolationArgument` for any other name when the
+/// message renders (`%{count}` on numericality's "is not a number"). A
+/// Symbol (an i18n key), a Proc, or an interpolated Ruby String stays the
+/// gap.
+fn push_message(value: &Node<'_>, kind: &str, counted: bool, slot: &mut Option<String>, gaps: &mut Vec<String>) {
+    let Some(text) = string_value(value) else {
+        gaps.push(format!("{kind}: message"));
+        return;
+    };
+    let mut rest = text.as_str();
+    while let Some(at) = rest.find("%{") {
+        let after = &rest[at + 2..];
+        let Some(end) = after.find('}') else { break };
+        let name = &after[..end];
+        if !(matches!(name, "value" | "attribute" | "model") || (counted && name == "count")) {
+            gaps.push(format!("{kind}: message"));
+            return;
+        }
+        rest = &after[end + 1..];
+    }
+    *slot = Some(text);
 }
 
 /// `if:` / `unless:` — the same reader a callback uses. A Symbol is the
@@ -540,6 +572,7 @@ fn parse_uniqueness(value: &Node<'_>, file: &str, class_consts: &super::ClassCon
             },
             "if" => push_condition(&child, file, &mut built.if_cond, "if", &mut gaps),
             "unless" => push_condition(&child, file, &mut built.unless_cond, "unless", &mut gaps),
+            "message" => push_message(&child, "uniqueness", false, &mut built.message, &mut gaps),
             other => gaps.push(format!("uniqueness: {other}")),
         }
     }
@@ -824,6 +857,7 @@ fn parse_bool_or_hash(
                 Some(false) => built.own_allow_nil = true,
                 _ => gaps.push("allow_nil".to_string()),
             },
+            "message" => push_message(&child, name, false, &mut built.message, &mut gaps),
             other => gaps.push(format!("{name}: {other}")),
         }
     }
@@ -918,6 +952,7 @@ fn parse_numericality(value: &Node<'_>, file: &str, class_consts: &super::ClassC
                 Some(flag) => allow_blank = Some(flag),
                 None => gaps.push("allow_blank".to_string()),
             },
+            "message" => push_message(&child, "numericality", false, &mut built.message, &mut gaps),
             other => gaps.push(format!("numericality: {other}")),
         }
     }
@@ -981,6 +1016,7 @@ fn parse_set(value: &Node<'_>, file: &str, exclusion: bool, class_consts: &super
                 Some(false) => {}
                 _ => gaps.push("allow_nil".to_string()),
             },
+            "message" => push_message(&child, label, false, &mut built.message, &mut gaps),
             other => gaps.push(format!("{label}: {other}")),
         }
     }
@@ -1045,6 +1081,7 @@ fn parse_format(value: &Node<'_>, file: &str, class_consts: &super::ClassConsts)
                 Some(false) => {}
                 _ => gaps.push("allow_nil".to_string()),
             },
+            "message" => push_message(&child, "format", false, &mut built.message, &mut gaps),
             other => gaps.push(format!("format: {other}")),
         }
     }

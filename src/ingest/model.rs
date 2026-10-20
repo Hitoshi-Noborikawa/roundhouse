@@ -545,6 +545,7 @@ pub(super) fn ingest_model_body_items(
                             rules: vec![rule.clone()],
                             if_cond: None,
                             unless_cond: None,
+                            message: None,
                         })
                         .collect()
                 } else {
@@ -933,6 +934,7 @@ pub(super) fn ingest_model_body_item(
                             .collect(),
                         if_cond: None,
                         unless_cond: None,
+                        message: None,
                     },
                     leading_comments,
                     leading_blank_line: false,

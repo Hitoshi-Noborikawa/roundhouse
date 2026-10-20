@@ -316,8 +316,23 @@ fn model_for(model: &Model, schema: &Schema) -> String {
                     ));
                     continue;
                 }
+                // A `message:` String: Sequel's helpers take `message:` but
+                // interpolate none of Rails' `%{value}` / `%{attribute}` /
+                // `%{model}`, so a message using one is not emitted, the way
+                // a guarded validation is not.
+                if validation.message.as_deref().is_some_and(|m| m.contains("%{")) {
+                    validate_lines.push(format!(
+                        "    # ROUNDHOUSE-TODO: validation on :{} with an interpolated message not emitted",
+                        validation.attribute
+                    ));
+                    continue;
+                }
+                let custom = validation.message.as_ref().map(|m| format!(", message: {m:?}")).unwrap_or_default();
                 for rule in &validation.rules {
                     match rule {
+                        ValidationRule::Presence if !custom.is_empty() => {
+                            validate_lines.push(format!("    validates_presence :{}{custom}", validation.attribute));
+                        }
                         ValidationRule::Presence => {
                             presence.push(format!(":{}", validation.attribute));
                         }
@@ -330,7 +345,7 @@ fn model_for(model: &Model, schema: &Schema) -> String {
                             let msg = message
                                 .as_ref()
                                 .map(|m| format!(", message: {m:?}"))
-                                .unwrap_or_default();
+                                .unwrap_or_else(|| custom.clone());
                             if let Some(min) = min {
                                 validate_lines.push(format!(
                                     "    validates_min_length {min}, :{}{msg}",
@@ -346,14 +361,14 @@ fn model_for(model: &Model, schema: &Schema) -> String {
                         }
                         ValidationRule::Uniqueness { .. } => {
                             validate_lines.push(format!(
-                                "    validates_unique :{}",
+                                "    validates_unique :{}{custom}",
                                 validation.attribute
                             ));
                         }
                         ValidationRule::Format { pattern, flags } => {
                             let body = crate::emit::shared::regex_literal::escape_regex_delimiters(pattern);
                             validate_lines.push(format!(
-                                "    validates_format /{body}/{flags}, :{}",
+                                "    validates_format /{body}/{flags}, :{}{custom}",
                                 validation.attribute
                             ));
                         }
@@ -373,32 +388,32 @@ fn model_for(model: &Model, schema: &Schema) -> String {
                                 opts.push_str(", allow_blank: true");
                             }
                             validate_lines.push(format!(
-                                "    {helper} :{}{opts}",
+                                "    {helper} :{}{opts}{custom}",
                                 validation.attribute
                             ));
                             // `validates_numeric` ignores `:greater_than`.
                             // `validates_operator` is the comparison Sequel runs.
                             if let Some(n) = gt {
                                 validate_lines.push(format!(
-                                    "    validates_operator :>, {n}, :{}{opts}",
+                                    "    validates_operator :>, {n}, :{}{opts}{custom}",
                                     validation.attribute
                                 ));
                             }
                             if let Some(n) = lt {
                                 validate_lines.push(format!(
-                                    "    validates_operator :<, {n}, :{}{opts}",
+                                    "    validates_operator :<, {n}, :{}{opts}{custom}",
                                     validation.attribute
                                 ));
                             }
                             if let Some(n) = gte {
                                 validate_lines.push(format!(
-                                    "    validates_operator :>=, {n}, :{}{opts}",
+                                    "    validates_operator :>=, {n}, :{}{opts}{custom}",
                                     validation.attribute
                                 ));
                             }
                             if let Some(n) = lte {
                                 validate_lines.push(format!(
-                                    "    validates_operator :<=, {n}, :{}{opts}",
+                                    "    validates_operator :<=, {n}, :{}{opts}{custom}",
                                     validation.attribute
                                 ));
                             }
@@ -414,7 +429,7 @@ fn model_for(model: &Model, schema: &Schema) -> String {
                                 )
                             };
                             validate_lines.push(format!(
-                                "    validates_includes {list}, :{}",
+                                "    validates_includes {list}, :{}{custom}",
                                 validation.attribute
                             ));
                         }

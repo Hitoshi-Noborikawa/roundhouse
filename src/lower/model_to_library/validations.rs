@@ -29,7 +29,7 @@ pub(super) fn push_validate_method(
     runtime_relation: super::RuntimeRelation,
     primary_key: &Symbol,
 ) {
-    let msgs = Messages(Some(model));
+    let model_msgs = Messages(Some(model), None);
     let mut stmts: Vec<Expr> = Vec::new();
 
     // One pass in declaration order: Rails checks a `belongs_to` where it is declared, among the `validates`, so its error lists there.
@@ -37,6 +37,8 @@ pub(super) fn push_validate_method(
         let span = item.span();
         match item {
             crate::dialect::ModelBodyItem::Validation { validation: v, .. } => {
+                // The validation's own `message:` replaces every error's default.
+                let msgs = Messages(Some(model), v.message.as_deref());
                 // Column type from the model's attributes row (when present).
                 // Lets the per-rule generator skip dead `is_a?(Array)` branches
                 // for fields the schema declares as `Str` — tsc narrows
@@ -117,7 +119,7 @@ pub(super) fn push_validate_method(
                     let own_pk = crate::lower::scope_chain::association_primary_key(models, target, None);
                     let lookup_pk = (assoc_pk != own_pk).then_some(&assoc_pk);
                     let mut check =
-                        inline_belongs_to_check(msgs, name, foreign_key, target, lookup_pk, *polymorphic);
+                        inline_belongs_to_check(model_msgs, name, foreign_key, target, lookup_pk, *polymorphic);
                     check.inherit_span(span);
                     stmts.push(check);
                 }
@@ -189,7 +191,7 @@ fn secure_password_checks(model: &Model) -> Vec<Expr> {
     let mut out = Vec::new();
     for attr in crate::lower::secure_password::secure_password_attrs(&model.body) {
         let human = model.human_attribute_name(attr.as_str());
-        let msgs = Messages(Some(model));
+        let msgs = Messages(Some(model), None);
         let plain = ivar(&attr);
         let digest = ivar(&Symbol::from(format!("{}_digest", attr.as_str())));
         let confirmation = ivar(&Symbol::from(format!("{}_confirmation", attr.as_str())));
@@ -1487,16 +1489,29 @@ fn format_float(n: f64) -> String {
 /// What a baked message needs from its model: the attribute's
 /// `human_attribute_name` and the locale's `errors.format`.
 #[derive(Clone, Copy, Default)]
-pub(crate) struct Messages<'a>(pub(crate) Option<&'a Model>);
+/// The second field is a validation's own `message:` String, used in
+/// place of each error's default (see [`Messages::error`]).
+pub(crate) struct Messages<'a>(pub(crate) Option<&'a Model>, pub(crate) Option<&'a str>);
 
 use crate::i18n::ErrorOpts;
 
 impl Messages<'_> {
     /// The full message Rails stores for an error of `kind` on `attr`, with the error it records.
     fn error(&self, attr: &str, kind: &str, opts: &ErrorOpts) -> Message {
+        // A rule-level message (Length's) already in `opts` wins; else the
+        // validation's own `message:`, which the lookup uses after a
+        // model-specific translation, as Rails' `generate_message` does.
+        let overridden;
+        let opts = match (self.1, &opts.message) {
+            (Some(message), None) => {
+                overridden = ErrorOpts { message: Some(message.to_string()), ..opts.clone() };
+                &overridden
+            }
+            _ => opts,
+        };
         let default = crate::i18n::ModelI18n::default();
         let i18n = self.0.map(|m| &m.i18n).unwrap_or(&default);
-        let parts = |p| crate::lower::errors_add::parts_expr(Span::synthetic(), p, None, attr);
+        let parts = |p| value_parts_expr(p, attr);
         Message {
             full: parts(i18n.full_error(attr, kind, opts)),
             kind: kind.to_string(),
@@ -1505,6 +1520,33 @@ impl Messages<'_> {
             optionless: matches!(kind, "blank" | "present" | "required" | "accepted" | "password_too_long"),
         }
     }
+}
+
+/// A message's parts as one String expression, `%{value}` read as
+/// `attr.to_s`: what I18n renders (nil as ""), and a String on every
+/// target, where a nullable field's bare read is an `Option` a strict
+/// target can't interpolate.
+fn value_parts_expr(parts: Vec<crate::i18n::Part>, attr: &str) -> Expr {
+    if !parts.iter().any(|p| matches!(p, crate::i18n::Part::Value)) {
+        return crate::lower::errors_add::parts_expr(Span::synthetic(), parts, None, attr);
+    }
+    let pieces = parts
+        .into_iter()
+        .map(|p| match p {
+            crate::i18n::Part::Text(value) => crate::expr::InterpPart::Text { value },
+            crate::i18n::Part::Value => crate::expr::InterpPart::Expr {
+                expr: send(
+                    Expr::new(
+                        Span::synthetic(),
+                        ExprNode::Send { recv: None, method: Symbol::from(attr), args: vec![], block: None, parenthesized: false },
+                    ),
+                    "to_s",
+                    vec![],
+                ),
+            },
+        })
+        .collect();
+    Expr::new(Span::synthetic(), ExprNode::StringInterp { parts: pieces })
 }
 
 pub(crate) struct Message {
