@@ -117,6 +117,17 @@ pub(crate) enum ErrorsReaders {
     CreatedOnFirstRead,
 }
 
+/// Whether the target ships the runtime `ActiveRecord::Relation`
+/// (`BuildTarget::has_runtime_relation`): the ruby-family targets do, so a
+/// validation that needs a query at validation time (`uniqueness:`) can
+/// run one. A strict target has only the chains the Arel builder folds,
+/// and keeps such a validation as a reported gap.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RuntimeRelation {
+    Absent,
+    Present,
+}
+
 /// Probe bodies expose framework ownership hidden by source overrides,
 /// but register the ordinary production definitions for faithful typing.
 /// Selection bounds retained bodies, never registry or demand inputs.
@@ -256,7 +267,7 @@ pub(crate) fn lower_models_inner(
 ) -> (Vec<LibraryClass>, HashMap<ClassId, crate::analyze::ClassInfo>) {
     lower_models_inner_with_ruby_values(
         models, schema, extra_class_infos, params_specs, unfolded, materialization,
-        finder_inputs, false, false, ErrorsReaders::FieldRead,
+        finder_inputs, false, false, ErrorsReaders::FieldRead, RuntimeRelation::Absent,
     )
 }
 
@@ -271,12 +282,13 @@ pub(crate) fn lower_models_inner_with_ruby_values(
     ruby_read_values: bool,
     param_binds: bool,
     errors_readers: ErrorsReaders,
+    runtime_relation: RuntimeRelation,
 ) -> (Vec<LibraryClass>, HashMap<ClassId, crate::analyze::ClassInfo>) {
     let mut all_methods: Vec<(Vec<MethodDef>, ClassId, Option<&Table>, &Model)> = Vec::new();
     let mut classes: HashMap<ClassId, crate::analyze::ClassInfo> = HashMap::new();
     let _body_names = schema::share_model_body_names(models, &Default::default());
     for model in models {
-        let methods = build_methods_with_finder_inputs(model, models, schema, params_specs, finder_inputs, param_binds, errors_readers);
+        let methods = build_methods_with_finder_inputs(model, models, schema, params_specs, finder_inputs, param_binds, errors_readers, runtime_relation);
         let table = schema.tables.get(&model.table.0);
         // Register actual production definitions, even for unselected
         // models and when source overrides hide framework ownership.
@@ -295,7 +307,7 @@ pub(crate) fn lower_models_inner_with_ruby_values(
                             if matches!(method.as_str(), "attr_accessor" | "attr_reader" | "attr_writer")),
                     _ => true,
                 });
-                let mut methods = build_methods_with_finder_inputs(&definitions, models, schema, params_specs, finder_inputs, param_binds, errors_readers);
+                let mut methods = build_methods_with_finder_inputs(&definitions, models, schema, params_specs, finder_inputs, param_binds, errors_readers, runtime_relation);
                 // Preserve original source inputs for late derivations
                 // (e.g. raw helpers) without treating them as framework
                 // claims. Both kinds traverse the canonical Arel/typer.
@@ -1171,7 +1183,7 @@ pub(crate) fn build_methods(
     schema: &Schema,
     params_specs: &crate::lower::controller_to_library::params::ParamsSpecs,
 ) -> Vec<MethodDef> {
-    build_methods_with_finder_inputs(model, models, schema, params_specs, FinderInputs::Scalar, false, ErrorsReaders::FieldRead)
+    build_methods_with_finder_inputs(model, models, schema, params_specs, FinderInputs::Scalar, false, ErrorsReaders::FieldRead, RuntimeRelation::Absent)
 }
 
 /// Return the instance method surface synthesized for a model, for ingest
@@ -1198,6 +1210,7 @@ fn build_methods_with_finder_inputs(
     finder_inputs: FinderInputs,
     param_binds: bool,
     errors_readers: ErrorsReaders,
+    runtime_relation: RuntimeRelation,
 ) -> Vec<MethodDef> {
     // No-op outside an emit diagnostics scope, so the many direct
     // test callers of the lowering entries are unaffected.
@@ -1296,7 +1309,19 @@ fn build_methods_with_finder_inputs(
         }
     }
 
-    push_validate_method(&mut methods, model, models, errors_readers);
+    // The key a uniqueness check excludes the record by: `self.primary_key
+    // = "…"`, else a schema key other than `id`, else `id` (as `def
+    // self.primary_key` is chosen in `push_schema_methods`).
+    let primary_key = model
+        .primary_key
+        .clone()
+        .or_else(|| {
+            schema.tables.get(&model.table.0).and_then(|t| {
+                t.columns.iter().find(|c| c.primary_key && c.name.as_str() != "id").map(|c| c.name.clone())
+            })
+        })
+        .unwrap_or_else(|| Symbol::from("id"));
+    push_validate_method(&mut methods, model, models, errors_readers, runtime_relation, &primary_key);
     push_association_methods(&mut methods, model, models, &through_joins);
     push_dependent_destroy(&mut methods, model, &through_joins);
     push_unknown_marker_methods(&mut methods, model);

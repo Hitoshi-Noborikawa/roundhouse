@@ -1461,11 +1461,19 @@ pub(super) struct ClassConsts {
     /// of one other folded regex constant — `(pattern, flags)`. Used to
     /// resolve `validates …, format: { with: NAME }` (#985 follow-up).
     regexes: std::collections::HashMap<String, (String, String)>,
+    /// The class body calls `default_scope` (bare or on `self`).
+    default_scoped: bool,
 }
 
 impl ClassConsts {
     pub(super) fn collect(stmts: &[Node<'_>], file: &str) -> Self {
         let mut out = ClassConsts::default();
+        out.default_scoped = stmts.iter().any(|stmt| {
+            stmt.as_call_node().is_some_and(|call| {
+                call.receiver().is_none_or(|r| r.as_self_node().is_some())
+                    && constant_id_str(&call.name()) == "default_scope"
+            })
+        });
         for stmt in stmts {
             let Some(cw) = stmt.as_constant_write_node() else { continue };
             let name = constant_id_str(&cw.name()).to_string();
@@ -1599,6 +1607,11 @@ impl ClassConsts {
             return self.scalars.get(constant_id_str(&cr.name())).cloned();
         }
         None
+    }
+
+    /// Does the class body declare a `default_scope`?
+    pub(super) fn default_scoped(&self) -> bool {
+        self.default_scoped
     }
 
     /// An integer the class body can fold: a literal, `.freeze`d or not,

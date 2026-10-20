@@ -246,7 +246,7 @@ fn expand_rule(rule: &ValidationRule, out: &mut Vec<Check>) {
                 out.push(Check::Exclusion { values: vs });
             }
         }
-        ValidationRule::Uniqueness { scope, case_sensitive } => {
+        ValidationRule::Uniqueness { scope, case_sensitive, .. } => {
             out.push(Check::Uniqueness {
                 scope: scope.clone(),
                 case_sensitive: *case_sensitive,

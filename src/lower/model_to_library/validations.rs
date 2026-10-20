@@ -26,6 +26,8 @@ pub(super) fn push_validate_method(
     model: &Model,
     models: &[Model],
     errors_readers: ErrorsReaders,
+    runtime_relation: super::RuntimeRelation,
+    primary_key: &Symbol,
 ) {
     let msgs = Messages(Some(model));
     let mut stmts: Vec<Expr> = Vec::new();
@@ -69,6 +71,15 @@ pub(super) fn push_validate_method(
                             send(reader, "nil?", vec![]),
                             errors_push(v.attribute.as_str(), msgs.error(v.attribute.as_str(), "blank", &Default::default())),
                         )]
+                    } else if let ValidationRule::Uniqueness { scope, case_sensitive, allow_nil, allow_blank } = rule {
+                        match runtime_relation {
+                            super::RuntimeRelation::Present => vec![inline_uniqueness_check(
+                                msgs, model, primary_key, &v.attribute, scope, *case_sensitive, *allow_nil, *allow_blank,
+                            )],
+                            // Reported per target by
+                            // `relation_residue::uniqueness_gaps_for_target`.
+                            super::RuntimeRelation::Absent => Vec::new(),
+                        }
                     } else {
                         validation_rule_to_calls(msgs, &v.attribute, rule, attr_ty)
                     };
@@ -632,6 +643,102 @@ fn validation_rule_to_calls(msgs: Messages, attr: &Symbol, rule: &ValidationRule
 /// of Rails' check — it can fail a save Rails would fail, never one
 /// Rails would pass — and the id-presence half is the part that
 /// catches the real error (an unset owner).
+/// Inline `validates :attr, uniqueness: …`, as Rails 8.1's
+/// `UniquenessValidator` queries (on a target with the runtime Relation):
+///   if Model.where(attr: @attr).not(<pk>: @<pk>)[.where(scope_col: @scope_col)…].exists?
+///     errors << "attr has already been taken"
+///   end
+/// `case_sensitive: false` compares `LOWER(table.attr) = LOWER(?)`, except
+/// for a nil value, which Rails compares `IS NULL` either way. A nil value
+/// is checked like any other (two nils collide) unless `allow_nil:`, and a
+/// blank one (nil, or empty once stripped) unless `allow_blank:`. The `not(<pk>: @<pk>)` is Rails'
+/// persisted-record exclusion, by the model's declared primary key (`"codes"."code" != ?`
+/// under `self.primary_key = "code"`, even beside an `id` column); on a new record it is `<pk> IS NOT NULL`,
+/// which every stored row satisfies, so the answer is the same. A `scope:`
+/// naming a `belongs_to` reads its foreign key (and type column when
+/// polymorphic), as Rails resolves it.
+fn inline_uniqueness_check(
+    msgs: Messages,
+    model: &Model,
+    primary_key: &Symbol,
+    attr: &Symbol,
+    scope: &[Symbol],
+    case_sensitive: bool,
+    allow_nil: bool,
+    allow_blank: bool,
+) -> Expr {
+    let sym = |name: &str| {
+        Expr::new(Span::synthetic(), ExprNode::Lit { value: Literal::Sym { value: Symbol::from(name) } })
+    };
+    let hash = |key: &str, value: Expr| {
+        Expr::new(Span::synthetic(), ExprNode::Hash { entries: vec![(sym(key), value)], kwargs: true })
+    };
+    let finder = Expr::new(
+        Span::synthetic(),
+        ExprNode::Const { path: model.name.0.as_str().split("::").map(Symbol::from).collect() },
+    );
+    let value = ivar(attr);
+    let mut relation = if case_sensitive {
+        send(finder, "where", vec![hash(attr.as_str(), value.clone())])
+    } else {
+        let lowered = Expr::new(
+            Span::synthetic(),
+            ExprNode::Lit {
+                value: Literal::Str {
+                    value: format!("LOWER({}.{}) = LOWER(?)", model.table.0.as_str(), attr.as_str()),
+                },
+            },
+        );
+        Expr::new(
+            Span::synthetic(),
+            ExprNode::If {
+                cond: send(value.clone(), "nil?", vec![]),
+                then_branch: send(finder.clone(), "where", vec![hash(attr.as_str(), value.clone())]),
+                else_branch: send(finder, "where", vec![lowered, value.clone()]),
+            },
+        )
+    };
+    relation = send(relation, "not", vec![hash(primary_key.as_str(), ivar(primary_key))]);
+    for name in scope {
+        let columns: Vec<Symbol> = match model.associations().find(|a| {
+            matches!(a, Association::BelongsTo { name: n, .. } if n == name)
+        }) {
+            Some(Association::BelongsTo { foreign_key, polymorphic, .. }) => {
+                let mut cols = vec![foreign_key.clone()];
+                if *polymorphic {
+                    cols.push(Symbol::from(format!("{}_type", name.as_str()).as_str()));
+                }
+                cols
+            }
+            _ => vec![name.clone()],
+        };
+        for column in columns {
+            relation = send(relation, "where", vec![hash(column.as_str(), ivar(&column))]);
+        }
+    }
+    let mut taken = send(relation, "exists?", vec![]);
+    let not = |e: Expr| {
+        Expr::new(
+            Span::synthetic(),
+            ExprNode::Send { recv: Some(e), method: Symbol::from("!"), args: vec![], block: None, parenthesized: false },
+        )
+    };
+    if allow_blank {
+        // `blank?` spelled out (`nil?` or empty once stripped): the Spinel
+        // runtime's String has no ActiveSupport `blank?`.
+        let blank = bool_op(
+            BoolOpKind::Or,
+            send(value.clone(), "nil?", vec![]),
+            send(send(send(value.clone(), "to_s", vec![]), "strip", vec![]), "empty?", vec![]),
+        );
+        taken = bool_op(BoolOpKind::And, not(blank), taken);
+    } else if allow_nil {
+        taken = bool_op(BoolOpKind::And, not(send(value.clone(), "nil?", vec![])), taken);
+    }
+    let push_err = errors_push(attr.as_str(), msgs.error(attr.as_str(), "taken", &Default::default()));
+    if_with_nil_else(taken, push_err)
+}
+
 fn inline_belongs_to_check(
     msgs: Messages,
     assoc_name: &Symbol,

@@ -66,11 +66,16 @@ struct BuiltRule {
     rule: crate::dialect::ValidationRule,
     if_cond: Option<Expr>,
     unless_cond: Option<Expr>,
+    /// The rule's own hash named `allow_nil:` / `allow_blank:`, which
+    /// wins over the call-level option (Rails merges the call's options
+    /// under each validator's own).
+    own_allow_nil: bool,
+    own_allow_blank: bool,
 }
 
 impl BuiltRule {
     fn bare(rule: crate::dialect::ValidationRule) -> Self {
-        Self { rule, if_cond: None, unless_cond: None }
+        Self { rule, if_cond: None, unless_cond: None, own_allow_nil: false, own_allow_blank: false }
     }
 }
 
@@ -209,17 +214,20 @@ pub(super) fn parse_validates_call(
         });
     }
 
-    if allow_blank && drafts.iter().any(|draft| !blank_safe(&draft.rule)) {
+    // Uniqueness stores both flags, so a call-level one applies to it
+    // (below) rather than refusing the call.
+    let is_uniqueness = |draft: &BuiltRule| matches!(draft.rule, ValidationRule::Uniqueness { .. });
+    if allow_blank && drafts.iter().any(|draft| !blank_safe(&draft.rule) && !is_uniqueness(draft)) {
         gaps.push("allow_blank".to_string());
     }
     // Call-level `allow_nil: true` is Rails' skip-when-nil for every
-    // validator in the call. Length stores it. The other rules this
-    // build lowers reject nil, so applying them would reject records
-    // Rails accepts.
+    // validator in the call. Length and Uniqueness store it. The other
+    // rules this build lowers reject nil, so applying them would reject
+    // records Rails accepts.
     if allow_nil == Some(true)
         && drafts
             .iter()
-            .any(|draft| !matches!(draft.rule, ValidationRule::Length { .. }))
+            .any(|draft| !matches!(draft.rule, ValidationRule::Length { .. }) && !is_uniqueness(draft))
     {
         gaps.push("allow_nil".to_string());
     }
@@ -236,6 +244,17 @@ pub(super) fn parse_validates_call(
 
     if allow_blank {
         drafts.retain(|draft| !matches!(draft.rule, ValidationRule::Presence));
+    }
+    for draft in &mut drafts {
+        let (own_nil, own_blank) = (draft.own_allow_nil, draft.own_allow_blank);
+        if let ValidationRule::Uniqueness { allow_nil: nil_slot, allow_blank: blank_slot, .. } = &mut draft.rule {
+            if let (Some(flag), false) = (allow_nil, own_nil) {
+                *nil_slot = flag;
+            }
+            if allow_blank && !own_blank {
+                *blank_slot = true;
+            }
+        }
     }
     if let Some(flag) = allow_nil {
         for draft in &mut drafts {
@@ -377,6 +396,88 @@ fn and_guard(a: Option<Expr>, b: Option<Expr>) -> Option<Expr> {
         )),
         (a, b) => a.or(b),
     }
+}
+
+/// `uniqueness: true` or `{ scope:, case_sensitive:, allow_nil:,
+/// allow_blank:, if:, unless: }`. `conditions:` (a relation callable) and
+/// `message:` stay gaps, and so does any uniqueness rule on a model whose
+/// class body declares a `default_scope`: Rails queries `unscoped`, and
+/// the runtime has no `unscoped` to match it.
+fn parse_uniqueness(value: &Node<'_>, file: &str, class_consts: &super::ClassConsts) -> RuleParse {
+    use crate::dialect::ValidationRule;
+    if class_consts.default_scoped() {
+        return RuleParse::Gap(vec!["uniqueness".to_string()]);
+    }
+    let rule = |scope, case_sensitive, allow_nil, allow_blank| ValidationRule::Uniqueness {
+        scope,
+        case_sensitive,
+        allow_nil,
+        allow_blank,
+    };
+    match super::super::util::bool_value(value) {
+        Some(true) => return RuleParse::Rule(BuiltRule::bare(rule(Vec::new(), true, false, false))),
+        Some(false) => return RuleParse::Skip,
+        None => {}
+    }
+    let Some(elements) = hash_elements(value) else {
+        return RuleParse::Gap(vec!["uniqueness".to_string()]);
+    };
+    let mut scope: Vec<Symbol> = Vec::new();
+    let mut case_sensitive = true;
+    let mut allow_nil = false;
+    let mut allow_blank = false;
+    let mut built = BuiltRule::bare(rule(Vec::new(), true, false, false));
+    let mut gaps = Vec::new();
+    for el in elements.iter() {
+        let Some(assoc) = el.as_assoc_node() else {
+            gaps.push("uniqueness".to_string());
+            continue;
+        };
+        let Some(key) = symbol_value(&assoc.key()) else {
+            gaps.push("uniqueness".to_string());
+            continue;
+        };
+        let child = assoc.value();
+        match key.as_str() {
+            "scope" => {
+                let names: Option<Vec<Symbol>> = if let Some(array) = child.as_array_node() {
+                    array.elements().iter().map(|e| symbol_value(&e).map(|s| Symbol::from(s.as_str()))).collect()
+                } else {
+                    symbol_value(&child).map(|s| vec![Symbol::from(s.as_str())])
+                };
+                match names {
+                    Some(names) => scope = names,
+                    None => gaps.push("uniqueness: scope".to_string()),
+                }
+            }
+            "case_sensitive" => match super::super::util::bool_value(&child) {
+                Some(flag) => case_sensitive = flag,
+                None => gaps.push("uniqueness: case_sensitive".to_string()),
+            },
+            "allow_nil" => match super::super::util::bool_value(&child) {
+                Some(flag) => {
+                    allow_nil = flag;
+                    built.own_allow_nil = true;
+                }
+                None => gaps.push("uniqueness: allow_nil".to_string()),
+            },
+            "allow_blank" => match super::super::util::bool_value(&child) {
+                Some(flag) => {
+                    allow_blank = flag;
+                    built.own_allow_blank = true;
+                }
+                None => gaps.push("uniqueness: allow_blank".to_string()),
+            },
+            "if" => push_condition(&child, file, &mut built.if_cond, "if", &mut gaps),
+            "unless" => push_condition(&child, file, &mut built.unless_cond, "unless", &mut gaps),
+            other => gaps.push(format!("uniqueness: {other}")),
+        }
+    }
+    if !gaps.is_empty() {
+        return RuleParse::Gap(gaps);
+    }
+    built.rule = rule(scope, case_sensitive, allow_nil, allow_blank);
+    RuleParse::Rule(built)
 }
 
 /// `allow_blank: true` skips every validator when the value is blank.
@@ -603,6 +704,7 @@ fn parse_validator(key: &str, value: &Node<'_>, file: &str, class_consts: &super
         "numericality" => parse_numericality(value, file, class_consts),
         "inclusion" => parse_set(value, file, false),
         "exclusion" => parse_set(value, file, true),
+        "uniqueness" => parse_uniqueness(value, file, class_consts),
         "format" => parse_format(value, file, class_consts),
         other => RuleParse::Gap(vec![other.to_string()]),
     }

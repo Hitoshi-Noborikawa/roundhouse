@@ -280,6 +280,8 @@ mod sidekiq_adapter;
 mod silent_lowerings;
 #[path = "emit_and_run/validates_options.rs"]
 mod validates_options;
+#[path = "emit_and_run/validates_uniqueness.rs"]
+mod validates_uniqueness;
 #[path = "emit_and_run/validates_integer_constants.rs"]
 mod validates_integer_constants;
 #[path = "emit_and_run/validation_callback_on.rs"]

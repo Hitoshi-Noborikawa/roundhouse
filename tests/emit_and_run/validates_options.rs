@@ -9,8 +9,9 @@ use super::emit_and_run;
 /// lambda-condition follow-up) a zero-arity lambda `if:` now guards the
 /// same way — `:note` below, with dedicated coverage in
 /// `validates_lambda_conditions.rs`. `equal_to`, `other_than`,
-/// uniqueness, comparison, and `length: is:` stay diagnostics and are
-/// not enforced.
+/// `uniqueness: { conditions: }`, comparison, and `length: is:` stay
+/// diagnostics and are not enforced (plain `uniqueness:` is covered by
+/// `validates_uniqueness.rs`).
 const MODEL: &str = r#"class Article < ApplicationRecord
   has_many :comments, dependent: :destroy
 
@@ -35,7 +36,7 @@ const MODEL: &str = r#"class Article < ApplicationRecord
   validates :label, presence: true, if: :live?
   validates :extra, presence: true, unless: :draft?
   validates :note, presence: true, if: -> { status == "live" }
-  validates :title, uniqueness: true
+  validates :title, uniqueness: { conditions: -> { where(published: true) } }
   validates :level, comparison: { less_than_or_equal_to: :cap }
   validates :tag, length: { maximum: 4, is: 2 }
 
@@ -145,7 +146,7 @@ raise "lambda condition not enforced: #{lambda_blank.inspect}" unless lambda_bla
 valid, msgs = messages(base.merge(title: "LambdaOk", status: "live", label: "x", extra: "y", note: "z"))
 raise "lambda condition filled rejected: #{msgs.inspect}" unless valid
 
-# uniqueness:, comparison:, and length: is: are not enforced.
+# uniqueness: { conditions: }, comparison:, and length: is: are not enforced.
 Article.create!(base.merge(title: "Taken", label: "x", extra: "y"))
 Article.create!(base.merge(title: "Taken"))
 valid, msgs = messages(base.merge(title: "Compared"))

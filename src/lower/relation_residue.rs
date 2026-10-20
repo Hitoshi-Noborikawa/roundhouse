@@ -161,6 +161,36 @@ fn walk(e: &Expr, in_chain: bool, ctx: &FoldCtx, diags: &mut Vec<Diagnostic>) {
 ///
 /// Host-only: the CLI is the emit gate that raises these, and the
 /// playground has no emit gate to raise anything for.
+/// `validates :attr, uniqueness: …` needs a query at validation time,
+/// which only the targets that ship the runtime Relation lower
+/// (`model_to_library::RuntimeRelation::Present`). Elsewhere the rule is
+/// not lowered, and this reports it, as the gap it was before, once per
+/// validation, so the emit says what it leaves out.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn uniqueness_gaps_for_target(app: &App, target: crate::build_target::BuildTarget) -> Vec<Diagnostic> {
+    if target.has_runtime_relation() {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    for model in &app.models {
+        for item in &model.body {
+            let crate::dialect::ModelBodyItem::Validation { validation, .. } = item else { continue };
+            if !validation.rules.iter().any(|r| matches!(r, crate::dialect::ValidationRule::Uniqueness { .. })) {
+                continue;
+            }
+            let mut d = Diagnostic::unsupported(
+                item.span(),
+                Some(crate::ident::Symbol::from(target.as_str())),
+                format!("validates :{}, uniqueness:", validation.attribute.as_str()),
+                "the uniqueness query needs the runtime Relation, which this target does not ship; Rails rejects records this build saves",
+            );
+            d.severity = crate::diagnostic::Severity::Warning;
+            out.push(d);
+        }
+    }
+    out
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 pub fn elevate_dynamic_relation_for_target(
     diags: &mut [Diagnostic],

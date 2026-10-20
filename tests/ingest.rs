@@ -1658,7 +1658,7 @@ fn unmodeled_validates_options_warn_and_drop_the_whole_call() {
     let (model, warnings, gaps) = ingest_widget(
         r#"
 class Widget < ApplicationRecord
-  validates :name, presence: true, uniqueness: true
+  validates :name, presence: true, uniqueness: { conditions: -> { where(active: true) } }
   validates :stock, comparison: { less_than_or_equal_to: :max_stock }
   validates :price, numericality: { greater_than: 0, odd: true }
   validates :bounded, numericality: { equal_to: 1, other_than: 2 }
@@ -3501,4 +3501,43 @@ end
     assert!(rule("label").is_some_and(|v| v.if_cond.is_none()), "{:?}", rule("label"));
     assert!(rule("name").is_none(), "a custom context stays a gap: {rules:?}");
     assert!(warnings.iter().any(|w| w.contains("validates :name, on:")), "{warnings:?}");
+}
+
+/// `uniqueness:` becomes a `Uniqueness` rule with its options; `conditions:`
+/// and a model with its own `default_scope` stay the reported gap.
+#[test]
+fn uniqueness_options_lower_to_a_rule() {
+    let (model, warnings, _) = ingest_widget(
+        r#"
+class Widget < ApplicationRecord
+  validates :uri, uniqueness: true
+  validates :name, uniqueness: { scope: [:owner_id, :kind], case_sensitive: false, allow_blank: true }
+  validates :code, uniqueness: { conditions: -> { where(active: true) } }
+end
+"#,
+    );
+    let rules = validation_rules(&model);
+    let rule = |attr: &str| rules.iter().find(|v| v.attribute.as_str() == attr).copied();
+    assert!(
+        matches!(rule("uri").map(|v| v.rules.as_slice()), Some([roundhouse::dialect::ValidationRule::Uniqueness { scope, case_sensitive: true, allow_nil: false, allow_blank: false }]) if scope.is_empty()),
+        "{:?}", rule("uri")
+    );
+    assert!(
+        matches!(rule("name").map(|v| v.rules.as_slice()), Some([roundhouse::dialect::ValidationRule::Uniqueness { scope, case_sensitive: false, allow_blank: true, .. }]) if scope.len() == 2),
+        "{:?}", rule("name")
+    );
+    assert!(rule("code").is_none(), "conditions: stays a gap: {rules:?}");
+    assert!(warnings.iter().any(|w| w.contains("validates :code, uniqueness: conditions:")), "{warnings:?}");
+
+    let (model, warnings, _) = ingest_widget(
+        "class Widget < ApplicationRecord\n  default_scope { where(kept: true) }\n  validates :uri, uniqueness: true\nend\n",
+    );
+    assert!(validation_rules(&model).iter().all(|v| v.attribute.as_str() != "uri"), "default_scope keeps the gap");
+    assert!(warnings.iter().any(|w| w.contains("validates :uri, uniqueness:")), "{warnings:?}");
+
+    let (model, warnings, _) = ingest_widget(
+        "class Widget < ApplicationRecord\n  self.default_scope { where(kept: true) }\n  validates :uri, uniqueness: true\nend\n",
+    );
+    assert!(validation_rules(&model).iter().all(|v| v.attribute.as_str() != "uri"), "self.default_scope keeps the gap");
+    assert!(warnings.iter().any(|w| w.contains("validates :uri, uniqueness:")), "{warnings:?}");
 }
