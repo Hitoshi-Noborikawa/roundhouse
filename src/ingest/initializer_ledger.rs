@@ -64,7 +64,9 @@
 //!
 //! [`INERT`] lists statements that provably have no effect on a compiled
 //! app, one reason each. An entry matches only when every argument is a
-//! plain literal, so a side effect cannot hide in the value.
+//! plain literal, so a side effect cannot hide in the value. A constant
+//! named on its own line (campfire's `ActiveStorage::Transformers::Vips`,
+//! there to force an autoload) is inert too.
 //!
 //! # Who a statement belongs to
 //!
@@ -90,7 +92,8 @@ use crate::vfs::Vfs;
 use super::app::{
     available_locales_line, default_locale_line, declares_rails_engine, fallbacks_line, extract_autoload_lib_ignores,
     extract_autoload_path_roots, extract_config_assignments, extract_config_time_zone,
-    extract_collection_cache_store, extract_filter_parameters, extract_initializer_filters, extract_module_mixins,
+    extract_collection_cache_store, extract_filter_parameters, extract_initializer_filters, extract_initializer_response_headers,
+    extract_module_mixins,
     extract_time_formats, extract_variable_content_type_exclusions,
     extract_video_preview_arguments, extract_video_previewer_replacement,
     extract_vips_loader_policy, forgery_strategy_line, kaminari_default_per_page,
@@ -208,6 +211,12 @@ const RECOGNIZERS: &[Recognizer] = &[
         origins: INIT,
         levels: TOP_HOOK,
         reads: |p| !extract_initializer_filters(p.text.as_bytes(), PROBE).is_empty(),
+    },
+    Recognizer {
+        name: "initializer_response_headers (X.after_action { response.set_header(k, v) }, bare or in ActiveSupport.on_load)",
+        origins: INIT,
+        levels: TOP_HOOK,
+        reads: |p| !extract_initializer_response_headers(p.text.as_bytes(), PROBE).is_empty(),
     },
     Recognizer {
         name: "sql_functions (create_function / create_aggregate)",
@@ -554,9 +563,14 @@ fn assoc_is_plain(node: &Node<'_>) -> bool {
         .is_some_and(|a| is_plain_literal(&a.key()) && is_plain_literal(&a.value()))
 }
 
+const BARE_CONSTANT_INERT: &str = "a constant named on its own line only makes Rails autoload it; the compiled app has every class loaded before boot";
+
 /// The inert-allowlist reason for `node`, if its target is listed and its
-/// value is a plain literal.
+/// value is a plain literal, or if it is a bare constant.
 fn inert_reason(node: &Node<'_>, src: &str) -> Option<&'static str> {
+    if node.as_constant_read_node().is_some() || node.as_constant_path_node().is_some() {
+        return Some(BARE_CONSTANT_INERT);
+    }
     let recv_text = |recv: Option<Node<'_>>| -> Option<String> {
         let recv = recv?;
         let loc = recv.location();
