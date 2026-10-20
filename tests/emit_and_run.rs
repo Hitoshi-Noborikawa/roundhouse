@@ -304,6 +304,8 @@ mod concern_included_constants;
 mod regex_string_interpolation;
 #[path = "emit_and_run/numericality_allow_nil_blank.rs"]
 mod numericality_allow_nil_blank;
+#[path = "emit_and_run/stdlib_email_regexp.rs"]
+mod stdlib_email_regexp;
 
 #[test]
 fn markdown_templates_render_with_their_mime_type_and_erb_escaping() {
