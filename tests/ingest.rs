@@ -3738,3 +3738,60 @@ end
         "a read-only constant still folds: {rules:?}"
     );
 }
+
+/// A mutation reaches a constant through anything that may be the same
+/// object: another constant assigned from it (either way round, `.freeze`
+/// included), a receiver chain rooted at it (`CHAINED.to_a << "c"`), or a
+/// variable holding it. Each of those leaves the list unfoldable; an alias
+/// nothing mutates (`COPY = KEPT`) leaves both foldable.
+#[test]
+fn a_mutation_through_an_alias_or_a_chain_makes_a_constant_unfoldable() {
+    let (model, warnings, _) = ingest_widget(
+        r#"
+class Widget < ApplicationRecord
+  ALIASED = %w[a b]
+  ALIAS = ALIASED
+  ALIAS << "c"
+  FROZEN = %w[a b]
+  FROZEN_ALIAS = FROZEN.freeze
+  FROZEN_ALIAS.push("c")
+  BACKWARD = %w[a b]
+  BACKWARD_ALIAS = BACKWARD
+  BACKWARD << "c"
+  CHAINED = %w[a b]
+  CHAINED.to_a << "c"
+  HELD = %w[a b]
+  KEPT = %w[a b]
+  COPY = KEPT
+
+  validates :aliased, inclusion: { in: ALIASED }
+  validates :frozen, inclusion: { in: FROZEN }
+  validates :backward, inclusion: { in: BACKWARD_ALIAS }
+  validates :chained, inclusion: { in: CHAINED }
+  validates :held, inclusion: { in: HELD }
+  validates :kept, inclusion: { in: KEPT }
+  validates :copy, inclusion: { in: COPY }
+
+  def self.widen!
+    list = HELD
+    list << "c"
+  end
+end
+"#,
+    );
+    let rules = validation_rules(&model);
+    for attr in ["aliased", "frozen", "backward", "chained", "held"] {
+        assert!(rules.iter().all(|v| v.attribute.as_str() != attr), "no folded rule for {attr}: {rules:?}");
+        assert!(
+            warnings.iter().any(|w| w.contains(&format!("validates :{attr}, inclusion: in:"))),
+            "{attr}: {warnings:?}"
+        );
+    }
+    for attr in ["kept", "copy"] {
+        assert!(
+            rules.iter().any(|v| v.attribute.as_str() == attr
+                && matches!(v.rules.as_slice(), [roundhouse::dialect::ValidationRule::Inclusion { values, .. }] if values.len() == 2)),
+            "{attr} still folds: {rules:?}"
+        );
+    }
+}

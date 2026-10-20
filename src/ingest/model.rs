@@ -1464,6 +1464,49 @@ struct ConstTaint {
     top_level: std::collections::HashSet<usize>,
     top_writes: std::collections::HashMap<String, usize>,
     tainted: std::collections::HashSet<String>,
+    /// `ALIAS = MODES` / `ALIAS = MODES.freeze` (any constant the
+    /// right-hand side reads): the two may be one object, so a mutation
+    /// through either taints both.
+    aliases: Vec<(String, String)>,
+}
+
+/// The constant a receiver chain is rooted at: `MODES`, `MODES.to_a`,
+/// `Widget::MODES.first.dup` (the last segment of a path).
+fn chain_root(node: &Node<'_>) -> Option<String> {
+    if let Some(paren) = node.as_parentheses_node() {
+        return chain_root(&paren.body()?);
+    }
+    if let Some(stmts) = node.as_statements_node() {
+        let body: Vec<Node<'_>> = stmts.body().iter().collect();
+        let [only] = body.as_slice() else { return None };
+        return chain_root(only);
+    }
+    if let Some(call) = node.as_call_node() {
+        return chain_root(&call.receiver()?);
+    }
+    if let Some(cr) = node.as_constant_read_node() {
+        return Some(constant_id_str(&cr.name()).to_string());
+    }
+    node.as_constant_path_node()?.name().map(|n| constant_id_str(&n).to_string())
+}
+
+/// Every constant a node reads, at any depth.
+fn constant_reads(node: &Node<'_>) -> Vec<String> {
+    struct Reads(Vec<String>);
+    impl<'pr> ruby_prism::Visit<'pr> for Reads {
+        fn visit_constant_read_node(&mut self, node: &ruby_prism::ConstantReadNode<'pr>) {
+            self.0.push(constant_id_str(&node.name()).to_string());
+        }
+        fn visit_constant_path_node(&mut self, node: &ruby_prism::ConstantPathNode<'pr>) {
+            if let Some(name) = node.name() {
+                self.0.push(constant_id_str(&name).to_string());
+            }
+            ruby_prism::visit_constant_path_node(self, node);
+        }
+    }
+    let mut reads = Reads(Vec::new());
+    ruby_prism::Visit::visit(&mut reads, node);
+    reads.0
 }
 
 impl ConstTaint {
@@ -1476,13 +1519,35 @@ impl ConstTaint {
                 .collect(),
             top_writes: Default::default(),
             tainted: Default::default(),
+            aliases: Vec::new(),
         };
         for stmt in stmts {
             ruby_prism::Visit::visit(&mut scan, stmt);
         }
-        let ConstTaint { top_writes, mut tainted, .. } = scan;
+        let ConstTaint { top_writes, mut tainted, aliases, .. } = scan;
         tainted.extend(top_writes.into_iter().filter(|(_, n)| *n > 1).map(|(name, _)| name));
+        // Across alias edges, both ways, until nothing changes.
+        loop {
+            let before = tainted.len();
+            for (a, b) in &aliases {
+                if tainted.contains(a) || tainted.contains(b) {
+                    tainted.insert(a.clone());
+                    tainted.insert(b.clone());
+                }
+            }
+            if tainted.len() == before {
+                break;
+            }
+        }
         tainted
+    }
+
+    /// `x = MODES` (or `@x`, `@@x`, `$x`, or `MODES.to_a`): the variable
+    /// may mutate the constant later, out of this pass's sight.
+    fn escape(&mut self, value: &Node<'_>) {
+        if let Some(root) = chain_root(value) {
+            self.tainted.insert(root);
+        }
     }
 
     fn taint(&mut self, name: Option<ruby_prism::ConstantId<'_>>) {
@@ -1496,6 +1561,9 @@ impl<'pr> ruby_prism::Visit<'pr> for ConstTaint {
     fn visit_constant_write_node(&mut self, node: &ruby_prism::ConstantWriteNode<'pr>) {
         let name = constant_id_str(&node.name()).to_string();
         if self.top_level.contains(&node.location().start_offset()) {
+            for read in constant_reads(&node.value()) {
+                self.aliases.push((name.clone(), read));
+            }
             *self.top_writes.entry(name).or_default() += 1;
         } else {
             self.tainted.insert(name);
@@ -1540,18 +1608,53 @@ impl<'pr> ruby_prism::Visit<'pr> for ConstTaint {
         self.taint(node.name());
         ruby_prism::visit_constant_path_target_node(self, node);
     }
+    // A call outside the read-only set taints the constant its receiver
+    // chain is rooted at: `MODES << "c"`, and `MODES.to_a << "c"` or
+    // `MODES.first << "x"`, whose receivers may be the constant itself
+    // or one of its elements.
     fn visit_call_node(&mut self, node: &ruby_prism::CallNode<'pr>) {
         if let Some(recv) = node.receiver() {
             let method = constant_id_str(&node.name());
             if !READ_ONLY_CONST_METHODS.contains(&method.as_ref()) {
-                if let Some(cr) = recv.as_constant_read_node() {
-                    self.taint(Some(cr.name()));
-                } else if let Some(cp) = recv.as_constant_path_node() {
-                    self.taint(cp.name());
+                if let Some(root) = chain_root(&recv) {
+                    self.tainted.insert(root);
                 }
             }
         }
         ruby_prism::visit_call_node(self, node);
+    }
+    fn visit_local_variable_write_node(&mut self, node: &ruby_prism::LocalVariableWriteNode<'pr>) {
+        self.escape(&node.value());
+        ruby_prism::visit_local_variable_write_node(self, node);
+    }
+    fn visit_local_variable_or_write_node(&mut self, node: &ruby_prism::LocalVariableOrWriteNode<'pr>) {
+        self.escape(&node.value());
+        ruby_prism::visit_local_variable_or_write_node(self, node);
+    }
+    fn visit_instance_variable_write_node(&mut self, node: &ruby_prism::InstanceVariableWriteNode<'pr>) {
+        self.escape(&node.value());
+        ruby_prism::visit_instance_variable_write_node(self, node);
+    }
+    fn visit_instance_variable_or_write_node(&mut self, node: &ruby_prism::InstanceVariableOrWriteNode<'pr>) {
+        self.escape(&node.value());
+        ruby_prism::visit_instance_variable_or_write_node(self, node);
+    }
+    fn visit_class_variable_write_node(&mut self, node: &ruby_prism::ClassVariableWriteNode<'pr>) {
+        self.escape(&node.value());
+        ruby_prism::visit_class_variable_write_node(self, node);
+    }
+    fn visit_global_variable_write_node(&mut self, node: &ruby_prism::GlobalVariableWriteNode<'pr>) {
+        self.escape(&node.value());
+        ruby_prism::visit_global_variable_write_node(self, node);
+    }
+    // `a, b = MODES, OTHER`: each right-hand element escapes.
+    fn visit_multi_write_node(&mut self, node: &ruby_prism::MultiWriteNode<'pr>) {
+        let value = node.value();
+        match value.as_array_node() {
+            Some(array) => array.elements().iter().for_each(|el| self.escape(&el)),
+            None => self.escape(&value),
+        }
+        ruby_prism::visit_multi_write_node(self, node);
     }
 }
 
