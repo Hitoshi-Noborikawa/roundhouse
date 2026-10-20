@@ -393,6 +393,9 @@ pub(super) fn rewrite_render_to_views(
                             _ => rest.push((k.clone(), v.clone())),
                         }
                     }
+                    if body.as_ref().is_some_and(|(_, ct)| *ct == Some("application/json")) {
+                        refuse_serializer_options(&mut rest);
+                    }
                     if name.is_none() {
                         // Non-template render: `render html: X, layout:
                         // "application"` → `render(X, layout: …)` (the
@@ -940,6 +943,44 @@ fn html_escape_call(value: &Expr) -> Expr {
             parenthesized: true,
         },
     )
+}
+
+/// active_model_serializers' `render json:` options. The runtime
+/// `render(body, status:, content_type:, location:)` takes none of
+/// them, so passed through they raised `ArgumentError (unknown
+/// keywords)` on the first request, and the body would have been the
+/// value's own `to_json` rather than the serializer's. Rendering through
+/// the serializer is not modelled: each such render is an error residue
+/// (it keeps the route with Rails), and its keywords are not emitted.
+const SERIALIZER_OPTIONS: [&str; 4] = ["serializer", "each_serializer", "adapter", "root"];
+
+///
+/// The residue sits on the option's key, inside the action alone: the
+/// render call's own start is shared by the controller's synthesized
+/// methods (`controller_name`, …) every route reaches, so anchored there
+/// it would keep the controller's other actions with Rails too.
+fn refuse_serializer_options(rest: &mut Vec<(Expr, Expr)>) {
+    let key_of = |k: &Expr| match &*k.node {
+        ExprNode::Lit { value: Literal::Sym { value } } => SERIALIZER_OPTIONS.iter().position(|o| *o == value.as_str()),
+        _ => None,
+    };
+    let Some((first, span)) = rest.iter().filter_map(|(k, _)| key_of(k).map(|i| (i, k.span))).min_by_key(|(i, _)| *i) else {
+        return;
+    };
+    rest.retain(|(k, _)| key_of(k).is_none());
+    let option = SERIALIZER_OPTIONS[first];
+    let mut d = crate::lower::residue_diagnostic(
+        "controller_render",
+        "render_json_serializer",
+        span,
+        "serializer_render_not_modelled",
+        format!(
+            "`render json:` with `{option}:` is not lowered: rendering through an active_model_serializers \
+             serializer is not modelled, and the runtime `render` takes no serializer options"
+        ),
+    );
+    d.severity = crate::diagnostic::Severity::Error;
+    crate::emit::diagnostics::push(d);
 }
 
 /// `json_render_encode`, with a value that may be a String at run time sent as it is (`JsonRender.body`).
