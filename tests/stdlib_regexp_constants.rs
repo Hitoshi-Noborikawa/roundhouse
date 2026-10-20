@@ -11,7 +11,9 @@
 //! 0
 //! ```
 //!
-//! Any other qualified constant stays the gap.
+//! The unrooted spelling resolves lexically in Ruby, so it folds only
+//! where nothing could shadow `URI`: a top-level class whose body
+//! defines no `URI`. Any other qualified constant stays the gap.
 
 use roundhouse::dialect::ValidationRule;
 
@@ -29,9 +31,13 @@ end
 "##;
 
 fn ingest() -> (roundhouse::Model, Vec<String>) {
+    ingest_source(MODEL, "app/models/person.rb")
+}
+
+fn ingest_source(source: &str, file: &str) -> (roundhouse::Model, Vec<String>) {
     roundhouse::ingest::survey::activate();
     let (model, diags) = roundhouse::ingest::prism::scope(|| {
-        roundhouse::ingest::ingest_model(MODEL.as_bytes(), "app/models/person.rb", &roundhouse::schema::Schema::default(), &Default::default())
+        roundhouse::ingest::ingest_model(source.as_bytes(), file, &roundhouse::schema::Schema::default(), &Default::default())
             .unwrap()
             .unwrap()
     });
@@ -82,4 +88,49 @@ fn the_constant_is_the_same_rule_as_its_inline_literal() {
     let inline = format_of(&model, "inline_email");
     assert!(inline.is_some(), "{warnings:?}");
     assert_eq!(format_of(&model, "email"), inline);
+}
+
+/// Inside `module Admin`, unrooted `URI` could be an app's `Admin::URI`:
+/// the unrooted spelling stays the gap, the rooted one still folds.
+#[test]
+fn a_nested_model_folds_only_the_rooted_spelling() {
+    let source = r##"module Admin
+  class Account < ApplicationRecord
+    validates :email, format: { with: URI::MailTo::EMAIL_REGEXP }
+    validates :backup_email, format: { with: ::URI::MailTo::EMAIL_REGEXP }
+  end
+end
+"##;
+    let (model, warnings) = ingest_source(source, "app/models/admin/account.rb");
+    assert_eq!(format_of(&model, "email"), None);
+    assert!(warnings.iter().any(|w| w.contains("validates :email, format: with:")), "{warnings:?}");
+    assert_eq!(format_of(&model, "backup_email"), Some((EMAIL_REGEXP_SOURCE, "")), "{warnings:?}");
+}
+
+/// `class Admin::Account` is nested too, however it is spelled.
+#[test]
+fn a_compound_class_name_counts_as_nested() {
+    let source = r##"class Admin::Account < ApplicationRecord
+  validates :email, format: { with: URI::MailTo::EMAIL_REGEXP }
+end
+"##;
+    let (model, warnings) = ingest_source(source, "app/models/admin/account.rb");
+    assert_eq!(format_of(&model, "email"), None);
+    assert!(warnings.iter().any(|w| w.contains("validates :email, format: with:")), "{warnings:?}");
+}
+
+/// A top-level class whose own body defines `URI` shadows the
+/// standard-library one for the unrooted spelling.
+#[test]
+fn a_class_body_defining_uri_keeps_the_unrooted_gap() {
+    for definition in ["URI = Object.new", "module URI
+  end", "class URI
+  end"] {
+        let source = format!(
+            "class Account < ApplicationRecord\n  {definition}\n  validates :email, format: {{ with: URI::MailTo::EMAIL_REGEXP }}\n  validates :backup_email, format: {{ with: ::URI::MailTo::EMAIL_REGEXP }}\nend\n"
+        );
+        let (model, warnings) = ingest_source(&source, "app/models/account.rb");
+        assert_eq!(format_of(&model, "email"), None, "{definition}");
+        assert_eq!(format_of(&model, "backup_email"), Some((EMAIL_REGEXP_SOURCE, "")), "{definition}: {warnings:?}");
+    }
 }

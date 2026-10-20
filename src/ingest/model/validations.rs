@@ -1007,7 +1007,7 @@ fn resolve_format_regex(
     node: &Node<'_>,
     class_consts: &super::ClassConsts,
 ) -> Option<(String, String)> {
-    let (pattern, flags) = class_consts.regex(node).or_else(|| stdlib_regexp_constant(node))?;
+    let (pattern, flags) = class_consts.regex(node).or_else(|| stdlib_regexp_constant(node, class_consts))?;
     if flags.chars().all(|c| matches!(c, 'i' | 'm')) {
         Some((pattern, flags))
     } else {
@@ -1016,31 +1016,42 @@ fn resolve_format_regex(
 }
 
 /// A well-known Regexp constant of Ruby's standard library, named by
-/// its full path (`URI::MailTo::EMAIL_REGEXP`, or rooted as
-/// `::URI::MailTo::EMAIL_REGEXP`), folded to its `(source, flags)`.
-/// Consulted only after the class body's own constants fail to resolve
-/// the value. Each entry is copied verbatim from
+/// its full path (`URI::MailTo::EMAIL_REGEXP`), folded to its
+/// `(source, flags)`. Consulted only after the class body's own
+/// constants fail to resolve the value. The rooted spelling
+/// (`::URI::MailTo::EMAIL_REGEXP`) always names the standard-library
+/// constant. The unrooted one resolves lexically, so it folds only when
+/// nothing in scope could shadow its first segment: the class is not
+/// nested in a module or class, and its body defines no constant,
+/// module, or class by that name. Otherwise it stays the gap.
+///
+/// Each entry is copied verbatim from
 /// `ruby -ruri -e 'p CONST.source, CONST.options'` on Ruby 4.0, so the
 /// rule is the one writing that literal inline would give (prism's
 /// unescaped `/…\/…/` source equals Ruby's `Regexp#source`, `\#`
 /// included). Anything else, including a method that builds a regex
 /// (`URI::DEFAULT_PARSER.make_regexp`), stays the gap.
-fn stdlib_regexp_constant(node: &Node<'_>) -> Option<(String, String)> {
-    fn segments(node: &Node<'_>, out: &mut Vec<String>) -> Option<()> {
+fn stdlib_regexp_constant(node: &Node<'_>, class_consts: &super::ClassConsts) -> Option<(String, String)> {
+    /// The path's segments, and whether it starts with `::`.
+    fn segments(node: &Node<'_>, out: &mut Vec<String>) -> Option<bool> {
         if let Some(c) = node.as_constant_read_node() {
             out.push(super::super::util::constant_id_str(&c.name()).to_string());
-            return Some(());
+            return Some(false);
         }
         let p = node.as_constant_path_node()?;
-        if let Some(parent) = p.parent() {
-            segments(&parent, out)?;
-        }
+        let rooted = match p.parent() {
+            Some(parent) => segments(&parent, out)?,
+            None => true,
+        };
         out.push(super::super::util::constant_id_str(&p.name()?).to_string());
-        Some(())
+        Some(rooted)
     }
     node.as_constant_path_node()?;
     let mut path = Vec::new();
-    segments(node, &mut path)?;
+    let rooted = segments(node, &mut path)?;
+    if !rooted && !class_consts.resolves_at_top_level(path.first()?) {
+        return None;
+    }
     let (source, flags) = match path.join("::").as_str() {
         "URI::MailTo::EMAIL_REGEXP" => (
             r"\A[a-zA-Z0-9.!\#$%&'*+/=?^_`{|}~-]+@[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(?:\.[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)*\z",

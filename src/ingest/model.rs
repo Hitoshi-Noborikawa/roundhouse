@@ -144,7 +144,8 @@ pub(super) fn ingest_model_with_enum_constants(
         // Constants the class body assigns, for `enum :x, CONST` and for
         // labels spelled with a constant (`NAME => NAME`).
         let stmts = flatten_statements(class_body);
-        let class_consts = ClassConsts::collect(&stmts, file);
+        let mut class_consts = ClassConsts::collect(&stmts, file);
+        class_consts.set_top_level(name_path.len() == 1);
         let resolve_constant = |node: &Node<'_>| enum_constants.resolve(node, &enum_owners);
         for statement in stmts {
             let definition = visibility::definition(&statement).map(|d| d.as_node());
@@ -1700,6 +1701,15 @@ pub(super) struct ClassConsts {
     /// alias of another folded list: the literals with their kind kept
     /// (a Symbol is not a String), for `inclusion: { in: NAME }`.
     lists: std::collections::HashMap<String, Vec<Literal>>,
+    /// Every constant, module, or class name the body itself defines,
+    /// folded or not — anything an unqualified constant path's first
+    /// segment could resolve to before Ruby reaches the top level.
+    defined_names: std::collections::HashSet<String>,
+    /// The class sits directly at the top level (`class User`, not
+    /// `module Admin; class User` nor `class Admin::User`), so its
+    /// lexical scope is only its own body. Set by `ingest_model`;
+    /// `false` everywhere else, which is the conservative answer.
+    top_level: bool,
 }
 
 impl ClassConsts {
@@ -1721,7 +1731,18 @@ impl ClassConsts {
         // wrong one: the validation stays the reported gap.
         let tainted = ConstTaint::scan(stmts);
         for stmt in stmts {
+            let defined = if let Some(m) = stmt.as_module_node() {
+                Some(m.constant_path())
+            } else {
+                stmt.as_class_node().map(|c| c.constant_path())
+            };
+            if let Some(path) = defined
+                && let Some(first) = constant_path_of(&path).and_then(|p| p.into_iter().next())
+            {
+                out.defined_names.insert(first);
+            }
             let Some(cw) = stmt.as_constant_write_node() else { continue };
+            out.defined_names.insert(constant_id_str(&cw.name()).to_string());
             let name = constant_id_str(&cw.name()).to_string();
             if tainted.contains(&name) {
                 continue;
@@ -1776,6 +1797,19 @@ impl ClassConsts {
             return self.lists.get(constant_id_str(&cr.name())).cloned();
         }
         node.as_array_node()?.elements().iter().map(|el| list_atom(&el)).collect()
+    }
+
+    /// Record whether the class sits directly at the top level.
+    pub(super) fn set_top_level(&mut self, top_level: bool) {
+        self.top_level = top_level;
+    }
+
+    /// Whether an unrooted constant path starting with `first` (the
+    /// `URI` of `URI::MailTo::EMAIL_REGEXP`) can only mean the top-level
+    /// constant: the class is not nested in a module or class, and its
+    /// own body defines nothing by that name.
+    pub(super) fn resolves_at_top_level(&self, first: &str) -> bool {
+        self.top_level && !self.defined_names.contains(first)
     }
 
     /// A regex literal the class body can fold: a bare `/pattern/flags`
