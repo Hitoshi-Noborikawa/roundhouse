@@ -9,12 +9,14 @@
 use crate::App;
 use crate::build_target::BuildTarget;
 
-/// Targets that run the real gem: Ruby and JRuby load it, and Blog, Roda
-/// and Futamura keep the app's own Ruby.
+/// Targets that run the real gem: Ruby and JRuby load it via
+/// `gems::RUNTIME_GEMS`. Blog and Futamura keep the app's own Ruby and
+/// Gemfile, so Faraday stays if the app declared it. Roda emits a fresh
+/// Gemfile without Faraday and does not run that wiring — refuse there.
 fn ships_gem(target: BuildTarget) -> bool {
     matches!(
         target,
-        BuildTarget::Ruby | BuildTarget::Jruby | BuildTarget::Blog | BuildTarget::Roda | BuildTarget::Futamura
+        BuildTarget::Ruby | BuildTarget::Jruby | BuildTarget::Blog | BuildTarget::Futamura
     )
 }
 

@@ -31,6 +31,8 @@ mod branch_local_join;
 mod utc_zone_time;
 #[path = "emit_and_run/discard.rs"]
 mod discard;
+#[path = "emit_and_run/pundit_source.rs"]
+mod pundit_source;
 #[path = "emit_and_run/pay_exceptions.rs"]
 mod pay_exceptions;
 #[path = "emit_and_run/net_http_patch.rs"]
@@ -3710,6 +3712,7 @@ fn faraday_is_refused_off_ruby_and_jruby() {
     }
     for target in [
         roundhouse::project::BuildTarget::Spinel,
+        roundhouse::project::BuildTarget::Roda,
         roundhouse::project::BuildTarget::Python,
         roundhouse::project::BuildTarget::Crystal,
         roundhouse::project::BuildTarget::Typescript,

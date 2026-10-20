@@ -177,6 +177,7 @@ pub mod oj;
 pub mod faraday;
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) mod gem_refusal;
+pub mod constantize;
 pub mod params_residue;
 pub mod params_permit;
 pub mod normalizes;
