@@ -167,7 +167,11 @@ fn own_reader_targets(model: &Model) -> HashSet<String> {
     let associations: HashSet<_> = model.associations().map(|a| a.name().as_str().to_string()).collect();
     model
         .methods()
-        .filter(|m| m.receiver == crate::dialect::MethodReceiver::Instance && exact_positional_arity(m) == Some(0))
+        .filter(|m| {
+            m.receiver == crate::dialect::MethodReceiver::Instance
+                && exact_positional_arity(m) == Some(0)
+                && !uses_implicit_block(&m.body)
+        })
         .map(|m| m.name.as_str().to_string())
         .filter(|name| !associations.contains(name))
         .collect()

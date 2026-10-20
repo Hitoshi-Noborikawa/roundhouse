@@ -704,3 +704,16 @@ fn a_model_delegate_to_its_own_reader_is_synthesized() {
     assert!(model.contains("authorizer.admin?"), "{model}");
     assert!(model.contains("def trusted?"), "{model}");
 }
+
+/// A reader that yields would raise from a forwarder that passes no block.
+#[test]
+fn a_model_delegate_to_a_reader_that_yields_is_left_alone() {
+    let mut files = tree("");
+    files.insert(
+        PathBuf::from("app/models/account.rb"),
+        b"class Account < ApplicationRecord\n  def authorizer\n    yield\n  end\n\n  delegate :admin?, to: :authorizer\nend\n".to_vec(),
+    );
+    let mut app = ingest_app_from_tree(files).expect("ingest");
+    let model = emit_model(&mut app, "account.rb");
+    assert!(!model.contains("def admin?"), "{model}");
+}
