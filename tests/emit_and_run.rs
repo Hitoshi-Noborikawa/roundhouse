@@ -9,6 +9,16 @@
 mod emit_and_run;
 #[path = "emit_and_run/active_model_attributes.rs"]
 mod active_model_attributes;
+#[path = "emit_and_run/arel_nodes.rs"]
+mod arel_nodes;
+#[path = "emit_and_run/database_tasks.rs"]
+mod database_tasks;
+#[path = "emit_and_run/framework_exceptions.rs"]
+mod framework_exceptions;
+#[path = "emit_and_run/preloader_runtime.rs"]
+mod preloader_runtime;
+#[path = "emit_and_run/framework_surface_rest.rs"]
+mod framework_surface_rest;
 #[path = "emit_and_run/date_calendar_duration.rs"]
 mod date_calendar_duration;
 #[path = "emit_and_run/interval_columns.rs"]
@@ -111,6 +121,8 @@ mod erb_template;
 mod representable_decorator;
 #[path = "emit_and_run/representable.rs"]
 mod representable;
+#[path = "emit_and_run/instance_extend.rs"]
+mod instance_extend;
 
 #[path = "support/class_configuration.rs"]
 mod class_configuration;

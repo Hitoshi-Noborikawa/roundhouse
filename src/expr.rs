@@ -107,6 +107,12 @@ pub const INHERITED_VISIBILITY: u64 = 1 << 20;
 /// `iso8601`; the other targets keep their time-format mapping.
 pub const GROUNDED_TIME_FORMAT: u64 = 1 << 21;
 
+/// `written_names` has applied Rubydex to this mixin path. The stored
+/// spelling is the answer, including when Rubydex left a short name
+/// because the reference is top-level. Absent on a per-file ingest,
+/// which never ran that pass.
+pub const RESOLVED_MIXIN: u64 = 1 << 22;
+
 /// Whether `expr` is a [`SELF_BINDING`] cast.
 pub fn is_self_binding(expr: &Expr) -> bool {
     expr.decisions & SELF_BINDING != 0
@@ -227,13 +233,22 @@ pub struct ExprCold {
     /// nothing tagged.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hint: Option<IrHint>,
+    /// The method `ingest` parsed for a `def` at expression position.
+    /// The node stays the nil that carries the nested-def diagnostic;
+    /// this is that same parse, so a hoist does not read the source again.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub nested_def: Option<crate::dialect::MethodDef>,
 }
 
-static EMPTY_COLD: ExprCold = ExprCold { diagnostic: None, hint: None };
+static EMPTY_COLD: ExprCold = ExprCold {
+    diagnostic: None,
+    hint: None,
+    nested_def: None,
+};
 
 impl ExprCold {
     fn is_empty(&self) -> bool {
-        self.diagnostic.is_none() && self.hint.is_none()
+        self.diagnostic.is_none() && self.hint.is_none() && self.nested_def.is_none()
     }
 
     /// Apply `f` to the annotations in `slot` (an [`Expr::cold`] field),
@@ -384,6 +399,16 @@ impl Expr {
         let mut taken = None;
         ExprCold::update(&mut self.cold, |c| taken = c.hint.take());
         taken
+    }
+
+    /// The method parsed at a nested `def`, when ingest kept one.
+    pub fn nested_def(&self) -> Option<&crate::dialect::MethodDef> {
+        self.cold().nested_def.as_ref()
+    }
+
+    /// Remember the method ingest parsed for this nested `def`.
+    pub fn set_nested_def(&mut self, method: crate::dialect::MethodDef) {
+        ExprCold::update(&mut self.cold, |c| c.nested_def = Some(method));
     }
 
     /// Provenance backfill for lowerer-synthesized subtrees: every node

@@ -2987,9 +2987,13 @@ module ActiveRecord
     # for a table-qualified column (campfire's direct-room sidebar).
     # Nested values go through `sql_ident` + `order_direction` so a
     # request-steered hash cannot splice SQL.
+    # A node is the caller's opt-in (`Arel.sql` with binds, a `Case`).
+    # Its text is the ordering. A String still has to be a column name.
     def order_term(p)
       if p.is_a?(Hash)
         format_order_hash(p)
+      elsif p.is_a?(Arel::Nodes::Node)
+        p.to_s
       else
         order_string(p.to_s)
       end

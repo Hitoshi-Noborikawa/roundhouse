@@ -429,7 +429,24 @@ fn untyped_subexpressions_baseline() {
     // MEASURED 631 on 2026-10-19: save and destroy share
     // `_enlist_or_run`, so the `Db._txn_depth` / `Db._txn_records`
     // walk is read once.
-    const CEILING: usize = 631;
+    // MEASURED 837 on 2026-10-19 after merging main (`sanitize_sql_like`
+    // stays 3). Main's ledger was 631. `ActiveRecord::Tasks` and the
+    // Rake subset add the unseeded-parameter and `Db` reads this probe
+    // does not type; the RBS-paired probe types the same files.
+    // MEASURED 844 on 2026-10-19: schema load plans every statement
+    // before the first DROP, and migrate refuses a schema dump before
+    // it rewrites a table. Those helpers are unseeded here.
+    // This probe has no RBS, so a new parameter read is a var. The
+    // framework-surface classes add `Arel.sql`'s bind walk,
+    // `Arel::Nodes` (`SqlLiteral`, `Quoted`, `Not`, `Case`,
+    // `NamedFunction`), `Associations::Preloader`, `Type::String`,
+    // `Type::Integer`, and `RecordNotDestroyed`. The RBS-paired
+    // runtime gate still has zero vars in those methods.
+    // Unmatched-bind checks and quoted CASE values read the same
+    // untyped parameters again.
+    // MEASURED 993 on 2026-10-19 after rebasing onto main's 844.
+    // The framework-surface classes are unseeded on this probe.
+    const CEILING: usize = 993;
     assert!(
         existing_untyped <= CEILING && like_untyped <= LIKE_CEILING,
         "{} untyped sub-expressions on spinel-blog runtime — exceeds ledger: \

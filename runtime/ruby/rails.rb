@@ -15,6 +15,9 @@
 # backend is wired.
 
 require_relative "active_support_reporters"
+require_relative "active_support_isolated_execution_state"
+require_relative "active_support_notifications"
+require_relative "active_support_configuration_file"
 
 module Rails
   class << self
