@@ -276,6 +276,8 @@ mod sidekiq_adapter;
 mod silent_lowerings;
 #[path = "emit_and_run/validates_options.rs"]
 mod validates_options;
+#[path = "emit_and_run/relation_from_aggregates.rs"]
+mod relation_from_aggregates;
 #[path = "emit_and_run/validates_lambda_conditions.rs"]
 mod validates_lambda_conditions;
 #[path = "emit_and_run/validates_format_flags.rs"]

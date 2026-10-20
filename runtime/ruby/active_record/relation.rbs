@@ -67,6 +67,9 @@ module ActiveRecord
     def from!: (String source) -> Relation
     def cte_prefix: () -> String
     def from_source: () -> String
+    def aggregate_column: (String column) -> String
+    def from_names_table?: () -> bool
+    def word_char?: (String char) -> bool
 
     # The association scope (`where_scope`) and what it presets on a
     # create (`scope_attributes`). The ivar is declared as well as the
