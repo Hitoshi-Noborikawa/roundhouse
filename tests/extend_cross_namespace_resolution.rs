@@ -38,7 +38,7 @@ mod emit_and_run;
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-use roundhouse::diagnostic::{DiagnosticKind, Severity};
+use roundhouse::diagnostic::DiagnosticKind;
 use roundhouse::ingest::ingest_app_from_tree;
 
 const BASE: &str = "module Widget\n  module Tools\n    class Base\n    end\n  end\nend\n";
@@ -53,6 +53,19 @@ module Widget
     class Probe < Base
       extend Beacon::Pinger
       prepend Beacon::Pinger
+    end
+  end
+end
+"#;
+
+/// The same mixins written rooted (`::Beacon::Pinger`): a rooted path
+/// names only the top-level module, never one nested under `Rooted`.
+const ROOTED: &str = r#"
+module Widget
+  module Tools
+    class Rooted < Base
+      extend ::Beacon::Pinger
+      prepend ::Beacon::Pinger
     end
   end
 end
@@ -99,6 +112,7 @@ fn files() -> HashMap<PathBuf, Vec<u8>> {
         ("app/models/widget/tools/base.rb", BASE),
         ("app/models/widget/tools/probe.rb", PROBE),
         ("app/models/widget/tools/switch.rb", SWITCH),
+        ("app/models/widget/tools/rooted.rb", ROOTED),
         ("lib/beacon/pinger.rb", PINGER),
         ("app/models/gadget.rb", GADGET),
     ]
@@ -118,12 +132,8 @@ fn app() -> roundhouse::App {
 #[test]
 fn analysis_alone_reports_no_error_for_the_cross_namespace_extend() {
     let app = app();
-    let errors: Vec<String> = roundhouse::analyze::diagnose(&app)
-        .into_iter()
-        .filter(|d| d.severity == Severity::Error)
-        .map(|d| d.to_string())
-        .collect();
-    assert!(errors.is_empty(), "{errors:?}");
+    let diagnostics: Vec<String> = roundhouse::analyze::diagnose(&app).into_iter().map(|d| d.to_string()).collect();
+    assert!(diagnostics.is_empty(), "{diagnostics:?}");
 }
 
 /// The real claim #1114 is about: the Ruby emitter keeps `extend`/
@@ -149,6 +159,9 @@ fn the_ruby_emitter_keeps_the_cross_namespace_extend_and_prepend() {
         .unwrap_or_else(|| panic!("no emitted probe.rb in {:?}", files.iter().map(|(p, _)| p).collect::<Vec<_>>()));
     assert!(probe_src.contains("extend Beacon::Pinger"), "{probe_src}");
     assert!(probe_src.contains("prepend Beacon::Pinger"), "{probe_src}");
+    let (_, rooted_src) = files.iter().find(|(path, _)| path.ends_with("rooted.rb")).expect("no emitted rooted.rb");
+    assert!(rooted_src.contains("extend ::Beacon::Pinger") || rooted_src.contains("extend Beacon::Pinger"), "{rooted_src}");
+    assert!(rooted_src.contains("prepend ::Beacon::Pinger") || rooted_src.contains("prepend Beacon::Pinger"), "{rooted_src}");
     let (_, switch_src) = files.iter().find(|(path, _)| path.ends_with("switch.rb")).expect("no emitted switch.rb");
     // `written_names` now resolves this `extend`'s argument too, so
     // the written, same-file-relative `Flags` is emitted as Rubydex's
@@ -162,6 +175,8 @@ fn the_ruby_emitter_keeps_the_cross_namespace_extend_and_prepend() {
 const SCRIPT: &str = r#"
 raise "extend not applied" unless Widget::Tools::Probe.pinger_configured?
 raise "prepend not applied" unless Widget::Tools::Probe.new.pinger_configured?
+raise "rooted extend not applied" unless Widget::Tools::Rooted.pinger_configured?
+raise "rooted prepend not applied" unless Widget::Tools::Rooted.new.pinger_configured?
 raise "control extend broke" unless Widget::Tools::Switch.flag_on?
 puts "cross-namespace extend/prepend contract passed"
 "#;
@@ -174,6 +189,7 @@ fn overlay() -> emit_and_run::Overlay {
         .write("app/models/widget/tools/base.rb", BASE)
         .write("app/models/widget/tools/probe.rb", PROBE)
         .write("app/models/widget/tools/switch.rb", SWITCH)
+        .write("app/models/widget/tools/rooted.rb", ROOTED)
         .write("lib/beacon/pinger.rb", PINGER)
         .write("app/models/gadget.rb", GADGET)
 }

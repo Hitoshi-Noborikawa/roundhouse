@@ -9015,11 +9015,14 @@ fn app_extension_calls<'a>(lc: &'a LibraryClass, app: &App, classes: &'a [Librar
         // fallback for an unresolved path (e.g. `extend SymbolEnum`
         // from a DSL this emitter itself expands, which never had a
         // source span `written_names` could resolve).
-        let written = path.iter().map(|s| s.as_str()).collect::<Vec<_>>().join("::");
-        let nested = format!("{}::{written}", lc.name.0.as_str());
+        // A rooted `::M` names the top-level M only: drop the empty
+        // leading segment for the lookup and skip the nested guess.
+        let rooted = path.first().is_some_and(|s| s.as_str().is_empty());
+        let written = path.iter().map(|s| s.as_str()).filter(|s| !s.is_empty()).collect::<Vec<_>>().join("::");
+        let nested = if rooted { written.clone() } else { format!("{}::{written}", lc.name.0.as_str()) };
         match NameIndex::current(app).filter(|index| index.covers(classes)) {
             Some(index) => index.library_classes.get(&written).into_iter().flatten()
-                .chain(index.library_classes.get(&nested).into_iter().flatten())
+                .chain(index.library_classes.get(&nested).into_iter().flatten().filter(|_| !rooted))
                 .copied()
                 .filter(|&j| {
                     let c = &classes[j];
