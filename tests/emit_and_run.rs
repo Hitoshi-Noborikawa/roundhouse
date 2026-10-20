@@ -278,6 +278,8 @@ mod silent_lowerings;
 mod validates_options;
 #[path = "emit_and_run/validates_lambda_conditions.rs"]
 mod validates_lambda_conditions;
+#[path = "emit_and_run/validates_format_flags.rs"]
+mod validates_format_flags;
 
 #[test]
 fn markdown_templates_render_with_their_mime_type_and_erb_escaping() {

@@ -350,10 +350,10 @@ fn model_for(model: &Model, schema: &Schema) -> String {
                                 validation.attribute
                             ));
                         }
-                        ValidationRule::Format { pattern } => {
+                        ValidationRule::Format { pattern, flags } => {
                             let body = crate::emit::shared::regex_literal::escape_regex_delimiters(pattern);
                             validate_lines.push(format!(
-                                "    validates_format /{body}/, :{}",
+                                "    validates_format /{body}/{flags}, :{}",
                                 validation.attribute
                             ));
                         }

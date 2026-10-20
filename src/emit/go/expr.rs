@@ -3452,17 +3452,45 @@ pub(super) fn emit_literal(lit: &Literal) -> String {
         Literal::Str { value } => go_str_literal(value),
         Literal::Sym { value } => go_str_literal(value.as_str()),
         Literal::Regex { pattern, flags } => {
-            // Empty flags → bare pattern (Go's `(?)` is a parse
-            // error; the `(?<flags>)` group requires at least one
-            // flag char). With flags, prepend the standard prefix.
+            // Ruby's `m` is Go `s` (dot-all); Ruby's `^`/`$` are always
+            // line anchors, so flagged `m` also needs Go `m`. Empty
+            // flags stay bare — Go's `(?)` is a parse error.
             let go_pattern = ruby_regex_to_go(pattern);
-            let full = if flags.is_empty() {
-                go_pattern
-            } else {
-                format!("(?{flags}){go_pattern}")
-            };
+            let full = crate::emit::shared::regex_literal::re2_style_regex_source(&go_pattern, flags);
             format!("regexp.MustCompile({})", go_str_literal(&full))
         }
+    }
+}
+
+#[cfg(test)]
+mod regex_flag_tests {
+    #[test]
+    fn rubys_m_keeps_line_anchors_as_well_as_dotall() {
+        assert_eq!(emit_literal(&regex("^b.c$", "m")), r#"regexp.MustCompile("(?sm)^b.c$")"#);
+    }
+
+    use super::emit_literal;
+    use crate::expr::Literal;
+
+    fn regex(pattern: &str, flags: &str) -> Literal {
+        Literal::Regex { pattern: pattern.to_string(), flags: flags.to_string() }
+    }
+
+    #[test]
+    fn empty_flags_render_a_bare_pattern_not_an_invalid_group() {
+        assert_eq!(emit_literal(&regex("a.b", "")), r#"regexp.MustCompile("a.b")"#);
+    }
+
+    #[test]
+    fn ignore_case_passes_through_as_go_i() {
+        assert_eq!(emit_literal(&regex("a.b", "i")), r#"regexp.MustCompile("(?i)a.b")"#);
+    }
+
+    #[test]
+    fn rubys_m_maps_to_gos_s_and_m() {
+        // Ruby's `m` is Go `s` (dot-all). Ruby's `^`/`$` are always
+        // line anchors, so flagged `m` also needs Go `m`.
+        assert_eq!(emit_literal(&regex("a.b", "m")), r#"regexp.MustCompile("(?sm)a.b")"#);
     }
 }
 

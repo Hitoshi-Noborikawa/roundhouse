@@ -1442,7 +1442,7 @@ end
         other => panic!("expected inclusion, got {other:?}"),
     }
     let code = rules.iter().find(|v| v.attribute.as_str() == "code").unwrap();
-    assert!(matches!(&code.rules[0], ValidationRule::Format { pattern } if pattern == r"\A[A-Z]{3}\z"));
+    assert!(matches!(&code.rules[0], ValidationRule::Format { pattern, flags } if pattern == r"\A[A-Z]{3}\z" && flags.is_empty()));
     let stock = rules.iter().find(|v| v.attribute.as_str() == "stock").unwrap();
     match &stock.rules[0] {
         ValidationRule::Inclusion { values, range: Some(range) } => {

@@ -4570,7 +4570,7 @@ pub(super) fn included_has_accessor(body: ruby_prism::Node<'_>, owner: &ClassId,
     walk_dsl_stmts(body, &mut stmts);
     super::survey::without_recording(|| {
         stmts.iter().any(|stmt| {
-            super::model::ingest_model_body_items(stmt, owner, file, Vec::new(), None)
+            super::model::ingest_model_body_items(stmt, owner, file, Vec::new(), None, &super::model::ClassConsts::default())
                 .is_ok_and(|items| items.iter().any(super::concern_accessors::is_candidate))
         })
     })
@@ -4710,7 +4710,7 @@ pub(in crate::ingest) fn ingest_concern_model_items_with_constants(
                 // today's handling as a whole.
                 if let Some((guard, stmts)) = includer_guarded_stmts(&inner, file) {
                     let parsed: Option<Vec<ModelBodyItem>> = stmts.iter().try_fold(Vec::new(), |mut acc, stmt| {
-                        let parsed = super::model::ingest_model_body_items(stmt, &id, file, Vec::new(), None).ok()?;
+                        let parsed = super::model::ingest_model_body_items(stmt, &id, file, Vec::new(), None, &super::model::ClassConsts::default()).ok()?;
                         let claimed = !parsed.is_empty()
                             && parsed.iter().all(|item| matches!(item,
                                 ModelBodyItem::Association { .. }
@@ -4783,7 +4783,7 @@ pub(in crate::ingest) fn ingest_concern_model_items_with_constants(
                 {
                     continue;
                 }
-                match super::model::ingest_model_body_items(&inner, &id, file, Vec::new(), None) {
+                match super::model::ingest_model_body_items(&inner, &id, file, Vec::new(), None, &super::model::ClassConsts::default()) {
                     Ok(parsed) => {
                         for mut item in parsed {
                             match item {

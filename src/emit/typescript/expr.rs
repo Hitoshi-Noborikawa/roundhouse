@@ -4086,17 +4086,81 @@ pub(super) fn js_literal(span: Span, lit: &Literal) -> Js {
             // string-boundary in practice (no `m` → no per-line shift),
             // matching Ruby `\A` / `\z` for the framework's use cases
             // (validates_format_of, route param matching, etc.).
+            //
+            // Ruby's `m` flag is "dot matches newline" (JS `s`), and
+            // Ruby's `^`/`$` are line anchors with or without it (JS
+            // `m`), so a flagged `m` emits both. With JS's `m` on, `^`/`$`
+            // no longer stand for Ruby's string anchors, which then
+            // become lookarounds instead.
+            let multiline = flags.contains('m');
             Js::new(
                 span,
                 JsExpr::Regex {
-                    pattern: translate_ruby_regex_anchors(pattern),
-                    flags: flags.clone(),
+                    pattern: translate_ruby_regex_anchors(pattern, multiline),
+                    flags: crate::emit::shared::regex_literal::translate_ruby_flags_for_re2_style_m(flags),
                 },
             )
         }
     }
 }
 
+#[cfg(test)]
+mod regex_flag_tests {
+    fn pattern_and_flags(pattern: &str, flags: &str) -> (String, String) {
+        let lit = Literal::Regex { pattern: pattern.to_string(), flags: flags.to_string() };
+        match *js_literal(Span::synthetic(), &lit).node {
+            super::JsExpr::Regex { pattern, flags } => (pattern, flags),
+            other => panic!("expected JsExpr::Regex, got {other:?}"),
+        }
+    }
+
+    /// Ruby's `^`/`$` are line anchors and `m` adds dot-matches-newline:
+    /// JS needs both `s` and `m`. With `m` on, JS's `^`/`$` are line
+    /// anchors, so Ruby's string anchors `\A`/`\z`/`\Z` can no longer
+    /// be spelled `^`/`$`.
+    #[test]
+    fn rubys_m_keeps_line_anchors_and_string_anchors_stay_absolute() {
+        assert_eq!(pattern_and_flags("^b.c$", "m"), ("^b.c$".to_string(), "sm".to_string()));
+        assert_eq!(
+            pattern_and_flags("\\Aa.b\\z", "m"),
+            ("(?<![\\s\\S])a.b(?![\\s\\S])".to_string(), "sm".to_string())
+        );
+        assert_eq!(pattern_and_flags("a\\Z", "im").0, "a(?=\\n?(?![\\s\\S]))");
+        // Without `m`, unchanged.
+        assert_eq!(pattern_and_flags("\\Aa\\z", ""), ("^a$".to_string(), String::new()));
+    }
+
+    use super::js_literal;
+    use crate::expr::Literal;
+    use crate::span::Span;
+
+    fn flags_of(pattern: &str, flags: &str) -> String {
+        let lit = Literal::Regex { pattern: pattern.to_string(), flags: flags.to_string() };
+        match *js_literal(Span::synthetic(), &lit).node {
+            super::JsExpr::Regex { flags, .. } => flags,
+            other => panic!("expected JsExpr::Regex, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn ignore_case_passes_through_as_js_i() {
+        assert_eq!(flags_of("a.b", "i"), "i");
+    }
+
+    #[test]
+    fn rubys_m_maps_to_js_s_and_m() {
+        // Ruby's `m` is JS `s` (dot-all). Ruby's `^`/`$` are always
+        // line anchors, so flagged `m` also needs JS `m`. Absolute
+        // anchors `\A`/`\z`/`\Z` then use lookarounds — covered by
+        // `rubys_m_keeps_line_anchors_and_string_anchors_stay_absolute`.
+        assert_eq!(flags_of("a.b", "m"), "sm");
+    }
+
+    #[test]
+    fn ignore_case_and_dot_matches_newline_combine() {
+        assert_eq!(flags_of("a.b", "im"), "ism");
+    }
+}
 
 /// Classify a `gsub` pattern into the JS pattern expression and the
 /// method name (`replace` vs `replaceAll`).
@@ -4131,16 +4195,18 @@ fn gsub_pattern_and_method(pat: &Expr) -> (Js, &'static str) {
         value: Literal::Regex { pattern, flags },
     } = &*pat.node
     {
-        let new_flags = if flags.contains('g') {
-            flags.clone()
+        // Same translation as a plain regex literal (`js_literal`), plus `g`.
+        let js_flags = crate::emit::shared::regex_literal::translate_ruby_flags_for_re2_style_m(flags);
+        let new_flags = if js_flags.contains('g') {
+            js_flags
         } else {
-            format!("{flags}g")
+            format!("{js_flags}g")
         };
         return (
             Js::new(
                 pat.span,
                 JsExpr::Regex {
-                    pattern: translate_ruby_regex_anchors(pattern),
+                    pattern: translate_ruby_regex_anchors(pattern, flags.contains('m')),
                     flags: new_flags,
                 },
             ),
@@ -4197,14 +4263,22 @@ fn gsub_pattern_and_method(pat: &Expr) -> (Js, &'static str) {
 /// backslash followed by `A`/`z`/`Z` doesn't get clobbered.
 /// Strict-end `\Z` differs from `\z` only in trailing-newline
 /// handling — close enough to `$` for these targets.
-fn translate_ruby_regex_anchors(pattern: &str) -> String {
+fn translate_ruby_regex_anchors(pattern: &str, multiline: bool) -> String {
     let mut out = String::with_capacity(pattern.len());
     let mut chars = pattern.chars().peekable();
     while let Some(c) = chars.next() {
         if c == '\\' {
             match chars.peek() {
                 Some('A') => {
-                    out.push('^');
+                    out.push_str(if multiline { "(?<![\\s\\S])" } else { "^" });
+                    chars.next();
+                }
+                Some('z') if multiline => {
+                    out.push_str("(?![\\s\\S])");
+                    chars.next();
+                }
+                Some('Z') if multiline => {
+                    out.push_str("(?=\\n?(?![\\s\\S]))");
                     chars.next();
                 }
                 Some('z') | Some('Z') => {
