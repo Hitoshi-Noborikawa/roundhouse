@@ -122,18 +122,25 @@ fn files() -> HashMap<PathBuf, Vec<u8>> {
 }
 
 fn app() -> roundhouse::App {
+    analyzed().0
+}
+
+/// The app plus the diagnostics `analyze_and_lower` itself returns.
+fn analyzed() -> (roundhouse::App, Vec<roundhouse::diagnostic::Diagnostic>) {
     let mut app = ingest_app_from_tree(files()).expect("ingest tree");
-    roundhouse::session::analyze_and_lower(&mut app);
-    app
+    let lowered = roundhouse::session::analyze_and_lower(&mut app);
+    (app, lowered)
 }
 
 /// `check`/`--survey`'s diagnostic side is silent either way — #1114's
 /// own point is that this check alone proves nothing about the emit.
 #[test]
 fn analysis_alone_reports_no_error_for_the_cross_namespace_extend() {
-    let app = app();
+    let (app, lowered) = analyzed();
+    let lowered: Vec<String> = lowered.into_iter().map(|d| d.to_string()).collect();
+    assert!(lowered.is_empty(), "analyze_and_lower: {lowered:?}");
     let diagnostics: Vec<String> = roundhouse::analyze::diagnose(&app).into_iter().map(|d| d.to_string()).collect();
-    assert!(diagnostics.is_empty(), "{diagnostics:?}");
+    assert!(diagnostics.is_empty(), "diagnose: {diagnostics:?}");
 }
 
 /// The real claim #1114 is about: the Ruby emitter keeps `extend`/
