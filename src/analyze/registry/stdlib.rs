@@ -142,15 +142,15 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
     // it). `Time - x` arithmetic still resolves to `Untyped` inside
     // `time_method` because receiver-only dispatch can't tell a
     // Duration arg (→ Time) from a Time arg (→ Float).
-    let time_ty = || Ty::Class {
-        id: ClassId(Symbol::from("Time")),
-        args: vec![].into(),
-    };
+    let time_ty = || Ty::Time;
     let mut time_cls = ClassInfo::default();
     time_cls.class_methods.insert(Symbol::from("current"), time_ty());
     time_cls.class_methods.insert(Symbol::from("now"), time_ty());
-    time_cls.class_methods.insert(Symbol::from("zone"), time_ty());
     time_cls.class_methods.insert(Symbol::from("at"), time_ty());
+    time_cls.class_methods.insert(Symbol::from("zone"), Ty::Class {
+        id: ClassId(Symbol::from("Time")),
+        args: vec![].into(),
+    });
     time_cls.class_methods.insert(Symbol::from("find_zone"), Ty::Union {
         variants: vec![
             Ty::Class { id: ClassId(Symbol::from("ActiveSupport::TimeZone")), args: vec![].into() },
