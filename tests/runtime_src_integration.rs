@@ -1115,10 +1115,62 @@ fn every_runtime_method_body_concretely_typed() {
     // `inertia_exec` (no separate `inertia_prop_json` read), and
     // `instance_exec` is abstract instead of a `super` wrapper. Session
     // flag reads are not gradual sites. The four sites stay.
-    const CEILING: usize = 798;
+    // MEASURED 777 on the 793 base: ErrorReporter no longer keeps a second
+    // `deep_dup`. `ActiveSupport.deep_dup` is that walk, including the
+    // non-duplicable leaf (Method, UnboundMethod, Singleton, and
+    // `duplicable?` answering false). The reporter method's 26 sites
+    // leave; the shared method grows by that leaf (22 -> 32).
+    // MEASURED 776 on that base: `query_pairs` reads an untyped Hash
+    // key's `to_s` once. The name uses that String in both arms.
+    // MEASURED 774 on that base: `ParameterFilter#value_for_key` reads
+    // its untyped key's `to_s` once. The dotted path and the regexp
+    // both use that String (776 -> 774).
+    // MEASURED 779 on 2026-10-19 after merging main's 798: the shared
+    // `deep_dup` and the two `to_s` binds still remove the same 19
+    // sites (798 -> 779).
+    // MEASURED 776 on 2026-10-19: `deliver` asks once whether the
+    // event name is a String or a Symbol. `resolve_payload` uses that
+    // bool, so the second pair of `is_a?` reads is gone (779 -> 776).
+    // MEASURED 772 on 2026-10-19: `deep_dup` asks a Hash key's class
+    // once and defers every other key. The second pass no longer
+    // repeats that `is_a?` pair (776 -> 772).
+    // MEASURED 776 on 2026-10-19 after merging main's 772.
+    // `ActiveRecord::Tasks` yields the connection (or nothing) to the
+    // caller's block. A `yield` outside a view is untyped, the same
+    // block-return escape `transaction` carries (+4 in
+    // active_record/tasks.rb: `with_connection`,
+    // `with_temporary_connection`, and `with_temporary_pool`'s yield
+    // plus the begin that answers it).
+    // MEASURED 778 on 2026-10-19: `RecordNotDestroyed#initialize` takes
+    // the record the caller passed, whatever model it is, and forwards
+    // the message through `super`, the same two gradual sites
+    // `RecordNotSaved#initialize` already carries (+2 in
+    // active_record/errors.rb, 776 -> 778).
+    // MEASURED 781 on 2026-10-19: `Associations::Preloader` keeps the
+    // association spec the caller passed (a Symbol, an Array, or a
+    // Hash) and hands it to `Preloading.records`. The parameter, the
+    // ivar, and the read in `call` are that spec (+3 in
+    // active_record/preloading.rb, 778 -> 781).
+    // MEASURED 791 on 2026-10-19: `Type::String` and `Type::Integer`
+    // read the value the caller passed, whatever it is (+10 in
+    // active_record/types.rb, 781 -> 791).
+    // MEASURED 815 on 2026-10-19: `Notifications` fans a callback and a
+    // payload out (+23 in active_support_notifications.rb).
+    // `IsolatedExecutionState` reads the thread-local slot (+1, 791 -> 815).
+    // MEASURED 819 on 2026-10-19: `Continuable#step` answers the block
+    // (+4 in active_job.rb, 815 -> 819).
+    // MEASURED 825 on 2026-10-19: `Notifications.sql` is the statement
+    // `Db.record_query` hands it, and `Event` keeps the span
+    // `instrument` computed so `duration` is milliseconds (+6 in
+    // active_support_notifications.rb, 819 -> 825).
+    // MEASURED 834 on 2026-10-19: the per-thread SQL guard, the
+    // one-argument SQL event, and the blank/unsupported integer cast
+    // read those same gradual values (825 -> 834).
+    // Remeasured 834 on 2026-10-19 after rebasing onto main.
+    const CEILING: usize = 834;
     assert!(
         total_gradual <= CEILING,
-        "{total_gradual} Ty::Untyped sites exceeds ceiling of {CEILING}",
+        "{total_gradual} Ty::Untyped sites exceeds ceiling of {CEILING}"
     );
 }
 

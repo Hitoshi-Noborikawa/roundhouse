@@ -43,6 +43,13 @@ fn owner(d: &Diagnostic) -> &str {
     }
 }
 
+fn holder(d: &Diagnostic) -> &str {
+    match &d.kind {
+        DiagnosticKind::UnconsumedInitializer { holder, .. } => holder.as_str(),
+        _ => unreachable!(),
+    }
+}
+
 fn location(d: &Diagnostic) -> &str {
     match &d.kind {
         DiagnosticKind::UnconsumedInitializer { location, .. } => location.as_str(),
@@ -365,6 +372,7 @@ fn the_ledger_is_a_warning_and_never_a_survey_gap() {
     let summary = roundhouse::ingest::initializer_ledger::render_summary(&diags);
     assert!(summary.contains("Initializer ledger: 1 unconsumed statement(s)"), "{summary}");
     assert!(summary.contains("[1×] c.a ="), "{summary}");
+    assert!(summary.contains("by owner: unknown 1"), "{summary}");
 }
 
 #[test]
@@ -457,4 +465,72 @@ fn a_statement_the_ledger_calls_consumed_has_its_recognizers_effect_on_the_app()
             && names.contains(&"action_cable_allow_same_origin_as_host"),
         "{names:?}"
     );
+}
+
+const HOLDER_LOCK: &str = "GEM\n  remote: https://rubygems.org/\n  specs:\n    devise (4.9.4)\n    doorkeeper (5.8.0)\n    lograge (0.14.0)\n    omniauth (2.1.2)\n    rack (3.1.8)\n    rack-attack (6.7.0)\n    railties (8.0.1)\n\nDEPENDENCIES\n  devise\n  doorkeeper\n  lograge\n  omniauth\n  rack-attack\n  railties\n";
+
+#[test]
+fn each_dropped_statement_names_who_it_belongs_to() {
+    let (_, ledger) = ingest(&[
+        ("Gemfile.lock", HOLDER_LOCK),
+        ("app/models/audit.rb", "class Audit
+  def self.record_boot; end
+end
+"),
+        (
+            "config/initializers/boot.rb",
+            "Rails.application.config.middleware.use Rack::Deflater
+             Rails.application.config.assets.paths << \"vendor\"
+             Rails.autoloaders.main.ignore(\"lib/tasks\")
+             Devise.setup do |config|
+  config.password_length = 8..128
+end
+             Doorkeeper.configure do
+  orm :active_record
+end
+             Rack::Attack.throttle(\"req/ip\", limit: 300, period: 300) { |req| req.ip }
+             OmniAuth.config.logger = Rails.logger
+             Audit.record_boot
+             Rails.application.config.after_initialize { Audit.record_boot }
+             if ENV[\"SLOW\"]
+  Rails.application.config.middleware.insert_before 0, Rack::Runtime
+end
+             Unheard::Of.start
+",
+        ),
+    ]);
+    let got: Vec<(&str, &str)> = ledger.iter().map(|d| (statement(d), holder(d))).collect();
+    assert_eq!(
+        got,
+        [
+            ("Rails.application.config.middleware.use", "rails"),
+            ("Rails.application.config.assets.paths.<<", "rails-boot-only"),
+            ("Rails.autoloaders.main.ignore", "rails-boot-only"),
+            ("config.password_length =", "gem:devise:modeled"),
+            ("orm :active_record", "gem:doorkeeper:unknown"),
+            ("Rack::Attack.throttle", "gem:rack-attack:unknown"),
+            ("OmniAuth.config.logger =", "gem:omniauth:unknown"),
+            ("Audit.record_boot", "app"),
+            ("Rails.application.config.after_initialize", "app"),
+            ("if ENV[\"SLOW\"]", "rails"),
+            ("Unheard::Of.start", "unknown"),
+        ]
+    );
+    let middleware = &ledger[0];
+    assert_eq!(middleware.severity, Severity::Warning);
+    assert!(middleware.message.ends_with("it is Rails behaviour the running app answers without"), "{}", middleware.message);
+    assert!(ledger[5].message.ends_with("it belongs to the gem `rack-attack` (unknown)"), "{}", ledger[5].message);
+}
+
+#[test]
+fn a_rooted_configure_block_and_an_in_repo_gem_keep_their_gems() {
+    let (_, ledger) = ingest(&[
+        ("Gemfile.lock", "PATH\n  remote: vendor/catalog\n  specs:\n    catalog (0.1.0)\n\nGEM\n  remote: https://rubygems.org/\n  specs:\n    devise (4.9.4)\n\nDEPENDENCIES\n  catalog!\n  devise\n"),
+        (
+            "config/initializers/boot.rb",
+            "::Devise.setup do |config|\n  config.password_length = 8..128\nend\nCatalog.configure do |c|\n  c.size = 3\nend\n",
+        ),
+    ]);
+    let got: Vec<(&str, &str)> = ledger.iter().map(|d| (statement(d), holder(d))).collect();
+    assert_eq!(got, [("config.password_length =", "gem:devise:modeled"), ("c.size =", "gem:catalog:in-repo")]);
 }

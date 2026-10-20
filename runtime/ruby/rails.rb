@@ -15,6 +15,9 @@
 # backend is wired.
 
 require_relative "active_support_reporters"
+require_relative "active_support_isolated_execution_state"
+require_relative "active_support_notifications"
+require_relative "active_support_configuration_file"
 
 module Rails
   class << self
@@ -460,6 +463,10 @@ module Rails
     # disagreement clears the session on every request.
     def session_cookie_key
       "_session"
+    end
+
+    def propshaft_asset_path(source)
+      "/assets/#{source}"
     end
 
     # `config.action_controller.forgery_protection_verification_strategy`,

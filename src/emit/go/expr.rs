@@ -529,23 +529,50 @@ pub(super) fn emit_expr(ctx: &EmitCtx, e: &Expr) -> String {
                  }}()",
             )
         }
-        // A standalone zero-param lambda ARGUMENT (`-> { <expr> }` —
-        // the broadcast lowerings pass their render this way, the
-        // `ActiveJob.enqueue` contract) → a Go closure. The return
-        // type comes from the lambda's inferred `Ty::Fn` (`string` for
-        // the render wrap); an untyped or parameterized lambda keeps
-        // the unsupported report — Go param types have nowhere honest
-        // to come from at this site.
-        ExprNode::Lambda { params, body, .. }
-            if params.is_empty()
+        // A lambda whose `Ty::Fn` names a concrete parameter and return
+        // type becomes a Go function. That is where a stored lambda's
+        // `.call` sites put the parameter types. A lambda with parameters
+        // and no such type stays unsupported: Go has nowhere else to
+        // read them. Zero-parameter lambdas keep the return type alone,
+        // including the broadcast / `ActiveJob.enqueue` shape.
+        ExprNode::Lambda { params, extra_params, rest_param, block_param, body, .. }
+            if extra_params.is_empty()
+                && rest_param.is_none()
+                && block_param.is_none()
                 && matches!(e.ty.as_ref(), Some(Ty::Fn { .. })) =>
         {
-            let Some(Ty::Fn { ret, .. }) = e.ty.as_ref() else { unreachable!() };
-            let ret_s = super::ty::go_ty(ret);
-            format!(
-                "func() {ret_s} {{\n\treturn {}\n}}",
-                emit_expr(&ctx.enter_scope(), body)
-            )
+            let Some(Ty::Fn { params: sig, ret, .. }) = e.ty.as_ref() else { unreachable!() };
+            let concrete = |t: &Ty| !matches!(t, Ty::Var { .. } | Ty::Untyped);
+            let typed_params = params.len() == sig.len()
+                && sig.iter().zip(params.iter()).all(|(p, name)| p.name == *name && concrete(&p.ty))
+                && concrete(ret);
+            if params.is_empty() || typed_params {
+                let ret_s = super::ty::go_ty(ret);
+                let formals = if params.is_empty() {
+                    String::new()
+                } else {
+                    sig.iter()
+                        .map(|p| format!("{} {}", super::library::sanitize(p.name.as_str()), super::ty::go_ty(&p.ty)))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                };
+                if params.is_empty() {
+                    format!(
+                        "func({formals}) {ret_s} {{\n\treturn {}\n}}",
+                        emit_expr(&ctx.enter_scope(), body)
+                    )
+                } else {
+                    let mut body_ctx = ctx.enter_scope();
+                    body_ctx.return_ty = Some((**ret).clone());
+                    for name in params {
+                        body_ctx.declare_param(name.as_str());
+                    }
+                    let body_s = emit_return_body(&body_ctx, body);
+                    format!("func({formals}) {ret_s} {{\n{body_s}}}")
+                }
+            } else {
+                crate::emit::diagnostics::report_unsupported(e.span, "go2", "Lambda", "")
+            }
         }
         ExprNode::Cast { value, target_ty } => emit_cast(ctx, value, target_ty),
         ExprNode::Case { scrutinee, arms } => emit_case(ctx, scrutinee, arms, e.ty.as_ref()),
@@ -652,7 +679,7 @@ fn emit_case(
 /// invisible to surrounding code.
 fn try_string_builder(ctx: &EmitCtx, e: &Expr) -> Option<String> {
     use crate::expr::LValue;
-    match e.hint? {
+    match e.hint().as_ref()? {
         IrHint::MutableStringLiteral => None, // emitted as the plain literal
         IrHint::StringBuilderInit => {
             if let ExprNode::Assign {
@@ -756,6 +783,10 @@ pub(super) fn emit_send(
     block: Option<&Expr>,
     result_ty: Option<&Ty>,
 ) -> String {
+    if let Some(recv) = crate::emit::shared::fn_call::function_receiver(recv, method, block) {
+        let args_s: Vec<String> = args.iter().map(|a| emit_expr(ctx, a)).collect();
+        return format!("{}({})", emit_expr(ctx, recv), args_s.join(", "));
+    }
     // Render kwarg expansion peephole. Ruby `render body,
     // content_type: "json"` lowers to a Send with args
     // `[body, Hash{content_type: ...}]`. The promoted

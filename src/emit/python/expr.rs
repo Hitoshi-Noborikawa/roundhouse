@@ -390,7 +390,7 @@ fn try_emit_raise_stmt(e: &Expr) -> Option<String> {
 /// form for Init/Append; Result is expr-position (the function's return
 /// tail) and is handled in `emit_expr`.
 fn try_string_builder_stmt(e: &Expr) -> Option<String> {
-    match e.hint? {
+    match e.hint().as_ref()? {
         IrHint::MutableStringLiteral => None, // emitted as the plain literal
         IrHint::StringBuilderInit => {
             if let ExprNode::Assign { target: LValue::Var { name, .. }, .. } = &*e.node {
@@ -814,14 +814,14 @@ pub(super) fn emit_expr(e: &Expr) -> String {
     // (e.g., Incompatible `+`). If so, emit the target raise-
     // equivalent instead of the normal rendering — matches Ruby's
     // behavior of raising at runtime.
-    if let Some(kind) = &e.diagnostic {
+    if let Some(kind) = &e.diagnostic() {
         return crate::emit::diagnostics::StubStyle::PythonThrow
             .render(&crate::diagnostic::Diagnostic::stub_text(kind));
     }
     // String-accumulator hints in expression position: an Append inside a
     // lambda (the partial collection-render shape) and the terminal Result
     // read at the function's return tail.
-    match e.hint {
+    match e.hint() {
         Some(IrHint::StringBuilderAppend) => {
             if let Some(s) = string_builder_append(e) {
                 return s;
@@ -1008,6 +1008,10 @@ pub(super) fn emit_expr(e: &Expr) -> String {
 }
 
 pub(super) fn emit_send(recv: Option<&Expr>, method: &str, args: &[Expr], parenthesized: bool) -> String {
+    if let Some(recv) = crate::emit::shared::fn_call::function_receiver(recv, method, None) {
+        let args_s: Vec<String> = args.iter().map(emit_expr).collect();
+        return format!("{}({})", emit_expr(recv), args_s.join(", "));
+    }
     // Index / slice. Handle before computing `args_s`: a Range arg
     // (`x[a..b]`) must be destructured into slice syntax, and the eager
     // `args_s` below would emit the Range node — firing a degrade — as a

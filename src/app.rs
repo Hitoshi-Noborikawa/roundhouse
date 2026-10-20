@@ -184,7 +184,9 @@ pub struct App {
     /// file's content is a `String`, so an app's images, fonts and
     /// binary test fixtures were silently dropped on the floor. Carried
     /// as `(relative path, bytes)` and copied VERBATIM into the emitted
-    /// tree; there is nothing to transpile in a JPEG.
+    /// tree; there is nothing to transpile in a JPEG. Compiled Propshaft
+    /// assets use the same byte channel so binary and text assets are
+    /// copied together.
     ///
     /// `serde(skip)`: these are a passthrough concern, not IR. The app
     /// JSON round-trip feeds the analyzer and the browser IDE, and
@@ -387,6 +389,13 @@ pub struct App {
     /// NameError at boot.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub module_mixins: Vec<ModuleMixin>,
+    /// Generated body of `runtime/active_record/app_rake_tasks.rb` when
+    /// `lib/tasks` prepends onto `ActiveRecord::Tasks::DatabaseTasks`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rake_tasks_source: Option<String>,
+    /// Why a `.rake` file was not installed. The sentence is the warning.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub rake_task_gaps: Vec<String>,
     /// `X.before_action :m[, only: …]` registered by a
     /// `config/initializers/` file — the mixin's companion: an app
     /// that mixes a guard INTO a framework controller also has to
@@ -947,6 +956,8 @@ impl App {
             html_safe_method_owners: BTreeSet::new(),
             time_formats: BTreeMap::new(),
             module_mixins: Vec::new(),
+            rake_tasks_source: None,
+            rake_task_gaps: Vec::new(),
             initializer_filters: Vec::new(),
             collection_cache_store: None,
             app_requires: Vec::new(),

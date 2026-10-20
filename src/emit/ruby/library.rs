@@ -26,9 +26,6 @@ pub(super) fn preserve_record_receiver_returns(lcs: &mut [LibraryClass], app: &A
     let templates = crate::runtime_src::parse_methods(
         "def reload(options = nil)\n  super(options)\n  self\nend\ndef lock!(lock = true)\n  super(lock)\n  self\nend\n",
     ).expect("receiver-return forwarders parse");
-    let classes: HashMap<ClassId, ()> = app.models.iter().map(|m| &m.name)
-        .chain(app.library_classes.iter().map(|lc| &lc.name))
-        .map(|id| (id.clone(), ())).collect();
     for lc in lcs {
         if !app.models.iter().any(|m| m.name == lc.name && app.schema.tables.contains_key(&m.table.0)) {
             continue;
@@ -36,7 +33,7 @@ pub(super) fn preserve_record_receiver_returns(lcs: &mut [LibraryClass], app: &A
         let self_ty = Ty::Class { id: lc.name.clone(), args: vec![].into() };
         for template in &templates {
             if lc.methods.iter().any(|m| m.name == template.name && m.receiver == MethodReceiver::Instance)
-                || record_return_overridden(app, &classes, &lc.name, template.name.as_str())
+                || record_return_overridden(app, &lc.name, template.name.as_str())
             {
                 continue;
             }
@@ -67,41 +64,10 @@ pub(super) fn preserve_record_receiver_returns(lcs: &mut [LibraryClass], app: &A
 
 /// Source overrides, including those on ApplicationRecord or a mixin,
 /// may return a different object. Do not interpose a self-returning wrapper.
-fn record_return_overridden(app: &App, classes: &HashMap<ClassId, ()>, class: &ClassId, method: &str) -> bool {
-    let mut pending = vec![class.clone()];
-    let mut seen = BTreeSet::new();
-    while let Some(id) = pending.pop() {
-        if !seen.insert(id.clone()) { continue; }
-        // Per-file ingest can retain a relative include. Resolve it in
-        // its owner's scope before looking for the concern's override.
-        let resolve = |written: &ClassId| crate::analyze::lexical_class(written, id.0.as_str(), classes)
-            .unwrap_or_else(|| written.clone());
-        let relevant = |m: &MethodDef| m.receiver == MethodReceiver::Instance
-            && (m.name.as_str() == method || (method == "lock!" && m.name.as_str() == "reload"));
-        if let Some(model) = app.models.iter().find(|m| m.name == id) {
-            if model.methods().any(relevant) { return true; }
-            // Parents are written relative to the subclass (`< Base` inside
-            // `module Admin`); resolve them the same way includes already are.
-            pending.extend(model.parent.iter().map(resolve));
-            for item in &model.body {
-                let crate::dialect::ModelBodyItem::Unknown { expr, .. } = item else { continue };
-                let ExprNode::Send { recv: None, method, args, .. } = &*expr.node else { continue };
-                if method.as_str() != "include" { continue; }
-                for arg in args {
-                    if let ExprNode::Const { path } = &*arg.node {
-                        let written = ClassId(Symbol::from(path.iter().map(Symbol::as_str).collect::<Vec<_>>().join("::")));
-                        pending.push(resolve(&written));
-                    }
-                }
-            }
-        }
-        if let Some(lc) = app.library_classes.iter().find(|lc| lc.name == id) {
-            if lc.methods.iter().any(relevant) { return true; }
-            pending.extend(lc.parent.iter().map(resolve));
-            pending.extend(lc.includes.iter().map(resolve));
-        }
-    }
-    false
+/// `lock!` calls `reload`, so an override of either one answers the source.
+fn record_return_overridden(app: &App, class: &ClassId, method: &str) -> bool {
+    crate::analyze::source_instance_method(app, class, method)
+        || (method == "lock!" && crate::analyze::source_instance_method(app, class, "reload"))
 }
 
 /// Lower library classes for Ruby and emit their source/RBS file pairs, grouping
@@ -3639,8 +3605,8 @@ fn is_view_helpers_const(e: &Expr) -> bool {
 /// could mutate it; the three below all interpolate into a new String.
 ///
 /// `stylesheet_link_tag` / `javascript_include_tag` map a literal name to
-/// an undigested `/assets/` path (the `image_path` note explains why no
-/// digests), so they are pure over their literals the way `image_tag`
+/// a path through the immutable emitted asset table, so they are pure
+/// over their literals the way `image_tag`
 /// is; `javascript_importmap_tags` is pure over the importmap table,
 /// which is the one non-literal argument this list admits (see
 /// `HOISTABLE_CONST_READERS`). campfire's layout pays all three on every
@@ -7606,6 +7572,14 @@ fn emit_library_class_decl_inner(
         .iter()
         .filter(|call| call.decisions & crate::expr::REPLAYED_CLASS_BODY != 0 && !call.span.is_synthetic())
         .collect();
+    // Kept out of `replayed_in_place`: that list is what turns on
+    // source-ordered bodies, and a constant write must not move includes
+    // or a gem DSL. The call is span-sorted into the constant list below.
+    let constant_calls: Vec<&Expr> = lc
+        .unknown_calls
+        .iter()
+        .filter(|call| !call.span.is_synthetic() && constant_defining_class_call(app, classes, lc, call))
+        .collect();
     let ordered_body = (lc.origin.is_none() || lc.data_define().is_some())
         && (lc.has_source_ivar_initializers() || !replayed_in_place.is_empty())
         && !app.controllers.iter().any(|controller| controller.name == lc.name);
@@ -7620,9 +7594,9 @@ fn emit_library_class_decl_inner(
     // project-root-anchored paths; we relpath each one against `out_dir`
     // so emit works correctly from any output directory.
     let mut requires: Vec<String> = Vec::new();
+    // Ingest stored the parent as Rubydex resolved it.
     if let Some(parent) = lc.parent.as_ref() {
-        let parent = lexical_parent(name, parent, app, classes);
-        if let Some(anchor) = require_path_for_parent(&parent, app, classes) {
+        if let Some(anchor) = require_path_for_parent(parent, app, classes) {
             if anchor != self_anchor {
                 requires.push(relpath(&out_dir, &anchor));
             }
@@ -7747,6 +7721,8 @@ fn emit_library_class_decl_inner(
     enum BodyItem<'a> {
         Constant(usize, &'a Expr),
         Initializer(&'a Expr),
+        Call(&'a Expr),
+        Include(&'a ClassId),
         Method(&'a MethodDef),
     }
     let mut body: Vec<_> = eager.iter().map(|&i| {
@@ -7767,6 +7743,9 @@ fn emit_library_class_decl_inner(
     if ordered_body {
         body.extend(replayed_in_place.iter().map(|call| (call.span.start, BodyItem::Initializer(call))));
     }
+    body.extend(constant_calls.iter().filter(|call| {
+        !(ordered_body && replayed_in_place.iter().any(|kept| std::ptr::eq(*kept, **call)))
+    }).map(|call| (call.span.start, BodyItem::Call(call))));
     // Concern-spliced and other foreign-file methods keep foreign
     // `name_span` offsets; interleave only same-file declarations.
     let body_file = lc.class_ivar_initializers.iter().find_map(|init| {
@@ -7777,7 +7756,25 @@ fn emit_library_class_decl_inner(
                     | ExprNode::OpAssign { target: LValue::Ivar { .. }, .. }
             ))
         .then_some(init.span.file)
-    }).or_else(|| replayed_in_place.first().map(|call| call.span.file));
+    }).or_else(|| replayed_in_place.first().map(|call| call.span.file))
+        .or_else(|| constant_calls.first().map(|call| call.span.file));
+    let same_file_method = |m: &MethodDef| {
+        !ordered_body
+            && !constant_calls.is_empty()
+            && !m.name_span.is_synthetic()
+            && constant_calls.first().is_some_and(|call| m.name_span.file == call.span.file)
+    };
+    let mut positioned: Vec<(usize, &ClassId)> = Vec::new();
+    if !ordered_body {
+        for inc in &lc.includes {
+            let floor = positioned.last().map(|(at, _)| *at);
+            if let Some(at) = hooked_include_position(lc, inc, app, classes).max(floor) {
+                positioned.push((at, inc));
+            }
+        }
+    }
+    let (moved_methods, moved_includes) =
+        methods_traveling_with_constant_call(lc, &positioned, same_file_method);
     let method_in_ordered_body = |m: &MethodDef| {
         ordered_body
             && !m.name_span.is_synthetic()
@@ -7790,6 +7787,13 @@ fn emit_library_class_decl_inner(
                 .filter(|m| method_in_ordered_body(m))
                 .map(|m| (m.name_span.start, BodyItem::Method(m))),
         );
+    }
+    for (slot, start) in &moved_includes {
+        body.push((*start, BodyItem::Include(positioned[*slot].1)));
+    }
+    for index in &moved_methods {
+        let method = &lc.methods[*index];
+        body.push((method.name_span.start, BodyItem::Method(method)));
     }
     body.sort_by_key(|(start, _)| *start);
     // Every require the file needs at its TOP: the class-body calls and
@@ -7837,8 +7841,10 @@ fn emit_library_class_decl_inner(
     // load-time code reads one of the constants above it.
     let per_body: Vec<BTreeSet<String>> =
         body.iter().map(|(_, item)| match item {
-            BodyItem::Constant(_, expr) | BodyItem::Initializer(expr) => resolve_all(expr, true),
-            BodyItem::Method(_) => BTreeSet::new(),
+            BodyItem::Constant(_, expr) | BodyItem::Initializer(expr) | BodyItem::Call(expr) => {
+                resolve_all(expr, true)
+            }
+            BodyItem::Method(_) | BodyItem::Include(_) => BTreeSet::new(),
         }).collect();
     let readers = constant_readers(lc, app, classes, &resolve);
     let mut splits = std::collections::BTreeMap::new();
@@ -8037,15 +8043,6 @@ fn emit_library_class_decl_inner(
     // earlier than it, so the includes keep their source order, and with
     // it the class's ancestors. An ordered body interleaves its methods
     // with ivar writes and keeps every include first.
-    let mut positioned: Vec<(usize, &ClassId)> = Vec::new();
-    if !ordered_body {
-        for inc in &lc.includes {
-            let floor = positioned.last().map(|(at, _)| *at);
-            if let Some(at) = hooked_include_position(lc, inc, app, classes).max(floor) {
-                positioned.push((at, inc));
-            }
-        }
-    }
     for inc in &lc.includes {
         if positioned.iter().any(|(_, p)| *p == inc) {
             continue;
@@ -8112,6 +8109,12 @@ fn emit_library_class_decl_inner(
         for (_, item) in items {
             match item {
                 BodyItem::Constant(i, _) => render_constants(s, &[*i]),
+                BodyItem::Call(expr) => {
+                    nested.borrow_mut().write_expr(s, depth, lc, expr);
+                    for line in super::emit_expr(&top_level(expr)).lines() {
+                        writeln!(s, "{body_pad}{line}").unwrap();
+                    }
+                }
                 BodyItem::Initializer(expr) if ordered_body => {
                     nested.borrow_mut().write_expr(s, depth, lc, expr);
                     for line in super::emit_expr(&top_level(expr)).lines() {
@@ -8121,6 +8124,10 @@ fn emit_library_class_decl_inner(
                 // Keep initialization in the require plan even when the
                 // lowered class renders it after its methods below.
                 BodyItem::Initializer(_) => {}
+                BodyItem::Include(inc) => {
+                    nested.borrow_mut().write_include(s, depth, lc, inc);
+                    writeln!(s, "{body_pad}{}", include_line(inc)).unwrap();
+                }
                 BodyItem::Method(method) => {
                     writeln!(s).unwrap();
                     render_method(s, method);
@@ -8175,28 +8182,35 @@ fn emit_library_class_decl_inner(
     // after it (`app_extension_calls`); every other call stays dropped.
     // Preserved external-gem `include`s are emitted separately and filtered
     // out of both the foreign replay list and the dropped-call reports.
+    let in_body = |call: &&Expr| {
+        constant_calls.iter().any(|kept| std::ptr::eq(*kept, *call))
+            || (ordered_body && replayed_in_place.iter().any(|kept| std::ptr::eq(*kept, *call)))
+    };
     let replayed: Vec<&Expr> = if replays_foreign_class_body(lc, app, classes) {
         lc.unknown_calls
             .iter()
-            .filter(|call| !is_preserved_external_include(call))
+            .filter(|call| !is_preserved_external_include(call) && !in_body(call))
             .collect()
     } else {
         let own = app_extension_calls(lc, app, classes);
+        let mut replayed = own.clone();
+        replayed.retain(|call| !in_body(call));
         for call in &lc.unknown_calls {
             // A payload job's `queue_as` and `discard_on
             // ActiveJob::DeserializationError` are not dropped: the plan
             // carries them (`lower::job_payload`).
-            if call.decisions & crate::expr::REPLAYED_CLASS_BODY != 0 && ordered_body {
+            if in_body(&call) {
                 continue;
             }
-            if !own.iter().any(|c| std::ptr::eq(*c, call))
-                && !is_preserved_external_include(call)
-                && !crate::lower::job_payload::modelled_class_body_call(app, lc, call)
-            {
-                report_dropped_class_body_call(lc, call);
+            let listed = own.iter().any(|c| std::ptr::eq(*c, call))
+                || is_preserved_external_include(call)
+                || crate::lower::job_payload::modelled_class_body_call(app, lc, call);
+            if listed {
+                continue;
             }
+            report_dropped_class_body_call(lc, call);
         }
-        own
+        replayed
     };
     for call in &replayed {
         nested.borrow_mut().write_expr(&mut s, depth, lc, call);
@@ -8222,14 +8236,23 @@ fn emit_library_class_decl_inner(
                 writeln!(s).unwrap();
             }
             first = false;
-            for (_, inc) in positioned.iter().filter(|(at, _)| *at == index) {
+            for (slot, (_, inc)) in positioned.iter().enumerate().filter(|(_, (at, _))| *at == index) {
+                if moved_includes.iter().any(|(moved, _)| *moved == slot) {
+                    continue;
+                }
                 nested.borrow_mut().write_include(&mut s, depth, lc, inc);
                 writeln!(s, "{body_pad}{}", include_line(inc)).unwrap();
                 writeln!(s).unwrap();
             }
+            if moved_methods.binary_search(&index).is_ok() {
+                continue;
+            }
             render_method(&mut s, m);
         }
-        for (_, inc) in positioned.iter().filter(|(at, _)| *at >= lc.methods.len()) {
+        for (slot, (_, inc)) in positioned.iter().enumerate().filter(|(_, (at, _))| *at >= lc.methods.len()) {
+            if moved_includes.iter().any(|(moved, _)| *moved == slot) {
+                continue;
+            }
             writeln!(s).unwrap();
             nested.borrow_mut().write_include(&mut s, depth, lc, inc);
             writeln!(s, "{body_pad}{}", include_line(inc)).unwrap();
@@ -8276,6 +8299,63 @@ fn emit_library_class_decl_inner(
     }
 
     EmittedFile { path: out_path, content: s }
+}
+
+/// Same-file methods a constant-defining call must see, and the hooked
+/// includes that sit between them.
+///
+/// Returns method indices (ascending) and `(slot, anchor)` into
+/// `positioned`. The anchor is the include's own offset, and not
+/// before the end of the method the hook calls. A call written on
+/// either side of the include stays there. An include that cannot
+/// move stays with the later method loop, and so does every method
+/// that would otherwise pass it.
+fn methods_traveling_with_constant_call<'a>(
+    lc: &'a LibraryClass,
+    positioned: &[(usize, &'a ClassId)],
+    same_file: impl Fn(&MethodDef) -> bool,
+) -> (Vec<usize>, Vec<(usize, u32)>) {
+    let mut method_moves = vec![false; lc.methods.len()];
+    let mut include_moves = vec![false; positioned.len()];
+    for (index, method) in lc.methods.iter().enumerate() {
+        let blocked = positioned
+            .iter()
+            .enumerate()
+            .any(|(slot, (at, _))| *at <= index && !include_moves[slot]);
+        if !same_file(method) || blocked {
+            continue;
+        }
+        method_moves[index] = true;
+        for (slot, (at, _)) in positioned.iter().enumerate() {
+            if at.checked_sub(1) == Some(index) {
+                include_moves[slot] = true;
+            }
+        }
+    }
+    let methods: Vec<usize> = method_moves
+        .iter()
+        .enumerate()
+        .filter(|(_, moves)| **moves)
+        .map(|(index, _)| index)
+        .collect();
+    let includes = include_moves
+        .iter()
+        .enumerate()
+        .filter(|(_, moves)| **moves)
+        .map(|(slot, _)| {
+            let followed = &lc.methods[positioned[slot].0 - 1];
+            let after_method = followed.name_span.end.max(followed.name_span.start.saturating_add(1));
+            let source = lc
+                .includes
+                .iter()
+                .zip(lc.include_spans.iter())
+                .find_map(|(inc, span)| std::ptr::eq(inc, positioned[slot].1).then_some(span))
+                .filter(|span| !span.is_synthetic())
+                .map(|span| span.start);
+            (slot, source.map(|start| start.max(after_method)).unwrap_or(after_method))
+        })
+        .collect();
+    (methods, includes)
 }
 
 /// Where `include inc` must be written in `lc`'s body when the source's
@@ -8947,6 +9027,65 @@ fn app_extension_calls<'a>(lc: &'a LibraryClass, app: &App, classes: &'a [Librar
     out
 }
 
+/// A receiverless class-body call that assigns a constant inside its block,
+/// and whose method this class or an ancestor defines. Running the call is
+/// what creates the constant; the ancestor check keeps a framework macro
+/// (`queue_as`, `included`) from being replayed just because a block wrote
+/// a name.
+fn constant_defining_class_call(app: &App, classes: &[LibraryClass], lc: &LibraryClass, call: &Expr) -> bool {
+    if lc.is_module {
+        return false;
+    }
+    let ExprNode::Send { recv: None, method, .. } = &*call.node else { return false };
+    block_assigns_bare_constant(call) && singleton_method_visible(app, classes, lc, method)
+}
+
+fn block_assigns_bare_constant(call: &Expr) -> bool {
+    let ExprNode::Send { block: Some(block), .. } = &*call.node else { return false };
+    let ExprNode::Lambda { body, .. } = &*block.node else { return false };
+    let stmts: &[Expr] = match &*body.node {
+        ExprNode::Seq { exprs } => exprs,
+        _ => std::slice::from_ref(body),
+    };
+    stmts.iter().any(|stmt| match &*stmt.node {
+        ExprNode::Assign { target: LValue::Const { path }, .. } => path.len() == 1,
+        ExprNode::Send { .. } => block_assigns_bare_constant(stmt),
+        _ => false,
+    })
+}
+
+/// An ancestor's class method. This fragment's own `def self` is emitted
+/// with the methods, after this call, so it is not loaded yet. Another
+/// reopen of this class is a different file.
+fn singleton_method_visible(app: &App, classes: &[LibraryClass], lc: &LibraryClass, method: &Symbol) -> bool {
+    let defines = |m: &MethodDef| m.receiver == MethodReceiver::Class && m.name == *method;
+    let mut current = lc.parent.clone();
+    let mut seen = BTreeSet::new();
+    seen.insert(lc.name.clone());
+    while let Some(id) = current {
+        if !seen.insert(id.clone()) {
+            return false;
+        }
+        // The require loads the ancestor's anchor file, the first fragment.
+        if let Some(class) = classes.iter().find(|class| class.name == id) {
+            if class.methods.iter().any(defines) {
+                return true;
+            }
+            current = class.parent.clone();
+            continue;
+        }
+        if let Some(model) = app.models.iter().find(|model| model.name == id) {
+            if model.methods().any(defines) {
+                return true;
+            }
+            current = model.parent.clone();
+            continue;
+        }
+        return false;
+    }
+    false
+}
+
 /// Ledger a class-body call we captured but chose not to replay. The
 /// emit diagnostic sink is live here (ingest's is not — it runs before
 /// any `diagnostics::scope`), which is why the judgment happens at emit
@@ -8973,7 +9112,7 @@ fn report_dropped_class_body_call(lc: &LibraryClass, call: &Expr) {
 
 fn is_preserved_external_include(call: &Expr) -> bool {
     matches!(
-        &call.diagnostic,
+        &call.diagnostic(),
         Some(crate::diagnostic::DiagnosticKind::Unsupported {
             construct,
             detail,
@@ -9001,7 +9140,7 @@ fn external_include_is_enabled(detail: &str) -> bool {
 fn include_is_unresolved(lc: &LibraryClass, inc: &ClassId) -> bool {
     let detail = format!("{} includes unresolved {}", lc.name.0, inc.0);
     lc.unknown_calls.iter().any(|call| {
-        matches!(&call.diagnostic,
+        matches!(&call.diagnostic(),
             Some(crate::diagnostic::DiagnosticKind::Unsupported { construct, detail: d, .. })
             if construct.as_str() == "include" && *d == detail)
     })
@@ -9097,30 +9236,29 @@ fn declares_constant_path(path: &str, app: &App, classes: &[LibraryClass]) -> bo
     })
 }
 
-/// An app constant `written` as a class header's superclass or a body's
+/// An app constant `name` as a class header's superclass or a body's
 /// mixin must spell it, given the lexical `scopes` (innermost last) Ruby
 /// searches first: `::Api::Base` inside `module Admin; module Api`, where
-/// a bare `Api` is `Admin::Api`. The ingest records the absolute name
-/// without its `::`, and written bare the header died with
-/// `uninitialized constant Admin::Api::Base`. A name the innermost
-/// shadowing scope does declare in full is that scope's, as Ruby binds
-/// it, and stays as written; so does a name the app does not declare.
-fn lexically_qualified(written: &str, scopes: &[&str], app: &App, classes: &[LibraryClass]) -> String {
-    if written.starts_with("::") || scopes.is_empty() {
-        return written.to_string();
+/// a bare `Api` is `Admin::Api`. Ingest stores the absolute name Rubydex
+/// resolved, without its `::`, and the emitted file nests every segment
+/// of the class it declares, so a source class written compact (`class
+/// Billing::Receipt < Record`, which is `::Record`) is emitted inside
+/// `module Billing` where a bare `Record` would be `Billing::Record`. A
+/// name the app does not declare (a runtime or gem class) stays as
+/// written.
+fn lexically_qualified(name: &str, scopes: &[&str], app: &App, classes: &[LibraryClass]) -> String {
+    if name.starts_with("::") || scopes.is_empty() {
+        return name.to_string();
     }
-    let first = written.split("::").next().unwrap_or(written);
-    let Some(scope) = (1..=scopes.len())
+    let first = name.split("::").next().unwrap_or(name);
+    let shadowed = (1..=scopes.len())
         .rev()
         .map(|i| scopes[..i].join("::"))
-        .find(|scope| declares_constant_path(&format!("{scope}::{first}"), app, classes))
-    else {
-        return written.to_string();
-    };
-    if declares_constant_path(&format!("{scope}::{written}"), app, classes) || !declares_constant_path(written, app, classes) {
-        return written.to_string();
+        .any(|scope| declares_constant_path(&format!("{scope}::{first}"), app, classes));
+    if !shadowed || !declares_constant_path(name, app, classes) {
+        return name.to_string();
     }
-    format!("::{written}")
+    format!("::{name}")
 }
 
 fn is_app_class(name: &str, app: &App, classes: &[LibraryClass]) -> bool {
@@ -9144,37 +9282,6 @@ fn outer_class_parent(name: &str, app: &App, classes: &[LibraryClass]) -> Option
     }
     library_classes_named(name, app, classes).into_iter()
         .find(|c| !c.is_module).and_then(|c| c.parent.clone())
-}
-
-/// The app class a written superclass names, looked up from the child's
-/// namespace outward as Ruby does: `Base` written in
-/// `Outer::Inner::Leaf` is `Outer::Inner::Base`. A name that matches
-/// no app class at any level is returned as written (a runtime or gem
-/// class).
-///
-/// The ingested class keeps only its qualified name, so this reads the
-/// nested form (`module Outer; module Inner`) and tries every enclosing
-/// prefix. The compact form (`module Outer::Inner`) searches only the
-/// innermost one, so an outer match that natively falls through to a
-/// top-level class can add a require the program does not need; the
-/// innermost match, the case that fixes load order, is the same in both
-/// forms. This only orders `require`s; typing uses `ConstResolver`.
-fn lexical_parent(child: &str, parent: &ClassId, app: &App, classes: &[LibraryClass]) -> ClassId {
-    let written = parent.0.as_str();
-    if written.starts_with("::") {
-        return parent.clone();
-    }
-    let defined = |candidate: &str| is_model_or_library_class(candidate, app, classes) || is_controller_named(candidate, app);
-    let mut scope: Vec<&str> = child.split("::").collect();
-    scope.pop();
-    while !scope.is_empty() {
-        let candidate = format!("{}::{written}", scope.join("::"));
-        if defined(&candidate) {
-            return ClassId(crate::ident::Symbol::from(candidate.as_str()));
-        }
-        scope.pop();
-    }
-    parent.clone()
 }
 
 fn require_path_for_parent(parent: &ClassId, app: &App, classes: &[LibraryClass]) -> Option<String> {
@@ -9864,8 +9971,19 @@ fn expr_mentions_includes(expr: &Expr) -> bool {
         if *found {
             return;
         }
-        if let ExprNode::Send { recv: Some(_), method, .. } = &*e.node {
-            if matches!(method.as_str(), "includes" | "preload" | "eager_load") {
+        if let ExprNode::Send { recv: Some(recv), method, .. } = &*e.node {
+            if matches!(method.as_str(), "includes" | "preload" | "eager_load" | "preload_associations") {
+                *found = true;
+                return;
+            }
+            // `Preloader.new(...).call` lowers to `Preloading.records`
+            // when the records are not one known model. That call is
+            // the only mention, and the batch loaders have to exist
+            // for it.
+            if method.as_str() == "records"
+                && matches!(&*recv.node, ExprNode::Const { path }
+                    if path.iter().map(|s| s.as_str()).filter(|s| !s.is_empty()).eq(["ActiveRecord", "Preloading"]))
+            {
                 *found = true;
                 return;
             }

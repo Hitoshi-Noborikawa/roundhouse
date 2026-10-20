@@ -948,7 +948,7 @@ fn count_var_assignments(e: &Expr, out: &mut HashMap<Symbol, usize>) {
         ExprNode::Send { recv: Some(recv), method, args, block, .. }
             if method.as_str() == "<<" && args.len() == 1 =>
         {
-            let is_string_builder_append = matches!(e.hint, Some(IrHint::StringBuilderAppend));
+            let is_string_builder_append = matches!(e.hint(), Some(IrHint::StringBuilderAppend));
             if !is_string_builder_append {
                 if let ExprNode::Var { name, .. } = &*recv.node {
                     *out.entry(name.clone()).or_insert(0) += 1;
@@ -1133,7 +1133,7 @@ pub(super) fn collect_reassigned(body: &Expr) -> HashSet<Symbol> {
 ///   site is the function's tail; an Append at the tail would be
 ///   a lowerer bug).
 fn try_string_builder_stmt(e: &Expr, declared: &mut HashSet<Symbol>) -> Option<Vec<JsStmt>> {
-    match e.hint? {
+    match e.hint().as_ref()? {
         IrHint::MutableStringLiteral => None, // emitted as the plain literal
         IrHint::StringBuilderInit => {
             if let ExprNode::Assign { target: LValue::Var { name, .. }, .. } = &*e.node {
@@ -1568,7 +1568,7 @@ pub(super) fn js_expr(e: &Expr) -> Js {
     }
     // Analyzer-set diagnostic annotations short-circuit to a target
     // raise-equivalent (preserves Ruby's runtime-raise semantics).
-    if let Some(kind) = &e.diagnostic {
+    if let Some(kind) = &e.diagnostic() {
         return Js::new(
             e.span,
             JsExpr::Raw(
@@ -1583,7 +1583,7 @@ pub(super) fn js_expr(e: &Expr) -> Js {
     // Append-inside-lambda (`articles.forEach(a => io << render(a))`
     // — the partial lowerer's collection-render shape) and the
     // terminal Result Var read at the function tail.
-    match e.hint {
+    match e.hint() {
         Some(IrHint::StringBuilderAppend) => {
             if let ExprNode::Send { recv: Some(recv), method, args, .. } = &*e.node {
                 if method.as_str() == "<<" && args.len() == 1 {
@@ -1907,7 +1907,7 @@ fn js_send_with_block(
     parenthesized: bool,
 ) -> Js {
     let Some(blk) = block else {
-        return js_send(span, recv, method, args, parenthesized);
+        return js_send(span, recv, method, args, parenthesized, None);
     };
     let predicate = recv.and(ruby_predicate_block(method, blk));
     let blk = predicate.as_ref().unwrap_or(blk);
@@ -1976,7 +1976,10 @@ fn js_send_with_block(
     }
     let mut all_args: Vec<Expr> = args.to_vec();
     all_args.push(blk.clone());
-    js_send(span, recv, method, &all_args, true)
+    // The block is already in `all_args`. Passing it here keeps
+    // `function_receiver` from treating `.call` as a direct invocation
+    // and dropping the block into a positional argument.
+    js_send(span, recv, method, &all_args, true, Some(blk))
 }
 
 /// HOF rewrites for blocks containing async sends. Returns
@@ -2155,8 +2158,9 @@ fn js_send(
     method: &str,
     args: &[Expr],
     parenthesized: bool,
+    block: Option<&Expr>,
 ) -> Js {
-    let result = js_send_inner(span, recv, method, args, parenthesized);
+    let result = js_send_inner(span, recv, method, args, parenthesized, block);
     if !is_async_method_name(method) {
         return result;
     }
@@ -2198,7 +2202,11 @@ fn js_send_inner(
     method: &str,
     args: &[Expr],
     parenthesized: bool,
+    block: Option<&Expr>,
 ) -> Js {
+    if let Some(recv) = crate::emit::shared::fn_call::function_receiver(recv, method, block) {
+        return Js::call(span, js_expr(recv), args.iter().map(js_expr).collect());
+    }
     // Temporal reader intrinsic: `ActiveSupport.parse_db_time(s)` parses
     // stored ISO-8601 text into a native `Date` (nil-safe: `string | null`
     // → `Date | null`). Maps to the hand-written `RhDateTime.parse`
@@ -3323,7 +3331,7 @@ fn js_send_inner(
                     js.span = span;
                     return js;
                 }
-                "slice" => return js_send_inner(span, recv, "[]", args, true),
+                "slice" => return js_send_inner(span, recv, "[]", args, true, None),
                 "capitalize" if args.is_empty() => {
                     // JS has no built-in capitalize. Match Ruby's
                     // semantics: uppercase the first char, lowercase
