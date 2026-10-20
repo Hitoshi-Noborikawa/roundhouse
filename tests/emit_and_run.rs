@@ -3601,6 +3601,76 @@ raise r.inspect unless r == [nil, "Faraday::ConnectionFailed"]"#,
         .assert_passes();
 }
 
+/// faraday-multipart and faraday-retry run too: their middleware is named
+/// by a symbol, and the Gemfile declares the gems it needs.
+#[test]
+fn faraday_multipart_and_retry_run_as_the_real_gems_on_ruby() {
+    let run = emit_and_run::real_blog()
+        .write(
+            "lib/uploader.rb",
+            "class Uploader
+  def self.upload(base, text)
+    conn = Faraday.new(url: base) do |c|
+      c.request :multipart
+      c.adapter Faraday.default_adapter
+    end
+    part = Faraday::Multipart::FilePart.new(StringIO.new(text), \"text/plain\", \"a.txt\")
+    conn.post(\"/upload\", { file: part }).body
+  end
+
+  def self.flaky(base)
+    conn = Faraday.new(url: base) do |c|
+      c.request(:retry, max: 2, interval: 0, retry_statuses: [503])
+      c.adapter Faraday.default_adapter
+    end
+    conn.get(\"/flaky\").body
+  end
+end
+",
+        )
+        .run_ruby(
+            r#"require "socket"
+require "stringio"
+server = TCPServer.new("127.0.0.1", 0)
+port = server.addr[1]
+hits = 0
+Thread.new do
+  loop do
+    client = server.accept
+    line = client.gets.to_s
+    headers = {}
+    while (header = client.gets) && header != "\r\n"
+      name, value = header.split(":", 2)
+      headers[name.downcase] = value.strip
+    end
+    body = client.read(headers["content-length"].to_i)
+    reply = if line.include?("/upload")
+      headers["content-type"].start_with?("multipart/form-data") && body.include?("filename=\"a.txt\"") && body.include?("hello") ? "multipart" : "plain"
+    else
+      hits += 1
+      hits == 1 ? nil : "recovered"
+    end
+    if reply
+      client.write "HTTP/1.1 200 OK\r\nContent-Length: #{reply.bytesize}\r\nConnection: close\r\n\r\n#{reply}"
+    else
+      client.write "HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+    end
+    client.close
+  end
+end
+base = "http://127.0.0.1:#{port}"
+r = Uploader.upload(base, "hello")
+raise r.inspect unless r == "multipart"
+r = Uploader.flaky(base)
+raise [r, hits].inspect unless r == "recovered" && hits == 2"#,
+        );
+    run.assert_passes();
+    let gemfile = std::fs::read_to_string(run.emitted.join("Gemfile")).expect("Gemfile");
+    for gem in ["faraday", "faraday-multipart", "faraday-retry"] {
+        assert!(gemfile.contains(&format!("gem {gem:?}")), "Gemfile does not declare {gem}:\n{gemfile}");
+    }
+}
+
 /// No other target has an HTTP client behind `Faraday`: each call and
 /// constant is refused there, and no `Faraday` reference is emitted.
 #[test]

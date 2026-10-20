@@ -497,6 +497,16 @@ pub const GEM_CATALOG: &[GemClass] = &[
     GemClass { name: "Faraday::FlatParamsEncoder", class_methods: &[], instance_methods: &[] },
     GemClass { name: "Faraday::NestedParamsEncoder", class_methods: &[], instance_methods: &[] },
     GemClass { name: "Faraday::Response::RaiseError", class_methods: &[], instance_methods: &[] },
+    // faraday-multipart: the parts a multipart body carries, and the
+    // Faraday v1 names it still aliases (`Faraday::UploadIO`, `FilePart`).
+    GemClass { name: "Faraday::Multipart", class_methods: &[], instance_methods: &[] },
+    GemClass { name: "Faraday::Multipart::FilePart", class_methods: &[], instance_methods: FARADAY_FILE_PART },
+    GemClass { name: "Faraday::Multipart::ParamPart", class_methods: &[], instance_methods: &[] },
+    GemClass { name: "Faraday::Multipart::CompositeReadIO", class_methods: &[], instance_methods: &[] },
+    GemClass { name: "Faraday::FilePart", class_methods: &[], instance_methods: FARADAY_FILE_PART },
+    GemClass { name: "Faraday::ParamPart", class_methods: &[], instance_methods: &[] },
+    GemClass { name: "Faraday::UploadIO", class_methods: &[], instance_methods: FARADAY_FILE_PART },
+    GemClass { name: "Faraday::CompositeReadIO", class_methods: &[], instance_methods: &[] },
     // The error hierarchy an app rescues. `response` is the Hash the gem
     // builds (`status`, `body`, `headers`), or nil for a connection error.
     GemClass { name: "Faraday::Error", class_methods: &[], instance_methods: FARADAY_ERROR },
@@ -513,6 +523,13 @@ pub const GEM_CATALOG: &[GemClass] = &[
     GemClass { name: "Faraday::TimeoutError", class_methods: &[], instance_methods: FARADAY_ERROR },
     GemClass { name: "Faraday::SSLError", class_methods: &[], instance_methods: FARADAY_ERROR },
     GemClass { name: "Faraday::ParsingError", class_methods: &[], instance_methods: FARADAY_ERROR },
+];
+
+const FARADAY_FILE_PART: &[(&str, GemTy)] = &[
+    ("content_type", GemTy::Untyped),
+    ("original_filename", GemTy::Untyped),
+    ("local_path", GemTy::Untyped),
+    ("io", GemTy::Untyped),
 ];
 
 const FARADAY_ERROR: &[(&str, GemTy)] = &[
