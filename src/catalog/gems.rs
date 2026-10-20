@@ -420,4 +420,108 @@ pub const GEM_CATALOG: &[GemClass] = &[
         class_methods: &[],
         instance_methods: &[],
     },
+    // Faraday — the HTTP client. Ruby and JRuby run the real gem (the
+    // emitted Gemfile declares it on demand, `gems::RUNTIME_GEMS`);
+    // every other target refuses each reference (`lower::faraday`).
+    // Responses and bodies are the gem's own objects, so they stay
+    // `Untyped` past the shapes below.
+    GemClass {
+        name: "Faraday",
+        class_methods: &[
+            ("new", GemTy::Instance("Faraday::Connection")),
+            ("default_adapter", GemTy::Sym),
+            ("default_adapter=", GemTy::Sym),
+            ("get", GemTy::Instance("Faraday::Response")),
+            ("post", GemTy::Instance("Faraday::Response")),
+            ("put", GemTy::Instance("Faraday::Response")),
+            ("patch", GemTy::Instance("Faraday::Response")),
+            ("delete", GemTy::Instance("Faraday::Response")),
+            ("head", GemTy::Instance("Faraday::Response")),
+        ],
+        instance_methods: &[],
+    },
+    GemClass {
+        name: "Faraday::Connection",
+        class_methods: &[],
+        instance_methods: &[
+            ("get", GemTy::Instance("Faraday::Response")),
+            ("post", GemTy::Instance("Faraday::Response")),
+            ("put", GemTy::Instance("Faraday::Response")),
+            ("patch", GemTy::Instance("Faraday::Response")),
+            ("delete", GemTy::Instance("Faraday::Response")),
+            ("head", GemTy::Instance("Faraday::Response")),
+            ("run_request", GemTy::Instance("Faraday::Response")),
+            ("request", GemTy::Untyped),
+            ("response", GemTy::Untyped),
+            ("use", GemTy::Untyped),
+            ("adapter", GemTy::Untyped),
+            ("headers", GemTy::Untyped),
+            ("params", GemTy::Untyped),
+            ("options", GemTy::Instance("Faraday::RequestOptions")),
+            ("url_prefix", GemTy::Untyped),
+            ("set_basic_auth", GemTy::Untyped),
+            ("builder", GemTy::Untyped),
+        ],
+    },
+    GemClass {
+        name: "Faraday::RequestOptions",
+        class_methods: &[],
+        instance_methods: &[
+            ("timeout", GemTy::Untyped),
+            ("timeout=", GemTy::Untyped),
+            ("open_timeout", GemTy::Untyped),
+            ("open_timeout=", GemTy::Untyped),
+            ("read_timeout", GemTy::Untyped),
+            ("read_timeout=", GemTy::Untyped),
+            ("write_timeout", GemTy::Untyped),
+            ("write_timeout=", GemTy::Untyped),
+            ("params_encoder", GemTy::Untyped),
+            ("params_encoder=", GemTy::Untyped),
+        ],
+    },
+    GemClass {
+        name: "Faraday::Response",
+        class_methods: &[],
+        instance_methods: &[
+            ("status", GemTy::Int),
+            ("body", GemTy::Untyped),
+            ("headers", GemTy::Untyped),
+            ("success?", GemTy::Bool),
+            ("finished?", GemTy::Bool),
+            ("reason_phrase", GemTy::Untyped),
+            ("env", GemTy::Untyped),
+            ("to_hash", GemTy::Untyped),
+        ],
+    },
+    // Values an app hands the connection: an encoder, a middleware class.
+    GemClass { name: "Faraday::FlatParamsEncoder", class_methods: &[], instance_methods: &[] },
+    GemClass { name: "Faraday::NestedParamsEncoder", class_methods: &[], instance_methods: &[] },
+    GemClass { name: "Faraday::Response::RaiseError", class_methods: &[], instance_methods: &[] },
+    // The error hierarchy an app rescues. `response` is the Hash the gem
+    // builds (`status`, `body`, `headers`), or nil for a connection error.
+    GemClass { name: "Faraday::Error", class_methods: &[], instance_methods: FARADAY_ERROR },
+    GemClass { name: "Faraday::ClientError", class_methods: &[], instance_methods: FARADAY_ERROR },
+    GemClass { name: "Faraday::ServerError", class_methods: &[], instance_methods: FARADAY_ERROR },
+    GemClass { name: "Faraday::BadRequestError", class_methods: &[], instance_methods: FARADAY_ERROR },
+    GemClass { name: "Faraday::UnauthorizedError", class_methods: &[], instance_methods: FARADAY_ERROR },
+    GemClass { name: "Faraday::ForbiddenError", class_methods: &[], instance_methods: FARADAY_ERROR },
+    GemClass { name: "Faraday::ResourceNotFound", class_methods: &[], instance_methods: FARADAY_ERROR },
+    GemClass { name: "Faraday::ConflictError", class_methods: &[], instance_methods: FARADAY_ERROR },
+    GemClass { name: "Faraday::UnprocessableEntityError", class_methods: &[], instance_methods: FARADAY_ERROR },
+    GemClass { name: "Faraday::TooManyRequestsError", class_methods: &[], instance_methods: FARADAY_ERROR },
+    GemClass { name: "Faraday::ConnectionFailed", class_methods: &[], instance_methods: FARADAY_ERROR },
+    GemClass { name: "Faraday::TimeoutError", class_methods: &[], instance_methods: FARADAY_ERROR },
+    GemClass { name: "Faraday::SSLError", class_methods: &[], instance_methods: FARADAY_ERROR },
+    GemClass { name: "Faraday::ParsingError", class_methods: &[], instance_methods: FARADAY_ERROR },
+];
+
+const FARADAY_ERROR: &[(&str, GemTy)] = &[
+    ("message", GemTy::Str),
+    ("to_s", GemTy::Str),
+    ("response", GemTy::Untyped),
+    ("response_status", GemTy::Untyped),
+    ("response_body", GemTy::Untyped),
+    ("response_headers", GemTy::Untyped),
+    ("wrapped_exception", GemTy::Untyped),
+    ("backtrace", GemTy::Untyped),
 ];

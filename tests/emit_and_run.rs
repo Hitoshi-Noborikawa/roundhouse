@@ -3547,6 +3547,127 @@ fn oj_target_errors_and_text(
     (errors, files)
 }
 
+const FARADAY_LIB: &str = "class PingClient
+  def self.fetch(base, path)
+    conn = Faraday.new(url: base) do |c|
+      c.response :raise_error
+      c.options.timeout = 5
+      c.adapter Faraday.default_adapter
+    end
+    response = conn.get(path)
+    [response.status, response.body, response.success?]
+  rescue Faraday::ResourceNotFound => e
+    [e.response_status, :not_found]
+  rescue Faraday::Error => e
+    [nil, e.class.name]
+  end
+end
+";
+
+/// Ruby runs the real faraday gem: a connection with middleware, a
+/// response, and the error hierarchy it raises, against a local server.
+#[test]
+fn faraday_runs_as_the_real_gem_on_ruby() {
+    emit_and_run::real_blog()
+        .write("app/models/ping_client.rb", FARADAY_LIB)
+        .run_ruby(
+            r#"require "socket"
+server = TCPServer.new("127.0.0.1", 0)
+port = server.addr[1]
+Thread.new do
+  loop do
+    client = server.accept
+    line = client.gets.to_s
+    while (header = client.gets) && header != "\r\n"; end
+    if line.include?("/ok")
+      client.write "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok"
+    else
+      client.write "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+    end
+    client.close
+  end
+end
+base = "http://127.0.0.1:#{port}"
+r = PingClient.fetch(base, "/ok")
+raise r.inspect unless r == [200, "ok", true]
+r = PingClient.fetch(base, "/missing")
+raise r.inspect unless r == [404, :not_found]
+closed = TCPServer.new("127.0.0.1", 0)
+closed_port = closed.addr[1]
+closed.close
+r = PingClient.fetch("http://127.0.0.1:#{closed_port}", "/x")
+raise r.inspect unless r == [nil, "Faraday::ConnectionFailed"]"#,
+        )
+        .assert_passes();
+}
+
+/// No other target has an HTTP client behind `Faraday`: each call and
+/// constant is refused there, and no `Faraday` reference is emitted.
+#[test]
+fn faraday_is_refused_off_ruby_and_jruby() {
+    let dir = std::env::temp_dir().join(format!("rh-faraday-targets-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    for (path, text) in [
+        (
+            "db/schema.rb",
+            "ActiveRecord::Schema.define do\n  create_table \"posts\", force: :cascade do |t|\n    t.string \"title\"\n  end\nend\n",
+        ),
+        ("config/routes.rb", "Rails.application.routes.draw do\n  get \"/posts\", to: \"posts#index\"\nend\n"),
+        ("app/models/post.rb", "class Post < ApplicationRecord\nend\n"),
+        ("app/models/ping_client.rb", FARADAY_LIB),
+        (
+            "app/controllers/posts_controller.rb",
+            "class PostsController < ApplicationController\n  def index\n    render plain: PingClient.fetch(\"http://example.test\", \"/ok\").inspect\n  end\nend\n",
+        ),
+    ] {
+        let full = dir.join(path);
+        std::fs::create_dir_all(full.parent().unwrap()).unwrap();
+        std::fs::write(full, text).unwrap();
+    }
+    let mut app = roundhouse::ingest::ingest_app(&dir).expect("ingest");
+    let lower_diags = roundhouse::session::analyze_and_lower(&mut app);
+    assert!(
+        lower_diags.iter().all(|d| d.severity != roundhouse::diagnostic::Severity::Error),
+        "check is not clean: {lower_diags:?}"
+    );
+    for target in [roundhouse::project::BuildTarget::Ruby, roundhouse::project::BuildTarget::Jruby] {
+        let (errors, files) = oj_target_errors_and_text(&app, &dir, target);
+        assert!(!errors.iter().any(|e| e.contains("Faraday")), "{target:?} refused the gem it ships:\n{}", errors.join("\n"));
+        assert!(
+            files.get("Gemfile").is_some_and(|g| g.contains("gem \"faraday\"")),
+            "{target:?} Gemfile does not declare faraday"
+        );
+    }
+    for target in [
+        roundhouse::project::BuildTarget::Spinel,
+        roundhouse::project::BuildTarget::Python,
+        roundhouse::project::BuildTarget::Crystal,
+        roundhouse::project::BuildTarget::Typescript,
+        roundhouse::project::BuildTarget::Rust,
+        roundhouse::project::BuildTarget::Go,
+        roundhouse::project::BuildTarget::Elixir,
+        roundhouse::project::BuildTarget::CSharp,
+        roundhouse::project::BuildTarget::Kotlin,
+        roundhouse::project::BuildTarget::Swift,
+    ] {
+        let (errors, files) = oj_target_errors_and_text(&app, &dir, target);
+        for site in ["`Faraday.new`", "`Faraday::ResourceNotFound`", "`Faraday::Error`"] {
+            assert!(
+                errors.iter().any(|e| e.contains(site) && e.contains("only the ruby and jruby trees ship")),
+                "{target:?} did not refuse {site}:\n{}",
+                errors.join("\n")
+            );
+        }
+        let hits: Vec<_> = files
+            .iter()
+            .filter(|(path, text)| !path.ends_with(".map") && path.contains("ping_client") && text.contains("Faraday"))
+            .map(|(path, _)| path.clone())
+            .collect();
+        assert!(hits.is_empty(), "{target:?} emitted a Faraday reference in {hits:?}");
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// `/(?<name>..)/ =~ str` assigns each named group to a local (nil when
 /// nothing matches) and answers the match's index: as a statement, as an
 /// `if` condition, and as a method's value. Checked against CRuby.

@@ -1916,6 +1916,16 @@ fn target_files_inner(
         }
         None => app,
     };
+    // Faraday runs as the real gem on ruby and jruby; every other target
+    // refuses each reference (`lower::faraday`).
+    let without_faraday;
+    let app = match crate::lower::faraday::without_unshipped_gem(app, target) {
+        Some(trimmed) => {
+            without_faraday = trimmed;
+            &without_faraday
+        }
+        None => app,
+    };
     if target == BuildTarget::Roda {
         if let Some((table, column)) = app.schema.tables.values().find_map(|table| {
             table
