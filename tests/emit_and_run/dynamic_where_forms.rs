@@ -49,3 +49,37 @@ expect "find_by(hash)", klass.find_by(score: 3).score, 3
     );
 }
 
+/// #1130: a Range value in a hash condition is Rails' comparison, not a
+/// string compared equal to the column.
+#[test]
+fn dynamic_where_renders_a_range_as_a_comparison() {
+    run_on_widgets(
+        r##"# #1130: a Range value is a comparison, not a string.
+expect "a..b", scores(klass.where(score: 5..9)), [5, 7]
+expect "a...b", scores(klass.where(score: 5...7)), [5]
+expect "a..", scores(klass.where(score: 5..)), [5, 7]
+expect "..b", scores(klass.where(score: ..5)), [3, 5]
+expect "...b", scores(klass.where(score: ...5)), [3]
+expect "a..a", scores(klass.where(score: 3..3)), [3]
+expect "b..a", scores(klass.where(score: 9..5)), []
+expect "nil..nil", scores(klass.where(score: nil..nil)), [nil, 3, 5, 7]
+expect "a..Infinity", scores(klass.where(score: 5..Float::INFINITY)), [5, 7]
+expect "-Infinity..b", scores(klass.where(score: -Float::INFINITY..5)), [3, 5]
+expect "Relation a..b", scores(klass.all.where(score: 5..9)), [5, 7]
+expect "not a..b", scores(klass.all.not(score: 5..9)), [3]
+expect "nested a..b", scores(klass.where(widgets: { score: 5..9 })), [5, 7]
+expect "find_by a..b", klass.find_by(score: 6..9).score, 7
+expect "range seeds nothing", klass.where(score: 5..9).find_or_initialize_by(id: -1).score, nil
+
+# A Range inside an Array is one more OR'd alternative.
+expect "[3, a..b]", scores(klass.where(score: [3, 6..9])), [3, 7]
+expect "[nil, a..b]", scores(klass.where(score: [nil, 6..9])), [nil, 7]
+expect "[a..b, ..c]", scores(klass.where(score: [6..9, ..3])), [3, 7]
+expect "[3, 5, a..b]", scores(klass.where(score: [3, 5, 6..9])), [3, 5, 7]
+
+# Range bounds bind like any other hash-condition value.
+sql = klass.where(score: 5...9).to_sql
+raise "exclusive range SQL: #{sql}" unless sql.include?("widgets.score >= 5") && sql.include?("widgets.score < 9")
+"##,
+    );
+}

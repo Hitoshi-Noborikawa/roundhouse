@@ -2626,9 +2626,13 @@ module ActiveRecord
         ids = val.map { |x| x.is_a?(Base) ? x._primary_key_value : x }
         if ids.empty?
           "1=0"
+        elsif ids.any? { |x| x.is_a?(Range) }
+          array_with_ranges_predicate(qcol, ids)
         else
           "#{qcol} IN (#{escape_list(ids)})"
         end
+      elsif val.is_a?(Range)
+        range_predicate(qcol, val)
       elsif val.nil?
         "#{qcol} IS NULL"
       elsif val.is_a?(Base)
@@ -2641,6 +2645,57 @@ module ActiveRecord
       else
         "#{qcol} = #{bind_literal(val)}"
       end
+    end
+
+    # Rails' Range condition: `where(score: 5..9)` is `>=` and `<=`, an
+    # exclusive end (`5...9`) is `<`, and an endless or beginless range
+    # (`5..`, `..9`, `...9`) is the one comparison it has. An infinite
+    # Float end is no bound, as in Rails, and a range with neither bound
+    # matches every row (`1=1`). Rails writes `BETWEEN` for the inclusive
+    # pair; `>= AND <=` is the same predicate and what the lowered
+    # call sites already write. The bounds bind like a scalar's value.
+    def range_predicate(qcol, range)
+      op = range.exclude_end? ? "<" : "<="
+      lo = range_bound_sql(range.begin)
+      hi = range_bound_sql(range.end)
+      if lo.nil?
+        return "1=1" if hi.nil?
+        return "#{qcol} #{op} #{hi}"
+      end
+      return "#{qcol} >= #{lo}" if hi.nil?
+      "(#{qcol} >= #{lo} AND #{qcol} #{op} #{hi})"
+    end
+
+    # One end's bound literal, or nil for no bound (nil or an infinite
+    # Float).
+    def range_bound_sql(bound)
+      return nil if bound.nil?
+      return nil if bound.is_a?(Float) && bound.abs == Float::INFINITY
+      bind_literal(bound)
+    end
+
+    # Rails' Array value holding a Range (`where(score: [3, 6..9])`):
+    # the scalars as one IN list, a `nil` as IS NULL, and each Range as
+    # its own comparison, ORed. An Array with no Range keeps the IN
+    # list above.
+    def array_with_ranges_predicate(qcol, vals)
+      scalars = []
+      arms = []
+      has_nil = false
+      range_arms = []
+      vals.each do |x|
+        if x.nil?
+          has_nil = true
+        elsif x.is_a?(Range)
+          range_arms << range_predicate(qcol, x)
+        else
+          scalars << x
+        end
+      end
+      arms << "#{qcol} IN (#{escape_list(scalars)})" unless scalars.empty?
+      arms << "#{qcol} IS NULL" if has_nil
+      range_arms.each { |r| arms << r }
+      "(#{arms.join(" OR ")})"
     end
 
     # For positional binds, split only the original `?` placeholders,
