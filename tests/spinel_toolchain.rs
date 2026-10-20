@@ -150,6 +150,8 @@ mod api_parity_round3;
 mod api_parity_round4;
 #[path = "spinel_toolchain/server_binding.rs"]
 mod server_binding;
+#[path = "spinel_toolchain/unix_listener.rs"]
+mod unix_listener;
 #[path = "support/request_id_runtime.rs"]
 mod request_id_runtime_contract;
 #[path = "spinel_toolchain/request_id_runtime.rs"]

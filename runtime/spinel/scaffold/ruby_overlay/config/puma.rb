@@ -12,6 +12,8 @@ threads_count = ENV.fetch("RAILS_MAX_THREADS", 3).to_i
 threads threads_count, threads_count
 
 port ENV.fetch("PORT", 3000)
+unix_bind = ENV.fetch("UNIX_BIND", "")
+bind(unix_bind.include?("?") ? unix_bind : unix_bind + "?mode=600") unless unix_bind.empty?
 environment ENV.fetch("RAILS_ENV", "development")
 
 # Clustered mode — enable via WEB_CONCURRENCY=N. Defaults to single
