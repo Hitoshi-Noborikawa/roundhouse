@@ -379,6 +379,82 @@ fn and_guard(a: Option<Expr>, b: Option<Expr>) -> Option<Expr> {
     }
 }
 
+/// `uniqueness: true` or `{ scope:, case_sensitive:, allow_nil:,
+/// allow_blank:, if:, unless: }`. `conditions:` (a relation callable) and
+/// `message:` stay gaps, and so does any uniqueness rule on a model whose
+/// class body declares a `default_scope`: Rails queries `unscoped`, and
+/// the runtime has no `unscoped` to match it.
+fn parse_uniqueness(value: &Node<'_>, file: &str, class_consts: &super::ClassConsts) -> RuleParse {
+    use crate::dialect::ValidationRule;
+    if class_consts.default_scoped() {
+        return RuleParse::Gap(vec!["uniqueness".to_string()]);
+    }
+    let rule = |scope, case_sensitive, allow_nil, allow_blank| ValidationRule::Uniqueness {
+        scope,
+        case_sensitive,
+        allow_nil,
+        allow_blank,
+    };
+    match super::super::util::bool_value(value) {
+        Some(true) => return RuleParse::Rule(BuiltRule::bare(rule(Vec::new(), true, false, false))),
+        Some(false) => return RuleParse::Skip,
+        None => {}
+    }
+    let Some(elements) = hash_elements(value) else {
+        return RuleParse::Gap(vec!["uniqueness".to_string()]);
+    };
+    let mut scope: Vec<Symbol> = Vec::new();
+    let mut case_sensitive = true;
+    let mut allow_nil = false;
+    let mut allow_blank = false;
+    let mut built = BuiltRule::bare(rule(Vec::new(), true, false, false));
+    let mut gaps = Vec::new();
+    for el in elements.iter() {
+        let Some(assoc) = el.as_assoc_node() else {
+            gaps.push("uniqueness".to_string());
+            continue;
+        };
+        let Some(key) = symbol_value(&assoc.key()) else {
+            gaps.push("uniqueness".to_string());
+            continue;
+        };
+        let child = assoc.value();
+        match key.as_str() {
+            "scope" => {
+                let names: Option<Vec<Symbol>> = if let Some(array) = child.as_array_node() {
+                    array.elements().iter().map(|e| symbol_value(&e).map(|s| Symbol::from(s.as_str()))).collect()
+                } else {
+                    symbol_value(&child).map(|s| vec![Symbol::from(s.as_str())])
+                };
+                match names {
+                    Some(names) => scope = names,
+                    None => gaps.push("uniqueness: scope".to_string()),
+                }
+            }
+            "case_sensitive" => match super::super::util::bool_value(&child) {
+                Some(flag) => case_sensitive = flag,
+                None => gaps.push("uniqueness: case_sensitive".to_string()),
+            },
+            "allow_nil" => match super::super::util::bool_value(&child) {
+                Some(flag) => allow_nil = flag,
+                None => gaps.push("uniqueness: allow_nil".to_string()),
+            },
+            "allow_blank" => match super::super::util::bool_value(&child) {
+                Some(flag) => allow_blank = flag,
+                None => gaps.push("uniqueness: allow_blank".to_string()),
+            },
+            "if" => push_condition(&child, file, &mut built.if_cond, "if", &mut gaps),
+            "unless" => push_condition(&child, file, &mut built.unless_cond, "unless", &mut gaps),
+            other => gaps.push(format!("uniqueness: {other}")),
+        }
+    }
+    if !gaps.is_empty() {
+        return RuleParse::Gap(gaps);
+    }
+    built.rule = rule(scope, case_sensitive, allow_nil, allow_blank);
+    RuleParse::Rule(built)
+}
+
 /// `allow_blank: true` skips every validator when the value is blank.
 /// Presence is then a dead check (Rails runs validations before
 /// `before_save`, which is what lobsters' `allow_blank: true, presence:
@@ -603,6 +679,7 @@ fn parse_validator(key: &str, value: &Node<'_>, file: &str, class_consts: &super
         "numericality" => parse_numericality(value, file, class_consts),
         "inclusion" => parse_set(value, file, false),
         "exclusion" => parse_set(value, file, true),
+        "uniqueness" => parse_uniqueness(value, file, class_consts),
         "format" => parse_format(value, file, class_consts),
         other => RuleParse::Gap(vec![other.to_string()]),
     }

@@ -618,7 +618,18 @@ pub struct InclusionRange {
 pub enum ValidationRule {
     Presence,
     Absence,
-    Uniqueness { scope: Vec<Symbol>, case_sensitive: bool },
+    /// `uniqueness: true` / `{ scope:, case_sensitive:, allow_nil:,
+    /// allow_blank: }`. `scope` holds the names as written; an
+    /// association name resolves to its foreign key when the check is
+    /// built. `case_sensitive: false` compares `LOWER(col) = LOWER(value)`.
+    Uniqueness {
+        scope: Vec<Symbol>,
+        case_sensitive: bool,
+        #[serde(default)]
+        allow_nil: bool,
+        #[serde(default)]
+        allow_blank: bool,
+    },
     Length {
         min: Option<u32>,
         max: Option<u32>,

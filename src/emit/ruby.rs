@@ -252,6 +252,7 @@ fn materialize_models_with_param_binds(
         true,
         param_binds,
         crate::lower::model_to_library::ErrorsReaders::CreatedOnFirstRead,
+        crate::lower::model_to_library::RuntimeRelation::Present,
     ).0;
     (lcs, params_specs)
 }
