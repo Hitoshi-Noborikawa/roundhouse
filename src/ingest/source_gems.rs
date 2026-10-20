@@ -39,8 +39,8 @@ pub(super) fn resolve<V: Vfs + ?Sized>(
                 "source_gems names {name:?} {version}, which no gem root holds (BUNDLE_PATH, GEM_HOME, GEM_PATH): run bundle install"
             ));
         };
-        // A `..` in BUNDLE_PATH would otherwise keep every required file outside `lib/`
-        let installed = normalize(&installed);
+        // Not lexical first: a `..` after a linked app dir resolves through the link, as the OS reads it
+        let installed = vfs.canonical(&installed).unwrap_or_else(|| normalize(&installed));
         let files = required_files(vfs, &installed, name)?;
         gems.push(SourceGem { mount: dir.join(MOUNT).join(format!("{name}-{version}")), installed, files });
     }
@@ -208,6 +208,27 @@ mod tests {
         let gems = resolve(&crate::vfs::FsVfs::new(), &root.join("app"), Some(&lock), &["widgets".to_string()]).unwrap();
         let files: Vec<_> = gems[0].files.iter().map(|p| p.display().to_string()).collect();
         assert_eq!(files, vec!["lib/widgets/part.rb", "lib/widgets.rb"]);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_bundle_path_through_a_linked_app_dir_resolves_as_the_os_does() {
+        let root = std::env::temp_dir().join(format!("rh-source-gems-link-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let write = |path: &str, text: &str| {
+            let full = root.join(path);
+            std::fs::create_dir_all(full.parent().unwrap()).unwrap();
+            std::fs::write(full, text).unwrap();
+        };
+        write("releases/1/.bundle/config", "---\nBUNDLE_PATH: \"../shared/bundle\"\n");
+        std::os::unix::fs::symlink(root.join("releases/1"), root.join("current")).unwrap();
+        let gem = "releases/shared/bundle/ruby/3.4.0/gems/widgets-1.0";
+        write(&format!("{gem}/lib/widgets.rb"), "require \"widgets/part\"\n");
+        write(&format!("{gem}/lib/widgets/part.rb"), "module Widgets; end\n");
+        let lock = Lockfile::parse("GEM\n  remote: https://rubygems.org/\n  specs:\n    widgets (1.0)\n\nDEPENDENCIES\n  widgets\n");
+        let gems = resolve(&crate::vfs::FsVfs::new(), &root.join("current"), Some(&lock), &["widgets".to_string()]).unwrap();
+        assert_eq!(gems[0].files.len(), 2);
         let _ = std::fs::remove_dir_all(&root);
     }
 }
