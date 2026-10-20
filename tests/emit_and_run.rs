@@ -10720,6 +10720,38 @@ raise "split size consumer" unless SplitFactoryConsumer.size == 33
     }
 }
 
+/// A hook that extends its carrier and then does more, as AASM's and
+/// flag_shih_tzu's do. The extend is the carrier splice's job; the rest of
+/// the hook must still run for each includer.
+#[test]
+fn an_included_hook_that_extends_its_carrier_and_more_runs() {
+    emit_and_run::real_blog()
+        .write("app/services/tracking.rb", r#"module Tracking
+  INCLUDERS = []
+
+  def self.included(base)
+    base.extend Tracking::ClassMethods
+    INCLUDERS << base.name
+  end
+
+  module ClassMethods
+    def tracked_label
+      "tracked " + name
+    end
+  end
+end
+"#)
+        .write("app/services/reading.rb", r#"class Reading
+  include Tracking
+end
+"#)
+        .run_ruby(r#"
+raise "carrier method: #{Reading.tracked_label.inspect}" unless Reading.tracked_label == "tracked Reading"
+raise "hook body: #{Tracking::INCLUDERS.inspect}" unless Tracking::INCLUDERS == ["Reading"]
+"#)
+        .assert_passes();
+}
+
 /// `resources :x, only: [] do … end` nests routes under a parent with no
 /// routes of its own. Ingest rejected the empty list and dropped the
 /// parent with every route nested in it.
