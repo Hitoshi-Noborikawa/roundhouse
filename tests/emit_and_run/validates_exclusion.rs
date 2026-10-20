@@ -2,7 +2,8 @@ use super::emit_and_run;
 
 /// `exclusion: { in: … }` / `validates_exclusion_of`: the value must not
 /// be one of the listed values (or, for a numeric range, not covered by
-/// it). Rails' message is "is reserved", and `nil` is never reserved.
+/// it). Rails' message is "is reserved". `nil` is reserved only when it's
+/// listed: Rails' `ExclusionValidator` has no implicit `allow_nil`.
 /// Answers below are Rails 8.1.4's for the same model and records.
 const MODEL: &str = r#"class Widget < ApplicationRecord
   validates :domain, exclusion: { in: [""] }

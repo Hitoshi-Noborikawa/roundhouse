@@ -960,7 +960,8 @@ fn inline_inclusion_check(
 ///   if @attr.is_a?(Numeric) && @attr >= begin && @attr <= end   # a range
 ///     errors << "attr is reserved"
 ///   end
-/// `nil` is never reserved: it isn't in a literal list, and a numeric
+/// `nil` is reserved only when the list names it (`in: [nil, …]`), as
+/// Rails' `ExclusionValidator` has no implicit `allow_nil`; a numeric
 /// range's `cover?` is false for it (and for any non-numeric value).
 fn inline_exclusion_check(
     msgs: Messages,

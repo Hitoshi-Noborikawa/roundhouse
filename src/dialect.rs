@@ -671,7 +671,8 @@ pub enum ValidationRule {
     },
     /// `exclusion: { in: […] }` / `validates_exclusion_of`: the value
     /// must NOT be one of `values`, or, with `range`, must not be covered
-    /// by it. `nil` is never reserved. Rails' message is "is reserved".
+    /// by it. `nil` is reserved only when it's listed (no implicit
+    /// `allow_nil`), never by a range. Rails' message is "is reserved".
     Exclusion {
         values: Vec<Literal>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
