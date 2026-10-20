@@ -6651,7 +6651,7 @@ fn walk_erb<V: Vfs + ?Sized>(
 /// of letting whole template files vanish without a trace. STRICT mode
 /// now aborts instead of silently dropping the template: it used to
 /// call `survey::record` directly, a no-op outside survey, so a
-/// still-unsupported format (`.rabl`, `.ruby`, or any non-html ERB
+/// still-unsupported format (`.rabl`, or any non-html ERB
 /// format this allow-list doesn't carry) emitted the controller with
 /// no view and reported no error — the one silent-drop `check`'s error
 /// gate is supposed to rule out.
