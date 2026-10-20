@@ -1049,6 +1049,9 @@ module Db
 
   def self.record_query(sql)
     @query_log.push(sql) unless @query_log.nil?
+    if defined?(ActiveSupport::Notifications) && ActiveSupport::Notifications.respond_to?(:sql)
+      ActiveSupport::Notifications.sql(sql)
+    end
   end
 
   # SQL-value escaping primitives — copied verbatim from db_cruby.rb.

@@ -328,9 +328,18 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
     // writes so the constant is modeled (not a silent raise stub) and
     // ruby-family emit keeps the call. Return types stay gradual: the
     // document shape is whatever the file held.
+    register_stdlib_class(classes, "ERB", &[], &[
+        ("result", Ty::Str),
+    ]);
+    {
+        let db = classes.entry(ClassId(Symbol::from("Db"))).or_default();
+        db.class_methods.entry(Symbol::from("capture_sql")).or_insert(Ty::Array { elem: std::sync::Arc::new(Ty::Str) });
+        db.class_methods.entry(Symbol::from("escape_string")).or_insert(Ty::Str);
+    }
     register_stdlib_class(classes, "YAML", &[
         ("load", Ty::Untyped), ("load_file", Ty::Untyped),
         ("safe_load", Ty::Untyped), ("safe_load_file", Ty::Untyped),
+        ("unsafe_load", Ty::Untyped),
         ("dump", Ty::Str),
     ], &[]);
     // Framework modules an app `include`s that emit already handles
@@ -533,6 +542,33 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
     // `ActiveSupport::Cache` — `expand_cache_key` and the bounded
     // `MemoryStore`, in runtime/spinel/active_support_cache.rb (the ruby
     // family and spinel). A cached value is whatever was written.
+    {
+        let state = classes.entry(ClassId(Symbol::from("ActiveSupport::IsolatedExecutionState"))).or_default();
+        state.is_module = true;
+        state.class_methods.insert(Symbol::from("[]"), Ty::Untyped);
+        state.class_methods.insert(Symbol::from("[]="), Ty::Untyped);
+        state.class_methods.insert(Symbol::from("state"), Ty::Hash { key: std::sync::Arc::new(Ty::Untyped), value: std::sync::Arc::new(Ty::Untyped) });
+    }
+    {
+        let notes = classes.entry(ClassId(Symbol::from("ActiveSupport::Notifications"))).or_default();
+        notes.is_module = true;
+        notes.class_methods.insert(Symbol::from("subscribe"), Ty::Untyped);
+        notes.class_methods.insert(Symbol::from("unsubscribe"), Ty::Nil);
+        notes.class_methods.insert(Symbol::from("instrument"), Ty::Untyped);
+        notes.class_methods.insert(Symbol::from("subscribed"), Ty::Untyped);
+    }
+    register_stdlib_class(classes, "ActiveSupport::Notifications::Event", &[], &[
+        ("name", Ty::Str),
+        ("payload", Ty::Hash { key: std::sync::Arc::new(Ty::Untyped), value: std::sync::Arc::new(Ty::Untyped) }),
+    ]);
+    register_stdlib_class(classes, "ActiveSupport::ConfigurationFile", &[
+        ("parse", Ty::Untyped),
+    ], &[]);
+    {
+        let continuable = classes.entry(ClassId(Symbol::from("ActiveJob::Continuable"))).or_default();
+        continuable.is_module = true;
+        continuable.instance_methods.insert(Symbol::from("step"), Ty::Untyped);
+    }
     register_stdlib_class(classes, "ActiveSupport::Cache", &[
         ("expand_cache_key", Ty::Str),
     ], &[]);
@@ -550,6 +586,20 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
         ("prune", Ty::Nil),
         ("read_multi", Ty::Hash { key: std::sync::Arc::new(Ty::Untyped), value: std::sync::Arc::new(Ty::Untyped) }),
         ("write_multi", Ty::Bool),
+    ]);
+    let null_store = Ty::Class { id: ClassId(Symbol::from("ActiveSupport::Cache::NullStore")), args: vec![].into() };
+    register_stdlib_class(classes, "ActiveSupport::Cache::NullStore", &[
+        ("new", null_store),
+    ], &[
+        ("read", Ty::Nil),
+        ("write", Ty::Bool),
+        ("fetch", Ty::Untyped),
+        ("delete", Ty::Bool),
+        ("exist?", Ty::Bool),
+        ("clear", Ty::Nil),
+        ("read_str", Ty::Nil),
+        ("write_str", Ty::Str),
+        ("fetch_str", Ty::Str),
     ]);
 
     // `FileUtils` — a default gem / spinel's `packages/fileutils`.
@@ -809,7 +859,14 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
         // Not `ActiveRecord::Base`: no instance surface is registered there, so `e.record.errors` would still fail.
         ("ActiveRecord::RecordInvalid", Some(("record", Ty::Untyped))),
         ("ActiveRecord::RecordNotSaved", Some(("record", Ty::Untyped))),
+        ("ActiveRecord::RecordNotDestroyed", Some(("record", Ty::Untyped))),
         ("ActiveRecord::ReadOnlyRecord", None),
+        ("ActiveRecord::ConnectionNotEstablished", None),
+        ("ActiveRecord::ConnectionFailed", None),
+        ("ActiveRecord::ConnectionTimeoutError", None),
+        ("ActiveRecord::Encryption::Errors::Decryption", None),
+        ("ActiveRecord::Encryption::Errors::Configuration", None),
+        ("ActiveJob::EnqueueError", None),
         // Names overlap `project::RUBY_FAMILY_RUNTIME_CONSTANTS` (emit
         // ledger). Keep extras here — inference needs the readers.
         ("ActionController::ParameterMissing", Some(("param", Ty::Str))),
@@ -825,6 +882,11 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
         let methods: Vec<(&str, Ty)> = methods;
         register_stdlib_class(classes, exc, &[], &methods);
     }
+    // `Associations::Preloader#call` — the ruby-family class in
+    // preloading.rb. A two-keyword call is rewritten before it runs.
+    register_stdlib_class(classes, "ActiveRecord::Associations::Preloader", &[], &[
+        ("call", Ty::Nil),
+    ]);
     // `ActiveModel::Type::Boolean.new.cast(v)`: nil for a blank value, else the boolean.
     // `ActiveSupport::TimeZone` is `runtime/ruby/active_support_ext.rb`'s port; `[]` is typed in dispatch, by its argument.
     {
@@ -841,6 +903,14 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
     // Not answered here beyond `new`: the dispatch arm for `ActiveSupport::StringInquirer` types its predicates and String surface.
     register_stdlib_class(classes, "ActiveSupport::StringInquirer", &[("new", Ty::Str)], &[]);
     // `ActiveRecord::Type::Boolean` is a subclass with the same casting; `deserialize` casts the same way for a boolean.
+    register_stdlib_class(classes, "ActiveRecord::Type::String", &[], &[
+        ("cast", Ty::Union { variants: vec![Ty::Str, Ty::Nil].into() }),
+        ("deserialize", Ty::Union { variants: vec![Ty::Str, Ty::Nil].into() }),
+    ]);
+    register_stdlib_class(classes, "ActiveRecord::Type::Integer", &[], &[
+        ("cast", Ty::Union { variants: vec![Ty::Int, Ty::Nil].into() }),
+        ("deserialize", Ty::Union { variants: vec![Ty::Int, Ty::Nil].into() }),
+    ]);
     for name in ["ActiveModel::Type::Boolean", "ActiveRecord::Type::Boolean"] {
         register_stdlib_class(classes, name, &[], &[
             ("cast", Ty::Union { variants: vec![Ty::Bool, Ty::Nil].into() }),
@@ -1176,6 +1246,9 @@ pub(crate) const BUILTIN_BLOCK_VALUE_METHODS: &[(&str, &str)] = &[
     ("Thread::Mutex", "synchronize"),
     ("Monitor", "synchronize"),
     ("ActiveSupport::Cache::MemoryStore", "fetch"),
+    ("ActiveSupport::Cache::NullStore", "fetch"),
+    ("ActiveSupport::Notifications", "subscribed"),
+    ("ActiveJob::Continuable", "step"),
 ];
 
 fn register_stdlib_class(

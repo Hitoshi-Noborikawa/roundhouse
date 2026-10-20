@@ -982,25 +982,10 @@ ActionController::Base.perform_caching = false
 
 # ---- Query assertions ------------------------------------------------
 #
-# Rails' `ActiveSupport::Notifications.subscribed(callback,
-# "sql.active_record") { … }` and the `ActiveRecord::Assertions::
-# QueryAssertions` built on it, over `Db.capture_sql`, which records
-# every statement a prepare/exec issues and skips a query-cache replay,
-# as Rails' counter skips CACHE events. The callback gets Rails' five
-# arguments; the payload carries `:sql` and `:name` ("SQL", since the
-# runtime does not name its queries). Called after the block rather than
-# during it, which no test can tell: they collect, then inspect.
-module ActiveSupport
-  module Notifications
-    def self.subscribed(callback, name, &block)
-      return block.call unless name == "sql.active_record"
-      result = nil
-      statements = Db.capture_sql { result = block.call }
-      statements.each { |sql| callback.call(name, nil, nil, nil, { sql: sql, name: "SQL" }) }
-      result
-    end
-  end
-end
+# `ActiveSupport::Notifications.subscribed` lives in
+# runtime/ruby/active_support_notifications.rb. SQL for that name drains
+# `Db.capture_sql` after the block. QueryAssertions below read the same
+# log directly and skip schema statements.
 
 module ActiveRecord
   module Assertions

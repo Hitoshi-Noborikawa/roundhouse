@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 require_relative "active_record/errors"
 require_relative "active_record/connection_not_established"
+require_relative "active_record/encryption_errors"
 require_relative "active_record/connection_pool"
 require_relative "active_record/registry"
 require_relative "active_record/base"
@@ -20,6 +21,7 @@ require_relative "active_record/friendly_id"
 require_relative "active_record/arel"
 require_relative "active_record/relation"
 require_relative "active_record/preloading"
+require_relative "active_record/types"
 # Database tasks (`db:schema:load`, `prepare_all`, `migrate`). After
 # connection.rb: the task runner calls `Connection`. The readers load
 # before `tasks.rb`, which prepends the app rake file onto the methods

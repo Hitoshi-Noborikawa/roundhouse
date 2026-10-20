@@ -1602,6 +1602,9 @@ module Db
   # No-op (single nil check) when no capture is installed.
   def self.record_query(sql)
     @query_log.push(sql) unless @query_log.nil?
+    if defined?(ActiveSupport::Notifications) && ActiveSupport::Notifications.respond_to?(:sql)
+      ActiveSupport::Notifications.sql(sql)
+    end
   end
 
   # SQL-value escaping primitives — lowerer-emitted code uses these to

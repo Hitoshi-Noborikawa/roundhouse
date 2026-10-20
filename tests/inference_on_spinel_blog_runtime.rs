@@ -436,7 +436,17 @@ fn untyped_subexpressions_baseline() {
     // MEASURED 844 on 2026-10-19: schema load plans every statement
     // before the first DROP, and migrate refuses a schema dump before
     // it rewrites a table. Those helpers are unseeded here.
-    const CEILING: usize = 844;
+    // This probe has no RBS, so a new parameter read is a var. The
+    // framework-surface classes add `Arel.sql`'s bind walk,
+    // `Arel::Nodes` (`SqlLiteral`, `Quoted`, `Not`, `Case`,
+    // `NamedFunction`), `Associations::Preloader`, `Type::String`,
+    // `Type::Integer`, and `RecordNotDestroyed`. The RBS-paired
+    // runtime gate still has zero vars in those methods.
+    // Unmatched-bind checks and quoted CASE values read the same
+    // untyped parameters again.
+    // MEASURED 993 on 2026-10-19 after rebasing onto main's 844.
+    // The framework-surface classes are unseeded on this probe.
+    const CEILING: usize = 993;
     assert!(
         existing_untyped <= CEILING && like_untyped <= LIKE_CEILING,
         "{} untyped sub-expressions on spinel-blog runtime — exceeds ledger: \
