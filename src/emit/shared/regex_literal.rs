@@ -12,6 +12,36 @@
 //! a STRING literal instead (python's `re.compile("…")`, go, kotlin,
 //! csharp) do not — their own string escaping already covers it.
 
+/// Semantic bits of a Ruby regex flag string this build understands.
+///
+/// Ruby's `m` is only "dot matches newline"; `^`/`$` are always line
+/// anchors. Targets that split those modes (RE2, Python, .NET, …) must
+/// turn `dot_matches_newline` into *both* their dot-all and their
+/// line-anchor options. `extended` (`x`) is carried for targets that
+/// can spell it (Python); format-validation ingest gaps it before emit.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct RubyRegexFlagBits {
+    pub ignore_case: bool,
+    pub dot_matches_newline: bool,
+    pub extended: bool,
+}
+
+/// Parse a Ruby flag string into the bits every options-style emitter
+/// shares. Unknown letters are ignored (ingest never ships them on the
+/// format-validation path).
+pub fn parse_ruby_regex_flags(flags: &str) -> RubyRegexFlagBits {
+    let mut bits = RubyRegexFlagBits::default();
+    for c in flags.chars() {
+        match c {
+            'i' => bits.ignore_case = true,
+            'm' => bits.dot_matches_newline = true,
+            'x' => bits.extended = true,
+            _ => {}
+        }
+    }
+    bits
+}
+
 /// Ruby's `m` flag is "dot matches newline" (what most other regex
 /// flavors spell `s` / `DOTALL`); Ruby has no flag for "`^`/`$` match
 /// at line boundaries" at all (that's always on, unflagged), so a
@@ -44,6 +74,18 @@ pub fn translate_ruby_flags_for_re2_style_m(flags: &str) -> String {
     out
 }
 
+/// Pattern string for an RE2-style `Regex::new` / `MustCompile` call:
+/// empty Ruby flags stay bare (an empty `(?)` prefix is a parse error);
+/// otherwise prepend `(?<translated>)`.
+pub fn re2_style_regex_source(pattern: &str, ruby_flags: &str) -> String {
+    let flags = translate_ruby_flags_for_re2_style_m(ruby_flags);
+    if flags.is_empty() {
+        pattern.to_string()
+    } else {
+        format!("(?{flags}){pattern}")
+    }
+}
+
 /// Escape unescaped `/` so `pattern` can sit inside `/…/` delimiters.
 ///
 /// An already-escaped `\/` is left alone, and a literal backslash `\\`
@@ -64,6 +106,8 @@ pub fn escape_regex_delimiters(pattern: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
     /// Ruby's `^`/`$` are always line anchors; its `m` only adds
     /// dot-matches-newline. A flagged `m` keeps both on RE2-style
     /// engines: `/^b.c$/m` matches "a\nb\nc\nd".
@@ -74,7 +118,25 @@ mod tests {
         assert_eq!(translate_ruby_flags_for_re2_style_m("i"), "i");
     }
 
-    use super::*;
+    #[test]
+    fn parse_bits_split_ruby_flag_letters() {
+        assert_eq!(
+            parse_ruby_regex_flags("imx"),
+            RubyRegexFlagBits {
+                ignore_case: true,
+                dot_matches_newline: true,
+                extended: true,
+            }
+        );
+        assert_eq!(parse_ruby_regex_flags(""), RubyRegexFlagBits::default());
+    }
+
+    #[test]
+    fn re2_source_skips_empty_flag_group() {
+        assert_eq!(re2_style_regex_source("a.b", ""), "a.b");
+        assert_eq!(re2_style_regex_source("a.b", "m"), "(?sm)a.b");
+        assert_eq!(re2_style_regex_source("^b.c$", "im"), "(?ism)^b.c$");
+    }
 
     #[test]
     fn bare_slash_is_escaped() {

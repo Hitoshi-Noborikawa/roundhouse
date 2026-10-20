@@ -1469,16 +1469,17 @@ fn emit_literal(lit: &Literal) -> String {
 
 /// Ruby regex flags this build can reproduce exactly: `i` →
 /// `.caseInsensitive`. Ruby's `m` (dot-matches-newline) is
-/// `.dotMatchesLineSeparators` — `NSRegularExpression` has no literal
-/// flag for "`^`/`$` at line boundaries" (that's `.anchorsMatchLines`,
-/// which isn't what Ruby's `m` means). Any other flag character stays
-/// an ingest-time gap, so none reaches here.
+/// `.dotMatchesLineSeparators`. Ruby's `^`/`$` are always line
+/// anchors, so a flagged `m` also adds `.anchorsMatchLines`. Any
+/// other flag character stays an ingest-time gap, so none reaches
+/// here.
 fn swift_regex_options(flags: &str) -> String {
+    let bits = crate::emit::shared::regex_literal::parse_ruby_regex_flags(flags);
     let mut parts: Vec<&str> = Vec::new();
-    if flags.contains('i') {
+    if bits.ignore_case {
         parts.push(".caseInsensitive");
     }
-    if flags.contains('m') {
+    if bits.dot_matches_newline {
         parts.push(".dotMatchesLineSeparators");
         parts.push(".anchorsMatchLines");
     }
@@ -1505,10 +1506,6 @@ mod regex_flag_tests {
     fn ignore_case_maps_to_case_insensitive() {
         assert_eq!(swift_regex_options("i"), ".caseInsensitive");
     }
-
-    #[test]
-    fn rubys_m_dot_matches_newline_maps_to_dot_matches_line_separators() {
-            }
 
     #[test]
     fn ignore_case_and_dot_matches_newline_combine_in_the_options_array() {

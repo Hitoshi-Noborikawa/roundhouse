@@ -1583,10 +1583,28 @@ mod tests {
     #[test]
     fn format_check_carries_flags_into_the_regex_literal() {
         let expr = inline_format_check(Messages::default(), &attr(), "a.b", "im");
-        assert!(
-            format!("{expr:?}").contains(r#"Regex { pattern: "a.b", flags: "im" }"#),
-            "{expr:#?}"
-        );
+        let flags = find_regex_flags(&expr).expect("expected a Regex literal in the format check");
+        assert_eq!(flags, "im");
+    }
+
+    fn find_regex_flags(expr: &Expr) -> Option<String> {
+        match expr.node.as_ref() {
+            ExprNode::Lit {
+                value: Literal::Regex { flags, .. },
+            } => Some(flags.clone()),
+            ExprNode::Send { recv, args, .. } => recv
+                .as_ref()
+                .and_then(|r| find_regex_flags(r))
+                .or_else(|| args.iter().find_map(find_regex_flags)),
+            ExprNode::If { cond, then_branch, else_branch } => find_regex_flags(cond)
+                .or_else(|| find_regex_flags(then_branch))
+                .or_else(|| find_regex_flags(else_branch)),
+            ExprNode::BoolOp { left, right, .. } => {
+                find_regex_flags(left).or_else(|| find_regex_flags(right))
+            }
+            ExprNode::Seq { exprs } => exprs.iter().find_map(find_regex_flags),
+            _ => None,
+        }
     }
 
     #[test]

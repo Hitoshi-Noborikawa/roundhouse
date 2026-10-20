@@ -1669,13 +1669,19 @@ pub(super) fn emit_literal(lit: &Literal) -> String {
 }
 
 fn python_regex_flag_expr(flags: &str) -> String {
+    let bits = crate::emit::shared::regex_literal::parse_ruby_regex_flags(flags);
     let mut parts: Vec<&str> = Vec::new();
-    if flags.contains('i') { parts.push("re.IGNORECASE"); }
-    // Ruby's `m` is "dot matches newline" — Python's `re.DOTALL`. Ruby's
-    // `^`/`$` are line anchors with or without `m`, which in Python is
-    // `re.MULTILINE`, so a flagged `m` needs both.
-    if flags.contains('m') { parts.push("re.DOTALL"); parts.push("re.MULTILINE"); }
-    if flags.contains('x') { parts.push("re.VERBOSE"); }
+    if bits.ignore_case {
+        parts.push("re.IGNORECASE");
+    }
+    // Ruby's `m` → `re.DOTALL`; Ruby's always-on line anchors → `re.MULTILINE`.
+    if bits.dot_matches_newline {
+        parts.push("re.DOTALL");
+        parts.push("re.MULTILINE");
+    }
+    if bits.extended {
+        parts.push("re.VERBOSE");
+    }
     parts.join(" | ")
 }
 
@@ -1692,13 +1698,6 @@ mod regex_flag_tests {
     fn ignore_case_maps_to_re_ignorecase() {
         assert_eq!(python_regex_flag_expr("i"), "re.IGNORECASE");
     }
-
-    #[test]
-    fn rubys_m_dot_matches_newline_maps_to_re_dotall_not_re_multiline() {
-        // `re.MULTILINE` shifts `^`/`$` to line boundaries — a
-        // different flag from Ruby's `m` (dot matches newline), which
-        // is `re.DOTALL`.
-            }
 
     #[test]
     fn ignore_case_and_dot_matches_newline_combine() {

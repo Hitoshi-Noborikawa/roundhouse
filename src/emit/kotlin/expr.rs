@@ -1032,16 +1032,17 @@ fn emit_literal(lit: &Literal) -> String {
 
 /// Ruby regex flags this build can reproduce exactly: `i` →
 /// `RegexOption.IGNORE_CASE`. Ruby's `m` (dot-matches-newline) is
-/// `RegexOption.DOT_MATCHES_ALL` — there's no "`^`/`$` at line
-/// boundaries" option here because Kotlin's `Regex` (via Java's
-/// `Pattern`) has no literal flag for it either. Any other flag
-/// character stays an ingest-time gap, so none reaches here.
+/// `RegexOption.DOT_MATCHES_ALL`. Ruby's `^`/`$` are always line
+/// anchors, so a flagged `m` also adds `RegexOption.MULTILINE`.
+/// Any other flag character stays an ingest-time gap, so none
+/// reaches here.
 fn kotlin_regex_options(flags: &str) -> String {
+    let bits = crate::emit::shared::regex_literal::parse_ruby_regex_flags(flags);
     let mut parts: Vec<&str> = Vec::new();
-    if flags.contains('i') {
+    if bits.ignore_case {
         parts.push("RegexOption.IGNORE_CASE");
     }
-    if flags.contains('m') {
+    if bits.dot_matches_newline {
         parts.push("RegexOption.DOT_MATCHES_ALL");
         parts.push("RegexOption.MULTILINE");
     }
@@ -1068,10 +1069,6 @@ mod regex_flag_tests {
     fn ignore_case_maps_to_regexoption_ignore_case() {
         assert_eq!(kotlin_regex_options("i"), "RegexOption.IGNORE_CASE");
     }
-
-    #[test]
-    fn rubys_m_dot_matches_newline_maps_to_dot_matches_all() {
-            }
 
     #[test]
     fn ignore_case_and_dot_matches_newline_combine_in_a_set() {

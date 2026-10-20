@@ -463,14 +463,9 @@ pub(crate) fn emit_literal(lit: &Literal) -> String {
         Literal::Str { value } => format!("{value:?}"),
         Literal::Sym { value } => format!("{:?}", value.as_str()),
         Literal::Regex { pattern, flags } => {
-            // Ruby's `m` (dot-matches-newline) is Rust's `s`, not `m`
-            // (Rust's `m` shifts `^`/`$` to line boundaries instead).
-            let flags = crate::emit::shared::regex_literal::translate_ruby_flags_for_re2_style_m(flags);
-            let source = if flags.is_empty() {
-                pattern.clone()
-            } else {
-                format!("(?{flags}){pattern}")
-            };
+            // Ruby's `m` is Rust `s` (dot-all); Ruby's `^`/`$` are always
+            // line anchors, so flagged `m` also needs Rust `m`.
+            let source = crate::emit::shared::regex_literal::re2_style_regex_source(pattern, flags);
             format!("regex::Regex::new({source:?}).unwrap()")
         }
     }
@@ -509,10 +504,9 @@ mod regex_flag_tests {
     }
 
     #[test]
-    fn rubys_m_dot_matches_newline_maps_to_rusts_s_not_m() {
-        // Rust's own `m` flag shifts `^`/`$` to line boundaries — a
-        // different flag Ruby doesn't have. Ruby's `m` (dot matches
-        // newline) is Rust's `s`.
+    fn rubys_m_maps_to_rusts_s_and_m() {
+        // Ruby's `m` is Rust `s` (dot-all). Ruby's `^`/`$` are always
+        // line anchors, so flagged `m` also needs Rust `m`.
         assert_eq!(
             emit_literal(&regex("a.b", "m")),
             r#"regex::Regex::new("(?sm)a.b").unwrap()"#

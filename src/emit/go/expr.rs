@@ -3452,18 +3452,11 @@ pub(super) fn emit_literal(lit: &Literal) -> String {
         Literal::Str { value } => go_str_literal(value),
         Literal::Sym { value } => go_str_literal(value.as_str()),
         Literal::Regex { pattern, flags } => {
-            // Empty flags → bare pattern (Go's `(?)` is a parse
-            // error; the `(?<flags>)` group requires at least one
-            // flag char). With flags, prepend the standard prefix.
-            // Ruby's `m` (dot-matches-newline) is Go's `s`, not `m`
-            // (Go's `m` shifts `^`/`$` to line boundaries instead).
-            let flags = crate::emit::shared::regex_literal::translate_ruby_flags_for_re2_style_m(flags);
+            // Ruby's `m` is Go `s` (dot-all); Ruby's `^`/`$` are always
+            // line anchors, so flagged `m` also needs Go `m`. Empty
+            // flags stay bare — Go's `(?)` is a parse error.
             let go_pattern = ruby_regex_to_go(pattern);
-            let full = if flags.is_empty() {
-                go_pattern
-            } else {
-                format!("(?{flags}){go_pattern}")
-            };
+            let full = crate::emit::shared::regex_literal::re2_style_regex_source(&go_pattern, flags);
             format!("regexp.MustCompile({})", go_str_literal(&full))
         }
     }
@@ -3494,9 +3487,9 @@ mod regex_flag_tests {
     }
 
     #[test]
-    fn rubys_m_dot_matches_newline_maps_to_gos_s_not_m() {
-        // Go's own `m` flag shifts `^`/`$` to line boundaries — Ruby's
-        // `m` (dot matches newline) is Go's `s`.
+    fn rubys_m_maps_to_gos_s_and_m() {
+        // Ruby's `m` is Go `s` (dot-all). Ruby's `^`/`$` are always
+        // line anchors, so flagged `m` also needs Go `m`.
         assert_eq!(emit_literal(&regex("a.b", "m")), r#"regexp.MustCompile("(?sm)a.b")"#);
     }
 }

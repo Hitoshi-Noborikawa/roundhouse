@@ -1035,16 +1035,17 @@ fn emit_literal(lit: &Literal) -> String {
 
 /// Ruby regex flags this build can reproduce exactly on .NET: `i` is
 /// `RegexOptions.IgnoreCase`. Ruby's `m` (dot-matches-newline) is
-/// `RegexOptions.Singleline` — .NET's own `RegexOptions.Multiline`
-/// instead shifts `^`/`$` to line boundaries, a different flag Ruby
-/// doesn't have. Any other flag character stays an ingest-time gap
+/// `RegexOptions.Singleline`. Ruby's `^`/`$` are always line anchors,
+/// so a flagged `m` also adds `RegexOptions.Multiline`. Any other
+/// flag character stays an ingest-time gap
 /// (`ValidationRule::Format` never carries one), so none reaches here.
 fn csharp_regex_options(flags: &str) -> String {
+    let bits = crate::emit::shared::regex_literal::parse_ruby_regex_flags(flags);
     let mut parts: Vec<&str> = Vec::new();
-    if flags.contains('i') {
+    if bits.ignore_case {
         parts.push("RegexOptions.IgnoreCase");
     }
-    if flags.contains('m') {
+    if bits.dot_matches_newline {
         parts.push("RegexOptions.Singleline");
         parts.push("RegexOptions.Multiline");
     }
@@ -1071,10 +1072,6 @@ mod regex_flag_tests {
     fn ignore_case_maps_to_regexoptions_ignorecase() {
         assert_eq!(csharp_regex_options("i"), "RegexOptions.IgnoreCase");
     }
-
-    #[test]
-    fn rubys_m_dot_matches_newline_maps_to_regexoptions_singleline_not_multiline() {
-            }
 
     #[test]
     fn ignore_case_and_dot_matches_newline_combine_in_the_constructor() {

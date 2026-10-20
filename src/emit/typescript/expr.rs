@@ -4148,11 +4148,11 @@ mod regex_flag_tests {
     }
 
     #[test]
-    fn rubys_m_dot_matches_newline_maps_to_js_s_not_m() {
-        // JS's own `m` flag shifts `^`/`$` to line boundaries (and
-        // would also break the `\A`/`\z` anchor translation, which
-        // assumes no `m` flag is ever emitted). Ruby's `m` (dot
-        // matches newline) is JS's `s`.
+    fn rubys_m_maps_to_js_s_and_m() {
+        // Ruby's `m` is JS `s` (dot-all). Ruby's `^`/`$` are always
+        // line anchors, so flagged `m` also needs JS `m`. Absolute
+        // anchors `\A`/`\z`/`\Z` then use lookarounds — covered by
+        // `rubys_m_keeps_line_anchors_and_string_anchors_stay_absolute`.
         assert_eq!(flags_of("a.b", "m"), "sm");
     }
 
