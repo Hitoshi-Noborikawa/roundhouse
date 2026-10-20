@@ -1461,7 +1461,7 @@ pub(super) struct ClassConsts {
     /// of one other folded regex constant — `(pattern, flags)`. Used to
     /// resolve `validates …, format: { with: NAME }` (#985 follow-up).
     regexes: std::collections::HashMap<String, (String, String)>,
-    /// The class body calls `default_scope`.
+    /// The class body calls `default_scope` (bare or on `self`).
     default_scoped: bool,
 }
 
@@ -1470,7 +1470,8 @@ impl ClassConsts {
         let mut out = ClassConsts::default();
         out.default_scoped = stmts.iter().any(|stmt| {
             stmt.as_call_node().is_some_and(|call| {
-                call.receiver().is_none() && constant_id_str(&call.name()) == "default_scope"
+                call.receiver().is_none_or(|r| r.as_self_node().is_some())
+                    && constant_id_str(&call.name()) == "default_scope"
             })
         });
         for stmt in stmts {

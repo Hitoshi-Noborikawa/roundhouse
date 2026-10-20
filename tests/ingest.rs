@@ -3534,4 +3534,10 @@ end
     );
     assert!(validation_rules(&model).iter().all(|v| v.attribute.as_str() != "uri"), "default_scope keeps the gap");
     assert!(warnings.iter().any(|w| w.contains("validates :uri, uniqueness:")), "{warnings:?}");
+
+    let (model, warnings, _) = ingest_widget(
+        "class Widget < ApplicationRecord\n  self.default_scope { where(kept: true) }\n  validates :uri, uniqueness: true\nend\n",
+    );
+    assert!(validation_rules(&model).iter().all(|v| v.attribute.as_str() != "uri"), "self.default_scope keeps the gap");
+    assert!(warnings.iter().any(|w| w.contains("validates :uri, uniqueness:")), "{warnings:?}");
 }
