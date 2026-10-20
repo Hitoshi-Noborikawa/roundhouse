@@ -39,6 +39,8 @@ pub(super) fn resolve<V: Vfs + ?Sized>(
                 "source_gems names {name:?} {version}, which no gem root holds (BUNDLE_PATH, GEM_HOME, GEM_PATH): run bundle install"
             ));
         };
+        // A `..` in BUNDLE_PATH would otherwise keep every required file outside `lib/`
+        let installed = normalize(&installed);
         let files = required_files(vfs, &installed, name)?;
         gems.push(SourceGem { mount: dir.join(MOUNT).join(format!("{name}-{version}")), installed, files });
     }
@@ -62,7 +64,7 @@ fn required_files<V: Vfs + ?Sized>(vfs: &V, gem: &Path, name: &str) -> Result<BT
         for (relative, feature) in requires(&text) {
             let base = if relative { file.parent().unwrap().to_path_buf() } else { lib.clone() };
             let path = base.join(if feature.ends_with(".rb") { feature } else { format!("{feature}.rb") });
-            let Ok(path) = normalize(&path) else { continue };
+            let path = normalize(&path);
             if path.starts_with(&lib) && vfs.exists(&path) {
                 pending.push(path);
             }
@@ -98,20 +100,19 @@ fn requires(text: &str) -> Vec<(bool, String)> {
     finder.0
 }
 
-fn normalize(path: &Path) -> Result<PathBuf, ()> {
+fn normalize(path: &Path) -> PathBuf {
+    use std::path::Component;
     let mut out = PathBuf::new();
     for component in path.components() {
         match component {
-            std::path::Component::ParentDir => {
-                if !out.pop() {
-                    return Err(());
-                }
+            Component::ParentDir if matches!(out.components().next_back(), Some(Component::Normal(_))) => {
+                out.pop();
             }
-            std::path::Component::CurDir => {}
+            Component::CurDir => {}
             other => out.push(other),
         }
     }
-    Ok(out)
+    out
 }
 
 pub(super) struct MountVfs<'a, V: Vfs + ?Sized> {
@@ -182,5 +183,31 @@ impl<V: Vfs + ?Sized> Vfs for MountVfs<'_, V> {
             Some(_) => None,
             None => self.inner.canonical(path),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_bundle_path_above_the_app_keeps_the_required_files() {
+        let root = std::env::temp_dir().join(format!("rh-source-gems-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let write = |path: &str, text: &str| {
+            let full = root.join(path);
+            std::fs::create_dir_all(full.parent().unwrap()).unwrap();
+            std::fs::write(full, text).unwrap();
+        };
+        write("app/.bundle/config", "---\nBUNDLE_PATH: \"../shared/bundle\"\n");
+        let gem = "shared/bundle/ruby/3.4.0/gems/widgets-1.0";
+        write(&format!("{gem}/lib/widgets.rb"), "require \"widgets/part\"\n");
+        write(&format!("{gem}/lib/widgets/part.rb"), "module Widgets; end\n");
+        write(&format!("{gem}/lib/widgets/rspec.rb"), "module Widgets; end\n");
+        let lock = Lockfile::parse("GEM\n  remote: https://rubygems.org/\n  specs:\n    widgets (1.0)\n\nDEPENDENCIES\n  widgets\n");
+        let gems = resolve(&crate::vfs::FsVfs::new(), &root.join("app"), Some(&lock), &["widgets".to_string()]).unwrap();
+        let files: Vec<_> = gems[0].files.iter().map(|p| p.display().to_string()).collect();
+        assert_eq!(files, vec!["lib/widgets/part.rb", "lib/widgets.rb"]);
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

@@ -117,7 +117,7 @@ fn rewrite(expr: &mut Expr, runs: bool, target: &str) {
 
 // One shared `case`: inlined at every call site, a large app's emit grew thirteenfold
 fn lookup_class(names: &BTreeSet<String>) -> Vec<crate::dialect::LibraryClass> {
-    let mut source = format!("class {LOOKUP}\n  def self.safe_constantize(name)\n    case name\n");
+    let mut source = format!("class {LOOKUP}\n  def self.safe_constantize(name)\n    case name.delete_prefix(\"::\")\n");
     for name in names {
         source.push_str(&format!("    when {name:?} then {name}\n"));
     }

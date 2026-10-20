@@ -112,6 +112,7 @@ _, body = get("/articles")
 check("index as anyone", [body.include?("Published"), body.include?("Hidden draft")], [true, false])
 _, body = get("/articles", "user=admin")
 check("index as admin", [body.include?("Published"), body.include?("Hidden draft")], [true, true])
+check("rooted name", RoundhouseConstants.safe_constantize("::ArticlePolicy"), ArticlePolicy)
 puts "ok"
 "##,
         )
