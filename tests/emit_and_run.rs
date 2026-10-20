@@ -280,6 +280,8 @@ mod silent_lowerings;
 mod validates_options;
 #[path = "emit_and_run/validates_integer_constants.rs"]
 mod validates_integer_constants;
+#[path = "emit_and_run/validation_callback_on.rs"]
+mod validation_callback_on;
 #[path = "emit_and_run/relation_from_aggregates.rs"]
 mod relation_from_aggregates;
 #[path = "emit_and_run/validates_lambda_conditions.rs"]
