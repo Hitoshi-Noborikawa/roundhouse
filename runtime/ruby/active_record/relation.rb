@@ -1207,13 +1207,18 @@ module ActiveRecord
       @cache_keys ||= {}
       tbl = @model.table_name
       digest = query_digest_hex(to_sql)
-      @cache_keys[timestamp_column] ||= "#{tbl}/query-#{digest}"
+      # `+ ""` hands the caller a fresh String, not the memo's own
+      # (Spinel refuses a typed String container whose Strings another
+      # name can change in place, matz/spinel#9258; the same copy-out
+      # idiom as #1115). Ruby answers the same characters either way.
+      (@cache_keys[timestamp_column] ||= "#{tbl}/query-#{digest}") + ""
     end
 
     def cache_version(timestamp_column = "updated_at")
       timestamp_column = timestamp_column.to_s
       @cache_versions ||= {}
-      @cache_versions[timestamp_column] ||= compute_cache_version(timestamp_column)
+      # Fresh copy out of the memo, as `cache_key` above.
+      (@cache_versions[timestamp_column] ||= compute_cache_version(timestamp_column)) + ""
     end
 
     # Guards `@model.schema_columns.include?` BEFORE calling `maximum`
