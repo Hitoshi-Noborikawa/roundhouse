@@ -5162,7 +5162,11 @@ fn apply_environment_flags(files: &mut [(String, String)], app: &App) {
 fn apply_module_mixins(files: &mut Vec<(String, String)>, app: &App, form: MixinForm) {
     use std::fmt::Write;
 
-    if app.module_mixins.is_empty() && app.initializer_filters.is_empty() && app.collection_cache_store.is_none() {
+    if app.module_mixins.is_empty()
+        && app.initializer_filters.is_empty()
+        && app.initializer_response_headers.is_empty()
+        && app.collection_cache_store.is_none()
+    {
         return;
     }
     let mut block = String::from(match form {
@@ -5240,6 +5244,35 @@ fn apply_module_mixins(files: &mut Vec<(String, String)>, app: &App, form: Mixin
                 let _ = writeln!(block, "    {} if [{}].include?(action_name)", f.method.as_str(), only.join(", "));
             }
             let _ = writeln!(block, "    return nil if performed?");
+        }
+        let _ = writeln!(block, "    nil\n  end\nend");
+    }
+    // The headers, one reopen per target, after the action as Rails runs
+    // an `after_action`: the controller asks this once the action has
+    // answered, and a `before_action` that answered skips it.
+    let mut header_targets: Vec<&str> =
+        app.initializer_response_headers.iter().map(|h| h.target.as_str()).collect();
+    header_targets.dedup();
+    for target in header_targets {
+        let _ = writeln!(
+            block,
+            "\n# `after_action` the app registers on a framework controller in\n\
+             # config/initializers/ (generated — see apply_module_mixins). The\n\
+             # controller asks this after its action.\n\
+             class {target}\n  def initializer_after_filters(action_name)"
+        );
+        for h in app.initializer_response_headers.iter().filter(|h| h.target.as_str() == target) {
+            let write = format!(
+                "headers[{}] = {}",
+                crate::emit::ruby::expr::ruby_str_literal(&h.name),
+                crate::emit::ruby::expr::ruby_str_literal(&h.value)
+            );
+            if h.only.is_empty() {
+                let _ = writeln!(block, "    {write}");
+            } else {
+                let only: Vec<String> = h.only.iter().map(|a| format!(":{}", a.as_str())).collect();
+                let _ = writeln!(block, "    {write} if [{}].include?(action_name)", only.join(", "));
+            }
         }
         let _ = writeln!(block, "    nil\n  end\nend");
     }

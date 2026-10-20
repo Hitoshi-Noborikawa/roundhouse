@@ -624,10 +624,10 @@ const FATES: &[(&str, GemFate)] = &[
     ("pry", GemFate::Infrastructure),
     ("pry-rails", GemFate::Infrastructure),
     ("puma", GemFate::Infrastructure),
-    // Not rack-attack or rack-cors: a middleware that throttles a request or
-    // writes its CORS headers changes what the app answers, and nothing in
-    // the app calls it for a dispatch failure to show that it is missing.
-    ("rack-protection", GemFate::Infrastructure),
+    // Not rack-attack, rack-cors or rack-protection: a middleware that
+    // throttles a request, writes its CORS headers or refuses one it reads
+    // as an attack changes what the app answers, and nothing in the app
+    // calls it for a dispatch failure to show that it is missing.
     ("rack-test", GemFate::Infrastructure),
     ("rails-controller-testing", GemFate::Infrastructure),
     ("rails-dom-testing", GemFate::Infrastructure),
