@@ -1,4 +1,5 @@
 # frozen_string_literal: true
+require_relative "active_support_duration"
 # PostgreSQL `interval` columns. One copy: the spinel time-parsing file
 # and the CRuby overlay that replaces it both `require_relative` this
 # sibling, so the parser is not maintained twice.
