@@ -959,16 +959,18 @@ module ActiveRecord
     # version, which stays for the strict-target runtime transpiles
     # (no Relation class in their tables); this file is walked only
     # into the ruby-family trees. Lowered call-sites don't land here —
-    # they drive a Relation or `_adapter_*` directly.
-    def self.where(conditions)
-      ActiveRecord::Relation.new(self).where(conditions.to_h)
+    # they drive a Relation or `_adapter_*` directly. Every form Rails
+    # takes forwards as written — a Hash, a SQL string, a string with
+    # positional or named binds — as `Relation#where` already takes them.
+    def self.where(condition = nil, *args)
+      ActiveRecord::Relation.new(self).where(condition, *args)
     end
 
-    # Model Hash finders use the relation's NULL / IN predicates too.
-    # `.to_h` matches `where` above: Hash is a no-op (nil / Array values
-    # survive); non-Hash inputs raise rather than reach Relation's SQL path.
+    # Model finders use the relation's NULL / IN predicates too. A SQL
+    # string reaches Relation#find_by's raw-SQL path, as Rails'
+    # `find_by("score > 6")` does.
     def self.find_by(conditions)
-      ActiveRecord::Relation.new(self).find_by(conditions.to_h)
+      ActiveRecord::Relation.new(self).find_by(conditions)
     end
 
     # `Model.find_or_initialize_by` / `find_or_create_by` /
