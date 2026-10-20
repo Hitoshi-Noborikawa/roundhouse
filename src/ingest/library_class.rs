@@ -4596,12 +4596,19 @@ fn walk_dsl_stmts<'pr>(body: ruby_prism::Node<'pr>, out: &mut Vec<ruby_prism::No
 pub(super) fn included_has_accessor(body: ruby_prism::Node<'_>, owner: &ClassId, file: &str) -> bool {
     let mut stmts = Vec::new();
     walk_dsl_stmts(body, &mut stmts);
-    super::survey::without_recording(|| {
-        stmts.iter().any(|stmt| {
-            super::model::ingest_model_body_items(stmt, owner, file, Vec::new(), None, &super::model::ClassConsts::default())
-                .is_ok_and(|items| items.iter().any(super::concern_accessors::is_candidate))
+    // A probe: what it builds is discarded, so is what it reports. Its
+    // gaps would otherwise be recorded (and printed) a second time per
+    // includer, with no constants to fold, for statements the concern
+    // walk lowers.
+    let (has, _probe_diags) = super::prism::scope(|| {
+        super::survey::without_recording(|| {
+            stmts.iter().any(|stmt| {
+                super::model::ingest_model_body_items(stmt, owner, file, Vec::new(), None, &super::model::ClassConsts::default())
+                    .is_ok_and(|items| items.iter().any(super::concern_accessors::is_candidate))
+            })
         })
-    })
+    });
+    has
 }
 
 /// Instance methods a concern's `included do` block (re)defines on every

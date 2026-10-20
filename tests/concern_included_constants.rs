@@ -48,6 +48,22 @@ end
 "#;
 
 fn ingest() -> (roundhouse::App, Vec<String>) {
+    let ((app, gaps), _) = ingest_with_warnings();
+    (app, gaps)
+}
+
+/// The ingest, plus the warnings it reports (what the CLI prints).
+fn ingest_with_warnings() -> ((roundhouse::App, Vec<String>), Vec<String>) {
+    let (result, diags) = roundhouse::ingest::prism::scope(ingest_inner);
+    let warnings = diags
+        .into_iter()
+        .filter(|d| d.severity == roundhouse::diagnostic::Severity::Warning)
+        .map(|d| d.message)
+        .collect();
+    (result, warnings)
+}
+
+fn ingest_inner() -> (roundhouse::App, Vec<String>) {
     let files: Vec<(&str, &str)> = vec![
         (
             "db/schema.rb",
@@ -94,4 +110,18 @@ fn a_concern_constant_folds_into_its_included_validation() {
         rules(&app, "kind")
     );
     assert!(!gaps.iter().any(|g| g.contains(":description") || g.contains(":kind")), "{gaps:?}");
+}
+
+/// A validation that lowers is not also reported as a gap. The
+/// per-includer accessor probe re-reads each `included do` statement and
+/// discards what it builds; the warnings that re-read produced were
+/// printed anyway, so the CLI said "length: maximum: not supported" for
+/// a check the includer runs.
+#[test]
+fn a_lowered_concern_validation_reports_no_warning() {
+    let (_, warnings) = ingest_with_warnings();
+    assert!(
+        !warnings.iter().any(|w| w.contains("validates :description") || w.contains("validates :kind")),
+        "{warnings:?}"
+    );
 }
