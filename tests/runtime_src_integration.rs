@@ -1172,7 +1172,11 @@ fn every_runtime_method_body_concretely_typed() {
     // so the range, its two ends, and the elements of an Array that may
     // hold one are read untyped (+12 in active_record/relation.rb,
     // 834 -> 846).
-    const CEILING: usize = 846;
+    // MEASURED 858 on 2026-10-20: `Relation#cache_key` /
+    // `#cache_version` / `#cache_key_with_version` for jbuilder `cache!`
+    // read the memo Hashes and the windowed rows untyped (+12 over
+    // main's 846, re-measured after rebasing #1034 onto main).
+    const CEILING: usize = 858;
     assert!(
         total_gradual <= CEILING,
         "{total_gradual} Ty::Untyped sites exceeds ceiling of {CEILING}"
