@@ -372,10 +372,13 @@ fn the_renamed_flash_param_keeps_clear_of_local_assigns_keys() {
 }
 
 /// … and of the record a collection binds (`as: :notice_`), which the
-/// partial takes even though its body never reads it.
+/// partial takes even though its body never reads it. Def and contracts
+/// share that record name, so the flash param is `notice__` on both —
+/// not `notice_` on the def and `notice_` on a caller that still thinks
+/// the record is `article`.
 #[test]
 fn the_renamed_flash_param_keeps_clear_of_the_collection_record() {
-    notice_app("<p class=\"stamp\">Ivar notice</p>")
+    let run = notice_app("<p class=\"stamp\">Ivar notice</p>")
         .write("app/views/articles/_stamp.html.erb", "<p class=\"stamp\"><%= @notice %></p>\n")
         .edit(
             "app/views/articles/show.html.erb",
@@ -384,8 +387,14 @@ fn the_renamed_flash_param_keeps_clear_of_the_collection_record() {
                 "{HEADING}  <%= render partial: \"stamp\", collection: @article.comments, as: :notice_ %>\n"
             ),
         )
-        .run_test(CONTROLLER_TEST)
-        .assert_passes();
+        .run_test(CONTROLLER_TEST);
+    run.assert_passes();
+    let stamp =
+        std::fs::read_to_string(run.emitted.join("app/views/articles/_stamp.rb")).expect("_stamp.rb");
+    assert!(
+        stamp.contains("notice__") && stamp.contains("def self.stamp(notice_,"),
+        "def takes as: record notice_ and flash notice__:\n{stamp}"
+    );
 }
 
 /// A block parameter named `notice`, here with a default, is a local:
