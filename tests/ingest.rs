@@ -3685,3 +3685,56 @@ end
         "{:?}", rule.rules
     );
 }
+
+/// A constant folds only when its one write is a plain top-level
+/// `NAME = …` and nothing else in the class body, at any depth, writes
+/// it or calls a possibly-mutating method on it. A write under `if`, an
+/// append (`<<`), a `push`, or a `concat` in a method body changes what
+/// Rails validates against, so each of those stays the reported gap; a
+/// read (`include?`, `freeze`) leaves the constant foldable.
+#[test]
+fn a_nested_write_or_a_mutation_makes_a_constant_unfoldable() {
+    let (model, warnings, _) = ingest_widget(
+        r#"
+class Widget < ApplicationRecord
+  NESTED = %w[a b]
+  if ENV["WIDGET_MODES"]
+    NESTED = %w[c]
+  end
+  APPENDED = %w[a b]
+  APPENDED << "c"
+  PUSHED = %w[a b]
+  PUSHED.push("c")
+  IN_METHOD = %w[a b]
+  READ = %w[a b].freeze
+
+  validates :nested, inclusion: { in: NESTED }
+  validates :appended, inclusion: { in: APPENDED }
+  validates :pushed, inclusion: { in: PUSHED }
+  validates :in_method, inclusion: { in: IN_METHOD }
+  validates :read, inclusion: { in: READ }
+
+  def self.widen!
+    IN_METHOD.concat(%w[c])
+  end
+
+  def readable?(value)
+    READ.include?(value) && READ.frozen?
+  end
+end
+"#,
+    );
+    let rules = validation_rules(&model);
+    for attr in ["nested", "appended", "pushed", "in_method"] {
+        assert!(rules.iter().all(|v| v.attribute.as_str() != attr), "no folded rule for {attr}: {rules:?}");
+        assert!(
+            warnings.iter().any(|w| w.contains(&format!("validates :{attr}, inclusion: in:"))),
+            "{attr}: {warnings:?}"
+        );
+    }
+    assert!(
+        rules.iter().any(|v| v.attribute.as_str() == "read"
+            && matches!(v.rules.as_slice(), [roundhouse::dialect::ValidationRule::Inclusion { values, .. }] if values.len() == 2)),
+        "a read-only constant still folds: {rules:?}"
+    );
+}

@@ -1443,6 +1443,118 @@ enum EnumStored {
     Expr(Expr),
 }
 
+/// Methods a class body may call on a folded constant without changing
+/// it. Any other call (`<<`, `push`, `concat`, `replace`, `[]=`, a
+/// bang method, or one this list doesn't know) counts as a mutation.
+const READ_ONLY_CONST_METHODS: &[&str] = &[
+    "freeze", "frozen?", "include?", "member?", "key?", "has_key?", "value?", "cover?", "each", "each_with_index",
+    "each_with_object", "map", "collect", "flat_map", "select", "filter", "reject", "find", "detect", "find_index",
+    "index", "any?", "all?", "none?", "one?", "empty?", "size", "length", "count", "first", "last", "min", "max",
+    "sum", "sort", "sort_by", "to_a", "to_h", "to_s", "to_sym", "to_set", "inspect", "dup", "keys", "values",
+    "fetch", "dig", "[]", "join", "entries", "zip", "index_by", "index_with", "group_by", "partition", "tally",
+    "filter_map", "each_slice", "each_key", "each_value", "each_pair", "values_at", "slice", "except", "take",
+    "drop", "uniq", "compact", "reverse", "flatten", "invert", "transform_values", "transform_keys", "minmax",
+    "intersection", "union", "difference", "excluding", "including", "&", "|", "+", "-", "source", "options",
+    "match", "match?", "=~", "===", "==", "!=", "eql?", "hash", "is_a?", "nil?", "present?", "blank?",
+];
+
+/// The names a class body writes, or may mutate, anywhere other than
+/// one plain top-level `NAME = …` (see [`ClassConsts::collect`]).
+struct ConstTaint {
+    top_level: std::collections::HashSet<usize>,
+    top_writes: std::collections::HashMap<String, usize>,
+    tainted: std::collections::HashSet<String>,
+}
+
+impl ConstTaint {
+    fn scan(stmts: &[Node<'_>]) -> std::collections::HashSet<String> {
+        let mut scan = ConstTaint {
+            top_level: stmts
+                .iter()
+                .filter(|s| s.as_constant_write_node().is_some())
+                .map(|s| s.location().start_offset())
+                .collect(),
+            top_writes: Default::default(),
+            tainted: Default::default(),
+        };
+        for stmt in stmts {
+            ruby_prism::Visit::visit(&mut scan, stmt);
+        }
+        let ConstTaint { top_writes, mut tainted, .. } = scan;
+        tainted.extend(top_writes.into_iter().filter(|(_, n)| *n > 1).map(|(name, _)| name));
+        tainted
+    }
+
+    fn taint(&mut self, name: Option<ruby_prism::ConstantId<'_>>) {
+        if let Some(name) = name {
+            self.tainted.insert(constant_id_str(&name).to_string());
+        }
+    }
+}
+
+impl<'pr> ruby_prism::Visit<'pr> for ConstTaint {
+    fn visit_constant_write_node(&mut self, node: &ruby_prism::ConstantWriteNode<'pr>) {
+        let name = constant_id_str(&node.name()).to_string();
+        if self.top_level.contains(&node.location().start_offset()) {
+            *self.top_writes.entry(name).or_default() += 1;
+        } else {
+            self.tainted.insert(name);
+        }
+        ruby_prism::visit_constant_write_node(self, node);
+    }
+    fn visit_constant_operator_write_node(&mut self, node: &ruby_prism::ConstantOperatorWriteNode<'pr>) {
+        self.taint(Some(node.name()));
+        ruby_prism::visit_constant_operator_write_node(self, node);
+    }
+    fn visit_constant_or_write_node(&mut self, node: &ruby_prism::ConstantOrWriteNode<'pr>) {
+        self.taint(Some(node.name()));
+        ruby_prism::visit_constant_or_write_node(self, node);
+    }
+    fn visit_constant_and_write_node(&mut self, node: &ruby_prism::ConstantAndWriteNode<'pr>) {
+        self.taint(Some(node.name()));
+        ruby_prism::visit_constant_and_write_node(self, node);
+    }
+    // `A, B = …` and `rescue => A` write through a target node.
+    fn visit_constant_target_node(&mut self, node: &ruby_prism::ConstantTargetNode<'pr>) {
+        self.taint(Some(node.name()));
+    }
+    // `self::NAME = …`, `Widget::NAME << …` and the like: tainted by
+    // their last segment, whatever the scope names.
+    fn visit_constant_path_write_node(&mut self, node: &ruby_prism::ConstantPathWriteNode<'pr>) {
+        self.taint(node.target().name());
+        ruby_prism::visit_constant_path_write_node(self, node);
+    }
+    fn visit_constant_path_operator_write_node(&mut self, node: &ruby_prism::ConstantPathOperatorWriteNode<'pr>) {
+        self.taint(node.target().name());
+        ruby_prism::visit_constant_path_operator_write_node(self, node);
+    }
+    fn visit_constant_path_or_write_node(&mut self, node: &ruby_prism::ConstantPathOrWriteNode<'pr>) {
+        self.taint(node.target().name());
+        ruby_prism::visit_constant_path_or_write_node(self, node);
+    }
+    fn visit_constant_path_and_write_node(&mut self, node: &ruby_prism::ConstantPathAndWriteNode<'pr>) {
+        self.taint(node.target().name());
+        ruby_prism::visit_constant_path_and_write_node(self, node);
+    }
+    fn visit_constant_path_target_node(&mut self, node: &ruby_prism::ConstantPathTargetNode<'pr>) {
+        self.taint(node.name());
+        ruby_prism::visit_constant_path_target_node(self, node);
+    }
+    fn visit_call_node(&mut self, node: &ruby_prism::CallNode<'pr>) {
+        if let Some(recv) = node.receiver() {
+            let method = constant_id_str(&node.name());
+            if !READ_ONLY_CONST_METHODS.contains(&method.as_ref()) {
+                if let Some(cr) = recv.as_constant_read_node() {
+                    self.taint(Some(cr.name()));
+                } else if let Some(cp) = recv.as_constant_path_node() {
+                    self.taint(cp.name());
+                }
+            }
+        }
+        ruby_prism::visit_call_node(self, node);
+    }
+}
+
 /// Constants a class body assigns that an `enum` declaration below them
 /// may name: the mapping itself (`enum :status, STATUSES`), a label
 /// (`NAME => NAME`, `"#{PENDING}": 1`) or a stored value
@@ -1478,31 +1590,25 @@ impl ClassConsts {
                     && constant_id_str(&call.name()) == "default_scope"
             })
         });
-        let mut seen = std::collections::HashSet::new();
+        // A constant folds only when its one write is a plain top-level
+        // `NAME = …` and nothing else in the body, at any depth (method
+        // bodies included), writes it or calls a method on it that may
+        // mutate it. Rails reads the constant as it stands when the macro
+        // naming it runs, and this pass folds the whole body before any
+        // macro is read, so a second write, a write under `if`, or an
+        // `NAME << x` leaves no value it could trust. Refusing beats a
+        // wrong one: the validation stays the reported gap.
+        let tainted = ConstTaint::scan(stmts);
         for stmt in stmts {
-            // A compound write (`NAME -= …`, `+=`, `||=`, `&&=`) is a
-            // write too, never folded: the name holds two values over
-            // the body, so it is unfoldable from here on, as below.
-            let compound = stmt
-                .as_constant_operator_write_node()
-                .map(|n| n.name())
-                .or_else(|| stmt.as_constant_or_write_node().map(|n| n.name()))
-                .or_else(|| stmt.as_constant_and_write_node().map(|n| n.name()));
-            if let Some(name) = compound {
-                let name = constant_id_str(&name).to_string();
-                out.regexes.remove(&name);
-                out.lists.remove(&name);
-                out.scalars.remove(&name);
-                out.labels.remove(&name);
-                out.mappings.remove(&name);
-                seen.insert(name);
-                continue;
-            }
             let Some(cw) = stmt.as_constant_write_node() else { continue };
             let name = constant_id_str(&cw.name()).to_string();
+            if tainted.contains(&name) {
+                continue;
+            }
             let value = cw.value();
             // The right-hand side reads the constants as they stand
-            // before this write (Ruby evaluates it first)...
+            // before this write (Ruby evaluates it first). A tainted one
+            // is in no map, so nothing derived from it folds either.
             let regex = out.regex(&value);
             let list = out.list(&value);
             let scalar = out.scalar(&value);
@@ -1515,21 +1621,6 @@ impl ClassConsts {
             } else {
                 None
             };
-            // ...and a second write makes the name unfoldable in every
-            // map. Rails reads the constant as it stands when the macro
-            // naming it runs (`MODES = %w[open]`, `validates … in: MODES`,
-            // then `MODES = %w[closed]` validates against `open`), and
-            // this pass folds the whole body before any macro is read,
-            // so neither value is safe. Ruby warns "already initialized
-            // constant" for it; refusing beats a wrong value.
-            if !seen.insert(name.clone()) {
-                out.regexes.remove(&name);
-                out.lists.remove(&name);
-                out.scalars.remove(&name);
-                out.labels.remove(&name);
-                out.mappings.remove(&name);
-                continue;
-            }
             if let Some(re) = regex {
                 out.regexes.insert(name.clone(), re);
             }
