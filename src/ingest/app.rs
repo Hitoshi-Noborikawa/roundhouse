@@ -321,14 +321,19 @@ pub fn ingest_app_with_vfs<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResult
     }
     super::sources::reset();
     let _source_root = super::sources::set_root(dir);
-    let path_gems = path_gem_dirs(vfs, dir);
-    let source_vfs = PathGemVfs { inner: vfs, root: dir, dirs: &path_gems };
+    let config = roundhouse_config(vfs, dir)?;
+    let extensions = project_extensions(vfs, dir, &config)?;
+    let lock = vfs.read_to_string(&dir.join("Gemfile.lock")).ok().map(|text| crate::gems::Lockfile::parse(&text));
+    let source_gems = super::source_gems::resolve(vfs, dir, lock.as_ref(), &extensions.source_gems)
+        .map_err(|message| IngestError::Parse { file: dir.join("roundhouse.yml").display().to_string(), message })?;
+    let mount_vfs = super::source_gems::MountVfs { inner: vfs, gems: &source_gems };
+    let mut path_gems = path_gem_dirs(&mount_vfs, dir);
+    path_gems.extend(source_gems.iter().map(|gem| gem.mount.clone()));
+    let source_vfs = PathGemVfs { inner: &mount_vfs, root: dir, dirs: &path_gems };
     let vfs = &source_vfs;
     let engine_routes = engine_route_sources(vfs, dir, &path_gems);
-    let config = roundhouse_config(vfs, dir)?;
     let additional_test_paths = additional_test_paths(dir, &config)?;
     validate_additional_test_paths(vfs, dir, &additional_test_paths)?;
-    let extensions = project_extensions(vfs, dir, &config)?;
     let roots = app_roots(vfs, dir, &path_gems);
     let lib_ignores: Vec<String> = vfs
         .read(&dir.join("config/application.rb"))
@@ -372,7 +377,9 @@ pub fn ingest_app_with_vfs<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResult
     let lock_path = dir.join("Gemfile.lock");
     if vfs.exists(&lock_path) {
         if let Ok(text) = vfs.read_to_string(&lock_path) {
-            app.gem_lock = Some(crate::gems::Lockfile::parse(&text));
+            let mut lock = crate::gems::Lockfile::parse(&text);
+            lock.source = app.extensions.source_gems.clone();
+            app.gem_lock = Some(lock);
             if let Some(lock) = &app.gem_lock {
                 app.gem_boundary = super::rbi::load_gem_boundary(vfs, dir, lock, &app.extensions);
             }

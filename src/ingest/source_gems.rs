@@ -1,0 +1,186 @@
+use std::collections::BTreeSet;
+use std::io;
+use std::path::{Path, PathBuf};
+
+use crate::gems::Lockfile;
+use crate::vfs::Vfs;
+
+pub(super) const MOUNT: &str = ".roundhouse/source_gems";
+
+pub(super) struct SourceGem {
+    pub mount: PathBuf,
+    installed: PathBuf,
+    files: BTreeSet<PathBuf>,
+}
+
+pub(super) fn resolve<V: Vfs + ?Sized>(
+    vfs: &V,
+    dir: &Path,
+    lock: Option<&Lockfile>,
+    names: &[String],
+) -> Result<Vec<SourceGem>, String> {
+    if names.is_empty() {
+        return Ok(Vec::new());
+    }
+    let Some(lock) = lock else {
+        return Err(format!("source_gems names {} but the app has no Gemfile.lock", names.join(", ")));
+    };
+    let roots = crate::i18n::gems::gem_roots(vfs, dir);
+    let mut gems = Vec::new();
+    for name in names {
+        let Some(version) = lock.version_of(name) else {
+            return Err(format!("source_gems names {name:?}, which Gemfile.lock does not resolve"));
+        };
+        if lock.is_in_repo(name) {
+            return Err(format!("source_gems names {name:?}, which Gemfile.lock already takes from the app's tree"));
+        }
+        let Some(installed) = crate::i18n::gems::installed_gem(vfs, &roots, name, version) else {
+            return Err(format!(
+                "source_gems names {name:?} {version}, which no gem root holds (BUNDLE_PATH, GEM_HOME, GEM_PATH): run bundle install"
+            ));
+        };
+        let files = required_files(vfs, &installed, name)?;
+        gems.push(SourceGem { mount: dir.join(MOUNT).join(format!("{name}-{version}")), installed, files });
+    }
+    Ok(gems)
+}
+
+fn required_files<V: Vfs + ?Sized>(vfs: &V, gem: &Path, name: &str) -> Result<BTreeSet<PathBuf>, String> {
+    let lib = gem.join("lib");
+    let entry = [name.to_string(), name.replace('-', "/")]
+        .into_iter()
+        .map(|feature| lib.join(format!("{feature}.rb")))
+        .find(|path| vfs.exists(path))
+        .ok_or_else(|| format!("source gem {name:?} has no lib/{name}.rb to require"))?;
+    let mut seen = BTreeSet::new();
+    let mut pending = vec![entry];
+    while let Some(file) = pending.pop() {
+        if !seen.insert(file.strip_prefix(gem).unwrap().to_path_buf()) {
+            continue;
+        }
+        let text = vfs.read_to_string(&file).map_err(|e| format!("{}: {e}", file.display()))?;
+        for (relative, feature) in requires(&text) {
+            let base = if relative { file.parent().unwrap().to_path_buf() } else { lib.clone() };
+            let path = base.join(if feature.ends_with(".rb") { feature } else { format!("{feature}.rb") });
+            let Ok(path) = normalize(&path) else { continue };
+            if path.starts_with(&lib) && vfs.exists(&path) {
+                pending.push(path);
+            }
+        }
+    }
+    Ok(seen)
+}
+
+fn requires(text: &str) -> Vec<(bool, String)> {
+    struct Finder(Vec<(bool, String)>);
+    impl<'pr> ruby_prism::Visit<'pr> for Finder {
+        fn visit_call_node(&mut self, node: &ruby_prism::CallNode<'pr>) {
+            let method = node.name();
+            let relative = match method.as_slice() {
+                b"require" => Some(false),
+                b"require_relative" => Some(true),
+                _ => None,
+            };
+            if let (Some(relative), None) = (relative, node.receiver()) {
+                let args: Vec<_> = node.arguments().map(|a| a.arguments().iter().collect()).unwrap_or_default();
+                if let [arg] = args.as_slice() {
+                    if let Some(s) = arg.as_string_node() {
+                        self.0.push((relative, String::from_utf8_lossy(s.unescaped()).into_owned()));
+                    }
+                }
+            }
+            ruby_prism::visit_call_node(self, node);
+        }
+    }
+    let parsed = ruby_prism::parse(text.as_bytes());
+    let mut finder = Finder(Vec::new());
+    ruby_prism::Visit::visit(&mut finder, &parsed.node());
+    finder.0
+}
+
+fn normalize(path: &Path) -> Result<PathBuf, ()> {
+    let mut out = PathBuf::new();
+    for component in path.components() {
+        match component {
+            std::path::Component::ParentDir => {
+                if !out.pop() {
+                    return Err(());
+                }
+            }
+            std::path::Component::CurDir => {}
+            other => out.push(other),
+        }
+    }
+    Ok(out)
+}
+
+pub(super) struct MountVfs<'a, V: Vfs + ?Sized> {
+    pub inner: &'a V,
+    pub gems: &'a [SourceGem],
+}
+
+impl<V: Vfs + ?Sized> MountVfs<'_, V> {
+    fn mounted(&self, path: &Path) -> Option<(&SourceGem, PathBuf)> {
+        self.gems.iter().find_map(|gem| path.strip_prefix(&gem.mount).ok().map(|rel| (gem, rel.to_path_buf())))
+    }
+
+    fn file(&self, path: &Path) -> io::Result<PathBuf> {
+        match self.mounted(path) {
+            Some((gem, rel)) if gem.files.contains(&rel) => Ok(gem.installed.join(rel)),
+            Some(_) => Err(io::Error::new(io::ErrorKind::NotFound, "not required by the source gem")),
+            None => Ok(path.to_path_buf()),
+        }
+    }
+}
+
+impl<V: Vfs + ?Sized> Vfs for MountVfs<'_, V> {
+    fn read(&self, path: &Path) -> io::Result<Vec<u8>> {
+        self.inner.read(&self.file(path)?)
+    }
+
+    fn read_to_string(&self, path: &Path) -> io::Result<String> {
+        self.inner.read_to_string(&self.file(path)?)
+    }
+
+    fn read_dir(&self, path: &Path) -> io::Result<Vec<PathBuf>> {
+        let Some((gem, rel)) = self.mounted(path) else { return self.inner.read_dir(path) };
+        let children: BTreeSet<PathBuf> = gem
+            .files
+            .iter()
+            .filter_map(|file| file.strip_prefix(&rel).ok()?.components().next().map(|c| path.join(c)))
+            .collect();
+        if children.is_empty() {
+            return Err(io::Error::new(io::ErrorKind::NotFound, "not required by the source gem"));
+        }
+        Ok(children.into_iter().collect())
+    }
+
+    fn exists(&self, path: &Path) -> bool {
+        match self.mounted(path) {
+            Some((gem, rel)) => gem.files.iter().any(|file| file.starts_with(&rel)),
+            None => self.inner.exists(path),
+        }
+    }
+
+    fn is_dir(&self, path: &Path) -> bool {
+        match self.mounted(path) {
+            Some((gem, rel)) => gem.files.iter().any(|file| file.starts_with(&rel) && *file != rel),
+            None => self.inner.is_dir(path),
+        }
+    }
+
+    fn is_symlink(&self, path: &Path) -> bool {
+        match self.mounted(path) {
+            // The mount is a name, not a directory on disk, so it has no link to report
+            Some(_) => false,
+            None => self.inner.is_symlink(path),
+        }
+    }
+
+    fn canonical(&self, path: &Path) -> Option<PathBuf> {
+        match self.mounted(path) {
+            Some(_) => None,
+            None => self.inner.canonical(path),
+        }
+    }
+}

@@ -210,6 +210,8 @@ pub struct Lockfile {
     /// analyzed like the rest of the app rather than being a boundary.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub in_repo: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub source: Vec<String>,
     /// Git repositories and locked revisions, in source order.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub git: Vec<GitSource>,
@@ -325,6 +327,10 @@ impl Lockfile {
         self.in_repo.iter().any(|n| n == name)
     }
 
+    pub fn is_source(&self, name: &str) -> bool {
+        self.source.iter().any(|n| n == name)
+    }
+
     /// The repository and revision that provide `name`, if it is Git-backed.
     pub fn git_source_of(&self, name: &str) -> Option<&GitSource> {
         self.git.iter().find(|source| source.specs.iter().any(|spec| spec == name))
@@ -386,6 +392,7 @@ pub enum GemFate {
     /// analyzer has to model: a dispatch that fails on its constants is
     /// a fact about the analysis of that code, and is reported as such.
     InRepo,
+    Source,
 }
 
 impl GemFate {
@@ -397,6 +404,7 @@ impl GemFate {
             GemFate::Infrastructure => "infrastructure",
             GemFate::Unknown => "unknown",
             GemFate::InRepo => "in-repo",
+            GemFate::Source => "source",
         }
     }
 }
@@ -430,7 +438,13 @@ impl GemCensus {
             .map(|name| GemEntry {
                 name: name.clone(),
                 version: lock.version_of(name).map(|v| v.to_string()),
-                fate: if lock.is_in_repo(name) { GemFate::InRepo } else { fate_of(name) },
+                fate: if lock.is_in_repo(name) {
+                    GemFate::InRepo
+                } else if lock.is_source(name) {
+                    GemFate::Source
+                } else {
+                    fate_of(name)
+                },
             })
             .collect();
         let transitive = lock.specs.len().saturating_sub(gems.len());
@@ -456,6 +470,7 @@ impl GemCensus {
             GemFate::Modeled,
             GemFate::Infrastructure,
             GemFate::InRepo,
+            GemFate::Source,
         ] {
             let n = self.count(fate);
             if n > 0 {

@@ -67,10 +67,13 @@ fn app() -> emit_and_run::Overlay {
     let overlay = emit_and_run::real_blog()
         .edit(
             "Gemfile.lock",
-            "GEM\n",
-            "PATH\n  remote: vendor/pundit\n  specs:\n    pundit (2.5.2)\n      activesupport (>= 3.0.0)\n\nGEM\n",
+            "    debug (1.11.1)\n",
+            "    pundit (2.5.2)\n      activesupport (>= 3.0.0)\n    debug (1.11.1)\n",
         )
-        .edit("Gemfile.lock", "DEPENDENCIES\n", "DEPENDENCIES\n  pundit!\n")
+        .edit("Gemfile.lock", "DEPENDENCIES\n", "DEPENDENCIES\n  pundit\n")
+        .write(".bundle/config", "---\nBUNDLE_PATH: \"vendor/bundle\"\n")
+        .write("roundhouse.yml", "extensions:\n  - config/roundhouse\n")
+        .write("config/roundhouse/gems.yml", "source_gems:\n  - {gem: \"pundit\"}\n")
         .edit(
             "app/controllers/application_controller.rb",
             "class ApplicationController < ActionController::Base\n",
@@ -86,7 +89,7 @@ fn app() -> emit_and_run::Overlay {
         .edit("app/controllers/articles_controller.rb", "  def edit\n  end", "  def edit\n    authorize @article\n  end")
         .write("app/policies/application_policy.rb", APPLICATION_POLICY)
         .write("app/policies/article_policy.rb", ARTICLE_POLICY);
-    with_gem(overlay, Path::new(GEM), "vendor/pundit")
+    with_gem(overlay, Path::new(GEM), "vendor/bundle/ruby/3.4.0/gems/pundit-2.5.2")
 }
 
 #[test]
@@ -166,4 +169,28 @@ fn safe_constantize_is_a_closed_case_on_ruby_and_refused_elsewhere() {
         );
     }
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn only_what_require_loads_is_ingested() {
+    let (emitted, errors) = app().emit(BuildTarget::Ruby);
+    assert!(errors.is_empty(), "errors: {errors:#?}");
+    let models = emitted.join("app/models/pundit");
+    assert!(models.join("policy_finder.rb").exists(), "the required gem files were not emitted");
+    for unrequired in ["rspec.rb", "policy_generator.rb"] {
+        assert!(!walk(&emitted).iter().any(|p| p.ends_with(unrequired)), "{unrequired} was ingested");
+    }
+}
+
+fn walk(dir: &Path) -> Vec<std::path::PathBuf> {
+    let mut out = Vec::new();
+    for entry in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            out.extend(walk(&path));
+        } else {
+            out.push(path);
+        }
+    }
+    out
 }
