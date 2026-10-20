@@ -287,6 +287,21 @@ fn a_session_store_in_another_initializer_reaches_the_cookie_key() {
 }
 
 #[test]
+fn a_mixed_conditional_with_session_store_stays_in_the_ledger() {
+    // A session_store sibling must not consume an unread assignment that
+    // shares its conditional — the ledger has to keep reporting the whole if.
+    let (_, ledger) = ingest(&[(
+        "config/initializers/mixed.rb",
+        "if Rails.env.production?\n\
+           Rails.application.config.session_store :cookie_store, key: \"_prod\"\n\
+           Rails.application.config.action_controller.forgery_protection_verification_strategy = :header_only\n\
+         end\n",
+    )]);
+    assert_eq!(ledger.len(), 1);
+    assert!(statement(&ledger[0]).starts_with("if "));
+}
+
+#[test]
 fn application_rb_reports_config_statements_nothing_reads() {
     let (app, ledger) = ingest(&[(
         "config/application.rb",

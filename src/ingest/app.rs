@@ -1007,6 +1007,18 @@ pub fn ingest_app_with_vfs<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResult
             })?;
             methods.append(&mut synth);
         }
+        // Session cookie name: application-derived default plus any
+        // `config.session_store` declarations (see `session_config`).
+        // Spliced like the cable / public-file-server settings. The
+        // synthesizer reads the VFS itself so an initializer-only tree
+        // (no `config/application.rb` body methods) still gets a key.
+        if let Some(cookie) = super::session_config::synthesize(vfs, dir)? {
+            let mut synth = crate::runtime_src::parse_methods(&cookie).map_err(|message| IngestError::Unsupported {
+                file: "config/ (config.session_store)".to_string(),
+                message,
+            })?;
+            methods.append(&mut synth);
+        }
         // A helper that overrides ActionView's `token_tag` to answer ""
         // (campfire's ApplicationHelper: "Header-only forgery protection
         // needs no secret in forms or cached HTML"). Rails' form helpers
@@ -1370,29 +1382,29 @@ end
                 class_ivar_initializers: Vec::new(),
             });
         }
-    }
-
-    let source = vfs.read(&app_config_path).unwrap_or_default();
-    if let Some(cookie) = super::session_config::synthesize(vfs, dir, &source)? {
-        let mut methods = crate::runtime_src::parse_methods(&cookie).map_err(|message| IngestError::Unsupported {
-            file: "config/ (config.session_store)".to_string(),
-            message,
+    } else if let Some(cookie) = super::session_config::synthesize(vfs, dir)? {
+        // No `config/application.rb`: still lift a key from initializers /
+        // env files onto a reopen, same method body the branch above uses.
+        let methods = crate::runtime_src::parse_methods(&cookie).map_err(|message| {
+            IngestError::Unsupported {
+                file: "config/ (config.session_store)".to_string(),
+                message,
+            }
         })?;
-        let application = app.rails_application.get_or_insert_with(|| crate::dialect::LibraryClass {
+        app.rails_application = Some(crate::dialect::LibraryClass {
             name: crate::ident::ClassId(crate::ident::Symbol::from("Rails::Application")),
             is_module: false,
             parent: None,
             parent_span: Default::default(),
             includes: Vec::new(),
             include_spans: Vec::new(),
-            methods: Vec::new(),
+            methods,
             nullable_columns: Vec::new(),
             origin: None,
             constants: Vec::new(),
             unknown_calls: Vec::new(),
             class_ivar_initializers: Vec::new(),
         });
-        application.methods.append(&mut methods);
     }
 
     // Top-level constants an initializer defines that are not mixins —
