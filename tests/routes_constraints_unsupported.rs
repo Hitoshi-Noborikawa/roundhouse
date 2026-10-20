@@ -20,10 +20,10 @@
 //!    without it. Full modifier support (plumbing the flag through
 //!    `lower::routes`'s segment-pattern compiler) is a follow-up.
 //!
-//! Both gaps are exercised on BOTH readers: `resources`/`resource`'s
-//! inline kwarg (`ingest_resources_route`) and an explicit route's own
-//! `constraints:` kwarg (`ingest_explicit_route`), since both call the
-//! same `regex_source` and had the identical gap.
+//! Both gaps are exercised on all three readers that share
+//! `read_param_regex_constraints`: `resources`/`resource`'s inline
+//! kwarg, an explicit route's `constraints:` kwarg, and the
+//! `constraints(...) do … end` block form.
 
 use roundhouse::dialect::RouteTable;
 use roundhouse::ingest::{ingest_routes, IngestError};
@@ -63,6 +63,16 @@ fn explicit_route_constraints_with_an_unparseable_value_is_a_located_gap() {
     );
 }
 
+#[test]
+fn block_constraints_with_an_unparseable_value_is_a_located_gap() {
+    expect_unsupported(
+        r#"constraints(id: ID_PATTERN) do
+  get "/widgets/:id", to: "widgets#show"
+end"#,
+        "is not a literal regex",
+    );
+}
+
 // --- Finding 2: a regex constraint carrying a modifier --------------
 
 #[test]
@@ -74,6 +84,16 @@ fn resources_constraints_regex_with_a_modifier_is_refused() {
 fn explicit_route_constraints_regex_with_a_modifier_is_refused() {
     expect_unsupported(
         r#"get "/widgets/:id", to: "widgets#show", constraints: { id: /[a-z]+/i }"#,
+        "regex modifiers",
+    );
+}
+
+#[test]
+fn block_constraints_regex_with_a_modifier_is_refused() {
+    expect_unsupported(
+        r#"constraints(id: /[a-z]+/i) do
+  get "/widgets/:id", to: "widgets#show"
+end"#,
         "regex modifiers",
     );
 }
@@ -91,4 +111,15 @@ fn explicit_route_constraints_plain_regex_still_lowers() {
     let table = ingest(r#"get "/widgets/:id", to: "widgets#show", constraints: { id: /[a-z]+/ }"#)
         .expect("plain regex constraint must ingest");
     assert!(!table.entries.is_empty(), "explicit route must still ingest");
+}
+
+#[test]
+fn block_constraints_plain_regex_still_lowers() {
+    let table = ingest(
+        r#"constraints(id: /[a-z]+/) do
+  get "/widgets/:id", to: "widgets#show"
+end"#,
+    )
+    .expect("plain regex block constraint must ingest");
+    assert!(!table.entries.is_empty(), "block constraints must still produce routes");
 }

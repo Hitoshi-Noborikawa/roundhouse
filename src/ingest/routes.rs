@@ -1217,11 +1217,14 @@ fn ingest_route_stmts<'pr>(
                         // A lambda/object arg (`constraints(SomeGuard.new)`)
                         // yields no hash here, so it changes nothing — that
                         // request-based shape stays unenforced, as before.
+                        // Non-literal / modified regex values refuse via
+                        // the shared reader (same fail-closed policy as
+                        // the `constraints:` kwarg on a route/resource).
                         if method == "constraints" {
-                            let block_constraints = call
-                                .arguments()
-                                .map(|args| block_constraints_hash(&args))
-                                .unwrap_or_default();
+                            let block_constraints = match call.arguments() {
+                                Some(args) => block_constraints_hash(&args, file)?,
+                                None => IndexMap::new(),
+                            };
                             merge_outer_constraints(&mut inner, &block_constraints);
                         }
                         entries.extend(inner);
@@ -1547,15 +1550,60 @@ fn merge_outer_constraints(entries: &mut [RouteSpec], outer: &IndexMap<Symbol, S
     }
 }
 
+/// Param→regex-source map from a `constraints:` / `constraints(...)`
+/// hash's assoc elements. Fail-closed: a value that isn't a literal
+/// regex, or a literal carrying `/i`/`/x`/`/m` (which `regex_source`
+/// cannot express), is `Unsupported` rather than silently omitted or
+/// stripped (#857/#1087). Shared by the explicit-route kwarg, the
+/// `resources`/`resource` kwarg, and the block-form reader below.
+fn read_param_regex_constraints<'a>(
+    elements: impl IntoIterator<Item = Node<'a>>,
+    file: &str,
+    context: &str,
+) -> IngestResult<IndexMap<Symbol, String>> {
+    let mut out = IndexMap::new();
+    for el in elements {
+        let Some(a) = el.as_assoc_node() else { continue };
+        let Some(param) = symbol_value(&a.key()) else { continue };
+        let constraint_value = a.value();
+        match regex_source(&constraint_value) {
+            Some(_) if regex_has_unsupported_modifiers(&constraint_value) => {
+                return Err(IngestError::Unsupported {
+                    file: file.into(),
+                    message: format!(
+                        "{context} constraints: {param}: regex modifiers (/i, /x, /m) are not carried into the lowered constraint"
+                    ),
+                });
+            }
+            Some(src) => {
+                out.insert(Symbol::from(param.as_str()), src);
+            }
+            None => {
+                return Err(IngestError::Unsupported {
+                    file: file.into(),
+                    message: format!(
+                        "{context} constraints: {param} is not a literal regex"
+                    ),
+                });
+            }
+        }
+    }
+    Ok(out)
+}
+
 /// The param→regex-source map from a `constraints(...)` call's own
 /// arguments — the block-level counterpart of the route-level
-/// `constraints:` kwarg hash parsed in `ingest_explicit_route`. Accepts
-/// both the bare-kwargs spelling (`constraints(slug: /.../)`, an
-/// implicit keyword hash) and an explicit Hash literal
-/// (`constraints({slug: /.../})`). A non-hash arg — the request-based
-/// `constraints(SomeGuard.new)` shape — yields an empty map, which is
-/// exactly "change nothing": that shape stays unenforced, as before.
-fn block_constraints_hash(args: &ruby_prism::ArgumentsNode<'_>) -> IndexMap<Symbol, String> {
+/// `constraints:` kwarg hash. Accepts both the bare-kwargs spelling
+/// (`constraints(slug: /.../)`, an implicit keyword hash) and an
+/// explicit Hash literal (`constraints({slug: /.../})`). A non-hash
+/// arg — the request-based `constraints(SomeGuard.new)` shape — yields
+/// an empty map, which is exactly "change nothing": that shape stays
+/// unenforced, as before (#727). Hash entries ride the shared
+/// fail-closed reader.
+fn block_constraints_hash(
+    args: &ruby_prism::ArgumentsNode<'_>,
+    file: &str,
+) -> IngestResult<IndexMap<Symbol, String>> {
     let mut out = IndexMap::new();
     for arg in args.arguments().iter() {
         let elements: Vec<Node<'_>> = if let Some(kh) = arg.as_keyword_hash_node() {
@@ -1565,15 +1613,13 @@ fn block_constraints_hash(args: &ruby_prism::ArgumentsNode<'_>) -> IndexMap<Symb
         } else {
             continue;
         };
-        for el in elements {
-            let Some(assoc) = el.as_assoc_node() else { continue };
-            let Some(param) = symbol_value(&assoc.key()) else { continue };
-            if let Some(src) = regex_source(&assoc.value()) {
-                out.insert(Symbol::from(param.as_str()), src);
-            }
-        }
+        out.extend(read_param_regex_constraints(
+            elements,
+            file,
+            "constraints block",
+        )?);
     }
-    out
+    Ok(out)
 }
 
 /// The `Unsupported` error for a route-body statement that is not a
@@ -3125,47 +3171,20 @@ fn ingest_explicit_route(
                         }
                     }
                     // `constraints: { id: /\d+/, tag: /[^,.\/]+/ }` —
-                    // per-param regex restrictions. Capture each param's
-                    // regex SOURCE (raw text between the delimiters, so
-                    // `\/` etc. survive back into a Ruby literal) keyed
-                    // by param name. digit-class regexes drive the runtime
-                    // router's Integer matcher; the rest let the roda
-                    // converter disambiguate two routes that share a
-                    // path+verb and differ only by the constraint (#67).
-                    // A value that isn't a literal regex can't be
-                    // lowered at all; refuse rather than drop the
-                    // constraint silently (#1087, same as the
-                    // `resources`/`resource` reader).
+                    // per-param regex restrictions (#67). Shared
+                    // fail-closed reader with `resources`/`resource`
+                    // and the `constraints(...) do` block form (#1087).
                     "constraints" => {
                         if let Some(h) = value.as_hash_node() {
-                            for el in h.elements().iter() {
-                                let Some(a) = el.as_assoc_node() else { continue };
-                                let Some(param) = symbol_value(&a.key()) else { continue };
-                                let constraint_value = a.value();
-                                match regex_source(&constraint_value) {
-                                    Some(_) if regex_has_unsupported_modifiers(&constraint_value) => {
-                                        return Err(IngestError::Unsupported {
-                                            file: file.into(),
-                                            message: format!(
-                                                "route {:?} constraints: {param}: regex modifiers (/i, /x, /m) are not carried into the lowered constraint",
-                                                path.as_deref().unwrap_or("?")
-                                            ),
-                                        });
-                                    }
-                                    Some(src) => {
-                                        constraints.insert(Symbol::from(param.as_str()), src);
-                                    }
-                                    None => {
-                                        return Err(IngestError::Unsupported {
-                                            file: file.into(),
-                                            message: format!(
-                                                "route {:?} constraints: {param} is not a literal regex",
-                                                path.as_deref().unwrap_or("?")
-                                            ),
-                                        });
-                                    }
-                                }
-                            }
+                            let ctx = format!(
+                                "route {:?}",
+                                path.as_deref().unwrap_or("?")
+                            );
+                            constraints.extend(read_param_regex_constraints(
+                                h.elements().iter(),
+                                file,
+                                &ctx,
+                            )?);
                         }
                     }
                     other => {
@@ -3502,47 +3521,16 @@ fn ingest_resources_route(
                     };
                 }
                 // `constraints: { id: /[A-Z]{2}\d+/ }` — per-param regex
-                // restriction, same shape and same reader as
-                // `ingest_explicit_route`'s `"constraints"` arm (#857).
-                // A value that isn't a literal regex (a method call, a
-                // Proc, a bare string) can't be lowered at all; refuse
-                // it HERE rather than silently emitting the route
-                // without that param's constraint (a member route could
-                // then accept a sibling collection path with no
-                // diagnostic). A literal regex that compiles still
-                // rides through to `lower::routes`, which already
-                // refuses (with a diagnostic) any flattened route whose
-                // constraint source doesn't compile as a segment
-                // pattern, the same fail-closed path `constraints:` on
-                // an explicit route already takes.
+                // restriction (#857). Shared fail-closed reader with
+                // the explicit-route kwarg and the block form (#1087).
                 "constraints" => {
                     if let Some(h) = value.as_hash_node() {
-                        for el in h.elements().iter() {
-                            let Some(a) = el.as_assoc_node() else { continue };
-                            let Some(param) = symbol_value(&a.key()) else { continue };
-                            let constraint_value = a.value();
-                            match regex_source(&constraint_value) {
-                                Some(_) if regex_has_unsupported_modifiers(&constraint_value) => {
-                                    return Err(IngestError::Unsupported {
-                                        file: file.into(),
-                                        message: format!(
-                                            "resources :{name_str} constraints: {param}: regex modifiers (/i, /x, /m) are not carried into the lowered constraint"
-                                        ),
-                                    });
-                                }
-                                Some(src) => {
-                                    constraints.insert(Symbol::from(param.as_str()), src);
-                                }
-                                None => {
-                                    return Err(IngestError::Unsupported {
-                                        file: file.into(),
-                                        message: format!(
-                                            "resources :{name_str} constraints: {param} is not a literal regex"
-                                        ),
-                                    });
-                                }
-                            }
-                        }
+                        let ctx = format!("resources :{name_str}");
+                        constraints.extend(read_param_regex_constraints(
+                            h.elements().iter(),
+                            file,
+                            &ctx,
+                        )?);
                     }
                 }
                 // `shallow:` lands when a fixture demands it.
