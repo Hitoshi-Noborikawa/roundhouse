@@ -1584,6 +1584,16 @@ impl ClassConsts {
         None
     }
 
+    /// An integer the class body can fold: a literal, `.freeze`d or not,
+    /// or one of the class's own integer constants (`maximum:
+    /// NAME_LIMIT`), whose value Rails reads when the class body runs.
+    pub(super) fn integer(&self, node: &Node<'_>) -> Option<i64> {
+        match self.scalar(node)? {
+            Literal::Int { value } => Some(value),
+            _ => None,
+        }
+    }
+
     /// A label spelled as a symbol, a string, a folded constant, or an
     /// interpolation of folded constants (`"#{UNSET_STATUS}": 0`).
     fn label(&self, node: &Node<'_>) -> Option<String> {

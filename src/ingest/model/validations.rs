@@ -426,28 +426,28 @@ fn parse_of_options<'a>(
             }
             "greater_than" if matches!(kind, ValidatesKind::Numericality) => {
                 saw_rule_key = true;
-                match number_value(&value) {
+                match bound_value(&value, class_consts) {
                     Some(n) => gt = Some(n),
                     None => gaps.push("numericality: greater_than".to_string()),
                 }
             }
             "less_than" if matches!(kind, ValidatesKind::Numericality) => {
                 saw_rule_key = true;
-                match number_value(&value) {
+                match bound_value(&value, class_consts) {
                     Some(n) => lt = Some(n),
                     None => gaps.push("numericality: less_than".to_string()),
                 }
             }
             "greater_than_or_equal_to" if matches!(kind, ValidatesKind::Numericality) => {
                 saw_rule_key = true;
-                match number_value(&value) {
+                match bound_value(&value, class_consts) {
                     Some(n) => gte = Some(n),
                     None => gaps.push("numericality: greater_than_or_equal_to".to_string()),
                 }
             }
             "less_than_or_equal_to" if matches!(kind, ValidatesKind::Numericality) => {
                 saw_rule_key = true;
-                match number_value(&value) {
+                match bound_value(&value, class_consts) {
                     Some(n) => lte = Some(n),
                     None => gaps.push("numericality: less_than_or_equal_to".to_string()),
                 }
@@ -520,8 +520,8 @@ fn parse_validator(key: &str, value: &Node<'_>, file: &str, class_consts: &super
     match key {
         "presence" => parse_bool_or_hash(value, ValidationRule::Presence, "presence", file),
         "absence" => parse_bool_or_hash(value, ValidationRule::Absence, "absence", file),
-        "length" => parse_length_rule(value, file),
-        "numericality" => parse_numericality(value, file),
+        "length" => parse_length_rule(value, file, class_consts),
+        "numericality" => parse_numericality(value, file, class_consts),
         "inclusion" => parse_inclusion(value, file),
         "format" => parse_format(value, file, class_consts),
         other => RuleParse::Gap(vec![other.to_string()]),
@@ -574,7 +574,7 @@ fn parse_bool_or_hash(
     }
 }
 
-fn parse_numericality(value: &Node<'_>, file: &str) -> RuleParse {
+fn parse_numericality(value: &Node<'_>, file: &str, class_consts: &super::ClassConsts) -> RuleParse {
     use crate::dialect::ValidationRule;
     if super::super::util::bool_value(value) == Some(true) {
         return RuleParse::Rule(BuiltRule::bare(ValidationRule::Numericality {
@@ -619,19 +619,19 @@ fn parse_numericality(value: &Node<'_>, file: &str) -> RuleParse {
                 Some(flag) => only_integer = flag,
                 None => gaps.push("numericality: only_integer".to_string()),
             },
-            "greater_than" => match number_value(&child) {
+            "greater_than" => match bound_value(&child, class_consts) {
                 Some(n) => gt = Some(n),
                 None => gaps.push("numericality: greater_than".to_string()),
             },
-            "less_than" => match number_value(&child) {
+            "less_than" => match bound_value(&child, class_consts) {
                 Some(n) => lt = Some(n),
                 None => gaps.push("numericality: less_than".to_string()),
             },
-            "greater_than_or_equal_to" => match number_value(&child) {
+            "greater_than_or_equal_to" => match bound_value(&child, class_consts) {
                 Some(n) => gte = Some(n),
                 None => gaps.push("numericality: greater_than_or_equal_to".to_string()),
             },
-            "less_than_or_equal_to" => match number_value(&child) {
+            "less_than_or_equal_to" => match bound_value(&child, class_consts) {
                 Some(n) => lte = Some(n),
                 None => gaps.push("numericality: less_than_or_equal_to".to_string()),
             },
@@ -795,7 +795,7 @@ fn resolve_format_regex(
 /// `length: { minimum: N, maximum: M }`. `is:`, `in:`, and `within:`
 /// change which lengths Rails accepts; they are a gap, not a silent
 /// drop beside a bound this build does lower.
-fn parse_length_rule(value: &ruby_prism::Node<'_>, file: &str) -> RuleParse {
+fn parse_length_rule(value: &ruby_prism::Node<'_>, file: &str, class_consts: &super::ClassConsts) -> RuleParse {
     use crate::dialect::ValidationRule;
     let Some(elements) = hash_elements(value) else {
         return RuleParse::Gap(vec!["length".to_string()]);
@@ -822,7 +822,7 @@ fn parse_length_rule(value: &ruby_prism::Node<'_>, file: &str) -> RuleParse {
         };
         let child = assoc.value();
         match key.as_str() {
-            "minimum" | "maximum" => match super::super::util::integer_value(&child) {
+            "minimum" | "maximum" => match class_consts.integer(&child) {
                 Some(n) if n >= 0 => {
                     let n = n as u32;
                     if key.as_str() == "minimum" {
@@ -862,6 +862,15 @@ fn parse_length_rule(value: &ruby_prism::Node<'_>, file: &str) -> RuleParse {
         allow_nil,
     };
     RuleParse::Rule(built)
+}
+
+/// A numericality bound: a number literal, or an integer constant of the
+/// class (`less_than_or_equal_to: MAX_SCORE`).
+fn bound_value(node: &Node<'_>, class_consts: &super::ClassConsts) -> Option<f64> {
+    if let Some(n) = class_consts.integer(node) {
+        return Some(n as f64);
+    }
+    number_value(node)
 }
 
 fn number_value(node: &Node<'_>) -> Option<f64> {

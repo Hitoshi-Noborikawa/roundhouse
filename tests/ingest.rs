@@ -3343,3 +3343,39 @@ fn recognized_wrap_parameters_forms_are_consumed_others_stay_in_the_survey() {
     assert_eq!(wrap_gaps.len(), 1, "only the unreadable form is a gap: {wrap_gaps:?}");
     assert!(wrap_gaps[0].0.to_lowercase().contains("gadgets"), "{wrap_gaps:?}");
 }
+
+/// A `length:` / `numericality:` bound may be an integer constant of the
+/// model (`maximum: NAME_LIMIT`): Rails reads it when the class body
+/// runs. It folds to its value, for both the `validates` hash and the
+/// `validates_numericality_of` form, and nothing is reported as a gap.
+#[test]
+fn integer_constant_bounds_fold_to_their_values() {
+    let (model, warnings, _) = ingest_widget(
+        r#"
+class Widget < ApplicationRecord
+  NAME_MIN = 2
+  NAME_LIMIT = 5
+  MAX_SCORE = 100
+
+  validates :name, length: { minimum: NAME_MIN, maximum: NAME_LIMIT }
+  validates :score, numericality: { greater_than_or_equal_to: 0, less_than_or_equal_to: MAX_SCORE }
+  validates_numericality_of :rank, greater_than: NAME_MIN
+end
+"#,
+    );
+    assert!(warnings.is_empty(), "{warnings:?}");
+    let rules = validation_rules(&model);
+    let rule = |attr: &str| rules.iter().find(|v| v.attribute.as_str() == attr).unwrap_or_else(|| panic!("no rule for {attr}: {rules:?}"));
+    assert!(
+        matches!(rule("name").rules.as_slice(), [roundhouse::dialect::ValidationRule::Length { min: Some(2), max: Some(5), .. }]),
+        "{:?}", rule("name").rules
+    );
+    assert!(
+        matches!(rule("score").rules.as_slice(), [roundhouse::dialect::ValidationRule::Numericality { gte: Some(g), lte: Some(l), .. }] if *g == 0.0 && *l == 100.0),
+        "{:?}", rule("score").rules
+    );
+    assert!(
+        matches!(rule("rank").rules.as_slice(), [roundhouse::dialect::ValidationRule::Numericality { gt: Some(g), .. }] if *g == 2.0),
+        "{:?}", rule("rank").rules
+    );
+}
