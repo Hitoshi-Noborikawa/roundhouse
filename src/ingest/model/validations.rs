@@ -66,11 +66,16 @@ struct BuiltRule {
     rule: crate::dialect::ValidationRule,
     if_cond: Option<Expr>,
     unless_cond: Option<Expr>,
+    /// The rule's own hash named `allow_nil:` / `allow_blank:`, which
+    /// wins over the call-level option (Rails merges the call's options
+    /// under each validator's own).
+    own_allow_nil: bool,
+    own_allow_blank: bool,
 }
 
 impl BuiltRule {
     fn bare(rule: crate::dialect::ValidationRule) -> Self {
-        Self { rule, if_cond: None, unless_cond: None }
+        Self { rule, if_cond: None, unless_cond: None, own_allow_nil: false, own_allow_blank: false }
     }
 }
 
@@ -209,17 +214,20 @@ pub(super) fn parse_validates_call(
         });
     }
 
-    if allow_blank && drafts.iter().any(|draft| !blank_safe(&draft.rule)) {
+    // Uniqueness stores both flags, so a call-level one applies to it
+    // (below) rather than refusing the call.
+    let is_uniqueness = |draft: &BuiltRule| matches!(draft.rule, ValidationRule::Uniqueness { .. });
+    if allow_blank && drafts.iter().any(|draft| !blank_safe(&draft.rule) && !is_uniqueness(draft)) {
         gaps.push("allow_blank".to_string());
     }
     // Call-level `allow_nil: true` is Rails' skip-when-nil for every
-    // validator in the call. Length stores it. The other rules this
-    // build lowers reject nil, so applying them would reject records
-    // Rails accepts.
+    // validator in the call. Length and Uniqueness store it. The other
+    // rules this build lowers reject nil, so applying them would reject
+    // records Rails accepts.
     if allow_nil == Some(true)
         && drafts
             .iter()
-            .any(|draft| !matches!(draft.rule, ValidationRule::Length { .. }))
+            .any(|draft| !matches!(draft.rule, ValidationRule::Length { .. }) && !is_uniqueness(draft))
     {
         gaps.push("allow_nil".to_string());
     }
@@ -236,6 +244,17 @@ pub(super) fn parse_validates_call(
 
     if allow_blank {
         drafts.retain(|draft| !matches!(draft.rule, ValidationRule::Presence));
+    }
+    for draft in &mut drafts {
+        let (own_nil, own_blank) = (draft.own_allow_nil, draft.own_allow_blank);
+        if let ValidationRule::Uniqueness { allow_nil: nil_slot, allow_blank: blank_slot, .. } = &mut draft.rule {
+            if let (Some(flag), false) = (allow_nil, own_nil) {
+                *nil_slot = flag;
+            }
+            if allow_blank && !own_blank {
+                *blank_slot = true;
+            }
+        }
     }
     if let Some(flag) = allow_nil {
         for draft in &mut drafts {
@@ -436,11 +455,17 @@ fn parse_uniqueness(value: &Node<'_>, file: &str, class_consts: &super::ClassCon
                 None => gaps.push("uniqueness: case_sensitive".to_string()),
             },
             "allow_nil" => match super::super::util::bool_value(&child) {
-                Some(flag) => allow_nil = flag,
+                Some(flag) => {
+                    allow_nil = flag;
+                    built.own_allow_nil = true;
+                }
                 None => gaps.push("uniqueness: allow_nil".to_string()),
             },
             "allow_blank" => match super::super::util::bool_value(&child) {
-                Some(flag) => allow_blank = flag,
+                Some(flag) => {
+                    allow_blank = flag;
+                    built.own_allow_blank = true;
+                }
                 None => gaps.push("uniqueness: allow_blank".to_string()),
             },
             "if" => push_condition(&child, file, &mut built.if_cond, "if", &mut gaps),

@@ -178,3 +178,50 @@ puts "primary key exclusion passed"
         )
         .assert_passes();
 }
+
+/// A call-level `allow_nil:` / `allow_blank:` reaches the uniqueness
+/// validator like every other one in the call (Rails passes the call's
+/// options to each), and a key in the validator's own hash wins over it.
+/// Rails 8.1.4 answers for the same rows: a nil uri and a blank label are
+/// skipped, and `code` still collides on nil because its hash says
+/// `allow_nil: false`.
+#[test]
+fn call_level_allow_nil_and_allow_blank_reach_uniqueness() {
+    emit_and_run::empty_app()
+        .write("app/models/application_record.rb", APPLICATION_RECORD)
+        .write(
+            "db/schema.rb",
+            r#"ActiveRecord::Schema.define do
+  create_table "widgets", force: :cascade do |t|
+    t.string "uri"
+    t.string "label"
+    t.string "code"
+  end
+end
+"#,
+        )
+        .write(
+            "app/models/widget.rb",
+            r#"class Widget < ApplicationRecord
+  validates :uri, uniqueness: true, allow_nil: true
+  validates :label, uniqueness: true, allow_blank: true
+  validates :code, uniqueness: { allow_nil: false }, allow_nil: true
+end
+"#,
+        )
+        .run_ruby(
+            r#"Widget.create!(uri: nil, label: "", code: "c")
+Widget.create!(uri: nil, label: "", code: nil)
+got = [
+  { uri: nil, label: "x1", code: "z1" },
+  { uri: "u", label: "", code: "z2" },
+  { uri: "u2", label: "  ", code: "z3" },
+  { uri: "u3", label: "x3", code: nil },
+].map { |attrs| w = Widget.new(**attrs); w.valid?; w.errors.to_a }
+want = [[], [], [], ["Code has already been taken"]]
+raise "errors: #{got.inspect}" unless got == want
+puts "call-level allow options passed"
+"#,
+        )
+        .assert_passes();
+}
