@@ -294,6 +294,8 @@ mod validates_exclusion;
 mod validates_lambda_conditions;
 #[path = "emit_and_run/validates_format_flags.rs"]
 mod validates_format_flags;
+#[path = "emit_and_run/concern_included_constants.rs"]
+mod concern_included_constants;
 
 #[test]
 fn markdown_templates_render_with_their_mime_type_and_erb_escaping() {

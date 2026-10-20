@@ -4700,6 +4700,12 @@ pub(in crate::ingest) fn ingest_concern_model_items_with_constants(
         };
 
         let Some(body) = module.body() else { continue };
+        // `included do` runs in the includer, but its constants resolve
+        // lexically, from this module (`DESCRIPTION_LIMIT = 150` in the
+        // concern wins over an includer's own, and an includer-only one
+        // is a NameError there): the module body's constants, under the
+        // class-body folding rules.
+        let concern_consts = super::model::ClassConsts::collect(&flatten_statements(module.body().unwrap()), file);
         let block_visibility = super::visibility::Visibility::resolve(Some(&body), file, Some(&id)).ok();
         let mut items: Vec<ModelBodyItem> = Vec::new();
         let mut enums: Vec<ConcernEnumDecl> = Vec::new();
@@ -4738,7 +4744,7 @@ pub(in crate::ingest) fn ingest_concern_model_items_with_constants(
                 // today's handling as a whole.
                 if let Some((guard, stmts)) = includer_guarded_stmts(&inner, file) {
                     let parsed: Option<Vec<ModelBodyItem>> = stmts.iter().try_fold(Vec::new(), |mut acc, stmt| {
-                        let parsed = super::model::ingest_model_body_items(stmt, &id, file, Vec::new(), None, &super::model::ClassConsts::default()).ok()?;
+                        let parsed = super::model::ingest_model_body_items(stmt, &id, file, Vec::new(), None, &concern_consts).ok()?;
                         let claimed = !parsed.is_empty()
                             && parsed.iter().all(|item| matches!(item,
                                 ModelBodyItem::Association { .. }
@@ -4770,7 +4776,7 @@ pub(in crate::ingest) fn ingest_concern_model_items_with_constants(
                         &call,
                         file,
                         &[],
-                        &super::model::ClassConsts::default(),
+                        &concern_consts,
                         &resolve_constant,
                     ) {
                         Ok(Some(super::model::ClassBodyExpansion::DelegatedType(expanded))) => {
@@ -4811,7 +4817,7 @@ pub(in crate::ingest) fn ingest_concern_model_items_with_constants(
                 {
                     continue;
                 }
-                match super::model::ingest_model_body_items(&inner, &id, file, Vec::new(), None, &super::model::ClassConsts::default()) {
+                match super::model::ingest_model_body_items(&inner, &id, file, Vec::new(), None, &concern_consts) {
                     Ok(parsed) => {
                         for mut item in parsed {
                             match item {
