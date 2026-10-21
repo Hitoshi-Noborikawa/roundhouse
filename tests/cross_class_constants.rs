@@ -243,7 +243,9 @@ fn reflection_on_the_owner_keeps_its_constants_a_gap() {
 }
 
 /// `Regexp.union` of literal Strings (or a folded list of them) is the
-/// escaped alternation Ruby builds; with no String it is `/(?!)/`, which
+/// escaped alternation Ruby builds; with no String it matches nothing, as
+/// Ruby's `/(?!)/` does, spelled `[^\s\S]`, which every target's engine
+/// compiles (RE2 on go and Rust's regex crate reject a lookahead), which
 /// matches nothing.
 #[test]
 fn regexp_union_folds_to_an_escaped_alternation() {
@@ -267,8 +269,18 @@ end
     };
     assert_eq!(pattern("slug"), r"a\.b|c\+d");
     assert_eq!(pattern("code"), r"x|y\|z");
-    assert_eq!(pattern("name"), "(?!)");
-    assert_eq!(pattern("text"), "(?!)");
+    assert_eq!(pattern("name"), r"[^\s\S]");
+    assert_eq!(pattern("text"), r"[^\s\S]");
+    // The strict targets compile what the fold hands them: Rust's own
+    // regex crate stands for rust's emit here (go's RE2 rejects the same
+    // lookaround).
+    for attr in ["slug", "code", "name", "text"] {
+        let pattern = pattern(attr);
+        let re = regex::Regex::new(&pattern).unwrap_or_else(|e| panic!("{attr}: {pattern}: {e}"));
+        if attr == "name" || attr == "text" {
+            assert!(!re.is_match("") && !re.is_match("a") && !re.is_match("\n"), "{pattern} matches nothing");
+        }
+    }
 }
 
 /// An app constant named `Regexp` may be what a body's `Regexp.union`
@@ -292,4 +304,45 @@ end
         assert!(rules(&app, "Widget", attr).is_empty(), "{attr}: {:?}", rules(&app, "Widget", attr));
         assert!(gaps.iter().any(|g| g.contains("widget.rb") && g.contains(&format!(":{attr},"))), "{attr}: {gaps:?}");
     }
+}
+
+/// `const_get` returns the owner's constant itself, so a mutation through
+/// it (`Kinds.const_get(:ALL) << "c"`) reaches the folded value, as does a
+/// `constantize` of the owner's name. `Object.const_get` (or a
+/// receiverless one outside any body) can reach any owner, so nothing
+/// folds then; `Object.const_set(:Name, …)` writes only `Name`, and an
+/// unrelated `Object.const_set(:Other, …)` keeps every owner folding. A
+/// dynamic `name.constantize` is not followed.
+#[test]
+fn a_dynamic_constant_lookup_keeps_the_owner_a_gap() {
+    let kinds = "module Kinds\n  ALL = %w(a b)\nend\n";
+    let model = "class Widget < ApplicationRecord\n  validates :kind, inclusion: Kinds::ALL\n  validates :text, length: { maximum: Rule::TEXT_SIZE_LIMIT }\nend\n";
+    for (case, source, rule_folds) in [
+        ("const_get", "class Registry\n  def self.add(kind)\n    Kinds.const_get(:ALL) << kind\n  end\nend\n", true),
+        ("constantize", "class Registry\n  def self.add(kind)\n    \"Kinds::ALL\".constantize << kind\n  end\nend\n", true),
+        ("Object.const_get", "class Registry\n  def self.add(name, kind)\n    Object.const_get(name) << kind\n  end\nend\n", false),
+        ("top-level const_get", "const_get(:Kinds)::ALL << \"c\"\n", false),
+        // `Object.const_set(:Name, …)` writes the one top-level `Name`.
+        ("Object.const_set(:Kinds)", "class Registry\n  def self.swap(list)\n    Object.const_set(:Kinds, list)\n  end\nend\n", true),
+    ] {
+        let (app, gaps) = ingest(&[
+            ("app/models/rule.rb", RULE),
+            ("app/models/kinds.rb", kinds),
+            ("app/models/registry.rb", source),
+            ("app/models/widget.rb", model),
+        ]);
+        assert!(rules(&app, "Widget", "kind").is_empty(), "{case}: {:?}", rules(&app, "Widget", "kind"));
+        assert!(gaps.iter().any(|g| g.contains("widget.rb") && g.contains(":kind,")), "{case}: {gaps:?}");
+        assert_eq!(!rules(&app, "Widget", "text").is_empty(), rule_folds, "{case}: Rule's constant {gaps:?}");
+    }
+}
+
+#[test]
+fn an_unrelated_top_level_const_set_keeps_owners_folding() {
+    let (app, gaps) = ingest(&[
+        ("app/models/rule.rb", RULE),
+        ("lib/tasks_helper.rb", "class TasksHelper\n  def self.define(klass)\n    Object.const_set(:StatusToBeDeleted, klass)\n  end\nend\n"),
+        ("app/models/widget.rb", "class Widget < ApplicationRecord\n  validates :text, length: { maximum: Rule::TEXT_SIZE_LIMIT }\nend\n"),
+    ]);
+    assert!(matches!(rules(&app, "Widget", "text").as_slice(), [ValidationRule::Length { max: Some(300), .. }]), "{gaps:?}");
 }

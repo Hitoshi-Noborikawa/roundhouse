@@ -1481,11 +1481,13 @@ struct ConstTaint {
     reflected: std::collections::HashSet<String>,
 }
 
-/// Calls on an owner that can write or remove its constants, or run code
-/// in its scope that does.
+/// Calls on an owner that can write or remove its constants, run code in
+/// its scope that does, or hand out a constant to mutate where this pass
+/// cannot follow it (`Kinds.const_get(:ALL) << "c"`). On `Object` (or
+/// receiverless outside any body) they can reach every owner.
 const REFLECTION_METHODS: &[&str] = &[
-    "const_set", "remove_const", "send", "__send__", "public_send", "class_eval", "module_eval", "class_exec",
-    "module_exec", "instance_eval", "instance_exec",
+    "const_set", "remove_const", "const_get", "send", "__send__", "public_send", "class_eval", "module_eval",
+    "class_exec", "module_exec", "instance_eval", "instance_exec",
 ];
 
 /// Methods whose result is a new object, never the receiver or one of its
@@ -1501,6 +1503,16 @@ const FRESH_RESULT_METHODS: &[&str] = &[
     "to_sym", "to_i", "to_f", "inspect", "index_by", "index_with", "group_by", "partition", "tally", "zip",
     "include?", "member?", "key?", "any?", "all?", "none?", "empty?", "nil?", "frozen?", "is_a?",
 ];
+
+/// The constant a `const_set(:Name, …)` / `remove_const(:Name)` names with a
+/// literal, which is all it can write.
+fn named_constant_write(call: &ruby_prism::CallNode<'_>) -> Option<String> {
+    if !matches!(constant_id_str(&call.name()).as_ref(), "const_set" | "remove_const") {
+        return None;
+    }
+    let first = call.arguments()?.arguments().iter().next()?;
+    symbol_value(&first).or_else(|| string_value(&first))
+}
 
 /// The constant a receiver chain is rooted at: `MODES`, `MODES.to_a`,
 /// `Widget::MODES.first` (the last segment of a path), unless the chain
@@ -1686,8 +1698,20 @@ impl<'pr> ruby_prism::Visit<'pr> for ConstTaint {
             }
             if REFLECTION_METHODS.contains(&method.as_ref()) {
                 if let Some(root) = chain_root(&recv) {
-                    self.reflected.insert(root);
+                    // `Object.const_set(:Name, …)` defines or replaces the
+                    // one top-level `Name`, not every owner.
+                    match named_constant_write(node) {
+                        Some(name) if root == "Object" => self.reflected.insert(name),
+                        _ => self.reflected.insert(root),
+                    };
                 }
+            }
+            // `"Kinds".constantize` is the owner itself. A computed name
+            // (`model_name.constantize`) is not followed.
+            if matches!(method.as_ref(), "constantize" | "safe_constantize")
+                && let Some(name) = string_value(&recv)
+            {
+                self.reflected.extend(name.trim_start_matches("::").split("::").map(str::to_string));
             }
         }
         ruby_prism::visit_call_node(self, node);
@@ -1975,7 +1999,9 @@ impl ClassConsts {
     /// `Regexp.union("a", "b")`, `Regexp.union(LIST)` or `Regexp.union(%w[…])`
     /// of Strings: the alternation of each String escaped, as Ruby builds
     /// it. No String at all (`Regexp.union`, `Regexp.union([])`) is Ruby's
-    /// `/(?!)/`, which matches nothing. A Regexp or Symbol argument, or one
+    /// `/(?!)/`, which matches nothing; it is spelled `[^\s\S]` here, which
+    /// also matches nothing and which every target's engine compiles (go's
+    /// RE2 and Rust's regex crate reject a lookahead). A Regexp or Symbol argument, or one
     /// this table cannot fold, leaves the call unresolved.
     fn regexp_union(&self, call: &ruby_prism::CallNode<'_>) -> Option<String> {
         if constant_id_str(&call.name()) != "union" || call.block().is_some() || self.regexp_shadowed {
@@ -1998,7 +2024,7 @@ impl ClassConsts {
             _ => args.iter().map(|arg| self.text(arg)).collect::<Option<_>>()?,
         };
         if strings.is_empty() {
-            return Some("(?!)".to_string());
+            return Some(r"[^\s\S]".to_string());
         }
         Some(strings.iter().map(|s| regexp_escape(s)).collect::<Vec<_>>().join("|"))
     }

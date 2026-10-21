@@ -92,8 +92,10 @@ pub(in crate::ingest) struct EnumConstants {
     /// over the whole file). By name, whatever owner the write names.
     foreign_taint: std::collections::HashSet<String>,
     /// Owner names a reflective call reaches (`Rule.const_set`,
-    /// `Rule.send(:remove_const, …)`, a receiverless `const_set` in the
-    /// owner's body): any of their constants may be replaced.
+    /// `Rule.send(:remove_const, …)`, `Kinds.const_get(:ALL) << x`,
+    /// `"Kinds".constantize`, a receiverless `const_set` in the owner's
+    /// body): any of their constants may be replaced or mutated. `Object`
+    /// reaches them all.
     reflected: std::collections::HashSet<String>,
 }
 
@@ -258,6 +260,7 @@ impl EnumConstants {
             return None;
         }
         if self.foreign_taint.contains(member)
+            || self.reflected.contains("Object")
             || owner.split("::").any(|segment| self.reflected.contains(segment))
             || self.write_counts.get(&name) != Some(&1)
         {

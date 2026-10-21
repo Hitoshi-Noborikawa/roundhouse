@@ -129,8 +129,16 @@ impl EnumConstants {
                     && let Some(call) = node.as_call_node()
                     && call.receiver().is_none_or(|r| r.as_self_node().is_some())
                     && super::super::REFLECTION_METHODS.contains(&constant_id_str(&call.name()).as_ref())
-                    && let Some(owner) = self.nesting.last()
                 {
+                    // Outside any body the receiver is `main`, whose
+                    // `const_get` reaches every owner, as `Object`'s does;
+                    // its `const_set(:Name, …)` only the one `Name`.
+                    let named = super::super::named_constant_write(&call);
+                    let owner = match (self.nesting.last(), &named) {
+                        (Some(owner), _) => owner.as_str(),
+                        (None, Some(name)) => name.as_str(),
+                        (None, None) => "Object",
+                    };
                     let last = owner.rsplit("::").next().unwrap_or(owner).to_string();
                     self.constants.reflected.insert(last);
                 }
