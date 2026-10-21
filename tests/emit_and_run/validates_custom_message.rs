@@ -10,7 +10,7 @@ fn app() -> emit_and_run::Overlay {
         .write("app/models/application_record.rb", "class ApplicationRecord < ActiveRecord::Base\n  self.abstract_class = true\nend\n")
         .write(
             "db/schema.rb",
-            "ActiveRecord::Schema.define do\n  create_table \"widgets\", force: :cascade do |t|\n    t.string \"code\"\n    t.string \"name\"\n    t.string \"kind\"\n    t.integer \"score\"\n    t.string \"title\"\n    t.string \"slug\"\n  end\nend\n",
+            "ActiveRecord::Schema.define do\n  create_table \"widgets\", force: :cascade do |t|\n    t.string \"code\"\n    t.string \"name\"\n    t.string \"kind\"\n    t.integer \"score\"\n    t.string \"title\"\n    t.string \"slug\"\n    t.string \"note\"\n  end\nend\n",
         )
         .write(
             "app/models/widget.rb",
@@ -21,6 +21,7 @@ fn app() -> emit_and_run::Overlay {
   validates :score, numericality: { greater_than: 1, message: "must exceed the minimum" }
   validates :title, exclusion: { in: %w[admin], message: "is reserved for %{model}" }
   validates :slug, uniqueness: { message: "is used by %{attribute}" }
+  validates :note, presence: { message: "is 100%% needed, not %%{shape}" }
 end
 "#,
         )
@@ -31,12 +32,12 @@ fn custom_messages_render_like_rails() {
     app()
         .run_ruby(
             r##"seed = Widget.new
-{ code: "A", name: "x", kind: "a", score: 5, title: "t", slug: "s" }.each { |k, v| seed.public_send(:"#{k}=", v) }
+{ code: "A", name: "x", kind: "a", score: 5, title: "t", slug: "s", note: "n" }.each { |k, v| seed.public_send(:"#{k}=", v) }
 seed.save!
 rows = [
-  { code: "a-1", name: "", kind: "z", score: 0, title: "admin", slug: "s" },
-  { code: "OK", name: "long", kind: "b", score: nil, title: "x", slug: "n" },
-  { code: "OK", name: "ok", kind: "b", score: 3, title: "x", slug: "n" },
+  { code: "a-1", name: "", kind: "z", score: 0, title: "admin", slug: "s", note: "" },
+  { code: "OK", name: "long", kind: "b", score: nil, title: "x", slug: "n", note: "n" },
+  { code: "OK", name: "ok", kind: "b", score: 3, title: "x", slug: "n", note: "n" },
 ]
 got = rows.map do |attrs|
   w = Widget.new
@@ -45,7 +46,7 @@ got = rows.map do |attrs|
   w.errors.to_a
 end
 want = [
-  ["Code is not a valid code (a-1)", "Name must be given", "Kind z is not a kind", "Score must exceed the minimum", "Title is reserved for Widget", "Slug is used by Slug"],
+  ["Code is not a valid code (a-1)", "Name must be given", "Kind z is not a kind", "Score must exceed the minimum", "Title is reserved for Widget", "Slug is used by Slug", "Note is 100% needed, not %{shape}"],
   ["Name is too long (maximum is 3 characters)", "Score must exceed the minimum"],
   [],
 ]
@@ -82,6 +83,7 @@ fn the_roda_emit_passes_a_plain_message_to_sequel() {
             "app/models/widget.rb",
             r#"class Widget < ApplicationRecord
   validates :phone, format: { with: /\A\+?\d+\z/, message: "only allows numbers" }
+  validates :title, presence: { message: "is 100%% needed" }
   validates :name, presence: { message: "must be given" }
   validates :score, numericality: { greater_than: 1, message: "must exceed the minimum" }
   validates :code, format: { with: /\A[A-Z]+\z/, message: "is not a valid code (%{value})" }
@@ -108,6 +110,7 @@ end
     for line in [
         r#", :phone, message: "only allows numbers""#,
         r#"validates_presence :name, message: "must be given""#,
+        r#"validates_presence :title, message: "is 100% needed""#,
         r#"validates_numeric :score, message: "must exceed the minimum""#,
         r#"validates_operator :>, 1, :score, message: "must exceed the minimum""#,
         "ROUNDHOUSE-TODO: validation on :code with an interpolated message not emitted",

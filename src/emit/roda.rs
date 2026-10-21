@@ -328,11 +328,13 @@ fn model_for(model: &Model, schema: &Schema) -> String {
                     continue;
                 }
                 // Through the Ruby string encoder: a single-quoted `'#{x}'`
-                // message is literal text, not an interpolation.
+                // message is literal text, not an interpolation. Sequel
+                // uses the String as given, so I18n's `%%` escape is
+                // rendered here as the `%` Rails shows.
                 let custom = validation
                     .message
                     .as_ref()
-                    .map(|m| format!(", message: {}", crate::emit::ruby::expr::ruby_str_literal(m)))
+                    .map(|m| format!(", message: {}", crate::emit::ruby::expr::ruby_str_literal(&m.replace("%%", "%"))))
                     .unwrap_or_default();
                 for rule in &validation.rules {
                     match rule {

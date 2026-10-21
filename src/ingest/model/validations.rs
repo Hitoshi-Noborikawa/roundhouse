@@ -368,16 +368,30 @@ fn push_message(value: &Node<'_>, kind: &str, counted: bool, slot: &mut Option<S
         gaps.push(format!("{kind}: message"));
         return;
     };
+    // `%%` is I18n's literal `%`, so `%%{x}` names no placeholder. A
+    // `%<name>` format reference is I18n interpolation too: the gap.
     let mut rest = text.as_str();
-    while let Some(at) = rest.find("%{") {
-        let after = &rest[at + 2..];
-        let Some(end) = after.find('}') else { break };
-        let name = &after[..end];
+    while let Some(at) = rest.find('%') {
+        let after = &rest[at + 1..];
+        if let Some(escaped) = after.strip_prefix('%') {
+            rest = escaped;
+            continue;
+        }
+        if after.starts_with('<') {
+            gaps.push(format!("{kind}: message"));
+            return;
+        }
+        let Some(open) = after.strip_prefix('{') else {
+            rest = after;
+            continue;
+        };
+        let Some(end) = open.find('}') else { break };
+        let name = &open[..end];
         if !(matches!(name, "value" | "attribute" | "model") || (counted && name == "count")) {
             gaps.push(format!("{kind}: message"));
             return;
         }
-        rest = &after[end + 1..];
+        rest = &open[end + 1..];
     }
     *slot = Some(text);
 }

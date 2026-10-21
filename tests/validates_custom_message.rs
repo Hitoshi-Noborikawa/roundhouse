@@ -8,7 +8,8 @@
 //! interpolation the rule cannot always supply (`%{count}` on
 //! numericality, whose "is not a number" error has no count: Rails raises
 //! `I18n::MissingInterpolationArgument`; an unknown `%{name}`) stay the
-//! gap. A call-level `message:` is not a Rails option at all (`validates`
+//! gap. `%%` is I18n's literal `%`, so `%%{shape}` names nothing and
+//! lowers. A call-level `message:` is not a Rails option at all (`validates`
 //! raises "Unknown validator: 'MessageValidator'").
 
 const MODEL: &str = r#"class Widget < ApplicationRecord
@@ -18,11 +19,13 @@ const MODEL: &str = r#"class Widget < ApplicationRecord
   validates :score, numericality: { greater_than: 1, message: "must exceed the minimum" }
   validates :title, exclusion: { in: %w[admin], message: "is reserved for %{model}" }
   validates :slug, uniqueness: { message: "is used by %{attribute}" }
+  validates :escaped, presence: { message: "100%% needed, not %%{shape}" }
 
   validates :keyed, presence: { message: :custom_key }
   validates :called, presence: { message: -> { "computed" } }
   validates :counted, numericality: { greater_than: 1, message: "must exceed %{count}" }
   validates :unknown, format: { with: /\Ax\z/, message: "needs %{shape}" }
+  validates :formatted, presence: { message: "needs %<count>d" }
 end
 "#;
 
@@ -51,7 +54,7 @@ fn lowered(model: &roundhouse::Model, attr: &str) -> bool {
 #[test]
 fn a_string_message_lowers_on_every_rule_kind() {
     let (model, warnings) = ingest();
-    for attr in ["code", "name", "kind", "score", "title", "slug"] {
+    for attr in ["code", "name", "kind", "score", "title", "slug", "escaped"] {
         assert!(lowered(&model, attr), "{attr} lowers: {warnings:?}");
         assert!(!warnings.iter().any(|w| w.contains(&format!("validates :{attr},"))), "{attr}: {warnings:?}");
     }
@@ -60,7 +63,7 @@ fn a_string_message_lowers_on_every_rule_kind() {
 #[test]
 fn other_messages_stay_the_gap() {
     let (model, warnings) = ingest();
-    for attr in ["keyed", "called", "counted", "unknown"] {
+    for attr in ["keyed", "called", "counted", "unknown", "formatted"] {
         assert!(!lowered(&model, attr), "{attr} stays a gap");
         assert!(warnings.iter().any(|w| w.contains(&format!("validates :{attr},")) && w.contains("message")), "{attr}: {warnings:?}");
     }
