@@ -5922,7 +5922,7 @@ fn unavailable_class_module_construct(name: &str, target: &str) -> Option<&'stat
         | "Struct" | "Mutex" | "Queue" | "SizedQueue"
         | "Thread::Queue" | "Thread::SizedQueue" | "Thread::Mutex"
         | "ThreadError" | "ClosedQueueError" | "RegexpError" | "Comparable" | "Enumerable"
-        | "LoadError" | "Proc"
+        | "LoadError" | "Proc" | "Range"
         | "JSON::GeneratorError"
         // Ported for spinel (`runtime/ruby/rack_utils.rb`), the gem's own on
         // the ruby family; no strict target loads either.
@@ -6230,7 +6230,7 @@ fn report_unsupported_bundled_constants(app: &App, target: BuildTarget) {
         }
         if !matches!(target, "jruby" | "spinel")
             && let crate::expr::ExprNode::Const { path } = &*expr.node
-            && path.iter().map(|s| s.as_str()).skip_while(|s| s.is_empty()).eq(["RUBY_VERSION"])
+            && matches!(path.iter().map(|s| s.as_str()).skip_while(|s| s.is_empty()).collect::<Vec<_>>()[..], ["RUBY_VERSION"] | ["Object", "RUBY_VERSION"])
         {
             emit::diagnostics::report_unsupported(
                 expr.span,

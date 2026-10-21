@@ -23,6 +23,18 @@ const PROBE: &str = r#"class CoreProbe
   rescue LoadError => e
     e.message
   end
+
+  def self.object_version
+    Object::RUBY_VERSION == RUBY_VERSION
+  end
+end
+
+module Inventory
+  Range = Struct.new(:start, :finish)
+
+  def self.span
+    Range.new(1, 2).finish
+  end
 end
 "#;
 
@@ -30,8 +42,8 @@ fn app() -> emit_and_run::Overlay {
     emit_and_run::real_blog().write("app/models/core_probe.rb", PROBE)
 }
 
-const ASSERTIONS: &str = r##"got = [CoreProbe.resolved(-> { 7 }), CoreProbe.resolved(5), CoreProbe.spans(3), CoreProbe.modern?, CoreProbe.optional]
-raise got.inspect unless got == [7, 5, [[0, 1, 2, 3], [0, 1, 2], 4], true, "missing"]
+const ASSERTIONS: &str = r##"got = [CoreProbe.resolved(-> { 7 }), CoreProbe.resolved(5), CoreProbe.spans(3), CoreProbe.modern?, CoreProbe.optional, CoreProbe.object_version, Inventory.span]
+raise got.inspect unless got == [7, 5, [[0, 1, 2, 3], [0, 1, 2], 4], true, "missing", true, 2]
 puts "core constants passed"
 "##;
 
@@ -50,15 +62,17 @@ fn core_constants_run_on_spinel() {
     assert!(run.stdout.contains("core constants passed"), "{}", run.stdout);
 }
 
-/// No strict runtime defines `Proc`, `LoadError` or `RUBY_VERSION`; they
-/// are reported there.
+/// No strict runtime defines `Proc`, `Range`, `LoadError` or
+/// `RUBY_VERSION`; they are reported there.
 #[test]
 fn core_constants_are_unsupported_on_strict_targets() {
     use roundhouse::project::BuildTarget::*;
     for target in [Rust, Typescript, Go, Python, CSharp, Kotlin, Swift, Elixir, Crystal] {
         let (_emitted, errors) = app().emit(target);
-        for name in ["Proc is not available", "LoadError is not available", "`RUBY_VERSION` is the running Ruby's"] {
+        for name in ["Proc is not available", "Range is not available", "LoadError is not available"] {
             assert!(errors.iter().any(|e| e.contains(name)), "{target:?} {name}: {errors:#?}");
         }
+        let version = errors.iter().filter(|e| e.contains("`RUBY_VERSION` is the running Ruby's")).count();
+        assert_eq!(version, 3, "{target:?}: {errors:#?}");
     }
 }

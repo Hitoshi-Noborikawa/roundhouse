@@ -1119,6 +1119,8 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
     // of that constant and Mutex.new retain their source expressions.
     // Do not invent member or synchronization return types here.
     register_stdlib_class(classes, "Struct", &[], &[]);
+    // `Range.new(0, n)` (flag_shih_tzu); its answer is typed off the bounds in dispatch.
+    register_stdlib_class(classes, "Range", &[], &[]);
     // `default.is_a?(Proc) ? default.call : default` (rails-settings-cached):
     // what a value that only proved itself a Proc answers is not known.
     register_stdlib_class(classes, "Proc", &[], &[

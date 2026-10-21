@@ -1422,6 +1422,10 @@ impl<'a> BodyTyper<'a> {
                 // (`SCORE_RANGE_TO_HIDE.include?(score)`, `.first`) and
                 // any other range value flowing through dispatch.
                 if id.0.as_str() == "Range" {
+                    if method.as_str() == "new" && args.is_empty() && (2..=3).contains(&call_args.len()) {
+                        let elem = call_args[0].ty.clone().or_else(|| call_args[1].ty.clone()).unwrap_or(Ty::Untyped);
+                        return Ty::Class { id: id.clone(), args: vec![elem].into() };
+                    }
                     if let Some(ty) = range_method(method, args.first()) {
                         return ty;
                     }

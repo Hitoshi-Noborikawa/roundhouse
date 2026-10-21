@@ -20,7 +20,7 @@ pub fn ingest_expr(node: &Node<'_>, file: &str) -> IngestResult<Expr> {
     // ingester keeps going. Errors are recorded into the per-thread
     // collector for the post-run punch list. See `survey.rs`.
     match ingest_expr_strict(node, file) {
-        Ok(e) => Ok(range_new_as_range(proc_new_as_proc(e))),
+        Ok(e) => Ok(proc_new_as_proc(e)),
         Err(err) if super::survey::is_active() => {
             super::survey::record(&err);
             Ok(Expr::new(
@@ -44,29 +44,6 @@ fn proc_new_as_proc(mut e: Expr) -> Expr {
         *recv = None;
         *method = Symbol::from("proc");
     }
-    e
-}
-
-/// `Range.new(a, b)` / `Range.new(a, b, true)` is the literal `a..b` /
-/// `a...b`: the same Range, which every target already carries.
-fn range_new_as_range(mut e: Expr) -> Expr {
-    let ExprNode::Send { recv: Some(recv), method, args, block: None, .. } = &mut *e.node else { return e };
-    if method.as_str() != "new"
-        || !matches!(&*recv.node, ExprNode::Const { path } if path.iter().map(|s| s.as_str()).filter(|s| !s.is_empty()).eq(["Range"]))
-    {
-        return e;
-    }
-    let exclusive = match args.get(2).map(|a| &*a.node) {
-        None => false,
-        Some(ExprNode::Lit { value: Literal::Bool { value } }) => *value,
-        Some(_) => return e,
-    };
-    if !(2..=3).contains(&args.len()) {
-        return e;
-    }
-    let mut args = std::mem::take(args).into_iter();
-    let (begin, end) = (args.next(), args.next());
-    *e.node = ExprNode::Range { begin, end, exclusive };
     e
 }
 
