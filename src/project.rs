@@ -1916,8 +1916,9 @@ fn target_files_inner(
         }
         None => app,
     };
-    // Faraday and Retryable run as the real gems on ruby and jruby; every other target refuses each reference
-    // (`lower::ruby_family_gems`).
+    // The gems only the ruby family ships (Faraday, Retryable, JWT, ...) run
+    // as the real gems on ruby and jruby; every other target refuses each
+    // reference (`lower::ruby_family_gems`).
     let without_ruby_family_gems;
     let app = match crate::lower::ruby_family_gems::without_unshipped_gems(app, target) {
         Some(trimmed) => {

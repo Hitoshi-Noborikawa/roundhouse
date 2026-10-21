@@ -205,8 +205,8 @@ pub(crate) fn compiler_runtime_gems() -> &'static [(Marker, &'static str)] {
             Marker::AnyText(&["Faraday::Retry", "request :retry", "request(:retry"]),
             "faraday-retry",
         ),
-        // Retryable, as Faraday: the real gem on this lane, refused on the
-        // strict targets (`lower::ruby_family_gems`).
+        // Retryable and JWT, as Faraday: the real gems on this lane,
+        // refused on the strict targets (`lower::ruby_family_gems`).
         (Marker::Constant("Retryable"), "retryable"),
         (Marker::Constant("JWT"), "jwt"),
     ];
@@ -618,8 +618,8 @@ const FATES: &[(&str, GemFate)] = &[
     ("pushover", GemFate::Modeled),    // catalog/gems: Pushover
     ("rack-mini-profiler", GemFate::Modeled), // catalog/gems: Rack::MiniProfiler
     ("representable", GemFate::Modeled), // ingest/representable: Decorator + JSON, property/collection subset
-    ("rotp", GemFate::Modeled),        // catalog/gems: ROTP::*
     ("retryable", GemFate::Modeled),   // catalog/gems: Retryable; the real gem on ruby and jruby, lower/ruby_family_gems refuses every other target
+    ("rotp", GemFate::Modeled),        // catalog/gems: ROTP::*
     ("rqrcode", GemFate::Modeled),     // catalog/gems: RQRCode::QRCode
     ("ruby-vips", GemFate::Modeled),   // active_storage variants seam
     ("sidekiq", GemFate::Modeled),     // registry/library: Sidekiq::Worker
