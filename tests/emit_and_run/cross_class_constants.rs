@@ -106,7 +106,12 @@ fn a_union_holding_a_slash_prints_a_typescript_literal_that_parses() {
             let path = entry.path();
             if path.is_dir() {
                 stack.push(path);
-            } else if let Ok(text) = std::fs::read_to_string(&path) {
+            } else if path.extension().is_some_and(|ext| ext == "ts")
+                && let Ok(text) = std::fs::read_to_string(&path)
+            {
+                // `.ts` only: the emit also writes `link.ts.map`, whose
+                // `sourcesContent` holds the same text, and the walk's
+                // order differs between filesystems.
                 if text.contains("class Link") && text.contains("https:") {
                     model = Some(text);
                 }
