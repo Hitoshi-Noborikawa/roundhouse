@@ -275,10 +275,12 @@ pub(super) fn parse_validates_call(
         }
     }
     // Presence under a call-level `allow_nil: true`: Rails' EachValidator
-    // skips nil, so presence checks only a non-nil value for blank.
+    // skips nil, so presence checks only a non-nil value for blank. The
+    // rule's own `allow_nil: false` wins (Rails merges the call's options
+    // under the validator's own), and presence then rejects nil.
     if allow_nil == Some(true) {
         for draft in &mut drafts {
-            if matches!(draft.rule, ValidationRule::Presence) {
+            if matches!(draft.rule, ValidationRule::Presence) && !draft.own_allow_nil {
                 draft.nil_skip = true;
             }
         }
@@ -816,8 +818,10 @@ fn parse_bool_or_hash(
             "unless" => {
                 push_condition(&child, file, &mut built.unless_cond, "unless", &mut gaps)
             }
+            // `allow_nil: false` is Rails' default, but stated in the
+            // rule's own hash it wins over a call-level `allow_nil: true`.
             "allow_nil" => match super::super::util::bool_value(&child) {
-                Some(false) => {}
+                Some(false) => built.own_allow_nil = true,
                 _ => gaps.push("allow_nil".to_string()),
             },
             other => gaps.push(format!("{name}: {other}")),
