@@ -45,3 +45,31 @@ puts "unscoped uniqueness passed"
         )
         .assert_passes();
 }
+
+/// `Model.unscoped { … }` runs the block with the default scope removed
+/// and returns the block's value, as Rails does. Default scopes are not
+/// lowered, so the block reads every row already. Answers are Rails
+/// 8.1.4's for the same rows (a visible "live" and a hidden "gone").
+#[test]
+fn unscoped_with_a_block_returns_the_block_value_like_rails() {
+    app()
+        .run_ruby(
+            r#"live = Post.new
+live.slug = "live"
+live.save!
+hidden = Post.new
+hidden.slug = "gone"
+hidden.deleted = true
+hidden.save!
+got = [
+  Post.unscoped { Post.where(deleted: true).count },
+  Post.unscoped { Post.where(slug: "gone").count },
+  Post.unscoped { "value" },
+  Post.unscoped.where(deleted: true).count,
+]
+raise "got #{got.inspect}" unless got == [1, 1, "value", 1]
+puts "unscoped block passed"
+"#,
+        )
+        .assert_passes();
+}

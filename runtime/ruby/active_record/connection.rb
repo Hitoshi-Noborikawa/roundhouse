@@ -1130,7 +1130,10 @@ module ActiveRecord
     # what Rails' UniquenessValidator queries (`finder_class.unscoped`).
     # Default scopes are not lowered, so it is `all`'s Relation; it is its
     # own name so the uniqueness check keeps Rails' meaning if they are.
+    # With a block, Rails runs it with the default scope removed and
+    # returns its value; with no default scope applied, that is the block.
     def self.unscoped
+      return yield if block_given?
       ActiveRecord::Relation.new(self)
     end
 
