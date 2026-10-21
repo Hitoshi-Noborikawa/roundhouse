@@ -8,7 +8,10 @@ checks = 0
   "identity_raises" => ParseInstanceOfRaises,
   "kind_raises" => ParseKindOfRaises,
   "class_raises" => ParseClassRaises,
-  "deep" => ParseDeep
+  "deep" => ParseDeep,
+  "match_false" => ParseMatchFalse,
+  "match_true" => ParseMatchTrue,
+  "match_raises" => ParseMatchRaises
 }.each do |action, expected|
   status, escaped = predicate_response_request(action)
   unless status == 500 && Kernel.instance_method(:instance_of?).bind_call(escaped, expected)

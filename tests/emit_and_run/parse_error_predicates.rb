@@ -37,6 +37,24 @@ end
 class ParseDeep < ParseInstanceOf
 end
 
+class ParseMatchFalse < ActionDispatch::Http::Parameters::ParseError
+  def self.===(other)
+    false
+  end
+end
+
+class ParseMatchTrue < ActionDispatch::Http::Parameters::ParseError
+  def self.===(other)
+    true
+  end
+end
+
+class ParseMatchRaises < ActionDispatch::Http::Parameters::ParseError
+  def self.===(other)
+    raise "subclass matcher called"
+  end
+end
+
 class SiblingBadRequest < ActionController::BadRequest
   def is_a?(other)
     true
@@ -84,6 +102,18 @@ class PredicatesController < ActionController::API
 
   def deep
     raise ParseDeep, "bad JSON"
+  end
+
+  def match_false
+    raise ParseMatchFalse, "bad JSON"
+  end
+
+  def match_true
+    raise ParseMatchTrue, "bad JSON"
+  end
+
+  def match_raises
+    raise ParseMatchRaises, "bad JSON"
   end
 
   def bad_request

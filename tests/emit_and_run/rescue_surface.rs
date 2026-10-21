@@ -16,7 +16,7 @@ fn parse_error_predicate_app() -> emit_and_run::Overlay {
     }
     let mut routes = "Rails.application.routes.draw do\n".to_string();
     for action in ["ancestry", "identity", "ancestry_raises", "identity_raises", "kind_raises", "class_raises",
-        "deep", "bad_request", "parameter_missing", "exact"] {
+        "deep", "match_false", "match_true", "match_raises", "bad_request", "parameter_missing", "exact"] {
         routes.push_str(&format!("  get '/predicates/{action}', to: 'predicates#{action}'\n"));
     }
     routes.push_str("end\n");

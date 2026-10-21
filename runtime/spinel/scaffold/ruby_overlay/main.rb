@@ -33,7 +33,7 @@
 require_relative "boot"
 
 module Main
-  # Spinel's subclass reflection needs a lexical class receiver.
+  # The framework class used by the nominal ParseError fallback.
   FrameworkParseError = ActionDispatch::Http::Parameters::ParseError
 
   # Dispatch one request to a response descriptor — the single source
@@ -305,9 +305,10 @@ module Main
       # The app's handlers have already run. Rails' rescue_responses map
       # an unhandled ParseError to :bad_request by its exact class name;
       # an application subclass has no default mapping.
-      # A direct subclass matches its descendants too. Match on classes,
-      # as rescue does, so instance predicate overrides cannot affect this.
-      raise if FrameworkParseError.subclasses.any? { |subclass| subclass === error }
+      # Bind the built-ins so application instance/class overrides cannot
+      # turn a subclass into the framework's exact exception class.
+      raise if Kernel.instance_method(:is_a?).bind_call(error, FrameworkParseError) &&
+               !Kernel.instance_method(:instance_of?).bind_call(error, FrameworkParseError)
       return [400, "<h1>400 Bad Request</h1>", "text/html; charset=utf-8", nil, {}, {}, {}, {}, {}]
     rescue ActiveRecord::RecordInvalid, ActiveRecord::RecordNotSaved, ActionController::InvalidAuthenticityToken
       # Not a 500: Rails' rescue_responses answer these with 422.
