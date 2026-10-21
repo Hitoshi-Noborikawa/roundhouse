@@ -4112,6 +4112,20 @@ fn jwt_is_refused_off_ruby_and_jruby() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// ActiveSupport's `Digest::UUID.uuid_v4` runs as `SecureRandom.uuid`: a
+/// fresh random (version 4) uuid on each call.
+#[test]
+fn digest_uuid_v4_runs_as_a_random_uuid() {
+    emit_and_run::real_blog()
+        .write("lib/correlation.rb", "class Correlation\n  def self.id\n    ::Digest::UUID.uuid_v4\n  end\nend\n")
+        .run_ruby(
+            "a = Correlation.id\nb = Correlation.id\n\
+             raise a.inspect unless a.match?(/\\A\\h{8}-\\h{4}-4\\h{3}-[89ab]\\h{3}-\\h{12}\\z/)\n\
+             raise \"repeated\" if a == b",
+        )
+        .assert_passes();
+}
+
 /// No other target has an HTTP client behind `Faraday`: each call and
 /// constant is refused there, and no `Faraday` reference is emitted.
 #[test]
