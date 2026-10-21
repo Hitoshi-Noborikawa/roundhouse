@@ -103,3 +103,58 @@ fn the_roda_emit_passes_allow_nil_and_allow_blank_to_sequel() {
         assert!(model.contains(line), "{line:?} in:\n{model}");
     }
 }
+
+/// A Boolean column's `false` is blank to Rails (`false.blank?`), so
+/// `allow_blank:` skips the format check for it; `allow_nil:` does not.
+/// Rails 8.1.4: `on` (allow_blank) passes with `false` and nil, `off`
+/// (allow_nil) fails with `false`. On a strict target the field is a
+/// Boolean, never a String, so its blank test is the narrowed `== false`
+/// beside `nil?`.
+fn flags() -> emit_and_run::Overlay {
+    emit_and_run::empty_app()
+        .write("app/models/application_record.rb", "class ApplicationRecord < ActiveRecord::Base\n  self.abstract_class = true\nend\n")
+        .write(
+            "db/schema.rb",
+            "ActiveRecord::Schema.define do\n  create_table \"flags\", force: :cascade do |t|\n    t.boolean \"on\"\n    t.boolean \"off\"\n  end\nend\n",
+        )
+        .write(
+            "app/models/flag.rb",
+            "class Flag < ApplicationRecord\n  validates :on, format: { with: /\\Atrue\\z/ }, allow_blank: true\n  validates :off, format: { with: /\\Atrue\\z/ }, allow_nil: true\nend\n",
+        )
+}
+
+#[test]
+fn a_boolean_false_is_blank_like_rails() {
+    flags()
+        .run_ruby(
+            r##"rows = [{ on: false, off: false }, { on: nil, off: nil }]
+got = rows.map do |attrs|
+  f = Flag.new
+  attrs.each { |k, v| f.public_send(:"#{k}=", v) }
+  f.valid?
+  f.errors.to_a
+end
+want = [["Off is invalid"], []]
+raise "flag errors: #{got.inspect}" unless got == want
+puts "boolean allow_blank passed"
+"##,
+        )
+        .assert_passes();
+}
+
+#[test]
+fn strict_targets_skip_a_boolean_false_under_allow_blank() {
+    use roundhouse::project::BuildTarget;
+    for target in [BuildTarget::Rust, BuildTarget::Typescript, BuildTarget::Go, BuildTarget::Crystal] {
+        let (emitted, errors) = flags().emit(target);
+        assert!(errors.is_empty(), "{target:?}: {errors:#?}");
+        if target == BuildTarget::Rust {
+            let flag = std::fs::read_to_string(emitted.join("src/models/flag.rs")).expect("flag.rs");
+            let validate = &flag[flag.find("pub fn validate(").expect("validate")..];
+            let validate = &validate[..validate.find("\n    }\n").unwrap_or(validate.len())];
+            let on = validate.lines().find(|l| l.contains("self.on.is_none()")).expect("the on skip");
+            assert!(on.contains("false"), "{on}");
+            assert!(!validate.lines().any(|l| l.contains("self.off.is_none()") && l.contains("false")), "{validate}");
+        }
+    }
+}

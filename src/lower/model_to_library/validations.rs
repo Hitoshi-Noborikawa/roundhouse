@@ -952,9 +952,10 @@ fn skip_nil_or_blank(
 /// @attr == false || @attr.to_s.strip.empty?` (`to_s`, the spelling Spinel
 /// takes). A String column drops the `false` disjunct: Rails casts `false`
 /// to `"f"` there, which is not blank. A strict target's field is its
-/// column's type: a String's narrowed `strip.empty?`, else `nil?` (a
-/// numeric field is never a String or `false`), which every target
-/// compiles. Narrower than the presence check's test, which is unchanged.
+/// column's type: a String's narrowed `strip.empty?`, a Boolean's
+/// narrowed `== false` (`false.blank?` is true), else `nil?` (a numeric
+/// field is never a String or `false`), which every target compiles.
+/// Narrower than the presence check's test, which is unchanged.
 fn allow_blank_cond(attr: &Symbol, attr_ty: Option<&Ty>, runtime_relation: super::RuntimeRelation) -> Expr {
     let value = ivar(attr);
     let nil = send(value.clone(), "nil?", vec![]);
@@ -978,6 +979,15 @@ fn allow_blank_cond(attr: &Symbol, attr_ty: Option<&Ty>, runtime_relation: super
             // narrowed value, as the presence check's does.
             let narrowed = if nilable { narrowed_ivar(attr, &Ty::Str) } else { value };
             bool_op(BoolOpKind::Or, nil, send(send(narrowed, "strip", vec![]), "empty?", vec![]))
+        }
+        super::RuntimeRelation::Absent if matches!(attr_ty, Some(Ty::Bool)) => {
+            let narrowed = if nilable { narrowed_ivar(attr, &Ty::Bool) } else { value };
+            let falsy = send(
+                narrowed,
+                "==",
+                vec![Expr::new(Span::synthetic(), ExprNode::Lit { value: Literal::Bool { value: false } })],
+            );
+            bool_op(BoolOpKind::Or, nil, falsy)
         }
         super::RuntimeRelation::Absent => nil,
     }
