@@ -976,7 +976,7 @@ impl<'a> BodyTyper<'a> {
                 "class" => !self.owns_operator(r.ty.as_ref(), method, self.is_class_object(r, ctx)),
                 // `safe_constantize` is left out: it answers nil for a name nothing defines.
                 "constantize" => matches!(r.ty.as_ref(), Some(Ty::Str))
-                    && !self.classes.get(&ClassId(Symbol::from("String"))).is_some_and(|c| c.instance_methods.contains_key(method)),
+                    && !self.owns_operator(Some(&Ty::Class { id: ClassId(Symbol::from("String")), args: vec![].into() }), method, false),
                 _ => false,
             },
             ExprNode::Var { name, .. } => ctx.query_class_objects.contains(name)
