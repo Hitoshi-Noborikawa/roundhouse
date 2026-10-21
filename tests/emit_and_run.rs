@@ -314,6 +314,8 @@ mod regex_string_interpolation;
 mod format_allow_nil_blank;
 #[path = "emit_and_run/cross_class_constants.rs"]
 mod cross_class_constants;
+#[path = "emit_and_run/regex_literal_hash_guard.rs"]
+mod regex_literal_hash_guard;
 #[path = "emit_and_run/numericality_allow_nil_blank.rs"]
 mod numericality_allow_nil_blank;
 #[path = "emit_and_run/stdlib_email_regexp.rs"]
