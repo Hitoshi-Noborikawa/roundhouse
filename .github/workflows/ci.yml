@@ -64,10 +64,8 @@ env:
   # spinel-redis, the Redis client the Sidekiq push runs on in a Spinel
   # tree, tested against a live Redis in sidekiq-live. The same repository
   # and tag the emitted spin.toml pins (src/project.rs); bump both together.
-  # The baron-hines fork until rubys/spinel-redis#3 (connect_timeout: and
-  # read_timeout:) is merged and tagged.
-  SPINEL_REDIS_REPO: baron-hines/spinel-redis
-  SPINEL_REDIS_REF: redis-timeouts-1
+  SPINEL_REDIS_REPO: rubys/spinel-redis
+  SPINEL_REDIS_REF: v0.3.0
 
 jobs:
   plan:
