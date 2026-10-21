@@ -312,6 +312,8 @@ mod validates_custom_message;
 mod regex_string_interpolation;
 #[path = "emit_and_run/format_allow_nil_blank.rs"]
 mod format_allow_nil_blank;
+#[path = "emit_and_run/format_value_to_s.rs"]
+mod format_value_to_s;
 #[path = "emit_and_run/cross_class_constants.rs"]
 mod cross_class_constants;
 #[path = "emit_and_run/numericality_allow_nil_blank.rs"]
