@@ -1627,11 +1627,9 @@ jobs:
       # so the floor can be raised. The pin is `CAMPFIRE_SHA`.
       - name: Enforce the floor
         env:
-          # 618 tests passed, 84 files green at c8f74a0, measured on a box
-          # without ffmpeg (the video-poster tests fail there); raise from
-          # the first run's notice.
-          FLOOR_TESTS: 618
-          FLOOR_FILES: 84
+          # 623 tests passed, 87 files green.
+          FLOOR_TESTS: 623
+          FLOOR_FILES: 87
         run: |
           set -euo pipefail
           tests=$(awk -F'|' '{p += $3} END {print p+0}' /tmp/campfire-tally.txt)
