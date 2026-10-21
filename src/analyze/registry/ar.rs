@@ -744,6 +744,15 @@ pub(in crate::analyze) fn register_action_cable(classes: &mut HashMap<ClassId, C
     cable
         .class_methods
         .insert(Symbol::from("server"), Ty::Class { id: server_id, args: vec![].into() });
+    // `ActionCable::INTERNAL`, as both cable runtimes define it: the
+    // `message_types` and `disconnect_reasons` tables, each a table of
+    // Strings (campfire's `close reason:
+    // ActionCable::INTERNAL[:disconnect_reasons][:unauthorized]`).
+    let strings = Ty::Hash { key: std::sync::Arc::new(Ty::Sym), value: std::sync::Arc::new(Ty::Str) };
+    cable.constants.insert(
+        Symbol::from("INTERNAL"),
+        Ty::Hash { key: std::sync::Arc::new(Ty::Sym), value: std::sync::Arc::new(strings) },
+    );
     classes.insert(ClassId(Symbol::from("ActionCable")), cable);
 }
 
