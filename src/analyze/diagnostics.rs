@@ -123,6 +123,17 @@ pub fn diagnose_with_coverage(app: &App) -> (Vec<Diagnostic>, PreloadCoverage) {
     out.extend(super::graphql::diagnose(app, diagnose_expr));
     out.extend(super::enum_raw_input::diagnose(app));
     out.extend(super::data::diagnose(app));
+    // Constructor refusals must also reach executable class constants and
+    // parameter defaults, which the ordinary method diagnostic policy omits.
+    fn collect_storage_constructors(expr: &Expr, out: &mut Vec<Diagnostic>) {
+        if let Some(DiagnosticKind::Unsupported { construct, detail, .. }) = expr.diagnostic()
+            && construct.as_str() == "ActiveStorage constructor"
+        {
+            out.push(Diagnostic::unsupported(expr.span, None, construct.as_str(), detail.clone()));
+        }
+        expr.node.for_each_child(&mut |child| collect_storage_constructors(child, out));
+    }
+    crate::lower::for_each_hook_body_ref(app, &mut |body| collect_storage_constructors(body, &mut out));
     // Rubydex's unresolved constants emit refusal stubs. Collect those
     // annotations from support methods/defaults/constants as well, so
     // an emitted raise cannot be hidden by the library diagnostic policy.

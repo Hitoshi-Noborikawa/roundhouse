@@ -251,3 +251,220 @@ fn active_storage_exception_methods_are_still_checked() {
         "{diagnostics:#?}"
     );
 }
+
+const CONSTRUCTOR_OWNERS: &[&str] = &[
+    "ActiveStorage::Transformers::Transformer",
+    "ActiveStorage::Transformers::ImageProcessingTransformer",
+    "ActiveStorage::Service::GCSService",
+];
+
+#[test]
+fn active_storage_exception_owner_constructors_stay_refused_in_every_operand_shape() {
+    // Each receiver has the same unsupported contract, regardless of the
+    // argument packet, the result's use, or how the class value is obtained.
+    for owner in CONSTRUCTOR_OWNERS {
+        let call = format!("{owner}.new({{ resize_to_limit: [10, 10] }})");
+        let forms = [
+            format!("::{call}"),
+            format!("{owner}.new"),
+            format!("{owner}.new({{}})"),
+            format!("{owner}.new(public: true)"),
+            format!("options = {{ resize_to_limit: [10, 10] }}; {owner}.new(options)"),
+            format!("args = [{{ resize_to_limit: [10, 10] }}]; {owner}.new(*args)"),
+            format!("options = {{ public: true }}; {owner}.new(**options)"),
+            format!("{call} {{ 1 }}"),
+            format!("owner = {owner}; owner.new({{}})"),
+            "OwnerAlias.new({})".to_string(),
+            "NamespaceAlias::OwnerAlias.new({})".to_string(),
+            format!("{owner}.freeze.itself.new({{}})"),
+            format!("[{owner}].first.new({{}})"),
+            format!("{{ owner: {owner} }}[:owner].new({{}})"),
+            format!("owner = flag ? {owner} : StandardError; owner.new({{}})"),
+            "owner_value.new({})".to_string(),
+            format!("construct({owner})"),
+            format!("[{call}]"),
+            format!("{{ {call} => 1 }}"),
+            format!("{{ value: {call} }}"),
+            format!("consume({call})"),
+            format!("{call}.name"),
+            format!("flag ? {call} : nil"),
+            format!("flag && {call}"),
+            format!("flag || {call}"),
+            format!("{call}; 1"),
+            format!("{owner}.send(:new, {{}})"),
+            format!("{owner}.public_send(\"new\", {{}})"),
+            format!("{owner}.__send__(:new, {{}})"),
+            format!("{owner}.send(:public_send, :new, {{}})"),
+            format!("name = :new; {owner}.public_send(name, {{}})"),
+            format!("{owner}.method(:new).call({{}})"),
+            format!("constructor = {owner}.public_method(\"new\"); constructor.call({{}})"),
+            format!("{owner}.singleton_method(:new).call({{}})"),
+            format!("name = :new; constructor = {owner}.method(name); constructor.call({{}})"),
+            format!("{owner}.new({call})"),
+            format!("{owner}.try(:new, {{}})"),
+            format!("{owner}.try!(\"new\", {{}})"),
+            format!("{owner}.then {{ |klass| klass.new({{}}) }}"),
+            format!("{owner}.tap {{ |klass| klass.new({{}}) }}"),
+            format!("[{owner}].map {{ |klass| klass.new({{}}) }}"),
+        ];
+        for form in forms {
+            let methods = format!(
+                "  OwnerAlias = {owner}\n  NamespaceAlias = StorageErrors\n\
+                 def self.owner_value\n    {owner}\n  end\n\
+                 def self.construct(owner)\n    owner.new({{}})\n  end\n\
+                 def self.consume(value)\n    value\n  end\n\
+                 def self.value(flag = true)\n    {form}\n  end\n"
+            );
+            let errors = app(&methods).check_errors();
+            assert!(
+                errors.iter().any(|e| e.contains(".new lacks a shared runtime constructor implementation")),
+                "{owner}: {form}: {errors:#?}"
+            );
+        }
+        for declaration in [
+            format!("  Value = {call}"),
+            format!("  def self.value(arg = {call})\n    arg\n  end"),
+            format!("  def value\n    {call}\n  end"),
+        ] {
+            let errors = app(&declaration).check_errors();
+            assert!(errors.iter().any(|e| e.contains(".new lacks a shared runtime constructor implementation")),
+                "{owner}: {declaration}: {errors:#?}");
+        }
+    }
+    let errors = app("  def self.value\n    ActiveStorage::Transformers.new\n  end").check_errors();
+    assert!(errors.iter().any(|e| e.contains("ActiveStorage::Transformers.new lacks")), "{errors:#?}");
+}
+
+#[test]
+fn active_storage_exception_owner_subclasses_and_empty_reopens_do_not_supply_constructors() {
+    for owner in CONSTRUCTOR_OWNERS {
+        for expression in ["new({})", "self.new({})", "StorageChild.new({})"] {
+            let overlay = app("").write("app/models/storage_child.rb", &format!(
+                "class {owner}\nend\n\
+                 class StorageParent < {owner}\nend\n\
+                 class StorageChild < StorageParent\n\
+                   def self.value\n    {expression}\n  end\nend\n"
+            ));
+            let errors = overlay.check_errors();
+            assert!(errors.iter().any(|e| e.contains(".new lacks a shared runtime constructor implementation")),
+                "{owner}: {expression}: {errors:#?}");
+        }
+    }
+}
+
+#[test]
+fn active_storage_exception_owner_constructor_refusals_survive_emission() {
+    use roundhouse::project::BuildTarget;
+    for owner in CONSTRUCTOR_OWNERS {
+        for target in [BuildTarget::Ruby, BuildTarget::Jruby, BuildTarget::Spinel] {
+            let (_, errors) = app(&format!("  def self.value\n    {owner}.new({{ resize_to_limit: [10, 10] }})\n  end"))
+                .emit(target);
+            assert!(errors.iter().any(|e| e.contains(".new lacks a shared runtime constructor implementation")),
+                "{owner}: {target:?}: {errors:#?}");
+        }
+        // The permissive harness still writes output. It must execute an
+        // explicit refusal stub instead of the previously accepted arity crash.
+        let run = app(&format!("  def self.value\n    {owner}.new({{ resize_to_limit: [10, 10] }})\n  end"))
+            .run_ruby("StorageErrors.value");
+        assert!(run.errors.iter().any(|e| e.contains(".new lacks a shared runtime constructor implementation")));
+        assert!(!run.success && run.stderr.contains("ActiveStorage constructor not supported"), "{}", run.stderr);
+    }
+}
+
+#[test]
+fn active_storage_exception_owner_source_initializers_execute() {
+    for owner in CONSTRUCTOR_OWNERS {
+        app(&format!("  def self.value\n    {owner}.new(7).marker\n  end"))
+            .write("app/models/storage_constructor.rb", &format!(
+                "class {owner}\n  attr_reader :marker\n\
+                   def initialize(marker)\n    @marker = marker\n  end\nend\n"
+            ))
+            .run_ruby("raise unless StorageErrors.value == 7")
+            .assert_passes();
+    }
+    // Initializers inherited through the newly registered runtime parent,
+    // and source subclass/mixin initializers, supply the constructor too.
+    app("  def self.value\n    ActiveStorage::Transformers::ImageProcessingTransformer.new(9).marker\n  end")
+        .write("app/models/storage_constructor.rb", r#"class ActiveStorage::Transformers::Transformer
+  attr_reader :marker
+  def initialize(marker)
+    @marker = marker
+  end
+end
+"#)
+        .run_ruby("raise unless StorageErrors.value == 9")
+        .assert_passes();
+    for owner in CONSTRUCTOR_OWNERS {
+        app("  def self.value\n    StorageChild.new(11).marker\n  end")
+            .write("app/models/storage_constructor.rb", &format!(
+                "module StorageInitializer\n  attr_reader :marker\n\
+                   def initialize(marker)\n    @marker = marker\n  end\nend\n\
+                 class StorageParent < {owner}\n  include StorageInitializer\nend\n\
+                 class StorageChild < StorageParent\nend\n"
+            ))
+            .run_ruby("raise unless StorageErrors.value == 11")
+            .assert_passes();
+    }
+}
+
+#[test]
+fn active_storage_exception_owner_source_class_constructors_execute() {
+    for owner in CONSTRUCTOR_OWNERS.iter().copied().chain(["ActiveStorage::Transformers"]) {
+        app(&format!("  def self.value\n    {owner}.new(13)\n  end"))
+            .write("app/models/storage_constructor.rb", &format!(
+                "{} {owner}\n  def self.new(value)\n    value + 1\n  end\nend\n",
+                if owner == "ActiveStorage::Transformers" { "module" } else { "class" }
+            ))
+            .run_ruby("raise unless StorageErrors.value == 14")
+            .assert_passes();
+    }
+}
+
+#[test]
+fn active_storage_exception_owner_constructors_delegating_to_missing_super_stay_refused() {
+    for owner in CONSTRUCTOR_OWNERS {
+        for method in ["initialize", "self.new"] {
+            for delegation in ["super", "super(options)", "if options; super(options); end"] {
+                let errors = app("  def self.value\n    StorageChild.new({})\n  end")
+                    .write("app/models/storage_child.rb", &format!(
+                        "class StorageChild < {owner}\n\
+                           def {method}(options)\n    {delegation}\n  end\nend\n"
+                    ))
+                    .check_errors();
+                assert!(errors.iter().any(|e| e.contains(".new lacks a shared runtime constructor implementation")),
+                    "{owner}: {method}: {delegation}: {errors:#?}");
+            }
+        }
+    }
+}
+
+#[test]
+fn active_storage_exception_owner_constructor_super_can_reach_a_source_initializer() {
+    app("  def self.value\n    ActiveStorage::Transformers::ImageProcessingTransformer.new(17).marker\n  end")
+        .write("app/models/storage_constructor.rb", r#"class ActiveStorage::Transformers::Transformer
+  attr_reader :marker
+  def initialize(marker)
+    @marker = marker
+  end
+end
+class ActiveStorage::Transformers::ImageProcessingTransformer
+  def initialize(marker)
+    super(marker)
+  end
+  def self.new(marker)
+    super(marker)
+  end
+end
+"#)
+        .run_ruby("raise unless StorageErrors.value == 17")
+        .assert_passes();
+}
+
+#[test]
+fn active_storage_exception_owner_safe_literal_reflection_still_executes() {
+    for owner in CONSTRUCTOR_OWNERS {
+        app(&format!("  def self.value\n    [{owner}.send(:name), {owner}.public_send(\"name\"), {owner}.__send__(:name)]\n  end"))
+            .run_ruby(&format!("raise unless StorageErrors.value == [\"{owner}\"] * 3"))
+            .assert_passes();
+    }
+}

@@ -68,6 +68,7 @@ use const_resolution::ResolvedConstant;
 mod narrowing;
 mod pagy;
 mod send;
+mod active_storage;
 pub(crate) use send::PARAM_VALUE;
 pub(crate) use send::{indexed_pluck, string_answers};
 #[cfg(test)]
@@ -205,6 +206,10 @@ pub struct ClassInfo {
     pub source_class_methods: std::collections::HashSet<Symbol>,
     /// Source declares its own class-side `new`, whose result need not be self.
     pub declares_constructor: bool,
+    /// A source `new` that calls `super` still needs the inherited constructor.
+    pub constructor_calls_super: bool,
+    /// Source supplies an initializer body without delegating to `super`.
+    pub implements_initializer: bool,
     /// Which of `class_methods` had their return type inferred FROM a
     /// query chain over this model — every `scope`, plus any class
     /// method whose body tail is such a chain.
@@ -1653,6 +1658,12 @@ impl<'a> BodyTyper<'a> {
                 if matches!(&crate::expr::ExprCold::diagnostic(&expr.cold), Some(crate::diagnostic::DiagnosticKind::Unsupported { construct, .. })
                     if matches!(construct.as_str(), "Module protocol" | "ActiveModel::Errors" | "ActiveModel::Error" | "Rails" | "ActiveRecord::Base" | "String extension" | "Hash extension" | "not_nil!" | "Object extension" | "Module callback argument"))
                 { crate::expr::ExprCold::set_diagnostic(&mut expr.cold, None); }
+                if self.inquirers.is_some()
+                    && matches!(crate::expr::ExprCold::diagnostic(&expr.cold), Some(crate::diagnostic::DiagnosticKind::Unsupported { construct, .. })
+                        if construct.as_str() == "ActiveStorage constructor")
+                {
+                    crate::expr::ExprCold::set_diagnostic(&mut expr.cold, None);
+                }
                 expr.decisions &= !crate::expr::RESOLVED_DATA_FACTORY;
                 if let Some(ty) = self.data_factories.and_then(|factories| factories.get(&expr_span)) {
                     // Only admitted declarations establish a Data class identity.
@@ -1815,6 +1826,17 @@ impl<'a> BodyTyper<'a> {
                     }
                     other => other,
                 };
+                // Namespace owners exist so exception constants and class values work;
+                // their empty runtime definitions do not implement Rails constructors.
+                if self.inquirers.is_some()
+                    && let Some(owner) = self.unsupported_active_storage_constructor(recv_ty.as_ref(), method, args)
+                {
+                    crate::expr::ExprCold::set_diagnostic(&mut expr.cold, Some(crate::diagnostic::DiagnosticKind::Unsupported {
+                        target: None,
+                        construct: Symbol::from("ActiveStorage constructor"),
+                        detail: format!("{owner}.new lacks a shared runtime constructor implementation"),
+                    }));
+                }
                 // `new` on the implicit or explicit `self` of a class-side
                 // method builds an instance of the class that RECEIVED the
                 // call: `CurrencyDb.load` runs `YamlDb.load` with `self ==

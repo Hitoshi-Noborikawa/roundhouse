@@ -1147,10 +1147,16 @@ impl Analyzer {
             if method.receiver == crate::dialect::MethodReceiver::Class {
                 classes.entry(id.clone()).or_default().source_class_methods.insert(method.name.clone());
             }
+            if method.receiver == crate::dialect::MethodReceiver::Instance
+                && method.name.as_str() == "initialize"
+            {
+                classes.entry(id.clone()).or_default().implements_initializer = !expr_calls_super(&method.body);
+            }
             if method.receiver == crate::dialect::MethodReceiver::Class
                 && method.name.as_str() == "new"
             {
                 classes.entry(id.clone()).or_default().declares_constructor = true;
+                classes.entry(id.clone()).or_default().constructor_calls_super = expr_calls_super(&method.body);
             }
         }
 

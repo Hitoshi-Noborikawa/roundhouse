@@ -831,6 +831,16 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
     ] {
         register_stdlib_class(classes, exc, &[], &exception_surface);
     }
+    // Exception owners preserve their runtime ancestry, without claiming a
+    // constructor implementation. The body typer refuses that missing API.
+    classes.entry(ClassId(Symbol::from("ActiveStorage::Transformers"))).or_default().is_module = true;
+    classes.entry(ClassId(Symbol::from("ActiveStorage::Transformers::Transformer"))).or_default();
+    for (owner, parent) in [
+        ("ActiveStorage::Transformers::ImageProcessingTransformer", "ActiveStorage::Transformers::Transformer"),
+        ("ActiveStorage::Service::GCSService", "ActiveStorage::Service"),
+    ] {
+        classes.entry(ClassId(Symbol::from(owner))).or_default().parent = Some(ClassId(Symbol::from(parent)));
+    }
     // Rails 8.1's Active Storage errors (including InvalidKeyError in
     // 8.1.4): errors.rb, preview.rb, service/gcs_service.rb and
     // transformers/image_processing_transformer.rb. Register the same
