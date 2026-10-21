@@ -183,6 +183,11 @@ fn a_held_class_answers_queries_not_writes() {
 }
 
 #[test]
+fn ipaddr_include_takes_only_an_ipaddr() {
+    refuses("IPAddr.new(\"10.0.0.0/8\").include?(title)", "include?");
+}
+
+#[test]
 fn unused_unresolved_model_include_is_not_silent() {
     refuses_with("1", "GhostModule", &[("app/models/probe.rb", "class Probe < ApplicationRecord\n  include GhostModule\nend\n")]);
 }

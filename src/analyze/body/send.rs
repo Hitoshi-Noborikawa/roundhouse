@@ -1070,6 +1070,16 @@ impl<'a> BodyTyper<'a> {
         args: &[crate::expr::Expr],
         instance_receiver: bool,
     ) -> Ty {
+        // Not the stdlib's String form too: the port reads `other.octets`, which a String lacks.
+        if let Some(Ty::Class { id, .. }) = recv_ty
+            && id.0.as_str() == "IPAddr"
+            && instance_receiver
+            && method.as_str() == "include?"
+            && let [other] = args
+            && matches!(other.ty.as_ref(), Some(Ty::Class { id: o, .. }) if o.0.as_str() == "IPAddr")
+        {
+            return Ty::Bool;
+        }
         // `Parameters` is a Hash-shaped bag: what its own class does not
         // answer (`fetch`, `each`, `map`, `count`, ...) is the Hash
         // reading over Symbol -> param value. Done here,
