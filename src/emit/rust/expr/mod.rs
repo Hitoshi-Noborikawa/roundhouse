@@ -1138,6 +1138,9 @@ fn emit_expr_inner(e: &Expr) -> String {
                             );
                             let iter_chain = if was_option {
                                 ".iter().flatten()"
+                            } else if matches!(&*r.node, ExprNode::Ivar { .. }) {
+                                // `into_iter` would move the field out of `self`, which the method only borrows.
+                                ".iter().cloned()"
                             } else {
                                 ".into_iter()"
                             };
@@ -1148,7 +1151,7 @@ fn emit_expr_inner(e: &Expr) -> String {
                     }
                 }
             }
-            let base = emit_send(recv.as_ref(), method.as_str(), args, e.ty.as_ref());
+            let base = emit_send(recv.as_ref(), method.as_str(), args, block.as_ref(), e.ty.as_ref());
             // A Send with attached block becomes a closure passed as
             // the last arg. `other.each do |k, v| ... end` (Ruby) →
             // `other.each(|k, v| { ... })` (Rust). Whether the

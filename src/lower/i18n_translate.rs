@@ -404,14 +404,142 @@ fn resolves_uncached(
     site: Site<'_>,
 ) -> Option<Result<(), String>> {
     let parsed = parse(recv, method, args, block, site)?;
-    Some(match (parsed, split_key(args)) {
-        (Err(reason), _) if block.is_some() => Err(reason),
+    let answer = match (parsed, split_key(args)) {
+        (Err(reason), _) if block.is_some() => return Some(Err(reason)),
         (_, Some((_, then_args, else_args))) => [then_args, else_args]
             .iter()
             .try_for_each(|a| resolves(catalog, recv, method, a, block, site).expect("still a translate call")),
+        (Ok(call), None) if counted_by_rule(&call, catalog) => Err(COUNT_BY_RULE.to_string()),
         (Ok(call), None) => plans_at(catalog, &call, plan_key(recv, method, args, block, site), site.in_view()).map(|_| ()),
         (Err(reason), None) => Err(reason),
+    };
+    Some(match answer {
+        Err(reason) if block.is_none() && runs_at_run_time(&reason, args, catalog) => Ok(()),
+        other => other,
     })
+}
+
+/// Whether a call refused for `reason` can be answered by
+/// `I18n.translate_runtime` instead, which reads the app's whole catalog
+/// as the gem does. Not one whose count may meet a locale's plural rule
+/// that roundhouse cannot read.
+fn runs_at_run_time(reason: &str, args: &[Expr], catalog: &Catalog) -> bool {
+    let runtime = reason.starts_with("a key computed at run time")
+        || reason == "a scope computed at run time"
+        || reason == "a default computed at run time"
+        || reason == "options that are not a literal Hash"
+        || reason == "a `locale:` read after an option with effects"
+        || reason == COUNT_BY_RULE
+        || reason.starts_with("missing interpolation argument");
+    if !runtime || !matches!(args.len(), 1 | 2) {
+        return false;
+    }
+    if catalog.plurals.values().all(|rule| !rule.is_empty()) {
+        return true;
+    }
+    match args.get(1).map(|o| &*o.node) {
+        None => true,
+        Some(ExprNode::Hash { entries, .. }) => !entries.iter().any(|(k, _)| {
+            !matches!(&*k.node, ExprNode::Lit { value: Literal::Sym { .. } })
+                || matches!(&*k.node, ExprNode::Lit { value: Literal::Sym { value } } if value.as_str() == "count")
+        }),
+        Some(_) => false,
+    }
+}
+
+/// `I18n.t("views.feed")` landing on a node of Strings, which I18n
+/// answers as a nested Hash of them: its full key, when every locale's
+/// lookup lands on such a node. Not from a template's `t`, whose Hash
+/// would meet the view's escaping, nor with anything a Hash answer
+/// would ignore or need (`count:`, `default:`, interpolation values).
+pub(crate) fn tree_answer(catalog: &Catalog, recv: Option<&Expr>, method: &str, args: &[Expr], block: Option<&Expr>) -> Option<String> {
+    let on_i18n = matches!(recv.map(|r| &*r.node),
+        Some(ExprNode::Const { path }) if path.len() == 1 && path[0].as_str() == "I18n");
+    if !on_i18n || block.is_some() || !matches!(method, "t" | "translate") {
+        return None;
+    }
+    let call = parse_args(args, None, false).ok()?;
+    if call.dynamic.is_some() || call.lookup.counted || !call.lookup.defaults.is_empty() || !call.lookup.values.is_empty() {
+        return None;
+    }
+    let full = Translate::full_key(&call.lookup, &call.lookup.key).ok()?;
+    let mut locales = catalog.locales();
+    for other in &catalog.others {
+        if !locales.contains(&other.locale) {
+            locales.push(other.locale.clone());
+        }
+    }
+    let lands = |c: &Catalog| c.entries.contains_key(&full) || c.opaque.contains(&full) || c.is_subtree(&full);
+    let every = catalog.variants(&locales).iter().all(|v| {
+        let chain = match &v.fallbacks {
+            Some(defaults) => crate::i18n::fallback_chain(&v.locale, defaults),
+            None => vec![v.locale.clone()],
+        };
+        chain.iter().filter_map(|l| catalog.catalog_for(l)).find(|c| lands(c)).is_some_and(|c| c.plain_subtree(&full))
+    });
+    every.then_some(full)
+}
+
+/// `t("views.calendar.weekdays")` landing on an Array, a number or a
+/// boolean, which I18n answers as it is: its full key and the runtime
+/// method answering it, when every locale's lookup lands on a value of
+/// one kind (an Array's items Strings in one locale and Symbols in
+/// another, as rails-i18n's `date.order` is, are both). Not an `_html`
+/// key, whose Array ActionView marks html-safe item by item.
+pub(crate) fn value_answer(catalog: &Catalog, recv: Option<&Expr>, method: &str, args: &[Expr], block: Option<&Expr>, site: Site<'_>) -> Option<(String, &'static str, Ty)> {
+    use crate::i18n::Opaque;
+    let call = parse(recv, method, args, block, site)?.ok()?;
+    if call.dynamic.is_some() || call.lookup.counted || !call.lookup.defaults.is_empty() || !call.lookup.values.is_empty() {
+        return None;
+    }
+    let full = Translate::full_key(&call.lookup, &call.lookup.key).ok()?;
+    if crate::i18n::is_html_safe_key(&full) {
+        return None;
+    }
+    let mut locales = catalog.locales();
+    for other in &catalog.others {
+        if !locales.contains(&other.locale) {
+            locales.push(other.locale.clone());
+        }
+    }
+    let lands = |c: &Catalog| c.entries.contains_key(&full) || c.opaque.contains(&full) || c.is_subtree(&full);
+    let mut found: Vec<&Opaque> = Vec::new();
+    for v in catalog.variants(&locales) {
+        let chain = match &v.fallbacks {
+            Some(defaults) => crate::i18n::fallback_chain(&v.locale, defaults),
+            None => vec![v.locale.clone()],
+        };
+        found.push(chain.iter().filter_map(|l| catalog.catalog_for(l)).find(|c| lands(c))?.values.get(&full)?);
+    }
+    let first = found.first()?;
+    if !found.iter().all(|v| std::mem::discriminant(*v) == std::mem::discriminant(*first)) {
+        return None;
+    }
+    let array = |elem: Ty| Ty::Array { elem: std::sync::Arc::new(elem) };
+    Some(match first {
+        Opaque::Array(_) => {
+            let items = found.iter().flat_map(|v| match v {
+                Opaque::Array(items) => items.iter().map(|(sym, _)| *sym).collect(),
+                _ => Vec::new(),
+            });
+            let (strings, symbols) = items.fold((false, false), |(s, y), sym| (s || !sym, y || sym));
+            match (strings, symbols) {
+                (_, false) => (full, "translate_strings", array(Ty::Str)),
+                (false, true) => (full, "translate_symbols", array(Ty::Sym)),
+                (true, true) => (full, "translate_items", array(Ty::Union { variants: vec![Ty::Str, Ty::Sym].into() })),
+            }
+        }
+        Opaque::Int(_) => (full, "translate_integer", Ty::Int),
+        Opaque::Float(_) => (full, "translate_float", Ty::Float),
+        Opaque::Bool(_) => (full, "translate_boolean", Ty::Bool),
+    })
+}
+
+const COUNT_BY_RULE: &str = "a count whose form a locale's own plural rule picks";
+
+/// A count meets a locale's own rule only when the call runs.
+fn counted_by_rule(call: &Call, catalog: &Catalog) -> bool {
+    call.lookup.counted && !catalog.plurals.is_empty()
 }
 
 fn parse_args(args: &[Expr], view: Option<&str>, template: bool) -> Result<Call, String> {
@@ -499,17 +627,23 @@ fn parse_args(args: &[Expr], view: Option<&str>, template: bool) -> Result<Call,
     Ok(call)
 }
 
-/// Fold every resolvable translate call in hook bodies, test bodies and
-/// templates. A controller's instance methods (its actions and the
-/// private methods they call) take the controller's `t`.
 thread_local! {
     /// The sites this lowering wrote to the table, by their records, and the records in order.
     static TABLE: std::cell::RefCell<(std::collections::HashMap<u64, Vec<usize>>, Vec<TableSite>)> =
         std::cell::RefCell::new(Default::default());
 }
 
+thread_local! {
+    /// The calls this lowering left to `I18n.translate_runtime`, and every call that reads the translation table.
+    static RUNTIME_SITES: std::cell::RefCell<(Vec<Span>, Vec<Span>)> = const { std::cell::RefCell::new((Vec::new(), Vec::new())) };
+}
+
+/// Fold every resolvable translate call in hook bodies, test bodies and
+/// templates. A controller's instance methods (its actions and the
+/// private methods they call) take the controller's `t`.
 pub fn apply_i18n_translate_lowering(app: &mut App) {
     TABLE.with(|t| *t.borrow_mut() = Default::default());
+    RUNTIME_SITES.with(|r| *r.borrow_mut() = Default::default());
     let catalog = app.i18n.or_rails_default().clone();
     let controllers: std::collections::HashMap<crate::ident::ClassId, String> = app
         .controllers
@@ -523,20 +657,33 @@ pub fn apply_i18n_translate_lowering(app: &mut App) {
         }
         rewrite(body, &catalog, Site::Other)
     });
+    // An `app/helpers` module's instance methods run in the view: their bare `t` is ActionView's, with no template for a lazy key.
+    let helpers: std::collections::HashSet<crate::ident::ClassId> = app.helper_method_index.values().cloned().collect();
+    for lc in app.library_classes.iter_mut().filter(|lc| helpers.contains(&lc.name)) {
+        for m in lc.methods.iter_mut().filter(|m| m.receiver == crate::dialect::MethodReceiver::Instance) {
+            for default in m.params.iter_mut().filter_map(|p| p.default.as_mut()) {
+                rewrite_default(default, &catalog, Site::View(None));
+            }
+            rewrite(&mut m.body, &catalog, Site::View(None));
+        }
+    }
     for controller in &mut app.controllers {
         let Some(scope) = controllers.get(&controller.name) else { continue };
         for item in &mut controller.body {
             match item {
                 crate::dialect::ControllerBodyItem::Action { action, .. } => {
                     for (_name, default) in &mut action.opt_params {
-                        rewrite(default, &catalog, Site::Controller(scope));
+                        rewrite_default(default, &catalog, Site::Controller(scope));
+                    }
+                    for default in action.kw_params.iter_mut().filter_map(|(_, d)| d.as_mut()) {
+                        rewrite_default(default, &catalog, Site::Controller(scope));
                     }
                     rewrite(&mut action.body, &catalog, Site::Controller(scope));
                 }
                 crate::dialect::ControllerBodyItem::ClassMethod { method, .. } => {
                     for p in &mut method.params {
                         if let Some(default) = &mut p.default {
-                            rewrite(default, &catalog, Site::Other);
+                            rewrite_default(default, &catalog, Site::Other);
                         }
                     }
                     rewrite(&mut method.body, &catalog, Site::Other);
@@ -557,6 +704,7 @@ pub fn apply_i18n_translate_lowering(app: &mut App) {
         rewrite(&mut view.body, &catalog, Site::View(Some(&name)));
     }
     app.i18n_table = TABLE.with(|t| std::mem::take(&mut t.borrow_mut().1));
+    (app.i18n_runtime_sites, app.i18n_table_sites) = RUNTIME_SITES.with(|r| std::mem::take(&mut *r.borrow_mut()));
 }
 
 /// Whether `controller` has `AbstractController::Translation`'s `t`:
@@ -585,8 +733,33 @@ fn translates(app: &App, controller: &crate::dialect::Controller) -> bool {
     false
 }
 
+// A parameter default has no statement ahead of it to hoist a `Seq` into, so a dynamic key's `__k = …; case __k …` keeps its own `begin`.
+fn rewrite_default(expr: &mut Expr, catalog: &Catalog, site: Site<'_>) {
+    rewrite(expr, catalog, site);
+    if matches!(&*expr.node, ExprNode::Seq { exprs } if exprs.len() > 1) {
+        let body = expr.clone();
+        *expr = Expr { ty: body.ty.clone(), ..Expr::new(body.span, ExprNode::BeginRescue { body, rescues: Vec::new(), else_branch: None, ensure: None, implicit: false }) };
+    }
+}
+
 fn rewrite(expr: &mut Expr, catalog: &Catalog, site: Site<'_>) {
     expr.node.for_each_child_mut(&mut |c| rewrite(c, catalog, site));
+    // Folded as the view's `t` it is, without the `raw` a controller body has no helper for: nothing renders this copy.
+    if expr.decisions & crate::expr::HELPER_COPY_TRANSLATE != 0 {
+        expr.decisions &= !crate::expr::HELPER_COPY_TRANSLATE;
+        rewrite_one(expr, catalog, Site::View(None));
+        if let ExprNode::Send { recv: None, method, args, .. } = &*expr.node
+            && method.as_str() == "raw"
+            && args.len() == 1
+        {
+            *expr = args[0].clone();
+        }
+        return;
+    }
+    rewrite_one(expr, catalog, site);
+}
+
+fn rewrite_one(expr: &mut Expr, catalog: &Catalog, site: Site<'_>) {
     if let Some(spelled) = with_locale(expr) {
         *expr = spelled;
         return;
@@ -611,9 +784,33 @@ fn rewrite(expr: &mut Expr, catalog: &Catalog, site: Site<'_>) {
         *expr = typed(Expr::new(expr.span, ExprNode::If { cond, then_branch, else_branch }));
         return;
     }
-    let Ok(call) = parsed else { return };
+    let runtime = |reason: &str, expr: &mut Expr| {
+        let ExprNode::Send { args, block: None, .. } = &*expr.node else { return };
+        if runs_at_run_time(reason, args, catalog) {
+            *expr = runtime_call(expr.span, args, catalog, site);
+        }
+    };
+    if let Some(full) = tree_answer(catalog, recv.as_ref(), method.as_str(), args, block.as_ref()) {
+        let hash_ty = Ty::Hash { key: std::sync::Arc::new(Ty::Sym), value: std::sync::Arc::new(Ty::Untyped) };
+        *expr = tree_call(expr.span, "translate_tree", hash_ty, &full, args.get(1));
+        return;
+    }
+    if let Some((full, method, ty)) = value_answer(catalog, recv.as_ref(), method.as_str(), args, block.as_ref(), site) {
+        *expr = tree_call(expr.span, method, ty, &full, args.get(1));
+        return;
+    }
+    let call = match parsed {
+        Ok(call) => call,
+        Err(reason) => return runtime(&reason, expr),
+    };
+    if counted_by_rule(&call, catalog) {
+        return runtime(COUNT_BY_RULE, expr);
+    }
     let key = plan_key(recv.as_ref(), method.as_str(), args, block.as_ref(), site);
-    let Ok(plans) = plans_at(catalog, &call, key, in_view) else { return };
+    let plans = match plans_at(catalog, &call, key, in_view) {
+        Ok(plans) => plans,
+        Err(reason) => return runtime(&reason, expr),
+    };
     let Some(folded) = fold_variants(&call, plans, expr.span, in_view, catalog) else { return };
     *expr = folded;
 }
@@ -702,6 +899,82 @@ fn fold_variants(call: &Call, plans: Vec<(Variant, Plan)>, span: Span, in_view: 
     Some(if html { raw(span, whole) } else { whole })
 }
 
+/// `I18n.translate_runtime(key, options, lazy_scope, in_view, raises)`
+/// for a call written `t(key, options)`: the options as the call passes
+/// them, and in a template the answer marked raw, the runtime having
+/// escaped what is not html-safe.
+/// `I18n.translate_tree(full_key, options)`: the node's Strings as a
+/// nested Hash, built from the app's catalog when the call runs; the
+/// other `translate_*` answer an opaque value the same way.
+fn tree_call(span: Span, method: &str, ty: Ty, full: &str, options: Option<&Expr>) -> Expr {
+    RUNTIME_SITES.with(|r| {
+        let mut r = r.borrow_mut();
+        r.0.push(span);
+        r.1.push(span);
+    });
+    let hash_ty = Ty::Hash { key: std::sync::Arc::new(Ty::Sym), value: std::sync::Arc::new(Ty::Untyped) };
+    let options = match options {
+        Some(opts) => {
+            let mut opts = opts.clone();
+            if let ExprNode::Hash { kwargs, .. } = &mut *opts.node {
+                *kwargs = false;
+            }
+            opts
+        }
+        None => Expr { ty: Some(hash_ty.clone()), ..Expr::new(span, ExprNode::Hash { entries: Vec::new(), kwargs: false }) },
+    };
+    let mut call = const_send(span, "I18n", method, vec![lit(span, full.to_string()), options]);
+    call.ty = Some(ty);
+    call
+}
+
+fn runtime_call(span: Span, args: &[Expr], catalog: &Catalog, site: Site<'_>) -> Expr {
+    RUNTIME_SITES.with(|r| {
+        let mut r = r.borrow_mut();
+        r.0.push(span);
+        r.1.push(span);
+    });
+    let options = match args.get(1) {
+        Some(opts) => {
+            let mut opts = opts.clone();
+            // Left as keywords the hash would swallow the arguments that follow it.
+            if let ExprNode::Hash { kwargs, .. } = &mut *opts.node {
+                *kwargs = false;
+            }
+            opts
+        }
+        None => Expr {
+            ty: Some(Ty::Hash { key: std::sync::Arc::new(Ty::Sym), value: std::sync::Arc::new(Ty::Untyped) }),
+            ..Expr::new(span, ExprNode::Hash { entries: Vec::new(), kwargs: false })
+        },
+    };
+    let lazy = match site {
+        Site::View(Some(view)) => lit(span, view.replace("/_", ".").replace('/', ".")),
+        Site::Controller(scope) => typed(Expr::new(span, ExprNode::StringInterp {
+            parts: vec![
+                InterpPart::Text { value: format!("{scope}.") },
+                InterpPart::Expr { expr: typed(Expr::new(span, ExprNode::Send {
+                    recv: None,
+                    method: Symbol::from("action_name"),
+                    args: vec![],
+                    block: None,
+                    parenthesized: false,
+                })) },
+            ],
+        })),
+        _ => lit(span, String::new()),
+    };
+    let in_view = site.in_view();
+    let mut raises = const_send(span, "I18n", "missing_raises", vec![
+        Expr::new(span, ExprNode::Lit { value: Literal::Bool { value: catalog.missing.raises } }),
+        lit(span, catalog.missing.flipped.join(",")),
+    ]);
+    raises.ty = Some(Ty::Bool);
+    let flag = Expr { ty: Some(Ty::Bool), ..Expr::new(span, ExprNode::Lit { value: Literal::Bool { value: in_view } }) };
+    let call = typed(const_send(span, "I18n", "translate_runtime", vec![args[0].clone(), options, lazy, flag, raises]));
+    if in_view { raw(span, call) } else { call }
+}
+
 /// A call whose answer differs by locale as `I18n.translate_site(…)`: its
 /// entry per locale (and environment, and run-time key) goes to the app's
 /// table, which the runtime reads when the call runs.
@@ -746,6 +1019,7 @@ fn table_site(call: &Call, locales: &[(String, Vec<(Plan, Vec<Variant>)>)], span
         shape.hash(&mut h);
         h.finish()
     };
+    RUNTIME_SITES.with(|r| r.borrow_mut().1.push(span));
     let id = TABLE.with(|t| {
         let mut t = t.borrow_mut();
         let (index, sites) = &mut *t;
@@ -936,8 +1210,8 @@ fn bind_all_options(call: &mut Call, span: Span) -> Vec<Expr> {
 /// an `around_action` writes it, spelled out as the gem runs it:
 ///
 /// ```ruby
-/// __i18n_locale_prev = I18n.enter_locale(l)
 /// begin
+///   __i18n_locale_prev = I18n.enter_locale(l)
 ///   body              # or action.call
 /// ensure
 ///   I18n.leave_locale(__i18n_locale_prev)
@@ -981,11 +1255,12 @@ fn with_locale(e: &Expr) -> Option<Expr> {
     let leave = Expr { ty: Some(Ty::Nil), ..const_send(span, "I18n", "leave_locale", vec![read_prev]) };
     let save = Expr { ty: Some(prev_ty), ..Expr::new(span, ExprNode::Assign { target: LValue::Var { id: VarId(0), name: prev }, value: enter }) };
     let body_ty = body.ty.clone();
-    let run = Expr {
-        ty: body_ty.clone(),
+    // The save inside the `begin`, not a statement before it: a value-position Seq is hoisted ahead of the whole statement (`[t(…), with_locale(…) { … }]`), which ran its siblings in the new locale.
+    let body = Expr { ty: body_ty.clone(), ..Expr::new(span, ExprNode::Seq { exprs: vec![save, body] }) };
+    Some(Expr {
+        ty: body_ty,
         ..Expr::new(span, ExprNode::BeginRescue { body, rescues: Vec::new(), else_branch: None, ensure: Some(leave), implicit: false })
-    };
-    Some(Expr { ty: body_ty, ..Expr::new(span, ExprNode::Seq { exprs: vec![save, run] }) })
+    })
 }
 
 /// `branches` (each with the environments it runs in, `None` for every
