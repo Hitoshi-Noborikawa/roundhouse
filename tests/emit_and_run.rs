@@ -18440,6 +18440,8 @@ mod core_constants;
 mod module_protocol_receivers;
 #[path = "emit_and_run/ipaddr_include.rs"]
 mod ipaddr_include;
+#[path = "emit_and_run/hash_subclass_include.rs"]
+mod hash_subclass_include;
 #[path = "emit_and_run/helper_diagnostics.rs"]
 mod helper_diagnostics;
 #[path = "emit_and_run/value_seq_order.rs"]

@@ -6121,6 +6121,19 @@ fn report_unsupported_bundled_constants(app: &App, target: BuildTarget) {
             }
         }
     }
+    // TypeScript emitted `class Enum extends Hash` and `this.is_has_key(...)`, neither of which exists there.
+    if !matches!(target, BuildTarget::Blog | BuildTarget::Ruby | BuildTarget::Roda | BuildTarget::Jruby | BuildTarget::Spinel) {
+        for lc in app.library_classes.iter().filter(|lc| !lc.is_module) {
+            if let Some(parent) = lc.parent.as_ref().filter(|p| matches!(p.0.as_str(), "Hash" | "Array" | "String" | "Set")) {
+                emit::diagnostics::report_unsupported(
+                    lc.parent_span,
+                    target.as_str(),
+                    "builtin subclass",
+                    format!("`{}` subclasses {}, which the {} emit has no class to extend", lc.name.0.as_str(), parent.0.as_str(), target.as_str()),
+                );
+            }
+        }
+    }
     if matches!(target, BuildTarget::Blog | BuildTarget::Ruby | BuildTarget::Roda) {
         return;
     }
