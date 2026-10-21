@@ -3240,8 +3240,20 @@ fn ruby_family_runtime_files(
     // time — campfire's suite went 219/240 to 0/240, every file dying
     // on the same line.
     let sidekiq = needs_redis(app);
+    // On these lanes the redis gem is required at the first push, not at
+    // boot: a tree whose tests record pushes through `SidekiqPush`'s seam
+    // then boots without the gem installed. Spinel resolves requires at
+    // compile time, so its tree keeps the file's top-level require.
     let sidekiq_client = if sidekiq {
-        crate::runtime_files::read_to_string(SIDEKIQ_REDIS_CLIENT)?
+        let client = crate::runtime_files::read_to_string(SIDEKIQ_REDIS_CLIENT)?;
+        const AT_LOAD: &str = "require \"redis\"\n";
+        const OPEN: &str = "    conn = password == \"\" ? Redis.new(url: url, connect_timeout: CONNECT_TIMEOUT, read_timeout: READ_TIMEOUT) : Redis.new(url: url, password: password, connect_timeout: CONNECT_TIMEOUT, read_timeout: READ_TIMEOUT)\n";
+        if !client.contains(AT_LOAD) || !client.contains(OPEN) {
+            return Err(format!("{SIDEKIQ_REDIS_CLIENT}: the require or the connect line moved"));
+        }
+        client
+            .replacen(AT_LOAD, "# `require \"redis\"` is at the first connect on this lane.\n", 1)
+            .replacen(OPEN, &format!("    require \"redis\"\n{OPEN}"), 1)
     } else {
         String::new()
     };
@@ -4656,7 +4668,7 @@ fn apply_job_registry(files: &mut [(String, String)], app: &App) {
     );
     let generated = format!(
         "{HEAD}{}\n{flag}{redis}{TAIL}",
-        crate::lower::job_payload::registry_source(&app.job_plans)
+        crate::lower::job_payload::registry_source(&app.job_plans, needs_redis(app))
     );
     for (path, content) in files.iter_mut() {
         if !path.ends_with("job_registry.rb") {
@@ -9748,9 +9760,11 @@ fn spin_shape(files: Vec<(String, String)>) -> Result<Vec<(String, String)>, Str
             "# Redis, for queue_adapter :sidekiq: jobs are pushed in Sidekiq's\n\
              # format for a Sidekiq process to run. spinel-redis, pure Ruby over\n\
              # sp_net. Git form, pinned to a tag because `ref` takes a branch\n\
-             # or tag, never a SHA; 0.2.0 carries the url:, AUTH, zadd and\n\
-             # pipelined this push needs, and the index lists only 0.1.0.\n\
-             redis = { git = \"https://github.com/rubys/spinel-redis\", ref = \"v0.2.0\" }\n",
+             # or tag, never a SHA. Until rubys/spinel-redis#3 (connect_timeout:\n\
+             # and read_timeout:) is merged and tagged, the tag is on its branch\n\
+             # in the baron-hines fork; it builds on v0.2.0's url:, AUTH, zadd\n\
+             # and pipelined.\n\
+             redis = { git = \"https://github.com/baron-hines/spinel-redis\", ref = \"redis-timeouts-1\" }\n",
         );
     }
     files.push(("spin.toml".to_string(), manifest));
