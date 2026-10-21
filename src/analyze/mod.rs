@@ -6239,6 +6239,7 @@ impl Analyzer {
                 let site_recv = match recv.as_ref().map(|r| &*r.node) {
                     None | Some(ExprNode::SelfRef) if class_body => SiteRecv::Class,
                     Some(ExprNode::Const { .. }) => SiteRecv::Class,
+                    _ if recv.as_ref().is_some_and(|r| singleton_of(r.ty.as_ref()).is_some()) => SiteRecv::Class,
                     Some(ExprNode::Send { method: m, args, .. }) if m.as_str() == "class" && args.is_empty() => {
                         SiteRecv::DotClass
                     }
@@ -6255,6 +6256,7 @@ impl Analyzer {
                                 return Ty::Untyped;
                             }
                             let t = a.ty.clone().unwrap_or(Ty::Var { var: crate::ident::TyVar(0) });
+                            let t = class_object_arg_ty(a, t);
                             // Template call sites are evidence of what
                             // callers pass; an `Untyped` arg there
                             // (`errors_for f.object`) means the CALLER's
@@ -7645,11 +7647,33 @@ fn association_builder_members(assoc: &crate::dialect::Association) -> Vec<(Symb
     ]
 }
 
+fn singleton_of(ty: Option<&Ty>) -> Option<&Ty> {
+    match ty {
+        Some(Ty::Class { id, args }) if id.0.as_str() == "Class" && args.len() == 1 => Some(&args[0]),
+        _ => None,
+    }
+}
+
+// Recorded flat, a class object argument would type its parameter as an instance of that class.
+fn class_object_arg_ty(arg: &Expr, ty: Ty) -> Ty {
+    match ty {
+        Ty::Class { ref id, ref args }
+            if arg.decisions & crate::expr::CLASS_OBJECT_VALUE != 0
+                && args.is_empty()
+                && !matches!(id.0.as_str(), "Class" | "Module") =>
+        {
+            Ty::Class { id: ClassId(Symbol::from("Class")), args: vec![ty.clone()].into() }
+        }
+        ty => ty,
+    }
+}
+
 /// Class ids a typed call receiver contributes to param unify and the
 /// reverse call graph. Mirrors the receivers dispatch actually chases:
 /// bare Class, Relation→model, Array elem, and Class arms of a Union.
 fn class_ids_for_call_receiver(ty: &Ty) -> Vec<ClassId> {
     match ty {
+        _ if let Some(of) = singleton_of(Some(ty)) => class_ids_for_call_receiver(of),
         Ty::Class { id, .. } => vec![id.clone()],
         Ty::Relation { of } => vec![of.clone()],
         Ty::Array { elem } => class_ids_for_call_receiver(elem),
