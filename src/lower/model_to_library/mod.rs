@@ -1321,7 +1321,7 @@ fn build_methods_with_finder_inputs(
             })
         })
         .unwrap_or_else(|| Symbol::from("id"));
-    push_validate_method(&mut methods, model, models, errors_readers, runtime_relation, &primary_key);
+    push_validate_method(&mut methods, model, errors_readers, runtime_relation, &primary_key);
     push_association_methods(&mut methods, model, models, &through_joins);
     push_dependent_destroy(&mut methods, model, &through_joins);
     push_unknown_marker_methods(&mut methods, model);

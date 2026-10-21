@@ -451,7 +451,14 @@ fn untyped_subexpressions_baseline() {
     // its ends, and Array elements that may hold one are vars here
     // (993 → 1014, +21 on this probe; the RBS-paired gate measures +12
     // gradual sites in relation.rb and bumps its own ceiling to 846).
-    const CEILING: usize = 1014;
+    // MEASURED 1043 on 2026-10-21 (main measured 1009): `touch_later`
+    // defers a `belongs_to …, touch: true` to the COMMIT, enlisting
+    // kind 3 on `Db._txn_records` (`touch_later` +13), and
+    // `_flush_deferred_touches_from` walks those entries (+16);
+    // `_commit_enlisted_from` skips them (+4) and `transaction` calls
+    // the flush (+1). Entry reads off `Db._txn_records` are vars on
+    // this RBS-less probe, as `_commit_enlisted_from`'s were already.
+    const CEILING: usize = 1043;
     assert!(
         existing_untyped <= CEILING && like_untyped <= LIKE_CEILING,
         "{} untyped sub-expressions on spinel-blog runtime — exceeds ledger: \

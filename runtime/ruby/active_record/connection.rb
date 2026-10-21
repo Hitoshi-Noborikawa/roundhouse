@@ -157,7 +157,10 @@ module ActiveRecord
   # record, and what the write was (0 create, 1 update, 2 destroy).
   # `Base.transaction` runs the held callbacks after its outermost
   # COMMIT and drops them on a ROLLBACK, restoring the record's
-  # persisted state as Rails' `rolledback!` does.
+  # persisted state as Rails' `rolledback!` does. Kind 3 is not a
+  # write yet: a `touch_later` the outermost transaction applies just
+  # before its COMMIT (`Base._flush_deferred_touches`), whose own touch
+  # then enlists as an update.
   class EnlistedRecord
     attr_reader :record, :kind
 
@@ -639,6 +642,10 @@ module ActiveRecord
         begin
           begin
             result = yield
+            # Where this savepoint runs its writes' commit callbacks (an
+            # unjoinable parent: a transactional test's), it is where
+            # their deferred touches land too, before the RELEASE.
+            ActiveRecord::Base._flush_deferred_touches_from(mark) if run_callbacks
             Db.exec("RELEASE SAVEPOINT #{savepoint}") unless savepoint.nil?
             finished = true
             result
@@ -689,6 +696,11 @@ module ActiveRecord
         begin
           begin
             result = yield
+            # Rails' `before_committed!`: the touches deferred by
+            # `touch_later` are written now, while the transaction is
+            # still open, so a failed one rolls the whole write back.
+            ActiveRecord::Base._flush_deferred_touches
+            result
           rescue ActiveRecord::Rollback
             # Rails' quiet way out: roll back, raise nothing, answer nil.
             rolled_back = true
@@ -1344,7 +1356,48 @@ module ActiveRecord
 
     def _touch_owner
       owner = @__touch_owner
-      owner.touch if !owner.nil? && owner.persisted?
+      owner.touch_later if !owner.nil? && owner.persisted?
+      nil
+    end
+
+    # Rails' `touch_later`, which `belongs_to …, touch: true` calls.
+    # Inside a transaction the touch waits for the outermost COMMIT and
+    # is written once per record: a message's rich text and the message
+    # itself both touch the room, and Rails stamps the room once.
+    # Waiting also keeps the UPDATE out of the middle of the save, which
+    # holds SQLite's one write lock. Outside a transaction it is `touch`.
+    def touch_later
+      return touch if Db._txn_depth == 0
+      records = Db._txn_records
+      already = records.any? { |entry| entry.kind == 3 && entry.record.equal?(self) }
+      records << ActiveRecord::EnlistedRecord.new(self, 3) unless already
+      true
+    end
+
+    # Just before the outermost COMMIT: each record a `touch_later`
+    # enlisted is touched, once. A touch fires `after_touch`, which can
+    # defer its own parent's touch (Boost -> Message -> Room), so the
+    # walk goes on until no deferred touch is left. The touch joins the
+    # still-open transaction and enlists as an update, so its commit
+    # callbacks run after the COMMIT with everyone else's.
+    def self._flush_deferred_touches
+      _flush_deferred_touches_from(0)
+    end
+
+    # The deferred touches enlisted at and after `from`: the outermost
+    # COMMIT's (0), or a savepoint's that runs its own commit callbacks.
+    def self._flush_deferred_touches_from(from)
+      touched = []
+      i = from
+      while i < Db._txn_records.length
+        entry = Db._txn_records[i]
+        i += 1
+        next unless entry.kind == 3
+        record = entry.record
+        next if touched.any? { |other| other.equal?(record) }
+        touched << record
+        record.touch
+      end
       nil
     end
 
@@ -1416,12 +1469,15 @@ module ActiveRecord
       return nil if held.nil?
       seen = []
       held.each do |entry|
+        # A deferred touch is not a write; its touch enlisted one.
+        next if entry.kind == 3
         record = entry.record
         next if seen.any? { |other| other.equal?(record) }
         seen << record
         kind = entry.kind
         held.each do |other|
           next unless other.record.equal?(record)
+          next if other.kind == 3
           kind = other.kind if other.kind == 2 || (other.kind == 0 && kind == 1)
         end
         record._run_commit_callbacks(kind)

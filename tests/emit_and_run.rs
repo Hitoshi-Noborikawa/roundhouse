@@ -1182,6 +1182,74 @@ end
         .assert_passes();
 }
 
+/// `belongs_to …, touch: true` is Rails' `touch_later`: inside a
+/// transaction the parent's row is stamped just before the COMMIT, not
+/// in the middle of the save; outside one a save still stamps it, and a
+/// rollback stamps nothing. A required `belongs_to` is
+/// checked through its reader, so a missing parent still fails the save.
+/// (campfire's message save, whose rich text and message both touch the
+/// room inside one transaction.)
+#[test]
+fn a_belongs_to_touch_waits_for_the_commit_and_lands_once() {
+    emit_and_run::real_blog()
+        .edit("app/models/comment.rb", "  belongs_to :article\n", "  belongs_to :article, touch: true\n")
+        .write(
+            "test/models/deferred_touch_test.rb",
+            r##"require "test_helper"
+
+class DeferredTouchTest < ActiveSupport::TestCase
+  def stored(article)
+    Article.find(article.id).updated_at.to_i
+  end
+
+  def parent(title)
+    travel_to Time.utc(2026, 1, 1, 12, 0, 0)
+    article = Article.create!(title: title, body: "A sufficiently long article body.")
+    travel_to Time.utc(2026, 1, 2, 12, 0, 0)
+    article
+  end
+
+  teardown { travel_back }
+
+  test "children saved in one transaction touch the parent at the commit" do
+    article = parent("Parent")
+    before = stored(article)
+    Article.transaction do
+      article.comments.create!(commenter: "Ann", body: "First comment")
+      article.comments.create!(commenter: "Bob", body: "Second comment")
+      assert_equal before, stored(article)
+    end
+    assert_equal Time.utc(2026, 1, 2, 12, 0, 0).to_i, stored(article)
+  end
+
+  test "a save outside a transaction still touches the parent" do
+    article = parent("Single")
+    article.comments.create!(commenter: "Ann", body: "Only comment")
+    assert_equal Time.utc(2026, 1, 2, 12, 0, 0).to_i, stored(article)
+  end
+
+  test "a rolled back transaction touches nothing" do
+    article = parent("Undone")
+    before = stored(article)
+    Article.transaction do
+      article.comments.create!(commenter: "Ann", body: "Dropped comment")
+      raise ActiveRecord::Rollback
+    end
+    assert_equal before, stored(article)
+  end
+
+  test "a comment on an article that does not exist is invalid" do
+    comment = Comment.new(commenter: "Ann", body: "Nobody home", article_id: 999_999)
+    assert_not comment.save
+    assert_includes comment.errors.full_messages, "Article must exist"
+  end
+end
+"##,
+        )
+        .run_test("test/models/deferred_touch_test.rb")
+        .assert_passes();
+}
+
 /// `rescue URI::Error` catches `URI.parse`'s `URI::InvalidURIError`, and
 /// `SocketError` resolves where the app names it without a require (Rails
 /// has loaded socket); both lanes define the classes.
