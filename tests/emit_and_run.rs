@@ -14241,6 +14241,68 @@ end
         .assert_passes();
 }
 
+/// `validate :m` with Rails 7.1's password-change guard shape: a Symbol
+/// dirty predicate as `if:` and a lambda as `unless:` (campfire's
+/// `password_challenge_matches`), `on: :create` (campfire's Session),
+/// `password_challenge` assigned through `update`, and an empty password
+/// leaving the digest as it was. Each assignment stays off bcrypt (CI's
+/// unit job does not install it).
+#[test]
+fn validate_guards_and_the_password_challenge_run() {
+    emit_and_run::real_blog()
+        .edit(
+            "db/schema.rb",
+            "create_table \"articles\", force: :cascade do |t|",
+            "create_table \"articles\", force: :cascade do |t|\n    t.string \"password_digest\"",
+        )
+        .edit(
+            "app/models/article.rb",
+            "class Article < ApplicationRecord\n  has_many :comments, dependent: :destroy",
+            r#"class Article < ApplicationRecord
+  has_many :comments, dependent: :destroy
+  has_secure_password validations: false
+  validate :challenge_matches, if: :will_save_change_to_title?, unless: -> { password_challenge.nil? }
+  validate :body_free, on: :create
+
+  def challenge_matches
+    errors.add(:password_challenge, :invalid) unless password_challenge == "ok"
+  end
+
+  def body_free
+    errors.add(:body, "is taken") if body == "only on create"
+  end"#,
+        )
+        .write(
+            "test/models/article_validate_guards_test.rb",
+            r#"require "test_helper"
+
+class ArticleValidateGuardsTest < ActiveSupport::TestCase
+  test "the challenge is checked only when the guarded column changes and a challenge is given" do
+    id = articles(:one).id
+    assert_not Article.find(id).update(title: "A new title", password_challenge: "wrong")
+    assert Article.find(id).update(title: "A new title", password_challenge: "ok")
+    assert Article.find(id).update(title: "Another title")
+    assert Article.find(id).update(body: "A different long body", password_challenge: "wrong")
+  end
+
+  test "on: :create runs before the first save only" do
+    assert_not Article.new(title: "Fresh", body: "only on create").save
+    assert articles(:one).update(body: "only on create")
+  end
+
+  test "an empty password leaves the digest as it was" do
+    article = articles(:one)
+    article.update!(password_digest: "stored digest")
+    article.update!(password: "")
+    assert_equal "stored digest", Article.find(article.id).password_digest
+  end
+end
+"#,
+        )
+        .run_test("test/models/article_validate_guards_test.rb")
+        .assert_passes();
+}
+
 #[path = "emit_and_run/relation_finders.rs"]
 mod relation_finders;
 #[path = "emit_and_run/attach_hash.rs"]
