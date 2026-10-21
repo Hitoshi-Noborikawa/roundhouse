@@ -20,6 +20,7 @@ const MODEL: &str = r#"class Widget < ApplicationRecord
   validates :title, exclusion: { in: %w[admin], message: "is reserved for %{model}" }
   validates :slug, uniqueness: { message: "is used by %{attribute}" }
   validates :escaped, presence: { message: "100%% needed, not %%{shape}" }
+  validates :bounded, presence: { message: "must be %< 10" }
 
   validates :keyed, presence: { message: :custom_key }
   validates :called, presence: { message: -> { "computed" } }
@@ -54,7 +55,7 @@ fn lowered(model: &roundhouse::Model, attr: &str) -> bool {
 #[test]
 fn a_string_message_lowers_on_every_rule_kind() {
     let (model, warnings) = ingest();
-    for attr in ["code", "name", "kind", "score", "title", "slug", "escaped"] {
+    for attr in ["code", "name", "kind", "score", "title", "slug", "escaped", "bounded"] {
         assert!(lowered(&model, attr), "{attr} lowers: {warnings:?}");
         assert!(!warnings.iter().any(|w| w.contains(&format!("validates :{attr},"))), "{attr}: {warnings:?}");
     }

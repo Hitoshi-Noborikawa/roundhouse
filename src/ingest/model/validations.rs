@@ -368,30 +368,15 @@ fn push_message(value: &Node<'_>, kind: &str, counted: bool, slot: &mut Option<S
         gaps.push(format!("{kind}: message"));
         return;
     };
-    // `%%` is I18n's literal `%`, so `%%{x}` names no placeholder. A
-    // `%<name>` format reference is I18n interpolation too: the gap.
-    let mut rest = text.as_str();
-    while let Some(at) = rest.find('%') {
-        let after = &rest[at + 1..];
-        if let Some(escaped) = after.strip_prefix('%') {
-            rest = escaped;
-            continue;
-        }
-        if after.starts_with('<') {
-            gaps.push(format!("{kind}: message"));
-            return;
-        }
-        let Some(open) = after.strip_prefix('{') else {
-            rest = after;
-            continue;
-        };
-        let Some(end) = open.find('}') else { break };
-        let name = &open[..end];
-        if !(matches!(name, "value" | "attribute" | "model") || (counted && name == "count")) {
-            gaps.push(format!("{kind}: message"));
-            return;
-        }
-        rest = &open[end + 1..];
+    // The placeholders as I18n reads the String: `%%` is a literal `%`
+    // (`%%{x}` names nothing), a `%<name>` format reference is refused,
+    // and a `%<` without a name and `>` (`"must be %< 10"`) is text.
+    let allowed = |name: &str| matches!(name, "value" | "attribute" | "model") || (counted && name == "count");
+    let known = crate::i18n::pieces(&text)
+        .is_ok_and(|pieces| pieces.iter().all(|p| !matches!(p, crate::i18n::Piece::Name(n) if !allowed(n))));
+    if !known {
+        gaps.push(format!("{kind}: message"));
+        return;
     }
     *slot = Some(text);
 }
