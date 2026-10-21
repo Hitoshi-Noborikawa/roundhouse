@@ -1,6 +1,5 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::process::Command;
 
 use roundhouse::analyze::{diagnose, Analyzer, DiagnosticKind};
 use roundhouse::ingest::ingest_app_from_tree;
@@ -153,9 +152,9 @@ values = [Clock.from_iso.to_i, Clock.from_xml.to_i, Clock.from_http.to_i,
           Clock.xml_formatted, Clock.time("invalid"), Clock.zone_time("")]
 puts values.inspect
 "#);
-    let oracle = Command::new("ruby").args(["-ractive_support/all", "-e", &format!(
+    let oracle = emit_and_run::ruby().args(["-ractive_support/all", "-e", &format!(
         "class ApplicationRecord; end\n{source}\nTime.zone = 'UTC'\n{script}"
-    )]).output().unwrap();
+    )]).output().expect("run CRuby parser oracle with ActiveSupport");
     assert!(oracle.status.success(), "{}", String::from_utf8_lossy(&oracle.stderr));
     let run = emit_and_run::empty_app()
         .write("config/application.rb", "module TimeProbe\n  class Application < Rails::Application\n    config.time_zone = \"UTC\"\n  end\nend\n")
