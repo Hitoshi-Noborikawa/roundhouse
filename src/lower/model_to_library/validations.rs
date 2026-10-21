@@ -970,7 +970,7 @@ fn blank_cond(attr: &Symbol, attr_ty: Option<&Ty>, runtime_relation: super::Runt
             and(is_a_check(&attr_ivar, "Hash"), send(attr_ivar, "empty?", vec![])),
         ),
         (super::RuntimeRelation::Absent, Some(Ty::Str)) => {
-            or(nil_check, send(send(narrowed, "strip", vec![]), "empty?", vec![]))
+            or(nil_check, send(stripped_str(narrowed), "empty?", vec![]))
         }
         (super::RuntimeRelation::Absent, Some(Ty::Bool)) => or(nil_check, is_false(narrowed)),
         (super::RuntimeRelation::Absent, Some(_)) => nil_check,
@@ -1042,7 +1042,7 @@ fn allow_blank_cond(attr: &Symbol, attr_ty: Option<&Ty>, runtime_relation: super
             // The `nil?` disjunct covers nil, so the strip reads the
             // narrowed value, as the presence check's does.
             let narrowed = if nilable { narrowed_ivar(attr, &Ty::Str) } else { value };
-            bool_op(BoolOpKind::Or, nil, send(send(narrowed, "strip", vec![]), "empty?", vec![]))
+            bool_op(BoolOpKind::Or, nil, send(stripped_str(narrowed), "empty?", vec![]))
         }
         super::RuntimeRelation::Absent if matches!(attr_ty, Some(Ty::Bool)) => {
             let narrowed = if nilable { narrowed_ivar(attr, &Ty::Bool) } else { value };
@@ -2193,6 +2193,17 @@ fn peel_nilable(ty: Option<&Ty>) -> (Option<&Ty>, bool) {
 
 /// `Cast(@attr, T)` — the nil-excluded read. Callers place it only
 /// where a preceding `nil?` disjunct/conjunct guarantees the value.
+/// `value.strip`, typed as the String it is. The strict String arms ask
+/// `empty?` of it; an emitter that dispatches `empty?` by the receiver's
+/// type (elixir: `s == ""`) needs that type on the synthesized call,
+/// which has none of its own, or it falls back to a struct dispatch.
+fn stripped_str(value: Expr) -> Expr {
+    Expr::new(
+        Span::synthetic(),
+        ExprNode::Cast { value: send(value, "strip", vec![]), target_ty: Ty::Str },
+    )
+}
+
 fn narrowed_ivar(attr: &Symbol, inner: &Ty) -> Expr {
     Expr::new(
         Span::synthetic(),

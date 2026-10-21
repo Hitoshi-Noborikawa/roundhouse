@@ -123,3 +123,30 @@ fn strict_targets_emit_temporal_presence_and_absence_without_errors() {
         assert!(errors.is_empty(), "{target:?}: {errors:#?}");
     }
 }
+
+/// Elixir dispatches `empty?` by its receiver's type. The strict String
+/// arm asks it of `strip`'s result, which is typed as the String it is,
+/// so the check reads `String.trim(x) == ""` and never falls back to a
+/// struct dispatch (`.__struct__.empty?`), which raised KeyError on a
+/// String at runtime.
+#[test]
+fn elixir_reads_a_stripped_string_as_a_string() {
+    use roundhouse::project::BuildTarget;
+    let (emitted, errors) = app().emit(BuildTarget::Elixir);
+    assert!(errors.is_empty(), "{errors:#?}");
+    let mut model = None;
+    let mut stack = vec![emitted.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        for entry in std::fs::read_dir(&dir).unwrap().flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                stack.push(path);
+            } else if path.file_name().is_some_and(|n| n == "item.ex") {
+                model = std::fs::read_to_string(&path).ok();
+            }
+        }
+    }
+    let model = model.expect("an emitted item.ex");
+    assert!(model.contains("String.trim(record.name) == \"\""), "{model}");
+    assert!(!model.contains("__struct__.empty?"), "{model}");
+}
