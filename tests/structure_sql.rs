@@ -530,3 +530,46 @@ fn other_meta_commands_and_literals_are_left_alone() {
     let notes = &schema.tables[&Symbol::from("notes")];
     assert_eq!(col(notes, "body").default.as_deref(), Some("first line\n\\restrict kept"));
 }
+
+#[test]
+fn named_not_null_constraints_keep_the_column() {
+    // PostgreSQL 18 pg_dump names a column's NOT NULL whenever the stored
+    // constraint name is not `<table>_<column>_not_null`: renamed tables,
+    // partitions, and names truncated at 63 bytes.
+    let sql = r#"
+CREATE TABLE public.user_identities (
+    id uuid NOT NULL,
+    first_name text,
+    email character varying CONSTRAINT identities_email_not_null NOT NULL,
+    created_at timestamp(6) without time zone CONSTRAINT identities_created_at_not_null NOT NULL,
+    nickname text DEFAULT 'x'::text CONSTRAINT identities_nickname_not_null NOT NULL,
+    handle text CONSTRAINT "Identities handle not null" NOT NULL,
+    display_name text GENERATED ALWAYS AS (first_name) STORED CONSTRAINT identities_display_name_not_null NOT NULL
+);
+"#;
+    let schema = ingest_structure_sql(sql.as_bytes(), "db/structure.sql").expect("strict ingest");
+    let table = &schema.tables[&Symbol::from("user_identities")];
+    for name in ["email", "created_at", "nickname", "handle", "display_name"] {
+        assert!(!col(table, name).nullable, "{name} keeps NOT NULL");
+    }
+    assert!(col(table, "first_name").nullable);
+    assert!(matches!(col(table, "email").col_type, ColumnType::String { .. }));
+    assert!(matches!(col(table, "created_at").col_type, ColumnType::DateTime));
+    assert_eq!(col(table, "nickname").default.as_deref(), Some("x"));
+    assert_eq!(col(table, "display_name").generated.as_ref().expect("generated").expression, "first_name");
+}
+
+#[test]
+fn a_constraint_keyword_without_a_not_null_still_fails_after_generated() {
+    let sql = r#"
+CREATE TABLE public.people (
+    id bigint NOT NULL,
+    first_name text,
+    display_name text GENERATED ALWAYS AS (first_name) STORED CONSTRAINT people_display_name_check
+);
+"#;
+    let error = ingest_structure_sql(sql.as_bytes(), "db/structure.sql")
+        .expect_err("a dangling constraint name is not a nullability clause")
+        .to_string();
+    assert!(error.contains("generated column dropped: people.display_name"), "{error}");
+}

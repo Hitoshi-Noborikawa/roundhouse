@@ -1378,11 +1378,11 @@ fn word_seq_pos_after(words: &[(usize, String)], after_byte: usize, seq: &[&str]
 
 /// Where a column definition's type phrase ends and its modifiers
 /// (`DEFAULT …`, `NOT NULL`, `NULL`, `GENERATED …`, `COLLATE …`, an
-/// inline `PRIMARY KEY`) begin — the first depth-0 occurrence of one
-/// of those keywords, or the end of the string when the column has no
-/// modifiers at all.
+/// inline `PRIMARY KEY`, or a named `CONSTRAINT name NOT NULL`) begin —
+/// the first depth-0 occurrence of one of those keywords, or the end of
+/// the string when the column has no modifiers at all.
 fn find_modifier_start(rest: &str) -> usize {
-    const STOP: [&str; 6] = ["DEFAULT", "NOT", "NULL", "GENERATED", "COLLATE", "PRIMARY"];
+    const STOP: [&str; 7] = ["CONSTRAINT", "DEFAULT", "NOT", "NULL", "GENERATED", "COLLATE", "PRIMARY"];
     for (pos, word) in top_level_words(rest) {
         if STOP.contains(&word.as_str()) {
             return pos;
@@ -1449,12 +1449,20 @@ fn parse_generated_modifier(modifiers: &str) -> Result<Option<GeneratedColumn>, 
 }
 
 /// Consume only an optional `NULL` or `NOT NULL` clause plus SQL trivia.
+/// PostgreSQL 18 pg_dump may name the clause (`CONSTRAINT name NOT
+/// NULL`), so an optional `CONSTRAINT name` prefix is accepted too.
 /// Checking the full suffix prevents punctuation, string literals, or
 /// other modifiers from being silently ignored.
 fn only_optional_nullability(s: &str) -> bool {
-    let start = skip_sql_trivia(s, 0);
+    let mut start = skip_sql_trivia(s, 0);
     if start == s.len() {
         return true;
+    }
+    if let Some(after_constraint) = consume_sql_keyword_ci(s, start, "CONSTRAINT") {
+        let Some((_, after_name)) = read_ident(s, skip_sql_trivia(s, after_constraint)) else {
+            return false;
+        };
+        start = skip_sql_trivia(s, after_name);
     }
     if let Some(end) = consume_sql_keyword_ci(s, start, "NULL") {
         return skip_sql_trivia(s, end) == s.len();
