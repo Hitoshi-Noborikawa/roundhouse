@@ -637,7 +637,7 @@ fn parse_of_options<'a>(
             }
             "in" | "within" if matches!(kind, ValidatesKind::Inclusion | ValidatesKind::Exclusion) => {
                 saw_rule_key = true;
-                match inclusion_values(&value) {
+                match inclusion_values(&value, class_consts) {
                     Some(spec) => inclusion = Some(spec),
                     None => gaps.push(format!("{}: in", set_label(&kind))),
                 }
@@ -702,8 +702,8 @@ fn parse_validator(key: &str, value: &Node<'_>, file: &str, class_consts: &super
         "absence" => parse_bool_or_hash(value, ValidationRule::Absence, "absence", file),
         "length" => parse_length_rule(value, file, class_consts),
         "numericality" => parse_numericality(value, file, class_consts),
-        "inclusion" => parse_set(value, file, false),
-        "exclusion" => parse_set(value, file, true),
+        "inclusion" => parse_set(value, file, false, class_consts),
+        "exclusion" => parse_set(value, file, true, class_consts),
         "uniqueness" => parse_uniqueness(value, file, class_consts),
         "format" => parse_format(value, file, class_consts),
         other => RuleParse::Gap(vec![other.to_string()]),
@@ -844,14 +844,14 @@ fn parse_numericality(value: &Node<'_>, file: &str, class_consts: &super::ClassC
 
 /// `inclusion:` or, with `exclusion`, `exclusion:` — the same `in:` /
 /// `within:` shapes, as a membership or a non-membership rule.
-fn parse_set(value: &Node<'_>, file: &str, exclusion: bool) -> RuleParse {
+fn parse_set(value: &Node<'_>, file: &str, exclusion: bool, class_consts: &super::ClassConsts) -> RuleParse {
     let label = if exclusion { "exclusion" } else { "inclusion" };
     // `exclusion: false` / `inclusion: false` — Rails' `validates` skips
     // a validator whose options are false, keeping the call's other rules.
     if super::super::util::bool_value(value) == Some(false) {
         return RuleParse::Skip;
     }
-    if let Some(spec) = inclusion_values(value) {
+    if let Some(spec) = inclusion_values(value, class_consts) {
         return RuleParse::Rule(BuiltRule::bare(set_rule(spec, exclusion)));
     }
     let Some(elements) = hash_elements(value) else {
@@ -871,7 +871,7 @@ fn parse_set(value: &Node<'_>, file: &str, exclusion: bool) -> RuleParse {
         };
         let child = assoc.value();
         match key.as_str() {
-            "in" | "within" => match inclusion_values(&child) {
+            "in" | "within" => match inclusion_values(&child, class_consts) {
                 Some(spec) => values = Some(spec),
                 None => gaps.push(format!("{label}: in")),
             },
@@ -1097,7 +1097,11 @@ fn set_label(kind: &ValidatesKind) -> &'static str {
 /// An array is list membership. A numeric range stays a range:
 /// `Range#include?` covers the numbers between the endpoints, which a
 /// list of the integers in between does not.
-fn inclusion_values(node: &Node<'_>) -> Option<InclusionSpec> {
+fn inclusion_values(node: &Node<'_>, class_consts: &super::ClassConsts) -> Option<InclusionSpec> {
+    // A list constant of the class (`in: MODES`, `MODES = %w[a b].freeze`).
+    if node.as_constant_read_node().is_some() || node.as_call_node().is_some() {
+        return class_consts.list(node).map(InclusionSpec::List);
+    }
     if let Some(array) = node.as_array_node() {
         let mut out = Vec::new();
         for element in array.elements().iter() {
