@@ -422,7 +422,7 @@ pub const GEM_CATALOG: &[GemClass] = &[
     },
     // Faraday — the HTTP client. Ruby and JRuby run the real gem (the
     // emitted Gemfile declares it on demand, `gems::RUNTIME_GEMS`);
-    // every other target refuses each reference (`lower::faraday`).
+    // every other target refuses each reference (`lower::ruby_family_gems`).
     // Responses and bodies are the gem's own objects, so they stay
     // `Untyped` past the shapes below.
     GemClass {
@@ -523,6 +523,13 @@ pub const GEM_CATALOG: &[GemClass] = &[
     GemClass { name: "Faraday::TimeoutError", class_methods: &[], instance_methods: FARADAY_ERROR },
     GemClass { name: "Faraday::SSLError", class_methods: &[], instance_methods: FARADAY_ERROR },
     GemClass { name: "Faraday::ParsingError", class_methods: &[], instance_methods: FARADAY_ERROR },
+    // Retryable — a block retried on an exception. As Faraday: the real
+    // gem on ruby and jruby, refused elsewhere (`lower::ruby_family_gems`).
+    GemClass {
+        name: "Retryable",
+        class_methods: &[("retryable", GemTy::Untyped)],
+        instance_methods: &[],
+    },
 ];
 
 const FARADAY_FILE_PART: &[(&str, GemTy)] = &[
