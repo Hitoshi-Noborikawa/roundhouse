@@ -2159,7 +2159,6 @@ end
     // `include`s (or nothing), now that every module of the app is
     // known; before the qualification below, which reads them.
     super::guarded_include::splice_guarded_includes(&mut app);
-    super::lock_versions::fold_lock_versions(&mut app);
     // Every superclass and mixin, as Rubydex resolved it, before the
     // concern splices and every later consumer look them up by ClassId.
     // A module-nested `class XController < BaseController` names
@@ -2350,6 +2349,8 @@ end
     // pass may append source-backed FileIds beyond the indexed snapshot.
     let late_sources = super::sources::drain();
     super::sources::assert_snapshot_matches(&[], &late_sources);
+    // After the concern splices, which copy items in unfolded.
+    super::lock_versions::fold_lock_versions(&mut app);
     // Before analysis too, so `check` types the recount the emit writes (`Origin.reset_counters(id, :stories)`), rather than reporting a method the lowering answers.
     crate::lower::reset_counters::apply_reset_counters_lowering(&mut app);
     super::app_extension_calls::mark(&mut app);

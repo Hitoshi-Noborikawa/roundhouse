@@ -72,5 +72,9 @@ fn gem_version_is_unsupported_on_strict_targets() {
         let (_emitted, errors) = app().emit(target);
         assert!(errors.iter().any(|e| e.contains("Gem::Version")), "{target:?}: {errors:#?}");
         assert!(!errors.iter().any(|e| e.contains("VERSION::")), "{target:?}: {errors:#?}");
+        let (_emitted, errors) = emit_and_run::real_blog()
+            .write("app/models/locked_probe.rb", "class LockedProbe\n  def self.ar\n    Gem.loaded_specs[\"activerecord\"].version\n  end\nend\n")
+            .emit(target);
+        assert!(errors.iter().any(|e| e.contains("Gem::Version")), "{target:?} folded: {errors:#?}");
     }
 }

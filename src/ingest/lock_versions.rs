@@ -4,7 +4,6 @@ use crate::app::App;
 use crate::expr::{Expr, ExprNode, Literal};
 use crate::gems::Lockfile;
 use crate::ident::Symbol;
-use crate::span::Span;
 
 const FRAMEWORKS: &[(&str, &str)] = &[
     ("Rails", "railties"),
@@ -24,6 +23,19 @@ const FRAMEWORKS: &[(&str, &str)] = &[
 pub(super) fn fold_lock_versions(app: &mut App) {
     let Some(lock) = app.gem_lock.clone() else { return };
     crate::lower::for_each_hook_body(app, &mut |body| fold(body, &lock));
+    for model in &mut app.models {
+        for item in &mut model.body {
+            let crate::dialect::ModelBodyItem::Association { assoc, .. } = item else { continue };
+            let expr = match assoc {
+                crate::dialect::Association::BelongsTo { default, .. } => default.as_mut(),
+                crate::dialect::Association::HasMany { scope, .. } | crate::dialect::Association::HasOne { scope, .. } => scope.as_mut(),
+                _ => None,
+            };
+            if let Some(expr) = expr {
+                fold(expr, &lock);
+            }
+        }
+    }
     for view in &mut app.views {
         fold(&mut view.body, &lock);
     }
@@ -85,12 +97,12 @@ fn gem_spec_version(spec: &Expr, method: &str, lock: &Lockfile) -> Option<ExprNo
     }
     let [key] = args.as_slice() else { return None };
     let ExprNode::Lit { value: Literal::Str { value: name } } = &*key.node else { return None };
-    Some(gem_version_new(spec, lock.version_of(name)?))
+    Some(gem_version_new(spec, lock.release_version_of(name)?))
 }
 
 fn framework_version<'a>(lock: &'a Lockfile, framework: &str) -> Option<&'a str> {
     let (_, gem) = FRAMEWORKS.iter().find(|(name, _)| *name == framework)?;
-    lock.version_of(gem)
+    lock.release_version_of(gem)
 }
 
 struct Parts<'a> {
@@ -123,10 +135,12 @@ fn str_lit(value: &str) -> ExprNode {
     ExprNode::Lit { value: Literal::Str { value: value.to_string() } }
 }
 
-// Not the read's own span: the constant resolver answers by span, and there it answered the name the read wrote.
 fn gem_version_new(at: &Expr, version: &str) -> ExprNode {
+    let mut class = Expr::new(at.span, ExprNode::Const { path: vec![Symbol::from("Gem"), Symbol::from("Version")] });
+    // Not resolved at the borrowed span, where the resolver answered the name the read wrote; still reported there on a strict target.
+    class.decisions |= crate::expr::GENERATED_CONST_REF;
     ExprNode::Send {
-        recv: Some(Expr::new(Span::synthetic(), ExprNode::Const { path: vec![Symbol::from("Gem"), Symbol::from("Version")] })),
+        recv: Some(class),
         method: Symbol::from("new"),
         args: vec![Expr::new(at.span, str_lit(version))],
         block: None,
