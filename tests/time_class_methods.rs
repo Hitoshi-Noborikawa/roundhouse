@@ -52,6 +52,15 @@ fn model() -> String {
   def self.zone_today
     Time.zone.today
   end
+  def self.zone_now
+    Time.zone.now
+  end
+  def self.zone_at
+    Time.zone.at(0)
+  end
+  def self.zone_year(zone)
+    Time.use_zone(zone) { Time.zone.now.year }
+  end
   def self.formatted
     Time.at(0).iso8601
   end
@@ -95,7 +104,8 @@ fn class_parsers_and_constructors_return_values_not_formatter_strings() {
         assert_eq!(method.body.ty, Some(Ty::Time), "{name}");
     }
     for (name, expected) in [("formatted", Ty::Str), ("xml_formatted", Ty::Str), ("offset", Ty::Int),
-        ("class_alias", Ty::Time), ("zone_local", Ty::Time), ("zone_today", Ty::Time)] {
+        ("class_alias", Ty::Time), ("zone_local", Ty::Time), ("zone_today", Ty::Time),
+        ("zone_now", Ty::Time), ("zone_at", Ty::Time), ("zone_year", Ty::Int)] {
         let method = app.models[0].methods().find(|m| m.name.as_str() == name).unwrap();
         assert_eq!(method.body.ty, Some(expected), "{name}");
     }
@@ -149,7 +159,9 @@ fn emitted_ruby_matches_cruby_parser_values_and_nil() {
 values = [Clock.from_iso.to_i, Clock.from_xml.to_i, Clock.from_http.to_i,
           Clock.from_rfc.to_i, Clock.from_rfc_alias.to_i, Clock.from_strptime.to_i,
           Clock.from_parse.to_i, Clock.offset, Clock.formatted,
-          Clock.xml_formatted, Clock.time("invalid"), Clock.zone_time("")]
+          Clock.xml_formatted, Clock.time("invalid"), Clock.zone_time(""),
+          Clock.zone_year("UTC")]
+raise "zone_now" unless Clock.zone_now.year == Clock.zone_year("UTC")
 puts values.inspect
 "#);
     let oracle = emit_and_run::ruby().args(["-ractive_support/all", "-e", &format!(

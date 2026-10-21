@@ -1876,7 +1876,13 @@ impl<'a> BodyTyper<'a> {
                     return block_ret.filter(|t| !matches!(t, Ty::Var { .. })).cloned().unwrap_or(Ty::Untyped);
                 }
                 if id.0.as_str() == "Time" {
-                    let ty = if instance_receiver { time_method(method) } else { time_class_method(method) };
+                    let ty = if instance_receiver && matches!(method.as_str(), "now" | "at") {
+                        Some(Ty::Time)
+                    } else if instance_receiver {
+                        time_method(method)
+                    } else {
+                        time_class_method(method)
+                    };
                     if let Some(ty) = ty {
                         return ty;
                     }
