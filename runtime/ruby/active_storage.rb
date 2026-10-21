@@ -276,12 +276,52 @@ module ActiveStorage
   class Error < StandardError
   end
 
+  # The remaining exceptions in Rails 8.1's active_storage/errors.rb.
+  class InvariableError < Error
+  end
+
+  class UnpreviewableError < Error
+  end
+
+  class UnrepresentableError < Error
+  end
+
+  class IntegrityError < Error
+  end
+
+  class FileNotFoundError < Error
+  end
+
+  class InvalidKeyError < Error
+  end
+
   # Rails' `ActiveStorage::PreviewError` — raised when a previewer cannot
   # draw a poster (ffmpeg failed, timed out, …). Apps and railties rescue
   # or raise it; campfire's `TimeLimitedVideoPreviewer` raises it when
   # the wall-clock limit trips. Parent is `Error`, not bare StandardError,
   # matching Rails.
   class PreviewError < Error
+  end
+
+  # Nested exceptions keep their Rails owners as well as their parents.
+  class Service
+    class GCSService < Service
+      class MetadataServerError < ActiveStorage::Error
+      end
+
+      class MetadataServerNotFoundError < ActiveStorage::Error
+      end
+    end
+  end
+
+  module Transformers
+    class ImageProcessingTransformer
+      class UnsupportedImageProcessingMethod < StandardError
+      end
+
+      class UnsupportedImageProcessingArgument < StandardError
+      end
+    end
   end
 
   # The video previewer's swap point. Drawing is the class-side
@@ -333,6 +373,9 @@ module ActiveStorage
   # exactly where `url_for(preview)` points in Rails; serving it draws
   # and transforms on demand, so building the URL does not.
   class Preview
+    class UnprocessedError < StandardError
+    end
+
     def initialize(blob, variation)
       @blob = blob
       @variation = variation

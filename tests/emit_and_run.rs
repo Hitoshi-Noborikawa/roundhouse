@@ -17,6 +17,8 @@ mod arel_nodes;
 mod database_tasks;
 #[path = "emit_and_run/framework_exceptions.rs"]
 mod framework_exceptions;
+#[path = "emit_and_run/active_storage_exceptions.rs"]
+mod active_storage_exceptions;
 #[path = "emit_and_run/preloader_runtime.rs"]
 mod preloader_runtime;
 #[path = "emit_and_run/framework_surface_rest.rs"]

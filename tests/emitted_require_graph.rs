@@ -279,6 +279,15 @@ fn ruby_family_runtime_constants_are_ledgered_on_other_targets() {
      ActiveRecord::Type::String, ActiveRecord::Type::Integer,
      ActiveSupport::IsolatedExecutionState, ActiveSupport::Notifications,
      ActiveSupport::Notifications::Event, ActiveSupport::ConfigurationFile,
+     ActiveStorage::Error, ActiveStorage::InvariableError,
+     ActiveStorage::UnpreviewableError, ActiveStorage::UnrepresentableError,
+     ActiveStorage::IntegrityError, ActiveStorage::FileNotFoundError,
+     ActiveStorage::PreviewError, ActiveStorage::InvalidKeyError,
+     ActiveStorage::Preview::UnprocessedError,
+     ActiveStorage::Service::GCSService::MetadataServerError,
+     ActiveStorage::Service::GCSService::MetadataServerNotFoundError,
+     ActiveStorage::Transformers::ImageProcessingTransformer::UnsupportedImageProcessingMethod,
+     ActiveStorage::Transformers::ImageProcessingTransformer::UnsupportedImageProcessingArgument,
      ActiveJob::EnqueueError, ActiveJob::Continuable]
   end
 end

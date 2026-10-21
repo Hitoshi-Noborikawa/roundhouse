@@ -831,6 +831,30 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
     ] {
         register_stdlib_class(classes, exc, &[], &exception_surface);
     }
+    // Rails 8.1's Active Storage errors (including InvalidKeyError in
+    // 8.1.4): errors.rb, preview.rb, service/gcs_service.rb and
+    // transformers/image_processing_transformer.rb. Register the same
+    // Exception surface as the other library errors, with Rails' parents
+    // so rescue bindings and is_a? narrowing retain their methods.
+    for (exc, parent) in [
+        ("ActiveStorage::Error", "StandardError"),
+        ("ActiveStorage::InvariableError", "ActiveStorage::Error"),
+        ("ActiveStorage::UnpreviewableError", "ActiveStorage::Error"),
+        ("ActiveStorage::UnrepresentableError", "ActiveStorage::Error"),
+        ("ActiveStorage::IntegrityError", "ActiveStorage::Error"),
+        ("ActiveStorage::FileNotFoundError", "ActiveStorage::Error"),
+        ("ActiveStorage::PreviewError", "ActiveStorage::Error"),
+        ("ActiveStorage::InvalidKeyError", "ActiveStorage::Error"),
+        ("ActiveStorage::Preview::UnprocessedError", "StandardError"),
+        ("ActiveStorage::Service::GCSService::MetadataServerError", "ActiveStorage::Error"),
+        ("ActiveStorage::Service::GCSService::MetadataServerNotFoundError", "ActiveStorage::Error"),
+        ("ActiveStorage::Transformers::ImageProcessingTransformer::UnsupportedImageProcessingMethod", "StandardError"),
+        ("ActiveStorage::Transformers::ImageProcessingTransformer::UnsupportedImageProcessingArgument", "StandardError"),
+    ] {
+        register_stdlib_class(classes, exc, &[], &exception_surface);
+        classes.entry(ClassId(Symbol::from(exc))).or_default().parent =
+            Some(ClassId(Symbol::from(parent)));
+    }
     // `rescue Errno::ENOENT` / `Errno::EIO`: every Errno class that both
     // CRuby (on every POSIX platform) and Spinel's runtime define. The
     // lookup is by exact name, so the family is registered whole.
