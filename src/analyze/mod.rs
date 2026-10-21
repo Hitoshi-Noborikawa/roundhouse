@@ -6290,6 +6290,7 @@ impl Analyzer {
                                         let t = v
                                             .ty
                                             .clone()
+                                            .map(|t| class_object_arg_ty(v, t))
                                             .unwrap_or(Ty::Var { var: crate::ident::TyVar(0) });
                                         let t = if via_helper_index && matches!(t, Ty::Untyped) {
                                             Ty::Var { var: crate::ident::TyVar(0) }
@@ -7657,10 +7658,8 @@ fn singleton_of(ty: Option<&Ty>) -> Option<&Ty> {
 // Recorded flat, a class object argument would type its parameter as an instance of that class.
 fn class_object_arg_ty(arg: &Expr, ty: Ty) -> Ty {
     match ty {
-        Ty::Class { ref id, ref args }
-            if arg.decisions & crate::expr::CLASS_OBJECT_VALUE != 0
-                && args.is_empty()
-                && !matches!(id.0.as_str(), "Class" | "Module") =>
+        Ty::Class { ref args, .. }
+            if arg.decisions & crate::expr::CLASS_OBJECT_VALUE != 0 && args.is_empty() =>
         {
             Ty::Class { id: ClassId(Symbol::from("Class")), args: vec![ty.clone()].into() }
         }
@@ -8017,7 +8016,7 @@ fn param_ty_with_default(observed: Option<Ty>, param: &crate::dialect::Param) ->
     let default = param
         .default
         .as_ref()
-        .and_then(|d| d.ty.clone())
+        .and_then(|d| d.ty.clone().map(|t| class_object_arg_ty(d, t)))
         .filter(|t| !matches!(t, Ty::Var { .. }));
     match (observed, default) {
         (Some(o), Some(d)) => Some(crate::analyze::body::union_of(o, d)),

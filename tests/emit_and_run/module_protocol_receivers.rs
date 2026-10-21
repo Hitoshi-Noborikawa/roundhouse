@@ -61,6 +61,30 @@ const HOLDER: &str = r#"class ClassHolder
     ClassHolder.new(ProtocolProbe)
   end
 end
+
+class DefaultHolder
+  def initialize(klass = ProtocolProbe)
+    @klass = klass
+  end
+
+  def contexts?
+    @klass.const_defined?(:VALID_CONTEXTS)
+  end
+end
+
+class KeywordHolder
+  def initialize(klass:)
+    @klass = klass
+  end
+
+  def answers?(name)
+    @klass.method_defined?(name)
+  end
+
+  def self.for_probe
+    KeywordHolder.new(klass: FlaggedProbe)
+  end
+end
 "#;
 
 fn app() -> emit_and_run::Overlay {
@@ -73,8 +97,9 @@ fn app() -> emit_and_run::Overlay {
 const ASSERTIONS: &str = r##"got = [ProtocolProbe.new.contexts, ProtocolProbe.new.flagged?, FlaggedProbe.new.flagged?, ProtocolProbe.tapped,
        ProtocolProbe.callable?(ProtocolProbe), ProtocolProbe.callable?(3), ProtocolProbe.named("ProtocolProbe"),
        ProtocolProbe.holder.contexts?, ClassHolder.for_probe.answers?(:contexts), FlaggedProbe.holder.answers?(:flag),
-       ClassHolder.for_probe.answers?(:missing)]
-raise got.inspect unless got == [[:post], false, true, "ProtocolProbe", true, false, true, true, true, true, false]
+       ClassHolder.for_probe.answers?(:missing), DefaultHolder.new.contexts?, DefaultHolder.new(KeywordHolder).contexts?,
+       KeywordHolder.for_probe.answers?(:flag)]
+raise got.inspect unless got == [[:post], false, true, "ProtocolProbe", true, false, true, true, true, true, false, true, false, true]
 puts "module protocol passed"
 "##;
 
