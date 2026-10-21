@@ -379,6 +379,10 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
         ("html_escape", Ty::Str), ("h", Ty::Str),
         ("url_encode", Ty::Str), ("u", Ty::Str), ("json_escape", Ty::Str),
     ], &[]);
+    // ActiveSupport's `Digest::UUID.uuid_v4` is `SecureRandom.uuid`
+    // (`lower::random_formatter` writes it so). `uuid_v5` / `uuid_v3`
+    // hash a namespace and are not registered: they stay refused.
+    register_stdlib_class(classes, "Digest::UUID", &[("uuid_v4", Ty::Str)], &[]);
     for digest in ["Digest::MD5", "Digest::SHA1", "Digest::SHA256"] {
         register_stdlib_class(classes, digest, &[
             ("hexdigest", Ty::Str), ("digest", Ty::Str),
