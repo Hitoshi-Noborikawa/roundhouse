@@ -53,6 +53,10 @@ end
     @pty_session = PtySession.find(params[:replacement_id])
     {{ body: "switched" }}
   end
+
+  def uncertain_attributes
+    params[:choose] ? message_params : "not attributes"
+  end
 end
 "#)),
     ]
@@ -75,6 +79,9 @@ fn local_and_ivar_attribute_hashes_and_local_keywords_build_the_declared_model()
     for source in [
         "    attributes = { body: \"hash\" }\n    message = @pty_session.received_messages.new(attributes)",
         "    attributes = { body: \"hash\" }\n    @message = @pty_session.received_messages.new(attributes)",
+        "    attributes = { body: \"hash\" }\n    copied = attributes\n    message = @pty_session.received_messages.new(copied)",
+        "    message = @pty_session.received_messages.new(switch_attributes)",
+        "    message = @pty_session.received_messages.new(switch_attributes.merge(body: \"merged\"))",
         "    message = @pty_session.received_messages.new(body: \"literal\")",
     ] {
         let (controller, _) = emitted(source, ASSOCIATION);
@@ -109,14 +116,19 @@ fn aliases_and_except_use_the_params_factory_and_request_a_copying_filter() {
 
 #[test]
 fn a_reassignment_or_conditional_binding_is_not_a_params_proof() {
-    for source in [
-        "    attributes = message_params\n    attributes = { body: \"hash\" }\n    message = @pty_session.received_messages.new(attributes)",
-        "    if params[:choose]\n      attributes = message_params\n    end\n    message = @pty_session.received_messages.new(attributes)",
-        "    attributes = message_params\n    [{ body: \"block\" }].each do |attributes|\n      message = @pty_session.received_messages.new(attributes)\n    end",
-        "    attributes = message_params\n    [1, 2].each do |i|\n      message = @pty_session.received_messages.new(attributes)\n      attributes = { body: \"next iteration\" }\n    end",
+    for (source, proven_hash) in [
+        ("    attributes = message_params\n    attributes = { body: \"hash\" }\n    message = @pty_session.received_messages.new(attributes)", true),
+        ("    if params[:choose]\n      attributes = message_params\n    end\n    message = @pty_session.received_messages.new(attributes)", false),
+        ("    attributes = message_params\n    [{ body: \"block\" }].each do |attributes|\n      message = @pty_session.received_messages.new(attributes)\n    end", false),
+        ("    attributes = message_params\n    [1, 2].each do |i|\n      message = @pty_session.received_messages.new(attributes)\n      attributes = { body: \"next iteration\" }\n    end", false),
+        ("    message = @pty_session.received_messages.new(uncertain_attributes)", false),
     ] {
         let (controller, _) = emitted(source, ASSOCIATION);
         assert!(!controller.contains("Message.from_params("), "false params proof:\n{controller}");
+        if !proven_hash {
+            assert!(!controller.contains(".merge(to_pty_session_id:"), "unproven Hash:\n{controller}");
+            assert!(!controller.contains("__rh_build_owner_"), "unproven build capture:\n{controller}");
+        }
     }
 }
 

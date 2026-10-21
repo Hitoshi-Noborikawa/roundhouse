@@ -1313,6 +1313,8 @@ pub(super) fn rewrite_assoc_through_parent_typed(
                     if !has_typed_factory(&model_class, spec) {
                         return None;
                     }
+                } else if outer_args.first().is_some_and(|arg| !sources.is_hash(arg)) {
+                    return None;
                 }
                 // Resolve the owner before evaluating attributes, which may
                 // reassign the parent ivar. Generated names cannot capture

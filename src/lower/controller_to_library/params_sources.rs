@@ -10,10 +10,16 @@ use crate::span::Span;
 
 use super::params::{params_source_class, ParamsSpecs};
 
-type Locals = BTreeMap<Symbol, ClassId>;
+#[derive(Clone, PartialEq, Eq)]
+enum Source {
+    Params(ClassId),
+    Hash,
+}
+
+type Locals = BTreeMap<Symbol, Source>;
 
 pub(super) struct ParamsSources {
-    reads: HashMap<(Span, Symbol), Option<ClassId>>,
+    reads: HashMap<(Span, Symbol), Option<Source>>,
     helpers: BTreeMap<Symbol, ClassId>,
 }
 
@@ -31,7 +37,10 @@ impl ParamsSources {
     pub(super) fn class(&self, expr: &Expr, specs: &ParamsSpecs) -> Option<ClassId> {
         match &*expr.node {
             ExprNode::Var { name, .. } => {
-                self.reads.get(&(expr.span, name.clone())).cloned().flatten()
+                match self.reads.get(&(expr.span, name.clone())).cloned().flatten() {
+                    Some(Source::Params(class)) => Some(class),
+                    _ => None,
+                }
             }
             ExprNode::Send { recv: Some(recv), method, block: None, .. }
                 if matches!(method.as_str(), "except" | "compact") => self.class(recv, specs),
@@ -39,7 +48,17 @@ impl ParamsSources {
         }
     }
 
-    fn visit(&mut self, expr: &Expr, locals: &mut Locals, specs: &ParamsSpecs) -> Option<ClassId> {
+    pub(super) fn is_hash(&self, expr: &Expr) -> bool {
+        match &*expr.node {
+            ExprNode::Hash { .. } => true,
+            ExprNode::Var { name, .. } => {
+                self.reads.get(&(expr.span, name.clone())) == Some(&Some(Source::Hash))
+            }
+            _ => matches!(expr.ty.as_ref(), Some(crate::ty::Ty::Hash { .. })),
+        }
+    }
+
+    fn visit(&mut self, expr: &Expr, locals: &mut Locals, specs: &ParamsSpecs) -> Option<Source> {
         match &*expr.node {
             ExprNode::Var { name, .. } => {
                 let class = locals.get(name).cloned();
@@ -51,6 +70,10 @@ impl ParamsSources {
                         .or_insert(class.clone());
                 }
                 class
+            }
+            ExprNode::Hash { .. } => {
+                expr.node.for_each_child(&mut |child| { self.visit(child, locals, specs); });
+                Some(Source::Hash)
             }
             ExprNode::Seq { exprs } => {
                 let mut class = None;
@@ -145,7 +168,7 @@ impl ParamsSources {
                 if block.is_none() && matches!(method.as_str(), "except" | "compact") {
                     receiver
                 } else {
-                    params_source_class(expr, &self.helpers, specs)
+                    params_source_class(expr, &self.helpers, specs).map(Source::Params)
                 }
             }
             _ => {
