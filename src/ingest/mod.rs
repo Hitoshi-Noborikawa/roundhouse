@@ -22,6 +22,7 @@ mod written_names;
 mod pagy;
 mod graphql_ruby;
 mod guarded_include;
+mod lock_versions;
 pub(crate) mod class_attribute;
 mod class_configuration;
 mod dry_initializer;

@@ -2159,6 +2159,7 @@ end
     // `include`s (or nothing), now that every module of the app is
     // known; before the qualification below, which reads them.
     super::guarded_include::splice_guarded_includes(&mut app);
+    super::lock_versions::fold_lock_versions(&mut app);
     // Every superclass and mixin, as Rubydex resolved it, before the
     // concern splices and every later consumer look them up by ClassId.
     // A module-nested `class XController < BaseController` names

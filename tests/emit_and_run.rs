@@ -18444,6 +18444,8 @@ mod ipaddr_include;
 mod hash_subclass_include;
 #[path = "emit_and_run/guarded_declarations.rs"]
 mod guarded_declarations;
+#[path = "emit_and_run/lock_versions.rs"]
+mod lock_versions;
 #[path = "emit_and_run/helper_diagnostics.rs"]
 mod helper_diagnostics;
 #[path = "emit_and_run/value_seq_order.rs"]
