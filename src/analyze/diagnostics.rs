@@ -48,6 +48,34 @@ fn attribute_macro_refusals(app: &App) -> Vec<Diagnostic> {
     out
 }
 
+// One error at each declaration, not one per helper call: the helpers stay typed so their callers still infer
+fn devise_refusals(app: &App) -> Vec<Diagnostic> {
+    let mut out = Vec::new();
+    if app.gem_lock.as_ref().is_some_and(|lock| lock.is_in_repo("devise") || lock.is_source("devise")) {
+        return out;
+    }
+    for model in &app.models {
+        for item in &model.body {
+            let crate::dialect::ModelBodyItem::Unknown { expr, .. } = item else { continue };
+            let ExprNode::Send { recv: None, method, .. } = &*expr.node else { continue };
+            if method.as_str() != "devise" {
+                continue;
+            }
+            let scope = crate::naming::snake_case(model.name.0.as_str().rsplit("::").next().unwrap_or(""));
+            out.push(Diagnostic::unsupported(
+                expr.span,
+                None,
+                "devise",
+                format!(
+                    "`devise` on `{}`: `current_{scope}`, `{scope}_signed_in?`, `authenticate_{scope}!`, `sign_in` and the rest are typed so their callers infer, but no target ships Devise or Warden, so each call reaches no method at run time",
+                    model.name.0.as_str()
+                ),
+            ));
+        }
+    }
+    out
+}
+
 /// Walk an analyzed `App` collecting every position where typing failed
 /// in a way that matters for downstream typed emission. Does not modify
 /// the IR — purely a read pass.
@@ -151,6 +179,7 @@ pub fn diagnose_with_coverage(app: &App) -> (Vec<Diagnostic>, PreloadCoverage) {
         }
     }
     out.extend(attribute_macro_refusals(app));
+    out.extend(devise_refusals(app));
     out.extend(overridden_synthesized_accessors(app));
     out.extend(runtime_defined_surfaces(app));
     // A filter's return value is Rails' to discard (`around_action

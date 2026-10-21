@@ -31,8 +31,7 @@ fn concern(devise: &str) -> String {
     )
 }
 
-/// Names of ivars that stayed unresolved, plus `current_user`'s type.
-fn analyze(user: &str, concern_src: &str) -> (Vec<String>, String) {
+fn diagnostics(user: &str, concern_src: &str) -> Vec<roundhouse::diagnostic::Diagnostic> {
     let files: Vec<(&str, &str)> = vec![
         ("db/schema.rb", SCHEMA),
         (
@@ -59,7 +58,12 @@ fn analyze(user: &str, concern_src: &str) -> (Vec<String>, String) {
         .collect();
     let mut app = ingest_app_from_tree(tree).expect("ingest tree");
     roundhouse::session::analyze_and_lower(&mut app);
-    let diags = diagnose(&app);
+    diagnose(&app)
+}
+
+/// Names of ivars that stayed unresolved, plus `current_user`'s type.
+fn analyze(user: &str, concern_src: &str) -> (Vec<String>, String) {
+    let diags = diagnostics(user, concern_src);
     let ivars = diags
         .iter()
         .filter_map(|d| match &d.kind {
@@ -110,4 +114,23 @@ fn an_unincluded_concern_creates_no_helpers() {
     );
     assert_eq!(ivars, ["bookmark"], "current_user must stay untyped");
     assert!(filters.contains("authenticate_user!"), "{filters:?}");
+}
+
+fn devise_refusals(user: &str, concern_src: &str) -> Vec<String> {
+    diagnostics(user, concern_src)
+        .into_iter()
+        .filter(|d| matches!(&d.kind, DiagnosticKind::Unsupported { construct, .. } if construct.as_str() == "devise"))
+        .map(|d| d.message)
+        .collect()
+}
+
+#[test]
+fn a_devise_declaration_is_refused_once_where_it_is_written() {
+    let direct = "class User < ApplicationRecord\n  devise :database_authenticatable\nend\n";
+    let found = devise_refusals(direct, "module User::Authenticatable\nend\n");
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert!(found[0].contains("`current_user`") && found[0].contains("no target ships Devise"), "{found:?}");
+
+    let found = devise_refusals(USER, &concern("devise :database_authenticatable"));
+    assert_eq!(found.len(), 1, "{found:?}");
 }
