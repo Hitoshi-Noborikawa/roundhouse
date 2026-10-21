@@ -66,6 +66,12 @@ struct BuiltRule {
     rule: crate::dialect::ValidationRule,
     if_cond: Option<Expr>,
     unless_cond: Option<Expr>,
+    /// `on:` in the rule's own hash, which wins over the call-level one:
+    /// `None` unset, `Some(guard)` as `context_guard` reads it.
+    on_guard: Option<Option<Expr>>,
+    /// A call-level `allow_nil: true` on a rule that stores no flag of its
+    /// own (presence): the rule runs only when the attribute is not nil.
+    nil_skip: bool,
     /// The rule's own hash named `allow_nil:` / `allow_blank:`, which
     /// wins over the call-level option (Rails merges the call's options
     /// under each validator's own).
@@ -75,7 +81,7 @@ struct BuiltRule {
 
 impl BuiltRule {
     fn bare(rule: crate::dialect::ValidationRule) -> Self {
-        Self { rule, if_cond: None, unless_cond: None, own_allow_nil: false, own_allow_blank: false }
+        Self { rule, if_cond: None, unless_cond: None, on_guard: None, nil_skip: false, own_allow_nil: false, own_allow_blank: false }
     }
 }
 
@@ -228,14 +234,17 @@ pub(super) fn parse_validates_call(
         gaps.push("allow_blank".to_string());
     }
     // Call-level `allow_nil: true` is Rails' skip-when-nil for every
-    // validator in the call. Length, Uniqueness and Numericality store it. The other
+    // validator in the call. Length, Uniqueness and Numericality store it, and
+    // Presence skips nil (`nil_skip` below). The other
     // rules this build lowers reject nil, so applying them would reject
     // records Rails accepts.
     if allow_nil == Some(true)
         && drafts
             .iter()
             .any(|draft| {
-                !matches!(draft.rule, ValidationRule::Length { .. }) && !is_uniqueness(draft) && !is_numericality(draft)
+                !matches!(draft.rule, ValidationRule::Length { .. } | ValidationRule::Presence)
+                    && !is_uniqueness(draft)
+                    && !is_numericality(draft)
             })
     {
         gaps.push("allow_nil".to_string());
@@ -262,6 +271,17 @@ pub(super) fn parse_validates_call(
             }
             if allow_blank && !own_blank {
                 *blank_slot = true;
+            }
+        }
+    }
+    // Presence under a call-level `allow_nil: true`: Rails' EachValidator
+    // skips nil, so presence checks only a non-nil value for blank. The
+    // rule's own `allow_nil: false` wins (Rails merges the call's options
+    // under the validator's own), and presence then rejects nil.
+    if allow_nil == Some(true) {
+        for draft in &mut drafts {
+            if matches!(draft.rule, ValidationRule::Presence) && !draft.own_allow_nil {
+                draft.nil_skip = true;
             }
         }
     }
@@ -303,7 +323,11 @@ pub(super) fn parse_validates_call(
         for draft in &drafts {
             // A condition inside the rule hash replaces the call-level
             // one for that key — the other key still merges in.
-            let if_cond = and_guard(on_guard.clone(), draft.if_cond.clone().or_else(|| call_if_cond.clone()));
+            // The rule's own `on:` replaces the call's, as Rails merges the
+            // call's options under each validator's own.
+            let rule_on = draft.on_guard.clone().unwrap_or_else(|| on_guard.clone());
+            let rule_on = if draft.nil_skip { and_guard(Some(not_nil(attr)), rule_on) } else { rule_on };
+            let if_cond = and_guard(rule_on, draft.if_cond.clone().or_else(|| call_if_cond.clone()));
             let unless_cond = draft.unless_cond.clone().or_else(|| call_unless_cond.clone());
             if let Some(current) = grouped.as_mut() {
                 if current.if_cond == if_cond && current.unless_cond == unless_cond {
@@ -365,6 +389,29 @@ fn push_condition(
 /// synthesized per model on every target, while `new_record?` lives on
 /// the runtime Base, which a rust or go struct does not inherit (the same
 /// spelling `model_to_library::markers` uses, for the same reason).
+/// `!self.<attr>.nil?`, the guard a call-level `allow_nil:` puts on a rule
+/// that stores no flag (presence).
+fn not_nil(attr: &Symbol) -> Expr {
+    let read = Expr::new(
+        Span::synthetic(),
+        ExprNode::Send {
+            recv: Some(Expr::new(Span::synthetic(), ExprNode::SelfRef)),
+            method: attr.clone(),
+            args: Vec::new(),
+            block: None,
+            parenthesized: false,
+        },
+    );
+    let nil = Expr::new(
+        Span::synthetic(),
+        ExprNode::Send { recv: Some(read), method: Symbol::from("nil?"), args: Vec::new(), block: None, parenthesized: false },
+    );
+    Expr::new(
+        Span::synthetic(),
+        ExprNode::Send { recv: Some(nil), method: Symbol::from("!"), args: Vec::new(), block: None, parenthesized: false },
+    )
+}
+
 fn context_guard(value: &Node<'_>) -> Option<Option<Expr>> {
     let mut contexts: Vec<String> = Vec::new();
     if let Some(array) = value.as_array_node() {
@@ -486,6 +533,10 @@ fn parse_uniqueness(value: &Node<'_>, file: &str, class_consts: &super::ClassCon
                     built.own_allow_blank = true;
                 }
                 None => gaps.push("uniqueness: allow_blank".to_string()),
+            },
+            "on" => match context_guard(&child) {
+                Some(guard) => built.on_guard = Some(guard),
+                None => gaps.push("on".to_string()),
             },
             "if" => push_condition(&child, file, &mut built.if_cond, "if", &mut gaps),
             "unless" => push_condition(&child, file, &mut built.unless_cond, "unless", &mut gaps),
@@ -759,12 +810,18 @@ fn parse_bool_or_hash(
         };
         let child = assoc.value();
         match key.as_str() {
+            "on" => match context_guard(&child) {
+                Some(guard) => built.on_guard = Some(guard),
+                None => gaps.push("on".to_string()),
+            },
             "if" => push_condition(&child, file, &mut built.if_cond, "if", &mut gaps),
             "unless" => {
                 push_condition(&child, file, &mut built.unless_cond, "unless", &mut gaps)
             }
+            // `allow_nil: false` is Rails' default, but stated in the
+            // rule's own hash it wins over a call-level `allow_nil: true`.
             "allow_nil" => match super::super::util::bool_value(&child) {
-                Some(false) => {}
+                Some(false) => built.own_allow_nil = true,
                 _ => gaps.push("allow_nil".to_string()),
             },
             other => gaps.push(format!("{name}: {other}")),
@@ -845,6 +902,10 @@ fn parse_numericality(value: &Node<'_>, file: &str, class_consts: &super::ClassC
                 None => gaps.push("numericality: less_than_or_equal_to".to_string()),
             },
             "equal_to" | "other_than" => gaps.push(format!("numericality: {key}")),
+            "on" => match context_guard(&child) {
+                Some(guard) => built.on_guard = Some(guard),
+                None => gaps.push("on".to_string()),
+            },
             "if" => push_condition(&child, file, &mut built.if_cond, "if", &mut gaps),
             "unless" => {
                 push_condition(&child, file, &mut built.unless_cond, "unless", &mut gaps)
@@ -908,6 +969,10 @@ fn parse_set(value: &Node<'_>, file: &str, exclusion: bool, class_consts: &super
                 Some(spec) => values = Some(spec),
                 None => gaps.push(format!("{label}: in")),
             },
+            "on" => match context_guard(&child) {
+                Some(guard) => built.on_guard = Some(guard),
+                None => gaps.push("on".to_string()),
+            },
             "if" => push_condition(&child, file, &mut built.if_cond, "if", &mut gaps),
             "unless" => {
                 push_condition(&child, file, &mut built.unless_cond, "unless", &mut gaps)
@@ -967,6 +1032,10 @@ fn parse_format(value: &Node<'_>, file: &str, class_consts: &super::ClassConsts)
             "with" => match resolve_format_regex(&child, class_consts) {
                 Some(resolved) => pattern = Some(resolved),
                 None => gaps.push("format: with".to_string()),
+            },
+            "on" => match context_guard(&child) {
+                Some(guard) => built.on_guard = Some(guard),
+                None => gaps.push("on".to_string()),
             },
             "if" => push_condition(&child, file, &mut built.if_cond, "if", &mut gaps),
             "unless" => {
@@ -1063,6 +1132,10 @@ fn parse_length_rule(value: &ruby_prism::Node<'_>, file: &str, class_consts: &su
             "message" => match string_value(&child) {
                 Some(text) => message = Some(text),
                 None => gaps.push("length: message".to_string()),
+            },
+            "on" => match context_guard(&child) {
+                Some(guard) => built.on_guard = Some(guard),
+                None => gaps.push("on".to_string()),
             },
             "if" => push_condition(&child, file, &mut built.if_cond, "if", &mut gaps),
             "unless" => {
