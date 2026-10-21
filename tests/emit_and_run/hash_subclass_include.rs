@@ -64,5 +64,9 @@ fn a_builtin_subclass_is_unsupported_on_strict_targets() {
     for target in [Rust, Typescript, Go, Python, CSharp, Kotlin, Swift, Elixir, Crystal] {
         let (_emitted, errors) = app().emit(target);
         assert!(errors.iter().any(|e| e.contains("`Enum` subclasses Hash")), "{target:?}: {errors:#?}");
+        let (_emitted, errors) = emit_and_run::real_blog()
+            .write("test/models/bag_test.rb", "require \"test_helper\"\n\nclass BagTest < ActiveSupport::TestCase\n  class Bag < Hash\n  end\n\n  test \"bag\" do\n    assert Bag.new.empty?\n  end\nend\n")
+            .emit(target);
+        assert!(errors.iter().any(|e| e.contains("subclasses Hash")), "{target:?} test-local: {errors:#?}");
     }
 }
