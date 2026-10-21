@@ -2273,6 +2273,7 @@ end
     super::sources::assert_snapshot_matches(&sources, &app.sources);
     app.source_index_required = !app.sources.is_empty();
     drop(sources);
+    carry_included_block_includes_into_controllers(&mut app);
     splice_concerns_into_controllers(&mut app);
     // After the splice: an action a concern provides is not implicit.
     synthesize_template_only_actions(&mut app);
@@ -3091,6 +3092,106 @@ fn is_empty_body(body: &crate::expr::Expr) -> bool {
         crate::expr::ExprNode::Seq { exprs } => exprs.is_empty(),
         crate::expr::ExprNode::Lit { value: crate::expr::Literal::Nil } => true,
         _ => false,
+    }
+}
+
+/// A concern can include a module from its `included do` block:
+///
+/// ```text
+/// module Authorization
+///   extend ActiveSupport::Concern
+///   included do
+///     include ActionPolicy::Controller
+///   end
+/// end
+/// ```
+///
+/// Rails runs that block on the controller, so the controller gets
+/// `ActionPolicy::Controller` too, placed ahead of `Authorization` in
+/// method lookup. Rewriting the controller's `include Authorization` to
+/// `include ActionPolicy::Controller, Authorization` gives that order,
+/// and also registers `Authorization`'s filters first, because a
+/// multi-argument `include` runs its modules' hooks last argument first.
+/// The method splice, the class-body macro expansion and the analyzer all
+/// read include statements, so this one rewrite reaches all three.
+///
+/// Models get the same through `splice_concerns_into_models`.
+fn carry_included_block_includes_into_controllers(app: &mut App) {
+    use crate::dialect::{ControllerBodyItem, ModelBodyItem};
+    use crate::expr::{Expr, ExprNode};
+    use crate::ident::ClassId;
+
+    // `concern_model_items` holds every concern's `included do`
+    // statements, a controller concern's too.
+    let block_includes: HashMap<ClassId, Vec<Expr>> = app
+        .concern_model_items
+        .iter()
+        .filter_map(|(module, items)| {
+            let args: Vec<Expr> = items
+                .iter()
+                .filter_map(|item| match item {
+                    ModelBodyItem::Unknown { expr, .. } => Some(expr),
+                    _ => None,
+                })
+                .filter_map(|expr| match &*expr.node {
+                    ExprNode::Send { recv: None, method, args, block: None, .. } if method.as_str() == "include" => {
+                        Some(args.iter().filter(|a| matches!(&*a.node, ExprNode::Const { .. })).cloned())
+                    }
+                    _ => None,
+                })
+                .flatten()
+                .collect();
+            (!args.is_empty()).then(|| (module.clone(), args))
+        })
+        .collect();
+    if block_includes.is_empty() {
+        return;
+    }
+
+    fn id_of(expr: &Expr) -> Option<ClassId> {
+        match &*expr.node {
+            ExprNode::Const { path } => Some(crate::analyze::mixin_path_id(path)),
+            _ => None,
+        }
+    }
+
+    // Ruby stacks each later include ahead of the earlier ones, hence
+    // `rev()`; a module already on the controller is skipped, which also
+    // ends an include cycle.
+    fn ahead_of(
+        module: &ClassId,
+        block_includes: &HashMap<ClassId, Vec<Expr>>,
+        seen: &mut HashSet<ClassId>,
+        out: &mut Vec<Expr>,
+    ) {
+        for included in block_includes.get(module).into_iter().flatten().rev() {
+            let Some(id) = id_of(included) else { continue };
+            if !seen.insert(id.clone()) {
+                continue;
+            }
+            ahead_of(&id, block_includes, seen, out);
+            out.push(included.clone());
+        }
+    }
+
+    for controller in &mut app.controllers {
+        let mut seen: HashSet<ClassId> =
+            crate::analyze::controller_includes(controller).into_iter().collect();
+        for item in &mut controller.body {
+            let ControllerBodyItem::Unknown { expr, .. } = item else { continue };
+            let ExprNode::Send { recv: None, method, args, .. } = &mut *expr.node else { continue };
+            if method.as_str() != "include" {
+                continue;
+            }
+            let mut carried = Vec::with_capacity(args.len());
+            for arg in std::mem::take(args) {
+                if let Some(id) = id_of(&arg) {
+                    ahead_of(&id, &block_includes, &mut seen, &mut carried);
+                }
+                carried.push(arg);
+            }
+            *args = carried;
+        }
     }
 }
 
