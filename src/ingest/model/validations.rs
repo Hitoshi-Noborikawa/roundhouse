@@ -1345,8 +1345,13 @@ fn set_label(kind: &ValidatesKind) -> &'static str {
 /// `Range#include?` covers the numbers between the endpoints, which a
 /// list of the integers in between does not.
 fn inclusion_values(node: &Node<'_>, class_consts: &super::ClassConsts) -> Option<InclusionSpec> {
-    // A list constant of the class (`in: MODES`, `MODES = %w[a b].freeze`).
-    if node.as_constant_read_node().is_some() || node.as_call_node().is_some() {
+    // `in: (MODES)` / `inclusion: ([…])`: the parentheses only group.
+    if let Some(inner) = super::single_parenthesized(node) {
+        return inclusion_values(&inner, class_consts);
+    }
+    // A list constant of the class (`in: MODES`, `MODES = %w[a b].freeze`),
+    // or of another owner (`in: Fasp::DATA_CATEGORIES`).
+    if node.as_constant_read_node().is_some() || node.as_constant_path_node().is_some() || node.as_call_node().is_some() {
         return class_consts.list(node).map(InclusionSpec::List);
     }
     if let Some(array) = node.as_array_node() {
