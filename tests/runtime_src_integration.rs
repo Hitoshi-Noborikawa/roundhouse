@@ -1190,7 +1190,10 @@ fn every_runtime_method_body_concretely_typed() {
     // MEASURED 865 on 2026-10-22: `ActiveSupport::JSON.encode_without_escape`
     // (Rails' `encode(value, escape: false)`) hands its value to
     // `jsonable` untyped, as `encode` does (+1 in active_support_ext.rb).
-    const CEILING: usize = 865;
+    // MEASURED 866 on 2026-10-22 (rebased onto 865): `ActiveRecord::Base.unscoped { … }`
+    // returns its block's value, which is untyped (+1 in
+    // active_record/connection.rb).
+    const CEILING: usize = 866;
     assert!(
         total_gradual <= CEILING,
         "{total_gradual} Ty::Untyped sites exceeds ceiling of {CEILING}"
