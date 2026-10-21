@@ -8881,7 +8881,10 @@ fn register_has_secure_password(
             .or_insert(auth_ty);
         methods
             .entry(Symbol::from(format!("{attr}_salt")))
-            .or_insert(Ty::Str);
+            .or_insert(Ty::Union { variants: vec![Ty::Str, Ty::Nil].into() });
+        methods
+            .entry(Symbol::from(format!("{attr}_challenge")))
+            .or_insert(Ty::Union { variants: vec![Ty::Str, Ty::Nil].into() });
         methods
             .entry(Symbol::from(format!("{attr}_challenge=")))
             .or_insert(Ty::Str);
