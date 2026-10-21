@@ -1025,6 +1025,9 @@ fn resolve_format_regex(
 /// a module or class, its body defines no constant, module, or class by
 /// that name, and no app class or module (so no app superclass or
 /// included module) defines one either. Otherwise it stays the gap.
+/// Neither spelling folds when the app itself defines or reopens the
+/// top-level namespace (`URI = …`, `module URI`, `URI::MailTo` in
+/// `lib/`), since it may have replaced the standard value.
 ///
 /// Each entry is copied verbatim from
 /// `ruby -ruri -e 'p CONST.source, CONST.options'` on Ruby 4.0, so the
@@ -1050,6 +1053,11 @@ fn stdlib_regexp_constant(node: &Node<'_>, class_consts: &super::ClassConsts) ->
     node.as_constant_path_node()?;
     let mut path = Vec::new();
     let rooted = segments(node, &mut path)?;
+    // An app that defines or reopens the top-level namespace may have
+    // replaced the standard value: neither spelling folds then.
+    if class_consts.app_defines_top_level(path.first()?) {
+        return None;
+    }
     if !rooted && !class_consts.resolves_at_top_level(path.first()?) {
         return None;
     }

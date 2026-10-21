@@ -102,6 +102,18 @@ impl EnumConstants {
             .collect()
     }
 
+    /// The first segment of every name the app's recorded sources define
+    /// or reopen (`URI` for `URI = …`, `module URI`, or
+    /// `URI::MailTo::EMAIL_REGEXP = …`). A well-known top-level constant
+    /// under one of these may have been replaced by the app, so callers
+    /// must not fold it from a built-in table, whichever way it is spelled.
+    pub(in crate::ingest) fn top_level_names(&self) -> std::collections::HashSet<String> {
+        self.values
+            .keys()
+            .filter_map(|key| key.split("::").next().map(str::to_string))
+            .collect()
+    }
+
     /// Only already-consumed original Ruby can add mutation facts here.
     /// Declaration admission remains the prepass's input roots. Revalidate
     /// enum declarations only: no model replacement or unrelated diagnostics.

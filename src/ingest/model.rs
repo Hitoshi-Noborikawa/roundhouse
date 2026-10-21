@@ -145,7 +145,11 @@ pub(super) fn ingest_model_with_enum_constants(
         // labels spelled with a constant (`NAME => NAME`).
         let stmts = flatten_statements(class_body);
         let mut class_consts = ClassConsts::collect(&stmts, file);
-        class_consts.set_lexical_scope(name_path.len() == 1, enum_constants.nested_names());
+        class_consts.set_lexical_scope(
+            name_path.len() == 1,
+            enum_constants.nested_names(),
+            enum_constants.top_level_names(),
+        );
         let resolve_constant = |node: &Node<'_>| enum_constants.resolve(node, &enum_owners);
         for statement in stmts {
             let definition = visibility::definition(&statement).map(|d| d.as_node());
@@ -1714,6 +1718,10 @@ pub(super) struct ClassConsts {
     /// (`EnumConstants::nested_names`): what an ancestor of the class
     /// (its superclass chain, an included module) could define.
     app_nested_names: std::collections::HashSet<String>,
+    /// First segments of every name the app defines or reopens
+    /// (`EnumConstants::top_level_names`): a top-level namespace the app
+    /// touches, whose standard-library contents it may have replaced.
+    app_top_level_names: std::collections::HashSet<String>,
 }
 
 impl ClassConsts {
@@ -1803,15 +1811,26 @@ impl ClassConsts {
         node.as_array_node()?.elements().iter().map(|el| list_atom(&el)).collect()
     }
 
-    /// Record whether the class sits directly at the top level, and the
-    /// names the app defines below the top level anywhere.
+    /// Record whether the class sits directly at the top level, the
+    /// names the app defines below the top level anywhere, and the
+    /// top-level namespaces the app defines or reopens.
     pub(super) fn set_lexical_scope(
         &mut self,
         top_level: bool,
         app_nested_names: std::collections::HashSet<String>,
+        app_top_level_names: std::collections::HashSet<String>,
     ) {
         self.top_level = top_level;
         self.app_nested_names = app_nested_names;
+        self.app_top_level_names = app_top_level_names;
+    }
+
+    /// Whether the app itself defines or reopens the top-level constant
+    /// `first` (`URI = …`, `module URI`, `URI::MailTo::X = …`), so a
+    /// standard-library constant under it, rooted or not, may not hold
+    /// its standard value.
+    pub(super) fn app_defines_top_level(&self, first: &str) -> bool {
+        self.app_top_level_names.contains(first)
     }
 
     /// Whether an unrooted constant path starting with `first` (the
