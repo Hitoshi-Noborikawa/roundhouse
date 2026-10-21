@@ -469,6 +469,115 @@ fn active_storage_exception_owner_safe_literal_reflection_still_executes() {
     }
 }
 
+/// Every owner the namespace registration exposes, the module included.
+const REFLECTION_OWNERS: &[(&str, &str)] = &[
+    ("ActiveStorage::Transformers", "module"),
+    ("ActiveStorage::Transformers::Transformer", "class"),
+    ("ActiveStorage::Transformers::ImageProcessingTransformer", "class"),
+    ("ActiveStorage::Service::GCSService", "class"),
+];
+
+#[test]
+fn active_storage_exception_owner_public_send_and_send_with_safe_names_execute() {
+    // These checked and ran before constructors were refused: a name that
+    // cannot be `new`, through a local bound once, a copy, a conditional,
+    // nested reflection and a literal symbol list.
+    for (owner, _) in REFLECTION_OWNERS {
+        app(&format!(
+            "  def self.value(flag = true)\n    name = :name\n    other = name\n    either = flag ? :name : :to_s\n    \
+             [{owner}.public_send(name), {owner}.send(name), {owner}.__send__(other), {owner}.public_send(either),\n     \
+             {owner}.send(flag ? :name : :to_s), {owner}.public_send(nil || :name), {owner}.send(:public_send, name),\n     \
+             {owner}.method(name).call, %i[name to_s].map {{ |m| {owner}.public_send(m) }}.first,\n     \
+             [:name].each_with_object([]) {{ |m, out| out << {owner}.send(m) }}.first]\n  end"
+        ))
+        .run_ruby(&format!(
+            "actual = StorageErrors.value\nraise actual.inspect unless actual == [\"{owner}\"] * 10"
+        ))
+        .assert_passes();
+    }
+}
+
+#[test]
+fn active_storage_exception_owner_source_public_send_and_send_answer_literal_names() {
+    // A source class method answers the reflective call in place of
+    // Ruby's, so no constructor runs.
+    for (owner, kind) in REFLECTION_OWNERS {
+        app(&format!(
+            "  def self.value\n    [{owner}.public_send(:new, {{}}), {owner}.send(:public_send, :new, {{}}),\n     \
+             {owner}.__send__(:public_send, \"new\", {{}})]\n  end"
+        ))
+        .write("app/models/storage_owner.rb", &format!(
+            "{kind} {owner}\n  def self.public_send(name, *args)\n    19\n  end\nend\n"
+        ))
+        .run_ruby("actual = StorageErrors.value\nraise actual.inspect unless actual == [19, 19, 19]")
+        .assert_passes();
+        app(&format!("  def self.value\n    [{owner}.send(:new, {{}}), {owner}.public_send(:send, :new, {{}})]\n  end"))
+            .write("app/models/storage_owner.rb", &format!(
+                "{kind} {owner}\n  class << self\n    def send(name, *args)\n      23\n    end\n  end\nend\n"
+            ))
+            .run_ruby("actual = StorageErrors.value\nraise actual.inspect unless actual == [23, 23]")
+            .assert_passes();
+    }
+    // Inherited by a Rails subclass, and declared by a source subclass.
+    app("  def self.value\n    [ActiveStorage::Transformers::ImageProcessingTransformer.public_send(:new, {}),\n     \
+         ActiveStorage::Service::GCSService.send(:new, {}), StorageChild.public_send(:new, {})]\n  end")
+        .write("app/models/storage_owner.rb", "class ActiveStorage::Transformers::Transformer\n  \
+                def self.public_send(name, *args)\n    19\n  end\nend\n\
+                class ActiveStorage::Service\n  def self.send(name, *args)\n    23\n  end\nend\n\
+                class StorageChild < ActiveStorage::Service::GCSService\n  \
+                def self.public_send(name, *args)\n    29\n  end\nend\n")
+        .run_ruby("actual = StorageErrors.value\nraise actual.inspect unless actual == [19, 23, 29]")
+        .assert_passes();
+}
+
+#[test]
+fn active_storage_exception_owner_public_send_and_send_reaching_new_stay_refused() {
+    for (owner, kind) in REFLECTION_OWNERS {
+        let forms = [
+            format!("name = :new\n    {owner}.public_send(name, {{}})"),
+            format!("name = :new\n    {owner}.send(name, {{}})"),
+            format!("name = :name\n    other = name\n    other = :new\n    {owner}.send(other, {{}})"),
+            format!("name = :name\n    name = :new if flag\n    {owner}.public_send(name, {{}})"),
+            format!("name = :name\n    reset = -> {{ name = :new }}\n    reset.call\n    {owner}.send(name, {{}})"),
+            format!("name = :name\n    [1].each {{ name = :new }}\n    {owner}.public_send(name, {{}})"),
+            format!("name = :name\n    binding.local_variable_set(:name, :new)\n    {owner}.send(name, {{}})"),
+            format!("{owner}.public_send(selector, {{}})"),
+            format!("{owner}.send(flag ? :name : :new, {{}})"),
+            format!("name = :public_send\n    {owner}.send(name, :new, {{}})"),
+            format!("%i[name new].each {{ |m| {owner}.public_send(m, {{}}) }}"),
+            format!("%i[name].each {{ |m| m = :new; {owner}.send(m, {{}}) }}"),
+            format!("name = :name\n    [:new].each {{ |name| {owner}.public_send(name, {{}}) }}"),
+        ];
+        for form in forms {
+            let errors = app(&format!("  def self.value(selector = :name, flag = true)\n    {form}\n  end"))
+                .check_errors();
+            assert!(
+                errors.iter().any(|e| e.contains(".new lacks a shared runtime constructor implementation")),
+                "{owner}: {form}: {errors:#?}"
+            );
+        }
+        // Source methods that hand the call back through `super`, answer a
+        // different name, or that the emitted direct call never reaches:
+        // `try` and an enumerable computed name lower to `recv.new(...)`.
+        for (method, body, form) in [
+            ("public_send", "super", format!("{owner}.public_send(:new, {{}})")),
+            ("send", "19", format!("{owner}.public_send(:new, {{}})")),
+            ("public_send", "19", format!("%i[new].each {{ |m| {owner}.public_send(m, {{}}) }}")),
+            ("public_send", "19", format!("{owner}.try(:new, {{}})")),
+        ] {
+            let errors = app(&format!("  def self.value\n    {form}\n  end"))
+                .write("app/models/storage_owner.rb", &format!(
+                    "{kind} {owner}\n  def self.{method}(name, *args)\n    {body}\n  end\nend\n"
+                ))
+                .check_errors();
+            assert!(
+                errors.iter().any(|e| e.contains(".new lacks a shared runtime constructor implementation")),
+                "{owner}: {method}: {form}: {errors:#?}"
+            );
+        }
+    }
+}
+
 #[test]
 fn active_storage_exception_owner_derived_class_constructors_keep_the_refusal() {
     for owner in CONSTRUCTOR_OWNERS {
