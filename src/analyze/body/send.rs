@@ -1138,6 +1138,13 @@ impl<'a> BodyTyper<'a> {
                 return param_value_method(method, block_ret).unwrap_or_else(|| str_method(method));
             }
         }
+        // Retain the nominal ancestry of class values derived from an
+        // exception owner, so a later/aliased constructor cannot erase its refusal.
+        if !instance_receiver
+            && let Some(ty) = self.derived_storage_class_value(recv_ty, method, args)
+        {
+            return ty;
+        }
         // `obj.class` is receiver-aware: our type system flattens the
         // class object and instances onto the same `Ty::Class { id }`,
         // so `instance_of_Base.class` returns `Ty::Class { Base }`

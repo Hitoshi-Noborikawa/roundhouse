@@ -468,3 +468,71 @@ fn active_storage_exception_owner_safe_literal_reflection_still_executes() {
             .assert_passes();
     }
 }
+
+#[test]
+fn active_storage_exception_owner_derived_class_constructors_keep_the_refusal() {
+    for owner in CONSTRUCTOR_OWNERS {
+        let forms = [
+            format!("Class.new({owner}).new({{}})"),
+            format!("child = Class.new({owner}); child.new({{}})"),
+            format!("Class.new({owner}) {{ 1 }}.new({{}})"),
+            format!("owner = flag ? {owner} : nil; owner&.new({{}})"),
+            format!("[StandardError, {owner}][1].new({{}})"),
+            format!("{owner}.ancestors.first.new({{}})"),
+            format!("ancestors = {owner}.ancestors; ancestors[0].new({{}})"),
+            format!("{owner}.public_send(:ancestors).first.new({{}})"),
+            format!("{owner}.method(:ancestors).call.first.new({{}})"),
+            format!("{owner}.subclasses.first.new({{}})"),
+            format!("children = {owner}.subclasses; children.first.new({{}})"),
+            format!("{owner}.method(:itself).call.new({{}})"),
+            "StorageChild.superclass.new({})".to_string(),
+            "parent = StorageChild.superclass; parent.new({})".to_string(),
+            "FactoryChild.new({})".to_string(),
+            "derived_class.new({})".to_string(),
+            "construct(derived_class)".to_string(),
+            format!("parent = flag ? {owner} : StandardError; Class.new(parent).new({{}})"),
+            "Class.new(flag ? derived_class : StandardError).new({})".to_string(),
+        ];
+        for form in forms {
+            let errors = app(&format!(
+                "  FactoryChild = Class.new({owner})\n\
+                 def self.derived_class\n    Class.new({owner})\n  end\n\
+                 def self.construct(klass)\n    klass.new({{}})\n  end\n\
+                 def self.value(flag = true)\n    {form}\n  end"
+            ))
+                .write("app/models/storage_child.rb", &format!("class StorageChild < {owner}\nend\n"))
+                .check_errors();
+            let refused = if form == "FactoryChild.new({})" {
+                // This model constant factory already lies outside the indexed
+                // class-factory surface. Preserve its existing constant refusal.
+                !errors.is_empty()
+            } else {
+                errors.iter().any(|e| e.contains(".new lacks a shared runtime constructor implementation"))
+            };
+            assert!(refused, "{owner}: {form}: {errors:#?}");
+        }
+    }
+    for receiver in [
+        "ActiveStorage::Transformers::ImageProcessingTransformer.superclass",
+        "ActiveStorage::Transformers::ImageProcessingTransformer.method(:superclass).call",
+    ] {
+        let errors = app(&format!("  def self.value\n    parent = {receiver}\n    parent.new({{}})\n  end"))
+            .check_errors();
+        assert!(errors.iter().any(|e| e.contains(".new lacks a shared runtime constructor implementation")),
+            "{receiver}: {errors:#?}");
+    }
+}
+
+#[test]
+fn active_storage_exception_owner_derived_class_values_still_execute() {
+    for owner in CONSTRUCTOR_OWNERS {
+        app(&format!("  def self.value\n    [Class.new({owner}), {owner}.ancestors]\n  end"))
+            .run_ruby(&format!("child, ancestors = StorageErrors.value\n\
+                               raise unless child.superclass == {owner}\n\
+                               raise unless ancestors.include?({owner})"))
+            .assert_passes();
+    }
+    app("  def self.value\n    ActiveStorage::Transformers::ImageProcessingTransformer.superclass\n  end")
+        .run_ruby("raise unless StorageErrors.value == ActiveStorage::Transformers::Transformer")
+        .assert_passes();
+}
