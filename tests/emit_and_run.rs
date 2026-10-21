@@ -1552,6 +1552,40 @@ end
         .assert_passes();
 }
 
+/// A params helper that ends `permit(…).compact.merge(k: v)` (campfire's
+/// `Users::ProfilesController#user_params`, which always adds the
+/// password challenge) is still the permit list's typed record with the
+/// merged key on it, so `update(<that>)` takes the typed update. The
+/// `.compact` between them hid the merge, and the update called the
+/// record's `title_provided` on the Hash the merge answered instead.
+#[test]
+fn a_compacted_permit_list_merges_into_its_typed_update() {
+    emit_and_run::real_blog()
+        .edit(
+            "app/controllers/articles_controller.rb",
+            "      params.expect(article: [ :title, :body ])\n",
+            "      params.require(:article).permit(:title).compact.merge(body: \"Merged by the controller, not the form.\")\n",
+        )
+        .write(
+            "test/controllers/articles_compact_merge_controller_test.rb",
+            r##"require "test_helper"
+
+class ArticlesCompactMergeControllerTest < ActionDispatch::IntegrationTest
+  test "the permitted field and the merged one both reach the record" do
+    article = articles(:one)
+    patch article_url(article), params: { article: { title: "Updated Title", body: "From the form" } }
+    assert_redirected_to article_url(article)
+    article.reload
+    assert_equal "Updated Title", article.title
+    assert_equal "Merged by the controller, not the form.", article.body
+  end
+end
+"##,
+        )
+        .run_test("test/controllers/articles_compact_merge_controller_test.rb")
+        .assert_passes();
+}
+
 /// `rescue URI::Error` catches `URI.parse`'s `URI::InvalidURIError`, and
 /// `SocketError` resolves where the app names it without a require (Rails
 /// has loaded socket); both lanes define the classes.
