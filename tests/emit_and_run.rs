@@ -8546,6 +8546,45 @@ fn an_include_from_an_included_block_takes_precedence_over_its_concern() {
         .assert_passes();
 }
 
+/// `connected_to(role: :writing)` runs its block on the primary, the one
+/// connection an emitted app has: the call is its block.
+#[test]
+fn connected_to_the_writing_role_runs_its_block() {
+    emit_and_run::real_blog()
+        .edit(
+            "app/models/article.rb",
+            "class Article < ApplicationRecord\n",
+            "class Article < ApplicationRecord\n  def self.retitle(id, title)\n    ::ActiveRecord::Base.connected_to(role: :writing) do\n      article = find(id)\n      article.update!(title: title)\n      article.title\n    end\n  end\n",
+        )
+        .run_ruby(
+            "a = Article.create!(title: \"Hi\", body: \"Body text here\")\n\
+             raise \"value\" unless Article.retitle(a.id, \"New\") == \"New\"\n\
+             raise \"write\" unless Article.find(a.id).title == \"New\"",
+        )
+        .assert_passes();
+}
+
+/// A reading role refuses writes in Rails, and a shard is another
+/// database; neither, nor a block whose `next` the call gives meaning,
+/// is the plain block.
+#[test]
+fn connected_to_other_than_the_writing_role_stays_unsupported() {
+    for call in [
+        "ActiveRecord::Base.connected_to(role: :reading) do\n      count\n    end",
+        "ActiveRecord::Base.connected_to(role: :writing, shard: :other) do\n      count\n    end",
+        "ActiveRecord::Base.connected_to(role: :writing) do\n      next 0 if none?\n      count\n    end",
+    ] {
+        let errors = emit_and_run::real_blog()
+            .edit(
+                "app/models/article.rb",
+                "class Article < ApplicationRecord\n",
+                &format!("class Article < ApplicationRecord\n  def self.tally\n    {call}\n  end\n"),
+            )
+            .check_errors();
+        assert!(errors.iter().any(|e| e.contains("connected_to")), "{call}: {errors:?}");
+    }
+}
+
 /// `def`s in a concern's `included do` are includer methods, instance and
 /// class side: they keep their visibility, and one over a column reader
 /// wins and reads the column through `super`.
