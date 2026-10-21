@@ -19,21 +19,21 @@ use crate::span::Span;
 /// position a method header has, since the body's spans start at its
 /// first statement.
 pub(super) fn def_name_span(def: &ruby_prism::DefNode<'_>, file: &str) -> crate::span::Span {
-    let loc = def.name_loc();
+    let (start, end) = super::prism_api::span_offsets(&def.name_loc());
     crate::span::Span {
         file: super::sources::file_id(file),
-        start: loc.start_offset() as u32,
-        end: loc.end_offset() as u32,
+        start,
+        end,
     }
 }
 
 /// Span of an arbitrary Prism node in `file`.
 pub(super) fn node_span(node: &Node<'_>, file: &str) -> crate::span::Span {
-    let loc = node.location();
+    let (start, end) = super::prism_api::span_offsets(&node.location());
     crate::span::Span {
         file: super::sources::file_id(file),
-        start: loc.start_offset() as u32,
-        end: loc.end_offset() as u32,
+        start,
+        end,
     }
 }
 
@@ -817,7 +817,7 @@ pub(super) fn collect_comments(result: &ruby_prism::ParseResult<'_>) -> Vec<(usi
                 .trim_end()
                 .to_string();
             (
-                loc.start_offset(),
+                super::prism_api::start_offset(&loc),
                 Comment { text, span: Span::synthetic() },
             )
         })

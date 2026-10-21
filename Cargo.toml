@@ -29,6 +29,13 @@ sha1 = "0.10"
 regex = "1"
 serde_yaml_ng = "0.10"
 indexmap = { version = "2", features = ["serde"] }
+# Prism 2.0.0 is on crates.io (2026-10-21) but Roundhouse cannot bump yet:
+# `rubydex` still depends on `ruby-prism ^1.9.0`, and both crates set
+# `links = "prism"`, so Cargo rejects a mixed 1.9 + 2.0 graph. See
+# `src/ingest/prism_api.rs` and the Prism 2 opportunity note for the
+# migration checklist (Location offsets, Diagnostic::message, MissingNode
+# → ErrorRecoveryNode, attach_comments). Flip the helpers first, then the
+# pin once rubydex accepts 2.x.
 ruby-prism = "1.9.0"
 ruby-rbs = "0.3"
 yaml-rust2 = { version = "0.13.0", default-features = false }

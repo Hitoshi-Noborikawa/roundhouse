@@ -103,12 +103,16 @@ pub fn parse<'pr>(source: &'pr [u8], file: &str) -> ParseResult<'pr> {
         let file_id = sources::file_id(file);
         for err in errors {
             let loc = err.location();
+            let (start, end) = super::prism_api::span_offsets(&loc);
             let span = Span {
                 file: file_id,
-                start: loc.start_offset() as u32,
-                end: loc.end_offset() as u32,
+                start,
+                end,
             };
-            push(Diagnostic::parse(span, err.message()));
+            push(Diagnostic::parse(
+                span,
+                super::prism_api::diagnostic_message(&err),
+            ));
         }
     }
     result

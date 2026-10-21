@@ -178,7 +178,7 @@ pub(super) fn register_parse(source: &[u8]) {
 }
 
 pub(super) fn line_at_parse(location: &ruby_prism::Location<'_>) -> Option<u32> {
-    let offset = location.start_offset();
+    let offset = super::prism_api::start_offset(location);
     // Recover only the input's identity, never dereference an adjusted pointer.
     let source = location.as_slice().as_ptr() as usize - offset;
     SOURCES.with(|s| s.borrow().parsed.get(&source)
@@ -189,7 +189,7 @@ pub(super) fn line_at_parse(location: &ruby_prism::Location<'_>) -> Option<u32> 
 /// Direct expression callers without the parse wrapper still reserve names
 /// in their supplied node; whole-file entry points reserve the entire input.
 pub(super) fn generated_local_is_reserved(location: &ruby_prism::Location<'_>, name: &str) -> bool {
-    let source = location.as_slice().as_ptr() as usize - location.start_offset();
+    let source = location.as_slice().as_ptr() as usize - super::prism_api::start_offset(location);
     SOURCES.with(|s| s.borrow().parsed.get(&source)
         .is_some_and(|parsed| parsed.reserved_locals.contains(name)))
         || location.as_slice().split(|b| !b.is_ascii_alphanumeric() && *b != b'_')
