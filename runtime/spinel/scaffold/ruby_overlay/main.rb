@@ -297,9 +297,14 @@ module Main
       # param; an html one may still name `?format=`.
       format_param = request_format == :html ? merged["format"].to_s : request_format.to_s
       return not_found_response(format_param, request_path, request, env)
-    rescue ActionController::ParameterMissing, ActionController::BadRequest
-      # `params.expect` / `params.require` refused the request and the app
-      # did not rescue it: Rails' rescue_responses answer :bad_request.
+    rescue ActionController::ParameterMissing, ActionController::BadRequest,
+           ActionDispatch::Http::Parameters::ParseError => error
+      # The app's handlers have already run. Rails' rescue_responses map
+      # an unhandled ParseError to :bad_request by its exact class name;
+      # an application subclass has no default mapping.
+      if error.is_a?(ActionDispatch::Http::Parameters::ParseError)
+        raise unless error.instance_of?(ActionDispatch::Http::Parameters::ParseError)
+      end
       return [400, "<h1>400 Bad Request</h1>", "text/html; charset=utf-8", nil, {}, {}, {}, {}, {}]
     rescue ActiveRecord::RecordInvalid, ActiveRecord::RecordNotSaved, ActionController::InvalidAuthenticityToken
       # Not a 500: Rails' rescue_responses answer these with 422.

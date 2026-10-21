@@ -1,6 +1,82 @@
-//! Named request exceptions and inherited `rescue_from` precedence.
+//! Named request exceptions, default responses, and inherited `rescue_from` precedence.
 
 use super::emit_and_run;
+
+fn parse_error_response_app() -> emit_and_run::Overlay {
+    let mut app = emit_and_run::empty_app();
+    // Ingest each controller from its own file, as in an application.
+    for (index, body) in include_str!("parse_error_responses.rb").split("\nclass ").enumerate() {
+        let source = if index == 0 { body.to_string() } else { format!("class {body}") };
+        let name = source.split_whitespace().nth(1).unwrap();
+        let path = if name == "ParseFailure" {
+            "app/services/parse_failure.rb".to_string()
+        } else {
+            format!("app/controllers/{}_controller.rb", name.trim_end_matches("Controller").to_lowercase())
+        };
+        app = app.write(&path, &source);
+    }
+    let mut routes = "Rails.application.routes.draw do\n".to_string();
+    for controller in ["parsers", "handlers", "children", "broads", "unrelated", "causes", "raising", "reraises"] {
+        for action in ["qualified", "absolute", "aliased", "absolute_alias", "constructed", "aliased_instance",
+            "failed", "failed_instance", "empty_message", "nil_message", "false_message", "symbol_message",
+            "integer_message", "implicit", "implicit_instance", "nested", "rethrown", "helper", "before", "after",
+            "derived", "wrapped", "omitted_outside_rescue", "unrelated", "locally"] {
+            routes.push_str(&format!("  get '/{controller}/{action}', to: '{controller}#{action}'\n"));
+        }
+    }
+    routes.push_str("end\n");
+    app.write("config/routes.rb", &routes)
+}
+
+#[test]
+fn parameters_parse_error_default_response_preserves_application_handlers() {
+    let script = format!(r#"
+def parse_response_request(controller, action)
+  status, _headers, body = Main.run_rack("REQUEST_METHOD" => "GET", "PATH_INFO" => "/#{{controller}}/#{{action}}",
+                                        "QUERY_STRING" => "", "rack.input" => StringIO.new(""))
+  body.close if body.respond_to?(:close)
+  [status, nil]
+rescue StandardError => error
+  [500, error]
+end
+{}"#, include_str!("parse_error_responses_contract.rb"));
+    parse_error_response_app().run_ruby(&script).assert_passes();
+}
+
+#[test]
+fn parameters_parse_error_default_response_also_reaches_cgi() {
+    let script = format!(r#"
+def parse_response_request(controller, action)
+  output = StringIO.new
+  Main.run({{ "REQUEST_METHOD" => "GET", "PATH_INFO" => "/#{{controller}}/#{{action}}", "QUERY_STRING" => "" }},
+           StringIO.new(""), output)
+  status = output.string[/\AStatus: (\d+)/, 1].to_i
+  [status, nil]
+rescue StandardError => error
+  [500, error]
+end
+{}"#, include_str!("parse_error_responses_contract.rb"));
+    parse_error_response_app().run_ruby(&script).assert_passes();
+}
+
+#[test]
+fn parameters_parse_error_exception_factory_keeps_its_unsupported_boundary() {
+    let errors = emit_and_run::empty_app()
+        .write("app/controllers/parses_controller.rb", r#"
+class ParsesController < ActionController::API
+  ParseAlias = ActionDispatch::Http::Parameters::ParseError
+  def qualified
+    raise ActionDispatch::Http::Parameters::ParseError.exception("bad JSON")
+  end
+  def aliased
+    raise ParseAlias.exception("bad JSON")
+  end
+end
+"#)
+        .check_errors();
+    assert_eq!(errors.len(), 2, "{errors:?}");
+    assert!(errors.iter().all(|error| error.contains("no known method `exception`")), "{errors:?}");
+}
 
 #[test]
 fn parameters_parse_error_preserves_the_active_exception_message() {
