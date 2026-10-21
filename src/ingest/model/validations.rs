@@ -1076,12 +1076,68 @@ fn resolve_format_regex(
     node: &Node<'_>,
     class_consts: &super::ClassConsts,
 ) -> Option<(String, String)> {
-    let (pattern, flags) = class_consts.regex(node)?;
+    let (pattern, flags) = class_consts.regex(node).or_else(|| stdlib_regexp_constant(node, class_consts))?;
     if flags.chars().all(|c| matches!(c, 'i' | 'm')) {
         Some((pattern, flags))
     } else {
         None
     }
+}
+
+/// A well-known Regexp constant of Ruby's standard library, named by
+/// its full path (`URI::MailTo::EMAIL_REGEXP`), folded to its
+/// `(source, flags)`. Consulted only after the class body's own
+/// constants fail to resolve the value. The rooted spelling
+/// (`::URI::MailTo::EMAIL_REGEXP`) always names the standard-library
+/// constant. The unrooted one resolves lexically, so it folds only when
+/// nothing could shadow its first segment: the class is not nested in
+/// a module or class, its body defines no constant, module, or class by
+/// that name, and no app class or module (so no app superclass or
+/// included module) defines one either. Otherwise it stays the gap.
+/// Neither spelling folds when the app itself defines or reopens the
+/// top-level namespace (`URI = …`, `module URI`, `URI::MailTo` in
+/// `lib/`), since it may have replaced the standard value.
+///
+/// Each entry is copied verbatim from
+/// `ruby -ruri -e 'p CONST.source, CONST.options'` on Ruby 4.0, so the
+/// rule is the one writing that literal inline would give (prism's
+/// unescaped `/…\/…/` source equals Ruby's `Regexp#source`, `\#`
+/// included). Anything else, including a method that builds a regex
+/// (`URI::DEFAULT_PARSER.make_regexp`), stays the gap.
+fn stdlib_regexp_constant(node: &Node<'_>, class_consts: &super::ClassConsts) -> Option<(String, String)> {
+    /// The path's segments, and whether it starts with `::`.
+    fn segments(node: &Node<'_>, out: &mut Vec<String>) -> Option<bool> {
+        if let Some(c) = node.as_constant_read_node() {
+            out.push(super::super::util::constant_id_str(&c.name()).to_string());
+            return Some(false);
+        }
+        let p = node.as_constant_path_node()?;
+        let rooted = match p.parent() {
+            Some(parent) => segments(&parent, out)?,
+            None => true,
+        };
+        out.push(super::super::util::constant_id_str(&p.name()?).to_string());
+        Some(rooted)
+    }
+    node.as_constant_path_node()?;
+    let mut path = Vec::new();
+    let rooted = segments(node, &mut path)?;
+    // An app that defines or reopens the top-level namespace may have
+    // replaced the standard value: neither spelling folds then.
+    if class_consts.app_defines_top_level(path.first()?) {
+        return None;
+    }
+    if !rooted && !class_consts.resolves_at_top_level(path.first()?) {
+        return None;
+    }
+    let (source, flags) = match path.join("::").as_str() {
+        "URI::MailTo::EMAIL_REGEXP" => (
+            r"\A[a-zA-Z0-9.!\#$%&'*+/=?^_`{|}~-]+@[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(?:\.[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)*\z",
+            "",
+        ),
+        _ => return None,
+    };
+    Some((source.to_string(), flags.to_string()))
 }
 
 /// `length: { minimum: N, maximum: M }`. `is:`, `in:`, and `within:`
