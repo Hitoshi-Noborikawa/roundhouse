@@ -1351,6 +1351,44 @@ end
         .assert_passes();
 }
 
+/// A module's `mattr_accessor` (campfire's
+/// `InlineScriptHashes.last_script_sources`, once-campfire#370) keeps its
+/// value in the module's own instance variable rather than a class
+/// variable: the same reads and writes on the Ruby tree, and nothing
+/// Spinel refuses (it has no class variables).
+#[test]
+fn a_modules_mattr_storage_is_its_own_instance_variable() {
+    let module = "module MemoStore\n  mattr_accessor :last\nend\n";
+    emit_and_run::real_blog()
+        .write("app/models/memo_store.rb", module)
+        .write(
+            "test/models/memo_store_test.rb",
+            r##"require "test_helper"
+
+class MemoStoreTest < ActiveSupport::TestCase
+  test "the module attribute starts nil and holds what it is given" do
+    assert_nil MemoStore.last
+    MemoStore.last = [ "key", "value" ]
+    assert_equal [ "key", "value" ], MemoStore.last
+    MemoStore.last = nil
+  end
+end
+"##,
+        )
+        .run_test("test/models/memo_store_test.rb")
+        .assert_passes();
+
+    let (_tree, errors) = emit_and_run::real_blog()
+        .write("app/models/memo_store.rb", module)
+        .write("app/models/memo_reader.rb", "class MemoReader\n  def self.read\n    MemoStore.last\n  end\nend\n")
+        .emit(roundhouse::project::BuildTarget::Spinel);
+    let refused: Vec<&String> = errors
+        .iter()
+        .filter(|e| e.contains("class variable") || e.contains("defined? query"))
+        .collect();
+    assert!(refused.is_empty(), "spinel refused the module's storage: {refused:?}");
+}
+
 /// `rescue URI::Error` catches `URI.parse`'s `URI::InvalidURIError`, and
 /// `SocketError` resolves where the app names it without a require (Rails
 /// has loaded socket); both lanes define the classes.
