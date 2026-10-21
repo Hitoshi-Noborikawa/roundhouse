@@ -505,14 +505,12 @@ module ActiveRecord
       sanitize_sql(statement)
     end
 
-    # Rails' `sanitize_sql_for_order`: a String is the ORDER BY fragment
-    # as written and comes back unchanged; an Array is a fragment and its
-    # binds, interleaved as `sanitize_sql_array` does. Rails hands back an
-    # Array whose head has no `?` as the Array; here it is its head, the
-    # same fragment, so `order` reads the same SQL either way.
+    # Rails' `sanitize_sql_for_order` on a String: the ORDER BY fragment
+    # as written, unchanged. The Array form is not this: Rails 8.1 checks
+    # its fragment with `disallow_raw_sql!`, which a fragment holding `?`
+    # never passes (`UnknownAttributeReference`), so it stays unsupported.
     def self.sanitize_sql_for_order(condition)
-      return condition if condition.is_a?(String)
-      sanitize_sql_array(condition)
+      condition
     end
 
     # Rails' `uncached { }`: the block's reads go to the database, not

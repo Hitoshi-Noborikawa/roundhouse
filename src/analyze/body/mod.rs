@@ -2427,6 +2427,20 @@ impl<'a> BodyTyper<'a> {
                         }));
                     }
                 }
+                // `sanitize_sql_for_order` is modeled on a String only: the
+                // fragment unchanged. Any other argument may be Rails' Array
+                // form, which raises for a `?` fragment there; refuse it.
+                if method.as_str() == "sanitize_sql_for_order"
+                    && matches!(recv_ty.as_ref(), Some(Ty::Class { id, .. }) if id.0.as_str() == "ActiveRecord::Base")
+                    && !(args.len() == 1 && block.is_none() && matches!(args[0].ty, Some(Ty::Str)))
+                    && crate::expr::ExprCold::diagnostic(&expr.cold).is_none()
+                {
+                    crate::expr::ExprCold::set_diagnostic(&mut expr.cold, Some(crate::diagnostic::DiagnosticKind::Unsupported {
+                        target: None,
+                        construct: Symbol::from("ActiveRecord::Base"),
+                        detail: "sanitize_sql_for_order is modeled on a String only; the Array form is not".to_string(),
+                    }));
+                }
                 dispatched
             }
 
