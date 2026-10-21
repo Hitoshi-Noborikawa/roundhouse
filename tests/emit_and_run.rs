@@ -304,6 +304,8 @@ mod concern_included_constants;
 mod validates_rule_on;
 #[path = "emit_and_run/validates_presence_allow_nil.rs"]
 mod validates_presence_allow_nil;
+#[path = "emit_and_run/validates_custom_message.rs"]
+mod validates_custom_message;
 #[path = "emit_and_run/regex_string_interpolation.rs"]
 mod regex_string_interpolation;
 #[path = "emit_and_run/numericality_allow_nil_blank.rs"]

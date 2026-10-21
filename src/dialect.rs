@@ -603,6 +603,10 @@ pub struct Validation {
     /// `unless:` — see `if_cond`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub unless_cond: Option<Expr>,
+    /// A literal String `message:` from the rule's own hash, in place of
+    /// the default message for every error the rules record.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
 }
 
 /// Inclusive or exclusive numeric range from `inclusion: { in: 1..3 }`.
