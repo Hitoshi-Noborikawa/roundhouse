@@ -14303,6 +14303,76 @@ end
         .assert_passes();
 }
 
+/// `flash` in an integration test is the last request's flash, read
+/// after a redirect the test does not follow (campfire's profile tests:
+/// `assert_equal "✓", flash[:notice]`).
+#[test]
+fn an_integration_test_reads_the_last_requests_flash() {
+    emit_and_run::real_blog()
+        .write(
+            "test/controllers/articles_flash_controller_test.rb",
+            r#"require "test_helper"
+
+class ArticlesFlashControllerTest < ActionDispatch::IntegrationTest
+  test "the redirect's notice is the flash" do
+    post articles_url, params: { article: { title: "Flashed", body: "A sufficiently long article body." } }
+    assert_redirected_to article_url(Article.find_by(title: "Flashed"))
+    assert_equal "Article was successfully created.", flash[:notice]
+    assert_nil flash[:alert]
+  end
+end
+"#,
+        )
+        .run_test("test/controllers/articles_flash_controller_test.rb")
+        .assert_passes();
+}
+
+/// A model class method a scope reaches (`titled.find_by_slug(s)`)
+/// takes the relation as a trailing `__rel`, so the call carries one
+/// argument more than the test's `stubs(...).with(s)` names; the ruby
+/// lanes' mocha replay still matches it (campfire's
+/// `User.stubs(:find_by_transfer_id).with(transfer_id)` against
+/// `User.active.find_by_transfer_id(params[:id])`), and the named
+/// argument still tells two stubs apart.
+#[test]
+#[ignore = "requires the mocha gem"]
+fn a_stub_with_args_matches_a_scope_reached_class_method() {
+    emit_and_run::real_blog()
+        .edit(
+            "app/models/article.rb",
+            "class Article < ApplicationRecord\n  has_many :comments, dependent: :destroy",
+            r#"class Article < ApplicationRecord
+  has_many :comments, dependent: :destroy
+  scope :titled, -> { where.not(title: nil) }
+
+  def self.find_by_slug(slug)
+    where(title: slug).first
+  end
+
+  def self.titled_slug(slug)
+    titled.find_by_slug(slug)
+  end"#,
+        )
+        .write(
+            "test/models/article_scoped_stub_test.rb",
+            r#"require "test_helper"
+
+class ArticleScopedStubTest < ActiveSupport::TestCase
+  test "the stub answers the scoped call it names" do
+    other = articles(:two)
+    Article.stubs(:find_by_slug).with("a-slug").returns(other)
+    Article.stubs(:find_by_slug).with("another").returns(articles(:one))
+    assert_equal other.id, Article.titled_slug("a-slug").id
+    assert_equal other.id, Article.find_by_slug("a-slug").id
+    assert_equal articles(:one).id, Article.titled_slug("another").id
+  end
+end
+"#,
+        )
+        .run_test("test/models/article_scoped_stub_test.rb")
+        .assert_passes();
+}
+
 #[path = "emit_and_run/relation_finders.rs"]
 mod relation_finders;
 #[path = "emit_and_run/attach_hash.rs"]
