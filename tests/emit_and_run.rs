@@ -1252,6 +1252,36 @@ end
         .assert_passes();
 }
 
+/// `Model.uncached { ... }` (campfire's password-digest and push-endpoint
+/// reads past the query cache): the block runs with the query cache off,
+/// the cache comes back after it, and the call answers the block's value.
+#[test]
+fn a_model_uncached_block_reads_past_the_query_cache() {
+    emit_and_run::real_blog()
+        .write(
+            "test/models/uncached_test.rb",
+            r##"require "test_helper"
+
+class UncachedTest < ActiveSupport::TestCase
+  test "the block reads past the query cache and answers its value" do
+    article = Article.create!(title: "Cached", body: "A sufficiently long article body.")
+    Db.query_cache_begin
+    begin
+      inside = Article.uncached { Db.query_cache_enabled? }
+      assert_equal false, inside
+      assert Db.query_cache_enabled?
+      assert_equal "Cached", Article.uncached { Article.where(id: article.id).pick(:title) }
+    ensure
+      Db.query_cache_end
+    end
+  end
+end
+"##,
+        )
+        .run_test("test/models/uncached_test.rb")
+        .assert_passes();
+}
+
 /// `rescue URI::Error` catches `URI.parse`'s `URI::InvalidURIError`, and
 /// `SocketError` resolves where the app names it without a require (Rails
 /// has loaded socket); both lanes define the classes.

@@ -105,6 +105,7 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
             .or_default();
         for m in [
             "transaction",
+            "uncached",
             "establish_connection",
         ] {
             base.class_methods.entry(Symbol::from(m)).or_insert(Ty::Untyped);
