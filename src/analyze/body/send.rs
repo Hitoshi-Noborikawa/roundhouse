@@ -417,6 +417,9 @@ impl<'a> BodyTyper<'a> {
         };
         for name in params { new_ctx.class_objects.remove(name); }
         super::forget_class_object_writes(block, &mut new_ctx);
+        if class_object_receiver && matches!(method.as_str(), "tap" | "then" | "yield_self") {
+            if let Some(name) = params.first() { *self.block_class_param.borrow_mut() = Some(name.clone()); }
+        }
         // `form_with model: product do |form|` / `form_for @product do
         // |f|`: the builder is parameterized by the record the form is
         // for, so `form.object` (and `form.object.errors`) answer it.

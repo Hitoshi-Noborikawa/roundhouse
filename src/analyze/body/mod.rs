@@ -386,6 +386,8 @@ pub struct BodyTyper<'a> {
     /// Parameter types for the lambda assignment currently being retyped
     /// from its `.call` sites. Empty during an ordinary walk.
     lambda_seeds: std::cell::RefCell<Option<lambda_local::Seeds>>,
+    /// The block parameter `block_ctx_for` proved a class object (`klass.tap { |k| }`), for the Lambda arm that clears its parameters.
+    block_class_param: std::cell::RefCell<Option<Symbol>>,
 }
 
 impl<'a> BodyTyper<'a> {
@@ -521,6 +523,7 @@ impl<'a> BodyTyper<'a> {
             helper_modules: None,
             open_classes: None,
             lambda_seeds: std::cell::RefCell::new(None),
+            block_class_param: std::cell::RefCell::new(None),
         }
     }
 
@@ -944,6 +947,15 @@ impl<'a> BodyTyper<'a> {
                     if self.classes().contains_key(id)
                         && !matches!(id.0.as_str(), "Integer" | "Float" | "Symbol" | "Rational" | "Complex" | "NilClass" | "TrueClass" | "FalseClass"));
                 (class_object || instance) && !self.owns_operator(r.ty.as_ref(), method, class_object)
+            }
+            // `safe_constantize` is left out: it answers nil for a name nothing defines.
+            ExprNode::Send { recv: Some(r), method, args, block: None, .. }
+                if method.as_str() == "constantize" && args.is_empty() && matches!(r.ty.as_ref(), Some(Ty::Str)) => true,
+            // Kernel#class answers a class whichever subclass the receiver is.
+            ExprNode::Send { recv: Some(r), method, args, block: None, .. }
+                if method.as_str() == "class" && args.is_empty() =>
+            {
+                !self.owns_operator(r.ty.as_ref(), method, self.is_class_object(r, ctx))
             }
             // `Module.new` / `Class.new(Parent)` answer a fresh module or
             // class, unless the app overrides `new` on them.
@@ -1491,6 +1503,9 @@ impl<'a> BodyTyper<'a> {
                 let mut inner = ctx.clone();
                 for name in params.iter().chain(rest_param.iter()).chain(block_param.iter()) {
                     inner.class_objects.remove(name);
+                }
+                if let Some(name) = self.block_class_param.borrow_mut().take().filter(|n| params.first() == Some(n)) {
+                    inner.class_objects.insert(name);
                 }
                 // Call-site evidence for a lambda stored in a local. Taken
                 // here so a nested lambda does not consume it. Block
