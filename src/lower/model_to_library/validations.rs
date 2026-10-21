@@ -911,18 +911,25 @@ fn inline_presence_check(msgs: Messages, attr: &Symbol, attr_ty: Option<&Ty>, ru
 /// cast), so every column but a String, Array or temporal one gets the full
 /// test, and a String column the whitespace regex. A strict target's field is
 /// its column's type, so it gets only what that type can be: a String's
-/// `strip.empty?` (each target's trim: Unicode White_Space on rust and go),
+/// `strip.empty?` (each target's trim: Unicode White_Space on rust and go;
+/// TypeScript's `trim()` keeps U+0085 and removes U+FEFF, the two places
+/// it differs from Rails' `blank?`),
 /// a boolean's `== false`, an Array's `empty?`, and `nil?` alone for a
 /// number. No `empty?` on a type that has none.
 ///
-/// Temporal columns (schema-typed `Time`) store ISO-8601 text in
-/// `@<attr>_raw`; `@<attr>` is never the storage slot (the ruby tree's
-/// parse memo is `@__t_<attr>`), so a check against it fired
-/// unconditionally — lobsters' `validates :created_at, presence: true`
-/// on Username rejected every record. Blank on the stored form is
-/// nil-or-empty text.
+/// Temporal columns (a `Time`, `Date` or `ActiveSupport::Duration`
+/// attribute, nullable or not) store their text in `@<attr>_raw`;
+/// `@<attr>` is never the storage slot (the ruby tree's parse memo is
+/// `@__t_<attr>`), so a check against it fired unconditionally —
+/// lobsters' `validates :created_at, presence: true` on Username
+/// rejected every record. Blank on the stored form is nil-or-empty text.
 fn blank_cond(attr: &Symbol, attr_ty: Option<&Ty>, runtime_relation: super::RuntimeRelation) -> Expr {
-    if matches!(attr_ty, Some(Ty::Time)) {
+    let temporal = match peel_nilable(attr_ty).0 {
+        Some(Ty::Time | Ty::Date) => true,
+        Some(Ty::Class { id, .. }) => id.0.as_str() == "ActiveSupport::Duration",
+        _ => false,
+    };
+    if temporal {
         let raw_ivar = ivar(&Symbol::from(format!("{}_raw", attr.as_str())));
         return bool_op(
             BoolOpKind::Or,
