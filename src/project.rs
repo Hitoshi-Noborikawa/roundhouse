@@ -6242,12 +6242,11 @@ fn report_unsupported_bundled_constants(app: &App, target: BuildTarget) {
         // A strict emit spelled these as methods its class objects do not have.
         if !matches!(target, "jruby" | "spinel")
             && let crate::expr::ExprNode::Send { recv: Some(recv), method, .. } = &*expr.node
-            && recv.decisions & crate::expr::CLASS_OBJECT_VALUE != 0
-            && matches!(method.as_str(),
-                "const_defined?" | "const_get" | "constants" | "method_defined?" | "public_method_defined?"
-                | "private_method_defined?" | "instance_method" | "public_instance_method" | "instance_methods"
-                | "public_instance_methods" | "private_instance_methods" | "include?" | "class_variable_get"
-                | "class_variable_set" | "class_variable_defined?")
+            && crate::analyze::is_module_query(method)
+            && (method.as_str() != "include?"
+                || recv.decisions & crate::expr::CLASS_OBJECT_VALUE != 0
+                || matches!(&*recv.node, crate::expr::ExprNode::Send { method, args, .. } if method.as_str() == "class" && args.is_empty())
+                || matches!(recv.ty.as_ref(), Some(crate::ty::Ty::Class { id, .. }) if matches!(id.0.as_str(), "Class" | "Module")))
         {
             emit::diagnostics::report_unsupported(
                 expr.span,

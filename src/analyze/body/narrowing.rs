@@ -330,7 +330,7 @@ pub(super) fn apply_narrowing(ctx: &Ctx, pred: &NarrowPred, then_branch: bool) -
         && matches!(pred, NarrowPred::IsA(..)) == then_branch
         && matches!(id.0.as_str(), "Class" | "Module")
     {
-        new_ctx.class_objects.insert(name.clone());
+        new_ctx.query_class_objects.insert(name.clone());
     }
     new_ctx
 }

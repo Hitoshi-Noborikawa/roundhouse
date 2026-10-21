@@ -154,6 +154,8 @@ fn identity_is_invalidated_by_reassignment_and_branch_writes() {
         "k = Probe; [Probe.new] => [k]; k.define_method(:x) { 1 }",
         "k = Probe; begin; raise StandardError; rescue => k; k.define_method(:x) { 1 }; end",
         "Probe.new.class.define_method(:x) { 1 }",
+        "k = title; k.define_method(:x) { 1 } if k.is_a?(Class)",
+        "title.to_s.constantize.define_method(:x) { 1 }",
     ] { refuses(body, "Module protocol"); }
 }
 

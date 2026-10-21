@@ -30,7 +30,7 @@ mod body;
 mod class_configuration;
 mod data;
 mod class_new;
-pub(crate) use body::{indexed_pluck, string_answers};
+pub(crate) use body::{indexed_pluck, is_module_query, string_answers};
 #[cfg(test)]
 pub(crate) use body::counted_first_last;
 pub(crate) use body::{ConstResolver, ConstResolverTask, definition_index};
@@ -1870,6 +1870,7 @@ impl Analyzer {
                 ivar_bindings: HashMap::new(),
                 local_bindings,
                 class_objects: Default::default(),
+                query_class_objects: Default::default(),
                 constants: Default::default(),
                 annotate_self_dispatch: false,
                 in_view: false, class_side: false, claimed_macro_template: false, instance_body: false,
@@ -2205,6 +2206,7 @@ impl Analyzer {
                     ivar_bindings: HashMap::new(),
                     local_bindings: HashMap::new(),
                     class_objects: Default::default(),
+                    query_class_objects: Default::default(),
                     constants: shared.clone(),
                     annotate_self_dispatch: false,
                     in_view: false, class_side: false, claimed_macro_template: false, instance_body: false,
@@ -2477,6 +2479,7 @@ impl Analyzer {
                 ivar_bindings: class_ivars.clone(),
                 local_bindings: HashMap::new(),
                 class_objects: Default::default(),
+                query_class_objects: Default::default(),
                 constants: global_constants.clone(),
                 annotate_self_dispatch: false, in_view: false, view_name: None, class_side: false, claimed_macro_template: false, instance_body: false,
             };
@@ -2494,6 +2497,7 @@ impl Analyzer {
                 ivar_bindings: class_ivars.clone(),
                 local_bindings: HashMap::new(),
                 class_objects: Default::default(),
+                query_class_objects: Default::default(),
                 constants: class_constants.clone(),
                 annotate_self_dispatch: false, in_view: false, view_name: None, class_side: false, claimed_macro_template: false, instance_body: false,
             };
@@ -2555,6 +2559,7 @@ impl Analyzer {
                     ivar_bindings: reseeded,
                     local_bindings: HashMap::new(),
                     class_objects: Default::default(),
+                    query_class_objects: Default::default(),
                     constants: class_constants.clone(),
                     annotate_self_dispatch: false, in_view: false, view_name: None, class_side: false, claimed_macro_template: false, instance_body: false,
                 };
@@ -2604,6 +2609,7 @@ impl Analyzer {
                 ivar_bindings: HashMap::new(),
                 local_bindings: HashMap::new(),
                 class_objects: Default::default(),
+                query_class_objects: Default::default(),
                 constants: global_constants.clone(),
                 annotate_self_dispatch: false, in_view: false, view_name: None, class_side: false, claimed_macro_template: false, instance_body: false,
             };
@@ -2625,6 +2631,7 @@ impl Analyzer {
                 ivar_bindings: HashMap::new(),
                 local_bindings: HashMap::new(),
                 class_objects: Default::default(),
+                query_class_objects: Default::default(),
                 constants: class_constants.clone(),
                 annotate_self_dispatch: false, in_view: false, view_name: None, class_side: false, claimed_macro_template: false, instance_body: false,
             };
@@ -3162,6 +3169,7 @@ impl Analyzer {
                             ivar_bindings: seed,
                             local_bindings: HashMap::new(),
                             class_objects: Default::default(),
+                            query_class_objects: Default::default(),
                             constants: meta.class_constants.clone(),
                             annotate_self_dispatch: false, in_view: false, view_name: None, class_side: false, claimed_macro_template: false, instance_body: false,
                         };
@@ -3685,6 +3693,7 @@ impl Analyzer {
                         ivar_bindings: seed,
                         local_bindings: HashMap::new(),
                         class_objects: Default::default(),
+                        query_class_objects: Default::default(),
                         constants: class_constants.clone(),
                         annotate_self_dispatch: false,
                         in_view: false, class_side: false, claimed_macro_template: false, instance_body: false,
@@ -3870,6 +3879,7 @@ impl Analyzer {
                 ivar_bindings: HashMap::new(),
                 local_bindings: HashMap::new(),
                 class_objects: Default::default(),
+                query_class_objects: Default::default(),
                 constants: Default::default(), annotate_self_dispatch: false, in_view: false, view_name: None, class_side: false, claimed_macro_template: false, instance_body: false,
             };
 
@@ -4015,6 +4025,7 @@ impl Analyzer {
                     ivar_bindings: reseeded,
                     local_bindings: HashMap::new(),
                     class_objects: Default::default(),
+                    query_class_objects: Default::default(),
                     constants: Default::default(), annotate_self_dispatch: false, in_view: false, view_name: None, class_side: false, claimed_macro_template: false, instance_body: false,
                 };
                 for method in &mut lc.methods {

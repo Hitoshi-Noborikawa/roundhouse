@@ -415,7 +415,7 @@ impl<'a> BodyTyper<'a> {
         let ExprNode::Lambda { params, .. } = &*block.node else {
             return new_ctx;
         };
-        for name in params { new_ctx.class_objects.remove(name); }
+        for name in params { new_ctx.class_objects.remove(name); new_ctx.query_class_objects.remove(name); }
         super::forget_class_object_writes(block, &mut new_ctx);
         if class_object_receiver && matches!(method.as_str(), "tap" | "then" | "yield_self") {
             if let Some(name) = params.first() { *self.block_class_param.borrow_mut() = Some(name.clone()); }
@@ -3949,6 +3949,15 @@ pub(super) fn is_module_protocol(method: &Symbol) -> bool {
         | "method_defined?" | "public_method_defined?" | "private_method_defined?"
         | "const_defined?" | "include?" | "instance_methods" | "public_instance_methods"
         | "private_instance_methods" | "remove_method" | "undef_method")
+}
+
+/// The Module protocol names that only read a class, which a strict emit has no class object to answer.
+pub(crate) fn is_module_query(method: &Symbol) -> bool {
+    matches!(method.as_str(),
+        "const_defined?" | "const_get" | "constants" | "method_defined?" | "public_method_defined?"
+        | "private_method_defined?" | "instance_method" | "public_instance_method" | "instance_methods"
+        | "public_instance_methods" | "private_instance_methods" | "include?" | "class_variable_get"
+        | "class_variable_defined?")
 }
 
 pub(super) fn object_protocol_method(
