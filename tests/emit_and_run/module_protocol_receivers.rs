@@ -72,5 +72,10 @@ fn module_protocol_queries_are_unsupported_on_strict_targets() {
         for name in ["`const_defined?` asks a class object", "`const_get` asks a class object", "`include?` asks a class object", "`method_defined?` asks a class object"] {
             assert!(errors.iter().any(|e| e.contains(name)), "{target:?} {name}: {errors:#?}");
         }
+        // An app object's own method of the same name is not the Module query.
+        let (_emitted, errors) = emit_and_run::real_blog()
+            .write("app/models/registry.rb", "class Registry\n  def const_get(name)\n    name.to_s\n  end\n\n  def self.lookup\n    Registry.new.const_get(:x)\n  end\nend\n")
+            .emit(target);
+        assert!(!errors.iter().any(|e| e.contains("asks a class object")), "{target:?}: {errors:#?}");
     }
 }

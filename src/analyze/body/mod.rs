@@ -62,7 +62,7 @@ mod narrowing;
 mod pagy;
 mod send;
 pub(crate) use send::PARAM_VALUE;
-pub(crate) use send::{indexed_pluck, is_module_query, string_answers};
+pub(crate) use send::{indexed_pluck, string_answers};
 #[cfg(test)]
 pub(crate) use send::counted_first_last;
 
@@ -975,7 +975,8 @@ impl<'a> BodyTyper<'a> {
             ExprNode::Send { recv: Some(r), method, args, block: None, .. } if args.is_empty() => match method.as_str() {
                 "class" => !self.owns_operator(r.ty.as_ref(), method, self.is_class_object(r, ctx)),
                 // `safe_constantize` is left out: it answers nil for a name nothing defines.
-                "constantize" => matches!(r.ty.as_ref(), Some(Ty::Str)),
+                "constantize" => matches!(r.ty.as_ref(), Some(Ty::Str))
+                    && !self.classes.get(&ClassId(Symbol::from("String"))).is_some_and(|c| c.instance_methods.contains_key(method)),
                 _ => false,
             },
             ExprNode::Var { name, .. } => ctx.query_class_objects.contains(name)
@@ -2344,6 +2345,9 @@ impl<'a> BodyTyper<'a> {
                     && !self.owns_operator(recv_ty.as_ref(), method, class_object_receiver) {
                     let class_object = class_object_receiver
                         || (send::is_module_query(method) && recv.as_ref().is_some_and(|r| self.answers_module_queries(r, recv_ty.as_ref(), ctx)));
+                    if class_object && send::is_module_query(method) {
+                        expr.decisions |= crate::expr::MODULE_QUERY;
+                    }
                     // `include?` is Module's ancestor check AND String/Enumerable
                     // membership. Refuse Module protocol only for true Module-only
                     // names, or for `include?` on a nominal class *instance* (where

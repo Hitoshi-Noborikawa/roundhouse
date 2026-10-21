@@ -170,6 +170,11 @@ fn instance_eval_changes_self_identity_in_class_side_methods() {
 }
 
 #[test]
+fn an_overridden_then_does_not_yield_the_class() {
+    refuses_with("Probe.go", "Module protocol", &[("app/models/probe.rb", "class Probe < ApplicationRecord\n  def self.then\n    yield 1\n  end\n\n  def self.go\n    Probe.then { |k| k.const_defined?(:X) }\n  end\nend\n")]);
+}
+
+#[test]
 fn unused_unresolved_model_include_is_not_silent() {
     refuses_with("1", "GhostModule", &[("app/models/probe.rb", "class Probe < ApplicationRecord\n  include GhostModule\nend\n")]);
 }
