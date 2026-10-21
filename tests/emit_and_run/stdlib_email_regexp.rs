@@ -53,3 +53,65 @@ fn uri_mailto_email_regexp_emits_cleanly_on_every_backend_target() {
         assert!(errors.is_empty(), "{target:?}: {errors:#?}");
     }
 }
+
+/// Ruby's constant lookup also searches the class's ancestors: when
+/// `ApplicationRecord` defines its own `URI`, an unrooted
+/// `URI::MailTo::EMAIL_REGEXP` in a model could name it, so that
+/// spelling stays the reported gap. The rooted spelling still folds.
+#[test]
+fn an_app_ancestor_defining_uri_keeps_the_unrooted_gap() {
+    let warnings = emit_and_run::empty_app()
+        .write(
+            "app/models/application_record.rb",
+            "class ApplicationRecord < ActiveRecord::Base\n  self.abstract_class = true\n\n  module URI\n  end\nend\n",
+        )
+        .write(
+            "db/schema.rb",
+            "ActiveRecord::Schema.define do\n  create_table \"people\", force: :cascade do |t|\n    t.string \"email\"\n    t.string \"backup_email\"\n  end\nend\n",
+        )
+        .write(
+            "app/models/person.rb",
+            "class Person < ApplicationRecord\n  validates :email, format: { with: URI::MailTo::EMAIL_REGEXP }\n  validates :backup_email, format: { with: ::URI::MailTo::EMAIL_REGEXP }\nend\n",
+        )
+        .ingest_warnings();
+    assert!(warnings.iter().any(|w| w.contains("validates :email, format: with:")), "{warnings:?}");
+    assert!(!warnings.iter().any(|w| w.contains("validates :backup_email,")), "{warnings:?}");
+}
+
+/// Without such an ancestor the unrooted spelling folds as before.
+#[test]
+fn a_plain_application_record_still_folds_the_unrooted_spelling() {
+    let warnings = emit_and_run::empty_app()
+        .write("app/models/application_record.rb", "class ApplicationRecord < ActiveRecord::Base\n  self.abstract_class = true\nend\n")
+        .write(
+            "db/schema.rb",
+            "ActiveRecord::Schema.define do\n  create_table \"people\", force: :cascade do |t|\n    t.string \"email\"\n  end\nend\n",
+        )
+        .write(
+            "app/models/person.rb",
+            "class Person < ApplicationRecord\n  validates :email, format: { with: URI::MailTo::EMAIL_REGEXP }\nend\n",
+        )
+        .ingest_warnings();
+    assert!(!warnings.iter().any(|w| w.contains("validates :email,")), "{warnings:?}");
+}
+
+/// The same holds for an included module that defines `URI`.
+#[test]
+fn an_included_concern_defining_uri_keeps_the_unrooted_gap() {
+    let warnings = emit_and_run::empty_app()
+        .write("app/models/application_record.rb", "class ApplicationRecord < ActiveRecord::Base\n  self.abstract_class = true\nend\n")
+        .write(
+            "app/models/concerns/contactable.rb",
+            "module Contactable\n  extend ActiveSupport::Concern\n\n  URI = Object.new\nend\n",
+        )
+        .write(
+            "db/schema.rb",
+            "ActiveRecord::Schema.define do\n  create_table \"people\", force: :cascade do |t|\n    t.string \"email\"\n  end\nend\n",
+        )
+        .write(
+            "app/models/person.rb",
+            "class Person < ApplicationRecord\n  include Contactable\n\n  validates :email, format: { with: URI::MailTo::EMAIL_REGEXP }\nend\n",
+        )
+        .ingest_warnings();
+    assert!(warnings.iter().any(|w| w.contains("validates :email, format: with:")), "{warnings:?}");
+}

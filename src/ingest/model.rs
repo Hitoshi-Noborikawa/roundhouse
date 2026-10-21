@@ -145,7 +145,7 @@ pub(super) fn ingest_model_with_enum_constants(
         // labels spelled with a constant (`NAME => NAME`).
         let stmts = flatten_statements(class_body);
         let mut class_consts = ClassConsts::collect(&stmts, file);
-        class_consts.set_top_level(name_path.len() == 1);
+        class_consts.set_lexical_scope(name_path.len() == 1, enum_constants.nested_names());
         let resolve_constant = |node: &Node<'_>| enum_constants.resolve(node, &enum_owners);
         for statement in stmts {
             let definition = visibility::definition(&statement).map(|d| d.as_node());
@@ -1710,6 +1710,10 @@ pub(super) struct ClassConsts {
     /// lexical scope is only its own body. Set by `ingest_model`;
     /// `false` everywhere else, which is the conservative answer.
     top_level: bool,
+    /// Names any app source defines below the top level
+    /// (`EnumConstants::nested_names`): what an ancestor of the class
+    /// (its superclass chain, an included module) could define.
+    app_nested_names: std::collections::HashSet<String>,
 }
 
 impl ClassConsts {
@@ -1799,17 +1803,26 @@ impl ClassConsts {
         node.as_array_node()?.elements().iter().map(|el| list_atom(&el)).collect()
     }
 
-    /// Record whether the class sits directly at the top level.
-    pub(super) fn set_top_level(&mut self, top_level: bool) {
+    /// Record whether the class sits directly at the top level, and the
+    /// names the app defines below the top level anywhere.
+    pub(super) fn set_lexical_scope(
+        &mut self,
+        top_level: bool,
+        app_nested_names: std::collections::HashSet<String>,
+    ) {
         self.top_level = top_level;
+        self.app_nested_names = app_nested_names;
     }
 
     /// Whether an unrooted constant path starting with `first` (the
     /// `URI` of `URI::MailTo::EMAIL_REGEXP`) can only mean the top-level
-    /// constant: the class is not nested in a module or class, and its
-    /// own body defines nothing by that name.
+    /// constant. Ruby searches the lexical scope, then the class's
+    /// ancestors, then `Object`. So: the class is not nested in a module
+    /// or class, its own body defines nothing by that name, and no app
+    /// class or module defines it either (which covers every app
+    /// superclass and included module, however deep).
     pub(super) fn resolves_at_top_level(&self, first: &str) -> bool {
-        self.top_level && !self.defined_names.contains(first)
+        self.top_level && !self.defined_names.contains(first) && !self.app_nested_names.contains(first)
     }
 
     /// A regex literal the class body can fold: a bare `/pattern/flags`

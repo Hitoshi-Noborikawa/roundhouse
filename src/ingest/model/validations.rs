@@ -1021,9 +1021,10 @@ fn resolve_format_regex(
 /// constants fail to resolve the value. The rooted spelling
 /// (`::URI::MailTo::EMAIL_REGEXP`) always names the standard-library
 /// constant. The unrooted one resolves lexically, so it folds only when
-/// nothing in scope could shadow its first segment: the class is not
-/// nested in a module or class, and its body defines no constant,
-/// module, or class by that name. Otherwise it stays the gap.
+/// nothing could shadow its first segment: the class is not nested in
+/// a module or class, its body defines no constant, module, or class by
+/// that name, and no app class or module (so no app superclass or
+/// included module) defines one either. Otherwise it stays the gap.
 ///
 /// Each entry is copied verbatim from
 /// `ruby -ruri -e 'p CONST.source, CONST.options'` on Ruby 4.0, so the
