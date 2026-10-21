@@ -18577,6 +18577,14 @@ mod proc_new_and_std_streams;
 mod core_constants;
 #[path = "emit_and_run/module_protocol_receivers.rs"]
 mod module_protocol_receivers;
+#[path = "emit_and_run/ipaddr_include.rs"]
+mod ipaddr_include;
+#[path = "emit_and_run/hash_subclass_include.rs"]
+mod hash_subclass_include;
+#[path = "emit_and_run/guarded_declarations.rs"]
+mod guarded_declarations;
+#[path = "emit_and_run/lock_versions.rs"]
+mod lock_versions;
 #[path = "emit_and_run/helper_diagnostics.rs"]
 mod helper_diagnostics;
 #[path = "emit_and_run/value_seq_order.rs"]

@@ -1014,6 +1014,18 @@ impl<'a> BodyTyper<'a> {
         false
     }
 
+    // An app class over Hash/Array/String/Set answers `include?` as membership, not Module#include?.
+    fn descends_from_collection(&self, id: &ClassId) -> bool {
+        let mut seen = std::collections::HashSet::new();
+        let mut current = self.classes().get(id).and_then(|c| c.parent.clone());
+        while let Some(id) = current {
+            if matches!(id.0.as_str(), "Hash" | "Array" | "String" | "Set") { return true; }
+            if !seen.insert(id.clone()) { break; }
+            current = self.classes().get(&id).and_then(|c| c.parent.clone());
+        }
+        false
+    }
+
     fn is_module_callback(&self, recv_ty: Option<&Ty>, method: &Symbol) -> bool {
         matches!(method.as_str(), "included" | "prepended" | "append_features" | "prepend_features")
             && matches!(recv_ty, Some(Ty::Class { id, .. }) if self.classes.get(id).is_some_and(|c| c.is_module && c.class_methods.contains_key(method)))
@@ -2365,7 +2377,7 @@ impl<'a> BodyTyper<'a> {
                     let module_only = send::is_module_protocol(method)
                         && (method.as_str() != "include?"
                             || matches!(&recv_ty, Some(Ty::Class { id, .. })
-                                if !matches!(id.0.as_str(), "Class" | "Module")));
+                                if !matches!(id.0.as_str(), "Class" | "Module") && !self.descends_from_collection(id)));
                     if module_only && !class_object
                         && !self.owns_operator(recv_ty.as_ref(), method, false) {
                         crate::expr::ExprCold::set_diagnostic(&mut expr.cold, Some(crate::diagnostic::DiagnosticKind::Unsupported {
