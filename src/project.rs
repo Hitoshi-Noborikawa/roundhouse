@@ -3247,7 +3247,7 @@ fn ruby_family_runtime_files(
     let sidekiq_client = if sidekiq {
         let client = crate::runtime_files::read_to_string(SIDEKIQ_REDIS_CLIENT)?;
         const AT_LOAD: &str = "require \"redis\"\n";
-        const OPEN: &str = "    conn = password == \"\" ? Redis.new(url: url) : Redis.new(url: url, password: password)\n";
+        const OPEN: &str = "    conn = password == \"\" ? Redis.new(url: url, connect_timeout: CONNECT_TIMEOUT, read_timeout: READ_TIMEOUT) : Redis.new(url: url, password: password, connect_timeout: CONNECT_TIMEOUT, read_timeout: READ_TIMEOUT)\n";
         if !client.contains(AT_LOAD) || !client.contains(OPEN) {
             return Err(format!("{SIDEKIQ_REDIS_CLIENT}: the require or the connect line moved"));
         }
@@ -9722,9 +9722,11 @@ fn spin_shape(files: Vec<(String, String)>) -> Result<Vec<(String, String)>, Str
             "# Redis, for queue_adapter :sidekiq: jobs are pushed in Sidekiq's\n\
              # format for a Sidekiq process to run. spinel-redis, pure Ruby over\n\
              # sp_net. Git form, pinned to a tag because `ref` takes a branch\n\
-             # or tag, never a SHA; 0.2.0 carries the url:, AUTH, zadd and\n\
-             # pipelined this push needs, and the index lists only 0.1.0.\n\
-             redis = { git = \"https://github.com/rubys/spinel-redis\", ref = \"v0.2.0\" }\n",
+             # or tag, never a SHA. Until rubys/spinel-redis#3 (connect_timeout:\n\
+             # and read_timeout:) is merged and tagged, the tag is on its branch\n\
+             # in the baron-hines fork; it builds on v0.2.0's url:, AUTH, zadd\n\
+             # and pipelined.\n\
+             redis = { git = \"https://github.com/baron-hines/spinel-redis\", ref = \"redis-timeouts-1\" }\n",
         );
     }
     files.push(("spin.toml".to_string(), manifest));

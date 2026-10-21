@@ -43,12 +43,18 @@ fn a_spinel_tree_on_sidekiq_gets_spinel_redis() {
     let (emitted, errors) = on_sidekiq().emit(BuildTarget::Spinel);
     assert!(errors.is_empty(), "{errors:#?}");
     let client = read(&emitted, "runtime/sidekiq_redis.rb");
-    assert!(client.contains("require \"redis\"") && client.contains("Redis.new(url: url)"), "{client}");
+    assert!(
+        client.contains("require \"redis\"")
+            && client.contains(
+                "Redis.new(url: url, connect_timeout: CONNECT_TIMEOUT, read_timeout: READ_TIMEOUT)"
+            ),
+        "{client}"
+    );
     assert!(!emitted.join("runtime/sidekiq_redis.rbs").exists(), "the façade's sidecar must drop");
     let manifest = read(&emitted, "spin.toml");
     assert!(
         manifest.contains(
-            "redis = { git = \"https://github.com/rubys/spinel-redis\", ref = \"v0.2.0\" }"
+            "redis = { git = \"https://github.com/baron-hines/spinel-redis\", ref = \"redis-timeouts-1\" }"
         ),
         "{manifest}"
     );
