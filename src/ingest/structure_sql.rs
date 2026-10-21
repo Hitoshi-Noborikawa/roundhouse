@@ -388,6 +388,12 @@ fn parse_column_def(
         file: file.into(),
         message: format!("generated column dropped: {table}.{col_name}: {message}"),
     })?;
+    if let Some(clause) = unsupported_named_constraint(modifiers) {
+        return Err(IngestError::Unsupported {
+            file: file.into(),
+            message: format!("column dropped: {table}.{col_name} has unsupported column constraint `{clause}`"),
+        });
+    }
     let (nullable, default) = parse_modifiers(modifiers);
     if generated.is_some() && default.is_some() {
         return Err(unsupported_col(file, table, &col_name, "generated column also has DEFAULT"));
@@ -1459,19 +1465,52 @@ fn only_optional_nullability(s: &str) -> bool {
         return true;
     }
     if let Some(after_constraint) = consume_sql_keyword_ci(s, start, "CONSTRAINT") {
-        let Some((_, after_name)) = read_ident(s, skip_sql_trivia(s, after_constraint)) else {
-            return false;
-        };
+        let Some(after_name) = consume_constraint_name(s, after_constraint) else { return false };
         start = skip_sql_trivia(s, after_name);
     }
+    consume_nullability(s, start).is_some_and(|end| skip_sql_trivia(s, end) == s.len())
+}
+
+/// A `NULL` or `NOT NULL` clause starting at `start`, returning the byte
+/// just past it.
+fn consume_nullability(s: &str, start: usize) -> Option<usize> {
     if let Some(end) = consume_sql_keyword_ci(s, start, "NULL") {
-        return skip_sql_trivia(s, end) == s.len();
+        return Some(end);
     }
-    let Some(after_not) = consume_sql_keyword_ci(s, start, "NOT") else { return false };
-    let Some(after_null) = consume_sql_keyword_ci(s, skip_sql_trivia(s, after_not), "NULL") else {
-        return false;
-    };
-    skip_sql_trivia(s, after_null) == s.len()
+    let after_not = consume_sql_keyword_ci(s, start, "NOT")?;
+    consume_sql_keyword_ci(s, skip_sql_trivia(s, after_not), "NULL")
+}
+
+/// The name after a `CONSTRAINT` keyword ending at `after_keyword`,
+/// returning the byte just past it. An unquoted reserved word that opens
+/// a column constraint cannot be a name, so `CONSTRAINT NOT NULL` names
+/// nothing and yields `None`.
+fn consume_constraint_name(s: &str, after_keyword: usize) -> Option<usize> {
+    const RESERVED: [&str; 9] =
+        ["CHECK", "COLLATE", "CONSTRAINT", "DEFAULT", "NOT", "NULL", "PRIMARY", "REFERENCES", "UNIQUE"];
+    let start = skip_sql_trivia(s, after_keyword);
+    let (name, end) = read_ident(s, start)?;
+    let quoted = s.as_bytes().get(start) == Some(&b'"');
+    if !quoted && RESERVED.iter().any(|word| name.eq_ignore_ascii_case(word)) {
+        return None;
+    }
+    Some(end)
+}
+
+/// pg_dump writes `CONSTRAINT name` inside a column definition only for
+/// its nullability (`CONSTRAINT name NOT NULL`). Any other named clause
+/// (`PRIMARY KEY`, `UNIQUE`, `CHECK`, `REFERENCES`), or a `CONSTRAINT`
+/// with no name, is returned from that keyword on, so the column is
+/// refused rather than read as a plain one with its key or check lost.
+fn unsupported_named_constraint(modifiers: &str) -> Option<&str> {
+    top_level_words(modifiers).into_iter().find_map(|(pos, word)| {
+        if word != "CONSTRAINT" {
+            return None;
+        }
+        let named_nullability = consume_constraint_name(modifiers, pos + "CONSTRAINT".len())
+            .and_then(|end| consume_nullability(modifiers, skip_sql_trivia(modifiers, end)));
+        named_nullability.is_none().then(|| modifiers[pos..].trim_end())
+    })
 }
 
 /// From a column definition's modifier tail: whether the column is
