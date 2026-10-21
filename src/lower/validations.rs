@@ -194,7 +194,7 @@ fn expand_rule(rule: &ValidationRule, out: &mut Vec<Check>) {
                 out.push(Check::MaxLength { n: *n, message: message.clone() });
             }
         }
-        ValidationRule::Format { pattern, flags } => {
+        ValidationRule::Format { pattern, flags, .. } => {
             out.push(Check::Format { pattern: pattern.clone(), flags: flags.clone() });
         }
         ValidationRule::Numericality { only_integer, gt, lt, gte, lte, .. } => {

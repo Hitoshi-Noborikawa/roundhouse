@@ -661,6 +661,13 @@ pub enum ValidationRule {
         /// so JSON written before this field existed still loads.
         #[serde(default)]
         flags: String,
+        /// `allow_nil:` / `allow_blank:`, from the validator's own hash
+        /// or the call (the hash wins). `None` is unset: Rails then
+        /// matches a nil or blank value's `to_s` like any other.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        allow_nil: Option<bool>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        allow_blank: Option<bool>,
     },
     Numericality {
         only_integer: bool,
