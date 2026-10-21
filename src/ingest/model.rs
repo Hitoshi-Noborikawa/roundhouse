@@ -1461,7 +1461,7 @@ const READ_ONLY_CONST_METHODS: &[&str] = &[
     "fetch", "dig", "[]", "join", "entries", "zip", "index_by", "index_with", "group_by", "partition", "tally",
     "filter_map", "each_slice", "each_key", "each_value", "each_pair", "values_at", "slice", "except", "take",
     "drop", "uniq", "compact", "reverse", "flatten", "invert", "transform_values", "transform_keys", "minmax",
-    "intersection", "union", "difference", "excluding", "including", "&", "|", "+", "-", "source", "options",
+    "intersection", "union", "difference", "excluding", "including", "&", "|", "+", "-", "*", "**", "-@", "source", "options",
     "match", "match?", "=~", "===", "==", "!=", "eql?", "hash", "is_a?", "nil?", "present?", "blank?",
 ];
 
@@ -1724,7 +1724,15 @@ pub(super) struct ClassConsts {
     /// (`EnumConstants::top_level_names`): a top-level namespace the app
     /// touches, whose standard-library contents it may have replaced.
     app_top_level_names: std::collections::HashSet<String>,
+    /// `NAME = 3`, `NAME = (2**31) - 1`, `NAME = 4 * (OTHER + 1)`: every
+    /// Integer the class body folds, at the width Ruby computes it (an
+    /// `i128`, so `2**63` is kept exactly; `scalars` holds the ones that
+    /// fit an `i64`).
+    integers: std::collections::HashMap<String, i128>,
 }
+
+/// The operators [`ClassConsts::int_expr`] folds.
+const INTEGER_OPERATORS: &[&str] = &["+", "-", "*", "**", "-@"];
 
 impl ClassConsts {
     pub(super) fn collect(stmts: &[Node<'_>], file: &str) -> Self {
@@ -1768,6 +1776,7 @@ impl ClassConsts {
             let regex = out.regex(&value);
             let list = out.list(&value);
             let scalar = out.scalar(&value);
+            let integer = out.int_expr(&value);
             let labels = if scalar.is_none() { label_list(&value) } else { None };
             // A failure to ingest a value is not this pass's to report:
             // the constant is simply not usable as a mapping, and the
@@ -1777,6 +1786,9 @@ impl ClassConsts {
             } else {
                 None
             };
+            if let Some(n) = integer {
+                out.integers.insert(name.clone(), n);
+            }
             if let Some(re) = regex {
                 out.regexes.insert(name.clone(), re);
             }
@@ -1962,6 +1974,9 @@ impl ClassConsts {
             }
             return Some(Literal::Str { value });
         }
+        if node.as_parentheses_node().is_some() || node.as_call_node().is_some_and(|c| INTEGER_OPERATORS.contains(&constant_id_str(&c.name()).as_ref())) {
+            return i64::try_from(self.int_expr(node)?).ok().map(|value| Literal::Int { value });
+        }
         if let Some(call) = node.as_call_node() {
             if constant_id_str(&call.name()) == "freeze" && call.arguments().is_none() {
                 return self.scalar(&call.receiver()?);
@@ -1983,6 +1998,42 @@ impl ClassConsts {
     /// Does the class body declare a `default_scope`?
     pub(super) fn default_scoped(&self) -> bool {
         self.default_scoped
+    }
+
+    /// Integer arithmetic the class body can fold, as Ruby computes it:
+    /// an Integer literal, a folded Integer constant, a parenthesized
+    /// expression, unary minus, or `+`, `-`, `*`, `**` of two of those.
+    /// Overflow past `i128` (or a negative or huge exponent) does not
+    /// fold, nor does any other operator or call (`/` truncates in
+    /// Ruby, and a method's result is not this pass's to compute).
+    pub(super) fn int_expr(&self, node: &Node<'_>) -> Option<i128> {
+        if let Some(paren) = node.as_parentheses_node() {
+            let body = paren.body()?;
+            let stmts = body.as_statements_node()?;
+            let parts: Vec<Node<'_>> = stmts.body().iter().collect();
+            let [only] = parts.as_slice() else { return None };
+            return self.int_expr(only);
+        }
+        if node.as_integer_node().is_some() {
+            return super::util::integer_value(node).map(i128::from);
+        }
+        if let Some(cr) = node.as_constant_read_node() {
+            return self.integers.get(constant_id_str(&cr.name())).copied();
+        }
+        let call = node.as_call_node()?;
+        if call.block().is_some() {
+            return None;
+        }
+        let lhs = self.int_expr(&call.receiver()?)?;
+        let args: Vec<Node<'_>> = call.arguments().map(|a| a.arguments().iter().collect()).unwrap_or_default();
+        match (constant_id_str(&call.name()).as_ref(), args.as_slice()) {
+            ("-@", []) => lhs.checked_neg(),
+            ("+", [rhs]) => lhs.checked_add(self.int_expr(rhs)?),
+            ("-", [rhs]) => lhs.checked_sub(self.int_expr(rhs)?),
+            ("*", [rhs]) => lhs.checked_mul(self.int_expr(rhs)?),
+            ("**", [rhs]) => lhs.checked_pow(u32::try_from(self.int_expr(rhs)?).ok().filter(|e| *e <= 127)?),
+            _ => None,
+        }
     }
 
     /// An integer the class body can fold: a literal, `.freeze`d or not,

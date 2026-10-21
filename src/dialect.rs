@@ -682,6 +682,9 @@ pub enum ValidationRule {
         allow_nil: Option<bool>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         allow_blank: Option<bool>,
+        /// `in: a..b` / `a...b`: Rails' "must be in a..b" check.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        in_range: Option<InclusionRange>,
     },
     Inclusion {
         values: Vec<Literal>,

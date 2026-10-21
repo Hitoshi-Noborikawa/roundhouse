@@ -214,6 +214,7 @@ pub(super) fn parse_validates_call(
             lte: None,
             allow_nil: None,
             allow_blank: None,
+            in_range: None,
         }));
     } else if !matches!(kind, ValidatesKind::Map) && !attrs.is_empty() {
         gaps.push(match kind {
@@ -775,6 +776,7 @@ fn parse_of_options<'a>(
             lte,
             allow_nil: None,
             allow_blank: None,
+            in_range: None,
         },
         ValidatesKind::Inclusion | ValidatesKind::Exclusion => match inclusion {
             Some(spec) => set_rule(spec, matches!(kind, ValidatesKind::Exclusion)),
@@ -878,6 +880,7 @@ fn parse_numericality(value: &Node<'_>, file: &str, class_consts: &super::ClassC
             lte: None,
             allow_nil: None,
             allow_blank: None,
+            in_range: None,
         }));
     }
     if super::super::util::bool_value(value) == Some(false) {
@@ -893,6 +896,7 @@ fn parse_numericality(value: &Node<'_>, file: &str, class_consts: &super::ClassC
     let mut lte = None;
     let mut allow_nil = None;
     let mut allow_blank = None;
+    let mut in_range = None;
     let mut built = BuiltRule::bare(ValidationRule::Numericality {
         only_integer: false,
         gt: None,
@@ -901,6 +905,7 @@ fn parse_numericality(value: &Node<'_>, file: &str, class_consts: &super::ClassC
         lte: None,
         allow_nil: None,
         allow_blank: None,
+        in_range: None,
     });
     let mut gaps = Vec::new();
     for el in elements.iter() {
@@ -934,6 +939,10 @@ fn parse_numericality(value: &Node<'_>, file: &str, class_consts: &super::ClassC
                 Some(n) => lte = Some(n),
                 None => gaps.push("numericality: less_than_or_equal_to".to_string()),
             },
+            "in" => match bound_range(&child, class_consts) {
+                Some(range) => in_range = Some(range),
+                None => gaps.push("numericality: in".to_string()),
+            },
             "equal_to" | "other_than" => gaps.push(format!("numericality: {key}")),
             "on" => match context_guard(&child) {
                 Some(guard) => built.on_guard = Some(guard),
@@ -966,6 +975,7 @@ fn parse_numericality(value: &Node<'_>, file: &str, class_consts: &super::ClassC
         lte,
         allow_nil,
         allow_blank,
+        in_range,
     };
     RuleParse::Rule(built)
 }
@@ -1255,10 +1265,36 @@ fn parse_length_rule(value: &ruby_prism::Node<'_>, file: &str, class_consts: &su
 /// A numericality bound: a number literal, or an integer constant of the
 /// class (`less_than_or_equal_to: MAX_SCORE`).
 fn bound_value(node: &Node<'_>, class_consts: &super::ClassConsts) -> Option<f64> {
-    if let Some(n) = class_consts.integer(node) {
-        return Some(n as f64);
+    // An Integer bound, literal or folded (`LIMIT - 1`, `2**63`), compared
+    // as a Float only when that Float is the same number: `2**63` is,
+    // `2**63 + 1` is not, and stays the gap rather than a rounded bound.
+    if let Some(n) = class_consts.int_expr(node) {
+        let f = n as f64;
+        return (f as i128 == n).then_some(f);
     }
     number_value(node)
+}
+
+/// `in: a..b` / `in: (a...b)` for numericality: both ends are Integer
+/// bounds (literals, constants, Integer arithmetic). A Float end stays
+/// the gap: the range is stored as `f64`, and Rails' message prints it
+/// with `Range#inspect`, which shows `1.0..3.0` where an Integer range
+/// shows `1..3`.
+fn bound_range(node: &Node<'_>, class_consts: &super::ClassConsts) -> Option<crate::dialect::InclusionRange> {
+    if let Some(paren) = node.as_parentheses_node() {
+        let body = paren.body()?;
+        let stmts = body.as_statements_node()?;
+        let parts: Vec<Node<'_>> = stmts.body().iter().collect();
+        let [only] = parts.as_slice() else { return None };
+        return bound_range(only, class_consts);
+    }
+    let range = node.as_range_node()?;
+    let end = |node: Node<'_>| class_consts.int_expr(&node).and_then(|_| bound_value(&node, class_consts));
+    Some(crate::dialect::InclusionRange {
+        begin: end(range.left()?)?,
+        end: end(range.right()?)?,
+        exclusive: range.is_exclude_end(),
+    })
 }
 
 fn number_value(node: &Node<'_>) -> Option<f64> {

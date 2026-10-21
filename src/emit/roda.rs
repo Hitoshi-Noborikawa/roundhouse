@@ -380,7 +380,7 @@ fn model_for(model: &Model, schema: &Schema) -> String {
                                 validation.attribute
                             ));
                         }
-                        ValidationRule::Numericality { only_integer, gt, lt, gte, lte, allow_nil, allow_blank } => {
+                        ValidationRule::Numericality { only_integer, gt, lt, gte, lte, allow_nil, allow_blank, .. } => {
                             let helper =
                                 if *only_integer { "validates_integer" } else { "validates_numeric" };
                             // Sequel's helpers skip nil under `allow_nil:` and
