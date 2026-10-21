@@ -43,6 +43,7 @@
 
 require "sqlite3"
 require "fileutils"
+require "timeout"
 
 module Db
   @pool    = nil
@@ -60,6 +61,11 @@ module Db
   @permit_owner = nil
   WRITE_PERMIT_TIMEOUT = 5.0
   @write_permit_timeout = WRITE_PERMIT_TIMEOUT
+  # The permit's cross-process half: a flock beside the database, taken
+  # by the permit's holder. See `acquire_writer_lock`.
+  @writer_lock_file = nil
+  @writer_lock_pid  = nil
+  @writer_lock_held = false
   # Background WAL checkpointing: asked for by the server boot
   # (`checkpoint_in_background!`), started per process on the first
   # lease. See `start_checkpointer`.
@@ -817,8 +823,8 @@ module Db
 
   def self.acquire_permit
     fiber = Fiber.current
+    deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + @write_permit_timeout
     @permit_lock.synchronize do
-      deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + @write_permit_timeout
       # A dead owner (a killed thread) never releases; a Mutex would
       # have been freed with it, so this permit treats it as free too.
       until @permit_owner.nil? || !@permit_owner.alive?
@@ -828,10 +834,99 @@ module Db
       end
       @permit_owner = fiber
     end
+    acquire_writer_lock(deadline)
     true
   end
 
+  # ── The permit across processes ──
+  #
+  # The permit queues this process's writers; the processes beside it
+  # (Puma's forked workers, a job runner) still met at SQLite's lock,
+  # where a writer that finds it held waits in the gem's
+  # `busy_handler_timeout`: a fixed `sleep(0.001)` between retries. Once
+  # every save held the lock for its whole transaction (Rails'), each
+  # hand-off between processes cost up to that millisecond, against a
+  # transaction of half of one. Campfire's message POST on the ruby
+  # lane, 11 workers: 1,197 req/s, and 1,427 with the same handler
+  # polling at 0.1 ms.
+  #
+  # So the permit's holder also takes an exclusive flock on a file beside
+  # the database. A writer in another process waits for it in the
+  # kernel, which wakes it when the lock is let go: no polling, and the
+  # GVL is released while it waits. The order is always permit, then
+  # flock, then SQLite's lock, so writers that follow it cannot deadlock;
+  # one that does not (a permit wait that timed out, another program)
+  # still meets SQLite's lock and its busy handler, as before.
+  #
+  # BOUNDED like the permit: the wait ends at the permit's deadline, and
+  # the write then goes on to SQLite without the flock, the behaviour
+  # before it existed. An uncontended lock is one non-blocking flock.
+  #
+  # The file is opened by the process that uses it. A descriptor
+  # inherited across fork shares its open file with the parent, and a
+  # flock is held per open file, so the two would count as one holder;
+  # a child drops it (without LOCK_UN, which would let go of the
+  # parent's hold) and opens its own. An in-memory database has no file
+  # and no other process to share it with, so it takes none.
+  def self.writer_lock_path(path)
+    File.join(File.dirname(path), ".#{File.basename(path)}.writer.lock")
+  end
+
+  def self.writer_lock_file
+    if !@writer_lock_file.nil? && @writer_lock_pid != Process.pid
+      begin
+        @writer_lock_file.close
+      rescue StandardError
+      end
+      @writer_lock_file = nil
+      @writer_lock_held = false
+    end
+    return @writer_lock_file unless @writer_lock_file.nil?
+    path = @path
+    return nil if path.nil? || path == ":memory:" || path.start_with?("file:")
+    lock_path = writer_lock_path(path)
+    FileUtils.mkdir_p(File.dirname(lock_path))
+    @writer_lock_file = File.open(lock_path, File::RDWR | File::CREAT, 0644)
+    @writer_lock_pid = Process.pid
+    @writer_lock_file
+  rescue StandardError
+    # A lock that cannot be opened leaves the hand-off to SQLite's own
+    # lock, as before.
+    nil
+  end
+
+  def self.acquire_writer_lock(deadline)
+    file = writer_lock_file
+    return false if file.nil?
+    unless file.flock(File::LOCK_EX | File::LOCK_NB)
+      remaining = deadline - Process.clock_gettime(Process::CLOCK_MONOTONIC)
+      return false if remaining <= 0
+      begin
+        Timeout.timeout(remaining) { file.flock(File::LOCK_EX) }
+      rescue Timeout::Error
+        return false
+      end
+    end
+    @writer_lock_held = true
+    true
+  rescue StandardError
+    false
+  end
+
+  def self.release_writer_lock
+    return unless @writer_lock_held
+    @writer_lock_held = false
+    # Held by the PARENT when this process was forked from it: the
+    # descriptor is the parent's open file, and LOCK_UN would let go of
+    # the parent's hold.
+    return unless @writer_lock_pid == Process.pid
+    @writer_lock_file.flock(File::LOCK_UN)
+  rescue StandardError
+    nil
+  end
+
   def self.release_permit
+    release_writer_lock
     @permit_lock.synchronize do
       @permit_owner = nil
       @permit_cv.signal
