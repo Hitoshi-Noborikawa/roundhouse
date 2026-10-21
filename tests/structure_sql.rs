@@ -530,3 +530,96 @@ fn other_meta_commands_and_literals_are_left_alone() {
     let notes = &schema.tables[&Symbol::from("notes")];
     assert_eq!(col(notes, "body").default.as_deref(), Some("first line\n\\restrict kept"));
 }
+
+#[test]
+fn named_not_null_constraints_keep_the_column() {
+    // PostgreSQL 18 pg_dump names a column's NOT NULL whenever the stored
+    // constraint name is not `<table>_<column>_not_null`: renamed tables,
+    // partitions, and names truncated at 63 bytes.
+    let sql = r#"
+CREATE TABLE public.user_identities (
+    id uuid NOT NULL,
+    first_name text,
+    email character varying CONSTRAINT identities_email_not_null NOT NULL,
+    created_at timestamp(6) without time zone CONSTRAINT identities_created_at_not_null NOT NULL,
+    nickname text DEFAULT 'x'::text CONSTRAINT identities_nickname_not_null NOT NULL,
+    handle text CONSTRAINT "Identities handle not null" NOT NULL,
+    display_name text GENERATED ALWAYS AS (first_name) STORED CONSTRAINT identities_display_name_not_null NOT NULL
+);
+"#;
+    let schema = ingest_structure_sql(sql.as_bytes(), "db/structure.sql").expect("strict ingest");
+    let table = &schema.tables[&Symbol::from("user_identities")];
+    for name in ["email", "created_at", "nickname", "handle", "display_name"] {
+        assert!(!col(table, name).nullable, "{name} keeps NOT NULL");
+    }
+    assert!(col(table, "first_name").nullable);
+    assert!(matches!(col(table, "email").col_type, ColumnType::String { .. }));
+    assert!(matches!(col(table, "created_at").col_type, ColumnType::DateTime));
+    assert_eq!(col(table, "nickname").default.as_deref(), Some("x"));
+    assert_eq!(col(table, "display_name").generated.as_ref().expect("generated").expression, "first_name");
+}
+
+#[test]
+fn a_named_column_constraint_other_than_nullability_is_refused() {
+    // Only the nullability clause is modeled after `CONSTRAINT name`. A
+    // named key, check, uniqueness or reference must fail ingest rather
+    // than be read as a plain nullable column.
+    for (clause, quoted) in [
+        ("CONSTRAINT people_id_pkey PRIMARY KEY", "CONSTRAINT people_id_pkey PRIMARY KEY"),
+        ("CONSTRAINT people_id_key UNIQUE", "CONSTRAINT people_id_key UNIQUE"),
+        ("CONSTRAINT people_id_check CHECK (id > 0)", "CONSTRAINT people_id_check CHECK (id > 0)"),
+        ("CONSTRAINT people_id_fkey REFERENCES public.users(id)", "CONSTRAINT people_id_fkey REFERENCES public.users(id)"),
+        ("NOT NULL CONSTRAINT people_id_pkey PRIMARY KEY", "CONSTRAINT people_id_pkey PRIMARY KEY"),
+    ] {
+        let sql = format!("CREATE TABLE public.people (\n    id bigint {clause}\n);\n");
+        let error = ingest_structure_sql(sql.as_bytes(), "db/structure.sql")
+            .expect_err(clause)
+            .to_string();
+        assert!(
+            error.contains(&format!("column dropped: people.id has unsupported column constraint `{quoted}`")),
+            "{clause}: {error}"
+        );
+    }
+}
+
+#[test]
+fn a_constraint_keyword_needs_a_name() {
+    // `NOT` is a reserved word, so it cannot be the constraint's name:
+    // `CONSTRAINT NOT NULL` is malformed, not a named NOT NULL.
+    let quoted = "CREATE TABLE public.people (\n    email text CONSTRAINT \"not\" NOT NULL\n);\n";
+    let schema = ingest_structure_sql(quoted.as_bytes(), "db/structure.sql").expect("a quoted reserved word is a name");
+    assert!(!col(&schema.tables[&Symbol::from("people")], "email").nullable);
+
+    let plain = "CREATE TABLE public.people (\n    email text CONSTRAINT NOT NULL\n);\n";
+    let error = ingest_structure_sql(plain.as_bytes(), "db/structure.sql")
+        .expect_err("unnamed CONSTRAINT")
+        .to_string();
+    assert!(error.contains("column dropped: people.email has unsupported column constraint `CONSTRAINT NOT NULL`"), "{error}");
+
+    let generated = r#"
+CREATE TABLE public.people (
+    id bigint NOT NULL,
+    first_name text,
+    display_name text GENERATED ALWAYS AS (first_name) STORED CONSTRAINT NOT NULL
+);
+"#;
+    let error = ingest_structure_sql(generated.as_bytes(), "db/structure.sql")
+        .expect_err("unnamed CONSTRAINT after GENERATED")
+        .to_string();
+    assert!(error.contains("people.display_name"), "{error}");
+}
+
+#[test]
+fn a_constraint_keyword_without_a_not_null_still_fails_after_generated() {
+    let sql = r#"
+CREATE TABLE public.people (
+    id bigint NOT NULL,
+    first_name text,
+    display_name text GENERATED ALWAYS AS (first_name) STORED CONSTRAINT people_display_name_check
+);
+"#;
+    let error = ingest_structure_sql(sql.as_bytes(), "db/structure.sql")
+        .expect_err("a dangling constraint name is not a nullability clause")
+        .to_string();
+    assert!(error.contains("generated column dropped: people.display_name"), "{error}");
+}
