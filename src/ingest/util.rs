@@ -201,7 +201,12 @@ pub(super) fn primary_class_with_scope<'pr>(
     while is_namespace_wrapper(&primary.1) {
         let inside = primary.1.location();
         match classes.next() {
-            Some(next) if next.1.location().start_offset() < inside.end_offset() => primary = next,
+            Some(next)
+                if super::prism_api::start_offset(&next.1.location())
+                    < super::prism_api::end_offset(&inside) =>
+            {
+                primary = next
+            }
             _ => break,
         }
     }
@@ -788,8 +793,8 @@ pub(super) fn array_style_from(arr: &ruby_prism::ArrayNode<'_>) -> ArrayStyle {
     // An empty array (`[]`) has no first element; default to tight
     // brackets since padding is only visually meaningful with content.
     if let Some(first) = arr.elements().iter().next() {
-        let opener_end = loc.end_offset();
-        let first_start = first.location().start_offset();
+        let opener_end = super::prism_api::end_offset(&loc);
+        let first_start = super::prism_api::start_offset(&first.location());
         if first_start > opener_end {
             return ArrayStyle::BracketsSpaced;
         }
