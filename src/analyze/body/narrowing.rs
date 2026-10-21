@@ -549,6 +549,8 @@ fn ty_compatible(a: &Ty, b: &Ty) -> bool {
             (a, b),
             (Ty::Array { .. }, Ty::Array { .. }) | (Ty::Hash { .. }, Ty::Hash { .. })
         )
+        || matches!((a, b), (Ty::Fn { .. }, Ty::Class { id, .. }) if id.0.as_str() == "Proc")
+        || matches!((a, b), (Ty::Class { id: x, .. }, Ty::Class { id: y, args }) if x == y && args.is_empty())
 }
 
 /// Forget every narrowed `x.attr` read whose local `x` the given expressions

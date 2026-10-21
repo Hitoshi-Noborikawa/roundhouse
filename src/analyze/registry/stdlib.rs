@@ -806,6 +806,9 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
         "Timeout::Error",
         // `rescue EOFError` around `readpartial` on a pipe or a pty.
         "EOFError",
+        // `rescue LoadError` around an optional `require` (counter_culture's
+        // after_commit_action fallback).
+        "LoadError",
         // lobsters' `Sponge::OTHER_PEOPLES_PROBLEMS`, a class-body Array
         // of exception classes. zlib's and Encoding's are Ruby's own and
         // spinel's (`packages/zlib`, `lib/sp_exc.c`). net/protocol's
@@ -1116,6 +1119,13 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
     // of that constant and Mutex.new retain their source expressions.
     // Do not invent member or synchronization return types here.
     register_stdlib_class(classes, "Struct", &[], &[]);
+    // `Range.new(0, n)` (flag_shih_tzu); its answer is typed off the bounds in dispatch.
+    register_stdlib_class(classes, "Range", &[], &[]);
+    // `default.is_a?(Proc) ? default.call : default` (rails-settings-cached):
+    // what a value that only proved itself a Proc answers is not known.
+    register_stdlib_class(classes, "Proc", &[], &[
+        ("call", Ty::Untyped), ("arity", Ty::Int), ("lambda?", Ty::Bool),
+    ]);
     register_stdlib_class(classes, "Mutex", &[], &[]);
     // The queue constructors, Thread's core aliases, and the standard
     // mixins likewise need exact entries for source constant resolution.

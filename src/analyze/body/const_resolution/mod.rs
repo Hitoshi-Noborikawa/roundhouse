@@ -104,6 +104,10 @@ const CORE_VALUE_CONSTS: &[(&str, &str, fn() -> Ty)] = &[
 /// until something reassigns it.
 const CORE_TOP_CONSTS: &[&str] = &["STDIN", "STDOUT", "STDERR"];
 
+/// `if RUBY_VERSION >= "2.7.1"` (aasm, hashie): the running Ruby's own
+/// version, which a compile-time answer would freeze to the wrong one.
+const CORE_TOP_STR_CONSTS: &[&str] = &["RUBY_VERSION"];
+
 fn io_ty() -> Ty {
     Ty::Class { id: ClassId(Symbol::from("IO")), args: vec![].into() }
 }
@@ -157,6 +161,10 @@ fn core_rbs() -> &'static str {
             out.push_str(name);
             out.push_str(": IO\n");
         }
+        for name in CORE_TOP_STR_CONSTS {
+            out.push_str(name);
+            out.push_str(": String\n");
+        }
         out
     })
     .as_str()
@@ -166,6 +174,9 @@ fn core_rbs() -> &'static str {
 fn core_value_type(name: &str) -> Option<Ty> {
     if CORE_TOP_CONSTS.contains(&name.trim_start_matches("Object::")) {
         return Some(io_ty());
+    }
+    if CORE_TOP_STR_CONSTS.contains(&name.trim_start_matches("Object::")) {
+        return Some(Ty::Str);
     }
     CORE_VALUE_CONSTS.iter().find_map(|(owner, field, ty)| {
         let need = owner.len() + 2 + field.len();
