@@ -589,32 +589,22 @@ fn validation_rule_to_calls(
             attr_ty,
             *allow_nil,
         ),
-        ValidationRule::Format { pattern, flags } => {
-            vec![inline_format_check(msgs, attr, pattern, flags)]
-        }
-        ValidationRule::Numericality { only_integer, gt, lt, gte, lte, allow_nil, allow_blank, in_range } => {
-            let checks = inline_numericality_check(msgs, attr, *only_integer, *gt, *lt, *gte, *lte, in_range.as_ref());
-            // Rails skips the validator for a nil value under allow_nil
-            // and a blank one under allow_blank (EachValidator#validate).
-            let skip = if *allow_blank == Some(true) {
-                Some(numericality_blank_cond(attr, runtime_relation))
-            } else if *allow_nil == Some(true) {
-                Some(send(ivar(attr), "nil?", vec![]))
-            } else {
-                None
-            };
-            match skip {
-                Some(cond) => vec![Expr::new(
-                    Span::synthetic(),
-                    ExprNode::If {
-                        cond,
-                        then_branch: Expr::new(Span::synthetic(), ExprNode::Lit { value: Literal::Nil }),
-                        else_branch: seq(checks),
-                    },
-                )],
-                None => checks,
-            }
-        }
+        ValidationRule::Format { pattern, flags, allow_nil, allow_blank } => skip_nil_or_blank(
+            vec![inline_format_check(msgs, attr, pattern, flags)],
+            attr,
+            attr_ty,
+            *allow_nil,
+            *allow_blank,
+            runtime_relation,
+        ),
+        ValidationRule::Numericality { only_integer, gt, lt, gte, lte, allow_nil, allow_blank, in_range } => skip_nil_or_blank(
+            inline_numericality_check(msgs, attr, *only_integer, *gt, *lt, *gte, *lte, in_range.as_ref()),
+            attr,
+            attr_ty,
+            *allow_nil,
+            *allow_blank,
+            runtime_relation,
+        ),
         ValidationRule::Inclusion { values, range } => {
             vec![inline_inclusion_check(msgs, attr, values, range.as_ref())]
         }
@@ -928,25 +918,66 @@ fn inline_presence_check(msgs: Messages, attr: &Symbol, attr_ty: Option<&Ty>) ->
     if_with_nil_else(cond, push_err)
 }
 
-/// `allow_blank:`'s skip for a numericality rule. On the ruby family the
-/// uncast writer can store the raw input, so a whitespace-only String (and
-/// `false`) is blank, as Rails reads it: `@attr.nil? || @attr == false ||
-/// @attr.to_s.strip.empty?` (`to_s`, the spelling Spinel takes). A strict
-/// target's numeric field is never a String or `false`, so blank is
-/// `nil?` there, which every target compiles. Narrower than the presence
-/// check's test, which is unchanged.
-fn numericality_blank_cond(attr: &Symbol, runtime_relation: super::RuntimeRelation) -> Expr {
+/// Rails skips an `EachValidator` for a nil value under `allow_nil:` and a
+/// blank one under `allow_blank:` (`EachValidator#validate`): the checks
+/// run in the `else` of `if <skip> then nil`.
+fn skip_nil_or_blank(
+    checks: Vec<Expr>,
+    attr: &Symbol,
+    attr_ty: Option<&Ty>,
+    allow_nil: Option<bool>,
+    allow_blank: Option<bool>,
+    runtime_relation: super::RuntimeRelation,
+) -> Vec<Expr> {
+    let cond = if allow_blank == Some(true) {
+        allow_blank_cond(attr, attr_ty, runtime_relation)
+    } else if allow_nil == Some(true) {
+        send(ivar(attr), "nil?", vec![])
+    } else {
+        return checks;
+    };
+    vec![Expr::new(
+        Span::synthetic(),
+        ExprNode::If {
+            cond,
+            then_branch: Expr::new(Span::synthetic(), ExprNode::Lit { value: Literal::Nil }),
+            else_branch: seq(checks),
+        },
+    )]
+}
+
+/// `allow_blank:`'s skip for a numericality or format rule. On the ruby
+/// family the uncast writer can store the raw input, so a whitespace-only
+/// String (and `false`) is blank, as Rails reads it: `@attr.nil? ||
+/// @attr == false || @attr.to_s.strip.empty?` (`to_s`, the spelling Spinel
+/// takes). A String column drops the `false` disjunct: Rails casts `false`
+/// to `"f"` there, which is not blank. A strict target's field is its
+/// column's type: a String's narrowed `strip.empty?`, else `nil?` (a
+/// numeric field is never a String or `false`), which every target
+/// compiles. Narrower than the presence check's test, which is unchanged.
+fn allow_blank_cond(attr: &Symbol, attr_ty: Option<&Ty>, runtime_relation: super::RuntimeRelation) -> Expr {
     let value = ivar(attr);
     let nil = send(value.clone(), "nil?", vec![]);
+    let (attr_ty, nilable) = peel_nilable(attr_ty);
+    let string_column = matches!(attr_ty, Some(Ty::Str));
     match runtime_relation {
         super::RuntimeRelation::Present => {
+            let empty = send(send(send(value.clone(), "to_s", vec![]), "strip", vec![]), "empty?", vec![]);
+            if string_column {
+                return bool_op(BoolOpKind::Or, nil, empty);
+            }
             let falsy = send(
-                value.clone(),
+                value,
                 "==",
                 vec![Expr::new(Span::synthetic(), ExprNode::Lit { value: Literal::Bool { value: false } })],
             );
-            let empty = send(send(send(value, "to_s", vec![]), "strip", vec![]), "empty?", vec![]);
             bool_op(BoolOpKind::Or, bool_op(BoolOpKind::Or, nil, falsy), empty)
+        }
+        super::RuntimeRelation::Absent if string_column => {
+            // The `nil?` disjunct covers nil, so the strip reads the
+            // narrowed value, as the presence check's does.
+            let narrowed = if nilable { narrowed_ivar(attr, &Ty::Str) } else { value };
+            bool_op(BoolOpKind::Or, nil, send(send(narrowed, "strip", vec![]), "empty?", vec![]))
         }
         super::RuntimeRelation::Absent => nil,
     }

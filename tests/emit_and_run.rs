@@ -308,6 +308,8 @@ mod validates_presence_allow_nil;
 mod validates_custom_message;
 #[path = "emit_and_run/regex_string_interpolation.rs"]
 mod regex_string_interpolation;
+#[path = "emit_and_run/format_allow_nil_blank.rs"]
+mod format_allow_nil_blank;
 #[path = "emit_and_run/numericality_allow_nil_blank.rs"]
 mod numericality_allow_nil_blank;
 #[path = "emit_and_run/stdlib_email_regexp.rs"]
