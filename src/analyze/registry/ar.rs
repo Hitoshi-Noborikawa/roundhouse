@@ -15,6 +15,13 @@ pub(in crate::analyze) fn connection_ty() -> Ty {
     Ty::Class { id: ClassId(Symbol::from("ActiveRecord::Connection")), args: vec![].into() }
 }
 
+/// `Model.current_transaction` — Rails 7.2's handle on the open
+/// transaction, whose `after_commit` the runtime implements
+/// (`runtime/ruby/active_record/connection.rb`).
+pub(in crate::analyze) fn transaction_ty() -> Ty {
+    Ty::Class { id: ClassId(Symbol::from("ActiveRecord::Transaction")), args: vec![].into() }
+}
+
 /// `ActiveRecord::Connection` and `ActiveRecord::Result`, read from the
 /// runtime's own signatures rather than restated here, so the analyzer
 /// knows exactly the surface both lanes implement. `connection` used to
@@ -25,7 +32,7 @@ pub(in crate::analyze) fn connection_ty() -> Ty {
 fn register_connection_surface(classes: &mut HashMap<ClassId, ClassInfo>) {
     const RBS: &str = include_str!("../../../runtime/ruby/active_record/connection.rbs");
     let Ok(parsed) = crate::rbs::parse_app_signatures(RBS) else { return };
-    for name in ["ActiveRecord::Connection", "ActiveRecord::Result"] {
+    for name in ["ActiveRecord::Connection", "ActiveRecord::Result", "ActiveRecord::Transaction"] {
         let id = ClassId(Symbol::from(name));
         let Some(methods) = parsed.get(&id) else { continue };
         let cls = classes.entry(id).or_default();
@@ -110,6 +117,9 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
         ] {
             base.class_methods.entry(Symbol::from(m)).or_insert(Ty::Untyped);
         }
+        base.class_methods
+            .entry(Symbol::from("current_transaction"))
+            .or_insert_with(transaction_ty);
         // Which database, and the pool's `with_connection` — served on the
         // ruby family and spinel by runtime/spinel/active_record_db_config.rb.
         base.class_methods

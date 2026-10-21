@@ -330,6 +330,7 @@ impl Analyzer {
             // `Base.uncached`), and its value is the block's, as
             // `transaction`'s is.
             cls.class_methods.insert(Symbol::from("uncached"), Ty::Untyped);
+            cls.class_methods.insert(Symbol::from("current_transaction"), registry::ar::transaction_ty());
             cls.class_methods.insert(Symbol::from("connection"), registry::ar::connection_ty());
             cls.class_methods.insert(Symbol::from("connection_pool"), Ty::Untyped);
             cls.class_methods.insert(Symbol::from("establish_connection"), Ty::Untyped);

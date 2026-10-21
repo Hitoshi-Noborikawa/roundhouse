@@ -1282,6 +1282,75 @@ end
         .assert_passes();
 }
 
+/// `current_transaction.after_commit { ... }` (Rails 7.2; campfire's
+/// password change closes the user's connections this way): the block
+/// runs once the transaction it was registered in commits, never for one
+/// that rolls back, and at once where no transaction can hold it.
+#[test]
+fn current_transaction_after_commit_waits_for_the_commit() {
+    emit_and_run::real_blog()
+        .edit(
+            "app/models/article.rb",
+            "  validates :title, presence: true\n",
+            "  validates :title, presence: true
+
+  LOG = []
+  after_update :note_on_commit
+
+  def self.note_now
+    current_transaction.after_commit { LOG << \"now\" }
+  end
+
+  private
+    def note_on_commit
+      self.class.current_transaction.after_commit { LOG << \"committed #{title}\" }
+    end
+
+  public
+",
+        )
+        .write(
+            "test/models/after_commit_test.rb",
+            r##"require "test_helper"
+
+class AfterCommitTest < ActiveSupport::TestCase
+  setup do
+    @article = Article.create!(title: "Start", body: "A sufficiently long article body.")
+    Article::LOG.clear
+  end
+
+  test "a save's own transaction runs the block once it commits" do
+    @article.update!(title: "Saved")
+    assert_equal [ "committed Saved" ], Article::LOG
+  end
+
+  test "an enclosing transaction holds the block until its commit" do
+    Article.transaction do
+      @article.update!(title: "Held")
+      assert_equal [], Article::LOG
+    end
+    assert_equal [ "committed Held" ], Article::LOG
+  end
+
+  test "a rolled back transaction never runs the block" do
+    Article.transaction do
+      @article.update!(title: "Undone")
+      raise ActiveRecord::Rollback
+    end
+    assert_equal [], Article::LOG
+  end
+
+  test "with no transaction to hold it the block runs at once" do
+    Article.note_now
+    assert_equal [ "now" ], Article::LOG
+  end
+end
+"##,
+        )
+        .run_test("test/models/after_commit_test.rb")
+        .assert_passes();
+}
+
 /// `rescue URI::Error` catches `URI.parse`'s `URI::InvalidURIError`, and
 /// `SocketError` resolves where the app names it without a require (Rails
 /// has loaded socket); both lanes define the classes.

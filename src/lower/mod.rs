@@ -99,6 +99,7 @@ pub mod attachable;
 pub mod attachables_grep;
 pub mod errors_index;
 pub mod job_class_side;
+pub mod transaction_after_commit;
 pub mod job_payload;
 pub mod mailer_class_side;
 pub mod mailer_templates;
@@ -680,6 +681,10 @@ const POST_ANALYZE_PASS_ORDER: &[(&str, &[&str])] = &[
     ("mailer_class_side", &[]),
     ("mailer_templates", &[]),
     ("job_class_side", &[]),
+    // `….current_transaction.after_commit { … }` -> the block as a lambda
+    // argument, the shape the runtime holds for the COMMIT. Consumes a
+    // shape no pass produces or reads; no constraints.
+    ("transaction_after_commit", &[]),
     ("send_static_dispatch", &[]),
     // Grounds the plural duration-unit calls that send_static_dispatch
     // synthesizes into case arms, so it must observe that pass's output.
@@ -1039,6 +1044,8 @@ pub fn apply_post_analyze_lowerings(
     ran!("mailer_templates");
     diags.extend(job_class_side::apply_job_class_side(app));
     ran!("job_class_side");
+    transaction_after_commit::apply_transaction_after_commit(app);
+    ran!("transaction_after_commit");
     diags.extend(crate::timings::phase("post-analyze: send_dispatch", || {
         send_dispatch::apply_send_static_dispatch(app, registry)
     }));
