@@ -508,14 +508,10 @@ pub(super) fn and_guard(a: Option<Expr>, b: Option<Expr>) -> Option<Expr> {
 
 /// `uniqueness: true` or `{ scope:, case_sensitive:, allow_nil:,
 /// allow_blank:, if:, unless: }`. `conditions:` (a relation callable) and
-/// `message:` stay gaps, and so does any uniqueness rule on a model whose
-/// class body declares a `default_scope`: Rails queries `unscoped`, and
-/// the runtime has no `unscoped` to match it.
-fn parse_uniqueness(value: &Node<'_>, file: &str, class_consts: &super::ClassConsts) -> RuleParse {
+/// `message:` stay gaps. A model with a `default_scope` lowers too: the
+/// check queries `Model.unscoped`, as Rails' UniquenessValidator does.
+fn parse_uniqueness(value: &Node<'_>, file: &str, _class_consts: &super::ClassConsts) -> RuleParse {
     use crate::dialect::ValidationRule;
-    if class_consts.default_scoped() {
-        return RuleParse::Gap(vec!["uniqueness".to_string()]);
-    }
     let rule = |scope, case_sensitive, allow_nil, allow_blank| ValidationRule::Uniqueness {
         scope,
         case_sensitive,

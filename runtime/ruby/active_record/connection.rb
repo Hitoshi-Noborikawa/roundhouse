@@ -1126,6 +1126,14 @@ module ActiveRecord
       ActiveRecord::Relation.new(self)
     end
 
+    # A Relation over the model with no default scope applied, which is
+    # what Rails' UniquenessValidator queries (`finder_class.unscoped`).
+    # Default scopes are not lowered, so it is `all`'s Relation; it is its
+    # own name so the uniqueness check keeps Rails' meaning if they are.
+    def self.unscoped
+      ActiveRecord::Relation.new(self)
+    end
+
     # SELECT 1 LIMIT 1. Strict targets keep COUNT in base.rb.
     def self.any?
       ActiveRecord::Relation.new(self).exists?

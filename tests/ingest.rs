@@ -3511,7 +3511,8 @@ end
 }
 
 /// `uniqueness:` becomes a `Uniqueness` rule with its options; `conditions:`
-/// and a model with its own `default_scope` stay the reported gap.
+/// stays the reported gap. A model with its own `default_scope` lowers too
+/// (the check queries `Model.unscoped`, as Rails does).
 #[test]
 fn uniqueness_options_lower_to_a_rule() {
     let (model, warnings, _) = ingest_widget(
@@ -3539,14 +3540,14 @@ end
     let (model, warnings, _) = ingest_widget(
         "class Widget < ApplicationRecord\n  default_scope { where(kept: true) }\n  validates :uri, uniqueness: true\nend\n",
     );
-    assert!(validation_rules(&model).iter().all(|v| v.attribute.as_str() != "uri"), "default_scope keeps the gap");
-    assert!(warnings.iter().any(|w| w.contains("validates :uri, uniqueness:")), "{warnings:?}");
+    assert!(validation_rules(&model).iter().any(|v| v.attribute.as_str() == "uri"), "default_scope lowers");
+    assert!(!warnings.iter().any(|w| w.contains("validates :uri, uniqueness:")), "{warnings:?}");
 
     let (model, warnings, _) = ingest_widget(
         "class Widget < ApplicationRecord\n  self.default_scope { where(kept: true) }\n  validates :uri, uniqueness: true\nend\n",
     );
-    assert!(validation_rules(&model).iter().all(|v| v.attribute.as_str() != "uri"), "self.default_scope keeps the gap");
-    assert!(warnings.iter().any(|w| w.contains("validates :uri, uniqueness:")), "{warnings:?}");
+    assert!(validation_rules(&model).iter().any(|v| v.attribute.as_str() == "uri"), "self.default_scope lowers");
+    assert!(!warnings.iter().any(|w| w.contains("validates :uri, uniqueness:")), "{warnings:?}");
 }
 
 /// `inclusion: { in: NAME }` folds a list constant with each element's

@@ -694,7 +694,7 @@ fn validation_rule_to_calls(
 /// error (an unset owner).
 /// Inline `validates :attr, uniqueness: …`, as Rails 8.1's
 /// `UniquenessValidator` queries (on a target with the runtime Relation):
-///   if Model.where(attr: @attr).not(<pk>: @<pk>)[.where(scope_col: @scope_col)…].exists?
+///   if Model.unscoped.where(attr: @attr).not(<pk>: @<pk>)[.where(scope_col: @scope_col)…].exists?
 ///     errors << "attr has already been taken"
 ///   end
 /// `case_sensitive: false` compares `LOWER(table.attr) = LOWER(?)`, except
@@ -726,6 +726,9 @@ fn inline_uniqueness_check(
         Span::synthetic(),
         ExprNode::Const { path: model.name.0.as_str().split("::").map(Symbol::from).collect() },
     );
+    // `Model.unscoped`, as Rails' UniquenessValidator builds its query on
+    // `finder_class.unscoped`: a row a `default_scope` hides still collides.
+    let finder = send(finder, "unscoped", vec![]);
     let value = ivar(attr);
     let mut relation = if case_sensitive {
         send(finder, "where", vec![hash(attr.as_str(), value.clone())])
