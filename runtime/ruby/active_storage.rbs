@@ -160,7 +160,10 @@ module ActiveStorage
   end
 
   module Transformers
-    class ImageProcessingTransformer
+    class Transformer
+    end
+
+    class ImageProcessingTransformer < ActiveStorage::Transformers::Transformer
       class UnsupportedImageProcessingMethod < StandardError
       end
 

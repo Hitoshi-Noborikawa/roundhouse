@@ -63,6 +63,100 @@ fn active_storage_exception_constant_values_keep_their_names_and_parents() {
 }
 
 #[test]
+fn active_storage_exception_owners_can_be_reopened_with_rails_superclasses() {
+    emit_and_run::empty_app()
+        .write("config/routes.rb", "Rails.application.routes.draw do\nend\n")
+        .write("db/schema.rb", "ActiveRecord::Schema[8.1].define do\nend\n")
+        .write("app/models/storage_owners.rb", r#"module ActiveStorage
+  module Transformers
+    def self.marker
+      "transformers"
+    end
+    class Transformer
+    end
+    class ImageProcessingTransformer < Transformer
+      def self.marker
+        "custom transformer"
+      end
+    end
+  end
+  class Service
+    class GCSService < Service
+      def self.marker
+        "custom service"
+      end
+    end
+  end
+end
+"#)
+        .run_ruby(r#"
+raise unless ActiveStorage::Transformers.marker == "transformers"
+raise unless ActiveStorage::Transformers::ImageProcessingTransformer.marker == "custom transformer"
+raise unless ActiveStorage::Service::GCSService.marker == "custom service"
+raise unless ActiveStorage::Transformers::ImageProcessingTransformer.superclass == ActiveStorage::Transformers::Transformer
+raise unless ActiveStorage::Transformers::Transformer.superclass == Object
+raise unless ActiveStorage::Service::GCSService.superclass == ActiveStorage::Service
+"#)
+        .assert_passes();
+}
+
+#[test]
+fn active_storage_exception_owner_values_have_the_rails_hierarchy() {
+    app("  def self.owners\n    [ActiveStorage::Transformers, ActiveStorage::Transformers::Transformer,\n     ActiveStorage::Transformers::ImageProcessingTransformer, ActiveStorage::Service::GCSService]\n  end")
+        .run_ruby(r#"
+owners = StorageErrors.owners
+raise owners.inspect unless owners.map(&:name) == [
+  "ActiveStorage::Transformers", "ActiveStorage::Transformers::Transformer",
+  "ActiveStorage::Transformers::ImageProcessingTransformer", "ActiveStorage::Service::GCSService"
+]
+raise unless owners[0].instance_of?(Module)
+raise unless owners[1].superclass == Object
+raise unless owners[2].superclass == owners[1]
+raise unless owners[3].superclass == ActiveStorage::Service
+"#)
+        .assert_passes();
+}
+
+#[test]
+fn active_storage_exception_owners_support_qualified_reopens_and_subclasses() {
+    emit_and_run::empty_app()
+        .write("config/routes.rb", "Rails.application.routes.draw do\nend\n")
+        .write("db/schema.rb", "ActiveRecord::Schema[8.1].define do\nend\n")
+        .write("app/models/storage_owners.rb", r#"class ActiveStorage::Transformers::ImageProcessingTransformer < ::ActiveStorage::Transformers::Transformer
+  def self.marker
+    "qualified transformer"
+  end
+end
+class ActiveStorage::Service::GCSService < ::ActiveStorage::Service
+  def self.marker
+    "qualified service"
+  end
+end
+class CustomTransformer < ActiveStorage::Transformers::ImageProcessingTransformer
+end
+class CustomService < ActiveStorage::Service::GCSService
+end
+"#)
+        .run_ruby(r#"
+raise unless CustomTransformer.marker == "qualified transformer"
+raise unless CustomService.marker == "qualified service"
+raise unless CustomTransformer.superclass.superclass == ActiveStorage::Transformers::Transformer
+raise unless CustomService.superclass.superclass == ActiveStorage::Service
+TransformerBase = ActiveStorage::Transformers::ImageProcessingTransformer
+class AliasedTransformer < TransformerBase
+end
+ServiceBase = ActiveStorage::Service::GCSService
+class AliasedService < ServiceBase
+end
+raise unless AliasedTransformer.marker == "qualified transformer"
+raise unless AliasedService.marker == "qualified service"
+raise unless ActiveStorage::Transformers::ImageProcessingTransformer::UnsupportedImageProcessingMethod.superclass == StandardError
+raise unless ActiveStorage::Service::GCSService::MetadataServerError.superclass == ActiveStorage::Error
+"#)
+        .assert_passes();
+}
+
+#[test]
 fn active_storage_exceptions_in_rescue_have_the_exception_surface() {
     let mut methods = String::new();
     let mut script = String::new();

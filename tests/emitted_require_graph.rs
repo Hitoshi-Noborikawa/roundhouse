@@ -279,6 +279,9 @@ fn ruby_family_runtime_constants_are_ledgered_on_other_targets() {
      ActiveRecord::Type::String, ActiveRecord::Type::Integer,
      ActiveSupport::IsolatedExecutionState, ActiveSupport::Notifications,
      ActiveSupport::Notifications::Event, ActiveSupport::ConfigurationFile,
+     ActiveStorage::Transformers, ActiveStorage::Transformers::Transformer,
+     ActiveStorage::Transformers::ImageProcessingTransformer,
+     ActiveStorage::Service::GCSService,
      ActiveStorage::Error, ActiveStorage::InvariableError,
      ActiveStorage::UnpreviewableError, ActiveStorage::UnrepresentableError,
      ActiveStorage::IntegrityError, ActiveStorage::FileNotFoundError,
@@ -416,6 +419,168 @@ end
             roundhouse::diagnostic::DiagnosticKind::Unsupported { construct, .. }
                 if matches!(construct.as_str(), "bundled_constant" | "ruby_family_runtime_constant")
         )), "{target:?}: {diags:?}");
+    }
+}
+
+/// Registering a nested exception also resolves its enclosing namespaces.
+/// Check those values independently, including aliases and nested operands.
+#[test]
+fn active_storage_exception_owners_are_ledgered_in_every_value_position() {
+    let owners = [
+        "ActiveStorage::Transformers",
+        "ActiveStorage::Transformers::Transformer",
+        "ActiveStorage::Transformers::ImageProcessingTransformer",
+        "ActiveStorage::Service::GCSService",
+    ];
+    let mut source = String::from("class StorageOwners\n  StorageNamespace = ActiveStorage\n  def self.keep(value)\n    value\n  end\n");
+    let mut expected = Vec::new();
+    for (i, owner) in owners.iter().enumerate() {
+        let forms = [
+            format!("{owner}"),
+            format!("::{owner}"),
+            format!("[[{owner}]]"),
+            format!("{{ value: {owner} }}"),
+            format!("{{ {owner} => nil }}"),
+            format!("keep({owner})"),
+            format!("value = {owner}; value"),
+            format!("{owner}.name"),
+            format!("if flag; {owner}; else; nil; end"),
+        ];
+        for (j, form) in forms.iter().enumerate() {
+            source.push_str(&format!("  def self.value_{i}_{j}(flag)\n    "));
+            // Pin the source operand, rather than just observing one refusal
+            // somewhere else in the same method or for the same owner.
+            let offset = source.len() + form.find(owner).unwrap();
+            expected.push((offset as u32, *owner));
+            source.push_str(form);
+            source.push_str("\n  end\n");
+        }
+        source.push_str(&format!("  Alias{i} = {owner}\n  def self.alias_{i}\n    Alias{i}\n  end\n"));
+        let aliased = owner.replacen("ActiveStorage", "StorageNamespace", 1);
+        source.push_str(&format!("  def namespace_alias_{i}\n    "));
+        expected.push((source.len() as u32, *owner));
+        source.push_str(&format!("{aliased}\n  end\n"));
+    }
+    source.push_str("end\n");
+    let tree = [
+        ("config/routes.rb", "Rails.application.routes.draw do\nend\n".to_string()),
+        ("app/models/storage_owners.rb", source),
+    ].into_iter().map(|(path, text)| (PathBuf::from(path), text.into_bytes())).collect();
+    let mut app = roundhouse::ingest::ingest_app_from_tree(tree).expect("ingest");
+    let mut analysis = roundhouse::session::analyze_and_lower(&mut app);
+    analysis.extend(roundhouse::analyze::diagnose(&app));
+    assert!(!analysis.iter().any(|d| d.severity == roundhouse::diagnostic::Severity::Error), "{analysis:?}");
+    for target in [
+        BuildTarget::Ruby, BuildTarget::Jruby, BuildTarget::Spinel,
+        BuildTarget::Go, BuildTarget::Rust, BuildTarget::Typescript,
+        BuildTarget::TypescriptWorker, BuildTarget::Python, BuildTarget::Elixir,
+        BuildTarget::Crystal, BuildTarget::Kotlin, BuildTarget::Swift, BuildTarget::CSharp,
+    ] {
+        let (files, diags) = roundhouse::emit::diagnostics::scope(|| {
+            target_files(&app, Path::new("."), target)
+        });
+        files.expect("target files");
+        let gaps: Vec<_> = diags.iter().filter(|d| matches!(
+            &d.kind,
+            roundhouse::diagnostic::DiagnosticKind::Unsupported { construct, .. }
+                if construct.as_str() == "ruby_family_runtime_constant"
+        )).collect();
+        assert!(gaps.iter().all(|d| d.severity == roundhouse::diagnostic::Severity::Error), "{gaps:?}");
+        if matches!(target, BuildTarget::Ruby | BuildTarget::Jruby | BuildTarget::Spinel) {
+            assert!(gaps.is_empty(), "{target:?}: {gaps:?}");
+            continue;
+        }
+        for (offset, owner) in &expected {
+            assert!(gaps.iter().any(|d| d.span.start <= *offset && d.span.end > *offset
+                && d.message.contains(owner)), "{target:?}: missing {owner} at {offset}: {gaps:?}");
+        }
+        for (i, owner) in owners.iter().enumerate() {
+            let alias = format!("Alias{i}\n  end");
+            let text = &app.sources.iter().find(|s| s.path.ends_with("storage_owners.rb")).unwrap().text;
+            let offset = text.find(&alias).unwrap() as u32;
+            assert!(gaps.iter().any(|d| d.span.start == offset && d.message.contains(owner)),
+                "{target:?}: missing alias {alias}: {gaps:?}");
+        }
+    }
+}
+
+#[test]
+fn active_storage_exception_owner_superclasses_are_ledgered_through_aliases() {
+    let mut source = String::new();
+    let owners = [
+        "ActiveStorage::Transformers::Transformer",
+        "ActiveStorage::Transformers::ImageProcessingTransformer",
+        "ActiveStorage::Service::GCSService",
+    ];
+    for (i, owner) in owners.iter().enumerate() {
+        source.push_str(&format!("Parent{i} = ::{owner}\nclass DirectChild{i} < ::{owner}\nend\nclass AliasChild{i} < Parent{i}\nend\n"));
+    }
+    let tree = [
+        ("config/routes.rb", "Rails.application.routes.draw do\nend\n".to_string()),
+        ("app/models/storage_children.rb", source),
+    ].into_iter().map(|(path, text)| (PathBuf::from(path), text.into_bytes())).collect();
+    let mut app = roundhouse::ingest::ingest_app_from_tree(tree).expect("ingest");
+    let analysis = roundhouse::session::analyze_and_lower(&mut app);
+    assert!(!analysis.iter().any(|d| d.severity == roundhouse::diagnostic::Severity::Error), "{analysis:?}");
+    for target in [BuildTarget::Typescript, BuildTarget::Rust] {
+        let (_, diags) = roundhouse::emit::diagnostics::scope(|| target_files(&app, Path::new("."), target));
+        for owner in owners {
+            // The alias is refused at its initialization; ingest retains
+            // the source alias name on AliasChild's superclass. The other
+            // refusal points directly at DirectChild's superclass.
+            let gaps: Vec<_> = diags.iter().filter(|d| d.message.contains(&format!("{owner} is not available"))).collect();
+            assert_eq!(gaps.len(), 2, "{target:?}: {owner}: {diags:?}");
+            assert!(gaps.iter().all(|d| !d.span.is_synthetic()), "{gaps:?}");
+        }
+    }
+}
+
+#[test]
+fn app_defined_active_storage_exception_owners_remain_available() {
+    let tree = [
+        ("config/routes.rb", "Rails.application.routes.draw do\nend\n"),
+        ("app/models/storage_owners.rb", r#"module ActiveStorage
+  module Transformers
+    def self.marker
+      "transformers"
+    end
+    class Transformer
+      def self.marker
+        "base"
+      end
+    end
+    class ImageProcessingTransformer < Transformer
+      def self.marker
+        "processor"
+      end
+    end
+  end
+  class Service
+    class GCSService < Service
+      def self.marker
+        "service"
+      end
+    end
+  end
+end
+class StorageOwners
+  def self.values
+    [ActiveStorage::Transformers, ActiveStorage::Transformers::Transformer,
+     ActiveStorage::Transformers::ImageProcessingTransformer, ActiveStorage::Service::GCSService]
+  end
+end
+"#),
+    ].into_iter().map(|(path, text)| (PathBuf::from(path), text.as_bytes().to_vec())).collect();
+    let mut app = roundhouse::ingest::ingest_app_from_tree(tree).expect("ingest");
+    let mut analysis = roundhouse::session::analyze_and_lower(&mut app);
+    analysis.extend(roundhouse::analyze::diagnose(&app));
+    assert!(!analysis.iter().any(|d| d.severity == roundhouse::diagnostic::Severity::Error), "{analysis:?}");
+    for target in [BuildTarget::Typescript, BuildTarget::Rust] {
+        let (files, diags) = roundhouse::emit::diagnostics::scope(|| target_files(&app, Path::new("."), target));
+        files.expect("target files");
+        assert!(!diags.iter().any(|d| matches!(&d.kind,
+            roundhouse::diagnostic::DiagnosticKind::Unsupported { construct, .. }
+                if construct.as_str() == "ruby_family_runtime_constant")), "{target:?}: {diags:?}");
     }
 }
 

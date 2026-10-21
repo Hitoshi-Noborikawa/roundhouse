@@ -5834,7 +5834,7 @@ fn report_keyword_params(app: &App, target: &str) {
     }
 }
 
-/// Exception classes defined in `runtime/ruby/`
+/// Class/module values defined in `runtime/ruby/`
 /// (`action_controller/parameter_missing.rb`,
 /// `action_view/missing_template.rb`) that only the ruby family and
 /// Spinel ship. Strict targets must ledger a typed constant read; keep
@@ -5879,7 +5879,14 @@ pub const RUBY_FAMILY_RUNTIME_CONSTANTS: &[&str] = &[
     "ActiveSupport::Notifications",
     "ActiveSupport::Notifications::Event",
     "ActiveSupport::ConfigurationFile",
-    // Exception class values defined by `runtime/ruby/active_storage.rb`.
+    // Exception classes and their newly exposed owners in
+    // `runtime/ruby/active_storage.rb`. Registering a nested error also
+    // resolves its enclosing namespace as a value, which needs the same
+    // runtime availability policy as the error itself.
+    "ActiveStorage::Transformers",
+    "ActiveStorage::Transformers::Transformer",
+    "ActiveStorage::Transformers::ImageProcessingTransformer",
+    "ActiveStorage::Service::GCSService",
     "ActiveStorage::Error",
     "ActiveStorage::InvariableError",
     "ActiveStorage::UnpreviewableError",
