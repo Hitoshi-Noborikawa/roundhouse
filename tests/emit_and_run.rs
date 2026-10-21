@@ -7060,6 +7060,41 @@ puts "sanitize_sql_array passed"
         .assert_passes();
 }
 
+/// `sanitize_sql_for_order`: a String is the fragment as written, an Array
+/// interleaves its binds; either orders a relation through `Arel.sql`.
+#[test]
+fn sanitize_sql_for_order_is_supported() {
+    sanitize_sql_array_app()
+        .write(
+            "app/models/widget.rb",
+            r#"class Widget < ApplicationRecord
+  def self.quoted(value)
+    ActiveRecord::Base.sanitize_sql_array(["SELECT ? AS v", value])
+  end
+
+  def self.by_fragment
+    order(Arel.sql(ActiveRecord::Base.sanitize_sql_for_order("length(name) DESC"))).map(&:name)
+  end
+
+  def self.first_named(name)
+    sql = ActiveRecord::Base.sanitize_sql_for_order(["CASE WHEN name = ? THEN 0 ELSE 1 END, name", name])
+    [sql, order(Arel.sql(sql)).map(&:name)]
+  end
+end
+"#,
+        )
+        .run_ruby(
+            r#"
+%w[bb a ccc].each { |n| Widget.create!(name: n) }
+raise Widget.by_fragment.inspect unless Widget.by_fragment == %w[ccc bb a]
+sql, names = Widget.first_named("bb")
+raise sql.inspect unless sql == "CASE WHEN name = 'bb' THEN 0 ELSE 1 END, name"
+raise names.inspect unless names == %w[bb a ccc]
+"#,
+        )
+        .assert_passes();
+}
+
 /// Relation#ids must preserve uuid / named string keys (#310).
 fn relation_ids_uuid_app() -> emit_and_run::Overlay {
     emit_and_run::empty_app()

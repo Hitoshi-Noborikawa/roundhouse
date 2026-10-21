@@ -81,6 +81,7 @@ module ActiveRecord
     def self.connection: () -> Connection
     def self.sanitize_sql: (Array[untyped] statement) -> String
     def self.sanitize_sql_array: (Array[untyped] statement) -> String
+    def self.sanitize_sql_for_order: (String | Array[untyped] condition) -> String
     def self.uncached: () { () -> untyped } -> untyped
     def self.clear_query_caches_for_current_thread: () -> nil
     def self.transaction: (?isolation: untyped, ?requires_new: untyped, ?joinable: bool) { () -> untyped } -> untyped

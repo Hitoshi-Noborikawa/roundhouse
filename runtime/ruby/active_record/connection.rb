@@ -505,6 +505,16 @@ module ActiveRecord
       sanitize_sql(statement)
     end
 
+    # Rails' `sanitize_sql_for_order`: a String is the ORDER BY fragment
+    # as written and comes back unchanged; an Array is a fragment and its
+    # binds, interleaved as `sanitize_sql_array` does. Rails hands back an
+    # Array whose head has no `?` as the Array; here it is its head, the
+    # same fragment, so `order` reads the same SQL either way.
+    def self.sanitize_sql_for_order(condition)
+      return condition if condition.is_a?(String)
+      sanitize_sql_array(condition)
+    end
+
     # Rails' `uncached { }`: the block's reads go to the database, not
     # the per-request replay cache, which comes back on after it.
     def self.uncached
