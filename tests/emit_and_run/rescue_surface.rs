@@ -2,6 +2,57 @@
 
 use super::emit_and_run;
 
+fn parse_error_predicate_app() -> emit_and_run::Overlay {
+    let mut app = emit_and_run::empty_app();
+    for (index, body) in include_str!("parse_error_predicates.rb").split("\nclass ").enumerate() {
+        let source = if index == 0 { body.to_string() } else { format!("class {body}") };
+        let name = source.split_whitespace().nth(1).unwrap();
+        let path = if name.ends_with("Controller") {
+            format!("app/controllers/{}_controller.rb", name.trim_end_matches("Controller").to_lowercase())
+        } else {
+            format!("app/services/{}.rb", name.to_lowercase())
+        };
+        app = app.write(&path, &source);
+    }
+    let mut routes = "Rails.application.routes.draw do\n".to_string();
+    for action in ["ancestry", "identity", "ancestry_raises", "identity_raises", "kind_raises", "class_raises",
+        "deep", "bad_request", "parameter_missing", "exact"] {
+        routes.push_str(&format!("  get '/predicates/{action}', to: 'predicates#{action}'\n"));
+    }
+    routes.push_str("end\n");
+    app.write("config/routes.rb", &routes)
+}
+
+#[test]
+fn parameters_parse_error_fallback_ignores_instance_class_predicates() {
+    let script = format!(r#"
+def predicate_response_request(action)
+  status, _headers, body = Main.run_rack("REQUEST_METHOD" => "GET", "PATH_INFO" => "/predicates/#{{action}}",
+                                        "QUERY_STRING" => "", "rack.input" => StringIO.new(""))
+  body.close if body.respond_to?(:close)
+  [status, nil]
+rescue StandardError => error
+  [500, error]
+end
+{}"#, include_str!("parse_error_predicates_contract.rb"));
+    parse_error_predicate_app().run_ruby(&script).assert_passes();
+}
+
+#[test]
+fn parameters_parse_error_cgi_fallback_ignores_instance_class_predicates() {
+    let script = format!(r#"
+def predicate_response_request(action)
+  output = StringIO.new
+  Main.run({{ "REQUEST_METHOD" => "GET", "PATH_INFO" => "/predicates/#{{action}}", "QUERY_STRING" => "" }},
+           StringIO.new(""), output)
+  [output.string[/\AStatus: (\d+)/, 1].to_i, nil]
+rescue StandardError => error
+  [500, error]
+end
+{}"#, include_str!("parse_error_predicates_contract.rb"));
+    parse_error_predicate_app().run_ruby(&script).assert_passes();
+}
+
 fn parse_error_response_app() -> emit_and_run::Overlay {
     let mut app = emit_and_run::empty_app();
     // Ingest each controller from its own file, as in an application.

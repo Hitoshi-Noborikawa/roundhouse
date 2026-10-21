@@ -28,6 +28,8 @@
 require_relative "boot"
 
 module Main
+  # Spinel's subclass reflection needs a lexical class receiver.
+  FrameworkParseError = ActionDispatch::Http::Parameters::ParseError
 
   # Maps the routes-table controller symbol to a literal `.new`
   # constructor call. Spinel's hash specializations don't accept class
@@ -623,9 +625,9 @@ module Main
       # The app's handlers have already run. Rails' rescue_responses map
       # an unhandled ParseError to :bad_request by its exact class name;
       # an application subclass has no default mapping.
-      if error.is_a?(ActionDispatch::Http::Parameters::ParseError)
-        raise unless error.instance_of?(ActionDispatch::Http::Parameters::ParseError)
-      end
+      # A direct subclass matches its descendants too. Match on classes,
+      # as rescue does, so instance predicate overrides cannot affect this.
+      raise if FrameworkParseError.subclasses.any? { |subclass| subclass === error }
       res.status = 400
       res.body = "<h1>400 Bad Request</h1>"
       return
