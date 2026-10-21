@@ -200,6 +200,8 @@ mod relation_projections;
 mod pluck_projection_semantics;
 #[path = "emit_and_run/response_redirect.rs"]
 mod response_redirect;
+#[path = "emit_and_run/api_response_fidelity.rs"]
+mod api_response_fidelity;
 #[path = "emit_and_run/constructor_unrelated_mutations.rs"]
 mod constructor_unrelated_mutations;
 #[path = "emit_and_run/render_to_string_partial_ivar.rs"]
