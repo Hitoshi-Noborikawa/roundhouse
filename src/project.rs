@@ -759,8 +759,8 @@ fn resolve_runtime_sig_conflicts(files: &mut [(String, String)]) -> Result<(), S
         parent: &str,
         fi: usize,
         text: &str,
-        decls: &mut HashMap<(String, String), Vec<Decl>>,
-    ) {
+        decls: &mut HashMap<(String, &'static str, String), Vec<Decl>>,
+    ) -> Result<(), String> {
         for node in nodes {
             let (name, members) = match node {
                 Node::Class(c) => (c.name(), c.members()),
@@ -775,12 +775,28 @@ fn resolve_runtime_sig_conflicts(files: &mut [(String, String)]) -> Result<(), S
                     let loc = method.location();
                     let mut start = loc.start() as usize;
                     let mut end = loc.end() as usize;
+                    // ruby-rbs 0.3 leaves name_location unset for a backtick
+                    // identifier. The name symbol's own location is populated
+                    // for every spelling, including quoted names and operators.
+                    let sig_start = method.name().location().end() as usize;
+                    let invalid_location = || {
+                        format!(
+                            "invalid source location for {parent}#{prefix}{}",
+                            method.name()
+                        )
+                    };
+                    let source = text
+                        .get(sig_start..end)
+                        .filter(|_| text.get(start..sig_start).is_some())
+                        .ok_or_else(invalid_location)?;
+                    let sig = signature_key(source);
                     for annotation in method.annotations().iter() {
                         start = start.min(annotation.location().start() as usize);
                     }
                     // Remove indentation/newline only when the declaration owns
                     // that part of the line; same-line neighbors must survive.
-                    let line_start = text[..start].rfind('\n').map_or(0, |n| n + 1);
+                    let before = text.get(..start).ok_or_else(invalid_location)?;
+                    let line_start = before.rfind('\n').map_or(0, |n| n + 1);
                     if text[line_start..start].trim().is_empty() {
                         start = line_start;
                     }
@@ -789,10 +805,14 @@ fn resolve_runtime_sig_conflicts(files: &mut [(String, String)]) -> Result<(), S
                     if suffix.is_empty() || suffix.starts_with('#') {
                         end = line_end;
                     }
-                    let sig_start = method.name_location().end() as usize;
-                    let sig = signature_key(&text[sig_start..loc.end() as usize]);
+                    // A quoted instance name can itself start with `self.`.
+                    // Keep the receiver separate from the decoded name.
                     decls
-                        .entry((parent.to_string(), format!("{prefix}{}", method.name())))
+                        .entry((
+                            parent.to_string(),
+                            prefix,
+                            method.name().as_str().to_string(),
+                        ))
                         .or_default()
                         .push(Decl {
                             file: fi,
@@ -813,11 +833,12 @@ fn resolve_runtime_sig_conflicts(files: &mut [(String, String)]) -> Result<(), S
                 _ => None,
             }));
             parts.push(name.name().as_str().to_string());
-            collect(members.iter(), &parts.join("::"), fi, text, decls);
+            collect(members.iter(), &parts.join("::"), fi, text, decls)?;
         }
+        Ok(())
     }
-    // (qualified class, method) -> its declarations, from every runtime .rbs.
-    let mut decls: HashMap<(String, String), Vec<Decl>> = HashMap::new();
+    // (qualified class, receiver, method) -> declarations from every runtime .rbs.
+    let mut decls: HashMap<(String, &'static str, String), Vec<Decl>> = HashMap::new();
     for (fi, (path, text)) in files.iter().enumerate() {
         if !path.ends_with(".rbs")
             || !(path.starts_with("runtime/") || path.starts_with("sig/runtime/"))
@@ -826,7 +847,8 @@ fn resolve_runtime_sig_conflicts(files: &mut [(String, String)]) -> Result<(), S
         }
         let signature =
             parse(text).map_err(|e| format!("resolve_runtime_sig_conflicts: {path}: {e}"))?;
-        collect(signature.declarations().iter(), "", fi, text, &mut decls);
+        collect(signature.declarations().iter(), "", fi, text, &mut decls)
+            .map_err(|e| format!("resolve_runtime_sig_conflicts: {path}: {e}"))?;
     }
     // Rank of the file a declaration sits in: higher wins.
     let rank = |fi: usize, class: &str| -> u8 {
@@ -843,7 +865,7 @@ fn resolve_runtime_sig_conflicts(files: &mut [(String, String)]) -> Result<(), S
     };
     let mut drop: HashMap<usize, Vec<std::ops::Range<usize>>> = HashMap::new();
     let mut undecided = Vec::new();
-    for ((class, method), ds) in &decls {
+    for ((class, receiver, method), ds) in &decls {
         let first = &ds[0].sig;
         if ds.iter().all(|d| &d.sig == first) {
             continue;
@@ -852,7 +874,7 @@ fn resolve_runtime_sig_conflicts(files: &mut [(String, String)]) -> Result<(), S
         let winners: Vec<&Decl> = ds.iter().filter(|d| rank(d.file, class) == best).collect();
         if winners.iter().any(|d| d.sig != winners[0].sig) {
             undecided.push(format!(
-                "{class}#{method}: {}",
+                "{class}#{receiver}{method}: {}",
                 ds.iter()
                     .map(|d| format!("{} `{}`", files[d.file].0, d.sig))
                     .collect::<Vec<_>>()
@@ -11037,6 +11059,170 @@ mod tests {
     }
 
     #[test]
+    fn spinel_runtime_sig_conflicts_accept_quoted_method_names() {
+        for name in [
+            "probe",
+            "[]",
+            "[]=",
+            "+",
+            "ready?",
+            "probe!",
+            "value=",
+            "class",
+            "two words",
+            "a:b",
+            "a#b",
+            "méthode",
+            r"a\\b",
+            "self.probe",
+            "self?.probe",
+            "two\nlines",
+            "a\"b",
+            "a'b",
+        ] {
+            for prefix in ["runtime/", "sig/runtime/"] {
+                for receiver in ["", "self.", "self?."] {
+                    let primary = format!(
+                        "# multibyte prefix: é\nmodule ActiveRecord\n  class Base\n\
+                         \x20   type payload = Array[Hash[String, Integer?]]\n\
+                         \x20   %a{{deprecated}}\n    def {receiver}`{name}`: (\n\
+                         \x20     payload body\n    ) -> String\n\
+                         \x20   def untouched: () -> Integer\n\
+                         \x20   alias `retained alias` untouched\n  end\nend\n"
+                    );
+                    let mut files = vec![(format!("{prefix}active_record/base.rbs"), primary)];
+                    // A declaration needs no competitor to trigger the original panic.
+                    let original = files.clone();
+                    resolve_runtime_sig_conflicts(&mut files).unwrap();
+                    assert_eq!(files, original);
+
+                    let reopen = format!(
+                        "class ::ActiveRecord::Base\n  def {receiver}`{name}`: (untyped) -> untyped\nend\n"
+                    );
+                    files.push((
+                        format!("{prefix}active_record/connection.rbs"),
+                        reopen.clone(),
+                    ));
+                    resolve_runtime_sig_conflicts(&mut files).unwrap();
+                    assert!(!files[0].1.contains("%a{"));
+                    assert!(!files[0].1.contains("-> String"));
+                    assert!(
+                        files[0]
+                            .1
+                            .contains("type payload = Array[Hash[String, Integer?]]")
+                    );
+                    assert!(files[0].1.contains("def untouched: () -> Integer"));
+                    assert!(files[0].1.contains("alias `retained alias` untouched"));
+                    assert_eq!(files[1].1, reopen);
+                    for (_, text) in &files {
+                        ruby_rbs::node::parse(text).expect("quoted declarations and aliases parse");
+                    }
+                    let resolved = files.clone();
+                    resolve_runtime_sig_conflicts(&mut files).unwrap();
+                    assert_eq!(files, resolved);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn spinel_runtime_sig_conflicts_match_quoted_and_unquoted_names() {
+        for name in [
+            "probe", "[]", "[]=", "+", "ready?", "probe!", "value=", "class",
+        ] {
+            for receiver in ["", "self.", "self?."] {
+                for quoted_primary in [false, true] {
+                    let names = if quoted_primary {
+                        [format!("`{name}`"), name.to_string()]
+                    } else {
+                        [name.to_string(), format!("`{name}`")]
+                    };
+                    let mut files = vec![
+                        (
+                            "runtime/active_record/base.rbs".into(),
+                            format!(
+                                "class ActiveRecord::Base\n  def {receiver}{}: () -> String\nend\n",
+                                names[0]
+                            ),
+                        ),
+                        (
+                            "sig/runtime/active_record/base.rbs".into(),
+                            format!(
+                                "class ActiveRecord::Base\n  def {receiver}{}: (\n  ) -> String\nend\n",
+                                names[1]
+                            ),
+                        ),
+                    ];
+                    let original = files.clone();
+                    resolve_runtime_sig_conflicts(&mut files).unwrap();
+                    assert_eq!(
+                        files, original,
+                        "equal decoded names and signatures survive"
+                    );
+                    files[1].1 = files[1].1.replace("String", "Integer");
+                    let conflicting = files.clone();
+                    assert!(
+                        resolve_runtime_sig_conflicts(&mut files)
+                            .unwrap_err()
+                            .contains(&format!("ActiveRecord::Base#{receiver}{name}"))
+                    );
+                    assert_eq!(
+                        files, conflicting,
+                        "undecidable conflicts leave inputs intact"
+                    );
+                    files[1].0 = "runtime/active_record/connection.rbs".into();
+                    resolve_runtime_sig_conflicts(&mut files).unwrap();
+                    assert_eq!(files[0].1, "class ActiveRecord::Base\nend\n");
+                    assert!(files[1].1.contains("Integer"));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn spinel_runtime_sig_conflicts_keep_quoted_names_and_receivers_distinct() {
+        // Receiver-like quoted names and distinct receiver kinds must stay independent.
+        for (left_receiver, left_name, right_receiver, right_name) in [
+            ("", "self.probe", "self.", "probe"),
+            ("", "self?.probe", "self?.", "probe"),
+            ("self.", "self?.probe", "self?.", "self.probe"),
+        ] {
+            for scope in ["class", "module"] {
+                let text = format!(
+                    "{scope} Example\n  def {left_receiver}`{left_name}`: () -> String\n\
+                     \x20 def {right_receiver}`{right_name}`: () -> Integer\nend\n"
+                );
+                let mut files = vec![("runtime/example.rbs".into(), text)];
+                let original = files.clone();
+                resolve_runtime_sig_conflicts(&mut files).unwrap();
+                assert_eq!(files, original);
+            }
+        }
+        // Quoted punctuation and qualified reopens work in nested module/interface scopes too.
+        for scope in ["module Helpers", "interface _Helpers"] {
+            let name = scope.split_whitespace().nth(1).unwrap();
+            let mut files = vec![
+                (
+                    "runtime/action_view/view_helpers.rbs".into(),
+                    format!("module ActionView {scope}\n  def `a:b#c`: () -> String\nend end\n"),
+                ),
+                (
+                    "runtime/hash_to_query.rbs".into(),
+                    format!(
+                        "{} ::ActionView::{name}\n  def `a:b#c`: () -> Integer\nend\n",
+                        scope.split_whitespace().next().unwrap()
+                    ),
+                ),
+            ];
+            resolve_runtime_sig_conflicts(&mut files).unwrap();
+            assert!(!files[0].1.contains("def "));
+            for (_, text) in &files {
+                ruby_rbs::node::parse(text).expect("quoted nested declarations parse");
+            }
+        }
+    }
+
+    #[test]
     fn spinel_runtime_sig_conflicts_remove_complete_declarations() {
         let shapes = [
             "(\n      String body,\n      ?status: Symbol\n    ) -> void",
@@ -11052,48 +11238,55 @@ mod tests {
         for prefix in ["runtime/", "sig/runtime/"] {
             for receiver in ["", "self.", "self?."] {
                 for shape in shapes {
-                    for reversed in [false, true] {
-                        let primary = format!(
-                            "module ActiveRecord\n  class Base\n    type payload = String | Integer\n\
-                             \x20   %a{{deprecated}}\n    def {receiver}probe: {shape}\n\
+                    for (name, reopen_name) in [
+                        ("probe", "probe"),
+                        ("`probe`", "probe"),
+                        ("probe", "`probe`"),
+                        ("`probe`", "`probe`"),
+                    ] {
+                        for reversed in [false, true] {
+                            let primary = format!(
+                                "module ActiveRecord\n  class Base\n    type payload = String | Integer\n\
+                             \x20   %a{{deprecated}}\n    def {receiver}{name}: {shape}\n\
                              \x20   def untouched: () -> Integer\n\
                              \x20   alias retained untouched\n  end\nend\n"
-                        );
-                        let reopen = format!(
-                            "class ActiveRecord::Base\n  def {receiver}probe: (untyped body) -> untyped\nend\n"
-                        );
-                        let mut files = vec![
-                            (format!("{prefix}active_record/base.rbs"), primary),
-                            (
-                                format!("{prefix}active_record/connection.rbs"),
-                                reopen.clone(),
-                            ),
-                        ];
-                        if reversed {
-                            files.reverse();
+                            );
+                            let reopen = format!(
+                                "class ActiveRecord::Base\n  def {receiver}{reopen_name}: (untyped body) -> untyped\nend\n"
+                            );
+                            let mut files = vec![
+                                (format!("{prefix}active_record/base.rbs"), primary),
+                                (
+                                    format!("{prefix}active_record/connection.rbs"),
+                                    reopen.clone(),
+                                ),
+                            ];
+                            if reversed {
+                                files.reverse();
+                            }
+                            resolve_runtime_sig_conflicts(&mut files).unwrap();
+                            for (path, text) in &files {
+                                ruby_rbs::node::parse(text)
+                                    .unwrap_or_else(|e| panic!("{path}: {e}\n{text}"));
+                            }
+                            let kept = files.iter().find(|(p, _)| p.ends_with("base.rbs")).unwrap();
+                            assert!(!kept.1.contains("probe"), "{}", kept.1);
+                            assert!(!kept.1.contains("%a{"), "{}", kept.1);
+                            assert!(kept.1.contains("type payload = String | Integer"));
+                            assert!(kept.1.contains("def untouched: () -> Integer"));
+                            assert!(kept.1.contains("alias retained untouched"));
+                            assert_eq!(
+                                files
+                                    .iter()
+                                    .find(|(p, _)| p.ends_with("connection.rbs"))
+                                    .unwrap()
+                                    .1,
+                                reopen
+                            );
+                            let resolved = files.clone();
+                            resolve_runtime_sig_conflicts(&mut files).unwrap();
+                            assert_eq!(files, resolved, "resolution must be idempotent");
                         }
-                        resolve_runtime_sig_conflicts(&mut files).unwrap();
-                        for (path, text) in &files {
-                            ruby_rbs::node::parse(text)
-                                .unwrap_or_else(|e| panic!("{path}: {e}\n{text}"));
-                        }
-                        let kept = files.iter().find(|(p, _)| p.ends_with("base.rbs")).unwrap();
-                        assert!(!kept.1.contains("probe"), "{}", kept.1);
-                        assert!(!kept.1.contains("%a{"), "{}", kept.1);
-                        assert!(kept.1.contains("type payload = String | Integer"));
-                        assert!(kept.1.contains("def untouched: () -> Integer"));
-                        assert!(kept.1.contains("alias retained untouched"));
-                        assert_eq!(
-                            files
-                                .iter()
-                                .find(|(p, _)| p.ends_with("connection.rbs"))
-                                .unwrap()
-                                .1,
-                            reopen
-                        );
-                        let resolved = files.clone();
-                        resolve_runtime_sig_conflicts(&mut files).unwrap();
-                        assert_eq!(files, resolved, "resolution must be idempotent");
                     }
                 }
             }
@@ -11177,7 +11370,7 @@ mod tests {
                 ruby_rbs::node::parse(text).expect("module/interface scopes survive");
             }
         }
-        for method in ["probe", "[]", "[]=", "+"] {
+        for method in ["probe", "`probe`", "[]", "`[]`", "[]=", "+", "`a:b#c`", "`méthode`"] {
             let mut files = vec![
                 ("runtime/active_record/base.rbs".into(),
                  format!("class ActiveRecord::Base def {method}: (String) -> void def untouched: () -> Integer end")),
