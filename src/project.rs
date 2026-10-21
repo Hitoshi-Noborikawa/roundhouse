@@ -5923,7 +5923,7 @@ fn unavailable_class_module_construct(name: &str, target: &str) -> Option<&'stat
         | "Struct" | "Mutex" | "Queue" | "SizedQueue"
         | "Thread::Queue" | "Thread::SizedQueue" | "Thread::Mutex"
         | "ThreadError" | "ClosedQueueError" | "RegexpError" | "Comparable" | "Enumerable"
-        | "LoadError" | "Proc" | "Range"
+        | "LoadError" | "Proc" | "Range" | "Method"
         | "JSON::GeneratorError"
         // Ported for spinel (`runtime/ruby/rack_utils.rb`), the gem's own on
         // the ruby family; no strict target loads either.
@@ -6139,6 +6139,28 @@ fn report_unsupported_bundled_constants(app: &App, target: BuildTarget) {
         return;
     }
     fn visit(expr: &crate::expr::Expr, app: &App, target: &str) {
+        // Not the whole constant: spinel answers `Method` as a value, and refuses only a class test against it.
+        if target == "spinel" {
+            let names_method = |e: &crate::expr::Expr| matches!(&*e.node, crate::expr::ExprNode::Const { path }
+                if path.iter().map(|p| p.as_str()).filter(|p| !p.is_empty()).eq(["Method"]));
+            let class_test = match &*expr.node {
+                crate::expr::ExprNode::Send { method, args, .. } => {
+                    matches!(method.as_str(), "is_a?" | "kind_of?" | "instance_of?") && args.first().is_some_and(names_method)
+                }
+                crate::expr::ExprNode::Case { arms, .. } => arms.iter().any(|arm| {
+                    matches!(&arm.pattern, crate::expr::Pattern::Expr { expr } if names_method(expr))
+                }),
+                _ => false,
+            };
+            if class_test {
+                emit::diagnostics::report_unsupported(
+                    expr.span,
+                    target,
+                    "Method",
+                    "a class test against `Method`, which the spinel emit refuses".to_string(),
+                );
+            }
+        }
         // Spinel matches this exception by its rescue name, but does not
         // expose its class as a constant. Keep the value guard below while
         // permitting the supported literal rescue clause, including ::JSON.

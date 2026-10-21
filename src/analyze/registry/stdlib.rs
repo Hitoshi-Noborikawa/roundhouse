@@ -1130,6 +1130,8 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
     register_stdlib_class(classes, "Proc", &[], &[
         ("call", Ty::Untyped), ("arity", Ty::Int), ("lambda?", Ty::Bool),
     ]);
+    // `Method.method_defined?(:source_location)` (aasm's invokers): the class as a value only.
+    register_stdlib_class(classes, "Method", &[], &[]);
     register_stdlib_class(classes, "Mutex", &[], &[]);
     // The queue constructors, Thread's core aliases, and the standard
     // mixins likewise need exact entries for source constant resolution.
