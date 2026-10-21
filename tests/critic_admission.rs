@@ -185,6 +185,7 @@ fn a_held_class_answers_queries_not_writes() {
 #[test]
 fn ipaddr_include_takes_only_an_ipaddr() {
     refuses("IPAddr.new(\"10.0.0.0/8\").include?(title)", "include?");
+    refuses("IPAddr.new(\"10.0.0.0/8\").include?(IPAddr)", "include?");
 }
 
 #[test]

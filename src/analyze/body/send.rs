@@ -1077,6 +1077,7 @@ impl<'a> BodyTyper<'a> {
             && method.as_str() == "include?"
             && let [other] = args
             && matches!(other.ty.as_ref(), Some(Ty::Class { id: o, .. }) if o.0.as_str() == "IPAddr")
+            && other.decisions & crate::expr::CLASS_OBJECT_VALUE == 0
         {
             return Ty::Bool;
         }
