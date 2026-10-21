@@ -6,7 +6,15 @@ use std::process::Command;
 fn unix_and_tcp_connections_keep_their_transport() {
     let (tree, errors) = emit_and_run::real_blog()
         .write("app/controllers/listener_controller.rb", "class ListenerController < ApplicationController\n  skip_forgery_protection\n  def show\n    headers[\"X-Worker\"] = Process.pid.to_s\n    render plain: request.env[\"roundhouse.listener\"].to_s\n  end\nend\n")
-        .write("config/routes.rb", "Rails.application.routes.draw do\n  get '/listener', to: 'listener#show'\n  post '/listener', to: 'listener#show'\nend\n")
+        .write("config/routes.rb", r#"Rails.application.routes.draw do
+  root "articles#index"
+  resources :articles do
+    resources :comments, only: [:create, :destroy]
+  end
+  get '/listener', to: 'listener#show'
+  post '/listener', to: 'listener#show'
+end
+"#)
         .emit(roundhouse::project::BuildTarget::Spinel);
     assert!(errors.is_empty(), "{errors:?}");
     let main = tree.join("main.rb");
