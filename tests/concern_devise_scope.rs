@@ -32,7 +32,11 @@ fn concern(devise: &str) -> String {
 }
 
 fn diagnostics(user: &str, concern_src: &str) -> Vec<roundhouse::diagnostic::Diagnostic> {
-    let files: Vec<(&str, &str)> = vec![
+    diagnostics_with(user, concern_src, &[])
+}
+
+fn diagnostics_with(user: &str, concern_src: &str, extra: &[(&str, &str)]) -> Vec<roundhouse::diagnostic::Diagnostic> {
+    let mut files: Vec<(&str, &str)> = vec![
         ("db/schema.rb", SCHEMA),
         (
             "config/routes.rb",
@@ -52,6 +56,7 @@ fn diagnostics(user: &str, concern_src: &str) -> Vec<roundhouse::diagnostic::Dia
         ("app/controllers/bookmarks_controller.rb", CONTROLLER),
         ("app/views/bookmarks/show.html.erb", "<p><%= @bookmark.title %></p>\n"),
     ];
+    files.extend_from_slice(extra);
     let tree: HashMap<PathBuf, Vec<u8>> = files
         .into_iter()
         .map(|(p, c)| (PathBuf::from(p), c.as_bytes().to_vec()))
@@ -117,7 +122,11 @@ fn an_unincluded_concern_creates_no_helpers() {
 }
 
 fn devise_refusals(user: &str, concern_src: &str) -> Vec<String> {
-    diagnostics(user, concern_src)
+    devise_refusals_with(user, concern_src, &[])
+}
+
+fn devise_refusals_with(user: &str, concern_src: &str, extra: &[(&str, &str)]) -> Vec<String> {
+    diagnostics_with(user, concern_src, extra)
         .into_iter()
         .filter(|d| matches!(&d.kind, DiagnosticKind::Unsupported { construct, .. } if construct.as_str() == "devise"))
         .map(|d| d.message)
@@ -133,4 +142,12 @@ fn a_devise_declaration_is_refused_once_where_it_is_written() {
 
     let found = devise_refusals(USER, &concern("devise :database_authenticatable"));
     assert_eq!(found.len(), 1, "{found:?}");
+}
+
+#[test]
+fn a_concern_two_models_include_is_refused_once_naming_both() {
+    let admin = "class Admin < ApplicationRecord\n  include User::Authenticatable\nend\n";
+    let found = devise_refusals_with(USER, &concern("devise :database_authenticatable"), &[("app/models/admin.rb", admin)]);
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert!(found[0].contains("`User`") && found[0].contains("`Admin`"), "{found:?}");
 }
