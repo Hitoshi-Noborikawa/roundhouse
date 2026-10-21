@@ -1310,7 +1310,19 @@ pub(super) fn emit_send(
     // `Send { recv: a, method: "==", args: [b] }`. Emit them infix.
     if let (Some(r), Some(op)) = (recv, binary_op(method)) {
         if args.len() == 1 {
-            return format!("{} {} {}", emit_expr(ctx, r), op, args_s[0]);
+            let lhs = emit_expr(ctx, r);
+            // An ordering against a nullable column reads its value
+            // (callers test nil first), and an Integer side widens to
+            // float64 against a Float literal bound: Go compares neither
+            // a pointer nor an int64 with an untyped float.
+            if matches!(op, "<" | "<=" | ">" | ">=") {
+                let lhs_v = deref_nullable(r, &lhs).unwrap_or_else(|| lhs.clone());
+                let int_lhs = nullable_field_go_ty(r).as_deref() == Some("*int64") || matches!(r.ty.as_ref(), Some(Ty::Int));
+                let float_rhs = matches!(&*args[0].node, ExprNode::Lit { value: Literal::Float { .. } });
+                let lhs_v = if int_lhs && float_rhs { format!("float64({lhs_v})") } else { lhs_v };
+                return format!("{lhs_v} {op} {}", args_s[0]);
+            }
+            return format!("{lhs} {} {}", op, args_s[0]);
         }
     }
 
@@ -1777,6 +1789,9 @@ pub(super) fn emit_send(
                         "NilClass" => return format!("{recv_s} == nil"),
                         _ => {}
                     }
+                    if let Some(answer) = static_is_a(r, &recv_s, class.as_str()) {
+                        return answer;
+                    }
                 }
             }
         }
@@ -2057,6 +2072,11 @@ pub(super) fn emit_send(
         if let Some(r) = recv {
             if matches!(r.ty.as_ref(), Some(Ty::Array { .. })) {
                 let recv_s = emit_expr(ctx, r);
+                // A nullable column element: nil is in no list (Ruby
+                // `[..].include?(nil)`), else compare the value.
+                if let Some(value) = deref_nullable(&args[0], &args_s[0]) {
+                    return format!("({} != nil && slices.Contains({recv_s}, {value}))", args_s[0]);
+                }
                 return format!("slices.Contains({recv_s}, {})", args_s[0]);
             }
         }
@@ -2094,11 +2114,15 @@ pub(super) fn emit_send(
                     r.ty.as_ref(),
                     Some(Ty::Class { id, .. }) if id.0.as_str() == "Regexp"
                 );
+                // A nullable column subject reads its value; the format
+                // check tests nil first.
                 if arg_is_regexp && !recv_is_regexp {
-                    return format!("{}.MatchString({})", args_s[0], recv_s);
+                    let subject = deref_nullable(r, &recv_s).unwrap_or_else(|| recv_s.clone());
+                    return format!("{}.MatchString({subject})", args_s[0]);
                 }
                 if recv_is_regexp {
-                    return format!("{recv_s}.MatchString({})", args_s[0]);
+                    let subject = deref_nullable(&args[0], &args_s[0]).unwrap_or_else(|| args_s[0].clone());
+                    return format!("{recv_s}.MatchString({subject})");
                 }
             }
             if let Some(wrapped) = map_go_str_method_1arg(method, &recv_s, &args_s[0]) {
@@ -4055,6 +4079,55 @@ fn nullable_column_go_ty(field_ruby: &str) -> Option<String> {
             .iter()
             .find(|(n, _)| n == field_ruby)
             .map(|(_, t)| t.clone())
+    })
+}
+
+/// The Go pointer type of a nullable column the expression reads as the
+/// model's own field (`@code` → `*string`).
+fn nullable_field_go_ty(e: &Expr) -> Option<String> {
+    match &*e.node {
+        ExprNode::Ivar { name } => nullable_column_go_ty(name.as_str()),
+        _ => None,
+    }
+}
+
+/// `DerefString(self.Code)` for a nullable column read where the value
+/// itself is needed (a regex subject, a list element, a comparison).
+/// Callers test nil first where nil changes the answer; the zero value
+/// stands in otherwise, as `DerefString` does for messages.
+fn deref_nullable(e: &Expr, e_s: &str) -> Option<String> {
+    let helper = match nullable_field_go_ty(e)?.as_str() {
+        "*string" => "DerefString",
+        "*int64" => "DerefInt64",
+        "*float64" => "DerefFloat64",
+        "*bool" => "DerefBool",
+        _ => return None,
+    };
+    Some(format!("{helper}({e_s})"))
+}
+
+/// `x.is_a?(Class)` on a typed column field, answered statically as
+/// rust's `static_is_a` does: the field already is (or is not) that
+/// class, so only a nullable field's nil test is left. `None` when the
+/// field's type does not decide it.
+fn static_is_a(r: &Expr, r_s: &str, class: &str) -> Option<String> {
+    let (core, nullable) = match nullable_field_go_ty(r).as_deref() {
+        Some("*string") => (Ty::Str, true),
+        Some("*int64") => (Ty::Int, true),
+        Some("*float64") => (Ty::Float, true),
+        Some(_) => return None,
+        None => match (&*r.node, r.ty.as_ref()) {
+            (ExprNode::Ivar { .. }, Some(t @ (Ty::Str | Ty::Int | Ty::Float))) => (t.clone(), false),
+            _ => return None,
+        },
+    };
+    let present = if nullable { format!("{r_s} != nil") } else { "true".to_string() };
+    Some(match (core, class) {
+        (Ty::Int, "Integer" | "Numeric") | (Ty::Float, "Float" | "Numeric") | (Ty::Str, "String") => present,
+        (Ty::Int, "Float" | "String") | (Ty::Float, "Integer" | "String") | (Ty::Str, "Integer" | "Float" | "Numeric") => {
+            "false".to_string()
+        }
+        _ => return None,
     })
 }
 
