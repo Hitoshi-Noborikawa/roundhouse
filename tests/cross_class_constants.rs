@@ -346,3 +346,36 @@ fn an_unrelated_top_level_const_set_keeps_owners_folding() {
     ]);
     assert!(matches!(rules(&app, "Widget", "text").as_slice(), [ValidationRule::Length { max: Some(300), .. }]), "{gaps:?}");
 }
+
+/// Parentheses around the constant are only Ruby grouping:
+/// `inclusion: (Fasp::DATA_CATEGORIES)`, `in: (MODES)` and
+/// `with: (Tag::NAME_RE)` read the same value as without them. The list
+/// and regex lookups stopped at the parentheses node, so each stayed the
+/// reported gap. The numericality and length bounds already looked
+/// through them, as these pins show.
+#[test]
+fn a_parenthesized_constant_folds_like_a_bare_one() {
+    let (app, gaps) = ingest(&[
+        ("app/models/rule.rb", RULE),
+        ("app/models/tag.rb", TAG),
+        ("app/models/fasp.rb", FASP),
+        (
+            "app/models/widget.rb",
+            "class Widget < ApplicationRecord
+  MODES = %w(x y).freeze
+  validates :category, inclusion: (Fasp::DATA_CATEGORIES)
+  validates :kind, inclusion: { in: (Fasp::DATA_CATEGORIES) }
+  validates :mode, inclusion: { in: (MODES) }
+  validates :name, format: { with: (Tag::NAME_RE) }
+  validates :text, length: { maximum: (Rule::TEXT_SIZE_LIMIT) }
+  validates :code, numericality: { less_than: (Rule::TEXT_SIZE_LIMIT) }
+end
+",
+        ),
+    ]);
+    for attr in ["category", "kind", "mode", "name", "text", "code"] {
+        assert_eq!(rules(&app, "Widget", attr).len(), 1, "{attr}: {:?} {gaps:?}", rules(&app, "Widget", attr));
+    }
+    assert!(!gaps.iter().any(|g| g.contains("widget.rb")), "{gaps:?}");
+    assert!(matches!(rules(&app, "Widget", "name").as_slice(), [ValidationRule::Format { pattern, .. }] if pattern == r"\A[a-z]+\z"));
+}

@@ -1751,6 +1751,15 @@ impl<'pr> ruby_prism::Visit<'pr> for ConstTaint {
     }
 }
 
+/// The one expression inside `( … )`: `inclusion: (Kinds::ALL)` reads
+/// what `inclusion: Kinds::ALL` does. `None` for anything else, including
+/// `(a; b)`.
+pub(super) fn single_parenthesized<'pr>(node: &Node<'pr>) -> Option<Node<'pr>> {
+    let body = node.as_parentheses_node()?.body()?;
+    let mut stmts = flatten_statements(body);
+    (stmts.len() == 1).then(|| stmts.pop().unwrap())
+}
+
 /// The key a constant read is folded under: its name, or for a path
 /// (`Rule::LIMIT`, `::Rule::LIMIT`) the path as written, which
 /// [`ClassConsts::import`] fills from the owner's table.
@@ -1926,6 +1935,9 @@ impl ClassConsts {
     /// Integer, Float, `true`/`false` or `nil` literal, `.freeze`d or not,
     /// or another folded list constant.
     pub(super) fn list(&self, node: &Node<'_>) -> Option<Vec<Literal>> {
+        if let Some(inner) = single_parenthesized(node) {
+            return self.list(&inner);
+        }
         if let Some(call) = node.as_call_node() {
             if constant_id_str(&call.name()) == "freeze" && call.arguments().is_none() {
                 return self.list(&call.receiver()?);
@@ -1981,6 +1993,9 @@ impl ClassConsts {
     /// flags are identical, so a mismatch (or any other interpolated
     /// shape) resolves to `None` rather than a wrong pattern.
     pub(super) fn regex(&self, node: &Node<'_>) -> Option<(String, String)> {
+        if let Some(inner) = single_parenthesized(node) {
+            return self.regex(&inner);
+        }
         if let Some(call) = node.as_call_node() {
             if constant_id_str(&call.name()) == "freeze" && call.arguments().is_none() {
                 return self.regex(&call.receiver()?);
