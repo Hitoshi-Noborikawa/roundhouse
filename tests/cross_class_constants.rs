@@ -193,6 +193,9 @@ end
         // sees depends on load order.
         ("app/models/palette.rb", "module Palette\n  SHADES = %w(red blue)\nend\n"),
         ("app/models/palette_ext.rb", "module Palette\n  SHADES = %w(green)\nend\n"),
+        // An app body reopening a standard-library namespace is not the
+        // whole owner: the library writes it too.
+        ("lib/uri_mail_to.rb", "module URI\n  module MailTo\n    LOCAL_RE = /x/\n  end\nend\n"),
         // `Rule` here is `Widget::Rule`, which has no `TEXT_SIZE_LIMIT`:
         // Rails raises NameError, so nothing can fold.
         (
@@ -208,12 +211,13 @@ end
   validates :shade, inclusion: Palette::SHADES
   validates :label, inclusion: Kinds::MISSING
   validates :name, inclusion: Kinds::SHADES
-  validates :email, format: { with: URI::MailTo::EMAIL_REGEXP }
+  validates :slug, format: { with: URI::MailTo::LOCAL_RE }
+  validates :email, format: { with: Markup::LINK_RE }
 end
 ",
         ),
     ]);
-    for attr in ["text", "kind", "mode", "code", "shade", "label", "email"] {
+    for attr in ["text", "kind", "mode", "code", "shade", "label", "email", "slug"] {
         assert!(rules(&app, "Widget", attr).is_empty(), "{attr}: {:?}", rules(&app, "Widget", attr));
         assert!(gaps.iter().any(|g| g.contains("widget.rb") && g.contains(&format!(":{attr},"))), "{attr}: {gaps:?}");
     }

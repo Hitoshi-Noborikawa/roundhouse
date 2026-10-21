@@ -249,6 +249,14 @@ impl EnumConstants {
             return None;
         }
         let (owner, member) = name.rsplit_once("::")?;
+        // An app body that reopens a core or standard-library namespace
+        // (`module URI; module MailTo`) is not the whole owner: the
+        // library writes it too, and the app file may never load (nothing
+        // autoloads a reopen of a constant already defined).
+        let root = owner.split("::").next().unwrap_or(owner);
+        if crate::emit::audit::CORE_CONSTANTS.contains(&root) {
+            return None;
+        }
         if self.foreign_taint.contains(member)
             || owner.split("::").any(|segment| self.reflected.contains(segment))
             || self.write_counts.get(&name) != Some(&1)
