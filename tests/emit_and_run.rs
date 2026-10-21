@@ -11520,6 +11520,118 @@ raise "hook body: #{Tracking::INCLUDERS.inspect}" unless Tracking::INCLUDERS == 
         .assert_passes();
 }
 
+/// The same `included` hooks written inside the module's own
+/// `class << self`, as action_policy's policy modules do. Ruby runs
+/// `def included(base)` there exactly like `def self.included(base)`, so
+/// each includer gets the carrier's methods and the rest of the hook
+/// still runs.
+#[test]
+fn an_included_hook_in_class_self_that_extends_its_carrier_runs() {
+    emit_and_run::real_blog()
+        .write("app/services/factory.rb", r#"module Factory
+  class << self
+    def included(base)
+      base.extend ClassMethods
+    end
+  end
+
+  module ClassMethods
+    def build_label
+      "built " + name
+    end
+  end
+end
+"#)
+        .write("app/services/tracking.rb", r#"module Tracking
+  INCLUDERS = []
+
+  class << self
+    def included(base)
+      base.extend ClassMethods
+      INCLUDERS << base.name
+    end
+  end
+
+  module ClassMethods
+    def tracked_label
+      "tracked " + name
+    end
+  end
+end
+"#)
+        .write("app/services/reading.rb", r#"class Reading
+  include Factory
+  include Tracking
+end
+"#)
+        .run_ruby(r#"
+raise "bridge: #{Reading.build_label.inspect}" unless Reading.build_label == "built Reading"
+raise "carrier method: #{Reading.tracked_label.inspect}" unless Reading.tracked_label == "tracked Reading"
+raise "hook body: #{Tracking::INCLUDERS.inspect}" unless Tracking::INCLUDERS == ["Reading"]
+"#)
+        .assert_passes();
+}
+
+/// A `class << self` hook that opens `class << base` instead of extending
+/// a carrier, the same shape `included_hook_class_methods_run` covers for
+/// `def self.included`.
+#[test]
+fn an_included_hook_in_class_self_that_opens_the_includer_singleton_runs() {
+    emit_and_run::real_blog()
+        .write("app/services/factory.rb", r#"module Factory
+  class << self
+    def included(base)
+      class << base
+        def build_label
+          "built " + name
+        end
+      end
+    end
+  end
+end
+"#)
+        .write("app/services/reading.rb", "class Reading\n  include Factory\nend\n")
+        .write("app/services/reading_label.rb", "class ReadingLabel\n  def self.text = Reading.build_label.upcase\nend\n")
+        .run_ruby(r#"
+raise "includer method: #{Reading.build_label.inspect}" unless Reading.build_label == "built Reading"
+raise "typed caller: #{ReadingLabel.text.inspect}" unless ReadingLabel.text == "BUILT READING"
+"#)
+        .assert_passes();
+}
+
+/// The `class << self` bridge and its `ClassMethods` carrier in different
+/// reopenings, in either file order.
+#[test]
+fn a_class_self_included_bridge_runs_with_its_carrier_in_another_file() {
+    for (bridge, carrier) in [
+        ("app/services/factory.rb", "app/services/factory_extension.rb"),
+        ("app/services/factory_bridge.rb", "app/services/factory.rb"),
+    ] {
+        emit_and_run::real_blog()
+            .write(bridge, r#"module Factory
+  class << self
+    def included(base)
+      base.extend ClassMethods
+    end
+  end
+end
+"#)
+            .write(carrier, r#"module Factory
+  module ClassMethods
+    def build_label
+      "built " + name
+    end
+  end
+end
+"#)
+            .write("app/services/reading.rb", "class Reading\n  include Factory\nend\n")
+            .run_ruby(r#"
+raise "split bridge: #{Reading.build_label.inspect}" unless Reading.build_label == "built Reading"
+"#)
+            .assert_passes();
+    }
+}
+
 /// `resources :x, only: [] do … end` nests routes under a parent with no
 /// routes of its own. Ingest rejected the empty list and dropped the
 /// parent with every route nested in it.

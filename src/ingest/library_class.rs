@@ -1671,7 +1671,12 @@ fn take_class_ivar_initializers(calls: &mut Vec<Expr>) -> Vec<Expr> {
 enum DeclBodyMode {
     Instance,
     ClassMethods,
-    SingletonClass,
+    /// `class << self`. `included_hook` is set only for a module's own
+    /// singleton, where `def included(base)` is the same `Module#included`
+    /// hook as `def self.included(base)`; `has_class_methods` says whether
+    /// that module body also declares `module ClassMethods`, which the
+    /// singleton body itself cannot see.
+    SingletonClass { included_hook: bool, has_class_methods: bool },
 }
 
 impl DeclBodyMode {
@@ -1922,8 +1927,9 @@ const POSITION_SENSITIVE_MARKERS: &[&str] = &[
 /// body metaprogramming as includer class methods (invariant 6).
 pub(super) fn included_hook_class_methods_body<'pr>(
     def: &ruby_prism::DefNode<'pr>,
+    in_singleton_class: bool,
 ) -> Option<ruby_prism::Node<'pr>> {
-    let param_name = included_hook_parameter(def)?;
+    let param_name = included_hook_parameter(def, in_singleton_class)?;
     let stmts = flatten_statements(def.body()?);
     let [stmt] = &stmts[..] else { return None };
     let sc = stmt.as_singleton_class_node()?;
@@ -1934,9 +1940,18 @@ pub(super) fn included_hook_class_methods_body<'pr>(
     sc.body()
 }
 
-fn included_hook_parameter(def: &ruby_prism::DefNode<'_>) -> Option<String> {
-    let receiver = def.receiver()?;
-    receiver.as_self_node()?;
+/// The single parameter of a `Module#included` hook. Ruby spells the hook
+/// two ways: `def self.included(base)` in the module body, or
+/// `def included(base)` inside the module's own `class << self`
+/// (`in_singleton_class`), as action_policy's policy modules do.
+fn included_hook_parameter(def: &ruby_prism::DefNode<'_>, in_singleton_class: bool) -> Option<String> {
+    match def.receiver() {
+        Some(receiver) if !in_singleton_class => {
+            receiver.as_self_node()?;
+        }
+        None if in_singleton_class => {}
+        _ => return None,
+    }
     if constant_id_str(&def.name()) != "included" {
         return None;
     }
@@ -1962,8 +1977,8 @@ fn included_hook_parameter(def: &ruby_prism::DefNode<'_>) -> Option<String> {
 /// replaces its only effect; retaining it would reference the nested
 /// module that ingestion flattened away. Extra statements are NOT safe
 /// to consume, nor is an extend of any other constant or receiver.
-fn is_class_methods_bridge(def: &ruby_prism::DefNode<'_>) -> bool {
-    let Some(param_name) = included_hook_parameter(def) else { return false };
+fn is_class_methods_bridge(def: &ruby_prism::DefNode<'_>, in_singleton_class: bool) -> bool {
+    let Some(param_name) = included_hook_parameter(def, in_singleton_class) else { return false };
     let Some(body) = def.body() else { return false };
     let stmts = flatten_statements(body);
     let [stmt] = &stmts[..] else { return false };
@@ -1985,8 +2000,13 @@ fn is_class_methods_bridge(def: &ruby_prism::DefNode<'_>) -> bool {
 /// `base.extend ClassMethods` is the carrier splice's job, as in the
 /// complete bridge, and the rest of the hook still runs. AASM writes
 /// `base.extend AASM::ClassMethods` and then registers `base`.
-fn drop_class_methods_extend(def: &ruby_prism::DefNode<'_>, owner: &ClassId, m: &mut MethodDef) {
-    let Some(param) = included_hook_parameter(def) else { return };
+fn drop_class_methods_extend(
+    def: &ruby_prism::DefNode<'_>,
+    in_singleton_class: bool,
+    owner: &ClassId,
+    m: &mut MethodDef,
+) {
+    let Some(param) = included_hook_parameter(def, in_singleton_class) else { return };
     let owner: Vec<&str> = owner.0.as_str().trim_start_matches("::").split("::").collect();
     let is_redundant = |stmt: &Expr| {
         let ExprNode::Send { recv: Some(recv), method, args, block: None, .. } = &*stmt.node else { return false };
@@ -2147,7 +2167,9 @@ fn walk_decl_body_with_visibility<'pr>(
         });
     }
     let has_class_methods = statements.iter().any(|stmt| stmt.as_module_node()
-        .is_some_and(|m| module_name_path(&m).as_deref() == Some(&["ClassMethods".to_string()])));
+        .is_some_and(|m| module_name_path(&m).as_deref() == Some(&["ClassMethods".to_string()])))
+        || matches!(mode, DeclBodyMode::SingletonClass { has_class_methods: true, .. });
+    let hook_in_singleton_class = matches!(mode, DeclBodyMode::SingletonClass { included_hook: true, .. });
     // An ActiveSupport::Concern's `included do def x … end end` defines `x`
     // on every includer. Hoisted into the module's own instance methods it
     // is found by the same lookup, unless the module also defines `x`
@@ -2316,16 +2338,16 @@ fn walk_decl_body_with_visibility<'pr>(
             // same class-receiver-methods bucket as `class_methods do`
             // / `module ClassMethods`, and (like those) contributes no
             // `included` method of its own.
-            if let Some(singleton_body) = included_hook_class_methods_body(&def) {
+            if let Some(singleton_body) = included_hook_class_methods_body(&def, hook_in_singleton_class) {
                 out.extend(walk_decl_body_with_visibility(Some(singleton_body), owner, file, DeclBodyMode::ClassMethods, visibility)?);
                 continue;
             }
-            if has_class_methods && is_class_methods_bridge(&def) {
+            if has_class_methods && is_class_methods_bridge(&def, hook_in_singleton_class) {
                 continue;
             }
             let mut m = ingest_library_method(&def, owner, file)?;
             if has_class_methods {
-                drop_class_methods_extend(&def, owner, &mut m);
+                drop_class_methods_extend(&def, hook_in_singleton_class, owner, &mut m);
             }
             visibility.apply(&statement, &mut m);
             if module_function_active && m.receiver == MethodReceiver::Instance {
@@ -2398,7 +2420,11 @@ fn walk_decl_body_with_visibility<'pr>(
         // `class << self ... end` — singleton class block. Body
         // defines class-level methods on the enclosing scope.
         if let Some(sc) = stmt.as_singleton_class_node() {
-            out.extend(walk_decl_body_with_visibility(sc.body(), owner, file, DeclBodyMode::SingletonClass, visibility)?);
+            let mode = DeclBodyMode::SingletonClass {
+                included_hook: mode == DeclBodyMode::Instance,
+                has_class_methods: mode == DeclBodyMode::Instance && has_class_methods,
+            };
+            out.extend(walk_decl_body_with_visibility(sc.body(), owner, file, mode, visibility)?);
             continue;
         }
         // `module ClassMethods … end` — ActiveSupport::Concern's OTHER
@@ -2504,7 +2530,8 @@ fn walk_decl_body_with_visibility<'pr>(
                                 })
                             })
                         {
-                            out.extend(walk_decl_body_with_visibility(sc.body(), owner, file, DeclBodyMode::SingletonClass, visibility)?);
+                            let mode = DeclBodyMode::SingletonClass { included_hook: false, has_class_methods: false };
+                            out.extend(walk_decl_body_with_visibility(sc.body(), owner, file, mode, visibility)?);
                             hoisted.push((inner.location().start_offset() as u32, inner.location().end_offset() as u32));
                             continue;
                         }
@@ -2548,7 +2575,7 @@ fn walk_decl_body_with_visibility<'pr>(
                     "include" => {
                         if let Some(args) = call.arguments() {
                             let args: Vec<_> = args.arguments().iter().collect();
-                            if mode == DeclBodyMode::SingletonClass
+                            if matches!(mode, DeclBodyMode::SingletonClass { .. })
                                 && args.iter().all(|arg| constant_path_of(arg).is_some())
                             {
                                 let mut expr = ingest_expr(&stmt, file)?;
@@ -2613,7 +2640,7 @@ fn walk_decl_body_with_visibility<'pr>(
                         }
                     }
                     "send" | "public_send"
-                        if mode == DeclBodyMode::SingletonClass
+                        if matches!(mode, DeclBodyMode::SingletonClass { .. })
                             && call.arguments().is_some_and(|args| {
                                 args.arguments().iter().next().is_some_and(|arg| {
                                     symbol_value(&arg).as_deref() == Some("include")
@@ -3993,13 +4020,34 @@ pub fn ingest_concern_class_method_spans(
                 // is not this node and stays on the module.
                 if singleton.expression().as_self_node().is_some() {
                     defs_in(singleton.body(), file, &mut spans);
+                    // Except the module's own `def included(base)`: that
+                    // hook runs when the module is included and is not
+                    // copied onto includers, the same as
+                    // `def self.included(base)` in the module body.
+                    let hooks: Vec<_> = singleton.body().map(flatten_statements).unwrap_or_default()
+                        .iter()
+                        .filter_map(|stmt| visibility::definition(stmt))
+                        .filter(|def| included_hook_parameter(def, true).is_some())
+                        .collect();
+                    for def in hooks {
+                        let hook = super::util::def_name_span(&def, file);
+                        spans.retain(|span| *span != hook);
+                        if is_class_methods_bridge(&def, true) {
+                            bridges.push(hook);
+                        }
+                        // `class << base` inside the hook defines includer
+                        // class methods, as in the `def self.included` form.
+                        if let Some(singleton_body) = included_hook_class_methods_body(&def, true) {
+                            defs_in(Some(singleton_body), file, &mut spans);
+                        }
+                    }
                 }
             }
             if let Some(def) = super::visibility::definition(&stmt) {
-                if let Some(singleton_body) = included_hook_class_methods_body(&def) {
+                if let Some(singleton_body) = included_hook_class_methods_body(&def, false) {
                     defs_in(Some(singleton_body), file, &mut spans);
                 }
-                if is_class_methods_bridge(&def) {
+                if is_class_methods_bridge(&def, false) {
                     bridges.push(super::util::def_name_span(&def, file));
                 }
             }
