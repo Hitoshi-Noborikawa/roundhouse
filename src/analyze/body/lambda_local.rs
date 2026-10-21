@@ -67,6 +67,7 @@ impl Seeds {
         for (name, ty) in params.iter().zip(self.positional.iter()) {
             let Some(ty) = ty else { continue };
             inner.class_objects.remove(name);
+            inner.query_class_objects.remove(name);
             inner.local_bindings.insert(name.clone(), ty.clone());
         }
     }

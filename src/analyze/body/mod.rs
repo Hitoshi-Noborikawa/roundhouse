@@ -124,6 +124,8 @@ pub struct Ctx {
     /// Locals whose assigned value is proven to be a class/module object.
     /// Nominal instance types alone do not establish this identity.
     pub class_objects: std::collections::HashSet<Symbol>,
+    /// Locals an `is_a?(Class)` / `is_a?(Module)` guard proved class objects of unknown identity: Module queries only (`answers_module_queries`).
+    pub query_class_objects: std::collections::HashSet<Symbol>,
     /// Module/class-level typed constants such as
     /// `STATUS_CODES = { ok: 200, ... }.freeze`. Rubydex IDs resolve
     /// source-backed reads; this scope types generated expressions.
@@ -386,6 +388,8 @@ pub struct BodyTyper<'a> {
     /// Parameter types for the lambda assignment currently being retyped
     /// from its `.call` sites. Empty during an ordinary walk.
     lambda_seeds: std::cell::RefCell<Option<lambda_local::Seeds>>,
+    /// The block parameter `block_ctx_for` proved a class object (`klass.tap { |k| }`), for the Lambda arm that clears its parameters.
+    block_class_param: std::cell::RefCell<Option<Symbol>>,
 }
 
 impl<'a> BodyTyper<'a> {
@@ -521,6 +525,7 @@ impl<'a> BodyTyper<'a> {
             helper_modules: None,
             open_classes: None,
             lambda_seeds: std::cell::RefCell::new(None),
+            block_class_param: std::cell::RefCell::new(None),
         }
     }
 
@@ -826,6 +831,7 @@ impl<'a> BodyTyper<'a> {
                     union_of(ctx.local_bindings.get(&name).cloned().unwrap_or(Ty::Nil), ty)
                 };
                 ctx.class_objects.remove(&name);
+                ctx.query_class_objects.remove(&name);
                 ctx.local_bindings.insert(name, ty);
             }
         };
@@ -954,6 +960,27 @@ impl<'a> BodyTyper<'a> {
             {
                 !self.owns_operator(r.ty.as_ref(), method, true)
             }
+            _ => false,
+        }
+    }
+
+    /// A class object of unknown identity: any class answers a Module query
+    /// as Ruby runs it, but a write through it (`define_method`) would land
+    /// on whichever subclass it is, which no method table here can follow.
+    fn answers_module_queries(&self, expr: &Expr, ty: Option<&Ty>, ctx: &Ctx) -> bool {
+        if self.is_class_object(expr, ctx) {
+            return true;
+        }
+        match &*expr.node {
+            ExprNode::Send { recv: Some(r), method, args, block: None, .. } if args.is_empty() => match method.as_str() {
+                "class" => !self.owns_operator(r.ty.as_ref(), method, self.is_class_object(r, ctx)),
+                // `safe_constantize` is left out: it answers nil for a name nothing defines.
+                "constantize" => matches!(r.ty.as_ref(), Some(Ty::Str))
+                    && !self.owns_operator(Some(&Ty::Class { id: ClassId(Symbol::from("String")), args: vec![].into() }), method, false),
+                _ => false,
+            },
+            ExprNode::Var { name, .. } => ctx.query_class_objects.contains(name)
+                || matches!(ty, Some(Ty::Class { id, .. }) if matches!(id.0.as_str(), "Class" | "Module")),
             _ => false,
         }
     }
@@ -1249,6 +1276,7 @@ impl<'a> BodyTyper<'a> {
                         }
                         let mut inner = ctx.clone();
                         inner.class_objects.remove(name);
+                        inner.query_class_objects.remove(name);
                         inner.local_bindings.insert(
                             name.clone(),
                             rescued.unwrap_or_else(|| Ty::Class {
@@ -1483,6 +1511,7 @@ impl<'a> BodyTyper<'a> {
                 let mut inner = ctx.clone();
                 inner.local_bindings.insert(name.clone(), v_ty);
                 inner.class_objects.remove(name);
+                inner.query_class_objects.remove(name);
                 if self.is_class_object(value, ctx) { inner.class_objects.insert(name.clone()); }
                 self.analyze_expr(body, &inner)
             }
@@ -1491,6 +1520,10 @@ impl<'a> BodyTyper<'a> {
                 let mut inner = ctx.clone();
                 for name in params.iter().chain(rest_param.iter()).chain(block_param.iter()) {
                     inner.class_objects.remove(name);
+                    inner.query_class_objects.remove(name);
+                }
+                if let Some(name) = self.block_class_param.borrow_mut().take().filter(|n| params.first() == Some(n)) {
+                    inner.class_objects.insert(name);
                 }
                 // Call-site evidence for a lambda stored in a local. Taken
                 // here so a nested lambda does not consume it. Block
@@ -1515,6 +1548,7 @@ impl<'a> BodyTyper<'a> {
                         continue;
                     }
                     inner.class_objects.remove(&param.name);
+                    inner.query_class_objects.remove(&param.name);
                     inner.local_bindings.insert(param.name.clone(), ty);
                 }
                 if let Some(seeds) = &seeds {
@@ -2309,7 +2343,11 @@ impl<'a> BodyTyper<'a> {
                 if matches!(dispatched, Ty::Var { .. } | Ty::Untyped) && self.inquirers.is_some()
                     && (recv.is_some() || (ctx.self_ty.is_some() && send::is_module_protocol(method)))
                     && !self.owns_operator(recv_ty.as_ref(), method, class_object_receiver) {
-                    let class_object = class_object_receiver;
+                    let class_object = class_object_receiver
+                        || (send::is_module_query(method) && recv.as_ref().is_some_and(|r| self.answers_module_queries(r, recv_ty.as_ref(), ctx)));
+                    if class_object && send::is_module_query(method) {
+                        expr.decisions |= crate::expr::MODULE_QUERY;
+                    }
                     // `include?` is Module's ancestor check AND String/Enumerable
                     // membership. Refuse Module protocol only for true Module-only
                     // names, or for `include?` on a nominal class *instance* (where
@@ -2569,6 +2607,7 @@ impl<'a> BodyTyper<'a> {
                             let proven = self.is_class_object(value, &local_ctx);
                             forget_class_object_writes(value, &mut local_ctx);
                             local_ctx.class_objects.remove(name);
+                            local_ctx.query_class_objects.remove(name);
                             if proven { local_ctx.class_objects.insert(name.clone()); }
                             // Before the binding insert below: the lambda body
                             // was typed in this `local_ctx`, without its own name.
@@ -3228,7 +3267,7 @@ fn forget_class_object_writes(expr: &Expr, ctx: &mut Ctx) {
         }
         _ => {}
     }
-    for name in names { ctx.class_objects.remove(&name); }
+    for name in names { ctx.class_objects.remove(&name); ctx.query_class_objects.remove(&name); }
     expr.node.for_each_child(&mut |child| forget_class_object_writes(child, ctx));
 }
 

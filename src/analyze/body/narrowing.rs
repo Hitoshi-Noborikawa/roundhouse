@@ -326,6 +326,12 @@ pub(super) fn apply_narrowing(ctx: &Ctx, pred: &NarrowPred, then_branch: bool) -
     narrowings(pred, then_branch, &mut |key, narrow| {
         narrow_binding(&mut new_ctx, key, |current| narrow(current))
     });
+    if let NarrowPred::IsA(VarKey::Local(name), Ty::Class { id, .. }) | NarrowPred::IsNotA(VarKey::Local(name), Ty::Class { id, .. }) = pred
+        && matches!(pred, NarrowPred::IsA(..)) == then_branch
+        && matches!(id.0.as_str(), "Class" | "Module")
+    {
+        new_ctx.query_class_objects.insert(name.clone());
+    }
     new_ctx
 }
 

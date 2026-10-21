@@ -6239,6 +6239,18 @@ fn report_unsupported_bundled_constants(app: &App, target: BuildTarget) {
                 format!("`RUBY_VERSION` is the running Ruby's, which the {target} emit has none of"),
             );
         }
+        // A strict emit spelled these as methods its class objects do not have.
+        if !matches!(target, "jruby" | "spinel")
+            && let crate::expr::ExprNode::Send { method, .. } = &*expr.node
+            && expr.decisions & crate::expr::MODULE_QUERY != 0
+        {
+            emit::diagnostics::report_unsupported(
+                expr.span,
+                target,
+                "Module protocol",
+                format!("`{}` asks a class object what it holds when the program runs, which the {target} emit cannot answer", method.as_str()),
+            );
+        }
         // A name computed when it runs: the Ruby family defines it then, which no compiled target can.
         if !matches!(target, "jruby")
             && let crate::expr::ExprNode::Send { recv, method, args, .. } = &*expr.node
