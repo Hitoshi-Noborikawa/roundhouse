@@ -622,6 +622,10 @@ fn handle_create_index(stmt: &str, file: &str, schema: &mut Schema, gaps: &mut V
     rest = rest[consumed..].trim_start();
     let Some(r5) = strip_prefix_ci(rest, "ON") else { return };
     rest = r5.trim_start();
+    // pg_dump's form for an index on a partitioned parent: `ON ONLY parent`.
+    if let Some(end) = consume_sql_keyword_ci(rest, 0, "ONLY") {
+        rest = rest[end..].trim_start();
+    }
     let Some((table_name, consumed2)) = read_ident(rest, 0) else { return };
     let table_sym = Symbol::from(table_name);
     let after_table = &rest[consumed2..];
