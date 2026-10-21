@@ -109,6 +109,8 @@ impl ConstScope {
     }
 }
 
+const RUNTIME_MIXIN: &str = "Module mixin at run time";
+
 /// Recursion context — what `self` is, what locals/ivars are in scope.
 /// Immutable during descent; clone to enter a new scope (Let body,
 /// block body, Seq walk with new ivar/local bindings).
@@ -178,6 +180,8 @@ pub struct Ctx {
     pub claimed_macro_template: bool,
     // `!class_side` cannot stand in: scope bodies type with it false, and their bare `active` is the scope.
     pub instance_body: bool,
+    // `class_side` cannot stand in: a `class_eval` block in an initializer is class-side too, and its `include` runs at load
+    pub method_body: bool,
 }
 
 /// User-class dispatch data: table name (if any), instance shape,
@@ -1651,7 +1655,7 @@ impl<'a> BodyTyper<'a> {
                     return ty.clone();
                 }
                 if matches!(&crate::expr::ExprCold::diagnostic(&expr.cold), Some(crate::diagnostic::DiagnosticKind::Unsupported { construct, .. })
-                    if matches!(construct.as_str(), "Module protocol" | "ActiveModel::Errors" | "ActiveModel::Error" | "Rails" | "ActiveRecord::Base" | "String extension" | "Hash extension" | "not_nil!" | "Object extension" | "Module callback argument"))
+                    if matches!(construct.as_str(), "Module protocol" | "ActiveModel::Errors" | "ActiveModel::Error" | "Rails" | "ActiveRecord::Base" | "String extension" | "Hash extension" | "not_nil!" | "Object extension" | "Module callback argument" | RUNTIME_MIXIN))
                 { crate::expr::ExprCold::set_diagnostic(&mut expr.cold, None); }
                 expr.decisions &= !crate::expr::RESOLVED_DATA_FACTORY;
                 if let Some(ty) = self.data_factories.and_then(|factories| factories.get(&expr_span)) {
@@ -1886,6 +1890,10 @@ impl<'a> BodyTyper<'a> {
                             block_ctx.instance_body = matches!(method.as_str(), "instance_eval" | "instance_exec")
                                 && self.is_instance(receiver, ctx);
                         }
+                    }
+                    // A `Module.new`/`Class.new` block is the new class's body, so its `include` is that class's ancestry
+                    if method.as_str() == "new" && class_object_receiver {
+                        block_ctx.method_body = false;
                     }
                     let method_ref_ty = self.analyze_expr(b, &block_ctx);
                     // The Lambda walker stores the analyzed body's type
@@ -2347,6 +2355,24 @@ impl<'a> BodyTyper<'a> {
                 let class_object_receiver = class_object_receiver
                     || (recv.as_ref().is_none_or(|r| matches!(&*r.node, ExprNode::SelfRef))
                         && send::is_module_protocol(method) && self.self_is_module_instance(ctx));
+                // A local built by `Class.new`/`Module.new` is a class still being assembled, not one the program already reads
+                let live_class = recv.as_ref().map_or(ctx.class_side, |r| match &*r.node {
+                    ExprNode::SelfRef => ctx.class_side,
+                    ExprNode::Const { .. } => self.is_class_object(r, ctx),
+                    _ => false,
+                });
+                if ctx.method_body && live_class && self.inquirers.is_some() && !ctx.claimed_macro_template
+                    && matches!(method.as_str(), "include" | "prepend" | "extend")
+                    && !self.owns_operator(recv_ty.as_ref(), method, true)
+                {
+                    crate::expr::ExprCold::set_diagnostic(&mut expr.cold, Some(crate::diagnostic::DiagnosticKind::Unsupported {
+                        target: None,
+                        construct: Symbol::from(RUNTIME_MIXIN),
+                        detail: format!("`{}` in a method mixes a module into a live class, which needs a method table \
+                                         that changes while the program runs; no compiled target has one", method.as_str()),
+                    }));
+                    return dispatched;
+                }
                 if matches!(dispatched, Ty::Var { .. } | Ty::Untyped) && self.inquirers.is_some()
                     && (recv.is_some() || (ctx.self_ty.is_some() && send::is_module_protocol(method)))
                     && !self.owns_operator(recv_ty.as_ref(), method, class_object_receiver) {
