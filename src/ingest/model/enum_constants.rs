@@ -77,6 +77,24 @@ pub(in crate::ingest) struct EnumConstants {
     /// Superclass identities are lookup barriers, never additional enum inputs.
     parents: std::collections::HashMap<String, Vec<ScopedName>>,
     facts: Vec<SourceFact>,
+    /// Each class or module's folded constants, by qualified name, for a
+    /// validation in another body that names them: every body that
+    /// declares the owner, merged. `None`: a body not at a file's or
+    /// body's top level, or a compact `class A::B` inside another
+    /// namespace, whose owner is not certain.
+    owner_consts: std::collections::HashMap<String, Option<super::ClassConsts>>,
+    /// `NAME = …` writes per qualified name, at any depth and in every
+    /// body: a name written twice (a reopened owner writing it again)
+    /// has the value of whichever file loads last.
+    write_counts: std::collections::HashMap<String, usize>,
+    /// Constant names some input file writes outside one plain top-level
+    /// `NAME = …`, mutates, or lets a variable hold ([`super::ConstTaint`]
+    /// over the whole file). By name, whatever owner the write names.
+    foreign_taint: std::collections::HashSet<String>,
+    /// Owner names a reflective call reaches (`Rule.const_set`,
+    /// `Rule.send(:remove_const, …)`, a receiverless `const_set` in the
+    /// owner's body): any of their constants may be replaced.
+    reflected: std::collections::HashSet<String>,
 }
 
 impl EnumConstants {
@@ -212,6 +230,39 @@ impl EnumConstants {
             namespace = parent;
         }
         true
+    }
+
+    /// The owner, member and owner table for a constant a body reads as
+    /// `key` (`Rule::TEXT_SIZE_LIMIT`, `::Fasp::DATA_CATEGORIES`, or a bare
+    /// `DATA_CATEGORIES` inside `module Fasp`), resolved the way Ruby does
+    /// from the reference's lexical `owners` (innermost first). `None`
+    /// when Ruby may read anything other than the owner's folded value:
+    /// an unknown or shadowed owner, an owner declared in several bodies
+    /// or reached by reflection, or a name tainted in any input file.
+    pub(in crate::ingest) fn owner_constant(
+        &self,
+        key: &str,
+        owners: &[String],
+    ) -> Option<(String, String, &super::ClassConsts)> {
+        let name = self.resolve_name(key, owners)?;
+        if !self.namespace_chain_valid(&name) {
+            return None;
+        }
+        let (owner, member) = name.rsplit_once("::")?;
+        if self.foreign_taint.contains(member)
+            || owner.split("::").any(|segment| self.reflected.contains(segment))
+            || self.write_counts.get(&name) != Some(&1)
+        {
+            return None;
+        }
+        let table = self.owner_consts.get(owner)?.as_ref()?;
+        Some((owner.to_string(), member.to_string(), table))
+    }
+
+    /// Whether any recorded source defines a constant, class or module
+    /// named `name` at any depth (`Regexp`, `Admin::Regexp`).
+    pub(in crate::ingest) fn defines_name(&self, name: &str) -> bool {
+        self.values.keys().any(|key| key.split("::").any(|segment| segment == name))
     }
 
     pub(in crate::ingest) fn resolve(
