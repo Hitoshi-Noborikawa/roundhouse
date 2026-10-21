@@ -3,6 +3,61 @@
 use super::emit_and_run;
 
 #[test]
+fn parameters_parse_error_preserves_the_active_exception_message() {
+    emit_and_run::empty_app()
+        .write(
+            "app/controllers/parses_controller.rb",
+            r#"class ParsesController < ActionController::API
+  rescue_from ActionDispatch::Http::Parameters::ParseError, with: :bad_json
+
+  def show
+    raise ArgumentError, "malformed input"
+  rescue ArgumentError
+    raise ActionDispatch::Http::Parameters::ParseError
+  end
+
+  def constructed
+    raise ArgumentError, "constructed input"
+  rescue ArgumentError
+    raise ActionDispatch::Http::Parameters::ParseError.new
+  end
+
+  private
+
+  def bad_json(error)
+    render json: { error: error.message }, status: :bad_request
+  end
+end
+"#,
+        )
+        .write(
+            "config/routes.rb",
+            "Rails.application.routes.draw do\n  get '/parse', to: 'parses#show'\n  get '/constructed', to: 'parses#constructed'\nend\n",
+        )
+        .run_ruby(
+            r#"
+{ "/parse" => "malformed input", "/constructed" => "constructed input" }.each do |path, message|
+  status, _headers, body = Main.run_rack("REQUEST_METHOD" => "GET", "PATH_INFO" => path,
+                                        "QUERY_STRING" => "", "rack.input" => StringIO.new(""))
+  text = +""
+  body.each { |part| text << part }
+  body.close if body.respond_to?(:close)
+  expected = [400, JSON.generate(error: message)]
+  raise "parse response #{[status, text].inspect}" unless [status, text] == expected
+end
+"#,
+        )
+        .assert_passes();
+}
+
+#[test]
+fn parameters_parse_error_constructor_contract_matches_rails() {
+    emit_and_run::empty_app()
+        .run_ruby(include_str!("parse_error_contract.rb"))
+        .assert_passes();
+}
+
+#[test]
 fn parameters_parse_error_resolves_and_reaches_the_bad_request_handler() {
     emit_and_run::empty_app()
         .write(

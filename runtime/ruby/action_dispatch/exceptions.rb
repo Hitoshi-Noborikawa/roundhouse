@@ -17,6 +17,11 @@ module ActionDispatch
   module Http
     module Parameters
       class ParseError < StandardError
+        # Omission wraps the active error; explicit nil keeps Exception's
+        # class-name message. Rails also raises when no error is active.
+        def initialize(message = $!.message)
+          super(message)
+        end
       end
     end
 
