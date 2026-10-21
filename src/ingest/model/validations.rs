@@ -66,6 +66,9 @@ struct BuiltRule {
     rule: crate::dialect::ValidationRule,
     if_cond: Option<Expr>,
     unless_cond: Option<Expr>,
+    /// `on:` in the rule's own hash, which wins over the call-level one:
+    /// `None` unset, `Some(guard)` as `context_guard` reads it.
+    on_guard: Option<Option<Expr>>,
     /// The rule's own hash named `allow_nil:` / `allow_blank:`, which
     /// wins over the call-level option (Rails merges the call's options
     /// under each validator's own).
@@ -75,7 +78,7 @@ struct BuiltRule {
 
 impl BuiltRule {
     fn bare(rule: crate::dialect::ValidationRule) -> Self {
-        Self { rule, if_cond: None, unless_cond: None, own_allow_nil: false, own_allow_blank: false }
+        Self { rule, if_cond: None, unless_cond: None, on_guard: None, own_allow_nil: false, own_allow_blank: false }
     }
 }
 
@@ -303,7 +306,10 @@ pub(super) fn parse_validates_call(
         for draft in &drafts {
             // A condition inside the rule hash replaces the call-level
             // one for that key — the other key still merges in.
-            let if_cond = and_guard(on_guard.clone(), draft.if_cond.clone().or_else(|| call_if_cond.clone()));
+            // The rule's own `on:` replaces the call's, as Rails merges the
+            // call's options under each validator's own.
+            let rule_on = draft.on_guard.clone().unwrap_or_else(|| on_guard.clone());
+            let if_cond = and_guard(rule_on, draft.if_cond.clone().or_else(|| call_if_cond.clone()));
             let unless_cond = draft.unless_cond.clone().or_else(|| call_unless_cond.clone());
             if let Some(current) = grouped.as_mut() {
                 if current.if_cond == if_cond && current.unless_cond == unless_cond {
@@ -486,6 +492,10 @@ fn parse_uniqueness(value: &Node<'_>, file: &str, class_consts: &super::ClassCon
                     built.own_allow_blank = true;
                 }
                 None => gaps.push("uniqueness: allow_blank".to_string()),
+            },
+            "on" => match context_guard(&child) {
+                Some(guard) => built.on_guard = Some(guard),
+                None => gaps.push("on".to_string()),
             },
             "if" => push_condition(&child, file, &mut built.if_cond, "if", &mut gaps),
             "unless" => push_condition(&child, file, &mut built.unless_cond, "unless", &mut gaps),
@@ -759,6 +769,10 @@ fn parse_bool_or_hash(
         };
         let child = assoc.value();
         match key.as_str() {
+            "on" => match context_guard(&child) {
+                Some(guard) => built.on_guard = Some(guard),
+                None => gaps.push("on".to_string()),
+            },
             "if" => push_condition(&child, file, &mut built.if_cond, "if", &mut gaps),
             "unless" => {
                 push_condition(&child, file, &mut built.unless_cond, "unless", &mut gaps)
@@ -845,6 +859,10 @@ fn parse_numericality(value: &Node<'_>, file: &str, class_consts: &super::ClassC
                 None => gaps.push("numericality: less_than_or_equal_to".to_string()),
             },
             "equal_to" | "other_than" => gaps.push(format!("numericality: {key}")),
+            "on" => match context_guard(&child) {
+                Some(guard) => built.on_guard = Some(guard),
+                None => gaps.push("on".to_string()),
+            },
             "if" => push_condition(&child, file, &mut built.if_cond, "if", &mut gaps),
             "unless" => {
                 push_condition(&child, file, &mut built.unless_cond, "unless", &mut gaps)
@@ -908,6 +926,10 @@ fn parse_set(value: &Node<'_>, file: &str, exclusion: bool, class_consts: &super
                 Some(spec) => values = Some(spec),
                 None => gaps.push(format!("{label}: in")),
             },
+            "on" => match context_guard(&child) {
+                Some(guard) => built.on_guard = Some(guard),
+                None => gaps.push("on".to_string()),
+            },
             "if" => push_condition(&child, file, &mut built.if_cond, "if", &mut gaps),
             "unless" => {
                 push_condition(&child, file, &mut built.unless_cond, "unless", &mut gaps)
@@ -967,6 +989,10 @@ fn parse_format(value: &Node<'_>, file: &str, class_consts: &super::ClassConsts)
             "with" => match resolve_format_regex(&child, class_consts) {
                 Some(resolved) => pattern = Some(resolved),
                 None => gaps.push("format: with".to_string()),
+            },
+            "on" => match context_guard(&child) {
+                Some(guard) => built.on_guard = Some(guard),
+                None => gaps.push("on".to_string()),
             },
             "if" => push_condition(&child, file, &mut built.if_cond, "if", &mut gaps),
             "unless" => {
@@ -1063,6 +1089,10 @@ fn parse_length_rule(value: &ruby_prism::Node<'_>, file: &str, class_consts: &su
             "message" => match string_value(&child) {
                 Some(text) => message = Some(text),
                 None => gaps.push("length: message".to_string()),
+            },
+            "on" => match context_guard(&child) {
+                Some(guard) => built.on_guard = Some(guard),
+                None => gaps.push("on".to_string()),
             },
             "if" => push_condition(&child, file, &mut built.if_cond, "if", &mut gaps),
             "unless" => {

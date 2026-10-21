@@ -300,6 +300,8 @@ mod validates_lambda_conditions;
 mod validates_format_flags;
 #[path = "emit_and_run/concern_included_constants.rs"]
 mod concern_included_constants;
+#[path = "emit_and_run/validates_rule_on.rs"]
+mod validates_rule_on;
 #[path = "emit_and_run/regex_string_interpolation.rs"]
 mod regex_string_interpolation;
 #[path = "emit_and_run/numericality_allow_nil_blank.rs"]
