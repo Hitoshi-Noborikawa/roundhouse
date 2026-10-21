@@ -5846,6 +5846,7 @@ pub const RUBY_FAMILY_RUNTIME_CONSTANTS: &[&str] = &[
     "ActionController::BadRequest",
     "ActionController::InvalidAuthenticityToken",
     "ActionController::RoutingError",
+    "ActionDispatch::Http::Parameters::ParseError",
     "AbstractController::ActionNotFound",
     "ActionView::MissingTemplate",
     // `runtime/ruby/active_record/arel.rb` — node constructors the ruby

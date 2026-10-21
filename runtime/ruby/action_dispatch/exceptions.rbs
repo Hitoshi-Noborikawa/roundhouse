@@ -5,6 +5,11 @@ module ActionDispatch
   end
 
   module Http
+    module Parameters
+      class ParseError < StandardError
+      end
+    end
+
     module MimeNegotiation
       class InvalidType < StandardError
       end
