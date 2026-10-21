@@ -3123,11 +3123,12 @@ fn carry_included_block_includes_into_controllers(app: &mut App) {
 
     // `concern_model_items` holds every concern's `included do`
     // statements, a controller concern's too.
-    let block_includes: HashMap<ClassId, Vec<Expr>> = app
+    // One entry per `include` call, its arguments as written.
+    let block_includes: HashMap<ClassId, Vec<Vec<Expr>>> = app
         .concern_model_items
         .iter()
         .filter_map(|(module, items)| {
-            let args: Vec<Expr> = items
+            let calls: Vec<Vec<Expr>> = items
                 .iter()
                 .filter_map(|item| match item {
                     ModelBodyItem::Unknown { expr, .. } => Some(expr),
@@ -3135,13 +3136,12 @@ fn carry_included_block_includes_into_controllers(app: &mut App) {
                 })
                 .filter_map(|expr| match &*expr.node {
                     ExprNode::Send { recv: None, method, args, block: None, .. } if method.as_str() == "include" => {
-                        Some(args.iter().filter(|a| matches!(&*a.node, ExprNode::Const { .. })).cloned())
+                        Some(args.iter().filter(|a| matches!(&*a.node, ExprNode::Const { .. })).cloned().collect())
                     }
                     _ => None,
                 })
-                .flatten()
                 .collect();
-            (!args.is_empty()).then(|| (module.clone(), args))
+            (!calls.is_empty()).then(|| (module.clone(), calls))
         })
         .collect();
     if block_includes.is_empty() {
@@ -3155,22 +3155,25 @@ fn carry_included_block_includes_into_controllers(app: &mut App) {
         }
     }
 
-    // Ruby stacks each later include ahead of the earlier ones, hence
-    // `rev()`; a module already on the controller is skipped, which also
-    // ends an include cycle.
+    // Ruby puts a later `include` call ahead of an earlier one, hence
+    // `rev()` over the calls, but keeps one call's `include A, B` as
+    // written, with `A` ahead. A module already on the controller is
+    // skipped, which also ends an include cycle.
     fn ahead_of(
         module: &ClassId,
-        block_includes: &HashMap<ClassId, Vec<Expr>>,
+        block_includes: &HashMap<ClassId, Vec<Vec<Expr>>>,
         seen: &mut HashSet<ClassId>,
         out: &mut Vec<Expr>,
     ) {
-        for included in block_includes.get(module).into_iter().flatten().rev() {
-            let Some(id) = id_of(included) else { continue };
-            if !seen.insert(id.clone()) {
-                continue;
+        for call in block_includes.get(module).into_iter().flatten().rev() {
+            for included in call {
+                let Some(id) = id_of(included) else { continue };
+                if !seen.insert(id.clone()) {
+                    continue;
+                }
+                ahead_of(&id, block_includes, seen, out);
+                out.push(included.clone());
             }
-            ahead_of(&id, block_includes, seen, out);
-            out.push(included.clone());
         }
     }
 

@@ -8884,6 +8884,70 @@ fn an_include_from_an_included_block_takes_precedence_on_the_controller() {
     .assert_passes();
 }
 
+/// `include First, Second` in an `included do` block puts `First` ahead
+/// of `Second`, as Ruby does, so `First`'s `guarded_title` wins.
+#[test]
+fn a_multi_module_include_in_an_included_block_keeps_its_order_on_the_controller() {
+    controller_concern_app(
+        "module Outer\n  extend ActiveSupport::Concern\n\n  included do\n    include First, Second\n  end\nend\n",
+        &[
+            (
+                "app/controllers/concerns/first.rb",
+                "module First\n  extend ActiveSupport::Concern\n\n  def guarded_title\n    \"first\"\n  end\nend\n",
+            ),
+            (
+                "app/controllers/concerns/second.rb",
+                "module Second\n  extend ActiveSupport::Concern\n\n  def guarded_title\n    \"second\"\n  end\nend\n",
+            ),
+        ],
+        "class StampedController < ApplicationController\n  def show\n    render plain: guarded_title\n  end\n\n  def plain\n    render plain: guarded_title\n  end\nend\n",
+        "  test \"First's method wins over Second's\" do\n    get \"/stamped/1\"\n    assert_equal \"first\", response.body\n  end\n",
+    )
+    .run_test("test/controllers/stamped_controller_test.rb")
+    .assert_passes();
+}
+
+/// `include Guard` written inside `module Outer` names `Outer::Guard`, as
+/// Ruby's lexical lookup finds it.
+#[test]
+fn an_included_block_include_resolves_in_its_concerns_namespace() {
+    controller_concern_app(
+        "module Outer\n  extend ActiveSupport::Concern\n\n  included do\n    include Guard\n  end\nend\n",
+        &[(
+            "app/controllers/concerns/outer/guard.rb",
+            "module Outer\n  module Guard\n    extend ActiveSupport::Concern\n\n    def guarded_title\n      \"namespaced\"\n    end\n  end\nend\n",
+        )],
+        "class StampedController < ApplicationController\n  def show\n    render plain: guarded_title\n  end\n\n  def plain\n    render plain: guarded_title\n  end\nend\n",
+        "  test \"Outer::Guard's method reaches the controller\" do\n    get \"/stamped/1\"\n    assert_equal \"namespaced\", response.body\n  end\n",
+    )
+    .run_test("test/controllers/stamped_controller_test.rb")
+    .assert_passes();
+}
+
+/// On a model too, `include Codes` written inside `module Signing` names
+/// `Signing::Codes`.
+#[test]
+fn an_included_block_include_resolves_in_its_concerns_namespace_on_the_model() {
+    emit_and_run::real_blog()
+        .write(
+            "app/models/concerns/signing.rb",
+            "module Signing\n  extend ActiveSupport::Concern\n\n  included do\n    include Codes\n  end\nend\n",
+        )
+        .write(
+            "app/models/concerns/signing/codes.rb",
+            "module Signing::Codes\n  extend ActiveSupport::Concern\n\n  def shout\n    title.upcase\n  end\nend\n",
+        )
+        .edit(
+            "app/models/article.rb",
+            "class Article < ApplicationRecord\n",
+            "class Article < ApplicationRecord\n  include Signing\n",
+        )
+        .run_ruby(
+            "a = Article.create!(title: \"Hi\", body: \"Body text here\")\nraise a.shout unless a.shout == \"HI\"",
+        )
+        .assert_passes();
+}
+
 /// `Guard`'s own `included do` include, `Deep`, reaches the controller too.
 #[test]
 fn an_include_two_included_blocks_deep_reaches_the_controller() {
