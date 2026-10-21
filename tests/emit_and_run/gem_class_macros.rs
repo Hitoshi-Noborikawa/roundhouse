@@ -83,3 +83,33 @@ end
     )
     .emit(roundhouse::project::BuildTarget::Ruby);
 }
+
+#[test]
+fn a_class_methods_module_another_module_extends_is_emitted_as_a_module() {
+    app(
+        "module Greeter
+  module Greeting
+    def greeting = \"Hello, #{title}\"
+  end
+
+  module ClassMethods
+    def greeters = all.map(&:greeting)
+  end
+
+  module Model
+    def acts_as_greeter
+      include Greeter::Greeting
+      extend Greeter::ClassMethods
+    end
+  end
+end
+",
+    )
+    .run_ruby(
+        r#"Article.create!(title: "World", body: "body number one is long enough")
+raise "got #{Article.greeters.inspect}" unless Article.greeters == ["Hello, World"]
+puts "ok"
+"#,
+    )
+    .assert_passes();
+}

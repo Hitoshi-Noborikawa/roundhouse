@@ -2240,6 +2240,8 @@ end
     super::acts_as_votable::expand_acts_as_votable(&mut app)?;
     // After the splice: `include Discard::Model` can arrive through a concern.
     super::discard::expand_discard_models(&mut app)?;
+    // Before the macros: a macro's `extend Owner::ClassMethods` names the module this surfaces.
+    super::referenced_carriers::surface_referenced_carriers(&mut app, &sources);
     super::model_macros::expand_model_macros(&mut app, &sources)?;
     // After the concern-macro expansion: a concern's macros are that one's to expand or refuse.
     super::class_macros::expand_class_macros(&mut app, &sources);
