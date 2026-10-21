@@ -45,3 +45,13 @@ fn ipaddr_include_runs_on_spinel() {
     run.assert_passes();
     assert!(run.stdout.contains("ipaddr include passed"), "{}", run.stdout);
 }
+
+/// No strict runtime carries the port, so a strict emit reports the class.
+#[test]
+fn ipaddr_is_unsupported_on_strict_targets() {
+    use roundhouse::project::BuildTarget::*;
+    for target in [Rust, Typescript, Go, Python, CSharp, Kotlin, Swift, Elixir, Crystal] {
+        let (_emitted, errors) = app().emit(target);
+        assert!(errors.iter().any(|e| e.contains("IPAddr")), "{target:?}: {errors:#?}");
+    }
+}
