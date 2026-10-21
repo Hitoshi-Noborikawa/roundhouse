@@ -13,6 +13,7 @@ use crate::build_target::BuildTarget;
 const GEMS: &[(&str, &str, &str)] = &[
     ("Faraday", "faraday", "a missing HTTP client"),
     ("Retryable", "retryable", "a missing retry helper"),
+    ("JWT", "jwt", "a missing token codec"),
 ];
 
 /// Targets that run the real gem: Ruby and JRuby load it via

@@ -73,6 +73,7 @@ pub(crate) const GEM_REQUIRES: &[&str] = &[
     "faraday/multipart",
     "faraday/retry",
     "retryable",
+    "jwt",
 ];
 
 /// Whether the compiler's own tables have a Ruby-family tree declare or
@@ -90,7 +91,7 @@ pub(crate) fn compiler_runtime_gems() -> &'static [(Marker, &'static str)] {
     // (constant an emitted body names, gem that defines it). Only gems
     // whose absence is a RUNTIME error belong here — the list is the
     // façade's, not a survey of what an app might like.
-    const RUNTIME_GEMS: [(Marker, &str); 21] = [
+    const RUNTIME_GEMS: [(Marker, &str); 22] = [
         (Marker::Constant("BCrypt"), "bcrypt"),
         (Marker::Constant("HTMLEntities"), "htmlentities"),
         (Marker::Constant("ROTP"), "rotp"),
@@ -207,6 +208,7 @@ pub(crate) fn compiler_runtime_gems() -> &'static [(Marker, &'static str)] {
         // Retryable, as Faraday: the real gem on this lane, refused on the
         // strict targets (`lower::ruby_family_gems`).
         (Marker::Constant("Retryable"), "retryable"),
+        (Marker::Constant("JWT"), "jwt"),
     ];
     &RUNTIME_GEMS
 }
@@ -603,6 +605,7 @@ const FATES: &[(&str, GemFate)] = &[
     ("image_processing", GemFate::Modeled), // active_storage variants seam
     ("inertia_rails", GemFate::Modeled), // ingest/inertia: render inertia:, inertia_share; runtime action_controller/inertia
     ("invisible_captcha", GemFate::Modeled), // before_action + spam? on subtitle honeypot only
+    ("jwt", GemFate::Modeled),         // catalog/gems: JWT; the real gem on ruby and jruby, lower/ruby_family_gems refuses every other target
     ("kaminari", GemFate::Modeled),    // Relation#page / per / paginate
     ("mail", GemFate::Modeled),        // catalog/gems: Mail::Address; ActionMailer
     ("mocha", GemFate::Modeled),       // lower/mocha bridge

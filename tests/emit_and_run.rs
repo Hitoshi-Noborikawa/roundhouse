@@ -3997,6 +3997,109 @@ fn retryable_is_refused_off_ruby_and_jruby() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+const JWT_LIB: &str = "class Token
+  SECRET = \"s3cret\"
+
+  def self.issue(user_id, exp)
+    JWT.encode({ user_id: user_id, exp: exp }, SECRET, \"HS256\")
+  end
+
+  def self.read(token, key = SECRET)
+    payload, _header = JWT.decode(token, key, true, { algorithm: \"HS256\" })
+    payload[\"user_id\"]
+  rescue JWT::ExpiredSignature
+    :expired
+  rescue JWT::VerificationError
+    :forged
+  rescue JWT::DecodeError
+    :malformed
+  end
+end
+";
+
+/// JWT runs as the real gem on Ruby: a token round-trips, and a wrong key,
+/// an expired token and garbage each raise their own `JWT::DecodeError`.
+#[test]
+fn jwt_runs_as_the_real_gem_on_ruby() {
+    let run = emit_and_run::real_blog()
+        .write("lib/token.rb", JWT_LIB)
+        .run_ruby(
+            r#"fresh = Token.issue(7, Time.now.to_i + 60)
+raise "round trip" unless Token.read(fresh) == 7
+raise "forged" unless Token.read(fresh, "other") == :forged
+raise "expired" unless Token.read(Token.issue(7, Time.now.to_i - 60)) == :expired
+raise "malformed" unless Token.read("not-a-token") == :malformed"#,
+        );
+    run.assert_passes();
+    let gemfile = std::fs::read_to_string(run.emitted.join("Gemfile")).expect("Gemfile");
+    assert!(gemfile.contains("gem \"jwt\""), "Gemfile does not declare jwt:\n{gemfile}");
+}
+
+/// Off Ruby and JRuby, each JWT reference is refused.
+#[test]
+fn jwt_is_refused_off_ruby_and_jruby() {
+    let dir = std::env::temp_dir().join(format!("rh-jwt-targets-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    for (path, text) in [
+        (
+            "db/schema.rb",
+            "ActiveRecord::Schema.define do\n  create_table \"posts\", force: :cascade do |t|\n    t.string \"title\"\n  end\nend\n",
+        ),
+        ("config/routes.rb", "Rails.application.routes.draw do\n  get \"/posts\", to: \"posts#index\"\nend\n"),
+        ("app/models/post.rb", "class Post < ApplicationRecord\nend\n"),
+        ("app/models/token.rb", JWT_LIB),
+        (
+            "app/controllers/posts_controller.rb",
+            "class PostsController < ApplicationController\n  def index\n    render plain: Token.read(Token.issue(1, 0)).inspect\n  end\nend\n",
+        ),
+    ] {
+        let full = dir.join(path);
+        std::fs::create_dir_all(full.parent().unwrap()).unwrap();
+        std::fs::write(full, text).unwrap();
+    }
+    let mut app = roundhouse::ingest::ingest_app(&dir).expect("ingest");
+    let lower_diags = roundhouse::session::analyze_and_lower(&mut app);
+    assert!(
+        lower_diags.iter().all(|d| d.severity != roundhouse::diagnostic::Severity::Error),
+        "check is not clean: {lower_diags:?}"
+    );
+    for target in [roundhouse::project::BuildTarget::Ruby, roundhouse::project::BuildTarget::Jruby] {
+        let (errors, files) = oj_target_errors_and_text(&app, &dir, target);
+        assert!(!errors.iter().any(|e| e.contains("JWT")), "{target:?} refused a gem it ships:\n{}", errors.join("\n"));
+        let gemfile = files.get("Gemfile").map(String::as_str).unwrap_or("");
+        assert!(gemfile.contains("gem \"jwt\""), "{target:?} Gemfile:\n{gemfile}");
+    }
+    for target in [
+        roundhouse::project::BuildTarget::Spinel,
+        roundhouse::project::BuildTarget::Roda,
+        roundhouse::project::BuildTarget::Python,
+        roundhouse::project::BuildTarget::Crystal,
+        roundhouse::project::BuildTarget::Typescript,
+        roundhouse::project::BuildTarget::Rust,
+        roundhouse::project::BuildTarget::Go,
+        roundhouse::project::BuildTarget::Elixir,
+        roundhouse::project::BuildTarget::CSharp,
+        roundhouse::project::BuildTarget::Kotlin,
+        roundhouse::project::BuildTarget::Swift,
+    ] {
+        let (errors, files) = oj_target_errors_and_text(&app, &dir, target);
+        for site in ["`JWT.encode`", "`JWT.decode`", "`JWT::ExpiredSignature`", "`JWT::DecodeError`"] {
+            assert!(
+                errors.iter().any(|e| e.contains(site) && e.contains("only the ruby and jruby trees ship")),
+                "{target:?} did not refuse {site}:\n{}",
+                errors.join("\n")
+            );
+        }
+        let hits: Vec<_> = files
+            .iter()
+            .filter(|(path, text)| !path.ends_with(".map") && path.contains("token") && text.contains("JWT"))
+            .map(|(path, _)| path.clone())
+            .collect();
+        assert!(hits.is_empty(), "{target:?} emitted a JWT reference in {hits:?}");
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// No other target has an HTTP client behind `Faraday`: each call and
 /// constant is refused there, and no `Faraday` reference is emitted.
 #[test]
