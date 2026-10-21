@@ -33,6 +33,8 @@ mod utc_zone_time;
 mod discard;
 #[path = "emit_and_run/pundit_source.rs"]
 mod pundit_source;
+#[path = "emit_and_run/gem_class_macros.rs"]
+mod gem_class_macros;
 #[path = "emit_and_run/source_gem_autoload.rs"]
 mod source_gem_autoload;
 #[path = "emit_and_run/pay_exceptions.rs"]
