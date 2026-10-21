@@ -115,3 +115,48 @@ end
         assert!(model.contains(line), "{line:?} in:\n{model}");
     }
 }
+
+/// A single-quoted message holding `#{…}` is literal text: Rails 8.1.4
+/// renders "Name has #{x} literally". The emitted Ruby (the model's check
+/// and the Roda/Sequel `message:`) must not turn it into an interpolation,
+/// which would raise NameError or print other text.
+fn literal_interpolation_app() -> emit_and_run::Overlay {
+    emit_and_run::empty_app()
+        .write("app/models/application_record.rb", "class ApplicationRecord < ActiveRecord::Base\n  self.abstract_class = true\nend\n")
+        .write(
+            "db/schema.rb",
+            "ActiveRecord::Schema.define do\n  create_table \"widgets\", force: :cascade do |t|\n    t.string \"name\"\n  end\nend\n",
+        )
+        .write("app/models/widget.rb", "class Widget < ApplicationRecord\n  validates :name, presence: { message: 'has #{x} literally' }\nend\n")
+}
+
+#[test]
+fn a_literal_interpolation_in_a_message_stays_literal() {
+    literal_interpolation_app()
+        .run_ruby(
+            r##"w = Widget.new
+w.valid?
+raise "errors: #{w.errors.to_a.inspect}" unless w.errors.to_a == ["Name has \#{x} literally"]
+puts "literal message passed"
+"##,
+        )
+        .assert_passes();
+    let (emitted, errors) = literal_interpolation_app().emit(roundhouse::project::BuildTarget::Roda);
+    assert!(errors.is_empty(), "{errors:#?}");
+    let mut model = None;
+    let mut stack = vec![emitted.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        for entry in std::fs::read_dir(&dir).unwrap().flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                stack.push(path);
+            } else if let Ok(text) = std::fs::read_to_string(&path) {
+                if text.contains("class Widget") && text.contains("validates_") {
+                    model = Some(text);
+                }
+            }
+        }
+    }
+    let model = model.expect("an emitted Widget model");
+    assert!(model.contains(r#"validates_presence :name, message: "has \#{x} literally""#), "{model}");
+}

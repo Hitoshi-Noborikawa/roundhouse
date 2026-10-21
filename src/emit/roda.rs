@@ -327,7 +327,13 @@ fn model_for(model: &Model, schema: &Schema) -> String {
                     ));
                     continue;
                 }
-                let custom = validation.message.as_ref().map(|m| format!(", message: {m:?}")).unwrap_or_default();
+                // Through the Ruby string encoder: a single-quoted `'#{x}'`
+                // message is literal text, not an interpolation.
+                let custom = validation
+                    .message
+                    .as_ref()
+                    .map(|m| format!(", message: {}", crate::emit::ruby::expr::ruby_str_literal(m)))
+                    .unwrap_or_default();
                 for rule in &validation.rules {
                     match rule {
                         ValidationRule::Presence if !custom.is_empty() => {
@@ -344,7 +350,7 @@ fn model_for(model: &Model, schema: &Schema) -> String {
                         ValidationRule::Length { min, max, message, allow_nil: _ } => {
                             let msg = message
                                 .as_ref()
-                                .map(|m| format!(", message: {m:?}"))
+                                .map(|m| format!(", message: {}", crate::emit::ruby::expr::ruby_str_literal(m)))
                                 .unwrap_or_else(|| custom.clone());
                             if let Some(min) = min {
                                 validate_lines.push(format!(
