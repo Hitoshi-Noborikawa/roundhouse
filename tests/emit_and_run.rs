@@ -3898,6 +3898,109 @@ fn faraday_test_module_superclass_is_refused_on_spinel() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+const RETRYABLE_LIB: &str = "class Contact
+  def self.flaky(failures)
+    attempts = 0
+    value = Retryable.retryable(tries: 3, on: ArgumentError, sleep: 0) do
+      attempts += 1
+      raise ArgumentError, \"again\" if attempts <= failures
+      :done
+    end
+    [value, attempts]
+  rescue ArgumentError
+    [:gave_up, attempts]
+  end
+end
+";
+
+/// Retryable runs as the real gem on Ruby, as Faraday does: the block is
+/// retried on the exceptions `on:` names, and its value is the call's.
+#[test]
+fn retryable_runs_as_the_real_gem_on_ruby() {
+    let run = emit_and_run::real_blog()
+        .write("lib/contact.rb", RETRYABLE_LIB)
+        .run_ruby(
+            r#"r = Contact.flaky(2)
+raise r.inspect unless r == [:done, 3]
+r = Contact.flaky(5)
+raise r.inspect unless r == [:gave_up, 3]"#,
+        );
+    run.assert_passes();
+    let gemfile = std::fs::read_to_string(run.emitted.join("Gemfile")).expect("Gemfile");
+    assert!(gemfile.contains("gem \"retryable\""), "Gemfile does not declare retryable:\n{gemfile}");
+}
+
+/// Off Ruby and JRuby, each Retryable reference is refused.
+#[test]
+fn retryable_is_refused_off_ruby_and_jruby() {
+    let dir = std::env::temp_dir().join(format!("rh-retryable-targets-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    for (path, text) in [
+        (
+            "db/schema.rb",
+            "ActiveRecord::Schema.define do\n  create_table \"posts\", force: :cascade do |t|\n    t.string \"title\"\n  end\nend\n",
+        ),
+        ("config/routes.rb", "Rails.application.routes.draw do\n  get \"/posts\", to: \"posts#index\"\nend\n"),
+        ("app/models/post.rb", "class Post < ApplicationRecord\nend\n"),
+        ("app/models/contact.rb", RETRYABLE_LIB),
+        (
+            "app/controllers/posts_controller.rb",
+            "class PostsController < ApplicationController\n  def index\n    render plain: Contact.flaky(1).inspect\n  end\nend\n",
+        ),
+    ] {
+        let full = dir.join(path);
+        std::fs::create_dir_all(full.parent().unwrap()).unwrap();
+        std::fs::write(full, text).unwrap();
+    }
+    let mut app = roundhouse::ingest::ingest_app(&dir).expect("ingest");
+    let lower_diags = roundhouse::session::analyze_and_lower(&mut app);
+    assert!(
+        lower_diags.iter().all(|d| d.severity != roundhouse::diagnostic::Severity::Error),
+        "check is not clean: {lower_diags:?}"
+    );
+    for target in [roundhouse::project::BuildTarget::Ruby, roundhouse::project::BuildTarget::Jruby] {
+        let (errors, files) = oj_target_errors_and_text(&app, &dir, target);
+        assert!(
+            !errors.iter().any(|e| e.contains("Retryable")),
+            "{target:?} refused a gem it ships:\n{}",
+            errors.join("\n")
+        );
+        let gemfile = files.get("Gemfile").map(String::as_str).unwrap_or("");
+        assert!(gemfile.contains("gem \"retryable\""), "{target:?} Gemfile:\n{gemfile}");
+    }
+    for target in [
+        roundhouse::project::BuildTarget::Spinel,
+        roundhouse::project::BuildTarget::Roda,
+        roundhouse::project::BuildTarget::Python,
+        roundhouse::project::BuildTarget::Crystal,
+        roundhouse::project::BuildTarget::Typescript,
+        roundhouse::project::BuildTarget::Rust,
+        roundhouse::project::BuildTarget::Go,
+        roundhouse::project::BuildTarget::Elixir,
+        roundhouse::project::BuildTarget::CSharp,
+        roundhouse::project::BuildTarget::Kotlin,
+        roundhouse::project::BuildTarget::Swift,
+    ] {
+        let (errors, files) = oj_target_errors_and_text(&app, &dir, target);
+        for site in ["`Retryable.retryable`"] {
+            assert!(
+                errors.iter().any(|e| e.contains(site) && e.contains("only the ruby and jruby trees ship")),
+                "{target:?} did not refuse {site}:\n{}",
+                errors.join("\n")
+            );
+        }
+        let hits: Vec<_> = files
+            .iter()
+            .filter(|(path, text)| {
+                !path.ends_with(".map") && path.contains("contact") && text.contains("Retryable")
+            })
+            .map(|(path, _)| path.clone())
+            .collect();
+        assert!(hits.is_empty(), "{target:?} emitted a Retryable reference in {hits:?}");
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// No other target has an HTTP client behind `Faraday`: each call and
 /// constant is refused there, and no `Faraday` reference is emitted.
 #[test]
