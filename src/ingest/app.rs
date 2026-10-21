@@ -2593,6 +2593,22 @@ fn splice_concerns_into_models_named(app: &mut App, only: &[crate::ident::Symbol
         }
     }
     defined.extend(app.models.iter().map(|model| model.name.0.as_str().to_string()));
+    // Each concern's own constants whose value is a literal count or
+    // duration, for `inline_concern_literals`.
+    let literals: std::collections::HashMap<crate::ident::ClassId, Vec<(crate::ident::Symbol, crate::expr::Expr)>> = app
+        .library_classes
+        .iter()
+        .map(|class| {
+            let consts = class
+                .constants
+                .iter()
+                .filter(|(_, value)| crate::lower::duration::literal_seconds(value).is_some())
+                .cloned()
+                .collect::<Vec<_>>();
+            (class.name.clone(), consts)
+        })
+        .filter(|(_, consts)| !consts.is_empty())
+        .collect();
 
     for model in &mut app.models {
         if !only.is_empty() && !only.iter().any(|n| n == &model.name.0) {
@@ -2661,6 +2677,9 @@ fn splice_concerns_into_models_named(app: &mut App, only: &[crate::ident::Symbol
                         let mut item = rehome_default_fk(item, id, &model_name);
                         if let ModelBodyItem::Unknown { expr, .. } = &mut item {
                             qualify_carried_constants(expr, id.0.as_str(), &defined);
+                            if let Some(consts) = literals.get(id) {
+                                inline_concern_literals(expr, consts);
+                            }
                         }
                         item
                     }).collect::<Vec<_>>()
@@ -2678,6 +2697,46 @@ fn splice_concerns_into_models_named(app: &mut App, only: &[crate::ident::Symbol
 
 /// An enclosing module's constant keeps its lexical meaning after splicing.
 /// The concern's own constants remain reachable through model ancestry.
+/// A macro call carried out of a concern's `included do` block reads a
+/// constant the concern itself defines (`generates_token_for :transfer,
+/// expires_in: TRANSFER_LINK_EXPIRY_DURATION`, with `TRANSFER_LINK_
+/// EXPIRY_DURATION = 4.hours` in campfire's `User::Transferable`). The
+/// block runs in the includer, but lexically inside the concern, so
+/// Rails reads the concern's constant once, as the class loads. When the
+/// value is a literal count or duration, the call's argument becomes that
+/// literal: the same value at the same moment, and one a macro that folds
+/// its option at compile time (`lower::generates_token_for`'s
+/// `expires_in:`) can read. Only the call's arguments, never a block it
+/// takes, and only a bare reference to the concern's own constant.
+fn inline_concern_literals(
+    expr: &mut crate::expr::Expr,
+    consts: &[(crate::ident::Symbol, crate::expr::Expr)],
+) {
+    use crate::expr::ExprNode;
+    fn inline(arg: &mut crate::expr::Expr, consts: &[(crate::ident::Symbol, crate::expr::Expr)]) {
+        match &mut *arg.node {
+            ExprNode::Const { path } if path.len() == 1 => {
+                if let Some((_, value)) = consts.iter().find(|(name, _)| name == &path[0]) {
+                    let span = arg.span;
+                    *arg = value.clone();
+                    arg.span = span;
+                }
+            }
+            ExprNode::Hash { entries, .. } => {
+                for (_, value) in entries.iter_mut() {
+                    inline(value, consts);
+                }
+            }
+            _ => {}
+        }
+    }
+    if let ExprNode::Send { recv: None, args, .. } = &mut *expr.node {
+        for arg in args.iter_mut() {
+            inline(arg, consts);
+        }
+    }
+}
+
 fn qualify_carried_constants(
     expr: &mut crate::expr::Expr,
     concern: &str,

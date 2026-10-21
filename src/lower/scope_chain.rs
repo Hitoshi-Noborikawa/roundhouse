@@ -1013,6 +1013,30 @@ pub fn build_assoc_class_methods(
             continue;
         }
         let Some(target_model) = models.iter().find(|m| m.name == *target) else { continue };
+        // `generates_token_for`'s finders, which the model lowering
+        // synthesizes after this survey (lower::generates_token_for): no
+        // body to read here, but each looks its record up with an
+        // implicit-self `find_by` / `find`, so reached through a relation
+        // it queries that relation, as Rails' scoping makes it
+        // (`User.active.find_by_transfer_id` -> `find_by_token_for`).
+        if matches!(mname.as_str(), "find_by_token_for" | "find_by_token_for!")
+            && !crate::lower::generates_token_for::token_for_decls(target_model).is_empty()
+            && !target_model.body.iter().any(|item| matches!(item,
+                ModelBodyItem::Method { method, .. } if method.name == *mname))
+        {
+            reg.entry(target.clone()).or_default().insert(
+                mname.clone(),
+                AssocScopedMethod {
+                    params: vec![
+                        crate::dialect::Param::positional(Symbol::from("purpose")),
+                        crate::dialect::Param::positional(Symbol::from("token")),
+                    ],
+                    creates: false,
+                    queries: true,
+                },
+            );
+            continue;
+        }
         let Some(method) = target_model.body.iter().find_map(|item| match item {
             ModelBodyItem::Method { method, .. }
                 if method.receiver == crate::dialect::MethodReceiver::Class

@@ -1391,6 +1391,80 @@ end
     assert!(refused.is_empty(), "spinel refused the module's storage: {refused:?}");
 }
 
+/// `generates_token_for` declared in a concern's `included` block with
+/// an expiry the concern names as a constant, and a value built with
+/// `String#last` over a safe navigation (campfire's
+/// `User::Transferable`: `expires_in: TRANSFER_LINK_EXPIRY_DURATION do
+/// password_salt&.last(10) end`). The token round-trips, stops verifying
+/// when the value changes, and a finder reached through a scope finds
+/// only what the scope holds (`User.active.find_by_transfer_id`). The
+/// scoped call is the app's, as campfire's is (a test body's call site is
+/// not part of the survey that threads the relation).
+#[test]
+fn a_concerns_token_for_round_trips_within_its_scope() {
+    emit_and_run::real_blog()
+        .write(
+            "app/models/article/shareable.rb",
+            r##"module Article::Shareable
+  extend ActiveSupport::Concern
+
+  SHARE_LINK_EXPIRY = 2.hours
+
+  included do
+    generates_token_for :share, expires_in: SHARE_LINK_EXPIRY do
+      title&.last(5)
+    end
+  end
+
+  class_methods do
+    def find_by_share_id(id)
+      find_by_token_for(:share, id)
+    end
+  end
+
+  def share_id
+    generate_token_for(:share)
+  end
+end
+"##,
+        )
+        .edit(
+            "app/models/article.rb",
+            "  validates :title, presence: true\n",
+            "  validates :title, presence: true\n  include Article::Shareable\n  scope :greetings, -> { where(title: \"Hello world\") }\n\n  def self.greeting_shared_by(token)\n    Article.greetings.find_by_share_id(token)\n  end\n",
+        )
+        .write(
+            "test/models/article_share_test.rb",
+            r##"require "test_helper"
+
+class ArticleShareTest < ActiveSupport::TestCase
+  setup do
+    @hello = Article.create!(title: "Hello world", body: "A sufficiently long article body.")
+    @other = Article.create!(title: "Another one", body: "A sufficiently long article body.")
+  end
+
+  test "a share id finds its article" do
+    assert_equal @hello, Article.find_by_share_id(@hello.share_id)
+  end
+
+  test "a share id stops working when the value it is bound to changes" do
+    token = @hello.share_id
+    @hello.update!(title: "Hello there")
+    assert_nil Article.find_by_share_id(token)
+  end
+
+  test "a share id finds only articles in scope" do
+    assert_equal @hello, Article.greeting_shared_by(@hello.share_id)
+    assert_nil Article.greeting_shared_by(@other.share_id)
+    assert_equal @other, Article.find_by_share_id(@other.share_id)
+  end
+end
+"##,
+        )
+        .run_test("test/models/article_share_test.rb")
+        .assert_passes();
+}
+
 /// `rescue URI::Error` catches `URI.parse`'s `URI::InvalidURIError`, and
 /// `SocketError` resolves where the app names it without a require (Rails
 /// has loaded socket); both lanes define the classes.
