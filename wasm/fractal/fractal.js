@@ -12,11 +12,11 @@
 
 import { createClient } from "../lib/wasm-client.mjs";
 
-// A small app, written to exercise the passes. Nothing here is from a real
-// application.
+// A small app to compile. No pass is registered yet, so the only stage is
+// the source. Nothing here is from a real application.
 const EXAMPLES = {
-  enum: {
-    label: "Enum predicates (inline-enum-predicates)",
+  article: {
+    label: "Article model",
     file: "app/models/article.rb",
     src: {
       "app/models/article.rb": `# frozen_string_literal: true
@@ -24,7 +24,6 @@ const EXAMPLES = {
 class Article < ApplicationRecord
   enum :status, { draft: 0, published: 1, archived: 2 }
   enum :visibility, { everyone: "everyone", members: "members" }, prefix: true
-  include Public::Listing
 
   def listed?
     published? && !archived?
@@ -42,17 +41,7 @@ end
   primary_abstract_class
 end
 `,
-      // A nested application namespace still belongs to the program.
-      "app/models/public/listing.rb": `module Public
-  module Listing
-    def draft?
-      super || published_at.nil?
-    end
-  end
-end
-`,
-      // The pass reads the Active Record version from here: change it to
-      // 7.0.8 and it declines.
+      // Passes read gem versions from here.
       "Gemfile.lock": `GEM
   remote: https://rubygems.org/
   specs:
@@ -83,7 +72,7 @@ const els = {
 };
 
 let client = null;
-let exampleKey = "enum";
+let exampleKey = "article";
 let src = {};           // the live, editable source tree
 let srcPath = null;     // the file in the editor
 let file = null;        // the file compiled (--file)
@@ -115,7 +104,7 @@ function writeHash() {
 }
 
 function loadExample(key) {
-  exampleKey = EXAMPLES[key] ? key : "enum";
+  exampleKey = EXAMPLES[key] ? key : "article";
   const ex = EXAMPLES[exampleKey];
   src = { ...ex.src };
   srcPath = ex.file;
@@ -319,7 +308,7 @@ function wire() {
 
 async function boot() {
   wire();
-  loadExample(readHash().example || "enum");
+  loadExample(readHash().example || "article");
   client = createClient({
     workerUrl: new URL("../lib/worker.mjs", import.meta.url),
     wasmUrl: new URL("../lib/roundhouse_wasm.wasm", import.meta.url).href,
