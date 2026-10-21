@@ -321,14 +321,19 @@ pub fn ingest_app_with_vfs<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResult
     }
     super::sources::reset();
     let _source_root = super::sources::set_root(dir);
-    let path_gems = path_gem_dirs(vfs, dir);
-    let source_vfs = PathGemVfs { inner: vfs, root: dir, dirs: &path_gems };
+    let config = roundhouse_config(vfs, dir)?;
+    let extensions = project_extensions(vfs, dir, &config)?;
+    let lock = vfs.read_to_string(&dir.join("Gemfile.lock")).ok().map(|text| crate::gems::Lockfile::parse(&text));
+    let source_gems = super::source_gems::resolve(vfs, dir, lock.as_ref(), &extensions.source_gems)
+        .map_err(|message| IngestError::Parse { file: dir.join("roundhouse.yml").display().to_string(), message })?;
+    let mount_vfs = super::source_gems::MountVfs { inner: vfs, gems: &source_gems };
+    let mut path_gems = path_gem_dirs(&mount_vfs, dir);
+    path_gems.extend(source_gems.iter().map(|gem| gem.mount.clone()));
+    let source_vfs = PathGemVfs { inner: &mount_vfs, root: dir, dirs: &path_gems };
     let vfs = &source_vfs;
     let engine_routes = engine_route_sources(vfs, dir, &path_gems);
-    let config = roundhouse_config(vfs, dir)?;
     let additional_test_paths = additional_test_paths(dir, &config)?;
     validate_additional_test_paths(vfs, dir, &additional_test_paths)?;
-    let extensions = project_extensions(vfs, dir, &config)?;
     let roots = app_roots(vfs, dir, &path_gems);
     let lib_ignores: Vec<String> = vfs
         .read(&dir.join("config/application.rb"))
@@ -372,7 +377,9 @@ pub fn ingest_app_with_vfs<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResult
     let lock_path = dir.join("Gemfile.lock");
     if vfs.exists(&lock_path) {
         if let Ok(text) = vfs.read_to_string(&lock_path) {
-            app.gem_lock = Some(crate::gems::Lockfile::parse(&text));
+            let mut lock = crate::gems::Lockfile::parse(&text);
+            lock.source = app.extensions.source_gems.clone();
+            app.gem_lock = Some(lock);
             if let Some(lock) = &app.gem_lock {
                 app.gem_boundary = super::rbi::load_gem_boundary(vfs, dir, lock, &app.extensions);
             }
@@ -1466,6 +1473,8 @@ end
                 }
                 app.module_mixins.extend(mixins);
                 app.initializer_filters.extend(extract_initializer_filters(&bytes, &path_str));
+                app.initializer_response_headers
+                    .extend(extract_initializer_response_headers(&bytes, &path_str));
                 if let Some(store) = extract_collection_cache_store(&bytes, &path_str) {
                     app.collection_cache_store = Some(store);
                 }
@@ -2315,6 +2324,7 @@ end
     }
     super::model_delegate::lower_model_delegates(&mut app);
     super::on_load_reopen::drain_pending(&mut app);
+    gap_numericality_allow_on_untyped(&mut app);
     app.const_resolver = const_resolver;
     // Admission needs complete controller permit demand and model DSL,
     // including declarations contributed by either kind of Concern,
@@ -2460,6 +2470,78 @@ fn walk_binary_assets<V: Vfs + ?Sized>(vfs: &V, root: &Path, dir: &Path, app: &m
         let rel = entry.strip_prefix(root).unwrap_or(&entry);
         app.binary_assets
             .push((rel.to_string_lossy().replace('\\', "/"), bytes));
+    }
+}
+
+/// `numericality:` with `allow_nil:` / `allow_blank:` on an attribute the
+/// model does not type as a number (no Integer/Float column: an
+/// `attr_accessor` of an `ActiveModel::Model` form, fed request Strings)
+/// stays the reported gap. The lowered check does not parse a String
+/// number (#1158), so on such an attribute it would reject `"30"` where
+/// Rails accepts it. The whole `validates` call is refused, as an ingest
+/// refusal is. Run after the concern splice, when every model's
+/// validations and columns are known.
+fn gap_numericality_allow_on_untyped(app: &mut App) {
+    use crate::dialect::{ModelBodyItem, ValidationRule};
+    let mut gaps: Vec<(crate::span::Span, String)> = Vec::new();
+    for model in &mut app.models {
+        let numeric = |attr: &crate::ident::Symbol| {
+            let ty = model.attributes.fields.get(attr);
+            let inner = match ty {
+                Some(crate::ty::Ty::Union { variants }) => {
+                    variants.iter().find(|v| !matches!(v, crate::ty::Ty::Nil)).cloned()
+                }
+                other => other.cloned(),
+            };
+            matches!(inner, Some(crate::ty::Ty::Int | crate::ty::Ty::Float))
+        };
+        let mut refused: Vec<(usize, crate::span::Span, String)> = Vec::new();
+        for (i, item) in model.body.iter().enumerate() {
+            let ModelBodyItem::Validation { validation, .. } = item else { continue };
+            if numeric(&validation.attribute) {
+                continue;
+            }
+            for rule in &validation.rules {
+                if let ValidationRule::Numericality { allow_nil, allow_blank, .. } = rule {
+                    let option = if *allow_blank == Some(true) {
+                        "allow_blank"
+                    } else if *allow_nil == Some(true) {
+                        "allow_nil"
+                    } else {
+                        continue;
+                    };
+                    refused.push((i, item.span(), format!("validates :{}, numericality: {option}:", validation.attribute.as_str())));
+                }
+            }
+        }
+        // The whole `validates` call goes, as an ingest refusal
+        // (`ParsedValidates::Gap`) does: every Validation item it produced
+        // shares its span (one per attribute, and per-rule `if:`/`unless:`
+        // splits), so a `presence:` beside the numericality is not kept.
+        let calls: std::collections::HashSet<(crate::span::FileId, u32, u32)> =
+            refused.iter().map(|(_, span, _)| (span.file, span.start, span.end)).collect();
+        model.body.retain(|item| {
+            !matches!(item, ModelBodyItem::Validation { .. }) || {
+                let span = item.span();
+                !calls.contains(&(span.file, span.start, span.end))
+            }
+        });
+        for (_, span, construct) in refused {
+            gaps.push((span, construct));
+        }
+    }
+    for (span, construct) in gaps {
+        let file = crate::ide::source(app, span.file).map(|s| s.path.clone()).unwrap_or_default();
+        let mut diagnostic = crate::diagnostic::Diagnostic::unsupported(
+            span,
+            None,
+            construct,
+            "an untyped attribute's String input is not parsed as a number (#1158); emitting the check would reject input Rails accepts",
+        );
+        diagnostic.severity = crate::diagnostic::Severity::Warning;
+        let message = diagnostic.message.clone();
+        super::prism::push(diagnostic);
+        survey::record(&IngestError::Unsupported { file, message });
     }
 }
 
@@ -3680,6 +3762,18 @@ fn is_recognized_wrap_parameters(method: &str, args: &[crate::expr::Expr]) -> bo
         && crate::lower::controller_to_library::params_wrapper::is_recognized_wrap_parameters_call(args)
 }
 
+/// `serialization_scope nil` (active_model_serializers'
+/// `ActionController::Serialization`): the serializers a render builds
+/// get no scope, so `current_user` is never called for one. Its only
+/// reader is a `render json: …, serializer:` render, which the lowering
+/// refuses (`refuse_serializer_options`), so no lowered action depends
+/// on it. A named scope (`serialization_scope :current_account`) stays
+/// the gap.
+fn is_serialization_scope_nil(method: &str, args: &[crate::expr::Expr]) -> bool {
+    method == "serialization_scope"
+        && matches!(args, [a] if matches!(&*a.node, crate::expr::ExprNode::Lit { value: crate::expr::Literal::Nil }))
+}
+
 /// Class-level `respond_to :json` is consumed as a no-op when nothing
 /// in this controller's ANCESTOR CHAIN (self included) calls
 /// `respond_with` — the only thing the responders gem's `respond_to`
@@ -3958,6 +4052,9 @@ fn report_unrecognized_controller_macros(app: &App) {
                 continue;
             }
             if is_recognized_wrap_parameters(method.as_str(), args) {
+                continue;
+            }
+            if is_serialization_scope_nil(method.as_str(), args) {
                 continue;
             }
             let file = file_of(expr.span.file);
@@ -6607,12 +6704,12 @@ fn walk_erb<V: Vfs + ?Sized>(
                     out.push((path, ViewEngine::Raw));
                 }
             }
-            // Template engines we don't ingest yet — they hold Ruby (or are
-            // pure Ruby, like `.json.ruby`) the analyzer never sees. Record
+            // Template engines we don't ingest yet — they hold Ruby the
+            // analyzer never sees (`.rabl`). Record
             // so the hole is visible to `--continue` and the LSP/MCP.
             // Moving one of these into `ViewEngine::from_extension` (above)
             // is the whole walker-side change to support a new engine.
-            Some("ruby" | "rabl") => {
+            Some("rabl") => {
                 record_skipped_view(&path, ext.expect("matched a Some arm"))?;
             }
             _ => {}
@@ -6627,7 +6724,7 @@ fn walk_erb<V: Vfs + ?Sized>(
 /// of letting whole template files vanish without a trace. STRICT mode
 /// now aborts instead of silently dropping the template: it used to
 /// call `survey::record` directly, a no-op outside survey, so a
-/// still-unsupported format (`.rabl`, `.ruby`, or any non-html ERB
+/// still-unsupported format (`.rabl`, or any non-html ERB
 /// format this allow-list doesn't carry) emitted the controller with
 /// no view and reported no error — the one silent-drop `check`'s error
 /// gate is supposed to rule out.
@@ -8909,37 +9006,171 @@ pub(super) fn extract_initializer_filters(source: &[u8], file: &str) -> Vec<crat
             _ => continue,
         };
         let Some(method) = super::util::symbol_value(method) else { continue };
-        let mut only: Vec<Symbol> = Vec::new();
-        if let Some(options) = options {
-            let Some(hash) = options.as_keyword_hash_node() else { continue };
-            let mut readable = true;
-            for element in hash.elements().iter() {
-                let Some(pair) = element.as_assoc_node() else { readable = false; break };
-                if super::util::symbol_value(&pair.key()).as_deref() != Some("only") {
-                    readable = false;
-                    break;
-                }
-                let value = pair.value();
-                if let Some(one) = super::util::symbol_value(&value) {
-                    only.push(Symbol::from(one));
-                } else if let Some(list) = value.as_array_node() {
-                    for e in list.elements().iter() {
-                        match super::util::symbol_value(&e) {
-                            Some(s) => only.push(Symbol::from(s)),
-                            None => { readable = false; break }
-                        }
-                    }
-                } else {
-                    readable = false;
-                }
-            }
-            if !readable || only.is_empty() {
-                continue;
-            }
-        }
+        let only = match options {
+            Some(options) => match filter_only(options) {
+                Some(only) => only,
+                None => continue,
+            },
+            None => Vec::new(),
+        };
         out.push(InitializerFilter { target: Symbol::from(target), method: Symbol::from(method), only });
     }
     out
+}
+
+/// The `only:` of a filter's options, `None` when the options say
+/// anything else (`except:`, `if:`, a computed list): a filter recorded
+/// without them would run where the app said it must not.
+fn filter_only(options: &Node<'_>) -> Option<Vec<Symbol>> {
+    let hash = options.as_keyword_hash_node()?;
+    let mut only = Vec::new();
+    for element in hash.elements().iter() {
+        let pair = element.as_assoc_node()?;
+        if super::util::symbol_value(&pair.key()).as_deref() != Some("only") {
+            return None;
+        }
+        let value = pair.value();
+        if let Some(one) = super::util::symbol_value(&value) {
+            only.push(Symbol::from(one));
+        } else {
+            for e in value.as_array_node()?.elements().iter() {
+                only.push(Symbol::from(super::util::symbol_value(&e)?));
+            }
+        }
+    }
+    (!only.is_empty()).then_some(only)
+}
+
+/// `X.after_action[(only: …)] { response.set_header("K", "v") }` in a
+/// `config/initializers/` file, bare, inside `to_prepare`, or inside
+/// `ActiveSupport.on_load(:hook) { … }` (which runs once the hook's class
+/// loads, before any request). campfire's `active_storage.rb` marks the
+/// disk service's file responses cacheable this way.
+///
+/// Only a block whose every statement writes one literal header is read
+/// (`response.set_header`, `response.headers[…] =`, `headers[…] =`):
+/// the runtime writes those itself, so nothing in the block goes
+/// unexecuted. An `on_load` block is read only when every statement in
+/// it is such a filter.
+pub(super) fn extract_initializer_response_headers(
+    source: &[u8],
+    file: &str,
+) -> Vec<crate::app::InitializerResponseHeader> {
+    let result = super::prism::parse(source, file);
+    let root = result.node();
+    let src = String::from_utf8_lossy(source).into_owned();
+    let Some(program) = root.as_program_node() else { return Vec::new() };
+    let mut out = Vec::new();
+    for stmt in initializer_statements(&program) {
+        if let Some(body) = on_load_body(&stmt) {
+            let mut inner = Vec::new();
+            if body.iter().all(|s| response_header_filter(s, &src, &mut inner)) {
+                out.extend(inner);
+            }
+        } else {
+            response_header_filter(&stmt, &src, &mut out);
+        }
+    }
+    out
+}
+
+/// The statements of `ActiveSupport.on_load(:sym) do … end`.
+fn on_load_body<'a>(node: &Node<'a>) -> Option<Vec<Node<'a>>> {
+    let call = node.as_call_node()?;
+    if super::util::constant_id_str(&call.name()) != "on_load" {
+        return None;
+    }
+    let recv = call.receiver()?;
+    if super::util::constant_path_of(&recv)? != ["ActiveSupport"] {
+        return None;
+    }
+    let args: Vec<_> = call.arguments()?.arguments().iter().collect();
+    if args.len() != 1 || super::util::symbol_value(&args[0]).is_none() {
+        return None;
+    }
+    let body = call.block()?.as_block_node()?.body()?.as_statements_node()?;
+    Some(body.body().iter().collect())
+}
+
+/// Append the headers of one `X.after_action { … }` to `out`; false (and
+/// nothing appended) when `node` is not one this reader takes whole.
+fn response_header_filter(
+    node: &Node<'_>,
+    src: &str,
+    out: &mut Vec<crate::app::InitializerResponseHeader>,
+) -> bool {
+    let Some(call) = node.as_call_node() else { return false };
+    if super::util::constant_id_str(&call.name()) != "after_action" {
+        return false;
+    }
+    let Some(target) = call.receiver().and_then(|r| constant_text(&r, src)) else { return false };
+    let args: Vec<_> = call.arguments().map(|a| a.arguments().iter().collect()).unwrap_or_default();
+    let only = match args.as_slice() {
+        [] => Vec::new(),
+        [options] => match filter_only(options) {
+            Some(only) => only,
+            None => return false,
+        },
+        _ => return false,
+    };
+    let Some(block) = call.block().and_then(|b| b.as_block_node()) else { return false };
+    if block.parameters().is_some() {
+        return false;
+    }
+    let Some(body) = block.body().and_then(|b| b.as_statements_node()) else { return false };
+    let mut headers = Vec::new();
+    for stmt in body.body().iter() {
+        match literal_header_write(&stmt) {
+            Some(pair) => headers.push(pair),
+            None => return false,
+        }
+    }
+    if headers.is_empty() {
+        return false;
+    }
+    for (name, value) in headers {
+        out.push(crate::app::InitializerResponseHeader {
+            target: Symbol::from(target.as_str()),
+            only: only.clone(),
+            name,
+            value,
+        });
+    }
+    true
+}
+
+/// `response.set_header("K", "v")`, `response.headers["K"] = "v"` or
+/// `headers["K"] = "v"`, with both Strings literal.
+fn literal_header_write(node: &Node<'_>) -> Option<(String, String)> {
+    let call = node.as_call_node()?;
+    let args: Vec<_> = call.arguments()?.arguments().iter().collect();
+    let [name, value] = args.as_slice() else { return None };
+    let is_response = |n: &Node<'_>| {
+        n.as_call_node().is_some_and(|c| {
+            c.receiver().is_none()
+                && c.arguments().is_none()
+                && c.block().is_none()
+                && super::util::constant_id_str(&c.name()) == "response"
+        })
+    };
+    let is_headers = |n: &Node<'_>| {
+        n.as_call_node().is_some_and(|c| {
+            c.arguments().is_none()
+                && c.block().is_none()
+                && super::util::constant_id_str(&c.name()) == "headers"
+                && c.receiver().is_none_or(|r| is_response(&r))
+        })
+    };
+    let recv = call.receiver()?;
+    let shape = match super::util::constant_id_str(&call.name()) {
+        "set_header" => is_response(&recv),
+        "[]=" => is_headers(&recv),
+        _ => false,
+    };
+    if !shape {
+        return None;
+    }
+    Some((super::util::string_value(name)?, super::util::string_value(value)?))
 }
 
 /// `ActionView::PartialRenderer.collection_cache = <Const>.<reader>` in a

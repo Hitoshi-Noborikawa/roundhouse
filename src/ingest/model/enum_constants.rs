@@ -89,6 +89,31 @@ impl EnumConstants {
             .any(|owner| self.values.contains_key(&format!("{owner}::JSON")))
     }
 
+    /// Every name the app's recorded sources define BELOW the top level
+    /// (`URI` for `Admin::URI` or `ApplicationRecord::URI`). An unrooted
+    /// path starting with one of these could resolve to the app's own
+    /// constant through a lexical owner or an ancestor (superclass or
+    /// included module), so callers that fold a well-known top-level
+    /// constant treat it as possibly shadowed.
+    pub(in crate::ingest) fn nested_names(&self) -> std::collections::HashSet<String> {
+        self.values
+            .keys()
+            .flat_map(|key| key.split("::").skip(1).map(str::to_string))
+            .collect()
+    }
+
+    /// The first segment of every name the app's recorded sources define
+    /// or reopen (`URI` for `URI = …`, `module URI`, or
+    /// `URI::MailTo::EMAIL_REGEXP = …`). A well-known top-level constant
+    /// under one of these may have been replaced by the app, so callers
+    /// must not fold it from a built-in table, whichever way it is spelled.
+    pub(in crate::ingest) fn top_level_names(&self) -> std::collections::HashSet<String> {
+        self.values
+            .keys()
+            .filter_map(|key| key.split("::").next().map(str::to_string))
+            .collect()
+    }
+
     /// Only already-consumed original Ruby can add mutation facts here.
     /// Declaration admission remains the prepass's input roots. Revalidate
     /// enum declarations only: no model replacement or unrelated diagnostics.

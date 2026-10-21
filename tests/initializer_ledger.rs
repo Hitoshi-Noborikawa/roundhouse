@@ -165,7 +165,8 @@ fn inert_allowlisted_statements_are_not_reported_but_a_computed_value_is() {
          Rails.application.config.action_dispatch.cookies_serializer = :json\n\
          Rails.application.config.assets.version = \"1.0\"\n\
          Rails.application.config.filter_parameters += Secrets.names\n\
-         Rails.application.config.generators do |g|\n  g.orm :active_record\nend\n",
+         Rails.application.config.generators do |g|\n  g.orm :active_record\nend\n\
+         ActiveStorage::Transformers::Vips\n",
     )]);
     // The computed `Secrets.names` could do anything; the literal ones cannot.
     assert_eq!(statements(&ledger), ["Rails.application.config.filter_parameters +="]);
@@ -189,6 +190,11 @@ fn every_recognizer_that_reads_an_initializer_keeps_its_statement_out_of_the_led
         ("config/initializers/formats.rb", "Time::DATE_FORMATS[:short_date] = \"%b %e\"\n"),
         ("config/initializers/mixins.rb", "Target.include Concern\n"),
         ("config/initializers/filters.rb", "Target.before_action :guard, only: [:show]\n"),
+        (
+            "config/initializers/headers.rb",
+            "ActiveSupport.on_load(:active_storage_blob) do\n  \
+             Target.after_action only: :show do\n    response.set_header(\"Cache-Control\", \"public\")\n  end\nend\n",
+        ),
         (
             "config/initializers/sqlite.rb",
             "conn.create_function(\"regexp\", 2) do |fn, pattern, expr|\n  fn.result = 1\nend\n",
@@ -466,6 +472,7 @@ fn a_statement_the_ledger_calls_consumed_has_its_recognizers_effect_on_the_app()
         ),
         ("config/initializers/formats.rb", "Time::DATE_FORMATS[:short_date] = \"%b %e\"\n"),
         ("config/initializers/filters.rb", "Target.before_action :guard, only: [:show]\n"),
+        ("config/initializers/headers.rb", "Target.after_action { headers[\"X-Seen\"] = \"1\" }\n"),
         (
             "config/initializers/sqlite.rb",
             "conn.create_function(\"regexp\", 2) do |fn, pattern, expr|\n  fn.result = 1\nend\n",
@@ -477,6 +484,7 @@ fn a_statement_the_ledger_calls_consumed_has_its_recognizers_effect_on_the_app()
     assert!(ledger.is_empty(), "{:?}", statements(&ledger));
     assert!(!app.time_formats.is_empty());
     assert_eq!(app.initializer_filters.len(), 1);
+    assert_eq!(app.initializer_response_headers.len(), 1);
     assert_eq!(app.sql_functions.len(), 1);
     let names: Vec<&str> = app
         .rails_application

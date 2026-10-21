@@ -554,7 +554,7 @@ fn spinel_shim_policy() {
     let dir = base.join(format!("roundhouse-db-concurrency-{}-spinel", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
-    for name in ["db.rb", "active_support_time_parsing.rb"] {
+    for name in ["db.rb", "active_support_time_parsing.rb", "active_support_interval.rb", "active_support_duration.rb"] {
         std::fs::copy(root.join("runtime/spinel").join(name), dir.join(name)).unwrap();
     }
     std::fs::copy(

@@ -340,8 +340,8 @@ fn view_prefix(controller_class: &str, action: &str) -> String {
 /// the gap only names the parent's file), any file the route's reach
 /// actually walks into (a partial or layout inlined into the view
 /// method that renders it), or the view template the action renders by
-/// convention (a template engine not ingested at all: `.css.erb`,
-/// `.xml.ruby` — these never become a method, so reach can't see them,
+/// convention (a template engine not ingested at all: `.rabl` —
+/// these never become a method, so reach can't see them,
 /// which is why the prefix check stays). Either way the lowered app
 /// cannot serve what the gap dropped, so the route it belongs to stays
 /// with Rails.

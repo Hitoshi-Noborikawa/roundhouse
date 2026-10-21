@@ -8,7 +8,7 @@ use ruby_prism::Node;
 
 use crate::Symbol;
 use crate::dialect::{Comment, ModelBodyItem};
-use crate::expr::{Expr, Literal};
+use crate::expr::{BoolOpKind, BoolOpSurface, Expr, ExprNode, Literal};
 use crate::span::Span;
 
 use super::super::IngestError;
@@ -44,6 +44,7 @@ pub(super) enum ValidatesKind {
     Map,
     Numericality,
     Inclusion,
+    Exclusion,
     Format,
 }
 
@@ -65,11 +66,24 @@ struct BuiltRule {
     rule: crate::dialect::ValidationRule,
     if_cond: Option<Expr>,
     unless_cond: Option<Expr>,
+    /// `on:` in the rule's own hash, which wins over the call-level one:
+    /// `None` unset, `Some(guard)` as `context_guard` reads it.
+    on_guard: Option<Option<Expr>>,
+    /// A call-level `allow_nil: true` on a rule that stores no flag of its
+    /// own (presence): the rule runs only when the attribute is not nil.
+    nil_skip: bool,
+    /// A literal String `message:` in the rule's own hash.
+    message: Option<String>,
+    /// The rule's own hash named `allow_nil:` / `allow_blank:`, which
+    /// wins over the call-level option (Rails merges the call's options
+    /// under each validator's own).
+    own_allow_nil: bool,
+    own_allow_blank: bool,
 }
 
 impl BuiltRule {
     fn bare(rule: crate::dialect::ValidationRule) -> Self {
-        Self { rule, if_cond: None, unless_cond: None }
+        Self { rule, if_cond: None, unless_cond: None, on_guard: None, nil_skip: false, message: None, own_allow_nil: false, own_allow_blank: false }
     }
 }
 
@@ -84,6 +98,7 @@ pub(super) fn parse_validates_call(
     call: &ruby_prism::CallNode<'_>,
     file: &str,
     kind: ValidatesKind,
+    class_consts: &super::ClassConsts,
 ) -> ParsedValidates {
     use crate::dialect::{Validation, ValidationRule};
     if call.block().is_some() {
@@ -101,6 +116,7 @@ pub(super) fn parse_validates_call(
         ValidatesKind::Map => "validates",
         ValidatesKind::Numericality => "validates_numericality_of",
         ValidatesKind::Inclusion => "validates_inclusion_of",
+        ValidatesKind::Exclusion => "validates_exclusion_of",
         ValidatesKind::Format => "validates_format_of",
     };
 
@@ -127,6 +143,8 @@ pub(super) fn parse_validates_call(
     let mut allow_nil: Option<bool> = None;
     let mut call_if_cond: Option<Expr> = None;
     let mut call_unless_cond: Option<Expr> = None;
+    // `on: :create` / `:update`: a guard ANDed into every rule's `if`.
+    let mut on_guard: Option<Expr> = None;
     let mut drafts: Vec<BuiltRule> = Vec::new();
 
     if let Some(node) = &option_node {
@@ -157,8 +175,12 @@ pub(super) fn parse_validates_call(
                         "unless" => {
                             push_condition(&value, file, &mut call_unless_cond, "unless", &mut gaps)
                         }
-                        "on" | "strict" | "message" => gaps.push(key),
-                        other => match parse_validator(other, &value, file) {
+                        "on" => match context_guard(&value) {
+                            Some(guard) => on_guard = guard,
+                            None => gaps.push(key),
+                        },
+                        "strict" | "message" => gaps.push(key),
+                        other => match parse_validator(other, &value, file, class_consts) {
                             RuleParse::Skip => {}
                             RuleParse::Rule(built) => drafts.push(built),
                             RuleParse::Gap(more) => gaps.extend(more),
@@ -166,7 +188,7 @@ pub(super) fn parse_validates_call(
                     }
                 }
             }
-            ValidatesKind::Numericality | ValidatesKind::Inclusion | ValidatesKind::Format => {
+            ValidatesKind::Numericality | ValidatesKind::Inclusion | ValidatesKind::Exclusion | ValidatesKind::Format => {
                 parse_of_options(
                     kind,
                     &elements,
@@ -175,8 +197,10 @@ pub(super) fn parse_validates_call(
                     &mut allow_nil,
                     &mut call_if_cond,
                     &mut call_unless_cond,
+                    &mut on_guard,
                     &mut drafts,
                     &mut gaps,
+                    class_consts,
                 );
             }
         }
@@ -188,26 +212,42 @@ pub(super) fn parse_validates_call(
             lt: None,
             gte: None,
             lte: None,
+            allow_nil: None,
+            allow_blank: None,
         }));
     } else if !matches!(kind, ValidatesKind::Map) && !attrs.is_empty() {
         gaps.push(match kind {
             ValidatesKind::Inclusion => "inclusion".to_string(),
+            ValidatesKind::Exclusion => "exclusion".to_string(),
             ValidatesKind::Format => "format".to_string(),
             ValidatesKind::Numericality | ValidatesKind::Map => "options".to_string(),
         });
     }
 
-    if allow_blank && drafts.iter().any(|draft| !blank_safe(&draft.rule)) {
+    // Uniqueness and Numericality store both flags, so a call-level one
+    // applies to them (below) rather than refusing the call.
+    let is_uniqueness = |draft: &BuiltRule| matches!(draft.rule, ValidationRule::Uniqueness { .. });
+    let is_numericality = |draft: &BuiltRule| matches!(draft.rule, ValidationRule::Numericality { .. });
+    if allow_blank
+        && drafts
+            .iter()
+            .any(|draft| !blank_safe(&draft.rule) && !is_uniqueness(draft) && !is_numericality(draft))
+    {
         gaps.push("allow_blank".to_string());
     }
     // Call-level `allow_nil: true` is Rails' skip-when-nil for every
-    // validator in the call. Length stores it. The other rules this
-    // build lowers reject nil, so applying them would reject records
-    // Rails accepts.
+    // validator in the call. Length, Uniqueness and Numericality store it, and
+    // Presence skips nil (`nil_skip` below). The other
+    // rules this build lowers reject nil, so applying them would reject
+    // records Rails accepts.
     if allow_nil == Some(true)
         && drafts
             .iter()
-            .any(|draft| !matches!(draft.rule, ValidationRule::Length { .. }))
+            .any(|draft| {
+                !matches!(draft.rule, ValidationRule::Length { .. } | ValidationRule::Presence)
+                    && !is_uniqueness(draft)
+                    && !is_numericality(draft)
+            })
     {
         gaps.push("allow_nil".to_string());
     }
@@ -225,14 +265,46 @@ pub(super) fn parse_validates_call(
     if allow_blank {
         drafts.retain(|draft| !matches!(draft.rule, ValidationRule::Presence));
     }
+    for draft in &mut drafts {
+        let (own_nil, own_blank) = (draft.own_allow_nil, draft.own_allow_blank);
+        if let ValidationRule::Uniqueness { allow_nil: nil_slot, allow_blank: blank_slot, .. } = &mut draft.rule {
+            if let (Some(flag), false) = (allow_nil, own_nil) {
+                *nil_slot = flag;
+            }
+            if allow_blank && !own_blank {
+                *blank_slot = true;
+            }
+        }
+    }
+    // Presence under a call-level `allow_nil: true`: Rails' EachValidator
+    // skips nil, so presence checks only a non-nil value for blank. The
+    // rule's own `allow_nil: false` wins (Rails merges the call's options
+    // under the validator's own), and presence then rejects nil.
+    if allow_nil == Some(true) {
+        for draft in &mut drafts {
+            if matches!(draft.rule, ValidationRule::Presence) && !draft.own_allow_nil {
+                draft.nil_skip = true;
+            }
+        }
+    }
     if let Some(flag) = allow_nil {
         for draft in &mut drafts {
-            if let ValidationRule::Length {
-                allow_nil: slot, ..
-            } = &mut draft.rule
+            if let ValidationRule::Length { allow_nil: slot, .. } | ValidationRule::Numericality { allow_nil: slot, .. } =
+                &mut draft.rule
             {
                 if slot.is_none() {
                     *slot = Some(flag);
+                }
+            }
+        }
+    }
+    // A call-level `allow_blank:` reaches the numericality validator as
+    // Rails passes it, under the validator's own key.
+    if allow_blank {
+        for draft in &mut drafts {
+            if let ValidationRule::Numericality { allow_blank: slot, .. } = &mut draft.rule {
+                if slot.is_none() {
+                    *slot = Some(true);
                 }
             }
         }
@@ -244,8 +316,9 @@ pub(super) fn parse_validates_call(
             out.push(Validation {
                 attribute: attr.clone(),
                 rules: Vec::new(),
-                if_cond: call_if_cond.clone(),
+                if_cond: and_guard(on_guard.clone(), call_if_cond.clone()),
                 unless_cond: call_unless_cond.clone(),
+                message: None,
             });
             continue;
         }
@@ -253,10 +326,14 @@ pub(super) fn parse_validates_call(
         for draft in &drafts {
             // A condition inside the rule hash replaces the call-level
             // one for that key — the other key still merges in.
-            let if_cond = draft.if_cond.clone().or_else(|| call_if_cond.clone());
+            // The rule's own `on:` replaces the call's, as Rails merges the
+            // call's options under each validator's own.
+            let rule_on = draft.on_guard.clone().unwrap_or_else(|| on_guard.clone());
+            let rule_on = if draft.nil_skip { and_guard(Some(not_nil(attr)), rule_on) } else { rule_on };
+            let if_cond = and_guard(rule_on, draft.if_cond.clone().or_else(|| call_if_cond.clone()));
             let unless_cond = draft.unless_cond.clone().or_else(|| call_unless_cond.clone());
             if let Some(current) = grouped.as_mut() {
-                if current.if_cond == if_cond && current.unless_cond == unless_cond {
+                if current.if_cond == if_cond && current.unless_cond == unless_cond && current.message == draft.message {
                     current.rules.push(draft.rule.clone());
                     continue;
                 }
@@ -267,6 +344,7 @@ pub(super) fn parse_validates_call(
                 rules: vec![draft.rule.clone()],
                 if_cond,
                 unless_cond,
+                message: draft.message.clone(),
             });
         }
         if let Some(validation) = grouped {
@@ -274,6 +352,33 @@ pub(super) fn parse_validates_call(
         }
     }
     ParsedValidates::Modeled(out)
+}
+
+/// `message: "…"` in a validator's own hash: Rails' text in place of the
+/// default (after a model-specific translation, which the message lookup
+/// still prefers). Only a literal String whose every `%{name}` the rule's
+/// errors always supply: `value`, `attribute`, `model`, and `count` where
+/// every error of the rule carries one (`counted`). Rails raises
+/// `I18n::MissingInterpolationArgument` for any other name when the
+/// message renders (`%{count}` on numericality's "is not a number"). A
+/// Symbol (an i18n key), a Proc, or an interpolated Ruby String stays the
+/// gap.
+fn push_message(value: &Node<'_>, kind: &str, counted: bool, slot: &mut Option<String>, gaps: &mut Vec<String>) {
+    let Some(text) = string_value(value) else {
+        gaps.push(format!("{kind}: message"));
+        return;
+    };
+    // The placeholders as I18n reads the String: `%%` is a literal `%`
+    // (`%%{x}` names nothing), a `%<name>` format reference is refused,
+    // and a `%<` without a name and `>` (`"must be %< 10"`) is text.
+    let allowed = |name: &str| matches!(name, "value" | "attribute" | "model") || (counted && name == "count");
+    let known = crate::i18n::pieces(&text)
+        .is_ok_and(|pieces| pieces.iter().all(|p| !matches!(p, crate::i18n::Piece::Name(n) if !allowed(n))));
+    if !known {
+        gaps.push(format!("{kind}: message"));
+        return;
+    }
+    *slot = Some(text);
 }
 
 /// `if:` / `unless:` — the same reader a callback uses. A Symbol is the
@@ -302,6 +407,179 @@ fn push_condition(
         return;
     }
     gaps.push(option.to_string());
+}
+
+/// `on:` as a guard on the record. Rails runs a validation in the context
+/// `valid?` / `save` use: `:create` for a new record, `:update` for a
+/// persisted one. So `on: :create` is `!self.persisted?`, `on: :update` is
+/// `self.persisted?`, and an array naming both is no guard at all
+/// (`Some(None)`). A custom context (`on: :publish`, run only by
+/// `valid?(:publish)`) is not modeled (`None`, a gap).
+///
+/// `self.persisted?` rather than a bare `new_record?`: `persisted?` is
+/// synthesized per model on every target, while `new_record?` lives on
+/// the runtime Base, which a rust or go struct does not inherit (the same
+/// spelling `model_to_library::markers` uses, for the same reason).
+/// `!self.<attr>.nil?`, the guard a call-level `allow_nil:` puts on a rule
+/// that stores no flag (presence).
+fn not_nil(attr: &Symbol) -> Expr {
+    let read = Expr::new(
+        Span::synthetic(),
+        ExprNode::Send {
+            recv: Some(Expr::new(Span::synthetic(), ExprNode::SelfRef)),
+            method: attr.clone(),
+            args: Vec::new(),
+            block: None,
+            parenthesized: false,
+        },
+    );
+    let nil = Expr::new(
+        Span::synthetic(),
+        ExprNode::Send { recv: Some(read), method: Symbol::from("nil?"), args: Vec::new(), block: None, parenthesized: false },
+    );
+    Expr::new(
+        Span::synthetic(),
+        ExprNode::Send { recv: Some(nil), method: Symbol::from("!"), args: Vec::new(), block: None, parenthesized: false },
+    )
+}
+
+fn context_guard(value: &Node<'_>) -> Option<Option<Expr>> {
+    let mut contexts: Vec<String> = Vec::new();
+    if let Some(array) = value.as_array_node() {
+        for element in array.elements().iter() {
+            contexts.push(symbol_value(&element)?);
+        }
+    } else {
+        contexts.push(symbol_value(value)?);
+    }
+    if contexts.is_empty() || contexts.iter().any(|c| c != "create" && c != "update") {
+        return None;
+    }
+    let create = contexts.iter().any(|c| c == "create");
+    let update = contexts.iter().any(|c| c == "update");
+    let persisted = Expr::new(
+        Span::synthetic(),
+        ExprNode::Send {
+            recv: Some(Expr::new(Span::synthetic(), ExprNode::SelfRef)),
+            method: Symbol::from("persisted?"),
+            args: Vec::new(),
+            block: None,
+            parenthesized: false,
+        },
+    );
+    Some(match (create, update) {
+        (true, true) => None,
+        (false, true) => Some(persisted),
+        _ => Some(Expr::new(
+            Span::synthetic(),
+            ExprNode::Send {
+                recv: Some(persisted),
+                method: Symbol::from("!"),
+                args: Vec::new(),
+                block: None,
+                parenthesized: false,
+            },
+        )),
+    })
+}
+
+/// Both guards hold (`on:`'s context guard and an `if:` condition), or
+/// whichever one is present.
+fn and_guard(a: Option<Expr>, b: Option<Expr>) -> Option<Expr> {
+    match (a, b) {
+        (Some(a), Some(b)) => Some(Expr::new(
+            Span::synthetic(),
+            ExprNode::BoolOp { op: BoolOpKind::And, surface: BoolOpSurface::Symbol, left: a, right: b },
+        )),
+        (a, b) => a.or(b),
+    }
+}
+
+/// `uniqueness: true` or `{ scope:, case_sensitive:, allow_nil:,
+/// allow_blank:, if:, unless: }`. `conditions:` (a relation callable) and
+/// `message:` stay gaps, and so does any uniqueness rule on a model whose
+/// class body declares a `default_scope`: Rails queries `unscoped`, and
+/// the runtime has no `unscoped` to match it.
+fn parse_uniqueness(value: &Node<'_>, file: &str, class_consts: &super::ClassConsts) -> RuleParse {
+    use crate::dialect::ValidationRule;
+    if class_consts.default_scoped() {
+        return RuleParse::Gap(vec!["uniqueness".to_string()]);
+    }
+    let rule = |scope, case_sensitive, allow_nil, allow_blank| ValidationRule::Uniqueness {
+        scope,
+        case_sensitive,
+        allow_nil,
+        allow_blank,
+    };
+    match super::super::util::bool_value(value) {
+        Some(true) => return RuleParse::Rule(BuiltRule::bare(rule(Vec::new(), true, false, false))),
+        Some(false) => return RuleParse::Skip,
+        None => {}
+    }
+    let Some(elements) = hash_elements(value) else {
+        return RuleParse::Gap(vec!["uniqueness".to_string()]);
+    };
+    let mut scope: Vec<Symbol> = Vec::new();
+    let mut case_sensitive = true;
+    let mut allow_nil = false;
+    let mut allow_blank = false;
+    let mut built = BuiltRule::bare(rule(Vec::new(), true, false, false));
+    let mut gaps = Vec::new();
+    for el in elements.iter() {
+        let Some(assoc) = el.as_assoc_node() else {
+            gaps.push("uniqueness".to_string());
+            continue;
+        };
+        let Some(key) = symbol_value(&assoc.key()) else {
+            gaps.push("uniqueness".to_string());
+            continue;
+        };
+        let child = assoc.value();
+        match key.as_str() {
+            "scope" => {
+                let names: Option<Vec<Symbol>> = if let Some(array) = child.as_array_node() {
+                    array.elements().iter().map(|e| symbol_value(&e).map(|s| Symbol::from(s.as_str()))).collect()
+                } else {
+                    symbol_value(&child).map(|s| vec![Symbol::from(s.as_str())])
+                };
+                match names {
+                    Some(names) => scope = names,
+                    None => gaps.push("uniqueness: scope".to_string()),
+                }
+            }
+            "case_sensitive" => match super::super::util::bool_value(&child) {
+                Some(flag) => case_sensitive = flag,
+                None => gaps.push("uniqueness: case_sensitive".to_string()),
+            },
+            "allow_nil" => match super::super::util::bool_value(&child) {
+                Some(flag) => {
+                    allow_nil = flag;
+                    built.own_allow_nil = true;
+                }
+                None => gaps.push("uniqueness: allow_nil".to_string()),
+            },
+            "allow_blank" => match super::super::util::bool_value(&child) {
+                Some(flag) => {
+                    allow_blank = flag;
+                    built.own_allow_blank = true;
+                }
+                None => gaps.push("uniqueness: allow_blank".to_string()),
+            },
+            "on" => match context_guard(&child) {
+                Some(guard) => built.on_guard = Some(guard),
+                None => gaps.push("on".to_string()),
+            },
+            "if" => push_condition(&child, file, &mut built.if_cond, "if", &mut gaps),
+            "unless" => push_condition(&child, file, &mut built.unless_cond, "unless", &mut gaps),
+            "message" => push_message(&child, "uniqueness", false, &mut built.message, &mut gaps),
+            other => gaps.push(format!("uniqueness: {other}")),
+        }
+    }
+    if !gaps.is_empty() {
+        return RuleParse::Gap(gaps);
+    }
+    built.rule = rule(scope, case_sensitive, allow_nil, allow_blank);
+    RuleParse::Rule(built)
 }
 
 /// `allow_blank: true` skips every validator when the value is blank.
@@ -379,8 +657,10 @@ fn parse_of_options<'a>(
     allow_nil: &mut Option<bool>,
     call_if_cond: &mut Option<Expr>,
     call_unless_cond: &mut Option<Expr>,
+    on_guard: &mut Option<Expr>,
     drafts: &mut Vec<BuiltRule>,
     gaps: &mut Vec<String>,
+    class_consts: &super::ClassConsts,
 ) {
     use crate::dialect::ValidationRule;
     let mut only_integer = false;
@@ -389,7 +669,7 @@ fn parse_of_options<'a>(
     let mut gte: Option<f64> = None;
     let mut lte: Option<f64> = None;
     let mut inclusion: Option<InclusionSpec> = None;
-    let mut pattern: Option<String> = None;
+    let mut pattern: Option<(String, String)> = None;
     let mut saw_rule_key = false;
     for el in elements.iter() {
         let Some(assoc) = el.as_assoc_node() else {
@@ -413,7 +693,11 @@ fn parse_of_options<'a>(
             },
             "if" => push_condition(&value, file, call_if_cond, "if", gaps),
             "unless" => push_condition(&value, file, call_unless_cond, "unless", gaps),
-            "on" | "strict" | "message" => gaps.push(key),
+            "on" => match context_guard(&value) {
+                Some(guard) => *on_guard = guard,
+                None => gaps.push(key),
+            },
+            "strict" | "message" => gaps.push(key),
             "only_integer" if matches!(kind, ValidatesKind::Numericality) => {
                 saw_rule_key = true;
                 match super::super::util::bool_value(&value) {
@@ -423,28 +707,28 @@ fn parse_of_options<'a>(
             }
             "greater_than" if matches!(kind, ValidatesKind::Numericality) => {
                 saw_rule_key = true;
-                match number_value(&value) {
+                match bound_value(&value, class_consts) {
                     Some(n) => gt = Some(n),
                     None => gaps.push("numericality: greater_than".to_string()),
                 }
             }
             "less_than" if matches!(kind, ValidatesKind::Numericality) => {
                 saw_rule_key = true;
-                match number_value(&value) {
+                match bound_value(&value, class_consts) {
                     Some(n) => lt = Some(n),
                     None => gaps.push("numericality: less_than".to_string()),
                 }
             }
             "greater_than_or_equal_to" if matches!(kind, ValidatesKind::Numericality) => {
                 saw_rule_key = true;
-                match number_value(&value) {
+                match bound_value(&value, class_consts) {
                     Some(n) => gte = Some(n),
                     None => gaps.push("numericality: greater_than_or_equal_to".to_string()),
                 }
             }
             "less_than_or_equal_to" if matches!(kind, ValidatesKind::Numericality) => {
                 saw_rule_key = true;
-                match number_value(&value) {
+                match bound_value(&value, class_consts) {
                     Some(n) => lte = Some(n),
                     None => gaps.push("numericality: less_than_or_equal_to".to_string()),
                 }
@@ -453,17 +737,17 @@ fn parse_of_options<'a>(
                 saw_rule_key = true;
                 gaps.push(format!("numericality: {key}"));
             }
-            "in" | "within" if matches!(kind, ValidatesKind::Inclusion) => {
+            "in" | "within" if matches!(kind, ValidatesKind::Inclusion | ValidatesKind::Exclusion) => {
                 saw_rule_key = true;
-                match inclusion_values(&value) {
+                match inclusion_values(&value, class_consts) {
                     Some(spec) => inclusion = Some(spec),
-                    None => gaps.push("inclusion: in".to_string()),
+                    None => gaps.push(format!("{}: in", set_label(&kind))),
                 }
             }
             "with" if matches!(kind, ValidatesKind::Format) => {
                 saw_rule_key = true;
-                match bare_regexp(&value) {
-                    Some(text) => pattern = Some(text),
+                match resolve_format_regex(&value, class_consts) {
+                    Some(resolved) => pattern = Some(resolved),
                     None => gaps.push("format: with".to_string()),
                 }
             }
@@ -471,6 +755,7 @@ fn parse_of_options<'a>(
                 let prefix = match kind {
                     ValidatesKind::Numericality => "numericality",
                     ValidatesKind::Inclusion => "inclusion",
+                    ValidatesKind::Exclusion => "exclusion",
                     ValidatesKind::Format => "format",
                     ValidatesKind::Map => "validates",
                 };
@@ -488,20 +773,22 @@ fn parse_of_options<'a>(
             lt,
             gte,
             lte,
+            allow_nil: None,
+            allow_blank: None,
         },
-        ValidatesKind::Inclusion => match inclusion {
-            Some(spec) => inclusion_rule(spec),
+        ValidatesKind::Inclusion | ValidatesKind::Exclusion => match inclusion {
+            Some(spec) => set_rule(spec, matches!(kind, ValidatesKind::Exclusion)),
             None if !saw_rule_key => {
-                gaps.push("inclusion".to_string());
+                gaps.push(set_label(&kind).to_string());
                 return;
             }
             None => {
-                gaps.push("inclusion: in".to_string());
+                gaps.push(format!("{}: in", set_label(&kind)));
                 return;
             }
         },
         ValidatesKind::Format => match pattern {
-            Some(pattern) => ValidationRule::Format { pattern },
+            Some((pattern, flags)) => ValidationRule::Format { pattern, flags },
             None => {
                 gaps.push("format: with".to_string());
                 return;
@@ -512,15 +799,17 @@ fn parse_of_options<'a>(
     drafts.push(BuiltRule::bare(rule));
 }
 
-fn parse_validator(key: &str, value: &Node<'_>, file: &str) -> RuleParse {
+fn parse_validator(key: &str, value: &Node<'_>, file: &str, class_consts: &super::ClassConsts) -> RuleParse {
     use crate::dialect::ValidationRule;
     match key {
         "presence" => parse_bool_or_hash(value, ValidationRule::Presence, "presence", file),
         "absence" => parse_bool_or_hash(value, ValidationRule::Absence, "absence", file),
-        "length" => parse_length_rule(value, file),
-        "numericality" => parse_numericality(value, file),
-        "inclusion" => parse_inclusion(value, file),
-        "format" => parse_format(value, file),
+        "length" => parse_length_rule(value, file, class_consts),
+        "numericality" => parse_numericality(value, file, class_consts),
+        "inclusion" => parse_set(value, file, false, class_consts),
+        "exclusion" => parse_set(value, file, true, class_consts),
+        "uniqueness" => parse_uniqueness(value, file, class_consts),
+        "format" => parse_format(value, file, class_consts),
         other => RuleParse::Gap(vec![other.to_string()]),
     }
 }
@@ -553,14 +842,21 @@ fn parse_bool_or_hash(
         };
         let child = assoc.value();
         match key.as_str() {
+            "on" => match context_guard(&child) {
+                Some(guard) => built.on_guard = Some(guard),
+                None => gaps.push("on".to_string()),
+            },
             "if" => push_condition(&child, file, &mut built.if_cond, "if", &mut gaps),
             "unless" => {
                 push_condition(&child, file, &mut built.unless_cond, "unless", &mut gaps)
             }
+            // `allow_nil: false` is Rails' default, but stated in the
+            // rule's own hash it wins over a call-level `allow_nil: true`.
             "allow_nil" => match super::super::util::bool_value(&child) {
-                Some(false) => {}
+                Some(false) => built.own_allow_nil = true,
                 _ => gaps.push("allow_nil".to_string()),
             },
+            "message" => push_message(&child, name, false, &mut built.message, &mut gaps),
             other => gaps.push(format!("{name}: {other}")),
         }
     }
@@ -571,7 +867,7 @@ fn parse_bool_or_hash(
     }
 }
 
-fn parse_numericality(value: &Node<'_>, file: &str) -> RuleParse {
+fn parse_numericality(value: &Node<'_>, file: &str, class_consts: &super::ClassConsts) -> RuleParse {
     use crate::dialect::ValidationRule;
     if super::super::util::bool_value(value) == Some(true) {
         return RuleParse::Rule(BuiltRule::bare(ValidationRule::Numericality {
@@ -580,6 +876,8 @@ fn parse_numericality(value: &Node<'_>, file: &str) -> RuleParse {
             lt: None,
             gte: None,
             lte: None,
+            allow_nil: None,
+            allow_blank: None,
         }));
     }
     if super::super::util::bool_value(value) == Some(false) {
@@ -593,12 +891,16 @@ fn parse_numericality(value: &Node<'_>, file: &str) -> RuleParse {
     let mut lt = None;
     let mut gte = None;
     let mut lte = None;
+    let mut allow_nil = None;
+    let mut allow_blank = None;
     let mut built = BuiltRule::bare(ValidationRule::Numericality {
         only_integer: false,
         gt: None,
         lt: None,
         gte: None,
         lte: None,
+        allow_nil: None,
+        allow_blank: None,
     });
     let mut gaps = Vec::new();
     for el in elements.iter() {
@@ -616,31 +918,40 @@ fn parse_numericality(value: &Node<'_>, file: &str) -> RuleParse {
                 Some(flag) => only_integer = flag,
                 None => gaps.push("numericality: only_integer".to_string()),
             },
-            "greater_than" => match number_value(&child) {
+            "greater_than" => match bound_value(&child, class_consts) {
                 Some(n) => gt = Some(n),
                 None => gaps.push("numericality: greater_than".to_string()),
             },
-            "less_than" => match number_value(&child) {
+            "less_than" => match bound_value(&child, class_consts) {
                 Some(n) => lt = Some(n),
                 None => gaps.push("numericality: less_than".to_string()),
             },
-            "greater_than_or_equal_to" => match number_value(&child) {
+            "greater_than_or_equal_to" => match bound_value(&child, class_consts) {
                 Some(n) => gte = Some(n),
                 None => gaps.push("numericality: greater_than_or_equal_to".to_string()),
             },
-            "less_than_or_equal_to" => match number_value(&child) {
+            "less_than_or_equal_to" => match bound_value(&child, class_consts) {
                 Some(n) => lte = Some(n),
                 None => gaps.push("numericality: less_than_or_equal_to".to_string()),
             },
             "equal_to" | "other_than" => gaps.push(format!("numericality: {key}")),
+            "on" => match context_guard(&child) {
+                Some(guard) => built.on_guard = Some(guard),
+                None => gaps.push("on".to_string()),
+            },
             "if" => push_condition(&child, file, &mut built.if_cond, "if", &mut gaps),
             "unless" => {
                 push_condition(&child, file, &mut built.unless_cond, "unless", &mut gaps)
             }
             "allow_nil" => match super::super::util::bool_value(&child) {
-                Some(false) => {}
-                _ => gaps.push("allow_nil".to_string()),
+                Some(flag) => allow_nil = Some(flag),
+                None => gaps.push("allow_nil".to_string()),
             },
+            "allow_blank" => match super::super::util::bool_value(&child) {
+                Some(flag) => allow_blank = Some(flag),
+                None => gaps.push("allow_blank".to_string()),
+            },
+            "message" => push_message(&child, "numericality", false, &mut built.message, &mut gaps),
             other => gaps.push(format!("numericality: {other}")),
         }
     }
@@ -653,34 +964,48 @@ fn parse_numericality(value: &Node<'_>, file: &str) -> RuleParse {
         lt,
         gte,
         lte,
+        allow_nil,
+        allow_blank,
     };
     RuleParse::Rule(built)
 }
 
-fn parse_inclusion(value: &Node<'_>, file: &str) -> RuleParse {
-    if let Some(spec) = inclusion_values(value) {
-        return RuleParse::Rule(BuiltRule::bare(inclusion_rule(spec)));
+/// `inclusion:` or, with `exclusion`, `exclusion:` — the same `in:` /
+/// `within:` shapes, as a membership or a non-membership rule.
+fn parse_set(value: &Node<'_>, file: &str, exclusion: bool, class_consts: &super::ClassConsts) -> RuleParse {
+    let label = if exclusion { "exclusion" } else { "inclusion" };
+    // `exclusion: false` / `inclusion: false` — Rails' `validates` skips
+    // a validator whose options are false, keeping the call's other rules.
+    if super::super::util::bool_value(value) == Some(false) {
+        return RuleParse::Skip;
+    }
+    if let Some(spec) = inclusion_values(value, class_consts) {
+        return RuleParse::Rule(BuiltRule::bare(set_rule(spec, exclusion)));
     }
     let Some(elements) = hash_elements(value) else {
-        return RuleParse::Gap(vec!["inclusion".to_string()]);
+        return RuleParse::Gap(vec![label.to_string()]);
     };
     let mut values = None;
-    let mut built = BuiltRule::bare(inclusion_rule(InclusionSpec::List(Vec::new())));
+    let mut built = BuiltRule::bare(set_rule(InclusionSpec::List(Vec::new()), exclusion));
     let mut gaps = Vec::new();
     for el in elements.iter() {
         let Some(assoc) = el.as_assoc_node() else {
-            gaps.push("inclusion".to_string());
+            gaps.push(label.to_string());
             continue;
         };
         let Some(key) = symbol_value(&assoc.key()) else {
-            gaps.push("inclusion".to_string());
+            gaps.push(label.to_string());
             continue;
         };
         let child = assoc.value();
         match key.as_str() {
-            "in" | "within" => match inclusion_values(&child) {
+            "in" | "within" => match inclusion_values(&child, class_consts) {
                 Some(spec) => values = Some(spec),
-                None => gaps.push("inclusion: in".to_string()),
+                None => gaps.push(format!("{label}: in")),
+            },
+            "on" => match context_guard(&child) {
+                Some(guard) => built.on_guard = Some(guard),
+                None => gaps.push("on".to_string()),
             },
             "if" => push_condition(&child, file, &mut built.if_cond, "if", &mut gaps),
             "unless" => {
@@ -690,7 +1015,8 @@ fn parse_inclusion(value: &Node<'_>, file: &str) -> RuleParse {
                 Some(false) => {}
                 _ => gaps.push("allow_nil".to_string()),
             },
-            other => gaps.push(format!("inclusion: {other}")),
+            "message" => push_message(&child, label, false, &mut built.message, &mut gaps),
+            other => gaps.push(format!("{label}: {other}")),
         }
     }
     if !gaps.is_empty() {
@@ -698,28 +1024,33 @@ fn parse_inclusion(value: &Node<'_>, file: &str) -> RuleParse {
     }
     match values {
         Some(spec) => {
-            built.rule = inclusion_rule(spec);
+            built.rule = set_rule(spec, exclusion);
             RuleParse::Rule(built)
         }
-        None => RuleParse::Gap(vec!["inclusion: in".to_string()]),
+        None => RuleParse::Gap(vec![format!("{label}: in")]),
     }
 }
 
-fn parse_format(value: &Node<'_>, file: &str) -> RuleParse {
+fn parse_format(value: &Node<'_>, file: &str, class_consts: &super::ClassConsts) -> RuleParse {
     use crate::dialect::ValidationRule;
-    if let Some(pattern) = bare_regexp(value) {
-        return RuleParse::Rule(BuiltRule::bare(ValidationRule::Format { pattern }));
+    if let Some((pattern, flags)) = resolve_format_regex(value, class_consts) {
+        return RuleParse::Rule(BuiltRule::bare(ValidationRule::Format { pattern, flags }));
     }
-    if value.as_regular_expression_node().is_some() {
-        // A flagged literal (`/a/i`) is not the pattern the lowerer emits.
+    if value.as_regular_expression_node().is_some()
+        || value.as_interpolated_regular_expression_node().is_some()
+    {
+        // A flagged literal with a flag no target can reproduce exactly
+        // (`/a/x`), or an interpolation this build can't flatten, is not
+        // the pattern the lowerer emits.
         return RuleParse::Gap(vec!["format: with".to_string()]);
     }
     let Some(elements) = hash_elements(value) else {
         return RuleParse::Gap(vec!["format".to_string()]);
     };
-    let mut pattern = None;
+    let mut pattern: Option<(String, String)> = None;
     let mut built = BuiltRule::bare(ValidationRule::Format {
         pattern: String::new(),
+        flags: String::new(),
     });
     let mut gaps = Vec::new();
     for el in elements.iter() {
@@ -733,9 +1064,13 @@ fn parse_format(value: &Node<'_>, file: &str) -> RuleParse {
         };
         let child = assoc.value();
         match key.as_str() {
-            "with" => match bare_regexp(&child) {
-                Some(text) => pattern = Some(text),
+            "with" => match resolve_format_regex(&child, class_consts) {
+                Some(resolved) => pattern = Some(resolved),
                 None => gaps.push("format: with".to_string()),
+            },
+            "on" => match context_guard(&child) {
+                Some(guard) => built.on_guard = Some(guard),
+                None => gaps.push("on".to_string()),
             },
             "if" => push_condition(&child, file, &mut built.if_cond, "if", &mut gaps),
             "unless" => {
@@ -745,6 +1080,7 @@ fn parse_format(value: &Node<'_>, file: &str) -> RuleParse {
                 Some(false) => {}
                 _ => gaps.push("allow_nil".to_string()),
             },
+            "message" => push_message(&child, "format", false, &mut built.message, &mut gaps),
             other => gaps.push(format!("format: {other}")),
         }
     }
@@ -752,18 +1088,98 @@ fn parse_format(value: &Node<'_>, file: &str) -> RuleParse {
         return RuleParse::Gap(gaps);
     }
     match pattern {
-        Some(pattern) => {
-            built.rule = ValidationRule::Format { pattern };
+        Some((pattern, flags)) => {
+            built.rule = ValidationRule::Format { pattern, flags };
             RuleParse::Rule(built)
         }
         None => RuleParse::Gap(vec!["format: with".to_string()]),
     }
 }
 
+/// Resolve a `format: { with: … }` value (or a bare `format: /…/`
+/// shorthand) to the regex literal it names, restricted to the flag
+/// combinations every emit target this build ships can reproduce with
+/// Ruby's exact meaning: no flags, `i` (case-insensitive) alone, `m`
+/// (Ruby's dot-matches-newline) alone, or both together. `x`
+/// (extended) has no faithful JS equivalent and `o` / an encoding flag
+/// changes match semantics in ways no target mirrors, so either one
+/// stays a gap rather than silently dropping. The value can be a
+/// direct `/pattern/flags` literal, a model constant assigned one
+/// (`NAME_RE`, `.freeze`d or aliased), or a constant assigned an
+/// interpolation of exactly one other such constant whose flags agree
+/// (`ClassConsts::regex` flattens that case).
+fn resolve_format_regex(
+    node: &Node<'_>,
+    class_consts: &super::ClassConsts,
+) -> Option<(String, String)> {
+    let (pattern, flags) = class_consts.regex(node).or_else(|| stdlib_regexp_constant(node, class_consts))?;
+    if flags.chars().all(|c| matches!(c, 'i' | 'm')) {
+        Some((pattern, flags))
+    } else {
+        None
+    }
+}
+
+/// A well-known Regexp constant of Ruby's standard library, named by
+/// its full path (`URI::MailTo::EMAIL_REGEXP`), folded to its
+/// `(source, flags)`. Consulted only after the class body's own
+/// constants fail to resolve the value. The rooted spelling
+/// (`::URI::MailTo::EMAIL_REGEXP`) always names the standard-library
+/// constant. The unrooted one resolves lexically, so it folds only when
+/// nothing could shadow its first segment: the class is not nested in
+/// a module or class, its body defines no constant, module, or class by
+/// that name, and no app class or module (so no app superclass or
+/// included module) defines one either. Otherwise it stays the gap.
+/// Neither spelling folds when the app itself defines or reopens the
+/// top-level namespace (`URI = …`, `module URI`, `URI::MailTo` in
+/// `lib/`), since it may have replaced the standard value.
+///
+/// Each entry is copied verbatim from
+/// `ruby -ruri -e 'p CONST.source, CONST.options'` on Ruby 4.0, so the
+/// rule is the one writing that literal inline would give (prism's
+/// unescaped `/…\/…/` source equals Ruby's `Regexp#source`, `\#`
+/// included). Anything else, including a method that builds a regex
+/// (`URI::DEFAULT_PARSER.make_regexp`), stays the gap.
+fn stdlib_regexp_constant(node: &Node<'_>, class_consts: &super::ClassConsts) -> Option<(String, String)> {
+    /// The path's segments, and whether it starts with `::`.
+    fn segments(node: &Node<'_>, out: &mut Vec<String>) -> Option<bool> {
+        if let Some(c) = node.as_constant_read_node() {
+            out.push(super::super::util::constant_id_str(&c.name()).to_string());
+            return Some(false);
+        }
+        let p = node.as_constant_path_node()?;
+        let rooted = match p.parent() {
+            Some(parent) => segments(&parent, out)?,
+            None => true,
+        };
+        out.push(super::super::util::constant_id_str(&p.name()?).to_string());
+        Some(rooted)
+    }
+    node.as_constant_path_node()?;
+    let mut path = Vec::new();
+    let rooted = segments(node, &mut path)?;
+    // An app that defines or reopens the top-level namespace may have
+    // replaced the standard value: neither spelling folds then.
+    if class_consts.app_defines_top_level(path.first()?) {
+        return None;
+    }
+    if !rooted && !class_consts.resolves_at_top_level(path.first()?) {
+        return None;
+    }
+    let (source, flags) = match path.join("::").as_str() {
+        "URI::MailTo::EMAIL_REGEXP" => (
+            r"\A[a-zA-Z0-9.!\#$%&'*+/=?^_`{|}~-]+@[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(?:\.[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)*\z",
+            "",
+        ),
+        _ => return None,
+    };
+    Some((source.to_string(), flags.to_string()))
+}
+
 /// `length: { minimum: N, maximum: M }`. `is:`, `in:`, and `within:`
 /// change which lengths Rails accepts; they are a gap, not a silent
 /// drop beside a bound this build does lower.
-fn parse_length_rule(value: &ruby_prism::Node<'_>, file: &str) -> RuleParse {
+fn parse_length_rule(value: &ruby_prism::Node<'_>, file: &str, class_consts: &super::ClassConsts) -> RuleParse {
     use crate::dialect::ValidationRule;
     let Some(elements) = hash_elements(value) else {
         return RuleParse::Gap(vec!["length".to_string()]);
@@ -790,7 +1206,7 @@ fn parse_length_rule(value: &ruby_prism::Node<'_>, file: &str) -> RuleParse {
         };
         let child = assoc.value();
         match key.as_str() {
-            "minimum" | "maximum" => match super::super::util::integer_value(&child) {
+            "minimum" | "maximum" => match class_consts.integer(&child) {
                 Some(n) if n >= 0 => {
                     let n = n as u32;
                     if key.as_str() == "minimum" {
@@ -808,6 +1224,10 @@ fn parse_length_rule(value: &ruby_prism::Node<'_>, file: &str) -> RuleParse {
             "message" => match string_value(&child) {
                 Some(text) => message = Some(text),
                 None => gaps.push("length: message".to_string()),
+            },
+            "on" => match context_guard(&child) {
+                Some(guard) => built.on_guard = Some(guard),
+                None => gaps.push("on".to_string()),
             },
             "if" => push_condition(&child, file, &mut built.if_cond, "if", &mut gaps),
             "unless" => {
@@ -832,6 +1252,15 @@ fn parse_length_rule(value: &ruby_prism::Node<'_>, file: &str) -> RuleParse {
     RuleParse::Rule(built)
 }
 
+/// A numericality bound: a number literal, or an integer constant of the
+/// class (`less_than_or_equal_to: MAX_SCORE`).
+fn bound_value(node: &Node<'_>, class_consts: &super::ClassConsts) -> Option<f64> {
+    if let Some(n) = class_consts.integer(node) {
+        return Some(n as f64);
+    }
+    number_value(node)
+}
+
 fn number_value(node: &Node<'_>) -> Option<f64> {
     if let Some(n) = super::super::util::integer_value(node) {
         return Some(n as f64);
@@ -844,20 +1273,33 @@ enum InclusionSpec {
     Range(crate::dialect::InclusionRange),
 }
 
-fn inclusion_rule(spec: InclusionSpec) -> crate::dialect::ValidationRule {
+/// The membership (`inclusion:`) or non-membership (`exclusion:`) rule for
+/// an `in:` value.
+fn set_rule(spec: InclusionSpec, exclusion: bool) -> crate::dialect::ValidationRule {
     use crate::dialect::ValidationRule;
-    match spec {
-        InclusionSpec::List(values) => ValidationRule::Inclusion { values, range: None },
-        InclusionSpec::Range(range) => {
-            ValidationRule::Inclusion { values: Vec::new(), range: Some(range) }
-        }
+    let (values, range) = match spec {
+        InclusionSpec::List(values) => (values, None),
+        InclusionSpec::Range(range) => (Vec::new(), Some(range)),
+    };
+    if exclusion {
+        ValidationRule::Exclusion { values, range }
+    } else {
+        ValidationRule::Inclusion { values, range }
     }
+}
+
+fn set_label(kind: &ValidatesKind) -> &'static str {
+    if matches!(kind, ValidatesKind::Exclusion) { "exclusion" } else { "inclusion" }
 }
 
 /// An array is list membership. A numeric range stays a range:
 /// `Range#include?` covers the numbers between the endpoints, which a
 /// list of the integers in between does not.
-fn inclusion_values(node: &Node<'_>) -> Option<InclusionSpec> {
+fn inclusion_values(node: &Node<'_>, class_consts: &super::ClassConsts) -> Option<InclusionSpec> {
+    // A list constant of the class (`in: MODES`, `MODES = %w[a b].freeze`).
+    if node.as_constant_read_node().is_some() || node.as_call_node().is_some() {
+        return class_consts.list(node).map(InclusionSpec::List);
+    }
     if let Some(array) = node.as_array_node() {
         let mut out = Vec::new();
         for element in array.elements().iter() {
@@ -898,20 +1340,3 @@ fn literal_atom(node: &Node<'_>) -> Option<Literal> {
     node.as_nil_node().is_some().then_some(Literal::Nil)
 }
 
-/// The pattern the format check emits, with no flags. A flag would
-/// change the match and the lowerer writes an unflagged literal.
-fn bare_regexp(node: &Node<'_>) -> Option<String> {
-    let regexp = node.as_regular_expression_node()?;
-    if regexp.is_ignore_case()
-        || regexp.is_multi_line()
-        || regexp.is_extended()
-        || regexp.is_once()
-        || regexp.is_euc_jp()
-        || regexp.is_windows_31j()
-        || regexp.is_utf_8()
-        || regexp.is_ascii_8bit()
-    {
-        return None;
-    }
-    Some(String::from_utf8_lossy(regexp.unescaped()).into_owned())
-}

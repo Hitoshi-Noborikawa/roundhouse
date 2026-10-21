@@ -144,7 +144,12 @@ pub(super) fn ingest_model_with_enum_constants(
         // Constants the class body assigns, for `enum :x, CONST` and for
         // labels spelled with a constant (`NAME => NAME`).
         let stmts = flatten_statements(class_body);
-        let class_consts = ClassConsts::collect(&stmts, file);
+        let mut class_consts = ClassConsts::collect(&stmts, file);
+        class_consts.set_lexical_scope(
+            name_path.len() == 1,
+            enum_constants.nested_names(),
+            enum_constants.top_level_names(),
+        );
         let resolve_constant = |node: &Node<'_>| enum_constants.resolve(node, &enum_owners);
         for statement in stmts {
             let definition = visibility::definition(&statement).map(|d| d.as_node());
@@ -378,6 +383,7 @@ pub(super) fn ingest_model_with_enum_constants(
                 file,
                 leading,
                 Some(&mut class_attr_defaults),
+                &class_consts,
             ) {
                 Ok(items) => items,
                 Err(err) if super::survey::is_active() => {
@@ -494,6 +500,7 @@ pub(super) fn ingest_model_body_items(
     file: &str,
     leading_comments: Vec<Comment>,
     class_attr_defaults: Option<&mut IndexMap<Symbol, Expr>>,
+    class_consts: &ClassConsts,
 ) -> IngestResult<Vec<ModelBodyItem>> {
     use crate::dialect::{Validation, ValidationRule};
     let span = Span {
@@ -507,12 +514,13 @@ pub(super) fn ingest_model_body_items(
             let of_kind = match name.as_str() {
                 "validates_numericality_of" => Some(ValidatesKind::Numericality),
                 "validates_inclusion_of" => Some(ValidatesKind::Inclusion),
+                "validates_exclusion_of" => Some(ValidatesKind::Exclusion),
                 "validates_format_of" => Some(ValidatesKind::Format),
                 _ => None,
             };
             if name == "validates" || of_kind.is_some() {
                 let kind = of_kind.unwrap_or(ValidatesKind::Map);
-                match parse_validates_call(&call, file, kind) {
+                match parse_validates_call(&call, file, kind, class_consts) {
                     ParsedValidates::Gap => return Ok(Vec::new()),
                     ParsedValidates::Modeled(parsed) if !parsed.is_empty() => {
                         return Ok(validation_items(parsed, leading_comments, span));
@@ -542,6 +550,7 @@ pub(super) fn ingest_model_body_items(
                             rules: vec![rule.clone()],
                             if_cond: None,
                             unless_cond: None,
+                            message: None,
                         })
                         .collect()
                 } else {
@@ -930,6 +939,7 @@ pub(super) fn ingest_model_body_item(
                             .collect(),
                         if_cond: None,
                         unless_cond: None,
+                        message: None,
                     },
                     leading_comments,
                     leading_blank_line: false,
@@ -1440,6 +1450,239 @@ enum EnumStored {
     Expr(Expr),
 }
 
+/// Methods a class body may call on a folded constant without changing
+/// it. Any other call (`<<`, `push`, `concat`, `replace`, `[]=`, a
+/// bang method, or one this list doesn't know) counts as a mutation.
+const READ_ONLY_CONST_METHODS: &[&str] = &[
+    "freeze", "frozen?", "include?", "member?", "key?", "has_key?", "value?", "cover?", "each", "each_with_index",
+    "each_with_object", "map", "collect", "flat_map", "select", "filter", "reject", "find", "detect", "find_index",
+    "index", "any?", "all?", "none?", "one?", "empty?", "size", "length", "count", "first", "last", "min", "max",
+    "sum", "sort", "sort_by", "to_a", "to_h", "to_s", "to_sym", "to_set", "inspect", "dup", "keys", "values",
+    "fetch", "dig", "[]", "join", "entries", "zip", "index_by", "index_with", "group_by", "partition", "tally",
+    "filter_map", "each_slice", "each_key", "each_value", "each_pair", "values_at", "slice", "except", "take",
+    "drop", "uniq", "compact", "reverse", "flatten", "invert", "transform_values", "transform_keys", "minmax",
+    "intersection", "union", "difference", "excluding", "including", "&", "|", "+", "-", "source", "options",
+    "match", "match?", "=~", "===", "==", "!=", "eql?", "hash", "is_a?", "nil?", "present?", "blank?",
+];
+
+/// The names a class body writes, or may mutate, anywhere other than
+/// one plain top-level `NAME = …` (see [`ClassConsts::collect`]).
+struct ConstTaint {
+    top_level: std::collections::HashSet<usize>,
+    top_writes: std::collections::HashMap<String, usize>,
+    tainted: std::collections::HashSet<String>,
+    /// `ALIAS = MODES` / `ALIAS = MODES.freeze` (any constant the
+    /// right-hand side reads): the two may be one object, so a mutation
+    /// through either taints both.
+    aliases: Vec<(String, String)>,
+}
+
+/// Methods whose result is a new object, never the receiver or one of its
+/// elements: a mutation of the result cannot reach the constant, so a
+/// receiver chain through one of them is no longer rooted at it
+/// (`(LIMIT - used).times`, `MODES.map(&:upcase) << "x"`). A method not
+/// listed may return the receiver itself (`to_a`, `tap`) or an element
+/// (`first`, `fetch`), and keeps the chain.
+const FRESH_RESULT_METHODS: &[&str] = &[
+    "+", "-", "*", "/", "%", "**", "<=>", "==", "!=", "<", "<=", ">", ">=", "&", "|", "^", "<<<", "~", "-@", "+@",
+    "map", "collect", "flat_map", "select", "filter", "reject", "filter_map", "sort", "sort_by", "uniq", "compact",
+    "reverse", "flatten", "dup", "clone", "size", "length", "count", "sum", "keys", "values", "join", "to_s",
+    "to_sym", "to_i", "to_f", "inspect", "index_by", "index_with", "group_by", "partition", "tally", "zip",
+    "include?", "member?", "key?", "any?", "all?", "none?", "empty?", "nil?", "frozen?", "is_a?",
+];
+
+/// The constant a receiver chain is rooted at: `MODES`, `MODES.to_a`,
+/// `Widget::MODES.first` (the last segment of a path), unless the chain
+/// passes through a [`FRESH_RESULT_METHODS`] call.
+fn chain_root(node: &Node<'_>) -> Option<String> {
+    if let Some(paren) = node.as_parentheses_node() {
+        return chain_root(&paren.body()?);
+    }
+    if let Some(stmts) = node.as_statements_node() {
+        let body: Vec<Node<'_>> = stmts.body().iter().collect();
+        let [only] = body.as_slice() else { return None };
+        return chain_root(only);
+    }
+    if let Some(call) = node.as_call_node() {
+        if FRESH_RESULT_METHODS.contains(&constant_id_str(&call.name()).as_ref()) {
+            return None;
+        }
+        return chain_root(&call.receiver()?);
+    }
+    if let Some(cr) = node.as_constant_read_node() {
+        return Some(constant_id_str(&cr.name()).to_string());
+    }
+    node.as_constant_path_node()?.name().map(|n| constant_id_str(&n).to_string())
+}
+
+/// Every constant a node reads, at any depth.
+fn constant_reads(node: &Node<'_>) -> Vec<String> {
+    struct Reads(Vec<String>);
+    impl<'pr> ruby_prism::Visit<'pr> for Reads {
+        fn visit_constant_read_node(&mut self, node: &ruby_prism::ConstantReadNode<'pr>) {
+            self.0.push(constant_id_str(&node.name()).to_string());
+        }
+        fn visit_constant_path_node(&mut self, node: &ruby_prism::ConstantPathNode<'pr>) {
+            if let Some(name) = node.name() {
+                self.0.push(constant_id_str(&name).to_string());
+            }
+            ruby_prism::visit_constant_path_node(self, node);
+        }
+    }
+    let mut reads = Reads(Vec::new());
+    ruby_prism::Visit::visit(&mut reads, node);
+    reads.0
+}
+
+impl ConstTaint {
+    fn scan(stmts: &[Node<'_>]) -> std::collections::HashSet<String> {
+        let mut scan = ConstTaint {
+            top_level: stmts
+                .iter()
+                .filter(|s| s.as_constant_write_node().is_some())
+                .map(|s| s.location().start_offset())
+                .collect(),
+            top_writes: Default::default(),
+            tainted: Default::default(),
+            aliases: Vec::new(),
+        };
+        for stmt in stmts {
+            ruby_prism::Visit::visit(&mut scan, stmt);
+        }
+        let ConstTaint { top_writes, mut tainted, aliases, .. } = scan;
+        tainted.extend(top_writes.into_iter().filter(|(_, n)| *n > 1).map(|(name, _)| name));
+        // Across alias edges, both ways, until nothing changes.
+        loop {
+            let before = tainted.len();
+            for (a, b) in &aliases {
+                if tainted.contains(a) || tainted.contains(b) {
+                    tainted.insert(a.clone());
+                    tainted.insert(b.clone());
+                }
+            }
+            if tainted.len() == before {
+                break;
+            }
+        }
+        tainted
+    }
+
+    /// `x = MODES` (or `@x`, `@@x`, `$x`, or `MODES.to_a`): the variable
+    /// may mutate the constant later, out of this pass's sight.
+    fn escape(&mut self, value: &Node<'_>) {
+        if let Some(root) = chain_root(value) {
+            self.tainted.insert(root);
+        }
+    }
+
+    fn taint(&mut self, name: Option<ruby_prism::ConstantId<'_>>) {
+        if let Some(name) = name {
+            self.tainted.insert(constant_id_str(&name).to_string());
+        }
+    }
+}
+
+impl<'pr> ruby_prism::Visit<'pr> for ConstTaint {
+    fn visit_constant_write_node(&mut self, node: &ruby_prism::ConstantWriteNode<'pr>) {
+        let name = constant_id_str(&node.name()).to_string();
+        if self.top_level.contains(&node.location().start_offset()) {
+            for read in constant_reads(&node.value()) {
+                self.aliases.push((name.clone(), read));
+            }
+            *self.top_writes.entry(name).or_default() += 1;
+        } else {
+            self.tainted.insert(name);
+        }
+        ruby_prism::visit_constant_write_node(self, node);
+    }
+    fn visit_constant_operator_write_node(&mut self, node: &ruby_prism::ConstantOperatorWriteNode<'pr>) {
+        self.taint(Some(node.name()));
+        ruby_prism::visit_constant_operator_write_node(self, node);
+    }
+    fn visit_constant_or_write_node(&mut self, node: &ruby_prism::ConstantOrWriteNode<'pr>) {
+        self.taint(Some(node.name()));
+        ruby_prism::visit_constant_or_write_node(self, node);
+    }
+    fn visit_constant_and_write_node(&mut self, node: &ruby_prism::ConstantAndWriteNode<'pr>) {
+        self.taint(Some(node.name()));
+        ruby_prism::visit_constant_and_write_node(self, node);
+    }
+    // `A, B = …` and `rescue => A` write through a target node.
+    fn visit_constant_target_node(&mut self, node: &ruby_prism::ConstantTargetNode<'pr>) {
+        self.taint(Some(node.name()));
+    }
+    // `self::NAME = …`, `Widget::NAME << …` and the like: tainted by
+    // their last segment, whatever the scope names.
+    fn visit_constant_path_write_node(&mut self, node: &ruby_prism::ConstantPathWriteNode<'pr>) {
+        self.taint(node.target().name());
+        ruby_prism::visit_constant_path_write_node(self, node);
+    }
+    fn visit_constant_path_operator_write_node(&mut self, node: &ruby_prism::ConstantPathOperatorWriteNode<'pr>) {
+        self.taint(node.target().name());
+        ruby_prism::visit_constant_path_operator_write_node(self, node);
+    }
+    fn visit_constant_path_or_write_node(&mut self, node: &ruby_prism::ConstantPathOrWriteNode<'pr>) {
+        self.taint(node.target().name());
+        ruby_prism::visit_constant_path_or_write_node(self, node);
+    }
+    fn visit_constant_path_and_write_node(&mut self, node: &ruby_prism::ConstantPathAndWriteNode<'pr>) {
+        self.taint(node.target().name());
+        ruby_prism::visit_constant_path_and_write_node(self, node);
+    }
+    fn visit_constant_path_target_node(&mut self, node: &ruby_prism::ConstantPathTargetNode<'pr>) {
+        self.taint(node.name());
+        ruby_prism::visit_constant_path_target_node(self, node);
+    }
+    // A call outside the read-only set taints the constant its receiver
+    // chain is rooted at: `MODES << "c"`, and `MODES.to_a << "c"` or
+    // `MODES.first << "x"`, whose receivers may be the constant itself
+    // or one of its elements.
+    fn visit_call_node(&mut self, node: &ruby_prism::CallNode<'pr>) {
+        if let Some(recv) = node.receiver() {
+            let method = constant_id_str(&node.name());
+            if !READ_ONLY_CONST_METHODS.contains(&method.as_ref()) {
+                if let Some(root) = chain_root(&recv) {
+                    self.tainted.insert(root);
+                }
+            }
+        }
+        ruby_prism::visit_call_node(self, node);
+    }
+    fn visit_local_variable_write_node(&mut self, node: &ruby_prism::LocalVariableWriteNode<'pr>) {
+        self.escape(&node.value());
+        ruby_prism::visit_local_variable_write_node(self, node);
+    }
+    fn visit_local_variable_or_write_node(&mut self, node: &ruby_prism::LocalVariableOrWriteNode<'pr>) {
+        self.escape(&node.value());
+        ruby_prism::visit_local_variable_or_write_node(self, node);
+    }
+    fn visit_instance_variable_write_node(&mut self, node: &ruby_prism::InstanceVariableWriteNode<'pr>) {
+        self.escape(&node.value());
+        ruby_prism::visit_instance_variable_write_node(self, node);
+    }
+    fn visit_instance_variable_or_write_node(&mut self, node: &ruby_prism::InstanceVariableOrWriteNode<'pr>) {
+        self.escape(&node.value());
+        ruby_prism::visit_instance_variable_or_write_node(self, node);
+    }
+    fn visit_class_variable_write_node(&mut self, node: &ruby_prism::ClassVariableWriteNode<'pr>) {
+        self.escape(&node.value());
+        ruby_prism::visit_class_variable_write_node(self, node);
+    }
+    fn visit_global_variable_write_node(&mut self, node: &ruby_prism::GlobalVariableWriteNode<'pr>) {
+        self.escape(&node.value());
+        ruby_prism::visit_global_variable_write_node(self, node);
+    }
+    // `a, b = MODES, OTHER`: each right-hand element escapes.
+    fn visit_multi_write_node(&mut self, node: &ruby_prism::MultiWriteNode<'pr>) {
+        let value = node.value();
+        match value.as_array_node() {
+            Some(array) => array.elements().iter().for_each(|el| self.escape(&el)),
+            None => self.escape(&value),
+        }
+        ruby_prism::visit_multi_write_node(self, node);
+    }
+}
+
 /// Constants a class body assigns that an `enum` declaration below them
 /// may name: the mapping itself (`enum :status, STATUSES`), a label
 /// (`NAME => NAME`, `"#{PENDING}": 1`) or a stored value
@@ -1454,36 +1697,271 @@ pub(super) struct ClassConsts {
     /// `NAME = %i[…]` / `%w[…]` — the bare labels, for the idioms that
     /// derive a mapping from them (`NAME.index_by(&:to_s)`).
     labels: std::collections::HashMap<String, Vec<String>>,
+    /// `NAME = /pattern/flags`, `.freeze`d, aliased, or an interpolation
+    /// of one other folded regex constant — `(pattern, flags)`. Used to
+    /// resolve `validates …, format: { with: NAME }` (#985 follow-up).
+    regexes: std::collections::HashMap<String, (String, String)>,
+    /// The class body calls `default_scope` (bare or on `self`).
+    default_scoped: bool,
+    /// `NAME = %w[…]` / `%i[…]` / `[…]` of literals, `.freeze`d or an
+    /// alias of another folded list: the literals with their kind kept
+    /// (a Symbol is not a String), for `inclusion: { in: NAME }`.
+    lists: std::collections::HashMap<String, Vec<Literal>>,
+    /// Every constant, module, or class name the body itself defines,
+    /// folded or not — anything an unqualified constant path's first
+    /// segment could resolve to before Ruby reaches the top level.
+    defined_names: std::collections::HashSet<String>,
+    /// The class sits directly at the top level (`class User`, not
+    /// `module Admin; class User` nor `class Admin::User`), so its
+    /// lexical scope is only its own body. Set by `ingest_model`;
+    /// `false` everywhere else, which is the conservative answer.
+    top_level: bool,
+    /// Names any app source defines below the top level
+    /// (`EnumConstants::nested_names`): what an ancestor of the class
+    /// (its superclass chain, an included module) could define.
+    app_nested_names: std::collections::HashSet<String>,
+    /// First segments of every name the app defines or reopens
+    /// (`EnumConstants::top_level_names`): a top-level namespace the app
+    /// touches, whose standard-library contents it may have replaced.
+    app_top_level_names: std::collections::HashSet<String>,
 }
 
 impl ClassConsts {
     pub(super) fn collect(stmts: &[Node<'_>], file: &str) -> Self {
         let mut out = ClassConsts::default();
+        out.default_scoped = stmts.iter().any(|stmt| {
+            stmt.as_call_node().is_some_and(|call| {
+                call.receiver().is_none_or(|r| r.as_self_node().is_some())
+                    && constant_id_str(&call.name()) == "default_scope"
+            })
+        });
+        // A constant folds only when its one write is a plain top-level
+        // `NAME = …` and nothing else in the body, at any depth (method
+        // bodies included), writes it or calls a method on it that may
+        // mutate it. Rails reads the constant as it stands when the macro
+        // naming it runs, and this pass folds the whole body before any
+        // macro is read, so a second write, a write under `if`, or an
+        // `NAME << x` leaves no value it could trust. Refusing beats a
+        // wrong one: the validation stays the reported gap.
+        let tainted = ConstTaint::scan(stmts);
         for stmt in stmts {
+            let defined = if let Some(m) = stmt.as_module_node() {
+                Some(m.constant_path())
+            } else {
+                stmt.as_class_node().map(|c| c.constant_path())
+            };
+            if let Some(path) = defined
+                && let Some(first) = constant_path_of(&path).and_then(|p| p.into_iter().next())
+            {
+                out.defined_names.insert(first);
+            }
             let Some(cw) = stmt.as_constant_write_node() else { continue };
+            out.defined_names.insert(constant_id_str(&cw.name()).to_string());
             let name = constant_id_str(&cw.name()).to_string();
-            let value = cw.value();
-            if let Some(lit) = out.scalar(&value) {
-                out.scalars.insert(name, lit);
+            if tainted.contains(&name) {
                 continue;
             }
-            if let Some(labels) = label_list(&value) {
-                out.labels.insert(name.clone(), labels);
-            }
+            let value = cw.value();
+            // The right-hand side reads the constants as they stand
+            // before this write (Ruby evaluates it first). A tainted one
+            // is in no map, so nothing derived from it folds either.
+            let regex = out.regex(&value);
+            let list = out.list(&value);
+            let scalar = out.scalar(&value);
+            let labels = if scalar.is_none() { label_list(&value) } else { None };
             // A failure to ingest a value is not this pass's to report:
             // the constant is simply not usable as a mapping, and the
             // enum that names it says so.
-            if let Ok(Some(mapping)) = enum_label_values(&value, file, &out, &|_| None) {
+            let mapping = if scalar.is_none() {
+                enum_label_values(&value, file, &out, &|_| None).ok().flatten()
+            } else {
+                None
+            };
+            if let Some(re) = regex {
+                out.regexes.insert(name.clone(), re);
+            }
+            if let Some(list) = list {
+                out.lists.insert(name.clone(), list);
+            }
+            if let Some(lit) = scalar {
+                out.scalars.insert(name.clone(), lit);
+            }
+            if let Some(labels) = labels {
+                out.labels.insert(name.clone(), labels);
+            }
+            if let Some(mapping) = mapping {
                 out.mappings.insert(name, mapping);
             }
         }
         out
     }
 
+    /// A list of literals the class body can fold: an array literal
+    /// (`%w[…]`, `%i[…]`, `[…]`) whose every element is a String, Symbol,
+    /// Integer, Float, `true`/`false` or `nil` literal, `.freeze`d or not,
+    /// or another folded list constant.
+    pub(super) fn list(&self, node: &Node<'_>) -> Option<Vec<Literal>> {
+        if let Some(call) = node.as_call_node() {
+            if constant_id_str(&call.name()) == "freeze" && call.arguments().is_none() {
+                return self.list(&call.receiver()?);
+            }
+            return None;
+        }
+        if let Some(cr) = node.as_constant_read_node() {
+            return self.lists.get(constant_id_str(&cr.name())).cloned();
+        }
+        node.as_array_node()?.elements().iter().map(|el| list_atom(&el)).collect()
+    }
+
+    /// Record whether the class sits directly at the top level, the
+    /// names the app defines below the top level anywhere, and the
+    /// top-level namespaces the app defines or reopens.
+    pub(super) fn set_lexical_scope(
+        &mut self,
+        top_level: bool,
+        app_nested_names: std::collections::HashSet<String>,
+        app_top_level_names: std::collections::HashSet<String>,
+    ) {
+        self.top_level = top_level;
+        self.app_nested_names = app_nested_names;
+        self.app_top_level_names = app_top_level_names;
+    }
+
+    /// Whether the app itself defines or reopens the top-level constant
+    /// `first` (`URI = …`, `module URI`, `URI::MailTo::X = …`), so a
+    /// standard-library constant under it, rooted or not, may not hold
+    /// its standard value.
+    pub(super) fn app_defines_top_level(&self, first: &str) -> bool {
+        self.app_top_level_names.contains(first)
+    }
+
+    /// Whether an unrooted constant path starting with `first` (the
+    /// `URI` of `URI::MailTo::EMAIL_REGEXP`) can only mean the top-level
+    /// constant. Ruby searches the lexical scope, then the class's
+    /// ancestors, then `Object`. So: the class is not nested in a module
+    /// or class, its own body defines nothing by that name, and no app
+    /// class or module defines it either (which covers every app
+    /// superclass and included module, however deep).
+    pub(super) fn resolves_at_top_level(&self, first: &str) -> bool {
+        self.top_level && !self.defined_names.contains(first) && !self.app_nested_names.contains(first)
+    }
+
+    /// A regex literal the class body can fold: a bare `/pattern/flags`
+    /// literal (`.freeze`d or not), a reference to another folded regex
+    /// constant (`OTHER_RE = NAME_RE`), or an interpolation of exactly
+    /// one other folded regex constant whose flags agree with the
+    /// outer literal's. Ruby embeds a nested `Regexp` in an
+    /// interpolated one as `(?flags-off:…)`; that group is only
+    /// equivalent to a plain substitution when the inner and outer
+    /// flags are identical, so a mismatch (or any other interpolated
+    /// shape) resolves to `None` rather than a wrong pattern.
+    pub(super) fn regex(&self, node: &Node<'_>) -> Option<(String, String)> {
+        if let Some(call) = node.as_call_node() {
+            if constant_id_str(&call.name()) == "freeze" && call.arguments().is_none() {
+                return self.regex(&call.receiver()?);
+            }
+            return None;
+        }
+        if let Some(cr) = node.as_constant_read_node() {
+            return self.regexes.get(constant_id_str(&cr.name())).cloned();
+        }
+        if node.as_regular_expression_node().is_some() {
+            return super::util::regexp_literal_flags(node);
+        }
+        self.interpolated_regex(node)
+    }
+
+    /// `/pattern#{CONST}pattern/flags` — folds when the embedded part
+    /// is itself a single expression this table can resolve to a regex
+    /// whose flags match the outer literal's, wrapping its source in a
+    /// non-capturing group (`(?:…)`), which is then exactly equivalent
+    /// on every target this build emits to. Any other embedded shape
+    /// (a different flag set, a non-regex constant, a method call)
+    /// leaves the whole constant unresolved.
+    fn interpolated_regex(&self, node: &Node<'_>) -> Option<(String, String)> {
+        let ir = node.as_interpolated_regular_expression_node()?;
+        if ir.is_once()
+            || ir.is_euc_jp()
+            || ir.is_windows_31j()
+            || ir.is_utf_8()
+            || ir.is_ascii_8bit()
+        {
+            return None;
+        }
+        let mut flags = String::new();
+        if ir.is_ignore_case() {
+            flags.push('i');
+        }
+        if ir.is_multi_line() {
+            flags.push('m');
+        }
+        if ir.is_extended() {
+            flags.push('x');
+        }
+        let mut pattern = String::new();
+        for part in ir.parts().iter() {
+            if let Some(sn) = part.as_string_node() {
+                pattern.push_str(&String::from_utf8_lossy(sn.unescaped()));
+                continue;
+            }
+            let es = part.as_embedded_statements_node()?;
+            let stmts = es.statements()?;
+            let body: Vec<Node<'_>> = stmts.body().iter().collect();
+            let [only] = body.as_slice() else { return None };
+            // A folded String (or Integer) constant is spliced in as raw
+            // pattern source, as Ruby does (`/\A#{FRAGMENT}\z/.source ==
+            // "\\A" + FRAGMENT + "\\z"`), under the outer literal's flags.
+            if let Some(text) = self.text(only) {
+                pattern.push_str(&text);
+                continue;
+            }
+            let (inner_pattern, inner_flags) = self.regex(only)?;
+            if inner_flags != flags {
+                return None;
+            }
+            pattern.push_str("(?:");
+            pattern.push_str(&inner_pattern);
+            pattern.push(')');
+        }
+        Some((pattern, flags))
+    }
+
+    /// The text an interpolated String or Integer piece contributes: a
+    /// folded String scalar as it is, an Integer as its digits (Ruby's
+    /// `to_s`). A Symbol constant folds as a String scalar too, and
+    /// interpolates as its name, as in Ruby.
+    fn text(&self, node: &Node<'_>) -> Option<String> {
+        if node.as_regular_expression_node().is_some() || node.as_interpolated_regular_expression_node().is_some() {
+            return None;
+        }
+        match self.scalar(node)? {
+            Literal::Str { value } => Some(value),
+            Literal::Int { value } => Some(value.to_string()),
+            _ => None,
+        }
+    }
+
     /// A scalar the class body can fold: a string, a symbol (stored as
     /// its string, which is what a string column holds), an integer,
-    /// or a constant already folded. `.freeze` is transparent.
+    /// a constant already folded, or a double-quoted interpolation whose
+    /// every piece is literal text or one of those (`"x[#{SEPARATORS}]"`).
+    /// `.freeze` is transparent.
     fn scalar(&self, node: &Node<'_>) -> Option<Literal> {
+        if let Some(interp) = node.as_interpolated_string_node() {
+            let mut value = String::new();
+            for part in interp.parts().iter() {
+                if let Some(sn) = part.as_string_node() {
+                    value.push_str(&String::from_utf8_lossy(sn.unescaped()));
+                    continue;
+                }
+                let es = part.as_embedded_statements_node()?;
+                let stmts = es.statements()?;
+                let body: Vec<Node<'_>> = stmts.body().iter().collect();
+                let [only] = body.as_slice() else { return None };
+                value.push_str(&self.text(only)?);
+            }
+            return Some(Literal::Str { value });
+        }
         if let Some(call) = node.as_call_node() {
             if constant_id_str(&call.name()) == "freeze" && call.arguments().is_none() {
                 return self.scalar(&call.receiver()?);
@@ -1500,6 +1978,21 @@ impl ClassConsts {
             return self.scalars.get(constant_id_str(&cr.name())).cloned();
         }
         None
+    }
+
+    /// Does the class body declare a `default_scope`?
+    pub(super) fn default_scoped(&self) -> bool {
+        self.default_scoped
+    }
+
+    /// An integer the class body can fold: a literal, `.freeze`d or not,
+    /// or one of the class's own integer constants (`maximum:
+    /// NAME_LIMIT`), whose value Rails reads when the class body runs.
+    pub(super) fn integer(&self, node: &Node<'_>) -> Option<i64> {
+        match self.scalar(node)? {
+            Literal::Int { value } => Some(value),
+            _ => None,
+        }
     }
 
     /// A label spelled as a symbol, a string, a folded constant, or an
@@ -1536,6 +2029,29 @@ impl ClassConsts {
 }
 
 /// The bare labels of a `%i[…]` / `%w[…]` array (optionally `.freeze`d).
+/// One literal element of a folded list, kind kept.
+fn list_atom(node: &Node<'_>) -> Option<Literal> {
+    if let Some(text) = string_value(node) {
+        return Some(Literal::Str { value: text });
+    }
+    if let Some(text) = symbol_value(node) {
+        return Some(Literal::Sym { value: Symbol::from(text.as_str()) });
+    }
+    if let Some(i) = node.as_integer_node() {
+        return Some(Literal::Int { value: super::util::integer_i64(&i.value())? });
+    }
+    if let Some(f) = node.as_float_node() {
+        return Some(Literal::Float { value: f.value() });
+    }
+    if node.as_true_node().is_some() {
+        return Some(Literal::Bool { value: true });
+    }
+    if node.as_false_node().is_some() {
+        return Some(Literal::Bool { value: false });
+    }
+    node.as_nil_node().is_some().then_some(Literal::Nil)
+}
+
 fn label_list(node: &Node<'_>) -> Option<Vec<String>> {
     if let Some(call) = node.as_call_node() {
         if constant_id_str(&call.name()) == "freeze" && call.arguments().is_none() {

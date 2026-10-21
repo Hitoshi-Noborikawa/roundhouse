@@ -1050,6 +1050,12 @@ fn ingest_expr_node(node: &Node<'_>, file: &str) -> IngestResult<Expr> {
                 };
                 return Ok(source_file_path_lit(span, dir));
             }
+            if let Some(body) = writing_connection_block(&c) {
+                return match body {
+                    Some(body) => ingest_expr(&body, file),
+                    None => Ok(Expr::new(span, ExprNode::Lit { value: Literal::Nil })),
+                };
+            }
             let args: Vec<Expr> = if let Some(a) = c.arguments() {
                 ingest_forwardable_arguments(&a, file)?
             } else {
@@ -4284,4 +4290,59 @@ fn binary_string(s: &ruby_prism::StringNode<'_>, span: Span, file: &str) -> Inge
         value = send(value, "freeze", Vec::new());
     }
     Ok(*value.node)
+}
+
+/// `ActiveRecord::Base.connected_to(role: :writing) do … end` runs its
+/// block on the writing connection, the primary: the only one an emitted
+/// app has. So the call is its block's body. A reading role (Rails then
+/// refuses writes), a shard, `prevent_writes:`, block parameters, or a
+/// `next`/`break`/`redo` whose meaning the block gives keep the call, an
+/// unsupported `connected_to`.
+/// ponytail: a local first assigned in the block outlives it once inlined;
+/// a later bare call of that name would read it.
+fn writing_connection_block<'pr>(c: &ruby_prism::CallNode<'pr>) -> Option<Option<Node<'pr>>> {
+    if constant_id_str(&c.name()) != "connected_to"
+        || c.receiver().and_then(|r| super::util::constant_path_of(&r)).as_deref() != Some(&["ActiveRecord".to_string(), "Base".to_string()])
+    {
+        return None;
+    }
+    let args: Vec<Node<'pr>> = c.arguments()?.arguments().iter().collect();
+    let [arg] = args.as_slice() else { return None };
+    let elements: Vec<Node<'pr>> = arg.as_keyword_hash_node()?.elements().iter().collect();
+    let [element] = elements.as_slice() else { return None };
+    let assoc = element.as_assoc_node()?;
+    if symbol_value(&assoc.key()).as_deref() != Some("role") || symbol_value(&assoc.value()).as_deref() != Some("writing") {
+        return None;
+    }
+    let block = c.block()?.as_block_node()?;
+    if block.parameters().is_some() {
+        return None;
+    }
+    struct Jumps(bool);
+    impl<'pr> ruby_prism::Visit<'pr> for Jumps {
+        fn visit_next_node(&mut self, _: &ruby_prism::NextNode<'pr>) {
+            self.0 = true;
+        }
+        fn visit_break_node(&mut self, _: &ruby_prism::BreakNode<'pr>) {
+            self.0 = true;
+        }
+        fn visit_redo_node(&mut self, _: &ruby_prism::RedoNode<'pr>) {
+            self.0 = true;
+        }
+        // An inner block, lambda or loop owns its own jumps.
+        fn visit_block_node(&mut self, _: &ruby_prism::BlockNode<'pr>) {}
+        fn visit_lambda_node(&mut self, _: &ruby_prism::LambdaNode<'pr>) {}
+        fn visit_while_node(&mut self, _: &ruby_prism::WhileNode<'pr>) {}
+        fn visit_until_node(&mut self, _: &ruby_prism::UntilNode<'pr>) {}
+        fn visit_for_node(&mut self, _: &ruby_prism::ForNode<'pr>) {}
+    }
+    let body = block.body();
+    if let Some(body) = &body {
+        let mut jumps = Jumps(false);
+        ruby_prism::Visit::visit(&mut jumps, body);
+        if jumps.0 {
+            return None;
+        }
+    }
+    Some(body)
 }

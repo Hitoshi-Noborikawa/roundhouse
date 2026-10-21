@@ -33,7 +33,8 @@ mod class_new;
 pub(crate) use body::{indexed_pluck, string_answers};
 #[cfg(test)]
 pub(crate) use body::counted_first_last;
-pub(crate) use body::{ConstResolver, ConstResolverTask};
+pub(crate) use body::{ConstResolver, ConstResolverTask, definition_index};
+pub use body::DefinitionIndex;
 pub use body::PreparedConstResolver;
 pub mod async_color;
 pub mod attribution;
@@ -66,7 +67,7 @@ pub use inferred_types::inferred_types;
 pub use inquiry::inquirer_methods;
 pub use diagnostics::{diagnose, diagnose_helper_modules, diagnose_with_coverage, unknown_receiver_sends, UnknownReceiverSend};
 
-pub use body::{BodyTyper, ClassInfo, ConstScope, Ctx};
+pub use body::{stamp_expected_on_empty_return_tail, BodyTyper, ClassInfo, ConstScope, Ctx};
 pub(crate) use body::PARAM_VALUE;
 use render::{
     collect_action_render_views, collect_content_partial_literals,
@@ -1869,6 +1870,7 @@ impl Analyzer {
                 ivar_bindings: HashMap::new(),
                 local_bindings,
                 class_objects: Default::default(),
+                query_class_objects: Default::default(),
                 constants: Default::default(),
                 annotate_self_dispatch: false,
                 in_view: false, class_side: false, claimed_macro_template: false, instance_body: false,
@@ -2204,6 +2206,7 @@ impl Analyzer {
                     ivar_bindings: HashMap::new(),
                     local_bindings: HashMap::new(),
                     class_objects: Default::default(),
+                    query_class_objects: Default::default(),
                     constants: shared.clone(),
                     annotate_self_dispatch: false,
                     in_view: false, class_side: false, claimed_macro_template: false, instance_body: false,
@@ -2476,6 +2479,7 @@ impl Analyzer {
                 ivar_bindings: class_ivars.clone(),
                 local_bindings: HashMap::new(),
                 class_objects: Default::default(),
+                query_class_objects: Default::default(),
                 constants: global_constants.clone(),
                 annotate_self_dispatch: false, in_view: false, view_name: None, class_side: false, claimed_macro_template: false, instance_body: false,
             };
@@ -2493,6 +2497,7 @@ impl Analyzer {
                 ivar_bindings: class_ivars.clone(),
                 local_bindings: HashMap::new(),
                 class_objects: Default::default(),
+                query_class_objects: Default::default(),
                 constants: class_constants.clone(),
                 annotate_self_dispatch: false, in_view: false, view_name: None, class_side: false, claimed_macro_template: false, instance_body: false,
             };
@@ -2554,6 +2559,7 @@ impl Analyzer {
                     ivar_bindings: reseeded,
                     local_bindings: HashMap::new(),
                     class_objects: Default::default(),
+                    query_class_objects: Default::default(),
                     constants: class_constants.clone(),
                     annotate_self_dispatch: false, in_view: false, view_name: None, class_side: false, claimed_macro_template: false, instance_body: false,
                 };
@@ -2603,6 +2609,7 @@ impl Analyzer {
                 ivar_bindings: HashMap::new(),
                 local_bindings: HashMap::new(),
                 class_objects: Default::default(),
+                query_class_objects: Default::default(),
                 constants: global_constants.clone(),
                 annotate_self_dispatch: false, in_view: false, view_name: None, class_side: false, claimed_macro_template: false, instance_body: false,
             };
@@ -2624,6 +2631,7 @@ impl Analyzer {
                 ivar_bindings: HashMap::new(),
                 local_bindings: HashMap::new(),
                 class_objects: Default::default(),
+                query_class_objects: Default::default(),
                 constants: class_constants.clone(),
                 annotate_self_dispatch: false, in_view: false, view_name: None, class_side: false, claimed_macro_template: false, instance_body: false,
             };
@@ -3161,6 +3169,7 @@ impl Analyzer {
                             ivar_bindings: seed,
                             local_bindings: HashMap::new(),
                             class_objects: Default::default(),
+                            query_class_objects: Default::default(),
                             constants: meta.class_constants.clone(),
                             annotate_self_dispatch: false, in_view: false, view_name: None, class_side: false, claimed_macro_template: false, instance_body: false,
                         };
@@ -3684,6 +3693,7 @@ impl Analyzer {
                         ivar_bindings: seed,
                         local_bindings: HashMap::new(),
                         class_objects: Default::default(),
+                        query_class_objects: Default::default(),
                         constants: class_constants.clone(),
                         annotate_self_dispatch: false,
                         in_view: false, class_side: false, claimed_macro_template: false, instance_body: false,
@@ -3869,6 +3879,7 @@ impl Analyzer {
                 ivar_bindings: HashMap::new(),
                 local_bindings: HashMap::new(),
                 class_objects: Default::default(),
+                query_class_objects: Default::default(),
                 constants: Default::default(), annotate_self_dispatch: false, in_view: false, view_name: None, class_side: false, claimed_macro_template: false, instance_body: false,
             };
 
@@ -4014,6 +4025,7 @@ impl Analyzer {
                     ivar_bindings: reseeded,
                     local_bindings: HashMap::new(),
                     class_objects: Default::default(),
+                    query_class_objects: Default::default(),
                     constants: Default::default(), annotate_self_dispatch: false, in_view: false, view_name: None, class_side: false, claimed_macro_template: false, instance_body: false,
                 };
                 for method in &mut lc.methods {
@@ -6227,6 +6239,7 @@ impl Analyzer {
                 let site_recv = match recv.as_ref().map(|r| &*r.node) {
                     None | Some(ExprNode::SelfRef) if class_body => SiteRecv::Class,
                     Some(ExprNode::Const { .. }) => SiteRecv::Class,
+                    _ if recv.as_ref().is_some_and(|r| singleton_of(r.ty.as_ref()).is_some()) => SiteRecv::Class,
                     Some(ExprNode::Send { method: m, args, .. }) if m.as_str() == "class" && args.is_empty() => {
                         SiteRecv::DotClass
                     }
@@ -6243,6 +6256,7 @@ impl Analyzer {
                                 return Ty::Untyped;
                             }
                             let t = a.ty.clone().unwrap_or(Ty::Var { var: crate::ident::TyVar(0) });
+                            let t = class_object_arg_ty(a, t);
                             // Template call sites are evidence of what
                             // callers pass; an `Untyped` arg there
                             // (`errors_for f.object`) means the CALLER's
@@ -6276,6 +6290,7 @@ impl Analyzer {
                                         let t = v
                                             .ty
                                             .clone()
+                                            .map(|t| class_object_arg_ty(v, t))
                                             .unwrap_or(Ty::Var { var: crate::ident::TyVar(0) });
                                         let t = if via_helper_index && matches!(t, Ty::Untyped) {
                                             Ty::Var { var: crate::ident::TyVar(0) }
@@ -6820,6 +6835,7 @@ pub(crate) fn instantiate_return_kind(
         },
         ReturnKind::ArrayOfSym => Ty::Array { elem: std::sync::Arc::new(Ty::Sym) },
         ReturnKind::Str => Ty::Str,
+        ReturnKind::StrOrNil => Ty::Union { variants: vec![Ty::Str, Ty::Nil].into() },
         ReturnKind::ClassRef(path) => Ty::Class {
             id: ClassId(Symbol::from(path)),
             args: vec![].into(),
@@ -7632,11 +7648,31 @@ fn association_builder_members(assoc: &crate::dialect::Association) -> Vec<(Symb
     ]
 }
 
+fn singleton_of(ty: Option<&Ty>) -> Option<&Ty> {
+    match ty {
+        Some(Ty::Class { id, args }) if id.0.as_str() == "Class" && args.len() == 1 => Some(&args[0]),
+        _ => None,
+    }
+}
+
+// Recorded flat, a class object argument would type its parameter as an instance of that class.
+fn class_object_arg_ty(arg: &Expr, ty: Ty) -> Ty {
+    match ty {
+        Ty::Class { ref args, .. }
+            if arg.decisions & crate::expr::CLASS_OBJECT_VALUE != 0 && args.is_empty() =>
+        {
+            Ty::Class { id: ClassId(Symbol::from("Class")), args: vec![ty.clone()].into() }
+        }
+        ty => ty,
+    }
+}
+
 /// Class ids a typed call receiver contributes to param unify and the
 /// reverse call graph. Mirrors the receivers dispatch actually chases:
 /// bare Class, Relation→model, Array elem, and Class arms of a Union.
 fn class_ids_for_call_receiver(ty: &Ty) -> Vec<ClassId> {
     match ty {
+        _ if let Some(of) = singleton_of(Some(ty)) => class_ids_for_call_receiver(of),
         Ty::Class { id, .. } => vec![id.clone()],
         Ty::Relation { of } => vec![of.clone()],
         Ty::Array { elem } => class_ids_for_call_receiver(elem),
@@ -7980,7 +8016,7 @@ fn param_ty_with_default(observed: Option<Ty>, param: &crate::dialect::Param) ->
     let default = param
         .default
         .as_ref()
-        .and_then(|d| d.ty.clone())
+        .and_then(|d| d.ty.clone().map(|t| class_object_arg_ty(d, t)))
         .filter(|t| !matches!(t, Ty::Var { .. }));
     match (observed, default) {
         (Some(o), Some(d)) => Some(crate::analyze::body::union_of(o, d)),

@@ -1669,9 +1669,38 @@ pub(super) fn emit_literal(lit: &Literal) -> String {
 }
 
 fn python_regex_flag_expr(flags: &str) -> String {
+    let bits = crate::emit::shared::regex_literal::parse_ruby_regex_flags(flags);
     let mut parts: Vec<&str> = Vec::new();
-    if flags.contains('i') { parts.push("re.IGNORECASE"); }
-    if flags.contains('m') { parts.push("re.MULTILINE"); }
-    if flags.contains('x') { parts.push("re.VERBOSE"); }
+    if bits.ignore_case {
+        parts.push("re.IGNORECASE");
+    }
+    // Ruby's `m` → `re.DOTALL`; Ruby's always-on line anchors → `re.MULTILINE`.
+    if bits.dot_matches_newline {
+        parts.push("re.DOTALL");
+        parts.push("re.MULTILINE");
+    }
+    if bits.extended {
+        parts.push("re.VERBOSE");
+    }
     parts.join(" | ")
+}
+
+#[cfg(test)]
+mod regex_flag_tests {
+    #[test]
+    fn rubys_m_keeps_line_anchors_as_well_as_dotall() {
+        assert_eq!(python_regex_flag_expr("m"), "re.DOTALL | re.MULTILINE");
+    }
+
+    use super::python_regex_flag_expr;
+
+    #[test]
+    fn ignore_case_maps_to_re_ignorecase() {
+        assert_eq!(python_regex_flag_expr("i"), "re.IGNORECASE");
+    }
+
+    #[test]
+    fn ignore_case_and_dot_matches_newline_combine() {
+        assert_eq!(python_regex_flag_expr("im"), "re.IGNORECASE | re.DOTALL | re.MULTILINE");
+    }
 }

@@ -603,6 +603,10 @@ pub struct Validation {
     /// `unless:` — see `if_cond`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub unless_cond: Option<Expr>,
+    /// A literal String `message:` from the rule's own hash, in place of
+    /// the default message for every error the rules record.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
 }
 
 /// Inclusive or exclusive numeric range from `inclusion: { in: 1..3 }`.
@@ -618,7 +622,18 @@ pub struct InclusionRange {
 pub enum ValidationRule {
     Presence,
     Absence,
-    Uniqueness { scope: Vec<Symbol>, case_sensitive: bool },
+    /// `uniqueness: true` / `{ scope:, case_sensitive:, allow_nil:,
+    /// allow_blank: }`. `scope` holds the names as written; an
+    /// association name resolves to its foreign key when the check is
+    /// built. `case_sensitive: false` compares `LOWER(col) = LOWER(value)`.
+    Uniqueness {
+        scope: Vec<Symbol>,
+        case_sensitive: bool,
+        #[serde(default)]
+        allow_nil: bool,
+        #[serde(default)]
+        allow_blank: bool,
+    },
     Length {
         min: Option<u32>,
         max: Option<u32>,
@@ -636,7 +651,17 @@ pub enum ValidationRule {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         allow_nil: Option<bool>,
     },
-    Format { pattern: String },
+    Format {
+        pattern: String,
+        /// Ruby regex flags, restricted at ingest to the combinations
+        /// every emit target can reproduce with Ruby's exact meaning:
+        /// `i` (case-insensitive), `m` (Ruby's dot-matches-newline), or
+        /// both — never `x` (extended) or an encoding/`o` flag, which
+        /// stay a `format: with` survey gap instead. `#[serde(default)]`
+        /// so JSON written before this field existed still loads.
+        #[serde(default)]
+        flags: String,
+    },
     Numericality {
         only_integer: bool,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -650,12 +675,28 @@ pub enum ValidationRule {
         gte: Option<f64>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         lte: Option<f64>,
+        /// `allow_nil:` / `allow_blank:`, from the validator's own hash
+        /// or the call (the hash wins). `None` is unset: Rails then
+        /// validates a nil or blank value like any other.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        allow_nil: Option<bool>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        allow_blank: Option<bool>,
     },
     Inclusion {
         values: Vec<Literal>,
         /// `in: 1..3` / `1...3`. Numeric `Range#include?` is `cover?`,
         /// so the endpoints stay a range instead of an expanded list.
         /// `values` is empty when this is set.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        range: Option<InclusionRange>,
+    },
+    /// `exclusion: { in: […] }` / `validates_exclusion_of`: the value
+    /// must NOT be one of `values`, or, with `range`, must not be covered
+    /// by it. `nil` is reserved only when it's listed (no implicit
+    /// `allow_nil`), never by a range. Rails' message is "is reserved".
+    Exclusion {
+        values: Vec<Literal>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         range: Option<InclusionRange>,
     },

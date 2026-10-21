@@ -82,9 +82,20 @@ pub enum Check {
     /// every number between the endpoints, so this is not a value list.
     /// Default message: `"is not included in the list"`.
     Cover { begin: f64, end: f64, exclusive: bool },
-    /// String must match the regex.
+    /// Value must NOT appear in the set of literal values.
+    /// Default message: `"is reserved"`.
+    Exclusion { values: Vec<InclusionValue> },
+    /// Numeric `exclusion: { in: begin..end }`: the value must not be
+    /// covered by the range. Default message: `"is reserved"`.
+    NotCover { begin: f64, end: f64, exclusive: bool },
+    /// String must match the regex. `flags` is Ruby's own flag
+    /// characters (`i`, `m`, or both — see `ValidationRule::Format`).
     /// Default message: `"is invalid"`.
-    Format { pattern: String },
+    Format {
+        pattern: String,
+        #[serde(default)]
+        flags: String,
+    },
     /// String must be unique in the table (evaluator hits the DB).
     /// Default message: `"has already been taken"`.
     Uniqueness { scope: Vec<Symbol>, case_sensitive: bool },
@@ -119,6 +130,7 @@ impl Check {
             }
             Check::OnlyInteger => "must be an integer".into(),
             Check::Inclusion { .. } | Check::Cover { .. } => "is not included in the list".into(),
+            Check::Exclusion { .. } | Check::NotCover { .. } => "is reserved".into(),
             Check::Format { .. } => "is invalid".into(),
             Check::Uniqueness { .. } => "has already been taken".into(),
             Check::Custom { .. } => String::new(),
@@ -182,10 +194,10 @@ fn expand_rule(rule: &ValidationRule, out: &mut Vec<Check>) {
                 out.push(Check::MaxLength { n: *n, message: message.clone() });
             }
         }
-        ValidationRule::Format { pattern } => {
-            out.push(Check::Format { pattern: pattern.clone() });
+        ValidationRule::Format { pattern, flags } => {
+            out.push(Check::Format { pattern: pattern.clone(), flags: flags.clone() });
         }
-        ValidationRule::Numericality { only_integer, gt, lt, gte, lte } => {
+        ValidationRule::Numericality { only_integer, gt, lt, gte, lte, .. } => {
             if *only_integer {
                 out.push(Check::OnlyInteger);
             }
@@ -218,7 +230,23 @@ fn expand_rule(rule: &ValidationRule, out: &mut Vec<Check>) {
                 out.push(Check::Inclusion { values: vs });
             }
         }
-        ValidationRule::Uniqueness { scope, case_sensitive } => {
+        ValidationRule::Exclusion { values, range } => {
+            if let Some(range) = range {
+                out.push(Check::NotCover {
+                    begin: range.begin,
+                    end: range.end,
+                    exclusive: range.exclusive,
+                });
+            }
+            let vs: Vec<InclusionValue> = values
+                .iter()
+                .filter_map(lit_to_inclusion_value)
+                .collect();
+            if !vs.is_empty() {
+                out.push(Check::Exclusion { values: vs });
+            }
+        }
+        ValidationRule::Uniqueness { scope, case_sensitive, .. } => {
             out.push(Check::Uniqueness {
                 scope: scope.clone(),
                 case_sensitive: *case_sensitive,

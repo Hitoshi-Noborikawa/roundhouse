@@ -522,7 +522,7 @@ module Main
     # includes `X-Forwarded-Proto`, CSRF/origin/fetch metadata, auth, and
     # content type; keeping one mapping avoids a drifting header allowlist.
     req.req_headers.each do |name, value|
-      request_obj.env[ActionDispatch::Http::Headers.env_name(name)] = value
+      request_obj.env[ActionDispatch::Http::Headers.env_name_from_header(name)] = value
     end
     request_obj.env["roundhouse.listener"] = req.listener_transport
     # config.assume_ssl: TLS ends at a proxy that forwards plain http.

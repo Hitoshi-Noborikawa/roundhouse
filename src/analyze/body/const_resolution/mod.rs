@@ -104,6 +104,10 @@ const CORE_VALUE_CONSTS: &[(&str, &str, fn() -> Ty)] = &[
 /// until something reassigns it.
 const CORE_TOP_CONSTS: &[&str] = &["STDIN", "STDOUT", "STDERR"];
 
+/// `if RUBY_VERSION >= "2.7.1"` (aasm, hashie): the running Ruby's own
+/// version, which a compile-time answer would freeze to the wrong one.
+const CORE_TOP_STR_CONSTS: &[&str] = &["RUBY_VERSION"];
+
 fn io_ty() -> Ty {
     Ty::Class { id: ClassId(Symbol::from("IO")), args: vec![].into() }
 }
@@ -157,6 +161,10 @@ fn core_rbs() -> &'static str {
             out.push_str(name);
             out.push_str(": IO\n");
         }
+        for name in CORE_TOP_STR_CONSTS {
+            out.push_str(name);
+            out.push_str(": String\n");
+        }
         out
     })
     .as_str()
@@ -166,6 +174,9 @@ fn core_rbs() -> &'static str {
 fn core_value_type(name: &str) -> Option<Ty> {
     if CORE_TOP_CONSTS.contains(&name.trim_start_matches("Object::")) {
         return Some(io_ty());
+    }
+    if CORE_TOP_STR_CONSTS.contains(&name.trim_start_matches("Object::")) {
+        return Some(Ty::Str);
     }
     CORE_VALUE_CONSTS.iter().find_map(|(owner, field, ty)| {
         let need = owner.len() + 2 + field.len();
@@ -419,6 +430,64 @@ fn is_assigned_value(graph: &Graph, declaration: &Declaration) -> bool {
         }
     }
     assigned
+}
+
+/// Where each class and module is defined, and what its ancestors are,
+/// read from Rubydex alone. A scoped fractal build asks this before it
+/// ingests anything, to decide which files to ingest.
+#[derive(Debug, Default)]
+pub struct DefinitionIndex {
+    /// Fully qualified name -> the source paths that define it
+    /// (`class`/`module` bodies, reopenings included), sorted.
+    pub files: HashMap<Box<str>, Vec<String>>,
+    /// Fully qualified name -> its resolved ancestors, nearest first,
+    /// itself excluded. A gem's ancestor that left the chain incomplete
+    /// ends it.
+    pub ancestors: HashMap<Box<str>, Vec<Box<str>>>,
+}
+
+/// Index `sources` with Rubydex and keep only [`DefinitionIndex`]'s
+/// answers. Cheaper than ingest: it parses each file once for constants
+/// and resolves names, and keeps nothing else.
+pub(crate) fn definition_index(sources: &[SourceFile]) -> DefinitionIndex {
+    let mut graph = crate::timings::phase("rubydex: index", || index_sources(sources));
+    crate::timings::phase("rubydex: resolve", || Resolver::new(&mut graph).resolve());
+    let app_paths: HashSet<&str> = sources.iter().map(|source| source.path.as_str()).collect();
+    let mut index = DefinitionIndex::default();
+    for declaration in graph.declarations().values() {
+        let Some(namespace) = declaration.as_namespace() else { continue };
+        let name: Box<str> = hoisted_name(declaration.name()).as_ref().into();
+        let mut paths: Vec<String> = declaration
+            .definitions()
+            .iter()
+            .filter_map(|id| graph.definitions().get(id))
+            .filter(|definition| matches!(definition, Definition::Class(_) | Definition::Module(_)))
+            .filter_map(|definition| graph.documents().get(definition.uri_id()))
+            .map(|document| document.uri())
+            .filter(|uri| app_paths.contains(uri))
+            .map(str::to_string)
+            .collect();
+        paths.sort();
+        paths.dedup();
+        let mut ancestors = Vec::new();
+        for ancestor in namespace.ancestors() {
+            let Ancestor::Complete(id) = ancestor else { break };
+            let Some(ancestor) = graph.declarations().get(id) else { continue };
+            let ancestor: Box<str> = hoisted_name(ancestor.name()).as_ref().into();
+            if ancestor != name && !ancestors.contains(&ancestor) {
+                ancestors.push(ancestor);
+            }
+        }
+        if !paths.is_empty() {
+            index.files.entry(name.clone()).or_default().extend(paths);
+        }
+        index.ancestors.entry(name).or_default().extend(ancestors);
+    }
+    for paths in index.files.values_mut() {
+        paths.sort();
+        paths.dedup();
+    }
+    index
 }
 
 impl ConstResolver {

@@ -691,6 +691,23 @@ Nokogiri-backed Fragment.
 with every attribute it carried (`sgid`, `content_type`, `caption`,
 `filename`, `url`).
 
+### `constantize` resolves only the app's own constants
+
+`name.constantize` and `name.safe_constantize` turn any String into the
+constant it names in Rails. A name computed at run time (pundit's
+`"#{model}Policy"`) or read off the wire would then reach every constant
+in the process, the reflection this pipeline does not emit. On the Ruby
+and JRuby targets `lower::constantize` routes each call to one generated
+`RoundhouseConstants` lookup, a `case` over the constants the app's own
+source defines: its models,
+controllers and library classes, including the source of a gem the app
+keeps in its tree (`gem "pundit", path: "vendor/pundit"`). A name in
+that set answers what Rails answers. A name outside it (`"String"`,
+a framework class) answers `nil` from `safe_constantize` and raises
+`NameError` from `constantize`, where Rails would resolve it. Every
+other target refuses the call with an unsupported diagnostic, and
+`name.constantize.instantiate(attrs)` stays `lower::record_snapshot`'s.
+
 ### Action Text decodes only the entities Rails' escaper emits
 
 `Content#to_plain_text` decodes `&amp; &lt; &gt; &quot; &#39; &apos;

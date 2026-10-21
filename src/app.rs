@@ -410,6 +410,13 @@ pub struct App {
     /// kept mixin supplies.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub initializer_filters: Vec<InitializerFilter>,
+    /// `X.after_action(only: …) { response.set_header(k, v) }` from a
+    /// `config/initializers/` file, bare or inside `ActiveSupport.on_load`:
+    /// campfire marks the disk service's file responses cacheable this
+    /// way. Resolved by `lower::module_mixins` against the same runtime
+    /// seams as `initializer_filters`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub initializer_response_headers: Vec<InitializerResponseHeader>,
     /// `ActionView::PartialRenderer.collection_cache = Store.reader` from
     /// a `config/initializers/` file (bare or inside `to_prepare`): the
     /// store cached collection renders read and write. campfire points
@@ -765,6 +772,17 @@ pub struct InitializerFilter {
     pub only: Vec<Symbol>,
 }
 
+/// One header an initializer's `after_action` writes on a framework
+/// controller's response. `only` empty means every action.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct InitializerResponseHeader {
+    pub target: Symbol,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub only: Vec<Symbol>,
+    pub name: String,
+    pub value: String,
+}
+
 /// `prepend` inserts AHEAD of the target in the lookup chain, `include`
 /// behind it. The distinction is the whole point of campfire's
 /// `RoomStreamsAreAuthorized`, whose `subscribed` calls `super` — as an
@@ -959,6 +977,7 @@ impl App {
             rake_tasks_source: None,
             rake_task_gaps: Vec::new(),
             initializer_filters: Vec::new(),
+            initializer_response_headers: Vec::new(),
             collection_cache_store: None,
             app_requires: Vec::new(),
             sql_functions: Vec::new(),

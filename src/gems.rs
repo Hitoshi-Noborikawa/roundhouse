@@ -69,6 +69,11 @@ pub(crate) const GEM_REQUIRES: &[&str] = &[
     "rails-html-sanitizer",
     "net/http/persistent",
     "web-push",
+    "faraday",
+    "faraday/multipart",
+    "faraday/retry",
+    "retryable",
+    "jwt",
 ];
 
 /// Whether the compiler's own tables have a Ruby-family tree declare or
@@ -86,7 +91,7 @@ pub(crate) fn compiler_runtime_gems() -> &'static [(Marker, &'static str)] {
     // (constant an emitted body names, gem that defines it). Only gems
     // whose absence is a RUNTIME error belong here — the list is the
     // façade's, not a survey of what an app might like.
-    const RUNTIME_GEMS: [(Marker, &str); 16] = [
+    const RUNTIME_GEMS: [(Marker, &str); 22] = [
         (Marker::Constant("BCrypt"), "bcrypt"),
         (Marker::Constant("HTMLEntities"), "htmlentities"),
         (Marker::Constant("ROTP"), "rotp"),
@@ -173,6 +178,37 @@ pub(crate) fn compiler_runtime_gems() -> &'static [(Marker, &'static str)] {
         // installed, which the app's own Gemfile (image_processing →
         // ruby-vips) already asked of the machine.
         (Marker::AnyText(&[VARIATION_MARKER]), "ruby-vips"),
+        // The HTTP client an app calls. The real gem runs on this lane;
+        // the strict targets refuse it (`lower::ruby_family_gems`). `Constant`
+        // matches `Faraday.new` / `Faraday::…` / `rescue Faraday`; the
+        // `AnyText` needles catch bare value uses (`CLIENT = Faraday`,
+        // `register(Faraday)`) that `names_constant` skips — without
+        // matching identifiers like `FaradayHolder`.
+        (Marker::Constant("Faraday"), "faraday"),
+        (Marker::AnyText(&["= Faraday", "(Faraday)", "Faraday,", ", Faraday"]), "faraday"),
+        // Its middleware gems. `request :multipart` / `request :retry`
+        // name no constant, and without the gem Faraday raises at the
+        // first connection that registers them.
+        (
+            Marker::AnyText(&[
+                "Faraday::Multipart",
+                "Faraday::UploadIO",
+                "Faraday::FilePart",
+                "Faraday::ParamPart",
+                "Faraday::CompositeReadIO",
+                "request :multipart",
+                "request(:multipart",
+            ]),
+            "faraday-multipart",
+        ),
+        (
+            Marker::AnyText(&["Faraday::Retry", "request :retry", "request(:retry"]),
+            "faraday-retry",
+        ),
+        // Retryable and JWT, as Faraday: the real gems on this lane,
+        // refused on the strict targets (`lower::ruby_family_gems`).
+        (Marker::Constant("Retryable"), "retryable"),
+        (Marker::Constant("JWT"), "jwt"),
     ];
     &RUNTIME_GEMS
 }
@@ -210,6 +246,8 @@ pub struct Lockfile {
     /// analyzed like the rest of the app rather than being a boundary.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub in_repo: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub source: Vec<String>,
     /// Git repositories and locked revisions, in source order.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub git: Vec<GitSource>,
@@ -325,6 +363,10 @@ impl Lockfile {
         self.in_repo.iter().any(|n| n == name)
     }
 
+    pub fn is_source(&self, name: &str) -> bool {
+        self.source.iter().any(|n| n == name)
+    }
+
     /// The repository and revision that provide `name`, if it is Git-backed.
     pub fn git_source_of(&self, name: &str) -> Option<&GitSource> {
         self.git.iter().find(|source| source.specs.iter().any(|spec| spec == name))
@@ -386,6 +428,7 @@ pub enum GemFate {
     /// analyzer has to model: a dispatch that fails on its constants is
     /// a fact about the analysis of that code, and is reported as such.
     InRepo,
+    Source,
 }
 
 impl GemFate {
@@ -397,6 +440,7 @@ impl GemFate {
             GemFate::Infrastructure => "infrastructure",
             GemFate::Unknown => "unknown",
             GemFate::InRepo => "in-repo",
+            GemFate::Source => "source",
         }
     }
 }
@@ -430,7 +474,13 @@ impl GemCensus {
             .map(|name| GemEntry {
                 name: name.clone(),
                 version: lock.version_of(name).map(|v| v.to_string()),
-                fate: if lock.is_in_repo(name) { GemFate::InRepo } else { fate_of(name) },
+                fate: if lock.is_in_repo(name) {
+                    GemFate::InRepo
+                } else if lock.is_source(name) {
+                    GemFate::Source
+                } else {
+                    fate_of(name)
+                },
             })
             .collect();
         let transitive = lock.specs.len().saturating_sub(gems.len());
@@ -456,6 +506,7 @@ impl GemCensus {
             GemFate::Modeled,
             GemFate::Infrastructure,
             GemFate::InRepo,
+            GemFate::Source,
         ] {
             let n = self.count(fate);
             if n > 0 {
@@ -547,10 +598,14 @@ const FATES: &[(&str, GemFate)] = &[
     ("faker", GemFate::Modeled),       // catalog/gems: Faker::*
     ("friendly_id", GemFate::Modeled), // lower/friendly_id + registry: friendly_id/friendly/to_param, Relation#friendly_find (slugged [+history] finder only; slug generation on save, :scoped/:finders/:simple_i18n unmodeled)
     ("geared_pagination", GemFate::Modeled), // registry/controllers: set_page_and_extract_portion_from
+    ("faraday", GemFate::Modeled),     // catalog/gems: Faraday; the real gem on ruby and jruby, lower/ruby_family_gems refuses every other target
+    ("faraday-multipart", GemFate::Modeled), // catalog/gems: Faraday::Multipart, as faraday
+    ("faraday-retry", GemFate::Modeled), // request :retry, as faraday
     ("htmlentities", GemFate::Modeled), // catalog/gems: HTMLEntities
     ("image_processing", GemFate::Modeled), // active_storage variants seam
     ("inertia_rails", GemFate::Modeled), // ingest/inertia: render inertia:, inertia_share; runtime action_controller/inertia
     ("invisible_captcha", GemFate::Modeled), // before_action + spam? on subtitle honeypot only
+    ("jwt", GemFate::Modeled),         // catalog/gems: JWT; the real gem on ruby and jruby, lower/ruby_family_gems refuses every other target
     ("kaminari", GemFate::Modeled),    // Relation#page / per / paginate
     ("mail", GemFate::Modeled),        // catalog/gems: Mail::Address; ActionMailer
     ("mocha", GemFate::Modeled),       // lower/mocha bridge
@@ -563,6 +618,7 @@ const FATES: &[(&str, GemFate)] = &[
     ("pushover", GemFate::Modeled),    // catalog/gems: Pushover
     ("rack-mini-profiler", GemFate::Modeled), // catalog/gems: Rack::MiniProfiler
     ("representable", GemFate::Modeled), // ingest/representable: Decorator + JSON, property/collection subset
+    ("retryable", GemFate::Modeled),   // catalog/gems: Retryable; the real gem on ruby and jruby, lower/ruby_family_gems refuses every other target
     ("rotp", GemFate::Modeled),        // catalog/gems: ROTP::*
     ("rqrcode", GemFate::Modeled),     // catalog/gems: RQRCode::QRCode
     ("ruby-vips", GemFate::Modeled),   // active_storage variants seam
@@ -624,10 +680,10 @@ const FATES: &[(&str, GemFate)] = &[
     ("pry", GemFate::Infrastructure),
     ("pry-rails", GemFate::Infrastructure),
     ("puma", GemFate::Infrastructure),
-    // Not rack-attack or rack-cors: a middleware that throttles a request or
-    // writes its CORS headers changes what the app answers, and nothing in
-    // the app calls it for a dispatch failure to show that it is missing.
-    ("rack-protection", GemFate::Infrastructure),
+    // Not rack-attack, rack-cors or rack-protection: a middleware that
+    // throttles a request, writes its CORS headers or refuses one it reads
+    // as an attack changes what the app answers, and nothing in the app
+    // calls it for a dispatch failure to show that it is missing.
     ("rack-test", GemFate::Infrastructure),
     ("rails-controller-testing", GemFate::Infrastructure),
     ("rails-dom-testing", GemFate::Infrastructure),

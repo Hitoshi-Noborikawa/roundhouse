@@ -26,8 +26,10 @@ pub(super) fn push_validate_method(
     model: &Model,
     models: &[Model],
     errors_readers: ErrorsReaders,
+    runtime_relation: super::RuntimeRelation,
+    primary_key: &Symbol,
 ) {
-    let msgs = Messages(Some(model));
+    let model_msgs = Messages(Some(model), None);
     let mut stmts: Vec<Expr> = Vec::new();
 
     // One pass in declaration order: Rails checks a `belongs_to` where it is declared, among the `validates`, so its error lists there.
@@ -35,6 +37,8 @@ pub(super) fn push_validate_method(
         let span = item.span();
         match item {
             crate::dialect::ModelBodyItem::Validation { validation: v, .. } => {
+                // The validation's own `message:` replaces every error's default.
+                let msgs = Messages(Some(model), v.message.as_deref());
                 // Column type from the model's attributes row (when present).
                 // Lets the per-rule generator skip dead `is_a?(Array)` branches
                 // for fields the schema declares as `Str` — tsc narrows
@@ -69,8 +73,17 @@ pub(super) fn push_validate_method(
                             send(reader, "nil?", vec![]),
                             errors_push(v.attribute.as_str(), msgs.error(v.attribute.as_str(), "blank", &Default::default())),
                         )]
+                    } else if let ValidationRule::Uniqueness { scope, case_sensitive, allow_nil, allow_blank } = rule {
+                        match runtime_relation {
+                            super::RuntimeRelation::Present => vec![inline_uniqueness_check(
+                                msgs, model, primary_key, &v.attribute, scope, *case_sensitive, *allow_nil, *allow_blank,
+                            )],
+                            // Reported per target by
+                            // `relation_residue::uniqueness_gaps_for_target`.
+                            super::RuntimeRelation::Absent => Vec::new(),
+                        }
                     } else {
-                        validation_rule_to_calls(msgs, &v.attribute, rule, attr_ty)
+                        validation_rule_to_calls(msgs, &v.attribute, rule, attr_ty, runtime_relation)
                     };
                     if v.if_cond.is_some() || v.unless_cond.is_some() {
                         let body = if produced.len() == 1 {
@@ -106,7 +119,7 @@ pub(super) fn push_validate_method(
                     let own_pk = crate::lower::scope_chain::association_primary_key(models, target, None);
                     let lookup_pk = (assoc_pk != own_pk).then_some(&assoc_pk);
                     let mut check =
-                        inline_belongs_to_check(msgs, name, foreign_key, target, lookup_pk, *polymorphic);
+                        inline_belongs_to_check(model_msgs, name, foreign_key, target, lookup_pk, *polymorphic);
                     check.inherit_span(span);
                     stmts.push(check);
                 }
@@ -178,7 +191,7 @@ fn secure_password_checks(model: &Model) -> Vec<Expr> {
     let mut out = Vec::new();
     for attr in crate::lower::secure_password::secure_password_attrs(&model.body) {
         let human = model.human_attribute_name(attr.as_str());
-        let msgs = Messages(Some(model));
+        let msgs = Messages(Some(model), None);
         let plain = ivar(&attr);
         let digest = ivar(&Symbol::from(format!("{}_digest", attr.as_str())));
         let confirmation = ivar(&Symbol::from(format!("{}_confirmation", attr.as_str())));
@@ -557,7 +570,13 @@ fn error_messages_for_body(span: Span, errors_readers: ErrorsReaders) -> Expr {
 /// `attr`. Each helper is `<helper>(:attr, @attr [, kwargs])` — the value
 /// is passed positionally so the runtime helper sees a concretely-typed
 /// `value` parameter (no block-yield, no `instance_variable_get`).
-fn validation_rule_to_calls(msgs: Messages, attr: &Symbol, rule: &ValidationRule, attr_ty: Option<&Ty>) -> Vec<Expr> {
+fn validation_rule_to_calls(
+    msgs: Messages,
+    attr: &Symbol,
+    rule: &ValidationRule,
+    attr_ty: Option<&Ty>,
+    runtime_relation: super::RuntimeRelation,
+) -> Vec<Expr> {
     match rule {
         ValidationRule::Presence => vec![inline_presence_check(msgs, attr, attr_ty)],
         ValidationRule::Absence => vec![inline_absence_check(msgs, attr)],
@@ -570,12 +589,37 @@ fn validation_rule_to_calls(msgs: Messages, attr: &Symbol, rule: &ValidationRule
             attr_ty,
             *allow_nil,
         ),
-        ValidationRule::Format { pattern } => vec![inline_format_check(msgs, attr, pattern)],
-        ValidationRule::Numericality { only_integer, gt, lt, gte, lte } => {
-            inline_numericality_check(msgs, attr, *only_integer, *gt, *lt, *gte, *lte)
+        ValidationRule::Format { pattern, flags } => {
+            vec![inline_format_check(msgs, attr, pattern, flags)]
+        }
+        ValidationRule::Numericality { only_integer, gt, lt, gte, lte, allow_nil, allow_blank } => {
+            let checks = inline_numericality_check(msgs, attr, *only_integer, *gt, *lt, *gte, *lte);
+            // Rails skips the validator for a nil value under allow_nil
+            // and a blank one under allow_blank (EachValidator#validate).
+            let skip = if *allow_blank == Some(true) {
+                Some(numericality_blank_cond(attr, runtime_relation))
+            } else if *allow_nil == Some(true) {
+                Some(send(ivar(attr), "nil?", vec![]))
+            } else {
+                None
+            };
+            match skip {
+                Some(cond) => vec![Expr::new(
+                    Span::synthetic(),
+                    ExprNode::If {
+                        cond,
+                        then_branch: Expr::new(Span::synthetic(), ExprNode::Lit { value: Literal::Nil }),
+                        else_branch: seq(checks),
+                    },
+                )],
+                None => checks,
+            }
         }
         ValidationRule::Inclusion { values, range } => {
             vec![inline_inclusion_check(msgs, attr, values, range.as_ref())]
+        }
+        ValidationRule::Exclusion { values, range } => {
+            vec![inline_exclusion_check(msgs, attr, values, range.as_ref())]
         }
         // `validate :validate_url` — a method the model defines, which
         // adds to `errors` itself. The synthesized `validate` just
@@ -627,6 +671,102 @@ fn validation_rule_to_calls(msgs: Messages, attr: &Symbol, rule: &ValidationRule
 /// of Rails' check — it can fail a save Rails would fail, never one
 /// Rails would pass — and the id-presence half is the part that
 /// catches the real error (an unset owner).
+/// Inline `validates :attr, uniqueness: …`, as Rails 8.1's
+/// `UniquenessValidator` queries (on a target with the runtime Relation):
+///   if Model.where(attr: @attr).not(<pk>: @<pk>)[.where(scope_col: @scope_col)…].exists?
+///     errors << "attr has already been taken"
+///   end
+/// `case_sensitive: false` compares `LOWER(table.attr) = LOWER(?)`, except
+/// for a nil value, which Rails compares `IS NULL` either way. A nil value
+/// is checked like any other (two nils collide) unless `allow_nil:`, and a
+/// blank one (nil, or empty once stripped) unless `allow_blank:`. The `not(<pk>: @<pk>)` is Rails'
+/// persisted-record exclusion, by the model's declared primary key (`"codes"."code" != ?`
+/// under `self.primary_key = "code"`, even beside an `id` column); on a new record it is `<pk> IS NOT NULL`,
+/// which every stored row satisfies, so the answer is the same. A `scope:`
+/// naming a `belongs_to` reads its foreign key (and type column when
+/// polymorphic), as Rails resolves it.
+fn inline_uniqueness_check(
+    msgs: Messages,
+    model: &Model,
+    primary_key: &Symbol,
+    attr: &Symbol,
+    scope: &[Symbol],
+    case_sensitive: bool,
+    allow_nil: bool,
+    allow_blank: bool,
+) -> Expr {
+    let sym = |name: &str| {
+        Expr::new(Span::synthetic(), ExprNode::Lit { value: Literal::Sym { value: Symbol::from(name) } })
+    };
+    let hash = |key: &str, value: Expr| {
+        Expr::new(Span::synthetic(), ExprNode::Hash { entries: vec![(sym(key), value)], kwargs: true })
+    };
+    let finder = Expr::new(
+        Span::synthetic(),
+        ExprNode::Const { path: model.name.0.as_str().split("::").map(Symbol::from).collect() },
+    );
+    let value = ivar(attr);
+    let mut relation = if case_sensitive {
+        send(finder, "where", vec![hash(attr.as_str(), value.clone())])
+    } else {
+        let lowered = Expr::new(
+            Span::synthetic(),
+            ExprNode::Lit {
+                value: Literal::Str {
+                    value: format!("LOWER({}.{}) = LOWER(?)", model.table.0.as_str(), attr.as_str()),
+                },
+            },
+        );
+        Expr::new(
+            Span::synthetic(),
+            ExprNode::If {
+                cond: send(value.clone(), "nil?", vec![]),
+                then_branch: send(finder.clone(), "where", vec![hash(attr.as_str(), value.clone())]),
+                else_branch: send(finder, "where", vec![lowered, value.clone()]),
+            },
+        )
+    };
+    relation = send(relation, "not", vec![hash(primary_key.as_str(), ivar(primary_key))]);
+    for name in scope {
+        let columns: Vec<Symbol> = match model.associations().find(|a| {
+            matches!(a, Association::BelongsTo { name: n, .. } if n == name)
+        }) {
+            Some(Association::BelongsTo { foreign_key, polymorphic, .. }) => {
+                let mut cols = vec![foreign_key.clone()];
+                if *polymorphic {
+                    cols.push(Symbol::from(format!("{}_type", name.as_str()).as_str()));
+                }
+                cols
+            }
+            _ => vec![name.clone()],
+        };
+        for column in columns {
+            relation = send(relation, "where", vec![hash(column.as_str(), ivar(&column))]);
+        }
+    }
+    let mut taken = send(relation, "exists?", vec![]);
+    let not = |e: Expr| {
+        Expr::new(
+            Span::synthetic(),
+            ExprNode::Send { recv: Some(e), method: Symbol::from("!"), args: vec![], block: None, parenthesized: false },
+        )
+    };
+    if allow_blank {
+        // `blank?` spelled out (`nil?` or empty once stripped): the Spinel
+        // runtime's String has no ActiveSupport `blank?`.
+        let blank = bool_op(
+            BoolOpKind::Or,
+            send(value.clone(), "nil?", vec![]),
+            send(send(send(value.clone(), "to_s", vec![]), "strip", vec![]), "empty?", vec![]),
+        );
+        taken = bool_op(BoolOpKind::And, not(blank), taken);
+    } else if allow_nil {
+        taken = bool_op(BoolOpKind::And, not(send(value.clone(), "nil?", vec![])), taken);
+    }
+    let push_err = errors_push(attr.as_str(), msgs.error(attr.as_str(), "taken", &Default::default()));
+    if_with_nil_else(taken, push_err)
+}
+
 fn inline_belongs_to_check(
     msgs: Messages,
     assoc_name: &Symbol,
@@ -781,6 +921,42 @@ fn inline_presence_check(msgs: Messages, attr: &Symbol, attr_ty: Option<&Ty>) ->
         let push_err = errors_push(attr.as_str(), msgs.error(attr.as_str(), "blank", &Default::default()));
         return if_with_nil_else(cond, push_err);
     }
+    let cond = blank_cond(attr, attr_ty);
+    // `errors << "attr can't be blank"`
+    let push_err = errors_push(attr.as_str(), msgs.error(attr.as_str(), "blank", &Default::default()));
+    // The wrapping `if cond then push_err end` (Nil else).
+    if_with_nil_else(cond, push_err)
+}
+
+/// `allow_blank:`'s skip for a numericality rule. On the ruby family the
+/// uncast writer can store the raw input, so a whitespace-only String (and
+/// `false`) is blank, as Rails reads it: `@attr.nil? || @attr == false ||
+/// @attr.to_s.strip.empty?` (`to_s`, the spelling Spinel takes). A strict
+/// target's numeric field is never a String or `false`, so blank is
+/// `nil?` there, which every target compiles. Narrower than the presence
+/// check's test, which is unchanged.
+fn numericality_blank_cond(attr: &Symbol, runtime_relation: super::RuntimeRelation) -> Expr {
+    let value = ivar(attr);
+    let nil = send(value.clone(), "nil?", vec![]);
+    match runtime_relation {
+        super::RuntimeRelation::Present => {
+            let falsy = send(
+                value.clone(),
+                "==",
+                vec![Expr::new(Span::synthetic(), ExprNode::Lit { value: Literal::Bool { value: false } })],
+            );
+            let empty = send(send(send(value, "to_s", vec![]), "strip", vec![]), "empty?", vec![]);
+            bool_op(BoolOpKind::Or, bool_op(BoolOpKind::Or, nil, falsy), empty)
+        }
+        super::RuntimeRelation::Absent => nil,
+    }
+}
+
+/// The presence check's blank test, `@attr.nil?` or empty by the
+/// column's type: a String or Array column's `empty?`, else the
+/// generic `is_a?(String)` / `is_a?(Array)` form. Shared with
+/// `numericality:`'s `allow_blank:` skip so "blank" means one thing.
+fn blank_cond(attr: &Symbol, attr_ty: Option<&Ty>) -> Expr {
     let attr_ivar = ivar(attr);
     // `@attr.nil?`
     let nil_check = send(attr_ivar.clone(), "nil?", vec![]);
@@ -833,10 +1009,7 @@ fn inline_presence_check(msgs: Messages, attr: &Symbol, attr_ty: Option<&Ty>) ->
             )
         }
     };
-    // `errors << "attr can't be blank"`
-    let push_err = errors_push(attr.as_str(), msgs.error(attr.as_str(), "blank", &Default::default()));
-    // The wrapping `if cond then push_err end` (Nil else).
-    if_with_nil_else(cond, push_err)
+    cond
 }
 
 /// Inline `validates :attr, absence: true` — the negation of presence.
@@ -950,18 +1123,64 @@ fn inline_inclusion_check(
     if_with_nil_else(not_included, push_err)
 }
 
+/// Inline `validates :attr, exclusion: { in: … }`, Rails' "is reserved":
+///   if [v1, v2].include?(@attr)            # a value list
+///   if @attr.is_a?(Numeric) && @attr >= begin && @attr <= end   # a range
+///     errors << "attr is reserved"
+///   end
+/// `nil` is reserved only when the list names it (`in: [nil, …]`), as
+/// Rails' `ExclusionValidator` has no implicit `allow_nil`; a numeric
+/// range's `cover?` is false for it (and for any non-numeric value).
+fn inline_exclusion_check(
+    msgs: Messages,
+    attr: &Symbol,
+    values: &[Literal],
+    range: Option<&crate::dialect::InclusionRange>,
+) -> Expr {
+    let attr_ivar = ivar(attr);
+    let reserved = if let Some(range) = range {
+        let begin = Expr::new(
+            Span::synthetic(),
+            ExprNode::Lit { value: Literal::Float { value: range.begin } },
+        );
+        let end = Expr::new(
+            Span::synthetic(),
+            ExprNode::Lit { value: Literal::Float { value: range.end } },
+        );
+        let numeric = is_a_check(&attr_ivar, "Numeric");
+        let from_begin = send(attr_ivar.clone(), ">=", vec![begin]);
+        let to_end = send(attr_ivar.clone(), if range.exclusive { "<" } else { "<=" }, vec![end]);
+        bool_op(BoolOpKind::And, numeric, bool_op(BoolOpKind::And, from_begin, to_end))
+    } else {
+        let array_lit = Expr::new(
+            Span::synthetic(),
+            ExprNode::Array {
+                elements: values
+                    .iter()
+                    .map(|lit| Expr::new(Span::synthetic(), ExprNode::Lit { value: lit.clone() }))
+                    .collect(),
+                style: ArrayStyle::Brackets,
+            },
+        );
+        send(array_lit, "include?", vec![attr_ivar])
+    };
+    let push_err =
+        errors_push(attr.as_str(), msgs.error(attr.as_str(), "exclusion", &Default::default()));
+    if_with_nil_else(reserved, push_err)
+}
+
 /// Inline `validates :attr, format: { with: /pattern/ }`.
 ///   if !(@attr.is_a?(String) && /pattern/.match?(@attr))
 ///     errors << "attr is invalid"
 ///   end
 /// The runtime helper's `with.nil?` guard is unnecessary — the
 /// pattern is a known literal at lower time.
-fn inline_format_check(msgs: Messages, attr: &Symbol, pattern: &str) -> Expr {
+fn inline_format_check(msgs: Messages, attr: &Symbol, pattern: &str, flags: &str) -> Expr {
     let attr_ivar = ivar(attr);
     let regex_lit = Expr::new(
         Span::synthetic(),
         ExprNode::Lit {
-            value: Literal::Regex { pattern: pattern.to_string(), flags: String::new() },
+            value: Literal::Regex { pattern: pattern.to_string(), flags: flags.to_string() },
         },
     );
     let is_string = is_a_check(&attr_ivar, "String");
@@ -1270,16 +1489,29 @@ fn format_float(n: f64) -> String {
 /// What a baked message needs from its model: the attribute's
 /// `human_attribute_name` and the locale's `errors.format`.
 #[derive(Clone, Copy, Default)]
-pub(crate) struct Messages<'a>(pub(crate) Option<&'a Model>);
+/// The second field is a validation's own `message:` String, used in
+/// place of each error's default (see [`Messages::error`]).
+pub(crate) struct Messages<'a>(pub(crate) Option<&'a Model>, pub(crate) Option<&'a str>);
 
 use crate::i18n::ErrorOpts;
 
 impl Messages<'_> {
     /// The full message Rails stores for an error of `kind` on `attr`, with the error it records.
     fn error(&self, attr: &str, kind: &str, opts: &ErrorOpts) -> Message {
+        // A rule-level message (Length's) already in `opts` wins; else the
+        // validation's own `message:`, which the lookup uses after a
+        // model-specific translation, as Rails' `generate_message` does.
+        let overridden;
+        let opts = match (self.1, &opts.message) {
+            (Some(message), None) => {
+                overridden = ErrorOpts { message: Some(message.to_string()), ..opts.clone() };
+                &overridden
+            }
+            _ => opts,
+        };
         let default = crate::i18n::ModelI18n::default();
         let i18n = self.0.map(|m| &m.i18n).unwrap_or(&default);
-        let parts = |p| crate::lower::errors_add::parts_expr(Span::synthetic(), p, None, attr);
+        let parts = |p| value_parts_expr(p, attr);
         Message {
             full: parts(i18n.full_error(attr, kind, opts)),
             kind: kind.to_string(),
@@ -1288,6 +1520,33 @@ impl Messages<'_> {
             optionless: matches!(kind, "blank" | "present" | "required" | "accepted" | "password_too_long"),
         }
     }
+}
+
+/// A message's parts as one String expression, `%{value}` read as
+/// `attr.to_s`: what I18n renders (nil as ""), and a String on every
+/// target, where a nullable field's bare read is an `Option` a strict
+/// target can't interpolate.
+fn value_parts_expr(parts: Vec<crate::i18n::Part>, attr: &str) -> Expr {
+    if !parts.iter().any(|p| matches!(p, crate::i18n::Part::Value)) {
+        return crate::lower::errors_add::parts_expr(Span::synthetic(), parts, None, attr);
+    }
+    let pieces = parts
+        .into_iter()
+        .map(|p| match p {
+            crate::i18n::Part::Text(value) => crate::expr::InterpPart::Text { value },
+            crate::i18n::Part::Value => crate::expr::InterpPart::Expr {
+                expr: send(
+                    Expr::new(
+                        Span::synthetic(),
+                        ExprNode::Send { recv: None, method: Symbol::from(attr), args: vec![], block: None, parenthesized: false },
+                    ),
+                    "to_s",
+                    vec![],
+                ),
+            },
+        })
+        .collect();
+    Expr::new(Span::synthetic(), ExprNode::StringInterp { parts: pieces })
 }
 
 pub(crate) struct Message {
@@ -1570,8 +1829,39 @@ mod tests {
 
     #[test]
     fn format_emits_invalid_error() {
-        let expr = inline_format_check(Messages::default(), &attr(), "[A-Z]+");
+        let expr = inline_format_check(Messages::default(), &attr(), "[A-Z]+", "");
         assert_eq!(collect_error_messages(&expr), vec!["Title is invalid"]);
+    }
+
+    /// The regex literal `inline_format_check` builds carries the
+    /// flags it's given — before this, `Literal::Regex { flags: .. }`
+    /// was always hardcoded empty, so a model's `i`/`m` flag never
+    /// reached any emit target even once ingest stopped refusing it.
+    #[test]
+    fn format_check_carries_flags_into_the_regex_literal() {
+        let expr = inline_format_check(Messages::default(), &attr(), "a.b", "im");
+        let flags = find_regex_flags(&expr).expect("expected a Regex literal in the format check");
+        assert_eq!(flags, "im");
+    }
+
+    fn find_regex_flags(expr: &Expr) -> Option<String> {
+        match expr.node.as_ref() {
+            ExprNode::Lit {
+                value: Literal::Regex { flags, .. },
+            } => Some(flags.clone()),
+            ExprNode::Send { recv, args, .. } => recv
+                .as_ref()
+                .and_then(|r| find_regex_flags(r))
+                .or_else(|| args.iter().find_map(find_regex_flags)),
+            ExprNode::If { cond, then_branch, else_branch } => find_regex_flags(cond)
+                .or_else(|| find_regex_flags(then_branch))
+                .or_else(|| find_regex_flags(else_branch)),
+            ExprNode::BoolOp { left, right, .. } => {
+                find_regex_flags(left).or_else(|| find_regex_flags(right))
+            }
+            ExprNode::Seq { exprs } => exprs.iter().find_map(find_regex_flags),
+            _ => None,
+        }
     }
 
     #[test]

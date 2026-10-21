@@ -67,6 +67,12 @@ module ActiveRecord
   end
 
   class Base
+    # cache_key / cache_version / cache_key_with_version — see
+    # connection.rb for why these live in this ruby-family/Spinel-only
+    # reopen rather than base.rb.
+    def cache_key: () -> String
+    def cache_version: () -> String?
+    def cache_key_with_version: () -> String
     # Request values stay intact until the schema-selected scalar adapter.
     def self.find: (Integer | Float | String | nil id) -> Base
     def self.find_by!: (Hash[String | Symbol, untyped] conditions) -> Base
@@ -95,8 +101,8 @@ module ActiveRecord
     def self.exists?: (*(Integer | Float | String | nil) ids) -> bool
     def self._exists_primary_key_input: (Integer | Float | String | nil id) -> bool
     # Ruby-family overrides of base.rb's Array / COUNT fallbacks.
-    def self.where: (Hash[Symbol, untyped] conditions) -> Relation
-    def self.find_by: (Hash[String | Symbol, untyped] conditions) -> Base?
+    def self.where: (?(Hash[String | Symbol, untyped] | String | nil) condition, *untyped args) -> Relation
+    def self.find_by: (Hash[String | Symbol, untyped] | String | nil conditions) -> Base?
     def self.find_sole_by: (Hash[String | Symbol, untyped] conditions) -> Base
     def self.find_or_initialize_by: (Hash[Symbol, untyped] conditions) -> Base
     def self.find_or_create_by: (Hash[Symbol, untyped] conditions) -> Base

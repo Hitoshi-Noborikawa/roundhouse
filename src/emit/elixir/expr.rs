@@ -3412,21 +3412,37 @@ fn emit_str_literal(value: &str) -> String {
 }
 
 /// Ruby `/pat/flags` → Elixir `~r/pat/flags`. `pattern` is the regex
-/// source text (backslash escapes preserved). Ruby's `m` flag (dotall)
-/// maps to Elixir's `s`; `i`/`x` carry over.
+/// source text (backslash escapes preserved). Ruby's `m` (dotall) is
+/// Elixir/Oniguruma `s`; Ruby's always-on line anchors need Elixir
+/// `m` as well, so a flagged Ruby `m` becomes `sm`. `i`/`x` carry over.
 fn emit_regex(pattern: &str, flags: &str) -> String {
     // Escape-aware: a source `\/` must not become `\\/`.
     let escaped = crate::emit::shared::regex_literal::escape_regex_delimiters(pattern);
-    let ex_flags: String = flags
-        .chars()
-        .filter_map(|f| match f {
-            'i' => Some('i'),
-            'm' => Some('s'),
-            'x' => Some('x'),
-            _ => None,
-        })
-        .collect();
+    let bits = crate::emit::shared::regex_literal::parse_ruby_regex_flags(flags);
+    let mut ex_flags = String::new();
+    if bits.ignore_case {
+        ex_flags.push('i');
+    }
+    if bits.dot_matches_newline {
+        ex_flags.push('s');
+        ex_flags.push('m');
+    }
+    if bits.extended {
+        ex_flags.push('x');
+    }
     format!("~r/{escaped}/{ex_flags}")
+}
+
+#[cfg(test)]
+mod regex_flag_tests {
+    use super::emit_regex;
+
+    #[test]
+    fn rubys_m_maps_to_elixir_s_and_m() {
+        assert_eq!(emit_regex("^b.c$", "m"), "~r/^b.c$/sm");
+        assert_eq!(emit_regex("a.b", "im"), "~r/a.b/ism");
+        assert_eq!(emit_regex("a.b", "i"), "~r/a.b/i");
+    }
 }
 
 fn is_screaming_snake(s: &str) -> bool {

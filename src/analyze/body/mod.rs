@@ -33,6 +33,13 @@ fn instance_shaped(ty: &Ty) -> bool {
     }
 }
 
+fn singleton_shaped(ty: &Ty) -> bool {
+    match ty {
+        Ty::Union { variants } => !variants.is_empty() && variants.iter().all(singleton_shaped),
+        _ => super::singleton_of(Some(ty)).is_some(),
+    }
+}
+
 fn bytes_block_has_escaping_break(e: &Expr) -> bool {
     match &*e.node {
         ExprNode::Break { .. } => true,
@@ -54,7 +61,8 @@ fn forwarded_block_may_be_nil(ty: &Ty) -> bool {
 mod diagnostic;
 mod const_resolution;
 mod lambda_local;
-pub(crate) use const_resolution::{ConstResolver, ConstResolverTask};
+pub(crate) use const_resolution::{ConstResolver, ConstResolverTask, definition_index};
+pub use const_resolution::DefinitionIndex;
 pub use const_resolution::PreparedConstResolver;
 use const_resolution::ResolvedConstant;
 mod narrowing;
@@ -123,6 +131,8 @@ pub struct Ctx {
     /// Locals whose assigned value is proven to be a class/module object.
     /// Nominal instance types alone do not establish this identity.
     pub class_objects: std::collections::HashSet<Symbol>,
+    /// Locals an `is_a?(Class)` / `is_a?(Module)` guard proved class objects of unknown identity: Module queries only (`answers_module_queries`).
+    pub query_class_objects: std::collections::HashSet<Symbol>,
     /// Module/class-level typed constants such as
     /// `STATUS_CODES = { ok: 200, ... }.freeze`. Rubydex IDs resolve
     /// source-backed reads; this scope types generated expressions.
@@ -385,6 +395,8 @@ pub struct BodyTyper<'a> {
     /// Parameter types for the lambda assignment currently being retyped
     /// from its `.call` sites. Empty during an ordinary walk.
     lambda_seeds: std::cell::RefCell<Option<lambda_local::Seeds>>,
+    /// The block parameter `block_ctx_for` proved a class object (`klass.tap { |k| }`), for the Lambda arm that clears its parameters.
+    block_class_param: std::cell::RefCell<Option<Symbol>>,
 }
 
 impl<'a> BodyTyper<'a> {
@@ -520,6 +532,7 @@ impl<'a> BodyTyper<'a> {
             helper_modules: None,
             open_classes: None,
             lambda_seeds: std::cell::RefCell::new(None),
+            block_class_param: std::cell::RefCell::new(None),
         }
     }
 
@@ -825,6 +838,7 @@ impl<'a> BodyTyper<'a> {
                     union_of(ctx.local_bindings.get(&name).cloned().unwrap_or(Ty::Nil), ty)
                 };
                 ctx.class_objects.remove(&name);
+                ctx.query_class_objects.remove(&name);
                 ctx.local_bindings.insert(name, ty);
             }
         };
@@ -953,6 +967,27 @@ impl<'a> BodyTyper<'a> {
             {
                 !self.owns_operator(r.ty.as_ref(), method, true)
             }
+            _ => false,
+        }
+    }
+
+    /// A class object of unknown identity: any class answers a Module query
+    /// as Ruby runs it, but a write through it (`define_method`) would land
+    /// on whichever subclass it is, which no method table here can follow.
+    fn answers_module_queries(&self, expr: &Expr, ty: Option<&Ty>, ctx: &Ctx) -> bool {
+        if self.is_class_object(expr, ctx) || ty.is_some_and(singleton_shaped) {
+            return true;
+        }
+        match &*expr.node {
+            ExprNode::Send { recv: Some(r), method, args, block: None, .. } if args.is_empty() => match method.as_str() {
+                "class" => !self.owns_operator(r.ty.as_ref(), method, self.is_class_object(r, ctx)),
+                // `safe_constantize` is left out: it answers nil for a name nothing defines.
+                "constantize" => matches!(r.ty.as_ref(), Some(Ty::Str))
+                    && !self.owns_operator(Some(&Ty::Class { id: ClassId(Symbol::from("String")), args: vec![].into() }), method, false),
+                _ => false,
+            },
+            ExprNode::Var { name, .. } => ctx.query_class_objects.contains(name)
+                || matches!(ty, Some(Ty::Class { id, .. }) if matches!(id.0.as_str(), "Class" | "Module")),
             _ => false,
         }
     }
@@ -1248,6 +1283,7 @@ impl<'a> BodyTyper<'a> {
                         }
                         let mut inner = ctx.clone();
                         inner.class_objects.remove(name);
+                        inner.query_class_objects.remove(name);
                         inner.local_bindings.insert(
                             name.clone(),
                             rescued.unwrap_or_else(|| Ty::Class {
@@ -1482,6 +1518,7 @@ impl<'a> BodyTyper<'a> {
                 let mut inner = ctx.clone();
                 inner.local_bindings.insert(name.clone(), v_ty);
                 inner.class_objects.remove(name);
+                inner.query_class_objects.remove(name);
                 if self.is_class_object(value, ctx) { inner.class_objects.insert(name.clone()); }
                 self.analyze_expr(body, &inner)
             }
@@ -1490,6 +1527,10 @@ impl<'a> BodyTyper<'a> {
                 let mut inner = ctx.clone();
                 for name in params.iter().chain(rest_param.iter()).chain(block_param.iter()) {
                     inner.class_objects.remove(name);
+                    inner.query_class_objects.remove(name);
+                }
+                if let Some(name) = self.block_class_param.borrow_mut().take().filter(|n| params.first() == Some(n)) {
+                    inner.class_objects.insert(name);
                 }
                 // Call-site evidence for a lambda stored in a local. Taken
                 // here so a nested lambda does not consume it. Block
@@ -1514,6 +1555,7 @@ impl<'a> BodyTyper<'a> {
                         continue;
                     }
                     inner.class_objects.remove(&param.name);
+                    inner.query_class_objects.remove(&param.name);
                     inner.local_bindings.insert(param.name.clone(), ty);
                 }
                 if let Some(seeds) = &seeds {
@@ -2308,7 +2350,11 @@ impl<'a> BodyTyper<'a> {
                 if matches!(dispatched, Ty::Var { .. } | Ty::Untyped) && self.inquirers.is_some()
                     && (recv.is_some() || (ctx.self_ty.is_some() && send::is_module_protocol(method)))
                     && !self.owns_operator(recv_ty.as_ref(), method, class_object_receiver) {
-                    let class_object = class_object_receiver;
+                    let class_object = class_object_receiver
+                        || (send::is_module_query(method) && recv.as_ref().is_some_and(|r| self.answers_module_queries(r, recv_ty.as_ref(), ctx)));
+                    if class_object && send::is_module_query(method) {
+                        expr.decisions |= crate::expr::MODULE_QUERY;
+                    }
                     // `include?` is Module's ancestor check AND String/Enumerable
                     // membership. Refuse Module protocol only for true Module-only
                     // names, or for `include?` on a nominal class *instance* (where
@@ -2335,7 +2381,7 @@ impl<'a> BodyTyper<'a> {
                 }
                 if matches!(dispatched, Ty::Var { .. } | Ty::Untyped) && self.inquirers.is_some()
                     && !self.owns_operator(recv_ty.as_ref(), method, class_object_receiver) {
-                    let gap = match recv_ty.as_ref() {
+                    let gap = match super::singleton_of(recv_ty.as_ref()).or(recv_ty.as_ref()) {
                         Some(Ty::Class { id, .. }) if matches!(id.0.as_str(), "ActiveModel::Errors" | "ActiveModel::Error") => Some(id.0.as_str()),
                         Some(Ty::Class { id, .. })
                             if matches!(id.0.as_str(), "Rails" | "ActiveRecord::Base")
@@ -2568,6 +2614,7 @@ impl<'a> BodyTyper<'a> {
                             let proven = self.is_class_object(value, &local_ctx);
                             forget_class_object_writes(value, &mut local_ctx);
                             local_ctx.class_objects.remove(name);
+                            local_ctx.query_class_objects.remove(name);
                             if proven { local_ctx.class_objects.insert(name.clone()); }
                             // Before the binding insert below: the lambda body
                             // was typed in this `local_ctx`, without its own name.
@@ -3227,7 +3274,7 @@ fn forget_class_object_writes(expr: &Expr, ctx: &mut Ctx) {
         }
         _ => {}
     }
-    for name in names { ctx.class_objects.remove(&name); }
+    for name in names { ctx.class_objects.remove(&name); ctx.query_class_objects.remove(&name); }
     expr.node.for_each_child(&mut |child| forget_class_object_writes(child, ctx));
 }
 
@@ -3388,6 +3435,202 @@ fn propagate_expected_to_empty_container(value: &mut Expr, expected: &Ty) {
             }
         }
         _ => {}
+    }
+}
+
+/// Stamp a method's declared `Hash[K, V]` / `Array[E]` return onto
+/// bare empty `{}` / `[]` literals on every value-producing return
+/// path (sequence tail, `If`/`Case` arms, `return {}`) whose typer-set
+/// type is still uninformative (`Var`/`Untyped`).
+///
+/// Mirrors the Assign-side [`propagate_expected_to_empty_container`]:
+/// without this, `def default_url_options; {}; end` typed
+/// `-> Hash[Symbol, String]` keeps `Hash<Var, Var>` on the literal,
+/// and Crystal emit's empty-hash default (`{} of String => String`)
+/// clashes with the annotated return. Call before body-typing when
+/// the RBS/`signature` return is known (see `runtime_src`).
+pub fn stamp_expected_on_empty_return_tail(body: &mut Expr, expected: &Ty) {
+    let peeled = expected.peel_nilable();
+    if !matches!(peeled, Ty::Hash { .. } | Ty::Array { .. }) {
+        return;
+    }
+    stamp_empty_return_tail(body, peeled);
+}
+
+/// Value-position walk: stamp empty containers that are themselves
+/// the method result, and recurse into control-flow that yields a
+/// value. Non-tail statements only contribute via explicit `return`.
+fn stamp_empty_return_tail(expr: &mut Expr, expected: &Ty) {
+    match &mut *expr.node {
+        ExprNode::Seq { exprs } if !exprs.is_empty() => {
+            let last = exprs.len() - 1;
+            for (i, e) in exprs.iter_mut().enumerate() {
+                if i == last {
+                    stamp_empty_return_tail(e, expected);
+                } else {
+                    stamp_returns_in_stmts(e, expected);
+                }
+            }
+        }
+        ExprNode::Return { value } => stamp_empty_return_tail(value, expected),
+        ExprNode::If {
+            then_branch,
+            else_branch,
+            ..
+        } => {
+            stamp_empty_return_tail(then_branch, expected);
+            stamp_empty_return_tail(else_branch, expected);
+        }
+        ExprNode::Case { arms, .. } => {
+            for arm in arms.iter_mut() {
+                stamp_empty_return_tail(&mut arm.body, expected);
+            }
+        }
+        ExprNode::CaseMatch {
+            arms, else_body, ..
+        } => {
+            for arm in arms.iter_mut() {
+                stamp_empty_return_tail(&mut arm.body, expected);
+            }
+            if let Some(eb) = else_body {
+                stamp_empty_return_tail(eb, expected);
+            }
+        }
+        ExprNode::BeginRescue {
+            body,
+            rescues,
+            else_branch,
+            ensure,
+            ..
+        } => {
+            stamp_empty_return_tail(body, expected);
+            for clause in rescues.iter_mut() {
+                stamp_empty_return_tail(&mut clause.body, expected);
+            }
+            if let Some(eb) = else_branch {
+                stamp_empty_return_tail(eb, expected);
+            }
+            if let Some(ens) = ensure {
+                stamp_returns_in_stmts(ens, expected);
+            }
+        }
+        ExprNode::RescueModifier { expr, fallback } => {
+            stamp_empty_return_tail(expr, expected);
+            stamp_empty_return_tail(fallback, expected);
+        }
+        // Loops / attached blocks are not value tails, but `return {}`
+        // inside them exits the enclosing method (Ruby) — except
+        // `lambda` / `define_method` blocks (same carve-out as
+        // `collect_return_types`).
+        ExprNode::While { body, .. } => stamp_returns_in_stmts(body, expected),
+        ExprNode::Send {
+            method,
+            block: Some(block),
+            ..
+        } if !matches!(method.as_str(), "lambda" | "define_method") => {
+            stamp_returns_in_attached_block(block, expected)
+        }
+        ExprNode::Hash { entries, .. } if entries.is_empty() => {
+            if empty_container_ty_uninformative(expr) {
+                expr.ty = Some(expected.clone());
+            }
+        }
+        ExprNode::Array { elements, .. } if elements.is_empty() => {
+            if empty_container_ty_uninformative(expr) {
+                expr.ty = Some(expected.clone());
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Statement-position walk: only chase explicit `return` (and nested
+/// control flow that may contain one). A bare `{}` mid-sequence is not
+/// a return value and must not be stamped.
+fn stamp_returns_in_stmts(expr: &mut Expr, expected: &Ty) {
+    match &mut *expr.node {
+        ExprNode::Seq { exprs } => {
+            for e in exprs.iter_mut() {
+                stamp_returns_in_stmts(e, expected);
+            }
+        }
+        ExprNode::Return { value } => stamp_empty_return_tail(value, expected),
+        ExprNode::If {
+            then_branch,
+            else_branch,
+            ..
+        } => {
+            stamp_returns_in_stmts(then_branch, expected);
+            stamp_returns_in_stmts(else_branch, expected);
+        }
+        ExprNode::Case { arms, .. } => {
+            for arm in arms.iter_mut() {
+                stamp_returns_in_stmts(&mut arm.body, expected);
+            }
+        }
+        ExprNode::CaseMatch {
+            arms, else_body, ..
+        } => {
+            for arm in arms.iter_mut() {
+                stamp_returns_in_stmts(&mut arm.body, expected);
+            }
+            if let Some(eb) = else_body {
+                stamp_returns_in_stmts(eb, expected);
+            }
+        }
+        ExprNode::BeginRescue {
+            body,
+            rescues,
+            else_branch,
+            ensure,
+            ..
+        } => {
+            stamp_returns_in_stmts(body, expected);
+            for clause in rescues.iter_mut() {
+                stamp_returns_in_stmts(&mut clause.body, expected);
+            }
+            if let Some(eb) = else_branch {
+                stamp_returns_in_stmts(eb, expected);
+            }
+            if let Some(ens) = ensure {
+                stamp_returns_in_stmts(ens, expected);
+            }
+        }
+        ExprNode::RescueModifier { expr, fallback } => {
+            stamp_returns_in_stmts(expr, expected);
+            stamp_returns_in_stmts(fallback, expected);
+        }
+        ExprNode::While { body, .. } => stamp_returns_in_stmts(body, expected),
+        ExprNode::Send {
+            method,
+            block: Some(block),
+            ..
+        } if !matches!(method.as_str(), "lambda" | "define_method") => {
+            stamp_returns_in_attached_block(block, expected)
+        }
+        _ => {}
+    }
+}
+
+/// Chase `return` inside a method-attached block (`Send.block` holding
+/// a `Lambda`). Caller must already skip `lambda` / `define_method`.
+/// Do not walk lambda literals passed as ordinary args — their `return`
+/// exits the lambda, not the enclosing method.
+fn stamp_returns_in_attached_block(block: &mut Expr, expected: &Ty) {
+    if let ExprNode::Lambda { body, .. } = &mut *block.node {
+        stamp_returns_in_stmts(body, expected);
+    }
+}
+
+/// True when an empty container's `e.ty` carries no emit-usable shape
+/// (absent, `Untyped`, `Var`, or `Hash`/`Array` whose params are open).
+fn empty_container_ty_uninformative(e: &Expr) -> bool {
+    match e.ty.as_ref() {
+        None => true,
+        Some(Ty::Untyped) | Some(Ty::Var { .. }) => true,
+        Some(Ty::Hash { key, value }) => key.is_unknown() && value.is_unknown(),
+        Some(Ty::Array { elem }) => elem.is_unknown(),
+        _ => false,
     }
 }
 
@@ -5636,6 +5879,199 @@ mod tests {
             panic!("expected CaseMatch, got {:?}", expr.node);
         };
         assert_eq!(arms[0].body.ty, Some(Ty::Untyped));
+    }
+
+    fn declared_sym_str_hash() -> Ty {
+        Ty::Hash {
+            key: std::sync::Arc::new(Ty::Sym),
+            value: std::sync::Arc::new(Ty::Str),
+        }
+    }
+
+    fn empty_hash_lit() -> Expr {
+        synth(ExprNode::Hash {
+            entries: vec![],
+            kwargs: false,
+        })
+    }
+
+    fn assert_stamped_sym_str_hash(e: &Expr) {
+        match e.ty.as_ref() {
+            Some(Ty::Hash { key, value }) => {
+                assert!(matches!(key.as_ref(), Ty::Sym), "key={key:?}");
+                assert!(matches!(value.as_ref(), Ty::Str), "value={value:?}");
+            }
+            other => panic!("expected Hash[Symbol, String], got {other:?}"),
+        }
+    }
+
+    /// Declared Hash return must stamp both arms of a trailing `If`
+    /// that yields bare `{}` (CodeRabbit: stop-at-If gap).
+    #[test]
+    fn stamp_empty_return_covers_if_branch_tails() {
+        let expected = declared_sym_str_hash();
+        let mut body = synth(ExprNode::If {
+            cond: var("flag"),
+            then_branch: empty_hash_lit(),
+            else_branch: empty_hash_lit(),
+        });
+        stamp_expected_on_empty_return_tail(&mut body, &expected);
+        let ExprNode::If {
+            then_branch,
+            else_branch,
+            ..
+        } = &*body.node
+        else {
+            panic!("expected If");
+        };
+        assert_stamped_sym_str_hash(then_branch);
+        assert_stamped_sym_str_hash(else_branch);
+    }
+
+    /// An earlier `return {}` in a sequence must be stamped even when
+    /// the value-producing tail is something else.
+    #[test]
+    fn stamp_empty_return_covers_early_return_in_seq() {
+        let expected = declared_sym_str_hash();
+        let mut body = synth(ExprNode::Seq {
+            exprs: vec![
+                synth(ExprNode::Return {
+                    value: empty_hash_lit(),
+                }),
+                nil_lit(),
+            ],
+        });
+        stamp_expected_on_empty_return_tail(&mut body, &expected);
+        let ExprNode::Seq { exprs } = &*body.node else {
+            panic!("expected Seq");
+        };
+        let ExprNode::Return { value } = &*exprs[0].node else {
+            panic!("expected Return");
+        };
+        assert_stamped_sym_str_hash(value);
+        assert!(
+            exprs[1].ty.is_none(),
+            "non-return mid/tail Nil must not be stamped as Hash"
+        );
+    }
+
+    /// `return {}` inside `while` exits the enclosing method and must
+    /// receive the declared Hash shape (CodeRabbit follow-up).
+    #[test]
+    fn stamp_empty_return_covers_return_inside_while() {
+        let expected = declared_sym_str_hash();
+        let mut body = synth(ExprNode::While {
+            cond: var("flag"),
+            body: synth(ExprNode::Return {
+                value: empty_hash_lit(),
+            }),
+            until_form: false,
+        });
+        stamp_expected_on_empty_return_tail(&mut body, &expected);
+        let ExprNode::While { body: loop_body, .. } = &*body.node else {
+            panic!("expected While");
+        };
+        let ExprNode::Return { value } = &*loop_body.node else {
+            panic!("expected Return in While body");
+        };
+        assert_stamped_sym_str_hash(value);
+    }
+
+    /// `return {}` in an attached method block (`Send.block` Lambda)
+    /// exits the enclosing method; stamp it. A Lambda passed as an
+    /// ordinary arg is left alone.
+    #[test]
+    fn stamp_empty_return_covers_return_in_send_block_not_arg_lambda() {
+        let expected = declared_sym_str_hash();
+        let block_lambda = synth(ExprNode::Lambda {
+            params: vec![],
+            rest_param: None,
+            extra_params: vec![],
+            block_param: None,
+            body: synth(ExprNode::Return {
+                value: empty_hash_lit(),
+            }),
+            block_style: Default::default(),
+        });
+        let arg_lambda = synth(ExprNode::Lambda {
+            params: vec![],
+            rest_param: None,
+            extra_params: vec![],
+            block_param: None,
+            body: synth(ExprNode::Return {
+                value: empty_hash_lit(),
+            }),
+            block_style: Default::default(),
+        });
+        let mut body = synth(ExprNode::Send {
+            recv: None,
+            method: Symbol::from("each"),
+            args: vec![arg_lambda],
+            block: Some(block_lambda),
+            parenthesized: false,
+        });
+        stamp_expected_on_empty_return_tail(&mut body, &expected);
+        let ExprNode::Send { args, block, .. } = &*body.node else {
+            panic!("expected Send");
+        };
+        let ExprNode::Lambda { body: block_body, .. } = &*block.as_ref().unwrap().node else {
+            panic!("expected block Lambda");
+        };
+        let ExprNode::Return { value } = &*block_body.node else {
+            panic!("expected Return in block");
+        };
+        assert_stamped_sym_str_hash(value);
+        let ExprNode::Lambda { body: arg_body, .. } = &*args[0].node else {
+            panic!("expected arg Lambda");
+        };
+        let ExprNode::Return { value: arg_ret } = &*arg_body.node else {
+            panic!("expected Return in arg lambda");
+        };
+        assert!(
+            arg_ret.ty.is_none(),
+            "arg-position lambda return must not inherit the method Hash return"
+        );
+    }
+
+    /// `lambda { return {} }` / `define_method(...) { return {} }` are
+    /// closure-local (same carve-out as `collect_return_types`); do not
+    /// stamp the enclosing method's Hash return onto them.
+    #[test]
+    fn stamp_empty_return_skips_lambda_and_define_method_blocks() {
+        let expected = declared_sym_str_hash();
+        for method in ["lambda", "define_method"] {
+            let block = synth(ExprNode::Lambda {
+                params: vec![],
+                rest_param: None,
+                extra_params: vec![],
+                block_param: None,
+                body: synth(ExprNode::Return {
+                    value: empty_hash_lit(),
+                }),
+                block_style: Default::default(),
+            });
+            let mut body = synth(ExprNode::Send {
+                recv: None,
+                method: Symbol::from(method),
+                args: vec![],
+                block: Some(block),
+                parenthesized: false,
+            });
+            stamp_expected_on_empty_return_tail(&mut body, &expected);
+            let ExprNode::Send { block, .. } = &*body.node else {
+                panic!("expected Send");
+            };
+            let ExprNode::Lambda { body: block_body, .. } = &*block.as_ref().unwrap().node else {
+                panic!("expected block Lambda");
+            };
+            let ExprNode::Return { value } = &*block_body.node else {
+                panic!("expected Return in {method} block");
+            };
+            assert!(
+                value.ty.is_none(),
+                "{method} block return must not inherit the enclosing Hash return"
+            );
+        }
     }
 }
 

@@ -49,6 +49,15 @@ pub(super) fn resolve(app: &mut App, sources: &[SourceFile], resolver: &ConstRes
                 names.rewrite_id(included, span);
             }
         }
+        // `extend`/`prepend` a library class's own body does not model
+        // structurally (unlike top-level `include`, above) stay in
+        // `unknown_calls` as a raw `Send`; resolve those the same way,
+        // so the Ruby/Spinel emitter's own lookup for which ones to
+        // replay (`app_extension_calls` in `src/emit/ruby/library.rs`)
+        // reads Rubydex's answer instead of guessing a second one.
+        for call in &mut class.unknown_calls {
+            names.rewrite_mixin_call(call, &["extend", "prepend"]);
+        }
     }
     for model in &mut app.models {
         if let Some(parent) = &mut model.parent {
@@ -56,7 +65,7 @@ pub(super) fn resolve(app: &mut App, sources: &[SourceFile], resolver: &ConstRes
         }
         for item in &mut model.body {
             if let ModelBodyItem::Unknown { expr, .. } = item {
-                names.rewrite_include(expr);
+                names.rewrite_mixin_call(expr, &["include"]);
             }
         }
     }
@@ -71,7 +80,7 @@ pub(super) fn resolve(app: &mut App, sources: &[SourceFile], resolver: &ConstRes
         }
         for item in &mut controller.body {
             if let ControllerBodyItem::Unknown { expr, .. } = item {
-                names.rewrite_include(expr);
+                names.rewrite_mixin_call(expr, &["include"]);
             }
         }
     }
@@ -150,11 +159,13 @@ impl Names<'_> {
         found
     }
 
-    /// `include X` in a model or controller body. A rooted `::X` is
-    /// absolute as written.
-    fn rewrite_include(&self, expr: &mut Expr) {
+    /// `include X` in a model or controller body, or (passing
+    /// `&["extend", "prepend"]`) a library class's own `extend`/
+    /// `prepend` captured verbatim in its `unknown_calls`. A rooted
+    /// `::X` is absolute as written.
+    fn rewrite_mixin_call(&self, expr: &mut Expr, methods: &[&str]) {
         let ExprNode::Send { recv: None, method, args, .. } = &mut *expr.node else { return };
-        if method.as_str() != "include" {
+        if !methods.contains(&method.as_str()) {
             return;
         }
         for arg in args.iter_mut() {
