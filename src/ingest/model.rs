@@ -1461,7 +1461,7 @@ const READ_ONLY_CONST_METHODS: &[&str] = &[
     "fetch", "dig", "[]", "join", "entries", "zip", "index_by", "index_with", "group_by", "partition", "tally",
     "filter_map", "each_slice", "each_key", "each_value", "each_pair", "values_at", "slice", "except", "take",
     "drop", "uniq", "compact", "reverse", "flatten", "invert", "transform_values", "transform_keys", "minmax",
-    "intersection", "union", "difference", "excluding", "including", "&", "|", "+", "-", "source", "options",
+    "intersection", "union", "difference", "excluding", "including", "&", "|", "+", "-", "*", "**", "-@", "source", "options",
     "match", "match?", "=~", "===", "==", "!=", "eql?", "hash", "is_a?", "nil?", "present?", "blank?",
 ];
 
