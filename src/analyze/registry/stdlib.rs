@@ -1132,6 +1132,17 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
     ]);
     // `Method.method_defined?(:source_location)` (aasm's invokers): the class as a value only.
     register_stdlib_class(classes, "Method", &[], &[]);
+    // Rubygems' version value, which the ruby family and spinel load with Ruby itself.
+    {
+        let version = || Ty::Class { id: ClassId(Symbol::from("Gem::Version")), args: vec![].into() };
+        register_stdlib_class(classes, "Gem::Version", &[("correct?", Ty::Bool)], &[
+            ("<=>", Ty::Union { variants: vec![Ty::Int, Ty::Nil].into() }),
+            ("<", Ty::Bool), ("<=", Ty::Bool), (">", Ty::Bool), (">=", Ty::Bool), ("==", Ty::Bool),
+            ("eql?", Ty::Bool), ("hash", Ty::Int),
+            ("to_s", Ty::Str), ("version", Ty::Str), ("prerelease?", Ty::Bool),
+            ("release", version()), ("bump", version()),
+        ]);
+    }
     register_stdlib_class(classes, "Mutex", &[], &[]);
     // The queue constructors, Thread's core aliases, and the standard
     // mixins likewise need exact entries for source constant resolution.

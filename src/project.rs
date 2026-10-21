@@ -5923,7 +5923,7 @@ fn unavailable_class_module_construct(name: &str, target: &str) -> Option<&'stat
         | "Struct" | "Mutex" | "Queue" | "SizedQueue"
         | "Thread::Queue" | "Thread::SizedQueue" | "Thread::Mutex"
         | "ThreadError" | "ClosedQueueError" | "RegexpError" | "Comparable" | "Enumerable"
-        | "LoadError" | "Proc" | "Range" | "Method"
+        | "LoadError" | "Proc" | "Range" | "Method" | "Gem::Version"
         // `runtime/ruby/ipaddr.rb` ships to spinel only; no strict runtime list carries it.
         | "IPAddr" | "IPAddr::InvalidAddressError"
         | "JSON::GeneratorError"
