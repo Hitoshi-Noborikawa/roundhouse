@@ -56,6 +56,13 @@ pub(super) fn push_validate_method(
                     matches!(a, Association::BelongsTo { name, .. } | Association::HasOne { name, .. }
                         if name == &v.attribute)
                 });
+                // `validates :image, presence: true` on a `has_one_attached
+                // :image` (or `has_many_attached :images`) names the
+                // ATTACHMENT. There is no `@image` slot either — the reader
+                // builds an `ActiveStorage::Attached` proxy — so the column
+                // check rejected every record, attached or not. Rails asks
+                // the proxy `blank?`: nothing attached, staged or saved.
+                let attachment = attachment_kind(model, &v.attribute);
                 for rule in &v.rules {
                     let mut produced = if is_assoc && matches!(rule, ValidationRule::Presence) {
                         let reader = Expr::new(
@@ -70,6 +77,11 @@ pub(super) fn push_validate_method(
                         );
                         vec![if_with_nil_else(
                             send(reader, "nil?", vec![]),
+                            errors_push(v.attribute.as_str(), msgs.error(v.attribute.as_str(), "blank", &Default::default())),
+                        )]
+                    } else if let (Some(kind), ValidationRule::Presence) = (attachment, rule) {
+                        vec![if_with_nil_else(
+                            attachment_blank_cond(model, &v.attribute, kind),
                             errors_push(v.attribute.as_str(), msgs.error(v.attribute.as_str(), "blank", &Default::default())),
                         )]
                     } else if let ValidationRule::Uniqueness { scope, case_sensitive, allow_nil, allow_blank } = rule {
@@ -1589,6 +1601,66 @@ fn send(recv: Expr, method: &str, args: Vec<Expr>) -> Expr {
             parenthesized: true,
         },
     )
+}
+
+#[derive(Clone, Copy)]
+enum AttachmentKind {
+    One,
+    Many,
+}
+
+/// Whether `attr` is a `has_one_attached` / `has_many_attached` the
+/// model declares.
+fn attachment_kind(model: &Model, attr: &Symbol) -> Option<AttachmentKind> {
+    if crate::lower::attached::attached_attrs(model).iter().any(|(_, a)| a == attr) {
+        Some(AttachmentKind::One)
+    } else if crate::lower::attached::many_attached_attrs(model).iter().any(|(_, a)| a == attr) {
+        Some(AttachmentKind::Many)
+    } else {
+        None
+    }
+}
+
+/// The attachment is blank — Rails' `Attached::One#blank?` (`!attached?`)
+/// and `Attached::Many`'s `attachments.empty?`, which both read the
+/// change staged by the writer before the saved rows:
+///
+/// ```ruby
+/// @image_pending.nil? && !image.attached?   # has_one_attached
+/// !images.attached?                         # has_many_attached
+/// ```
+///
+/// The staged half is what makes `Photo.new(image: file).valid?` true:
+/// validation runs before the save that writes the attachment row. Only
+/// `has_one_attached` has a synthesized writer (`lower::attached`), and
+/// only when the model does not define the reader itself; a
+/// `has_many_attached` attaches through the proxy, which writes its rows
+/// at once.
+fn attachment_blank_cond(model: &Model, attr: &Symbol, kind: AttachmentKind) -> Expr {
+    let reader = Expr::new(
+        Span::synthetic(),
+        ExprNode::Send { recv: None, method: attr.clone(), args: vec![], block: None, parenthesized: false },
+    );
+    let not_attached = Expr::new(
+        Span::synthetic(),
+        ExprNode::Send {
+            recv: Some(send(reader, "attached?", vec![])),
+            method: Symbol::from("!"),
+            args: vec![],
+            block: None,
+            parenthesized: false,
+        },
+    );
+    let staged_writer = matches!(kind, AttachmentKind::One)
+        && !super::model_defines_instance_method(model, attr);
+    if !staged_writer {
+        return not_attached;
+    }
+    let pending = Expr::new(
+        Span::synthetic(),
+        ExprNode::Ivar { name: Symbol::from(format!("{}_pending", attr.as_str())) },
+    );
+    bool_op(BoolOpKind::And, send(pending, "nil?", vec![]), not_attached)
 }
 
 fn bool_op(op: BoolOpKind, left: Expr, right: Expr) -> Expr {
