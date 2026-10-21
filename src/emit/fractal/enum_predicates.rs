@@ -6,11 +6,11 @@
 //! (unchanged from 7.1 to 8.1 and main), so inside a method of the model
 //!
 //! ```ruby
-//! enum :status, { pending: 0, paid: 1 }
-//! def shippable? = paid? && !archived?
+//! enum :status, { draft: 0, published: 1 }
+//! def listed? = published? && !hidden?
 //! ```
 //!
-//! `paid?` becomes `(status_for_database == 1)`: the same comparison,
+//! `published?` becomes `(status_for_database == 1)`: the same comparison,
 //! with no block-backed method (which ZJIT cannot call directly) and no
 //! `public_send` of a dynamic symbol in between. `status_for_database`
 //! is an ordinary `def` Active Record generates.
@@ -74,7 +74,7 @@ impl Pass for EnumPredicates {
     }
 
     fn summary(&self) -> &'static str {
-        "Inside the enum's own class, a call to an enum predicate (`paid?`) becomes the comparison Rails' generated method runs (`(status_for_database == 1)`)."
+        "Inside the enum's own class, a call to an enum predicate (`published?`) becomes the comparison Rails' generated method runs (`(status_for_database == 1)`)."
     }
 
     fn scope(&self) -> Scope {
@@ -502,8 +502,8 @@ mod tests {
     #[test]
     fn reads_hash_array_and_keyword_mappings() {
         assert_eq!(
-            names("enum :status, { pending: 0, paid: 1 }"),
-            [("paid?".into(), "status".into(), "1".into()), ("pending?".into(), "status".into(), "0".into())]
+            names("enum :status, { draft: 0, published: 1 }"),
+            [("draft?".into(), "status".into(), "0".into()), ("published?".into(), "status".into(), "1".into())]
         );
         assert_eq!(names("enum :size, %i[small large]"), [("large?".into(), "size".into(), "1".into()), ("small?".into(), "size".into(), "0".into())]);
         // With no positional mapping every keyword is a label, `prefix` too.
@@ -515,10 +515,10 @@ mod tests {
 
     #[test]
     fn applies_prefix_and_suffix() {
-        let got: Vec<String> = names("enum :status, { paid: 1 }, prefix: true, suffix: :now").into_iter().map(|(n, _, _)| n).collect();
-        assert_eq!(got, ["status_paid_now?"]);
-        let got: Vec<String> = names("enum :status, [:paid], prefix: \"is\"").into_iter().map(|(n, _, _)| n).collect();
-        assert_eq!(got, ["is_paid?"]);
+        let got: Vec<String> = names("enum :status, { published: 1 }, prefix: true, suffix: :now").into_iter().map(|(n, _, _)| n).collect();
+        assert_eq!(got, ["status_published_now?"]);
+        let got: Vec<String> = names("enum :status, [:published], prefix: \"is\"").into_iter().map(|(n, _, _)| n).collect();
+        assert_eq!(got, ["is_published?"]);
     }
 
     #[test]
@@ -532,12 +532,12 @@ mod tests {
 
     #[test]
     fn declines_what_it_cannot_reproduce() {
-        assert!(declared("enum :status, { paid: :p }").unwrap_err().contains("symbol value"));
-        assert!(declared("enum status: { paid: 1 }").unwrap_err().contains("keyword form"));
+        assert!(declared("enum :status, { published: :p }").unwrap_err().contains("symbol value"));
+        assert!(declared("enum status: { published: 1 }").unwrap_err().contains("keyword form"));
         assert!(declared("enum :status, STATUSES").unwrap_err().contains("not a literal"));
-        assert!(declared("enum :status, { paid: 1 }, prefix: PREFIX").unwrap_err().contains("prefix"));
-        assert!(declared("enum :status, { paid: 1 }, _prefix: true").unwrap_err().contains("does not know"));
-        assert_eq!(declared("enum :status, { paid: 1 }, instance_methods: false").unwrap().len(), 0);
+        assert!(declared("enum :status, { published: 1 }, prefix: PREFIX").unwrap_err().contains("prefix"));
+        assert!(declared("enum :status, { published: 1 }, _prefix: true").unwrap_err().contains("does not know"));
+        assert_eq!(declared("enum :status, { published: 1 }, instance_methods: false").unwrap().len(), 0);
         // A label Ruby cannot call bare is skipped, not declined.
         assert_eq!(names("enum :status, { \"in progress\" => 0, done: 1 }").into_iter().map(|(n, _, _)| n).collect::<Vec<_>>(), ["done?"]);
     }
