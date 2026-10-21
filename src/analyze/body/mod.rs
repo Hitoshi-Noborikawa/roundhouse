@@ -182,6 +182,12 @@ pub struct Ctx {
     pub instance_body: bool,
     // `class_side` cannot stand in: a `class_eval` block in an initializer is class-side too, and its `include` runs at load
     pub method_body: bool,
+    /// Implicit `self` is a class still being assembled: a Module hook's
+    /// receiver, or a `Class.new`/`Module.new` block's new class.
+    pub building_self: bool,
+    /// Locals bound to a class the program already has (a constant, or
+    /// `self` on the class side), not one `Class.new` is building.
+    pub live_class_locals: std::collections::HashSet<Symbol>,
 }
 
 /// User-class dispatch data: table name (if any), instance shape,
@@ -913,6 +919,15 @@ impl<'a> BodyTyper<'a> {
         None
     }
 
+    fn is_live_class(&self, expr: &Expr, ctx: &Ctx) -> bool {
+        match &*expr.node {
+            ExprNode::SelfRef => ctx.class_side && !ctx.building_self,
+            ExprNode::Const { .. } => self.is_class_object(expr, ctx),
+            ExprNode::Var { name, .. } => ctx.class_objects.contains(name) && ctx.live_class_locals.contains(name),
+            _ => false,
+        }
+    }
+
     /// Identity evidence for Module protocol, independent of nominal instance type.
     fn is_class_object(&self, expr: &Expr, ctx: &Ctx) -> bool {
         if self.class_factories.is_some_and(|factories| factories.contains_key(&expr.span)) {
@@ -1523,7 +1538,9 @@ impl<'a> BodyTyper<'a> {
                 inner.local_bindings.insert(name.clone(), v_ty);
                 inner.class_objects.remove(name);
                 inner.query_class_objects.remove(name);
+                inner.live_class_locals.remove(name);
                 if self.is_class_object(value, ctx) { inner.class_objects.insert(name.clone()); }
+                if self.is_live_class(value, ctx) { inner.live_class_locals.insert(name.clone()); }
                 self.analyze_expr(body, &inner)
             }
 
@@ -1532,6 +1549,7 @@ impl<'a> BodyTyper<'a> {
                 for name in params.iter().chain(rest_param.iter()).chain(block_param.iter()) {
                     inner.class_objects.remove(name);
                     inner.query_class_objects.remove(name);
+                    inner.live_class_locals.remove(name);
                 }
                 if let Some(name) = self.block_class_param.borrow_mut().take().filter(|n| params.first() == Some(n)) {
                     inner.class_objects.insert(name);
@@ -1891,9 +1909,12 @@ impl<'a> BodyTyper<'a> {
                                 && self.is_instance(receiver, ctx);
                         }
                     }
-                    // A `Module.new`/`Class.new` block is the new class's body, so its `include` is that class's ancestry
-                    if method.as_str() == "new" && class_object_receiver {
-                        block_ctx.method_body = false;
+                    // Not any `new` with a block: only `Class.new`/`Module.new` makes the block's self a class it is building
+                    if method.as_str() == "new"
+                        && recv.as_ref().is_some_and(|r| matches!(&*r.node, ExprNode::Const { path }
+                            if matches!(path.iter().map(|s| s.as_str()).filter(|s| !s.is_empty()).collect::<Vec<_>>().as_slice(), ["Class"] | ["Module"])))
+                    {
+                        block_ctx.building_self = true;
                     }
                     let method_ref_ty = self.analyze_expr(b, &block_ctx);
                     // The Lambda walker stores the analyzed body's type
@@ -2355,12 +2376,7 @@ impl<'a> BodyTyper<'a> {
                 let class_object_receiver = class_object_receiver
                     || (recv.as_ref().is_none_or(|r| matches!(&*r.node, ExprNode::SelfRef))
                         && send::is_module_protocol(method) && self.self_is_module_instance(ctx));
-                // A local built by `Class.new`/`Module.new` is a class still being assembled, not one the program already reads
-                let live_class = recv.as_ref().map_or(ctx.class_side, |r| match &*r.node {
-                    ExprNode::SelfRef => ctx.class_side,
-                    ExprNode::Const { .. } => self.is_class_object(r, ctx),
-                    _ => false,
-                });
+                let live_class = recv.as_ref().map_or(ctx.class_side && !ctx.building_self, |r| self.is_live_class(r, ctx));
                 if ctx.method_body && live_class && self.inquirers.is_some() && !ctx.claimed_macro_template
                     && matches!(method.as_str(), "include" | "prepend" | "extend")
                     && !self.owns_operator(recv_ty.as_ref(), method, true)
@@ -2638,10 +2654,13 @@ impl<'a> BodyTyper<'a> {
                         }
                         if let ExprNode::Assign { target: LValue::Var { name, .. }, value } = &*e.node {
                             let proven = self.is_class_object(value, &local_ctx);
+                            let live = self.is_live_class(value, &local_ctx);
                             forget_class_object_writes(value, &mut local_ctx);
                             local_ctx.class_objects.remove(name);
                             local_ctx.query_class_objects.remove(name);
+                            local_ctx.live_class_locals.remove(name);
                             if proven { local_ctx.class_objects.insert(name.clone()); }
+                            if live { local_ctx.live_class_locals.insert(name.clone()); }
                             // Before the binding insert below: the lambda body
                             // was typed in this `local_ctx`, without its own name.
                             lambda_local::remember(&mut lambda_locals, i, e, &local_ctx);

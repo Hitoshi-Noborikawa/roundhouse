@@ -47,6 +47,14 @@ pub(crate) fn expand_model_macros(
     let mut hook_providers: HashMap<Symbol, usize> = HashMap::new();
     for (id, receiver) in hook_sources {
         let Some(class) = app.library_classes.iter().find(|c| &c.name == id) else {
+            if receiver == MethodReceiver::Instance {
+                super::survey::record(&super::IngestError::Unsupported {
+                    file: id.to_string(),
+                    message: format!(
+                        "`ActiveSupport.on_load(:active_record)` extends `{id}`, which is not ingested: the macros it gives every model are unknown"
+                    ),
+                });
+            }
             continue;
         };
         for m in class.methods.iter().filter(|m| m.receiver == receiver) {
@@ -437,11 +445,12 @@ fn has_definition(body: &Expr) -> bool {
     found
 }
 
-/// A receiverless `include`/`extend`/`prepend` whose arguments are all
-/// constant paths: the class-body mixin a macro runs on its caller.
+/// A receiverless `include`/`extend` whose arguments are all constant
+/// paths: the class-body mixin a macro runs on its caller.
 pub(super) fn mixin_args(expr: &Expr) -> Option<Vec<&[Symbol]>> {
     let ExprNode::Send { recv: None, method, args, block: None, .. } = &*expr.node else { return None };
-    if !matches!(method.as_str(), "include" | "extend" | "prepend") || args.is_empty() {
+    // Not `prepend`: a model's `prepend` is neither a recorded include nor replayed in the emitted class body
+    if !matches!(method.as_str(), "include" | "extend") || args.is_empty() {
         return None;
     }
     args.iter()
@@ -456,7 +465,9 @@ pub(super) fn mixin_args(expr: &Expr) -> Option<Vec<&[Symbol]>> {
 /// so a mixin constant must name the same module from there as from the
 /// macro's own nesting: a known module, with no nearer one of that name.
 fn mixins_resolve_alike(app: &App, origin: &ClassId, items: &[ModelBodyItem]) -> bool {
-    let known = |name: &str| app.library_classes.iter().any(|c| c.name.0.as_str() == name);
+    let known = |name: &str| {
+        app.library_classes.iter().any(|c| c.name.0.as_str() == name) || app.models.iter().any(|m| m.name.0.as_str() == name)
+    };
     let scopes: Vec<&str> = {
         let full = origin.0.as_str();
         let mut out = vec![full];

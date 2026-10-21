@@ -41,11 +41,14 @@ fn a_mixin_a_method_runs_is_refused_at_the_call() {
         "class Strainer\n  \
            def self.add_filter(filter)\n    include(filter)\n  end\n\n  \
            def self.decorate\n    extend UpFilter\n  end\n\n  \
-           def self.wrap\n    Strainer.prepend(UpFilter)\n  end\n\
+           def self.wrap\n    Strainer.prepend(UpFilter)\n  end\n\n  \
+           def self.aliased\n    target = Strainer\n    target.include(UpFilter)\n  end\n\n  \
+           def self.inherited(base)\n    Strainer.extend(UpFilter)\n  end\n\n  \
+           def self.anonymous\n    Class.new { Strainer.include(UpFilter) }\n  end\n\
          end\n",
     );
-    for method in ["`include`", "`extend`", "`prepend`"] {
-        assert_eq!(found.iter().filter(|d| d.contains(method)).count(), 1, "{method} once in {found:?}");
+    for (method, count) in [("`include`", 3), ("`extend`", 2), ("`prepend`", 1)] {
+        assert_eq!(found.iter().filter(|d| d.contains(method)).count(), count, "{method} {count} times in {found:?}");
     }
 }
 
@@ -55,7 +58,7 @@ fn a_class_body_mixin_a_hook_a_built_class_and_a_class_own_include_stay_clean() 
         "class Strainer\n  include UpFilter\n\n  \
            def self.include(name) = name.to_s\n\n  \
            def self.add_filter(filter)\n    include(filter)\n  end\n\n  \
-           def self.inherited(base)\n    base.include(UpFilter)\n    Strainer.extend(UpFilter)\n  end\n\n  \
+           def self.inherited(base)\n    base.include(UpFilter)\n  end\n\n  \
            def self.build\n    klass = Class.new\n    klass.include(UpFilter)\n    klass\n  end\n\n  \
            def self.[](name)\n    Module.new do\n      extend ActiveSupport::Concern\n      include UpFilter\n    end\n  end\n\
          end\n",
