@@ -468,6 +468,9 @@ module ActiveRecord
       raise ArgumentError, "wrong number of arguments (given #{ids.length}, expected 0..1)" if ids.length > 1
       id = ids[0]
       return false if id.nil?
+      # Conditions, not a key (Rails' `exists?(name: "x")`): the Relation
+      # answers them, through the default scope when the model has one.
+      return all.exists?(id) if id.is_a?(Hash)
       unless _default_scope_where.empty?
         key = _cast_primary_key(id)
         return false if key.nil?

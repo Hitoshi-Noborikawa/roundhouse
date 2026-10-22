@@ -129,6 +129,34 @@ puts "default scope bulk writes passed"
         .assert_passes();
 }
 
+/// `exists?(hash)` on a default-scoped model is a condition, not a
+/// primary key: the scope's Relation answers it. It was cast as a key
+/// first, which no Hash is, so every hash form answered `false`.
+#[test]
+fn exists_with_conditions_on_a_default_scoped_model_like_rails() {
+    app()
+        .write(
+            "app/models/gadget.rb",
+            "class Gadget < ApplicationRecord\n  belongs_to :shelf, optional: true\n  default_scope { where(archived: false) }\n\n  def self.named?(name)\n    exists?(name: name)\n  end\nend\n",
+        )
+        .run_ruby(&format!(
+            r#"{SEED}got = [
+  Gadget.exists?(name: "live"),
+  Gadget.exists?(name: "gone"),
+  Gadget.named?("live"),
+  Gadget.named?("gone"),
+  Gadget.exists?(live.id.to_s),
+  Gadget.exists?(gone.id),
+  Shelf.exists?(name: "s"),
+]
+want = [true, false, true, false, true, false, true]
+raise "exists: #{{got.inspect}}" unless got == want
+puts "default scope exists passed"
+"#
+        ))
+        .assert_passes();
+}
+
 /// The scope's literal is where `new` starts, and a given attribute
 /// still wins over it, `false` and `nil` included, when the column has
 /// no schema default of its own (Rails 8.1.4: `Sprocket.new(active:

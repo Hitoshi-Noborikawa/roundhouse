@@ -48,6 +48,8 @@ fn a_default_scope_applies_in_the_spinel_binary_like_rails() {
   Gadget.pluck(:name),
   Gadget.find_by(id: gone.id).nil?,
   Gadget.exists?(gone.id),
+  Gadget.exists?(name: "live"),
+  Gadget.exists?(name: "gone"),
   shelf.gadgets.count,
   Note.find(note.id).gadget.nil?,
   Shelf.joined_count,
@@ -56,7 +58,7 @@ fn a_default_scope_applies_in_the_spinel_binary_like_rails() {
   Gadget.unscope(where: :archived).count,
   Badge.new.kind,
 ]
-want = [1, ["live"], true, false, 1, true, 1, 2, 2, 2, "basic"]
+want = [1, ["live"], true, false, true, false, 1, true, 1, 2, 2, 2, "basic"]
 raise "spinel: #{{got.inspect}}" unless got == want
 Gadget.clear
 left = Gadget.unscoped.pluck(:name)
