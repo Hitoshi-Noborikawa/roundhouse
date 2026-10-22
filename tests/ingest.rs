@@ -1442,7 +1442,7 @@ end
         other => panic!("expected inclusion, got {other:?}"),
     }
     let code = rules.iter().find(|v| v.attribute.as_str() == "code").unwrap();
-    assert!(matches!(&code.rules[0], ValidationRule::Format { pattern, flags } if pattern == r"\A[A-Z]{3}\z" && flags.is_empty()));
+    assert!(matches!(&code.rules[0], ValidationRule::Format { pattern, flags, .. } if pattern == r"\A[A-Z]{3}\z" && flags.is_empty()));
     let stock = rules.iter().find(|v| v.attribute.as_str() == "stock").unwrap();
     match &stock.rules[0] {
         ValidationRule::Inclusion { values, range: Some(range) } => {
@@ -2592,7 +2592,7 @@ fn specific_ledger_messages_replace_the_generic_catch_all() {
     for (source, expected) in [
         ("class Foo; end", "class/module defined inside a method or block (runtime class definition)"),
         ("module Foo; end", "class/module defined inside a method or block (runtime class definition)"),
-        ("1 + ", "unparsed fragment (Prism recovery node)"),
+        ("1 + ", "unparsed fragment near `+` (Prism recovery)"),
     ] {
         let result = ruby_prism::parse(source.as_bytes());
         let program = result.node();

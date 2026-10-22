@@ -332,7 +332,9 @@ fn type_of_const_literal(node: &Node<'_>) -> Option<Ty> {
         };
         let assoc = first.as_assoc_node()?;
         let key_ty = type_of_literal_node(&assoc.key())?;
-        let value_ty = type_of_literal_node(&assoc.value())?;
+        // A table of tables (`ActionCable::INTERNAL`'s `disconnect_reasons`)
+        // is typed as deep as its literals go.
+        let value_ty = type_of_const_literal(&assoc.value())?;
         return Some(Ty::Hash {
             key: std::sync::Arc::new(key_ty),
             value: std::sync::Arc::new(value_ty),
@@ -387,7 +389,7 @@ pub fn parse_methods(source: &str) -> Result<Vec<MethodDef>, String> {
 
     let errors: Vec<String> = result
         .errors()
-        .map(|e| e.message().to_string())
+        .map(|e| crate::ingest::prism_api::diagnostic_message(&e))
         .collect();
     if !errors.is_empty() {
         return Err(format!("parse error: {}", errors.join("; ")));
@@ -1144,7 +1146,7 @@ fn collect_from_stmt(
                     if let Some(args) = call.arguments() {
                         for arg in args.arguments().iter() {
                             let Some(sym) = arg.as_symbol_node() else { continue };
-                            let Some(loc) = sym.value_loc() else { continue };
+                            let loc = sym.content_loc();
                             let attr_name = std::str::from_utf8(loc.as_slice())
                                 .map_err(|_| "attr name not UTF-8".to_string())?;
                             if mk_reader {
@@ -1542,7 +1544,7 @@ fn method_params(
 
     // Block: `&block` — populated into `block_param` slot, not the
     // flat list. Anonymous `&` has no name — return None.
-    let block_param = match params_node.block() {
+    let block_param = match crate::ingest::prism_api::block_parameter(&params_node) {
         Some(block) => match block.name() {
             Some(loc) => Some(Param::positional(Symbol::new(decode_utf8(
                 loc.as_slice(),

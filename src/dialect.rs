@@ -603,6 +603,10 @@ pub struct Validation {
     /// `unless:` — see `if_cond`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub unless_cond: Option<Expr>,
+    /// A literal String `message:` from the rule's own hash, in place of
+    /// the default message for every error the rules record.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
 }
 
 /// Inclusive or exclusive numeric range from `inclusion: { in: 1..3 }`.
@@ -657,6 +661,13 @@ pub enum ValidationRule {
         /// so JSON written before this field existed still loads.
         #[serde(default)]
         flags: String,
+        /// `allow_nil:` / `allow_blank:`, from the validator's own hash
+        /// or the call (the hash wins). `None` is unset: Rails then
+        /// matches a nil or blank value's `to_s` like any other.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        allow_nil: Option<bool>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        allow_blank: Option<bool>,
     },
     Numericality {
         only_integer: bool,
@@ -678,6 +689,9 @@ pub enum ValidationRule {
         allow_nil: Option<bool>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         allow_blank: Option<bool>,
+        /// `in: a..b` / `a...b`: Rails' "must be in a..b" check.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        in_range: Option<InclusionRange>,
     },
     Inclusion {
         values: Vec<Literal>,

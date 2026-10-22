@@ -2767,6 +2767,19 @@ module MochaBridge
       else
         Object.const_get(konst)
       end
+    # A model class method a relation reaches (`User.active.find_by_x(id)`)
+    # takes the relation as a trailing `__rel`, the lowering's spelling of
+    # Rails' implicit scoping, so the call carries one argument more than
+    # the test's `with(...)` names. It is matched by an optional
+    # `anything` — the stubbed method is the one the test wrote either way.
+    # Read before the first stub replaces the method's parameter list, and
+    # remembered, since a second stub of the same method sees mocha's.
+    @rel_params ||= {}
+    rel_param =
+      %w[stubs expects].include?(kind.to_s) &&
+      @rel_params.fetch([target, meth.to_sym]) do |key|
+        @rel_params[key] = target.respond_to?(meth) && target.method(meth).parameters.last&.last == :__rel
+      end
     expectation =
       case kind.to_s
       when "stubs" then target.stubs(meth)
@@ -2777,6 +2790,7 @@ module MochaBridge
       end
     ops.each do |op, args|
       args = args.map { |a| a.is_a?(String) && a.match?(CONST_NAME) && Object.const_defined?(a) ? Object.const_get(a) : a } if op == :raises
+      args = args + [matcher(:optionally, matcher(:anything))] if op == :with && rel_param && !blk
       expectation =
         if op == :with && blk
           expectation.with(&blk)
@@ -3240,8 +3254,20 @@ fn ruby_family_runtime_files(
     // time — campfire's suite went 219/240 to 0/240, every file dying
     // on the same line.
     let sidekiq = needs_redis(app);
+    // On these lanes the redis gem is required at the first push, not at
+    // boot: a tree whose tests record pushes through `SidekiqPush`'s seam
+    // then boots without the gem installed. Spinel resolves requires at
+    // compile time, so its tree keeps the file's top-level require.
     let sidekiq_client = if sidekiq {
-        crate::runtime_files::read_to_string(SIDEKIQ_REDIS_CLIENT)?
+        let client = crate::runtime_files::read_to_string(SIDEKIQ_REDIS_CLIENT)?;
+        const AT_LOAD: &str = "require \"redis\"\n";
+        const OPEN: &str = "    conn = password == \"\" ? Redis.new(url: url, connect_timeout: CONNECT_TIMEOUT, read_timeout: READ_TIMEOUT) : Redis.new(url: url, password: password, connect_timeout: CONNECT_TIMEOUT, read_timeout: READ_TIMEOUT)\n";
+        if !client.contains(AT_LOAD) || !client.contains(OPEN) {
+            return Err(format!("{SIDEKIQ_REDIS_CLIENT}: the require or the connect line moved"));
+        }
+        client
+            .replacen(AT_LOAD, "# `require \"redis\"` is at the first connect on this lane.\n", 1)
+            .replacen(OPEN, &format!("    require \"redis\"\n{OPEN}"), 1)
     } else {
         String::new()
     };
@@ -4656,7 +4682,7 @@ fn apply_job_registry(files: &mut [(String, String)], app: &App) {
     );
     let generated = format!(
         "{HEAD}{}\n{flag}{redis}{TAIL}",
-        crate::lower::job_payload::registry_source(&app.job_plans)
+        crate::lower::job_payload::registry_source(&app.job_plans, needs_redis(app))
     );
     for (path, content) in files.iter_mut() {
         if !path.ends_with("job_registry.rb") {
@@ -5923,7 +5949,9 @@ fn unavailable_class_module_construct(name: &str, target: &str) -> Option<&'stat
         | "Struct" | "Mutex" | "Queue" | "SizedQueue"
         | "Thread::Queue" | "Thread::SizedQueue" | "Thread::Mutex"
         | "ThreadError" | "ClosedQueueError" | "RegexpError" | "Comparable" | "Enumerable"
-        | "LoadError" | "Proc" | "Range"
+        | "LoadError" | "Proc" | "Range" | "Method" | "Gem::Version"
+        // `runtime/ruby/ipaddr.rb` ships to spinel only; no strict runtime list carries it.
+        | "IPAddr" | "IPAddr::InvalidAddressError"
         | "JSON::GeneratorError"
         // Ported for spinel (`runtime/ruby/rack_utils.rb`), the gem's own on
         // the ruby family; no strict target loads either.
@@ -6121,10 +6149,46 @@ fn report_unsupported_bundled_constants(app: &App, target: BuildTarget) {
             }
         }
     }
+    // TypeScript emitted `class Enum extends Hash` and `this.is_has_key(...)`, neither of which exists there.
+    if !matches!(target, BuildTarget::Blog | BuildTarget::Ruby | BuildTarget::Roda | BuildTarget::Jruby | BuildTarget::Spinel) {
+        let classes = app.library_classes.iter().chain(app.test_modules.iter().flat_map(|tm| tm.inner_classes.iter()));
+        for lc in classes.filter(|lc| !lc.is_module) {
+            if let Some(parent) = lc.parent.as_ref().filter(|p| matches!(p.0.as_str(), "Hash" | "Array" | "String" | "Set")) {
+                emit::diagnostics::report_unsupported(
+                    lc.parent_span,
+                    target.as_str(),
+                    "builtin subclass",
+                    format!("`{}` subclasses {}, which the {} emit has no class to extend", lc.name.0.as_str(), parent.0.as_str(), target.as_str()),
+                );
+            }
+        }
+    }
     if matches!(target, BuildTarget::Blog | BuildTarget::Ruby | BuildTarget::Roda) {
         return;
     }
     fn visit(expr: &crate::expr::Expr, app: &App, target: &str) {
+        // Not the whole constant: spinel answers `Method` as a value, and refuses only a class test against it.
+        if target == "spinel" {
+            let names_method = |e: &crate::expr::Expr| matches!(&*e.node, crate::expr::ExprNode::Const { path }
+                if path.iter().map(|p| p.as_str()).filter(|p| !p.is_empty()).eq(["Method"]));
+            let class_test = match &*expr.node {
+                crate::expr::ExprNode::Send { method, args, .. } => {
+                    matches!(method.as_str(), "is_a?" | "kind_of?" | "instance_of?") && args.first().is_some_and(names_method)
+                }
+                crate::expr::ExprNode::Case { arms, .. } => arms.iter().any(|arm| {
+                    matches!(&arm.pattern, crate::expr::Pattern::Expr { expr } if names_method(expr))
+                }),
+                _ => false,
+            };
+            if class_test {
+                emit::diagnostics::report_unsupported(
+                    expr.span,
+                    target,
+                    "Method",
+                    "a class test against `Method`, which the spinel emit refuses".to_string(),
+                );
+            }
+        }
         // Spinel matches this exception by its rescue name, but does not
         // expose its class as a constant. Keep the value guard below while
         // permitting the supported literal rescue clause, including ::JSON.
@@ -9710,9 +9774,10 @@ fn spin_shape(files: Vec<(String, String)>) -> Result<Vec<(String, String)>, Str
             "# Redis, for queue_adapter :sidekiq: jobs are pushed in Sidekiq's\n\
              # format for a Sidekiq process to run. spinel-redis, pure Ruby over\n\
              # sp_net. Git form, pinned to a tag because `ref` takes a branch\n\
-             # or tag, never a SHA; 0.2.0 carries the url:, AUTH, zadd and\n\
-             # pipelined this push needs, and the index lists only 0.1.0.\n\
-             redis = { git = \"https://github.com/rubys/spinel-redis\", ref = \"v0.2.0\" }\n",
+             # or tag, never a SHA. 0.3.0 adds the connect_timeout: and\n\
+             # read_timeout: this push sets to 0.2.0's url:, AUTH, zadd and\n\
+             # pipelined.\n\
+             redis = { git = \"https://github.com/rubys/spinel-redis\", ref = \"v0.3.0\" }\n",
         );
     }
     files.push(("spin.toml".to_string(), manifest));

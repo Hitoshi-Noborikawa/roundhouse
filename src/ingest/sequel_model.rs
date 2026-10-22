@@ -33,6 +33,7 @@ use super::util::{
 };
 use super::{IngestError, IngestResult};
 
+use crate::ingest::prism_api::PrismLocation;
 /// Parse a single Sequel model file. Returns `Ok(None)` when the file's
 /// first class doesn't subclass `Sequel::Model` (a support class — the
 /// caller ingests it through the library-class path instead).
@@ -465,6 +466,7 @@ fn parse_validation_helper(call: &ruby_prism::CallNode<'_>) -> Option<Vec<Valida
                         rules: vec![ValidationRule::Presence],
                         if_cond: None,
                         unless_cond: None,
+                        message: None,
                     })
                     .collect()
             })
@@ -494,6 +496,7 @@ fn parse_validation_helper(call: &ruby_prism::CallNode<'_>) -> Option<Vec<Valida
                         }],
                         if_cond: None,
                         unless_cond: None,
+                        message: None,
                     })
                     .collect()
             })

@@ -56,15 +56,16 @@ env:
   # Mastodon (AGPL) is the scale case.
   MASTODON_SHA: 163f96cee4dea23365bff9b433871e68d20d9ee7
   RUBY_BENCH_SHA: d771f81f1ce9db51376e03ca7b8e6a83160556d4
-  CAMPFIRE_SHA: 11d3fb9ce01faad3384807563053ba86126f747e
+  CAMPFIRE_SHA: c8f74a0b0e1e93146c4d7c1d6ac80c9079682216
   # rubys/spinel-pg, the PostgreSQL driver the Spinel Db shim
   # (runtime/spinel/db_pg.rb) is tested against in spinel-framework.
   # Pinned like the apps above; bump deliberately.
   SPINEL_PG_SHA: f48735c91aa8cde258299e1189957972667a0d1f
-  # rubys/spinel-redis, the Redis client the Sidekiq push runs on in a
-  # Spinel tree, tested against a live Redis in sidekiq-live. A tag, the
-  # same ref the emitted spin.toml pins (src/project.rs); bump both together.
-  SPINEL_REDIS_REF: v0.2.0
+  # spinel-redis, the Redis client the Sidekiq push runs on in a Spinel
+  # tree, tested against a live Redis in sidekiq-live. The same repository
+  # and tag the emitted spin.toml pins (src/project.rs); bump both together.
+  SPINEL_REDIS_REPO: rubys/spinel-redis
+  SPINEL_REDIS_REF: v0.3.0
 
 jobs:
   plan:
@@ -335,41 +336,9 @@ jobs:
     # build-site → smoke → deploy tail behind it (2026-08-19).
     timeout-minutes: 15
 
-    env:
-      WASI_SDK_VERSION: "33.0"
     steps:
       - uses: actions/checkout@v7
-      - uses: ./.github/actions/setup-rust
-        with:
-          targets: wasm32-wasip1
-      - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: wasm
-      - name: Install libclang (host bindgen)
-        timeout-minutes: 8
-        run: |
-          "$GITHUB_WORKSPACE/scripts/ci-apt-install" libclang-dev
-      - name: Cache WASI SDK
-        id: wasi-sdk
-        uses: actions/cache@v6
-        with:
-          path: /opt/wasi-sdk
-          key: wasi-sdk-${{ env.WASI_SDK_VERSION }}-x86_64-linux
-      - name: Install WASI SDK
-        if: steps.wasi-sdk.outputs.cache-hit != 'true'
-        run: |
-          ver="${WASI_SDK_VERSION}"; major="${ver%%.*}"
-          url="https://github.com/WebAssembly/wasi-sdk/releases/download/wasi-sdk-${major}/wasi-sdk-${ver}-x86_64-linux.tar.gz"
-          curl -fsSL "$url" -o /tmp/wasi-sdk.tar.gz
-          sudo mkdir -p /opt/wasi-sdk
-          sudo tar -xzf /tmp/wasi-sdk.tar.gz -C /opt/wasi-sdk --strip-components=1
-      - name: Build roundhouse_wasm.wasm
-        env:
-          WASI_SDK_PATH: /opt/wasi-sdk
-          # Stamped into the wasm's `version` export, which /ide/ puts on
-          # its copyable summary line.
-          ROUNDHOUSE_COMMIT: ${{ github.sha }}
-        run: cargo build --release --target wasm32-wasip1 --manifest-path wasm/Cargo.toml
+      - uses: ./.github/actions/build-wasm
       - name: Upload wasm artifact
         uses: actions/upload-artifact@v7
         with:
@@ -889,7 +858,7 @@ jobs:
       - name: Install Playwright Chromium (+ system deps)
         run: $GITHUB_WORKSPACE/scripts/ci-playwright-install
         working-directory: tests/browser_smoke
-      - name: Serve wasm/ and verify the /ide/ + /playground/ + /studio/ pages
+      - name: Serve wasm/ and verify the /ide/ + /playground/ + /studio/ + /fractal/ pages
         run: |
           set -euo pipefail
           (cd wasm && python3 -m http.server 8099 >/tmp/ide-server.log 2>&1 &)
@@ -902,6 +871,8 @@ jobs:
           # wasm/lib/test-runtime.mjs — the in-memory Db shim that once drifted
           # off the `_opt` seam unseen because nothing here ran it.
           (cd wasm/studio && node verify-studio.mjs)
+          # Fractal's pass explorer, over the same worker's fractal_stages export.
+          (cd wasm/fractal && node verify-fractal.mjs)
 
   # Per-target framework-test conformance gate for the spinel AOT
   # target. Same emit pipeline as framework-tests-ruby, but each
@@ -1076,7 +1047,7 @@ jobs:
       - name: Check out spinel-redis (pinned)
         uses: actions/checkout@v7
         with:
-          repository: rubys/spinel-redis
+          repository: ${{ env.SPINEL_REDIS_REPO }}
           ref: ${{ env.SPINEL_REDIS_REF }}
           path: spinel-redis
       - uses: ruby/setup-ruby@v1
@@ -1656,9 +1627,9 @@ jobs:
       # so the floor can be raised. The pin is `CAMPFIRE_SHA`.
       - name: Enforce the floor
         env:
-          # 579 tests passed, 84 files green.
-          FLOOR_TESTS: 579
-          FLOOR_FILES: 84
+          # 623 tests passed, 87 files green.
+          FLOOR_TESTS: 623
+          FLOOR_FILES: 87
         run: |
           set -euo pipefail
           tests=$(awk -F'|' '{p += $3} END {print p+0}' /tmp/campfire-tally.txt)
@@ -3224,25 +3195,16 @@ jobs:
       # as an artifact (NOT committed) — see wasm/vendor/ruby-rbs-sys/README.md
       # and the "Publishing to Pages" section of docs/archive/browser-demo-plan.md. Pure
       # static files (no npm/vite, no COOP/COEP), so they serve straight off Pages.
-      - name: Bundle the in-browser playground + studio demos (→ _site/lib, _site/playground, _site/studio)
+      - name: Bundle the in-browser playground + studio demos (→ _site/lib, _site/playground, _site/studio, _site/fractal)
         if: needs.plan.outputs.site == 'true'
         run: |
           set -euo pipefail
-          mkdir -p _site/lib _site/playground _site/studio
-          # Shared lib: every code module + the freshly-built compiler wasm (from
-          # the build-wasm artifact — not committed; see that job + wasm/vendor/).
-          # A glob, not a list: browser-smoke-ide serves wasm/ directly, so a
-          # module missing from a hand-kept list only fails on the live site
-          # (local-bundle.mjs, 2026-09-15).
-          cp wasm/lib/*.mjs wasm/lib/*.js _site/lib/
+          # Shared with the site-only publisher, including each browser entrypoint.
+          python3 scripts/ci-site.py browser-assets --root _site
           cp wasm-artifact/roundhouse_wasm.wasm _site/lib/
           # Fresh seed app from the just-generated real-blog fixture (→ lib).
           (cd wasm/browser-spike && node gen-fixture.mjs)
           cp wasm/browser-spike/fixture.json _site/lib/fixture.json
-          # Each surface: its own HTML + entry module(s). Studio also ships its
-          # app-host service worker (sw.js), which serves the running app.
-          cp wasm/playground/index.html wasm/playground/playground.js _site/playground/
-          cp wasm/studio/index.html wasm/studio/studio.js wasm/studio/sw.js _site/studio/
           echo "lib files:";        find _site/lib -type f | sort
           echo "playground files:"; find _site/playground -type f | sort
           echo "studio files:";     find _site/studio -type f | sort
@@ -3271,8 +3233,6 @@ jobs:
         if: needs.plan.outputs.site == 'true'
         run: |
           set -euo pipefail
-          mkdir -p _site/ide
-          cp wasm/ide/index.html wasm/ide/ide.js _site/ide/
           cp wasm/ide/app-src.json _site/ide/
           echo "ide files:"; find _site/ide -type f | sort
 

@@ -1191,6 +1191,15 @@ module ActiveRecord
       true
     end
 
+    # `touch_later` — what Rails' `belongs_to …, touch: true` calls.
+    # Rails defers the write to just before the transaction's COMMIT and
+    # stamps each record once, however many children asked; the
+    # ruby-family reopen (connection.rb) does that. A strict target has
+    # no transaction to wait on, so here it is `touch`.
+    def touch_later
+      touch
+    end
+
     # `touch` after a call-site column write (`touch :connected_at`,
     # `increment!(:connections, touch: true)`): the whole row, so the
     # assigned column is written with the timestamp.

@@ -1123,7 +1123,7 @@ fn str_method(model: &Model, name: &str, body: Expr) -> MethodDef {
 ///
 ///   def after_create
 ///     __touch_message = message
-///     __touch_message.touch unless __touch_message.nil?
+///     __touch_message.touch_later unless __touch_message.nil?
 ///   end
 ///
 /// and the same in `after_update`, `after_destroy` and `after_touch`.
@@ -1205,9 +1205,14 @@ fn push_belongs_to_touches(methods: &mut Vec<MethodDef>, model: &Model) {
             ));
         }
         // A stamped column has to reach the row with the timestamp, so
-        // that form finishes with the whole-row `touch_written`; the bare
-        // form's `touch` writes `updated_at` alone, as Rails' does.
-        let finish = if matches!(touch, Touch::Column(_)) { "touch_written" } else { "touch" };
+        // that form finishes with the whole-row `touch_written`, at once.
+        // The bare form is Rails' `touch_later`: inside the save's
+        // transaction the parent is stamped once, just before COMMIT,
+        // however many of this record's hooks (and its siblings') asked
+        // (runtime/ruby/active_record/connection.rb); outside one, and on
+        // a strict target (base.rb), it is `touch`, which writes
+        // `updated_at` alone, as Rails' does.
+        let finish = if matches!(touch, Touch::Column(_)) { "touch_written" } else { "touch_later" };
         guarded.push(Expr::new(
             span,
             ExprNode::Send {

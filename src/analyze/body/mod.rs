@@ -33,6 +33,13 @@ fn instance_shaped(ty: &Ty) -> bool {
     }
 }
 
+fn singleton_shaped(ty: &Ty) -> bool {
+    match ty {
+        Ty::Union { variants } => !variants.is_empty() && variants.iter().all(singleton_shaped),
+        _ => super::singleton_of(Some(ty)).is_some(),
+    }
+}
+
 fn bytes_block_has_escaping_break(e: &Expr) -> bool {
     match &*e.node {
         ExprNode::Break { .. } => true,
@@ -101,6 +108,8 @@ impl ConstScope {
         self.global.get(name)
     }
 }
+
+const RUNTIME_MIXIN: &str = "Module mixin at run time";
 
 /// Recursion context — what `self` is, what locals/ivars are in scope.
 /// Immutable during descent; clone to enter a new scope (Let body,
@@ -171,6 +180,14 @@ pub struct Ctx {
     pub claimed_macro_template: bool,
     // `!class_side` cannot stand in: scope bodies type with it false, and their bare `active` is the scope.
     pub instance_body: bool,
+    // `class_side` cannot stand in: a `class_eval` block in an initializer is class-side too, and its `include` runs at load
+    pub method_body: bool,
+    /// Implicit `self` is a class still being assembled: a Module hook's
+    /// receiver, or a `Class.new`/`Module.new` block's new class.
+    pub building_self: bool,
+    /// Locals bound to a class the program already has (a constant, or
+    /// `self` on the class side), not one `Class.new` is building.
+    pub live_class_locals: std::collections::HashSet<Symbol>,
 }
 
 /// User-class dispatch data: table name (if any), instance shape,
@@ -902,6 +919,15 @@ impl<'a> BodyTyper<'a> {
         None
     }
 
+    fn is_live_class(&self, expr: &Expr, ctx: &Ctx) -> bool {
+        match &*expr.node {
+            ExprNode::SelfRef => ctx.class_side && !ctx.building_self,
+            ExprNode::Const { .. } => self.is_class_object(expr, ctx),
+            ExprNode::Var { name, .. } => ctx.class_objects.contains(name) && ctx.live_class_locals.contains(name),
+            _ => false,
+        }
+    }
+
     /// Identity evidence for Module protocol, independent of nominal instance type.
     fn is_class_object(&self, expr: &Expr, ctx: &Ctx) -> bool {
         if self.class_factories.is_some_and(|factories| factories.contains_key(&expr.span)) {
@@ -968,7 +994,7 @@ impl<'a> BodyTyper<'a> {
     /// as Ruby runs it, but a write through it (`define_method`) would land
     /// on whichever subclass it is, which no method table here can follow.
     fn answers_module_queries(&self, expr: &Expr, ty: Option<&Ty>, ctx: &Ctx) -> bool {
-        if self.is_class_object(expr, ctx) {
+        if self.is_class_object(expr, ctx) || ty.is_some_and(singleton_shaped) {
             return true;
         }
         match &*expr.node {
@@ -1001,6 +1027,18 @@ impl<'a> BodyTyper<'a> {
         let mut current = self.classes().get(id).and_then(|c| c.parent.clone());
         while let Some(id) = current {
             if matches!(id.0.as_str(), "Module" | "Class") { return true; }
+            if !seen.insert(id.clone()) { break; }
+            current = self.classes().get(&id).and_then(|c| c.parent.clone());
+        }
+        false
+    }
+
+    // An app class over Hash/Array/String/Set answers `include?` as membership, not Module#include?.
+    fn descends_from_collection(&self, id: &ClassId) -> bool {
+        let mut seen = std::collections::HashSet::new();
+        let mut current = self.classes().get(id).and_then(|c| c.parent.clone());
+        while let Some(id) = current {
+            if matches!(id.0.as_str(), "Hash" | "Array" | "String" | "Set") { return true; }
             if !seen.insert(id.clone()) { break; }
             current = self.classes().get(&id).and_then(|c| c.parent.clone());
         }
@@ -1512,7 +1550,9 @@ impl<'a> BodyTyper<'a> {
                 inner.local_bindings.insert(name.clone(), v_ty);
                 inner.class_objects.remove(name);
                 inner.query_class_objects.remove(name);
+                inner.live_class_locals.remove(name);
                 if self.is_class_object(value, ctx) { inner.class_objects.insert(name.clone()); }
+                if self.is_live_class(value, ctx) { inner.live_class_locals.insert(name.clone()); }
                 self.analyze_expr(body, &inner)
             }
 
@@ -1521,6 +1561,7 @@ impl<'a> BodyTyper<'a> {
                 for name in params.iter().chain(rest_param.iter()).chain(block_param.iter()) {
                     inner.class_objects.remove(name);
                     inner.query_class_objects.remove(name);
+                    inner.live_class_locals.remove(name);
                 }
                 if let Some(name) = self.block_class_param.borrow_mut().take().filter(|n| params.first() == Some(n)) {
                     inner.class_objects.insert(name);
@@ -1644,7 +1685,7 @@ impl<'a> BodyTyper<'a> {
                     return ty.clone();
                 }
                 if matches!(&crate::expr::ExprCold::diagnostic(&expr.cold), Some(crate::diagnostic::DiagnosticKind::Unsupported { construct, .. })
-                    if matches!(construct.as_str(), "Module protocol" | "ActiveModel::Errors" | "ActiveModel::Error" | "Rails" | "ActiveRecord::Base" | "String extension" | "Hash extension" | "not_nil!" | "Object extension" | "Module callback argument"))
+                    if matches!(construct.as_str(), "Module protocol" | "ActiveModel::Errors" | "ActiveModel::Error" | "Rails" | "ActiveRecord::Base" | "String extension" | "Hash extension" | "not_nil!" | "Object extension" | "Module callback argument" | RUNTIME_MIXIN))
                 { crate::expr::ExprCold::set_diagnostic(&mut expr.cold, None); }
                 expr.decisions &= !crate::expr::RESOLVED_DATA_FACTORY;
                 if let Some(ty) = self.data_factories.and_then(|factories| factories.get(&expr_span)) {
@@ -1879,6 +1920,13 @@ impl<'a> BodyTyper<'a> {
                             block_ctx.instance_body = matches!(method.as_str(), "instance_eval" | "instance_exec")
                                 && self.is_instance(receiver, ctx);
                         }
+                    }
+                    // Not any `new` with a block: only `Class.new`/`Module.new` makes the block's self a class it is building
+                    if method.as_str() == "new"
+                        && recv.as_ref().is_some_and(|r| matches!(&*r.node, ExprNode::Const { path }
+                            if matches!(path.iter().map(|s| s.as_str()).filter(|s| !s.is_empty()).collect::<Vec<_>>().as_slice(), ["Class"] | ["Module"])))
+                    {
+                        block_ctx.building_self = true;
                     }
                     let method_ref_ty = self.analyze_expr(b, &block_ctx);
                     // The Lambda walker stores the analyzed body's type
@@ -2340,6 +2388,19 @@ impl<'a> BodyTyper<'a> {
                 let class_object_receiver = class_object_receiver
                     || (recv.as_ref().is_none_or(|r| matches!(&*r.node, ExprNode::SelfRef))
                         && send::is_module_protocol(method) && self.self_is_module_instance(ctx));
+                let live_class = recv.as_ref().map_or(ctx.class_side && !ctx.building_self, |r| self.is_live_class(r, ctx));
+                if ctx.method_body && live_class && self.inquirers.is_some() && !ctx.claimed_macro_template
+                    && matches!(method.as_str(), "include" | "prepend" | "extend")
+                    && !self.owns_operator(recv_ty.as_ref(), method, true)
+                {
+                    crate::expr::ExprCold::set_diagnostic(&mut expr.cold, Some(crate::diagnostic::DiagnosticKind::Unsupported {
+                        target: None,
+                        construct: Symbol::from(RUNTIME_MIXIN),
+                        detail: format!("`{}` in a method mixes a module into a live class, which needs a method table \
+                                         that changes while the program runs; no compiled target has one", method.as_str()),
+                    }));
+                    return dispatched;
+                }
                 if matches!(dispatched, Ty::Var { .. } | Ty::Untyped) && self.inquirers.is_some()
                     && (recv.is_some() || (ctx.self_ty.is_some() && send::is_module_protocol(method)))
                     && !self.owns_operator(recv_ty.as_ref(), method, class_object_receiver) {
@@ -2358,7 +2419,7 @@ impl<'a> BodyTyper<'a> {
                     let module_only = send::is_module_protocol(method)
                         && (method.as_str() != "include?"
                             || matches!(&recv_ty, Some(Ty::Class { id, .. })
-                                if !matches!(id.0.as_str(), "Class" | "Module")));
+                                if !matches!(id.0.as_str(), "Class" | "Module") && !self.descends_from_collection(id)));
                     if module_only && !class_object
                         && !self.owns_operator(recv_ty.as_ref(), method, false) {
                         crate::expr::ExprCold::set_diagnostic(&mut expr.cold, Some(crate::diagnostic::DiagnosticKind::Unsupported {
@@ -2374,7 +2435,7 @@ impl<'a> BodyTyper<'a> {
                 }
                 if matches!(dispatched, Ty::Var { .. } | Ty::Untyped) && self.inquirers.is_some()
                     && !self.owns_operator(recv_ty.as_ref(), method, class_object_receiver) {
-                    let gap = match recv_ty.as_ref() {
+                    let gap = match super::singleton_of(recv_ty.as_ref()).or(recv_ty.as_ref()) {
                         Some(Ty::Class { id, .. }) if matches!(id.0.as_str(), "ActiveModel::Errors" | "ActiveModel::Error") => Some(id.0.as_str()),
                         Some(Ty::Class { id, .. })
                             if matches!(id.0.as_str(), "Rails" | "ActiveRecord::Base")
@@ -2620,10 +2681,13 @@ impl<'a> BodyTyper<'a> {
                         }
                         if let ExprNode::Assign { target: LValue::Var { name, .. }, value } = &*e.node {
                             let proven = self.is_class_object(value, &local_ctx);
+                            let live = self.is_live_class(value, &local_ctx);
                             forget_class_object_writes(value, &mut local_ctx);
                             local_ctx.class_objects.remove(name);
                             local_ctx.query_class_objects.remove(name);
+                            local_ctx.live_class_locals.remove(name);
                             if proven { local_ctx.class_objects.insert(name.clone()); }
+                            if live { local_ctx.live_class_locals.insert(name.clone()); }
                             // Before the binding insert below: the lambda body
                             // was typed in this `local_ctx`, without its own name.
                             lambda_local::remember(&mut lambda_locals, i, e, &local_ctx);

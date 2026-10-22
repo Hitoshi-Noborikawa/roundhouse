@@ -1078,6 +1078,7 @@ pub fn writable_field_set(
     }
     if let Some(attr) = crate::lower::secure_password::secure_password_attr(&model.body) {
         writable.insert(Symbol::from(format!("{}_confirmation", attr.as_str())));
+        writable.insert(Symbol::from(format!("{}_challenge", attr.as_str())));
         writable.insert(attr);
     }
     for (name, _ty) in self::markers::attribute_api_decls(&model.body) {
@@ -1321,7 +1322,7 @@ fn build_methods_with_finder_inputs(
             })
         })
         .unwrap_or_else(|| Symbol::from("id"));
-    push_validate_method(&mut methods, model, models, errors_readers, runtime_relation, &primary_key);
+    push_validate_method(&mut methods, model, errors_readers, runtime_relation, &primary_key);
     push_association_methods(&mut methods, model, models, &through_joins);
     push_dependent_destroy(&mut methods, model, &through_joins);
     push_unknown_marker_methods(&mut methods, model);

@@ -39,6 +39,7 @@ use super::view::{ViewEngine, ingest_template};
 use super::survey::{self, unwrap_or_record};
 use super::{IngestError, IngestResult};
 
+use crate::ingest::prism_api::PrismLocation;
 /// Read a file's bytes for one of the per-file walks below (ERB,
 /// jbuilder, models, controllers, migrations, `structure.sql`, routes
 /// split files, …). An unreadable file — the shape that matters in
@@ -230,7 +231,7 @@ fn names_root_constant(text: &str, name: &str) -> bool {
             }
         }
     }
-    let parsed = ruby_prism::parse(text.as_bytes());
+    let parsed = super::prism::parse_silent(text.as_bytes());
     let mut reads = Reads { name, found: false };
     ruby_prism::Visit::visit(&mut reads, &parsed.node());
     reads.found
@@ -2240,6 +2241,8 @@ end
     super::acts_as_votable::expand_acts_as_votable(&mut app)?;
     // After the splice: `include Discard::Model` can arrive through a concern.
     super::discard::expand_discard_models(&mut app)?;
+    // Before the macros: a macro's `extend Owner::ClassMethods` names the module this surfaces.
+    super::referenced_carriers::surface_referenced_carriers(&mut app, &sources);
     super::model_macros::expand_model_macros(&mut app, &sources)?;
     // After the concern-macro expansion: a concern's macros are that one's to expand or refuse.
     super::class_macros::expand_class_macros(&mut app, &sources);
@@ -2349,6 +2352,8 @@ end
     // pass may append source-backed FileIds beyond the indexed snapshot.
     let late_sources = super::sources::drain();
     super::sources::assert_snapshot_matches(&[], &late_sources);
+    // After the concern splices, which copy items in unfolded.
+    super::lock_versions::fold_lock_versions(&mut app);
     // Before analysis too, so `check` types the recount the emit writes (`Origin.reset_counters(id, :stories)`), rather than reporting a method the lowering answers.
     crate::lower::reset_counters::apply_reset_counters_lowering(&mut app);
     super::app_extension_calls::mark(&mut app);
@@ -2589,6 +2594,22 @@ fn splice_concerns_into_models_named(app: &mut App, only: &[crate::ident::Symbol
         }
     }
     defined.extend(app.models.iter().map(|model| model.name.0.as_str().to_string()));
+    // Each concern's own constants whose value is a literal count or
+    // duration, for `inline_concern_literals`.
+    let literals: std::collections::HashMap<crate::ident::ClassId, Vec<(crate::ident::Symbol, crate::expr::Expr)>> = app
+        .library_classes
+        .iter()
+        .map(|class| {
+            let consts = class
+                .constants
+                .iter()
+                .filter(|(_, value)| crate::lower::duration::literal_seconds(value).is_some())
+                .cloned()
+                .collect::<Vec<_>>();
+            (class.name.clone(), consts)
+        })
+        .filter(|(_, consts)| !consts.is_empty())
+        .collect();
 
     for model in &mut app.models {
         if !only.is_empty() && !only.iter().any(|n| n == &model.name.0) {
@@ -2657,6 +2678,9 @@ fn splice_concerns_into_models_named(app: &mut App, only: &[crate::ident::Symbol
                         let mut item = rehome_default_fk(item, id, &model_name);
                         if let ModelBodyItem::Unknown { expr, .. } = &mut item {
                             qualify_carried_constants(expr, id.0.as_str(), &defined);
+                            if let Some(consts) = literals.get(id) {
+                                inline_concern_literals(expr, consts);
+                            }
                         }
                         item
                     }).collect::<Vec<_>>()
@@ -2674,6 +2698,46 @@ fn splice_concerns_into_models_named(app: &mut App, only: &[crate::ident::Symbol
 
 /// An enclosing module's constant keeps its lexical meaning after splicing.
 /// The concern's own constants remain reachable through model ancestry.
+/// A macro call carried out of a concern's `included do` block reads a
+/// constant the concern itself defines (`generates_token_for :transfer,
+/// expires_in: TRANSFER_LINK_EXPIRY_DURATION`, with `TRANSFER_LINK_
+/// EXPIRY_DURATION = 4.hours` in campfire's `User::Transferable`). The
+/// block runs in the includer, but lexically inside the concern, so
+/// Rails reads the concern's constant once, as the class loads. When the
+/// value is a literal count or duration, the call's argument becomes that
+/// literal: the same value at the same moment, and one a macro that folds
+/// its option at compile time (`lower::generates_token_for`'s
+/// `expires_in:`) can read. Only the call's arguments, never a block it
+/// takes, and only a bare reference to the concern's own constant.
+fn inline_concern_literals(
+    expr: &mut crate::expr::Expr,
+    consts: &[(crate::ident::Symbol, crate::expr::Expr)],
+) {
+    use crate::expr::ExprNode;
+    fn inline(arg: &mut crate::expr::Expr, consts: &[(crate::ident::Symbol, crate::expr::Expr)]) {
+        match &mut *arg.node {
+            ExprNode::Const { path } if path.len() == 1 => {
+                if let Some((_, value)) = consts.iter().find(|(name, _)| name == &path[0]) {
+                    let span = arg.span;
+                    *arg = value.clone();
+                    arg.span = span;
+                }
+            }
+            ExprNode::Hash { entries, .. } => {
+                for (_, value) in entries.iter_mut() {
+                    inline(value, consts);
+                }
+            }
+            _ => {}
+        }
+    }
+    if let ExprNode::Send { recv: None, args, .. } = &mut *expr.node {
+        for arg in args.iter_mut() {
+            inline(arg, consts);
+        }
+    }
+}
+
 fn qualify_carried_constants(
     expr: &mut crate::expr::Expr,
     concern: &str,
@@ -7097,7 +7161,7 @@ fn boot_required_files<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> Vec<PathBuf> {
     for name in ["application.rb", "environment.rb"] {
         let file = config_dir.join(name);
         let Ok(source) = vfs.read(&file) else { continue };
-        let parsed = ruby_prism::parse(&source);
+        let parsed = super::prism::parse_silent(&source);
         let Some(program) = parsed.node().as_program_node() else { continue };
         for statement in program.statements().body().iter() {
             let Some(call) = statement.as_call_node() else { continue };
@@ -7332,7 +7396,7 @@ pub(super) fn declares_rails_engine<V: Vfs + ?Sized>(vfs: &V, lib_dir: &Path) ->
     }
     files.iter().any(|file| {
         vfs.read(file).is_ok_and(|source| {
-            let parsed = ruby_prism::parse(&source);
+            let parsed = super::prism::parse_silent(&source);
             let mut visitor = EngineVisitor { found: false };
             ruby_prism::Visit::visit(&mut visitor, &parsed.node());
             visitor.found
@@ -7371,7 +7435,7 @@ fn engine_route_sources<V: Vfs + ?Sized>(
         files.dedup();
         for file in files {
             let Ok(source) = vfs.read(&file) else { continue };
-            let parsed = ruby_prism::parse(&source);
+            let parsed = super::prism::parse_silent(&source);
             if parsed.errors().next().is_some() {
                 continue;
             }
@@ -7714,7 +7778,7 @@ fn plain_engine_library_sources<V: Vfs + ?Sized>(
             return false;
         }
         let Ok(source) = vfs.read(file) else { return false };
-        let parsed = ruby_prism::parse(&source);
+        let parsed = super::prism::parse_silent(&source);
         if parsed.errors().next().is_some() {
             return false;
         }

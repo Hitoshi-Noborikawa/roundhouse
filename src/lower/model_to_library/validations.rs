@@ -24,12 +24,11 @@ use super::{fn_sig, seq, ErrorsReaders};
 pub(super) fn push_validate_method(
     methods: &mut Vec<MethodDef>,
     model: &Model,
-    models: &[Model],
     errors_readers: ErrorsReaders,
     runtime_relation: super::RuntimeRelation,
     primary_key: &Symbol,
 ) {
-    let msgs = Messages(Some(model));
+    let model_msgs = Messages(Some(model), None);
     let mut stmts: Vec<Expr> = Vec::new();
 
     // One pass in declaration order: Rails checks a `belongs_to` where it is declared, among the `validates`, so its error lists there.
@@ -37,6 +36,8 @@ pub(super) fn push_validate_method(
         let span = item.span();
         match item {
             crate::dialect::ModelBodyItem::Validation { validation: v, .. } => {
+                // The validation's own `message:` replaces every error's default.
+                let msgs = Messages(Some(model), v.message.as_deref());
                 // Column type from the model's attributes row (when present).
                 // Lets the per-rule generator skip dead `is_a?(Array)` branches
                 // for fields the schema declares as `Str` — tsc narrows
@@ -55,6 +56,13 @@ pub(super) fn push_validate_method(
                     matches!(a, Association::BelongsTo { name, .. } | Association::HasOne { name, .. }
                         if name == &v.attribute)
                 });
+                // `validates :image, presence: true` on a `has_one_attached
+                // :image` (or `has_many_attached :images`) names the
+                // ATTACHMENT. There is no `@image` slot either — the reader
+                // builds an `ActiveStorage::Attached` proxy — so the column
+                // check rejected every record, attached or not. Rails asks
+                // the proxy `blank?`: nothing attached, staged or saved.
+                let attachment = attachment_kind(model, &v.attribute);
                 for rule in &v.rules {
                     let mut produced = if is_assoc && matches!(rule, ValidationRule::Presence) {
                         let reader = Expr::new(
@@ -69,6 +77,11 @@ pub(super) fn push_validate_method(
                         );
                         vec![if_with_nil_else(
                             send(reader, "nil?", vec![]),
+                            errors_push(v.attribute.as_str(), msgs.error(v.attribute.as_str(), "blank", &Default::default())),
+                        )]
+                    } else if let (Some(kind), ValidationRule::Presence) = (attachment, rule) {
+                        vec![if_with_nil_else(
+                            attachment_blank_cond(model, &v.attribute, kind),
                             errors_push(v.attribute.as_str(), msgs.error(v.attribute.as_str(), "blank", &Default::default())),
                         )]
                     } else if let ValidationRule::Uniqueness { scope, case_sensitive, allow_nil, allow_blank } = rule {
@@ -100,24 +113,13 @@ pub(super) fn push_validate_method(
             }
             crate::dialect::ModelBodyItem::Association { assoc, .. } => {
                 // Rails 5+ default: every `belongs_to` requires the associated
-                // record to exist before save. Emit `validates_belongs_to(:assoc,
-                // @<fk>, <Target>)` per non-optional belongs_to. The runtime
-                // helper short-circuits when the FK is unset (nil/0) and queries
-                // `<Target>.exists?(fk_value)` otherwise (by the association's
-                // `primary_key:` when it names a column other than the target's key).
+                // record to exist before save, checked through the association
+                // reader (`inline_belongs_to_check`).
                 if let Association::BelongsTo {
-                    name, target, foreign_key, optional: false, polymorphic, primary_key, ..
+                    name, foreign_key, optional: false, polymorphic, ..
                 } = assoc
                 {
-                    // The foreign key holds the association's primary key; the
-                    // existence lookup goes by that column when it is not the
-                    // target's own key (`primary_key: "uuid"`).
-                    let assoc_pk =
-                        crate::lower::scope_chain::association_primary_key(models, target, primary_key.as_ref());
-                    let own_pk = crate::lower::scope_chain::association_primary_key(models, target, None);
-                    let lookup_pk = (assoc_pk != own_pk).then_some(&assoc_pk);
-                    let mut check =
-                        inline_belongs_to_check(msgs, name, foreign_key, target, lookup_pk, *polymorphic);
+                    let mut check = inline_belongs_to_check(model_msgs, name, foreign_key, *polymorphic);
                     check.inherit_span(span);
                     stmts.push(check);
                 }
@@ -189,7 +191,7 @@ fn secure_password_checks(model: &Model) -> Vec<Expr> {
     let mut out = Vec::new();
     for attr in crate::lower::secure_password::secure_password_attrs(&model.body) {
         let human = model.human_attribute_name(attr.as_str());
-        let msgs = Messages(Some(model));
+        let msgs = Messages(Some(model), None);
         let plain = ivar(&attr);
         let digest = ivar(&Symbol::from(format!("{}_digest", attr.as_str())));
         let confirmation = ivar(&Symbol::from(format!("{}_confirmation", attr.as_str())));
@@ -587,32 +589,30 @@ fn validation_rule_to_calls(
             attr_ty,
             *allow_nil,
         ),
-        ValidationRule::Format { pattern, flags } => {
-            vec![inline_format_check(msgs, attr, pattern, flags)]
-        }
-        ValidationRule::Numericality { only_integer, gt, lt, gte, lte, allow_nil, allow_blank } => {
-            let checks = inline_numericality_check(msgs, attr, *only_integer, *gt, *lt, *gte, *lte);
-            // Rails skips the validator for a nil value under allow_nil
-            // and a blank one under allow_blank (EachValidator#validate).
-            let skip = if *allow_blank == Some(true) {
-                Some(numericality_blank_cond(attr, runtime_relation))
-            } else if *allow_nil == Some(true) {
-                Some(send(ivar(attr), "nil?", vec![]))
-            } else {
-                None
-            };
-            match skip {
-                Some(cond) => vec![Expr::new(
-                    Span::synthetic(),
-                    ExprNode::If {
-                        cond,
-                        then_branch: Expr::new(Span::synthetic(), ExprNode::Lit { value: Literal::Nil }),
-                        else_branch: seq(checks),
-                    },
-                )],
-                None => checks,
-            }
-        }
+        ValidationRule::Format { pattern, flags, allow_nil, allow_blank } => skip_nil_or_blank(
+            vec![inline_format_check(
+                msgs,
+                attr,
+                pattern,
+                flags,
+                attr_ty,
+                *allow_nil == Some(true) || *allow_blank == Some(true),
+                runtime_relation,
+            )],
+            attr,
+            attr_ty,
+            *allow_nil,
+            *allow_blank,
+            runtime_relation,
+        ),
+        ValidationRule::Numericality { only_integer, gt, lt, gte, lte, allow_nil, allow_blank, in_range } => skip_nil_or_blank(
+            inline_numericality_check(msgs, attr, *only_integer, *gt, *lt, *gte, *lte, in_range.as_ref()),
+            attr,
+            attr_ty,
+            *allow_nil,
+            *allow_blank,
+            runtime_relation,
+        ),
         ValidationRule::Inclusion { values, range } => {
             vec![inline_inclusion_check(msgs, attr, values, range.as_ref())]
         }
@@ -651,24 +651,28 @@ fn validation_rule_to_calls(
 /// Inline `belongs_to` presence check (Rails 5+ default — every
 /// non-optional `belongs_to` requires the associated record to
 /// exist). Generates the IR equivalent of:
-///   if @article_id.nil? || @article_id == 0 || !Article.exists?(@article_id)
+///   if @article_id.nil? || @article_id == 0 || article.nil?
 ///     errors << "article must exist"
 ///   end
-/// Mirrors `runtime/ruby/active_record/validations.rb::validates_belongs_to`
-/// but flattens the early-return + post-check sequence to a single
-/// composite condition.
+/// THROUGH THE READER, as Rails' `validates_presence_of :article`
+/// (what `belongs_to` declares, `message: :required`) reads the
+/// association: a target already loaded or assigned (`message.room =
+/// room`, `creator: Current.user`) costs no query, and one that is not
+/// is loaded once and kept for the save's later reads (a `touch: true`
+/// cascade). The reader goes by the association's `primary_key:`, and
+/// a foreign-key write clears what it holds, so a reassigned key is
+/// checked afresh. An `exists?` probe here asked the database again
+/// for every save, inside the save's transaction, which holds SQLite's
+/// one write lock while it runs.
 ///
 /// A POLYMORPHIC association keeps only the first two terms. The class
-/// to query is in the row's `<assoc>_type` COLUMN, so there is no
-/// constant to write here — and `target` for a polymorphic belongs_to
-/// is the assoc-name phantom (`Record` for `belongs_to :record`), a
-/// class that does not exist. Emitting `Record.exists?(@record_id)`
-/// was an uninitialized-constant NameError on the first save of any
-/// polymorphic child; `ActionText::RichText` is the first model in the
-/// corpus to reach it. Dropping the existence half is a strict SUBSET
-/// of Rails' check — it can fail a save Rails would fail, never one
-/// Rails would pass — and the id-presence half is the part that
-/// catches the real error (an unset owner).
+/// to query is in the row's `<assoc>_type` COLUMN, and `target` for a
+/// polymorphic belongs_to is the assoc-name phantom (`Record` for
+/// `belongs_to :record`), a class that does not exist and has no typed
+/// reader. Dropping the existence half is a strict SUBSET of Rails'
+/// check — it can fail a save Rails would fail, never one Rails would
+/// pass — and the id-presence half is the part that catches the real
+/// error (an unset owner).
 /// Inline `validates :attr, uniqueness: …`, as Rails 8.1's
 /// `UniquenessValidator` queries (on a target with the runtime Relation):
 ///   if Model.where(attr: @attr).not(<pk>: @<pk>)[.where(scope_col: @scope_col)…].exists?
@@ -769,8 +773,6 @@ fn inline_belongs_to_check(
     msgs: Messages,
     assoc_name: &Symbol,
     foreign_key: &Symbol,
-    target: &ClassId,
-    lookup_pk: Option<&Symbol>,
     polymorphic: bool,
 ) -> Expr {
     let fk_ivar = ivar(foreign_key);
@@ -778,7 +780,7 @@ fn inline_belongs_to_check(
     let nil_check = send(fk_ivar.clone(), "nil?", vec![]);
     // `@fk == 0`
     let zero_check = send(
-        fk_ivar.clone(),
+        fk_ivar,
         "==",
         vec![Expr::new(
             Span::synthetic(),
@@ -792,50 +794,22 @@ fn inline_belongs_to_check(
     if polymorphic {
         return if_with_nil_else(bool_op(BoolOpKind::Or, nil_check, zero_check), push_err);
     }
-    // `!Target.exists?(@fk)`
-    let target_const = Expr::new(
-        Span::synthetic(),
-        ExprNode::Const { path: vec![target.0.clone()] },
-    );
-    let exists_call = match lookup_pk {
-        // `Target.exists?(uuid: @fk)`. Model_to_library synthesis runs
-        // after the post-analyze `exists_conditions` rewrite, so that
-        // pass never sees this send; arel (`build_exists_kwargs`) in
-        // `lower_models_inner` turns the kwargs form into a SELECT 1
-        // probe when the PK column is on the schema.
-        Some(pk) => {
-            let conditions = Expr::new(
-                Span::synthetic(),
-                ExprNode::Hash {
-                    entries: vec![(
-                        Expr::new(
-                            Span::synthetic(),
-                            ExprNode::Lit { value: Literal::Sym { value: pk.clone() } },
-                        ),
-                        fk_ivar,
-                    )],
-                    kwargs: true,
-                },
-            );
-            send(target_const, "exists?", vec![conditions])
-        }
-        // `Target.exists?(@fk)`
-        None => send(target_const, "exists?", vec![fk_ivar]),
-    };
-    let not_exists = Expr::new(
+    // `article.nil?` — the association reader, on self.
+    let reader = Expr::new(
         Span::synthetic(),
         ExprNode::Send {
-            recv: Some(exists_call),
-            method: Symbol::from("!"),
+            recv: None,
+            method: assoc_name.clone(),
             args: vec![],
             block: None,
             parenthesized: false,
         },
     );
+    let missing = send(reader, "nil?", vec![]);
     let cond = bool_op(
         BoolOpKind::Or,
         bool_op(BoolOpKind::Or, nil_check, zero_check),
-        not_exists,
+        missing,
     );
     if_with_nil_else(cond, push_err)
 }
@@ -926,25 +900,76 @@ fn inline_presence_check(msgs: Messages, attr: &Symbol, attr_ty: Option<&Ty>) ->
     if_with_nil_else(cond, push_err)
 }
 
-/// `allow_blank:`'s skip for a numericality rule. On the ruby family the
-/// uncast writer can store the raw input, so a whitespace-only String (and
-/// `false`) is blank, as Rails reads it: `@attr.nil? || @attr == false ||
-/// @attr.to_s.strip.empty?` (`to_s`, the spelling Spinel takes). A strict
-/// target's numeric field is never a String or `false`, so blank is
-/// `nil?` there, which every target compiles. Narrower than the presence
-/// check's test, which is unchanged.
-fn numericality_blank_cond(attr: &Symbol, runtime_relation: super::RuntimeRelation) -> Expr {
+/// Rails skips an `EachValidator` for a nil value under `allow_nil:` and a
+/// blank one under `allow_blank:` (`EachValidator#validate`): the checks
+/// run in the `else` of `if <skip> then nil`.
+fn skip_nil_or_blank(
+    checks: Vec<Expr>,
+    attr: &Symbol,
+    attr_ty: Option<&Ty>,
+    allow_nil: Option<bool>,
+    allow_blank: Option<bool>,
+    runtime_relation: super::RuntimeRelation,
+) -> Vec<Expr> {
+    let cond = if allow_blank == Some(true) {
+        allow_blank_cond(attr, attr_ty, runtime_relation)
+    } else if allow_nil == Some(true) {
+        send(ivar(attr), "nil?", vec![])
+    } else {
+        return checks;
+    };
+    vec![Expr::new(
+        Span::synthetic(),
+        ExprNode::If {
+            cond,
+            then_branch: Expr::new(Span::synthetic(), ExprNode::Lit { value: Literal::Nil }),
+            else_branch: seq(checks),
+        },
+    )]
+}
+
+/// `allow_blank:`'s skip for a numericality or format rule. On the ruby
+/// family the uncast writer can store the raw input, so a whitespace-only
+/// String (and `false`) is blank, as Rails reads it: `@attr.nil? ||
+/// @attr == false || @attr.to_s.strip.empty?` (`to_s`, the spelling Spinel
+/// takes). A String column drops the `false` disjunct: Rails casts `false`
+/// to `"f"` there, which is not blank. A strict target's field is its
+/// column's type: a String's narrowed `strip.empty?`, a Boolean's
+/// narrowed `== false` (`false.blank?` is true), else `nil?` (a numeric
+/// field is never a String or `false`), which every target compiles.
+/// Narrower than the presence check's test, which is unchanged.
+fn allow_blank_cond(attr: &Symbol, attr_ty: Option<&Ty>, runtime_relation: super::RuntimeRelation) -> Expr {
     let value = ivar(attr);
     let nil = send(value.clone(), "nil?", vec![]);
+    let (attr_ty, nilable) = peel_nilable(attr_ty);
+    let string_column = matches!(attr_ty, Some(Ty::Str));
     match runtime_relation {
         super::RuntimeRelation::Present => {
+            let empty = send(send(send(value.clone(), "to_s", vec![]), "strip", vec![]), "empty?", vec![]);
+            if string_column {
+                return bool_op(BoolOpKind::Or, nil, empty);
+            }
             let falsy = send(
-                value.clone(),
+                value,
                 "==",
                 vec![Expr::new(Span::synthetic(), ExprNode::Lit { value: Literal::Bool { value: false } })],
             );
-            let empty = send(send(send(value, "to_s", vec![]), "strip", vec![]), "empty?", vec![]);
             bool_op(BoolOpKind::Or, bool_op(BoolOpKind::Or, nil, falsy), empty)
+        }
+        super::RuntimeRelation::Absent if string_column => {
+            // The `nil?` disjunct covers nil, so the strip reads the
+            // narrowed value, as the presence check's does.
+            let narrowed = if nilable { narrowed_ivar(attr, &Ty::Str) } else { value };
+            bool_op(BoolOpKind::Or, nil, send(send(narrowed, "strip", vec![]), "empty?", vec![]))
+        }
+        super::RuntimeRelation::Absent if matches!(attr_ty, Some(Ty::Bool)) => {
+            let narrowed = if nilable { narrowed_ivar(attr, &Ty::Bool) } else { value };
+            let falsy = send(
+                narrowed,
+                "==",
+                vec![Expr::new(Span::synthetic(), ExprNode::Lit { value: Literal::Bool { value: false } })],
+            );
+            bool_op(BoolOpKind::Or, nil, falsy)
         }
         super::RuntimeRelation::Absent => nil,
     }
@@ -1167,23 +1192,66 @@ fn inline_exclusion_check(
     if_with_nil_else(reserved, push_err)
 }
 
-/// Inline `validates :attr, format: { with: /pattern/ }`.
-///   if !(@attr.is_a?(String) && /pattern/.match?(@attr))
+/// Inline `validates :attr, format: { with: /pattern/ }`. Rails 8.1.4's
+/// `FormatValidator` matches `value.to_s`, so nil is checked as `""` and
+/// a non-String value by its String form (`true` passes `/\Atrue\z/`).
+///   if !/pattern/.match?(@attr.to_s)
 ///     errors << "attr is invalid"
 ///   end
+/// On the ruby family that is the whole check. A strict target's field
+/// is its column's type: a String column matches the value itself, any
+/// other matches its `to_s`, and a nullable column matches `""` for nil
+/// (`(@attr.nil? && /pattern/.match?("")) || (!@attr.nil? &&
+/// /pattern/.match?(<narrowed>))`), unless `allow_nil:` / `allow_blank:`
+/// already skips nil.
 /// The runtime helper's `with.nil?` guard is unnecessary — the
 /// pattern is a known literal at lower time.
-fn inline_format_check(msgs: Messages, attr: &Symbol, pattern: &str, flags: &str) -> Expr {
-    let attr_ivar = ivar(attr);
-    let regex_lit = Expr::new(
-        Span::synthetic(),
-        ExprNode::Lit {
-            value: Literal::Regex { pattern: pattern.to_string(), flags: flags.to_string() },
-        },
-    );
-    let is_string = is_a_check(&attr_ivar, "String");
-    let match_call = send(regex_lit, "match?", vec![attr_ivar]);
-    let valid = bool_op(BoolOpKind::And, is_string, match_call);
+fn inline_format_check(
+    msgs: Messages,
+    attr: &Symbol,
+    pattern: &str,
+    flags: &str,
+    attr_ty: Option<&Ty>,
+    nil_skipped: bool,
+    runtime_relation: super::RuntimeRelation,
+) -> Expr {
+    let matches = |value: Expr| {
+        let regex_lit = Expr::new(
+            Span::synthetic(),
+            ExprNode::Lit {
+                value: Literal::Regex { pattern: pattern.to_string(), flags: flags.to_string() },
+            },
+        );
+        send(regex_lit, "match?", vec![value])
+    };
+    let valid = match runtime_relation {
+        super::RuntimeRelation::Present => matches(send(ivar(attr), "to_s", vec![])),
+        super::RuntimeRelation::Absent => {
+            let (attr_ty, nilable) = peel_nilable(attr_ty);
+            let value = match (nilable, attr_ty) {
+                (true, Some(inner)) => narrowed_ivar(attr, inner),
+                _ => ivar(attr),
+            };
+            let string_form = match attr_ty {
+                Some(Ty::Str) => value,
+                _ => send(value, "to_s", vec![]),
+            };
+            if nilable && !nil_skipped {
+                // Two guarded disjuncts rather than a conditional
+                // expression, which Go has no spelling for.
+                let empty = Expr::new(Span::synthetic(), ExprNode::Lit { value: Literal::Str { value: String::new() } });
+                let nil = send(ivar(attr), "nil?", vec![]);
+                let present = send(nil.clone(), "!", vec![]);
+                bool_op(
+                    BoolOpKind::Or,
+                    bool_op(BoolOpKind::And, nil, matches(empty)),
+                    bool_op(BoolOpKind::And, present, matches(string_form)),
+                )
+            } else {
+                matches(string_form)
+            }
+        }
+    };
     let invalid = Expr::new(
         Span::synthetic(),
         ExprNode::Send {
@@ -1374,6 +1442,7 @@ fn inline_numericality_check(
     lt: Option<f64>,
     gte: Option<f64>,
     lte: Option<f64>,
+    in_range: Option<&crate::dialect::InclusionRange>,
 ) -> Vec<Expr> {
     let attr_ivar = ivar(attr);
     // `@attr.nil? || !@attr.is_a?(Numeric)` — the "not a number" guard.
@@ -1444,6 +1513,20 @@ fn inline_numericality_check(
         );
         else_stmts.push(if_with_nil_else(above, errors_push(attr.as_str(), msg)));
     }
+    // `in: a..b`: `@attr < a || @attr > b` (`>= b` for `a...b`), and
+    // Rails' message names the range as `Range#inspect` prints it.
+    if let Some(range) = in_range {
+        let float = |n: f64| Expr::new(Span::synthetic(), ExprNode::Lit { value: Literal::Float { value: n } });
+        let below = send(attr_ivar.clone(), "<", vec![float(range.begin)]);
+        let above = send(attr_ivar.clone(), if range.exclusive { ">=" } else { ">" }, vec![float(range.end)]);
+        let dots = if range.exclusive { "..." } else { ".." };
+        let msg = msgs.error(
+            attr.as_str(),
+            "in",
+            &ErrorOpts::count(format!("{}{dots}{}", format_float(range.begin), format_float(range.end))),
+        );
+        else_stmts.push(if_with_nil_else(bool_op(BoolOpKind::Or, below, above), errors_push(attr.as_str(), msg)));
+    }
     if only_integer {
         let is_int = is_a_check(&attr_ivar, "Integer");
         let not_int = Expr::new(
@@ -1478,7 +1561,9 @@ fn inline_numericality_check(
 /// agree across inline and helper-call paths.
 fn format_float(n: f64) -> String {
     if n == n.trunc() {
-        format!("{}", n as i64)
+        // Through `i128`: `2**63` is a whole f64 that `as i64` would
+        // saturate to `i64::MAX`.
+        format!("{}", n as i128)
     } else {
         format!("{n}")
     }
@@ -1487,16 +1572,29 @@ fn format_float(n: f64) -> String {
 /// What a baked message needs from its model: the attribute's
 /// `human_attribute_name` and the locale's `errors.format`.
 #[derive(Clone, Copy, Default)]
-pub(crate) struct Messages<'a>(pub(crate) Option<&'a Model>);
+/// The second field is a validation's own `message:` String, used in
+/// place of each error's default (see [`Messages::error`]).
+pub(crate) struct Messages<'a>(pub(crate) Option<&'a Model>, pub(crate) Option<&'a str>);
 
 use crate::i18n::ErrorOpts;
 
 impl Messages<'_> {
     /// The full message Rails stores for an error of `kind` on `attr`, with the error it records.
     fn error(&self, attr: &str, kind: &str, opts: &ErrorOpts) -> Message {
+        // A rule-level message (Length's) already in `opts` wins; else the
+        // validation's own `message:`, which the lookup uses after a
+        // model-specific translation, as Rails' `generate_message` does.
+        let overridden;
+        let opts = match (self.1, &opts.message) {
+            (Some(message), None) => {
+                overridden = ErrorOpts { message: Some(message.to_string()), ..opts.clone() };
+                &overridden
+            }
+            _ => opts,
+        };
         let default = crate::i18n::ModelI18n::default();
         let i18n = self.0.map(|m| &m.i18n).unwrap_or(&default);
-        let parts = |p| crate::lower::errors_add::parts_expr(Span::synthetic(), p, None, attr);
+        let parts = |p| value_parts_expr(p, attr);
         Message {
             full: parts(i18n.full_error(attr, kind, opts)),
             kind: kind.to_string(),
@@ -1505,6 +1603,33 @@ impl Messages<'_> {
             optionless: matches!(kind, "blank" | "present" | "required" | "accepted" | "password_too_long"),
         }
     }
+}
+
+/// A message's parts as one String expression, `%{value}` read as
+/// `attr.to_s`: what I18n renders (nil as ""), and a String on every
+/// target, where a nullable field's bare read is an `Option` a strict
+/// target can't interpolate.
+fn value_parts_expr(parts: Vec<crate::i18n::Part>, attr: &str) -> Expr {
+    if !parts.iter().any(|p| matches!(p, crate::i18n::Part::Value)) {
+        return crate::lower::errors_add::parts_expr(Span::synthetic(), parts, None, attr);
+    }
+    let pieces = parts
+        .into_iter()
+        .map(|p| match p {
+            crate::i18n::Part::Text(value) => crate::expr::InterpPart::Text { value },
+            crate::i18n::Part::Value => crate::expr::InterpPart::Expr {
+                expr: send(
+                    Expr::new(
+                        Span::synthetic(),
+                        ExprNode::Send { recv: None, method: Symbol::from(attr), args: vec![], block: None, parenthesized: false },
+                    ),
+                    "to_s",
+                    vec![],
+                ),
+            },
+        })
+        .collect();
+    Expr::new(Span::synthetic(), ExprNode::StringInterp { parts: pieces })
 }
 
 pub(crate) struct Message {
@@ -1527,6 +1652,66 @@ fn send(recv: Expr, method: &str, args: Vec<Expr>) -> Expr {
             parenthesized: true,
         },
     )
+}
+
+#[derive(Clone, Copy)]
+enum AttachmentKind {
+    One,
+    Many,
+}
+
+/// Whether `attr` is a `has_one_attached` / `has_many_attached` the
+/// model declares.
+fn attachment_kind(model: &Model, attr: &Symbol) -> Option<AttachmentKind> {
+    if crate::lower::attached::attached_attrs(model).iter().any(|(_, a)| a == attr) {
+        Some(AttachmentKind::One)
+    } else if crate::lower::attached::many_attached_attrs(model).iter().any(|(_, a)| a == attr) {
+        Some(AttachmentKind::Many)
+    } else {
+        None
+    }
+}
+
+/// The attachment is blank — Rails' `Attached::One#blank?` (`!attached?`)
+/// and `Attached::Many`'s `attachments.empty?`, which both read the
+/// change staged by the writer before the saved rows:
+///
+/// ```ruby
+/// @image_pending.nil? && !image.attached?   # has_one_attached
+/// !images.attached?                         # has_many_attached
+/// ```
+///
+/// The staged half is what makes `Photo.new(image: file).valid?` true:
+/// validation runs before the save that writes the attachment row. Only
+/// `has_one_attached` has a synthesized writer (`lower::attached`), and
+/// only when the model does not define the reader itself; a
+/// `has_many_attached` attaches through the proxy, which writes its rows
+/// at once.
+fn attachment_blank_cond(model: &Model, attr: &Symbol, kind: AttachmentKind) -> Expr {
+    let reader = Expr::new(
+        Span::synthetic(),
+        ExprNode::Send { recv: None, method: attr.clone(), args: vec![], block: None, parenthesized: false },
+    );
+    let not_attached = Expr::new(
+        Span::synthetic(),
+        ExprNode::Send {
+            recv: Some(send(reader, "attached?", vec![])),
+            method: Symbol::from("!"),
+            args: vec![],
+            block: None,
+            parenthesized: false,
+        },
+    );
+    let staged_writer = matches!(kind, AttachmentKind::One)
+        && !super::model_defines_instance_method(model, attr);
+    if !staged_writer {
+        return not_attached;
+    }
+    let pending = Expr::new(
+        Span::synthetic(),
+        ExprNode::Ivar { name: Symbol::from(format!("{}_pending", attr.as_str())) },
+    );
+    bool_op(BoolOpKind::And, send(pending, "nil?", vec![]), not_attached)
 }
 
 fn bool_op(op: BoolOpKind, left: Expr, right: Expr) -> Expr {
@@ -1787,7 +1972,7 @@ mod tests {
 
     #[test]
     fn format_emits_invalid_error() {
-        let expr = inline_format_check(Messages::default(), &attr(), "[A-Z]+", "");
+        let expr = inline_format_check(Messages::default(), &attr(), "[A-Z]+", "", None, false, crate::lower::model_to_library::RuntimeRelation::Absent);
         assert_eq!(collect_error_messages(&expr), vec!["Title is invalid"]);
     }
 
@@ -1797,7 +1982,7 @@ mod tests {
     /// reached any emit target even once ingest stopped refusing it.
     #[test]
     fn format_check_carries_flags_into_the_regex_literal() {
-        let expr = inline_format_check(Messages::default(), &attr(), "a.b", "im");
+        let expr = inline_format_check(Messages::default(), &attr(), "a.b", "im", None, false, crate::lower::model_to_library::RuntimeRelation::Absent);
         let flags = find_regex_flags(&expr).expect("expected a Regex literal in the format check");
         assert_eq!(flags, "im");
     }
@@ -1837,14 +2022,14 @@ mod tests {
 
     #[test]
     fn numericality_bare_emits_nan_only() {
-        let exprs = inline_numericality_check(Messages::default(), &attr(), false, None, None, None, None);
+        let exprs = inline_numericality_check(Messages::default(), &attr(), false, None, None, None, None, None);
         let msgs: Vec<String> = exprs.iter().flat_map(collect_error_messages).collect();
         assert_eq!(msgs, vec!["Title is not a number"]);
     }
 
     #[test]
     fn numericality_with_gt_lt_and_only_integer_emits_all_messages() {
-        let exprs = inline_numericality_check(Messages::default(), &attr(), true, Some(0.0), Some(100.0), None, None);
+        let exprs = inline_numericality_check(Messages::default(), &attr(), true, Some(0.0), Some(100.0), None, None, None);
         let msgs: Vec<String> = exprs.iter().flat_map(collect_error_messages).collect();
         // Order matches the source order in inline_numericality_check:
         // nan-msg (then-branch), then gt → lt → only_integer in else.
@@ -1864,7 +2049,7 @@ mod tests {
         // `format_float` matches Ruby's default `to_s` shape for whole
         // numbers: 5.0 → "5", 0.5 → "0.5". Lock the contract so error
         // messages stay byte-stable across cruby and transpiled targets.
-        let exprs = inline_numericality_check(Messages::default(), &attr(), false, Some(0.5), None, None, None);
+        let exprs = inline_numericality_check(Messages::default(), &attr(), false, Some(0.5), None, None, None, None);
         let msgs: Vec<String> = exprs.iter().flat_map(collect_error_messages).collect();
         assert!(
             msgs.iter().any(|m| m == "Title must be greater than 0.5"),
@@ -1876,30 +2061,21 @@ mod tests {
     fn belongs_to_inline_emits_must_exist_error() {
         let assoc_name = Symbol::from("article");
         let foreign_key = Symbol::from("article_id");
-        let target = ClassId(Symbol::from("Article"));
-        let expr = inline_belongs_to_check(Messages::default(), &assoc_name, &foreign_key, &target, None, false);
+        let expr = inline_belongs_to_check(Messages::default(), &assoc_name, &foreign_key, false);
         assert_eq!(collect_error_messages(&expr), vec!["Article must exist"]);
     }
 
     #[test]
-    fn belongs_to_with_a_declared_primary_key_looks_the_target_up_by_it() {
-        // `belongs_to :product, foreign_key: "product_uuid", primary_key:
-        // "uuid"`: the foreign key holds `products.uuid`, so asking
-        // `Product.exists?(@product_uuid)` would compare it with `id`.
+    fn belongs_to_checks_the_target_through_its_reader_not_a_query() {
+        // Rails' presence validation reads the association, so a loaded
+        // or assigned target answers without asking the database. The
+        // reader goes by the association's `primary_key:` itself.
         let assoc_name = Symbol::from("product");
         let foreign_key = Symbol::from("product_uuid");
-        let target = ClassId(Symbol::from("Product"));
-        let pk = Symbol::from("uuid");
-        let expr = inline_belongs_to_check(
-            Messages::default(),
-            &assoc_name,
-            &foreign_key,
-            &target,
-            Some(&pk),
-            false,
-        );
+        let expr = inline_belongs_to_check(Messages::default(), &assoc_name, &foreign_key, false);
         let rendered = format!("{expr:?}");
-        assert!(rendered.contains("\"exists?\"") && rendered.contains("\"uuid\"") && rendered.contains("kwargs: true"), "{rendered}");
+        assert!(!rendered.contains("exists?"), "the check must not probe with exists?: {rendered}");
+        assert!(rendered.contains("method: Symbol(\"product\")"), "the check reads the association: {rendered}");
         assert_eq!(collect_error_messages(&expr), vec!["Product must exist"]);
     }
 
@@ -1910,8 +2086,7 @@ mod tests {
         // uninitialized-constant NameError on the first save.
         let assoc_name = Symbol::from("record");
         let foreign_key = Symbol::from("record_id");
-        let target = ClassId(Symbol::from("Record"));
-        let expr = inline_belongs_to_check(Messages::default(), &assoc_name, &foreign_key, &target, None, true);
+        let expr = inline_belongs_to_check(Messages::default(), &assoc_name, &foreign_key, true);
         assert_eq!(collect_error_messages(&expr), vec!["Record must exist"]);
         let rendered = format!("{expr:?}");
         assert!(

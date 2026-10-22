@@ -325,6 +325,12 @@ impl Analyzer {
             // return whatever the block returned, which we don't
             // statically track — Untyped is the gradual escape.
             cls.class_methods.insert(Symbol::from("transaction"), Ty::Untyped);
+            // `Model.uncached { ... }`: the block's reads skip the query
+            // cache (runtime/ruby/active_record/connection.rb's
+            // `Base.uncached`), and its value is the block's, as
+            // `transaction`'s is.
+            cls.class_methods.insert(Symbol::from("uncached"), Ty::Untyped);
+            cls.class_methods.insert(Symbol::from("current_transaction"), registry::ar::transaction_ty());
             cls.class_methods.insert(Symbol::from("connection"), registry::ar::connection_ty());
             cls.class_methods.insert(Symbol::from("connection_pool"), Ty::Untyped);
             cls.class_methods.insert(Symbol::from("establish_connection"), Ty::Untyped);
@@ -1873,7 +1879,7 @@ impl Analyzer {
                 query_class_objects: Default::default(),
                 constants: Default::default(),
                 annotate_self_dispatch: false,
-                in_view: false, class_side: false, claimed_macro_template: false, instance_body: false,
+                in_view: false, class_side: false, claimed_macro_template: false, instance_body: false, method_body: false, building_self: false, live_class_locals: Default::default(),
                 view_name: None,
             };
             self.body_typer().analyze_expr(&mut helper.body, &ctx);
@@ -2209,7 +2215,7 @@ impl Analyzer {
                     query_class_objects: Default::default(),
                     constants: shared.clone(),
                     annotate_self_dispatch: false,
-                    in_view: false, class_side: false, claimed_macro_template: false, instance_body: false,
+                    in_view: false, class_side: false, claimed_macro_template: false, instance_body: false, method_body: false, building_self: false, live_class_locals: Default::default(),
                     view_name: None,
                 };
                 let ty = typer.analyze_expr(value, &ctx);
@@ -2481,7 +2487,7 @@ impl Analyzer {
                 class_objects: Default::default(),
                 query_class_objects: Default::default(),
                 constants: global_constants.clone(),
-                annotate_self_dispatch: false, in_view: false, view_name: None, class_side: false, claimed_macro_template: false, instance_body: false,
+                annotate_self_dispatch: false, in_view: false, view_name: None, class_side: false, claimed_macro_template: false, instance_body: false, method_body: false, building_self: false, live_class_locals: Default::default(),
             };
             for item in model.body.iter_mut() {
                 if let ModelBodyItem::Unknown { expr, .. } = item {
@@ -2499,7 +2505,7 @@ impl Analyzer {
                 class_objects: Default::default(),
                 query_class_objects: Default::default(),
                 constants: class_constants.clone(),
-                annotate_self_dispatch: false, in_view: false, view_name: None, class_side: false, claimed_macro_template: false, instance_body: false,
+                annotate_self_dispatch: false, in_view: false, view_name: None, class_side: false, claimed_macro_template: false, instance_body: false, method_body: false, building_self: false, live_class_locals: Default::default(),
             };
 
             // Pass A: type every method body with only `@attributes`
@@ -2561,7 +2567,7 @@ impl Analyzer {
                     class_objects: Default::default(),
                     query_class_objects: Default::default(),
                     constants: class_constants.clone(),
-                    annotate_self_dispatch: false, in_view: false, view_name: None, class_side: false, claimed_macro_template: false, instance_body: false,
+                    annotate_self_dispatch: false, in_view: false, view_name: None, class_side: false, claimed_macro_template: false, instance_body: false, method_body: false, building_self: false, live_class_locals: Default::default(),
                 };
 
                 for scope in model.scopes_mut() {
@@ -2611,7 +2617,7 @@ impl Analyzer {
                 class_objects: Default::default(),
                 query_class_objects: Default::default(),
                 constants: global_constants.clone(),
-                annotate_self_dispatch: false, in_view: false, view_name: None, class_side: false, claimed_macro_template: false, instance_body: false,
+                annotate_self_dispatch: false, in_view: false, view_name: None, class_side: false, claimed_macro_template: false, instance_body: false, method_body: false, building_self: false, live_class_locals: Default::default(),
             };
             if retype {
                 for item in controller.body.iter_mut() {
@@ -2633,7 +2639,7 @@ impl Analyzer {
                 class_objects: Default::default(),
                 query_class_objects: Default::default(),
                 constants: class_constants.clone(),
-                annotate_self_dispatch: false, in_view: false, view_name: None, class_side: false, claimed_macro_template: false, instance_body: false,
+                annotate_self_dispatch: false, in_view: false, view_name: None, class_side: false, claimed_macro_template: false, instance_body: false, method_body: false, building_self: false, live_class_locals: Default::default(),
             };
 
             // Snapshot this controller's own segment of the filter chain
@@ -3171,7 +3177,7 @@ impl Analyzer {
                             class_objects: Default::default(),
                             query_class_objects: Default::default(),
                             constants: meta.class_constants.clone(),
-                            annotate_self_dispatch: false, in_view: false, view_name: None, class_side: false, claimed_macro_template: false, instance_body: false,
+                            annotate_self_dispatch: false, in_view: false, view_name: None, class_side: false, claimed_macro_template: false, instance_body: false, method_body: false, building_self: false, live_class_locals: Default::default(),
                         };
                         // Seed helper-method params from the inferred-params
                         // table too, so `period(query)`'s body resolves on
@@ -3696,7 +3702,7 @@ impl Analyzer {
                         query_class_objects: Default::default(),
                         constants: class_constants.clone(),
                         annotate_self_dispatch: false,
-                        in_view: false, class_side: false, claimed_macro_template: false, instance_body: false,
+                        in_view: false, class_side: false, claimed_macro_template: false, instance_body: false, method_body: false, building_self: false, live_class_locals: Default::default(),
                         view_name: None,
                     };
                     let origin = app
@@ -3880,7 +3886,7 @@ impl Analyzer {
                 local_bindings: HashMap::new(),
                 class_objects: Default::default(),
                 query_class_objects: Default::default(),
-                constants: Default::default(), annotate_self_dispatch: false, in_view: false, view_name: None, class_side: false, claimed_macro_template: false, instance_body: false,
+                constants: Default::default(), annotate_self_dispatch: false, in_view: false, view_name: None, class_side: false, claimed_macro_template: false, instance_body: false, method_body: false, building_self: false, live_class_locals: Default::default(),
             };
 
             if retype {
@@ -4026,7 +4032,7 @@ impl Analyzer {
                     local_bindings: HashMap::new(),
                     class_objects: Default::default(),
                     query_class_objects: Default::default(),
-                    constants: Default::default(), annotate_self_dispatch: false, in_view: false, view_name: None, class_side: false, claimed_macro_template: false, instance_body: false,
+                    constants: Default::default(), annotate_self_dispatch: false, in_view: false, view_name: None, class_side: false, claimed_macro_template: false, instance_body: false, method_body: false, building_self: false, live_class_locals: Default::default(),
                 };
                 for method in &mut lc.methods {
                     let mctx = self.seed_method_params(&reseeded_ctx, &lc_name, method, true);
@@ -4503,6 +4509,13 @@ impl Analyzer {
         let mut ctx = base.clone();
         ctx.class_side = matches!(method.receiver, crate::dialect::MethodReceiver::Class);
         ctx.instance_body = !ctx.class_side;
+        ctx.method_body = true;
+        // A Module hook's implicit self mixes in while the includer's body loads; an explicit existing class is still a live change
+        ctx.building_self = ctx.class_side
+            && matches!(
+                method.name.as_str(),
+                "included" | "extended" | "prepended" | "inherited" | "append_features" | "prepend_features" | "extend_object"
+            );
         // Class-method bodies named after a first-class model DSL
         // (`has_markdown`, `has_rich_text`, …) are macro templates —
         // association/`scope` leftovers inside them are claimed at
@@ -4595,6 +4608,7 @@ impl Analyzer {
         let from_origin = origin
             .and_then(|m| self.inferred_params.get(&(m.clone(), action_name.clone(), MethodReceiver::Instance)));
         let mut ctx = base.clone();
+        ctx.method_body = true;
         ctx.instance_body = true;
         for (i, name) in params.fields.keys().enumerate() {
             if self.declared_untyped_param(class_id, action_name, Some(i), name) {
@@ -6239,6 +6253,7 @@ impl Analyzer {
                 let site_recv = match recv.as_ref().map(|r| &*r.node) {
                     None | Some(ExprNode::SelfRef) if class_body => SiteRecv::Class,
                     Some(ExprNode::Const { .. }) => SiteRecv::Class,
+                    _ if recv.as_ref().is_some_and(|r| singleton_of(r.ty.as_ref()).is_some()) => SiteRecv::Class,
                     Some(ExprNode::Send { method: m, args, .. }) if m.as_str() == "class" && args.is_empty() => {
                         SiteRecv::DotClass
                     }
@@ -6255,6 +6270,7 @@ impl Analyzer {
                                 return Ty::Untyped;
                             }
                             let t = a.ty.clone().unwrap_or(Ty::Var { var: crate::ident::TyVar(0) });
+                            let t = class_object_arg_ty(a, t);
                             // Template call sites are evidence of what
                             // callers pass; an `Untyped` arg there
                             // (`errors_for f.object`) means the CALLER's
@@ -6288,6 +6304,7 @@ impl Analyzer {
                                         let t = v
                                             .ty
                                             .clone()
+                                            .map(|t| class_object_arg_ty(v, t))
                                             .unwrap_or(Ty::Var { var: crate::ident::TyVar(0) });
                                         let t = if via_helper_index && matches!(t, Ty::Untyped) {
                                             Ty::Var { var: crate::ident::TyVar(0) }
@@ -7645,11 +7662,31 @@ fn association_builder_members(assoc: &crate::dialect::Association) -> Vec<(Symb
     ]
 }
 
+fn singleton_of(ty: Option<&Ty>) -> Option<&Ty> {
+    match ty {
+        Some(Ty::Class { id, args }) if id.0.as_str() == "Class" && args.len() == 1 => Some(&args[0]),
+        _ => None,
+    }
+}
+
+// Recorded flat, a class object argument would type its parameter as an instance of that class.
+fn class_object_arg_ty(arg: &Expr, ty: Ty) -> Ty {
+    match ty {
+        Ty::Class { ref args, .. }
+            if arg.decisions & crate::expr::CLASS_OBJECT_VALUE != 0 && args.is_empty() =>
+        {
+            Ty::Class { id: ClassId(Symbol::from("Class")), args: vec![ty.clone()].into() }
+        }
+        ty => ty,
+    }
+}
+
 /// Class ids a typed call receiver contributes to param unify and the
 /// reverse call graph. Mirrors the receivers dispatch actually chases:
 /// bare Class, Relation→model, Array elem, and Class arms of a Union.
 fn class_ids_for_call_receiver(ty: &Ty) -> Vec<ClassId> {
     match ty {
+        _ if let Some(of) = singleton_of(Some(ty)) => class_ids_for_call_receiver(of),
         Ty::Class { id, .. } => vec![id.clone()],
         Ty::Relation { of } => vec![of.clone()],
         Ty::Array { elem } => class_ids_for_call_receiver(elem),
@@ -7993,7 +8030,7 @@ fn param_ty_with_default(observed: Option<Ty>, param: &crate::dialect::Param) ->
     let default = param
         .default
         .as_ref()
-        .and_then(|d| d.ty.clone())
+        .and_then(|d| d.ty.clone().map(|t| class_object_arg_ty(d, t)))
         .filter(|t| !matches!(t, Ty::Var { .. }));
     match (observed, default) {
         (Some(o), Some(d)) => Some(crate::analyze::body::union_of(o, d)),
@@ -8844,7 +8881,10 @@ fn register_has_secure_password(
             .or_insert(auth_ty);
         methods
             .entry(Symbol::from(format!("{attr}_salt")))
-            .or_insert(Ty::Str);
+            .or_insert(Ty::Union { variants: vec![Ty::Str, Ty::Nil].into() });
+        methods
+            .entry(Symbol::from(format!("{attr}_challenge")))
+            .or_insert(Ty::Union { variants: vec![Ty::Str, Ty::Nil].into() });
         methods
             .entry(Symbol::from(format!("{attr}_challenge=")))
             .or_insert(Ty::Str);

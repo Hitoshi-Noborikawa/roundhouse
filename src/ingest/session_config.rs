@@ -33,6 +33,7 @@ use super::util::{
 use super::{IngestError, IngestResult};
 use crate::vfs::Vfs;
 
+use crate::ingest::prism_api::PrismLocation;
 /// One statement that can change the cookie key, in execution order.
 #[derive(Clone, Debug)]
 enum Step {
@@ -279,7 +280,7 @@ fn read_file<V: Vfs + ?Sized>(vfs: &V, path: &Path) -> IngestResult<Vec<Step>> {
 /// `session_store` declarations — possibly wrapped in `configure` /
 /// `if` / `unless`.
 pub(super) fn reads(source: &[u8]) -> bool {
-    let parsed = ruby_prism::parse(source);
+    let parsed = super::prism::parse_silent(source);
     let src = String::from_utf8_lossy(source);
     let stmts = parsed
         .node()
@@ -343,7 +344,7 @@ pub(super) fn synthesize<V: Vfs + ?Sized>(
 ) -> IngestResult<Option<String>> {
     let app_path = dir.join("config/application.rb");
     let app_bytes = vfs.read(&app_path).unwrap_or_default();
-    let app_parsed = ruby_prism::parse(&app_bytes);
+    let app_parsed = super::prism::parse_silent(&app_bytes);
     let name = application_name(
         app_parsed
             .node()
