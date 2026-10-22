@@ -316,6 +316,10 @@ mod regex_string_interpolation;
 mod format_allow_nil_blank;
 #[path = "emit_and_run/format_value_to_s.rs"]
 mod format_value_to_s;
+#[path = "emit_and_run/validates_acceptance.rs"]
+mod validates_acceptance;
+#[path = "emit_and_run/attribute_api_boolean_cast.rs"]
+mod attribute_api_boolean_cast;
 #[path = "emit_and_run/cross_class_constants.rs"]
 mod cross_class_constants;
 #[path = "emit_and_run/numericality_allow_nil_blank.rs"]

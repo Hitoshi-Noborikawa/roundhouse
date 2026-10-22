@@ -84,6 +84,22 @@ pub(super) fn push_validate_method(
                             attachment_blank_cond(model, &v.attribute, kind),
                             errors_push(v.attribute.as_str(), msgs.error(v.attribute.as_str(), "blank", &Default::default())),
                         )]
+                    } else if matches!(rule, ValidationRule::Acceptance { .. })
+                        && super::markers::synthesized_boolean_attribute(model, &v.attribute)
+                    {
+                        match runtime_relation {
+                            // The ruby family's writer stores Rails' cast
+                            // (`true`, `false` or nil), which the check
+                            // compares as written.
+                            super::RuntimeRelation::Present => {
+                                validation_rule_to_calls(msgs, &v.attribute, rule, None, runtime_relation)
+                            }
+                            // A strict target's field turns nil and `""`
+                            // into `false`, which the check would reject
+                            // where Rails skips it. Reported per target by
+                            // `lower::validations::acceptance_gaps_for_target`.
+                            super::RuntimeRelation::Absent => Vec::new(),
+                        }
                     } else if let ValidationRule::Uniqueness { scope, case_sensitive, allow_nil, allow_blank } = rule {
                         match runtime_relation {
                             super::RuntimeRelation::Present => vec![inline_uniqueness_check(
@@ -580,6 +596,9 @@ fn validation_rule_to_calls(
     match rule {
         ValidationRule::Presence => vec![inline_presence_check(msgs, attr, attr_ty)],
         ValidationRule::Absence => vec![inline_absence_check(msgs, attr)],
+        ValidationRule::Acceptance { accept, allow_nil } => {
+            vec![inline_acceptance_check(msgs, attr, accept, *allow_nil != Some(false), attr_ty, runtime_relation)]
+        }
         ValidationRule::Length { min, max, message, allow_nil } => inline_length_check(
             msgs,
             attr,
@@ -1190,6 +1209,78 @@ fn inline_exclusion_check(
     let push_err =
         errors_push(attr.as_str(), msgs.error(attr.as_str(), "exclusion", &Default::default()));
     if_with_nil_else(reserved, push_err)
+}
+
+/// Inline `validates :attr, acceptance: { accept: [...], allow_nil: }`.
+/// Rails 8.1.4's `AcceptanceValidator` adds `:accepted` unless
+/// `Array(accept).include?(value)`, and skips nil unless `allow_nil:
+/// false`:
+///   if !@attr.nil? && !(@attr == "1" || @attr == true)
+///     errors << "attr must be accepted"
+///   end
+/// The test is one `==` per accepted value, which every target compiles
+/// against any field type. A strict target's field is its column's type,
+/// so a Boolean column compares only the Boolean values (Rails casts the
+/// input before validating, and a cast `"1"` is `true`), and a String or
+/// Integer column only those; with none left, nothing is accepted. The
+/// ruby family compares them all, as Rails' `include?` does, except on a
+/// Boolean column: its writer stores the input uncast, so the check reads
+/// `ActiveSupport.cast_boolean(@attr)` (`"yes"` is `true`, `""` nil).
+fn inline_acceptance_check(
+    msgs: Messages,
+    attr: &Symbol,
+    accept: &[Literal],
+    allow_nil: bool,
+    attr_ty: Option<&Ty>,
+    runtime_relation: super::RuntimeRelation,
+) -> Expr {
+    let (inner_ty, nilable) = peel_nilable(attr_ty);
+    let boolean_column = matches!(inner_ty, Some(Ty::Bool));
+    // The ruby family's column writer stores the input uncast, so a
+    // Boolean column is cast here, as Rails casts it before validating.
+    let cast = (runtime_relation == super::RuntimeRelation::Present && boolean_column).then(|| {
+        let mut cast = Expr::new(
+            Span::synthetic(),
+            ExprNode::Send {
+                recv: Some(Expr::new(Span::synthetic(), ExprNode::Const { path: vec![Symbol::from("ActiveSupport")] })),
+                method: Symbol::from("cast_boolean"),
+                args: vec![ivar(attr)],
+                block: None,
+                parenthesized: true,
+            },
+        );
+        cast.ty = Some(Ty::Union { variants: vec![Ty::Bool, Ty::Nil].into() });
+        cast
+    });
+    let value = match (&cast, runtime_relation, nilable, inner_ty) {
+        (Some(cast), ..) => cast.clone(),
+        (None, super::RuntimeRelation::Absent, true, Some(inner)) => narrowed_ivar(attr, inner),
+        _ => ivar(attr),
+    };
+    let keeps = |lit: &Literal| match (runtime_relation, inner_ty) {
+        (_, Some(Ty::Bool)) => matches!(lit, Literal::Bool { .. }),
+        (super::RuntimeRelation::Present, _) | (_, None) => true,
+        (_, Some(Ty::Str)) => matches!(lit, Literal::Str { .. }),
+        (_, Some(Ty::Int)) => matches!(lit, Literal::Int { .. }),
+        _ => false,
+    };
+    let accepted = accept
+        .iter()
+        .filter(|lit| keeps(lit))
+        .map(|lit| send(value.clone(), "==", vec![Expr::new(Span::synthetic(), ExprNode::Lit { value: lit.clone() })]))
+        .reduce(|acc, eq| bool_op(BoolOpKind::Or, acc, eq))
+        .unwrap_or_else(|| Expr::new(Span::synthetic(), ExprNode::Lit { value: Literal::Bool { value: false } }));
+    let rejected = send(accepted, "!", vec![]);
+    let nil = send(cast.unwrap_or_else(|| ivar(attr)), "nil?", vec![]);
+    // A nil value is skipped under allow_nil and rejected otherwise; the
+    // comparisons read the narrowed value behind the nil test.
+    let invalid = if allow_nil {
+        bool_op(BoolOpKind::And, send(nil, "!", vec![]), rejected)
+    } else {
+        bool_op(BoolOpKind::Or, nil, rejected)
+    };
+    let push_err = errors_push(attr.as_str(), msgs.error(attr.as_str(), "accepted", &Default::default()));
+    if_with_nil_else(invalid, push_err)
 }
 
 /// Inline `validates :attr, format: { with: /pattern/ }`. Rails 8.1.4's
