@@ -3560,8 +3560,8 @@ fn js_send_inner(
                     // permitted field; without this rewrite the Send
                     // emits literally and tsc rejects since
                     // `Record<string, any>` has no `.fetch`. The
-                    // single-arg form becomes a bracket index — Ruby's
-                    // KeyError on missing key isn't modeled in TS.
+                    // single-arg form raises on a missing key, as Ruby's
+                    // KeyError does (it is typed the value, never nil).
                     "fetch" if args.len() == 2 => {
                         return Js::binary(
                             span,
@@ -3570,8 +3570,37 @@ fn js_send_inner(
                             js_expr(&args[1]),
                         );
                     }
+                    // `(() => { const h = r; const k = key; if (!(k in h))
+                    // throw new Error(…); return h[k]; })()`: receiver and
+                    // key read once; a present key holding nil answers it.
                     "fetch" if args.len() == 1 => {
-                        return Js::index(span, js_expr(r), js_expr(&args[0]));
+                        let missing = Js::unary(
+                            span,
+                            "!",
+                            Js::binary(span, "in", synth_ident("k"), synth_ident("h")),
+                        );
+                        let err = Js::synth(JsExpr::New {
+                            callee: synth_ident("Error"),
+                            args: vec![Js::binary(
+                                span,
+                                "+",
+                                Js::str(Span::synthetic(), "key not found: "),
+                                synth_ident("k"),
+                            )],
+                        });
+                        return iife(
+                            span,
+                            vec![
+                                const_decl("h", js_expr(r)),
+                                const_decl("k", js_expr(&args[0])),
+                                JsStmt::synth(JsStmtNode::If {
+                                    cond: missing,
+                                    then: vec![JsStmt::synth(JsStmtNode::Throw(err))],
+                                    else_: None,
+                                }),
+                                return_stmt(Some(Js::index(span, synth_ident("h"), synth_ident("k")))),
+                            ],
+                        );
                     }
                     "dup" | "clone" if args.is_empty() => {
                         return Js::new(
