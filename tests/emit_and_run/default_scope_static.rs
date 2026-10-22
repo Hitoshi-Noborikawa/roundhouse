@@ -202,6 +202,35 @@ puts "default scope given attributes passed"
         .assert_passes();
 }
 
+/// An STI subclass of a default-scoped model keeps the base's scope:
+/// Rails 8.1.4 reads `SubWidget.count` as `type = 'SubWidget' AND
+/// active = TRUE`, and `SubWidget.new` starts with `active: true`.
+#[test]
+fn an_sti_subclass_keeps_the_base_default_scope_like_rails() {
+    bare()
+        .write(
+            "db/schema.rb",
+            "ActiveRecord::Schema.define do\n  create_table \"widgets\", force: :cascade do |t|\n    t.string \"name\"\n    t.boolean \"active\"\n    t.string \"type\"\n  end\nend\n",
+        )
+        .write("app/models/widget.rb", "class Widget < ApplicationRecord\n  default_scope { where(active: true) }\nend\n")
+        .write(
+            "app/models/sub_widget.rb",
+            "class SubWidget < Widget\n  def self.live_count\n    count\n  end\n\n  def self.live_names\n    order(:name).pluck(:name)\n  end\nend\n",
+        )
+        .run_ruby(
+            r#"Widget.create!(name: "on", active: true)
+Widget.create!(name: "off", active: false)
+SubWidget.create!(name: "subon", active: true)
+SubWidget.create!(name: "suboff", active: false)
+got = [Widget.count, SubWidget.live_count, SubWidget.live_names, SubWidget.new.active, Widget.unscoped.count]
+want = [2, 1, ["subon"], true, 4]
+raise "sti: #{got.inspect}" unless got == want
+puts "default scope sti passed"
+"#,
+        )
+        .assert_passes();
+}
+
 /// Through the CLI: a target without the runtime Relation reports the
 /// scope it cannot apply, once per model, instead of answering every
 /// query from the whole table; a ruby-family target applies it and
