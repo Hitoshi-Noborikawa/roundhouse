@@ -66,7 +66,8 @@ fn emitted(body: &str, association: &str) -> (String, String) {
     let tree: HashMap<PathBuf, Vec<u8>> = files(body, association).into_iter()
         .map(|(path, source)| (path.into(), source.into_bytes())).collect();
     let mut app = ingest_app_from_tree(tree).expect("ingest");
-    roundhouse::session::analyze_and_lower(&mut app);
+    let diagnostics = roundhouse::session::analyze_and_lower(&mut app);
+    assert!(diagnostics.is_empty(), "unexpected lowering diagnostics: {diagnostics:#?}");
     let files = ruby::emit_lowered_controllers(&app);
     let content = |suffix: &str| files.iter()
         .find(|file| file.path.to_string_lossy().ends_with(suffix))
@@ -109,9 +110,50 @@ fn aliases_and_except_use_the_params_factory_and_request_a_copying_filter() {
     assert!(controller.contains("Message.from_params(copied_attributes)"), "{controller}");
     assert!(controller.contains(".to_pty_session_id = __rh_build_owner_"), "{controller}");
     assert!(!controller.contains("received_messages.build("), "{controller}");
-    assert!(params.contains("def except(key)"), "{params}");
+    assert!(params.contains("def except(*keys)"), "{params}");
     assert!(params.contains("result.in_reply_to_id_provided = false"), "{params}");
     assert!(!params.contains("@in_reply_to_id_provided = false if"), "{params}");
+}
+
+#[test]
+fn except_with_multiple_keys_matches_rails_without_mutating_the_original() {
+    let body = r#"
+    attributes = message_params
+    alias_attributes = attributes
+    filtered = alias_attributes.except(:in_reply_to_id, :body)
+    @original = attributes
+    @filtered = filtered
+    @unchanged = attributes.except
+    @repeated = attributes.except(:unknown, :body, :body)
+    message = @pty_session.received_messages.new(filtered)
+    message.save!
+    head :ok
+"#;
+    let mut overlay = emit_and_run::empty_app();
+    for (path, source) in files(body, ASSOCIATION) { overlay = overlay.write(path, &source); }
+    let run = overlay.run_ruby(r#"
+require "json"
+require_relative "app/controllers/messages_controller"
+owner = PtySession.create!(name: "owner")
+controller = MessagesController.new
+controller.instance_variable_set(:@params, {
+  "id" => owner.id.to_s, "message" => {"body" => "kept", "in_reply_to_id" => "33"}
+})
+controller.create
+row = Message.all.to_a.first
+raise "filtered build" unless row.body.nil? && row.in_reply_to_id.nil? && row.to_pty_session_id == owner.id
+def provided_values(params)
+  values = {}
+  values["body"] = params.body if params.body_provided
+  values["in_reply_to_id"] = params.in_reply_to_id if params.in_reply_to_id_provided
+  values
+end
+puts JSON.generate([:@original, :@filtered, :@unchanged, :@repeated].map do |name|
+  provided_values(controller.instance_variable_get(name))
+end)
+"#);
+    run.assert_passes();
+    assert_eq!(run.stdout.trim(), r#"[{"body":"kept","in_reply_to_id":"33"},{},{"body":"kept","in_reply_to_id":"33"},{"in_reply_to_id":"33"}]"#);
 }
 
 #[test]

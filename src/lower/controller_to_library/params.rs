@@ -1423,7 +1423,7 @@ fn synth_attr_reader(owner: &ClassId, field: &Symbol, ty: Ty) -> MethodDef {
     }
 }
 
-/// Copy the params record and clear only the copy's presence flag.
+/// Copy the params record and clear only the copy's requested presence flags.
 /// A local alias can retain the receiver, so mutating it would change
 /// subsequent builds from the original permitted parameters.
 fn synth_except(spec: &ParamsSpec) -> MethodDef {
@@ -1438,11 +1438,11 @@ fn synth_except(spec: &ParamsSpec) -> MethodDef {
         recv: Some(result_read()), method: Symbol::from(format!("{field}=")),
         args: vec![value], block: None, parenthesized: false,
     });
-    let key = Symbol::from("key");
-    let key_read = |()| Expr::new(
-        Span::synthetic(),
-        ExprNode::Var { id: VarId(0), name: key.clone() },
-    );
+    let keys = Symbol::from("keys");
+    let keys_ty = Ty::Array { elem: Ty::Sym.into() };
+    let keys_read = || with_ty(Expr::new(span,
+        ExprNode::Var { id: VarId(0), name: keys.clone() },
+    ), keys_ty.clone());
     let mut stmts = vec![Expr::new(span, ExprNode::Assign {
         target: LValue::Var { id: VarId(1), name: result.clone() },
         value: with_ty(Expr::new(span, ExprNode::Send {
@@ -1463,8 +1463,8 @@ fn synth_except(spec: &ParamsSpec) -> MethodDef {
         let cond = Expr::new(
             Span::synthetic(),
             ExprNode::Send {
-                recv: Some(key_read(())),
-                method: Symbol::from("=="),
+                recv: Some(keys_read()),
+                method: Symbol::from("include?"),
                 args: vec![Expr::new(
                     Span::synthetic(),
                     ExprNode::Lit { value: Literal::Sym { value: field.clone() } },
@@ -1500,9 +1500,16 @@ fn synth_except(spec: &ParamsSpec) -> MethodDef {
         name_span: crate::span::Span::synthetic(),
         name: Symbol::from("except"),
         receiver: MethodReceiver::Instance,
-        params: vec![Param::positional(key.clone())],
+        params: vec![Param::rest(keys.clone())],
         body,
-        signature: Some(fn_sig(vec![(key, Ty::Sym)], owner_ty)),
+        signature: Some(Ty::Fn {
+            params: vec![crate::ty::Param {
+                name: keys, ty: keys_ty.into(), kind: crate::ty::ParamKind::Rest,
+            }].into(),
+            block: None,
+            ret: owner_ty.into(),
+            effects: EffectSet::pure(),
+        }),
         effects: EffectSet::default(),
         enclosing_class: Some(owner.0.clone()),
         kind: AccessorKind::Method,
