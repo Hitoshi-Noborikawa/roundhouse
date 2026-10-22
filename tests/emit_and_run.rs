@@ -324,6 +324,8 @@ mod stdlib_email_regexp;
 mod constant_arithmetic_bounds;
 #[path = "emit_and_run/validates_symbol_or_conditions.rs"]
 mod validates_symbol_or_conditions;
+#[path = "emit_and_run/stdlib_uri_make_regexp.rs"]
+mod stdlib_uri_make_regexp;
 
 #[test]
 fn markdown_templates_render_with_their_mime_type_and_erb_escaping() {
