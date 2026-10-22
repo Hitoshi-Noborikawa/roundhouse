@@ -1,0 +1,152 @@
+//! Thin adapters over the `ruby-prism` crate surface Roundhouse touches.
+//!
+//! Prism 2.0.0 renamed Location offsets (`start_offset` → `start` / `end`),
+//! made `Diagnostic::message` return `&[u8]`, and replaced `MissingNode`
+//! with `ErrorRecoveryNode`.
+//!
+//! Call-site style: use [`PrismLocation`] for offsets (`loc.start_offset()`).
+//! Free functions remain the trait's implementation plus non-method helpers
+//! (`span_offsets`, `diagnostic_message`, `is_recovery_node`,
+//! `block_parameter`). Prefer native `start`/`end` only when rewriting a
+//! site deliberately — not as a mixed style alongside the trait.
+
+use ruby_prism::{BlockParameterNode, Diagnostic, Location, Node, ParametersNode};
+
+/// Byte offset where `loc` starts in the parsed source.
+#[inline]
+pub(crate) fn start_offset(loc: &Location<'_>) -> usize {
+    loc.start() as usize
+}
+
+/// Byte offset where `loc` ends in the parsed source.
+#[inline]
+pub(crate) fn end_offset(loc: &Location<'_>) -> usize {
+    loc.end() as usize
+}
+
+/// `(start, end)` as the `u32` pair [`crate::span::Span`] stores.
+#[inline]
+pub(crate) fn span_offsets(loc: &Location<'_>) -> (u32, u32) {
+    (start_offset(loc) as u32, end_offset(loc) as u32)
+}
+
+/// Human-readable text of a Prism diagnostic.
+///
+/// Prism 2.0 returns `&[u8]` (source encoding; not always UTF-8). Lossy
+/// conversion lives here so callers keep a `String`.
+#[inline]
+pub(crate) fn diagnostic_message(err: &Diagnostic<'_>) -> String {
+    String::from_utf8_lossy(err.message()).into_owned()
+}
+
+/// Prism's error-recovery placeholder (`ErrorRecoveryNode` on 2.0).
+#[inline]
+pub(crate) fn is_recovery_node(node: &Node<'_>) -> bool {
+    node.as_error_recovery_node().is_some()
+}
+
+/// Prism 2 returns `ParametersNode::block` as a generic [`Node`] (`&blk`,
+/// anonymous `&`, or `&nil`). Narrow to the named/anonymous block-parameter
+/// form callers already expect.
+#[inline]
+pub(crate) fn block_parameter<'pr>(
+    parameters: &ParametersNode<'pr>,
+) -> Option<BlockParameterNode<'pr>> {
+    parameters.block()?.as_block_parameter_node()
+}
+
+/// Method-shaped offset aliases for Prism 2's `start` / `end`. Bring into
+/// scope with `use …::PrismLocation`.
+pub(crate) trait PrismLocation {
+    fn start_offset(&self) -> usize;
+    fn end_offset(&self) -> usize;
+}
+
+impl PrismLocation for Location<'_> {
+    #[inline]
+    fn start_offset(&self) -> usize {
+        start_offset(self)
+    }
+
+    #[inline]
+    fn end_offset(&self) -> usize {
+        end_offset(self)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn offsets_match_source_slice() {
+        let result = ruby_prism::parse(b"abc");
+        let loc = result.node().location();
+        assert_eq!(start_offset(&loc), 0);
+        assert_eq!(end_offset(&loc), 3);
+        assert_eq!(span_offsets(&loc), (0, 3));
+        assert_eq!(loc.start_offset(), 0);
+        assert_eq!(loc.end_offset(), 3);
+        assert_eq!(loc.as_slice(), b"abc");
+    }
+
+    #[test]
+    fn recovery_node_on_truncated_source() {
+        let result = ruby_prism::parse(b"1 + ");
+        assert!(result.errors().next().is_some());
+        struct Finder<'pr> {
+            hit: Option<Node<'pr>>,
+        }
+        impl<'pr> ruby_prism::Visit<'pr> for Finder<'pr> {
+            fn visit_error_recovery_node(
+                &mut self,
+                node: &ruby_prism::ErrorRecoveryNode<'pr>,
+            ) {
+                self.hit = Some(node.as_node());
+            }
+        }
+        let mut finder = Finder { hit: None };
+        ruby_prism::Visit::visit(&mut finder, &result.node());
+        let node = finder
+            .hit
+            .expect("expected a Prism recovery node for truncated `1 + `");
+        assert!(is_recovery_node(&node));
+    }
+
+    #[test]
+    fn diagnostic_message_is_non_empty() {
+        let result = ruby_prism::parse(b"def\n");
+        let err = result.errors().next().expect("syntax error");
+        assert!(!diagnostic_message(&err).is_empty());
+    }
+
+    fn first_def<'pr>(result: &'pr ruby_prism::ParseResult<'_>) -> ruby_prism::DefNode<'pr> {
+        let program = result.node().as_program_node().expect("program");
+        program
+            .statements()
+            .body()
+            .iter()
+            .next()
+            .expect("stmt")
+            .as_def_node()
+            .expect("def")
+    }
+
+    #[test]
+    fn block_parameter_narrows_named_and_anonymous() {
+        let named = ruby_prism::parse(b"def f(&blk); end");
+        let pn = first_def(&named).parameters().expect("params");
+        let bp = block_parameter(&pn).expect("block param");
+        assert_eq!(bp.name().map(|n| n.as_slice()), Some(&b"blk"[..]));
+
+        let anon = ruby_prism::parse(b"def f(&); end");
+        let pn = first_def(&anon).parameters().expect("params");
+        let bp = block_parameter(&pn).expect("anonymous block param");
+        assert!(bp.name().is_none());
+
+        // Ruby 4.1 `&nil` is a different node kind — not a block parameter.
+        let nil_block = ruby_prism::parse(b"def f(&nil); end");
+        let pn = first_def(&nil_block).parameters().expect("params");
+        assert!(block_parameter(&pn).is_none());
+    }
+}

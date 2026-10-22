@@ -14,6 +14,7 @@ use crate::span::Span;
 use super::super::IngestError;
 use super::super::util::{string_value, symbol_value};
 
+use crate::ingest::prism_api::PrismLocation;
 pub(super) fn validation_items(
     parsed: Vec<crate::dialect::Validation>,
     leading_comments: Vec<Comment>,

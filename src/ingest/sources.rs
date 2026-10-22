@@ -50,6 +50,7 @@ use std::path::{Path, PathBuf};
 
 use crate::span::{FileId, SourceFile};
 
+use super::prism_api::PrismLocation;
 thread_local! {
     static SOURCES: RefCell<Registry> = RefCell::new(Registry::default());
 }

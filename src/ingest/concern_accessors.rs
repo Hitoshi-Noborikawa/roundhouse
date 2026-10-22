@@ -14,6 +14,7 @@ use crate::App;
 use super::survey::unwrap_or_record;
 use super::{IngestError, IngestResult};
 
+use crate::ingest::prism_api::PrismLocation;
 /// Retain recognized attr_* declarations, including conditional ones,
 /// so refusal is attributed to each includer rather than silently dropped.
 pub(super) fn is_candidate(item: &ModelBodyItem) -> bool {

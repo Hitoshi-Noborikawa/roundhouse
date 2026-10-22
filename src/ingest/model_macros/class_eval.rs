@@ -17,6 +17,7 @@ use crate::span::SourceFile;
 
 use super::{Expansion, bindings, interned_name};
 
+use crate::ingest::prism_api::PrismLocation;
 pub(super) fn expand(
     def: &MethodDef,
     args: &[crate::expr::Expr],

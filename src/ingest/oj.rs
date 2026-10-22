@@ -43,6 +43,7 @@ use crate::dialect::{LibraryClass, LibraryClassOrigin};
 use super::IngestError;
 use super::survey;
 
+use crate::ingest::prism_api::PrismLocation;
 pub(super) fn lower_oj(
     app: &mut App,
     sources: &[crate::span::SourceFile],

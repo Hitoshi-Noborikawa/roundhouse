@@ -49,6 +49,7 @@ use crate::span::{SourceFile, Span};
 use super::util::{constant_id_str, flatten_statements, symbol_value};
 use super::{IngestError, IngestResult};
 
+use crate::ingest::prism_api::PrismLocation;
 const DECORATOR: &str = "Representable::Decorator";
 const JSON_MODULE: &str = "Representable::JSON";
 

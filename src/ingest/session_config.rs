@@ -33,6 +33,7 @@ use super::util::{
 use super::{IngestError, IngestResult};
 use crate::vfs::Vfs;
 
+use crate::ingest::prism_api::PrismLocation;
 /// One statement that can change the cookie key, in execution order.
 #[derive(Clone, Debug)]
 enum Step {

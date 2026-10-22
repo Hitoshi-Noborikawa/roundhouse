@@ -9,6 +9,8 @@ use super::{
 use crate::expr::Literal;
 use ruby_prism::Node;
 
+use crate::ingest::prism_api::PrismLocation;
+
 #[derive(Clone, Copy)]
 enum SourceKind {
     Inputs,

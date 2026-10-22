@@ -14,6 +14,7 @@ use super::util::{
 };
 use super::{IngestError, IngestResult};
 
+use crate::ingest::prism_api::PrismLocation;
 pub fn ingest_expr(node: &Node<'_>, file: &str) -> IngestResult<Expr> {
     // Survey-mode gate: when active, intercept Err returns and
     // substitute a `Literal::Nil` placeholder so the surrounding
@@ -2938,7 +2939,9 @@ fn ingest_expr_node(node: &Node<'_>, file: &str) -> IngestResult<Expr> {
         // going. There is no real construct here to ingest — ledgered
         // by name rather than falling through to the generic message,
         // which would misleadingly imply a real Ruby node was rejected.
-        n if n.as_missing_node().is_some() => {
+        // (`MissingNode` on Prism 1.9; `ErrorRecoveryNode` on 2.0 — see
+        // `super::prism_api::is_recovery_node`.)
+        n if super::prism_api::is_recovery_node(&n) => {
             return Err(IngestError::Unsupported {
                 file: file.into(),
                 message: "unparsed fragment (Prism recovery node)".into(),
@@ -3181,7 +3184,7 @@ fn ingest_find_pattern(
         .iter()
         .map(|n| ingest_pattern(&n, file))
         .collect::<IngestResult<Vec<_>>>()?;
-    let post_rest = splat_name(&find.right(), file)?;
+    let post_rest = splat_name(&find.right().as_node(), file)?;
     Ok(MatchPattern::Find { constant, pre_rest, middle, post_rest })
 }
 
