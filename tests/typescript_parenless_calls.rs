@@ -1,0 +1,31 @@
+//! #1229: a zero-argument `def` called without parens is a call in the
+//! TypeScript emit, not a property read, wherever the emit knows the
+//! method: on a plain class (instance or class side), from a subclass's
+//! class method, and from a model's class method. Before, only a
+//! model's instance methods were known, so `label.upcase` read the
+//! function (`this.label.toUpperCase()`). The run itself is
+//! `typescript_toolchain::real_blog_parenless_calls_run_under_tsx`.
+
+#[path = "support/emit_and_run.rs"]
+#[allow(dead_code)]
+mod emit_and_run;
+#[path = "support/parenless_calls.rs"]
+mod parenless_calls;
+
+use roundhouse::project::BuildTarget;
+
+#[test]
+fn a_zero_argument_def_without_parens_is_called() {
+    let (emitted, errors) = parenless_calls::overlay().emit(BuildTarget::Typescript);
+    assert!(errors.is_empty(), "{errors:?}");
+    let read = |p: &str| std::fs::read_to_string(emitted.join(p)).unwrap_or_else(|e| panic!("{p}: {e}"));
+    let meter = read("app/models/meter.ts");
+    let widget = read("app/models/widget.ts");
+    let comment = read("app/models/comment.ts");
+    for call in ["return this.label().toUpperCase();", "return this.label();", "return this.name().toUpperCase();"] {
+        assert!(meter.contains(call), "{call}:\n{meter}");
+    }
+    assert!(!meter.contains("this.label.") && !meter.contains("this.label;"), "{meter}");
+    assert!(widget.contains("return this.label().toUpperCase();"), "{widget}");
+    assert!(comment.contains("[this.tag(), this.tag()]"), "{comment}");
+}

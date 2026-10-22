@@ -622,6 +622,7 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
         all_app_classes
             .iter()
             .chain(runtime_seed_classes.iter())
+            .chain(app.library_classes.iter())
             .map(|c| (c, instance_field_names(c))),
     );
 
@@ -1993,7 +1994,7 @@ pub(super) fn js_library_class(
     // the member kind to a getter.
     for m in &class.methods {
         if is_temporal_reader(m) {
-            let mut member = js_class_member(m, has_parent)?;
+            let mut member = class_member(class, m, has_parent)?;
             if let js_ast::JsClassMember::Method { kind, .. } = &mut member {
                 *kind = js_ast::MethodKind::Get;
             }
@@ -2083,7 +2084,7 @@ pub(super) fn js_library_class(
             members.push(JsClassMember::Blank);
         }
         first = false;
-        members.push(js_class_member(m, has_parent)?);
+        members.push(class_member(class, m, has_parent)?);
     }
 
     Ok(JsDecl::Class {
@@ -2379,6 +2380,18 @@ fn body_contains_yield(body: &crate::expr::Expr) -> bool {
 /// or constructor). Uses signature when present (typed params + ret);
 /// falls back to body.ty for return and `any` for params when not
 /// (lowered models don't populate signatures yet).
+/// `js_class_member` for a method of `class`, with `self` in its body
+/// naming `class`, on the class side for a class method
+/// (`expr::with_self_class`).
+fn class_member(
+    class: &crate::dialect::LibraryClass,
+    m: &crate::dialect::MethodDef,
+    has_parent: bool,
+) -> Result<js_ast::JsClassMember, String> {
+    let class_side = matches!(m.receiver, crate::dialect::MethodReceiver::Class);
+    expr::with_self_class(class.name.0.as_str().to_string(), class_side, || js_class_member(m, has_parent))
+}
+
 fn js_class_member(
     m: &crate::dialect::MethodDef,
     has_parent: bool,

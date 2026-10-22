@@ -137,6 +137,9 @@ pub(super) fn body_has_async_send(expr: &Expr) -> bool {
 pub(crate) struct ClassShape {
     parent: Option<String>,
     methods: HashMap<String, (crate::dialect::AccessorKind, usize)>,
+    /// The class's own (`def self.x`) methods, read for a `self` send
+    /// inside a class method.
+    class_methods: HashMap<String, (crate::dialect::AccessorKind, usize)>,
 }
 
 std::thread_local! {
@@ -216,6 +219,7 @@ pub(crate) fn set_class_shapes<'a>(
         }
         for m in &c.methods {
             if !matches!(m.receiver, crate::dialect::MethodReceiver::Instance) {
+                entry.class_methods.entry(m.name.as_str().to_string()).or_insert((m.kind, m.params.len()));
                 continue;
             }
             let kind = if m.kind == AccessorKind::Method
@@ -235,6 +239,16 @@ pub(crate) fn set_class_shapes<'a>(
 /// on the class or its nearest ancestor that declares it.
 fn instance_method_shape(ty: Option<&Ty>, method: &str) -> Option<(crate::dialect::AccessorKind, usize)> {
     let Some(Ty::Class { id, .. }) = strip_nullable(ty) else { return None };
+    method_shape(id.0.as_str(), method, false)
+}
+
+/// The shape of the class method `method` of the class `class`, found
+/// on it or its nearest ancestor that declares it.
+fn class_method_shape(class: &str, method: &str) -> Option<(crate::dialect::AccessorKind, usize)> {
+    method_shape(class, method, true)
+}
+
+fn method_shape(class: &str, method: &str, class_side: bool) -> Option<(crate::dialect::AccessorKind, usize)> {
     CLASS_SHAPES.with(|cell| {
         let map = cell.borrow();
         let resolve = |name: &str| -> Option<&ClassShape> {
@@ -247,10 +261,11 @@ fn instance_method_shape(ty: Option<&Ty>, method: &str) -> Option<(crate::dialec
                 }
             })
         };
-        let mut current = Some(id.0.as_str().to_string());
+        let mut current = Some(class.to_string());
         for _ in 0..16 {
             let shape = resolve(current.as_deref()?)?;
-            if let Some(found) = shape.methods.get(method) {
+            let methods = if class_side { &shape.class_methods } else { &shape.methods };
+            if let Some(found) = methods.get(method) {
                 return Some(found.clone());
             }
             current = shape.parent.clone();
@@ -262,6 +277,24 @@ fn instance_method_shape(ty: Option<&Ty>, method: &str) -> Option<(crate::dialec
 std::thread_local! {
     static CURRENT_METHOD_PARAMS: std::cell::RefCell<HashSet<Symbol>> =
         std::cell::RefCell::new(HashSet::new());
+}
+
+std::thread_local! {
+    static SELF_CLASS: std::cell::RefCell<Option<(String, bool)>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Run `f` with `class` as the class whose method body is being
+/// emitted, and `class_side` true for a class method, so a `self` send
+/// in it reads that class's methods of the same side even where `self`
+/// carries no type.
+pub(crate) fn with_self_class<F, R>(class: String, class_side: bool, f: F) -> R
+where
+    F: FnOnce() -> R,
+{
+    let prev = SELF_CLASS.with(|cell| std::mem::replace(&mut *cell.borrow_mut(), Some((class, class_side))));
+    let r = f();
+    SELF_CLASS.with(|cell| *cell.borrow_mut() = prev);
+    r
 }
 
 /// Run `f` with `params` as the active enclosing-method parameter
@@ -4069,12 +4102,20 @@ fn js_send_inner(
                 }
             );
             // A receiver whose class declares the method as a real
-            // `def` (no attribute slot) needs the call.
-            let is_declared_method = !is_const_recv
-                && matches!(
-                    instance_method_shape(r.ty.as_ref(), method),
-                    Some((crate::dialect::AccessorKind::Method, 0))
-                );
+            // `def` (no attribute slot) needs the call. `self` is the
+            // enclosing class's instance, or the class itself in a class
+            // method, whose own methods answer then.
+            let self_class = matches!(&*r.node, ExprNode::SelfRef)
+                .then(|| SELF_CLASS.with(|cell| cell.borrow().clone()))
+                .flatten();
+            let shape = match &self_class {
+                Some((class, true)) => class_method_shape(class, method),
+                Some((class, false)) => instance_method_shape(r.ty.as_ref(), method)
+                    .or_else(|| method_shape(class, method, false)),
+                None => instance_method_shape(r.ty.as_ref(), method),
+            };
+            let is_declared_method =
+                !is_const_recv && matches!(shape, Some((crate::dialect::AccessorKind::Method, 0)));
             let raw = if args.is_empty()
                 && !parenthesized
                 && !force_parens
