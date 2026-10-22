@@ -67,6 +67,7 @@ mod class_macros;
 mod column_accessors;
 mod model_macros;
 mod referenced_carriers;
+mod extend_splice;
 pub mod on_load_reopen;
 pub mod prism;
 mod propshaft;

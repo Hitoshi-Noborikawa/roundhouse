@@ -2245,6 +2245,8 @@ end
     super::model_macros::expand_model_macros(&mut app, &sources)?;
     // After the concern-macro expansion: a concern's macros are that one's to expand or refuse.
     super::class_macros::expand_class_macros(&mut app, &sources);
+    // After the macros: an expanded `has_ancestry` is what writes the `extend`.
+    super::extend_splice::splice_sole_extended_modules(&mut app);
     super::column_accessors::rewrite_super(&mut app);
     // After the splice, so a class method a concern contributed gets
     // the same treatment as one written in the model.

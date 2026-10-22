@@ -835,6 +835,13 @@ pub fn survey_assoc_class_methods(
         collect_assoc_method_demand(body, assocs, &scope_names, &mut demand);
         collect_relation_class_method_demand(body, &models_set, &scope_names, &mut model_demand);
     });
+    // A gem's class method a relation may reach where no call site is typed (`relation_class_calls`).
+    for (name, owner) in crate::lower::relation_class_calls::spliced_owners(app) {
+        // Not a writer: `relation.x = v` is no call a relation delegates, and the delegate would not parse
+        if !name.as_str().ends_with('=') {
+            model_demand.insert((owner, name));
+        }
+    }
     for view in &app.views {
         collect_assoc_method_demand(&view.body, assocs, &scope_names, &mut demand);
         collect_relation_class_method_demand(
