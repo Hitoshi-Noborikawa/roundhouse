@@ -1,25 +1,22 @@
 //! Thin adapters over the `ruby-prism` crate surface Roundhouse touches.
 //!
-//! Prism 2.0.0 renames several of these entry points (`Location::start_offset`
-//! → `start`, `Diagnostic::message` → `&[u8]`, `MissingNode` →
-//! `ErrorRecoveryNode`). Roundhouse cannot bump yet: `rubydex` still depends
-//! on `ruby-prism ^1.9.0`, and both crates `links = "prism"`, so Cargo rejects
-//! a mixed graph. These helpers are the single place to flip when that pin
-//! moves — call sites that still use the raw 1.9 names should migrate here
-//! as they are touched.
+//! Prism 2.0.0 renamed Location offsets (`start_offset` → `start` / `end`),
+//! made `Diagnostic::message` return `&[u8]`, and replaced `MissingNode`
+//! with `ErrorRecoveryNode`. Free functions and [`PrismLocation`] keep call
+//! sites stable; new code should prefer the free functions.
 
 use ruby_prism::{Diagnostic, Location, Node};
 
 /// Byte offset where `loc` starts in the parsed source.
 #[inline]
 pub(crate) fn start_offset(loc: &Location<'_>) -> usize {
-    loc.start_offset()
+    loc.start() as usize
 }
 
 /// Byte offset where `loc` ends in the parsed source.
 #[inline]
 pub(crate) fn end_offset(loc: &Location<'_>) -> usize {
-    loc.end_offset()
+    loc.end() as usize
 }
 
 /// `(start, end)` as the `u32` pair [`crate::span::Span`] stores.
@@ -30,18 +27,37 @@ pub(crate) fn span_offsets(loc: &Location<'_>) -> (u32, u32) {
 
 /// Human-readable text of a Prism diagnostic.
 ///
-/// Prism 2.0 returns `&[u8]` (source encoding; not always UTF-8). Keep the
-/// lossy conversion here so the bump does not touch every ingest caller.
+/// Prism 2.0 returns `&[u8]` (source encoding; not always UTF-8). Lossy
+/// conversion lives here so callers keep a `String`.
 #[inline]
 pub(crate) fn diagnostic_message(err: &Diagnostic<'_>) -> String {
-    err.message().to_string()
+    String::from_utf8_lossy(err.message()).into_owned()
 }
 
-/// Prism's error-recovery placeholder (`MissingNode` on 1.9;
-/// `ErrorRecoveryNode` on 2.0).
+/// Prism's error-recovery placeholder (`ErrorRecoveryNode` on 2.0).
 #[inline]
 pub(crate) fn is_recovery_node(node: &Node<'_>) -> bool {
-    node.as_missing_node().is_some()
+    node.as_error_recovery_node().is_some()
+}
+
+/// Method-shaped aliases for [`start_offset`] / [`end_offset`] so existing
+/// `loc.start_offset()` call sites compile against Prism 2 without a
+/// repo-wide rewrite. Bring into scope with `use …::PrismLocation`.
+pub(crate) trait PrismLocation {
+    fn start_offset(&self) -> usize;
+    fn end_offset(&self) -> usize;
+}
+
+impl PrismLocation for Location<'_> {
+    #[inline]
+    fn start_offset(&self) -> usize {
+        start_offset(self)
+    }
+
+    #[inline]
+    fn end_offset(&self) -> usize {
+        end_offset(self)
+    }
 }
 
 #[cfg(test)]
@@ -55,6 +71,8 @@ mod tests {
         assert_eq!(start_offset(&loc), 0);
         assert_eq!(end_offset(&loc), 3);
         assert_eq!(span_offsets(&loc), (0, 3));
+        assert_eq!(loc.start_offset(), 0);
+        assert_eq!(loc.end_offset(), 3);
         assert_eq!(loc.as_slice(), b"abc");
     }
 
@@ -66,13 +84,18 @@ mod tests {
             hit: Option<Node<'pr>>,
         }
         impl<'pr> ruby_prism::Visit<'pr> for Finder<'pr> {
-            fn visit_missing_node(&mut self, node: &ruby_prism::MissingNode<'pr>) {
+            fn visit_error_recovery_node(
+                &mut self,
+                node: &ruby_prism::ErrorRecoveryNode<'pr>,
+            ) {
                 self.hit = Some(node.as_node());
             }
         }
         let mut finder = Finder { hit: None };
         ruby_prism::Visit::visit(&mut finder, &result.node());
-        let node = finder.hit.expect("expected a Prism recovery node for truncated `1 + `");
+        let node = finder
+            .hit
+            .expect("expected a Prism recovery node for truncated `1 + `");
         assert!(is_recovery_node(&node));
     }
 

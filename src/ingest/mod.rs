@@ -69,7 +69,7 @@ mod model_macros;
 mod referenced_carriers;
 pub mod on_load_reopen;
 pub mod prism;
-mod prism_api;
+pub(crate) mod prism_api;
 mod propshaft;
 pub mod rbi;
 pub mod rate_limit;
