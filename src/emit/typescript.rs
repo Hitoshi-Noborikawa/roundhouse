@@ -613,6 +613,9 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
     all_app_classes.extend(fixture_lcs.iter().cloned());
     all_app_classes.extend(test_lcs.iter().cloned());
     all_app_classes.extend(test_inner_lcs.iter().cloned());
+    // Each class's `static` constants, for a child constant that shadows
+    // an ancestor's (`expr::ancestor_declares_static`).
+    expr::set_static_constants(all_app_classes.iter().chain(runtime_seed_classes.iter()).chain(app.library_classes.iter()));
     // Send-site shapes for every class this emit knows: see
     // `expr::set_class_shapes`.
     expr::set_class_shapes(
@@ -1887,11 +1890,15 @@ pub(super) fn js_library_class(
         {
             continue;
         }
+        // A constant shadowing an ancestor's static of the same name is
+        // typed `any`: TypeScript requires the child's static side to be
+        // assignable to the parent's (TS2417), and Ruby's values may differ.
+        let shadows = expr::ancestor_declares_static(class.parent.as_ref().map(|p| p.0.as_str()), name.as_str());
         members.push(JsClassMember::Field {
             is_static: true,
             declare: false,
             name: name.as_str().to_string(),
-            ty: None,
+            ty: shadows.then(|| TsType("any".into())),
             init: Some(expr::js_expr(value)),
             span: value.span,
         });

@@ -54,6 +54,19 @@ pub fn gauge_overlay() -> Overlay {
         .write("app/models/gauge.rb", GAUGE)
 }
 
+/// A child class whose constant shadows its parent's, with a value of
+/// another kind (Ruby: `Dial::WEIGHTS` is "s", `Meter::WEIGHTS` the Hash).
+pub const METER: &str = "class Meter\n  WEIGHTS = { \"a\" => 1 }.freeze\nend\n";
+pub const DIAL: &str = "class Dial < Meter\n  WEIGHTS = \"s\"\n\n  def self.summary\n    [WEIGHTS, Meter::WEIGHTS[\"a\"]].join(\",\")\n  end\nend\n";
+
+/// What `Dial.summary` answers under CRuby.
+#[allow(dead_code)]
+pub const SHADOW_SUMMARY: &str = "s,1";
+
+pub fn shadow_overlay() -> Overlay {
+    emit_and_run::real_blog().write("app/models/meter.rb", METER).write("app/models/dial.rb", DIAL)
+}
+
 /// What `Scale.summary` answers under CRuby.
 #[allow(dead_code)]
 pub const SUMMARY: &str = "9,small,scale,9,1.5,3,d,2";
