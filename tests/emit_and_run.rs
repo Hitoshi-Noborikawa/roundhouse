@@ -5680,14 +5680,15 @@ fn a_positional_struct_constant_refuses_keyword_construction() {
         .check_errors();
     assert!(errors.iter().any(|e| e.contains("Struct keyword construction")), "{errors:?}");
 
-    // `keyword_init: false` is the same positional form.
+    // `keyword_init: false` written out: Ruby passes the keywords as one Hash
+    // to the first member, which is what the positional constructor does.
     let errors = emit_and_run::real_blog()
         .write(
             "app/services/phone_check.rb",
             "class PhoneCheck\n  Normalized = Struct.new(:number, :valid, keyword_init: false)\n\n  def self.call(raw)\n    Normalized.new(number: raw, valid: true)\n  end\nend\n",
         )
         .check_errors();
-    assert!(errors.iter().any(|e| e.contains("Struct keyword construction")), "{errors:?}");
+    assert!(!errors.iter().any(|e| e.contains("Struct keyword construction")), "{errors:?}");
 
     // A subclass with a class-side `new` of its own decides what `new` takes.
     let errors = emit_and_run::real_blog()

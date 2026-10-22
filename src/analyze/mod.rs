@@ -1131,7 +1131,9 @@ impl Analyzer {
                     class.origin,
                     Some(
                         crate::dialect::LibraryClassOrigin::StructSuperclass { .. }
-                            | crate::dialect::LibraryClassOrigin::StructConstant { keyword_init: false, .. }
+                            // Omitted `keyword_init`: Ruby binds keywords by member name,
+                            // which the positional constructor does not.
+                            | crate::dialect::LibraryClassOrigin::StructConstant { keyword_init: false, positional_written: false, .. }
                     )
                 ) {
                     if let Some(info) = classes.get_mut(&lc.name) {

@@ -1452,6 +1452,8 @@ struct StructConstant<'pr> {
     name: Symbol,
     members: Vec<Symbol>,
     keyword_init: bool,
+    /// `keyword_init: false` written out.
+    positional_written: bool,
     body: Option<ruby_prism::Node<'pr>>,
 }
 
@@ -1477,6 +1479,7 @@ fn struct_constant_spec<'pr>(value: &ruby_prism::Node<'pr>) -> Option<StructCons
     }
     let mut members = Vec::new();
     let mut keyword_init = false;
+    let mut positional_written = false;
     for arg in call.arguments()?.arguments().iter() {
         if let Some(options) = arg.as_keyword_hash_node() {
             let elements: Vec<_> = options.elements().iter().collect();
@@ -1489,6 +1492,7 @@ fn struct_constant_spec<'pr>(value: &ruby_prism::Node<'pr>) -> Option<StructCons
                 return None;
             }
             keyword_init = pair.value().as_true_node().is_some();
+            positional_written = !keyword_init;
             continue;
         }
         let member = symbol_value(&arg)?;
@@ -1535,7 +1539,7 @@ fn struct_constant_spec<'pr>(value: &ruby_prism::Node<'pr>) -> Option<StructCons
             body
         }
     };
-    Some(StructConstant { name: Symbol::from(""), members, keyword_init, body })
+    Some(StructConstant { name: Symbol::from(""), members, keyword_init, positional_written, body })
 }
 
 /// The classes `owner`'s body defines through `X = Struct.new(…)`, with
@@ -1608,6 +1612,7 @@ fn struct_constant_classes(
             crate::dialect::LibraryClassOrigin::StructConstant {
                 members: spec.members.clone(),
                 keyword_init: spec.keyword_init,
+                positional_written: spec.positional_written,
             },
         );
         if spec.body.is_some() {
