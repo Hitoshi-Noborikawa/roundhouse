@@ -197,6 +197,8 @@ pub struct Ctx {
 pub struct ClassInfo {
     /// Kind of the indexed source declaration; never inferred from its name.
     pub is_module: bool,
+    /// `@@name` storage a `cattr_*`/`mattr_*` declares, typed by its default.
+    pub class_vars: HashMap<Symbol, Ty>,
     /// Constant values declared by external gem RBI/RBS files.
     pub constants: HashMap<Symbol, Ty>,
     /// If this class maps to a database table, which one.
@@ -1247,6 +1249,19 @@ impl<'a> BodyTyper<'a> {
                 .local_bindings
                 .get(name)
                 .cloned()
+                .or_else(|| {
+                    let cvar = name.as_str().strip_prefix("@@")?;
+                    let id = match ctx.self_ty.as_ref()? {
+                        Ty::Class { id, args } if id.0.as_str() == "Class" && args.len() == 1 => match &args[0] {
+                            Ty::Class { id, .. } => id,
+                            _ => return None,
+                        },
+                        Ty::Class { id, .. } => id,
+                        _ => return None,
+                    };
+
+                    self.classes().get(id)?.class_vars.get(&Symbol::from(cvar)).cloned()
+                })
                 .unwrap_or_else(unknown),
 
             ExprNode::Ivar { name } => {

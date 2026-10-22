@@ -2300,12 +2300,11 @@ fn walk_decl_body_with_visibility<'pr>(
         // has been walked. Non-nil initializers remain outside this slice.
         if stmt.as_class_variable_write_node().is_some() {
             let initializer = ingest_expr(&stmt, file)?;
-            if !matches!(&*initializer.node, ExprNode::Assign { value, .. }
-                if matches!(&*value.node, ExprNode::Lit { value: Literal::Nil }))
-            {
+            // Not any value: one that reads other state would observe the order the emitted body runs in
+            if !matches!(&*initializer.node, ExprNode::Assign { value, .. } if is_literal_value(value)) {
                 return Err(IngestError::Unsupported {
                     file: file.into(),
-                    message: "class-variable initializer with non-nil value".into(),
+                    message: "class-variable initializer with a non-literal value".into(),
                 });
             }
             out.class_initializers.push(initializer);

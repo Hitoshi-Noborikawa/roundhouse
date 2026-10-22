@@ -49,6 +49,8 @@ module ActiveRecord
       # hit the database. Chain methods call `unload_records`, which keeps
       # an empty loaded cache when `@null` is set so terminals stay quiet.
       @null = false
+      # `none` itself, apart from the `(1 = 0)` it adds: `unscope(:where)` keeps it, as Rails' NullRelation does.
+      @none = false
       @records = nil
       @scope_attributes = {}
       @where_cols = []
@@ -88,6 +90,11 @@ module ActiveRecord
     # empty-IN `where`, never from the pure predicate builder.
     def null_relation?
       @null
+    end
+
+    # Set by `none` alone, which `unscope(:where)` does not undo.
+    def explicit_none?
+      @none
     end
 
     def mark_null!
@@ -419,6 +426,27 @@ module ActiveRecord
       spawn.unscope!(where: where)
     end
 
+    # Rails' `unscope(:where)`: every WHERE condition goes, whatever
+    # built it (a hash, raw SQL, a merge), and the create attributes
+    # those conditions seeded. A `none` stays.
+    def unscope_where
+      spawn.unscope_where!
+    end
+
+    def unscope_where!
+      own_lists
+      @wheres = []
+      @where_cols = []
+      @where_null = []
+      @opaque_wheres = false
+      # A record built through the relation took these from the WHEREs just dropped.
+      @scope_attributes = {}
+      @null = @none
+      push_where_cols("(1 = 0)", [], true) if @none
+      unload_records
+      self
+    end
+
     def unscope!(where: nil)
       own_lists
       @records = nil
@@ -510,7 +538,8 @@ module ActiveRecord
     # its own rows and order.
     def order_parts!(parts)
       own_lists
-      terms = parts.map { |p| order_term(p) }
+      # Rails drops a blank part: ancestry's `reorder(column, order)` passes a nil `order`.
+      terms = parts.compact.map { |p| order_term(p) }
       terms.each { |t| @orders << t }
       # `@orders` just changed `to_sql`, so any `cache_key`/`cache_version`
       # memo taken before this call is for the OLD ordering (roundhouse
@@ -1076,6 +1105,7 @@ module ActiveRecord
         @opaque_wheres = true
       end
       mark_null! if other.null_relation?
+      @none = true if other.explicit_none?
       self
     end
 
@@ -1100,6 +1130,7 @@ module ActiveRecord
       own_lists
       unload_records
       push_where_cols("(1 = 0)", [], true)
+      @none = true
       mark_null!
       self
     end
@@ -1156,6 +1187,12 @@ module ActiveRecord
     # (lobsters' Search switches on it to pick per-model joins).
     def klass
       @model
+    end
+
+    # Rails' relation answers its model's class methods; ancestry reads
+    # `scope.primary_key` off the relation it is handed.
+    def primary_key
+      @model.primary_key
     end
 
     # ---- cache_key / cache_version / cache_key_with_version ---------
@@ -3345,7 +3382,7 @@ module ActiveRecord
     def order_term(p)
       if p.is_a?(Hash)
         format_order_hash(p)
-      elsif p.is_a?(Arel::Nodes::Node)
+      elsif p.is_a?(Arel::Nodes::Node) || p.is_a?(Arel::Attribute)
         p.to_s
       else
         order_string(p.to_s)

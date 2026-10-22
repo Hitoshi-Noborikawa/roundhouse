@@ -131,6 +131,7 @@ pub mod sum_symbol;
 pub mod values_at_splat;
 pub mod request_index;
 pub mod arel_attribute;
+pub mod relation_class_calls;
 pub mod exclude_predicate;
 pub mod in_predicate;
 pub mod including;
@@ -847,6 +848,8 @@ pub fn apply_post_analyze_lowerings(
     ran!("params_permit");
     indifferent_access::apply_indifferent_access_lowering(app);
     ran!("indifferent_access");
+    // Not fused: a local bound to `arel_table` is a whole-body fact, which a per-node rewrite cannot see
+    arel_attribute::apply_arel_attribute_lowering(app);
     crate::timings::phase("post-analyze: fused send rewrites", || {
         fused::apply_fused_independent_rewrites(app);
     });
@@ -952,6 +955,7 @@ pub fn apply_post_analyze_lowerings(
     // an `update` site.
     update_writer_check::apply_update_writer_check(app);
     ran!("update_writer_check");
+    unscope_check::rewrite_unscope_where(app);
     diags.extend(unscope_check::apply_unscope_check(app));
     ran!("unscope_check");
     inquiry::apply_inquiry_lowering(app);
