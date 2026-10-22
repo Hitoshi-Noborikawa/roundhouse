@@ -326,6 +326,8 @@ mod format_value_to_s;
 mod validates_acceptance;
 #[path = "emit_and_run/attribute_api_boolean_cast.rs"]
 mod attribute_api_boolean_cast;
+#[path = "emit_and_run/hash_fetch_one_arg.rs"]
+mod hash_fetch_one_arg;
 #[path = "emit_and_run/numericality_unknown_option.rs"]
 mod numericality_unknown_option;
 #[path = "emit_and_run/cross_class_constants.rs"]

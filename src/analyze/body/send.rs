@@ -3370,12 +3370,15 @@ pub(super) fn hash_method(
         // non-nil form as `.get(k).cloned().unwrap_or(default)` — a
         // `V`, not an `Option` (`emit/rust/expr/send/index.rs:414`).
         //
-        // The one-arg form raises `KeyError` rather than answering
-        // nil, so `value` alone would be right; it stays `value | Nil`
-        // because the extra arm only costs a nil-check and every
-        // target's one-arg path is written against it.
-        "fetch" => match args.get(1).and_then(|a| a.ty.clone()) {
-            Some(default) if !default.is_open() => union_of(value.clone(), default),
+        // The one-arg form answers the value or raises `KeyError`, never
+        // nil, so it is `value`, as `Array#fetch(i)` is its element (#1014:
+        // a `value | Nil` made `RANKS.fetch(k) + 1` an incompatible_binop).
+        // Each strict target's one-arg path raises on a missing key. A
+        // block answers a miss with its value.
+        "fetch" => match (args.len(), args.get(1).and_then(|a| a.ty.clone()), block_ret) {
+            (1, _, None) => value.clone(),
+            (1, _, Some(missed)) if !missed.is_open() => union_of(value.clone(), missed.clone()),
+            (_, Some(default), _) if !default.is_open() => union_of(value.clone(), default),
             _ => Ty::Union { variants: vec![value.clone(), Ty::Nil].into() },
         },
         "merge" => Ty::Hash {
