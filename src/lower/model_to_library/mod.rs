@@ -1332,7 +1332,7 @@ fn build_methods_with_finder_inputs(
     self::validations::push_active_model_constructor(&mut methods, model);
     // `attribute :name, :type` (Rails Attributes API) — typed virtual
     // readers + cast writers; same before-user-methods ordering.
-    self::markers::push_attribute_api_methods(&mut methods, model);
+    self::markers::push_attribute_api_methods(&mut methods, model, runtime_relation);
     // typed_store virtual attributes — reader/predicate/writer per
     // declared attr, routing through the `TypedStore` runtime (the
     // YAML seam). Before `push_user_methods` so a custom method in the
