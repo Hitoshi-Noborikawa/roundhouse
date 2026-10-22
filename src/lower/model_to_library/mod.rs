@@ -1254,6 +1254,9 @@ fn build_methods_with_finder_inputs(
             methods.push(adapter_emit::synth_exists_primary_key_input(&model.name, table));
         }
         push_adapter_methods(&mut methods, model, table, schema, param_binds);
+        if let Some(scope) = crate::lower::default_scope::static_default_scope(model) {
+            methods.push(crate::lower::default_scope::synth_default_scope_where(model, &scope));
+        }
         // `from_params(p: <Resource>Params)` — typed factory matching the
         // (resource, fields) tuple a controller's `permit(...)` declared.
         // Skipped silently when the model isn't permitted by any
@@ -2197,6 +2200,7 @@ fn build_class_info_with_finder_inputs(
 ) -> crate::analyze::ClassInfo {
     let mut info = crate::analyze::ClassInfo::default();
     info.table = Some(model.table.clone());
+    info.default_scoped = crate::lower::default_scope::static_default_scope(model).is_some();
     info.parent = model.parent.clone();
     // The analyzer's registry is not this map. Arel's `ids` / `pluck`
     // and the source-method decline read these two fields, so they have

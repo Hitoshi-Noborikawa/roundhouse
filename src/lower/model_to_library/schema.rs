@@ -2463,6 +2463,7 @@ fn synth_initialize(
 ) -> MethodDef {
     let attrs = Symbol::from("attrs");
 
+    let scope = crate::lower::default_scope::static_default_scope(model).unwrap_or_default();
     let mut stmts: Vec<Expr> = Vec::new();
     // Do not forward explicit attrs to a parent's possibly different enum mapping.
     stmts.push(Expr::new(
@@ -2512,9 +2513,20 @@ fn synth_initialize(
         // declared) leaves it NULL.
         let col_ty = ty_of_column(&col.col_type);
         let column = ColumnSlot::classify(col, model);
-        let schema_default = column_default_literal(model, col);
+        // A `default_scope { where(col: literal) }` column starts at the
+        // scope's literal, as Rails' scope attributes seed `new` (given
+        // attributes still win). A `nil` literal is the unset value.
+        let scoped = scope.iter().find(|(c, _)| *c == col.name).map(|(_, l)| l);
+        let schema_default = match scoped {
+            Some(crate::expr::Literal::Nil) => None,
+            Some(l) => Some(with_ty(
+                Expr::new(Span::synthetic(), ExprNode::Lit { value: l.clone() }),
+                ty_of_column(&col.col_type),
+            )),
+            None => column_default_literal(model, col),
+        };
         let nullable = matches!(super::ty_of_column_slot(col), Ty::Union { .. })
-            && schema_default.is_none();
+            && (schema_default.is_none() || matches!(scoped, Some(crate::expr::Literal::Nil)));
         let default = schema_default.unwrap_or_else(|| default_literal_for_ty(&col_ty));
         // Defaults are stored database values, not assignments through
         // the enum type. In particular, a base constructor must not

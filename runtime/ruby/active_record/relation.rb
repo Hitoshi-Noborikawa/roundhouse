@@ -31,7 +31,11 @@ module ActiveRecord
   # without the receiver's cache (or, for `order`, a sorted copy of it),
   # and the receiver keeps its own.
   class Relation
-    def initialize(model)
+    # `scoped` false is `Model.unscoped`: no default scope. Otherwise the
+    # model's `default_scope { where(…) }` is added here, when the
+    # relation is built, as Rails evaluates it — every query root on a
+    # model is a `Relation.new`, so this is the one place it applies.
+    def initialize(model, scoped = true)
       @model = model
       @table = model._table_sql
       @wheres = []
@@ -64,6 +68,26 @@ module ActiveRecord
       @ctes = []
       @shared_lists = false
       @friendly = false
+      apply_default_scope! if scoped
+    end
+
+    # Rails' `default_scope`: the model's conditions (`{}` for a model
+    # with none), skipped inside the model's `unscoped { … }` block.
+    # Added with `where!`, so they are attributed to their columns:
+    # `unscope(where: :col)` and `rewhere` lift them, and a record built
+    # through the relation starts with them.
+    def apply_default_scope!
+      return if Relation.unscoped_tables.include?(@table)
+      conditions = @model._default_scope_where
+      where!(conditions) unless conditions.empty?
+      nil
+    end
+
+    # The tables whose model is inside `Model.unscoped { … }`, innermost
+    # last. Module-level state, as `ActionController::Current` is: the
+    # runtime dispatches one request at a time.
+    def self.unscoped_tables
+      @unscoped_tables ||= []
     end
 
     # Drop the loaded-records memo. A null relation keeps `[]` so a later

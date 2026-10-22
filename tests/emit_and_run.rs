@@ -292,6 +292,8 @@ mod validates_inclusion_constants;
 mod uniqueness_default_scoped;
 #[path = "emit_and_run/uniqueness_association_attribute.rs"]
 mod uniqueness_association_attribute;
+#[path = "emit_and_run/default_scope_static.rs"]
+mod default_scope_static;
 #[path = "emit_and_run/validates_integer_constants.rs"]
 mod validates_integer_constants;
 #[path = "emit_and_run/validation_callback_on.rs"]

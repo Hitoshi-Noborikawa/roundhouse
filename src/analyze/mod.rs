@@ -269,6 +269,7 @@ impl Analyzer {
 
             let mut cls = ClassInfo::default();
             cls.table = Some(model.table.clone());
+            cls.default_scoped = crate::lower::default_scope::static_default_scope(model).is_some();
             cls.attributes = model.attributes.clone();
             cls.primary_key = model.primary_key.clone().or_else(|| app.schema.tables.get(&model.table.0)
                 .and_then(|table| table.columns.iter().find(|column| column.primary_key))
