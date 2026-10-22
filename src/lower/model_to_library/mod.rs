@@ -2866,18 +2866,18 @@ fn type_method_body(
 }
 
 /// Backfill a signature for a user-defined method whose body types to a
-/// concrete scalar. User methods carry `signature: None`, so the
+/// concrete scalar or Time. User methods carry `signature: None`, so the
 /// emitted `.rbs` says `-> untyped` even when the body is trivially
 /// typed — and under spinel AOT an untyped return turns every chained
 /// call into a whole-program poly dispatch (lobsters:
 /// `User.username_regex_s[1...-1]` became a 26-class `[]` switch that
-/// doesn't C-compile). Scalars only, and only when the body has no
+/// doesn't C-compile). Scalars and Time only, and only when the body has no
 /// explicit `return` (an early return of another type would make the
 /// trailing-expression type a lie — in Ruby a `return` inside a block
 /// exits the method, so the walk counts those too). If/Case bodies
 /// union their branches, so divergent shapes fail the scalar gate on
 /// their own. Param types stay untyped — this pins only the return.
-/// A scalar, or a scalar unioned with nil — `String?` and friends.
+/// A scalar or Time, optionally unioned with nil — `String?`, `Time?` and friends.
 ///
 /// The nullable arm matters because a `rescue` contributes one: a body
 /// of `uri.to_s … rescue nil` types `Str | Nil`, and refusing to
@@ -2887,7 +2887,7 @@ fn type_method_body(
 /// costs nothing here — widening to `untyped` does.
 fn scalar_or_nullable_scalar(ty: &Ty) -> bool {
     fn is_scalar(t: &Ty) -> bool {
-        matches!(t, Ty::Str | Ty::Int | Ty::Float | Ty::Bool)
+        matches!(t, Ty::Str | Ty::Int | Ty::Float | Ty::Bool | Ty::Time)
     }
     match ty {
         t if is_scalar(t) => true,
