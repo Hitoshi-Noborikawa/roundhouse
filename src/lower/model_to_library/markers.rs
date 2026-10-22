@@ -334,14 +334,18 @@ fn const_symbol_array(model: &Model, path: &[Symbol]) -> Vec<Symbol> {
         };
         let ExprNode::Array { elements, .. } = &*value.node else { continue };
         // `attr_accessor` takes a Symbol or a String name (`%w[a b]`).
+        // Any other element raises `TypeError` there, after the names
+        // before it are defined, so a list holding one expands to nothing
+        // rather than to the names around it.
         return elements
             .iter()
-            .filter_map(|e| match &*e.node {
+            .map(|e| match &*e.node {
                 ExprNode::Lit { value: Literal::Sym { value } } => Some(value.clone()),
                 ExprNode::Lit { value: Literal::Str { value } } => Some(Symbol::from(value.as_str())),
                 _ => None,
             })
-            .collect();
+            .collect::<Option<Vec<_>>>()
+            .unwrap_or_default();
     }
     Vec::new()
 }

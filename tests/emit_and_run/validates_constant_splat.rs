@@ -71,3 +71,29 @@ fn an_unfoldable_splat_stays_a_reported_gap() {
     let refused = warnings.iter().filter(|w| w.contains("validates argument:")).count();
     assert_eq!(refused, 2, "{warnings:?}");
 }
+
+/// `attr_accessor(*BAD)` with a non-name element: Ruby defines the
+/// names before it, then raises `TypeError` at the element, so `last`
+/// is never defined. The splat expands to nothing rather than to the
+/// names around the bad element.
+#[test]
+fn an_accessor_splat_with_a_non_name_element_declares_no_accessor() {
+    emit_and_run::empty_app()
+        .write("app/models/application_record.rb", "class ApplicationRecord < ActiveRecord::Base\n  self.abstract_class = true\nend\n")
+        .write(
+            "db/schema.rb",
+            "ActiveRecord::Schema.define do\n  create_table \"widgets\", force: :cascade do |t|\n    t.string \"name\"\n  end\nend\n",
+        )
+        .write(
+            "app/models/widget.rb",
+            "class Widget < ApplicationRecord\n  BAD = [:first, 1, :last].freeze\n  attr_accessor(*BAD)\nend\n",
+        )
+        .run_ruby(
+            r##"w = Widget.new
+got = [w.respond_to?(:last), w.respond_to?(:last=)]
+raise "accessors: #{got.inspect}" unless got == [false, false]
+puts "mixed accessor splat passed"
+"##,
+        )
+        .assert_passes();
+}
