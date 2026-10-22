@@ -976,13 +976,6 @@ fn blank_cond(attr: &Symbol, attr_ty: Option<&Ty>, runtime_relation: super::Runt
     };
     let or = |a, b| bool_op(BoolOpKind::Or, a, b);
     let and = |a, b| bool_op(BoolOpKind::And, a, b);
-    let whitespace = |value: Expr| {
-        let re = Expr::new(
-            Span::synthetic(),
-            ExprNode::Lit { value: Literal::Regex { pattern: r"\A[[:space:]]*\z".to_string(), flags: String::new() } },
-        );
-        send(re, "match?", vec![value])
-    };
     let is_false = |value: Expr| {
         send(value, "==", vec![Expr::new(Span::synthetic(), ExprNode::Lit { value: Literal::Bool { value: false } })])
     };
@@ -1013,6 +1006,16 @@ fn blank_cond(attr: &Symbol, attr_ty: Option<&Ty>, runtime_relation: super::Runt
             and(is_a_check(&attr_ivar, "Array"), send(attr_ivar, "empty?", vec![])),
         ),
     }
+}
+
+/// Rails' `blank?` for a String, `/\A[[:space:]]*\z/.match?(value)`:
+/// U+3000 and U+00A0 count as whitespace, U+200B does not.
+fn whitespace(value: Expr) -> Expr {
+    let re = Expr::new(
+        Span::synthetic(),
+        ExprNode::Lit { value: Literal::Regex { pattern: r"\A[[:space:]]*\z".to_string(), flags: String::new() } },
+    );
+    send(re, "match?", vec![value])
 }
 
 /// Rails skips an `EachValidator` for a nil value under `allow_nil:` and a
@@ -1046,8 +1049,8 @@ fn skip_nil_or_blank(
 /// `allow_blank:`'s skip for a numericality or format rule. On the ruby
 /// family the uncast writer can store the raw input, so a whitespace-only
 /// String (and `false`) is blank, as Rails reads it: `@attr.nil? ||
-/// @attr == false || @attr.to_s.strip.empty?` (`to_s`, the spelling Spinel
-/// takes). A String column drops the `false` disjunct: Rails casts `false`
+/// @attr == false || /\A[[:space:]]*\z/.match?(@attr.to_s)` (`to_s`, the
+/// spelling Spinel takes; the presence check's whitespace test). A String column drops the `false` disjunct: Rails casts `false`
 /// to `"f"` there, which is not blank. A strict target's field is its
 /// column's type: a String's narrowed `strip.empty?`, a Boolean's
 /// narrowed `== false` (`false.blank?` is true), else `nil?` (a numeric
@@ -1060,7 +1063,7 @@ fn allow_blank_cond(attr: &Symbol, attr_ty: Option<&Ty>, runtime_relation: super
     let string_column = matches!(attr_ty, Some(Ty::Str));
     match runtime_relation {
         super::RuntimeRelation::Present => {
-            let empty = send(send(send(value.clone(), "to_s", vec![]), "strip", vec![]), "empty?", vec![]);
+            let empty = whitespace(send(value.clone(), "to_s", vec![]));
             if string_column {
                 return bool_op(BoolOpKind::Or, nil, empty);
             }
