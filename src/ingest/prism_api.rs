@@ -51,12 +51,38 @@ pub(crate) fn recovery_unsupported_message(recovery: &ErrorRecoveryNode<'_>) -> 
     // Cap before lossy decode so a huge recovered call/pattern span does
     // not allocate a full UTF-8 buffer just to take 40 chars.
     let capped = &bytes[..bytes.len().min(160)];
-    let preview: String = String::from_utf8_lossy(capped).chars().take(40).collect();
+    let preview = escape_recovery_preview(String::from_utf8_lossy(capped).chars());
     if preview.is_empty() {
         "unparsed fragment (Prism recovery node)".into()
     } else {
         format!("unparsed fragment near `{preview}` (Prism recovery)")
     }
+}
+
+/// Keep recovery previews on one diagnostic line: escape newlines and other
+/// controls after the byte cap / 40-char display limit, not before.
+fn escape_recovery_preview(chars: impl Iterator<Item = char>) -> String {
+    let mut out = String::new();
+    for (i, c) in chars.enumerate() {
+        if i >= 40 {
+            break;
+        }
+        match c {
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            // Line/paragraph separators are not Cc (`is_control`), but still
+            // break a one-line diagnostic in many terminals.
+            '\u{2028}' => out.push_str("\\u{2028}"),
+            '\u{2029}' => out.push_str("\\u{2029}"),
+            c if c.is_control() => {
+                use std::fmt::Write;
+                let _ = write!(out, "\\u{{{:x}}}", u32::from(c));
+            }
+            c => out.push(c),
+        }
+    }
+    out
 }
 
 /// Prism 2 returns `ParametersNode::block` as a generic [`Node`] (`&blk`,
@@ -140,6 +166,23 @@ mod tests {
         let result = ruby_prism::parse(b"def\n");
         let err = result.errors().next().expect("syntax error");
         assert!(!diagnostic_message(&err).is_empty());
+    }
+
+    #[test]
+    fn recovery_preview_escapes_controls() {
+        let escaped = escape_recovery_preview("a\nb\tc\u{7}d\u{2028}e".chars());
+        assert_eq!(escaped, "a\\nb\\tc\\u{7}d\\u{2028}e");
+        assert!(!escaped.contains('\n'));
+        assert!(!escaped.contains('\t'));
+        assert!(!escaped.contains('\u{7}'));
+        assert!(!escaped.contains('\u{2028}'));
+        // Display limit is 40 source chars (escaping may lengthen the string).
+        let mixed = format!("{}\n{}", "a".repeat(20), "b".repeat(30));
+        let escaped = escape_recovery_preview(mixed.chars());
+        assert_eq!(escaped.matches('a').count(), 20);
+        assert!(escaped.contains("\\n"));
+        assert_eq!(escaped.matches('b').count(), 19); // 20 + newline + 19 = 40
+        assert!(!escaped.contains('\n'));
     }
 
     fn first_def<'pr>(result: &'pr ruby_prism::ParseResult<'_>) -> ruby_prism::DefNode<'pr> {
