@@ -986,6 +986,15 @@ impl App {
         }
         for controller in &self.controllers {
             included.extend(crate::analyze::controller_includes(controller));
+            let mut items = controller.body.iter().filter_map(|item| match item {
+                crate::dialect::ControllerBodyItem::Unknown { expr, .. } => Some(expr),
+                _ => None,
+            });
+            let mut extends = Vec::new();
+            mixed(&mut items, "extend", &mut extends);
+            for m in extends {
+                extenders.entry(m).or_default().insert(controller.name.clone());
+            }
         }
         // A module's own include counts only when something uses that module: ancestry's
         // MaterializedPath2 includes MaterializedPath, and no model takes MaterializedPath2

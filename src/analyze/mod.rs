@@ -392,6 +392,11 @@ impl Analyzer {
                 // Int (affected row count).
                 cls.class_methods.insert(Symbol::from("unscoped"), relation_of_self.clone());
                 cls.class_methods.insert(Symbol::from("default_scoped"), relation_of_self.clone());
+                // The ruby-family reopen answers it (connection.rb); a strict target has no `Type::Value` and refuses the constant.
+                cls.class_methods.insert(
+                    Symbol::from("type_for_attribute"),
+                    Ty::Class { id: ClassId(Symbol::from("ActiveRecord::Type::Value")), args: vec![].into() },
+                );
                 cls.class_methods.insert(Symbol::from("none"), relation_of_self.clone());
                 cls.class_methods.insert(Symbol::from("delete_all"), Ty::Int);
                 cls.class_methods.insert(Symbol::from("update_all"), Ty::Int);

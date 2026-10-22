@@ -248,7 +248,9 @@ fn writes_through(text: &str, setters: &[&str], cvar: &str) -> bool {
             let before = &text[..at];
             let after = &text[at + setter.len()..];
             let assigns = after.trim_start().starts_with('=') && !after.trim_start().starts_with("==");
-            if (assigns && before.ends_with('.') && !before.ends_with("def self.")) || (before.ends_with(':') && after.starts_with('=')) {
+            // `send(:name=, v)` and `send("name=", v)` name the setter as a Symbol or a String
+            let named = before.ends_with(':') || before.ends_with('"') || before.ends_with('\'');
+            if (assigns && before.ends_with('.') && !before.ends_with("def self.")) || (named && after.starts_with('=')) {
                 return true;
             }
         }
@@ -648,8 +650,12 @@ impl Run<'_> {
                     ExprNode::Array { elements, .. } => elements.iter().map(|e| vec![e.clone()]).collect(),
                     _ => return Err("it loops over a value that is not a literal Hash or Array".into()),
                 };
+                // Not a key: Ruby hands a one-parameter block over a Hash the `[key, value]` pair
+                if matches!(&*over.node, ExprNode::Hash { .. }) && params.len() != 2 {
+                    return Err("a loop over a Hash binds other than its key and value".into());
+                }
                 for row in rows {
-                    if params.len() > row.len() && !(params.len() == 1) {
+                    if params.len() > row.len() {
                         return Err("a loop's block takes more parameters than each element has".into());
                     }
                     let mut inner = env.clone();

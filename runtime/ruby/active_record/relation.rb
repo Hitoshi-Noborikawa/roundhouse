@@ -420,19 +420,22 @@ module ActiveRecord
     end
 
     # Rails' `unscope(:where)`: every WHERE condition goes, whatever
-    # built it (a hash, raw SQL, a merge), and so does a `none`.
+    # built it (a hash, raw SQL, a merge), and so does a `none` and the
+    # create attributes those conditions seeded.
     def unscope_where
       spawn.unscope_where!
     end
 
     def unscope_where!
       own_lists
-      @records = nil
       @wheres = []
       @where_cols = []
       @where_null = []
       @opaque_wheres = false
+      # A record built through the relation took these from the WHEREs just dropped.
+      @scope_attributes = {}
       @null = false
+      unload_records
       self
     end
 

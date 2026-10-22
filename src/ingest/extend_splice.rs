@@ -103,7 +103,8 @@ fn from_source_gem(module: &LibraryClass) -> bool {
 }
 
 fn extended_hook_includes(module: &LibraryClass, classes: &[LibraryClass]) -> Option<Vec<ClassId>> {
-    if defines_at_run_time(module) || !from_source_gem(module) {
+    // Not one that includes others: the model would lose what `extend` gives it through them
+    if defines_at_run_time(module) || !from_source_gem(module) || !module.includes.is_empty() {
         return None;
     }
     let Some(hook) = module.methods.iter().find(|m| m.receiver == MethodReceiver::Class && m.name.as_str() == "extended") else {
