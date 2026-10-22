@@ -320,6 +320,8 @@ mod format_value_to_s;
 mod validates_acceptance;
 #[path = "emit_and_run/attribute_api_boolean_cast.rs"]
 mod attribute_api_boolean_cast;
+#[path = "emit_and_run/numericality_unknown_option.rs"]
+mod numericality_unknown_option;
 #[path = "emit_and_run/cross_class_constants.rs"]
 mod cross_class_constants;
 #[path = "emit_and_run/regex_literal_hash_guard.rs"]

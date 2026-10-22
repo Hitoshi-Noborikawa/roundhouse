@@ -954,6 +954,56 @@ fn parse_bool_or_hash(
     }
 }
 
+/// Every key Rails 8.1.4's `NumericalityValidator` reads: its
+/// `RESERVED_OPTIONS` (the compare checks, `odd` / `even`, `in`,
+/// `only_integer`, `only_numeric`) and the options every validator
+/// takes. Any other key is an interpolation option for the error
+/// message, which the default messages never name, so Rails ignores it.
+const NUMERICALITY_OPTIONS: &[&str] = &[
+    "greater_than",
+    "greater_than_or_equal_to",
+    "equal_to",
+    "less_than",
+    "less_than_or_equal_to",
+    "other_than",
+    "odd",
+    "even",
+    "in",
+    "only_integer",
+    "only_numeric",
+    "allow_nil",
+    "allow_blank",
+    "message",
+    "if",
+    "unless",
+    "on",
+    "strict",
+];
+
+/// A key the validator does not read: Rails ignores it, and so does the
+/// lowering, with a note naming the key (and the option it most likely
+/// meant: `greater_than_or_equal` for `greater_than_or_equal_to`).
+fn ignored_validator_option(validator: &str, option: &str, known: &[&str], assoc: &ruby_prism::AssocNode<'_>, file: &str) {
+    let hint = known.iter().find(|k| k.strip_suffix("_to") == Some(option)).map(|k| Symbol::from(*k));
+    let kind = crate::diagnostic::DiagnosticKind::IgnoredValidatorOption {
+        validator: Symbol::from(validator),
+        option: Symbol::from(option),
+        hint,
+    };
+    let location = assoc.location();
+    let span = Span {
+        file: super::super::sources::file_id(file),
+        start: location.start_offset() as u32,
+        end: location.end_offset() as u32,
+    };
+    super::super::prism::push(crate::diagnostic::Diagnostic {
+        span,
+        severity: crate::diagnostic::Diagnostic::default_severity(&kind),
+        message: crate::diagnostic::Diagnostic::stub_text(&kind),
+        kind,
+    });
+}
+
 fn parse_numericality(value: &Node<'_>, file: &str, class_consts: &super::ClassConsts) -> RuleParse {
     use crate::dialect::ValidationRule;
     if super::super::util::bool_value(value) == Some(true) {
@@ -1046,7 +1096,8 @@ fn parse_numericality(value: &Node<'_>, file: &str, class_consts: &super::ClassC
                 None => gaps.push("allow_blank".to_string()),
             },
             "message" => push_message(&child, "numericality", false, &mut built.message, &mut gaps),
-            other => gaps.push(format!("numericality: {other}")),
+            other if NUMERICALITY_OPTIONS.contains(&other) => gaps.push(format!("numericality: {other}")),
+            other => ignored_validator_option("numericality", other, NUMERICALITY_OPTIONS, &assoc, file),
         }
     }
     if !gaps.is_empty() {
