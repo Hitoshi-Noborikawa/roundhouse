@@ -5722,6 +5722,10 @@ fn define_method_loops_the_substitution_cannot_keep_are_not_unrolled() {
         "KINDS.each do |kind|\n    define_method(:\"#{kind}?\") do\n      yield\n    end\n  end",
         // a constant whose value is not a literal
         "LIST.each do |kind|\n    define_method(:\"#{kind}?\") do\n      kind\n    end\n  end",
+        // `next` at the block's own level does not parse inside a `def`
+        "KINDS.each do |kind|\n    define_method(:\"#{kind}?\") do\n      next false if kind == :draft\n      true\n    end\n  end",
+        // a named visibility marker sets a generated method's visibility
+        "def draft?\n    true\n  end\n\n  KINDS.each do |kind|\n    define_method(:\"#{kind}?\") do\n      kind\n    end\n  end\n  private :draft?",
     ] {
         let (emitted, _errors) = emit_and_run::real_blog()
             .write(
@@ -5730,7 +5734,7 @@ fn define_method_loops_the_substitution_cannot_keep_are_not_unrolled() {
             )
             .emit(roundhouse::project::BuildTarget::Ruby);
         let labels = std::fs::read_to_string(emitted.join("app/models/labels.rb")).expect("labels.rb");
-        assert!(!labels.contains("def draft?"), "{body}:\n{labels}");
+        assert!(!labels.contains("def live?"), "{body}:\n{labels}");
     }
 }
 

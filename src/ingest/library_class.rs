@@ -2085,14 +2085,16 @@ fn only_defs(body: Option<ruby_prism::Node<'_>>) -> bool {
         // The walk unrolls a loop only before any bare visibility marker;
         // one after it would be hoisted and then dropped.
         let mut bare_marker = false;
-        flatten_statements(body).iter().all(|stmt| {
+        let statements = flatten_statements(body);
+        let named = super::define_method_loop::named_visibility(&statements);
+        statements.iter().all(|stmt| {
             if let Some(call) = stmt.as_call_node().filter(|c| visibility::marker(c)) {
                 bare_marker |= call.arguments().is_none();
                 return true;
             }
             visibility::definition(stmt).is_some()
                 || stmt.as_def_node().is_some()
-                || (!bare_marker && super::define_method_loop::unrollable(stmt))
+                || (!bare_marker && super::define_method_loop::unrollable(stmt, &named))
         })
     })
 }
@@ -2149,6 +2151,7 @@ fn walk_decl_body_with_visibility<'pr>(
     // and in the bodies it encloses (`class << self`, `included do`).
     let _constants = super::define_method_loop::Scope::enter(super::define_method_loop::ConstTable::of(owner, &statements));
     let mut bare_visibility_marker = false;
+    let named_visibility = super::define_method_loop::named_visibility(&statements);
     if let Some(name) = super::util::hoisted_name_collision(&statements) {
         return Err(IngestError::Unsupported {
             file: file.into(),
@@ -2246,6 +2249,7 @@ fn walk_decl_body_with_visibility<'pr>(
                 owner,
                 file,
                 if mode.is_class_side() { MethodReceiver::Class } else { MethodReceiver::Instance },
+                &named_visibility,
             )
         {
             out.methods.extend(methods);

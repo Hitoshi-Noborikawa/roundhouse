@@ -20,7 +20,7 @@
 //! (Ruby refuses implicit arguments from a `define_method` body).
 
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use ruby_prism::{CallNode, Node};
 
@@ -155,7 +155,7 @@ struct Plan<'pr> {
     defines: Vec<CallNode<'pr>>,
 }
 
-fn plan<'pr>(stmt: &Node<'pr>, file: &str) -> Option<Plan<'pr>> {
+fn plan<'pr>(stmt: &Node<'pr>, file: &str, named: &HashSet<String>) -> Option<Plan<'pr>> {
     let call = stmt.as_call_node()?;
     if constant_id_str(&call.name()) != "each" || call.arguments().is_some() {
         return None;
@@ -194,7 +194,7 @@ fn plan<'pr>(stmt: &Node<'pr>, file: &str) -> Option<Plan<'pr>> {
         return None;
     }
     let plan = Plan { constant, entries, key_param, value_param, defines };
-    plan.defines.iter().all(|d| define_ok(d, &plan)).then_some(plan)
+    plan.defines.iter().all(|d| define_ok(d, &plan, named)).then_some(plan)
 }
 
 /// Plain required parameter names, or `None` for any other shape.
@@ -220,7 +220,7 @@ fn required_params(params: Option<Node<'_>>) -> Option<Vec<String>> {
         .collect()
 }
 
-fn define_ok(define: &CallNode<'_>, plan: &Plan<'_>) -> bool {
+fn define_ok(define: &CallNode<'_>, plan: &Plan<'_>, named: &HashSet<String>) -> bool {
     let Some(block) = define.block().and_then(|b| b.as_block_node()) else { return false };
     let Some(params) = required_params(block.parameters()) else { return false };
     let loop_params: Vec<&str> = std::iter::once(plan.key_param.as_str()).chain(plan.value_param.as_deref()).collect();
@@ -228,10 +228,14 @@ fn define_ok(define: &CallNode<'_>, plan: &Plan<'_>) -> bool {
         return false;
     }
     let names = plan_names(define, plan);
-    if names.as_ref().is_none_or(|n| n.iter().any(|name| !super::model_macros::valid_def_name(&Symbol::from(name.as_str())))) {
+    // A name a `private :name`-style marker in the same body sets the
+    // visibility of is not one this tracks: refused, not left public.
+    if names.as_ref().is_none_or(|n| {
+        n.iter().any(|name| !super::model_macros::valid_def_name(&Symbol::from(name.as_str())) || named.contains(name))
+    }) {
         return false;
     }
-    let mut check = BodyCheck { depth: 0, loop_params: &loop_params, ok: true };
+    let mut check = BodyCheck { depth: 0, loops: 0, loop_params: &loop_params, ok: true };
     if let Some(body) = block.body() {
         ruby_prism::Visit::visit(&mut check, &body);
     }
@@ -292,6 +296,8 @@ fn name_for(arg: &Node<'_>, key_param: &str, key: &str) -> Option<String> {
 struct BodyCheck<'a> {
     /// Blocks and lambdas entered inside the `define_method` block.
     depth: u32,
+    /// `while` / `until` / `for` loops entered inside it.
+    loops: u32,
     loop_params: &'a [&'a str],
     ok: bool,
 }
@@ -346,6 +352,40 @@ impl<'pr> ruby_prism::Visit<'pr> for BodyCheck<'_> {
     fn visit_def_node(&mut self, _: &ruby_prism::DefNode<'pr>) {
         self.ok = false;
     }
+    // `next` / `break` / `redo` at the block's own level leave the
+    // `define_method` block; inside a `def` they do not parse.
+    fn visit_next_node(&mut self, node: &ruby_prism::NextNode<'pr>) {
+        if self.depth == 0 && self.loops == 0 {
+            self.ok = false;
+        }
+        ruby_prism::visit_next_node(self, node);
+    }
+    fn visit_break_node(&mut self, node: &ruby_prism::BreakNode<'pr>) {
+        if self.depth == 0 && self.loops == 0 {
+            self.ok = false;
+        }
+        ruby_prism::visit_break_node(self, node);
+    }
+    fn visit_redo_node(&mut self, _: &ruby_prism::RedoNode<'pr>) {
+        if self.depth == 0 && self.loops == 0 {
+            self.ok = false;
+        }
+    }
+    fn visit_while_node(&mut self, node: &ruby_prism::WhileNode<'pr>) {
+        self.loops += 1;
+        ruby_prism::visit_while_node(self, node);
+        self.loops -= 1;
+    }
+    fn visit_until_node(&mut self, node: &ruby_prism::UntilNode<'pr>) {
+        self.loops += 1;
+        ruby_prism::visit_until_node(self, node);
+        self.loops -= 1;
+    }
+    fn visit_for_node(&mut self, node: &ruby_prism::ForNode<'pr>) {
+        self.loops += 1;
+        ruby_prism::visit_for_node(self, node);
+        self.loops -= 1;
+    }
     fn visit_block_node(&mut self, node: &ruby_prism::BlockNode<'pr>) {
         // A nested block naming a loop parameter would shadow it.
         if node.locals().iter().any(|l| self.loop_params.contains(&constant_id_str(&l))) {
@@ -367,8 +407,19 @@ impl<'pr> ruby_prism::Visit<'pr> for BodyCheck<'_> {
 
 /// Whether `stmt` is a loop this unrolls, with the enclosing bodies' tables
 /// in scope.
-pub(super) fn unrollable(stmt: &Node<'_>) -> bool {
-    plan(stmt, "").is_some()
+pub(super) fn unrollable(stmt: &Node<'_>, named: &HashSet<String>) -> bool {
+    plan(stmt, "", named).is_some()
+}
+
+/// The names `private :a, :b`-style markers in `statements` set the
+/// visibility of.
+pub(super) fn named_visibility(statements: &[Node<'_>]) -> HashSet<String> {
+    statements
+        .iter()
+        .filter_map(|s| s.as_call_node())
+        .filter(|c| c.receiver().is_none() && super::visibility::marker(c))
+        .flat_map(|c| c.arguments().map(|a| a.arguments().iter().filter_map(|n| literal_key(&n).map(|k| k.text().to_string())).collect::<Vec<_>>()).unwrap_or_default())
+        .collect()
 }
 
 /// The `def`s the loop makes, or `None` when it is not one this unrolls.
@@ -377,8 +428,9 @@ pub(super) fn unroll(
     owner: &ClassId,
     file: &str,
     receiver: MethodReceiver,
+    named: &HashSet<String>,
 ) -> Option<Vec<MethodDef>> {
-    let plan = plan(stmt, file)?;
+    let plan = plan(stmt, file, named)?;
     let keys = match &plan.entries {
         Entries::Array(k) | Entries::Hash(k) => k.clone(),
     };
