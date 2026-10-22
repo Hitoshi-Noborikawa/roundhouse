@@ -38,3 +38,20 @@ fn without_an_app_base_the_runtime_base_keeps_its_name() {
     assert!(record.contains("import { Base } from \"../../src/active_record_base.js\";"), "{record}");
     assert!(record.contains("extends Base {"), "{record}");
 }
+
+/// The alias steps aside for an app class of its name: an app
+/// `ActiveRecordBase` extending the runtime base extended itself
+/// (TS2506), and a file naming it imported the runtime base instead.
+#[test]
+fn the_runtime_base_alias_avoids_an_app_class_of_that_name() {
+    let (emitted, errors) = app_class_base::alias_taken_overlay().emit(BuildTarget::Typescript);
+    assert!(errors.is_empty(), "{errors:?}");
+    let read = |p: &str| std::fs::read_to_string(emitted.join(p)).unwrap_or_else(|e| panic!("{p}: {e}"));
+    let arb = read("app/models/active_record_base.ts");
+    assert!(arb.contains("import { Base as ActiveRecordBase2 } from \"../../src/active_record_base.js\";"), "{arb}");
+    assert!(arb.contains("export class ActiveRecordBase extends ActiveRecordBase2 {"), "{arb}");
+    let gadget = read("app/models/gadget.ts");
+    assert!(gadget.contains("import { ActiveRecordBase } from \"./active_record_base.js\";"), "{gadget}");
+    assert!(!gadget.contains("src/active_record_base.js"), "{gadget}");
+}
+

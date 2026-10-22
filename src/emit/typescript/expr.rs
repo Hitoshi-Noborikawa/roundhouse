@@ -4132,28 +4132,44 @@ fn js_send_inner(
 /// StandardError)` and similar idioms emit a bare `StandardError`
 /// that's neither in scope nor importable.
 std::thread_local! {
-    static RUNTIME_BASE_ALIASED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// The aliases of `ActiveRecord::Base` and `ActionController::Base`,
+    /// when they are aliased (`set_runtime_base_aliases`).
+    static RUNTIME_BASE_ALIASES: std::cell::RefCell<Option<(String, String)>> =
+        const { std::cell::RefCell::new(None) };
 }
 
 /// Alias the runtime's `ActiveRecord::Base` and `ActionController::Base`
 /// in the app files emitted from here on, for an app that defines its
-/// own `Base` (#1228). Off while the runtime's own files emit, where
-/// `Base` is the class being defined.
-pub(crate) fn set_runtime_base_aliased(on: bool) {
-    RUNTIME_BASE_ALIASED.with(|cell| cell.set(on));
+/// own `Base` (#1228), under names none of `app_classes` takes
+/// (`ActiveRecordBase`, or `ActiveRecordBase2` beside an app class of
+/// that name). `None` turns it off, as while the runtime's own files
+/// emit, where `Base` is the class being defined.
+pub(crate) fn set_runtime_base_aliases(app_classes: Option<&HashSet<String>>) {
+    let free = |want: &str, taken: &HashSet<String>| {
+        let mut name = want.to_string();
+        let mut n = 2;
+        while taken.contains(&name) {
+            name = format!("{want}{n}");
+            n += 1;
+        }
+        name
+    };
+    let aliases = app_classes.map(|taken| (free("ActiveRecordBase", taken), free("ActionControllerBase", taken)));
+    RUNTIME_BASE_ALIASES.with(|cell| *cell.borrow_mut() = aliases);
 }
 
 /// The local name an app file gives the runtime class `qualified`
 /// (`ActiveRecord::Base`) when the app's own `Base` takes the bare name.
-pub(crate) fn runtime_base_alias(qualified: &str) -> Option<&'static str> {
-    if !RUNTIME_BASE_ALIASED.with(|cell| cell.get()) {
-        return None;
-    }
-    match qualified {
-        "ActiveRecord::Base" => Some("ActiveRecordBase"),
-        "ActionController::Base" => Some("ActionControllerBase"),
-        _ => None,
-    }
+pub(crate) fn runtime_base_alias(qualified: &str) -> Option<String> {
+    RUNTIME_BASE_ALIASES.with(|cell| {
+        let aliases = cell.borrow();
+        let (record, controller) = aliases.as_ref()?;
+        match qualified {
+            "ActiveRecord::Base" => Some(record.clone()),
+            "ActionController::Base" => Some(controller.clone()),
+            _ => None,
+        }
+    })
 }
 
 fn const_name(path: &[Symbol]) -> String {

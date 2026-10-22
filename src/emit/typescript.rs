@@ -806,10 +806,17 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
     .expect("runtime transpile failed (Ruby source error)");
     // The runtime's files are written; an app class named `Base` takes
     // the bare name in the app's (#1228).
-    expr::set_runtime_base_aliased(
-        app.library_classes.iter().any(|c| c.name.0.as_str() == "Base")
-            || app.models.iter().any(|m| m.name.0.as_str() == "Base"),
-    );
+    {
+        let last = |n: &str| n.rsplit("::").next().unwrap_or(n).to_string();
+        let app_classes: std::collections::HashSet<String> = app
+            .library_classes
+            .iter()
+            .map(|c| last(c.name.0.as_str()))
+            .chain(app.models.iter().map(|m| last(m.name.0.as_str())))
+            .chain(app.controllers.iter().map(|c| last(c.name.0.as_str())))
+            .collect();
+        expr::set_runtime_base_aliases(app_classes.contains("Base").then_some(&app_classes));
+    }
     {
         // Summarize what the shake kept. `eligible` excludes the
         // unconditional keeps (accessors + initialize) so the kept%
@@ -1097,7 +1104,7 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
         files.push(emit_main_ts(app, has_seeds));
     }
 
-    expr::set_runtime_base_aliased(false);
+    expr::set_runtime_base_aliases(None);
     files
 }
 
@@ -1854,7 +1861,7 @@ pub(super) fn js_library_class(
             // Test parents — runtime adapter exports both names.
             "ActiveSupport::TestCase" | "ActionDispatch::IntegrationTest" => "TestCase".to_string(),
             "Minitest::Test" => "Test".to_string(),
-            _ if let Some(alias) = expr::runtime_base_alias(raw) => alias.to_string(),
+            _ if let Some(alias) = expr::runtime_base_alias(raw) => alias,
             // All other framework parents (`ActiveRecord::Base`,
             // `ActionController::Base`, mixins) collapse to the last
             // segment — the imported name in their .ts file.

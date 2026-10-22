@@ -308,6 +308,22 @@ fn real_blog_memoized_fields_run_under_tsx() {
 
 #[test]
 #[ignore]
+fn real_blog_app_class_named_like_the_alias_runs_under_tsx() {
+    // An app `ActiveRecordBase` beside an app `Base`: the runtime base
+    // takes another alias, and the app compiles and answers as CRuby.
+    let (emitted, errors) = app_class_base::alias_taken_overlay().emit(roundhouse::project::BuildTarget::Typescript);
+    assert!(errors.is_empty(), "{errors:?}");
+    let out = run_under_tsx(
+        &emitted,
+        "import { Gadget } from \"./app/models/gadget.js\";\nconsole.log(Gadget.both());\n",
+    );
+    assert_eq!(out, app_class_base::BOTH);
+    std::fs::remove_file(emitted.join("check.ts")).unwrap();
+    assert_tsc_passes("real-blog with app Base and ActiveRecordBase", &emitted);
+}
+
+#[test]
+#[ignore]
 fn real_blog_app_class_base_runs_under_tsx() {
     // A class extending the app's own `Base` reads its class method and
     // constant as CRuby does, and the app, whose records and controllers

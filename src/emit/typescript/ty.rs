@@ -102,7 +102,7 @@ fn ts_class_ty(id: &ClassId) -> String {
     // Base`), the bare name is the class itself; in importing files,
     // `import { Base }` brings it into scope under the same name.
     if let Some(alias) = super::expr::runtime_base_alias(raw) {
-        return alias.into();
+        return alias;
     }
     let last = raw.rsplit("::").next().unwrap_or(raw);
     last.into()
