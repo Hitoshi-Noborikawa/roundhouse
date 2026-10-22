@@ -7091,17 +7091,20 @@ raise Widget.by_fragment.inspect unless Widget.by_fragment == %w[ccc bb a]
 /// raises for a `?` fragment there. It keeps a refusal at check.
 #[test]
 fn sanitize_sql_for_order_refuses_the_array_form() {
-    let errors = sanitize_sql_array_app()
-        .edit(
-            "app/models/widget.rb",
-            "class Widget < ApplicationRecord\n",
-            "class Widget < ApplicationRecord\n  def self.first_named(name)\n    order(Arel.sql(ActiveRecord::Base.sanitize_sql_for_order([\"CASE WHEN name = ? THEN 0 ELSE 1 END\", name])))\n  end\n",
-        )
-        .check_errors();
-    assert!(
-        errors.iter().any(|e| e.contains("sanitize_sql_for_order is modeled on a String only")),
-        "{errors:?}"
-    );
+    // On Base, and on a model through implicit self.
+    for receiver in ["ActiveRecord::Base.", ""] {
+        let errors = sanitize_sql_array_app()
+            .edit(
+                "app/models/widget.rb",
+                "class Widget < ApplicationRecord\n",
+                &format!("class Widget < ApplicationRecord\n  def self.first_named(name)\n    order(Arel.sql({receiver}sanitize_sql_for_order([\"CASE WHEN name = ? THEN 0 ELSE 1 END\", name])))\n  end\n"),
+            )
+            .check_errors();
+        assert!(
+            errors.iter().any(|e| e.contains("sanitize_sql_for_order is modeled on a String only")),
+            "{receiver:?}: {errors:?}"
+        );
+    }
 }
 
 /// Relation#ids must preserve uuid / named string keys (#310).

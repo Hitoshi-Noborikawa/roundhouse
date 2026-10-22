@@ -2429,9 +2429,10 @@ impl<'a> BodyTyper<'a> {
                 }
                 // `sanitize_sql_for_order` is modeled on a String only: the
                 // fragment unchanged. Any other argument may be Rails' Array
-                // form, which raises for a `?` fragment there; refuse it.
+                // form, which raises for a `?` fragment there; refuse it, on
+                // Base and on every model, implicit self included.
                 if method.as_str() == "sanitize_sql_for_order"
-                    && matches!(recv_ty.as_ref(), Some(Ty::Class { id, .. }) if id.0.as_str() == "ActiveRecord::Base")
+                    && self.is_model_class(recv_ty.as_ref())
                     && !(args.len() == 1 && block.is_none() && matches!(args[0].ty, Some(Ty::Str)))
                     && crate::expr::ExprCold::diagnostic(&expr.cold).is_none()
                 {
