@@ -88,8 +88,7 @@ fn a_defaults_format_stays_the_default_only() {
     assert!(r.seg_patterns.is_empty(), "{r:#?}");
 }
 
-#[test]
-fn the_ruby_target_answers_as_rails_does() {
+fn ruby_target_answers(overlay: emit_and_run::Overlay, assertions: String) {
     let script = format!(
         r#"require "stringio"
 def req(path)
@@ -97,16 +96,15 @@ def req(path)
   status = result[0]
   status == 404 ? "404|" : status.to_s + "|" + result[2].join
 end
-{}puts "PASS"
-"#,
-        format_requirement::assertions()
+{assertions}puts "PASS"
+"#
     );
-    format_requirement::overlay().run_ruby(&script).assert_passes();
+    overlay.run_ruby(&script).assert_passes();
 }
 
-/// The table itself, against actionpack 8.1.4's router.
-#[test]
-fn rails_answers_the_table() {
+/// Run `assertions` against actionpack 8.1.4's router drawing `routes`
+/// over `controller`.
+fn rails_answers(controller: &str, routes: &str, assertions: String) {
     if !Command::new("ruby").args(["-raction_controller", "-e", "1"]).status().is_ok_and(|s| s.success()) {
         eprintln!("skipping: ruby with the actionpack gem not available");
         return;
@@ -116,7 +114,6 @@ fn rails_answers_the_table() {
 require "action_controller"
 require "rack/mock"
 {controller}
-class ApplicationController < ActionController::Base; end
 routes = ActionDispatch::Routing::RouteSet.new
 routes.draw do
 {draw}
@@ -129,15 +126,10 @@ def req_with(routes, path)
   status.to_s + "|" + text
 end
 define_method(:req) {{ |path| req_with(routes, path) }}
-{asserts}puts "Rails agrees"
+{assertions}puts "Rails agrees"
 "#,
-        controller = format_requirement::CONTROLLER.replace("< ApplicationController", "< ActionController::Base"),
-        draw = format_requirement::ROUTES
-            .lines()
-            .filter(|l| l.starts_with("  "))
-            .collect::<Vec<_>>()
-            .join("\n"),
-        asserts = format_requirement::assertions(),
+        controller = controller.replace("< ApplicationController", "< ActionController::Base"),
+        draw = routes.lines().filter(|l| l.starts_with("  ")).collect::<Vec<_>>().join("\n"),
     );
     let output = Command::new("ruby").arg("-e").arg(&script).output().expect("ruby is on PATH");
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -145,5 +137,53 @@ define_method(:req) {{ |path| req_with(routes, path) }}
     assert!(
         output.status.success() && stdout.contains("Rails agrees"),
         "actionpack 8.1.4 disagrees with the table\n=== stdout ===\n{stdout}\n=== stderr ===\n{stderr}"
+    );
+}
+
+#[test]
+fn the_ruby_target_answers_as_rails_does() {
+    ruby_target_answers(format_requirement::overlay(), format_requirement::assertions());
+}
+
+/// The table itself, against actionpack 8.1.4's router.
+#[test]
+fn rails_answers_the_table() {
+    rails_answers(format_requirement::CONTROLLER, format_requirement::ROUTES, format_requirement::assertions());
+}
+
+// --- Constraints written as plain text --------------------------------
+
+#[test]
+fn a_plain_name_constraint_is_its_own_exact_pattern() {
+    let r = only(r#"get "/exports/:id/followers", to: "exports#followers", constraints: { format: :csv }"#);
+    assert_eq!(r.format, None, "{r:#?}");
+    assert!(format_pattern(&r).is_some() && r.refused.is_none(), "{r:#?}");
+    let r = only(r#"get "/kinds/:kind", to: "exports#kind", constraints: { kind: "main-feed" }"#);
+    assert!(r.seg_patterns.iter().any(|(n, _)| n == "kind") && r.refused.is_none(), "{r:#?}");
+}
+
+/// Rails never matches a String requirement holding a `.` (its router
+/// splits segments there), and other punctuation is left to a regex
+/// literal: both stay gaps, as does any value that isn't a literal.
+#[test]
+fn other_plain_text_stays_a_gap() {
+    for value in [r#""a.b""#, r#""a+b""#, r#""""#, "FORMATS"] {
+        let err = routes(&format!(r#"get "/kinds/:kind", to: "exports#kind", constraints: {{ kind: {value} }}"#))
+            .expect_err(value);
+        assert!(err.contains("is not a literal regex or a plain name"), "{value}: {err}");
+    }
+}
+
+#[test]
+fn the_ruby_target_matches_plain_names_as_rails_does() {
+    ruby_target_answers(format_requirement::literal_overlay(), format_requirement::literal_assertions());
+}
+
+#[test]
+fn rails_answers_the_plain_name_table() {
+    rails_answers(
+        format_requirement::LITERAL_CONTROLLER,
+        format_requirement::LITERAL_ROUTES,
+        format_requirement::literal_assertions(),
     );
 }

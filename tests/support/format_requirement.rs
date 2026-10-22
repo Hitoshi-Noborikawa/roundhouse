@@ -71,3 +71,69 @@ pub fn assertions() -> String {
     }
     s
 }
+
+/// Constraints written as plain text, which Rails matches exactly
+/// (`literal_overlay`).
+pub const LITERAL_CONTROLLER: &str = r#"class ExportsController < ApplicationController
+  def index
+    render plain: "index:#{params[:format]}"
+  end
+
+  def followers
+    render plain: "followers:#{params[:format]}"
+  end
+
+  def download
+    render plain: "download:#{params[:format]}"
+  end
+
+  def kind
+    render plain: "kind:#{params[:kind]}"
+  end
+end
+"#;
+
+pub const LITERAL_ROUTES: &str = r#"Rails.application.routes.draw do
+  resources :exports, only: :index, constraints: { format: :json }
+  constraints(format: :csv) do
+    get "/exports/:id/followers", to: "exports#followers"
+  end
+  resources :exports, only: [] do
+    member { get :download, constraints: { format: "csv" } }
+  end
+  get "/kinds/:kind", to: "exports#kind", constraints: { kind: "main-feed" }
+end
+"#;
+
+pub const LITERAL_CASES: &[(&str, &str)] = &[
+    ("/exports", "200|index:"),
+    ("/exports.json", "200|index:json"),
+    ("/exports.csv", "404|"),
+    ("/exports/1/followers", "200|followers:"),
+    ("/exports/1/followers.csv", "200|followers:csv"),
+    ("/exports/1/followers.CSV", "404|"),
+    ("/exports/1/followers.json", "404|"),
+    ("/exports/1/download", "200|download:"),
+    ("/exports/1/download.csv", "200|download:csv"),
+    ("/exports/1/download.json", "404|"),
+    // Exact and case-sensitive.
+    ("/kinds/main-feed", "200|kind:main-feed"),
+    ("/kinds/main-feeds", "404|"),
+    ("/kinds/Main-feed", "404|"),
+];
+
+pub fn literal_overlay() -> Overlay {
+    emit_and_run::empty_app()
+        .write("db/schema.rb", "ActiveRecord::Schema[8.1].define(version: 1) do\nend\n")
+        .write("app/controllers/application_controller.rb", "class ApplicationController < ActionController::Base\nend\n")
+        .write("app/controllers/exports_controller.rb", LITERAL_CONTROLLER)
+        .write("config/routes.rb", LITERAL_ROUTES)
+}
+
+pub fn literal_assertions() -> String {
+    let mut s = String::new();
+    for (path, expected) in LITERAL_CASES {
+        s.push_str(&format!("got = req({path:?})\nraise \"{path}: #{{got}}\" unless got == {expected:?}\n"));
+    }
+    s
+}

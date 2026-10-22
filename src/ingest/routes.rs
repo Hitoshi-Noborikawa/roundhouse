@@ -1587,9 +1587,9 @@ fn folded_regex(node: &Node<'_>) -> Option<(String, String)> {
 
 /// Param→regex-source map from a `constraints:` / `constraints(...)`
 /// hash's assoc elements. Fail-closed: a value that isn't a literal
-/// regex, or a literal carrying `/i`/`/x`/`/m` (which `regex_source`
-/// cannot express), is `Unsupported` rather than silently omitted or
-/// stripped (#857/#1087). Shared by the explicit-route kwarg, the
+/// regex or a plain-name String or Symbol, or a regex literal carrying
+/// `/i`/`/x`/`/m` (which `regex_source` cannot express), is
+/// `Unsupported` rather than silently omitted or stripped (#857/#1087). Shared by the explicit-route kwarg, the
 /// `resources`/`resource` kwarg, and the block-form reader below.
 fn read_param_regex_constraints<'a>(
     elements: impl IntoIterator<Item = Node<'a>>,
@@ -1627,13 +1627,23 @@ fn read_param_regex_constraints<'a>(
                         ),
                     });
                 }
-                out.insert(Symbol::from(param.as_str()), src);
+                out.insert(Symbol::from(key), src);
+            }
+            // `constraints: { format: :csv }` / `{ id: "main" }`: Rails
+            // matches the text exactly. Only a plain name is taken (see
+            // `plain_literal_source`); any other value stays a gap.
+            None if let Some(src) = string_value(&constraint_value)
+                .or_else(|| symbol_value(&constraint_value))
+                .as_deref()
+                .and_then(plain_literal_source) =>
+            {
+                out.insert(Symbol::from(key), src);
             }
             None => {
                 return Err(IngestError::Unsupported {
                     file: file.into(),
                     message: format!(
-                        "{context} constraints: {param} is not a literal regex"
+                        "{context} constraints: {param} is not a literal regex or a plain name"
                     ),
                 });
             }
