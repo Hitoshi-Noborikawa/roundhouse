@@ -21,7 +21,7 @@ end
 /// A model whose methods read its own constants through the Hash and
 /// Array methods the TypeScript emit rewrites (#1223 b).
 pub const GAUGE: &str = r#"class Gauge < ApplicationRecord
-  WEIGHTS = { "small" => 1, "large" => 9 }.freeze
+  WEIGHTS = { "small" => 1, "large" => 9, "none" => nil }.freeze
   NAMES = %w[small large].freeze
 
   def summary
@@ -31,12 +31,18 @@ pub const GAUGE: &str = r#"class Gauge < ApplicationRecord
   def self.heaviest
     WEIGHTS.fetch("large", 0)
   end
+
+  # A key holding nil answers nil, not the default; an Object.prototype
+  # name is not a key.
+  def self.probe
+    [WEIGHTS.fetch("none", 0).nil?, WEIGHTS.key?("constructor"), WEIGHTS.key?("none")].join(",")
+  end
 end
 "#;
 
 /// What `Gauge#summary` answers under CRuby for a `size` of "large".
 #[allow(dead_code)]
-pub const GAUGE_SUMMARY: &str = "9,true,small|large,small,9";
+pub const GAUGE_SUMMARY: &str = "9,true,small|large|none,small,9";
 
 pub fn gauge_overlay() -> Overlay {
     emit_and_run::real_blog()

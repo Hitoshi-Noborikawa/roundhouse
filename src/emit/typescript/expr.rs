@@ -671,6 +671,17 @@ fn async_iife_awaited(span: Span, stmts: Vec<JsStmt>) -> Js {
     )
 }
 
+/// `Object.prototype.hasOwnProperty.call(obj, key)`: an own key, as Ruby's
+/// `Hash#key?` answers (`key in obj` also finds the prototype's).
+fn has_own(span: Span, obj: Js, key: Js) -> Js {
+    let has = Js::member(
+        Span::synthetic(),
+        Js::member(Span::synthetic(), Js::member(Span::synthetic(), synth_ident("Object"), "prototype"), "hasOwnProperty"),
+        "call",
+    );
+    Js::call(span, has, vec![obj, key])
+}
+
 /// `(() => { throw new Error("<msg>"); })()`
 fn iife_throw_msg(span: Span, msg: &str) -> Js {
     let err = Js::synth(JsExpr::New {
@@ -3491,8 +3502,10 @@ fn js_send_inner(
                     Js::method_call(span, synth_ident("Object"), "keys", vec![js_expr(r)])
                 };
                 match method {
+                    // An own key, as Ruby's `Hash#key?` answers: `in` also
+                    // finds `Object.prototype`'s (`"constructor"`).
                     "key?" | "has_key?" | "include?" if args.len() == 1 => {
-                        return Js::binary(span, "in", js_expr(&args[0]), js_expr(r));
+                        return has_own(span, js_expr(r), js_expr(&args[0]));
                     }
                     "empty?" if args.is_empty() => {
                         return Js::binary(
@@ -3571,23 +3584,36 @@ fn js_send_inner(
                     // `Record<string, any>` has no `.fetch`. The
                     // single-arg form raises on a missing key, as Ruby's
                     // KeyError does (it is typed the value, never nil).
+                    // `(() => { const h = r; const k = key; const d = default;
+                    // return own(h, k) ? h[k] : d; })()`: the default only on
+                    // a missing key, so a key holding nil answers nil (`??`
+                    // read it as missing); each operand read once, the
+                    // default eagerly, as Ruby evaluates its arguments.
                     "fetch" if args.len() == 2 => {
-                        return Js::binary(
+                        let pick = Js::new(
                             span,
-                            "??",
-                            Js::index(span, js_expr(r), js_expr(&args[0])),
-                            js_expr(&args[1]),
+                            JsExpr::Ternary {
+                                cond: has_own(span, synth_ident("h"), synth_ident("k")),
+                                then: Js::index(span, synth_ident("h"), synth_ident("k")),
+                                else_: synth_ident("d"),
+                            },
+                        );
+                        return iife(
+                            span,
+                            vec![
+                                const_decl("h", js_expr(r)),
+                                const_decl("k", js_expr(&args[0])),
+                                const_decl("d", js_expr(&args[1])),
+                                return_stmt(Some(pick)),
+                            ],
                         );
                     }
-                    // `(() => { const h = r; const k = key; if (!(k in h))
+                    // `(() => { const h = r; const k = key; if (!own(h, k))
                     // throw new Error(…); return h[k]; })()`: receiver and
-                    // key read once; a present key holding nil answers it.
+                    // key read once; a present key holding nil answers it,
+                    // and an Object.prototype name is not a key.
                     "fetch" if args.len() == 1 => {
-                        let missing = Js::unary(
-                            span,
-                            "!",
-                            Js::binary(span, "in", synth_ident("k"), synth_ident("h")),
-                        );
+                        let missing = Js::unary(span, "!", has_own(span, synth_ident("h"), synth_ident("k")));
                         let err = Js::synth(JsExpr::New {
                             callee: synth_ident("Error"),
                             args: vec![Js::binary(

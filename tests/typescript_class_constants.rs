@@ -63,8 +63,8 @@ fn a_models_constant_reads_get_the_hash_and_array_rewrites() {
     assert!(errors.is_empty(), "{errors:?}");
     let gauge = std::fs::read_to_string(emitted.join("app/models/gauge.ts")).expect("gauge.ts");
     for read in [
-        "Gauge.WEIGHTS[this.size] ?? 0",
-        "this.size in Gauge.WEIGHTS",
+        "const h = Gauge.WEIGHTS; const k = this.size; const d = 0; return Object.prototype.hasOwnProperty.call(h, k) ? h[k] : d;",
+        "Object.prototype.hasOwnProperty.call(Gauge.WEIGHTS, this.size)",
         "Object.keys(Gauge.WEIGHTS)",
         "Gauge.NAMES[0]",
     ] {
@@ -72,7 +72,7 @@ fn a_models_constant_reads_get_the_hash_and_array_rewrites() {
     }
     assert!(!gauge.contains("Gauge.WEIGHTS.fetch") && !gauge.contains("is_key"), "{gauge}");
     // A source `def self.heaviest` reads it the same way.
-    assert!(gauge.contains("Gauge.WEIGHTS[\"large\"] ?? 0"), "{gauge}");
+    assert!(gauge.contains("const h = Gauge.WEIGHTS; const k = \"large\"; const d = 0;"), "{gauge}");
 }
 
 /// A `.freeze` nested inside a literal constant answers its receiver:

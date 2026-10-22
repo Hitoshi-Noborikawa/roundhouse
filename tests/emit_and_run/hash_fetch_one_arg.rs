@@ -78,5 +78,6 @@ fn typescript_one_argument_fetch_raises_on_a_missing_key() {
     assert!(errors.is_empty(), "{errors:#?}");
     let model = std::fs::read_to_string(emitted.join("app/models/membership.ts")).expect("membership.ts");
     assert!(model.contains("throw new Error(\"key not found: \" + k)"), "{model}");
-    assert!(model.contains("if (!(k in h))"), "{model}");
+    // An own key: an Object.prototype name (`"constructor"`) is not one.
+    assert!(model.contains("if (!Object.prototype.hasOwnProperty.call(h, k))"), "{model}");
 }
