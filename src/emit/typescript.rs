@@ -2062,11 +2062,6 @@ pub(super) fn js_library_class(
     })
 }
 
-/// A class-body constant's value as TypeScript declares it: `.freeze`
-/// stripped (it has no TS analog), when what is left is a literal TS
-/// renders as written: `nil`, a Boolean, number, String, Symbol or
-/// regexp, or an Array or Hash of those. Anything else (a call, a
-/// constant read, `Struct.new`) is `None`.
 /// `(ivar, is_static)` → literal for each method of `class` whose body is
 /// `@<its own name> ||= <literal>` (a literal `declarable_constant_value`
 /// takes): the reader `js_library_class` drops for the field of that
@@ -2098,6 +2093,11 @@ fn memoized_literals(
     out
 }
 
+/// A class-body constant's value as TypeScript declares it: `.freeze`
+/// stripped (it has no TS analog), when what is left is a literal TS
+/// renders as written: `nil`, a Boolean, number, String, Symbol or
+/// regexp, or an Array or Hash of those. Anything else (a call, a
+/// constant read, `Struct.new`) is `None`.
 pub(super) fn declarable_constant_value(value: &crate::expr::Expr) -> Option<&crate::expr::Expr> {
     use crate::expr::ExprNode;
     let value = match &*value.node {
