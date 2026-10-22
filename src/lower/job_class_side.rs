@@ -92,8 +92,10 @@ pub fn apply_job_class_side(app: &mut App) -> Vec<Diagnostic> {
             "job_class_side",
             "job-set-options",
             *span,
-            "ignored by Sidekiq",
-            "`set(priority:)` is dropped: Sidekiq's ActiveJob adapter ignores it".to_string(),
+            "priority not modeled",
+            "`set(priority:)` is dropped: Sidekiq doesn't order jobs by it, but Rails still \
+             writes it into the payload's `priority`, which here stays null"
+                .to_string(),
         ));
     }
     for span in &scheduled.rejected {
@@ -542,7 +544,8 @@ struct SetFolds {
 /// `<at>` and `<queue>` for a `set(...)`'s literal options, or `None`
 /// when they aren't literal `wait:`, `wait_until:`, `queue:` and
 /// `priority:` keys. `wait:` is relative to now and `wait_until:`
-/// absolute, as Rails reads them; both go through `to_f`, which an
+/// absolute, as Rails reads them, and `wait_until:` wins when both are
+/// given; both go through `to_f`, which an
 /// Integer, a Float, a Duration and a Time all answer.
 fn set_options(args: &[Expr], span: crate::span::Span, folds: &mut SetFolds) -> Option<(Expr, Expr)> {
     let [opts] = args else { return None };
@@ -563,7 +566,9 @@ fn set_options(args: &[Expr], span: crate::span::Span, folds: &mut SetFolds) -> 
     for (k, v) in entries {
         let ExprNode::Lit { value: crate::expr::Literal::Sym { value: key } } = &*k.node else { return None };
         match key.as_str() {
-            "wait" => {
+            // `wait_until:` wins over `wait:` whichever comes first,
+            // as Rails' `set` reads them.
+            "wait" if !entries.iter().any(|(k, _)| is_sym(k, "wait_until")) => {
                 let time = typed(ExprNode::Const { path: vec![Symbol::from("Time")] }, Ty::Untyped);
                 let now = send(
                     time,
@@ -576,12 +581,17 @@ fn set_options(args: &[Expr], span: crate::span::Span, folds: &mut SetFolds) -> 
                 at = send(now_f, "+", vec![wait_f], Ty::Float);
             }
             "wait_until" => at = send(v.clone(), "to_f", vec![], Ty::Float),
+            "wait" => {}
             "queue" => queue = send(v.clone(), "to_s", vec![], Ty::Str),
             "priority" => folds.priority.push(k.span),
             _ => return None,
         }
     }
     Some((at, queue))
+}
+
+fn is_sym(e: &Expr, name: &str) -> bool {
+    matches!(&*e.node, ExprNode::Lit { value: crate::expr::Literal::Sym { value } } if value.as_str() == name)
 }
 
 /// `perform_later_with(at, queue, *params)`: `later`'s body with its

@@ -385,6 +385,8 @@ const SET_ENQUEUE: &str = r##"  validates :title, presence: true
     ArticleJob.set(wait_until: Time.now - 60).perform_later(self)
     ArticleJob.set(queue: :low).perform_later(self)
     ArticleJob.set(queue: "critical", wait: 30.seconds).perform_later(self)
+    ArticleJob.set(wait: 10, wait_until: Time.now + 7200).perform_later(self)
+    ArticleJob.set(wait_until: Time.now + 7200, wait: 10).perform_later(self)
   end
 "##;
 
@@ -399,7 +401,7 @@ def env(line)
 end
 zadds = lines.select { |l| l.start_with?("zadd ") }
 lpushes = lines.select { |l| l.start_with?("lpush ") }
-raise "zadds #{zadds.length} #{lines.inspect}" unless zadds.length == 4
+raise "zadds #{zadds.length} #{lines.inspect}" unless zadds.length == 6
 raise "lpushes #{lpushes.length}" unless lpushes.length == 2
 score = ->(l) { l.split(" ", 4)[2].to_f }
 raise "5.minutes #{score.(zadds[0]) - t0}" unless (score.(zadds[0]) - t0 - 300).abs < 5
@@ -407,6 +409,8 @@ raise "90 #{score.(zadds[1]) - t0}" unless (score.(zadds[1]) - t0 - 90).abs < 5
 raise "wait_until #{score.(zadds[2]) - t0}" unless (score.(zadds[2]) - t0 - 3600).abs < 5
 raise "queue+wait #{score.(zadds[3]) - t0}" unless (score.(zadds[3]) - t0 - 30).abs < 5
 raise "queue+wait queue" unless env(zadds[3])["queue"] == "critical" && env(zadds[3])["args"][0]["queue_name"] == "critical"
+raise "wait_until wins #{score.(zadds[4]) - t0}" unless (score.(zadds[4]) - t0 - 7200).abs < 5
+raise "wait_until wins, either order #{score.(zadds[5]) - t0}" unless (score.(zadds[5]) - t0 - 7200).abs < 5
 raise "scheduled_at" unless env(zadds[0])["args"][0]["scheduled_at"].is_a?(String) && !env(zadds[0]).key?("enqueued_at")
 due = lpushes[0]
 raise "due #{due}" unless due.start_with?("lpush queue:default ") && env(due)["args"][0]["scheduled_at"].is_a?(String)
@@ -419,7 +423,8 @@ puts "set options passed"
 /// `set(wait:, wait_until:, queue:)` under `:sidekiq`: a wait or a
 /// future time is a ZADD at the right score, a time already past is
 /// pushed at once with its `scheduled_at`, and `queue:` sets both the
-/// envelope's queue and the ActiveJob `queue_name`. The sites are
+/// envelope's queue and the ActiveJob `queue_name`. Given both,
+/// `wait_until:` wins over `wait:`, as in Rails. The sites are
 /// honored, so they file no `job-set-options` warning.
 #[test]
 fn set_options_schedule_and_route_the_push() {

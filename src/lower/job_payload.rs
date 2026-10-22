@@ -601,9 +601,6 @@ pub fn apply_ruby(lcs: &mut [LibraryClass], app: &App) {
     }
 }
 
-/// The ledger line for a job that keeps its Proc. Under `queue_adapter
-/// :sidekiq` it is an error: a Proc can't be pushed to Redis, so the job
-/// would silently run in process instead of where the app sends it.
 /// A wrapper's parameters as typed reads: the first `lead` of them, then
 /// the job's own arguments.
 fn wrapper_vars(wrapper: &crate::dialect::MethodDef, lead: usize) -> (Vec<Expr>, Vec<Expr>) {
@@ -630,6 +627,9 @@ fn wrapper_vars(wrapper: &crate::dialect::MethodDef, lead: usize) -> (Vec<Expr>,
     (vars, args)
 }
 
+/// The ledger line for a job that keeps its Proc. Under `queue_adapter
+/// :sidekiq` it is an error: a Proc can't be pushed to Redis, so the job
+/// would silently run in process instead of where the app sends it.
 fn fallback_diagnostic(
     plan: &JobPlan,
     f: &JobFallback,
