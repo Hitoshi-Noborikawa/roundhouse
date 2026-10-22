@@ -3,6 +3,7 @@
 //! Invalid inputs still shadow outer names; members use canonical metadata.
 
 mod context;
+mod derived;
 mod policy;
 mod source;
 
@@ -97,6 +98,22 @@ pub(in crate::ingest) struct EnumConstants {
     /// body): any of their constants may be replaced or mutated. `Object`
     /// reaches them all.
     reflected: std::collections::HashSet<String>,
+    /// Each owner's own `enum` declarations (bodies whose owner is
+    /// certain), for another body reading `Owner.<plural>`.
+    enum_declarations: std::collections::HashMap<String, Vec<derived::Declaration>>,
+    /// `(owner's last segment, method)` for `def self.m` and `class <<
+    /// self; def m` in an owner's body.
+    singleton_methods: std::collections::HashSet<(String, String)>,
+    /// Singleton method names whose owner is not certain: `def Const.m`,
+    /// and an enum's class method declared in a body whose owner is not
+    /// certain.
+    uncertain_singleton_methods: std::collections::HashSet<String>,
+    /// Owners (last segment) whose singleton class something opens:
+    /// `singleton_class`, `define_singleton_method`, a non-`def` statement
+    /// inside `class << self`.
+    open_singletons: std::collections::HashSet<String>,
+    /// A singleton class opened on a receiver this pass cannot name.
+    singletons_unknown: bool,
 }
 
 impl EnumConstants {
@@ -276,7 +293,18 @@ impl EnumConstants {
         self.values.keys().any(|key| key.split("::").any(|segment| segment == name))
     }
 
+    /// A mapping named by a constant (or a Sorbet enum's `values`), or
+    /// derived from another owner's ([`derived`]: `Gadget.statuses`,
+    /// `Owner::HASH`, `.keys`, `.merge`).
     pub(in crate::ingest) fn resolve(
+        &self,
+        node: &Node<'_>,
+        owners: &[String],
+    ) -> Option<Vec<(String, Literal)>> {
+        self.resolve_constant(node, owners).or_else(|| self.derived(node, owners))
+    }
+
+    fn resolve_constant(
         &self,
         node: &Node<'_>,
         owners: &[String],
