@@ -1395,7 +1395,18 @@ fn inclusion_values(node: &Node<'_>, class_consts: &super::ClassConsts) -> Optio
     // A list constant of the class (`in: MODES`, `MODES = %w[a b].freeze`),
     // or of another owner (`in: Fasp::DATA_CATEGORIES`).
     if node.as_constant_read_node().is_some() || node.as_constant_path_node().is_some() || node.as_call_node().is_some() {
-        return class_consts.list(node).map(InclusionSpec::List);
+        if let Some(list) = class_consts.list(node) {
+            return Some(InclusionSpec::List(list));
+        }
+        // A Hash constant: Rails asks `NAME.include?(value)`, which is
+        // `key?`. That compares with `eql?`, so a numeric key does not
+        // hold an equal number of the other class (`{ 1 => … }` and
+        // `1.0`) as the list check would: only non-numeric keys fold.
+        let keys = class_consts.hash_keys_of(node)?;
+        if keys.iter().any(|k| matches!(k, Literal::Int { .. } | Literal::Float { .. })) {
+            return None;
+        }
+        return Some(InclusionSpec::List(keys));
     }
     if let Some(array) = node.as_array_node() {
         let mut out = Vec::new();

@@ -1868,6 +1868,11 @@ pub(super) struct ClassConsts {
     /// body's `Regexp.union` may resolve to: no union folds. Set by
     /// [`ClassConsts::import`].
     regexp_shadowed: bool,
+    /// `NAME = { "a" => …, b: … }`, `.freeze`d or an alias of another:
+    /// the keys, each a literal kept with its kind, in order. The values
+    /// are never read. For `inclusion: { in: NAME.keys }` and
+    /// `inclusion: { in: NAME }` (`Hash#include?` is `key?`).
+    hash_keys: std::collections::HashMap<String, Vec<Literal>>,
 }
 
 /// The operators [`ClassConsts::int_expr`] folds.
@@ -1914,6 +1919,7 @@ impl ClassConsts {
             // is in no map, so nothing derived from it folds either.
             let regex = out.regex(&value);
             let list = out.list(&value);
+            let keys = out.hash_keys_of(&value);
             let scalar = out.scalar(&value);
             let integer = out.int_expr(&value);
             let labels = if scalar.is_none() { label_list(&value) } else { None };
@@ -1936,6 +1942,9 @@ impl ClassConsts {
             }
             if let Some(list) = list {
                 out.lists.insert(name.clone(), list);
+            }
+            if let Some(keys) = keys {
+                out.hash_keys.insert(name.clone(), keys);
             }
             if let Some(lit) = scalar {
                 out.scalars.insert(name.clone(), lit);
@@ -1962,12 +1971,44 @@ impl ClassConsts {
             if constant_id_str(&call.name()) == "freeze" && call.arguments().is_none() {
                 return self.list(&call.receiver()?);
             }
+            // `NAME.keys` of a folded Hash constant.
+            if constant_id_str(&call.name()) == "keys" && call.arguments().is_none() && call.block().is_none() {
+                return self.hash_keys_of(&call.receiver()?);
+            }
             return None;
         }
         if let Some(key) = const_key(node) {
             return self.lists.get(&key).cloned();
         }
         node.as_array_node()?.elements().iter().map(|el| list_atom(&el)).collect()
+    }
+
+    /// The keys of a Hash the class body can fold: a Hash literal whose
+    /// every key is a literal [`list_atom`] (no `**splat`), `.freeze`d or
+    /// not, or another folded Hash constant. Each key keeps its kind, in
+    /// the order `Hash#keys` gives (a repeated key keeps its first
+    /// place).
+    pub(super) fn hash_keys_of(&self, node: &Node<'_>) -> Option<Vec<Literal>> {
+        if let Some(inner) = single_parenthesized(node) {
+            return self.hash_keys_of(&inner);
+        }
+        if let Some(call) = node.as_call_node() {
+            if constant_id_str(&call.name()) == "freeze" && call.arguments().is_none() && call.block().is_none() {
+                return self.hash_keys_of(&call.receiver()?);
+            }
+            return None;
+        }
+        if let Some(key) = const_key(node) {
+            return self.hash_keys.get(&key).cloned();
+        }
+        let mut keys: Vec<Literal> = Vec::new();
+        for element in node.as_hash_node()?.elements().iter() {
+            let key = list_atom(&element.as_assoc_node()?.key())?;
+            if !keys.contains(&key) {
+                keys.push(key);
+            }
+        }
+        Some(keys)
     }
 
     /// Record whether the class sits directly at the top level, the
@@ -2092,6 +2133,7 @@ impl ClassConsts {
         self.labels.extend(other.labels);
         self.regexes.extend(other.regexes);
         self.lists.extend(other.lists);
+        self.hash_keys.extend(other.hash_keys);
         self.integers.extend(other.integers);
         self.from_union.extend(other.from_union);
     }
@@ -2130,6 +2172,7 @@ impl ClassConsts {
         for key in reads.0 {
             if self.scalars.contains_key(&key)
                 || self.lists.contains_key(&key)
+                || self.hash_keys.contains_key(&key)
                 || self.regexes.contains_key(&key)
                 || self.integers.contains_key(&key)
             {
@@ -2144,6 +2187,9 @@ impl ClassConsts {
             }
             if let Some(value) = table.lists.get(&member) {
                 self.lists.insert(key.clone(), value.clone());
+            }
+            if let Some(value) = table.hash_keys.get(&member) {
+                self.hash_keys.insert(key.clone(), value.clone());
             }
             if let Some(value) = table.integers.get(&member) {
                 self.integers.insert(key.clone(), *value);
