@@ -19,6 +19,7 @@ use crate::diagnostic::{Diagnostic, Severity};
 use crate::span::Span;
 use crate::vfs::Vfs;
 
+use crate::ingest::prism_api::PrismLocation;
 struct Task {
     name: String,
     prerequisite: String,

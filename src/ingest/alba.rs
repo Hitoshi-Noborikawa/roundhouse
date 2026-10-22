@@ -15,6 +15,7 @@ use super::util::{
 };
 use super::{IngestError, IngestResult};
 
+use crate::ingest::prism_api::PrismLocation;
 const RESOURCE: &str = "Alba::Resource";
 
 #[derive(Clone)]

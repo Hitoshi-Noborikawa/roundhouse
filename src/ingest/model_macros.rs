@@ -20,6 +20,7 @@ use crate::expr::{Expr, ExprNode, Literal};
 use crate::ident::{ClassId, Symbol};
 use crate::span::SourceFile;
 
+use crate::ingest::prism_api::PrismLocation;
 mod class_eval;
 
 pub(crate) fn expand_model_macros(

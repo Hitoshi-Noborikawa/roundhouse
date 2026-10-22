@@ -23,6 +23,7 @@ use super::util::{
 };
 use super::{IngestError, IngestResult};
 
+use crate::ingest::prism_api::PrismLocation;
 mod enum_constants;
 pub(in crate::ingest) use enum_constants::EnumConstants;
 
@@ -2864,13 +2865,17 @@ pub(super) fn ingest_method(
     // body that passes it on (`each(&blk)`) still binds the name.
     // Ruby 3.4's anonymous `&` gets the same synthesized name the
     // library-class path gives it, so bare-`&` forwarding binds.
-    let block_param = def.parameters().and_then(|pn| pn.block()).map(|block| {
-        let name = block
-            .name()
-            .and_then(|loc| std::str::from_utf8(loc.as_slice()).ok())
-            .unwrap_or("__blk");
-        crate::dialect::Param::positional(Symbol::from(name))
-    });
+    let block_param = def
+        .parameters()
+        .and_then(|pn| pn.block())
+        .and_then(|n| n.as_block_parameter_node())
+        .map(|block| {
+            let name = block
+                .name()
+                .and_then(|loc| std::str::from_utf8(loc.as_slice()).ok())
+                .unwrap_or("__blk");
+            crate::dialect::Param::positional(Symbol::from(name))
+        });
 
     // Only full `...` or nameless `**` enters this canonical seam.
     // Named rest/keyword-rest above and the separate block slot stay
@@ -3150,7 +3155,7 @@ fn simple_condition_body<'pr>(
             if let Some(rest) = pn.keyword_rest() {
                 self.bind_parameter(&rest);
             }
-            if let Some(block) = pn.block() {
+            if let Some(block) = pn.block().and_then(|n| n.as_block_parameter_node()) {
                 if let Some(name) = block.name() {
                     self.push_binding(&constant_id_str(&name));
                 }

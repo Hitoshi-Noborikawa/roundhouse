@@ -106,6 +106,7 @@ use super::util::{
 };
 use super::{prism, sources, survey};
 
+use crate::ingest::prism_api::PrismLocation;
 /// The file label every probe passes the recognizers: a `<…>` label is never
 /// registered as a source (see `ingest::sources`), so asking a recognizer
 /// about one statement cannot disturb the app's source table.

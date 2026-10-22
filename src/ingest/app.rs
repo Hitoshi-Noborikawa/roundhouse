@@ -39,6 +39,7 @@ use super::view::{ViewEngine, ingest_template};
 use super::survey::{self, unwrap_or_record};
 use super::{IngestError, IngestResult};
 
+use crate::ingest::prism_api::PrismLocation;
 /// Read a file's bytes for one of the per-file walks below (ERB,
 /// jbuilder, models, controllers, migrations, `structure.sql`, routes
 /// split files, …). An unreadable file — the shape that matters in

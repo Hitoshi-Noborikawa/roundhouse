@@ -26,6 +26,7 @@ use super::util::{
 };
 use super::{IngestError, IngestResult};
 
+use crate::ingest::prism_api::PrismLocation;
 /// Ingest the first class declaration, or return `None` if there is none.
 /// Custom Data blocks require plural ingestion because their lifted methods
 /// belong to additional library classes; reject them rather than lose that IR.
@@ -1129,7 +1130,7 @@ fn sorbet_struct_members(body: Option<ruby_prism::Node<'_>>, file: &str) -> Vec<
         let Some(name) = args.next().and_then(|n| {
             let symbol = n.as_symbol_node()?;
             Some(Symbol::from(
-                String::from_utf8_lossy(symbol.value_loc()?.as_slice()).as_ref(),
+                String::from_utf8_lossy(symbol.unescaped()).as_ref(),
             ))
         }) else {
             continue;
@@ -3443,6 +3444,7 @@ pub(super) fn ingest_library_method_with_keywords(
     let block_param = def
         .parameters()
         .and_then(|pn| pn.block())
+        .and_then(|n| n.as_block_parameter_node())
         .map(|block| {
             let name = block
                 .name()

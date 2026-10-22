@@ -38,6 +38,7 @@ use crate::expr::{Expr, ExprNode, LValue, Literal};
 use crate::ident::{ClassId, Symbol};
 use crate::span::{SourceFile, Span};
 
+use crate::ingest::prism_api::PrismLocation;
 const MAX_DEPTH: usize = 8;
 
 pub(crate) fn expand_class_macros(app: &mut App, sources: &[SourceFile]) {

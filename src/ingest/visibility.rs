@@ -11,6 +11,7 @@ use crate::ident::ClassId;
 use super::util::{constant_id_str, flatten_statements, module_name_path, symbol_or_string_value};
 use super::{IngestError, IngestResult};
 
+use crate::ingest::prism_api::PrismLocation;
 const PRIVATE_HOOKS: &[&str] = &[
     "initialize", "initialize_copy", "initialize_dup", "initialize_clone",
 ];
