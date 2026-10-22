@@ -323,9 +323,9 @@ fn real_blog_model_constant_reads_run_under_tsx() {
     assert!(errors.is_empty(), "{errors:?}");
     let out = run_under_tsx(
         &emitted,
-        "import { Gauge } from \"./app/models/gauge.js\";\nconst g = new Gauge();\ng.size = \"large\";\nconsole.log(g.summary());\n",
+        "import { Gauge } from \"./app/models/gauge.js\";\nconst g = new Gauge();\ng.size = \"large\";\nconsole.log(g.summary() + \";\" + Gauge.heaviest());\n",
     );
-    assert_eq!(out, class_constants::GAUGE_SUMMARY);
+    assert_eq!(out, format!("{};9", class_constants::GAUGE_SUMMARY));
 }
 
 #[test]

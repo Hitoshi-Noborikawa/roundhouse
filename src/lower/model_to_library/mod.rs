@@ -2827,6 +2827,12 @@ fn type_method_body(
         // A `def` from the model's source carries no enclosing class; `self` in it is still the model.
         ctx.self_ty = Some(Ty::Class { id: model.name.clone(), args: vec![].into() });
         ctx.instance_body = true;
+    } else if let Some(model) = model.filter(|_| method.receiver == MethodReceiver::Class) {
+        // A source `def self.x`: names resolve in the model's namespace, so
+        // its own constant reads find the model's constants (#1223). Only
+        // the lexical class: a `self_ty` here would re-type its implicit-self
+        // calls, which this pass leaves as they were.
+        ctx.lexical_self = Some(Ty::Class { id: model.name.clone(), args: vec![].into() });
     }
     // Seed ivar_bindings from schema columns so bare `@title` reads
     // resolve to the column type. Same source the synthesizers used

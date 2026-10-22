@@ -68,4 +68,6 @@ fn a_models_constant_reads_get_the_hash_and_array_rewrites() {
         assert!(gauge.contains(read), "{read}:\n{gauge}");
     }
     assert!(!gauge.contains("Gauge.WEIGHTS.fetch") && !gauge.contains("is_key"), "{gauge}");
+    // A source `def self.heaviest` reads it the same way.
+    assert!(gauge.contains("Gauge.WEIGHTS[\"large\"] ?? 0"), "{gauge}");
 }

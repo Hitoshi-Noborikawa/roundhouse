@@ -27,6 +27,10 @@ pub const GAUGE: &str = r#"class Gauge < ApplicationRecord
   def summary
     [WEIGHTS.fetch(size, 0), WEIGHTS.key?(size), WEIGHTS.keys.join("|"), NAMES.first, WEIGHTS[size]].join(",")
   end
+
+  def self.heaviest
+    WEIGHTS.fetch("large", 0)
+  end
 end
 "#;
 

@@ -1230,7 +1230,9 @@ impl<'a> BodyTyper<'a> {
                                 // after lowering): the class's own constant.
                                 .or_else(|| {
                                     let (leaf, owner) = path.split_last()?;
-                                    let Some(Ty::Class { id, .. }) = &ctx.self_ty else { return None };
+                                    let Some(Ty::Class { id, .. }) = ctx.lexical_self.as_ref().or(ctx.self_ty.as_ref()) else {
+                                        return None;
+                                    };
                                     if written_class_id(owner) != *id {
                                         return None;
                                     }
