@@ -909,7 +909,8 @@ fn inline_presence_check(msgs: Messages, attr: &Symbol, attr_ty: Option<&Ty>, ru
 ///
 /// The ruby family can hold the raw input in any column (the writer does not
 /// cast), so every column but a String, Array or temporal one gets the full
-/// test, and a String column the whitespace regex. A strict target's field is
+/// test, and a String column the whitespace regex over its value's `to_s`
+/// (Rails casts a non-String value there first, and no cast is blank). A strict target's field is
 /// its column's type, so it gets only what that type can be: a String's
 /// `strip.empty?` (each target's trim: Unicode White_Space on rust and go;
 /// TypeScript's `trim()` keeps U+0085 and removes U+FEFF, the two places
@@ -961,7 +962,13 @@ fn blank_cond(attr: &Symbol, attr_ty: Option<&Ty>, runtime_relation: super::Runt
     };
     match (runtime_relation, attr_ty) {
         (_, Some(Ty::Array { .. })) => or(nil_check, send(narrowed, "empty?", vec![])),
-        (super::RuntimeRelation::Present, Some(Ty::Str)) => or(nil_check, whitespace(narrowed)),
+        // The uncast writer can hold an Integer, `false` or an Array here,
+        // which Rails casts to a String before validating (`5` is `"5"`,
+        // `false` is `"f"`, `[]` is `"[]"`): none is blank, and `to_s`
+        // answers the same without raising on the regexp.
+        (super::RuntimeRelation::Present, Some(Ty::Str)) => {
+            or(nil_check, whitespace(send(attr_ivar.clone(), "to_s", vec![])))
+        }
         (super::RuntimeRelation::Present, _) => or(
             or(
                 or(or(nil_check, is_false(attr_ivar.clone())), and(is_a_check(&attr_ivar, "String"), whitespace(attr_ivar.clone()))),

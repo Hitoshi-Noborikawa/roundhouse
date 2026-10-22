@@ -150,3 +150,33 @@ fn elixir_reads_a_stripped_string_as_a_string() {
     assert!(model.contains("String.trim(record.name) == \"\""), "{model}");
     assert!(!model.contains("__struct__.empty?"), "{model}");
 }
+
+/// A String column can hold a non-String value on the ruby family (the
+/// writer does not cast). Rails 8.1.4 casts it first (`5` is `"5"`,
+/// `false` is `"f"`, `[1]` is `"[1]"`), so none is blank: presence
+/// passes and absence fails. The whitespace test used to raise
+/// TypeError on the regexp for each of them.
+#[test]
+fn a_non_string_value_on_a_string_column_is_present_like_rails() {
+    emit_and_run::empty_app()
+        .write("app/models/application_record.rb", "class ApplicationRecord < ActiveRecord::Base\n  self.abstract_class = true\nend\n")
+        .write(
+            "db/schema.rb",
+            "ActiveRecord::Schema.define do\n  create_table \"notes\", force: :cascade do |t|\n    t.string \"title\"\n    t.string \"gone\"\n  end\nend\n",
+        )
+        .write("app/models/note.rb", "class Note < ApplicationRecord\n  validates :title, presence: true\n  validates :gone, absence: true\nend\n")
+        .run_ruby(
+            r##"got = [5, false, [1], [], true, 0].map do |v|
+  n = Note.new
+  n.title = v
+  n.gone = v
+  n.valid?
+  n.errors.to_a
+end
+want = [["Gone must be blank"]] * 6
+raise "errors: #{got.inspect}" unless got == want
+puts "non-String presence passed"
+"##,
+        )
+        .assert_passes();
+}
