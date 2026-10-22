@@ -189,7 +189,7 @@ pub(crate) fn expand_model_macros(
                         MethodReceiver::Class,
                     )
                 })
-                && supported_source_signature(def, sources)
+                && supported_source_signature(def, sources, false)
                 && supported_source_call(expr, sources))
             .then(|| expand(def, args, sources, &model.name))
             .flatten()
@@ -198,6 +198,10 @@ pub(crate) fn expand_model_macros(
                 mark_mixin_constants(&mut expansion.items);
                 expansion
             });
+            // A load-hook macro this cannot expand is the partial evaluator's to run or refuse (`class_macros`)
+            if methods.is_none() && hook_origins.contains(origin) && !macros.contains_key(method) {
+                continue;
+            }
             candidates.push((index, method.clone(), methods));
         }
         if candidates.is_empty() {
@@ -334,7 +338,7 @@ fn include_closure(app: &App, id: ClassId, included: &mut HashSet<ClassId>) {
 /// Library IR intentionally flattens some Ruby parameters. Expansion
 /// needs the original signature: destructuring and anonymous rest may
 /// otherwise disappear altogether and look like a simpler valid macro.
-pub(super) fn supported_source_signature(def: &MethodDef, sources: &[SourceFile]) -> bool {
+pub(super) fn supported_source_signature(def: &MethodDef, sources: &[SourceFile], optionals: bool) -> bool {
     let Some(source) = def
         .name_span
         .file
@@ -346,6 +350,7 @@ pub(super) fn supported_source_signature(def: &MethodDef, sources: &[SourceFile]
     };
     struct Signature {
         offset: usize,
+        optionals: bool,
         valid: bool,
     }
     impl<'pr> ruby_prism::Visit<'pr> for Signature {
@@ -357,7 +362,7 @@ pub(super) fn supported_source_signature(def: &MethodDef, sources: &[SourceFile]
                 params.rest().is_none()
                     && params.keyword_rest().is_none()
                     && params.block().is_none()
-                    && params.optionals().iter().next().is_none()
+                    && (self.optionals || params.optionals().iter().next().is_none())
                     && params.posts().iter().next().is_none()
                     && params
                         .requireds()
@@ -373,6 +378,7 @@ pub(super) fn supported_source_signature(def: &MethodDef, sources: &[SourceFile]
     let parsed = ruby_prism::parse(source.text.as_bytes());
     let mut signature = Signature {
         offset: def.name_span.start as usize,
+        optionals,
         valid: false,
     };
     ruby_prism::Visit::visit(&mut signature, &parsed.node());
