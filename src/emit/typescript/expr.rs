@@ -4131,8 +4131,36 @@ fn js_send_inner(
 /// as Const references — without this, `assert_operator(X, :<,
 /// StandardError)` and similar idioms emit a bare `StandardError`
 /// that's neither in scope nor importable.
+std::thread_local! {
+    static RUNTIME_BASE_ALIASED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Alias the runtime's `ActiveRecord::Base` and `ActionController::Base`
+/// in the app files emitted from here on, for an app that defines its
+/// own `Base` (#1228). Off while the runtime's own files emit, where
+/// `Base` is the class being defined.
+pub(crate) fn set_runtime_base_aliased(on: bool) {
+    RUNTIME_BASE_ALIASED.with(|cell| cell.set(on));
+}
+
+/// The local name an app file gives the runtime class `qualified`
+/// (`ActiveRecord::Base`) when the app's own `Base` takes the bare name.
+pub(crate) fn runtime_base_alias(qualified: &str) -> Option<&'static str> {
+    if !RUNTIME_BASE_ALIASED.with(|cell| cell.get()) {
+        return None;
+    }
+    match qualified {
+        "ActiveRecord::Base" => Some("ActiveRecordBase"),
+        "ActionController::Base" => Some("ActionControllerBase"),
+        _ => None,
+    }
+}
+
 fn const_name(path: &[Symbol]) -> String {
     let segs: Vec<&str> = path.iter().map(|s| s.as_str()).collect();
+    if let Some(alias) = runtime_base_alias(&segs.join("::")) {
+        return alias.to_string();
+    }
     const FRAMEWORK_NAMESPACES: &[&str] = &[
         "ActionController",
         "ActiveRecord",

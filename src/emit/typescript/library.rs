@@ -926,6 +926,7 @@ fn collect_imports_with_companions(
             "StandardError" => String::new(),
             "ActiveSupport::TestCase" | "ActionDispatch::IntegrationTest" => "TestCase".to_string(),
             "Minitest::Test" => "Test".to_string(),
+            _ if let Some(alias) = super::expr::runtime_base_alias(raw) => alias.to_string(),
             // All other framework parents (`ActiveRecord::Base`,
             // `ActionController::Base`, mixins like `ActiveRecord::
             // Validations`) collapse to the last segment — the
@@ -999,6 +1000,9 @@ fn collect_imports_with_companions(
     let mut fixture_imports: Vec<(String, String)> = Vec::new();
     let mut controller_imports: Vec<(String, String)> = Vec::new();
     let mut controller_base_import: bool = false;
+    // The runtime base classes under their #1228 aliases.
+    let mut controller_base_alias_import: bool = false;
+    let mut active_record_base_alias_import: bool = false;
     let mut active_record_base_import: bool = false;
     let mut active_record_namespace_import: bool = false;
     let mut route_helpers_import: bool = false;
@@ -1040,7 +1044,11 @@ fn collect_imports_with_companions(
             runtime_src_imports.push((r, stem.to_string()));
         } else if r == "Test" || r == "TestCase" {
             runtime_imports.push(r);
-        } else if r == "Base" {
+        } else if r == "ActiveRecordBase" && super::expr::runtime_base_alias("ActiveRecord::Base").is_some() {
+            active_record_base_alias_import = true;
+        } else if r == "ActionControllerBase" && super::expr::runtime_base_alias("ActionController::Base").is_some() {
+            controller_base_alias_import = true;
+        } else if r == "Base" && super::expr::runtime_base_alias("ActiveRecord::Base").is_none() {
             // Bare `Base` — disambiguate via canonical parent inspection
             // above. ApplicationController extends ActionController::Base
             // → controller_base_import; everything else (record-typed
@@ -1204,11 +1212,12 @@ fn collect_imports_with_companions(
         };
         out.push(named(vec![n.clone()], import_path));
     }
-    if controller_base_import {
+    if controller_base_import || controller_base_alias_import {
         let runtime_path = relative_to_root(out_path, "src/action_controller_base.js");
-        out.push(named(vec!["Base".to_string()], runtime_path));
+        let alias = controller_base_alias_import.then(|| "ActionControllerBase".to_string());
+        out.push(JsImport::Named { names: vec![("Base".to_string(), alias)], from: runtime_path });
     }
-    if active_record_base_import || active_record_namespace_import {
+    if active_record_base_import || active_record_base_alias_import || active_record_namespace_import {
         // ActiveRecord::Base lives in the runtime as `Base` from
         // `src/active_record_base.ts`. The `ActiveRecord` namespace
         // class (with the `static adapter` slot) lives in the same
@@ -1217,12 +1226,15 @@ fn collect_imports_with_companions(
         let runtime_path = relative_to_root(out_path, "src/active_record_base.js");
         let mut names = Vec::new();
         if active_record_base_import {
-            names.push("Base".to_string());
+            names.push(("Base".to_string(), None));
+        }
+        if active_record_base_alias_import {
+            names.push(("Base".to_string(), Some("ActiveRecordBase".to_string())));
         }
         if active_record_namespace_import {
-            names.push("ActiveRecord".to_string());
+            names.push(("ActiveRecord".to_string(), None));
         }
-        out.push(named(names, runtime_path));
+        out.push(JsImport::Named { names, from: runtime_path });
     }
     if route_helpers_import {
         // routes_to_library emits the per-app helpers to
@@ -1321,7 +1333,9 @@ fn collect_ty_class_refs(ty: &crate::ty::Ty, out: &mut BTreeSet<String>) {
             ];
             let raw = id.0.as_str();
             let segs: Vec<&str> = raw.split("::").collect();
-            let segment = if segs.len() >= 2 && FRAMEWORK_NAMESPACES.contains(&segs[0]) {
+            let segment = if let Some(alias) = super::expr::runtime_base_alias(raw) {
+                alias
+            } else if segs.len() >= 2 && FRAMEWORK_NAMESPACES.contains(&segs[0]) {
                 segs.last().copied().unwrap_or(raw)
             } else {
                 segs.first().copied().unwrap_or(raw)
@@ -1461,7 +1475,9 @@ fn collect_class_refs(e: &Expr, out: &mut BTreeSet<String>) {
                 "Roundhouse",
             ];
             let segs: Vec<&str> = path.iter().map(|s| s.as_str()).collect();
-            if segs.len() >= 2 && FRAMEWORK_NAMESPACES.contains(&segs[0]) {
+            if let Some(alias) = super::expr::runtime_base_alias(&segs.join("::")) {
+                out.insert(alias.to_string());
+            } else if segs.len() >= 2 && FRAMEWORK_NAMESPACES.contains(&segs[0]) {
                 if let Some(last) = segs.last() {
                     out.insert((*last).to_string());
                 }
