@@ -623,7 +623,7 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
             .iter()
             .chain(runtime_seed_classes.iter())
             .chain(app.library_classes.iter())
-            .map(|c| (c, instance_field_names(c))),
+            .map(|c| (c, instance_field_names(c), static_field_names(c))),
     );
 
     // Reuse the runtime parse from the async-expansion step above
@@ -1710,6 +1710,27 @@ pub fn emit_library_class(class: &crate::dialect::LibraryClass) -> Result<String
 
 /// The instance field names `js_library_class` declares for `class`:
 /// its attribute readers and the ivars its instance methods assign.
+/// The class-side counterpart of `instance_field_names`: a class-side
+/// attribute reader, and each `@ivar` a class method assigns, which
+/// `js_library_class` declares as a `static` field (`def self.label;
+/// @label ||= "x"; end` is `static label`, and the method is left out).
+fn static_field_names(class: &crate::dialect::LibraryClass) -> std::collections::HashSet<String> {
+    use crate::dialect::{AccessorKind, MethodReceiver};
+    let mut names = std::collections::HashSet::new();
+    let mut ivars: indexmap::IndexMap<String, Ty> = indexmap::IndexMap::new();
+    for m in &class.methods {
+        if !matches!(m.receiver, MethodReceiver::Class) {
+            continue;
+        }
+        if matches!(m.kind, AccessorKind::AttributeReader) && m.params.is_empty() {
+            names.insert(m.name.as_str().to_string());
+        }
+        collect_ivar_assignments(&m.body, &mut ivars);
+    }
+    names.extend(ivars.into_keys());
+    names
+}
+
 fn instance_field_names(class: &crate::dialect::LibraryClass) -> std::collections::HashSet<String> {
     use crate::dialect::{AccessorKind, MethodReceiver};
     let mut names = std::collections::HashSet::new();

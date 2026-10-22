@@ -29,3 +29,16 @@ fn a_zero_argument_def_without_parens_is_called() {
     assert!(widget.contains("return this.label().toUpperCase();"), "{widget}");
     assert!(comment.contains("[this.tag(), this.tag()]"), "{comment}");
 }
+
+/// A class method the emit declares as a `static` field (`def self.mode;
+/// @mode ||= "x"; end` is `static mode`) is read, not called: `this.mode()`
+/// on a field was TS2349 and a TypeError at run time.
+#[test]
+fn a_class_side_field_is_read_not_called() {
+    let (emitted, errors) = parenless_calls::overlay().emit(BuildTarget::Typescript);
+    assert!(errors.is_empty(), "{errors:?}");
+    let dial = std::fs::read_to_string(emitted.join("app/models/dial.ts")).expect("dial.ts");
+    assert!(dial.contains("static mode"), "{dial}");
+    assert!(dial.contains("return this.mode.toUpperCase();"), "{dial}");
+    assert!(!dial.contains("this.mode()"), "{dial}");
+}

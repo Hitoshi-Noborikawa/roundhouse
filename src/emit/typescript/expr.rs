@@ -203,32 +203,35 @@ std::thread_local! {
         std::cell::RefCell::new(HashMap::new());
 }
 
-/// Record the instance-method shapes of `classes` for the Send emit.
-/// `fields` is each class's TS field names (`js_library_class`'s
-/// attribute readers and assigned ivars): a method whose emitted name
-/// is one of them is dropped in favour of the field, so it reads as one.
+/// Record the method shapes of `classes` for the Send emit. `fields` is
+/// each class's TS instance field names and `static_fields` its static
+/// ones (`js_library_class`'s attribute readers and assigned ivars, per
+/// side): a method whose emitted name is one of its side's fields is
+/// dropped in favour of the field, so it reads as one.
 pub(crate) fn set_class_shapes<'a>(
-    classes: impl IntoIterator<Item = (&'a crate::dialect::LibraryClass, HashSet<String>)>,
+    classes: impl IntoIterator<Item = (&'a crate::dialect::LibraryClass, HashSet<String>, HashSet<String>)>,
 ) {
     use crate::dialect::AccessorKind;
+    let as_field = |kind: AccessorKind, fields: &HashSet<String>, name: &str| {
+        if kind == AccessorKind::Method && fields.contains(&super::library::sanitize_identifier(name)) {
+            AccessorKind::AttributeReader
+        } else {
+            kind
+        }
+    };
     let mut map: HashMap<String, ClassShape> = HashMap::new();
-    for (c, fields) in classes {
+    for (c, fields, static_fields) in classes {
         let entry = map.entry(c.name.0.as_str().to_string()).or_default();
         if entry.parent.is_none() {
             entry.parent = c.parent.as_ref().map(|p| p.0.as_str().to_string());
         }
         for m in &c.methods {
             if !matches!(m.receiver, crate::dialect::MethodReceiver::Instance) {
-                entry.class_methods.entry(m.name.as_str().to_string()).or_insert((m.kind, m.params.len()));
+                let kind = as_field(m.kind, &static_fields, m.name.as_str());
+                entry.class_methods.entry(m.name.as_str().to_string()).or_insert((kind, m.params.len()));
                 continue;
             }
-            let kind = if m.kind == AccessorKind::Method
-                && fields.contains(&super::library::sanitize_identifier(m.name.as_str()))
-            {
-                AccessorKind::AttributeReader
-            } else {
-                m.kind
-            };
+            let kind = as_field(m.kind, &fields, m.name.as_str());
             entry.methods.entry(m.name.as_str().to_string()).or_insert((kind, m.params.len()));
         }
     }
