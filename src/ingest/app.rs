@@ -2536,10 +2536,10 @@ fn gap_numericality_allow_on_untyped(app: &mut App) {
 /// `AcceptanceValidator` defines a virtual reader and writer for an
 /// undeclared one on first use, which this build does not synthesize, so
 /// the lowered check would read an ivar nothing writes. A name declared
-/// only by `attribute :name, :type` is refused too: its synthesized writer
-/// does not cast as Rails does (the Boolean one turns nil and `""` into
-/// `false`, where Rails keeps nil and skips the check). Refused as a whole
-/// call, as the numericality gap is.
+/// only by `attribute :name, :type` of another type is refused too: its
+/// synthesized writer stores the input verbatim, where Rails casts it
+/// (`true` is `"t"` on a String attribute). Refused as a whole call, as
+/// the numericality gap is.
 fn gap_acceptance_on_undeclared(app: &mut App) {
     use crate::dialect::{MethodReceiver, ModelBodyItem, ValidationRule};
     use crate::expr::{ExprNode, Literal};
@@ -2584,7 +2584,10 @@ fn gap_acceptance_on_undeclared(app: &mut App) {
             }
             let attr = &validation.attribute;
             let construct = format!("validates :{}, acceptance:", attr.as_str());
-            if declared(attr) {
+            // An `attribute :x, :boolean` with the synthesized writer is
+            // lowered on the ruby family and reported per strict target
+            // (`lower::validations::acceptance_gaps_for_target`).
+            if declared(attr) || crate::lower::model_to_library::markers::synthesized_boolean_attribute(model, attr) {
                 continue;
             } else if attribute_call(attr) {
                 refused_attribute_api.push((i, item.span(), construct));
@@ -2603,7 +2606,7 @@ fn gap_acceptance_on_undeclared(app: &mut App) {
     report_validates_gaps(
         app,
         attribute_api,
-        "acceptance: on an `attribute` the model declares, whose writer does not cast as Rails does (a Boolean one turns nil and \"\" into false)",
+        "acceptance: on an `attribute` the model declares, whose writer stores the input uncast where Rails casts it",
     );
 }
 

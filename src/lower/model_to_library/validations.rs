@@ -84,6 +84,22 @@ pub(super) fn push_validate_method(
                             attachment_blank_cond(model, &v.attribute, kind),
                             errors_push(v.attribute.as_str(), msgs.error(v.attribute.as_str(), "blank", &Default::default())),
                         )]
+                    } else if matches!(rule, ValidationRule::Acceptance { .. })
+                        && super::markers::synthesized_boolean_attribute(model, &v.attribute)
+                    {
+                        match runtime_relation {
+                            // The ruby family's writer stores Rails' cast
+                            // (`true`, `false` or nil), which the check
+                            // compares as written.
+                            super::RuntimeRelation::Present => {
+                                validation_rule_to_calls(msgs, &v.attribute, rule, None, runtime_relation)
+                            }
+                            // A strict target's field turns nil and `""`
+                            // into `false`, which the check would reject
+                            // where Rails skips it. Reported per target by
+                            // `lower::validations::acceptance_gaps_for_target`.
+                            super::RuntimeRelation::Absent => Vec::new(),
+                        }
                     } else if let ValidationRule::Uniqueness { scope, case_sensitive, allow_nil, allow_blank } = rule {
                         match runtime_relation {
                             super::RuntimeRelation::Present => vec![inline_uniqueness_check(

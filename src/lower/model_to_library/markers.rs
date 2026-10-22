@@ -517,6 +517,16 @@ pub(crate) fn attribute_api_decls(body: &[ModelBodyItem]) -> Vec<(Symbol, Symbol
     out
 }
 
+/// `attr` is an `attribute :attr, :boolean` whose reader and writer are the
+/// synthesized ones (the model defines neither itself), so its value is
+/// what `push_attribute_api_methods`' Boolean cast stores.
+pub(crate) fn synthesized_boolean_attribute(model: &Model, attr: &Symbol) -> bool {
+    let setter = Symbol::from(format!("{}=", attr.as_str()));
+    attribute_api_decls(&model.body).iter().any(|(name, ty)| name == attr && ty.as_str() == "boolean")
+        && !crate::lower::model_to_library::model_defines_instance_method(model, attr)
+        && !crate::lower::model_to_library::model_defines_instance_method(model, &setter)
+}
+
 /// `attribute :name, :type` — typed virtual attributes (lobsters'
 /// `attribute :mod_note, :boolean` on Message, `:is_unread` on the
 /// SQL-view-backed ReplyingComment). Reader is a typed ivar read;

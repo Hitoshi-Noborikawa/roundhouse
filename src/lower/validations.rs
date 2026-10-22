@@ -273,3 +273,39 @@ fn lit_to_inclusion_value(lit: &crate::expr::Literal) -> Option<InclusionValue> 
         Literal::Regex { .. } => None,
     }
 }
+
+/// `validates :attr, acceptance:` on an `attribute :attr, :boolean` is
+/// lowered only on the targets whose writer keeps Rails' nil (the ruby
+/// family, `BuildTarget::has_runtime_relation`). A strict target's field
+/// turns nil and `""` into `false`, so the check would reject a record
+/// Rails accepts; this reports the rule it leaves out, once per
+/// validation, as `uniqueness_gaps_for_target` does.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn acceptance_gaps_for_target(
+    app: &crate::App,
+    target: crate::build_target::BuildTarget,
+) -> Vec<crate::diagnostic::Diagnostic> {
+    if target.has_runtime_relation() {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    for model in &app.models {
+        for item in &model.body {
+            let crate::dialect::ModelBodyItem::Validation { validation, .. } = item else { continue };
+            if !validation.rules.iter().any(|r| matches!(r, ValidationRule::Acceptance { .. }))
+                || !crate::lower::model_to_library::markers::synthesized_boolean_attribute(model, &validation.attribute)
+            {
+                continue;
+            }
+            let mut d = crate::diagnostic::Diagnostic::unsupported(
+                item.span(),
+                Some(Symbol::from(target.as_str())),
+                format!("validates :{}, acceptance:", validation.attribute.as_str()),
+                "this target's Boolean attribute writer turns nil and \"\" into false, which the check would reject where Rails skips it",
+            );
+            d.severity = crate::diagnostic::Severity::Warning;
+            out.push(d);
+        }
+    }
+    out
+}
