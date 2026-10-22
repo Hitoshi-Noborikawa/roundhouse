@@ -33,18 +33,21 @@ fn literal_constants_are_declared_as_static_members() {
 }
 
 /// A value that is not a literal (a constant read, a call) is not
-/// declared, nor is a constant whose name a method also takes.
+/// declared, nor is a constant whose name a class method also takes.
 #[test]
 fn only_literal_unclaimed_constants_are_declared() {
     let (emitted, errors) = emit_and_run::real_blog()
         .write(
             "app/models/gauge.rb",
-            "class Gauge\n  WEIGHTS = { \"a\" => 1 }.freeze\n  ALIAS = WEIGHTS\n  STARTED = Time.now\n  LEVEL = 3\n\n  def self.LEVEL\n    4\n  end\n\n  def self.size\n    WEIGHTS.size\n  end\nend\n",
+            "class Gauge\n  WEIGHTS = { \"a\" => 1 }.freeze\n  ALIAS = WEIGHTS\n  STARTED = Time.now\n  LEVEL = 3\n  MODE = \"auto\"\n\n  def self.LEVEL\n    4\n  end\n\n  def MODE\n    \"manual\"\n  end\n\n  def self.size\n    WEIGHTS.size\n  end\nend\n",
         )
         .emit(BuildTarget::Typescript);
     assert!(errors.is_empty(), "{errors:?}");
     let gauge = std::fs::read_to_string(emitted.join("app/models/gauge.ts")).expect("gauge.ts");
     assert!(gauge.contains("static WEIGHTS = { \"a\": 1 };"), "{gauge}");
+    // An instance method of the same name does not collide: TypeScript
+    // keeps the static and instance sides apart, as Ruby does.
+    assert!(gauge.contains("static MODE = \"auto\";"), "{gauge}");
     for absent in ["static ALIAS", "static STARTED", "static LEVEL ="] {
         assert!(!gauge.contains(absent), "{absent}:\n{gauge}");
     }
