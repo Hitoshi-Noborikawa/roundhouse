@@ -125,6 +125,7 @@ pub(super) fn emit_library_class_decls(app: &App) -> Vec<EmittedFile> {
     apply_datetime_lowering(&mut lcs, app);
     apply_rich_text_content_memo(&mut lcs);
     apply_boolean_lowering(&mut lcs, app);
+    apply_typed_writer_cast_lowering(&mut lcs, app);
     apply_hydration_nil_lowering(&mut lcs, app);
     apply_time_format_lowering(&mut lcs, app);
     // Same rooting the view pipeline applies, for the same reason one
@@ -9847,6 +9848,89 @@ pub(crate) fn apply_boolean_lowering(lcs: &mut [LibraryClass], app: &App) {
             }
         }
     }
+}
+
+/// Ruby-family pre-emit pass: the public writer of an integer, float,
+/// decimal or boolean column casts what it is given, as ActiveModel's
+/// typed attribute does (`record.min_favs = "5"` reads back `5`,
+/// `= ""` reads nil, `active = "1"` true). Before, the writer stored the
+/// value as given, so a request param reached every validator, comparison
+/// and serializer as a String (#1158). `ActiveSupport.cast_integer` /
+/// `cast_float` / `cast_boolean` implement ActiveModel 8.1.4's casts; a
+/// decimal column is a Float here and casts as one. Hydration passes
+/// values already of the column's type (`Db.column_int_opt`,
+/// `row.x&.to_i`), on which each cast is the identity. Strict targets
+/// type the writer's parameter and are not rewritten.
+///
+/// Only the synthesized writer is rewritten (`@col = <the value>`, perhaps
+/// through `normalizes`, which then runs on the cast value as in Rails),
+/// also when a model's own `col=` renamed it `_write_<col>_raw`, so its
+/// `super` casts too. An enum column's writer maps labels and is left
+/// alone, as is the primary key's.
+pub(crate) fn apply_typed_writer_cast_lowering(lcs: &mut [LibraryClass], app: &App) {
+    for model in &app.models {
+        let Some(table) = app.schema.tables.get(&model.table.0) else {
+            continue;
+        };
+        let casts: HashMap<Symbol, &'static str> = table
+            .columns
+            .iter()
+            .filter(|c| !c.primary_key && !model.enums.contains_key(&c.name))
+            .filter_map(|c| {
+                let cast = match c.col_type {
+                    crate::schema::ColumnType::Integer | crate::schema::ColumnType::BigInt => "cast_integer",
+                    crate::schema::ColumnType::Float | crate::schema::ColumnType::Decimal { .. } => "cast_float",
+                    crate::schema::ColumnType::Boolean => "cast_boolean",
+                    _ => return None,
+                };
+                Some((c.name.clone(), cast))
+            })
+            .collect();
+        if casts.is_empty() {
+            continue;
+        }
+        let Some(lc) = lcs.iter_mut().find(|lc| lc.name == model.name) else {
+            continue;
+        };
+        for m in &mut lc.methods {
+            if m.receiver != MethodReceiver::Instance || m.kind != crate::dialect::AccessorKind::AttributeWriter {
+                continue;
+            }
+            let name = m.name.as_str();
+            let col = name
+                .strip_prefix("_write_")
+                .and_then(|n| n.strip_suffix("_raw"))
+                .or_else(|| name.strip_suffix('='))
+                .map(Symbol::from);
+            let Some(col) = col else { continue };
+            let Some(cast) = casts.get(&col) else { continue };
+            let [param] = m.params.as_slice() else { continue };
+            let param = param.name.clone();
+            let ExprNode::Assign { target: crate::expr::LValue::Ivar { name: ivar }, value } = &mut *m.body.node else {
+                continue;
+            };
+            if *ivar != col {
+                continue;
+            }
+            cast_param_reads(value, &param, cast);
+        }
+    }
+}
+
+/// Replace each read of `param` in `e` with `ActiveSupport.<cast>(param)`.
+fn cast_param_reads(e: &mut Expr, param: &Symbol, cast: &str) {
+    if matches!(&*e.node, ExprNode::Var { name, .. } if name == param) {
+        let read = std::mem::replace(e, sp_expr(ExprNode::Lit { value: Literal::Nil }));
+        *e = sp_expr(ExprNode::Send {
+            recv: Some(sp_expr(ExprNode::Const { path: vec![Symbol::from("ActiveSupport")] })),
+            method: Symbol::from(cast),
+            args: vec![read],
+            block: None,
+            parenthesized: true,
+        });
+        return;
+    }
+    e.node.for_each_child_mut(&mut |c| cast_param_reads(c, param, cast));
 }
 
 /// `@col == true || @col == 1`.

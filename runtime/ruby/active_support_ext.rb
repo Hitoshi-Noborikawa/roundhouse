@@ -671,6 +671,50 @@ module ActiveSupport
     end
   end
 
+  # ActiveModel::Type::Float, through `Helpers::Numeric#cast` (a decimal
+  # column is a Float here, so it casts the same, where Rails answers a
+  # BigDecimal of the same value). A blank string is nil; `true`/`false`
+  # are 1.0/0.0; `"Infinity"`, `"-Infinity"` and `"NaN"` are those floats
+  # (`Type::Float#cast_value`); any other string is `to_f`.
+  def self.cast_float(value)
+    if value.nil?
+      nil
+    elsif value == true
+      1.0
+    elsif value == false
+      0.0
+    elsif value.is_a?(Float)
+      value
+    elsif value.is_a?(Integer)
+      value.to_f
+    elsif value.is_a?(String)
+      ActiveSupport.float_from_string(value)
+    else
+      raise TypeError, "can't cast #{value.class} to a float"
+    end
+  end
+
+  # The String half of `cast_float`: the blank scan `integer_from_string`
+  # makes, then Rails' three named values, then `to_f`. The named values
+  # are divisions rather than `Float::INFINITY`/`NAN`, which not every
+  # target defines.
+  def self.float_from_string(value)
+    i = 0
+    n = value.length
+    blank = true
+    while i < n
+      blank = false unless value[i].match?(/[[:space:]]/)
+      i = n unless blank
+      i = i + 1
+    end
+    return nil if blank
+    zero = 0.0
+    return 1.0 / zero if value == "Infinity"
+    return -1.0 / zero if value == "-Infinity"
+    return zero / zero if value == "NaN"
+    value.to_f
+  end
+
   # `String#blank?` is `/\A[[:space:]]*\z/`, which raises ArgumentError
   # on invalid UTF-8 — the integer writer does, in `presence`, before
   # it slices. One character at a time, the same scan `squish` lowers:

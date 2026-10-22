@@ -6044,6 +6044,7 @@ const RUBY_SPINEL_ONLY_METHODS: &[(&str, &str)] = &[
     // the include is not a claim that a strict target can run the cast.
     ("ActiveSupport", "cast_string"),
     ("ActiveSupport", "cast_integer"),
+    ("ActiveSupport", "cast_float"),
     ("ActiveSupport", "cast_boolean"),
     ("ActiveSupport", "cast_datetime"),
     ("ActiveSupport", "errors_to_hash"),
