@@ -2463,6 +2463,7 @@ fn synth_initialize(
 ) -> MethodDef {
     let attrs = Symbol::from("attrs");
 
+    let scope = crate::lower::default_scope::static_default_scope(model).unwrap_or_default();
     let mut stmts: Vec<Expr> = Vec::new();
     // Do not forward explicit attrs to a parent's possibly different enum mapping.
     stmts.push(Expr::new(
@@ -2512,9 +2513,21 @@ fn synth_initialize(
         // declared) leaves it NULL.
         let col_ty = ty_of_column(&col.col_type);
         let column = ColumnSlot::classify(col, model);
-        let schema_default = column_default_literal(model, col);
+        // A `default_scope { where(col: literal) }` column starts at the
+        // scope's literal, as Rails' scope attributes seed `new` (given
+        // attributes still win). A `nil` literal is the unset value.
+        let scoped = scope.iter().find(|(c, _)| *c == col.name).map(|(_, l)| l);
+        let schema_default = match scoped {
+            Some(crate::expr::Literal::Nil) => None,
+            Some(l) => Some(with_ty(
+                Expr::new(Span::synthetic(), ExprNode::Lit { value: l.clone() }),
+                ty_of_column(&col.col_type),
+            )),
+            None => column_default_literal(model, col),
+        };
+        let has_default = schema_default.is_some();
         let nullable = matches!(super::ty_of_column_slot(col), Ty::Union { .. })
-            && schema_default.is_none();
+            && (schema_default.is_none() || matches!(scoped, Some(crate::expr::Literal::Nil)));
         let default = schema_default.unwrap_or_else(|| default_literal_for_ty(&col_ty));
         // Defaults are stored database values, not assignments through
         // the enum type. In particular, a base constructor must not
@@ -2735,7 +2748,7 @@ fn synth_initialize(
                     parenthesized: false,
                 },
             ));
-            if overrides_schema_default(model, col) && json_assign_is_none {
+            if overrides_default(model, col, has_default) && json_assign_is_none {
                 let given = Expr::new(Span::synthetic(), ExprNode::Cast {
                     value: given, target_ty: super::ty_of_column_slot(col),
                 });
@@ -3728,8 +3741,9 @@ fn synth_index_write(owner: &ClassId, table: &Table, model: &Model) -> MethodDef
 /// Widening the ingest is its own change with its own measurement —
 /// it moves those columns' emitted constructors in a second app.
 // Not the `||` alone: `new(flag: false)` under `default: true` and `new(n: nil)` under `default: 7` would read back the default.
-fn overrides_schema_default(model: &Model, col: &Column) -> bool {
-    column_default_literal(model, col).is_some()
+// `has_default` is the column's starting value, a `default_scope` literal included: `new(active: false)` under `where(active: true)` keeps `false`.
+fn overrides_default(model: &Model, col: &Column, has_default: bool) -> bool {
+    has_default
         && !ColumnSlot::classify(col, model).is_temporal()
         && (matches!(col.col_type, crate::schema::ColumnType::Boolean)
             || matches!(super::ty_of_column_slot(col), Ty::Union { .. }))

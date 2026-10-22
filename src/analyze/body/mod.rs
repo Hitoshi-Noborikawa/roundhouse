@@ -204,6 +204,10 @@ pub struct ClassInfo {
     /// If this class maps to a database table, which one.
     pub table: Option<crate::ident::TableRef>,
     pub primary_key: Option<Symbol>,
+    /// The model declares a `default_scope` the runtime Relation applies
+    /// (`lower::default_scope`): a query on it must not be folded to SQL
+    /// at transpile time, which would read the rows the scope hides.
+    pub default_scoped: bool,
     /// Instance-state shape (columns + attr_accessor).
     pub attributes: Row,
     /// Attributes of `attributes` that the app's own `def` replaces. A

@@ -1193,7 +1193,11 @@ fn every_runtime_method_body_concretely_typed() {
     // MEASURED 866 on 2026-10-22 (rebased onto 865): `ActiveRecord::Base.unscoped { … }`
     // returns its block's value, which is untyped (+1 in
     // active_record/connection.rb).
-    const CEILING: usize = 866;
+    // MEASURED 868 on 2026-10-22 (default_scope static, on 866): `unscoped { … }`
+    // pops the model's table in an `ensure`, so the block's untyped value
+    // is held in a local before it is returned (+2 in
+    // active_record/connection.rb).
+    const CEILING: usize = 868;
     assert!(
         total_gradual <= CEILING,
         "{total_gradual} Ty::Untyped sites exceeds ceiling of {CEILING}"

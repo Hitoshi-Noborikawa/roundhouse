@@ -126,6 +126,7 @@ pub mod dirty_predicate_kwargs;
 pub mod job_test_only;
 pub mod test_cookie_jar;
 pub mod sti_scope;
+pub mod default_scope;
 mod sti_subclass_callbacks;
 pub mod sum_symbol;
 pub mod values_at_splat;

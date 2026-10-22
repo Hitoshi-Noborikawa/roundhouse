@@ -2019,6 +2019,9 @@ fn target_files_inner(
     for d in crate::lower::validations::acceptance_gaps_for_target(app, target) {
         emit::diagnostics::push(d);
     }
+    for d in crate::lower::relation_residue::default_scope_gaps_for_target(app, target) {
+        emit::diagnostics::push(d);
+    }
     report_mailers(app, target);
     report_sqlite_index_predicates(app, target);
     report_native_ruby_syntax(app, target);
@@ -11915,7 +11918,7 @@ mod tests {
             .map(|(_, c)| c.as_str())
             .expect("relation.rbs in spinel tree");
         assert!(
-            relation.contains("def initialize: (untyped model) -> void"),
+            relation.contains("def initialize: (untyped model, ?bool scoped) -> void"),
             "Spinel must not keep initialize:(Base): {relation}"
         );
         assert!(
@@ -11979,7 +11982,7 @@ mod tests {
         let shared = crate::runtime_files::read_to_string("runtime/ruby/active_record/relation.rbs")
             .expect("shared relation.rbs");
         assert!(
-            shared.contains("def initialize: (Base model) -> void"),
+            shared.contains("def initialize: (Base model, ?bool scoped) -> void"),
             "shared relation.rbs must keep Base for Bar A/B"
         );
         // CRuby/JRuby share `spinel_files` but must NOT get the rewrite.
@@ -11990,7 +11993,7 @@ mod tests {
             .map(|(_, c)| c.as_str())
             .expect("relation.rbs in ruby tree");
         assert!(
-            ruby_relation.contains("def initialize: (Base model) -> void"),
+            ruby_relation.contains("def initialize: (Base model, ?bool scoped) -> void"),
             "CRuby relation.rbs must keep Base: {ruby_relation}"
         );
         assert!(

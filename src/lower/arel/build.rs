@@ -159,6 +159,11 @@ pub fn try_build_arel_with_assocs(
     // registry; method must be one of the base AR shapes we recognize.
     let class_id = const_to_class_id(recv, registry)?;
     let info = registry.get(&class_id)?;
+    // A default scope is applied by the runtime Relation when it is
+    // built; SQL composed here would read the rows it hides.
+    if info.default_scoped {
+        return None;
+    }
     let table_ref = info.table.as_ref()?.clone();
     let table = schema.tables.get(&table_ref.0)?;
 
@@ -193,6 +198,11 @@ fn try_chain_recv(
     // `Article.all.order(...)`.
     let class_id = const_to_class_id(recv, registry)?;
     let info = registry.get(&class_id)?;
+    // A default scope is applied by the runtime Relation when it is
+    // built; SQL composed here would read the rows it hides.
+    if info.default_scoped {
+        return None;
+    }
     let table_ref = info.table.as_ref()?.clone();
     let _ = schema.tables.get(&table_ref.0)?;
     Some((ArelOp::Select(build_all(&table_ref)), class_id))
@@ -227,6 +237,11 @@ fn attach_preloads(
         // lazy reader, which honors it, instead of loading the wrong
         // children.
         if edge.primary_key.is_some() {
+            continue;
+        }
+        // A default-scoped target keeps its lazy reader, which builds
+        // its Relation through the scope; the batch here would not.
+        if registry.get(&edge.to).is_some_and(|i| i.default_scoped) {
             continue;
         }
         let Some(table_ref) = registry.get(&edge.to).and_then(|i| i.table.clone()) else {
