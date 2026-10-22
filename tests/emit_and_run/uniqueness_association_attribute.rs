@@ -103,3 +103,56 @@ fn uniqueness_on_a_polymorphic_belongs_to_is_a_reported_gap() {
         "{warnings:?}"
     );
 }
+
+/// A String foreign key under `case_sensitive: false` compares
+/// case-insensitively, as Rails does (`LOWER("tickets"."code_ref") =
+/// LOWER(?)`); without it, a case-only difference is a different key.
+/// Answers are Rails 8.1.4's for the same models and rows.
+#[test]
+fn a_string_foreign_key_compares_case_insensitively_like_rails() {
+    emit_and_run::empty_app()
+        .write("app/models/application_record.rb", "class ApplicationRecord < ActiveRecord::Base\n  self.abstract_class = true\nend\n")
+        .write("app/models/code.rb", "class Code < ApplicationRecord\nend\n")
+        .write(
+            "db/schema.rb",
+            "ActiveRecord::Schema.define do\n  create_table \"codes\", force: :cascade do |t|\n    t.string \"code\"\n  end\n  create_table \"tickets\", force: :cascade do |t|\n    t.string \"code_ref\"\n  end\n  create_table \"passes\", force: :cascade do |t|\n    t.string \"code_ref\"\n  end\nend\n",
+        )
+        .write(
+            "app/models/ticket.rb",
+            "class Ticket < ApplicationRecord\n  belongs_to :code, foreign_key: \"code_ref\", primary_key: \"code\", optional: true\n  validates :code, uniqueness: { case_sensitive: false }\nend\n",
+        )
+        .write(
+            "app/models/pass.rb",
+            "class Pass < ApplicationRecord\n  belongs_to :code, foreign_key: \"code_ref\", primary_key: \"code\", optional: true\n  validates :code, uniqueness: true\nend\n",
+        )
+        .run_ruby(
+            r#"up = Code.new
+up.code = "ABC"
+up.save!
+low = Code.new
+low.code = "abc"
+low.save!
+def errs(record)
+  record.valid?
+  record.errors.to_a
+end
+first = Ticket.new
+first.code = up
+first.save!
+pass = Pass.new
+pass.code = up
+pass.save!
+lower_ticket = Ticket.new
+lower_ticket.code = low
+same_ticket = Ticket.new
+same_ticket.code = up
+lower_pass = Pass.new
+lower_pass.code = low
+got = [errs(lower_ticket), errs(same_ticket), errs(lower_pass)]
+want = [["Code has already been taken"], ["Code has already been taken"], []]
+raise "code errors: #{got.inspect}" unless got == want
+puts "string key uniqueness passed"
+"#,
+        )
+        .assert_passes();
+}

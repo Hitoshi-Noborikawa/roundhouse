@@ -745,16 +745,22 @@ fn inline_uniqueness_check(
         .unwrap_or_else(|| attr.clone());
     let association = column != *attr;
     let value = ivar(&column);
-    // `case_sensitive: false` lowers a String comparison; a key compares as
-    // an id (Rails' `LOWER` over an Integer column answers the same).
-    let mut relation = if case_sensitive || association {
+    // `case_sensitive: false` lowers a String comparison, a String foreign
+    // key's too (Rails: `LOWER("tickets"."code_ref") = LOWER(?)`). An
+    // Integer key compares as an id: Rails' `LOWER` over it answers the same.
+    let string_key = match model.attributes.fields.get(&column) {
+        Some(Ty::Str) => true,
+        Some(Ty::Union { variants }) => variants.iter().any(|v| matches!(v, Ty::Str)),
+        _ => false,
+    };
+    let mut relation = if case_sensitive || (association && !string_key) {
         send(finder, "where", vec![hash(column.as_str(), value.clone())])
     } else {
         let lowered = Expr::new(
             Span::synthetic(),
             ExprNode::Lit {
                 value: Literal::Str {
-                    value: format!("LOWER({}.{}) = LOWER(?)", model.table.0.as_str(), attr.as_str()),
+                    value: format!("LOWER({}.{}) = LOWER(?)", model.table.0.as_str(), column.as_str()),
                 },
             },
         );
@@ -762,7 +768,7 @@ fn inline_uniqueness_check(
             Span::synthetic(),
             ExprNode::If {
                 cond: send(value.clone(), "nil?", vec![]),
-                then_branch: send(finder.clone(), "where", vec![hash(attr.as_str(), value.clone())]),
+                then_branch: send(finder.clone(), "where", vec![hash(column.as_str(), value.clone())]),
                 else_branch: send(finder, "where", vec![lowered, value.clone()]),
             },
         )
