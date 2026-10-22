@@ -316,6 +316,20 @@ fn real_blog_class_constants_run_under_tsx() {
 
 #[test]
 #[ignore]
+fn real_blog_model_constant_reads_run_under_tsx() {
+    // A model method reading its own constants through `fetch`, `key?`,
+    // `keys`, `first` and `[]` answers as CRuby does (#1223 b).
+    let (emitted, errors) = class_constants::gauge_overlay().emit(roundhouse::project::BuildTarget::Typescript);
+    assert!(errors.is_empty(), "{errors:?}");
+    let out = run_under_tsx(
+        &emitted,
+        "import { Gauge } from \"./app/models/gauge.js\";\nconst g = new Gauge();\ng.size = \"large\";\nconsole.log(g.summary());\n",
+    );
+    assert_eq!(out, class_constants::GAUGE_SUMMARY);
+}
+
+#[test]
+#[ignore]
 fn real_blog_array_methods_run_under_tsx() {
     // The Array methods the emit translates answer as CRuby does,
     // empty-Array and not-found answers included.

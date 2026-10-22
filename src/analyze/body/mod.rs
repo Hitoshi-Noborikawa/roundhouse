@@ -1225,6 +1225,17 @@ impl<'a> BodyTyper<'a> {
                                     values.get(&declaration_id_from_lookup_name(name.0.as_str()))
                                 })
                                 .cloned()
+                                // `Widget::WEIGHTS` read inside `Widget` (a
+                                // body the analyzer already qualified, re-typed
+                                // after lowering): the class's own constant.
+                                .or_else(|| {
+                                    let (leaf, owner) = path.split_last()?;
+                                    let Some(Ty::Class { id, .. }) = &ctx.self_ty else { return None };
+                                    if written_class_id(owner) != *id {
+                                        return None;
+                                    }
+                                    ctx.constants.get_own(leaf).cloned()
+                                })
                         };
                         // Otherwise retain the written class path, but
                         // never guess another class by its suffix.

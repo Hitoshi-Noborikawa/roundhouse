@@ -18,6 +18,32 @@ pub const SCALE: &str = r#"class Scale
 end
 "#;
 
+/// A model whose methods read its own constants through the Hash and
+/// Array methods the TypeScript emit rewrites (#1223 b).
+pub const GAUGE: &str = r#"class Gauge < ApplicationRecord
+  WEIGHTS = { "small" => 1, "large" => 9 }.freeze
+  NAMES = %w[small large].freeze
+
+  def summary
+    [WEIGHTS.fetch(size, 0), WEIGHTS.key?(size), WEIGHTS.keys.join("|"), NAMES.first, WEIGHTS[size]].join(",")
+  end
+end
+"#;
+
+/// What `Gauge#summary` answers under CRuby for a `size` of "large".
+#[allow(dead_code)]
+pub const GAUGE_SUMMARY: &str = "9,true,small|large,small,9";
+
+pub fn gauge_overlay() -> Overlay {
+    emit_and_run::real_blog()
+        .edit(
+            "db/schema.rb",
+            "  create_table \"articles\", force: :cascade do |t|\n",
+            "  create_table \"gauges\", force: :cascade do |t|\n    t.string \"size\"\n  end\n\n  create_table \"articles\", force: :cascade do |t|\n",
+        )
+        .write("app/models/gauge.rb", GAUGE)
+}
+
 /// What `Scale.summary` answers under CRuby.
 #[allow(dead_code)]
 pub const SUMMARY: &str = "9,small,scale,9,1.5,3,d,2";

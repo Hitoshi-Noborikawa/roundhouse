@@ -2865,6 +2865,14 @@ fn type_method_body(
             }
         }
     }
+    // The model's own constants, as the analyzer seeds them
+    // (`extract_const_assignments`): this pass re-types the body from
+    // scratch, and the read the analyzer qualified to `Widget::WEIGHTS`
+    // otherwise fell back to a phantom `Ty::Class` (#1223), so the
+    // emitters saw no Hash or Array behind it.
+    if let Some(m) = model {
+        ctx.constants = crate::analyze::ConstScope::default().with_own(crate::analyze::extract_const_assignments(&m.body));
+    }
     // Opt-in to `recv: Some(SelfRef)` rewriting on bare Sends —
     // matches the pattern view_to_library uses.
     ctx.annotate_self_dispatch = true;

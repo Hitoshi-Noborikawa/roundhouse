@@ -49,3 +49,23 @@ fn only_literal_unclaimed_constants_are_declared() {
         assert!(!gauge.contains(absent), "{absent}:\n{gauge}");
     }
 }
+
+/// A model's own constant reads carry their value's type through the
+/// model lowering (#1223 b), so the Hash and Array rewrites apply as they
+/// do in a plain class. The read was typed as a phantom `Gauge::WEIGHTS`
+/// class, and `fetch`, `key?` and `keys` reached a plain object.
+#[test]
+fn a_models_constant_reads_get_the_hash_and_array_rewrites() {
+    let (emitted, errors) = class_constants::gauge_overlay().emit(BuildTarget::Typescript);
+    assert!(errors.is_empty(), "{errors:?}");
+    let gauge = std::fs::read_to_string(emitted.join("app/models/gauge.ts")).expect("gauge.ts");
+    for read in [
+        "Gauge.WEIGHTS[this.size] ?? 0",
+        "this.size in Gauge.WEIGHTS",
+        "Object.keys(Gauge.WEIGHTS)",
+        "Gauge.NAMES[0]",
+    ] {
+        assert!(gauge.contains(read), "{read}:\n{gauge}");
+    }
+    assert!(!gauge.contains("Gauge.WEIGHTS.fetch") && !gauge.contains("is_key"), "{gauge}");
+}
