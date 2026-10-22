@@ -1518,6 +1518,14 @@ fn struct_constant_spec<'pr>(value: &ruby_prism::Node<'pr>) -> Option<StructCons
                 if !statements.body().iter().all(|stmt| stmt.as_def_node().is_some()) {
                     return None;
                 }
+                // Not an `initialize` of its own: in Ruby the generated one is
+                // the anonymous Struct parent's, which its `super` reaches. Here
+                // both would sit in one class, and that `super` would miss.
+                if statements.body().iter().any(|stmt| {
+                    stmt.as_def_node().is_some_and(|def| def.receiver().is_none() && constant_id_str(&def.name()) == "initialize")
+                }) {
+                    return None;
+                }
             } else if body.is_some() {
                 return None;
             }

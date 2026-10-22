@@ -5665,8 +5665,11 @@ raise point.sum.to_s unless point.sum == 41"#,
         .assert_passes();
 }
 
-/// Since Ruby 3.2 a positional Struct also takes keywords, which the
-/// positional constructor would bind to its first member: refused.
+/// Since Ruby 3.2 a positional Struct also takes keywords, by member name,
+/// which the emitted positional constructor would bind to its first
+/// member: refused. A block defining its own `initialize` is not read as
+/// the class at all: its `super` reaches the Struct parent in Ruby, which
+/// the synthesized class does not have.
 #[test]
 fn a_positional_struct_constant_refuses_keyword_construction() {
     let errors = emit_and_run::real_blog()
@@ -5675,7 +5678,15 @@ fn a_positional_struct_constant_refuses_keyword_construction() {
             "class PhoneCheck\n  Normalized = Struct.new(:number, :valid)\n\n  def self.call(raw)\n    Normalized.new(number: raw, valid: true)\n  end\nend\n",
         )
         .check_errors();
-    assert!(errors.iter().any(|e| e.contains("Struct keyword construction") || e.contains("built positionally")), "{errors:?}");
+    assert!(errors.iter().any(|e| e.contains("Struct keyword construction")), "{errors:?}");
+
+    let errors = emit_and_run::real_blog()
+        .write(
+            "app/services/phone_check.rb",
+            "class PhoneCheck\n  Normalized = Struct.new(:number, :valid) do\n    def initialize(number:, valid:)\n      super(number, valid)\n    end\n  end\n\n  def self.call(raw)\n    Normalized.new(number: raw, valid: true)\n  end\nend\n",
+        )
+        .check_errors();
+    assert!(!errors.is_empty(), "a Struct block with its own initialize checked clean");
 }
 
 /// `Float#to_d` / `Integer#to_d` build a BigDecimal without
