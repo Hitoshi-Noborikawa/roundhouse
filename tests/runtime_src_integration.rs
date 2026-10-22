@@ -1182,7 +1182,12 @@ fn every_runtime_method_body_concretely_typed() {
     // active_record/connection.rb's `transaction`, 8 -> 10; the
     // savepoint branch already read its `result` the same way).
     // `touch_later` and `_flush_deferred_touches_from` type fully.
-    const CEILING: usize = 860;
+    // MEASURED 862 on 2026-10-22: `ActionDispatch::Http::Parameters::
+    // ParseError#initialize` takes the message the caller passed (or
+    // nil) and forwards it through `super`, the same two gradual sites
+    // `RecordNotDestroyed#initialize` carries (+2 in
+    // action_dispatch/exceptions.rb, 860 -> 862).
+    const CEILING: usize = 862;
     assert!(
         total_gradual <= CEILING,
         "{total_gradual} Ty::Untyped sites exceeds ceiling of {CEILING}"
