@@ -464,7 +464,10 @@ fn untyped_subexpressions_baseline() {
     // `_after_commit` +6, `transaction` +6 for the savepoint mark and
     // the run/drop calls). The same untyped reads off a `Db` list as the
     // records above.
-    const CEILING: usize = 1082;
+    // MEASURED 1083 on 2026-10-22: `Base.sanitize_sql_for_order(condition)`
+    // answers its String unchanged; its parameter is a var on this
+    // RBS-less probe (`(String) -> String` in connection.rbs), +1.
+    const CEILING: usize = 1083;
     assert!(
         existing_untyped <= CEILING && like_untyped <= LIKE_CEILING,
         "{} untyped sub-expressions on spinel-blog runtime — exceeds ledger: \
