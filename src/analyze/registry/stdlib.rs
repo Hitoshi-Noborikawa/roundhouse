@@ -914,6 +914,10 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
         ("cast", Ty::Union { variants: vec![Ty::Str, Ty::Nil].into() }),
         ("deserialize", Ty::Union { variants: vec![Ty::Str, Ty::Nil].into() }),
     ]);
+    // What `Model.type_for_attribute(name)` answers on the ruby family: the column's type name, nil for no column.
+    register_stdlib_class(classes, "ActiveRecord::Type::Value", &[], &[
+        ("type", Ty::Union { variants: vec![Ty::Sym, Ty::Nil].into() }),
+    ]);
     register_stdlib_class(classes, "ActiveRecord::Type::Integer", &[], &[
         ("cast", Ty::Union { variants: vec![Ty::Int, Ty::Nil].into() }),
         ("deserialize", Ty::Union { variants: vec![Ty::Int, Ty::Nil].into() }),

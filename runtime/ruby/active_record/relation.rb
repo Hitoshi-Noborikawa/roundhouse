@@ -49,6 +49,8 @@ module ActiveRecord
       # hit the database. Chain methods call `unload_records`, which keeps
       # an empty loaded cache when `@null` is set so terminals stay quiet.
       @null = false
+      # `none` itself, apart from the `(1 = 0)` it adds: `unscope(:where)` keeps it, as Rails' NullRelation does.
+      @none = false
       @records = nil
       @scope_attributes = {}
       @where_cols = []
@@ -88,6 +90,11 @@ module ActiveRecord
     # empty-IN `where`, never from the pure predicate builder.
     def null_relation?
       @null
+    end
+
+    # Set by `none` alone, which `unscope(:where)` does not undo.
+    def explicit_none?
+      @none
     end
 
     def mark_null!
@@ -420,8 +427,8 @@ module ActiveRecord
     end
 
     # Rails' `unscope(:where)`: every WHERE condition goes, whatever
-    # built it (a hash, raw SQL, a merge), and so does a `none` and the
-    # create attributes those conditions seeded.
+    # built it (a hash, raw SQL, a merge), and the create attributes
+    # those conditions seeded. A `none` stays.
     def unscope_where
       spawn.unscope_where!
     end
@@ -434,7 +441,8 @@ module ActiveRecord
       @opaque_wheres = false
       # A record built through the relation took these from the WHEREs just dropped.
       @scope_attributes = {}
-      @null = false
+      @null = @none
+      push_where_cols("(1 = 0)", [], true) if @none
       unload_records
       self
     end
@@ -1097,6 +1105,7 @@ module ActiveRecord
         @opaque_wheres = true
       end
       mark_null! if other.null_relation?
+      @none = true if other.explicit_none?
       self
     end
 
@@ -1121,6 +1130,7 @@ module ActiveRecord
       own_lists
       unload_records
       push_where_cols("(1 = 0)", [], true)
+      @none = true
       mark_null!
       self
     end
