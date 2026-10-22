@@ -232,6 +232,8 @@ pub(super) fn parse_validates_call(
     let stores_flags = |draft: &BuiltRule| {
         matches!(draft.rule, ValidationRule::Numericality { .. } | ValidationRule::Format { .. })
     };
+    // Acceptance stores `allow_nil` (below); `allow_blank` stays the gap.
+    let stores_nil = |draft: &BuiltRule| matches!(draft.rule, ValidationRule::Acceptance { .. });
     if allow_blank
         && drafts
             .iter()
@@ -251,6 +253,7 @@ pub(super) fn parse_validates_call(
                 !matches!(draft.rule, ValidationRule::Length { .. } | ValidationRule::Presence)
                     && !is_uniqueness(draft)
                     && !stores_flags(draft)
+                    && !stores_nil(draft)
             })
     {
         gaps.push("allow_nil".to_string());
@@ -295,7 +298,8 @@ pub(super) fn parse_validates_call(
         for draft in &mut drafts {
             if let ValidationRule::Length { allow_nil: slot, .. }
             | ValidationRule::Numericality { allow_nil: slot, .. }
-            | ValidationRule::Format { allow_nil: slot, .. } = &mut draft.rule
+            | ValidationRule::Format { allow_nil: slot, .. }
+            | ValidationRule::Acceptance { allow_nil: slot, .. } = &mut draft.rule
             {
                 if slot.is_none() {
                     *slot = Some(flag);
@@ -812,6 +816,7 @@ fn parse_validator(key: &str, value: &Node<'_>, file: &str, class_consts: &super
     match key {
         "presence" => parse_bool_or_hash(value, ValidationRule::Presence, "presence", file),
         "absence" => parse_bool_or_hash(value, ValidationRule::Absence, "absence", file),
+        "acceptance" => parse_acceptance(value, file),
         "length" => parse_length_rule(value, file, class_consts),
         "numericality" => parse_numericality(value, file, class_consts),
         "inclusion" => parse_set(value, file, false, class_consts),
@@ -819,6 +824,80 @@ fn parse_validator(key: &str, value: &Node<'_>, file: &str, class_consts: &super
         "uniqueness" => parse_uniqueness(value, file, class_consts),
         "format" => parse_format(value, file, class_consts),
         other => RuleParse::Gap(vec![other.to_string()]),
+    }
+}
+
+/// `acceptance: true`, `acceptance: false`, or `acceptance: { accept:,
+/// allow_nil:, … }`. Rails' `AcceptanceValidator` merges the options over
+/// `{ allow_nil: true, accept: ["1", true] }`, so an unset `accept:` is that
+/// default and an unset `allow_nil:` stays `None` (read as `true`). An
+/// `accept:` value is a literal String, Integer or Boolean, or an Array of
+/// them; anything else stays the gap.
+fn parse_acceptance(value: &Node<'_>, file: &str) -> RuleParse {
+    use crate::dialect::ValidationRule;
+    let default_accept = || vec![Literal::Str { value: "1".to_string() }, Literal::Bool { value: true }];
+    match super::super::util::bool_value(value) {
+        Some(true) => {
+            return RuleParse::Rule(BuiltRule::bare(ValidationRule::Acceptance { accept: default_accept(), allow_nil: None }))
+        }
+        Some(false) => return RuleParse::Skip,
+        None => {}
+    }
+    let Some(elements) = hash_elements(value) else {
+        return RuleParse::Gap(vec!["acceptance".to_string()]);
+    };
+    let mut accept = None;
+    let mut allow_nil = None;
+    let mut built = BuiltRule::bare(ValidationRule::Acceptance { accept: Vec::new(), allow_nil: None });
+    let mut gaps = Vec::new();
+    for el in elements.iter() {
+        let Some(assoc) = el.as_assoc_node() else {
+            gaps.push("acceptance".to_string());
+            continue;
+        };
+        let Some(key) = symbol_value(&assoc.key()) else {
+            gaps.push("acceptance".to_string());
+            continue;
+        };
+        let child = assoc.value();
+        match key.as_str() {
+            "accept" => match acceptance_values(&child) {
+                Some(values) => accept = Some(values),
+                None => gaps.push("acceptance: accept".to_string()),
+            },
+            "allow_nil" => match super::super::util::bool_value(&child) {
+                Some(flag) => {
+                    allow_nil = Some(flag);
+                    built.own_allow_nil = true;
+                }
+                None => gaps.push("allow_nil".to_string()),
+            },
+            "on" => match context_guard(&child) {
+                Some(guard) => built.on_guard = Some(guard),
+                None => gaps.push("on".to_string()),
+            },
+            "if" => push_condition(&child, file, &mut built.if_cond, "if", &mut gaps),
+            "unless" => push_condition(&child, file, &mut built.unless_cond, "unless", &mut gaps),
+            "message" => push_message(&child, "acceptance", false, &mut built.message, &mut gaps),
+            other => gaps.push(format!("acceptance: {other}")),
+        }
+    }
+    if !gaps.is_empty() {
+        return RuleParse::Gap(gaps);
+    }
+    built.rule = ValidationRule::Acceptance { accept: accept.unwrap_or_else(default_accept), allow_nil };
+    RuleParse::Rule(built)
+}
+
+/// `accept: true`, `accept: "yes"` or `accept: [true, "true", "1"]`
+/// (Rails reads it through `Array(...)`).
+fn acceptance_values(node: &Node<'_>) -> Option<Vec<Literal>> {
+    let atom = |node: &Node<'_>| {
+        literal_atom(node).filter(|lit| matches!(lit, Literal::Str { .. } | Literal::Int { .. } | Literal::Bool { .. }))
+    };
+    match node.as_array_node() {
+        Some(array) => array.elements().iter().map(|element| atom(&element)).collect(),
+        None => atom(node).map(|lit| vec![lit]),
     }
 }
 

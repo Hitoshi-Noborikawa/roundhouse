@@ -183,6 +183,9 @@ fn expand_rule(rule: &ValidationRule, out: &mut Vec<Check>) {
     match rule {
         ValidationRule::Presence => out.push(Check::Presence),
         ValidationRule::Absence => out.push(Check::Absence),
+        // Not a `Check`: the emitted `validate` body is
+        // `inline_acceptance_check`.
+        ValidationRule::Acceptance { .. } => {}
         // `allow_nil` is not a `Check`. This fan-out is only read by
         // `tests/lower_validations.rs`. The emitted `validate` body is
         // `inline_length_check`, which is where nil is decided.

@@ -2330,6 +2330,7 @@ end
     super::model_delegate::lower_model_delegates(&mut app);
     super::on_load_reopen::drain_pending(&mut app);
     gap_numericality_allow_on_untyped(&mut app);
+    gap_acceptance_on_undeclared(&mut app);
     app.const_resolver = const_resolver;
     // Admission needs complete controller permit demand and model DSL,
     // including declarations contributed by either kind of Concern,
@@ -2521,30 +2522,118 @@ fn gap_numericality_allow_on_untyped(app: &mut App) {
                 }
             }
         }
-        // The whole `validates` call goes, as an ingest refusal
-        // (`ParsedValidates::Gap`) does: every Validation item it produced
-        // shares its span (one per attribute, and per-rule `if:`/`unless:`
-        // splits), so a `presence:` beside the numericality is not kept.
-        let calls: std::collections::HashSet<(crate::span::FileId, u32, u32)> =
-            refused.iter().map(|(_, span, _)| (span.file, span.start, span.end)).collect();
-        model.body.retain(|item| {
-            !matches!(item, ModelBodyItem::Validation { .. }) || {
-                let span = item.span();
-                !calls.contains(&(span.file, span.start, span.end))
-            }
-        });
-        for (_, span, construct) in refused {
-            gaps.push((span, construct));
-        }
+        refuse_validates_calls(model, refused, &mut gaps);
     }
+    report_validates_gaps(
+        app,
+        gaps,
+        "an untyped attribute's String input is not parsed as a number (#1158); emitting the check would reject input Rails accepts",
+    );
+}
+
+/// `acceptance:` stays the reported gap on an attribute the model does
+/// not declare as a column, an `attr_*` or a method. Rails'
+/// `AcceptanceValidator` defines a virtual reader and writer for an
+/// undeclared one on first use, which this build does not synthesize, so
+/// the lowered check would read an ivar nothing writes. A name declared
+/// only by `attribute :name, :type` is refused too: its synthesized writer
+/// does not cast as Rails does (the Boolean one turns nil and `""` into
+/// `false`, where Rails keeps nil and skips the check). Refused as a whole
+/// call, as the numericality gap is.
+fn gap_acceptance_on_undeclared(app: &mut App) {
+    use crate::dialect::{MethodReceiver, ModelBodyItem, ValidationRule};
+    use crate::expr::{ExprNode, Literal};
+    let mut undeclared: Vec<(crate::span::Span, String)> = Vec::new();
+    let mut attribute_api: Vec<(crate::span::Span, String)> = Vec::new();
+    for model in &mut app.models {
+        let attribute_call = |attr: &crate::ident::Symbol| {
+            model.body.iter().any(|item| match item {
+                ModelBodyItem::Unknown { expr, .. } => matches!(&*expr.node,
+                    ExprNode::Send { recv: None, method, args, .. }
+                        if method.as_str() == "attribute"
+                            && args.first().is_some_and(|arg| matches!(&*arg.node, ExprNode::Lit { value: Literal::Sym { value } } if value == attr))),
+                _ => false,
+            })
+        };
+        let declared = |attr: &crate::ident::Symbol| {
+            let setter = crate::ident::Symbol::from(format!("{}=", attr.as_str()));
+            model.attributes.fields.contains_key(attr)
+                || model.body.iter().any(|item| match item {
+                    ModelBodyItem::Method { method, .. } => {
+                        method.receiver == MethodReceiver::Instance && (method.name == *attr || method.name == setter)
+                    }
+                    ModelBodyItem::Unknown { expr, .. } => match &*expr.node {
+                        ExprNode::Send { recv: None, method, args, .. }
+                            if matches!(method.as_str(), "attr_accessor" | "attr_reader" | "attr_writer") =>
+                        {
+                            args.iter().any(|arg| {
+                                matches!(&*arg.node, ExprNode::Lit { value: Literal::Sym { value } } if value == attr)
+                            })
+                        }
+                        _ => false,
+                    },
+                    _ => false,
+                })
+        };
+        let mut refused: Vec<(usize, crate::span::Span, String)> = Vec::new();
+        let mut refused_attribute_api: Vec<(usize, crate::span::Span, String)> = Vec::new();
+        for (i, item) in model.body.iter().enumerate() {
+            let ModelBodyItem::Validation { validation, .. } = item else { continue };
+            if !validation.rules.iter().any(|rule| matches!(rule, ValidationRule::Acceptance { .. })) {
+                continue;
+            }
+            let attr = &validation.attribute;
+            let construct = format!("validates :{}, acceptance:", attr.as_str());
+            if declared(attr) {
+                continue;
+            } else if attribute_call(attr) {
+                refused_attribute_api.push((i, item.span(), construct));
+            } else {
+                refused.push((i, item.span(), construct));
+            }
+        }
+        refuse_validates_calls(model, refused, &mut undeclared);
+        refuse_validates_calls(model, refused_attribute_api, &mut attribute_api);
+    }
+    report_validates_gaps(
+        app,
+        undeclared,
+        "acceptance: on an attribute the model does not declare; Rails defines a virtual accessor for it, which this build does not synthesize",
+    );
+    report_validates_gaps(
+        app,
+        attribute_api,
+        "acceptance: on an `attribute` the model declares, whose writer does not cast as Rails does (a Boolean one turns nil and \"\" into false)",
+    );
+}
+
+/// Drop every Validation item of each refused `validates` call, as an
+/// ingest refusal (`ParsedValidates::Gap`) does: every item a call
+/// produced shares its span (one per attribute, and per-rule `if:` /
+/// `unless:` splits), so a `presence:` beside the refused rule is not kept.
+fn refuse_validates_calls(
+    model: &mut crate::dialect::Model,
+    refused: Vec<(usize, crate::span::Span, String)>,
+    gaps: &mut Vec<(crate::span::Span, String)>,
+) {
+    use crate::dialect::ModelBodyItem;
+    let calls: std::collections::HashSet<(crate::span::FileId, u32, u32)> =
+        refused.iter().map(|(_, span, _)| (span.file, span.start, span.end)).collect();
+    model.body.retain(|item| {
+        !matches!(item, ModelBodyItem::Validation { .. }) || {
+            let span = item.span();
+            !calls.contains(&(span.file, span.start, span.end))
+        }
+    });
+    for (_, span, construct) in refused {
+        gaps.push((span, construct));
+    }
+}
+
+fn report_validates_gaps(app: &App, gaps: Vec<(crate::span::Span, String)>, detail: &str) {
     for (span, construct) in gaps {
         let file = crate::ide::source(app, span.file).map(|s| s.path.clone()).unwrap_or_default();
-        let mut diagnostic = crate::diagnostic::Diagnostic::unsupported(
-            span,
-            None,
-            construct,
-            "an untyped attribute's String input is not parsed as a number (#1158); emitting the check would reject input Rails accepts",
-        );
+        let mut diagnostic = crate::diagnostic::Diagnostic::unsupported(span, None, construct, detail);
         diagnostic.severity = crate::diagnostic::Severity::Warning;
         let message = diagnostic.message.clone();
         super::prism::push(diagnostic);
