@@ -127,6 +127,35 @@ fn compile_seg_patterns(
     (out, None)
 }
 
+/// Add a route's `(.:format)` requirement (`dialect::FORMAT_REQUIREMENT`)
+/// to its compiled segment patterns, under `format`: the router checks a
+/// request's extension against it, and a request with no extension is
+/// not held to it. A requirement outside the subset refuses the route,
+/// as any other does; a route already refused stays so.
+fn with_format_requirement(
+    constraints: &indexmap::IndexMap<Symbol, String>,
+    (mut seg_patterns, refused): (Vec<(String, String)>, Option<(String, String)>),
+) -> (Vec<(String, String)>, Option<(String, String)>) {
+    let Some(src) = constraints.get(&Symbol::from(crate::dialect::FORMAT_REQUIREMENT)) else {
+        return (seg_patterns, refused);
+    };
+    if refused.is_some() {
+        return (seg_patterns, refused);
+    }
+    let pattern = if src == crate::dialect::FORMAT_NONE {
+        Some(crate::lower::segment_pattern::NEVER.to_string())
+    } else {
+        crate::lower::segment_pattern::compile(src)
+    };
+    match pattern {
+        Some(p) => {
+            seg_patterns.push(("format".to_string(), p));
+            (seg_patterns, None)
+        }
+        None => (Vec::new(), Some(("format".to_string(), src.clone()))),
+    }
+}
+
 /// Is this constraint regex a plain digit class (`\d+` / `[0-9]+`,
 /// optionally `\A…\z` / `^…$` anchored)? Those are the only
 /// constraints the regex-free runtime router can enforce; anything
@@ -353,6 +382,7 @@ fn singular_resource_actions() -> &'static [(&'static str, HttpMethod, &'static 
 fn collect_flat_routes(spec: &RouteSpec, out: &mut Vec<FlatRoute>, ctx: &Ctx) {
     match spec {
         RouteSpec::Explicit { method, path, controller, action, as_name, scope, constraints } => {
+            let constraints_map = constraints;
             // `:format => "rss"` rides the constraints map at ingest
             // (it shapes the request, not the routing triple); surface
             // it as the route's forced response format.
@@ -522,7 +552,8 @@ fn collect_flat_routes(spec: &RouteSpec, out: &mut Vec<FlatRoute>, ctx: &Ctx) {
                 // route rather than serve it unenforced — a route
                 // that advertises `[^@/.]+` but can't actually check
                 // it is exactly the original bug.
-                let (seg_patterns, refused) = compile_seg_patterns(&constraints);
+                let (seg_patterns, refused) =
+                    with_format_requirement(constraints_map, compile_seg_patterns(&constraints));
                 out.push(FlatRoute {
                     method: method.clone(),
                     path: vpath,
@@ -752,7 +783,8 @@ fn collect_flat_routes(spec: &RouteSpec, out: &mut Vec<FlatRoute>, ctx: &Ctx) {
                 // Same fail-closed rule as the `Explicit` arm: a
                 // requirement outside the supported subset refuses
                 // this action's route rather than serve it unenforced.
-                let (seg_patterns, refused) = compile_seg_patterns(&other_constraints);
+                let (seg_patterns, refused) =
+                    with_format_requirement(resource_constraints, compile_seg_patterns(&other_constraints));
                 out.push(FlatRoute {
                     method: method.clone(),
                     path: full_path.clone(),

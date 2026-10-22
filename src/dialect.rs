@@ -1961,6 +1961,18 @@ impl ResourceScope {
 /// Surface forms of a routes.rb entry. Preserves source structure so
 /// `resources :articles do ... end` round-trips byte-for-byte; a downstream
 /// target emitter that needs concrete routes expands via [`RouteSpec::expand`].
+/// The `constraints` key of a route's requirement on its `(.:format)`
+/// extension (`constraints: { format: /csv|json/ }`, `format: false`).
+/// Kept apart from `format`, which there is the route's forced response
+/// format (`format: "rss"`, `defaults: { format: :json }`): Rails keeps a
+/// requirement and a default apart, and a requirement forces nothing on
+/// a request that sends no extension. Not a name a path param can take.
+pub const FORMAT_REQUIREMENT: &str = "(.:format)";
+
+/// The `FORMAT_REQUIREMENT` value of `format: false`: no extension is
+/// accepted. Not a regex source; the route lowering knows it by name.
+pub const FORMAT_NONE: &str = "";
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum RouteSpec {

@@ -726,6 +726,11 @@ fn lazy_is_terminal(items: &[Item]) -> bool {
         .all(|(idx, item)| !item.lazy() || idx == last)
 }
 
+/// An alternation of no sequences: the pattern no value matches
+/// (`segment_pattern_alt_match` tries none). `format: false` is the
+/// `(.:format)` requirement no extension meets.
+pub const NEVER: &str = "A";
+
 pub fn compile(src: &str) -> Option<String> {
     let ast = parse_pattern(src)?;
     let seqs = expand(&ast)?;
