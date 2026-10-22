@@ -170,10 +170,16 @@ module Main
     request_format = :xml if path_format == "xml"
     # `/service-worker.js`: campfire's raw service-worker template.
     request_format = :js if path_format == "js"
-    # A route-forced format (`get "/rss" => "home#index", :format =>
-    # "rss"`) overrides the path-suffix sniff — the URL has no
-    # extension but the route pins the response format.
-    request_format = matched.req_format unless matched.req_format.nil?
+    # A route's default format (`get "/rss" => "home#index", :format =>
+    # "rss"`, `defaults: { format: :json }`) fills in what the request
+    # left out, as in Rails: it applies only when the path carried no
+    # extension, and is then written to `params[:format]` too (as a
+    # String, which the action reads). `/widgets/1.html` keeps html on a
+    # route defaulting to json.
+    if path_format.empty? && !matched.req_format.nil?
+      request_format = matched.req_format
+      matched.path_params["format"] = matched.req_format.to_s
+    end
 
     # `--target futamura`'s whole-route bridge serves only the actions
     # the analysis cleared (src/emit/futamura/routes.rb); any other

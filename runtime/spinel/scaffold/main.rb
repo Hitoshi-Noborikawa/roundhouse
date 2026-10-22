@@ -449,27 +449,34 @@ module Main
     request_format = :xml if path_format == "xml"
     # `/service-worker.js`: campfire's raw service-worker template.
     request_format = :js if path_format == "js"
-    # A route-forced format (`get "/rss" => "home#index", :format => "rss"`)
-    # overrides the path-suffix sniff above — the URL carries no extension
-    # but the route pins the response format. Without it every route-pinned
-    # entry fell through to :html and lobsters' /rss and /hottest served the
-    # HTML home page.
+    # A route's default format (`get "/rss" => "home#index", :format =>
+    # "rss"`, `defaults: { format: :json }`) fills in what the request
+    # left out, as in Rails: only when the path carried no extension, and
+    # it is then written to `params[:format]` too. Without it every
+    # route-pinned entry fell through to :html and lobsters' /rss and
+    # /hottest served the HTML home page; with it unconditional,
+    # `/widgets/1.html` on a json-defaulted route was answered as json.
     #
-    # The CRuby overlay writes this as a one-line `request_format =
-    # matched.req_format unless matched.req_format.nil?`. That shape does
-    # not compile here, and neither does binding the read to a guarded
-    # local: `req_format` is `Symbol?`, which spinel stores as a poly
-    # RbVal, while a local seeded from a Symbol literal is a bare `sp_sym`
-    # — the assignment is a type error whatever the nil guard looks like.
-    # COMPARING the poly against literals never materializes a nilable
-    # Symbol, so the supported formats are named here instead. The set
-    # matches the response types the tail of this method can stamp.
-    if matched.req_format == :rss
-      request_format = :rss
-    elsif matched.req_format == :json
-      request_format = :json
-    elsif matched.req_format == :xml
-      request_format = :xml
+    # The CRuby overlay writes this generically (`request_format =
+    # matched.req_format`). That shape does not compile here, and neither
+    # does binding the read to a guarded local: `req_format` is
+    # `Symbol?`, which spinel stores as a poly RbVal, while a local
+    # seeded from a Symbol literal is a bare `sp_sym` - the assignment is
+    # a type error whatever the nil guard looks like. COMPARING the poly
+    # against literals never materializes a nilable Symbol, so the
+    # supported formats are named here instead. The set matches the
+    # response types the tail of this method can stamp.
+    if path_format.empty?
+      if matched.req_format == :rss
+        request_format = :rss
+        matched.path_params["format"] = "rss"
+      elsif matched.req_format == :json
+        request_format = :json
+        matched.path_params["format"] = "json"
+      elsif matched.req_format == :xml
+        request_format = :xml
+        matched.path_params["format"] = "xml"
+      end
     end
 
     controller = Main.instantiate_controller(matched.controller)
