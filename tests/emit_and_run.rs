@@ -332,6 +332,8 @@ mod attribute_api_boolean_cast;
 mod hash_fetch_one_arg;
 #[path = "emit_and_run/numericality_unknown_option.rs"]
 mod numericality_unknown_option;
+#[path = "emit_and_run/belongs_to_nil_writer.rs"]
+mod belongs_to_nil_writer;
 #[path = "emit_and_run/cross_class_constants.rs"]
 mod cross_class_constants;
 #[path = "emit_and_run/regex_literal_hash_guard.rs"]
