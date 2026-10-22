@@ -553,7 +553,7 @@ fn interned_prism_name(arg: &ruby_prism::Node<'_>) -> bool {
     arg.as_symbol_node().is_some() || arg.as_string_node().is_some()
 }
 
-fn valid_def_name(name: &Symbol) -> bool {
+pub(super) fn valid_def_name(name: &Symbol) -> bool {
     let header = format!("def {name}\nend\n");
     let parsed = ruby_prism::parse(header.as_bytes());
     let node = parsed.node();
