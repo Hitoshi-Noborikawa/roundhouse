@@ -621,6 +621,7 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
     // answers the document; `decode` whatever the document holds.
     register_stdlib_class(classes, "ActiveSupport::JSON", &[
         ("encode", Ty::Str),
+        ("encode_without_escape", Ty::Str),
         ("decode", Ty::Untyped),
         ("time_json", Ty::Str),
         ("time_fragment", Ty::Str),

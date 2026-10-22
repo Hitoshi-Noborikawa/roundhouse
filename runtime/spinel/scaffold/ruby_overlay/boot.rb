@@ -106,6 +106,9 @@ require_relative "runtime/active_support_core_ext"
 # reopen above; it now takes the same lowered call every other
 # ruby-family target does, so the two stay one behaviour.
 require_relative "runtime/active_support_ext"
+# ActiveSupport::JSON.encode straight through the C generator when the
+# value is already JSON-native; the shared walk otherwise.
+require_relative "runtime/active_support_json_cruby"
 require_relative "runtime/action_view_number_helper"
 require_relative "runtime/action_view_form_builder_extras"
 require_relative "runtime/active_record"
