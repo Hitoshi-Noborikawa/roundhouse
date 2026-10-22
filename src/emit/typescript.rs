@@ -1806,6 +1806,11 @@ pub(super) fn js_library_class(
 
     let mut fields: Vec<(String, String, bool, bool, crate::span::Span)> = Vec::new();
     let mut field_names_seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    // The same names per side, `[instance, static]`: a field subsumes a
+    // method of its name on its own side only (`attr_reader :label` and
+    // `def self.label` are both kept).
+    let mut side_field_names: [std::collections::HashSet<String>; 2] = Default::default();
+    let side = |is_static: bool| usize::from(is_static);
     for m in &class.methods {
         if is_attr_reader(m) {
             // A temporal reader emits as a `Date` getter (below), not a
@@ -1813,6 +1818,7 @@ pub(super) fn js_library_class(
             // path.
             if is_temporal_reader(m) {
                 field_names_seen.insert(m.name.as_str().to_string());
+                side_field_names[side(matches!(m.receiver, MethodReceiver::Class))].insert(m.name.as_str().to_string());
                 continue;
             }
             let ty = match m.signature.as_ref() {
@@ -1821,6 +1827,7 @@ pub(super) fn js_library_class(
             };
             let is_static = matches!(m.receiver, MethodReceiver::Class);
             field_names_seen.insert(m.name.as_str().to_string());
+            side_field_names[side(is_static)].insert(m.name.as_str().to_string());
             fields.push((m.name.as_str().to_string(), ty, is_static, false, m.body.span));
         }
     }
@@ -1854,12 +1861,14 @@ pub(super) fn js_library_class(
         }
     }
     for (name, ty) in ivar_assignments {
-        if field_names_seen.insert(name.clone()) {
+        if side_field_names[0].insert(name.clone()) {
+            field_names_seen.insert(name.clone());
             fields.push((name, ts_ty(&ty), false, true, crate::span::Span::synthetic()));
         }
     }
     for (name, ty) in static_ivar_assignments {
-        if field_names_seen.insert(name.clone()) {
+        if side_field_names[1].insert(name.clone()) {
+            field_names_seen.insert(name.clone());
             fields.push((name, ts_ty(&ty), true, true, crate::span::Span::synthetic()));
         }
     }
@@ -2082,7 +2091,7 @@ pub(super) fn js_library_class(
             // here; surface those as a separate Ruby-source change
             // rather than emitting broken TS. A literal memo is not
             // one: its field starts at the literal (`memoized_literals`).
-            if field_names_seen.contains(&stripped) {
+            if side_field_names[side(matches!(m.receiver, MethodReceiver::Class))].contains(&stripped) {
                 return false;
             }
             // Predicate/bang vs same-name plain-method twin (`save`

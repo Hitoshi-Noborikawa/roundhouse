@@ -42,3 +42,16 @@ fn a_class_side_field_is_read_not_called() {
     assert!(dial.contains("return this.mode.toUpperCase();"), "{dial}");
     assert!(!dial.contains("this.mode()"), "{dial}");
 }
+
+/// An instance `attr_reader :label` no longer hides `def self.label`:
+/// the class method is emitted, and a class-side `label` calls it.
+#[test]
+fn an_instance_field_leaves_a_class_method_of_its_name() {
+    let (emitted, errors) = parenless_calls::overlay().emit(BuildTarget::Typescript);
+    assert!(errors.is_empty(), "{errors:?}");
+    let knob = std::fs::read_to_string(emitted.join("app/models/knob.ts")).expect("knob.ts");
+    assert!(knob.contains("  label: string;"), "{knob}");
+    assert!(knob.contains("static label(): string {"), "{knob}");
+    assert!(knob.contains("return this.label().toUpperCase();"), "{knob}");
+}
+

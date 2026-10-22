@@ -34,6 +34,11 @@ end
 /// (and leaves the method out): a read without parens stays a read.
 pub const DIAL: &str = "class Dial\n  def self.mode\n    @mode ||= \"x\"\n  end\n\n  def self.loud\n    mode.upcase\n  end\nend\n";
 
+/// An instance reader and a class method of the same name: Ruby keeps
+/// them apart (`Knob.shout` reads the class method), and so must the
+/// emit.
+pub const KNOB: &str = "class Knob\n  attr_reader :label\n\n  def initialize\n    @label = \"inst\"\n  end\n\n  def self.label\n    \"cls\"\n  end\n\n  def self.shout\n    label.upcase\n  end\nend\n";
+
 pub const WIDGET: &str = "class Widget < Meter\n  def self.shout\n    label.upcase\n  end\nend\n";
 
 const COMMENT_ANCHOR: &str = "  after_destroy_commit { article.broadcast_replace_to(\"articles\") rescue nil }\n";
@@ -48,6 +53,7 @@ pub fn overlay() -> Overlay {
         .write("app/models/meter.rb", METER)
         .write("app/models/widget.rb", WIDGET)
         .write("app/models/dial.rb", DIAL)
+        .write("app/models/knob.rb", KNOB)
         .edit(
             "app/models/comment.rb",
             COMMENT_ANCHOR,
