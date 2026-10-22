@@ -887,6 +887,12 @@ fn report_unclaimed_unknowns(model: &Model, schema: &Schema) {
         {
             continue;
         }
+        // `default_scope { where(col: literal) }` — claimed by
+        // lower::default_scope (the runtime Relation applies it; a target
+        // without one reports it per target). Other shapes keep warning.
+        if name == "default_scope" && crate::lower::default_scope::static_default_scope(model).is_some() {
+            continue;
+        }
         // Bare `has_rich_text :body` — claimed by lower::rich_text.
         // The option-carrying forms (`encrypted:`, `store_if_blank:`)
         // are NOT claimed: each changes the expansion and none is

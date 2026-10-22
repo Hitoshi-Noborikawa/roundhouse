@@ -124,3 +124,48 @@ puts "default scope bulk writes passed"
         ))
         .assert_passes();
 }
+
+/// Through the CLI: a target without the runtime Relation reports the
+/// scope it cannot apply, once per model, instead of answering every
+/// query from the whole table; a ruby-family target applies it and
+/// reports nothing. A shape this does not lower (an `order`) keeps the
+/// model-DSL warning on every target.
+#[test]
+fn the_cli_reports_default_scope_only_where_it_is_not_applied() {
+    let root = std::env::temp_dir().join(format!("roundhouse-default-scope-cli-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    for (path, body) in [
+        ("app/models/application_record.rb", "class ApplicationRecord < ActiveRecord::Base\n  self.abstract_class = true\nend\n"),
+        ("app/models/gadget.rb", "class Gadget < ApplicationRecord\n  default_scope { where(archived: false) }\nend\n"),
+        ("app/models/shelf.rb", "class Shelf < ApplicationRecord\n  default_scope { order(:name) }\nend\n"),
+        (
+            "db/schema.rb",
+            "ActiveRecord::Schema.define do\n  create_table \"shelves\", force: :cascade do |t|\n    t.string \"name\"\n  end\n  create_table \"gadgets\", force: :cascade do |t|\n    t.string \"name\"\n    t.boolean \"archived\", default: false, null: false\n  end\nend\n",
+        ),
+    ] {
+        let file = root.join("app_src").join(path);
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        std::fs::write(file, body).unwrap();
+    }
+    let lines = |target: &str| -> Vec<String> {
+        let out = std::process::Command::new(env!("CARGO_BIN_EXE_roundhouse"))
+            .args(["--target", target, "--allow-unsupported", "-o"])
+            .arg(root.join(format!("out-{target}")))
+            .arg(root.join("app_src"))
+            .output()
+            .expect("run roundhouse");
+        String::from_utf8_lossy(&out.stderr)
+            .lines()
+            .filter(|l| l.contains("default_scope not supported"))
+            .map(str::to_string)
+            .collect()
+    };
+    let rust = lines("rust");
+    let ruby = lines("ruby");
+    std::fs::remove_dir_all(&root).ok();
+    let on = |lines: &[String], file: &str| lines.iter().filter(|l| l.contains(file)).count();
+    assert_eq!(on(&rust, "gadget.rb"), 1, "rust reports the scope it cannot apply: {rust:#?}");
+    assert_eq!(on(&ruby, "gadget.rb"), 0, "the ruby target applies the scope: {ruby:#?}");
+    assert_eq!(on(&rust, "shelf.rb"), 1, "an unlowered shape still warns: {rust:#?}");
+    assert_eq!(on(&ruby, "shelf.rb"), 1, "an unlowered shape still warns: {ruby:#?}");
+}
