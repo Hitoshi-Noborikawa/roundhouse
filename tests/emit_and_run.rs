@@ -5626,6 +5626,58 @@ end
         .assert_passes();
 }
 
+/// The positional `Result = Struct.new(:a, :b)` in a class body is the
+/// class it defines too: members in order, a missing one nil, writers,
+/// and the methods its block adds. Expected values are Ruby's own.
+#[test]
+fn a_positional_struct_constant_runs_as_its_class() {
+    emit_and_run::real_blog()
+        .write(
+            "app/services/phone_check.rb",
+            r#"class PhoneCheck
+  Normalized = Struct.new(:number, :valid, :error)
+  Point = Struct.new(:x, :y) do
+    def sum
+      x + y
+    end
+  end
+
+  def self.call(raw)
+    return Normalized.new(nil, false, "blank") if raw.empty?
+    Normalized.new(raw.delete("-"), true)
+  end
+
+  def self.point
+    Point.new(1, 2)
+  end
+end
+"#,
+        )
+        .run_ruby(
+            r#"ok = PhoneCheck.call("912-345")
+raise ok.to_s unless ok.number == "912345" && ok.valid == true && ok.error.nil?
+bad = PhoneCheck.call("")
+raise bad.to_s unless bad.number.nil? && bad.valid == false && bad.error == "blank"
+point = PhoneCheck.point
+point.y = 40
+raise point.sum.to_s unless point.sum == 41"#,
+        )
+        .assert_passes();
+}
+
+/// Since Ruby 3.2 a positional Struct also takes keywords, which the
+/// positional constructor would bind to its first member: refused.
+#[test]
+fn a_positional_struct_constant_refuses_keyword_construction() {
+    let errors = emit_and_run::real_blog()
+        .write(
+            "app/services/phone_check.rb",
+            "class PhoneCheck\n  Normalized = Struct.new(:number, :valid)\n\n  def self.call(raw)\n    Normalized.new(number: raw, valid: true)\n  end\nend\n",
+        )
+        .check_errors();
+    assert!(errors.iter().any(|e| e.contains("Struct keyword construction") || e.contains("built positionally")), "{errors:?}");
+}
+
 /// `Float#to_d` / `Integer#to_d` build a BigDecimal without
 /// `bigdecimal/util`, and the decimal arithmetic after them runs:
 /// Float and Integer operands, comparison, `round`, and `floor`/`ceil`

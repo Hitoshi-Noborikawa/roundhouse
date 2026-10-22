@@ -1446,7 +1446,7 @@ fn struct_class(
     }
 }
 
-/// `Result = Struct.new(:a, :b, keyword_init: true) do … end` written
+/// `Result = Struct.new(:a, :b[, keyword_init: true]) do … end` written
 /// directly in a class or module body, read as the class it defines.
 struct StructConstant<'pr> {
     name: Symbol,
@@ -1498,8 +1498,11 @@ fn struct_constant_spec<'pr>(value: &ruby_prism::Node<'pr>) -> Option<StructCons
         }
         members.push(Symbol::from(member));
     }
-    // Not the positional form: since Ruby 3.2 it takes keywords too, which a positional constructor would bind to its first member.
-    if members.is_empty() || !keyword_init {
+    // The positional form too: since Ruby 3.2 it also takes keywords, which
+    // the positional constructor would bind to its first member, so analysis
+    // refuses a keyword `new` on it (`positional_struct`), as for a
+    // `Struct.new(...)` superclass.
+    if members.is_empty() {
         return None;
     }
     let body = match call.block() {

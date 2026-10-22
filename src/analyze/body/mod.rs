@@ -2189,7 +2189,7 @@ impl<'a> BodyTyper<'a> {
                     crate::expr::ExprCold::set_diagnostic(&mut expr.cold, Some(crate::diagnostic::DiagnosticKind::Unsupported {
                         target: None,
                         construct: Symbol::from("Struct keyword construction"),
-                        detail: "a `Struct.new(...)` superclass is built positionally; keyword arguments would land in its first member".to_string(),
+                        detail: "a positional `Struct.new(...)` is built positionally; keyword arguments would land in its first member".to_string(),
                     }));
                 }
                 // `PTY.spawn(..., &maybe)` when `maybe` is nilable: Ruby
