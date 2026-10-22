@@ -604,7 +604,13 @@ fn model_class(model: &Model, mut methods: Vec<MethodDef>, table: Option<&Table>
         methods,
         nullable_columns: nullable_column_names(table),
         origin: None,
-        constants: collect_model_constants(model),
+        constants: {
+            let mut constants = collect_model_constants(model);
+            if let Some(table) = table {
+                constants.extend(schema::enum_constants(model, table));
+            }
+            constants
+        },
         unknown_calls: replayed_class_body(model),
         class_ivar_initializers: collect_class_attr_initializers(model),
     }
