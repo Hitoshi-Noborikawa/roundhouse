@@ -529,7 +529,7 @@ fn diagnose_engine_helper_uses(
     let helper_sources = cx.helper_sources.get_or_init(|| (cx.load_helper_sources)());
     for source in helper_sources {
         let engine_origin = source.engine_class.as_deref() == Some(engine_class);
-        let parsed = ruby_prism::parse(&source.source);
+        let parsed = super::prism::parse_silent(&source.source);
         let mut finder = HelperUseFinder {
             engine_helpers: &engine_helpers,
             mounted_helpers: &mounted_helpers,

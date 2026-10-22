@@ -44,7 +44,7 @@ pub fn ingest_sorbet_declarations(
     HashMap<ClassId, HashMap<Symbol, Ty>>,
     HashMap<ClassId, std::collections::HashSet<Symbol>>,
 ) {
-    let result = ruby_prism::parse(source);
+    let result = super::prism::parse_silent(source);
     let node = result.node();
     let Some(program) = node.as_program_node() else {
         return (HashMap::new(), HashMap::new());

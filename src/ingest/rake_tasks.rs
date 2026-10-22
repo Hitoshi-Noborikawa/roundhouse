@@ -81,7 +81,7 @@ pub(crate) fn gap_diagnostics(app: &App) -> Vec<Diagnostic> {
 }
 
 fn classify(text: &str) -> Result<Hook, String> {
-    let parsed = ruby_prism::parse(text.as_bytes());
+    let parsed = super::prism::parse_silent(text.as_bytes());
     let root = parsed.node();
     let Some(program) = root.as_program_node() else {
         return Err("it is not a Ruby program".into());

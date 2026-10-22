@@ -1116,7 +1116,7 @@ fn engine_class_ledgers(
     lib_ignores: &[String],
 ) -> Vec<FileLedger> {
     let src = String::from_utf8_lossy(bytes).into_owned();
-    let parsed = ruby_prism::parse(bytes);
+    let parsed = super::prism::parse_silent(bytes);
     let root = parsed.node();
     let mut out = Vec::new();
     for (scope, class) in find_all_classes_with_scope(&root) {

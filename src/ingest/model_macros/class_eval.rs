@@ -45,7 +45,7 @@ pub(super) fn expand(
         .0
         .checked_sub(1)
         .and_then(|i| sources.get(i as usize))?;
-    let parsed = ruby_prism::parse(source.text.as_bytes());
+    let parsed = crate::ingest::prism::parse_silent(source.text.as_bytes());
     if parsed.errors().next().is_some() {
         return None;
     }
@@ -206,7 +206,7 @@ fn bind_local_reads(
     idents: &HashMap<String, String>,
     param_names: &HashSet<String>,
 ) -> Option<String> {
-    let parsed = ruby_prism::parse(src.as_bytes());
+    let parsed = crate::ingest::prism::parse_silent(src.as_bytes());
     if parsed.errors().next().is_some() {
         return None;
     }

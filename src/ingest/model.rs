@@ -1176,7 +1176,7 @@ fn validate_sorbet_enum_mappings(
 ) -> IngestResult<()> {
     // This source was already parsed by ingest. Do not duplicate parse or
     // unrelated model diagnostics, or rebuild the model to check one mapping.
-    let result = ruby_prism::parse(source.text.as_bytes());
+    let result = super::prism::parse_silent(source.text.as_bytes());
     let root = result.node();
     let Some((_, class)) = super::util::find_all_classes_with_scope(&root).into_iter()
         .find(|(_, class)| class.location().start_offset() == model.span.start as usize)

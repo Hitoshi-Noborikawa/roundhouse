@@ -6,11 +6,11 @@
 //!
 //! Call-site style: use [`PrismLocation`] for offsets (`loc.start_offset()`).
 //! Free functions remain the trait's implementation plus non-method helpers
-//! (`span_offsets`, `diagnostic_message`, `is_recovery_node`,
+//! (`span_offsets`, `diagnostic_message`, `recovery_unsupported_message`,
 //! `block_parameter`). Prefer native `start`/`end` only when rewriting a
 //! site deliberately — not as a mixed style alongside the trait.
 
-use ruby_prism::{BlockParameterNode, Diagnostic, Location, Node, ParametersNode};
+use ruby_prism::{BlockParameterNode, Diagnostic, ErrorRecoveryNode, Location, ParametersNode};
 
 /// Byte offset where `loc` starts in the parsed source.
 #[inline]
@@ -39,10 +39,24 @@ pub(crate) fn diagnostic_message(err: &Diagnostic<'_>) -> String {
     String::from_utf8_lossy(err.message()).into_owned()
 }
 
-/// Prism's error-recovery placeholder (`ErrorRecoveryNode` on 2.0).
-#[inline]
-pub(crate) fn is_recovery_node(node: &Node<'_>) -> bool {
-    node.as_error_recovery_node().is_some()
+/// Unsupported-ingest message for a Prism recovery node, including a short
+/// source preview. Prefer Prism's `unexpected()` span when present; otherwise
+/// fall back to the recovery node's own location (common for missing-token
+/// placeholders where `unexpected` is null).
+pub(crate) fn recovery_unsupported_message(recovery: &ErrorRecoveryNode<'_>) -> String {
+    let bytes = recovery
+        .unexpected()
+        .map(|unexpected| unexpected.location().as_slice())
+        .unwrap_or_else(|| recovery.location().as_slice());
+    // Cap before lossy decode so a huge recovered call/pattern span does
+    // not allocate a full UTF-8 buffer just to take 40 chars.
+    let capped = &bytes[..bytes.len().min(160)];
+    let preview: String = String::from_utf8_lossy(capped).chars().take(40).collect();
+    if preview.is_empty() {
+        "unparsed fragment (Prism recovery node)".into()
+    } else {
+        format!("unparsed fragment near `{preview}` (Prism recovery)")
+    }
 }
 
 /// Prism 2 returns `ParametersNode::block` as a generic [`Node`] (`&blk`,
@@ -77,6 +91,7 @@ impl PrismLocation for Location<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ruby_prism::Node;
 
     #[test]
     fn offsets_match_source_slice() {
@@ -110,7 +125,14 @@ mod tests {
         let node = finder
             .hit
             .expect("expected a Prism recovery node for truncated `1 + `");
-        assert!(is_recovery_node(&node));
+        let recovery = node
+            .as_error_recovery_node()
+            .expect("hit must narrow to ErrorRecoveryNode");
+        let message = recovery_unsupported_message(&recovery);
+        assert!(
+            message.contains("Prism recovery") && message.contains('`'),
+            "expected a preview-bearing recovery message, got: {message}"
+        );
     }
 
     #[test]

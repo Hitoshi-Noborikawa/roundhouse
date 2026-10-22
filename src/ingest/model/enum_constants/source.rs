@@ -265,7 +265,7 @@ impl EnumConstants {
             SourceKind::Inputs => prism::parse(source, file),
             // Already consumed/diagnosed by the real pipeline. Observe the
             // original facts without adding a second set of parse errors.
-            SourceKind::Mutations => ruby_prism::parse(source),
+            SourceKind::Mutations => crate::ingest::prism::parse_silent(source),
         };
         if result.errors().next().is_none() {
             let mut collector = Collector {

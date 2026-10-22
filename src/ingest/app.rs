@@ -231,7 +231,7 @@ fn names_root_constant(text: &str, name: &str) -> bool {
             }
         }
     }
-    let parsed = ruby_prism::parse(text.as_bytes());
+    let parsed = super::prism::parse_silent(text.as_bytes());
     let mut reads = Reads { name, found: false };
     ruby_prism::Visit::visit(&mut reads, &parsed.node());
     reads.found
@@ -7161,7 +7161,7 @@ fn boot_required_files<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> Vec<PathBuf> {
     for name in ["application.rb", "environment.rb"] {
         let file = config_dir.join(name);
         let Ok(source) = vfs.read(&file) else { continue };
-        let parsed = ruby_prism::parse(&source);
+        let parsed = super::prism::parse_silent(&source);
         let Some(program) = parsed.node().as_program_node() else { continue };
         for statement in program.statements().body().iter() {
             let Some(call) = statement.as_call_node() else { continue };
@@ -7396,7 +7396,7 @@ pub(super) fn declares_rails_engine<V: Vfs + ?Sized>(vfs: &V, lib_dir: &Path) ->
     }
     files.iter().any(|file| {
         vfs.read(file).is_ok_and(|source| {
-            let parsed = ruby_prism::parse(&source);
+            let parsed = super::prism::parse_silent(&source);
             let mut visitor = EngineVisitor { found: false };
             ruby_prism::Visit::visit(&mut visitor, &parsed.node());
             visitor.found
@@ -7435,7 +7435,7 @@ fn engine_route_sources<V: Vfs + ?Sized>(
         files.dedup();
         for file in files {
             let Ok(source) = vfs.read(&file) else { continue };
-            let parsed = ruby_prism::parse(&source);
+            let parsed = super::prism::parse_silent(&source);
             if parsed.errors().next().is_some() {
                 continue;
             }
@@ -7778,7 +7778,7 @@ fn plain_engine_library_sources<V: Vfs + ?Sized>(
             return false;
         }
         let Ok(source) = vfs.read(file) else { return false };
-        let parsed = ruby_prism::parse(&source);
+        let parsed = super::prism::parse_silent(&source);
         if parsed.errors().next().is_some() {
             return false;
         }
