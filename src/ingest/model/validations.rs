@@ -1544,7 +1544,10 @@ fn inclusion_values(node: &Node<'_>, class_consts: &super::ClassConsts) -> Optio
     if let Some(array) = node.as_array_node() {
         let mut out = Vec::new();
         for element in array.elements().iter() {
-            out.push(literal_atom(&element)?);
+            out.push(
+                literal_atom(&element)
+                    .or_else(|| super::super::util::duration_seconds(&element).map(|value| Literal::Int { value }))?,
+            );
         }
         return Some(InclusionSpec::List(out));
     }

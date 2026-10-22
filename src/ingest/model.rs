@@ -1957,8 +1957,9 @@ impl ClassConsts {
 
     /// A list of literals the class body can fold: an array literal
     /// (`%w[…]`, `%i[…]`, `[…]`) whose every element is a String, Symbol,
-    /// Integer, Float, `true`/`false` or `nil` literal, `.freeze`d or not,
-    /// or another folded list constant.
+    /// Integer, Float, `true`/`false` or `nil` literal, or a Duration
+    /// literal (`1.week.seconds`, folded to its Integer seconds), `.freeze`d
+    /// or not, or another folded list constant.
     pub(super) fn list(&self, node: &Node<'_>) -> Option<Vec<Literal>> {
         if let Some(inner) = single_parenthesized(node) {
             return self.list(&inner);
@@ -1976,7 +1977,13 @@ impl ClassConsts {
         if let Some(key) = const_key(node) {
             return self.lists.get(&key).cloned();
         }
-        node.as_array_node()?.elements().iter().map(|el| list_atom(&el)).collect()
+        node.as_array_node()?
+            .elements()
+            .iter()
+            .map(|el| {
+                list_atom(&el).or_else(|| super::util::duration_seconds(&el).map(|value| Literal::Int { value }))
+            })
+            .collect()
     }
 
     /// The keys of a Hash the class body can fold: a Hash literal whose

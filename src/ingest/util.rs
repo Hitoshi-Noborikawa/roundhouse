@@ -76,6 +76,34 @@ pub(super) fn integer_value(node: &Node<'_>) -> Option<i64> {
     integer_i64(&node.as_integer_node()?.value())
 }
 
+/// The seconds an `ActiveSupport::Duration` literal stands for: an Integer
+/// literal times a unit (`1.week`, `2.months`), bare or with `.seconds`
+/// (`1.week.seconds`, itself a Duration of the same length). Rails 8.1.4's
+/// fixed lengths: a month is 2629746 seconds (a year / 12) and a year
+/// 31556952 (365.2425 days). A Duration equals its Integer seconds, both
+/// ways, so a list of them answers `include?` as the Integer list does.
+pub(super) fn duration_seconds(node: &Node<'_>) -> Option<i64> {
+    let call = node.as_call_node()?;
+    if call.arguments().is_some() || call.block().is_some() {
+        return None;
+    }
+    let receiver = call.receiver()?;
+    let unit: i64 = match constant_id_str(&call.name()) {
+        // `1.week.seconds`: the Duration's own `.seconds` is the same length.
+        "seconds" if receiver.as_call_node().is_some() => return duration_seconds(&receiver),
+        "second" | "seconds" => 1,
+        "minute" | "minutes" => 60,
+        "hour" | "hours" => 3_600,
+        "day" | "days" => 86_400,
+        "week" | "weeks" => 604_800,
+        "fortnight" | "fortnights" => 1_209_600,
+        "month" | "months" => 2_629_746,
+        "year" | "years" => 31_556_952,
+        _ => return None,
+    };
+    integer_value(&receiver)?.checked_mul(unit)
+}
+
 /// A non-interpolated `/pattern/flags` literal's pattern (prism's
 /// UNESCAPED bytes — the regex engine's view, same as
 /// `dialect::Literal::Regex`) and its flags, in canonical `imxoesun`
