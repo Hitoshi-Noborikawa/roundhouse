@@ -440,6 +440,72 @@ ALTER TABLE ONLY shard.readings_p0
     assert_eq!(pk_gaps, 1, "{gaps:?}");
 }
 
+/// pg_dump writes an index on a partitioned table as `CREATE INDEX …
+/// ON ONLY parent`, then one index per partition and an `ALTER INDEX …
+/// ATTACH PARTITION` joining each to the parent's. `ONLY` used to be read
+/// as the table name, so every such index was ledgered as a clause before
+/// the column list. The parent keeps the index; the partitions' indexes
+/// stay out with the partitions.
+#[test]
+fn an_index_on_only_a_partitioned_parent_is_the_parents_index() {
+    let sql = r#"
+CREATE TABLE public.events (
+    id bigint NOT NULL,
+    account_id bigint NOT NULL,
+    created_at timestamp(6) without time zone NOT NULL,
+    status integer
+)
+PARTITION BY RANGE (created_at);
+
+CREATE TABLE public.events_2026_06 (
+    id bigint NOT NULL,
+    account_id bigint NOT NULL,
+    created_at timestamp(6) without time zone NOT NULL,
+    status integer
+);
+
+CREATE TABLE public.only_items (
+    id bigint NOT NULL
+);
+
+ALTER TABLE ONLY public.events ATTACH PARTITION public.events_2026_06 FOR VALUES FROM ('2026-06-01 00:00:00') TO ('2026-07-01 00:00:00');
+
+CREATE UNIQUE INDEX idx_events_tenant_identity ON ONLY public.events USING btree (id, created_at, account_id);
+
+CREATE INDEX index_events_on_failures ON ONLY public.events USING btree (status, created_at DESC) WHERE (status >= 400);
+
+CREATE INDEX index_events_on_account_id ON ONLY public.events (account_id);
+
+CREATE UNIQUE INDEX events_2026_06_id_created_at_account_id_idx ON public.events_2026_06 USING btree (id, created_at, account_id);
+
+CREATE INDEX index_only_items_on_id ON only_items USING btree (id);
+
+ALTER INDEX public.idx_events_tenant_identity ATTACH PARTITION public.events_2026_06_id_created_at_account_id_idx;
+"#;
+    survey::activate();
+    let schema = ingest_structure_sql(sql.as_bytes(), "db/structure.sql").expect("survey mode never errors");
+    let gaps = survey::drain();
+    assert!(gaps.is_empty(), "{gaps:?}");
+
+    let indexes: Vec<(&str, bool, Option<&str>, Option<&str>)> = schema.tables[&Symbol::from("events")]
+        .indexes
+        .iter()
+        .map(|i| (i.name.as_str(), i.unique, i.using.as_deref(), i.predicate.as_deref()))
+        .collect();
+    // `index_events_on_failures` has a `DESC` column, which is skipped
+    // like any other non-plain column, `ONLY` or not.
+    assert_eq!(
+        indexes,
+        vec![
+            ("idx_events_tenant_identity", true, Some("btree"), None),
+            ("index_events_on_account_id", false, None, None),
+        ]
+    );
+    assert!(!schema.tables.contains_key(&Symbol::from("events_2026_06")));
+    // A table whose name starts with `only` is not read as `ONLY`.
+    assert_eq!(schema.tables[&Symbol::from("only_items")].indexes.len(), 1);
+}
+
 /// `CREATE … INDEX … WHERE (…)` keeps its predicate, as `where:` in
 /// `schema.rb` does. It used to be dropped, so a partial unique index
 /// came out unique over every row. The predicate is the rest of the

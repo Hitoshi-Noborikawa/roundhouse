@@ -1442,7 +1442,7 @@ end
         other => panic!("expected inclusion, got {other:?}"),
     }
     let code = rules.iter().find(|v| v.attribute.as_str() == "code").unwrap();
-    assert!(matches!(&code.rules[0], ValidationRule::Format { pattern, flags } if pattern == r"\A[A-Z]{3}\z" && flags.is_empty()));
+    assert!(matches!(&code.rules[0], ValidationRule::Format { pattern, flags, .. } if pattern == r"\A[A-Z]{3}\z" && flags.is_empty()));
     let stock = rules.iter().find(|v| v.attribute.as_str() == "stock").unwrap();
     match &stock.rules[0] {
         ValidationRule::Inclusion { values, range: Some(range) } => {
@@ -2189,15 +2189,22 @@ end
 }
 
 #[test]
-fn non_nil_classvar_initializer_is_refused() {
+fn a_literal_classvar_initializer_is_kept_and_an_expression_refused() {
     use roundhouse::ingest::ingest_library_classes;
 
-    // A non-nil `@@X = <expr>` initializer can't be dropped silently —
-    // strict ingest refuses it (survey mode records the gap per-item).
-    let src = b"class Twitter\n  @@TIMEOUT = 30\nend\n";
+    // ancestry's `@@default_update_strategy = :ruby`: a literal reads no
+    // other state, so it is kept as the class's initializer. A computed
+    // value is refused: it would observe the emitted body's order.
+    let classes = ingest_library_classes(b"class Twitter\n  @@TIMEOUT = 30\nend\n", "extras/twitter.rb")
+        .expect("a literal class-variable initializer ingests");
     assert!(
-        ingest_library_classes(src, "extras/twitter.rb").is_err(),
-        "non-nil class-variable initializer must not be silently dropped"
+        classes[0].class_ivar_initializers.iter().any(|e| roundhouse::emit::ruby::emit_expr(e).contains("@@TIMEOUT = 30")),
+        "{:?}",
+        classes[0].class_ivar_initializers
+    );
+    assert!(
+        ingest_library_classes(b"class Twitter\n  @@TIMEOUT = ENV.fetch(\"T\")\nend\n", "extras/twitter.rb").is_err(),
+        "a computed class-variable initializer must be refused"
     );
 }
 
@@ -2592,7 +2599,7 @@ fn specific_ledger_messages_replace_the_generic_catch_all() {
     for (source, expected) in [
         ("class Foo; end", "class/module defined inside a method or block (runtime class definition)"),
         ("module Foo; end", "class/module defined inside a method or block (runtime class definition)"),
-        ("1 + ", "unparsed fragment (Prism recovery node)"),
+        ("1 + ", "unparsed fragment near `+` (Prism recovery)"),
     ] {
         let result = ruby_prism::parse(source.as_bytes());
         let program = result.node();

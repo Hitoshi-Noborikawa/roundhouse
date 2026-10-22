@@ -463,29 +463,26 @@ fn direction_from_value(v: &Expr) -> Option<super::ir::Direction> {
 // Receiver resolution
 // ---------------------------------------------------------------------------
 
-/// Resolve a `Const` Expr to a registry-known `ClassId`. Tries the
-/// joined path verbatim first (`Foo::Bar` → `ClassId("Foo::Bar")`),
-/// then the last segment alone (`Bar`) since the model lowerer
-/// registers app classes under their bare name. Returns None when
-/// the receiver isn't a Const or the class isn't registered.
+/// Resolve a `Const` Expr to a registry-known `ClassId`: the class the
+/// path names, and no other. A leading `::` (`::Widget`) only anchors
+/// the path at the top level. Returns None when the receiver isn't a
+/// Const or the class isn't registered.
+///
+/// The path is never matched by its last segment. An association's
+/// `class_name: "Vendor::Record"` names a class a gem can define and
+/// the app does not; matching `Record` instead bound it to an unrelated
+/// top-level model, so the reader read that model's table. Rails loads
+/// `Vendor::Record` or raises NameError, never another class.
 pub(super) fn const_to_class_id(recv: &Expr, registry: &HashMap<ClassId, ClassInfo>) -> Option<ClassId> {
     let ExprNode::Const { path } = recv.node.as_ref() else {
         return None;
     };
-    if path.is_empty() {
+    let segments: Vec<&str> = path.iter().map(|s| s.as_str()).skip_while(|s| s.is_empty()).collect();
+    if segments.is_empty() {
         return None;
     }
-    let joined = ClassId(Symbol::from(
-        path.iter().map(|s| s.as_str()).collect::<Vec<_>>().join("::"),
-    ));
-    if registry.contains_key(&joined) {
-        return Some(joined);
-    }
-    let last = ClassId(path.last().unwrap().clone());
-    if registry.contains_key(&last) {
-        return Some(last);
-    }
-    None
+    let joined = ClassId(Symbol::from(segments.join("::").as_str()));
+    registry.contains_key(&joined).then_some(joined)
 }
 
 // ---------------------------------------------------------------------------

@@ -1176,7 +1176,21 @@ fn every_runtime_method_body_concretely_typed() {
     // `#cache_version` / `#cache_key_with_version` for jbuilder `cache!`
     // read the memo Hashes and the windowed rows untyped (+12 over
     // main's 846, re-measured after rebasing #1034 onto main).
-    const CEILING: usize = 858;
+    // MEASURED 860 on 2026-10-21: the outermost `Base.transaction`
+    // writes the touches `touch_later` deferred before its COMMIT, then
+    // answers the block's value it read from `yield` (+2 in
+    // active_record/connection.rb's `transaction`, 8 -> 10; the
+    // savepoint branch already read its `result` the same way).
+    // `touch_later` and `_flush_deferred_touches_from` type fully.
+    // MEASURED 864 on 2026-10-22: ancestry from source reads a record's
+    // column by name (`read_attribute`, `write_attribute`,
+    // `attribute_in_database`), whose value is whatever that column
+    // holds, and asks a relation for its model's `primary_key` (+4 in
+    // active_record/connection.rb and relation.rb, 860 -> 864).
+    // MEASURED 865 on 2026-10-22: `ActiveSupport::JSON.encode_without_escape`
+    // (Rails' `encode(value, escape: false)`) hands its value to
+    // `jsonable` untyped, as `encode` does (+1 in active_support_ext.rb).
+    const CEILING: usize = 865;
     assert!(
         total_gradual <= CEILING,
         "{total_gradual} Ty::Untyped sites exceeds ceiling of {CEILING}"

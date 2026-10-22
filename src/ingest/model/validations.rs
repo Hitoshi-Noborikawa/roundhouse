@@ -14,6 +14,7 @@ use crate::span::Span;
 use super::super::IngestError;
 use super::super::util::{string_value, symbol_value};
 
+use crate::ingest::prism_api::PrismLocation;
 pub(super) fn validation_items(
     parsed: Vec<crate::dialect::Validation>,
     leading_comments: Vec<Comment>,
@@ -214,6 +215,7 @@ pub(super) fn parse_validates_call(
             lte: None,
             allow_nil: None,
             allow_blank: None,
+            in_range: None,
         }));
     } else if !matches!(kind, ValidatesKind::Map) && !attrs.is_empty() {
         gaps.push(match kind {
@@ -224,19 +226,23 @@ pub(super) fn parse_validates_call(
         });
     }
 
-    // Uniqueness and Numericality store both flags, so a call-level one
-    // applies to them (below) rather than refusing the call.
+    // Uniqueness, Numericality and Format store both flags, so a call-level
+    // one applies to them (below) rather than refusing the call.
     let is_uniqueness = |draft: &BuiltRule| matches!(draft.rule, ValidationRule::Uniqueness { .. });
-    let is_numericality = |draft: &BuiltRule| matches!(draft.rule, ValidationRule::Numericality { .. });
+    let stores_flags = |draft: &BuiltRule| {
+        matches!(draft.rule, ValidationRule::Numericality { .. } | ValidationRule::Format { .. })
+    };
+    // Acceptance stores `allow_nil` (below); `allow_blank` stays the gap.
+    let stores_nil = |draft: &BuiltRule| matches!(draft.rule, ValidationRule::Acceptance { .. });
     if allow_blank
         && drafts
             .iter()
-            .any(|draft| !blank_safe(&draft.rule) && !is_uniqueness(draft) && !is_numericality(draft))
+            .any(|draft| !blank_safe(&draft.rule) && !is_uniqueness(draft) && !stores_flags(draft))
     {
         gaps.push("allow_blank".to_string());
     }
     // Call-level `allow_nil: true` is Rails' skip-when-nil for every
-    // validator in the call. Length, Uniqueness and Numericality store it, and
+    // validator in the call. Length, Uniqueness, Numericality and Format store it, and
     // Presence skips nil (`nil_skip` below). The other
     // rules this build lowers reject nil, so applying them would reject
     // records Rails accepts.
@@ -246,7 +252,8 @@ pub(super) fn parse_validates_call(
             .any(|draft| {
                 !matches!(draft.rule, ValidationRule::Length { .. } | ValidationRule::Presence)
                     && !is_uniqueness(draft)
-                    && !is_numericality(draft)
+                    && !stores_flags(draft)
+                    && !stores_nil(draft)
             })
     {
         gaps.push("allow_nil".to_string());
@@ -289,8 +296,10 @@ pub(super) fn parse_validates_call(
     }
     if let Some(flag) = allow_nil {
         for draft in &mut drafts {
-            if let ValidationRule::Length { allow_nil: slot, .. } | ValidationRule::Numericality { allow_nil: slot, .. } =
-                &mut draft.rule
+            if let ValidationRule::Length { allow_nil: slot, .. }
+            | ValidationRule::Numericality { allow_nil: slot, .. }
+            | ValidationRule::Format { allow_nil: slot, .. }
+            | ValidationRule::Acceptance { allow_nil: slot, .. } = &mut draft.rule
             {
                 if slot.is_none() {
                     *slot = Some(flag);
@@ -298,11 +307,13 @@ pub(super) fn parse_validates_call(
             }
         }
     }
-    // A call-level `allow_blank:` reaches the numericality validator as
-    // Rails passes it, under the validator's own key.
+    // A call-level `allow_blank:` reaches the numericality and format
+    // validators as Rails passes it, under the validator's own key.
     if allow_blank {
         for draft in &mut drafts {
-            if let ValidationRule::Numericality { allow_blank: slot, .. } = &mut draft.rule {
+            if let ValidationRule::Numericality { allow_blank: slot, .. } | ValidationRule::Format { allow_blank: slot, .. } =
+                &mut draft.rule
+            {
                 if slot.is_none() {
                     *slot = Some(true);
                 }
@@ -443,7 +454,7 @@ fn not_nil(attr: &Symbol) -> Expr {
     )
 }
 
-fn context_guard(value: &Node<'_>) -> Option<Option<Expr>> {
+pub(super) fn context_guard(value: &Node<'_>) -> Option<Option<Expr>> {
     let mut contexts: Vec<String> = Vec::new();
     if let Some(array) = value.as_array_node() {
         for element in array.elements().iter() {
@@ -485,7 +496,7 @@ fn context_guard(value: &Node<'_>) -> Option<Option<Expr>> {
 
 /// Both guards hold (`on:`'s context guard and an `if:` condition), or
 /// whichever one is present.
-fn and_guard(a: Option<Expr>, b: Option<Expr>) -> Option<Expr> {
+pub(super) fn and_guard(a: Option<Expr>, b: Option<Expr>) -> Option<Expr> {
     match (a, b) {
         (Some(a), Some(b)) => Some(Expr::new(
             Span::synthetic(),
@@ -775,6 +786,7 @@ fn parse_of_options<'a>(
             lte,
             allow_nil: None,
             allow_blank: None,
+            in_range: None,
         },
         ValidatesKind::Inclusion | ValidatesKind::Exclusion => match inclusion {
             Some(spec) => set_rule(spec, matches!(kind, ValidatesKind::Exclusion)),
@@ -788,7 +800,7 @@ fn parse_of_options<'a>(
             }
         },
         ValidatesKind::Format => match pattern {
-            Some((pattern, flags)) => ValidationRule::Format { pattern, flags },
+            Some((pattern, flags)) => ValidationRule::Format { pattern, flags, allow_nil: None, allow_blank: None },
             None => {
                 gaps.push("format: with".to_string());
                 return;
@@ -804,6 +816,7 @@ fn parse_validator(key: &str, value: &Node<'_>, file: &str, class_consts: &super
     match key {
         "presence" => parse_bool_or_hash(value, ValidationRule::Presence, "presence", file),
         "absence" => parse_bool_or_hash(value, ValidationRule::Absence, "absence", file),
+        "acceptance" => parse_acceptance(value, file),
         "length" => parse_length_rule(value, file, class_consts),
         "numericality" => parse_numericality(value, file, class_consts),
         "inclusion" => parse_set(value, file, false, class_consts),
@@ -811,6 +824,80 @@ fn parse_validator(key: &str, value: &Node<'_>, file: &str, class_consts: &super
         "uniqueness" => parse_uniqueness(value, file, class_consts),
         "format" => parse_format(value, file, class_consts),
         other => RuleParse::Gap(vec![other.to_string()]),
+    }
+}
+
+/// `acceptance: true`, `acceptance: false`, or `acceptance: { accept:,
+/// allow_nil:, … }`. Rails' `AcceptanceValidator` merges the options over
+/// `{ allow_nil: true, accept: ["1", true] }`, so an unset `accept:` is that
+/// default and an unset `allow_nil:` stays `None` (read as `true`). An
+/// `accept:` value is a literal String, Integer or Boolean, or an Array of
+/// them; anything else stays the gap.
+fn parse_acceptance(value: &Node<'_>, file: &str) -> RuleParse {
+    use crate::dialect::ValidationRule;
+    let default_accept = || vec![Literal::Str { value: "1".to_string() }, Literal::Bool { value: true }];
+    match super::super::util::bool_value(value) {
+        Some(true) => {
+            return RuleParse::Rule(BuiltRule::bare(ValidationRule::Acceptance { accept: default_accept(), allow_nil: None }))
+        }
+        Some(false) => return RuleParse::Skip,
+        None => {}
+    }
+    let Some(elements) = hash_elements(value) else {
+        return RuleParse::Gap(vec!["acceptance".to_string()]);
+    };
+    let mut accept = None;
+    let mut allow_nil = None;
+    let mut built = BuiltRule::bare(ValidationRule::Acceptance { accept: Vec::new(), allow_nil: None });
+    let mut gaps = Vec::new();
+    for el in elements.iter() {
+        let Some(assoc) = el.as_assoc_node() else {
+            gaps.push("acceptance".to_string());
+            continue;
+        };
+        let Some(key) = symbol_value(&assoc.key()) else {
+            gaps.push("acceptance".to_string());
+            continue;
+        };
+        let child = assoc.value();
+        match key.as_str() {
+            "accept" => match acceptance_values(&child) {
+                Some(values) => accept = Some(values),
+                None => gaps.push("acceptance: accept".to_string()),
+            },
+            "allow_nil" => match super::super::util::bool_value(&child) {
+                Some(flag) => {
+                    allow_nil = Some(flag);
+                    built.own_allow_nil = true;
+                }
+                None => gaps.push("allow_nil".to_string()),
+            },
+            "on" => match context_guard(&child) {
+                Some(guard) => built.on_guard = Some(guard),
+                None => gaps.push("on".to_string()),
+            },
+            "if" => push_condition(&child, file, &mut built.if_cond, "if", &mut gaps),
+            "unless" => push_condition(&child, file, &mut built.unless_cond, "unless", &mut gaps),
+            "message" => push_message(&child, "acceptance", false, &mut built.message, &mut gaps),
+            other => gaps.push(format!("acceptance: {other}")),
+        }
+    }
+    if !gaps.is_empty() {
+        return RuleParse::Gap(gaps);
+    }
+    built.rule = ValidationRule::Acceptance { accept: accept.unwrap_or_else(default_accept), allow_nil };
+    RuleParse::Rule(built)
+}
+
+/// `accept: true`, `accept: "yes"` or `accept: [true, "true", "1"]`
+/// (Rails reads it through `Array(...)`).
+fn acceptance_values(node: &Node<'_>) -> Option<Vec<Literal>> {
+    let atom = |node: &Node<'_>| {
+        literal_atom(node).filter(|lit| matches!(lit, Literal::Str { .. } | Literal::Int { .. } | Literal::Bool { .. }))
+    };
+    match node.as_array_node() {
+        Some(array) => array.elements().iter().map(|element| atom(&element)).collect(),
+        None => atom(node).map(|lit| vec![lit]),
     }
 }
 
@@ -878,6 +965,7 @@ fn parse_numericality(value: &Node<'_>, file: &str, class_consts: &super::ClassC
             lte: None,
             allow_nil: None,
             allow_blank: None,
+            in_range: None,
         }));
     }
     if super::super::util::bool_value(value) == Some(false) {
@@ -893,6 +981,7 @@ fn parse_numericality(value: &Node<'_>, file: &str, class_consts: &super::ClassC
     let mut lte = None;
     let mut allow_nil = None;
     let mut allow_blank = None;
+    let mut in_range = None;
     let mut built = BuiltRule::bare(ValidationRule::Numericality {
         only_integer: false,
         gt: None,
@@ -901,6 +990,7 @@ fn parse_numericality(value: &Node<'_>, file: &str, class_consts: &super::ClassC
         lte: None,
         allow_nil: None,
         allow_blank: None,
+        in_range: None,
     });
     let mut gaps = Vec::new();
     for el in elements.iter() {
@@ -934,6 +1024,10 @@ fn parse_numericality(value: &Node<'_>, file: &str, class_consts: &super::ClassC
                 Some(n) => lte = Some(n),
                 None => gaps.push("numericality: less_than_or_equal_to".to_string()),
             },
+            "in" => match bound_range(&child, class_consts) {
+                Some(range) => in_range = Some(range),
+                None => gaps.push("numericality: in".to_string()),
+            },
             "equal_to" | "other_than" => gaps.push(format!("numericality: {key}")),
             "on" => match context_guard(&child) {
                 Some(guard) => built.on_guard = Some(guard),
@@ -966,6 +1060,7 @@ fn parse_numericality(value: &Node<'_>, file: &str, class_consts: &super::ClassC
         lte,
         allow_nil,
         allow_blank,
+        in_range,
     };
     RuleParse::Rule(built)
 }
@@ -1034,7 +1129,7 @@ fn parse_set(value: &Node<'_>, file: &str, exclusion: bool, class_consts: &super
 fn parse_format(value: &Node<'_>, file: &str, class_consts: &super::ClassConsts) -> RuleParse {
     use crate::dialect::ValidationRule;
     if let Some((pattern, flags)) = resolve_format_regex(value, class_consts) {
-        return RuleParse::Rule(BuiltRule::bare(ValidationRule::Format { pattern, flags }));
+        return RuleParse::Rule(BuiltRule::bare(ValidationRule::Format { pattern, flags, allow_nil: None, allow_blank: None }));
     }
     if value.as_regular_expression_node().is_some()
         || value.as_interpolated_regular_expression_node().is_some()
@@ -1048,9 +1143,13 @@ fn parse_format(value: &Node<'_>, file: &str, class_consts: &super::ClassConsts)
         return RuleParse::Gap(vec!["format".to_string()]);
     };
     let mut pattern: Option<(String, String)> = None;
+    let mut allow_nil = None;
+    let mut allow_blank = None;
     let mut built = BuiltRule::bare(ValidationRule::Format {
         pattern: String::new(),
         flags: String::new(),
+        allow_nil: None,
+        allow_blank: None,
     });
     let mut gaps = Vec::new();
     for el in elements.iter() {
@@ -1077,8 +1176,12 @@ fn parse_format(value: &Node<'_>, file: &str, class_consts: &super::ClassConsts)
                 push_condition(&child, file, &mut built.unless_cond, "unless", &mut gaps)
             }
             "allow_nil" => match super::super::util::bool_value(&child) {
-                Some(false) => {}
-                _ => gaps.push("allow_nil".to_string()),
+                Some(flag) => allow_nil = Some(flag),
+                None => gaps.push("allow_nil".to_string()),
+            },
+            "allow_blank" => match super::super::util::bool_value(&child) {
+                Some(flag) => allow_blank = Some(flag),
+                None => gaps.push("allow_blank".to_string()),
             },
             "message" => push_message(&child, "format", false, &mut built.message, &mut gaps),
             other => gaps.push(format!("format: {other}")),
@@ -1089,7 +1192,7 @@ fn parse_format(value: &Node<'_>, file: &str, class_consts: &super::ClassConsts)
     }
     match pattern {
         Some((pattern, flags)) => {
-            built.rule = ValidationRule::Format { pattern, flags };
+            built.rule = ValidationRule::Format { pattern, flags, allow_nil, allow_blank };
             RuleParse::Rule(built)
         }
         None => RuleParse::Gap(vec!["format: with".to_string()]),
@@ -1112,7 +1215,10 @@ fn resolve_format_regex(
     node: &Node<'_>,
     class_consts: &super::ClassConsts,
 ) -> Option<(String, String)> {
-    let (pattern, flags) = class_consts.regex(node).or_else(|| stdlib_regexp_constant(node, class_consts))?;
+    let (pattern, flags) = class_consts
+        .regex(node)
+        .or_else(|| stdlib_regexp_constant(node, class_consts))
+        .or_else(|| stdlib_regexp_call(node, class_consts))?;
     if flags.chars().all(|c| matches!(c, 'i' | 'm')) {
         Some((pattern, flags))
     } else {
@@ -1138,9 +1244,55 @@ fn resolve_format_regex(
 /// `ruby -ruri -e 'p CONST.source, CONST.options'` on Ruby 4.0, so the
 /// rule is the one writing that literal inline would give (prism's
 /// unescaped `/…\/…/` source equals Ruby's `Regexp#source`, `\#`
-/// included). Anything else, including a method that builds a regex
-/// (`URI::DEFAULT_PARSER.make_regexp`), stays the gap.
+/// included). Any other constant stays the gap; a method that builds a
+/// regex is [`stdlib_regexp_call`]'s.
 fn stdlib_regexp_constant(node: &Node<'_>, class_consts: &super::ClassConsts) -> Option<(String, String)> {
+    let (source, flags) = match stdlib_path(node, class_consts)?.as_str() {
+        "URI::MailTo::EMAIL_REGEXP" => (
+            r"\A[a-zA-Z0-9.!\#$%&'*+/=?^_`{|}~-]+@[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(?:\.[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)*\z",
+            "",
+        ),
+        _ => return None,
+    };
+    Some((source.to_string(), flags.to_string()))
+}
+
+/// `URI::DEFAULT_PARSER.make_regexp` (or the `RFC2396_PARSER` /
+/// `RFC3986_PARSER` spelling, the same Regexp on Ruby 4.0), with no
+/// schemes, under the same shadowing rules as [`stdlib_regexp_constant`].
+///
+/// Ruby's value is a 1440-character extended-mode (`/x`) pattern with
+/// `(?#…)` comments and a `(?!//)` lookahead, which no strict target's
+/// regex engine reads as Ruby does. It has no anchors, and everything
+/// after the scheme's `:` is optional: the opaque and hierarchical parts,
+/// the authority after a `//` (so a `//` matches with an empty one),
+/// the path, query and fragment. So `match?` on it, which is all a format
+/// rule asks, is true exactly when the string holds a scheme and its
+/// colon: `[a-zA-Z][a-zA-Z0-9+.-]*:` (Ruby's `\d` is ASCII only, and the
+/// `-` goes last so no target reads an escape). That pattern is what the
+/// rule gets. With schemes
+/// (`make_regexp(%w[http https])`) the pattern adds a lookahead on them
+/// and stays the gap.
+fn stdlib_regexp_call(node: &Node<'_>, class_consts: &super::ClassConsts) -> Option<(String, String)> {
+    let call = node.as_call_node()?;
+    if super::super::util::constant_id_str(&call.name()) != "make_regexp"
+        || call.arguments().is_some()
+        || call.block().is_some()
+    {
+        return None;
+    }
+    match stdlib_path(&call.receiver()?, class_consts)?.as_str() {
+        "URI::DEFAULT_PARSER" | "URI::RFC2396_PARSER" | "URI::RFC3986_PARSER" => {
+            Some(("[a-zA-Z][a-zA-Z0-9+.-]*:".to_string(), String::new()))
+        }
+        _ => None,
+    }
+}
+
+/// A constant path (`URI::MailTo`, `::URI::DEFAULT_PARSER`) joined with
+/// `::`, when it can only name the standard-library constant (see
+/// [`stdlib_regexp_constant`]).
+fn stdlib_path(node: &Node<'_>, class_consts: &super::ClassConsts) -> Option<String> {
     /// The path's segments, and whether it starts with `::`.
     fn segments(node: &Node<'_>, out: &mut Vec<String>) -> Option<bool> {
         if let Some(c) = node.as_constant_read_node() {
@@ -1166,14 +1318,7 @@ fn stdlib_regexp_constant(node: &Node<'_>, class_consts: &super::ClassConsts) ->
     if !rooted && !class_consts.resolves_at_top_level(path.first()?) {
         return None;
     }
-    let (source, flags) = match path.join("::").as_str() {
-        "URI::MailTo::EMAIL_REGEXP" => (
-            r"\A[a-zA-Z0-9.!\#$%&'*+/=?^_`{|}~-]+@[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(?:\.[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)*\z",
-            "",
-        ),
-        _ => return None,
-    };
-    Some((source.to_string(), flags.to_string()))
+    Some(path.join("::"))
 }
 
 /// `length: { minimum: N, maximum: M }`. `is:`, `in:`, and `within:`
@@ -1255,10 +1400,36 @@ fn parse_length_rule(value: &ruby_prism::Node<'_>, file: &str, class_consts: &su
 /// A numericality bound: a number literal, or an integer constant of the
 /// class (`less_than_or_equal_to: MAX_SCORE`).
 fn bound_value(node: &Node<'_>, class_consts: &super::ClassConsts) -> Option<f64> {
-    if let Some(n) = class_consts.integer(node) {
-        return Some(n as f64);
+    // An Integer bound, literal or folded (`LIMIT - 1`, `2**63`), compared
+    // as a Float only when that Float is the same number: `2**63` is,
+    // `2**63 + 1` is not, and stays the gap rather than a rounded bound.
+    if let Some(n) = class_consts.int_expr(node) {
+        let f = n as f64;
+        return (f as i128 == n).then_some(f);
     }
     number_value(node)
+}
+
+/// `in: a..b` / `in: (a...b)` for numericality: both ends are Integer
+/// bounds (literals, constants, Integer arithmetic). A Float end stays
+/// the gap: the range is stored as `f64`, and Rails' message prints it
+/// with `Range#inspect`, which shows `1.0..3.0` where an Integer range
+/// shows `1..3`.
+fn bound_range(node: &Node<'_>, class_consts: &super::ClassConsts) -> Option<crate::dialect::InclusionRange> {
+    if let Some(paren) = node.as_parentheses_node() {
+        let body = paren.body()?;
+        let stmts = body.as_statements_node()?;
+        let parts: Vec<Node<'_>> = stmts.body().iter().collect();
+        let [only] = parts.as_slice() else { return None };
+        return bound_range(only, class_consts);
+    }
+    let range = node.as_range_node()?;
+    let end = |node: Node<'_>| class_consts.int_expr(&node).and_then(|_| bound_value(&node, class_consts));
+    Some(crate::dialect::InclusionRange {
+        begin: end(range.left()?)?,
+        end: end(range.right()?)?,
+        exclusive: range.is_exclude_end(),
+    })
 }
 
 fn number_value(node: &Node<'_>) -> Option<f64> {
@@ -1296,9 +1467,25 @@ fn set_label(kind: &ValidatesKind) -> &'static str {
 /// `Range#include?` covers the numbers between the endpoints, which a
 /// list of the integers in between does not.
 fn inclusion_values(node: &Node<'_>, class_consts: &super::ClassConsts) -> Option<InclusionSpec> {
-    // A list constant of the class (`in: MODES`, `MODES = %w[a b].freeze`).
-    if node.as_constant_read_node().is_some() || node.as_call_node().is_some() {
-        return class_consts.list(node).map(InclusionSpec::List);
+    // `in: (MODES)` / `inclusion: ([…])`: the parentheses only group.
+    if let Some(inner) = super::single_parenthesized(node) {
+        return inclusion_values(&inner, class_consts);
+    }
+    // A list constant of the class (`in: MODES`, `MODES = %w[a b].freeze`),
+    // or of another owner (`in: Fasp::DATA_CATEGORIES`).
+    if node.as_constant_read_node().is_some() || node.as_constant_path_node().is_some() || node.as_call_node().is_some() {
+        if let Some(list) = class_consts.list(node) {
+            return Some(InclusionSpec::List(list));
+        }
+        // A Hash constant: Rails asks `NAME.include?(value)`, which is
+        // `key?`. That compares with `eql?`, so a numeric key does not
+        // hold an equal number of the other class (`{ 1 => … }` and
+        // `1.0`) as the list check would: only non-numeric keys fold.
+        let keys = class_consts.hash_keys_of(node)?;
+        if keys.iter().any(|k| matches!(k, Literal::Int { .. } | Literal::Float { .. })) {
+            return None;
+        }
+        return Some(InclusionSpec::List(keys));
     }
     if let Some(array) = node.as_array_node() {
         let mut out = Vec::new();

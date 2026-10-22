@@ -12,6 +12,7 @@ use crate::dialect::Comment;
 use crate::expr::ArrayStyle;
 use crate::span::Span;
 
+use super::prism_api::PrismLocation;
 // ---- Leaf literal extractors -------------------------------------------
 
 /// The span of a `def`'s name token (`show` in `def show`, `title=` in
@@ -19,21 +20,21 @@ use crate::span::Span;
 /// position a method header has, since the body's spans start at its
 /// first statement.
 pub(super) fn def_name_span(def: &ruby_prism::DefNode<'_>, file: &str) -> crate::span::Span {
-    let loc = def.name_loc();
+    let (start, end) = super::prism_api::span_offsets(&def.name_loc());
     crate::span::Span {
         file: super::sources::file_id(file),
-        start: loc.start_offset() as u32,
-        end: loc.end_offset() as u32,
+        start,
+        end,
     }
 }
 
 /// Span of an arbitrary Prism node in `file`.
 pub(super) fn node_span(node: &Node<'_>, file: &str) -> crate::span::Span {
-    let loc = node.location();
+    let (start, end) = super::prism_api::span_offsets(&node.location());
     crate::span::Span {
         file: super::sources::file_id(file),
-        start: loc.start_offset() as u32,
-        end: loc.end_offset() as u32,
+        start,
+        end,
     }
 }
 
@@ -201,7 +202,11 @@ pub(super) fn primary_class_with_scope<'pr>(
     while is_namespace_wrapper(&primary.1) {
         let inside = primary.1.location();
         match classes.next() {
-            Some(next) if next.1.location().start_offset() < inside.end_offset() => primary = next,
+            Some(next)
+                if next.1.location().start_offset() < inside.end_offset() =>
+            {
+                primary = next
+            }
             _ => break,
         }
     }
@@ -276,6 +281,10 @@ fn collect_classes<'pr, F: FnMut(&[String], &[String], ruby_prism::ClassNode<'pr
     }
     if let Some(body) = hoisted_singleton_body(node) {
         collect_classes(&body, scope, nesting, out);
+        return;
+    }
+    if let Some(decl) = self_guarded_body(node, Some(scope)) {
+        collect_classes(&decl, scope, nesting, out);
         return;
     }
     if let Some(m) = node.as_module_node() {
@@ -372,6 +381,10 @@ fn collect_modules<'pr, F: FnMut(&[String], ruby_prism::ModuleNode<'pr>)>(
     }
     if let Some(body) = hoisted_singleton_body(node) {
         collect_modules(&body, scope, out);
+        return;
+    }
+    if let Some(decl) = self_guarded_body(node, Some(scope)) {
+        collect_modules(&decl, scope, out);
     }
 }
 
@@ -621,10 +634,35 @@ pub(super) fn constant_path_is_rooted(p: &ruby_prism::ConstantPathNode<'_>) -> b
 
 pub(super) fn flatten_statements<'pr>(node: Node<'pr>) -> Vec<Node<'pr>> {
     if let Some(s) = node.as_statements_node() {
-        s.body().iter().collect()
+        s.body().iter().flat_map(|stmt| match self_guarded_body(&stmt, None) {
+            Some(body) => vec![body],
+            None => vec![stmt],
+        }).collect()
     } else {
         vec![node]
     }
+}
+
+// Only a reload guard around its own declaration: any other guard, or an `else`, takes the branch what else loaded decides.
+pub(super) fn self_guarded_body<'pr>(node: &Node<'pr>, scope: Option<&[String]>) -> Option<Node<'pr>> {
+    let unless = node.as_unless_node()?;
+    if unless.else_clause().is_some() {
+        return None;
+    }
+    let guarded = constant_path_of(&unless.predicate().as_defined_node()?.value())?;
+    let mut body = unless.statements()?.body().iter();
+    let decl = body.next()?;
+    if body.next().is_some() {
+        return None;
+    }
+    let declared = if let Some(m) = decl.as_module_node() {
+        module_name_path(&m)?
+    } else if let Some(c) = decl.as_class_node() {
+        class_name_path(&c)?
+    } else {
+        return None;
+    };
+    (guarded == declared || scope.is_some_and(|scope| guarded.iter().eq(scope.iter().chain(&declared)))).then_some(decl)
 }
 
 pub(super) fn find_call_named<'pr>(

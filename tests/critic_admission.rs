@@ -183,6 +183,22 @@ fn a_held_class_answers_queries_not_writes() {
 }
 
 #[test]
+fn ipaddr_include_takes_only_an_ipaddr() {
+    refuses("IPAddr.new(\"10.0.0.0/8\").include?(title)", "include?");
+    refuses("IPAddr.new(\"10.0.0.0/8\").include?(IPAddr)", "include?");
+}
+
+#[test]
+fn only_a_guard_on_its_own_declaration_is_read_through() {
+    for guard in ["unless defined?(::Other)", "unless defined?(::Other::Sub)"] {
+        let shelf = format!("module Shelf\n  {guard}\n    module Sub\n      X = 1\n    end\n  end\nend\n");
+        refuses_with("Shelf::Sub::X", "Shelf::Sub::X", &[("app/models/shelf.rb", &shelf)]);
+    }
+    let with_else = "module Shelf\n  unless defined?(::Shelf::Sub)\n    module Sub\n      X = 1\n    end\n  else\n    nil\n  end\nend\n";
+    refuses_with("Shelf::Sub::X", "Shelf::Sub::X", &[("app/models/shelf.rb", with_else)]);
+}
+
+#[test]
 fn unused_unresolved_model_include_is_not_silent() {
     refuses_with("1", "GhostModule", &[("app/models/probe.rb", "class Probe < ApplicationRecord\n  include GhostModule\nend\n")]);
 }

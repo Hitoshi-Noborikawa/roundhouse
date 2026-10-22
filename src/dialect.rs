@@ -622,6 +622,16 @@ pub struct InclusionRange {
 pub enum ValidationRule {
     Presence,
     Absence,
+    /// `acceptance: true` / `{ accept:, allow_nil: }`. `accept` holds the
+    /// literal values Rails' `AcceptanceValidator` accepts (its default is
+    /// `["1", true]`). `allow_nil` is from the validator's own hash or the
+    /// call (the hash wins); `None` is Rails' default, which for this
+    /// validator is `true`.
+    Acceptance {
+        accept: Vec<Literal>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        allow_nil: Option<bool>,
+    },
     /// `uniqueness: true` / `{ scope:, case_sensitive:, allow_nil:,
     /// allow_blank: }`. `scope` holds the names as written; an
     /// association name resolves to its foreign key when the check is
@@ -661,6 +671,13 @@ pub enum ValidationRule {
         /// so JSON written before this field existed still loads.
         #[serde(default)]
         flags: String,
+        /// `allow_nil:` / `allow_blank:`, from the validator's own hash
+        /// or the call (the hash wins). `None` is unset: Rails then
+        /// matches a nil or blank value's `to_s` like any other.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        allow_nil: Option<bool>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        allow_blank: Option<bool>,
     },
     Numericality {
         only_integer: bool,
@@ -682,6 +699,9 @@ pub enum ValidationRule {
         allow_nil: Option<bool>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         allow_blank: Option<bool>,
+        /// `in: a..b` / `a...b`: Rails' "must be in a..b" check.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        in_range: Option<InclusionRange>,
     },
     Inclusion {
         values: Vec<Literal>,

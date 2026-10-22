@@ -604,7 +604,13 @@ fn model_class(model: &Model, mut methods: Vec<MethodDef>, table: Option<&Table>
         methods,
         nullable_columns: nullable_column_names(table),
         origin: None,
-        constants: collect_model_constants(model),
+        constants: {
+            let mut constants = collect_model_constants(model);
+            if let Some(table) = table {
+                constants.extend(schema::enum_constants(model, table));
+            }
+            constants
+        },
         unknown_calls: replayed_class_body(model),
         class_ivar_initializers: collect_class_attr_initializers(model),
     }
@@ -1078,6 +1084,7 @@ pub fn writable_field_set(
     }
     if let Some(attr) = crate::lower::secure_password::secure_password_attr(&model.body) {
         writable.insert(Symbol::from(format!("{}_confirmation", attr.as_str())));
+        writable.insert(Symbol::from(format!("{}_challenge", attr.as_str())));
         writable.insert(attr);
     }
     for (name, _ty) in self::markers::attribute_api_decls(&model.body) {
@@ -1321,7 +1328,7 @@ fn build_methods_with_finder_inputs(
             })
         })
         .unwrap_or_else(|| Symbol::from("id"));
-    push_validate_method(&mut methods, model, models, errors_readers, runtime_relation, &primary_key);
+    push_validate_method(&mut methods, model, errors_readers, runtime_relation, &primary_key);
     push_association_methods(&mut methods, model, models, &through_joins);
     push_dependent_destroy(&mut methods, model, &through_joins);
     push_unknown_marker_methods(&mut methods, model);
@@ -1331,7 +1338,7 @@ fn build_methods_with_finder_inputs(
     self::validations::push_active_model_constructor(&mut methods, model);
     // `attribute :name, :type` (Rails Attributes API) — typed virtual
     // readers + cast writers; same before-user-methods ordering.
-    self::markers::push_attribute_api_methods(&mut methods, model);
+    self::markers::push_attribute_api_methods(&mut methods, model, runtime_relation);
     // typed_store virtual attributes — reader/predicate/writer per
     // declared attr, routing through the `TypedStore` runtime (the
     // YAML seam). Before `push_user_methods` so a custom method in the
@@ -2859,18 +2866,18 @@ fn type_method_body(
 }
 
 /// Backfill a signature for a user-defined method whose body types to a
-/// concrete scalar. User methods carry `signature: None`, so the
+/// concrete scalar or Time. User methods carry `signature: None`, so the
 /// emitted `.rbs` says `-> untyped` even when the body is trivially
 /// typed — and under spinel AOT an untyped return turns every chained
 /// call into a whole-program poly dispatch (lobsters:
 /// `User.username_regex_s[1...-1]` became a 26-class `[]` switch that
-/// doesn't C-compile). Scalars only, and only when the body has no
+/// doesn't C-compile). Scalars and Time only, and only when the body has no
 /// explicit `return` (an early return of another type would make the
 /// trailing-expression type a lie — in Ruby a `return` inside a block
 /// exits the method, so the walk counts those too). If/Case bodies
 /// union their branches, so divergent shapes fail the scalar gate on
 /// their own. Param types stay untyped — this pins only the return.
-/// A scalar, or a scalar unioned with nil — `String?` and friends.
+/// A scalar or Time, optionally unioned with nil — `String?`, `Time?` and friends.
 ///
 /// The nullable arm matters because a `rescue` contributes one: a body
 /// of `uri.to_s … rescue nil` types `Str | Nil`, and refusing to
@@ -2880,7 +2887,7 @@ fn type_method_body(
 /// costs nothing here — widening to `untyped` does.
 fn scalar_or_nullable_scalar(ty: &Ty) -> bool {
     fn is_scalar(t: &Ty) -> bool {
-        matches!(t, Ty::Str | Ty::Int | Ty::Float | Ty::Bool)
+        matches!(t, Ty::Str | Ty::Int | Ty::Float | Ty::Bool | Ty::Time)
     }
     match ty {
         t if is_scalar(t) => true,
