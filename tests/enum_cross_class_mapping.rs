@@ -294,3 +294,44 @@ fn reading_another_owners_mapping_records_no_gap_of_its_own() {
     assert_eq!(big(&alone), 1, "{alone:#?}");
     assert_eq!(big(&gaps), 1, "{gaps:#?}");
 }
+
+/// A file that is not an enum input (an initializer, a controller) is
+/// read only after the models are ingested. A singleton definition, a
+/// reflective call or a second declaration found there still makes the
+/// folded mapping the reported gap, as a Sorbet enum's would be.
+#[test]
+fn a_consumed_source_that_redefines_the_method_reports_the_gap() {
+    let cases: &[(&str, &str)] = &[
+        ("config/initializers/gadget_patch.rb", "def Gadget.statuses = {}\n"),
+        (
+            "config/initializers/gadget_patch.rb",
+            "Rails.application.config.to_prepare do\n  Gadget.class_eval do\n    def self.statuses = {}\n  end\nend\n",
+        ),
+        ("config/initializers/gadget_patch.rb", "Gadget.send(:define_singleton_method, :statuses) { {} }\n"),
+        ("config/initializers/gadget_patch.rb", "Gadget.singleton_class.prepend(Module.new)\n"),
+        ("config/initializers/gadget_patch.rb", "class Gadget\n  enum :status, %i[other]\nend\n"),
+        (
+            "app/controllers/application_controller.rb",
+            "class ApplicationController < ActionController::Base\n  Gadget.define_singleton_method(:statuses) { {} }\nend\n",
+        ),
+    ];
+    for (path, source) in cases {
+        let (_, gaps) = ingest(&[
+            ("app/models/gadget.rb", GADGET),
+            ("app/models/widget.rb", "class Widget < ApplicationRecord\n  enum :status, Gadget.statuses\nend\n"),
+            (path, source),
+        ]);
+        assert!(
+            gaps.iter().any(|g| g.contains("app/models/widget.rb") && g.contains("enum :status mapping")),
+            "{path}: {source}\n{gaps:#?}"
+        );
+    }
+    // A consumed source that defines nothing on the owner changes nothing.
+    let (app, gaps) = ingest(&[
+        ("app/models/gadget.rb", GADGET),
+        ("app/models/widget.rb", "class Widget < ApplicationRecord\n  enum :status, Gadget.statuses\nend\n"),
+        ("config/initializers/gadget_patch.rb", "Rails.application.config.to_prepare { Gadget.count }\n"),
+    ]);
+    assert_eq!(mapping(&app, "Widget", "status"), Some(statuses()), "{gaps:?}");
+    assert!(!gaps.iter().any(|g| g.contains("widget.rb")), "{gaps:?}");
+}

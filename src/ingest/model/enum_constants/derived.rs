@@ -198,7 +198,26 @@ pub(super) fn literal_pairs(stored: Vec<(String, super::super::EnumStored)>) -> 
         .collect()
 }
 
+impl Recipe {
+    fn reads_enum_method(&self) -> bool {
+        match self {
+            Recipe::EnumOf { .. } => true,
+            Recipe::Keys(inner) => inner.reads_enum_method(),
+            Recipe::Merge(left, right) => left.reads_enum_method() || right.reads_enum_method(),
+            Recipe::Fixed(_) | Recipe::Const { .. } => false,
+        }
+    }
+}
+
 impl EnumConstants {
+    /// For a mapping folded before the consumed sources were read: it
+    /// read another owner's enum method, which those sources now say may
+    /// answer something else.
+    pub(in crate::ingest) fn enum_method_read_refused(&self, node: &Node<'_>, owners: &[String]) -> bool {
+        Recipe::of(node, owners, None, "").is_some_and(|recipe| recipe.reads_enum_method())
+            && self.derived(node, owners).is_none()
+    }
+
     /// The mapping a derived expression evaluates to, when every owner
     /// it reads answers statically. `owners`: the reference's lexical
     /// owners, innermost first; the innermost is the body being loaded.

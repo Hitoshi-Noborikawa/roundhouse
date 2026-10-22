@@ -1192,6 +1192,10 @@ fn validate_sorbet_enum_mappings(
                     &source.path, &declaration.column,
                 )))?;
             }
+        } else if model.enums.contains_key(&Symbol::from(declaration.column.as_str()))
+            && constants.enum_method_read_refused(&declaration.mapping, &owners)
+        {
+            super::survey::unwrap_or_record::<()>(Err(enum_mapping_error(&source.path, &declaration.column)))?;
         }
     }
     Ok(())

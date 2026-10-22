@@ -215,8 +215,11 @@ impl EnumConstants {
                 // block, a conditional, a concern's `included do`) may
                 // define its class method on some owner this pass does
                 // not follow.
+                // A consumed (non-input) source is read after the models:
+                // its declarations are never recorded, only marked.
                 if let Some(declaration) = super::super::enum_declaration(&call)
-                    && !matches!(self.parents.as_slice(), [.., Node::ClassNode { .. }, Node::StatementsNode { .. }])
+                    && (matches!(self.kind, SourceKind::Mutations)
+                        || !matches!(self.parents.as_slice(), [.., Node::ClassNode { .. }, Node::StatementsNode { .. }]))
                 {
                     constants
                         .uncertain_singleton_methods
@@ -404,11 +407,14 @@ impl EnumConstants {
             };
             ruby_prism::Visit::visit(&mut collector, &result.node());
             let direct_writes = collector.direct_writes;
+            let (tainted, reflected) = super::super::ConstTaint::scan_tree(&result.node(), direct_writes);
             if matches!(kind, SourceKind::Inputs) {
-                let (tainted, reflected) = super::super::ConstTaint::scan_tree(&result.node(), direct_writes);
                 self.foreign_taint.extend(tainted);
-                self.reflected.extend(reflected);
             }
+            // Reflection in a consumed source can still reach an enum's
+            // class method (`Gadget.send(:define_singleton_method, …)`).
+            // Nothing else reads `reflected` once the models are ingested.
+            self.reflected.extend(reflected);
         }
     }
 
