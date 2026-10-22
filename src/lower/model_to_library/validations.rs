@@ -705,7 +705,10 @@ fn validation_rule_to_calls(
 /// under `self.primary_key = "code"`, even beside an `id` column); on a new record it is `<pk> IS NOT NULL`,
 /// which every stored row satisfies, so the answer is the same. A `scope:`
 /// naming a `belongs_to` reads its foreign key (and type column when
-/// polymorphic), as Rails resolves it.
+/// polymorphic), as Rails resolves it, and so does the validated attribute
+/// itself when it names a non-polymorphic `belongs_to` (`validates
+/// :reblog, uniqueness:` queries `reblog_of_id`; the error stays on
+/// `reblog`).
 fn inline_uniqueness_check(
     msgs: Messages,
     model: &Model,
@@ -729,9 +732,23 @@ fn inline_uniqueness_check(
     // `Model.unscoped`, as Rails' UniquenessValidator builds its query on
     // `finder_class.unscoped`: a row a `default_scope` hides still collides.
     let finder = send(finder, "unscoped", vec![]);
-    let value = ivar(attr);
-    let mut relation = if case_sensitive {
-        send(finder, "where", vec![hash(attr.as_str(), value.clone())])
+    // An attribute naming a `belongs_to` compares its foreign key, as
+    // Rails' `bind_attribute` resolves it (`where(reblog: r)` is
+    // `"reblog_of_id" = r.id`), and the value read is that key. Ingest
+    // keeps a polymorphic one a gap: Rails raises computing its class.
+    let column = model
+        .associations()
+        .find_map(|a| match a {
+            Association::BelongsTo { name, foreign_key, polymorphic: false, .. } if name == attr => Some(foreign_key.clone()),
+            _ => None,
+        })
+        .unwrap_or_else(|| attr.clone());
+    let association = column != *attr;
+    let value = ivar(&column);
+    // `case_sensitive: false` lowers a String comparison; a key compares as
+    // an id (Rails' `LOWER` over an Integer column answers the same).
+    let mut relation = if case_sensitive || association {
+        send(finder, "where", vec![hash(column.as_str(), value.clone())])
     } else {
         let lowered = Expr::new(
             Span::synthetic(),
