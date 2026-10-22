@@ -2827,6 +2827,12 @@ fn type_method_body(
         // A `def` from the model's source carries no enclosing class; `self` in it is still the model.
         ctx.self_ty = Some(Ty::Class { id: model.name.clone(), args: vec![].into() });
         ctx.instance_body = true;
+    } else if let Some(model) = model.filter(|_| method.receiver == MethodReceiver::Class) {
+        // A source `def self.x`: names resolve in the model's namespace, so
+        // its own constant reads find the model's constants (#1223). Only
+        // the lexical class: a `self_ty` here would re-type its implicit-self
+        // calls, which this pass leaves as they were.
+        ctx.lexical_self = Some(Ty::Class { id: model.name.clone(), args: vec![].into() });
     }
     // Seed ivar_bindings from schema columns so bare `@title` reads
     // resolve to the column type. Same source the synthesizers used
@@ -2864,6 +2870,14 @@ fn type_method_body(
                 ctx.ivar_bindings.insert(name, ty);
             }
         }
+    }
+    // The model's own constants, as the analyzer seeds them
+    // (`extract_const_assignments`): this pass re-types the body from
+    // scratch, and the read the analyzer qualified to `Widget::WEIGHTS`
+    // otherwise fell back to a phantom `Ty::Class` (#1223), so the
+    // emitters saw no Hash or Array behind it.
+    if let Some(m) = model {
+        ctx.constants = crate::analyze::ConstScope::default().with_own(crate::analyze::extract_const_assignments(&m.body));
     }
     // Opt-in to `recv: Some(SelfRef)` rewriting on bare Sends —
     // matches the pattern view_to_library uses.

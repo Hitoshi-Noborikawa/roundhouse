@@ -1875,11 +1875,16 @@ pub(super) fn js_library_class(
     // Class-body constants (`WEIGHTS = { "small" => 1 }.freeze`) as
     // `static WEIGHTS = { "small": 1 };`, so a `Klass.WEIGHTS` read
     // resolves (#1223). Only a literal value TS renders as written is
-    // declared; a constant whose name a method or field also takes is
-    // left out, as is any other value.
+    // declared; a constant whose name a static method or field also
+    // takes is left out, as is any other value.
     for (name, value) in &class.constants {
         let Some(value) = declarable_constant_value(value) else { continue };
-        if fields.iter().any(|f| f.0 == name.as_str()) || class.methods.iter().any(|m| m.name.as_str() == name.as_str()) {
+        // Only a static member collides: TypeScript keeps a class's static
+        // and instance sides apart, as Ruby keeps a constant apart from an
+        // instance method of the same name.
+        if fields.iter().any(|f| f.2 && f.0 == name.as_str())
+            || class.methods.iter().any(|m| m.receiver == crate::dialect::MethodReceiver::Class && m.name.as_str() == name.as_str())
+        {
             continue;
         }
         members.push(JsClassMember::Field {
