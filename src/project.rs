@@ -835,6 +835,26 @@ fn target_emits_app_library_classes(target: BuildTarget) -> bool {
     )
 }
 
+/// A gem's class method called where the receiver may be a relation:
+/// only the Ruby family hands a relation on (`lower::relation_class_calls`).
+fn report_relation_class_calls(app: &App, target: BuildTarget) {
+    if matches!(target, BuildTarget::Blog | BuildTarget::Ruby | BuildTarget::Jruby | BuildTarget::Spinel | BuildTarget::Futamura) {
+        return;
+    }
+    for (span, method) in crate::lower::relation_class_calls::untyped_calls(app) {
+        emit::diagnostics::report_unsupported(
+            span,
+            target.as_str(),
+            "class method on a relation",
+            format!(
+                "`{}` is a class method the model takes from a gem module, called on a receiver whose type is unknown; \
+                 Rails' relation answers it, and this target has no relation to hand it",
+                method.as_str()
+            ),
+        );
+    }
+}
+
 fn report_unemitted_library_classes(app: &App, target: BuildTarget) {
     if target_emits_app_library_classes(target) {
         return;
@@ -1984,6 +2004,7 @@ fn target_files_inner(
     reject_unsupported_forwarded_procs(app, target)?;
     report_unsupported_keys(app, target);
     report_unemitted_library_classes(app, target);
+    report_relation_class_calls(app, target);
     report_typescript_error_class(app, target);
     report_replayed_class_bodies(app, target);
     report_controller_sibling_classes(app, target);
@@ -5884,6 +5905,9 @@ pub const RUBY_FAMILY_RUNTIME_CONSTANTS: &[&str] = &[
     "Arel::Nodes::Not",
     "Arel::Nodes::Case",
     "Arel::Nodes::NamedFunction",
+    "Arel::Nodes::Ascending",
+    "Arel::Nodes::Descending",
+    "Arel::Nodes::Predicate",
     // `runtime/ruby/active_record/connection_not_established.rb` and
     // `encryption_errors.rb`. A rescue of ConnectionNotEstablished
     // catches the two children. Strict targets do not load the files.
@@ -5898,6 +5922,7 @@ pub const RUBY_FAMILY_RUNTIME_CONSTANTS: &[&str] = &[
     // lowerer; these two classes are the ruby-family casters.
     "ActiveRecord::Type::String",
     "ActiveRecord::Type::Integer",
+    "ActiveRecord::Type::Value",
     // Thread-local state and the notification fan-out. ruby family and
     // spinel, required from rails.rb. ConfigurationFile parses YAML, which
     // Spinel does not ship, so that class stays on the ruby family.
@@ -5922,7 +5947,8 @@ fn unavailable_class_module_construct(name: &str, target: &str) -> Option<&'stat
     // but recognizes GeneratorError only as a literal rescue name, and
     // its `packages/net` stops short of net/protocol's `HTTPBadResponse`.
     if target == "spinel" {
-        if name == "ActiveSupport::ConfigurationFile" {
+        // The Arel ordering and predicate nodes live on the CRuby overlay (`arel_predicates.rb`).
+        if matches!(name, "ActiveSupport::ConfigurationFile" | "Arel::Nodes::Ascending" | "Arel::Nodes::Descending" | "Arel::Nodes::Predicate") {
             return Some("ruby_family_runtime_constant");
         }
         return if matches!(name, "JSON::GeneratorError" | "Net::HTTPBadResponse") {

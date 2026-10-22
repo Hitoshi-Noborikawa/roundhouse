@@ -419,6 +419,23 @@ module ActiveRecord
       spawn.unscope!(where: where)
     end
 
+    # Rails' `unscope(:where)`: every WHERE condition goes, whatever
+    # built it (a hash, raw SQL, a merge), and so does a `none`.
+    def unscope_where
+      spawn.unscope_where!
+    end
+
+    def unscope_where!
+      own_lists
+      @records = nil
+      @wheres = []
+      @where_cols = []
+      @where_null = []
+      @opaque_wheres = false
+      @null = false
+      self
+    end
+
     def unscope!(where: nil)
       own_lists
       @records = nil
@@ -510,7 +527,8 @@ module ActiveRecord
     # its own rows and order.
     def order_parts!(parts)
       own_lists
-      terms = parts.map { |p| order_term(p) }
+      # Rails drops a blank part: ancestry's `reorder(column, order)` passes a nil `order`.
+      terms = parts.compact.map { |p| order_term(p) }
       terms.each { |t| @orders << t }
       # `@orders` just changed `to_sql`, so any `cache_key`/`cache_version`
       # memo taken before this call is for the OLD ordering (roundhouse
@@ -1156,6 +1174,12 @@ module ActiveRecord
     # (lobsters' Search switches on it to pick per-model joins).
     def klass
       @model
+    end
+
+    # Rails' relation answers its model's class methods; ancestry reads
+    # `scope.primary_key` off the relation it is handed.
+    def primary_key
+      @model.primary_key
     end
 
     # ---- cache_key / cache_version / cache_key_with_version ---------
@@ -3345,7 +3369,7 @@ module ActiveRecord
     def order_term(p)
       if p.is_a?(Hash)
         format_order_hash(p)
-      elsif p.is_a?(Arel::Nodes::Node)
+      elsif p.is_a?(Arel::Nodes::Node) || p.is_a?(Arel::Attribute)
         p.to_s
       else
         order_string(p.to_s)

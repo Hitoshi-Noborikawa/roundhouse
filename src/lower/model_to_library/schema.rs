@@ -58,6 +58,64 @@ fn push_schema_symbol_list(
     });
 }
 
+/// Rails' type name for a column (`type_for_attribute(name).type`).
+fn rails_type_name(col: &crate::schema::ColumnType) -> &'static str {
+    use crate::schema::ColumnType as C;
+    match col {
+        C::Integer | C::BigInt | C::Reference { .. } => "integer",
+        C::Float => "float",
+        C::Decimal { .. } => "decimal",
+        C::String { .. } => "string",
+        C::Text => "text",
+        C::Boolean => "boolean",
+        C::Date => "date",
+        C::DateTime => "datetime",
+        C::Time => "time",
+        C::Binary => "binary",
+        C::Json => "json",
+        C::Jsonb => "jsonb",
+        C::Uuid => "uuid",
+        C::Interval => "interval",
+    }
+}
+
+/// `def self.schema_column_types; { id: :integer, title: :string, ... }; end`
+fn push_schema_column_types(methods: &mut Vec<MethodDef>, owner: &ClassId, table: &Table) {
+    // Not String values: a per-model Hash of String literals is shared text Spinel's String analysis refuses `Arel.sql` over
+    let ty = Ty::Hash { key: std::sync::Arc::new(Ty::Sym), value: std::sync::Arc::new(Ty::Sym) };
+    let body = with_ty(
+        Expr::new(
+            Span::synthetic(),
+            ExprNode::Hash {
+                entries: table
+                    .columns
+                    .iter()
+                    .map(|c| (lit_sym(c.name.clone()), lit_sym(Symbol::from(rails_type_name(&c.col_type)))))
+                    .collect(),
+                kwargs: false,
+            },
+        ),
+        ty.clone(),
+    );
+    methods.push(MethodDef {
+        visibility: crate::dialect::MethodVisibility::Public,
+        unsupported_formals: None,
+        has_anonymous_block: false,
+        name_span: Span::synthetic(),
+        name: Symbol::from("schema_column_types"),
+        receiver: MethodReceiver::Class,
+        params: Vec::new(),
+        body,
+        signature: Some(fn_sig(vec![], ty)),
+        effects: EffectSet::default(),
+        enclosing_class: Some(owner.0.clone()),
+        kind: AccessorKind::Method,
+        is_async: false,
+        mutates_self: false,
+        block_param: None,
+    });
+}
+
 pub(super) fn push_schema_methods(
     methods: &mut Vec<MethodDef>,
     model: &Model,
@@ -362,6 +420,7 @@ pub(super) fn push_schema_methods(
     // Schema column-name lists. Time vs date stay separate so JSON can
     // apply ISO8601-with-offset vs calendar-only without sniffing values.
     push_schema_symbol_list(methods, owner, "schema_columns", table, |_| true);
+    push_schema_column_types(methods, owner, table);
     push_schema_symbol_list(methods, owner, "schema_time_columns", table, |c| {
         matches!(c.col_type, crate::schema::ColumnType::DateTime | crate::schema::ColumnType::Time)
     });

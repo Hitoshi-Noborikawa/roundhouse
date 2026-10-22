@@ -1182,7 +1182,12 @@ fn every_runtime_method_body_concretely_typed() {
     // active_record/connection.rb's `transaction`, 8 -> 10; the
     // savepoint branch already read its `result` the same way).
     // `touch_later` and `_flush_deferred_touches_from` type fully.
-    const CEILING: usize = 860;
+    // MEASURED 864 on 2026-10-22: ancestry from source reads a record's
+    // column by name (`read_attribute`, `write_attribute`,
+    // `attribute_in_database`), whose value is whatever that column
+    // holds, and asks a relation for its model's `primary_key` (+4 in
+    // active_record/connection.rb and relation.rb, 860 -> 864).
+    const CEILING: usize = 864;
     assert!(
         total_gradual <= CEILING,
         "{total_gradual} Ty::Untyped sites exceeds ceiling of {CEILING}"

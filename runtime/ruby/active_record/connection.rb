@@ -374,6 +374,43 @@ module ActiveRecord
   # walked only into the ruby-family trees, and active_record.rb
   # requires it AFTER base.rb so the reopen sees the real class.
   class Base
+    # Ruby-family only, beside the other reopens here: strict targets have
+    # no `Type::Value`, no untyped `self[name]` and no relation `all`.
+    def read_attribute(name)
+      self[name]
+    end
+
+    def write_attribute(name, value)
+      self[name] = value
+    end
+
+    def saved_changes?
+      !saved_changes.empty?
+    end
+
+    # Rails' `attribute_in_database`: the stored value, before any change
+    # pending on this record. The changes are String-keyed; Rails takes a
+    # Symbol as well.
+    def attribute_in_database(name)
+      attribute_was(name.to_s)
+    end
+
+    def self.schema_column_types
+      {}
+    end
+
+    # Rails' `type_for_attribute(name).type`: the column's type name, nil
+    # for a name that is no column.
+    def self.type_for_attribute(name)
+      ActiveRecord::Type::Value.new(schema_column_types[name.to_sym])
+    end
+
+    # Rails' `default_scoped`: `all` with the model's `default_scope`,
+    # which this runtime does not model (a declared one is reported).
+    def self.default_scoped
+      all
+    end
+
     # Keep public input intact until schema-selected normalization, then raise
     # the same RecordNotFound for an invalid key or an absent record.
     # Reject nil before a key-typed adapter can coerce it to a real
