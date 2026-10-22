@@ -433,6 +433,59 @@ fn set_options_schedule_and_route_the_push() {
     assert!(job.contains("JobRegistry.push_article_job(queue, at, article)"), "{job}");
 }
 
+const COLLIDER_JOB: &str = r##"class ColliderJob < ApplicationJob
+  queue_as :default
+
+  def perform(queue, at, q)
+    queue + at + q
+  end
+end
+"##;
+
+const COLLIDER_ENQUEUE: &str = r##"  validates :title, presence: true
+
+  def enqueue_job
+    ColliderJob.perform_later("mine", "stamp", "own")
+    ColliderJob.set(wait: 60).perform_later("mine", "stamp", "own")
+  end
+"##;
+
+const COLLIDER_SCRIPT: &str = r##"ActiveJob.register_drain
+SidekiqPush.start_recording
+Article.create!(title: "Collider title", body: "A long enough article body.").enqueue_job
+lines = SidekiqPush.recorded
+def env(line)
+  JSON.parse(line.split(" ", 4).last)
+end
+lpush = lines.find { |l| l.start_with?("lpush queue:default ") }
+zadd = lines.find { |l| l.start_with?("zadd ") }
+raise "lines #{lines.inspect}" unless lpush && zadd
+[lpush, zadd].each do |l|
+  args = env(l)["args"][0]["arguments"]
+  raise "arguments #{args.inspect}" unless args == ["mine", "stamp", "own"]
+end
+puts "collider passed"
+"##;
+
+/// A job whose own parameters are named `queue`, `at` and `q`: the push
+/// path's added parameters and local take fresh names, so the job's
+/// arguments reach the payload unchanged, scheduled or not.
+#[test]
+fn a_job_whose_parameters_are_named_queue_at_and_q_still_pushes_its_arguments() {
+    let run = emit_and_run::real_blog()
+        .write("app/jobs/collider_job.rb", COLLIDER_JOB)
+        .edit("app/models/article.rb", "  validates :title, presence: true\n", COLLIDER_ENQUEUE)
+        .edit("config/environments/production.rb", "  config.active_job.queue_adapter = :solid_queue\n", SIDEKIQ)
+        .run_ruby(COLLIDER_SCRIPT);
+    run.assert_passes();
+    assert!(run.stdout.contains("collider passed"), "{}", run.stdout);
+    let job = read(&run.emitted, "app/models/collider_job.rb");
+    assert!(job.contains("def self.perform_later_with(at_, queue_, queue, at, q)"), "{job}");
+    let registry = read(&run.emitted, "runtime/job_registry.rb");
+    assert!(registry.contains("def self.push_collider_job(queue_, at_, queue, at, q)"), "{registry}");
+    assert!(registry.contains("q_ = queue_ == \"\" ? \"default\" : queue_"), "{registry}");
+}
+
 const PRIORITY_ENQUEUE: &str = r##"  validates :title, presence: true
 
   def enqueue_job

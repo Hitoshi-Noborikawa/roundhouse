@@ -842,17 +842,21 @@ pub fn registry_source(plans: &[JobPlan], sidekiq: bool) -> String {
         ));
         s.push_str("  end\n\n");
         if sidekiq {
+            let own: Vec<&str> = plan.params.iter().map(|p| p.name.as_str()).collect();
+            let queue = fresh_name("queue", &own);
+            let at = fresh_name("at", &own);
+            let q = fresh_name("q", &own);
             let params = writer_params(plan);
             let params = match params.strip_prefix('(') {
-                Some(rest) => format!("(queue, at, {rest}"),
-                None => "(queue, at)".to_string(),
+                Some(rest) => format!("({queue}, {at}, {rest}"),
+                None => format!("({queue}, {at})"),
             };
             let push = if plan.enqueue_after_commit { "enqueue_after_commit" } else { "enqueue" };
             s.push_str(&format!("  def self.push_{}{params}\n", plan.suffix()));
             // "" is a `set(...)` with no `queue:`: the job's `queue_as`.
-            s.push_str(&format!("    q = queue == \"\" ? {} : queue\n", ruby_str(&plan.queue)));
+            s.push_str(&format!("    {q} = {queue} == \"\" ? {} : {queue}\n", ruby_str(&plan.queue)));
             s.push_str(&format!(
-                "    SidekiqPush.{push}({job}, q, at,\n      ActiveJob::Payload.build_at({job}, q, at, ActiveJob::Arguments.list({list})))\n",
+                "    SidekiqPush.{push}({job}, {q}, {at},\n      ActiveJob::Payload.build_at({job}, {q}, {at}, ActiveJob::Arguments.list({list})))\n",
                 job = ruby_str(&plan.job),
             ));
             s.push_str("  end\n\n");
@@ -957,6 +961,17 @@ fn writer_params(plan: &JobPlan) -> String {
         .collect::<Vec<_>>()
         .join(", ");
     format!("({list})")
+}
+
+/// `base`, or `base` with `_` appended until it is none of `taken`: a
+/// name the push path adds (`at`, `queue`, a local) can't collide with
+/// one of the job's own parameters.
+pub(crate) fn fresh_name(base: &str, taken: &[&str]) -> String {
+    let mut name = base.to_string();
+    while taken.contains(&name.as_str()) {
+        name.push('_');
+    }
+    name
 }
 
 fn ruby_str(s: &str) -> String {

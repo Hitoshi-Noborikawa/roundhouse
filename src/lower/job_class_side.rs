@@ -585,7 +585,8 @@ fn set_options(args: &[Expr], span: crate::span::Span, folds: &mut SetFolds) -> 
 }
 
 /// `perform_later_with(at, queue, *params)`: `later`'s body with its
-/// parameters moved two places along, so the two lead.
+/// parameters moved two places along, so the two lead. The two are
+/// renamed past any of the job's own parameter names.
 fn perform_later_with(later: &crate::dialect::MethodDef) -> crate::dialect::MethodDef {
     fn shift(e: &mut Expr) {
         if let ExprNode::Var { id, .. } = &mut *e.node {
@@ -596,16 +597,19 @@ fn perform_later_with(later: &crate::dialect::MethodDef) -> crate::dialect::Meth
     let mut w = later.clone();
     w.name = Symbol::from("perform_later_with");
     shift(&mut w.body);
+    let own: Vec<&str> = later.params.iter().map(|p| p.name.as_str()).collect();
+    let at = Symbol::from(super::job_payload::fresh_name("at", &own).as_str());
+    let queue = Symbol::from(super::job_payload::fresh_name("queue", &own).as_str());
     let mut params = vec![
-        crate::dialect::Param::positional(Symbol::from("at")),
-        crate::dialect::Param::positional(Symbol::from("queue")),
+        crate::dialect::Param::positional(at.clone()),
+        crate::dialect::Param::positional(queue.clone()),
     ];
     params.extend(later.params.iter().cloned());
     w.params = params;
     if let Some(Ty::Fn { params: tys, block, ret, effects }) = &later.signature {
         let mut all = vec![
-            crate::ty::Param { name: Symbol::from("at"), ty: Ty::Float.into(), kind: crate::ty::ParamKind::Required },
-            crate::ty::Param { name: Symbol::from("queue"), ty: Ty::Str.into(), kind: crate::ty::ParamKind::Required },
+            crate::ty::Param { name: at, ty: Ty::Float.into(), kind: crate::ty::ParamKind::Required },
+            crate::ty::Param { name: queue, ty: Ty::Str.into(), kind: crate::ty::ParamKind::Required },
         ];
         all.extend(tys.iter().cloned());
         w.signature = Some(Ty::Fn { params: all.into(), block: block.clone(), ret: ret.clone(), effects: effects.clone() });
