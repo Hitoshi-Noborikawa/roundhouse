@@ -7,9 +7,13 @@ use super::emit_and_run;
 /// reported gap, and the emitted tree read and deleted every row
 /// (`Gadget.count` was `SELECT COUNT(*) FROM gadgets`; `delete_all` a bare
 /// DELETE, #572). Answers are Rails 8.1.4's for the same models and rows.
-fn app() -> emit_and_run::Overlay {
+fn bare() -> emit_and_run::Overlay {
     emit_and_run::empty_app()
         .write("app/models/application_record.rb", "class ApplicationRecord < ActiveRecord::Base\n  self.abstract_class = true\nend\n")
+}
+
+fn app() -> emit_and_run::Overlay {
+    bare()
         .write(
             "db/schema.rb",
             "ActiveRecord::Schema.define do\n  create_table \"shelves\", force: :cascade do |t|\n    t.string \"name\"\n  end\n  create_table \"gadgets\", force: :cascade do |t|\n    t.string \"name\"\n    t.boolean \"archived\", default: false, null: false\n    t.integer \"shelf_id\"\n  end\n  create_table \"notes\", force: :cascade do |t|\n    t.integer \"gadget_id\"\n    t.string \"body\"\n  end\n  create_table \"badges\", force: :cascade do |t|\n    t.string \"kind\"\n  end\nend\n",
@@ -122,6 +126,30 @@ raise "bulk: #{{[renamed, left].inspect}}" unless [renamed, left] == [["u", "gon
 puts "default scope bulk writes passed"
 "#
         ))
+        .assert_passes();
+}
+
+/// The scope's literal is where `new` starts, and a given attribute
+/// still wins over it, `false` and `nil` included, when the column has
+/// no schema default of its own (Rails 8.1.4: `Sprocket.new(active:
+/// false).active` is false, `.new(spare: nil).spare` is nil).
+#[test]
+fn given_attributes_win_over_the_scope_literal_without_a_schema_default() {
+    bare()
+        .write(
+            "db/schema.rb",
+            "ActiveRecord::Schema.define do\n  create_table \"sprockets\", force: :cascade do |t|\n    t.string \"name\"\n    t.boolean \"active\", null: false\n    t.boolean \"spare\"\n  end\nend\n",
+        )
+        .write("app/models/sprocket.rb", "class Sprocket < ApplicationRecord\n  default_scope { where(active: true, spare: true) }\nend\n")
+        .run_ruby(
+            r#"fresh = Sprocket.new
+off = Sprocket.new(active: false, spare: false)
+blank = Sprocket.new(spare: nil)
+got = [fresh.active, fresh.spare, off.active, off.spare, blank.active, blank.spare]
+raise "new: #{got.inspect}" unless got == [true, true, false, false, true, nil]
+puts "default scope given attributes passed"
+"#,
+        )
         .assert_passes();
 }
 
