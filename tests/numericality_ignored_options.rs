@@ -9,6 +9,9 @@ const MODEL: &str = r#"class Widget < ApplicationRecord
   validates :count, numericality: { greater_than_or_equal: 0 }
   validates :size, numericality: { only_integer: true, frobnicate: true }
   validates :parity, numericality: { odd: true }
+  validates :fresh, numericality: { except_on: :create }
+  validates :other, numericality: { attributes: [:count] }
+  validates :early, numericality: { prepend: true }
 end
 "#;
 
@@ -51,5 +54,11 @@ fn an_unread_option_is_ignored_with_a_note() {
     assert!(notes[1].message.contains("frobnicate") && !notes[1].message.contains("did you mean"), "{}", notes[1].message);
     assert!(notes.iter().all(|d| d.severity == roundhouse::diagnostic::Severity::Warning));
     assert_eq!(numericality(&model, "parity"), None, "odd: stays a gap");
-    assert_eq!(gaps, 1, "only the odd: call is a survey gap");
+    // Rails consumes these before the validator runs (Rails 8.1.4:
+    // `except_on: :create` skips a new record, `attributes: [:count]`
+    // validates `count` instead), so they are gaps, not ignored keys.
+    for attr in ["fresh", "other", "early"] {
+        assert_eq!(numericality(&model, attr), None, "{attr} stays a gap");
+    }
+    assert_eq!(gaps, 4, "odd:, except_on:, attributes: and prepend: are the survey gaps");
 }

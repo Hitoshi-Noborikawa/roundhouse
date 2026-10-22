@@ -956,9 +956,13 @@ fn parse_bool_or_hash(
 
 /// Every key Rails 8.1.4's `NumericalityValidator` reads: its
 /// `RESERVED_OPTIONS` (the compare checks, `odd` / `even`, `in`,
-/// `only_integer`, `only_numeric`) and the options every validator
-/// takes. Any other key is an interpolation option for the error
-/// message, which the default messages never name, so Rails ignores it.
+/// `only_integer`, `only_numeric`), the options every validator takes,
+/// and the ones Rails consumes before the validator runs: scheduling's
+/// `VALID_OPTIONS_FOR_VALIDATE` (`except_on`, `prepend`) and
+/// `EachValidator`'s `attributes`, which a rule's own hash overrides the
+/// validated fields with. Any other key is an interpolation option for
+/// the error message, which the default messages never name, so Rails
+/// ignores it.
 const NUMERICALITY_OPTIONS: &[&str] = &[
     "greater_than",
     "greater_than_or_equal_to",
@@ -978,6 +982,9 @@ const NUMERICALITY_OPTIONS: &[&str] = &[
     "unless",
     "on",
     "strict",
+    "except_on",
+    "prepend",
+    "attributes",
 ];
 
 /// A key the validator does not read: Rails ignores it, and so does the
