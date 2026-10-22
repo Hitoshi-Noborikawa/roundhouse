@@ -137,7 +137,7 @@ fn dynamic_default_scope(model: &Model) -> Option<DynamicScope> {
     let body = scope_body(model)?;
     let (guarded, where_call) = match &*body.node {
         ExprNode::If { cond, then_branch, else_branch } => {
-            if !portable(cond) {
+            if !portable(cond, &[]) {
                 return None;
             }
             match (is_nil(then_branch), is_nil(else_branch)) {
@@ -201,7 +201,7 @@ fn where_hash(model: &Model, call: &Expr) -> Option<(Expr, Vec<Symbol>, bool)> {
                 }
             }
             _ => {
-                if !portable(v) {
+                if !portable(v, &[]) {
                     return None;
                 }
                 all_literal = false;
@@ -216,18 +216,28 @@ fn where_hash(model: &Model, call: &Expr) -> Option<(Expr, Vec<Symbol>, bool)> {
 /// from literals, constants and calls on them, with `&&`/`||`/`!` and
 /// the locals a `&.` desugars to. No bare (implicit-self) call, `self`,
 /// instance variable, block, assignment or control flow.
-fn portable(e: &Expr) -> bool {
+fn portable(e: &Expr, bound: &[Symbol]) -> bool {
     match &*e.node {
         ExprNode::Lit { value } => !matches!(value, Literal::Regex { .. }),
-        ExprNode::Const { .. } | ExprNode::Var { .. } => true,
-        ExprNode::Send { recv: Some(recv), args, block: None, .. } => portable(recv) && args.iter().all(portable),
-        ExprNode::BoolOp { left, right, .. } => portable(left) && portable(right),
-        ExprNode::Let { value, body, .. } => portable(value) && portable(body),
-        ExprNode::If { cond, then_branch, else_branch } => {
-            portable(cond) && portable(then_branch) && portable(else_branch)
+        ExprNode::Const { .. } => true,
+        // A local is portable only when a `Let` inside the expression
+        // binds it: one captured from outside the block does not exist
+        // in the method the expression is lowered into.
+        ExprNode::Var { name, .. } => bound.contains(name),
+        ExprNode::Send { recv: Some(recv), args, block: None, .. } => {
+            portable(recv, bound) && args.iter().all(|a| portable(a, bound))
         }
-        ExprNode::Array { elements, .. } => elements.iter().all(portable),
-        ExprNode::Hash { entries, .. } => entries.iter().all(|(k, v)| portable(k) && portable(v)),
+        ExprNode::BoolOp { left, right, .. } => portable(left, bound) && portable(right, bound),
+        ExprNode::Let { name, value, body, .. } => {
+            let mut inner = bound.to_vec();
+            inner.push(name.clone());
+            portable(value, bound) && portable(body, &inner)
+        }
+        ExprNode::If { cond, then_branch, else_branch } => {
+            portable(cond, bound) && portable(then_branch, bound) && portable(else_branch, bound)
+        }
+        ExprNode::Array { elements, .. } => elements.iter().all(|a| portable(a, bound)),
+        ExprNode::Hash { entries, .. } => entries.iter().all(|(k, v)| portable(k, bound) && portable(v, bound)),
         _ => false,
     }
 }

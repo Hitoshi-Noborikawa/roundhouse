@@ -122,6 +122,7 @@ pub(super) fn push_schema_methods(
     models: &[Model],
     table: &Table,
     through_joins: &super::associations::ThroughJoins,
+    runtime_relation: super::RuntimeRelation,
 ) {
     let owner = &model.name;
 
@@ -482,7 +483,7 @@ pub(super) fn push_schema_methods(
     // lobsters emits.)
 
     // def initialize(attrs = {}); super(); per-column self.col = attrs[:col] [|| 0 for id]; end
-    methods.push(synth_initialize(owner, table, model, through_joins));
+    methods.push(synth_initialize(owner, table, model, through_joins, runtime_relation));
 
     // def id; @identifier; end / def id=(value); @identifier = value; end
     // — when the key column is not called `id` and the table has no
@@ -2463,6 +2464,7 @@ fn synth_initialize(
     table: &Table,
     model: &Model,
     through_joins: &super::associations::ThroughJoins,
+    runtime_relation: super::RuntimeRelation,
 ) -> MethodDef {
     let attrs = Symbol::from("attrs");
 
@@ -2848,8 +2850,9 @@ fn synth_initialize(
         }
     }
 
-    if let Some(crate::lower::default_scope::DefaultScope::Dynamic(scope)) =
-        crate::lower::default_scope::default_scope(model)
+    // Only where the runtime Relation ships: `unscoped_tables` lives there.
+    if let (Some(crate::lower::default_scope::DefaultScope::Dynamic(scope)), super::RuntimeRelation::Present) =
+        (crate::lower::default_scope::default_scope(model), runtime_relation)
     {
         stmts.push(seed_dynamic_scope(owner, table, &scope.columns, &attrs));
     }

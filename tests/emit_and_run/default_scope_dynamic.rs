@@ -352,3 +352,52 @@ puts "dynamic default scope scoped association passed"
         ))
         .assert_passes();
 }
+
+fn read_tree(dir: &std::path::Path, ext: &str) -> String {
+    let mut out = String::new();
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(d) = stack.pop() {
+        for entry in std::fs::read_dir(&d).expect("read emitted dir").flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                stack.push(path);
+            } else if path.extension().is_some_and(|e| e == ext) {
+                out.push_str(&std::fs::read_to_string(&path).unwrap_or_default());
+            }
+        }
+    }
+    out
+}
+
+/// A local captured from outside the block does not exist in the method
+/// the scope is lowered into, so such a scope is not lowered: it keeps
+/// the model-DSL warning rather than emit a reference to an undefined
+/// local.
+#[test]
+fn a_scope_reading_a_captured_local_is_not_lowered() {
+    let (emitted, _errors) = app()
+        .write("db/schema.rb", "ActiveRecord::Schema.define do\n  create_table \"crates\", force: :cascade do |t|\n    t.integer \"account_id\"\n  end\nend\n")
+        .write("app/models/crate.rb", "class Crate < ApplicationRecord\n  acct = 5\n  default_scope { where(account_id: acct) }\nend\n")
+        .remove("app/models/project.rb")
+        .remove("app/models/note.rb")
+        .remove("app/models/gadget.rb")
+        .remove("app/models/widget.rb")
+        .remove("app/models/account.rb")
+        .emit(roundhouse::project::BuildTarget::Ruby);
+    let ruby = read_tree(&emitted.join("app/models"), "rb");
+    assert!(!ruby.contains("_default_scope_where"), "a captured local is not lowered: {ruby}");
+}
+
+/// A target without the runtime Relation has no `unscoped_tables` to ask,
+/// so `new` does not seed from the scope there; the scope's own method is
+/// still emitted, and the ruby target still seeds.
+#[test]
+fn seeding_is_skipped_on_targets_without_the_runtime_relation() {
+    let (ruby_out, _) = app().emit(roundhouse::project::BuildTarget::Ruby);
+    let ruby = read_tree(&ruby_out.join("app/models"), "rb");
+    assert!(ruby.contains("ActiveRecord::Relation.unscoped_tables"), "the ruby target seeds: {ruby}");
+    let (rust_out, _) = app().emit(roundhouse::project::BuildTarget::Rust);
+    let rust = read_tree(&rust_out.join("src/models"), "rs");
+    assert!(rust.contains("_default_scope_where"), "the scope itself is still emitted: {rust}");
+    assert!(!rust.contains("unscoped_tables"), "a target without the runtime Relation does not seed: {rust}");
+}
