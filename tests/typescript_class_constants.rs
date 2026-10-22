@@ -74,3 +74,20 @@ fn a_models_constant_reads_get_the_hash_and_array_rewrites() {
     // A source `def self.heaviest` reads it the same way.
     assert!(gauge.contains("Gauge.WEIGHTS[\"large\"] ?? 0"), "{gauge}");
 }
+
+/// A `.freeze` nested inside a literal constant answers its receiver:
+/// `{ "a" => [1, 2].freeze }.freeze` declares `{ "a": [1, 2] }`. The
+/// nested `.freeze` was emitted as a property read, which is `undefined`.
+#[test]
+fn a_nested_freeze_in_a_literal_constant_answers_its_receiver() {
+    let (emitted, errors) = emit_and_run::real_blog()
+        .write(
+            "app/models/rack.rb",
+            "class Rack\n  NESTED = { \"a\" => [1, 2].freeze, \"b\" => { \"c\" => \"d\" }.freeze }.freeze\n\n  def self.first_a\n    NESTED[\"a\"][0]\n  end\nend\n",
+        )
+        .emit(BuildTarget::Typescript);
+    assert!(errors.is_empty(), "{errors:?}");
+    let rack = std::fs::read_to_string(emitted.join("app/models/rack.ts")).expect("rack.ts");
+    assert!(rack.contains("static NESTED = { \"a\": [1, 2], \"b\": { \"c\": \"d\" } };"), "{rack}");
+    assert!(!rack.contains(".freeze"), "{rack}");
+}

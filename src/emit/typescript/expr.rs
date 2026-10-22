@@ -2207,6 +2207,15 @@ fn js_send_inner(
     if let Some(recv) = crate::emit::shared::fn_call::function_receiver(recv, method, block) {
         return Js::call(span, js_expr(recv), args.iter().map(js_expr).collect());
     }
+    // `x.freeze` answers `x`, whatever its type: no JS value has a
+    // `freeze` method (only the static `Object.freeze`), so the bare
+    // property read was `undefined`, as in a constant's nested
+    // `[1, 2].freeze` (#1223).
+    if method == "freeze" && args.is_empty() && block.is_none() {
+        if let Some(r) = recv {
+            return js_expr(r);
+        }
+    }
     // Temporal reader intrinsic: `ActiveSupport.parse_db_time(s)` parses
     // stored ISO-8601 text into a native `Date` (nil-safe: `string | null`
     // → `Date | null`). Maps to the hand-written `RhDateTime.parse`
