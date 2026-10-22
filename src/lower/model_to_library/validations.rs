@@ -590,7 +590,15 @@ fn validation_rule_to_calls(
             *allow_nil,
         ),
         ValidationRule::Format { pattern, flags, allow_nil, allow_blank } => skip_nil_or_blank(
-            vec![inline_format_check(msgs, attr, pattern, flags)],
+            vec![inline_format_check(
+                msgs,
+                attr,
+                pattern,
+                flags,
+                attr_ty,
+                *allow_nil == Some(true) || *allow_blank == Some(true),
+                runtime_relation,
+            )],
             attr,
             attr_ty,
             *allow_nil,
@@ -1184,23 +1192,66 @@ fn inline_exclusion_check(
     if_with_nil_else(reserved, push_err)
 }
 
-/// Inline `validates :attr, format: { with: /pattern/ }`.
-///   if !(@attr.is_a?(String) && /pattern/.match?(@attr))
+/// Inline `validates :attr, format: { with: /pattern/ }`. Rails 8.1.4's
+/// `FormatValidator` matches `value.to_s`, so nil is checked as `""` and
+/// a non-String value by its String form (`true` passes `/\Atrue\z/`).
+///   if !/pattern/.match?(@attr.to_s)
 ///     errors << "attr is invalid"
 ///   end
+/// On the ruby family that is the whole check. A strict target's field
+/// is its column's type: a String column matches the value itself, any
+/// other matches its `to_s`, and a nullable column matches `""` for nil
+/// (`(@attr.nil? && /pattern/.match?("")) || (!@attr.nil? &&
+/// /pattern/.match?(<narrowed>))`), unless `allow_nil:` / `allow_blank:`
+/// already skips nil.
 /// The runtime helper's `with.nil?` guard is unnecessary — the
 /// pattern is a known literal at lower time.
-fn inline_format_check(msgs: Messages, attr: &Symbol, pattern: &str, flags: &str) -> Expr {
-    let attr_ivar = ivar(attr);
-    let regex_lit = Expr::new(
-        Span::synthetic(),
-        ExprNode::Lit {
-            value: Literal::Regex { pattern: pattern.to_string(), flags: flags.to_string() },
-        },
-    );
-    let is_string = is_a_check(&attr_ivar, "String");
-    let match_call = send(regex_lit, "match?", vec![attr_ivar]);
-    let valid = bool_op(BoolOpKind::And, is_string, match_call);
+fn inline_format_check(
+    msgs: Messages,
+    attr: &Symbol,
+    pattern: &str,
+    flags: &str,
+    attr_ty: Option<&Ty>,
+    nil_skipped: bool,
+    runtime_relation: super::RuntimeRelation,
+) -> Expr {
+    let matches = |value: Expr| {
+        let regex_lit = Expr::new(
+            Span::synthetic(),
+            ExprNode::Lit {
+                value: Literal::Regex { pattern: pattern.to_string(), flags: flags.to_string() },
+            },
+        );
+        send(regex_lit, "match?", vec![value])
+    };
+    let valid = match runtime_relation {
+        super::RuntimeRelation::Present => matches(send(ivar(attr), "to_s", vec![])),
+        super::RuntimeRelation::Absent => {
+            let (attr_ty, nilable) = peel_nilable(attr_ty);
+            let value = match (nilable, attr_ty) {
+                (true, Some(inner)) => narrowed_ivar(attr, inner),
+                _ => ivar(attr),
+            };
+            let string_form = match attr_ty {
+                Some(Ty::Str) => value,
+                _ => send(value, "to_s", vec![]),
+            };
+            if nilable && !nil_skipped {
+                // Two guarded disjuncts rather than a conditional
+                // expression, which Go has no spelling for.
+                let empty = Expr::new(Span::synthetic(), ExprNode::Lit { value: Literal::Str { value: String::new() } });
+                let nil = send(ivar(attr), "nil?", vec![]);
+                let present = send(nil.clone(), "!", vec![]);
+                bool_op(
+                    BoolOpKind::Or,
+                    bool_op(BoolOpKind::And, nil, matches(empty)),
+                    bool_op(BoolOpKind::And, present, matches(string_form)),
+                )
+            } else {
+                matches(string_form)
+            }
+        }
+    };
     let invalid = Expr::new(
         Span::synthetic(),
         ExprNode::Send {
@@ -1921,7 +1972,7 @@ mod tests {
 
     #[test]
     fn format_emits_invalid_error() {
-        let expr = inline_format_check(Messages::default(), &attr(), "[A-Z]+", "");
+        let expr = inline_format_check(Messages::default(), &attr(), "[A-Z]+", "", None, false, crate::lower::model_to_library::RuntimeRelation::Absent);
         assert_eq!(collect_error_messages(&expr), vec!["Title is invalid"]);
     }
 
@@ -1931,7 +1982,7 @@ mod tests {
     /// reached any emit target even once ingest stopped refusing it.
     #[test]
     fn format_check_carries_flags_into_the_regex_literal() {
-        let expr = inline_format_check(Messages::default(), &attr(), "a.b", "im");
+        let expr = inline_format_check(Messages::default(), &attr(), "a.b", "im", None, false, crate::lower::model_to_library::RuntimeRelation::Absent);
         let flags = find_regex_flags(&expr).expect("expected a Regex literal in the format check");
         assert_eq!(flags, "im");
     }
