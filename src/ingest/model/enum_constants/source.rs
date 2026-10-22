@@ -526,8 +526,8 @@ impl EnumConstants {
                 continue;
             }
             // The forms the owner's own ingest folds, then the derived ones.
-            let recipe = super::super::enum_label_values(&declaration.mapping, file, &table, &|_| None)
-                .ok()
+            let recipe = super::derived::mapping_values_fold(&declaration.mapping, &table)
+                .then(|| super::super::enum_label_values(&declaration.mapping, file, &table, &|_| None).ok().flatten())
                 .flatten()
                 .and_then(super::derived::literal_pairs)
                 .map(|pairs| super::derived::Recipe::Fixed(super::derived::Value::Map { pairs, indifferent: false }))

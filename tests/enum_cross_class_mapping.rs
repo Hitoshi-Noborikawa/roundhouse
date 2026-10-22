@@ -271,3 +271,26 @@ fn the_models_own_mapping_stays_a_gap() {
     assert_eq!(mapping(&app, "Widget", "role"), None);
     assert!(gaps.iter().any(|g| g.contains("enum :role mapping")), "{gaps:?}");
 }
+
+/// Reading a mapping for another owner records nothing itself: a Hash
+/// value ingest cannot take (an Integer past 64 bits) is the gap of the
+/// file that writes it, once, and a mapping it makes uncomputable is the
+/// referencing enum's gap, not a second report of that value.
+#[test]
+fn reading_another_owners_mapping_records_no_gap_of_its_own() {
+    const BIG: &str = "99999999999999999999999";
+    let gadget = format!("class Gadget < ApplicationRecord\n  enum :status, {{ draft: 0, big: {BIG} }}\nend\n");
+    let (_, alone) = ingest(&[("app/models/gadget.rb", &gadget)]);
+    let widget = format!("class Widget < ApplicationRecord\n  enum :status, Gadget.statuses\n  enum :role, Sprocket.vendors.merge(huge: {BIG})\nend\n");
+    let (app, gaps) = ingest(&[("app/models/gadget.rb", &gadget), ("app/models/sprocket.rb", SPROCKET), ("app/models/widget.rb", &widget)]);
+    let added: Vec<&String> = gaps.iter().filter(|g| !alone.contains(g)).collect();
+    assert_eq!(mapping(&app, "Widget", "role"), None);
+    // Widget's own literal is Widget's gap; nothing names no file.
+    assert!(added.iter().all(|g| g.contains("app/models/widget.rb")), "alone: {alone:#?}\nadded: {added:#?}");
+    // Gadget's value is reported once, by Gadget's own ingest, as on a
+    // tree with no reference to it (recording its mapping in the
+    // prepass reported it twice more).
+    let big = |gaps: &[String]| gaps.iter().filter(|g| g.contains("gadget.rb") && g.contains("64-bit")).count();
+    assert_eq!(big(&alone), 1, "{alone:#?}");
+    assert_eq!(big(&gaps), 1, "{gaps:#?}");
+}

@@ -121,6 +121,9 @@ impl Recipe {
                 Some(hash) => hash.elements().iter().collect(),
                 None => node.as_keyword_hash_node()?.elements().iter().collect(),
             };
+            if !values_fold(&elements, consts) {
+                return None;
+            }
             let pairs = super::super::enum_label_pairs(elements.into_iter(), file, consts).ok()??;
             return literal_pairs(pairs).map(|pairs| Recipe::Fixed(Value::Map { pairs, indifferent: false }));
         }
@@ -147,6 +150,41 @@ impl Recipe {
             }
             _ => None,
         }
+    }
+}
+
+/// Whether every value of a Hash mapping folds to a literal, checked
+/// before `enum_label_pairs` would ingest one that does not: that ingest
+/// records a survey gap, and a recipe is only ever literal, so a mapping
+/// read for another owner must not report its values a second time (or
+/// under no file at all).
+fn values_fold(elements: &[Node<'_>], consts: &super::super::ClassConsts) -> bool {
+    elements.iter().all(|element| {
+        element.as_assoc_node().is_some_and(|assoc| {
+            let value = assoc.value();
+            match value.as_constant_write_node() {
+                Some(write) => consts.scalar(&write.value()).is_some(),
+                None => value.as_nil_node().is_some() || consts.scalar(&value).is_some(),
+            }
+        })
+    })
+}
+
+/// [`values_fold`] for a whole mapping expression: a Hash literal (or a
+/// frozen one) must fold; anything else ingests no values.
+pub(super) fn mapping_values_fold(node: &Node<'_>, consts: &super::super::ClassConsts) -> bool {
+    if let Some(call) = node.as_call_node()
+        && constant_id_str(&call.name()) == "freeze"
+        && call.arguments().is_none()
+        && call.block().is_none()
+        && let Some(receiver) = call.receiver()
+    {
+        return mapping_values_fold(&receiver, consts);
+    }
+    match (node.as_hash_node(), node.as_keyword_hash_node()) {
+        (Some(hash), _) => values_fold(&hash.elements().iter().collect::<Vec<_>>(), consts),
+        (_, Some(hash)) => values_fold(&hash.elements().iter().collect::<Vec<_>>(), consts),
+        _ => true,
     }
 }
 
