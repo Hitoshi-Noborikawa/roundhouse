@@ -2044,12 +2044,14 @@ pub(super) fn js_library_class(
     // ivar (`def persisted?; @persisted; end`) are subsumed by the
     // field; callers reading `record.persisted?` sanitize to
     // `record.persisted` and get the field directly.
-    let mut sanitized_seen: std::collections::HashSet<String> =
-        field_names_seen.clone();
+    // Per side, as `side_field_names`: a static `ready?` keeps its name
+    // beside an instance `is_ready`.
+    let mut sanitized_seen: [std::collections::HashSet<String>; 2] = side_field_names.clone();
     for m in &class.methods {
         let raw = m.name.as_str();
         if !raw.ends_with('?') && !raw.ends_with('!') {
-            sanitized_seen.insert(crate::emit::typescript::library::sanitize_identifier(raw));
+            sanitized_seen[side(matches!(m.receiver, MethodReceiver::Class))]
+                .insert(crate::emit::typescript::library::sanitize_identifier(raw));
         }
     }
 
@@ -2097,7 +2099,7 @@ pub(super) fn js_library_class(
             // Predicate/bang vs same-name plain-method twin (`save`
             // vs `save!`): keep the plain twin.
             if raw.ends_with('?') || raw.ends_with('!') {
-                !sanitized_seen.contains(&stripped)
+                !sanitized_seen[side(matches!(m.receiver, MethodReceiver::Class))].contains(&stripped)
             } else {
                 true
             }

@@ -55,3 +55,14 @@ fn an_instance_field_leaves_a_class_method_of_its_name() {
     assert!(knob.contains("return this.label().toUpperCase();"), "{knob}");
 }
 
+/// The predicate/bang twin check is per side too: an instance `is_ready`
+/// no longer drops `def self.ready?`, which sanitizes to the same name.
+#[test]
+fn an_instance_method_leaves_a_class_predicate_of_its_sanitized_name() {
+    let (emitted, errors) = parenless_calls::overlay().emit(BuildTarget::Typescript);
+    assert!(errors.is_empty(), "{errors:?}");
+    let lamp = std::fs::read_to_string(emitted.join("app/models/lamp.ts")).expect("lamp.ts");
+    assert!(lamp.contains("  is_ready(): boolean {"), "{lamp}");
+    assert!(lamp.contains("static is_ready(): boolean {"), "{lamp}");
+}
+

@@ -39,6 +39,10 @@ pub const DIAL: &str = "class Dial\n  def self.mode\n    @mode ||= \"x\"\n  end\
 /// emit.
 pub const KNOB: &str = "class Knob\n  attr_reader :label\n\n  def initialize\n    @label = \"inst\"\n  end\n\n  def self.label\n    \"cls\"\n  end\n\n  def self.shout\n    label.upcase\n  end\nend\n";
 
+/// An instance method and a class predicate that sanitize to one name
+/// (`is_ready`, `ready?`): each side keeps its own.
+pub const LAMP: &str = "class Lamp\n  def is_ready\n    false\n  end\n\n  def self.ready?\n    true\n  end\n\n  def self.state\n    ready? ? \"on\" : \"off\"\n  end\nend\n";
+
 pub const WIDGET: &str = "class Widget < Meter\n  def self.shout\n    label.upcase\n  end\nend\n";
 
 const COMMENT_ANCHOR: &str = "  after_destroy_commit { article.broadcast_replace_to(\"articles\") rescue nil }\n";
@@ -54,6 +58,7 @@ pub fn overlay() -> Overlay {
         .write("app/models/widget.rb", WIDGET)
         .write("app/models/dial.rb", DIAL)
         .write("app/models/knob.rb", KNOB)
+        .write("app/models/lamp.rb", LAMP)
         .edit(
             "app/models/comment.rb",
             COMMENT_ANCHOR,
