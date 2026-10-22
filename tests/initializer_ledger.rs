@@ -583,3 +583,14 @@ fn a_filter_parameters_list_with_a_regexp_and_comments_is_read() {
     assert_eq!(statements(&ledger), ["Rails.application.config.filter_parameters +="]);
     assert_eq!(location(&ledger[0]), "config/initializers/filter_parameter_logging.rb:7:1");
 }
+
+#[test]
+fn a_filter_parameters_operand_after_a_comment_or_blank_line_is_read() {
+    let (_, ledger) = ingest(&[(
+        "config/initializers/filter_parameter_logging.rb",
+        "Rails.application.config.filter_parameters +=\n  # credentials\n  [:password]\n\
+         Rails.application.config.filter_parameters +=\n\n  [:token]\n\
+         Rails.application.config.filter_parameters += [\n  # secrets\n  :secret,\n]\n",
+    )]);
+    assert!(ledger.is_empty(), "{:?}", statements(&ledger));
+}

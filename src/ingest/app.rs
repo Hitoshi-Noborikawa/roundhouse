@@ -9847,19 +9847,27 @@ pub(crate) fn extract_filter_parameters(source: &[u8]) -> Vec<FilterParametersLi
             out.push(FilterParametersLine::Computed { replace: false });
             continue;
         };
-        // The shortest run of lines that parses as one operand. A
+        // The shortest run of lines that parses as one operand. Blank
+        // and comment-only lines before it (`+=` ending its line) parse
+        // cleanly but hold no operand, so the run grows past them. A
         // statement that never parses stays Computed, and the scan goes
         // on from the next line.
         let mut text = rest.to_string();
         let mut filters = None;
         for end in i..=lines.len() {
-            if !text.trim().is_empty() {
+            let found = {
                 let parsed = ruby_prism::parse(text.as_bytes());
-                if parsed.errors().next().is_none() {
-                    filters = Some(filter_parameter_list(&parsed, &text));
-                    i = end;
-                    break;
-                }
+                let has_operand = parsed
+                    .node()
+                    .as_program_node()
+                    .is_some_and(|p| p.statements().body().iter().next().is_some());
+                (has_operand && parsed.errors().next().is_none())
+                    .then(|| filter_parameter_list(&parsed, &text))
+            };
+            if found.is_some() {
+                filters = found;
+                i = end;
+                break;
             }
             if end < lines.len() {
                 text.push('\n');
