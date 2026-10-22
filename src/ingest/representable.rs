@@ -94,7 +94,7 @@ pub(super) fn lower_representable_decorators(
         if !source.text.contains(DECORATOR) {
             continue;
         }
-        let parsed = ruby_prism::parse(source.text.as_bytes());
+        let parsed = super::prism::parse_silent(source.text.as_bytes());
         let mut found = Vec::new();
         collect_classes(&parsed.node(), &mut Vec::new(), &mut found);
         for (path, class) in found {

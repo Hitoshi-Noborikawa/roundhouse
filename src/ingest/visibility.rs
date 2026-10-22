@@ -183,7 +183,7 @@ impl Visibility {
         source: &str,
         file: &str,
     ) -> HashMap<usize, MethodVisibility> {
-        let parsed = ruby_prism::parse(source.as_bytes());
+        let parsed = super::prism::parse(source.as_bytes(), file);
         let root = parsed.node();
         let mut defaults = HashMap::new();
         let bodies = super::util::find_all_classes_with_scope(&root)

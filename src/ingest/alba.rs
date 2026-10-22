@@ -245,7 +245,7 @@ fn collect_resource_declarations(
         {
             continue;
         }
-        let parsed = ruby_prism::parse(source.text.as_bytes());
+        let parsed = super::prism::parse_silent(source.text.as_bytes());
         let mut guard = SourceGuard {
             resources,
             counts: HashMap::new(),
