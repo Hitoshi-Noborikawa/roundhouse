@@ -106,11 +106,142 @@ impl EnumConstants {
                 }
             }
         }
+        impl Collector<'_, '_> {
+            /// What may define or replace a class method an `enum` defines
+            /// ([`super::derived`]). Over-approximate: an owner is named
+            /// by its last segment, and an unknown receiver opens every
+            /// owner.
+            fn record_singleton(&mut self, node: &Node<'_>) {
+                let owner = self
+                    .nesting
+                    .last()
+                    .map(|name| name.rsplit("::").next().unwrap_or(name).to_string());
+                let constants = &mut *self.constants;
+                // The innermost `class << x` around this node, if any,
+                // before any nested def/class (a scope boundary).
+                let singleton = self.parents.iter().rev().find_map(|parent| match parent {
+                    Node::SingletonClassNode { .. } => Some(Some(parent.as_singleton_class_node().unwrap())),
+                    Node::DefNode { .. } | Node::ClassNode { .. } | Node::ModuleNode { .. } => Some(None),
+                    _ => None,
+                }).flatten();
+                let on_self = |expression: &Node<'_>| expression.as_self_node().is_some();
+                // Inside `x.instance_eval do … end` (or `class_eval`, …)
+                // `self` is whatever `x` is: a definition there may land
+                // on any owner, so it is known by name only.
+                let in_eval = self.parents.windows(2).any(|pair| {
+                    matches!(&pair[1], Node::BlockNode { .. })
+                        && pair[0].as_call_node().is_some_and(|call| {
+                            super::derived::EVAL_METHODS.contains(&constant_id_str(&call.name()).as_ref())
+                        })
+                });
+                if let Some(def) = node.as_def_node() {
+                    let method = constant_id_str(&def.name()).to_string();
+                    if in_eval {
+                        constants.uncertain_singleton_methods.insert(method);
+                        return;
+                    }
+                    match (def.receiver(), &singleton, &owner) {
+                        (Some(receiver), _, Some(owner)) if receiver.as_self_node().is_some() => {
+                            constants.singleton_methods.insert((owner.clone(), method));
+                        }
+                        (Some(receiver), _, None) if receiver.as_self_node().is_some() => {}
+                        (Some(_), _, _) => {
+                            constants.uncertain_singleton_methods.insert(method);
+                        }
+                        (None, Some(class), Some(owner)) if on_self(&class.expression()) => {
+                            constants.singleton_methods.insert((owner.clone(), method));
+                        }
+                        (None, Some(_), _) => {
+                            constants.uncertain_singleton_methods.insert(method);
+                        }
+                        (None, None, _) => {}
+                    }
+                    return;
+                }
+                if let Some(class) = node.as_singleton_class_node() {
+                    let expression = class.expression();
+                    if !on_self(&expression) {
+                        match EnumConstants::path(&expression) {
+                            Some(path) => {
+                                constants.open_singletons.insert(path.rsplit("::").next().unwrap_or(&path).to_string());
+                            }
+                            None => constants.singletons_unknown = true,
+                        }
+                    }
+                    return;
+                }
+                // Anything but a `def` directly inside `class << self`
+                // (`attr_reader`, `alias`, `define_method`, `prepend`).
+                if let [.., Node::SingletonClassNode { .. }, Node::StatementsNode { .. }] = self.parents.as_slice()
+                    && let Some(owner) = &owner
+                {
+                    constants.open_singletons.insert(owner.clone());
+                }
+                let Some(call) = node.as_call_node() else { return };
+                let mut method = constant_id_str(&call.name()).to_string();
+                let mut args: Vec<Node<'_>> =
+                    call.arguments().map(|a| a.arguments().iter().collect()).unwrap_or_default();
+                // `x.send(:define_singleton_method, :name)` is the call it names.
+                if matches!(method.as_str(), "send" | "__send__" | "public_send")
+                    && let Some(sent) = args.first().and_then(symbol_or_string_value)
+                {
+                    method = sent;
+                    args.remove(0);
+                }
+                if super::derived::SINGLETON_METHODS.contains(&method.as_str()) {
+                    // `define_singleton_method(:name)` on any receiver.
+                    let named = args.first().and_then(symbol_or_string_value);
+                    let named = named.is_some_and(|name| {
+                        constants.uncertain_singleton_methods.insert(name);
+                        true
+                    });
+                    if in_eval && call.receiver().is_none_or(|receiver| receiver.as_self_node().is_some()) {
+                        if !named {
+                            constants.singletons_unknown = true;
+                        }
+                        return;
+                    }
+                    match call.receiver() {
+                        None => {
+                            if let Some(owner) = &owner {
+                                constants.open_singletons.insert(owner.clone());
+                            }
+                        }
+                        Some(receiver) if receiver.as_self_node().is_some() => {
+                            if let Some(owner) = &owner {
+                                constants.open_singletons.insert(owner.clone());
+                            }
+                        }
+                        Some(receiver) => match EnumConstants::path(&receiver) {
+                            Some(path) => {
+                                constants.open_singletons.insert(path.rsplit("::").next().unwrap_or(&path).to_string());
+                            }
+                            None => constants.singletons_unknown = true,
+                        },
+                    }
+                }
+                // An `enum` anywhere but directly in a class body (a
+                // block, a conditional, a concern's `included do`) may
+                // define its class method on some owner this pass does
+                // not follow.
+                // A consumed (non-input) source is read after the models:
+                // its declarations are never recorded, only marked.
+                if let Some(declaration) = super::super::enum_declaration(&call)
+                    && (matches!(self.kind, SourceKind::Mutations)
+                        || !matches!(self.parents.as_slice(), [.., Node::ClassNode { .. }, Node::StatementsNode { .. }]))
+                {
+                    constants
+                        .uncertain_singleton_methods
+                        .insert(crate::naming::pluralize_snake(&declaration.column));
+                }
+            }
+        }
         impl<'pr> ruby_prism::Visit<'pr> for Collector<'_, 'pr> {
             fn visit_branch_node_enter(&mut self, node: Node<'pr>) {
                 // Classifier receives ancestors only, identically for branches
                 // and leaves. Push/pop below is solely the traversal contract.
                 self.record_reference(&node);
+                self.record_singleton(&node);
                 let direct = matches!(self.kind, SourceKind::Inputs)
                     && self.parents.iter().all(|parent| {
                         matches!(
@@ -223,6 +354,12 @@ impl EnumConstants {
                                 self.file,
                             )
                         });
+                        if let Some(class) = node.as_class_node() {
+                            let owners: Vec<String> = std::iter::once(name.clone())
+                                .chain(self.nesting.iter().rev().cloned())
+                                .collect();
+                            self.constants.record_enum_declarations(&class, &name, certain, &owners, self.file);
+                        }
                         match (self.constants.owner_consts.get_mut(&name), table) {
                             (Some(Some(existing)), Some(table)) => existing.merge(table),
                             (Some(existing), None) => *existing = None,
@@ -258,6 +395,7 @@ impl EnumConstants {
 
             fn visit_leaf_node_enter(&mut self, node: Node<'pr>) {
                 self.record_reference(&node);
+                self.record_singleton(&node);
                 self.constants.record_write(&node, &self.nesting, false);
             }
         }
@@ -373,6 +511,43 @@ impl EnumConstants {
                     owners: nesting.iter().rev().cloned().collect(),
                 }));
             }
+        }
+    }
+
+    /// An owner's own `enum` declarations, as [`super::derived`] recipes.
+    /// A body whose owner is not certain records only that some owner
+    /// may answer each enum's class method.
+    fn record_enum_declarations(
+        &mut self,
+        class: &ruby_prism::ClassNode<'_>,
+        name: &str,
+        certain: bool,
+        owners: &[String],
+        file: &str,
+    ) {
+        let Some(body) = class.body() else { return };
+        let statements = flatten_statements(body);
+        let table = super::super::ClassConsts::collect(&statements, file);
+        for statement in &statements {
+            let Some(declaration) = statement.as_call_node().and_then(|call| super::super::enum_declaration(&call))
+            else {
+                continue;
+            };
+            if !certain {
+                self.uncertain_singleton_methods.insert(crate::naming::pluralize_snake(&declaration.column));
+                continue;
+            }
+            // The forms the owner's own ingest folds, then the derived ones.
+            let recipe = super::derived::mapping_values_fold(&declaration.mapping, &table)
+                .then(|| super::super::enum_label_values(&declaration.mapping, file, &table, &|_| None).ok().flatten())
+                .flatten()
+                .and_then(super::derived::literal_pairs)
+                .map(|pairs| super::derived::Recipe::Fixed(super::derived::Value::Map { pairs, indifferent: false }))
+                .or_else(|| super::derived::Recipe::of(&declaration.mapping, owners, Some(&table), file));
+            self.enum_declarations
+                .entry(name.to_string())
+                .or_default()
+                .push(super::derived::Declaration { column: declaration.column, recipe });
         }
     }
 

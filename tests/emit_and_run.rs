@@ -18946,3 +18946,5 @@ mod inherited_visibility;
 mod class_side_relations;
 #[path = "emit_and_run/dynamic_where_forms.rs"]
 mod dynamic_where_forms;
+#[path = "emit_and_run/enum_cross_class_mapping.rs"]
+mod enum_cross_class_mapping;
