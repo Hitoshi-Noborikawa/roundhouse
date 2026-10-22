@@ -2333,6 +2333,7 @@ end
     super::on_load_reopen::drain_pending(&mut app);
     gap_numericality_allow_on_untyped(&mut app);
     gap_acceptance_on_undeclared(&mut app);
+    gap_uniqueness_on_polymorphic_attribute(&mut app);
     app.const_resolver = const_resolver;
     // Admission needs complete controller permit demand and model DSL,
     // including declarations contributed by either kind of Concern,
@@ -2639,6 +2640,57 @@ fn report_validates_gaps(app: &App, gaps: Vec<(crate::span::Span, String)>, deta
     for (span, construct) in gaps {
         let file = crate::ide::source(app, span.file).map(|s| s.path.clone()).unwrap_or_default();
         let mut diagnostic = crate::diagnostic::Diagnostic::unsupported(span, None, construct, detail);
+        diagnostic.severity = crate::diagnostic::Severity::Warning;
+        let message = diagnostic.message.clone();
+        super::prism::push(diagnostic);
+        survey::record(&IngestError::Unsupported { file, message });
+    }
+}
+
+/// `uniqueness:` on an attribute naming a polymorphic `belongs_to`
+/// (`validates :subject, uniqueness: true`) stays the reported gap. Rails
+/// 8.1.4 resolves the attribute to its foreign key through the association's
+/// class, which a polymorphic one does not have: validating a record that
+/// holds a subject raises `ArgumentError` ("Polymorphic associations do not
+/// support computing the class."). Refused as a whole call, as the
+/// numericality gap is.
+fn gap_uniqueness_on_polymorphic_attribute(app: &mut App) {
+    use crate::dialect::{Association, ModelBodyItem, ValidationRule};
+    let mut gaps: Vec<(crate::span::Span, String)> = Vec::new();
+    for model in &mut app.models {
+        let polymorphic = |attr: &crate::ident::Symbol| {
+            model
+                .associations()
+                .any(|a| matches!(a, Association::BelongsTo { name, polymorphic: true, .. } if name == attr))
+        };
+        let refused: Vec<(crate::span::Span, String)> = model
+            .body
+            .iter()
+            .filter_map(|item| {
+                let ModelBodyItem::Validation { validation, .. } = item else { return None };
+                (validation.rules.iter().any(|r| matches!(r, ValidationRule::Uniqueness { .. }))
+                    && polymorphic(&validation.attribute))
+                .then(|| (item.span(), format!("validates :{}, uniqueness:", validation.attribute.as_str())))
+            })
+            .collect();
+        let calls: std::collections::HashSet<(crate::span::FileId, u32, u32)> =
+            refused.iter().map(|(span, _)| (span.file, span.start, span.end)).collect();
+        model.body.retain(|item| {
+            !matches!(item, ModelBodyItem::Validation { .. }) || {
+                let span = item.span();
+                !calls.contains(&(span.file, span.start, span.end))
+            }
+        });
+        gaps.extend(refused);
+    }
+    for (span, construct) in gaps {
+        let file = crate::ide::source(app, span.file).map(|s| s.path.clone()).unwrap_or_default();
+        let mut diagnostic = crate::diagnostic::Diagnostic::unsupported(
+            span,
+            None,
+            construct,
+            "the attribute is a polymorphic association, which Rails' uniqueness check cannot resolve to a class; Rails raises ArgumentError validating a record that holds one",
+        );
         diagnostic.severity = crate::diagnostic::Severity::Warning;
         let message = diagnostic.message.clone();
         super::prism::push(diagnostic);

@@ -1837,8 +1837,6 @@ pub(super) struct ClassConsts {
     /// of one other folded regex constant — `(pattern, flags)`. Used to
     /// resolve `validates …, format: { with: NAME }` (#985 follow-up).
     regexes: std::collections::HashMap<String, (String, String)>,
-    /// The class body calls `default_scope` (bare or on `self`).
-    default_scoped: bool,
     /// `NAME = %w[…]` / `%i[…]` / `[…]` of literals, `.freeze`d or an
     /// alias of another folded list: the literals with their kind kept
     /// (a Symbol is not a String), for `inclusion: { in: NAME }`.
@@ -1885,12 +1883,6 @@ const INTEGER_OPERATORS: &[&str] = &["+", "-", "*", "**", "-@"];
 impl ClassConsts {
     pub(super) fn collect(stmts: &[Node<'_>], file: &str) -> Self {
         let mut out = ClassConsts::default();
-        out.default_scoped = stmts.iter().any(|stmt| {
-            stmt.as_call_node().is_some_and(|call| {
-                call.receiver().is_none_or(|r| r.as_self_node().is_some())
-                    && constant_id_str(&call.name()) == "default_scope"
-            })
-        });
         // A constant folds only when its one write is a plain top-level
         // `NAME = …` and nothing else in the body, at any depth (method
         // bodies included), writes it or calls a method on it that may
@@ -2318,10 +2310,6 @@ impl ClassConsts {
         None
     }
 
-    /// Does the class body declare a `default_scope`?
-    pub(super) fn default_scoped(&self) -> bool {
-        self.default_scoped
-    }
 
     /// Integer arithmetic the class body can fold, as Ruby computes it:
     /// an Integer literal, a folded Integer constant, a parenthesized

@@ -694,7 +694,7 @@ fn validation_rule_to_calls(
 /// error (an unset owner).
 /// Inline `validates :attr, uniqueness: …`, as Rails 8.1's
 /// `UniquenessValidator` queries (on a target with the runtime Relation):
-///   if Model.where(attr: @attr).not(<pk>: @<pk>)[.where(scope_col: @scope_col)…].exists?
+///   if Model.unscoped.where(attr: @attr).not(<pk>: @<pk>)[.where(scope_col: @scope_col)…].exists?
 ///     errors << "attr has already been taken"
 ///   end
 /// `case_sensitive: false` compares `LOWER(table.attr) = LOWER(?)`, except
@@ -705,7 +705,10 @@ fn validation_rule_to_calls(
 /// under `self.primary_key = "code"`, even beside an `id` column); on a new record it is `<pk> IS NOT NULL`,
 /// which every stored row satisfies, so the answer is the same. A `scope:`
 /// naming a `belongs_to` reads its foreign key (and type column when
-/// polymorphic), as Rails resolves it.
+/// polymorphic), as Rails resolves it, and so does the validated attribute
+/// itself when it names a non-polymorphic `belongs_to` (`validates
+/// :reblog, uniqueness:` queries `reblog_of_id`; the error stays on
+/// `reblog`).
 fn inline_uniqueness_check(
     msgs: Messages,
     model: &Model,
@@ -726,15 +729,38 @@ fn inline_uniqueness_check(
         Span::synthetic(),
         ExprNode::Const { path: model.name.0.as_str().split("::").map(Symbol::from).collect() },
     );
-    let value = ivar(attr);
-    let mut relation = if case_sensitive {
-        send(finder, "where", vec![hash(attr.as_str(), value.clone())])
+    // `Model.unscoped`, as Rails' UniquenessValidator builds its query on
+    // `finder_class.unscoped`: a row a `default_scope` hides still collides.
+    let finder = send(finder, "unscoped", vec![]);
+    // An attribute naming a `belongs_to` compares its foreign key, as
+    // Rails' `bind_attribute` resolves it (`where(reblog: r)` is
+    // `"reblog_of_id" = r.id`), and the value read is that key. Ingest
+    // keeps a polymorphic one a gap: Rails raises computing its class.
+    let column = model
+        .associations()
+        .find_map(|a| match a {
+            Association::BelongsTo { name, foreign_key, polymorphic: false, .. } if name == attr => Some(foreign_key.clone()),
+            _ => None,
+        })
+        .unwrap_or_else(|| attr.clone());
+    let association = column != *attr;
+    let value = ivar(&column);
+    // `case_sensitive: false` lowers a String comparison, a String foreign
+    // key's too (Rails: `LOWER("tickets"."code_ref") = LOWER(?)`). An
+    // Integer key compares as an id: Rails' `LOWER` over it answers the same.
+    let string_key = match model.attributes.fields.get(&column) {
+        Some(Ty::Str) => true,
+        Some(Ty::Union { variants }) => variants.iter().any(|v| matches!(v, Ty::Str)),
+        _ => false,
+    };
+    let mut relation = if case_sensitive || (association && !string_key) {
+        send(finder, "where", vec![hash(column.as_str(), value.clone())])
     } else {
         let lowered = Expr::new(
             Span::synthetic(),
             ExprNode::Lit {
                 value: Literal::Str {
-                    value: format!("LOWER({}.{}) = LOWER(?)", model.table.0.as_str(), attr.as_str()),
+                    value: format!("LOWER({}.{}) = LOWER(?)", model.table.0.as_str(), column.as_str()),
                 },
             },
         );
@@ -742,7 +768,7 @@ fn inline_uniqueness_check(
             Span::synthetic(),
             ExprNode::If {
                 cond: send(value.clone(), "nil?", vec![]),
-                then_branch: send(finder.clone(), "where", vec![hash(attr.as_str(), value.clone())]),
+                then_branch: send(finder.clone(), "where", vec![hash(column.as_str(), value.clone())]),
                 else_branch: send(finder, "where", vec![lowered, value.clone()]),
             },
         )
