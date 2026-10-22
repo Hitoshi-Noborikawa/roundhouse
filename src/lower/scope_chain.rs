@@ -2035,13 +2035,21 @@ pub fn build_assoc_registry(models: &[Model]) -> AssocRegistry {
 /// predicate in its ON clause, as Rails' association join does
 /// (`Shelf.joins(:gadgets)` reads `… ON gadgets.shelf_id = shelves.id
 /// AND gadgets.archived = FALSE`). A `through:` join touching a scoped
-/// model, or a scope this cannot render, keeps no tail: the join is not
-/// composed rather than composed without the scope.
+/// model, or a scope this cannot render (one read when the relation is
+/// built), keeps no tail: the join is not composed rather than composed
+/// without the scope.
 fn scope_join_tails(reg: &mut AssocRegistry, models: &[Model]) {
-    use super::default_scope::{sql_predicate, static_default_scope};
+    use super::default_scope::{default_scope, sql_predicate, DefaultScope};
     let scoped: HashMap<ClassId, Vec<(Symbol, Literal)>> = models
         .iter()
-        .filter_map(|m| static_default_scope(m).map(|s| (m.name.clone(), s)))
+        .filter_map(|m| {
+            default_scope(m).map(|s| match s {
+                DefaultScope::Static(pairs) => (m.name.clone(), pairs),
+                // No SQL here can read it: an empty list is the
+                // "cannot render" arm below.
+                DefaultScope::Dynamic(_) => (m.name.clone(), Vec::new()),
+            })
+        })
         .collect();
     if scoped.is_empty() {
         return;
@@ -2079,6 +2087,9 @@ fn scope_join_tails(reg: &mut AssocRegistry, models: &[Model]) {
         }
         let table = reg.table_for(&target);
         let render = |alias: &str| -> Option<String> {
+            if preds.is_empty() {
+                return None;
+            }
             preds
                 .iter()
                 .map(|(col, lit)| sql_predicate(alias, col, lit).map(|p| format!(" AND {p}")))

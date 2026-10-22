@@ -231,7 +231,7 @@ pub(super) fn push_association_methods(
                 // A through reader is a Relation. Whether this name is
                 // one is the same map the writer and destroy read.
                 let through_relation = through_joins.get(name).is_some();
-                methods.push(synth_has_many_reader(
+                let mut reader = synth_has_many_reader(
                     owner,
                     name,
                     target,
@@ -240,7 +240,11 @@ pub(super) fn push_association_methods(
                     as_interface.as_ref(),
                     scope.as_ref(),
                     through_relation,
-                ));
+                );
+                if crate::lower::default_scope::reader_replaces_scope(models, assoc) {
+                    reroot_unscoping(&mut reader.body, target, foreign_key);
+                }
+                methods.push(reader);
                 methods.push(synth_preload_setter(owner, name, target));
                 // `<name>_loaded?` / `<name>_target`: the eager-load cache
                 // read from outside the record. `scope_chain`'s seed arm
@@ -619,6 +623,43 @@ fn guard_nil_owner_key(query: Expr, foreign_key: &Symbol, owner_key: &Symbol) ->
             parenthesized: true,
         },
     )
+}
+
+/// `Target.where(fk => @id)` in the reader becomes
+/// `Target.unscope(where: :fk).where(fk => @id)`: the default scope's
+/// condition on the key goes, the owner's stays.
+fn reroot_unscoping(body: &mut Expr, target: &ClassId, foreign_key: &Symbol) {
+    fn walk(e: &mut Expr, target: &ClassId, foreign_key: &Symbol) -> bool {
+        match &mut *e.node {
+            ExprNode::Send { recv: Some(recv), method, .. } if method.as_str() == "where" => {
+                let is_target = matches!(&*recv.node, ExprNode::Const { path }
+                    if path.iter().map(|s| s.as_str()).collect::<Vec<_>>().join("::") == target.0.as_str());
+                if is_target {
+                    let key = Expr::new(Span::synthetic(), ExprNode::Lit { value: Literal::Sym { value: Symbol::from("where") } });
+                    let unscoped = Expr::new(
+                        Span::synthetic(),
+                        ExprNode::Send {
+                            recv: Some(recv.clone()),
+                            method: Symbol::from("unscope"),
+                            args: vec![Expr::new(
+                                Span::synthetic(),
+                                ExprNode::Hash { entries: vec![(key, lit_sym(foreign_key.clone()))], kwargs: true },
+                            )],
+                            block: None,
+                            parenthesized: true,
+                        },
+                    );
+                    *recv = unscoped;
+                    return true;
+                }
+                walk(recv, target, foreign_key)
+            }
+            ExprNode::Send { recv: Some(recv), .. } => walk(recv, target, foreign_key),
+            ExprNode::Seq { exprs } => exprs.iter_mut().any(|x| walk(x, target, foreign_key)),
+            _ => false,
+        }
+    }
+    walk(body, target, foreign_key);
 }
 
 fn synth_has_many_reader(

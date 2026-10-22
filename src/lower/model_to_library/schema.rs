@@ -2848,6 +2848,12 @@ fn synth_initialize(
         }
     }
 
+    if let Some(crate::lower::default_scope::DefaultScope::Dynamic(scope)) =
+        crate::lower::default_scope::default_scope(model)
+    {
+        stmts.push(seed_dynamic_scope(owner, table, &scope.columns, &attrs));
+    }
+
     // has_secure_password virtual attrs: `User.new(password: "...",
     // password_confirmation: "...")` is the factory/signup shape —
     // Rails routes them through the macro's plaintext writers (where
@@ -3750,6 +3756,92 @@ fn overrides_default(model: &Model, col: &Column, has_default: bool) -> bool {
         && !ColumnSlot::classify(col, model).is_temporal()
         && (matches!(col.col_type, crate::schema::ColumnType::Boolean)
             || matches!(super::ty_of_column_slot(col), Ty::Union { .. }))
+}
+
+/// A default scope read when the relation is built seeds `new` the same
+/// way, as Rails' scope attributes do: the scope's values now, unless
+/// the model is inside `unscoped { }`, and a given attribute (nil
+/// included) still wins.
+///
+/// ```ruby
+/// unless ActiveRecord::Relation.unscoped_tables.include?(Project._table_sql)
+///   __rh_scope = Project._default_scope_where
+///   self.account_id = __rh_scope[:account_id] if __rh_scope.key?(:account_id) && !attrs.key?(:account_id)
+/// end
+/// ```
+fn seed_dynamic_scope(owner: &ClassId, table: &Table, columns: &[Symbol], attrs: &Symbol) -> Expr {
+    let scope_var = Symbol::from("__rh_scope");
+    let send = |recv: Expr, method: &str, args: Vec<Expr>| {
+        Expr::new(
+            Span::synthetic(),
+            ExprNode::Send { recv: Some(recv), method: Symbol::from(method), args, block: None, parenthesized: true },
+        )
+    };
+    let mut stmts = vec![Expr::new(
+        Span::synthetic(),
+        ExprNode::Assign {
+            target: LValue::Var { id: VarId(0), name: scope_var.clone() },
+            value: send(class_const(owner), "_default_scope_where", Vec::new()),
+        },
+    )];
+    for col in &table.columns {
+        if !columns.contains(&col.name) {
+            continue;
+        }
+        let has = send(var_ref(scope_var.clone()), "key?", vec![lit_sym(col.name.clone())]);
+        let given = send(var_ref(attrs.clone()), "key?", vec![lit_sym(col.name.clone())]);
+        let not_given = with_ty(
+            Expr::new(
+                Span::synthetic(),
+                ExprNode::Send { recv: Some(given), method: Symbol::from("!"), args: vec![], block: None, parenthesized: false },
+            ),
+            Ty::Bool,
+        );
+        let cond = with_ty(
+            Expr::new(
+                Span::synthetic(),
+                ExprNode::BoolOp { op: BoolOpKind::And, surface: BoolOpSurface::default(), left: has, right: not_given },
+            ),
+            Ty::Bool,
+        );
+        let value = Expr::new(
+            Span::synthetic(),
+            ExprNode::Send {
+                recv: Some(var_ref(scope_var.clone())),
+                method: Symbol::from("[]"),
+                args: vec![lit_sym(col.name.clone())],
+                block: None,
+                parenthesized: false,
+            },
+        );
+        let assign = Expr::new(
+            Span::synthetic(),
+            ExprNode::Send {
+                recv: Some(self_ref()),
+                method: col_storage_setter(col),
+                args: vec![value],
+                block: None,
+                parenthesized: false,
+            },
+        );
+        stmts.push(Expr::new(Span::synthetic(), ExprNode::If { cond, then_branch: assign, else_branch: nil_lit() }));
+    }
+    let lifted = send(
+        send(
+            Expr::new(
+                Span::synthetic(),
+                ExprNode::Const { path: vec![Symbol::from("ActiveRecord"), Symbol::from("Relation")] },
+            ),
+            "unscoped_tables",
+            Vec::new(),
+        ),
+        "include?",
+        vec![send(class_const(owner), "_table_sql", Vec::new())],
+    );
+    Expr::new(
+        Span::synthetic(),
+        ExprNode::If { cond: lifted, then_branch: nil_lit(), else_branch: seq(stmts) },
+    )
 }
 
 // Not a new shape: the same `attrs.key?` guarded write `synth_update_hash` emits, which every target already compiles.

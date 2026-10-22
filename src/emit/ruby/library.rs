@@ -10155,7 +10155,12 @@ pub(crate) fn apply_preload_lowering(lcs: &mut [LibraryClass], app: &App) {
     // A dynamic query can reach Relation without any named scope (for
     // example, a helper returning a where.not chain). Its includes hint
     // needs the same batch loaders. Apps with no includes remain untouched.
-    if !app_mentions_includes(app) {
+    // A has_many reader that replaces its target's default scope on the
+    // key (`lower::default_scope::reader_replaces_scope`) answers other
+    // rows than Rails' preload, which ANDs the scope: its batch loader
+    // must exist for any `includes` that reaches the runtime, seen here
+    // or not, rather than fall back to that reader.
+    if !app_mentions_includes(app) && !app_has_scope_replacing_reader(app) {
         return;
     }
 
@@ -10230,6 +10235,12 @@ fn preload_cache_guard(name: &Symbol) -> Expr {
 /// `eager_load` to a receiver. Over-approximates (a chain the arel pass
 /// later consumes statically still counts) — the cost of a false
 /// positive is inert synthesized methods, not wrong behavior.
+fn app_has_scope_replacing_reader(app: &App) -> bool {
+    app.models
+        .iter()
+        .any(|m| m.associations().any(|a| crate::lower::default_scope::reader_replaces_scope(&app.models, a)))
+}
+
 fn app_mentions_includes(app: &App) -> bool {
     use crate::dialect::{ControllerBodyItem, ModelBodyItem};
     let in_expr = expr_mentions_includes;
@@ -10342,7 +10353,7 @@ enum PreloadKind {
 fn touches_default_scoped(model: &crate::dialect::Model, assoc: &crate::dialect::Association, app: &App) -> bool {
     use crate::dialect::Association;
     let scoped = |id: &ClassId| {
-        app.models.iter().any(|m| &m.name == id && crate::lower::default_scope::static_default_scope(m).is_some())
+        app.models.iter().any(|m| &m.name == id && crate::lower::default_scope::default_scope(m).is_some())
     };
     let (target, through) = match assoc {
         Association::BelongsTo { target, .. } => (target, None),
