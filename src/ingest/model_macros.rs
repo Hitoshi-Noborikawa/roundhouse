@@ -371,7 +371,7 @@ pub(super) fn supported_source_signature(def: &MethodDef, sources: &[SourceFile]
             });
         }
     }
-    let parsed = ruby_prism::parse(source.text.as_bytes());
+    let parsed = super::prism::parse_silent(source.text.as_bytes());
     let mut signature = Signature {
         offset: def.name_span.start as usize,
         valid: false,
@@ -399,7 +399,7 @@ fn supported_source_call(expr: &Expr, sources: &[SourceFile]) -> bool {
     else {
         return false;
     };
-    let parsed = ruby_prism::parse(bytes);
+    let parsed = super::prism::parse_silent(bytes);
     if parsed.errors().next().is_some() {
         return false;
     }
@@ -555,7 +555,7 @@ fn interned_prism_name(arg: &ruby_prism::Node<'_>) -> bool {
 
 fn valid_def_name(name: &Symbol) -> bool {
     let header = format!("def {name}\nend\n");
-    let parsed = ruby_prism::parse(header.as_bytes());
+    let parsed = super::prism::parse_silent(header.as_bytes());
     let node = parsed.node();
     let Some(program) = node.as_program_node() else {
         return false;
@@ -792,7 +792,7 @@ fn supported_source_statement(
     else {
         return false;
     };
-    let parsed = ruby_prism::parse(text);
+    let parsed = super::prism::parse_silent(text);
     if parsed.errors().next().is_some() {
         return false;
     }

@@ -2939,19 +2939,10 @@ fn ingest_expr_node(node: &Node<'_>, file: &str) -> IngestResult<Expr> {
         // going. There is no real construct here to ingest — ledgered
         // by name rather than falling through to the generic message,
         // which would misleadingly imply a real Ruby node was rejected.
-        n if super::prism_api::is_recovery_node(&n) => {
-            let message = n
-                .as_error_recovery_node()
-                .and_then(|recovery| recovery.unexpected())
-                .map(|unexpected| {
-                    let preview = String::from_utf8_lossy(unexpected.location().as_slice());
-                    let preview = preview.chars().take(40).collect::<String>();
-                    format!("unparsed fragment near `{preview}` (Prism recovery)")
-                })
-                .unwrap_or_else(|| "unparsed fragment (Prism recovery node)".into());
+        n if let Some(recovery) = n.as_error_recovery_node() => {
             return Err(IngestError::Unsupported {
                 file: file.into(),
-                message,
+                message: super::prism_api::recovery_unsupported_message(&recovery),
             });
         }
         // `class`/`module` at expression position — e.g. inside a

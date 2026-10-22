@@ -183,7 +183,10 @@ impl Visibility {
         source: &str,
         file: &str,
     ) -> HashMap<usize, MethodVisibility> {
-        let parsed = super::prism::parse(source.as_bytes(), file);
+        // Classification re-parse: primary ingest already reported syntax
+        // errors via `prism::parse`. Reporting again under the same
+        // `prism::scope` would duplicate located Parse diagnostics.
+        let parsed = super::prism::parse_silent(source.as_bytes());
         let root = parsed.node();
         let mut defaults = HashMap::new();
         let bodies = super::util::find_all_classes_with_scope(&root)

@@ -644,7 +644,7 @@ fn source_text<'s>(span: Span, sources: &'s [SourceFile]) -> Option<&'s [u8]> {
 /// which the IR would have flattened into ordinary arguments.
 fn call_syntax_kept(call: &Expr, sources: &[SourceFile]) -> bool {
     let Some(text) = source_text(call.span, sources) else { return false };
-    let parsed = ruby_prism::parse(text);
+    let parsed = super::prism::parse_silent(text);
     if parsed.errors().next().is_some() {
         return false;
     }
@@ -667,7 +667,7 @@ fn call_syntax_kept(call: &Expr, sources: &[SourceFile]) -> bool {
 /// classes, so it erases nothing.
 fn definition_syntax_kept(statement: &Expr, sources: &[SourceFile]) -> bool {
     let Some(text) = source_text(statement.span, sources) else { return false };
-    let parsed = ruby_prism::parse(text);
+    let parsed = super::prism::parse_silent(text);
     if parsed.errors().next().is_some() {
         return false;
     }
@@ -797,7 +797,7 @@ fn collapse_literal_send(e: &mut Expr) {
 
 fn valid_def_name(name: &Symbol) -> bool {
     let header = format!("def {name}\nend\n");
-    let parsed = ruby_prism::parse(header.as_bytes());
+    let parsed = super::prism::parse_silent(header.as_bytes());
     let node = parsed.node();
     let Some(program) = node.as_program_node() else { return false };
     let nodes: Vec<_> = program.statements().body().iter().collect();
