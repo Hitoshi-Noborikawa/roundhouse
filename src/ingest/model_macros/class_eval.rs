@@ -101,10 +101,9 @@ pub(super) fn expand(
     // non-symbol kwarg) declines the *entire* expansion, including
     // already-rewritten class_eval methods. That is fail-closed, not
     // a support claim — pin with a negative overlay.
-    if items
-        .iter()
-        .any(|item| matches!(item, ModelBodyItem::Unknown { .. }))
-    {
+    if items.iter().any(|item| {
+        matches!(item, ModelBodyItem::Unknown { expr, .. } if super::mixin_args(expr).is_none())
+    }) {
         return None;
     }
     (!methods.is_empty() || !items.is_empty()).then_some(Expansion { methods, items })

@@ -373,10 +373,20 @@ fn model_for(model: &Model, schema: &Schema) -> String {
                                 validation.attribute
                             ));
                         }
-                        ValidationRule::Format { pattern, flags } => {
+                        ValidationRule::Format { pattern, flags, allow_nil, allow_blank } => {
                             let body = crate::emit::shared::regex_literal::escape_regex_delimiters(pattern);
+                            // Sequel's `allow_nil:` / `allow_blank:` (its
+                            // `blank_object?` is Rails' `blank?`), as on the
+                            // numericality helpers below.
+                            let mut opts = String::new();
+                            if *allow_nil == Some(true) {
+                                opts.push_str(", allow_nil: true");
+                            }
+                            if *allow_blank == Some(true) {
+                                opts.push_str(", allow_blank: true");
+                            }
                             validate_lines.push(format!(
-                                "    validates_format /{body}/{flags}, :{}{custom}",
+                                "    validates_format /{body}/{flags}, :{}{opts}{custom}",
                                 validation.attribute
                             ));
                         }

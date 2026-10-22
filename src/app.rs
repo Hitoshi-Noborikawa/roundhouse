@@ -310,6 +310,10 @@ pub struct App {
     /// (not a seeded `include` set on every model).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub load_hook_class_macros: Vec<ClassId>,
+    /// Modules `extend`ed inside `ActiveSupport.on_load(:active_record)`:
+    /// their instance methods are class-method macros on every model.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub load_hook_extended_macros: Vec<ClassId>,
     /// Partial → local name → type, harvested by the analyzer from the
     /// RENDER SITES that pass each local (`render partial: "form",
     /// locals: { new_message: @new_message }` with `@new_message` typed
@@ -968,6 +972,7 @@ impl App {
             attachable_unsigned_models: Vec::new(),
             pending_attachment_on_load: Vec::new(),
             load_hook_class_macros: Vec::new(),
+            load_hook_extended_macros: Vec::new(),
             partial_local_types: HashMap::new(),
             view_ivar_types: HashMap::new(),
             html_safe_methods: BTreeSet::new(),

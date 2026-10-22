@@ -479,6 +479,24 @@ module ActiveSupport
     out
   end
 
+  # AS `String#first(limit = 1)` / `String#last(limit = 1)`
+  # (core_ext/string/access.rb): the leading or trailing `limit`
+  # characters, the whole String when it is shorter, and ArgumentError
+  # for a negative limit. A String reopen the transpiled runtimes cannot
+  # host, as `squish` below. Campfire binds its transfer link to
+  # `password_salt&.last(10)`.
+  def self.string_first(text, limit)
+    head = text[0, limit]
+    raise ArgumentError, "negative limit" if head.nil?
+    head
+  end
+
+  def self.string_last(text, limit)
+    tail = text[[text.length - limit, 0].max, limit]
+    raise ArgumentError, "negative limit" if tail.nil?
+    tail
+  end
+
   # Rails' destructive form always returns the same receiver, including
   # when its contents were already squished.
   def self.squish!(text)

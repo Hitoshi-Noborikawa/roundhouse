@@ -58,6 +58,10 @@ module ActiveRecord
     def exec_insert: (String sql, ?String? name, ?Array[String | Integer | Float | bool | nil] binds) -> Result
   end
 
+  class Transaction
+    def after_commit: (^() -> nil work) -> nil
+  end
+
   class EnlistedRecord
     @record: Base
     @kind: Integer
@@ -81,6 +85,10 @@ module ActiveRecord
     def self.connection: () -> Connection
     def self.sanitize_sql: (Array[untyped] statement) -> String
     def self.sanitize_sql_array: (Array[untyped] statement) -> String
+    def self.current_transaction: () -> ActiveRecord::Transaction
+    def self._after_commit: (^() -> nil work) -> nil
+    def self._run_after_commits_from: (Integer from) -> nil
+    def self._drop_after_commits_from: (Integer from) -> nil
     def self.uncached: () { () -> untyped } -> untyped
     def self.clear_query_caches_for_current_thread: () -> nil
     def self.transaction: (?isolation: untyped, ?requires_new: untyped, ?joinable: bool) { () -> untyped } -> untyped
@@ -169,6 +177,9 @@ module ActiveRecord
     @__touch_owner: Base?
     def _adopt_touch_owner: (Base owner) -> nil
     def _touch_owner: () -> nil
+    def touch_later: () -> bool
+    def self._flush_deferred_touches: () -> nil
+    def self._flush_deferred_touches_from: (Integer from) -> nil
     def _save_committed: (bool was_new) -> void
     def _destroy_committed: () -> void
     def _enlist_or_run: (Integer kind) -> nil

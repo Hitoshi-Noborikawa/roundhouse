@@ -795,7 +795,7 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
         "Exception", "StandardError", "RuntimeError", "ArgumentError",
         "TypeError", "NameError", "NoMethodError", "IndexError",
         "KeyError", "RangeError", "IOError", "IO::TimeoutError", "NotImplementedError",
-        "FrozenError", "ZeroDivisionError", "StopIteration",
+        "FrozenError", "ZeroDivisionError", "FloatDomainError", "StopIteration",
         "ThreadError", "ClosedQueueError", "RegexpError",
         // CRuby's bundled libraries and Spinel's uri/net/json packages
         // recognize these exception names; emitted requires load them.
@@ -1130,6 +1130,19 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
     register_stdlib_class(classes, "Proc", &[], &[
         ("call", Ty::Untyped), ("arity", Ty::Int), ("lambda?", Ty::Bool),
     ]);
+    // `Method.method_defined?(:source_location)` (aasm's invokers): the class as a value only.
+    register_stdlib_class(classes, "Method", &[], &[]);
+    // Rubygems' version value, which the ruby family and spinel load with Ruby itself.
+    {
+        let version = || Ty::Class { id: ClassId(Symbol::from("Gem::Version")), args: vec![].into() };
+        register_stdlib_class(classes, "Gem::Version", &[("correct?", Ty::Bool)], &[
+            ("<=>", Ty::Union { variants: vec![Ty::Int, Ty::Nil].into() }),
+            ("<", Ty::Bool), ("<=", Ty::Bool), (">", Ty::Bool), (">=", Ty::Bool), ("==", Ty::Bool),
+            ("eql?", Ty::Bool), ("hash", Ty::Int),
+            ("to_s", Ty::Str), ("version", Ty::Str), ("prerelease?", Ty::Bool),
+            ("release", version()), ("bump", version()),
+        ]);
+    }
     register_stdlib_class(classes, "Mutex", &[], &[]);
     // The queue constructors, Thread's core aliases, and the standard
     // mixins likewise need exact entries for source constant resolution.
