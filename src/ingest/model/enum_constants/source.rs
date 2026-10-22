@@ -176,12 +176,19 @@ impl EnumConstants {
                     constants.open_singletons.insert(owner.clone());
                 }
                 let Some(call) = node.as_call_node() else { return };
-                let method = constant_id_str(&call.name());
-                if super::derived::SINGLETON_METHODS.contains(&method.as_ref()) {
+                let mut method = constant_id_str(&call.name()).to_string();
+                let mut args: Vec<Node<'_>> =
+                    call.arguments().map(|a| a.arguments().iter().collect()).unwrap_or_default();
+                // `x.send(:define_singleton_method, :name)` is the call it names.
+                if matches!(method.as_str(), "send" | "__send__" | "public_send")
+                    && let Some(sent) = args.first().and_then(symbol_or_string_value)
+                {
+                    method = sent;
+                    args.remove(0);
+                }
+                if super::derived::SINGLETON_METHODS.contains(&method.as_str()) {
                     // `define_singleton_method(:name)` on any receiver.
-                    let named = call.arguments()
-                        .and_then(|args| args.arguments().iter().next())
-                        .and_then(|first| symbol_or_string_value(&first));
+                    let named = args.first().and_then(symbol_or_string_value);
                     let named = named.is_some_and(|name| {
                         constants.uncertain_singleton_methods.insert(name);
                         true
@@ -407,14 +414,11 @@ impl EnumConstants {
             };
             ruby_prism::Visit::visit(&mut collector, &result.node());
             let direct_writes = collector.direct_writes;
-            let (tainted, reflected) = super::super::ConstTaint::scan_tree(&result.node(), direct_writes);
             if matches!(kind, SourceKind::Inputs) {
+                let (tainted, reflected) = super::super::ConstTaint::scan_tree(&result.node(), direct_writes);
                 self.foreign_taint.extend(tainted);
+                self.reflected.extend(reflected);
             }
-            // Reflection in a consumed source can still reach an enum's
-            // class method (`Gadget.send(:define_singleton_method, …)`).
-            // Nothing else reads `reflected` once the models are ingested.
-            self.reflected.extend(reflected);
         }
     }
 

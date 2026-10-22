@@ -326,11 +326,15 @@ fn a_consumed_source_that_redefines_the_method_reports_the_gap() {
             "{path}: {source}\n{gaps:#?}"
         );
     }
-    // A consumed source that defines nothing on the owner changes nothing.
+    // A consumed source that defines nothing on the owner changes nothing,
+    // nor does reopening a library class that shares its last name.
     let (app, gaps) = ingest(&[
         ("app/models/gadget.rb", GADGET),
         ("app/models/widget.rb", "class Widget < ApplicationRecord\n  enum :status, Gadget.statuses\nend\n"),
-        ("config/initializers/gadget_patch.rb", "Rails.application.config.to_prepare { Gadget.count }\n"),
+        (
+            "config/initializers/gadget_patch.rb",
+            "Rails.application.config.to_prepare { Gadget.count }\nVendor::Gadget.class_eval do\n  def tag = :vendor\nend\n",
+        ),
     ]);
     assert_eq!(mapping(&app, "Widget", "status"), Some(statuses()), "{gaps:?}");
     assert!(!gaps.iter().any(|g| g.contains("widget.rb")), "{gaps:?}");
