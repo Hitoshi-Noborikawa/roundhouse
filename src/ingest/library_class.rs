@@ -1482,10 +1482,13 @@ fn struct_constant_spec<'pr>(value: &ruby_prism::Node<'pr>) -> Option<StructCons
             let elements: Vec<_> = options.elements().iter().collect();
             let [pair] = elements.as_slice() else { return None };
             let pair = pair.as_assoc_node()?;
-            if symbol_value(&pair.key()).as_deref() != Some("keyword_init") || pair.value().as_true_node().is_none() {
+            // `keyword_init: false` is the positional form, written out.
+            if symbol_value(&pair.key()).as_deref() != Some("keyword_init")
+                || (pair.value().as_true_node().is_none() && pair.value().as_false_node().is_none())
+            {
                 return None;
             }
-            keyword_init = true;
+            keyword_init = pair.value().as_true_node().is_some();
             continue;
         }
         let member = symbol_value(&arg)?;
