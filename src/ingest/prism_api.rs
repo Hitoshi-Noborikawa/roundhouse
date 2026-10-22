@@ -2,10 +2,15 @@
 //!
 //! Prism 2.0.0 renamed Location offsets (`start_offset` → `start` / `end`),
 //! made `Diagnostic::message` return `&[u8]`, and replaced `MissingNode`
-//! with `ErrorRecoveryNode`. Free functions and [`PrismLocation`] keep call
-//! sites stable; new code should prefer the free functions.
+//! with `ErrorRecoveryNode`.
+//!
+//! Call-site style: use [`PrismLocation`] for offsets (`loc.start_offset()`).
+//! Free functions remain the trait's implementation plus non-method helpers
+//! (`span_offsets`, `diagnostic_message`, `is_recovery_node`,
+//! `block_parameter`). Prefer native `start`/`end` only when rewriting a
+//! site deliberately — not as a mixed style alongside the trait.
 
-use ruby_prism::{Diagnostic, Location, Node};
+use ruby_prism::{BlockParameterNode, Diagnostic, Location, Node, ParametersNode};
 
 /// Byte offset where `loc` starts in the parsed source.
 #[inline]
@@ -40,9 +45,18 @@ pub(crate) fn is_recovery_node(node: &Node<'_>) -> bool {
     node.as_error_recovery_node().is_some()
 }
 
-/// Method-shaped aliases for [`start_offset`] / [`end_offset`] so existing
-/// `loc.start_offset()` call sites compile against Prism 2 without a
-/// repo-wide rewrite. Bring into scope with `use …::PrismLocation`.
+/// Prism 2 returns `ParametersNode::block` as a generic [`Node`] (`&blk`,
+/// anonymous `&`, or `&nil`). Narrow to the named/anonymous block-parameter
+/// form callers already expect.
+#[inline]
+pub(crate) fn block_parameter<'pr>(
+    parameters: &ParametersNode<'pr>,
+) -> Option<BlockParameterNode<'pr>> {
+    parameters.block()?.as_block_parameter_node()
+}
+
+/// Method-shaped offset aliases for Prism 2's `start` / `end`. Bring into
+/// scope with `use …::PrismLocation`.
 pub(crate) trait PrismLocation {
     fn start_offset(&self) -> usize;
     fn end_offset(&self) -> usize;
@@ -104,5 +118,35 @@ mod tests {
         let result = ruby_prism::parse(b"def\n");
         let err = result.errors().next().expect("syntax error");
         assert!(!diagnostic_message(&err).is_empty());
+    }
+
+    fn first_def<'pr>(result: &'pr ruby_prism::ParseResult<'_>) -> ruby_prism::DefNode<'pr> {
+        let program = result.node().as_program_node().expect("program");
+        program
+            .statements()
+            .body()
+            .iter()
+            .next()
+            .expect("stmt")
+            .as_def_node()
+            .expect("def")
+    }
+
+    #[test]
+    fn block_parameter_narrows_named_and_anonymous() {
+        let named = ruby_prism::parse(b"def f(&blk); end");
+        let pn = first_def(&named).parameters().expect("params");
+        let bp = block_parameter(&pn).expect("block param");
+        assert_eq!(bp.name().map(|n| n.as_slice()), Some(&b"blk"[..]));
+
+        let anon = ruby_prism::parse(b"def f(&); end");
+        let pn = first_def(&anon).parameters().expect("params");
+        let bp = block_parameter(&pn).expect("anonymous block param");
+        assert!(bp.name().is_none());
+
+        // Ruby 4.1 `&nil` is a different node kind — not a block parameter.
+        let nil_block = ruby_prism::parse(b"def f(&nil); end");
+        let pn = first_def(&nil_block).parameters().expect("params");
+        assert!(block_parameter(&pn).is_none());
     }
 }

@@ -597,7 +597,7 @@ fn ingest_controller_body_item(
             // Block param (`&block`) — methods that name their block so
             // the body can pass it on (`&block`) or that crash without the
             // arity slot.
-            if let Some(bn) = pn.block().and_then(|n| n.as_block_parameter_node()) {
+            if let Some(bn) = super::prism_api::block_parameter(&pn) {
                 block_param = Some(match bn.name() {
                     Some(n) => Symbol::from(constant_id_str(&n)),
                     // Ruby 3.4 anonymous block param (`def f(&)`) —

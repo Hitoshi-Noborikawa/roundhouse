@@ -2867,8 +2867,7 @@ pub(super) fn ingest_method(
     // library-class path gives it, so bare-`&` forwarding binds.
     let block_param = def
         .parameters()
-        .and_then(|pn| pn.block())
-        .and_then(|n| n.as_block_parameter_node())
+        .and_then(|pn| super::prism_api::block_parameter(&pn))
         .map(|block| {
             let name = block
                 .name()
@@ -3155,7 +3154,7 @@ fn simple_condition_body<'pr>(
             if let Some(rest) = pn.keyword_rest() {
                 self.bind_parameter(&rest);
             }
-            if let Some(block) = pn.block().and_then(|n| n.as_block_parameter_node()) {
+            if let Some(block) = super::prism_api::block_parameter(&pn) {
                 if let Some(name) = block.name() {
                     self.push_binding(&constant_id_str(&name));
                 }

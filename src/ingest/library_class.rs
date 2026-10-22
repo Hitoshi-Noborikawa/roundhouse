@@ -3443,8 +3443,7 @@ pub(super) fn ingest_library_method_with_keywords(
     // the runtime_src split (see runtime_src::method_params).
     let block_param = def
         .parameters()
-        .and_then(|pn| pn.block())
-        .and_then(|n| n.as_block_parameter_node())
+        .and_then(|pn| super::prism_api::block_parameter(&pn))
         .map(|block| {
             let name = block
                 .name()

@@ -1544,7 +1544,7 @@ fn method_params(
 
     // Block: `&block` — populated into `block_param` slot, not the
     // flat list. Anonymous `&` has no name — return None.
-    let block_param = match params_node.block().and_then(|n| n.as_block_parameter_node()) {
+    let block_param = match crate::ingest::prism_api::block_parameter(&params_node) {
         Some(block) => match block.name() {
             Some(loc) => Some(Param::positional(Symbol::new(decode_utf8(
                 loc.as_slice(),

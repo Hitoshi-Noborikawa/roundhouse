@@ -546,7 +546,7 @@ pub(super) fn def_parameters(
         let name = node.name()?;
         out.push((constant_id_str(&name).to_string(), ParamKind::KeywordRest));
     }
-    if let Some(block) = parameters.block().and_then(|n| n.as_block_parameter_node()) {
+    if let Some(block) = crate::ingest::prism_api::block_parameter(&parameters) {
         let name = block.name()?;
         out.push((constant_id_str(&name).to_string(), ParamKind::Block));
     }
