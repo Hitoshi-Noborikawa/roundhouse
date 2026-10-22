@@ -84,10 +84,17 @@ module ActiveRecord
     end
 
     # The tables whose model is inside `Model.unscoped { … }`, innermost
-    # last. Module-level state, as `ActionController::Current` is: the
-    # runtime dispatches one request at a time.
+    # last. Per thread, as Rails' scope registry is: a request served on
+    # another thread meanwhile keeps the scope. Seeded and cleared, as
+    # `Db._txn_records` is, so the element type is String.
     def self.unscoped_tables
-      @unscoped_tables ||= []
+      tables = Thread.current[:roundhouse_unscoped_tables]
+      if tables.nil?
+        tables = [""]
+        tables.clear
+        Thread.current[:roundhouse_unscoped_tables] = tables
+      end
+      tables
     end
 
     # Drop the loaded-records memo. A null relation keeps `[]` so a later

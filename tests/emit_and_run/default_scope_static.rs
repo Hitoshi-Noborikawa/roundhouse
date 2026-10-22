@@ -98,6 +98,27 @@ puts "default scope unscoped passed"
         .assert_passes();
 }
 
+/// `unscoped { }` lifts the scope for the thread inside the block only:
+/// Rails keeps it in per-thread state, so a request served on another
+/// thread meanwhile still reads through the scope (Rails 8.1.4: 1).
+#[test]
+fn unscoped_block_lifts_the_scope_on_its_own_thread_only_like_rails() {
+    app()
+        .run_ruby(&format!(
+            r#"{SEED}inside = Queue.new
+release = Queue.new
+worker = Thread.new {{ Gadget.unscoped {{ inside << Gadget.count; release.pop }} }}
+got = [inside.pop, Gadget.count]
+release << :go
+worker.join
+got << Gadget.count
+raise "threads: #{{got.inspect}}" unless got == [2, 1, 1]
+puts "default scope threads passed"
+"#
+        ))
+        .assert_passes();
+}
+
 #[test]
 fn new_records_take_the_scope_attributes_like_rails() {
     app()
