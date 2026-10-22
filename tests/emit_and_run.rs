@@ -318,6 +318,8 @@ mod validates_presence_allow_nil;
 mod validates_custom_message;
 #[path = "emit_and_run/presence_rails_blank.rs"]
 mod presence_rails_blank;
+#[path = "emit_and_run/allow_blank_unicode_space.rs"]
+mod allow_blank_unicode_space;
 #[path = "emit_and_run/regex_string_interpolation.rs"]
 mod regex_string_interpolation;
 #[path = "emit_and_run/format_allow_nil_blank.rs"]
