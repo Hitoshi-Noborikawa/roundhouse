@@ -64,7 +64,8 @@ struct Registry {
 }
 
 struct ParsedSource {
-    lines: Vec<usize>,
+    /// Byte offset of the start of each line (Prism `line_offsets()`).
+    line_starts: Vec<usize>,
     reserved_locals: HashSet<String>,
 }
 
@@ -163,18 +164,33 @@ pub fn line_at(path: &str, offset: usize) -> Option<u32> {
 /// Track the actual parsed bytes separately from first-text-wins span sources.
 /// Prism locations borrow this input: its address identifies a live version,
 /// even when several versions of the same filename are being ingested.
-pub(super) fn register_parse(source: &[u8]) {
-    let lines = source.iter().enumerate().filter_map(|(offset, &byte)|
-        (byte == b'\n').then_some(offset)).collect();
+///
+/// Line starts come from [`ruby_prism::ParseResult::line_offsets`] so we do
+/// not re-scan the source for newlines after Prism already built the table.
+pub(super) fn register_parse_result(result: &ruby_prism::ParseResult<'_>) {
+    let source = result.source();
+    let line_starts = result
+        .line_offsets()
+        .iter()
+        .map(|&offset| offset as usize)
+        .collect();
     // Reserve compiler-style identifiers throughout the input, including
     // parameters and later assignments outside the expression being lowered.
     // Strings/comments may conservatively reserve a name too; no user binding
     // may be captured just because it is outside this node's source slice.
-    let reserved_locals = source.split(|b| !b.is_ascii_alphanumeric() && *b != b'_')
+    let reserved_locals = source
+        .split(|b| !b.is_ascii_alphanumeric() && *b != b'_')
         .filter(|word| word.starts_with(b"__"))
-        .map(|word| String::from_utf8_lossy(word).into_owned()).collect();
+        .map(|word| String::from_utf8_lossy(word).into_owned())
+        .collect();
     SOURCES.with(|s| {
-        s.borrow_mut().parsed.insert(source.as_ptr() as usize, ParsedSource { lines, reserved_locals });
+        s.borrow_mut().parsed.insert(
+            source.as_ptr() as usize,
+            ParsedSource {
+                line_starts,
+                reserved_locals,
+            },
+        );
     });
 }
 
@@ -182,8 +198,15 @@ pub(super) fn line_at_parse(location: &ruby_prism::Location<'_>) -> Option<u32> 
     let offset = location.start_offset();
     // Recover only the input's identity, never dereference an adjusted pointer.
     let source = location.as_slice().as_ptr() as usize - offset;
-    SOURCES.with(|s| s.borrow().parsed.get(&source)
-        .map(|parsed| parsed.lines.partition_point(|&newline| newline < offset) as u32 + 1))
+    SOURCES.with(|s| {
+        s.borrow().parsed.get(&source).map(|parsed| {
+            // `line_starts` are sorted start-of-line offsets; the line number
+            // is how many starts are `<= offset` (1-based).
+            parsed
+                .line_starts
+                .partition_point(|&start| start <= offset) as u32
+        })
+    })
 }
 
 /// Check a generated local against the actual parse, not first-text-wins spans.
@@ -287,6 +310,63 @@ mod tests {
         assert_eq!(line_at("a.rb", 8), Some(3)); // start of "three"
         assert_eq!(line_at("nope.rb", 0), None);
         drain();
+    }
+
+    #[test]
+    fn line_offsets_agree_with_newline_scan_and_are_cheaper_to_keep() {
+        let source = {
+            let line = b"  def foo(bar, baz = 1)\n    puts bar\n  end\n";
+            let mut buf = Vec::with_capacity(line.len() * 8_000);
+            for _ in 0..8_000 {
+                buf.extend_from_slice(line);
+            }
+            buf
+        };
+        let result = ruby_prism::parse(&source);
+        let prism_starts: Vec<usize> = result.line_offsets().iter().map(|&o| o as usize).collect();
+        let scanned_newlines: Vec<usize> = source
+            .iter()
+            .enumerate()
+            .filter_map(|(offset, &byte)| (byte == b'\n').then_some(offset))
+            .collect();
+
+        // Same 1-based line numbers for every offset we care about.
+        let line_from_starts = |offset: usize| {
+            prism_starts.partition_point(|&start| start <= offset) as u32
+        };
+        let line_from_newlines = |offset: usize| {
+            scanned_newlines.partition_point(|&newline| newline < offset) as u32 + 1
+        };
+        for offset in [0usize, 1, source.len() / 4, source.len() / 2, source.len().saturating_sub(1)] {
+            assert_eq!(
+                line_from_starts(offset),
+                line_from_newlines(offset),
+                "offset {offset}"
+            );
+        }
+
+        let t0 = std::time::Instant::now();
+        for _ in 0..200 {
+            let _: Vec<usize> = source
+                .iter()
+                .enumerate()
+                .filter_map(|(offset, &byte)| (byte == b'\n').then_some(offset))
+                .collect();
+        }
+        let scan = t0.elapsed();
+
+        let t1 = std::time::Instant::now();
+        for _ in 0..200 {
+            let _: Vec<usize> = result.line_offsets().iter().map(|&o| o as usize).collect();
+        }
+        let copy = t1.elapsed();
+
+        // After Prism has parsed, keeping its line table must beat a fresh
+        // newline scan of the same bytes (the whole point of this switch).
+        assert!(
+            copy < scan,
+            "copying Prism line_offsets ({copy:?}) should beat rescanning newlines ({scan:?})"
+        );
     }
 
     #[test]

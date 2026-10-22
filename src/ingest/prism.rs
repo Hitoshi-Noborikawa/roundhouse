@@ -83,7 +83,7 @@ pub(super) fn push(d: Diagnostic) {
 /// Compiled ERB and typed runtime sources keep their own diagnostic policy.
 pub(crate) fn parse_silent(source: &[u8]) -> ParseResult<'_> {
     let result = ruby_prism::parse(source);
-    sources::register_parse(result.source());
+    sources::register_parse_result(&result);
     result
 }
 
