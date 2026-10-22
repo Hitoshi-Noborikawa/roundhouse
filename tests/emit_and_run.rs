@@ -338,6 +338,8 @@ mod numericality_unknown_option;
 mod belongs_to_nil_writer;
 #[path = "emit_and_run/inclusion_duration_literals.rs"]
 mod inclusion_duration_literals;
+#[path = "emit_and_run/validates_constant_splat.rs"]
+mod validates_constant_splat;
 #[path = "emit_and_run/cross_class_constants.rs"]
 mod cross_class_constants;
 #[path = "emit_and_run/regex_literal_hash_guard.rs"]

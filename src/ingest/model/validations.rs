@@ -95,6 +95,21 @@ enum RuleParse {
     Gap(Vec<String>),
 }
 
+/// The attribute names a `*CONST` splat expands to: a list constant the
+/// class body folds (`%i[a b]`, `%w[a b]`, `.freeze`d or not) whose every
+/// element is a Symbol or a String.
+fn splat_names(node: &Node<'_>, class_consts: &super::ClassConsts) -> Option<Vec<Symbol>> {
+    class_consts
+        .list(node)?
+        .into_iter()
+        .map(|lit| match lit {
+            Literal::Sym { value } => Some(value),
+            Literal::Str { value } => Some(Symbol::from(value.as_str())),
+            _ => None,
+        })
+        .collect()
+}
+
 pub(super) fn parse_validates_call(
     call: &ruby_prism::CallNode<'_>,
     file: &str,
@@ -127,6 +142,16 @@ pub(super) fn parse_validates_call(
     for arg in args.arguments().iter() {
         if let Some(name) = super::super::util::symbol_or_string_value(&arg) {
             attrs.push(Symbol::from(name.as_str()));
+            continue;
+        }
+        // `validates(*FIELDS, presence: true)` with `FIELDS = %i[a b]` in
+        // the class body: Ruby expands the splat into the attribute names.
+        if let Some(splat) = arg.as_splat_node() {
+            if let Some(names) = splat.expression().and_then(|e| splat_names(&e, class_consts)) {
+                attrs.extend(names);
+            } else {
+                gaps.push("argument".to_string());
+            }
             continue;
         }
         if hash_elements(&arg).is_some() {

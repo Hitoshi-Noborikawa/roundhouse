@@ -323,11 +323,22 @@ fn const_symbol_array(model: &Model, path: &[Symbol]) -> Vec<Symbol> {
         if target.last() != Some(wanted) {
             continue;
         }
+        // `%i(a b).freeze` is the same list; `freeze` returns its receiver.
+        let value = match &*value.node {
+            ExprNode::Send { recv: Some(recv), method, args, block: None, .. }
+                if method.as_str() == "freeze" && args.is_empty() =>
+            {
+                recv
+            }
+            _ => value,
+        };
         let ExprNode::Array { elements, .. } = &*value.node else { continue };
+        // `attr_accessor` takes a Symbol or a String name (`%w[a b]`).
         return elements
             .iter()
             .filter_map(|e| match &*e.node {
                 ExprNode::Lit { value: Literal::Sym { value } } => Some(value.clone()),
+                ExprNode::Lit { value: Literal::Str { value } } => Some(Symbol::from(value.as_str())),
                 _ => None,
             })
             .collect();
