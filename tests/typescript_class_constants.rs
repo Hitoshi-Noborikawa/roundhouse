@@ -145,8 +145,8 @@ fn the_cli_reports_each_constant_the_typescript_emit_leaves_out() {
     assert!(ts_ok && rb_ok, "the emits still write the tree: {ts:#?}");
     assert_eq!(ts.len(), 3, "{ts:#?}");
     let line = |name: &str| ts.iter().find(|l| l.contains(&format!("constant Gauge::{name} "))).cloned().unwrap_or_default();
-    assert!(line("ALIAS").contains("gauge.rb:3:") && line("ALIAS").contains("not a literal"), "{ts:#?}");
+    assert!(line("ALIAS").contains("gauge.rb:3:") && line("ALIAS").contains("read finds nothing: its value is not a literal"), "{ts:#?}");
     assert!(line("STARTED").contains("gauge.rb:4:") && line("STARTED").contains("not a literal"), "{ts:#?}");
-    assert!(line("LEVEL").contains("gauge.rb:5:") && line("LEVEL").contains("static method or field of that name"), "{ts:#?}");
+    assert!(line("LEVEL").contains("gauge.rb:5:") && line("LEVEL").contains("a `Gauge.LEVEL` read reaches the class's static method or field of that name instead"), "{ts:#?}");
     assert!(rb.is_empty(), "{rb:#?}");
 }
