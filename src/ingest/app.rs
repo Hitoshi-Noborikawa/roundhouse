@@ -1133,15 +1133,17 @@ end
         // `ActiveSupport.filter_parameters` for the event reporter; the
         // runtime's stays the reporter's own, as before.) Synthesized as
         // `config_filter_parameters` on the reopen, over the framework
-        // default (`[]`) in runtime/ruby/rails.rb. A Regexp, Proc or
-        // computed operand is not read; the survey names it.
+        // default (`[]`) in runtime/ruby/rails.rb. A Regexp literal is
+        // kept as written (ParameterFilter matches it against the key);
+        // an interpolated Regexp, a Proc or a computed operand is not
+        // read, and the survey names it.
         {
             let mut names: Vec<String> = Vec::new();
             let mut seen = false;
             let mut fold = |bytes: &[u8], file: &Path| {
                 for line in extract_filter_parameters(bytes) {
                     match line {
-                        FilterParametersLine::Literal { replace, names: more } => {
+                        FilterParametersLine::Literal { replace, filters: more } => {
                             seen = true;
                             if replace {
                                 names.clear();
@@ -1157,7 +1159,7 @@ end
                             }
                             survey::record(&IngestError::Unsupported {
                                 file: file.display().to_string(),
-                                message: "config.filter_parameters is not a list of Symbol or String literals; request.filtered_parameters does not apply it".to_string(),
+                                message: "config.filter_parameters is not a list of Symbol, String or Regexp literals; request.filtered_parameters does not apply it".to_string(),
                             })
                         }
                     }
@@ -1173,7 +1175,7 @@ end
                 }
             }
             if seen {
-                let literal = names.iter().map(|n| format!("{n:?}")).collect::<Vec<_>>().join(", ");
+                let literal = names.join(", ");
                 if let Ok(mut synth) = crate::runtime_src::parse_methods(&format!(
                     "def config_filter_parameters\n  [{literal}]\nend\n"
                 )) {
@@ -9807,10 +9809,13 @@ pub(super) fn extract_variable_content_type_exclusions(source: &[u8]) -> Vec<Str
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum FilterParametersLine {
     /// `+= [...]` (`replace: false`) or `= [...]` (`replace: true`) of
-    /// Symbol and String literals, each as its String.
-    Literal { replace: bool, names: Vec<String> },
-    /// Any other operand: a Regexp, a Proc, a computed list. `replace`
-    /// is true for a plain `=`, which still discards the names before it.
+    /// Symbol, String and Regexp literals, each as the Ruby source of the
+    /// filter: a Symbol or String as its String literal (`"passw"`), a
+    /// Regexp as written (`/\bapi_key/i`).
+    Literal { replace: bool, filters: Vec<String> },
+    /// Any other operand: an interpolated Regexp, a Proc, a computed
+    /// list. `replace` is true for a plain `=`, which still discards the
+    /// filters before it.
     Computed { replace: bool },
 }
 
@@ -9818,14 +9823,17 @@ pub(crate) enum FilterParametersLine {
 /// (`Rails.application.config.filter_parameters += [:passw, :email]` in
 /// `filter_parameter_logging.rb`, or `config.filter_parameters += [...]`
 /// in the Application body). Line-scanned like the other config reads;
-/// the list may span lines, so the scan continues to its closing
-/// bracket. `%i[...]` and `%w[...]` lists count as literals.
+/// the operand may span lines, so it grows a line at a time until Prism
+/// parses it whole (comments and trailing commas inside the list are
+/// Ruby's to skip). `%i[...]` and `%w[...]` lists count as literals.
 pub(crate) fn extract_filter_parameters(source: &[u8]) -> Vec<FilterParametersLine> {
     let source = String::from_utf8_lossy(source);
+    let lines: Vec<&str> = source.lines().collect();
     let mut out = Vec::new();
-    let mut lines = source.lines();
-    while let Some(line) = lines.next() {
-        let t = line.trim_start();
+    let mut i = 0;
+    while i < lines.len() {
+        let t = lines[i].trim_start();
+        i += 1;
         if t.starts_with('#') {
             continue;
         }
@@ -9839,60 +9847,53 @@ pub(crate) fn extract_filter_parameters(source: &[u8]) -> Vec<FilterParametersLi
             out.push(FilterParametersLine::Computed { replace: false });
             continue;
         };
-        let mut text = rest.trim().to_string();
-        if text.is_empty() {
-            if let Some(next) = lines.next() {
-                text.push_str(next.trim());
+        // The shortest run of lines that parses as one operand. A
+        // statement that never parses stays Computed, and the scan goes
+        // on from the next line.
+        let mut text = rest.to_string();
+        let mut filters = None;
+        for end in i..=lines.len() {
+            if !text.trim().is_empty() {
+                let parsed = ruby_prism::parse(text.as_bytes());
+                if parsed.errors().next().is_none() {
+                    filters = Some(filter_parameter_list(&parsed, &text));
+                    i = end;
+                    break;
+                }
+            }
+            if end < lines.len() {
+                text.push('\n');
+                text.push_str(lines[end]);
             }
         }
-        let opens = text.starts_with('[') || text.starts_with("%i[") || text.starts_with("%w[");
-        if opens {
-            while !text.contains(']') {
-                let Some(next) = lines.next() else { break };
-                text.push(' ');
-                text.push_str(next.trim());
-            }
-        }
-        out.push(filter_parameter_list(&text).map_or(FilterParametersLine::Computed { replace }, |names| {
-            FilterParametersLine::Literal { replace, names }
-        }));
+        out.push(match filters.flatten() {
+            Some(filters) => FilterParametersLine::Literal { replace, filters },
+            None => FilterParametersLine::Computed { replace },
+        });
     }
     out
 }
 
-/// The names of a `[:a, "b"]`, `%i[a b]` or `%w[a b]` literal that is
-/// the whole operand (nothing but a comment after it).
-fn filter_parameter_list(text: &str) -> Option<Vec<String>> {
-    let (words, body) = if let Some(b) = text.strip_prefix("%i[").or_else(|| text.strip_prefix("%w[")) {
-        (true, b)
-    } else {
-        (false, text.strip_prefix('[')?)
-    };
-    let close = body.find(']')?;
-    let after = body[close + 1..].trim();
-    if !(after.is_empty() || after.starts_with('#')) {
-        return None;
-    }
-    let inner = &body[..close];
-    if words {
-        return Some(inner.split_whitespace().map(str::to_string).collect());
-    }
-    inner
-        .split(',')
-        .map(str::trim)
-        .filter(|e| !e.is_empty())
-        .map(|e| {
-            let name = if let Some(sym) = e.strip_prefix(':') {
-                sym
-            } else if e.len() >= 2
-                && ((e.starts_with('"') && e.ends_with('"')) || (e.starts_with('\'') && e.ends_with('\'')))
-            {
-                &e[1..e.len() - 1]
-            } else {
-                return None;
-            };
+/// The filters of an operand that is one `[...]`, `%i[...]` or `%w[...]`
+/// literal of Symbols, Strings and plain Regexps, as Ruby source. A
+/// Symbol or String is kept only when it is a plain name (letters,
+/// digits, `_`, `.`), since it is written back as a String literal.
+fn filter_parameter_list(parsed: &ruby_prism::ParseResult<'_>, text: &str) -> Option<Vec<String>> {
+    let program = parsed.node();
+    let statements: Vec<_> = program.as_program_node()?.statements().body().iter().collect();
+    let [operand] = statements.as_slice() else { return None };
+    let array = operand.as_array_node()?;
+    array
+        .elements()
+        .iter()
+        .map(|element| {
+            if element.as_regular_expression_node().is_some() {
+                let loc = element.location();
+                return Some(text[loc.start_offset()..loc.end_offset()].to_string());
+            }
+            let name = super::util::symbol_or_string_value(&element)?;
             let plain = !name.is_empty() && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '.');
-            plain.then(|| name.to_string())
+            plain.then(|| format!("{name:?}"))
         })
         .collect()
 }
