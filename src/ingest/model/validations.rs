@@ -1136,7 +1136,10 @@ fn resolve_format_regex(
     node: &Node<'_>,
     class_consts: &super::ClassConsts,
 ) -> Option<(String, String)> {
-    let (pattern, flags) = class_consts.regex(node).or_else(|| stdlib_regexp_constant(node, class_consts))?;
+    let (pattern, flags) = class_consts
+        .regex(node)
+        .or_else(|| stdlib_regexp_constant(node, class_consts))
+        .or_else(|| stdlib_regexp_call(node, class_consts))?;
     if flags.chars().all(|c| matches!(c, 'i' | 'm')) {
         Some((pattern, flags))
     } else {
@@ -1162,9 +1165,55 @@ fn resolve_format_regex(
 /// `ruby -ruri -e 'p CONST.source, CONST.options'` on Ruby 4.0, so the
 /// rule is the one writing that literal inline would give (prism's
 /// unescaped `/…\/…/` source equals Ruby's `Regexp#source`, `\#`
-/// included). Anything else, including a method that builds a regex
-/// (`URI::DEFAULT_PARSER.make_regexp`), stays the gap.
+/// included). Any other constant stays the gap; a method that builds a
+/// regex is [`stdlib_regexp_call`]'s.
 fn stdlib_regexp_constant(node: &Node<'_>, class_consts: &super::ClassConsts) -> Option<(String, String)> {
+    let (source, flags) = match stdlib_path(node, class_consts)?.as_str() {
+        "URI::MailTo::EMAIL_REGEXP" => (
+            r"\A[a-zA-Z0-9.!\#$%&'*+/=?^_`{|}~-]+@[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(?:\.[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)*\z",
+            "",
+        ),
+        _ => return None,
+    };
+    Some((source.to_string(), flags.to_string()))
+}
+
+/// `URI::DEFAULT_PARSER.make_regexp` (or the `RFC2396_PARSER` /
+/// `RFC3986_PARSER` spelling, the same Regexp on Ruby 4.0), with no
+/// schemes, under the same shadowing rules as [`stdlib_regexp_constant`].
+///
+/// Ruby's value is a 1440-character extended-mode (`/x`) pattern with
+/// `(?#…)` comments and a `(?!//)` lookahead, which no strict target's
+/// regex engine reads as Ruby does. It has no anchors, and everything
+/// after the scheme's `:` is optional: the opaque and hierarchical parts,
+/// the authority after a `//` (so a `//` matches with an empty one),
+/// the path, query and fragment. So `match?` on it, which is all a format
+/// rule asks, is true exactly when the string holds a scheme and its
+/// colon: `[a-zA-Z][a-zA-Z0-9+.-]*:` (Ruby's `\d` is ASCII only, and the
+/// `-` goes last so no target reads an escape). That pattern is what the
+/// rule gets. With schemes
+/// (`make_regexp(%w[http https])`) the pattern adds a lookahead on them
+/// and stays the gap.
+fn stdlib_regexp_call(node: &Node<'_>, class_consts: &super::ClassConsts) -> Option<(String, String)> {
+    let call = node.as_call_node()?;
+    if super::super::util::constant_id_str(&call.name()) != "make_regexp"
+        || call.arguments().is_some()
+        || call.block().is_some()
+    {
+        return None;
+    }
+    match stdlib_path(&call.receiver()?, class_consts)?.as_str() {
+        "URI::DEFAULT_PARSER" | "URI::RFC2396_PARSER" | "URI::RFC3986_PARSER" => {
+            Some(("[a-zA-Z][a-zA-Z0-9+.-]*:".to_string(), String::new()))
+        }
+        _ => None,
+    }
+}
+
+/// A constant path (`URI::MailTo`, `::URI::DEFAULT_PARSER`) joined with
+/// `::`, when it can only name the standard-library constant (see
+/// [`stdlib_regexp_constant`]).
+fn stdlib_path(node: &Node<'_>, class_consts: &super::ClassConsts) -> Option<String> {
     /// The path's segments, and whether it starts with `::`.
     fn segments(node: &Node<'_>, out: &mut Vec<String>) -> Option<bool> {
         if let Some(c) = node.as_constant_read_node() {
@@ -1190,14 +1239,7 @@ fn stdlib_regexp_constant(node: &Node<'_>, class_consts: &super::ClassConsts) ->
     if !rooted && !class_consts.resolves_at_top_level(path.first()?) {
         return None;
     }
-    let (source, flags) = match path.join("::").as_str() {
-        "URI::MailTo::EMAIL_REGEXP" => (
-            r"\A[a-zA-Z0-9.!\#$%&'*+/=?^_`{|}~-]+@[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(?:\.[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)*\z",
-            "",
-        ),
-        _ => return None,
-    };
-    Some((source.to_string(), flags.to_string()))
+    Some(path.join("::"))
 }
 
 /// `length: { minimum: N, maximum: M }`. `is:`, `in:`, and `within:`
@@ -1353,7 +1395,18 @@ fn inclusion_values(node: &Node<'_>, class_consts: &super::ClassConsts) -> Optio
     // A list constant of the class (`in: MODES`, `MODES = %w[a b].freeze`),
     // or of another owner (`in: Fasp::DATA_CATEGORIES`).
     if node.as_constant_read_node().is_some() || node.as_constant_path_node().is_some() || node.as_call_node().is_some() {
-        return class_consts.list(node).map(InclusionSpec::List);
+        if let Some(list) = class_consts.list(node) {
+            return Some(InclusionSpec::List(list));
+        }
+        // A Hash constant: Rails asks `NAME.include?(value)`, which is
+        // `key?`. That compares with `eql?`, so a numeric key does not
+        // hold an equal number of the other class (`{ 1 => … }` and
+        // `1.0`) as the list check would: only non-numeric keys fold.
+        let keys = class_consts.hash_keys_of(node)?;
+        if keys.iter().any(|k| matches!(k, Literal::Int { .. } | Literal::Float { .. })) {
+            return None;
+        }
+        return Some(InclusionSpec::List(keys));
     }
     if let Some(array) = node.as_array_node() {
         let mut out = Vec::new();
