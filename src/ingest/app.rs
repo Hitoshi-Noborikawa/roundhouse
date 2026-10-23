@@ -2587,19 +2587,17 @@ fn gap_numericality_allow_on_untyped(app: &mut App) {
     );
 }
 
-/// `acceptance:` stays the reported gap on an attribute the model does
-/// not declare as a column, an `attr_*` or a method. Rails'
-/// `AcceptanceValidator` defines a virtual reader and writer for an
-/// undeclared one on first use, which this build does not synthesize, so
-/// the lowered check would read an ivar nothing writes. A name declared
-/// only by `attribute :name, :type` of another type is refused too: its
-/// synthesized writer stores the input verbatim, where Rails casts it
-/// (`true` is `"t"` on a String attribute). Refused as a whole call, as
-/// the numericality gap is.
+/// `acceptance:` on an attribute the model does not declare as a column,
+/// an `attr_*` or a method: Rails' `AcceptanceValidator` defines a plain,
+/// uncast reader and writer for it on first use, so the model gains the
+/// same `attr_accessor` here and the check reads what it writes. A name
+/// declared only by `attribute :name, :type` of another type stays the
+/// reported gap: its synthesized writer stores the input verbatim, where
+/// Rails casts it (`true` is `"t"` on a String attribute). Refused as a
+/// whole call, as the numericality gap is.
 fn gap_acceptance_on_undeclared(app: &mut App) {
     use crate::dialect::{MethodReceiver, ModelBodyItem, ValidationRule};
     use crate::expr::{ExprNode, Literal};
-    let mut undeclared: Vec<(crate::span::Span, String)> = Vec::new();
     let mut attribute_api: Vec<(crate::span::Span, String)> = Vec::new();
     for model in &mut app.models {
         let attribute_call = |attr: &crate::ident::Symbol| {
@@ -2631,8 +2629,8 @@ fn gap_acceptance_on_undeclared(app: &mut App) {
                     _ => false,
                 })
         };
-        let mut refused: Vec<(usize, crate::span::Span, String)> = Vec::new();
         let mut refused_attribute_api: Vec<(usize, crate::span::Span, String)> = Vec::new();
+        let mut virtual_attrs: Vec<(usize, crate::ident::Symbol, crate::span::Span)> = Vec::new();
         for (i, item) in model.body.iter().enumerate() {
             let ModelBodyItem::Validation { validation, .. } = item else { continue };
             if !validation.rules.iter().any(|rule| matches!(rule, ValidationRule::Acceptance { .. })) {
@@ -2647,18 +2645,31 @@ fn gap_acceptance_on_undeclared(app: &mut App) {
                 continue;
             } else if attribute_call(attr) {
                 refused_attribute_api.push((i, item.span(), construct));
-            } else {
-                refused.push((i, item.span(), construct));
+            } else if !virtual_attrs.iter().any(|(_, a, _)| a == attr) {
+                virtual_attrs.push((i, attr.clone(), item.span()));
             }
         }
-        refuse_validates_calls(model, refused, &mut undeclared);
+        // Rails' `AcceptanceValidator` defines a plain `attr_reader` and
+        // `attr_writer` for an attribute the model does not declare
+        // (`LazilyDefineAttributes`), uncast: the same accessor written
+        // as `attr_accessor :agreement`, placed ahead of the validation.
+        for (i, attr, span) in virtual_attrs.into_iter().rev() {
+            let accessor = crate::expr::Expr::new(
+                span,
+                ExprNode::Send {
+                    recv: None,
+                    method: crate::ident::Symbol::from("attr_accessor"),
+                    args: vec![crate::expr::Expr::new(span, ExprNode::Lit { value: Literal::Sym { value: attr } })],
+                    block: None,
+                    parenthesized: false,
+                },
+            );
+            model.body.insert(i, ModelBodyItem::Unknown { expr: accessor, leading_comments: Vec::new(), leading_blank_line: false });
+        }
+        // After the inserts: their indices are the body's as scanned, and
+        // the refusal removes by span, not by index.
         refuse_validates_calls(model, refused_attribute_api, &mut attribute_api);
     }
-    report_validates_gaps(
-        app,
-        undeclared,
-        "acceptance: on an attribute the model does not declare; Rails defines a virtual accessor for it, which this build does not synthesize",
-    );
     report_validates_gaps(
         app,
         attribute_api,
