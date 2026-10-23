@@ -102,7 +102,7 @@ fn a_computed_superclass_is_reported() {
         .write(&format!("{GEM}/taggy/mark.rb"), "module Taggy\n  class Mark < Taggy.base.constantize\n  end\nend\n")
         .edit(&format!("{GEM}/taggy.rb"), "require \"taggy/extra\"\n", "require \"taggy/extra\"\nrequire \"taggy/mark\"\n")
         .check_errors();
-    assert!(errors.iter().any(|e| e.contains("`Taggy::Mark`'s superclass is computed")), "{errors:#?}");
+    assert!(errors.iter().any(|e| e.contains("`Taggy::Mark`'s superclass is an expression")), "{errors:#?}");
 }
 
 // Not expanded from a guess: the String it `class_eval`s is built when the program runs.
