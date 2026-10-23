@@ -367,6 +367,8 @@ pub(crate) fn apply_model_lowering(mut lcs: &mut [LibraryClass], app: &App) {
     // Boolean-column readers/predicates cast SQLite's 0/1 Integers
     // (0 is truthy in Ruby).
     library::apply_boolean_lowering(&mut lcs, app);
+    // Typed-column writers cast what they are given (#1158).
+    library::apply_typed_writer_cast_lowering(&mut lcs, app);
     // NULL fidelity: nullable columns hydrate to nil (not 0/"") and fk
     // 0-sentinel guards widen to accept nil (no-op for schemas with no
     // nullable columns). A string `blank?` already carries `(r || "")`

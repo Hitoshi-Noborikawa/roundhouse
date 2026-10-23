@@ -211,6 +211,15 @@ pub(super) fn ingest_model_with_enum_constants(
                             enum_defaults.insert(expanded.column.clone(), d);
                         }
                         if let Some(mapping) = expanded.mapping {
+                            if mapping
+                                .iter()
+                                .all(|(label, stored)| matches!(stored, Literal::Str { value } if value == label))
+                            {
+                                class_consts.note_enum_labels(
+                                    expanded.column.as_str(),
+                                    mapping.iter().map(|(label, _)| label.clone()).collect(),
+                                );
+                            }
                             enums.insert(expanded.column, mapping);
                         }
                         let mut blank = leading_blank;
@@ -1875,6 +1884,12 @@ pub(super) struct ClassConsts {
     /// are never read. For `inclusion: { in: NAME.keys }` and
     /// `inclusion: { in: NAME }` (`Hash#include?` is `key?`).
     hash_keys: std::collections::HashMap<String, Vec<Literal>>,
+    /// An enum the class body declared so far, by the class method Rails
+    /// names after it (`enum :status` → `statuses`): its labels, which
+    /// `statuses.keys` answers. Only an enum whose every label is also the
+    /// String it stores (`{ password: "password" }`): a lowered check
+    /// reads the stored value, and only there do the two agree.
+    enum_labels: std::collections::HashMap<String, Vec<String>>,
 }
 
 /// The operators [`ClassConsts::int_expr`] folds.
@@ -1991,6 +2006,11 @@ impl ClassConsts {
     /// not, or another folded Hash constant. Each key keeps its kind, in
     /// the order `Hash#keys` gives (a repeated key keeps its first
     /// place).
+    /// Record an enum the class body declares, for `<plural>.keys` below.
+    pub(super) fn note_enum_labels(&mut self, column: &str, labels: Vec<String>) {
+        self.enum_labels.insert(crate::naming::pluralize_snake(column), labels);
+    }
+
     pub(super) fn hash_keys_of(&self, node: &Node<'_>) -> Option<Vec<Literal>> {
         if let Some(inner) = single_parenthesized(node) {
             return self.hash_keys_of(&inner);
@@ -1998,6 +2018,15 @@ impl ClassConsts {
         if let Some(call) = node.as_call_node() {
             if constant_id_str(&call.name()) == "freeze" && call.arguments().is_none() && call.block().is_none() {
                 return self.hash_keys_of(&call.receiver()?);
+            }
+            // `statuses` (or `self.statuses`): an enum this body declared
+            // above, whose mapping's keys are its labels as Strings.
+            if call.arguments().is_none()
+                && call.block().is_none()
+                && call.receiver().is_none_or(|r| r.as_self_node().is_some())
+            {
+                let labels = self.enum_labels.get(constant_id_str(&call.name()))?;
+                return Some(labels.iter().map(|l| Literal::Str { value: l.clone() }).collect());
             }
             return None;
         }
@@ -2990,6 +3019,9 @@ fn parse_callback(
         "after_destroy_commit" => CallbackHook::AfterCommit,
         "after_save_commit" => CallbackHook::AfterSaveCommit,
         "after_rollback" => CallbackHook::AfterRollback,
+        // Only the block form was recognized; the symbol form fell
+        // through to a "not lowered" Unknown and the method never ran.
+        "after_initialize" => CallbackHook::AfterInitialize,
         _ => return None,
     };
     // The lifecycle the sugar spelling pins, which `push_symbol_callback`

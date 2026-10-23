@@ -622,7 +622,8 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
         all_app_classes
             .iter()
             .chain(runtime_seed_classes.iter())
-            .map(|c| (c, instance_field_names(c))),
+            .chain(app.library_classes.iter())
+            .map(|c| (c, instance_field_names(c), static_field_names(c))),
     );
 
     // Reuse the runtime parse from the async-expansion step above
@@ -1709,6 +1710,27 @@ pub fn emit_library_class(class: &crate::dialect::LibraryClass) -> Result<String
 
 /// The instance field names `js_library_class` declares for `class`:
 /// its attribute readers and the ivars its instance methods assign.
+/// The class-side counterpart of `instance_field_names`: a class-side
+/// attribute reader, and each `@ivar` a class method assigns, which
+/// `js_library_class` declares as a `static` field (`def self.label;
+/// @label ||= "x"; end` is `static label`, and the method is left out).
+fn static_field_names(class: &crate::dialect::LibraryClass) -> std::collections::HashSet<String> {
+    use crate::dialect::{AccessorKind, MethodReceiver};
+    let mut names = std::collections::HashSet::new();
+    let mut ivars: indexmap::IndexMap<String, Ty> = indexmap::IndexMap::new();
+    for m in &class.methods {
+        if !matches!(m.receiver, MethodReceiver::Class) {
+            continue;
+        }
+        if matches!(m.kind, AccessorKind::AttributeReader) && m.params.is_empty() {
+            names.insert(m.name.as_str().to_string());
+        }
+        collect_ivar_assignments(&m.body, &mut ivars);
+    }
+    names.extend(ivars.into_keys());
+    names
+}
+
 fn instance_field_names(class: &crate::dialect::LibraryClass) -> std::collections::HashSet<String> {
     use crate::dialect::{AccessorKind, MethodReceiver};
     let mut names = std::collections::HashSet::new();
@@ -1784,6 +1806,11 @@ pub(super) fn js_library_class(
 
     let mut fields: Vec<(String, String, bool, bool, crate::span::Span)> = Vec::new();
     let mut field_names_seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    // The same names per side, `[instance, static]`: a field subsumes a
+    // method of its name on its own side only (`attr_reader :label` and
+    // `def self.label` are both kept).
+    let mut side_field_names: [std::collections::HashSet<String>; 2] = Default::default();
+    let side = |is_static: bool| usize::from(is_static);
     for m in &class.methods {
         if is_attr_reader(m) {
             // A temporal reader emits as a `Date` getter (below), not a
@@ -1791,6 +1818,7 @@ pub(super) fn js_library_class(
             // path.
             if is_temporal_reader(m) {
                 field_names_seen.insert(m.name.as_str().to_string());
+                side_field_names[side(matches!(m.receiver, MethodReceiver::Class))].insert(m.name.as_str().to_string());
                 continue;
             }
             let ty = match m.signature.as_ref() {
@@ -1799,6 +1827,7 @@ pub(super) fn js_library_class(
             };
             let is_static = matches!(m.receiver, MethodReceiver::Class);
             field_names_seen.insert(m.name.as_str().to_string());
+            side_field_names[side(is_static)].insert(m.name.as_str().to_string());
             fields.push((m.name.as_str().to_string(), ty, is_static, false, m.body.span));
         }
     }
@@ -1832,12 +1861,14 @@ pub(super) fn js_library_class(
         }
     }
     for (name, ty) in ivar_assignments {
-        if field_names_seen.insert(name.clone()) {
+        if side_field_names[0].insert(name.clone()) {
+            field_names_seen.insert(name.clone());
             fields.push((name, ts_ty(&ty), false, true, crate::span::Span::synthetic()));
         }
     }
     for (name, ty) in static_ivar_assignments {
-        if field_names_seen.insert(name.clone()) {
+        if side_field_names[1].insert(name.clone()) {
+            field_names_seen.insert(name.clone());
             fields.push((name, ts_ty(&ty), true, true, crate::span::Span::synthetic()));
         }
     }
@@ -1993,7 +2024,7 @@ pub(super) fn js_library_class(
     // the member kind to a getter.
     for m in &class.methods {
         if is_temporal_reader(m) {
-            let mut member = js_class_member(m, has_parent)?;
+            let mut member = class_member(class, m, has_parent)?;
             if let js_ast::JsClassMember::Method { kind, .. } = &mut member {
                 *kind = js_ast::MethodKind::Get;
             }
@@ -2013,12 +2044,14 @@ pub(super) fn js_library_class(
     // ivar (`def persisted?; @persisted; end`) are subsumed by the
     // field; callers reading `record.persisted?` sanitize to
     // `record.persisted` and get the field directly.
-    let mut sanitized_seen: std::collections::HashSet<String> =
-        field_names_seen.clone();
+    // Per side, as `side_field_names`: a static `ready?` keeps its name
+    // beside an instance `is_ready`.
+    let mut sanitized_seen: [std::collections::HashSet<String>; 2] = side_field_names.clone();
     for m in &class.methods {
         let raw = m.name.as_str();
         if !raw.ends_with('?') && !raw.ends_with('!') {
-            sanitized_seen.insert(crate::emit::typescript::library::sanitize_identifier(raw));
+            sanitized_seen[side(matches!(m.receiver, MethodReceiver::Class))]
+                .insert(crate::emit::typescript::library::sanitize_identifier(raw));
         }
     }
 
@@ -2060,13 +2093,13 @@ pub(super) fn js_library_class(
             // here; surface those as a separate Ruby-source change
             // rather than emitting broken TS. A literal memo is not
             // one: its field starts at the literal (`memoized_literals`).
-            if field_names_seen.contains(&stripped) {
+            if side_field_names[side(matches!(m.receiver, MethodReceiver::Class))].contains(&stripped) {
                 return false;
             }
             // Predicate/bang vs same-name plain-method twin (`save`
             // vs `save!`): keep the plain twin.
             if raw.ends_with('?') || raw.ends_with('!') {
-                !sanitized_seen.contains(&stripped)
+                !sanitized_seen[side(matches!(m.receiver, MethodReceiver::Class))].contains(&stripped)
             } else {
                 true
             }
@@ -2083,7 +2116,7 @@ pub(super) fn js_library_class(
             members.push(JsClassMember::Blank);
         }
         first = false;
-        members.push(js_class_member(m, has_parent)?);
+        members.push(class_member(class, m, has_parent)?);
     }
 
     Ok(JsDecl::Class {
@@ -2379,6 +2412,18 @@ fn body_contains_yield(body: &crate::expr::Expr) -> bool {
 /// or constructor). Uses signature when present (typed params + ret);
 /// falls back to body.ty for return and `any` for params when not
 /// (lowered models don't populate signatures yet).
+/// `js_class_member` for a method of `class`, with `self` in its body
+/// naming `class`, on the class side for a class method
+/// (`expr::with_self_class`).
+fn class_member(
+    class: &crate::dialect::LibraryClass,
+    m: &crate::dialect::MethodDef,
+    has_parent: bool,
+) -> Result<js_ast::JsClassMember, String> {
+    let class_side = matches!(m.receiver, crate::dialect::MethodReceiver::Class);
+    expr::with_self_class(class.name.0.as_str().to_string(), class_side, || js_class_member(m, has_parent))
+}
+
 fn js_class_member(
     m: &crate::dialect::MethodDef,
     has_parent: bool,

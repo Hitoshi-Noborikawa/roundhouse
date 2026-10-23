@@ -1015,26 +1015,39 @@ fn writable_permit_fields(
     fields
         .iter()
         .filter(|field| {
-            if writable.contains(*field) || model_defines_writer(model, field) {
+            if writable.contains(*field) || model_defines_public_writer(model, field) {
                 return true;
             }
+            let private = model_defines_writer(model, field);
             let kind = DiagnosticKind::LowerResidue {
                 pass: Symbol::from("permit_writer_filter"),
                 construct: Symbol::from("permit"),
-                reason: Symbol::from("no writer"),
+                reason: Symbol::from(if private { "private writer" } else { "no writer" }),
             };
-            let d = Diagnostic {
-                span: model.span,
-                severity: Diagnostic::default_severity(&kind),
-                kind,
-                message: format!(
+            let message = if private {
+                format!(
+                    "permitted field `{field}` has only a private or protected writer on \
+                     `{model_name}` — dropped from the synthesized update/from_params; \
+                     Rails assigns through public_send and would raise \
+                     UnknownAttributeError if a request submitted it",
+                    field = field.as_str(),
+                    model_name = model.name.0.as_str(),
+                )
+            } else {
+                format!(
                     "permitted field `{field}` has no writer on `{model_name}` (not a \
                      column, attr_writer, belongs_to, typed_store, has_secure_password, \
                      or `def {field}=`) — dropped from the synthesized update/from_params; \
                      Rails would raise UnknownAttributeError if a request submitted it",
                     field = field.as_str(),
                     model_name = model.name.0.as_str(),
-                ),
+                )
+            };
+            let d = Diagnostic {
+                span: model.span,
+                severity: Diagnostic::default_severity(&kind),
+                kind,
+                message,
             };
             crate::emit::diagnostics::push(d);
             false
@@ -1132,6 +1145,20 @@ pub fn writable_field_set(
 pub(crate) fn model_defines_writer(model: &Model, field: &crate::ident::Symbol) -> bool {
     let writer = crate::ident::Symbol::from(format!("{}=", field.as_str()));
     model_defines_instance_method(model, &writer)
+}
+
+/// `model_defines_writer` for mass assignment: Rails assigns permitted
+/// params through `public_send`, so a private or protected `def <field>=`
+/// is not a key it accepts (`UnknownAttributeError`). Hydration keeps
+/// `model_defines_writer`, which any visibility satisfies.
+pub(crate) fn model_defines_public_writer(model: &Model, field: &crate::ident::Symbol) -> bool {
+    let writer = crate::ident::Symbol::from(format!("{}=", field.as_str()));
+    model.body.iter().any(|item| {
+        matches!(item, crate::dialect::ModelBodyItem::Method { method, .. }
+            if method.name == writer
+                && method.receiver == MethodReceiver::Instance
+                && method.visibility == crate::dialect::MethodVisibility::Public)
+    })
 }
 
 /// Survey the same untyped synthesis used by emission. Source lookup stays

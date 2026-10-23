@@ -217,9 +217,50 @@ fn collect_constant_expr_from_stmt(node: &Node<'_>, out: &mut Vec<(Symbol, Expr)
             }
             _ => value,
         };
-        if let Ok(expr) = ingest_expr(&inner, VIRTUAL_FILE) {
+        if let Ok(mut expr) = ingest_expr(&inner, VIRTUAL_FILE) {
+            bare_hash_new_as_literal(&mut expr);
             out.push((Symbol::new(name_str), expr));
         }
+    }
+}
+
+/// `Hash.new` with no arguments and no block: an empty Hash, exactly
+/// what `{}` builds. The runtime spells a constant this way when it
+/// needs its own object: CRuby compiles `{}.freeze` to one shared
+/// frozen empty Hash, so two constants written `{}.freeze` are the same
+/// object (`HYDRATE_ATTRS` in `active_record/base.rb` is told apart
+/// from `EMPTY_ATTRS` by identity). The transpiled targets have no
+/// such sharing and lower an empty Hash literal, not a `Hash`
+/// constructor, so a constant value of this shape is read as `{}`:
+/// typed here, and its value rewritten by `bare_hash_new_as_literal`.
+fn is_bare_hash_new(node: &Node<'_>) -> bool {
+    let Some(call) = node.as_call_node() else { return false };
+    if call.name().as_slice() != b"new" || call.arguments().is_some() || call.block().is_some() {
+        return false;
+    }
+    call.receiver()
+        .and_then(|r| r.as_constant_read_node())
+        .is_some_and(|k| k.name().as_slice() == b"Hash")
+}
+
+/// The ingested-`Expr` side of `is_bare_hash_new`: a constant whose
+/// value is `Hash.new` (or `Hash.new.freeze`) becomes the empty Hash
+/// literal it is equal to.
+fn bare_hash_new_as_literal(value: &mut Expr) {
+    let target = match &mut *value.node {
+        ExprNode::Send { recv: Some(r), method, args, block: None, .. }
+            if method.as_str() == "freeze" && args.is_empty() =>
+        {
+            r
+        }
+        _ => value,
+    };
+    let is_hash_new = matches!(&*target.node,
+        ExprNode::Send { recv: Some(r), method, args, block: None, .. }
+            if method.as_str() == "new" && args.is_empty()
+                && matches!(&*r.node, ExprNode::Const { path } if path.len() == 1 && path[0].as_str() == "Hash"));
+    if is_hash_new {
+        *target.node = ExprNode::Hash { entries: vec![], kwargs: false };
     }
 }
 
@@ -303,6 +344,13 @@ fn type_of_const_literal(node: &Node<'_>) -> Option<Ty> {
                 return Some(Ty::Int);
             }
             return None;
+        }
+        // `Hash.new` types as the `{}` it equals (see `is_bare_hash_new`).
+        if is_bare_hash_new(node) {
+            return Some(Ty::Hash {
+                key: std::sync::Arc::new(Ty::Untyped),
+                value: std::sync::Arc::new(Ty::Untyped),
+            });
         }
         // `CONST = Klass.new(…)` — a constructed instance is as much a
         // typed constant as a literal is, and it is the shape a rule
@@ -533,6 +581,7 @@ pub fn parse_library_with_rbs(
         reclassify_abstract_attributes(&mut lc.methods);
         for (_, value) in &mut lc.constants {
             project_runtime_keywords(value);
+            bare_hash_new_as_literal(value);
         }
         for call in &mut lc.unknown_calls {
             project_runtime_keywords(call);
@@ -1572,6 +1621,41 @@ mod tests {
         let mut methods = parse_methods(src).expect("parses");
         assert_eq!(methods.len(), 1, "expected exactly one method");
         methods.remove(0)
+    }
+
+    /// A runtime constant spelled `Hash.new.freeze` (so CRuby gives it its
+    /// own object rather than the shared frozen `{}`) reaches the
+    /// transpiled targets as the empty Hash literal, typed as a Hash, in
+    /// both the module-constant and the class-constant views. A
+    /// `Hash.new` with a default value is a different thing and is left
+    /// alone.
+    #[test]
+    fn bare_hash_new_constant_reads_as_empty_hash_literal() {
+        let src = "class Widget\n  SHARED = {}.freeze\n  OWN = Hash.new.freeze\n  PLAIN = Hash.new\n  DEFAULTED = Hash.new(0)\nend\n";
+        let empty = |e: &Expr| matches!(&*e.node, ExprNode::Hash { entries, .. } if entries.is_empty());
+        let exprs = parse_module_constant_exprs(src).expect("parses");
+        let by_name = |n: &str| exprs.iter().find(|(k, _)| k.as_str() == n).map(|(_, v)| v).unwrap();
+        assert!(empty(by_name("SHARED")));
+        assert!(empty(by_name("OWN")), "{:?}", by_name("OWN").node);
+        assert!(empty(by_name("PLAIN")), "{:?}", by_name("PLAIN").node);
+        assert!(!empty(by_name("DEFAULTED")), "{:?}", by_name("DEFAULTED").node);
+
+        let types = parse_module_constants(src).expect("parses");
+        for name in ["SHARED", "OWN", "PLAIN"] {
+            assert!(matches!(types.get(&Symbol::from(name)), Some(Ty::Hash { .. })), "{name}: {:?}", types.get(&Symbol::from(name)));
+        }
+
+        // The class-constant view keeps the `.freeze` and rewrites its receiver.
+        let parsed = parse(b"Hash.new.freeze\n");
+        let program = parsed.node();
+        let stmt = program.as_program_node().unwrap().statements().body().iter().next().unwrap();
+        let mut class_value = ingest_expr(&stmt, VIRTUAL_FILE).expect("ingests");
+        bare_hash_new_as_literal(&mut class_value);
+        assert!(
+            matches!(&*class_value.node, ExprNode::Send { recv: Some(r), method, .. } if method.as_str() == "freeze" && empty(r)),
+            "{:?}",
+            class_value.node
+        );
     }
 
     #[test]

@@ -125,6 +125,7 @@ pub(super) fn emit_library_class_decls(app: &App) -> Vec<EmittedFile> {
     apply_datetime_lowering(&mut lcs, app);
     apply_rich_text_content_memo(&mut lcs);
     apply_boolean_lowering(&mut lcs, app);
+    apply_typed_writer_cast_lowering(&mut lcs, app);
     apply_hydration_nil_lowering(&mut lcs, app);
     apply_time_format_lowering(&mut lcs, app);
     // Same rooting the view pipeline applies, for the same reason one
@@ -9847,6 +9848,190 @@ pub(crate) fn apply_boolean_lowering(lcs: &mut [LibraryClass], app: &App) {
             }
         }
     }
+}
+
+/// Ruby-family pre-emit pass: the public writer of an integer, float,
+/// decimal or boolean column casts what it is given, as ActiveModel's
+/// typed attribute does (`record.min_favs = "5"` reads back `5`,
+/// `= ""` reads nil, `active = "1"` true). Before, the writer stored the
+/// value as given, so a request param reached every validator, comparison
+/// and serializer as a String (#1158). `ActiveSupport.cast_integer` /
+/// `cast_float` / `cast_boolean` implement ActiveModel 8.1.4's casts; a
+/// decimal column is a Float here and casts as one. Hydration passes
+/// values already of the column's type (`Db.column_int_opt`,
+/// `row.x&.to_i`), on which each cast is the identity. Strict targets
+/// type the writer's parameter and are not rewritten.
+///
+/// Only the synthesized writer is rewritten (`@col = <the value>`, perhaps
+/// through `normalizes`, which then runs on the cast value as in Rails),
+/// also when a model's own `col=` renamed it `_write_<col>_raw`, so its
+/// `super` casts too. An enum column's writer maps labels and is left
+/// alone, as is the primary key's.
+pub(crate) fn apply_typed_writer_cast_lowering(lcs: &mut [LibraryClass], app: &App) {
+    for model in &app.models {
+        let Some(table) = app.schema.tables.get(&model.table.0) else {
+            continue;
+        };
+        let casts: HashMap<Symbol, &'static str> = table
+            .columns
+            .iter()
+            .filter(|c| !c.primary_key && !model.enums.contains_key(&c.name))
+            .filter_map(|c| {
+                let cast = match c.col_type {
+                    crate::schema::ColumnType::Integer | crate::schema::ColumnType::BigInt => "cast_integer",
+                    crate::schema::ColumnType::Float | crate::schema::ColumnType::Decimal { .. } => "cast_float",
+                    crate::schema::ColumnType::Boolean => "cast_boolean",
+                    _ => return None,
+                };
+                Some((c.name.clone(), cast))
+            })
+            .collect();
+        if casts.is_empty() {
+            continue;
+        }
+        let Some(lc) = lcs.iter_mut().find(|lc| lc.name == model.name) else {
+            continue;
+        };
+        // The columns a `numericality:` validation checks: their writer
+        // keeps what the user assigned, and the check reads it.
+        let mut checked: BTreeSet<Symbol> = BTreeSet::new();
+        for m in &lc.methods {
+            collect_numericality_checks(&m.body, &mut checked);
+        }
+        checked.retain(|c| casts.contains_key(c));
+        for m in &mut lc.methods {
+            if m.receiver != MethodReceiver::Instance || m.kind != crate::dialect::AccessorKind::AttributeWriter {
+                if !checked.is_empty() {
+                    read_raw_in_numericality_checks(&mut m.body, &checked);
+                    forget_raw_on_internal_writes(&mut m.body, &checked);
+                }
+                continue;
+            }
+            let name = m.name.as_str();
+            let col = name
+                .strip_prefix("_write_")
+                .and_then(|n| n.strip_suffix("_raw"))
+                .or_else(|| name.strip_suffix('='))
+                .map(Symbol::from);
+            let Some(col) = col else { continue };
+            let Some(cast) = casts.get(&col) else { continue };
+            let [param] = m.params.as_slice() else { continue };
+            let param = param.name.clone();
+            let ExprNode::Assign { target: crate::expr::LValue::Ivar { name: ivar }, value } = &mut *m.body.node else {
+                continue;
+            };
+            if *ivar != col {
+                continue;
+            }
+            cast_param_reads(value, &param, cast);
+            if checked.contains(&col) {
+                let keep_raw = sp_expr(ExprNode::Assign {
+                    target: crate::expr::LValue::Ivar { name: raw_ivar(&col) },
+                    value: sp_expr(ExprNode::Var { id: crate::ident::VarId(0), name: param.clone() }),
+                });
+                let cast_write = std::mem::replace(&mut m.body, sp_expr(ExprNode::Lit { value: Literal::Nil }));
+                m.body = sp_expr(ExprNode::Seq { exprs: vec![keep_raw, cast_write] });
+            }
+        }
+    }
+}
+
+/// `@<col>_before_type_cast`: what the user assigned to `col`, nil when
+/// the value did not come from the user (a load, an internal write).
+fn raw_ivar(col: &Symbol) -> Symbol {
+    Symbol::from(format!("{}_before_type_cast", col.as_str()))
+}
+
+/// The column a lowered `numericality:` check tests, when `e` is one:
+/// `if @col.nil? || !@col.is_a?(Numeric)` (`inline_numericality_check`).
+fn numericality_check_column(e: &Expr) -> Option<Symbol> {
+    let ExprNode::If { cond, .. } = &*e.node else { return None };
+    let ExprNode::BoolOp { op: crate::expr::BoolOpKind::Or, left, right, .. } = &*cond.node else {
+        return None;
+    };
+    let ExprNode::Send { recv: Some(nil_recv), method: nil_m, args: nil_args, .. } = &*left.node else {
+        return None;
+    };
+    let ExprNode::Ivar { name } = &*nil_recv.node else { return None };
+    if nil_m.as_str() != "nil?" || !nil_args.is_empty() {
+        return None;
+    }
+    let ExprNode::Send { recv: Some(not_recv), method: not_m, .. } = &*right.node else { return None };
+    let ExprNode::Send { recv: Some(is_a_recv), method: is_a_m, args: is_a_args, .. } = &*not_recv.node else {
+        return None;
+    };
+    let numeric = matches!(is_a_args.as_slice(), [a] if matches!(&*a.node, ExprNode::Const { path } if path.len() == 1 && path[0].as_str() == "Numeric"));
+    let same = matches!(&*is_a_recv.node, ExprNode::Ivar { name: n } if n == name);
+    (not_m.as_str() == "!" && is_a_m.as_str() == "is_a?" && numeric && same).then(|| name.clone())
+}
+
+fn collect_numericality_checks(e: &Expr, out: &mut BTreeSet<Symbol>) {
+    if let Some(col) = numericality_check_column(e) {
+        out.insert(col);
+    }
+    e.node.for_each_child(&mut |c| collect_numericality_checks(c, out));
+}
+
+/// In each lowered `numericality:` check on a `checked` column, read the
+/// number ActiveModel's validator reads: the user's raw value when there
+/// is one, parsed as `parse_as_number` does
+/// (`ActiveSupport.numericality_number`), instead of the cast value. The
+/// `allow_nil`/`allow_blank` skip around it keeps the cast value, as
+/// Rails' `EachValidator#validate` does.
+fn read_raw_in_numericality_checks(e: &mut Expr, checked: &BTreeSet<Symbol>) {
+    if let Some(col) = numericality_check_column(e).filter(|c| checked.contains(c)) {
+        let number = sp_expr(ExprNode::Send {
+            recv: Some(sp_expr(ExprNode::Const { path: vec![Symbol::from("ActiveSupport")] })),
+            method: Symbol::from("numericality_number"),
+            args: vec![ivar_read(&raw_ivar(&col)), ivar_read(&col)],
+            block: None,
+            parenthesized: true,
+        });
+        replace_ivar_reads(e, &col, &number);
+        return;
+    }
+    e.node.for_each_child_mut(&mut |c| read_raw_in_numericality_checks(c, checked));
+}
+
+fn replace_ivar_reads(e: &mut Expr, col: &Symbol, with: &Expr) {
+    if matches!(&*e.node, ExprNode::Ivar { name } if name == col) {
+        *e = with.clone();
+        return;
+    }
+    e.node.for_each_child_mut(&mut |c| replace_ivar_reads(c, col, with));
+}
+
+/// A write to a checked column other than its writer (`[]=`, a counter)
+/// is not the user's assignment: it clears the raw value, so the check
+/// reads the column again.
+fn forget_raw_on_internal_writes(e: &mut Expr, checked: &BTreeSet<Symbol>) {
+    e.node.for_each_child_mut(&mut |c| forget_raw_on_internal_writes(c, checked));
+    let col = match &*e.node {
+        ExprNode::Assign { target: crate::expr::LValue::Ivar { name }, .. } if checked.contains(name) => name.clone(),
+        _ => return,
+    };
+    let forget = sp_expr(ExprNode::Assign {
+        target: crate::expr::LValue::Ivar { name: raw_ivar(&col) },
+        value: sp_expr(ExprNode::Lit { value: Literal::Nil }),
+    });
+    let write = std::mem::replace(e, sp_expr(ExprNode::Lit { value: Literal::Nil }));
+    *e = sp_expr(ExprNode::Seq { exprs: vec![forget, write] });
+}
+
+/// Replace each read of `param` in `e` with `ActiveSupport.<cast>(param)`.
+fn cast_param_reads(e: &mut Expr, param: &Symbol, cast: &str) {
+    if matches!(&*e.node, ExprNode::Var { name, .. } if name == param) {
+        let read = std::mem::replace(e, sp_expr(ExprNode::Lit { value: Literal::Nil }));
+        *e = sp_expr(ExprNode::Send {
+            recv: Some(sp_expr(ExprNode::Const { path: vec![Symbol::from("ActiveSupport")] })),
+            method: Symbol::from(cast),
+            args: vec![read],
+            block: None,
+            parenthesized: true,
+        });
+        return;
+    }
+    e.node.for_each_child_mut(&mut |c| cast_param_reads(c, param, cast));
 }
 
 /// `@col == true || @col == 1`.
