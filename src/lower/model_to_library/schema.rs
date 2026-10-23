@@ -3118,12 +3118,27 @@ fn synth_initialize(
                 ExprNode::Send {
                     recv: Some(self_ref()),
                     method: Symbol::from(format!("{}=", field.as_str())),
-                    args: vec![lookup.clone()],
+                    args: vec![lookup],
                     block: None,
                     parenthesized: false,
                 },
             );
-            stmts.push(guard_unless_nil(lookup, assign));
+            // `attrs.key?`, not the nil guard: Rails' `new(x: nil)`
+            // calls `x=(nil)`, and an omitted key calls nothing.
+            let cond = Expr::new(
+                Span::synthetic(),
+                ExprNode::Send {
+                    recv: Some(var_ref(attrs.clone())),
+                    method: Symbol::from("key?"),
+                    args: vec![lit_sym(field.clone())],
+                    block: None,
+                    parenthesized: true,
+                },
+            );
+            stmts.push(Expr::new(
+                Span::synthetic(),
+                ExprNode::If { cond, then_branch: assign, else_branch: nil_lit() },
+            ));
         }
     }
 
@@ -4113,7 +4128,13 @@ fn virtual_writer_fields(model: &Model, table: &Table) -> std::collections::BTre
         {
             continue;
         }
-        if let Some(base) = method.name.as_str().strip_suffix('=') {
+        // An identifier writer only: `==`, `!=`, `[]=` and `<=` end in
+        // `=` too, and name no attribute.
+        let Some(base) = method.name.as_str().strip_suffix('=') else { continue };
+        let mut chars = base.chars();
+        if chars.next().is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+            && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+        {
             virtuals.insert(Symbol::from(base));
         }
     }

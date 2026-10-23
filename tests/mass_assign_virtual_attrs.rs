@@ -41,6 +41,11 @@ raise "update: #{c.nickname.inspect}" unless c.nickname == "u"
 # A virtual attribute is not stored: a loaded record has none.
 raise "find: #{Member.find(c.id).nickname.inspect}" unless Member.find(c.id).nickname.nil?
 raise "omitted: #{Member.new(email: "y").nickname.inspect}" unless Member.new(email: "y").nickname.nil?
+# An explicit nil is assigned through the writer, as an omitted key isn't.
+raise "explicit nil: #{Member.new(email: "z", badge: nil).badge.inspect}" unless Member.new(email: "z", badge: nil).badge == "!"
+raise "omitted badge: #{Member.new(email: "z").badge.inspect}" unless Member.new(email: "z").badge.nil?
+n = Member.new(email: "z", nickname: nil)
+raise "explicit nil accessor: #{n.nickname.inspect}" unless n.nickname.nil?
 puts "PASS"
 "##;
 
@@ -252,4 +257,71 @@ fn rails_refuses_a_private_attr_writer_key() {
     for (key, model) in PRIVATE_ATTR_FORMS {
         rails_refuses_keys(model, &[key]);
     }
+}
+
+/// An operator method whose name ends in `=` (`==`, `[]=`) is not a
+/// writer: it names no attribute, and `new` and `update` don't call it.
+const OPERATOR_MODEL: &str = r##"class Member < ApplicationRecord
+  attr_accessor :nickname
+
+  def ==(other)
+    super
+  end
+
+  def []=(name, value)
+    super
+  end
+end
+"##;
+
+const OPERATOR_SCRIPT: &str = r##"m = Member.new(email: "x", nickname: "n")
+raise "new: #{[m.email, m.nickname].inspect}" unless m.email == "x" && m.nickname == "n"
+m.save!
+m.update(nickname: "u")
+raise "update: #{m.nickname.inspect}" unless m.nickname == "u"
+m[:email] = "y"
+raise "[]=: #{m.email.inspect}" unless m.email == "y"
+raise "==" unless m == Member.find(m.id)
+puts "PASS"
+"##;
+
+#[test]
+fn an_operator_method_is_not_a_writer() {
+    app().write("app/models/member.rb", OPERATOR_MODEL).run_ruby(OPERATOR_SCRIPT).assert_passes();
+    use roundhouse::project::BuildTarget;
+    for target in [BuildTarget::Rust, BuildTarget::Typescript, BuildTarget::Go] {
+        let (_emitted, errors) = app().write("app/models/member.rb", OPERATOR_MODEL).emit(target);
+        assert!(errors.is_empty(), "{target:?}: {errors:#?}");
+    }
+}
+
+#[test]
+fn rails_answers_the_operator_script() {
+    let probe = r#"gem "activerecord", "8.1.4"; require "active_record"; require "sqlite3""#;
+    if !Command::new("ruby").args(["-e", probe]).status().is_ok_and(|s| s.success()) {
+        eprintln!("skipping: ruby with activerecord 8.1.4 and sqlite3 not available");
+        return;
+    }
+    let script = format!(
+        r##"gem "activerecord", "8.1.4"
+require "active_record"
+require "sqlite3"
+ActiveRecord::Base.establish_connection(adapter: "sqlite3", database: ":memory:")
+ActiveRecord::Schema.verbose = false
+ActiveRecord::Schema.define do
+  create_table(:members) {{ |t| t.string :email }}
+end
+class ApplicationRecord < ActiveRecord::Base
+  primary_abstract_class
+end
+{OPERATOR_MODEL}
+{OPERATOR_SCRIPT}"##
+    );
+    let output = Command::new("ruby").arg("-e").arg(&script).output().expect("ruby is on PATH");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success() && stdout.contains("PASS"),
+        "activerecord 8.1.4 disagrees\n=== stdout ===\n{stdout}\n=== stderr ===\n{stderr}"
+    );
 }
