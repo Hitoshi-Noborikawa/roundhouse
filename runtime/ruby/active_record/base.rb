@@ -381,7 +381,12 @@ module ActiveRecord
     # exactly once; before this it also ran on the empty shell, where
     # `new_record?` is true and every column is blank. A distinct object
     # from EMPTY_ATTRS, which is also what a bare `Model.new` receives.
-    HYDRATE_ATTRS = {}.freeze
+    # `Hash.new`, NOT a `{}` literal: CRuby compiles `{}.freeze` to one
+    # shared frozen empty Hash, so two constants spelled that way are
+    # the same object and a bare `new` would be taken for hydration.
+    # The transpiled targets read a bare `Hash.new` constant as `{}`
+    # (`runtime_src::is_bare_hash_new`).
+    HYDRATE_ATTRS = Hash.new.freeze
 
     # `attrs = {}` keeps Base's constructor signature compatible
     # with subclasses that take attrs (`def initialize(attrs = {})`).
