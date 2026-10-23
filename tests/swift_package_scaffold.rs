@@ -24,8 +24,8 @@ fn emitted_package_swift_floors_hummingbird_at_2_28() {
         package.content
     );
     assert!(
-        !package.content.contains("ServiceContextModule"),
-        "Package.swift no longer needs ServiceContextModule:\n{}",
+        !package.content.contains("swift-service-context"),
+        "Package.swift no longer needs swift-service-context:\n{}",
         package.content
     );
 }
