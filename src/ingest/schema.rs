@@ -1148,21 +1148,23 @@ fn view_columns_from_sql(sql: &str, tables: &IndexMap<Symbol, Table>) -> Vec<Col
         let item_start = i < 2
             || toks[i - 2].eq_ignore_ascii_case("select")
             || toks[i - 2].ends_with(',');
+        // The source column's type and `array:` both: the view re-exposes it.
         let resolved = if item_start {
-            parse_col_ref(toks[i - 1]).and_then(|(t, c)| lookup_column_type(tables, &t, &c))
+            parse_col_ref(toks[i - 1]).and_then(|(t, c)| lookup_column(tables, &t, &c))
         } else {
             None
         };
+        let array = resolved.as_ref().is_some_and(|(_, array)| *array);
         columns.push(Column {
             name: Symbol::from(alias),
-            col_type: resolved.unwrap_or_else(|| view_column_type(alias)),
+            col_type: resolved.map(|(col_type, _)| col_type).unwrap_or_else(|| view_column_type(alias)),
             nullable: true,
             default: None,
             primary_key: false,
             generated: None,
             generated_text_compatible: None,
             generated_int4_compatible: None,
-            array: false,
+            array,
         });
     }
     columns
@@ -1191,17 +1193,17 @@ fn parse_col_ref(tok: &str) -> Option<(String, String)> {
 }
 
 /// Look up a column's declared type in the already-parsed schema.
-fn lookup_column_type(
+fn lookup_column(
     tables: &IndexMap<Symbol, Table>,
     table: &str,
     column: &str,
-) -> Option<ColumnType> {
+) -> Option<(ColumnType, bool)> {
     tables
         .get(&Symbol::from(table))?
         .columns
         .iter()
         .find(|c| c.name.as_str() == column)
-        .map(|c| c.col_type.clone())
+        .map(|c| (c.col_type.clone(), c.array))
 }
 
 /// Fallback column type for a computed view column (no single source

@@ -91,3 +91,32 @@ fn a_target_that_stores_rows_reports_each_array_column() {
 fn futamura_reports_no_array_column() {
     assert!(warnings("futamura").is_empty());
 }
+
+/// A view that projects an array column directly is an array column too:
+/// it re-exposes the table's column, type and `array:` alike.
+#[test]
+fn a_view_projecting_an_array_column_carries_the_flag() {
+    let schema = "ActiveRecord::Schema[8.1].define(version: 1) do
+  create_table \"members\", force: :cascade do |t|
+    t.string \"name\"
+    t.bigint \"tag_ids\", array: true
+  end
+  create_view \"member_tags\", sql_definition: <<-SQL
+      SELECT members.name AS name, members.tag_ids AS tag_ids FROM members
+  SQL
+end
+";
+    let tree: HashMap<PathBuf, Vec<u8>> = [
+        ("db/schema.rb", schema),
+        ("app/models/application_record.rb", "class ApplicationRecord < ActiveRecord::Base\n  primary_abstract_class\nend\n"),
+        ("config/routes.rb", "Rails.application.routes.draw do\nend\n"),
+    ]
+    .into_iter()
+    .map(|(p, c)| (PathBuf::from(p), c.as_bytes().to_vec()))
+    .collect();
+    let app = ingest_app_from_tree(tree).expect("ingest");
+    let view = app.schema.tables.values().find(|t| t.name.as_str() == "member_tags").expect("member_tags view");
+    let column = |name: &str| view.columns.iter().find(|c| c.name.as_str() == name).expect(name);
+    assert!(column("tag_ids").array, "{:?}", column("tag_ids"));
+    assert!(!column("name").array);
+}
