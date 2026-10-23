@@ -1577,3 +1577,104 @@ mod preload_scopes {
         assert!(!init.contains("User#seen_posts"), "{init}");
     }
 }
+
+/// A `where` value typed as a collection on every path: a `pluck` result,
+/// or a Relation held in a local. `ActiveRecord::StatementCache` refuses
+/// an Array, Hash, Range or Relation bind (`unsupported_value?`), so a
+/// site bound to one always runs its fallback: Rails answers, and the
+/// specialization is never used. Such a chain is left to Rails, as a
+/// literal collection already is. A value that is a collection on some
+/// paths only (`params[:name]`) is still bound.
+mod collection_binds {
+    use std::collections::HashMap;
+    use std::path::PathBuf;
+
+    use roundhouse::analyze::Analyzer;
+    use roundhouse::emit::futamura::specialize;
+    use roundhouse::ingest::ingest_app_from_tree;
+
+    const CONTROLLER: &str = r#"class MembersController < ApplicationController
+  def index
+    rows = Member.where(active: true)
+    @named = Member.where(name: rows.pluck(:name)).to_a
+    @within = Member.where(id: rows).to_a
+    @one = Member.where(name: params[:name]).to_a
+  end
+end
+"#;
+
+    fn report() -> roundhouse::emit::futamura::Report {
+        let files: Vec<(&str, &str)> = vec![
+            (
+                "db/schema.rb",
+                "ActiveRecord::Schema[8.1].define(version: 1) do\n  create_table \"members\", force: :cascade do |t|\n    t.string \"name\"\n    t.boolean \"active\"\n  end\nend\n",
+            ),
+            ("app/models/application_record.rb", "class ApplicationRecord < ActiveRecord::Base\n  primary_abstract_class\nend\n"),
+            ("app/models/member.rb", "class Member < ApplicationRecord\nend\n"),
+            ("app/controllers/application_controller.rb", "class ApplicationController < ActionController::Base\nend\n"),
+            ("app/controllers/members_controller.rb", CONTROLLER),
+            ("config/routes.rb", "Rails.application.routes.draw do\n  resources :members, only: [:index]\nend\n"),
+        ];
+        let tree: HashMap<PathBuf, Vec<u8>> =
+            files.iter().map(|(p, c)| (PathBuf::from(p), c.as_bytes().to_vec())).collect();
+        let mut app = ingest_app_from_tree(tree).expect("ingest");
+        Analyzer::new(&app).analyze(&mut app);
+        let mut out: Vec<(String, String)> = files.iter().map(|(p, c)| (p.to_string(), c.to_string())).collect();
+        specialize(&app, &mut out).unwrap()
+    }
+
+    fn left_to_rails(report: &roundhouse::emit::futamura::Report, line: usize) -> bool {
+        report.residue.iter().any(|r| {
+            r.contains(&format!("members_controller.rb:{line}:")) && r.contains("where value is a collection")
+        })
+    }
+
+    #[test]
+    fn a_pluck_result_is_not_a_bind() {
+        let report = report();
+        assert!(left_to_rails(&report, 4), "{:?}", report.residue);
+        assert!(!report.specialized.iter().any(|s| s.contains("members_controller.rb:4:")), "{:?}", report.specialized);
+    }
+
+    #[test]
+    fn a_relation_is_not_a_bind() {
+        let report = report();
+        assert!(left_to_rails(&report, 5), "{:?}", report.residue);
+        assert!(!report.specialized.iter().any(|s| s.contains("members_controller.rb:5:")), "{:?}", report.specialized);
+    }
+
+    #[test]
+    fn a_value_that_may_be_a_scalar_is_still_bound() {
+        let report = report();
+        assert!(report.specialized.iter().any(|s| s.contains("members_controller.rb:6:")), "{:?}", report.specialized);
+    }
+
+    /// A parameter whose inferred type still holds a variable is not
+    /// evidence: callers passing `[]` and `nil` type `name` as `Array[T] |
+    /// nil`, while a call with a String is what the app runs. The site
+    /// stays bound.
+    #[test]
+    fn a_partly_inferred_collection_type_is_still_bound() {
+        let files: Vec<(&str, &str)> = vec![
+            (
+                "db/schema.rb",
+                "ActiveRecord::Schema[8.1].define(version: 1) do\n  create_table \"members\", force: :cascade do |t|\n    t.string \"name\"\n  end\nend\n",
+            ),
+            ("app/models/application_record.rb", "class ApplicationRecord < ActiveRecord::Base\n  primary_abstract_class\nend\n"),
+            ("app/models/member.rb", "class Member < ApplicationRecord\nend\n"),
+            ("app/services/fetch_member_service.rb", "class FetchMemberService\n  def call(name)\n    Member.find_by(name:)\n  end\nend\n"),
+            (
+                "app/services/batch_service.rb",
+                "class BatchService\n  def first_batch\n    FetchMemberService.new.call([])\n  end\n\n  def none\n    FetchMemberService.new.call(nil)\n  end\nend\n",
+            ),
+            ("config/routes.rb", "Rails.application.routes.draw do\nend\n"),
+        ];
+        let tree: HashMap<PathBuf, Vec<u8>> =
+            files.iter().map(|(p, c)| (PathBuf::from(p), c.as_bytes().to_vec())).collect();
+        let mut app = ingest_app_from_tree(tree).expect("ingest");
+        Analyzer::new(&app).analyze(&mut app);
+        let mut out: Vec<(String, String)> = files.iter().map(|(p, c)| (p.to_string(), c.to_string())).collect();
+        let report = specialize(&app, &mut out).unwrap();
+        assert!(report.specialized.iter().any(|s| s.contains("fetch_member_service.rb:3:")), "{:?}", report.specialized);
+    }
+}

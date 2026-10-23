@@ -336,7 +336,9 @@ impl<'a> Specializer<'a> {
                     if !self.has_column(&chain.model, column) {
                         return Err(format!("where on `{}`, not a column", column.as_str()));
                     }
-                    if matches!(&*v.node, ExprNode::Hash { .. } | ExprNode::Array { .. } | ExprNode::Range { .. }) {
+                    if matches!(&*v.node, ExprNode::Hash { .. } | ExprNode::Array { .. } | ExprNode::Range { .. })
+                        || v.ty.as_ref().is_some_and(always_a_collection)
+                    {
                         return Err("where value is a collection".into());
                     }
                     let value = match self.value(v, cx)? {
@@ -728,4 +730,29 @@ fn collect_locals<'e>(e: &'e Expr, out: &mut HashMap<(VarId, Symbol), Option<&'e
         out.entry((*id, name.clone())).and_modify(|v| *v = None).or_insert(Some(value));
     }
     e.node.for_each_child(&mut |c| collect_locals(c, out));
+}
+
+/// A value typed as a collection on every path (an Array, a Hash, a Range,
+/// a Relation, or nil beside one of them): `ActiveRecord::StatementCache`
+/// refuses each of them as a bind (`unsupported_value?`), so a site bound
+/// to it would always run its fallback. Only a fully inferred type counts:
+/// a parameter whose type still holds a variable (`Array[T] | nil` for a
+/// value that is a String at run time) is not evidence, and stays a bind.
+fn always_a_collection(ty: &Ty) -> bool {
+    if ty.mentions_unknown() {
+        return false;
+    }
+    fn collection(ty: &Ty) -> bool {
+        match ty {
+            Ty::Array { .. } | Ty::Tuple { .. } | Ty::Hash { .. } | Ty::Relation { .. } => true,
+            Ty::Class { id, .. } => id.0.as_str() == "Range",
+            _ => false,
+        }
+    }
+    match ty {
+        Ty::Union { variants } => {
+            variants.iter().any(collection) && variants.iter().all(|v| collection(v) || matches!(v, Ty::Nil))
+        }
+        other => collection(other),
+    }
 }
