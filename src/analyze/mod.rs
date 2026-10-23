@@ -2607,7 +2607,12 @@ impl Analyzer {
                 // The class body has run before any class method does, so its writes are not nilable there.
                 let mut class_side_ctx = reseeded_ctx.clone();
                 for (name, ty) in class_body_ivars {
-                    class_side_ctx.ivar_bindings.insert(name, ty);
+                    // Merged, not replaced: a class method's own write (`@state = "ready"`) is a value too.
+                    let merged = match class_side_ctx.ivar_bindings.get(&name) {
+                        Some(existing) => crate::analyze::body::union_of(existing.clone(), ty),
+                        None => ty,
+                    };
+                    class_side_ctx.ivar_bindings.insert(name, merged);
                 }
                 for scope in model.scopes_mut() {
                     self.body_typer().analyze_expr(&mut scope.body, &reseeded_ctx);

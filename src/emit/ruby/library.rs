@@ -768,13 +768,21 @@ fn walk_load_time_paths_on(expr: &Expr, owner: &LibraryClass, side: MethodReceiv
         } else {
             (method.as_str(), side)
         };
-        if own && visited.insert(format!("{}{called}", if on == MethodReceiver::Class { "." } else { "#" })) {
-            for method in owner.methods.iter().filter(|method| method.name.as_str() == called && method.receiver == on) {
-                walk_param_defaults(&method.params, owner, on, visited, paths);
-                if let Some(block) = &method.block_param {
-                    walk_param_defaults(std::slice::from_ref(block), owner, on, visited, paths);
+        // An overridden `new` still reaches `initialize` through its `super`, so both are walked.
+        let targets: Vec<(&str, MethodReceiver)> = if method.as_str() == "new" && side == MethodReceiver::Class && overridden_new {
+            vec![(called, on), ("initialize", MethodReceiver::Instance)]
+        } else {
+            vec![(called, on)]
+        };
+        for (called, on) in targets {
+            if own && visited.insert(format!("{}{called}", if on == MethodReceiver::Class { "." } else { "#" })) {
+                for method in owner.methods.iter().filter(|method| method.name.as_str() == called && method.receiver == on) {
+                    walk_param_defaults(&method.params, owner, on, visited, paths);
+                    if let Some(block) = &method.block_param {
+                        walk_param_defaults(std::slice::from_ref(block), owner, on, visited, paths);
+                    }
+                    walk_load_time_paths_on(&method.body, owner, on, visited, paths);
                 }
-                walk_load_time_paths_on(&method.body, owner, on, visited, paths);
             }
         }
         for value in recv.iter().chain(args) {
