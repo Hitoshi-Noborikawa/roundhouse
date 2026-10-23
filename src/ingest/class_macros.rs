@@ -86,7 +86,9 @@ pub(crate) fn expand_class_macros(app: &mut App, sources: &[SourceFile]) {
     for model_index in 0..app.models.len() {
         let ancestors = ancestors(app, &parents, &app.models[model_index].name);
         let mut table = class_method_table(app, &ancestors);
-        let own_names: HashSet<Symbol> = table.keys().cloned().collect();
+        // Not the model's own: the `on_load` reopen of ActiveRecord::Base carries the hook's very definitions (audited's Concern).
+        let own_names: HashSet<Symbol> =
+            table.iter().filter(|(name, def)| hooks.get(*name).is_none_or(|hook| hook.name_span != def.name_span)).map(|(name, _)| name.clone()).collect();
         for (name, def) in &hooks {
             table.entry(name.clone()).or_insert_with(|| def.clone());
         }
