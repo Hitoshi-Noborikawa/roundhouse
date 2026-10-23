@@ -395,6 +395,26 @@ fn run_transpile(
             return Err(format!("ingest {}: {e}", input.display()));
         }
     };
+    // An ActiveRecord class outside app/models (a migration helper's own
+    // query class, a gem's model) is reported at ingest for the targets
+    // that lower models, which don't model it (#1278). Futamura runs on
+    // Rails and the Roda conversion on Sequel, which load it themselves;
+    // under --survey it is a recorded gap, not a failed run.
+    let mut parse_diags = parse_diags;
+    let unmodelled_record = |d: &roundhouse::diagnostic::Diagnostic| {
+        matches!(&d.kind, roundhouse::diagnostic::DiagnosticKind::Unsupported { construct, .. }
+            if construct.as_str() == roundhouse::ingest::UNMODELLED_RECORD)
+    };
+    if matches!(target, BuildTarget::Futamura | BuildTarget::Roda) {
+        parse_diags.retain(|d| !unmodelled_record(d));
+    } else if survey {
+        let (recorded, kept): (Vec<_>, Vec<_>) = parse_diags.into_iter().partition(|d| unmodelled_record(d));
+        parse_diags = kept;
+        for d in recorded {
+            let file = roundhouse::ide::source(&app, d.span.file).map(|s| s.path.clone()).unwrap_or_default();
+            survey_gaps.push(roundhouse::ingest::IngestError::Unsupported { file, message: d.message.clone() });
+        }
+    }
     // Analyze + the post-analyze shared lowerings — type-directed IR
     // rewrites every target consumes (blank-predicate grounding,
     // `Time.current`). The returned residue diagnostics (sites a pass
