@@ -141,7 +141,7 @@ impl<'a> Specializer<'a> {
     pub fn method_body(&self, body: &Expr, sites: &mut Vec<Site>, residue: &mut Vec<Residue>) {
         let mut locals = HashMap::new();
         collect_locals(body, &mut locals);
-        let cx = Cx { locals: &locals, depth: Default::default(), args: HashMap::new(), self_chain: None };
+        let cx = Cx { locals: &locals, depth: Default::default(), args: HashMap::new(), arg_tys: HashMap::new(), self_chain: None };
         self.visit(body, &cx, sites, residue);
     }
 
@@ -337,7 +337,7 @@ impl<'a> Specializer<'a> {
                         return Err(format!("where on `{}`, not a column", column.as_str()));
                     }
                     if matches!(&*v.node, ExprNode::Hash { .. } | ExprNode::Array { .. } | ExprNode::Range { .. })
-                        || v.ty.as_ref().is_some_and(always_a_collection)
+                        || cx.ty_of(v).as_ref().is_some_and(always_a_collection)
                     {
                         return Err("where value is a collection".into());
                     }
@@ -441,10 +441,18 @@ impl<'a> Specializer<'a> {
             _ => &scope.body,
         };
         let mut bound = HashMap::new();
+        let mut bound_tys = HashMap::new();
         for (p, a) in scope.params.iter().zip(args) {
             bound.insert(p.name.clone(), self.value(a, cx)?);
+            bound_tys.insert(p.name.clone(), cx.ty_of(a));
         }
-        let inner = Cx { locals: cx.locals, depth: std::cell::Cell::new(cx.depth.get()), args: bound, self_chain: Some(chain.clone()) };
+        let inner = Cx {
+            locals: cx.locals,
+            depth: std::cell::Cell::new(cx.depth.get()),
+            args: bound,
+            arg_tys: bound_tys,
+            self_chain: Some(chain.clone()),
+        };
         let ExprNode::Send { recv, method, args, block: None, .. } = &*body.node else {
             return Err(format!("scope `{}` body is not a call chain", scope.name.as_str()));
         };
@@ -601,8 +609,21 @@ struct Cx<'b> {
     depth: std::cell::Cell<usize>,
     /// Scope parameters bound to the call's argument values.
     args: HashMap<Symbol, Val>,
+    /// Each bound parameter's type at the call site: the scope body types
+    /// its parameters without the call's arguments.
+    arg_tys: HashMap<Symbol, Option<Ty>>,
     /// The relation an inlined scope body runs against.
     self_chain: Option<Chain>,
+}
+
+impl Cx<'_> {
+    /// An expression's type, a scope parameter's being its call site's.
+    fn ty_of(&self, e: &Expr) -> Option<Ty> {
+        match &*e.node {
+            ExprNode::Var { name, .. } if self.args.contains_key(name) => self.arg_tys.get(name).cloned().flatten(),
+            _ => e.ty.clone(),
+        }
+    }
 }
 
 impl Chain {

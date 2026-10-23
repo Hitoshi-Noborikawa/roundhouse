@@ -1649,6 +1649,39 @@ end
         assert!(report.specialized.iter().any(|s| s.contains("members_controller.rb:6:")), "{:?}", report.specialized);
     }
 
+    /// A scope's parameter takes its call site's type: `by_names(rows.pluck(:name))`
+    /// binds an Array where the scope says `where(name: names)`, and is
+    /// left to Rails; `by_names(params[:name])` is still bound.
+    #[test]
+    fn a_scope_argument_carries_its_type() {
+        let files: Vec<(&str, &str)> = vec![
+            (
+                "db/schema.rb",
+                "ActiveRecord::Schema[8.1].define(version: 1) do\n  create_table \"members\", force: :cascade do |t|\n    t.string \"name\"\n    t.boolean \"active\"\n  end\nend\n",
+            ),
+            ("app/models/application_record.rb", "class ApplicationRecord < ActiveRecord::Base\n  primary_abstract_class\nend\n"),
+            ("app/models/member.rb", "class Member < ApplicationRecord\n  scope :by_names, ->(names) { where(name: names) }\nend\n"),
+            ("app/controllers/application_controller.rb", "class ApplicationController < ActionController::Base\nend\n"),
+            (
+                "app/controllers/members_controller.rb",
+                "class MembersController < ApplicationController\n  def index\n    rows = Member.where(active: true)\n    @named = Member.by_names(rows.pluck(:name)).to_a\n    @one = Member.by_names(params[:name]).to_a\n  end\nend\n",
+            ),
+            ("config/routes.rb", "Rails.application.routes.draw do\n  resources :members, only: [:index]\nend\n"),
+        ];
+        let tree: HashMap<PathBuf, Vec<u8>> =
+            files.iter().map(|(p, c)| (PathBuf::from(p), c.as_bytes().to_vec())).collect();
+        let mut app = ingest_app_from_tree(tree).expect("ingest");
+        Analyzer::new(&app).analyze(&mut app);
+        let mut out: Vec<(String, String)> = files.iter().map(|(p, c)| (p.to_string(), c.to_string())).collect();
+        let report = specialize(&app, &mut out).unwrap();
+        assert!(
+            report.residue.iter().any(|r| r.contains("members_controller.rb:4:") && r.contains("where value is a collection")),
+            "{:?}",
+            report.residue
+        );
+        assert!(report.specialized.iter().any(|s| s.contains("members_controller.rb:5:")), "{:?}", report.specialized);
+    }
+
     /// A parameter whose inferred type still holds a variable is not
     /// evidence: callers passing `[]` and `nil` type `name` as `Array[T] |
     /// nil`, while a call with a String is what the app runs. The site
