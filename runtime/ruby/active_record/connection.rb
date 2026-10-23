@@ -1454,6 +1454,42 @@ module ActiveRecord
       ActiveRecord.adapter.select_rows(sql).map { |row| instantiate(row) }
     end
 
+    # Not in base.rb: a block here would put one on every strict target's runtime.
+    def _run_save_callbacks
+      before_save
+      value = block_given? ? yield : true
+      after_save
+      value
+    end
+
+    def _run_create_callbacks
+      before_create
+      value = block_given? ? yield : true
+      after_create
+      value
+    end
+
+    def _run_update_callbacks
+      before_update
+      value = block_given? ? yield : true
+      after_update
+      value
+    end
+
+    def _run_destroy_callbacks
+      before_destroy
+      value = block_given? ? yield : true
+      after_destroy
+      value
+    end
+
+    def _run_validation_callbacks
+      before_validation
+      value = block_given? ? yield : true
+      after_validation
+      value
+    end
+
     # Rails' `update_attribute`: one writer, then save WITHOUT
     # validations (validation callbacks skipped too) — save callbacks
     # still run. Specs use it to construct records a validation would
