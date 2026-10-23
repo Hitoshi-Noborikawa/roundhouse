@@ -284,7 +284,7 @@ pub(crate) fn drop_expanded_hook_macros(app: &mut App, expanded: &HashSet<Symbol
         .library_classes
         .iter()
         .flat_map(|c| c.methods.iter().filter(|m| hooked(&c.name, m)))
-        .filter(|m| !expanded.contains(&m.name) && !mentioned(m.name.as_str(), sources))
+        .filter(|m| !expanded.contains(&m.name) && !implicitly_called(m.name.as_str()) && !mentioned(m.name.as_str(), sources))
         .map(|m| m.name.clone())
         .collect();
     let mut called: HashSet<Symbol> = HashSet::new();
@@ -355,7 +355,8 @@ fn hook_macro_table(app: &App) -> HashMap<Symbol, MethodDef> {
 /// the variable) keeps the reader a value known only when it runs.
 fn frozen_readers(app: &App, sources: &[SourceFile]) -> HashMap<(String, Symbol), Expr> {
     let mut out = HashMap::new();
-    let dead = uncalled_bodies(app, sources);
+    // Not computed up front: it scans every source per method, and most apps have no frozen reader to ask about.
+    let dead: std::cell::OnceCell<Vec<(usize, usize, usize)>> = std::cell::OnceCell::new();
     for class in &app.library_classes {
         let initial: HashMap<&str, &Expr> = class
             .class_ivar_initializers
@@ -389,6 +390,7 @@ fn frozen_readers(app: &App, sources: &[SourceFile]) -> HashMap<(String, Symbol)
                     continue;
                 }
                 let setters: Vec<&str> = writers.iter().map(|w| w.name.as_str().trim_end_matches('=')).collect();
+                let dead = dead.get_or_init(|| uncalled_bodies(app, sources));
                 if sources.iter().enumerate().any(|(i, source)| writes_through(&source.text, &setters, cvar.as_str(), &|at| dead.iter().any(|&(f, a, b)| f == i && a <= at && at < b))) {
                     continue;
                 }
@@ -447,6 +449,16 @@ fn uncalled_bodies(app: &App, sources: &[SourceFile]) -> Vec<(usize, usize, usiz
         }
     }
     out
+}
+
+// Not "unmentioned, so dead": Ruby and Rails call these by protocol, with no call in any source.
+fn implicitly_called(name: &str) -> bool {
+    matches!(
+        name,
+        "inherited" | "included" | "extended" | "prepended" | "method_added" | "method_missing" | "respond_to_missing?"
+            | "initialize" | "table_name_prefix" | "table_name_suffix" | "to_s" | "inspect" | "==" | "hash" | "eql?" | "<=>"
+            | "to_param" | "to_partial_path" | "model_name"
+    )
 }
 
 fn mentioned(name: &str, sources: &[SourceFile]) -> bool {
