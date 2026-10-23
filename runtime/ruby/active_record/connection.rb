@@ -595,6 +595,14 @@ module ActiveRecord
       sanitize_sql(statement)
     end
 
+    # Rails' `sanitize_sql_for_order` on a String: the ORDER BY fragment
+    # as written, unchanged. The Array form is not this: Rails 8.1 checks
+    # its fragment with `disallow_raw_sql!`, which a fragment holding `?`
+    # never passes (`UnknownAttributeReference`), so it stays unsupported.
+    def self.sanitize_sql_for_order(condition)
+      condition
+    end
+
     # Rails' `current_transaction`. One database, so every model's is the
     # same; what `after_commit` asks of it is whether one is open.
     def self.current_transaction

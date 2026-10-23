@@ -7540,6 +7540,53 @@ puts "sanitize_sql_array passed"
         .assert_passes();
 }
 
+/// `sanitize_sql_for_order` on a String is the fragment as written, and
+/// orders a relation through `Arel.sql`.
+#[test]
+fn sanitize_sql_for_order_is_supported() {
+    sanitize_sql_array_app()
+        .write(
+            "app/models/widget.rb",
+            r#"class Widget < ApplicationRecord
+  def self.quoted(value)
+    ActiveRecord::Base.sanitize_sql_array(["SELECT ? AS v", value])
+  end
+
+  def self.by_fragment
+    order(Arel.sql(ActiveRecord::Base.sanitize_sql_for_order("length(name) DESC"))).map(&:name)
+  end
+end
+"#,
+        )
+        .run_ruby(
+            r#"
+%w[bb a ccc].each { |n| Widget.create!(name: n) }
+raise Widget.by_fragment.inspect unless Widget.by_fragment == %w[ccc bb a]
+"#,
+        )
+        .assert_passes();
+}
+
+/// Rails' Array form of `sanitize_sql_for_order` is not modeled: Rails 8.1
+/// raises for a `?` fragment there. It keeps a refusal at check.
+#[test]
+fn sanitize_sql_for_order_refuses_the_array_form() {
+    // On Base, and on a model through implicit self.
+    for receiver in ["ActiveRecord::Base.", ""] {
+        let errors = sanitize_sql_array_app()
+            .edit(
+                "app/models/widget.rb",
+                "class Widget < ApplicationRecord\n",
+                &format!("class Widget < ApplicationRecord\n  def self.first_named(name)\n    order(Arel.sql({receiver}sanitize_sql_for_order([\"CASE WHEN name = ? THEN 0 ELSE 1 END\", name])))\n  end\n"),
+            )
+            .check_errors();
+        assert!(
+            errors.iter().any(|e| e.contains("sanitize_sql_for_order is modeled on a String only")),
+            "{receiver:?}: {errors:?}"
+        );
+    }
+}
+
 /// Relation#ids must preserve uuid / named string keys (#310).
 fn relation_ids_uuid_app() -> emit_and_run::Overlay {
     emit_and_run::empty_app()

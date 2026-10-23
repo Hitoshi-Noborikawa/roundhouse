@@ -139,7 +139,7 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
             .or_insert_with(connection_ty);
         base.class_methods.entry(Symbol::from("configurations")).or_insert(Ty::Untyped);
         base.class_methods.entry(Symbol::from("configurations=")).or_insert(Ty::Untyped);
-        for m in ["sanitize_sql", "sanitize_sql_array", "sanitize_sql_like"] {
+        for m in ["sanitize_sql", "sanitize_sql_array", "sanitize_sql_for_order", "sanitize_sql_like"] {
             base.class_methods.entry(Symbol::from(m)).or_insert(Ty::Str);
         }
         // Association / ActionText macro helpers call these on the

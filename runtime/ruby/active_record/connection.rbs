@@ -97,6 +97,7 @@ module ActiveRecord
     def self.connection: () -> Connection
     def self.sanitize_sql: (Array[untyped] statement) -> String
     def self.sanitize_sql_array: (Array[untyped] statement) -> String
+    def self.sanitize_sql_for_order: (String condition) -> String
     def self.current_transaction: () -> ActiveRecord::Transaction
     def self._after_commit: (^() -> nil work) -> nil
     def self._run_after_commits_from: (Integer from) -> nil

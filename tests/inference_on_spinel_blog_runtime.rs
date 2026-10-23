@@ -470,7 +470,10 @@ fn untyped_subexpressions_baseline() {
     // MEASURED 1086 on 2026-10-22: `merge` carries a merged `none` through
     // `other.explicit_none?`, read off the same untyped `other` its
     // `other.null_relation?` already reads (+1 in relation.rb).
-    const CEILING: usize = 1086;
+    // MEASURED 1085 on 2026-10-23, with `Base.sanitize_sql_for_order(condition)`
+    // answering its String unchanged; its parameter is a var on this
+    // RBS-less probe (`(String) -> String` in connection.rbs).
+    const CEILING: usize = 1085;
     assert!(
         existing_untyped <= CEILING && like_untyped <= LIKE_CEILING,
         "{} untyped sub-expressions on spinel-blog runtime — exceeds ledger: \
