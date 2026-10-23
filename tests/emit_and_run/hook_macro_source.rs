@@ -16,6 +16,7 @@ fn app() -> emit_and_run::Overlay {
             &format!("{GEM}/taggy.rb"),
             r#"require "taggy/config"
 require "taggy/tagged"
+require "taggy/extra"
 require "taggy/railtie" if defined?(Rails)
 
 module Taggy
@@ -44,6 +45,7 @@ end
             "module Taggy\n  module Config\n    @@registry = true\n\n    def registry\n      @@registry\n    end\n\n    \
              def registry=(value)\n      @@registry = value\n    end\n\n    def disable_registry\n      self.registry = false\n    end\n  end\nend\n",
         )
+        .write(&format!("{GEM}/taggy/extra.rb"), "module Taggy\n  def self.extra\n    1\n  end\nend\n")
         .write(
             &format!("{GEM}/taggy/tagged.rb"),
             "module Taggy\n  module Tagged\n    def tag_label\n      \"#{self.class.tag_cname}:#{self.class.tag_table}\"\n    end\n  end\nend\n",
@@ -63,8 +65,20 @@ fn a_hook_extended_macro_runs_as_rails_runs_it() {
 a = Article.create!(title: "Hello world", body: "body number one is long enough")
 raise "tag_label: #{a.tag_label.inspect}" unless a.tag_label == "Label:labels"
 raise "kinds: #{Taggy.kinds.inspect}" unless Taggy.kinds == ["Article"]
+raise "registry: #{Taggy.registry.inspect}" unless Taggy.registry == true
+raise "extra: #{Taggy.extra.inspect}" unless Taggy.extra == 1
 puts "ok"
 "#,
         )
         .assert_passes();
+}
+
+// Not emitted bare with no diagnostic: the class's superclass is known only once the gem has loaded.
+#[test]
+fn a_computed_superclass_is_reported() {
+    let errors = app()
+        .write(&format!("{GEM}/taggy/mark.rb"), "module Taggy\n  class Mark < Taggy.base.constantize\n  end\nend\n")
+        .edit(&format!("{GEM}/taggy.rb"), "require \"taggy/extra\"\n", "require \"taggy/extra\"\nrequire \"taggy/mark\"\n")
+        .check_errors();
+    assert!(errors.iter().any(|e| e.contains("`Taggy::Mark`'s superclass is computed")), "{errors:#?}");
 }

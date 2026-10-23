@@ -20,6 +20,25 @@ use crate::dialect::{MethodReceiver, ModelBodyItem};
 use crate::expr::ExprNode;
 
 pub(super) fn mark(app: &mut App) {
+    let modules: HashSet<String> =
+        app.library_classes.iter().filter(|lc| lc.is_module && lc.origin.is_none()).map(|lc| lc.name.0.as_str().to_string()).collect();
+    // Not only a class's: a module's `extend Configure` gives the module its readers, which the emit otherwise drops.
+    for lc in app.library_classes.iter_mut().filter(|lc| lc.is_module && lc.origin.is_none()) {
+        let owner = lc.name.0.as_str().to_string();
+        for expr in &mut lc.unknown_calls {
+            let ExprNode::Send { recv: None, method, args, block: None, .. } = &*expr.node else { continue };
+            let known = |a: &crate::expr::Expr| match &*a.node {
+                ExprNode::Const { path } => {
+                    let written = path.iter().map(|s| s.as_str()).filter(|s| !s.is_empty()).collect::<Vec<_>>().join("::");
+                    modules.contains(&written) || modules.contains(&format!("{owner}::{written}"))
+                }
+                _ => false,
+            };
+            if method.as_str() == "extend" && !args.is_empty() && args.iter().all(known) && !expr.span.is_synthetic() {
+                expr.decisions |= crate::expr::REPLAYED_CLASS_BODY;
+            }
+        }
+    }
     for lc in app.library_classes.iter_mut().filter(|lc| lc.origin.is_none()) {
         let own: HashSet<String> = lc
             .methods
@@ -43,8 +62,7 @@ pub(super) fn mark(app: &mut App) {
         entry.0 += 1;
         entry.1.extend(lc.methods.iter().filter(|m| m.receiver == MethodReceiver::Instance).map(|m| m.name.as_str().to_string()));
     }
-    // Not replayed through a reopened module: the Ruby emit keeps only one opening's methods, so the replayed call would raise at load.
-    let modules: Vec<(String, HashSet<String>)> = openings.into_iter().filter(|(_, (n, _))| *n == 1).map(|(name, (_, methods))| (name, methods)).collect();
+    let modules: Vec<(String, HashSet<String>)> = openings.into_iter().map(|(name, (_, methods))| (name, methods)).collect();
     for model in &mut app.models {
         let owner = model.name.0.as_str().to_string();
         let mut extended: Vec<usize> = Vec::new();

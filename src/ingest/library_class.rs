@@ -537,6 +537,14 @@ pub(super) fn library_class_and_struct_base(
         Some(_) => Some(struct_base_id(&owner)),
         None => parent,
     };
+    if parent.is_none() && class.superclass().is_some() {
+        super::prism::push(crate::diagnostic::Diagnostic::unsupported(
+            source_parent_span,
+            None,
+            "superclass",
+            format!("`{}`'s superclass is computed when the class loads (acts-as-taggable-on's `< ActsAsTaggableOn.base_class.constantize`), so the class is emitted without it", owner.0.as_str()),
+        ));
+    }
 
     let DeclBody {
         mut includes,

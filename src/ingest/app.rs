@@ -2365,6 +2365,7 @@ end
     // Before analysis too, so `check` types the recount the emit writes (`Origin.reset_counters(id, :stories)`), rather than reporting a method the lowering answers.
     crate::lower::reset_counters::apply_reset_counters_lowering(&mut app);
     super::app_extension_calls::mark(&mut app);
+    report_unmodelled_records(&app);
     super::unreachable_views::mark(&mut app);
     super::uncalled_helper_copies::mark(&mut app);
     let (rake_tasks_source, rake_task_gaps) = super::rake_tasks::ingest(vfs, dir);
@@ -2377,6 +2378,22 @@ end
 /// own `require` can mean. A require of anything else is the app's own
 /// file (Zeitwerk or `require_relative` territory) or a gem, which the
 /// Gemfile and the runtime wiring answer for.
+// Not a warning per dropped declaration: the class is not a model here at all, so none of its persistence exists.
+fn report_unmodelled_records(app: &App) {
+    for lc in app.library_classes.iter().filter(|lc| !lc.is_module) {
+        let Some(parent) = &lc.parent else { continue };
+        if parent.0.as_str().trim_start_matches("::") != "ActiveRecord::Base" || app.models.iter().any(|m| m.name == lc.name) {
+            continue;
+        }
+        super::prism::push(crate::diagnostic::Diagnostic::unsupported(
+            lc.parent_span,
+            None,
+            "ActiveRecord model outside app/models",
+            format!("`{}` extends ActiveRecord::Base from a file the app does not load as a model (a gem's, like audited's `Audited::Audit`), so its table, associations, scopes, validations and callbacks are missing", lc.name.0.as_str()),
+        ));
+    }
+}
+
 const APP_REQUIRABLE_STDLIB: &[&str] = &[
     "base64", "benchmark", "bigdecimal", "cgi", "csv", "date", "delegate", "digest",
     "digest/md5", "digest/sha1", "digest/sha2", "English", "erb", "etc", "fileutils", "find",

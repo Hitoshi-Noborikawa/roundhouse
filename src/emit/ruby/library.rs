@@ -221,7 +221,18 @@ pub(super) fn emit_library_class_decls(app: &App) -> Vec<EmittedFile> {
             }
             files
         })
-        .collect()
+        .fold(Vec::<EmittedFile>::new(), |mut out, file| {
+            // Not left to the tree's last-wins dedupe: a module opened in two files (rolify's `Rolify`) would lose one opening's methods.
+            match out.iter_mut().find(|f| f.path == file.path) {
+                Some(existing) if existing.content == file.content => {}
+                Some(existing) => {
+                    existing.content.push('\n');
+                    existing.content.push_str(&file.content);
+                }
+                None => out.push(file),
+            }
+            out
+        })
 }
 
 /// `Data.define(<symbols>)` — the factory `analyze::data` models.
