@@ -2399,9 +2399,10 @@ fn emit_assign(target: &LValue, value: &Expr) -> String {
                 // @article`) stands in for the `@article.x` it replaced, which
                 // unwrapped the implicitly-unwrapped ivar (`var article:
                 // Article!`). Inferred, the temp is an `Article?`; given the
-                // ivar's own type it unwraps as that read did. Only this temp:
-                // a user's local from an ivar may well hold its nil.
-                if crate::lower::controller_to_library::rewrites::is_build_owner_local(name.as_str())
+                // ivar's own type it unwraps as that read did. Only this temp,
+                // which lowering marks: a user's local from an ivar may well
+                // hold its nil.
+                if value.decisions & crate::expr::BUILD_OWNER != 0
                     && let ExprNode::Ivar { name } = &*value.node
                     && let Some(ty) = instance_prop_ty(name.as_str()).or_else(|| value.ty.clone())
                 {

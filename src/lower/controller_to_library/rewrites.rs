@@ -1322,9 +1322,11 @@ pub(super) fn rewrite_assoc_through_parent_typed(
                 let mut names = names.borrow_mut();
                 let owner_name = fresh_build_local("owner", &mut names);
                 let owner = Expr::new(e.span, ExprNode::Var { id: VarId(0), name: owner_name.clone() });
+                let mut owner_read = inner_recv.clone();
+                owner_read.decisions |= crate::expr::BUILD_OWNER;
                 let capture = Expr::new(e.span, ExprNode::Assign {
                     target: LValue::Var { id: VarId(0), name: owner_name },
-                    value: inner_recv.clone(),
+                    value: owner_read,
                 });
                 let build_target = if spec.is_some() || outer_args.is_empty() {
                     LValue::Var { id: VarId(0), name: fresh_build_local("record", &mut names) }
@@ -1728,13 +1730,6 @@ fn build_target_read(target: &LValue, span: Span) -> Expr {
         LValue::Ivar { name } => ExprNode::Ivar { name: name.clone() },
         _ => unreachable!("build destination is a local or instance variable"),
     })
-}
-
-/// Whether `name` is the owner temp an association build binds
-/// (`rh_build_owner_N = @article`): the owner the original `@article.x`
-/// read in place, unconditionally.
-pub(crate) fn is_build_owner_local(name: &str) -> bool {
-    name.strip_prefix("rh_build_owner_").is_some_and(|n| !n.is_empty() && n.chars().all(|c| c.is_ascii_digit()))
 }
 
 fn fresh_build_local(role: &str, names: &mut HashSet<Symbol>) -> Symbol {

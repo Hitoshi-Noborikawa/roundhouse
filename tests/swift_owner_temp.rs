@@ -44,3 +44,21 @@ fn a_local_that_tests_an_ivar_for_nil_stays_optional() {
     std::fs::remove_dir_all(&out).ok();
     assert!(product.contains("let cached = featuredImageCache"), "{product}");
 }
+
+/// The provenance is the build's own, not the name: an app local that
+/// happens to be spelled like the temp (`rh_build_owner_7 = @article`)
+/// is the user's and keeps its inferred optional.
+#[test]
+fn a_user_local_named_like_the_owner_temp_stays_optional() {
+    let (emitted, errors) = emit_and_run::real_blog()
+        .edit(
+            "app/controllers/comments_controller.rb",
+            "    @comment = @article.comments.find(params.expect(:id))\n",
+            "    rh_build_owner_7 = @article\n    head :not_found if rh_build_owner_7.nil?\n    @comment = @article.comments.find(params.expect(:id))\n",
+        )
+        .emit(BuildTarget::Swift);
+    assert!(errors.is_empty(), "{errors:#?}");
+    let controller = std::fs::read_to_string(emitted.join("Sources/App/app/controllers/CommentsController.swift")).expect("CommentsController.swift");
+    assert!(controller.contains("let rhBuildOwner0: Article = article"), "{controller}");
+    assert!(!controller.contains("rhBuildOwner7: Article"), "{controller}");
+}

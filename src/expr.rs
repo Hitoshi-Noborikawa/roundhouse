@@ -118,6 +118,11 @@ pub const RESOLVED_MIXIN: u64 = 1 << 22;
 /// can ask; `project::report_unsupported_bundled_constants` reports it elsewhere.
 pub const MODULE_QUERY: u64 = 1 << 23;
 
+/// The owner read an association build captures into its temp
+/// (`rh_build_owner_N = @article`): it stands in for the receiver of the
+/// `@article.x` the build replaced, which read the owner unconditionally.
+pub const BUILD_OWNER: u64 = 1 << 24;
+
 /// Whether `expr` is a [`SELF_BINDING`] cast.
 pub fn is_self_binding(expr: &Expr) -> bool {
     expr.decisions & SELF_BINDING != 0
