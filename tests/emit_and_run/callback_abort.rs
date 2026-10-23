@@ -5,6 +5,7 @@ use super::emit_and_run;
 const CALLBACKS: &str = r##"  LOG = []
   attr_accessor :stop_at
   before_validation { LOG << "bv"; throw(:abort) if stop_at == :bv }
+  after_validation { LOG << "av" if stop_at == :invalid }
   before_save { LOG << "bs"; helper_stop if stop_at == :bs }
   before_create { LOG << "bc"; throw(:abort) if stop_at == :bc }
   before_update { LOG << "bu"; throw(:abort) if stop_at == :bu }
@@ -41,10 +42,14 @@ check("save! bs", run { a = Article.new(title: "x", body: body); a.stop_at = :bs
 check("save bc", run { a = Article.new(title: "x", body: body); a.stop_at = :bc; a.save }, [false, ["bv", "bs", "bc"]])
 check("after_save as", run { a = Article.new(title: "x", body: body); a.stop_at = :as; a.save }, ["UncaughtThrowError: uncaught throw :abort", ["bv", "bs", "bc", "as"]])
 check("nothing inserted", Article.count, base)
+check("invalid runs after_validation", run { a = Article.new(title: "", body: body); a.stop_at = :invalid; a.save }, [false, ["bv", "av"]])
+check("bv halt clears earlier errors", run { a = Article.new(title: "", body: body); a.save; a.stop_at = :bv; a.save! }, ["ActiveRecord::RecordInvalid: Validation failed: ", ["bv", "bv"]])
 a = Article.create!(title: "u", body: body)
 check("update bu", run { a.stop_at = :bu; a.title = "v"; a.save }, [false, ["bv", "bs", "bu"]])
 check("update! bu", run { a.save! }, ["ActiveRecord::RecordNotSaved: Failed to save the record", ["bv", "bs", "bu"]])
 check("not updated", Article.find(a.id).title, "u")
+check("update_attribute bs", run { a.stop_at = :bs; a.update_attribute(:title, "w") }, [false, ["bs"]])
+check("update_attribute rolled back", Article.find(a.id).title, "u")
 check("destroy bd", run { a.stop_at = :bd; a.destroy }, [false, ["bd"]])
 check("destroy! bd", run { a.destroy! }, ["ActiveRecord::RecordNotDestroyed: Failed to destroy Article with id=#{a.id}", ["bd"]])
 check("not destroyed", [a.persisted?, Article.exists?(a.id)], [true, true])

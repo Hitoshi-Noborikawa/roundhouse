@@ -1526,6 +1526,7 @@ module ActiveRecord
       status = false
       self.class.transaction do
         status = save_after_validation
+        raise ActiveRecord::Rollback unless status
       end
       status
     end
@@ -1543,9 +1544,14 @@ module ActiveRecord
       status = false
       @_save_halted = false
       self.class.transaction do
-        # A before_validation halt is a failed validation (RecordInvalid), not a halted save.
-        ok = !_halted_by_abort { before_validation } && valid?
-        after_validation if ok
+        # Not left to valid?: a before_validation halt skips it, and Rails clears the errors ahead of that hook.
+        @errors = []
+        @error_details = []
+        ok = false
+        unless _halted_by_abort { before_validation }
+          ok = valid?
+          after_validation
+        end
         status = ok ? save_after_validation : false
         raise ActiveRecord::Rollback unless status
       end
