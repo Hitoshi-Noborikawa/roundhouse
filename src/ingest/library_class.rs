@@ -542,7 +542,7 @@ pub(super) fn library_class_and_struct_base(
             source_parent_span,
             None,
             "superclass",
-            format!("`{}`'s superclass is computed when the class loads (acts-as-taggable-on's `< ActsAsTaggableOn.base_class.constantize`), so the class is emitted without it", owner.0.as_str()),
+            format!("`{}`'s superclass is an expression evaluated when the class loads, not a constant, so the class is emitted without it", owner.0.as_str()),
         ));
     }
 
