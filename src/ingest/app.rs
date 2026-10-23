@@ -2440,7 +2440,7 @@ fn report_unmodelled_records(app: &App) {
         super::prism::push(crate::diagnostic::Diagnostic::unsupported(
             lc.parent_span,
             None,
-            "ActiveRecord model outside app/models",
+            super::UNMODELLED_RECORD,
             format!("`{}` extends ActiveRecord::Base from a file the app does not load as a model (a gem's, like audited's `Audited::Audit`), so its table, associations, scopes, validations and callbacks are missing", lc.name.0.as_str()),
         ));
     }

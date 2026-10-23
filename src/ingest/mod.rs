@@ -96,6 +96,11 @@ pub mod vite;
 mod visibility;
 
 pub use app::{ingest_app, ingest_app_from_tree, ingest_app_with_vfs};
+
+/// The construct an ActiveRecord class outside app/models is reported
+/// under (`app::report_unmodelled_records`): the CLI keys its per-target
+/// handling on it (#1278).
+pub const UNMODELLED_RECORD: &str = "ActiveRecord model outside app/models";
 pub use controller::ingest_controller;
 pub use expr::ingest_expr;
 pub use fixture::ingest_fixture_file;
