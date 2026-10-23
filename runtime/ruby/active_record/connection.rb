@@ -1541,14 +1541,31 @@ module ActiveRecord
     # ruby-family method the strict targets' base does not have.
     def save
       status = false
+      @_save_halted = false
       self.class.transaction do
-        before_validation
-        ok = valid?
-        after_validation
-        status = ok ? save_after_validation : false
+        ok = false
+        # Not one catch for the whole save: a before_validation halt is a failed validation (RecordInvalid), a later one is not.
+        catch(:abort) do
+          before_validation
+          ok = valid?
+          after_validation
+        end
+        if ok
+          @_save_halted = true
+          catch(:abort) do
+            status = save_after_validation
+            @_save_halted = false
+          end
+        end
         raise ActiveRecord::Rollback unless status
       end
       status
+    end
+
+    def save!
+      return self if save
+      raise RecordNotSaved.new("Failed to save the record", self) if @_save_halted
+      raise RecordInvalid, self
     end
 
     # `destroy` in a transaction too, for the same reason: a dependent
@@ -1556,15 +1573,25 @@ module ActiveRecord
     # base.rb's body, restated as `save` is.
     def destroy
       return self unless persisted?
+      halted = true
       self.class.transaction do
-        before_destroy
-        _adapter_delete
-        @persisted = false
-        @destroyed = true
-        after_destroy
-        _destroy_committed
+        catch(:abort) do
+          before_destroy
+          _adapter_delete
+          @persisted = false
+          @destroyed = true
+          after_destroy
+          _destroy_committed
+          halted = false
+        end
+        raise ActiveRecord::Rollback if halted
       end
-      self
+      halted ? false : self
+    end
+
+    def destroy!
+      return self if destroy
+      raise RecordNotDestroyed.new("Failed to destroy #{self.class.name} with id=#{id}", self)
     end
 
     # Rails' `touch` runs in a transaction too, and is an update as far

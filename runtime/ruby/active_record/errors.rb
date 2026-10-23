@@ -159,7 +159,7 @@ module ActiveRecord
     end
   end
 
-  # Raised by app code (`raise ActiveRecord::RecordNotSaved.new(msg, record)`) to answer 422 as Rails does; no runtime save path raises it yet.
+  # Raised by app code (`raise ActiveRecord::RecordNotSaved.new(msg, record)`) to answer 422 as Rails does, and by the Ruby targets' `save!` when a callback throws `:abort`.
   class RecordNotSaved < ActiveRecordError
     attr_reader :record
 
@@ -169,8 +169,8 @@ module ActiveRecord
     end
   end
 
-  # Raised by app code (`raise ActiveRecord::RecordNotDestroyed.new(msg, record)`).
-  # `destroy!` does not raise it: there is no abort channel on destroy yet.
+  # Raised by app code (`raise ActiveRecord::RecordNotDestroyed.new(msg, record)`),
+  # and by the Ruby targets' `destroy!` when a `before_destroy` throws `:abort`.
   class RecordNotDestroyed < ActiveRecordError
     attr_reader :record
 
