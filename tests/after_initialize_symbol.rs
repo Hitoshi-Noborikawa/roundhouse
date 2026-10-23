@@ -37,6 +37,33 @@ end
 
 class Tally < ApplicationRecord
   after_initialize :mark
+  after_initialize :one, :two
+  after_initialize { trail << :block }
+  after_initialize :three
+  after_initialize :close, :after_close, if: :open?
+  before_validation :close_v, :after_close_v, if: :open_v?
+
+  def trail
+    @trail ||= []
+  end
+
+  def one = trail << :one
+  def two = trail << :two
+  def three = trail << :three
+
+  def open? = @closed != true
+  def close
+    trail << :close
+    @closed = true
+  end
+  def after_close = trail << :after_close
+
+  def open_v? = @closed_v != true
+  def close_v
+    trail << :close_v
+    @closed_v = true
+  end
+  def after_close_v = trail << :after_close_v
 
   def marked?
     @marked == true
@@ -59,6 +86,16 @@ got = [u.salt, u.name, u.seen?].inspect
 raise "new(name: z): " + got unless got == %q([nil, "z", false])
 t = Tally.new(label: "x")
 raise "tally new: not marked" unless t.marked?
+# Declaration order, across one call, separate calls and a block; and
+# `if:` asked again before each target, so `close` skips `after_close`.
+got = t.trail.inspect
+raise "trail: " + got unless got == %q([:one, :two, :block, :three, :close])
+# The same per-target `if:` on a validation hook, run by `save` (a bare
+# `valid?` running it is #1140).
+v = Tally.new(label: "v")
+v.save!
+got = v.trail.inspect
+raise "validation trail: " + got unless got == %q([:one, :two, :block, :three, :close, :close_v])
 t.save!
 loaded = Tally.find(t.id)
 raise "tally find: not marked" unless loaded.marked?
