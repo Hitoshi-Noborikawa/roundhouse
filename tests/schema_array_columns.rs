@@ -61,9 +61,13 @@ fn the_analysis_keeps_the_element_type_for_now() {
 }
 
 fn warnings(target: &str) -> Vec<String> {
-    let root = std::env::temp_dir().join(format!("roundhouse-array-columns-{target}-{}", std::process::id()));
+    warnings_for(target, &files(), "base")
+}
+
+fn warnings_for(target: &str, files: &[(&str, &str)], tag: &str) -> Vec<String> {
+    let root = std::env::temp_dir().join(format!("roundhouse-array-columns-{tag}-{target}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&root);
-    for (path, body) in files() {
+    for &(path, body) in files {
         let file = root.join("app_src").join(path);
         std::fs::create_dir_all(file.parent().unwrap()).unwrap();
         std::fs::write(file, body).unwrap();
@@ -119,4 +123,23 @@ end
     let column = |name: &str| view.columns.iter().find(|c| c.name.as_str() == name).expect(name);
     assert!(column("tag_ids").array, "{:?}", column("tag_ids"));
     assert!(!column("name").array);
+}
+
+/// The view's array column is reported where the table's is.
+#[test]
+fn a_view_over_an_array_column_warns_too() {
+    let schema = format!(
+        "{}",
+        SCHEMA.replace(
+            "  end\nend\n",
+            "  end\n  create_view \"member_tags\", sql_definition: <<-SQL\n      SELECT members.name AS name, members.tag_ids AS tag_ids FROM members\n  SQL\nend\n",
+        )
+    );
+    let mut files = files();
+    files[0] = ("db/schema.rb", schema.as_str());
+    for target in ["ruby", "rust"] {
+        let lines = warnings_for(target, &files, "view");
+        assert!(lines.iter().any(|l| l.contains("member_tags") && l.contains("`tag_ids`")), "{target}: {lines:#?}");
+        assert_eq!(lines.len(), 3, "the two table columns and the view's\n{target}: {lines:#?}");
+    }
 }
