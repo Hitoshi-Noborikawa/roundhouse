@@ -28,6 +28,7 @@ mod broadcasts;
 mod inertia;
 mod process_action;
 pub mod params;
+mod params_sources;
 mod permit_splat;
 mod typed_update;
 pub mod params_wrapper;

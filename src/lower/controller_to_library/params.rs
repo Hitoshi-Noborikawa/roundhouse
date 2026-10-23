@@ -53,6 +53,7 @@ use crate::dialect::{
 use crate::effect::EffectSet;
 use crate::expr::{Arm, Expr, ExprNode, LValue, Literal, Pattern};
 use crate::ident::{ClassId, Symbol, VarId};
+use crate::lower::typing::with_ty;
 use crate::naming::camelize;
 use crate::span::Span;
 use crate::ty::Ty;
@@ -294,7 +295,8 @@ fn scan_create_demand(controllers: &[Controller], specs: &mut ParamsSpecs) {
     let mut demand: Vec<(ClassId, bool)> = Vec::new();
     let mut to_attrs: Vec<ClassId> = Vec::new();
     let mut as_json: Vec<ClassId> = Vec::new();
-    // Read-only for the whole walk; the two demand lists are applied
+    let mut except: Vec<ClassId> = Vec::new();
+    // Read-only for the whole walk; the demand lists are applied
     // after it, which is what keeps this a shared borrow.
     let specs_ro: &ParamsSpecs = specs;
     for c in controllers {
@@ -307,10 +309,18 @@ fn scan_create_demand(controllers: &[Controller], specs: &mut ParamsSpecs) {
         let helper_classes: BTreeMap<Symbol, ClassId> =
             helpers.iter().map(|(n, s)| (n.clone(), s.class_id.clone())).collect();
         for action in &actions {
+            let sources = super::params_sources::ParamsSources::new(
+                &action.body, helper_classes.clone(), specs_ro,
+            );
             walk_all(&action.body, &mut |e| {
                 let ExprNode::Send { recv: Some(recv), method, args, .. } = &*e.node else {
                     return;
                 };
+                if method.as_str() == "except" {
+                    if let Some(class) = sources.class(recv, specs_ro) {
+                        except.push(class);
+                    }
+                }
                 // `<params-source>.to_attrs` — the attribute-hash
                 // conversion `params_merge` writes at a call site whose
                 // callee takes a hash, not a params object.
@@ -370,6 +380,11 @@ fn scan_create_demand(controllers: &[Controller], specs: &mut ParamsSpecs) {
     for class_id in as_json {
         if let Some(spec) = specs.specs.iter_mut().find(|s| s.class_id == class_id) {
             spec.wants_as_json = true;
+        }
+    }
+    for class_id in except {
+        if let Some(spec) = specs.specs.iter_mut().find(|s| s.class_id == class_id) {
+            spec.wants_except = true;
         }
     }
 }
@@ -902,10 +917,8 @@ where
 ///   - the permit chain written inline: `params.require(:hat_request)
 ///     .permit(:hat, :link, :reason)` — lobsters' `HatsController`
 ///     writes it straight into `update!`
-///   - either of those under an in-place filter: `.except(:reason)`,
-///     `.compact`. Both narrow WHICH fields the object reports as
-///     provided and return the object itself, so the class is the
-///     receiver's.
+///   - either of those under `.except(:reason)` or `.compact`, whose
+///     result has the receiver's params class.
 pub(crate) fn params_source_class(
     expr: &Expr,
     helpers: &BTreeMap<Symbol, ClassId>,
@@ -914,6 +927,12 @@ pub(crate) fn params_source_class(
     if let ExprNode::Send { recv: Some(recv), method, block: None, .. } = &*expr.node {
         if matches!(method.as_str(), "except" | "compact") {
             return params_source_class(recv, helpers, specs);
+        }
+        if method.as_str() == "from_raw" {
+            if let ExprNode::Const { path } = &*recv.node {
+                return specs.iter().find(|s| Some(&s.class_id.0) == path.last())
+                    .map(|s| s.class_id.clone());
+            }
         }
     }
     if let ExprNode::Send { recv: None, method, args, block: None, .. } = &*expr.node {
@@ -1273,7 +1292,7 @@ fn build_params_class(spec: &ParamsSpec) -> LibraryClass {
         methods.push(synth_to_attrs(&spec.class_id, &spec.fields));
     }
     if spec.wants_except {
-        methods.push(synth_except(&spec.class_id, &spec.fields));
+        methods.push(synth_except(spec));
     }
 
     // Provenance: every synthesized body attributes to the
@@ -1414,46 +1433,67 @@ fn synth_attr_reader(owner: &ClassId, field: &Symbol, ty: Ty) -> MethodDef {
     }
 }
 
-/// `def except(key)` — mark the named field not-provided and return
-/// self. Rails' `permitted.except(:reason)` drops a key before `update`
-/// consumes the params, and "dropped" is exactly what the
-/// `<field>_provided` flag says. Clearing the flag (rather than nilling
-/// the value slot, which is what this used to do) keeps the slot a
-/// plain `String` — a nil write there would ask every strict target to
-/// flow-narrow an Option through `update`'s guard.
-///
-/// The receiver is always a fresh `from_raw` product at the corpus
-/// sites, so mutate-and-return stands in for Rails' copy semantics.
-fn synth_except(owner: &ClassId, fields: &[Symbol]) -> MethodDef {
-    let key = Symbol::from("key");
-    let key_read = |()| Expr::new(
-        Span::synthetic(),
-        ExprNode::Var { id: VarId(0), name: key.clone() },
-    );
-    let mut stmts: Vec<Expr> = Vec::new();
-    for field in fields {
-        let cond = Expr::new(
+/// Copy the params record and clear only the copy's requested presence flags.
+/// A local alias can retain the receiver, so mutating it would change
+/// subsequent builds from the original permitted parameters.
+fn synth_except(spec: &ParamsSpec) -> MethodDef {
+    let owner = &spec.class_id;
+    let owner_ty = Ty::Class { id: owner.clone(), args: vec![].into() };
+    let span = Span::synthetic();
+    let result = Symbol::from("result");
+    let result_read = || with_ty(Expr::new(span, ExprNode::Var {
+        id: VarId(1), name: result.clone(),
+    }), owner_ty.clone());
+    let setter = |field: &Symbol, value: Expr| Expr::new(span, ExprNode::Send {
+        recv: Some(result_read()), method: Symbol::from(format!("{field}=")),
+        args: vec![value], block: None, parenthesized: false,
+    });
+    let keys = Symbol::from("keys");
+    let keys_ty = Ty::Array { elem: Ty::Union { variants: vec![Ty::Sym, Ty::Str].into() }.into() };
+    let keys_read = || with_ty(Expr::new(span,
+        ExprNode::Var { id: VarId(0), name: keys.clone() },
+    ), keys_ty.clone());
+    let mut stmts = vec![Expr::new(span, ExprNode::Assign {
+        target: LValue::Var { id: VarId(1), name: result.clone() },
+        value: with_ty(Expr::new(span, ExprNode::Send {
+            recv: Some(Expr::new(span, ExprNode::Const {
+                path: owner.0.as_str().split("::").map(Symbol::from).collect(),
+            })),
+            method: Symbol::from("new"), args: vec![], block: None, parenthesized: false,
+        }), owner_ty.clone()),
+    })];
+    for field in &spec.fields {
+        let provided = provided_field(field);
+        stmts.push(setter(field, with_ty(
+            Expr::new(span, ExprNode::Ivar { name: field.clone() }), field_ty(spec, field),
+        )));
+        stmts.push(setter(&provided, with_ty(
+            Expr::new(span, ExprNode::Ivar { name: provided.clone() }), Ty::Bool,
+        )));
+        let includes = |value| Expr::new(
             Span::synthetic(),
             ExprNode::Send {
-                recv: Some(key_read(())),
-                method: Symbol::from("=="),
+                recv: Some(keys_read()),
+                method: Symbol::from("include?"),
                 args: vec![Expr::new(
                     Span::synthetic(),
-                    ExprNode::Lit { value: Literal::Sym { value: field.clone() } },
+                    ExprNode::Lit { value },
                 )],
                 block: None,
                 parenthesized: false,
             },
         );
-        let clear = Expr::new(
-            Span::synthetic(),
-            ExprNode::Assign {
-                target: LValue::Ivar { name: provided_field(field) },
-                value: Expr::new(
+        let cond = Expr::new(span, ExprNode::BoolOp {
+            op: crate::expr::BoolOpKind::Or,
+            surface: Default::default(),
+            left: includes(Literal::Sym { value: field.clone() }),
+            right: includes(Literal::Str { value: field.as_str().into() }),
+        });
+        let clear = setter(&provided,
+                Expr::new(
                     Span::synthetic(),
                     ExprNode::Lit { value: Literal::Bool { value: false } },
                 ),
-            },
         );
         stmts.push(Expr::new(
             Span::synthetic(),
@@ -1467,9 +1507,8 @@ fn synth_except(owner: &ClassId, fields: &[Symbol]) -> MethodDef {
             },
         ));
     }
-    stmts.push(Expr::new(Span::synthetic(), ExprNode::SelfRef));
-    let body = Expr::new(Span::synthetic(), ExprNode::Seq { exprs: stmts });
-    let owner_ty = Ty::Class { id: owner.clone(), args: vec![].into() };
+    stmts.push(result_read());
+    let body = with_ty(Expr::new(span, ExprNode::Seq { exprs: stmts }), owner_ty.clone());
     MethodDef {
         visibility: crate::dialect::MethodVisibility::Public,
         unsupported_formals: None,
@@ -1477,14 +1516,21 @@ fn synth_except(owner: &ClassId, fields: &[Symbol]) -> MethodDef {
         name_span: crate::span::Span::synthetic(),
         name: Symbol::from("except"),
         receiver: MethodReceiver::Instance,
-        params: vec![Param::positional(key.clone())],
+        params: vec![Param::rest(keys.clone())],
         body,
-        signature: Some(fn_sig(vec![(key, Ty::Sym)], owner_ty)),
+        signature: Some(Ty::Fn {
+            params: vec![crate::ty::Param {
+                name: keys, ty: keys_ty.into(), kind: crate::ty::ParamKind::Rest,
+            }].into(),
+            block: None,
+            ret: owner_ty.into(),
+            effects: EffectSet::pure(),
+        }),
         effects: EffectSet::default(),
         enclosing_class: Some(owner.0.clone()),
         kind: AccessorKind::Method,
         is_async: false,
-        mutates_self: true,
+        mutates_self: false,
         block_param: None,
     }
 }
