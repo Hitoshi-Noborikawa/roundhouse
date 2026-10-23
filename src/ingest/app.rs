@@ -557,6 +557,15 @@ pub fn ingest_app_with_vfs<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResult
         table_prefixes.entry(module).or_insert(prefix);
     }
     let base_prefixes = super::model::inherited_table_prefixes(&class_prefixes, &base_pairs);
+    // What runs at boot, before models load and routes are drawn: a
+    // constant an initializer appends to, replaces or reassigns has that
+    // value when a validation or a constraint reads it, not the input's.
+    let boot_files = boot_source_files(vfs, dir);
+    for file in &boot_files {
+        if let Ok(text) = vfs.read(file) {
+            enum_constants.record_boot(&text, &file.display().to_string());
+        }
+    }
     enum_constants.finish();
     model_bases.close_over(&base_pairs);
     for root in &roots {
@@ -1627,6 +1636,11 @@ end
                     route_inputs.record_again(&text, &file.display().to_string());
                 }
             }
+            for file in &boot_files {
+                if let Ok(text) = vfs.read(file) {
+                    route_inputs.record_boot(&text, &file.display().to_string());
+                }
+            }
             route_inputs.finish();
             let mut route_consts = super::model::ClassConsts::default();
             for text in std::iter::once(&source).chain(draw_files.values().map(|(s, _)| s)) {
@@ -2133,7 +2147,11 @@ end
         }
     }
 
-    enum_constants.validate_consumed_sources(&app, &sources, &enum_input_files)?;
+    // The boot sources were observed before the folds; observing them
+    // again would count each of their writes twice.
+    let observed: std::collections::HashSet<PathBuf> =
+        enum_input_files.iter().chain(boot_files.iter()).cloned().collect();
+    enum_constants.validate_consumed_sources(&app, &sources, &observed)?;
     keep_initializer_defined(&mut app, dir, &sources, initializer_defined);
     // `self.queue_adapter =` on ApplicationJob (see `App::queue_adapter`).
     apply_application_job_queue_adapter(&mut app);
@@ -7008,6 +7026,27 @@ fn walk_jbuilder<V: Vfs + ?Sized>(
 /// listing silently ignored them — on Mastodon that dropped 306 of 337
 /// controller files (admin/, api/, settings/, concerns/) with no gap
 /// recorded anywhere. The textbook silent gap; never again.
+/// The Ruby an app runs at boot, before it loads models and draws
+/// routes: `config/application.rb`, `config/environment.rb`,
+/// `config/boot.rb`, each `config/environments/*.rb` (whichever one
+/// runs), and every `config/initializers` file.
+fn boot_source_files<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> Vec<PathBuf> {
+    let config = dir.join("config");
+    let mut files: Vec<PathBuf> = ["application.rb", "environment.rb", "boot.rb"]
+        .iter()
+        .map(|name| config.join(name))
+        .filter(|path| vfs.exists(path) && !vfs.is_dir(path))
+        .collect();
+    for sub in ["environments", "initializers"] {
+        let sub_dir = config.join(sub);
+        if vfs.is_dir(&sub_dir) {
+            files.extend(read_rb_files(vfs, &sub_dir).unwrap_or_default());
+        }
+    }
+    files.sort();
+    files
+}
+
 pub(super) fn read_rb_files<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResult<Vec<PathBuf>> {
     fn collect<V: Vfs + ?Sized>(
         vfs: &V,

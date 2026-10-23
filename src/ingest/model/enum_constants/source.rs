@@ -15,6 +15,10 @@ use crate::ingest::prism_api::PrismLocation;
 enum SourceKind {
     Inputs,
     Mutations,
+    /// A source that runs at boot, before models load and routes are
+    /// drawn (`config/initializers`): it admits no constant input, but a
+    /// constant it writes or mutates no longer has the input's value.
+    Boot,
 }
 
 impl EnumConstants {
@@ -32,6 +36,15 @@ impl EnumConstants {
     /// Observe nonlibrary sources without admitting new constant inputs.
     pub(in crate::ingest) fn record_mutations(&mut self, source: &[u8], file: &str) {
         self.collect(source, file, SourceKind::Mutations, true);
+    }
+
+    /// Observe a source that runs at boot (an initializer) before the
+    /// folds: it admits no input, and a constant it reassigns, mutates,
+    /// or names in `const_set` / `remove_const` is tainted
+    /// ([`super::super::ConstTaint::scan_boot`]). Its own top-level
+    /// `NAME = …` defines a top-level name and taints no other owner's.
+    pub(in crate::ingest) fn record_boot(&mut self, source: &[u8], file: &str) {
+        self.collect(source, file, SourceKind::Boot, true);
     }
 
     fn collect(&mut self, source: &[u8], file: &str, kind: SourceKind, silent: bool) {
@@ -234,7 +247,7 @@ impl EnumConstants {
                 // A consumed (non-input) source is read after the models:
                 // its declarations are never recorded, only marked.
                 if let Some(declaration) = super::super::enum_declaration(&call)
-                    && (matches!(self.kind, SourceKind::Mutations)
+                    && (!matches!(self.kind, SourceKind::Inputs)
                         || !matches!(self.parents.as_slice(), [.., Node::ClassNode { .. }, Node::StatementsNode { .. }]))
                 {
                     constants
@@ -260,7 +273,14 @@ impl EnumConstants {
                         )
                     });
                 self.constants.record_write(&node, &self.nesting, direct);
-                if direct && node.as_constant_write_node().is_some() {
+                // A boot source's program-level `NAME = …` defines a
+                // top-level constant: not a write to another owner's.
+                let boot_top_level = matches!(self.kind, SourceKind::Boot)
+                    && self.nesting.is_empty()
+                    && self.parents.iter().all(|parent| {
+                        matches!(parent, Node::ProgramNode { .. } | Node::StatementsNode { .. })
+                    });
+                if (direct || boot_top_level) && node.as_constant_write_node().is_some() {
                     self.direct_writes.insert(node.location().start_offset());
                 }
                 // `const_set(:X, …)` / `self.send(:remove_const, :X)` in a
@@ -438,10 +458,29 @@ impl EnumConstants {
             };
             ruby_prism::Visit::visit(&mut collector, &result.node());
             let direct_writes = collector.direct_writes;
-            if matches!(kind, SourceKind::Inputs) {
-                let (tainted, reflected) = super::super::ConstTaint::scan_tree(&result.node(), direct_writes);
-                self.foreign_taint.extend(tainted);
-                self.reflected.extend(reflected);
+            match kind {
+                SourceKind::Inputs => {
+                    let (tainted, reflected) = super::super::ConstTaint::scan_tree(&result.node(), direct_writes);
+                    self.foreign_taint.extend(tainted);
+                    self.reflected.extend(reflected);
+                }
+                // A boot source calls the app's classes freely (`Gadget.count`):
+                // a taint rooted at a class or module the inputs define is
+                // not a constant it changes.
+                SourceKind::Boot => {
+                    let owners: std::collections::HashSet<&str> = self
+                        .values
+                        .iter()
+                        .filter(|(_, value)| matches!(value, EnumConstant::Namespace))
+                        .filter_map(|(name, _)| name.rsplit("::").next())
+                        .collect();
+                    let tainted: Vec<String> = super::super::ConstTaint::scan_boot(&result.node(), direct_writes)
+                        .into_iter()
+                        .filter(|name| !owners.contains(name.as_str()))
+                        .collect();
+                    self.foreign_taint.extend(tainted);
+                }
+                SourceKind::Mutations => {}
             }
         }
     }

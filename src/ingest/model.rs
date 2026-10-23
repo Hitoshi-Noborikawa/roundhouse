@@ -1512,6 +1512,9 @@ struct ConstTaint {
     /// The constants a [`REFLECTION_METHODS`] call's receiver chain is
     /// rooted at (`Rule.const_set`): owners whose constants it may replace.
     reflected: std::collections::HashSet<String>,
+    /// The constant a `const_set(:NAME, …)` / `remove_const(:NAME)` call
+    /// names, whatever its receiver.
+    named_writes: std::collections::HashSet<String>,
 }
 
 /// Calls on an owner that can write or remove its constants, run code in
@@ -1602,6 +1605,7 @@ impl ConstTaint {
             tainted: Default::default(),
             aliases: Vec::new(),
             reflected: Default::default(),
+            named_writes: Default::default(),
         };
         for stmt in stmts {
             ruby_prism::Visit::visit(&mut scan, stmt);
@@ -1628,11 +1632,37 @@ impl ConstTaint {
             tainted: Default::default(),
             aliases: Vec::new(),
             reflected: Default::default(),
+            named_writes: Default::default(),
         };
         ruby_prism::Visit::visit(&mut scan, root);
         let ConstTaint { mut tainted, aliases, reflected, .. } = scan;
         Self::alias_closure(&mut tainted, &aliases);
         (tainted, reflected)
+    }
+
+    /// The names a source that runs at boot may leave with another value:
+    /// the constants it writes outside `direct_writes`, mutates or lets a
+    /// variable hold, and each constant a `const_set` / `remove_const`
+    /// names. A call on an owner (`Gadget.count`, `Vendor::Gadget.class_eval`)
+    /// is not a write to one of its constants: a mutation inside the
+    /// block is scanned on its own.
+    pub(super) fn scan_boot(
+        root: &Node<'_>,
+        direct_writes: std::collections::HashSet<usize>,
+    ) -> std::collections::HashSet<String> {
+        let mut scan = ConstTaint {
+            top_level: direct_writes,
+            top_writes: Default::default(),
+            tainted: Default::default(),
+            aliases: Vec::new(),
+            reflected: Default::default(),
+            named_writes: Default::default(),
+        };
+        ruby_prism::Visit::visit(&mut scan, root);
+        let ConstTaint { mut tainted, aliases, named_writes, .. } = scan;
+        Self::alias_closure(&mut tainted, &aliases);
+        tainted.extend(named_writes);
+        tainted
     }
 
     fn alias_closure(tainted: &mut std::collections::HashSet<String>, aliases: &[(String, String)]) {
@@ -1728,6 +1758,9 @@ impl<'pr> ruby_prism::Visit<'pr> for ConstTaint {
                 if let Some(root) = chain_root(&recv) {
                     self.tainted.insert(root);
                 }
+            }
+            if let Some(name) = named_constant_write(node) {
+                self.named_writes.insert(name);
             }
             if REFLECTION_METHODS.contains(&method.as_ref()) {
                 if let Some(root) = chain_root(&recv) {
