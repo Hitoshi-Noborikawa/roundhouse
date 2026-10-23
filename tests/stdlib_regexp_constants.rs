@@ -54,7 +54,7 @@ fn format_of<'a>(model: &'a roundhouse::Model, attr: &str) -> Option<(&'a str, &
     model.body.iter().find_map(|item| match item {
         roundhouse::dialect::ModelBodyItem::Validation { validation, .. } if validation.attribute.as_str() == attr => {
             validation.rules.iter().find_map(|rule| match rule {
-                ValidationRule::Format { pattern, flags } => Some((pattern.as_str(), flags.as_str())),
+                ValidationRule::Format { pattern, flags, .. } => Some((pattern.as_str(), flags.as_str())),
                 _ => None,
             })
         }

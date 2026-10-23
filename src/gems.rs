@@ -254,6 +254,9 @@ pub struct Lockfile {
     /// Runtime dependencies of each resolved spec, in lockfile order.
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub spec_deps: std::collections::BTreeMap<String, Vec<String>>,
+    /// The `PLATFORMS` section.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub platforms: Vec<String>,
 }
 
 /// One `GIT` source from a Bundler lockfile.
@@ -337,6 +340,11 @@ impl Lockfile {
                         }
                     }
                 }
+                "PLATFORMS" => {
+                    if indent == 2 {
+                        lock.platforms.push(body.to_string());
+                    }
+                }
                 "DEPENDENCIES" => {
                     if indent == 2 {
                         // `rails (~> 8.0.2)` / `debug` / `rails!` (a
@@ -401,6 +409,12 @@ impl Lockfile {
 
     pub fn version_of(&self, name: &str) -> Option<&str> {
         self.specs.iter().find(|(n, _)| n == name).map(|(_, v)| v.as_str())
+    }
+
+    // Not cut at the first `-`: `1.2.3-alpha` is a prerelease, only a listed platform is a suffix.
+    pub fn release_version_of(&self, name: &str) -> Option<&str> {
+        let version = self.version_of(name)?;
+        Some(self.platforms.iter().find_map(|p| version.strip_suffix(p.as_str())?.strip_suffix('-')).unwrap_or(version))
     }
 }
 
@@ -1419,6 +1433,15 @@ pub(crate) fn gems_owning_constant_with<'a>(census: &'a GemCensus, constant_path
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_release_version_drops_only_a_listed_platform() {
+        let lock = Lockfile::parse("GEM\n  specs:\n    nokogiri (1.18.3-arm64-darwin)\n    pre (1.2.3-alpha)\n    rails (8.0.2)\n\nPLATFORMS\n  arm64-darwin\n  ruby\n");
+        assert_eq!(lock.release_version_of("nokogiri"), Some("1.18.3"));
+        assert_eq!(lock.release_version_of("pre"), Some("1.2.3-alpha"));
+        assert_eq!(lock.release_version_of("rails"), Some("8.0.2"));
+        assert_eq!(lock.release_version_of("absent"), None);
+    }
 
     #[test]
     fn git_activation_orders_dependencies_and_terminates_cycles() {

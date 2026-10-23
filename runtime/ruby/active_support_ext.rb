@@ -68,6 +68,13 @@ module ActiveSupport
       JsonBuilder.escape_html_entities(::JSON.generate(ActiveSupport::JSON.jsonable(value)))
     end
 
+    # `encode(value, escape: false)`, which `lower::symbolize_keys`
+    # routes here: the same document without the HTML-entity escaping,
+    # for text no page embeds (a digest's input).
+    def self.encode_without_escape(value)
+      ::JSON.generate(ActiveSupport::JSON.jsonable(value))
+    end
+
     def self.decode(text)
       ::JSON.parse(text)
     end
@@ -477,6 +484,24 @@ module ActiveSupport
       i = i + 1
     end
     out
+  end
+
+  # AS `String#first(limit = 1)` / `String#last(limit = 1)`
+  # (core_ext/string/access.rb): the leading or trailing `limit`
+  # characters, the whole String when it is shorter, and ArgumentError
+  # for a negative limit. A String reopen the transpiled runtimes cannot
+  # host, as `squish` below. Campfire binds its transfer link to
+  # `password_salt&.last(10)`.
+  def self.string_first(text, limit)
+    head = text[0, limit]
+    raise ArgumentError, "negative limit" if head.nil?
+    head
+  end
+
+  def self.string_last(text, limit)
+    tail = text[[text.length - limit, 0].max, limit]
+    raise ArgumentError, "negative limit" if tail.nil?
+    tail
   end
 
   # Rails' destructive form always returns the same receiver, including

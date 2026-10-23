@@ -1,6 +1,7 @@
 module ActiveSupport
   module JSON
     def self.encode: (untyped value) -> String
+    def self.encode_without_escape: (untyped value) -> String
     def self.decode: (String text) -> untyped
     def self.jsonable: (untyped value) -> untyped
     def self.time_json: (::Time t) -> String
@@ -67,6 +68,8 @@ module ActiveSupport
   def self.cast_integer: (::Object? value) -> Integer?
   def self.integer_from_string: (String value) -> Integer?
   def self.integer_from_bytes: (Array[Integer] raw) -> Integer
+  def self.string_first: (String text, Integer limit) -> String
+  def self.string_last: (String text, Integer limit) -> String
   def self.squish: (String text) -> String
   def self.squish!: (String text) -> String
   def self.truncate: (String text, Integer truncate_to, String? omission, String? separator) -> String

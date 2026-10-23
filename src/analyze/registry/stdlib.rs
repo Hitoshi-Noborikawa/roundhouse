@@ -142,15 +142,15 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
     // it). `Time - x` arithmetic still resolves to `Untyped` inside
     // `time_method` because receiver-only dispatch can't tell a
     // Duration arg (→ Time) from a Time arg (→ Float).
-    let time_ty = || Ty::Class {
-        id: ClassId(Symbol::from("Time")),
-        args: vec![].into(),
-    };
+    let time_ty = || Ty::Time;
     let mut time_cls = ClassInfo::default();
     time_cls.class_methods.insert(Symbol::from("current"), time_ty());
     time_cls.class_methods.insert(Symbol::from("now"), time_ty());
-    time_cls.class_methods.insert(Symbol::from("zone"), time_ty());
     time_cls.class_methods.insert(Symbol::from("at"), time_ty());
+    time_cls.class_methods.insert(Symbol::from("zone"), Ty::Class {
+        id: ClassId(Symbol::from("Time")),
+        args: vec![].into(),
+    });
     time_cls.class_methods.insert(Symbol::from("find_zone"), Ty::Union {
         variants: vec![
             Ty::Class { id: ClassId(Symbol::from("ActiveSupport::TimeZone")), args: vec![].into() },
@@ -379,6 +379,10 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
         ("html_escape", Ty::Str), ("h", Ty::Str),
         ("url_encode", Ty::Str), ("u", Ty::Str), ("json_escape", Ty::Str),
     ], &[]);
+    // ActiveSupport's `Digest::UUID.uuid_v4` is `SecureRandom.uuid`
+    // (`lower::random_formatter` writes it so). `uuid_v5` / `uuid_v3`
+    // hash a namespace and are not registered: they stay refused.
+    register_stdlib_class(classes, "Digest::UUID", &[("uuid_v4", Ty::Str)], &[]);
     for digest in ["Digest::MD5", "Digest::SHA1", "Digest::SHA256"] {
         register_stdlib_class(classes, digest, &[
             ("hexdigest", Ty::Str), ("digest", Ty::Str),
@@ -617,6 +621,7 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
     // answers the document; `decode` whatever the document holds.
     register_stdlib_class(classes, "ActiveSupport::JSON", &[
         ("encode", Ty::Str),
+        ("encode_without_escape", Ty::Str),
         ("decode", Ty::Untyped),
         ("time_json", Ty::Str),
         ("time_fragment", Ty::Str),
@@ -791,7 +796,7 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
         "Exception", "StandardError", "RuntimeError", "ArgumentError",
         "TypeError", "NameError", "NoMethodError", "IndexError",
         "KeyError", "RangeError", "IOError", "IO::TimeoutError", "NotImplementedError",
-        "FrozenError", "ZeroDivisionError", "StopIteration",
+        "FrozenError", "ZeroDivisionError", "FloatDomainError", "StopIteration",
         "ThreadError", "ClosedQueueError", "RegexpError",
         // CRuby's bundled libraries and Spinel's uri/net/json packages
         // recognize these exception names; emitted requires load them.
@@ -943,6 +948,10 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
     register_stdlib_class(classes, "ActiveRecord::Type::String", &[], &[
         ("cast", Ty::Union { variants: vec![Ty::Str, Ty::Nil].into() }),
         ("deserialize", Ty::Union { variants: vec![Ty::Str, Ty::Nil].into() }),
+    ]);
+    // What `Model.type_for_attribute(name)` answers on the ruby family: the column's type name, nil for no column.
+    register_stdlib_class(classes, "ActiveRecord::Type::Value", &[], &[
+        ("type", Ty::Union { variants: vec![Ty::Sym, Ty::Nil].into() }),
     ]);
     register_stdlib_class(classes, "ActiveRecord::Type::Integer", &[], &[
         ("cast", Ty::Union { variants: vec![Ty::Int, Ty::Nil].into() }),
@@ -1160,6 +1169,19 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
     register_stdlib_class(classes, "Proc", &[], &[
         ("call", Ty::Untyped), ("arity", Ty::Int), ("lambda?", Ty::Bool),
     ]);
+    // `Method.method_defined?(:source_location)` (aasm's invokers): the class as a value only.
+    register_stdlib_class(classes, "Method", &[], &[]);
+    // Rubygems' version value, which the ruby family and spinel load with Ruby itself.
+    {
+        let version = || Ty::Class { id: ClassId(Symbol::from("Gem::Version")), args: vec![].into() };
+        register_stdlib_class(classes, "Gem::Version", &[("correct?", Ty::Bool)], &[
+            ("<=>", Ty::Union { variants: vec![Ty::Int, Ty::Nil].into() }),
+            ("<", Ty::Bool), ("<=", Ty::Bool), (">", Ty::Bool), (">=", Ty::Bool), ("==", Ty::Bool),
+            ("eql?", Ty::Bool), ("hash", Ty::Int),
+            ("to_s", Ty::Str), ("version", Ty::Str), ("prerelease?", Ty::Bool),
+            ("release", version()), ("bump", version()),
+        ]);
+    }
     register_stdlib_class(classes, "Mutex", &[], &[]);
     // The queue constructors, Thread's core aliases, and the standard
     // mixins likewise need exact entries for source constant resolution.

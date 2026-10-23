@@ -300,6 +300,7 @@ module ActiveRecord
     def lock!: (?(bool | String)? lock) -> Base
     # `touch` is no-arg on purpose; see the note on the body.
     def touch: () -> bool
+    def touch_later: () -> bool
     def touch_written: () -> bool
 
     # Lifecycle hooks — no-op defaults. Subclasses override.

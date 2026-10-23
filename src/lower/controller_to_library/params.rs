@@ -981,6 +981,16 @@ fn match_permit_call_full(expr: &Expr) -> Option<(Symbol, Vec<Symbol>, Vec<Symbo
         return Some((resource, fields, nested));
     }
 
+    // `<permit-chain>.compact` — the same fields. Rails drops nil-valued
+    // keys; the record's presence flags (`Params.provided` answers false
+    // for a nil, or any non-String, value) already leave those unset, so
+    // the chain under it is the whole answer. Seen through so a merge
+    // written after it (campfire's `permit(…).compact.merge(password_
+    // challenge: …)`) is still Form 3.
+    if method.as_str() == "compact" && args.is_empty() {
+        return match_permit_call_full(recv);
+    }
+
     // Form 3: `<permit-chain>.merge(field: expr, …)` — server-side
     // fields folded into the permitted set (lobsters merges
     // `edit_user_id: @user.id` after permit). The merged keys join the
@@ -2075,7 +2085,14 @@ pub fn rewrite_to_from_raw(expr: &Expr, specs: &ParamsSpecs, guard: bool) -> Exp
                 let (resource, fields) = match_permit_call(e)?;
                 let spec = specs.find(&resource, &fields)?;
                 let ExprNode::Hash { entries, .. } = &*args[0].node else { return None };
-                let arg = factory_arg(recv, guard, e.span);
+                // The factory reads the permit chain's own shape, under a
+                // `.compact` (see `match_permit_call_full`).
+                let chain = match &*recv.node {
+                    ExprNode::Send { recv: Some(inner), method, args, block: None, .. }
+                        if method.as_str() == "compact" && args.is_empty() => inner,
+                    _ => recv,
+                };
+                let arg = factory_arg(chain, guard, e.span);
                 return Some(build_from_raw_merge(&spec.class_id, entries, e.span, arg));
             }
         }

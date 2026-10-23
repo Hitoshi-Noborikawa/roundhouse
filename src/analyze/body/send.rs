@@ -1070,6 +1070,17 @@ impl<'a> BodyTyper<'a> {
         args: &[crate::expr::Expr],
         instance_receiver: bool,
     ) -> Ty {
+        // Not the stdlib's String form too: the port reads `other.octets`, which a String lacks.
+        if let Some(Ty::Class { id, .. }) = recv_ty
+            && id.0.as_str() == "IPAddr"
+            && instance_receiver
+            && method.as_str() == "include?"
+            && let [other] = args
+            && matches!(other.ty.as_ref(), Some(Ty::Class { id: o, .. }) if o.0.as_str() == "IPAddr")
+            && other.decisions & crate::expr::CLASS_OBJECT_VALUE == 0
+        {
+            return Ty::Bool;
+        }
         // `Parameters` is a Hash-shaped bag: what its own class does not
         // answer (`fetch`, `each`, `map`, `count`, ...) is the Hash
         // reading over Symbol -> param value. Done here,
@@ -1834,6 +1845,7 @@ impl<'a> BodyTyper<'a> {
                         // none. campfire's `Webhook#extract_text_from`
                         // is the shape.
                         "String" => return Ty::Str,
+                        "Time" => return Ty::Time,
                         _ => {}
                     }
                     return Ty::Class { id: id.clone(), args: args.clone() };
@@ -1893,7 +1905,14 @@ impl<'a> BodyTyper<'a> {
                     return block_ret.filter(|t| !matches!(t, Ty::Var { .. })).cloned().unwrap_or(Ty::Untyped);
                 }
                 if id.0.as_str() == "Time" {
-                    if let Some(ty) = time_method(method) {
+                    let ty = if instance_receiver && matches!(method.as_str(), "now" | "at") {
+                        Some(Ty::Time)
+                    } else if instance_receiver {
+                        time_method(method)
+                    } else {
+                        time_class_method(method)
+                    };
+                    if let Some(ty) = ty {
                         return ty;
                     }
                 }
@@ -2637,20 +2656,27 @@ pub(super) fn range_method(method: &Symbol, elem: Option<&Ty>) -> Option<Ty> {
     Some(ty)
 }
 
+fn time_class_method(method: &Symbol) -> Option<Ty> {
+    match method.as_str() {
+        "now" | "current" | "at" | "utc" | "gm" | "local" | "mktime"
+        | "iso8601" | "xmlschema" | "httpdate" | "rfc2822" | "rfc822" | "strptime" => Some(Ty::Time),
+        _ => None,
+    }
+}
+
 /// Methods on a `Time` value — modeled as the first-class `Ty::Time`
 /// variant. AR datetime columns type as `Ty::Time` (see
 /// `ingest::model::ty_of_column`), so this is the surface a column read
-/// like `story.created_at.strftime(...)` dispatches against. The `Time`
-/// class constant (`Ty::Class{"Time"}`, the receiver of `Time.now`)
-/// flattens onto the same table, so the class-side constructors live
-/// here too. DateTime/time-of-day columns also use `Ty::Time`;
+/// like `story.created_at.strftime(...)` dispatches against. Class-side
+/// constructors and parsers use `time_class_method` instead.
+/// DateTime/time-of-day columns also use `Ty::Time`;
 /// date-only columns have their own table. Returns `None` for unmodeled methods so dispatch falls
 /// through to the parent-chain walk.
 pub(super) fn time_method(method: &Symbol) -> Option<Ty> {
     let time = || Ty::Time;
     let ty = match method.as_str() {
-        // Constructors, coercions, and Time-returning transforms.
-        "now" | "current" | "utc" | "local" | "at" | "today"
+        // Coercions and Time-returning transforms.
+        "utc" | "local" | "today"
         | "to_time" | "in_time_zone" | "localtime" | "getlocal" | "getutc"
         | "beginning_of_day" | "end_of_day" | "beginning_of_hour" | "end_of_hour"
         | "beginning_of_week" | "end_of_week" | "beginning_of_month" | "end_of_month"
@@ -2677,7 +2703,7 @@ pub(super) fn time_method(method: &Symbol) -> Option<Ty> {
             args: vec![time()].into(),
         },
         // String renderings.
-        "iso8601" | "rfc2822" | "rfc3339" | "to_s" | "to_fs" | "to_formatted_s"
+        "iso8601" | "xmlschema" | "rfc2822" | "rfc3339" | "to_s" | "to_fs" | "to_formatted_s"
         | "strftime" | "httpdate" | "rfc822" | "ctime" | "asctime" | "inspect"
         | "zone" => Ty::Str,
         // Integer components / epoch seconds / spaceship.
@@ -3351,12 +3377,15 @@ pub(super) fn hash_method(
         // non-nil form as `.get(k).cloned().unwrap_or(default)` — a
         // `V`, not an `Option` (`emit/rust/expr/send/index.rs:414`).
         //
-        // The one-arg form raises `KeyError` rather than answering
-        // nil, so `value` alone would be right; it stays `value | Nil`
-        // because the extra arm only costs a nil-check and every
-        // target's one-arg path is written against it.
-        "fetch" => match args.get(1).and_then(|a| a.ty.clone()) {
-            Some(default) if !default.is_open() => union_of(value.clone(), default),
+        // The one-arg form answers the value or raises `KeyError`, never
+        // nil, so it is `value`, as `Array#fetch(i)` is its element (#1014:
+        // a `value | Nil` made `RANKS.fetch(k) + 1` an incompatible_binop).
+        // Each strict target's one-arg path raises on a missing key. A
+        // block answers a miss with its value.
+        "fetch" => match (args.len(), args.get(1).and_then(|a| a.ty.clone()), block_ret) {
+            (1, _, None) => value.clone(),
+            (1, _, Some(missed)) if !missed.is_open() => union_of(value.clone(), missed.clone()),
+            (_, Some(default), _) if !default.is_open() => union_of(value.clone(), default),
             _ => Ty::Union { variants: vec![value.clone(), Ty::Nil].into() },
         },
         "merge" => Ty::Hash {
