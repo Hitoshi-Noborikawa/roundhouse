@@ -335,6 +335,20 @@ impl EnumConstants {
                             }
                         })
                         .or_insert(value);
+                    // A top-level `class ActivityPub::CollectionsController`
+                    // runs only where `ActivityPub` already exists, which
+                    // Zeitwerk defines from the directory when no file
+                    // declares it: its enclosing names are namespaces.
+                    // Inside another body the path resolves lexically
+                    // (`module Wrapper; class T::Enum` reopens `::T`), so
+                    // nothing is assumed there.
+                    if qualified && owner.is_empty() {
+                        let mut enclosing = name.as_str();
+                        while let Some((parent, _)) = enclosing.rsplit_once("::") {
+                            self.constants.values.entry(parent.to_string()).or_insert(EnumConstant::Namespace);
+                            enclosing = parent;
+                        }
+                    }
                     // Classes and modules both own lexical constant
                     // lookup — concern `TYPES` inside `included do`
                     // resolves through the module entry the same way a
