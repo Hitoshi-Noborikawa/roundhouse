@@ -91,3 +91,17 @@ fn a_nested_freeze_in_a_literal_constant_answers_its_receiver() {
     assert!(rack.contains("static NESTED = { \"a\": [1, 2], \"b\": { \"c\": \"d\" } };"), "{rack}");
     assert!(!rack.contains(".freeze"), "{rack}");
 }
+
+/// A constant shadowing an ancestor's static of the same name is typed
+/// `any`: TypeScript requires a child's static side to be assignable to
+/// its parent's (TS2417), and the Ruby values may be of different kinds.
+#[test]
+fn a_constant_shadowing_an_ancestors_static_is_typed_any() {
+    let (emitted, errors) = class_constants::shadow_overlay().emit(BuildTarget::Typescript);
+    assert!(errors.is_empty(), "{errors:?}");
+    let read = |p: &str| std::fs::read_to_string(emitted.join(p)).unwrap_or_else(|e| panic!("{p}: {e}"));
+    let dial = read("app/models/dial.ts");
+    let meter = read("app/models/meter.ts");
+    assert!(dial.contains("static WEIGHTS: any = \"s\";"), "{dial}");
+    assert!(meter.contains("static WEIGHTS = { \"a\": 1 };"), "{meter}");
+}

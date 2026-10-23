@@ -140,6 +140,51 @@ pub(crate) struct ClassShape {
 }
 
 std::thread_local! {
+    /// Each class this emit knows: its parent and the constants its body
+    /// declares as `static` members (`set_static_constants`).
+    static STATIC_CONSTANTS: std::cell::RefCell<HashMap<String, (Option<String>, HashSet<String>)>> =
+        std::cell::RefCell::new(HashMap::new());
+}
+
+/// Record, for `classes`, each one's parent and the class-body constants
+/// the TypeScript emit declares as `static` members.
+pub(crate) fn set_static_constants<'a>(classes: impl IntoIterator<Item = &'a crate::dialect::LibraryClass>) {
+    let mut map: HashMap<String, (Option<String>, HashSet<String>)> = HashMap::new();
+    for c in classes {
+        let entry = map.entry(c.name.0.as_str().to_string()).or_default();
+        if entry.0.is_none() {
+            entry.0 = c.parent.as_ref().map(|p| p.0.as_str().to_string());
+        }
+        for (name, value) in &c.constants {
+            if super::declarable_constant_value(value).is_some() {
+                entry.1.insert(name.as_str().to_string());
+            }
+        }
+    }
+    STATIC_CONSTANTS.with(|cell| *cell.borrow_mut() = map);
+}
+
+/// Whether an ancestor of a class whose parent is `parent` declares a
+/// `static` constant `name`: a child's own constant of that name shadows
+/// it, as Ruby's does, and TypeScript requires the child's static side to
+/// be assignable to the parent's, so the child's is typed `any`.
+pub(crate) fn ancestor_declares_static(parent: Option<&str>, name: &str) -> bool {
+    STATIC_CONSTANTS.with(|cell| {
+        let map = cell.borrow();
+        let mut current = parent.map(str::to_string);
+        for _ in 0..16 {
+            let Some(class) = current else { return false };
+            let Some((next, statics)) = map.get(&class) else { return false };
+            if statics.contains(name) {
+                return true;
+            }
+            current = next.clone();
+        }
+        false
+    })
+}
+
+std::thread_local! {
     static NESTED_CLASS_NAMES: std::cell::RefCell<HashSet<String>> =
         std::cell::RefCell::new(HashSet::new());
 }

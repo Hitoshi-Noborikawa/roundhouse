@@ -330,6 +330,20 @@ fn real_blog_model_constant_reads_run_under_tsx() {
 
 #[test]
 #[ignore]
+fn real_blog_shadowing_constant_runs_under_tsx() {
+    // A child's constant shadowing its parent's answers its own value, and
+    // the parent's still answers the parent's (#1223).
+    let (emitted, errors) = class_constants::shadow_overlay().emit(roundhouse::project::BuildTarget::Typescript);
+    assert!(errors.is_empty(), "{errors:?}");
+    let out = run_under_tsx(
+        &emitted,
+        "import { Dial } from \"./app/models/dial.js\";\nconsole.log(Dial.summary());\n",
+    );
+    assert_eq!(out, class_constants::SHADOW_SUMMARY);
+}
+
+#[test]
+#[ignore]
 fn real_blog_array_methods_run_under_tsx() {
     // The Array methods the emit translates answer as CRuby does,
     // empty-Array and not-found answers included.
