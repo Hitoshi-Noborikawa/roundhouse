@@ -94,8 +94,9 @@ fn a_constant_regex_with_a_modifier_stays_a_gap() {
 /// The table itself, against actionpack 8.1.4's router.
 #[test]
 fn rails_answers_the_table() {
-    if !Command::new("ruby").args(["-raction_controller", "-e", "1"]).status().is_ok_and(|s| s.success()) {
-        eprintln!("skipping: ruby with the actionpack gem not available");
+    let probe = r#"gem "actionpack", "8.1.4"; require "action_controller""#;
+    if !Command::new("ruby").args(["-e", probe]).status().is_ok_and(|s| s.success()) {
+        eprintln!("skipping: ruby with actionpack 8.1.4 not available");
         return;
     }
     let script = format!(
@@ -129,4 +130,24 @@ end
         output.status.success() && stdout.contains("Rails agrees"),
         "actionpack 8.1.4 disagrees with the table\n=== stdout ===\n{stdout}\n=== stderr ===\n{stderr}"
     );
+}
+
+/// A controller file that is also an autoload input (an app that adds
+/// `app/controllers/concerns` to its autoload paths) is recorded once:
+/// a second recording counted its constant as written twice, which
+/// refuses the fold.
+#[test]
+fn a_controller_file_on_the_autoload_paths_folds_once() {
+    let tree: std::collections::HashMap<std::path::PathBuf, Vec<u8>> = [
+        ("db/schema.rb", "ActiveRecord::Schema[8.1].define(version: 1) do\nend\n"),
+        ("config/application.rb", "module App\n  class Application < Rails::Application\n    config.autoload_paths << Rails.root.join(\"app\", \"controllers\", \"concerns\")\n  end\nend\n"),
+        ("app/controllers/application_controller.rb", "class ApplicationController < ActionController::Base\nend\n"),
+        ("app/controllers/concerns/kinds.rb", "module Kinds\n  LIST = %w[featured tags].freeze\nend\n"),
+        ("app/controllers/collections_controller.rb", "class CollectionsController < ApplicationController\n  def show\n    head :ok\n  end\nend\n"),
+        ("config/routes.rb", "Rails.application.routes.draw do\n  get \"/collections/:id\", to: \"collections#show\", constraints: { id: Regexp.union(Kinds::LIST) }\nend\n"),
+    ]
+    .into_iter()
+    .map(|(p, s)| (std::path::PathBuf::from(p), s.as_bytes().to_vec()))
+    .collect();
+    roundhouse::ingest::ingest_app_from_tree(tree).expect("the constraint folds");
 }

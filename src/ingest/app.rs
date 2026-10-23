@@ -1616,7 +1616,12 @@ end
                     route_files.extend(read_rb_files(vfs, &controllers_dir)?);
                 }
             }
+            // A controller can also be an autoload input (an app that adds
+            // `app/controllers/concerns` to its autoload paths); recorded
+            // twice, its constants would count as written twice and fold
+            // nowhere.
             route_files.sort();
+            route_files.dedup();
             for file in &route_files {
                 if let Ok(text) = vfs.read(file) {
                     route_inputs.record_again(&text, &file.display().to_string());
