@@ -1055,16 +1055,6 @@ module ActiveRecord
       true
     end
 
-    def update_attribute(name, value)
-      self[name] = value
-      status = false
-      self.class.transaction do
-        status = save_after_validation
-        raise ActiveRecord::Rollback unless status
-      end
-      status
-    end
-
     # `record.update_columns(a: 1, b: 2)` — several attributes at once,
     # the same way: no validations, no callbacks, no timestamps.
     def update_columns(attributes)

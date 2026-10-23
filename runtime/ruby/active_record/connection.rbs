@@ -189,7 +189,6 @@ module ActiveRecord
     def self.first: () -> Base?
     def self.take: () -> Base?
     def self._hydrate_all: (String sql) -> Array[Base]
-    def update_attribute: (Symbol name, untyped value) -> bool
     def save: () -> bool
     def destroy: () -> Base
     def touch: () -> bool
