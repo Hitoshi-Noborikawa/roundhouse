@@ -1338,6 +1338,7 @@ pub struct AssocRegistry {
     /// model -> its superclass model, so `Article < Publication` builds
     /// and finds through the associations its abstract base declares.
     model_parents: HashMap<ClassId, ClassId>,
+    has_many_poly: HashMap<(ClassId, Symbol), (Symbol, String)>,
 }
 
 /// One association declaration, as the parent-ivar rewrite reads it
@@ -1477,6 +1478,7 @@ impl AssocRegistry {
             None => {
                 self.has_many_unseedable.iter().any(|(_, a)| a == assoc)
                     || self.has_many_owner_key.keys().any(|(_, a)| a == assoc)
+                    || self.has_many_poly.keys().any(|(_, a)| a == assoc)
             }
         }
     }
@@ -1488,7 +1490,10 @@ impl AssocRegistry {
             .cloned()
             .unwrap_or_else(|| Symbol::from("id"))
     }
-    fn is_model(&self, class: &ClassId) -> bool {
+    fn has_many_poly(&self, model: Option<&ClassId>, assoc: &Symbol) -> Option<&(Symbol, String)> {
+        model.and_then(|m| self.has_many_poly.get(&(m.clone(), assoc.clone())))
+    }
+        fn is_model(&self, class: &ClassId) -> bool {
         self.tables.contains_key(class)
     }
     /// The models `owner` may be, `nil` aside, for a `<owner>.<assoc>`
@@ -1641,6 +1646,7 @@ impl AssocRegistry {
             has_many_inverse,
             assoc_builds,
             model_parents: _,
+            has_many_poly,
         } = self;
         let key = (model.clone(), name.clone());
         join_tails.remove(&key);
@@ -1655,6 +1661,7 @@ impl AssocRegistry {
         assoc_extension.remove(&key);
         has_many_inverse.remove(&key);
         assoc_builds.remove(&key);
+        has_many_poly.remove(&key);
     }
 }
 
@@ -1883,10 +1890,24 @@ pub fn build_assoc_registry(models: &[Model]) -> AssocRegistry {
                         reg.has_many_owner_key
                             .insert((m.name.clone(), name.clone()), owner_key.clone());
                     }
-                    if as_interface.is_some()
-                        || scope.as_ref().is_some_and(|s| !scope_is_row_preserving(s))
-                    {
+                    if scope.as_ref().is_some_and(|s| !scope_is_row_preserving(s)) {
                         reg.has_many_unseedable.insert((m.name.clone(), name.clone()));
+                    }
+                    if let Some(interface) = as_interface {
+                        // Rails stores the base class: an STI subclass's rows name its table's root model
+                        let mut base = m;
+                        while let Some(parent) = base
+                            .parent
+                            .as_ref()
+                            .and_then(|p| models.iter().find(|x| &x.name == p))
+                            .filter(|p| p.table == base.table)
+                        {
+                            base = parent;
+                        }
+                        reg.has_many_poly.insert(
+                            (m.name.clone(), name.clone()),
+                            (Symbol::from(format!("{}_type", interface.as_str())), base.name.0.as_str().to_string()),
+                        );
                     }
                     let t = reg.table_for(target);
                     reg.join_tails.insert(
@@ -2505,6 +2526,11 @@ pub fn mentions_assoc_lookup(expr: &Expr, assocs: &AssocRegistry) -> bool {
                             | "in_batches"
                             | "maximum"
                             | "minimum"
+                            // Array answers neither: acts_as_follower's `follows.find_or_create_by(…)`
+                            | "find_or_create_by"
+                            | "find_or_initialize_by"
+                            | "create_or_find_by"
+                            | "create_or_find_by!"
                     )
             {
                 if let ExprNode::Send { method: aname, args: aargs, block: None, .. } = &*r.node {
@@ -3007,6 +3033,8 @@ fn is_relation_terminal(name: &str, args: &[Expr], block: Option<&Expr>) -> bool
                 // looks its endpoint up on a parked `Current.user
                 // .push_subscriptions` read this way since c8f74a0.
                 | "find_or_initialize_by"
+                | "create_or_find_by"
+                | "create_or_find_by!"
         ),
     }
 }
@@ -4503,6 +4531,16 @@ fn rewrite_send(expr: &mut Expr, ctx: &Ctx, locals: &mut Locals) -> Option<Class
                         .cloned()
                     };
                     if let Some((target, fk, owner_id)) = resolved {
+                        let owner_model: Option<ClassId> = match &*ir.node {
+                            ExprNode::SelfRef => ctx.instance_self.clone(),
+                            _ => assoc_read_target(ir, aname, ctx.assocs).and_then(|(owner, _, _)| owner),
+                        };
+                        let type_entry = ctx.assocs.has_many_poly(owner_model.as_ref(), aname).map(|(col, owner_class)| {
+                            (
+                                syn(span, ExprNode::Lit { value: Literal::Sym { value: col.clone() } }),
+                                syn(span, ExprNode::Lit { value: Literal::Str { value: owner_class.clone() } }),
+                            )
+                        });
                         // CollectionProxy constructors: `story.comments
                         // .build(attrs)` constructs the target with the
                         // association's FK preset — `Comment.new(attrs…,
@@ -4543,16 +4581,17 @@ fn rewrite_send(expr: &mut Expr, ctx: &Ctx, locals: &mut Locals) -> Option<Class
                                     owner_id.clone(),
                                 ),
                             };
+                            let preset: Vec<(Expr, Expr)> = std::iter::once(fk_entry).chain(type_entry.clone()).collect();
                             let merged: Option<Vec<Expr>> = if args.is_empty() {
                                 Some(vec![syn(
                                     span,
-                                    ExprNode::Hash { entries: vec![fk_entry], kwargs: true },
+                                    ExprNode::Hash { entries: preset.clone(), kwargs: true },
                                 )])
                             } else if args.len() == 1 {
                                 match &*args[0].node {
                                     ExprNode::Hash { entries, kwargs: true } => {
                                         let mut entries = entries.clone();
-                                        entries.push(fk_entry);
+                                        entries.extend(preset.clone());
                                         Some(vec![syn(
                                             span,
                                             ExprNode::Hash { entries, kwargs: true },
@@ -4578,7 +4617,7 @@ fn rewrite_send(expr: &mut Expr, ctx: &Ctx, locals: &mut Locals) -> Option<Class
                                         match &*margs[0].node {
                                             ExprNode::Hash { entries, kwargs: true } => {
                                                 let mut entries = entries.clone();
-                                                entries.push(fk_entry);
+                                                entries.extend(preset.clone());
                                                 Some(vec![syn(
                                                     span,
                                                     ExprNode::Send {
@@ -4642,13 +4681,15 @@ fn rewrite_send(expr: &mut Expr, ctx: &Ctx, locals: &mut Locals) -> Option<Class
                             let fk_hash = syn(
                                 span,
                                 ExprNode::Hash {
-                                    entries: vec![(
+                                    entries: std::iter::once((
                                         syn(
                                             span,
                                             ExprNode::Lit { value: Literal::Sym { value: fk } },
                                         ),
                                         owner_id,
-                                    )],
+                                    ))
+                                    .chain(type_entry.clone())
+                                    .collect(),
                                     kwargs: true,
                                 },
                             );

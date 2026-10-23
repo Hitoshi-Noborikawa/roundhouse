@@ -805,6 +805,8 @@ const RUNTIME_ATTRS_SLOTS: &[&str] = &[
     "find_or_initialize_by",
     "find_or_create_by",
     "find_or_create_by!",
+    "create_or_find_by",
+    "create_or_find_by!",
 ];
 
 fn convert_attributes_assignments(app: &mut App, specs: &ParamsSpecs) {

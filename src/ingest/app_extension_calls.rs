@@ -20,6 +20,21 @@ use crate::dialect::{MethodReceiver, ModelBodyItem};
 use crate::expr::ExprNode;
 
 pub(super) fn mark(app: &mut App) {
+    for lc in app.library_classes.iter_mut().filter(|lc| lc.origin.is_none()) {
+        let own: HashSet<String> = lc
+            .methods
+            .iter()
+            .filter(|m| m.receiver == MethodReceiver::Class)
+            .map(|m| m.name.as_str().to_string())
+            .collect();
+        for expr in &mut lc.unknown_calls {
+            let ExprNode::Send { recv, method, .. } = &*expr.node else { continue };
+            let on_self = recv.as_ref().is_none_or(|r| matches!(&*r.node, ExprNode::SelfRef));
+            if on_self && own.contains(method.as_str()) && !expr.span.is_synthetic() {
+                expr.decisions |= crate::expr::REPLAYED_CLASS_BODY;
+            }
+        }
+    }
     let mut openings: std::collections::BTreeMap<String, (usize, HashSet<String>)> = Default::default();
     for lc in app.library_classes.iter().filter(|lc| lc.is_module && lc.origin.is_none()) {
         let entry = openings.entry(lc.name.0.as_str().to_string()).or_default();

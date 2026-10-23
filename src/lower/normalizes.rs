@@ -181,7 +181,7 @@ pub fn apply_normalizes_finder_lowering(app: &mut App) {
 }
 
 const FINDERS: &[&str] =
-    &["find_by", "find_by!", "where", "exists?", "find_or_create_by", "find_or_initialize_by"];
+    &["find_by", "find_by!", "where", "exists?", "find_or_create_by", "find_or_initialize_by", "create_or_find_by", "create_or_find_by!"];
 
 fn rewrite(e: &mut Expr, normalized: &HashMap<ClassId, Vec<Symbol>>) {
     e.node.for_each_child_mut(&mut |c| rewrite(c, normalized));

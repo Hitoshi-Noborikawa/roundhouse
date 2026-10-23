@@ -175,6 +175,73 @@ pub(crate) fn expand_class_macros(app: &mut App, sources: &[SourceFile]) {
     }
 }
 
+pub(crate) fn hook_macro_calls(app: &App) -> HashSet<Symbol> {
+    let hooks = hook_macro_table(app);
+    let mut called = HashSet::new();
+    for model in &app.models {
+        for item in &model.body {
+            let ModelBodyItem::Unknown { expr, .. } = item else { continue };
+            if let ExprNode::Send { recv, method, .. } = &*expr.node
+                && recv.as_ref().is_none_or(|r| matches!(&*r.node, ExprNode::SelfRef))
+                && hooks.contains_key(method)
+            {
+                called.insert(method.clone());
+            }
+        }
+    }
+    called
+}
+
+/// Not kept once expanded: analyzed on the gem's module, the macro's `has_many` and `include` are reported.
+pub(crate) fn drop_expanded_hook_macros(app: &mut App, expanded: &HashSet<Symbol>) {
+    if expanded.is_empty() {
+        return;
+    }
+    let mut called: HashSet<Symbol> = HashSet::new();
+    let mut note = |e: &Expr| {
+        visit(e, &mut |x| {
+            if let ExprNode::Send { method, .. } = &*x.node
+                && expanded.contains(method)
+            {
+                called.insert(method.clone());
+            }
+        })
+    };
+    for model in &app.models {
+        for item in &model.body {
+            if let ModelBodyItem::Unknown { expr, .. } = item {
+                note(expr);
+            }
+        }
+        for m in model.methods() {
+            note(&m.body);
+        }
+    }
+    for class in &app.library_classes {
+        for call in &class.unknown_calls {
+            note(call);
+        }
+        for m in &class.methods {
+            if !expanded.contains(&m.name) {
+                note(&m.body);
+            }
+        }
+    }
+    // The `on_load` reopen of ActiveRecord::Base carries an included hook module's class methods too
+    let origins: Vec<(ClassId, MethodReceiver)> = app
+        .load_hook_class_macros
+        .iter()
+        .map(|id| (id.clone(), MethodReceiver::Class))
+        .chain(app.load_hook_extended_macros.iter().map(|id| (id.clone(), MethodReceiver::Instance)))
+        .chain(std::iter::once((ClassId(Symbol::from("ActiveRecord::Base")), MethodReceiver::Class)))
+        .collect();
+    for (id, receiver) in origins {
+        for class in app.library_classes.iter_mut().filter(|c| c.name == id) {
+            class.methods.retain(|m| m.receiver != receiver || !expanded.contains(&m.name) || called.contains(&m.name));
+        }
+    }
+}
+
 /// The macros a gem's `ActiveSupport.on_load(:active_record)` gives
 /// every model: an included module's class methods, an extended
 /// module's instance methods, each as a class method of the model.

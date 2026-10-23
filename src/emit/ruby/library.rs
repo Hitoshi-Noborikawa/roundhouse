@@ -1808,6 +1808,7 @@ pub(crate) fn apply_scope_lowering(lcs: &mut [LibraryClass], app: &App) {
         // The Ruby family's attrs Hash holds a record (see the field).
         owner_objects: true,
     };
+    let sole_includers = app.sole_includer_of_modules();
     for lc in lcs.iter_mut() {
         // Models gain their scope class methods (already chain-normalized).
         let is_model = app.models.iter().any(|m| m.name == lc.name);
@@ -1854,6 +1855,13 @@ pub(crate) fn apply_scope_lowering(lcs: &mut [LibraryClass], app: &App) {
                         .and_then(|other| other.parent.clone());
                 }
                 None
+            })
+            // Not only by namespace: a gem module that one model alone includes runs on that model.
+            .or_else(|| {
+                (lc.is_module && !is_model)
+                    .then(|| sole_includers.get(&lc.name).cloned())
+                    .flatten()
+                    .filter(|owner| app.models.iter().any(|m| &m.name == owner))
             });
         if let Some(model) = app.models.iter().find(|m| m.name == lc.name) {
             crate::lower::model_to_library::push_scope_methods(
@@ -7831,6 +7839,11 @@ fn emit_library_class_decl_inner(
     let mut body_requires: BTreeSet<String> = BTreeSet::new();
     for call in &lc.unknown_calls {
         body_requires.extend(resolve_all(call, true));
+    }
+    for call in &replayed_in_place {
+        let mut paths = BTreeSet::new();
+        walk_load_time_paths(call, lc, &mut BTreeSet::new(), &mut paths);
+        body_requires.extend(paths.iter().filter_map(|p| resolve(p, true)));
     }
     for &i in &deferred {
         body_requires.extend(resolve_all(&lc.constants[i].1, true));

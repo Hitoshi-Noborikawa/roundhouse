@@ -807,6 +807,11 @@ impl Analyzer {
                 ("assign_attributes", Ty::Untyped),
                 ("update_column", Ty::Bool),
                 ("update_columns", Ty::Bool),
+                ("update_attribute", Ty::Bool),
+                // Untyped, not a column type: the column is named only at run time.
+                ("read_attribute", Ty::Untyped),
+                ("write_attribute", Ty::Untyped),
+                ("attribute_in_database", Ty::Untyped),
                 ("saved_changes", Ty::Untyped),
                 ("saved_changes?", Ty::Bool),
                 ("changes", Ty::Untyped),

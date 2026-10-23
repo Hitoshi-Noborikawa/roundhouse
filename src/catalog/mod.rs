@@ -339,6 +339,20 @@ pub const AR_CATALOG: &[CatalogedMethod] = &[
         chain: ChainKind::NotApplicable,
         return_kind: Some(ReturnKind::SelfType),
     },
+    CatalogedMethod {
+        name: "create_or_find_by",
+        receiver: ReceiverContext::Class,
+        effect: EffectClass::DbWrite,
+        chain: ChainKind::NotApplicable,
+        return_kind: Some(ReturnKind::SelfType),
+    },
+    CatalogedMethod {
+        name: "create_or_find_by!",
+        receiver: ReceiverContext::Class,
+        effect: EffectClass::DbWrite,
+        chain: ChainKind::NotApplicable,
+        return_kind: Some(ReturnKind::SelfType),
+    },
     // Pagination entry point (`Model.page(n)`). Not core AR, but it
     // shares the relation-builder shape and is called on every model
     // class, so the AR catalog is its mechanical home (the gem catalog
@@ -1836,6 +1850,20 @@ pub const AR_CATALOG: &[CatalogedMethod] = &[
     },
     CatalogedMethod {
         name: "find_or_create_by!",
+        receiver: ReceiverContext::Relation,
+        effect: EffectClass::DbWrite,
+        chain: ChainKind::NotApplicable,
+        return_kind: Some(ReturnKind::SelfType),
+    },
+    CatalogedMethod {
+        name: "create_or_find_by",
+        receiver: ReceiverContext::Relation,
+        effect: EffectClass::DbWrite,
+        chain: ChainKind::NotApplicable,
+        return_kind: Some(ReturnKind::SelfType),
+    },
+    CatalogedMethod {
+        name: "create_or_find_by!",
         receiver: ReceiverContext::Relation,
         effect: EffectClass::DbWrite,
         chain: ChainKind::NotApplicable,
