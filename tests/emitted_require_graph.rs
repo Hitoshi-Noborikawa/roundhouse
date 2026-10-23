@@ -280,7 +280,8 @@ fn ruby_family_runtime_constants_are_ledgered_on_other_targets() {
      ActiveRecord::Type::String, ActiveRecord::Type::Integer, ActiveRecord::Type::Value,
      ActiveSupport::IsolatedExecutionState, ActiveSupport::Notifications,
      ActiveSupport::Notifications::Event, ActiveSupport::ConfigurationFile,
-     ActiveJob::EnqueueError, ActiveJob::Continuable]
+     ActiveJob::EnqueueError, ActiveJob::Continuable,
+     ActionDispatch::Http::Parameters::ParseError]
   end
 end
 "#),
