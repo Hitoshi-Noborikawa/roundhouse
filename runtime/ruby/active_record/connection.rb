@@ -1456,38 +1456,63 @@ module ActiveRecord
 
     # Not in base.rb: a block here would put one on every strict target's runtime.
     def _run_save_callbacks
-      before_save
-      value = block_given? ? yield : true
-      after_save
-      value
+      done = false
+      value = catch(:abort) do
+        before_save
+        result = block_given? ? yield : true
+        after_save
+        done = true
+        result
+      end
+      done ? value : false
     end
 
     def _run_create_callbacks
-      before_create
-      value = block_given? ? yield : true
-      after_create
-      value
+      done = false
+      value = catch(:abort) do
+        before_create
+        result = block_given? ? yield : true
+        after_create
+        done = true
+        result
+      end
+      done ? value : false
     end
 
     def _run_update_callbacks
-      before_update
-      value = block_given? ? yield : true
-      after_update
-      value
+      done = false
+      value = catch(:abort) do
+        before_update
+        result = block_given? ? yield : true
+        after_update
+        done = true
+        result
+      end
+      done ? value : false
     end
 
     def _run_destroy_callbacks
-      before_destroy
-      value = block_given? ? yield : true
-      after_destroy
-      value
+      done = false
+      value = catch(:abort) do
+        before_destroy
+        result = block_given? ? yield : true
+        after_destroy
+        done = true
+        result
+      end
+      done ? value : false
     end
 
     def _run_validation_callbacks
-      before_validation
-      value = block_given? ? yield : true
-      after_validation
-      value
+      done = false
+      value = catch(:abort) do
+        before_validation
+        result = block_given? ? yield : true
+        after_validation
+        done = true
+        result
+      end
+      done ? value : false
     end
 
     # Rails' `update_attribute`: one writer, then save WITHOUT

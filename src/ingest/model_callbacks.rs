@@ -1,8 +1,8 @@
 // Not a fixed hook list like `CallbackHook`: an app or gem names its own events, so each chain is built as Rails builds it.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
-use crate::dialect::{MethodReceiver, Model, ModelBodyItem};
+use crate::dialect::{Model, ModelBodyItem};
 use crate::expr::{Expr, ExprNode, Literal};
 use crate::ident::{ClassId, Symbol};
 
@@ -241,11 +241,12 @@ fn nest(chain: &[Link], body: &str) -> String {
     }
 }
 
-fn source(events: &indexmap::IndexMap<Symbol, Event>, halting: impl Fn(&Event) -> bool) -> String {
+fn source(events: &indexmap::IndexMap<Symbol, Event>) -> String {
     let mut src = String::from("class CallbacksSynth < ApplicationRecord\n");
     for (name, ev) in events {
         let body = "__rc_value = block_given? ? yield : true";
-        let code = if halting(ev) {
+        // Not only where a target's own body throws: a helper it calls can `throw :abort` too.
+        let code = if ev.chain.iter().any(|l| l.kind != Kind::After) {
             format!(
                 "__rc_value = nil\n__rc_done = false\n__rc_result = catch(:abort) do\n{}\n__rc_done = true\n__rc_value\nend\n__rc_done ? __rc_result : false",
                 nest(&ev.chain, body)
@@ -259,30 +260,59 @@ fn source(events: &indexmap::IndexMap<Symbol, Event>, halting: impl Fn(&Event) -
     src
 }
 
-fn throws(e: &Expr) -> bool {
-    if matches!(&*e.node, ExprNode::Send { method, .. } if method.as_str() == "throw") {
-        return true;
-    }
-    let mut found = false;
-    e.node.for_each_child(&mut |c| found |= throws(c));
-    found
-}
-
-fn rewrite(e: &mut Expr) {
-    if let ExprNode::Send { method, args, .. } = &mut *e.node
+fn rewrite(e: &mut Expr, has_runner: &dyn Fn(&Symbol) -> bool) {
+    if let ExprNode::Send { recv: None, method, args, .. } = &mut *e.node
         && method.as_str() == "run_callbacks"
         && let [only] = args.as_slice()
         && let Some(event) = sym(only)
+        && has_runner(&event)
     {
         *method = Symbol::from(format!("_run_{}_callbacks", event.as_str()));
         args.clear();
     }
-    e.node.for_each_child_mut(&mut rewrite);
+    e.node.for_each_child_mut(&mut |c| rewrite(c, has_runner));
+}
+
+fn has_around_block(ev: &Event) -> bool {
+    ev.chain.iter().any(|l| l.kind == Kind::Around && matches!(l.target, Target::Block(_)))
+}
+
+// The events a runner is built for; each event this cannot build is reported, unless the parent's chain already was.
+fn buildable(
+    events: &indexmap::IndexMap<Symbol, Event>,
+    inherited: Option<&indexmap::IndexMap<Symbol, Event>>,
+    name: &ClassId,
+    span: crate::span::Span,
+) -> indexmap::IndexMap<Symbol, Event> {
+    let reported = |e: &Symbol, f: fn(&Event) -> bool| inherited.and_then(|p| p.get(e)).is_some_and(f);
+    for (event, ev) in events {
+        if ev.refused && !reported(event, |p| p.refused) {
+            super::prism::push(crate::diagnostic::Diagnostic::unsupported(
+                span,
+                None,
+                "callback",
+                format!("a `{}` callback on `{}` is declared in a form this does not read (an option, or a target that is not a Symbol, a block or a lambda), so its chain is not built", event.as_str(), name.0.as_str()),
+            ));
+        } else if !ev.refused && has_around_block(ev) && !reported(event, has_around_block) {
+            super::prism::push(crate::diagnostic::Diagnostic::unsupported(
+                span,
+                None,
+                "callback",
+                format!("an `around_{}` block on `{}` needs its block to take the chain as a proc, which this does not build", event.as_str(), name.0.as_str()),
+            ));
+        }
+    }
+    events
+        .iter()
+        .filter(|(e, ev)| !ev.refused && !has_around_block(ev) && !RUNTIME_EVENTS.contains(&e.as_str()))
+        .map(|(e, ev)| (e.clone(), ev.clone()))
+        .collect()
 }
 
 pub(super) fn expand_model_callbacks(app: &mut crate::App) {
     let parents: HashMap<ClassId, ClassId> = app.models.iter().filter_map(|m| Some((m.name.clone(), m.parent.clone()?))).collect();
     let mut declared: HashMap<ClassId, indexmap::IndexMap<Symbol, Event>> = HashMap::new();
+    let mut runners: HashMap<ClassId, HashSet<Symbol>> = HashMap::new();
     let mut order: Vec<usize> = (0..app.models.len()).collect();
     let depth = |m: &Model| {
         let mut d = 0;
@@ -321,38 +351,9 @@ pub(super) fn expand_model_callbacks(app: &mut crate::App) {
             continue;
         }
         let name = model.name.clone();
-        for (event, _) in events.iter().filter(|(_, ev)| ev.refused) {
-            super::prism::push(crate::diagnostic::Diagnostic::unsupported(
-                model.body.get(*consumed.first().unwrap_or(&0)).map(|i| i.span()).unwrap_or_default(),
-                None,
-                "callback",
-                format!("a `{}` callback on `{}` is declared in a form this does not read (an option, or a target that is not a Symbol, a block or a lambda), so its chain is not built", event.as_str(), name.0.as_str()),
-            ));
-        }
-        let methods: HashMap<Symbol, &crate::dialect::MethodDef> =
-            model.methods().filter(|m| m.receiver == MethodReceiver::Instance).map(|m| (m.name.clone(), m)).collect();
-        // Not caught when nothing in the chain can throw: a target the model does not define might.
-        let halting = |ev: &Event| {
-            ev.chain.iter().filter(|l| l.kind != Kind::After).any(|l| match &l.target {
-                Target::Method(m) => methods.get(m).is_none_or(|d| throws(&d.body)),
-                Target::Block(b) => b.contains("throw"),
-            })
-        };
-        let buildable: indexmap::IndexMap<Symbol, Event> = events
-            .iter()
-            .filter(|(e, ev)| !ev.refused && !RUNTIME_EVENTS.contains(&e.as_str()))
-            .filter(|(_, ev)| !ev.chain.iter().any(|l| l.kind == Kind::Around && matches!(l.target, Target::Block(_))))
-            .map(|(e, ev)| (e.clone(), ev.clone()))
-            .collect();
-        for (event, _) in events.iter().filter(|(_, ev)| ev.chain.iter().any(|l| l.kind == Kind::Around && matches!(l.target, Target::Block(_)))) {
-            super::prism::push(crate::diagnostic::Diagnostic::unsupported(
-                Default::default(),
-                None,
-                "callback",
-                format!("an `around_{}` block on `{}` needs its block to take the chain as a proc, which this does not build", event.as_str(), name.0.as_str()),
-            ));
-        }
-        let src = source(&buildable, halting);
+        let span = model.body.get(*consumed.first().unwrap_or(&0)).map(|i| i.span()).unwrap_or_default();
+        let built = buildable(&events, model.parent.as_ref().and_then(|p| declared.get(p)), &name, span);
+        let src = source(&built);
         let (parsed, diags) = super::prism::scope(|| super::model::ingest_model(src.as_bytes(), "<callbacks>", &app.schema, &Default::default()));
         let synth = match parsed {
             Ok(Some(m)) if diags.is_empty() => m,
@@ -367,6 +368,7 @@ pub(super) fn expand_model_callbacks(app: &mut crate::App) {
             model.body.remove(at);
         }
         model.body.extend(synth.body.into_iter().filter(|it| matches!(it, ModelBodyItem::Method { .. })));
+        runners.insert(name.clone(), built.keys().cloned().collect());
         declared.insert(name, events);
     }
     // Not only models: an STI subclass is a library class whose parent is one, and its body may skip or add a link.
@@ -385,20 +387,9 @@ pub(super) fn expand_model_callbacks(app: &mut crate::App) {
             }
             let name = lc.name.clone();
             if !consumed.is_empty() {
-                let methods: HashMap<Symbol, crate::dialect::MethodDef> =
-                    lc.methods.iter().filter(|m| m.receiver == MethodReceiver::Instance).map(|m| (m.name.clone(), m.clone())).collect();
-                let halting = |ev: &Event| {
-                    ev.chain.iter().filter(|l| l.kind != Kind::After).any(|l| match &l.target {
-                        Target::Method(m) => methods.get(m).is_none_or(|d| throws(&d.body)),
-                        Target::Block(b) => b.contains("throw"),
-                    })
-                };
-                let buildable: indexmap::IndexMap<Symbol, Event> = events
-                    .iter()
-                    .filter(|(e, ev)| !ev.refused && !RUNTIME_EVENTS.contains(&e.as_str()))
-                    .map(|(e, ev)| (e.clone(), ev.clone()))
-                    .collect();
-                let src = source(&buildable, halting);
+                let span = lc.unknown_calls.get(consumed[0]).map(|c| c.span).unwrap_or_default();
+                let built = buildable(&events, lc.parent.as_ref().and_then(|p| declared.get(p)), &name, span);
+                let src = source(&built);
                 let (parsed, diags) = super::prism::scope(|| super::model::ingest_model(src.as_bytes(), "<callbacks>", &app.schema, &Default::default()));
                 match parsed {
                     Ok(Some(m)) if diags.is_empty() => {
@@ -410,6 +401,7 @@ pub(super) fn expand_model_callbacks(app: &mut crate::App) {
                             m.enclosing_class = Some(name.0.clone());
                             m
                         }));
+                        runners.insert(name.clone(), built.keys().cloned().collect());
                     }
                     _ => super::survey::record_synthesis_failure("<callbacks>", &format!("callback chains for `{}`", name.0.as_str()), &diags),
                 }
@@ -421,9 +413,32 @@ pub(super) fn expand_model_callbacks(app: &mut crate::App) {
             break;
         }
     }
-    rewrite_run_callbacks(app);
+    rewrite_run_callbacks(app, &runners);
 }
 
-fn rewrite_run_callbacks(app: &mut crate::App) {
-    crate::lower::for_each_hook_body(app, &mut rewrite);
+// Only where a runner exists for the owner or an ancestor: elsewhere the call would name a method nothing defines.
+fn rewrite_run_callbacks(app: &mut crate::App, runners: &HashMap<ClassId, HashSet<Symbol>>) {
+    let models: HashSet<ClassId> = app.models.iter().map(|m| m.name.clone()).collect();
+    let parents: HashMap<ClassId, ClassId> = app
+        .models
+        .iter()
+        .filter_map(|m| Some((m.name.clone(), m.parent.clone()?)))
+        .chain(app.library_classes.iter().filter_map(|c| Some((c.name.clone(), c.parent.clone()?))))
+        .collect();
+    crate::lower::for_each_owned_hook_body(app, &mut |owner, e| {
+        let has_runner = |event: &Symbol| {
+            let mut cur = owner.cloned();
+            for _ in 0..32 {
+                let Some(c) = cur else { return false };
+                if runners.get(&c).is_some_and(|r| r.contains(event))
+                    || (models.contains(&c) && RUNTIME_EVENTS.contains(&event.as_str()))
+                {
+                    return true;
+                }
+                cur = parents.get(&c).cloned();
+            }
+            false
+        };
+        rewrite(e, &has_runner);
+    });
 }

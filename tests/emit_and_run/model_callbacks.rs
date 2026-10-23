@@ -37,6 +37,12 @@ const CUSTOM: &str = r##"  LOG = []
   def pub_after = LOG << "pub-after"
   def archive = run_callbacks(:archive) { LOG << "body"; :done }
   def publish = run_callbacks(:publish) { LOG << "pub-body"; :pub }
+  define_model_callbacks :review
+  before_review :guard
+  attr_accessor :stopped
+  def guard = stop!
+  def stop! = (throw(:abort) if stopped)
+  def review = run_callbacks(:review) { LOG << "review"; :rev }
 "##;
 
 #[test]
@@ -57,6 +63,9 @@ check("if: false", [i.archive, l.dup], [:done, ["b1", "ar1-in", "ar2-in", "body"
 check("only:", [i.publish, l.dup], [:pub, ["pub-before", "pub-body", "pub-after"]]); l.clear
 i.bad = true
 check("throw :abort", [i.publish, l.dup], [false, []])
+check("no abort through a helper", [i.review, l.dup], [:rev, ["review"]]); l.clear
+i.stopped = true
+check("abort through a helper", [i.review, l.dup], [false, []])
 puts "ok"
 "##,
         )
@@ -71,7 +80,7 @@ fn run_callbacks_on_save_and_a_raw_chain_with_a_subclass_skip() {
             "class Article < ApplicationRecord\n",
             "class Article < ApplicationRecord\n  LOG = []\n  before_save :bs\n  after_save :as\n  define_callbacks :perform\n  \
              set_callback :perform, :before, :x1\n  set_callback :perform, :after, :y1\n  set_callback :perform, :after, :y2\n  \
-             def bs = LOG << \"bs\"\n  def as = LOG << \"as\"\n  def x1 = LOG << \"x1\"\n  def y1 = LOG << \"y1\"\n  def y2 = LOG << \"y2\"\n  \
+             attr_accessor :halt\n  def bs\n    LOG << \"bs\"\n    throw(:abort) if halt\n  end\n  def as = LOG << \"as\"\n  def x1 = LOG << \"x1\"\n  def y1 = LOG << \"y1\"\n  def y2 = LOG << \"y2\"\n  \
              def touch_it = run_callbacks(:save) { LOG << \"manual\"; 7 }\n  def perform = run_callbacks(:perform) { LOG << \"perform\"; 42 }\n",
         )
         .write("app/models/special.rb", "class Special < Article\n  skip_callback :perform, :after, :y1\nend\n")
@@ -85,7 +94,9 @@ l = Article::LOG
 a = Article.new(title: "t", body: "body number one is long enough")
 check("run_callbacks(:save)", [a.touch_it, l.dup], [7, ["bs", "manual", "as"]]); l.clear
 check("set_callback afters", [a.perform, l.dup], [42, ["x1", "perform", "y2", "y1"]]); l.clear
-check("skip_callback", [Special.new.perform, l.dup], [42, ["x1", "perform", "y2"]])
+check("skip_callback", [Special.new.perform, l.dup], [42, ["x1", "perform", "y2"]]); l.clear
+a.halt = true
+check("run_callbacks(:save) halted", [a.touch_it, l.dup], [false, ["bs"]])
 puts "ok"
 "##,
         )
