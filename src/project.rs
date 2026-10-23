@@ -5913,13 +5913,16 @@ fn apply_controller_paths(files: &mut [(String, String)], flat: &[crate::lower::
 /// `main.rb` too.
 fn apply_route_table_root(files: &mut [(String, String)], app: &App) {
     const WITH_ROOT: &str = "[RouteTable.root] + RouteTable.table";
+    // The test helper's route generation puts the root back among the
+    // declarations (`RoutingAssertions#generated_route`).
+    const ROOT_INSERT: &str = "        routes.insert(RouteTable.root_position, RouteTable.root)\n";
     let has_root = crate::lower::flatten_routes(app).iter().any(|r| r.path == "/");
     if has_root {
         return;
     }
     for (path, content) in files.iter_mut() {
         if path == "main.rb" || path == "test/test_helper.rb" {
-            *content = content.replace(WITH_ROOT, "RouteTable.table");
+            *content = content.replace(WITH_ROOT, "RouteTable.table").replace(ROOT_INSERT, "");
         }
     }
 }
