@@ -1757,7 +1757,7 @@ broadcast had already gone out. `scripts/campfire-cable-walk` splices
 header. What this runtime does not have is the third option Rails
 actually uses: enqueue now, run elsewhere, later.
 
-### Queued jobs are serialized payloads, but nothing is durable
+### Queued jobs are serialized payloads, durable only under `:sidekiq`
 
 On the ruby, jruby and spinel lanes, a served app's `perform_later`
 queues an ActiveJob-format JSON payload: the `job.serialize` hash of
@@ -1771,18 +1771,34 @@ come from the job's `perform_later` call sites, and
 
 **What is still missing.**
 
-- **Durability.** The payloads sit in a process-local Array. Nothing is
-  retried (`retry_on` is inert), nothing is scheduled (`set(wait:)` is
-  dropped), and nothing survives a restart. A payload is what an
-  external adapter such as Sidekiq would store; no such adapter exists
-  yet.
+- **Durability, unless the app is on Sidekiq.** By default the payloads
+  sit in a process-local Array. Nothing is retried (`retry_on` is
+  inert), nothing is scheduled (`set(wait:)` is dropped), and nothing
+  survives a restart. An app whose `ApplicationJob` sets
+  `self.queue_adapter = :sidekiq` (or `config.active_job.queue_adapter
+  = :sidekiq`) pushes each payload to Redis instead, in Sidekiq 8's
+  envelope (`runtime/spinel/sidekiq_push.rb`, `sidekiq_redis.rb`):
+  `SADD queues` and `LPUSH queue:<name>`, or `ZADD schedule` for a
+  literal `set(wait:)` or `set(wait_until:)` that lands in the future.
+  A pushed job is run by a Ruby Sidekiq process; there is no in-binary
+  worker yet. Redis comes
+  from `Sidekiq.configure_client`'s `url:` and `password:`, then
+  `REDIS_PROVIDER`, then `REDIS_URL`. The connection is one per
+  process, with 1-second connect and read timeouts, and a dropped
+  connection is retried once. A non-literal `set(...)` is an error
+  under `:sidekiq`, and `set(priority:)` is dropped with a warning.
+  This holds on ruby, jruby and spinel; the other targets warn
+  (`sidekiq-adapter-not-honored`) and run the jobs in process. A pushed
+  job carries `"retry":true`, so Sidekiq retries it with its own
+  defaults; Active Job's `retry_on`, TLS (`rediss://`) and per-job
+  adapters are still missing.
 - **Some argument types.** A job whose call sites pass a Hash, a Date,
   an untyped value, or nothing typed at all keeps its closure, with a
   `job-closure-fallback` warning naming the parameter. Lobsters'
   `ResticJob`, `WalCheckpointJob` and `MastodonSyncListJob` are the
   corpus cases.
-- **One queue.** `queue_name` is recorded, but every entry drains in
-  arrival order.
+- **One queue in process.** `queue_name` is recorded, but every entry
+  drains in arrival order. Under `:sidekiq` it names the Redis queue.
 - **The test adapter keeps closures.** `assert_enqueued_with` still
   checks the job and not its arguments (above).
 - **`enqueue_after_transaction_commit`** is honored for payload jobs
