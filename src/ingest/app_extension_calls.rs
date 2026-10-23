@@ -29,8 +29,9 @@ pub(super) fn mark(app: &mut App) {
             let ExprNode::Send { recv: None, method, args, block: None, .. } = &*expr.node else { continue };
             let known = |a: &crate::expr::Expr| match &*a.node {
                 ExprNode::Const { path } => {
+                    let rooted = path.first().is_some_and(|s| s.as_str().is_empty());
                     let written = path.iter().map(|s| s.as_str()).filter(|s| !s.is_empty()).collect::<Vec<_>>().join("::");
-                    modules.contains(&written) || modules.contains(&format!("{owner}::{written}"))
+                    modules.contains(&written) || (!rooted && modules.contains(&format!("{owner}::{written}")))
                 }
                 _ => false,
             };

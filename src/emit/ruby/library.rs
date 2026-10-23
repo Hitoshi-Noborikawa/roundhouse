@@ -762,7 +762,8 @@ fn walk_load_time_paths_on(expr: &Expr, owner: &LibraryClass, side: MethodReceiv
             ExprNode::Const { path } => path.iter().map(|part| part.as_str()).filter(|part| !part.is_empty()).collect::<Vec<_>>().join("::") == owner.name.0.as_str(),
             _ => false,
         });
-        let (called, on) = if method.as_str() == "new" && side == MethodReceiver::Class {
+        let overridden_new = owner.methods.iter().any(|m| m.name.as_str() == "new" && m.receiver == MethodReceiver::Class);
+        let (called, on) = if method.as_str() == "new" && side == MethodReceiver::Class && !overridden_new {
             ("initialize", MethodReceiver::Instance)
         } else {
             (method.as_str(), side)
