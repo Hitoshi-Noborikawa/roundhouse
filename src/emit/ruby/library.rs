@@ -9898,8 +9898,9 @@ pub(crate) fn apply_boolean_lowering(lcs: &mut [LibraryClass], app: &App) {
 /// `= ""` reads nil, `active = "1"` true). Before, the writer stored the
 /// value as given, so a request param reached every validator, comparison
 /// and serializer as a String (#1158). `ActiveSupport.cast_integer` /
-/// `cast_float` / `cast_boolean` implement ActiveModel 8.1.4's casts; a
-/// decimal column is a Float here and casts as one. Hydration passes
+/// `cast_float` / `cast_decimal` / `cast_boolean` implement ActiveModel
+/// 8.1.4's casts; a decimal column is a Float here, cast as `Type::Decimal`
+/// casts (a Symbol is 0.0 there, where `Type::Float` raises). Hydration passes
 /// values already of the column's type (`Db.column_int_opt`,
 /// `row.x&.to_i`), on which each cast is the identity. Strict targets
 /// type the writer's parameter and are not rewritten.
@@ -9921,7 +9922,8 @@ pub(crate) fn apply_typed_writer_cast_lowering(lcs: &mut [LibraryClass], app: &A
             .filter_map(|c| {
                 let cast = match c.col_type {
                     crate::schema::ColumnType::Integer | crate::schema::ColumnType::BigInt => "cast_integer",
-                    crate::schema::ColumnType::Float | crate::schema::ColumnType::Decimal { .. } => "cast_float",
+                    crate::schema::ColumnType::Float => "cast_float",
+                    crate::schema::ColumnType::Decimal { .. } => "cast_decimal",
                     crate::schema::ColumnType::Boolean => "cast_boolean",
                     _ => return None,
                 };

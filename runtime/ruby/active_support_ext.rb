@@ -618,10 +618,12 @@ module ActiveSupport
   end
 
   # Not `value == false || value == 0`: ActiveModel compares its FALSE_VALUES by string too, so :off and "0" answer false.
+  # Only the String "" is nil, as `cast_value`'s `value == ""`: `:""`
+  # is not in FALSE_VALUES, so it is true.
   def self.cast_boolean(value)
     return nil if value.nil?
+    return nil if value == ""
     text = value.to_s
-    return nil if text == ""
     !%w[0 f F false FALSE off OFF].include?(text)
   end
 
@@ -646,7 +648,11 @@ module ActiveSupport
   # string is nil. A Float that is not finite is nil (`to_i` raises
   # `FloatDomainError`). Any other string is `to_i` of its first 16
   # bytes, Rails' `byteslice(0, limit * 4)` at the default 4-byte limit.
-  # A value of another class raises `TypeError`; Rails would call `to_i`.
+  # A value of another class is what `value.presence` and then
+  # `value.to_i rescue nil` answer: a Time or another Numeric (a
+  # Rational) its `to_i`, anything else nil (a Symbol, an Array, a Hash
+  # and an Object have no `to_i`). Each class is named rather than asked
+  # with `respond_to?`, so every branch is typed.
   def self.cast_integer(value)
     if value.nil?
       nil
@@ -666,8 +672,28 @@ module ActiveSupport
       end
     elsif value.is_a?(String)
       ActiveSupport.integer_from_string(value)
+    elsif value.is_a?(Time)
+      value.to_i
+    elsif value.is_a?(Numeric)
+      value.to_i
     else
-      raise TypeError, "can't cast #{value.class} to an integer"
+      nil
+    end
+  end
+
+  # `Helpers::Numeric#cast`'s `value.presence` for a value that is not
+  # nil, a boolean, a number or a String: `Object#blank?`, which is
+  # `empty?` for the classes that answer it (`[]`, `{}`, `:""`) and
+  # false for any other object.
+  def self.numeric_blank?(value)
+    if value.is_a?(Array)
+      value.empty?
+    elsif value.is_a?(Hash)
+      value.empty?
+    elsif value.is_a?(Symbol)
+      value.empty?
+    else
+      false
     end
   end
 
@@ -675,7 +701,11 @@ module ActiveSupport
   # column is a Float here, so it casts the same, where Rails answers a
   # BigDecimal of the same value). A blank string is nil; `true`/`false`
   # are 1.0/0.0; `"Infinity"`, `"-Infinity"` and `"NaN"` are those floats
-  # (`Type::Float#cast_value`); any other string is `to_f`.
+  # (`Type::Float#cast_value`); any other string is `to_f`. A value of
+  # another class is nil when blank (`[]`, `{}`, `:""`), a Time or
+  # another Numeric (a Rational) its `to_f`; Rails does not rescue that
+  # `to_f`, so anything else (a Symbol, an Array, a Hash, an Object)
+  # raises the NoMethodError it raises there.
   def self.cast_float(value)
     if value.nil?
       nil
@@ -689,8 +719,31 @@ module ActiveSupport
       value.to_f
     elsif value.is_a?(String)
       ActiveSupport.float_from_string(value)
+    elsif ActiveSupport.numeric_blank?(value)
+      nil
+    elsif value.is_a?(Time)
+      value.to_f
+    elsif value.is_a?(Numeric)
+      value.to_f
     else
-      raise TypeError, "can't cast #{value.class} to a float"
+      raise NoMethodError, "undefined method 'to_f' for an instance of #{value.class}"
+    end
+  end
+
+  # ActiveModel::Type::Decimal, as a Float (a decimal column is a Float
+  # here). nil, booleans, numbers and Strings cast as `cast_float` does.
+  # Another value is nil when blank; another Numeric (a Rational) is its
+  # value; anything else is what its `to_s` reads (`cast_value(value.to_s)`),
+  # so a Symbol, an Array, a Hash or an Object is 0.0 and `:"5"` is 5.0.
+  def self.cast_decimal(value)
+    if value.nil? || value == true || value == false || value.is_a?(Integer) || value.is_a?(Float) || value.is_a?(String)
+      ActiveSupport.cast_float(value)
+    elsif ActiveSupport.numeric_blank?(value)
+      nil
+    elsif value.is_a?(Numeric)
+      value.to_f
+    else
+      ActiveSupport.float_from_string(value.to_s)
     end
   end
 

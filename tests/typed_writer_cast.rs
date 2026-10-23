@@ -102,6 +102,54 @@ const CASTS: &[(&str, &str)] = &[
     ("5.7", "[5, 5.7, 5.7, true]"),
 ];
 
+/// `(value, [min_favs, ratio, price, active])` for a value that is not
+/// nil, a boolean, a number or a String: `Helpers::Numeric#cast` makes a
+/// blank one (`[]`, `{}`, `:""`) nil, then `Type::Integer` answers
+/// `to_i rescue nil`, `Type::Float` an unrescued `to_f` (a Symbol, an
+/// Array, a Hash and an Object raise NoMethodError), and `Type::Decimal`
+/// what the value's `to_s` reads. `Type::Boolean` makes only `""` nil.
+const OTHER: &[(&str, &str)] = &[
+    (":many", r#"["nil", "NoMethodError", "0.0", "true"]"#),
+    (":off", r#"["nil", "NoMethodError", "0.0", "false"]"#),
+    (r#":"5""#, r#"["nil", "NoMethodError", "5.0", "true"]"#),
+    (r#":"""#, r#"["nil", "nil", "nil", "true"]"#),
+    ("[]", r#"["nil", "nil", "nil", "true"]"#),
+    ("[1]", r#"["nil", "NoMethodError", "0.0", "true"]"#),
+    ("{}", r#"["nil", "nil", "nil", "true"]"#),
+    ("{ a: 1 }", r#"["nil", "NoMethodError", "0.0", "true"]"#),
+    ("Object.new", r#"["nil", "NoMethodError", "0.0", "true"]"#),
+];
+
+/// Ruby asserting `OTHER`: each column is assigned on its own, and a
+/// raise reads as its class.
+fn other_assertions() -> String {
+    let mut s = String::new();
+    for (value, want) in OTHER {
+        s.push_str(&format!("v = {value}
+got = []
+"));
+        for col in ["min_favs", "ratio", "price", "active"] {
+            let read = if col == "price" { "x.price.nil? ? \"nil\" : x.price.to_f.inspect".to_string() } else { format!("x.{col}.inspect") };
+            s.push_str(&format!(
+                "begin
+  x = Policy.new
+  x.{col} = v
+  got << ({read})
+rescue NoMethodError => e
+  got << e.class.name
+end
+"
+            ));
+        }
+        s.push_str(&format!(
+            "raise %q(other {}: ) + got.inspect unless got.inspect == {want:?}
+",
+            value.replace(['(', ')'], "")
+        ));
+    }
+    s
+}
+
 /// `numericality: { greater_than_or_equal_to: 1 }` on a String param, as
 /// `Policy.new(min_favs: value)`: the cast value is what is compared.
 const NUMERICALITY: &[(&str, &str)] = &[
@@ -132,6 +180,7 @@ fn assertions() -> String {
             value.replace('"', "\\\"")
         ));
     }
+    s.push_str(&other_assertions());
     s
 }
 
