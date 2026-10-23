@@ -15,6 +15,8 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+#[path = "support/memoized_fields.rs"]
+mod memoized_fields;
 #[path = "support/emit_and_run.rs"]
 #[allow(dead_code)]
 mod emit_and_run;
@@ -284,6 +286,22 @@ fn run_under_tsx(emitted: &Path, script: &str) -> String {
         .expect("run tsx");
     assert!(run.status.success(), "{}", String::from_utf8_lossy(&run.stderr));
     String::from_utf8_lossy(&run.stdout).trim().to_string()
+}
+
+#[test]
+#[ignore]
+fn real_blog_memoized_fields_run_under_tsx() {
+    // Readers memoizing a literal answer it, on a plain class's two sides
+    // and on a model, as CRuby does (#1238); the app compiles.
+    let (emitted, errors) = memoized_fields::overlay().emit(roundhouse::project::BuildTarget::Typescript);
+    assert!(errors.is_empty(), "{errors:?}");
+    let out = run_under_tsx(
+        &emitted,
+        "import { Meter } from \"./app/models/meter.js\";\nimport { Comment } from \"./app/models/comment.js\";\nconst m = new Meter();\nconsole.log(JSON.stringify([Meter.label, m.name, m.items, new Comment().tone]));\n",
+    );
+    assert_eq!(out, memoized_fields::SUMMARY);
+    std::fs::remove_file(emitted.join("check.ts")).unwrap();
+    assert_tsc_passes("real-blog with memoized readers", &emitted);
 }
 
 #[test]

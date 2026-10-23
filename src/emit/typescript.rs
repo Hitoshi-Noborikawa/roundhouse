@@ -1911,6 +1911,11 @@ pub(super) fn js_library_class(
     // parent's field list through emit_library_class; expand when a
     // new framework parent surface materializes.
     const INHERITED_FIELD_NAMES: &[&str] = &["id", "errors", "error_details", "persisted", "destroyed"];
+    // A reader whose whole body memoizes a literal into the ivar of its
+    // own name (`def label; @label ||= "x"; end`) is dropped in favour of
+    // the field below; the field starts at that literal, which is what
+    // every read answers (#1238).
+    let memoized = memoized_literals(class);
     for (name, ty, is_static, from_ivar, span) in &fields {
         // ivar-derived fields on a derived class get `declare` —
         // the constructor body's `this.x = ...` (or a parent
@@ -1932,7 +1937,11 @@ pub(super) fn js_library_class(
         // load; mirror that with a type-driven default. Skip the
         // initializer when the field is `declare`d (parent provides
         // backing).
-        let init = if *is_static && !needs_declare {
+        let memo = memoized.get(&(name.clone(), *is_static));
+        let needs_declare = needs_declare && memo.is_none();
+        let init = if let Some(literal) = memo {
+            Some(expr::js_expr(literal))
+        } else if *is_static && !needs_declare {
             ts_default_for_type(ty)
         } else {
             None
@@ -2023,7 +2032,8 @@ pub(super) fn js_library_class(
             // accessor-expose an ivar are subsumed by the field.
             // Non-trivial colliders (rare) lose runtime semantics
             // here; surface those as a separate Ruby-source change
-            // rather than emitting broken TS.
+            // rather than emitting broken TS. A literal memo is not
+            // one: its field starts at the literal (`memoized_literals`).
             if field_names_seen.contains(&stripped) {
                 return false;
             }
@@ -2057,6 +2067,37 @@ pub(super) fn js_library_class(
         members,
         span: crate::span::Span::synthetic(),
     })
+}
+
+/// `(ivar, is_static)` → literal for each method of `class` whose body is
+/// `@<its own name> ||= <literal>` (a literal `declarable_constant_value`
+/// takes): the reader `js_library_class` drops for the field of that
+/// name, and the value the field starts at.
+fn memoized_literals(
+    class: &crate::dialect::LibraryClass,
+) -> std::collections::HashMap<(String, bool), &crate::expr::Expr> {
+    use crate::expr::{ExprNode, LValue, OpAssignOp};
+    let mut out = std::collections::HashMap::new();
+    for m in &class.methods {
+        if !m.params.is_empty() {
+            continue;
+        }
+        let body = match &*m.body.node {
+            ExprNode::Seq { exprs } if exprs.len() == 1 => &exprs[0],
+            _ => &m.body,
+        };
+        let ExprNode::OpAssign { target: LValue::Ivar { name }, op: OpAssignOp::OrOr, value } = &*body.node else {
+            continue;
+        };
+        if name.as_str() != m.name.as_str() {
+            continue;
+        }
+        if let Some(literal) = declarable_constant_value(value) {
+            let is_static = matches!(m.receiver, crate::dialect::MethodReceiver::Class);
+            out.insert((name.as_str().to_string(), is_static), literal);
+        }
+    }
+    out
 }
 
 /// A class-body constant's value as TypeScript declares it: `.freeze`
