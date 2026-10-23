@@ -2741,6 +2741,10 @@ module ActiveRecord
       @model.new(scope_attributes.merge(conditions))
     end
 
+    def build(conditions)
+      @model.new(scope_attributes.merge(conditions))
+    end
+
     # ---- SQL composition --------------------------------------------
 
     # Rails' `to_sql`: the SELECT with every value written in, which is

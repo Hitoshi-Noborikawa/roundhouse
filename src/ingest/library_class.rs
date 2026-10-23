@@ -537,6 +537,14 @@ pub(super) fn library_class_and_struct_base(
         Some(_) => Some(struct_base_id(&owner)),
         None => parent,
     };
+    if parent.is_none() && class.superclass().is_some() {
+        super::prism::push(crate::diagnostic::Diagnostic::unsupported(
+            source_parent_span,
+            None,
+            "superclass",
+            format!("`{}`'s superclass is an expression evaluated when the class loads, not a constant, so the class is emitted without it", owner.0.as_str()),
+        ));
+    }
 
     let DeclBody {
         mut includes,
@@ -1773,8 +1781,21 @@ impl DeclBody {
                 ExprNode::Assign { value, .. } => is_literal_value(value),
                 _ => false,
             });
+        let literal_inits = self.class_initializers.iter().all(|expr| match &*expr.node {
+            ExprNode::Assign { value, .. } => is_literal_value(value),
+            _ => false,
+        });
+        // Not `include`: an ancestor's `@@x` is shared with this body's. An extended module's methods read their own (rolify's `extend Configure` beside `@@resource_types = []`).
+        let mixins_only = self.unknown_calls.iter().all(|call| match &*call.node {
+            ExprNode::Send { recv: None, method, args, block: None, .. } => {
+                method.as_str() == "extend"
+                    && !args.is_empty()
+                    && args.iter().all(|a| matches!(&*a.node, ExprNode::Const { .. }))
+            }
+            _ => false,
+        });
         if has_source_ordered_init
-            && (!self.unknown_calls.is_empty()
+            && ((!self.unknown_calls.is_empty() && !(literal_inits && mixins_only))
                 || !self.includes.is_empty()
                 || (!self.constants.is_empty() && !order_independent))
         {

@@ -807,6 +807,11 @@ impl Analyzer {
                 ("assign_attributes", Ty::Untyped),
                 ("update_column", Ty::Bool),
                 ("update_columns", Ty::Bool),
+                ("update_attribute", Ty::Bool),
+                // Untyped, not a column type: the column is named only at run time.
+                ("read_attribute", Ty::Untyped),
+                ("write_attribute", Ty::Untyped),
+                ("attribute_in_database", Ty::Untyped),
                 ("saved_changes", Ty::Untyped),
                 ("saved_changes?", Ty::Bool),
                 ("changes", Ty::Untyped),
@@ -831,6 +836,10 @@ impl Analyzer {
                 ("broadcast_remove_to", Ty::Nil),
             ] {
                 cls.instance_methods.entry(Symbol::from(name)).or_insert(ty);
+            }
+            // Not the catalog's `Str`: a key that is not a literal reads whatever its column holds.
+            for name in ["read_attribute", "write_attribute"] {
+                cls.instance_methods.insert(Symbol::from(name), Ty::Untyped);
             }
             // Associations as instance methods (return types derived from
             // cardinality). Each also gets a writer `name=`: belongs_to/
@@ -2567,8 +2576,17 @@ impl Analyzer {
             for scope in model.scopes() {
                 extract_ivar_assignments(&scope.body, &mut flow_ivars);
             }
+            // Not in the shared map: the class body's `@x = …` is the class object's, which only its `def self.x` reads.
+            let mut class_body_ivars: HashMap<Symbol, Ty> = HashMap::new();
+            for item in &model.body {
+                if let ModelBodyItem::Unknown { expr, .. } = item
+                    && crate::lower::model_to_library::writes_class_ivar(expr)
+                {
+                    extract_ivar_assignments(expr, &mut class_body_ivars);
+                }
+            }
 
-            if !flow_ivars.is_empty() {
+            if !flow_ivars.is_empty() || !class_body_ivars.is_empty() {
                 // Re-seed ctx with discovered ivars alongside @attributes.
                 // Memoizing ivars become `Union<T, Nil>` to reflect that
                 // the read can be nil before the first assignment.
@@ -2595,11 +2613,22 @@ impl Analyzer {
                     annotate_self_dispatch: false, in_view: false, view_name: None, class_side: false, claimed_macro_template: false, instance_body: false, method_body: false, building_self: false, live_class_locals: Default::default(),
                 };
 
+                // The class body has run before any class method does, so its writes are not nilable there.
+                let mut class_side_ctx = reseeded_ctx.clone();
+                for (name, ty) in class_body_ivars {
+                    // Merged, not replaced: a class method's own write (`@state = "ready"`) is a value too.
+                    let merged = match class_side_ctx.ivar_bindings.get(&name) {
+                        Some(existing) => crate::analyze::body::union_of(existing.clone(), ty),
+                        None => ty,
+                    };
+                    class_side_ctx.ivar_bindings.insert(name, merged);
+                }
                 for scope in model.scopes_mut() {
                     self.body_typer().analyze_expr(&mut scope.body, &reseeded_ctx);
                 }
                 for method in model.methods_mut() {
-                    let mctx = self.seed_method_params(&reseeded_ctx, &model_name, method, true);
+                    let side = if method.receiver == MethodReceiver::Class { &class_side_ctx } else { &reseeded_ctx };
+                    let mctx = self.seed_method_params(side, &model_name, method, true);
                     self.body_typer().analyze_expr(&mut method.body, &mctx);
                 }
             }

@@ -222,7 +222,18 @@ pub(super) fn emit_library_class_decls(app: &App) -> Vec<EmittedFile> {
             }
             files
         })
-        .collect()
+        .fold(Vec::<EmittedFile>::new(), |mut out, file| {
+            // Not left to the tree's last-wins dedupe: a module opened in two files (rolify's `Rolify`) would lose one opening's methods.
+            match out.iter_mut().find(|f| f.path == file.path) {
+                Some(existing) if existing.content == file.content => {}
+                Some(existing) => {
+                    existing.content.push('\n');
+                    existing.content.push_str(&file.content);
+                }
+                None => out.push(file),
+            }
+            out
+        })
 }
 
 /// `Data.define(<symbols>)` — the factory `analyze::data` models.
@@ -718,21 +729,26 @@ fn invoked_lambda(expr: &Expr) -> Option<&Expr> {
     }
 }
 
-fn walk_param_defaults(params: &[crate::dialect::Param], owner: &LibraryClass, visited: &mut BTreeSet<String>, paths: &mut BTreeSet<Vec<String>>) {
+fn walk_param_defaults(params: &[crate::dialect::Param], owner: &LibraryClass, side: MethodReceiver, visited: &mut BTreeSet<String>, paths: &mut BTreeSet<Vec<String>>) {
     for param in params {
         if let Some(default) = &param.default {
-            walk_load_time_paths(default, owner, visited, paths);
+            walk_load_time_paths_on(default, owner, side, visited, paths);
         }
     }
 }
 
 fn walk_load_time_paths(expr: &Expr, owner: &LibraryClass, visited: &mut BTreeSet<String>, paths: &mut BTreeSet<Vec<String>>) {
+    walk_load_time_paths_on(expr, owner, MethodReceiver::Class, visited, paths);
+}
+
+// Not by name alone: a class-body `configure` runs `def self.configure`, never an instance method of that name.
+fn walk_load_time_paths_on(expr: &Expr, owner: &LibraryClass, side: MethodReceiver, visited: &mut BTreeSet<String>, paths: &mut BTreeSet<Vec<String>>) {
     if let Some(lambda) = invoked_lambda(expr) {
         if let ExprNode::Lambda { extra_params, body, .. } = &*lambda.node {
-            walk_param_defaults(extra_params, owner, visited, paths);
-            walk_load_time_paths(body, owner, visited, paths);
+            walk_param_defaults(extra_params, owner, side, visited, paths);
+            walk_load_time_paths_on(body, owner, side, visited, paths);
         } else {
-            walk_load_time_paths(lambda, owner, visited, paths);
+            walk_load_time_paths_on(lambda, owner, side, visited, paths);
         }
     }
     if let ExprNode::Lambda { .. } = &*expr.node {
@@ -747,18 +763,31 @@ fn walk_load_time_paths(expr: &Expr, owner: &LibraryClass, visited: &mut BTreeSe
             ExprNode::Const { path } => path.iter().map(|part| part.as_str()).filter(|part| !part.is_empty()).collect::<Vec<_>>().join("::") == owner.name.0.as_str(),
             _ => false,
         });
-        let called = if method.as_str() == "new" { "initialize" } else { method.as_str() };
-        if own && visited.insert(called.to_string()) {
-            for method in owner.methods.iter().filter(|method| method.name.as_str() == called) {
-                walk_param_defaults(&method.params, owner, visited, paths);
-                if let Some(block) = &method.block_param {
-                    walk_param_defaults(std::slice::from_ref(block), owner, visited, paths);
+        let overridden_new = owner.methods.iter().any(|m| m.name.as_str() == "new" && m.receiver == MethodReceiver::Class);
+        let (called, on) = if method.as_str() == "new" && side == MethodReceiver::Class && !overridden_new {
+            ("initialize", MethodReceiver::Instance)
+        } else {
+            (method.as_str(), side)
+        };
+        // An overridden `new` still reaches `initialize` through its `super`, so both are walked.
+        let targets: Vec<(&str, MethodReceiver)> = if method.as_str() == "new" && side == MethodReceiver::Class && overridden_new {
+            vec![(called, on), ("initialize", MethodReceiver::Instance)]
+        } else {
+            vec![(called, on)]
+        };
+        for (called, on) in targets {
+            if own && visited.insert(format!("{}{called}", if on == MethodReceiver::Class { "." } else { "#" })) {
+                for method in owner.methods.iter().filter(|method| method.name.as_str() == called && method.receiver == on) {
+                    walk_param_defaults(&method.params, owner, on, visited, paths);
+                    if let Some(block) = &method.block_param {
+                        walk_param_defaults(std::slice::from_ref(block), owner, on, visited, paths);
+                    }
+                    walk_load_time_paths_on(&method.body, owner, on, visited, paths);
                 }
-                walk_load_time_paths(&method.body, owner, visited, paths);
             }
         }
         for value in recv.iter().chain(args) {
-            walk_load_time_paths(value, owner, visited, paths);
+            walk_load_time_paths_on(value, owner, side, visited, paths);
         }
         let stores_block = matches!(method.as_str(), "proc" | "lambda")
             || (method.as_str() == "new" && matches!(recv.as_ref().map(|recv| &*recv.node),
@@ -766,12 +795,12 @@ fn walk_load_time_paths(expr: &Expr, owner: &LibraryClass, visited: &mut BTreeSe
         if !stores_block {
             if let Some(block) = block {
                 let body = match &*block.node { ExprNode::Lambda { body, .. } => body, _ => block };
-                walk_load_time_paths(body, owner, visited, paths);
+                walk_load_time_paths_on(body, owner, side, visited, paths);
             }
         }
         return;
     }
-    expr.node.for_each_child(&mut |child| walk_load_time_paths(child, owner, visited, paths));
+    expr.node.for_each_child(&mut |child| walk_load_time_paths_on(child, owner, side, visited, paths));
 }
 
 struct NestedEmitter<'a> {
@@ -1809,6 +1838,7 @@ pub(crate) fn apply_scope_lowering(lcs: &mut [LibraryClass], app: &App) {
         // The Ruby family's attrs Hash holds a record (see the field).
         owner_objects: true,
     };
+    let sole_includers = app.sole_includer_of_modules();
     for lc in lcs.iter_mut() {
         // Models gain their scope class methods (already chain-normalized).
         let is_model = app.models.iter().any(|m| m.name == lc.name);
@@ -1855,6 +1885,13 @@ pub(crate) fn apply_scope_lowering(lcs: &mut [LibraryClass], app: &App) {
                         .and_then(|other| other.parent.clone());
                 }
                 None
+            })
+            // Not only by namespace: a gem module that one model alone includes runs on that model.
+            .or_else(|| {
+                (lc.is_module && !is_model)
+                    .then(|| sole_includers.get(&lc.name).cloned())
+                    .flatten()
+                    .filter(|owner| app.models.iter().any(|m| &m.name == owner))
             });
         if let Some(model) = app.models.iter().find(|m| m.name == lc.name) {
             crate::lower::model_to_library::push_scope_methods(
@@ -7832,6 +7869,11 @@ fn emit_library_class_decl_inner(
     let mut body_requires: BTreeSet<String> = BTreeSet::new();
     for call in &lc.unknown_calls {
         body_requires.extend(resolve_all(call, true));
+    }
+    for call in &replayed_in_place {
+        let mut paths = BTreeSet::new();
+        walk_load_time_paths(call, lc, &mut BTreeSet::new(), &mut paths);
+        body_requires.extend(paths.iter().filter_map(|p| resolve(p, true)));
     }
     for &i in &deferred {
         body_requires.extend(resolve_all(&lc.constants[i].1, true));

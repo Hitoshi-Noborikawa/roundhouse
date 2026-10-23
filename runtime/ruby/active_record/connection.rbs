@@ -70,6 +70,11 @@ module ActiveRecord
     def initialize: (Base record, Integer kind) -> void
   end
 
+  class Relation
+    def create_or_find_by: (Hash[Symbol, untyped] conditions) -> Base
+    def create_or_find_by!: (Hash[Symbol, untyped] conditions) -> Base
+  end
+
   class Base
     def read_attribute: (Symbol name) -> untyped
     def write_attribute: (Symbol name, untyped value) -> untyped
@@ -108,6 +113,7 @@ module ActiveRecord
     def self.record_timestamps=: (bool value) -> bool
     def self.record_timestamps: () -> bool
     def update_column: (String | Symbol name, untyped value) -> bool
+    def update_attribute: (String | Symbol name, untyped value) -> bool
     def update_columns: (Hash[Symbol | String, untyped] attributes) -> bool
     def delete: () -> Base
     def _as_json_only: (Array[Symbol] only) -> Hash[String, untyped]
@@ -122,6 +128,8 @@ module ActiveRecord
     def self.find_or_initialize_by: (Hash[Symbol, untyped] conditions) -> Base
     def self.find_or_create_by: (Hash[Symbol, untyped] conditions) -> Base
     def self.find_or_create_by!: (Hash[Symbol, untyped] conditions) -> Base
+    def self.create_or_find_by: (Hash[Symbol, untyped] conditions) -> Base
+    def self.create_or_find_by!: (Hash[Symbol, untyped] conditions) -> Base
     def self.sole: () -> Base
     def self.delete_by: (Hash[Symbol, untyped] | String conditions) -> Integer
     def self.destroy_by: (Hash[Symbol, untyped] | String conditions) -> Array[Base]
@@ -181,7 +189,6 @@ module ActiveRecord
     def self.first: () -> Base?
     def self.take: () -> Base?
     def self._hydrate_all: (String sql) -> Array[Base]
-    def update_attribute: (Symbol name, untyped value) -> bool
     def save: () -> bool
     def destroy: () -> Base
     def touch: () -> bool

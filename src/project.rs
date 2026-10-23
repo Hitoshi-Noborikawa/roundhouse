@@ -1033,6 +1033,17 @@ fn report_replayed_class_bodies(app: &App, target: BuildTarget) {
             }
         }
     }
+    for lc in &app.library_classes {
+        for expr in lc.unknown_calls.iter().filter(|e| e.decisions & crate::expr::REPLAYED_CLASS_BODY != 0) {
+            let crate::expr::ExprNode::Send { method, .. } = &*expr.node else { continue };
+            emit::diagnostics::report_unsupported(
+                expr.span,
+                target.as_str(),
+                "class body",
+                format!("`{}` in the body of `{}` runs its own class method as it loads, which the {} emit does not carry", method.as_str(), lc.name.0.as_str(), target.as_str()),
+            );
+        }
+    }
 }
 
 /// A mailer and the `ActionMailer` runtime it delivers through ship on
@@ -1652,8 +1663,9 @@ fn report_self_bindings(app: &App, target: BuildTarget) {
 /// `Array.try_convert` (what a nested splat desugars to), `include?` on
 /// a `Class`/`Module` value (Module's ancestry query, which the other
 /// targets' `include?` is not), Kernel's `Rational(...)`, which a
-/// rational literal ingests as, and Kernel's `Integer(...)` and
-/// `Float(...)`. The other emitters render them as the method name on
+/// rational literal ingests as, Kernel's `Integer(...)` and
+/// `Float(...)`, and the ActiveRecord methods only connection.rb defines.
+/// The other emitters render them as the method name on
 /// the receiver, which nothing there defines, so they refuse each by name.
 fn report_ruby_only_sends(app: &App, target: BuildTarget) {
     if matches!(target, BuildTarget::Blog | BuildTarget::Ruby | BuildTarget::Jruby
@@ -1668,7 +1680,10 @@ fn report_ruby_only_sends(app: &App, target: BuildTarget) {
             || app.library_classes.iter().any(|class| class.methods.iter().any(|method| method.name.as_str() == name))
             || app.controllers.iter().any(|controller| controller.actions().any(|action| action.name.as_str() == name))
     };
-    let kernel: Vec<&str> = ["Rational", "Integer", "Float"].into_iter().filter(|name| !defines(name)).collect();
+    let kernel: Vec<&str> = ["Rational", "Integer", "Float", "update_attribute", "attribute_in_database", "create_or_find_by", "create_or_find_by!"]
+        .into_iter()
+        .filter(|name| !defines(name))
+        .collect();
     fn visit(expr: &crate::expr::Expr, target: BuildTarget, kernel: &[&str]) {
         use crate::expr::ExprNode;
         use crate::ty::Ty;
@@ -1678,6 +1693,10 @@ fn report_ruby_only_sends(app: &App, target: BuildTarget) {
                 (None, "Rational") if kernel.contains(&"Rational") => Some("Kernel#Rational"),
                 (None, "Integer") if kernel.contains(&"Integer") => Some("Kernel#Integer"),
                 (None, "Float") if kernel.contains(&"Float") => Some("Kernel#Float"),
+                (_, "update_attribute") if kernel.contains(&"update_attribute") => Some("ActiveRecord::Base#update_attribute"),
+                (_, "attribute_in_database") if kernel.contains(&"attribute_in_database") => Some("ActiveRecord::Base#attribute_in_database"),
+                (_, "create_or_find_by") if kernel.contains(&"create_or_find_by") => Some("ActiveRecord::Relation#create_or_find_by"),
+                (_, "create_or_find_by!") if kernel.contains(&"create_or_find_by!") => Some("ActiveRecord::Relation#create_or_find_by!"),
                 (Some(r), "[]") => match &*r.node {
                     ExprNode::Const { path } if path.len() == 1 && path[0].as_str() == "Array" => Some("Array[]"),
                     ExprNode::Const { path } if path.len() == 1 && path[0].as_str() == "Hash" => Some("Hash[]"),
@@ -1706,6 +1725,42 @@ fn report_ruby_only_sends(app: &App, target: BuildTarget) {
         expr.node.for_each_child(&mut |child| visit(child, target, kernel));
     }
     crate::lower::for_each_emit_body_ref(app, &mut |expr| visit(expr, target, &kernel));
+}
+
+/// Not left to the runtime's raise: `scope_chain` needs the receiver's model to write the join's SQL.
+fn report_dynamic_association_joins(app: &App, target: BuildTarget) {
+    if matches!(target, BuildTarget::Futamura) {
+        return;
+    }
+    fn names_association(arg: &crate::expr::Expr) -> bool {
+        use crate::expr::{ExprNode, Literal};
+        match &*arg.node {
+            ExprNode::Lit { value: Literal::Sym { .. } } => true,
+            ExprNode::Array { elements, .. } => elements.iter().any(names_association),
+            ExprNode::Hash { entries, .. } => entries.iter().any(|(k, v)| names_association(k) || names_association(v)),
+            _ => false,
+        }
+    }
+    fn runtime_class(expr: &crate::expr::Expr) -> bool {
+        use crate::expr::ExprNode;
+        let ExprNode::Send { recv: Some(r), method, .. } = &*expr.node else { return false };
+        matches!(method.as_str(), "constantize" | "safe_constantize" | "const_get") || runtime_class(r)
+    }
+    fn visit(expr: &crate::expr::Expr, target: BuildTarget) {
+        use crate::expr::ExprNode;
+        if let ExprNode::Send { recv: Some(r), method, args, .. } = &*expr.node
+            && matches!(method.as_str(), "joins" | "left_outer_joins" | "left_joins")
+            && runtime_class(r)
+            && args.iter().any(names_association)
+        {
+            crate::emit::diagnostics::report_unsupported(
+                expr.span, target.as_str(), "association join on an unknown model",
+                format!("`{}` names an association, which is resolved from the receiver's model at transpile time; this receiver's model is only known at run time", method.as_str()),
+            );
+        }
+        expr.node.for_each_child(&mut |child| visit(child, target));
+    }
+    crate::lower::for_each_emit_body_ref(app, &mut |expr| visit(expr, target));
 }
 
 /// A send on a typed Array, number or String receiver that the TypeScript emit has
@@ -2138,6 +2193,7 @@ fn target_files_inner(
     report_native_ruby_syntax(app, target);
     report_self_bindings(app, target);
     report_ruby_only_sends(app, target);
+    report_dynamic_association_joins(app, target);
     report_typescript_array_sends(app, target);
     report_dry_struct_stdlib(app, target);
     // Full forwarding currently has a native Ruby contract only. A

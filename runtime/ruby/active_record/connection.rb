@@ -373,6 +373,30 @@ module ActiveRecord
   # Connection class (which those tables don't ship). This file is
   # walked only into the ruby-family trees, and active_record.rb
   # requires it AFTER base.rb so the reopen sees the real class.
+
+  # Not in relation.rb: the strict targets' `Db` never raises RecordNotUnique.
+  class Relation
+    def create_or_find_by(conditions)
+      created = build(conditions)
+      begin
+        ActiveRecord::Base.transaction(requires_new: true) { created.save }
+      rescue ActiveRecord::RecordNotUnique
+        return find_by!(conditions)
+      end
+      created
+    end
+
+    def create_or_find_by!(conditions)
+      created = build(conditions)
+      begin
+        ActiveRecord::Base.transaction(requires_new: true) { created.save! }
+      rescue ActiveRecord::RecordNotUnique
+        return find_by!(conditions)
+      end
+      created
+    end
+  end
+
   class Base
     # Ruby-family only, beside the other reopens here: strict targets have
     # no `Type::Value`, no untyped `self[name]` and no relation `all`.
@@ -1118,6 +1142,14 @@ module ActiveRecord
 
     def self.find_or_create_by!(conditions)
       ActiveRecord::Relation.new(self).find_or_create_by!(conditions.to_h)
+    end
+
+    def self.create_or_find_by(conditions)
+      ActiveRecord::Relation.new(self).create_or_find_by(conditions.to_h)
+    end
+
+    def self.create_or_find_by!(conditions)
+      ActiveRecord::Relation.new(self).create_or_find_by!(conditions.to_h)
     end
 
     # `Model.find_sole_by(attrs)` — Rails' `where(attrs).sole`; see
