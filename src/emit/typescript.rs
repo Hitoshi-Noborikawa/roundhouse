@@ -1896,15 +1896,26 @@ pub(super) fn js_library_class(
     // declared; a constant whose name a static method or field also
     // takes is left out, as is any other value.
     for (name, value) in &class.constants {
-        let Some(value) = declarable_constant_value(value) else { continue };
+        let Some(literal) = declarable_constant_value(value) else {
+            report_undeclared_constant(class, name, value.span, "finds nothing", "its value is not a literal TypeScript renders as written (a constant read, a call, `Struct.new`)");
+            continue;
+        };
         // Only a static member collides: TypeScript keeps a class's static
         // and instance sides apart, as Ruby keeps a constant apart from an
         // instance method of the same name.
         if fields.iter().any(|f| f.2 && f.0 == name.as_str())
             || class.methods.iter().any(|m| m.receiver == crate::dialect::MethodReceiver::Class && m.name.as_str() == name.as_str())
         {
+            report_undeclared_constant(
+                class,
+                name,
+                value.span,
+                "reaches the class's static method or field of that name instead",
+                "a static member for the constant would collide with it",
+            );
             continue;
         }
+        let value = literal;
         // A constant shadowing an ancestor's static of the same name is
         // typed `any`: TypeScript requires the child's static side to be
         // assignable to the parent's (TS2417), and Ruby's values may differ.
@@ -2113,6 +2124,35 @@ fn memoized_literals(
         }
     }
     out
+}
+
+/// A class-body constant the TypeScript emit leaves out, reported as a
+/// gap: a `Klass.NAME` read finds no such member, or (`reaches`) the
+/// static member that took the name. The runtime's own classes (an
+/// `origin`) are not reported.
+fn report_undeclared_constant(
+    class: &crate::dialect::LibraryClass,
+    name: &crate::ident::Symbol,
+    span: crate::span::Span,
+    reaches: &str,
+    why: &str,
+) {
+    if class.origin.is_some() {
+        return;
+    }
+    let owner = class.name.0.as_str();
+    let mut d = crate::diagnostic::Diagnostic::unsupported(
+        span,
+        Some(crate::ident::Symbol::from("typescript")),
+        format!("constant {owner}::{}", name.as_str()),
+        format!(
+            "`{owner}::{name}` is not declared in the typescript emit, so a `{}.{name}` read {reaches}: {why}",
+            owner.rsplit("::").next().unwrap_or(owner),
+            name = name.as_str(),
+        ),
+    );
+    d.severity = crate::diagnostic::Severity::Warning;
+    crate::emit::diagnostics::push(d);
 }
 
 /// A class-body constant's value as TypeScript declares it: `.freeze`
