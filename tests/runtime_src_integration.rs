@@ -1206,7 +1206,10 @@ fn every_runtime_method_body_concretely_typed() {
     // create/update/destroy/validation twins answer the value of the block
     // `run_callbacks(:save) { … }` passes, whatever its type, held in a
     // local around the after hook (+5 in active_record/connection.rb).
-    const CEILING: usize = 875;
+    // MEASURED 876 on 2026-10-24 (on 875): `_halted_by_abort` yields to
+    // the before_* hook it guards and discards its value (+1 in
+    // active_record/connection.rb).
+    const CEILING: usize = 876;
     assert!(
         total_gradual <= CEILING,
         "{total_gradual} Ty::Untyped sites exceeds ceiling of {CEILING}"
