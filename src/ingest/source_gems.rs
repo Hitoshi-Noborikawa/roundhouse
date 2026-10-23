@@ -61,6 +61,23 @@ fn required_files<V: Vfs + ?Sized>(vfs: &V, gem: &Path, name: &str) -> Result<BT
             continue;
         }
         let text = vfs.read_to_string(&file).map_err(|e| format!("{}: {e}", file.display()))?;
+        // Not only what is required: `Zeitwerk::Loader.for_gem` autoloads every file under lib/ by its constant name.
+        if let Some(ignored) = zeitwerk_ignores(&text, file.parent().unwrap()) {
+            let mut dirs = vec![lib.clone()];
+            while let Some(dir) = dirs.pop() {
+                let Ok(entries) = vfs.read_dir(&dir) else { continue };
+                for entry in entries {
+                    if vfs.is_symlink(&entry) || ignored.iter().any(|i| entry.starts_with(i)) {
+                        continue;
+                    }
+                    if vfs.is_dir(&entry) {
+                        dirs.push(entry);
+                    } else if entry.extension().is_some_and(|e| e == "rb") {
+                        pending.push(entry);
+                    }
+                }
+            }
+        }
         for (relative, feature) in requires(&text) {
             let base = if relative { file.parent().unwrap().to_path_buf() } else { lib.clone() };
             let path = base.join(if feature.ends_with(".rb") { feature } else { format!("{feature}.rb") });
@@ -89,6 +106,24 @@ fn required_files<V: Vfs + ?Sized>(vfs: &V, gem: &Path, name: &str) -> Result<BT
         }
     }
     Ok(seen)
+}
+
+// `None` for an ignore written other than `"#{__dir__}/…"`: mounting what it leaves out would ingest code the gem never loads.
+fn zeitwerk_ignores(text: &str, dir: &Path) -> Option<Vec<PathBuf>> {
+    if !text.contains("Zeitwerk::Loader.for_gem") || !text.contains(".setup") {
+        return None;
+    }
+    let mut out = Vec::new();
+    for (at, _) in text.match_indices(".ignore(") {
+        let rest = &text[at + ".ignore(".len()..];
+        let arg = rest.split(')').next()?.trim();
+        let rel = arg.strip_prefix("\"#{__dir__}/")?.strip_suffix('"')?;
+        if rel.contains('#') || rel.contains('*') {
+            return None;
+        }
+        out.push(normalize(&dir.join(rel)));
+    }
+    Some(out)
 }
 
 fn requires(text: &str) -> Vec<(bool, String)> {
@@ -259,6 +294,32 @@ mod tests {
         let gems = resolve(&crate::vfs::FsVfs::new(), &root.join("app"), Some(&lock), &["widgets".to_string()]).unwrap();
         let files: Vec<_> = gems[0].files.iter().map(|p| p.display().to_string()).collect();
         assert_eq!(files, vec!["lib/widgets/base.rb", "lib/widgets.rb"]);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_zeitwerk_gem_brings_every_lib_file_it_does_not_ignore() {
+        let root = std::env::temp_dir().join(format!("rh-source-gems-zeitwerk-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let write = |path: &str, text: &str| {
+            let full = root.join(path);
+            std::fs::create_dir_all(full.parent().unwrap()).unwrap();
+            std::fs::write(full, text).unwrap();
+        };
+        write("app/.bundle/config", "---\nBUNDLE_PATH: \"vendor/bundle\"\n");
+        let gem = "app/vendor/bundle/ruby/3.4.0/gems/widgets-1.0";
+        write(
+            &format!("{gem}/lib/widgets.rb"),
+            "require \"zeitwerk\"\nloader = Zeitwerk::Loader.for_gem\nloader.ignore(\"#{__dir__}/widgets/templates\")\nloader.setup\nmodule Widgets; end\n",
+        );
+        write(&format!("{gem}/lib/widgets/part.rb"), "module Widgets; class Part; end; end\n");
+        write(&format!("{gem}/lib/widgets/part/kind.rb"), "module Widgets; class Part; class Kind; end; end; end\n");
+        write(&format!("{gem}/lib/widgets/templates/model.rb"), "class <%= name %>; end\n");
+        write(&format!("{gem}/lib/widgets/notes.txt"), "not ruby\n");
+        let lock = Lockfile::parse("GEM\n  remote: https://rubygems.org/\n  specs:\n    widgets (1.0)\n\nDEPENDENCIES\n  widgets\n");
+        let gems = resolve(&crate::vfs::FsVfs::new(), &root.join("app"), Some(&lock), &["widgets".to_string()]).unwrap();
+        let files: Vec<_> = gems[0].files.iter().map(|p| p.display().to_string()).collect();
+        assert_eq!(files, vec!["lib/widgets/part/kind.rb", "lib/widgets/part.rb", "lib/widgets.rb"]);
         let _ = std::fs::remove_dir_all(&root);
     }
 
