@@ -13,7 +13,13 @@ threads threads_count, threads_count
 
 port ENV.fetch("PORT", 3000)
 unix_bind = ENV.fetch("UNIX_BIND", "")
-bind(unix_bind.include?("?") ? unix_bind : unix_bind + "?mode=600") unless unix_bind.empty?
+unless unix_bind.empty?
+  match = unix_bind.match(/\Aunix:\/\/\/[^?\0#]*(?:\?mode=([0-7]{1,4}))?\z/)
+  unless match && (match[1].nil? || match[1].to_i(8) <= 0777)
+    raise ArgumentError, "UNIX_BIND needs unix:///absolute/path?mode=600"
+  end
+  bind(match[1] ? unix_bind : unix_bind + "?mode=600")
+end
 environment ENV.fetch("RAILS_ENV", "development")
 
 # Clustered mode — enable via WEB_CONCURRENCY=N. Defaults to single
