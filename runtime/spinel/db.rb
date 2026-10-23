@@ -1496,6 +1496,32 @@ module Db
     records
   end
 
+  # The work `current_transaction.after_commit` holds for the COMMIT
+  # (ActiveRecord::Base._after_commit), beside the records above. Seeded
+  # and cleared, as the records are, so the element type is the work's.
+  def self._txn_callbacks
+    work = Thread.current[:ar_txn_callbacks]
+    if work.nil?
+      work = [-> { nil }]
+      work.clear
+      Thread.current[:ar_txn_callbacks] = work
+    end
+    work
+  end
+
+  # The tables whose model is inside `Model.unscoped { … }` on this
+  # thread (relation.rb's `Relation.unscoped_tables`). Seeded and
+  # cleared, as the records are, so the element type is String.
+  def self._unscoped_tables
+    tables = Thread.current[:ar_unscoped_tables]
+    if tables.nil?
+      tables = [""]
+      tables.clear
+      Thread.current[:ar_unscoped_tables] = tables
+    end
+    tables
+  end
+
   # Request-scoped connection lease for the thread-per-connection
   # server. Leases a connection index (parking on the pool's condition
   # variable while none is free), binds its DbConn to this thread's

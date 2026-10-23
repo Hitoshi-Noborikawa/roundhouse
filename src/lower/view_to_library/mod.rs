@@ -1185,6 +1185,30 @@ pub fn insert_db_stub(
             },
         ),
     );
+    // The work `current_transaction.after_commit` holds for the COMMIT
+    // (connection.rb's `_after_commit`): `^() -> nil` lambdas, boxed per
+    // thread like the records above.
+    db_info.class_methods.insert(
+        Symbol::from("_txn_callbacks"),
+        fn_sig(
+            vec![],
+            Ty::Array {
+                elem: std::sync::Arc::new(Ty::Fn {
+                    params: vec![].into(),
+                    block: None,
+                    ret: std::sync::Arc::new(Ty::Nil),
+                    effects: crate::effect::EffectSet::default(),
+                }),
+            },
+        ),
+    );
+    // The tables inside a `Model.unscoped` block on this thread
+    // (relation.rb's `Relation.unscoped_tables`), boxed per thread like
+    // the transaction state above.
+    db_info.class_methods.insert(
+        Symbol::from("_unscoped_tables"),
+        fn_sig(vec![], Ty::Array { elem: std::sync::Arc::new(Ty::Str) }),
+    );
     classes.insert(ClassId(Symbol::from("Db")), db_info);
 
     // MessageDigest — the keyed-digest primitive surface, same

@@ -1969,6 +1969,10 @@ pub(crate) fn apply_scope_lowering(lcs: &mut [LibraryClass], app: &App) {
         // against a seeded Relation. A model's own CLASS methods
         // additionally seed bare implicit-self roots (`where(key: key)`
         // in `Keystore.value_for`), signalled via `class_self`.
+        // Ivars every method that assigns them binds to one association
+        // read, for the methods that only read them (a controller's
+        // private helper after its `before_action`).
+        let ivar_bindings = crate::lower::scope_chain::class_ivar_assoc_bindings(&lc.methods, &assocs);
         for m in &mut lc.methods {
             // A `__scope_` entry's forward body already carries `__rel`
             // exactly once — never re-thread it (re-entrancy guard for
@@ -1976,6 +1980,7 @@ pub(crate) fn apply_scope_lowering(lcs: &mut [LibraryClass], app: &App) {
             if m.name.as_str().starts_with("__scope_") {
                 continue;
             }
+            let ivar_seeds = crate::lower::scope_chain::ivar_seeds_for(&m.body, &ivar_bindings);
             let class_self = (m.receiver == MethodReceiver::Class)
                 .then(|| if is_model { Some(lc.name.clone()) } else { concern_owner.clone() })
                 .flatten();
@@ -2002,7 +2007,15 @@ pub(crate) fn apply_scope_lowering(lcs: &mut [LibraryClass], app: &App) {
                     || (class_self.is_some()
                         && crate::lower::scope_chain::mentions_bare_chain_start(e))
             };
-            if mentions(&m.body) {
+            if !ivar_seeds.is_empty() {
+                crate::lower::scope_chain::rewrite_call_site_seeded(
+                    &mut m.body,
+                    &regs,
+                    class_self.as_ref(),
+                    instance_self.as_ref(),
+                    &ivar_seeds,
+                );
+            } else if mentions(&m.body) {
                 crate::lower::scope_chain::rewrite_call_site(
                     &mut m.body,
                     &regs,
@@ -10096,6 +10109,34 @@ enum PreloadKind {
     PlainText { attr: String, owner: String },
 }
 
+/// Would `assoc`'s raw-SQL batch (belongs_to, `through:`) load rows of a
+/// model whose `default_scope` the runtime Relation applies
+/// (`lower::default_scope`): its target, or its `through:` model?
+fn touches_default_scoped(model: &crate::dialect::Model, assoc: &crate::dialect::Association, app: &App) -> bool {
+    use crate::dialect::Association;
+    let scoped = |id: &ClassId| {
+        app.models.iter().any(|m| &m.name == id && crate::lower::default_scope::static_default_scope(m).is_some())
+    };
+    let (target, through) = match assoc {
+        Association::BelongsTo { target, .. } => (target, None),
+        Association::HasMany { target, through, .. } | Association::HasOne { target, through, .. } => {
+            (target, through.as_ref())
+        }
+        _ => return false,
+    };
+    // A direct has_many / has_one batch loads through
+    // `Relation.new(<target>)`, which applies the scope itself.
+    let Some(thr) = through else {
+        return matches!(assoc, Association::BelongsTo { .. }) && scoped(target);
+    };
+    scoped(target) || {
+        model.associations().any(|a| {
+            a.name() == thr
+                && matches!(a, Association::BelongsTo { target, .. } | Association::HasMany { target, .. } | Association::HasOne { target, .. } if scoped(target))
+        })
+    }
+}
+
 /// Select association shapes whose batch queries preserve the reader's filters,
 /// resolving each against the app model registry and its table metadata.
 fn preload_targets(model: &crate::dialect::Model, app: &App) -> Vec<(String, PreloadKind)> {
@@ -10112,6 +10153,12 @@ fn preload_targets(model: &crate::dialect::Model, app: &App) -> Vec<(String, Pre
         // A refused association (`assoc_primary_key`) has no reader to
         // preload into.
         if crate::lower::assoc_primary_key::unsupported_reason(model, &app.models, assoc).is_some() {
+            continue;
+        }
+        // A belongs_to or `through:` batch is raw SQL; one that loads a
+        // default-scoped model keeps its lazy reader, whose Relation
+        // applies the scope, rather than load the rows it hides.
+        if touches_default_scoped(model, assoc, app) {
             continue;
         }
         match assoc {

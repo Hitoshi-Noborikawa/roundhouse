@@ -33,6 +33,10 @@ mod utc_zone_time;
 mod discard;
 #[path = "emit_and_run/pundit_source.rs"]
 mod pundit_source;
+#[path = "emit_and_run/ancestry_source.rs"]
+mod ancestry_source;
+#[path = "emit_and_run/gem_class_macros.rs"]
+mod gem_class_macros;
 #[path = "emit_and_run/source_gem_autoload.rs"]
 mod source_gem_autoload;
 #[path = "emit_and_run/pay_exceptions.rs"]
@@ -286,6 +290,12 @@ mod validates_options;
 mod validates_uniqueness;
 #[path = "emit_and_run/validates_inclusion_constants.rs"]
 mod validates_inclusion_constants;
+#[path = "emit_and_run/uniqueness_default_scoped.rs"]
+mod uniqueness_default_scoped;
+#[path = "emit_and_run/uniqueness_association_attribute.rs"]
+mod uniqueness_association_attribute;
+#[path = "emit_and_run/default_scope_static.rs"]
+mod default_scope_static;
 #[path = "emit_and_run/validates_integer_constants.rs"]
 mod validates_integer_constants;
 #[path = "emit_and_run/validation_callback_on.rs"]
@@ -308,14 +318,46 @@ mod validates_rule_on;
 mod validates_presence_allow_nil;
 #[path = "emit_and_run/validates_custom_message.rs"]
 mod validates_custom_message;
+#[path = "emit_and_run/presence_rails_blank.rs"]
+mod presence_rails_blank;
+#[path = "emit_and_run/allow_blank_unicode_space.rs"]
+mod allow_blank_unicode_space;
 #[path = "emit_and_run/regex_string_interpolation.rs"]
 mod regex_string_interpolation;
+#[path = "emit_and_run/format_allow_nil_blank.rs"]
+mod format_allow_nil_blank;
+#[path = "emit_and_run/format_value_to_s.rs"]
+mod format_value_to_s;
+#[path = "emit_and_run/validates_acceptance.rs"]
+mod validates_acceptance;
+#[path = "emit_and_run/attribute_api_boolean_cast.rs"]
+mod attribute_api_boolean_cast;
+#[path = "emit_and_run/hash_fetch_one_arg.rs"]
+mod hash_fetch_one_arg;
+#[path = "emit_and_run/numericality_unknown_option.rs"]
+mod numericality_unknown_option;
+#[path = "emit_and_run/belongs_to_nil_writer.rs"]
+mod belongs_to_nil_writer;
+#[path = "emit_and_run/inclusion_duration_literals.rs"]
+mod inclusion_duration_literals;
+#[path = "emit_and_run/validates_constant_splat.rs"]
+mod validates_constant_splat;
+#[path = "emit_and_run/cross_class_constants.rs"]
+mod cross_class_constants;
+#[path = "emit_and_run/regex_literal_hash_guard.rs"]
+mod regex_literal_hash_guard;
 #[path = "emit_and_run/numericality_allow_nil_blank.rs"]
 mod numericality_allow_nil_blank;
 #[path = "emit_and_run/stdlib_email_regexp.rs"]
 mod stdlib_email_regexp;
 #[path = "emit_and_run/constant_arithmetic_bounds.rs"]
 mod constant_arithmetic_bounds;
+#[path = "emit_and_run/validates_symbol_or_conditions.rs"]
+mod validates_symbol_or_conditions;
+#[path = "emit_and_run/stdlib_uri_make_regexp.rs"]
+mod stdlib_uri_make_regexp;
+#[path = "emit_and_run/validates_inclusion_hash_constants.rs"]
+mod validates_inclusion_hash_constants;
 
 #[test]
 fn markdown_templates_render_with_their_mime_type_and_erb_escaping() {
@@ -1181,6 +1223,406 @@ end
 "##,
         )
         .run_test("test/models/destroy_batch_commit_test.rb")
+        .assert_passes();
+}
+
+/// `belongs_to …, touch: true` is Rails' `touch_later`: inside a
+/// transaction the parent's row is stamped just before the COMMIT, not
+/// in the middle of the save; outside one a save still stamps it, and a
+/// rollback stamps nothing. A required `belongs_to` is
+/// checked through its reader, so a missing parent still fails the save.
+/// (campfire's message save, whose rich text and message both touch the
+/// room inside one transaction.)
+#[test]
+fn a_belongs_to_touch_waits_for_the_commit_and_lands_once() {
+    emit_and_run::real_blog()
+        .edit("app/models/comment.rb", "  belongs_to :article\n", "  belongs_to :article, touch: true\n")
+        .write(
+            "test/models/deferred_touch_test.rb",
+            r##"require "test_helper"
+
+class DeferredTouchTest < ActiveSupport::TestCase
+  def stored(article)
+    Article.find(article.id).updated_at.to_i
+  end
+
+  def parent(title)
+    travel_to Time.utc(2026, 1, 1, 12, 0, 0)
+    article = Article.create!(title: title, body: "A sufficiently long article body.")
+    travel_to Time.utc(2026, 1, 2, 12, 0, 0)
+    article
+  end
+
+  teardown { travel_back }
+
+  test "children saved in one transaction touch the parent at the commit" do
+    article = parent("Parent")
+    before = stored(article)
+    Article.transaction do
+      article.comments.create!(commenter: "Ann", body: "First comment")
+      article.comments.create!(commenter: "Bob", body: "Second comment")
+      assert_equal before, stored(article)
+    end
+    assert_equal Time.utc(2026, 1, 2, 12, 0, 0).to_i, stored(article)
+  end
+
+  test "a save outside a transaction still touches the parent" do
+    article = parent("Single")
+    article.comments.create!(commenter: "Ann", body: "Only comment")
+    assert_equal Time.utc(2026, 1, 2, 12, 0, 0).to_i, stored(article)
+  end
+
+  test "a rolled back transaction touches nothing" do
+    article = parent("Undone")
+    before = stored(article)
+    Article.transaction do
+      article.comments.create!(commenter: "Ann", body: "Dropped comment")
+      raise ActiveRecord::Rollback
+    end
+    assert_equal before, stored(article)
+  end
+
+  test "a comment on an article that does not exist is invalid" do
+    comment = Comment.new(commenter: "Ann", body: "Nobody home", article_id: 999_999)
+    assert_not comment.save
+    assert_includes comment.errors.full_messages, "Article must exist"
+  end
+end
+"##,
+        )
+        .run_test("test/models/deferred_touch_test.rb")
+        .assert_passes();
+}
+
+/// `Model.uncached { ... }` (campfire's password-digest and push-endpoint
+/// reads past the query cache): the block runs with the query cache off,
+/// the cache comes back after it, and the call answers the block's value.
+#[test]
+fn a_model_uncached_block_reads_past_the_query_cache() {
+    emit_and_run::real_blog()
+        .write(
+            "test/models/uncached_test.rb",
+            r##"require "test_helper"
+
+class UncachedTest < ActiveSupport::TestCase
+  test "the block reads past the query cache and answers its value" do
+    article = Article.create!(title: "Cached", body: "A sufficiently long article body.")
+    Db.query_cache_begin
+    begin
+      inside = Article.uncached { Db.query_cache_enabled? }
+      assert_equal false, inside
+      assert Db.query_cache_enabled?
+      assert_equal "Cached", Article.uncached { Article.where(id: article.id).pick(:title) }
+    ensure
+      Db.query_cache_end
+    end
+  end
+end
+"##,
+        )
+        .run_test("test/models/uncached_test.rb")
+        .assert_passes();
+}
+
+/// `current_transaction.after_commit { ... }` (Rails 7.2; campfire's
+/// password change closes the user's connections this way): the block
+/// runs once the transaction it was registered in commits, never for one
+/// that rolls back, and at once where no transaction can hold it.
+#[test]
+fn current_transaction_after_commit_waits_for_the_commit() {
+    emit_and_run::real_blog()
+        .edit(
+            "app/models/article.rb",
+            "  validates :title, presence: true\n",
+            "  validates :title, presence: true
+
+  LOG = []
+  after_update :note_on_commit
+
+  def self.note_now
+    current_transaction.after_commit { LOG << \"now\" }
+  end
+
+  private
+    def note_on_commit
+      self.class.current_transaction.after_commit { LOG << \"committed #{title}\" }
+    end
+
+  public
+",
+        )
+        .write(
+            "test/models/after_commit_test.rb",
+            r##"require "test_helper"
+
+class AfterCommitTest < ActiveSupport::TestCase
+  setup do
+    @article = Article.create!(title: "Start", body: "A sufficiently long article body.")
+    Article::LOG.clear
+  end
+
+  test "a save's own transaction runs the block once it commits" do
+    @article.update!(title: "Saved")
+    assert_equal [ "committed Saved" ], Article::LOG
+  end
+
+  test "an enclosing transaction holds the block until its commit" do
+    Article.transaction do
+      @article.update!(title: "Held")
+      assert_equal [], Article::LOG
+    end
+    assert_equal [ "committed Held" ], Article::LOG
+  end
+
+  test "a rolled back transaction never runs the block" do
+    Article.transaction do
+      @article.update!(title: "Undone")
+      raise ActiveRecord::Rollback
+    end
+    assert_equal [], Article::LOG
+  end
+
+  test "with no transaction to hold it the block runs at once" do
+    Article.note_now
+    assert_equal [ "now" ], Article::LOG
+  end
+end
+"##,
+        )
+        .run_test("test/models/after_commit_test.rb")
+        .assert_passes();
+}
+
+/// A module's `mattr_accessor` (campfire's
+/// `InlineScriptHashes.last_script_sources`, once-campfire#370) keeps its
+/// value in the module's own instance variable rather than a class
+/// variable: the same reads and writes on the Ruby tree, and nothing
+/// Spinel refuses (it has no class variables).
+#[test]
+fn a_modules_mattr_storage_is_its_own_instance_variable() {
+    let module = "module MemoStore\n  mattr_accessor :last\nend\n";
+    emit_and_run::real_blog()
+        .write("app/models/memo_store.rb", module)
+        .write(
+            "test/models/memo_store_test.rb",
+            r##"require "test_helper"
+
+class MemoStoreTest < ActiveSupport::TestCase
+  test "the module attribute starts nil and holds what it is given" do
+    assert_nil MemoStore.last
+    MemoStore.last = [ "key", "value" ]
+    assert_equal [ "key", "value" ], MemoStore.last
+    MemoStore.last = nil
+  end
+end
+"##,
+        )
+        .run_test("test/models/memo_store_test.rb")
+        .assert_passes();
+
+    let (_tree, errors) = emit_and_run::real_blog()
+        .write("app/models/memo_store.rb", module)
+        .write("app/models/memo_reader.rb", "class MemoReader\n  def self.read\n    MemoStore.last\n  end\nend\n")
+        .emit(roundhouse::project::BuildTarget::Spinel);
+    let refused: Vec<&String> = errors
+        .iter()
+        .filter(|e| e.contains("class variable") || e.contains("defined? query"))
+        .collect();
+    assert!(refused.is_empty(), "spinel refused the module's storage: {refused:?}");
+}
+
+/// `generates_token_for` declared in a concern's `included` block with
+/// an expiry the concern names as a constant, and a value built with
+/// `String#last` over a safe navigation (campfire's
+/// `User::Transferable`: `expires_in: TRANSFER_LINK_EXPIRY_DURATION do
+/// password_salt&.last(10) end`). The token round-trips, stops verifying
+/// when the value changes, and a finder reached through a scope finds
+/// only what the scope holds (`User.active.find_by_transfer_id`). The
+/// scoped call is the app's, as campfire's is (a test body's call site is
+/// not part of the survey that threads the relation).
+#[test]
+fn a_concerns_token_for_round_trips_within_its_scope() {
+    emit_and_run::real_blog()
+        .write(
+            "app/models/article/shareable.rb",
+            r##"module Article::Shareable
+  extend ActiveSupport::Concern
+
+  SHARE_LINK_EXPIRY = 2.hours
+
+  included do
+    generates_token_for :share, expires_in: SHARE_LINK_EXPIRY do
+      title&.last(5)
+    end
+  end
+
+  class_methods do
+    def find_by_share_id(id)
+      find_by_token_for(:share, id)
+    end
+  end
+
+  def share_id
+    generate_token_for(:share)
+  end
+end
+"##,
+        )
+        .edit(
+            "app/models/article.rb",
+            "  validates :title, presence: true\n",
+            "  validates :title, presence: true\n  include Article::Shareable\n  scope :greetings, -> { where(title: \"Hello world\") }\n\n  def self.greeting_shared_by(token)\n    Article.greetings.find_by_share_id(token)\n  end\n",
+        )
+        .write(
+            "test/models/article_share_test.rb",
+            r##"require "test_helper"
+
+class ArticleShareTest < ActiveSupport::TestCase
+  setup do
+    @hello = Article.create!(title: "Hello world", body: "A sufficiently long article body.")
+    @other = Article.create!(title: "Another one", body: "A sufficiently long article body.")
+  end
+
+  test "a share id finds its article" do
+    assert_equal @hello, Article.find_by_share_id(@hello.share_id)
+  end
+
+  test "a share id stops working when the value it is bound to changes" do
+    token = @hello.share_id
+    @hello.update!(title: "Hello there")
+    assert_nil Article.find_by_share_id(token)
+  end
+
+  test "a share id finds only articles in scope" do
+    assert_equal @hello, Article.greeting_shared_by(@hello.share_id)
+    assert_nil Article.greeting_shared_by(@other.share_id)
+    assert_equal @other, Article.find_by_share_id(@other.share_id)
+  end
+end
+"##,
+        )
+        .run_test("test/models/article_share_test.rb")
+        .assert_passes();
+}
+
+/// An association parked in an ivar by a `before_action` (campfire's
+/// `@push_subscriptions = Current.user.push_subscriptions`) answers
+/// `find_or_initialize_by(<params>)` as a relation scoped to its owner,
+/// with the params object as the condition hash, and the same ivar read
+/// again in a private helper the action calls answers `find_by` the same
+/// way.
+#[test]
+fn a_parked_association_finds_or_initializes_and_a_helper_reads_it() {
+    emit_and_run::real_blog()
+        .write(
+            "app/controllers/comments_controller.rb",
+            r##"class CommentsController < ApplicationController
+  before_action :set_article
+  before_action :set_comments
+
+  def create
+    @comment = @comments.find_or_initialize_by(comment_params)
+    if @comment.persisted? || @comment.save
+      redirect_to @article, notice: posted_notice
+    else
+      redirect_to @article, alert: "Could not create comment."
+    end
+  end
+
+  def destroy
+    @comment = @article.comments.find(params.expect(:id))
+    @comment.destroy
+    redirect_to @article, notice: "Comment was successfully deleted."
+  end
+
+  private
+
+    def set_article
+      @article = Article.find(params.expect(:article_id))
+    end
+
+    def set_comments
+      @comments = @article.comments
+    end
+
+    def posted_notice
+      @comments.find_by(commenter: "Twice") ? "Posted by Twice." : "Comment was successfully created."
+    end
+
+    def comment_params
+      params.expect(comment: [ :commenter, :body ])
+    end
+end
+"##,
+        )
+        .write(
+            "test/controllers/comments_find_or_initialize_controller_test.rb",
+            r##"require "test_helper"
+
+class CommentsFindOrInitializeControllerTest < ActionDispatch::IntegrationTest
+  setup do
+    @article = articles(:one)
+    @other = Article.create!(title: "Other article", body: "A sufficiently long article body.")
+  end
+
+  test "the same comment posted twice is one comment, on its own article" do
+    params = { comment: { commenter: "Twice", body: "Said it once." } }
+    assert_difference("Comment.count", 1) do
+      post article_comments_url(@article), params: params
+      post article_comments_url(@article), params: params
+    end
+    comment = Comment.find_by(commenter: "Twice")
+    assert_equal @article.id, comment.article_id
+    follow_redirect!
+    assert_includes response.body, "Posted by Twice."
+  end
+
+  test "another article's comments are another scope" do
+    params = { comment: { commenter: "Twice", body: "Said it once." } }
+    post article_comments_url(@article), params: params
+    assert_difference("Comment.count", 1) do
+      post article_comments_url(@other), params: params
+    end
+    assert_equal [ @article.id, @other.id ].sort, Comment.where(commenter: "Twice").map(&:article_id).sort
+  end
+end
+"##,
+        )
+        .run_test("test/controllers/comments_find_or_initialize_controller_test.rb")
+        .assert_passes();
+}
+
+/// A params helper that ends `permit(…).compact.merge(k: v)` (campfire's
+/// `Users::ProfilesController#user_params`, which always adds the
+/// password challenge) is still the permit list's typed record with the
+/// merged key on it, so `update(<that>)` takes the typed update. The
+/// `.compact` between them hid the merge, and the update called the
+/// record's `title_provided` on the Hash the merge answered instead.
+#[test]
+fn a_compacted_permit_list_merges_into_its_typed_update() {
+    emit_and_run::real_blog()
+        .edit(
+            "app/controllers/articles_controller.rb",
+            "      params.expect(article: [ :title, :body ])\n",
+            "      params.require(:article).permit(:title).compact.merge(body: \"Merged by the controller, not the form.\")\n",
+        )
+        .write(
+            "test/controllers/articles_compact_merge_controller_test.rb",
+            r##"require "test_helper"
+
+class ArticlesCompactMergeControllerTest < ActionDispatch::IntegrationTest
+  test "the permitted field and the merged one both reach the record" do
+    article = articles(:one)
+    patch article_url(article), params: { article: { title: "Updated Title", body: "From the form" } }
+    assert_redirected_to article_url(article)
+    article.reload
+    assert_equal "Updated Title", article.title
+    assert_equal "Merged by the controller, not the form.", article.body
+  end
+end
+"##,
+        )
+        .run_test("test/controllers/articles_compact_merge_controller_test.rb")
         .assert_passes();
 }
 
@@ -13837,6 +14279,138 @@ end
         .assert_passes();
 }
 
+/// `validate :m` with Rails 7.1's password-change guard shape: a Symbol
+/// dirty predicate as `if:` and a lambda as `unless:` (campfire's
+/// `password_challenge_matches`), `on: :create` (campfire's Session),
+/// `password_challenge` assigned through `update`, and an empty password
+/// leaving the digest as it was. Each assignment stays off bcrypt (CI's
+/// unit job does not install it).
+#[test]
+fn validate_guards_and_the_password_challenge_run() {
+    emit_and_run::real_blog()
+        .edit(
+            "db/schema.rb",
+            "create_table \"articles\", force: :cascade do |t|",
+            "create_table \"articles\", force: :cascade do |t|\n    t.string \"password_digest\"",
+        )
+        .edit(
+            "app/models/article.rb",
+            "class Article < ApplicationRecord\n  has_many :comments, dependent: :destroy",
+            r#"class Article < ApplicationRecord
+  has_many :comments, dependent: :destroy
+  has_secure_password validations: false
+  validate :challenge_matches, if: :will_save_change_to_title?, unless: -> { password_challenge.nil? }
+  validate :body_free, on: :create
+
+  def challenge_matches
+    errors.add(:password_challenge, :invalid) unless password_challenge == "ok"
+  end
+
+  def body_free
+    errors.add(:body, "is taken") if body == "only on create"
+  end"#,
+        )
+        .write(
+            "test/models/article_validate_guards_test.rb",
+            r#"require "test_helper"
+
+class ArticleValidateGuardsTest < ActiveSupport::TestCase
+  test "the challenge is checked only when the guarded column changes and a challenge is given" do
+    id = articles(:one).id
+    assert_not Article.find(id).update(title: "A new title", password_challenge: "wrong")
+    assert Article.find(id).update(title: "A new title", password_challenge: "ok")
+    assert Article.find(id).update(title: "Another title")
+    assert Article.find(id).update(body: "A different long body", password_challenge: "wrong")
+  end
+
+  test "on: :create runs before the first save only" do
+    assert_not Article.new(title: "Fresh", body: "only on create").save
+    assert articles(:one).update(body: "only on create")
+  end
+
+  test "an empty password leaves the digest as it was" do
+    article = articles(:one)
+    article.update!(password_digest: "stored digest")
+    article.update!(password: "")
+    assert_equal "stored digest", Article.find(article.id).password_digest
+  end
+end
+"#,
+        )
+        .run_test("test/models/article_validate_guards_test.rb")
+        .assert_passes();
+}
+
+/// `flash` in an integration test is the last request's flash, read
+/// after a redirect the test does not follow (campfire's profile tests:
+/// `assert_equal "✓", flash[:notice]`).
+#[test]
+fn an_integration_test_reads_the_last_requests_flash() {
+    emit_and_run::real_blog()
+        .write(
+            "test/controllers/articles_flash_controller_test.rb",
+            r#"require "test_helper"
+
+class ArticlesFlashControllerTest < ActionDispatch::IntegrationTest
+  test "the redirect's notice is the flash" do
+    post articles_url, params: { article: { title: "Flashed", body: "A sufficiently long article body." } }
+    assert_redirected_to article_url(Article.find_by(title: "Flashed"))
+    assert_equal "Article was successfully created.", flash[:notice]
+    assert_nil flash[:alert]
+  end
+end
+"#,
+        )
+        .run_test("test/controllers/articles_flash_controller_test.rb")
+        .assert_passes();
+}
+
+/// A model class method a scope reaches (`titled.find_by_slug(s)`)
+/// takes the relation as a trailing `__rel`, so the call carries one
+/// argument more than the test's `stubs(...).with(s)` names; the ruby
+/// lanes' mocha replay still matches it (campfire's
+/// `User.stubs(:find_by_transfer_id).with(transfer_id)` against
+/// `User.active.find_by_transfer_id(params[:id])`), and the named
+/// argument still tells two stubs apart.
+#[test]
+#[ignore = "requires the mocha gem"]
+fn a_stub_with_args_matches_a_scope_reached_class_method() {
+    emit_and_run::real_blog()
+        .edit(
+            "app/models/article.rb",
+            "class Article < ApplicationRecord\n  has_many :comments, dependent: :destroy",
+            r#"class Article < ApplicationRecord
+  has_many :comments, dependent: :destroy
+  scope :titled, -> { where.not(title: nil) }
+
+  def self.find_by_slug(slug)
+    where(title: slug).first
+  end
+
+  def self.titled_slug(slug)
+    titled.find_by_slug(slug)
+  end"#,
+        )
+        .write(
+            "test/models/article_scoped_stub_test.rb",
+            r#"require "test_helper"
+
+class ArticleScopedStubTest < ActiveSupport::TestCase
+  test "the stub answers the scoped call it names" do
+    other = articles(:two)
+    Article.stubs(:find_by_slug).with("a-slug").returns(other)
+    Article.stubs(:find_by_slug).with("another").returns(articles(:one))
+    assert_equal other.id, Article.titled_slug("a-slug").id
+    assert_equal other.id, Article.find_by_slug("a-slug").id
+    assert_equal articles(:one).id, Article.titled_slug("another").id
+  end
+end
+"#,
+        )
+        .run_test("test/models/article_scoped_stub_test.rb")
+        .assert_passes();
+}
+
 #[path = "emit_and_run/relation_finders.rs"]
 mod relation_finders;
 #[path = "emit_and_run/attach_hash.rs"]
@@ -18372,6 +18946,14 @@ mod proc_new_and_std_streams;
 mod core_constants;
 #[path = "emit_and_run/module_protocol_receivers.rs"]
 mod module_protocol_receivers;
+#[path = "emit_and_run/ipaddr_include.rs"]
+mod ipaddr_include;
+#[path = "emit_and_run/hash_subclass_include.rs"]
+mod hash_subclass_include;
+#[path = "emit_and_run/guarded_declarations.rs"]
+mod guarded_declarations;
+#[path = "emit_and_run/lock_versions.rs"]
+mod lock_versions;
 #[path = "emit_and_run/helper_diagnostics.rs"]
 mod helper_diagnostics;
 #[path = "emit_and_run/value_seq_order.rs"]
@@ -18400,3 +18982,49 @@ mod inherited_visibility;
 mod class_side_relations;
 #[path = "emit_and_run/dynamic_where_forms.rs"]
 mod dynamic_where_forms;
+#[path = "emit_and_run/enum_cross_class_mapping.rs"]
+mod enum_cross_class_mapping;
+
+/// `ActiveSupport::JSON.encode(value, escape: false)` — Rails' document
+/// without the HTML-entity escaping, which campfire's fragment keys can
+/// digest instead of the escaped one — lowers to the runtime's
+/// `encode_without_escape`, keyword or braced, and plain `encode` keeps
+/// its escaping.
+#[test]
+fn json_encode_with_escape_false_runs() {
+    emit_and_run::real_blog()
+        .edit(
+            "app/models/article.rb",
+            "class Article < ApplicationRecord\n  has_many :comments, dependent: :destroy",
+            r#"class Article < ApplicationRecord
+  has_many :comments, dependent: :destroy
+
+  def plain_doc
+    ActiveSupport::JSON.encode([ "<b>&</b>", { title: title, n: 2 } ], escape: false)
+  end
+
+  def braced_doc
+    ActiveSupport::JSON.encode([ "<i>" ], { escape: false })
+  end
+
+  def escaped_doc
+    ActiveSupport::JSON.encode([ "<b>&</b>" ])
+  end"#,
+        )
+        .write(
+            "test/models/article_json_escape_test.rb",
+            r#"require "test_helper"
+
+class ArticleJsonEscapeTest < ActiveSupport::TestCase
+  test "escape: false leaves the entities alone" do
+    article = Article.new(title: "A <title> & more", body: "A sufficiently long article body.")
+    assert_equal %q(["<b>&</b>",{"title":"A <title> & more","n":2}]), article.plain_doc
+    assert_equal %q(["<i>"]), article.braced_doc
+    assert_equal %(["\\u003cb\\u003e\\u0026\\u003c/b\\u003e"]), article.escaped_doc
+  end
+end
+"#,
+        )
+        .run_test("test/models/article_json_escape_test.rb")
+        .assert_passes();
+}
