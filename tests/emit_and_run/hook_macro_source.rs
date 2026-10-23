@@ -11,7 +11,7 @@ fn app() -> emit_and_run::Overlay {
         .write(".bundle/config", "---\nBUNDLE_PATH: \"vendor/bundle\"\n")
         .write("roundhouse.yml", "extensions:\n  - config/roundhouse\n")
         .write("config/roundhouse/gems.yml", "source_gems:\n  - {gem: \"taggy\"}\n")
-        .edit("app/models/article.rb", "class Article < ApplicationRecord\n", "class Article < ApplicationRecord\n  taggy\n")
+        .edit("app/models/article.rb", "class Article < ApplicationRecord\n", "class Article < ApplicationRecord\n  taggy\n  taggy_on :topics, [:notes, nil]\n")
         .write(
             &format!("{GEM}/taggy.rb"),
             r#"require "taggy/config"
@@ -32,6 +32,26 @@ module Taggy
     self.tag_table = tag_cname.tableize.gsub(/\//, "_")
     extra = options.reject { |k, _v| ![:prefix].include?(k.to_sym) }
     @@kinds << self.name if Taggy.registry
+  end
+
+  def taggy_on(*kinds)
+    include Tagged unless included_modules.include?(Taggy::Tagged)
+    kinds.to_a.flatten.compact.map(&:to_sym).each do |kind|
+      class_eval <<-RUBY, __FILE__, __LINE__ + 1
+        def #{kind}_label
+          "#{kind}:" + tag_label
+        end
+      RUBY
+    end
+    class_eval do
+      def self.taggy_kinds?
+        true
+      end
+    end
+  end
+
+  def taggy_from(name)
+    class_eval "def #{name.call}_label; end"
   end
 
   def self.kinds
@@ -67,6 +87,8 @@ raise "tag_label: #{a.tag_label.inspect}" unless a.tag_label == "Label:labels"
 raise "kinds: #{Taggy.kinds.inspect}" unless Taggy.kinds == ["Article"]
 raise "registry: #{Taggy.registry.inspect}" unless Taggy.registry == true
 raise "extra: #{Taggy.extra.inspect}" unless Taggy.extra == 1
+got = [a.topics_label, a.notes_label, Article.taggy_kinds?, Article.included_modules.count(Taggy::Tagged)]
+raise "taggy_on: #{got.inspect}" unless got == ["topics:Label:labels", "notes:Label:labels", true, 1]
 puts "ok"
 "#,
         )
@@ -81,4 +103,13 @@ fn a_computed_superclass_is_reported() {
         .edit(&format!("{GEM}/taggy.rb"), "require \"taggy/extra\"\n", "require \"taggy/extra\"\nrequire \"taggy/mark\"\n")
         .check_errors();
     assert!(errors.iter().any(|e| e.contains("`Taggy::Mark`'s superclass is computed")), "{errors:#?}");
+}
+
+// Not expanded from a guess: the String it `class_eval`s is built when the program runs.
+#[test]
+fn a_class_eval_of_a_run_time_string_is_reported() {
+    let errors = app()
+        .edit("app/models/article.rb", "  taggy\n", "  taggy\n  taggy_from -> { \"x\" }\n")
+        .check_errors();
+    assert!(errors.iter().any(|e| e.contains("`taggy_from` defines methods this call does not expand")), "{errors:#?}");
 }
