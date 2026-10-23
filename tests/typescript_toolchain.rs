@@ -21,6 +21,8 @@ mod memoized_fields;
 mod app_class_base;
 #[path = "support/parenless_calls.rs"]
 mod parenless_calls;
+#[path = "support/model_class_methods.rs"]
+mod model_class_methods;
 #[path = "support/emit_and_run.rs"]
 #[allow(dead_code)]
 mod emit_and_run;
@@ -354,6 +356,20 @@ fn real_blog_parenless_calls_run_under_tsx() {
         "import { Meter } from \"./app/models/meter.js\";\nimport { Widget } from \"./app/models/widget.js\";\nimport { Comment } from \"./app/models/comment.js\";\nimport { Gauge } from \"./app/models/gauge.js\";\nconsole.log([Meter.a(), Meter.b(), Meter.c(), new Meter().e(), Widget.shout(), Comment.tags(), Gauge.show(), new Gauge().both()].join(\",\"));\n",
     );
     assert_eq!(out, parenless_calls::SUMMARY);
+}
+
+#[test]
+#[ignore]
+fn real_blog_model_class_methods_run_under_tsx() {
+    // A model's class method calling another without a receiver answers
+    // as CRuby does (#1236).
+    let (emitted, errors) = model_class_methods::overlay().emit(roundhouse::project::BuildTarget::Typescript);
+    assert!(errors.is_empty(), "{errors:?}");
+    let out = run_under_tsx(
+        &emitted,
+        "import { Comment } from \"./app/models/comment.js\";\nconsole.log([Comment.loud_tag(), Comment.tag_size()].join(\",\"));\n",
+    );
+    assert_eq!(out, model_class_methods::SUMMARY);
 }
 
 #[test]

@@ -3989,11 +3989,15 @@ fn rewrite_send(expr: &mut Expr, ctx: &Ctx, locals: &mut Locals) -> Option<Class
         Some(r) if matches!(&*r.node, ExprNode::SelfRef) => {
             let self_model =
                 ctx.scope_body.as_ref().map(|(m, _)| m).or(ctx.class_self.as_ref());
+            // A terminal too, where there is a `__rel` to end on: Rails runs
+            // the body inside the relation's `scoping`, so `self.find(id)`
+            // is the scoped find a bare `find(id)` is.
             match self_model {
                 Some(m)
                     if is_relation_chain_method(method.as_str())
                         || method.as_str() == "all"
-                        || ctx.scope_of(m, &method) =>
+                        || ctx.scope_of(m, &method)
+                        || (ctx.scope_body.is_some() && is_relation_terminal(method.as_str(), &args, block.as_ref())) =>
                 {
                     None
                 }
