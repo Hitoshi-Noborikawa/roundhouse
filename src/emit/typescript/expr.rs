@@ -136,10 +136,19 @@ pub(super) fn body_has_async_send(expr: &Expr) -> bool {
 #[derive(Default, Clone)]
 pub(crate) struct ClassShape {
     parent: Option<String>,
-    methods: HashMap<String, (crate::dialect::AccessorKind, usize)>,
+    methods: HashMap<String, Shape>,
     /// The class's own (`def self.x`) methods, read for a `self` send
     /// inside a class method.
-    class_methods: HashMap<String, (crate::dialect::AccessorKind, usize)>,
+    class_methods: HashMap<String, Shape>,
+}
+
+/// A method's kind, its parameter count, and whether a call with no
+/// arguments reaches it (every parameter optional: a default, a rest, a
+/// forwarding `...`), which is what makes a parenless send a call.
+type Shape = (crate::dialect::AccessorKind, usize, bool);
+
+fn accepts_no_arguments(m: &crate::dialect::MethodDef) -> bool {
+    m.params.iter().all(|p| p.default.is_some() || p.rest || p.forwarding || p.name.as_str().is_empty())
 }
 
 std::thread_local! {
@@ -228,11 +237,11 @@ pub(crate) fn set_class_shapes<'a>(
         for m in &c.methods {
             if !matches!(m.receiver, crate::dialect::MethodReceiver::Instance) {
                 let kind = as_field(m.kind, &static_fields, m.name.as_str());
-                entry.class_methods.entry(m.name.as_str().to_string()).or_insert((kind, m.params.len()));
+                entry.class_methods.entry(m.name.as_str().to_string()).or_insert((kind, m.params.len(), accepts_no_arguments(m)));
                 continue;
             }
             let kind = as_field(m.kind, &fields, m.name.as_str());
-            entry.methods.entry(m.name.as_str().to_string()).or_insert((kind, m.params.len()));
+            entry.methods.entry(m.name.as_str().to_string()).or_insert((kind, m.params.len(), accepts_no_arguments(m)));
         }
     }
     CLASS_SHAPES.with(|cell| *cell.borrow_mut() = map);
@@ -240,18 +249,18 @@ pub(crate) fn set_class_shapes<'a>(
 
 /// The shape of `method` on an instance of the class `ty` names, found
 /// on the class or its nearest ancestor that declares it.
-fn instance_method_shape(ty: Option<&Ty>, method: &str) -> Option<(crate::dialect::AccessorKind, usize)> {
+fn instance_method_shape(ty: Option<&Ty>, method: &str) -> Option<Shape> {
     let Some(Ty::Class { id, .. }) = strip_nullable(ty) else { return None };
     method_shape(id.0.as_str(), method, false)
 }
 
 /// The shape of the class method `method` of the class `class`, found
 /// on it or its nearest ancestor that declares it.
-fn class_method_shape(class: &str, method: &str) -> Option<(crate::dialect::AccessorKind, usize)> {
+fn class_method_shape(class: &str, method: &str) -> Option<Shape> {
     method_shape(class, method, true)
 }
 
-fn method_shape(class: &str, method: &str, class_side: bool) -> Option<(crate::dialect::AccessorKind, usize)> {
+fn method_shape(class: &str, method: &str, class_side: bool) -> Option<Shape> {
     CLASS_SHAPES.with(|cell| {
         let map = cell.borrow();
         let resolve = |name: &str| -> Option<&ClassShape> {
@@ -2544,7 +2553,7 @@ fn js_send_inner(
         let attr = &method[..method.len() - 1];
         // A custom writer (`def foo=(v)`) is a method, `set_foo`, not
         // a field the assignment could land in.
-        if let Some((crate::dialect::AccessorKind::Method, 1)) =
+        if let Some((crate::dialect::AccessorKind::Method, 1, _)) =
             instance_method_shape(recv.unwrap().ty.as_ref(), method)
         {
             return Js::method_call(
@@ -4118,7 +4127,7 @@ fn js_send_inner(
                 None => instance_method_shape(r.ty.as_ref(), method),
             };
             let is_declared_method =
-                !is_const_recv && matches!(shape, Some((crate::dialect::AccessorKind::Method, 0)));
+                !is_const_recv && matches!(shape, Some((crate::dialect::AccessorKind::Method, _, true)));
             let raw = if args.is_empty()
                 && !parenthesized
                 && !force_parens

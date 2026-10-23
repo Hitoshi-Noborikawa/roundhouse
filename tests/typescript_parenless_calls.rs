@@ -66,3 +66,15 @@ fn an_instance_method_leaves_a_class_predicate_of_its_sanitized_name() {
     assert!(lamp.contains("static is_ready(): boolean {"), "{lamp}");
 }
 
+
+/// A method whose every parameter is optional (`def self.label(prefix =
+/// "x")`, `def tag(sep = "-")`) takes a call with no arguments, so a
+/// parenless send is a call there too: `this.label` read the function.
+#[test]
+fn a_def_with_only_optional_parameters_is_called() {
+    let (emitted, errors) = parenless_calls::overlay().emit(BuildTarget::Typescript);
+    assert!(errors.is_empty(), "{errors:?}");
+    let gauge = std::fs::read_to_string(emitted.join("app/models/gauge.ts")).expect("gauge.ts");
+    assert!(gauge.contains("return this.label();"), "{gauge}");
+    assert!(gauge.contains("return this.tag();"), "{gauge}");
+}

@@ -43,14 +43,18 @@ pub const KNOB: &str = "class Knob\n  attr_reader :label\n\n  def initialize\n  
 /// (`is_ready`, `ready?`): each side keeps its own.
 pub const LAMP: &str = "class Lamp\n  def is_ready\n    false\n  end\n\n  def self.ready?\n    true\n  end\n\n  def self.state\n    ready? ? \"on\" : \"off\"\n  end\nend\n";
 
+/// A method whose every parameter has a default accepts a call with no
+/// arguments, on either side: a parenless `label` / `tag` is a call.
+pub const GAUGE: &str = "class Gauge\n  def self.label(prefix = \"x\")\n    prefix + \"!\"\n  end\n\n  def self.show\n    label\n  end\n\n  def tag(sep = \"-\")\n    sep * 2\n  end\n\n  def both\n    tag\n  end\nend\n";
+
 pub const WIDGET: &str = "class Widget < Meter\n  def self.shout\n    label.upcase\n  end\nend\n";
 
 const COMMENT_ANCHOR: &str = "  after_destroy_commit { article.broadcast_replace_to(\"articles\") rescue nil }\n";
 
 /// What `[Meter.a, Meter.b, Meter.c, Meter.new.e, Widget.shout,
-/// Comment.tags].join(",")` answers under CRuby.
+/// Comment.tags, Gauge.show, Gauge.new.both].join(",")` answers under CRuby.
 #[allow(dead_code)]
-pub const SUMMARY: &str = "BASE,base,BASE,N,BASE,t,t";
+pub const SUMMARY: &str = "BASE,base,BASE,N,BASE,t,t,x!,--";
 
 pub fn overlay() -> Overlay {
     emit_and_run::real_blog()
@@ -59,6 +63,7 @@ pub fn overlay() -> Overlay {
         .write("app/models/dial.rb", DIAL)
         .write("app/models/knob.rb", KNOB)
         .write("app/models/lamp.rb", LAMP)
+        .write("app/models/gauge.rb", GAUGE)
         .edit(
             "app/models/comment.rb",
             COMMENT_ANCHOR,

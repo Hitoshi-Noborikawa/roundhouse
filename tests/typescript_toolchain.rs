@@ -351,7 +351,7 @@ fn real_blog_parenless_calls_run_under_tsx() {
     assert!(errors.is_empty(), "{errors:?}");
     let out = run_under_tsx(
         &emitted,
-        "import { Meter } from \"./app/models/meter.js\";\nimport { Widget } from \"./app/models/widget.js\";\nimport { Comment } from \"./app/models/comment.js\";\nconsole.log([Meter.a(), Meter.b(), Meter.c(), new Meter().e(), Widget.shout(), Comment.tags()].join(\",\"));\n",
+        "import { Meter } from \"./app/models/meter.js\";\nimport { Widget } from \"./app/models/widget.js\";\nimport { Comment } from \"./app/models/comment.js\";\nimport { Gauge } from \"./app/models/gauge.js\";\nconsole.log([Meter.a(), Meter.b(), Meter.c(), new Meter().e(), Widget.shout(), Comment.tags(), Gauge.show(), new Gauge().both()].join(\",\"));\n",
     );
     assert_eq!(out, parenless_calls::SUMMARY);
 }
