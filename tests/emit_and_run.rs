@@ -35,6 +35,8 @@ mod utc_zone_time;
 mod discard;
 #[path = "emit_and_run/pundit_source.rs"]
 mod pundit_source;
+#[path = "emit_and_run/ancestry_source.rs"]
+mod ancestry_source;
 #[path = "emit_and_run/gem_class_macros.rs"]
 mod gem_class_macros;
 #[path = "emit_and_run/source_gem_autoload.rs"]
@@ -204,6 +206,8 @@ mod relation_projections;
 mod pluck_projection_semantics;
 #[path = "emit_and_run/response_redirect.rs"]
 mod response_redirect;
+#[path = "emit_and_run/api_response_fidelity.rs"]
+mod api_response_fidelity;
 #[path = "emit_and_run/constructor_unrelated_mutations.rs"]
 mod constructor_unrelated_mutations;
 #[path = "emit_and_run/render_to_string_partial_ivar.rs"]
@@ -288,6 +292,12 @@ mod validates_options;
 mod validates_uniqueness;
 #[path = "emit_and_run/validates_inclusion_constants.rs"]
 mod validates_inclusion_constants;
+#[path = "emit_and_run/uniqueness_default_scoped.rs"]
+mod uniqueness_default_scoped;
+#[path = "emit_and_run/uniqueness_association_attribute.rs"]
+mod uniqueness_association_attribute;
+#[path = "emit_and_run/default_scope_static.rs"]
+mod default_scope_static;
 #[path = "emit_and_run/validates_integer_constants.rs"]
 mod validates_integer_constants;
 #[path = "emit_and_run/validation_callback_on.rs"]
@@ -310,18 +320,46 @@ mod validates_rule_on;
 mod validates_presence_allow_nil;
 #[path = "emit_and_run/validates_custom_message.rs"]
 mod validates_custom_message;
+#[path = "emit_and_run/presence_rails_blank.rs"]
+mod presence_rails_blank;
+#[path = "emit_and_run/allow_blank_unicode_space.rs"]
+mod allow_blank_unicode_space;
 #[path = "emit_and_run/regex_string_interpolation.rs"]
 mod regex_string_interpolation;
 #[path = "emit_and_run/format_allow_nil_blank.rs"]
 mod format_allow_nil_blank;
+#[path = "emit_and_run/format_value_to_s.rs"]
+mod format_value_to_s;
+#[path = "emit_and_run/validates_acceptance.rs"]
+mod validates_acceptance;
+#[path = "emit_and_run/attribute_api_boolean_cast.rs"]
+mod attribute_api_boolean_cast;
+#[path = "emit_and_run/hash_fetch_one_arg.rs"]
+mod hash_fetch_one_arg;
+#[path = "emit_and_run/numericality_unknown_option.rs"]
+mod numericality_unknown_option;
+#[path = "emit_and_run/belongs_to_nil_writer.rs"]
+mod belongs_to_nil_writer;
+#[path = "emit_and_run/inclusion_duration_literals.rs"]
+mod inclusion_duration_literals;
+#[path = "emit_and_run/validates_constant_splat.rs"]
+mod validates_constant_splat;
 #[path = "emit_and_run/cross_class_constants.rs"]
 mod cross_class_constants;
+#[path = "emit_and_run/regex_literal_hash_guard.rs"]
+mod regex_literal_hash_guard;
 #[path = "emit_and_run/numericality_allow_nil_blank.rs"]
 mod numericality_allow_nil_blank;
 #[path = "emit_and_run/stdlib_email_regexp.rs"]
 mod stdlib_email_regexp;
 #[path = "emit_and_run/constant_arithmetic_bounds.rs"]
 mod constant_arithmetic_bounds;
+#[path = "emit_and_run/validates_symbol_or_conditions.rs"]
+mod validates_symbol_or_conditions;
+#[path = "emit_and_run/stdlib_uri_make_regexp.rs"]
+mod stdlib_uri_make_regexp;
+#[path = "emit_and_run/validates_inclusion_hash_constants.rs"]
+mod validates_inclusion_hash_constants;
 
 #[test]
 fn markdown_templates_render_with_their_mime_type_and_erb_escaping() {
@@ -18946,3 +18984,49 @@ mod inherited_visibility;
 mod class_side_relations;
 #[path = "emit_and_run/dynamic_where_forms.rs"]
 mod dynamic_where_forms;
+#[path = "emit_and_run/enum_cross_class_mapping.rs"]
+mod enum_cross_class_mapping;
+
+/// `ActiveSupport::JSON.encode(value, escape: false)` — Rails' document
+/// without the HTML-entity escaping, which campfire's fragment keys can
+/// digest instead of the escaped one — lowers to the runtime's
+/// `encode_without_escape`, keyword or braced, and plain `encode` keeps
+/// its escaping.
+#[test]
+fn json_encode_with_escape_false_runs() {
+    emit_and_run::real_blog()
+        .edit(
+            "app/models/article.rb",
+            "class Article < ApplicationRecord\n  has_many :comments, dependent: :destroy",
+            r#"class Article < ApplicationRecord
+  has_many :comments, dependent: :destroy
+
+  def plain_doc
+    ActiveSupport::JSON.encode([ "<b>&</b>", { title: title, n: 2 } ], escape: false)
+  end
+
+  def braced_doc
+    ActiveSupport::JSON.encode([ "<i>" ], { escape: false })
+  end
+
+  def escaped_doc
+    ActiveSupport::JSON.encode([ "<b>&</b>" ])
+  end"#,
+        )
+        .write(
+            "test/models/article_json_escape_test.rb",
+            r#"require "test_helper"
+
+class ArticleJsonEscapeTest < ActiveSupport::TestCase
+  test "escape: false leaves the entities alone" do
+    article = Article.new(title: "A <title> & more", body: "A sufficiently long article body.")
+    assert_equal %q(["<b>&</b>",{"title":"A <title> & more","n":2}]), article.plain_doc
+    assert_equal %q(["<i>"]), article.braced_doc
+    assert_equal %(["\\u003cb\\u003e\\u0026\\u003c/b\\u003e"]), article.escaped_doc
+  end
+end
+"#,
+        )
+        .run_test("test/models/article_json_escape_test.rb")
+        .assert_passes();
+}

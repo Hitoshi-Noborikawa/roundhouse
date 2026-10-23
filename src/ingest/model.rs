@@ -23,6 +23,7 @@ use super::util::{
 };
 use super::{IngestError, IngestResult};
 
+use crate::ingest::prism_api::PrismLocation;
 mod enum_constants;
 pub(in crate::ingest) use enum_constants::EnumConstants;
 
@@ -1175,7 +1176,7 @@ fn validate_sorbet_enum_mappings(
 ) -> IngestResult<()> {
     // This source was already parsed by ingest. Do not duplicate parse or
     // unrelated model diagnostics, or rebuild the model to check one mapping.
-    let result = ruby_prism::parse(source.text.as_bytes());
+    let result = super::prism::parse_silent(source.text.as_bytes());
     let root = result.node();
     let Some((_, class)) = super::util::find_all_classes_with_scope(&root).into_iter()
         .find(|(_, class)| class.location().start_offset() == model.span.start as usize)
@@ -1192,6 +1193,10 @@ fn validate_sorbet_enum_mappings(
                     &source.path, &declaration.column,
                 )))?;
             }
+        } else if model.enums.contains_key(&Symbol::from(declaration.column.as_str()))
+            && constants.enum_method_read_refused(&declaration.mapping, &owners)
+        {
+            super::survey::unwrap_or_record::<()>(Err(enum_mapping_error(&source.path, &declaration.column)))?;
         }
     }
     Ok(())
@@ -1832,8 +1837,6 @@ pub(super) struct ClassConsts {
     /// of one other folded regex constant — `(pattern, flags)`. Used to
     /// resolve `validates …, format: { with: NAME }` (#985 follow-up).
     regexes: std::collections::HashMap<String, (String, String)>,
-    /// The class body calls `default_scope` (bare or on `self`).
-    default_scoped: bool,
     /// `NAME = %w[…]` / `%i[…]` / `[…]` of literals, `.freeze`d or an
     /// alias of another folded list: the literals with their kind kept
     /// (a Symbol is not a String), for `inclusion: { in: NAME }`.
@@ -1867,6 +1870,11 @@ pub(super) struct ClassConsts {
     /// body's `Regexp.union` may resolve to: no union folds. Set by
     /// [`ClassConsts::import`].
     regexp_shadowed: bool,
+    /// `NAME = { "a" => …, b: … }`, `.freeze`d or an alias of another:
+    /// the keys, each a literal kept with its kind, in order. The values
+    /// are never read. For `inclusion: { in: NAME.keys }` and
+    /// `inclusion: { in: NAME }` (`Hash#include?` is `key?`).
+    hash_keys: std::collections::HashMap<String, Vec<Literal>>,
 }
 
 /// The operators [`ClassConsts::int_expr`] folds.
@@ -1875,12 +1883,6 @@ const INTEGER_OPERATORS: &[&str] = &["+", "-", "*", "**", "-@"];
 impl ClassConsts {
     pub(super) fn collect(stmts: &[Node<'_>], file: &str) -> Self {
         let mut out = ClassConsts::default();
-        out.default_scoped = stmts.iter().any(|stmt| {
-            stmt.as_call_node().is_some_and(|call| {
-                call.receiver().is_none_or(|r| r.as_self_node().is_some())
-                    && constant_id_str(&call.name()) == "default_scope"
-            })
-        });
         // A constant folds only when its one write is a plain top-level
         // `NAME = …` and nothing else in the body, at any depth (method
         // bodies included), writes it or calls a method on it that may
@@ -1913,6 +1915,7 @@ impl ClassConsts {
             // is in no map, so nothing derived from it folds either.
             let regex = out.regex(&value);
             let list = out.list(&value);
+            let keys = out.hash_keys_of(&value);
             let scalar = out.scalar(&value);
             let integer = out.int_expr(&value);
             let labels = if scalar.is_none() { label_list(&value) } else { None };
@@ -1936,6 +1939,9 @@ impl ClassConsts {
             if let Some(list) = list {
                 out.lists.insert(name.clone(), list);
             }
+            if let Some(keys) = keys {
+                out.hash_keys.insert(name.clone(), keys);
+            }
             if let Some(lit) = scalar {
                 out.scalars.insert(name.clone(), lit);
             }
@@ -1951,8 +1957,9 @@ impl ClassConsts {
 
     /// A list of literals the class body can fold: an array literal
     /// (`%w[…]`, `%i[…]`, `[…]`) whose every element is a String, Symbol,
-    /// Integer, Float, `true`/`false` or `nil` literal, `.freeze`d or not,
-    /// or another folded list constant.
+    /// Integer, Float, `true`/`false` or `nil` literal, or a Duration
+    /// literal (`1.week.seconds`, folded to its Integer seconds), `.freeze`d
+    /// or not, or another folded list constant.
     pub(super) fn list(&self, node: &Node<'_>) -> Option<Vec<Literal>> {
         if let Some(inner) = single_parenthesized(node) {
             return self.list(&inner);
@@ -1961,12 +1968,50 @@ impl ClassConsts {
             if constant_id_str(&call.name()) == "freeze" && call.arguments().is_none() {
                 return self.list(&call.receiver()?);
             }
+            // `NAME.keys` of a folded Hash constant.
+            if constant_id_str(&call.name()) == "keys" && call.arguments().is_none() && call.block().is_none() {
+                return self.hash_keys_of(&call.receiver()?);
+            }
             return None;
         }
         if let Some(key) = const_key(node) {
             return self.lists.get(&key).cloned();
         }
-        node.as_array_node()?.elements().iter().map(|el| list_atom(&el)).collect()
+        node.as_array_node()?
+            .elements()
+            .iter()
+            .map(|el| {
+                list_atom(&el).or_else(|| super::util::duration_seconds(&el).map(|value| Literal::Int { value }))
+            })
+            .collect()
+    }
+
+    /// The keys of a Hash the class body can fold: a Hash literal whose
+    /// every key is a literal [`list_atom`] (no `**splat`), `.freeze`d or
+    /// not, or another folded Hash constant. Each key keeps its kind, in
+    /// the order `Hash#keys` gives (a repeated key keeps its first
+    /// place).
+    pub(super) fn hash_keys_of(&self, node: &Node<'_>) -> Option<Vec<Literal>> {
+        if let Some(inner) = single_parenthesized(node) {
+            return self.hash_keys_of(&inner);
+        }
+        if let Some(call) = node.as_call_node() {
+            if constant_id_str(&call.name()) == "freeze" && call.arguments().is_none() && call.block().is_none() {
+                return self.hash_keys_of(&call.receiver()?);
+            }
+            return None;
+        }
+        if let Some(key) = const_key(node) {
+            return self.hash_keys.get(&key).cloned();
+        }
+        let mut keys: Vec<Literal> = Vec::new();
+        for element in node.as_hash_node()?.elements().iter() {
+            let key = list_atom(&element.as_assoc_node()?.key())?;
+            if !keys.contains(&key) {
+                keys.push(key);
+            }
+        }
+        Some(keys)
     }
 
     /// Record whether the class sits directly at the top level, the
@@ -2091,6 +2136,7 @@ impl ClassConsts {
         self.labels.extend(other.labels);
         self.regexes.extend(other.regexes);
         self.lists.extend(other.lists);
+        self.hash_keys.extend(other.hash_keys);
         self.integers.extend(other.integers);
         self.from_union.extend(other.from_union);
     }
@@ -2129,6 +2175,7 @@ impl ClassConsts {
         for key in reads.0 {
             if self.scalars.contains_key(&key)
                 || self.lists.contains_key(&key)
+                || self.hash_keys.contains_key(&key)
                 || self.regexes.contains_key(&key)
                 || self.integers.contains_key(&key)
             {
@@ -2143,6 +2190,9 @@ impl ClassConsts {
             }
             if let Some(value) = table.lists.get(&member) {
                 self.lists.insert(key.clone(), value.clone());
+            }
+            if let Some(value) = table.hash_keys.get(&member) {
+                self.hash_keys.insert(key.clone(), value.clone());
             }
             if let Some(value) = table.integers.get(&member) {
                 self.integers.insert(key.clone(), *value);
@@ -2267,10 +2317,6 @@ impl ClassConsts {
         None
     }
 
-    /// Does the class body declare a `default_scope`?
-    pub(super) fn default_scoped(&self) -> bool {
-        self.default_scoped
-    }
 
     /// Integer arithmetic the class body can fold, as Ruby computes it:
     /// an Integer literal, a folded Integer constant, a parenthesized
@@ -2474,7 +2520,8 @@ fn enum_label_values(
             };
             Ok(labels.map(identity))
         }
-        _ => Ok(None),
+        // Another owner's mapping: `Gadget.statuses`, `.keys`, `.merge`.
+        _ => Ok(resolve_constant(node).map(|pairs| pairs.into_iter().map(|(label, value)| (label, EnumStored::Lit(value))).collect())),
     }
 }
 
@@ -2864,13 +2911,16 @@ pub(super) fn ingest_method(
     // body that passes it on (`each(&blk)`) still binds the name.
     // Ruby 3.4's anonymous `&` gets the same synthesized name the
     // library-class path gives it, so bare-`&` forwarding binds.
-    let block_param = def.parameters().and_then(|pn| pn.block()).map(|block| {
-        let name = block
-            .name()
-            .and_then(|loc| std::str::from_utf8(loc.as_slice()).ok())
-            .unwrap_or("__blk");
-        crate::dialect::Param::positional(Symbol::from(name))
-    });
+    let block_param = def
+        .parameters()
+        .and_then(|pn| super::prism_api::block_parameter(&pn))
+        .map(|block| {
+            let name = block
+                .name()
+                .and_then(|loc| std::str::from_utf8(loc.as_slice()).ok())
+                .unwrap_or("__blk");
+            crate::dialect::Param::positional(Symbol::from(name))
+        });
 
     // Only full `...` or nameless `**` enters this canonical seam.
     // Named rest/keyword-rest above and the separate block slot stay
@@ -3040,6 +3090,10 @@ fn parse_callback(
 /// record. Anything else (a lambda with parameters, an array of
 /// conditions) is unmodeled and declines.
 fn callback_condition(value: &ruby_prism::Node<'_>, file: &str) -> Option<Expr> {
+    // `if: (:a?)`: the parentheses only group.
+    if let Some(inner) = single_parenthesized(value) {
+        return callback_condition(&inner, file);
+    }
     if let Some(lambda) = value.as_lambda_node() {
         let body = simple_condition_body(lambda.parameters(), lambda.body())?;
         return ingest_expr(&body, file).ok();
@@ -3054,7 +3108,11 @@ fn callback_condition(value: &ruby_prism::Node<'_>, file: &str) -> Option<Expr> 
             }
         }
     }
-    let sym = symbol_value(value)?;
+    // `if: :a? || :b?` / `if: :a? && :b?`: Ruby evaluates the operator
+    // before the macro runs, and a Symbol is truthy, so the option is
+    // `:a?` and `:b?` respectively. Rails stores that one Symbol and
+    // calls only that predicate.
+    let sym = symbol_operator_value(value)?;
     Some(Expr::new(
         Span::synthetic(),
         ExprNode::Send {
@@ -3065,6 +3123,26 @@ fn callback_condition(value: &ruby_prism::Node<'_>, file: &str) -> Option<Expr> 
             parenthesized: false,
         },
     ))
+}
+
+/// The name of the Symbol a Symbol literal, or an `||` / `&&` chain of
+/// them, evaluates to in Ruby: a Symbol is truthy, so `a || b` is `a`
+/// and `a && b` is `b` once `a` is known to be a Symbol
+/// (`:a? || :b? || :c?` is `:a?`, `:a? && :b? && :c?` is `:c?`). `None`
+/// when an operand Ruby would evaluate is not itself such a Symbol.
+fn symbol_operator_value(node: &ruby_prism::Node<'_>) -> Option<String> {
+    if let Some(name) = symbol_value(node) {
+        return Some(name);
+    }
+    if let Some(inner) = single_parenthesized(node) {
+        return symbol_operator_value(&inner);
+    }
+    if let Some(or) = node.as_or_node() {
+        return symbol_operator_value(&or.left());
+    }
+    let and = node.as_and_node()?;
+    symbol_operator_value(&and.left())?;
+    symbol_operator_value(&and.right())
 }
 
 /// The one expression a lambda/proc callback condition may splice into the
@@ -3150,7 +3228,7 @@ fn simple_condition_body<'pr>(
             if let Some(rest) = pn.keyword_rest() {
                 self.bind_parameter(&rest);
             }
-            if let Some(block) = pn.block() {
+            if let Some(block) = super::prism_api::block_parameter(&pn) {
                 if let Some(name) = block.name() {
                     self.push_binding(&constant_id_str(&name));
                 }
