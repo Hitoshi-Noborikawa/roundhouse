@@ -240,15 +240,22 @@ module ActionDispatch
         # Not on the HEAD pass, though: Rails' first HEAD pass takes only
         # routes that name a verb, so a `via: :all` route is reached on
         # the GET pass, in declaration order with the GET routes.
-        # Attr-reader Strings do not carry Spinel's shared handle.
-        # Concatenating "" is a new string with the same characters;
-        # `match_parts` and the verb compare only read them.
-        verb = route.verb + ""
-        if (verb == method_upcase || (verb == "ANY" && method_upcase != "HEAD")) && admits(route, count, lead) &&
-           !(unpeeled && format_held_param_tail(route))
-          params = match_parts(route.pattern_parts, path_parts, route.int_params + "", format, route.seg_constraints + "")
-          unless params.nil?
-            return ActionDispatch::Router::MatchResult.new(route.controller, route.action, params, route.req_format)
+        # `admits` first: it reads only precomputed counts and the lead
+        # segment, and rejects almost every route, so the copies below
+        # are made for the few routes whose shape fits the path rather
+        # than once per route in the table. All three tests are pure, so
+        # the order does not change which route matches.
+        if admits(route, count, lead)
+          # Attr-reader Strings do not carry Spinel's shared handle.
+          # Concatenating "" is a new string with the same characters;
+          # `match_parts` and the verb compare only read them.
+          verb = route.verb + ""
+          if (verb == method_upcase || (verb == "ANY" && method_upcase != "HEAD")) &&
+             !(unpeeled && format_held_param_tail(route))
+            params = match_parts(route.pattern_parts, path_parts, route.int_params + "", format, route.seg_constraints + "")
+            unless params.nil?
+              return ActionDispatch::Router::MatchResult.new(route.controller, route.action, params, route.req_format)
+            end
           end
         end
         i += 1
