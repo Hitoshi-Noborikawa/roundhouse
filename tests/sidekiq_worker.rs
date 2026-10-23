@@ -38,7 +38,7 @@ const SOURCES: &[(&str, &str)] = &[
     ("runtime/spinel/sidekiq_push.rb", "sidekiq_push.rb"),
     ("runtime/spinel/job_registry.rb", "job_registry.rb"),
     ("runtime/spinel/sidekiq_envelope.rb", "sidekiq_envelope.rb"),
-    ("runtime/spinel/sidekiq_worker.rb", "sidekiq_worker.rb"),
+    ("runtime/spinel/sidekiq/sidekiq_worker.rb", "sidekiq_worker.rb"),
     ("tests/sidekiq_worker/driver.rb", "driver.rb"),
     ("tests/sidekiq_worker/worker_driver.rb", "worker_driver.rb"),
 ];
