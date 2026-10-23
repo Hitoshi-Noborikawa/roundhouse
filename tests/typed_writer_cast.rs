@@ -20,8 +20,61 @@ const SCHEMA: &str = r#"ActiveRecord::Schema[8.1].define(version: 1) do
     t.decimal "price"
     t.boolean "active"
   end
+  create_table "gauges", force: :cascade do |t|
+    t.integer "min_favs"
+    t.integer "age"
+    t.float "rating"
+    t.integer "level"
+  end
 end
 "#;
+
+/// The issue's model, plus a float `only_integer` column and an
+/// `allow_nil:` one, for `numericality:` reading the user's raw value.
+const GAUGE: &str = r#"class Gauge < ApplicationRecord
+  validates :min_favs, numericality: { greater_than_or_equal_to: 1 }
+  validates :age, numericality: { only_integer: true }
+  validates :rating, numericality: { only_integer: true }
+  validates :level, numericality: true, allow_nil: true
+end
+"#;
+
+/// `(Ruby building a Gauge g, its error messages)`. Rails reads the
+/// value the user assigned (`<attr>_before_type_cast`) where it came from
+/// the user, the cast value otherwise, and parses it as
+/// `NumericalityValidator#parse_as_number` does; `allow_nil` tests the
+/// cast value.
+const RAW: &[(&str, &str)] = &[
+    // The issue's table: `min_favs` (>= 1), with the others valid.
+    (r#"g = Gauge.new(min_favs: nil, age: 3, rating: 1, level: 1)"#, r#"["Min favs is not a number"]"#),
+    (r#"g = Gauge.new(min_favs: "", age: 3, rating: 1, level: 1)"#, r#"["Min favs is not a number"]"#),
+    (r#"g = Gauge.new(min_favs: "abc", age: 3, rating: 1, level: 1)"#, r#"["Min favs is not a number"]"#),
+    (r#"g = Gauge.new(min_favs: "0", age: 3, rating: 1, level: 1)"#, r#"["Min favs must be greater than or equal to 1"]"#),
+    (r#"g = Gauge.new(min_favs: "5", age: 3, rating: 1, level: 1)"#, "[]"),
+    (r#"g = Gauge.new(min_favs: 5, age: 3, rating: 1, level: 1)"#, "[]"),
+    (r#"g = Gauge.new(min_favs: "5.5", age: 3, rating: 1, level: 1)"#, "[]"),
+    (r#"g = Gauge.new(min_favs: " ", age: 3, rating: 1, level: 1)"#, r#"["Min favs is not a number"]"#),
+    // `age` (only_integer), with the others valid.
+    (r#"g = Gauge.new(min_favs: 2, age: "abc", rating: 1, level: 1)"#, r#"["Age is not a number"]"#),
+    (r#"g = Gauge.new(min_favs: 2, age: "5", rating: 1, level: 1)"#, "[]"),
+    (r#"g = Gauge.new(min_favs: 2, age: "5.5", rating: 1, level: 1)"#, r#"["Age must be an integer"]"#),
+    (r#"g = Gauge.new(min_favs: 2, age: 5.5, rating: 1, level: 1)"#, r#"["Age must be an integer"]"#),
+    // A float column holding a whole number: the raw Integer 2 passes
+    // only_integer, a raw Float 2.0 does not.
+    (r#"g = Gauge.new(min_favs: 2, age: 3, rating: 2, level: 1)"#, "[]"),
+    (r#"g = Gauge.new(min_favs: 2, age: 3, rating: 2.0, level: 1)"#, r#"["Rating must be an integer"]"#),
+    (r#"g = Gauge.new(min_favs: 2, age: 3, rating: "2", level: 1)"#, "[]"),
+    // allow_nil tests the cast value: a blank String is nil there.
+    (r#"g = Gauge.new(min_favs: 2, age: 3, rating: 1, level: "")"#, "[]"),
+    (r#"g = Gauge.new(min_favs: 2, age: 3, rating: 1, level: " ")"#, "[]"),
+    (r#"g = Gauge.new(min_favs: 2, age: 3, rating: 1, level: "abc")"#, r#"["Level is not a number"]"#),
+    // nil assigned after a String: the raw value is nil, then the cast nil.
+    (r#"g = Gauge.new(min_favs: "abc", age: 3, rating: 1, level: 1); g.min_favs = nil"#, r#"["Min favs is not a number"]"#),
+    // A loaded record did not come from the user: the stored value counts.
+    // The Integer 2 assigned above passed only_integer; reloaded, the
+    // float column holds 2.0, which does not.
+    (r#"g = Gauge.new(min_favs: "7", age: 3, rating: 2, level: 1); g.save!; g = Gauge.find(g.id)"#, r#"["Rating must be an integer"]"#),
+];
 
 const MODEL: &str = r#"class Policy < ApplicationRecord
   validates :min_favs, numericality: { greater_than_or_equal_to: 1 }, allow_nil: true
@@ -67,6 +120,12 @@ fn assertions() -> String {
             value.replace('"', "\\\"")
         ));
     }
+    for (setup, want) in RAW {
+        s.push_str(&format!(
+            "{setup}\ng.valid?\ngot = messages(g).inspect\nraise %q({}: ) + got unless got == {want:?}\n",
+            setup.replace(['(', ')'], "")
+        ));
+    }
     for (value, want) in NUMERICALITY {
         s.push_str(&format!(
             "x = Policy.new(min_favs: {value})\nx.valid?\ngot = messages(x).inspect\nraise \"numericality {}: #{{got}}\" unless got == {want:?}\n",
@@ -81,6 +140,7 @@ fn app() -> emit_and_run::Overlay {
         .write("db/schema.rb", SCHEMA)
         .write("app/models/application_record.rb", "class ApplicationRecord < ActiveRecord::Base\n  primary_abstract_class\nend\n")
         .write("app/models/policy.rb", MODEL)
+        .write("app/models/gauge.rb", GAUGE)
         .write("app/controllers/application_controller.rb", "class ApplicationController < ActionController::Base\nend\n")
         .write("config/routes.rb", "Rails.application.routes.draw do\nend\n")
 }
@@ -134,11 +194,18 @@ ActiveRecord::Schema.define do
     t.decimal :price
     t.boolean :active
   end
+  create_table(:gauges) do |t|
+    t.integer :min_favs
+    t.integer :age
+    t.float :rating
+    t.integer :level
+  end
 end
 class ApplicationRecord < ActiveRecord::Base
   primary_abstract_class
 end
 {MODEL}
+{GAUGE}
 def messages(r)
   r.errors.full_messages
 end

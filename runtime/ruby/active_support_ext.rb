@@ -694,6 +694,26 @@ module ActiveSupport
     end
   end
 
+  # The number ActiveModel 8.1.4's NumericalityValidator checks, or nil
+  # when it is "not a number". `raw` is the value the user assigned
+  # (`<attr>_before_type_cast`), nil when the attribute did not come from
+  # the user, in which case the cast `value` is read (`raw_value ||
+  # value`). Then `parse_as_number`: a Numeric as it is; a String of
+  # digits (`/\A[+-]?\d+\z/`) its Integer; a hex prefix not a number;
+  # anything else what `Kernel.Float` reads, or not a number where it
+  # raises. `Kernel.Float`'s grammar is the regexp, since not every
+  # target has `Float()`.
+  def self.numericality_number(raw, value)
+    v = raw.nil? || raw == false ? value : raw
+    return nil if v.nil?
+    return v if v.is_a?(Integer) || v.is_a?(Float)
+    text = v.to_s
+    return text.to_i if text.match?(/\A[+-]?\d+\z/)
+    return nil if text.match?(/\A[+-]?0[xX]/)
+    return nil unless text.match?(/\A[[:space:]]*[+-]?(?:\d+(?:_\d+)*(?:\.(?:\d+(?:_\d+)*)?)?|\.\d+(?:_\d+)*)(?:[eE][+-]?\d+(?:_\d+)*)?[[:space:]]*\z/)
+    text.to_f
+  end
+
   # The String half of `cast_float`: the blank scan `integer_from_string`
   # makes, then Rails' three named values, then `to_f`. The named values
   # are divisions rather than `Float::INFINITY`/`NAN`, which not every
