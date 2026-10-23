@@ -2567,16 +2567,17 @@ impl Analyzer {
             for scope in model.scopes() {
                 extract_ivar_assignments(&scope.body, &mut flow_ivars);
             }
-            // Not only method bodies: the class body's `@x = …` is what its `def self.x` reads.
+            // Not in the shared map: the class body's `@x = …` is the class object's, which only its `def self.x` reads.
+            let mut class_body_ivars: HashMap<Symbol, Ty> = HashMap::new();
             for item in &model.body {
                 if let ModelBodyItem::Unknown { expr, .. } = item
                     && crate::lower::model_to_library::writes_class_ivar(expr)
                 {
-                    extract_ivar_assignments(expr, &mut flow_ivars);
+                    extract_ivar_assignments(expr, &mut class_body_ivars);
                 }
             }
 
-            if !flow_ivars.is_empty() {
+            if !flow_ivars.is_empty() || !class_body_ivars.is_empty() {
                 // Re-seed ctx with discovered ivars alongside @attributes.
                 // Memoizing ivars become `Union<T, Nil>` to reflect that
                 // the read can be nil before the first assignment.
@@ -2603,11 +2604,17 @@ impl Analyzer {
                     annotate_self_dispatch: false, in_view: false, view_name: None, class_side: false, claimed_macro_template: false, instance_body: false, method_body: false, building_self: false, live_class_locals: Default::default(),
                 };
 
+                // The class body has run before any class method does, so its writes are not nilable there.
+                let mut class_side_ctx = reseeded_ctx.clone();
+                for (name, ty) in class_body_ivars {
+                    class_side_ctx.ivar_bindings.insert(name, ty);
+                }
                 for scope in model.scopes_mut() {
                     self.body_typer().analyze_expr(&mut scope.body, &reseeded_ctx);
                 }
                 for method in model.methods_mut() {
-                    let mctx = self.seed_method_params(&reseeded_ctx, &model_name, method, true);
+                    let side = if method.receiver == MethodReceiver::Class { &class_side_ctx } else { &reseeded_ctx };
+                    let mctx = self.seed_method_params(side, &model_name, method, true);
                     self.body_typer().analyze_expr(&mut method.body, &mctx);
                 }
             }
