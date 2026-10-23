@@ -409,16 +409,28 @@ fn railtie_base(name: &str) -> String {
 /// The `railtie_base` of the application class in config/application.rb
 /// `source`, None when it declares no `Rails::Application` subclass.
 pub(super) fn application_railtie_base(source: &[u8]) -> Option<String> {
+    application_class_name(source).map(|name| railtie_base(&name))
+}
+
+/// `GlobalID.app` for the application class in config/application.rb
+/// `source`: globalid's railtie removes every `_application` from the
+/// railtie name, not just the last, then dasherizes, so
+/// `MyApplication::Application` is `my`.
+pub(super) fn application_global_id_app(source: &[u8]) -> Option<String> {
+    application_class_name(source)
+        .map(|name| crate::naming::underscore_words(&name).replace("_application", "").replace('_', "-"))
+}
+
+fn application_class_name(source: &[u8]) -> Option<String> {
     let parsed = super::prism::parse_silent(source);
-    let name = application_name(
+    application_name(
         parsed
             .node()
             .as_program_node()
             .map(|p| p.statements().body().iter().collect())
             .unwrap_or_default(),
         &[],
-    )?;
-    Some(railtie_base(&name))
+    )
 }
 
 /// Ruby source for the reopen's `session_cookie_key`, None when the app

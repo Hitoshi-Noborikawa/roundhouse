@@ -28,6 +28,10 @@ fn named_applications_derive_keys_like_rails() {
             "class NamedApp < Rails::Application\nend",
             "_named_app_session",
         ),
+        (
+            "module MyApplication\nclass Application < Rails::Application\nend\nend",
+            "_my_application_session",
+        ),
     ] {
         let app = tree(&[("config/application.rb", source)]).unwrap();
         let application = app.rails_application.unwrap();
@@ -106,6 +110,8 @@ fn global_id_app_is_the_dasherized_railtie_name() {
             "\"outer-html-app\"",
         ),
         ("class NamedApp < Rails::Application\nend", "\"named-app\""),
+        // globalid removes every `_application`, the session key only the last.
+        ("module MyApplication\nclass Application < Rails::Application\nend\nend", "\"my\""),
     ] {
         let app = tree(&[("config/application.rb", source)]).unwrap();
         let application = app.rails_application.unwrap();

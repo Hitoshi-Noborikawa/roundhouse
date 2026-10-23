@@ -1052,16 +1052,16 @@ pub fn ingest_app_with_vfs<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResult
         // `GlobalID.app` — the first segment of every `gid://<app>/
         // <Model>/<id>` this runtime mints, and half of every turbo
         // stream name that names a record. globalid's railtie takes it
-        // from the application's railtie name less `_application`,
-        // dasherized (`Campfire` -> "campfire", `MyApp` -> "my-app",
-        // `Outer::HTMLApp` -> "outer-html-app"), so a gid a real Rails
+        // from the application's railtie name with every `_application`
+        // removed, dasherized (`Campfire` -> "campfire", `MyApp` ->
+        // "my-app", `Outer::HTMLApp` -> "outer-html-app",
+        // `MyApplication` -> "my"), so a gid a real Rails
         // process minted for a multi-word app locates here too.
         // Synthesized as an override on the Application reopen, the
         // same shape as `session_cookie_key` above; the namespace itself
         // is dropped at ingest, so without this the name is gone by
         // emit time.
-        if let Some(base) = super::session_config::application_railtie_base(&source) {
-            let app_name = base.replace('_', "-");
+        if let Some(app_name) = super::session_config::application_global_id_app(&source) {
             if let Ok(mut synth) = crate::runtime_src::parse_methods(&format!(
                 "def global_id_app\n  {app_name:?}\nend\n"
             )) {
