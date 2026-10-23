@@ -887,10 +887,11 @@ fn report_unclaimed_unknowns(model: &Model, schema: &Schema) {
         {
             continue;
         }
-        // `default_scope { where(col: literal) }` — claimed by
-        // lower::default_scope (the runtime Relation applies it; a target
-        // without one reports it per target). Other shapes keep warning.
-        if name == "default_scope" && crate::lower::default_scope::static_default_scope(model).is_some() {
+        // `default_scope { where(…) }`, static or read at build time —
+        // claimed by lower::default_scope (the runtime Relation applies
+        // it; a target without one reports it per target). Other shapes
+        // keep warning.
+        if name == "default_scope" && crate::lower::default_scope::default_scope(model).is_some() {
             continue;
         }
         // Bare `has_rich_text :body` — claimed by lower::rich_text.
@@ -1277,7 +1278,7 @@ fn build_methods_with_finder_inputs(
         let writable_fields =
             permitted_fields.map(|fields| writable_permit_fields(model, table, fields));
         let permitted_fields = writable_fields.as_deref();
-        push_schema_methods(&mut methods, model, models, table, &through_joins);
+        push_schema_methods(&mut methods, model, models, table, &through_joins, runtime_relation);
         // Per-model Level-3 adapter primitives (`_adapter_find_by_id`, etc.)
         // — typed methods that go directly from SQL composition to typed
         // model instances over the `Sqlite` primitive surface. See
@@ -1287,8 +1288,14 @@ fn build_methods_with_finder_inputs(
             methods.push(adapter_emit::synth_exists_primary_key_input(&model.name, table));
         }
         push_adapter_methods(&mut methods, model, table, schema, param_binds);
-        if let Some(scope) = crate::lower::default_scope::static_default_scope(model) {
-            methods.push(crate::lower::default_scope::synth_default_scope_where(model, &scope));
+        match crate::lower::default_scope::default_scope(model) {
+            Some(crate::lower::default_scope::DefaultScope::Static(scope)) => {
+                methods.push(crate::lower::default_scope::synth_default_scope_where(model, &scope));
+            }
+            Some(crate::lower::default_scope::DefaultScope::Dynamic(scope)) => {
+                methods.push(crate::lower::default_scope::synth_dynamic_default_scope_where(model, &scope));
+            }
+            None => {}
         }
         // `from_params(p: <Resource>Params)` — typed factory matching the
         // (resource, fields) tuple a controller's `permit(...)` declared.
@@ -2233,7 +2240,7 @@ fn build_class_info_with_finder_inputs(
 ) -> crate::analyze::ClassInfo {
     let mut info = crate::analyze::ClassInfo::default();
     info.table = Some(model.table.clone());
-    info.default_scoped = crate::lower::default_scope::static_default_scope(model).is_some();
+    info.default_scoped = crate::lower::default_scope::default_scope(model).is_some();
     info.parent = model.parent.clone();
     // The analyzer's registry is not this map. Arel's `ids` / `pluck`
     // and the source-method decline read these two fields, so they have
