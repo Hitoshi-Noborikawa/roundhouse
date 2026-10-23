@@ -788,6 +788,9 @@ pub enum CallbackHook {
     /// name and fires it in the right two places.
     AfterSaveCommit,
     AfterRollback,
+    /// `after_initialize :set_salt` — runs on construction and on load,
+    /// the same `def after_initialize` the block form lowers to.
+    AfterInitialize,
 }
 
 /// A formal parameter on a `MethodDef`. Carries the parameter name, an

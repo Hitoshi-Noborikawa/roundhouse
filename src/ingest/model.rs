@@ -2990,6 +2990,9 @@ fn parse_callback(
         "after_destroy_commit" => CallbackHook::AfterCommit,
         "after_save_commit" => CallbackHook::AfterSaveCommit,
         "after_rollback" => CallbackHook::AfterRollback,
+        // Only the block form was recognized; the symbol form fell
+        // through to a "not lowered" Unknown and the method never ran.
+        "after_initialize" => CallbackHook::AfterInitialize,
         _ => return None,
     };
     // The lifecycle the sugar spelling pins, which `push_symbol_callback`

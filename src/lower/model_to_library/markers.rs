@@ -1483,6 +1483,7 @@ fn hook_method_name(hook: crate::dialect::CallbackHook) -> &'static str {
         Hook::AfterCommit => "after_commit",
         Hook::AfterSaveCommit => "after_save_commit",
         Hook::AfterRollback => "after_rollback",
+        Hook::AfterInitialize => "after_initialize",
     }
 }
 
