@@ -30,6 +30,10 @@ struct App(std::path::PathBuf);
 
 impl App {
     fn new(tag: &str) -> Self {
+        Self::with(tag, &[])
+    }
+
+    fn with(tag: &str, extra: &[(&str, &str)]) -> Self {
         let root = std::env::temp_dir().join(format!("roundhouse-unmodelled-{tag}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         for (path, body) in [
@@ -42,7 +46,10 @@ impl App {
                 "config/application.rb",
                 "require_relative \"boot\"\nrequire \"rails/all\"\n\nmodule Sample\n  class Application < Rails::Application\n    config.load_defaults 8.0\n    config.autoload_lib(ignore: %w(assets tasks))\n  end\nend\n",
             ),
-        ] {
+        ]
+        .into_iter()
+        .chain(extra.iter().copied())
+        {
             let file = root.join("app_src").join(path);
             std::fs::create_dir_all(file.parent().unwrap()).unwrap();
             std::fs::write(file, body).unwrap();
@@ -114,4 +121,27 @@ fn check_still_reports_it() {
     let out = Command::new(env!("CARGO_BIN_EXE_roundhouse")).arg("check").arg(app.0.join("app_src")).output().expect("run check");
     assert!(!out.status.success(), "{}", stderr(&out));
     assert!(stderr(&out).contains(REPORT) || String::from_utf8_lossy(&out.stdout).contains(REPORT), "{}", stderr(&out));
+}
+
+/// The recorded report doesn't make the file a skipped one: an unrelated
+/// failure that file's classes cause elsewhere still gates the survey run,
+/// rather than being attributed to the report as coverage.
+#[test]
+fn an_unrelated_failure_beside_it_still_gates_the_survey() {
+    let helpers = HELPERS.replace(
+        "    class CorruptionError < StandardError\n    end\n",
+        "    class CorruptionError < StandardError\n    end\n\n    class Report\n      def total\n        1\n      end\n    end\n",
+    );
+    let app = App::with(
+        "unrelated",
+        &[
+            ("lib/tools/migration_helpers.rb", helpers.as_str()),
+            ("app/models/member.rb", "class Member < ApplicationRecord\n  def report_total\n    Tools::MigrationHelpers::Report.nope_here\n  end\nend\n"),
+        ],
+    );
+    let (out, _) = app.run(&["--target", "ruby", "--survey"]);
+    let err = stderr(&out);
+    assert!(!out.status.success(), "the dispatch failure still fails the run\n{err}");
+    assert!(err.contains("error[send_dispatch_failed]") && err.contains("nope_here"), "{err}");
+    assert!(err.contains(REPORT), "and the punch list still names the class\n{err}");
 }

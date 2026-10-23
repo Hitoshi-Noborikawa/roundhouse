@@ -400,6 +400,9 @@ fn run_transpile(
     // that lower models, which don't model it (#1278). Futamura runs on
     // Rails and the Roda conversion on Sequel, which load it themselves;
     // under --survey it is a recorded gap, not a failed run.
+    // Kept apart from `survey_gaps` until the punch list prints: the
+    // class did ingest, so its file is not a skipped one for attribution.
+    let mut unmodelled_gaps: Vec<roundhouse::ingest::IngestError> = Vec::new();
     let mut parse_diags = parse_diags;
     let unmodelled_record = |d: &roundhouse::diagnostic::Diagnostic| {
         matches!(&d.kind, roundhouse::diagnostic::DiagnosticKind::Unsupported { construct, .. }
@@ -412,7 +415,7 @@ fn run_transpile(
         parse_diags = kept;
         for d in recorded {
             let file = roundhouse::ide::source(&app, d.span.file).map(|s| s.path.clone()).unwrap_or_default();
-            survey_gaps.push(roundhouse::ingest::IngestError::Unsupported { file, message: d.message.clone() });
+            unmodelled_gaps.push(roundhouse::ingest::IngestError::Unsupported { file, message: d.message.clone() });
         }
     }
     // Analyze + the post-analyze shared lowerings — type-directed IR
@@ -644,6 +647,7 @@ fn run_transpile(
     // The punch list, before the gate: on an app that fails the gate
     // this is the most useful thing in the run, and printing it after
     // the early `return Err` would mean never printing it at all.
+    survey_gaps.append(&mut unmodelled_gaps);
     if !survey_gaps.is_empty() {
         // `attribute_analysis_gaps` runs twice (once over `analyze_diags`,
         // once over the emit-phase `diags` — see the call sites above) and
