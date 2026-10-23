@@ -1322,9 +1322,11 @@ pub(super) fn rewrite_assoc_through_parent_typed(
                 let mut names = names.borrow_mut();
                 let owner_name = fresh_build_local("owner", &mut names);
                 let owner = Expr::new(e.span, ExprNode::Var { id: VarId(0), name: owner_name.clone() });
+                let mut owner_read = inner_recv.clone();
+                owner_read.decisions |= crate::expr::BUILD_OWNER;
                 let capture = Expr::new(e.span, ExprNode::Assign {
                     target: LValue::Var { id: VarId(0), name: owner_name },
-                    value: inner_recv.clone(),
+                    value: owner_read,
                 });
                 let build_target = if spec.is_some() || outer_args.is_empty() {
                     LValue::Var { id: VarId(0), name: fresh_build_local("record", &mut names) }
