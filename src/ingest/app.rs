@@ -1603,15 +1603,43 @@ end
                 }
             }
             let block_wrappers = mapper_extension_block_methods(&app, vfs, dir);
-            if let Some(routes) = unwrap_or_record(ingest_routes_with_engines(
-                &source,
-                &routes_path.display().to_string(),
-                &draw_files,
-                &block_wrappers,
-                &engine_routes,
-                &helper_sources,
-                &load_helper_sources,
-            ))? {
+            // The constants the route files read, folded from their owners
+            // as a model body's are, for `constraints:` values. A route
+            // names a controller's constant as often as a model's, so its
+            // table also takes the controllers, which the enum inputs above
+            // leave out on purpose (a controller is not a model's input).
+            let mut route_inputs = super::model::EnumConstants::default();
+            let mut route_files: Vec<PathBuf> = enum_input_files.iter().cloned().collect();
+            for root in &roots {
+                let controllers_dir = dir.join(root).join("controllers");
+                if vfs.is_dir(&controllers_dir) {
+                    route_files.extend(read_rb_files(vfs, &controllers_dir)?);
+                }
+            }
+            route_files.sort();
+            for file in &route_files {
+                if let Ok(text) = vfs.read(file) {
+                    route_inputs.record_again(&text, &file.display().to_string());
+                }
+            }
+            route_inputs.finish();
+            let mut route_consts = super::model::ClassConsts::default();
+            for text in std::iter::once(&source).chain(draw_files.values().map(|(s, _)| s)) {
+                let parsed = ruby_prism::parse(text);
+                route_consts.import(&[parsed.node()], &route_inputs, &[]);
+            }
+            let routes = super::routes::with_route_constants(route_consts, || {
+                ingest_routes_with_engines(
+                    &source,
+                    &routes_path.display().to_string(),
+                    &draw_files,
+                    &block_wrappers,
+                    &engine_routes,
+                    &helper_sources,
+                    &load_helper_sources,
+                )
+            });
+            if let Some(routes) = unwrap_or_record(routes)? {
                 // `to: redirect("/x")` routes point at actions nobody
                 // wrote, so write them: one controller, one action per
                 // redirect, each a `redirect_to <literal>, status: …`. It
