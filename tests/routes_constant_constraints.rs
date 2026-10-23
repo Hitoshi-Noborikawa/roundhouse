@@ -4,7 +4,8 @@
 //! was "is not a literal regex" and the route stayed out of the lowered
 //! app. A compact `class Feeds::CollectionsController` resolves without a
 //! file declaring `module Feeds`, which Zeitwerk defines from the
-//! directory. Answers are actionpack 8.1.4's (`rails_answers_the_table`).
+//! directory. A `format:` constant is a requirement on the extension,
+//! as a literal is. Answers are actionpack 8.1.4's (`rails_answers_the_table`).
 
 #[path = "support/emit_and_run.rs"]
 #[allow(dead_code)]
@@ -23,9 +24,14 @@ end
 
 const WIDGETS: &str = r#"class WidgetsController < ApplicationController
   ID_RE = /[0-9]+-[a-z]+/
+  EXPORT_FORMAT = /csv/
 
   def show
     render plain: "widget:#{params[:id]}"
+  end
+
+  def export
+    render plain: "export:#{params[:id]}"
   end
 end
 "#;
@@ -35,6 +41,7 @@ const ROUTES: &str = r#"Rails.application.routes.draw do
     resources :collections, only: [:show], constraints: { id: Regexp.union(Feeds::CollectionsController::SUPPORTED_COLLECTIONS) }
   end
   get "/widgets/:id", to: "widgets#show", constraints: { id: WidgetsController::ID_RE }
+  get "/exports/:id", to: "widgets#export", constraints: { format: WidgetsController::EXPORT_FORMAT }
 end
 "#;
 
@@ -45,6 +52,12 @@ const CASES: &[(&str, &str)] = &[
     ("/feeds/collections/featuredx", "404|"),
     ("/widgets/12-ab", "200|widget:12-ab"),
     ("/widgets/12", "404|"),
+    // A `format:` constant is a requirement on the extension, as a
+    // literal is: an extension it matches, or none, is served; any
+    // other is not routed.
+    ("/exports/1.csv", "200|export:1"),
+    ("/exports/1", "200|export:1"),
+    ("/exports/1.json", "404|"),
 ];
 
 fn assertions() -> String {

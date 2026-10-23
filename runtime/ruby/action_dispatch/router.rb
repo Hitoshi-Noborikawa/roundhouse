@@ -158,11 +158,17 @@ module ActionDispatch
           # Trimming from the FULL path (rather than rewriting the
           # segment array and re-joining) avoids an array index
           # ASSIGNMENT, which is another shape not every emitter carries.
-          stripped = match_path(method, path[0, path.length - ext.length - 1].to_s, table, ext)
+          stripped = match_path(method, path[0, path.length - ext.length - 1].to_s, table, ext, false)
           return stripped unless stripped.nil?
+          # The extension was a format no route took. A route holding
+          # the format to a requirement (`constraints: { format: :csv }`,
+          # `format: false`) must not take it now as part of a param
+          # either: Rails' `[^/.?]+` segment never holds the dot, so
+          # `/widgets/1.json` is a 404 there, not `id = "1.json"`.
+          return match_path(method, path, table, +"", true)
         end
       end
-      match_path(method, path, table, +"")
+      match_path(method, path, table, +"", false)
     end
 
     # Is `ext` one of Rails' registered format extensions? The registry
@@ -209,18 +215,22 @@ module ActionDispatch
     # proxy sends — 404'd on every app, since no `rails new` app
     # declares a HEAD route. The verb the ACTION sees stays HEAD;
     # dropping the body is the server's job, as it is Rack's.
-    def self.match_path(method, path, table, format)
+    #
+    # `unpeeled` is the literal-path retry after a registered extension
+    # matched nothing stripped: a format-constrained route whose last
+    # segment is a param sits it out (`Router.match`).
+    def self.match_path(method, path, table, format, unpeeled)
       method_upcase = method.to_s.upcase
       path_parts = path.split("/")
-      hit = scan_routes(method_upcase, path_parts, table, format)
+      hit = scan_routes(method_upcase, path_parts, table, format, unpeeled)
       if hit.nil? && method_upcase == "HEAD"
-        return scan_routes("GET", path_parts, table, format)
+        return scan_routes("GET", path_parts, table, format, unpeeled)
       end
       hit
     end
 
     # One pass of the table for one verb, over the already-split path.
-    def self.scan_routes(method_upcase, path_parts, table, format)
+    def self.scan_routes(method_upcase, path_parts, table, format, unpeeled)
       count = path_parts.length
       lead = count > 1 ? path_parts[1].to_s : +""
       i = 0
@@ -234,7 +244,8 @@ module ActionDispatch
         # Concatenating "" is a new string with the same characters;
         # `match_parts` and the verb compare only read them.
         verb = route.verb + ""
-        if (verb == method_upcase || (verb == "ANY" && method_upcase != "HEAD")) && admits(route, count, lead)
+        if (verb == method_upcase || (verb == "ANY" && method_upcase != "HEAD")) && admits(route, count, lead) &&
+           !(unpeeled && format_held_param_tail(route))
           params = match_parts(route.pattern_parts, path_parts, route.int_params + "", format, route.seg_constraints + "")
           unless params.nil?
             return ActionDispatch::Router::MatchResult.new(route.controller, route.action, params, route.req_format)
@@ -243,6 +254,17 @@ module ActionDispatch
         i += 1
       end
       nil
+    end
+
+    # Does `route` hold its `(.:format)` to a requirement AND end in a
+    # param segment that a literal dotted path would bind the extension
+    # into? A literal last segment (`/notes.rss`) holds its own dot.
+    def self.format_held_param_tail(route)
+      parts = route.pattern_parts
+      return false if parts.length == 0
+      tail = parts[parts.length - 1].to_s
+      return false unless tail.start_with?(":") || tail.start_with?("*")
+      !segment_pattern_for(route.seg_constraints + "", "format").empty?
     end
 
     # Whether a path of `count` segments whose first is `lead` can match
@@ -316,6 +338,13 @@ module ActionDispatch
       # built a params Hash (and a `:name` substring per segment) only to
       # fail on its first literal — 37% of that request's allocations.
       return nil unless literals_match(pattern_parts, path_parts)
+      # The route's `(.:format)` requirement, compiled under `format`:
+      # an extension must meet it, and no extension always does, as in
+      # Rails (`constraints: { format: :csv }` serves `/export` too).
+      unless format.empty?
+        format_pattern = segment_pattern_for(seg_constraints, "format")
+        return nil if !format_pattern.empty? && !segment_pattern_match(format_pattern, format)
+      end
       params = {}
       params["format"] = format unless format.empty?
       i = 0
