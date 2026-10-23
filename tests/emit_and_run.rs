@@ -282,6 +282,8 @@ mod campfire_caches;
 mod action_text_markdown;
 #[path = "emit_and_run/ordinalize.rs"]
 mod ordinalize;
+#[path = "emit_and_run/float_round_digits.rs"]
+mod float_round_digits;
 #[path = "emit_and_run/autoload_once_paths.rs"]
 mod autoload_once_paths;
 #[path = "emit_and_run/config_require_relative.rs"]

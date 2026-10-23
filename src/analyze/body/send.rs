@@ -2400,7 +2400,7 @@ impl<'a> BodyTyper<'a> {
                 bigdecimal()
             }
             Some(Ty::Int) => int_method(method),
-            Some(Ty::Float) => float_method(method),
+            Some(Ty::Float) => float_method(method, args),
             Some(Ty::Bool) => bool_method(method),
             // Union dispatch: try each concrete (non-Nil, non-Var) variant
             // and union the resolved results. Covers the common
@@ -3821,14 +3821,12 @@ fn bigdecimal_method(method: &Symbol, args: &[crate::expr::Expr]) -> Option<Ty> 
     })
 }
 
-pub(super) fn float_method(method: &Symbol) -> Ty {
+pub(super) fn float_method(method: &Symbol, args: &[crate::expr::Expr]) -> Ty {
     match method.as_str() {
         "to_s" | "inspect" => Ty::Str,
         "to_d" => bigdecimal(),
-        // No-arg rounding returns Int (the common shape); with a digits
-        // arg it returns Float, but we don't see args here — Int is the
-        // safer default for the bare call.
-        "to_i" | "to_int" | "round" | "ceil" | "floor" | "truncate" => Ty::Int,
+        "round" | "ceil" | "floor" | "truncate" => float_rounding(args),
+        "to_i" | "to_int" => Ty::Int,
         "to_f" | "abs" | "fdiv" | "clamp" | "modulo" => Ty::Float,
         "div" => Ty::Int,
         "divmod" => Ty::Array { elem: std::sync::Arc::new(Ty::Float) },
@@ -3839,6 +3837,70 @@ pub(super) fn float_method(method: &Symbol) -> Ty {
         "+" | "-" | "*" | "/" | "%" | "**" => Ty::Float,
         "==" | "!=" | "<" | ">" | "<=" | ">=" | "<=>" | "eql?" | "equal?" => Ty::Bool,
         _ => unknown(),
+    }
+}
+
+/// CRuby picks `Float#round`/`floor`/`ceil`/`truncate`'s class from the digits value: Integer for none or <= 0, Float above.
+fn float_rounding(args: &[crate::expr::Expr]) -> Ty {
+    use crate::expr::{ExprNode, Literal};
+    // A trailing `half:` keyword hash is the tie-break mode, not a digit count.
+    let digits = match args {
+        [rest @ .., last] if matches!(&*last.node, ExprNode::Hash { kwargs: true, .. }) => rest,
+        all => all,
+    };
+    match digits {
+        [] => Ty::Int,
+        [n] => match &*n.node {
+            ExprNode::Lit { value: Literal::Int { value } } if *value > 0 => Ty::Float,
+            ExprNode::Lit { value: Literal::Int { .. } } => Ty::Int,
+            _ => Ty::Union { variants: vec![Ty::Int, Ty::Float].into() },
+        },
+        _ => unknown(),
+    }
+}
+
+#[cfg(test)]
+mod float_rounding_tests {
+    use super::*;
+
+    // Types `src` with `x` bound to a Float and `n` to an Integer.
+    fn ty_of(src: &str) -> Ty {
+        let parsed = ruby_prism::parse(src.as_bytes());
+        let program = parsed.node();
+        let stmt = program.as_program_node().unwrap().statements().body().iter().next().unwrap();
+        let mut expr = crate::ingest::expr::ingest_expr(&stmt, "probe.rb").unwrap();
+        let classes = std::collections::HashMap::new();
+        let mut ctx = super::super::Ctx::default();
+        ctx.local_bindings.insert(Symbol::from("x"), Ty::Float);
+        ctx.local_bindings.insert(Symbol::from("n"), Ty::Int);
+        super::super::BodyTyper::new(&classes).analyze_expr(&mut expr, &ctx)
+    }
+
+    #[test]
+    fn digits_literal_picks_float_or_integer_like_cruby() {
+        for m in ["round", "floor", "ceil", "truncate"] {
+            assert_eq!(ty_of(&format!("x.{m}")), Ty::Int, "{m}");
+            assert_eq!(ty_of(&format!("x.{m}(0)")), Ty::Int, "{m}(0)");
+            assert_eq!(ty_of(&format!("x.{m}(-1)")), Ty::Int, "{m}(-1)");
+            assert_eq!(ty_of(&format!("x.{m}(2)")), Ty::Float, "{m}(2)");
+        }
+    }
+
+    #[test]
+    fn half_keyword_is_not_a_digit_count() {
+        assert_eq!(ty_of("x.round(half: :even)"), Ty::Int);
+        assert_eq!(ty_of("x.round(1, half: :even)"), Ty::Float);
+        assert_eq!(ty_of("x.round(0, half: :up)"), Ty::Int);
+    }
+
+    #[test]
+    fn non_literal_digits_is_either_class() {
+        let either = Ty::Union { variants: vec![Ty::Int, Ty::Float].into() };
+        assert_eq!(ty_of("x.round(n)"), either);
+        assert_eq!(ty_of("x.round(n, half: :even)"), either);
+        // Integer#round never answers a Float, whatever the digits.
+        assert_eq!(ty_of("n.round(2)"), Ty::Int);
+        assert_eq!(ty_of("n.round(-1)"), Ty::Int);
     }
 }
 
