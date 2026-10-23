@@ -18,6 +18,13 @@
 //!   `clear_instance_variables_between_requests` that sets to nil every
 //!   instance variable its code (and its app ancestors' code) assigns;
 //!   the runtime calls it before each request but the first.
+//! - What the action left for the view. Rails' `view_assigns`
+//!   (AbstractController::Rendering) is the controller's instance
+//!   variables but its own, by name without `@`. A controller here gets
+//!   a public `view_assigns` returning those same instance variables:
+//!   `{ "article" => @article, ... }`. One the request did not assign
+//!   is nil here, where Rails leaves the key out; reading it gives nil
+//!   either way.
 //!
 //! Runs at the end of ingest, before analysis, so what it writes is
 //! typed like source. An app with no `ActionController::TestCase` test
@@ -33,6 +40,7 @@ use crate::span::Span;
 
 const TEST_CASE: &str = "ActionController::TestCase";
 pub const CLEAR_METHOD: &str = "clear_instance_variables_between_requests";
+pub const VIEW_ASSIGNS_METHOD: &str = "view_assigns";
 
 pub fn prepare(app: &mut App) {
     if !app.test_modules.iter().any(|tm| tm.parent.as_ref().is_some_and(|p| p.0.as_str() == TEST_CASE)) {
@@ -123,6 +131,27 @@ fn add_clear_methods(app: &mut App) {
         let nil = || Expr::new(span, ExprNode::Lit { value: Literal::Nil });
         let mut exprs: Vec<Expr> = names.iter().map(|n| assign(n.as_str(), nil())).collect();
         exprs.push(nil());
+        let assigns = Expr::new(
+            span,
+            ExprNode::Hash {
+                entries: names
+                    .iter()
+                    .map(|n| {
+                        (
+                            Expr::new(span, ExprNode::Lit { value: Literal::Str { value: n.as_str().to_string() } }),
+                            Expr::new(span, ExprNode::Ivar { name: n.clone() }),
+                        )
+                    })
+                    .collect(),
+                kwargs: false,
+            },
+        );
+        let at = controller
+            .body
+            .iter()
+            .position(|item| matches!(item, ControllerBodyItem::PrivateMarker { .. }))
+            .unwrap_or(controller.body.len());
+        controller.body.insert(at, public_method(VIEW_ASSIGNS_METHOD, assigns));
         let item = ControllerBodyItem::Action {
             action: Action {
                 name: Symbol::from(CLEAR_METHOD),
@@ -163,4 +192,26 @@ fn assigned_ivars(e: &Expr, out: &mut Vec<Symbol>) {
         }
     }
     e.node.for_each_child(&mut |c| assigned_ivars(c, out));
+}
+
+/// A public, non-routed controller method with no parameters.
+fn public_method(name: &str, body: Expr) -> ControllerBodyItem {
+    ControllerBodyItem::Action {
+        action: Action {
+            name: Symbol::from(name),
+            params: crate::ty::Row::default(),
+            opt_params: Vec::new(),
+            kw_params: Vec::new(),
+            kwrest_param: None,
+            block_param: None,
+            rest_param: None,
+            anonymous_formal: None,
+            name_span: Span::synthetic(),
+            body,
+            renders: RenderTarget::Inferred,
+            effects: crate::effect::EffectSet::pure(),
+        },
+        leading_comments: Vec::new(),
+        leading_blank_line: true,
+    }
 }
