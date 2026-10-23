@@ -631,10 +631,10 @@ fn emit_dispatch(
          \x20       return None\n\
          \x20   p = _nest_params(dict(params or {}))\n\
          \x20   p.update(m.path_params)\n\
-         \x20   # Format: a route-declared format wins; else the stripped\n\
-         \x20   # `.ext`; else anything the matcher's own ext-retry put in\n\
+         \x20   # Format: the stripped `.ext`; else the route's default\n\
+         \x20   # format; else anything the matcher's own ext-retry put in\n\
          \x20   # params[\"format\"].\n\
-         \x20   fmt = m.req_format or fmt or p.get(\"format\") or \"html\"\n\
+         \x20   fmt = fmt or m.req_format or p.get(\"format\") or \"html\"\n\
          \x20   c = dispatch(m.controller, m.action, params=p, flash=flash,\n\
          \x20                request_method=method, request_path=path,\n\
          \x20                request_format=fmt, query_string=qs)\n\

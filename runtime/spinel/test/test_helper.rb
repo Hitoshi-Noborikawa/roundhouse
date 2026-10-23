@@ -1971,8 +1971,10 @@ module RequestDispatch
     controller.request_format = :json if path_format == "json"
     controller.request_format = :turbo_stream if path_format == "turbo_stream"
     controller.request_format = :rss if path_format == "rss"
-    controller.request_format = :json if matched.req_format == :json
-    controller.request_format = :rss if matched.req_format == :rss
+    if path_format.empty?
+      controller.request_format = :json if matched.req_format == :json
+      controller.request_format = :rss if matched.req_format == :rss
+    end
     controller.request_format = :json if as == :json
     # The request object, built the way the dispatcher builds it (see
     # `main.rb`'s `controller.request = ActionDispatch::Request.new(...)`).
