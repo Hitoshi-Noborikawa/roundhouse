@@ -1439,7 +1439,7 @@ fn synth_except(spec: &ParamsSpec) -> MethodDef {
         args: vec![value], block: None, parenthesized: false,
     });
     let keys = Symbol::from("keys");
-    let keys_ty = Ty::Array { elem: Ty::Sym.into() };
+    let keys_ty = Ty::Array { elem: Ty::Union { variants: vec![Ty::Sym, Ty::Str].into() }.into() };
     let keys_read = || with_ty(Expr::new(span,
         ExprNode::Var { id: VarId(0), name: keys.clone() },
     ), keys_ty.clone());
@@ -1460,19 +1460,25 @@ fn synth_except(spec: &ParamsSpec) -> MethodDef {
         stmts.push(setter(&provided, with_ty(
             Expr::new(span, ExprNode::Ivar { name: provided.clone() }), Ty::Bool,
         )));
-        let cond = Expr::new(
+        let includes = |value| Expr::new(
             Span::synthetic(),
             ExprNode::Send {
                 recv: Some(keys_read()),
                 method: Symbol::from("include?"),
                 args: vec![Expr::new(
                     Span::synthetic(),
-                    ExprNode::Lit { value: Literal::Sym { value: field.clone() } },
+                    ExprNode::Lit { value },
                 )],
                 block: None,
                 parenthesized: false,
             },
         );
+        let cond = Expr::new(span, ExprNode::BoolOp {
+            op: crate::expr::BoolOpKind::Or,
+            surface: Default::default(),
+            left: includes(Literal::Sym { value: field.clone() }),
+            right: includes(Literal::Str { value: field.as_str().into() }),
+        });
         let clear = setter(&provided,
                 Expr::new(
                     Span::synthetic(),

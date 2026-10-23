@@ -125,8 +125,17 @@ fn except_with_multiple_keys_matches_rails_without_mutating_the_original() {
     @filtered = filtered
     @unchanged = attributes.except
     @repeated = attributes.except(:unknown, :body, :body)
+    string_filtered = alias_attributes.except("in_reply_to_id")
+    mixed_filtered = alias_attributes.except("in_reply_to_id", :body)
+    @string = string_filtered
+    @mixed = mixed_filtered
+    @mixed_repeated = attributes.except("unknown", "body", :body)
     message = @pty_session.received_messages.new(filtered)
     message.save!
+    string_message = @pty_session.received_messages.new(string_filtered)
+    string_message.save!
+    mixed_message = @pty_session.received_messages.new(mixed_filtered)
+    mixed_message.save!
     head :ok
 "#;
     let mut overlay = emit_and_run::empty_app();
@@ -140,20 +149,22 @@ controller.instance_variable_set(:@params, {
   "id" => owner.id.to_s, "message" => {"body" => "kept", "in_reply_to_id" => "33"}
 })
 controller.create
-row = Message.all.to_a.first
+row, string_row, mixed_row = Message.all.to_a
 raise "filtered build" unless row.body.nil? && row.in_reply_to_id.nil? && row.to_pty_session_id == owner.id
+raise "String-filtered build" unless string_row.body == "kept" && string_row.in_reply_to_id.nil? && string_row.to_pty_session_id == owner.id
+raise "mixed-filtered build" unless mixed_row.body.nil? && mixed_row.in_reply_to_id.nil? && mixed_row.to_pty_session_id == owner.id
 def provided_values(params)
   values = {}
   values["body"] = params.body if params.body_provided
   values["in_reply_to_id"] = params.in_reply_to_id if params.in_reply_to_id_provided
   values
 end
-puts JSON.generate([:@original, :@filtered, :@unchanged, :@repeated].map do |name|
+puts JSON.generate([:@original, :@filtered, :@unchanged, :@repeated, :@string, :@mixed, :@mixed_repeated].map do |name|
   provided_values(controller.instance_variable_get(name))
 end)
 "#);
     run.assert_passes();
-    assert_eq!(run.stdout.trim(), r#"[{"body":"kept","in_reply_to_id":"33"},{},{"body":"kept","in_reply_to_id":"33"},{"in_reply_to_id":"33"}]"#);
+    assert_eq!(run.stdout.trim(), r#"[{"body":"kept","in_reply_to_id":"33"},{},{"body":"kept","in_reply_to_id":"33"},{"in_reply_to_id":"33"},{"body":"kept"},{},{"in_reply_to_id":"33"}]"#);
 }
 
 #[test]
