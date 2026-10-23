@@ -42,6 +42,7 @@
 # target compiles against.
 
 require "sqlite3"
+require "json"
 require "fileutils"
 require "timeout"
 
@@ -1774,8 +1775,15 @@ module Db
   # Render an integer list for `IN (...)` eager-load batches (issue
   # #27). Empty list → "NULL" so `IN (NULL)` is valid SQL matching no
   # rows (an empty `IN ()` is a syntax error).
+  #
+  # An all-Integer list (every preload batch) goes through
+  # `JSON.generate`, which writes the whole list in C: two objects for
+  # any length, where `map { to_s }.join` costs one String per id (a
+  # room render preloads ~160 ids). Anything else keeps `to_i`, which is
+  # what makes the list safe to inline.
   def self.escape_int_list(ids)
     return "NULL" if ids.empty?
+    return JSON.generate(ids)[1..-2] if ids.all?(Integer)
 
     ids.map { |i| i.to_i.to_s }.join(", ")
   end
