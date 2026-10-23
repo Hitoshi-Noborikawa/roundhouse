@@ -159,11 +159,18 @@ puts "PASS"
 /// Rails refuses each private writer's key with `UnknownAttributeError`.
 #[test]
 fn rails_refuses_a_private_writer_key() {
+    rails_refuses_keys(PRIVATE_MODEL, &["role", "tier", "rank"]);
+}
+
+/// Each key raises `UnknownAttributeError` from `new` and from `update`
+/// under activerecord 8.1.4; skipped when the gems aren't installed.
+fn rails_refuses_keys(model: &str, keys: &[&str]) {
     let probe = r#"gem "activerecord", "8.1.4"; require "active_record"; require "sqlite3""#;
     if !Command::new("ruby").args(["-e", probe]).status().is_ok_and(|s| s.success()) {
         eprintln!("skipping: ruby with activerecord 8.1.4 and sqlite3 not available");
         return;
     }
+    let keys = keys.iter().map(|k| format!(":{k}")).collect::<Vec<_>>().join(", ");
     let script = format!(
         r##"gem "activerecord", "8.1.4"
 require "active_record"
@@ -176,8 +183,8 @@ end
 class ApplicationRecord < ActiveRecord::Base
   primary_abstract_class
 end
-{PRIVATE_MODEL}
-%i[role tier rank].each do |key|
+{model}
+[{keys}].each do |key|
   begin
     Member.new(email: "x", key => "v")
     raise "accepted #{{key}}"
@@ -198,4 +205,51 @@ puts "PASS""##
         output.status.success() && stdout.contains("PASS"),
         "activerecord 8.1.4 disagrees\n=== stdout ===\n{stdout}\n=== stderr ===\n{stderr}"
     );
+}
+
+/// A private `attr_*` writer, in each way Ruby allows: a public
+/// `attr_accessor` made private by `private :x=`, `private attr_accessor`,
+/// and an `attr_writer` inside a `private` section. Rails raises
+/// `UnknownAttributeError` for each key (`rails_refuses_a_private_attr_writer_key`).
+/// Ingest refuses all three, so no build makes one mass-assignable, and
+/// `virtual_writer_fields` never meets an `attr_*` writer that isn't public.
+const PRIVATE_ATTR_FORMS: [(&str, &str); 3] = [
+    ("role", "class Member < ApplicationRecord\n  attr_accessor :role\n  private :role=\nend\n"),
+    ("tier", "class Member < ApplicationRecord\n  private attr_accessor :tier\nend\n"),
+    ("rank", "class Member < ApplicationRecord\n  private\n\n  attr_writer :rank\nend\n"),
+];
+
+#[test]
+fn a_private_attr_writer_is_refused_at_ingest() {
+    for (key, model) in PRIVATE_ATTR_FORMS {
+        let root = std::env::temp_dir().join(format!("roundhouse-private-attr-{}-{key}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        for (path, body) in [
+            ("app/models/application_record.rb", "class ApplicationRecord < ActiveRecord::Base\n  primary_abstract_class\nend\n"),
+            ("app/models/member.rb", model),
+            ("config/routes.rb", "Rails.application.routes.draw do\nend\n"),
+            ("db/schema.rb", "ActiveRecord::Schema[8.1].define(version: 1) do\n  create_table \"members\", force: :cascade do |t|\n    t.string \"email\"\n  end\nend\n"),
+        ] {
+            let file = root.join("app_src").join(path);
+            std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+            std::fs::write(file, body).unwrap();
+        }
+        let out = Command::new(env!("CARGO_BIN_EXE_roundhouse"))
+            .args(["--target", "ruby", "--allow-unsupported", "-o"])
+            .arg(root.join("out"))
+            .arg(root.join("app_src"))
+            .output()
+            .expect("run roundhouse");
+        let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+        std::fs::remove_dir_all(&root).ok();
+        assert!(!out.status.success() && stderr.contains("visibility"), "{key}: {stderr}");
+    }
+}
+
+/// Rails refuses each private `attr_*` writer's key.
+#[test]
+fn rails_refuses_a_private_attr_writer_key() {
+    for (key, model) in PRIVATE_ATTR_FORMS {
+        rails_refuses_keys(model, &[key]);
+    }
 }
