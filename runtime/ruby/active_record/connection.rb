@@ -377,9 +377,9 @@ module ActiveRecord
   # Not in relation.rb: the strict targets' `Db` never raises RecordNotUnique.
   class Relation
     def create_or_find_by(conditions)
-      created = @model.new(scope_attributes.merge(conditions))
+      created = build(conditions)
       begin
-        @model.transaction(requires_new: true) { created.save }
+        ActiveRecord::Base.transaction(requires_new: true) { created.save }
       rescue ActiveRecord::RecordNotUnique
         return find_by!(conditions)
       end
@@ -387,9 +387,9 @@ module ActiveRecord
     end
 
     def create_or_find_by!(conditions)
-      created = @model.new(scope_attributes.merge(conditions))
+      created = build(conditions)
       begin
-        @model.transaction(requires_new: true) { created.save! }
+        ActiveRecord::Base.transaction(requires_new: true) { created.save! }
       rescue ActiveRecord::RecordNotUnique
         return find_by!(conditions)
       end

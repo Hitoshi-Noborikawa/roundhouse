@@ -28,9 +28,11 @@ pub(super) fn mark(app: &mut App) {
             .map(|m| m.name.as_str().to_string())
             .collect();
         for expr in &mut lc.unknown_calls {
-            let ExprNode::Send { recv, method, .. } = &*expr.node else { continue };
+            let ExprNode::Send { recv, method, block, .. } = &*expr.node else { continue };
             let on_self = recv.as_ref().is_none_or(|r| matches!(&*r.node, ExprNode::SelfRef));
-            if on_self && own.contains(method.as_str()) && !expr.span.is_synthetic() {
+            // Not a Concern's `included do … end`: the hook's own name, which the concern splice owns.
+            let hook = matches!(method.as_str(), "included" | "extended" | "prepended" | "inherited" | "class_methods");
+            if on_self && !hook && block.is_none() && own.contains(method.as_str()) && !expr.span.is_synthetic() {
                 expr.decisions |= crate::expr::REPLAYED_CLASS_BODY;
             }
         }
