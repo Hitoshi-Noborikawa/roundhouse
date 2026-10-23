@@ -7029,10 +7029,53 @@ fn walk_jbuilder<V: Vfs + ?Sized>(
 /// The Ruby an app runs at boot, before it loads models and draws
 /// routes: `config/application.rb`, `config/environment.rb`,
 /// `config/boot.rb`, each `config/environments/*.rb` (whichever one
-/// runs), every `config/initializers` file, and each file the boot chain
-/// loads by a literal top-level `require_relative`
-/// ([`boot_required_files`]). A file already recorded as an input is
-/// left out, so its writes are not counted twice.
+/// runs), every `config/initializers` file, and each file one of those
+/// loads by a literal top-level `require_relative`. A file already
+/// recorded as an input is left out, so its writes are not counted twice.
+/// The targets of `file`'s literal top-level `require_relative` calls,
+/// under [`boot_required_files`]' checks: an existing `.rb` file inside the
+/// app, reached without a symbolic link, other than the boot chain itself.
+/// Silent: a computed or outside path is simply not followed.
+fn literal_require_relative_targets<V: Vfs + ?Sized>(vfs: &V, dir: &Path, file: &Path) -> Vec<PathBuf> {
+    let config_dir = dir.join("config");
+    let boot_chain = ["boot.rb", "application.rb", "environment.rb"].map(|name| config_dir.join(name));
+    let Some(base) = file.parent() else { return Vec::new() };
+    let Ok(source) = vfs.read(file) else { return Vec::new() };
+    let parsed = super::prism::parse_silent(&source);
+    let Some(program) = parsed.node().as_program_node() else { return Vec::new() };
+    let mut out = Vec::new();
+    for statement in program.statements().body().iter() {
+        let Some(call) = statement.as_call_node() else { continue };
+        if call.receiver().is_some()
+            || call.block().is_some()
+            || super::util::constant_id_str(&call.name()) != "require_relative"
+        {
+            continue;
+        }
+        let arguments: Vec<_> = call.arguments().map(|a| a.arguments().iter().collect()).unwrap_or_default();
+        let Some(mut target) = (arguments.len() == 1)
+            .then(|| super::util::string_value(&arguments[0]))
+            .flatten()
+            .and_then(|request| normalize_engine_library_require(dir, base, &request))
+        else {
+            continue;
+        };
+        if target.extension().is_none() {
+            target.set_extension("rb");
+        }
+        if !boot_chain.contains(&target)
+            && target.extension().is_some_and(|e| e == "rb")
+            && vfs.exists(&target)
+            && !vfs.is_dir(&target)
+            && !path_has_symlink_component(vfs, dir, &target)
+            && !out.contains(&target)
+        {
+            out.push(target);
+        }
+    }
+    out
+}
+
 fn boot_source_files<V: Vfs + ?Sized>(
     vfs: &V,
     dir: &Path,
@@ -7050,7 +7093,15 @@ fn boot_source_files<V: Vfs + ?Sized>(
             files.extend(read_rb_files(vfs, &sub_dir)?);
         }
     }
-    files.extend(boot_required_files(vfs, dir));
+    // What the boot chain, an environment file or an initializer loads by
+    // a literal `require_relative` runs at boot too. Followed here with
+    // `boot_required_files`' checks, silently: that function reports the
+    // paths it can't follow for `application.rb` / `environment.rb` once,
+    // and feeds the support-root batch, which this list does not.
+    let requiring: Vec<PathBuf> = files.clone();
+    for file in requiring {
+        files.extend(literal_require_relative_targets(vfs, dir, &file));
+    }
     files.retain(|file| !inputs.contains(file));
     files.sort();
     files.dedup();

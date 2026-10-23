@@ -465,18 +465,17 @@ impl EnumConstants {
                     self.reflected.extend(reflected);
                 }
                 // A boot source calls the app's classes freely (`Gadget.count`):
-                // a taint rooted at a class or module the inputs define is
-                // not a constant it changes.
+                // the scan skips a receiver rooted at a class or module
+                // (`ConstTaint::names_boot_namespace`).
                 SourceKind::Boot => {
-                    let owners: std::collections::HashSet<&str> = self
+                    let namespaces: std::collections::HashSet<String> = self
                         .values
                         .iter()
                         .filter(|(_, value)| matches!(value, EnumConstant::Namespace))
-                        .filter_map(|(name, _)| name.rsplit("::").next())
+                        .map(|(name, _)| name.clone())
                         .collect();
-                    let (tainted, aliases) = super::super::ConstTaint::scan_boot(&result.node(), direct_writes);
-                    let tainted: Vec<String> =
-                        tainted.into_iter().filter(|name| !owners.contains(name.as_str())).collect();
+                    let (tainted, aliases) =
+                        super::super::ConstTaint::scan_boot(&result.node(), direct_writes, namespaces);
                     self.foreign_taint.extend(tainted);
                     self.boot_aliases.extend(aliases);
                 }

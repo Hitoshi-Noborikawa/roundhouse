@@ -22,13 +22,15 @@ const KINDS_CONTROLLER: &str = "class KindsController < ApplicationController\n 
 const ROUTE: &str = "  get \"/kinds/:id\", to: \"kinds#show\", constraints: { id: Regexp.union(Catalog::KINDS) }\n";
 
 /// Each initializer that leaves `Catalog::KINDS` other than `%w[news blog]`.
-const MUTATING: [&str; 5] = [
+const MUTATING: [&str; 6] = [
     "Catalog::KINDS << \"wiki\"\n",
     "Catalog.send(:remove_const, :KINDS)\nCatalog::KINDS = %w[wiki]\n",
     "Catalog::KINDS.replace(%w[wiki])\n",
     "Catalog.send(:remove_const, :KINDS)\nCatalog.const_set(:KINDS, %w[wiki])\n",
     // A receiverless `const_set` in the owner's body.
     "module Catalog\n  send(:remove_const, :KINDS)\n  const_set(:KINDS, %w[wiki])\nend\n",
+    // Both through `send`.
+    "Catalog.send(:remove_const, :KINDS)\nCatalog.send(:const_set, :KINDS, %w[wiki])\n",
 ];
 
 /// Reads the constant and defines a top-level one of its own.
@@ -103,7 +105,7 @@ fn rails_reads_the_initializers_value() {
         eprintln!("skipping: ruby with activerecord/actionpack 8.1.4 and sqlite3 not available");
         return;
     }
-    let expected = [("news", true, true), ("news", false, false), ("news", false, false), ("news", false, false), ("news", false, false)];
+    let expected = [("news", true, true), ("news", false, false), ("news", false, false), ("news", false, false), ("news", false, false), ("news", false, false)];
     for (initializer, (kind, news_valid, news_routed)) in MUTATING.iter().zip(expected) {
         let script = format!(
             r##"gem "activerecord", "8.1.4"
@@ -205,6 +207,14 @@ fn an_unreadable_boot_directory_is_an_error() {
     }
     let private = root.join("app_src/config/environments/private");
     std::fs::set_permissions(&private, std::fs::Permissions::from_mode(0o000)).unwrap();
+    // A process that can read past the mode (CAP_DAC_OVERRIDE, root) has
+    // no unreadable directory to report.
+    if std::fs::read_dir(&private).is_ok() {
+        std::fs::set_permissions(&private, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::remove_dir_all(&root).ok();
+        eprintln!("skipping: this process can list a mode-000 directory");
+        return;
+    }
     let out = Command::new(env!("CARGO_BIN_EXE_roundhouse"))
         .args(["--target", "ruby", "-o"])
         .arg(root.join("out"))
@@ -217,4 +227,30 @@ fn an_unreadable_boot_directory_is_an_error() {
     std::fs::remove_dir_all(&root).ok();
     assert!(!out.status.success(), "the unreadable directory is reported\n{stderr}\n{widget}");
     assert!(!widget.contains("[\"news\", \"blog\"]"), "{widget}");
+}
+
+#[test]
+fn a_file_an_initializer_requires_is_a_boot_source() {
+    assert_refused(&[
+        ("config/catalog_extensions.rb", "Catalog::KINDS << \"wiki\"\n"),
+        ("config/initializers/catalog.rb", "require_relative \"../catalog_extensions\"\n"),
+    ]);
+}
+
+#[test]
+fn a_file_boot_rb_requires_is_a_boot_source() {
+    assert_refused(&[
+        ("config/catalog_extensions.rb", "Catalog::KINDS << \"wiki\"\n"),
+        ("config/boot.rb", "require_relative \"catalog_extensions\"\n"),
+    ]);
+}
+
+/// A namespace that happens to share the constant's name does not hide
+/// a mutation of the constant.
+#[test]
+fn a_namespace_named_like_the_constant_keeps_the_taint() {
+    assert_refused(&[
+        ("app/lib/kinds.rb", "module KINDS\nend\n"),
+        ("config/initializers/catalog.rb", "Catalog::KINDS << \"wiki\"\n"),
+    ]);
 }

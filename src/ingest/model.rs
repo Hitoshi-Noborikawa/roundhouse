@@ -1515,6 +1515,10 @@ struct ConstTaint {
     /// The constant a `const_set(:NAME, …)` / `remove_const(:NAME)` call
     /// names, whatever its receiver.
     named_writes: std::collections::HashSet<String>,
+    /// For a boot source: the qualified classes and modules the inputs
+    /// define. A call on one, or a variable holding one, is not a change
+    /// to a constant (`Gadget.count`); see [`ConstTaint::names_boot_namespace`].
+    boot_namespaces: Option<std::collections::HashSet<String>>,
 }
 
 /// Calls on an owner that can write or remove its constants, run code in
@@ -1574,6 +1578,51 @@ fn chain_root(node: &Node<'_>) -> Option<String> {
     node.as_constant_path_node()?.name().map(|n| constant_id_str(&n).to_string())
 }
 
+/// [`chain_root`]'s constant as written: `Gadget`, `Vendor::Gadget`,
+/// `::Catalog::KINDS`.
+fn chain_root_path(node: &Node<'_>) -> Option<String> {
+    fn path(node: &Node<'_>) -> Option<String> {
+        if let Some(cr) = node.as_constant_read_node() {
+            return Some(constant_id_str(&cr.name()).to_string());
+        }
+        let cp = node.as_constant_path_node()?;
+        let name = constant_id_str(&cp.name()?).to_string();
+        match cp.parent() {
+            Some(parent) => Some(format!("{}::{name}", path(&parent)?)),
+            None => Some(format!("::{name}")),
+        }
+    }
+    if let Some(paren) = node.as_parentheses_node() {
+        return chain_root_path(&paren.body()?);
+    }
+    if let Some(stmts) = node.as_statements_node() {
+        let body: Vec<Node<'_>> = stmts.body().iter().collect();
+        let [only] = body.as_slice() else { return None };
+        return chain_root_path(only);
+    }
+    if let Some(call) = node.as_call_node() {
+        if FRESH_RESULT_METHODS.contains(&constant_id_str(&call.name()).as_ref()) {
+            return None;
+        }
+        return chain_root_path(&call.receiver()?);
+    }
+    path(node)
+}
+
+/// `send(:const_set, :NAME, …)` / `public_send(:remove_const, :NAME)`:
+/// the constant a literal dispatch to a named write names.
+fn dispatched_named_constant_write(call: &ruby_prism::CallNode<'_>) -> Option<String> {
+    if !matches!(constant_id_str(&call.name()).as_ref(), "send" | "__send__" | "public_send") {
+        return None;
+    }
+    let arguments: Vec<Node<'_>> = call.arguments()?.arguments().iter().collect();
+    let [method, name, ..] = arguments.as_slice() else { return None };
+    if !matches!(symbol_value(method).as_deref(), Some("const_set" | "remove_const")) {
+        return None;
+    }
+    symbol_value(name).or_else(|| string_value(name))
+}
+
 /// Every constant a node reads, at any depth.
 fn constant_reads(node: &Node<'_>) -> Vec<String> {
     struct Reads(Vec<String>);
@@ -1606,6 +1655,7 @@ impl ConstTaint {
             aliases: Vec::new(),
             reflected: Default::default(),
             named_writes: Default::default(),
+            boot_namespaces: None,
         };
         for stmt in stmts {
             ruby_prism::Visit::visit(&mut scan, stmt);
@@ -1633,6 +1683,7 @@ impl ConstTaint {
             aliases: Vec::new(),
             reflected: Default::default(),
             named_writes: Default::default(),
+            boot_namespaces: None,
         };
         ruby_prism::Visit::visit(&mut scan, root);
         let ConstTaint { mut tainted, aliases, reflected, .. } = scan;
@@ -1649,6 +1700,7 @@ impl ConstTaint {
     pub(super) fn scan_boot(
         root: &Node<'_>,
         direct_writes: std::collections::HashSet<usize>,
+        namespaces: std::collections::HashSet<String>,
     ) -> (std::collections::HashSet<String>, Vec<(String, String)>) {
         let mut scan = ConstTaint {
             top_level: direct_writes,
@@ -1657,6 +1709,7 @@ impl ConstTaint {
             aliases: Vec::new(),
             reflected: Default::default(),
             named_writes: Default::default(),
+            boot_namespaces: Some(namespaces),
         };
         ruby_prism::Visit::visit(&mut scan, root);
         let ConstTaint { mut tainted, aliases, named_writes, .. } = scan;
@@ -1671,6 +1724,25 @@ impl ConstTaint {
     /// edges from several sources before closing them.
     pub(super) fn close_aliases(tainted: &mut std::collections::HashSet<String>, aliases: &[(String, String)]) {
         Self::alias_closure(tainted, aliases);
+    }
+
+    /// Whether a boot source's receiver chain (`Gadget.count`,
+    /// `Vendor::Gadget.class_eval`) is rooted at a class or module rather
+    /// than at a constant it could change: a bare name an input namespace
+    /// has, a path an input defines as a namespace, or a path rooted
+    /// outside the inputs (a library class). `Catalog::KINDS` is rooted in
+    /// an input namespace and is not one, so it is a constant, whatever
+    /// else is named `KINDS`.
+    fn names_boot_namespace(&self, node: &Node<'_>) -> bool {
+        let Some(namespaces) = &self.boot_namespaces else { return false };
+        let Some(path) = chain_root_path(node) else { return false };
+        let path = path.trim_start_matches("::");
+        match path.split_once("::") {
+            None => namespaces.iter().any(|ns| ns.rsplit("::").next() == Some(path)),
+            Some((first, _)) => {
+                namespaces.contains(path) || !namespaces.iter().any(|ns| ns.split("::").next() == Some(first))
+            }
+        }
     }
 
     fn alias_closure(tainted: &mut std::collections::HashSet<String>, aliases: &[(String, String)]) {
@@ -1692,6 +1764,9 @@ impl ConstTaint {
     /// `x = MODES` (or `@x`, `@@x`, `$x`, or `MODES.to_a`): the variable
     /// may mutate the constant later, out of this pass's sight.
     fn escape(&mut self, value: &Node<'_>) {
+        if self.names_boot_namespace(value) {
+            return;
+        }
         if let Some(root) = chain_root(value) {
             self.tainted.insert(root);
         }
@@ -1762,12 +1837,12 @@ impl<'pr> ruby_prism::Visit<'pr> for ConstTaint {
     fn visit_call_node(&mut self, node: &ruby_prism::CallNode<'pr>) {
         // `Catalog.const_set(:KINDS, …)`, or a receiverless one in the
         // owner's body: either replaces that name.
-        if let Some(name) = named_constant_write(node) {
+        if let Some(name) = named_constant_write(node).or_else(|| dispatched_named_constant_write(node)) {
             self.named_writes.insert(name);
         }
         if let Some(recv) = node.receiver() {
             let method = constant_id_str(&node.name());
-            if !READ_ONLY_CONST_METHODS.contains(&method.as_ref()) {
+            if !READ_ONLY_CONST_METHODS.contains(&method.as_ref()) && !self.names_boot_namespace(&recv) {
                 if let Some(root) = chain_root(&recv) {
                     self.tainted.insert(root);
                 }
