@@ -3613,11 +3613,15 @@ fn ingest_resources_route(
             .collect();
     }
 
-    let mut nested = block_entries(call, file, Some(name_str.as_str()), cx)?;
+    // A verb in the block with no `to:` (`member { get :download }`)
+    // dispatches to the resource's controller: `controller:` when given,
+    // as Rails routes it, else the resource name.
+    let block_controller = controller.as_deref().unwrap_or(name_str.as_str()).to_string();
+    let mut nested = block_entries(call, file, Some(block_controller.as_str()), cx)?;
     if !concern_names.is_empty() {
         let none = eval::RVal::Hash(Vec::new());
         nested.extend(cx.with_mount_scope(cx.mount_scope_depth.get() + 1, || {
-            run_concerns(&concern_names, &none, file, Some(name_str.as_str()), cx)
+            run_concerns(&concern_names, &none, file, Some(block_controller.as_str()), cx)
         })?);
     }
     // Push the inline `constraints:` kwarg down into every `member do`/
