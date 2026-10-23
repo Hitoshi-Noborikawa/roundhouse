@@ -59,6 +59,16 @@ pub(super) fn resolve(app: &mut App, sources: &[SourceFile], resolver: &ConstRes
             names.rewrite_mixin_call(call, &["extend", "prepend"]);
         }
     }
+    // A concern's `included do` statements, which the concern splices
+    // copy onto each includer: an `include Guard` there names the module
+    // as seen from inside the concern, not from the includer.
+    for items in app.concern_model_items.values_mut() {
+        for item in items {
+            if let ModelBodyItem::Unknown { expr, .. } = item {
+                names.rewrite_mixin_call(expr, &["include"]);
+            }
+        }
+    }
     for model in &mut app.models {
         if let Some(parent) = &mut model.parent {
             names.rewrite_parent(&model.name, parent, model.parent_span);

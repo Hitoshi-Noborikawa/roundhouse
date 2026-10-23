@@ -9209,6 +9209,153 @@ fn a_concern_included_from_an_included_block_reaches_the_model() {
         .assert_passes();
 }
 
+/// real-blog with `ApplicationController` including the `Outer` concern
+/// (`outer`), the extra concern files in `modules`, and a
+/// `StampedController` (`body`) at `/stamped/:id` and `/stamped/:id/plain`.
+fn controller_concern_app(outer: &str, modules: &[(&str, &str)], body: &str, test: &str) -> emit_and_run::Overlay {
+    let mut app = emit_and_run::real_blog()
+        .edit(
+            "config/routes.rb",
+            "  root \"articles#index\"\n",
+            "  root \"articles#index\"\n  get \"/stamped/:id\", to: \"stamped#show\"\n  get \"/stamped/:id/plain\", to: \"stamped#plain\"\n",
+        )
+        .write("app/controllers/concerns/outer.rb", outer)
+        .edit(
+            "app/controllers/application_controller.rb",
+            "class ApplicationController < ActionController::Base\n",
+            "class ApplicationController < ActionController::Base\n  include Outer\n",
+        )
+        .write("app/controllers/stamped_controller.rb", body)
+        .write(
+            "test/controllers/stamped_controller_test.rb",
+            &format!("require \"test_helper\"\n\nclass StampedControllerTest < ActionDispatch::IntegrationTest\n{test}end\n"),
+        );
+    for (path, source) in modules {
+        app = app.write(path, source);
+    }
+    app
+}
+
+/// `Outer`'s `included do` includes `Guard`, the way action_policy's setup
+/// includes `ActionPolicy::Controller`. The controller gets `Guard`'s
+/// method, and `Guard`'s `class_methods` filter macro runs.
+#[test]
+fn a_concern_included_from_an_included_block_reaches_the_controller() {
+    controller_concern_app(
+        "module Outer\n  extend ActiveSupport::Concern\n\n  included do\n    include Guard\n  end\nend\n",
+        &[(
+            "app/controllers/concerns/guard.rb",
+            "module Guard\n  extend ActiveSupport::Concern\n\n  def guarded_title\n    \"guarded\"\n  end\n\n  def stamp\n    @stamp = \"stamped\"\n  end\n\n  class_methods do\n    def stamp_before(**options)\n      before_action :stamp, options\n    end\n  end\nend\n",
+        )],
+        "class StampedController < ApplicationController\n  stamp_before only: :show\n\n  def show\n    render plain: \"#{guarded_title} #{@stamp}\"\n  end\n\n  def plain\n    render plain: \"#{guarded_title} #{@stamp.inspect}\"\n  end\nend\n",
+        "  test \"Guard's method and filter macro reach the controller\" do\n    get \"/stamped/1\"\n    assert_equal \"guarded stamped\", response.body\n    get \"/stamped/2/plain\"\n    assert_equal \"guarded nil\", response.body\n  end\n",
+    )
+    .run_test("test/controllers/stamped_controller_test.rb")
+    .assert_passes();
+}
+
+/// `Guard` sits ahead of `Outer`, so its `guarded_title` wins, as in Ruby.
+#[test]
+fn an_include_from_an_included_block_takes_precedence_on_the_controller() {
+    controller_concern_app(
+        "module Outer\n  extend ActiveSupport::Concern\n\n  included do\n    include Guard\n  end\n\n  def guarded_title\n    \"outer\"\n  end\nend\n",
+        &[(
+            "app/controllers/concerns/guard.rb",
+            "module Guard\n  extend ActiveSupport::Concern\n\n  def guarded_title\n    \"guard\"\n  end\nend\n",
+        )],
+        "class StampedController < ApplicationController\n  def show\n    render plain: guarded_title\n  end\n\n  def plain\n    render plain: guarded_title\n  end\nend\n",
+        "  test \"Guard's method wins over Outer's\" do\n    get \"/stamped/1\"\n    assert_equal \"guard\", response.body\n  end\n",
+    )
+    .run_test("test/controllers/stamped_controller_test.rb")
+    .assert_passes();
+}
+
+/// `include First, Second` in an `included do` block puts `First` ahead
+/// of `Second`, as Ruby does, so `First`'s `guarded_title` wins.
+#[test]
+fn a_multi_module_include_in_an_included_block_keeps_its_order_on_the_controller() {
+    controller_concern_app(
+        "module Outer\n  extend ActiveSupport::Concern\n\n  included do\n    include First, Second\n  end\nend\n",
+        &[
+            (
+                "app/controllers/concerns/first.rb",
+                "module First\n  extend ActiveSupport::Concern\n\n  def guarded_title\n    \"first\"\n  end\nend\n",
+            ),
+            (
+                "app/controllers/concerns/second.rb",
+                "module Second\n  extend ActiveSupport::Concern\n\n  def guarded_title\n    \"second\"\n  end\nend\n",
+            ),
+        ],
+        "class StampedController < ApplicationController\n  def show\n    render plain: guarded_title\n  end\n\n  def plain\n    render plain: guarded_title\n  end\nend\n",
+        "  test \"First's method wins over Second's\" do\n    get \"/stamped/1\"\n    assert_equal \"first\", response.body\n  end\n",
+    )
+    .run_test("test/controllers/stamped_controller_test.rb")
+    .assert_passes();
+}
+
+/// `include Guard` written inside `module Outer` names `Outer::Guard`, as
+/// Ruby's lexical lookup finds it.
+#[test]
+fn an_included_block_include_resolves_in_its_concerns_namespace() {
+    controller_concern_app(
+        "module Outer\n  extend ActiveSupport::Concern\n\n  included do\n    include Guard\n  end\nend\n",
+        &[(
+            "app/controllers/concerns/outer/guard.rb",
+            "module Outer\n  module Guard\n    extend ActiveSupport::Concern\n\n    def guarded_title\n      \"namespaced\"\n    end\n  end\nend\n",
+        )],
+        "class StampedController < ApplicationController\n  def show\n    render plain: guarded_title\n  end\n\n  def plain\n    render plain: guarded_title\n  end\nend\n",
+        "  test \"Outer::Guard's method reaches the controller\" do\n    get \"/stamped/1\"\n    assert_equal \"namespaced\", response.body\n  end\n",
+    )
+    .run_test("test/controllers/stamped_controller_test.rb")
+    .assert_passes();
+}
+
+/// On a model too, `include Codes` written inside `module Signing` names
+/// `Signing::Codes`.
+#[test]
+fn an_included_block_include_resolves_in_its_concerns_namespace_on_the_model() {
+    emit_and_run::real_blog()
+        .write(
+            "app/models/concerns/signing.rb",
+            "module Signing\n  extend ActiveSupport::Concern\n\n  included do\n    include Codes\n  end\nend\n",
+        )
+        .write(
+            "app/models/concerns/signing/codes.rb",
+            "module Signing::Codes\n  extend ActiveSupport::Concern\n\n  def shout\n    title.upcase\n  end\nend\n",
+        )
+        .edit(
+            "app/models/article.rb",
+            "class Article < ApplicationRecord\n",
+            "class Article < ApplicationRecord\n  include Signing\n",
+        )
+        .run_ruby(
+            "a = Article.create!(title: \"Hi\", body: \"Body text here\")\nraise a.shout unless a.shout == \"HI\"",
+        )
+        .assert_passes();
+}
+
+/// `Guard`'s own `included do` include, `Deep`, reaches the controller too.
+#[test]
+fn an_include_two_included_blocks_deep_reaches_the_controller() {
+    controller_concern_app(
+        "module Outer\n  extend ActiveSupport::Concern\n\n  included do\n    include Guard\n  end\nend\n",
+        &[
+            (
+                "app/controllers/concerns/guard.rb",
+                "module Guard\n  extend ActiveSupport::Concern\n\n  included do\n    include Deep\n  end\nend\n",
+            ),
+            (
+                "app/controllers/concerns/deep.rb",
+                "module Deep\n  extend ActiveSupport::Concern\n\n  def deep_title\n    \"deep\"\n  end\nend\n",
+            ),
+        ],
+        "class StampedController < ApplicationController\n  def show\n    render plain: deep_title\n  end\n\n  def plain\n    render plain: deep_title\n  end\nend\n",
+        "  test \"Deep's method reaches the controller\" do\n    get \"/stamped/1\"\n    assert_equal \"deep\", response.body\n  end\n",
+    )
+    .run_test("test/controllers/stamped_controller_test.rb")
+    .assert_passes();
+}
+
 /// Ruby's lookup order for a module included from `included do`: the
 /// block runs on the includer after the outer module is appended, so
 /// the inner module sits AHEAD of the outer one and its method wins.
