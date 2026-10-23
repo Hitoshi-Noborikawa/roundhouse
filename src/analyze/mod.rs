@@ -837,6 +837,10 @@ impl Analyzer {
             ] {
                 cls.instance_methods.entry(Symbol::from(name)).or_insert(ty);
             }
+            // Not the catalog's `Str`: a key that is not a literal reads whatever its column holds.
+            for name in ["read_attribute", "write_attribute"] {
+                cls.instance_methods.insert(Symbol::from(name), Ty::Untyped);
+            }
             // Associations as instance methods (return types derived from
             // cardinality). Each also gets a writer `name=`: belongs_to/
             // has_one assign a record-or-nil, has_many/HABTM assign a

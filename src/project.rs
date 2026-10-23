@@ -1729,6 +1729,9 @@ fn report_ruby_only_sends(app: &App, target: BuildTarget) {
 
 /// Not left to the runtime's raise: `scope_chain` needs the receiver's model to write the join's SQL.
 fn report_dynamic_association_joins(app: &App, target: BuildTarget) {
+    if matches!(target, BuildTarget::Futamura) {
+        return;
+    }
     fn names_association(arg: &crate::expr::Expr) -> bool {
         use crate::expr::{ExprNode, Literal};
         match &*arg.node {

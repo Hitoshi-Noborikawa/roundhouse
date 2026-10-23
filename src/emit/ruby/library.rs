@@ -728,21 +728,26 @@ fn invoked_lambda(expr: &Expr) -> Option<&Expr> {
     }
 }
 
-fn walk_param_defaults(params: &[crate::dialect::Param], owner: &LibraryClass, visited: &mut BTreeSet<String>, paths: &mut BTreeSet<Vec<String>>) {
+fn walk_param_defaults(params: &[crate::dialect::Param], owner: &LibraryClass, side: MethodReceiver, visited: &mut BTreeSet<String>, paths: &mut BTreeSet<Vec<String>>) {
     for param in params {
         if let Some(default) = &param.default {
-            walk_load_time_paths(default, owner, visited, paths);
+            walk_load_time_paths_on(default, owner, side, visited, paths);
         }
     }
 }
 
 fn walk_load_time_paths(expr: &Expr, owner: &LibraryClass, visited: &mut BTreeSet<String>, paths: &mut BTreeSet<Vec<String>>) {
+    walk_load_time_paths_on(expr, owner, MethodReceiver::Class, visited, paths);
+}
+
+// Not by name alone: a class-body `configure` runs `def self.configure`, never an instance method of that name.
+fn walk_load_time_paths_on(expr: &Expr, owner: &LibraryClass, side: MethodReceiver, visited: &mut BTreeSet<String>, paths: &mut BTreeSet<Vec<String>>) {
     if let Some(lambda) = invoked_lambda(expr) {
         if let ExprNode::Lambda { extra_params, body, .. } = &*lambda.node {
-            walk_param_defaults(extra_params, owner, visited, paths);
-            walk_load_time_paths(body, owner, visited, paths);
+            walk_param_defaults(extra_params, owner, side, visited, paths);
+            walk_load_time_paths_on(body, owner, side, visited, paths);
         } else {
-            walk_load_time_paths(lambda, owner, visited, paths);
+            walk_load_time_paths_on(lambda, owner, side, visited, paths);
         }
     }
     if let ExprNode::Lambda { .. } = &*expr.node {
@@ -757,18 +762,22 @@ fn walk_load_time_paths(expr: &Expr, owner: &LibraryClass, visited: &mut BTreeSe
             ExprNode::Const { path } => path.iter().map(|part| part.as_str()).filter(|part| !part.is_empty()).collect::<Vec<_>>().join("::") == owner.name.0.as_str(),
             _ => false,
         });
-        let called = if method.as_str() == "new" { "initialize" } else { method.as_str() };
-        if own && visited.insert(called.to_string()) {
-            for method in owner.methods.iter().filter(|method| method.name.as_str() == called) {
-                walk_param_defaults(&method.params, owner, visited, paths);
+        let (called, on) = if method.as_str() == "new" && side == MethodReceiver::Class {
+            ("initialize", MethodReceiver::Instance)
+        } else {
+            (method.as_str(), side)
+        };
+        if own && visited.insert(format!("{}{called}", if on == MethodReceiver::Class { "." } else { "#" })) {
+            for method in owner.methods.iter().filter(|method| method.name.as_str() == called && method.receiver == on) {
+                walk_param_defaults(&method.params, owner, on, visited, paths);
                 if let Some(block) = &method.block_param {
-                    walk_param_defaults(std::slice::from_ref(block), owner, visited, paths);
+                    walk_param_defaults(std::slice::from_ref(block), owner, on, visited, paths);
                 }
-                walk_load_time_paths(&method.body, owner, visited, paths);
+                walk_load_time_paths_on(&method.body, owner, on, visited, paths);
             }
         }
         for value in recv.iter().chain(args) {
-            walk_load_time_paths(value, owner, visited, paths);
+            walk_load_time_paths_on(value, owner, side, visited, paths);
         }
         let stores_block = matches!(method.as_str(), "proc" | "lambda")
             || (method.as_str() == "new" && matches!(recv.as_ref().map(|recv| &*recv.node),
@@ -776,12 +785,12 @@ fn walk_load_time_paths(expr: &Expr, owner: &LibraryClass, visited: &mut BTreeSe
         if !stores_block {
             if let Some(block) = block {
                 let body = match &*block.node { ExprNode::Lambda { body, .. } => body, _ => block };
-                walk_load_time_paths(body, owner, visited, paths);
+                walk_load_time_paths_on(body, owner, side, visited, paths);
             }
         }
         return;
     }
-    expr.node.for_each_child(&mut |child| walk_load_time_paths(child, owner, visited, paths));
+    expr.node.for_each_child(&mut |child| walk_load_time_paths_on(child, owner, side, visited, paths));
 }
 
 struct NestedEmitter<'a> {

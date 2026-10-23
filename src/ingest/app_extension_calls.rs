@@ -22,8 +22,8 @@ use crate::expr::ExprNode;
 pub(super) fn mark(app: &mut App) {
     let modules: HashSet<String> =
         app.library_classes.iter().filter(|lc| lc.is_module && lc.origin.is_none()).map(|lc| lc.name.0.as_str().to_string()).collect();
-    // Not only a class's: a module's `extend Configure` gives the module its readers, which the emit otherwise drops.
-    for lc in app.library_classes.iter_mut().filter(|lc| lc.is_module && lc.origin.is_none()) {
+    // Where the source has it, a module's or a class's: the emit otherwise drops a module's, and runs a class's after a `@@x = …` written before it.
+    for lc in app.library_classes.iter_mut().filter(|lc| lc.origin.is_none()) {
         let owner = lc.name.0.as_str().to_string();
         for expr in &mut lc.unknown_calls {
             let ExprNode::Send { recv: None, method, args, block: None, .. } = &*expr.node else { continue };
