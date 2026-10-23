@@ -4093,7 +4093,10 @@ pub(crate) fn row_from_table(table: &Table) -> Row {
 /// — validations and analysis both need to see that. The primary key
 /// is excluded (the INSERT assigns it and every hydration path treats
 /// it as present). Twin of `lower::model_to_library::ty_of_column_slot`;
-/// keep them in sync, same as the `ty_of_column` pair below.
+/// keep them in sync, same as the `ty_of_column` pair below. A
+/// PostgreSQL array column (`array: true`) is still typed as its element
+/// here: the analysis feeds every lowered target's method dispatch, and
+/// their storage holds one element (`project::report_array_columns`).
 fn ty_of_column_slot(col: &crate::schema::Column) -> Ty {
     let base = ty_of_column(&col.col_type);
     if col.nullable && !col.primary_key {

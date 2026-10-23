@@ -78,7 +78,13 @@ pub struct Column {
     /// This stays sparse so ordinary integer columns keep their serialized
     /// form and application typing.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub generated_int4_compatible: Option<bool>,
+    pub generated_int4_compatible: Option<bool>,    /// A PostgreSQL array column (`t.bigint "tag_ids", array: true`):
+    /// Rails reads an `Array` of `col_type`, or nil when the column is
+    /// nullable and unset. `col_type` stays the element type, as Rails'
+    /// own column metadata keeps it. Sparse, so a non-array column keeps
+    /// its serialized form.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub array: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

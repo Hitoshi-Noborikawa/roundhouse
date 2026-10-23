@@ -1392,6 +1392,7 @@ mod tests {
                         generated: None,
                         generated_text_compatible: None,
                         generated_int4_compatible: None,
+                        array: false,
                     },
                     Column {
                         name: Symbol::from("title"),
@@ -1402,6 +1403,7 @@ mod tests {
                         generated: None,
                         generated_text_compatible: None,
                         generated_int4_compatible: None,
+                        array: false,
                     },
                 ],
                 indexes: vec![],

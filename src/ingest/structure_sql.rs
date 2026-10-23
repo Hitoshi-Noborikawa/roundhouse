@@ -414,6 +414,7 @@ fn parse_column_def(
         generated,
         generated_text_compatible,
         generated_int4_compatible,
+        array: false,
     }))
 }
 
