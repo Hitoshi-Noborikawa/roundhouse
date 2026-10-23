@@ -141,7 +141,7 @@ impl<'a> Specializer<'a> {
     pub fn method_body(&self, body: &Expr, sites: &mut Vec<Site>, residue: &mut Vec<Residue>) {
         let mut locals = HashMap::new();
         collect_locals(body, &mut locals);
-        let cx = Cx { locals: &locals, depth: Default::default(), args: HashMap::new(), self_chain: None };
+        let cx = Cx { locals: &locals, depth: Default::default(), args: HashMap::new(), arg_tys: HashMap::new(), self_chain: None };
         self.visit(body, &cx, sites, residue);
     }
 
@@ -336,7 +336,9 @@ impl<'a> Specializer<'a> {
                     if !self.has_column(&chain.model, column) {
                         return Err(format!("where on `{}`, not a column", column.as_str()));
                     }
-                    if matches!(&*v.node, ExprNode::Hash { .. } | ExprNode::Array { .. } | ExprNode::Range { .. }) {
+                    if matches!(&*v.node, ExprNode::Hash { .. } | ExprNode::Array { .. } | ExprNode::Range { .. })
+                        || cx.ty_of(v).as_ref().is_some_and(always_a_collection)
+                    {
                         return Err("where value is a collection".into());
                     }
                     let value = match self.value(v, cx)? {
@@ -439,10 +441,18 @@ impl<'a> Specializer<'a> {
             _ => &scope.body,
         };
         let mut bound = HashMap::new();
+        let mut bound_tys = HashMap::new();
         for (p, a) in scope.params.iter().zip(args) {
             bound.insert(p.name.clone(), self.value(a, cx)?);
+            bound_tys.insert(p.name.clone(), cx.ty_of(a));
         }
-        let inner = Cx { locals: cx.locals, depth: std::cell::Cell::new(cx.depth.get()), args: bound, self_chain: Some(chain.clone()) };
+        let inner = Cx {
+            locals: cx.locals,
+            depth: std::cell::Cell::new(cx.depth.get()),
+            args: bound,
+            arg_tys: bound_tys,
+            self_chain: Some(chain.clone()),
+        };
         let ExprNode::Send { recv, method, args, block: None, .. } = &*body.node else {
             return Err(format!("scope `{}` body is not a call chain", scope.name.as_str()));
         };
@@ -599,8 +609,21 @@ struct Cx<'b> {
     depth: std::cell::Cell<usize>,
     /// Scope parameters bound to the call's argument values.
     args: HashMap<Symbol, Val>,
+    /// Each bound parameter's type at the call site: the scope body types
+    /// its parameters without the call's arguments.
+    arg_tys: HashMap<Symbol, Option<Ty>>,
     /// The relation an inlined scope body runs against.
     self_chain: Option<Chain>,
+}
+
+impl Cx<'_> {
+    /// An expression's type, a scope parameter's being its call site's.
+    fn ty_of(&self, e: &Expr) -> Option<Ty> {
+        match &*e.node {
+            ExprNode::Var { name, .. } if self.args.contains_key(name) => self.arg_tys.get(name).cloned().flatten(),
+            _ => e.ty.clone(),
+        }
+    }
 }
 
 impl Chain {
@@ -728,4 +751,29 @@ fn collect_locals<'e>(e: &'e Expr, out: &mut HashMap<(VarId, Symbol), Option<&'e
         out.entry((*id, name.clone())).and_modify(|v| *v = None).or_insert(Some(value));
     }
     e.node.for_each_child(&mut |c| collect_locals(c, out));
+}
+
+/// A value typed as a collection on every path (an Array, a Hash, a Range,
+/// a Relation, or nil beside one of them): `ActiveRecord::StatementCache`
+/// refuses each of them as a bind (`unsupported_value?`), so a site bound
+/// to it would always run its fallback. Only a fully inferred type counts:
+/// a parameter whose type still holds a variable (`Array[T] | nil` for a
+/// value that is a String at run time) is not evidence, and stays a bind.
+fn always_a_collection(ty: &Ty) -> bool {
+    if ty.mentions_unknown() {
+        return false;
+    }
+    fn collection(ty: &Ty) -> bool {
+        match ty {
+            Ty::Array { .. } | Ty::Tuple { .. } | Ty::Hash { .. } | Ty::Relation { .. } => true,
+            Ty::Class { id, .. } => id.0.as_str() == "Range",
+            _ => false,
+        }
+    }
+    match ty {
+        Ty::Union { variants } => {
+            variants.iter().any(collection) && variants.iter().all(|v| collection(v) || matches!(v, Ty::Nil))
+        }
+        other => collection(other),
+    }
 }
