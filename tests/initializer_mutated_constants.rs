@@ -254,3 +254,24 @@ fn a_namespace_named_like_the_constant_keeps_the_taint() {
         ("config/initializers/catalog.rb", "Catalog::KINDS << \"wiki\"\n"),
     ]);
 }
+
+/// A chain of requires runs at boot to its end: an initializer requires
+/// `a.rb`, which requires `b.rb`, which mutates the list.
+#[test]
+fn a_require_chain_is_followed_to_its_end() {
+    assert_refused(&[
+        ("config/b.rb", "Catalog::KINDS << \"wiki\"\n"),
+        ("config/a.rb", "require_relative \"b\"\n"),
+        ("config/initializers/catalog.rb", "require_relative \"../a\"\n"),
+    ]);
+}
+
+/// Two files that require each other end the walk.
+#[test]
+fn a_require_cycle_ends() {
+    assert_refused(&[
+        ("config/b.rb", "require_relative \"a\"\nCatalog::KINDS << \"wiki\"\n"),
+        ("config/a.rb", "require_relative \"b\"\n"),
+        ("config/initializers/catalog.rb", "require_relative \"../a\"\n"),
+    ]);
+}

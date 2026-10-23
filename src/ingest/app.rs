@@ -7098,9 +7098,16 @@ fn boot_source_files<V: Vfs + ?Sized>(
     // `boot_required_files`' checks, silently: that function reports the
     // paths it can't follow for `application.rb` / `environment.rb` once,
     // and feeds the support-root batch, which this list does not.
-    let requiring: Vec<PathBuf> = files.clone();
-    for file in requiring {
-        files.extend(literal_require_relative_targets(vfs, dir, &file));
+    // To the end of each chain (`a.rb` requires `b.rb`), each file once.
+    let mut visited: std::collections::HashSet<PathBuf> = files.iter().cloned().collect();
+    let mut pending: Vec<PathBuf> = files.clone();
+    while let Some(file) = pending.pop() {
+        for target in literal_require_relative_targets(vfs, dir, &file) {
+            if visited.insert(target.clone()) {
+                files.push(target.clone());
+                pending.push(target);
+            }
+        }
     }
     files.retain(|file| !inputs.contains(file));
     files.sort();
