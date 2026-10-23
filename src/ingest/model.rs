@@ -1643,13 +1643,13 @@ impl ConstTaint {
     /// The names a source that runs at boot may leave with another value:
     /// the constants it writes outside `direct_writes`, mutates or lets a
     /// variable hold, and each constant a `const_set` / `remove_const`
-    /// names. A call on an owner (`Gadget.count`, `Vendor::Gadget.class_eval`)
+    /// names; with its alias edges (`ALIAS = KINDS`), left unclosed. A call on an owner (`Gadget.count`, `Vendor::Gadget.class_eval`)
     /// is not a write to one of its constants: a mutation inside the
     /// block is scanned on its own.
     pub(super) fn scan_boot(
         root: &Node<'_>,
         direct_writes: std::collections::HashSet<usize>,
-    ) -> std::collections::HashSet<String> {
+    ) -> (std::collections::HashSet<String>, Vec<(String, String)>) {
         let mut scan = ConstTaint {
             top_level: direct_writes,
             top_writes: Default::default(),
@@ -1660,9 +1660,17 @@ impl ConstTaint {
         };
         ruby_prism::Visit::visit(&mut scan, root);
         let ConstTaint { mut tainted, aliases, named_writes, .. } = scan;
-        Self::alias_closure(&mut tainted, &aliases);
         tainted.extend(named_writes);
-        tainted
+        // Unclosed: an alias one boot source writes and another mutates
+        // through is one object, so the caller closes over every boot
+        // source's edges together (`EnumConstants::finish`).
+        (tainted, aliases)
+    }
+
+    /// [`Self::alias_closure`] for a caller that collects taints and alias
+    /// edges from several sources before closing them.
+    pub(super) fn close_aliases(tainted: &mut std::collections::HashSet<String>, aliases: &[(String, String)]) {
+        Self::alias_closure(tainted, aliases);
     }
 
     fn alias_closure(tainted: &mut std::collections::HashSet<String>, aliases: &[(String, String)]) {
@@ -1752,15 +1760,17 @@ impl<'pr> ruby_prism::Visit<'pr> for ConstTaint {
     // `MODES.first << "x"`, whose receivers may be the constant itself
     // or one of its elements.
     fn visit_call_node(&mut self, node: &ruby_prism::CallNode<'pr>) {
+        // `Catalog.const_set(:KINDS, …)`, or a receiverless one in the
+        // owner's body: either replaces that name.
+        if let Some(name) = named_constant_write(node) {
+            self.named_writes.insert(name);
+        }
         if let Some(recv) = node.receiver() {
             let method = constant_id_str(&node.name());
             if !READ_ONLY_CONST_METHODS.contains(&method.as_ref()) {
                 if let Some(root) = chain_root(&recv) {
                     self.tainted.insert(root);
                 }
-            }
-            if let Some(name) = named_constant_write(node) {
-                self.named_writes.insert(name);
             }
             if REFLECTION_METHODS.contains(&method.as_ref()) {
                 if let Some(root) = chain_root(&recv) {

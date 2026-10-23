@@ -22,11 +22,13 @@ const KINDS_CONTROLLER: &str = "class KindsController < ApplicationController\n 
 const ROUTE: &str = "  get \"/kinds/:id\", to: \"kinds#show\", constraints: { id: Regexp.union(Catalog::KINDS) }\n";
 
 /// Each initializer that leaves `Catalog::KINDS` other than `%w[news blog]`.
-const MUTATING: [&str; 4] = [
+const MUTATING: [&str; 5] = [
     "Catalog::KINDS << \"wiki\"\n",
     "Catalog.send(:remove_const, :KINDS)\nCatalog::KINDS = %w[wiki]\n",
     "Catalog::KINDS.replace(%w[wiki])\n",
     "Catalog.send(:remove_const, :KINDS)\nCatalog.const_set(:KINDS, %w[wiki])\n",
+    // A receiverless `const_set` in the owner's body.
+    "module Catalog\n  send(:remove_const, :KINDS)\n  const_set(:KINDS, %w[wiki])\nend\n",
 ];
 
 /// Reads the constant and defines a top-level one of its own.
@@ -101,7 +103,7 @@ fn rails_reads_the_initializers_value() {
         eprintln!("skipping: ruby with activerecord/actionpack 8.1.4 and sqlite3 not available");
         return;
     }
-    let expected = [("news", true, true), ("news", false, false), ("news", false, false), ("news", false, false)];
+    let expected = [("news", true, true), ("news", false, false), ("news", false, false), ("news", false, false), ("news", false, false)];
     for (initializer, (kind, news_valid, news_routed)) in MUTATING.iter().zip(expected) {
         let script = format!(
             r##"gem "activerecord", "8.1.4"
@@ -141,4 +143,78 @@ puts "PASS""##,
             "{initializer}: activerecord/actionpack 8.1.4 disagree\n=== stdout ===\n{stdout}\n=== stderr ===\n{stderr}"
         );
     }
+}
+
+/// Boot files beyond one initializer: a file `config/application.rb`
+/// requires (which runs before any initializer), and an alias written in
+/// one initializer and mutated through in another.
+fn boot_app(files: &[(&str, &str)], route: bool) -> emit_and_run::Overlay {
+    files.iter().fold(app(None, route), |app, (path, source)| app.write(path, source))
+}
+
+fn assert_refused(files: &[(&str, &str)]) {
+    let (emitted, errors) = boot_app(files, false).emit(roundhouse::project::BuildTarget::Ruby);
+    assert!(errors.is_empty(), "{errors:#?}");
+    let widget = std::fs::read_to_string(emitted.join("app/models/widget.rb")).expect("widget.rb");
+    assert!(!widget.contains("[\"news\", \"blog\"]"), "{files:?}\n{widget}");
+    let refused = std::panic::catch_unwind(|| boot_app(files, true).ingest_warnings());
+    let message = refused.expect_err("the constraint is refused").downcast::<String>().map(|m| *m).unwrap_or_default();
+    assert!(message.contains("constraints: id"), "{files:?}: {message}");
+}
+
+#[test]
+fn a_file_the_application_requires_is_a_boot_source() {
+    assert_refused(&[
+        ("config/catalog_extensions.rb", "Catalog::KINDS << \"wiki\"\n"),
+        ("config/application.rb", "require_relative \"../app/lib/catalog\"\nrequire_relative \"catalog_extensions\"\n"),
+    ]);
+}
+
+#[test]
+fn an_alias_one_initializer_writes_and_another_mutates() {
+    assert_refused(&[
+        ("config/initializers/a_alias.rb", "KINDS_ALIAS = Catalog::KINDS\n"),
+        ("config/initializers/b_extend.rb", "KINDS_ALIAS << \"wiki\"\n"),
+    ]);
+}
+
+/// A boot directory that can't be read is an error, as a models directory
+/// is, rather than a boot source silently left out. Here a nested
+/// directory under `config/environments` can't be listed: swallowing that
+/// dropped the readable `test.rb` beside it, mutation and all, and the
+/// stale list was folded.
+#[cfg(unix)]
+#[test]
+fn an_unreadable_boot_directory_is_an_error() {
+    use std::os::unix::fs::PermissionsExt;
+    let root = std::env::temp_dir().join(format!("roundhouse-boot-unreadable-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let routes = "Rails.application.routes.draw do\nend\n";
+    for (path, body) in [
+        ("db/schema.rb", "ActiveRecord::Schema[8.1].define(version: 1) do\n  create_table \"widgets\", force: :cascade do |t|\n    t.string \"kind\"\n  end\nend\n"),
+        ("app/models/application_record.rb", "class ApplicationRecord < ActiveRecord::Base\n  primary_abstract_class\nend\n"),
+        ("app/lib/catalog.rb", CATALOG),
+        ("app/models/widget.rb", WIDGET),
+        ("config/routes.rb", routes),
+        ("config/environments/test.rb", "Catalog::KINDS << \"wiki\"\n"),
+        ("config/environments/private/keep.rb", "# placeholder\n"),
+    ] {
+        let file = root.join("app_src").join(path);
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        std::fs::write(file, body).unwrap();
+    }
+    let private = root.join("app_src/config/environments/private");
+    std::fs::set_permissions(&private, std::fs::Permissions::from_mode(0o000)).unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_roundhouse"))
+        .args(["--target", "ruby", "-o"])
+        .arg(root.join("out"))
+        .arg(root.join("app_src"))
+        .output()
+        .expect("run roundhouse");
+    std::fs::set_permissions(&private, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+    let widget = std::fs::read_to_string(root.join("out/app/models/widget.rb")).unwrap_or_default();
+    std::fs::remove_dir_all(&root).ok();
+    assert!(!out.status.success(), "the unreadable directory is reported\n{stderr}\n{widget}");
+    assert!(!widget.contains("[\"news\", \"blog\"]"), "{widget}");
 }

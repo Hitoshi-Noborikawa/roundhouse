@@ -92,6 +92,11 @@ pub(in crate::ingest) struct EnumConstants {
     /// `NAME = …`, mutates, or lets a variable hold ([`super::ConstTaint`]
     /// over the whole file). By name, whatever owner the write names.
     foreign_taint: std::collections::HashSet<String>,
+    /// `ALIAS = KINDS` edges the boot sources write, across all of them:
+    /// closed over `foreign_taint` once they are all recorded, in
+    /// `finish`, so an alias one initializer writes and a later one
+    /// mutates through taints the original.
+    boot_aliases: Vec<(String, String)>,
     /// Owner names a reflective call reaches (`Rule.const_set`,
     /// `Rule.send(:remove_const, …)`, `Kinds.const_get(:ALL) << x`,
     /// `"Kinds".constantize`, a receiverless `const_set` in the owner's

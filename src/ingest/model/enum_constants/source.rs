@@ -474,11 +474,11 @@ impl EnumConstants {
                         .filter(|(_, value)| matches!(value, EnumConstant::Namespace))
                         .filter_map(|(name, _)| name.rsplit("::").next())
                         .collect();
-                    let tainted: Vec<String> = super::super::ConstTaint::scan_boot(&result.node(), direct_writes)
-                        .into_iter()
-                        .filter(|name| !owners.contains(name.as_str()))
-                        .collect();
+                    let (tainted, aliases) = super::super::ConstTaint::scan_boot(&result.node(), direct_writes);
+                    let tainted: Vec<String> =
+                        tainted.into_iter().filter(|name| !owners.contains(name.as_str())).collect();
                     self.foreign_taint.extend(tainted);
+                    self.boot_aliases.extend(aliases);
                 }
                 SourceKind::Mutations => {}
             }

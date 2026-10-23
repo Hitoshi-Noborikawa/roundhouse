@@ -560,9 +560,9 @@ pub fn ingest_app_with_vfs<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResult
     // What runs at boot, before models load and routes are drawn: a
     // constant an initializer appends to, replaces or reassigns has that
     // value when a validation or a constraint reads it, not the input's.
-    let boot_files = boot_source_files(vfs, dir);
+    let boot_files = boot_source_files(vfs, dir, &enum_input_files)?;
     for file in &boot_files {
-        if let Ok(text) = vfs.read(file) {
+        if let Some(text) = read_or_ledger(vfs, file)? {
             enum_constants.record_boot(&text, &file.display().to_string());
         }
     }
@@ -1637,7 +1637,7 @@ end
                 }
             }
             for file in &boot_files {
-                if let Ok(text) = vfs.read(file) {
+                if let Some(text) = read_or_ledger(vfs, file)? {
                     route_inputs.record_boot(&text, &file.display().to_string());
                 }
             }
@@ -7029,8 +7029,15 @@ fn walk_jbuilder<V: Vfs + ?Sized>(
 /// The Ruby an app runs at boot, before it loads models and draws
 /// routes: `config/application.rb`, `config/environment.rb`,
 /// `config/boot.rb`, each `config/environments/*.rb` (whichever one
-/// runs), and every `config/initializers` file.
-fn boot_source_files<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> Vec<PathBuf> {
+/// runs), every `config/initializers` file, and each file the boot chain
+/// loads by a literal top-level `require_relative`
+/// ([`boot_required_files`]). A file already recorded as an input is
+/// left out, so its writes are not counted twice.
+fn boot_source_files<V: Vfs + ?Sized>(
+    vfs: &V,
+    dir: &Path,
+    inputs: &std::collections::HashSet<PathBuf>,
+) -> IngestResult<Vec<PathBuf>> {
     let config = dir.join("config");
     let mut files: Vec<PathBuf> = ["application.rb", "environment.rb", "boot.rb"]
         .iter()
@@ -7040,11 +7047,14 @@ fn boot_source_files<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> Vec<PathBuf> {
     for sub in ["environments", "initializers"] {
         let sub_dir = config.join(sub);
         if vfs.is_dir(&sub_dir) {
-            files.extend(read_rb_files(vfs, &sub_dir).unwrap_or_default());
+            files.extend(read_rb_files(vfs, &sub_dir)?);
         }
     }
+    files.extend(boot_required_files(vfs, dir));
+    files.retain(|file| !inputs.contains(file));
     files.sort();
-    files
+    files.dedup();
+    Ok(files)
 }
 
 pub(super) fn read_rb_files<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResult<Vec<PathBuf>> {
