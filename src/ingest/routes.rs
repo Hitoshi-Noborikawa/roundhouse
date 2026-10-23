@@ -1564,6 +1564,27 @@ fn merge_outer_constraints(entries: &mut [RouteSpec], outer: &IndexMap<Symbol, S
     }
 }
 
+std::thread_local! {
+    /// The constants the app's route files read, folded from their owners
+    /// (`ingest::app` builds it as a model body's `ClassConsts`).
+    static ROUTE_CONSTANTS: RefCell<Option<super::model::ClassConsts>> = const { RefCell::new(None) };
+}
+
+/// Ingest routes with `consts` answering the constants a `constraints:`
+/// value names (`Regexp.union(KindsController::KINDS)`, `ID_RE`).
+pub(super) fn with_route_constants<R>(consts: super::model::ClassConsts, f: impl FnOnce() -> R) -> R {
+    let prev = ROUTE_CONSTANTS.with(|cell| cell.replace(Some(consts)));
+    let out = f();
+    ROUTE_CONSTANTS.with(|cell| *cell.borrow_mut() = prev);
+    out
+}
+
+/// A `constraints:` value the route files' constants fold to a regex:
+/// a constant naming one, or `Regexp.union` of a String list constant.
+fn folded_regex(node: &Node<'_>) -> Option<(String, String)> {
+    ROUTE_CONSTANTS.with(|cell| cell.borrow().as_ref().and_then(|consts| consts.regex(node)))
+}
+
 /// Param→regex-source map from a `constraints:` / `constraints(...)`
 /// hash's assoc elements. Fail-closed: a value that isn't a literal
 /// regex, or a literal carrying `/i`/`/x`/`/m` (which `regex_source`
@@ -1590,6 +1611,19 @@ fn read_param_regex_constraints<'a>(
                 });
             }
             Some(src) => {
+                out.insert(Symbol::from(param.as_str()), src);
+            }
+            // `Regexp.union(Owner::LIST)` / `NAME_RE`: what the constant
+            // folds to, under the same modifier rule as a literal.
+            None if let Some((src, flags)) = folded_regex(&constraint_value) => {
+                if !flags.is_empty() {
+                    return Err(IngestError::Unsupported {
+                        file: file.into(),
+                        message: format!(
+                            "{context} constraints: {param}: regex modifiers (/i, /x, /m) are not carried into the lowered constraint"
+                        ),
+                    });
+                }
                 out.insert(Symbol::from(param.as_str()), src);
             }
             None => {
@@ -3613,11 +3647,15 @@ fn ingest_resources_route(
             .collect();
     }
 
-    let mut nested = block_entries(call, file, Some(name_str.as_str()), cx)?;
+    // A verb in the block with no `to:` (`member { get :download }`)
+    // dispatches to the resource's controller: `controller:` when given,
+    // as Rails routes it, else the resource name.
+    let block_controller = controller.as_deref().unwrap_or(name_str.as_str()).to_string();
+    let mut nested = block_entries(call, file, Some(block_controller.as_str()), cx)?;
     if !concern_names.is_empty() {
         let none = eval::RVal::Hash(Vec::new());
         nested.extend(cx.with_mount_scope(cx.mount_scope_depth.get() + 1, || {
-            run_concerns(&concern_names, &none, file, Some(name_str.as_str()), cx)
+            run_concerns(&concern_names, &none, file, Some(block_controller.as_str()), cx)
         })?);
     }
     // Push the inline `constraints:` kwarg down into every `member do`/

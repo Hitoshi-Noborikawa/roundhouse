@@ -68,6 +68,7 @@ use const_resolution::ResolvedConstant;
 mod narrowing;
 mod pagy;
 mod send;
+mod active_storage;
 pub(crate) use send::PARAM_VALUE;
 pub(crate) use send::{indexed_pluck, string_answers};
 #[cfg(test)]
@@ -221,6 +222,12 @@ pub struct ClassInfo {
     pub source_class_methods: std::collections::HashSet<Symbol>,
     /// Source declares its own class-side `new`, whose result need not be self.
     pub declares_constructor: bool,
+    /// A source `new` that calls `super` still needs the inherited constructor.
+    pub constructor_calls_super: bool,
+    /// Source class methods that call `super`, reaching the inherited one.
+    pub delegating_class_methods: std::collections::HashSet<Symbol>,
+    /// Source supplies an initializer body without delegating to `super`.
+    pub implements_initializer: bool,
     /// Which of `class_methods` had their return type inferred FROM a
     /// query chain over this model — every `scope`, plus any class
     /// method whose body tail is such a chain.
@@ -413,6 +420,11 @@ pub struct BodyTyper<'a> {
     lambda_seeds: std::cell::RefCell<Option<lambda_local::Seeds>>,
     /// The block parameter `block_ctx_for` proved a class object (`klass.tap { |k| }`), for the Lambda arm that clears its parameters.
     block_class_param: std::cell::RefCell<Option<Symbol>>,
+    /// The locals of the outermost expression being typed, counted once
+    /// for the selector proofs of `active_storage`.
+    scope_bindings: std::cell::RefCell<Option<active_storage::ScopeBindings>>,
+    /// The block parameter a literal symbol list binds (`%i[a b].each { |m| }`), for the Lambda arm.
+    block_selector_param: std::cell::RefCell<Option<(Symbol, Vec<Symbol>)>>,
 }
 
 impl<'a> BodyTyper<'a> {
@@ -549,6 +561,8 @@ impl<'a> BodyTyper<'a> {
             open_classes: None,
             lambda_seeds: std::cell::RefCell::new(None),
             block_class_param: std::cell::RefCell::new(None),
+            scope_bindings: std::cell::RefCell::new(None),
+            block_selector_param: std::cell::RefCell::new(None),
         }
     }
 
@@ -718,7 +732,15 @@ impl<'a> BodyTyper<'a> {
     /// annotation rides with the IR so emitters can render a runtime
     /// raise-equivalent without re-classifying.
     pub fn analyze_expr(&self, expr: &mut Expr, ctx: &Ctx) -> Ty {
+        // The outermost call types a whole body: count the locals it binds.
+        let root = self.inquirers.is_some() && self.scope_bindings.borrow().is_none();
+        if root {
+            *self.scope_bindings.borrow_mut() = Some(active_storage::ScopeBindings::of(expr));
+        }
         let ty = self.compute(expr, ctx);
+        if root {
+            *self.scope_bindings.borrow_mut() = None;
+        }
         expr.ty = Some(ty.clone());
         // Not accepted silently: the runtime's setter keeps nothing, so every save would still stamp.
         if expr.diagnostic().is_none()
@@ -1598,6 +1620,14 @@ impl<'a> BodyTyper<'a> {
                 if let Some(name) = self.block_class_param.borrow_mut().take().filter(|n| params.first() == Some(n)) {
                     inner.class_objects.insert(name);
                 }
+                for name in params.iter().chain(rest_param.iter()).chain(block_param.iter())
+                    .chain(extra_params.iter().map(|param| &param.name))
+                {
+                    active_storage::forget_selector_proof(&mut inner, name);
+                }
+                if let Some((name, names)) = self.block_selector_param.borrow_mut().take().filter(|(n, _)| params.first() == Some(n)) {
+                    active_storage::insert_selector_proof(&mut inner, &name, &names);
+                }
                 // Call-site evidence for a lambda stored in a local. Taken
                 // here so a nested lambda does not consume it. Block
                 // parameters still arrive through `ctx` from `block_ctx_for`.
@@ -1719,6 +1749,12 @@ impl<'a> BodyTyper<'a> {
                 if matches!(&crate::expr::ExprCold::diagnostic(&expr.cold), Some(crate::diagnostic::DiagnosticKind::Unsupported { construct, .. })
                     if matches!(construct.as_str(), "Module protocol" | "ActiveModel::Errors" | "ActiveModel::Error" | "Rails" | "ActiveRecord::Base" | "String extension" | "Hash extension" | "not_nil!" | "Object extension" | "Module callback argument" | RUNTIME_MIXIN))
                 { crate::expr::ExprCold::set_diagnostic(&mut expr.cold, None); }
+                if self.inquirers.is_some()
+                    && matches!(crate::expr::ExprCold::diagnostic(&expr.cold), Some(crate::diagnostic::DiagnosticKind::Unsupported { construct, .. })
+                        if construct.as_str() == "ActiveStorage constructor")
+                {
+                    crate::expr::ExprCold::set_diagnostic(&mut expr.cold, None);
+                }
                 expr.decisions &= !crate::expr::RESOLVED_DATA_FACTORY;
                 if let Some(ty) = self.data_factories.and_then(|factories| factories.get(&expr_span)) {
                     // Only admitted declarations establish a Data class identity.
@@ -1881,6 +1917,17 @@ impl<'a> BodyTyper<'a> {
                     }
                     other => other,
                 };
+                // Namespace owners exist so exception constants and class values work;
+                // their empty runtime definitions do not implement Rails constructors.
+                if self.inquirers.is_some()
+                    && let Some(owner) = self.unsupported_active_storage_constructor(recv_ty.as_ref(), method, args, ctx)
+                {
+                    crate::expr::ExprCold::set_diagnostic(&mut expr.cold, Some(crate::diagnostic::DiagnosticKind::Unsupported {
+                        target: None,
+                        construct: Symbol::from("ActiveStorage constructor"),
+                        detail: format!("{owner}.new lacks a shared runtime constructor implementation"),
+                    }));
+                }
                 // `new` on the implicit or explicit `self` of a class-side
                 // method builds an instance of the class that RECEIVED the
                 // call: `CurrencyDb.load` runs `YamlDb.load` with `self ==
@@ -1953,6 +2000,7 @@ impl<'a> BodyTyper<'a> {
                                 && self.is_instance(receiver, ctx);
                         }
                     }
+                    *self.block_selector_param.borrow_mut() = self.iterated_selectors(recv.as_ref(), method, b);
                     // Not any `new` with a block: only `Class.new`/`Module.new` makes the block's self a class it is building
                     if method.as_str() == "new"
                         && recv.as_ref().is_some_and(|r| matches!(&*r.node, ExprNode::Const { path }
@@ -1961,6 +2009,7 @@ impl<'a> BodyTyper<'a> {
                         block_ctx.building_self = true;
                     }
                     let method_ref_ty = self.analyze_expr(b, &block_ctx);
+                    self.block_selector_param.borrow_mut().take();
                     // The Lambda walker stores the analyzed body's type
                     // on the body expr itself. `map`/`collect`/similar
                     // use that to determine the output element type.
@@ -2704,6 +2753,7 @@ impl<'a> BodyTyper<'a> {
                             local_ctx.query_class_objects.remove(name);
                             local_ctx.live_class_locals.remove(name);
                             if proven { local_ctx.class_objects.insert(name.clone()); }
+                            self.prove_selector(name, value, &mut local_ctx);
                             if live { local_ctx.live_class_locals.insert(name.clone()); }
                             // Before the binding insert below: the lambda body
                             // was typed in this `local_ctx`, without its own name.
@@ -3339,6 +3389,14 @@ impl<'a> BodyTyper<'a> {
 /// Conditional writes, block writes and parameter rebinding invalidate identity.
 fn forget_class_object_writes(expr: &Expr, ctx: &mut Ctx) {
     let mut names = Vec::new();
+    rebound_names(expr, &mut names);
+    for name in names { ctx.class_objects.remove(&name); ctx.query_class_objects.remove(&name); }
+    expr.node.for_each_child(&mut |child| forget_class_object_writes(child, ctx));
+}
+
+/// The locals one node binds: assignments, parameters, `let`, pattern
+/// and rescue bindings.
+fn rebound_names(expr: &Expr, names: &mut Vec<Symbol>) {
     match &*expr.node {
         ExprNode::Assign { target: LValue::Var { name, .. }, .. }
         | ExprNode::OpAssign { target: LValue::Var { name, .. }, .. } => names.push(name.clone()),
@@ -3355,16 +3413,14 @@ fn forget_class_object_writes(expr: &Expr, ctx: &mut Ctx) {
         }
         ExprNode::Let { name, .. } => names.push(name.clone()),
         ExprNode::CaseMatch { arms, .. } => {
-            for arm in arms { arm.pattern.bound_names(&mut names); }
+            for arm in arms { arm.pattern.bound_names(names); }
         }
-        ExprNode::MatchRequired { pattern, .. } | ExprNode::MatchPredicate { pattern, .. } => pattern.bound_names(&mut names),
+        ExprNode::MatchRequired { pattern, .. } | ExprNode::MatchPredicate { pattern, .. } => pattern.bound_names(names),
         ExprNode::BeginRescue { rescues, .. } => {
             for rescue in rescues { names.extend(rescue.binding.iter().cloned()); }
         }
         _ => {}
     }
-    for name in names { ctx.class_objects.remove(&name); ctx.query_class_objects.remove(&name); }
-    expr.node.for_each_child(&mut |child| forget_class_object_writes(child, ctx));
 }
 
 // Literal / primitive types ---------------------------------------------

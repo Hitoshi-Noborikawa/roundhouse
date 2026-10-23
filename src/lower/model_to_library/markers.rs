@@ -1385,28 +1385,31 @@ fn push_symbol_callback(
         )
     };
 
-    let mut body = seq(cb.targets.iter().map(self_call).collect());
+    // `if:` / `unless:` — a target runs only when the condition holds,
+    // exactly as Rails. The condition was already negated for `unless:`
+    // at ingest. Rails registers each target of `before_save :a, :b,
+    // if: :c` as its own callback with the condition, so it is asked
+    // again before each target: one that changes it skips the next.
+    let guarded = |call: Expr| match &cb.condition {
+        Some(cond) => Expr::new(
+            span,
+            ExprNode::If {
+                cond: cond.clone(),
+                then_branch: seq(vec![call]),
+                else_branch: Expr::new(Span::synthetic(), ExprNode::Lit { value: Literal::Nil }),
+            },
+        ),
+        None => call,
+    };
+    let mut body = match cb.targets.as_slice() {
+        [only] => guarded(self_call(only)),
+        targets => seq(targets.iter().map(|t| guarded(self_call(t))).collect()),
+    };
     if matches!(cb.hook, Hook::BeforeValidation | Hook::AfterValidation) && cb.on.is_some() {
         // Validations never run on destroy; ingest rejects this.
         let Some(on) = cb.on else { return };
         let Some(guarded) = guard_validation_on(body, on, span) else { return };
         body = guarded;
-    }
-    // `if:` / `unless:` — the callback runs only when the condition
-    // holds, exactly as Rails. The condition was already negated for
-    // `unless:` at ingest.
-    if let Some(cond) = &cb.condition {
-        body = Expr::new(
-            span,
-            ExprNode::If {
-                cond: cond.clone(),
-                then_branch: body,
-                else_branch: Expr::new(
-                    Span::synthetic(),
-                    ExprNode::Lit { value: Literal::Nil },
-                ),
-            },
-        );
     }
     fold_into_or_push(methods, model, hook_name, body);
 }
@@ -1483,6 +1486,7 @@ fn hook_method_name(hook: crate::dialect::CallbackHook) -> &'static str {
         Hook::AfterCommit => "after_commit",
         Hook::AfterSaveCommit => "after_save_commit",
         Hook::AfterRollback => "after_rollback",
+        Hook::AfterInitialize => "after_initialize",
     }
 }
 

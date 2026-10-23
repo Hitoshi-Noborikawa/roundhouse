@@ -19,15 +19,22 @@ enum SourceKind {
 
 impl EnumConstants {
     pub(in crate::ingest) fn record(&mut self, source: &[u8], file: &str) {
-        self.collect(source, file, SourceKind::Inputs);
+        self.collect(source, file, SourceKind::Inputs, false);
+    }
+
+    /// `record` for a second table over sources the pipeline already
+    /// parses and diagnoses (the routes' constants): the same inputs,
+    /// without a second set of parse errors.
+    pub(in crate::ingest) fn record_again(&mut self, source: &[u8], file: &str) {
+        self.collect(source, file, SourceKind::Inputs, true);
     }
 
     /// Observe nonlibrary sources without admitting new constant inputs.
     pub(in crate::ingest) fn record_mutations(&mut self, source: &[u8], file: &str) {
-        self.collect(source, file, SourceKind::Mutations);
+        self.collect(source, file, SourceKind::Mutations, true);
     }
 
-    fn collect(&mut self, source: &[u8], file: &str, kind: SourceKind) {
+    fn collect(&mut self, source: &[u8], file: &str, kind: SourceKind, silent: bool) {
         struct Collector<'a, 'pr> {
             constants: &'a mut EnumConstants,
             file: &'a str,
@@ -335,6 +342,20 @@ impl EnumConstants {
                             }
                         })
                         .or_insert(value);
+                    // A top-level `class ActivityPub::CollectionsController`
+                    // runs only where `ActivityPub` already exists, which
+                    // Zeitwerk defines from the directory when no file
+                    // declares it: its enclosing names are namespaces.
+                    // Inside another body the path resolves lexically
+                    // (`module Wrapper; class T::Enum` reopens `::T`), so
+                    // nothing is assumed there.
+                    if qualified && owner.is_empty() {
+                        let mut enclosing = name.as_str();
+                        while let Some((parent, _)) = enclosing.rsplit_once("::") {
+                            self.constants.values.entry(parent.to_string()).or_insert(EnumConstant::Namespace);
+                            enclosing = parent;
+                        }
+                    }
                     // Classes and modules both own lexical constant
                     // lookup — concern `TYPES` inside `included do`
                     // resolves through the module entry the same way a
@@ -399,11 +420,12 @@ impl EnumConstants {
                 self.constants.record_write(&node, &self.nesting, false);
             }
         }
-        let result = match kind {
-            SourceKind::Inputs => prism::parse(source, file),
-            // Already consumed/diagnosed by the real pipeline. Observe the
-            // original facts without adding a second set of parse errors.
-            SourceKind::Mutations => crate::ingest::prism::parse_silent(source),
+        // A source the real pipeline already consumes and diagnoses is
+        // observed without adding a second set of parse errors.
+        let result = if silent {
+            crate::ingest::prism::parse_silent(source)
+        } else {
+            prism::parse(source, file)
         };
         if result.errors().next().is_none() {
             let mut collector = Collector {

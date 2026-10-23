@@ -2398,6 +2398,9 @@ pub(super) fn model_declares_after_initialize(model: &Model) -> bool {
             ExprNode::Send { recv: None, method, block: Some(_), .. }
                 if method.as_str() == "after_initialize"
         ),
+        ModelBodyItem::Callback { callback, .. } => {
+            callback.hook == crate::dialect::CallbackHook::AfterInitialize
+        }
         _ => false,
     })
 }

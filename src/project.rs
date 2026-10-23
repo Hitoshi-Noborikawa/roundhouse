@@ -6056,7 +6056,7 @@ fn report_keyword_params(app: &App, target: &str) {
     }
 }
 
-/// Exception classes defined in `runtime/ruby/`
+/// Class/module values defined in `runtime/ruby/`
 /// (`action_controller/parameter_missing.rb`,
 /// `action_view/missing_template.rb`) that only the ruby family and
 /// Spinel ship. Strict targets must ledger a typed constant read; keep
@@ -6068,6 +6068,7 @@ pub const RUBY_FAMILY_RUNTIME_CONSTANTS: &[&str] = &[
     "ActionController::BadRequest",
     "ActionController::InvalidAuthenticityToken",
     "ActionController::RoutingError",
+    "ActionDispatch::Http::Parameters::ParseError",
     "AbstractController::ActionNotFound",
     "ActionView::MissingTemplate",
     // `runtime/ruby/active_record/arel.rb` — node constructors the ruby
@@ -6105,6 +6106,27 @@ pub const RUBY_FAMILY_RUNTIME_CONSTANTS: &[&str] = &[
     "ActiveSupport::Notifications",
     "ActiveSupport::Notifications::Event",
     "ActiveSupport::ConfigurationFile",
+    // Exception classes and their newly exposed owners in
+    // `runtime/ruby/active_storage.rb`. Registering a nested error also
+    // resolves its enclosing namespace as a value, which needs the same
+    // runtime availability policy as the error itself.
+    "ActiveStorage::Transformers",
+    "ActiveStorage::Transformers::Transformer",
+    "ActiveStorage::Transformers::ImageProcessingTransformer",
+    "ActiveStorage::Service::GCSService",
+    "ActiveStorage::Error",
+    "ActiveStorage::InvariableError",
+    "ActiveStorage::UnpreviewableError",
+    "ActiveStorage::UnrepresentableError",
+    "ActiveStorage::IntegrityError",
+    "ActiveStorage::FileNotFoundError",
+    "ActiveStorage::PreviewError",
+    "ActiveStorage::InvalidKeyError",
+    "ActiveStorage::Preview::UnprocessedError",
+    "ActiveStorage::Service::GCSService::MetadataServerError",
+    "ActiveStorage::Service::GCSService::MetadataServerNotFoundError",
+    "ActiveStorage::Transformers::ImageProcessingTransformer::UnsupportedImageProcessingMethod",
+    "ActiveStorage::Transformers::ImageProcessingTransformer::UnsupportedImageProcessingArgument",
     // `runtime/ruby/active_job.rb`.
     "ActiveJob::EnqueueError",
     "ActiveJob::Continuable",
@@ -6211,6 +6233,8 @@ const RUBY_SPINEL_ONLY_METHODS: &[(&str, &str)] = &[
     // the include is not a claim that a strict target can run the cast.
     ("ActiveSupport", "cast_string"),
     ("ActiveSupport", "cast_integer"),
+    ("ActiveSupport", "cast_float"),
+    ("ActiveSupport", "numericality_number"),
     ("ActiveSupport", "cast_boolean"),
     ("ActiveSupport", "cast_datetime"),
     ("ActiveSupport", "errors_to_hash"),

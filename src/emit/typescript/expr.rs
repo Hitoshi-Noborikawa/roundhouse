@@ -136,7 +136,64 @@ pub(super) fn body_has_async_send(expr: &Expr) -> bool {
 #[derive(Default, Clone)]
 pub(crate) struct ClassShape {
     parent: Option<String>,
-    methods: HashMap<String, (crate::dialect::AccessorKind, usize)>,
+    methods: HashMap<String, Shape>,
+    /// The class's own (`def self.x`) methods, read for a `self` send
+    /// inside a class method.
+    class_methods: HashMap<String, Shape>,
+}
+
+/// A method's kind, its parameter count, and whether a call with no
+/// arguments reaches it (every parameter optional: a default, a rest, a
+/// forwarding `...`), which is what makes a parenless send a call.
+type Shape = (crate::dialect::AccessorKind, usize, bool);
+
+fn accepts_no_arguments(m: &crate::dialect::MethodDef) -> bool {
+    m.params.iter().all(|p| p.default.is_some() || p.rest || p.forwarding || p.name.as_str().is_empty())
+}
+
+std::thread_local! {
+    /// Each class this emit knows: its parent and the constants its body
+    /// declares as `static` members (`set_static_constants`).
+    static STATIC_CONSTANTS: std::cell::RefCell<HashMap<String, (Option<String>, HashSet<String>)>> =
+        std::cell::RefCell::new(HashMap::new());
+}
+
+/// Record, for `classes`, each one's parent and the class-body constants
+/// the TypeScript emit declares as `static` members.
+pub(crate) fn set_static_constants<'a>(classes: impl IntoIterator<Item = &'a crate::dialect::LibraryClass>) {
+    let mut map: HashMap<String, (Option<String>, HashSet<String>)> = HashMap::new();
+    for c in classes {
+        let entry = map.entry(c.name.0.as_str().to_string()).or_default();
+        if entry.0.is_none() {
+            entry.0 = c.parent.as_ref().map(|p| p.0.as_str().to_string());
+        }
+        for (name, value) in &c.constants {
+            if super::declarable_constant_value(value).is_some() {
+                entry.1.insert(name.as_str().to_string());
+            }
+        }
+    }
+    STATIC_CONSTANTS.with(|cell| *cell.borrow_mut() = map);
+}
+
+/// Whether an ancestor of a class whose parent is `parent` declares a
+/// `static` constant `name`: a child's own constant of that name shadows
+/// it, as Ruby's does, and TypeScript requires the child's static side to
+/// be assignable to the parent's, so the child's is typed `any`.
+pub(crate) fn ancestor_declares_static(parent: Option<&str>, name: &str) -> bool {
+    STATIC_CONSTANTS.with(|cell| {
+        let map = cell.borrow();
+        let mut current = parent.map(str::to_string);
+        for _ in 0..16 {
+            let Some(class) = current else { return false };
+            let Some((next, statics)) = map.get(&class) else { return false };
+            if statics.contains(name) {
+                return true;
+            }
+            current = next.clone();
+        }
+        false
+    })
 }
 
 std::thread_local! {
@@ -155,32 +212,36 @@ std::thread_local! {
         std::cell::RefCell::new(HashMap::new());
 }
 
-/// Record the instance-method shapes of `classes` for the Send emit.
-/// `fields` is each class's TS field names (`js_library_class`'s
-/// attribute readers and assigned ivars): a method whose emitted name
-/// is one of them is dropped in favour of the field, so it reads as one.
+/// Record the method shapes of `classes` for the Send emit. `fields` is
+/// each class's TS instance field names and `static_fields` its static
+/// ones (`js_library_class`'s attribute readers and assigned ivars, per
+/// side): a method whose emitted name is one of its side's fields is
+/// dropped in favour of the field, so it reads as one.
 pub(crate) fn set_class_shapes<'a>(
-    classes: impl IntoIterator<Item = (&'a crate::dialect::LibraryClass, HashSet<String>)>,
+    classes: impl IntoIterator<Item = (&'a crate::dialect::LibraryClass, HashSet<String>, HashSet<String>)>,
 ) {
     use crate::dialect::AccessorKind;
+    let as_field = |kind: AccessorKind, fields: &HashSet<String>, name: &str| {
+        if kind == AccessorKind::Method && fields.contains(&super::library::sanitize_identifier(name)) {
+            AccessorKind::AttributeReader
+        } else {
+            kind
+        }
+    };
     let mut map: HashMap<String, ClassShape> = HashMap::new();
-    for (c, fields) in classes {
+    for (c, fields, static_fields) in classes {
         let entry = map.entry(c.name.0.as_str().to_string()).or_default();
         if entry.parent.is_none() {
             entry.parent = c.parent.as_ref().map(|p| p.0.as_str().to_string());
         }
         for m in &c.methods {
             if !matches!(m.receiver, crate::dialect::MethodReceiver::Instance) {
+                let kind = as_field(m.kind, &static_fields, m.name.as_str());
+                entry.class_methods.entry(m.name.as_str().to_string()).or_insert((kind, m.params.len(), accepts_no_arguments(m)));
                 continue;
             }
-            let kind = if m.kind == AccessorKind::Method
-                && fields.contains(&super::library::sanitize_identifier(m.name.as_str()))
-            {
-                AccessorKind::AttributeReader
-            } else {
-                m.kind
-            };
-            entry.methods.entry(m.name.as_str().to_string()).or_insert((kind, m.params.len()));
+            let kind = as_field(m.kind, &fields, m.name.as_str());
+            entry.methods.entry(m.name.as_str().to_string()).or_insert((kind, m.params.len(), accepts_no_arguments(m)));
         }
     }
     CLASS_SHAPES.with(|cell| *cell.borrow_mut() = map);
@@ -188,8 +249,18 @@ pub(crate) fn set_class_shapes<'a>(
 
 /// The shape of `method` on an instance of the class `ty` names, found
 /// on the class or its nearest ancestor that declares it.
-fn instance_method_shape(ty: Option<&Ty>, method: &str) -> Option<(crate::dialect::AccessorKind, usize)> {
+fn instance_method_shape(ty: Option<&Ty>, method: &str) -> Option<Shape> {
     let Some(Ty::Class { id, .. }) = strip_nullable(ty) else { return None };
+    method_shape(id.0.as_str(), method, false)
+}
+
+/// The shape of the class method `method` of the class `class`, found
+/// on it or its nearest ancestor that declares it.
+fn class_method_shape(class: &str, method: &str) -> Option<Shape> {
+    method_shape(class, method, true)
+}
+
+fn method_shape(class: &str, method: &str, class_side: bool) -> Option<Shape> {
     CLASS_SHAPES.with(|cell| {
         let map = cell.borrow();
         let resolve = |name: &str| -> Option<&ClassShape> {
@@ -202,10 +273,11 @@ fn instance_method_shape(ty: Option<&Ty>, method: &str) -> Option<(crate::dialec
                 }
             })
         };
-        let mut current = Some(id.0.as_str().to_string());
+        let mut current = Some(class.to_string());
         for _ in 0..16 {
             let shape = resolve(current.as_deref()?)?;
-            if let Some(found) = shape.methods.get(method) {
+            let methods = if class_side { &shape.class_methods } else { &shape.methods };
+            if let Some(found) = methods.get(method) {
                 return Some(found.clone());
             }
             current = shape.parent.clone();
@@ -217,6 +289,24 @@ fn instance_method_shape(ty: Option<&Ty>, method: &str) -> Option<(crate::dialec
 std::thread_local! {
     static CURRENT_METHOD_PARAMS: std::cell::RefCell<HashSet<Symbol>> =
         std::cell::RefCell::new(HashSet::new());
+}
+
+std::thread_local! {
+    static SELF_CLASS: std::cell::RefCell<Option<(String, bool)>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Run `f` with `class` as the class whose method body is being
+/// emitted, and `class_side` true for a class method, so a `self` send
+/// in it reads that class's methods of the same side even where `self`
+/// carries no type.
+pub(crate) fn with_self_class<F, R>(class: String, class_side: bool, f: F) -> R
+where
+    F: FnOnce() -> R,
+{
+    let prev = SELF_CLASS.with(|cell| std::mem::replace(&mut *cell.borrow_mut(), Some((class, class_side))));
+    let r = f();
+    SELF_CLASS.with(|cell| *cell.borrow_mut() = prev);
+    r
 }
 
 /// Run `f` with `params` as the active enclosing-method parameter
@@ -2463,7 +2553,7 @@ fn js_send_inner(
         let attr = &method[..method.len() - 1];
         // A custom writer (`def foo=(v)`) is a method, `set_foo`, not
         // a field the assignment could land in.
-        if let Some((crate::dialect::AccessorKind::Method, 1)) =
+        if let Some((crate::dialect::AccessorKind::Method, 1, _)) =
             instance_method_shape(recv.unwrap().ty.as_ref(), method)
         {
             return Js::method_call(
@@ -4024,12 +4114,20 @@ fn js_send_inner(
                 }
             );
             // A receiver whose class declares the method as a real
-            // `def` (no attribute slot) needs the call.
-            let is_declared_method = !is_const_recv
-                && matches!(
-                    instance_method_shape(r.ty.as_ref(), method),
-                    Some((crate::dialect::AccessorKind::Method, 0))
-                );
+            // `def` (no attribute slot) needs the call. `self` is the
+            // enclosing class's instance, or the class itself in a class
+            // method, whose own methods answer then.
+            let self_class = matches!(&*r.node, ExprNode::SelfRef)
+                .then(|| SELF_CLASS.with(|cell| cell.borrow().clone()))
+                .flatten();
+            let shape = match &self_class {
+                Some((class, true)) => class_method_shape(class, method),
+                Some((class, false)) => instance_method_shape(r.ty.as_ref(), method)
+                    .or_else(|| method_shape(class, method, false)),
+                None => instance_method_shape(r.ty.as_ref(), method),
+            };
+            let is_declared_method =
+                !is_const_recv && matches!(shape, Some((crate::dialect::AccessorKind::Method, _, true)));
             let raw = if args.is_empty()
                 && !parenthesized
                 && !force_parens
@@ -4086,8 +4184,52 @@ fn js_send_inner(
 /// as Const references — without this, `assert_operator(X, :<,
 /// StandardError)` and similar idioms emit a bare `StandardError`
 /// that's neither in scope nor importable.
+std::thread_local! {
+    /// The aliases of `ActiveRecord::Base` and `ActionController::Base`,
+    /// when they are aliased (`set_runtime_base_aliases`).
+    static RUNTIME_BASE_ALIASES: std::cell::RefCell<Option<(String, String)>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Alias the runtime's `ActiveRecord::Base` and `ActionController::Base`
+/// in the app files emitted from here on, for an app that defines its
+/// own `Base` (#1228), under names none of `app_classes` takes
+/// (`ActiveRecordBase`, or `ActiveRecordBase2` beside an app class of
+/// that name). `None` turns it off, as while the runtime's own files
+/// emit, where `Base` is the class being defined.
+pub(crate) fn set_runtime_base_aliases(app_classes: Option<&HashSet<String>>) {
+    let free = |want: &str, taken: &HashSet<String>| {
+        let mut name = want.to_string();
+        let mut n = 2;
+        while taken.contains(&name) {
+            name = format!("{want}{n}");
+            n += 1;
+        }
+        name
+    };
+    let aliases = app_classes.map(|taken| (free("ActiveRecordBase", taken), free("ActionControllerBase", taken)));
+    RUNTIME_BASE_ALIASES.with(|cell| *cell.borrow_mut() = aliases);
+}
+
+/// The local name an app file gives the runtime class `qualified`
+/// (`ActiveRecord::Base`) when the app's own `Base` takes the bare name.
+pub(crate) fn runtime_base_alias(qualified: &str) -> Option<String> {
+    RUNTIME_BASE_ALIASES.with(|cell| {
+        let aliases = cell.borrow();
+        let (record, controller) = aliases.as_ref()?;
+        match qualified {
+            "ActiveRecord::Base" => Some(record.clone()),
+            "ActionController::Base" => Some(controller.clone()),
+            _ => None,
+        }
+    })
+}
+
 fn const_name(path: &[Symbol]) -> String {
     let segs: Vec<&str> = path.iter().map(|s| s.as_str()).collect();
+    if let Some(alias) = runtime_base_alias(&segs.join("::")) {
+        return alias.to_string();
+    }
     const FRAMEWORK_NAMESPACES: &[&str] = &[
         "ActionController",
         "ActiveRecord",

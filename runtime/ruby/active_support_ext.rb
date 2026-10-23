@@ -671,6 +671,70 @@ module ActiveSupport
     end
   end
 
+  # ActiveModel::Type::Float, through `Helpers::Numeric#cast` (a decimal
+  # column is a Float here, so it casts the same, where Rails answers a
+  # BigDecimal of the same value). A blank string is nil; `true`/`false`
+  # are 1.0/0.0; `"Infinity"`, `"-Infinity"` and `"NaN"` are those floats
+  # (`Type::Float#cast_value`); any other string is `to_f`.
+  def self.cast_float(value)
+    if value.nil?
+      nil
+    elsif value == true
+      1.0
+    elsif value == false
+      0.0
+    elsif value.is_a?(Float)
+      value
+    elsif value.is_a?(Integer)
+      value.to_f
+    elsif value.is_a?(String)
+      ActiveSupport.float_from_string(value)
+    else
+      raise TypeError, "can't cast #{value.class} to a float"
+    end
+  end
+
+  # The number ActiveModel 8.1.4's NumericalityValidator checks, or nil
+  # when it is "not a number". `raw` is the value the user assigned
+  # (`<attr>_before_type_cast`), nil when the attribute did not come from
+  # the user, in which case the cast `value` is read (`raw_value ||
+  # value`). Then `parse_as_number`: a Numeric as it is; a String of
+  # digits (`/\A[+-]?\d+\z/`) its Integer; a hex prefix not a number;
+  # anything else what `Kernel.Float` reads, or not a number where it
+  # raises. `Kernel.Float`'s grammar is the regexp, since not every
+  # target has `Float()`.
+  def self.numericality_number(raw, value)
+    v = raw.nil? || raw == false ? value : raw
+    return nil if v.nil?
+    return v if v.is_a?(Integer) || v.is_a?(Float)
+    text = v.to_s
+    return text.to_i if text.match?(/\A[+-]?\d+\z/)
+    return nil if text.match?(/\A[+-]?0[xX]/)
+    return nil unless text.match?(/\A[[:space:]]*[+-]?(?:\d+(?:_\d+)*(?:\.(?:\d+(?:_\d+)*)?)?|\.\d+(?:_\d+)*)(?:[eE][+-]?\d+(?:_\d+)*)?[[:space:]]*\z/)
+    text.to_f
+  end
+
+  # The String half of `cast_float`: the blank scan `integer_from_string`
+  # makes, then Rails' three named values, then `to_f`. The named values
+  # are divisions rather than `Float::INFINITY`/`NAN`, which not every
+  # target defines.
+  def self.float_from_string(value)
+    i = 0
+    n = value.length
+    blank = true
+    while i < n
+      blank = false unless value[i].match?(/[[:space:]]/)
+      i = n unless blank
+      i = i + 1
+    end
+    return nil if blank
+    zero = 0.0
+    return 1.0 / zero if value == "Infinity"
+    return -1.0 / zero if value == "-Infinity"
+    return zero / zero if value == "NaN"
+    value.to_f
+  end
+
   # `String#blank?` is `/\A[[:space:]]*\z/`, which raises ArgumentError
   # on invalid UTF-8 — the integer writer does, in `presence`, before
   # it slices. One character at a time, the same scan `squish` lowers:

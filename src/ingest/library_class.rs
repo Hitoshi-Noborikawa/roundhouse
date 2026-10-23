@@ -4866,7 +4866,7 @@ pub(in crate::ingest) fn ingest_concern_model_items_with_constants(
                                 ModelBodyItem::Unknown { .. } => {
                                     if is_candidate(&item) {
                                         if !is_supported(&item) {
-                                            decline(&mut item, "unsupported accessor shape: only direct, nonempty, literal-Symbol attr_accessor is modeled");
+                                            decline(&mut item, "unsupported accessor shape: only direct, nonempty, literal-Symbol attr_accessor, attr_reader or attr_writer is modeled");
                                         } else if !is_direct {
                                             decline(&mut item, "inside with_options is not modeled");
                                         }

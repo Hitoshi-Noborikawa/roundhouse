@@ -28,6 +28,8 @@
 require_relative "boot"
 
 module Main
+  # Spinel's class reflection needs a lexical class receiver.
+  FrameworkParseError = ActionDispatch::Http::Parameters::ParseError
 
   # Maps the routes-table controller symbol to a literal `.new`
   # constructor call. Spinel's hash specializations don't accept class
@@ -524,6 +526,7 @@ module Main
     req.req_headers.each do |name, value|
       request_obj.env[ActionDispatch::Http::Headers.env_name_from_header(name)] = value
     end
+    request_obj.env["roundhouse.listener"] = req.listener_transport
     # config.assume_ssl: TLS ends at a proxy that forwards plain http.
     # Rails' AssumeSSL marks the request https before the action, so
     # secure cookies and absolute redirects use https.
@@ -618,9 +621,14 @@ module Main
       format_param = request_format == :html ? req.req_params.fetch("format", "") : fmt_name
       Main.render_not_found(res, format_param, request_path, req)
       return
-    rescue ActionController::ParameterMissing, ActionController::BadRequest
-      # `params.expect` / `params.require` refused the request and the app
-      # did not rescue it: Rails' rescue_responses answer :bad_request.
+    rescue ActionController::ParameterMissing, ActionController::BadRequest,
+           ActionDispatch::Http::Parameters::ParseError => error
+      # The app's handlers have already run. Rails' rescue_responses map
+      # an unhandled ParseError to :bad_request by its exact class name;
+      # an application subclass has no default mapping.
+      # Spinel has no built-in method binding: compare nominal classes,
+      # without consulting any application's subclass matcher.
+      raise if FrameworkParseError === error && error.class != FrameworkParseError
       res.status = 400
       res.body = "<h1>400 Bad Request</h1>"
       return
@@ -809,6 +817,7 @@ end
 port = (ENV["PORT"] || "3000").to_i
 workers = (ENV["WORKERS"] || "1").to_i
 binding_arg = ""
+unix_bind = ENV["UNIX_BIND"].to_s
 i = 0
 while i < ARGV.length
   arg = ARGV[i]
@@ -818,6 +827,7 @@ while i < ARGV.length
     puts "  -p, --port N     listen port (default 3000; PORT env)"
     puts "  -w, --workers N  prefork N processes (default 1; WORKERS env)"
     puts "  -b, --binding IP bind to IP (BINDING env; default localhost in development, 0.0.0.0 otherwise)"
+    puts "      --unix-bind URL add unix:///absolute/path?mode=600 (UNIX_BIND env; default disabled)"
     puts "  -h, --help       show this help and exit"
     puts ""
     puts "  OS workers per process: one per core; SPINEL_WORKERS=N caps it"
@@ -833,6 +843,9 @@ while i < ARGV.length
     i += 2
   elsif (arg == "--binding" || arg == "-b") && i + 1 < ARGV.length
     binding_arg = ARGV[i + 1]
+    i += 2
+  elsif arg == "--unix-bind" && i + 1 < ARGV.length
+    unix_bind = ARGV[i + 1]
     i += 2
   else
     $stderr.puts "unknown option: " + arg + " (try --help)"
@@ -863,6 +876,10 @@ if workers > 1 && binding_arg != "0.0.0.0"
   exit(1)
 end
 Tep::APP.bind_host = binding_arg
+Sock.sphttp_install_term_handlers
+unix_listener = Tep::UnixListener.new(unix_bind)
+unix_listener.open
+begin
 Main.configure_default_adapter!
 # Serving, so WAL checkpoints move off the request path: a background
 # thread runs them instead of some request's COMMIT
@@ -899,7 +916,10 @@ Tep::APP.name = Rails.application.global_id_app
 # the environment differing (matz/spinel#4306). HTTP only; see the note
 # at the top of tep/server_scheduled.rb.
 if (ENV["TEP_SERVER"] || "thread") == "fiber"
-  Tep::Server::Scheduled.new(MainApp.new).run(port, workers, false)
+  Tep::Server::Scheduled.new(MainApp.new).run(port, workers, false, unix_listener)
 else
-  Tep::Server::Threaded.new(MainApp.new).run(port, workers, false)
+  Tep::Server::Threaded.new(MainApp.new).run(port, workers, false, unix_listener)
+end
+ensure
+  unix_listener.close
 end

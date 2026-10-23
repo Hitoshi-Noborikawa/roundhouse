@@ -91,3 +91,62 @@ fn a_nested_freeze_in_a_literal_constant_answers_its_receiver() {
     assert!(rack.contains("static NESTED = { \"a\": [1, 2], \"b\": { \"c\": \"d\" } };"), "{rack}");
     assert!(!rack.contains(".freeze"), "{rack}");
 }
+
+/// A constant shadowing an ancestor's static of the same name is typed
+/// `any`: TypeScript requires a child's static side to be assignable to
+/// its parent's (TS2417), and the Ruby values may be of different kinds.
+#[test]
+fn a_constant_shadowing_an_ancestors_static_is_typed_any() {
+    let (emitted, errors) = class_constants::shadow_overlay().emit(BuildTarget::Typescript);
+    assert!(errors.is_empty(), "{errors:?}");
+    let read = |p: &str| std::fs::read_to_string(emitted.join(p)).unwrap_or_else(|e| panic!("{p}: {e}"));
+    let dial = read("app/models/dial.ts");
+    let meter = read("app/models/meter.ts");
+    assert!(dial.contains("static WEIGHTS: any = \"s\";"), "{dial}");
+    assert!(meter.contains("static WEIGHTS = { \"a\": 1 };"), "{meter}");
+}
+
+/// Each constant the TypeScript emit leaves out is reported for that
+/// target, saying why (#1223 c): a value that is not a literal, or a
+/// name a static method or field of the class also takes. The emit still writes
+/// the tree (a warning, as the per-target `uniqueness:` gap is), and the
+/// ruby target, which keeps every constant, reports none.
+#[test]
+fn the_cli_reports_each_constant_the_typescript_emit_leaves_out() {
+    let root = std::env::temp_dir().join(format!("roundhouse-ts-constants-cli-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    for (path, body) in [
+        ("app/models/application_record.rb", "class ApplicationRecord < ActiveRecord::Base\n  primary_abstract_class\nend\n"),
+        ("app/models/gauge.rb", "class Gauge\n  WEIGHTS = { \"a\" => 1 }.freeze\n  ALIAS = WEIGHTS\n  STARTED = Time.now\n  LEVEL = 3\n\n  def self.LEVEL\n    4\n  end\n\n  def self.size\n    WEIGHTS.size\n  end\nend\n"),
+        ("db/schema.rb", "ActiveRecord::Schema.define do\nend\n"),
+        ("config/routes.rb", "Rails.application.routes.draw do\nend\n"),
+    ] {
+        let file = root.join("app_src").join(path);
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        std::fs::write(file, body).unwrap();
+    }
+    let run = |target: &str| {
+        let out = std::process::Command::new(env!("CARGO_BIN_EXE_roundhouse"))
+            .args(["--target", target, "-o"])
+            .arg(root.join(format!("out-{target}")))
+            .arg(root.join("app_src"))
+            .output()
+            .expect("run roundhouse");
+        let lines: Vec<String> = String::from_utf8_lossy(&out.stderr)
+            .lines()
+            .filter(|l| l.contains("warning[unsupported]: constant Gauge::"))
+            .map(String::from)
+            .collect();
+        (out.status.success(), lines)
+    };
+    let (ts_ok, ts) = run("typescript");
+    let (rb_ok, rb) = run("ruby");
+    std::fs::remove_dir_all(&root).ok();
+    assert!(ts_ok && rb_ok, "the emits still write the tree: {ts:#?}");
+    assert_eq!(ts.len(), 3, "{ts:#?}");
+    let line = |name: &str| ts.iter().find(|l| l.contains(&format!("constant Gauge::{name} "))).cloned().unwrap_or_default();
+    assert!(line("ALIAS").contains("gauge.rb:3:") && line("ALIAS").contains("read finds nothing: its value is not a literal"), "{ts:#?}");
+    assert!(line("STARTED").contains("gauge.rb:4:") && line("STARTED").contains("not a literal"), "{ts:#?}");
+    assert!(line("LEVEL").contains("gauge.rb:5:") && line("LEVEL").contains("a `Gauge.LEVEL` read reaches the class's static method or field of that name instead"), "{ts:#?}");
+    assert!(rb.is_empty(), "{rb:#?}");
+}
