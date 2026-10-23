@@ -14,7 +14,7 @@ fn app() -> emit_and_run::Overlay {
         .edit("app/models/article.rb", "class Article < ApplicationRecord\n", "class Article < ApplicationRecord\n  taggy\n  taggy_on :topics, [:notes, nil]\n")
         .write(
             &format!("{GEM}/taggy.rb"),
-            r#"require "taggy/config"
+            r##"require "taggy/config"
 require "taggy/tagged"
 require "taggy/extra"
 require "taggy/railtie" if defined?(Rails)
@@ -58,7 +58,7 @@ module Taggy
     @@kinds
   end
 end
-"#,
+"##,
         )
         .write(
             &format!("{GEM}/taggy/config.rb"),
