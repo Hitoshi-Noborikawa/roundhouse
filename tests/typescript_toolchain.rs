@@ -19,6 +19,8 @@ use std::process::Command;
 mod memoized_fields;
 #[path = "support/app_class_base.rs"]
 mod app_class_base;
+#[path = "support/parenless_calls.rs"]
+mod parenless_calls;
 #[path = "support/emit_and_run.rs"]
 #[allow(dead_code)]
 mod emit_and_run;
@@ -337,6 +339,21 @@ fn real_blog_app_class_base_runs_under_tsx() {
     assert_eq!(out, app_class_base::SUMMARY);
     std::fs::remove_file(emitted.join("check.ts")).unwrap();
     assert_tsc_passes("real-blog with an app Base", &emitted);
+}
+
+#[test]
+#[ignore]
+fn real_blog_parenless_calls_run_under_tsx() {
+    // A zero-argument `def` called without parens answers its value on a
+    // plain class, from a subclass's class method and from a model's
+    // class method, as CRuby does (#1229).
+    let (emitted, errors) = parenless_calls::overlay().emit(roundhouse::project::BuildTarget::Typescript);
+    assert!(errors.is_empty(), "{errors:?}");
+    let out = run_under_tsx(
+        &emitted,
+        "import { Meter } from \"./app/models/meter.js\";\nimport { Widget } from \"./app/models/widget.js\";\nimport { Comment } from \"./app/models/comment.js\";\nimport { Gauge } from \"./app/models/gauge.js\";\nconsole.log([Meter.a(), Meter.b(), Meter.c(), new Meter().e(), Widget.shout(), Comment.tags(), Gauge.show(), new Gauge().both()].join(\",\"));\n",
+    );
+    assert_eq!(out, parenless_calls::SUMMARY);
 }
 
 #[test]
