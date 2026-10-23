@@ -1526,6 +1526,7 @@ module ActiveRecord
       status = false
       self.class.transaction do
         status = save_after_validation
+        raise ActiveRecord::Rollback unless status
       end
       status
     end
@@ -1541,14 +1542,60 @@ module ActiveRecord
     # ruby-family method the strict targets' base does not have.
     def save
       status = false
+      @_save_halted = false
       self.class.transaction do
-        before_validation
-        ok = valid?
-        after_validation
+        # Not left to valid?: a before_validation halt skips it, and Rails clears the errors ahead of that hook.
+        @errors = []
+        @error_details = []
+        ok = false
+        unless _halted_by_abort { before_validation }
+          ok = valid?
+          after_validation
+        end
         status = ok ? save_after_validation : false
         raise ActiveRecord::Rollback unless status
       end
       status
+    end
+
+    def save!
+      return self if save
+      raise RecordNotSaved.new("Failed to save the record", self) if @_save_halted
+      raise RecordInvalid, self
+    end
+
+    # base.rb's body with each before_* hook able to halt the save, as
+    # Rails' before callbacks can; an after_* hook's `throw :abort` is not
+    # caught, as in Rails, where it escapes as UncaughtThrowError.
+    def save_after_validation
+      if _halted_by_abort { before_save }
+        @_save_halted = true
+        return false
+      end
+      was_new = new_record?
+      if was_new
+        if _halted_by_abort { before_create }
+          @_save_halted = true
+          return false
+        end
+        fill_timestamps(true)
+        self.id = _adapter_insert
+        @persisted = true
+        __track_saved_changes(was_new)
+        after_create
+      else
+        if _halted_by_abort { before_update }
+          @_save_halted = true
+          return false
+        end
+        fill_timestamps(false)
+        _adapter_update
+        __track_saved_changes(was_new)
+        after_update
+      end
+      after_save
+      _save_committed(was_new)
+      true
     end
 
     # `destroy` in a transaction too, for the same reason: a dependent
@@ -1556,15 +1603,31 @@ module ActiveRecord
     # base.rb's body, restated as `save` is.
     def destroy
       return self unless persisted?
+      halted = false
       self.class.transaction do
-        before_destroy
+        halted = _halted_by_abort { before_destroy }
+        raise ActiveRecord::Rollback if halted
         _adapter_delete
         @persisted = false
         @destroyed = true
         after_destroy
         _destroy_committed
       end
-      self
+      halted ? false : self
+    end
+
+    def destroy!
+      return self if destroy
+      raise RecordNotDestroyed.new("Failed to destroy #{self.class.name} with id=#{id}", self)
+    end
+
+    def _halted_by_abort
+      done = false
+      catch(:abort) do
+        yield
+        done = true
+      end
+      !done
     end
 
     # Rails' `touch` runs in a transaction too, and is an update as far

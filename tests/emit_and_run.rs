@@ -37,6 +37,8 @@ mod branch_local_join;
 mod utc_zone_time;
 #[path = "emit_and_run/discard.rs"]
 mod discard;
+#[path = "emit_and_run/callback_abort.rs"]
+mod callback_abort;
 #[path = "emit_and_run/pundit_source.rs"]
 mod pundit_source;
 #[path = "emit_and_run/ancestry_source.rs"]
