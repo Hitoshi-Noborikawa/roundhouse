@@ -947,6 +947,13 @@ impl Run<'_> {
                         self.declare(assigned);
                         Ok(false)
                     }
+                    // Not expanded: a dedicated lowering claims such an installer (`has_markdown`), and a name it cannot read fails closed.
+                    "has_one" | "has_many" | "belongs_to" | "has_and_belongs_to_many" | "scope"
+                        if args.first().is_some_and(|a| matches!(&*a.node, ExprNode::Send { recv: Some(r), method, .. }
+                            if method.as_str() == "to_sym" && matches!(&*r.node, ExprNode::StringInterp { .. }))) =>
+                    {
+                        Err(format!("it declares a `{}` whose name is built from its arguments", method.as_str()))
+                    }
                     name if CLASS_BODY_DECLARATIONS.contains(&name) && block.is_none() && self.method_def(method).is_none() => {
                         let declared = self.substitute(st, env, &HashSet::new())?;
                         if matches!(name, "cattr_accessor" | "cattr_reader" | "mattr_accessor" | "mattr_reader")
