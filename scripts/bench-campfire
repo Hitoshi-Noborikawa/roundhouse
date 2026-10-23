@@ -1719,14 +1719,48 @@ run_socket_phase() {
             || fail "the ruby socket lane failed (see $LOG_DIR/sockets-ruby.log)"
     fi
 
-    # One file for the renderer, lanes labelled the way the HTTP rows are.
+    # TOBI IN ITS DEPLOYED SHAPE: one process, $tier_cpus worker Ractors
+    # and as many job Ractors, with the cable fan-out on an in-process
+    # Bus Ractor. Unlike the `ruby` row, that is a shape it can ship at
+    # the tier's full core count, so against `ruby` this row is "what
+    # one deployable process does with four cores" vs "what ours does
+    # with one". The sweep copies the socket seed over tobi's database;
+    # the HTTP seed is put back afterwards so nothing that reads tobi's
+    # tree later in this run (or a rerun of one lane) sees 1,000 users.
+    local tobi_socket_workers=""
+    if wants_lane tobi && [[ -d "$TOBI_ROOT" ]]; then
+        tobi_socket_workers="$tier_cpus"
+        local tobi_db="$TOBI_ROOT/storage/db/production.sqlite3"
+        [[ -f "$tobi_db" ]] && cp "$tobi_db" "$tobi_db.http-seed"
+        step "socket phase: tobi, $SOCKET_SIZES sockets on cpus $SOCKET_CPUS ($tier_cpus worker Ractors)"
+        "$sweep" --lane tobi --tobi "$TOBI_ROOT" \
+            --db "$db" --cookies "$cookies" --cpus "$SOCKET_CPUS" \
+            --workers "$tier_cpus" --sizes "$SOCKET_SIZES" --per-room "$per_room" \
+            --secret "$SPINEL_SECRET" --out "$OUT_DIR/sockets-tobi" \
+            > "$LOG_DIR/sockets-tobi.log" 2>&1 \
+            || fail "the tobi socket lane failed (see $LOG_DIR/sockets-tobi.log)"
+        if [[ -f "$tobi_db.http-seed" ]]; then
+            mv "$tobi_db.http-seed" "$tobi_db"
+            rm -f "$tobi_db-wal" "$tobi_db-shm"
+        fi
+    fi
+
+    # One file for the renderer, lanes labelled the way the HTTP rows are,
+    # each with the shape it ran: the rows are different worker counts on
+    # the same four cores, and the table has to say so beside the numbers.
+    SOCKET_SHAPES="spinel=$tier_cpus workers, one process
+ruby=1 Puma worker x $THREADS threads
+tobi=$tobi_socket_workers worker Ractors, one process
+rails=$rails_workers Puma workers x $THREADS threads" \
     ruby - "$OUT_DIR/sockets-binary/results.jsonl" "$OUT_DIR/sockets-rails/results.jsonl" \
-           "$OUT_DIR/sockets-ruby/results.jsonl" "$OUT_DIR/sockets.json" <<'RUBY'
+           "$OUT_DIR/sockets-ruby/results.jsonl" "$OUT_DIR/sockets-tobi/results.jsonl" \
+           "$OUT_DIR/sockets.json" <<'RUBY'
 require "json"
-binary, rails, emit_ruby, out = ARGV
+binary, rails, emit_ruby, tobi, out = ARGV
+shapes = ENV.fetch("SOCKET_SHAPES", "").lines(chomp: true).to_h { |l| l.split("=", 2) }
 rows = []
 # Order is the page's: our two lanes, then theirs.
-{ "spinel" => binary, "ruby" => emit_ruby, "rails" => rails }.each do |lane, path|
+{ "spinel" => binary, "ruby" => emit_ruby, "tobi" => tobi, "rails" => rails }.each do |lane, path|
   next unless File.exist?(path)
   File.readlines(path, chomp: true).reject(&:empty?).each do |line|
     d = JSON.parse(line) rescue next
@@ -1744,6 +1778,7 @@ rows = []
       "driver_max_pass_ms" => d.dig("chat", "driver_max_pass_ms"),
       "teardown_cpu_s" => d.dig("teardown", "cpu_seconds"),
       "server" => d["server"],
+      "shape" => shapes[lane],
     }
   end
 end
@@ -1896,6 +1931,7 @@ jvm_ran     = (targets_ran & %w[jruby truffleruby]).any?
 tr_ran      = targets_ran.include?("truffleruby")
 rails_tr_ran = targets_ran.include?("rails-truffleruby")
 one_p_ran   = targets_ran.any? { |t| t.end_with?("-1p") }
+ruby_1p_ran = targets_ran.include?("ruby-1p")
 tobi_ran    = targets_ran.include?("tobi")
 falcon_ran  = targets_ran.include?("ruby-falcon")
 
@@ -1926,7 +1962,8 @@ env["notes"] = [
   "queue are both in-process: at more than one worker a broadcast reaches " \
   "only the subscribers sharing a process with the poster, so campfire " \
   "could not actually run this shape. Its deployable CRuby shape today is " \
-  "one worker; one process serving every core (Falcon on Ractors, the " \
+  "one worker#{ruby_1p_ran ? ' — the <code>ruby-1p</code> row, read it against <code>tobi</code> for the deployable comparison' : ''}; " \
+  "one process serving every core (Falcon on Ractors, the " \
   "shape <code>spinel</code> already has) is the planned replacement. " \
   "<code>spinel</code> needs none of this: " \
   "one process, green threads, one shared registry — which is why it is " \
@@ -1948,7 +1985,8 @@ env["notes"] = [
   "them fewer cores\". Read them per lane-family: <code>ruby</code> and " \
   "<code>spinel</code> differ from their <code>-1p</code> twins in worker " \
   "count and NOTHING else, but <code>rails-1p</code> also sheds Thruster " \
-  "and resque-pool, so its delta is not attributable to cores alone." if one_p_ran),
+  "and resque-pool, so its delta is not attributable to cores alone." \
+  "#{ruby_1p_ran ? ' <code>ruby-1p</code> is ALSO the emit\'s deployable CRuby shape: one Puma worker, so one cable registry and one job queue, the shape the WebSocket tier runs it in.' : ''}" if one_p_ran),
   "Known omissions, stated rather than discovered: the WebSocket phase's " \
   "rails lane runs Puma with campfire's worker count and its allocator but " \
   "WITHOUT Thruster and resque-pool, and no lane terminates TLS.",
