@@ -88,3 +88,33 @@ fn a_literal_key_with_a_hash_brace_stays_literal() {
     let ruby = roundhouse::emit::ruby::emit_method(method);
     assert!(ruby.contains(r#""_demo_\#{x}""#), "{ruby}");
 }
+
+/// `GlobalID.app` starts from the same railtie name as the session key,
+/// dasherized as globalid's railtie does, so a gid Rails minted for a
+/// multi-word or nested app name is one this runtime accepts.
+#[test]
+fn global_id_app_is_the_dasherized_railtie_name() {
+    for (source, expected) in [
+        ("module Campfire\nclass Application < Rails::Application\nend\nend", "\"campfire\""),
+        ("module CwtRails\nclass Application < Rails::Application\nend\nend", "\"cwt-rails\""),
+        (
+            "module Outer\nmodule HTMLApp\nclass Application < Rails::Application\nend\nend\nend",
+            "\"outer-html-app\"",
+        ),
+        (
+            "module Outer::HTMLApp\nclass Application < Rails::Application\nend\nend",
+            "\"outer-html-app\"",
+        ),
+        ("class NamedApp < Rails::Application\nend", "\"named-app\""),
+    ] {
+        let app = tree(&[("config/application.rb", source)]).unwrap();
+        let application = app.rails_application.unwrap();
+        let method = application
+            .methods
+            .iter()
+            .find(|m| m.name.as_str() == "global_id_app")
+            .unwrap();
+        let ruby = roundhouse::emit::ruby::emit_method(method);
+        assert!(ruby.contains(expected), "{ruby}");
+    }
+}
