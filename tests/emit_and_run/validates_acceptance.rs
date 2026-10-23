@@ -246,3 +246,35 @@ end
         "activerecord 8.1.4 disagrees\n=== stdout ===\n{stdout}\n=== stderr ===\n{stderr}"
     );
 }
+
+/// Refused acceptance validations ahead of an undeclared one: the
+/// refusal removes them from the body, and the undeclared name's accessor
+/// still lands ahead of its own validation.
+#[test]
+fn refused_acceptance_ahead_of_an_undeclared_one() {
+    let app = || {
+        emit_and_run::empty_app()
+            .write("app/models/application_record.rb", APPLICATION_RECORD)
+            .write("db/schema.rb", SIGNUP_SCHEMA)
+            .write(
+                "app/models/signup.rb",
+                "class Signup < ApplicationRecord\n  attribute :code, :string\n  attribute :code2, :string\n  validates :code, acceptance: { accept: 'yes' }\n  validates :code2, acceptance: { accept: 'yes' }\n  validates :agreement, acceptance: true\nend\n",
+            )
+    };
+    let warnings = app().ingest_warnings();
+    for attr in ["code", "code2"] {
+        assert!(
+            warnings.iter().any(|w| w.contains(&format!("validates :{attr}, acceptance:")) && w.contains("uncast")),
+            "{attr}: {warnings:?}"
+        );
+    }
+    assert!(!warnings.iter().any(|w| w.contains(":agreement")), "{warnings:?}");
+    let run = app().run_ruby(
+        r##"s = Signup.new(name: "x", agreement: "0")
+raise "rejected: #{s.errors.to_a.inspect}" unless !s.valid? && s.errors.to_a == ["Agreement must be accepted"]
+raise "accepted" unless Signup.new(name: "x", agreement: "1").valid?
+puts "refused ahead passed"
+"##,
+    );
+    run.assert_passes();
+}

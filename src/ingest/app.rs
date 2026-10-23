@@ -2596,7 +2596,6 @@ fn gap_acceptance_on_undeclared(app: &mut App) {
                 virtual_attrs.push((i, attr.clone(), item.span()));
             }
         }
-        refuse_validates_calls(model, refused_attribute_api, &mut attribute_api);
         // Rails' `AcceptanceValidator` defines a plain `attr_reader` and
         // `attr_writer` for an attribute the model does not declare
         // (`LazilyDefineAttributes`), uncast: the same accessor written
@@ -2614,6 +2613,9 @@ fn gap_acceptance_on_undeclared(app: &mut App) {
             );
             model.body.insert(i, ModelBodyItem::Unknown { expr: accessor, leading_comments: Vec::new(), leading_blank_line: false });
         }
+        // After the inserts: their indices are the body's as scanned, and
+        // the refusal removes by span, not by index.
+        refuse_validates_calls(model, refused_attribute_api, &mut attribute_api);
     }
     report_validates_gaps(
         app,
