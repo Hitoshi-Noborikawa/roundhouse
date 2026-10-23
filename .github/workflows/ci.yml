@@ -1970,13 +1970,18 @@ jobs:
         uses: gradle/actions/setup-gradle@v5
         with:
           gradle-version: '9.5.1'
+      - &swift-platform
+        name: Name the Swift platform
+        id: swift-platform
+        if: matrix.target == 'swift'
+        run: echo "release=$(. /etc/os-release && echo "$VERSION_ID")" >> "$GITHUB_OUTPUT"
       - &swift-toolchain-cache
         name: Cache Swift toolchain
         if: matrix.target == 'swift'
         uses: actions/cache@v6
         with:
           path: ~/swift-toolchain
-          key: swift-toolchain-${{ runner.os }}-${{ runner.arch }}-6.4.1
+          key: swift-toolchain-${{ runner.os }}-${{ steps.swift-platform.outputs.release }}-${{ runner.arch }}-6.4.1
       - &swift-install
         name: Install Swift
         if: matrix.target == 'swift'
@@ -2494,6 +2499,7 @@ jobs:
         uses: gradle/actions/setup-gradle@v5
         with:
           gradle-version: '9.5.1'
+      - *swift-platform
       - *swift-toolchain-cache
       - *swift-install
       - name: Install libsqlite3-dev (Swift CSQLite systemLibrary)
