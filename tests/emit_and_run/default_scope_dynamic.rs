@@ -11,11 +11,11 @@ fn app() -> emit_and_run::Overlay {
         .write("app/models/application_record.rb", "class ApplicationRecord < ActiveRecord::Base\n  self.abstract_class = true\nend\n")
         .write(
             "db/schema.rb",
-            "ActiveRecord::Schema.define do\n  create_table \"accounts\", force: :cascade do |t|\n    t.string \"name\"\n  end\n  create_table \"projects\", force: :cascade do |t|\n    t.integer \"account_id\"\n    t.string \"name\"\n  end\n  create_table \"notes\", force: :cascade do |t|\n    t.integer \"project_id\"\n    t.string \"body\"\n  end\n  create_table \"gadgets\", force: :cascade do |t|\n    t.string \"name\"\n    t.boolean \"archived\", default: false, null: false\n  end\n  create_table \"widgets\", force: :cascade do |t|\n    t.string \"name\"\n    t.string \"region\"\n  end\nend\n",
+            "ActiveRecord::Schema.define do\n  create_table \"accounts\", force: :cascade do |t|\n    t.string \"name\"\n  end\n  create_table \"projects\", force: :cascade do |t|\n    t.integer \"account_id\"\n    t.string \"name\"\n  end\n  create_table \"notes\", force: :cascade do |t|\n    t.integer \"project_id\"\n    t.string \"body\"\n  end\n  create_table \"gadgets\", force: :cascade do |t|\n    t.string \"name\"\n    t.boolean \"archived\", default: false, null: false\n  end\n  create_table \"widgets\", force: :cascade do |t|\n    t.string \"name\"\n    t.string \"region\"\n  end\n  create_table \"gizmos\", force: :cascade do |t|\n    t.integer \"rank\"\n    t.string \"name\"\n  end\nend\n",
         )
         .write(
             "app/models/current.rb",
-            "class Current < ActiveSupport::CurrentAttributes\n  attribute :account #: Account\n  attribute :show_archived #: bool\n  attribute :region #: String\nend\n",
+            "class Current < ActiveSupport::CurrentAttributes\n  attribute :account #: Account\n  attribute :show_archived #: bool\n  attribute :region #: String\n  attribute :rank #: Integer\nend\n",
         )
         .write("app/models/account.rb", "class Account < ApplicationRecord\n  has_many :projects\nend\n")
         .write(
@@ -25,6 +25,7 @@ fn app() -> emit_and_run::Overlay {
         .write("app/models/note.rb", "class Note < ApplicationRecord\n  belongs_to :project, optional: true\nend\n")
         .write("app/models/gadget.rb", "class Gadget < ApplicationRecord\n  default_scope { where(archived: false) unless Current.show_archived }\nend\n")
         .write("app/models/widget.rb", "class Widget < ApplicationRecord\n  default_scope { where(region: Current.region) }\nend\n")
+        .write("app/models/gizmo.rb", "class Gizmo < ApplicationRecord\n  default_scope { where(rank: [Current.rank, 2]) if Current.rank }\nend\n")
 }
 
 const SEED: &str = r#"a = Account.create!(name: "a")
@@ -388,16 +389,47 @@ fn a_scope_reading_a_captured_local_is_not_lowered() {
     assert!(!ruby.contains("_default_scope_where"), "a captured local is not lowered: {ruby}");
 }
 
-/// A target without the runtime Relation has no `unscoped_tables` to ask,
+/// A target without the runtime Relation has no `scope_attributes` to read,
 /// so `new` does not seed from the scope there; the scope's own method is
 /// still emitted, and the ruby target still seeds.
 #[test]
 fn seeding_is_skipped_on_targets_without_the_runtime_relation() {
     let (ruby_out, _) = app().emit(roundhouse::project::BuildTarget::Ruby);
     let ruby = read_tree(&ruby_out.join("app/models"), "rb");
-    assert!(ruby.contains("ActiveRecord::Relation.unscoped_tables"), "the ruby target seeds: {ruby}");
+    assert!(ruby.contains("Project.all.scope_attributes"), "the ruby target seeds: {ruby}");
     let (rust_out, _) = app().emit(roundhouse::project::BuildTarget::Rust);
     let rust = read_tree(&rust_out.join("src/models"), "rs");
     assert!(rust.contains("_default_scope_where"), "the scope itself is still emitted: {rust}");
-    assert!(!rust.contains("unscoped_tables"), "a target without the runtime Relation does not seed: {rust}");
+    assert!(!rust.contains("scope_attributes"), "a target without the runtime Relation does not seed: {rust}");
+}
+
+/// Only an equality condition seeds `new`, as Rails' `scope_for_create`
+/// (`where_clause.to_h(equality_only: true)`) and the runtime Relation's
+/// `merge_seedable_scope` do: an array (IN) scope filters the query and
+/// leaves the column unset, while `nil` (IS NULL) and a scalar seed it.
+/// Rails 8.1.4: `[1, nil, 5, nil, 1]`, `[["w0"], nil, "us"]`,
+/// `[["weu"], "eu"]` (a range scope also leaves the column unset there).
+#[test]
+fn only_equality_scope_values_seed_new_records_like_rails() {
+    app()
+        .run_ruby(
+            r#"Gizmo.create!(rank: 1, name: "g1")
+Gizmo.create!(rank: 3, name: "g3")
+Widget.create!(name: "w0")
+Current.region = "eu"
+Widget.create!(name: "weu")
+Current.region = nil
+Current.rank = 1
+got = [
+  [Gizmo.count, Gizmo.new.rank, Gizmo.new(rank: 5).rank, Gizmo.create!(name: "n").rank, Gizmo.where(name: "g1").count],
+  [Widget.pluck(:name), Widget.new.region, Widget.new(region: "us").region],
+]
+Current.region = "eu"
+got << [Widget.pluck(:name), Widget.new.region]
+want = [[1, nil, 5, nil, 1], [["w0"], nil, "us"], [["weu"], "eu"]]
+raise "seed: #{got.inspect}" unless got == want
+puts "dynamic default scope seeding passed"
+"#,
+        )
+        .assert_passes();
 }

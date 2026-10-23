@@ -2850,7 +2850,7 @@ fn synth_initialize(
         }
     }
 
-    // Only where the runtime Relation ships: `unscoped_tables` lives there.
+    // Only where the runtime Relation ships: `scope_attributes` lives there.
     if let (Some(crate::lower::default_scope::DefaultScope::Dynamic(scope)), super::RuntimeRelation::Present) =
         (crate::lower::default_scope::default_scope(model), runtime_relation)
     {
@@ -3762,15 +3762,16 @@ fn overrides_default(model: &Model, col: &Column, has_default: bool) -> bool {
 }
 
 /// A default scope read when the relation is built seeds `new` the same
-/// way, as Rails' scope attributes do: the scope's values now, unless
-/// the model is inside `unscoped { }`, and a given attribute (nil
-/// included) still wins.
+/// way, as Rails' scope attributes do (`all.scope_for_create`): the
+/// scope's values now, and a given attribute (nil included) still wins.
+/// Reading them off a fresh relation reuses the runtime Relation's own
+/// rules: inside `unscoped { }` it carries no scope, and only equality
+/// values seed (`merge_seedable_scope`), so an array, range or nested
+/// hash filters the query and leaves the column unset (Rails 8.1.4).
 ///
 /// ```ruby
-/// unless ActiveRecord::Relation.unscoped_tables.include?(Project._table_sql)
-///   __rh_scope = Project._default_scope_where
-///   self.account_id = __rh_scope[:account_id] if __rh_scope.key?(:account_id) && !attrs.key?(:account_id)
-/// end
+/// __rh_scope = Project.all.scope_attributes
+/// self.account_id = __rh_scope[:account_id] if __rh_scope.key?(:account_id) && !attrs.key?(:account_id)
 /// ```
 fn seed_dynamic_scope(owner: &ClassId, table: &Table, columns: &[Symbol], attrs: &Symbol) -> Expr {
     let scope_var = Symbol::from("__rh_scope");
@@ -3784,7 +3785,7 @@ fn seed_dynamic_scope(owner: &ClassId, table: &Table, columns: &[Symbol], attrs:
         Span::synthetic(),
         ExprNode::Assign {
             target: LValue::Var { id: VarId(0), name: scope_var.clone() },
-            value: send(class_const(owner), "_default_scope_where", Vec::new()),
+            value: send(send(class_const(owner), "all", Vec::new()), "scope_attributes", Vec::new()),
         },
     )];
     for col in &table.columns {
@@ -3829,22 +3830,7 @@ fn seed_dynamic_scope(owner: &ClassId, table: &Table, columns: &[Symbol], attrs:
         );
         stmts.push(Expr::new(Span::synthetic(), ExprNode::If { cond, then_branch: assign, else_branch: nil_lit() }));
     }
-    let lifted = send(
-        send(
-            Expr::new(
-                Span::synthetic(),
-                ExprNode::Const { path: vec![Symbol::from("ActiveRecord"), Symbol::from("Relation")] },
-            ),
-            "unscoped_tables",
-            Vec::new(),
-        ),
-        "include?",
-        vec![send(class_const(owner), "_table_sql", Vec::new())],
-    );
-    Expr::new(
-        Span::synthetic(),
-        ExprNode::If { cond: lifted, then_branch: nil_lit(), else_branch: seq(stmts) },
-    )
+    seq(stmts)
 }
 
 // Not a new shape: the same `attrs.key?` guarded write `synth_update_hash` emits, which every target already compiles.
