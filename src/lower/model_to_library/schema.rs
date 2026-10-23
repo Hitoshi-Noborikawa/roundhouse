@@ -4094,7 +4094,7 @@ fn synth_update_typed(
 /// Every name the model is assigned through other than a column: the
 /// `writable_field_set` virtuals (`attr_accessor` / `attr_writer`,
 /// `typed_store` attrs, the Attributes API, `has_secure_password`'s
-/// plaintext keys, `has_rich_text` attrs) and each hand-written
+/// plaintext keys, `has_rich_text` attrs) and each public hand-written
 /// `def <field>=`. `writable_field_set` deliberately leaves the
 /// hand-written writers out (its callers hold a field name and ask
 /// `model_defines_writer` per field), but mass assignment has to
@@ -4106,7 +4106,11 @@ fn virtual_writer_fields(model: &Model, table: &Table) -> std::collections::BTre
     let mut virtuals = super::writable_field_set(model, table);
     for item in &model.body {
         let crate::dialect::ModelBodyItem::Method { method, .. } = item else { continue };
-        if method.receiver != MethodReceiver::Instance {
+        // Rails assigns through `public_send`: a private or protected
+        // writer is not a mass-assignment key.
+        if method.receiver != MethodReceiver::Instance
+            || method.visibility != crate::dialect::MethodVisibility::Public
+        {
             continue;
         }
         if let Some(base) = method.name.as_str().strip_suffix('=') {
