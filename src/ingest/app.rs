@@ -557,6 +557,15 @@ pub fn ingest_app_with_vfs<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResult
         table_prefixes.entry(module).or_insert(prefix);
     }
     let base_prefixes = super::model::inherited_table_prefixes(&class_prefixes, &base_pairs);
+    // What runs at boot, before models load and routes are drawn: a
+    // constant an initializer appends to, replaces or reassigns has that
+    // value when a validation or a constraint reads it, not the input's.
+    let boot_files = boot_source_files(vfs, dir, &enum_input_files)?;
+    for file in &boot_files {
+        if let Some(text) = read_or_ledger(vfs, file)? {
+            enum_constants.record_boot(&text, &file.display().to_string());
+        }
+    }
     enum_constants.finish();
     model_bases.close_over(&base_pairs);
     for root in &roots {
@@ -1627,6 +1636,11 @@ end
                     route_inputs.record_again(&text, &file.display().to_string());
                 }
             }
+            for file in &boot_files {
+                if let Some(text) = read_or_ledger(vfs, file)? {
+                    route_inputs.record_boot(&text, &file.display().to_string());
+                }
+            }
             route_inputs.finish();
             let mut route_consts = super::model::ClassConsts::default();
             for text in std::iter::once(&source).chain(draw_files.values().map(|(s, _)| s)) {
@@ -2133,7 +2147,11 @@ end
         }
     }
 
-    enum_constants.validate_consumed_sources(&app, &sources, &enum_input_files)?;
+    // The boot sources were observed before the folds; observing them
+    // again would count each of their writes twice.
+    let observed: std::collections::HashSet<PathBuf> =
+        enum_input_files.iter().chain(boot_files.iter()).cloned().collect();
+    enum_constants.validate_consumed_sources(&app, &sources, &observed)?;
     keep_initializer_defined(&mut app, dir, &sources, initializer_defined);
     // `self.queue_adapter =` on ApplicationJob (see `App::queue_adapter`).
     apply_application_job_queue_adapter(&mut app);
@@ -7142,6 +7160,95 @@ fn walk_jbuilder<V: Vfs + ?Sized>(
 /// listing silently ignored them — on Mastodon that dropped 306 of 337
 /// controller files (admin/, api/, settings/, concerns/) with no gap
 /// recorded anywhere. The textbook silent gap; never again.
+/// The Ruby an app runs at boot, before it loads models and draws
+/// routes: `config/application.rb`, `config/environment.rb`,
+/// `config/boot.rb`, each `config/environments/*.rb` (whichever one
+/// runs), every `config/initializers` file, and each file one of those
+/// loads by a literal top-level `require_relative`. A file already
+/// recorded as an input is left out, so its writes are not counted twice.
+/// The targets of `file`'s literal top-level `require_relative` calls,
+/// under [`boot_required_files`]' checks: an existing `.rb` file inside the
+/// app, reached without a symbolic link, other than the boot chain itself.
+/// Silent: a computed or outside path is simply not followed.
+fn literal_require_relative_targets<V: Vfs + ?Sized>(vfs: &V, dir: &Path, file: &Path) -> Vec<PathBuf> {
+    let config_dir = dir.join("config");
+    let boot_chain = ["boot.rb", "application.rb", "environment.rb"].map(|name| config_dir.join(name));
+    let Some(base) = file.parent() else { return Vec::new() };
+    let Ok(source) = vfs.read(file) else { return Vec::new() };
+    let parsed = super::prism::parse_silent(&source);
+    let Some(program) = parsed.node().as_program_node() else { return Vec::new() };
+    let mut out = Vec::new();
+    for statement in program.statements().body().iter() {
+        let Some(call) = statement.as_call_node() else { continue };
+        if call.receiver().is_some()
+            || call.block().is_some()
+            || super::util::constant_id_str(&call.name()) != "require_relative"
+        {
+            continue;
+        }
+        let arguments: Vec<_> = call.arguments().map(|a| a.arguments().iter().collect()).unwrap_or_default();
+        let Some(mut target) = (arguments.len() == 1)
+            .then(|| super::util::string_value(&arguments[0]))
+            .flatten()
+            .and_then(|request| normalize_engine_library_require(dir, base, &request))
+        else {
+            continue;
+        };
+        if target.extension().is_none() {
+            target.set_extension("rb");
+        }
+        if !boot_chain.contains(&target)
+            && target.extension().is_some_and(|e| e == "rb")
+            && vfs.exists(&target)
+            && !vfs.is_dir(&target)
+            && !path_has_symlink_component(vfs, dir, &target)
+            && !out.contains(&target)
+        {
+            out.push(target);
+        }
+    }
+    out
+}
+
+fn boot_source_files<V: Vfs + ?Sized>(
+    vfs: &V,
+    dir: &Path,
+    inputs: &std::collections::HashSet<PathBuf>,
+) -> IngestResult<Vec<PathBuf>> {
+    let config = dir.join("config");
+    let mut files: Vec<PathBuf> = ["application.rb", "environment.rb", "boot.rb"]
+        .iter()
+        .map(|name| config.join(name))
+        .filter(|path| vfs.exists(path) && !vfs.is_dir(path))
+        .collect();
+    for sub in ["environments", "initializers"] {
+        let sub_dir = config.join(sub);
+        if vfs.is_dir(&sub_dir) {
+            files.extend(read_rb_files(vfs, &sub_dir)?);
+        }
+    }
+    // What the boot chain, an environment file or an initializer loads by
+    // a literal `require_relative` runs at boot too. Followed here with
+    // `boot_required_files`' checks, silently: that function reports the
+    // paths it can't follow for `application.rb` / `environment.rb` once,
+    // and feeds the support-root batch, which this list does not.
+    // To the end of each chain (`a.rb` requires `b.rb`), each file once.
+    let mut visited: std::collections::HashSet<PathBuf> = files.iter().cloned().collect();
+    let mut pending: Vec<PathBuf> = files.clone();
+    while let Some(file) = pending.pop() {
+        for target in literal_require_relative_targets(vfs, dir, &file) {
+            if visited.insert(target.clone()) {
+                files.push(target.clone());
+                pending.push(target);
+            }
+        }
+    }
+    files.retain(|file| !inputs.contains(file));
+    files.sort();
+    files.dedup();
+    Ok(files)
+}
+
 pub(super) fn read_rb_files<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResult<Vec<PathBuf>> {
     fn collect<V: Vfs + ?Sized>(
         vfs: &V,
