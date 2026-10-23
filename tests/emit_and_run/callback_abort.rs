@@ -46,7 +46,7 @@ check("update! bu", run { a.save! }, ["ActiveRecord::RecordNotSaved: Failed to s
 check("not updated", Article.find(a.id).title, "u")
 check("destroy bd", run { a.stop_at = :bd; a.destroy }, [false, ["bd"]])
 check("destroy! bd", run { a.destroy! }, ["ActiveRecord::RecordNotDestroyed: Failed to destroy Article with id=#{a.id}", ["bd"]])
-check("not destroyed", [a.destroyed?, Article.exists?(a.id)], [false, true])
+check("not destroyed", [a.persisted?, Article.exists?(a.id)], [true, true])
 a.stop_at = nil
 check("destroy", run { a.destroy }, [:record, ["bd", "ad"]])
 puts "ok"
