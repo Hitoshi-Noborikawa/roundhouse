@@ -649,7 +649,7 @@ module ActiveSupport
   # `FloatDomainError`). Any other string is `to_i` of its first 16
   # bytes, Rails' `byteslice(0, limit * 4)` at the default 4-byte limit.
   # A value of another class is what `value.presence` and then
-  # `value.to_i rescue nil` answer: a Time or another Numeric (a
+  # `value.to_i rescue nil` answer: a Time, a Duration (its seconds) or another Numeric (a
   # Rational) its `to_i`, anything else nil (a Symbol, an Array, a Hash
   # and an Object have no `to_i`). Each class is named rather than asked
   # with `respond_to?`, so every branch is typed.
@@ -674,6 +674,8 @@ module ActiveSupport
       ActiveSupport.integer_from_string(value)
     elsif value.is_a?(Time)
       value.to_i
+    elsif value.is_a?(ActiveSupport::Duration)
+      value.to_i
     elsif value.is_a?(Numeric)
       value.to_i
     else
@@ -683,7 +685,7 @@ module ActiveSupport
 
   # `Helpers::Numeric#cast`'s `value.presence` for a value that is not
   # nil, a boolean, a number or a String: `Object#blank?`, which is
-  # `empty?` for the classes that answer it (`[]`, `{}`, `:""`) and
+  # `empty?` for the classes that answer it (`[]`, `{}`, `:""`, `Set[]`) and
   # false for any other object.
   def self.numeric_blank?(value)
     if value.is_a?(Array)
@@ -691,6 +693,8 @@ module ActiveSupport
     elsif value.is_a?(Hash)
       value.empty?
     elsif value.is_a?(Symbol)
+      value.empty?
+    elsif value.is_a?(Set)
       value.empty?
     else
       false
@@ -703,7 +707,7 @@ module ActiveSupport
   # are 1.0/0.0; `"Infinity"`, `"-Infinity"` and `"NaN"` are those floats
   # (`Type::Float#cast_value`); any other string is `to_f`. A value of
   # another class is nil when blank (`[]`, `{}`, `:""`), a Time or
-  # another Numeric (a Rational) its `to_f`; Rails does not rescue that
+  # another Numeric (a Rational) or a Duration its `to_f`; Rails does not rescue that
   # `to_f`, so anything else (a Symbol, an Array, a Hash, an Object)
   # raises the NoMethodError it raises there.
   def self.cast_float(value)
@@ -723,6 +727,8 @@ module ActiveSupport
       nil
     elsif value.is_a?(Time)
       value.to_f
+    elsif value.is_a?(ActiveSupport::Duration)
+      value.to_f
     elsif value.is_a?(Numeric)
       value.to_f
     else
@@ -740,6 +746,8 @@ module ActiveSupport
       ActiveSupport.cast_float(value)
     elsif ActiveSupport.numeric_blank?(value)
       nil
+    elsif value.is_a?(ActiveSupport::Duration)
+      value.to_f
     elsif value.is_a?(Numeric)
       value.to_f
     else

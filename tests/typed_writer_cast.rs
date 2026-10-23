@@ -104,10 +104,10 @@ const CASTS: &[(&str, &str)] = &[
 
 /// `(value, [min_favs, ratio, price, active])` for a value that is not
 /// nil, a boolean, a number or a String: `Helpers::Numeric#cast` makes a
-/// blank one (`[]`, `{}`, `:""`) nil, then `Type::Integer` answers
+/// blank one (`[]`, `{}`, `:""`, `Set[]`) nil, then `Type::Integer` answers
 /// `to_i rescue nil`, `Type::Float` an unrescued `to_f` (a Symbol, an
 /// Array, a Hash and an Object raise NoMethodError), and `Type::Decimal`
-/// what the value's `to_s` reads. `Type::Boolean` makes only `""` nil.
+/// what the value's `to_s` reads. A Duration casts as its seconds. `Type::Boolean` makes only `""` nil.
 const OTHER: &[(&str, &str)] = &[
     (":many", r#"["nil", "NoMethodError", "0.0", "true"]"#),
     (":off", r#"["nil", "NoMethodError", "0.0", "false"]"#),
@@ -118,6 +118,9 @@ const OTHER: &[(&str, &str)] = &[
     ("{}", r#"["nil", "nil", "nil", "true"]"#),
     ("{ a: 1 }", r#"["nil", "NoMethodError", "0.0", "true"]"#),
     ("Object.new", r#"["nil", "NoMethodError", "0.0", "true"]"#),
+    ("Set[]", r#"["nil", "nil", "nil", "true"]"#),
+    ("Set[1]", r#"["nil", "NoMethodError", "0.0", "true"]"#),
+    ("ActiveSupport::Duration.minutes(5)", r#"["300", "300.0", "300.0", "true"]"#),
 ];
 
 /// Ruby asserting `OTHER`: each column is assigned on its own, and a
