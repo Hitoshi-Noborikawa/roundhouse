@@ -37,6 +37,8 @@ mod pundit_source;
 mod ancestry_source;
 #[path = "emit_and_run/acts_as_follower_source.rs"]
 mod acts_as_follower_source;
+#[path = "emit_and_run/hook_macro_source.rs"]
+mod hook_macro_source;
 #[path = "emit_and_run/gem_class_macros.rs"]
 mod gem_class_macros;
 #[path = "emit_and_run/source_gem_autoload.rs"]

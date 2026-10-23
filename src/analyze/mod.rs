@@ -2563,6 +2563,14 @@ impl Analyzer {
             for scope in model.scopes() {
                 extract_ivar_assignments(&scope.body, &mut flow_ivars);
             }
+            // Not only method bodies: the class body's `@x = …` is what its `def self.x` reads.
+            for item in &model.body {
+                if let ModelBodyItem::Unknown { expr, .. } = item
+                    && crate::lower::model_to_library::writes_class_ivar(expr)
+                {
+                    extract_ivar_assignments(expr, &mut flow_ivars);
+                }
+            }
 
             if !flow_ivars.is_empty() {
                 // Re-seed ctx with discovered ivars alongside @attributes.

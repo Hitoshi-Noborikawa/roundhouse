@@ -1773,9 +1773,22 @@ impl DeclBody {
                 ExprNode::Assign { value, .. } => is_literal_value(value),
                 _ => false,
             });
+        let literal_inits = self.class_initializers.iter().all(|expr| match &*expr.node {
+            ExprNode::Assign { value, .. } => is_literal_value(value),
+            _ => false,
+        });
+        // A mixin's hooks read their own module's `@@` variables, never this body's: rolify's `extend Configure` beside `@@resource_types = []`.
+        let mixins_only = self.unknown_calls.iter().all(|call| match &*call.node {
+            ExprNode::Send { recv: None, method, args, block: None, .. } => {
+                matches!(method.as_str(), "extend" | "include" | "prepend")
+                    && !args.is_empty()
+                    && args.iter().all(|a| matches!(&*a.node, ExprNode::Const { .. }))
+            }
+            _ => false,
+        });
         if has_source_ordered_init
-            && (!self.unknown_calls.is_empty()
-                || !self.includes.is_empty()
+            && ((!self.unknown_calls.is_empty() && !(literal_inits && mixins_only))
+                || (!self.includes.is_empty() && !literal_inits)
                 || (!self.constants.is_empty() && !order_independent))
         {
             return Err(IngestError::Unsupported {
