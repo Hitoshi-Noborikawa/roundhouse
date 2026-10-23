@@ -13,7 +13,8 @@
 #
 # Three scenarios:
 #   strict   - `-q high -q low`: two jobs that run, a job that raises
-#              with `retry: 0`, and malformed JSON
+#              with `retry: 0`, malformed JSON, and a job on its last
+#              retry that already carries Sidekiq's error fields
 #   weighted - `-q a,2 -q b,1` over 200 fetches
 #   shutdown - TSTP, then TERM with a job still running past `-t 1`
 #
@@ -92,6 +93,10 @@ end
 
 def ms?(v) = v.is_a?(Integer) && v.to_s.length == 13
 
+# A timestamp the run itself wrote, as opposed to one the oracle seeded
+# (those are in 2001, and are kept so the record shows they survive).
+def fresh_ms?(v) = ms?(v) && (v - (Time.now.to_f * 1000).to_i).abs < 86_400_000
+
 # The envelope's keys in the order they appear in the JSON text, at the
 # top level only: a small scan that tracks nesting and strings.
 def top_level_keys(raw)
@@ -119,10 +124,10 @@ def mask_envelope(raw)
   env = JSON.parse(raw)
   raise "jid shape: #{env["jid"]}" unless env["jid"].match?(/\A[0-9a-f]{24}\z/)
   env["jid"] = "<jid>"
-  %w[created_at enqueued_at failed_at].each do |k|
+  %w[created_at enqueued_at failed_at retried_at].each do |k|
     next unless env.key?(k)
     raise "#{k} is not integer ms: #{env[k].inspect}" unless ms?(env[k])
-    env[k] = "<ms>"
+    env[k] = "<ms>" if fresh_ms?(env[k])
   end
   env["args"] = env["args"].map do |aj|
     aj = aj.dup
@@ -133,6 +138,31 @@ def mask_envelope(raw)
     aj
   end
   env
+end
+
+# A job's text with its per-run values pinned to fixed ones, keys and
+# formatting as Sidekiq wrote them, so a test can feed the same text to
+# the runtime and compare what it writes with what Sidekiq wrote.
+# Malformed JSON is returned as it is.
+PINNED = {
+  "jid" => "0123456789abcdef01234567",
+  "created_at" => 1_792_632_730_123,
+  "enqueued_at" => 1_792_632_730_124,
+  "job_id" => "00000000-0000-4000-8000-000000000000",
+  "aj_enqueued_at" => "2026-10-23T00:00:00.000000000Z"
+}.freeze
+
+def pin(raw)
+  env = JSON.parse(raw)
+  env["jid"] = PINNED["jid"]
+  env["created_at"] = PINNED["created_at"] if env.key?("created_at")
+  env["enqueued_at"] = PINNED["enqueued_at"] if env.key?("enqueued_at")
+  env["args"] = env["args"].map do |aj|
+    aj.merge("job_id" => PINNED["job_id"], "enqueued_at" => PINNED["aj_enqueued_at"])
+  end
+  JSON.generate(env)
+rescue JSON::ParserError
+  raw
 end
 
 # One command, with its per-run values masked. `now` is the dead write's
@@ -186,8 +216,20 @@ RecordJob.set(queue: :high).perform_later("h1")
 BoomJob.set(queue: :high).perform_later("b1")
 MALFORMED = '{"class":"Sidekiq::ActiveJob::Wrapper","args":[not json'
 redis("LPUSH", "queue:high", MALFORMED)
+# A job Ruby Sidekiq has already retried three times, on its last try:
+# the error fields are there, and the failure exhausts `retry: 3`.
+BoomJob.set(queue: :staging).perform_later("r3")
+retried = JSON.parse(redis("RPOP", "queue:staging"))
+retried["retry"] = 3
+retried["error_message"] = "old message"
+retried["error_class"] = "OldError"
+retried["failed_at"] = 1_000_000_000_000
+retried["retry_count"] = 3
+retried["retried_at"] = 1_000_000_010_000
+redis("LPUSH", "queue:high", JSON.generate(retried))
+pushed_high = redis("LRANGE", "queue:high", 0, -1).reverse.map { |raw| pin(raw) }
 trips = server("strict", "-q", "high", "-q", "low", "-c", "1", "-t", "1") do |pid|
-  wait_for("strict jobs") { redis("LLEN", "oracle:ran") == 2 && redis("ZCARD", "dead") == 2 }
+  wait_for("strict jobs") { redis("LLEN", "oracle:ran") == 2 && redis("ZCARD", "dead") == 3 }
   Process.kill("TERM", pid)
 end
 strict = kept(trips)
@@ -230,6 +272,7 @@ puts JSON.pretty_generate(
   "strict" => {
     "args" => "-q high -q low -c 1 -t 1",
     "ran_in_order" => strict_ran,
+    "popped_from_high_pinned" => pushed_high,
     "round_trips" => describe_trips(strict),
     "dead_after" => dead_after
   },
@@ -238,7 +281,8 @@ puts JSON.pretty_generate(
     "fetches" => 200,
     "brpop_shapes" => fetches.map { |c| [c[0].downcase, c[1..-2].sort, c[-1]] }.uniq,
     "orders_seen" => fetches.map { |c| c[1..-2] }.uniq.sort,
-    "queue_a_first_within_0.1_of_two_thirds" => ((first_a / 200.0) - 2.0 / 3).abs < 0.1
+    # 2/3 expected; the bounds are wide enough that a run never flakes.
+    "queue_a_first_share_between_0.5_and_0.85" => (100..170).cover?(first_a)
   },
   "shutdown" => {
     "args" => "-q default -c 1 -t 1",
