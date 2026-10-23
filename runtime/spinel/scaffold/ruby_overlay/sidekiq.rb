@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 # The `sidekiq` role on ruby and jruby: run jobs from Redis instead of
 # serving HTTP, as `./app sidekiq` does on spinel.
 #
