@@ -1779,16 +1779,19 @@ come from the job's `perform_later` call sites, and
   = :sidekiq`) pushes each payload to Redis instead, in Sidekiq 8's
   envelope (`runtime/spinel/sidekiq_push.rb`, `sidekiq_redis.rb`):
   `SADD queues` and `LPUSH queue:<name>`, or `ZADD schedule` for a
-  literal `set(wait:)` or `set(wait_until:)`. A pushed job is run by a
-  Ruby Sidekiq process; there is no in-binary worker yet. Redis comes
+  literal `set(wait:)` or `set(wait_until:)` that lands in the future.
+  A pushed job is run by a Ruby Sidekiq process; there is no in-binary
+  worker yet. Redis comes
   from `Sidekiq.configure_client`'s `url:` and `password:`, then
   `REDIS_PROVIDER`, then `REDIS_URL`. The connection is one per
   process, with 1-second connect and read timeouts, and a dropped
   connection is retried once. A non-literal `set(...)` is an error
   under `:sidekiq`, and `set(priority:)` is dropped with a warning.
   This holds on ruby, jruby and spinel; the other targets warn
-  (`sidekiq-adapter-not-honored`) and run the jobs in process. Retries,
-  `retry_on`, TLS (`rediss://`) and per-job adapters are still missing.
+  (`sidekiq-adapter-not-honored`) and run the jobs in process. A pushed
+  job carries `"retry":true`, so Sidekiq retries it with its own
+  defaults; Active Job's `retry_on`, TLS (`rediss://`) and per-job
+  adapters are still missing.
 - **Some argument types.** A job whose call sites pass a Hash, a Date,
   an untyped value, or nothing typed at all keeps its closure, with a
   `job-closure-fallback` warning naming the parameter. Lobsters'
