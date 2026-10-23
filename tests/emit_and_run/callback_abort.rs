@@ -1,4 +1,4 @@
-//! `throw :abort` from a lifecycle callback halts `save` / `destroy` as ActiveRecord 8.1.4 does: false, RecordNotSaved, RecordNotDestroyed.
+//! `throw :abort` from a before_* callback halts `save` / `destroy` as ActiveRecord 8.1.4 does (false, RecordNotSaved, RecordNotDestroyed); from an after_* one it escapes, rolled back.
 
 use super::emit_and_run;
 
@@ -9,7 +9,7 @@ const CALLBACKS: &str = r##"  LOG = []
   before_create { LOG << "bc"; throw(:abort) if stop_at == :bc }
   before_update { LOG << "bu"; throw(:abort) if stop_at == :bu }
   before_destroy { LOG << "bd"; throw(:abort) if stop_at == :bd }
-  after_save { LOG << "as" }
+  after_save { LOG << "as"; throw(:abort) if stop_at == :as }
   after_destroy { LOG << "ad" }
   def helper_stop = throw(:abort)
 "##;
@@ -39,6 +39,7 @@ check("save! bv", run { a = Article.new(title: "x", body: body); a.stop_at = :bv
 check("save bs", run { a = Article.new(title: "x", body: body); a.stop_at = :bs; a.save }, [false, ["bv", "bs"]])
 check("save! bs", run { a = Article.new(title: "x", body: body); a.stop_at = :bs; a.save! }, ["ActiveRecord::RecordNotSaved: Failed to save the record", ["bv", "bs"]])
 check("save bc", run { a = Article.new(title: "x", body: body); a.stop_at = :bc; a.save }, [false, ["bv", "bs", "bc"]])
+check("after_save as", run { a = Article.new(title: "x", body: body); a.stop_at = :as; a.save }, ["UncaughtThrowError: uncaught throw :abort", ["bv", "bs", "bc", "as"]])
 check("nothing inserted", Article.count, base)
 a = Article.create!(title: "u", body: body)
 check("update bu", run { a.stop_at = :bu; a.title = "v"; a.save }, [false, ["bv", "bs", "bu"]])

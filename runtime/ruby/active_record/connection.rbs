@@ -199,6 +199,7 @@ module ActiveRecord
     def save!: () -> Base
     def destroy: () -> (Base | false)
     def destroy!: () -> Base
+    def _halted_by_abort: () { () -> untyped } -> bool
     def touch: () -> bool
     def touch_written: () -> bool
     def _note_touched: () -> nil
