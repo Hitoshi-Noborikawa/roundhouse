@@ -9937,15 +9937,21 @@ pub(crate) fn apply_typed_writer_cast_lowering(lcs: &mut [LibraryClass], app: &A
         // A model's `attribute :name, :type` writers cast as ActiveModel's
         // types do, as `ingest::active_model_attributes` casts a plain
         // class's: an `ActiveModel::Model` form's and an ActiveRecord
-        // model's alike (Rails 8.1.4). On a column it overrides the column's
-        // type (`attribute :code, :integer` on a string column reads `"abc"`
-        // as 0), so its cast replaces the column's, except on an enum
-        // column, whose mapping decorates the attribute (`"archived"` stays
-        // a label). `:boolean` already casts inline
-        // (`markers::push_attribute_api_methods`).
+        // model's alike (Rails 8.1.4). Over a column, Rails' declared type
+        // replaces the column's everywhere, but here only the writer would
+        // follow it, so a column keeps its own cast unless the two agree
+        // (`markers::attribute_matches_column`; the mismatch is reported
+        // with the model DSL). An enum column keeps its mapping too: the
+        // enum decorates the attribute (`"archived"` stays a label).
+        // `:boolean` already casts inline (`markers::push_attribute_api_methods`).
         {
             for (name, ty) in crate::lower::model_to_library::markers::attribute_api_decls(&model.body) {
                 if model.enums.contains_key(&name) {
+                    continue;
+                }
+                if let Some(col) = table.and_then(|t| t.columns.iter().find(|c| c.name == name))
+                    && !crate::lower::model_to_library::markers::attribute_matches_column(ty.as_str(), &col.col_type)
+                {
                     continue;
                 }
                 let cast = match ty.as_str() {
