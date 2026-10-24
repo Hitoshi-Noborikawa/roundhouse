@@ -50,3 +50,14 @@ pub fn analyze_and_lower(app: &mut App) -> Vec<Diagnostic> {
         })
     })
 }
+
+/// [`analyze_and_lower`] for the app one target emits: the target's own
+/// pre-analysis choices first. A target that stores PostgreSQL array
+/// columns as the Array Rails reads types them so
+/// (`lower::array_columns`); every other target sees the ingested app.
+pub fn analyze_and_lower_for(app: &mut App, target: crate::build_target::BuildTarget) -> Vec<Diagnostic> {
+    if target.stores_array_columns() {
+        crate::lower::array_columns::store_arrays(app);
+    }
+    analyze_and_lower(app)
+}

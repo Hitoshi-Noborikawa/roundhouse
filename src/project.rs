@@ -1299,6 +1299,25 @@ fn inject_cruby_date_calendar_helpers(boot: &mut String) -> Result<(), String> {
     }
 }
 
+/// `boot.rb` requires `runtime/array_column` after the JSON-column seam,
+/// only for an app with a stored array column (`lower::array_columns`).
+/// The ruby overlay's boot replaces Spinel's, so both trees call this.
+fn inject_array_column_require(files: &mut [(String, String)], app: &App) -> Result<(), String> {
+    if !app.schema.tables.values().any(|t| t.columns.iter().any(|c| c.array_stored)) {
+        return Ok(());
+    }
+    let anchor = "require_relative \"runtime/json_column\"\n";
+    let Some((_, boot)) = files.iter_mut().find(|(p, _)| p == "boot.rb") else {
+        return Err("boot.rb missing for the array-column require".into());
+    };
+    if boot.contains("require_relative \"runtime/array_column\"") {
+        return Ok(());
+    }
+    let at = boot.find(anchor).ok_or("boot.rb missing the json_column require (array-column anchor)")?;
+    boot.insert_str(at + anchor.len(), "require_relative \"runtime/array_column\"\n");
+    Ok(())
+}
+
 fn inject_cruby_date_calendar_boot_requires(
     files: &mut Vec<(String, String)>,
 ) -> Result<(), String> {
@@ -1491,7 +1510,8 @@ fn report_array_columns(app: &App, target: BuildTarget) {
         return;
     }
     for table in app.schema.tables.values() {
-        for column in table.columns.iter().filter(|column| column.array) {
+        // A stored array column holds the Array (`lower::array_columns`).
+        for column in table.columns.iter().filter(|column| column.array && !column.array_stored) {
             let mut d = crate::diagnostic::Diagnostic::unsupported(
                 crate::span::Span::synthetic(),
                 Some(crate::ident::Symbol::from(target.as_str())),
@@ -3907,6 +3927,7 @@ fn ruby_family_runtime_files(
     if app_uses_date(app) {
         inject_cruby_date_calendar_boot_requires(&mut files)?;
     }
+    inject_array_column_require(&mut files, app)?;
     // Re-apply after the gem_facades rewrite above: the CRuby/JRuby
     // content replaces the spinel-tree file that `apply_pay_demand`
     // already annotated in `spinel_files`.
@@ -7017,6 +7038,19 @@ fn spinel_files(app: &App, fixture: &Path, param_binds: bool) -> Result<(Vec<(St
             .map_err(|e| format!("read runtime/spinel/json_column.rbs: {e}"))?;
         files.push(("sig/runtime/json_column.rbs".to_string(), rbs));
     }
+
+    // PostgreSQL array-column seam: the JSON text the row holds and the
+    // typed Array the record keeps (`lower::array_columns`). Only an app
+    // with a stored array column ships it.
+    let stores_arrays = app.schema.tables.values().any(|t| t.columns.iter().any(|c| c.array_stored));
+    if stores_arrays {
+        let rbs = crate::runtime_files::read_to_string("runtime/spinel/array_column.rbs")
+            .map_err(|e| format!("read runtime/spinel/array_column.rbs: {e}"))?;
+        files.push(("sig/runtime/array_column.rbs".to_string(), rbs));
+    } else {
+        files.retain(|(p, _)| p != "runtime/array_column.rb" && p != "runtime/array_column.rbs");
+    }
+    inject_array_column_require(&mut files, app)?;
 
     // ActiveJob payload codecs. Same reason as the JSON-column sidecar:
     // the readers take parsed JSON, which only the sidecar can type.

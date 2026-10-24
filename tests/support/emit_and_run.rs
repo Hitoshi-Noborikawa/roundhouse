@@ -304,7 +304,7 @@ impl Overlay {
         // As the CLI does: an error ingest reports gates the emit too.
         let (app, ingest_diags) = roundhouse::ingest::prism::scope(|| ingest_app(&source));
         let mut app = app.expect("ingest the overlaid fixture");
-        let lower_diags = roundhouse::session::analyze_and_lower(&mut app);
+        let lower_diags = roundhouse::session::analyze_and_lower_for(&mut app, target);
         let mut errors: Vec<_> = ingest_diags
             .into_iter()
             .chain(diagnose(&app))

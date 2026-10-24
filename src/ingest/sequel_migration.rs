@@ -191,6 +191,7 @@ fn ingest_column_stmt(
                 generated_text_compatible: None,
                 generated_int4_compatible: None,
                 array: false,
+                array_stored: false,
             });
         }
         "foreign_key" => {
@@ -217,6 +218,7 @@ fn ingest_column_stmt(
                 generated_text_compatible: None,
                 generated_int4_compatible: None,
                 array: false,
+                array_stored: false,
             });
             table.foreign_keys.push(ForeignKey {
                 from_column: Symbol::from(name.as_str()),
@@ -294,6 +296,7 @@ fn ingest_column_stmt(
                 generated_text_compatible: None,
                 generated_int4_compatible: None,
                 array: false,
+                array_stored: false,
             });
         }
     }

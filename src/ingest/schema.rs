@@ -948,6 +948,7 @@ fn table_from_create_table(
                 generated_text_compatible: None,
                 generated_int4_compatible: None,
                 array: false,
+                array_stored: false,
             }),
             Some(t) => column_with_type(t, id_name.clone(), &opts, &table_name, file),
         };
@@ -1060,6 +1061,7 @@ fn virtual_table_from_call(call: &ruby_prism::CallNode<'_>) -> Option<(Symbol, T
             generated_text_compatible: None,
             generated_int4_compatible: None,
             array: false,
+            array_stored: false,
         })
         .collect();
     Some((
@@ -1165,6 +1167,7 @@ fn view_columns_from_sql(sql: &str, tables: &IndexMap<Symbol, Table>) -> Vec<Col
             generated_text_compatible: None,
             generated_int4_compatible: None,
             array,
+            array_stored: false,
         });
     }
     columns
@@ -1233,6 +1236,7 @@ fn timestamp_columns() -> [Column; 2] {
         generated_text_compatible: None,
         generated_int4_compatible: None,
         array: false,
+        array_stored: false,
     };
     [col("created_at"), col("updated_at")]
 }
@@ -1251,6 +1255,7 @@ fn reference_column(name: &str) -> Column {
         generated_text_compatible: None,
         generated_int4_compatible: None,
         array: false,
+        array_stored: false,
     }
 }
 
@@ -1263,6 +1268,8 @@ struct ColumnOpts {
     limit: Option<u32>,
     /// A present array option is non-scalar unless explicitly false or nil.
     array: bool,
+    /// `default: []`, which `default_value` reads as no default.
+    empty_array_default: bool,
 }
 
 // Not `string_value` alone: schema.rb dumps an integer, float or boolean default unquoted (`default: 0`, `default: true`).
@@ -1287,7 +1294,10 @@ fn parse_column_opts<'pr>(nodes: impl Iterator<Item = &'pr Node<'pr>>) -> Column
             let value = &assoc.value();
             match key.as_str() {
                 "null" => opts.nullable = bool_value(value),
-                "default" => opts.default = default_value(value),
+                "default" => {
+                    opts.default = default_value(value);
+                    opts.empty_array_default = value.as_array_node().is_some_and(|a| a.elements().iter().next().is_none());
+                }
                 "limit" => {
                     if let Some(n) = integer_value(value) {
                         if n >= 0 {
@@ -1564,12 +1574,15 @@ fn column_with_type(
         name: Symbol::from(col_name),
         col_type,
         nullable: opts.nullable.unwrap_or(true),
-        default: opts.default.clone(),
+        // An array column's `default: []` is kept as `[]`; a target that
+        // stores the Array reads it (`Column::stored_default`).
+        default: if opts.array && opts.empty_array_default { Some("[]".into()) } else { opts.default.clone() },
         primary_key: false,
         generated: None,
         generated_text_compatible,
         generated_int4_compatible,
         array: opts.array,
+        array_stored: false,
     })
 }
 

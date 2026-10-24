@@ -4094,11 +4094,16 @@ pub(crate) fn row_from_table(table: &Table) -> Row {
 /// is excluded (the INSERT assigns it and every hydration path treats
 /// it as present). Twin of `lower::model_to_library::ty_of_column_slot`;
 /// keep them in sync, same as the `ty_of_column` pair below. A
-/// PostgreSQL array column (`array: true`) is still typed as its element
-/// here: the analysis feeds every lowered target's method dispatch, and
-/// their storage holds one element (`project::report_array_columns`).
-fn ty_of_column_slot(col: &crate::schema::Column) -> Ty {
-    let base = ty_of_column(&col.col_type);
+/// PostgreSQL array column (`array: true`) is typed `Array[<element>]`
+/// only where the target stores the Array (`Column::array_stored`, set by
+/// `lower::array_columns`). Elsewhere it stays its element: the analysis
+/// feeds the lowered targets' method dispatch, and their storage holds one
+/// element (`project::report_array_columns`).
+pub(crate) fn ty_of_column_slot(col: &crate::schema::Column) -> Ty {
+    let mut base = ty_of_column(&col.col_type);
+    if col.array_stored {
+        base = Ty::Array { elem: base.into() };
+    }
     if col.nullable && !col.primary_key {
         Ty::Union { variants: vec![base, Ty::Nil].into() }
     } else {

@@ -229,6 +229,16 @@ impl BuildTarget {
         }
     }
 
+    /// Does the target store a PostgreSQL array column (`array: true`) as
+    /// the Array Rails reads (JSON text in SQLite), typing it
+    /// `Array[<element>]`? The Ruby-family runtimes do
+    /// (`lower::array_columns`). Every other target that stores rows
+    /// holds one element and reports the column
+    /// (`project::report_array_columns`).
+    pub fn stores_array_columns(self) -> bool {
+        matches!(self, BuildTarget::Ruby | BuildTarget::Jruby | BuildTarget::Spinel)
+    }
+
     /// Does the emitted persistence runtime provide the single-statement
     /// `Db.exec_returning` operation needed to hydrate generated columns
     /// from the INSERT that created them? The Ruby-family runtimes each

@@ -89,6 +89,7 @@ SPINEL_TESTS = [
     "spinel_pg_db",
     "generated_columns_spinel",
     "postgres_json_types_spinel",
+    "array_column_storage_spinel",
     "pessimistic_locking",
     "not_found_parity_spinel",
     "spinel_transaction_connection",
@@ -239,6 +240,19 @@ JSON_TYPES_SPINEL_INPUTS = {
     "src/lower/arel/ruby_values.rs",
     "src/lower/model_to_library/mod.rs",
     "src/lower/model_to_library/schema.rs",
+}
+
+# The stored PostgreSQL array column: its pass, storage and runtime seam.
+ARRAY_COLUMN_SPINEL_INPUTS = {
+    "src/schema.rs",
+    "src/ingest/schema.rs",
+    "src/ingest/model.rs",
+    "src/lower/array_columns.rs",
+    "src/emit/shared/schema_sql.rs",
+    "src/lower/model_to_library/mod.rs",
+    "src/lower/model_to_library/schema.rs",
+    "runtime/spinel/array_column.rb",
+    "runtime/spinel/array_column.rbs",
 }
 
 # Bulk advisory Spinel suite (unknown-input spinel_lane, ruby-family
@@ -448,6 +462,8 @@ def native_coverage(path):
         suites.add("generated_columns_spinel")
     if path in JSON_TYPES_SPINEL_INPUTS:
         suites.add("postgres_json_types_spinel")
+    if path in ARRAY_COLUMN_SPINEL_INPUTS or path.startswith("src/lower/model_to_library/adapter_emit/"):
+        suites.add("array_column_storage_spinel")
     # Gate drivers stay flat beside their Rust harness. Match the most
     # specific suite first (e.g. param_binds_values before param_binds).
     if path == "tests/param_binds_text_cleanup.rb":

@@ -195,6 +195,7 @@ module ActiveRecord
     def self.first: () -> Base?
     def self.take: () -> Base?
     def self._hydrate_all: (String sql) -> Array[Base]
+    def self.decode_plucked: (String | Symbol column, untyped value) -> untyped
     def save: () -> bool
     def save!: () -> Base
     def destroy: () -> (Base | false)
