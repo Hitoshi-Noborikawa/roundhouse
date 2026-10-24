@@ -143,3 +143,106 @@ fn a_strict_target_refuses_a_class_value_read_in_the_set() {
     let (_emitted, errors) = app().emit(roundhouse::project::BuildTarget::Rust);
     assert!(errors.iter().any(|e| e.contains("Module protocol") && e.contains("const_get")), "{errors:#?}");
 }
+
+// Rails 8.1.4 (oracle `inclusion_callable_cr.rb`): a set check asks the
+// set for each element of an Array value (`value.all?`), so an exclusion
+// rejects it only when every element is reserved and `[]` is in every set;
+// a nil value is asked of the set as it is. A nested block that names the
+// lambda's parameter rebinds it.
+const ARRAY_COLUMNS: &str = "create_table \"articles\", force: :cascade do |t|\n    t.string \"shade\"\n    t.string \"tags\", array: true\n    t.string \"marks\", array: true";
+
+const ARRAY_MODEL: &str = r#"class Article < ApplicationRecord
+  has_many :comments, dependent: :destroy
+  validates :shade, inclusion: { in: ->(record) { %w(red).map { |record| record } } }, allow_nil: true
+  validates :tags, inclusion: { in: %w(a b) }
+  validates :marks, exclusion: { in: ->(r) { %w(x) } }
+"#;
+
+fn array_app() -> emit_and_run::Overlay {
+    emit_and_run::real_blog()
+        .edit("db/schema.rb", "create_table \"articles\", force: :cascade do |t|", ARRAY_COLUMNS)
+        .edit(
+            "app/models/article.rb",
+            "class Article < ApplicationRecord\n  has_many :comments, dependent: :destroy\n",
+            ARRAY_MODEL,
+        )
+}
+
+const ARRAY_TEST: &str = r#"require "test_helper"
+
+class ArticleArrayClusivityTest < ActiveSupport::TestCase
+  def article(**attrs)
+    Article.new(title: "Arrays", body: "A body long enough to validate.", tags: %w(a), **attrs)
+  end
+
+  test "a nested block's own parameter is not the record" do
+    assert article(shade: "red").valid?
+    assert_not article(shade: "blue").valid?
+  end
+
+  test "an Array value is included when every element is" do
+    assert article(tags: %w(a b)).valid?
+    assert article(tags: []).valid?
+    record = article(tags: %w(a c))
+    assert_not record.valid?
+    assert_equal ["Tags is not included in the list"], record.errors.full_messages
+    assert_not article(tags: nil).valid?
+  end
+
+  test "an Array value is reserved only when every element is" do
+    assert article(marks: %w(x y)).valid?
+    assert article(marks: nil).valid?
+    assert_not article(marks: %w(x)).valid?
+    assert_not article(marks: []).valid?
+  end
+end
+"#;
+
+#[test]
+fn an_array_value_is_checked_element_by_element_on_ruby() {
+    array_app().write("test/models/article_array_clusivity_test.rb", ARRAY_TEST).run_test("test/models/article_array_clusivity_test.rb").assert_passes();
+}
+
+/// A one-parameter callable's body keeps the class body's `self` in Rails
+/// (`value.call(record)`), so a receiverless call in it runs on the class.
+/// Lowered into the record's validation it would run on the record, so it
+/// stays a gap.
+#[test]
+fn a_one_parameter_callable_calling_its_class_stays_a_gap() {
+    let warnings = emit_and_run::real_blog()
+        .edit("db/schema.rb", "create_table \"articles\", force: :cascade do |t|", "create_table \"articles\", force: :cascade do |t|\n    t.string \"mood\"")
+        .edit(
+            "app/models/article.rb",
+            "class Article < ApplicationRecord\n  has_many :comments, dependent: :destroy\n",
+            "class Article < ApplicationRecord\n  has_many :comments, dependent: :destroy\n  def self.allowed_moods = %w(happy)\n  validates :mood, inclusion: { in: ->(r) { allowed_moods } }\n",
+        )
+        .ingest_warnings();
+    assert!(warnings.iter().any(|w| w.contains("inclusion: in")), "{warnings:#?}");
+}
+
+const ARRAY_SPINEL_SCRIPT: &str = r##"
+def check(label, got, want)
+  raise "#{label}: #{got.inspect} (want #{want.inspect})" unless got == want
+end
+def article(shade: nil, tags: ["a"], marks: nil)
+  Article.new(title: "Arrays", body: "A body long enough to validate.", shade: shade, tags: tags, marks: marks)
+end
+check("nested block parameter", article(shade: "red").valid?, true)
+check("nested block parameter rejects", article(shade: "blue").valid?, false)
+check("all included", article(tags: ["a", "b"]).valid?, true)
+check("empty included", article(tags: []).valid?, true)
+check("one not included", article(tags: ["a", "c"]).valid?, false)
+check("nil not included", article(tags: nil).valid?, false)
+check("not all reserved", article(marks: ["x", "y"]).valid?, true)
+check("all reserved", article(marks: ["x"]).valid?, false)
+check("empty reserved", article(marks: []).valid?, false)
+puts "array clusivity passed"
+"##;
+
+#[test]
+#[ignore = "requires the Spinel toolchain"]
+fn an_array_value_is_checked_element_by_element_on_spinel() {
+    let run = array_app().run_spinel_with_db(ARRAY_SPINEL_SCRIPT);
+    run.assert_passes();
+    assert!(run.stdout.contains("array clusivity passed"), "{}", run.stdout);
+}

@@ -1635,10 +1635,15 @@ fn inclusion_values(node: &Node<'_>, class_consts: &super::ClassConsts) -> Optio
 }
 
 /// `in: ->(record) { body }`, `in: -> { body }`, `lambda { |r| … }`,
-/// `proc { … }` or `in: :method`: Rails calls a callable with the record
-/// (`Clusivity#include?`), so its parameter is the record and its body is
-/// read with the record as `self`; a Symbol is that method of the record.
-/// Anything else (more parameters, a body ingest can't read) stays a gap.
+/// `proc { … }` or `in: :method` (Rails' `ResolveValue`): a zero-arity
+/// callable runs on the record (`instance_exec`), so its body reads as
+/// written in the record's method; a one-parameter callable is called
+/// with the record (`value.call(record)`), so its parameter becomes
+/// `self`; a Symbol is that method of the record. A one-parameter body
+/// keeps the class body's `self` in Rails, so one that calls a method
+/// without a receiver or reads `self` would run on the record here, not
+/// the class: it stays a gap, as does anything else (more parameters, a
+/// body ingest can't read).
 fn inclusion_call(node: &Node<'_>, file: &str) -> Option<InclusionSpec> {
     use crate::expr::{Expr, ExprNode};
     if let Some(name) = symbol_value(node) {
@@ -1671,19 +1676,44 @@ fn inclusion_call(node: &Node<'_>, file: &str) -> Option<InclusionSpec> {
     }
     let mut body = body.clone();
     if let Some(param) = params.first() {
+        if reads_implicit_self(&body) {
+            return None;
+        }
         replace_var_with_self(&mut body, param);
     }
     Some(InclusionSpec::Call(body))
 }
 
+/// Whether `e` calls a method without a receiver or reads `self`.
+fn reads_implicit_self(e: &crate::expr::Expr) -> bool {
+    use crate::expr::ExprNode;
+    if matches!(&*e.node, ExprNode::SelfRef | ExprNode::Send { recv: None, .. }) {
+        return true;
+    }
+    let mut found = false;
+    e.node.for_each_child(&mut |c| found = found || reads_implicit_self(c));
+    found
+}
+
 /// The record a callable `in:` is given is the validating record itself.
+/// A nested block that names a parameter the same rebinds it, so its body
+/// is left alone.
 fn replace_var_with_self(e: &mut crate::expr::Expr, name: &Symbol) {
     use crate::expr::ExprNode;
-    if let ExprNode::Var { name: n, .. } = &*e.node
-        && n == name
-    {
-        *e = crate::expr::Expr::new(e.span, ExprNode::SelfRef);
-        return;
+    match &*e.node {
+        ExprNode::Var { name: n, .. } if n == name => {
+            *e = crate::expr::Expr::new(e.span, ExprNode::SelfRef);
+            return;
+        }
+        ExprNode::Lambda { params, rest_param, extra_params, block_param, .. }
+            if params.contains(name)
+                || rest_param.as_ref() == Some(name)
+                || block_param.as_ref() == Some(name)
+                || extra_params.iter().any(|p| p.name == *name) =>
+        {
+            return;
+        }
+        _ => {}
     }
     e.node.for_each_child_mut(&mut |c| replace_var_with_self(c, name));
 }
