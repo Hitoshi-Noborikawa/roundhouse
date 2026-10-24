@@ -164,7 +164,15 @@ const QUERY_ONLY_METHODS: &[&str] = &[
 ];
 
 fn receiver_unknown(ty: Option<&Ty>) -> bool {
-    matches!(ty, None | Some(Ty::Untyped) | Some(Ty::Var { .. }))
+    match ty {
+        None | Some(Ty::Untyped) | Some(Ty::Var { .. }) => true,
+        // An ivar read is the value or nil: `@scope` is `Var | nil`.
+        Some(Ty::Union { variants }) => {
+            variants.iter().any(|v| matches!(v, Ty::Untyped | Ty::Var { .. }))
+                && variants.iter().all(|v| matches!(v, Ty::Untyped | Ty::Var { .. } | Ty::Nil))
+        }
+        _ => false,
+    }
 }
 
 /// Act on what the residue message says, for the target actually being
