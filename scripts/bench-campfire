@@ -1840,7 +1840,9 @@ RUBY
 # membership), scrolling back, searching, returning to a hidden tab —
 # while posts land in the rooms people are reading, and every response
 # and delivery is checked: see `loadgen users` in the shared verification
-# harness ($VERIFICATION_ROOT). The population steps up until the p99 of
+# harness ($VERIFICATION_ROOT: a checkout of roundhouse-rb/once-campfire-
+# verification, branch users-profile until that is merged upstream). The
+# population steps up until the p99 of
 # a navigation passes the target; the result is how many people a lane
 # serves, with per-route latency, socket delivery and memory per step.
 #
