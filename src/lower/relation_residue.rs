@@ -159,7 +159,7 @@ fn walk(e: &Expr, in_chain: bool, ctx: &FoldCtx, diags: &mut Vec<Diagnostic>) {
 const QUERY_ONLY_METHODS: &[&str] = &[
     "where", "rewhere", "order", "reorder", "limit", "offset", "joins", "left_joins",
     "left_outer_joins", "includes", "preload", "eager_load", "references", "pluck", "pick",
-    "having", "distinct", "unscope", "find_by", "find_by!", "find_each", "find_in_batches",
+    "group", "having", "distinct", "unscope", "find_by", "find_by!", "find_each", "find_in_batches",
     "in_batches", "update_all", "delete_all", "destroy_all", "none",
 ];
 

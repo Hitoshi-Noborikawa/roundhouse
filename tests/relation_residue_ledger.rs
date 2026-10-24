@@ -81,6 +81,10 @@ end
     scope.where.not(title: "x")
   end
 
+  def grouped
+    scope.group(:score).count
+  end
+
   def counted(items)
     items.select { |i| i }.count
   end
@@ -264,17 +268,19 @@ fn a_query_on_an_untyped_receiver_is_ledgered_once_per_chain() {
     // `scope.where("score > ?", 1)` and `scope.where.not(...)`: the
     // scope is a constructor argument nothing types, so the chain is no
     // Relation to the analyzer and no Arel fold, yet a strict target
-    // has nothing that answers `where`. One entry per chain head, and
-    // `select { }.count` (Array's too) is not one.
+    // has nothing that answers `where`. One entry per chain head
+    // (`group(:score).count` is one, at `group`), and `select { }.count`
+    // (Array's too) is not one.
     let entries = untyped_queries_for(BuildTarget::Ruby);
-    assert_eq!(entries.len(), 2, "{entries:?}");
-    assert!(entries.iter().all(|d| d.message.contains("`where`")), "{entries:?}");
+    assert_eq!(entries.len(), 3, "{entries:?}");
+    assert_eq!(entries.iter().filter(|d| d.message.contains("`where`")).count(), 2, "{entries:?}");
+    assert_eq!(entries.iter().filter(|d| d.message.contains("`group`")).count(), 1, "{entries:?}");
     assert!(entries.iter().all(|d| d.severity == Severity::Warning), "{entries:?}");
 }
 
 #[test]
 fn a_query_on_an_untyped_receiver_fails_a_strict_emit() {
     let entries = untyped_queries_for(BuildTarget::Typescript);
-    assert_eq!(entries.len(), 2, "{entries:?}");
+    assert_eq!(entries.len(), 3, "{entries:?}");
     assert!(entries.iter().all(|d| d.severity == Severity::Error), "{entries:?}");
 }
