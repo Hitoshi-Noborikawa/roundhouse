@@ -2932,6 +2932,17 @@ Three gaps remain, all on spinel's side:
   order, which differs only when two gems define one key. A gem that is
   not an engine adds its files from its own code; none is read unless
   `src/i18n/gems.rs::NON_ENGINE_LOCALES` names its paths.
+  The same runtime is transpiled to TypeScript (Node), which reaches
+  the locale, `Rails.env` and `config/i18n_translations` through a
+  hand-written `I18nHost` (`runtime/typescript/i18n_host.ts`, the Ruby
+  family's is `runtime/ruby/i18n_host.rb`): each request runs in its
+  own `AsyncLocalStorage` scope, as node:http interleaves requests
+  across awaits, so it starts at the default locale rather than
+  inheriting a previous request's on the same thread. JS has no Symbol
+  apart from String, so `InvalidLocale`'s message shows a String locale
+  as `:de` where Rails shows `"de"`. The worker and browser builds and
+  the other strict targets still refuse a translation chosen when it
+  runs.
 - **`fragment_name_with_digest(name, digest_path)` adds no template
   digest**: templates carry none here (see
   `runtime/spinel/action_controller_fragment_caching.rb`), so an omitted

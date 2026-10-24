@@ -34,6 +34,9 @@ mod array_methods;
 mod truthiness;
 #[path = "support/class_constants.rs"]
 mod class_constants;
+#[path = "support/i18n_locales_app.rs"]
+#[allow(dead_code)]
+mod i18n_locales_app;
 
 use roundhouse::emit::typescript;
 use roundhouse::ingest::ingest_app;
@@ -481,4 +484,37 @@ fn real_blog_ruby_truthiness_runs_under_tsx() {
         "import { TruthProbe } from \"./app/models/truth_probe.js\";\nconsole.log(JSON.stringify(TruthProbe.run(0, \"\", null, false, [], [\"\", \"a\"])));\n",
     );
     assert_eq!(out, truthiness::EXPECTED);
+}
+
+#[test]
+#[ignore]
+fn real_blog_i18n_locales_run_under_tsx() {
+    // The answers `emit_and_run::i18n_locales` checks on CRuby, but for a String
+    // locale named in an error: JS has no Symbol apart from String, so `"de"` shows as `:de`.
+    let (emitted, errors) = i18n_locales_app::probe_app()
+        .edit("app/models/article.rb", i18n_locales_app::IN_LOCALE, "")
+        .emit(roundhouse::project::BuildTarget::Typescript);
+    assert!(errors.is_empty(), "{errors:?}");
+    assert!(emitted.join("config/i18n_translations").exists());
+    let out = run_under_tsx(
+        &emitted,
+        r#"import { Article } from "./app/models/article.js";
+import { I18n } from "./src/i18n_locale.js";
+const expect = (what: string, got: unknown, want: unknown) => {
+  if (JSON.stringify(got) !== JSON.stringify(want)) throw new Error(what + ": " + JSON.stringify(got));
+};
+expect("lookups", Article.lookups(), ["Hello", "Hi <x>", "1 item", "2 items", "Translation missing: en.probe.nope", "Cześć", "fallback 3", "en"]);
+expect("polish", Article.polish(), ["1 rzecz", "5 rzeczy", "English only", "Cześć", "Translation missing: pl.probe.nope", "Cześć", "Hi Ola", "pl"]);
+expect("restored", I18n.locale(), "en");
+expect("named", [Article.named("pl"), Article.named("en"), Article.named(null)], ["Cześć", "Hello", "Hello"]);
+expect("dynamic", [Article.probe_key("greet"), Article.only_key("xx")], ["Hello", "Translation missing: en.probe.only_xx"]);
+let message = "no raise";
+try { Article.named("de"); } catch (e) { message = (e as Error).message; }
+expect("named de", message, ":de is not a valid locale");
+console.log("locales passed");
+"#,
+    );
+    assert_eq!(out, "locales passed");
+    std::fs::remove_file(emitted.join("check.ts")).unwrap();
+    assert_tsc_passes("real-blog with two locales", &emitted);
 }

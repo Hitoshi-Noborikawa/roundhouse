@@ -1452,11 +1452,12 @@ fn emits_namespaced_controllers(target: BuildTarget) -> bool {
 }
 
 /// A `t` that reads the translation table or the whole catalog when it
-/// runs (`lower::i18n_translate`): only the Ruby-family runtime carries
-/// `I18n.translate_site` / `I18n.translate_runtime`, so another target
-/// reports each one rather than emit a call to nothing.
+/// runs (`lower::i18n_translate`): only the Ruby-family runtime and the
+/// TypeScript (Node) one carry `I18n.translate_site` /
+/// `I18n.translate_runtime`, so another target reports each one rather
+/// than emit a call to nothing.
 fn report_i18n_table_sites(app: &App, target: BuildTarget) {
-    if matches!(target, BuildTarget::Blog | BuildTarget::Ruby | BuildTarget::Jruby | BuildTarget::Spinel | BuildTarget::Futamura) {
+    if matches!(target, BuildTarget::Blog | BuildTarget::Ruby | BuildTarget::Jruby | BuildTarget::Spinel | BuildTarget::Futamura | BuildTarget::Typescript) {
         return;
     }
     for span in &app.i18n_table_sites {
@@ -2423,7 +2424,16 @@ fn target_files_inner(
         BuildTarget::Rust => Ok(sort_files(emit::rust::emit(app))),
         BuildTarget::Swift => Ok(sort_files(emit::swift::emit(app))),
         BuildTarget::CSharp => Ok(sort_files(emit::csharp::emit(app))),
-        BuildTarget::Typescript => Ok(sort_files(emit::typescript::emit(app))),
+        BuildTarget::Typescript => {
+            let mut files = emit::typescript::emit(app);
+            if !app.i18n_table.is_empty() || !app.i18n_runtime_sites.is_empty() {
+                files.push(emit::EmittedFile {
+                    path: std::path::PathBuf::from("config/i18n_translations"),
+                    content: i18n_table_text(app),
+                });
+            }
+            Ok(sort_files(files))
+        }
         BuildTarget::TypescriptWorker => Ok(sort_files(emit::typescript::emit_with_profile(
             app,
             &crate::profile::DeploymentProfile::worker(),
@@ -6685,7 +6695,7 @@ fn report_unsupported_bundled_constants(app: &App, target: BuildTarget) {
             );
         }
         // `translate_site` / `translate_runtime` are reported with their call (`report_i18n_table_sites`).
-        if !matches!(target, "jruby" | "spinel")
+        if !matches!(target, "jruby" | "spinel" | "typescript")
             && let crate::expr::ExprNode::Send { recv: Some(recv), method, .. } = &*expr.node
             && matches!(&*recv.node, crate::expr::ExprNode::Const { path } if path.iter().map(|s| s.as_str()).skip_while(|s| s.is_empty()).eq(["I18n"]))
             && !matches!(method.as_str(), "translate_site" | "translate_runtime")

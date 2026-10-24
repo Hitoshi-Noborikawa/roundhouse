@@ -36,6 +36,7 @@ const BROADCASTS_SOURCE: &str = include_str!("../../runtime/typescript/broadcast
 // `JsonBuilder.encode_datetime` Date branch is injected into the
 // transpiled json_builder unit (see `patch_json_builder_datetime`).
 const DATETIME_SOURCE: &str = include_str!("../../runtime/typescript/datetime.ts");
+const I18N_HOST_SOURCE: &str = include_str!("../../runtime/typescript/i18n_host.ts");
 const DB_SOURCE: &str = include_str!("../../runtime/typescript/db.ts");
 const PARAM_VALUE_SOURCE: &str = include_str!("../../runtime/typescript/param_value.ts");
 const PARAMS_SOURCE: &str = include_str!("../../runtime/typescript/params.ts");
@@ -216,6 +217,10 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
     files.push(EmittedFile {
         path: PathBuf::from("src/broadcasts.ts"),
         content: BROADCASTS_SOURCE.to_string(),
+    });
+    files.push(EmittedFile {
+        path: PathBuf::from("src/i18n_host.ts"),
+        content: I18N_HOST_SOURCE.to_string(),
     });
     // Datetime seam — `RhDateTime.parse` for temporal-column getters.
     files.push(EmittedFile {
@@ -725,6 +730,8 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
     let shake_stats: std::rc::Rc<std::cell::RefCell<Vec<(String, usize, usize, usize, usize)>>> =
         Default::default();
     let shake_stats_in = shake_stats.clone();
+    let catalog = app.i18n.or_rails_default();
+    let app_locales = (catalog.locale.clone(), catalog.locales());
     let runtime_units = crate::runtime_loader::typescript_units(move |_path, classes| {
         let mut classes: Vec<_> = classes
             .into_iter()
@@ -801,6 +808,9 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
         if !extern_for_runtime.is_empty() {
             let refs: Vec<&str> = extern_for_runtime.iter().map(|s| s.as_str()).collect();
             crate::analyze::async_color::propagate_with_externs(&mut classes, &refs);
+        }
+        if _path.ends_with("i18n_locale.ts") {
+            with_app_locales(&mut classes, &app_locales.0, &app_locales.1);
         }
         classes
     })
@@ -2133,6 +2143,32 @@ pub(super) fn js_library_class(
 /// `@<its own name> ||= <literal>` (a literal `declarable_constant_value`
 /// takes): the reader `js_library_class` drops for the field of that
 /// name, and the value the field starts at.
+// Not `project::apply_i18n_locales`' text splice: this runtime is transpiled from the parsed source, not copied
+fn with_app_locales(classes: &mut [crate::dialect::LibraryClass], default: &str, available: &[String]) {
+    use crate::expr::{Expr, ExprNode, Literal};
+    let sym = |name: &str| {
+        let mut e = Expr::new(crate::span::Span::synthetic(), ExprNode::Lit { value: Literal::Sym { value: crate::ident::Symbol::from(name) } });
+        e.ty = Some(Ty::Sym);
+        e
+    };
+    for class in classes.iter_mut().filter(|c| c.name.0.as_str() == "I18n") {
+        for method in &mut class.methods {
+            match method.name.as_str() {
+                "app_default_locale" => method.body = sym(default),
+                "app_available_locales" => {
+                    let mut list = Expr::new(
+                        crate::span::Span::synthetic(),
+                        ExprNode::Array { elements: available.iter().map(|l| sym(l)).collect(), style: Default::default() },
+                    );
+                    list.ty = Some(Ty::Array { elem: std::sync::Arc::new(Ty::Sym) });
+                    method.body = list;
+                }
+                _ => {}
+            }
+        }
+    }
+}
+
 fn memoized_literals(
     class: &crate::dialect::LibraryClass,
 ) -> std::collections::HashMap<(String, bool), &crate::expr::Expr> {

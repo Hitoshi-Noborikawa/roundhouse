@@ -869,6 +869,8 @@ const RUNTIME_SRC_IMPORTS: &[(&str, &str)] = &[
     ("RecordInvalid", "errors"),
     ("ErrorDetail", "active_record_base"),
     ("FormBuilder", "view_helpers"),
+    ("I18n", "i18n_locale"),
+    ("I18nHost", "i18n_host"),
     // Db primitive surface (`Db.prepare`, `Db.step?`, `Db.column_*`,
     // `Db.escape_int`, `Db.last_insert_rowid`, …) backing the
     // lowerer-emitted `_adapter_*` methods and the Arel pass's

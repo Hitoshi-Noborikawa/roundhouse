@@ -316,6 +316,28 @@ pub struct RuntimeUnit {
 /// to one `runtime/ruby/<x>.rb` file we want to emit as a TS file
 /// in the output project.
 const TYPESCRIPT_RUNTIME: &[RuntimeEntry] = &[
+    runtime_entry! {
+        stem: "active_support_inflections",
+        namespace: "",
+        out_path: "src/active_support_inflections.ts",
+        mode: Mode::Library,
+        imports: NO_IMPORTS,
+        prelude: NO_PRELUDE,
+        extra_roots: NO_EXTRA_ROOTS,
+    },
+    runtime_entry! {
+        stem: "i18n_locale",
+        namespace: "",
+        out_path: "src/i18n_locale.ts",
+        mode: Mode::Library,
+        imports: &[
+            ("I18nHost", "./i18n_host.js"),
+            ("ViewHelpers", "./view_helpers.js"),
+            ("ActiveSupport", "./active_support_inflections.js"),
+        ],
+        prelude: NO_PRELUDE,
+        extra_roots: NO_EXTRA_ROOTS,
+    },
     // HashWithIndifferentAccess no longer transpiled to typed targets
     // per Phase 2.5(b). @flash / @session moved to per-app
     // ActionDispatch::Flash / ActionDispatch::Session structs with
