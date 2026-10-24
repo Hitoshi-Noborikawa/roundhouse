@@ -3080,6 +3080,11 @@ fn js_send_inner(
     // nullable wrapper so dispatch fires on the inner type.
     if let Some(r) = recv {
         let recv_ty = strip_nullable(r.ty.as_ref());
+        // Not left out as a Union: an Integer-or-Float count (`count.to_f`) has every number method a Float has
+        let recv_ty = match recv_ty {
+            Some(Ty::Union { variants }) if variants.iter().all(|v| matches!(v, Ty::Int | Ty::Float | Ty::Nil)) && variants.iter().any(|v| matches!(v, Ty::Float)) => Some(&Ty::Float),
+            other => other,
+        };
         match recv_ty {
             // Ruby Array → JS Array (with native method renames where
             // they diverge: `.each` → `.forEach`, `.size` → `.length`).
