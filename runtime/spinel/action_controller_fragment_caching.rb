@@ -86,7 +86,7 @@ module ActionController
       return nil unless perform_caching
       store = cache_store
       return nil if store.nil?
-      name = ActiveSupport::Cache.expanded_key(combined_fragment_cache_key(key))
+      name = ActiveSupport::Cache.retrieve_cache_key(combined_fragment_cache_key(key))
       return store.read(name) if store.is_a?(ActiveSupport::Cache::MemoryStore)
       store.read_str(name)
     end
@@ -104,7 +104,7 @@ module ActionController
       return content unless perform_caching
       store = cache_store
       return content if store.nil?
-      name = ActiveSupport::Cache.expanded_key(combined_fragment_cache_key(key))
+      name = ActiveSupport::Cache.retrieve_cache_key(combined_fragment_cache_key(key))
       if store.is_a?(ActiveSupport::Cache::MemoryStore)
         store.write(name, content) if ttl == 0
         return content
@@ -158,9 +158,14 @@ module ActionView
     # no digest here), so an app's override of
     # `combined_fragment_cache_key` sees the same `[path, key]` shape.
     # Expanded once, for the read and the write to share.
+    #
+    # Expanded as Rails' `expand_cache_key` does, by `retrieve_cache_key`:
+    # a record contributes its `cache_key_with_version`. `cached: true`
+    # hands the element itself through here, and a store's own
+    # `expanded_key` (`cache_key`, no version) would never let it expire.
     def self.collection_fragment_key(partial, key)
       controller = ActionView::ViewHelpers.fragment_controller
-      ActiveSupport::Cache.expanded_key(controller.combined_fragment_cache_key([ partial, key ]))
+      ActiveSupport::Cache.retrieve_cache_key(controller.combined_fragment_cache_key([ partial, key ]))
     end
 
     # Rails reads and writes every element through `ActionView::
