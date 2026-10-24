@@ -42,6 +42,7 @@ fn create_with_a_block_does_not_save_an_invalid_record() {
         .run_ruby(ASSERTIONS);
     assert!(run.errors.is_empty(), "{:?}", run.errors);
     assert!(!run.success, "a comment without a commenter was saved:\n{}\n{}", run.stdout, run.stderr);
+    assert!(run.stderr.contains("not saved") || run.stdout.contains("not saved"), "failed for another reason:\n{}\n{}", run.stdout, run.stderr);
 }
 
 
