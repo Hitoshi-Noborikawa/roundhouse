@@ -1056,12 +1056,8 @@ fn campfire_failure_capture_keeps_the_original_exit_and_actual_c() {
                 "#!/bin/sh\necho build-output >&2\nif [ \"$RETAINED_C\" = true ]; then\n  echo \"spinel: the generated C is kept at $PWD/actual.c\" >&2\nfi\necho \"note: the generated C is kept at $PWD/stale.c\"\nexit \"$BUILD_EXIT\"\n",
             ),
             (
-                "spinel-dist/spinel-real",
-                "#!/bin/sh\n[ \"$1\" = --string-repr=handle ] && [ \"$2\" = --version ] || exit 99\necho compiler-version\n",
-            ),
-            (
                 "spinel-dist/spinel",
-                "#!/bin/sh\nd=$(dirname \"$0\")\n[ -x \"$d/spinel-real\" ] || chmod +x \"$d/spinel-real\"\nexec \"$d/spinel-real\" --string-repr=handle \"$@\"\n",
+                "#!/bin/sh\n[ \"$1\" = --version ] || exit 99\necho compiler-version\n",
             ),
         ] {
             let path = root.join(path);
