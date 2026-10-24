@@ -63,7 +63,9 @@ module I18n
   def self.checked_locale(value)
     found = value.nil? ? nil : available_named(value.to_s)
     return found unless found.nil?
-    shown = value.nil? ? "nil" : (value.is_a?(Symbol) ? ":" + value.to_s : "\"" + value.to_s + "\"")
+    # Not `value.to_s` in each arm: a strict target narrows `value` to a Symbol there and loses the conversion
+    name = value.to_s
+    shown = value.nil? ? "nil" : (value.is_a?(Symbol) ? ":" + name : "\"" + name + "\"")
     raise InvalidLocale, shown + " is not a valid locale"
   end
 
@@ -83,8 +85,10 @@ module I18n
     previous
   end
 
+  # Not `set_locale_name(previous) unless previous.nil?`: a strict target does not narrow the tested local
   def self.leave_locale(previous)
-    I18nHost.set_locale_name(previous) unless previous.nil?
+    return nil if previous.nil?
+    I18nHost.set_locale_name(previous.to_s)
     nil
   end
 
