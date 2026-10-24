@@ -246,3 +246,58 @@ fn an_array_value_is_checked_element_by_element_on_spinel() {
     run.assert_passes();
     assert!(run.stdout.contains("array clusivity passed"), "{}", run.stdout);
 }
+
+// Rails 8.1.4 (oracle `inclusion_numbered.rb`): `-> { _1.allowed }` has
+// arity 1 and `-> { it.tones }` names the same parameter, so both are
+// called with the record; `-> { [_1, _2] }` takes two and Rails raises
+// ArgumentError.
+const NUMBERED_MODEL: &str = r#"class Article < ApplicationRecord
+  has_many :comments, dependent: :destroy
+  validates :mood, inclusion: { in: -> { _1.allowed } }, allow_nil: true
+  validates :tone, inclusion: { in: -> { it.tones } }, allow_nil: true
+
+  def allowed
+    %w(happy)
+  end
+
+  def tones
+    %w(calm)
+  end
+"#;
+
+const NUMBERED_SCRIPT: &str = r##"
+def check(label, got, want)
+  raise "#{label}: #{got.inspect} (want #{want.inspect})" unless got == want
+end
+base = { title: "Numbered", body: "A body long enough to validate." }
+check("_1 is the record", Article.new(**base, mood: "happy").valid?, true)
+check("_1 rejects", Article.new(**base, mood: "sad").valid?, false)
+check("it is the record", Article.new(**base, tone: "calm").valid?, true)
+check("it rejects", Article.new(**base, tone: "loud").valid?, false)
+puts "numbered parameters passed"
+"##;
+
+#[test]
+fn a_numbered_or_it_parameter_is_the_record_on_ruby() {
+    let run = emit_and_run::real_blog()
+        .edit("db/schema.rb", "create_table \"articles\", force: :cascade do |t|", "create_table \"articles\", force: :cascade do |t|\n    t.string \"mood\"\n    t.string \"tone\"")
+        .edit("app/models/article.rb", "class Article < ApplicationRecord\n  has_many :comments, dependent: :destroy\n", NUMBERED_MODEL)
+        .run_ruby(NUMBERED_SCRIPT);
+    run.assert_passes();
+    assert!(run.stdout.contains("numbered parameters passed"), "{}", run.stdout);
+}
+
+/// Two numbered parameters: Rails raises ArgumentError calling it with
+/// the record, so it stays a gap.
+#[test]
+fn two_numbered_parameters_stay_a_gap() {
+    let warnings = emit_and_run::real_blog()
+        .edit("db/schema.rb", "create_table \"articles\", force: :cascade do |t|", "create_table \"articles\", force: :cascade do |t|\n    t.string \"word\"")
+        .edit(
+            "app/models/article.rb",
+            "class Article < ApplicationRecord\n  has_many :comments, dependent: :destroy\n",
+            "class Article < ApplicationRecord\n  has_many :comments, dependent: :destroy\n  validates :word, inclusion: { in: -> { [_1, _2] } }\n",
+        )
+        .ingest_warnings();
+    assert!(warnings.iter().any(|w| w.contains("inclusion: in")), "{warnings:#?}");
+}

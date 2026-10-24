@@ -1674,14 +1674,33 @@ fn inclusion_call(node: &Node<'_>, file: &str) -> Option<InclusionSpec> {
     if !extra_params.is_empty() || params.len() > 1 {
         return None;
     }
+    // `-> { _1.allowed }` takes one parameter (arity 1, so Rails calls it
+    // with the record), which the parsed lambda does not list. Two or more
+    // (`_1`, `_2`) make Rails raise `ArgumentError`: a gap.
+    let numbered = match numbered_parameters(node) {
+        Some(0) | None => None,
+        Some(1) => Some(Symbol::from("_1")),
+        Some(_) => return None,
+    };
     let mut body = body.clone();
-    if let Some(param) = params.first() {
+    if let Some(param) = params.first().or(numbered.as_ref()) {
         if reads_implicit_self(&body) {
             return None;
         }
         replace_var_with_self(&mut body, param);
     }
     Some(InclusionSpec::Call(body))
+}
+
+/// The highest numbered parameter (`_1`, `_2`, …) a lambda literal or a
+/// `lambda`/`proc`/`Proc.new` block reads, or `None` when it declares none.
+fn numbered_parameters(node: &Node<'_>) -> Option<u8> {
+    let params = if let Some(lambda) = node.as_lambda_node() {
+        lambda.parameters()
+    } else {
+        node.as_call_node()?.block()?.as_block_node()?.parameters()
+    };
+    Some(params?.as_numbered_parameters_node()?.maximum())
 }
 
 /// Whether `e` calls a method without a receiver or reads `self`.
