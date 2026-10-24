@@ -10227,9 +10227,10 @@ fn lane_test_class(line: &str) -> Option<String> {
     // The parents `emit::ruby` leaves on a test class: `TestBase` is
     // what `ActiveSupport::TestCase` becomes; the rest are the
     // harness's own subclasses of it (runtime/spinel/test/test_helper.rb).
-    const LANE_PARENTS: [&str; 5] = [
+    const LANE_PARENTS: [&str; 6] = [
         "< TestBase",
         "< ActionDispatch::IntegrationTest",
+        "< ActionController::TestCase",
         "< ActionView::TestCase",
         "< ActionCable::Channel::TestCase",
         "< ActionCable::Connection::TestCase",
@@ -10932,6 +10933,7 @@ mod tests {
             "class MessagesHelperTest < ActionView::TestCase",
             "class RoomTest < TestBase",
             "class RoomsControllerTest < ActionDispatch::IntegrationTest",
+            "class ArticlesControllerTest < ActionController::TestCase",
         ] {
             assert!(lane_test_class(line).is_some(), "{line}");
         }
