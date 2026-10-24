@@ -144,7 +144,11 @@ pub fn emit_expr(e: &Expr) -> String {
         && let ExprNode::Send { recv: Some(r), method, args, block: None, .. } = &*e.node
         && method.as_str() == "const_get"
         && let [arg] = args.as_slice()
-        && let ExprNode::Lit { value: crate::expr::Literal::Sym { value: name } } = &*arg.node
+        && let Some(name) = match &*arg.node {
+            ExprNode::Lit { value: crate::expr::Literal::Sym { value } } => Some(value.as_str().to_string()),
+            ExprNode::Lit { value: crate::expr::Literal::Str { value } } => Some(value.clone()),
+            _ => None,
+        }
     {
         return format!("{}::{name}", emit_postfix_recv(r));
     }

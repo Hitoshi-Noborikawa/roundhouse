@@ -630,10 +630,12 @@ pub(super) fn constant_path_segments_strs(node: &Node<'_>) -> Option<Vec<String>
         return Some(vec![constant_id_str(&c.name()).to_string()]);
     }
     if let Some(p) = node.as_constant_path_node() {
-        let mut out = p
-            .parent()
-            .and_then(|n| constant_path_segments_strs(&n))
-            .unwrap_or_default();
+        // A value anywhere up the chain (`self.class::NAMES::LABEL`) makes
+        // the whole path a lookup through that value, not a constant name.
+        let mut out = match p.parent() {
+            Some(parent) => constant_path_segments_strs(&parent)?,
+            None => Vec::new(),
+        };
         if let Some(id) = p.name() {
             out.push(constant_id_str(&id).to_string());
         }

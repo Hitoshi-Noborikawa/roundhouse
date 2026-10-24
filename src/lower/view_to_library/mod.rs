@@ -3854,7 +3854,10 @@ pub(super) fn rewrite_ivars_to_locals(expr: &Expr, locals: &IvarLocals) -> Expr 
         },
         other => other.clone(),
     };
-    Expr::new(expr.span, new_node)
+    let mut out = Expr::new(expr.span, new_node);
+    // `@article.class::STATES` stays a path (`expr::CONST_PATH`).
+    out.decisions |= expr.decisions & crate::expr::CONST_PATH;
+    out
 }
 
 fn rewrite_lvalue(lv: &LValue, locals: &IvarLocals) -> LValue {

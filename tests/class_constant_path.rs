@@ -5,7 +5,8 @@
 //! `NameError: uninitialized constant <class>::KINDS`. Ingest dropped the
 //! parent and read a lexical `KINDS`, which no target could resolve; the
 //! path now reaches the analysis as `const_get(:KINDS)` and the ruby family
-//! writes it back as the path.
+//! writes it back as the path, a chained one (`self.class::NAMES::LABEL`)
+//! included.
 
 use roundhouse::project::BuildTarget;
 
@@ -36,10 +37,18 @@ class Shape
   def peer_kinds(other)
     other.class::KINDS
   end
+
+  def label
+    self.class::NAMES::LABEL
+  end
 end
 
 class Polygon < Shape
   KINDS = %w(a b).freeze
+
+  module NAMES
+    LABEL = "poly"
+  end
 end
 
 class Square < Polygon
@@ -80,6 +89,8 @@ check("parent's", Polygon.new.limit, 10)
 check("included module", Square.new.labels, %w(m))
 check("other.class", Shape.new.peer_kinds(Circle.new), %w(z))
 check("model", Article.new.states, %w(draft published))
+check("chained", Polygon.new.label, "poly")
+check("chained, inherited", Square.new.label, "poly")
 message = begin
   Shape.new.kinds
   "no error"
@@ -111,4 +122,16 @@ fn a_constant_through_a_class_value_resolves_as_ruby_does_on_spinel() {
 fn a_strict_target_refuses_the_read() {
     let (_emitted, errors) = app().emit(BuildTarget::Rust);
     assert!(errors.iter().any(|e| e.contains("const_get")), "{errors:#?}");
+}
+
+/// A view's read keeps the path too: the view lowering rebuilds the send
+/// (ivars become locals), and the path survives it.
+#[test]
+fn a_view_reads_the_constant_through_the_class() {
+    let (emitted, errors) = app()
+        .edit("app/views/articles/show.html.erb", "<%= @article.title %>", "<%= @article.title %> <%= @article.class::STATES.join(\",\") %>")
+        .emit(BuildTarget::Ruby);
+    assert!(errors.is_empty(), "{errors:#?}");
+    let view = std::fs::read_to_string(emitted.join("app/views/articles/show.rb")).expect("show.rb");
+    assert!(view.contains("article.class::STATES"), "{view}");
 }

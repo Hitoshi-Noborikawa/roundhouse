@@ -1026,15 +1026,42 @@ fn ingest_expr_node(node: &Node<'_>, file: &str) -> IngestResult<Expr> {
             // value, not a constant, and Ruby looks `KINDS` up through that
             // class's ancestors. Its own spelling is `const_get(:KINDS)`;
             // dropping the parent made it a lexical `KINDS`.
-            if let Some(parent) = p.parent().filter(|parent| super::util::constant_path_segments_strs(parent).is_none()) {
-                let recv = ingest_expr(&parent, file)?;
-                let name = p.name().map(|id| constant_id_str(&id).to_string()).unwrap_or_default();
+            if super::util::constant_path_segments_strs(n).is_none() {
+                // A chain (`self.class::NAMES::LABEL`) is one scoped lookup,
+                // `const_get("NAMES::LABEL")`, as Ruby resolves it: the
+                // first segment through the value's ancestors, the rest
+                // inside it. One call keeps the receiver a proven class.
+                let mut names = Vec::new();
+                let mut at = p;
+                // A rooted segment (`::A`) has no value under it, and its
+                // path is all constants, so the walk always ends on one.
+                let value = loop {
+                    names.push(at.name().map(|id| constant_id_str(&id).to_string()).unwrap_or_default());
+                    match at.parent().map(|parent| (parent.as_constant_path_node(), parent)) {
+                        Some((Some(inner), _)) => at = inner,
+                        Some((None, parent)) => break Some(parent),
+                        None => break None,
+                    }
+                };
+                let Some(value) = value else {
+                    return Err(IngestError::Unsupported {
+                        file: file.to_string(),
+                        message: "constant path with no value under it".into(),
+                    });
+                };
+                names.reverse();
+                let recv = ingest_expr(&value, file)?;
+                let name = if names.len() == 1 {
+                    Literal::Sym { value: Symbol::from(names[0].as_str()) }
+                } else {
+                    Literal::Str { value: names.join("::") }
+                };
                 let mut send = Expr::new(
                     span,
                     ExprNode::Send {
                         recv: Some(recv),
                         method: Symbol::from("const_get"),
-                        args: vec![Expr::new(span, ExprNode::Lit { value: Literal::Sym { value: Symbol::from(name.as_str()) } })],
+                        args: vec![Expr::new(span, ExprNode::Lit { value: name })],
                         block: None,
                         parenthesized: true,
                     },
