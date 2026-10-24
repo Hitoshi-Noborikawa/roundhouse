@@ -7,6 +7,8 @@
 
 #[path = "support/emit_and_run.rs"]
 mod emit_and_run;
+#[path = "support/pundit_app.rs"]
+mod pundit_app;
 #[path = "emit_and_run/session_cookie_key.rs"]
 mod session_cookie_key;
 #[path = "emit_and_run/active_model_attributes.rs"]
