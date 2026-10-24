@@ -9950,7 +9950,7 @@ pub(crate) fn apply_typed_writer_cast_lowering(lcs: &mut [LibraryClass], app: &A
                     continue;
                 }
                 if let Some(col) = table.and_then(|t| t.columns.iter().find(|c| c.name == name))
-                    && !crate::lower::model_to_library::markers::attribute_matches_column(ty.as_str(), &col.col_type)
+                    && !crate::lower::model_to_library::markers::attribute_matches_column(ty.as_str(), col)
                 {
                     continue;
                 }

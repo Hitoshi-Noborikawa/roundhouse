@@ -522,11 +522,14 @@ pub(super) fn push_attr_accessor_methods(methods: &mut Vec<MethodDef>, model: &M
 /// | boolean | `:boolean` |
 /// | datetime | `:datetime` |
 ///
-/// Any other pair keeps the column's cast and is reported.
-pub(crate) fn attribute_matches_column(ty: &str, col: &crate::schema::ColumnType) -> bool {
+/// Any other pair keeps the column's cast and is reported, and so does an
+/// array column (`t.bigint "tag_ids", array: true`): its value is an
+/// Array, whose element type is not the column's.
+pub(crate) fn attribute_matches_column(ty: &str, col: &crate::schema::Column) -> bool {
     use crate::schema::ColumnType;
-    matches!(
-        (ty, col),
+    !col.array
+        && matches!(
+        (ty, &col.col_type),
         ("string", ColumnType::String { .. } | ColumnType::Text)
             | ("integer", ColumnType::Integer | ColumnType::BigInt)
             | ("float", ColumnType::Float)

@@ -938,15 +938,16 @@ fn report_unclaimed_unknowns(model: &Model, schema: &Schema) {
                             .tables
                             .get(&model.table.0)
                             .and_then(|t| t.columns.iter().find(|c| c.name == *attr))
-                        && !self::markers::attribute_matches_column(ty.as_str(), &col.col_type)
+                        && !self::markers::attribute_matches_column(ty.as_str(), col)
                     {
                         let mut d = Diagnostic::unsupported(
                             expr.span,
                             None,
                             name,
                             format!(
-                                "`attribute :{attr}, :{ty}` over a {} column on `{}`: the column's type is kept (its reader and storage don't follow the declared type)",
+                                "`attribute :{attr}, :{ty}` over a {}{} column on `{}`: the column's type is kept (its reader and storage don't follow the declared type)",
                                 column_type_word(&col.col_type),
+                                if col.array { " array" } else { "" },
                                 model.name.0.as_str()
                             ),
                         );

@@ -136,14 +136,14 @@ check("reloaded writes", [r.code, r.enabled, r.shout, r.status, r.label], ["7", 
 puts "attribute over column passed"
 "##;
 
-const COLUMN_MODEL: &str = "class Article < ApplicationRecord\n  has_many :comments, dependent: :destroy\n  attribute :code, :integer\n  attribute :enabled, :string\n  attribute :shout, :boolean\n  attribute :label, :string\n  attribute :status, :integer\n  enum :status, { active: 0, archived: 1 }\n";
+const COLUMN_MODEL: &str = "class Article < ApplicationRecord\n  has_many :comments, dependent: :destroy\n  attribute :code, :integer\n  attribute :enabled, :string\n  attribute :shout, :boolean\n  attribute :label, :string\n  attribute :status, :integer\n  enum :status, { active: 0, archived: 1 }\n  attribute :tag_ids, :integer\n";
 
 fn column_app() -> emit_and_run::Overlay {
     emit_and_run::real_blog()
         .edit(
             "db/schema.rb",
             "create_table \"articles\", force: :cascade do |t|",
-            "create_table \"articles\", force: :cascade do |t|\n    t.string \"code\"\n    t.boolean \"enabled\"\n    t.string \"shout\"\n    t.string \"label\"\n    t.integer \"status\"",
+            "create_table \"articles\", force: :cascade do |t|\n    t.string \"code\"\n    t.boolean \"enabled\"\n    t.string \"shout\"\n    t.string \"label\"\n    t.integer \"status\"\n    t.bigint \"tag_ids\", array: true",
         )
         .edit(
             "app/models/article.rb",
@@ -177,7 +177,7 @@ fn an_attribute_over_a_column_of_another_type_is_reported() {
     assert!(std::process::Command::new("cp").args(["-a"]).arg(roundhouse::fixtures::real_blog()).arg(&source).status().unwrap().success());
     let schema = std::fs::read_to_string(source.join("db/schema.rb")).unwrap().replacen(
         "create_table \"articles\", force: :cascade do |t|",
-        "create_table \"articles\", force: :cascade do |t|\n    t.string \"code\"\n    t.boolean \"enabled\"\n    t.string \"shout\"\n    t.string \"label\"\n    t.integer \"status\"",
+        "create_table \"articles\", force: :cascade do |t|\n    t.string \"code\"\n    t.boolean \"enabled\"\n    t.string \"shout\"\n    t.string \"label\"\n    t.integer \"status\"\n    t.bigint \"tag_ids\", array: true",
         1,
     );
     std::fs::write(source.join("db/schema.rb"), schema).unwrap();
@@ -195,8 +195,39 @@ fn an_attribute_over_a_column_of_another_type_is_reported() {
         .expect("run roundhouse");
     std::fs::remove_dir_all(&root).ok();
     let diagnostics: Vec<String> = String::from_utf8_lossy(&out.stderr).lines().map(String::from).collect();
-    for kept in ["`attribute :code, :integer` over a string column", "`attribute :enabled, :string` over a boolean column", "`attribute :shout, :boolean` over a string column"] {
+    for kept in ["`attribute :code, :integer` over a string column", "`attribute :enabled, :string` over a boolean column", "`attribute :shout, :boolean` over a string column", "`attribute :tag_ids, :integer` over a bigint array column"] {
         assert!(diagnostics.iter().any(|d| d.contains(kept)), "{kept} not reported: {diagnostics:#?}");
     }
     assert!(!diagnostics.iter().any(|d| d.contains("`attribute :label") || d.contains("`attribute :status")), "{diagnostics:#?}");
+}
+
+const ARRAY_COLUMN_SCRIPT: &str = r##"
+def check(label, got, want)
+  raise "#{label}: #{got.inspect} (want #{want.inspect})" unless got == want
+end
+a = Article.new(title: "Arrays", body: "A body long enough to validate.", tag_ids: [1, 2])
+check("new keeps the Array", a.tag_ids, [1, 2])
+a.tag_ids = [3]
+check("the writer keeps the Array", a.tag_ids, [3])
+a.save!
+check("reloaded Array", Article.find(a.id).tag_ids, [3])
+puts "attribute over array column passed"
+"##;
+
+/// A scalar `attribute` over an array column (`t.bigint "tag_ids", array:
+/// true` with `attribute :tag_ids, :integer`) matches the element type, not
+/// the column's: the column keeps its Array writer and storage, and the
+/// declaration is reported.
+#[test]
+fn an_attribute_over_an_array_column_keeps_the_array() {
+    let run = emit_and_run::real_blog()
+        .edit("db/schema.rb", "create_table \"articles\", force: :cascade do |t|", "create_table \"articles\", force: :cascade do |t|\n    t.bigint \"tag_ids\", array: true")
+        .edit(
+            "app/models/article.rb",
+            "class Article < ApplicationRecord\n  has_many :comments, dependent: :destroy\n",
+            "class Article < ApplicationRecord\n  has_many :comments, dependent: :destroy\n  attribute :tag_ids, :integer\n",
+        )
+        .run_ruby(ARRAY_COLUMN_SCRIPT);
+    run.assert_passes();
+    assert!(run.stdout.contains("attribute over array column passed"), "{}", run.stdout);
 }
