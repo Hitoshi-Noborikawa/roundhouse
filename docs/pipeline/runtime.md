@@ -2932,17 +2932,24 @@ Three gaps remain, all on spinel's side:
   order, which differs only when two gems define one key. A gem that is
   not an engine adds its files from its own code; none is read unless
   `src/i18n/gems.rs::NON_ENGINE_LOCALES` names its paths.
-  The same runtime is transpiled to TypeScript (Node), which reaches
-  the locale, `Rails.env` and `config/i18n_translations` through a
-  hand-written `I18nHost` (`runtime/typescript/i18n_host.ts`, the Ruby
-  family's is `runtime/ruby/i18n_host.rb`): each request runs in its
-  own `AsyncLocalStorage` scope, as node:http interleaves requests
-  across awaits, so it starts at the default locale rather than
-  inheriting a previous request's on the same thread. JS has no Symbol
-  apart from String, so `InvalidLocale`'s message shows a String locale
-  as `:de` where Rails shows `"de"`. The worker and browser builds and
-  the other strict targets still refuse a translation chosen when it
-  runs.
+  The same runtime is transpiled to every strict target but Rust. Each
+  reaches the locale, `Rails.env` and `config/i18n_translations` through
+  a hand-written `I18nHost` (`runtime/<target>/i18n_host.*`; the Ruby
+  family's is `runtime/ruby/i18n_host.rb`) that keeps the locale per
+  request: an `AsyncLocalStorage` scope on TypeScript (node:http
+  interleaves requests across awaits), a context variable on Python, a
+  per-fiber slot on Crystal, an `AsyncLocal` on C#, a thread-local on
+  Kotlin and Swift, a slot keyed by goroutine on Go, and the request's
+  process on Elixir. Every server resets it at the start of a request,
+  so a request starts at the default locale rather than inheriting a
+  previous one's. TypeScript, Python, C#, Kotlin, Swift and Go have no
+  Symbol apart from String, so `InvalidLocale`'s message shows a String
+  locale as `:de` where Rails shows `"de"`. Elixir holds the parsed table
+  in the request's process, so each request parses it again; the file's
+  text is read once. Only the Ruby family, TypeScript and Crystal carry
+  the catalog a translation chosen by a run-time key reads; elsewhere,
+  and in the worker and browser builds and on Rust, such a translation
+  is refused.
 - **`fragment_name_with_digest(name, digest_path)` adds no template
   digest**: templates carry none here (see
   `runtime/spinel/action_controller_fragment_caching.rb`), so an omitted
