@@ -18,7 +18,7 @@
 #[allow(dead_code)]
 mod emit_and_run;
 
-const COLUMNS: &str = "create_table \"articles\", force: :cascade do |t|\n    t.string \"tone\"\n    t.string \"slug\"\n    t.string \"code\"\n    t.string \"word\"\n    t.string \"gate\"\n    t.string \"note\"\n    t.string \"pick\"\n    t.string \"handle\"";
+const COLUMNS: &str = "create_table \"articles\", force: :cascade do |t|\n    t.string \"tone\"\n    t.string \"slug\"\n    t.string \"code\"\n    t.string \"word\"\n    t.string \"gate\"\n    t.string \"note\"\n    t.string \"pick\"\n    t.string \"handle\"\n    t.string \"short\"";
 
 const MODEL: &str = r#"class Article < ApplicationRecord
   has_many :comments, dependent: :destroy
@@ -30,6 +30,7 @@ const MODEL: &str = r#"class Article < ApplicationRecord
   validates :gate, inclusion: { in: %w(x) }, allow_nil: true, if: -> { note == "on" }
   validates :pick, inclusion: { in: %w(x), allow_nil: true }
   validates :handle, exclusion: { in: %w(admin), allow_blank: true }, inclusion: { in: %w(ok admin) }
+  validates :short, length: { maximum: 1 }, allow_blank: true
 "#;
 
 fn app() -> emit_and_run::Overlay {
@@ -73,11 +74,13 @@ class ArticleOuterAllowTest < ActiveSupport::TestCase
     assert_equal [], errors_for(slug: "")
     assert_equal [], errors_for(slug: "  ")
     assert_equal [], errors_for(word: "  ")
+    assert_equal [], errors_for(short: "  ")
   end
 
   test "allow_blank still checks a value" do
     assert_equal ["Slug is not included in the list", "Slug is invalid"], errors_for(slug: "X1")
     assert_equal ["Word is reserved"], errors_for(word: "admin")
+    assert_equal ["Short is too long (maximum is 1 character)"], errors_for(short: "ab")
   end
 
   test "a validator's own allow_nil: false wins" do
@@ -117,6 +120,7 @@ check("baseline", errors_for(valid), [])
 check("allow_nil nil", errors_for(valid, tone: nil), [])
 check("allow_nil empty", errors_for(valid, tone: ""), ["Tone is not included in the list"])
 check("allow_blank spaces", errors_for(valid, slug: "  "), [])
+check("allow_blank maximum-only length", errors_for(valid, short: "  "), [])
 check("allow_blank value", errors_for(valid, slug: "X1"), ["Slug is not included in the list", "Slug is invalid"])
 check("own allow_nil false", errors_for(valid, code: nil), ["Code is too short (minimum is 2 characters)"])
 check("if off", errors_for(valid, gate: "z", note: "off"), [])

@@ -653,8 +653,10 @@ fn parse_uniqueness(value: &Node<'_>, file: &str, _class_consts: &super::ClassCo
 fn blank_safe(rule: &crate::dialect::ValidationRule) -> bool {
     use crate::dialect::ValidationRule;
     match rule {
+        // A blank value passes absence, and presence under `allow_blank:` is
+        // dropped. A maximum-only length is not safe: `"  "` is blank and
+        // two characters long, so `maximum: 1` would reject what Rails skips.
         ValidationRule::Presence | ValidationRule::Absence => true,
-        ValidationRule::Length { min: None, .. } => true,
         _ => false,
     }
 }
