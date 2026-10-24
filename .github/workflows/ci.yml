@@ -463,10 +463,6 @@ jobs:
           cp -R spinel-src/packages             spinel-dist/packages
           cp -R spinel-src/builtins             spinel-dist/builtins
           git -C spinel-src rev-parse HEAD > spinel-dist/revision.txt
-          # Not each caller's flag: every lane, spin included, runs this binary, so the wrapper is the one place.
-          mv spinel-dist/spinel spinel-dist/spinel-real
-          printf '#!/bin/sh\nd=$(dirname "$0")\n[ -x "$d/spinel-real" ] || chmod +x "$d/spinel-real"\nexec "$d/spinel-real" --string-repr=handle "$@"\n' > spinel-dist/spinel
-          chmod +x spinel-dist/spinel
       - name: Upload spinel toolchain
         id: toolchain
         uses: actions/upload-artifact@v7
@@ -1258,7 +1254,7 @@ jobs:
           mkdir -p /tmp/campfire && tar -xzf /tmp/campfire.tar.gz -C /tmp/campfire --strip-components=1
       - name: Emit and build the comparison binary
         id: build
-        # --string-repr=handle analyses campfire about 2.9x as long as the default (matz/spinel#9258).
+        # Spinel's one-String representation (its default since baea3e288) analyses campfire about 2.9x as long as the old one (matz/spinel#9258).
         timeout-minutes: 55
         run: |
           set -o pipefail
