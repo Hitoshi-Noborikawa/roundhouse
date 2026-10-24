@@ -92,6 +92,7 @@ pub mod sql_functions;
 pub mod structure_sql;
 pub mod survey;
 mod with_options;
+pub(crate) mod nested_attributes;
 pub mod test;
 pub(crate) mod rake_tasks;
 pub mod util;

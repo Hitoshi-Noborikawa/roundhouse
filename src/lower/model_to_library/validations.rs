@@ -136,6 +136,12 @@ pub(super) fn push_validate_method(
                 } = assoc
                 {
                     let mut check = inline_belongs_to_check(model_msgs, name, foreign_key, *polymorphic);
+                    // `accepts_nested_attributes_for` (`ingest::nested_attributes`)
+                    // builds the record before the save, which writes its id:
+                    // Rails checks the object it built, so a pending one passes.
+                    if super::model_defines_instance_method(model, &Symbol::from(format!("{}_attributes=", name.as_str()))) {
+                        check = skip_when_nested_pending(check, name);
+                    }
                     check.inherit_span(span);
                     stmts.push(check);
                 }
@@ -875,6 +881,22 @@ fn inline_belongs_to_check(
         missing,
     );
     if_with_nil_else(cond, push_err)
+}
+
+/// `if <cond> … end` from `inline_belongs_to_check`, with `&&
+/// @__nested_<assoc>.nil?` added: no record built by the association's
+/// nested-attributes writer is waiting for the save.
+fn skip_when_nested_pending(check: Expr, assoc_name: &Symbol) -> Expr {
+    let ExprNode::If { cond, then_branch, else_branch } = &*check.node else { return check };
+    let none_pending = send(ivar(&Symbol::from(format!("__nested_{}", assoc_name.as_str()))), "nil?", vec![]);
+    Expr::new(
+        check.span,
+        ExprNode::If {
+            cond: bool_op(BoolOpKind::And, cond.clone(), none_pending),
+            then_branch: then_branch.clone(),
+            else_branch: else_branch.clone(),
+        },
+    )
 }
 
 /// `validate :method, if: :pred` / `unless: :pred`. The Symbol becomes

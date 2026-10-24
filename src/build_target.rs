@@ -245,6 +245,14 @@ impl BuildTarget {
         matches!(self, BuildTarget::Ruby | BuildTarget::Jruby | BuildTarget::Spinel | BuildTarget::Blog)
     }
 
+    /// Does the target lower `accepts_nested_attributes_for`
+    /// (`ingest::nested_attributes`)? Its generated model source is
+    /// verified on the Ruby-family runtimes; elsewhere the declaration
+    /// stays the reported gap.
+    pub fn lowers_nested_attributes(self) -> bool {
+        matches!(self, BuildTarget::Ruby | BuildTarget::Jruby | BuildTarget::Spinel)
+    }
+
     pub fn stores_array_columns(self) -> bool {
         matches!(self, BuildTarget::Ruby | BuildTarget::Jruby | BuildTarget::Spinel)
     }
