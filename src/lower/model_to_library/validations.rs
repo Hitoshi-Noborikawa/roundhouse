@@ -884,11 +884,17 @@ fn inline_belongs_to_check(
 }
 
 /// `if <cond> … end` from `inline_belongs_to_check`, with `&&
-/// @__nested_<assoc>.nil?` added: no record built by the association's
-/// nested-attributes writer is waiting for the save.
+/// (@__nested_<assoc>.nil? || @__nested_<assoc>.empty?)` added: no record
+/// built or updated by the association's nested-attributes writer is
+/// waiting for the save.
 fn skip_when_nested_pending(check: Expr, assoc_name: &Symbol) -> Expr {
     let ExprNode::If { cond, then_branch, else_branch } = &*check.node else { return check };
-    let none_pending = send(ivar(&Symbol::from(format!("__nested_{}", assoc_name.as_str()))), "nil?", vec![]);
+    let pending = ivar(&Symbol::from(format!("__nested_{}", assoc_name.as_str())));
+    let none_pending = bool_op(
+        BoolOpKind::Or,
+        send(pending.clone(), "nil?", vec![]),
+        send(pending, "empty?", vec![]),
+    );
     Expr::new(
         check.span,
         ExprNode::If {
