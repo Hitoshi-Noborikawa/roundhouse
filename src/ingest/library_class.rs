@@ -2187,21 +2187,47 @@ fn walk_decl_body_with_visibility<'pr>(
     };
 
     let statements = flatten_statements(b);
-    // Instance methods the body defines anywhere, for an alias of a builtin.
+    // Instance method names the body defines anywhere, for an alias of a
+    // builtin: a `def`, an `attr_reader`/`attr_accessor`, a
+    // `define_method(:name)`, or an `alias`/`alias_method` to that name.
     let defined_instance_methods: HashSet<String> = statements
         .iter()
-        .filter_map(|stmt| {
+        .flat_map(|stmt| {
             let definition = visibility::definition(stmt).map(|d| d.as_node());
-            let def = definition.as_ref().unwrap_or(stmt).as_def_node()?;
-            def.receiver().is_none().then(|| constant_id_str(&def.name()).to_string())
+            let node = definition.as_ref().unwrap_or(stmt);
+            let mut names = Vec::new();
+            if let Some(def) = node.as_def_node()
+                && def.receiver().is_none()
+            {
+                names.push(constant_id_str(&def.name()).to_string());
+            }
+            // `alias to_s to_s` rebinds the method it names: not a definition.
+            if let Some(alias) = node.as_alias_method_node()
+                && let Some(name) = alias_keyword_name(&alias.new_name())
+                && alias_keyword_name(&alias.old_name()) != Some(name.clone())
+            {
+                names.push(name.as_str().to_string());
+            }
+            if let Some(call) = node.as_call_node()
+                && call.receiver().is_none_or(|r| r.as_self_node().is_some())
+            {
+                let args: Vec<_> = call.arguments().map(|a| a.arguments().iter().collect()).unwrap_or_default();
+                match constant_id_str(&call.name()) {
+                    "attr_reader" | "attr_accessor" => names.extend(args.iter().filter_map(|a| symbol_value(a))),
+                    "define_method" | "alias_method" => names.extend(args.first().and_then(|a| symbol_value(a))),
+                    _ => {}
+                }
+            }
+            names
         })
         .collect();
-    // An `include`/`prepend` anywhere in the body: the module may define a
+    // An `include`/`prepend` (or `self.include`) anywhere in the body: the module may define a
     // builtin's name, so an alias of that builtin captured something the
     // delegation can't reproduce.
     let mixes_in = statements.iter().any(|stmt| {
         stmt.as_call_node().is_some_and(|c| {
-            c.receiver().is_none() && matches!(constant_id_str(&c.name()), "include" | "prepend")
+            c.receiver().is_none_or(|r| r.as_self_node().is_some())
+                && matches!(constant_id_str(&c.name()), "include" | "prepend")
         })
     });
     if let Some(name) = super::util::hoisted_name_collision(&statements) {
