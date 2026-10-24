@@ -2250,6 +2250,16 @@ impl<'a> BodyTyper<'a> {
                 {
                     return projected;
                 }
+                // Only the constant `Class` builds a class with `new`. A class object
+                // of unknown identity (`x.class`, campfire's `sanitizer_class`) builds
+                // an instance of whichever class it is; answering `Class` handed
+                // spinel a Class receiver for the instance's own calls.
+                if method.as_str() == "new"
+                    && matches!(recv_ty.as_ref(), Some(Ty::Class { id, args: targs }) if id.0.as_str() == "Class" && targs.is_empty())
+                    && recv.as_ref().is_some_and(|r| !matches!(&*r.node, ExprNode::Const { .. }))
+                {
+                    return Ty::Untyped;
+                }
                 let instance_receiver = recv.as_ref().map_or(ctx.instance_body, |r| self.is_instance(r, ctx))
                     && recv_ty.as_ref().is_some_and(instance_shaped);
                 let mut dispatched =
