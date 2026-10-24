@@ -642,6 +642,21 @@ pub(super) fn constant_path_segments_strs(node: &Node<'_>) -> Option<Vec<String>
     None
 }
 
+/// Whether a value sits anywhere under this constant path
+/// (`self.class::KINDS`, `self.class::NAMES::LABEL`): the path is then a
+/// lookup through that value. `constant_path_segments_strs` keeps the
+/// constant names alone, for the declaration sites that check their own
+/// literal spelling (`alba::literal_constant`).
+pub(super) fn constant_path_has_value_parent(p: &ruby_prism::ConstantPathNode<'_>) -> bool {
+    match p.parent() {
+        None => false,
+        Some(parent) => match parent.as_constant_path_node() {
+            Some(inner) => constant_path_has_value_parent(&inner),
+            None => parent.as_constant_read_node().is_none(),
+        },
+    }
+}
+
 pub(super) fn constant_path_segments(p: &ruby_prism::ConstantPathNode<'_>) -> Vec<Symbol> {
     constant_path_segments_strs(&p.as_node())
         .unwrap_or_default()

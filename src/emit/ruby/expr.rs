@@ -139,6 +139,19 @@ pub fn emit_expr(e: &Expr) -> String {
     if is_locked_external_gem_constant(e) {
         return emit_node(&e.node);
     }
+    // `self.class::KINDS`, which ingest gave the analysis as `const_get`.
+    if e.decisions & crate::expr::CONST_PATH != 0
+        && let ExprNode::Send { recv: Some(r), method, args, block: None, .. } = &*e.node
+        && method.as_str() == "const_get"
+        && let [arg] = args.as_slice()
+        && let Some(name) = match &*arg.node {
+            ExprNode::Lit { value: crate::expr::Literal::Sym { value } } => Some(value.as_str().to_string()),
+            ExprNode::Lit { value: crate::expr::Literal::Str { value } } => Some(value.clone()),
+            _ => None,
+        }
+    {
+        return format!("{}::{name}", emit_postfix_recv(r));
+    }
     // A site a lowering replaced with a stub — `lower::object_extend`,
     // the arel `ColumnSpec::Named` placeholder — renders as the raise
     // the report describes, so the program fails THERE with the reason

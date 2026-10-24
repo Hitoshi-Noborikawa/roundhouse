@@ -123,6 +123,12 @@ pub const MODULE_QUERY: u64 = 1 << 23;
 /// `@article.x` the build replaced, which read the owner unconditionally.
 pub const BUILD_OWNER: u64 = 1 << 24;
 
+/// A constant path whose parent is a value (`self.class::KINDS`), ingested
+/// as the analysis' `const_get(:KINDS)`. The ruby family writes it back as
+/// the path: `const_get` also finds a top-level constant, which `::` does
+/// not (`Base::String` raises).
+pub const CONST_PATH: u64 = 1 << 25;
+
 /// Whether `expr` is a [`SELF_BINDING`] cast.
 pub fn is_self_binding(expr: &Expr) -> bool {
     expr.decisions & SELF_BINDING != 0

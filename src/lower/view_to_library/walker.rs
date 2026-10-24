@@ -1615,7 +1615,10 @@ pub(super) fn rewrite_helpers_in_expr(e: &Expr, ctx: &ViewCtx) -> Expr {
         },
         other => other.clone(),
     };
-    Expr::new(e.span, new_node)
+    let mut out = Expr::new(e.span, new_node);
+    // `f.object.class::X` stays a path (`expr::CONST_PATH`).
+    out.decisions |= e.decisions & crate::expr::CONST_PATH;
+    out
 }
 
 /// Does a block body hold compiled-template buffer ops (`_buf = _buf + …`)?
