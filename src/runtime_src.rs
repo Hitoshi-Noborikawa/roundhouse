@@ -750,6 +750,16 @@ fn seed_well_known_classes(
     // `column_*` directly, so its bodies need the same typing here.
     crate::lower::view_to_library::insert_db_stub(classes);
 
+    // Not transpiled with the rest: each strict target writes I18nHost by hand, so only its signatures reach the files that call it.
+    let host = crate::rbs::parse_app_signatures(include_str!("../runtime/ruby/i18n_host.rbs"))
+        .expect("runtime/ruby/i18n_host.rbs must parse");
+    for (class_id, methods) in host {
+        let info = classes.entry(class_id).or_default();
+        for (name, ty) in methods {
+            info.class_methods.insert(name, ty);
+        }
+    }
+
     let row_ty = Ty::Hash {
         key: std::sync::Arc::new(Ty::Str),
         value: std::sync::Arc::new(Ty::Untyped),

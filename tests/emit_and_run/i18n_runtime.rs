@@ -4,7 +4,7 @@
 //! translations and calls on CRuby 3.4.
 
 use super::emit_and_run;
-use super::i18n_locales::locales_app;
+use super::i18n_locales_app::locales_app;
 
 const RUNTIME: &str = "  def self.full_key(key)
     I18n.t(key)

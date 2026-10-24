@@ -1,5 +1,6 @@
 # frozen_string_literal: true
 require_relative "i18n_locale_tag"
+require_relative "i18n_host"
 # `I18n.locale` / `I18n.default_locale` / `I18n.available_locales`, the
 # locale a request runs in, and the answers for a key the locale lacks.
 #
@@ -39,7 +40,7 @@ module I18n
   # cannot narrow, and a String they can. (Not `locale_set`: Spinel
   # spells `locale=` with that name.)
   def self.thread_locale_name
-    Thread.current[:roundhouse_i18n_locale].to_s
+    I18nHost.locale_name
   end
 
   def self.locale
@@ -49,7 +50,7 @@ module I18n
 
   # `I18n.locale = x`: an available locale, a Symbol or its String.
   def self.locale=(value)
-    Thread.current[:roundhouse_i18n_locale] = checked_locale(value).to_s
+    I18nHost.set_locale_name(checked_locale(value).to_s)
   end
 
   # `value` as the locale it names, or the gem's InvalidLocale, whose
@@ -73,19 +74,19 @@ module I18n
   def self.enter_locale(value)
     return nil if value.nil?
     previous = locale.to_s
-    Thread.current[:roundhouse_i18n_locale] = checked_locale(value).to_s
+    I18nHost.set_locale_name(checked_locale(value).to_s)
     previous
   end
 
   def self.leave_locale(previous)
-    Thread.current[:roundhouse_i18n_locale] = previous unless previous.nil?
+    I18nHost.set_locale_name(previous) unless previous.nil?
     nil
   end
 
   # Whether the running environment is one of `envs` (comma-separated),
   # where `config.i18n.fallbacks` differs by environment.
   def self.running_in?(envs)
-    envs.split(",").include?(Rails.env.to_s)
+    envs.split(",").include?(I18nHost.env_name)
   end
 
   class MissingTranslationData < ArgumentError
@@ -95,7 +96,7 @@ module I18n
   # is `config/application.rb`'s setting, and the comma-separated
   # `flipped` environments set the other value in their own file.
   def self.missing_raises(raises, flipped)
-    env = Rails.env.to_s
+    env = I18nHost.env_name
     flipped.split(",").include?(env) ? !raises : raises
   end
 
@@ -422,7 +423,7 @@ module I18n
 
   def self.runtime_chain(loc)
     chains = runtime_chains
-    env = Rails.env.to_s
+    env = I18nHost.env_name
     chains[loc + "\u001C" + env] || chains[loc + "\u001C"] || [loc]
   end
 
@@ -488,7 +489,7 @@ module I18n
 
   def self.site_entry_in(id, loc, key)
     table = translation_table
-    env = Rails.env.to_s
+    env = I18nHost.env_name
     sep = "\u001C"
     # Not the any-environment key before this environment's "*": an environment with entries of its own has them all.
     found = table[id + sep + loc + sep + env + sep + key]
@@ -514,50 +515,51 @@ module I18n
     out
   end
 
+  # Not each reader's own ivar tested for nil: the TypeScript emitter folds an ivar named after its reader into a field that starts filled
   def self.translation_table
-    load_translation_table if @translation_table.nil?
-    @translation_table || {}
+    load_translation_table unless @table_loaded
+    @site_table || {}
   end
 
   def self.runtime_leaves
-    load_translation_table if @runtime_leaves.nil?
-    @runtime_leaves || {}
+    load_translation_table unless @table_loaded
+    @leaf_table || {}
   end
 
   def self.runtime_nodes
-    load_translation_table if @runtime_nodes.nil?
-    @runtime_nodes || {}
+    load_translation_table unless @table_loaded
+    @node_table || {}
   end
 
   def self.runtime_order
-    load_translation_table if @runtime_order.nil?
-    @runtime_order || []
+    load_translation_table unless @table_loaded
+    @leaf_order || []
   end
 
   def self.runtime_empties
-    load_translation_table if @runtime_empties.nil?
-    @runtime_empties || {}
+    load_translation_table unless @table_loaded
+    @empty_table || {}
   end
 
   def self.runtime_chains
-    load_translation_table if @runtime_chains.nil?
-    @runtime_chains || {}
+    load_translation_table unless @table_loaded
+    @chain_table || {}
   end
 
   def self.translation_entries
-    load_translation_table if @translation_entries.nil?
-    @translation_entries || []
+    load_translation_table unless @table_loaded
+    @entry_list || []
   end
 
   # A line ends in a "." field: `split` drops trailing empty fields, and a template or a key can be empty.
   def self.runtime_rules
-    load_translation_table if @runtime_rules.nil?
-    @runtime_rules || {}
+    load_translation_table unless @table_loaded
+    @rule_table || {}
   end
 
   def self.runtime_opaque
-    load_translation_table if @runtime_opaque.nil?
-    @runtime_opaque || {}
+    load_translation_table unless @table_loaded
+    @opaque_table || {}
   end
 
   def self.load_translation_table
@@ -572,7 +574,7 @@ module I18n
     empties = {}
     chains = {}
     sep = "\u001C"
-    File.read(File.join(Rails.root.to_s, "config", "i18n_translations")).split("\u001E").each do |line|
+    I18nHost.table_text.split("\u001E").each do |line|
       fields = line.split("\u001F")
       kind = fields[0]
       if kind == "E"
@@ -598,10 +600,10 @@ module I18n
       elsif kind == "R"
         rules[fields[1]] = fields[2].to_s.split(" ")
       elsif kind == "F"
-        chains[fields[1] + sep + fields[2]] = fields[3].to_s.split(",")
+        chains[fields[1].to_s + sep + fields[2].to_s] = fields[3].to_s.split(",")
       elsif kind == "B"
         names = keys[fields[1]] || []
-        prefix = fields[1] + sep + fields[2] + sep + fields[3] + sep
+        prefix = fields[1].to_s + sep + fields[2].to_s + sep + fields[3].to_s + sep
         i = 0
         while i < names.length
           at = fields[4 + i]
@@ -610,15 +612,16 @@ module I18n
         end
       end
     end
-    @runtime_leaves = leaves
-    @runtime_nodes = nodes
-    @runtime_order = order
-    @runtime_empties = empties
-    @runtime_chains = chains
-    @runtime_rules = rules
-    @runtime_opaque = opaque
-    @translation_entries = entries
-    @translation_table = table
+    @leaf_table = leaves
+    @node_table = nodes
+    @leaf_order = order
+    @empty_table = empties
+    @chain_table = chains
+    @rule_table = rules
+    @opaque_table = opaque
+    @entry_list = entries
+    @site_table = table
+    @table_loaded = true
     nil
   end
 

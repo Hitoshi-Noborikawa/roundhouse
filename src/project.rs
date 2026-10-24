@@ -7494,6 +7494,7 @@ fn spinel_files(app: &App, fixture: &Path, param_binds: bool) -> Result<(Vec<(St
         // `I18n.locale` / `default_locale` — the locale campfire folds
         // into its cache keys; per thread, the app's default until a
         // request sets one (see the file's header).
+        "i18n_host",
         "i18n_locale",
         // The i18n gem's `I18n::Locale::Tag`, which `i18n_locale.rb` requires.
         "i18n_locale_tag",
