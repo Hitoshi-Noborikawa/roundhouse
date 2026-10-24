@@ -614,8 +614,9 @@ impl<'a> Specializer<'a> {
     /// once from one, or a scope parameter bound to one. Leaving such a site
     /// to Rails is never wrong; binding an Array is.
     fn mentions_array_column(&self, v: &Expr, cx: &Cx, depth: usize) -> bool {
+        // Past the limit the value is not proven free of one: fail closed.
         if depth > 8 {
-            return false;
+            return true;
         }
         if self.reads_array_column(v, cx) {
             return true;
