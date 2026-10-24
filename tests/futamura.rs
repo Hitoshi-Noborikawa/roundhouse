@@ -1694,7 +1694,10 @@ end
                 "ActiveRecord::Schema[8.1].define(version: 1) do\n  create_table \"members\", force: :cascade do |t|\n    t.string \"name\"\n    t.bigint \"tag_ids\", array: true, default: [], null: false\n  end\nend\n",
             ),
             ("app/models/application_record.rb", "class ApplicationRecord < ActiveRecord::Base\n  primary_abstract_class\nend\n"),
-            ("app/models/member.rb", "class Member < ApplicationRecord\n  def peers\n    Member.where(id: tag_ids).to_a\n  end\n\n  def namesakes\n    Member.where(name: name).to_a\n  end\nend\n"),
+            (
+                "app/models/member.rb",
+                "class Member < ApplicationRecord\n  scope :by_ids, ->(ids) { where(id: ids) }\n  scope :named, ->(n) { where(name: n) }\n\n  def peers\n    Member.where(id: tag_ids).to_a\n  end\n\n  def namesakes\n    Member.where(name: name).to_a\n  end\n\n  def scoped_peers\n    Member.by_ids(tag_ids).to_a\n  end\n\n  def either_peers\n    Member.where(id: tag_ids || nil).to_a\n  end\n\n  def local_peers\n    ids = tag_ids\n    Member.where(id: ids).to_a\n  end\n\n  def scoped_namesakes\n    Member.named(name).to_a\n  end\nend\n",
+            ),
             ("app/controllers/application_controller.rb", "class ApplicationController < ActionController::Base\nend\n"),
             (
                 "app/controllers/members_controller.rb",
@@ -1711,9 +1714,15 @@ end
         let left = |file: &str, line: usize| {
             report.residue.iter().any(|r| r.contains(&format!("{file}:{line}:")) && r.contains("where value is a collection"))
         };
-        assert!(left("member.rb", 3), "{:?}", report.residue);
+        assert!(left("member.rb", 6), "{:?}", report.residue);
         assert!(left("members_controller.rb", 4), "{:?}", report.residue);
-        assert!(report.specialized.iter().any(|s| s.contains("member.rb:7:")), "{:?}", report.specialized);
+        assert!(report.specialized.iter().any(|s| s.contains("member.rb:10:")), "{:?}", report.specialized);
+        // Through a scope's parameter, a `||` operand and a local.
+        assert!(left("member.rb", 14), "{:?}", report.residue);
+        assert!(left("member.rb", 18), "{:?}", report.residue);
+        assert!(left("member.rb", 23), "{:?}", report.residue);
+        // A scope bound to a plain column read is still specialized.
+        assert!(report.specialized.iter().any(|s| s.contains("member.rb:27:")), "{:?}", report.specialized);
     }
 
     /// A parameter whose inferred type still holds a variable is not
