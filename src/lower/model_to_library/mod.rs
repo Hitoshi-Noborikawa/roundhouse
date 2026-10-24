@@ -3102,6 +3102,9 @@ pub fn ty_of_column(t: &ColumnType) -> Ty {
 /// NOT for the SQL seam — `column_read_method` and the Arel visitor pick
 /// their reader from the underlying column type, which nullability
 /// doesn't change.
+/// An `array: true` column stays its element type here, the lowered
+/// targets' storage; `project::report_array_columns` reports it for each
+/// lowered target.
 pub fn ty_of_column_slot(col: &Column) -> Ty {
     let base = ty_of_column(&col.col_type);
     if (col.nullable || col.generated.is_some()) && !col.primary_key {

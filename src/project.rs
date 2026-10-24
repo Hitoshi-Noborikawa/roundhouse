@@ -1481,6 +1481,34 @@ fn without_rails_health_controller(app: &App, target: BuildTarget) -> Option<App
 /// it was before predicates were kept (`Dialect::index_predicate`). It
 /// rejects rows Rails accepts, so each one is named. A warning, not an
 /// error: the tree still runs, with a stricter index than the app's.
+/// A PostgreSQL array column (`array: true`) on a target that stores rows
+/// itself: its SQLite storage holds one element, not the `Array` Rails
+/// reads, so the column is reported for that target. The Roda conversion
+/// runs on Sequel and futamura on Rails, which read the database's own
+/// type.
+fn report_array_columns(app: &App, target: BuildTarget) {
+    if matches!(target, BuildTarget::Blog | BuildTarget::Roda | BuildTarget::Futamura) {
+        return;
+    }
+    for table in app.schema.tables.values() {
+        for column in table.columns.iter().filter(|column| column.array) {
+            let mut d = crate::diagnostic::Diagnostic::unsupported(
+                crate::span::Span::synthetic(),
+                Some(crate::ident::Symbol::from(target.as_str())),
+                "array_column",
+                format!(
+                    "table {}: `{}` is a PostgreSQL array column; this target stores and reads \
+                     one element where Rails reads an Array",
+                    table.name.as_str(),
+                    column.name.as_str()
+                ),
+            );
+            d.severity = crate::diagnostic::Severity::Warning;
+            emit::diagnostics::push(d);
+        }
+    }
+}
+
 fn report_sqlite_index_predicates(app: &App, target: BuildTarget) {
     // The Roda conversion writes Sequel migrations, which carry no
     // predicate at all.
@@ -2194,6 +2222,7 @@ fn target_files_inner(
     }
     report_mailers(app, target);
     report_sqlite_index_predicates(app, target);
+    report_array_columns(app, target);
     report_native_ruby_syntax(app, target);
     report_self_bindings(app, target);
     report_ruby_only_sends(app, target);
