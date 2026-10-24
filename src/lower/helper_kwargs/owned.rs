@@ -170,11 +170,21 @@ impl OwnerIndex {
         let Ok(ancestors) = self.ancestors(class, side) else {
             return Resolved::Ambiguous;
         };
-        if side == Side::Instance && ancestors.iter().any(|c| self.prepending.contains(c)) {
+        let key = |c: &String| (c.clone(), side, method.clone());
+        let first = ancestors.iter().position(|c| self.defined.contains_key(&key(c)));
+        // A prepended module sits right ahead of the class that prepends
+        // it (`Base` prepending `Loud`: `[Child, Loud, Base]`), so it can
+        // take the call only from a class at or before the first definer;
+        // one prepended further up is never reached. With no definer known,
+        // any prepended module might define the name.
+        if side == Side::Instance
+            && ancestors[..first.map_or(ancestors.len(), |f| f + 1)]
+                .iter()
+                .any(|c| self.prepending.contains(c))
+        {
             return Resolved::Ambiguous;
         }
-        let key = |c: &String| (c.clone(), side, method.clone());
-        let Some(first) = ancestors.iter().position(|c| self.defined.contains_key(&key(c))) else {
+        let Some(first) = first else {
             return Resolved::Missing;
         };
         // A module reachable at two positions in the chain: Ruby keeps

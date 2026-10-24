@@ -69,7 +69,11 @@ const EXPECTED: &str = "[[:a, :string, false, nil], [:b, :string, true, \"kept\"
 const REPORT: &str = "p Kwlab::Builder.report\np Kwlab::Gadget.report\n";
 
 fn native(files: &[(&str, &str)], script: &str) -> String {
-    let dir = std::env::temp_dir().join(format!("roundhouse-kwlab-{}-{}", std::process::id(), files.len()));
+    // One directory per call: tests run in parallel, and two with the
+    // same number of files shared one.
+    static CALLS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let call = CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let dir = std::env::temp_dir().join(format!("roundhouse-kwlab-{}-{call}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let mut requires = String::new();
     for (name, source) in files {
@@ -462,6 +466,76 @@ end
     let (_emitted, errors) = emit_and_run::real_blog()
         .write("app/lib/kwlab/loud.rb", LOUD)
         .write("app/lib/kwlab/gadget.rb", GADGET)
+        .emit(BuildTarget::Ruby);
+    assert!(errors.iter().any(|e| e.contains("flattened keyword arguments")), "not refused; errors: {errors:#?}");
+}
+
+const LOUD: &str = r##"module Kwlab
+  module Loud
+    def field(name, null: true, type: nil)
+      [:loud, name, null, type]
+    end
+  end
+end
+"##;
+const PREPENDING_BASE: &str = r##"module Kwlab
+  class Plain
+    prepend Loud
+
+    def field(name, type = nil, null: true)
+      [:base, name, type, null]
+    end
+  end
+end
+"##;
+
+/// A prepended module sits right ahead of the class that prepends it
+/// (Ruby 4.0.7: `Base` prepending `Loud` gives `[Child, Loud, Base]`), so a
+/// subclass's own definition is found first and the call binds to it.
+#[test]
+fn a_prepend_above_the_first_definer_does_not_refuse() {
+    const CHILD: &str = r##"module Kwlab
+  class Gadget < Plain
+    def field(name, type = nil, null: true)
+      [:child, name, type, null]
+    end
+
+    def add(name)
+      field(name, null: false)
+    end
+  end
+end
+"##;
+    const SCRIPT: &str = "p Kwlab::Gadget.new.add(:a)\n";
+    let expected = native(&[("loud.rb", LOUD), ("plain.rb", PREPENDING_BASE), ("gadget.rb", CHILD)], SCRIPT);
+    assert_eq!(expected, "[:child, :a, nil, false]\n", "native control");
+    let run = emit_and_run::real_blog()
+        .write("app/lib/kwlab/loud.rb", LOUD)
+        .write("app/lib/kwlab/plain.rb", PREPENDING_BASE)
+        .write("app/lib/kwlab/gadget.rb", CHILD)
+        .run_ruby(&format!(
+            "require_relative \"app/models/kwlab/loud\"\nrequire_relative \"app/models/kwlab/plain\"\nrequire_relative \"app/models/kwlab/gadget\"\n{SCRIPT}"
+        ));
+    run.assert_passes();
+    assert_eq!(run.stdout, expected, "emitted vs native");
+}
+
+/// Without a definition of its own, the subclass's call reaches the
+/// prepended module ahead of `Base`'s: still refused.
+#[test]
+fn a_prepend_at_or_before_the_first_definer_is_refused() {
+    const CHILD: &str = r##"module Kwlab
+  class Gadget < Plain
+    def add(name)
+      field(name, null: false)
+    end
+  end
+end
+"##;
+    let (_emitted, errors) = emit_and_run::real_blog()
+        .write("app/lib/kwlab/loud.rb", LOUD)
+        .write("app/lib/kwlab/plain.rb", PREPENDING_BASE)
+        .write("app/lib/kwlab/gadget.rb", CHILD)
         .emit(BuildTarget::Ruby);
     assert!(errors.iter().any(|e| e.contains("flattened keyword arguments")), "not refused; errors: {errors:#?}");
 }
