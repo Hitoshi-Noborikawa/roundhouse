@@ -34,6 +34,7 @@ pub use table_prefix::{
 };
 
 mod validations;
+mod with_options;
 use validations::{and_guard, context_guard, parse_validates_call, validation_items, ParsedValidates, ValidatesKind};
 
 /// Parse a single model file. The first class definition is treated as the
@@ -520,6 +521,22 @@ pub(super) fn ingest_model_body_items(
         end: stmt.location().end_offset() as u32,
     };
     if let Some(call) = stmt.as_call_node() {
+        if with_options::is_with_options(&call) {
+            return match with_options::expand(&call, &[], owner, file, class_consts) {
+                Ok(items) => Ok(items),
+                // Declined: reported with what blocked it, and dropped like
+                // any unlowered model DSL (none of its calls is kept).
+                Err(IngestError::Unsupported { message, .. }) => {
+                    let mut diagnostic =
+                        crate::diagnostic::Diagnostic::unsupported(span, None, "with_options", message.clone());
+                    diagnostic.severity = crate::diagnostic::Severity::Warning;
+                    super::prism::push(diagnostic);
+                    super::survey::record(&IngestError::Unsupported { file: file.into(), message });
+                    Ok(Vec::new())
+                }
+                Err(err) => Err(err),
+            };
+        }
         if call.receiver().is_none() {
             let name = constant_id_str(&call.name()).to_string();
             let of_kind = match name.as_str() {
