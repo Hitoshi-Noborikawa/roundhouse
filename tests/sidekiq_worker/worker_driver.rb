@@ -127,6 +127,7 @@ module SidekiqRedis
     rescue StandardError
       return json
     end
+    return json unless env.is_a?(Hash)
     now = Process.clock_gettime(Process::CLOCK_REALTIME, :millisecond)
     ["failed_at", "retried_at"].each do |k|
       v = env[k]
@@ -206,6 +207,9 @@ SidekiqWorker.parse(["sidekiq", "-q", "high", "-q", "low", "-c", "1", "-t", "1"]
 popped.each { |raw| SidekiqRedis::SCRIPT.push("queue:high\t" + raw) }
 SidekiqRedis::SCRIPT.push("queue:low\t" + JSON.generate({ "retry" => true, "queue" => "low", "class" => "HardWorker", "args" => [1], "jid" => "aaaaaaaaaaaaaaaaaaaaaaaa" }))
 SidekiqRedis::SCRIPT.push("queue:low\t" + JSON.generate({ "retry" => false, "queue" => "low", "class" => "HardWorker", "args" => [2], "jid" => "bbbbbbbbbbbbbbbbbbbbbbbb" }))
+# Malformed envelopes fail their job, not the processor.
+SidekiqRedis::SCRIPT.push("queue:low\tnull")
+SidekiqRedis::SCRIPT.push("queue:low\t" + JSON.generate({ "retry" => true, "queue" => "low", "class" => "Sidekiq::ActiveJob::Wrapper", "wrapped" => "NoArgsJob", "jid" => "cccccccccccccccccccccccc" }))
 SidekiqWorker.start(1)
 waited = 0
 while (SidekiqRedis::SCRIPT.length > 0 || SidekiqWorker::INFLIGHT_JOB[0].length > 0) && waited < 500

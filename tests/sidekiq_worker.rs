@@ -209,7 +209,12 @@ fn the_worker_runs_and_shuts_down_as_sidekiq_does() {
         .and_then(Value::as_str)
         .unwrap();
     assert_eq!(other.first().map(String::as_str), Some(malformed), "malformed JSON goes to dead as it is");
-    assert_eq!(other.len(), 2, "plus the native job; the retry: false one is dropped: {other:?}");
+    assert!(other.iter().any(|r| r == "null"), "a non-object envelope goes to dead as it is: {other:?}");
+    assert!(
+        other.iter().any(|r| r.contains("\"wrapped\":\"NoArgsJob\"") && r.contains("\"error_class\":\"NoMethodError\"")),
+        "an envelope without args fails its job: {other:?}"
+    );
+    assert_eq!(other.len(), 4, "plus the native job; the retry: false one is dropped: {other:?}");
 }
 
 fn spinel_twin(name: &str, driver: &str) {

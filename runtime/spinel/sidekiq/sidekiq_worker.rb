@@ -401,22 +401,36 @@ module SidekiqWorker
       write_dead(raw)
       return nil
     end
+    # Valid JSON that is not an object (`null`, `[]`, `1`) is no job:
+    # dead as it was popped, like invalid JSON.
+    unless env.is_a?(Hash)
+      log("WARN", "Job on " + queue + " is not a JSON object: " + raw)
+      write_dead(raw)
+      return nil
+    end
     label = describe_env(env)
     unless SidekiqEnvelope.active_job?(env)
       fail_job(env, raw, queue, label, "NameError", "uninitialized constant " + SidekiqEnvelope.klass(env), started)
       return nil
     end
     log("INFO", label + " start")
-    payload = SidekiqEnvelope.aj_payload(env)
-    outcome = Db.with_connection { ActiveJob.perform_parsed(payload) }
-    if outcome == ActiveJob::PERFORM_RAN
-      log("INFO", label + " done: " + elapsed(started) + " sec")
-    elsif outcome == ActiveJob::PERFORM_DISCARDED
-      log("INFO", label + " discarded: " + elapsed(started) + " sec")
-    elsif outcome == ActiveJob::PERFORM_UNKNOWN_CLASS
-      fail_job(env, raw, queue, label, "NameError", "uninitialized constant " + payload["job_class"].to_s, started)
-    else
-      fail_job(env, raw, queue, label, ActiveJob.failure_class, ActiveJob.failure_message, started)
+    # Whatever escapes the run (an envelope without `args`, a connection
+    # error) fails the job, as Sidekiq's processor does, rather than
+    # killing the processor thread (and, on Spinel, the process).
+    begin
+      payload = SidekiqEnvelope.aj_payload(env)
+      outcome = Db.with_connection { ActiveJob.perform_parsed(payload) }
+      if outcome == ActiveJob::PERFORM_RAN
+        log("INFO", label + " done: " + elapsed(started) + " sec")
+      elsif outcome == ActiveJob::PERFORM_DISCARDED
+        log("INFO", label + " discarded: " + elapsed(started) + " sec")
+      elsif outcome == ActiveJob::PERFORM_UNKNOWN_CLASS
+        fail_job(env, raw, queue, label, "NameError", "uninitialized constant " + payload["job_class"].to_s, started)
+      else
+        fail_job(env, raw, queue, label, ActiveJob.failure_class, ActiveJob.failure_message, started)
+      end
+    rescue StandardError => e
+      fail_job(env, raw, queue, label, e.class.name, e.message, started)
     end
     nil
   end
