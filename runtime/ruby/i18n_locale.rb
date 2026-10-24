@@ -32,7 +32,12 @@ module I18n
 
   # The gem's set holds each locale as a String and a Symbol, so "en" and :en answer alike.
   def self.locale_available?(locale)
-    !locale.nil? && app_available_locales.include?(locale.to_s.to_sym)
+    !locale.nil? && !available_named(locale.to_s).nil?
+  end
+
+  # Not `name.to_sym`: Crystal cannot make a Symbol when it runs, and every locale that passes is one of these.
+  def self.available_named(name)
+    app_available_locales.find { |l| l.to_s == name }
   end
 
   # The locale set for this thread, by name ("" when none is): a Symbol
@@ -44,8 +49,8 @@ module I18n
   end
 
   def self.locale
-    set = thread_locale_name
-    set.empty? ? app_default_locale : set.to_sym
+    found = available_named(thread_locale_name)
+    found.nil? ? app_default_locale : found
   end
 
   # `I18n.locale = x`: an available locale, a Symbol or its String.
@@ -56,8 +61,8 @@ module I18n
   # `value` as the locale it names, or the gem's InvalidLocale, whose
   # message shows the value as `inspect` does (nil is not a locale).
   def self.checked_locale(value)
-    name = value.to_s.to_sym
-    return name if !value.nil? && app_available_locales.include?(name)
+    found = value.nil? ? nil : available_named(value.to_s)
+    return found unless found.nil?
     shown = value.nil? ? "nil" : (value.is_a?(Symbol) ? ":" + value.to_s : "\"" + value.to_s + "\"")
     raise InvalidLocale, shown + " is not a valid locale"
   end
@@ -218,7 +223,7 @@ module I18n
     loc = options.key?(:locale) ? locale_name(options[:locale]) : locale.to_s
     opaque = runtime_opaque
     runtime_chain(loc).each do |l|
-      found = opaque[l + "." + full]
+      found = opaque.fetch(l + "." + full, nil)
       return found unless found.nil?
     end
     []
@@ -260,7 +265,7 @@ module I18n
     i = 0
     while i < path.length
       key = path[i].to_s.to_sym
-      child = node[key]
+      child = node.fetch(key, nil)
       unless child.is_a?(Hash)
         child = {}
         node[key] = child
@@ -276,7 +281,7 @@ module I18n
     i = 0
     while i < path.length - 1
       key = path[i].to_s.to_sym
-      child = node[key]
+      child = node.fetch(key, nil)
       unless child.is_a?(Hash)
         child = {}
         node[key] = child
@@ -304,7 +309,7 @@ module I18n
   def self.runtime_lookup(loc, full, count)
     leaves = runtime_leaves
     runtime_chain(loc).each do |l|
-      text = leaves[l + "." + full]
+      text = leaves.fetch(l + "." + full, nil)
       return text unless text.nil?
       raise NotImplementedError, "I18n.t(\"#{full}\") answers a value that is not a String, which is not supported" if runtime_opaque.key?(l + "." + full)
       next unless runtime_nodes.key?(l + "." + full)
@@ -316,21 +321,21 @@ module I18n
 
   # Not `entry[form]` alone: with a locale's rule, I18n's Pluralization backend takes the `zero`, `0` and `1` keys first and `other` for a form the entry lacks.
   def self.plural_form(leaves, loc, node, count)
-    zero = leaves[node + ".zero"]
+    zero = leaves.fetch(node + ".zero", nil)
     return zero if count == 0 && !zero.nil?
     rule = plural_rule(loc)
     if rule.nil?
       form = count == 1 ? "one" : "other"
-      text = leaves[node + "." + form]
+      text = leaves.fetch(node + "." + form, nil)
       raise InvalidPluralizationData, "translation data #{node} can not be used with :count => #{count}. key '#{form}' is missing." if text.nil?
       return text
     end
     if count == 0 || count == 1
-      exact = leaves[node + "." + (count == 0 ? "0" : "1")]
+      exact = leaves.fetch(node + "." + (count == 0 ? "0" : "1"), nil)
       return exact unless exact.nil?
     end
     form = plural_category(rule, count)
-    text = leaves[node + "." + form] || leaves[node + ".other"]
+    text = leaves.fetch(node + "." + form, nil) || leaves.fetch(node + ".other", nil)
     raise InvalidPluralizationData, "translation data #{node} can not be used with :count => #{count}. key '#{form}' is missing." if text.nil?
     text
   end
@@ -338,7 +343,7 @@ module I18n
   def self.plural_rule(loc)
     rules = runtime_rules
     runtime_chain(loc).each do |l|
-      rule = rules[l]
+      rule = rules.fetch(l, nil)
       return rule unless rule.nil?
     end
     nil
@@ -411,7 +416,7 @@ module I18n
       return a % b
     end
     return plural_num(rule, ops).floor.to_f if token == "floor"
-    value = ops[token]
+    value = ops.fetch(token, nil)
     value.nil? ? token.to_f : value
   end
 
@@ -424,7 +429,7 @@ module I18n
   def self.runtime_chain(loc)
     chains = runtime_chains
     env = I18nHost.env_name
-    chains[loc + "\u001C" + env] || chains[loc + "\u001C"] || [loc]
+    chains.fetch(loc + "\u001C" + env, nil) || chains.fetch(loc + "\u001C", nil) || [loc]
   end
 
   # `%{name}` filled from the options that are not the gem's reserved ones, as I18n.interpolate does; none given leaves the text as it is.
@@ -492,10 +497,10 @@ module I18n
     env = I18nHost.env_name
     sep = "\u001C"
     # Not the any-environment key before this environment's "*": an environment with entries of its own has them all.
-    found = table[id + sep + loc + sep + env + sep + key]
-    found = table[id + sep + loc + sep + env + sep + "*"] if found.nil? && !key.empty?
-    found = table[id + sep + loc + sep + sep + key] if found.nil?
-    found = table[id + sep + loc + sep + sep + "*"] if found.nil? && !key.empty?
+    found = table.fetch(id + sep + loc + sep + env + sep + key, nil)
+    found = table.fetch(id + sep + loc + sep + env + sep + "*", nil) if found.nil? && !key.empty?
+    found = table.fetch(id + sep + loc + sep + sep + key, nil) if found.nil?
+    found = table.fetch(id + sep + loc + sep + sep + "*", nil) if found.nil? && !key.empty?
     found
   end
 
@@ -578,9 +583,9 @@ module I18n
       fields = line.split("\u001F")
       kind = fields[0]
       if kind == "E"
-        entries << fields[1, fields.length - 2]
+        entries << (fields[1, fields.length - 2] || [])
       elsif kind == "K"
-        keys[fields[1]] = fields[2, fields.length - 3]
+        keys[fields[1]] = fields[2, fields.length - 3] || []
       elsif kind == "L" || kind == "M"
         if kind == "L"
           leaves[fields[1]] = fields[2].to_s
@@ -602,7 +607,7 @@ module I18n
       elsif kind == "F"
         chains[fields[1].to_s + sep + fields[2].to_s] = fields[3].to_s.split(",")
       elsif kind == "B"
-        names = keys[fields[1]] || []
+        names = keys.fetch(fields[1], nil) || []
         prefix = fields[1].to_s + sep + fields[2].to_s + sep + fields[3].to_s + sep
         i = 0
         while i < names.length
