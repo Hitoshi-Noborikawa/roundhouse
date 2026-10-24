@@ -719,3 +719,24 @@ fn a_model_delegate_to_a_reader_that_yields_is_left_alone() {
     let model = emit_model(&mut app, "account.rb");
     assert!(!model.contains("def admin?"), "{model}");
 }
+
+/// A target named like the allow_nil forwarder's local is read through
+/// `self.`, as the other names the forwarder uses are, so the local does
+/// not shadow it.
+#[test]
+fn an_allow_nil_target_named_like_the_forwarders_local_is_read_through_self() {
+    let out = emit(
+        r#"class Filter
+  def __allow_nil_target__
+    "x"
+  end
+
+  delegate :upcase, to: :__allow_nil_target__, allow_nil: true
+end
+"#,
+    );
+    assert!(
+        out.contains("__allow_nil_target__ = self.__allow_nil_target__"),
+        "got:\n{out}"
+    );
+}

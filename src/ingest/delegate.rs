@@ -270,6 +270,8 @@ fn receiver(target: &str) -> std::borrow::Cow<'_, str> {
         "args",
         "block",
         "value",
+        // The allow_nil forwarder's own local (`synthesized_source`).
+        "__allow_nil_target__",
         "key",
         "other",
         "__delegate_target",
