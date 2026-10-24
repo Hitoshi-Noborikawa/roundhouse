@@ -2438,7 +2438,8 @@ fn sti_dispatch(base_new: Expr, type_read: &Expr, subs: &[ClassId], span: Span) 
 ///      the automatic inverse, and a singleton method or unsaved change
 ///      on the owner is what the record must see);
 ///   2. `_autosave_<name>` saves an unsaved one and takes the id,
-///      folded into `before_validation`;
+///      folded into `_autosave_belongs_to`, which `save` calls before
+///      `valid?` so that a direct `valid?` writes nothing, as in Rails;
 ///   3. the constructor's `attrs[:<name>]` goes through that writer,
 ///      as Rails routes every attrs key through its writer, instead of
 ///      the shared lowering's bare foreign-key copy.
@@ -2487,10 +2488,12 @@ fn sti_dispatch(base_new: Expr, type_read: &Expr, subs: &[ClassId], span: Span) 
 /// strict targets keep the gap they already had, ledgered in
 /// docs/pipeline/runtime.md.
 ///
-/// Ordering inside `before_validation` is load-bearing: the autosave
-/// call is pushed BEFORE the belongs_to `default:` statement, which is
-/// guarded on `@creator_id == 0`. Fill the key first or an explicitly
-/// assigned unsaved creator is overwritten by the default.
+/// Ordering is load-bearing: the autosave runs BEFORE the belongs_to
+/// `default:` statement in `before_validation`, which is guarded on
+/// `@creator_id == 0`. Fill the key first or an explicitly assigned
+/// unsaved creator is overwritten by the default. `save` calls
+/// `_autosave_belongs_to` ahead of `valid?`, which runs
+/// `before_validation`, so the separate hook keeps that order.
 pub(crate) fn apply_belongs_to_autosave(lcs: &mut [LibraryClass], app: &App) {
     use crate::dialect::Association;
 
@@ -2532,7 +2535,7 @@ pub(crate) fn apply_belongs_to_autosave(lcs: &mut [LibraryClass], app: &App) {
                 ExprNode::Seq { exprs: vec![assign, stash_target(&name, span)] },
             );
             lc.methods.push(autosave_method(&lc.name, &name, &fk));
-            fold_before_validation(&mut lc.methods, &lc.name, &name);
+            fold_autosave_call_into_hook(&mut lc.methods, &lc.name, &name);
             route_init_through_writer(lc, &name, &fk);
         }
     }
@@ -2710,9 +2713,9 @@ fn autosave_method(
     }
 }
 
-/// PREPEND, not append: see the ordering note on
-/// [`apply_belongs_to_autosave`].
-fn fold_before_validation(
+/// Prepended, as when this folded into `before_validation`, so the
+/// order the targets are saved in is unchanged.
+fn fold_autosave_call_into_hook(
     methods: &mut Vec<crate::dialect::MethodDef>,
     owner: &ClassId,
     name: &Symbol,
@@ -2728,7 +2731,7 @@ fn fold_before_validation(
             parenthesized: false,
         },
     );
-    let hook = Symbol::from("before_validation");
+    let hook = Symbol::from("_autosave_belongs_to");
     if let Some(existing) =
         methods.iter_mut().find(|m| m.name == hook && m.receiver == MethodReceiver::Instance)
     {

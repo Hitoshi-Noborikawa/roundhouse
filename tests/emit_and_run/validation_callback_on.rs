@@ -44,3 +44,44 @@ puts "validation callback contexts passed"
         )
         .assert_passes();
 }
+
+/// Rails runs the validation callbacks inside `valid?`, so a direct
+/// `valid?` runs them in the record's context as `save` does (#1140).
+/// Answers are Rails 8.1.4's.
+#[test]
+fn valid_runs_the_validation_callbacks() {
+    app()
+        .run_ruby(
+            r#"a = Article.new(title: "Hello", body: "A body long enough to pass validation.")
+a.valid?
+created = a.seen
+a.save!
+a.valid?
+raise "seen: #{[created, a.seen].inspect}" unless [created, a.seen] == ["create", "update"]
+puts "valid? validation callbacks passed"
+"#,
+        )
+        .assert_passes();
+}
+
+/// The belongs_to autosave is a save step, not a validation callback, so
+/// a direct `valid?` leaves an unsaved parent unsaved, as Rails 8.1.4
+/// does. `save!` still saves it first and takes its id.
+#[test]
+fn valid_does_not_save_an_unsaved_belongs_to_target() {
+    emit_and_run::real_blog()
+        .run_ruby(
+            r#"before = Article.count
+article = Article.new(title: "Parent", body: "A body long enough to pass validation.")
+comment = Comment.new(article: article, commenter: "Ann", body: "Hello there")
+comment.valid?
+checked = [Article.count - before, article.persisted?]
+raise "after valid?: #{checked.inspect}" unless checked == [0, false]
+comment.save!
+saved = [Article.count - before, comment.article_id == article.id]
+raise "after save!: #{saved.inspect}" unless saved == [1, true]
+puts "belongs_to autosave waits for save"
+"#,
+        )
+        .assert_passes();
+}
