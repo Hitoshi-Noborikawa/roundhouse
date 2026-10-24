@@ -2236,6 +2236,12 @@ impl<'a> BodyTyper<'a> {
                         return t;
                     }
                 }
+                // `a[start, length]` and `a[range]` answer a slice (nil past the end), not an element
+                if matches!(method.as_str(), "[]" | "slice")
+                    && (args.len() == 2 || args.first().is_some_and(|a| matches!(a.ty, Some(Ty::Class { ref id, .. }) if id.0.as_str() == "Range") || matches!(&*a.node, crate::expr::ExprNode::Range { .. })))
+                {
+                    return Ty::Union { variants: vec![Ty::Array { elem: std::sync::Arc::new(elem.clone()) }, Ty::Nil].into() };
+                }
                 array_method(method, elem, block_ret)
             }
             // Relation-typed receiver — a chain started from a scope
