@@ -125,8 +125,9 @@ pub(super) fn index_unmodeled_lookup_mutations(app: &App, index: &mut SourceCont
 /// body that declares the owner (the class body or a reopening; not one a
 /// concern's `included do` splices in, an alias, or `define_method`, which
 /// the lookup scan already refuses), none of them contains `super` in any
-/// form, and the owner's body prepends nothing (a prepended module comes
-/// before it). Anything else is not shadowing.
+/// form, and nothing is prepended to the owner, in its body or by an
+/// initializer (`Widget.prepend(Mod)`, `App::module_mixins`): a prepended
+/// module comes before it. Anything else is not shadowing.
 fn shadows_supplied_initialize(app: &App) -> HashSet<ClassId> {
     let resolver = app.const_resolver.for_sources(&app.sources);
     let initialize = Symbol::from("initialize");
@@ -140,6 +141,16 @@ fn shadows_supplied_initialize(app: &App) -> HashSet<ClassId> {
             && method.params.iter().all(|param| param.default.as_ref().is_none_or(|d| !contains_super(d)))
     };
     let prepends = |expr: &Expr| matches!(&*expr.node, ExprNode::Send { method, .. } if method.as_str() == "prepend");
+    // An initializer names its target as written; a full name or a
+    // trailing segment that could be the owner counts, failing closed.
+    let prepended_elsewhere = |owner: &ClassId| {
+        let full = owner.0.as_str();
+        app.module_mixins.iter().any(|mixin| {
+            let target = mixin.target.as_str().trim_start_matches("::");
+            mixin.kind == crate::app::MixinKind::Prepend
+                && (target == full || full.ends_with(&format!("::{target}")) || target.ends_with(&format!("::{full}")))
+        })
+    };
     let mut out = HashSet::new();
     for class in super::classes(app).filter(|class| !class.is_module) {
         let defs: Vec<&MethodDef> = class
@@ -150,6 +161,7 @@ fn shadows_supplied_initialize(app: &App) -> HashSet<ClassId> {
         if !defs.is_empty()
             && defs.iter().all(|m| plain(&class.name, m))
             && !class.unknown_calls.iter().any(prepends)
+            && !prepended_elsewhere(&class.name)
         {
             out.insert(class.name.clone());
         }
@@ -160,7 +172,7 @@ fn shadows_supplied_initialize(app: &App) -> HashSet<ClassId> {
         let prepended = model.body.iter().any(|item| {
             matches!(item, crate::dialect::ModelBodyItem::Unknown { expr, .. } if prepends(expr))
         });
-        if !defs.is_empty() && defs.iter().all(|m| plain(&model.name, m)) && !prepended {
+        if !defs.is_empty() && defs.iter().all(|m| plain(&model.name, m)) && !prepended && !prepended_elsewhere(&model.name) {
             out.insert(model.name.clone());
         }
     }

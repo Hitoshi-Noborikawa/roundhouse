@@ -155,3 +155,17 @@ fn an_own_initialize_shadows_a_source_mixins_on_ruby() {
     run.assert_passes();
     assert_eq!(run.stdout, native, "emitted vs native");
 }
+
+/// A module an initializer prepends (`Kit::Req.prepend(Kit::Loud)`,
+/// `App::module_mixins`) comes before the class's own `initialize` too.
+#[test]
+fn an_initializer_prepend_keeps_the_refusal() {
+    let (_emitted, errors) = emit_and_run::real_blog()
+        .write("app/lib/kit/helper.rb", &helper(URL_HELPERS))
+        .write("app/lib/kit/req.rb", &req(PLAIN, ""))
+        .write("app/lib/kit/loud.rb", "module Kit\n  module Loud\n    def initialize(*args, **kw)\n      @x = [:loud]\n    end\n  end\nend\n")
+        .write("app/lib/kit/caller.rb", CALLER)
+        .write("config/initializers/kit_loud.rb", "Kit::Req.prepend(Kit::Loud)\n")
+        .emit(BuildTarget::Ruby);
+    assert!(errors.iter().any(|e| e.contains(REFUSAL)), "not refused: {errors:#?}");
+}
