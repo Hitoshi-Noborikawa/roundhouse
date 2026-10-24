@@ -71,8 +71,12 @@ struct BuiltRule {
     /// `None` unset, `Some(guard)` as `context_guard` reads it.
     on_guard: Option<Option<Expr>>,
     /// A call-level `allow_nil: true` on a rule that stores no flag of its
-    /// own (presence): the rule runs only when the attribute is not nil.
+    /// own (presence, inclusion, exclusion): the rule runs only when the
+    /// attribute is not nil.
     nil_skip: bool,
+    /// The same for `allow_blank: true`: the rule runs only when the
+    /// attribute is not blank (nil, `""`, `"  "`).
+    blank_skip: bool,
     /// A literal String `message:` in the rule's own hash.
     message: Option<String>,
     /// The rule's own hash named `allow_nil:` / `allow_blank:`, which
@@ -84,7 +88,7 @@ struct BuiltRule {
 
 impl BuiltRule {
     fn bare(rule: crate::dialect::ValidationRule) -> Self {
-        Self { rule, if_cond: None, unless_cond: None, on_guard: None, nil_skip: false, message: None, own_allow_nil: false, own_allow_blank: false }
+        Self { rule, if_cond: None, unless_cond: None, on_guard: None, nil_skip: false, blank_skip: false, message: None, own_allow_nil: false, own_allow_blank: false }
     }
 }
 
@@ -259,29 +263,32 @@ pub(super) fn parse_validates_call(
     };
     // Acceptance stores `allow_nil` (below); `allow_blank` stays the gap.
     let stores_nil = |draft: &BuiltRule| matches!(draft.rule, ValidationRule::Acceptance { .. });
-    if allow_blank
-        && drafts
-            .iter()
-            .any(|draft| !blank_safe(&draft.rule) && !is_uniqueness(draft) && !stores_flags(draft))
-    {
-        gaps.push("allow_blank".to_string());
+    // Call-level `allow_blank: true` on a rule that stores no flag of its
+    // own: Rails skips a blank value for every validator in the call, so
+    // the rule runs only when the value is not blank. Its own option wins.
+    if allow_blank {
+        for draft in &mut drafts {
+            if !blank_safe(&draft.rule) && !is_uniqueness(draft) && !stores_flags(draft) && !draft.own_allow_blank {
+                draft.blank_skip = true;
+            }
+        }
     }
     // Call-level `allow_nil: true` is Rails' skip-when-nil for every
     // validator in the call. Length, Uniqueness, Numericality and Format store it, and
     // Presence skips nil (`nil_skip` below). The other
     // rules this build lowers reject nil, so applying them would reject
     // records Rails accepts.
-    if allow_nil == Some(true)
-        && drafts
-            .iter()
-            .any(|draft| {
-                !matches!(draft.rule, ValidationRule::Length { .. } | ValidationRule::Presence)
-                    && !is_uniqueness(draft)
-                    && !stores_flags(draft)
-                    && !stores_nil(draft)
-            })
-    {
-        gaps.push("allow_nil".to_string());
+    if allow_nil == Some(true) {
+        for draft in &mut drafts {
+            if !matches!(draft.rule, ValidationRule::Length { .. } | ValidationRule::Presence)
+                && !is_uniqueness(draft)
+                && !stores_flags(draft)
+                && !stores_nil(draft)
+                && !draft.own_allow_nil
+            {
+                draft.nil_skip = true;
+            }
+        }
     }
 
     if !gaps.is_empty() {
@@ -366,6 +373,7 @@ pub(super) fn parse_validates_call(
             // call's options under each validator's own.
             let rule_on = draft.on_guard.clone().unwrap_or_else(|| on_guard.clone());
             let rule_on = if draft.nil_skip { and_guard(Some(not_nil(attr)), rule_on) } else { rule_on };
+            let rule_on = if draft.blank_skip { and_guard(Some(not_blank(attr)), rule_on) } else { rule_on };
             let if_cond = and_guard(rule_on, draft.if_cond.clone().or_else(|| call_if_cond.clone()));
             let unless_cond = draft.unless_cond.clone().or_else(|| call_unless_cond.clone());
             if let Some(current) = grouped.as_mut() {
@@ -458,6 +466,28 @@ fn push_condition(
 /// spelling `model_to_library::markers` uses, for the same reason).
 /// `!self.<attr>.nil?`, the guard a call-level `allow_nil:` puts on a rule
 /// that stores no flag (presence).
+/// `!self.<attr>.blank?`: Rails' `allow_blank:` skips nil, `""` and `"  "`.
+fn not_blank(attr: &Symbol) -> Expr {
+    let read = Expr::new(
+        Span::synthetic(),
+        ExprNode::Send {
+            recv: Some(Expr::new(Span::synthetic(), ExprNode::SelfRef)),
+            method: attr.clone(),
+            args: Vec::new(),
+            block: None,
+            parenthesized: false,
+        },
+    );
+    let blank = Expr::new(
+        Span::synthetic(),
+        ExprNode::Send { recv: Some(read), method: Symbol::from("blank?"), args: Vec::new(), block: None, parenthesized: false },
+    );
+    Expr::new(
+        Span::synthetic(),
+        ExprNode::Send { recv: Some(blank), method: Symbol::from("!"), args: Vec::new(), block: None, parenthesized: false },
+    )
+}
+
 fn not_nil(attr: &Symbol) -> Expr {
     let read = Expr::new(
         Span::synthetic(),
@@ -1185,9 +1215,21 @@ fn parse_set(value: &Node<'_>, file: &str, exclusion: bool, class_consts: &super
             "unless" => {
                 push_condition(&child, file, &mut built.unless_cond, "unless", &mut gaps)
             }
+            // The rule's own option wins over the call's, as Rails merges
+            // the call's options under each validator's own.
             "allow_nil" => match super::super::util::bool_value(&child) {
-                Some(false) => {}
-                _ => gaps.push("allow_nil".to_string()),
+                Some(flag) => {
+                    built.nil_skip = flag;
+                    built.own_allow_nil = true;
+                }
+                None => gaps.push("allow_nil".to_string()),
+            },
+            "allow_blank" => match super::super::util::bool_value(&child) {
+                Some(flag) => {
+                    built.blank_skip = flag;
+                    built.own_allow_blank = true;
+                }
+                None => gaps.push("allow_blank".to_string()),
             },
             "message" => push_message(&child, label, false, &mut built.message, &mut gaps),
             other => gaps.push(format!("{label}: {other}")),
