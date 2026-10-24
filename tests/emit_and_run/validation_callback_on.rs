@@ -85,3 +85,33 @@ puts "belongs_to autosave waits for save"
         )
         .assert_passes();
 }
+
+/// A belongs_to `default:` applies only when no target is assigned, as
+/// Rails' `association.default` checks the reader. An unsaved target
+/// assigned through the writer has a zero foreign key until `save`
+/// autosaves it, so a direct `valid?` must not replace it.
+#[test]
+fn valid_keeps_an_assigned_unsaved_target_over_the_default() {
+    emit_and_run::real_blog()
+        .edit(
+            "app/models/comment.rb",
+            "  belongs_to :article\n",
+            "  belongs_to :article, default: -> { Article.order(:id).first }\n",
+        )
+        .run_ruby(
+            r#"fallback = Article.create!(title: "Fallback", body: "A body long enough to pass validation.")
+unassigned = Comment.new(commenter: "Bo", body: "Hello there")
+unassigned.valid?
+raise "default not applied: #{unassigned.article_id.inspect}" unless unassigned.article_id == fallback.id
+article = Article.new(title: "Parent", body: "A body long enough to pass validation.")
+comment = Comment.new(article: article, commenter: "Ann", body: "Hello there")
+comment.valid?
+raise "replaced by the default: #{comment.article.title}" unless comment.article.equal?(article)
+comment.save!
+saved = [article.persisted?, comment.article_id == article.id]
+raise "after save!: #{saved.inspect}" unless saved == [true, true]
+puts "assigned target kept over the default"
+"#,
+        )
+        .assert_passes();
+}

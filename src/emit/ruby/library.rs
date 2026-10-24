@@ -2488,12 +2488,12 @@ fn sti_dispatch(base_new: Expr, type_read: &Expr, subs: &[ClassId], span: Span) 
 /// strict targets keep the gap they already had, ledgered in
 /// docs/pipeline/runtime.md.
 ///
-/// Ordering is load-bearing: the autosave runs BEFORE the belongs_to
-/// `default:` statement in `before_validation`, which is guarded on
-/// `@creator_id == 0`. Fill the key first or an explicitly assigned
-/// unsaved creator is overwritten by the default. `save` calls
-/// `_autosave_belongs_to` ahead of `valid?`, which runs
-/// `before_validation`, so the separate hook keeps that order.
+/// The belongs_to `default:` statement in `before_validation` is
+/// guarded on `@creator_id == 0`, which an explicitly assigned unsaved
+/// creator also has. `save` calls `_autosave_belongs_to` ahead of
+/// `valid?`, so the key is filled first; a direct `valid?` has no
+/// autosave, so the guard also asks the reader
+/// (`guard_default_on_reader`).
 pub(crate) fn apply_belongs_to_autosave(lcs: &mut [LibraryClass], app: &App) {
     use crate::dialect::Association;
 
@@ -2536,8 +2536,59 @@ pub(crate) fn apply_belongs_to_autosave(lcs: &mut [LibraryClass], app: &App) {
             );
             lc.methods.push(autosave_method(&lc.name, &name, &fk));
             fold_autosave_call_into_hook(&mut lc.methods, &lc.name, &name);
+            guard_default_on_reader(&mut lc.methods, &name);
             route_init_through_writer(lc, &name, &fk);
         }
+    }
+}
+
+/// The shared `default:` statement in `before_validation`,
+/// `self.<name> = <default> if @fk.nil? || @fk == 0`, also requires
+/// `<name>.nil?`, as Rails' `association.default` checks the reader.
+/// An unsaved target assigned through the writer has a zero key until
+/// `save` autosaves it, and a direct `valid?` runs `before_validation`
+/// without that autosave. The key test stays first, so the reader
+/// answers from the stash and never queries.
+fn guard_default_on_reader(methods: &mut [MethodDef], name: &Symbol) {
+    let Some(hook) = methods
+        .iter_mut()
+        .find(|m| m.name.as_str() == "before_validation" && m.receiver == MethodReceiver::Instance)
+    else {
+        return;
+    };
+    let writer = format!("{}=", name.as_str());
+    let guard = |stmt: &mut Expr| {
+        let ExprNode::If { cond, then_branch, .. } = &mut *stmt.node else { return };
+        let assigns = matches!(&*then_branch.node, ExprNode::Send { recv: Some(r), method, .. }
+            if matches!(&*r.node, ExprNode::SelfRef) && method.as_str() == writer);
+        if !assigns {
+            return;
+        }
+        let span = cond.span;
+        let syn = |n| Expr::new(span, n);
+        let reader_nil = syn(ExprNode::Send {
+            recv: Some(syn(ExprNode::Send {
+                recv: None,
+                method: name.clone(),
+                args: vec![],
+                block: None,
+                parenthesized: false,
+            })),
+            method: Symbol::from("nil?"),
+            args: vec![],
+            block: None,
+            parenthesized: false,
+        });
+        *cond = syn(ExprNode::BoolOp {
+            op: crate::expr::BoolOpKind::And,
+            surface: crate::expr::BoolOpSurface::default(),
+            left: cond.clone(),
+            right: reader_nil,
+        });
+    };
+    match &mut *hook.body.node {
+        ExprNode::Seq { exprs } => exprs.iter_mut().for_each(guard),
+        _ => guard(&mut hook.body),
     }
 }
 
