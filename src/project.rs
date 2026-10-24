@@ -6267,6 +6267,7 @@ const RUBY_SPINEL_ONLY_METHODS: &[(&str, &str)] = &[
     ("ActiveSupport", "cast_string"),
     ("ActiveSupport", "cast_integer"),
     ("ActiveSupport", "cast_float"),
+    ("ActiveSupport", "cast_decimal"),
     ("ActiveSupport", "numericality_number"),
     ("ActiveSupport", "cast_boolean"),
     ("ActiveSupport", "cast_datetime"),

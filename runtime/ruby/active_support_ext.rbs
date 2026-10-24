@@ -68,6 +68,8 @@ module ActiveSupport
   def self.cast_integer: (::Object? value) -> Integer?
   def self.integer_from_string: (String value) -> Integer?
   def self.cast_float: (::Object? value) -> Float?
+  def self.cast_decimal: (::Object? value) -> Float?
+  def self.numeric_blank?: (::Object? value) -> bool
   def self.numericality_number: (::Object? raw, ::Object? value) -> (Integer | Float)?
   def self.float_from_string: (String value) -> Float?
   def self.integer_from_bytes: (Array[Integer] raw) -> Integer

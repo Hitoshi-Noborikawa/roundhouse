@@ -29,8 +29,10 @@
 //! The writer returns the argument it was given. Rails'
 //! `AttributeSet#write_from_user` does, and `obj.n = "08"` is `"08"`.
 //!
-//! A value of another class raises `TypeError` where Rails would call
-//! `to_i` (integer) or keep it (datetime): the static targets cannot ask
+//! A value of another class is nil for `:integer` where it is blank or
+//! has no `to_i` (a Symbol, an Array, a Hash), as Rails' `to_i rescue
+//! nil`, and its `to_i` otherwise. For `:datetime` it raises
+//! `TypeError` where Rails would keep it: the static targets cannot ask
 //! an arbitrary object, and raising is not a different answer.
 //!
 //! A class is left as it was, include and all (so `check` still reports
