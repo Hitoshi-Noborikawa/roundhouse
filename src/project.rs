@@ -1456,7 +1456,7 @@ fn emits_namespaced_controllers(target: BuildTarget) -> bool {
 /// `I18n.translate_site` / `I18n.translate_runtime` reports each one
 /// rather than emit a call to nothing.
 // Not a BuildTarget match: the bundled-constant walk names its target as a string, and both read these
-const I18N_RUNTIME_TARGETS: &[&str] = &["blog", "futamura", "ruby", "jruby", "spinel", "typescript", "crystal", "csharp"];
+const I18N_RUNTIME_TARGETS: &[&str] = &["blog", "futamura", "ruby", "jruby", "spinel", "typescript", "crystal", "csharp", "kotlin"];
 const I18N_CATALOG_TARGETS: &[&str] = &["blog", "futamura", "ruby", "jruby", "spinel", "typescript", "crystal"];
 
 fn ships_i18n_runtime(target: BuildTarget) -> bool {

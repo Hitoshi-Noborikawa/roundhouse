@@ -1046,6 +1046,24 @@ fn kotlin_wrap_namespace(_namespace: &str, body: &str) -> String {
 
 const KOTLIN_RUNTIME: &[RuntimeEntry] = &[
     runtime_entry! {
+        stem: "active_support_inflections",
+        namespace: "",
+        out_path: "src/main/kotlin/ActiveSupportInflections.kt",
+        mode: Mode::Library,
+        imports: NO_IMPORTS,
+        prelude: NO_PRELUDE,
+        extra_roots: NO_EXTRA_ROOTS,
+    },
+    runtime_entry! {
+        stem: "i18n_locale",
+        namespace: "",
+        out_path: "src/main/kotlin/I18nLocale.kt",
+        mode: Mode::Library,
+        imports: NO_IMPORTS,
+        prelude: NO_PRELUDE,
+        extra_roots: NO_EXTRA_ROOTS,
+    },
+    runtime_entry! {
         stem: "inflector",
         namespace: "",
         out_path: "src/main/kotlin/Inflector.kt",
