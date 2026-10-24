@@ -1214,7 +1214,11 @@ fn every_runtime_method_body_concretely_typed() {
     // class is declared by the spinel and CRuby overlays, not by the
     // ruby-family signatures, so the branch's `to_i`/`to_f` read one
     // gradual site (+1 in active_support_ext.rb, 876 -> 877).
-    const CEILING: usize = 877;
+    // MEASURED 878 on 2026-10-24 (on 877): `Base.decode_plucked`'s identity
+    // default hands back the plucked value as the row held it, whatever its
+    // type; a model with a stored array column overrides it to decode
+    // (+1 in active_record/connection.rb).
+    const CEILING: usize = 878;
     assert!(
         total_gradual <= CEILING,
         "{total_gradual} Ty::Untyped sites exceeds ceiling of {CEILING}"
