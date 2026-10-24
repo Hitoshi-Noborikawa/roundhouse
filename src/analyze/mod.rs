@@ -1156,9 +1156,10 @@ impl Analyzer {
                     class.origin,
                     Some(
                         crate::dialect::LibraryClassOrigin::StructSuperclass { .. }
-                            // Omitted `keyword_init`: Ruby binds keywords by member name,
-                            // which the positional constructor does not.
-                            | crate::dialect::LibraryClassOrigin::StructConstant { keyword_init: false, positional_written: false, .. }
+                            // Omitted `keyword_init`, Ruby binds keywords by member name; written
+                            // `false`, it passes them as one Hash to the first member. Inference
+                            // binds them by name either way, so both stay refused.
+                            | crate::dialect::LibraryClassOrigin::StructConstant { keyword_init: false, .. }
                     )
                 ) {
                     if let Some(info) = classes.get_mut(&lc.name) {
