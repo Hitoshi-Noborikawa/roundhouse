@@ -15,6 +15,8 @@ mod session_cookie_key;
 mod session_options_key;
 #[path = "emit_and_run/httpdate_from_now.rs"]
 mod httpdate_from_now;
+#[path = "emit_and_run/cookie_jar_each.rs"]
+mod cookie_jar_each;
 #[path = "emit_and_run/active_model_attributes.rs"]
 mod active_model_attributes;
 #[path = "emit_and_run/arel_nodes.rs"]
