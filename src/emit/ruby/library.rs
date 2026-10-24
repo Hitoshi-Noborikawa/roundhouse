@@ -2536,7 +2536,7 @@ pub(crate) fn apply_belongs_to_autosave(lcs: &mut [LibraryClass], app: &App) {
             );
             lc.methods.push(autosave_method(&lc.name, &name, &fk));
             fold_autosave_call_into_hook(&mut lc.methods, &lc.name, &name);
-            guard_default_on_reader(&mut lc.methods, &name);
+            guard_default_on_reader(&mut lc.methods, &name, &fk);
             route_init_through_writer(lc, &name, &fk);
         }
     }
@@ -2549,7 +2549,7 @@ pub(crate) fn apply_belongs_to_autosave(lcs: &mut [LibraryClass], app: &App) {
 /// `save` autosaves it, and a direct `valid?` runs `before_validation`
 /// without that autosave. The key test stays first, so the reader
 /// answers from the stash and never queries.
-fn guard_default_on_reader(methods: &mut [MethodDef], name: &Symbol) {
+fn guard_default_on_reader(methods: &mut [MethodDef], name: &Symbol, fk: &Symbol) {
     let Some(hook) = methods
         .iter_mut()
         .find(|m| m.name.as_str() == "before_validation" && m.receiver == MethodReceiver::Instance)
@@ -2561,7 +2561,10 @@ fn guard_default_on_reader(methods: &mut [MethodDef], name: &Symbol) {
         let ExprNode::If { cond, then_branch, .. } = &mut *stmt.node else { return };
         let assigns = matches!(&*then_branch.node, ExprNode::Send { recv: Some(r), method, .. }
             if matches!(&*r.node, ExprNode::SelfRef) && method.as_str() == writer);
-        if !assigns {
+        // The default's statement only: a model's own block
+        // before_validation can assign the association under its own
+        // condition, and that keeps its meaning.
+        if !assigns || !is_default_key_test(cond, fk) {
             return;
         }
         let span = cond.span;
@@ -2590,6 +2593,21 @@ fn guard_default_on_reader(methods: &mut [MethodDef], name: &Symbol) {
         ExprNode::Seq { exprs } => exprs.iter_mut().for_each(guard),
         _ => guard(&mut hook.body),
     }
+}
+
+/// `@<fk>.nil? || @<fk> == 0`, the test `push_belongs_to_defaults`
+/// (lower::model_to_library::markers) guards a `default:` with.
+fn is_default_key_test(cond: &Expr, fk: &Symbol) -> bool {
+    let is_fk = |e: &Expr| matches!(&*e.node, ExprNode::Ivar { name } if name == fk);
+    let ExprNode::BoolOp { op: crate::expr::BoolOpKind::Or, left, right, .. } = &*cond.node else {
+        return false;
+    };
+    let nil_test = matches!(&*left.node, ExprNode::Send { recv: Some(r), method, args, .. }
+        if method.as_str() == "nil?" && args.is_empty() && is_fk(r));
+    let zero_test = matches!(&*right.node, ExprNode::Send { recv: Some(r), method, args, .. }
+        if method.as_str() == "==" && is_fk(r)
+            && matches!(args.as_slice(), [a] if matches!(&*a.node, ExprNode::Lit { value: Literal::Int { value: 0 } })));
+    nil_test && zero_test
 }
 
 /// `@<name>_cache = value; @<name>_loaded = true`

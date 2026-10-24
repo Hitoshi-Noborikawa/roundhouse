@@ -96,7 +96,7 @@ fn valid_keeps_an_assigned_unsaved_target_over_the_default() {
         .edit(
             "app/models/comment.rb",
             "  belongs_to :article\n",
-            "  belongs_to :article, default: -> { Article.order(:id).first }\n",
+            "  belongs_to :article, default: -> { Article.order(:id).first }\n  before_validation { self.article = Article.order(:id).first if commenter == \"swap\" }\n",
         )
         .run_ruby(
             r#"fallback = Article.create!(title: "Fallback", body: "A body long enough to pass validation.")
@@ -110,6 +110,9 @@ raise "replaced by the default: #{comment.article.title}" unless comment.article
 comment.save!
 saved = [article.persisted?, comment.article_id == article.id]
 raise "after save!: #{saved.inspect}" unless saved == [true, true]
+swapped = Comment.new(article: article, commenter: "swap", body: "Hello there")
+swapped.valid?
+raise "the model's own assignment was guarded: #{swapped.article_id.inspect}" unless swapped.article_id == fallback.id
 puts "assigned target kept over the default"
 "#,
         )
