@@ -380,6 +380,15 @@ module Cable
   # Reactor thread only (see the threading contract above), so no lock.
   module Registry
     SUBS = {}
+    # Told when a stream gains its first subscriber here and loses its last:
+    # the cross-worker hub routes by it (runtime/cable_hub.rb). Set once,
+    # before any connection subscribes.
+    WATCHERS = []
+
+    def self.watch(watcher)
+      WATCHERS << watcher
+      nil
+    end
 
     # Called from Puma request threads by `Broadcasts.record` after a
     # model commit. Returns as soon as the closure is queued — the
@@ -434,8 +443,10 @@ module Cable
     end
 
     def self.subscribe(stream, conn)
+      fresh = !SUBS.key?(stream)
       list = (SUBS[stream] ||= [])
       list << conn unless list.include?(conn)
+      WATCHERS.each { |watcher| watcher.stream_added(stream) } if fresh
       nil
     end
 
@@ -443,13 +454,20 @@ module Cable
       list = SUBS[stream]
       return nil if list.nil?
       list.delete(conn)
-      SUBS.delete(stream) if list.empty?
+      if list.empty?
+        SUBS.delete(stream)
+        WATCHERS.each { |watcher| watcher.stream_removed(stream) }
+      end
       nil
     end
 
     def self.unsubscribe_all(conn)
       SUBS.each_value { |list| list.delete(conn) }
-      SUBS.delete_if { |_stream, list| list.empty? }
+      emptied = SUBS.select { |_stream, list| list.empty? }.keys
+      emptied.each do |stream|
+        SUBS.delete(stream)
+        WATCHERS.each { |watcher| watcher.stream_removed(stream) }
+      end
       nil
     end
   end
