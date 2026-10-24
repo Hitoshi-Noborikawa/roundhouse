@@ -29,7 +29,23 @@ fn emit() {
     let fixture = args.first().cloned().unwrap_or_else(|| "fixtures/real-blog".into());
 
     let mut app = ingest_app(Path::new(&fixture)).expect("ingest");
-    roundhouse::session::analyze_and_lower(&mut app);
+    // The target's own pre-analysis choices (array columns, the untyped
+    // numericality refusal), as `bin/roundhouse` makes them.
+    let canonical = match target.as_str() {
+        "ts" => "typescript",
+        "cr" => "crystal",
+        "rs" => "rust",
+        "py" => "python",
+        "ex" => "elixir",
+        "kt" => "kotlin",
+        "sw" => "swift",
+        "cs" => "csharp",
+        other => other,
+    };
+    match roundhouse::build_target::BuildTarget::from_str(canonical) {
+        Some(t) => roundhouse::session::analyze_and_lower_for(&mut app, t),
+        None => roundhouse::session::analyze_and_lower(&mut app),
+    };
 
     let (files, default_out_dir) = match target.as_str() {
         "typescript" | "ts" => {

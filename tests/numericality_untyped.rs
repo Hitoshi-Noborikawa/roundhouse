@@ -159,3 +159,35 @@ fn a_strict_target_refuses_an_untyped_numericality_without_allow() {
     let rust = cli_warnings("rust", "no-allow");
     assert!(rust.iter().any(|w| w.contains("validates :required, numericality:")), "{rust:#?}");
 }
+
+/// The site build (`project::build_archives`) emits each target from the
+/// target's own analysis (`session::analyze_and_lower_for`), as the CLI
+/// does, so a strict target's archive refuses the untyped rule the same
+/// way: its settings form is the CLI's, file for file.
+#[test]
+fn the_site_archive_emits_a_strict_target_as_the_cli_does() {
+    let root = std::env::temp_dir().join(format!("roundhouse-numericality-untyped-archive-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let source = root.join("app");
+    std::fs::create_dir_all(&root).unwrap();
+    assert!(std::process::Command::new("cp").args(["-a"]).arg(roundhouse::fixtures::real_blog()).arg(&source).status().unwrap().success());
+    std::fs::write(source.join("app/models/settings_form.rb"), FORM).unwrap();
+    let cli = std::process::Command::new(env!("CARGO_BIN_EXE_roundhouse"))
+        .args(["--target", "rust", "--allow-unsupported", "-o"])
+        .arg(root.join("cli"))
+        .arg(&source)
+        .output()
+        .expect("run roundhouse");
+    assert!(cli.status.success(), "{}", String::from_utf8_lossy(&cli.stderr));
+    roundhouse::project::build_archives(&source, &root.join("site"), &[roundhouse::build_target::BuildTarget::Rust]).unwrap();
+    let manifest: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(root.join("site/browse/rust.json")).unwrap()).unwrap();
+    let files = manifest["files"].as_array().unwrap();
+    let form = files
+        .iter()
+        .find(|f| f["path"].as_str().is_some_and(|p| p.ends_with("settings_form.rs")))
+        .expect("settings form in the archive");
+    let cli_form = std::fs::read_to_string(root.join("cli").join(form["path"].as_str().unwrap())).unwrap();
+    std::fs::remove_dir_all(&root).ok();
+    assert_eq!(form["content"].as_str().unwrap(), cli_form);
+}
