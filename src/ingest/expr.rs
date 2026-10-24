@@ -1026,7 +1026,7 @@ fn ingest_expr_node(node: &Node<'_>, file: &str) -> IngestResult<Expr> {
             // value, not a constant, and Ruby looks `KINDS` up through that
             // class's ancestors. Its own spelling is `const_get(:KINDS)`;
             // dropping the parent made it a lexical `KINDS`.
-            if super::util::constant_path_segments_strs(n).is_none() {
+            if super::util::constant_path_has_value_parent(&p) {
                 // A chain (`self.class::NAMES::LABEL`) is one scoped lookup,
                 // `const_get("NAMES::LABEL")`, as Ruby resolves it: the
                 // first segment through the value's ancestors, the rest
