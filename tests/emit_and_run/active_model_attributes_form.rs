@@ -70,3 +70,32 @@ fn a_form_models_attributes_include_is_resolved() {
     let warnings = form().ingest_warnings();
     assert!(!warnings.iter().any(|e| e.contains("includes unresolved ActiveModel::Attributes")), "{warnings:#?}");
 }
+
+const RECORD_SCRIPT: &str = r##"
+def check(label, got, want)
+  raise "#{label}: #{got.inspect} (want #{want.inspect})" unless got == want
+end
+a = Article.new(title: "Typed", body: "A body long enough to validate.", rank: "7", tag: 12, flag: "0")
+check("integer", a.rank, 7)
+check("string", a.tag, "12")
+check("boolean", a.flag, false)
+a.rank = "08"
+check("writer casts", a.rank, 8)
+puts "ActiveRecord attributes passed"
+"##;
+
+/// An ActiveRecord model's `attribute :name, :type` (Rails 8.1.4) casts as
+/// the ActiveModel form's does: `Record.new(count: "7").count` is 7 and
+/// `label: 12` is `"12"`.
+#[test]
+fn a_record_casts_its_attribute_api_declarations_on_ruby() {
+    let run = emit_and_run::real_blog()
+        .edit(
+            "app/models/article.rb",
+            "class Article < ApplicationRecord\n  has_many :comments, dependent: :destroy\n",
+            "class Article < ApplicationRecord\n  has_many :comments, dependent: :destroy\n  attribute :rank, :integer\n  attribute :tag, :string\n  attribute :flag, :boolean\n",
+        )
+        .run_ruby(RECORD_SCRIPT);
+    run.assert_passes();
+    assert!(run.stdout.contains("ActiveRecord attributes passed"), "{}", run.stdout);
+}

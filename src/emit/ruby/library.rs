@@ -9934,11 +9934,13 @@ pub(crate) fn apply_typed_writer_cast_lowering(lcs: &mut [LibraryClass], app: &A
                     .collect()
             })
             .unwrap_or_default();
-        // A tableless model's (an `ActiveModel::Model` form's)
-        // `attribute :name, :type` writers cast as ActiveModel's types do,
-        // as `ingest::active_model_attributes` casts a plain class's.
-        // `:boolean` already casts inline (`markers::push_attribute_api_methods`).
-        if table.is_none() {
+        // A model's `attribute :name, :type` writers cast as ActiveModel's
+        // types do, as `ingest::active_model_attributes` casts a plain
+        // class's: an `ActiveModel::Model` form's and an ActiveRecord
+        // model's alike (Rails 8.1.4). A column of the same name keeps its
+        // column cast. `:boolean` already casts inline
+        // (`markers::push_attribute_api_methods`).
+        {
             for (name, ty) in crate::lower::model_to_library::markers::attribute_api_decls(&model.body) {
                 let cast = match ty.as_str() {
                     "string" => "cast_string",
