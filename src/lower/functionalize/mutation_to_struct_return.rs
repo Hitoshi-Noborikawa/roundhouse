@@ -212,7 +212,18 @@ pub fn transform_method(mut m: MethodDef, reg: &Registry) -> MethodDef {
 /// rather than `self`/`nil`/a mutation (`valid?`'s implicit
 /// `@errors.empty?`).
 fn returns_genuine_value(e: &Expr) -> bool {
-    has_value_return(e) || tail_is_genuine_value(e)
+    has_value_return(e) || tail_is_genuine_value(e) || tail_is_genuine_local(e)
+}
+
+/// True when the body ends in a local that a top-level statement of the
+/// same body assigned a genuine value: `valid?`'s `ok = @errors.empty?;
+/// after_validation; ok`, which takes the answer before a callback runs.
+fn tail_is_genuine_local(e: &Expr) -> bool {
+    let ExprNode::Seq { exprs } = &*e.node else { return false };
+    let Some(ExprNode::Var { name, .. }) = exprs.last().map(|t| &*t.node) else { return false };
+    exprs.iter().any(|s| {
+        matches!(&*s.node, ExprNode::Assign { target: LValue::Var { name: n, .. }, value } if n == name && tail_is_genuine_value(value))
+    })
 }
 
 /// The trailing (value-producing) expression of a body — the last
@@ -1697,6 +1708,28 @@ mod tests {
         // stamping happens in the full pipeline, not this unit slice).
         assert!(ex.contains("{record, "), "tail wrapped as {{record, value}}:\n{ex}");
         assert!(!ex.contains("mutates instance state and returns a value"), "not stubbed:\n{ex}");
+    }
+
+    #[test]
+    fn dual_return_carries_an_answer_taken_before_a_callback() {
+        // def valid?; @errors = []; ok = @errors.empty?; after_validation; ok; end
+        let valid = instance_method(
+            "valid?",
+            &[],
+            syn(ExprNode::Seq {
+                exprs: vec![
+                    assign_ivar("errors", syn(ExprNode::Array { elements: vec![], style: ArrayStyle::Brackets })),
+                    syn(ExprNode::Assign {
+                        target: lvar("ok"),
+                        value: send(Some(syn(ExprNode::Ivar { name: sym("errors") })), "empty?", vec![]),
+                    }),
+                    send(None, "after_validation", vec![]),
+                    vr("ok"),
+                ],
+            }),
+        );
+        let ex = render_all(vec![valid]);
+        assert!(ex.contains("{record, ok}"), "the local answer is the tuple's value:\n{ex}");
     }
 
     #[test]
