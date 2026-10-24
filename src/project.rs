@@ -1695,6 +1695,46 @@ fn report_self_bindings(app: &App, target: BuildTarget) {
 /// `Float(...)`, and the ActiveRecord methods only connection.rb defines.
 /// The other emitters render them as the method name on
 /// the receiver, which nothing there defines, so they refuse each by name.
+/// `alias read_attribute_for_serialization send`: the alias delegates to a
+/// method every Ruby object answers (`expr::BUILTIN_ALIAS`), which a strict
+/// target has no counterpart for. Refused there where it is written, naming
+/// the builtin.
+fn report_builtin_aliases(app: &App, target: BuildTarget) {
+    if matches!(
+        target,
+        BuildTarget::Blog | BuildTarget::Ruby | BuildTarget::Jruby | BuildTarget::Spinel | BuildTarget::Roda | BuildTarget::Futamura
+    ) {
+        return;
+    }
+    fn find(e: &crate::expr::Expr, out: &mut Vec<(crate::span::Span, crate::ident::Symbol)>) {
+        if e.decisions & crate::expr::BUILTIN_ALIAS != 0
+            && let crate::expr::ExprNode::Send { method, .. } = &*e.node
+        {
+            out.push((e.span, method.clone()));
+        }
+        e.node.for_each_child(&mut |c| find(c, out));
+    }
+    for class in &app.library_classes {
+        for method in &class.methods {
+            let mut found = Vec::new();
+            find(&method.body, &mut found);
+            for (span, builtin) in found {
+                emit::diagnostics::report_unsupported(
+                    span,
+                    target.as_str(),
+                    "builtin alias",
+                    format!(
+                        "`{}` aliases `{}`, a method every Ruby object answers, which the {} emit has no counterpart for",
+                        method.name.as_str(),
+                        builtin.as_str(),
+                        target.as_str()
+                    ),
+                );
+            }
+        }
+    }
+}
+
 fn report_ruby_only_sends(app: &App, target: BuildTarget) {
     if matches!(target, BuildTarget::Blog | BuildTarget::Ruby | BuildTarget::Jruby
         | BuildTarget::Spinel | BuildTarget::Roda) {
@@ -2226,6 +2266,7 @@ fn target_files_inner(
     report_native_ruby_syntax(app, target);
     report_self_bindings(app, target);
     report_ruby_only_sends(app, target);
+    report_builtin_aliases(app, target);
     report_dynamic_association_joins(app, target);
     report_typescript_array_sends(app, target);
     report_dry_struct_stdlib(app, target);

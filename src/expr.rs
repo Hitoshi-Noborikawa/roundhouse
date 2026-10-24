@@ -118,6 +118,11 @@ pub const RESOLVED_MIXIN: u64 = 1 << 22;
 /// can ask; `project::report_unsupported_bundled_constants` reports it elsewhere.
 pub const MODULE_QUERY: u64 = 1 << 23;
 
+/// The call an `alias new builtin` delegates to (`ingest::library_class::
+/// OBJECT_BUILTINS`): a method every Ruby object answers, which only the
+/// ruby family has; `project::report_builtin_aliases` refuses it elsewhere.
+pub const BUILTIN_ALIAS: u64 = 1 << 26;
+
 /// The owner read an association build captures into its temp
 /// (`rh_build_owner_N = @article`): it stands in for the receiver of the
 /// `@article.x` the build replaced, which read the owner unconditionally.
