@@ -1888,7 +1888,8 @@ pub(super) fn js_library_class(
     let parent = class.parent.as_ref().map(|p| {
         let raw = p.0.as_str();
         match raw {
-            "StandardError" => "Error".to_string(),
+            "StandardError" | "RuntimeError" | "ArgumentError" | "TypeError" | "NameError" | "NoMethodError"
+            | "NotImplementedError" | "KeyError" | "IndexError" => "Error".to_string(),
             // Test parents — runtime adapter exports both names.
             "ActiveSupport::TestCase" | "ActionDispatch::IntegrationTest" => "TestCase".to_string(),
             "Minitest::Test" => "Test".to_string(),
