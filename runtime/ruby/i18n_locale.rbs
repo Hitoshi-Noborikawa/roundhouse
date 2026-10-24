@@ -9,6 +9,7 @@ module I18n
   self.@rule_table: Hash[String, Array[String]]
   self.@opaque_table: Hash[String, Array[String]]
   self.@table_loaded: bool
+  self.@catalog_loaded: bool
   class InvalidLocale < ArgumentError
   end
 
@@ -79,4 +80,5 @@ module I18n
   def self.translation_table: () -> Hash[String, Integer]
   def self.translation_entries: () -> Array[Array[String]]
   def self.load_translation_table: () -> nil
+  def self.load_runtime_catalog: () -> nil
 end

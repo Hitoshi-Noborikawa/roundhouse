@@ -817,7 +817,8 @@ pub const I18N_CATALOG_METHODS: &[&str] = &[
     "translate_symbols", "translate_integer", "translate_float", "translate_boolean", "insert_empty",
     "insert_tree", "scope_text", "html_safe_key?", "runtime_lookup", "plural_form", "plural_rule",
     "plural_category", "plural_key", "plural_bool", "plural_num", "plural_step", "runtime_chain",
-    "interpolate_runtime",
+    "interpolate_runtime", "runtime_leaves", "runtime_nodes", "runtime_order", "runtime_empties", "runtime_chains",
+    "runtime_rules", "runtime_opaque", "load_runtime_catalog",
 ];
 
 // Not a target field: the runtimes that carry the catalog are the TypeScript and Crystal trees, named by what they write
@@ -896,12 +897,12 @@ where
             (body, Vec::new(), methods)
         }
         Mode::Library => {
-            let classes = parse_library_with_rbs(
+            // Not trimmed after the transform: a functional target's transform splits a loop into helpers the trim would drop
+            let mut classes = parse_library_with_rbs(
                 entry.rb_src.as_bytes(),
                 entry.rbs_src,
                 entry.rb_path,
             )?;
-            let mut classes = transform(entry.out_path, classes);
             // Not the whole file: the I18n core reaches titleize (a missing key's span) and nothing else in it
             if entry.rb_path == "runtime/ruby/active_support_inflections.rb" && !I18N_CATALOG_OUT.iter().any(|ext| entry.out_path.ends_with(ext)) {
                 classes.retain(|c| c.name.0.as_str() == "ActiveSupport");
@@ -921,6 +922,7 @@ where
                     }
                 });
             }
+            let classes = transform(entry.out_path, classes);
             // Module-level constants (`HTML_ESCAPES = { ... }.freeze`
             // in `view_helpers.rb`, etc.) emit as top-level
             // `const NAME = ...;` declarations BEFORE class bodies,

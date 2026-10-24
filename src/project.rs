@@ -4146,18 +4146,14 @@ fn apply_cable_connection(files: &mut [(String, String)], app: &App) {
 /// `I18n.available_locales` answer and `I18n.locale =` checks against.
 /// An app that sets neither keeps the file's `:en`.
 /// `app.i18n_table` as `I18n.load_translation_table` reads it: each
-/// distinct entry once (`E`), each site's run-time keys once (`K`), and
-/// per site, locale and environment the index of each key's entry (`B`,
-/// `-` for none), so neither an entry nor a key is spelled per locale.
+/// distinct entry once (`E`), and per site, locale, environment and key
+/// the index of its entry (`T`), so no entry is spelled per locale.
 fn i18n_table_text(app: &App) -> String {
     let mut index: std::collections::HashMap<&Vec<String>, usize> = std::collections::HashMap::new();
     let mut entries = String::new();
-    let mut keys: Vec<(&str, Vec<&str>)> = Vec::new();
-    let mut blocks: Vec<((&str, &str, &str), std::collections::HashMap<&str, usize>)> = Vec::new();
+    let mut lines = String::new();
     let table: Vec<(String, Vec<String>)> = app.i18n_table.iter().flat_map(|site| site.records()).collect();
     for (record, entry) in &table {
-        let mut parts = record.splitn(4, '\u{1c}');
-        let (site, locale, env, key) = (parts.next().unwrap_or(""), parts.next().unwrap_or(""), parts.next().unwrap_or(""), parts.next().unwrap_or(""));
         let next = index.len();
         let at = *index.entry(entry).or_insert_with(|| {
             entries.push('E');
@@ -4168,42 +4164,11 @@ fn i18n_table_text(app: &App) -> String {
             entries.push_str("\u{1f}.\u{1e}");
             next
         });
-        match keys.last_mut() {
-            Some((s, ks)) if *s == site => {
-                if !ks.contains(&key) {
-                    ks.push(key);
-                }
-            }
-            _ => keys.push((site, vec![key])),
-        }
-        match blocks.last_mut() {
-            Some((b, m)) if *b == (site, locale, env) => {
-                m.insert(key, at);
-            }
-            _ => blocks.push(((site, locale, env), std::collections::HashMap::from([(key, at)]))),
-        }
+        // Not packed per site and locale: unpacking a run of keys is a loop inside the line loop, which a functional target cannot write
+        lines.push_str(&format!("T\u{1f}{}\u{1f}{at}\u{1f}.\u{1e}", record.splitn(4, '\u{1c}').collect::<Vec<_>>().join("\u{1f}")));
     }
     let mut out = entries;
-    let site_keys: std::collections::HashMap<&str, &Vec<&str>> = keys.iter().map(|(s, k)| (*s, k)).collect();
-    for (site, ks) in &keys {
-        out.push_str(&format!("K\u{1f}{site}"));
-        for k in ks {
-            out.push('\u{1f}');
-            out.push_str(k);
-        }
-        out.push_str("\u{1f}.\u{1e}");
-    }
-    for ((site, locale, env), at) in &blocks {
-        out.push_str(&format!("B\u{1f}{site}\u{1f}{locale}\u{1f}{env}"));
-        for k in site_keys[site].iter() {
-            out.push('\u{1f}');
-            match at.get(k) {
-                Some(i) => out.push_str(&i.to_string()),
-                None => out.push('-'),
-            }
-        }
-        out.push_str("\u{1f}.\u{1e}");
-    }
+    out.push_str(&lines);
     // The whole catalog and each locale's fallback chain, for `I18n.translate_runtime`: only when a call is left to it.
     if !app.i18n_runtime_sites.is_empty() {
         let catalog = app.i18n.or_rails_default();

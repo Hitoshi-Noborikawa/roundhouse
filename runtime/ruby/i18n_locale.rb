@@ -534,27 +534,27 @@ module I18n
   end
 
   def self.runtime_leaves
-    load_translation_table unless @table_loaded == true
+    load_runtime_catalog unless @catalog_loaded == true
     @leaf_table || {}
   end
 
   def self.runtime_nodes
-    load_translation_table unless @table_loaded == true
+    load_runtime_catalog unless @catalog_loaded == true
     @node_table || {}
   end
 
   def self.runtime_order
-    load_translation_table unless @table_loaded == true
+    load_runtime_catalog unless @catalog_loaded == true
     @leaf_order || []
   end
 
   def self.runtime_empties
-    load_translation_table unless @table_loaded == true
+    load_runtime_catalog unless @catalog_loaded == true
     @empty_table || {}
   end
 
   def self.runtime_chains
-    load_translation_table unless @table_loaded == true
+    load_runtime_catalog unless @catalog_loaded == true
     @chain_table || {}
   end
 
@@ -565,21 +565,38 @@ module I18n
 
   # A line ends in a "." field: `split` drops trailing empty fields, and a template or a key can be empty.
   def self.runtime_rules
-    load_translation_table unless @table_loaded == true
+    load_runtime_catalog unless @catalog_loaded == true
     @rule_table || {}
   end
 
   def self.runtime_opaque
-    load_translation_table unless @table_loaded == true
+    load_runtime_catalog unless @catalog_loaded == true
     @opaque_table || {}
   end
 
+  # Not one loop over every kind: the core targets drop the catalog's readers, and a T line per key keeps each kind a single write
   def self.load_translation_table
     table = {}
+    entries = []
+    sep = "\u001C"
+    I18nHost.table_text.split("\u001E").each do |line|
+      fields = line.split("\u001F")
+      kind = fields[0]
+      if kind == "E"
+        entries << (fields[1, fields.length - 2] || [])
+      elsif kind == "T"
+        table[fields[1].to_s + sep + fields[2].to_s + sep + fields[3].to_s + sep + fields[4].to_s] = fields[5].to_s.to_i
+      end
+    end
+    @entry_list = entries
+    @site_table = table
+    @table_loaded = true
+    nil
+  end
+
+  def self.load_runtime_catalog
     rules = {}
     opaque = {}
-    entries = []
-    keys = {}
     leaves = {}
     nodes = {}
     order = []
@@ -589,11 +606,7 @@ module I18n
     I18nHost.table_text.split("\u001E").each do |line|
       fields = line.split("\u001F")
       kind = fields[0]
-      if kind == "E"
-        entries << (fields[1, fields.length - 2] || [])
-      elsif kind == "K"
-        keys[fields[1]] = fields[2, fields.length - 3] || []
-      elsif kind == "L" || kind == "M"
+      if kind == "L" || kind == "M"
         if kind == "L"
           leaves[fields[1]] = fields[2].to_s
         else
@@ -613,15 +626,6 @@ module I18n
         rules[fields[1]] = fields[2].to_s.split(" ")
       elsif kind == "F"
         chains[fields[1].to_s + sep + fields[2].to_s] = fields[3].to_s.split(",")
-      elsif kind == "B"
-        names = keys.fetch(fields[1], nil) || []
-        prefix = fields[1].to_s + sep + fields[2].to_s + sep + fields[3].to_s + sep
-        i = 0
-        while i < names.length
-          at = fields[4 + i]
-          table[prefix + names[i].to_s] = at.to_i unless at == "-"
-          i += 1
-        end
       end
     end
     @leaf_table = leaves
@@ -631,9 +635,7 @@ module I18n
     @chain_table = chains
     @rule_table = rules
     @opaque_table = opaque
-    @entry_list = entries
-    @site_table = table
-    @table_loaded = true
+    @catalog_loaded = true
     nil
   end
 
