@@ -114,11 +114,32 @@ fn walk(e: &Expr, in_chain: bool, ctx: &FoldCtx, diags: &mut Vec<Diagnostic>) {
                 ),
             ));
         }
+        // Not only Relation-typed heads: a query on an untyped receiver (a Pundit `scope.where`) reaches a strict target as a call nothing defines.
+        let untyped_query = !in_chain
+            && !folds
+            && !is_relation_head
+            && QUERY_ONLY_METHODS.contains(&method.as_str())
+            && recv.as_ref().is_some_and(|r| receiver_unknown(r.ty.as_ref()));
+        if untyped_query {
+            diags.push(crate::lower::residue_diagnostic(
+                "relation_residue",
+                "dynamic_relation",
+                e.span,
+                "untyped_relation_query",
+                format!(
+                    "relation query `{}` on a receiver of unknown type — not folded \
+                     to SQL at transpile time; executes on the runtime Relation in \
+                     ruby-family targets, unsupported at strict-target emit",
+                    method.as_str(),
+                ),
+            ));
+        }
         // The receiver spine below a Relation-typed Send is the same
         // chain — suppress duplicate entries. Everything else starts
         // a fresh chain.
         let spine = in_chain
             || folds
+            || untyped_query
             || matches!(e.ty.as_ref(), Some(Ty::Relation { .. }));
         if let Some(r) = recv {
             walk(r, spine, ctx, diags);
@@ -132,6 +153,18 @@ fn walk(e: &Expr, in_chain: bool, ctx: &FoldCtx, diags: &mut Vec<Diagnostic>) {
         return;
     }
     e.node.for_each_child(&mut |c| walk(c, false, ctx, diags));
+}
+
+/// ActiveRecord's query methods that no Array, Hash or String answers, so a call to one on an untyped receiver is a relation query.
+const QUERY_ONLY_METHODS: &[&str] = &[
+    "where", "rewhere", "order", "reorder", "limit", "offset", "joins", "left_joins",
+    "left_outer_joins", "includes", "preload", "eager_load", "references", "pluck", "pick",
+    "having", "distinct", "unscope", "find_by", "find_by!", "find_each", "find_in_batches",
+    "in_batches", "update_all", "delete_all", "destroy_all", "none",
+];
+
+fn receiver_unknown(ty: Option<&Ty>) -> bool {
+    matches!(ty, None | Some(Ty::Untyped) | Some(Ty::Var { .. }))
 }
 
 /// Act on what the residue message says, for the target actually being
