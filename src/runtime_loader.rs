@@ -812,6 +812,17 @@ where
 /// `comment_prefix` selects the target's line-comment marker (TS:
 /// `//`, Crystal: `#`). The header lines are prefixed with this so
 /// the generated file's first lines are valid in the target language.
+pub const I18N_CATALOG_METHODS: &[&str] = &[
+    "translate_runtime", "translate_tree", "opaque_fields", "translate_items", "translate_strings",
+    "translate_symbols", "translate_integer", "translate_float", "translate_boolean", "insert_empty",
+    "insert_tree", "scope_text", "html_safe_key?", "runtime_lookup", "plural_form", "plural_rule",
+    "plural_category", "plural_key", "plural_bool", "plural_num", "plural_step", "runtime_chain",
+    "interpolate_runtime",
+];
+
+// Not a target field: the runtimes that carry the catalog are the TypeScript and Crystal trees, named by what they write
+const I18N_CATALOG_OUT: &[&str] = &[".ts", ".cr"];
+
 thread_local! {
     // Not a parameter of each `*_units`: every emitter builds its own transform, and the locales are the app's
     static APP_LOCALES: std::cell::RefCell<Option<(String, Vec<String>)>> = const { std::cell::RefCell::new(None) };
@@ -891,6 +902,11 @@ where
                 entry.rb_path,
             )?;
             let mut classes = transform(entry.out_path, classes);
+            if entry.rb_path == "runtime/ruby/i18n_locale.rb" && !I18N_CATALOG_OUT.iter().any(|ext| entry.out_path.ends_with(ext)) {
+                for class in classes.iter_mut().filter(|c| c.name.0.as_str() == "I18n") {
+                    class.methods.retain(|m| !I18N_CATALOG_METHODS.contains(&m.name.as_str()));
+                }
+            }
             if entry.rb_path == "runtime/ruby/i18n_locale.rb" {
                 APP_LOCALES.with(|l| {
                     if let Some((default, available)) = &*l.borrow() {

@@ -1455,21 +1455,30 @@ fn emits_namespaced_controllers(target: BuildTarget) -> bool {
 /// runs (`lower::i18n_translate`): a target whose runtime carries no
 /// `I18n.translate_site` / `I18n.translate_runtime` reports each one
 /// rather than emit a call to nothing.
+// Not a BuildTarget match: the bundled-constant walk names its target as a string, and both read these
+const I18N_RUNTIME_TARGETS: &[&str] = &["blog", "futamura", "ruby", "jruby", "spinel", "typescript", "crystal"];
+const I18N_CATALOG_TARGETS: &[&str] = &["blog", "futamura", "ruby", "jruby", "spinel", "typescript", "crystal"];
+
 fn ships_i18n_runtime(target: BuildTarget) -> bool {
-    matches!(
-        target,
-        BuildTarget::Blog
-            | BuildTarget::Futamura
-            | BuildTarget::Ruby
-            | BuildTarget::Jruby
-            | BuildTarget::Spinel
-            | BuildTarget::Typescript
-            | BuildTarget::Crystal
-    )
+    I18N_RUNTIME_TARGETS.contains(&target.as_str())
+}
+
+fn ships_i18n_catalog(target: BuildTarget) -> bool {
+    I18N_CATALOG_TARGETS.contains(&target.as_str())
 }
 
 fn report_i18n_table_sites(app: &App, target: BuildTarget) {
     if ships_i18n_runtime(target) {
+        if !ships_i18n_catalog(target) {
+            for span in &app.i18n_runtime_sites {
+                crate::emit::diagnostics::report_unsupported(
+                    *span,
+                    target.as_str(),
+                    "I18n",
+                    "a translation whose key or options are known only when it runs, which reads the app's whole catalog; this target's runtime carries the locale-chosen table, not the catalog",
+                );
+            }
+        }
         return;
     }
     for span in &app.i18n_table_sites {
@@ -6706,17 +6715,29 @@ fn report_unsupported_bundled_constants(app: &App, target: BuildTarget) {
             );
         }
         // `translate_site` / `translate_runtime` are reported with their call (`report_i18n_table_sites`).
-        if !matches!(target, "jruby" | "spinel" | "typescript" | "crystal")
-            && let crate::expr::ExprNode::Send { recv: Some(recv), method, .. } = &*expr.node
+        if let crate::expr::ExprNode::Send { recv: Some(recv), method, .. } = &*expr.node
             && matches!(&*recv.node, crate::expr::ExprNode::Const { path } if path.iter().map(|s| s.as_str()).skip_while(|s| s.is_empty()).eq(["I18n"]))
-            && !matches!(method.as_str(), "translate_site" | "translate_runtime")
         {
-            emit::diagnostics::report_unsupported(
-                expr.span,
-                target,
-                "I18n",
-                format!("`I18n.{}` is the Ruby-family runtime's (the locale in effect, switching it, or a missing translation's answer); the {target} runtime ships none", method.as_str()),
-            );
+            let method = method.as_str();
+            if !I18N_RUNTIME_TARGETS.contains(&target) && !matches!(method, "translate_site" | "translate_runtime") {
+                emit::diagnostics::report_unsupported(
+                    expr.span,
+                    target,
+                    "I18n",
+                    format!("`I18n.{method}` is the Ruby-family runtime's (the locale in effect, switching it, or a missing translation's answer); the {target} runtime ships none"),
+                );
+            } else if I18N_RUNTIME_TARGETS.contains(&target)
+                && !I18N_CATALOG_TARGETS.contains(&target)
+                && method != "translate_runtime"
+                && crate::runtime_loader::I18N_CATALOG_METHODS.contains(&method)
+            {
+                emit::diagnostics::report_unsupported(
+                    expr.span,
+                    target,
+                    "I18n",
+                    format!("`I18n.{method}` reads the app's whole catalog when it runs; the {target} runtime carries the locale-chosen table, not the catalog"),
+                );
+            }
         }
         if matches!(&*expr.node, crate::expr::ExprNode::Const { .. }) {
             if let Some(crate::ty::Ty::Class { id, .. }) = &expr.ty {
