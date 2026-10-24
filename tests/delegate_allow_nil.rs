@@ -110,3 +110,17 @@ fn a_plain_classs_allow_nil_delegate_on_ruby() {
     run.assert_passes();
     assert_eq!(run.stdout, "[\"AB\", nil]\n");
 }
+
+/// An ordinary delegation to a PRIVATE target named like the allow_nil
+/// forwarder's local is read through `self.`, as Rails reads its own
+/// reserved names (`arg`, `value`, …): Ruby 2.7+ allows a private method
+/// with a literal `self` receiver (Ruby 4.0.7 oracle `private_self_call.rb`).
+#[test]
+fn an_ordinary_delegation_to_a_private_target_named_like_the_local_runs() {
+    const LIB: &str = "class Holder\n  delegate :upcase, to: :__allow_nil_target__\n\n  private\n\n  def __allow_nil_target__\n    \"ab\"\n  end\nend\n";
+    let run = emit_and_run::real_blog()
+        .write("app/lib/holder.rb", LIB)
+        .run_ruby("require_relative \"app/models/holder\"\np Holder.new.upcase\n");
+    run.assert_passes();
+    assert_eq!(run.stdout, "\"AB\"\n");
+}
