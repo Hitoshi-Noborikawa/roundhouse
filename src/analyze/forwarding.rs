@@ -855,6 +855,13 @@ struct SourceContractIndex<'a> {
     modules: HashSet<ClassId>,
     data_factories: HashSet<ClassId>,
     unmodeled_constructor_lookup: HashSet<ClassId>,
+    /// The owners whose class-side `new` itself may be replaced: the part
+    /// of `unmodeled_constructor_lookup` an own `initialize` cannot
+    /// shadow (`constructor::index_unmodeled_lookup_mutations`).
+    unmodeled_new_lookup: HashSet<ClassId>,
+    /// Owners whose own plain `initialize` shadows any a mixin supplies
+    /// (`constructor::shadows_supplied_initialize`).
+    shadowing_initializers: HashSet<ClassId>,
     fragments: HashMap<ClassId, usize>,
     instance: HashMap<(ClassId, Symbol), (&'a MethodDef, bool)>,
     class: HashMap<(ClassId, Symbol), (&'a MethodDef, bool)>,
@@ -879,6 +886,8 @@ impl<'a> SourceContractIndex<'a> {
             modules: HashSet::new(),
             data_factories: HashSet::new(),
             unmodeled_constructor_lookup: HashSet::new(),
+            unmodeled_new_lookup: HashSet::new(),
+            shadowing_initializers: HashSet::new(),
             fragments: HashMap::new(),
             instance: HashMap::new(),
             class: HashMap::new(),
