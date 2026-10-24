@@ -98,7 +98,7 @@ fn a_translation_known_only_when_it_runs_is_unsupported_on_strict_targets() {
 #[test]
 fn the_locale_s_runtime_is_unsupported_on_strict_targets() {
     use roundhouse::project::BuildTarget::*;
-    for target in [Rust, Elixir] {
+    for target in [Rust] {
         let (_emitted, errors) = emit_and_run::real_blog()
             .edit(
                 "app/models/article.rb",

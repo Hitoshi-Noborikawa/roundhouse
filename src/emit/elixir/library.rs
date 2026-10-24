@@ -44,6 +44,16 @@ pub fn emit_library_class(class: &LibraryClass) -> Result<String, String> {
     // Register the Ruby class name for `Module#name` reflection
     // (`#{name}` in a class method resolves to this string).
     expr::set_current_class_name(class.name.0.as_str());
+    // Not a plain module: a raise of it must carry its class, which only an exception module does
+    let parent = class.parent.as_ref().map(|p| p.0.as_str()).unwrap_or("");
+    let core_error = matches!(
+        parent.rsplit("::").next().unwrap_or(parent),
+        "StandardError" | "RuntimeError" | "ArgumentError" | "TypeError" | "NameError" | "KeyError" | "IndexError"
+    );
+    if (core_error || expr::is_error_module(parent)) && class.methods.is_empty() {
+        expr::register_error_module(class.name.0.as_str(), &v2_name);
+        return Ok(format!("defmodule {v2_name} do\n  defexception message: \"\"\nend\n"));
+    }
     let body = emit_class_body(class, &v2_name)?;
     Ok(format!("defmodule {v2_name} do\n{body}end\n"))
 }

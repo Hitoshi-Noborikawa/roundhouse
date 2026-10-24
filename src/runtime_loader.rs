@@ -1871,6 +1871,24 @@ fn elixir_wrap_namespace(_namespace: &str, body: &str) -> String {
 /// mutation-threading.
 const ELIXIR_RUNTIME: &[RuntimeEntry] = &[
     runtime_entry! {
+        stem: "active_support_inflections",
+        namespace: "",
+        out_path: "lib/v2/active_support_inflections.ex",
+        mode: Mode::Library,
+        imports: NO_IMPORTS,
+        prelude: NO_PRELUDE,
+        extra_roots: NO_EXTRA_ROOTS,
+    },
+    runtime_entry! {
+        stem: "i18n_locale",
+        namespace: "",
+        out_path: "lib/v2/i18n_locale.ex",
+        mode: Mode::Library,
+        imports: NO_IMPORTS,
+        prelude: NO_PRELUDE,
+        extra_roots: NO_EXTRA_ROOTS,
+    },
+    runtime_entry! {
         stem: "inflector",
         namespace: "",
         out_path: "lib/v2/inflector.ex",
