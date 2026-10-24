@@ -2345,15 +2345,14 @@ end
     // that signature (campfire's `WebPush::Connections::Stages`).
     crate::lower::known_super_forwarding::restate(&mut app);
     collect_binary_assets(vfs, dir, &mut app);
-    let mut require_roots: Vec<String> = roots.iter().map(|r| r.display().to_string()).collect();
-    require_roots.extend(support_roots(vfs, dir, &roots, &path_gems, &lib_ignores));
+    let mut require_roots: Vec<PathBuf> = roots.iter().map(|root| dir.join(root)).collect();
     require_roots.extend(
-        boot_required
+        support_roots(vfs, dir, &roots, &path_gems, &lib_ignores)
             .iter()
-            .filter_map(|file| file.strip_prefix(dir).ok())
-            .map(|file| file.display().to_string()),
+            .map(|root| dir.join(root)),
     );
-    app.app_requires = collect_app_requires(vfs, dir, &require_roots);
+    require_roots.extend(boot_required);
+    app.app_requires = collect_app_requires(&app.sources, &require_roots);
     // Generated re-ingest labels never register real sources. No later
     // pass may append source-backed FileIds beyond the indexed snapshot.
     let late_sources = super::sources::drain();
@@ -2385,29 +2384,21 @@ const APP_REQUIRABLE_STDLIB: &[&str] = &[
 ];
 
 /// [`App::app_requires`]: every literal top-level `require "lib"` of a
-/// standard library in the trees the app loads from (`roots`: each app
-/// root, a Packwerk package's or an engine's included, and the support
-/// roots beside them, `lib/` among them). A terminal channel that
-/// requires `pty` and `io/console` needs the second for `IO#winsize=`,
+/// standard library in the ingested Ruby sources under the app and
+/// support roots, including files loaded by the boot chain. A terminal
+/// channel that requires `pty` and `io/console` needs the second for `IO#winsize=`,
 /// which io/console adds and no constant names, so the bundled requires
 /// (driven by the constants a file names) cannot bring it back.
-fn collect_app_requires<V: Vfs + ?Sized>(vfs: &V, dir: &Path, roots: &[String]) -> Vec<String> {
-    fn walk<V: Vfs + ?Sized>(vfs: &V, path: &Path, out: &mut std::collections::BTreeSet<String>, depth: usize) {
-        if depth > 16 || vfs.is_symlink(path) {
-            return;
+fn collect_app_requires(sources: &[crate::span::SourceFile], roots: &[PathBuf]) -> Vec<String> {
+    let mut out = std::collections::BTreeSet::new();
+    for source in sources {
+        let path = Path::new(&source.path);
+        if path.extension().and_then(|e| e.to_str()) != Some("rb")
+            || !roots.iter().any(|root| path.starts_with(root))
+        {
+            continue;
         }
-        if vfs.is_dir(path) {
-            let Ok(entries) = vfs.read_dir(path) else { return };
-            for entry in entries {
-                walk(vfs, &entry, out, depth + 1);
-            }
-            return;
-        }
-        if path.extension().and_then(|e| e.to_str()) != Some("rb") {
-            return;
-        }
-        let Ok(text) = vfs.read_to_string(path) else { return };
-        for line in text.lines() {
+        for line in source.text.lines() {
             let Some(rest) = line.strip_prefix("require ") else { continue };
             // `require "io/console" # why`: the literal, then nothing but
             // a comment
@@ -2422,10 +2413,6 @@ fn collect_app_requires<V: Vfs + ?Sized>(vfs: &V, dir: &Path, roots: &[String]) 
                 }
             }
         }
-    }
-    let mut out = std::collections::BTreeSet::new();
-    for root in roots {
-        walk(vfs, &dir.join(root), &mut out, 0);
     }
     out.into_iter().collect()
 }
