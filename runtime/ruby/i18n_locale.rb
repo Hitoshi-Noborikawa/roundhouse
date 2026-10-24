@@ -600,7 +600,7 @@ module I18n
         parts = fields[1].split(".")
         j = parts.length - 1
         while j > 1
-          nodes[parts[0, j].join(".")] = true
+          nodes[(parts[0, j] || []).join(".")] = true
           j -= 1
         end
       elsif kind == "O"

@@ -902,6 +902,13 @@ where
                 entry.rb_path,
             )?;
             let mut classes = transform(entry.out_path, classes);
+            // Not the whole file: the I18n core reaches titleize (a missing key's span) and nothing else in it
+            if entry.rb_path == "runtime/ruby/active_support_inflections.rb" && !I18N_CATALOG_OUT.iter().any(|ext| entry.out_path.ends_with(ext)) {
+                classes.retain(|c| c.name.0.as_str() == "ActiveSupport");
+                for class in classes.iter_mut() {
+                    class.methods.retain(|m| matches!(m.name.as_str(), "underscore" | "humanize" | "titleize"));
+                }
+            }
             if entry.rb_path == "runtime/ruby/i18n_locale.rb" && !I18N_CATALOG_OUT.iter().any(|ext| entry.out_path.ends_with(ext)) {
                 for class in classes.iter_mut().filter(|c| c.name.0.as_str() == "I18n") {
                     class.methods.retain(|m| !I18N_CATALOG_METHODS.contains(&m.name.as_str()));
