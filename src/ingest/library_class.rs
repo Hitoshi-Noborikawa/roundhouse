@@ -555,6 +555,14 @@ pub(super) fn library_class_and_struct_base(
         mut class_initializers,
         class_attributes: _,
     } = walk_decl_body(class.body(), &owner, file, DeclBodyMode::Instance)?;
+    // An alias of a builtin captured the superclass's method where the
+    // superclass defines it; the delegation can't tell (`OBJECT_BUILTINS`).
+    if class.superclass().is_some() && methods.iter().any(|m| delegates_to_builtin(&m.body)) {
+        return Err(IngestError::Unsupported {
+            file: file.into(),
+            message: "alias names a method this body has not defined".into(),
+        });
+    }
 
     // A `T::Struct` is a class GENERATOR, not an annotation: `const
     // :name, String` IS the constructor and the reader. Lower it into
@@ -2179,6 +2187,49 @@ fn walk_decl_body_with_visibility<'pr>(
     };
 
     let statements = flatten_statements(b);
+    // Instance method names the body defines anywhere, for an alias of a
+    // builtin: a `def`, an `attr_reader`/`attr_accessor`, a
+    // `define_method(:name)`, or an `alias`/`alias_method` to that name.
+    let defined_instance_methods: HashSet<String> = statements
+        .iter()
+        .flat_map(|stmt| {
+            let definition = visibility::definition(stmt).map(|d| d.as_node());
+            let node = definition.as_ref().unwrap_or(stmt);
+            let mut names = Vec::new();
+            if let Some(def) = node.as_def_node()
+                && def.receiver().is_none()
+            {
+                names.push(constant_id_str(&def.name()).to_string());
+            }
+            // `alias to_s to_s` rebinds the method it names: not a definition.
+            if let Some(alias) = node.as_alias_method_node()
+                && let Some(name) = alias_keyword_name(&alias.new_name())
+                && alias_keyword_name(&alias.old_name()) != Some(name.clone())
+            {
+                names.push(name.as_str().to_string());
+            }
+            if let Some(call) = node.as_call_node()
+                && call.receiver().is_none_or(|r| r.as_self_node().is_some())
+            {
+                let args: Vec<_> = call.arguments().map(|a| a.arguments().iter().collect()).unwrap_or_default();
+                match constant_id_str(&call.name()) {
+                    "attr_reader" | "attr_accessor" => names.extend(args.iter().filter_map(|a| symbol_value(a))),
+                    "define_method" | "alias_method" => names.extend(args.first().and_then(|a| symbol_value(a))),
+                    _ => {}
+                }
+            }
+            names
+        })
+        .collect();
+    // An `include`/`prepend` (or `self.include`) anywhere in the body: the module may define a
+    // builtin's name, so an alias of that builtin captured something the
+    // delegation can't reproduce.
+    let mixes_in = statements.iter().any(|stmt| {
+        stmt.as_call_node().is_some_and(|c| {
+            c.receiver().is_none_or(|r| r.as_self_node().is_some())
+                && matches!(constant_id_str(&c.name()), "include" | "prepend")
+        })
+    });
     if let Some(name) = super::util::hoisted_name_collision(&statements) {
         return Err(IngestError::Unsupported {
             file: file.into(),
@@ -2481,6 +2532,32 @@ fn walk_decl_body_with_visibility<'pr>(
             let from = alias_keyword_name(&alias.old_name());
             let receiver = if mode.is_class_side() { MethodReceiver::Class } else { MethodReceiver::Instance };
             if let Some((to, from)) = to.zip(from) {
+                // `alias read_attribute_for_serialization send`: a method
+                // every object answers, unless the body defines that name
+                // or mixes in a module, or the class has a superclass
+                // (`library_class_and_struct_base`). Ruby's alias captured
+                // the method as it stood, and a delegation would reach the
+                // body's, the module's or the superclass's definition.
+                // `alias to_s to_s` rebinds the method it names: a no-op.
+                if to == from && OBJECT_BUILTINS.iter().any(|(name, _, _)| *name == from.as_str()) {
+                    continue;
+                }
+                if receiver == MethodReceiver::Instance
+                    && !mixes_in
+                    && OBJECT_BUILTINS.iter().any(|(name, _, _)| *name == from.as_str())
+                    && !out.methods.iter().any(|method| method.name.as_str() == from && method.receiver == receiver)
+                    && !defined_instance_methods.contains(from.as_str())
+                {
+                    let span = Span {
+                        file: super::sources::file_id(file),
+                        start: alias.location().start_offset() as u32,
+                        end: alias.location().end_offset() as u32,
+                    };
+                    let mut method = builtin_alias_method(to.as_str(), from.as_str(), owner, file, span)?;
+                    visibility.apply(&statement, &mut method);
+                    out.methods.push(method);
+                    continue;
+                }
                 if let Some(source) = out.methods.iter().rposition(|method| method.name.as_str() == from && method.receiver == receiver) {
                     let mut copy = copy_aliased_method(&out.methods[source], to.as_str());
                     copy.name_span = Span {
@@ -3065,6 +3142,72 @@ pub(super) fn alias_source(
 /// eligible, and for the alias span and visibility. A body that calls
 /// `super` is still copied; model ingest refuses that case first,
 /// because a renamed copy would reach its own super method.
+/// Methods every Ruby object answers (Ruby 4.0.7's `Object` / `Kernel`
+/// public instance methods), which an `alias` may name without the class
+/// defining them. Each has a row in `tests/alias_builtin.rs`.
+/// Each with its parameters and the call's arguments, the builtin's own
+/// arity (`Object.instance_method(:to_s).arity` is 0, so `label(1)`
+/// raises as `to_s(1)` does).
+pub(crate) const OBJECT_BUILTINS: &[(&str, &str, &str)] = &[
+    ("send", "*args, &block", "*args, &block"),
+    ("public_send", "*args, &block", "*args, &block"),
+    ("__send__", "*args, &block", "*args, &block"),
+    ("to_s", "", ""),
+    ("inspect", "", ""),
+    ("class", "", ""),
+    ("itself", "", ""),
+    ("object_id", "", ""),
+    ("hash", "", ""),
+    ("frozen?", "", ""),
+    ("nil?", "", ""),
+    ("equal?", "other", "other"),
+    ("is_a?", "klass", "klass"),
+    ("kind_of?", "klass", "klass"),
+    ("instance_of?", "klass", "klass"),
+    ("respond_to?", "name, include_all = false", "name, include_all"),
+];
+
+/// Whether a synthesized builtin alias's call is in `e` (`BUILTIN_ALIAS`).
+fn delegates_to_builtin(e: &Expr) -> bool {
+    if e.decisions & crate::expr::BUILTIN_ALIAS != 0 {
+        return true;
+    }
+    let mut found = false;
+    e.node.for_each_child(&mut |c| found = found || delegates_to_builtin(c));
+    found
+}
+
+/// `alias to from` for a builtin `from`: `def to(<params>) =
+/// self.from(<args>)` with the builtin's own arity, every span the alias's,
+/// and the call marked `BUILTIN_ALIAS`. Through the `send` family, keyword
+/// arguments reach the target as a trailing Hash (library methods do not
+/// keep `**`/`...`).
+fn builtin_alias_method(to: &str, from: &str, owner: &ClassId, file: &str, span: Span) -> IngestResult<MethodDef> {
+    let (_, params, args) = OBJECT_BUILTINS.iter().find(|(name, _, _)| *name == from).expect("a builtin");
+    // `self.`: a bare `class(…)` is the keyword.
+    let source = format!("def {to}({params})\n  self.{from}({args})\nend\n");
+    let parsed = super::prism::parse_silent(source.as_bytes());
+    let def = parsed
+        .node()
+        .as_program_node()
+        .and_then(|program| program.statements().body().iter().next())
+        .and_then(|stmt| stmt.as_def_node())
+        .ok_or_else(|| IngestError::Unsupported { file: file.into(), message: "alias names a method this body has not defined".into() })?;
+    let mut method = ingest_library_method(&def, owner, file)?;
+    method.name_span = span;
+    fn respan(e: &mut Expr, span: Span, from: &str) {
+        e.span = span;
+        if let crate::expr::ExprNode::Send { method, .. } = &*e.node
+            && method.as_str() == from
+        {
+            e.decisions |= crate::expr::BUILTIN_ALIAS;
+        }
+        e.node.for_each_child_mut(&mut |c| respan(c, span, from));
+    }
+    respan(&mut method.body, span, from);
+    Ok(method)
+}
+
 pub(crate) fn copy_aliased_method(source: &MethodDef, new_name: &str) -> MethodDef {
     let mut copy = source.clone();
     copy.name = Symbol::from(new_name);
