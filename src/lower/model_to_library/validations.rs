@@ -638,6 +638,8 @@ fn validation_rule_to_calls(
         ValidationRule::Exclusion { values, range } => {
             vec![inline_exclusion_check(msgs, attr, values, range.as_ref())]
         }
+        ValidationRule::InclusionCall { set } => vec![inline_set_call_check(msgs, attr, set, false)],
+        ValidationRule::ExclusionCall { set } => vec![inline_set_call_check(msgs, attr, set, true)],
         // `validate :validate_url` — a method the model defines, which
         // adds to `errors` itself. The synthesized `validate` just
         // calls it; everything else about the shape (when it runs, what
@@ -1184,6 +1186,33 @@ fn inline_inclusion_check(
     let push_err =
         errors_push(attr.as_str(), msgs.error(attr.as_str(), "inclusion", &Default::default()));
     if_with_nil_else(not_included, push_err)
+}
+
+/// Inline `inclusion:` / `exclusion:` with a callable `in:`, the set read
+/// on the record when it validates (Rails' `Clusivity#include?`):
+///   if !(<set>).include?(@attr)      # inclusion: "is not included in the list"
+///   if (<set>).include?(@attr)       # exclusion: "is reserved"
+///     errors << …
+///   end
+fn inline_set_call_check(msgs: Messages, attr: &Symbol, set: &Expr, exclusion: bool) -> Expr {
+    let include_call = send(set.clone(), "include?", vec![ivar(attr)]);
+    let cond = if exclusion {
+        include_call
+    } else {
+        Expr::new(
+            Span::synthetic(),
+            ExprNode::Send {
+                recv: Some(include_call),
+                method: Symbol::from("!"),
+                args: vec![],
+                block: None,
+                parenthesized: false,
+            },
+        )
+    };
+    let kind = if exclusion { "exclusion" } else { "inclusion" };
+    let push_err = errors_push(attr.as_str(), msgs.error(attr.as_str(), kind, &Default::default()));
+    if_with_nil_else(cond, push_err)
 }
 
 /// Inline `validates :attr, exclusion: { in: … }`, Rails' "is reserved":
