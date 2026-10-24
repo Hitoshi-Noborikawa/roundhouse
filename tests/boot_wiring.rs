@@ -117,3 +117,24 @@ fn rails_version_is_the_locked_one() {
     run.assert_passes();
     assert!(run.stdout.contains("8.1.4\nnil"), "{}", run.stdout);
 }
+
+#[test]
+fn boot_requires_only_the_library_files_ingest_loads() {
+    for target in [BuildTarget::Spinel, BuildTarget::Ruby] {
+        let (emitted, errors) = emit_and_run::real_blog()
+            .write("config/application.rb", "config.autoload_lib(ignore: %w[tools])\n")
+            .write(
+                "lib/tools/tool_probe.rb",
+                "require \"io/console\"\nclass ToolProbe\n  def self.rows = 1\nend\n",
+            )
+            .write(
+                "lib/app_probe.rb",
+                "require \"open3\"\nclass AppProbe\n  def self.rows = 1\nend\n",
+            )
+            .emit(target);
+        assert!(errors.is_empty(), "{target:?} errors: {errors:?}");
+        let boot = std::fs::read_to_string(emitted.join("boot.rb")).expect("read boot.rb");
+        assert!(boot.lines().any(|line| line == "require \"open3\""), "{target:?}:\n{boot}");
+        assert!(!boot.lines().any(|line| line == "require \"io/console\""), "{target:?}:\n{boot}");
+    }
+}
