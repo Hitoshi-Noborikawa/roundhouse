@@ -3102,16 +3102,30 @@ pub fn ty_of_column(t: &ColumnType) -> Ty {
 /// NOT for the SQL seam — `column_read_method` and the Arel visitor pick
 /// their reader from the underlying column type, which nullability
 /// doesn't change.
-/// An `array: true` column stays its element type here, the lowered
-/// targets' storage; `project::report_array_columns` reports it for each
-/// lowered target.
+/// An `array: true` column is `Array[<element>]` where the target stores
+/// the Array (`Column::array_stored`, `lower::array_columns`); elsewhere it
+/// stays its element type, the lowered targets' storage, and
+/// `project::report_array_columns` reports it.
 pub fn ty_of_column_slot(col: &Column) -> Ty {
-    let base = ty_of_column(&col.col_type);
+    let mut base = ty_of_column(&col.col_type);
+    if col.array_stored {
+        base = Ty::Array { elem: base.into() };
+    }
     if (col.nullable || col.generated.is_some()) && !col.primary_key {
         Ty::Union { variants: vec![base, Ty::Nil].into() }
     } else {
         base
     }
+}
+
+/// What the database row holds for the column: the slot type, except
+/// that a stored array column (`Column::array_stored`) is its JSON text
+/// until the model's hydration writer decodes it.
+pub fn ty_of_column_stored(col: &Column) -> Ty {
+    if col.array_stored {
+        return Ty::Union { variants: vec![Ty::Str, Ty::Nil].into() };
+    }
+    ty_of_column_slot(col)
 }
 
 /// Build a `Ty::Fn` signature from positional (name, type) pairs and a return type.

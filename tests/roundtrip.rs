@@ -35,6 +35,7 @@ fn tiny_blog_round_trips() {
                     generated_text_compatible: None,
                     generated_int4_compatible: None,
                     array: false,
+                    array_stored: false,
                 },
                 Column {
                     name: Symbol::from("title"),
@@ -46,6 +47,7 @@ fn tiny_blog_round_trips() {
                     generated_text_compatible: None,
                     generated_int4_compatible: None,
                     array: false,
+                    array_stored: false,
                 },
             ],
             indexes: vec![],

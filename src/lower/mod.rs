@@ -18,6 +18,7 @@
 //! broadcasts orchestration, schema → DDL, and router dispatch tables.
 
 pub mod arel;
+pub mod array_columns;
 pub mod associations;
 pub mod association_new;
 pub mod blank;

@@ -85,6 +85,23 @@ pub struct Column {
     /// its serialized form.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub array: bool,
+    /// The target stores this array column as an Array: set by
+    /// `lower::array_columns::store_arrays` on the ruby family, where it
+    /// is typed `Array[<element>]` and kept in SQLite as JSON text. Every
+    /// other target reads the element, as before.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub array_stored: bool,
+}
+
+impl Column {
+    /// The schema default a target reads. An array column's `[]` counts
+    /// only where the target stores the Array.
+    pub fn stored_default(&self) -> Option<&str> {
+        if self.array && !self.array_stored {
+            return None;
+        }
+        self.default.as_deref()
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

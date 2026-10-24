@@ -92,9 +92,13 @@ impl Dialect {
     /// JSON or binary value, a default ingest could not read — is left to
     /// the model layer, as before.
     fn column_default(self, col: &Column) -> Option<String> {
-        let raw = col.default.as_deref()?;
+        let raw = col.stored_default()?;
         if col.generated.is_some() {
             return None;
+        }
+        if col.array_stored {
+            // `default: []`, the only array default ingest keeps.
+            return Some(format!("'{}'", raw.replace('\'', "''")));
         }
         match &col.col_type {
             ColumnType::Integer | ColumnType::BigInt => {
@@ -216,11 +220,14 @@ pub fn render_schema_statements_for(schema: &Schema, dialect: Dialect) -> Result
                 lines.push(dialect.key_column(col));
                 continue;
             }
-            let mut line = format!(
-                "  {} {}",
-                dialect.ident(col.name.as_str()),
+            // A stored array column holds the Array as JSON text
+            // (`lower::array_columns`).
+            let col_type = if col.array_stored {
+                dialect.column_type(&ColumnType::Text)
+            } else {
                 dialect.column_type(&col.col_type)
-            );
+            };
+            let mut line = format!("  {} {}", dialect.ident(col.name.as_str()), col_type);
             if let Some(generated) = &col.generated {
                 line.push_str(" GENERATED ALWAYS AS (");
                 line.push_str(&generated.expression);
@@ -543,6 +550,7 @@ mod tests {
             generated_text_compatible: None,
             generated_int4_compatible: None,
             array: false,
+            array_stored: false,
         }
     }
 

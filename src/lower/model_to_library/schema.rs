@@ -58,6 +58,82 @@ fn push_schema_symbol_list(
     });
 }
 
+/// `def self.decode_plucked(column, value)`: a plucked stored array
+/// column's JSON text, decoded as hydration decodes it; every other value
+/// as read. Only a model with a stored array column overrides `Base`'s
+/// identity, so only its tree names `ArrayColumn`.
+fn push_decode_plucked(methods: &mut Vec<MethodDef>, owner: &ClassId, table: &Table) {
+    let stored: Vec<&Column> = table.columns.iter().filter(|c| c.array_stored).collect();
+    if stored.is_empty() {
+        return;
+    }
+    let column = Symbol::from("column");
+    let value = Symbol::from("value");
+    let mut body = with_ty(var_ref(value.clone()), Ty::Untyped);
+    for col in stored.into_iter().rev() {
+        let name = Expr::new(
+            Span::synthetic(),
+            ExprNode::Send {
+                recv: Some(var_ref(column.clone())),
+                method: Symbol::from("to_s"),
+                args: vec![],
+                block: None,
+                parenthesized: false,
+            },
+        );
+        let cond = with_ty(
+            Expr::new(
+                Span::synthetic(),
+                ExprNode::Send {
+                    recv: Some(with_ty(name, Ty::Str)),
+                    method: Symbol::from("=="),
+                    args: vec![lit_str(col.name.as_str().to_string())],
+                    block: None,
+                    parenthesized: false,
+                },
+            ),
+            Ty::Bool,
+        );
+        let load = Expr::new(
+            Span::synthetic(),
+            ExprNode::Send {
+                recv: Some(class_const(&ClassId(Symbol::from("ArrayColumn")))),
+                method: Symbol::from(array_load_method(col)),
+                args: vec![with_ty(var_ref(value.clone()), super::ty_of_column_stored(col))],
+                block: None,
+                parenthesized: true,
+            },
+        );
+        body = with_ty(
+            Expr::new(Span::synthetic(), ExprNode::If { cond, then_branch: load, else_branch: body }),
+            Ty::Untyped,
+        );
+    }
+    methods.push(MethodDef {
+        visibility: crate::dialect::MethodVisibility::Public,
+        unsupported_formals: None,
+        has_anonymous_block: false,
+        name_span: Span::synthetic(),
+        name: Symbol::from("decode_plucked"),
+        receiver: MethodReceiver::Class,
+        params: vec![Param::positional(column.clone()), Param::positional(value.clone())],
+        body,
+        signature: Some(fn_sig(
+            vec![
+                (column, Ty::Union { variants: vec![Ty::Str, Ty::Sym].into() }),
+                (value, Ty::Untyped),
+            ],
+            Ty::Untyped,
+        )),
+        effects: EffectSet::default(),
+        enclosing_class: Some(owner.0.clone()),
+        kind: AccessorKind::Method,
+        is_async: false,
+        mutates_self: false,
+        block_param: None,
+    });
+}
+
 /// Rails' type name for a column (`type_for_attribute(name).type`).
 fn rails_type_name(col: &crate::schema::ColumnType) -> &'static str {
     use crate::schema::ColumnType as C;
@@ -165,6 +241,9 @@ pub(super) fn push_schema_methods(
         methods.push(synth_attr_reader(owner, col, model));
         if model.enums.contains_key(&col.name) {
             methods.push(synth_enum_storage_writer(owner, col));
+        }
+        if col.array_stored {
+            methods.push(synth_array_storage_writer(owner, col));
         }
         if slot.is_json() {
             // Hydration writes stored JSON text without dump; the public
@@ -422,6 +501,7 @@ pub(super) fn push_schema_methods(
     // apply ISO8601-with-offset vs calendar-only without sniffing values.
     push_schema_symbol_list(methods, owner, "schema_columns", table, |_| true);
     push_schema_column_types(methods, owner, table);
+    push_decode_plucked(methods, owner, table);
     push_schema_symbol_list(methods, owner, "schema_time_columns", table, |c| {
         matches!(c.col_type, crate::schema::ColumnType::DateTime | crate::schema::ColumnType::Time)
     });
@@ -903,7 +983,9 @@ fn col_storage_setter(col: &Column) -> Symbol {
 /// Unknown stored enum values remain intact; JSON text skips dump so
 /// already-serialized DB bytes are not double-encoded.
 fn hydration_setter(model: &Model, col: &Column) -> Symbol {
-    if model.enums.contains_key(&col.name) {
+    if col.array_stored {
+        array_storage_writer(col)
+    } else if model.enums.contains_key(&col.name) {
         enum_storage_writer(col)
     } else {
         // The model's own `<col>=` is what assignment runs, not what a row loads through.
@@ -915,6 +997,12 @@ fn hydration_setter(model: &Model, col: &Column) -> Symbol {
 
 pub(crate) fn enum_storage_writer(col: &Column) -> Symbol {
     Symbol::from(format!("_write_{}_raw", col.name.as_str()))
+}
+
+/// `_write_<col>_array_raw`: a stored array column's hydration writer,
+/// which decodes the row's JSON text (`ArrayColumn.load_*`).
+fn array_storage_writer(col: &Column) -> Symbol {
+    Symbol::from(format!("_write_{}_array_raw", col.name.as_str()))
 }
 
 fn json_storage_writer(col: &Column) -> Symbol {
@@ -1387,6 +1475,57 @@ fn synth_enum_storage_writer(owner: &ClassId, col: &Column) -> MethodDef {
     }
 }
 
+/// A stored array column's hydration writer: the row's JSON text,
+/// decoded into the Array the record keeps (`ArrayColumn.load_ints` /
+/// `load_strings`).
+fn synth_array_storage_writer(owner: &ClassId, col: &Column) -> MethodDef {
+    let value = Symbol::from("value");
+    let text_ty = super::ty_of_column_stored(col);
+    let load = Expr::new(
+        Span::synthetic(),
+        ExprNode::Send {
+            recv: Some(class_const(&ClassId(Symbol::from("ArrayColumn")))),
+            method: Symbol::from(array_load_method(col)),
+            args: vec![with_ty(var_ref(value.clone()), text_ty.clone())],
+            block: None,
+            parenthesized: true,
+        },
+    );
+    let assign = Expr::new(
+        Span::synthetic(),
+        ExprNode::Assign {
+            target: LValue::Ivar { name: col_storage_name(col) },
+            value: with_ty(load, super::ty_of_column_slot(col)),
+        },
+    );
+    MethodDef {
+        visibility: crate::dialect::MethodVisibility::Public,
+        unsupported_formals: None,
+        has_anonymous_block: false,
+        name_span: Span::synthetic(),
+        name: array_storage_writer(col),
+        receiver: MethodReceiver::Instance,
+        params: vec![Param::positional(value.clone())],
+        body: seq(vec![assign, nil_lit()]),
+        signature: Some(fn_sig(vec![(value, text_ty)], Ty::Nil)),
+        effects: EffectSet::default(),
+        enclosing_class: Some(owner.0.clone()),
+        kind: AccessorKind::Method,
+        is_async: false,
+        mutates_self: true,
+        block_param: None,
+    }
+}
+
+/// `ArrayColumn`'s loader for the column's element: integers or strings
+/// (`lower::array_columns::stores_element`).
+pub(crate) fn array_load_method(col: &Column) -> &'static str {
+    match ty_of_column(&col.col_type) {
+        Ty::Int => "load_ints",
+        _ => "load_strings",
+    }
+}
+
 /// Internal JSON hydration writes already-serialized DB text into the
 /// String slot without `JsonColumn.dump` (which would double-encode).
 fn synth_json_storage_writer(owner: &ClassId, col: &Column) -> MethodDef {
@@ -1803,7 +1942,7 @@ fn synth_from_row(owner: &ClassId, table: &Table, model: &Model) -> MethodDef {
         // Slot type: for a nullable column both sides of this
         // assignment are nilable (the Row field and the model setter),
         // so casting to the bare type would unwrap on one side only.
-        let col_ty = super::ty_of_column_slot(col);
+        let col_ty = super::ty_of_column_stored(col);
         let row_field = Expr::new(
             Span::synthetic(),
             ExprNode::Send {
@@ -2033,6 +2172,9 @@ fn column_read_method(col_ty: &Ty) -> &'static str {
 /// match nothing. The primary key is never nullable in practice and is
 /// excluded by `ty_of_column_slot`.
 pub(crate) fn column_read_method_for(col: &Column) -> &'static str {
+    if col.array_stored {
+        return "column_text_opt";
+    }
     let base = ty_of_column(&col.col_type);
     if !matches!(super::ty_of_column_slot(col), Ty::Union { .. }) {
         return column_read_method(&base);
@@ -2516,7 +2658,12 @@ fn synth_initialize(
         // default therefore also takes the `||` form: its unset value
         // is the default, and only the type-zero case (no default
         // declared) leaves it NULL.
-        let col_ty = ty_of_column(&col.col_type);
+        // A stored array column starts as an Array (`lower::array_columns`).
+        let col_ty = if col.array_stored {
+            Ty::Array { elem: ty_of_column(&col.col_type).into() }
+        } else {
+            ty_of_column(&col.col_type)
+        };
         let column = ColumnSlot::classify(col, model);
         // A `default_scope { where(col: literal) }` column starts at the
         // scope's literal, as Rails' scope attributes seed `new` (given
@@ -3939,7 +4086,16 @@ fn column_default_literal(model: &Model, col: &Column) -> Option<Expr> {
 
 fn schema_default_literal(col: &Column) -> Option<Expr> {
     use crate::schema::ColumnType;
-    let raw = col.default.as_ref()?;
+    let raw = col.stored_default()?;
+    if col.array_stored {
+        // `default: []`, the only array default ingest keeps: a fresh
+        // empty Array of the column's element type.
+        return Some(with_ty(
+            Expr::new(Span::synthetic(), ExprNode::Array { elements: vec![], style: ArrayStyle::Brackets }),
+            super::ty_of_column_slot(col),
+        ));
+    }
+    let raw = &raw.to_string();
     match &col.col_type {
         ColumnType::String { .. } | ColumnType::Text => Some(lit_str(raw.clone())),
         ColumnType::Integer | ColumnType::BigInt => raw.parse::<i64>().ok().map(lit_int),

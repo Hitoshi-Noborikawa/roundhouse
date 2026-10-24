@@ -9918,7 +9918,9 @@ pub(crate) fn apply_typed_writer_cast_lowering(lcs: &mut [LibraryClass], app: &A
         let casts: HashMap<Symbol, &'static str> = table
             .columns
             .iter()
-            .filter(|c| !c.primary_key && !model.enums.contains_key(&c.name))
+            // A stored array column's writer takes the Array; its
+            // elements are not cast (`lower::array_columns`).
+            .filter(|c| !c.primary_key && !c.array_stored && !model.enums.contains_key(&c.name))
             .filter_map(|c| {
                 let cast = match c.col_type {
                     crate::schema::ColumnType::Integer | crate::schema::ColumnType::BigInt => "cast_integer",
