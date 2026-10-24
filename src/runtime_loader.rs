@@ -794,6 +794,45 @@ where
 /// `comment_prefix` selects the target's line-comment marker (TS:
 /// `//`, Crystal: `#`). The header lines are prefixed with this so
 /// the generated file's first lines are valid in the target language.
+thread_local! {
+    // Not a parameter of each `*_units`: every emitter builds its own transform, and the locales are the app's
+    static APP_LOCALES: std::cell::RefCell<Option<(String, Vec<String>)>> = const { std::cell::RefCell::new(None) };
+}
+
+pub fn with_app_locales<R>(app: &crate::App, f: impl FnOnce() -> R) -> R {
+    let catalog = app.i18n.or_rails_default();
+    let prev = APP_LOCALES.with(|l| l.replace(Some((catalog.locale.clone(), catalog.locales()))));
+    let out = f();
+    APP_LOCALES.with(|l| *l.borrow_mut() = prev);
+    out
+}
+
+// Not `project::apply_i18n_locales`' text splice: this runtime is transpiled from the parsed source, not copied
+fn splice_app_locales(classes: &mut [LibraryClass], default: &str, available: &[String]) {
+    use crate::expr::{Expr, ExprNode, Literal};
+    let sym = |name: &str| {
+        let mut e = Expr::new(crate::span::Span::synthetic(), ExprNode::Lit { value: Literal::Sym { value: crate::ident::Symbol::from(name) } });
+        e.ty = Some(crate::ty::Ty::Sym);
+        e
+    };
+    for class in classes.iter_mut().filter(|c| c.name.0.as_str() == "I18n") {
+        for method in &mut class.methods {
+            match method.name.as_str() {
+                "app_default_locale" => method.body = sym(default),
+                "app_available_locales" => {
+                    let mut list = Expr::new(
+                        crate::span::Span::synthetic(),
+                        ExprNode::Array { elements: available.iter().map(|l| sym(l)).collect(), style: Default::default() },
+                    );
+                    list.ty = Some(crate::ty::Ty::Array { elem: std::sync::Arc::new(crate::ty::Ty::Sym) });
+                    method.body = list;
+                }
+                _ => {}
+            }
+        }
+    }
+}
+
 fn transpile_entry<F>(
     entry: &RuntimeEntry,
     target: &TargetEmit,
@@ -833,7 +872,14 @@ where
                 entry.rbs_src,
                 entry.rb_path,
             )?;
-            let classes = transform(entry.out_path, classes);
+            let mut classes = transform(entry.out_path, classes);
+            if entry.rb_path == "runtime/ruby/i18n_locale.rb" {
+                APP_LOCALES.with(|l| {
+                    if let Some((default, available)) = &*l.borrow() {
+                        splice_app_locales(&mut classes, default, available);
+                    }
+                });
+            }
             // Module-level constants (`HTML_ESCAPES = { ... }.freeze`
             // in `view_helpers.rb`, etc.) emit as top-level
             // `const NAME = ...;` declarations BEFORE class bodies,

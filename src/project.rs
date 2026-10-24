@@ -1452,12 +1452,23 @@ fn emits_namespaced_controllers(target: BuildTarget) -> bool {
 }
 
 /// A `t` that reads the translation table or the whole catalog when it
-/// runs (`lower::i18n_translate`): only the Ruby-family runtime and the
-/// TypeScript (Node) one carry `I18n.translate_site` /
-/// `I18n.translate_runtime`, so another target reports each one rather
-/// than emit a call to nothing.
+/// runs (`lower::i18n_translate`): a target whose runtime carries no
+/// `I18n.translate_site` / `I18n.translate_runtime` reports each one
+/// rather than emit a call to nothing.
+fn ships_i18n_runtime(target: BuildTarget) -> bool {
+    matches!(
+        target,
+        BuildTarget::Blog
+            | BuildTarget::Futamura
+            | BuildTarget::Ruby
+            | BuildTarget::Jruby
+            | BuildTarget::Spinel
+            | BuildTarget::Typescript
+    )
+}
+
 fn report_i18n_table_sites(app: &App, target: BuildTarget) {
-    if matches!(target, BuildTarget::Blog | BuildTarget::Ruby | BuildTarget::Jruby | BuildTarget::Spinel | BuildTarget::Futamura | BuildTarget::Typescript) {
+    if ships_i18n_runtime(target) {
         return;
     }
     for span in &app.i18n_table_sites {
@@ -2401,7 +2412,7 @@ fn target_files_inner(
             }
         }
     }
-    let files = crate::timings::phase(format_args!("emit {}: assemble", target.as_str()), || match target {
+    let files = crate::timings::phase(format_args!("emit {}: assemble", target.as_str()), || crate::runtime_loader::with_app_locales(app, || match target {
         BuildTarget::Blog => blog_files(fixture),
         BuildTarget::Futamura => futamura_files(fixture),
         BuildTarget::Spinel => spinel_files_with_source_markers(app, fixture, param_binds).and_then(|(mut files, _)| {
@@ -2424,21 +2435,20 @@ fn target_files_inner(
         BuildTarget::Rust => Ok(sort_files(emit::rust::emit(app))),
         BuildTarget::Swift => Ok(sort_files(emit::swift::emit(app))),
         BuildTarget::CSharp => Ok(sort_files(emit::csharp::emit(app))),
-        BuildTarget::Typescript => {
-            let mut files = emit::typescript::emit(app);
-            if !app.i18n_table.is_empty() || !app.i18n_runtime_sites.is_empty() {
-                files.push(emit::EmittedFile {
-                    path: std::path::PathBuf::from("config/i18n_translations"),
-                    content: i18n_table_text(app),
-                });
-            }
-            Ok(sort_files(files))
-        }
+        BuildTarget::Typescript => Ok(sort_files(emit::typescript::emit(app))),
         BuildTarget::TypescriptWorker => Ok(sort_files(emit::typescript::emit_with_profile(
             app,
             &crate::profile::DeploymentProfile::worker(),
         ))),
-    })?;
+    }))?;
+    let mut files = files;
+    // The Ruby family writes its table with its runtime (`spinel_files`); a strict target reads it from the same path.
+    if ships_i18n_runtime(target)
+        && !matches!(target, BuildTarget::Blog | BuildTarget::Futamura | BuildTarget::Spinel | BuildTarget::Ruby | BuildTarget::Jruby)
+        && (!app.i18n_table.is_empty() || !app.i18n_runtime_sites.is_empty())
+    {
+        files.push(("config/i18n_translations".to_string(), i18n_table_text(app)));
+    }
 
     // Ruby-family trees ship the framework runtime as verbatim text, so
     // their tree-shake runs here, on the finished file set (after
