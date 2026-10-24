@@ -152,30 +152,12 @@ fn add_clear_methods(app: &mut App) {
             .position(|item| matches!(item, ControllerBodyItem::PrivateMarker { .. }))
             .unwrap_or(controller.body.len());
         controller.body.insert(at, public_method(VIEW_ASSIGNS_METHOD, assigns));
-        let item = ControllerBodyItem::Action {
-            action: Action {
-                name: Symbol::from(CLEAR_METHOD),
-                params: crate::ty::Row::default(),
-                opt_params: Vec::new(),
-                kw_params: Vec::new(),
-                kwrest_param: None,
-                block_param: None,
-                rest_param: None,
-                anonymous_formal: None,
-                name_span: span,
-                body: Expr::new(span, ExprNode::Seq { exprs }),
-                renders: RenderTarget::Inferred,
-                effects: crate::effect::EffectSet::pure(),
-            },
-            leading_comments: Vec::new(),
-            leading_blank_line: true,
-        };
         let at = controller
             .body
             .iter()
             .position(|item| matches!(item, ControllerBodyItem::PrivateMarker { .. }))
             .unwrap_or(controller.body.len());
-        controller.body.insert(at, item);
+        controller.body.insert(at, public_method(CLEAR_METHOD, Expr::new(span, ExprNode::Seq { exprs })));
     }
 }
 
