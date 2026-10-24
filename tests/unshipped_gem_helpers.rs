@@ -103,20 +103,32 @@ fn an_app_method_whose_answer_is_untyped_is_not_refused() {
 }
 
 #[test]
-fn a_parameter_default_and_an_explicit_self_call_are_refused_once() {
-    let (_, diags) = analyzed(
+fn a_parameter_default_and_an_explicit_self_call_are_refused_where_written() {
+    let (app, diags) = analyzed(
         "class ApplicationController < ActionController::Base\n  \
          private\n\n  \
          def scoped(rel = policy_scope(Article))\n    rel\n  end\n\n  \
          def check(record)\n    self.authorize(record)\n  end\nend\n",
     );
-    let refusals = refused(&diags);
-    for helper in ["pundit: policy_scope", "pundit: authorize"] {
-        assert!(refusals.iter().filter(|r| r.as_str() == helper).count() >= 1, "{helper}: {refusals:?}");
-    }
-    let at_self_call: Vec<_> = diags
-        .iter()
-        .filter(|d| d.severity == Severity::Error && d.message.contains("authorize") && !matches!(d.kind, DiagnosticKind::Unsupported { .. }))
-        .collect();
-    assert!(at_self_call.is_empty(), "the dispatch failure is the refusal, not a second error: {at_self_call:#?}");
+    let at = |line: &str| -> Vec<String> {
+        diags
+            .iter()
+            .filter(|d| d.severity == Severity::Error)
+            .map(|d| d.render(&app.sources))
+            .filter(|r| r.contains(&format!("application_controller.rb:{line}:")))
+            .collect()
+    };
+    let default_site = at("4");
+    assert!(default_site.len() == 1 && default_site[0].contains("`policy_scope` is a helper of the `pundit` gem"), "{default_site:#?}");
+    let self_call = at("9");
+    assert!(self_call.len() == 1 && self_call[0].contains("`authorize` is a helper of the `pundit` gem"), "the refusal replaces the dispatch error: {self_call:#?}");
+}
+
+#[test]
+fn a_same_named_method_elsewhere_does_not_hide_the_refusal() {
+    let (_, diags) = analyzed(
+        "class ApplicationController < ActionController::Base\nend\n\n\
+         class Gatekeeper\n  def authorize(record)\n    record\n  end\nend\n",
+    );
+    assert!(refused(&diags).contains(&"pundit: authorize".to_string()), "{:?}", refused(&diags));
 }

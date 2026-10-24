@@ -93,20 +93,31 @@ fn devise_refusals(app: &App) -> Vec<Diagnostic> {
 // Rewritten in place, not added beside: a transpile runs no attribution, so the site's warning would stay its only finding
 fn unshipped_gem_helpers(app: &App, out: &mut Vec<Diagnostic>) {
     let Some(lock) = &app.gem_lock else { return };
-    // Not only a typed app method: one whose body answers no type yet is still the app's, not the gem's
-    let app_defined: std::collections::HashSet<&str> = app
-        .controllers
-        .iter()
-        .flat_map(|c| c.actions().map(|a| a.name.as_str()).chain(c.class_methods().map(|m| m.name.as_str())))
-        .chain(app.library_classes.iter().flat_map(|lc| lc.methods.iter().map(|m| m.name.as_str())))
-        .collect();
     let unshipped = |method: &str| {
         crate::gems::gem_claiming_method(lock, method).filter(|gem| {
-            !app_defined.contains(method)
-                && !lock.is_in_repo(gem)
+            !lock.is_in_repo(gem)
                 && !lock.is_source(gem)
                 && !app.extensions.runtime_gems.iter().any(|row| row.gem == *gem)
         })
+    };
+    // Not only a typed app method: one whose body answers no type yet is still the app's, if the call reaches it
+    let controller_defines = |controller: &crate::dialect::Controller, method: &str| {
+        let mut current = Some(controller);
+        let mut seen = std::collections::HashSet::new();
+        while let Some(c) = current {
+            if !seen.insert(c.name.0.as_str()) {
+                break;
+            }
+            if c.actions().any(|a| a.name.as_str() == method) {
+                return true;
+            }
+            current = c.parent.as_ref().and_then(|p| app.controllers.iter().find(|o| o.name == *p));
+        }
+        false
+    };
+    let view_defines = |method: &str| {
+        let name = Symbol::from(method);
+        app.helper_method_index.contains_key(&name) || app.view_visible_controller_methods.contains(&name)
     };
     fn visit<'a>(
         expr: &'a Expr,
@@ -127,15 +138,17 @@ fn unshipped_gem_helpers(app: &App, out: &mut Vec<Diagnostic>) {
     }
     let mut sites = Vec::new();
     for controller in &app.controllers {
+        let in_controller = |method: &str| unshipped(method).filter(|_| !controller_defines(controller, method));
         for action in controller.actions() {
             for default in action.opt_params.iter().map(|(_, d)| d).chain(action.kw_params.iter().filter_map(|(_, d)| d.as_ref())) {
-                visit(default, &unshipped, &mut sites);
+                visit(default, &in_controller, &mut sites);
             }
-            visit(&action.body, &unshipped, &mut sites);
+            visit(&action.body, &in_controller, &mut sites);
         }
     }
+    let in_view = |method: &str| unshipped(method).filter(|_| !view_defines(method));
     for view in &app.views {
-        visit(&view.body, &unshipped, &mut sites);
+        visit(&view.body, &in_view, &mut sites);
     }
     let refusal = |span, gem: &str, method: &Symbol| {
         Diagnostic::unsupported(
