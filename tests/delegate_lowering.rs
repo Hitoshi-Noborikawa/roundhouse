@@ -221,16 +221,18 @@ end
 }
 
 /// `prefix: true` is a supported ActiveSupport form. `allow_nil: true`
-/// stays visible because the pass cannot model Rails' `nil.respond_to?`
-/// distinction across all targets.
+/// guards a nil target as Rails' `!_.nil?` does; a name nil itself answers
+/// (`to_s`) stays visible, because Rails calls it on nil
+/// (`nil.respond_to?(:to_s)`).
 #[test]
-fn prefix_true_is_honoured_and_allow_nil_is_declined() {
+fn prefix_true_is_honoured_and_allow_nil_guards_a_nil_target() {
     let out = emit(
         r#"class Filter
   attr_reader :request
 
   delegate :host, to: :request, prefix: true
   delegate :path, to: :request, allow_nil: true
+  delegate :to_s, to: :request, allow_nil: true
 end
 "#,
     );
@@ -239,12 +241,12 @@ end
         "prefix should be honoured:\n{out}"
     );
     assert!(
-        !out.contains("def path"),
-        "allow_nil must not be lowered unsafely:\n{out}"
+        out.contains("def path\n    __allow_nil_target__ = request\n"),
+        "allow_nil should guard a nil target:\n{out}"
     );
     assert!(
-        !out.contains("delegate"),
-        "the DSL call must not reach emitted code:\n{out}"
+        !out.contains("def to_s"),
+        "a name nil answers must not be lowered:\n{out}"
     );
 }
 

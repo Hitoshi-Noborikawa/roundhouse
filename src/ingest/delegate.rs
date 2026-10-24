@@ -329,6 +329,12 @@ fn synthesized_source(
             forwarder
         } else if let Some(attr) = m.strip_suffix('=') {
             ("value", format!("{t}.{attr} = value"))
+        } else if d.allow_nil {
+            // Rails' `_ = target; _.m if !_.nil?`: a nil target answers nil
+            // (the local is named so that no `to:` target can be shadowed by it)
+            // and any other (`false` too) is called through. Not `&.`, which
+            // the lowering spells as `&&` and would answer `false` for it.
+            ("", format!("__allow_nil_target__ = {t}\n    __allow_nil_target__.nil? ? nil : __allow_nil_target__.{m}"))
         } else {
             ("", format!("{t}.{m}"))
         };
