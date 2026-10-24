@@ -138,10 +138,11 @@ impl<'a> Specializer<'a> {
     }
 
     /// Every query site in a method body: specialized, or left with a reason.
-    pub fn method_body(&self, body: &Expr, sites: &mut Vec<Site>, residue: &mut Vec<Residue>) {
+    /// `owner`: the model whose method this is, for its receiverless column reads.
+    pub fn method_body(&self, owner: Option<&str>, body: &Expr, sites: &mut Vec<Site>, residue: &mut Vec<Residue>) {
         let mut locals = HashMap::new();
         collect_locals(body, &mut locals);
-        let cx = Cx { locals: &locals, depth: Default::default(), args: HashMap::new(), arg_tys: HashMap::new(), self_chain: None };
+        let cx = Cx { locals: &locals, depth: Default::default(), args: HashMap::new(), arg_tys: HashMap::new(), self_chain: None, owner };
         self.visit(body, &cx, sites, residue);
     }
 
@@ -338,6 +339,7 @@ impl<'a> Specializer<'a> {
                     }
                     if matches!(&*v.node, ExprNode::Hash { .. } | ExprNode::Array { .. } | ExprNode::Range { .. })
                         || cx.ty_of(v).as_ref().is_some_and(always_a_collection)
+                        || self.reads_array_column(v, cx)
                     {
                         return Err("where value is a collection".into());
                     }
@@ -452,6 +454,7 @@ impl<'a> Specializer<'a> {
             args: bound,
             arg_tys: bound_tys,
             self_chain: Some(chain.clone()),
+            owner: cx.owner,
         };
         let ExprNode::Send { recv, method, args, block: None, .. } = &*body.node else {
             return Err(format!("scope `{}` body is not a call chain", scope.name.as_str()));
@@ -591,6 +594,38 @@ impl<'a> Specializer<'a> {
         }
     }
 
+    /// A read of a PostgreSQL array column (`tag_ids`, `@member.tag_ids`):
+    /// an Array on every path, which the analysis still types as its
+    /// element, so the schema answers.
+    fn reads_array_column(&self, v: &Expr, cx: &Cx) -> bool {
+        let ExprNode::Send { recv, method, args, block: None, .. } = &*v.node else { return false };
+        if !args.is_empty() {
+            return false;
+        }
+        let model = match recv.as_ref().map(|r| (&*r.node, r.ty.as_ref())) {
+            // In an inlined scope a receiverless call is the relation's, not a column.
+            None | Some((ExprNode::SelfRef, _)) if cx.self_chain.is_none() => cx.owner,
+            Some((_, Some(ty))) => match ty {
+                Ty::Class { id, .. } => Some(id.0.as_str()),
+                Ty::Union { variants } => {
+                    let mut classes = variants.iter().filter(|t| !matches!(t, Ty::Nil));
+                    match (classes.next(), classes.next()) {
+                        (Some(Ty::Class { id, .. }), None) => Some(id.0.as_str()),
+                        _ => None,
+                    }
+                }
+                _ => None,
+            },
+            _ => None,
+        };
+        let Some(m) = model.and_then(|name| self.models.get(name)) else { return false };
+        self.app
+            .schema
+            .tables
+            .get(&m.table.0)
+            .is_some_and(|t| t.columns.iter().any(|c| &c.name == method && c.array))
+    }
+
     fn has_column(&self, model: &ClassId, column: &Symbol) -> bool {
         let m = self.models[model.0.as_str()];
         self.app
@@ -612,6 +647,8 @@ struct Cx<'b> {
     /// Each bound parameter's type at the call site: the scope body types
     /// its parameters without the call's arguments.
     arg_tys: HashMap<Symbol, Option<Ty>>,
+    /// The model whose method is walked, if any.
+    owner: Option<&'b str>,
     /// The relation an inlined scope body runs against.
     self_chain: Option<Chain>,
 }

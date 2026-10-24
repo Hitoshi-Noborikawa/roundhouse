@@ -1682,6 +1682,40 @@ end
         assert!(report.specialized.iter().any(|s| s.contains("members_controller.rb:5:")), "{:?}", report.specialized);
     }
 
+    /// A PostgreSQL array column (`array: true`) is an Array on every path,
+    /// though the analysis types it as its element: a `where` over one, read
+    /// in the model (`tag_ids`) or through a record (`@member.tag_ids`), is
+    /// left to Rails. A plain column read is still bound.
+    #[test]
+    fn an_array_column_read_is_not_a_bind() {
+        let files: Vec<(&str, &str)> = vec![
+            (
+                "db/schema.rb",
+                "ActiveRecord::Schema[8.1].define(version: 1) do\n  create_table \"members\", force: :cascade do |t|\n    t.string \"name\"\n    t.bigint \"tag_ids\", array: true, default: [], null: false\n  end\nend\n",
+            ),
+            ("app/models/application_record.rb", "class ApplicationRecord < ActiveRecord::Base\n  primary_abstract_class\nend\n"),
+            ("app/models/member.rb", "class Member < ApplicationRecord\n  def peers\n    Member.where(id: tag_ids).to_a\n  end\n\n  def namesakes\n    Member.where(name: name).to_a\n  end\nend\n"),
+            ("app/controllers/application_controller.rb", "class ApplicationController < ActionController::Base\nend\n"),
+            (
+                "app/controllers/members_controller.rb",
+                "class MembersController < ApplicationController\n  def index\n    @member = Member.find(params[:id])\n    @peers = Member.where(id: @member.tag_ids).to_a\n  end\nend\n",
+            ),
+            ("config/routes.rb", "Rails.application.routes.draw do\n  resources :members, only: [:index]\nend\n"),
+        ];
+        let tree: HashMap<PathBuf, Vec<u8>> =
+            files.iter().map(|(p, c)| (PathBuf::from(p), c.as_bytes().to_vec())).collect();
+        let mut app = ingest_app_from_tree(tree).expect("ingest");
+        Analyzer::new(&app).analyze(&mut app);
+        let mut out: Vec<(String, String)> = files.iter().map(|(p, c)| (p.to_string(), c.to_string())).collect();
+        let report = specialize(&app, &mut out).unwrap();
+        let left = |file: &str, line: usize| {
+            report.residue.iter().any(|r| r.contains(&format!("{file}:{line}:")) && r.contains("where value is a collection"))
+        };
+        assert!(left("member.rb", 3), "{:?}", report.residue);
+        assert!(left("members_controller.rb", 4), "{:?}", report.residue);
+        assert!(report.specialized.iter().any(|s| s.contains("member.rb:7:")), "{:?}", report.specialized);
+    }
+
     /// A parameter whose inferred type still holds a variable is not
     /// evidence: callers passing `[]` and `nil` type `name` as `Array[T] |
     /// nil`, while a call with a String is what the app runs. The site
