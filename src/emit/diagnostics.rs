@@ -201,7 +201,7 @@ impl StubStyle {
     pub fn for_target(target: &str) -> StubStyle {
         match target {
             "rust" => StubStyle::RustPanic,
-            "go" => StubStyle::GoPanic,
+            "go" | "go2" => StubStyle::GoPanic,
             "typescript" => StubStyle::TsThrow,
             "python" => StubStyle::PythonThrow,
             // ruby, elixir, crystal, and anything else.
