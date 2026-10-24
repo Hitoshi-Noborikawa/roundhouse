@@ -352,3 +352,116 @@ end
         "not refused; errors: {errors:#?}"
     );
 }
+
+/// A module a class and its superclass both include is one ancestor in
+/// Ruby (`Child.ancestors == [Child, Base, Helper]`, Ruby 4.0.7), so a
+/// keyword call in the module's body reaches its own definition on every
+/// receiver. The index listed the module twice and refused every such
+/// call as ambiguous (a large real app's JSON-LD helper, included by a
+/// service and by its subclass).
+#[test]
+fn a_module_included_by_a_class_and_its_superclass_binds_its_keywords() {
+    const HELPER: &str = r##"module Kwlab
+  module Fetching
+    def fetch(uri, on_behalf_of = nil, raise_on_error: :none, options: {})
+      [uri, on_behalf_of, raise_on_error, options]
+    end
+
+    def outer(uri)
+      fetch(uri, nil, raise_on_error: :temporary)
+    end
+
+    def outer2(uri)
+      fetch(uri, :me, options: { a: 1 })
+    end
+  end
+end
+"##;
+    const BASE: &str = "module Kwlab\n  class Base\n    include Fetching\n  end\nend\n";
+    const CHILD: &str = "module Kwlab\n  class Child < Base\n    include Fetching\n  end\nend\n";
+    const SCRIPT: &str = "p Kwlab::Child.new.outer(\"u\")\np Kwlab::Child.new.outer2(\"u\")\np Kwlab::Base.new.outer(\"u\")\n";
+    let expected = native(&[("fetching.rb", HELPER), ("base.rb", BASE), ("child.rb", CHILD)], SCRIPT);
+    assert_eq!(expected, "[\"u\", nil, :temporary, {}]\n[\"u\", :me, :none, {a: 1}]\n[\"u\", nil, :temporary, {}]\n", "native control");
+    let run = emit_and_run::real_blog()
+        .write("app/lib/kwlab/fetching.rb", HELPER)
+        .write("app/lib/kwlab/base.rb", BASE)
+        .write("app/lib/kwlab/child.rb", CHILD)
+        .run_ruby(&format!(
+            "require_relative \"app/models/kwlab/fetching\"\nrequire_relative \"app/models/kwlab/base\"\nrequire_relative \"app/models/kwlab/child\"\n{SCRIPT}"
+        ));
+    run.assert_passes();
+    assert_eq!(run.stdout, expected, "emitted vs native");
+}
+
+/// Which copy of a twice-included module Ruby keeps decides the binding
+/// when another module defining the name sits between the copies:
+/// `class A; include M; end; class B < A; include X; include M; end` has
+/// `B.ancestors == [B, X, A, M]` and reaches X's, but the copy in B would
+/// reach M's. That stays refused.
+#[test]
+fn a_definer_between_two_copies_of_a_module_is_refused() {
+    const M: &str = r##"module Kwlab
+  module Fields
+    def field(name, type = nil, null: true)
+      [name, type, null]
+    end
+
+    def add(name)
+      field(name, null: false)
+    end
+  end
+end
+"##;
+    const X: &str = r##"module Kwlab
+  module Loud
+    def field(name, null: true, type: nil)
+      [:loud, name, null, type]
+    end
+  end
+end
+"##;
+    const A: &str = "module Kwlab\n  class Plain\n    include Fields\n  end\nend\n";
+    const B: &str = "module Kwlab\n  class Gadget < Plain\n    include Loud\n    include Fields\n  end\nend\n";
+    let (_emitted, errors) = emit_and_run::real_blog()
+        .write("app/lib/kwlab/fields.rb", M)
+        .write("app/lib/kwlab/loud.rb", X)
+        .write("app/lib/kwlab/plain.rb", A)
+        .write("app/lib/kwlab/gadget.rb", B)
+        .emit(BuildTarget::Ruby);
+    assert!(errors.iter().any(|e| e.contains("flattened keyword arguments")), "not refused; errors: {errors:#?}");
+}
+
+/// A prepended module sits ahead of the class in Ruby's lookup, so a
+/// call in the class's body reaches the module's `field`, whose slots
+/// differ. The index does not see `prepend`, so the call is refused
+/// rather than respelled for the class's own definition.
+#[test]
+fn a_call_through_a_prepended_module_is_refused() {
+    const LOUD: &str = r##"module Kwlab
+  module Loud
+    def field(name, null: true, type: nil)
+      [:loud, name, null, type]
+    end
+  end
+end
+"##;
+    const GADGET: &str = r##"module Kwlab
+  class Gadget
+    prepend Loud
+
+    def field(name, type = nil, null: true)
+      [name, type, null]
+    end
+
+    def add(name)
+      field(name, null: false)
+    end
+  end
+end
+"##;
+    let (_emitted, errors) = emit_and_run::real_blog()
+        .write("app/lib/kwlab/loud.rb", LOUD)
+        .write("app/lib/kwlab/gadget.rb", GADGET)
+        .emit(BuildTarget::Ruby);
+    assert!(errors.iter().any(|e| e.contains("flattened keyword arguments")), "not refused; errors: {errors:#?}");
+}
