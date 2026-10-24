@@ -99,3 +99,42 @@ fn a_record_casts_its_attribute_api_declarations_on_ruby() {
     run.assert_passes();
     assert!(run.stdout.contains("ActiveRecord attributes passed"), "{}", run.stdout);
 }
+
+const COLUMN_SCRIPT: &str = r##"
+def check(label, got, want)
+  raise "#{label}: #{got.inspect} (want #{want.inspect})" unless got == want
+end
+a = Article.new(title: "Typed", body: "A body long enough to validate.", code: "abc", status: "archived")
+check("attribute overrides a string column's type", a.code, 0)
+check("attribute overrides a string column's type (digits)", Article.new(code: "7").code, 7)
+check("an enum keeps its mapping", a.status, "archived")
+check("an enum saves its integer", (a.save!; Article.find(a.id).status), "archived")
+b = Article.new(title: "Typed", body: "A body long enough to validate.")
+b.status = "archived"
+check("an enum writer keeps its mapping", b.status, "archived")
+b.code = "12"
+check("the code writer casts", b.code, 12)
+puts "attribute over column passed"
+"##;
+
+/// `attribute :name, :type` on an existing column (Rails 8.1.4): it
+/// overrides the column's type (`attribute :code, :integer` on a string
+/// column reads `"abc"` as 0), but an enum declared after it decorates the
+/// attribute, so `"archived"` stays a label.
+#[test]
+fn an_attribute_over_a_column_overrides_its_type_but_not_an_enum() {
+    let run = emit_and_run::real_blog()
+        .edit(
+            "db/schema.rb",
+            "create_table \"articles\", force: :cascade do |t|",
+            "create_table \"articles\", force: :cascade do |t|\n    t.string \"code\"\n    t.integer \"status\"",
+        )
+        .edit(
+            "app/models/article.rb",
+            "class Article < ApplicationRecord\n  has_many :comments, dependent: :destroy\n",
+            "class Article < ApplicationRecord\n  has_many :comments, dependent: :destroy\n  attribute :code, :integer\n  attribute :status, :integer\n  enum :status, { active: 0, archived: 1 }\n",
+        )
+        .run_ruby(COLUMN_SCRIPT);
+    run.assert_passes();
+    assert!(run.stdout.contains("attribute over column passed"), "{}", run.stdout);
+}
