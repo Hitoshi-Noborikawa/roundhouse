@@ -1022,6 +1022,26 @@ fn ingest_expr_node(node: &Node<'_>, file: &str) -> IngestResult<Expr> {
         }
         n if n.as_constant_path_node().is_some() => {
             let p = n.as_constant_path_node().unwrap();
+            // `self.class::KINDS` / `record.class::KINDS`: the parent is a
+            // value, not a constant, and Ruby looks `KINDS` up through that
+            // class's ancestors. Its own spelling is `const_get(:KINDS)`;
+            // dropping the parent made it a lexical `KINDS`.
+            if let Some(parent) = p.parent().filter(|parent| super::util::constant_path_segments_strs(parent).is_none()) {
+                let recv = ingest_expr(&parent, file)?;
+                let name = p.name().map(|id| constant_id_str(&id).to_string()).unwrap_or_default();
+                let mut send = Expr::new(
+                    span,
+                    ExprNode::Send {
+                        recv: Some(recv),
+                        method: Symbol::from("const_get"),
+                        args: vec![Expr::new(span, ExprNode::Lit { value: Literal::Sym { value: Symbol::from(name.as_str()) } })],
+                        block: None,
+                        parenthesized: true,
+                    },
+                );
+                send.decisions |= crate::expr::CONST_PATH;
+                return Ok(send);
+            }
             // `::StatsD` names the top-level constant from anywhere; an empty
             // first segment keeps that through passes that qualify a bare
             // name into its enclosing namespace (`qualify_lexical_consts`
