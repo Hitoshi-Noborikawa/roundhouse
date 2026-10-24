@@ -1454,6 +1454,14 @@ module ActiveRecord
       ActiveRecord.adapter.select_rows(sql).map { |row| instantiate(row) }
     end
 
+    # A plucked value as the record would hold it (`Relation#pluck`). A
+    # model with a stored PostgreSQL array column overrides this to decode
+    # that column's JSON text (`lower::array_columns`); every other value
+    # is what the row held.
+    def self.decode_plucked(column, value)
+      value
+    end
+
     # Not in base.rb: a block here would put one on every strict target's runtime.
     def _run_save_callbacks
       done = false

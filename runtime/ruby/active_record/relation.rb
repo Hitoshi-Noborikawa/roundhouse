@@ -2364,10 +2364,10 @@ module ActiveRecord
       ensure
         @select_sql = prior
       end
-      return rows.map { |row| row["v0"] } if columns.length == 1
+      return rows.map { |row| @model.decode_plucked(columns[0], row["v0"]) } if columns.length == 1
       rows.map do |row|
         values = []
-        columns.each_with_index { |_col, index| values << row["v#{index}"] }
+        columns.each_with_index { |col, index| values << @model.decode_plucked(col, row["v#{index}"]) }
         values
       end
     end

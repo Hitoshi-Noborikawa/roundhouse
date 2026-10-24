@@ -5,8 +5,9 @@
 //! option silently. The column now carries the flag, and each target that
 //! stores rows itself, in SQLite, reports it as a gap: its storage holds
 //! one element. The futamura and Roda targets read the database's own type
-//! and report nothing. The analysis keeps the element type until a
-//! target's storage holds the Array.
+//! and report nothing, and neither does the ruby family, which stores the
+//! Array. The ingested analysis keeps the element type; a target that
+//! stores the Array retypes it before its analysis.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -84,10 +85,20 @@ fn warnings_for(target: &str, files: &[(&str, &str)], tag: &str) -> Vec<String> 
 
 #[test]
 fn a_target_that_stores_rows_reports_each_array_column() {
-    for target in ["ruby", "spinel", "rust", "typescript"] {
+    for target in ["rust", "typescript"] {
         let lines = warnings(target);
         assert_eq!(lines.len(), 2, "{target}: {lines:#?}");
         assert!(lines.iter().any(|l| l.contains("`tag_ids`")) && lines.iter().any(|l| l.contains("`labels`")), "{target}: {lines:#?}");
+    }
+}
+
+/// The ruby family stores the Array (`lower::array_columns`,
+/// `tests/array_column_storage.rs`), so it reports none.
+#[test]
+fn the_ruby_family_reports_no_array_column() {
+    for target in ["ruby", "spinel", "jruby"] {
+        let lines = warnings(target);
+        assert!(lines.is_empty(), "{target}: {lines:#?}");
     }
 }
 
@@ -137,9 +148,10 @@ fn a_view_over_an_array_column_warns_too() {
     );
     let mut files = files();
     files[0] = ("db/schema.rb", schema.as_str());
-    for target in ["ruby", "rust"] {
+    for target in ["rust", "typescript"] {
         let lines = warnings_for(target, &files, "view");
         assert!(lines.iter().any(|l| l.contains("member_tags") && l.contains("`tag_ids`")), "{target}: {lines:#?}");
         assert_eq!(lines.len(), 3, "the two table columns and the view's\n{target}: {lines:#?}");
     }
+    assert!(warnings_for("ruby", &files, "view").is_empty());
 }

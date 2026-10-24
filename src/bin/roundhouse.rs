@@ -446,7 +446,7 @@ fn run_transpile(
         roundhouse::analyze::Analyzer::new(&app).analyze(&mut app);
         Vec::new()
     } else {
-        roundhouse::session::analyze_and_lower(&mut app)
+        roundhouse::session::analyze_and_lower_for(&mut app, target)
     };
 
     // Analyze-time diagnostics — the same type errors roundhouse-check
