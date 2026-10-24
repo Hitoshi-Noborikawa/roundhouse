@@ -13,6 +13,8 @@ mod pundit_app;
 mod session_cookie_key;
 #[path = "emit_and_run/session_options_key.rs"]
 mod session_options_key;
+#[path = "emit_and_run/httpdate_from_now.rs"]
+mod httpdate_from_now;
 #[path = "emit_and_run/active_model_attributes.rs"]
 mod active_model_attributes;
 #[path = "emit_and_run/arel_nodes.rs"]
