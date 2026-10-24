@@ -10599,13 +10599,15 @@ pub fn build_archives(fixture: &Path, out: &Path, targets: &[BuildTarget]) -> Re
     for target in targets {
         // Analyze + the same post-analyze shared lowerings as the
         // single-target driver, with the target's own pre-analysis
-        // choices (`session::analyze_and_lower_for`); the site build has
-        // no diagnostic surface, so the residue is dropped.
+        // choices (`session::analyze_and_lower_for`). What it refused or
+        // left behind is printed per target, as the CLI prints it.
         let files = match (target, &analyzed) {
             (BuildTarget::Futamura, Some(analyzed)) => target_files(analyzed, fixture, *target)?,
             _ => {
                 let mut target_app = app.clone();
-                let _ = crate::session::analyze_and_lower_for(&mut target_app, *target);
+                for d in crate::session::analyze_and_lower_for(&mut target_app, *target) {
+                    eprintln!("roundhouse: {}: {}", target.as_str(), d.render(&target_app.sources));
+                }
                 target_files(&target_app, fixture, *target)?
             }
         };

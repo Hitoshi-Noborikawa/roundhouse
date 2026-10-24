@@ -42,10 +42,15 @@ fn emit() {
         "cs" => "csharp",
         other => other,
     };
-    match roundhouse::build_target::BuildTarget::from_str(canonical) {
+    let diagnostics = match roundhouse::build_target::BuildTarget::from_str(canonical) {
         Some(t) => roundhouse::session::analyze_and_lower_for(&mut app, t),
         None => roundhouse::session::analyze_and_lower(&mut app),
     };
+    // What the analysis refused or left behind (a strict target's refused
+    // untyped `numericality:` rule), printed as the CLI prints it.
+    for d in &diagnostics {
+        eprintln!("roundhouse: {}", d.render(&app.sources));
+    }
 
     let (files, default_out_dir) = match target.as_str() {
         "typescript" | "ts" => {

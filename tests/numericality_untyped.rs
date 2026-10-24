@@ -191,3 +191,34 @@ fn the_site_archive_emits_a_strict_target_as_the_cli_does() {
     std::fs::remove_dir_all(&root).ok();
     assert_eq!(form["content"].as_str().unwrap(), cli_form);
 }
+
+/// The site's archive build and the preview binary print what the
+/// target's analysis refused, as the CLI does: a strict target names the
+/// untyped `numericality:` rule it dropped.
+#[test]
+fn archives_and_preview_report_the_refused_rule() {
+    let root = std::env::temp_dir().join(format!("roundhouse-numericality-untyped-report-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let source = root.join("app");
+    std::fs::create_dir_all(&root).unwrap();
+    assert!(std::process::Command::new("cp").args(["-a"]).arg(roundhouse::fixtures::real_blog()).arg(&source).status().unwrap().success());
+    std::fs::write(source.join("app/models/settings_form.rb"), FORM).unwrap();
+    let archives = std::process::Command::new(env!("CARGO_BIN_EXE_roundhouse"))
+        .args(["--archives", "rust"])
+        .arg(&source)
+        .arg("-o")
+        .arg(root.join("site"))
+        .output()
+        .expect("run roundhouse --archives");
+    let preview = std::process::Command::new(env!("CARGO_BIN_EXE_emit_preview"))
+        .args(["--target", "rs", "--out"])
+        .arg(root.join("preview"))
+        .arg(&source)
+        .output()
+        .expect("run emit_preview");
+    std::fs::remove_dir_all(&root).ok();
+    let archives = String::from_utf8_lossy(&archives.stderr);
+    let preview = String::from_utf8_lossy(&preview.stderr);
+    assert!(archives.lines().any(|l| l.starts_with("roundhouse: rust:") && l.contains("validates :required, numericality:")), "{archives}");
+    assert!(preview.lines().any(|l| l.starts_with("roundhouse:") && l.contains("validates :required, numericality:")), "{preview}");
+}
