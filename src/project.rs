@@ -1464,6 +1464,7 @@ fn ships_i18n_runtime(target: BuildTarget) -> bool {
             | BuildTarget::Jruby
             | BuildTarget::Spinel
             | BuildTarget::Typescript
+            | BuildTarget::Crystal
     )
 }
 
@@ -6705,7 +6706,7 @@ fn report_unsupported_bundled_constants(app: &App, target: BuildTarget) {
             );
         }
         // `translate_site` / `translate_runtime` are reported with their call (`report_i18n_table_sites`).
-        if !matches!(target, "jruby" | "spinel" | "typescript")
+        if !matches!(target, "jruby" | "spinel" | "typescript" | "crystal")
             && let crate::expr::ExprNode::Send { recv: Some(recv), method, .. } = &*expr.node
             && matches!(&*recv.node, crate::expr::ExprNode::Const { path } if path.iter().map(|s| s.as_str()).skip_while(|s| s.is_empty()).eq(["I18n"]))
             && !matches!(method.as_str(), "translate_site" | "translate_runtime")

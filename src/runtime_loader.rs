@@ -492,6 +492,24 @@ const TYPESCRIPT_RUNTIME: &[RuntimeEntry] = &[
 /// (Module mode, no dependencies); expanded as the Crystal target
 /// proves out additional surface area.
 const CRYSTAL_RUNTIME: &[RuntimeEntry] = &[
+    runtime_entry! {
+        stem: "active_support_inflections",
+        namespace: "",
+        out_path: "src/active_support_inflections.cr",
+        mode: Mode::Library,
+        imports: NO_IMPORTS,
+        prelude: NO_PRELUDE,
+        extra_roots: NO_EXTRA_ROOTS,
+    },
+    runtime_entry! {
+        stem: "i18n_locale",
+        namespace: "",
+        out_path: "src/i18n_locale.cr",
+        mode: Mode::Library,
+        imports: NO_IMPORTS,
+        prelude: NO_PRELUDE,
+        extra_roots: NO_EXTRA_ROOTS,
+    },
     // HWIA dropped per Phase 2.5(b); flash/session moved to typed
     // ActionDispatch structs.
     runtime_entry! {
