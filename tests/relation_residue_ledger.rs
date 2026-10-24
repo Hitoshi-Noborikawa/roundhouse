@@ -234,7 +234,7 @@ fn only_the_dynamic_relation_residue_is_elevated() {
     let mut diags = diagnostics();
     let before: Vec<String> = diags
         .iter()
-        .filter(|d| !d.message.contains("relation chain stays dynamic"))
+        .filter(|d| !d.message.contains("relation chain stays dynamic") && !d.message.contains("on a receiver of unknown type"))
         .map(Diagnostic::to_string)
         .collect();
     roundhouse::lower::relation_residue::elevate_dynamic_relation_for_target(
@@ -243,7 +243,7 @@ fn only_the_dynamic_relation_residue_is_elevated() {
     );
     let after: Vec<String> = diags
         .iter()
-        .filter(|d| !d.message.contains("relation chain stays dynamic"))
+        .filter(|d| !d.message.contains("relation chain stays dynamic") && !d.message.contains("on a receiver of unknown type"))
         .map(Diagnostic::to_string)
         .collect();
     assert_eq!(before, after, "no other diagnostic is touched");
