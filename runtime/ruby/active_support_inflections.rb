@@ -38,7 +38,10 @@ module ActiveSupport
   def self.demodulize(text)
     s = text.to_s
     idx = s.rindex("::")
-    idx ? s[(idx + 2)..-1].to_s : s
+    # Not `s[(idx + 2)..-1]` or `if idx`: a strict target slices by start and length, and does not narrow a found index once tested
+    return s if idx.nil?
+    at = idx.to_i
+    s[at + 2, s.length - at - 2].to_s
   end
 
   # Regular-suffix singularize only. Analyze folds `String#singularize`
@@ -135,7 +138,8 @@ module ActiveSupport
     def self.deconstantize(text)
       s = text.to_s
       idx = s.rindex("::")
-      idx ? s[0, idx].to_s : ""
+      # Not `idx ? s[0, idx] : ""`: a strict target does not narrow a found index once tested
+      idx.nil? ? "" : s[0, idx.to_i].to_s
     end
 
     # Rails assumes a top-level class name and removes its namespace before

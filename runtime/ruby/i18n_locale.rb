@@ -395,7 +395,8 @@ module I18n
     if token == "of"
       size = rule[plural_step].to_s.to_i
       found = false
-      size.times { found = true if plural_num(rule, ops) == x }
+      # Not `found = true if ...`: each step reads the next operand, so every one runs, and a modifier if in a block is a statement C# cannot put there
+      size.times { found = plural_num(rule, ops) == x || found }
       return found
     end
     y = plural_num(rule, ops)
@@ -478,7 +479,9 @@ module I18n
     return subtree_translation(key) if kind == "s"
     template = entry[2]
     if kind == "p"
-      template = (count == 0 && entry[2] == "1") ? entry[3] : (count == 1 ? entry[4] : entry[5])
+      # Not `count == 0`: a count is an Integer or a Float, and a strict target compares one number type, as Ruby's 1.0 == 1 does
+      amount = count.nil? ? nil : count.to_f
+      template = (amount == 0.0 && entry[2] == "1") ? entry[3] : (amount == 1.0 ? entry[4] : entry[5])
     end
     out = render_template(template, count, names, values, html)
     escape_plain && !html ? ActionView::ViewHelpers.html_escape(out) : out
@@ -522,48 +525,48 @@ module I18n
 
   # Not each reader's own ivar tested for nil: the TypeScript emitter folds an ivar named after its reader into a field that starts filled
   def self.translation_table
-    load_translation_table unless @table_loaded
+    load_translation_table unless @table_loaded == true
     @site_table || {}
   end
 
   def self.runtime_leaves
-    load_translation_table unless @table_loaded
+    load_translation_table unless @table_loaded == true
     @leaf_table || {}
   end
 
   def self.runtime_nodes
-    load_translation_table unless @table_loaded
+    load_translation_table unless @table_loaded == true
     @node_table || {}
   end
 
   def self.runtime_order
-    load_translation_table unless @table_loaded
+    load_translation_table unless @table_loaded == true
     @leaf_order || []
   end
 
   def self.runtime_empties
-    load_translation_table unless @table_loaded
+    load_translation_table unless @table_loaded == true
     @empty_table || {}
   end
 
   def self.runtime_chains
-    load_translation_table unless @table_loaded
+    load_translation_table unless @table_loaded == true
     @chain_table || {}
   end
 
   def self.translation_entries
-    load_translation_table unless @table_loaded
+    load_translation_table unless @table_loaded == true
     @entry_list || []
   end
 
   # A line ends in a "." field: `split` drops trailing empty fields, and a template or a key can be empty.
   def self.runtime_rules
-    load_translation_table unless @table_loaded
+    load_translation_table unless @table_loaded == true
     @rule_table || {}
   end
 
   def self.runtime_opaque
-    load_translation_table unless @table_loaded
+    load_translation_table unless @table_loaded == true
     @opaque_table || {}
   end
 
@@ -612,7 +615,7 @@ module I18n
         i = 0
         while i < names.length
           at = fields[4 + i]
-          table[prefix + names[i]] = at.to_i unless at == "-"
+          table[prefix + names[i].to_s] = at.to_i unless at == "-"
           i += 1
         end
       end
