@@ -7,7 +7,7 @@ use crate::ident::Symbol;
 use crate::span::Span;
 
 fn case_runs(target: BuildTarget) -> bool {
-    matches!(target, BuildTarget::Ruby | BuildTarget::Jruby)
+    matches!(target, BuildTarget::Ruby | BuildTarget::Jruby | BuildTarget::Spinel)
 }
 
 fn keeps_source_call(target: BuildTarget) -> bool {

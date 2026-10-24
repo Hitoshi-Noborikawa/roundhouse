@@ -124,7 +124,7 @@ puts "ok"
 }
 
 #[test]
-fn safe_constantize_is_a_closed_case_on_ruby_and_refused_elsewhere() {
+fn safe_constantize_is_a_closed_case_on_the_ruby_family_and_refused_elsewhere() {
     let dir = std::env::temp_dir().join(format!("rh-constantize-targets-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     for (path, text) in [
@@ -160,14 +160,16 @@ fn safe_constantize_is_a_closed_case_on_ruby_and_refused_elsewhere() {
             .collect();
         (errors, files.unwrap_or_default())
     };
-    let (errors, files) = emit(BuildTarget::Ruby);
-    assert!(!errors.iter().any(|e| e.contains("safe_constantize")), "ruby refused the call:\n{}", errors.join("\n"));
-    let text = |file: &str| files.iter().find(|(path, _)| path.ends_with(file)).map(|(_, text)| text.clone()).unwrap_or_default();
-    let finder = text("finder.rb");
-    assert!(finder.contains("RoundhouseConstants.safe_constantize("), "ruby did not route the call to the lookup:\n{finder}");
-    let lookup = text("roundhouse_constants.rb");
-    assert!(lookup.contains("when \"PostPolicy\""), "ruby did not emit the closed case:\n{lookup}");
-    for target in [BuildTarget::Spinel, BuildTarget::Typescript, BuildTarget::Rust, BuildTarget::Python] {
+    for target in [BuildTarget::Ruby, BuildTarget::Spinel] {
+        let (errors, files) = emit(target);
+        assert!(!errors.iter().any(|e| e.contains("safe_constantize")), "{target:?} refused the call:\n{}", errors.join("\n"));
+        let text = |file: &str| files.iter().find(|(path, _)| path.ends_with(file)).map(|(_, text)| text.clone()).unwrap_or_default();
+        let finder = text("finder.rb");
+        assert!(finder.contains("RoundhouseConstants.safe_constantize("), "{target:?} did not route the call to the lookup:\n{finder}");
+        let lookup = text("roundhouse_constants.rb");
+        assert!(lookup.contains("when \"PostPolicy\""), "{target:?} did not emit the closed case:\n{lookup}");
+    }
+    for target in [BuildTarget::Typescript, BuildTarget::Rust, BuildTarget::Python] {
         let (errors, _) = emit(target);
         assert!(
             errors.iter().any(|e| e.contains("safe_constantize")),
