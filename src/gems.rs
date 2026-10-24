@@ -812,6 +812,10 @@ pub(crate) fn gem_providing_dsl(lock: &Lockfile, dsl: &str) -> Option<&'static s
         .copied()
 }
 
+pub fn claims_surface(gem: &str) -> bool {
+    SURFACES.iter().any(|(name, _)| *name == gem)
+}
+
 /// The gem whose surface a method name belongs to, if any of the
 /// gems in `lock` claim it. `None` when no present gem claims the
 /// name. Modeled gems never claim (their surface resolves).

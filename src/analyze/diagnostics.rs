@@ -90,6 +90,73 @@ fn devise_refusals(app: &App) -> Vec<Diagnostic> {
     out
 }
 
+// Rewritten in place, not added beside: a transpile runs no attribution, so the site's warning would stay its only finding
+fn unshipped_gem_helpers(app: &App, out: &mut Vec<Diagnostic>) {
+    let Some(lock) = &app.gem_lock else { return };
+    let unshipped = |method: &str| {
+        crate::gems::gem_claiming_method(lock, method).filter(|gem| {
+            !lock.is_in_repo(gem)
+                && !lock.is_source(gem)
+                && !app.extensions.runtime_gems.iter().any(|row| row.gem == *gem)
+        })
+    };
+    fn visit<'a>(
+        expr: &'a Expr,
+        unshipped: &impl Fn(&str) -> Option<&'static str>,
+        sites: &mut Vec<(crate::span::Span, &'static str, &'a Symbol)>,
+    ) {
+        if let ExprNode::Send { recv, method, .. } = &*expr.node
+            && recv.as_ref().is_none_or(|r| matches!(&*r.node, ExprNode::SelfRef))
+            && is_unknown_ty(expr.ty.as_ref())
+            && !expr.span.is_synthetic()
+            && let Some(gem) = unshipped(method.as_str())
+        {
+            if !sites.iter().any(|(span, ..)| *span == expr.span) {
+                sites.push((expr.span, gem, method));
+            }
+        }
+        expr.node.for_each_child(&mut |child| visit(child, unshipped, sites));
+    }
+    let mut sites = Vec::new();
+    for controller in &app.controllers {
+        for action in controller.actions() {
+            visit(&action.body, &unshipped, &mut sites);
+        }
+    }
+    for view in &app.views {
+        visit(&view.body, &unshipped, &mut sites);
+    }
+    let refusal = |span, gem: &str, method: &Symbol| {
+        Diagnostic::unsupported(
+            span,
+            None,
+            gem,
+            format!(
+                "`{}` is a helper of the `{gem}` gem, which roundhouse does not model and no target ships, so the call reaches no method at run time; `source_gems` compiles a gem from its source",
+                method.as_str()
+            ),
+        )
+    };
+    for d in out.iter_mut() {
+        match &d.kind {
+            DiagnosticKind::UndefinedFilterTarget { target, .. } => {
+                if let Some(gem) = unshipped(target.as_str()) {
+                    let target = target.clone();
+                    *d = refusal(d.span, gem, &target);
+                }
+            }
+            DiagnosticKind::UnresolvedType { .. } => {
+                if let Some(i) = sites.iter().position(|(span, ..)| *span == d.span) {
+                    let (span, gem, method) = sites.remove(i);
+                    *d = refusal(span, gem, method);
+                }
+            }
+            _ => {}
+        }
+    }
+    out.extend(sites.into_iter().map(|(span, gem, method)| refusal(span, gem, method)));
+}
+
 /// Walk an analyzed `App` collecting every position where typing failed
 /// in a way that matters for downstream typed emission. Does not modify
 /// the IR — purely a read pass.
@@ -267,6 +334,7 @@ pub fn diagnose_with_coverage(app: &App) -> (Vec<Diagnostic>, PreloadCoverage) {
     // ivar channel.
     let (preload_diags, coverage) = preload::missing_preload_report(app);
     out.extend(preload_diags);
+    unshipped_gem_helpers(app, &mut out);
     let refused_gem_sites: std::collections::HashSet<_> = out.iter().filter_map(|diagnostic| {
         matches!(&diagnostic.kind, DiagnosticKind::Unsupported { construct, .. }
             if construct.as_str() == "gem_requires_rails").then_some(diagnostic.span)
