@@ -22,6 +22,13 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+#[path = "support/emit_and_run.rs"]
+#[allow(dead_code)]
+mod emit_and_run;
+#[path = "support/i18n_locales_app.rs"]
+#[allow(dead_code)]
+mod i18n_locales_app;
+
 use roundhouse::emit::swift;
 use roundhouse::ingest::ingest_app;
 
@@ -151,4 +158,42 @@ fn parse_executed_count(s: &str) -> Option<usize> {
     let rest = &s[idx + "Executed ".len()..];
     let end = rest.find(' ')?;
     rest[..end].parse::<usize>().ok()
+}
+
+#[test]
+#[ignore]
+fn real_blog_i18n_locales_run() {
+    // The answers `emit_and_run::i18n_locales` checks on CRuby, but for a String
+    // locale named in an error: Swift has no Symbol apart from String, so `"de"` shows as `:de`.
+    let (emitted, errors) = i18n_locales_app::probe_app()
+        .edit("app/models/article.rb", i18n_locales_app::IN_LOCALE, "")
+        .emit(roundhouse::project::BuildTarget::Swift);
+    assert!(errors.is_empty(), "{errors:?}");
+    std::fs::write(emitted.join("Tests/AppTests/I18nProbeTests.swift"), r#"import XCTest
+@testable import App
+
+final class I18nProbeTests: XCTestCase {
+    func testLocalesAnswerAsRails() throws {
+        XCTAssertEqual(try Article.lookups(), ["Hello", "Hi <x>", "1 item", "2 items", "Translation missing: en.probe.nope", "Cześć", "fallback 3", "en"])
+        XCTAssertEqual(try Article.polish(), ["1 rzecz", "5 rzeczy", "English only", "Cześć", "Translation missing: pl.probe.nope", "Cześć", "Hi Ola", "pl"])
+        XCTAssertEqual(I18n.locale(), "en")
+        XCTAssertEqual([try Article.named("pl"), try Article.named("en"), try Article.named(nil)], ["Cześć", "Hello", "Hello"])
+        XCTAssertEqual([try Article.probeKey("greet"), try Article.onlyKey("xx")], ["Hello", "Translation missing: en.probe.only_xx"])
+        XCTAssertThrowsError(try Article.named("de")) { error in
+            XCTAssertEqual((error as? InvalidLocale)?.message, ":de is not a valid locale")
+        }
+    }
+}
+"#).expect("write probe test");
+    let output = Command::new("swift")
+        .args(["test", "--filter", "I18nProbeTests"])
+        .current_dir(&emitted)
+        .output()
+        .expect("run swift test");
+    assert!(
+        output.status.success(),
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
 }

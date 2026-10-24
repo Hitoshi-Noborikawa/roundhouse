@@ -2127,6 +2127,9 @@ jobs:
       - name: cargo test --test emit_and_run render json writer on swift
         if: ${{ !cancelled() && matrix.target == 'swift' }}
         run: cargo test --locked --test emit_and_run render_json_record_writer_runs_on_swift -- --ignored --nocapture --exact
+      - name: cargo test --test swift_toolchain real_blog_i18n_locales_run
+        if: ${{ !cancelled() && matrix.target == 'swift' }}
+        run: cargo test --locked --test swift_toolchain real_blog_i18n_locales_run -- --ignored --nocapture --exact
       - name: cargo test --test typescript_toolchain real_blog -- --ignored
         if: ${{ !cancelled() && matrix.target == 'typescript' }}
         run: cargo test --test typescript_toolchain real_blog -- --ignored --nocapture
