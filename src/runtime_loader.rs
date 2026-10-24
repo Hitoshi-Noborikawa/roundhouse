@@ -2131,6 +2131,28 @@ fn split_python_constants_around_classes(constants: &str, class_names: &[String]
 /// don't apply.
 const PYTHON_RUNTIME: &[RuntimeEntry] = &[
     runtime_entry! {
+        stem: "active_support_inflections",
+        namespace: "",
+        out_path: "app/active_support_inflections.py",
+        mode: Mode::Library,
+        imports: NO_IMPORTS,
+        prelude: NO_PRELUDE,
+        extra_roots: NO_EXTRA_ROOTS,
+    },
+    runtime_entry! {
+        stem: "i18n_locale",
+        namespace: "",
+        out_path: "app/i18n_locale.py",
+        mode: Mode::Library,
+        imports: &[
+            ("I18nHost", "app.i18n_host"),
+            ("ViewHelpers", "app.v2.view_helpers"),
+            ("ActiveSupport", "app.active_support_inflections"),
+        ],
+        prelude: NO_PRELUDE,
+        extra_roots: NO_EXTRA_ROOTS,
+    },
+    runtime_entry! {
         stem: "inflector",
         namespace: "",
         out_path: "app/inflector.py",

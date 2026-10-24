@@ -304,6 +304,8 @@ fn emit_models(models: &[LibraryClass]) -> Result<String, String> {
         // top: view_helpers.py imports only Base and the stdlib —
         // no models↔view_helpers cycle to break.
         ("ViewHelpers.", "from app.v2.view_helpers import ViewHelpers\n"),
+        ("I18n.", "from app.i18n_locale import I18n\n"),
+        ("InvalidLocale", "from app.i18n_locale import InvalidLocale\n"),
     ] {
         if body.contains(needle) {
             out.push_str(import);
@@ -360,6 +362,9 @@ fn emit_views(
         // The framework-namespace collapse renders
         // `ActionView::ViewHelpers` as bare `ViewHelpers`.
         out.push_str("from app.v2.view_helpers import ViewHelpers\n");
+    }
+    if body.contains("I18n.") {
+        out.push_str("from app.i18n_locale import I18n\n");
     }
     if body.contains("Inflector.") {
         // The inflector unit is Mode::Module (bare functions) — alias
