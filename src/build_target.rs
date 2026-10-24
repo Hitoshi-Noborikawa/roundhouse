@@ -237,11 +237,12 @@ impl BuildTarget {
     /// (`project::report_array_columns`).
     /// Does the target's `numericality:` check parse a String the way Rails'
     /// validator does (`ActiveSupport.numericality_number`)? The
-    /// Ruby-family runtimes do; on the others an untyped attribute's
+    /// Ruby-family runtimes do, and `Blog` is the Rails source itself,
+    /// whose validator does; on the others an untyped attribute's
     /// `numericality:` is the reported gap
     /// (`ingest::app::refuse_numericality_allow_on_untyped`).
     pub fn parses_numericality_input(self) -> bool {
-        matches!(self, BuildTarget::Ruby | BuildTarget::Jruby | BuildTarget::Spinel)
+        matches!(self, BuildTarget::Ruby | BuildTarget::Jruby | BuildTarget::Spinel | BuildTarget::Blog)
     }
 
     pub fn stores_array_columns(self) -> bool {

@@ -222,3 +222,26 @@ fn archives_and_preview_report_the_refused_rule() {
     assert!(archives.lines().any(|l| l.starts_with("roundhouse: rust:") && l.contains("validates :required, numericality:")), "{archives}");
     assert!(preview.lines().any(|l| l.starts_with("roundhouse:") && l.contains("validates :required, numericality:")), "{preview}");
 }
+
+/// The `blog` archive is the Rails source, unchanged: its validator keeps
+/// the rule, so the archive build reports no refusal for it.
+#[test]
+fn the_blog_archive_reports_no_refusal() {
+    let root = std::env::temp_dir().join(format!("roundhouse-numericality-untyped-blog-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let source = root.join("app");
+    std::fs::create_dir_all(&root).unwrap();
+    assert!(std::process::Command::new("cp").args(["-a"]).arg(roundhouse::fixtures::real_blog()).arg(&source).status().unwrap().success());
+    std::fs::write(source.join("app/models/settings_form.rb"), FORM).unwrap();
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_roundhouse"))
+        .args(["--archives", "blog"])
+        .arg(&source)
+        .arg("-o")
+        .arg(root.join("site"))
+        .output()
+        .expect("run roundhouse --archives blog");
+    std::fs::remove_dir_all(&root).ok();
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "{stderr}");
+    assert!(!stderr.contains("numericality:"), "{stderr}");
+}
