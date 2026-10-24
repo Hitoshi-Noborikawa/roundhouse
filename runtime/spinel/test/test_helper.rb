@@ -1440,9 +1440,8 @@ end
 
 module ActionDispatch
   module Assertions
-    # Rails' `ActionDispatch::Assertions::RoutingAssertions`, the half
-    # that recognizes a path. `assert_generates` and `assert_routing`
-    # (which also generates the path from the options) are not here.
+    # Rails' `ActionDispatch::Assertions::RoutingAssertions`:
+    # `assert_recognizes`, `assert_generates` and `assert_routing`.
     module RoutingAssertions
       # `assert_recognizes(expected_options, path, extras = {}, message = nil)`.
       # `path` is a String (a GET) or `{ method: verb, path: path }`;
@@ -1458,6 +1457,7 @@ module ActionDispatch
         request_path = ""
         if path.is_a?(Hash)
           verb = path[:method].to_s.upcase
+          verb = "GET" if verb.empty?
           request_path = path[:path].to_s
         else
           request_path = path.to_s
