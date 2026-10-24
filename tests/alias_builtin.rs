@@ -40,6 +40,7 @@ const PRESENTER: &str = r#"class NamePresenter
   alias exactly? instance_of?
   alias answers? respond_to?
   alias none? nil?
+  alias inspect inspect
 end
 "#;
 
@@ -71,6 +72,7 @@ check("instance_of?", x.exactly?(Object), false)
 check("respond_to? yes", x.answers?(:name), true)
 check("respond_to? no", x.answers?(:nope), false)
 check("nil?", x.none?, false)
+check("alias inspect inspect is a no-op", x.inspect.start_with?("#<NamePresenter"), true)
 check("respond_to? include_all", x.answers?(:initialize, true), true)
 arity = begin
   x.label(1)
@@ -89,30 +91,41 @@ fn an_alias_of_a_builtin_answers_as_the_builtin_on_ruby() {
     assert!(run.stdout.contains("builtin aliases passed"), "{}", run.stdout);
 }
 
-/// A class that defines the builtin's name keeps the gap: Ruby's alias
-/// captured `Object#to_s`, and a delegating method would reach the class's
-/// own `to_s` instead.
+/// Where something else defines the builtin's name, Ruby's alias captured
+/// what stood at the alias (Ruby 4.0.7), and a delegating method can't
+/// reproduce it, so each shape stays the gap:
+/// - the class defines it after the alias (the alias keeps `Object#to_s`);
+/// - a module included before (the alias is the module's) or after (the
+///   alias keeps `Object#to_s` while `to_s` is the module's);
+/// - a module prepended (the alias keeps `Object#to_s`);
+/// - a superclass that defines it (the alias is the superclass's).
 #[test]
-fn a_builtin_the_class_redefines_stays_the_gap() {
+fn a_builtin_something_else_defines_stays_the_gap() {
     use std::collections::HashMap;
     use std::path::PathBuf;
-    let tree: HashMap<PathBuf, Vec<u8>> = [
-        (
-            "app/presenters/label_presenter.rb",
-            "class LabelPresenter\n  alias label to_s\n\n  def to_s\n    \"mine\"\n  end\nend\n",
-        ),
-        ("app/presenters/name_presenter.rb", PRESENTER),
-        ("config/routes.rb", "Rails.application.routes.draw do\nend\n"),
-    ]
-    .into_iter()
-    .map(|(p, c)| (PathBuf::from(p), c.as_bytes().to_vec()))
-    .collect();
+    let cases = [
+        ("redefined_presenter", "class RedefinedPresenter\n  alias label to_s\n\n  def to_s\n    \"mine\"\n  end\nend\n"),
+        ("include_before_presenter", "class IncludeBeforePresenter\n  include Loud\n  alias label to_s\nend\n"),
+        ("include_after_presenter", "class IncludeAfterPresenter\n  alias label to_s\n  include Loud\nend\n"),
+        ("prepend_presenter", "class PrependPresenter\n  alias label to_s\n  prepend Loud\nend\n"),
+        ("child_presenter", "class ChildPresenter < BasePresenter\n  alias label to_s\nend\n"),
+    ];
+    let mut tree: HashMap<PathBuf, Vec<u8>> = cases
+        .iter()
+        .map(|(file, body)| (PathBuf::from(format!("app/presenters/{file}.rb")), body.as_bytes().to_vec()))
+        .collect();
+    tree.insert(PathBuf::from("app/presenters/loud.rb"), b"module Loud\n  def to_s\n    \"loud\"\n  end\nend\n".to_vec());
+    tree.insert(PathBuf::from("app/presenters/base_presenter.rb"), b"class BasePresenter\n  def to_s\n    \"base\"\n  end\nend\n".to_vec());
+    tree.insert(PathBuf::from("app/presenters/name_presenter.rb"), PRESENTER.as_bytes().to_vec());
+    tree.insert(PathBuf::from("config/routes.rb"), b"Rails.application.routes.draw do\nend\n".to_vec());
     roundhouse::ingest::survey::activate();
     let app = roundhouse::ingest::ingest_app_from_tree(tree).expect("ingest");
     let gaps: Vec<String> = roundhouse::ingest::survey::drain().into_iter().map(|g| g.to_string()).collect();
-    assert!(gaps.iter().any(|g| g.contains("label_presenter.rb") && g.contains("alias")), "{gaps:#?}");
-    assert!(!app.library_classes.iter().any(|c| c.name.0.as_str() == "LabelPresenter"));
+    for (file, _) in cases {
+        assert!(gaps.iter().any(|g| g.contains(&format!("{file}.rb")) && g.contains("alias")), "{file}: {gaps:#?}");
+    }
     assert!(app.library_classes.iter().any(|c| c.name.0.as_str() == "NamePresenter"), "{gaps:#?}");
+    assert!(app.library_classes.iter().any(|c| c.name.0.as_str() == "BasePresenter"), "{gaps:#?}");
 }
 
 /// The strict targets have no `send` to delegate to: refused where it is

@@ -555,6 +555,14 @@ pub(super) fn library_class_and_struct_base(
         mut class_initializers,
         class_attributes: _,
     } = walk_decl_body(class.body(), &owner, file, DeclBodyMode::Instance)?;
+    // An alias of a builtin captured the superclass's method where the
+    // superclass defines it; the delegation can't tell (`OBJECT_BUILTINS`).
+    if class.superclass().is_some() && methods.iter().any(|m| delegates_to_builtin(&m.body)) {
+        return Err(IngestError::Unsupported {
+            file: file.into(),
+            message: "alias names a method this body has not defined".into(),
+        });
+    }
 
     // A `T::Struct` is a class GENERATOR, not an annotation: `const
     // :name, String` IS the constructor and the reader. Lower it into
@@ -2188,6 +2196,14 @@ fn walk_decl_body_with_visibility<'pr>(
             def.receiver().is_none().then(|| constant_id_str(&def.name()).to_string())
         })
         .collect();
+    // An `include`/`prepend` anywhere in the body: the module may define a
+    // builtin's name, so an alias of that builtin captured something the
+    // delegation can't reproduce.
+    let mixes_in = statements.iter().any(|stmt| {
+        stmt.as_call_node().is_some_and(|c| {
+            c.receiver().is_none() && matches!(constant_id_str(&c.name()), "include" | "prepend")
+        })
+    });
     if let Some(name) = super::util::hoisted_name_collision(&statements) {
         return Err(IngestError::Unsupported {
             file: file.into(),
@@ -2492,9 +2508,16 @@ fn walk_decl_body_with_visibility<'pr>(
             if let Some((to, from)) = to.zip(from) {
                 // `alias read_attribute_for_serialization send`: a method
                 // every object answers, unless the body defines that name
-                // itself (Ruby's alias captured the builtin; a delegation
-                // would reach the body's definition).
+                // or mixes in a module, or the class has a superclass
+                // (`library_class_and_struct_base`). Ruby's alias captured
+                // the method as it stood, and a delegation would reach the
+                // body's, the module's or the superclass's definition.
+                // `alias to_s to_s` rebinds the method it names: a no-op.
+                if to == from && OBJECT_BUILTINS.iter().any(|(name, _, _)| *name == from.as_str()) {
+                    continue;
+                }
                 if receiver == MethodReceiver::Instance
+                    && !mixes_in
                     && OBJECT_BUILTINS.iter().any(|(name, _, _)| *name == from.as_str())
                     && !out.methods.iter().any(|method| method.name.as_str() == from && method.receiver == receiver)
                     && !defined_instance_methods.contains(from.as_str())
@@ -3117,6 +3140,16 @@ pub(crate) const OBJECT_BUILTINS: &[(&str, &str, &str)] = &[
     ("instance_of?", "klass", "klass"),
     ("respond_to?", "name, include_all = false", "name, include_all"),
 ];
+
+/// Whether a synthesized builtin alias's call is in `e` (`BUILTIN_ALIAS`).
+fn delegates_to_builtin(e: &Expr) -> bool {
+    if e.decisions & crate::expr::BUILTIN_ALIAS != 0 {
+        return true;
+    }
+    let mut found = false;
+    e.node.for_each_child(&mut |c| found = found || delegates_to_builtin(c));
+    found
+}
 
 /// `alias to from` for a builtin `from`: `def to(<params>) =
 /// self.from(<args>)` with the builtin's own arity, every span the alias's,
