@@ -151,3 +151,11 @@ fn an_untyped_attributes_string_is_parsed_as_a_number_on_spinel() {
     assert!(run.stdout.contains("untyped numericality passed"), "{}", run.stdout);
 }
 
+/// Without `allow_*` too: the strict targets' check is `is_a?(Numeric)`,
+/// which rejects `"12"`, so the line is the reported gap there rather than
+/// a check that refuses what Rails accepts.
+#[test]
+fn a_strict_target_refuses_an_untyped_numericality_without_allow() {
+    let rust = cli_warnings("rust", "no-allow");
+    assert!(rust.iter().any(|w| w.contains("validates :required, numericality:")), "{rust:#?}");
+}

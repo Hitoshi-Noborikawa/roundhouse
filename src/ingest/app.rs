@@ -2544,8 +2544,8 @@ fn walk_binary_assets<V: Vfs + ?Sized>(vfs: &V, root: &Path, dir: &Path, app: &m
     }
 }
 
-/// `numericality:` with `allow_nil:` / `allow_blank:` on an attribute the
-/// model does not type as a number (no Integer/Float column: an
+/// `numericality:` (with or without `allow_nil:` / `allow_blank:`) on an
+/// attribute the model does not type as a number (no Integer/Float column: an
 /// `attr_accessor` of an `ActiveModel::Model` form, fed request Strings)
 /// is the reported gap on a target whose check does not parse a String
 /// number (#1158): there it would reject `"30"` where Rails accepts it. The
@@ -2574,14 +2574,16 @@ pub(crate) fn refuse_numericality_allow_on_untyped(app: &mut App, target: &str) 
             }
             for rule in &validation.rules {
                 if let ValidationRule::Numericality { allow_nil, allow_blank, .. } = rule {
-                    let option = if *allow_blank == Some(true) {
-                        "allow_blank"
+                    // Without `allow_*` the check is `is_a?(Numeric)`, which
+                    // rejects `"12"` as surely: refused too.
+                    let construct = if *allow_blank == Some(true) {
+                        format!("validates :{}, numericality: allow_blank:", validation.attribute.as_str())
                     } else if *allow_nil == Some(true) {
-                        "allow_nil"
+                        format!("validates :{}, numericality: allow_nil:", validation.attribute.as_str())
                     } else {
-                        continue;
+                        format!("validates :{}, numericality:", validation.attribute.as_str())
                     };
-                    refused.push((i, item.span(), format!("validates :{}, numericality: {option}:", validation.attribute.as_str())));
+                    refused.push((i, item.span(), construct));
                 }
             }
         }
