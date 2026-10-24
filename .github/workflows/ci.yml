@@ -463,6 +463,10 @@ jobs:
           cp -R spinel-src/packages             spinel-dist/packages
           cp -R spinel-src/builtins             spinel-dist/builtins
           git -C spinel-src rev-parse HEAD > spinel-dist/revision.txt
+          # Not each caller's flag: every lane, spin included, runs this binary, so the wrapper is the one place.
+          mv spinel-dist/spinel spinel-dist/spinel-real
+          printf '#!/bin/sh\nd=$(dirname "$0")\n[ -x "$d/spinel-real" ] || chmod +x "$d/spinel-real"\nexec "$d/spinel-real" --string-repr=handle "$@"\n' > spinel-dist/spinel
+          chmod +x spinel-dist/spinel
       - name: Upload spinel toolchain
         id: toolchain
         uses: actions/upload-artifact@v7
@@ -1214,7 +1218,7 @@ jobs:
     if: ${{ !cancelled() && contains(fromJSON(needs.plan.outputs.jobs), 'campfire-spinel-build') && needs.build-roundhouse.outputs.roundhouse-bin-artifact-id != '' && needs.spinel-build.outputs.artifact-id != '' }}
     runs-on: ubuntu-latest
     # 60m: apt alone can take 20m; fetch 5m + emit/build 25m still need room.
-    timeout-minutes: 60
+    timeout-minutes: 85
     continue-on-error: true
     outputs:
       artifact-id: ${{ steps.binary.outputs.artifact-id }}
@@ -1254,7 +1258,8 @@ jobs:
           mkdir -p /tmp/campfire && tar -xzf /tmp/campfire.tar.gz -C /tmp/campfire --strip-components=1
       - name: Emit and build the comparison binary
         id: build
-        timeout-minutes: 25
+        # --string-repr=handle analyses campfire about 2.9x as long as the default (matz/spinel#9258).
+        timeout-minutes: 55
         run: |
           set -o pipefail
           test -x "$ROUNDHOUSE_BIN"
