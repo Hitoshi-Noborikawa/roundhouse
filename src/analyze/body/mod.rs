@@ -2594,6 +2594,19 @@ impl<'a> BodyTyper<'a> {
                         detail: "sanitize_sql_for_order is modeled on a String only; the Array form is not".to_string(),
                     }));
                 }
+                // The runtime jar's `each` yields unconditionally; Rails'
+                // blockless form answers an Enumerator, which it does not.
+                if method.as_str() == "each"
+                    && block.is_none()
+                    && matches!(recv_ty.as_ref(), Some(Ty::Class { id, .. }) if id.0.as_str() == "ActionDispatch::Cookies::CookieJar")
+                    && crate::expr::ExprCold::diagnostic(&expr.cold).is_none()
+                {
+                    crate::expr::ExprCold::set_diagnostic(&mut expr.cold, Some(crate::diagnostic::DiagnosticKind::Unsupported {
+                        target: None,
+                        construct: Symbol::from("ActionDispatch::Cookies::CookieJar"),
+                        detail: "cookies.each is modeled with a block only; the blockless Enumerator is not".to_string(),
+                    }));
+                }
                 dispatched
             }
 

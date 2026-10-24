@@ -55,6 +55,14 @@ fn the_cookie_test_fails_when_nothing_is_deleted() {
     assert!(run.stdout.contains("FAIL CookieFilterControllerTest"), "the test did not run:\n{}\n{}", run.stdout, run.stderr);
 }
 
+// A blockless `cookies.each` (Rails' Enumerator) stays refused: the
+// runtime jar's `each` yields unconditionally.
+#[test]
+fn a_blockless_cookies_each_stays_refused() {
+    let errors = app("  before_action :enumerate_cookies\n\n  def enumerate_cookies\n    cookies.each.to_a\n  end\n").check_errors();
+    assert!(errors.iter().any(|e| e.contains("cookies.each is modeled with a block only")), "{errors:?}");
+}
+
 #[test]
 #[ignore = "requires spin and spinel on PATH plus SQLite development libraries"]
 fn unknown_cookies_are_deleted_in_the_spinel_build() {
