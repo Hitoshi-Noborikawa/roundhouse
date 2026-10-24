@@ -148,3 +148,34 @@ fn rspec_examples_pass_in_the_spinel_build() {
         String::from_utf8_lossy(&output.stderr)
     );
 }
+
+// `type: :request` groups are integration tests: `get` drives the app and
+// `response` is the one it answered, with a failing control.
+const REQUEST_SPEC: &str = r#"require "rails_helper"
+
+RSpec.describe "Articles", type: :request do
+  it "lists the articles" do
+    get "/articles"
+    expect(response.status).to eq(200)
+  end
+end
+"#;
+
+fn request_app(spec: &str) -> emit_and_run::Overlay {
+    emit_and_run::real_blog()
+        .write("roundhouse.yml", "test_paths:\n  - spec/requests\n")
+        .write("spec/requests/articles_spec.rb", spec)
+}
+
+#[test]
+fn request_specs_run_as_integration_tests() {
+    request_app(REQUEST_SPEC).run_test("test/models/requests_articles_spec_test.rb").assert_passes();
+}
+
+#[test]
+fn a_request_spec_with_the_wrong_status_fails() {
+    let run = request_app(&REQUEST_SPEC.replace("eq(200)", "eq(404)")).run_test("test/models/requests_articles_spec_test.rb");
+    assert!(run.errors.is_empty(), "{:?}", run.errors);
+    assert!(!run.success, "a wrong status passed:\n{}\n{}", run.stdout, run.stderr);
+    assert!(run.stdout.contains("FAIL RequestsArticlesSpec#test_lists_the_articles: assertion failed"), "failed for another reason:\n{}\n{}", run.stdout, run.stderr);
+}
