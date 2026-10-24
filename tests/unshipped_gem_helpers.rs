@@ -90,3 +90,33 @@ fn an_app_method_of_the_same_name_is_not_refused() {
     );
     assert_eq!(refused(&diags), Vec::<String>::new(), "{diags:#?}");
 }
+
+#[test]
+fn an_app_method_whose_answer_is_untyped_is_not_refused() {
+    let (_, diags) = analyzed(
+        "class ApplicationController < ActionController::Base\n  \
+         def doorkeeper_authorize!\n    true\n  end\n\n  \
+         def authorize(record)\n    unknown_helper(record)\n  end\n\n  \
+         def policy_scope(scope)\n    unknown_helper(scope)\n  end\nend\n",
+    );
+    assert_eq!(refused(&diags), Vec::<String>::new(), "{diags:#?}");
+}
+
+#[test]
+fn a_parameter_default_and_an_explicit_self_call_are_refused_once() {
+    let (_, diags) = analyzed(
+        "class ApplicationController < ActionController::Base\n  \
+         private\n\n  \
+         def scoped(rel = policy_scope(Article))\n    rel\n  end\n\n  \
+         def check(record)\n    self.authorize(record)\n  end\nend\n",
+    );
+    let refusals = refused(&diags);
+    for helper in ["pundit: policy_scope", "pundit: authorize"] {
+        assert!(refusals.iter().filter(|r| r.as_str() == helper).count() >= 1, "{helper}: {refusals:?}");
+    }
+    let at_self_call: Vec<_> = diags
+        .iter()
+        .filter(|d| d.severity == Severity::Error && d.message.contains("authorize") && !matches!(d.kind, DiagnosticKind::Unsupported { .. }))
+        .collect();
+    assert!(at_self_call.is_empty(), "the dispatch failure is the refusal, not a second error: {at_self_call:#?}");
+}

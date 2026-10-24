@@ -93,9 +93,17 @@ fn devise_refusals(app: &App) -> Vec<Diagnostic> {
 // Rewritten in place, not added beside: a transpile runs no attribution, so the site's warning would stay its only finding
 fn unshipped_gem_helpers(app: &App, out: &mut Vec<Diagnostic>) {
     let Some(lock) = &app.gem_lock else { return };
+    // Not only a typed app method: one whose body answers no type yet is still the app's, not the gem's
+    let app_defined: std::collections::HashSet<&str> = app
+        .controllers
+        .iter()
+        .flat_map(|c| c.actions().map(|a| a.name.as_str()).chain(c.class_methods().map(|m| m.name.as_str())))
+        .chain(app.library_classes.iter().flat_map(|lc| lc.methods.iter().map(|m| m.name.as_str())))
+        .collect();
     let unshipped = |method: &str| {
         crate::gems::gem_claiming_method(lock, method).filter(|gem| {
-            !lock.is_in_repo(gem)
+            !app_defined.contains(method)
+                && !lock.is_in_repo(gem)
                 && !lock.is_source(gem)
                 && !app.extensions.runtime_gems.iter().any(|row| row.gem == *gem)
         })
@@ -120,6 +128,9 @@ fn unshipped_gem_helpers(app: &App, out: &mut Vec<Diagnostic>) {
     let mut sites = Vec::new();
     for controller in &app.controllers {
         for action in controller.actions() {
+            for default in action.opt_params.iter().map(|(_, d)| d).chain(action.kw_params.iter().filter_map(|(_, d)| d.as_ref())) {
+                visit(default, &unshipped, &mut sites);
+            }
             visit(&action.body, &unshipped, &mut sites);
         }
     }
@@ -145,7 +156,7 @@ fn unshipped_gem_helpers(app: &App, out: &mut Vec<Diagnostic>) {
                     *d = refusal(d.span, gem, &target);
                 }
             }
-            DiagnosticKind::UnresolvedType { .. } => {
+            DiagnosticKind::UnresolvedType { .. } | DiagnosticKind::SendDispatchFailed { .. } => {
                 if let Some(i) = sites.iter().position(|(span, ..)| *span == d.span) {
                     let (span, gem, method) = sites.remove(i);
                     *d = refusal(span, gem, method);
