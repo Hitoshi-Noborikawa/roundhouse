@@ -55,43 +55,55 @@ pub(crate) fn normalizations(model: &Model) -> IndexMap<Symbol, (Symbol, Expr, b
     let mut out = IndexMap::new();
     for item in &model.body {
         let ModelBodyItem::Unknown { expr, .. } = item else { continue };
-        let ExprNode::Send { recv: None, method, args, .. } = &*expr.node else { continue };
-        if method.as_str() != "normalizes" {
-            continue;
-        }
-        let mut attrs = Vec::new();
-        let mut with = None;
-        let mut apply_to_nil = false;
-        let mut supported = true;
-        for arg in args {
-            match &*arg.node {
-                ExprNode::Lit { value: Literal::Sym { value } } => attrs.push(value.clone()),
-                ExprNode::Hash { entries, .. } => {
-                    for (k, v) in entries {
-                        let ExprNode::Lit { value: Literal::Sym { value: key } } = &*k.node else {
-                            supported = false;
-                            continue;
-                        };
-                        match (key.as_str(), &*v.node) {
-                            ("with", ExprNode::Lambda { params, rest_param: None, extra_params, body, .. })
-                                if params.len() == 1 && extra_params.is_empty() =>
-                            {
-                                with = Some((params[0].clone(), body.clone()));
-                            }
-                            ("apply_to_nil", ExprNode::Lit { value: Literal::Bool { value } }) => apply_to_nil = *value,
-                            _ => supported = false,
-                        }
-                    }
-                }
-                _ => supported = false,
-            }
-        }
-        let (Some((param, body)), true) = (with, supported) else { continue };
+        let Some((attrs, param, body, apply_to_nil)) = reproducible(expr) else { continue };
         for attr in attrs {
             out.insert(attr, (param.clone(), body.clone(), apply_to_nil));
         }
     }
     out
+}
+
+/// Is `expr` a `normalizes` call this lowering applies in full: one it
+/// reproduces, every attribute of which is a column (the normalizer is
+/// generated for columns only)? The model path claims exactly these;
+/// any other `normalizes` stays a reported gap.
+pub(crate) fn lowers_call(expr: &Expr, is_column: impl Fn(&Symbol) -> bool) -> bool {
+    reproducible(expr).is_some_and(|(attrs, ..)| !attrs.is_empty() && attrs.iter().all(is_column))
+}
+
+/// A `normalizes :a, :b, with: ->(x) { … }, apply_to_nil: <bool>` call
+/// with a one-parameter lambda literal and no other option: its
+/// attributes, the lambda's parameter and body, and `apply_to_nil`.
+fn reproducible(expr: &Expr) -> Option<(Vec<Symbol>, Symbol, Expr, bool)> {
+    let ExprNode::Send { recv: None, method, args, .. } = &*expr.node else { return None };
+    if method.as_str() != "normalizes" {
+        return None;
+    }
+    let mut attrs = Vec::new();
+    let mut with = None;
+    let mut apply_to_nil = false;
+    for arg in args {
+        match &*arg.node {
+            ExprNode::Lit { value: Literal::Sym { value } } => attrs.push(value.clone()),
+            ExprNode::Hash { entries, .. } => {
+                for (k, v) in entries {
+                    let ExprNode::Lit { value: Literal::Sym { value: key } } = &*k.node else { return None };
+                    match (key.as_str(), &*v.node) {
+                        ("with", ExprNode::Lambda { params, rest_param: None, extra_params, body, .. })
+                            if params.len() == 1 && extra_params.is_empty() =>
+                        {
+                            with = Some((params[0].clone(), body.clone()));
+                        }
+                        ("apply_to_nil", ExprNode::Lit { value: Literal::Bool { value } }) => apply_to_nil = *value,
+                        _ => return None,
+                    }
+                }
+            }
+            _ => return None,
+        }
+    }
+    let (param, body) = with?;
+    Some((attrs, param, body, apply_to_nil))
 }
 
 /// `Model._normalize_<attr>(value)` for each normalized attribute that

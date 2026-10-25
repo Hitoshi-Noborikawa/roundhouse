@@ -924,6 +924,17 @@ fn report_unclaimed_unknowns(model: &Model, schema: &Schema) {
         {
             continue;
         }
+        // `normalizes :attr, with: ->(v) { … }` over columns — claimed by
+        // `lower::normalizes` (the `_normalize_<attr>` class method the
+        // column writer and finders call). Another `with:`, or an
+        // attribute that isn't a column, stays unclaimed and warns.
+        if name == "normalizes"
+            && crate::lower::normalizes::lowers_call(expr, |attr| {
+                schema.tables.get(&model.table.0).is_some_and(|t| t.columns.iter().any(|c| c.name == *attr))
+            })
+        {
+            continue;
+        }
         // 2-arg `attribute :name, :type` — claimed by
         // markers::push_attribute_api_methods (typed virtual
         // attributes), as is a 3-arg one whose `default:` it reads. A
