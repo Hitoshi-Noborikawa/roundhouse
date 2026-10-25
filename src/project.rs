@@ -1860,7 +1860,7 @@ fn report_ruby_only_sends(app: &App, target: BuildTarget) {
     fn visit(expr: &crate::expr::Expr, target: BuildTarget, kernel: &[&str]) {
         use crate::expr::ExprNode;
         use crate::ty::Ty;
-        if let ExprNode::Send { recv, method, .. } = &*expr.node {
+        if let ExprNode::Send { recv, method, args, .. } = &*expr.node {
             let recv_ty = recv.as_ref().and_then(|r| r.ty.as_ref());
             let construct = match (recv, method.as_str()) {
                 (None, "Rational") if kernel.contains(&"Rational") => Some("Kernel#Rational"),
@@ -1874,6 +1874,13 @@ fn report_ruby_only_sends(app: &App, target: BuildTarget) {
                 (_, "create_or_find_by!") if kernel.contains(&"create_or_find_by!") => Some("ActiveRecord::Relation#create_or_find_by!"),
                 // Not filtered by what the app defines: the model's own `_run_x_callbacks` is the generated chain, built on yield and catch.
                 (_, name) if name.starts_with("_run_") && name.ends_with("_callbacks") => Some("ActiveRecord::Base#run_callbacks"),
+                // The switch is kept by connection.rb, which only the ruby family loads; elsewhere every save would still stamp
+                (Some(r), "record_timestamps=")
+                    if r.decisions & crate::expr::CLASS_OBJECT_VALUE != 0
+                        && !matches!(args.first().map(|a| &*a.node), Some(ExprNode::Lit { value: crate::expr::Literal::Bool { value: true } })) =>
+                {
+                    Some("ActiveRecord::Base.record_timestamps=")
+                }
                 (Some(r), "[]") => match &*r.node {
                     ExprNode::Const { path } if path.len() == 1 && path[0].as_str() == "Array" => Some("Array[]"),
                     ExprNode::Const { path } if path.len() == 1 && path[0].as_str() == "Hash" => Some("Hash[]"),

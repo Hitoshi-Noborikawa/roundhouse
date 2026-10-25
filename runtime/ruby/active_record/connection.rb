@@ -13,6 +13,9 @@
 # columns), so a typed bag is the honest contract rather than an
 # avoidable erasure.
 module ActiveRecord
+  # Not an ivar on each class: Rails' class_attribute is inherited until a subclass sets its own, so the reader walks the superclass chain through this table
+  TIMESTAMP_SWITCHES = { "ActiveRecord::Base" => true }
+
   # `raise ActiveRecord::Rollback` inside `transaction { }` rolls it back
   # quietly: the transaction rescues it and answers nil. Here beside
   # `transaction`, which only the ruby family has.
@@ -1041,16 +1044,24 @@ module ActiveRecord
       ActiveRecord.adapter.changes
     end
 
-    # `self.record_timestamps=` — Rails class-attribute toggling auto
-    # timestamp stamping. Kept nowhere: `fill_timestamps` always stamps,
-    # so analysis reports any assignment other than `true`; the per-call
-    # `upsert_all(…, record_timestamps:)` is honored.
     def self.record_timestamps=(value)
+      TIMESTAMP_SWITCHES[name] = value
       value
     end
 
     def self.record_timestamps
+      klass = self
+      while !klass.nil?
+        found = TIMESTAMP_SWITCHES[klass.name]
+        return found unless found.nil?
+        klass = klass == ActiveRecord::Base ? nil : klass.superclass
+      end
       true
+    end
+
+    # Not base.rb's answer: a strict target, which never loads this file, keeps no switch to read
+    def stamps_timestamps?
+      self.class.record_timestamps
     end
 
     # `record.update_column(name, value)` — write one attribute straight
@@ -1595,7 +1606,7 @@ module ActiveRecord
           @_save_halted = true
           return false
         end
-        fill_timestamps(true)
+        fill_timestamps(true) if stamps_timestamps?
         self.id = _adapter_insert
         @persisted = true
         __track_saved_changes(was_new)
@@ -1605,7 +1616,7 @@ module ActiveRecord
           @_save_halted = true
           return false
         end
-        fill_timestamps(false)
+        fill_timestamps(false) if stamps_timestamps?
         _adapter_update
         __track_saved_changes(was_new)
         after_update

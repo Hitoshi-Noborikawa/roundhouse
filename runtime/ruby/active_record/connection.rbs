@@ -2,6 +2,8 @@
 # Hash[String, untyped] by design — raw SQL's row shape (aliased
 # aggregates, computed columns) is genuinely dynamic; see connection.rb.
 module ActiveRecord
+  TIMESTAMP_SWITCHES: Hash[String, bool]
+
   class Rollback < StandardError
   end
 
@@ -113,6 +115,7 @@ module ActiveRecord
     def self.upsert_all: (Array[Hash[Symbol, untyped]] rows, ?unique_by: (String | Symbol | Array[Symbol]), ?on_duplicate: String?, ?returning: untyped, ?record_timestamps: bool?) -> Integer
     def self.record_timestamps=: (bool value) -> bool
     def self.record_timestamps: () -> bool
+    def stamps_timestamps?: () -> bool
     def update_column: (String | Symbol name, untyped value) -> bool
     def update_attribute: (String | Symbol name, untyped value) -> bool
     def _run_save_callbacks: () ?{ () -> untyped } -> untyped
