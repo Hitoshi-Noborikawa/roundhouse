@@ -230,6 +230,7 @@ pub(super) fn push_schema_methods(
         methods,
         model,
         &table.columns.iter().map(|c| (c.name.clone(), super::ty_of_column_slot(c))).collect(),
+        runtime_relation == super::RuntimeRelation::Present,
     );
     let mut demanded: Option<std::rc::Rc<std::collections::HashSet<Symbol>>> = None;
     for col in &table.columns {
