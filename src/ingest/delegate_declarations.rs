@@ -16,6 +16,9 @@ pub(super) struct Delegation {
     pub(super) file: String,
     pub(super) declaration_span: crate::span::Span,
     pub(super) visibility: MethodVisibility,
+    /// `allow_nil: true`: the forwarder answers nil for a nil target
+    /// (`delegate::synthesized_source`).
+    pub(super) allow_nil: bool,
 }
 
 #[derive(Default)]
@@ -30,6 +33,7 @@ struct ParsedDeclaration {
     names: Vec<Symbol>,
     target: Symbol,
     prefix: DelegatePrefix,
+    allow_nil: bool,
     has_unsupported_option: bool,
 }
 
@@ -120,6 +124,18 @@ impl<'a> DelegateEligibility<'a> {
 
         let mut entries = Vec::new();
         for method in &declaration.names {
+            // Rails' allow_nil forwarder is `_ = target; _.m if !_.nil? ||
+            // nil.respond_to?(:m)` (activesupport 8.1.4): a nil guard
+            // exactly, unless nil answers `m` itself (`to_s`, `blank?`, …),
+            // which Rails calls on nil. A setter or an operator is not
+            // reproduced with allow_nil either.
+            if declaration.allow_nil
+                && (NIL_PUBLIC_METHODS.contains(&method.as_str())
+                    || method.as_str().ends_with('=')
+                    || super::operator_forwarder("", method.as_str()).is_some())
+            {
+                return None;
+            }
             let name = generated_name(
                 method.as_str(),
                 &declaration.prefix,
@@ -165,6 +181,7 @@ impl<'a> DelegateEligibility<'a> {
                 file: file.clone(),
                 declaration_span: call.span,
                 visibility,
+                allow_nil: declaration.allow_nil,
             });
         }
         if self.supported_target_methods.is_some_and(|supported| {
@@ -255,6 +272,7 @@ fn parse_declaration(call: &Expr) -> Option<ParsedDeclaration> {
     let mut names = Vec::new();
     let mut target = None;
     let mut prefix = DelegatePrefix::None;
+    let mut allow_nil = false;
     let mut has_unsupported_option = false;
     for arg in args {
         match &*arg.node {
@@ -297,11 +315,16 @@ fn parse_declaration(call: &Expr) -> Option<ParsedDeclaration> {
                             _ => has_unsupported_option = true,
                         },
                         // Rails tests respond_to? before returning nil for
-                        // allow_nil; a plain nil guard is not equivalent.
+                        // allow_nil, so a plain nil guard is equivalent only
+                        // for a method nil does not answer
+                        // (`eligible_entries`, `NIL_PUBLIC_METHODS`).
                         "allow_nil" => match &*value.node {
                             ExprNode::Lit {
                                 value: Literal::Bool { value: false },
-                            } => {}
+                            } => allow_nil = false,
+                            ExprNode::Lit {
+                                value: Literal::Bool { value: true },
+                            } => allow_nil = true,
                             _ => has_unsupported_option = true,
                         },
                         _ => has_unsupported_option = true,
@@ -319,9 +342,16 @@ fn parse_declaration(call: &Expr) -> Option<ParsedDeclaration> {
         names,
         target,
         prefix,
+        allow_nil,
         has_unsupported_option,
     })
 }
+
+/// `nil.public_methods` in a Rails 8.1.4 process on Ruby 4.0.5
+/// (ActiveSupport's core extensions included: `blank?`, `presence`,
+/// `try`, …; oracle `nil_public_methods.out`). Re-verify on a Rails or
+/// Ruby upgrade.
+const NIL_PUBLIC_METHODS: &[&str] = &["!", "!=", "!~", "&", "<=>", "==", "===", "=~", "^", "__id__", "__send__", "acts_like?", "as_json", "blank?", "class", "clone", "deep_dup", "define_singleton_method", "display", "dup", "duplicable?", "enum_for", "eql?", "equal?", "extend", "freeze", "frozen?", "hash", "html_safe?", "in?", "inspect", "instance_eval", "instance_exec", "instance_of?", "instance_values", "instance_variable_defined?", "instance_variable_get", "instance_variable_names", "instance_variable_set", "instance_variables", "is_a?", "itself", "kind_of?", "method", "methods", "nil?", "object_id", "presence", "presence_in", "present?", "private_methods", "protected_methods", "public_method", "public_methods", "public_send", "rationalize", "remove_instance_variable", "respond_to?", "send", "singleton_class", "singleton_method", "singleton_methods", "tap", "then", "to_a", "to_c", "to_d", "to_enum", "to_f", "to_h", "to_i", "to_json", "to_param", "to_query", "to_r", "to_s", "to_yaml", "try", "try!", "with_options", "yield_self", "|"];
 
 fn generated_name(method: &str, prefix: &DelegatePrefix, target: &str) -> String {
     match prefix {
