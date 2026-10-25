@@ -550,6 +550,27 @@ sum_pss_kb() {
     echo "$total"
 }
 
+# CPU time (user + system clock ticks, USER_HZ) across a PID and its
+# descendants: the users phase reports cores used per step from it.
+sum_cpu_ticks() {
+    local pids="$1" stack="$1"
+    while [[ -n "$stack" ]]; do
+        local next=""
+        for p in $stack; do
+            for k in $(pgrep -P "$p" 2>/dev/null || true); do
+                pids="$pids $k"; next="$next $k"
+            done
+        done
+        stack="$next"
+    done
+    local total=0 v
+    for p in $pids; do
+        v="$(awk '{ sub(/.*\) /, ""); print $12 + $13 }' "/proc/$p/stat" 2>/dev/null || echo 0)"
+        total=$(( total + ${v:-0} ))
+    done
+    echo "$total"
+}
+
 # Sum RSS across a PID and its descendants (KB). Puma's master carries
 # almost nothing; the workers are the measurement.
 sum_rss_kb() {
@@ -1900,9 +1921,12 @@ run_users_phase() {
             skip_lane "$lane" "users" "did not answer on :$port" "$LOG_DIR/users-$lane.log"
             stop_lane "$port"
         else
+            # Memory and CPU of the server's process tree every 2 s, sampled
+            # from the generator's cores so the sampling stays off the server's.
             local mem="$OUT_DIR/users-memory-$lane.tsv"
-            ( while kill -0 "$SERVER_PID" 2>/dev/null; do
-                  printf '%s\t%s\t%s\n' "$(date +%s%3N)" "$(sum_pss_kb "$SERVER_PID")" "$(sum_rss_kb "$SERVER_PID")"
+            ( taskset -p -c "$CLIENT_CPUS" $BASHPID > /dev/null
+              while kill -0 "$SERVER_PID" 2>/dev/null; do
+                  printf '%s\t%s\t%s\t%s\n' "$(date +%s%3N)" "$(sum_pss_kb "$SERVER_PID")" "$(sum_rss_kb "$SERVER_PID")" "$(sum_cpu_ticks "$SERVER_PID")"
                   sleep 2
               done ) > "$mem" 2>/dev/null &
             local sampler=$!
