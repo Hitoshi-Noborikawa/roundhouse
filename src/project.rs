@@ -1456,7 +1456,7 @@ fn emits_namespaced_controllers(target: BuildTarget) -> bool {
 /// `I18n.translate_site` / `I18n.translate_runtime` reports each one
 /// rather than emit a call to nothing.
 // Not a BuildTarget match: the bundled-constant walk names its target as a string, and both read these
-const I18N_RUNTIME_TARGETS: &[&str] = &["blog", "futamura", "ruby", "jruby", "spinel", "typescript", "crystal", "csharp", "kotlin", "swift", "python", "go", "elixir"];
+const I18N_RUNTIME_TARGETS: &[&str] = &["blog", "futamura", "ruby", "jruby", "spinel", "typescript", "crystal", "csharp", "kotlin", "swift", "python", "go", "elixir", "rust"];
 const I18N_CATALOG_TARGETS: &[&str] = &["blog", "futamura", "ruby", "jruby", "spinel", "typescript", "crystal"];
 
 fn ships_i18n_runtime(target: BuildTarget) -> bool {
@@ -1549,6 +1549,43 @@ fn report_array_columns(app: &App, target: BuildTarget) {
             emit::diagnostics::push(d);
         }
     }
+}
+
+/// Rails' default forgery check heads every controller rooted at
+/// ActionController::Base, and only the Ruby family's runtime issues and
+/// verifies the token (`runtime/ruby/action_controller/authenticity_token.rb`).
+/// Elsewhere the check passes every request, so the gap is named once.
+fn report_forgery_protection(app: &App, target: BuildTarget) {
+    if matches!(target, BuildTarget::Blog | BuildTarget::Roda | BuildTarget::Futamura | BuildTarget::Ruby | BuildTarget::Jruby | BuildTarget::Spinel) {
+        return;
+    }
+    let parent_of = |name: &str| {
+        app.controllers.iter().find(|c| c.name.0.as_str() == name).and_then(|c| c.parent.as_ref()).map(|p| p.0.as_str().to_string())
+    };
+    // Not the controllers ingest synthesizes: the health check and the redirect routes answer GET, which the check never reads
+    let synthesized = [crate::ingest::routes::RAILS_HEALTH_CONTROLLER, crate::ingest::routes::REDIRECT_CONTROLLER];
+    let rooted_at_base = app.controllers.iter().filter(|c| !synthesized.contains(&c.name.0.as_str())).any(|c| {
+        let mut cur = c.parent.as_ref().map(|p| p.0.as_str().to_string());
+        for _ in 0..32 {
+            match cur {
+                Some(ref p) if p == "ActionController::Base" => return true,
+                Some(ref p) => cur = parent_of(p),
+                None => return false,
+            }
+        }
+        false
+    });
+    if !rooted_at_base {
+        return;
+    }
+    let mut d = crate::diagnostic::Diagnostic::unsupported(
+        crate::span::Span::synthetic(),
+        Some(crate::ident::Symbol::from(target.as_str())),
+        "forgery_protection",
+        "Rails checks every non-GET request for an authenticity token; this target's runtime issues no token and passes every request",
+    );
+    d.severity = crate::diagnostic::Severity::Warning;
+    emit::diagnostics::push(d);
 }
 
 fn report_sqlite_index_predicates(app: &App, target: BuildTarget) {
@@ -2331,6 +2368,7 @@ fn target_files_inner(
     report_mailers(app, target);
     report_sqlite_index_predicates(app, target);
     report_array_columns(app, target);
+    report_forgery_protection(app, target);
     report_native_ruby_syntax(app, target);
     report_self_bindings(app, target);
     report_ruby_only_sends(app, target);

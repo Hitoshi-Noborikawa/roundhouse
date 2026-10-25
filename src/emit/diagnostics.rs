@@ -195,6 +195,8 @@ pub enum StubStyle {
     PythonThrow,
     /// Swift: `fatalError("…")`.
     SwiftFatal,
+    /// C#: a throw expression, valid as a switch arm and as a statement.
+    CSharpThrow,
     /// Kotlin: `error("…")`.
     KotlinError,
 }
@@ -210,6 +212,7 @@ impl StubStyle {
             "python" => StubStyle::PythonThrow,
             "swift" => StubStyle::SwiftFatal,
             "kotlin" => StubStyle::KotlinError,
+            "csharp" => StubStyle::CSharpThrow,
             // ruby, elixir, crystal, and anything else.
             _ => StubStyle::Raise,
         }
@@ -233,6 +236,7 @@ impl StubStyle {
             }
             StubStyle::SwiftFatal => format!("fatalError({msg:?})"),
             StubStyle::KotlinError => format!("error({msg:?})"),
+            StubStyle::CSharpThrow => format!("throw new System.NotSupportedException({msg:?})"),
         }
     }
 }

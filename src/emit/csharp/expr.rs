@@ -1288,8 +1288,9 @@ fn emit_case_expr(scrutinee: &Expr, arms: &[Arm]) -> String {
                 lines.push(format!("    {} => (object?)({body}),", emit_literal(value)));
             }
             other => {
-                lines.push(format!("    /* TODO pattern {other:?} */ _ => (object?)({body}),"));
-                has_default = true;
+                let stub = crate::emit::diagnostics::report_unsupported(arm.body.span, "csharp", "case pattern", format!("{other:?}").split([' ', '(', '{']).next().unwrap_or("").to_string());
+                // Not an arm of the switch: a `_` there subsumes the arms after it, and a switch of throws alone has no type
+                return format!("((object?)null ?? {stub})");
             }
         }
     }
@@ -2229,11 +2230,9 @@ fn emit_case_stmt(scrutinee: &Expr, arms: &[Arm]) -> String {
                 out.push_str(&format!("{kw} ({s} == {}) {{\n{body}\n}} ", emit_literal(value)));
             }
             other => {
-                let kw = if first { "if" } else { "else if" };
-                first = false;
-                out.push_str(&format!(
-                    "{kw} (false) {{ /* TODO pattern {other:?} */\n{body}\n}} "
-                ));
+                let stub = crate::emit::diagnostics::report_unsupported(arm.body.span, "csharp", "case pattern", format!("{other:?}").split([' ', '(', '{']).next().unwrap_or("").to_string());
+                // Not an arm that never matches: the Ruby arm would run where this one is skipped
+                return format!("{stub};");
             }
         }
     }
@@ -2348,7 +2347,7 @@ fn emit_op_assign(target: &LValue, op: OpAssignOp, value: &Expr) -> String {
         OpAssignOp::Mul => format!("{lhs} *= {v}"),
         OpAssignOp::Div => format!("{lhs} /= {v}"),
         OpAssignOp::Mod => format!("{lhs} %= {v}"),
-        _ => format!("{lhs} = {lhs} /* TODO op-assign */ {v}"),
+        other => crate::emit::diagnostics::report_unsupported(value.span, "csharp", "OpAssign", format!("{other:?}")),
     }
 }
 

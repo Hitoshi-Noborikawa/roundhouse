@@ -147,7 +147,7 @@ module I18n
     missing_translation(key, raises)
     last = key.split(".").last.to_s
     title = ActionView::ViewHelpers.html_escape("translation missing: " + key + details)
-    text = ActionView::ViewHelpers.html_escape(ActiveSupport.titleize(last))
+    text = ActionView::ViewHelpers.html_escape(ActiveSupport.titleize(last).to_s)
     "<span class=\"translation_missing\" title=\"" + title + "\">" + text + "</span>"
   end
 
@@ -473,19 +473,23 @@ module I18n
   # Not folded per locale at the call: an app with a hundred locales made every `t` a hundred-arm case.
   def self.translate_site(id, loc, key, count, names, values, details, raises, in_view, escape_plain)
     entry = site_entry(id, loc, key)
-    kind = entry[0]
-    html = entry[1] == "1"
+    # Not the fields read bare: an Array's element may be nil to the typer, and a strict target holds each one as a String
+    kind = entry[0].to_s
+    html = entry[1].to_s == "1"
     if kind == "m"
-      shown = entry[2].empty? ? loc + "." + key : entry[2]
+      named = entry[2].to_s
+      shown = named.empty? ? loc + "." + key : named
       return missing_translation_tag(shown, details, raises) if in_view
-      return entry[3].empty? ? missing_translation(shown, raises) : missing_translation_among(shown, entry[3], raises)
+      considered = entry[3].to_s
+      return considered.empty? ? missing_translation(shown, raises) : missing_translation_among(shown, considered, raises)
     end
     return subtree_translation(key) if kind == "s"
-    template = entry[2]
+    template = entry[2].to_s
     if kind == "p"
       # Not `count == 0`: a count is an Integer or a Float, and a strict target compares one number type, as Ruby's 1.0 == 1 does
-      amount = count.nil? ? nil : count.to_f
-      template = (amount == 0.0 && entry[2] == "1") ? entry[3] : (amount == 1.0 ? entry[4] : entry[5])
+      zero = !count.nil? && count.to_f == 0.0
+      one = !count.nil? && count.to_f == 1.0
+      template = (zero && entry[2].to_s == "1") ? entry[3].to_s : (one ? entry[4].to_s : entry[5].to_s)
     end
     out = render_template(template, count, names, values, html)
     escape_plain && !html ? ActionView::ViewHelpers.html_escape(out) : out
@@ -514,14 +518,16 @@ module I18n
   def self.render_template(template, count, names, values, html)
     out = ""
     template.split("\u001D").each do |part|
-      next if part.empty?
-      body = part[1, part.length - 1].to_s
-      if part[0, 1] == "n"
-        at = names.index(body)
-        value = at.nil? ? (body == "count" ? count.to_s : "%{" + body + "}") : values[at].to_s
-        out = out + (html ? ActionView::ViewHelpers.html_escape(value) : value)
-      else
-        out = out + body
+      # Not `next if part.empty?`: Rust emits this block as a closure, where `next` has no spelling yet
+      unless part.empty?
+        body = part[1, part.length - 1].to_s
+        if part[0, 1] == "n"
+          at = names.index(body)
+          value = at.nil? ? (body == "count" ? count.to_s : "%{" + body + "}") : values[at].to_s
+          out = out + (html ? ActionView::ViewHelpers.html_escape(value) : value)
+        else
+          out = out + body
+        end
       end
     end
     out
@@ -581,7 +587,7 @@ module I18n
     sep = "\u001C"
     I18nHost.table_text.split("\u001E").each do |line|
       fields = line.split("\u001F")
-      kind = fields[0]
+      kind = fields[0].to_s
       if kind == "E"
         entries << (fields[1, fields.length - 2] || [])
       elsif kind == "T"
@@ -605,7 +611,7 @@ module I18n
     sep = "\u001C"
     I18nHost.table_text.split("\u001E").each do |line|
       fields = line.split("\u001F")
-      kind = fields[0]
+      kind = fields[0].to_s
       if kind == "L" || kind == "M"
         if kind == "L"
           leaves[fields[1]] = fields[2].to_s

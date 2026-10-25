@@ -1071,10 +1071,12 @@ mod tests {
         for target in ["rust", "python", "go", "typescript"] {
             let r = call(&server(), "wont_lower", json!({ "target": target }));
             assert_eq!(r["result"]["isError"], false);
+            // Not "lowers cleanly": the forgery check these runtimes pass without a token is the one gap they name
+            let text = text_of(&r);
+            let gaps: Vec<&str> = text.lines().filter(|l| l.starts_with("warning[") || l.starts_with("error[")).collect();
             assert!(
-                text_of(&r).contains("lowers cleanly"),
-                "expected `{target}` to lower real-blog cleanly (datetime seam), got: {}",
-                text_of(&r)
+                gaps.len() == 1 && gaps[0].contains("forgery_protection"),
+                "expected `{target}` to lower real-blog's datetime columns cleanly, got: {text}"
             );
         }
 

@@ -163,7 +163,8 @@ fn routing_redirect_host_policy_keeps_the_base_string_signature() {
     );
     let swift = controller_file(roundhouse::emit::swift::emit(&app), "RoundhouseRedirectsController");
     assert!(
-        swift.content.contains("override func sameHostLocation(_ location: String) -> String"),
+        // Throwing: the base raises ArgumentError for an unsafe redirect, which Swift throws
+        swift.content.contains("override func sameHostLocation(_ location: String) throws -> String"),
         "{}",
         swift.content
     );

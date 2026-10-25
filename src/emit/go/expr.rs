@@ -521,30 +521,9 @@ pub(super) fn emit_expr(ctx: &EmitCtx, e: &Expr) -> String {
                 format!("fmt.Sprintf({}, {})", go_str_literal(&fmt), args.join(", "))
             }
         }
-        // Ruby `yield args` — invokes the caller-provided block.
-        // Go has no native block-yield; the idiomatic Go shape is a
-        // closure parameter the caller passes. Until that shape lands
-        // (which would change every yielding method's signature),
-        // emit as a panic so the file parses and the gap surfaces
-        // loudly at runtime. The args get `_ = ...` references so
-        // surrounding `v := self.Data[k]; yield k, v` doesn't leave
-        // `v` as an unused-local vet error.
         ExprNode::Yield { args } => {
-            let arg_uses: Vec<String> = args
-                .iter()
-                .map(|a| format!("\t_ = {}", emit_expr(ctx, a)))
-                .collect();
-            let body = if arg_uses.is_empty() {
-                String::new()
-            } else {
-                format!("{}\n", arg_uses.join("\n"))
-            };
-            format!(
-                "func() interface{{}} {{\n\
-                 {body}\
-                 \tpanic(\"yield not implemented in go2 emit\")\n\
-                 }}()",
-            )
+            let args_s: Vec<String> = args.iter().map(|a| emit_expr(ctx, a)).collect();
+            format!("block({})", args_s.join(", "))
         }
         // A lambda whose `Ty::Fn` names a concrete parameter and return
         // type becomes a Go function. That is where a stored lambda's
@@ -2308,6 +2287,10 @@ pub(super) fn emit_send(
     }
 
     let go_m = go_method_ident(method);
+    // Not dropped: a call that reaches here with a block would run its method without it
+    if let Some(b) = block {
+        return crate::emit::diagnostics::report_unsupported(b.span, "go2", "block argument", format!("a block passed to `{method}`"));
+    }
     match recv {
         None => {
             // Bareword identifier in an expression context — Ruby's
@@ -2678,7 +2661,7 @@ fn self_ref_expr(ctx: &EmitCtx) -> String {
     if ctx.in_class_method {
         match ctx.class_name.as_deref() {
             Some(n) => n.to_string(),
-            None => "/* TODO: SelfRef without class context */".to_string(),
+            None => crate::emit::diagnostics::report_unsupported(crate::span::Span::synthetic(), "go2", "SelfRef", "a class method with no class"),
         }
     } else {
         // Instance method — the emitted Go has `(self *Class)` and

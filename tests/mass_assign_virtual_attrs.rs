@@ -289,10 +289,13 @@ puts "PASS"
 fn an_operator_method_is_not_a_writer() {
     app().write("app/models/member.rb", OPERATOR_MODEL).run_ruby(OPERATOR_SCRIPT).assert_passes();
     use roundhouse::project::BuildTarget;
-    for target in [BuildTarget::Rust, BuildTarget::Typescript, BuildTarget::Go] {
+    for target in [BuildTarget::Typescript, BuildTarget::Go] {
         let (_emitted, errors) = app().write("app/models/member.rb", OPERATOR_MODEL).emit(target);
         assert!(errors.is_empty(), "{target:?}: {errors:#?}");
     }
+    // Rust has no parent method to call: its models flatten the base class
+    let (_emitted, errors) = app().write("app/models/member.rb", OPERATOR_MODEL).emit(BuildTarget::Rust);
+    assert!(errors.iter().all(|e| e.contains("Super not supported (rust)")) && !errors.is_empty(), "{errors:#?}");
 }
 
 #[test]
