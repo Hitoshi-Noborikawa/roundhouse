@@ -425,7 +425,8 @@ fn emit_ctrl_test_expr(expr: &Expr, app: &App) -> String {
                 }
             }
             if values.is_empty() {
-                format!("{template:?}.to_string()")
+                // Not the escaped template: with no value to format, `{{` would reach the literal as written
+                format!("{:?}.to_string()", template.replace("{{", "{").replace("}}", "}"))
             } else {
                 format!("format!({template:?}, {})", values.join(", "))
             }
