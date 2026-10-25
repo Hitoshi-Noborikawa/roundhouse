@@ -213,6 +213,7 @@ fn tiny_blog_round_trips() {
         controller_resolutions: std::collections::HashMap::new(),
         sources: vec![],
         wrap_parameters_by_default: false,
+        ports_active_model_validator: false,
         // Derived from `sources` and `serde(skip)`, like `binary_assets`.
         const_resolver: Default::default(),
         source_index_required: false,
