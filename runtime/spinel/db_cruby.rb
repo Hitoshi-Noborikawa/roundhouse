@@ -1830,15 +1830,77 @@ end
 module SQLite3
   module DataVersionGeneration
     def get_first_value(*args)
-      value = super
       sql = args[0]
-      if !sql.nil? && sql == "PRAGMA data_version"
-        base = value.is_a?(Integer) ? value : 0
-        base + Db.write_generation
-      else
-        value
+      return super unless !sql.nil? && sql == "PRAGMA data_version"
+      # Compiled once per connection (FixedStatements): the observer asks
+      # on every cached read.
+      value = args.length == 1 ? fixed_statement_first_value(sql) : super
+      base = value.is_a?(Integer) ? value : 0
+      base + Db.write_generation
+    end
+  end
+
+  # Statements a connection runs over and over with nothing to bind —
+  # transaction control on every request and write, and the observer's
+  # `PRAGMA data_version` — compiled once per connection and reset after
+  # each run. The gem's `execute` and `get_first_value` prepare and close
+  # a statement every call: measured on campfire's users profile, these
+  # were about 10 of the ~14 statements each request prepared.
+  #
+  # Inside `execute`, not beside it, so every caller (Db's snapshot,
+  # permit and transaction paths, an app's own `execute("BEGIN")`) takes
+  # it, and anything that wraps a connection's `execute` still sees each
+  # call. A statement that raises is reset all the same, so the next run
+  # starts clean; `close` finalizes them first. A connection inherited
+  # across fork is dropped, not closed (Db.adopt_after_fork), and its
+  # statements go with it.
+  module FixedStatements
+    # Transaction control: no rows, so `execute` answers the gem's empty
+    # result. `PRAGMA data_version` has a row; only `get_first_value`
+    # (DataVersionGeneration) takes it through here.
+    FIXED = { "BEGIN" => true, "BEGIN IMMEDIATE" => true, "COMMIT" => true, "ROLLBACK" => true }.freeze
+    NO_ROWS = [].freeze
+
+    def execute(sql, bind_vars = [], &block)
+      return super unless block.nil? && (bind_vars.nil? || bind_vars.empty?) && FIXED.key?(sql)
+      stmt = fixed_statement(sql)
+      begin
+        stmt.step
+      ensure
+        stmt.reset!
       end
+      NO_ROWS
+    end
+
+    def close
+      fixed = @rh_fixed_statements
+      @rh_fixed_statements = nil
+      fixed&.each_value { |stmt| stmt.close unless stmt.closed? }
+      super
+    end
+
+    private
+
+    def fixed_statement(sql)
+      cache = (@rh_fixed_statements ||= {})
+      stmt = cache[sql]
+      if stmt.nil? || stmt.closed?
+        stmt = prepare(sql)
+        cache[sql] = stmt
+      end
+      stmt
+    end
+
+    def fixed_statement_first_value(sql)
+      stmt = fixed_statement(sql)
+      begin
+        row = stmt.step
+      ensure
+        stmt.reset!
+      end
+      row.nil? ? nil : row[0]
     end
   end
 end
+SQLite3::Database.prepend(SQLite3::FixedStatements)
 SQLite3::Database.prepend(SQLite3::DataVersionGeneration)
