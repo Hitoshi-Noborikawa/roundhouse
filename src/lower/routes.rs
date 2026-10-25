@@ -340,6 +340,20 @@ impl Ctx {
             .map(|n| format!("{}_", n.singular))
             .collect()
     }
+
+    /// The prefix a member/collection route's action goes in FRONT of:
+    /// the scope's `as` prefix and every enclosing level but the
+    /// innermost, whose own singular or plural ends the name. Rails
+    /// names `collection { get :sorted }` in `namespace :admin` >
+    /// `resources :gadgets` > `resources :parts` `sorted_admin_gadget_parts`.
+    fn member_name_prefix(&self) -> String {
+        let outer = self.parents.len().saturating_sub(1);
+        let parents: String = self.parents[..outer]
+            .iter()
+            .map(|n| format!("{}_", n.singular))
+            .collect();
+        format!("{}{parents}", self.name_prefix)
+    }
 }
 
 /// Route-helper name for a fully-static path: segments joined with `_`
@@ -418,9 +432,9 @@ fn collect_flat_routes(spec: &RouteSpec, out: &mut Vec<FlatRoute>, ctx: &Ctx) {
                     ctx.parent_pair().and_then(|(parent, parent_plural)| {
                         static_path_name(path).map(|child| match scope {
                             ResourceScope::Member => {
-                                format!("{}{child}_{parent}", ctx.name_prefix)
+                                format!("{child}_{}{parent}", ctx.member_name_prefix())
                             }
-                            _ => format!("{}{child}_{parent_plural}", ctx.name_prefix),
+                            _ => format!("{child}_{}{parent_plural}", ctx.member_name_prefix()),
                         })
                     })
                 }
@@ -447,10 +461,10 @@ fn collect_flat_routes(spec: &RouteSpec, out: &mut Vec<FlatRoute>, ctx: &Ctx) {
                     let s = s.as_str();
                     let n = match (scope, ctx.parent_pair()) {
                         (ResourceScope::Member, Some((parent, _))) => {
-                            format!("{}{s}_{parent}", ctx.name_prefix)
+                            format!("{s}_{}{parent}", ctx.member_name_prefix())
                         }
                         (ResourceScope::Collection, Some((_, plural))) => {
-                            format!("{}{s}_{plural}", ctx.name_prefix)
+                            format!("{s}_{}{plural}", ctx.member_name_prefix())
                         }
                         (ResourceScope::Nested, _) => {
                             format!("{}{}{s}", ctx.name_prefix, ctx.parent_name_prefix())

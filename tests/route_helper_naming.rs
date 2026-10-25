@@ -133,3 +133,69 @@ fn the_unrenamed_sibling_keeps_its_own_helpers() {
     name_for(NAMESPACED_AS, "/mod_mails", "mod_mails");
     name_for(NAMESPACED_AS, "/mod_mails/:id", "mod_mail");
 }
+
+/// The action goes in front of the whole prefix: the namespace or scope
+/// `as`, then every enclosing resource but the innermost (#728). Names
+/// are Rails 8.1.4's for the same routes.
+const PREFIXED: &str = r#"Rails.application.routes.draw do
+  concern :batch do
+    collection do
+      post :batch
+    end
+  end
+  namespace :admin do
+    resources :widgets, only: [:index], concerns: :batch
+    resources :gadgets do
+      member { post :approve }
+      collection { get :search }
+      get :peek, on: :member, as: :glance
+      get :recent, on: :collection, as: :fresh
+      resources :parts do
+        collection { get :sorted }
+        member { get :preview }
+      end
+    end
+  end
+  scope "/x", as: :ex do
+    resources :things do
+      collection { get :search }
+    end
+  end
+  resources :rooms do
+    resources :messages do
+      collection { get :search }
+      member { get :pin }
+    end
+  end
+  namespace :api do
+    namespace :v1 do
+      resources :items do
+        collection { get :search }
+      end
+    end
+  end
+end
+"#;
+
+#[test]
+fn namespaced_member_and_collection_routes_put_the_action_first() {
+    name_for(PREFIXED, "/admin/widgets/batch", "batch_admin_widgets");
+    name_for(PREFIXED, "/admin/gadgets/:id/approve", "approve_admin_gadget");
+    name_for(PREFIXED, "/admin/gadgets/search", "search_admin_gadgets");
+    name_for(PREFIXED, "/x/things/search", "search_ex_things");
+    name_for(PREFIXED, "/api/v1/items/search", "search_api_v1_items");
+}
+
+#[test]
+fn an_as_name_on_a_namespaced_member_or_collection_route_goes_first_too() {
+    name_for(PREFIXED, "/admin/gadgets/:id/peek", "glance_admin_gadget");
+    name_for(PREFIXED, "/admin/gadgets/recent", "fresh_admin_gadgets");
+}
+
+#[test]
+fn nested_member_and_collection_routes_keep_the_outer_resource() {
+    name_for(PREFIXED, "/rooms/:room_id/messages/search", "search_room_messages");
+    name_for(PREFIXED, "/rooms/:room_id/messages/:id/pin", "pin_room_message");
+    name_for(PREFIXED, "/admin/gadgets/:gadget_id/parts/sorted", "sorted_admin_gadget_parts");
+    name_for(PREFIXED, "/admin/gadgets/:gadget_id/parts/:id/preview", "preview_admin_gadget_part");
+}
