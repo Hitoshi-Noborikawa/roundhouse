@@ -83,3 +83,48 @@ fn apply_to_nil_and_normalize_value_for_on_spinel() {
     run.assert_passes();
     assert!(run.stdout.contains("normalizes passed"), "{}", run.stdout);
 }
+
+// A `normalizes` this lowering applies is claimed, so it isn't also
+// reported "not lowered"; one it doesn't apply still is: a `with:` that
+// isn't a one-parameter lambda, or an attribute that isn't a column.
+fn not_lowered_warnings(decls: &str) -> Vec<String> {
+    static RUN: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let n = RUN.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    let root = std::env::temp_dir().join(format!("roundhouse-normalizes-claim-{}-{n}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let source = root.join("app");
+    std::fs::create_dir_all(&root).unwrap();
+    assert!(std::process::Command::new("cp").args(["-a"]).arg(roundhouse::fixtures::real_blog()).arg(&source).status().unwrap().success());
+    let model = std::fs::read_to_string(source.join("app/models/article.rb")).unwrap().replacen(
+        "  has_many :comments, dependent: :destroy\n",
+        &format!("  has_many :comments, dependent: :destroy\n{decls}"),
+        1,
+    );
+    std::fs::write(source.join("app/models/article.rb"), model).unwrap();
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_roundhouse"))
+        .args(["--target", "ruby", "--allow-unsupported", "-o"])
+        .arg(root.join("out"))
+        .arg(&source)
+        .output()
+        .unwrap();
+    let _ = std::fs::remove_dir_all(&root);
+    String::from_utf8_lossy(&out.stderr)
+        .lines()
+        .filter(|l| l.contains("normalizes not supported") && l.contains("not lowered"))
+        .map(str::to_string)
+        .collect()
+}
+
+#[test]
+fn a_lowered_normalizes_is_not_reported() {
+    let warnings = not_lowered_warnings("  normalizes :title, with: ->(title) { title.squish }\n");
+    assert!(warnings.is_empty(), "{warnings:?}");
+}
+
+#[test]
+fn a_normalizes_this_lowering_skips_is_still_reported() {
+    let warnings = not_lowered_warnings(
+        "  attr_accessor :slug\n  normalizes :title, with: :squish_it\n  normalizes :slug, with: ->(slug) { slug.strip }\n",
+    );
+    assert_eq!(warnings.len(), 2, "{warnings:?}");
+}
