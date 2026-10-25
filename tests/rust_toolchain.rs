@@ -488,3 +488,47 @@ fn rescue_clauses_answer_as_ruby() {
         String::from_utf8_lossy(&output.stderr)
     );
 }
+
+#[test]
+#[ignore]
+fn real_blog_rescue_from_runs() {
+    // Rails answers a missing article with the handler's 404 and an empty body.
+    let (emitted, errors) = emit_and_run::real_blog()
+        .edit(
+            "app/controllers/articles_controller.rb",
+            "class ArticlesController < ApplicationController\n",
+            "class ArticlesController < ApplicationController\n  rescue_from(ActiveRecord::RecordNotFound) { head :not_found }\n",
+        )
+        .emit(roundhouse::project::BuildTarget::Rust);
+    assert!(errors.is_empty(), "{errors:?}");
+    std::fs::create_dir_all(emitted.join("tests")).expect("tests dir");
+    std::fs::write(
+        emitted.join("tests/rescue_from.rs"),
+        r#"use app::db::{self, Db};
+use app::{router, schema_sql};
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_missing_record_is_rescued_to_404() {
+    db::setup_test_db(schema_sql::CREATE_TABLES);
+    Db::exec("INSERT INTO articles (title, body, created_at, updated_at) VALUES ('A', 'Long enough body text', '2026-01-02 03:04:05', '2026-01-03 00:00:00')");
+    let server = axum_test::TestServer::new(router::router()).unwrap();
+    assert_eq!(server.get("/articles/1").await.status_code(), 200);
+    let missing = server.get("/articles/999").await;
+    assert_eq!(missing.status_code(), 404);
+    assert_eq!(missing.text(), "");
+}
+"#,
+    )
+    .expect("write test");
+    let output = Command::new("cargo")
+        .args(["test", "--test", "rescue_from"])
+        .current_dir(&*emitted)
+        .output()
+        .expect("run cargo test");
+    assert!(
+        output.status.success(),
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}

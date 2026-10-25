@@ -1145,13 +1145,6 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
                 // outgoing path is field-independent (thread-local).
                 let has_flash = body.contains("pub flash:");
                 let has_params = body.contains("pub params:");
-                // Not left to the dispatcher's begin/rescue: each handler calls its action directly, so process_action and its rescue never run
-                if let Some(pa) = lc.methods.iter().find(|m| m.name.as_str() == "process_action")
-                    && let crate::expr::ExprNode::BeginRescue { rescues, .. } = &*rescue_root(&pa.body).node
-                    && !rescues.is_empty()
-                {
-                    crate::emit::diagnostics::report_unsupported(pa.body.span, "rust", "rescue_from", "a handler calls its action directly, not through process_action");
-                }
                 let axum_wrappers = render_axum_handler_wrappers(
                     lc.name.0.as_str(),
                     &flat_routes_2c,
@@ -1631,7 +1624,6 @@ fn render_axum_handler_wrappers(
     );
     for r in routes {
         let action = r.action.as_str();
-        let method_name = if action == "new" { "new_action" } else { action };
         let path_params = &r.path_params;
         let carries_body = |method: &HttpMethod| matches!(method, HttpMethod::Post | HttpMethod::Patch | HttpMethod::Put);
         // Also a body another route to the action carries, where the controller reads `params`: `get` and `post` to one action share this wrapper, and axum's `Form` reads a GET's query string.
@@ -1765,12 +1757,11 @@ fn render_axum_handler_wrappers(
         if has_flash {
             body.push_str("    c.flash = crate::http::flash_from_request(&headers);\n");
         }
-        // The wrapper calls the action without `process_action`, so it
-        // sets `action_name` itself.
         if sets_action_name {
             body.push_str(&format!("    c.assign_action_name({action:?});\n"));
         }
-        body.push_str(&format!("    c.{method_name}();\n"));
+        // Not the action itself: Rails runs it through process_action, which carries the forgery check and the rescue_from handlers
+        body.push_str(&format!("    c.process_action({action:?});\n"));
         // Translate the thread-local response, then sweep the flash the
         // action set (FLASH_OUT) onto a Set-Cookie — empty clears it, so
         // a shown notice doesn't stick. Field-independent, so every
@@ -2462,10 +2453,3 @@ fn collect_global_class_methods(
     }
 }
 
-/// The dispatcher's begin/rescue, behind the not-found guard `process_action` may put first.
-fn rescue_root(body: &crate::expr::Expr) -> &crate::expr::Expr {
-    match &*body.node {
-        crate::expr::ExprNode::Seq { exprs } if !exprs.is_empty() => &exprs[exprs.len() - 1],
-        _ => body,
-    }
-}

@@ -145,9 +145,8 @@ puts "ALL OK"
 /// `@params` reads must emit there without new errors.
 #[test]
 fn the_rewritten_dispatcher_emits_for_rust_and_typescript() {
-    let (_emitted, errors) = app().emit(BuildTarget::Typescript);
-    assert!(errors.is_empty(), "{errors:#?}");
-    // Rust's handlers call the action directly, so the dispatcher's rescue never runs
-    let (_emitted, errors) = app().emit(BuildTarget::Rust);
-    assert!(!errors.is_empty() && errors.iter().all(|e| e.contains("rescue_from not supported (rust)")), "{errors:#?}");
+    for target in [BuildTarget::Rust, BuildTarget::Typescript] {
+        let (_emitted, errors) = app().emit(target);
+        assert!(errors.is_empty(), "{target:?}: {errors:#?}");
+    }
 }

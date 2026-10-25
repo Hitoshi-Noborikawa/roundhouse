@@ -2073,6 +2073,9 @@ jobs:
       - name: cargo test --test rust_toolchain real_blog_begin_rescue_runs
         if: ${{ !cancelled() && matrix.target == 'rust' }}
         run: cargo test --locked --test rust_toolchain real_blog_begin_rescue_runs -- --ignored --nocapture --exact
+      - name: cargo test --test rust_toolchain real_blog_rescue_from_runs
+        if: ${{ !cancelled() && matrix.target == 'rust' }}
+        run: cargo test --locked --test rust_toolchain real_blog_rescue_from_runs -- --ignored --nocapture --exact
       - name: cargo test --test emit_and_run render json writer on rust
         if: ${{ !cancelled() && matrix.target == 'rust' }}
         run: cargo test --locked --test emit_and_run render_json_record_writer_runs_on_rust -- --ignored --nocapture --exact
