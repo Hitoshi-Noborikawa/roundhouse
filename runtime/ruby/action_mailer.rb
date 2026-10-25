@@ -43,6 +43,22 @@ module ActionMailer
     end
   end
 
+  # One header of a built mail, as `Mail::Message#[]` answers it.
+  class Header
+    def initialize(name, value)
+      @name = name
+      @value = value
+    end
+
+    def name
+      @name
+    end
+
+    def value
+      @value
+    end
+  end
+
   # One built mail, as ActionMailer's `Mail::Message` answers it: address
   # headers as Arrays of bare addresses, and with both a text and an html
   # template, a multipart/alternative whose own body is empty.
@@ -54,6 +70,7 @@ module ActionMailer
       @bcc = Message.addresses(opts[:bcc])
       @reply_to = Message.addresses(opts[:reply_to])
       @subject = opts[:subject]
+      @headers = {}
       @text_body = text_body
       @html_body = html_body
       given = opts[:body]
@@ -104,6 +121,37 @@ module ActionMailer
       @subject
     end
 
+    # Headers a mailer added (`headers("X-Priority" => "1")`), by name.
+    def headers
+      @headers
+    end
+
+    def add_header(name, value)
+      @headers[name] = value
+    end
+
+    # `message["To"]`: an added header, or an address header `mail` set, by
+    # name in any case; nil when the mail has none. The subject is
+    # `subject` (its value is stored as given, untyped).
+    def [](name)
+      key = name.downcase
+      found = nil
+      @headers.each { |given, value| found = Header.new(given, value) if found.nil? && given.downcase == key }
+      return found unless found.nil?
+      value = case key
+      when "to" then Message.joined(@to)
+      when "from" then Message.joined(@from)
+      when "cc" then Message.joined(@cc)
+      when "bcc" then Message.joined(@bcc)
+      when "reply-to" then Message.joined(@reply_to)
+      end
+      value.nil? ? nil : Header.new(name, value)
+    end
+
+    def self.joined(list)
+      list.nil? ? nil : list.join(", ")
+    end
+
     def body
       @body
     end
@@ -148,8 +196,45 @@ module ActionMailer
       @deliveries ||= []
     end
 
+    # The mail is kept as `message`, for the after callbacks; headers
+    # given before it was built are added to it.
     def mail(opts, text_body = nil, html_body = nil)
-      Message.new(opts, text_body, html_body)
+      built = Message.new(opts, text_body, html_body)
+      __headers.each { |name, value| built.add_header(name, value) }
+      @_message = built
+      built
+    end
+
+    def message
+      @_message
+    end
+
+    # The action this mailer runs, which the generated callback chain sets
+    # (`ingest::mailer_callbacks`).
+    def action_name
+      @_action_name.to_s
+    end
+
+    def __start_action(name)
+      @_action_name = name
+    end
+
+    # `headers("X-Priority" => "1")` adds them; `headers["X"] = value`
+    # adds one through the answer.
+    def headers(values = nil)
+      values.each { |name, value| __add_header(name, value) } unless values.nil?
+      Headers.new(self)
+    end
+
+    def __headers
+      @_headers ||= {}
+    end
+
+    def __add_header(name, value)
+      __headers[name] = value
+      built = @_message
+      built.add_header(name, value) unless built.nil?
+      value
     end
 
     def params
@@ -159,6 +244,22 @@ module ActionMailer
     def _with_params(params)
       @params = params
       self
+    end
+  end
+
+  # What `headers` answers: `headers["X"] = value` adds a header to the
+  # mail, or to the one `mail` will build.
+  class Headers
+    def initialize(mailer)
+      @mailer = mailer
+    end
+
+    def []=(name, value)
+      @mailer.__add_header(name, value)
+    end
+
+    def [](name)
+      @mailer.__headers[name]
     end
   end
 end

@@ -65,7 +65,9 @@ pub fn analyze_and_lower_for(app: &mut App, target: crate::build_target::BuildTa
     }
     let mut refused = if target.lowers_validates_with() {
         crate::ingest::validates_with::expand(app);
-        crate::ingest::each_validator::expand(app, target.as_str())
+        let mut found = crate::ingest::each_validator::expand(app, target.as_str());
+        found.extend(crate::ingest::mailer_callbacks::expand(app, target.as_str()));
+        found
     } else {
         crate::ingest::each_validator::refuse(app, target.as_str())
     };
