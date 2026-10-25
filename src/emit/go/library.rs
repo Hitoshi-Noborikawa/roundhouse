@@ -1159,6 +1159,20 @@ fn report_valued_yields(e: &Expr, statement: bool) {
             report_valued_yields(body, true);
         }
         ExprNode::Lambda { body, .. } => report_valued_yields(body, true),
+        // Not a statement in every block: `map { |n| yield n }` keeps the block's value, which a void func has none of
+        ExprNode::Send { recv, method, args, block, .. } => {
+            if let Some(r) = recv {
+                report_valued_yields(r, false);
+            }
+            args.iter().for_each(|a| report_valued_yields(a, false));
+            if let Some(b) = block {
+                let discards = matches!(method.as_str(), "each" | "each_with_index" | "each_pair" | "each_key" | "each_value" | "times" | "upto" | "downto" | "step" | "loop" | "each_char" | "each_line" | "reverse_each");
+                match &*b.node {
+                    ExprNode::Lambda { body, .. } => report_valued_yields(body, discards),
+                    _ => report_valued_yields(b, false),
+                }
+            }
+        }
         _ => e.node.for_each_child(&mut |c| report_valued_yields(c, false)),
     }
 }

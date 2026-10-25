@@ -2288,7 +2288,7 @@ pub(super) fn emit_send(
 
     let go_m = go_method_ident(method);
     // Not dropped: a call that reaches here with a block would run its method without it
-    if let Some(b) = block.filter(|b| matches!(&*b.node, ExprNode::Lambda { .. })) {
+    if let Some(b) = block {
         return crate::emit::diagnostics::report_unsupported(b.span, "go2", "block argument", format!("a block passed to `{method}`"));
     }
     match recv {
