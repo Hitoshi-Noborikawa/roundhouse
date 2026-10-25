@@ -416,18 +416,48 @@ module ActiveSupport
     text = template
     # A String message is kept as written, `%{…}` and all. A kind's
     # template takes Rails' default interpolations, an explicit option
-    # winning; the value goes in as written (split and join: a gsub
-    # replacement would read `\0` or `\&` in it).
+    # winning.
     unless kind.nil?
       values = { "attribute" => human, "model" => names.key?("__model") ? names["__model"].to_s : "" }
       options.each { |key, value| values[key] = value }
-      values.each { |key, value| text = text.split("%{" + key + "}", -1).join(value) }
+      text = interpolate(template, values)
     end
     full = text
     unless name == "base"
       full = before + human + between + text + after
     end
     ActiveRecord::ErrorDetail.new(name, kind.nil? ? text : kind, text, full, !kind.nil?, options.empty?)
+  end
+
+  # I18n's interpolation, in one pass as its `gsub` makes: each `%{name}`
+  # the values give is replaced by its value as written (not rescanned,
+  # and not read for `\0` or `\&`), `%%` is a literal `%`, and any other
+  # `%{name}` stays as written.
+  def self.interpolate(template, values)
+    out = ""
+    rest = template
+    scanning = true
+    while scanning
+      at = rest.index("%")
+      if at.nil? || at + 1 >= rest.length
+        scanning = false
+      else
+        out = out + rest[0, at].to_s
+        after = rest[at + 1, 1].to_s
+        close = after == "{" ? rest.index("}", at + 2) : nil
+        if after == "%"
+          out = out + "%"
+          rest = rest[at + 2, rest.length - at - 2].to_s
+        elsif !close.nil? && values.key?(rest[at + 2, close - at - 2].to_s)
+          out = out + values[rest[at + 2, close - at - 2].to_s].to_s
+          rest = rest[close + 1, rest.length - close - 1].to_s
+        else
+          out = out + "%"
+          rest = rest[at + 1, rest.length - at - 1].to_s
+        end
+      end
+    end
+    out + rest
   end
 
   # The template under `key` in `table`, its plural form chosen by

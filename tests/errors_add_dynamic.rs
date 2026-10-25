@@ -137,9 +137,9 @@ fn a_runtime_errors_add_follows_rails_lookup_order_on_ruby() {
 // written (no backslash expansion), a plural-only `errors.attributes`
 // key is found, and `%{attribute}` / `%{model}` default to the human
 // names, an explicit `attribute:` option winning.
-const CR_LOCALE: &str = "en:\n  hello: \"Hello world\"\n  errors:\n    attributes:\n      title:\n        many_items:\n          one: \"needs one (attributes)\"\n          other: \"needs %{count} (attributes)\"\n    messages:\n      many_items:\n        one: \"needs one (messages)\"\n        other: \"needs %{count} (messages)\"\n  activerecord:\n    models:\n      article:\n        one: \"Story\"\n        other: \"Stories\"\n    errors:\n      messages:\n        taken_value: \"%{value} is taken\"\n        named: \"of %{attribute} is wrong\"\n        modeled: \"is wrong for a %{model}\"\n";
+const CR_LOCALE: &str = "en:\n  hello: \"Hello world\"\n  errors:\n    attributes:\n      title:\n        many_items:\n          one: \"needs one (attributes)\"\n          other: \"needs %{count} (attributes)\"\n    messages:\n      many_items:\n        one: \"needs one (messages)\"\n        other: \"needs %{count} (messages)\"\n  activerecord:\n    models:\n      article:\n        one: \"Story\"\n        other: \"Stories\"\n    errors:\n      messages:\n        taken_value: \"%{value} is taken\"\n        named: \"of %{attribute} is wrong\"\n        modeled: \"is wrong for a %{model}\"\n        both: \"%{value} / %{count}\"\n        percent: \"100%% of %{count}\"\n";
 
-const CR_CHECKER: &str = "class CrChecker\n  def self.taken(record, attribute, value)\n    record.errors.add(attribute, :taken_value, value: value)\n  end\n\n  def self.items(record, attribute, n)\n    record.errors.add(attribute, :many_items, count: n)\n  end\n\n  def self.named(record, attribute)\n    record.errors.add(attribute, :named)\n  end\n\n  def self.renamed(record, attribute)\n    record.errors.add(attribute, :named, attribute: \"Text\")\n  end\n\n  def self.modeled(record, attribute)\n    record.errors.add(attribute, :modeled)\n  end\nend\n";
+const CR_CHECKER: &str = "class CrChecker\n  def self.taken(record, attribute, value)\n    record.errors.add(attribute, :taken_value, value: value)\n  end\n\n  def self.items(record, attribute, n)\n    record.errors.add(attribute, :many_items, count: n)\n  end\n\n  def self.named(record, attribute)\n    record.errors.add(attribute, :named)\n  end\n\n  def self.renamed(record, attribute)\n    record.errors.add(attribute, :named, attribute: \"Text\")\n  end\n\n  def self.modeled(record, attribute)\n    record.errors.add(attribute, :modeled)\n  end\n\n  def self.both(record, attribute, value, n)\n    record.errors.add(attribute, :both, value: value, count: n)\n  end\n\n  def self.percent(record, attribute, n)\n    record.errors.add(attribute, :percent, count: n)\n  end\nend\n";
 
 const CR_SCRIPT: &str = r##"
 def check(label, got, want)
@@ -162,6 +162,10 @@ a = fresh; CrChecker.renamed(a, :body)
 check("%{attribute} given", a.errors, ["Body of Text is wrong"])
 a = fresh; CrChecker.modeled(a, :body)
 check("%{model} by default", a.errors, ["Body is wrong for a Story"])
+a = fresh; CrChecker.both(a, :body, "%{count}", 3)
+check("an inserted value is not rescanned", a.errors, ["Body %{count} / 3"])
+a = fresh; CrChecker.percent(a, :body, 3)
+check("%% is a literal %", a.errors, ["Body 100% of 3"])
 puts "review rows passed"
 "##;
 
