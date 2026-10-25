@@ -212,15 +212,15 @@ pub(super) fn emit_send(
         if method == "raise" && args.len() == 1 {
             return format!("panic!(\"{{}}\", {})", args_s[0]);
         }
-        // Not `raise(KIND, payload)` for a class the runtime has no kind for: there is no KIND to name, and a rescuer reads its class and message
+        // Not the payload-dropping `raise(KIND, payload)` when the message is a String: a rescuer reads `e.message`, and a class the runtime has no kind for is named as Ruby names it
         if method == "raise" && args.len() == 2 && args[1].ty.as_ref().is_some_and(|t| t.is_stringish()) {
             if let ExprNode::Const { path } = &*args[0].node {
                 let last = path.last().map(|s| s.as_str()).unwrap_or("");
-                let framework_kind = matches!(last, "NotImplementedError" | "RecordNotFound" | "RecordInvalid" | "ArgumentError" | "RuntimeError" | "IndexError");
-                if !framework_kind {
-                    let class = raised_class_name(path);
-                    return format!("crate::errors_ext::raise_class({class:?}, ({}).to_string())", args_s[1]);
+                let msg = format!("({}).to_string()", args_s[1]);
+                if matches!(last, "NotImplementedError" | "RecordNotFound" | "RecordInvalid" | "ArgumentError" | "RuntimeError" | "IndexError") {
+                    return format!("crate::errors_ext::raise_msg(crate::errors_ext::{last}, {msg})");
                 }
+                return format!("crate::errors_ext::raise_class({:?}, {msg})", raised_class_name(path));
             }
         }
         return format!("{}({})", rewritten_method, args_s.join(", "));

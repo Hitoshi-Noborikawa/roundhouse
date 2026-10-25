@@ -147,7 +147,7 @@ puts "ALL OK"
 fn the_rewritten_dispatcher_emits_for_rust_and_typescript() {
     let (_emitted, errors) = app().emit(BuildTarget::Typescript);
     assert!(errors.is_empty(), "{errors:#?}");
-    // Rust has no exception object for the rescue_from clauses to test and re-raise
+    // Rust's handlers call the action directly, so the dispatcher's rescue never runs
     let (_emitted, errors) = app().emit(BuildTarget::Rust);
-    assert!(!errors.is_empty() && errors.iter().all(|e| e.contains("BeginRescue not supported (rust)")), "{errors:#?}");
+    assert!(!errors.is_empty() && errors.iter().all(|e| e.contains("rescue_from not supported (rust)")), "{errors:#?}");
 }

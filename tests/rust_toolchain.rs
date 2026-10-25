@@ -446,3 +446,45 @@ fn i18n_locales_probe() {
         String::from_utf8_lossy(&output.stderr)
     );
 }
+
+#[test]
+#[ignore]
+fn real_blog_begin_rescue_runs() {
+    // CRuby answers ["ok a", "rescued empty", "other"] and re-raises the TypeError.
+    let (emitted, errors) = emit_and_run::real_blog()
+        .edit(
+            "app/models/article.rb",
+            "  validates :title, presence: true\n",
+            "  validates :title, presence: true\n\n  def self.guarded(s)\n    t = s.to_s\n    begin\n      raise ArgumentError, \"empty\" if t.empty?\n      raise TypeError, \"bad\" if t == \"bad\"\n      raise IndexError, \"other\" if t == \"other\"\n      \"ok \" + t\n    rescue ArgumentError => e\n      \"rescued \" + e.message\n    rescue IndexError, KeyError\n      \"other\"\n    end\n  end\n",
+        )
+        .emit(roundhouse::project::BuildTarget::Rust);
+    assert!(errors.is_empty(), "{errors:?}");
+    std::fs::create_dir_all(emitted.join("tests")).expect("tests dir");
+    std::fs::write(
+        emitted.join("tests/begin_rescue.rs"),
+        r#"use app::errors_ext::Raised;
+use app::models::Article;
+
+#[test]
+fn rescue_clauses_answer_as_ruby() {
+    let g = |s: &str| Article::guarded(serde_json::Value::from(s));
+    assert_eq!([g("a"), g(""), g("other")], ["ok a", "rescued empty", "other"]);
+    let raised = std::panic::catch_unwind(|| g("bad")).expect_err("an unrescued class is raised again");
+    let raised = raised.downcast_ref::<Raised>().expect("a Raised payload");
+    assert_eq!((raised.class, raised.message.as_str()), ("TypeError", "bad"));
+}
+"#,
+    )
+    .expect("write test");
+    let output = Command::new("cargo")
+        .args(["test", "--test", "begin_rescue"])
+        .current_dir(&*emitted)
+        .output()
+        .expect("run cargo test");
+    assert!(
+        output.status.success(),
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}

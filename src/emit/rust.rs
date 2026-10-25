@@ -910,7 +910,7 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
                         pub fn destroy(&mut self) {{ {destroy_body} }}\n\
                         pub fn exists_pred(id: i64) -> bool {{ Self::_adapter_exists_by_id_pred(id) }}\n\
                         pub fn persisted_pred(&self) -> bool {{ self.id != 0 }}\n\
-                        pub fn find(id: i64) -> Self {{ Self::_adapter_find_by_id(id).expect(\"record not found\") }}\n\
+                        pub fn find(id: i64) -> Self {{ Self::_adapter_find_by_id(id).unwrap_or_else(|| crate::errors_ext::raise(crate::errors_ext::RecordNotFound, id)) }}\n\
                         pub fn count() -> i64 {{ Self::_adapter_count() }}\n\
                         pub fn all() -> Vec<{name}> {{ Self::_adapter_all() }}\n\
                         pub fn last() -> Option<{name}> {{ Self::_adapter_last() }}\n\
@@ -1145,6 +1145,13 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
                 // outgoing path is field-independent (thread-local).
                 let has_flash = body.contains("pub flash:");
                 let has_params = body.contains("pub params:");
+                // Not left to the dispatcher's begin/rescue: each handler calls its action directly, so process_action and its rescue never run
+                if let Some(pa) = lc.methods.iter().find(|m| m.name.as_str() == "process_action")
+                    && let crate::expr::ExprNode::BeginRescue { rescues, .. } = &*rescue_root(&pa.body).node
+                    && !rescues.is_empty()
+                {
+                    crate::emit::diagnostics::report_unsupported(pa.body.span, "rust", "rescue_from", "a handler calls its action directly, not through process_action");
+                }
                 let axum_wrappers = render_axum_handler_wrappers(
                     lc.name.0.as_str(),
                     &flat_routes_2c,
@@ -2452,5 +2459,13 @@ fn collect_global_class_methods(
         global_class_method_defaults: out_defaults,
         global_mutating_methods: out_mutating,
         ..EmitCtx::default()
+    }
+}
+
+/// The dispatcher's begin/rescue, behind the not-found guard `process_action` may put first.
+fn rescue_root(body: &crate::expr::Expr) -> &crate::expr::Expr {
+    match &*body.node {
+        crate::expr::ExprNode::Seq { exprs } if !exprs.is_empty() => &exprs[exprs.len() - 1],
+        _ => body,
     }
 }

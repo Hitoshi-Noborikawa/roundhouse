@@ -489,7 +489,12 @@ fn method_reads_self(body: &Expr) -> bool {
                 walk(scrutinee) || arms.iter().any(|a| walk(&a.body))
             }
             ExprNode::Cast { value, .. } => walk(value),
-            _ => false,
+            // Not false for the rest: a begin/rescue or any other node holding a self read still makes the method an instance one
+            _ => {
+                let mut found = false;
+                e.node.for_each_child(&mut |c| found |= walk(c));
+                found
+            }
         }
     }
     walk(body)
