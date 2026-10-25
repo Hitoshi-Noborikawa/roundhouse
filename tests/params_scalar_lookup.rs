@@ -51,8 +51,8 @@ fn lookup_demand_preserves_factory_projections_and_adds_only_used_membership() {
     assert!(source.contains("def key?(key)"), "{source}");
     assert!(!source.contains("def include?(key)"), "{source}");
     assert!(source.contains("ItemParams.__rh_param_value(@__rh_permitted_values, key.to_s)"), "{source}");
-    assert!(source.contains("Params.provided(sub, \"token\")"), "{source}");
-    assert!(source.contains("Params.str(sub, \"token\", \"\")"), "{source}");
+    assert!(source.contains("Params.scalar_provided(sub, \"token\")"), "{source}");
+    assert!(source.contains("Params.scalar(sub, \"token\")"), "{source}");
     let ordinary = emitted("    item_params", HELPER);
     assert!(!ordinary.contains("__rh_permitted_values"), "{ordinary}");
 }
