@@ -88,3 +88,47 @@ fn errors_add_on_base_with_a_method_call_message_on_ruby() {
     run.assert_passes();
     assert!(run.stdout.contains("base message passed"), "{}", run.stdout);
 }
+
+// Rails' lookup order for a run-time `errors.add(attribute, kind)`
+// (oracle `lookup_order.rb`): the model's `attributes.<attr>.<kind>`, its
+// `<kind>`, `activerecord.errors.messages`, `errors.attributes.<attr>`,
+// then `errors.messages`. An abstract parent's key isn't consulted, and a
+// tableless form's scope is `activemodel`.
+const LOOKUP_LOCALE: &str = "en:\n  hello: \"Hello world\"\n  errors:\n    attributes:\n      title:\n        unusable: \"is unusable (errors.attributes)\"\n        worn: \"is worn (errors.attributes)\"\n    messages:\n      stale: \"is stale (errors.messages)\"\n      worn: \"is worn (errors.messages)\"\n  activerecord:\n    errors:\n      messages:\n        stale: \"is stale (activerecord.errors.messages)\"\n        unusable: \"is unusable (activerecord.errors.messages)\"\n      models:\n        article:\n          reserved: \"is reserved for articles\"\n          attributes:\n            slug:\n              invalid: \"is not a valid slug\"\n        titled_record:\n          reserved: \"is reserved for titled records\"\n        note:\n          reserved: \"is reserved for notes\"\n  activemodel:\n    errors:\n      messages:\n        stale: \"is stale (activemodel.errors.messages)\"\n";
+
+// A literal kind in each branch, as a validator writes it.
+const LOOKUP_CHECKER: &str = "class LookupChecker\n  def self.add(record, attribute, kind)\n    case kind\n    when :invalid then record.errors.add(attribute, :invalid)\n    when :reserved then record.errors.add(attribute, :reserved)\n    when :unusable then record.errors.add(attribute, :unusable)\n    when :stale then record.errors.add(attribute, :stale)\n    when :worn then record.errors.add(attribute, :worn)\n    when :blank then record.errors.add(attribute, :blank)\n    end\n  end\nend\n";
+
+const LOOKUP_SCRIPT: &str = r##"
+def check(label, got, want)
+  raise "#{label}: #{got.inspect} (want #{want.inspect})" unless got == want
+end
+def msg(record, attribute, kind) = record.tap { |r| LookupChecker.add(r, attribute, kind) }.errors
+check("1. the model's attribute override", msg(Article.new, :slug, :invalid), ["Slug is not a valid slug"])
+check("2. the model's kind override", msg(Article.new, :body, :reserved), ["Body is reserved for articles"])
+check("3. activerecord.errors.messages, over errors.attributes", msg(Article.new, :title, :unusable), ["Title is unusable (activerecord.errors.messages)"])
+check("3. activerecord.errors.messages, over errors.messages", msg(Article.new, :body, :stale), ["Body is stale (activerecord.errors.messages)"])
+check("4. errors.attributes, over errors.messages", msg(Article.new, :title, :worn), ["Title is worn (errors.attributes)"])
+check("5. errors.messages", msg(Article.new, :body, :worn), ["Body is worn (errors.messages)"])
+check("5. Rails' default", msg(Article.new, :body, :blank), ["Body can't be blank"])
+check("another model, the same kind: its own", msg(Note.new, :body, :reserved), ["Body is reserved for notes"])
+check("an abstract parent's key isn't consulted", msg(Note.new, :body, :invalid), ["Body is invalid"])
+check("a tableless form reads activemodel.errors.messages", msg(Form::Draft.new, :name, :stale), ["Name is stale (activemodel.errors.messages)"])
+puts "lookup order passed"
+"##;
+
+fn lookup_app() -> emit_and_run::Overlay {
+    emit_and_run::real_blog()
+        .write("config/locales/en.yml", LOOKUP_LOCALE)
+        .write("app/models/lookup_checker.rb", LOOKUP_CHECKER)
+        .write("app/models/titled_record.rb", "class TitledRecord < ApplicationRecord\n  self.abstract_class = true\nend\n")
+        .write("app/models/note.rb", "class Note < TitledRecord\n  self.table_name = \"comments\"\nend\n")
+        .write("app/models/form/draft.rb", "class Form::Draft\n  include ActiveModel::Model\n\n  attr_accessor :name\n\n  validates :name, presence: true\nend\n")
+}
+
+#[test]
+fn a_runtime_errors_add_follows_rails_lookup_order_on_ruby() {
+    let run = lookup_app().run_ruby(LOOKUP_SCRIPT);
+    run.assert_passes();
+    assert!(run.stdout.contains("lookup order passed"), "{}", run.stdout);
+}

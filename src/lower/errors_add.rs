@@ -67,7 +67,7 @@ fn error_tables_class(data: &LabelData) -> crate::dialect::LibraryClass {
         parent_span: Default::default(),
         includes: Vec::new(),
         include_spans: Vec::new(),
-        methods: vec![table_method("names", &data.names)],
+        methods: vec![table_method("names", &data.names), table_method("overrides", &data.overrides)],
         nullable_columns: Vec::new(),
         origin: None,
         constants: Vec::new(),
@@ -132,6 +132,11 @@ pub(crate) struct LabelData {
     /// Each model with translated attribute names, by class name, for
     /// `ErrorTables.names`.
     names: Vec<(String, Vec<(String, String)>)>,
+    /// Each model's own messages ("<attr>.<kind>", "<kind>") in Rails'
+    /// lookup order, with its scope under "__scope", for
+    /// `ErrorTables.overrides`; a model with none and the `activerecord`
+    /// scope is left out (its table is empty).
+    overrides: Vec<(String, Vec<(String, String)>)>,
     /// Set once a run-time `errors.add` is rewritten: `ErrorTables` is then
     /// generated (`error_tables_class`).
     used: std::cell::Cell<bool>,
@@ -152,6 +157,19 @@ impl LabelData {
                 .iter()
                 .map(|m| (m.name.0.as_str().to_string(), m.i18n.translated_attribute_names()))
                 .filter(|(_, names)| !names.is_empty())
+                .collect(),
+            overrides: app
+                .models
+                .iter()
+                .filter_map(|m| {
+                    let mut rows = m.i18n.error_overrides();
+                    let scope = m.i18n.error_scope().to_string();
+                    if rows.is_empty() && scope == "activerecord" {
+                        return None;
+                    }
+                    rows.push(("__scope".to_string(), scope));
+                    Some((m.name.0.as_str().to_string(), rows))
+                })
                 .collect(),
             used: std::cell::Cell::new(false),
         }
@@ -577,7 +595,7 @@ fn dynamic_add(expr: &mut Expr, labels: &Labels) -> bool {
         str_hash(entries, crate::ty::Ty::Str),
         str_hash(site, crate::ty::Ty::Str),
         table_call(span, "names", owner.clone()),
-        str_hash(Vec::new(), crate::ty::Ty::Str),
+        table_call(span, "overrides", owner.clone()),
         str_lit(span, &before),
         str_lit(span, &between),
         str_lit(span, &after),
