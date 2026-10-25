@@ -404,6 +404,24 @@ fn emit_ctrl_test_expr(expr: &Expr, app: &App) -> String {
                 format!("{method}({})", args_s.join(", "))
             }
         }
+        ExprNode::StringInterp { parts } => {
+            let mut template = String::new();
+            let mut values = Vec::new();
+            for part in parts {
+                match part {
+                    crate::expr::InterpPart::Text { value } => template.push_str(&value.replace('{', "{{").replace('}', "}}")),
+                    crate::expr::InterpPart::Expr { expr } => {
+                        template.push_str("{}");
+                        values.push(emit_ctrl_test_expr(expr, app));
+                    }
+                }
+            }
+            if values.is_empty() {
+                format!("{template:?}.to_string()")
+            } else {
+                format!("format!({template:?}, {})", values.join(", "))
+            }
+        }
         other => crate::emit::diagnostics::report_unsupported(expr.span, "rust", other.kind_str(), "in a controller test"),
     }
 }
