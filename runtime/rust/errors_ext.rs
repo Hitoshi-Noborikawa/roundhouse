@@ -51,6 +51,44 @@ pub fn raise<T>(kind: FrameworkError, _payload: T) -> ! {
     panic!("FrameworkError::{:?}", kind);
 }
 
+impl FrameworkError {
+    pub fn ruby_name(self) -> &'static str {
+        match self {
+            FrameworkError::NotImplemented => "NotImplementedError",
+            FrameworkError::RecordNotFound => "ActiveRecord::RecordNotFound",
+            FrameworkError::RecordInvalid => "ActiveRecord::RecordInvalid",
+            FrameworkError::Argument => "ArgumentError",
+            FrameworkError::Runtime => "RuntimeError",
+            FrameworkError::Index => "IndexError",
+        }
+    }
+}
+
+/// A raised Ruby exception: its class and message. The panic payload of
+/// `raise_msg` / `raise_class`, so a caller can `catch_unwind` and read
+/// what Ruby's `rescue => e` would (`e.class.name`, `e.message`).
+#[derive(Debug, Clone)]
+pub struct Raised {
+    pub class: &'static str,
+    pub message: String,
+}
+
+impl std::fmt::Display for Raised {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{} ({})", self.message, self.class)
+    }
+}
+
+/// `raise Klass, "message"` for a framework error kind.
+pub fn raise_msg(kind: FrameworkError, message: String) -> ! {
+    raise_class(kind.ruby_name(), message)
+}
+
+/// `raise Klass, "message"` for any other Ruby exception class, named as Ruby names it.
+pub fn raise_class(class: &'static str, message: String) -> ! {
+    std::panic::panic_any(Raised { class, message })
+}
+
 /// Placeholder for Ruby's `self.name` (class name) inside emitted
 /// class methods. The transpile lowers bare `name` calls to a free
 /// function reference; until the emit-side rewrites these to

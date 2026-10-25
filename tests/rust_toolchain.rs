@@ -20,6 +20,13 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+#[path = "support/emit_and_run.rs"]
+#[allow(dead_code)]
+mod emit_and_run;
+#[path = "support/i18n_locales_app.rs"]
+#[allow(dead_code)]
+mod i18n_locales_app;
+
 use roundhouse::emit::rust;
 use roundhouse::ingest::ingest_app;
 
@@ -394,5 +401,48 @@ fn filters_that_read_action_name_compile() {
          \n=== stderr ===\n{}",
         scratch.display(),
         String::from_utf8_lossy(&output.stderr),
+    );
+}
+
+#[test]
+#[ignore]
+fn real_blog_i18n_locales_run() {
+    // The answers `emit_and_run::i18n_locales` checks on CRuby.
+    let (emitted, errors) = i18n_locales_app::probe_app()
+        .edit("app/models/article.rb", i18n_locales_app::IN_LOCALE, "")
+        .emit(roundhouse::project::BuildTarget::Rust);
+    assert!(errors.is_empty(), "{errors:?}");
+    std::fs::create_dir_all(emitted.join("tests")).expect("tests dir");
+    std::fs::write(
+        emitted.join("tests/i18n_probe.rs"),
+        r#"use app::errors_ext::Raised;
+use app::i18n_locale::I18n;
+use app::models::Article;
+use serde_json::Value;
+
+#[test]
+fn i18n_locales_probe() {
+    assert_eq!(Article::lookups(), ["Hello", "Hi <x>", "1 item", "2 items", "Translation missing: en.probe.nope", "Cześć", "fallback 3", "en"]);
+    assert_eq!(Article::polish(), ["1 rzecz", "5 rzeczy", "English only", "Cześć", "Translation missing: pl.probe.nope", "Cześć", "Hi Ola", "pl"]);
+    assert_eq!(I18n::locale(), "en");
+    assert_eq!([Article::named(Value::from("pl")), Article::named(Value::from("en")), Article::named(Value::Null)], ["Cześć", "Hello", "Hello"]);
+    assert_eq!([Article::probe_key(Value::from("greet")), Article::only_key(Value::from("xx"))], ["Hello", "Translation missing: en.probe.only_xx"]);
+    let raised = std::panic::catch_unwind(|| Article::named(Value::from("de"))).expect_err("named de raises");
+    let raised = raised.downcast_ref::<Raised>().expect("a Raised payload");
+    assert_eq!((raised.class, raised.message.as_str()), ("I18n::InvalidLocale", "\"de\" is not a valid locale"));
+}
+"#,
+    )
+    .expect("write probe");
+    let output = Command::new("cargo")
+        .args(["test", "--test", "i18n_probe"])
+        .current_dir(&*emitted)
+        .output()
+        .expect("run cargo test");
+    assert!(
+        output.status.success(),
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
     );
 }

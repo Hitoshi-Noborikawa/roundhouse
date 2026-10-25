@@ -604,6 +604,19 @@ fn in_constructor() -> bool {
         .unwrap_or(false)
 }
 
+thread_local! {
+    static CURRENT_RUBY_CLASS: std::cell::RefCell<String> = const { std::cell::RefCell::new(String::new()) };
+}
+
+/// The Ruby name of the library class being emitted, for a raise that names a sibling bare.
+pub(crate) fn set_current_ruby_class_name(name: &str) {
+    CURRENT_RUBY_CLASS.with(|c| *c.borrow_mut() = name.to_string());
+}
+
+pub(super) fn current_ruby_class_name() -> Option<String> {
+    CURRENT_RUBY_CLASS.with(|c| Some(c.borrow().clone()).filter(|s| !s.is_empty()))
+}
+
 fn in_class_method() -> bool {
     current_emit_ctx()
         .map(|ctx| ctx.in_class_method.get())
@@ -1102,6 +1115,17 @@ fn emit_expr_inner(e: &Expr) -> String {
             // function-return Vec receivers (the common case here,
             // `adapter.all(...).map { ... }`) the temporary is moved
             // anyway.
+            // `vec.find { |x| ... }`: the first element the block holds true for, or nil. Rust Vec has no `.find`
+            if matches!(method.as_str(), "find" | "detect") && args.is_empty() {
+                if let (Some(r), Some(b)) = (recv.as_ref(), block.as_ref()) {
+                    if let (Some(crate::ty::Ty::Array { .. }), ExprNode::Lambda { params, body, .. }) = (r.ty.as_ref().map(peel_nil), &*b.node) {
+                        if params.len() == 1 {
+                            let p = params[0].as_str();
+                            return format!("{}.iter().find(|{p}| {{ {} }}).cloned()", emit_expr(r), emit_expr(body));
+                        }
+                    }
+                }
+            }
             if method.as_str() == "map" && args.is_empty() && recv.is_some() {
                 let r = recv.as_ref().unwrap();
                 if matches!(r.ty.as_ref().map(peel_nil), Some(crate::ty::Ty::Array { .. })) {
@@ -1322,9 +1346,15 @@ fn emit_expr_inner(e: &Expr) -> String {
         ExprNode::Raise { value } => {
             format!("panic!(\"{{}}\", {})", emit_expr(value))
         }
-        // Catch-all for IR shapes not yet implemented. Each new runtime
-        // file in Phase 2 expands this until full coverage.
-        other => format!("/* TODO rust2: ExprNode::{:?} */", std::mem::discriminant(other)),
+        // Not reported: the struct literal a constructor ends in already starts every field the parent's `initialize` would
+        ExprNode::Super { .. } if current_emit_ctx().map(|c| c.in_constructor.get()).unwrap_or(false) => String::new(),
+        // Not `rescue` too: a raise is a panic whose payload no typed match recovers yet
+        ExprNode::BeginRescue { body, rescues, else_branch: None, ensure: Some(en), .. }
+            if rescues.is_empty() && !contains_jump(body) =>
+        {
+            emit_ensure_only(body, en)
+        }
+        other => crate::emit::diagnostics::report_unsupported(e.span, "rust", other.kind_str(), ""),
     }
 }
 
@@ -1381,4 +1411,52 @@ pub(super) fn with_declared_vars_scope<R>(f: impl FnOnce() -> R) -> R {
     let r = f();
     *ctx.declared_vars.borrow_mut() = snapshot;
     r
+}
+
+fn emit_ensure_only(body: &Expr, ensure: &Expr) -> String {
+    let mut ensure_reads = std::collections::HashSet::new();
+    collect_var_reads(ensure, &mut ensure_reads);
+    let stmts: Vec<&Expr> = match &*body.node {
+        ExprNode::Seq { exprs } => exprs.iter().collect(),
+        _ => vec![body],
+    };
+    let mut lines = Vec::new();
+    for st in &stmts {
+        if let ExprNode::Assign { target: LValue::Var { name, .. }, value } = &*st.node {
+            let n = name.as_str().to_string();
+            if ensure_reads.contains(&n) && !is_declared_var(&n) {
+                let ty = value.ty.clone().unwrap_or(crate::ty::Ty::Untyped);
+                lines.push(format!("let mut {n}: {} = Default::default();", super::ty::rust_ty(&ty)));
+                mark_local_var_ty(&n, ty);
+                declare_var(n);
+            }
+        }
+    }
+    let body_s = with_declared_vars_scope(|| emit_expr(body));
+    let ensure_s = with_declared_vars_scope(|| emit_expr(ensure));
+    // Not a Drop guard: the ensure reads locals the body assigns, which a guard would hold borrowed across the body
+    lines.push(format!("let __ensured = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {{ {body_s} }}));"));
+    lines.push(format!("{ensure_s};"));
+    lines.push("match __ensured { Ok(__v) => __v, Err(__p) => std::panic::resume_unwind(__p) }".to_string());
+    format!("{{\n{}\n}}", lines.join("\n"))
+}
+
+fn collect_var_reads(e: &Expr, out: &mut std::collections::HashSet<String>) {
+    if let ExprNode::Var { name, .. } = &*e.node {
+        out.insert(name.as_str().to_string());
+    }
+    e.node.for_each_child(&mut |c| collect_var_reads(c, out));
+}
+
+// Not emitted inside the closure: a `return`/`break`/`next` there would leave the closure, not the method or loop it names
+fn contains_jump(e: &Expr) -> bool {
+    if matches!(&*e.node, ExprNode::Return { .. } | ExprNode::Break { .. } | ExprNode::Next { .. }) {
+        return true;
+    }
+    if matches!(&*e.node, ExprNode::Lambda { .. }) {
+        return false;
+    }
+    let mut found = false;
+    e.node.for_each_child(&mut |c| found |= contains_jump(c));
+    found
 }

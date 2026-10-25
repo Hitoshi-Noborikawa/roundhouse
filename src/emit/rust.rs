@@ -117,6 +117,7 @@ const RT_BROADCASTS_SOURCE: &str = include_str!("../../runtime/rust/broadcasts.r
 // intrinsic target) plus the `EncodeDatetime` trait that backs the
 // generic `JsonBuilder::encode_datetime`.
 const RT_RH_DATETIME_SOURCE: &str = include_str!("../../runtime/rust/rh_datetime.rs");
+const RT_I18N_HOST_SOURCE: &str = include_str!("../../runtime/rust/i18n_host.rs");
 // Phase 6 HTTP/server/cable runtime — hand-written, shared with the
 // legacy rust emitter. `server::start` mounts axum, applies schema,
 // installs middleware (layout-wrap, method-override), and serves
@@ -144,6 +145,8 @@ const RT_TEST_SUPPORT_SOURCE: &str = include_str!("../../runtime/rust/test_suppo
 /// bare references the lowerer leaves unqualified.
 const VIEW_IMPORTS: &str = "\
 #[allow(unused_imports)]
+use crate::i18n_locale::I18n;
+#[allow(unused_imports)]
 use std::fmt::Write as _;
 #[allow(unused_imports)]
 use crate::view_helpers::{self, ViewHelpers};
@@ -170,6 +173,8 @@ use crate::views::*;
 /// (Flash/Session), and the broadcasts shim. Same `#[allow(unused_
 /// imports)]` discipline as MODEL_IMPORTS / VIEW_IMPORTS.
 const CONTROLLER_IMPORTS: &str = "\
+#[allow(unused_imports)]
+use crate::i18n_locale::I18n;
 #[allow(unused_imports)]
 use crate::action_controller_base::{self, Base};
 #[allow(unused_imports)]
@@ -205,6 +210,8 @@ use crate::errors_ext::{raise, ArgumentError, NotImplementedError, RecordNotFoun
 const MODEL_JSON_IMPORT: &str = "#[allow(unused_imports)]\nuse crate::json_builder::JsonBuilder;\n";
 
 const MODEL_IMPORTS: &str = "\
+#[allow(unused_imports)]
+use crate::i18n_locale::I18n;
 #[allow(unused_imports)]
 use crate::active_record_base::ErrorDetail;
 #[allow(unused_imports)]
@@ -331,6 +338,7 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
         ("src/db.rs", RT_DB_SOURCE),
         ("src/broadcasts.rs", RT_BROADCASTS_SOURCE),
         ("src/rh_datetime.rs", RT_RH_DATETIME_SOURCE),
+        ("src/i18n_host.rs", RT_I18N_HOST_SOURCE),
         ("src/http.rs", RT_HTTP_SOURCE),
         ("src/server.rs", RT_SERVER_SOURCE),
         ("src/cable.rs", RT_CABLE_SOURCE),

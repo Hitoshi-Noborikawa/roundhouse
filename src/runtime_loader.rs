@@ -624,6 +624,24 @@ where
 /// hand-written primitive runtime (`runtime/rust/`) on top.
 const RUST_RUNTIME: &[RuntimeEntry] = &[
     runtime_entry! {
+        stem: "active_support_inflections",
+        namespace: "",
+        out_path: "src/active_support_inflections.rs",
+        mode: Mode::Library,
+        imports: NO_IMPORTS,
+        prelude: NO_PRELUDE,
+        extra_roots: NO_EXTRA_ROOTS,
+    },
+    runtime_entry! {
+        stem: "i18n_locale",
+        namespace: "",
+        out_path: "src/i18n_locale.rs",
+        mode: Mode::Library,
+        imports: &[("I18nHost", "i18n_host"), ("raise", "errors_ext"), ("ViewHelpers", "view_helpers"), ("ActiveSupport", "active_support_inflections"), ("RubyToS", "http")],
+        prelude: NO_PRELUDE,
+        extra_roots: NO_EXTRA_ROOTS,
+    },
+    runtime_entry! {
         stem: "inflector",
         namespace: "",
         out_path: "src/inflector.rs",

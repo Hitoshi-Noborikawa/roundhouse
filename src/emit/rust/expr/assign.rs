@@ -15,7 +15,14 @@ use super::{
 };
 
 pub(super) fn emit_assign(target: &LValue, value: &Expr) -> String {
-    let rhs = emit_expr(value);
+    // Not the `&str` literal: Ruby's `buf = +""` is a buffer the code appends to, which a Rust literal cannot be
+    let rhs = if matches!(&*value.node, ExprNode::Lit { value: crate::expr::Literal::Str { .. } })
+        && value.hint() == &Some(crate::expr::IrHint::MutableStringLiteral)
+    {
+        format!("String::from({})", emit_expr(value))
+    } else {
+        emit_expr(value)
+    };
     match target {
         LValue::Var { name, .. } => {
             let name_str = name.as_str().to_string();

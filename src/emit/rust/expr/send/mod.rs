@@ -212,6 +212,22 @@ pub(super) fn emit_send(
         if method == "raise" && args.len() == 1 {
             return format!("panic!(\"{{}}\", {})", args_s[0]);
         }
+        // Not the payload-dropping `raise(KIND, payload)` when the message is a String: a rescuer reads `e.message`, and a class the runtime has no kind for is named as Ruby names it
+        if method == "raise" && args.len() == 2 && args[1].ty.as_ref().is_some_and(|t| t.is_stringish()) {
+            if let ExprNode::Const { path } = &*args[0].node {
+                let last = path.last().map(|s| s.as_str()).unwrap_or("");
+                let kind = match last {
+                    "NotImplementedError" | "RecordNotFound" | "RecordInvalid" | "ArgumentError" | "RuntimeError" | "IndexError" => true,
+                    _ => false,
+                };
+                let msg = format!("({}).to_string()", args_s[1]);
+                if kind {
+                    return format!("crate::errors_ext::raise_msg(crate::errors_ext::{last}, {msg})");
+                }
+                let class = raised_class_name(path);
+                return format!("crate::errors_ext::raise_class({class:?}, {msg})");
+            }
+        }
         return format!("{}({})", rewritten_method, args_s.join(", "));
     }
     let r = recv.unwrap();
@@ -777,4 +793,21 @@ pub(crate) fn is_array_index_read(arg: &Expr) -> bool {
         && args.len() == 1
         && matches!(r.ty.as_ref(), Some(Ty::Array { .. }))
         && matches!(args[0].ty.as_ref(), Some(Ty::Int))
+}
+
+/// A raised constant's Ruby name, nested in the class being emitted when
+/// written bare inside it (`raise InvalidLocale` inside `I18n`).
+fn raised_class_name(path: &[crate::ident::Symbol]) -> String {
+    let joined = path.iter().map(|s| s.as_str()).collect::<Vec<_>>().join("::");
+    if path.len() > 1 {
+        return joined;
+    }
+    match super::current_ruby_class_name() {
+        Some(owner) if !owner.is_empty() && !is_core_exception(&joined) => format!("{owner}::{joined}"),
+        _ => joined,
+    }
+}
+
+fn is_core_exception(name: &str) -> bool {
+    matches!(name, "StandardError" | "Exception" | "TypeError" | "NameError" | "NoMethodError" | "KeyError" | "RangeError" | "ZeroDivisionError" | "FrozenError" | "StopIteration")
 }
