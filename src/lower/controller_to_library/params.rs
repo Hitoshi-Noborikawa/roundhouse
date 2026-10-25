@@ -1222,10 +1222,17 @@ pub(super) fn rewrite_nested_lookups(body: &Expr, helpers: &[crate::dialect::Act
         if method.as_str() != "[]" || args.len() != 1 || !sources.nested(recv, specs) {
             return None;
         }
-        let key = with_ty(Expr::new(args[0].span, ExprNode::Send {
-            recv: Some(args[0].clone()), method: Symbol::from("to_s"),
-            args: vec![], block: None, parenthesized: false,
-        }), Ty::Str);
+        let string_key = matches!(&*args[0].node,
+            ExprNode::Lit { value: Literal::Str { .. } | Literal::Sym { .. } })
+            || args[0].ty.as_ref().is_some_and(Ty::is_stringish);
+        let key = if string_key {
+            with_ty(Expr::new(args[0].span, ExprNode::Send {
+                recv: Some(args[0].clone()), method: Symbol::from("to_s"),
+                args: vec![], block: None, parenthesized: false,
+            }), Ty::Str)
+        } else {
+            args[0].clone()
+        };
         Some(with_ty(Expr::new(expr.span, ExprNode::Send {
             recv: Some(Expr::new(expr.span, ExprNode::Const { path: vec![Symbol::from("Params")] })),
             method: Symbol::from("nested_lookup"), args: vec![recv.clone(), key],

@@ -42,11 +42,19 @@ module Params
     filtered
   end
 
+  def self.nested_key(key)
+    if key.is_a?(Symbol)
+      key.to_s
+    else
+      key
+    end
+  end
+
   def self.nested_lookup(value, key)
     if value.is_a?(Hash)
-      value.fetch(key, nil)
+      value.fetch(Params.nested_key(key), nil)
     elsif value.is_a?(Array)
-      raise(TypeError.new("a String or Symbol is not an Array index"))
+      value[key]
     else
       raise(NoMethodError.new("the nested params value is not a Hash"))
     end

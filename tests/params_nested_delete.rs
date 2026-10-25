@@ -386,6 +386,88 @@ puts "nested filter order preserved"
 }
 
 #[test]
+fn deleted_nested_indices_match_recorded_rails_without_coercing_other_keys() {
+    let controller = include_str!("params_vectors/nested_delete_indices.rb");
+    let run = overlay(PERMIT).write("app/controllers/items_controller.rb", controller).run_ruby(r#"
+require "json"
+require_relative "app/controllers/items_controller"
+controller = ItemsController.new
+controller.params = {"item" => {
+  "items" => [{"name" => "first", "outside" => "rejected"}, {"name" => "last"}],
+  "labels" => [33, false], "settings" => {"0" => "zero", "value" => 44, "deeper" => {"0" => "deep zero", "value" => 55}}
+}}
+puts JSON.generate(controller.send(:indices))
+"#);
+    run.assert_passes();
+    assert_eq!(run.stdout.trim(), include_str!("params_vectors/nested_delete_indices.json").trim());
+}
+
+#[test]
+fn deleted_nested_runtime_keys_match_recorded_rails_for_arrays_and_hashes() {
+    let controller = include_str!("params_vectors/nested_delete_indices.rb");
+    let run = overlay(PERMIT).write("app/controllers/items_controller.rb", controller).run_ruby(r#"
+require "json"
+require_relative "app/controllers/items_controller"
+controller = ItemsController.new
+controller.params = {"item" => {
+  "items" => [{"name" => "first", "outside" => "rejected"}, {"name" => "last"}],
+  "labels" => [33, false], "settings" => {"0" => "zero", "value" => 44, "deeper" => {"0" => "deep zero", "value" => 55}}
+}}
+rows = [0, "0", :"0", "value", :value, nil, false, 0..0].map do |key|
+  values = [:array_index, :scalar_array_index, :unknown_index].map do |method|
+    begin
+      controller.send(method, key)
+    rescue TypeError => error
+      ["error", error.class.name]
+    end
+  end
+  [key.class.name, key.to_s, values]
+end
+puts JSON.generate(rows)
+"#);
+    run.assert_passes();
+    assert_eq!(run.stdout.trim(), include_str!("params_vectors/nested_delete_runtime_keys.json").trim());
+}
+
+#[test]
+fn typed_param_value_indices_normalize_only_runtime_string_and_symbol_keys() {
+    use roundhouse::expr::{Expr, ExprNode};
+    use roundhouse::ident::{ClassId, Symbol, VarId};
+    use roundhouse::span::Span;
+    use roundhouse::ty::Ty;
+
+    let span = Span::synthetic();
+    let mut value = Expr::new(span, ExprNode::Var { id: VarId(0), name: Symbol::from("value") });
+    value.ty = Some(Ty::Class { id: ClassId(Symbol::from("Roundhouse::ParamValue")), args: vec![].into() });
+    let key = Expr::new(span, ExprNode::Var { id: VarId(1), name: Symbol::from("key") });
+    let read = Expr::new(span, ExprNode::Send {
+        recv: Some(value), method: Symbol::from("[]"), args: vec![key],
+        block: None, parenthesized: false,
+    });
+    let expression = ruby::emit_expr(&read);
+    let run = overlay(PERMIT).run_ruby(&format!(r#"
+require "json"
+rows = [0, "0", :"0", "value", :value, nil, false, 0..0].map do |key|
+  values = [[{{"name" => "first"}}, {{"name" => "last"}}], {{"0" => "zero", "value" => 44}}].map do |value|
+    begin
+      {expression}
+    rescue TypeError => error
+      ["error", error.class.name]
+    end
+  end
+  [key.class.name, key.to_s, values]
+end
+puts JSON.generate(rows)
+"#));
+    run.assert_passes();
+    let actual: serde_json::Value = serde_json::from_str(run.stdout.trim()).unwrap();
+    let recorded: serde_json::Value = serde_json::from_str(include_str!("params_vectors/nested_delete_runtime_keys.json")).unwrap();
+    let expected: Vec<_> = recorded.as_array().unwrap().iter().map(|row|
+        serde_json::json!([row[0], row[1], [row[2][0], row[2][2]]])).collect();
+    assert_eq!(actual, serde_json::json!(expected));
+}
+
+#[test]
 fn generated_value_methods_have_fully_typed_bodies() {
     fn assert_typed(expr: &roundhouse::expr::Expr) {
         assert!(matches!(expr.ty.as_ref(), Some(ty) if !matches!(ty,
