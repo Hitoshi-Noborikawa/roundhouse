@@ -1288,8 +1288,8 @@ fn emit_case_expr(scrutinee: &Expr, arms: &[Arm]) -> String {
                 lines.push(format!("    {} => (object?)({body}),", emit_literal(value)));
             }
             other => {
-                let stub = crate::emit::diagnostics::report_unsupported(crate::span::Span::synthetic(), "csharp", "case pattern", format!("{other:?}").split([' ', '(', '{']).next().unwrap_or("").to_string());
-                lines.push(format!("    _ => (object?)({stub}),"));
+                let stub = crate::emit::diagnostics::report_unsupported(arm.body.span, "csharp", "case pattern", format!("{other:?}").split([' ', '(', '{']).next().unwrap_or("").to_string());
+                lines.push(format!("    _ => {stub},"));
                 has_default = true;
             }
         }
@@ -2349,7 +2349,7 @@ fn emit_op_assign(target: &LValue, op: OpAssignOp, value: &Expr) -> String {
         OpAssignOp::Mul => format!("{lhs} *= {v}"),
         OpAssignOp::Div => format!("{lhs} /= {v}"),
         OpAssignOp::Mod => format!("{lhs} %= {v}"),
-        other => crate::emit::diagnostics::report_unsupported(crate::span::Span::synthetic(), "csharp", "OpAssign", format!("{other:?}")),
+        other => crate::emit::diagnostics::report_unsupported(value.span, "csharp", "OpAssign", format!("{other:?}")),
     }
 }
 
