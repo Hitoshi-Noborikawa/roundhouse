@@ -626,6 +626,10 @@ fn lower_difference(
     };
     let mut probes: Vec<(Expr, String, i64)> = Vec::new();
     match &*args[0].node {
+        // No expressions (`[]`, or `{}` for `assert_difference`): Rails
+        // runs the block and checks nothing.
+        ExprNode::Array { elements, .. } if elements.is_empty() => {}
+        ExprNode::Hash { entries, .. } if hash_form && entries.is_empty() => {}
         ExprNode::Array { elements, .. } if !elements.is_empty() => {
             for el in elements {
                 let (probe, label) = probe_of(el)?;
@@ -651,6 +655,9 @@ fn lower_difference(
         Some(ExprNode::Lambda { body, .. }) => body.clone(),
         _ => return None,
     };
+    if probes.is_empty() {
+        return Some(block_body);
+    }
 
     // A nested assertion (`assert_difference … do assert_difference …
     // do … end end`) is lowered first, inside this block: its `__diff_*`

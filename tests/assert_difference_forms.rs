@@ -57,6 +57,21 @@ const TEST: &str = r#"
     end
   end
 
+  test "no expressions runs the block" do
+    attrs = { title: "Forms", body: "A sufficiently long body for validation." }
+    before = Article.count
+    assert_difference([]) do
+      Article.create!(**attrs)
+    end
+    assert_difference({}) do
+      Article.create!(**attrs)
+    end
+    assert_no_difference([]) do
+      Article.create!(**attrs)
+    end
+    assert_equal before + 3, Article.count
+  end
+
   test "difference forms fail per expression" do
     attrs = { title: "Forms", body: "A sufficiently long body for validation." }
     assert_raises(RuntimeError) do
