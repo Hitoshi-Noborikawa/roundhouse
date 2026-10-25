@@ -3753,8 +3753,10 @@ fn parse_association(
                 }
                 // Rails reads `optional:` for its truth: a lambda or a
                 // Symbol is optional, whatever it would return. Only a
-                // `false` or `nil` literal keeps the association required.
+                // `false` or `nil` literal, parenthesized or not, keeps
+                // the association required.
                 "optional" => {
+                    let value = single_parenthesized(&value).unwrap_or(value);
                     optional = Some(bool_value(&value).unwrap_or_else(|| value.as_nil_node().is_none()))
                 }
                 // `touch: true` / `touch: :last_message_at`. A `false`
