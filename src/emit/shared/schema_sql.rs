@@ -88,8 +88,8 @@ impl Dialect {
     /// `INSERT` — which in Rails get the DATABASE's default. (A record
     /// gets the same value from the model layer either way.) Only the
     /// unambiguous literal kinds render: a number on a numeric column, a
-    /// boolean, a string on a string column. Anything else — a date, a
-    /// JSON or binary value, a default ingest could not read — is left to
+    /// boolean, a string on a string column, or serialized JSON. Anything
+    /// else — a date or binary value, a default ingest could not read — is left to
     /// the model layer, as before.
     fn column_default(self, col: &Column) -> Option<String> {
         let raw = col.stored_default()?;
@@ -116,6 +116,10 @@ impl Dialect {
             },
             ColumnType::String { .. } | ColumnType::Text => {
                 Some(format!("'{}'", raw.replace('\'', "''")))
+            }
+            ColumnType::Json | ColumnType::Jsonb => {
+                serde_json::from_str::<serde_json::Value>(raw).ok()
+                    .map(|_| format!("'{}'", raw.replace('\'', "''")))
             }
             _ => None,
         }

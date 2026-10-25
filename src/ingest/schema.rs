@@ -434,15 +434,23 @@ fn apply_migration_verb(
             // Positional literal or `from:`/`to:` kwargs; only literals
             // are retained (parity with the schema.rb parser).
             if let (Some(t), Some(c)) = (arg_name(0), arg_name(1)) {
-                let positional = args.get(2).and_then(default_value);
-                let to_kwarg = kwarg_value(args.iter().skip(2), "to").and_then(|v| default_value(&v));
-                let default = to_kwarg.clone().or_else(|| positional.clone());
+                let to_kwarg = kwarg_value(args.iter().skip(2), "to");
+                let value = to_kwarg.as_ref().or_else(|| args.get(2));
+                let default_for = |col: &Column| {
+                    value.and_then(|value| {
+                        if !col.array && matches!(col.col_type, ColumnType::Json | ColumnType::Jsonb) {
+                            json_default_value(value)
+                        } else {
+                            default_value(value)
+                        }
+                    })
+                };
                 if let Some(table) = schema.tables.get(&Symbol::from(t.as_str())) {
                     if table.columns.iter().any(|column| column.generated.is_some()) {
                         let mut candidate = table.clone();
                         for col in &mut candidate.columns {
                             if col.name.as_str() == c {
-                                col.default = default.clone();
+                                col.default = default_for(col);
                             }
                         }
                         validate_generated_migration_candidate(&candidate, verb, file, dialect)?;
@@ -451,7 +459,7 @@ fn apply_migration_verb(
                 if let Some(table) = schema.tables.get_mut(&Symbol::from(t.as_str())) {
                     for col in &mut table.columns {
                         if col.name.as_str() == c {
-                            col.default = default.clone();
+                            col.default = default_for(col);
                         }
                     }
                 }
@@ -1265,6 +1273,7 @@ fn reference_column(name: &str) -> Column {
 struct ColumnOpts {
     nullable: Option<bool>,
     default: Option<String>,
+    json_default: Option<String>,
     limit: Option<u32>,
     /// A present array option is non-scalar unless explicitly false or nil.
     array: bool,
@@ -1283,6 +1292,52 @@ fn default_value(node: &Node<'_>) -> Option<String> {
     bool_value(node).map(|b| b.to_string()).or_else(|| string_value(node))
 }
 
+fn json_default_value(node: &Node<'_>) -> Option<String> {
+    if node.as_nil_node().is_some() {
+        None
+    } else {
+        json_literal(node)
+    }
+}
+
+fn json_literal(node: &Node<'_>) -> Option<String> {
+    if node.as_nil_node().is_some() {
+        return Some("null".into());
+    }
+    if let Some(value) = string_value(node).or_else(|| symbol_value(node)) {
+        return serde_json::to_string(&value).ok();
+    }
+    if let Some(value) = integer_value(node) {
+        return Some(value.to_string());
+    }
+    if let Some(value) = node.as_float_node().map(|n| n.value()).filter(|n| n.is_finite()) {
+        return serde_json::to_string(&value).ok();
+    }
+    if let Some(value) = bool_value(node) {
+        return Some(value.to_string());
+    }
+    if let Some(array) = node.as_array_node() {
+        let values = array.elements().iter().map(|value| json_literal(&value)).collect::<Option<Vec<_>>>()?;
+        return Some(format!("[{}]", values.join(",")));
+    }
+    if let Some(hash) = node.as_hash_node() {
+        let entries = hash.elements().iter().map(|element| {
+            let assoc = element.as_assoc_node()?;
+            let key = assoc.key();
+            let key_kind = std::mem::discriminant(&key);
+            let key = string_value(&key).or_else(|| symbol_value(&key))
+                .or_else(|| default_value(&key))
+                .or_else(|| key.as_nil_node().map(|_| String::new()))?;
+            Some(((key_kind, key), json_literal(&assoc.value())?))
+        }).collect::<Option<IndexMap<_, _>>>()?;
+        let entries = entries.iter().map(|((_, key), value)| {
+            format!("{}:{value}", serde_json::to_string(key).unwrap())
+        }).collect::<Vec<_>>();
+        return Some(format!("{{{}}}", entries.join(",")));
+    }
+    None
+}
+
 /// Collect column options while retaining array metadata omitted by the normalized column type.
 fn parse_column_opts<'pr>(nodes: impl Iterator<Item = &'pr Node<'pr>>) -> ColumnOpts {
     let mut opts = ColumnOpts::default();
@@ -1296,6 +1351,7 @@ fn parse_column_opts<'pr>(nodes: impl Iterator<Item = &'pr Node<'pr>>) -> Column
                 "null" => opts.nullable = bool_value(value),
                 "default" => {
                     opts.default = default_value(value);
+                    opts.json_default = json_default_value(value);
                     opts.empty_array_default = value.as_array_node().is_some_and(|a| a.elements().iter().next().is_none());
                 }
                 "limit" => {
@@ -1576,7 +1632,13 @@ fn column_with_type(
         nullable: opts.nullable.unwrap_or(true),
         // An array column's `default: []` is kept as `[]`; a target that
         // stores the Array reads it (`Column::stored_default`).
-        default: if opts.array && opts.empty_array_default { Some("[]".into()) } else { opts.default.clone() },
+        default: if opts.array && opts.empty_array_default {
+            Some("[]".into())
+        } else if !opts.array && matches!(type_name, "json" | "jsonb") {
+            opts.json_default.clone()
+        } else {
+            opts.default.clone()
+        },
         primary_key: false,
         generated: None,
         generated_text_compatible,
