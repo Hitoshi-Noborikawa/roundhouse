@@ -637,7 +637,7 @@ const RUST_RUNTIME: &[RuntimeEntry] = &[
         namespace: "",
         out_path: "src/i18n_locale.rs",
         mode: Mode::Library,
-        imports: &[("I18nHost", "i18n_host"), ("raise", "errors_ext"), ("ViewHelpers", "view_helpers"), ("ActiveSupport", "active_support_inflections"), ("RubyToS", "http")],
+        imports: &[("I18nHost", "i18n_host"), ("raise", "errors_ext"), ("NotImplementedError", "errors_ext"), ("ArgumentError", "errors_ext"), ("ViewHelpers", "view_helpers"), ("ActiveSupport", "active_support_inflections"), ("RubyToS", "http")],
         prelude: NO_PRELUDE,
         extra_roots: NO_EXTRA_ROOTS,
     },
