@@ -1289,8 +1289,8 @@ fn emit_case_expr(scrutinee: &Expr, arms: &[Arm]) -> String {
             }
             other => {
                 let stub = crate::emit::diagnostics::report_unsupported(arm.body.span, "csharp", "case pattern", format!("{other:?}").split([' ', '(', '{']).next().unwrap_or("").to_string());
-                lines.push(format!("    _ => {stub},"));
-                has_default = true;
+                // Not an arm of the switch: a `_` there subsumes the arms after it, and a switch of throws alone has no type
+                return format!("((object?)null ?? {stub})");
             }
         }
     }
