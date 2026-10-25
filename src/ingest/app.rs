@@ -524,6 +524,7 @@ pub fn ingest_app_with_vfs<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResult
                 .extend(super::model::ingest_table_name_prefixes(&source, &entry.display().to_string()));
             class_prefixes.extend(super::model::ingest_class_table_prefixes(&source, &entry.display().to_string()));
             model_bases.record(&source, &mut base_pairs);
+            model_bases.record_tableless(&source);
             enum_constants.record(&source, &entry.display().to_string());
             enum_input_files.insert(entry);
         }
@@ -568,6 +569,7 @@ pub fn ingest_app_with_vfs<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResult
     }
     enum_constants.finish();
     model_bases.close_over(&base_pairs);
+    model_bases.close_over_tableless();
     for root in &roots {
         let models_dir = dir.join(root).join("models");
         if !vfs.is_dir(&models_dir) {
@@ -2320,6 +2322,9 @@ end
     super::on_load_reopen::apply_pending(&mut app);
     splice_concerns_into_models(&mut app);
     splice_concern_class_methods_into_includers(&mut app, &concern_class_method_spans);
+    // After the splice, so a concern's DSL on a tableless parent reaches
+    // its subclasses too; before the macros, which read the result.
+    super::tableless_inheritance::inherit_tableless_parents(&mut app);
     super::acts_as_votable::expand_acts_as_votable(&mut app)?;
     // After the splice: `include Discard::Model` can arrive through a concern.
     super::discard::expand_discard_models(&mut app)?;

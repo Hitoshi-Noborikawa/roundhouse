@@ -3768,6 +3768,13 @@ fn declares_abstract_class(class: &ruby_prism::ClassNode<'_>) -> bool {
 #[derive(Debug, Default, Clone)]
 pub struct ModelBases {
     names: std::collections::HashSet<String>,
+    /// Tableless models a subclass extends on the model path (see
+    /// `record_tableless`).
+    tableless: std::collections::HashSet<String>,
+    /// Every `class X < Y` under `app/models`: the child, its lexical
+    /// scope, the parent as written, and whether the child writes its
+    /// own `initialize`.
+    tableless_pairs: Vec<(String, Vec<String>, Vec<String>, bool)>,
 }
 
 impl ModelBases {
@@ -3784,7 +3791,7 @@ impl ModelBases {
         // resolution classify that class as a model rather than a
         // library class that emits `class Markdown < Record`.
         names.insert("ActionText::Record".to_string());
-        Self { names }
+        Self { names, ..Self::default() }
     }
 
     /// Is `name` (possibly after lexical qualification) an AR base?
@@ -3885,6 +3892,80 @@ impl ModelBases {
         }
     }
 
+    /// One `app/models` file's tableless model or `class X < Y` pair, for
+    /// `close_over_tableless`.
+    ///
+    /// A superclass-less class that includes `ActiveModel::Model` (or
+    /// `Validations`) is a tableless model (`classify_class_file`), and so
+    /// is a subclass of one: Rails' child inherits the parent's
+    /// attributes, validations and constructor
+    /// (`class Admin::AccountAction < Admin::BaseAction`). Ingested as a
+    /// library class, the child dropped its own `attribute` and
+    /// `validates`.
+    ///
+    /// A class that writes its own `initialize` is no parent here: its
+    /// child's synthesized constructor would shadow the inherited one.
+    pub fn record_tableless(&mut self, source: &[u8]) {
+        let result = parse(source);
+        let root = result.node();
+        // The file's primary class only: it is the one `classify_class_file`
+        // routes to the model path.
+        let Some((scope, class)) = super::util::primary_class_with_scope(&root) else { return };
+        let Some(path) = class_name_path(&class) else { return };
+        let mut full = scope.clone();
+        full.extend(path);
+        let own_initialize = defines_initialize(&class);
+        match class.superclass().and_then(|n| constant_path_of(&n)) {
+            None if includes_active_model(&class) && !own_initialize => {
+                self.tableless.insert(full.join("::"));
+            }
+            None => {}
+            Some(parent) => self.tableless_pairs.push((full.join("::"), scope, parent, own_initialize)),
+        }
+    }
+
+    /// Close the tableless set over subclasses, at any depth and in any
+    /// file order.
+    pub fn close_over_tableless(&mut self) {
+        loop {
+            let mut added = false;
+            for (child, scope, parent, own_initialize) in &self.tableless_pairs {
+                if !*own_initialize
+                    && !self.tableless.contains(child)
+                    && self.resolve_tableless(scope, parent).is_some()
+                {
+                    self.tableless.insert(child.clone());
+                    added = true;
+                }
+            }
+            if !added {
+                break;
+            }
+        }
+    }
+
+    /// The tableless model `parent_path` names from `scope`, resolved the
+    /// way Ruby's constant lookup walks the enclosing modules.
+    pub fn resolve_tableless(&self, scope: &[String], parent_path: &[String]) -> Option<String> {
+        let joined = parent_path.join("::");
+        if parent_path.len() == 1 {
+            let mut segs = scope.to_vec();
+            while !segs.is_empty() {
+                let candidate = format!("{}::{}", segs.join("::"), joined);
+                if self.tableless.contains(&candidate) {
+                    return Some(candidate);
+                }
+                segs.pop();
+            }
+        }
+        self.tableless.contains(&joined).then_some(joined)
+    }
+
+    /// Is `name` a tableless model a subclass extends on the model path?
+    pub fn is_tableless(&self, name: &str) -> bool {
+        self.tableless.contains(name)
+    }
+
     fn parent_is_known_base(&self, child: &str, parent: &str) -> bool {
         if self.names.contains(parent) {
             return true;
@@ -3970,7 +4051,25 @@ pub fn classify_class_file(source: &[u8], bases: &ModelBases) -> Option<ClassKin
         // the model path lowers its `validates` DSL and synthesizes
         // `valid?`/`errors`; the library-class path would drop them.
         None if includes_active_model(&class) => ClassKind::Model,
+        // A subclass of a tableless model is one too (`record_tableless`).
+        Some(_)
+            if class
+                .superclass()
+                .and_then(|n| constant_path_of(&n))
+                .is_some_and(|p| bases.resolve_tableless(&scope, &p).is_some()) =>
+        {
+            ClassKind::Model
+        }
         _ => ClassKind::LibraryClass,
+    })
+}
+
+/// `def initialize` in the class body.
+fn defines_initialize(class: &ruby_prism::ClassNode<'_>) -> bool {
+    let Some(body) = class.body() else { return false };
+    let Some(stmts) = body.as_statements_node() else { return false };
+    stmts.body().iter().any(|stmt| {
+        stmt.as_def_node().is_some_and(|d| d.receiver().is_none() && d.name().as_slice() == b"initialize")
     })
 }
 
