@@ -675,7 +675,7 @@ struct Ctx {
     /// The model of each `json.partial!(record, …)` record, keyed by
     /// the record's span (`record_partial::record_sites`), resolved on
     /// the analyzed template before its ivars become locals.
-    record_sites: std::rc::Rc<std::collections::HashMap<Span, Result<Vec<String>, Unresolved>>>,
+    record_sites: std::rc::Rc<record_partial::RecordSites>,
     /// The model `arg_name` is a record of, when known.
     arg_model: Option<String>,
     /// The analyzer's type of each expression of the template as
@@ -2621,10 +2621,11 @@ fn record_partial_path(
     arg: &Expr,
     as_name: Option<&Symbol>,
     resource_dir: &str,
-    sites: &std::collections::HashMap<Span, Result<Vec<String>, Unresolved>>,
-) -> Result<Vec<(String, Symbol, String)>, Unresolved> {
-    let models = sites.get(&arg.span).cloned().unwrap_or(Err(Unresolved::Unknown))?;
-    models
+    sites: &record_partial::RecordSites,
+) -> Result<RecordBranches, Unresolved> {
+    let record = sites.get(&arg.span).cloned().unwrap_or(Err(Unresolved::Unknown))?;
+    let branches = record
+        .names
         .into_iter()
         .map(|model| {
             let (path, element) = record_partial::model_partial_path(&model, resource_dir);
@@ -2633,7 +2634,15 @@ fn record_partial_path(
             }
             Ok((path, element, model))
         })
-        .collect()
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(RecordBranches { branches, switched: record.switched })
+}
+
+/// The `(path, local, model)` of each model a record may be, and
+/// whether its class is switched on.
+struct RecordBranches {
+    branches: Vec<(String, Symbol, String)>,
+    switched: bool,
 }
 
 /// The statements and the call that render `arg`'s partial. One model:
@@ -2646,8 +2655,9 @@ fn record_partial_path(
 ///   if __rec0.is_a?(Widget) then __part0 = Views::Widgets.widget_json(__rec0)
 ///   elsif __rec0.is_a?(Gadget) then __part0 = Views::Gadgets.gadget_json(__rec0)
 ///   else raise("…") end
-fn record_partial_call(arg: &Expr, branches: &[(String, Symbol, String)], ctx: &Ctx) -> (Vec<Expr>, Expr) {
-    if let [(path, local, _)] = branches {
+fn record_partial_call(arg: &Expr, record: &RecordBranches, ctx: &Ctx) -> (Vec<Expr>, Expr) {
+    let branches = &record.branches;
+    if let ([(path, local, _)], false) = (branches.as_slice(), record.switched) {
         return (Vec::new(), partial_call(path, vec![(local.clone(), arg.clone())], ctx));
     }
     let n = ctx.temps.get();
@@ -3069,7 +3079,7 @@ fn collect_local_names(e: &Expr, out: &mut std::collections::HashSet<Symbol>) {
 fn collect_partial_sites(
     e: &Expr,
     dir: &str,
-    records: &std::collections::HashMap<Span, Result<Vec<String>, Unresolved>>,
+    records: &record_partial::RecordSites,
     out: &mut Vec<((String, String), Vec<Symbol>)>,
 ) {
     if let ExprNode::Send { recv: Some(recv), block: None, .. } = &*e.node {
@@ -3081,7 +3091,7 @@ fn collect_partial_sites(
                 JbStmt::ArrayPartial { partial_path, item_var, .. } => Some((partial_path, vec![item_var])),
                 JbStmt::PairPartial { partial_path, as_name, .. } => Some((partial_path, vec![as_name])),
                 JbStmt::PartialRecord { arg, as_name } => {
-                    for (path, local, _) in record_partial_path(arg, as_name.as_ref(), dir, records).unwrap_or_default() {
+                    for (path, local, _) in record_partial_path(arg, as_name.as_ref(), dir, records).map(|r| r.branches).unwrap_or_default() {
                         let (mod_path, method) = partial_target(&path, dir);
                         out.push((partial_key(&mod_path, &method), vec![local]));
                     }

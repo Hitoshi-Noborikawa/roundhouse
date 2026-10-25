@@ -320,3 +320,81 @@ puts "a partial over a union is its record's class's partial"
         .run_ruby(&script)
         .assert_passes();
 }
+
+/// A polymorphic reader with one declared target is still a record of
+/// whatever class its row names. The class is checked, as it is for two
+/// targets: a row of another class raises rather than be rendered by
+/// the target's partial, which would read attributes that record does
+/// not have (`widgets/_widget` called on a `Gadget` row: `undefined
+/// method 'name'`). Rails renders the row's own partial; a class
+/// outside the declared targets is the refusal the lowering raises.
+#[test]
+fn a_partial_over_a_one_target_polymorphic_reader_checks_the_rows_class() {
+    let schema = r#"ActiveRecord::Schema.define do
+  create_table "widgets", force: :cascade do |t|
+    t.string "name"
+  end
+  create_table "gadgets", force: :cascade do |t|
+    t.string "label"
+  end
+  create_table "tags", force: :cascade do |t|
+    t.string "thing_type"
+    t.integer "thing_id"
+  end
+end
+"#;
+    let script = r#"
+require_relative "app/controllers/tags_controller"
+widget = Widget.create!(name: "alpha")
+gadget = Gadget.create!(label: "g1")
+w = Tag.create!(thing_type: "Widget", thing_id: widget.id)
+g = Tag.create!(thing_type: "Gadget", thing_id: gadget.id)
+def render_action(id)
+  controller = TagsController.new
+  controller.params = {"id" => id.to_s}
+  controller.process_action(:show)
+  controller.body
+end
+# Rails 8.1.4 + jbuilder 2.15.1, same row: GET /tags/1.
+expected = '{"thing":{"name":"alpha"}}'
+actual = render_action(w.id)
+raise actual.inspect unless actual == expected
+begin
+  actual = render_action(g.id)
+rescue => e
+  raise e unless e.message.include?("of a class other than Widget")
+  puts "a one-target polymorphic reader checks the row's class"
+  exit
+end
+raise "rendered a Gadget row with the Widget partial: #{actual}"
+"#;
+    emit_and_run::empty_app()
+        .write("db/schema.rb", schema)
+        .write(
+            "config/routes.rb",
+            "Rails.application.routes.draw do\n  get \"tags/:id\", to: \"tags#show\", defaults: { format: :json }\nend\n",
+        )
+        .write(
+            "app/models/application_record.rb",
+            "class ApplicationRecord < ActiveRecord::Base\n  primary_abstract_class\nend\n",
+        )
+        .write("app/models/widget.rb", "class Widget < ApplicationRecord\n  has_many :tags, as: :thing\nend\n")
+        .write("app/models/gadget.rb", "class Gadget < ApplicationRecord\nend\n")
+        .write("app/models/tag.rb", "class Tag < ApplicationRecord\n  belongs_to :thing, polymorphic: true\nend\n")
+        .write(
+            "app/controllers/application_controller.rb",
+            "class ApplicationController < ActionController::Base\nend\n",
+        )
+        .write(
+            "app/controllers/tags_controller.rb",
+            "class TagsController < ApplicationController\n  def show\n    @tag = Tag.find(params[:id])\n  end\nend\n",
+        )
+        .write("app/views/widgets/_widget.json.jbuilder", "json.name widget.name\n")
+        .write("app/views/gadgets/_gadget.json.jbuilder", "json.label gadget.label\n")
+        .write(
+            "app/views/tags/show.json.jbuilder",
+            "json.thing do\n  json.partial! @tag.thing\nend\n",
+        )
+        .run_ruby(script)
+        .assert_passes();
+}

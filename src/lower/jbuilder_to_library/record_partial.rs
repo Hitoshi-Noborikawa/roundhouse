@@ -72,21 +72,36 @@ impl Unresolved {
     }
 }
 
+/// The models a record may be, and whether its class is checked.
+#[derive(Clone, Debug)]
+pub(super) struct RecordModels {
+    pub names: Vec<String>,
+    /// The record is of a closed set (a union, a polymorphic reader),
+    /// rendered by a switch on its class that raises for any other,
+    /// even when the set has one member.
+    pub switched: bool,
+}
+
+pub(super) type RecordSites = HashMap<Span, Result<RecordModels, Unresolved>>;
+
 /// The models the record of every `json.partial!(record, …)` site in
 /// a template body may be, keyed by the record argument's span: one
 /// model, or the closed set of a union or a polymorphic reader, which
 /// the lowering renders by a switch on the record's class. Block
 /// parameters over a collection are bound to its element model as the
 /// walk enters the block.
-pub(super) fn record_sites(body: &Expr, models: &[Model]) -> HashMap<Span, Result<Vec<String>, Unresolved>> {
+pub(super) fn record_sites(body: &Expr, models: &[Model]) -> RecordSites {
     let mut out = HashMap::new();
     let mut env = HashMap::new();
     walk(body, models, &mut env, &mut out);
     out.into_iter()
         .map(|(span, r)| {
             let r = match r {
-                Ok(m) => Ok(vec![m]),
-                Err(Unresolved::Set(set)) => Ok(set),
+                Ok(m) => Ok(RecordModels { names: vec![m], switched: false }),
+                // A closed set is switched on the record's class even
+                // with one member: a polymorphic reader with one
+                // declared target still holds a row of any class.
+                Err(Unresolved::Set(set)) => Ok(RecordModels { names: set, switched: true }),
                 Err(why) => Err(why),
             };
             (span, r)
@@ -301,6 +316,14 @@ fn resolve(arg: &Expr, models: &[Model], env: &Env) -> Result<String, Unresolved
     if let Some(name) = bare_name(arg) {
         if let Some(m) = env.get(&name) {
             return checked(m, models).unwrap_or(Err(Unresolved::Unknown));
+        }
+    }
+    // A polymorphic reader's type is `Target | nil` for one declared
+    // target, the same as a plain `belongs_to`'s, so the type cannot
+    // say the row may be of another class: the reader's declaration can.
+    if matches!(&*arg.node, ExprNode::Send { recv: Some(_), .. } | ExprNode::BoolOp { .. }) {
+        if let Err(set @ Unresolved::Set(_)) = structural(arg, models, env) {
+            return Err(set);
         }
     }
     if let Some(r) = arg.ty.as_ref().and_then(|t| model_of_ty(t, models)) {
