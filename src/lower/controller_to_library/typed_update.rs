@@ -186,7 +186,7 @@ pub(super) fn synthesize_demanded_to_attrs(
             if let Some(spec) = specs.by_class(&params_lc.name) {
                 params_lc
                     .methods
-                    .push(synth_to_attrs(&spec.class_id, &spec.fields));
+                    .push(synth_to_attrs(&spec.class_id, &spec.scalar_fields()));
             }
         }
     }

@@ -202,8 +202,13 @@ fn a_hash_valued_key_does_not_sink_the_permit() {
     );
 }
 
+/// The ruby family carries `settings: {}` (#1338): a
+/// `Roundhouse::ParamValue` member read by `Params.nested`, as Rails'
+/// `permit` keeps any hash there, and no "non-scalar" ledger entry.
+/// Strict targets keep the drop and its warning
+/// (`tests/params_nested_carry.rs`).
 #[test]
-fn the_hash_valued_key_is_dropped_and_ledgered() {
+fn the_hash_valued_key_is_carried() {
     let (files, diags) = roundhouse::emit::diagnostics::scope(|| {
         let app = hash_lowered();
         ruby::emit_lowered_controllers(&app)
@@ -215,13 +220,12 @@ fn the_hash_valued_key_is_dropped_and_ledgered() {
         .expect("emitted params record");
     assert!(params.contains("def name"), "the scalar half is carried:\n{params}");
     assert!(
-        !params.contains("settings"),
-        "a nested hash has no slot in a String-fielded record:\n{params}"
+        params.contains(r#"Params.nested(sub, "settings", [], "deep")"#),
+        "the nested hash is read as submitted:\n{params}"
     );
     assert!(
-        diags.iter().any(|d| d.message.contains("permitted key `settings`")
-            && d.message.contains("non-scalar")),
-        "the dropped key is on the ledger, not silent: {:?}",
+        !diags.iter().any(|d| d.message.contains("permitted key `settings`")),
+        "a carried key is not ledgered as dropped: {:?}",
         diags.iter().map(|d| d.message.clone()).collect::<Vec<_>>(),
     );
 }

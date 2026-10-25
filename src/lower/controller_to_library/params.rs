@@ -124,6 +124,35 @@ pub struct ParamsSpec {
     /// the models are known; empty until then, which is every field a
     /// String — the shape every emitter already compiles.
     pub file_fields: std::collections::BTreeSet<Symbol>,
+    /// The scalar permitted fields the list was recognized with, before
+    /// [`ParamsSpecs::carry_nested`] adds carried nested keys to
+    /// `fields`: what a call site's own `(resource, fields)` matches.
+    pub key_fields: Vec<Symbol>,
+    /// Non-scalar keys whose filter this lowering can reproduce
+    /// (`k: [[:a, :b]]`, `k: [:a, :b]`, `k: {}`), in source order.
+    pub nested_candidates: Vec<NestedKey>,
+    /// The candidates carried as fields (ruby family): each a
+    /// `Roundhouse::ParamValue` member read with `Params.nested`.
+    pub nested_fields: BTreeMap<Symbol, NestedKey>,
+}
+
+impl ParamsSpec {
+    /// `fields` without the carried nested keys: the String-valued ones.
+    pub fn scalar_fields(&self) -> Vec<Symbol> {
+        self.fields.iter().filter(|f| !self.nested_fields.contains_key(*f)).cloned().collect()
+    }
+}
+
+/// One non-scalar permitted key and how Rails' `permit` filters it:
+/// `mode` as `Params.nested` takes it ("list", "any", "hash", "deep"),
+/// `allowed` the key's flat list of scalar sub-keys.
+#[derive(Clone, Debug, PartialEq)]
+pub struct NestedKey {
+    pub name: Symbol,
+    pub allowed: Vec<String>,
+    pub mode: &'static str,
+    pub controller: ClassId,
+    pub span: Span,
 }
 
 /// Every distinct `(resource, fields)` permit list in the app, deduped.
@@ -159,7 +188,7 @@ impl ParamsSpecs {
     pub fn find(&self, resource: &Symbol, fields: &[Symbol]) -> Option<&ParamsSpec> {
         self.specs
             .iter()
-            .find(|s| &s.resource == resource && s.fields == fields)
+            .find(|s| &s.resource == resource && s.key_fields == fields)
     }
 
     pub fn by_class(&self, class_id: &ClassId) -> Option<&ParamsSpec> {
@@ -200,6 +229,96 @@ impl ParamsSpecs {
             }
         }
     }
+
+    /// Carry each spec's nested candidates as fields (`on`, the ruby
+    /// family, whose runtime reads them with `Params.nested`), or leave
+    /// them dropped; `warn` ledgers each dropped one, which the
+    /// controller-side lowering does once per target.
+    pub fn carry_nested(&mut self, on: bool, warn: bool) {
+        for spec in &mut self.specs {
+            for candidate in spec.nested_candidates.clone() {
+                if on {
+                    if !spec.fields.contains(&candidate.name) {
+                        spec.fields.push(candidate.name.clone());
+                    }
+                    spec.nested_fields.insert(candidate.name.clone(), candidate);
+                } else if warn {
+                    warn_nested_keys(&spec.resource, std::slice::from_ref(&candidate.name), &candidate.controller, candidate.span);
+                }
+            }
+        }
+    }
+}
+
+/// The non-scalar keys of the permit / expect list at (or under) `expr`
+/// whose filter `Params.nested` reproduces: a flat list of Symbols
+/// (`k: [:a, :b]`; "any" under `permit`, "hash" under `expect`), that
+/// list wrapped once (`k: [[:a, :b]]`, "list"), or `k: {}` ("deep").
+fn nested_candidates(expr: &Expr, controller: &ClassId) -> Vec<NestedKey> {
+    fn find_call(e: &Expr) -> Option<(&str, &[Expr])> {
+        let ExprNode::Send { recv, method, args, .. } = &*e.node else { return None };
+        if matches!(method.as_str(), "permit" | "expect") {
+            return Some((method.as_str(), args));
+        }
+        let mut found = None;
+        if let Some(r) = recv {
+            found = find_call(r);
+        }
+        if found.is_none() {
+            for a in args {
+                if let Some(f) = find_call(a) {
+                    found = Some(f);
+                    break;
+                }
+            }
+        }
+        found
+    }
+    let Some((method, args)) = find_call(expr) else { return Vec::new() };
+    // The list the keys live in: `permit`'s own args, or the Array under
+    // `expect(resource: [...])`.
+    let list: Vec<&Expr> = if method == "expect" {
+        let Some(ExprNode::Hash { entries, .. }) = args.first().map(|a| &*a.node) else { return Vec::new() };
+        let Some((_, v)) = entries.first() else { return Vec::new() };
+        let ExprNode::Array { elements, .. } = &*v.node else { return Vec::new() };
+        elements.iter().collect()
+    } else {
+        match args {
+            [one] => match &*one.node {
+                ExprNode::Array { elements, .. } => elements.iter().collect(),
+                _ => vec![one],
+            },
+            _ => args.iter().collect(),
+        }
+    };
+    let Some(ExprNode::Hash { entries, .. }) = list.last().map(|e| &*e.node) else { return Vec::new() };
+    let syms = |elements: &[Expr]| -> Option<Vec<String>> {
+        elements.iter().map(|e| sym_of(e).map(|s| s.as_str().to_string())).collect()
+    };
+    let mut out = Vec::new();
+    for (k, v) in entries {
+        let Some(name) = sym_of(k) else { continue };
+        let (allowed, mode) = match &*v.node {
+            ExprNode::Hash { entries, .. } if entries.is_empty() => (Vec::new(), "deep"),
+            ExprNode::Array { elements, .. } => match elements.as_slice() {
+                [] => continue,
+                [inner] if matches!(&*inner.node, ExprNode::Array { .. }) => {
+                    let ExprNode::Array { elements, .. } = &*inner.node else { continue };
+                    match syms(elements) {
+                        Some(a) if !a.is_empty() => (a, "list"),
+                        _ => continue,
+                    }
+                }
+                _ => match syms(elements) {
+                    Some(a) => (a, if method == "expect" { "hash" } else { "any" }),
+                    None => continue,
+                },
+            },
+            _ => continue,
+        };
+        out.push(NestedKey { name, allowed, mode, controller: controller.clone(), span: expr.span });
+    }
+    out
 }
 
 impl ParamsSpec {
@@ -212,8 +331,10 @@ impl ParamsSpec {
 /// String — the request's own shape — or, for a `has_one_attached`
 /// field, the uploaded file a multipart part became (nil when the
 /// request carried none).
-fn field_ty(spec: &ParamsSpec, field: &Symbol) -> Ty {
-    if spec.file_fields.contains(field) {
+pub(crate) fn field_ty(spec: &ParamsSpec, field: &Symbol) -> Ty {
+    if spec.nested_fields.contains_key(field) {
+        param_value_ty()
+    } else if spec.file_fields.contains(field) {
         Ty::Union { variants: vec![uploaded_file_ty(), Ty::Nil].into() }
     } else {
         Ty::Str
@@ -261,6 +382,24 @@ fn field_reads(spec: &ParamsSpec, field: &Symbol, sub: Expr, span: Span) -> (Exp
             ret,
         )
     };
+    if let Some(nested) = spec.nested_fields.get(field) {
+        let allowed = with_ty(
+            Expr::new(
+                span,
+                ExprNode::Array {
+                    elements: nested.allowed.iter().map(|a| str_lit(a)).collect(),
+                    style: crate::expr::ArrayStyle::default(),
+                },
+            ),
+            Ty::Array { elem: Ty::Str.into() },
+        );
+        let args = vec![sub, str_lit(field.as_str()), allowed, str_lit(nested.mode)];
+        let params = vec![Symbol::from("Params")];
+        return (
+            call(params.clone(), "nested_provided", args.clone(), Ty::Bool),
+            call(params, "nested", args, param_value_ty()),
+        );
+    }
     if spec.file_fields.contains(field) {
         let uploaded: Vec<Symbol> =
             uploaded_file_class().0.as_str().split("::").map(Symbol::from).collect();
@@ -484,6 +623,9 @@ pub fn specs_from_lists(lists: &[(Symbol, Vec<Symbol>)]) -> ParamsSpecs {
                 declaring: Vec::new(),
                 is_canonical: true,
                 file_fields: std::collections::BTreeSet::new(),
+                key_fields: fields.clone(),
+                nested_candidates: Vec::new(),
+                nested_fields: BTreeMap::new(),
             })
             .collect(),
         model_resources: None,
@@ -505,6 +647,7 @@ fn record(
     controller: &ClassId,
     span: Span,
     wants: Wants,
+    candidates: Vec<NestedKey>,
     index: &mut BTreeMap<(Symbol, Vec<Symbol>), usize>,
     specs: &mut Vec<ParamsSpec>,
 ) {
@@ -512,6 +655,11 @@ fn record(
     match index.get(&key) {
         Some(&i) => {
             specs[i].wants_except |= wants.except;
+            for candidate in candidates {
+                if !specs[i].nested_candidates.iter().any(|c| c.name == candidate.name) {
+                    specs[i].nested_candidates.push(candidate);
+                }
+            }
             if !specs[i].declaring.contains(controller) {
                 specs[i].declaring.push(controller.clone());
             }
@@ -524,7 +672,7 @@ fn record(
                 // the resource carries one list or several.
                 class_id: ClassId(Symbol::from("")),
                 resource,
-                fields,
+                fields: fields.clone(),
                 span,
                 wants_except: wants.except,
                 wants_create: false,
@@ -536,6 +684,9 @@ fn record(
                 declaring: vec![controller.clone()],
                 is_canonical: false,
                 file_fields: std::collections::BTreeSet::new(),
+                key_fields: fields.clone(),
+                nested_candidates: candidates,
+                nested_fields: BTreeMap::new(),
             });
         }
     }
@@ -557,14 +708,19 @@ fn collect_from_expr(
         };
         if wants.except {
             if let Some((resource, fields)) = match_permit_call(recv) {
-                record(resource, fields, controller, expr.span, wants, index, specs);
+                record(resource, fields, controller, expr.span, wants, Vec::new(), index, specs);
             }
         }
     }
     let found = match_reverse_merge(expr).or_else(|| match_permit_call_full(expr));
     if let Some((resource, fields, nested)) = found {
-        warn_nested_keys(&resource, &nested, controller, expr.span);
-        record(resource, fields, controller, expr.span, Wants::default(), index, specs);
+        let candidates = nested_candidates(expr, controller);
+        // A key no candidate reproduces stays dropped wherever it lowers;
+        // a candidate's fate is the target's (`ParamsSpecs::carry_nested`).
+        let unsupported: Vec<Symbol> =
+            nested.into_iter().filter(|k| !candidates.iter().any(|c| &c.name == k)).collect();
+        warn_nested_keys(&resource, &unsupported, controller, expr.span);
+        record(resource, fields, controller, expr.span, Wants::default(), candidates, index, specs);
         // Stop here. The merge form (`permit(...).merge(k: v)`) matched
         // this node with the WIDER field set; recursing would reach the
         // inner bare permit and — now that specs key on the field list —
@@ -1391,7 +1547,7 @@ fn build_params_class(spec: &ParamsSpec) -> LibraryClass {
         methods.push(synth_as_json(&spec.class_id));
     }
     if spec.wants_to_attrs {
-        methods.push(synth_to_attrs(&spec.class_id, &spec.fields));
+        methods.push(synth_to_attrs(&spec.class_id, &spec.scalar_fields()));
     }
     if spec.wants_except {
         methods.push(synth_except(spec));
@@ -1461,7 +1617,7 @@ fn synth_params_initialize(spec: &ParamsSpec) -> MethodDef {
     }
     for field in fields {
         // A file field's "nothing" is nil, not "" — see `field_ty`.
-        let rhs = if spec.file_fields.contains(field) {
+        let rhs = if spec.file_fields.contains(field) || spec.nested_fields.contains_key(field) {
             expr(ExprNode::Lit { value: Literal::Nil }, Some(Ty::Nil))
         } else {
             expr(ExprNode::Lit { value: Literal::Str { value: String::new() } }, Some(Ty::Str))
@@ -2153,9 +2309,12 @@ pub(super) fn expr(node: ExprNode, ty: Option<Ty>) -> Expr {
 
 fn synth_to_h(spec: &ParamsSpec) -> MethodDef {
     let owner = &spec.class_id;
+    // A carried nested key is no String: the String-valued hash leaves it
+    // out, and the model reads it through its own member.
     let entries: Vec<(Expr, Expr)> = spec
         .fields
         .iter()
+        .filter(|field| !spec.nested_fields.contains_key(*field))
         .map(|field| {
             let key = expr(
                 ExprNode::Lit { value: Literal::Str { value: field.as_str().to_string() } },

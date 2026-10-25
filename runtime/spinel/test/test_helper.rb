@@ -2555,6 +2555,9 @@ module RequestDispatch
     hash.each do |k, v|
       if v.is_a?(Hash)
         out[k.to_s] = stringify_keys(v)
+      elsif v.is_a?(Array)
+        # A form's `items[][name]` arrives as String-keyed hashes too.
+        out[k.to_s] = v.map { |item| item.is_a?(Hash) ? stringify_keys(item) : item }
       else
         out[k.to_s] = v
       end
