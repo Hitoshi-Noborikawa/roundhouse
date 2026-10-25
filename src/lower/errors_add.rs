@@ -270,6 +270,7 @@ fn rewrite_errors_add(expr: &mut Expr, labels: &Labels, diags: &mut Vec<Diagnost
     }
     let reader = recv.as_ref().expect("checked errors reader");
     let i18n = labels.model(reader);
+    let mut hoisted: Option<Expr> = None;
     // Rails looks a Symbol message (or none, `:invalid`) up as an error type.
     let kind = match msg.as_ref().map(|m| &*m.node) {
         None => Some("invalid".to_string()),
@@ -285,7 +286,21 @@ fn rewrite_errors_add(expr: &mut Expr, labels: &Labels, diags: &mut Vec<Diagnost
             parts_expr(span, i18n.error(field.as_str(), &kind, &Default::default()), reader_owner.as_ref(), field.as_str()),
         ),
         None => {
-            let bare = msg.clone().unwrap_or_else(|| unreachable!("a missing message is `:invalid`"));
+            let mut bare = msg.clone().unwrap_or_else(|| unreachable!("a missing message is `:invalid`"));
+            // A computed String message (`I18n.t(…)`, an interpolation of
+            // calls) is evaluated once into a local, which the record then
+            // keeps twice. Any other one stays residue.
+            if !reads_without_effect_deep(&bare) && matches!(bare.ty, Some(crate::ty::Ty::Str)) {
+                let local = Symbol::from(format!("__error_message_{}", span.start));
+                let mut read = Expr::new(span, ExprNode::Var { id: crate::ident::VarId(0), name: local.clone() });
+                read.ty = Some(crate::ty::Ty::Str);
+                hoisted = Some(Expr::new(
+                    span,
+                    ExprNode::Assign { target: crate::expr::LValue::Var { id: crate::ident::VarId(0), name: local }, value: bare },
+                ));
+                bare = read;
+                msg = Some(bare.clone());
+            }
             if !reads_without_effect_deep(&bare) {
                 diags.push(residue(expr, "the message is not a plain read, and the record keeps it twice"));
                 *expr.node = ExprNode::Send {
@@ -318,7 +333,11 @@ fn rewrite_errors_add(expr: &mut Expr, labels: &Labels, diags: &mut Vec<Diagnost
     );
     push_message.ty = recv_ty.clone();
     // Options other than `message:` stayed residue above, so nothing sits beside the type.
-    *expr = attributed_push(push_message, owner, field.as_str(), kind, symbolic, true, bare, span);
+    let pushed = attributed_push(push_message, owner, field.as_str(), kind, symbolic, true, bare, span);
+    *expr = match hoisted {
+        Some(assign) => Expr::new(span, ExprNode::Seq { exprs: vec![assign, pushed] }),
+        None => pushed,
+    };
 }
 
 fn is_errors_ty(e: &Expr) -> bool {
