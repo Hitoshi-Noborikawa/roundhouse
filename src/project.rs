@@ -1890,6 +1890,11 @@ fn report_ruby_only_sends(app: &App, target: BuildTarget) {
                 (Some(_), "with_object") if matches!(recv_ty, Some(Ty::Array { .. })) => Some("Enumerator#with_object"),
                 (Some(_), "include?") if matches!(recv_ty, Some(Ty::Class { id, .. })
                     if matches!(id.0.as_str(), "Class" | "Module")) => Some("Module#include?"),
+                // The uri library is the ruby family's and spinel's `packages/uri`; no strict runtime carries it.
+                (Some(_), "escape") if matches!(recv_ty, Some(Ty::Class { id, .. }) if id.0.as_str() == "URI::RFC2396_Parser") => Some("URI::RFC2396_Parser#escape"),
+                (Some(_), "unescape") if matches!(recv_ty, Some(Ty::Class { id, .. }) if id.0.as_str() == "URI::RFC2396_Parser") => Some("URI::RFC2396_Parser#unescape"),
+                (Some(_), "escape") if matches!(recv_ty, Some(Ty::Class { id, .. }) if id.0.as_str() == "URI::RFC3986_Parser") => Some("URI::RFC3986_Parser#escape"),
+                (Some(_), "unescape") if matches!(recv_ty, Some(Ty::Class { id, .. }) if id.0.as_str() == "URI::RFC3986_Parser") => Some("URI::RFC3986_Parser#unescape"),
                 _ => None,
             };
             if let Some(construct) = construct {

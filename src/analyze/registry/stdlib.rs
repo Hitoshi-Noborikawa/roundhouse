@@ -1093,6 +1093,9 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
     ], &[]);
     // A class test such as `URI.parse(url).is_a?(URI::HTTP)` names the
     // real bundled class, without claiming any extra instance methods.
+    for parser in ["URI::RFC2396_Parser", "URI::RFC3986_Parser"] {
+        register_stdlib_class(classes, parser, &[], &[("escape", Ty::Str), ("unescape", Ty::Str)]);
+    }
     register_stdlib_class(classes, "URI::HTTP", &[], &[]);
     register_stdlib_class(classes, "URI::HTTPS", &[], &[]);
     // `res.is_a?(Net::HTTPSuccess)` — lobsters' Github; spinel's

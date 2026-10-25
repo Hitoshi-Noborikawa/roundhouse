@@ -14523,6 +14523,59 @@ raise "random_bytes: #{byte.inspect}" unless byte.is_a?(String) && byte.bytesize
     run.assert_passes();
 }
 
+/// `URI::RFC2396_PARSER.escape(url)` (lobsters' webmention job) and its
+/// siblings are the uri library's parsers: they run on the ruby family,
+/// and a strict target, with no uri runtime, reports the call.
+fn uri_parser_app() -> emit_and_run::Overlay {
+    emit_and_run::empty_app()
+        .write(
+            "app/models/application_record.rb",
+            "class ApplicationRecord < ActiveRecord::Base\n  self.abstract_class = true\nend\n",
+        )
+        .write(
+            "app/models/linker.rb",
+            r#"class Linker
+  def self.rfc2396(url)
+    URI::RFC2396_PARSER.escape(url.to_s)
+  end
+
+  def self.rfc3986(url)
+    URI::RFC3986_PARSER.unescape(url.to_s)
+  end
+
+  def self.default(url)
+    URI::DEFAULT_PARSER.escape(url.to_s)
+  end
+end
+"#,
+        )
+        .write(
+            "db/schema.rb",
+            "ActiveRecord::Schema[8.1].define(version: 2026_01_01_000000) do\n  create_table \"widgets\", force: :cascade do |t|\n    t.string \"name\"\n  end\nend\n",
+        )
+}
+
+#[test]
+fn uri_parser_constants_escape_on_the_ruby_family() {
+    uri_parser_app()
+        .run_ruby(
+            r##"raise "rfc2396" unless Linker.rfc2396("a b/é") == "a%20b/%C3%A9"
+raise "rfc3986" unless Linker.rfc3986("a%20b") == "a b"
+raise "default" unless Linker.default("a b") == "a%20b"
+"##,
+        )
+        .assert_passes();
+}
+
+#[test]
+fn uri_parser_calls_are_reported_on_a_strict_target() {
+    let (_emitted, errors) = uri_parser_app().emit(roundhouse::project::BuildTarget::Rust);
+    for call in ["URI::RFC2396_Parser#escape", "URI::RFC3986_Parser#unescape", "URI::RFC3986_Parser#escape"] {
+        assert!(errors.iter().any(|e| e.contains(&format!("{call} not supported (rust)"))), "{call}: {errors:#?}");
+    }
+    assert!(!errors.iter().any(|e| e.contains("constant not supported")), "{errors:#?}");
+}
+
 /// `module_function :name` promotes the def to the module, and ingest
 /// retargets the sibling bare call to `Owner.name`. That receiver is
 /// generated, not written, so it must resolve rather than emit a refusal
