@@ -609,7 +609,7 @@ mod tests {
 
     #[test]
     fn a_load_once_method_s_ivars_are_process_wide_and_a_toggled_flag_s_are_not() {
-        let src = b"module Cache\n  def self.table\n    load unless @loaded == true\n    @table\n  end\n\n  def self.load\n    @table = { \"a\" => 1 }\n    @loaded = true\n  end\n\n  def self.render\n    @rendering = true\n    @frame = 1\n    @rendering = false\n  end\n\n  def self.rendering?\n    @rendering == true\n  end\nend\n";
+        let src = b"module Cache\n  def self.table\n    load unless @loaded == true\n    @table\n  end\n\n  def self.load\n    @table = { \"a\" => 1 }\n    @loaded = true\n  end\n\n  def self.render\n    @rendering = true\n    @frame = 1\n    @rendering = false\n  end\n\n  def self.rendering?\n    @rendering == true\n  end\n\n  def self.stamp\n    @memo = 1\n    @stamped = true\n  end\nend\n";
         let classes = crate::ingest::ingest_library_classes(src, "cache.rb").expect("ingest");
         let names = load_once_ivars(&classes[0]);
         let mut names: Vec<&str> = names.iter().map(String::as_str).collect();
@@ -688,19 +688,20 @@ fn load_once_ivars(class: &LibraryClass) -> std::collections::HashSet<String> {
         }
         e.node.for_each_child(&mut |c| writes(c, out));
     }
-    // Reads of `@name` other than as the left of `== true`
-    fn other_reads(e: &crate::expr::Expr, name: &str, found: &mut bool) {
+    // Reads of `@name` other than as the left of `== true`, and how many of those guards there are
+    fn other_reads(e: &crate::expr::Expr, name: &str, found: &mut bool, guards: &mut usize) {
         if let ExprNode::Send { recv: Some(r), method, args, .. } = &*e.node
             && method.as_str() == "=="
             && matches!(&*r.node, ExprNode::Ivar { name: n } if n.as_str() == name)
             && matches!(args.as_slice(), [a] if matches!(&*a.node, ExprNode::Lit { value: Literal::Bool { value: true } }))
         {
+            *guards += 1;
             return;
         }
         if matches!(&*e.node, ExprNode::Ivar { name: n } if n.as_str() == name) {
             *found = true;
         }
-        e.node.for_each_child(&mut |c| other_reads(c, name, found));
+        e.node.for_each_child(&mut |c| other_reads(c, name, found, guards));
     }
     let mut all_writes = Vec::new();
     for m in &class.methods {
@@ -713,10 +714,12 @@ fn load_once_ivars(class: &LibraryClass) -> std::collections::HashSet<String> {
         let flags: Vec<&String> = w.iter().filter(|(_, t)| *t).map(|(n, _)| n).collect();
         let once = flags.iter().any(|flag| {
             let mut found = all_writes.iter().any(|(n, t)| n == *flag && !t);
+            let mut guards = 0;
             for other in &class.methods {
-                other_reads(&other.body, flag, &mut found);
+                other_reads(&other.body, flag, &mut found, &mut guards);
             }
-            !found
+            // Not a flag nothing reads: without a guard, the method runs on every request
+            !found && guards > 0
         });
         if once {
             out.extend(w.into_iter().map(|(n, _)| n));
