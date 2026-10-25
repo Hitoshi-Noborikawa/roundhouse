@@ -16,6 +16,8 @@ mod pundit_app;
 mod session_cookie_key;
 #[path = "emit_and_run/inertia_runtime_props.rs"]
 mod inertia_runtime_props;
+#[path = "emit_and_run/form_builder_fields.rs"]
+mod form_builder_fields;
 #[path = "emit_and_run/session_options_key.rs"]
 mod session_options_key;
 #[path = "emit_and_run/httpdate_from_now.rs"]

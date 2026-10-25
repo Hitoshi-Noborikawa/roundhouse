@@ -49,6 +49,75 @@ fn attribute_macro_refusals(app: &App) -> Vec<Diagnostic> {
 }
 
 // One error at each declaration, not one per helper call: the helpers stay typed so their callers still infer
+/// A `FormBuilder` call the form lowering does not expand. The registry
+/// types the whole Rails builder surface (`registry::view`) so a form
+/// body types, but `lower::view_to_library` expands only the methods
+/// `classify_form_builder_method` names; any other survives into the
+/// emit as a literal `form.<method>(…)` with no builder behind it, and
+/// the page fails at render. Typed is not supported (invariant 6), so
+/// each such call is refused here — as is an expanded field given an
+/// option its Rails `render` rewrites and the lowering would pass
+/// through as a plain attribute.
+fn unlowered_form_builder_calls(app: &App) -> Vec<Diagnostic> {
+    fn visit(expr: &Expr, out: &mut Vec<Diagnostic>) {
+        if let ExprNode::Send { recv: Some(r), method, args, .. } = &*expr.node
+            && !expr.span.is_synthetic()
+            && matches!(&r.ty, Some(Ty::Class { id, .. }) if id.0.as_str() == "ActionView::Helpers::FormBuilder")
+            && !FORM_BUILDER_HANDLED_ELSEWHERE.contains(&method.as_str())
+        {
+            let m = method.as_str();
+            if crate::lower::classify_form_builder_method(m).is_none() {
+                out.push(Diagnostic::unsupported(
+                    expr.span,
+                    None,
+                    "form builder method",
+                    format!(
+                        "`form.{m}` has no lowering (the form lowering expands label, text_field, text_area, password_field, hidden_field, email_field, url_field, number_field, range_field, search_field, telephone_field/phone_field, check_box, radio_button, select, file_field, rich_text_area, button, submit and fields_for), so the call reaches no method at render"
+                    ),
+                ));
+            } else if let Some(opt) = rewritten_option(m, args) {
+                out.push(Diagnostic::unsupported(
+                    expr.span,
+                    None,
+                    "form builder option",
+                    format!(
+                        "`form.{m}` with `{opt}:` is not modeled: Rails' field rewrites that option when it renders, and the lowering would write it as a plain attribute"
+                    ),
+                ));
+            }
+        }
+        expr.node.for_each_child(&mut |child| visit(child, out));
+    }
+    /// The option of `method`'s call that Rails' `Tags::*#render`
+    /// rewrites: `NumberField` (and `RangeField`) turn `in:`/`within:`
+    /// into `min`/`max`; `SearchField` expands `autosave:`/`onsearch:`.
+    fn rewritten_option(method: &str, args: &[Expr]) -> Option<&'static str> {
+        let rewritten: &[&'static str] = match method {
+            "number_field" | "range_field" => &["in", "within"],
+            "search_field" => &["autosave", "onsearch"],
+            _ => return None,
+        };
+        let (_, opts) = crate::lower::classify_form_builder_args(args);
+        opts?.iter().find_map(|(k, _)| {
+            let key = match &*k.node {
+                ExprNode::Lit { value: crate::expr::Literal::Sym { value } } => value.as_str(),
+                ExprNode::Lit { value: crate::expr::Literal::Str { value } } => value.as_str(),
+                _ => return None,
+            };
+            rewritten.iter().find(|o| **o == key).copied()
+        })
+    }
+    let mut out = Vec::new();
+    for view in &app.views {
+        visit(&view.body, &mut out);
+    }
+    out
+}
+
+/// Builder methods the view lowering serves outside
+/// `classify_form_builder_method`.
+const FORM_BUILDER_HANDLED_ELSEWHERE: &[&str] = &["object"];
+
 fn devise_refusals(app: &App) -> Vec<Diagnostic> {
     let mut out = Vec::new();
     if app.gem_lock.as_ref().is_some_and(|lock| lock.is_in_repo("devise") || lock.is_source("devise")) {
@@ -295,6 +364,7 @@ pub fn diagnose_with_coverage(app: &App) -> (Vec<Diagnostic>, PreloadCoverage) {
         }
     }
     out.extend(attribute_macro_refusals(app));
+    out.extend(unlowered_form_builder_calls(app));
     out.extend(devise_refusals(app));
     out.extend(overridden_synthesized_accessors(app));
     out.extend(runtime_defined_surfaces(app));
