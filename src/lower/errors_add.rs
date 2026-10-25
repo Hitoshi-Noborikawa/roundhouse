@@ -151,7 +151,9 @@ impl LabelData {
                 keys: Vec::new(),
                 catalog: app.i18n.subset_for("activerecord", &[]),
             },
-            catalog: app.i18n.clone(),
+            // Rails' English for an app built outside ingest, as the
+            // literal path's `ModelI18n` reads it.
+            catalog: app.i18n.or_rails_default().clone(),
             names: app
                 .models
                 .iter()
