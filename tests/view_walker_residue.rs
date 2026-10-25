@@ -209,6 +209,13 @@ end
         body.contains("__ck_c_"),
         "collection expression is bound once before the gate:\n{body}"
     );
+    // The uncached paths preload the collection's records, never the
+    // collection: `preload_associations` takes an Array, and the Spinel
+    // build read a Relation handed to it as one (campfire's sidebar crashed).
+    for (at, _) in body.match_indices(".preload_associations ") {
+        let arg = body[at + ".preload_associations ".len()..].split(|c: char| c == ' ' || c == '\n').next().unwrap_or("");
+        assert!(arg.starts_with("__ck_misses_") || arg.ends_with(".to_a"), "preload_associations takes records, got `{arg}`:\n{body}");
+    }
     assert!(
         residues(&diags).is_empty(),
         "cached: true is not residue: {diags:?}"

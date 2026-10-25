@@ -368,7 +368,7 @@ fn named_collection_item_render(
 /// ```ruby
 /// c = <collection>
 /// if ActionView::ViewHelpers.collection_caching?
-///   c.preload_associations(c) if c.respond_to?(:preload_associations)
+///   c.preload_associations(c.to_a) if c.respond_to?(:preload_associations)
 ///   keys = []
 ///   c.each { |item| keys << ActionView::ViewHelpers.collection_fragment_key("x/y", <key>) }
 ///   hits = ActionView::ViewHelpers.collection_fragment_read_multi(keys)
@@ -379,7 +379,7 @@ fn named_collection_item_render(
 ///   end
 ///   ActionView::ViewHelpers.collection_rendered("app/views/x/_y.html.erb", hits)
 /// else
-///   c.preload_associations(c) if c.respond_to?(:preload_associations)
+///   c.preload_associations(c.to_a) if c.respond_to?(:preload_associations)
 ///   c.each { |y| io << <render y> }
 /// end
 /// ```
@@ -461,10 +461,11 @@ fn wrap_keyed_cached_collection(
                 None,
                 false,
             ),
+            // Not the collection itself: `preload_associations` takes its records, and a Spinel build reads an argument typed Array as one
             then_branch: send(
                 Some(var_ref(coll.clone())),
                 "preload_associations",
-                vec![var_ref(coll.clone())],
+                vec![send(Some(var_ref(coll.clone())), "to_a", Vec::new(), None, false)],
                 None,
                 false,
             ),
