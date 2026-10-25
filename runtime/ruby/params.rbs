@@ -1,4 +1,6 @@
 module Params
+  def self.filtered_values: (Hash[String, Roundhouse::ParamValue], Array[String], Hash[String, Array[String]], Hash[String, String]) -> Hash[String, Roundhouse::ParamValue]
+  def self.nested_lookup: (Roundhouse::ParamValue, String) -> Roundhouse::ParamValue
   def self.wrap: (Hash[String, Roundhouse::ParamValue], ActionDispatch::Request?, String, bool, Array[String], Array[String]) -> Hash[String, Roundhouse::ParamValue]
   def self.sub: (Hash[String, Roundhouse::ParamValue], String) -> Hash[String, Roundhouse::ParamValue]
   def self.str: (Hash[String, Roundhouse::ParamValue], String, String) -> String

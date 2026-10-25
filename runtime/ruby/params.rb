@@ -28,6 +28,30 @@
 # per-target FFI and this is pure logic over the union — so it belongs
 # in the transpiled runtime rather than in twelve hand-written copies.
 module Params
+  def self.filtered_values(sub, fields, children, modes)
+    filtered = Params.allowed_scalars(sub, fields)
+    children.each do |key, allowed|
+      mode = modes.fetch(key, "hash")
+      if mode == "scalars"
+        filtered[key] = sub.fetch(key, nil) if Params.scalar_list_provided(sub, key)
+      else
+        value = Params.nested(sub, key, allowed, mode)
+        filtered[key] = value unless value.nil?
+      end
+    end
+    filtered
+  end
+
+  def self.nested_lookup(value, key)
+    if value.is_a?(Hash)
+      value.fetch(key, nil)
+    elsif value.is_a?(Array)
+      raise(TypeError.new("a String or Symbol is not an Array index"))
+    else
+      raise(NoMethodError.new("the nested params value is not a Hash"))
+    end
+  end
+
   # The nested resource hash a controller's params arrive under
   # (`{"article" => {"title" => …}}`). Missing, or present but not a
   # hash, yields an empty hash — a caller reading fields off it then

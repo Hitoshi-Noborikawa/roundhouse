@@ -47,12 +47,12 @@ fn emitted(body: &str, helper: &str) -> String {
 #[test]
 fn lookup_demand_preserves_factory_projections_and_adds_only_used_membership() {
     let source = emitted("    item_params.key?(key)", HELPER);
-    assert!(source.contains("ItemParams.__rh_scalar_values(sub,"), "{source}");
+    assert!(source.contains("Params.filtered_values(sub,"), "{source}");
     assert!(source.contains("def key?(key)"), "{source}");
     assert!(!source.contains("def include?(key)"), "{source}");
-    assert!(source.contains("ItemParams.__rh_param_value(@__rh_permitted_values, key.to_s)"), "{source}");
-    assert!(source.contains("Params.provided(sub, \"token\")"), "{source}");
-    assert!(source.contains("Params.str(sub, \"token\", \"\")"), "{source}");
+    assert!(source.contains("ItemParams.__rh_param_value(self.__rh_values, key.to_s)"), "{source}");
+    assert!(source.contains("Params.provided("), "{source}");
+    assert!(source.contains("Params.str("), "{source}");
     let ordinary = emitted("    item_params", HELPER);
     assert!(!ordinary.contains("__rh_permitted_values"), "{ordinary}");
 }
@@ -97,13 +97,10 @@ fn local_alias_demand_uses_the_binding_at_the_read() {
 }
 
 #[test]
-fn filters_and_writes_keep_the_lookup_boundary() {
+fn writes_and_merges_keep_the_lookup_boundary() {
     for (body, helper) in [
-        ("    item_params.key?(key)", format!("{HELPER}.compact")),
-        ("    item_params.key?(key)", format!("{HELPER}.except(:token)")),
         ("    item_params.key?(key)", format!("{HELPER}.merge(token: \"server\")")),
         ("    item_params.key?(key)", format!("{HELPER}.reverse_merge(token: \"default\")")),
-        ("    p = item_params\n    p.except(:token)\n    p.key?(key)", HELPER.into()),
         ("    p = item_params\n    p.token = \"changed\"\n    p.key?(key)", HELPER.into()),
     ] {
         let source = emitted(body, &helper);
@@ -145,7 +142,7 @@ fn synthesized_lookup_helpers_have_typed_bodies() {
     let classes = roundhouse::lower::controller_to_library::params::synthesize_params_classes(&specs);
     let params = classes.iter().find(|class| class.name.0.as_str() == "ItemParams").expect("params");
     let helpers: Vec<_> = params.methods.iter().filter(|method|
-        matches!(method.name.as_str(), "__rh_scalar_values" | "__rh_param_value")).collect();
+        matches!(method.name.as_str(), "__rh_values" | "__rh_param_value")).collect();
     assert_eq!(helpers.len(), 2);
     for helper in helpers { assert_typed(&helper.body); }
 }

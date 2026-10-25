@@ -14,6 +14,7 @@ use super::params::{params_source_class, ParamsSpecs};
 enum Source {
     Params(ClassId),
     Hash,
+    Nested,
 }
 
 type Locals = BTreeMap<Symbol, Source>;
@@ -35,16 +36,33 @@ impl ParamsSources {
     }
 
     pub(super) fn class(&self, expr: &Expr, specs: &ParamsSpecs) -> Option<ClassId> {
+        match self.source(expr, specs) {
+            Some(Source::Params(class)) => Some(class),
+            _ => None,
+        }
+    }
+
+    pub(super) fn nested(&self, expr: &Expr, specs: &ParamsSpecs) -> bool {
+        self.source(expr, specs) == Some(Source::Nested)
+    }
+
+    fn source(&self, expr: &Expr, specs: &ParamsSpecs) -> Option<Source> {
         match &*expr.node {
             ExprNode::Var { name, .. } => {
-                match self.reads.get(&(expr.span, name.clone())).cloned().flatten() {
-                    Some(Source::Params(class)) => Some(class),
-                    _ => None,
-                }
+                self.reads.get(&(expr.span, name.clone())).cloned().flatten()
             }
             ExprNode::Send { recv: Some(recv), method, block: None, .. }
-                if matches!(method.as_str(), "except" | "compact") => self.class(recv, specs),
-            _ => params_source_class(expr, &self.helpers, specs),
+                if matches!(method.as_str(), "except" | "compact") =>
+                    self.source(recv, specs).filter(|source|
+                        matches!(source, Source::Params(_) | Source::Hash)),
+            ExprNode::Send { recv: Some(recv), method, args, block: None, .. }
+                if matches!(method.as_str(), "delete" | "[]") && args.len() == 1 => {
+                    let class = self.class(recv, specs)?;
+                    let spec = specs.by_class(&class)?;
+                    if !spec.has_nested_value(&args[0]) { return None; }
+                    Some(Source::Nested)
+                }
+            _ => params_source_class(expr, &self.helpers, specs).map(Source::Params),
         }
     }
 
@@ -166,9 +184,9 @@ impl ParamsSources {
                 for arg in args { self.visit(arg, locals, specs); }
                 if let Some(block) = block { self.visit(block, locals, specs); }
                 if block.is_none() && matches!(method.as_str(), "except" | "compact") {
-                    receiver
+                    receiver.filter(|source| matches!(source, Source::Params(_) | Source::Hash))
                 } else {
-                    params_source_class(expr, &self.helpers, specs).map(Source::Params)
+                    self.source(expr, specs)
                 }
             }
             _ => {

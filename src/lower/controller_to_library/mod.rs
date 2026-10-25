@@ -28,6 +28,7 @@ mod broadcasts;
 mod inertia;
 mod process_action;
 pub mod params;
+mod params_values;
 mod params_sources;
 mod permit_splat;
 mod typed_update;
@@ -3221,7 +3222,10 @@ fn lower_action_body(
     // polymorphic location form without runtime class dispatch.
     let with_response_location = rewrite_response_location_kwarg(&with_render);
     let with_response_location = inertia::encode_inertia_values(&with_response_location);
-    let with_params = rewrite_params(&with_response_location);
+    let with_nested_params = self::params::rewrite_nested_lookups(
+        &with_response_location, params_privs, params_specs,
+    );
+    let with_params = rewrite_params(&with_nested_params);
     // After bare `params.expect(...)` / `params.require(:r).permit(...)`
     // canonicalize via `rewrite_params`, replace each permit chain with
     // the typed factory `<Resource>Params.from_raw(@params)`. The
