@@ -778,8 +778,10 @@ module ActionCable
               "ActionCable::Connection: the handshake carried no identified user"
       end
 
-      # The live socket this connection was accepted on (`Cable.upgrade`
-      # sets it), which `close` closes. nil under `Connection::TestCase`.
+      # Rails' `socket`: the live connection this one was accepted on
+      # (`Cable.upgrade` sets a `Cable::Socket` over its driver), or
+      # `Connection::TestCase`'s `TestSocket`. Rails 8.2 hands both
+      # `close` and `perform_work` to the socket, and so does this.
       attr_accessor :transport
 
       # Rails' `beat`, called on every server heartbeat (`Cable.app_beats`).
@@ -790,26 +792,30 @@ module ActionCable
         nil
       end
 
-      # Rails' `perform_work(receiver, method)`. Rails hands it to a worker;
+      # Rails' `perform_work(receiver, method)`, delegated to the socket as
+      # Rails 8.2 delegates it. Rails' live socket hands it to a worker;
       # this lane's heartbeat has a thread of its own and calls `beat`
-      # under a database lease, so the work runs there. Modeled for a
+      # under a database lease, so `Cable::Socket` runs it there, and a
+      # test's socket inline. With no socket, inline. Modeled for a
       # callable and `:call`, the one shape an app passes.
       def perform_work(receiver, method_name)
         unless method_name.to_s == "call"
           raise ArgumentError, "ActionCable perform_work: only (callable, :call) is modeled"
         end
-        receiver.call
+        live = @transport
+        if live.nil?
+          receiver.call
+        else
+          live.perform_work(receiver)
+        end
         nil
       end
 
       # Rails' `close(reason:, reconnect:)`: tell the client why and whether
-      # to come back, then close the socket. The client's close reply runs
-      # the socket's ordinary teardown.
+      # to come back, then close the socket.
       def close(reason: nil, reconnect: true)
-        ws = @transport
-        return nil if ws.nil?
-        ws.text(ActionCable.disconnect_json(reason, reconnect))
-        ws.close(1000, "")
+        live = @transport
+        live.close_with_reason(reason, reconnect) unless live.nil?
         nil
       end
     end

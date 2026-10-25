@@ -674,6 +674,14 @@ module Cable
       nil
     end
 
+    # `ActionCable::Connection::Base#perform_work`'s socket half: the
+    # app's work on a cable worker, with a database connection, as Rails
+    # hands it to its pool.
+    def perform_work(receiver)
+      Workers.post { Db.with_connection { receiver.call } }
+      nil
+    end
+
     def identifiers_for(stream)
       @subscriptions[stream] || []
     end

@@ -1838,14 +1838,99 @@ module ActionCable
   end
 
   module Connection
+    # Rails' `ActionCable::Connection::TestSocket` (8.2): the socket a
+    # `Connection::TestCase` connection is accepted on. It records what
+    # the connection was told — `transmissions`, the frames, and
+    # `closed` — and runs `perform_work` inline, as Rails' test server
+    # does, so a test's `connection.beat` has finished its work when it
+    # returns. `close_with_reason` is the call `Connection::Base#close`
+    # makes on its socket on both lanes, answered with the disconnect
+    # frame Rails' `close` transmits and the close.
+    #
+    # `build_request(path, cookies:)` is Rails' request for a socket, cut
+    # to what a connection here reads off it: the path and the cookie jar.
+    class TestSocket
+      class Request
+        attr_reader :path, :cookie_jar
+
+        def initialize(path, cookie_jar)
+          @path = path
+          @cookie_jar = cookie_jar
+        end
+      end
+
+      def self.build_request(path, cookies:)
+        Request.new(path, cookies)
+      end
+
+      attr_reader :request, :transmissions, :closed
+
+      def initialize(request)
+        @request = request
+        @transmissions = [{ type: "", reason: "", reconnect: false }]
+        @transmissions.pop
+        @closed = false
+      end
+
+      def close_with_reason(reason, reconnect)
+        @transmissions << { type: "disconnect", reason: reason.to_s, reconnect: reconnect ? true : false }
+        @closed = true
+        nil
+      end
+
+      def perform_work(receiver)
+        receiver.call
+        nil
+      end
+    end
+
+    # Rails' `ActionCable::Connection::TestServer`, which a test hands a
+    # connection it builds itself. Its executor and pub/sub are the
+    # socket's here (`TestSocket#perform_work` runs inline), so it holds
+    # nothing; `lower::cable_test_case` drops it from the constructor.
+    class TestServer
+      def initialize(server)
+        @server = server
+      end
+    end
+
+    # What a test's `ApplicationCable::Connection.new(TestServer.new(…),
+    # socket)` lowers to (`lower::cable_test_case`): Rails 8.2 builds a
+    # connection from a server and a socket, this runtime from the
+    # handshake's cookie jar — so the connection is built the way
+    # `Cable.identify` builds one, over the socket's jar, and accepted on
+    # the socket.
+    def self.accept_test_socket(sock)
+      conn = build(sock.request.cookie_jar)
+      conn.transport = sock
+      conn
+    end
+
+    # Rails' `handle_open`, the server's call when a socket opens:
+    # `connect`, and a rejection answered by closing with the
+    # unauthorized reason and no reconnect. The live servers on both
+    # lanes refuse an unauthorized handshake before it is a socket
+    # (`Cable.upgrade` answers 401), so only a test reaches this.
+    class Base
+      def handle_open
+        begin
+          connect
+        rescue ActionCable::Connection::Authorization::UnauthorizedError
+          close(reason: ActionCable::INTERNAL[:disconnect_reasons][:unauthorized], reconnect: false)
+        end
+        nil
+      end
+    end
+
     # `ActionCable::Connection::TestCase` — Rails' way of running an
-    # app's `connect` against a cookie jar the test seeded, with no
-    # socket. `cookies.signed[:session_token] = token` writes the jar,
-    # `connect` builds the app's connection class over it (the same
-    # factory `Cable.identify` uses, so this IS the handshake's code
-    # path minus the socket) and runs `connect`; `connection` is the
-    # identified object, and `assert_reject_connection` is the
-    # `reject_unauthorized_connection` raise, caught.
+    # app's `connect` against a cookie jar the test seeded.
+    # `cookies.signed[:session_token] = token` writes the jar, `connect`
+    # builds the app's connection class over it (the same factory
+    # `Cable.identify` uses, so this IS the handshake's code path) on a
+    # fresh `TestSocket` and runs `connect`; `connection` is the
+    # identified object, `socket` what it was told, and
+    # `assert_reject_connection` is the `reject_unauthorized_connection`
+    # raise, caught.
     class TestCase < TestBase
       def cookies
         @__cookies = ActionController::CookieJar.new if @__cookies.nil?
@@ -1853,10 +1938,19 @@ module ActionCable
       end
 
       def connect
+        sock = ActionCable::Connection::TestSocket.new(
+          ActionCable::Connection::TestSocket.build_request("/cable", cookies: cookies)
+        )
+        @__socket = sock
         conn = ActionCable::Connection.build(cookies)
+        conn.transport = sock
         conn.connect
         @__connection = conn
         nil
+      end
+
+      def socket
+        @__socket
       end
 
       # Rails: `check_connected!` — "Must be connected!".

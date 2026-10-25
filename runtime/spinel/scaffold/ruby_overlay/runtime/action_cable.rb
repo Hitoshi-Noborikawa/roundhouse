@@ -693,8 +693,11 @@ module ActionCable
               "ActionCable::Connection: the handshake carried no identified user"
       end
 
-      # The live socket this connection was accepted on (`Cable::Connection`
-      # sets it), which `close` closes. nil under `Connection::TestCase`.
+      # Rails' `socket`: the live connection this one was accepted on
+      # (`Cable::Connection` sets it), or `Connection::TestCase`'s
+      # `TestSocket`. Rails 8.2 hands both `close` and `perform_work` to
+      # the socket, and so does this: what a test asserts is what the
+      # socket was told.
       attr_accessor :transport
 
       # Rails' `beat`, called on every server heartbeat. Rails' transmits
@@ -705,14 +708,21 @@ module ActionCable
         nil
       end
 
-      # Rails' `perform_work(receiver, method)`: the app's work, on a worker
-      # rather than the heartbeat's thread, with a database connection.
-      # Modeled for a callable and `:call`, the one shape an app passes.
+      # Rails' `perform_work(receiver, method)`, delegated to the socket as
+      # Rails 8.2 delegates it: the live one runs it on a worker rather
+      # than the heartbeat's thread, with a database connection; a test's
+      # runs it inline. With no socket, inline. Modeled for a callable and
+      # `:call`, the one shape an app passes.
       def perform_work(receiver, method_name)
         unless method_name.to_s == "call"
           raise ArgumentError, "ActionCable perform_work: only (callable, :call) is modeled"
         end
-        Cable::Workers.post { Db.with_connection { receiver.call } }
+        live = @transport
+        if live.nil?
+          receiver.call
+        else
+          live.perform_work(receiver)
+        end
         nil
       end
 
