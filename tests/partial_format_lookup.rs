@@ -1,0 +1,175 @@
+//! A partial rendered from a template resolves in that template's format
+//! first. Rails prepends the rendering template's format to the lookup
+//! (`TemplateRenderer#render` → `prepend_formats(template.format)`), so
+//! `render "note"` in `banner.turbo_stream.erb` finds
+//! `_note.turbo_stream.erb` ahead of `_note.html.erb`. The html partial
+//! is the fallback a Turbo request leaves in the list: its `Accept`
+//! carries `text/html`, and the `turbo_stream` builder adds `:html` too.
+//!
+//! The variants lower beside each other (`note_turbo_stream` and
+//! `note`), and every render call site named the html one, so a
+//! turbo_stream-only partial was a call to a method nothing defines.
+
+#[path = "support/emit_and_run.rs"]
+mod emit_and_run;
+
+const CONTROLLER_TEST: &str = "test/controllers/articles_controller_test.rb";
+
+const HTML_NOTE: &str = "<p id=\"note\">Html note</p>\n";
+
+const STREAM_NOTE: &str = "<p id=\"note\">Stream note</p>\n";
+
+/// The blog with a `banner` action whose only template is
+/// `banner.turbo_stream.erb` holding `template`, and a test that asks for
+/// it as a turbo stream and expects `expect` in the body and not `absent`.
+fn banner_app(template: &str, expect: &str, absent: &str) -> emit_and_run::Overlay {
+    emit_and_run::real_blog()
+        .write("app/views/articles/banner.turbo_stream.erb", template)
+        .edit(
+            "config/routes.rb",
+            "  root \"articles#index\"\n",
+            "  root \"articles#index\"\n  \
+             get \"articles/:id/banner\", to: \"articles#banner\", as: :banner_article\n",
+        )
+        .edit(
+            "app/controllers/articles_controller.rb",
+            "  # GET /articles/new\n",
+            "  def banner\n  end\n\n  # GET /articles/new\n",
+        )
+        .edit(
+            CONTROLLER_TEST,
+            "  test \"should get edit\" do\n",
+            &format!(
+                "  test \"the turbo stream renders the note\" do\n    \
+                 get banner_article_url(@article, format: :turbo_stream)\n    \
+                 assert_includes response.body, {expect:?}\n    \
+                 assert_not_includes response.body, {absent:?}\n  end\n\n  \
+                 test \"should get edit\" do\n"
+            ),
+        )
+}
+
+#[test]
+fn a_turbo_stream_template_renders_a_turbo_stream_only_partial() {
+    banner_app("<%= render \"note\" %>\n", "Stream note", "Html note")
+        .write("app/views/articles/_note.turbo_stream.erb", STREAM_NOTE)
+        .run_test(CONTROLLER_TEST)
+        .assert_passes();
+}
+
+#[test]
+fn a_turbo_stream_template_falls_back_to_the_html_partial() {
+    banner_app("<%= render \"note\" %>\n", "Html note", "Stream note")
+        .write("app/views/articles/_note.html.erb", HTML_NOTE)
+        .run_test(CONTROLLER_TEST)
+        .assert_passes();
+}
+
+#[test]
+fn a_turbo_stream_template_prefers_the_turbo_stream_partial() {
+    banner_app("<%= render \"note\" %>\n", "Stream note", "Html note")
+        .write("app/views/articles/_note.html.erb", HTML_NOTE)
+        .write("app/views/articles/_note.turbo_stream.erb", STREAM_NOTE)
+        .run_test(CONTROLLER_TEST)
+        .assert_passes();
+}
+
+/// `render partial:, collection:` takes the same lookup, once per element.
+#[test]
+fn a_turbo_stream_collection_render_prefers_the_turbo_stream_partial() {
+    banner_app(
+        "<%= render partial: \"note\", collection: Article.all %>\n",
+        "Stream note",
+        "Html note",
+    )
+    .write("app/views/articles/_note.html.erb", HTML_NOTE)
+    .write("app/views/articles/_note.turbo_stream.erb", STREAM_NOTE)
+    .run_test(CONTROLLER_TEST)
+    .assert_passes();
+}
+
+/// An html template looks up html first, beside a turbo_stream twin.
+#[test]
+fn an_html_template_renders_the_html_partial() {
+    emit_and_run::real_blog()
+        .write("app/views/articles/_note.html.erb", HTML_NOTE)
+        .write("app/views/articles/_note.turbo_stream.erb", STREAM_NOTE)
+        .edit(
+            "app/views/articles/show.html.erb",
+            "  <h1 class=\"font-bold text-4xl\"><%= @article.title %></h1>\n",
+            "  <h1 class=\"font-bold text-4xl\"><%= @article.title %></h1>\n  <%= render \"note\" %>\n",
+        )
+        .edit(
+            CONTROLLER_TEST,
+            "    assert_select \"h2\", \"Comments\"\n",
+            "    assert_select \"h2\", \"Comments\"\n    \
+             assert_includes response.body, \"Html note\"\n    \
+             assert_not_includes response.body, \"Stream note\"\n",
+        )
+        .run_test(CONTROLLER_TEST)
+        .assert_passes();
+}
+
+/// turbo-rails renders a `turbo_stream.<action> target, partial:` with
+/// `formats: [:html]` (`TagBuilder#render_template`), whatever template
+/// it is written in.
+#[test]
+fn the_turbo_stream_builder_renders_the_html_partial() {
+    banner_app(
+        "<%= turbo_stream.update \"note\", partial: \"articles/note\" %>\n",
+        "Html note",
+        "Stream note",
+    )
+    .write("app/views/articles/_note.html.erb", HTML_NOTE)
+    .write("app/views/articles/_note.turbo_stream.erb", STREAM_NOTE)
+    .run_test(CONTROLLER_TEST)
+    .assert_passes();
+}
+
+/// `formats:` replaces the lookup's formats for that render, and is not
+/// a local the partial is handed.
+#[test]
+fn an_explicit_formats_option_picks_that_partial() {
+    banner_app(
+        "<%= render partial: \"note\", formats: [:html] %>\n",
+        "Html note",
+        "Stream note",
+    )
+    .write("app/views/articles/_note.html.erb", HTML_NOTE)
+    .write("app/views/articles/_note.turbo_stream.erb", STREAM_NOTE)
+    .run_test(CONTROLLER_TEST)
+    .assert_passes();
+}
+
+/// An explicit list is walked in order, the first format with a variant
+/// winning; `:xml` has none here, so `:turbo_stream` is the one found.
+#[test]
+fn an_explicit_formats_list_falls_through_to_its_next_format() {
+    banner_app(
+        "<%= render partial: \"note\", formats: [:xml, :turbo_stream] %>\n",
+        "Stream note",
+        "Html note",
+    )
+    .write("app/views/articles/_note.html.erb", HTML_NOTE)
+    .write("app/views/articles/_note.turbo_stream.erb", STREAM_NOTE)
+    .run_test(CONTROLLER_TEST)
+    .assert_passes();
+}
+
+/// `render layout:` with a block takes `formats:` the same way: Rails
+/// resolves the layout partial inside the replaced lookup.
+#[test]
+fn an_explicit_formats_option_picks_that_layout() {
+    banner_app(
+        "<%= render layout: \"wrapper\", formats: [:html] do %>Body<% end %>\n",
+        "Html wrapper",
+        "Stream wrapper",
+    )
+    .write("app/views/articles/_wrapper.html.erb", "<div>Html wrapper <%= yield %></div>\n")
+    .write(
+        "app/views/articles/_wrapper.turbo_stream.erb",
+        "<div>Stream wrapper <%= yield %></div>\n",
+    )
+    .run_test(CONTROLLER_TEST)
+    .assert_passes();
+}

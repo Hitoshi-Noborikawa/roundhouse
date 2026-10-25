@@ -39,6 +39,7 @@ pub(super) fn emit_render_partial(rp: &RenderPartial<'_>, ctx: &ViewCtx) -> Opti
             let plural_camel = camelize_path(&crate::naming::pluralize_snake(&singular));
             let mut call_args = vec![var_ref(Symbol::from(crate::naming::safe_local(&singular)))];
             call_args.extend(partial_extra_args(ctx, &plural_camel, &singular));
+            let method = ctx.render_method(&plural_camel, &singular);
             let call = send(
                 Some(Expr::new(
                     Span::synthetic(),
@@ -46,7 +47,7 @@ pub(super) fn emit_render_partial(rp: &RenderPartial<'_>, ctx: &ViewCtx) -> Opti
                         path: vec![Symbol::from("Views"), Symbol::from(plural_camel)],
                     },
                 )),
-                &singular,
+                method.as_str(),
                 call_args,
                 None,
                 true,
@@ -122,8 +123,7 @@ pub(super) fn emit_render_partial(rp: &RenderPartial<'_>, ctx: &ViewCtx) -> Opti
             if module_camel.is_empty() {
                 return None;
             }
-            let method_name =
-                crate::lower::view::view_method_name(&method_sym).as_str().to_string();
+            let method_name = ctx.render_method(&module_camel, &method_sym).as_str().to_string();
             // An action view has no record arg — its params are its
             // FULL closure (threaded into the caller by the
             // render-graph fold) plus nil-default extras. No
@@ -196,6 +196,7 @@ pub(super) fn emit_render_partial(rp: &RenderPartial<'_>, ctx: &ViewCtx) -> Opti
                         call_args.push(hash);
                     }
                 }
+                let method = ctx.render_method(&module_camel, &method_sym);
                 let render_call = send(
                     Some(Expr::new(
                         Span::synthetic(),
@@ -203,7 +204,7 @@ pub(super) fn emit_render_partial(rp: &RenderPartial<'_>, ctx: &ViewCtx) -> Opti
                             path: vec![Symbol::from("Views"), Symbol::from(module_camel)],
                         },
                     )),
-                    crate::lower::view::view_method_name(&method_sym).as_str(),
+                    method.as_str(),
                     call_args,
                     None,
                     true,
@@ -347,6 +348,7 @@ fn named_collection_item_render(
     let mut call_args = vec![var_ref(var_name.clone())];
     call_args.extend(partial_extra_args(ctx, &module_camel, &method_sym));
     call_args.extend(locals_extra_args(locals, &module_camel, &method_sym, ctx));
+    let method = ctx.render_method(&module_camel, &method_sym);
     let render_call = send(
         Some(Expr::new(
             Span::synthetic(),
@@ -354,7 +356,7 @@ fn named_collection_item_render(
                 path: vec![Symbol::from("Views"), Symbol::from(module_camel)],
             },
         )),
-        crate::lower::view::view_method_name(&method_sym).as_str(),
+        method.as_str(),
         call_args,
         None,
         true,
@@ -510,10 +512,12 @@ fn wrap_keyed_cached_collection(
         view_helpers_call("collection_fragment_read_multi", vec![var_ref(keys.clone())]),
     );
     // Rails' `render_collection.action_view` names the partial's template
-    // file; the walker lowers HTML ERB, so that is its extension.
+    // file: an ERB one, in the format the render resolves it to.
+    let (module, stem) = super::partial_name_to_key(partial, &ctx.resource_dir);
+    let format = ctx.render_format(&module, &stem);
     let identifier = match partial.rsplit_once('/') {
-        Some((dir, base)) => format!("app/views/{dir}/_{base}.html.erb"),
-        None => format!("app/views/_{partial}.html.erb"),
+        Some((dir, base)) => format!("app/views/{dir}/_{base}.{format}.erb"),
+        None => format!("app/views/_{partial}.{format}.erb"),
     };
     let rendered = view_helpers_call(
         "collection_rendered",
@@ -840,6 +844,7 @@ fn emit_partial_each(recv: &Expr, plural_name: &str, ctx: &ViewCtx) -> Expr {
 
     let mut call_args = vec![var_ref(var_name.clone())];
     call_args.extend(partial_extra_args(ctx, &plural_camel, &singular));
+    let method = ctx.render_method(&plural_camel, &singular);
     let render_call = send(
         Some(Expr::new(
             Span::synthetic(),
@@ -847,7 +852,7 @@ fn emit_partial_each(recv: &Expr, plural_name: &str, ctx: &ViewCtx) -> Expr {
                 path: vec![Symbol::from("Views"), Symbol::from(plural_camel.clone())],
             },
         )),
-        &singular,
+        method.as_str(),
         call_args,
         None,
         true,
@@ -992,6 +997,7 @@ pub(super) fn named_partial_call_with_record(
             } else {
                 call_args.extend(locals_extra_args(locals, &module_camel, &method_sym, ctx));
             }
+            let method = ctx.render_method(&module_camel, &method_sym);
             let render_call = send(
                 Some(Expr::new(
                     Span::synthetic(),
@@ -1007,7 +1013,7 @@ pub(super) fn named_partial_call_with_record(
                 // latent until campfire's `rooms/layouts/_new`. The
                 // extras/strict-locals keys stay on the RAW stem, which
                 // is what the def side keys on too.
-                crate::lower::view::view_method_name(&method_sym).as_str(),
+                method.as_str(),
                 call_args,
                 None,
                 true,

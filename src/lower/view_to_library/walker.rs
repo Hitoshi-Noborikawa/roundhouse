@@ -321,7 +321,7 @@ fn walk_stmt(stmt: &Expr, ctx: &ViewCtx) -> Vec<Expr> {
                 &is_options_ivar,
             ) {
                 let disc = "discard";
-                let disc_ctx = ViewCtx { accumulator: disc.to_string(), ..ctx.clone() };
+                let disc_ctx = ViewCtx { accumulator: disc.to_string(), ..ctx.for_render(args) };
                 if let Some(stmt) = emit_render_partial(&rp, &disc_ctx) {
                     return vec![assign_accumulator_string_new(disc), stmt];
                 }
@@ -836,6 +836,7 @@ fn emit_io_append(arg: &Expr, ctx: &ViewCtx) -> Vec<Expr> {
             &is_local,
             &is_options_ivar,
         ) {
+            let render_ctx = ctx.for_render(sa);
             // `render layout: "x" do … end` lowers to SEVERAL statements
             // (a capture local, then the layout call), so it can't ride
             // `emit_render_partial`'s single-expression return. It also
@@ -844,12 +845,12 @@ fn emit_io_append(arg: &Expr, ctx: &ViewCtx) -> Vec<Expr> {
             // `render` and emit a call to a method no view module has.
             if let crate::lower::view::RenderPartial::LayoutBlock { layout, locals, block } = &rp {
                 if let Some(stmts) =
-                    super::partial::emit_layout_block(layout, *locals, block, ctx)
+                    super::partial::emit_layout_block(layout, *locals, block, &render_ctx)
                 {
                     return stmts;
                 }
             }
-            if let Some(stmt) = emit_render_partial(&rp, ctx) {
+            if let Some(stmt) = emit_render_partial(&rp, &render_ctx) {
                 return vec![stmt];
             }
         }
@@ -919,7 +920,8 @@ fn emit_io_append(arg: &Expr, ctx: &ViewCtx) -> Vec<Expr> {
             // / `as:`). Same resolution a `render partial:` call site
             // gets, through the same `named_partial_call` — a second
             // partial resolver here would be a second set of rules to
-            // keep in step.
+            // keep in step. Looked up in html: turbo-rails renders it
+            // `formats: [:html]` (`TagBuilder#render_template`).
             if let Some(ts) = block
                 .is_none()
                 .then(|| super::helpers::turbo_stream_partial(recv.as_ref(), method.as_str(), sa))
@@ -952,9 +954,12 @@ fn emit_io_append(arg: &Expr, ctx: &ViewCtx) -> Vec<Expr> {
                     ) {
                         return out;
                     }
-                } else if let Some(html) =
-                    super::partial::named_partial_call(ts.partial, None, locals.as_deref(), ctx)
-                {
+                } else if let Some(html) = super::partial::named_partial_call(
+                    ts.partial,
+                    None,
+                    locals.as_deref(),
+                    &ctx.in_formats(&["html"]),
+                ) {
                     return vec![accumulator_append_call(
                         super::helpers::turbo_stream_fragment_call(
                             method.as_str(),
@@ -1297,7 +1302,7 @@ fn turbo_stream_collection_fragment(
         None,
         bound_locals.as_deref(),
         Some(var_ref(var.clone())),
-        ctx,
+        &ctx.in_formats(&["html"]),
     )?;
     let cap = "_ts_cap";
     let cap_ctx = ViewCtx {
@@ -1756,6 +1761,8 @@ mod tests {
             lexxy: false,
             lexxy_editor_adapter: false,
             partial_ivars: Default::default(),
+            formats: vec!["html".to_string()],
+            view_formats: Default::default(),
             multipart_partials: Default::default(),
             dyn_pools: Default::default(),
             partial_extras: Default::default(),

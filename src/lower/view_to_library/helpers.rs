@@ -163,13 +163,15 @@ pub(super) fn emit_turbo_stream_fragment(
             // string, a nested call) would need the partial machinery a
             // `render` call site gets, so decline and leave the source
             // shape for the residue ledger.
+            // turbo-rails renders it `formats: :html` (`render_record`),
+            // whatever template the builder is written in.
             let name = record_name(content)?;
             let partial = format!("{}/{}", pluralize_snake(&name), name);
             super::partial::named_partial_call(
                 &partial,
                 Some(&rewrite_helpers_in_expr(content, ctx)),
                 None,
-                ctx,
+                &ctx.in_formats(&["html"]),
             )?
         }
     };
