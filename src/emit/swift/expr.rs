@@ -1458,14 +1458,12 @@ fn emit_node(n: &ExprNode, e: &Expr) -> String {
         }
         ExprNode::Break { .. } => "break".to_string(),
         // Not reported when it throws: a Swift error is what `try?` catches, as Ruby's modifier catches a StandardError
+        // Not `(try? e) ?? fallback`: a call that answers nil without throwing would take the fallback
         ExprNode::RescueModifier { expr, fallback } if body_throws(expr, &current_class()) => {
             let e_s = emit_expr(expr);
-            let e_s = e_s.strip_prefix("try ").unwrap_or(&e_s);
-            if matches!(&*fallback.node, ExprNode::Lit { value: Literal::Nil }) {
-                format!("(try? {e_s})")
-            } else {
-                format!("((try? {e_s}) ?? {})", emit_expr(fallback))
-            }
+            let e_s = if e_s.starts_with("try ") { e_s } else { format!("try {e_s}") };
+            let try_kw = if body_throws(fallback, &current_class()) { "try " } else { "" };
+            format!("({try_kw}{{ do {{ return {e_s} }} catch {{ return {} }} }}())", emit_expr(fallback))
         }
         // Not the bare expression: what it raises is a fatalError, which no Swift catch reaches
         ExprNode::RescueModifier { .. } => {
@@ -1994,7 +1992,7 @@ fn emit_case(scrutinee: &Expr, arms: &[Arm], returning: bool) -> String {
                 lines.push(format!("case {}:\n{body}", emit_literal(value)));
             }
             other => {
-                let stub = crate::emit::diagnostics::report_unsupported(crate::span::Span::synthetic(), "swift", "case pattern", format!("{other:?}").split([' ', '(', '{']).next().unwrap_or("").to_string());
+                let stub = crate::emit::diagnostics::report_unsupported(arm.body.span, "swift", "case pattern", format!("{other:?}").split([' ', '(', '{']).next().unwrap_or("").to_string());
                 lines.push(format!("default:\n{stub}"));
                 has_default = true;
             }
@@ -2591,13 +2589,21 @@ pub(super) fn body_throws(e: &Expr, cls: &str) -> bool {
                 &camel(method.as_str()),
             ),
             ExprNode::SelfRef => !cls.is_empty() && throws_lookup(cls, &camel(method.as_str())),
-            _ => false,
+            // Not left out: a typed receiver's call is emitted with `try` when its method throws, so it throws here too
+            _ => match r.ty.as_ref().map(|t| t.peel_nilable()) {
+                Some(crate::ty::Ty::Class { id, .. }) => throws_lookup(&super::naming::type_name(id.0.as_str()), &camel(method.as_str())),
+                _ => false,
+            },
         },
         ExprNode::Send { recv: None, method, .. } => {
             !cls.is_empty() && throws_lookup(cls, &camel(method.as_str()))
         }
         _ => false,
     };
+    // Not the rescued expression: what it throws the modifier catches
+    if let ExprNode::RescueModifier { fallback, .. } = &*e.node {
+        return body_throws(fallback, cls);
+    }
     direct || children(e).into_iter().any(|c| body_throws(c, cls))
 }
 

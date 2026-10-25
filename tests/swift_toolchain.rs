@@ -201,12 +201,12 @@ final class I18nProbeTests: XCTestCase {
 #[test]
 #[ignore]
 fn real_blog_rescue_modifier_runs() {
-    // A raise that throws is what `expr rescue fallback` catches.
+    // A raise that throws is what `expr rescue fallback` catches; a nil answered without one is kept, as CRuby keeps it.
     let (emitted, errors) = emit_and_run::real_blog()
         .edit(
             "app/models/article.rb",
             "  validates :title, presence: true\n",
-            "  validates :title, presence: true\n\n  def self.checked(s)\n    raise ArgumentError, \"empty\" if s.to_s.empty?\n    s.to_s\n  end\n\n  def self.safe(s)\n    checked(s) rescue \"none\"\n  end\n",
+            "  validates :title, presence: true\n\n  def self.checked(s)\n    raise ArgumentError, \"empty\" if s.to_s.empty?\n    s.to_s\n  end\n\n  def self.safe(s)\n    checked(s) rescue \"none\"\n  end\n\n  def self.lookup(s)\n    raise ArgumentError, \"empty\" if s.to_s.empty?\n    s.to_s == \"gone\" ? nil : s.to_s\n  end\n\n  def self.safe_lookup(s)\n    lookup(s) rescue \"fallback\"\n  end\n",
         )
         .emit(roundhouse::project::BuildTarget::Swift);
     assert!(errors.is_empty(), "{errors:?}");
@@ -217,6 +217,9 @@ final class RescueModifierTests: XCTestCase {
     func testTheFallbackAnswersARaise() throws {
         XCTAssertEqual(Article.safe("a") as? String, "a")
         XCTAssertEqual(Article.safe("") as? String, "none")
+        XCTAssertNil(Article.safeLookup("gone"))
+        XCTAssertEqual(Article.safeLookup("") as? String, "fallback")
+        XCTAssertEqual(Article.safeLookup("a") as? String, "a")
     }
 }
 "#).expect("write test");
