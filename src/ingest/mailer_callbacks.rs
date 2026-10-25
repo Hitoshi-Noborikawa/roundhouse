@@ -408,7 +408,8 @@ fn actions(lc: &LibraryClass) -> Vec<String> {
         .collect()
 }
 
-/// Every instance method the class and its mailer ancestors define.
+/// Every instance method the class and its mailer ancestors define, or
+/// a module they include.
 fn defined(app: &App, i: usize, parents: &HashMap<String, String>, mailers: &BTreeSet<String>) -> BTreeSet<String> {
     let mut out = BTreeSet::new();
     let mut cur = Some(app.library_classes[i].name.0.as_str().to_string());
@@ -420,6 +421,19 @@ fn defined(app: &App, i: usize, parents: &HashMap<String, String>, mailers: &BTr
         }
         if let Some(lc) = app.library_classes.iter().find(|c| c.name.0.as_str() == name) {
             out.extend(lc.methods.iter().filter(|m| m.receiver == MethodReceiver::Instance).map(|m| m.name.as_str().to_string()));
+            // A module it includes (a mailer concern), and the modules that
+            // one includes.
+            let mut modules: Vec<String> = lc.includes.iter().map(|id| id.0.as_str().to_string()).collect();
+            let mut seen: BTreeSet<String> = BTreeSet::new();
+            while let Some(module) = modules.pop() {
+                if !seen.insert(module.clone()) {
+                    continue;
+                }
+                if let Some(m) = app.library_classes.iter().find(|c| c.is_module && c.name.0.as_str() == module) {
+                    out.extend(m.methods.iter().filter(|d| d.receiver == MethodReceiver::Instance).map(|d| d.name.as_str().to_string()));
+                    modules.extend(m.includes.iter().map(|id| id.0.as_str().to_string()));
+                }
+            }
         }
         cur = parents.get(&name).filter(|p| mailers.contains(*p)).cloned();
     }

@@ -159,3 +159,18 @@ fn skip_before_action_keeps_the_callbacks_reported() {
         "{warnings:#?}"
     );
 }
+
+// A callback the mailer gets from an included module (oracle
+// `test_app/concern_oracle.rb`): Rails finds it through the include.
+const STAMPING: &str = "module Stamping\n  private\n\n  def stamp_concern\n    CallbackLog.add(\"stamp_concern\")\n    headers(\"X-Concern\" => \"1\")\n  end\nend\n";
+const CONCERN_MAILER: &str = "class ConcernMailer < ApplicationMailer\n  include Stamping\n  after_action :stamp_concern\n\n  def hi\n    mail(to: \"a@example.com\", subject: \"Hi\", body: \"hi\")\n  end\nend\n";
+
+#[test]
+fn a_callback_from_an_included_module_runs_on_ruby() {
+    let run = app()
+        .write("app/mailers/concerns/stamping.rb", STAMPING)
+        .write("app/mailers/concern_mailer.rb", CONCERN_MAILER)
+        .run_ruby("CallbackLog.clear\nm = ConcernMailer.hi.deliver_now\ngot = [CallbackLog.entries, m[\"X-Concern\"].value, m[\"X-Stamp\"].value]\nraise got.inspect unless got == [[\"base_before\", \"stamp_concern\", \"stamp\"], \"1\", \"yes\"]\nputs \"concern passed\"\n");
+    run.assert_passes();
+    assert!(run.stdout.contains("concern passed"), "{}", run.stdout);
+}
