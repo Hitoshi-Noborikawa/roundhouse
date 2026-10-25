@@ -1574,7 +1574,7 @@ fn build_params_class(spec: &ParamsSpec) -> LibraryClass {
         methods.push(synth_as_json(&spec.class_id));
     }
     if spec.wants_to_attrs {
-        methods.push(synth_to_attrs(&spec.class_id, &spec.scalar_fields()));
+        methods.push(synth_to_attrs(&spec.class_id, &spec.fields, &spec.nested_fields));
     }
     if spec.wants_except {
         methods.push(synth_except(spec));
@@ -2060,7 +2060,12 @@ fn synth_from_raw(spec: &ParamsSpec) -> MethodDef {
 /// `""` — the same distinction `<field>_provided` was introduced for.
 /// Writing it would overwrite a column default on create, which is the
 /// data loss the presence slots were added to stop.
-pub(super) fn synth_to_attrs(owner: &ClassId, fields: &[Symbol]) -> MethodDef {
+///
+/// A nested or list field (`comments_attributes`, `labels: []`) is
+/// written too, as the model's constructor takes it: leaving it out lost
+/// the nested records of every create that went through this hash, while
+/// the update path assigned them.
+pub(super) fn synth_to_attrs(owner: &ClassId, fields: &[Symbol], nested: &BTreeMap<Symbol, NestedKey>) -> MethodDef {
     use crate::lower::typing::with_ty;
     let attrs = Symbol::from("attrs");
     // The declared type is `initialize`'s parameter type verbatim: this
@@ -2100,7 +2105,7 @@ pub(super) fn synth_to_attrs(owner: &ClassId, fields: &[Symbol]) -> MethodDef {
         );
         let value = with_ty(
             Expr::new(Span::synthetic(), ExprNode::Ivar { name: field.clone() }),
-            Ty::Str,
+            if nested.contains_key(field) { Ty::Untyped } else { Ty::Str },
         );
         let write = Expr::new(
             Span::synthetic(),
