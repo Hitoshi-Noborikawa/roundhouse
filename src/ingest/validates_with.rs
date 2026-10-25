@@ -8,10 +8,10 @@
 //! model source, ingested like the app's own:
 //!
 //! ```ruby
-//! def __validates_with_1
+//! def __validates_with_article_1
 //!   SomeValidator.new(max: 5).validate(self)
 //! end
-//! validate :__validates_with_1, if: -> { … }, on: :create
+//! validate :__validates_with_article_1, if: -> { … }, on: :create
 //! ```
 //!
 //! so the conditions take `validate`'s existing path. The validator is
@@ -34,6 +34,9 @@ pub(crate) fn expand(app: &mut App) {
     let sources = app.sources.clone();
     for model in &mut app.models {
         let mut counter = 0usize;
+        // A parent model and its subclass each count from 1; the model's
+        // name keeps the parent's method from being the child's override.
+        let owner = crate::naming::underscore_words(model.name.0.as_str());
         let mut body = Vec::with_capacity(model.body.len());
         for item in std::mem::take(&mut model.body) {
             let expanded = match &item {
@@ -42,7 +45,7 @@ pub(crate) fn expand(app: &mut App) {
                         let text = source_text(&sources, expr.span);
                         text.and_then(|t| {
                             counter += 1;
-                            let name = format!("__validates_with_{counter}");
+                            let name = format!("__validates_with_{owner}_{counter}");
                             generated_source(t, &name)
                                 .and_then(|src| ingest_source(&src, &model.name))
                         })

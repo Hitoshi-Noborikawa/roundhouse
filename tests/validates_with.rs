@@ -66,3 +66,48 @@ fn validates_with_runs_the_validator_on_spinel() {
     run.assert_passes();
     assert!(run.stdout.contains("validates_with passed"), "{}", run.stdout);
 }
+
+
+// A parent model's `validates_with` stays its own when a subclass has
+// one too. Both get model source of their own (an abstract parent and
+// its child are both models), so the generated method names must differ:
+// a shared `__validates_with_1` would send the parent's `validate`
+// (as the child's `super` reaches it) to the child's validator.
+const TITLE: &str = "class TitleValidator < ActiveModel::Validator\n  def validate(record)\n    record.errors.add(:title, \"is missing\") if record.title.to_s.empty?\n  end\nend\n";
+const BODY: &str = "class BodyValidator < ActiveModel::Validator\n  def validate(record)\n    record.errors.add(:body, \"is missing\") if record.body.to_s.empty?\n  end\nend\n";
+
+const INHERITED_SCRIPT: &str = r##"
+def check(label, got, want)
+  raise "#{label}: #{got.inspect} (want #{want.inspect})" unless got == want
+end
+a = Article.new
+TitledRecord.instance_method(:validate).bind(a).call
+check("the parent's validate runs the parent's validator", [a.errors.include?("Title is missing"), a.errors.include?("Body is missing")], [true, false])
+b = Article.new
+Article.instance_method(:validate).bind(b).call
+check("the child's validate runs the child's validator", b.errors.include?("Body is missing"), true)
+puts "inherited validates_with passed"
+"##;
+
+fn inherited_app() -> emit_and_run::Overlay {
+    emit_and_run::real_blog()
+        .edit("app/models/article.rb", "class Article < ApplicationRecord\n", "class Article < TitledRecord\n")
+        .edit(
+            "app/models/article.rb",
+            "  has_many :comments, dependent: :destroy\n",
+            "  has_many :comments, dependent: :destroy\n  validates_with BodyValidator\n",
+        )
+        .write(
+            "app/models/titled_record.rb",
+            "class TitledRecord < ApplicationRecord\n  self.abstract_class = true\n  validates_with TitleValidator\nend\n",
+        )
+        .write("app/validators/title_validator.rb", TITLE)
+        .write("app/validators/body_validator.rb", BODY)
+}
+
+#[test]
+fn a_parents_validates_with_keeps_its_own_name_on_ruby() {
+    let run = inherited_app().run_ruby(INHERITED_SCRIPT);
+    run.assert_passes();
+    assert!(run.stdout.contains("inherited validates_with passed"), "{}", run.stdout);
+}
