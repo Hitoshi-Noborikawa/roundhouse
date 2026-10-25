@@ -99,3 +99,33 @@ fn has_many_autosave_validates_and_saves_loaded_children_on_ruby() {
     run.assert_passes();
     assert!(run.stdout.contains("autosave passed"), "{}", run.stdout);
 }
+
+// Association options that change what Rails does and that aren't
+// modelled are reported, not dropped silently: `index_errors:` (Rails
+// prefixes "Comments[1] body …") and `counter_cache:` here.
+#[test]
+fn an_ignored_association_option_is_reported() {
+    let root = std::env::temp_dir().join(format!("roundhouse-ignored-assoc-option-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let source = root.join("app");
+    std::fs::create_dir_all(&root).unwrap();
+    assert!(std::process::Command::new("cp").args(["-a"]).arg(roundhouse::fixtures::real_blog()).arg(&source).status().unwrap().success());
+    let edit = |path: &str, from: &str, to: &str| {
+        let text = std::fs::read_to_string(source.join(path)).unwrap().replacen(from, to, 1);
+        std::fs::write(source.join(path), text).unwrap();
+    };
+    edit("app/models/article.rb", "  has_many :comments, dependent: :destroy\n", "  has_many :comments, dependent: :destroy, index_errors: true\n");
+    edit("app/models/comment.rb", "  belongs_to :article\n", "  belongs_to :article, counter_cache: true\n");
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_roundhouse"))
+        .args(["--target", "ruby", "--allow-unsupported", "-o"])
+        .arg(root.join("out"))
+        .arg(&source)
+        .output()
+        .unwrap();
+    let _ = std::fs::remove_dir_all(&root);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let reported: Vec<&str> = stderr.lines().filter(|l| l.contains("association option is not modelled")).collect();
+    assert_eq!(reported.len(), 2, "{stderr}");
+    assert!(reported.iter().any(|l| l.contains("has_many :comments, index_errors:")), "{reported:?}");
+    assert!(reported.iter().any(|l| l.contains("belongs_to :article, counter_cache:")), "{reported:?}");
+}

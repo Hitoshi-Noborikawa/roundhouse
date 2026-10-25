@@ -3784,6 +3784,24 @@ fn parse_association(
                         .and_then(|l| l.body())
                         .and_then(|b| ingest_expr(&b, file).ok());
                 }
+                // Options that change what Rails does and that nothing here
+                // models: reported rather than dropped silently.
+                "index_errors" | "counter_cache" | "validate" | "required" | "before_add" | "after_add"
+                | "before_remove" | "after_remove" | "ensuring_owner_was" => {
+                    let span = Span {
+                        file: super::sources::file_id(file),
+                        start: el.location().start_offset() as u32,
+                        end: el.location().end_offset() as u32,
+                    };
+                    let mut diagnostic = crate::diagnostic::Diagnostic::unsupported(
+                        span,
+                        None,
+                        format!("{method} :{name_str}, {key}:"),
+                        "this association option is not modelled and is ignored",
+                    );
+                    diagnostic.severity = crate::diagnostic::Severity::Warning;
+                    super::prism::push(diagnostic);
+                }
                 _ => {}
             }
         }
