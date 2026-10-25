@@ -212,6 +212,51 @@ fn a_failed_push_at_commit_runs_the_record_callbacks_first() {
     assert!(run.stdout.contains("failed push passed"), "{}", run.stdout);
 }
 
+const RAISING_CALLBACK: &str = r#"  validates :title, presence: true
+
+  after_create_commit :refuse
+
+  def refuse
+    raise ArgumentError, "callback failed" if title == "Refused title"
+  end
+"#;
+
+const RAISING_CALLBACK_SCRIPT: &str = r#"SidekiqPush.start_recording
+begin
+  Article.transaction do
+    Article.create!(title: "Refused title", body: "A long enough article body.")
+    SidekiqPush.enqueue_after_commit("ArticleJob", "default", 0.0, "{}")
+  end
+  raise "the callback's error was swallowed"
+rescue ArgumentError => e
+  raise e unless e.message == "callback failed"
+end
+raise "pushed after a raising callback: #{SidekiqPush.recorded.inspect}" unless SidekiqPush.recorded.empty?
+raise "still held: #{SidekiqPush.held.length}" unless SidekiqPush.held.empty?
+raise "the data was not committed" unless Article.where(title: "Refused title").count == 1
+Article.transaction do
+  Article.create!(title: "Next title", body: "Another long enough body.")
+end
+raise "the dropped job was pushed later: #{SidekiqPush.recorded.inspect}" unless SidekiqPush.recorded.empty?
+SidekiqPush.stop_recording
+puts "raising callback passed"
+"#;
+
+/// A record's `after_commit` that raises ends the COMMIT there, as in
+/// Rails 8.1, where `after_all_transactions_commit` (the enqueue) runs
+/// after the record callbacks: the data stays committed, the caller
+/// sees the callback's error, and the held job is dropped, not pushed
+/// then or at the thread's next COMMIT.
+#[test]
+fn a_raising_commit_callback_drops_the_held_push() {
+    let run = emit_and_run::real_blog()
+        .write("app/jobs/article_job.rb", JOB)
+        .edit("app/models/article.rb", "  validates :title, presence: true\n", RAISING_CALLBACK)
+        .run_ruby(RAISING_CALLBACK_SCRIPT);
+    run.assert_passes();
+    assert!(run.stdout.contains("raising callback passed"), "{}", run.stdout);
+}
+
 const CONFIGURE_CLIENT: &str = "Sidekiq.configure_client do |config|\n  config.redis = { url: ENV.fetch(\"JOBS_REDIS_URL\", \"redis://jobs:6379/1\"), password: ENV[\"JOBS_REDIS_PASSWORD\"] }\nend\n";
 
 /// The app's `configure_client` settings reach the registry the push
