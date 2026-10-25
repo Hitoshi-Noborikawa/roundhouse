@@ -86,8 +86,10 @@ use crate::naming::singularize;
 use crate::span::Span;
 
 mod record_partial;
+mod record_value;
 
 use record_partial::Unresolved;
+use record_value::{RecordShapes, RecordValue};
 
 use super::view_to_library::{
     build_view_signature, infer_view_arg, insert_framework_stubs, split_view_name, view_module_id,
@@ -365,6 +367,9 @@ fn build_library_class(
         partial_key,
         template: format!("{dir}/{base}"),
         record_sites: std::rc::Rc::new(record_partial::record_sites(&view.body, &app.models)),
+        arg_model: arg_model.clone(),
+        span_types: std::rc::Rc::new(record_value::span_types(&view.body)),
+        record_shapes: std::rc::Rc::new(RecordShapes::build(app)),
     };
 
     let mut body_stmts: Vec<Expr> = Vec::new();
@@ -671,6 +676,14 @@ struct Ctx {
     /// the record's span (`record_partial::record_sites`), resolved on
     /// the analyzed template before its ivars become locals.
     record_sites: std::rc::Rc<std::collections::HashMap<Span, Result<String, Unresolved>>>,
+    /// The model `arg_name` is a record of, when known.
+    arg_model: Option<String>,
+    /// The analyzer's type of each expression of the template as
+    /// written, by span (`record_value::span_types`): the walk reads a
+    /// copy whose ivars are locals, which carries no types.
+    span_types: std::rc::Rc<std::collections::HashMap<Span, crate::ty::Ty>>,
+    /// The app's models as JSON values (`record_value`).
+    record_shapes: std::rc::Rc<RecordShapes>,
 }
 
 /// Classification of a single top-level statement in a jbuilder
@@ -1187,12 +1200,21 @@ fn emit_pairs(
         match stmt {
             JbStmt::Extract { obj, attrs } => {
                 let obj_is_arg = obj_is_named_local(obj, &ctx.arg_name);
+                let obj_model = record_model_of(obj, ctx);
                 for attr in attrs {
                     push_separator(out, ctx, sep);
                     out.push(io_append_lit(
                         &ctx.accumulator,
                         &format!("\"{}\":", attr.as_str()),
                     ));
+                    // An association: its record (or records) as
+                    // `as_json` writes them.
+                    if let Some(record) = obj_model.as_deref().and_then(|m| ctx.record_shapes.reader(m, attr)) {
+                        let read = send(Some((*obj).clone()), attr.as_str(), Vec::new(), None, false);
+                        out.extend(record_value_or_refusal(read, record.as_ref(), src.span, ctx));
+                        sep = Sep::After;
+                        continue;
+                    }
                     // A temporal column serializes from its `<col>_raw`
                     // storage reader (the stored ISO-8601 text), NOT the
                     // parsing `<col>` reader. Other columns (Integer,
@@ -1230,12 +1252,18 @@ fn emit_pairs(
                 // `encode_value` would otherwise render `Time#to_s`
                 // ("2026-09-12 13:26:25 UTC") where Rails renders
                 // `xmlschema(3)` ("2026-09-12T13:26:25.149Z").
-                let encoded = temporal_column_read(value, ctx)
-                    .and_then(|(obj, col)| temporal_column_json(&obj, &col, ctx.arg_columns.get(&col)?))
-                    .unwrap_or_else(|| {
-                        json_builder_encode(rewrite_h_escape(&rewrite_route_helpers(value, ctx)))
-                    });
-                out.push(io_append_call(&ctx.accumulator, encoded));
+                // A record, or records: as `as_json` writes them.
+                if let Some(record) = ctx.span_types.get(&value.span).and_then(|t| ctx.record_shapes.of_ty(t)) {
+                    let value = rewrite_h_escape(&rewrite_route_helpers(value, ctx));
+                    out.extend(record_value_or_refusal(value, Some(&record), src.span, ctx));
+                } else {
+                    let encoded = temporal_column_read(value, ctx)
+                        .and_then(|(obj, col)| temporal_column_json(&obj, &col, ctx.arg_columns.get(&col)?))
+                        .unwrap_or_else(|| {
+                            json_builder_encode(rewrite_h_escape(&rewrite_route_helpers(value, ctx)))
+                        });
+                    out.push(io_append_call(&ctx.accumulator, encoded));
+                }
                 sep = Sep::After;
             }
             JbStmt::PairPartial { key, partial_path, arg, as_name } => {
@@ -2143,7 +2171,82 @@ fn emit_array_extract(collection: &Expr, attrs: &[Symbol], ctx: &Ctx) -> Vec<Exp
     let mut inner = ctx.clone();
     inner.arg_name = item.as_str().to_string();
     inner.arg_columns = ctx.model_columns.get(&model).cloned().unwrap_or_default();
+    inner.arg_model = Some(model);
     emit_array_block(collection, &item, &body, &inner)
+}
+
+/// The model of the record `obj` is: its static type, else the
+/// template argument's model when `obj` is that argument.
+fn record_model_of(obj: &Expr, ctx: &Ctx) -> Option<String> {
+    match ctx.span_types.get(&obj.span).and_then(|t| ctx.record_shapes.of_ty(t)) {
+        Some(RecordValue::One(m)) => Some(m),
+        Some(RecordValue::Many(_)) => None,
+        None => ctx.arg_model.clone().filter(|_| obj_is_named_local(obj, &ctx.arg_name)),
+    }
+}
+
+/// The JSON of `value`, a record or records of one model, as Active
+/// Record's `as_json` writes it: the object `json.extract!(record,
+/// *attributes)` builds (`null` for a nil record), or an array of
+/// them. Refused, with the reason, when the model's `as_json` is not
+/// its columns or the record's class is not known (`record` is None:
+/// a polymorphic reader).
+fn record_value_or_refusal(value: Expr, record: Option<&RecordValue>, span: Span, ctx: &Ctx) -> Vec<Expr> {
+    let refuse = |why: &str| {
+        crate::ingest::survey::record(&crate::ingest::IngestError::Unsupported {
+            file: String::new(),
+            message: format!("jbuilder: a record as a value, which Jbuilder encodes with `as_json`: {why}"),
+        });
+        vec![unsupported_stmt(span, "jbuilder record value", why)]
+    };
+    let Some(record) = record else {
+        return refuse("a polymorphic association's record is of the class its row names");
+    };
+    let model = record.model().to_string();
+    let attrs = match ctx.record_shapes.attributes(&model) {
+        Ok(a) => a.to_vec(),
+        Err(why) => return refuse(why),
+    };
+    let extract = |var: &Symbol| {
+        let mut args = vec![var_ref(var.clone())];
+        args.extend(attrs.iter().map(|a| {
+            Expr::new(Span::synthetic(), ExprNode::Lit { value: Literal::Sym { value: a.clone() } })
+        }));
+        let json = send(None, "json", Vec::new(), None, false);
+        send(Some(json), "extract!", args, None, true)
+    };
+    let mut inner = ctx.clone();
+    inner.arg_columns = ctx.model_columns.get(&model).cloned().unwrap_or_default();
+    inner.arg_model = Some(model);
+    match record {
+        RecordValue::Many(_) => {
+            let item = Symbol::from("__item");
+            inner.arg_name = item.as_str().to_string();
+            emit_array_block(&value, &item, &extract(&item), &inner)
+        }
+        RecordValue::One(_) => {
+            let n = ctx.temps.get();
+            ctx.temps.set(n + 1);
+            let rec = Symbol::from(format!("__rec{n}"));
+            inner.arg_name = rec.as_str().to_string();
+            let stmt = extract(&rec);
+            let (object, _) = emit_object_filled(&[&stmt], &inner);
+            let bind = Expr::new(
+                Span::synthetic(),
+                ExprNode::Assign { target: LValue::Var { id: VarId(0), name: rec.clone() }, value },
+            );
+            let cond = send(Some(var_ref(rec)), "nil?", Vec::new(), None, false);
+            let branch = Expr::new(
+                Span::synthetic(),
+                ExprNode::If {
+                    cond,
+                    then_branch: io_append_lit(&ctx.accumulator, "null"),
+                    else_branch: seq(object),
+                },
+            );
+            vec![bind, branch]
+        }
+    }
 }
 
 fn is_json_receiver(recv: &Expr) -> bool {

@@ -4,6 +4,9 @@
 //!
 //! `json.partial!(record, …)` renders the partial of the record's class
 //! (`record.to_partial_path`), whatever the local holding it is called.
+//!
+//! A record as a value is encoded with `as_json`: its attributes, and
+//! a collection of records an array of them.
 
 use super::emit_and_run;
 
@@ -28,6 +31,11 @@ const WIDGETS_CONTROLLER: &str = r#"class WidgetsController < ApplicationControl
     @gadgets = @widget.gadgets.to_a
     @gadget = @gadgets.first
     @item = Widget.find(params[:id])
+  end
+
+  def assoc
+    @widget = Widget.find(params[:id])
+    @gadget = @widget.gadgets.first
   end
 
   private
@@ -55,6 +63,7 @@ fn app() -> emit_and_run::Overlay {
             "config/routes.rb",
             r#"Rails.application.routes.draw do
   get "widgets/:id", to: "widgets#show", defaults: { format: :json }
+  get "widgets/:id/assoc", to: "widgets#assoc", defaults: { format: :json }
   namespace :api do
     get "widgets/:id", to: "widgets#show", defaults: { format: :json }
   end
@@ -79,6 +88,7 @@ end
 }
 
 const SEED: &str = r#"
+require_relative "app/controllers/widgets_controller"
 widget = Widget.create!(name: "alpha", size: 3)
 Gadget.create!(label: "g1", widget_id: widget.id)
 def render_action(controller, action, id)
@@ -159,6 +169,34 @@ puts "a record's partial comes from its class"
         .write("app/views/widgets/show.json.jbuilder", show)
         .write("app/views/gadgets/_with_owner.json.jbuilder", with_owner)
         .write("app/views/api/widgets/show.json.jbuilder", "json.gadget do\n  json.partial!(@gadget, as: :gadget)\nend\n")
+        .run_ruby(&script)
+        .assert_passes();
+}
+
+/// A record as a value (an association named in `json.call` /
+/// `json.extract!`, or a pair's value) is its attributes, as `as_json`
+/// gives them, and a collection of records is an array of those. It was
+/// the record's `to_s`, `"#<Widget:0x…>"`.
+#[test]
+fn a_record_value_is_its_attributes_not_its_to_s() {
+    let assoc = r#"json.call(@gadget, :label, :widget)
+json.extract!(@widget, :name, :gadgets)
+json.owner @gadget.widget
+json.list @widget.gadgets.to_a
+json.none @gadget.note
+"#;
+    // Rails 8.1.4 + jbuilder 2.15.1, same rows: GET /widgets/1/assoc.
+    let script = format!(
+        r#"{SEED}
+expected = '{{"label":"g1","widget":{{"id":1,"name":"alpha","size":3}},"name":"alpha","gadgets":[{{"id":1,"label":"g1","widget_id":1,"note":null}}],"owner":{{"id":1,"name":"alpha","size":3}},"list":[{{"id":1,"label":"g1","widget_id":1,"note":null}}],"none":null}}'
+actual = render_action(WidgetsController.new, :assoc, widget.id)
+raise actual.inspect unless actual == expected
+puts "a record value is its attributes"
+"#
+    );
+    app()
+        .write("app/views/widgets/show.json.jbuilder", "json.id @widget.id\n")
+        .write("app/views/widgets/assoc.json.jbuilder", assoc)
         .run_ruby(&script)
         .assert_passes();
 }
