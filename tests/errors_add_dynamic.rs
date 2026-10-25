@@ -174,3 +174,34 @@ fn errors_add_review_rows_on_ruby() {
     run.assert_passes();
     assert!(run.stdout.contains("review rows passed"), "{}", run.stdout);
 }
+
+// Review of #1377 (oracle `cr_oracle_verbatim.rb`): a String message is
+// kept as written, `%{…}` and all; only a Symbol kind's template is
+// interpolated.
+const VERBATIM_CHECKER: &str = "class VerbatimChecker\n  def self.literal(record)\n    record.errors.add(:body, \"literal %{attribute}\")\n  end\n\n  def self.variable(record, attribute)\n    record.errors.add(attribute, \"literal %{attribute} %{model}\")\n  end\n\n  def self.base(record, attribute)\n    record.errors.add(attribute, \"base %{attribute}\")\n  end\n\n  def self.symbol(record, attribute)\n    record.errors.add(attribute, :named)\n  end\nend\n";
+
+const VERBATIM_SCRIPT: &str = r##"
+def check(label, got, want)
+  raise "#{label}: #{got.inspect} (want #{want.inspect})" unless got == want
+end
+def fresh = Article.new(title: "t", body: "A body long enough to validate.")
+a = fresh; VerbatimChecker.literal(a)
+check("a literal attribute, a String with %{attribute}", a.errors, ["Body literal %{attribute}"])
+a = fresh; VerbatimChecker.variable(a, :body)
+check("a variable attribute, a String with %{attribute}", a.errors, ["Body literal %{attribute} %{model}"])
+a = fresh; VerbatimChecker.base(a, :base)
+check(":base, a String with %{attribute}", a.errors, ["base %{attribute}"])
+a = fresh; VerbatimChecker.symbol(a, :body)
+check("a Symbol kind still interpolates", a.errors, ["Body of Body is wrong"])
+puts "verbatim rows passed"
+"##;
+
+#[test]
+fn a_string_message_is_kept_verbatim_on_ruby() {
+    let run = emit_and_run::real_blog()
+        .write("config/locales/en.yml", CR_LOCALE)
+        .write("app/models/verbatim_checker.rb", VERBATIM_CHECKER)
+        .run_ruby(VERBATIM_SCRIPT);
+    run.assert_passes();
+    assert!(run.stdout.contains("verbatim rows passed"), "{}", run.stdout);
+}

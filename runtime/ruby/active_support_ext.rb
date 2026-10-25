@@ -413,13 +413,16 @@ module ActiveSupport
         ("translation missing: errors.messages." + kind)
     end
     human = names.key?(name) ? names[name].to_s : humanize(name.tr(".", "_"))
-    # Rails' default interpolations, an explicit option winning; the value
-    # goes in as written (split and join: a gsub replacement would read
-    # `\0` or `\&` in it).
-    values = { "attribute" => human, "model" => names.key?("__model") ? names["__model"].to_s : "" }
-    options.each { |key, value| values[key] = value }
     text = template
-    values.each { |key, value| text = text.split("%{" + key + "}", -1).join(value) }
+    # A String message is kept as written, `%{…}` and all. A kind's
+    # template takes Rails' default interpolations, an explicit option
+    # winning; the value goes in as written (split and join: a gsub
+    # replacement would read `\0` or `\&` in it).
+    unless kind.nil?
+      values = { "attribute" => human, "model" => names.key?("__model") ? names["__model"].to_s : "" }
+      options.each { |key, value| values[key] = value }
+      values.each { |key, value| text = text.split("%{" + key + "}", -1).join(value) }
+    end
     full = text
     unless name == "base"
       full = before + human + between + text + after
