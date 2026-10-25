@@ -34,7 +34,8 @@
 //! A chain it doesn't take (`skip_before_action`, a non-literal option,
 //! a callback method the class doesn't define, an action with keyword or
 //! block parameters, a name the generated methods would take) keeps the
-//! class's calls reported, and its subclasses' with it.
+//! class's calls reported, and its subclasses' with it. Other targets
+//! report every callback ([`refuse`]).
 
 use std::collections::{BTreeSet, HashMap};
 
@@ -353,6 +354,27 @@ pub(crate) fn expand(app: &mut App, target: &str) -> Vec<crate::diagnostic::Diag
         ));
     }
     out
+}
+
+/// A target without the chain: every mailer callback is reported, and
+/// its action runs without it, as before.
+pub(crate) fn refuse(app: &mut App, target: &str) -> Vec<crate::diagnostic::Diagnostic> {
+    let mailers = crate::lower::mailer_class_side::mailer_names(app);
+    let mut gaps: Vec<(Span, String)> = Vec::new();
+    for lc in &app.library_classes {
+        if !mailers.contains(lc.name.0.as_str()) {
+            continue;
+        }
+        for call in lc.unknown_calls.iter().filter(|c| declares_callbacks(c)) {
+            gaps.push((call.span, construct(call)));
+        }
+    }
+    super::app::validates_gap_diagnostics(
+        app,
+        target,
+        gaps,
+        "mailer callback not lowered: this target has no mailer callback chain, so the action runs without it",
+    )
 }
 
 fn construct(call: &Expr) -> String {

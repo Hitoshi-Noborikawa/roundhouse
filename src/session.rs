@@ -69,7 +69,9 @@ pub fn analyze_and_lower_for(app: &mut App, target: crate::build_target::BuildTa
         found.extend(crate::ingest::mailer_callbacks::expand(app, target.as_str()));
         found
     } else {
-        crate::ingest::each_validator::refuse(app, target.as_str())
+        let mut found = crate::ingest::each_validator::refuse(app, target.as_str());
+        found.extend(crate::ingest::mailer_callbacks::refuse(app, target.as_str()));
+        found
     };
     if !target.parses_numericality_input() {
         refused.extend(crate::ingest::app::refuse_numericality_allow_on_untyped(app, target.as_str()));

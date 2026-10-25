@@ -111,6 +111,20 @@ fn app_files() -> Vec<(&'static str, &'static str)> {
     ]
 }
 
+// A strict target has no chain: each callback call is reported, where
+// its emitter dropped it without a word.
+#[test]
+fn a_strict_target_reports_each_mailer_callback() {
+    let warnings = lowered_warnings(&app_files(), BuildTarget::Typescript);
+    for construct in ["mailer before_action", "mailer after_action", "mailer around_action", "mailer with_options"] {
+        assert!(
+            warnings.iter().any(|w| w.contains(construct) && w.contains("mailer callback not lowered")),
+            "{construct}: {warnings:#?}"
+        );
+    }
+    assert_eq!(warnings.iter().filter(|w| w.contains("mailer callback not lowered")).count(), 10, "{warnings:#?}");
+}
+
 #[test]
 fn the_ruby_family_reports_no_mailer_callback() {
     let warnings = lowered_warnings(&app_files(), BuildTarget::Ruby);
