@@ -128,6 +128,10 @@ pub struct ParamsSpec {
     /// [`ParamsSpecs::carry_nested`] adds carried nested keys to
     /// `fields`: what a call site's own `(resource, fields)` matches.
     pub key_fields: Vec<Symbol>,
+    /// The nested keys' filters (`name:mode:allowed`), part of the spec's
+    /// identity with `key_fields`: two lists that differ only there are
+    /// two mass-assignment boundaries, so two specs.
+    pub nested_signature: Vec<String>,
     /// Non-scalar keys whose filter this lowering can reproduce
     /// (`k: [[:a, :b]]`, `k: [:a, :b]`, `k: {}`), in source order.
     pub nested_candidates: Vec<NestedKey>,
@@ -186,10 +190,10 @@ impl ParamsSpecs {
     /// The spec a call site's own `(resource, fields)` names — the exact
     /// lookup every rewrite wants, since `match_permit_call` returns
     /// both halves of the key.
-    pub fn find(&self, resource: &Symbol, fields: &[Symbol]) -> Option<&ParamsSpec> {
+    pub fn find(&self, resource: &Symbol, fields: &[Symbol], nested: &[String]) -> Option<&ParamsSpec> {
         self.specs
             .iter()
-            .find(|s| &s.resource == resource && s.key_fields == fields)
+            .find(|s| &s.resource == resource && s.key_fields == fields && s.nested_signature == nested)
     }
 
     pub fn by_class(&self, class_id: &ClassId) -> Option<&ParamsSpec> {
@@ -249,6 +253,17 @@ impl ParamsSpecs {
             }
         }
     }
+}
+
+/// A spec's nested identity: each candidate's name, mode and allowed keys.
+fn signature_of(candidates: &[NestedKey]) -> Vec<String> {
+    candidates.iter().map(|c| format!("{}:{}:{}", c.name.as_str(), c.mode, c.allowed.join(","))).collect()
+}
+
+/// The nested identity of the permit list at (or under) `expr`: what a
+/// call site passes to [`ParamsSpecs::find`] with its scalar fields.
+pub(crate) fn nested_signature(expr: &Expr) -> Vec<String> {
+    signature_of(&nested_candidates(expr, &ClassId(Symbol::from(""))))
 }
 
 /// The non-scalar keys of the permit / expect list at (or under) `expr`
@@ -433,7 +448,7 @@ fn field_reads(spec: &ParamsSpec, field: &Symbol, sub: Expr, span: Span) -> (Exp
 /// Walk every controller's action bodies and collect one ParamsSpec per
 /// distinct `(resource, fields)` pair.
 pub fn collect_specs(controllers: &[Controller]) -> ParamsSpecs {
-    let mut index: BTreeMap<(Symbol, Vec<Symbol>), usize> = BTreeMap::new();
+    let mut index: BTreeMap<(Symbol, Vec<Symbol>, Vec<String>), usize> = BTreeMap::new();
     let mut specs: Vec<ParamsSpec> = Vec::new();
     for c in controllers {
         for action in c.actions() {
@@ -474,7 +489,7 @@ fn scan_lookup_demand(controllers: &[Controller], specs: &mut ParamsSpecs) {
                 let class = sources.class(recv, specs).or_else(|| {
                     match_reverse_merge(expr).or_else(|| match_permit_call_full(expr))
                         .and_then(|(resource, fields, _)| {
-                        specs.find(&resource, &fields).map(|spec| spec.class_id.clone())
+                        specs.find(&resource, &fields, &nested_signature(expr)).map(|spec| spec.class_id.clone())
                     })
                 });
                 let Some(class) = class else { return };
@@ -638,6 +653,7 @@ pub fn specs_from_lists(lists: &[(Symbol, Vec<Symbol>)]) -> ParamsSpecs {
                 is_canonical: true,
                 file_fields: std::collections::BTreeSet::new(),
                 key_fields: fields.clone(),
+                nested_signature: Vec::new(),
                 nested_candidates: Vec::new(),
                 nested_fields: BTreeMap::new(),
             })
@@ -662,18 +678,13 @@ fn record(
     span: Span,
     wants: Wants,
     candidates: Vec<NestedKey>,
-    index: &mut BTreeMap<(Symbol, Vec<Symbol>), usize>,
+    index: &mut BTreeMap<(Symbol, Vec<Symbol>, Vec<String>), usize>,
     specs: &mut Vec<ParamsSpec>,
 ) {
-    let key = (resource.clone(), fields.clone());
+    let key = (resource.clone(), fields.clone(), signature_of(&candidates));
     match index.get(&key) {
         Some(&i) => {
             specs[i].wants_except |= wants.except;
-            for candidate in candidates {
-                if !specs[i].nested_candidates.iter().any(|c| c.name == candidate.name) {
-                    specs[i].nested_candidates.push(candidate);
-                }
-            }
             if !specs[i].declaring.contains(controller) {
                 specs[i].declaring.push(controller.clone());
             }
@@ -699,6 +710,7 @@ fn record(
                 is_canonical: false,
                 file_fields: std::collections::BTreeSet::new(),
                 key_fields: fields.clone(),
+                nested_signature: signature_of(&candidates),
                 nested_candidates: candidates,
                 nested_fields: BTreeMap::new(),
             });
@@ -709,7 +721,7 @@ fn record(
 fn collect_from_expr(
     expr: &Expr,
     controller: &ClassId,
-    index: &mut BTreeMap<(Symbol, Vec<Symbol>), usize>,
+    index: &mut BTreeMap<(Symbol, Vec<Symbol>, Vec<String>), usize>,
     specs: &mut Vec<ParamsSpec>,
 ) {
     // `<permit-chain>.except(:key)` / `.compact` — mark the spec before
@@ -722,7 +734,8 @@ fn collect_from_expr(
         };
         if wants.except {
             if let Some((resource, fields)) = match_permit_call(recv) {
-                record(resource, fields, controller, expr.span, wants, Vec::new(), index, specs);
+                let candidates = nested_candidates(recv, controller);
+                record(resource, fields, controller, expr.span, wants, candidates, index, specs);
             }
         }
     }
@@ -894,16 +907,16 @@ pub fn model_update_name(spec: &ParamsSpec, bang: bool) -> Symbol {
 
 /// First permit list in `expr`, in the same pre-order the collector
 /// uses — the way a `<resource>_params` helper body names its spec.
-pub fn first_permit_in(body: &Expr) -> Option<(Symbol, Vec<Symbol>)> {
+pub fn first_permit_in(body: &Expr) -> Option<(Symbol, Vec<Symbol>, Vec<String>)> {
     first_permit_at(body)
 }
 
-fn first_permit_at(expr: &Expr) -> Option<(Symbol, Vec<Symbol>)> {
+fn first_permit_at(expr: &Expr) -> Option<(Symbol, Vec<Symbol>, Vec<String>)> {
     if let Some((resource, fields, _)) = match_reverse_merge(expr) {
-        return Some((resource, fields));
+        return Some((resource, fields, nested_signature(expr)));
     }
-    if let Some(found) = match_permit_call(expr) {
-        return Some(found);
+    if let Some((resource, fields)) = match_permit_call(expr) {
+        return Some((resource, fields, nested_signature(expr)));
     }
     let mut found = None;
     walk_children(expr, &mut |c| {
@@ -1141,8 +1154,8 @@ where
         if !a.name.as_str().ends_with("_params") {
             continue;
         }
-        if let Some((resource, fields)) = first_permit_in(&a.body) {
-            if let Some(spec) = specs.find(&resource, &fields) {
+        if let Some((resource, fields, nested)) = first_permit_in(&a.body) {
+            if let Some(spec) = specs.find(&resource, &fields, &nested) {
                 out.insert(a.name.clone(), spec);
             }
         }
@@ -1183,7 +1196,7 @@ pub(crate) fn params_source_class(
         }
     }
     let (resource, fields) = match_permit_call(expr)?;
-    specs.find(&resource, &fields).map(|s| s.class_id.clone())
+    specs.find(&resource, &fields, &nested_signature(expr)).map(|s| s.class_id.clone())
 }
 
 /// Match either of the two source forms:
@@ -2496,7 +2509,7 @@ pub fn rewrite_to_from_raw(expr: &Expr, specs: &ParamsSpecs, guard: bool) -> Exp
         if let ExprNode::Send { recv: Some(recv), method, args, block: None, .. } = &*e.node {
             if method.as_str() == "compact" && args.is_empty() {
                 if let Some((resource, fields)) = match_permit_call(recv) {
-                    if let Some(spec) = specs.find(&resource, &fields) {
+                    if let Some(spec) = specs.find(&resource, &fields, &nested_signature(recv)) {
                         let arg = factory_arg(recv, guard, e.span);
                         return Some(build_from_raw_call(&spec.class_id, e.span, arg));
                     }
@@ -2511,7 +2524,7 @@ pub fn rewrite_to_from_raw(expr: &Expr, specs: &ParamsSpecs, guard: bool) -> Exp
                 && match_permit_call(recv).is_some()
             {
                 let (resource, fields) = match_permit_call(e)?;
-                let spec = specs.find(&resource, &fields)?;
+                let spec = specs.find(&resource, &fields, &nested_signature(e))?;
                 let ExprNode::Hash { entries, .. } = &*args[0].node else { return None };
                 // The factory reads the permit chain's own shape, under a
                 // `.compact` (see `match_permit_call_full`).
@@ -2532,7 +2545,7 @@ pub fn rewrite_to_from_raw(expr: &Expr, specs: &ParamsSpecs, guard: bool) -> Exp
             let ExprNode::Send { recv: Some(recv), args, .. } = &*e.node else { unreachable!() };
             let ExprNode::Hash { entries, .. } = &*recv.node else { unreachable!() };
             let (_, permitted) = match_permit_call(&args[0])?;
-            let spec = specs.find(&resource, &fields)?;
+            let spec = specs.find(&resource, &fields, &nested_signature(e))?;
             let arg = factory_arg(&args[0], guard, e.span);
             Some(build_from_raw_defaults(&spec.class_id, entries, &permitted, e.span, arg))
         };
@@ -2550,7 +2563,7 @@ pub fn rewrite_to_from_raw(expr: &Expr, specs: &ParamsSpecs, guard: bool) -> Exp
             return Some(seq);
         }
         let (resource, fields) = match_permit_call(e)?;
-        let spec = specs.find(&resource, &fields)?;
+        let spec = specs.find(&resource, &fields, &nested_signature(e))?;
         Some(build_from_raw_call(&spec.class_id, e.span, factory_arg(e, guard, e.span)))
     })
 }

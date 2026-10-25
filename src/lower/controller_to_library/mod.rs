@@ -2912,7 +2912,7 @@ fn action_to_method(
         Ty::Str
     } else if !is_public && method_name.ends_with("_params") {
         let spec = self::params::first_permit_in(&a.body)
-            .and_then(|(resource, fields)| params_specs.find(&resource, &fields));
+            .and_then(|(resource, fields, nested)| params_specs.find(&resource, &fields, &nested));
         if let Some(spec) = spec {
             Ty::Class { id: spec.class_id.clone(), args: vec![].into() }
         } else {

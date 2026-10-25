@@ -359,6 +359,8 @@ module RequestDispatch
   # type is `Hash[String, untyped]` — keys always String via `k.to_s`,
   # values are recursive Hash | original-leaf, both unified as untyped.
   def stringify_keys: (Hash[untyped, untyped] hash) -> Hash[String, untyped]
+  # `stringify_keys` for an Array value, at any depth of nesting.
+  def stringify_list: (Array[untyped] list) -> Array[untyped]
 
   def assert_response: (Symbol | Integer expected, ?String? message) -> void
   def assert_redirected_to: (String expected_path, ?ActionResponse response) -> void

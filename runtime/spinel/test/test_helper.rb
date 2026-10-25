@@ -2556,13 +2556,26 @@ module RequestDispatch
       if v.is_a?(Hash)
         out[k.to_s] = stringify_keys(v)
       elsif v.is_a?(Array)
-        # A form's `items[][name]` arrives as String-keyed hashes too.
-        out[k.to_s] = v.map { |item| item.is_a?(Hash) ? stringify_keys(item) : item }
+        # A form's `items[][name]` arrives as String-keyed hashes too,
+        # at any depth of nesting.
+        out[k.to_s] = stringify_list(v)
       else
         out[k.to_s] = v
       end
     end
     out
+  end
+
+  def stringify_list(list)
+    list.map do |item|
+      if item.is_a?(Hash)
+        stringify_keys(item)
+      elsif item.is_a?(Array)
+        stringify_list(item)
+      else
+        item
+      end
+    end
   end
 
   # Symbol-form HTTP-status assertion. Real-blog tests pass `:success`,
