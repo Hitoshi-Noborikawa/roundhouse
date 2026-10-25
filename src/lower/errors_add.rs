@@ -534,7 +534,8 @@ fn dynamic_add(expr: &mut Expr, labels: &Labels) -> bool {
             (Some(value.as_str().to_string()), None, None)
         }
         [opts] if matches!(&*opts.node, ExprNode::Hash { .. }) => (Some("invalid".to_string()), None, Some(opts)),
-        [m] if matches!(m.ty, Some(crate::ty::Ty::Str)) && reads_without_effect_deep(m) => (None, Some(m.clone()), None),
+        // Computed (`"saw " + value.inspect`) too: the helper takes it once.
+        [m] if matches!(m.ty, Some(crate::ty::Ty::Str)) => (None, Some(m.clone()), None),
         [k, opts] if matches!(&*opts.node, ExprNode::Hash { .. }) => match &*k.node {
             ExprNode::Lit { value: Literal::Sym { value } } => (Some(value.as_str().to_string()), None, Some(opts)),
             _ => return false,
