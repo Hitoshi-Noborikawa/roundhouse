@@ -35,6 +35,15 @@ pub(in crate::analyze) fn register(
         for m in ["helpers", "helper", "default_url_options"] {
             acb.class_methods.insert(Symbol::from(m), Ty::Untyped);
         }
+        // `cache_store`, the class-level store (`Rails.cache` unless an
+        // app sets another) that `rate_limit`'s synthesized filter
+        // counts in — `self.class.cache_store`, as actionpack's default
+        // `store:` is. runtime/spinel/action_controller_fragment_caching.rb
+        // defines it on every controller class.
+        acb.class_methods.insert(
+            Symbol::from("cache_store"),
+            Ty::Class { id: ClassId(Symbol::from("Rails::Cache")), args: vec![].into() },
+        );
         classes
             .entry(ClassId(Symbol::from("ActionController::Base")))
             .or_insert(acb);

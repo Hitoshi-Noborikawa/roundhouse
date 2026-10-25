@@ -338,6 +338,15 @@ module Rails
       value
     end
 
+    # Rails' `increment(name, amount = 1, expires_in:)`, the call
+    # `rate_limit` makes on the controller's `cache_store` — under that
+    # name, so a test stubbing the store's `increment` is heard. The
+    # counting is `increment_str`'s, which each store behind
+    # `Rails.cache` shards and locks its own way.
+    def increment(key, amount = 1, expires_in: 0)
+      increment_str(key.to_s, amount, expires_in.to_i)
+    end
+
     # A counter in the typed store: the value is the count as decimal
     # text, so the store stays `String → String` on every target. The
     # first increment in a window starts the window — the entry is
@@ -345,14 +354,14 @@ module Rails
     # is what `rate_limit`'s `within:` means (MemoryStore#increment does
     # the same). A whole-store flush at the cap resets every window;
     # that is the bound's shape, not a cost anything pays today.
-    def increment_str(key, ttl)
+    def increment_str(key, amount, ttl)
       k = key.to_s
       hit = read_str(k)
       if hit.nil?
-        write_str(k, "1", ttl)
-        1
+        write_str(k, amount.to_s, ttl)
+        amount
       else
-        n = hit.to_i + 1
+        n = hit.to_i + amount
         @entries[k] = n.to_s
         n
       end

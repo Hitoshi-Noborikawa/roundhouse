@@ -123,7 +123,7 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
     blocker.class_methods.insert(Symbol::from("blocked?"), Ty::Bool);
     classes.insert(ClassId(Symbol::from("ActionController::BrowserBlocker")), blocker);
 
-    // `ActionController::RateLimiter.exceeded?(key, within, to)` — the
+    // `ActionController::RateLimiter.exceeded?(store, key, within, to)` — the
     // counter behind `rate_limit`, called from the filter method
     // `ingest::rate_limit` synthesizes; runtime/ruby/action_controller/
     // rate_limiter.rb answers it. Registered for the same reason.
