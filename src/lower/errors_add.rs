@@ -57,6 +57,9 @@ pub fn apply_errors_add_lowering(app: &mut App) -> Vec<Diagnostic> {
 pub(crate) struct LabelData {
     models: std::collections::HashMap<crate::ident::ClassId, crate::i18n::ModelI18n>,
     unknown: crate::i18n::ModelI18n,
+    /// The app's whole catalog: the global error messages a run-time
+    /// `errors.add` (`dynamic_add`) bakes for its kind.
+    catalog: crate::i18n::Catalog,
 }
 
 impl LabelData {
@@ -68,6 +71,7 @@ impl LabelData {
                 keys: Vec::new(),
                 catalog: app.i18n.subset_for("activerecord", &[]),
             },
+            catalog: app.i18n.clone(),
         }
     }
 
@@ -219,6 +223,9 @@ fn rewrite_errors_add(expr: &mut Expr, labels: &Labels, diags: &mut Vec<Diagnost
                 && matches!(&*args[0].node, ExprNode::Lit { value: Literal::Sym { .. } })
     );
     if !matches {
+        if dynamic_add(expr, labels) {
+            return;
+        }
         let reason = match &*expr.node {
             ExprNode::Send { args, .. }
                 if args.first().is_some_and(
@@ -258,7 +265,6 @@ fn rewrite_errors_add(expr: &mut Expr, labels: &Labels, diags: &mut Vec<Diagnost
         };
         msg = Some(fold_str_concat(entries.into_iter().next().unwrap().1));
     } else if matches!(msg.as_ref().map(|m| &*m.node), Some(ExprNode::Hash { .. })) {
-        diags.push(residue(expr, "unrecognized arg shape"));
         *expr.node = ExprNode::Send {
             recv,
             method: Symbol::from("add"),
@@ -266,6 +272,9 @@ fn rewrite_errors_add(expr: &mut Expr, labels: &Labels, diags: &mut Vec<Diagnost
             block: None,
             parenthesized: true,
         };
+        if !dynamic_add(expr, labels) {
+            diags.push(residue(expr, "unrecognized arg shape"));
+        }
         return;
     }
     let reader = recv.as_ref().expect("checked errors reader");
@@ -395,6 +404,130 @@ fn format_pieces(format: &str) -> Option<(String, String, String)> {
     let (between, after) = rest.split_once("%{message}")?;
     (!before.contains("%{") && !between.contains("%{") && !after.contains("%{"))
         .then(|| (before.to_string(), between.to_string(), after.to_string()))
+}
+
+/// `<record>.errors.add(attribute, kind_or_message, **options)` whose
+/// attribute or options are known only at run time (a validator's
+/// `validate_each(record, attribute, value)`) → `ActiveSupport.errors_add(
+/// …)`, pushed with its full message onto the record's errors. The kind is a literal Symbol, or a String message stands in
+/// for it, so the global messages Rails would fall back to for that kind
+/// (`site`) are baked here, and the helper looks the record's own model
+/// first. Any other shape (a dynamic kind, a `message:` option, a
+/// record read twice) stays residue.
+fn dynamic_add(expr: &mut Expr, labels: &Labels) -> bool {
+    let ExprNode::Send { recv: Some(reader), args, .. } = &*expr.node else { return false };
+    let ExprNode::Send { recv: owner, .. } = &*reader.node else { return false };
+    if !owner_reads_once(owner.as_ref()) || args.is_empty() || args.len() > 3 {
+        return false;
+    }
+    let span = expr.span;
+    let (kind, message, options) = match &args[1..] {
+        [] => (Some("invalid".to_string()), None, None),
+        [Expr { node, .. }] if matches!(&**node, ExprNode::Lit { value: Literal::Sym { .. } }) => {
+            let ExprNode::Lit { value: Literal::Sym { value } } = &**node else { unreachable!() };
+            (Some(value.as_str().to_string()), None, None)
+        }
+        [opts] if matches!(&*opts.node, ExprNode::Hash { .. }) => (Some("invalid".to_string()), None, Some(opts)),
+        [m] if matches!(m.ty, Some(crate::ty::Ty::Str)) && reads_without_effect_deep(m) => (None, Some(m.clone()), None),
+        [k, opts] if matches!(&*opts.node, ExprNode::Hash { .. }) => match &*k.node {
+            ExprNode::Lit { value: Literal::Sym { value } } => (Some(value.as_str().to_string()), None, Some(opts)),
+            _ => return false,
+        },
+        _ => return false,
+    };
+    // Options as a String-keyed Hash; `message:` (Rails' override) isn't taken.
+    let mut entries = Vec::new();
+    if let Some(opts) = options {
+        let ExprNode::Hash { entries: given, .. } = &*opts.node else { unreachable!() };
+        for (k, v) in given {
+            let ExprNode::Lit { value: Literal::Sym { value: key } } = &*k.node else { return false };
+            if key.as_str() == "message" {
+                return false;
+            }
+            // Interpolated as text, as I18n does; `count:` also picks the plural form.
+            let mut text = Expr::new(span, ExprNode::Send { recv: Some(v.clone()), method: Symbol::from("to_s"), args: vec![], block: None, parenthesized: false });
+            text.ty = Some(crate::ty::Ty::Str);
+            entries.push((str_lit(span, key.as_str()), text));
+        }
+    }
+    let Some((before, between, after)) = format_pieces(labels.model(reader).errors_format()) else { return false };
+    let mut site = Vec::new();
+    if let Some(kind) = &kind {
+        let catalog = &labels.data.catalog;
+        let mut put = |name: String, key: String| {
+            for (suffix, k) in [("", key.clone()), (".zero", format!("{key}.zero")), (".one", format!("{key}.one")), (".other", format!("{key}.other"))] {
+                if let Some(text) = catalog.lookup(&k) {
+                    site.push((str_lit(span, &format!("{name}{suffix}")), str_lit(span, text)));
+                }
+            }
+        };
+        put("ar_messages".into(), format!("activerecord.errors.messages.{kind}"));
+        put("am_messages".into(), format!("activemodel.errors.messages.{kind}"));
+        let prefix = "errors.attributes.";
+        let attrs: Vec<String> = catalog
+            .entries
+            .keys()
+            .filter_map(|k| k.strip_prefix(prefix))
+            .filter_map(|rest| rest.strip_suffix(&format!(".{kind}")).map(str::to_string))
+            .filter(|a| !a.contains('.'))
+            .collect();
+        for attr in attrs {
+            put(format!("attributes.{attr}"), format!("{prefix}{attr}.{kind}"));
+        }
+        put("messages".into(), format!("errors.messages.{kind}"));
+    }
+    let str_hash = |entries: Vec<(Expr, Expr)>, value: crate::ty::Ty| {
+        let mut h = Expr::new(span, ExprNode::Hash { entries, kwargs: false });
+        h.ty = Some(crate::ty::Ty::Hash { key: std::sync::Arc::new(crate::ty::Ty::Str), value: std::sync::Arc::new(value) });
+        h
+    };
+    let nil = || {
+        let mut n = Expr::new(span, ExprNode::Lit { value: Literal::Nil });
+        n.ty = Some(crate::ty::Ty::Nil);
+        n
+    };
+    let mut name = Expr::new(span, ExprNode::Send { recv: Some(args[0].clone()), method: Symbol::from("to_s"), args: vec![], block: None, parenthesized: false });
+    name.ty = Some(crate::ty::Ty::Str);
+    let call_args = vec![
+        name,
+        kind.as_deref().map(|k| str_lit(span, k)).unwrap_or_else(nil),
+        message.unwrap_or_else(nil),
+        str_hash(entries, crate::ty::Ty::Str),
+        str_hash(site, crate::ty::Ty::Str),
+        str_hash(Vec::new(), crate::ty::Ty::Str),
+        str_hash(Vec::new(), crate::ty::Ty::Str),
+        str_lit(span, &before),
+        str_lit(span, &between),
+        str_lit(span, &after),
+    ];
+    let mut support = Expr::new(span, ExprNode::Const { path: vec![Symbol::from("ActiveSupport")] });
+    support.ty = Some(crate::ty::Ty::Class { id: crate::ident::ClassId(Symbol::from("ActiveSupport")), args: vec![].into() });
+    let detail_ty = crate::ty::Ty::Class { id: crate::ident::ClassId(Symbol::from("ActiveRecord::ErrorDetail")), args: vec![].into() };
+    let mut call = Expr::new(
+        span,
+        ExprNode::Send { recv: Some(support), method: Symbol::from("error_detail"), args: call_args, block: None, parenthesized: true },
+    );
+    call.ty = Some(detail_ty.clone());
+    // `detail = ActiveSupport.error_detail(…); <owner>.errors << detail.full_message; <owner>.error_details << detail`
+    let local = Symbol::from(format!("__error_detail_{}", span.start));
+    let read = || {
+        let mut r = Expr::new(span, ExprNode::Var { id: crate::ident::VarId(0), name: local.clone() });
+        r.ty = Some(detail_ty.clone());
+        r
+    };
+    let assign = Expr::new(span, ExprNode::Assign { target: crate::expr::LValue::Var { id: crate::ident::VarId(0), name: local.clone() }, value: call });
+    let mut full = Expr::new(span, ExprNode::Send { recv: Some(read()), method: Symbol::from("full_message"), args: vec![], block: None, parenthesized: false });
+    full.ty = Some(crate::ty::Ty::Str);
+    let mut errors = reader.clone();
+    errors.ty = Some(crate::ty::Ty::Array { elem: std::sync::Arc::new(crate::ty::Ty::Str) });
+    let mut push_message = Expr::new(span, ExprNode::Send { recv: Some(errors), method: Symbol::from("<<"), args: vec![full], block: None, parenthesized: false });
+    push_message.ty = Some(crate::ty::Ty::Array { elem: std::sync::Arc::new(crate::ty::Ty::Str) });
+    let mut push_detail = Expr::new(span, ExprNode::Send { recv: Some(error_details(owner.clone(), span)), method: Symbol::from("<<"), args: vec![read()], block: None, parenthesized: false });
+    push_detail.ty = Some(error_details_ty());
+    let mut call = Expr::new(span, ExprNode::Seq { exprs: vec![assign, push_message, push_detail] });
+    call.ty = Some(error_details_ty());
+    *expr = call;
+    true
 }
 
 /// `errors.import(error, attribute: :field)` → `ActiveSupport.errors_import(…)` and

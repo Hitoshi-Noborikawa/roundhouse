@@ -387,6 +387,51 @@ module ActiveSupport
     details
   end
 
+  # Rails' `errors.add(attribute, kind_or_message, **options)` where the
+  # attribute or the options are known only at run time (a validator's
+  # `validate_each`). The message is looked up as Rails does: the model's
+  # own (`overrides`, "<attr>.<kind>" then "<kind>", with its "__scope"),
+  # then what the call site baked for its literal kind (`site`):
+  # "ar_messages" or "am_messages" (<scope>.errors.messages.<kind>),
+  # "attributes.<attr>" (errors.attributes.<attr>.<kind>) and "messages"
+  # (errors.messages.<kind>), each with ".one" / ".other" / ".zero" plural
+  # forms. A String `message` is used as given. The attribute is named by
+  # the model's translated names (`names`), else humanized. Answers the
+  # error's detail; the call site pushes it and its full message onto the
+  # record's errors.
+  def self.error_detail(name, kind, message, options, site, names, overrides, before, between, after)
+    count = options["count"]
+    if kind.nil?
+      template = message.to_s
+    else
+      scoped = overrides["__scope"] == "activemodel" ? "am_messages" : "ar_messages"
+      template = error_template(overrides, name + "." + kind, count) ||
+        error_template(overrides, kind, count) ||
+        error_template(site, scoped, count) ||
+        error_template(site, "attributes." + name, count) ||
+        error_template(site, "messages", count) ||
+        ("translation missing: errors.messages." + kind)
+    end
+    text = template
+    options.each { |key, value| text = text.gsub("%{" + key + "}", value) }
+    full = text
+    unless name == "base"
+      human = names.key?(name) ? names[name].to_s : humanize(name.tr(".", "_"))
+      full = before + human + between + text + after
+    end
+    ActiveRecord::ErrorDetail.new(name, kind.nil? ? text : kind, text, full, !kind.nil?, options.empty?)
+  end
+
+  # The template under `key` in `table`, its plural form chosen by
+  # `count` as English does (zero, one, other), else the plain one.
+  def self.error_template(table, key, count)
+    unless count.nil?
+      form = count.to_s == "1" ? "one" : (count.to_s == "0" && table.key?(key + ".zero") ? "zero" : "other")
+      return table[key + "." + form] if table.key?(key + "." + form)
+    end
+    table[key]
+  end
+
   # Rails' `errors.merge!(other)`: each of the other record's errors
   # imported under its own attribute, and nothing when it is these errors.
   def self.errors_merge(errors, details, others, names, before, between, after)
