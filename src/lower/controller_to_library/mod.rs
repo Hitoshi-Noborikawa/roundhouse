@@ -245,6 +245,10 @@ pub fn lower_controllers_with_arel_views_and_assocs(
 pub struct LowerControllerOptions<'a> {
     /// Ruby-family nullable read values; strict-target defaults stay unchanged.
     pub ruby_read_values: bool,
+    /// Carry non-scalar permitted keys (`k: [[:a]]`, `k: {}`) as
+    /// `Roundhouse::ParamValue` members read by `Params.nested` (ruby
+    /// family); elsewhere they are dropped with a warning.
+    pub carry_nested_params: bool,
     /// The selected Db shim supports typed positional binds for read predicates.
     pub param_binds: bool,
     /// App `Schema` — enables the Arel SQL-chain lowering pass.
@@ -304,6 +308,7 @@ pub fn lower_controllers_with_arel_views_assocs_and_routes(
 ) -> Vec<LibraryClass> {
     let LowerControllerOptions {
         ruby_read_values,
+        carry_nested_params,
         param_binds,
         schema,
         views,
@@ -332,6 +337,7 @@ pub fn lower_controllers_with_arel_views_assocs_and_routes(
     // rewrite controller bodies + register the class with the typer.
     let mut params_specs = self::params::collect_specs(controllers);
     params_specs.mark_file_fields(models);
+    params_specs.carry_nested(carry_nested_params, true);
     self::typed_update::mark_model_resources(&mut params_specs, models, schema);
     let params_lcs = self::params::synthesize_params_classes(&params_specs);
     // What `@parent.<assoc>.build` / `.find` expand to: the same
@@ -2906,7 +2912,7 @@ fn action_to_method(
         Ty::Str
     } else if !is_public && method_name.ends_with("_params") {
         let spec = self::params::first_permit_in(&a.body)
-            .and_then(|(resource, fields)| params_specs.find(&resource, &fields));
+            .and_then(|(resource, fields, nested)| params_specs.find(&resource, &fields, &nested));
         if let Some(spec) = spec {
             Ty::Class { id: spec.class_id.clone(), args: vec![].into() }
         } else {

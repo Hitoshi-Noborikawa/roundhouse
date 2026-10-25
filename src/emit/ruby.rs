@@ -219,6 +219,9 @@ fn materialize_models_with_param_binds(
     // A permitted `has_one_attached` field is a FILE on the params
     // class; the model's `from_params` reads it as one.
     params_specs.mark_file_fields(&app.models);
+    // The ruby family carries non-scalar permitted keys; the controller
+    // side ledgers the ones it can't (`carry_nested`).
+    params_specs.carry_nested(true, false);
 
     // Bulk lower so per-resource synthesized siblings (`<Model>Row`)
     // ride alongside the model class. Each returned `LibraryClass`
@@ -662,6 +665,7 @@ fn lower_controllers_for_spinel(app: &App, format_breadth: FormatBreadth, param_
         model_extras,
         crate::lower::controller_to_library::LowerControllerOptions {
             ruby_read_values: true,
+            carry_nested_params: true,
             param_binds,
             schema: Some(&app.schema),
             views: &app.views,

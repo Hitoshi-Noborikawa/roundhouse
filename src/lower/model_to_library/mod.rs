@@ -369,7 +369,12 @@ pub(crate) fn lower_models_inner_with_ruby_values(
                 .insert(setter_name, crate::dialect::AccessorKind::AttributeWriter);
         };
         for field in &spec.fields {
-            register(field.clone(), Ty::Str);
+            let ty = if spec.nested_fields.contains_key(field) {
+                crate::lower::controller_to_library::params::field_ty(spec, field)
+            } else {
+                Ty::Str
+            };
+            register(field.clone(), ty);
             register(
                 crate::lower::controller_to_library::params::provided_field(field),
                 Ty::Bool,

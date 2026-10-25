@@ -242,4 +242,106 @@ module Params
     end
     !narrowed.nil?
   end
+
+  # A non-scalar permitted key's value, filtered as Rails' `permit`
+  # filters it, or nil when nothing under `key` passes. `allowed` is the
+  # key's flat list of scalar keys; `mode` is how it was spelled:
+  #   "list"  `k: [[:a]]`: an Array of hashes, or a hash of hashes
+  #           (`{"0" => {...}}`, what form builders send);
+  #   "any"   `permit(k: [:a])`: those, or one hash;
+  #   "hash"  `expect(r: [k: [:a]])`: one hash only;
+  #   "deep"  `k: {}`: any hash, as submitted.
+  # Each kept hash keeps the allowed keys holding a scalar.
+  def self.nested(sub, key, allowed, mode)
+    return nil unless sub.key?(key)
+    value = sub.fetch(key, nil)
+    if value.is_a?(Array)
+      return nil if mode == "hash" || mode == "deep"
+      kept = []
+      i = 0
+      while i < value.length
+        item = value[i]
+        kept.push(Params.allowed_scalars(item, allowed)) if item.is_a?(Hash)
+        i = i + 1
+      end
+      return kept
+    end
+    return nil unless value.is_a?(Hash)
+    return value if mode == "deep"
+    if mode != "hash" && Params.numbered(value)
+      out = {}
+      value.each do |k, v|
+        out[k] = Params.allowed_scalars(v, allowed) if Params.index_key(k) && v.is_a?(Hash)
+      end
+      return out
+    end
+    return nil if mode == "list"
+    Params.allowed_scalars(value, allowed)
+  end
+
+  # `k: []`'s value: the Array of scalars under `key`, each as the String
+  # a request carries, or [] when the key is absent or holds anything
+  # else (a scalar, a hash, an array with a hash or array in it), which
+  # Rails' `permit` drops. `scalar_list_provided` tells the two apart.
+  def self.scalar_list(sub, key)
+    out = []
+    return out unless Params.scalar_list_provided(sub, key)
+    value = sub.fetch(key, nil)
+    if value.is_a?(Array)
+      i = 0
+      while i < value.length
+        item = value[i]
+        out.push(item.nil? ? "" : item.to_s)
+        i = i + 1
+      end
+    end
+    out
+  end
+
+  def self.scalar_list_provided(sub, key)
+    return false unless sub.key?(key)
+    value = sub.fetch(key, nil)
+    value.is_a?(Array) && Params.scalars_only(value)
+  end
+
+  def self.nested_provided(sub, key, allowed, mode)
+    !Params.nested(sub, key, allowed, mode).nil?
+  end
+
+  # `hash` restricted to the `allowed` keys that hold a scalar.
+  def self.allowed_scalars(hash, allowed)
+    out = {}
+    i = 0
+    while i < allowed.length
+      name = allowed[i]
+      if hash.key?(name)
+        item = hash.fetch(name, nil)
+        out[name] = item unless item.is_a?(Hash) || item.is_a?(Array)
+      end
+      i = i + 1
+    end
+    out
+  end
+
+  # Rails' `nested_attributes?`: some key is an index ("0", "-1")
+  # holding a hash.
+  def self.numbered(hash)
+    found = false
+    hash.each do |k, v|
+      found = true if Params.index_key(k) && v.is_a?(Hash)
+    end
+    found
+  end
+
+  def self.index_key(key)
+    text = key.to_s
+    text = text[1, text.length - 1] if text.start_with?("-")
+    return false if text.empty?
+    i = 0
+    while i < text.length
+      return false unless "0123456789".include?(text[i])
+      i = i + 1
+    end
+    true
+  end
 end
