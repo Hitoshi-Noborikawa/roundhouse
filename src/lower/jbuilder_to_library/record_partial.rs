@@ -442,13 +442,16 @@ fn element_model(coll: &Expr, models: &[Model], env: &Env) -> Option<String> {
             plural_model(method, models)
         }
         ExprNode::Send { recv: Some(recv), method, block: None, .. } => {
-            if RELATION_STEPS.contains(&method.as_str()) {
-                return element_model(recv, models, env);
-            }
+            // A relation step on the model constant (`Widget.all`) is
+            // where the chain starts: the constant itself answers no
+            // collection, so it is checked before recursing.
             if let ExprNode::Const { path } = &*recv.node {
                 let name = path.iter().map(|s| s.as_str()).collect::<Vec<_>>().join("::");
                 return (model(&name, models).is_some() && RELATION_STEPS.contains(&method.as_str()))
                     .then_some(name);
+            }
+            if RELATION_STEPS.contains(&method.as_str()) {
+                return element_model(recv, models, env);
             }
             let owner = resolve(recv, models, env).ok()?;
             let m = model(&owner, models)?;
@@ -492,7 +495,42 @@ fn plural_model(name: &Symbol, models: &[Model]) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::model_partial_path;
+    use super::{model_partial_path, record_sites};
+    use std::collections::HashMap;
+    use std::path::PathBuf;
+
+    /// The models each `json.partial!(record)` site of `view` may be,
+    /// before the analyzer types anything, so only the template's own
+    /// evidence (`element_model`, `resolve`) is in play.
+    fn sites_of(view: &str) -> Vec<Result<Vec<String>, String>> {
+        let files: HashMap<PathBuf, Vec<u8>> = [
+            (
+                "db/schema.rb",
+                "ActiveRecord::Schema.define do\n  create_table \"widgets\", force: :cascade do |t|\n    t.string \"name\"\n  end\nend\n",
+            ),
+            ("app/models/application_record.rb", "class ApplicationRecord < ActiveRecord::Base\n  primary_abstract_class\nend\n"),
+            ("app/models/widget.rb", "class Widget < ApplicationRecord\nend\n"),
+            ("app/views/widgets/_widget.json.jbuilder", "json.name widget.name\n"),
+            ("app/views/widgets/index.json.jbuilder", view),
+        ]
+        .iter()
+        .map(|(p, c)| (PathBuf::from(p), c.as_bytes().to_vec()))
+        .collect();
+        let app = crate::ingest::ingest_app_from_tree(files).expect("ingest");
+        let v = app.views.iter().find(|v| v.name.as_str().ends_with("index")).expect("the view");
+        record_sites(&v.body, &app.models)
+            .into_values()
+            .map(|r| r.map(|m| m.names).map_err(|why| why.detail()))
+            .collect()
+    }
+
+    #[test]
+    fn a_block_over_a_model_constants_finder_binds_its_parameter_to_the_model() {
+        for collection in ["Widget.all", "Widget.where(size: 3)", "Widget.includes(:gadgets).to_a"] {
+            let sites = sites_of(&format!("json.array!({collection}) do |row|\n  json.partial!(row)\nend\n"));
+            assert_eq!(sites, vec![Ok(vec!["Widget".to_string()])], "{collection}");
+        }
+    }
 
     #[test]
     fn the_partial_path_takes_the_controller_namespace_as_action_view_merges_it() {
