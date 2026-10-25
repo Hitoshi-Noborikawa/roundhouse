@@ -341,11 +341,12 @@ impl Ctx {
             .collect()
     }
 
-    /// The prefix a member/collection route's action goes in FRONT of:
-    /// the scope's `as` prefix and every enclosing level but the
-    /// innermost, whose own singular or plural ends the name. Rails
-    /// names `collection { get :sorted }` in `namespace :admin` >
-    /// `resources :gadgets` > `resources :parts` `sorted_admin_gadget_parts`.
+    /// The prefix a member or collection route's action goes in FRONT of:
+    /// the scope's `as` prefix, then every enclosing level but the
+    /// innermost, whose own singular or plural ends the name.
+    /// `namespace :admin` wrapping `resources :gadgets` wrapping
+    /// `resources :parts` with `collection { get :sorted }` is
+    /// `sorted_admin_gadget_parts`.
     fn member_name_prefix(&self) -> String {
         let outer = self.parents.len().saturating_sub(1);
         let parents: String = self.parents[..outer]

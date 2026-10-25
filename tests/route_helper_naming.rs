@@ -134,9 +134,7 @@ fn the_unrenamed_sibling_keeps_its_own_helpers() {
     name_for(NAMESPACED_AS, "/mod_mails/:id", "mod_mail");
 }
 
-/// The action goes in front of the whole prefix: the namespace or scope
-/// `as`, then every enclosing resource but the innermost (#728). Names
-/// are Rails 8.1.4's for the same routes.
+/// Expected names are Rails 8.1.4's (#728).
 const PREFIXED: &str = r#"Rails.application.routes.draw do
   concern :batch do
     collection do
