@@ -1129,8 +1129,38 @@ fn render_params(m: &MethodDef) -> String {
 /// function, its parameter types read from the first `yield`'s values.
 pub(super) fn yield_block_param(m: &MethodDef) -> Option<String> {
     let args = first_yield_args(&m.body)?;
+    let void = matches!(m.signature.as_ref(), Some(Ty::Fn { ret, .. }) if matches!(ret.as_ref(), Ty::Nil));
+    report_valued_yields(&m.body, void);
     let tys: Vec<String> = args.iter().map(|a| go_ty_stub(a.ty.as_ref())).collect();
     Some(format!("block func({})", tys.join(", ")))
+}
+
+// Not a value-returning block: the block is a void func here, so a yield whose value is read has nothing to read
+fn report_valued_yields(e: &Expr, statement: bool) {
+    use crate::expr::ExprNode;
+    match &*e.node {
+        ExprNode::Yield { args } => {
+            if !statement {
+                crate::emit::diagnostics::report_unsupported(e.span, "go2", "yield", "a yield whose value is used");
+            }
+            args.iter().for_each(|a| report_valued_yields(a, false));
+        }
+        ExprNode::Seq { exprs } => {
+            let last = exprs.len().saturating_sub(1);
+            exprs.iter().enumerate().for_each(|(i, x)| report_valued_yields(x, i < last || statement));
+        }
+        ExprNode::If { cond, then_branch, else_branch } => {
+            report_valued_yields(cond, false);
+            report_valued_yields(then_branch, statement);
+            report_valued_yields(else_branch, statement);
+        }
+        ExprNode::While { cond, body, .. } => {
+            report_valued_yields(cond, false);
+            report_valued_yields(body, true);
+        }
+        ExprNode::Lambda { body, .. } => report_valued_yields(body, true),
+        _ => e.node.for_each_child(&mut |c| report_valued_yields(c, false)),
+    }
 }
 
 fn first_yield_args(e: &Expr) -> Option<&Vec<Expr>> {

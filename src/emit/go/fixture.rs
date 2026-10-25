@@ -186,5 +186,7 @@ pub(super) fn go_literal_for(value: &str, ty: &Ty) -> String {
 }
 
 fn unreadable_fixture_value(value: &str, ty: &Ty) -> String {
-    crate::emit::diagnostics::report_unsupported(crate::span::Span::synthetic(), "go2", "fixture value", format!("{value:?} for a {ty:?} column"))
+    let stub = crate::emit::diagnostics::report_unsupported(crate::span::Span::synthetic(), "go2", "fixture value", format!("{value:?} for a {ty:?} column"));
+    // Not the bare panic: it answers no value, and the fixture assigns this to a field
+    format!("func() {} {{ {stub} }}()", super::ty::go_ty_stub(Some(ty)))
 }
