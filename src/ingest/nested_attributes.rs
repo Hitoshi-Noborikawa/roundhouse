@@ -23,7 +23,7 @@
 //! declaration as the reported gap it was.
 
 use crate::app::App;
-use crate::dialect::{Association, Model, ModelBodyItem};
+use crate::dialect::{Association, Dependent, Model, ModelBodyItem};
 use crate::expr::{Expr, ExprNode, Literal};
 use crate::ident::Symbol;
 
@@ -75,6 +75,21 @@ struct Target {
     /// `as:`: the target's `<as>_type` column and the value Rails writes
     /// there, the owner's `polymorphic_name`.
     polymorphic_type: Option<(String, String)>,
+    /// has_one: what an entry without an `id` does to the record already
+    /// there, by the association's `dependent:`.
+    replace: Replace,
+}
+
+/// Rails' has_one replacement (`HasOneAssociation#remove_target!`).
+#[derive(PartialEq, Clone, Copy)]
+enum Replace {
+    /// has_many / belongs_to: nothing is replaced.
+    No,
+    Destroy,
+    Delete,
+    /// No `dependent:`, `:nullify` or a `:restrict_*`: the old record's
+    /// key (and `as:` type) is set to nil and saved.
+    Nullify,
 }
 
 #[derive(PartialEq)]
@@ -91,15 +106,21 @@ fn targets(model: &Model, names: &[Symbol], allow_destroy: bool, models: &[Model
             let assoc = model.associations().find(|a| a.name() == name)?;
             // A custom `primary_key:` on either side keys the record by
             // another column than the `id` the generated source reads.
-            let (kind, class, foreign_key, as_interface) = match assoc {
+            let (kind, class, foreign_key, as_interface, replace) = match assoc {
                 Association::HasMany { target, foreign_key, through: None, primary_key: None, as_interface, .. } => {
-                    (Kind::HasMany, target, foreign_key, as_interface)
+                    (Kind::HasMany, target, foreign_key, as_interface, Replace::No)
                 }
-                Association::HasOne { target, foreign_key, through: None, primary_key: None, as_interface, .. } => {
-                    (Kind::HasOne, target, foreign_key, as_interface)
+                Association::HasOne { target, foreign_key, through: None, primary_key: None, as_interface, dependent, .. } => {
+                    let replace = match dependent {
+                        Dependent::Destroy => Replace::Destroy,
+                        Dependent::Delete => Replace::Delete,
+                        Dependent::None | Dependent::Nullify | Dependent::Restrict => Replace::Nullify,
+                        Dependent::DestroyAsync | Dependent::DeleteAll => return None,
+                    };
+                    (Kind::HasOne, target, foreign_key, as_interface, replace)
                 }
                 Association::BelongsTo { target, foreign_key, polymorphic: false, primary_key: None, .. } => {
-                    (Kind::BelongsTo, target, foreign_key, &None)
+                    (Kind::BelongsTo, target, foreign_key, &None, Replace::No)
                 }
                 _ => return None,
             };
@@ -141,6 +162,7 @@ fn targets(model: &Model, names: &[Symbol], allow_destroy: bool, models: &[Model
                 allow_destroy,
                 owner: model.name.0.as_str().to_string(),
                 polymorphic_type,
+                replace,
             })
         })
         .collect()
@@ -163,13 +185,17 @@ fn humanize(name: &str) -> String {
 /// its columns assigned now and saved with the parent; with
 /// `allow_destroy: true` a truthy `_destroy` (ActiveModel's boolean cast)
 /// destroys it instead, and an entry without an `id` so marked builds
-/// nothing. Held records are validated with the parent, then saved:
+/// nothing. A has_one record built replaces the one already there, by
+/// `dependent:`, before the parent saves; a required belongs_to marked
+/// for destruction fails the parent's "must exist" (`__nested_<name>_marked`,
+/// read by the required check). Held records are validated with the parent, then saved:
 /// has_many/has_one ones after it, with their foreign key, belongs_to
 /// ones before it, the parent carrying the id.
 fn source(target: &Target) -> String {
-    let Target { name, class, foreign_key, kind, inverse, allow_destroy, owner, polymorphic_type } = target;
+    let Target { name, class, foreign_key, kind, inverse, allow_destroy, owner, polymorphic_type, replace } = target;
     let ivar = format!("@__nested_{name}");
     let doomed = format!("@__nested_{name}_destroy");
+    let replaced = format!("@__nested_{name}_replaced");
     let human = humanize(name);
     let destroy = if *allow_destroy {
         "!attrs[:_destroy].nil? && ![\"\", \"0\", \"f\", \"F\", \"false\", \"FALSE\", \"off\", \"OFF\"].include?(attrs[:_destroy].to_s)"
@@ -187,8 +213,14 @@ fn source(target: &Target) -> String {
             "  def {name}_attributes=(attributes)\n    {ivar} = [] if {ivar}.nil?\n    {doomed} = [] if {doomed}.nil?\n    entries = attributes.is_a?(Hash) ? attributes.values : attributes\n    entries.each do |entry|\n      {decode}      if id.nil? || id.to_s.empty?\n        {ivar} << {class}.new(attrs) unless destroy\n      else\n        existing = nil\n        {name}.each {{ |record| existing = record if record.id.to_s == id.to_s }}\n        {not_found} if existing.nil?\n        if destroy\n          {doomed} << existing\n        else\n          attrs.each {{ |key, value| existing[key] = value }}\n          {ivar} << existing\n        end\n      end\n    end\n  end\n\n"
         )
     } else {
+        // has_one: the record already there is replaced by the one built.
+        let build = if *replace == Replace::No {
+            format!("      {ivar} << {class}.new(attrs) unless destroy\n")
+        } else {
+            format!("      unless destroy\n        {ivar} << {class}.new(attrs)\n        {replaced} = {name}\n      end\n")
+        };
         format!(
-            "  def {name}_attributes=(attributes)\n    entry = attributes\n    {ivar} = []\n    {doomed} = []\n    {decode}    if id.nil? || id.to_s.empty?\n      {ivar} << {class}.new(attrs) unless destroy\n    else\n      existing = {name}\n      {not_found} if existing.nil? || existing.id.to_s != id.to_s\n      if destroy\n        {doomed} << existing\n      else\n        attrs.each {{ |key, value| existing[key] = value }}\n        {ivar} << existing\n      end\n    end\n  end\n\n"
+            "  def {name}_attributes=(attributes)\n    entry = attributes\n    {ivar} = []\n    {doomed} = []\n    {decode}    if id.nil? || id.to_s.empty?\n{build}    else\n      existing = {name}\n      {not_found} if existing.nil? || existing.id.to_s != id.to_s\n      if destroy\n        {doomed} << existing\n      else\n        attrs.each {{ |key, value| existing[key] = value }}\n        {ivar} << existing\n      end\n    end\n  end\n\n"
         )
     };
     let skip_inverse = inverse
@@ -203,7 +235,7 @@ fn source(target: &Target) -> String {
     );
     let save = match kind {
         Kind::BelongsTo => format!(
-            "  def __nested_{name}_save\n    unless {ivar}.nil?\n      children = {ivar}\n      {ivar} = nil\n      children.each do |child|\n        child.save!\n        self.{foreign_key} = child.id\n      end\n    end\n    self.{foreign_key} = nil unless {doomed}.nil? || {doomed}.empty?\n  end\n\n  before_save :__nested_{name}_save\n\n  def __nested_{name}_destroy\n{destroy_doomed}  end\n\n  after_save :__nested_{name}_destroy\n\n"
+            "  def __nested_{name}_save\n    unless {ivar}.nil?\n      children = {ivar}\n      {ivar} = nil\n      children.each do |child|\n        child.save!\n        self.{foreign_key} = child.id\n      end\n    end\n    self.{foreign_key} = nil unless {doomed}.nil? || {doomed}.empty?\n  end\n\n  before_save :__nested_{name}_save\n\n  def __nested_{name}_destroy\n{destroy_doomed}  end\n\n  after_save :__nested_{name}_destroy\n\n  def __nested_{name}_marked\n    !{doomed}.nil? && !{doomed}.empty?\n  end\n\n"
         ),
         Kind::HasMany | Kind::HasOne => {
             let reset = if *kind == Kind::HasMany { format!("    reload_{name}\n") } else { String::new() };
@@ -211,7 +243,28 @@ fn source(target: &Target) -> String {
                 .as_ref()
                 .map(|(column, owner_type)| format!("        child.{column} = \"{owner_type}\"\n"))
                 .unwrap_or_default();
-            format!(
+            let clear_type = polymorphic_type
+                .as_ref()
+                .map(|(column, _)| format!("      old.{column} = nil\n"))
+                .unwrap_or_default();
+            let remove = match replace {
+                Replace::No => String::new(),
+                Replace::Destroy => "      old.destroy\n".to_string(),
+                Replace::Delete => "      old.delete\n".to_string(),
+                Replace::Nullify => format!(
+                    "      old.{foreign_key} = nil\n{clear_type}      raise ActiveRecord::RecordNotSaved, \"Failed to remove the existing associated {name}. The record failed to save after its foreign key was set to nil.\" unless old.save\n"
+                ),
+            };
+            let replace_old = if remove.is_empty() {
+                String::new()
+            } else {
+                // Before the save: a failing nullify raises with nothing
+                // written, as Rails' rollback leaves it.
+                format!(
+                    "  def __nested_{name}_replace\n    unless {replaced}.nil?\n      old = {replaced}\n      {replaced} = nil\n{remove}    end\n  end\n\n  before_save :__nested_{name}_replace\n\n"
+                )
+            };
+            replace_old + &format!(
                 "  def __nested_{name}_save\n    unless {ivar}.nil?\n      children = {ivar}\n      {ivar} = nil\n      children.each do |child|\n        child.{foreign_key} = id\n{set_type}        child.save!\n      end\n    end\n{destroy_doomed}{reset}  end\n\n  after_save :__nested_{name}_save\n\n"
             )
         }

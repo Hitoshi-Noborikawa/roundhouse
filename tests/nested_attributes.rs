@@ -24,6 +24,15 @@
 //! or owner type raises `RecordNotFound`. A custom `primary_key:` stays
 //! reported.
 //!
+//! Replacement and required destroys (oracle `nested_attributes6.rb`): a
+//! has_one entry without an `id` replaces the record already there, by
+//! the association's `dependent:` (`:destroy` destroys it, `:delete`
+//! deletes it, otherwise its key, and an `as:` type, are set to nil and
+//! saved, and a record that then fails to save raises `RecordNotSaved`
+//! with nothing written). A required belongs_to whose record is marked
+//! for destruction fails the parent ("Writer must exist"), with the
+//! record and the key kept.
+//!
 //! The declaration was reported and dropped, and no writer existed.
 
 #[path = "support/emit_and_run.rs"]
@@ -266,6 +275,89 @@ fn nested_attributes_over_polymorphic_as_on_spinel() {
     let run = polymorphic_app().run_spinel_with_db(POLY_SCRIPT);
     run.assert_passes();
     assert!(run.stdout.contains("nested polymorphic passed"), "{}", run.stdout);
+}
+const REPLACE_TABLES: &str = "  create_table \"owners\", force: :cascade do |t|\n    t.string \"name\"\n  end\n\n  create_table \"gones\", force: :cascade do |t|\n    t.integer \"owner_id\"\n    t.string \"text\"\n  end\n\n  create_table \"wipes\", force: :cascade do |t|\n    t.integer \"owner_id\"\n    t.string \"text\"\n  end\n\n  create_table \"kepts\", force: :cascade do |t|\n    t.integer \"owner_id\"\n    t.string \"text\"\n  end\n\n  create_table \"plains\", force: :cascade do |t|\n    t.integer \"owner_id\"\n    t.string \"text\"\n  end\n\n  create_table \"stucks\", force: :cascade do |t|\n    t.integer \"owner_id\"\n    t.string \"text\"\n  end\n\n  create_table \"folks\", force: :cascade do |t|\n    t.string \"name\"\n  end\n\n  create_table \"spots\", force: :cascade do |t|\n    t.string \"line\"\n    t.string \"addressable_type\"\n    t.integer \"addressable_id\"\n  end\n\n  create_table \"writers\", force: :cascade do |t|\n    t.string \"name\"\n  end\n\n  create_table \"letters\", force: :cascade do |t|\n    t.string \"title\"\n    t.integer \"writer_id\"\n  end\n\n  create_table \"comments\", force: :cascade do |t|";
+
+fn replace_app() -> emit_and_run::Overlay {
+    let mut app = emit_and_run::real_blog().edit("db/schema.rb", TABLES, REPLACE_TABLES);
+    for (class, required) in [("Gone", true), ("Wipe", true), ("Kept", false), ("Plain", false), ("Stuck", true)] {
+        let optional = if required { "" } else { ", optional: true" };
+        app = app.write(
+            &format!("app/models/{}.rb", class.to_lowercase()),
+            &format!("class {class} < ApplicationRecord\n  belongs_to :owner{optional}\nend\n"),
+        );
+    }
+    app.write(
+        "app/models/owner.rb",
+        "class Owner < ApplicationRecord\n  has_one :gone, dependent: :destroy\n  has_one :wipe, dependent: :delete\n  has_one :kept, dependent: :nullify\n  has_one :plain\n  has_one :stuck\n  accepts_nested_attributes_for :gone, :wipe, :kept, :plain, :stuck\nend\n",
+    )
+    .write(
+        "app/models/folk.rb",
+        "class Folk < ApplicationRecord\n  has_one :home, as: :addressable, class_name: \"Spot\", dependent: :destroy\n  has_one :spare, as: :addressable, class_name: \"Spot\"\n  accepts_nested_attributes_for :home, :spare\nend\n",
+    )
+    .write("app/models/spot.rb", "class Spot < ApplicationRecord\n  belongs_to :addressable, polymorphic: true, optional: true\nend\n")
+    .write("app/models/writer.rb", "class Writer < ApplicationRecord\nend\n")
+    .write(
+        "app/models/letter.rb",
+        "class Letter < ApplicationRecord\n  belongs_to :writer\n  accepts_nested_attributes_for :writer, allow_destroy: true\nend\n",
+    )
+}
+
+const REPLACE_SCRIPT: &str = r##"
+def check(label, got, want)
+  raise "#{label}: #{got.inspect} (want #{want.inspect})" unless got == want
+end
+o = Owner.create!(name: "o", gone_attributes: { text: "1" }, wipe_attributes: { text: "1" },
+  kept_attributes: { text: "1" }, plain_attributes: { text: "1" })
+old = [Gone, Wipe, Kept, Plain].map { |k| k.where(owner_id: o.id).first.id }
+o.update!(gone_attributes: { text: "2" }, wipe_attributes: { text: "2" }, kept_attributes: { text: "2" }, plain_attributes: { text: "2" })
+check("dependent: :destroy replaces", [Gone.where(id: old[0]).count, Gone.where(owner_id: o.id).map(&:text)], [0, ["2"]])
+check("dependent: :delete replaces", [Wipe.where(id: old[1]).count, Wipe.where(owner_id: o.id).map(&:text)], [0, ["2"]])
+check("dependent: :nullify replaces", [Kept.find(old[2]).owner_id, Kept.where(owner_id: o.id).map(&:text)], [nil, ["2"]])
+check("no dependent nullifies", [Plain.find(old[3]).owner_id, Plain.where(owner_id: o.id).map(&:text)], [nil, ["2"]])
+n = Owner.create!(name: "n")
+n.update!(gone_attributes: { text: "x" })
+check("nothing there: just builds", Gone.where(owner_id: n.id).map(&:text), ["x"])
+s = Owner.create!(name: "s", stuck_attributes: { text: "1" })
+stuck = Stuck.where(owner_id: s.id).first
+raised = begin
+  s.update(name: "renamed", stuck_attributes: { text: "2" })
+  "no error"
+rescue ActiveRecord::RecordNotSaved => e
+  e.message
+end
+check("a required old record raises", raised, "Failed to remove the existing associated stuck. The record failed to save after its foreign key was set to nil.")
+check("nothing written", [Stuck.find(stuck.id).owner_id, Stuck.where(owner_id: s.id).count, Owner.find(s.id).name], [s.id, 1, "s"])
+f = Folk.create!(name: "f", home_attributes: { line: "1" })
+old_home = Spot.where(addressable_id: f.id).first.id
+f.update!(home_attributes: { line: "2" })
+check("as: dependent: :destroy replaces", [Spot.where(id: old_home).count, Spot.where(addressable_type: "Folk", addressable_id: f.id).map(&:line)], [0, ["2"]])
+g = Folk.create!(name: "g", spare_attributes: { line: "1" })
+spare = Spot.where(addressable_id: g.id).first
+g.update!(spare_attributes: { line: "2" })
+check("as: nullify clears the id and type", [Spot.find(spare.id).addressable_id, Spot.find(spare.id).addressable_type], [nil, nil])
+check("as: the new one", Spot.where(addressable_type: "Folk", addressable_id: g.id).map(&:line), ["2"])
+w = Writer.create!(name: "w")
+l = Letter.create!(title: "t", writer_id: w.id)
+check("a required belongs_to marked for destruction fails", l.update(writer_attributes: { id: w.id, _destroy: "1" }), false)
+check("its error", l.errors.include?("Writer must exist"), true)
+check("the record and key kept", [Writer.where(id: w.id).count, Letter.find(l.id).writer_id], [1, w.id])
+puts "nested replace passed"
+"##;
+
+#[test]
+fn nested_attributes_replace_and_required_destroy_on_ruby() {
+    let run = replace_app().run_ruby(REPLACE_SCRIPT);
+    run.assert_passes();
+    assert!(run.stdout.contains("nested replace passed"), "{}", run.stdout);
+}
+
+#[test]
+#[ignore = "requires the Spinel toolchain"]
+fn nested_attributes_replace_and_required_destroy_on_spinel() {
+    let run = replace_app().run_spinel_with_db(REPLACE_SCRIPT);
+    run.assert_passes();
+    assert!(run.stdout.contains("nested replace passed"), "{}", run.stdout);
 }
 
 /// Emit real-blog for `target` with Article's first two lines replaced by
