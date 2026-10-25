@@ -93,6 +93,19 @@ class FalconController < Async::Container::Controller
         if CABLE_HUB && defined?(Broadcasts) && defined?(Cable::Registry)
           Broadcasts.set_transport(Cable::Hub.connect(CABLE_HUB_PATH))
         end
+        if defined?(Cable::Stats) && Cable::Stats::ON
+          Cable::Stats.ensure_reporting
+          # How late the event loop runs a timer: what blocks it, every
+          # request on this worker waits out.
+          Async(transient: true) do
+            loop do
+              due = Cable::Stats.now + 0.01
+              sleep 0.01
+              Cable::Stats.record("loop_lag", due)
+              Cable::Stats.note_gc
+            end
+          end
+        end
         front = ThrusterCache::Front.new(Protocol::Rack::Adapter.new(app))
         server = Falcon::Server.new(front, bound, protocol: endpoint.protocol, scheme: endpoint.scheme)
         instance.ready!

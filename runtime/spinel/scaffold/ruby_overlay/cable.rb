@@ -70,11 +70,11 @@ module Cable
   PROTOCOLS = ["actioncable-v1-json"].freeze
   PING_INTERVAL = 3 # seconds — matches Action Cable's BEAT_INTERVAL
 
-  # Where a subscribe's time goes, for profiling under load. Off unless
+  # Where a worker's time goes, for profiling under load. Off unless
   # ROUNDHOUSE_CABLE_STATS names a period in seconds; then every period
   # each worker writes one line per stage to stderr:
   #
-  #   [cable stats] <unix ms> <pid> <stage> <count per bucket, tab-separated>
+  #   [roundhouse stats] <unix ms> <pid> <stage> <count per bucket, tab-separated>
   #
   # with buckets bounded above by BOUNDS milliseconds (the last is
   # unbounded), so scripts/campfire-users-fold.rb can add up any window.
@@ -86,12 +86,26 @@ module Cable
   #   hub      waiting for the hub to acknowledge a stream (cable_hub.rb),
   #            which holds the reactor thread
   #   total    the command's arrival to the confirmation
+  #
+  # And beside them:
+  #
+  #   loop_lag   how late a 10 ms timer on Falcon's event loop fires
+  #              (falcon.rb): the time every request on that worker waited
+  #   db_permit  a write waiting behind this process's writers
+  #   db_flock   a write waiting behind another process's (Db's flock)
+  #   gc         not a histogram: GC.stat's time (ms), major and minor
+  #              collections over the period
+  #   major_by   not a histogram: major collections by GC.latest_gc_info's
+  #              reason (`nofree:3  oldgen:1`), read at loop_lag's ticks,
+  #              so two majors between ticks count as the later one's
   module Stats
     PERIOD = ENV["ROUNDHOUSE_CABLE_STATS"].to_f
     ON = PERIOD > 0
     BOUNDS = [1, 2, 5, 10, 20, 50, 100, 200, 500, 1000, 2000].freeze
     LOCK = Mutex.new
     @counts = Hash.new { |h, stage| h[stage] = Array.new(BOUNDS.size + 1, 0) }
+    @major_by = Hash.new(0)
+    @majors_seen = nil
 
     def self.now
       Process.clock_gettime(Process::CLOCK_MONOTONIC)
@@ -104,10 +118,27 @@ module Cable
       nil
     end
 
+    # Called often (loop_lag's tick): notes the reason for each major
+    # collection since the last call.
+    def self.note_gc
+      majors = GC.stat(:major_gc_count)
+      return if majors == @majors_seen
+      reason = @majors_seen && GC.latest_gc_info(:major_by)
+      @majors_seen = majors
+      LOCK.synchronize { @major_by[reason.to_s] += 1 } if reason
+      nil
+    end
+
     def self.report
       counts = LOCK.synchronize { c = @counts; @counts = Hash.new { |h, stage| h[stage] = Array.new(BOUNDS.size + 1, 0) }; c }
+      major_by = LOCK.synchronize { m = @major_by; @major_by = Hash.new(0); m }
       stamp = Process.clock_gettime(Process::CLOCK_REALTIME, :millisecond)
-      counts.each { |stage, row| $stderr.puts "[cable stats] #{stamp} #{Process.pid} #{stage}\t#{row.join("\t")}" }
+      counts.each { |stage, row| $stderr.puts "[roundhouse stats] #{stamp} #{Process.pid} #{stage}\t#{row.join("\t")}" }
+      gc = GC.stat.values_at(:time, :major_gc_count, :minor_gc_count)
+      last = @last_gc || gc
+      @last_gc = gc
+      $stderr.puts "[roundhouse stats] #{stamp} #{Process.pid} gc\t#{gc.zip(last).map { |now, was| now - was }.join("\t")}"
+      $stderr.puts "[roundhouse stats] #{stamp} #{Process.pid} major_by\t#{major_by.map { |r, n| "#{r}:#{n}" }.join("\t")}" unless major_by.empty?
       nil
     end
 
@@ -117,6 +148,8 @@ module Cable
       return if @reporter_pid == Process.pid
 
       @reporter_pid = Process.pid
+      @last_gc = nil
+      Db.wait_observer = method(:record) if defined?(Db) && Db.respond_to?(:wait_observer=)
       Thread.new do
         loop do
           sleep PERIOD

@@ -62,6 +62,10 @@ module Db
   @permit_owner = nil
   WRITE_PERMIT_TIMEOUT = 5.0
   @write_permit_timeout = WRITE_PERMIT_TIMEOUT
+  # Told how long a writer waited, when it had to: `call(stage, since)`
+  # with stage "db_permit" (behind this process's writers) or "db_flock"
+  # (behind another process's). For profiling; nil costs one check.
+  @wait_observer = nil
   # The permit's cross-process half: a flock beside the database, taken
   # by the permit's holder. See `acquire_writer_lock`.
   @writer_lock_file = nil
@@ -847,19 +851,26 @@ module Db
     @write_permit_timeout = seconds
   end
 
+  def self.wait_observer=(observer)
+    @wait_observer = observer
+  end
+
   def self.acquire_permit
     fiber = Fiber.current
     deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + @write_permit_timeout
+    waited = nil
     @permit_lock.synchronize do
       # A dead owner (a killed thread) never releases; a Mutex would
       # have been freed with it, so this permit treats it as free too.
       until @permit_owner.nil? || !@permit_owner.alive?
         remaining = deadline - Process.clock_gettime(Process::CLOCK_MONOTONIC)
         return false if remaining <= 0
+        waited ||= Process.clock_gettime(Process::CLOCK_MONOTONIC)
         @permit_cv.wait(@permit_lock, remaining)
       end
       @permit_owner = fiber
     end
+    @wait_observer&.call("db_permit", waited) if waited
     acquire_writer_lock(deadline)
     true
   end
@@ -925,12 +936,15 @@ module Db
     file = writer_lock_file
     return false if file.nil?
     unless file.flock(File::LOCK_EX | File::LOCK_NB)
-      remaining = deadline - Process.clock_gettime(Process::CLOCK_MONOTONIC)
+      waited = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+      remaining = deadline - waited
       return false if remaining <= 0
       begin
         Timeout.timeout(remaining) { file.flock(File::LOCK_EX) }
       rescue Timeout::Error
         return false
+      ensure
+        @wait_observer&.call("db_flock", waited)
       end
     end
     @writer_lock_held = true

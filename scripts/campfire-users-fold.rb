@@ -24,7 +24,7 @@ lanes.each do |lane|
   # Cable::Stats lines from the lane's own log: [unix ms, stage, bucket counts].
   lane_log = File.join(out, "logs", "users-#{lane}.log")
   cable = File.exist?(lane_log) ?
-    File.foreach(lane_log).grep(/\A\[cable stats\] /).map { |l| f = l.chomp.split(/[ \t]/); [f[2].to_i, f[4], f[5..].map(&:to_i)] } : []
+    File.foreach(lane_log).grep(/\A\[roundhouse stats\] /).map { |l| f = l.chomp.split(/[ \t]/); [f[2].to_i, f[4], f[4] == "major_by" ? f[5..] : f[5..].map(&:to_i)] } : []
   starts = phases.each_with_index.select { |(name, _), _| name.start_with?("step ") && !name.include?("warmup") }
   result["steps"].each_with_index do |step, i|
     start = starts[i] or next
@@ -39,16 +39,25 @@ lanes.each do |lane|
     if timed.length >= 2 && timed.last[0] > timed.first[0]
       step["server_cpu_cores"] = ((timed.last[3] - timed.first[3]) / 100.0 / ((timed.last[0] - timed.first[0]) / 1000.0)).round(2)
     end
-    # A subscribe's stages: count, bucket-bound p50/p99 (ms; nil past the
-    # last bound) and how many took longer than the client's 500 ms re-send.
+    # Cable::Stats' stages (cable.rb): for each histogram, count,
+    # bucket-bound p50/p99 (ms; nil past the last bound) and how many took
+    # longer than 50 ms and than the client's 500 ms subscribe re-send.
+    # GC is summed over the workers: ms of GC per second, collections.
     cwin = cable.select { |t, _, _| t >= from && t < to }
     unless cwin.empty?
-      step["cable_subscribe_ms"] = cwin.group_by { |_, stage, _| stage }.to_h do |stage, rows|
+      secs = [(to.finite? ? to : cwin.map(&:first).max) - from, 1].max / 1000.0
+      step["stages_ms"] = cwin.group_by { |_, stage, _| stage }.to_h do |stage, rows|
+        if stage == "major_by"
+          next [stage, rows.flat_map(&:last).each_with_object(Hash.new(0)) { |pair, h| r, n = pair.split(":"); h[r] += n.to_i }]
+        end
         sums = rows.map(&:last).transpose.map(&:sum)
+        if stage == "gc"
+          next [stage, { "ms_per_s" => (sums[0] / secs).round(1), "major" => sums[1], "minor" => sums[2] }]
+        end
         n = sums.sum
         at = ->(q) { i = 0; acc = 0; (acc += sums[i]; i += 1) while acc < q * n; CABLE_BOUNDS[i - 1] }
-        over = sums[(CABLE_BOUNDS.index(500) + 1)..].sum
-        [stage, { "n" => n, "p50_le" => at.(0.5), "p99_le" => at.(0.99), "over_500" => over }]
+        over = ->(ms) { sums[(CABLE_BOUNDS.index(ms) + 1)..].sum }
+        [stage, { "n" => n, "p50_le" => at.(0.5), "p99_le" => at.(0.99), "over_50" => over.(50), "over_500" => over.(500) }]
       end
     end
     # The same cores by process and by thread (campfire-users-threads.rb).
