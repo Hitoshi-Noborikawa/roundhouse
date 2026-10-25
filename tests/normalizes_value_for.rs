@@ -108,6 +108,8 @@ fn not_lowered_warnings(decls: &str) -> Vec<String> {
         .output()
         .unwrap();
     let _ = std::fs::remove_dir_all(&root);
+    // A run that fails before reporting anything must not read as "no warning".
+    assert!(out.status.success(), "roundhouse failed:\n{}", String::from_utf8_lossy(&out.stderr));
     String::from_utf8_lossy(&out.stderr)
         .lines()
         .filter(|l| l.contains("normalizes not supported") && l.contains("not lowered"))
