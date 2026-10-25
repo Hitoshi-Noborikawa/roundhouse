@@ -72,6 +72,9 @@ struct Target {
     allow_destroy: bool,
     /// The declaring model, for `RecordNotFound`'s message.
     owner: String,
+    /// `as:`: the target's `<as>_type` column and the value Rails writes
+    /// there, the owner's `polymorphic_name`.
+    polymorphic_type: Option<(String, String)>,
 }
 
 #[derive(PartialEq)]
@@ -86,25 +89,49 @@ fn targets(model: &Model, names: &[Symbol], allow_destroy: bool, models: &[Model
         .iter()
         .map(|name| {
             let assoc = model.associations().find(|a| a.name() == name)?;
-            let (kind, class, foreign_key) = match assoc {
-                Association::HasMany { target, foreign_key, through: None, .. } => (Kind::HasMany, target, foreign_key),
-                Association::HasOne { target, foreign_key, through: None, .. } => (Kind::HasOne, target, foreign_key),
-                Association::BelongsTo { target, foreign_key, polymorphic: false, .. } => (Kind::BelongsTo, target, foreign_key),
+            // A custom `primary_key:` on either side keys the record by
+            // another column than the `id` the generated source reads.
+            let (kind, class, foreign_key, as_interface) = match assoc {
+                Association::HasMany { target, foreign_key, through: None, primary_key: None, as_interface, .. } => {
+                    (Kind::HasMany, target, foreign_key, as_interface)
+                }
+                Association::HasOne { target, foreign_key, through: None, primary_key: None, as_interface, .. } => {
+                    (Kind::HasOne, target, foreign_key, as_interface)
+                }
+                Association::BelongsTo { target, foreign_key, polymorphic: false, primary_key: None, .. } => {
+                    (Kind::BelongsTo, target, foreign_key, &None)
+                }
                 _ => return None,
             };
             // The target is one of the app's models (its constructor and
             // `save!` are the ones the generated source calls).
             let target_model = models.iter().find(|m| &m.name == class)?;
+            // A model keyed by another column (`self.primary_key = …`) too.
+            let custom_key = |m: &Model| m.primary_key.as_ref().is_some_and(|k| k.as_str() != "id");
+            if custom_key(model) || custom_key(target_model) {
+                return None;
+            }
+            // `as: :addressable`: the target's `belongs_to :addressable,
+            // polymorphic: true` is the inverse, and its `_type` column holds
+            // the owner's `polymorphic_name` (its STI base class).
             let inverse = (kind != Kind::BelongsTo)
                 .then(|| {
-                    target_model.associations().find_map(|a| match a {
-                        Association::BelongsTo { name, foreign_key: fk, polymorphic: false, .. } if fk == foreign_key => {
+                    target_model.associations().find_map(|a| match (a, as_interface) {
+                        (Association::BelongsTo { name, polymorphic: true, .. }, Some(as_name)) if name == as_name => {
+                            Some(name.as_str().to_string())
+                        }
+                        (Association::BelongsTo { name, foreign_key: fk, polymorphic: false, .. }, None) if fk == foreign_key => {
                             Some(name.as_str().to_string())
                         }
                         _ => None,
                     })
                 })
                 .flatten();
+            let polymorphic_type = as_interface.as_ref().map(|as_name| {
+                // An STI subclass is a library class inheriting this
+                // writer, so the declaring model is the base Rails names.
+                (format!("{}_type", as_name.as_str()), model.name.0.as_str().to_string())
+            });
             Some(Target {
                 name: name.as_str().to_string(),
                 class: class.0.as_str().to_string(),
@@ -113,6 +140,7 @@ fn targets(model: &Model, names: &[Symbol], allow_destroy: bool, models: &[Model
                 inverse,
                 allow_destroy,
                 owner: model.name.0.as_str().to_string(),
+                polymorphic_type,
             })
         })
         .collect()
@@ -139,7 +167,7 @@ fn humanize(name: &str) -> String {
 /// has_many/has_one ones after it, with their foreign key, belongs_to
 /// ones before it, the parent carrying the id.
 fn source(target: &Target) -> String {
-    let Target { name, class, foreign_key, kind, inverse, allow_destroy, owner } = target;
+    let Target { name, class, foreign_key, kind, inverse, allow_destroy, owner, polymorphic_type } = target;
     let ivar = format!("@__nested_{name}");
     let doomed = format!("@__nested_{name}_destroy");
     let human = humanize(name);
@@ -179,8 +207,12 @@ fn source(target: &Target) -> String {
         ),
         Kind::HasMany | Kind::HasOne => {
             let reset = if *kind == Kind::HasMany { format!("    reload_{name}\n") } else { String::new() };
+            let set_type = polymorphic_type
+                .as_ref()
+                .map(|(column, owner_type)| format!("        child.{column} = \"{owner_type}\"\n"))
+                .unwrap_or_default();
             format!(
-                "  def __nested_{name}_save\n    unless {ivar}.nil?\n      children = {ivar}\n      {ivar} = nil\n      children.each do |child|\n        child.{foreign_key} = id\n        child.save!\n      end\n    end\n{destroy_doomed}{reset}  end\n\n  after_save :__nested_{name}_save\n\n"
+                "  def __nested_{name}_save\n    unless {ivar}.nil?\n      children = {ivar}\n      {ivar} = nil\n      children.each do |child|\n        child.{foreign_key} = id\n{set_type}        child.save!\n      end\n    end\n{destroy_doomed}{reset}  end\n\n  after_save :__nested_{name}_save\n\n"
             )
         }
     };

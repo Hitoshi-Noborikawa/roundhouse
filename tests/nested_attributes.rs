@@ -16,6 +16,14 @@
 //! nothing, and a belongs_to so destroyed leaves the parent's key nil.
 //! Without `allow_destroy`, `_destroy` is ignored and the other keys apply.
 //!
+//! Polymorphic `as:` (oracle `nested_attributes5.rb`): a has_one or
+//! has_many `as: :addressable` (with `class_name:`, or from a concern)
+//! writes `addressable_id` and `addressable_type`, the type being the
+//! owner's `polymorphic_name` (an STI subclass writes its base class); an
+//! id is looked up among the owner's own records, so one of another owner
+//! or owner type raises `RecordNotFound`. A custom `primary_key:` stays
+//! reported.
+//!
 //! The declaration was reported and dropped, and no writer existed.
 
 #[path = "support/emit_and_run.rs"]
@@ -186,6 +194,113 @@ fn nested_attributes_build_and_save_with_the_parent_on_spinel() {
     assert!(run.stdout.contains("nested attributes passed"), "{}", run.stdout);
 }
 
+const POLY_TABLES: &str = "  create_table \"people\", force: :cascade do |t|\n    t.string \"name\"\n    t.string \"type\"\n    t.datetime \"created_at\", null: false\n    t.datetime \"updated_at\", null: false\n  end\n\n  create_table \"places\", force: :cascade do |t|\n    t.string \"name\"\n    t.datetime \"created_at\", null: false\n    t.datetime \"updated_at\", null: false\n  end\n\n  create_table \"locations\", force: :cascade do |t|\n    t.string \"line\"\n    t.string \"addressable_type\"\n    t.integer \"addressable_id\"\n    t.datetime \"created_at\", null: false\n    t.datetime \"updated_at\", null: false\n  end\n\n  create_table \"remarks\", force: :cascade do |t|\n    t.string \"text\"\n    t.string \"remarkable_type\"\n    t.integer \"remarkable_id\"\n    t.datetime \"created_at\", null: false\n    t.datetime \"updated_at\", null: false\n  end\n\n  create_table \"comments\", force: :cascade do |t|";
+
+fn polymorphic_app() -> emit_and_run::Overlay {
+    emit_and_run::real_blog()
+        .edit("db/schema.rb", TABLES, POLY_TABLES)
+        .write("app/models/location.rb", "class Location < ApplicationRecord\n  belongs_to :addressable, polymorphic: true\nend\n")
+        .write(
+            "app/models/remark.rb",
+            "class Remark < ApplicationRecord\n  belongs_to :remarkable, polymorphic: true\n  validates :text, presence: true\nend\n",
+        )
+        .write(
+            "app/models/concerns/remarkable.rb",
+            "module Remarkable\n  extend ActiveSupport::Concern\n\n  included do\n    has_many :remarks, as: :remarkable\n    accepts_nested_attributes_for :remarks, allow_destroy: true\n  end\nend\n",
+        )
+        .write(
+            "app/models/person.rb",
+            "class Person < ApplicationRecord\n  include Remarkable\n  has_one :home, as: :addressable, class_name: \"Location\"\n  accepts_nested_attributes_for :home, allow_destroy: true\nend\n",
+        )
+        .write("app/models/employee.rb", "class Employee < Person\nend\n")
+        .write("app/models/place.rb", "class Place < ApplicationRecord\n  include Remarkable\nend\n")
+}
+
+const POLY_SCRIPT: &str = r##"
+def check(label, got, want)
+  raise "#{label}: #{got.inspect} (want #{want.inspect})" unless got == want
+end
+def not_found
+  yield
+  "no error"
+rescue ActiveRecord::RecordNotFound => e
+  e.message
+end
+p = Person.create!(name: "a", home_attributes: { line: "x" })
+l = Location.where(addressable_id: p.id).first
+check("has_one as:, class_name: builds", [l.line, l.addressable_type], ["x", "Person"])
+e = Employee.create!(name: "e", home_attributes: { line: "y" }, remarks_attributes: [{ text: "r" }])
+check("an STI owner writes its base class", Location.where(addressable_id: e.id).first.addressable_type, "Person")
+check("has_many as: on it too", Remark.where(remarkable_id: e.id).first.remarkable_type, "Person")
+pl = Place.create!(name: "p", remarks_attributes: [{ text: "r1" }, { text: "r2" }])
+check("has_many as: from a concern", Remark.where(remarkable_type: "Place", remarkable_id: pl.id).count, 2)
+r = Remark.where(remarkable_type: "Place", remarkable_id: pl.id).first
+pl.update!(remarks_attributes: [{ id: r.id, text: "z" }])
+check("update by id", Remark.find(r.id).text, "z")
+mine = Remark.where(remarkable_type: "Person", remarkable_id: e.id).first
+check("an id of another owner type", not_found { pl.update(remarks_attributes: [{ id: mine.id, text: "z" }]) },
+  "Couldn't find Remark with ID=#{mine.id} for Place with ID=#{pl.id}")
+other = Place.create!(name: "o")
+check("an id of another owner", not_found { other.update(remarks_attributes: [{ id: r.id, text: "z" }]) },
+  "Couldn't find Remark with ID=#{r.id} for Place with ID=#{other.id}")
+pl.update!(remarks_attributes: [{ id: r.id, _destroy: "1" }])
+check("destroy has_many as:", Remark.where(id: r.id).count, 0)
+p.update!(home_attributes: { id: l.id, _destroy: "1" })
+check("destroy has_one as:", Location.where(id: l.id).count, 0)
+bad = Place.new(name: "b", remarks_attributes: [{ text: "" }])
+check("an invalid child fails the parent", bad.save, false)
+check("its error", bad.errors.include?("Remarks text can't be blank"), true)
+puts "nested polymorphic passed"
+"##;
+
+#[test]
+fn nested_attributes_over_polymorphic_as_on_ruby() {
+    let run = polymorphic_app().run_ruby(POLY_SCRIPT);
+    run.assert_passes();
+    assert!(run.stdout.contains("nested polymorphic passed"), "{}", run.stdout);
+}
+
+#[test]
+#[ignore = "requires the Spinel toolchain"]
+fn nested_attributes_over_polymorphic_as_on_spinel() {
+    let run = polymorphic_app().run_spinel_with_db(POLY_SCRIPT);
+    run.assert_passes();
+    assert!(run.stdout.contains("nested polymorphic passed"), "{}", run.stdout);
+}
+
+/// Emit real-blog for `target` with Article's first two lines replaced by
+/// `article_head`; the CLI's stderr.
+fn emit_stderr(name: &str, target: &str, article_head: &str) -> String {
+    let root = std::env::temp_dir().join(format!("roundhouse-nested-attributes-{name}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let source = root.join("app");
+    std::fs::create_dir_all(&root).unwrap();
+    assert!(std::process::Command::new("cp").args(["-a"]).arg(roundhouse::fixtures::real_blog()).arg(&source).status().unwrap().success());
+    let model = std::fs::read_to_string(source.join("app/models/article.rb"))
+        .unwrap()
+        .replacen("class Article < ApplicationRecord\n  has_many :comments, dependent: :destroy\n", article_head, 1);
+    std::fs::write(source.join("app/models/article.rb"), model).unwrap();
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_roundhouse"))
+        .args(["--target", target, "--allow-unsupported", "-o"])
+        .arg(root.join("out"))
+        .arg(&source)
+        .output()
+        .expect("run roundhouse");
+    std::fs::remove_dir_all(&root).ok();
+    String::from_utf8_lossy(&out.stderr).into_owned()
+}
+
+/// A custom `primary_key:` keys the records by another column than the
+/// `id` the generated source reads: the declaration stays reported.
+#[test]
+fn a_custom_primary_key_stays_reported() {
+    let stderr = emit_stderr(
+        "primary-key",
+        "ruby",
+        "class Article < ApplicationRecord\n  has_many :comments, dependent: :destroy, primary_key: :title\n  accepts_nested_attributes_for :comments\n",
+    );
+    assert!(stderr.contains("accepts_nested_attributes_for not supported"), "{stderr}");
+}
 
 /// A strict target's lowering of the generated source is not verified,
 /// so there the declaration stays the reported gap it was.
