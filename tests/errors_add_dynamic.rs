@@ -132,3 +132,45 @@ fn a_runtime_errors_add_follows_rails_lookup_order_on_ruby() {
     run.assert_passes();
     assert!(run.stdout.contains("lookup order passed"), "{}", run.stdout);
 }
+
+// Review of #1377 (oracle `cr_oracle.rb`): a value is substituted as
+// written (no backslash expansion), a plural-only `errors.attributes`
+// key is found, and `%{attribute}` / `%{model}` default to the human
+// names, an explicit `attribute:` option winning.
+const CR_LOCALE: &str = "en:\n  hello: \"Hello world\"\n  errors:\n    attributes:\n      title:\n        many_items:\n          one: \"needs one (attributes)\"\n          other: \"needs %{count} (attributes)\"\n    messages:\n      many_items:\n        one: \"needs one (messages)\"\n        other: \"needs %{count} (messages)\"\n  activerecord:\n    models:\n      article:\n        one: \"Story\"\n        other: \"Stories\"\n    errors:\n      messages:\n        taken_value: \"%{value} is taken\"\n        named: \"of %{attribute} is wrong\"\n        modeled: \"is wrong for a %{model}\"\n";
+
+const CR_CHECKER: &str = "class CrChecker\n  def self.taken(record, attribute, value)\n    record.errors.add(attribute, :taken_value, value: value)\n  end\n\n  def self.items(record, attribute, n)\n    record.errors.add(attribute, :many_items, count: n)\n  end\n\n  def self.named(record, attribute)\n    record.errors.add(attribute, :named)\n  end\n\n  def self.renamed(record, attribute)\n    record.errors.add(attribute, :named, attribute: \"Text\")\n  end\n\n  def self.modeled(record, attribute)\n    record.errors.add(attribute, :modeled)\n  end\nend\n";
+
+const CR_SCRIPT: &str = r##"
+def check(label, got, want)
+  raise "#{label}: #{got.inspect} (want #{want.inspect})" unless got == want
+end
+def fresh = Article.new(title: "t", body: "A body long enough to validate.")
+a = fresh; CrChecker.taken(a, :body, "a\\0b")
+check("a backslash-zero value, verbatim", a.errors, ["Body a\\0b is taken"])
+a = fresh; CrChecker.taken(a, :body, "x\\&y")
+check("a backslash-ampersand value, verbatim", a.errors, ["Body x\\&y is taken"])
+a = fresh; CrChecker.items(a, :title, 1)
+check("a plural-only errors.attributes key, one", a.errors, ["Title needs one (attributes)"])
+a = fresh; CrChecker.items(a, :title, 2)
+check("a plural-only errors.attributes key, other", a.errors, ["Title needs 2 (attributes)"])
+a = fresh; CrChecker.items(a, :body, 2)
+check("another attribute: errors.messages", a.errors, ["Body needs 2 (messages)"])
+a = fresh; CrChecker.named(a, :body)
+check("%{attribute} by default", a.errors, ["Body of Body is wrong"])
+a = fresh; CrChecker.renamed(a, :body)
+check("%{attribute} given", a.errors, ["Body of Text is wrong"])
+a = fresh; CrChecker.modeled(a, :body)
+check("%{model} by default", a.errors, ["Body is wrong for a Story"])
+puts "review rows passed"
+"##;
+
+#[test]
+fn errors_add_review_rows_on_ruby() {
+    let run = emit_and_run::real_blog()
+        .write("config/locales/en.yml", CR_LOCALE)
+        .write("app/models/cr_checker.rb", CR_CHECKER)
+        .run_ruby(CR_SCRIPT);
+    run.assert_passes();
+    assert!(run.stdout.contains("review rows passed"), "{}", run.stdout);
+}

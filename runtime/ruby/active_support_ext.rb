@@ -412,11 +412,16 @@ module ActiveSupport
         error_template(site, "messages", count) ||
         ("translation missing: errors.messages." + kind)
     end
+    human = names.key?(name) ? names[name].to_s : humanize(name.tr(".", "_"))
+    # Rails' default interpolations, an explicit option winning; the value
+    # goes in as written (split and join: a gsub replacement would read
+    # `\0` or `\&` in it).
+    values = { "attribute" => human, "model" => names.key?("__model") ? names["__model"].to_s : "" }
+    options.each { |key, value| values[key] = value }
     text = template
-    options.each { |key, value| text = text.gsub("%{" + key + "}", value) }
+    values.each { |key, value| text = text.split("%{" + key + "}", -1).join(value) }
     full = text
     unless name == "base"
-      human = names.key?(name) ? names[name].to_s : humanize(name.tr(".", "_"))
       full = before + human + between + text + after
     end
     ActiveRecord::ErrorDetail.new(name, kind.nil? ? text : kind, text, full, !kind.nil?, options.empty?)

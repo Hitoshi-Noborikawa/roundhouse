@@ -155,8 +155,12 @@ impl LabelData {
             names: app
                 .models
                 .iter()
-                .map(|m| (m.name.0.as_str().to_string(), m.i18n.translated_attribute_names()))
-                .filter(|(_, names)| !names.is_empty())
+                .map(|m| {
+                    // With the model's human name, for a `%{model}` interpolation.
+                    let mut names = m.i18n.translated_attribute_names();
+                    names.push(("__model".to_string(), m.i18n.model_human_name()));
+                    (m.name.0.as_str().to_string(), names)
+                })
                 .collect(),
             overrides: app
                 .models
@@ -564,11 +568,15 @@ fn dynamic_add(expr: &mut Expr, labels: &Labels) -> bool {
         put("ar_messages".into(), format!("activerecord.errors.messages.{kind}"));
         put("am_messages".into(), format!("activemodel.errors.messages.{kind}"));
         let prefix = "errors.attributes.";
-        let attrs: Vec<String> = catalog
+        // An attribute with the kind, plain or only in its plural forms.
+        let attrs: std::collections::BTreeSet<String> = catalog
             .entries
             .keys()
             .filter_map(|k| k.strip_prefix(prefix))
-            .filter_map(|rest| rest.strip_suffix(&format!(".{kind}")).map(str::to_string))
+            .filter_map(|rest| {
+                let rest = [".zero", ".one", ".other"].iter().find_map(|form| rest.strip_suffix(form)).unwrap_or(rest);
+                rest.strip_suffix(&format!(".{kind}")).map(str::to_string)
+            })
             .filter(|a| !a.contains('.'))
             .collect();
         for attr in attrs {
