@@ -282,6 +282,19 @@ module Tep
     gz
   end
 
+  # Not the app's spelling: a header Hash is case-sensitive, so a downcased Content-Encoding went unseen and the body was gzipped again
+  HEADER_NAMES = ["Content-Type", "Content-Length", "Content-Encoding", "Transfer-Encoding", "Connection", "Vary", "Location"]
+
+  def self.header_name(name)
+    lower = name.downcase
+    i = 0
+    while i < HEADER_NAMES.length
+      return HEADER_NAMES[i] if HEADER_NAMES[i].downcase == lower
+      i += 1
+    end
+    name
+  end
+
   # Honour Accept-Encoding: gzip the way campfire's `use Rack::Deflater`
   # does on CRuby. Inline bodies only — sendfile/streaming/websocket stay
   # as they are. Mutates res.body and stamps Content-Encoding + Vary.

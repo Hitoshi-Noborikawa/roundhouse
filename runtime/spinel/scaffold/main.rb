@@ -698,7 +698,7 @@ module Main
     while i < n
       k = controller.headers.key_at(i)
       v = controller.headers.val_at(i)
-      res.headers[k] = v unless v.nil?
+      res.headers[Tep.header_name(k)] = v unless v.nil?
       i += 1
     end
 
