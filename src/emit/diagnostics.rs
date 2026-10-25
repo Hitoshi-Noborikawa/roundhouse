@@ -193,6 +193,10 @@ pub enum StubStyle {
     TsThrow,
     /// Python expression-position throw via a throwing generator.
     PythonThrow,
+    /// Swift: `fatalError("…")`.
+    SwiftFatal,
+    /// Kotlin: `error("…")`.
+    KotlinError,
 }
 
 impl StubStyle {
@@ -201,9 +205,11 @@ impl StubStyle {
     pub fn for_target(target: &str) -> StubStyle {
         match target {
             "rust" => StubStyle::RustPanic,
-            "go" => StubStyle::GoPanic,
+            "go" | "go2" => StubStyle::GoPanic,
             "typescript" => StubStyle::TsThrow,
             "python" => StubStyle::PythonThrow,
+            "swift" => StubStyle::SwiftFatal,
+            "kotlin" => StubStyle::KotlinError,
             // ruby, elixir, crystal, and anything else.
             _ => StubStyle::Raise,
         }
@@ -225,6 +231,8 @@ impl StubStyle {
             StubStyle::PythonThrow => {
                 format!("(_ for _ in ()).throw(TypeError({msg:?}))")
             }
+            StubStyle::SwiftFatal => format!("fatalError({msg:?})"),
+            StubStyle::KotlinError => format!("error({msg:?})"),
         }
     }
 }

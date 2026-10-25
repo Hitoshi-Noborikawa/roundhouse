@@ -965,6 +965,10 @@ jobs:
           repository: rubys/spinel-pg
           ref: ${{ env.SPINEL_PG_SHA }}
           path: spinel-pg
+      # Not the runner's system Ruby: a suite compares the binary with CRuby, and the baseline's messages are 3.4's
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: ${{ env.MRI_RUBY }}
       - uses: ./.github/actions/setup-rust
       - uses: Swatinem/rust-cache@v2
       - uses: actions/download-artifact@v8
@@ -2114,6 +2118,9 @@ jobs:
       - name: cargo test --test emit_and_run render json writer on kotlin
         if: ${{ !cancelled() && matrix.target == 'kotlin' }}
         run: cargo test --locked --test emit_and_run render_json_record_writer_runs_on_kotlin -- --ignored --nocapture --exact
+      - name: cargo test --test kotlin_toolchain real_blog_i18n_locales_run
+        if: ${{ !cancelled() && matrix.target == 'kotlin' }}
+        run: cargo test --locked --test kotlin_toolchain real_blog_i18n_locales_run -- --ignored --nocapture --exact
       - name: cargo test --test framework_tests_swift
         if: ${{ !cancelled() && matrix.target == 'swift' }}
         run: |
@@ -2124,6 +2131,9 @@ jobs:
       - name: cargo test --test emit_and_run render json writer on swift
         if: ${{ !cancelled() && matrix.target == 'swift' }}
         run: cargo test --locked --test emit_and_run render_json_record_writer_runs_on_swift -- --ignored --nocapture --exact
+      - name: cargo test --test swift_toolchain real_blog_i18n_locales_run
+        if: ${{ !cancelled() && matrix.target == 'swift' }}
+        run: cargo test --locked --test swift_toolchain real_blog_i18n_locales_run -- --ignored --nocapture --exact
       - name: cargo test --test typescript_toolchain real_blog -- --ignored
         if: ${{ !cancelled() && matrix.target == 'typescript' }}
         run: cargo test --test typescript_toolchain real_blog -- --ignored --nocapture
@@ -2157,6 +2167,9 @@ jobs:
       - name: cargo test --test python_toolchain -- --ignored
         if: ${{ !cancelled() && matrix.target == 'python' }}
         run: cargo test --test python_toolchain -- --ignored --nocapture
+      - name: cargo test --test go_toolchain real_blog_i18n_locales_run
+        if: ${{ !cancelled() && matrix.target == 'go' }}
+        run: cargo test --locked --test go_toolchain real_blog_i18n_locales_run -- --ignored --nocapture --exact
       - name: cargo test --test emit_and_run render json writer on go
         if: ${{ !cancelled() && matrix.target == 'go' }}
         run: cargo test --locked --test emit_and_run render_json_record_writer_runs_on_go -- --ignored --nocapture --exact

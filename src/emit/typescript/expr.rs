@@ -848,6 +848,40 @@ fn return_stmt(value: Option<Js>) -> JsStmt {
 // Body + statements -----------------------------------------------------
 
 pub(super) fn js_body(body: &Expr, return_ty: &Ty) -> Vec<JsStmt> {
+    in_scope(body, || js_body_in_scope(body, return_ty))
+}
+
+thread_local! {
+    // Not a block's own `let`: a name its method (or an outer block) assigns is that scope's, as Ruby closes over it
+    static SCOPE_LOCALS: std::cell::RefCell<Vec<HashSet<Symbol>>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+fn collect_scope_locals(e: &Expr, out: &mut HashSet<Symbol>) {
+    if let ExprNode::Assign { target: LValue::Var { name, .. }, .. } = &*e.node {
+        out.insert(name.clone());
+    }
+    if !matches!(&*e.node, ExprNode::Lambda { .. }) {
+        e.node.for_each_child(&mut |child| collect_scope_locals(child, out));
+    }
+}
+
+fn in_scope<T>(body: &Expr, f: impl FnOnce() -> T) -> T {
+    let mut own = HashSet::new();
+    collect_scope_locals(body, &mut own);
+    SCOPE_LOCALS.with(|c| c.borrow_mut().push(own));
+    let out = f();
+    SCOPE_LOCALS.with(|c| c.borrow_mut().pop());
+    out
+}
+
+fn is_outer_local(name: &Symbol) -> bool {
+    SCOPE_LOCALS.with(|c| {
+        let stack = c.borrow();
+        stack.len() > 1 && stack[..stack.len() - 1].iter().any(|scope| scope.contains(name))
+    })
+}
+
+fn js_body_in_scope(body: &Expr, return_ty: &Ty) -> Vec<JsStmt> {
     // Pre-walk: find local-var names assigned more than once in this
     // method body. They'll emit as `let` at first occurrence and bare
     // `name = value` thereafter. Names assigned exactly once still
@@ -879,6 +913,8 @@ pub(super) fn js_body(body: &Expr, return_ty: &Ty) -> Vec<JsStmt> {
     count_top_level_var_assignments(body, &mut top_level_counts);
     let mut hoisted: Vec<Symbol> = reassigned
         .iter()
+        // Not an enclosing scope's local: a second `let` here would shadow the one a `catch` or `finally` reads
+        .filter(|name| !is_outer_local(name))
         .filter(|name| {
             let total = count_var_for(body, name);
             let top = top_level_counts.get(*name).copied().unwrap_or(0);
@@ -1003,14 +1039,14 @@ fn js_body_with_state(
         // the body actually exits the method, `throw e` outside the match
         // arms rethrows cleanly, and no needless `(() => { ... })()` noise.
         ExprNode::BeginRescue { body: inner, rescues, else_branch, ensure, .. } => {
-            vec![js_begin_rescue_stmt(
+            js_begin_rescue_stmt(
                 body.span,
                 inner,
                 rescues,
                 else_branch.as_ref(),
                 ensure.as_ref(),
                 return_ty,
-            )]
+            )
         }
         // Single-Case-as-whole-body (e.g., `process_action`'s synthesized
         // dispatcher): route through the statement walker so it emits as
@@ -1146,6 +1182,39 @@ fn count_var_assignments(e: &Expr, out: &mut HashMap<Symbol, usize>) {
 /// `try { ... } catch (e) { ... } finally { ... }` with early-return
 /// and rethrow working as Ruby's semantics expect.
 fn js_begin_rescue_stmt(
+    span: Span,
+    body: &Expr,
+    rescues: &[RescueClause],
+    else_branch: Option<&Expr>,
+    ensure: Option<&Expr>,
+    return_ty: &Ty,
+) -> Vec<JsStmt> {
+    // Not declared inside `try`: `catch` and `finally` read what the body assigned, as Ruby's rescue and ensure do
+    let mut shared = HashSet::new();
+    for part in std::iter::once(body).chain(else_branch).chain(rescues.iter().map(|r| &r.body)) {
+        collect_scope_locals(part, &mut shared);
+    }
+    let mut hoisted: Vec<Symbol> = shared.iter().filter(|n| !is_outer_local(n)).cloned().collect();
+    hoisted.sort();
+    SCOPE_LOCALS.with(|c| c.borrow_mut().push(shared));
+    let try_stmt = js_begin_rescue_try(span, body, rescues, else_branch, ensure, return_ty);
+    SCOPE_LOCALS.with(|c| c.borrow_mut().pop());
+    let mut out: Vec<JsStmt> = hoisted
+        .iter()
+        .map(|name| {
+            JsStmt::synth(JsStmtNode::VarDecl {
+                kind: VarKind::Let,
+                name: escape_reserved_word(name.as_str()),
+                ty: Some(TsType("any".into())),
+                init: None,
+            })
+        })
+        .collect();
+    out.push(try_stmt);
+    out
+}
+
+fn js_begin_rescue_try(
     span: Span,
     body: &Expr,
     rescues: &[RescueClause],
@@ -1300,7 +1369,12 @@ pub(super) fn js_stmts_with_state(
             // → `const`. Subsequent occurrences (only possible for
             // reassigned names) → bare `name = value`.
             let escaped = escape_reserved_word(name.as_str());
-            let node = if reassigned.contains(name) {
+            let node = if is_outer_local(name) {
+                JsStmtNode::Expr(Js::new(
+                    e.span,
+                    JsExpr::Assign { target: Js::ident(e.span, escaped), op: "=", value: js_expr(value) },
+                ))
+            } else if reassigned.contains(name) {
                 if declared.insert(name.clone()) {
                     JsStmtNode::VarDecl {
                         kind: VarKind::Let,
@@ -1830,7 +1904,15 @@ pub(super) fn js_expr(e: &Expr) -> Js {
             // locals (so e.g. an inner capture buffer `body =
             // String.new` followed by `body << X` emits as `let body`
             // not `const body`).
-            let arrow_body = match &*body.node {
+            // Not the arrow's value: an iterator discards it, and the expression form leaves a branch's locals undeclared
+            let void = VOID_BLOCK.with(|c| {
+                let hit = std::ptr::eq(c.get(), e);
+                if hit {
+                    c.set(std::ptr::null());
+                }
+                hit
+            });
+            let arrow_body = in_scope(body, || match &*body.node {
                 ExprNode::Seq { exprs } if exprs.len() > 1 => {
                     let reassigned = collect_reassigned(body);
                     let mut declared: HashSet<Symbol> = HashSet::new();
@@ -1839,15 +1921,20 @@ pub(super) fn js_expr(e: &Expr) -> Js {
                         stmts.extend(js_stmts_with_state(
                             x,
                             i == exprs.len() - 1,
-                            false,
+                            void,
                             &reassigned,
                             &mut declared,
                         ));
                     }
                     ArrowBody::Block(stmts)
                 }
+                ExprNode::If { .. } | ExprNode::Case { .. } if void => {
+                    let reassigned = collect_reassigned(body);
+                    let mut declared: HashSet<Symbol> = HashSet::new();
+                    ArrowBody::Block(js_stmts_with_state(body, true, true, &reassigned, &mut declared))
+                }
                 _ => ArrowBody::Expr(js_expr(body)),
-            };
+            });
             Js::new(
                 e.span,
                 JsExpr::Arrow { params: js_params, body: arrow_body, is_async: body_async },
@@ -1996,6 +2083,11 @@ pub(super) fn js_expr(e: &Expr) -> Js {
     }
 }
 
+thread_local! {
+    // Not a flag the next lambda consumes: an argument's own block can be emitted before this one
+    static VOID_BLOCK: std::cell::Cell<*const Expr> = const { std::cell::Cell::new(std::ptr::null()) };
+}
+
 /// Send emission that folds a trailing block (Ruby `do ... end` /
 /// `&:sym`) in as an arrow-function argument — TS's closest
 /// equivalent. The block-less path delegates directly to `js_send`.
@@ -2077,10 +2169,15 @@ fn js_send_with_block(
     }
     let mut all_args: Vec<Expr> = args.to_vec();
     all_args.push(blk.clone());
+    let void = matches!(method, "each" | "each_with_index" | "reverse_each" | "each_key" | "each_value" | "each_pair" | "each_char" | "times" | "upto" | "downto");
+    let outer = VOID_BLOCK.with(|c| c.replace(if void { all_args.last().map_or(std::ptr::null(), |b| b as *const Expr) } else { std::ptr::null() }));
     // The block is already in `all_args`. Passing it here keeps
     // `function_receiver` from treating `.call` as a direct invocation
     // and dropping the block into a positional argument.
-    js_send(span, recv, method, &all_args, true, Some(blk))
+    let out = js_send(span, recv, method, &all_args, true, Some(blk));
+    // Not left set: a freed block's address can come back as another call's block
+    VOID_BLOCK.with(|c| c.set(outer));
+    out
 }
 
 /// HOF rewrites for blocks containing async sends. Returns
@@ -2983,6 +3080,11 @@ fn js_send_inner(
     // nullable wrapper so dispatch fires on the inner type.
     if let Some(r) = recv {
         let recv_ty = strip_nullable(r.ty.as_ref());
+        // Not left out as a Union: an Integer-or-Float count (`count.to_f`) has every number method a Float has
+        let recv_ty = match recv_ty {
+            Some(Ty::Union { variants }) if variants.iter().all(|v| matches!(v, Ty::Int | Ty::Float | Ty::Nil)) && variants.iter().any(|v| matches!(v, Ty::Float)) => Some(&Ty::Float),
+            other => other,
+        };
         match recv_ty {
             // Ruby Array → JS Array (with native method renames where
             // they diverge: `.each` → `.forEach`, `.size` → `.length`).

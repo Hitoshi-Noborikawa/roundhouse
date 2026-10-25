@@ -88,6 +88,7 @@ const SERVER_SWIFT: &str = include_str!("../../../runtime/swift/server.swift");
 // (Server.swift's runIfActive bridge), per-thread IS per-request.
 // ThreadSpecificVariable requires a class value, hence the Box.
 const RHTHREADLOCAL_SWIFT: &str = include_str!("../../../runtime/swift/rhthreadlocal.swift");
+const I18N_HOST_SWIFT: &str = include_str!("../../../runtime/swift/i18n_host.swift");
 
 /// The hand-written primitive files, emitted under `Sources/App/runtime/`.
 pub fn primitives() -> Vec<EmittedFile> {
@@ -127,6 +128,10 @@ pub fn primitives() -> Vec<EmittedFile> {
         EmittedFile {
             path: PathBuf::from("Sources/App/runtime/RhThreadLocal.swift"),
             content: RHTHREADLOCAL_SWIFT.to_string(),
+        },
+        EmittedFile {
+            path: PathBuf::from("Sources/App/runtime/I18nHost.swift"),
+            content: I18N_HOST_SWIFT.to_string(),
         },
         EmittedFile {
             path: PathBuf::from("Sources/App/runtime/Cable.swift"),

@@ -4,7 +4,7 @@
 //! translations and calls on CRuby 3.4.
 
 use super::emit_and_run;
-use super::i18n_locales::locales_app;
+use super::i18n_locales_app::locales_app;
 
 const RUNTIME: &str = "  def self.full_key(key)
     I18n.t(key)
@@ -98,7 +98,7 @@ fn a_translation_known_only_when_it_runs_is_unsupported_on_strict_targets() {
 #[test]
 fn the_locale_s_runtime_is_unsupported_on_strict_targets() {
     use roundhouse::project::BuildTarget::*;
-    for target in [Rust, Typescript, Go, Python, CSharp, Kotlin, Swift, Elixir, Crystal] {
+    for target in [Rust] {
         let (_emitted, errors) = emit_and_run::real_blog()
             .edit(
                 "app/models/article.rb",

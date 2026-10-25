@@ -223,6 +223,8 @@ pub(super) fn body_contains_yield(body: &Expr) -> bool {
 pub(super) fn emit_body(body: &Expr, return_ty: &Ty) -> String {
     let is_void = matches!(return_ty, Ty::Nil);
     match &*body.node {
+        // Not `return <expr>`: Python has no try-expression, so a whole-body `begin` returns from inside its `try`
+        ExprNode::BeginRescue { .. } => emit_stmt(body, true, is_void),
         ExprNode::Assign { target: LValue::Ivar { .. }, value } => {
             if is_void {
                 // Statement route keeps the store: `self.x = v`. The
@@ -539,10 +541,13 @@ pub(super) fn emit_stmt(e: &Expr, is_last: bool, void_return: bool) -> String {
         // An empty `classes` list is Ruby's implicit StandardError;
         // `Exception` is the nearest Python spelling that still catches
         // what the ensure must survive.
-        ExprNode::BeginRescue { body, rescues, else_branch, ensure, .. }
-            if !is_last || void_return =>
-        {
-            let mut out = format!("try:\n{}", emit_block_body(body, true));
+        // Not statement position alone: a method whose last expression is the `begin` returns its value from inside `try`
+        ExprNode::BeginRescue { body, rescues, else_branch, ensure, .. } => {
+            let returning = is_last && !void_return;
+            let arm = |e: &Expr| if returning { emit_block_body_returning(e) } else { emit_block_body(e, true) };
+            // Not returned from the `try` when there is an `else`: a `return` there skips Python's `else:`, whose value is the begin's
+            let body_arm = if else_branch.is_some() { emit_block_body(body, true) } else { arm(body) };
+            let mut out = format!("try:\n{}", body_arm);
             for r in rescues {
                 let classes: Vec<String> = r.classes.iter().map(emit_expr).collect();
                 let head = match (classes.is_empty(), &r.binding) {
@@ -553,10 +558,10 @@ pub(super) fn emit_stmt(e: &Expr, is_last: bool, void_return: bool) -> String {
                         format!("except ({}) as {}:", classes.join(", "), b.as_str())
                     }
                 };
-                out.push_str(&format!("\n{head}\n{}", emit_block_body(&r.body, true)));
+                out.push_str(&format!("\n{head}\n{}", arm(&r.body)));
             }
             if let Some(eb) = else_branch {
-                out.push_str(&format!("\nelse:\n{}", emit_block_body(eb, true)));
+                out.push_str(&format!("\nelse:\n{}", arm(eb)));
             }
             if let Some(en) = ensure {
                 out.push_str(&format!("\nfinally:\n{}", emit_block_body(en, true)));
@@ -655,7 +660,33 @@ fn lvalue_str(t: &LValue) -> String {
 /// Kotlin's namespaces-collapse rule. App-level namespaces
 /// (`Views::Articles`) keep their dotted form — the overlay defines
 /// them as real classes.
+/// The Python builtin a Ruby core error raises and is subclassed as.
+pub(super) fn python_core_error(name: &str) -> Option<&'static str> {
+    Some(match name {
+        "StandardError" => "Exception",
+        "ArgumentError" => "ValueError",
+        "NoMethodError" => "AttributeError",
+        "RuntimeError" | "TypeError" | "NameError" | "NotImplementedError" | "KeyError" | "IndexError" => {
+            return Some(match name {
+                "RuntimeError" => "RuntimeError",
+                "TypeError" => "TypeError",
+                "NameError" => "NameError",
+                "NotImplementedError" => "NotImplementedError",
+                "KeyError" => "KeyError",
+                _ => "IndexError",
+            });
+        }
+        _ => return None,
+    })
+}
+
 fn py_const_path(path: &[crate::ident::Symbol]) -> String {
+    // Not passed through: Python has no ArgumentError, and its builtin for the same failure is ValueError
+    if let [only] = path
+        && let Some(builtin) = python_core_error(only.as_str())
+    {
+        return builtin.to_string();
+    }
     match path.first().map(|s| s.as_str()) {
         Some("ActionDispatch" | "ActionController" | "ActionView") if path.len() >= 2 => {
             path.last().unwrap().to_string()
@@ -790,6 +821,19 @@ fn block_or_pass(e: &Expr, void: bool) -> String {
 /// (`while`/`if`). A `Seq` becomes one statement per line; anything else
 /// is a single statement. Body statements are never the method's return
 /// value, so `is_last` is false throughout.
+fn emit_block_body_returning(e: &Expr) -> String {
+    let inner = match &*e.node {
+        ExprNode::Seq { exprs } if !exprs.is_empty() => exprs
+            .iter()
+            .enumerate()
+            .map(|(i, s)| emit_stmt(s, i == exprs.len() - 1, false))
+            .collect::<Vec<_>>()
+            .join("\n"),
+        _ => emit_stmt(e, true, false),
+    };
+    super::shared::indent_py(&inner)
+}
+
 fn emit_block_body(e: &Expr, void: bool) -> String {
     let inner = match &*e.node {
         ExprNode::Seq { exprs } => exprs
@@ -854,6 +898,26 @@ pub(super) fn emit_expr(e: &Expr) -> String {
             match params.as_slice() {
                 [p] => format!("[{} for {} in {}]", emit_expr(body), p, emit_expr(recv)),
                 _ => crate::emit::diagnostics::report_unsupported(e.span, "python", "map-block", ""),
+            }
+        }
+        // The other one-parameter iterators as comprehensions; any other block is refused, not dropped
+        ExprNode::Send { recv: Some(recv), method, block: Some(block), args, .. }
+            if args.is_empty() && matches!(&*block.node, ExprNode::Lambda { params, .. } if params.len() == 1) =>
+        {
+            let ExprNode::Lambda { params, body, .. } = &*block.node else { unreachable!() };
+            if matches!(&*body.node, ExprNode::Seq { exprs } if exprs.len() > 1) {
+                return crate::emit::diagnostics::report_unsupported(e.span, "python", format!("{method}-block"), "a block of several statements has no comprehension form");
+            }
+            // Parenthesized: a ternary body after a comprehension's `if` is a syntax error bare
+            let (p, b, r) = (&params[0], format!("({})", emit_expr(body)), emit_expr(recv));
+            match method.as_str() {
+                "find" | "detect" => format!("next(({p} for {p} in {r} if {b}), None)"),
+                "select" | "filter" => format!("[{p} for {p} in {r} if {b}]"),
+                "reject" => format!("[{p} for {p} in {r} if not ({b})]"),
+                "any?" => format!("any({b} for {p} in {r})"),
+                "all?" => format!("all({b} for {p} in {r})"),
+                "none?" => format!("not any({b} for {p} in {r})"),
+                other => crate::emit::diagnostics::report_unsupported(e.span, "python", format!("{other}-block"), "no Python expression form for this block"),
             }
         }
         ExprNode::Send { recv, method, args, parenthesized, .. } => {
@@ -1514,6 +1578,8 @@ fn map_builtin_method(recv: &str, method: &str, ty: Option<&Ty>, args_s: &[Strin
         // in parens since `in` is a comparison-precedence operator and may
         // sit inside a larger boolean expression.
         "include?" if one_arg && is_seq => format!("({} in {recv})", args_s[0]),
+        // Not list.index as it is: Python raises for a miss, and Ruby answers nil
+        "index" if one_arg && is_seq => format!("({recv}.index({a}) if {a} in {recv} else None)", a = args_s[0]),
         // Ruby `Hash#fetch(k)` raises on a missing key — Python `d[k]`
         // raises KeyError, the same contract; `fetch(k, default)` is
         // `d.get(k, default)`. Gated to Hash so Flash#fetch /
@@ -1631,6 +1697,8 @@ fn emit_operand(e: &Expr, parent: u8, right: bool) -> String {
                 None => false,
             }
         }
+        // A conditional or boolean operand binds looser than any infix here: `out + (html ? a : b)` bare reads as `(out + a) if html else b`
+        ExprNode::If { .. } | ExprNode::BoolOp { .. } => true,
         // `-2 ** 2` is `-(2 ** 2)` in Python.
         ExprNode::Lit { value: Literal::Int { value } } => parent == 7 && !right && *value < 0,
         ExprNode::Lit { value: Literal::Float { value } } => {

@@ -942,19 +942,20 @@ fn rewrite_expr(e: &Expr) -> Expr {
                 case
             }
         }
-        ExprNode::Send { recv, method, args, block, parenthesized } => syn(ExprNode::Send {
+        // Not a fresh untyped node: the rebuild means what the call meant, and the emitter dispatches on its type
+        ExprNode::Send { recv, method, args, block, parenthesized } => keep_ty(e, syn(ExprNode::Send {
             recv: recv.as_ref().map(rewrite_expr),
             method: method.clone(),
             args: args.iter().map(rewrite_expr).collect(),
             block: block.as_ref().map(rewrite_expr),
             parenthesized: *parenthesized,
-        }),
-        ExprNode::BoolOp { op, surface, left, right } => syn(ExprNode::BoolOp {
+        })),
+        ExprNode::BoolOp { op, surface, left, right } => keep_ty(e, syn(ExprNode::BoolOp {
             op: *op,
             surface: *surface,
             left: rewrite_expr(left),
             right: rewrite_expr(right),
-        }),
+        })),
         ExprNode::Assign { target, value } => keep_hint(e, syn(ExprNode::Assign {
             target: target.clone(),
             value: rewrite_expr(value),
@@ -1147,6 +1148,11 @@ fn has_nested_mutation_or_loop(e: &Expr) -> bool {
 // ---- IR builders + walker -------------------------------------------
 
 /// The string-builder tags (`io = String.new`, `io << chunk`) a writer reading `self` comes through here with; without them `local_accumulation` turns the appends into a list `++`.
+fn keep_ty(from: &Expr, mut to: Expr) -> Expr {
+    to.ty = from.ty.clone();
+    to
+}
+
 fn keep_hint(from: &Expr, mut to: Expr) -> Expr {
     to.set_hint(*from.hint());
     to

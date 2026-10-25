@@ -125,7 +125,8 @@ pub fn emit_method(m: &MethodDef) -> String {
 }
 
 fn rewrite_ivars_to_class_vars(body: &str) -> String {
-    let mut out = String::with_capacity(body.len());
+    // Not pushed byte by byte into a String: a byte above 0x7f is half a UTF-8 character, not a char
+    let mut out: Vec<u8> = Vec::with_capacity(body.len());
     let bytes = body.as_bytes();
     let mut i = 0;
     // Track whether we're inside a string literal (`"..."`). The
@@ -139,7 +140,7 @@ fn rewrite_ivars_to_class_vars(body: &str) -> String {
     while i < bytes.len() {
         let c = bytes[i];
         if in_string {
-            out.push(c as char);
+            out.push(c);
             i += 1;
             if string_escape {
                 string_escape = false;
@@ -152,7 +153,7 @@ fn rewrite_ivars_to_class_vars(body: &str) -> String {
         }
         if c == b'"' {
             in_string = true;
-            out.push('"');
+            out.push(b'"');
             i += 1;
             continue;
         }
@@ -160,22 +161,22 @@ fn rewrite_ivars_to_class_vars(body: &str) -> String {
             let next = bytes[i + 1];
             // Already `@@` — emit as-is, advance past both.
             if next == b'@' {
-                out.push('@');
-                out.push('@');
+                out.push(b'@');
+                out.push(b'@');
                 i += 2;
                 continue;
             }
             // `@<ident>` — promote to `@@<ident>`.
             if next.is_ascii_alphabetic() || next == b'_' {
-                out.push_str("@@");
+                out.extend_from_slice(b"@@");
                 i += 1;
                 continue;
             }
         }
-        out.push(c as char);
+        out.push(c);
         i += 1;
     }
-    out
+    String::from_utf8(out).expect("the rewrite only adds ASCII to UTF-8 text")
 }
 
 fn render_params(m: &MethodDef, annotate: bool) -> String {

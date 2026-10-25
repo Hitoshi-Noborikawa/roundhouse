@@ -1225,6 +1225,16 @@ fn emit_io_append(arg: &Expr, ctx: &ViewCtx) -> Vec<Expr> {
     if let Some(safe) = html_safe_value(&rewritten, ctx) {
         return vec![accumulator_append_call(coerce_to_s(safe), ctx)];
     }
+    // Not left to each emitter: only the Ruby one unwrapped the escape around `raw`, and TypeScript shipped `html_escape(raw(x))`
+    if let ExprNode::Send { recv, method, args, block: None, .. } = &*rewritten.node
+        && method.as_str() == "raw"
+        && args.len() == 1
+        && recv.as_ref().is_none_or(|r| matches!(&*r.node, ExprNode::Const { path } if path.last().is_some_and(|s| s.as_str() == "ViewHelpers")))
+    {
+        let mut call = view_helpers_call("raw", vec![args[0].clone()]);
+        call.ty = Some(crate::ty::Ty::Str);
+        return vec![accumulator_append_call(coerce_to_s(call), ctx)];
+    }
     let escaped = view_helpers_call("html_escape", vec![coerce_to_s(rewritten)]);
     vec![accumulator_append_call(escaped, ctx)]
 }
@@ -1618,6 +1628,8 @@ pub(super) fn rewrite_helpers_in_expr(e: &Expr, ctx: &ViewCtx) -> Expr {
     let mut out = Expr::new(e.span, new_node);
     // `f.object.class::X` stays a path (`expr::CONST_PATH`).
     out.decisions |= e.decisions & crate::expr::CONST_PATH;
+    // Not a fresh, untyped node: a rebuilt `[]` the i18n lowering typed `Array[String]` would read as `Array[untyped]`
+    out.ty = e.ty.clone();
     out
 }
 

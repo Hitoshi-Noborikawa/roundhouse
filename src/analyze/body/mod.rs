@@ -741,6 +741,17 @@ impl<'a> BodyTyper<'a> {
         if root {
             *self.scope_bindings.borrow_mut() = None;
         }
+        // Not overwritten by a re-analysis that knows less: the i18n lowering stamps the `I18n` runtime calls it writes, which the app registry does not carry. Only those: elsewhere the re-analysis is the newer fact
+        let ty = match (&ty, &expr.ty, &*expr.node) {
+            (fresh, Some(stamped), ExprNode::Send { recv: Some(r), .. })
+                if matches!(fresh, Ty::Untyped | Ty::Var { .. })
+                    && !stamped.is_open()
+                    && matches!(&*r.node, ExprNode::Const { path } if path.len() == 1 && path[0].as_str() == "I18n") =>
+            {
+                stamped.clone()
+            }
+            _ => ty,
+        };
         expr.ty = Some(ty.clone());
         // Not accepted silently: the runtime's setter keeps nothing, so every save would still stamp.
         if expr.diagnostic().is_none()
@@ -1577,7 +1588,18 @@ impl<'a> BodyTyper<'a> {
                     if matches!(lt, Ty::Nil) {
                         return rt;
                     }
-                    narrowing::remove_nil(&lt)
+                    let peeled = narrowing::remove_nil(&lt);
+                    // Not a union with the empty literal's open element: `list || []` answers list's type
+                    let adopts = match (&*right.node, &peeled) {
+                        (ExprNode::Array { elements, .. }, Ty::Array { .. }) => elements.is_empty() && !peeled.mentions_unknown(),
+                        (ExprNode::Hash { entries, .. }, Ty::Hash { .. }) => entries.is_empty() && !peeled.mentions_unknown(),
+                        _ => false,
+                    };
+                    if adopts {
+                        right.ty = Some(peeled.clone());
+                        return peeled;
+                    }
+                    peeled
                 } else {
                     // `a && b` answers `a` only when `a` was falsy, so only
                     // the arms of `a` that CAN be falsy belong to the result:

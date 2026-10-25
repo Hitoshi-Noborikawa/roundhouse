@@ -36,6 +36,7 @@ const BROADCASTS_SOURCE: &str = include_str!("../../runtime/typescript/broadcast
 // `JsonBuilder.encode_datetime` Date branch is injected into the
 // transpiled json_builder unit (see `patch_json_builder_datetime`).
 const DATETIME_SOURCE: &str = include_str!("../../runtime/typescript/datetime.ts");
+const I18N_HOST_SOURCE: &str = include_str!("../../runtime/typescript/i18n_host.ts");
 const DB_SOURCE: &str = include_str!("../../runtime/typescript/db.ts");
 const PARAM_VALUE_SOURCE: &str = include_str!("../../runtime/typescript/param_value.ts");
 const PARAMS_SOURCE: &str = include_str!("../../runtime/typescript/params.ts");
@@ -216,6 +217,10 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
     files.push(EmittedFile {
         path: PathBuf::from("src/broadcasts.ts"),
         content: BROADCASTS_SOURCE.to_string(),
+    });
+    files.push(EmittedFile {
+        path: PathBuf::from("src/i18n_host.ts"),
+        content: I18N_HOST_SOURCE.to_string(),
     });
     // Datetime seam — `RhDateTime.parse` for temporal-column getters.
     files.push(EmittedFile {
@@ -1888,7 +1893,8 @@ pub(super) fn js_library_class(
     let parent = class.parent.as_ref().map(|p| {
         let raw = p.0.as_str();
         match raw {
-            "StandardError" => "Error".to_string(),
+            "StandardError" | "RuntimeError" | "ArgumentError" | "TypeError" | "NameError" | "NoMethodError"
+            | "NotImplementedError" | "KeyError" | "IndexError" => "Error".to_string(),
             // Test parents — runtime adapter exports both names.
             "ActiveSupport::TestCase" | "ActionDispatch::IntegrationTest" => "TestCase".to_string(),
             "Minitest::Test" => "Test".to_string(),

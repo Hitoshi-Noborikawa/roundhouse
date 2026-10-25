@@ -7,6 +7,9 @@
 
 #[path = "support/emit_and_run.rs"]
 mod emit_and_run;
+#[path = "support/i18n_locales_app.rs"]
+#[allow(dead_code)]
+mod i18n_locales_app;
 #[path = "support/pundit_app.rs"]
 mod pundit_app;
 #[path = "emit_and_run/session_cookie_key.rs"]

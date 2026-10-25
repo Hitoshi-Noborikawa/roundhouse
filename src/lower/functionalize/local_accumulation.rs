@@ -31,7 +31,16 @@ pub fn transform_method(mut m: MethodDef) -> MethodDef {
     m
 }
 
+// Not a fresh untyped node where the rewrite only rebuilt it: the emitter dispatches on the type the body-typer stamped
 fn rewrite(e: &Expr) -> Expr {
+    let mut out = rewrite_node(e);
+    if out.ty.is_none() && std::mem::discriminant(&*out.node) == std::mem::discriminant(&*e.node) {
+        out.ty = e.ty.clone();
+    }
+    out
+}
+
+fn rewrite_node(e: &Expr) -> Expr {
     match &*e.node {
         // `x += n` / `x -= n` / … on a local → `x = x <op> n`.
         ExprNode::OpAssign { target: target @ LValue::Var { .. }, op, value } => {
@@ -149,13 +158,15 @@ fn clone_send(e: &Expr) -> Expr {
     let ExprNode::Send { recv, method, args, block, parenthesized } = &*e.node else {
         return e.clone();
     };
-    syn(ExprNode::Send {
+    let mut out = syn(ExprNode::Send {
         recv: recv.as_ref().map(rewrite),
         method: method.clone(),
         args: args.iter().map(rewrite).collect(),
         block: block.as_ref().map(rewrite),
         parenthesized: *parenthesized,
-    })
+    });
+    out.ty = e.ty.clone();
+    out
 }
 
 /// If `method` is an attribute setter (`foo=` with an identifier base —

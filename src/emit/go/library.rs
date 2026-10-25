@@ -128,7 +128,12 @@ pub fn emit_library_class_with_registry(
     if embedded_parent.is_some() && ar_chain.contains(&name) {
         fields.retain(|f| f.ruby_name != "id");
     }
-    if embedded_parent.is_none() && fields.is_empty() && !is_ar_base {
+    if is_error_class(class) {
+        super::expr::register_error_class(name.clone());
+        out.push_str(&format!(
+            "type {name} struct {{\n\tMessage string\n}}\n\nfunc (e *{name}) Error() string {{\n\treturn e.Message\n}}\n\n"
+        ));
+    } else if embedded_parent.is_none() && fields.is_empty() && !is_ar_base {
         out.push_str(&format!("type {name} struct{{}}\n\n"));
     } else {
         out.push_str(&format!("type {name} struct {{\n"));
@@ -804,7 +809,7 @@ fn try_field_init_literal(
 /// `ActionController::Base` → `ActionControllerBase`. Go identifiers
 /// can't contain `::` (Ruby's namespace separator); strip it so the
 /// emitted type at least file-parses.
-fn sanitize_type_name(name: &str) -> String {
+pub(super) fn sanitize_type_name(name: &str) -> String {
     name.replace("::", "")
 }
 
@@ -814,15 +819,32 @@ fn sanitize_type_name(name: &str) -> String {
 /// (e.g. `Object`, `BasicObject`). The chain composes: ApplicationRecord
 /// → `*ActiveRecordBase`, Article → `*ApplicationRecord`. Method
 /// promotion delivers Base's instance methods through both hops.
+fn is_core_exception_root(raw: &str) -> bool {
+    matches!(
+        raw.rsplit("::").next().unwrap_or(raw),
+        "Exception" | "StandardError" | "RuntimeError" | "ArgumentError" | "TypeError" | "NameError" | "KeyError" | "IndexError"
+    )
+}
+
+// Not every class under a Ruby exception root: one with fields of its own keeps the plain struct shape, whose ivars have nowhere else to go
+fn is_error_class(class: &LibraryClass) -> bool {
+    let Some(parent) = class.parent.as_ref() else { return false };
+    let raw = parent.0.as_str();
+    let core = is_core_exception_root(raw);
+    (core || super::expr::is_error_class(&sanitize_type_name(raw)))
+        && collect_fields(&class.methods, &class.nullable_columns).is_empty()
+}
+
 fn embedded_parent_type(class: &LibraryClass) -> Option<String> {
     let parent = class.parent.as_ref()?;
+    // Not embedded: an error class's struct is its `Message` alone
+    if is_error_class(class) {
+        return None;
+    }
     let raw = parent.0.as_str();
     // Ruby's exception roots have no Go type to embed; a class under
     // one is a plain struct, like the framework error sentinels.
-    if matches!(
-        raw,
-        "Object" | "BasicObject" | "Exception" | "StandardError" | "RuntimeError" | "ArgumentError"
-    ) {
+    if is_core_exception_root(raw) || matches!(raw, "Object" | "BasicObject") {
         return None;
     }
     Some(sanitize_type_name(raw))
@@ -1018,7 +1040,12 @@ pub fn format_module_ivar(owner: &str, name: &str, value: &Expr) -> String {
     } else {
         format!("{}_{name}_slot", sanitize_type_name(owner))
     };
+    MODULE_IVAR_SLOTS.with(|m| m.borrow_mut().insert(var_name.clone()));
     format!("var {var_name} = {rendered}")
+}
+
+thread_local! {
+    static MODULE_IVAR_SLOTS: std::cell::RefCell<std::collections::HashSet<String>> = std::cell::RefCell::new(std::collections::HashSet::new());
 }
 
 fn emit_method(
@@ -1066,6 +1093,7 @@ fn emit_method(
         in_class_method: matches!(m.receiver, MethodReceiver::Class),
         var_renames: std::collections::HashMap::new(),
         declared: std::rc::Rc::new(std::cell::RefCell::new(std::collections::HashSet::new())),
+        boxed_locals: std::rc::Rc::new(std::cell::RefCell::new(std::collections::HashSet::new())),
         void_method: returns_void,
         in_module_singleton: false,
         self_methods: Some(std::rc::Rc::clone(self_methods)),
@@ -1446,7 +1474,17 @@ fn emit_module_singleton(class: &LibraryClass) -> Result<String, String> {
     // suffix avoids collision with the accessor func of the same
     // base name (`ActiveRecord_adapter` is the reader fn;
     // `ActiveRecord_adapter_slot` is the backing storage).
-    let slots = collect_module_singleton_slots(&class.methods);
+    let mut slots = collect_module_singleton_slots(&class.methods);
+    let mut assigned = Vec::new();
+    for m in &class.methods {
+        collect_assigned_ivars(&m.body, &mut assigned);
+    }
+    for (slot, ty) in assigned {
+        let declared = MODULE_IVAR_SLOTS.with(|m| m.borrow().contains(&format!("{name}_{slot}_slot")));
+        if !declared && !slots.iter().any(|(n, _)| *n == slot) {
+            slots.push((slot, ty));
+        }
+    }
     for (slot, ty) in &slots {
         out.push_str(&format!(
             "var {name}_{slot}_slot {}\n",
@@ -1510,6 +1548,16 @@ fn collect_module_singleton_slots(methods: &[MethodDef]) -> Vec<(String, Ty)> {
     out
 }
 
+// Not accessor pairs alone: a module's own `@x = …` inside a `def self.` has no reader, yet its slot must exist
+fn collect_assigned_ivars(e: &crate::expr::Expr, out: &mut Vec<(String, Ty)>) {
+    if let crate::expr::ExprNode::Assign { target: crate::expr::LValue::Ivar { name }, value } = &*e.node {
+        if !out.iter().any(|(n, _)| n == name.as_str()) {
+            out.push((name.as_str().to_string(), value.ty.clone().unwrap_or(Ty::Untyped)));
+        }
+    }
+    e.node.for_each_child(&mut |c| collect_assigned_ivars(c, out));
+}
+
 fn emit_module_singleton_method(class_name: &str, m: &MethodDef) -> String {
     let (params, optional_unpack) = render_params_with_unpack(m);
     let ret = render_return(m);
@@ -1527,6 +1575,7 @@ fn emit_module_singleton_method(class_name: &str, m: &MethodDef) -> String {
         in_class_method: true,
         var_renames: std::collections::HashMap::new(),
         declared: std::rc::Rc::new(std::cell::RefCell::new(std::collections::HashSet::new())),
+        boxed_locals: std::rc::Rc::new(std::cell::RefCell::new(std::collections::HashSet::new())),
         void_method: returns_void,
         in_module_singleton: true,
         // Module-singleton has no instance methods; nothing to put

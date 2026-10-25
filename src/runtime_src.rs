@@ -724,6 +724,21 @@ pub fn parse_library_with_rbs(
                 typer.analyze_expr(&mut m.body, &ctx);
             }
         }
+        // Not the assigned local's own type: `@table = table` built from `{}` keeps an open key, and each emitter declares the ivar from what is assigned
+        if let Some(declared) = rbs_ivars_by_class.get(&lc.name) {
+            fn stamp(e: &mut Expr, declared: &std::collections::HashMap<Symbol, Ty>) {
+                if let ExprNode::Assign { target: crate::expr::LValue::Ivar { name }, value } = &mut *e.node
+                    && let Some(ty) = declared.get(name)
+                    && value.ty.as_ref().is_none_or(|t| t.mentions_unknown())
+                {
+                    value.ty = Some(ty.clone());
+                }
+                e.node.for_each_child_mut(&mut |c| stamp(c, declared));
+            }
+            for m in &mut lc.methods {
+                stamp(&mut m.body, declared);
+            }
+        }
     }
 
     Ok(library_classes)
@@ -749,6 +764,16 @@ fn seed_well_known_classes(
     // (active_record/connection.rb) calls `Db.prepare`/`step?`/
     // `column_*` directly, so its bodies need the same typing here.
     crate::lower::view_to_library::insert_db_stub(classes);
+
+    // Not transpiled with the rest: each strict target writes I18nHost by hand, so only its signatures reach the files that call it.
+    let host = crate::rbs::parse_app_signatures(include_str!("../runtime/ruby/i18n_host.rbs"))
+        .expect("runtime/ruby/i18n_host.rbs must parse");
+    for (class_id, methods) in host {
+        let info = classes.entry(class_id).or_default();
+        for (name, ty) in methods {
+            info.class_methods.insert(name, ty);
+        }
+    }
 
     let row_ty = Ty::Hash {
         key: std::sync::Arc::new(Ty::Str),

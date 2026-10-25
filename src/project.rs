@@ -1452,11 +1452,33 @@ fn emits_namespaced_controllers(target: BuildTarget) -> bool {
 }
 
 /// A `t` that reads the translation table or the whole catalog when it
-/// runs (`lower::i18n_translate`): only the Ruby-family runtime carries
-/// `I18n.translate_site` / `I18n.translate_runtime`, so another target
-/// reports each one rather than emit a call to nothing.
+/// runs (`lower::i18n_translate`): a target whose runtime carries no
+/// `I18n.translate_site` / `I18n.translate_runtime` reports each one
+/// rather than emit a call to nothing.
+// Not a BuildTarget match: the bundled-constant walk names its target as a string, and both read these
+const I18N_RUNTIME_TARGETS: &[&str] = &["blog", "futamura", "ruby", "jruby", "spinel", "typescript", "crystal", "csharp", "kotlin", "swift", "python", "go", "elixir"];
+const I18N_CATALOG_TARGETS: &[&str] = &["blog", "futamura", "ruby", "jruby", "spinel", "typescript", "crystal"];
+
+fn ships_i18n_runtime(target: BuildTarget) -> bool {
+    I18N_RUNTIME_TARGETS.contains(&target.as_str())
+}
+
+fn ships_i18n_catalog(target: BuildTarget) -> bool {
+    I18N_CATALOG_TARGETS.contains(&target.as_str())
+}
+
 fn report_i18n_table_sites(app: &App, target: BuildTarget) {
-    if matches!(target, BuildTarget::Blog | BuildTarget::Ruby | BuildTarget::Jruby | BuildTarget::Spinel | BuildTarget::Futamura) {
+    if ships_i18n_runtime(target) {
+        if !ships_i18n_catalog(target) {
+            for span in &app.i18n_runtime_sites {
+                crate::emit::diagnostics::report_unsupported(
+                    *span,
+                    target.as_str(),
+                    "I18n",
+                    "a translation whose key or options are known only when it runs, which reads the app's whole catalog; this target's runtime carries the locale-chosen table, not the catalog",
+                );
+            }
+        }
         return;
     }
     for span in &app.i18n_table_sites {
@@ -2400,7 +2422,7 @@ fn target_files_inner(
             }
         }
     }
-    let files = crate::timings::phase(format_args!("emit {}: assemble", target.as_str()), || match target {
+    let files = crate::timings::phase(format_args!("emit {}: assemble", target.as_str()), || crate::runtime_loader::with_app_locales(app, || match target {
         BuildTarget::Blog => blog_files(fixture),
         BuildTarget::Futamura => futamura_files(fixture),
         BuildTarget::Spinel => spinel_files_with_source_markers(app, fixture, param_binds).and_then(|(mut files, _)| {
@@ -2428,7 +2450,15 @@ fn target_files_inner(
             app,
             &crate::profile::DeploymentProfile::worker(),
         ))),
-    })?;
+    }))?;
+    let mut files = files;
+    // The Ruby family writes its table with its runtime (`spinel_files`); a strict target reads it from the same path.
+    if ships_i18n_runtime(target)
+        && !matches!(target, BuildTarget::Blog | BuildTarget::Futamura | BuildTarget::Spinel | BuildTarget::Ruby | BuildTarget::Jruby)
+        && (!app.i18n_table.is_empty() || !app.i18n_runtime_sites.is_empty())
+    {
+        files.push(("config/i18n_translations".to_string(), i18n_table_text(app)));
+    }
 
     // Ruby-family trees ship the framework runtime as verbatim text, so
     // their tree-shake runs here, on the finished file set (after
@@ -4116,18 +4146,14 @@ fn apply_cable_connection(files: &mut [(String, String)], app: &App) {
 /// `I18n.available_locales` answer and `I18n.locale =` checks against.
 /// An app that sets neither keeps the file's `:en`.
 /// `app.i18n_table` as `I18n.load_translation_table` reads it: each
-/// distinct entry once (`E`), each site's run-time keys once (`K`), and
-/// per site, locale and environment the index of each key's entry (`B`,
-/// `-` for none), so neither an entry nor a key is spelled per locale.
+/// distinct entry once (`E`), and per site, locale, environment and key
+/// the index of its entry (`T`), so no entry is spelled per locale.
 fn i18n_table_text(app: &App) -> String {
     let mut index: std::collections::HashMap<&Vec<String>, usize> = std::collections::HashMap::new();
     let mut entries = String::new();
-    let mut keys: Vec<(&str, Vec<&str>)> = Vec::new();
-    let mut blocks: Vec<((&str, &str, &str), std::collections::HashMap<&str, usize>)> = Vec::new();
+    let mut lines = String::new();
     let table: Vec<(String, Vec<String>)> = app.i18n_table.iter().flat_map(|site| site.records()).collect();
     for (record, entry) in &table {
-        let mut parts = record.splitn(4, '\u{1c}');
-        let (site, locale, env, key) = (parts.next().unwrap_or(""), parts.next().unwrap_or(""), parts.next().unwrap_or(""), parts.next().unwrap_or(""));
         let next = index.len();
         let at = *index.entry(entry).or_insert_with(|| {
             entries.push('E');
@@ -4138,42 +4164,11 @@ fn i18n_table_text(app: &App) -> String {
             entries.push_str("\u{1f}.\u{1e}");
             next
         });
-        match keys.last_mut() {
-            Some((s, ks)) if *s == site => {
-                if !ks.contains(&key) {
-                    ks.push(key);
-                }
-            }
-            _ => keys.push((site, vec![key])),
-        }
-        match blocks.last_mut() {
-            Some((b, m)) if *b == (site, locale, env) => {
-                m.insert(key, at);
-            }
-            _ => blocks.push(((site, locale, env), std::collections::HashMap::from([(key, at)]))),
-        }
+        // Not packed per site and locale: unpacking a run of keys is a loop inside the line loop, which a functional target cannot write
+        lines.push_str(&format!("T\u{1f}{}\u{1f}{at}\u{1f}.\u{1e}", record.splitn(4, '\u{1c}').collect::<Vec<_>>().join("\u{1f}")));
     }
     let mut out = entries;
-    let site_keys: std::collections::HashMap<&str, &Vec<&str>> = keys.iter().map(|(s, k)| (*s, k)).collect();
-    for (site, ks) in &keys {
-        out.push_str(&format!("K\u{1f}{site}"));
-        for k in ks {
-            out.push('\u{1f}');
-            out.push_str(k);
-        }
-        out.push_str("\u{1f}.\u{1e}");
-    }
-    for ((site, locale, env), at) in &blocks {
-        out.push_str(&format!("B\u{1f}{site}\u{1f}{locale}\u{1f}{env}"));
-        for k in site_keys[site].iter() {
-            out.push('\u{1f}');
-            match at.get(k) {
-                Some(i) => out.push_str(&i.to_string()),
-                None => out.push('-'),
-            }
-        }
-        out.push_str("\u{1f}.\u{1e}");
-    }
+    out.push_str(&lines);
     // The whole catalog and each locale's fallback chain, for `I18n.translate_runtime`: only when a call is left to it.
     if !app.i18n_runtime_sites.is_empty() {
         let catalog = app.i18n.or_rails_default();
@@ -6685,17 +6680,29 @@ fn report_unsupported_bundled_constants(app: &App, target: BuildTarget) {
             );
         }
         // `translate_site` / `translate_runtime` are reported with their call (`report_i18n_table_sites`).
-        if !matches!(target, "jruby" | "spinel")
-            && let crate::expr::ExprNode::Send { recv: Some(recv), method, .. } = &*expr.node
+        if let crate::expr::ExprNode::Send { recv: Some(recv), method, .. } = &*expr.node
             && matches!(&*recv.node, crate::expr::ExprNode::Const { path } if path.iter().map(|s| s.as_str()).skip_while(|s| s.is_empty()).eq(["I18n"]))
-            && !matches!(method.as_str(), "translate_site" | "translate_runtime")
         {
-            emit::diagnostics::report_unsupported(
-                expr.span,
-                target,
-                "I18n",
-                format!("`I18n.{}` is the Ruby-family runtime's (the locale in effect, switching it, or a missing translation's answer); the {target} runtime ships none", method.as_str()),
-            );
+            let method = method.as_str();
+            if !I18N_RUNTIME_TARGETS.contains(&target) && !matches!(method, "translate_site" | "translate_runtime") {
+                emit::diagnostics::report_unsupported(
+                    expr.span,
+                    target,
+                    "I18n",
+                    format!("`I18n.{method}` is the Ruby-family runtime's (the locale in effect, switching it, or a missing translation's answer); the {target} runtime ships none"),
+                );
+            } else if I18N_RUNTIME_TARGETS.contains(&target)
+                && !I18N_CATALOG_TARGETS.contains(&target)
+                && method != "translate_runtime"
+                && crate::runtime_loader::I18N_CATALOG_METHODS.contains(&method)
+            {
+                emit::diagnostics::report_unsupported(
+                    expr.span,
+                    target,
+                    "I18n",
+                    format!("`I18n.{method}` reads the app's whole catalog when it runs; the {target} runtime carries the locale-chosen table, not the catalog"),
+                );
+            }
         }
         if matches!(&*expr.node, crate::expr::ExprNode::Const { .. }) {
             if let Some(crate::ty::Ty::Class { id, .. }) = &expr.ty {
@@ -7494,6 +7501,7 @@ fn spinel_files(app: &App, fixture: &Path, param_binds: bool) -> Result<(Vec<(St
         // `I18n.locale` / `default_locale` — the locale campfire folds
         // into its cache keys; per thread, the app's default until a
         // request sets one (see the file's header).
+        "i18n_host",
         "i18n_locale",
         // The i18n gem's `I18n::Locale::Tag`, which `i18n_locale.rb` requires.
         "i18n_locale_tag",
