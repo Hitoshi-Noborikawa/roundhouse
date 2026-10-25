@@ -596,11 +596,12 @@ fn lower_difference(
     if args.is_empty() {
         return None;
     }
-    let ExprNode::Lit { value: Literal::Str { value: expr_str } } = &*args[0].node else {
-        return None;
-    };
-    let probe = parse_const_dot_method(expr_str, span)?;
-    let delta: i64 = if method == "assert_no_difference" {
+    // Rails' first argument is one expression, an Array of them, or a
+    // Hash of expression => difference (activesupport 8.1.4); an
+    // expression is a `"Const.method"` String or a lambda. Each is
+    // checked on its own, with the shared difference unless the Hash
+    // names one.
+    let default_delta: i64 = if method == "assert_no_difference" {
         0
     } else if args.len() >= 2 {
         match &*args[1].node {
@@ -610,6 +611,37 @@ fn lower_difference(
     } else {
         1
     };
+    let probe_of = |e: &Expr| -> Option<(Expr, String)> {
+        match &*e.node {
+            ExprNode::Lit { value: Literal::Str { value } } => {
+                Some((parse_const_dot_method(value, span)?, value.clone()))
+            }
+            ExprNode::Lambda { params, body, .. } if params.is_empty() => {
+                Some((body.clone(), "expression".to_string()))
+            }
+            _ => None,
+        }
+    };
+    let mut probes: Vec<(Expr, String, i64)> = Vec::new();
+    match &*args[0].node {
+        ExprNode::Array { elements, .. } if !elements.is_empty() => {
+            for el in elements {
+                let (probe, label) = probe_of(el)?;
+                probes.push((probe, label, default_delta));
+            }
+        }
+        ExprNode::Hash { entries, .. } if !entries.is_empty() && method == "assert_difference" && args.len() == 1 => {
+            for (k, v) in entries {
+                let (probe, label) = probe_of(k)?;
+                let ExprNode::Lit { value: Literal::Int { value } } = &*v.node else { return None };
+                probes.push((probe, label, *value));
+            }
+        }
+        _ => {
+            let (probe, label) = probe_of(&args[0])?;
+            probes.push((probe, label, default_delta));
+        }
+    }
     // Block body — unwrap the Lambda's inner body. If no block given,
     // there's nothing to do between captures; bail and let the typer
     // surface it.
@@ -618,46 +650,37 @@ fn lower_difference(
         _ => return None,
     };
 
-    let before_name = Symbol::from("__diff_before");
-    let after_name = Symbol::from("__diff_after");
-    let before_assign = Expr::new(
-        span,
-        ExprNode::Assign {
-            target: LValue::Var { id: VarId(0), name: before_name.clone() },
-            value: probe.clone(),
-        },
-    );
-    let after_assign = Expr::new(
-        span,
-        ExprNode::Assign {
-            target: LValue::Var { id: VarId(0), name: after_name.clone() },
-            value: probe.clone(),
-        },
-    );
-    let actual_diff = send_method(
-        span,
-        Expr::new(span, ExprNode::Var { id: VarId(0), name: after_name }),
-        "-",
-        vec![Expr::new(span, ExprNode::Var { id: VarId(0), name: before_name })],
-    );
-    let mismatch = send_method(
-        span,
-        actual_diff,
-        "!=",
-        vec![Expr::new(span, ExprNode::Lit { value: Literal::Int { value: delta } })],
-    );
-    let msg = format!("{} didn't change by {}", expr_str, delta);
-    let check = raise_if(span, mismatch, msg);
-
+    let name = |kind: &str, i: usize| {
+        if probes.len() == 1 { Symbol::from(format!("__diff_{kind}")) } else { Symbol::from(format!("__diff_{kind}_{i}")) }
+    };
+    let var = |n: Symbol| Expr::new(span, ExprNode::Var { id: VarId(0), name: n });
+    let assign = |n: Symbol, value: Expr| {
+        Expr::new(span, ExprNode::Assign { target: LValue::Var { id: VarId(0), name: n }, value })
+    };
+    let mut stmts: Vec<Expr> = probes
+        .iter()
+        .enumerate()
+        .map(|(i, (probe, _, _))| assign(name("before", i), probe.clone()))
+        .collect();
     // Inline block body — flatten if it's already a Seq so the
     // outer Seq stays single-level.
-    let mut stmts: Vec<Expr> = vec![before_assign];
     match &*block_body.node {
         ExprNode::Seq { exprs } => stmts.extend(exprs.iter().cloned()),
         _ => stmts.push(block_body.clone()),
     }
-    stmts.push(after_assign);
-    stmts.push(check);
+    for (i, (probe, _, _)) in probes.iter().enumerate() {
+        stmts.push(assign(name("after", i), probe.clone()));
+    }
+    for (i, (_, label, delta)) in probes.iter().enumerate() {
+        let actual_diff = send_method(span, var(name("after", i)), "-", vec![var(name("before", i))]);
+        let mismatch = send_method(
+            span,
+            actual_diff,
+            "!=",
+            vec![Expr::new(span, ExprNode::Lit { value: Literal::Int { value: *delta } })],
+        );
+        stmts.push(raise_if(span, mismatch, format!("{label} didn't change by {delta}")));
+    }
     Some(Expr::new(span, ExprNode::Seq { exprs: stmts }))
 }
 
