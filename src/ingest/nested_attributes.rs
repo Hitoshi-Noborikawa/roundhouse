@@ -255,6 +255,15 @@ fn humanize(name: &str) -> String {
     }
 }
 
+/// A child's errors added to its owner under the association, as Rails
+/// imports them: "Comments body can't be blank", key `comments.body`,
+/// each distinct message once.
+fn copied_errors(name: &str, human: &str, skip_inverse: &str) -> String {
+    format!(
+        "      child.errors.each do |error|\n        attribute = error.attribute.to_s\n{skip_inverse}        full = \"{human} \" + attribute.tr(\"_\", \" \") + \" \" + error.message\n        next if error_details.any? {{ |detail| detail.full_message == full }}\n        errors << full\n        error_details << ActiveRecord::ErrorDetail.new(\"{name}.\" + attribute, error.type.to_s, error.message, full, true, true)\n      end\n"
+    )
+}
+
 /// The model source for one association.
 ///
 /// An entry without an `id` builds a record; one with an `id` updates
@@ -333,8 +342,9 @@ fn source(target: &Target) -> String {
         .as_ref()
         .map(|inverse| format!("        next if attribute == \"{inverse}\"\n"))
         .unwrap_or_default();
+    let copied = copied_errors(name, &human, &skip_inverse);
     let validate = format!(
-        "  def __nested_{name}_valid\n    return if {ivar}.nil?\n    {ivar}.each do |entry|\n      next unless entry.is_a?({class})\n      child = entry\n      next if child.valid?\n      child.errors.each do |error|\n        attribute = error.attribute.to_s\n{skip_inverse}        full = \"{human} \" + attribute.tr(\"_\", \" \") + \" \" + error.message\n        errors << full\n        error_details << ActiveRecord::ErrorDetail.new(\"{name}.\" + attribute, error.type.to_s, error.message, full, true, true)\n      end\n    end\n  end\n\n  validate :__nested_{name}_valid\n\n"
+        "  def __nested_{name}_valid\n    return if {ivar}.nil?\n    {ivar}.each do |entry|\n      next unless entry.is_a?({class})\n      child = entry\n      next if child.valid?\n{copied}    end\n  end\n\n  validate :__nested_{name}_valid\n\n"
     );
     let destroy_doomed = format!(
         "    unless {doomed}.nil?\n      gone = {doomed}\n      {doomed} = nil\n      gone.each {{ |record| record.destroy }}\n    end\n"

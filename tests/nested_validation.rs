@@ -25,6 +25,10 @@ body = "A body long enough to validate."
 both = Article.new(title: "", body: body, comments_attributes: [{ commenter: "c", body: "" }])
 both.valid?
 check("the association's errors list first", both.errors, ["Comments body can't be blank", "Title can't be blank"])
+twice = Article.new(title: "t", body: body, comments_attributes: [{ commenter: "c", body: "" }, { commenter: "d", body: "" }])
+twice.valid?
+check("the same error once", twice.errors, ["Comments body can't be blank"])
+check("one detail", twice.error_details.map(&:attribute), ["comments.body"])
 puts "nested validation passed"
 "##;
 
