@@ -1058,10 +1058,11 @@ jobs:
       - uses: ruby/setup-ruby@v1
         with:
           ruby-version: ${{ env.MRI_RUBY }}
-      - name: Install the redis and sidekiq gems
+      - name: Install the redis, sidekiq and activejob gems
         run: |
           gem install --no-document redis -v '~> 5.4'
           gem install --no-document sidekiq -v 8.1.7
+          gem install --no-document activejob -v 8.1.3
       - uses: ./.github/actions/setup-rust
       - uses: Swatinem/rust-cache@v2
       - uses: actions/download-artifact@v8
