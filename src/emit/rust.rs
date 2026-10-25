@@ -910,7 +910,7 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
                         pub fn destroy(&mut self) {{ {destroy_body} }}\n\
                         pub fn exists_pred(id: i64) -> bool {{ Self::_adapter_exists_by_id_pred(id) }}\n\
                         pub fn persisted_pred(&self) -> bool {{ self.id != 0 }}\n\
-                        pub fn find(id: i64) -> Self {{ Self::_adapter_find_by_id(id).unwrap_or_else(|| crate::errors_ext::raise(crate::errors_ext::RecordNotFound, id)) }}\n\
+                        pub fn find(id: i64) -> Self {{ Self::_adapter_find_by_id(id).unwrap_or_else(|| crate::errors_ext::raise_msg(crate::errors_ext::RecordNotFound, format!(\"Couldn't find {name} with 'id'={{}}\", id))) }}\n\
                         pub fn count() -> i64 {{ Self::_adapter_count() }}\n\
                         pub fn all() -> Vec<{name}> {{ Self::_adapter_all() }}\n\
                         pub fn last() -> Option<{name}> {{ Self::_adapter_last() }}\n\
