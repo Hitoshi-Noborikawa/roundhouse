@@ -1433,7 +1433,7 @@ fn emit_case(scrutinee: &Expr, arms: &[Arm]) -> String {
                 lines.push(format!("    {} -> {body_block}", emit_literal(value)));
             }
             other => {
-                let stub = crate::emit::diagnostics::report_unsupported(crate::span::Span::synthetic(), "kotlin", "case pattern", format!("{other:?}").split([' ', '(', '{']).next().unwrap_or("").to_string());
+                let stub = crate::emit::diagnostics::report_unsupported(arm.body.span, "kotlin", "case pattern", format!("{other:?}").split([' ', '(', '{']).next().unwrap_or("").to_string());
                 lines.push(format!("    else -> {{ {stub} }}"));
                 has_else = true;
             }
@@ -1549,7 +1549,7 @@ fn emit_op_assign(target: &LValue, op: OpAssignOp, value: &Expr) -> String {
         OpAssignOp::Mul => format!("{lhs} *= {v}"),
         OpAssignOp::Div => format!("{lhs} /= {v}"),
         OpAssignOp::Mod => format!("{lhs} %= {v}"),
-        other => crate::emit::diagnostics::report_unsupported(crate::span::Span::synthetic(), "kotlin", "OpAssign", format!("{other:?}")),
+        other => crate::emit::diagnostics::report_unsupported(value.span, "kotlin", "OpAssign", format!("{other:?}")),
     }
 }
 
