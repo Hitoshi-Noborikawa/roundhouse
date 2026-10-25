@@ -43,7 +43,9 @@ struct Options {
 #[derive(Clone)]
 enum RejectIf {
     AllBlank,
-    Method(String),
+    /// The model's method, and whether it takes the entry: Rails'
+    /// `call_reject_if` sends it bare when its arity is 0.
+    Method(String, bool),
     /// The lambda's parameter and body. Rails calls it with the class as
     /// `self`, so a body that calls a method without a receiver or reads
     /// `self` is not taken (`reads_implicit_self`).
@@ -71,7 +73,7 @@ fn declaration(expr: &Expr) -> Option<(Vec<Symbol>, Options)> {
                             options.reject_if = Some(if value.as_str() == "all_blank" {
                                 RejectIf::AllBlank
                             } else {
-                                RejectIf::Method(value.as_str().to_string())
+                                RejectIf::Method(value.as_str().to_string(), true)
                             });
                         }
                         ("reject_if", ExprNode::Lambda { params, rest_param: None, extra_params, block_param: None, body, .. })
@@ -162,6 +164,18 @@ enum Kind {
 }
 
 fn targets(model: &Model, names: &[Symbol], options: &Options, models: &[Model]) -> Option<Vec<Target>> {
+    // A Symbol `reject_if:` names one of the model's own instance
+    // methods; one it doesn't define (inherited, or from a concern not
+    // spliced in) keeps the declaration a reported gap.
+    let resolved_reject_if = match &options.reject_if {
+        Some(RejectIf::Method(method, _)) => {
+            let def = model
+                .methods()
+                .find(|m| m.name.as_str() == method && m.receiver == crate::dialect::MethodReceiver::Instance)?;
+            Some(RejectIf::Method(method.clone(), !def.params.is_empty()))
+        }
+        other => other.clone(),
+    };
     names
         .iter()
         .map(|name| {
@@ -222,7 +236,7 @@ fn targets(model: &Model, names: &[Symbol], options: &Options, models: &[Model])
                 kind,
                 inverse,
                 allow_destroy: options.allow_destroy,
-                reject_if: options.reject_if.clone(),
+                reject_if: resolved_reject_if.clone(),
                 owner: model.name.0.as_str().to_string(),
                 polymorphic_type,
                 replace,
@@ -275,22 +289,27 @@ fn source(target: &Target) -> String {
     let rejected = match reject_if {
         None => String::new(),
         Some(RejectIf::AllBlank) => "rejected = !destroy && attrs.all? { |key, value| key == :_destroy || value.nil? || value == false || value.to_s.strip.empty? }\n      ".to_string(),
-        Some(RejectIf::Method(method)) => format!("{indifferent}rejected = !destroy && {method}(seen)\n      "),
+        Some(RejectIf::Method(method, true)) => format!("{indifferent}rejected = !destroy && {method}(seen)\n      "),
+        Some(RejectIf::Method(method, false)) => format!("rejected = !destroy && {method}\n      "),
         Some(RejectIf::Lambda(..)) => format!("{indifferent}rejected = !destroy && __nested_{name}_reject(seen)\n      "),
     };
-    let skip = if reject_if.is_none() {
-        String::new()
-    } else if *kind == Kind::HasMany {
-        "next if rejected\n      ".to_string()
-    } else {
-        "return if rejected\n    ".to_string()
+    // Rails looks the `id` up first: an entry naming a record the
+    // association lacks raises `RecordNotFound` even when rejected. So
+    // the skip sits at the start of the build branch and after the
+    // lookup, not before the `id` is read.
+    let skip = |indent: &str| match (reject_if.is_some(), *kind == Kind::HasMany) {
+        (false, _) => String::new(),
+        (true, true) => format!("{indent}next if rejected\n"),
+        (true, false) => format!("{indent}return if rejected\n"),
     };
+    let skip_outer = skip("      ");
+    let skip_inner = skip("        ");
     let decode = format!(
-        "attrs = {{}}\n      entry.each {{ |key, value| attrs[key.to_sym] = value }}\n      destroy = {destroy}\n      {rejected}{skip}attrs.delete(:_destroy)\n      id = attrs.delete(:id)\n"
+        "attrs = {{}}\n      entry.each {{ |key, value| attrs[key.to_sym] = value }}\n      destroy = {destroy}\n      {rejected}attrs.delete(:_destroy)\n      id = attrs.delete(:id)\n"
     );
     let writer = if *kind == Kind::HasMany {
         format!(
-            "  def {name}_attributes=(attributes)\n    {ivar} = [] if {ivar}.nil?\n    {doomed} = [] if {doomed}.nil?\n    entries = attributes.is_a?(Hash) ? attributes.values : attributes\n    entries.each do |entry|\n      {decode}      if id.nil? || id.to_s.empty?\n        {ivar} << {class}.new(attrs) unless destroy\n      else\n        existing = nil\n        {name}.each {{ |record| existing = record if record.id.to_s == id.to_s }}\n        {not_found} if existing.nil?\n        if destroy\n          {doomed} << existing\n        else\n          attrs.each {{ |key, value| existing[key] = value }}\n          {ivar} << existing\n        end\n      end\n    end\n  end\n\n"
+            "  def {name}_attributes=(attributes)\n    {ivar} = [] if {ivar}.nil?\n    {doomed} = [] if {doomed}.nil?\n    entries = attributes.is_a?(Hash) ? attributes.values : attributes\n    entries.each do |entry|\n      {decode}      if id.nil? || id.to_s.empty?\n{skip_inner}        {ivar} << {class}.new(attrs) unless destroy\n      else\n        existing = nil\n        {name}.each {{ |record| existing = record if record.id.to_s == id.to_s }}\n        {not_found} if existing.nil?\n{skip_inner}        if destroy\n          {doomed} << existing\n        else\n          attrs.each {{ |key, value| existing[key] = value }}\n          {ivar} << existing\n        end\n      end\n    end\n  end\n\n"
         )
     } else {
         // has_one: the record already there is replaced by the one built.
@@ -307,7 +326,7 @@ fn source(target: &Target) -> String {
         // pending is reset only once the entry is accepted, so an entry
         // that raises `RecordNotFound` changes nothing.
         format!(
-            "  def {name}_attributes=(attributes)\n    entry = attributes\n    built = {built}\n    {decode}    if id.nil? || id.to_s.empty?\n      {ivar} = []\n      {doomed} = []\n      unless destroy\n        if built.nil?\n          built = {class}.new(attrs)\n          {built} = built\n{replace_old}        else\n          attrs.each {{ |key, value| built[key] = value }}\n        end\n      end\n      {ivar} << built unless built.nil?\n    else\n      {not_found} unless built.nil?\n      existing = {name}\n      {not_found} if existing.nil? || existing.id.to_s != id.to_s\n      {ivar} = []\n      {doomed} = []\n      if destroy\n        {doomed} << existing\n      else\n        attrs.each {{ |key, value| existing[key] = value }}\n        {ivar} << existing\n      end\n    end\n  end\n\n"
+            "  def {name}_attributes=(attributes)\n    entry = attributes\n    built = {built}\n    {decode}    if id.nil? || id.to_s.empty?\n{skip_outer}      {ivar} = []\n      {doomed} = []\n      unless destroy\n        if built.nil?\n          built = {class}.new(attrs)\n          {built} = built\n{replace_old}        else\n          attrs.each {{ |key, value| built[key] = value }}\n        end\n      end\n      {ivar} << built unless built.nil?\n    else\n      {not_found} unless built.nil?\n      existing = {name}\n      {not_found} if existing.nil? || existing.id.to_s != id.to_s\n{skip_outer}      {ivar} = []\n      {doomed} = []\n      if destroy\n        {doomed} << existing\n      else\n        attrs.each {{ |key, value| existing[key] = value }}\n        {ivar} << existing\n      end\n    end\n  end\n\n"
         )
     };
     let skip_inverse = inverse

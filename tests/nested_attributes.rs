@@ -507,8 +507,8 @@ fn a_strict_target_keeps_the_declaration_reported() {
 // Symbol calls that method of the model with it; a marked entry is never
 // rejected, and an `id` counts as a value.
 const REJECT_TABLES: &str = "  create_table \"comments\", force: :cascade do |t|";
-const REJECT_NEW_TABLES: &str = "  create_table \"tags\", force: :cascade do |t|\n    t.integer \"article_id\"\n    t.string \"name\"\n    t.datetime \"created_at\", null: false\n    t.datetime \"updated_at\", null: false\n  end\n\n  create_table \"notes\", force: :cascade do |t|\n    t.integer \"article_id\"\n    t.string \"text\"\n    t.datetime \"created_at\", null: false\n    t.datetime \"updated_at\", null: false\n  end\n\n  create_table \"comments\", force: :cascade do |t|";
-const REJECT_ARTICLE: &str = "class Article < ApplicationRecord\n  has_many :comments, dependent: :destroy\n  has_many :tags\n  has_many :notes\n  accepts_nested_attributes_for :comments, reject_if: :all_blank, allow_destroy: true\n  accepts_nested_attributes_for :tags, reject_if: ->(attributes) { attributes['name'].blank? }\n  accepts_nested_attributes_for :notes, reject_if: :skip_note?\n\n  def skip_note?(attributes)\n    attributes['text'] == \"skip\"\n  end\n";
+const REJECT_NEW_TABLES: &str = "  create_table \"tags\", force: :cascade do |t|\n    t.integer \"article_id\"\n    t.string \"name\"\n    t.datetime \"created_at\", null: false\n    t.datetime \"updated_at\", null: false\n  end\n\n  create_table \"notes\", force: :cascade do |t|\n    t.integer \"article_id\"\n    t.string \"text\"\n    t.datetime \"created_at\", null: false\n    t.datetime \"updated_at\", null: false\n  end\n\n  create_table \"marks\", force: :cascade do |t|\n    t.integer \"article_id\"\n    t.string \"name\"\n  end\n\n  create_table \"comments\", force: :cascade do |t|";
+const REJECT_ARTICLE: &str = "class Article < ApplicationRecord\n  has_many :comments, dependent: :destroy\n  has_many :tags\n  has_many :notes\n  accepts_nested_attributes_for :comments, reject_if: :all_blank, allow_destroy: true\n  accepts_nested_attributes_for :tags, reject_if: ->(attributes) { attributes['name'].blank? }\n  accepts_nested_attributes_for :notes, reject_if: :skip_note?\n  has_many :marks\n  accepts_nested_attributes_for :marks, reject_if: :locked?\n\n  def skip_note?(attributes)\n    attributes['text'] == \"skip\"\n  end\n\n  def locked?\n    title == \"locked\"\n  end\n";
 
 const REJECT_SCRIPT: &str = r##"
 def check(label, got, want)
@@ -529,6 +529,27 @@ a = Article.create!(**base, tags_attributes: [{ name: "" }, { "name" => "ok" }])
 check("lambda reads the entry by String key", Tag.where(article_id: a.id).map(&:name), ["ok"])
 a = Article.create!(**base, notes_attributes: [{ text: "skip" }, { text: "keep" }])
 check("Symbol method", Note.where(article_id: a.id).map(&:text), ["keep"])
+a = Article.create!(**base, marks_attributes: [{ name: "m" }])
+check("a zero-arity method is called bare", Mark.where(article_id: a.id).count, 1)
+a = Article.create!(title: "locked", body: base[:body], marks_attributes: [{ name: "m" }])
+check("and its answer rejects", Mark.where(article_id: a.id).count, 0)
+def not_found
+  yield
+  "no error"
+rescue ActiveRecord::RecordNotFound => e
+  e.message
+end
+a = Article.create!(**base)
+check("an unknown id raises before rejection", not_found { a.update(comments_attributes: [{ id: 0 }]) },
+  "Couldn't find Comment with ID=0 for Article with ID=#{a.id}")
+o = Article.create!(**base, tags_attributes: [{ name: "theirs" }])
+theirs = Tag.where(article_id: o.id).first
+check("another owner's id raises though the lambda rejects it", not_found { a.update(tags_attributes: [{ id: theirs.id, name: "" }]) },
+  "Couldn't find Tag with ID=#{theirs.id} for Article with ID=#{a.id}")
+mine = Article.create!(**base, tags_attributes: [{ name: "mine" }])
+tag = Tag.where(article_id: mine.id).first
+mine.update!(tags_attributes: [{ id: tag.id, name: "" }])
+check("a rejected entry with an own id is skipped", Tag.find(tag.id).name, "mine")
 puts "nested reject_if passed"
 "##;
 
@@ -538,6 +559,7 @@ fn reject_app() -> emit_and_run::Overlay {
         .edit("app/models/article.rb", "class Article < ApplicationRecord\n  has_many :comments, dependent: :destroy\n", REJECT_ARTICLE)
         .write("app/models/tag.rb", "class Tag < ApplicationRecord\n  belongs_to :article\nend\n")
         .write("app/models/note.rb", "class Note < ApplicationRecord\n  belongs_to :article\nend\n")
+        .write("app/models/mark.rb", "class Mark < ApplicationRecord\n  belongs_to :article\nend\n")
 }
 
 #[test]
@@ -564,6 +586,19 @@ fn a_reject_if_lambda_calling_its_class_stays_reported() {
         "reject-gap",
         "ruby",
         "class Article < ApplicationRecord\n  has_many :comments, dependent: :destroy\n  accepts_nested_attributes_for :comments, reject_if: ->(attributes) { skip?(attributes) }\n\n  def self.skip?(attributes)\n    false\n  end\n",
+    );
+    assert!(stderr.contains("accepts_nested_attributes_for not supported"), "{stderr}");
+}
+
+/// A Symbol `reject_if:` the model doesn't define itself (inherited, or
+/// from a concern not spliced in) can't be checked for Rails' arity
+/// rule, so the declaration stays the reported gap.
+#[test]
+fn a_reject_if_method_the_model_lacks_stays_reported() {
+    let stderr = emit_stderr(
+        "reject-missing",
+        "ruby",
+        "class Article < ApplicationRecord\n  has_many :comments, dependent: :destroy\n  accepts_nested_attributes_for :comments, reject_if: :missing?\n",
     );
     assert!(stderr.contains("accepts_nested_attributes_for not supported"), "{stderr}");
 }
