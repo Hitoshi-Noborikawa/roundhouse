@@ -38,8 +38,9 @@ fn synthesized_string_normalizer_uses_the_shared_squish_helper() {
         .next()
         .unwrap();
     assert!(
-        // The value is cast by the String column's type first (`to_s`).
-        normalizer.contains("ActiveSupport.squish(value.to_s)"),
+        // The value is cast by the String column's type first, into a
+        // String local.
+        normalizer.contains("ActiveSupport.squish(cast_value)"),
         "{normalizer}"
     );
     assert!(source.contains("term.squish.downcase"), "{source}");

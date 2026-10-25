@@ -119,73 +119,68 @@ pub(crate) fn push_normalize_methods(methods: &mut Vec<MethodDef>, model: &Model
             continue;
         }
         let value = Symbol::from("value");
-        // The value the lambda sees, cast by the column's type as Rails
-        // casts it:
-        // - a String column's is `value.to_s` (inside the nil guard), which
-        //   keeps it typed String for the lowering of what the lambda calls
-        //   on it (`squish`);
-        // - an Integer column's is a local holding
-        //   `ActiveRecord::Type::Integer.new.cast(value)` (blank is nil).
-        let caster = if cast { type_class(col_ty) } else { None };
-        let input = if caster == Some("Integer") { Symbol::from("cast_value") } else { value.clone() };
-        let read_input = || synthetic(ExprNode::Var { id: VarId(0), name: input.clone() });
-        let lambda_input = || match caster {
-            Some("String") => synthetic(ExprNode::Send {
-                recv: Some(read_input()),
-                method: Symbol::from("to_s"),
-                args: vec![],
-                block: None,
-                parenthesized: false,
-            }),
-            _ => read_input(),
+        let read_value = || synthetic(ExprNode::Var { id: VarId(0), name: value.clone() });
+        let send = |recv: Expr, method: &str, args: Vec<Expr>| {
+            synthetic(ExprNode::Send { recv: Some(recv), method: Symbol::from(method), args, block: None, parenthesized: false })
         };
-        let mut normalized = body.clone();
-        crate::lower::case_lambda::subst(&mut normalized, &param, &lambda_input());
-        let nil_check = synthetic(ExprNode::Send {
-            recv: Some(read_input()),
-            method: Symbol::from("nil?"),
-            args: vec![],
-            block: None,
-            parenthesized: false,
-        });
-        let body = if apply_to_nil {
+        let lambda_with = |input: Expr| {
+            let mut normalized = body.clone();
+            crate::lower::case_lambda::subst(&mut normalized, &param, &input);
             normalized
-        } else {
-            synthetic(ExprNode::If {
-                cond: nil_check,
-                then_branch: synthetic(ExprNode::Lit { value: Literal::Nil }),
-                else_branch: normalized,
-            })
         };
-        let body = match caster {
-            Some(type_name) if type_name == "Integer" => {
-                let type_object = synthetic(ExprNode::Send {
-                    recv: Some(synthetic(ExprNode::Const {
-                        path: vec![Symbol::from("ActiveRecord"), Symbol::from("Type"), Symbol::from(type_name)],
-                    })),
-                    method: Symbol::from("new"),
-                    args: vec![],
-                    block: None,
-                    parenthesized: false,
+        let nil_lit = || synthetic(ExprNode::Lit { value: Literal::Nil });
+        let str_lit = |v: &str| synthetic(ExprNode::Lit { value: Literal::Str { value: v.to_string() } });
+        let assign = |name: &Symbol, v: Expr| {
+            synthetic(ExprNode::Assign { target: crate::expr::LValue::Var { id: VarId(0), name: name.clone() }, value: v })
+        };
+        let if_nil = |cond_on: Expr, then_branch: Expr, else_branch: Expr| {
+            synthetic(ExprNode::If { cond: send(cond_on, "nil?", vec![]), then_branch, else_branch })
+        };
+        // The value the lambda sees is cast by the column's type, as Rails
+        // casts it; nil stays nil:
+        // - a String column's non-nil value goes into a String local
+        //   (`true` → "t", `false` → "f", else `to_s`), which keeps what the
+        //   lambda calls on it lowered (`squish`). Under `apply_to_nil` the
+        //   nil branch runs the lambda on the nil itself.
+        // - an Integer column's goes through
+        //   `ActiveRecord::Type::Integer.new.cast(value)` (blank is nil).
+        let cast_value = Symbol::from("cast_value");
+        let read_cast = || synthetic(ExprNode::Var { id: VarId(0), name: cast_value.clone() });
+        let body = match if cast { type_class(col_ty) } else { None } {
+            Some("String") => {
+                let as_string = synthetic(ExprNode::If {
+                    cond: send(read_value(), "==", vec![synthetic(ExprNode::Lit { value: Literal::Bool { value: true } })]),
+                    then_branch: str_lit("t"),
+                    else_branch: synthetic(ExprNode::If {
+                        cond: send(read_value(), "==", vec![synthetic(ExprNode::Lit { value: Literal::Bool { value: false } })]),
+                        then_branch: str_lit("f"),
+                        else_branch: send(read_value(), "to_s", vec![]),
+                    }),
                 });
-                let cast_call = synthetic(ExprNode::Send {
-                    recv: Some(type_object),
-                    method: Symbol::from("cast"),
-                    args: vec![synthetic(ExprNode::Var { id: VarId(0), name: value.clone() })],
-                    block: None,
-                    parenthesized: true,
-                });
-                synthetic(ExprNode::Seq {
-                    exprs: vec![
-                        synthetic(ExprNode::Assign {
-                            target: crate::expr::LValue::Var { id: VarId(0), name: input.clone() },
-                            value: cast_call,
-                        }),
-                        body,
-                    ],
-                })
+                let present = synthetic(ExprNode::Seq { exprs: vec![assign(&cast_value, as_string), lambda_with(read_cast())] });
+                let absent = if apply_to_nil { lambda_with(read_value()) } else { nil_lit() };
+                if_nil(read_value(), absent, present)
             }
-            _ => body,
+            Some(type_name) => {
+                let type_object = send(
+                    synthetic(ExprNode::Const {
+                        path: vec![Symbol::from("ActiveRecord"), Symbol::from("Type"), Symbol::from(type_name)],
+                    }),
+                    "new",
+                    vec![],
+                );
+                let mut cast_call = send(type_object, "cast", vec![read_value()]);
+                if let ExprNode::Send { parenthesized, .. } = &mut *cast_call.node {
+                    *parenthesized = true;
+                }
+                let normalized = lambda_with(read_cast());
+                let guarded = if apply_to_nil { normalized } else { if_nil(read_cast(), nil_lit(), normalized) };
+                synthetic(ExprNode::Seq { exprs: vec![assign(&cast_value, cast_call), guarded] })
+            }
+            None => {
+                let normalized = lambda_with(read_value());
+                if apply_to_nil { normalized } else { if_nil(read_value(), nil_lit(), normalized) }
+            }
         };
         methods.push(MethodDef {
             visibility: crate::dialect::MethodVisibility::Public,
