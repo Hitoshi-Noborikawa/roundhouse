@@ -103,6 +103,37 @@ pub fn emit_module(methods: &[MethodDef]) -> Result<String, String> {
         .map(|s| type_name(s.as_str()))
         .unwrap_or_default();
     register_params_for(&name, methods);
+    // Not left bare: a module renders with no class context, so a bare call to a throwing sibling would get no `try`
+    let qualified: Vec<MethodDef>;
+    let methods: &[MethodDef] = match methods.first().and_then(|m| m.enclosing_class.as_ref()) {
+        Some(owner) => {
+            let owner = crate::ident::ClassId(owner.clone());
+            let names: std::collections::HashSet<crate::ident::Symbol> = methods.iter().map(|m| m.name.clone()).collect();
+            qualified = methods
+                .iter()
+                .cloned()
+                .map(|mut m| {
+                    super::route_errors::qualify_siblings(&mut m.body, &owner, &names);
+                    m
+                })
+                .collect();
+            &qualified
+        }
+        None => methods,
+    };
+    loop {
+        let mut changed = false;
+        for m in methods {
+            let method = camel(m.name.as_str());
+            if !super::expr::throws_lookup(&name, &method) && super::expr::body_throws(&m.body, &name) {
+                super::expr::register_throws(format!("{name}.{method}"));
+                changed = true;
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
     let mut out = format!("enum {name} {{\n");
     out.push_str(&emit_module_ivars(methods, &BTreeMap::new()));
     for m in methods {

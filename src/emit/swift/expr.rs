@@ -146,6 +146,12 @@ pub(super) fn reset_registries() {
     ERROR_CLASSES.with(|m| m.borrow_mut().clear());
     METHOD_PARAMS.with(|m| m.borrow_mut().clear());
     CLASS_INITS.with(|m| m.borrow_mut().clear());
+    for (name, parent) in super::primitives::CORE_ERROR_CLASSES {
+        match parent {
+            Some(p) => register_class_parent(name.to_string(), p.to_string()),
+            None => register_error_class(name.to_string()),
+        }
+    }
 }
 
 /// Register a module/object-level accessor property ("Type.prop") whose
@@ -1460,6 +1466,7 @@ fn emit_node(n: &ExprNode, e: &Expr) -> String {
         ),
         ExprNode::Yield { args } => format!("block({})", args.iter().map(emit_expr).collect::<Vec<_>>().join(", ")),
         // Not `rescue` too: a Swift raise is a fatalError or a typed throw, which a Ruby rescue clause does not map onto
+        ExprNode::BeginRescue { body, rescues, else_branch: None, ensure: None, .. } if rescues.is_empty() => emit_expr(body),
         ExprNode::BeginRescue { body, rescues, else_branch: None, ensure: Some(en), .. } if rescues.is_empty() => {
             emit_ensure_only(&emit_expr(body), en)
         }
@@ -2341,6 +2348,7 @@ fn branch_is_terminal(e: &Expr) -> bool {
 /// through unprefixed.
 pub(super) fn wrap_return(e: &Expr) -> String {
     match &*e.node {
+        ExprNode::BeginRescue { body, rescues, else_branch: None, ensure: None, .. } if rescues.is_empty() => wrap_return(body),
         ExprNode::BeginRescue { body, rescues, else_branch: None, ensure: Some(en), .. } if rescues.is_empty() => {
             emit_ensure_only(&wrap_return(body), en)
         }
@@ -2552,11 +2560,7 @@ pub(super) fn is_raise_expr(e: &Expr) -> bool {
 pub(super) fn body_throws(e: &Expr, cls: &str) -> bool {
     let direct = match &*e.node {
         ExprNode::Send { recv: None, method, args, .. } if method.as_str() == "raise" => {
-            args.first().map_or(false, |a| {
-                matches!(&*a.node, ExprNode::Const { path }
-                    if is_error_class_name(&super::naming::type_name(
-                        &path.iter().map(|s| s.to_string()).collect::<Vec<_>>().join("::"))))
-            })
+            args.first().map_or(false, |a| raised_error_class(a).is_some())
         }
         ExprNode::Raise { value } => match &*value.node {
             ExprNode::Const { path } => is_error_class_name(&super::naming::type_name(
@@ -2794,6 +2798,13 @@ fn emit_send(
     // Error-conforming class throws; everything else is a "never
     // happens" fatalError.
     if method == "raise" && recv.is_none() && !args.is_empty() {
+        if matches!(&*args[0].node, ExprNode::Send { .. }) && let Some(cls) = raised_error_class(&args[0]) {
+            // Not the constructed error with a second argument: Ruby's message argument replaces its message
+            return match args_s.get(1) {
+                Some(msg) => format!("throw {cls}({msg})"),
+                None => format!("throw {}", args_s[0]),
+            };
+        }
         if let ExprNode::Const { path } = &*args[0].node {
             let joined = path.iter().map(|s| s.to_string()).collect::<Vec<_>>().join("::");
             let cls = super::naming::type_name(&joined);
@@ -3105,7 +3116,9 @@ fn emit_send(
             // A receiver that is statically nil (a Void call: `assert_nil
             // controller.head(:no_content)`) is evaluated, and is nil.
             "nil?" if matches!(r.ty.as_ref(), Some(crate::ty::Ty::Nil)) => {
-                return format!("({{ _ = {rs}; return true }}())")
+                // Not a bare call of the closure: one that holds a `try` throws, and its call needs a `try` too
+                let try_kw = if rs.starts_with("try ") { "try " } else { "" };
+                return format!("({try_kw}{{ _ = {rs}; return true }}())")
             }
             "nil?" => return format!("({rs} == nil)"),
             // `to_s`: identity on a String; plain interpolation for
@@ -3499,4 +3512,18 @@ fn emit_do_catch(body: &str, rescues: &[crate::expr::RescueClause], ensure: Opti
 
 fn emit_ensure_only(body: &str, ensure: &Expr) -> String {
     format!("do {{\n    defer {{\n{}\n    }}\n{}\n}}", indent(&indent(&emit_expr(ensure))), indent(body))
+}
+
+/// The Error-conforming class a raise's first argument names: `raise K` or `raise K.new(...)`.
+fn raised_error_class(a: &Expr) -> Option<String> {
+    let path = match &*a.node {
+        ExprNode::Const { path } => path,
+        ExprNode::Send { recv: Some(r), method, .. } if method.as_str() == "new" => match &*r.node {
+            ExprNode::Const { path } => path,
+            _ => return None,
+        },
+        _ => return None,
+    };
+    let cls = super::naming::type_name(&path.iter().map(|s| s.to_string()).collect::<Vec<_>>().join("::"));
+    is_error_class_name(&cls).then_some(cls)
 }

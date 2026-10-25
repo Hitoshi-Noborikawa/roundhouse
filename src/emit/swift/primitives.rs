@@ -91,8 +91,24 @@ const RHTHREADLOCAL_SWIFT: &str = include_str!("../../../runtime/swift/rhthreadl
 const I18N_HOST_SWIFT: &str = include_str!("../../../runtime/swift/i18n_host.swift");
 
 /// The hand-written primitive files, emitted under `Sources/App/runtime/`.
+const CORE_ERRORS_SWIFT: &str = include_str!("../../../runtime/swift/core_errors.swift");
+
+/// The classes `CORE_ERRORS_SWIFT` defines, with the parent each subclasses.
+pub const CORE_ERROR_CLASSES: &[(&str, Option<&str>)] = &[
+    ("ArgumentError", None),
+    ("TypeError", None),
+    ("NameError", None),
+    ("NoMethodError", Some("NameError")),
+    ("IndexError", None),
+    ("KeyError", Some("IndexError")),
+];
+
 pub fn primitives() -> Vec<EmittedFile> {
     vec![
+        EmittedFile {
+            path: PathBuf::from("Sources/App/runtime/CoreErrors.swift"),
+            content: CORE_ERRORS_SWIFT.to_string(),
+        },
         EmittedFile {
             path: PathBuf::from("Sources/App/runtime/RhString.swift"),
             content: RHSTRING_SWIFT.to_string(),
