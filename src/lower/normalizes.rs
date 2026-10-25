@@ -23,8 +23,13 @@
 //! existing row's value alone until it is reassigned. The two agree for
 //! every row written by the app after the declaration.
 //!
+//! `apply_to_nil: true` drops the nil pass-through: an assigned nil is
+//! normalized too (`->(t) { t.to_s }` makes it ""). `normalize_value_for
+//! (:attr, value)` on the model (a class method, `self.class.` in an
+//! instance method, a scope) is the same call as the column writer's.
+//!
 //! Not reproduced, and left alone rather than half-applied: a `with:`
-//! that is not a one-parameter lambda literal, and `apply_to_nil: true`.
+//! that is not a one-parameter lambda literal.
 
 use std::collections::HashMap;
 
@@ -46,7 +51,7 @@ pub(crate) fn normalizer_name(attr: &Symbol) -> Symbol {
 /// with the lambda's parameter and body, in declaration order (an
 /// `IndexMap`: a repeated `normalizes :attr` keeps its first position
 /// but the later declaration's body wins, same as a Ruby `Hash`).
-pub(crate) fn normalizations(model: &Model) -> IndexMap<Symbol, (Symbol, Expr)> {
+pub(crate) fn normalizations(model: &Model) -> IndexMap<Symbol, (Symbol, Expr, bool)> {
     let mut out = IndexMap::new();
     for item in &model.body {
         let ModelBodyItem::Unknown { expr, .. } = item else { continue };
@@ -56,6 +61,7 @@ pub(crate) fn normalizations(model: &Model) -> IndexMap<Symbol, (Symbol, Expr)> 
         }
         let mut attrs = Vec::new();
         let mut with = None;
+        let mut apply_to_nil = false;
         let mut supported = true;
         for arg in args {
             match &*arg.node {
@@ -72,7 +78,7 @@ pub(crate) fn normalizations(model: &Model) -> IndexMap<Symbol, (Symbol, Expr)> 
                             {
                                 with = Some((params[0].clone(), body.clone()));
                             }
-                            ("apply_to_nil", ExprNode::Lit { value: Literal::Bool { value: false } }) => {}
+                            ("apply_to_nil", ExprNode::Lit { value: Literal::Bool { value } }) => apply_to_nil = *value,
                             _ => supported = false,
                         }
                     }
@@ -80,18 +86,19 @@ pub(crate) fn normalizations(model: &Model) -> IndexMap<Symbol, (Symbol, Expr)> 
                 _ => supported = false,
             }
         }
-        let (Some(with), true) = (with, supported) else { continue };
+        let (Some((param, body)), true) = (with, supported) else { continue };
         for attr in attrs {
-            out.insert(attr, with.clone());
+            out.insert(attr, (param.clone(), body.clone(), apply_to_nil));
         }
     }
     out
 }
 
 /// `Model._normalize_<attr>(value)` for each normalized attribute that
-/// is one of the model's columns: `value.nil? ? nil : <body>`.
+/// is one of the model's columns: `value.nil? ? nil : <body>`, or the
+/// body alone under `apply_to_nil: true`.
 pub(crate) fn push_normalize_methods(methods: &mut Vec<MethodDef>, model: &Model, columns: &HashMap<Symbol, Ty>) {
-    for (attr, (param, body)) in normalizations(model) {
+    for (attr, (param, body, apply_to_nil)) in normalizations(model) {
         let Some(col_ty) = columns.get(&attr) else { continue };
         let name = normalizer_name(&attr);
         if methods.iter().any(|m| m.receiver == MethodReceiver::Class && m.name == name) {
@@ -108,11 +115,15 @@ pub(crate) fn push_normalize_methods(methods: &mut Vec<MethodDef>, model: &Model
             block: None,
             parenthesized: false,
         });
-        let body = synthetic(ExprNode::If {
-            cond: nil_check,
-            then_branch: synthetic(ExprNode::Lit { value: Literal::Nil }),
-            else_branch: normalized,
-        });
+        let body = if apply_to_nil {
+            normalized
+        } else {
+            synthetic(ExprNode::If {
+                cond: nil_check,
+                then_branch: synthetic(ExprNode::Lit { value: Literal::Nil }),
+                else_branch: normalized,
+            })
+        };
         methods.push(MethodDef {
             visibility: crate::dialect::MethodVisibility::Public,
             unsupported_formals: None,
@@ -143,13 +154,17 @@ pub(crate) fn normalized_write(model: &Model, attr: &Symbol, value: Expr) -> Opt
 }
 
 fn call_normalizer(model: &ClassId, attr: &Symbol, value: Expr) -> Expr {
+    // The model's constant, a synthesized class reference: no source span
+    // (the value's would make the resolver look for a constant there).
+    let mut model_ref = Expr::new(
+        Span::synthetic(),
+        ExprNode::Const { path: model.0.as_str().split("::").map(Symbol::from).collect() },
+    );
+    model_ref.decisions |= crate::expr::RESOLVED_CLASS_REF;
     let mut e = Expr::new(
         value.span,
         ExprNode::Send {
-            recv: Some(Expr::new(
-                value.span,
-                ExprNode::Const { path: model.0.as_str().split("::").map(Symbol::from).collect() },
-            )),
+            recv: Some(model_ref),
             method: normalizer_name(attr),
             args: vec![value.clone()],
             block: None,
@@ -177,14 +192,18 @@ pub fn apply_normalizes_finder_lowering(app: &mut App) {
     if normalized.is_empty() {
         return;
     }
-    super::for_each_hook_body(app, &mut |body| rewrite(body, &normalized));
+    super::for_each_owned_hook_body(app, &mut |owner, body| rewrite(body, &normalized, owner));
 }
 
 const FINDERS: &[&str] =
     &["find_by", "find_by!", "where", "exists?", "find_or_create_by", "find_or_initialize_by", "create_or_find_by", "create_or_find_by!"];
 
-fn rewrite(e: &mut Expr, normalized: &HashMap<ClassId, Vec<Symbol>>) {
-    e.node.for_each_child_mut(&mut |c| rewrite(c, normalized));
+fn rewrite(e: &mut Expr, normalized: &HashMap<ClassId, Vec<Symbol>>, owner: Option<&ClassId>) {
+    e.node.for_each_child_mut(&mut |c| rewrite(c, normalized, owner));
+    if let Some(call) = normalize_value_for(e, normalized, owner) {
+        *e = call;
+        return;
+    }
     let ExprNode::Send { recv: Some(r), method, args, .. } = &mut *e.node else { return };
     if !FINDERS.contains(&method.as_str()) {
         return;
@@ -210,6 +229,37 @@ fn rewrite(e: &mut Expr, normalized: &HashMap<ClassId, Vec<Symbol>>) {
             *v = call_normalizer(&class, key, v.clone());
         }
     }
+}
+
+/// `normalize_value_for(:attr, value)` on a model that normalizes
+/// `attr` — receiver-less or `self.` in its own class methods and
+/// scopes, `self.class.` in its instance methods, or the model's
+/// constant — as `Model._normalize_<attr>(value)`. Another attribute is
+/// left alone (Rails casts it by its type there).
+fn normalize_value_for(e: &Expr, normalized: &HashMap<ClassId, Vec<Symbol>>, owner: Option<&ClassId>) -> Option<Expr> {
+    let ExprNode::Send { recv, method, args, .. } = &*e.node else { return None };
+    if method.as_str() != "normalize_value_for" || args.len() != 2 {
+        return None;
+    }
+    let ExprNode::Lit { value: Literal::Sym { value: attr } } = &*args[0].node else { return None };
+    let class = match recv.as_ref().map(|r| &*r.node) {
+        None | Some(ExprNode::SelfRef) => owner?.clone(),
+        Some(ExprNode::Send { recv: Some(inner), method, args, .. })
+            if method.as_str() == "class" && args.is_empty() && matches!(&*inner.node, ExprNode::SelfRef) =>
+        {
+            owner?.clone()
+        }
+        Some(ExprNode::Const { path }) => {
+            ClassId(Symbol::from(path.iter().map(|s| s.as_str()).collect::<Vec<_>>().join("::")))
+        }
+        _ => return None,
+    };
+    if !normalized.get(&class)?.contains(attr) {
+        return None;
+    }
+    let mut call = call_normalizer(&class, attr, args[1].clone());
+    call.span = e.span;
+    Some(call)
 }
 
 /// Already wrapped — the rewrite must be idempotent, since a body can be
