@@ -129,3 +129,40 @@ fn an_ignored_association_option_is_reported() {
     assert!(reported.iter().any(|l| l.contains("has_many :comments, index_errors:")), "{reported:?}");
     assert!(reported.iter().any(|l| l.contains("belongs_to :article, counter_cache:")), "{reported:?}");
 }
+
+// A loaded child that nested attributes also stage (oracle
+// `cr_oracle.rb`): marked `_destroy`, it isn't validated or saved but
+// destroyed, and the owner saves; updated, its error reaches the owner
+// once, from the nested check alone.
+const STAGED_SCRIPT: &str = r##"
+def check(label, got, want)
+  raise "#{label}: #{got.inspect} (want #{want.inspect})" unless got == want
+end
+body = "A body long enough to validate."
+a = Article.create!(title: "t", body: body, comments_attributes: [{ commenter: "c", body: "one" }])
+q = Article.find(a.id)
+c = q.comments.to_a.first
+c.body = ""
+q.comments_attributes = [{ id: c.id, _destroy: "1" }]
+check("a loaded child marked for destruction isn't validated", [q.save, q.errors], [true, []])
+check("it's destroyed", Comment.exists?(c.id), false)
+b = Article.create!(title: "t", body: body, comments_attributes: [{ commenter: "c", body: "one" }])
+r = Article.find(b.id)
+d = r.comments.to_a.first
+r.comments_attributes = [{ id: d.id, body: "" }]
+check("a loaded child the writer updates: its error once", [r.save, r.errors], [false, ["Comments body can't be blank"]])
+puts "staged children passed"
+"##;
+
+#[test]
+fn a_loaded_child_staged_by_nested_attributes_is_checked_once_on_ruby() {
+    let run = emit_and_run::real_blog()
+        .edit(
+            "app/models/article.rb",
+            "class Article < ApplicationRecord\n  has_many :comments, dependent: :destroy\n",
+            "class Article < ApplicationRecord\n  has_many :comments, dependent: :destroy\n  accepts_nested_attributes_for :comments, allow_destroy: true\n",
+        )
+        .run_ruby(STAGED_SCRIPT);
+    run.assert_passes();
+    assert!(run.stdout.contains("staged children passed"), "{}", run.stdout);
+}

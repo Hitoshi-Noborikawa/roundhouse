@@ -281,10 +281,21 @@ fn copied_errors(name: &str, human: &str, skip_inverse: &str) -> String {
 /// (`lower::model_to_library::associations`), so once `<name>_loaded?`
 /// the reader answers those objects, the ones the app edited, without a
 /// query; read through it, the children are typed.
-pub(crate) fn autosave_source(name: &str, class: &str, human: &str, skip_inverse: &str) -> String {
+pub(crate) fn autosave_source(name: &str, class: &str, human: &str, skip_inverse: &str, staged: bool) -> String {
     let copied = copied_errors(name, human, skip_inverse);
+    // Under nested attributes, a loaded child the writer holds is checked by
+    // `__nested_<name>_valid`, and one it marked for destruction is neither
+    // checked nor saved, but destroyed (`__nested_<name>_destroy`).
+    let (skip_valid, skip_save) = if staged {
+        (
+            format!("      next if !@__nested_{name}.nil? && @__nested_{name}.include?(child)\n      next if !@__nested_{name}_destroy.nil? && @__nested_{name}_destroy.include?(child)\n"),
+            format!("      next if !@__nested_{name}_destroy.nil? && @__nested_{name}_destroy.include?(child)\n"),
+        )
+    } else {
+        (String::new(), String::new())
+    };
     format!(
-        "  def __autosave_{name}_valid\n    return unless {name}_loaded?\n    added = []\n    {name}.each do |entry|\n      next unless entry.is_a?({class})\n      child = entry\n      next unless child.changed?\n      next if child.valid?\n{copied}    end\n  end\n\n  validate :__autosave_{name}_valid\n\n  def __autosave_{name}_save\n    return unless {name}_loaded?\n    {name}.each do |child|\n      child.save! if child.changed?\n    end\n  end\n\n  after_save :__autosave_{name}_save\n\n"
+        "  def __autosave_{name}_valid\n    return unless {name}_loaded?\n    added = []\n    {name}.each do |entry|\n      next unless entry.is_a?({class})\n      child = entry\n{skip_valid}      next unless child.changed?\n      next if child.valid?\n{copied}    end\n  end\n\n  validate :__autosave_{name}_valid\n\n  def __autosave_{name}_save\n    return unless {name}_loaded?\n    {name}.each do |child|\n{skip_save}      child.save! if child.changed?\n    end\n  end\n\n  after_save :__autosave_{name}_save\n\n"
     )
 }
 
@@ -370,7 +381,7 @@ fn source(target: &Target) -> String {
     let validate = format!(
         "  def __nested_{name}_valid\n    return if {ivar}.nil?\n    added = []\n    {ivar}.each do |entry|\n      next unless entry.is_a?({class})\n      child = entry\n      next if child.valid?\n{copied}    end\n  end\n\n  validate :__nested_{name}_valid\n\n"
     );
-    let validate = if *kind == Kind::HasMany { validate + &autosave_source(name, class, &human, &skip_inverse) } else { validate };
+    let validate = if *kind == Kind::HasMany { validate + &autosave_source(name, class, &human, &skip_inverse, true) } else { validate };
     let destroy_doomed = format!(
         "    unless {doomed}.nil?\n      gone = {doomed}\n      {doomed} = nil\n      gone.each {{ |record| record.destroy }}\n    end\n"
     );
@@ -497,7 +508,7 @@ pub(crate) fn expand_autosave(app: &mut App) {
                     let src = format!(
                         "class {}\n{}end\n",
                         model.name.0.as_str().replace("::", "__"),
-                        autosave_source(name.as_str(), target.0.as_str(), &humanize(name.as_str()), "")
+                        autosave_source(name.as_str(), target.0.as_str(), &humanize(name.as_str()), "", false)
                     );
                     ingest_source(&src, &model.name)
                 }
