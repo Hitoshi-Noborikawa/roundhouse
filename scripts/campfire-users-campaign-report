@@ -34,7 +34,9 @@ METRICS = [
   [ "delivery p99 (ms)", ->(s) { s.dig("delivery", "latency", "p99_ms") } ],
   [ "peak PSS (MB)", ->(s) { s.dig("memory", "peak_pss_mb") }, 0 ],
   [ "server CPU (cores)", ->(s) { s["server_cpu_cores"] }, 2 ],
-  [ "generator CPU (% of one core)", ->(s) { s["generator_cpu_percent"] }, 0 ]
+  [ "generator CPU (% of one core)", ->(s) { s["generator_cpu_percent"] }, 0 ],
+  # Requests that got no response; older runs have only the per-route counts.
+  [ "errors (requests with no response)", ->(s) { s["routes"].values.sum { |r| r["errors"].to_i } }, 0 ]
 ].freeze
 
 puts "# Users profile campaign"
@@ -71,4 +73,15 @@ runs.each do |group, lanes|
   end
   puts
   puts "Checks across all reps — #{checks.join("; ")}."
+  kinds = lanes.flat_map do |lane, results|
+    results.flat_map { |r| r["steps"].flat_map { |st| (st["errors"] || {}).map { |kind, n| [ lane, st["people"], kind, n ] } } }
+  end
+  unless kinds.empty?
+    puts
+    puts "Errors by reason, summed over reps:"
+    puts
+    kinds.group_by { |lane, people, kind, _| [ lane, people, kind ] }.each do |(lane, people, kind), rows|
+      puts "- #{lane}, #{people} people: #{rows.sum(&:last)} × #{kind}"
+    end
+  end
 end
