@@ -546,6 +546,24 @@ pub(crate) fn attribute_matches_column(ty: &str, col: &crate::schema::Column) ->
 /// lowerer's `bool_reader_names` (a `:boolean` attribute is a bool
 /// reader for `f.check_box`) and the permit-writer filter (an
 /// `attribute` writer is assignable).
+/// `attribute :name, :type, default: v` beside the model's own `def name=`.
+/// Rails applies the default without that writer, and the writer's `super`
+/// reaches the attribute's generated one; here a source `def` replaces a
+/// generated writer or is dropped by it, so the declaration stays unclaimed
+/// and reported.
+pub(crate) fn default_beside_source_writer(body: &[ModelBodyItem], args: &[Expr]) -> bool {
+    let [name, _, options] = args else { return false };
+    let ExprNode::Lit { value: Literal::Sym { value: name } } = &*name.node else { return false };
+    if attribute_api_default(options).is_none() {
+        return false;
+    }
+    let setter = format!("{}=", name.as_str());
+    body.iter().any(|item| {
+        matches!(item, ModelBodyItem::Method { method, .. }
+            if method.name.as_str() == setter && method.receiver == MethodReceiver::Instance)
+    })
+}
+
 pub(crate) fn attribute_api_decls(body: &[ModelBodyItem]) -> Vec<(Symbol, Symbol)> {
     let mut out = Vec::new();
     for item in body {
@@ -553,7 +571,10 @@ pub(crate) fn attribute_api_decls(body: &[ModelBodyItem]) -> Vec<(Symbol, Symbol
         let ExprNode::Send { recv: None, method, args, block: None, .. } = &*expr.node else {
             continue;
         };
-        if method.as_str() != "attribute" || !(args.len() == 2 || (args.len() == 3 && attribute_api_default(&args[2]).is_some())) {
+        if method.as_str() != "attribute"
+            || !(args.len() == 2 || (args.len() == 3 && attribute_api_default(&args[2]).is_some()))
+            || default_beside_source_writer(body, args)
+        {
             continue;
         }
         let (
@@ -601,7 +622,7 @@ pub(crate) fn attribute_api_defaults(body: &[ModelBodyItem]) -> Vec<(Symbol, Exp
         let ExprNode::Send { recv: None, method, args, block: None, .. } = &*expr.node else {
             continue;
         };
-        if method.as_str() != "attribute" || args.len() != 3 {
+        if method.as_str() != "attribute" || args.len() != 3 || default_beside_source_writer(body, args) {
             continue;
         }
         let ExprNode::Lit { value: Literal::Sym { value: name } } = &*args[0].node else { continue };
@@ -650,6 +671,14 @@ fn nilable_bool() -> Ty {
     Ty::Union { variants: vec![Ty::Bool, Ty::Nil].into() }
 }
 
+/// Does the model body `def name` as an instance method?
+fn source_defines_reader(model: &Model, name: &Symbol) -> bool {
+    model.body.iter().any(|item| {
+        matches!(item, crate::dialect::ModelBodyItem::Method { method, .. }
+            if method.name == *name && method.receiver == MethodReceiver::Instance)
+    })
+}
+
 pub(super) fn push_attribute_api_methods(methods: &mut Vec<MethodDef>, model: &Model, runtime_relation: super::RuntimeRelation) {
     let keeps_nil = runtime_relation == super::RuntimeRelation::Present;
     let bool_ty = || if keeps_nil { nilable_bool() } else { Ty::Bool };
@@ -667,9 +696,15 @@ pub(super) fn push_attribute_api_methods(methods: &mut Vec<MethodDef>, model: &M
         // read means it is never read. The value is a class method's body,
         // so a lambda runs with the class as `self` and a String literal is
         // a fresh String each time.
+        //
+        // A reader the model defines itself is what Rails reads, default or
+        // not. The default-applying reader would replace it (only a bare
+        // `@name` read yields to a source `def`), so that attribute keeps
+        // the plain reader instead.
         if let Some(default) = &default
             && !methods.iter().any(|m| m.name == name)
             && !methods.iter().any(|m| m.name == setter)
+            && !source_defines_reader(model, &name)
         {
             let applied = default_applied_ivar(&name);
             let default_method = default_method_name(&name);
