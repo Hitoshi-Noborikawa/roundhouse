@@ -1685,10 +1685,13 @@ fn push_user_methods(methods: &mut Vec<MethodDef>, model: &Model, columns: &Hash
 ///   - `belongs_to` / `has_one` reader: resolves — Rails defines the
 ///     reader when the macro runs, same as a `def`.
 ///   - `attr_accessor` / `attr_reader` / `attr_writer`: resolves.
-///   - ActiveModel::Attributes `attribute`: resolves in Rails, but
-///     roundhouse doesn't synthesize a method for it yet (separate,
-///     undone work) — so there's nothing in `methods` to find, and it
-///     stays a gap, unchanged from today.
+///   - ActiveModel::Attributes `attribute` on a tableless model:
+///     resolves, against the synthesized reader, from the `attribute`
+///     line on (activemodel 8.1.4 defines it right there: an alias
+///     before it raises `NameError`, and a later `def` doesn't change
+///     what an alias after it copied). On an ActiveRecord model
+///     `attribute` is lazy like a column, so Rails raises `NameError`
+///     and this refuses with the same `alias_attribute` hint.
 ///   - a plain AR column reader: Rails itself raises `NameError`
 ///     here — ActiveRecord generates attribute methods lazily, which
 ///     is why `alias_attribute` exists. Refused with a gap that names
@@ -1717,6 +1720,9 @@ fn resolve_model_aliases(
     }
 
     let table = schema.tables.get(&model.table.0);
+    // `attribute` defines its reader eagerly only through
+    // ActiveModel::Attributes; ActiveRecord's is lazy.
+    let eager_attributes = includes_active_model_attributes(model);
     // Every name declared SOMEWHERE in the body via a category this
     // function can see — a hand-written `def` / enum method, a
     // `belongs_to`/`has_one` reader, or an `attr_accessor`/`attr_reader`/
@@ -1737,6 +1743,9 @@ fn resolve_model_aliases(
             }
             ModelBodyItem::Unknown { expr, .. } => {
                 declared_anywhere.extend(attr_accessor_arg_names(expr));
+                if eager_attributes {
+                    declared_anywhere.extend(attribute_api_arg_name(expr));
+                }
             }
             _ => {}
         }
@@ -1767,7 +1776,8 @@ fn resolve_model_aliases(
                 }
             }
             ModelBodyItem::Unknown { expr, .. } => {
-                for name in attr_accessor_arg_names(expr) {
+                let attribute = attribute_api_arg_name(expr).filter(|_| eager_attributes);
+                for name in attr_accessor_arg_names(expr).into_iter().chain(attribute) {
                     if let Some(m) = pre_user_methods
                         .iter()
                         .find(|m| m.name == name && m.receiver == MethodReceiver::Instance)
@@ -1785,7 +1795,9 @@ fn resolve_model_aliases(
                     // break snapshot semantics, so this is a refusal
                     // (the `None` arm below), not a fallback.
                     None
-                } else if table.is_some_and(|t| t.columns.iter().any(|c| c.name == *old)) {
+                } else if table.is_some_and(|t| t.columns.iter().any(|c| c.name == *old))
+                    || (!eager_attributes && attribute_api_names(model).contains(old))
+                {
                     // A plain AR column reader — Rails itself raises
                     // NameError here (attribute methods are generated
                     // lazily), so this never resolves; the `None` arm
@@ -1829,7 +1841,8 @@ fn resolve_model_aliases(
                         live.insert(new.clone(), copy);
                     }
                     None => {
-                        push_alias_target_unresolved_gap(*span, model, old, new, table);
+                        let lazy_attribute = !eager_attributes && attribute_api_names(model).contains(old);
+                        push_alias_target_unresolved_gap(*span, model, old, new, table, lazy_attribute);
                     }
                 }
             }
@@ -1857,6 +1870,40 @@ fn attr_accessor_arg_names(expr: &Expr) -> Vec<Symbol> {
             _ => None,
         })
         .collect()
+}
+
+/// The name an `attribute :name, …` call declares, when `expr` is one.
+fn attribute_api_arg_name(expr: &Expr) -> Option<Symbol> {
+    let ExprNode::Send { recv: None, method, args, block: None, .. } = &*expr.node else {
+        return None;
+    };
+    if method.as_str() != "attribute" {
+        return None;
+    }
+    match args.first().map(|a| &*a.node) {
+        Some(ExprNode::Lit { value: Literal::Sym { value } }) => Some(value.clone()),
+        _ => None,
+    }
+}
+
+fn attribute_api_names(model: &Model) -> HashSet<Symbol> {
+    model.body.iter().filter_map(|item| match item {
+        crate::dialect::ModelBodyItem::Unknown { expr, .. } => attribute_api_arg_name(expr),
+        _ => None,
+    }).collect()
+}
+
+/// `include ActiveModel::Attributes` in the class body.
+fn includes_active_model_attributes(model: &Model) -> bool {
+    model.body.iter().any(|item| {
+        let crate::dialect::ModelBodyItem::Unknown { expr, .. } = item else { return false };
+        let ExprNode::Send { recv: None, method, args, .. } = &*expr.node else { return false };
+        method.as_str() == "include"
+            && args.iter().any(|a| matches!(&*a.node,
+                ExprNode::Const { path } if path.len() == 2
+                    && path[0].as_str() == "ActiveModel"
+                    && path[1].as_str() == "Attributes"))
+    })
 }
 
 /// A forwarder for `old` when it's a known ActiveRecord::Base instance
@@ -1906,9 +1953,15 @@ fn push_alias_target_unresolved_gap(
     old: &Symbol,
     new: &Symbol,
     table: Option<&Table>,
+    lazy_attribute: bool,
 ) {
     let is_column = table.is_some_and(|t| t.columns.iter().any(|c| c.name == *old));
-    let detail = if is_column {
+    let detail = if lazy_attribute {
+        format!(
+            "alias {new} {old} names an ActiveRecord `attribute` — Rails raises NameError here too \
+             (attribute methods are generated lazily); use `alias_attribute :{new}, :{old}` instead"
+        )
+    } else if is_column {
         format!(
             "alias {new} {old} names a column — Rails raises NameError here too \
              (attribute methods are generated lazily); use `alias_attribute :{new}, :{old}` instead"
@@ -1916,7 +1969,8 @@ fn push_alias_target_unresolved_gap(
     } else {
         format!(
             "alias {new} {old} on {}: {old} is not defined (not a hand-written method, \
-             enum method, association, attr_accessor, or inherited ActiveRecord method)",
+             enum method, association, attr_accessor, ActiveModel attribute declared above it, \
+             or inherited ActiveRecord method)",
             model.name.0
         )
     };
