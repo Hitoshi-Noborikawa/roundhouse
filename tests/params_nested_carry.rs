@@ -301,7 +301,7 @@ fn hashes_in_nested_arrays_arrive_string_keyed_on_ruby() {
 // `expect` into a `permit` marked `FROM_PARAMS_EXPECT` before the helper
 // is replaced, and the spec must still be found there.
 const EXPECT_HASH: &str = "      params.expect(article: [ :title, :body, settings: [ :theme ] ])\n";
-const THEME_WRITER: &str = "  has_many :comments, dependent: :destroy\n\n  def settings=(value)\n    self.body = body.to_s + \" theme=\" + value[\"theme\"].to_s\n  end\n";
+const THEME_WRITER: &str = "  has_many :comments, dependent: :destroy\n\n  def settings=(value)\n    raise \"unfiltered key reached writer\" if value.key?(\"extra\")\n    self.body = body.to_s + \" theme=\" + value[\"theme\"].to_s\n  end\n";
 
 const EXPECT_HASH_TEST: &str = r#"
   test "an expect hash key reaches the writer" do
