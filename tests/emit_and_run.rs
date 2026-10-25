@@ -22,6 +22,8 @@ mod httpdate_from_now;
 mod cookie_jar_each;
 #[path = "emit_and_run/create_block.rs"]
 mod create_block;
+#[path = "emit_and_run/active_model_attribute_alias.rs"]
+mod active_model_attribute_alias;
 #[path = "emit_and_run/active_model_attributes.rs"]
 mod active_model_attributes;
 #[path = "emit_and_run/active_model_attributes_form.rs"]
