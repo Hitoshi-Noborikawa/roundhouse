@@ -59,6 +59,9 @@ pub fn analyze_and_lower_for(app: &mut App, target: crate::build_target::BuildTa
     if target.stores_array_columns() {
         crate::lower::array_columns::store_arrays(app);
     }
+    if target.lowers_nested_attributes() {
+        crate::ingest::nested_attributes::expand(app);
+    }
     let mut refused = if target.parses_numericality_input() {
         Vec::new()
     } else {
