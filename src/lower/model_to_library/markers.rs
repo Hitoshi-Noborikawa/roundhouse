@@ -1302,6 +1302,21 @@ pub(super) fn push_cache_key_methods(methods: &mut Vec<MethodDef>, model: &Model
     );
     methods.push(str_method(model, "cache_key", key));
 
+    // THE MODEL'S OWN `cache_version` DECIDES THE VERSION, as in Rails,
+    // whose `cache_key_with_version` is `"#{cache_key}-#{cache_version}"`
+    // (or `cache_key` alone when that answers nil). The `updated_at` fast
+    // path below reads the column directly and would skip an override:
+    // campfire's `Message#cache_version` answers its trigger-maintained
+    // `presentation_version`, which moves on edits that leave the
+    // message's `updated_at` alone (a creator renamed by foreign SQL), and
+    // keyed by `updated_at` the old fragment was served after them.
+    if methods.iter().any(|m| {
+        m.name.as_str() == "cache_version" && m.receiver == MethodReceiver::Instance
+    }) {
+        methods.push(str_method(model, "cache_key_with_version", versioned_by_cache_version(span)));
+        return;
+    }
+
     // `updated_at` decides the version. Read through the `<col>_raw`
     // storage ivar (`col_storage_name`), which for a temporal column is
     // the ISO-8601 text as stored — the public reader would parse it
@@ -1380,6 +1395,59 @@ pub(super) fn push_cache_key_methods(methods: &mut Vec<MethodDef>, model: &Model
         ),
     };
     methods.push(str_method(model, "cache_key_with_version", versioned));
+}
+
+/// Rails' `cache_key_with_version` over the model's own `cache_version`:
+///
+///   version = cache_version
+///   version.nil? ? cache_key : "#{cache_key}-#{version}"
+fn versioned_by_cache_version(span: Span) -> Expr {
+    let version = Symbol::from("version");
+    let call = |recv: Option<Expr>, method: &str| {
+        Expr::new(
+            span,
+            ExprNode::Send {
+                recv,
+                method: Symbol::from(method),
+                args: Vec::new(),
+                block: None,
+                parenthesized: false,
+            },
+        )
+    };
+    let read = || Expr::new(span, ExprNode::Var { id: VarId(0), name: version.clone() });
+    let assign = Expr::new(
+        span,
+        ExprNode::Assign {
+            target: LValue::Var { id: VarId(0), name: version.clone() },
+            value: call(Some(Expr::new(span, ExprNode::SelfRef)), "cache_version"),
+        },
+    );
+    let joined = with_ty(
+        Expr::new(
+            span,
+            ExprNode::StringInterp {
+                parts: vec![
+                    crate::expr::InterpPart::Expr { expr: call(None, "cache_key") },
+                    crate::expr::InterpPart::Text { value: "-".to_string() },
+                    crate::expr::InterpPart::Expr { expr: read() },
+                ],
+            },
+        ),
+        Ty::Str,
+    );
+    let pick = with_ty(
+        Expr::new(
+            span,
+            ExprNode::If {
+                cond: call(Some(read()), "nil?"),
+                then_branch: with_ty(call(None, "cache_key"), Ty::Str),
+                else_branch: joined,
+            },
+        ),
+        Ty::Str,
+    );
+    seq(vec![assign, pick])
 }
 
 /// A no-arg instance method returning String — the shape both cache-key
