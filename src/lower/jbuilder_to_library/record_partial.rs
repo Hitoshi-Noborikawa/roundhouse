@@ -13,10 +13,13 @@
 //! association readers), else the template's own evidence — a block
 //! parameter over a collection of a model, a local named after a model,
 //! an association reader on a resolved record, a finder on a model
-//! constant. A record whose class is not one statically known model —
-//! an unknown type, a union of classes, a model with STI subclasses or
-//! a polymorphic target, whose partial depends on the row — is refused
-//! with a reason instead of being rendered as nothing.
+//! constant. A record of a closed set of models — a union of model
+//! types, a polymorphic reader with the targets the IR records — is
+//! rendered by a run-time switch on its class, one branch per model's
+//! partial. A record whose class is not known — an unknown type, a
+//! union with a member that is no model, a model with STI subclasses,
+//! a polymorphic reader with no recorded targets — is refused with a
+//! reason instead of being rendered as nothing.
 
 use std::collections::HashMap;
 
@@ -39,6 +42,11 @@ pub(super) enum Unresolved {
     Polymorphic,
     /// `as:` names a local other than the model's singular name.
     As { model: String, as_name: Symbol },
+    /// One record of a closed set of models (a union's members, a
+    /// polymorphic reader's targets): rendered by a run-time switch
+    /// on its class, so a site never reports it; the resolution of a
+    /// receiver maps it to `Union`.
+    Set(Vec<String>),
 }
 
 impl Unresolved {
@@ -59,19 +67,31 @@ impl Unresolved {
             Unresolved::As { model, as_name } => format!(
                 "`as: :{as_name}` binds the `{model}` record under a name its partial is not lowered to take"
             ),
+            Unresolved::Set(models) => format!("the record is one of {}", models.join(", ")),
         }
     }
 }
 
-/// The model the record of every `json.partial!(record, …)` site in a
-/// template body is, keyed by the record argument's span. Block
+/// The models the record of every `json.partial!(record, …)` site in
+/// a template body may be, keyed by the record argument's span: one
+/// model, or the closed set of a union or a polymorphic reader, which
+/// the lowering renders by a switch on the record's class. Block
 /// parameters over a collection are bound to its element model as the
 /// walk enters the block.
-pub(super) fn record_sites(body: &Expr, models: &[Model]) -> HashMap<Span, Result<String, Unresolved>> {
+pub(super) fn record_sites(body: &Expr, models: &[Model]) -> HashMap<Span, Result<Vec<String>, Unresolved>> {
     let mut out = HashMap::new();
     let mut env = HashMap::new();
     walk(body, models, &mut env, &mut out);
-    out
+    out.into_iter()
+        .map(|(span, r)| {
+            let r = match r {
+                Ok(m) => Ok(vec![m]),
+                Err(Unresolved::Set(set)) => Ok(set),
+                Err(why) => Err(why),
+            };
+            (span, r)
+        })
+        .collect()
 }
 
 /// `<collection>/<element>` for `model`, under the namespace of the
@@ -222,6 +242,24 @@ fn checked(name: &str, models: &[Model]) -> Option<Result<String, Unresolved>> {
     }
 }
 
+/// `Set` of `names` when they are two or more models each rendering
+/// its own partial (no STI subclasses), else `None`: an open set, or
+/// one whose members are not all models, is not switched over.
+fn closed_set(names: &[&str], models: &[Model]) -> Option<Unresolved> {
+    let mut set: Vec<String> = Vec::new();
+    for n in names {
+        match checked(n, models)? {
+            Ok(m) if !set.contains(&m) => set.push(m),
+            Ok(_) => {}
+            Err(_) => return None,
+        }
+    }
+    match set.len() {
+        0 => None,
+        _ => Some(Unresolved::Set(set)),
+    }
+}
+
 /// The model a type says the value is, when it says: one model class,
 /// possibly nil. `None` when the type carries no class (unknown,
 /// a type variable), so the caller falls back to the template's own
@@ -238,11 +276,14 @@ fn model_of_ty(ty: &Ty, models: &[Model]) -> Option<Result<String, Unresolved>> 
                 [one] => model_of_ty(one, models),
                 [] => None,
                 many => {
-                    if many.iter().all(|t| matches!(t, Ty::Class { .. })) {
-                        Some(Err(Unresolved::Union))
-                    } else {
-                        None
-                    }
+                    let names: Option<Vec<&str>> = many
+                        .iter()
+                        .map(|t| match t {
+                            Ty::Class { id, .. } => Some(id.0.as_str()),
+                            _ => None,
+                        })
+                        .collect();
+                    names.map(|names| Err(closed_set(&names, models).unwrap_or(Unresolved::Union)))
                 }
             }
         }
@@ -301,7 +342,11 @@ fn structural(arg: &Expr, models: &[Model], env: &Env) -> Result<String, Unresol
             if !args.is_empty() {
                 return Err(Unresolved::Unknown);
             }
-            let owner = resolve(recv, models, env)?;
+            // The reader of a record of a set has no one owner model.
+            let owner = resolve(recv, models, env).map_err(|why| match why {
+                Unresolved::Set(_) => Unresolved::Union,
+                why => why,
+            })?;
             association_target(&owner, method, models)
         }
         _ => Err(Unresolved::Unknown),
@@ -340,9 +385,10 @@ fn association_target(owner: &str, reader: &Symbol, models: &[Model]) -> Result<
     };
     for assoc in m.associations() {
         match assoc {
-            Association::BelongsTo { name, target, polymorphic, .. } if name == reader => {
+            Association::BelongsTo { name, target, polymorphic, polymorphic_targets, .. } if name == reader => {
                 if *polymorphic {
-                    return Err(Unresolved::Polymorphic);
+                    let names: Vec<&str> = polymorphic_targets.iter().map(|t| t.0.as_str()).collect();
+                    return Err(closed_set(&names, models).unwrap_or(Unresolved::Polymorphic));
                 }
                 return checked(target.0.as_str(), models).unwrap_or(Err(Unresolved::Unknown));
             }

@@ -675,7 +675,7 @@ struct Ctx {
     /// The model of each `json.partial!(record, …)` record, keyed by
     /// the record's span (`record_partial::record_sites`), resolved on
     /// the analyzed template before its ivars become locals.
-    record_sites: std::rc::Rc<std::collections::HashMap<Span, Result<String, Unresolved>>>,
+    record_sites: std::rc::Rc<std::collections::HashMap<Span, Result<Vec<String>, Unresolved>>>,
     /// The model `arg_name` is a record of, when known.
     arg_model: Option<String>,
     /// The analyzer's type of each expression of the template as
@@ -985,8 +985,10 @@ fn emit_object_filled(raw_stmts: &[&Expr], ctx: &Ctx) -> (Vec<Expr>, bool) {
             JbStmt::PartialRecord { arg, as_name } => {
                 record_partial_path(arg, as_name.as_ref(), &ctx.resource_dir, &ctx.record_sites)
                     .ok()
-                    .map(|(partial_path, local)| {
-                        emit_partial_call(&partial_path, vec![(local, (*arg).clone())], ctx)
+                    .map(|branches| {
+                        let (mut stmts, call) = record_partial_call(arg, &branches, ctx);
+                        stmts.push(io_append_call(&ctx.accumulator, call));
+                        stmts
                     })
             }
             _ => None,
@@ -1256,6 +1258,12 @@ fn emit_pairs(
                 if let Some(record) = ctx.span_types.get(&value.span).and_then(|t| ctx.record_shapes.of_ty(t)) {
                     let value = rewrite_h_escape(&rewrite_route_helpers(value, ctx));
                     out.extend(record_value_or_refusal(value, Some(&record), src.span, ctx));
+                } else if let Some(record) = association_read(value, ctx) {
+                    // An association reader the analyzer left untyped
+                    // (a polymorphic one): its records as the reader
+                    // on the owner's model answers them.
+                    let value = rewrite_h_escape(&rewrite_route_helpers(value, ctx));
+                    out.extend(record_value_or_refusal(value, record.as_ref(), src.span, ctx));
                 } else {
                     let encoded = temporal_column_read(value, ctx)
                         .and_then(|(obj, col)| temporal_column_json(&obj, &col, ctx.arg_columns.get(&col)?))
@@ -1332,8 +1340,9 @@ fn emit_pairs(
             }
             JbStmt::PartialRecord { arg, as_name } => {
                 match record_partial_path(arg, as_name.as_ref(), &ctx.resource_dir, &ctx.record_sites) {
-                    Ok((partial_path, local)) => {
-                        let call = partial_call(&partial_path, vec![(local, (*arg).clone())], ctx);
+                    Ok(branches) => {
+                        let (stmts, call) = record_partial_call(arg, &branches, ctx);
+                        out.extend(stmts);
                         sep = emit_merged_partial(call, ctx, out, sep);
                     }
                     // Refused visibly: rendering nothing here was a 200
@@ -2175,12 +2184,26 @@ fn emit_array_extract(collection: &Expr, attrs: &[Symbol], ctx: &Ctx) -> Vec<Exp
     emit_array_block(collection, &item, &body, &inner)
 }
 
+/// The records `value` reads when it is an association reader on a
+/// record of a known model (`@tag.thing`): `Some(None)` for a reader
+/// whose class the row decides and the app gives no closed set of.
+fn association_read(value: &Expr, ctx: &Ctx) -> Option<Option<RecordValue>> {
+    let ExprNode::Send { recv: Some(recv), method, args, block: None, .. } = &*value.node else {
+        return None;
+    };
+    if !args.is_empty() {
+        return None;
+    }
+    let owner = record_model_of(recv, ctx)?;
+    ctx.record_shapes.reader(&owner, method)
+}
+
 /// The model of the record `obj` is: its static type, else the
 /// template argument's model when `obj` is that argument.
 fn record_model_of(obj: &Expr, ctx: &Ctx) -> Option<String> {
     match ctx.span_types.get(&obj.span).and_then(|t| ctx.record_shapes.of_ty(t)) {
         Some(RecordValue::One(m)) => Some(m),
-        Some(RecordValue::Many(_)) => None,
+        Some(RecordValue::Many(_) | RecordValue::OneOf(_)) => None,
         None => ctx.arg_model.clone().filter(|_| obj_is_named_local(obj, &ctx.arg_name)),
     }
 }
@@ -2188,9 +2211,11 @@ fn record_model_of(obj: &Expr, ctx: &Ctx) -> Option<String> {
 /// The JSON of `value`, a record or records of one model, as Active
 /// Record's `as_json` writes it: the object `json.extract!(record,
 /// *attributes)` builds (`null` for a nil record), or an array of
-/// them. Refused, with the reason, when the model's `as_json` is not
-/// its columns or the record's class is not known (`record` is None:
-/// a polymorphic reader).
+/// them. A record of a closed set of models is written by a switch on
+/// its class, each branch its model's object, raising for a class
+/// outside the set. Refused, with the reason, when a model's `as_json`
+/// is not its columns or the record's class is not known (`record` is
+/// None: a polymorphic reader with no recorded targets).
 fn record_value_or_refusal(value: Expr, record: Option<&RecordValue>, span: Span, ctx: &Ctx) -> Vec<Expr> {
     let refuse = |why: &str| {
         crate::ingest::survey::record(&crate::ingest::IngestError::Unsupported {
@@ -2200,53 +2225,71 @@ fn record_value_or_refusal(value: Expr, record: Option<&RecordValue>, span: Span
         vec![unsupported_stmt(span, "jbuilder record value", why)]
     };
     let Some(record) = record else {
-        return refuse("a polymorphic association's record is of the class its row names");
+        return refuse("a polymorphic association's record is of the class its row names, and the app declares no closed set of them");
     };
-    let model = record.model().to_string();
-    let attrs = match ctx.record_shapes.attributes(&model) {
-        Ok(a) => a.to_vec(),
-        Err(why) => return refuse(why),
-    };
-    let extract = |var: &Symbol| {
+    // `json.extract!(<var>, *attributes)` for `model`, with the context
+    // that writes it.
+    let extract = |var: &Symbol, model: &str| -> Result<(Expr, Ctx), &'static str> {
+        let attrs = ctx.record_shapes.attributes(model)?;
         let mut args = vec![var_ref(var.clone())];
         args.extend(attrs.iter().map(|a| {
             Expr::new(Span::synthetic(), ExprNode::Lit { value: Literal::Sym { value: a.clone() } })
         }));
         let json = send(None, "json", Vec::new(), None, false);
-        send(Some(json), "extract!", args, None, true)
+        let mut inner = ctx.clone();
+        inner.arg_name = var.as_str().to_string();
+        inner.arg_columns = ctx.model_columns.get(model).cloned().unwrap_or_default();
+        inner.arg_model = Some(model.to_string());
+        Ok((send(Some(json), "extract!", args, None, true), inner))
     };
-    let mut inner = ctx.clone();
-    inner.arg_columns = ctx.model_columns.get(&model).cloned().unwrap_or_default();
-    inner.arg_model = Some(model);
-    match record {
-        RecordValue::Many(_) => {
+    let models: Vec<&str> = match record {
+        RecordValue::Many(model) => {
             let item = Symbol::from("__item");
-            inner.arg_name = item.as_str().to_string();
-            emit_array_block(&value, &item, &extract(&item), &inner)
+            return match extract(&item, model) {
+                Ok((stmt, inner)) => emit_array_block(&value, &item, &stmt, &inner),
+                Err(why) => refuse(why),
+            };
         }
-        RecordValue::One(_) => {
-            let n = ctx.temps.get();
-            ctx.temps.set(n + 1);
-            let rec = Symbol::from(format!("__rec{n}"));
-            inner.arg_name = rec.as_str().to_string();
-            let stmt = extract(&rec);
-            let (object, _) = emit_object_filled(&[&stmt], &inner);
-            let bind = Expr::new(
-                Span::synthetic(),
-                ExprNode::Assign { target: LValue::Var { id: VarId(0), name: rec.clone() }, value },
-            );
-            let cond = send(Some(var_ref(rec)), "nil?", Vec::new(), None, false);
-            let branch = Expr::new(
-                Span::synthetic(),
-                ExprNode::If {
-                    cond,
-                    then_branch: io_append_lit(&ctx.accumulator, "null"),
-                    else_branch: seq(object),
-                },
-            );
-            vec![bind, branch]
+        RecordValue::One(model) => vec![model.as_str()],
+        RecordValue::OneOf(models) => models.iter().map(String::as_str).collect(),
+    };
+    let n = ctx.temps.get();
+    ctx.temps.set(n + 1);
+    let rec = Symbol::from(format!("__rec{n}"));
+    let object = |model: &str| -> Result<Expr, &'static str> {
+        let (stmt, inner) = extract(&rec, model)?;
+        Ok(seq(emit_object_filled(&[&stmt], &inner).0))
+    };
+    let mut branch = match record {
+        // One model: its object, the class unchecked as before.
+        RecordValue::One(model) => match object(model) {
+            Ok(o) => o,
+            Err(why) => return refuse(why),
+        },
+        _ => {
+            let mut switch = raise_outside_set("jbuilder record value", &models);
+            for model in models.iter().rev() {
+                match object(model) {
+                    Ok(o) => switch = is_a_branch(&rec, model, o, switch),
+                    Err(why) => return refuse(why),
+                }
+            }
+            switch
         }
-    }
+    };
+    branch = Expr::new(
+        Span::synthetic(),
+        ExprNode::If {
+            cond: send(Some(var_ref(rec.clone())), "nil?", Vec::new(), None, false),
+            then_branch: io_append_lit(&ctx.accumulator, "null"),
+            else_branch: branch,
+        },
+    );
+    let bind = Expr::new(
+        Span::synthetic(),
+        ExprNode::Assign { target: LValue::Var { id: VarId(0), name: rec }, value },
+    );
+    vec![bind, branch]
 }
 
 fn is_json_receiver(recv: &Expr) -> bool {
@@ -2570,18 +2613,78 @@ fn emit_array_block(collection: &Expr, item_var: &Symbol, body: &Expr, ctx: &Ctx
 /// other than the model's singular: the lowered partial takes its
 /// record under that singular, and a partial reading the `as:` name
 /// would not find it.
+///
+/// A record of a closed set of models (a union's members, a
+/// polymorphic reader's targets) has one `(path, local, model)` per
+/// member, which `record_partial_call` switches over.
 fn record_partial_path(
     arg: &Expr,
     as_name: Option<&Symbol>,
     resource_dir: &str,
-    sites: &std::collections::HashMap<Span, Result<String, Unresolved>>,
-) -> Result<(String, Symbol), Unresolved> {
-    let model = sites.get(&arg.span).cloned().unwrap_or(Err(Unresolved::Unknown))?;
-    let (path, element) = record_partial::model_partial_path(&model, resource_dir);
-    if let Some(a) = as_name.filter(|a| **a != element) {
-        return Err(Unresolved::As { model, as_name: a.clone() });
+    sites: &std::collections::HashMap<Span, Result<Vec<String>, Unresolved>>,
+) -> Result<Vec<(String, Symbol, String)>, Unresolved> {
+    let models = sites.get(&arg.span).cloned().unwrap_or(Err(Unresolved::Unknown))?;
+    models
+        .into_iter()
+        .map(|model| {
+            let (path, element) = record_partial::model_partial_path(&model, resource_dir);
+            if let Some(a) = as_name.filter(|a| **a != element) {
+                return Err(Unresolved::As { model, as_name: a.clone() });
+            }
+            Ok((path, element, model))
+        })
+        .collect()
+}
+
+/// The statements and the call that render `arg`'s partial. One model:
+/// its partial's call. A closed set: the record bound once and a switch
+/// on its class, each branch calling its model's partial, and a raise
+/// for a record of any other class, whose partial was not lowered:
+///
+///   __rec0 = <arg>
+///   __part0 = ""
+///   if __rec0.is_a?(Widget) then __part0 = Views::Widgets.widget_json(__rec0)
+///   elsif __rec0.is_a?(Gadget) then __part0 = Views::Gadgets.gadget_json(__rec0)
+///   else raise("…") end
+fn record_partial_call(arg: &Expr, branches: &[(String, Symbol, String)], ctx: &Ctx) -> (Vec<Expr>, Expr) {
+    if let [(path, local, _)] = branches {
+        return (Vec::new(), partial_call(path, vec![(local.clone(), arg.clone())], ctx));
     }
-    Ok((path, element))
+    let n = ctx.temps.get();
+    ctx.temps.set(n + 1);
+    let rec = Symbol::from(format!("__rec{n}"));
+    let part = Symbol::from(format!("__part{n}"));
+    let assign = |name: &Symbol, value: Expr| {
+        Expr::new(Span::synthetic(), ExprNode::Assign { target: LValue::Var { id: VarId(0), name: name.clone() }, value })
+    };
+    let models: Vec<&str> = branches.iter().map(|(_, _, m)| m.as_str()).collect();
+    let mut switch = raise_outside_set("jbuilder partial! of a record", &models);
+    for (path, local, model) in branches.iter().rev() {
+        let call = partial_call(path, vec![(local.clone(), var_ref(rec.clone()))], ctx);
+        switch = is_a_branch(&rec, model, assign(&part, call), switch);
+    }
+    let stmts = vec![assign(&rec, arg.clone()), assign(&part, lit_str(String::new())), switch];
+    (stmts, var_ref(part))
+}
+
+/// `if <rec>.is_a?(<Model>) then <then> else <otherwise> end`.
+fn is_a_branch(rec: &Symbol, model: &str, then: Expr, otherwise: Expr) -> Expr {
+    let class = const_path(&model.split("::").map(Symbol::from).collect::<Vec<_>>());
+    Expr::new(
+        Span::synthetic(),
+        ExprNode::If {
+            cond: send(Some(var_ref(rec.clone())), "is_a?", vec![class], None, true),
+            then_branch: then,
+            else_branch: otherwise,
+        },
+    )
+}
+
+/// The `else` of a switch over a closed set of models: a record of a
+/// class outside it raises rather than render a shape nobody lowered.
+fn raise_outside_set(construct: &str, models: &[&str]) -> Expr {
+    let message = format!("roundhouse: {construct} of a class other than {}", models.join(", "));
+    send(None, "raise", vec![lit_str(message)], None, true)
 }
 
 fn emit_partial_call(partial_path: &str, locals: Vec<(Symbol, Expr)>, ctx: &Ctx) -> Vec<Expr> {
@@ -2966,7 +3069,7 @@ fn collect_local_names(e: &Expr, out: &mut std::collections::HashSet<Symbol>) {
 fn collect_partial_sites(
     e: &Expr,
     dir: &str,
-    records: &std::collections::HashMap<Span, Result<String, Unresolved>>,
+    records: &std::collections::HashMap<Span, Result<Vec<String>, Unresolved>>,
     out: &mut Vec<((String, String), Vec<Symbol>)>,
 ) {
     if let ExprNode::Send { recv: Some(recv), block: None, .. } = &*e.node {
@@ -2978,7 +3081,11 @@ fn collect_partial_sites(
                 JbStmt::ArrayPartial { partial_path, item_var, .. } => Some((partial_path, vec![item_var])),
                 JbStmt::PairPartial { partial_path, as_name, .. } => Some((partial_path, vec![as_name])),
                 JbStmt::PartialRecord { arg, as_name } => {
-                    record_partial_path(arg, as_name.as_ref(), dir, records).ok().map(|(p, l)| (p, vec![l]))
+                    for (path, local, _) in record_partial_path(arg, as_name.as_ref(), dir, records).unwrap_or_default() {
+                        let (mod_path, method) = partial_target(&path, dir);
+                        out.push((partial_key(&mod_path, &method), vec![local]));
+                    }
+                    None
                 }
                 _ => None,
             };

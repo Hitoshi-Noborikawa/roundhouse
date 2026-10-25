@@ -12,9 +12,13 @@
 //! The lowering knows the record's model from its static type, and the
 //! model's attributes from its table, so it writes the object down as
 //! `json.extract!(record, *attributes)` would, `null` for a nil record.
-//! A record whose attributes are not the table's columns (the attribute
-//! API, `serialize`, a renamed inheritance column, its own `as_json`) or
-//! whose class is not known (a polymorphic reader) is refused with the
+//! A record of a closed set of models (a union of model types, a
+//! polymorphic reader whose targets the IR records) is written by a
+//! switch on its class, each branch its model's attributes, and raises
+//! for a class outside the set. A record whose attributes are not the
+//! table's columns (the attribute API, `serialize`, a renamed
+//! inheritance column, its own `as_json`) or whose class is not known
+//! (a polymorphic reader with no recorded targets) is refused with the
 //! reason rather than written as its `to_s`.
 
 use std::collections::HashMap;
@@ -33,14 +37,8 @@ pub(super) enum RecordValue {
     One(String),
     /// An Array, Relation or association collection of records.
     Many(String),
-}
-
-impl RecordValue {
-    pub(super) fn model(&self) -> &str {
-        match self {
-            RecordValue::One(m) | RecordValue::Many(m) => m,
-        }
-    }
+    /// One record of any of a closed set of models, or nil.
+    OneOf(Vec<String>),
 }
 
 /// What the lowering knows about the app's models as JSON values.
@@ -49,7 +47,7 @@ pub(super) struct RecordShapes {
     /// Each model's `serializable_hash` keys, or why they are not known.
     attributes: HashMap<String, Result<Vec<Symbol>, &'static str>>,
     /// Each model's association readers and the records they answer;
-    /// `None` for a polymorphic `belongs_to`.
+    /// `None` for a polymorphic `belongs_to` with no recorded targets.
     readers: HashMap<String, HashMap<Symbol, Option<RecordValue>>>,
 }
 
@@ -71,11 +69,18 @@ impl RecordShapes {
                     None => Err("the model's attributes are not its table's columns"),
                 }
             };
-            out.attributes.insert(name.clone(), attrs);
+            out.attributes.insert(name, attrs);
+        }
+        for m in &app.models {
+            let name = m.name.0.as_str().to_string();
             let mut readers = HashMap::new();
             for a in m.associations() {
                 let (reader, value) = match a {
-                    Association::BelongsTo { name, polymorphic: true, .. } => (name, None),
+                    Association::BelongsTo { name, polymorphic: true, polymorphic_targets, .. } => {
+                        let targets: Vec<String> = polymorphic_targets.iter().map(|t| t.0.as_str().to_string()).collect();
+                        let closed = !targets.is_empty() && targets.iter().all(|t| out.is_model(t));
+                        (name, closed.then_some(RecordValue::OneOf(targets)))
+                    }
                     Association::BelongsTo { name, target, .. } | Association::HasOne { name, target, .. } => {
                         (name, Some(RecordValue::One(target.0.as_str().to_string())))
                     }
@@ -118,12 +123,21 @@ impl RecordShapes {
                 let non_nil: Vec<&Ty> = variants.iter().filter(|t| !matches!(t, Ty::Nil)).collect();
                 match non_nil.as_slice() {
                     [one] => match self.of_ty(one)? {
-                        RecordValue::One(m) => Some(RecordValue::One(m)),
+                        one @ (RecordValue::One(_) | RecordValue::OneOf(_)) => Some(one),
                         // A collection or nil: Jbuilder writes `null`
                         // for the nil; not a shape lowered here.
                         RecordValue::Many(_) => None,
                     },
-                    _ => None,
+                    many => {
+                        let mut set: Vec<String> = Vec::new();
+                        for t in many {
+                            let m = model(t)?;
+                            if !set.contains(&m) {
+                                set.push(m);
+                            }
+                        }
+                        Some(RecordValue::OneOf(set))
+                    }
                 }
             }
             _ => None,

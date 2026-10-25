@@ -200,3 +200,123 @@ puts "a record value is its attributes"
         .run_ruby(&script)
         .assert_passes();
 }
+
+/// The tags app: a `Tag` whose polymorphic `thing` is a `Widget` or a
+/// `Gadget` (the targets the app declares through `has_many …, as:`),
+/// a partial for each, and the seeded rows with a renderer for
+/// `TagsController`.
+fn tags_app() -> emit_and_run::Overlay {
+    let schema = r#"ActiveRecord::Schema.define do
+  create_table "widgets", force: :cascade do |t|
+    t.string "name"
+    t.integer "size"
+  end
+  create_table "gadgets", force: :cascade do |t|
+    t.string "label"
+  end
+  create_table "tags", force: :cascade do |t|
+    t.string "label"
+    t.string "thing_type"
+    t.integer "thing_id"
+  end
+end
+"#;
+    let controller = r#"class TagsController < ApplicationController
+  def show
+    @tag = Tag.find(params[:id])
+  end
+
+  def pick
+    @tag = Tag.find(params[:id])
+    @thing = @tag.label == "w" ? Widget.first : Gadget.first
+  end
+end
+"#;
+    emit_and_run::empty_app()
+        .write("db/schema.rb", schema)
+        .write(
+            "config/routes.rb",
+            r#"Rails.application.routes.draw do
+  get "tags/:id", to: "tags#show", defaults: { format: :json }
+  get "tags/:id/pick", to: "tags#pick", defaults: { format: :json }
+end
+"#,
+        )
+        .write(
+            "app/models/application_record.rb",
+            "class ApplicationRecord < ActiveRecord::Base\n  primary_abstract_class\nend\n",
+        )
+        .write("app/models/widget.rb", "class Widget < ApplicationRecord\n  has_many :tags, as: :thing\nend\n")
+        .write("app/models/gadget.rb", "class Gadget < ApplicationRecord\n  has_many :tags, as: :thing\nend\n")
+        .write("app/models/tag.rb", "class Tag < ApplicationRecord\n  belongs_to :thing, polymorphic: true\nend\n")
+        .write(
+            "app/controllers/application_controller.rb",
+            "class ApplicationController < ActionController::Base\nend\n",
+        )
+        .write("app/controllers/tags_controller.rb", controller)
+        .write("app/views/widgets/_widget.json.jbuilder", "json.name widget.name\n")
+        .write("app/views/gadgets/_gadget.json.jbuilder", "json.label gadget.label\n")
+        .write("app/views/tags/show.json.jbuilder", "json.id @tag.id\n")
+        .write("app/views/tags/pick.json.jbuilder", "json.id @tag.id\n")
+}
+
+const TAGS_SEED: &str = r#"
+require_relative "app/controllers/tags_controller"
+widget = Widget.create!(name: "alpha", size: 3)
+gadget = Gadget.create!(label: "g1")
+w = Tag.create!(label: "w", thing_type: "Widget", thing_id: widget.id)
+g = Tag.create!(label: "g", thing_type: "Gadget", thing_id: gadget.id)
+def render_action(action, id)
+  controller = TagsController.new
+  controller.params = {"id" => id.to_s}
+  controller.process_action(action)
+  controller.body
+end
+"#;
+
+/// A polymorphic reader, named in `json.call` or given as a pair's
+/// value, is a record of one of the reader's targets, written by a
+/// switch on its class: the attributes of the row's class. The first
+/// was refused, the second written as the record's `to_s`.
+#[test]
+fn a_polymorphic_record_value_is_its_rows_class_attributes() {
+    // Rails 8.1.4 + jbuilder 2.15.1, same rows: GET /tags/1, /tags/2.
+    let script = format!(
+        r#"{TAGS_SEED}
+expected = '{{"label":"w","thing":{{"id":1,"name":"alpha","size":3}},"owner":{{"id":1,"name":"alpha","size":3}}}}'
+actual = render_action(:show, w.id)
+raise actual.inspect unless actual == expected
+expected = '{{"label":"g","thing":{{"id":1,"label":"g1"}},"owner":{{"id":1,"label":"g1"}}}}'
+actual = render_action(:show, g.id)
+raise actual.inspect unless actual == expected
+puts "a polymorphic record value is its row's class's attributes"
+"#
+    );
+    tags_app()
+        .write("app/views/tags/show.json.jbuilder", "json.call(@tag, :label, :thing)\njson.owner @tag.thing\n")
+        .run_ruby(&script)
+        .assert_passes();
+}
+
+/// `json.partial!` of a record typed as a union of two models renders
+/// the partial of the record's class, by a switch on it. It was
+/// refused.
+#[test]
+fn a_partial_over_a_union_of_models_is_its_records_class_partial() {
+    // Rails 8.1.4 + jbuilder 2.15.1, same rows: GET /tags/1/pick, /tags/2/pick.
+    let script = format!(
+        r#"{TAGS_SEED}
+expected = '{{"id":1,"picked":{{"name":"alpha"}}}}'
+actual = render_action(:pick, w.id)
+raise actual.inspect unless actual == expected
+expected = '{{"id":2,"picked":{{"label":"g1"}}}}'
+actual = render_action(:pick, g.id)
+raise actual.inspect unless actual == expected
+puts "a partial over a union is its record's class's partial"
+"#
+    );
+    tags_app()
+        .write("app/views/tags/pick.json.jbuilder", "json.id @tag.id\njson.picked do\n  json.partial! @thing\nend\n")
+        .run_ruby(&script)
+        .assert_passes();
+}
