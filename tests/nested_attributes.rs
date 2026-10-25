@@ -276,7 +276,7 @@ fn nested_attributes_over_polymorphic_as_on_spinel() {
     run.assert_passes();
     assert!(run.stdout.contains("nested polymorphic passed"), "{}", run.stdout);
 }
-const REPLACE_TABLES: &str = "  create_table \"owners\", force: :cascade do |t|\n    t.string \"name\"\n  end\n\n  create_table \"gones\", force: :cascade do |t|\n    t.integer \"owner_id\"\n    t.string \"text\"\n  end\n\n  create_table \"wipes\", force: :cascade do |t|\n    t.integer \"owner_id\"\n    t.string \"text\"\n  end\n\n  create_table \"kepts\", force: :cascade do |t|\n    t.integer \"owner_id\"\n    t.string \"text\"\n  end\n\n  create_table \"plains\", force: :cascade do |t|\n    t.integer \"owner_id\"\n    t.string \"text\"\n  end\n\n  create_table \"stucks\", force: :cascade do |t|\n    t.integer \"owner_id\"\n    t.string \"text\"\n  end\n\n  create_table \"shields\", force: :cascade do |t|\n    t.integer \"owner_id\"\n    t.string \"text\"\n  end\n\n  create_table \"folks\", force: :cascade do |t|\n    t.string \"name\"\n  end\n\n  create_table \"spots\", force: :cascade do |t|\n    t.string \"line\"\n    t.string \"addressable_type\"\n    t.integer \"addressable_id\"\n  end\n\n  create_table \"writers\", force: :cascade do |t|\n    t.string \"name\"\n  end\n\n  create_table \"letters\", force: :cascade do |t|\n    t.string \"title\"\n    t.integer \"writer_id\"\n  end\n\n  create_table \"comments\", force: :cascade do |t|";
+const REPLACE_TABLES: &str = "  create_table \"owners\", force: :cascade do |t|\n    t.string \"name\"\n  end\n\n  create_table \"gones\", force: :cascade do |t|\n    t.integer \"owner_id\"\n    t.string \"text\"\n    t.string \"tag\"\n  end\n\n  create_table \"wipes\", force: :cascade do |t|\n    t.integer \"owner_id\"\n    t.string \"text\"\n  end\n\n  create_table \"kepts\", force: :cascade do |t|\n    t.integer \"owner_id\"\n    t.string \"text\"\n  end\n\n  create_table \"plains\", force: :cascade do |t|\n    t.integer \"owner_id\"\n    t.string \"text\"\n  end\n\n  create_table \"stucks\", force: :cascade do |t|\n    t.integer \"owner_id\"\n    t.string \"text\"\n  end\n\n  create_table \"shields\", force: :cascade do |t|\n    t.integer \"owner_id\"\n    t.string \"text\"\n  end\n\n  create_table \"folks\", force: :cascade do |t|\n    t.string \"name\"\n  end\n\n  create_table \"spots\", force: :cascade do |t|\n    t.string \"line\"\n    t.string \"addressable_type\"\n    t.integer \"addressable_id\"\n  end\n\n  create_table \"writers\", force: :cascade do |t|\n    t.string \"name\"\n    t.string \"tag\"\n  end\n\n  create_table \"letters\", force: :cascade do |t|\n    t.string \"title\"\n    t.integer \"writer_id\"\n  end\n\n  create_table \"comments\", force: :cascade do |t|";
 
 fn replace_app() -> emit_and_run::Overlay {
     let mut app = emit_and_run::real_blog().edit("db/schema.rb", TABLES, REPLACE_TABLES);
@@ -289,7 +289,7 @@ fn replace_app() -> emit_and_run::Overlay {
     }
     app.write(
         "app/models/owner.rb",
-        "class Owner < ApplicationRecord\n  has_one :gone, dependent: :destroy\n  has_one :wipe, dependent: :delete\n  has_one :kept, dependent: :nullify\n  has_one :plain\n  has_one :stuck\n  has_one :shield, dependent: :destroy\n  accepts_nested_attributes_for :gone, :wipe, :kept, :plain, :stuck, :shield\nend\n",
+        "class Owner < ApplicationRecord\n  has_one :gone, dependent: :destroy\n  has_one :wipe, dependent: :delete\n  has_one :kept, dependent: :nullify\n  has_one :plain\n  has_one :stuck\n  has_one :shield, dependent: :destroy\n  accepts_nested_attributes_for :gone, :wipe, :kept, :plain, :stuck, :shield, allow_destroy: true\nend\n",
     )
     .write(
         "app/models/folk.rb",
@@ -361,6 +361,52 @@ sh = Owner.create!(name: "sh", shield_attributes: { text: "keep" })
 kept_shield = Shield.where(owner_id: sh.id).first
 check("an old record whose destroy aborts: the update succeeds", sh.update(shield_attributes: { text: "new" }), true)
 check("both rows stay, as in Rails", Shield.where(owner_id: sh.id).map(&:text).sort, ["keep", "new"])
+def not_found
+  yield
+  "no error"
+rescue ActiveRecord::RecordNotFound => e
+  e.message
+end
+t = Owner.create!(name: "t", gone_attributes: { text: "old" })
+old = Gone.where(owner_id: t.id).first
+t.gone_attributes = { text: "new" }
+check("an id after a pending build", not_found { t.gone_attributes = { id: old.id, text: "x" } },
+  "Couldn't find Gone with ID=#{old.id} for Owner with ID=#{t.id}")
+check("the old record untouched", Gone.where(id: old.id).map(&:text), ["old"])
+t = Owner.create!(name: "t", gone_attributes: { text: "old" })
+old = Gone.where(owner_id: t.id).first
+t.gone_attributes = { text: "a", tag: "t" }
+t.gone_attributes = { text: "b" }
+t.save!
+check("two entries without an id: one record, merged", [Gone.where(id: old.id).count, Gone.where(owner_id: t.id).map { |g| [g.text, g.tag] }], [0, [["b", "t"]]])
+t = Owner.create!(name: "t", gone_attributes: { text: "old" })
+t.gone_attributes = { text: "a", tag: "t" }
+t.gone_attributes = { text: "b", _destroy: "1" }
+t.save!
+check("a marked second entry leaves the built record", Gone.where(owner_id: t.id).map { |g| [g.text, g.tag] }, [["a", "t"]])
+n = Owner.new(name: "n")
+n.gone_attributes = { text: "a", tag: "t" }
+n.gone_attributes = { text: "b" }
+n.save!
+check("a new owner: one record, merged", Gone.where(owner_id: n.id).map { |g| [g.text, g.tag] }, [["b", "t"]])
+lw = Writer.create!(name: "old")
+lt = Letter.create!(title: "l", writer_id: lw.id)
+lt.writer_attributes = { name: "new" }
+check("belongs_to: an id after a pending build", not_found { lt.writer_attributes = { id: lw.id, name: "x" } },
+  "Couldn't find Writer with ID=#{lw.id} for Letter with ID=#{lt.id}")
+lt = Letter.create!(title: "l", writer_id: lw.id)
+before = Writer.count
+lt.writer_attributes = { name: "a", tag: "t" }
+lt.writer_attributes = { name: "b" }
+lt.save!
+w = Writer.find(Letter.find(lt.id).writer_id)
+check("belongs_to: two entries without an id", [[w.name, w.tag], Writer.count - before, Writer.where(id: lw.id).count], [["b", "t"], 1, 1])
+lt = Letter.create!(title: "l", writer_id: lw.id)
+lt.writer_attributes = { name: "a", tag: "t" }
+lt.writer_attributes = { name: "b", _destroy: "1" }
+lt.save!
+w = Writer.find(Letter.find(lt.id).writer_id)
+check("belongs_to: a marked second entry leaves the built record", [w.name, w.tag], ["a", "t"])
 puts "nested replace passed"
 "##;
 

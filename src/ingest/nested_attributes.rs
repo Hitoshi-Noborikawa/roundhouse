@@ -196,6 +196,7 @@ fn source(target: &Target) -> String {
     let ivar = format!("@__nested_{name}");
     let doomed = format!("@__nested_{name}_destroy");
     let replaced = format!("@__nested_{name}_replaced");
+    let built = format!("@__nested_{name}_built");
     let human = humanize(name);
     let destroy = if *allow_destroy {
         "!attrs[:_destroy].nil? && ![\"\", \"0\", \"f\", \"F\", \"false\", \"FALSE\", \"off\", \"OFF\"].include?(attrs[:_destroy].to_s)"
@@ -214,15 +215,18 @@ fn source(target: &Target) -> String {
         )
     } else {
         // has_one: the record already there is replaced by the one built.
-        let build = if *replace == Replace::No {
-            format!("      {ivar} << {class}.new(attrs) unless destroy\n")
+        // A new owner has no record to replace: Rails' reader answers
+        // nil without a query, where ours would match a row keyed 0.
+        let replace_old = if *replace == Replace::No {
+            String::new()
         } else {
-            // A new owner has no record to replace: Rails' reader answers
-            // nil without a query, where ours would match a row keyed 0.
-            format!("      unless destroy\n        {ivar} << {class}.new(attrs)\n        {replaced} = {name} unless new_record?\n      end\n")
+            format!("          {replaced} = {name} unless new_record?\n")
         };
+        // The record built is the association's target until the save,
+        // as Rails' `build_<name>` makes it: a later entry without an `id`
+        // assigns to it, and one with an `id` matches nothing.
         format!(
-            "  def {name}_attributes=(attributes)\n    entry = attributes\n    {ivar} = []\n    {doomed} = []\n    {decode}    if id.nil? || id.to_s.empty?\n{build}    else\n      existing = {name}\n      {not_found} if existing.nil? || existing.id.to_s != id.to_s\n      if destroy\n        {doomed} << existing\n      else\n        attrs.each {{ |key, value| existing[key] = value }}\n        {ivar} << existing\n      end\n    end\n  end\n\n"
+            "  def {name}_attributes=(attributes)\n    entry = attributes\n    built = {built}\n    {decode}    {ivar} = []\n    {doomed} = []\n    if id.nil? || id.to_s.empty?\n      unless destroy\n        if built.nil?\n          built = {class}.new(attrs)\n          {built} = built\n{replace_old}        else\n          attrs.each {{ |key, value| built[key] = value }}\n        end\n      end\n      {ivar} << built unless built.nil?\n    else\n      {not_found} unless built.nil?\n      existing = {name}\n      {not_found} if existing.nil? || existing.id.to_s != id.to_s\n      if destroy\n        {doomed} << existing\n      else\n        attrs.each {{ |key, value| existing[key] = value }}\n        {ivar} << existing\n      end\n    end\n  end\n\n"
         )
     };
     let skip_inverse = inverse
@@ -270,6 +274,12 @@ fn source(target: &Target) -> String {
                 "  def __nested_{name}_save\n    unless {ivar}.nil?\n      children = {ivar}\n      {ivar} = nil\n      children.each do |child|\n        child.{foreign_key} = id\n{set_type}        child.save!\n      end\n    end\n{destroy_doomed}{reset}  end\n\n  after_save :__nested_{name}_save\n\n"
             )
         }
+    };
+    // The save ends the built record's time as the pending target.
+    let save = if *kind == Kind::HasMany {
+        save
+    } else {
+        save.replacen(&format!("  def __nested_{name}_save\n"), &format!("  def __nested_{name}_save\n    {built} = nil\n"), 1)
     };
     writer + &validate + &save
 }
