@@ -721,3 +721,26 @@ fn priority_warns_and_a_computed_set_is_an_error() {
     assert_eq!(errors.len(), 1, "{errors:#?}");
     assert!(errors[0].contains("can't be honored"), "{errors:#?}");
 }
+
+/// A tree on `:sidekiq` documents its worker role under the README's
+/// `## Run`, as a `###` part so scripts/smoke doesn't start it, with the
+/// cable.yml channel its broadcasts go out on; a tree that isn't on
+/// Sidekiq has no such part.
+#[test]
+fn the_readme_says_how_to_run_the_worker() {
+    for (target, worker) in [(BuildTarget::Spinel, "./build/bin/blog sidekiq"), (BuildTarget::Ruby, "bundle exec ruby sidekiq.rb")] {
+        let (emitted, errors) = on_sidekiq().write("config/cable.yml", CABLE_REDIS).emit(target);
+        assert!(errors.is_empty(), "{errors:#?}");
+        let readme = read(&emitted, "README.md");
+        let run = readme.find("## Run\n").unwrap_or_else(|| panic!("{readme}"));
+        let jobs = readme.find("### Jobs on Sidekiq\n").unwrap_or_else(|| panic!("{readme}"));
+        let next = readme[run + 1..].find("\n## ").map(|i| run + 1 + i).unwrap_or(readme.len());
+        assert!(run < jobs && jobs < next, "{readme}");
+        assert!(readme[jobs..next].contains(&format!("```sh\n{worker}\n```\n")), "{readme}");
+        assert!(readme[jobs..next].contains("`depot_production:<stream>`"), "{readme}");
+    }
+    let (plain, _) = on_sidekiq().emit(BuildTarget::Ruby);
+    assert!(read(&plain, "README.md").contains("reaches no browser"));
+    let (off, _) = emit_and_run::real_blog().emit(BuildTarget::Ruby);
+    assert!(!read(&off, "README.md").contains("### Jobs on Sidekiq"));
+}

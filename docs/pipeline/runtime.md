@@ -1799,18 +1799,39 @@ come from the job's `perform_later` call sites, and
   envelope (`runtime/spinel/sidekiq_push.rb`, `sidekiq_redis.rb`):
   `SADD queues` and `LPUSH queue:<name>`, or `ZADD schedule` for a
   literal `set(wait:)` or `set(wait_until:)` that lands in the future.
-  A pushed job is run by a Ruby Sidekiq process; there is no in-binary
-  worker yet. Redis comes
-  from `Sidekiq.configure_client`'s `url:` and `password:`, then
-  `REDIS_PROVIDER`, then `REDIS_URL`. The connection is one per
-  process, with 1-second connect and read timeouts, and a dropped
-  connection is retried once. A non-literal `set(...)` is an error
+  Redis comes from `Sidekiq.configure_client`'s `url:` and `password:`,
+  then `REDIS_PROVIDER`, then `REDIS_URL`. The connection is one per
+  process, with 1-second connect and read timeouts, and a refused or
+  dropped connection, the first one included, is retried once. A job
+  held for COMMIT is dropped when an `after_commit` callback raises, as
+  Rails drops it, and the caller sees the callback's error. A non-literal `set(...)` is an error
   under `:sidekiq`, and `set(priority:)` is dropped with a warning.
   This holds on ruby, jruby and spinel; the other targets warn
   (`sidekiq-adapter-not-honored`) and run the jobs in process. A pushed
   job carries `"retry":true`, so Sidekiq retries it with its own
   defaults; Active Job's `retry_on`, TLS (`rediss://`) and per-job
   adapters are still missing.
+- **The worker role has no retries.** The same build runs the pushed
+  jobs as `./app sidekiq` (spinel) or `ruby sidekiq.rb` (ruby, jruby),
+  a Sidekiq 8.1 server process with BasicFetch
+  (`runtime/spinel/sidekiq/sidekiq_worker.rb`); a Ruby Sidekiq process
+  on the Rails app can run them too. `-c`, `-q` and `-t` win over
+  config/sidekiq.yml's literal `:concurrency:`, `:queues:` and
+  `:timeout:` (its `production:` section merged over the top level),
+  which win over `RAILS_MAX_THREADS` and the defaults (5, `default`,
+  25). TSTP quiets it, and TERM or INT waits up to the timeout and
+  pushes unfinished jobs back. A job that raises goes straight to the
+  dead set with Sidekiq's error fields, so the retry set, the scheduler
+  that moves `schedule` and `retry` to their queues, `retry_on`, and the
+  heartbeat Sidekiq's Web UI reads are still missing. Under
+  config/cable.yml's `adapter: redis`, every process's broadcasts go
+  out as `PUBLISH <channel_prefix>:<stream>`, as Action Cable's Redis
+  adapter sends them, and each server process delivers what it
+  receives through one `PSUBSCRIBE <channel_prefix>:*` connection
+  (`runtime/spinel/sidekiq/redis_cable.rb`). On any other cable
+  adapter a job's broadcasts in the worker reach no browser, with a
+  warning. Broadcasts Rails would enqueue (`broadcast_*_later`, and
+  `broadcasts_to`'s create and update) are rendered inline instead.
 - **Some argument types.** A job whose call sites pass a Hash, a Date,
   an untyped value, or nothing typed at all keeps its closure, with a
   `job-closure-fallback` warning naming the parameter. Lobsters'
@@ -3003,7 +3024,10 @@ Three gaps remain, all on spinel's side:
   alone (`_adapter_touch`), which is what keeps campfire's
   trigger-maintained `rooms.messages_count` correct when a message
   touches its room. A `save`/`update` of a record loaded before a
-  trigger moved one of its columns still writes the stale value back.
+  trigger moved one of its columns still writes the stale value back. The
+  same goes for two jobs the Sidekiq worker runs at once on one
+  record: the later `save` writes back every column it loaded, so the
+  earlier job's change is lost where Rails would keep it.
 
 ### `HashWithIndifferentAccess` is a String-keyed Hash; a call converts its keys at the site
 
