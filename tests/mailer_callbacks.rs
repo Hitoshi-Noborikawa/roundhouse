@@ -174,3 +174,17 @@ fn a_callback_from_an_included_module_runs_on_ruby() {
     run.assert_passes();
     assert!(run.stdout.contains("concern passed"), "{}", run.stdout);
 }
+
+// A public method is an action too, but called directly from a running
+// action it is a plain method call: Rails runs no callbacks for it
+// (oracle `test_app/direct_oracle.rb`).
+const DIRECT_MAILER: &str = "class DirectMailer < ApplicationMailer\n  before_action :note_before\n\n  def hi\n    mail(to: \"a@example.com\", subject: greeting, body: \"hi\")\n  end\n\n  def greeting\n    CallbackLog.add(\"greeting\")\n    \"Hello\"\n  end\n\n  private\n\n  def note_before\n    CallbackLog.add(\"before\")\n  end\nend\n";
+
+#[test]
+fn an_action_called_from_a_running_action_runs_no_chain_on_ruby() {
+    let run = app()
+        .write("app/mailers/direct_mailer.rb", DIRECT_MAILER)
+        .run_ruby("CallbackLog.clear\nm = DirectMailer.hi.deliver_now\ngot = [CallbackLog.entries, m.subject]\nraise got.inspect unless got == [[\"base_before\", \"before\", \"greeting\", \"stamp\"], \"Hello\"]\nputs \"direct passed\"\n");
+    run.assert_passes();
+    assert!(run.stdout.contains("direct passed"), "{}", run.stdout);
+}

@@ -14,7 +14,7 @@
 //!
 //! ```ruby
 //! def hello(a)
-//!   __start_action("hello")
+//!   return __mailer_action_hello(a) unless __start_action("hello")
 //!   load_params
 //!   wrap do
 //!     __mailer_action_hello(a)   # the action's own body, now private
@@ -507,7 +507,10 @@ fn generated_methods(
             resolved.push((c.kind, target, conds.join(" && ")));
         }
         let body = nested(&resolved, &format!("{ACTION_PREFIX}{action}({args})"));
-        text.push_str(&format!("  def {action}({args})\n    __start_action(\"{action}\")\n{body}    message\n  end\n\n"));
+        // Called from inside a running action, the method is a plain call.
+        text.push_str(&format!(
+            "  def {action}({args})\n    return {ACTION_PREFIX}{action}({args}) unless __start_action(\"{action}\")\n{body}    message\n  end\n\n"
+        ));
     }
     // This class's own block callbacks and lambda conditions.
     for c in &parsed.callbacks {

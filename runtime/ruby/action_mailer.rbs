@@ -67,7 +67,7 @@ module ActionMailer
     def _with_params: (Hash[Symbol, untyped] params) -> self
     def message: () -> Message?
     def action_name: () -> String
-    def __start_action: (String name) -> String
+    def __start_action: (String name) -> bool
     def headers: (?Hash[String, String]? values) -> Headers
     def __headers: () -> Hash[String, String]
     def __add_header: (String name, String value) -> String

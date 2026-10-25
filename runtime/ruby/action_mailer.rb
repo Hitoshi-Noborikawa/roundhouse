@@ -215,8 +215,13 @@ module ActionMailer
       @_action_name.to_s
     end
 
+    # Starts the action's chain, or answers false while another action
+    # runs: a public method called from inside one is a plain call, as in
+    # Rails, where only processing an action runs the callbacks.
     def __start_action(name)
+      return false unless @_action_name.nil?
       @_action_name = name
+      true
     end
 
     # `headers("X-Priority" => "1")` adds them; `headers["X"] = value`
