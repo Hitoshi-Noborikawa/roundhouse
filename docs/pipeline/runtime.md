@@ -2946,9 +2946,11 @@ Three gaps remain, all on spinel's side:
   Symbol apart from String, so `InvalidLocale`'s message shows a String
   locale as `:de` where Rails shows `"de"`; Rust's untyped locale carries
   no Symbol either, and shows a Symbol one as `"de"` where Rails shows
-  `:de`. Elixir holds the parsed table
-  in the request's process, so each request parses it again; the file's
-  text is read once. Only the Ruby family, TypeScript and Crystal carry
+  `:de`. Elixir keeps the parsed table in `:persistent_term`, as it does
+  whatever a load-once method fills (one that sets `@flag = true`, read
+  only as `@flag == true`): Plug serves each request in a process of its
+  own, where the process dictionary would parse the table again. Only the
+  Ruby family, TypeScript and Crystal carry
   the catalog a translation chosen by a run-time key reads; elsewhere,
   and in the worker and browser builds, such a translation is refused.
 - **`fragment_name_with_digest(name, digest_path)` adds no template

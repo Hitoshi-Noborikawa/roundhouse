@@ -203,6 +203,11 @@ defmodule I18nProbeTest do
     error = assert_raise I18n.InvalidLocale, fn -> Article.named("de") end
     assert error.message == "\"de\" is not a valid locale"
   end
+
+  test "another request reads the table the first one loaded" do
+    Article.lookups()
+    assert Task.async(fn -> {Process.get(:i18n_table_loaded), :persistent_term.get(:i18n_table_loaded, nil)} end) |> Task.await() == {nil, true}
+  end
 end
 "#).expect("write probe");
     mix_deps_get(&emitted);

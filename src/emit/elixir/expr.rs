@@ -134,6 +134,22 @@ thread_local! {
     static CURRENT_CLASS_NAME: RefCell<String> = const { RefCell::new(String::new()) };
 }
 
+thread_local! {
+    /// The current module's ivars a load-once method fills (`library::load_once_ivars`).
+    static PROCESS_WIDE_IVARS: RefCell<std::collections::HashSet<String>> = RefCell::new(std::collections::HashSet::new());
+}
+
+pub(super) fn set_process_wide_ivars(names: std::collections::HashSet<String>) {
+    PROCESS_WIDE_IVARS.with(|n| *n.borrow_mut() = names);
+}
+
+/// Where a module-singleton's `@ivar` lives: the request's process, or,
+/// for what a load-once method fills, every process.
+// Not the process dictionary for a load-once table: Plug serves each request in a process of its own, so each would load it again
+fn ivar_store(name: &str) -> &'static str {
+    if PROCESS_WIDE_IVARS.with(|n| n.borrow().contains(name)) { ":persistent_term" } else { "Process" }
+}
+
 /// Set the Ruby name of the class currently being emitted. Called by
 /// `emit_library_class`.
 pub(super) fn set_current_class_name(name: &str) {
@@ -616,7 +632,7 @@ fn emit_stmt(e: &Expr) -> String {
         // threaded to struct fields by the functionalize passes, so an
         // Ivar target here is always module-singleton state).
         ExprNode::Assign { target: LValue::Ivar { name }, value } => {
-            format!("Process.put({}, {})", ivar_pd_key(name.as_str()), emit_expr(value))
+            format!("{}.put({}, {})", ivar_store(name.as_str()), ivar_pd_key(name.as_str()), emit_expr(value))
         }
         ExprNode::MultiAssign { targets, value } => emit_multi_assign(targets, value),
         _ => emit_expr(e),
@@ -2422,7 +2438,7 @@ fn ivar_pd_key(name: &str) -> String {
 /// defaulting to an empty map (the hash-store shape most of these
 /// runtime modules use).
 fn ivar_pd_get(name: &str) -> String {
-    format!("Process.get({}, %{{}})", ivar_pd_key(name))
+    format!("{}.get({}, %{{}})", ivar_store(name), ivar_pd_key(name))
 }
 
 /// Type-aware variant: a SCALAR module var takes its scalar zero as
@@ -2438,7 +2454,7 @@ fn ivar_pd_get_typed(name: &str, ty: Option<&crate::ty::Ty>) -> String {
         Some(Ty::Str) => "\"\"",
         _ => "%{}",
     };
-    format!("Process.get({}, {default})", ivar_pd_key(name))
+    format!("{}.get({}, {default})", ivar_store(name), ivar_pd_key(name))
 }
 
 /// Ruby stdlib module calls → Elixir equivalents. `Base64.strict_encode64`
@@ -2471,7 +2487,8 @@ fn emit_ivar_state_send(name: &str, method: &str, args: &[Expr]) -> Option<Strin
     match (method, args.len()) {
         // `@h[k] = v` → put back the updated map.
         ("[]=", 2) => Some(format!(
-            "Process.put({key}, Map.put({get}, {}, {}))",
+            "{}.put({key}, Map.put({get}, {}, {}))",
+            ivar_store(name),
             emit_expr(&args[0]),
             emit_expr(&args[1])
         )),
