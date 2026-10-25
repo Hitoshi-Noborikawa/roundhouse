@@ -541,6 +541,17 @@ fn set_options_schedule_and_route_the_push() {
     let job = read(&run.emitted, "app/models/article_job.rb");
     assert!(job.contains("def self.perform_later_with(at, queue, article)"), "{job}");
     assert!(job.contains("JobRegistry.push_article_job(queue, at, article)"), "{job}");
+    let model = read(&run.emitted, "app/models/article.rb");
+    assert!(model.contains("Time.now.to_f + 300.0"), "{model}");
+}
+
+/// A literal Duration `wait:` folds to its seconds, so the strict
+/// targets, which have no Duration, emit the same `set(...)` sites
+/// cleanly under `:sidekiq`.
+#[test]
+fn a_literal_duration_wait_emits_on_go() {
+    let (_, errors) = on_sidekiq().edit("app/models/article.rb", ENQUEUE, SET_ENQUEUE).emit(BuildTarget::Go);
+    assert!(errors.is_empty(), "{errors:#?}");
 }
 
 const COLLIDER_JOB: &str = r##"class ColliderJob < ApplicationJob
