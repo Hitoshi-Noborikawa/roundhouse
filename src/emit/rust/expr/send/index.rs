@@ -79,12 +79,8 @@ pub(super) fn try_recv_typed_method(
             // Only fires for literal negatives — dynamic negative
             // indices would need a runtime branch, which the framework
             // patterns we ship today don't require.
-            if matches!(
-                recv_ty,
-                Some(crate::ty::Ty::Array { .. })
-                    | Some(crate::ty::Ty::Str)
-                    | Some(crate::ty::Ty::Sym)
-            ) {
+            // Not a String too: a Rust str has no integer index, and the character read below answers `s[-1]`
+            if matches!(recv_ty, Some(crate::ty::Ty::Array { .. })) {
                 if let ExprNode::Lit { value: Literal::Int { value } } = &*args[0].node {
                     if *value < 0 {
                         let recv_s = emit_expr(r);
@@ -94,12 +90,9 @@ pub(super) fn try_recv_typed_method(
                         // delivers. Callers (e.g. `Base.last`'s tail
                         // wrapped in `Some(...)`) need owned T to
                         // match the `Option<T>` return type.
-                        if matches!(recv_ty, Some(crate::ty::Ty::Array { .. })) {
-                            return Some(format!(
-                                "{recv_s}[{recv_s}.len() - {abs}_usize].clone()"
-                            ));
-                        }
-                        return Some(format!("{recv_s}[{recv_s}.len() - {abs}_usize]"));
+                        return Some(format!(
+                            "{recv_s}[{recv_s}.len() - {abs}_usize].clone()"
+                        ));
                     }
                 }
             }

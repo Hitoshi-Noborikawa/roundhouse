@@ -1124,7 +1124,14 @@ fn emit_expr_inner(e: &Expr) -> String {
                     if let (Some(crate::ty::Ty::Array { .. }), ExprNode::Lambda { params, body, .. }) = (r.ty.as_ref().map(peel_nil), &*b.node) {
                         if params.len() == 1 {
                             let p = params[0].as_str();
-                            return format!("{}.iter().find(|{p}| {{ {} }}).cloned()", emit_expr(r), emit_expr(body));
+                            let field_ty = match &*r.node {
+                                ExprNode::Ivar { name } => ivar_field_ty(name.as_str()),
+                                _ => None,
+                            };
+                            let was_option = field_ty.or_else(|| r.ty.clone()).is_some_and(|t| util::is_option_ty(&t));
+                            let iter = if was_option { ".iter().flatten()" } else { ".iter()" };
+                            // Not the closure's own `&&T`: the body reads the element as the `&T` every other block here binds
+                            return format!("{}{iter}.find(|__x| {{ let {p} = *__x; {} }}).cloned()", emit_expr(r), emit_expr(body));
                         }
                     }
                 }

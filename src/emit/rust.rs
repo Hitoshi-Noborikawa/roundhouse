@@ -1709,6 +1709,8 @@ fn render_axum_handler_wrappers(
             body.push_str("    let form = form.map(|f| f.0).unwrap_or_default();\n");
         }
         body.push_str("    crate::http::response_clear();\n");
+        // Not in the layout middleware: a task resumes on any worker after its await, so a thread-local reset there can miss the handler's thread
+        body.push_str("    crate::i18n_host::I18nHost::reset_request();\n");
         body.push_str("    crate::http::request_format_set(_fmt.0);\n");
         if has_params {
             if has_body {

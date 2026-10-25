@@ -186,7 +186,6 @@ async fn layout_wrap(req: Request, next: Next) -> Response {
     // Axum's multi-thread runtime means each worker thread has
     // its own thread-local; reset covers the current worker.
     view_helpers::reset_render_state();
-    crate::i18n_host::I18nHost::reset_request();
 
     let res = next.run(req).await;
 

@@ -410,9 +410,17 @@ fn emit_ctrl_test_expr(expr: &Expr, app: &App) -> String {
             for part in parts {
                 match part {
                     crate::expr::InterpPart::Text { value } => template.push_str(&value.replace('{', "{{").replace('}', "}}")),
+                    // Ruby's `"#{nil}"` is the empty String
+                    crate::expr::InterpPart::Expr { expr } if matches!(&*expr.node, ExprNode::Lit { value: Literal::Nil }) => {}
                     crate::expr::InterpPart::Expr { expr } => {
+                        let value = emit_ctrl_test_expr(expr, app);
+                        let nilable = matches!(expr.ty.as_ref(), Some(crate::ty::Ty::Union { variants }) if variants.iter().any(|v| matches!(v, crate::ty::Ty::Nil)));
+                        // Not formatted as is: an Option has no Display, so `{}` would not compile
+                        if nilable && !value.ends_with(".unwrap_or_default()") {
+                            return crate::emit::diagnostics::report_unsupported(expr.span, "rust", "StringInterp", "a value that may be nil, in a controller test");
+                        }
                         template.push_str("{}");
-                        values.push(emit_ctrl_test_expr(expr, app));
+                        values.push(value);
                     }
                 }
             }
