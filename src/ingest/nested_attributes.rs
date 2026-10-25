@@ -226,17 +226,27 @@ fn targets(model: &Model, names: &[Symbol], options: &Options, models: &[Model],
                         (Association::BelongsTo { name, polymorphic: true, .. }, Some(as_name)) if name == as_name => {
                             Some(name.as_str().to_string())
                         }
-                        // Rails infers this inverse only when neither declaration
-                        // writes `foreign_key:`, or when one says `inverse_of:`;
-                        // without it a child built on a new owner is validated
-                        // without its owner, so its "must exist" stands.
+                        // The owner's reflection decides, as `build` sets the
+                        // inverse from it: an `inverse_of:` name there, or
+                        // Rails' inference, which neither side's `foreign_key:`
+                        // nor `inverse_of: false` allows. The child's own
+                        // `inverse_of:` name doesn't. Without one, a child built
+                        // on a new owner is validated without its owner, so its
+                        // "must exist" stands.
                         (Association::BelongsTo { name: inverse_name, foreign_key: fk, polymorphic: false, .. }, None) if fk == foreign_key => {
                             let span_of = |m: &Model, n: &Symbol| m.spanned_associations().find(|(_, a)| a.name() == n).map(|(s, _)| s);
                             let owner_span = span_of(model, name);
                             let child_span = span_of(target_model, inverse_name);
-                            let says = |span: Option<crate::span::Span>, key: &str| span.is_some_and(|s| declared_option(sources, s, key).is_some());
-                            let inferred = !says(owner_span, "foreign_key") && !says(child_span, "foreign_key");
-                            (inferred || says(owner_span, "inverse_of") || says(child_span, "inverse_of")).then(|| inverse_name.as_str().to_string())
+                            let option = |span: Option<crate::span::Span>, key: &str| span.and_then(|s| declared_value(sources, s, key));
+                            let owner_inverse = option(owner_span, "inverse_of");
+                            let child_inverse = option(child_span, "inverse_of");
+                            let has = |span: Option<crate::span::Span>, key: &str| option(span, key).is_some();
+                            let inferred = owner_inverse.is_none()
+                                && !has(owner_span, "foreign_key")
+                                && !has(child_span, "foreign_key")
+                                && child_inverse != Some(OptionValue::Off);
+                            let named = owner_inverse == Some(OptionValue::Name(inverse_name.as_str().to_string()));
+                            (inferred || named).then(|| inverse_name.as_str().to_string())
                         }
                         _ => None,
                     })
@@ -559,6 +569,41 @@ fn declared_option(sources: &[crate::span::SourceFile], span: crate::span::Span,
                 .as_symbol_node()
                 .is_some_and(|k| k.unescaped() == key.as_bytes())
                 .then(|| assoc.value().as_true_node().is_some())
+        })
+    })
+}
+
+/// A declaration option's value, as the inverse rule reads it.
+#[derive(Debug, PartialEq)]
+enum OptionValue {
+    /// A Symbol or String literal.
+    Name(String),
+    /// `false` or `nil`.
+    Off,
+    /// Anything else.
+    Other,
+}
+
+/// The declaration at `span`'s `key:` option, `None` when it isn't given.
+fn declared_value(sources: &[crate::span::SourceFile], span: crate::span::Span, key: &str) -> Option<OptionValue> {
+    let file = (span.file.0 as usize).checked_sub(1).and_then(|i| sources.get(i))?;
+    let text = file.text.get(span.start as usize..span.end as usize)?;
+    let result = ruby_prism::parse(text.as_bytes());
+    let root = result.node();
+    let call = root.as_program_node().and_then(|p| p.statements().body().iter().next()).and_then(|n| n.as_call_node())?;
+    let args = call.arguments()?;
+    args.arguments().iter().filter_map(|a| a.as_keyword_hash_node()).find_map(|hash| {
+        hash.elements().iter().filter_map(|e| e.as_assoc_node()).find_map(|assoc| {
+            assoc.key().as_symbol_node().is_some_and(|k| k.unescaped() == key.as_bytes()).then(|| {
+                let value = assoc.value();
+                if value.as_false_node().is_some() || value.as_nil_node().is_some() {
+                    OptionValue::Off
+                } else if let Some(name) = super::util::symbol_or_string_value(&value) {
+                    OptionValue::Name(name)
+                } else {
+                    OptionValue::Other
+                }
+            })
         })
     })
 }
