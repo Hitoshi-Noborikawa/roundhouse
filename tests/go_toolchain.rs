@@ -210,3 +210,39 @@ func TestI18nLocalesProbe(t *testing.T) {
         String::from_utf8_lossy(&output.stderr)
     );
 }
+
+#[test]
+#[ignore]
+fn real_blog_flash_each_yields() {
+    // A yielding runtime method takes the block as a Go function.
+    let (emitted, errors) = emit_and_run::real_blog().emit(roundhouse::project::BuildTarget::Go);
+    assert!(errors.is_empty(), "{errors:?}");
+    std::fs::write(emitted.join("app/v2/flash_each_test.go"), r#"package v2
+
+import (
+	"reflect"
+	"testing"
+)
+
+func TestFlashEachYieldsPopulatedFields(t *testing.T) {
+	flash := NewActionDispatchFlash(map[string]string{"alert": "Oops"})
+	var got []string
+	flash.Each(func(k string, v string) { got = append(got, k+"="+v) })
+	if !reflect.DeepEqual(got, []string{"alert=Oops"}) {
+		t.Fatalf("%#v", got)
+	}
+}
+"#).expect("write test");
+    go_mod_tidy(&emitted);
+    let output = Command::new("go")
+        .args(["test", "-count=1", "-run", "TestFlashEachYieldsPopulatedFields", "./app/v2/"])
+        .current_dir(&*emitted)
+        .output()
+        .expect("run go test");
+    assert!(
+        output.status.success(),
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}

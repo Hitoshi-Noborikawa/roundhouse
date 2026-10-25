@@ -2173,6 +2173,9 @@ jobs:
       - name: cargo test --test go_toolchain real_blog_i18n_locales_run
         if: ${{ !cancelled() && matrix.target == 'go' }}
         run: cargo test --locked --test go_toolchain real_blog_i18n_locales_run -- --ignored --nocapture --exact
+      - name: cargo test --test go_toolchain real_blog_flash_each_yields
+        if: ${{ !cancelled() && matrix.target == 'go' }}
+        run: cargo test --locked --test go_toolchain real_blog_flash_each_yields -- --ignored --nocapture --exact
       - name: cargo test --test emit_and_run render json writer on go
         if: ${{ !cancelled() && matrix.target == 'go' }}
         run: cargo test --locked --test emit_and_run render_json_record_writer_runs_on_go -- --ignored --nocapture --exact

@@ -1120,8 +1120,30 @@ fn render_params(m: &MethodDef) -> String {
             let ty = sig_tys.as_ref().and_then(|tys| tys.get(i));
             format!("{} {}", sanitize(p.name.as_str()), go_ty_stub(ty))
         })
+        .chain(yield_block_param(m))
         .collect::<Vec<_>>()
         .join(", ")
+}
+
+/// A method whose body yields takes the block as a trailing `block`
+/// function, its parameter types read from the first `yield`'s values.
+pub(super) fn yield_block_param(m: &MethodDef) -> Option<String> {
+    let args = first_yield_args(&m.body)?;
+    let tys: Vec<String> = args.iter().map(|a| go_ty_stub(a.ty.as_ref())).collect();
+    Some(format!("block func({})", tys.join(", ")))
+}
+
+fn first_yield_args(e: &Expr) -> Option<&Vec<Expr>> {
+    if let crate::expr::ExprNode::Yield { args } = &*e.node {
+        return Some(args);
+    }
+    let mut found = None;
+    e.node.for_each_child(&mut |c| {
+        if found.is_none() {
+            found = first_yield_args(c);
+        }
+    });
+    found
 }
 
 /// Like `render_params`, but also folds trailing-defaulted params
@@ -1168,6 +1190,8 @@ fn render_params_with_unpack(m: &MethodDef) -> (String, String) {
             } else {
                 "interface{}".to_string()
             };
+            // Not after the variadic: Go accepts a variadic only as the last parameter
+            params_out.extend(yield_block_param(m));
             params_out.push(format!("_opts ...{go_ty}"));
             for (j, opt) in m.params[split..].iter().enumerate() {
                 if opt.name.as_str().starts_with('_') {
