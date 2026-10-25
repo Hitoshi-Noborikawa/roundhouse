@@ -22,6 +22,15 @@
 //! declaration a reported gap, as do a name that is not a plain
 //! has_many/has_one/belongs_to of this model. Other targets keep the
 //! declaration as the reported gap it was.
+//!
+//! Part 4: the generated items take the declaration's place, so the
+//! association's errors list before a later `validates`'s, and a child's
+//! error is added to the owner once however many children have it. A
+//! has_many also autosaves, as Rails' nested attributes imply: the loaded
+//! children the app changed are validated with the owner and saved after
+//! it (`autosave_source`), the reader keeping what it loads. `has_many …,
+//! autosave: true` without nested attributes gets the same
+//! (`expand_autosave`).
 
 use crate::app::App;
 use crate::dialect::{Association, Dependent, Model, ModelBodyItem};
@@ -264,6 +273,23 @@ fn copied_errors(name: &str, human: &str, skip_inverse: &str) -> String {
     )
 }
 
+/// The autosave half of a has_many (Rails' `autosave: true`, which
+/// `accepts_nested_attributes_for` implies): the loaded children the app
+/// changed are validated with the owner and saved after it. The
+/// `__autosave_<name>_save` marker makes the reader keep what it loads
+/// (`lower::model_to_library::associations`), so these are the objects
+/// the app edited. The copy reads `error_details` itself: a child read
+/// from `<name>_target` isn't one `errors.each` is lowered for.
+pub(crate) fn autosave_source(name: &str, class: &str, human: &str, skip_inverse: &str) -> String {
+    let copied = format!(
+        "      child.error_details.each do |detail|\n        attribute = detail.attribute\n{skip}        full = \"{human} \" + attribute.tr(\"_\", \" \") + \" \" + detail.message\n        next if error_details.any? {{ |seen| seen.full_message == full }}\n        errors << full\n        error_details << ActiveRecord::ErrorDetail.new(\"{name}.\" + attribute, detail.kind, detail.message, full, true, true)\n      end\n",
+        skip = skip_inverse
+    );
+    format!(
+        "  def __autosave_{name}_valid\n    return unless {name}_loaded?\n    {name}_target.each do |entry|\n      next unless entry.is_a?({class})\n      child = entry\n      next unless child.has_changes_to_save?\n      next if child.valid?\n{copied}    end\n  end\n\n  validate :__autosave_{name}_valid\n\n  def __autosave_{name}_save\n    return unless {name}_loaded?\n    {name}_target.each do |child|\n      child.save! if child.has_changes_to_save?\n    end\n  end\n\n  after_save :__autosave_{name}_save\n\n"
+    )
+}
+
 /// The model source for one association.
 ///
 /// An entry without an `id` builds a record; one with an `id` updates
@@ -346,6 +372,7 @@ fn source(target: &Target) -> String {
     let validate = format!(
         "  def __nested_{name}_valid\n    return if {ivar}.nil?\n    {ivar}.each do |entry|\n      next unless entry.is_a?({class})\n      child = entry\n      next if child.valid?\n{copied}    end\n  end\n\n  validate :__nested_{name}_valid\n\n"
     );
+    let validate = if *kind == Kind::HasMany { validate + &autosave_source(name, class, &human, &skip_inverse) } else { validate };
     let destroy_doomed = format!(
         "    unless {doomed}.nil?\n      gone = {doomed}\n      {doomed} = nil\n      gone.each {{ |record| record.destroy }}\n    end\n"
     );
@@ -447,6 +474,61 @@ pub(crate) fn expand(app: &mut App) {
             }
         }
     }
+}
+
+/// `has_many :x, autosave: true` without `accepts_nested_attributes_for`
+/// (which already generates it): the same validation and save of the
+/// loaded children the app changed, after the declaration.
+pub(crate) fn expand_autosave(app: &mut App) {
+    let sources = app.sources.clone();
+    for model in &mut app.models {
+        let body = std::mem::take(&mut model.body);
+        let defined: Vec<String> = body
+            .iter()
+            .filter_map(|item| match item {
+                ModelBodyItem::Method { method, .. } => Some(method.name.as_str().to_string()),
+                _ => None,
+            })
+            .collect();
+        for item in body {
+            let generated = match &item {
+                ModelBodyItem::Association { assoc: crate::dialect::Association::HasMany { name, target, through: None, .. }, .. }
+                    if !defined.iter().any(|d| *d == format!("__autosave_{}_save", name.as_str()))
+                        && declares_autosave(&sources, item.span()) =>
+                {
+                    let src = format!(
+                        "class {}\n{}end\n",
+                        model.name.0.as_str().replace("::", "__"),
+                        autosave_source(name.as_str(), target.0.as_str(), &humanize(name.as_str()), "")
+                    );
+                    ingest_source(&src, &model.name)
+                }
+                _ => None,
+            };
+            model.body.push(item);
+            if let Some(items) = generated {
+                model.body.extend(items);
+            }
+        }
+    }
+}
+
+/// Does the declaration at `span` pass `autosave: true`?
+fn declares_autosave(sources: &[crate::span::SourceFile], span: crate::span::Span) -> bool {
+    let Some(file) = (span.file.0 as usize).checked_sub(1).and_then(|i| sources.get(i)) else { return false };
+    let Some(text) = file.text.get(span.start as usize..span.end as usize) else { return false };
+    let result = ruby_prism::parse(text.as_bytes());
+    let root = result.node();
+    let Some(call) = root.as_program_node().and_then(|p| p.statements().body().iter().next()).and_then(|n| n.as_call_node()) else {
+        return false;
+    };
+    let Some(args) = call.arguments() else { return false };
+    args.arguments().iter().filter_map(|a| a.as_keyword_hash_node()).any(|hash| {
+        hash.elements().iter().filter_map(|e| e.as_assoc_node()).any(|assoc| {
+            assoc.key().as_symbol_node().is_some_and(|k| k.unescaped() == b"autosave")
+                && assoc.value().as_true_node().is_some()
+        })
+    })
 }
 
 /// The body items of `src`'s one class, ingested as model source under

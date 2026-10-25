@@ -61,6 +61,7 @@ pub fn analyze_and_lower_for(app: &mut App, target: crate::build_target::BuildTa
     }
     if target.lowers_nested_attributes() {
         crate::ingest::nested_attributes::expand(app);
+        crate::ingest::nested_attributes::expand_autosave(app);
     }
     let mut refused = if target.parses_numericality_input() {
         Vec::new()
