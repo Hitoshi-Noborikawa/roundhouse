@@ -10581,6 +10581,37 @@ fn on_the_index(overlay: emit_and_run::Overlay, calls: &str, assertions: &str) -
         .run_test(CONTROLLER_TEST)
 }
 
+/// A `tag.*` attribute whose value is a method call runs the call once,
+/// as Rails does: campfire's layout passes `href: fresh_account_logo_path`,
+/// which reads `Current.account` (a query) and formats a timestamp, and
+/// the emit's nil guard spelled the value twice, so each tag ran it twice.
+/// A value that answers nil still leaves the attribute out.
+#[test]
+fn a_tag_attribute_value_is_evaluated_once() {
+    let run = on_the_index(
+        emit_and_run::real_blog().write(
+            "app/helpers/application_helper.rb",
+            "module ApplicationHelper\n  \
+               CALLS = []\n\n  \
+               def counted_logo_path\n    \
+                 CALLS << 1\n    \
+                 \"/logo.png?v=1\"\n  \
+               end\n\n  \
+               def missing_logo_path\n    \
+                 CALLS << 1\n    \
+                 nil\n  \
+               end\n\
+             end\n",
+        ),
+        "<i id=\"once\"><%= tag.link rel: \"icon\", href: counted_logo_path %></i>\n\
+         <i id=\"nil\"><%= tag.link rel: \"apple-touch-icon\", href: missing_logo_path %></i>\n",
+        "    assert_match(/<i id=\"once\"><link rel=\"icon\" href=\"\\/logo.png\\?v=1\"><\\/i>/, response.body)\n    \
+             assert_match(/<i id=\"nil\"><link rel=\"apple-touch-icon\"><\\/i>/, response.body)\n    \
+             assert_equal 2, ApplicationHelper::CALLS.length\n",
+    );
+    run.assert_passes();
+}
+
 /// B1 in NEXUS_BUGS.md: a helper keyword named `class`, read with the
 /// `class:` shorthand, emitted a bare `class` and compared it with the
 /// String `"nil"`. Rails leaves the attribute out for `class: nil`.

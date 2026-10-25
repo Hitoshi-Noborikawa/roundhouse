@@ -183,6 +183,16 @@ module ActionView
       html_escape(value.to_s)
     end
 
+    # One attribute of a `tag.*` / `content_tag` call whose value is known
+    # only at run time, as Rails' `tag_options` renders it: ` key="value"`,
+    # escaped, or nothing at all when the value is nil. A call, so the
+    # value expression runs once (`lower::view_to_library::attr_parts`,
+    # `push_escaped_attr`); an inline `nil?` guard ran it twice. Same
+    # shape as `to_query_value`, which the strict targets already compile.
+    def self.tag_attr(key, value)
+      value.nil? ? "" : " #{key}=\"#{html_escape(value.to_s)}\""
+    end
+
     # Percent-encoding for a QUERY-STRING VALUE — what Rails' `url_for`
     # applies to the options it turns into a query (`?v=…&size=…`), and
     # what the generated `direct` URL helpers call.
