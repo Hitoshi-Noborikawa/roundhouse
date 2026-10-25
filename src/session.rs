@@ -63,14 +63,15 @@ pub fn analyze_and_lower_for(app: &mut App, target: crate::build_target::BuildTa
         crate::ingest::nested_attributes::expand(app);
         crate::ingest::nested_attributes::expand_autosave(app);
     }
-    if target.lowers_validates_with() {
+    let mut refused = if target.lowers_validates_with() {
         crate::ingest::validates_with::expand(app);
-    }
-    let mut refused = if target.parses_numericality_input() {
-        Vec::new()
+        crate::ingest::each_validator::expand(app, target.as_str())
     } else {
-        crate::ingest::app::refuse_numericality_allow_on_untyped(app, target.as_str())
+        crate::ingest::each_validator::refuse(app, target.as_str())
     };
+    if !target.parses_numericality_input() {
+        refused.extend(crate::ingest::app::refuse_numericality_allow_on_untyped(app, target.as_str()));
+    }
     refused.extend(analyze_and_lower(app));
     refused
 }

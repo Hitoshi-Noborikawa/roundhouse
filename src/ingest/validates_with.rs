@@ -115,7 +115,7 @@ fn generated_source(call_text: &str, name: &str) -> Option<String> {
 /// The body items of `src`'s one class, ingested as model source under
 /// its own isolated scope (as `delegate` forwarders are). None when it
 /// doesn't ingest cleanly, or `validate` doesn't take its conditions.
-fn ingest_source(src: &str, owner: &crate::ident::ClassId) -> Option<Vec<ModelBodyItem>> {
+pub(super) fn ingest_source(src: &str, owner: &crate::ident::ClassId) -> Option<Vec<ModelBodyItem>> {
     let (items, diags) = crate::ingest::prism::scope(|| -> Option<Vec<ModelBodyItem>> {
         let result = crate::ingest::prism::parse(src.as_bytes(), "<validates_with>");
         let root = result.node();

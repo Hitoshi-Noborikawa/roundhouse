@@ -19,4 +19,28 @@ module ActiveModel
       nil
     end
   end
+
+  # `ActiveModel::EachValidator`, the base of a `validates :attr, foo: …`
+  # class (`FooValidator`): built with the attributes and the key's
+  # options, then `validate_each(record, attribute, value)` per attribute.
+  # The ruby family's expansion (`ingest::each_validator`) reads each
+  # attribute and calls it from the model's validation, skipping nil or
+  # blank values under the call's `allow_nil:` / `allow_blank:`.
+  class EachValidator < Validator
+    # Sets `@options` itself, as `Validator#initialize` does, rather than
+    # through `super`, whose call isn't typed.
+    def initialize(options = {})
+      @attributes = options.fetch(:attributes, [])
+      @options = options.reject { |key| key == :attributes }
+    end
+
+    def attributes
+      @attributes
+    end
+
+    # A subclass defines it; the base adds nothing.
+    def validate_each(record, attribute, value)
+      nil
+    end
+  end
 end

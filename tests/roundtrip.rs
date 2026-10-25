@@ -214,6 +214,7 @@ fn tiny_blog_round_trips() {
         sources: vec![],
         wrap_parameters_by_default: false,
         ports_active_model_validator: false,
+        each_validator_calls: Vec::new(),
         // Derived from `sources` and `serde(skip)`, like `binary_assets`.
         const_resolver: Default::default(),
         source_index_required: false,

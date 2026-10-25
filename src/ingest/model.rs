@@ -553,6 +553,16 @@ pub(super) fn ingest_model_body_items(
                     ParsedValidates::Modeled(parsed) if !parsed.is_empty() => {
                         return Ok(validation_items(parsed, leading_comments, span));
                     }
+                    // The lowered rules, and the call itself for its custom
+                    // keys (`ingest::each_validator` lowers or reports them).
+                    ParsedValidates::Custom(parsed, keys) => {
+                        let mut items = validation_items(parsed, leading_comments, span);
+                        let expr = ingest_expr(stmt, file)?;
+                        let text = String::from_utf8_lossy(call.location().as_slice()).into_owned();
+                        super::each_validator::note(expr.span, text, keys);
+                        items.push(ModelBodyItem::Unknown { expr, leading_comments: Vec::new(), leading_blank_line: false });
+                        return Ok(items);
+                    }
                     ParsedValidates::Decline | ParsedValidates::Modeled(_) => {}
                 }
             }

@@ -20,6 +20,7 @@ use crate::dialect::{
 };
 use crate::expr::Expr;
 use crate::ident::{ClassId, Symbol};
+use crate::span::Span;
 use crate::schema::Schema;
 use crate::ty::Ty;
 
@@ -61,6 +62,17 @@ pub struct ConcernGuardedItem {
 
 /// The top-level IR: a Rails application as data. This is the serializable
 /// deliverable — the thing ingesters produce and emitters consume.
+
+/// A `validates` call kept for its custom keys (`ingest::each_validator`):
+/// the model, the call's span and source text, and each key with the app
+/// `EachValidator` class it names.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct EachValidatorCall {
+    pub model: ClassId,
+    pub span: Span,
+    pub text: String,
+    pub keys: Vec<(String, String)>,
+}
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct App {
@@ -617,6 +629,11 @@ pub struct App {
     /// an unported Rails subclass. Set by `session::analyze_and_lower_for`.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub ports_active_model_validator: bool,
+    /// The `validates` calls whose custom keys each name an app
+    /// `EachValidator` (`ingest::each_validator`), which each target
+    /// expands or reports.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub each_validator_calls: Vec<EachValidatorCall>,
     /// Rubydex answers for `sources`, resolved while ingest finished.
     /// The analyzer resolves the sources itself when this is absent.
     #[serde(skip)]
@@ -1109,6 +1126,7 @@ impl App {
             sources: Vec::new(),
             wrap_parameters_by_default: false,
             ports_active_model_validator: false,
+            each_validator_calls: Vec::new(),
             const_resolver: Default::default(),
             source_index_required: false,
             root: String::new(),

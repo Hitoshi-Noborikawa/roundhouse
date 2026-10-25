@@ -61,6 +61,12 @@ pub(super) enum ParsedValidates {
     /// Not a shape this parser claims (`validates` with a block). The
     /// call stays on the unsupported-DSL ledger.
     Decline,
+    /// Every option is lowered but some keys that name no built-in
+    /// validator (`domain: true` for an app's `DomainValidator`): the rules
+    /// that are, and those keys. Which keys name an app validator is known
+    /// only once the whole app is ingested (`ingest::each_validator`), which
+    /// lowers them or reports the call.
+    Custom(Vec<crate::dialect::Validation>, Vec<String>),
 }
 
 struct BuiltRule {
@@ -143,6 +149,8 @@ pub(super) fn parse_validates_call(
     let mut attrs: Vec<Symbol> = Vec::new();
     let mut option_node: Option<Node<'_>> = None;
     let mut gaps: Vec<String> = Vec::new();
+    // Keys naming no built-in validator: an app's `EachValidator`, maybe.
+    let mut custom: Vec<String> = Vec::new();
     for arg in args.arguments().iter() {
         if let Some(name) = super::super::util::symbol_or_string_value(&arg) {
             attrs.push(Symbol::from(name.as_str()));
@@ -213,6 +221,9 @@ pub(super) fn parse_validates_call(
                         other => match parse_validator(other, &value, file, class_consts) {
                             RuleParse::Skip => {}
                             RuleParse::Rule(built) => drafts.push(built),
+                            RuleParse::Gap(more) if !BUILT_IN_VALIDATORS.contains(&other) && more == [other] => {
+                                custom.push(other.to_string())
+                            }
                             RuleParse::Gap(more) => gaps.extend(more),
                         },
                     }
@@ -292,6 +303,8 @@ pub(super) fn parse_validates_call(
     }
 
     if !gaps.is_empty() {
+        // Another gap drops the call; its custom keys are reported with it.
+        gaps.extend(custom);
         gaps.sort();
         gaps.dedup();
         record_validation_gaps(file, span, method, &attrs, &gaps);
@@ -395,8 +408,17 @@ pub(super) fn parse_validates_call(
             out.push(validation);
         }
     }
-    ParsedValidates::Modeled(out)
+    if custom.is_empty() {
+        ParsedValidates::Modeled(out)
+    } else {
+        ParsedValidates::Custom(out, custom)
+    }
 }
+
+/// The validators Rails defines for a `validates` key, whether or not
+/// this parser lowers them: never an app's `EachValidator`.
+const BUILT_IN_VALIDATORS: &[&str] =
+    &["presence", "absence", "acceptance", "length", "numericality", "inclusion", "exclusion", "uniqueness", "format", "comparison", "confirmation", "associated"];
 
 /// `message: "…"` in a validator's own hash: Rails' text in place of the
 /// default (after a model-specific translation, which the message lookup
