@@ -12297,6 +12297,14 @@ end
 
   def self.nil_foreign_key
     nullable_name(false).foreign_key
+  end
+
+  def self.nil_camelcase
+    nullable_path(false).camelcase
+  end
+
+  def self.nil_titlecase
+    nullable_path(false).titlecase
   end"#,
         )
 }
@@ -12328,6 +12336,8 @@ class WidgetsControllerTest < ActionDispatch::IntegrationTest
     assert_equal "undefined method 'dasherize' for nil", assert_raises(NoMethodError) {{ Article.nil_dasherize }}.message
     assert_equal "undefined method 'deconstantize' for nil", assert_raises(NoMethodError) {{ Article.nil_deconstantize }}.message
     assert_equal "undefined method 'foreign_key' for nil", assert_raises(NoMethodError) {{ Article.nil_foreign_key }}.message
+    assert_equal "undefined method 'camelcase' for nil", assert_raises(NoMethodError) {{ Article.nil_camelcase }}.message
+    assert_equal "undefined method 'titlecase' for nil", assert_raises(NoMethodError) {{ Article.nil_titlecase }}.message
   end
 end
 "#
@@ -12355,6 +12365,8 @@ raise "nil classify" unless nil_message {{ Article.nil_classify }} == "undefined
 raise "nil dasherize" unless nil_message {{ Article.nil_dasherize }} == "undefined method 'dasherize' for nil"
 raise "nil deconstantize" unless nil_message {{ Article.nil_deconstantize }} == "undefined method 'deconstantize' for nil"
 raise "nil foreign_key" unless nil_message {{ Article.nil_foreign_key }} == "undefined method 'foreign_key' for nil"
+raise "nil camelcase" unless nil_message {{ Article.nil_camelcase }} == "undefined method 'camelcase' for nil"
+raise "nil titlecase" unless nil_message {{ Article.nil_titlecase }} == "undefined method 'titlecase' for nil"
 puts "string inflections passed"
 "#
     ));

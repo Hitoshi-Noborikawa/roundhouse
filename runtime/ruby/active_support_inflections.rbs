@@ -10,6 +10,8 @@ module ActiveSupport
   def self.titleize: (String? text) -> String
   # String methods over the Inflector bodies; nil raises as in Rails.
   def self.camelize: (String? text) -> String
+  def self.camelcase: (String? text) -> String
+  def self.titlecase: (String? text) -> String
   def self.classify: (String? text) -> String
   def self.dasherize: (String? text) -> String
   def self.deconstantize: (String? text) -> String

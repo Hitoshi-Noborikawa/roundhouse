@@ -116,13 +116,14 @@ const STRING_CORE_EXT: &[StringCoreExt] = &[
         site: Site::Fused,
         stamp_string: true,
     },
-    // Rails' alias of `titleize`; the runtime raises on nil as Rails does.
+    // Rails' alias of `titleize`, its own runtime method so a nil
+    // receiver's error names `titlecase`, as Rails' does.
     StringCoreExt {
         name: "titlecase",
         receiver: ReceiverShape::StringOrNil,
         arity: 0,
         runtime_receiver: &["ActiveSupport"],
-        runtime_name: "titleize",
+        runtime_name: "titlecase",
         site: Site::Fused,
         stamp_string: true,
     },
@@ -137,13 +138,14 @@ const STRING_CORE_EXT: &[StringCoreExt] = &[
         site: Site::Fused,
         stamp_string: true,
     },
-    // Rails' alias of `camelize`.
+    // Rails' alias of `camelize`, its own runtime method for the same
+    // reason as `titlecase`.
     StringCoreExt {
         name: "camelcase",
         receiver: ReceiverShape::StringOrNil,
         arity: 0,
         runtime_receiver: &["ActiveSupport"],
-        runtime_name: "camelize",
+        runtime_name: "camelcase",
         site: Site::Fused,
         stamp_string: true,
     },
@@ -460,7 +462,7 @@ mod tests {
             Some(&["ActiveSupport".to_string(), "Inflector".to_string()][..])
         );
 
-        // An alias grounds on the method it aliases.
+        // An alias keeps its own name, so the runtime's nil error can name it.
         let mut camelcase = call(Some(Ty::Str), "camelcase", 0);
         assert!(rewrite_node(&mut camelcase, Site::Fused));
         assert_eq!(
@@ -468,12 +470,12 @@ mod tests {
             Some(&["ActiveSupport".to_string()][..])
         );
         assert!(
-            matches!(&*camelcase.node, ExprNode::Send { method, .. } if method.as_str() == "camelize")
+            matches!(&*camelcase.node, ExprNode::Send { method, .. } if method.as_str() == "camelcase")
         );
         let mut titlecase = call(Some(Ty::Str), "titlecase", 0);
         assert!(rewrite_node(&mut titlecase, Site::Fused));
         assert!(
-            matches!(&*titlecase.node, ExprNode::Send { method, .. } if method.as_str() == "titleize")
+            matches!(&*titlecase.node, ExprNode::Send { method, .. } if method.as_str() == "titlecase")
         );
         assert_eq!(
             const_path(&titlecase).as_deref(),

@@ -82,11 +82,21 @@ module ActiveSupport
   end
 
   # The String methods over the Inflector bodies below. A nil receiver
-  # raises, as Rails' String methods do; the Inflector bodies read
-  # `to_s` and answer "" for nil, as `ActiveSupport::Inflector`'s do.
+  # raises, as Rails' String methods do, naming the method the caller
+  # wrote (an alias included); otherwise the Inflector body answers.
   def self.camelize(text)
     raise NoMethodError, "undefined method 'camelize' for nil" if text.nil?
     ActiveSupport::Inflector.camelize(text.to_s)
+  end
+
+  def self.camelcase(text)
+    raise NoMethodError, "undefined method 'camelcase' for nil" if text.nil?
+    ActiveSupport::Inflector.camelize(text.to_s)
+  end
+
+  def self.titlecase(text)
+    raise NoMethodError, "undefined method 'titlecase' for nil" if text.nil?
+    titleize(text)
   end
 
   def self.classify(text)
