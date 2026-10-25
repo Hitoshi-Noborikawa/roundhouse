@@ -32,10 +32,12 @@ use crate::ingest::prism_api::PrismLocation;
 pub(crate) fn expand(app: &mut App) {
     app.ports_active_model_validator = true;
     let sources = app.sources.clone();
+    // One count for the app, not per model: a parent model's method must
+    // not share a name with its subclass's, which would override it, and
+    // owners can underscore alike (`Foo_Bar`, `Foo::Bar`). The owner in
+    // the name is only for reading.
+    let mut counter = 0usize;
     for model in &mut app.models {
-        let mut counter = 0usize;
-        // A parent model and its subclass each count from 1; the model's
-        // name keeps the parent's method from being the child's override.
         let owner = crate::naming::underscore_words(model.name.0.as_str());
         let mut body = Vec::with_capacity(model.body.len());
         for item in std::mem::take(&mut model.body) {

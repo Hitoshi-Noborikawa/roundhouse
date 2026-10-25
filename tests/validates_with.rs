@@ -111,3 +111,40 @@ fn a_parents_validates_with_keeps_its_own_name_on_ruby() {
     run.assert_passes();
     assert!(run.stdout.contains("inherited validates_with passed"), "{}", run.stdout);
 }
+
+
+// Owners whose names underscore alike (`Foo_Bar` and `Foo::Bar`, both
+// `foo_bar`) still get distinct methods: the number is the app's.
+// (`FooBar` and `Foo_Bar` would too, but both emit to `foo_bar.rb`.)
+const SPELLING_SCRIPT: &str = r##"
+def check(label, got, want)
+  raise "#{label}: #{got.inspect} (want #{want.inspect})" unless got == want
+end
+a = Foo::Bar.new
+Foo_Bar.instance_method(:validate).bind(a).call
+check("the parent's validate runs the parent's validator", [a.errors.include?("Title is missing"), a.errors.include?("Body is missing")], [true, false])
+b = Foo::Bar.new
+Foo::Bar.instance_method(:validate).bind(b).call
+check("the child's validate runs the child's validator", b.errors.include?("Body is missing"), true)
+puts "underscored owners passed"
+"##;
+
+#[test]
+fn owners_that_underscore_alike_keep_distinct_methods_on_ruby() {
+    let run = emit_and_run::real_blog()
+        .edit(
+            "db/schema.rb",
+            "  create_table \"comments\", force: :cascade do |t|\n",
+            "  create_table \"bars\", force: :cascade do |t|\n    t.string \"title\"\n    t.text \"body\"\n  end\n\n  create_table \"comments\", force: :cascade do |t|\n",
+        )
+        .write(
+            "app/models/foo_bar.rb",
+            "class Foo_Bar < ApplicationRecord\n  self.abstract_class = true\n  validates_with TitleValidator\nend\n",
+        )
+        .write("app/models/foo/bar.rb", "module Foo\n  class Bar < Foo_Bar\n    validates_with BodyValidator\n  end\nend\n")
+        .write("app/validators/title_validator.rb", TITLE)
+        .write("app/validators/body_validator.rb", BODY)
+        .run_ruby(SPELLING_SCRIPT);
+    run.assert_passes();
+    assert!(run.stdout.contains("underscored owners passed"), "{}", run.stdout);
+}
