@@ -197,3 +197,38 @@ final class I18nProbeTests: XCTestCase {
         String::from_utf8_lossy(&output.stderr)
     );
 }
+
+#[test]
+#[ignore]
+fn real_blog_rescue_modifier_runs() {
+    // A raise that throws is what `expr rescue fallback` catches.
+    let (emitted, errors) = emit_and_run::real_blog()
+        .edit(
+            "app/models/article.rb",
+            "  validates :title, presence: true\n",
+            "  validates :title, presence: true\n\n  def self.checked(s)\n    raise ArgumentError, \"empty\" if s.to_s.empty?\n    s.to_s\n  end\n\n  def self.safe(s)\n    checked(s) rescue \"none\"\n  end\n",
+        )
+        .emit(roundhouse::project::BuildTarget::Swift);
+    assert!(errors.is_empty(), "{errors:?}");
+    std::fs::write(emitted.join("Tests/AppTests/RescueModifierTests.swift"), r#"import XCTest
+@testable import App
+
+final class RescueModifierTests: XCTestCase {
+    func testTheFallbackAnswersARaise() throws {
+        XCTAssertEqual(Article.safe("a") as? String, "a")
+        XCTAssertEqual(Article.safe("") as? String, "none")
+    }
+}
+"#).expect("write test");
+    let output = Command::new("swift")
+        .args(["test", "--filter", "RescueModifierTests"])
+        .current_dir(&emitted)
+        .output()
+        .expect("run swift test");
+    assert!(
+        output.status.success(),
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}

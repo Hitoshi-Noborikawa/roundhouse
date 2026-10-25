@@ -1457,13 +1457,21 @@ fn emit_node(n: &ExprNode, e: &Expr) -> String {
             }
         }
         ExprNode::Break { .. } => "break".to_string(),
-        // No throwing yet (Phase 3 `throws` pass), so the rescue-modifier
-        // fallback shape degrades to just the expression — visible TODO.
-        ExprNode::RescueModifier { expr, fallback } => format!(
-            "{} /* TODO rescue-modifier fallback: {} */",
-            emit_expr(expr),
-            emit_expr(fallback)
-        ),
+        // Not reported when it throws: a Swift error is what `try?` catches, as Ruby's modifier catches a StandardError
+        ExprNode::RescueModifier { expr, fallback } if body_throws(expr, &current_class()) => {
+            let e_s = emit_expr(expr);
+            let e_s = e_s.strip_prefix("try ").unwrap_or(&e_s);
+            if matches!(&*fallback.node, ExprNode::Lit { value: Literal::Nil }) {
+                format!("(try? {e_s})")
+            } else {
+                format!("((try? {e_s}) ?? {})", emit_expr(fallback))
+            }
+        }
+        // Not the bare expression: what it raises is a fatalError, which no Swift catch reaches
+        ExprNode::RescueModifier { .. } => {
+            let stub = crate::emit::diagnostics::report_unsupported(e.span, "swift", "RescueModifier", "an expression whose raise traps rather than throws");
+            if IN_TEST_CLASS.with(|f| *f.borrow()) { stub.replacen("fatalError(", "throw XCTSkip(", 1) } else { stub }
+        }
         ExprNode::Yield { args } => format!("block({})", args.iter().map(emit_expr).collect::<Vec<_>>().join(", ")),
         // Not `rescue` too: a Swift raise is a fatalError or a typed throw, which a Ruby rescue clause does not map onto
         ExprNode::BeginRescue { body, rescues, else_branch: None, ensure: None, .. } if rescues.is_empty() => emit_expr(body),
