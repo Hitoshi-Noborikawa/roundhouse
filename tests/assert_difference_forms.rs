@@ -40,6 +40,23 @@ const TEST: &str = r#"
     end
   end
 
+  test "nested assertions keep their own counts" do
+    attrs = { title: "Forms", body: "A sufficiently long body for validation." }
+    a = Article.create!(**attrs)
+    doomed = Article.create!(**attrs)
+    assert_difference -> { Article.count }, -1 do
+      assert_difference -> { Comment.count }, +1 do
+        Comment.create!(article_id: a.id, commenter: "c", body: "b")
+        doomed.destroy
+      end
+    end
+    assert_difference("Article.count") do
+      assert_no_difference("Comment.count") do
+        Article.create!(**attrs)
+      end
+    end
+  end
+
   test "difference forms fail per expression" do
     attrs = { title: "Forms", body: "A sufficiently long body for validation." }
     assert_raises(RuntimeError) do

@@ -652,8 +652,29 @@ fn lower_difference(
         _ => return None,
     };
 
+    // A nested assertion (`assert_difference … do assert_difference …
+    // do … end end`) is lowered first, inside this block: its `__diff_*`
+    // locals are already there, so this one takes a fresh prefix rather
+    // than overwrite them. An unnested one keeps `__diff_`.
+    let mut taken: Vec<String> = Vec::new();
+    fn diff_locals(e: &Expr, out: &mut Vec<String>) {
+        match &*e.node {
+            ExprNode::Var { name, .. } | ExprNode::Assign { target: LValue::Var { name, .. }, .. }
+                if name.as_str().starts_with("__diff") =>
+            {
+                out.push(name.as_str().to_string())
+            }
+            _ => {}
+        }
+        e.node.for_each_child(&mut |c| diff_locals(c, out));
+    }
+    diff_locals(&block_body, &mut taken);
+    let prefix = (1..)
+        .map(|n: usize| if n == 1 { "__diff".to_string() } else { format!("__diff{n}") })
+        .find(|p| !taken.iter().any(|t| t.starts_with(&format!("{p}_"))))
+        .unwrap();
     let name = |kind: &str, i: usize| {
-        if probes.len() == 1 { Symbol::from(format!("__diff_{kind}")) } else { Symbol::from(format!("__diff_{kind}_{i}")) }
+        if probes.len() == 1 { Symbol::from(format!("{prefix}_{kind}")) } else { Symbol::from(format!("{prefix}_{kind}_{i}")) }
     };
     let var = |n: Symbol| Expr::new(span, ExprNode::Var { id: VarId(0), name: n });
     let assign = |n: Symbol, value: Expr| {
