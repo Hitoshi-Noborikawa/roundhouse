@@ -16,9 +16,10 @@
 //! On the ruby family the declaration becomes ordinary model source,
 //! ingested like the app's own: the writer, a `validate` method and save
 //! callbacks per association. An updated record's columns are assigned
-//! through `[]=`; a non-column key is not routed to a writer. Options other
-//! than `allow_destroy:` (`reject_if:`, `limit:`, `update_only:`) keep the
-//! whole declaration a reported gap, as do a name that is not a plain
+//! through `[]=`; a non-column key is not routed to a writer. `reject_if:`
+//! (`:all_blank`, a method name or a one-parameter lambda) skips an entry,
+//! #1335 part 3. Other options (`limit:`, `update_only:`) keep the whole
+//! declaration a reported gap, as do a name that is not a plain
 //! has_many/has_one/belongs_to of this model. Other targets keep the
 //! declaration as the reported gap it was.
 
@@ -27,15 +28,37 @@ use crate::dialect::{Association, Dependent, Model, ModelBodyItem};
 use crate::expr::{Expr, ExprNode, Literal};
 use crate::ident::Symbol;
 
+/// What a declaration's options ask for.
+#[derive(Clone, Default)]
+struct Options {
+    allow_destroy: bool,
+    reject_if: Option<RejectIf>,
+}
+
+/// `reject_if:` (Rails 8.1.4): `:all_blank` skips an entry whose values,
+/// `_destroy` aside, are all blank; a Symbol names a method of the model
+/// called with the entry; a lambda is called with it. The entry they see
+/// is indifferent (`attributes['text']` and `attributes[:text]` both
+/// read). An entry marked for destruction is never rejected.
+#[derive(Clone)]
+enum RejectIf {
+    AllBlank,
+    Method(String),
+    /// The lambda's parameter and body. Rails calls it with the class as
+    /// `self`, so a body that calls a method without a receiver or reads
+    /// `self` is not taken (`reads_implicit_self`).
+    Lambda(Symbol, Expr),
+}
+
 /// The associations one declaration names, when every one of them and
 /// every option is reproduced.
-fn declaration(expr: &Expr) -> Option<(Vec<Symbol>, bool)> {
+fn declaration(expr: &Expr) -> Option<(Vec<Symbol>, Options)> {
     let ExprNode::Send { recv: None, method, args, block: None, .. } = &*expr.node else { return None };
     if method.as_str() != "accepts_nested_attributes_for" {
         return None;
     }
     let mut names = Vec::new();
-    let mut allow_destroy = false;
+    let mut options = Options::default();
     for arg in args {
         match &*arg.node {
             ExprNode::Lit { value: Literal::Sym { value } } => names.push(value.clone()),
@@ -43,7 +66,19 @@ fn declaration(expr: &Expr) -> Option<(Vec<Symbol>, bool)> {
                 for (key, value) in entries {
                     let ExprNode::Lit { value: Literal::Sym { value: key } } = &*key.node else { return None };
                     match (key.as_str(), &*value.node) {
-                        ("allow_destroy", ExprNode::Lit { value: Literal::Bool { value } }) => allow_destroy = *value,
+                        ("allow_destroy", ExprNode::Lit { value: Literal::Bool { value } }) => options.allow_destroy = *value,
+                        ("reject_if", ExprNode::Lit { value: Literal::Sym { value } }) => {
+                            options.reject_if = Some(if value.as_str() == "all_blank" {
+                                RejectIf::AllBlank
+                            } else {
+                                RejectIf::Method(value.as_str().to_string())
+                            });
+                        }
+                        ("reject_if", ExprNode::Lambda { params, rest_param: None, extra_params, block_param: None, body, .. })
+                            if params.len() == 1 && extra_params.is_empty() && !reads_implicit_self(body) =>
+                        {
+                            options.reject_if = Some(RejectIf::Lambda(params[0].clone(), body.clone()));
+                        }
                         _ => return None,
                     }
                 }
@@ -51,7 +86,33 @@ fn declaration(expr: &Expr) -> Option<(Vec<Symbol>, bool)> {
             _ => return None,
         }
     }
-    (!names.is_empty()).then_some((names, allow_destroy))
+    (!names.is_empty()).then_some((names, options))
+}
+
+/// Whether `e` calls a method without a receiver or reads `self`.
+fn reads_implicit_self(e: &Expr) -> bool {
+    if matches!(&*e.node, ExprNode::SelfRef | ExprNode::Send { recv: None, .. }) {
+        return true;
+    }
+    let mut found = false;
+    e.node.for_each_child(&mut |c| found = found || reads_implicit_self(c));
+    found
+}
+
+/// The lambda's body with its parameter renamed to the generated
+/// method's own (`attributes`).
+fn renamed(body: &Expr, from: &Symbol, to: &Symbol) -> Expr {
+    let mut body = body.clone();
+    fn walk(e: &mut Expr, from: &Symbol, to: &Symbol) {
+        if let ExprNode::Var { name, .. } = &mut *e.node
+            && name == from
+        {
+            *name = to.clone();
+        }
+        e.node.for_each_child_mut(&mut |c| walk(c, from, to));
+    }
+    walk(&mut body, from, to);
+    body
 }
 
 fn is_declaration(item: &ModelBodyItem) -> bool {
@@ -70,6 +131,7 @@ struct Target {
     inverse: Option<String>,
     /// `allow_destroy: true`: a truthy `_destroy` marks the record.
     allow_destroy: bool,
+    reject_if: Option<RejectIf>,
     /// The declaring model, for `RecordNotFound`'s message.
     owner: String,
     /// `as:`: the target's `<as>_type` column and the value Rails writes
@@ -99,7 +161,7 @@ enum Kind {
     BelongsTo,
 }
 
-fn targets(model: &Model, names: &[Symbol], allow_destroy: bool, models: &[Model]) -> Option<Vec<Target>> {
+fn targets(model: &Model, names: &[Symbol], options: &Options, models: &[Model]) -> Option<Vec<Target>> {
     names
         .iter()
         .map(|name| {
@@ -159,7 +221,8 @@ fn targets(model: &Model, names: &[Symbol], allow_destroy: bool, models: &[Model
                 foreign_key: foreign_key.as_str().to_string(),
                 kind,
                 inverse,
-                allow_destroy,
+                allow_destroy: options.allow_destroy,
+                reject_if: options.reject_if.clone(),
                 owner: model.name.0.as_str().to_string(),
                 polymorphic_type,
                 replace,
@@ -192,7 +255,7 @@ fn humanize(name: &str) -> String {
 /// has_many/has_one ones after it, with their foreign key, belongs_to
 /// ones before it, the parent carrying the id.
 fn source(target: &Target) -> String {
-    let Target { name, class, foreign_key, kind, inverse, allow_destroy, owner, polymorphic_type, replace } = target;
+    let Target { name, class, foreign_key, kind, inverse, allow_destroy, owner, reject_if, polymorphic_type, replace } = target;
     let ivar = format!("@__nested_{name}");
     let doomed = format!("@__nested_{name}_destroy");
     let replaced = format!("@__nested_{name}_replaced");
@@ -206,8 +269,24 @@ fn source(target: &Target) -> String {
     let not_found = format!(
         "raise ActiveRecord::RecordNotFound, \"Couldn't find {class} with ID=#{{id}} for {owner} with ID=#{{self.id}}\""
     );
+    // Rejection reads the whole entry, `id` included, before it is split;
+    // a marked entry is never rejected.
+    let indifferent = "seen = {}\n      attrs.each { |key, value| seen[key.to_s] = value; seen[key] = value }\n      ";
+    let rejected = match reject_if {
+        None => String::new(),
+        Some(RejectIf::AllBlank) => "rejected = !destroy && attrs.all? { |key, value| key == :_destroy || value.nil? || value == false || value.to_s.strip.empty? }\n      ".to_string(),
+        Some(RejectIf::Method(method)) => format!("{indifferent}rejected = !destroy && {method}(seen)\n      "),
+        Some(RejectIf::Lambda(..)) => format!("{indifferent}rejected = !destroy && __nested_{name}_reject(seen)\n      "),
+    };
+    let skip = if reject_if.is_none() {
+        String::new()
+    } else if *kind == Kind::HasMany {
+        "next if rejected\n      ".to_string()
+    } else {
+        "return if rejected\n    ".to_string()
+    };
     let decode = format!(
-        "attrs = {{}}\n      entry.each {{ |key, value| attrs[key.to_sym] = value }}\n      destroy = {destroy}\n      attrs.delete(:_destroy)\n      id = attrs.delete(:id)\n"
+        "attrs = {{}}\n      entry.each {{ |key, value| attrs[key.to_sym] = value }}\n      destroy = {destroy}\n      {rejected}{skip}attrs.delete(:_destroy)\n      id = attrs.delete(:id)\n"
     );
     let writer = if *kind == Kind::HasMany {
         format!(
@@ -283,7 +362,14 @@ fn source(target: &Target) -> String {
     } else {
         save.replacen(&format!("  def __nested_{name}_save\n"), &format!("  def __nested_{name}_save\n    {built} = nil\n"), 1)
     };
-    writer + &validate + &save
+    // The lambda's body replaces this placeholder's once ingested
+    // (`expand`).
+    let reject_method = if matches!(reject_if, Some(RejectIf::Lambda(..))) {
+        format!("  def __nested_{name}_reject(attributes)\n    false\n  end\n\n")
+    } else {
+        String::new()
+    };
+    writer + &reject_method + &validate + &save
 }
 
 /// Expand every reproducible declaration into model source, in place.
@@ -297,14 +383,25 @@ pub(crate) fn expand(app: &mut App) {
         let mut expanded = Vec::new();
         for (index, item) in model.body.iter().enumerate() {
             let ModelBodyItem::Unknown { expr, .. } = item else { continue };
-            let Some((names, allow_destroy)) = declaration(expr) else { continue };
-            let Some(targets) = targets(model, &names, allow_destroy, &snapshot) else { continue };
+            let Some((names, options)) = declaration(expr) else { continue };
+            let Some(targets) = targets(model, &names, &options, &snapshot) else { continue };
             let src = format!(
                 "class {}\n{}end\n",
                 model.name.0.as_str().replace("::", "__"),
                 targets.iter().map(source).collect::<String>()
             );
-            let Some(items) = ingest_source(&src, &model.name) else { continue };
+            let Some(mut items) = ingest_source(&src, &model.name) else { continue };
+            for target in &targets {
+                let Some(RejectIf::Lambda(param, body)) = &target.reject_if else { continue };
+                let method_name = format!("__nested_{}_reject", target.name);
+                for item in &mut items {
+                    if let ModelBodyItem::Method { method, .. } = item
+                        && method.name.as_str() == method_name
+                    {
+                        method.body = renamed(body, param, &Symbol::from("attributes"));
+                    }
+                }
+            }
             generated.extend(items);
             expanded.push(index);
         }
