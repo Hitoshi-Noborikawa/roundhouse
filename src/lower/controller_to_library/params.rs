@@ -437,12 +437,84 @@ fn field_reads(spec: &ParamsSpec, field: &Symbol, sub: Expr, span: Span) -> (Exp
             call(uploaded, "from_params", vec![sub, str_lit(field.as_str())], field_ty(spec, field)),
         )
     } else {
+        // `scalar_provided` / `scalar`: the field's own key, or one of
+        // its multiparameter keys (`password(1)`), which Rails' `permit`
+        // keeps too — see runtime/ruby/params.rb.
         let params = vec![Symbol::from("Params")];
         (
-            call(params.clone(), "provided", vec![sub.clone(), str_lit(field.as_str())], Ty::Bool),
-            call(params, "str", vec![sub, str_lit(field.as_str()), str_lit("")], Ty::Str),
+            call(params.clone(), "scalar_provided", vec![sub.clone(), str_lit(field.as_str())], Ty::Bool),
+            call(params, "scalar", vec![sub, str_lit(field.as_str())], Ty::Str),
         )
     }
+}
+
+/// The params object's record of the request's multiparameter keys
+/// (`name(1)`) among its scalar fields: which fields they arrived for,
+/// and whether any came in a shape whose Rails value is not reproduced
+/// (`runtime/ruby/params.rb`). The model's `from_params` and
+/// `update_from_*` read both, and raise rather than write a value Rails
+/// would not.
+pub fn multiparameter_fields_field() -> Symbol {
+    Symbol::from("rh_multiparameter_fields")
+}
+
+pub fn multiparameter_unsupported_field() -> Symbol {
+    Symbol::from("rh_multiparameter_unsupported")
+}
+
+fn multiparameter_stmts(spec: &ParamsSpec, recv: impl Fn() -> Expr, sub: impl Fn() -> Expr, span: Span) -> Vec<Expr> {
+    use crate::lower::typing::with_ty;
+    let names = || {
+        let elements: Vec<Expr> = spec
+            .fields
+            .iter()
+            .filter(|f| !spec.file_fields.contains(f))
+            .map(|f| {
+                with_ty(
+                    Expr::new(span, ExprNode::Lit { value: Literal::Str { value: f.as_str().to_string() } }),
+                    Ty::Str,
+                )
+            })
+            .collect();
+        with_ty(
+            Expr::new(span, ExprNode::Array { elements, style: Default::default() }),
+            Ty::Array { elem: std::sync::Arc::new(Ty::Str) },
+        )
+    };
+    let params_call = |method: &str, ret: Ty| {
+        with_ty(
+            Expr::new(
+                span,
+                ExprNode::Send {
+                    recv: Some(Expr::new(span, ExprNode::Const { path: vec![Symbol::from("Params")] })),
+                    method: Symbol::from(method),
+                    args: vec![sub(), names()],
+                    block: None,
+                    parenthesized: true,
+                },
+            ),
+            ret,
+        )
+    };
+    let set = |field: Symbol, value: Expr| {
+        Expr::new(
+            span,
+            ExprNode::Send {
+                recv: Some(recv()),
+                method: Symbol::from(format!("{}=", field.as_str())),
+                args: vec![value],
+                block: None,
+                parenthesized: false,
+            },
+        )
+    };
+    vec![
+        set(
+            multiparameter_fields_field(),
+            params_call("multiparameter_fields", Ty::Array { elem: std::sync::Arc::new(Ty::Str) }),
+        ),
+        set(multiparameter_unsupported_field(), params_call("multiparameter_unsupported", Ty::Bool)),
+    ]
 }
 
 /// Walk every controller's action bodies and collect one ParamsSpec per
@@ -1138,6 +1210,9 @@ fn build_params_object(
         stmts.push(setter(format!("{}_provided=", field.as_str()), provided));
         stmts.push(setter(format!("{}=", field.as_str()), read));
     }
+    if !from_literal {
+        stmts.extend(multiparameter_stmts(spec, var, ivar_params, span));
+    }
     stmts.push(var());
     with_ty(Expr::new(span, ExprNode::Seq { exprs: stmts }), owner_ty)
 }
@@ -1537,6 +1612,11 @@ fn build_params_class(spec: &ParamsSpec) -> LibraryClass {
         methods.push(synth_attr_reader(&spec.class_id, &flag, Ty::Bool));
         methods.push(synth_attr_writer(&spec.class_id, &flag, Ty::Bool));
     }
+    let fields_ty = Ty::Array { elem: std::sync::Arc::new(Ty::Str) };
+    methods.push(synth_attr_reader(&spec.class_id, &multiparameter_fields_field(), fields_ty.clone()));
+    methods.push(synth_attr_writer(&spec.class_id, &multiparameter_fields_field(), fields_ty));
+    methods.push(synth_attr_reader(&spec.class_id, &multiparameter_unsupported_field(), Ty::Bool));
+    methods.push(synth_attr_writer(&spec.class_id, &multiparameter_unsupported_field(), Ty::Bool));
     methods.push(synth_from_raw(spec));
     if spec.scalar_lookup() {
         methods.extend(synth_lookup_helpers(&spec.class_id));
@@ -1624,11 +1704,14 @@ fn synth_params_initialize(spec: &ParamsSpec) -> MethodDef {
         }, Some(params_hash_ty())));
     }
     {
-        for field in fields {
+        let unsupported = multiparameter_unsupported_field();
+        for field in fields.iter().chain(std::iter::once(&unsupported)) {
             stmts.push(Expr::new(
                 Span::synthetic(),
                 ExprNode::Assign {
-                    target: LValue::Ivar { name: provided_field(field) },
+                    target: LValue::Ivar {
+                        name: if *field == unsupported { field.clone() } else { provided_field(field) },
+                    },
                     value: Expr {
                         span: Span::synthetic(),
                         node: Box::new(ExprNode::Lit { value: Literal::Bool { value: false } }),
@@ -1642,6 +1725,24 @@ fn synth_params_initialize(spec: &ParamsSpec) -> MethodDef {
             ));
         }
     }
+    // `Params.no_fields`, a typed empty `Array[String]`: an empty array
+    // literal carries no element type for a strict target to declare.
+    stmts.push(Expr::new(
+        Span::synthetic(),
+        ExprNode::Assign {
+            target: LValue::Ivar { name: multiparameter_fields_field() },
+            value: expr(
+                ExprNode::Send {
+                    recv: Some(Expr::new(Span::synthetic(), ExprNode::Const { path: vec![Symbol::from("Params")] })),
+                    method: Symbol::from("no_fields"),
+                    args: Vec::new(),
+                    block: None,
+                    parenthesized: true,
+                },
+                Some(Ty::Array { elem: std::sync::Arc::new(Ty::Str) }),
+            ),
+        },
+    ));
     for field in fields {
         // A file field's "nothing" is nil, not "" — see `field_ty`.
         let rhs = if spec.nested_fields.get(field).is_some_and(|n| n.mode == "scalars") {
@@ -2019,6 +2120,12 @@ fn synth_from_raw(spec: &ParamsSpec) -> MethodDef {
         stmts.push(setter(Symbol::from(format!("{}=", provided_field(field).as_str())), provided));
         stmts.push(setter(Symbol::from(format!("{}=", field.as_str())), read));
     }
+    stmts.extend(multiparameter_stmts(
+        spec,
+        || var(&instance, owner_ty.clone()),
+        || var(&sub, hash_ty.clone()),
+        Span::synthetic(),
+    ));
 
     stmts.push(var(&instance, owner_ty.clone()));
 

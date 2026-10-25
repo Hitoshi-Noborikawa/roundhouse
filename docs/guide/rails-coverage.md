@@ -171,10 +171,24 @@ not add generic class-object/Relation support to strict targets.
 |---|---|---|
 | Actions | The seven RESTful actions and any other; implicit render | + Rails 8.1.4 `head(status, options = nil)` on Ruby + Spinel (see below), `send_file`, `rescue_from`, `rate_limit` (`to:`/`within:`/`by:`/`with:`/`only:`/`except:`, counted in the app's cache as in Rails), `invisible_captcha` (`only:`/`except:`/`prepend:` → honeypot `spam?` on `subtitle` only; rotated/custom names unmodeled), pretender `impersonates :scope` when the controller defines a local `current_<scope>` (wraps it as `true_<scope>`, adds `impersonate_` / `stop_impersonating_`; inherited-only Devise helpers stay unsupported) |
 | Filters | `before_action` with `only:`/`except:`, ivar flow into views | + `around_action`, `after_action`, `if:`/`unless:` guards (symbol and lambda), `skip_before_action`, filters from concerns |
-| Params | `params.expect`, `params.require(...).permit(...)`, `params[:id]`; typed by the schema they're assigned to | + nested permits, arrays, `params.merge`, indifferent access; a missing resource answers 400; JSON bodies wrapped under the model name (`wrap_parameters`, on by default since `load_defaults 7.0`) |
+| Params | `params.expect`, `params.require(...).permit(...)`, `params[:id]`; typed by the schema they're assigned to | + nested permits, arrays, `params.merge`, indifferent access; a missing resource answers 400; JSON bodies wrapped under the model name (`wrap_parameters`, on by default since `load_defaults 7.0`); multiparameter keys (`title(1)`, `body(2i)`) on a String or Text attribute, stored as Rails stores them (see below) |
 | Responses | `render` (template, partial, `json:`, `status:`), `redirect_to` (record, path, `status:`), `respond_to` with `format.html`/`format.json`, `flash` and `flash.now` | + `expires_in`, `stale?`/`fresh_when` (answered as always fresh — a deliberate divergence), `cookies` and `cookies.signed`/`.permanent`, `session`, `helper_method`, `layout` |
 | Concerns | `include`d modules with `included do` filter blocks | + `class_methods`, concern-defined actions and helpers |
 | Auth and request | — | `Current` attributes, `authenticate_by`, signed/global ids, `has_secure_password` sessions; `request.headers` (`[]`, `fetch`, `key?`, case-insensitive HTTP and Rack names), `request.authorization` (including Rack and legacy authorization env keys), route-only `request.path_parameters`, and HTTP Token/Bearer and Basic auth helpers |
+
+**Multiparameter keys.** Rails' `permit(:title)` also keeps `title(1)`,
+`title(2i)` and `title(3f)`, the parts `date_select` submits, and
+assignment rebuilds the attribute from them. For a String or Text
+attribute (and `has_secure_password`'s password, confirmation and
+challenge), Rails assigns the text of the parts Hash, so `title(1)=T`
+stores `{1 => "T"}`. Roundhouse reproduces that text, Ruby 3.4's
+`Hash#inspect` form, for parts that are plain printable ASCII (no `"`,
+`\` or `#`) or `i` integers, with a blank part as `nil`. Validations see
+it, and a save writes it, as in Rails. Any other attribute type (a date
+column builds a Date), an `f` part, other text, or only blank parts raise
+an error naming the gap before the record changes. `date_select` itself
+is not supported. This is the Ruby family (Ruby and Spinel) only: the
+other targets ignore multiparameter keys.
 
 The Spinel dispatcher forwards incoming request headers into the request's
 Rack env (`HTTP_*`, plus unprefixed `CONTENT_TYPE` and `CONTENT_LENGTH`).

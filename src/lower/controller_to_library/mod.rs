@@ -648,6 +648,12 @@ pub fn lower_controllers_with_arel_views_assocs_and_routes(
                 // The companion presence slot each value slot carries.
                 params_ivars.insert(self::params::provided_field(f), Ty::Bool);
             }
+            // The request's multiparameter record.
+            params_ivars.insert(
+                self::params::multiparameter_fields_field(),
+                Ty::Array { elem: std::sync::Arc::new(Ty::Str) },
+            );
+            params_ivars.insert(self::params::multiparameter_unsupported_field(), Ty::Bool);
         }
         for method in &mut params_lc.methods {
             crate::lower::typing::type_method_body(method, &classes, &params_ivars);

@@ -380,6 +380,12 @@ pub(crate) fn lower_models_inner_with_ruby_values(
                 Ty::Bool,
             );
         }
+        // The multiparameter record the model's guard reads.
+        register(
+            crate::lower::controller_to_library::params::multiparameter_fields_field(),
+            Ty::Array { elem: std::sync::Arc::new(Ty::Str) },
+        );
+        register(crate::lower::controller_to_library::params::multiparameter_unsupported_field(), Ty::Bool);
         info.class_methods.insert(
             Symbol::from("from_raw"),
             fn_sig(

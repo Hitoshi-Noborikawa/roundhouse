@@ -18,6 +18,8 @@ mod session_cookie_key;
 mod inertia_runtime_props;
 #[path = "emit_and_run/form_builder_fields.rs"]
 mod form_builder_fields;
+#[path = "emit_and_run/multiparameter_params.rs"]
+mod multiparameter_params;
 #[path = "emit_and_run/session_options_key.rs"]
 mod session_options_key;
 #[path = "emit_and_run/httpdate_from_now.rs"]
