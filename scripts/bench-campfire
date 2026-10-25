@@ -2463,5 +2463,8 @@ REPRO
 pack_spinel_tree
 
 ok "results in $OUT_DIR"
-echo
-cat "$OUT_DIR/summary.md"
+# A users-only run has no wrk table; its results are users.json.
+if [[ -f "$OUT_DIR/summary.md" ]]; then
+    echo
+    cat "$OUT_DIR/summary.md"
+fi
