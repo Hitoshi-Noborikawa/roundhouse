@@ -3751,7 +3751,12 @@ fn parse_association(
                 "dependent" => {
                     dependent = symbol_value(&value).and_then(|s| dependent_from_sym(&s))
                 }
-                "optional" => optional = bool_value(&value),
+                // Rails reads `optional:` for its truth: a lambda or a
+                // Symbol is optional, whatever it would return. Only a
+                // `false` or `nil` literal keeps the association required.
+                "optional" => {
+                    optional = Some(bool_value(&value).unwrap_or_else(|| value.as_nil_node().is_none()))
+                }
                 // `touch: true` / `touch: :last_message_at`. A `false`
                 // is Rails' explicit opt-out and reads as no touch,
                 // which is what `None` already means.
