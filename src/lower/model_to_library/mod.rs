@@ -930,7 +930,7 @@ fn report_unclaimed_unknowns(model: &Model, schema: &Schema) {
         // unclaimed and warn.
         if name == "attribute" {
             if let ExprNode::Send { args, .. } = &*expr.node {
-                if args.len() == 2 {
+                if args.len() == 2 || (args.len() == 3 && self::markers::attribute_api_default(&args[2]).is_some()) {
                     // Over a column of another type, the column's cast,
                     // reader and storage are kept
                     // (`markers::attribute_matches_column`): reported.

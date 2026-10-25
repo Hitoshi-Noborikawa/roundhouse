@@ -313,11 +313,14 @@ pub(super) fn push_active_model_constructor(methods: &mut Vec<MethodDef>, model:
     // classes ingest cannot classify as tableless models (campfire's
     // `ActionText::Attachment::OpengraphEmbed`, which lives in `lib/`),
     // and the two must not drift into two constructors.
+    let defaulted: Vec<Symbol> =
+        super::markers::attribute_api_defaults(&model.body).into_iter().map(|(name, _)| name).collect();
     methods.push(crate::lower::active_model_model::attributes_initialize(
         &model.name,
         model.span,
         &names,
         &attribute_api,
+        &defaulted,
     ));
 }
 
