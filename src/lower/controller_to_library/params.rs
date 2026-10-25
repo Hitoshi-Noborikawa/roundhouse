@@ -145,6 +145,7 @@ impl ParamsSpec {
 
 /// One non-scalar permitted key and how Rails' `permit` filters it:
 /// `mode` as `Params.nested` takes it ("list", "any", "hash", "deep"),
+/// or "scalars" for `k: []` (`Params.scalar_list`, an `Array[String]`),
 /// `allowed` the key's flat list of scalar sub-keys.
 #[derive(Clone, Debug, PartialEq)]
 pub struct NestedKey {
@@ -253,7 +254,8 @@ impl ParamsSpecs {
 /// The non-scalar keys of the permit / expect list at (or under) `expr`
 /// whose filter `Params.nested` reproduces: a flat list of Symbols
 /// (`k: [:a, :b]`; "any" under `permit`, "hash" under `expect`), that
-/// list wrapped once (`k: [[:a, :b]]`, "list"), or `k: {}` ("deep").
+/// list wrapped once (`k: [[:a, :b]]`, "list"), or `k: {}` ("deep");
+/// and `k: []` ("scalars"), which `Params.scalar_list` reads.
 fn nested_candidates(expr: &Expr, controller: &ClassId) -> Vec<NestedKey> {
     fn find_call(e: &Expr) -> Option<(&str, &[Expr])> {
         let ExprNode::Send { recv, method, args, .. } = &*e.node else { return None };
@@ -301,7 +303,7 @@ fn nested_candidates(expr: &Expr, controller: &ClassId) -> Vec<NestedKey> {
         let (allowed, mode) = match &*v.node {
             ExprNode::Hash { entries, .. } if entries.is_empty() => (Vec::new(), "deep"),
             ExprNode::Array { elements, .. } => match elements.as_slice() {
-                [] => continue,
+                [] => (Vec::new(), "scalars"),
                 [inner] if matches!(&*inner.node, ExprNode::Array { .. }) => {
                     let ExprNode::Array { elements, .. } = &*inner.node else { continue };
                     match syms(elements) {
@@ -332,8 +334,12 @@ impl ParamsSpec {
 /// field, the uploaded file a multipart part became (nil when the
 /// request carried none).
 pub(crate) fn field_ty(spec: &ParamsSpec, field: &Symbol) -> Ty {
-    if spec.nested_fields.contains_key(field) {
-        param_value_ty()
+    if let Some(nested) = spec.nested_fields.get(field) {
+        if nested.mode == "scalars" {
+            Ty::Array { elem: Ty::Str.into() }
+        } else {
+            param_value_ty()
+        }
     } else if spec.file_fields.contains(field) {
         Ty::Union { variants: vec![uploaded_file_ty(), Ty::Nil].into() }
     } else {
@@ -382,6 +388,14 @@ fn field_reads(spec: &ParamsSpec, field: &Symbol, sub: Expr, span: Span) -> (Exp
             ret,
         )
     };
+    if spec.nested_fields.get(field).is_some_and(|n| n.mode == "scalars") {
+        let params = vec![Symbol::from("Params")];
+        let args = vec![sub, str_lit(field.as_str())];
+        return (
+            call(params.clone(), "scalar_list_provided", args.clone(), Ty::Bool),
+            call(params, "scalar_list", args, field_ty(spec, field)),
+        );
+    }
     if let Some(nested) = spec.nested_fields.get(field) {
         let allowed = with_ty(
             Expr::new(
@@ -1617,7 +1631,12 @@ fn synth_params_initialize(spec: &ParamsSpec) -> MethodDef {
     }
     for field in fields {
         // A file field's "nothing" is nil, not "" — see `field_ty`.
-        let rhs = if spec.file_fields.contains(field) || spec.nested_fields.contains_key(field) {
+        let rhs = if spec.nested_fields.get(field).is_some_and(|n| n.mode == "scalars") {
+            expr(
+                ExprNode::Array { elements: Vec::new(), style: crate::expr::ArrayStyle::default() },
+                Some(Ty::Array { elem: Ty::Str.into() }),
+            )
+        } else if spec.file_fields.contains(field) || spec.nested_fields.contains_key(field) {
             expr(ExprNode::Lit { value: Literal::Nil }, Some(Ty::Nil))
         } else {
             expr(ExprNode::Lit { value: Literal::Str { value: String::new() } }, Some(Ty::Str))

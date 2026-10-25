@@ -279,6 +279,31 @@ module Params
     Params.allowed_scalars(value, allowed)
   end
 
+  # `k: []`'s value: the Array of scalars under `key`, each as the String
+  # a request carries, or [] when the key is absent or holds anything
+  # else (a scalar, a hash, an array with a hash or array in it), which
+  # Rails' `permit` drops. `scalar_list_provided` tells the two apart.
+  def self.scalar_list(sub, key)
+    out = []
+    return out unless Params.scalar_list_provided(sub, key)
+    value = sub.fetch(key, nil)
+    if value.is_a?(Array)
+      i = 0
+      while i < value.length
+        item = value[i]
+        out.push(item.nil? ? "" : item.to_s)
+        i = i + 1
+      end
+    end
+    out
+  end
+
+  def self.scalar_list_provided(sub, key)
+    return false unless sub.key?(key)
+    value = sub.fetch(key, nil)
+    value.is_a?(Array) && Params.scalars_only(value)
+  end
+
   def self.nested_provided(sub, key, allowed, mode)
     !Params.nested(sub, key, allowed, mode).nil?
   end

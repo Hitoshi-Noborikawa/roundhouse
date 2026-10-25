@@ -6,6 +6,10 @@
 //! (`{"0" => {…}}`), each hash cut to the listed keys, and
 //! `Article.new(permitted)` hands it to `comments_attributes=`.
 //!
+//! `permit(…, labels: [])` keeps an Array of scalars, and drops one
+//! holding a hash or an array, a scalar, or a hash (`nested_permit2.rb`);
+//! the ruby family carries it as an `Array[String]`.
+//!
 //! On the ruby family the key was dropped from the synthesized params
 //! record with a "non-scalar" warning, so the writer never ran. Strict
 //! targets keep that warning.
@@ -93,6 +97,62 @@ fn from_raw_carries_the_list_on_spinel() {
     let run = app(EXPECT).run_spinel_with_db(SCRIPT);
     run.assert_passes();
     assert!(run.stdout.contains("nested carry passed"), "{}", run.stdout);
+}
+
+const LABELS_WRITER: &str = "  has_many :comments, dependent: :destroy\n\n  def labels=(list)\n    self.body = body.to_s + \" [\" + list.join(\",\") + \"]\"\n  end\n";
+const LABELS_PERMIT: &str = "      params.require(:article).permit(:title, :body, labels: [])\n";
+
+const LABELS_TEST: &str = r#"
+  test "a scalar list" do
+    post articles_url, params: { article: { title: "Labels", body: "A sufficiently long body for validation.", labels: ["a", "b"] } }
+    assert_equal "A sufficiently long body for validation. [a,b]", Article.last.body
+  end
+
+  test "a list holding a hash is dropped" do
+    post articles_url, params: { article: { title: "Labels", body: "A sufficiently long body for validation.", labels: ["a", { x: "1" }] } }
+    assert_equal "A sufficiently long body for validation.", Article.last.body
+  end
+
+"#;
+
+fn labels_app() -> emit_and_run::Overlay {
+    emit_and_run::real_blog()
+        .edit("app/models/article.rb", "  has_many :comments, dependent: :destroy\n", LABELS_WRITER)
+        .edit("app/controllers/articles_controller.rb", "      params.expect(article: [ :title, :body ])\n", LABELS_PERMIT)
+        .edit("test/controllers/articles_controller_test.rb", "  test \"should get new\" do\n", &format!("{LABELS_TEST}  test \"should get new\" do\n"))
+}
+
+#[test]
+fn a_scalar_list_reaches_the_writer_on_ruby() {
+    labels_app().run_test("test/controllers/articles_controller_test.rb").assert_passes();
+}
+
+const LABELS_SCRIPT: &str = r##"
+def check(label, got, want)
+  raise "#{label}: #{got.inspect} (want #{want.inspect})" unless got == want
+end
+raw = { "article" => { "title" => "Labels", "body" => "A sufficiently long body for validation.", "labels" => ["a", "b"] } }
+a = Article.from_params(ArticleParams.from_raw(raw))
+check("a scalar list", a.body, "A sufficiently long body for validation. [a,b]")
+raw = { "article" => { "title" => "Labels", "body" => "A sufficiently long body for validation.", "labels" => "a" } }
+b = Article.from_params(ArticleParams.from_raw(raw))
+check("a scalar is dropped", b.body, "A sufficiently long body for validation.")
+puts "labels passed"
+"##;
+
+#[test]
+fn from_raw_carries_a_scalar_list_on_ruby() {
+    let run = labels_app().run_ruby(LABELS_SCRIPT);
+    run.assert_passes();
+    assert!(run.stdout.contains("labels passed"), "{}", run.stdout);
+}
+
+#[test]
+#[ignore = "requires the Spinel toolchain"]
+fn from_raw_carries_a_scalar_list_on_spinel() {
+    let run = labels_app().run_spinel_with_db(LABELS_SCRIPT);
+    run.assert_passes();
+    assert!(run.stdout.contains("labels passed"), "{}", run.stdout);
 }
 
 /// A strict target's params record still holds Strings only: the key
