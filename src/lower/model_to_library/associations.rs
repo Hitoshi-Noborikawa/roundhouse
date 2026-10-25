@@ -240,6 +240,7 @@ pub(super) fn push_association_methods(
                     as_interface.as_ref(),
                     scope.as_ref(),
                     through_relation,
+                    keeps_nil,
                 );
                 if crate::lower::default_scope::reader_replaces_scope(models, assoc) {
                     reroot_unscoping(&mut reader.body, target, foreign_key);
@@ -494,6 +495,7 @@ pub(super) fn push_association_methods(
                     &owner_key,
                     as_interface.as_ref(),
                     scope.as_ref(),
+                    keeps_nil,
                 ));
                 methods.push(synth_has_one_preload_setter(owner, name, target));
                 push_singular_loaded_reader(methods, model, owner, name);
@@ -599,6 +601,58 @@ fn push_association_names(methods: &mut Vec<MethodDef>, model: &Model) {
     });
 }
 
+/// `return <value> if new_record? && <owner key absent>`: Rails'
+/// `find_target?` / `null_scope?`, under which a has_one or has_many of
+/// an owner that is a new record without its key doesn't query
+/// (`ForeignAssociation#foreign_key_present?`). The ruby family's new
+/// record holds `id` 0 (its column's default), not nil, so 0 counts as
+/// absent for `id`; a custom key column is absent when nil or empty.
+fn unsaved_owner_guard(owner_key: &Symbol, value: Expr) -> Expr {
+    let key = || Expr::new(Span::synthetic(), ExprNode::Ivar { name: owner_key.clone() });
+    let send = |recv: Expr, method: &str, args: Vec<Expr>| {
+        Expr::new(
+            Span::synthetic(),
+            ExprNode::Send { recv: Some(recv), method: Symbol::from(method), args, block: None, parenthesized: false },
+        )
+    };
+    let or = |left: Expr, right: Expr| {
+        Expr::new(
+            Span::synthetic(),
+            ExprNode::BoolOp {
+                op: crate::expr::BoolOpKind::Or,
+                surface: crate::expr::BoolOpSurface::default(),
+                left,
+                right,
+            },
+        )
+    };
+    let absent = if owner_key.as_str() == "id" {
+        or(send(key(), "nil?", vec![]), send(key(), "==", vec![lit_int(0)]))
+    } else {
+        or(send(key(), "nil?", vec![]), send(send(key(), "to_s", vec![]), "empty?", vec![]))
+    };
+    let new_record = Expr::new(
+        Span::synthetic(),
+        ExprNode::Send { recv: None, method: Symbol::from("new_record?"), args: vec![], block: None, parenthesized: false },
+    );
+    Expr::new(
+        Span::synthetic(),
+        ExprNode::If {
+            cond: Expr::new(
+                Span::synthetic(),
+                ExprNode::BoolOp {
+                    op: crate::expr::BoolOpKind::And,
+                    surface: crate::expr::BoolOpSurface::default(),
+                    left: new_record,
+                    right: absent,
+                },
+            ),
+            then_branch: Expr::new(Span::synthetic(), ExprNode::Return { value }),
+            else_branch: nil_lit(),
+        },
+    )
+}
+
 /// A keyed association (`primary_key:` other than `id`) must not match
 /// when the owner's key is NULL: Rails answers nil / empty for it, but
 /// `where(fk: nil)` is `fk IS NULL`, which would return every orphan
@@ -671,6 +725,7 @@ fn synth_has_many_reader(
     as_interface: Option<&Symbol>,
     scope: Option<&Expr>,
     through: bool,
+    unsaved_guard: bool,
 ) -> MethodDef {
     // def comments; Comment.where(article_id: @id); end
     //
@@ -766,7 +821,14 @@ fn synth_has_many_reader(
             else_branch: nil_lit(),
         },
     );
-    let body = seq(vec![guard, lazy_query]);
+    let empty = Expr::new(
+        Span::synthetic(),
+        ExprNode::Array { elements: vec![], style: crate::expr::ArrayStyle::Brackets },
+    );
+    let body = match (unsaved_guard && !through).then(|| unsaved_owner_guard(owner_key, empty)) {
+        Some(unsaved) => seq(vec![guard, unsaved, lazy_query]),
+        None => seq(vec![guard, lazy_query]),
+    };
 
     // has_many reader — body computes (`Comment.where(...)`), so it
     // must remain a Method even though Ruby's `article.comments` reads
@@ -1105,6 +1167,7 @@ fn synth_has_one_reader(
     owner_key: &Symbol,
     as_interface: Option<&Symbol>,
     scope: Option<&Expr>,
+    unsaved_guard: bool,
 ) -> MethodDef {
     let mut entries = vec![(
         lit_sym(foreign_key.clone()),
@@ -1172,7 +1235,11 @@ fn synth_has_one_reader(
         name: name.clone(),
         receiver: MethodReceiver::Instance,
         params: Vec::new(),
-        body: seq(vec![guard, first]),
+        body: if unsaved_guard {
+            seq(vec![guard, unsaved_owner_guard(owner_key, nil_lit()), first])
+        } else {
+            seq(vec![guard, first])
+        },
         signature: Some(fn_sig(
             vec![],
             Ty::Union {
