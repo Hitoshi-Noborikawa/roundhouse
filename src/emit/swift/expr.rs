@@ -1994,7 +1994,8 @@ fn emit_case(scrutinee: &Expr, arms: &[Arm], returning: bool) -> String {
                 lines.push(format!("case {}:\n{body}", emit_literal(value)));
             }
             other => {
-                lines.push(format!("/* TODO pattern {other:?} */ default:\n{body}"));
+                let stub = crate::emit::diagnostics::report_unsupported(crate::span::Span::synthetic(), "swift", "case pattern", format!("{other:?}").split([' ', '(', '{']).next().unwrap_or("").to_string());
+                lines.push(format!("default:\n{stub}"));
                 has_default = true;
             }
         }
