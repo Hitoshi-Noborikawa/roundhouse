@@ -1769,12 +1769,7 @@ fn ingest_expr_node(node: &Node<'_>, file: &str) -> IngestResult<Expr> {
             let extra_params = block_extra_params(l.parameters(), file)?;
             let params = block_param_names(l.parameters());
             let mut rest_param = lambda_rest_param(l.parameters());
-            let body = match l.body() {
-                Some(b) => ingest_expr(&b, file)?,
-                None => Expr::new(Span::synthetic(), ExprNode::Seq { exprs: vec![] }),
-            };
-            let body = destructure_block_params(l.parameters(), body, file)?;
-            let body = desugar_post_params(&mut rest_param, block_post_params(l.parameters()), body);
+            let body = ingest_block_body(|| l.parameters(), l.body(), &mut rest_param, file)?;
             // `->(x) { body }` literals always use brace form (Prism's
             // opening_loc is `{`); `->(x) do body end` exists but isn't
             // idiomatic and doesn't appear in any fixture yet.
@@ -3743,12 +3738,7 @@ fn ingest_call_block(
                 let extra_params = block_extra_params(lam.parameters(), file)?;
                 let params = block_param_names(lam.parameters());
                 let mut rest_param = lambda_rest_param(lam.parameters());
-                let body = match lam.body() {
-                    Some(body) => ingest_expr(&body, file)?,
-                    None => Expr::new(Span::synthetic(), ExprNode::Seq { exprs: vec![] }),
-                };
-                let body = destructure_block_params(lam.parameters(), body, file)?;
-                let body = desugar_post_params(&mut rest_param, block_post_params(lam.parameters()), body);
+                let body = ingest_block_body(|| lam.parameters(), lam.body(), &mut rest_param, file)?;
                 let block_style = block_style_from_opening(lam.opening_loc().as_slice());
                 return Ok(Some(Expr::new(
                     Span::synthetic(),
@@ -3812,12 +3802,7 @@ fn ingest_block_node_as_lambda(b: &ruby_prism::BlockNode<'_>, file: &str) -> Ing
     let extra_params = block_extra_params(b.parameters(), file)?;
     let params = block_param_names(b.parameters());
     let mut rest_param = block_rest_param(b.parameters());
-    let body = match b.body() {
-        Some(body) => ingest_expr(&body, file)?,
-        None => Expr::new(Span::synthetic(), ExprNode::Seq { exprs: vec![] }),
-    };
-    let body = destructure_block_params(b.parameters(), body, file)?;
-    let body = desugar_post_params(&mut rest_param, block_post_params(b.parameters()), body);
+    let body = ingest_block_body(|| b.parameters(), b.body(), &mut rest_param, file)?;
     let block_style = block_style_from_opening(b.opening_loc().as_slice());
     Ok(Expr::new(
         Span::synthetic(),
@@ -4127,6 +4112,27 @@ fn block_param_names(params_node: Option<Node<'_>>) -> Vec<Symbol> {
         .collect()
 }
 
+/// A block's or lambda's body, shaped by its parameters: destructured
+/// slots unpacked, post-rest parameters popped off the rest, and
+/// block-locals renamed apart from the enclosing scope. Every place that
+/// ingests a block goes through here, so none of them drops a step.
+/// `params` is the node's own `parameters` getter: a Prism `Node` is not
+/// `Clone`, so each step asks for its own.
+fn ingest_block_body<'pr>(
+    params: impl Fn() -> Option<Node<'pr>>,
+    body_node: Option<Node<'pr>>,
+    rest_param: &mut Option<Symbol>,
+    file: &str,
+) -> IngestResult<Expr> {
+    let body = match body_node {
+        Some(body) => ingest_expr(&body, file)?,
+        None => Expr::new(Span::synthetic(), ExprNode::Seq { exprs: vec![] }),
+    };
+    let body = destructure_block_params(params(), body, file)?;
+    let body = desugar_post_params(rest_param, block_post_params(params()), body);
+    Ok(scope_block_locals(params(), body))
+}
+
 /// The statements that unpack a block's destructured parameters
 /// (`|(host, secure, origin), index|`) from the temps
 /// `block_param_names` named for them, ahead of the body. Dropping the
@@ -4264,6 +4270,169 @@ fn desugar_post_params(rest_param: &mut Option<Symbol>, posts: Vec<Symbol>, body
         other => exprs.push(Expr::new(body.span, other)),
     }
     Expr::new(Span::synthetic(), ExprNode::Seq { exprs })
+}
+
+/// Block-locals (`|n; tag|`) shadow the enclosing scope's local of the
+/// same name, and Lambda IR has no slot for them: dropped, the block's
+/// `tag = n.to_s` reassigned the method's `tag` (#687). So each one is
+/// renamed in the body to a name no enclosing scope holds, and starts
+/// at nil, as Ruby starts it on every call, unless the body writes it
+/// before any read.
+fn scope_block_locals(params_node: Option<Node<'_>>, mut body: Expr) -> Expr {
+    let Some(bpn) = params_node.as_ref().and_then(|n| n.as_block_parameters_node()) else {
+        return body;
+    };
+    for local in bpn.locals().iter() {
+        let Some(local) = local.as_block_local_variable_node() else { continue };
+        let name = Symbol::from(constant_id_str(&local.name()));
+        let loc = local.location();
+        // The offset keeps a nested block's own `; tag` apart from this one.
+        let fresh = fresh_reserved_local(&loc, &format!("__{name}_{}", loc.start_offset()));
+        rename_block_local(&mut body, &name, &fresh);
+        if !written_before_read(&body, &fresh) {
+            let init = Expr::new(
+                Span::synthetic(),
+                ExprNode::Assign {
+                    target: crate::expr::LValue::Var { id: crate::ident::VarId(0), name: fresh },
+                    value: Expr::new(Span::synthetic(), ExprNode::Lit { value: Literal::Nil }),
+                },
+            );
+            let mut exprs = vec![init];
+            match *body.node {
+                ExprNode::Seq { exprs: inner } => exprs.extend(inner),
+                other => exprs.push(Expr::new(body.span, other)),
+            }
+            body = Expr::new(Span::synthetic(), ExprNode::Seq { exprs });
+        }
+    }
+    body
+}
+
+/// Every read and write of local `from` in `e` becomes `to`, except
+/// inside a nested block or lambda whose own parameter is `from`.
+fn rename_block_local(e: &mut Expr, from: &Symbol, to: &Symbol) {
+    fn rename_lvalue(target: &mut crate::expr::LValue, from: &Symbol, to: &Symbol) {
+        if let crate::expr::LValue::Var { name, .. } = target {
+            if name == from {
+                *name = to.clone();
+            }
+        }
+    }
+    match &mut *e.node {
+        ExprNode::Var { name, .. } if name == from => *name = to.clone(),
+        ExprNode::Assign { target, .. } | ExprNode::OpAssign { target, .. } => rename_lvalue(target, from, to),
+        ExprNode::MultiAssign { targets, .. } => {
+            for target in targets {
+                rename_lvalue(target, from, to);
+            }
+        }
+        ExprNode::BeginRescue { rescues, .. } => {
+            for rescue in rescues {
+                if rescue.binding.as_ref() == Some(from) {
+                    rescue.binding = Some(to.clone());
+                }
+            }
+        }
+        ExprNode::CaseMatch { arms, .. } => {
+            for arm in arms {
+                rename_pattern_binds(&mut arm.pattern, from, to);
+            }
+        }
+        ExprNode::MatchPredicate { pattern, .. } | ExprNode::MatchRequired { pattern, .. } => {
+            rename_pattern_binds(pattern, from, to);
+        }
+        ExprNode::Lambda { params, rest_param, block_param, extra_params, .. }
+            if params.contains(from)
+                || rest_param.as_ref() == Some(from)
+                || block_param.as_ref() == Some(from)
+                || extra_params.iter().any(|p| &p.name == from) =>
+        {
+            return;
+        }
+        _ => {}
+    }
+    e.node.for_each_child_mut(&mut |c| rename_block_local(c, from, to));
+}
+
+/// The names a pattern binds, renamed as `rename_block_local` renames
+/// writes. A pinned read (`^tag`) is an expression, renamed by the walk.
+fn rename_pattern_binds(pattern: &mut crate::expr::MatchPattern, from: &Symbol, to: &Symbol) {
+    use crate::expr::{HashRest, MatchPattern};
+    let rename = |name: &mut Symbol| {
+        if name == from {
+            *name = to.clone();
+        }
+    };
+    match pattern {
+        MatchPattern::Nil | MatchPattern::Value { .. } => {}
+        MatchPattern::Bind { name } => rename(name),
+        MatchPattern::Capture { pattern, name } => {
+            rename_pattern_binds(pattern, from, to);
+            rename(name);
+        }
+        MatchPattern::Alt { alternatives } => {
+            for p in alternatives {
+                rename_pattern_binds(p, from, to);
+            }
+        }
+        MatchPattern::Array { pre, rest, post, .. } => {
+            for p in pre.iter_mut().chain(post.iter_mut()) {
+                rename_pattern_binds(p, from, to);
+            }
+            if let Some(Some(name)) = rest {
+                rename(name);
+            }
+        }
+        MatchPattern::Find { pre_rest, middle, post_rest, .. } => {
+            for p in middle {
+                rename_pattern_binds(p, from, to);
+            }
+            for name in [pre_rest, post_rest].into_iter().flatten() {
+                rename(name);
+            }
+        }
+        MatchPattern::Hash { pairs, rest, .. } => {
+            for (key, sub) in pairs {
+                match sub {
+                    Some(p) => rename_pattern_binds(p, from, to),
+                    // `in {tag:}` binds the key's own name.
+                    None if key == from => *sub = Some(MatchPattern::Bind { name: to.clone() }),
+                    None => {}
+                }
+            }
+            if let Some(HashRest::Collect { name }) = rest {
+                rename(name);
+            }
+        }
+    }
+}
+
+/// Whether the first statement of `body` that mentions local `name` is
+/// a plain assignment to it whose value doesn't read it. Anything else
+/// may read it unset, so the caller starts it at nil.
+fn written_before_read(body: &Expr, name: &Symbol) -> bool {
+    fn mentions(e: &Expr, name: &Symbol) -> bool {
+        let here = match &*e.node {
+            ExprNode::Var { name: n, .. } => n == name,
+            ExprNode::Assign { target: crate::expr::LValue::Var { name: n, .. }, .. }
+            | ExprNode::OpAssign { target: crate::expr::LValue::Var { name: n, .. }, .. } => n == name,
+            ExprNode::MultiAssign { targets, .. } => targets
+                .iter()
+                .any(|t| matches!(t, crate::expr::LValue::Var { name: n, .. } if n == name)),
+            ExprNode::BeginRescue { rescues, .. } => rescues.iter().any(|r| r.binding.as_ref() == Some(name)),
+            _ => false,
+        };
+        let mut found = here;
+        e.node.for_each_child(&mut |c| found = found || mentions(c, name));
+        found
+    }
+    let stmts: Vec<&Expr> = match &*body.node {
+        ExprNode::Seq { exprs } => exprs.iter().collect(),
+        _ => vec![body],
+    };
+    let Some(first) = stmts.into_iter().find(|s| mentions(s, name)) else { return true };
+    matches!(&*first.node, ExprNode::Assign { target: crate::expr::LValue::Var { name: n, .. }, value }
+        if n == name && !mentions(value, name))
 }
 
 /// Map the operator bytes of an `OrNode` / `AndNode` to the surface form.
