@@ -398,8 +398,11 @@ fn source(target: &Target) -> String {
 pub(crate) fn expand(app: &mut App) {
     let snapshot: Vec<Model> = app.models.clone();
     for model in &mut app.models {
-        let mut generated: Vec<ModelBodyItem> = Vec::new();
-        let mut expanded = Vec::new();
+        // Each declaration's generated items, keyed by its index: they take
+        // its place, as Rails adds the validation and save callbacks where
+        // `accepts_nested_attributes_for` is called (an association's errors
+        // list before a later `validates`'s).
+        let mut generated: Vec<(usize, Vec<ModelBodyItem>)> = Vec::new();
         for (index, item) in model.body.iter().enumerate() {
             let ModelBodyItem::Unknown { expr, .. } = item else { continue };
             let Some((names, options)) = declaration(expr) else { continue };
@@ -421,19 +424,18 @@ pub(crate) fn expand(app: &mut App) {
                     }
                 }
             }
-            generated.extend(items);
-            expanded.push(index);
+            generated.push((index, items));
         }
-        if expanded.is_empty() {
+        if generated.is_empty() {
             continue;
         }
-        let mut index = 0;
-        model.body.retain(|item| {
-            let keep = !(is_declaration(item) && expanded.contains(&index));
-            index += 1;
-            keep
-        });
-        model.body.extend(generated);
+        let body = std::mem::take(&mut model.body);
+        for (index, item) in body.into_iter().enumerate() {
+            match generated.iter().position(|(i, _)| *i == index) {
+                Some(at) if is_declaration(&item) => model.body.append(&mut generated[at].1),
+                _ => model.body.push(item),
+            }
+        }
     }
 }
 
