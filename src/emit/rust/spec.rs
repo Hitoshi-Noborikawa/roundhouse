@@ -154,7 +154,10 @@ fn emit_ctrl_test_send(
             "unprocessable_entity" | "unprocessable_content" => {
                 "resp.assert_unprocessable();".to_string()
             }
-            other => format!("resp.assert_status(/* {other:?} */ 200);"),
+            other => match crate::lower::controller_test::asserted_status_code(other) {
+                Some(code) => format!("resp.assert_status({code});"),
+                None => format!("{};", crate::emit::diagnostics::report_unsupported(crate::span::Span::synthetic(), "rust", "assert_response", format!("`:{other}` names no single status"))),
+            },
         },
         Some(ControllerTestSend::AssertRedirectedTo { url }) => {
             let u = emit_url_expr(url, app);
@@ -283,10 +286,7 @@ fn emit_assert_select_classified(
     use crate::lower::AssertSelectKind;
     let ExprNode::Lit { value: Literal::Str { value: selector } } = &*selector_expr.node
     else {
-        return format!(
-            "/* TODO: dynamic selector */ resp.assert_select({:?});",
-            emit_ctrl_test_expr(selector_expr, app),
-        );
+        return format!("{};", crate::emit::diagnostics::report_unsupported(selector_expr.span, "rust", "assert_select", "a selector computed when the test runs"));
     };
     match kind {
         AssertSelectKind::Text(expr) => {
@@ -404,7 +404,7 @@ fn emit_ctrl_test_expr(expr: &Expr, app: &App) -> String {
                 format!("{method}({})", args_s.join(", "))
             }
         }
-        _ => format!("/* TODO expr {:?} */", std::mem::discriminant(&*expr.node)),
+        other => crate::emit::diagnostics::report_unsupported(expr.span, "rust", other.kind_str(), "in a controller test"),
     }
 }
 
