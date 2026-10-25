@@ -296,6 +296,32 @@ fn hashes_in_nested_arrays_arrive_string_keyed_on_ruby() {
         .assert_passes();
 }
 
+// `expect(article: [… , k: [:a]])` filters `k` as one hash (oracle
+// `nested_permit2.rb`: "hash" mode). The controller rewrite turns the
+// `expect` into a `permit` marked `FROM_PARAMS_EXPECT` before the helper
+// is replaced, and the spec must still be found there.
+const EXPECT_HASH: &str = "      params.expect(article: [ :title, :body, settings: [ :theme ] ])\n";
+const THEME_WRITER: &str = "  has_many :comments, dependent: :destroy\n\n  def settings=(value)\n    self.body = body.to_s + \" theme=\" + value[\"theme\"].to_s\n  end\n";
+
+const EXPECT_HASH_TEST: &str = r#"
+  test "an expect hash key reaches the writer" do
+    post articles_url, params: { article: { title: "Theme", body: "A sufficiently long body for validation.",
+      settings: { theme: "dark", extra: "x" } } }
+    assert_equal "A sufficiently long body for validation. theme=dark", Article.last.body
+  end
+
+"#;
+
+#[test]
+fn an_expect_hash_key_reaches_the_writer_on_ruby() {
+    emit_and_run::real_blog()
+        .edit("app/models/article.rb", "  has_many :comments, dependent: :destroy\n", THEME_WRITER)
+        .edit("app/controllers/articles_controller.rb", "      params.expect(article: [ :title, :body ])\n", EXPECT_HASH)
+        .edit("test/controllers/articles_controller_test.rb", "  test \"should get new\" do\n", &format!("{EXPECT_HASH_TEST}  test \"should get new\" do\n"))
+        .run_test("test/controllers/articles_controller_test.rb")
+        .assert_passes();
+}
+
 /// A strict target's params record still holds Strings only: the key
 /// stays dropped there, with its warning; the ruby family carries it.
 #[test]
