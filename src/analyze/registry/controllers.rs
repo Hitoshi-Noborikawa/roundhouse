@@ -636,27 +636,29 @@ fn register_inertia(classes: &mut HashMap<ClassId, ClassInfo>, app_ctrl: &mut Cl
             page.instance_methods.insert(name.clone(), ty.clone());
         }
     }
-    // Phantom until controller_to_library rewrites to `prop_json`.
-    page.instance_methods.insert(
-        Symbol::from("prop"),
-        Ty::Fn {
-            params: vec![
-                crate::ty::Param {
-                    name: Symbol::from("key"),
-                    ty: Ty::Str.into(),
-                    kind: crate::ty::ParamKind::Required,
-                },
-                crate::ty::Param {
-                    name: Symbol::from("value"),
-                    ty: Ty::Untyped.into(),
-                    kind: crate::ty::ParamKind::Required,
-                },
-            ].into(),
-            block: None,
-            ret: std::sync::Arc::new(Ty::Nil),
-            effects: crate::effect::EffectSet::default(),
-        },
-    );
+    // Phantom until controller_to_library selects the runtime call.
+    for name in ["prop", "lazy_prop"] {
+        page.instance_methods.insert(
+            Symbol::from(name),
+            Ty::Fn {
+                params: vec![
+                    crate::ty::Param {
+                        name: Symbol::from("key"),
+                        ty: Ty::Str.into(),
+                        kind: crate::ty::ParamKind::Required,
+                    },
+                    crate::ty::Param {
+                        name: Symbol::from("value"),
+                        ty: Ty::Untyped.into(),
+                        kind: crate::ty::ParamKind::Required,
+                    },
+                ].into(),
+                block: None,
+                ret: std::sync::Arc::new(Ty::Nil),
+                effects: crate::effect::EffectSet::default(),
+            },
+        );
+    }
     if let Some(methods) = parsed.get(&ClassId(Symbol::from("ActionController::Base"))) {
         for (name, ty) in methods {
             app_ctrl.class_methods.insert(name.clone(), ty.clone());
