@@ -373,6 +373,15 @@ t.gone_attributes = { text: "new" }
 check("an id after a pending build", not_found { t.gone_attributes = { id: old.id, text: "x" } },
   "Couldn't find Gone with ID=#{old.id} for Owner with ID=#{t.id}")
 check("the old record untouched", Gone.where(id: old.id).map(&:text), ["old"])
+t.save!
+check("the rescued entry changed nothing: the build saves", [Gone.where(id: old.id).count, Gone.where(owner_id: t.id).map(&:text)], [0, ["new"]])
+t = Owner.create!(name: "t", gone_attributes: { text: "old" })
+old = Gone.where(owner_id: t.id).first
+t.gone_attributes = { id: old.id, text: "edited" }
+check("a wrong id after an update", not_found { t.gone_attributes = { id: 0, text: "x" } },
+  "Couldn't find Gone with ID=0 for Owner with ID=#{t.id}")
+t.save!
+check("the update still saves", Gone.find(old.id).text, "edited")
 t = Owner.create!(name: "t", gone_attributes: { text: "old" })
 old = Gone.where(owner_id: t.id).first
 t.gone_attributes = { text: "a", tag: "t" }
@@ -394,6 +403,8 @@ lt = Letter.create!(title: "l", writer_id: lw.id)
 lt.writer_attributes = { name: "new" }
 check("belongs_to: an id after a pending build", not_found { lt.writer_attributes = { id: lw.id, name: "x" } },
   "Couldn't find Writer with ID=#{lw.id} for Letter with ID=#{lt.id}")
+lt.save!
+check("belongs_to: the build still saves", [Writer.find(Letter.find(lt.id).writer_id).name, Writer.find(lw.id).name], ["new", "old"])
 lt = Letter.create!(title: "l", writer_id: lw.id)
 before = Writer.count
 lt.writer_attributes = { name: "a", tag: "t" }

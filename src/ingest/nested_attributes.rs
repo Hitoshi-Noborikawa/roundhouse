@@ -224,9 +224,11 @@ fn source(target: &Target) -> String {
         };
         // The record built is the association's target until the save,
         // as Rails' `build_<name>` makes it: a later entry without an `id`
-        // assigns to it, and one with an `id` matches nothing.
+        // assigns to it, and one with an `id` matches nothing. What is
+        // pending is reset only once the entry is accepted, so an entry
+        // that raises `RecordNotFound` changes nothing.
         format!(
-            "  def {name}_attributes=(attributes)\n    entry = attributes\n    built = {built}\n    {decode}    {ivar} = []\n    {doomed} = []\n    if id.nil? || id.to_s.empty?\n      unless destroy\n        if built.nil?\n          built = {class}.new(attrs)\n          {built} = built\n{replace_old}        else\n          attrs.each {{ |key, value| built[key] = value }}\n        end\n      end\n      {ivar} << built unless built.nil?\n    else\n      {not_found} unless built.nil?\n      existing = {name}\n      {not_found} if existing.nil? || existing.id.to_s != id.to_s\n      if destroy\n        {doomed} << existing\n      else\n        attrs.each {{ |key, value| existing[key] = value }}\n        {ivar} << existing\n      end\n    end\n  end\n\n"
+            "  def {name}_attributes=(attributes)\n    entry = attributes\n    built = {built}\n    {decode}    if id.nil? || id.to_s.empty?\n      {ivar} = []\n      {doomed} = []\n      unless destroy\n        if built.nil?\n          built = {class}.new(attrs)\n          {built} = built\n{replace_old}        else\n          attrs.each {{ |key, value| built[key] = value }}\n        end\n      end\n      {ivar} << built unless built.nil?\n    else\n      {not_found} unless built.nil?\n      existing = {name}\n      {not_found} if existing.nil? || existing.id.to_s != id.to_s\n      {ivar} = []\n      {doomed} = []\n      if destroy\n        {doomed} << existing\n      else\n        attrs.each {{ |key, value| existing[key] = value }}\n        {ivar} << existing\n      end\n    end\n  end\n\n"
         )
     };
     let skip_inverse = inverse
