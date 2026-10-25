@@ -10071,7 +10071,15 @@ pub(crate) fn apply_typed_writer_cast_lowering(lcs: &mut [LibraryClass], app: &A
             let Some(cast) = casts.get(&col) else { continue };
             let [param] = m.params.as_slice() else { continue };
             let param = param.name.clone();
-            let ExprNode::Assign { target: crate::expr::LValue::Ivar { name: ivar }, value } = &mut *m.body.node else {
+            // A defaulted attribute's writer is `@col = value; @col_default_applied = true`.
+            let assign = match &mut *m.body.node {
+                ExprNode::Seq { exprs } => match exprs.first_mut() {
+                    Some(first) => &mut *first.node,
+                    None => continue,
+                },
+                node => node,
+            };
+            let ExprNode::Assign { target: crate::expr::LValue::Ivar { name: ivar }, value } = assign else {
                 continue;
             };
             if *ivar != col {

@@ -546,6 +546,24 @@ pub(crate) fn attribute_matches_column(ty: &str, col: &crate::schema::Column) ->
 /// lowerer's `bool_reader_names` (a `:boolean` attribute is a bool
 /// reader for `f.check_box`) and the permit-writer filter (an
 /// `attribute` writer is assignable).
+/// `attribute :name, :type, default: v` beside the model's own `def name=`.
+/// Rails applies the default without that writer, and the writer's `super`
+/// reaches the attribute's generated one; here a source `def` replaces a
+/// generated writer or is dropped by it, so the declaration stays unclaimed
+/// and reported.
+pub(crate) fn default_beside_source_writer(body: &[ModelBodyItem], args: &[Expr]) -> bool {
+    let [name, _, options] = args else { return false };
+    let ExprNode::Lit { value: Literal::Sym { value: name } } = &*name.node else { return false };
+    if attribute_api_default(options).is_none() {
+        return false;
+    }
+    let setter = format!("{}=", name.as_str());
+    body.iter().any(|item| {
+        matches!(item, ModelBodyItem::Method { method, .. }
+            if method.name.as_str() == setter && method.receiver == MethodReceiver::Instance)
+    })
+}
+
 pub(crate) fn attribute_api_decls(body: &[ModelBodyItem]) -> Vec<(Symbol, Symbol)> {
     let mut out = Vec::new();
     for item in body {
@@ -553,7 +571,10 @@ pub(crate) fn attribute_api_decls(body: &[ModelBodyItem]) -> Vec<(Symbol, Symbol
         let ExprNode::Send { recv: None, method, args, block: None, .. } = &*expr.node else {
             continue;
         };
-        if method.as_str() != "attribute" || args.len() != 2 {
+        if method.as_str() != "attribute"
+            || !(args.len() == 2 || (args.len() == 3 && attribute_api_default(&args[2]).is_some()))
+            || default_beside_source_writer(body, args)
+        {
             continue;
         }
         let (
@@ -566,6 +587,61 @@ pub(crate) fn attribute_api_decls(body: &[ModelBodyItem]) -> Vec<(Symbol, Symbol
         out.push((name.clone(), ty.clone()));
     }
     out
+}
+
+/// The `default:` of a 3-arg `attribute :name, :type, default: v`, when
+/// this lowering reads it: `Some(None)` for `nil` (no default), `Some(Some(
+/// e))` for a literal (`true`, `false`, a number, a String, a Symbol) or a
+/// zero-arity lambda's body. `None` for any other option or default.
+pub(crate) fn attribute_api_default(options: &Expr) -> Option<Option<Expr>> {
+    let ExprNode::Hash { entries, .. } = &*options.node else { return None };
+    let [(key, value)] = entries.as_slice() else { return None };
+    if !matches!(&*key.node, ExprNode::Lit { value: Literal::Sym { value } } if value.as_str() == "default") {
+        return None;
+    }
+    match &*value.node {
+        ExprNode::Lit { value: Literal::Nil } => Some(None),
+        ExprNode::Lit {
+            value: Literal::Bool { .. } | Literal::Int { .. } | Literal::Float { .. } | Literal::Str { .. } | Literal::Sym { .. },
+        } => Some(Some(value.clone())),
+        ExprNode::Lambda { params, rest_param: None, extra_params, block_param: None, body, .. }
+            if params.is_empty() && extra_params.is_empty() =>
+        {
+            Some(Some(body.clone()))
+        }
+        _ => None,
+    }
+}
+
+/// Each `attribute :name, :type, default: v` with a default this lowering
+/// reads (`attribute_api_default`), as `(name, the literal or lambda body)`.
+pub(crate) fn attribute_api_defaults(body: &[ModelBodyItem]) -> Vec<(Symbol, Expr)> {
+    let mut out = Vec::new();
+    for item in body {
+        let ModelBodyItem::Unknown { expr, .. } = item else { continue };
+        let ExprNode::Send { recv: None, method, args, block: None, .. } = &*expr.node else {
+            continue;
+        };
+        if method.as_str() != "attribute" || args.len() != 3 || default_beside_source_writer(body, args) {
+            continue;
+        }
+        let ExprNode::Lit { value: Literal::Sym { value: name } } = &*args[0].node else { continue };
+        if let Some(Some(default)) = attribute_api_default(&args[2]) {
+            out.push((name.clone(), default));
+        }
+    }
+    out
+}
+
+/// The flag a defaulted attribute's reader and writer share: set once the
+/// default has been applied or the attribute written.
+pub(crate) fn default_applied_ivar(name: &Symbol) -> Symbol {
+    Symbol::from(format!("{}_default_applied", name.as_str()))
+}
+
+/// The class method that answers a model attribute's default.
+pub(crate) fn default_method_name(name: &Symbol) -> Symbol {
+    Symbol::from(format!("__default_{}", name.as_str()))
 }
 
 /// `attr` is an `attribute :attr, :boolean` whose reader and writer are the
@@ -595,15 +671,129 @@ fn nilable_bool() -> Ty {
     Ty::Union { variants: vec![Ty::Bool, Ty::Nil].into() }
 }
 
+/// Does the model body `def name` as an instance method?
+fn source_defines_reader(model: &Model, name: &Symbol) -> bool {
+    model.body.iter().any(|item| {
+        matches!(item, crate::dialect::ModelBodyItem::Method { method, .. }
+            if method.name == *name && method.receiver == MethodReceiver::Instance)
+    })
+}
+
 pub(super) fn push_attribute_api_methods(methods: &mut Vec<MethodDef>, model: &Model, runtime_relation: super::RuntimeRelation) {
     let keeps_nil = runtime_relation == super::RuntimeRelation::Present;
     let bool_ty = || if keeps_nil { nilable_bool() } else { Ty::Bool };
     if is_primary_abstract_class(model) {
         return;
     }
+    let defaults = attribute_api_defaults(&model.body);
     for (name, ty_sym) in attribute_api_decls(&model.body) {
         let is_bool = ty_sym.as_str() == "boolean";
         let setter = Symbol::from(format!("{}=", name.as_str()));
+        let default = defaults.iter().find(|(n, _)| *n == name).map(|(_, d)| d.clone());
+        // `attribute :x, :type, default: v` (Rails 8.1.4): the default is
+        // applied on the attribute's first read, through the writer (so it
+        // is cast as an assigned value is), and kept; a write before that
+        // read means it is never read. The value is a class method's body,
+        // so a lambda runs with the class as `self` and a String literal is
+        // a fresh String each time.
+        //
+        // A reader the model defines itself is what Rails reads, default or
+        // not. The default-applying reader would replace it (only a bare
+        // `@name` read yields to a source `def`), so that attribute keeps
+        // the plain reader instead.
+        if let Some(default) = &default
+            && !methods.iter().any(|m| m.name == name)
+            && !methods.iter().any(|m| m.name == setter)
+            && !source_defines_reader(model, &name)
+        {
+            let applied = default_applied_ivar(&name);
+            let default_method = default_method_name(&name);
+            methods.push(MethodDef {
+                visibility: crate::dialect::MethodVisibility::Public,
+                unsupported_formals: None,
+                has_anonymous_block: false,
+                name_span: crate::span::Span::synthetic(),
+                name: default_method.clone(),
+                receiver: MethodReceiver::Class,
+                params: Vec::new(),
+                body: default.clone(),
+                signature: None,
+                effects: EffectSet::default(),
+                enclosing_class: Some(model.name.0.clone()),
+                kind: AccessorKind::Method,
+                is_async: false,
+                mutates_self: false,
+                block_param: None,
+            });
+            let class_of_self = Expr::new(
+                Span::synthetic(),
+                ExprNode::Send {
+                    recv: Some(Expr::new(Span::synthetic(), ExprNode::SelfRef)),
+                    method: Symbol::from("class"),
+                    args: vec![],
+                    block: None,
+                    parenthesized: false,
+                },
+            );
+            let read_default = Expr::new(
+                Span::synthetic(),
+                ExprNode::Send { recv: Some(class_of_self), method: default_method, args: vec![], block: None, parenthesized: false },
+            );
+            let apply = Expr::new(
+                Span::synthetic(),
+                ExprNode::Send {
+                    recv: Some(Expr::new(Span::synthetic(), ExprNode::SelfRef)),
+                    method: setter.clone(),
+                    args: vec![read_default],
+                    block: None,
+                    parenthesized: false,
+                },
+            );
+            let not_applied = Expr::new(
+                Span::synthetic(),
+                ExprNode::Send {
+                    recv: Some(Expr::new(Span::synthetic(), ExprNode::Ivar { name: applied.clone() })),
+                    method: Symbol::from("!"),
+                    args: vec![],
+                    block: None,
+                    parenthesized: false,
+                },
+            );
+            let read = Expr::new(Span::synthetic(), ExprNode::Ivar { name: name.clone() });
+            let read = if is_bool { with_ty(read, bool_ty()) } else { read };
+            methods.push(MethodDef {
+                visibility: crate::dialect::MethodVisibility::Public,
+                unsupported_formals: None,
+                has_anonymous_block: false,
+                name_span: crate::span::Span::synthetic(),
+                name: name.clone(),
+                receiver: MethodReceiver::Instance,
+                params: Vec::new(),
+                body: Expr::new(
+                    Span::synthetic(),
+                    ExprNode::Seq {
+                        exprs: vec![
+                            Expr::new(
+                                Span::synthetic(),
+                                ExprNode::If {
+                                    cond: not_applied,
+                                    then_branch: apply,
+                                    else_branch: Expr::new(Span::synthetic(), ExprNode::Lit { value: Literal::Nil }),
+                                },
+                            ),
+                            read,
+                        ],
+                    },
+                ),
+                signature: if is_bool { Some(super::fn_sig(vec![], bool_ty())) } else { None },
+                effects: EffectSet::default(),
+                enclosing_class: Some(model.name.0.clone()),
+                kind: AccessorKind::AttributeReader,
+                is_async: false,
+                mutates_self: true,
+                block_param: None,
+            });
+        }
         if !methods.iter().any(|m| m.name == name) {
             methods.push(MethodDef {
                 visibility: crate::dialect::MethodVisibility::Public,
@@ -753,7 +943,19 @@ pub(super) fn push_attribute_api_methods(methods: &mut Vec<MethodDef>, model: &M
                 name: setter,
                 receiver: MethodReceiver::Instance,
                 params: vec![Param::positional(value)],
-                body,
+                // A defaulted attribute's write marks the default as read.
+                body: if default.is_some() {
+                    let mark = Expr::new(
+                        Span::synthetic(),
+                        ExprNode::Assign {
+                            target: LValue::Ivar { name: default_applied_ivar(&name) },
+                            value: Expr::new(Span::synthetic(), ExprNode::Lit { value: Literal::Bool { value: true } }),
+                        },
+                    );
+                    Expr::new(Span::synthetic(), ExprNode::Seq { exprs: vec![body, mark] })
+                } else {
+                    body
+                },
                 signature: None,
                 effects: EffectSet::default(),
                 enclosing_class: Some(model.name.0.clone()),

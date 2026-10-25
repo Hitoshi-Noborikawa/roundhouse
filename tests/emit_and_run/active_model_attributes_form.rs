@@ -231,3 +231,159 @@ fn an_attribute_over_an_array_column_keeps_the_array() {
     run.assert_passes();
     assert!(run.stdout.contains("attribute over array column passed"), "{}", run.stdout);
 }
+
+const DEFAULTS_FORM: &str = r#"class Form::Prefs
+  include ActiveModel::Model
+  include ActiveModel::Attributes
+
+  CALLS = []
+
+  attribute :flag, :boolean, default: true
+  attribute :limit, :integer, default: "12"
+  attribute :label, :string, default: "none"
+  attribute :stamp, :integer, default: -> { CALLS << :call; CALLS.size }
+  attribute :origin, :string, default: -> { name }
+end
+"#;
+
+/// `attribute … default:` on a model (Rails 8.1.4, the same on a tableless
+/// form and an ActiveRecord model): cast as an assigned value is; `new`
+/// with the key, even nil, wins; a String default is fresh per instance; a
+/// lambda is called on the first read, with the class as `self`, kept, and
+/// skipped by an earlier write or `new` key.
+const DEFAULTS_SCRIPT: &str = r##"
+require_relative "app/models/form/prefs"
+def check(label, got, want)
+  raise "#{label}: #{got.inspect} (want #{want.inspect})" unless got == want
+end
+p = Form::Prefs.new
+check("defaults", [p.flag, p.limit, p.label], [true, 12, "none"])
+check("new with nil", Form::Prefs.new(flag: nil).flag, nil)
+check("new with a value", Form::Prefs.new(limit: "3").limit, 3)
+check("fresh string", Form::Prefs.new.label.equal?(Form::Prefs.new.label), false)
+Form::Prefs::CALLS.clear
+o = Form::Prefs.new
+check("lambda not called by new", Form::Prefs::CALLS.size, 0)
+check("lambda on first read, kept", [o.stamp, o.stamp, Form::Prefs::CALLS.size], [1, 1, 1])
+Form::Prefs::CALLS.clear
+check("new key skips the lambda", [Form::Prefs.new(stamp: 5).stamp, Form::Prefs::CALLS.size], [5, 0])
+w = Form::Prefs.new
+w.stamp = 6
+check("write before read skips the lambda", [w.stamp, Form::Prefs::CALLS.size], [6, 0])
+check("lambda self is the class", Form::Prefs.new.origin, "Form::Prefs")
+puts "model attribute defaults passed"
+"##;
+
+fn defaults_form() -> emit_and_run::Overlay {
+    emit_and_run::real_blog().write("app/models/form/prefs.rb", DEFAULTS_FORM)
+}
+
+#[test]
+fn a_form_models_attribute_defaults_on_ruby() {
+    let run = defaults_form().run_ruby(DEFAULTS_SCRIPT);
+    run.assert_passes();
+    assert!(run.stdout.contains("model attribute defaults passed"), "{}", run.stdout);
+}
+
+#[test]
+#[ignore = "requires the Spinel toolchain"]
+fn a_form_models_attribute_defaults_on_spinel() {
+    let run = defaults_form().run_spinel(DEFAULTS_SCRIPT);
+    run.assert_passes();
+    assert!(run.stdout.contains("model attribute defaults passed"), "{}", run.stdout);
+}
+
+const RECORD_DEFAULTS_SCRIPT: &str = r##"
+def check(label, got, want)
+  raise "#{label}: #{got.inspect} (want #{want.inspect})" unless got == want
+end
+a = Article.new(title: "Typed", body: "A body long enough to validate.")
+check("defaults", [a.flag, a.rank], [true, 12])
+check("new with nil", Article.new(flag: nil).flag, nil)
+check("new with a value", Article.new(rank: "3").rank, 3)
+puts "ActiveRecord attribute defaults passed"
+"##;
+
+#[test]
+fn a_records_attribute_defaults_on_ruby() {
+    let run = emit_and_run::real_blog()
+        .edit(
+            "app/models/article.rb",
+            "class Article < ApplicationRecord\n  has_many :comments, dependent: :destroy\n",
+            "class Article < ApplicationRecord\n  has_many :comments, dependent: :destroy\n  attribute :rank, :integer, default: \"12\"\n  attribute :flag, :boolean, default: true\n",
+        )
+        .run_ruby(RECORD_DEFAULTS_SCRIPT);
+    run.assert_passes();
+    assert!(run.stdout.contains("ActiveRecord attribute defaults passed"), "{}", run.stdout);
+}
+
+// A model's own reader next to a defaulted attribute (activerecord
+// 8.1.4, oracle `cr-oracle.rb`) is what's read, default or not.
+const SOURCE_READER_SCRIPT: &str = r##"
+def check(label, got, want)
+  raise "#{label}: #{got.inspect} (want #{want.inspect})" unless got == want
+end
+check("the source reader over the default", Article.new.label, "source label")
+check("the source reader after a write", Article.new(label: "x").label, "source label")
+puts "source reader passed"
+"##;
+
+#[test]
+fn a_source_reader_beside_a_default_on_ruby() {
+    let run = emit_and_run::real_blog()
+        .edit(
+            "app/models/article.rb",
+            "class Article < ApplicationRecord\n  has_many :comments, dependent: :destroy\n",
+            "class Article < ApplicationRecord\n  has_many :comments, dependent: :destroy\n  attribute :label, :string, default: \"none\"\n\n  def label\n    \"source label\"\n  end\n",
+        )
+        .run_ruby(SOURCE_READER_SCRIPT);
+    run.assert_passes();
+    assert!(run.stdout.contains("source reader passed"), "{}", run.stdout);
+}
+
+// Two `default:` declarations this lowering doesn't model, so they stay
+// reported rather than claimed and dropped: one over an existing column
+// (Rails makes it the column's default), and one whose writer the model
+// defines (Rails' default skips that writer, and the writer's `super`
+// has no generated method to reach here).
+fn reported_default(decl: &str) -> Vec<String> {
+    static RUN: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let n = RUN.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    let root = std::env::temp_dir().join(format!("roundhouse-reported-default-{}-{n}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let source = root.join("app");
+    std::fs::create_dir_all(&root).unwrap();
+    assert!(std::process::Command::new("cp").args(["-a"]).arg(roundhouse::fixtures::real_blog()).arg(&source).status().unwrap().success());
+    let model = std::fs::read_to_string(source.join("app/models/article.rb")).unwrap().replacen(
+        "class Article < ApplicationRecord\n  has_many :comments, dependent: :destroy\n",
+        &format!("class Article < ApplicationRecord\n  has_many :comments, dependent: :destroy\n{decl}"),
+        1,
+    );
+    std::fs::write(source.join("app/models/article.rb"), model).unwrap();
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_roundhouse"))
+        .args(["--target", "ruby", "--allow-unsupported", "-o"])
+        .arg(root.join("out"))
+        .arg(&source)
+        .output()
+        .unwrap();
+    let _ = std::fs::remove_dir_all(&root);
+    String::from_utf8_lossy(&out.stderr)
+        .lines()
+        .filter(|l| l.contains("attribute not supported") && l.contains("not lowered"))
+        .map(str::to_string)
+        .collect()
+}
+
+#[test]
+fn a_default_over_a_column_is_reported() {
+    let warnings = reported_default("  attribute :title, :string, default: \"untitled\"\n");
+    assert_eq!(warnings.len(), 1, "{warnings:?}");
+}
+
+#[test]
+fn a_default_beside_a_source_writer_is_reported() {
+    let warnings = reported_default(
+        "  attribute :mood, :string, default: \"calm\"\n\n  def mood=(v)\n    super(v.to_s.upcase)\n  end\n",
+    );
+    assert_eq!(warnings.len(), 1, "{warnings:?}");
+}

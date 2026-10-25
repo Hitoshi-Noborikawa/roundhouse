@@ -1777,6 +1777,32 @@ fn report_builtin_aliases(app: &App, target: BuildTarget) {
     }
 }
 
+/// `attribute :x, :type, default: v` on a model: the ruby family's lazy,
+/// cast default is verified there (`tests/emit_and_run/
+/// active_model_attributes_form.rs`); a strict target emits the same IR
+/// without the casts its runtime lacks, so the declaration is reported.
+fn report_model_attribute_defaults(app: &App, target: BuildTarget) {
+    if matches!(
+        target,
+        BuildTarget::Blog | BuildTarget::Ruby | BuildTarget::Jruby | BuildTarget::Spinel | BuildTarget::Roda | BuildTarget::Futamura
+    ) {
+        return;
+    }
+    for model in &app.models {
+        for (name, default) in crate::lower::model_to_library::markers::attribute_api_defaults(&model.body) {
+            let mut d = crate::diagnostic::Diagnostic::unsupported(
+                default.span,
+                Some(crate::ident::Symbol::from(target.as_str())),
+                format!("attribute :{}, default:", name.as_str()),
+                "the default is read on first access and cast on the ruby family; this target's lowering is not verified",
+            );
+            d.severity = crate::diagnostic::Severity::Warning;
+            emit::diagnostics::push(d);
+        }
+    }
+}
+
+
 fn report_ruby_only_sends(app: &App, target: BuildTarget) {
     if matches!(target, BuildTarget::Blog | BuildTarget::Ruby | BuildTarget::Jruby
         | BuildTarget::Spinel | BuildTarget::Roda) {
@@ -2308,6 +2334,7 @@ fn target_files_inner(
     report_native_ruby_syntax(app, target);
     report_self_bindings(app, target);
     report_ruby_only_sends(app, target);
+    report_model_attribute_defaults(app, target);
     report_builtin_aliases(app, target);
     report_dynamic_association_joins(app, target);
     report_typescript_array_sends(app, target);
