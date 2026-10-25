@@ -217,7 +217,9 @@ fn source(target: &Target) -> String {
         let build = if *replace == Replace::No {
             format!("      {ivar} << {class}.new(attrs) unless destroy\n")
         } else {
-            format!("      unless destroy\n        {ivar} << {class}.new(attrs)\n        {replaced} = {name}\n      end\n")
+            // A new owner has no record to replace: Rails' reader answers
+            // nil without a query, where ours would match a row keyed 0.
+            format!("      unless destroy\n        {ivar} << {class}.new(attrs)\n        {replaced} = {name} unless new_record?\n      end\n")
         };
         format!(
             "  def {name}_attributes=(attributes)\n    entry = attributes\n    {ivar} = []\n    {doomed} = []\n    {decode}    if id.nil? || id.to_s.empty?\n{build}    else\n      existing = {name}\n      {not_found} if existing.nil? || existing.id.to_s != id.to_s\n      if destroy\n        {doomed} << existing\n      else\n        attrs.each {{ |key, value| existing[key] = value }}\n        {ivar} << existing\n      end\n    end\n  end\n\n"

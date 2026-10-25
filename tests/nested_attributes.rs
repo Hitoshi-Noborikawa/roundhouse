@@ -276,11 +276,11 @@ fn nested_attributes_over_polymorphic_as_on_spinel() {
     run.assert_passes();
     assert!(run.stdout.contains("nested polymorphic passed"), "{}", run.stdout);
 }
-const REPLACE_TABLES: &str = "  create_table \"owners\", force: :cascade do |t|\n    t.string \"name\"\n  end\n\n  create_table \"gones\", force: :cascade do |t|\n    t.integer \"owner_id\"\n    t.string \"text\"\n  end\n\n  create_table \"wipes\", force: :cascade do |t|\n    t.integer \"owner_id\"\n    t.string \"text\"\n  end\n\n  create_table \"kepts\", force: :cascade do |t|\n    t.integer \"owner_id\"\n    t.string \"text\"\n  end\n\n  create_table \"plains\", force: :cascade do |t|\n    t.integer \"owner_id\"\n    t.string \"text\"\n  end\n\n  create_table \"stucks\", force: :cascade do |t|\n    t.integer \"owner_id\"\n    t.string \"text\"\n  end\n\n  create_table \"folks\", force: :cascade do |t|\n    t.string \"name\"\n  end\n\n  create_table \"spots\", force: :cascade do |t|\n    t.string \"line\"\n    t.string \"addressable_type\"\n    t.integer \"addressable_id\"\n  end\n\n  create_table \"writers\", force: :cascade do |t|\n    t.string \"name\"\n  end\n\n  create_table \"letters\", force: :cascade do |t|\n    t.string \"title\"\n    t.integer \"writer_id\"\n  end\n\n  create_table \"comments\", force: :cascade do |t|";
+const REPLACE_TABLES: &str = "  create_table \"owners\", force: :cascade do |t|\n    t.string \"name\"\n  end\n\n  create_table \"gones\", force: :cascade do |t|\n    t.integer \"owner_id\"\n    t.string \"text\"\n  end\n\n  create_table \"wipes\", force: :cascade do |t|\n    t.integer \"owner_id\"\n    t.string \"text\"\n  end\n\n  create_table \"kepts\", force: :cascade do |t|\n    t.integer \"owner_id\"\n    t.string \"text\"\n  end\n\n  create_table \"plains\", force: :cascade do |t|\n    t.integer \"owner_id\"\n    t.string \"text\"\n  end\n\n  create_table \"stucks\", force: :cascade do |t|\n    t.integer \"owner_id\"\n    t.string \"text\"\n  end\n\n  create_table \"shields\", force: :cascade do |t|\n    t.integer \"owner_id\"\n    t.string \"text\"\n  end\n\n  create_table \"folks\", force: :cascade do |t|\n    t.string \"name\"\n  end\n\n  create_table \"spots\", force: :cascade do |t|\n    t.string \"line\"\n    t.string \"addressable_type\"\n    t.integer \"addressable_id\"\n  end\n\n  create_table \"writers\", force: :cascade do |t|\n    t.string \"name\"\n  end\n\n  create_table \"letters\", force: :cascade do |t|\n    t.string \"title\"\n    t.integer \"writer_id\"\n  end\n\n  create_table \"comments\", force: :cascade do |t|";
 
 fn replace_app() -> emit_and_run::Overlay {
     let mut app = emit_and_run::real_blog().edit("db/schema.rb", TABLES, REPLACE_TABLES);
-    for (class, required) in [("Gone", true), ("Wipe", true), ("Kept", false), ("Plain", false), ("Stuck", true)] {
+    for (class, required) in [("Gone", false), ("Wipe", false), ("Kept", false), ("Plain", false), ("Stuck", true)] {
         let optional = if required { "" } else { ", optional: true" };
         app = app.write(
             &format!("app/models/{}.rb", class.to_lowercase()),
@@ -289,13 +289,17 @@ fn replace_app() -> emit_and_run::Overlay {
     }
     app.write(
         "app/models/owner.rb",
-        "class Owner < ApplicationRecord\n  has_one :gone, dependent: :destroy\n  has_one :wipe, dependent: :delete\n  has_one :kept, dependent: :nullify\n  has_one :plain\n  has_one :stuck\n  accepts_nested_attributes_for :gone, :wipe, :kept, :plain, :stuck\nend\n",
+        "class Owner < ApplicationRecord\n  has_one :gone, dependent: :destroy\n  has_one :wipe, dependent: :delete\n  has_one :kept, dependent: :nullify\n  has_one :plain\n  has_one :stuck\n  has_one :shield, dependent: :destroy\n  accepts_nested_attributes_for :gone, :wipe, :kept, :plain, :stuck, :shield\nend\n",
     )
     .write(
         "app/models/folk.rb",
         "class Folk < ApplicationRecord\n  has_one :home, as: :addressable, class_name: \"Spot\", dependent: :destroy\n  has_one :spare, as: :addressable, class_name: \"Spot\"\n  accepts_nested_attributes_for :home, :spare\nend\n",
     )
     .write("app/models/spot.rb", "class Spot < ApplicationRecord\n  belongs_to :addressable, polymorphic: true, optional: true\nend\n")
+    .write(
+        "app/models/shield.rb",
+        "class Shield < ApplicationRecord\n  belongs_to :owner, optional: true\n  before_destroy :guard\n\n  def guard\n    throw :abort if text == \"keep\"\n  end\nend\n",
+    )
     .write("app/models/writer.rb", "class Writer < ApplicationRecord\nend\n")
     .write(
         "app/models/letter.rb",
@@ -342,6 +346,21 @@ l = Letter.create!(title: "t", writer_id: w.id)
 check("a required belongs_to marked for destruction fails", l.update(writer_attributes: { id: w.id, _destroy: "1" }), false)
 check("its error", l.errors.include?("Writer must exist"), true)
 check("the record and key kept", [Writer.where(id: w.id).count, Letter.find(l.id).writer_id], [1, w.id])
+orphans = [Gone, Wipe, Kept, Plain].flat_map { |k| [k.create!(text: "orphan"), k.create!(text: "zero", owner_id: 0)] }
+spot = Spot.create!(line: "orphan")
+zero_spot = Spot.create!(line: "zero", addressable_type: "Folk", addressable_id: 0)
+fresh = Owner.new(name: "fresh", gone_attributes: { text: "n" }, wipe_attributes: { text: "n" },
+  kept_attributes: { text: "n" }, plain_attributes: { text: "n" })
+check("a new owner saves", fresh.save, true)
+check("rows with a nil or 0 key survive a new owner", orphans.map { |r| r.class.where(id: r.id).map(&:owner_id) },
+  [[nil], [0]] * 4)
+nf = Folk.new(name: "nf", home_attributes: { line: "n" })
+nf.save!
+check("as: rows with a nil or 0 key survive a new owner", [spot, zero_spot].map { |r| Spot.where(id: r.id).map(&:addressable_id) }, [[nil], [0]])
+sh = Owner.create!(name: "sh", shield_attributes: { text: "keep" })
+kept_shield = Shield.where(owner_id: sh.id).first
+check("an old record whose destroy aborts: the update succeeds", sh.update(shield_attributes: { text: "new" }), true)
+check("both rows stay, as in Rails", Shield.where(owner_id: sh.id).map(&:text).sort, ["keep", "new"])
 puts "nested replace passed"
 "##;
 
