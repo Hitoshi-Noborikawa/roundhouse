@@ -634,7 +634,9 @@ fn dynamic_add(expr: &mut Expr, labels: &Labels) -> bool {
 /// `ErrorTables.<table>(<record>.class.name)`, the record's model's table.
 fn table_call(span: crate::span::Span, table: &str, owner: Option<Expr>) -> Expr {
     let record = owner.unwrap_or_else(|| Expr::new(span, ExprNode::SelfRef));
-    let class = Expr::new(span, ExprNode::Send { recv: Some(record), method: Symbol::from("class"), args: vec![], block: None, parenthesized: false });
+    // Stamped: a record of no known type (a Devise `resource`) still answers `class`.
+    let mut class = Expr::new(span, ExprNode::Send { recv: Some(record), method: Symbol::from("class"), args: vec![], block: None, parenthesized: false });
+    class.ty = Some(crate::ty::Ty::Class { id: crate::ident::ClassId(Symbol::from("Class")), args: vec![].into() });
     let mut name = Expr::new(span, ExprNode::Send { recv: Some(class), method: Symbol::from("name"), args: vec![], block: None, parenthesized: false });
     name.ty = Some(crate::ty::Ty::Str);
     let mut tables = Expr::new(span, ExprNode::Const { path: vec![Symbol::from("ErrorTables")] });
