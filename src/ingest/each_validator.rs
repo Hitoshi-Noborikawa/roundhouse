@@ -29,7 +29,8 @@
 //! rather than once per declaration, which only a validator keeping state
 //! between calls would notice, and its `options` hold the key's own
 //! options without the conditions and `allow_nil:` / `allow_blank:`.
-//! A shape this doesn't take (`strict:`, a non-literal `allow_nil:`)
+//! A shape this doesn't take (`strict:`, a non-literal `allow_nil:`, a key
+//! whose value is a constant or a call, which Rails classifies by its class)
 //! keeps the call the reported gap, as do strict targets ([`refuse`]).
 
 use std::cell::RefCell;
@@ -236,8 +237,11 @@ enum KeyValue {
     Off,
     /// A Hash: its options, conditions and `allow_*`, as the call's.
     Hash { options: Vec<String>, conditions: Vec<(String, String)>, allow_nil: Option<bool>, allow_blank: Option<bool> },
-    /// Any other value: `in:` for an Array, else `with:`.
+    /// Any other value: `in:` for an Array or a Range, else `with:`.
     Value(String),
+    /// A constant or a call: Rails picks by its class at run time (a Hash
+    /// is the options, an Array `in:`), which isn't known here.
+    Dynamic,
 }
 
 fn shape(text: &str) -> Option<Shape> {
@@ -292,16 +296,32 @@ fn shape(text: &str) -> Option<Shape> {
                         }
                     }
                     KeyValue::Hash { options, conditions, allow_nil, allow_blank }
-                } else if value.as_array_node().is_some() {
+                } else if value.as_array_node().is_some() || value.as_range_node().is_some() {
+                    // Rails' `_parse_validates_options`: a Range or an Array is `in:`.
                     KeyValue::Value(format!("in: {}", slice(value.location())?))
-                } else {
+                } else if literal_with(&value) {
                     KeyValue::Value(format!("with: {}", slice(value.location())?))
+                } else {
+                    KeyValue::Dynamic
                 };
                 shape.keys.push((key, kind));
             }
         }
     }
     Some(shape)
+}
+
+/// A literal that is neither a Hash, an Array nor a Range: Rails passes it
+/// as `with:`.
+fn literal_with(node: &ruby_prism::Node<'_>) -> bool {
+    node.as_string_node().is_some()
+        || node.as_interpolated_string_node().is_some()
+        || node.as_symbol_node().is_some()
+        || node.as_integer_node().is_some()
+        || node.as_float_node().is_some()
+        || node.as_regular_expression_node().is_some()
+        || node.as_interpolated_regular_expression_node().is_some()
+        || node.as_lambda_node().is_some()
 }
 
 fn literal_bool(node: &ruby_prism::Node<'_>) -> Option<bool> {
@@ -338,6 +358,7 @@ fn generated_source(call: &EachValidatorCall, owner: &str, counter: &mut usize) 
         let (mut allow_nil, mut allow_blank) = (shape.allow_nil, shape.allow_blank);
         let options: Vec<String> = match value {
             KeyValue::Off => continue,
+            KeyValue::Dynamic => return None,
             KeyValue::Bare => Vec::new(),
             KeyValue::Value(option) => vec![option.clone()],
             KeyValue::Hash { options, conditions: own, allow_nil: nil, allow_blank: blank } => {

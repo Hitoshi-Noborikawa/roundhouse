@@ -184,3 +184,58 @@ fn the_ruby_family_reports_no_key() {
     let (_items, warnings) = lowered_entry(BuildTarget::Ruby);
     assert!(warnings.is_empty(), "{warnings:#?}");
 }
+
+// Review of #1381 (oracle `cr_oracle.rb`). Rails' `_parse_validates_options`
+// passes a Range as `in:`, as an Array.
+const SIZE: &str = "class SizeValidator < ActiveModel::EachValidator\n  def validate_each(record, attribute, value)\n    record.errors.add(attribute, \"options \" + options.inspect)\n  end\nend\n";
+
+#[test]
+fn a_range_value_is_in_on_ruby() {
+    let run = emit_and_run::real_blog()
+        .edit("db/schema.rb", SCHEMA_ANCHOR, SCHEMA)
+        .write("app/validators/size_validator.rb", SIZE)
+        .write("app/models/entry.rb", "class Entry < ApplicationRecord\n  validates :title, size: 1..5\nend\n")
+        .run_ruby("e = Entry.new\ne.valid?\nraise e.errors.inspect unless e.errors == [\"Title options {in: 1..5}\"]\nputs \"range passed\"\n");
+    run.assert_passes();
+    assert!(run.stdout.contains("range passed"), "{}", run.stdout);
+}
+
+// A constant or a call is classified by its class at run time (a Hash is
+// the options, an Array `in:`), which the build doesn't know: the call
+// stays reported.
+#[test]
+fn a_key_whose_value_is_a_constant_stays_reported() {
+    let warnings = lowered_warnings(
+        &[
+            ("app/validators/size_validator.rb", SIZE),
+            ("app/models/entry.rb", "class Entry < ApplicationRecord\n  OPTIONS = { max: 3 }\n  validates :title, size: OPTIONS\nend\n"),
+        ],
+        BuildTarget::Ruby,
+    );
+    assert!(
+        warnings.iter().any(|w| w.contains("validates :title, size:") && w.contains("validation option not lowered")),
+        "{warnings:#?}"
+    );
+}
+
+/// The `validates` warnings ingest and `target`'s lowering give for the
+/// blog with `files` written over it.
+fn lowered_warnings(files: &[(&str, &str)], target: BuildTarget) -> Vec<String> {
+    let root = std::env::temp_dir().join(format!("roundhouse-each-validator-w-{}-{}", std::process::id(), files.len()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).unwrap();
+    let source = root.join("app");
+    assert!(std::process::Command::new("cp").args(["-a"]).arg(roundhouse::fixtures::real_blog()).arg(&source).status().unwrap().success());
+    let schema = std::fs::read_to_string(source.join("db/schema.rb")).unwrap().replacen(SCHEMA_ANCHOR, SCHEMA, 1);
+    std::fs::write(source.join("db/schema.rb"), schema).unwrap();
+    for (path, text) in files {
+        let full = source.join(path);
+        std::fs::create_dir_all(full.parent().unwrap()).unwrap();
+        std::fs::write(full, text).unwrap();
+    }
+    let (app, ingest) = roundhouse::ingest::prism::scope(|| roundhouse::ingest::ingest_app(&source));
+    let mut app = app.expect("ingest");
+    let lowered = roundhouse::session::analyze_and_lower_for(&mut app, target);
+    std::fs::remove_dir_all(&root).ok();
+    ingest.into_iter().chain(lowered).map(|d| d.message).filter(|m| m.contains("validates :")).collect()
+}
