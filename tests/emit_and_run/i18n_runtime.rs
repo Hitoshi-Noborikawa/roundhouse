@@ -89,5 +89,5 @@ fn a_template_key_from_the_request_is_looked_up_and_escaped() {
 #[test]
 fn a_translation_known_only_when_it_runs_is_unsupported_on_strict_targets() {
     let (_emitted, errors) = runtime_app().emit(roundhouse::project::BuildTarget::Rust);
-    assert!(errors.iter().any(|e| e.contains("only the Ruby-family runtime carries")), "{errors:#?}");
+    assert!(errors.iter().any(|e| e.contains("this target's runtime carries the locale-chosen table, not the catalog")), "{errors:#?}");
 }
