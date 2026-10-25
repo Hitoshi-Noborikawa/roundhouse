@@ -19,7 +19,7 @@
 //!
 //! ```ruby
 //! def __validates_each_article_1
-//!   __validator = SlugValidator.new(attributes: [:slug], reserved: %w[admin new])
+//!   __validator = ::SlugValidator.new(attributes: [:slug], reserved: %w[admin new])
 //!   __validator.validate_each(self, :slug, self.slug)
 //! end
 //! validate :__validates_each_article_1, if: -> { … }
@@ -375,7 +375,10 @@ fn generated_source(call: &EachValidatorCall, owner: &str, counter: &mut usize) 
         *counter += 1;
         let name = format!("__validates_each_{owner}_{counter}");
         let built = std::iter::once(format!("attributes: [{attrs}]")).chain(options).collect::<Vec<_>>().join(", ");
-        out.push_str(&format!("  def {name}\n    __validator = {class}.new({built})\n"));
+        // Root-qualified: the class is the one Rails' lookup found, and a
+        // bare name inside a model nested in a module would resolve
+        // lexically, to that module's class of the name first.
+        out.push_str(&format!("  def {name}\n    __validator = ::{class}.new({built})\n"));
         for attr in &shape.attrs {
             let guard = if allow_blank {
                 format!(" unless ActiveSupport.blank?(self.{attr})")

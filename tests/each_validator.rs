@@ -218,6 +218,21 @@ fn a_key_whose_value_is_a_constant_stays_reported() {
     );
 }
 
+// The class reference is root-qualified: in a model inside a module, a
+// bare name would find the module's class of that name, which Rails'
+// lookup doesn't consult (oracle: "top mark").
+#[test]
+fn a_model_in_a_module_gets_the_top_level_validator_on_ruby() {
+    let run = emit_and_run::real_blog()
+        .edit("db/schema.rb", SCHEMA_ANCHOR, SCHEMA)
+        .write("app/validators/mark_validator.rb", &marker("MarkValidator", "top mark"))
+        .write("app/models/shop/mark_validator.rb", &marker("Shop::MarkValidator", "module mark"))
+        .write("app/models/shop/item.rb", "module Shop\n  class Item < ApplicationRecord\n    self.table_name = \"entries\"\n    validates :title, mark: true\n  end\nend\n")
+        .run_ruby("i = Shop::Item.new\ni.valid?\nraise i.errors.inspect unless i.errors == [\"Title top mark\"]\nputs \"module passed\"\n");
+    run.assert_passes();
+    assert!(run.stdout.contains("module passed"), "{}", run.stdout);
+}
+
 /// The `validates` warnings ingest and `target`'s lowering give for the
 /// blog with `files` written over it.
 fn lowered_warnings(files: &[(&str, &str)], target: BuildTarget) -> Vec<String> {
