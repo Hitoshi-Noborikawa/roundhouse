@@ -187,7 +187,7 @@ end
     // Rails' collection cache: each element is its own key, under the
     // controller's combined_fragment_cache_key, read in one read_multi.
     assert!(
-        body.contains("collection_fragment_key(\"articles/article\", __ck_item_"),
+        body.contains("collection_fragment_key(\"articles/_article\", __ck_item_"),
         "each element keys its own fragment, as an object:\n{body}"
     );
     assert!(
@@ -269,7 +269,7 @@ end
         .chars()
         .take_while(char::is_ascii_digit)
         .collect();
-    let append = format!("__ck_keys_{n} << ActionView::ViewHelpers.collection_fragment_key(\"articles/article\", __ck_item_{n})");
+    let append = format!("__ck_keys_{n} << ActionView::ViewHelpers.collection_fragment_key(\"articles/_article\", __ck_item_{n})");
     let after_append = body[open..]
         .find(&append)
         .map(|i| open + i + append.len())

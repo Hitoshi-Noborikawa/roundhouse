@@ -370,7 +370,7 @@ fn named_collection_item_render(
 /// if ActionView::ViewHelpers.collection_caching?
 ///   c.preload_associations(c.to_a) if c.respond_to?(:preload_associations)
 ///   keys = []
-///   c.each { |item| keys << ActionView::ViewHelpers.collection_fragment_key("x/y", <key>) }
+///   c.each { |item| keys << ActionView::ViewHelpers.collection_fragment_key("x/_y", <key>) }
 ///   hits = ActionView::ViewHelpers.collection_fragment_read_multi(keys)
 ///   i = 0
 ///   c.each do |y|
@@ -473,6 +473,16 @@ fn wrap_keyed_cached_collection(
         },
     );
 
+    // Rails keys each element under the partial's TEMPLATE
+    // (`messages/_message`, its digest path), the same name the
+    // partial's own `<% cache message do %>` uses (`ctx.view_name`,
+    // `walker::record_cache_key`). Keyed by the render's spelling
+    // (`messages/message`), a miss rendered the partial and its block
+    // filed a second copy under its own name that nothing read.
+    let template = match partial.rsplit_once('/') {
+        Some((dir, base)) => format!("{dir}/_{}", base.trim_start_matches('_')),
+        None => format!("{}/_{}", ctx.resource_dir, partial.trim_start_matches('_')),
+    };
     let build_keys = send(
         Some(var_ref(coll.clone())),
         "each",
@@ -485,7 +495,7 @@ fn wrap_keyed_cached_collection(
                     "<<",
                     vec![view_helpers_call(
                         "collection_fragment_key",
-                        vec![str_lit(partial), body.clone()],
+                        vec![str_lit(&template), body.clone()],
                     )],
                     None,
                     false,

@@ -146,6 +146,21 @@ module ActionView
       ActionView::ViewHelpers.fragment_controller.write_fragment(ActionView::ViewHelpers.fragment_name(key), value, ttl)
     end
 
+    # `<% cache record do %>`: Rails' CacheHelper hands the controller
+    # `cache_fragment_name(record, digest_path:)`, which is `[template,
+    # record]`, and the controller combines it. So an app's
+    # `combined_fragment_cache_key` sees the record itself (campfire
+    # shares a message's fragment across viewers only when it does), and
+    # the key is the one a `cached: true` collection of the same partial
+    # files the fragment under (`collection_fragment_key`).
+    def self.fragment_read_record(template, record)
+      ActionView::ViewHelpers.fragment_controller.read_fragment([ template, record ])
+    end
+
+    def self.fragment_write_record(template, record, value, ttl)
+      ActionView::ViewHelpers.fragment_controller.write_fragment([ template, record ], value, ttl)
+    end
+
     # Rails' `CollectionCaching#will_cache?`: the rendering controller's
     # `perform_caching`.
     def self.collection_caching?

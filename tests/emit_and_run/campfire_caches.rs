@@ -288,6 +288,87 @@ end
         .assert_passes();
 }
 
+/// `<% cache article do %>` inside a partial that a `cached: true`
+/// collection renders, as campfire's `messages/_message` is: Rails keys
+/// both by `[template, record]` (`messages/_message`, the record), so
+/// a collection miss files ONE fragment per element, and the app's
+/// `combined_fragment_cache_key` sees the record (campfire shares a
+/// message's fragment across viewers only then). The emit used to key
+/// the collection by the render's spelling (`fragments/article`) and
+/// the block by text, so every miss filed a second copy nothing read.
+#[test]
+fn a_cached_collection_and_its_partials_cache_block_share_one_fragment() {
+    contract::fragments_overlay()
+        .edit(
+            "config/routes.rb",
+            "  get \"/fragments/:id\", to: \"fragments#show\"\n",
+            "  get \"/fragments\", to: \"fragments#index\"\n  get \"/fragments/:id\", to: \"fragments#show\"\n",
+        )
+        .edit(
+            "app/controllers/fragments_controller.rb",
+            "  EPOCH = [ 0 ]\n",
+            "  EPOCH = [ 0 ]\n  RECORD_KEYS = []\n",
+        )
+        .edit(
+            "app/controllers/fragments_controller.rb",
+            "    super([ EPOCH.length, key ])\n",
+            "    RECORD_KEYS.push(key.is_a?(Array) && key.any? { |part| part.is_a?(Article) })\n    super([ EPOCH.length, key ])\n",
+        )
+        .edit(
+            "app/controllers/fragments_controller.rb",
+            "  def show\n",
+            "  def index\n    @articles = Article.order(:id)\n  end\n\n  def show\n",
+        )
+        .write(
+            "app/views/fragments/index.html.erb",
+            "<%= render partial: \"fragments/article\", collection: @articles, cached: true %>\n",
+        )
+        .write(
+            "app/views/fragments/_article.html.erb",
+            "<% cache article do %><p><%= article.title %></p><% end %>\n",
+        )
+        .write(
+            "test/controllers/fragments_controller_test.rb",
+            r#"require "test_helper"
+
+class FragmentsControllerTest < ActionDispatch::IntegrationTest
+  setup do
+    @first = Article.create!(title: "First", body: "A sufficiently long article body.")
+    @second = Article.create!(title: "Second", body: "A sufficiently long article body.")
+    # Past the length the collection renders uncached (MAX_UNCACHED_COLLECTION_LENGTH).
+    8.times { |i| Article.create!(title: "More #{i}", body: "A sufficiently long article body.") }
+    FragmentsController::STORE.clear
+    FragmentsController::RECORD_KEYS.clear
+    @previous_collection_cache = ActionView::PartialRenderer.collection_cache
+    ActionView::PartialRenderer.collection_cache = FragmentsController::STORE
+    ActionController::Base.perform_caching = true
+  end
+
+  teardown do
+    ActionController::Base.perform_caching = false
+    ActionView::PartialRenderer.collection_cache = @previous_collection_cache
+    FragmentsController::STORE.clear
+  end
+
+  test "a collection miss files one fragment per element, keyed by the record" do
+    get "/fragments"
+    assert_includes response.body, "First"
+    assert_includes response.body, "Second"
+    assert_includes FragmentsController::STORE.inspect, "entries=#{Article.count},"
+    assert FragmentsController::RECORD_KEYS.any?
+    assert FragmentsController::RECORD_KEYS.all?
+
+    ActiveRecord::Base.connection.execute("UPDATE articles SET title = 'Changed' WHERE id = #{@first.id}")
+    get "/fragments"
+    assert_includes response.body, "First"
+  end
+end
+"#,
+        )
+        .run_test("test/controllers/fragments_controller_test.rb")
+        .assert_passes();
+}
+
 #[test]
 fn qr_code_capacity_error_is_rescued_by_name() {
     contract::qr_code_overlay()

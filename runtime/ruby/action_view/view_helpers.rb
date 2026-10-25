@@ -290,6 +290,18 @@ module ActionView
       value
     end
 
+    # A `<% cache record do %>` block, keyed as Rails' CacheHelper keys
+    # it: `[template, record]`, combined by the controller
+    # (`lower::view_to_library::walker`, `emit_cached_fragment`). Here
+    # caching is off; the ruby family and spinel reopen both.
+    def self.fragment_read_record(_template, _record)
+      nil
+    end
+
+    def self.fragment_write_record(_template, _record, value, _ttl)
+      value
+    end
+
     # A `render collection:, cached: ->(item) { key }` reads and writes
     # each element's fragment through these four
     # (`lower::view_to_library::partial`, `wrap_keyed_cached_collection`).

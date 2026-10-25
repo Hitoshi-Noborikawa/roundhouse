@@ -205,14 +205,18 @@ fn walk_stmt(stmt: &Expr, ctx: &ViewCtx) -> Vec<Expr> {
         // controller's) when the key can be built, and rendered
         // transparently when it cannot:
         //
-        //   __cache_hit_1 = ActionView::ViewHelpers.fragment_read("views/messages/_message/…")
+        //   __cache_hit_1 = ActionView::ViewHelpers.fragment_read_record("messages/_message", message)
         //   if __cache_hit_1.nil?
         //     __cache_io_1 = String.new
         //     … body …
-        //     io << ActionView::ViewHelpers.fragment_write(<same key>, __cache_io_1, 0)
+        //     io << ActionView::ViewHelpers.fragment_write_record(<same key>, __cache_io_1, 0)
         //   else
         //     io << __cache_hit_1
         //   end
+        //
+        // `cache record` hands the controller `[template, record]`, as
+        // Rails does (`record_cache_key`); any other key is folded to
+        // text and read with `fragment_read("views/…")`.
         //
         // TWO APPENDS, not one through a reassigned local. `read_str`
         // answers `String?` and the body produces a `String`; a single
@@ -239,10 +243,14 @@ fn walk_stmt(stmt: &Expr, ctx: &ViewCtx) -> Vec<Expr> {
             let ExprNode::Lambda { body, .. } = &*block.node else {
                 return vec![todo_io_append("cache block shape", stmt.span)];
             };
-            let Some(parts) = cache_key_parts(args, ctx) else {
-                return walk_body(body, ctx);
+            let key = match record_cache_key(args, ctx) {
+                Some(key) => key,
+                None => match cache_key_parts(args, ctx) {
+                    Some(parts) => FragmentKey::Text(parts),
+                    None => return walk_body(body, ctx),
+                },
             };
-            emit_cached_fragment(&parts, cache_ttl(args), body, ctx, stmt.span)
+            emit_cached_fragment(&key, cache_ttl(args), body, ctx, stmt.span)
         }
         // Block-form `<% content_for :subnav do %> … <% end %>` —
         // slot capture (lobsters' subnav pattern: pages and partials
@@ -1846,6 +1854,28 @@ mod tests {
     }
 
     #[test]
+    fn a_record_key_reaches_the_controller_as_the_record() {
+        // campfire's `<% cache message do %>`: Rails hands the controller
+        // `[template, record]`, so the app's `combined_fragment_cache_key`
+        // sees the Message, and a `cached: true` collection of the same
+        // partial files the fragment under the same key.
+        let emitted = cache_emit(vec![var("message")]);
+
+        assert!(
+            emitted.contains("ActionView::ViewHelpers.fragment_read_record(\"#{ActionView::ViewHelpers.cache_scope}messages/_message\", message)"),
+            "the read hands over the template and the record:\n{emitted}"
+        );
+        assert!(
+            emitted.contains("ActionView::ViewHelpers.fragment_write_record(\"#{ActionView::ViewHelpers.cache_scope}messages/_message\", message, "),
+            "the miss arm writes under the same key:\n{emitted}"
+        );
+        assert!(
+            !emitted.contains("cache_key_with_version"),
+            "the record is not folded to text before the controller sees it:\n{emitted}"
+        );
+    }
+
+    #[test]
     fn the_body_renders_into_its_own_accumulator_not_the_page() {
         let key = Expr::new(
             Span::default(),
@@ -2486,6 +2516,51 @@ enum KeyPart {
     Expr(Expr),
 }
 
+/// How a `<% cache %>` site names its fragment.
+enum FragmentKey {
+    /// `cache_key_parts`' interpolated text.
+    Text(Vec<InterpPart>),
+    /// `cache record`: the template's path and the record, which the
+    /// controller combines, as Rails' CacheHelper hands it
+    /// `cache_fragment_name(record, digest_path:)`.
+    Record { template: Vec<InterpPart>, record: Expr },
+}
+
+/// `cache record` — one record, nothing else in the key — keeps the
+/// record in the key, as Rails does, instead of folding it to text.
+///
+/// TWO THINGS DEPEND ON IT. An app's `combined_fragment_cache_key`
+/// override sees what Rails would hand it: campfire's `CachedResponses`
+/// shares a message's fragment across viewers only when the key holds a
+/// `Message`, and keys a String per viewer and per database commit. And
+/// the key is the one a `cached: true` collection of the same partial
+/// files the fragment under (`collection_fragment_key` with the same
+/// template path), so a collection miss that renders the partial writes
+/// one entry, not a second that nothing ever reads.
+///
+/// The template is `ctx.view_name`, behind the broadcast scope as in
+/// `cache_key_parts`. Other key shapes keep `cache_key_parts`.
+fn record_cache_key(args: &[Expr], ctx: &ViewCtx) -> Option<FragmentKey> {
+    if args.is_empty() || args.len() > 2 {
+        return None;
+    }
+    let record = match &*args[0].node {
+        ExprNode::Array { elements, .. } if elements.len() == 1 => &elements[0],
+        ExprNode::Array { .. } => return None,
+        _ => &args[0],
+    };
+    if !is_record(record, ctx) {
+        return None;
+    }
+    Some(FragmentKey::Record {
+        template: vec![
+            InterpPart::Expr { expr: view_helpers_call("cache_scope", Vec::new()) },
+            InterpPart::Text { value: ctx.view_name.clone() },
+        ],
+        record: record.clone(),
+    })
+}
+
 /// Append literal text, merging into the previous chunk so the emitted
 /// string carries one `Text` run rather than a chain of adjacent ones.
 fn push_key_text(parts: &mut Vec<InterpPart>, t: &str) {
@@ -2581,7 +2656,7 @@ fn cache_ttl(args: &[Expr]) -> Expr {
 /// The read / render / write triple. See the walker arm's note for the
 /// shape and why it is spelled without a block.
 fn emit_cached_fragment(
-    parts: &[InterpPart],
+    fragment: &FragmentKey,
     ttl: Expr,
     body: &Expr,
     ctx: &ViewCtx,
@@ -2594,7 +2669,16 @@ fn emit_cached_fragment(
     let hit = Symbol::from(format!("__cache_hit_{uniq}"));
     let cap = format!("__cache_io_{uniq}");
 
-    let key = || Expr::new(span, ExprNode::StringInterp { parts: parts.to_vec() });
+    let interp = |parts: &[InterpPart]| Expr::new(span, ExprNode::StringInterp { parts: parts.to_vec() });
+    // The read's and the write's arguments, before the value and TTL.
+    let key = || match fragment {
+        FragmentKey::Text(parts) => vec![interp(parts)],
+        FragmentKey::Record { template, record } => vec![interp(template), record.clone()],
+    };
+    let (read_method, write_method) = match fragment {
+        FragmentKey::Text(_) => ("fragment_read", "fragment_write"),
+        FragmentKey::Record { .. } => ("fragment_read_record", "fragment_write_record"),
+    };
     // `ActionView::ViewHelpers.fragment_read/fragment_write`: the
     // runtime's store on every target, reopened on the ruby family and
     // spinel to ask the controller as Rails' CacheHelper does.
@@ -2610,7 +2694,7 @@ fn emit_cached_fragment(
         span,
         ExprNode::Assign {
             target: LValue::Var { id: VarId(0), name: hit.clone() },
-            value: send(Some(store()), "fragment_read", vec![key()], None, true),
+            value: send(Some(store()), read_method, key(), None, true),
         },
     );
 
@@ -2622,8 +2706,8 @@ fn emit_cached_fragment(
     miss.push(accumulator_append_call(
         send(
             Some(store()),
-            "fragment_write",
-            vec![key(), accumulator_result_ref(&cap), ttl],
+            write_method,
+            key().into_iter().chain([accumulator_result_ref(&cap), ttl]).collect(),
             None,
             true,
         ),
