@@ -4,6 +4,9 @@
 //! (activesupport 8.1.4, oracle `assert_difference.rb`). Each is checked
 //! on its own.
 //!
+//! After a Hash the next argument is the message
+//! (`assert_difference({ "Article.count" => 1 }, "message")`).
+//!
 //! Only a single String was lowered; the other forms reached the test
 //! helper, which called `.call` on the Array ("undefined method 'call'
 //! for an instance of Array").
@@ -27,6 +30,9 @@ const TEST: &str = r#"
     end
     assert_no_difference(["Article.count", "Comment.count"]) do
       Article.count
+    end
+    assert_difference({ "Article.count" => 1 }, "a hash with a message") do
+      Article.create!(**attrs)
     end
     assert_difference(-> { Article.count } => 2) do
       Article.create!(**attrs)

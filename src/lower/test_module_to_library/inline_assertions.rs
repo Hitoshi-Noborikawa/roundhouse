@@ -600,8 +600,10 @@ fn lower_difference(
     // Hash of expression => difference (activesupport 8.1.4); an
     // expression is a `"Const.method"` String or a lambda. Each is
     // checked on its own, with the shared difference unless the Hash
-    // names one.
-    let default_delta: i64 = if method == "assert_no_difference" {
+    // names one. After a Hash the next argument is the message; after
+    // anything else it is the difference, then the message.
+    let hash_form = method == "assert_difference" && matches!(&*args[0].node, ExprNode::Hash { .. });
+    let default_delta: i64 = if hash_form || method == "assert_no_difference" {
         0
     } else if args.len() >= 2 {
         match &*args[1].node {
@@ -630,7 +632,7 @@ fn lower_difference(
                 probes.push((probe, label, default_delta));
             }
         }
-        ExprNode::Hash { entries, .. } if !entries.is_empty() && method == "assert_difference" && args.len() == 1 => {
+        ExprNode::Hash { entries, .. } if hash_form && !entries.is_empty() => {
             for (k, v) in entries {
                 let (probe, label) = probe_of(k)?;
                 let ExprNode::Lit { value: Literal::Int { value } } = &*v.node else { return None };
