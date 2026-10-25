@@ -277,16 +277,13 @@ fn copied_errors(name: &str, human: &str, skip_inverse: &str) -> String {
 /// `accepts_nested_attributes_for` implies): the loaded children the app
 /// changed are validated with the owner and saved after it. The
 /// `__autosave_<name>_save` marker makes the reader keep what it loads
-/// (`lower::model_to_library::associations`), so these are the objects
-/// the app edited. The copy reads `error_details` itself: a child read
-/// from `<name>_target` isn't one `errors.each` is lowered for.
+/// (`lower::model_to_library::associations`), so once `<name>_loaded?`
+/// the reader answers those objects, the ones the app edited, without a
+/// query; read through it, the children are typed.
 pub(crate) fn autosave_source(name: &str, class: &str, human: &str, skip_inverse: &str) -> String {
-    let copied = format!(
-        "      child.error_details.each do |detail|\n        attribute = detail.attribute\n{skip}        full = \"{human} \" + attribute.tr(\"_\", \" \") + \" \" + detail.message\n        next if error_details.any? {{ |seen| seen.full_message == full }}\n        errors << full\n        error_details << ActiveRecord::ErrorDetail.new(\"{name}.\" + attribute, detail.kind, detail.message, full, true, true)\n      end\n",
-        skip = skip_inverse
-    );
+    let copied = copied_errors(name, human, skip_inverse);
     format!(
-        "  def __autosave_{name}_valid\n    return unless {name}_loaded?\n    {name}_target.each do |entry|\n      next unless entry.is_a?({class})\n      child = entry\n      next unless child.has_changes_to_save?\n      next if child.valid?\n{copied}    end\n  end\n\n  validate :__autosave_{name}_valid\n\n  def __autosave_{name}_save\n    return unless {name}_loaded?\n    {name}_target.each do |child|\n      child.save! if child.has_changes_to_save?\n    end\n  end\n\n  after_save :__autosave_{name}_save\n\n"
+        "  def __autosave_{name}_valid\n    return unless {name}_loaded?\n    {name}.each do |entry|\n      next unless entry.is_a?({class})\n      child = entry\n      next unless child.changed?\n      next if child.valid?\n{copied}    end\n  end\n\n  validate :__autosave_{name}_valid\n\n  def __autosave_{name}_save\n    return unless {name}_loaded?\n    {name}.each do |child|\n      child.save! if child.changed?\n    end\n  end\n\n  after_save :__autosave_{name}_save\n\n"
     )
 }
 
