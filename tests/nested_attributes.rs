@@ -500,3 +500,105 @@ fn a_strict_target_keeps_the_declaration_reported() {
     assert!(rust.contains("accepts_nested_attributes_for not supported"), "{rust}");
     assert!(!ruby.contains("accepts_nested_attributes_for not supported"), "{ruby}");
 }
+
+// Part 3 (oracle `nested_attributes4.rb`): `reject_if: :all_blank` skips
+// an entry whose values, `_destroy` aside, are all blank (whitespace too);
+// a lambda is called with the indifferent entry, `attributes['name']`; a
+// Symbol calls that method of the model with it; a marked entry is never
+// rejected, and an `id` counts as a value.
+const REJECT_TABLES: &str = "  create_table \"comments\", force: :cascade do |t|";
+const REJECT_NEW_TABLES: &str = "  create_table \"tags\", force: :cascade do |t|\n    t.integer \"article_id\"\n    t.string \"name\"\n    t.datetime \"created_at\", null: false\n    t.datetime \"updated_at\", null: false\n  end\n\n  create_table \"notes\", force: :cascade do |t|\n    t.integer \"article_id\"\n    t.string \"text\"\n    t.datetime \"created_at\", null: false\n    t.datetime \"updated_at\", null: false\n  end\n\n  create_table \"marks\", force: :cascade do |t|\n    t.integer \"article_id\"\n    t.string \"name\"\n  end\n\n  create_table \"comments\", force: :cascade do |t|";
+const REJECT_ARTICLE: &str = "class Article < ApplicationRecord\n  has_many :comments, dependent: :destroy\n  has_many :tags\n  has_many :notes\n  accepts_nested_attributes_for :comments, reject_if: :all_blank, allow_destroy: true\n  accepts_nested_attributes_for :tags, reject_if: ->(attributes) { attributes['name'].blank? }\n  accepts_nested_attributes_for :notes, reject_if: :skip_note?\n  has_many :marks\n  accepts_nested_attributes_for :marks, reject_if: :locked?\n\n  def skip_note?(attributes)\n    attributes['text'] == \"skip\"\n  end\n\n  def locked?\n    title == \"locked\"\n  end\n";
+
+const REJECT_SCRIPT: &str = r##"
+def check(label, got, want)
+  raise "#{label}: #{got.inspect} (want #{want.inspect})" unless got == want
+end
+base = { title: "Reject", body: "A body long enough to validate." }
+a = Article.create!(**base, comments_attributes: [{ commenter: "", body: "" }, { commenter: "c", body: "x" }])
+check(":all_blank skips an all-blank entry", Comment.where(article_id: a.id).count, 1)
+a = Article.create!(**base, comments_attributes: [{ commenter: " ", body: "  ", _destroy: "0" }])
+check(":all_blank: whitespace and _destroy", Comment.where(article_id: a.id).count, 0)
+a = Article.create!(**base, comments_attributes: [{ commenter: "c", body: "x" }])
+c = Comment.where(article_id: a.id).first
+a.update!(comments_attributes: [{ id: c.id, commenter: "c", body: "y" }])
+check("an id counts as a value", Comment.find(c.id).body, "y")
+a.update!(comments_attributes: [{ id: c.id, commenter: "", body: "", _destroy: "1" }])
+check("a marked entry is not rejected", Comment.where(id: c.id).count, 0)
+a = Article.create!(**base, tags_attributes: [{ name: "" }, { "name" => "ok" }])
+check("lambda reads the entry by String key", Tag.where(article_id: a.id).map(&:name), ["ok"])
+a = Article.create!(**base, notes_attributes: [{ text: "skip" }, { text: "keep" }])
+check("Symbol method", Note.where(article_id: a.id).map(&:text), ["keep"])
+a = Article.create!(**base, marks_attributes: [{ name: "m" }])
+check("a zero-arity method is called bare", Mark.where(article_id: a.id).count, 1)
+a = Article.create!(title: "locked", body: base[:body], marks_attributes: [{ name: "m" }])
+check("and its answer rejects", Mark.where(article_id: a.id).count, 0)
+def not_found
+  yield
+  "no error"
+rescue ActiveRecord::RecordNotFound => e
+  e.message
+end
+a = Article.create!(**base)
+check("an unknown id raises before rejection", not_found { a.update(comments_attributes: [{ id: 0 }]) },
+  "Couldn't find Comment with ID=0 for Article with ID=#{a.id}")
+o = Article.create!(**base, tags_attributes: [{ name: "theirs" }])
+theirs = Tag.where(article_id: o.id).first
+check("another owner's id raises though the lambda rejects it", not_found { a.update(tags_attributes: [{ id: theirs.id, name: "" }]) },
+  "Couldn't find Tag with ID=#{theirs.id} for Article with ID=#{a.id}")
+mine = Article.create!(**base, tags_attributes: [{ name: "mine" }])
+tag = Tag.where(article_id: mine.id).first
+mine.update!(tags_attributes: [{ id: tag.id, name: "" }])
+check("a rejected entry with an own id is skipped", Tag.find(tag.id).name, "mine")
+puts "nested reject_if passed"
+"##;
+
+fn reject_app() -> emit_and_run::Overlay {
+    emit_and_run::real_blog()
+        .edit("db/schema.rb", REJECT_TABLES, REJECT_NEW_TABLES)
+        .edit("app/models/article.rb", "class Article < ApplicationRecord\n  has_many :comments, dependent: :destroy\n", REJECT_ARTICLE)
+        .write("app/models/tag.rb", "class Tag < ApplicationRecord\n  belongs_to :article\nend\n")
+        .write("app/models/note.rb", "class Note < ApplicationRecord\n  belongs_to :article\nend\n")
+        .write("app/models/mark.rb", "class Mark < ApplicationRecord\n  belongs_to :article\nend\n")
+}
+
+#[test]
+fn nested_attributes_reject_if_on_ruby() {
+    let run = reject_app().run_ruby(REJECT_SCRIPT);
+    run.assert_passes();
+    assert!(run.stdout.contains("nested reject_if passed"), "{}", run.stdout);
+}
+
+#[test]
+#[ignore = "requires the Spinel toolchain"]
+fn nested_attributes_reject_if_on_spinel() {
+    let run = reject_app().run_spinel_with_db(REJECT_SCRIPT);
+    run.assert_passes();
+    assert!(run.stdout.contains("nested reject_if passed"), "{}", run.stdout);
+}
+
+/// Rails calls the lambda with the class as `self`: a receiverless call in
+/// it is the class's method, which the generated instance method would
+/// not reach, so the declaration stays the reported gap.
+#[test]
+fn a_reject_if_lambda_calling_its_class_stays_reported() {
+    let stderr = emit_stderr(
+        "reject-gap",
+        "ruby",
+        "class Article < ApplicationRecord\n  has_many :comments, dependent: :destroy\n  accepts_nested_attributes_for :comments, reject_if: ->(attributes) { skip?(attributes) }\n\n  def self.skip?(attributes)\n    false\n  end\n",
+    );
+    assert!(stderr.contains("accepts_nested_attributes_for not supported"), "{stderr}");
+}
+
+/// A Symbol `reject_if:` the model doesn't define itself (inherited, or
+/// from a concern not spliced in) can't be checked for Rails' arity
+/// rule, so the declaration stays the reported gap.
+#[test]
+fn a_reject_if_method_the_model_lacks_stays_reported() {
+    let stderr = emit_stderr(
+        "reject-missing",
+        "ruby",
+        "class Article < ApplicationRecord\n  has_many :comments, dependent: :destroy\n  accepts_nested_attributes_for :comments, reject_if: :missing?\n",
+    );
+    assert!(stderr.contains("accepts_nested_attributes_for not supported"), "{stderr}");
+}
