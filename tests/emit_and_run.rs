@@ -12224,6 +12224,168 @@ end
         .assert_passes();
 }
 
+/// #293: `classify`, `camelize` and `dasherize` were typed as Strings and
+/// emitted onto a String no runtime reopens, so the action answered 500.
+/// The request is the issue's own; `issue_inflections` repeats it outside
+/// a controller, `namespaced_inflections` adds the aliases, namespaces,
+/// a schema prefix and the remaining Inflector bodies, and
+/// `nullable_inflections` reads them on a `String | nil` receiver.
+fn string_inflections_app() -> emit_and_run::Overlay {
+    emit_and_run::real_blog()
+        .edit(
+            "config/routes.rb",
+            "  root \"articles#index\"\n",
+            "  root \"articles#index\"\n  get \"/widgets\", to: \"widgets#index\"\n",
+        )
+        .write(
+            "app/controllers/widgets_controller.rb",
+            r#"class WidgetsController < ApplicationController
+  def index
+    kind = "gear_boxes"
+    render plain: [kind.classify, kind.camelize, kind.singularize, kind.humanize, kind.dasherize].join(" ")
+  end
+end
+"#,
+        )
+        .edit(
+            "app/models/article.rb",
+            "class Article < ApplicationRecord\n  has_many :comments, dependent: :destroy",
+            r#"class Article < ApplicationRecord
+  has_many :comments, dependent: :destroy
+
+  def self.issue_inflections
+    kind = "gear_boxes"
+    [kind.classify, kind.camelize, kind.singularize, kind.humanize, kind.dasherize].join(" ")
+  end
+
+  def self.namespaced_inflections
+    path = "admin/gear_boxes"
+    name = "Admin::GearBox"
+    [path.camelcase, path.classify, "shop.gear_boxes".classify, "gear_boxes".titlecase, path.dasherize,
+     name.deconstantize, name.foreign_key, "Admin::APIKey".foreign_key].join("|")
+  end
+
+  def self.nullable_path(flag)
+    flag ? "admin/gear_boxes" : nil
+  end
+
+  def self.nullable_name(flag)
+    flag ? "Admin::GearBox" : nil
+  end
+
+  def self.nullable_inflections
+    path = nullable_path(true)
+    name = nullable_name(true)
+    [path.camelize, path.classify, path.dasherize, name.deconstantize, name.foreign_key].join("|")
+  end
+
+  def self.nil_camelize
+    nullable_path(false).camelize
+  end
+
+  def self.nil_classify
+    nullable_path(false).classify
+  end
+
+  def self.nil_dasherize
+    nullable_path(false).dasherize
+  end
+
+  def self.nil_deconstantize
+    nullable_name(false).deconstantize
+  end
+
+  def self.nil_foreign_key
+    nullable_name(false).foreign_key
+  end"#,
+        )
+}
+
+/// Rails 8.1's answers (ActiveSupport 8.1.4).
+const ISSUE_INFLECTIONS: &str = "GearBox GearBoxes gear_box Gear boxes gear-boxes";
+const NAMESPACED_INFLECTIONS: &str =
+    "Admin::GearBoxes|Admin::GearBox|GearBox|Gear Boxes|admin/gear-boxes|Admin|gear_box_id|api_key_id";
+/// A `String | nil` receiver: the String arm answers, nil raises as in Rails.
+const NULLABLE_INFLECTIONS: &str = "Admin::GearBoxes|Admin::GearBox|admin/gear-boxes|Admin|gear_box_id";
+
+#[test]
+fn string_inflections_with_an_inflector_body_run() {
+    string_inflections_app()
+        .write(
+            "test/controllers/widgets_controller_test.rb",
+            &format!(
+                r#"require "test_helper"
+
+class WidgetsControllerTest < ActionDispatch::IntegrationTest
+  test "the inflections answer as ActiveSupport does" do
+    get "/widgets"
+    assert_equal "{ISSUE_INFLECTIONS}", response.body
+    assert_equal "{ISSUE_INFLECTIONS}", Article.issue_inflections
+    assert_equal "{NAMESPACED_INFLECTIONS}", Article.namespaced_inflections
+    assert_equal "{NULLABLE_INFLECTIONS}", Article.nullable_inflections
+    assert_equal "undefined method 'camelize' for nil", assert_raises(NoMethodError) {{ Article.nil_camelize }}.message
+    assert_equal "undefined method 'classify' for nil", assert_raises(NoMethodError) {{ Article.nil_classify }}.message
+    assert_equal "undefined method 'dasherize' for nil", assert_raises(NoMethodError) {{ Article.nil_dasherize }}.message
+    assert_equal "undefined method 'deconstantize' for nil", assert_raises(NoMethodError) {{ Article.nil_deconstantize }}.message
+    assert_equal "undefined method 'foreign_key' for nil", assert_raises(NoMethodError) {{ Article.nil_foreign_key }}.message
+  end
+end
+"#
+            ),
+        )
+        .run_test("test/controllers/widgets_controller_test.rb")
+        .assert_passes();
+}
+
+#[test]
+#[ignore = "requires the Spinel toolchain"]
+fn string_inflections_with_an_inflector_body_run_on_spinel() {
+    let run = string_inflections_app().run_spinel(&format!(
+        r#"raise "issue: " + Article.issue_inflections unless Article.issue_inflections == "{ISSUE_INFLECTIONS}"
+raise "namespaced: " + Article.namespaced_inflections unless Article.namespaced_inflections == "{NAMESPACED_INFLECTIONS}"
+raise "nullable: " + Article.nullable_inflections unless Article.nullable_inflections == "{NULLABLE_INFLECTIONS}"
+def nil_message
+  yield
+  "nothing raised"
+rescue NoMethodError => e
+  e.message
+end
+raise "nil camelize" unless nil_message {{ Article.nil_camelize }} == "undefined method 'camelize' for nil"
+raise "nil classify" unless nil_message {{ Article.nil_classify }} == "undefined method 'classify' for nil"
+raise "nil dasherize" unless nil_message {{ Article.nil_dasherize }} == "undefined method 'dasherize' for nil"
+raise "nil deconstantize" unless nil_message {{ Article.nil_deconstantize }} == "undefined method 'deconstantize' for nil"
+raise "nil foreign_key" unless nil_message {{ Article.nil_foreign_key }} == "undefined method 'foreign_key' for nil"
+puts "string inflections passed"
+"#
+    ));
+    run.assert_passes();
+    assert!(run.stdout.contains("string inflections passed"), "{}", run.stdout);
+}
+
+/// #293: `tableize` needs Rails' plural rules, which the runtime does not
+/// carry (its `pluralize_word` keeps a word that ends in "s", where Rails
+/// answers "statuses"), and `strip_heredoc` has no runtime body. Both are
+/// refused at check time, not emitted onto a String no runtime reopens.
+#[test]
+fn string_extensions_without_a_runtime_body_are_refused() {
+    for (call, method) in [
+        (r#""Status".tableize"#, "tableize"),
+        (r#""  gear\n  boxes\n".strip_heredoc"#, "strip_heredoc"),
+    ] {
+        let errors = emit_and_run::real_blog()
+            .edit(
+                "app/models/article.rb",
+                "class Article < ApplicationRecord\n  has_many :comments, dependent: :destroy",
+                &format!(
+                    "class Article < ApplicationRecord\n  has_many :comments, dependent: :destroy\n\n  def self.probe\n    {call}\n  end"
+                ),
+            )
+            .check_errors();
+        let gap = format!("{method} lacks a shared runtime/lowering implementation");
+        assert!(errors.iter().any(|e| e.contains(&gap)), "{method}: {errors:?}");
+    }
+}
+
 /// The exact inclusion bridge and its carrier can be in different
 /// reopenings. Consuming the bridge must follow the carrier's identity,
 /// not whether both declarations happened to share a source file.
