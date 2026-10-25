@@ -1,6 +1,7 @@
 //! `errors.add` with an attribute or options known only at run time
 //! (activerecord 8.1.4, oracle `errors_add.rb`): a validator's
-//! `record.errors.add(attribute, :invalid)` gives "Body is invalid",
+//! `record.errors.add(attribute, :invalid)` gives "Body is invalid" (the
+//! model's translated name when the locale has one: "Heading is invalid"),
 //! `count:` and `value:` interpolate into the locale's message (and
 //! `count:` picks its plural form), and a String message is used as
 //! given; on `:base` the message stands alone.
@@ -13,7 +14,7 @@
 #[allow(dead_code)]
 mod emit_and_run;
 
-const LOCALE: &str = "en:\n  hello: \"Hello world\"\n  activerecord:\n    errors:\n      messages:\n        too_many_words: \"has more than %{count} words\"\n        taken_value: \"%{value} is taken\"\n        one_or_more:\n          one: \"needs one item\"\n          other: \"needs %{count} items\"\n";
+const LOCALE: &str = "en:\n  hello: \"Hello world\"\n  activerecord:\n    attributes:\n      article:\n        title: \"Heading\"\n    errors:\n      messages:\n        too_many_words: \"has more than %{count} words\"\n        taken_value: \"%{value} is taken\"\n        one_or_more:\n          one: \"needs one item\"\n          other: \"needs %{count} items\"\n";
 
 const CHECKER: &str = "class Checker\n  def self.invalid(record, attribute)\n    record.errors.add(attribute, :invalid)\n  end\n\n  def self.blank(record, attribute)\n    record.errors.add(attribute, :blank)\n  end\n\n  def self.words(record, attribute, limit)\n    record.errors.add(attribute, :too_many_words, count: limit)\n  end\n\n  def self.taken(record, attribute, value)\n    record.errors.add(attribute, :taken_value, value: value)\n  end\n\n  def self.items(record, attribute, n)\n    record.errors.add(attribute, :one_or_more, count: n)\n  end\n\n  def self.wrong(record, attribute)\n    record.errors.add(attribute, \"looks wrong\")\n  end\nend\n";
 
@@ -24,6 +25,8 @@ end
 def fresh = Article.new(title: "t", body: "A body long enough to validate.")
 a = fresh; Checker.invalid(a, :body)
 check("a variable attribute, :invalid", [a.errors, a.error_details.map { |d| [d.attribute, d.kind] }], [["Body is invalid"], [["body", "invalid"]]])
+a = fresh; Checker.invalid(a, :title)
+check("the model's translated attribute name", a.errors, ["Heading is invalid"])
 a = fresh; Checker.blank(a, :body)
 check(":blank", a.errors, ["Body can't be blank"])
 a = fresh; Checker.words(a, :body, 3)

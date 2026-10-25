@@ -49,8 +49,77 @@ pub fn apply_errors_add_lowering(app: &mut App) -> Vec<Diagnostic> {
     super::for_each_owned_hook_body(app, &mut |owner, body| {
         rewrite_errors_add(body, &data.at(owner), &mut diags)
     });
+    if data.used.get() {
+        app.library_classes.push(error_tables_class(&data));
+    }
     diags
 }
+
+/// `ErrorTables`, generated only for an app with a run-time `errors.add`:
+/// the tables `ActiveSupport.error_detail` names an attribute by and looks
+/// a model's own messages up in, by the record's class name, each a typed
+/// `Hash[String, String]` (empty for a model with none).
+fn error_tables_class(data: &LabelData) -> crate::dialect::LibraryClass {
+    crate::dialect::LibraryClass {
+        name: crate::ident::ClassId(Symbol::from("ErrorTables")),
+        is_module: false,
+        parent: None,
+        parent_span: Default::default(),
+        includes: Vec::new(),
+        include_spans: Vec::new(),
+        methods: vec![table_method("names", &data.names)],
+        nullable_columns: Vec::new(),
+        origin: None,
+        constants: Vec::new(),
+        unknown_calls: Vec::new(),
+        class_ivar_initializers: Vec::new(),
+    }
+}
+
+/// `def self.<name>(class_name)`: `if class_name == "<Model>" then {…}
+/// elsif … else {} end`, every branch a `Hash[String, String]`.
+fn table_method(name: &str, rows: &[(String, Vec<(String, String)>)]) -> crate::dialect::MethodDef {
+    use crate::ty::Ty;
+    let span = crate::span::Span::synthetic();
+    let hash_ty = Ty::Hash { key: std::sync::Arc::new(Ty::Str), value: std::sync::Arc::new(Ty::Str) };
+    let hash = |entries: &[(String, String)]| {
+        let mut h = Expr::new(
+            span,
+            ExprNode::Hash { entries: entries.iter().map(|(k, v)| (str_lit(span, k), str_lit(span, v))).collect(), kwargs: false },
+        );
+        h.ty = Some(hash_ty.clone());
+        h
+    };
+    let param = Symbol::from("class_name");
+    let mut body = hash(&[]);
+    for (class, entries) in rows.iter().rev() {
+        let mut read = Expr::new(span, ExprNode::Var { id: crate::ident::VarId(0), name: param.clone() });
+        read.ty = Some(Ty::Str);
+        let mut cond = Expr::new(span, ExprNode::Send { recv: Some(read), method: Symbol::from("=="), args: vec![str_lit(span, class)], block: None, parenthesized: false });
+        cond.ty = Some(Ty::Bool);
+        let mut branch = Expr::new(span, ExprNode::If { cond, then_branch: hash(entries), else_branch: body });
+        branch.ty = Some(hash_ty.clone());
+        body = branch;
+    }
+    crate::dialect::MethodDef {
+        visibility: crate::dialect::MethodVisibility::Public,
+        unsupported_formals: None,
+        has_anonymous_block: false,
+        name_span: span,
+        name: Symbol::from(name),
+        receiver: crate::dialect::MethodReceiver::Class,
+        params: vec![crate::dialect::Param::positional(param)],
+        body,
+        signature: Some(crate::lower::model_to_library::fn_sig(vec![(Symbol::from("class_name"), Ty::Str)], hash_ty)),
+        effects: crate::effect::EffectSet::default(),
+        enclosing_class: Some(Symbol::from("ErrorTables")),
+        kind: crate::dialect::AccessorKind::Method,
+        is_async: false,
+        mutates_self: false,
+        block_param: None,
+    }
+}
+
 
 /// Each model's stamped i18n, and the app's for an `errors` whose model
 /// is not known, held apart from the `App` the walk borrows mutably.
@@ -60,6 +129,12 @@ pub(crate) struct LabelData {
     /// The app's whole catalog: the global error messages a run-time
     /// `errors.add` (`dynamic_add`) bakes for its kind.
     catalog: crate::i18n::Catalog,
+    /// Each model with translated attribute names, by class name, for
+    /// `ErrorTables.names`.
+    names: Vec<(String, Vec<(String, String)>)>,
+    /// Set once a run-time `errors.add` is rewritten: `ErrorTables` is then
+    /// generated (`error_tables_class`).
+    used: std::cell::Cell<bool>,
 }
 
 impl LabelData {
@@ -72,6 +147,13 @@ impl LabelData {
                 catalog: app.i18n.subset_for("activerecord", &[]),
             },
             catalog: app.i18n.clone(),
+            names: app
+                .models
+                .iter()
+                .map(|m| (m.name.0.as_str().to_string(), m.i18n.translated_attribute_names()))
+                .filter(|(_, names)| !names.is_empty())
+                .collect(),
+            used: std::cell::Cell::new(false),
         }
     }
 
@@ -494,7 +576,7 @@ fn dynamic_add(expr: &mut Expr, labels: &Labels) -> bool {
         message.unwrap_or_else(nil),
         str_hash(entries, crate::ty::Ty::Str),
         str_hash(site, crate::ty::Ty::Str),
-        str_hash(Vec::new(), crate::ty::Ty::Str),
+        table_call(span, "names", owner.clone()),
         str_hash(Vec::new(), crate::ty::Ty::Str),
         str_lit(span, &before),
         str_lit(span, &between),
@@ -526,8 +608,22 @@ fn dynamic_add(expr: &mut Expr, labels: &Labels) -> bool {
     push_detail.ty = Some(error_details_ty());
     let mut call = Expr::new(span, ExprNode::Seq { exprs: vec![assign, push_message, push_detail] });
     call.ty = Some(error_details_ty());
+    labels.data.used.set(true);
     *expr = call;
     true
+}
+
+/// `ErrorTables.<table>(<record>.class.name)`, the record's model's table.
+fn table_call(span: crate::span::Span, table: &str, owner: Option<Expr>) -> Expr {
+    let record = owner.unwrap_or_else(|| Expr::new(span, ExprNode::SelfRef));
+    let class = Expr::new(span, ExprNode::Send { recv: Some(record), method: Symbol::from("class"), args: vec![], block: None, parenthesized: false });
+    let mut name = Expr::new(span, ExprNode::Send { recv: Some(class), method: Symbol::from("name"), args: vec![], block: None, parenthesized: false });
+    name.ty = Some(crate::ty::Ty::Str);
+    let mut tables = Expr::new(span, ExprNode::Const { path: vec![Symbol::from("ErrorTables")] });
+    tables.ty = Some(crate::ty::Ty::Class { id: crate::ident::ClassId(Symbol::from("ErrorTables")), args: vec![].into() });
+    let mut call = Expr::new(span, ExprNode::Send { recv: Some(tables), method: Symbol::from(table), args: vec![name], block: None, parenthesized: true });
+    call.ty = Some(crate::ty::Ty::Hash { key: std::sync::Arc::new(crate::ty::Ty::Str), value: std::sync::Arc::new(crate::ty::Ty::Str) });
+    call
 }
 
 /// `errors.import(error, attribute: :field)` → `ActiveSupport.errors_import(…)` and
