@@ -1,0 +1,164 @@
+//! Records in jbuilder templates, run as the emitted app renders them
+//! and compared with what Rails 8.1.4 + jbuilder 2.15.1 answer for the
+//! same rows and templates.
+//!
+//! `json.partial!(record, …)` renders the partial of the record's class
+//! (`record.to_partial_path`), whatever the local holding it is called.
+
+use super::emit_and_run;
+
+const SCHEMA: &str = r#"ActiveRecord::Schema.define do
+  create_table "widgets", force: :cascade do |t|
+    t.string "name"
+    t.integer "size"
+  end
+  create_table "gadgets", force: :cascade do |t|
+    t.string "label"
+    t.integer "widget_id"
+    t.string "note"
+  end
+end
+"#;
+
+const WIDGETS_CONTROLLER: &str = r#"class WidgetsController < ApplicationController
+  helper_method :current_widget
+
+  def show
+    @widget = Widget.find(params[:id])
+    @gadgets = @widget.gadgets.to_a
+    @gadget = @gadgets.first
+    @item = Widget.find(params[:id])
+  end
+
+  private
+
+  def current_widget
+    Widget.first
+  end
+end
+"#;
+
+const API_WIDGETS_CONTROLLER: &str = r#"class Api::WidgetsController < ApplicationController
+  def show
+    @widget = Widget.find(params[:id])
+    @gadget = @widget.gadgets.first
+  end
+end
+"#;
+
+/// The app every test here starts from: a widget with gadgets, and a
+/// partial for each model (plus a namespaced one for the gadget).
+fn app() -> emit_and_run::Overlay {
+    emit_and_run::empty_app()
+        .write("db/schema.rb", SCHEMA)
+        .write(
+            "config/routes.rb",
+            r#"Rails.application.routes.draw do
+  get "widgets/:id", to: "widgets#show", defaults: { format: :json }
+  namespace :api do
+    get "widgets/:id", to: "widgets#show", defaults: { format: :json }
+  end
+end
+"#,
+        )
+        .write(
+            "app/models/application_record.rb",
+            "class ApplicationRecord < ActiveRecord::Base\n  primary_abstract_class\nend\n",
+        )
+        .write("app/models/widget.rb", "class Widget < ApplicationRecord\n  has_many :gadgets\nend\n")
+        .write("app/models/gadget.rb", "class Gadget < ApplicationRecord\n  belongs_to :widget, optional: true\nend\n")
+        .write(
+            "app/controllers/application_controller.rb",
+            "class ApplicationController < ActionController::Base\nend\n",
+        )
+        .write("app/controllers/widgets_controller.rb", WIDGETS_CONTROLLER)
+        .write("app/controllers/api/widgets_controller.rb", API_WIDGETS_CONTROLLER)
+        .write("app/views/gadgets/_gadget.json.jbuilder", "json.label gadget.label\n")
+        .write("app/views/widgets/_widget.json.jbuilder", "json.name widget.name\n")
+        .write("app/views/api/gadgets/_gadget.json.jbuilder", "json.api_label gadget.label\n")
+}
+
+const SEED: &str = r#"
+widget = Widget.create!(name: "alpha", size: 3)
+Gadget.create!(label: "g1", widget_id: widget.id)
+def render_action(controller, action, id)
+  controller.params = {"id" => id.to_s}
+  controller.process_action(action)
+  controller.body
+end
+"#;
+
+/// The record's class picks the partial: a block parameter that is not
+/// named after the model, an ivar named something else, a helper
+/// method, an association reader (plain and through `&.`), a finder on
+/// the model, and `partial: …, object:` all render the model's
+/// partial, which a `partial:` option after a record does not change.
+/// A namespaced controller's view renders the namespaced partial. A key
+/// whose block renders the partial only under a condition is left out
+/// when the condition fails (`extra`), as Jbuilder leaves out a key
+/// whose block sets nothing: the unresolved partial used to keep the
+/// key as `"extra":{}`.
+#[test]
+fn a_records_partial_comes_from_its_class_not_its_local_name() {
+    let show = r#"json.items(@gadgets) do |gadget|
+  json.partial!(gadget, partial: "gadgets/gadget", as: :gadget)
+end
+json.named(@gadgets) do |g|
+  json.partial!(g, partial: "gadgets/gadget", as: :gadget)
+end
+json.odd(@gadgets) do |g|
+  json.partial!(g, partial: "gadgets/missing", as: :gadget)
+end
+json.item do
+  json.partial!(@item)
+end
+json.helper do
+  json.partial!(current_widget)
+end
+json.owner do
+  json.partial!(@gadget.widget, as: :widget)
+end
+json.safe do
+  json.partial!(@gadget&.widget, as: :widget)
+end
+json.found do
+  json.partial!(Widget.first, as: :widget)
+end
+json.kw do
+  json.partial! partial: "gadgets/gadget", object: @gadget, as: :gadget
+end
+json.extra do
+  json.partial!(@gadget.widget, as: :widget) if @gadget.note
+end
+json.kept do
+  json.partial!(@gadget.widget, as: :widget) if @gadget.label
+end
+json.chain(@widget&.gadgets) do |g|
+  json.partial!("gadgets/with_owner", gadget: g)
+end
+"#;
+    // Rails 8.1.4 + jbuilder 2.15.1, same rows:
+    //   GET /widgets/1     => the first line below
+    //   GET /api/widgets/1 => the second
+    let script = format!(
+        r#"{SEED}
+expected = '{{"items":[{{"label":"g1"}}],"named":[{{"label":"g1"}}],"odd":[{{"label":"g1"}}],"item":{{"name":"alpha"}},"helper":{{"name":"alpha"}},"owner":{{"name":"alpha"}},"safe":{{"name":"alpha"}},"found":{{"name":"alpha"}},"kw":{{"label":"g1"}},"kept":{{"name":"alpha"}},"chain":[{{"label":"g1","owner":{{"name":"alpha"}}}}]}}'
+actual = render_action(WidgetsController.new, :show, widget.id)
+raise actual.inspect unless actual == expected
+expected = '{{"gadget":{{"api_label":"g1"}}}}'
+require_relative "app/controllers/api/widgets_controller"
+actual = render_action(Api::WidgetsController.new, :show, widget.id)
+raise actual.inspect unless actual == expected
+puts "a record's partial comes from its class"
+"#
+    );
+    // A partial's own local through `&.`, which arrives as a temporary
+    // (`(__safe_nav = gadget) && __safe_nav.widget`).
+    let with_owner = "json.label gadget.label\njson.owner do\n  json.partial!(gadget&.widget, as: :widget)\nend\n";
+    app()
+        .write("app/views/widgets/show.json.jbuilder", show)
+        .write("app/views/gadgets/_with_owner.json.jbuilder", with_owner)
+        .write("app/views/api/widgets/show.json.jbuilder", "json.gadget do\n  json.partial!(@gadget, as: :gadget)\nend\n")
+        .run_ruby(&script)
+        .assert_passes();
+}

@@ -85,6 +85,10 @@ use crate::ident::{ClassId, Symbol, VarId};
 use crate::naming::singularize;
 use crate::span::Span;
 
+mod record_partial;
+
+use record_partial::Unresolved;
+
 use super::view_to_library::{
     build_view_signature, infer_view_arg, insert_framework_stubs, split_view_name, view_module_id,
 };
@@ -360,6 +364,7 @@ fn build_library_class(
         partials: partials.clone(),
         partial_key,
         template: format!("{dir}/{base}"),
+        record_sites: std::rc::Rc::new(record_partial::record_sites(&view.body, &app.models)),
     };
 
     let mut body_stmts: Vec<Expr> = Vec::new();
@@ -662,6 +667,10 @@ struct Ctx {
     /// (`messages/_message`): what a `json.cache!` key names it by,
     /// where Rails names it by its digest path.
     template: String,
+    /// The model of each `json.partial!(record, …)` record, keyed by
+    /// the record's span (`record_partial::record_sites`), resolved on
+    /// the analyzed template before its ivars become locals.
+    record_sites: std::rc::Rc<std::collections::HashMap<Span, Result<String, Unresolved>>>,
 }
 
 /// Classification of a single top-level statement in a jbuilder
@@ -961,7 +970,8 @@ fn emit_object_filled(raw_stmts: &[&Expr], ctx: &Ctx) -> (Vec<Expr>, bool) {
             }
             JbStmt::ArrayExtract { collection, attrs } => Some(emit_array_extract(collection, attrs, ctx)),
             JbStmt::PartialRecord { arg, as_name } => {
-                record_partial_path(arg, as_name.as_ref(), &ctx.resource_dir, &ctx.models)
+                record_partial_path(arg, as_name.as_ref(), &ctx.resource_dir, &ctx.record_sites)
+                    .ok()
                     .map(|(partial_path, local)| {
                         emit_partial_call(&partial_path, vec![(local, (*arg).clone())], ctx)
                     })
@@ -1008,7 +1018,7 @@ fn has_unlowered(stmts: &[&Expr], ctx: &Ctx) -> bool {
         | JbStmt::ArrayBlock { .. }
         | JbStmt::ArrayExtract { .. } => true,
         JbStmt::PartialRecord { arg, as_name } => {
-            record_partial_path(arg, as_name.as_ref(), &ctx.resource_dir, &ctx.models).is_none()
+            record_partial_path(arg, as_name.as_ref(), &ctx.resource_dir, &ctx.record_sites).is_err()
         }
         JbStmt::Cond { then_branch, else_branch, .. } => {
             has_unlowered(&branch_stmts(then_branch), ctx) || has_unlowered(&branch_stmts(else_branch), ctx)
@@ -1293,12 +1303,20 @@ fn emit_pairs(
                 sep = emit_merged_partial(partial_call(partial_path, locals, ctx), ctx, out, sep);
             }
             JbStmt::PartialRecord { arg, as_name } => {
-                match record_partial_path(arg, as_name.as_ref(), &ctx.resource_dir, &ctx.models) {
-                    Some((partial_path, local)) => {
+                match record_partial_path(arg, as_name.as_ref(), &ctx.resource_dir, &ctx.record_sites) {
+                    Ok((partial_path, local)) => {
                         let call = partial_call(&partial_path, vec![(local, (*arg).clone())], ctx);
                         sep = emit_merged_partial(call, ctx, out, sep);
                     }
-                    None => out.push(io_append_lit(&ctx.accumulator, "")),
+                    // Refused visibly: rendering nothing here was a 200
+                    // with the record's keys missing.
+                    Err(why) => {
+                        crate::ingest::survey::record(&crate::ingest::IngestError::Unsupported {
+                            file: String::new(),
+                            message: format!("jbuilder: `json.partial!` of a record whose partial is not statically known: {}", why.detail()),
+                        });
+                        out.push(unsupported_stmt(src.span, "jbuilder partial! of a record", &why.detail()));
+                    }
                 }
             }
             JbStmt::ArrayPartial { .. } | JbStmt::ArrayBlock { .. } | JbStmt::ArrayExtract { .. } => {
@@ -1892,7 +1910,7 @@ fn classify<'a>(stmt: &'a Expr) -> JbStmt<'a> {
             // caching, so it renders the same partial. Any other
             // option is a local for the partial, which the call has no
             // way to pass, so that form stays Unknown.
-            if block.is_none() && local_name(path_arg).is_some() {
+            if block.is_none() && record_partial::is_record_position(path_arg) {
                 let options_ok = match args.len() {
                     1 => true,
                     2 => extract_hash(&args[1]).is_some_and(|opts| {
@@ -1933,7 +1951,9 @@ fn classify<'a>(stmt: &'a Expr) -> JbStmt<'a> {
                 let Some(partial_path) = hash_get_string(opts, "partial") else {
                     return JbStmt::Unknown;
                 };
-                return match partial_locals(opts, &["partial", "as", "collection", "cached"]) {
+                return match partial_locals(opts, &["partial", "as", "collection", "cached"])
+                    .and_then(|locals| bind_object_local(locals, opts, &partial_path))
+                {
                     Some(locals) => JbStmt::Partial { partial_path, locals },
                     None => JbStmt::Unknown,
                 };
@@ -1954,7 +1974,9 @@ fn classify<'a>(stmt: &'a Expr) -> JbStmt<'a> {
                     {
                         return JbStmt::ArrayPartial { collection, partial_path, item_var };
                     }
-                    match partial_locals(opts, &["as"]) {
+                    match partial_locals(opts, &["as"])
+                        .and_then(|locals| bind_object_local(locals, opts, &partial_path))
+                    {
                         Some(locals) => locals,
                         None => return JbStmt::Unknown,
                     }
@@ -2217,6 +2239,36 @@ fn partial_locals<'a>(entries: &'a [(Expr, Expr)], skip: &[&str]) -> Option<Vec<
     }
 }
 
+/// The locals of a one-partial render with an `object:` option: Action
+/// View also binds the object under `as:`, or under the partial's own
+/// name (`gadget` for `gadgets/gadget`), as it binds the record of
+/// `json.partial!(record)`. `object` stays a local too
+/// (`local_assigns[:object]` is set in Rails). None when `as:` is not
+/// a literal name.
+fn bind_object_local<'a>(
+    mut locals: Vec<(Symbol, &'a Expr)>,
+    opts: &'a [(Expr, Expr)],
+    partial_path: &str,
+) -> Option<Vec<(Symbol, &'a Expr)>> {
+    let Some(object) = hash_get_value(opts, "object") else {
+        return Some(locals);
+    };
+    let name = match hash_get_value(opts, "as") {
+        None => {
+            let base = partial_path.rsplit('/').next().unwrap_or(partial_path);
+            Symbol::from(base.trim_start_matches('_'))
+        }
+        Some(v) => match &*v.node {
+            ExprNode::Lit { value: Literal::Sym { value } } => value.clone(),
+            _ => Symbol::from(string_literal(v)?.as_str()),
+        },
+    };
+    if !locals.iter().any(|(k, _)| *k == name) {
+        locals.push((name, object));
+    }
+    Some(locals)
+}
+
 fn string_literal(e: &Expr) -> Option<String> {
     if let ExprNode::Lit {
         value: Literal::Str { value },
@@ -2403,56 +2455,30 @@ fn emit_array_block(collection: &Expr, item_var: &Symbol, body: &Expr, ctx: &Ctx
     ]
 }
 
-/// The partial path `json.partial! <local>` renders: Active Model's
+/// The partial path `json.partial!(record, …)` renders: Active Model's
 /// `to_partial_path`, `"<plural>/<singular>"` of the record's model
 /// (`widgets/widget` for a `Widget`), under the namespace of the
 /// template's own directory (`admin/widgets/widget` from
 /// `admin/widgets/`), which is Action View's
 /// `prefix_partial_path_with_controller_namespace` default. The model
-/// is the one the local is named after, the same name-to-model reading
-/// the template's parameters get (`ivar_ty`). Unresolved when the
-/// local names no model of the app, or when `as:` names the partial's
-/// local something other than the model's singular: the lowered partial
-/// takes its record under that singular, and a partial reading the
-/// `as:` name would not find it.
+/// is the record's static type (`record_partial::record_sites`), not
+/// the name of the local that holds it. Unresolved when that type is
+/// not one model, or when `as:` names the partial's local something
+/// other than the model's singular: the lowered partial takes its
+/// record under that singular, and a partial reading the `as:` name
+/// would not find it.
 fn record_partial_path(
     arg: &Expr,
     as_name: Option<&Symbol>,
     resource_dir: &str,
-    models: &std::collections::HashSet<String>,
-) -> Option<(String, Symbol)> {
-    let name = local_name(arg)?;
-    let model = crate::naming::camelize(name.as_str());
-    if !models.contains(&model) {
-        return None;
+    sites: &std::collections::HashMap<Span, Result<String, Unresolved>>,
+) -> Result<(String, Symbol), Unresolved> {
+    let model = sites.get(&arg.span).cloned().unwrap_or(Err(Unresolved::Unknown))?;
+    let (path, element) = record_partial::model_partial_path(&model, resource_dir);
+    if let Some(a) = as_name.filter(|a| **a != element) {
+        return Err(Unresolved::As { model, as_name: a.clone() });
     }
-    let singular = crate::naming::snake_case(&model);
-    if as_name.is_some_and(|a| a.as_str() != singular) {
-        return None;
-    }
-    let path = format!("{}/{}", crate::naming::pluralize_snake(&model), singular);
-    let path = match resource_dir.rsplit_once('/') {
-        Some((namespace, _)) => format!("{namespace}/{path}"),
-        None => path,
-    };
-    Some((path, Symbol::from(singular)))
-}
-
-/// The name of a bare local: a `Var`, or the receiverless, argless,
-/// blockless `Send` prism gives a partial's locals. An ivar counts under
-/// its own name: the template walk reads it as that local
-/// (`rewrite_ivars_to_locals`), and the render graph, which walks the
-/// template as written (`render_edges`), has to find the same partial
-/// for `json.partial! @widget`, or the template's ivar closure misses
-/// the partial's ivars and its call passes them as undefined names.
-fn local_name(e: &Expr) -> Option<Symbol> {
-    match &*e.node {
-        ExprNode::Var { name, .. } | ExprNode::Ivar { name } => Some(name.clone()),
-        ExprNode::Send { recv: None, method, args, block: None, .. } if args.is_empty() => {
-            Some(method.clone())
-        }
-        _ => None,
-    }
+    Ok((path, element))
 }
 
 fn emit_partial_call(partial_path: &str, locals: Vec<(Symbol, Expr)>, ctx: &Ctx) -> Vec<Expr> {
@@ -2551,7 +2577,7 @@ fn partial_params(app: &App) -> PartialParams {
     let known_models: Vec<String> =
         app.models.iter().map(|m| m.name.0.as_str().to_string()).collect();
     let views: Vec<&View> = app.views.iter().filter(|v| v.jbuilder && !v.analysis_only).collect();
-    let edges = render_edges(&views, &known_models);
+    let edges = render_edges(&views, &app.models);
     let closures = ivar_closures(&views, &edges);
     let mut bound: std::collections::HashMap<(String, String), Vec<Symbol>> =
         std::collections::HashMap::new();
@@ -2665,8 +2691,7 @@ fn partial_always_filled(partial_path: &str, ctx: &Ctx) -> bool {
 /// local names the render binds.
 type RenderSites = Vec<((String, String), Option<Symbol>, Vec<Symbol>)>;
 
-fn render_edges(views: &[&View], known_models: &[String]) -> Vec<(Symbol, RenderSites)> {
-    let models: std::collections::HashSet<String> = known_models.iter().cloned().collect();
+fn render_edges(views: &[&View], models: &[crate::dialect::Model]) -> Vec<(Symbol, RenderSites)> {
     let mut partial_views: std::collections::HashMap<(String, String), Symbol> =
         std::collections::HashMap::new();
     for v in views {
@@ -2681,7 +2706,8 @@ fn render_edges(views: &[&View], known_models: &[String]) -> Vec<(Symbol, Render
         .map(|v| {
             let (dir, _) = split_view_name(v.name.as_str());
             let mut sites = Vec::new();
-            collect_partial_sites(&v.body, dir, &models, &mut sites);
+            let records = record_partial::record_sites(&v.body, models);
+            collect_partial_sites(&v.body, dir, &records, &mut sites);
             let sites = sites
                 .into_iter()
                 .map(|(key, names)| {
@@ -2791,10 +2817,8 @@ fn ivar_closures(
 /// partials it renders, so a partial is typed with its renderers'
 /// ivars as an ERB partial is.
 pub(crate) fn jbuilder_render_edges(app: &App) -> Vec<(Symbol, Vec<Symbol>)> {
-    let known_models: Vec<String> =
-        app.models.iter().map(|m| m.name.0.as_str().to_string()).collect();
     let views: Vec<&View> = app.views.iter().filter(|v| v.jbuilder && !v.analysis_only).collect();
-    render_edges(&views, &known_models)
+    render_edges(&views, &app.models)
         .into_iter()
         .map(|(name, sites)| (name, sites.into_iter().filter_map(|(_, t, _)| t).collect()))
         .collect()
@@ -2806,9 +2830,8 @@ pub(crate) fn jbuilder_ivar_closures(
     views: &[View],
     models: &[crate::dialect::Model],
 ) -> std::collections::HashMap<Symbol, Vec<Symbol>> {
-    let known_models: Vec<String> = models.iter().map(|m| m.name.0.as_str().to_string()).collect();
     let views: Vec<&View> = views.iter().filter(|v| v.jbuilder && !v.analysis_only).collect();
-    let edges = render_edges(&views, &known_models);
+    let edges = render_edges(&views, models);
     ivar_closures(&views, &edges)
 }
 
@@ -2840,7 +2863,7 @@ fn collect_local_names(e: &Expr, out: &mut std::collections::HashSet<Symbol>) {
 fn collect_partial_sites(
     e: &Expr,
     dir: &str,
-    models: &std::collections::HashSet<String>,
+    records: &std::collections::HashMap<Span, Result<String, Unresolved>>,
     out: &mut Vec<((String, String), Vec<Symbol>)>,
 ) {
     if let ExprNode::Send { recv: Some(recv), block: None, .. } = &*e.node {
@@ -2852,7 +2875,7 @@ fn collect_partial_sites(
                 JbStmt::ArrayPartial { partial_path, item_var, .. } => Some((partial_path, vec![item_var])),
                 JbStmt::PairPartial { partial_path, as_name, .. } => Some((partial_path, vec![as_name])),
                 JbStmt::PartialRecord { arg, as_name } => {
-                    record_partial_path(arg, as_name.as_ref(), dir, models).map(|(p, l)| (p, vec![l]))
+                    record_partial_path(arg, as_name.as_ref(), dir, records).ok().map(|(p, l)| (p, vec![l]))
                 }
                 _ => None,
             };
@@ -2862,7 +2885,7 @@ fn collect_partial_sites(
             }
         }
     }
-    e.node.for_each_child(&mut |c| collect_partial_sites(c, dir, models, out));
+    e.node.for_each_child(&mut |c| collect_partial_sites(c, dir, records, out));
 }
 
 /// The `local_assigns[:x]` keys a template reads, in first-seen order.
