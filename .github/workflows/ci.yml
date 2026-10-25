@@ -965,6 +965,10 @@ jobs:
           repository: rubys/spinel-pg
           ref: ${{ env.SPINEL_PG_SHA }}
           path: spinel-pg
+      # Not the runner's system Ruby: a suite compares the binary with CRuby, and the baseline's messages are 3.4's
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: ${{ env.MRI_RUBY }}
       - uses: ./.github/actions/setup-rust
       - uses: Swatinem/rust-cache@v2
       - uses: actions/download-artifact@v8
