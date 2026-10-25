@@ -14,6 +14,8 @@ mod i18n_locales_app;
 mod pundit_app;
 #[path = "emit_and_run/session_cookie_key.rs"]
 mod session_cookie_key;
+#[path = "emit_and_run/inertia_runtime_props.rs"]
+mod inertia_runtime_props;
 #[path = "emit_and_run/session_options_key.rs"]
 mod session_options_key;
 #[path = "emit_and_run/httpdate_from_now.rs"]
