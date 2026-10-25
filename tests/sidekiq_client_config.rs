@@ -125,3 +125,34 @@ fn sidekiq_yml_literals_are_the_worker_defaults() {
     assert_eq!(warnings.len(), 1, "{warnings:#?}");
     assert!(warnings[0].contains(":timeout") && warnings[0].contains("ERB"), "{warnings:#?}");
 }
+
+/// `config/cable.yml`'s production `adapter: redis` is read into
+/// `App::cable_redis`; an app on `:sidekiq` with another adapter is told
+/// that a job's broadcasts stay in the worker.
+#[test]
+fn cable_yml_redis_and_the_worker_broadcast_warning() {
+    let ingest_with = |files: &[(&str, &str)]| {
+        let mut tree: HashMap<PathBuf, Vec<u8>> = HashMap::new();
+        tree.insert(PathBuf::from("db/schema.rb"), SCHEMA.as_bytes().to_vec());
+        for (p, c) in files {
+            tree.insert(PathBuf::from(p), c.as_bytes().to_vec());
+        }
+        let (app, diags) = prism::scope(|| ingest_app_from_tree(tree));
+        (app.expect("ingest"), sidekiq_warnings(diags))
+    };
+    let sidekiq = ("config/environments/production.rb", "Rails.application.configure do\n  config.active_job.queue_adapter = :sidekiq\nend\n");
+    let redis = ("config/cable.yml", "production:\n  adapter: redis\n  url: <%= ENV.fetch(\"REDIS_URL\") { \"redis://localhost:6379/1\" } %>\n  channel_prefix: app_production\n");
+    let (app, warnings) = ingest_with(&[sidekiq, redis]);
+    let cable = app.cable_redis.expect("the redis cable");
+    assert_eq!(cable.channel_prefix, "app_production");
+    assert_eq!(cable.url, RedisSetting::EnvFetch { name: "REDIS_URL".into(), default: Some("redis://localhost:6379/1".into()) });
+    assert!(warnings.is_empty(), "{warnings:#?}");
+
+    let (app, warnings) = ingest_with(&[sidekiq, ("config/cable.yml", "production:\n  adapter: solid_cable\n")]);
+    assert!(app.cable_redis.is_none());
+    assert_eq!(warnings.len(), 1, "{warnings:#?}");
+    assert!(warnings[0].contains("stay in the worker process") && warnings[0].contains("`solid_cable`"), "{warnings:#?}");
+
+    let (_, warnings) = ingest_with(&[("config/cable.yml", "production:\n  adapter: solid_cable\n")]);
+    assert!(warnings.is_empty(), "not on :sidekiq: {warnings:#?}");
+}

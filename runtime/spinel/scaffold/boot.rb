@@ -182,6 +182,9 @@ require_relative "runtime/job_registry"
 # (a façade unless the tree is on :sidekiq).
 require_relative "runtime/sidekiq_envelope"
 require_relative "runtime/sidekiq_worker"
+# Broadcasts between processes through Redis, for config/cable.yml's
+# `adapter: redis` (a façade unless the tree is on :sidekiq).
+require_relative "runtime/redis_cable"
 # Per-request state per THREAD -- reopens Current, the view slots, the
 # broadcast log, the job queue and the store memo (see the file).
 require_relative "runtime/thread_state"

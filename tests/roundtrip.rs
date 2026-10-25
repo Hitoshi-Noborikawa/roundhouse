@@ -187,6 +187,7 @@ fn tiny_blog_round_trips() {
         queue_adapter: None,
         sidekiq_redis: Default::default(),
         sidekiq_worker: Default::default(),
+        cable_redis: None,
         attachable_unsigned_models: Vec::new(),
         pending_attachment_on_load: Vec::new(),
         load_hook_class_macros: Vec::new(),

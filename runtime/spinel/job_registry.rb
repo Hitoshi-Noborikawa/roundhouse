@@ -61,6 +61,18 @@ module JobRegistry
   def self.sidekiq_worker_queues
     ""
   end
+
+  def self.cable_redis?
+    false
+  end
+
+  def self.cable_redis_url
+    ""
+  end
+
+  def self.cable_channel_prefix
+    ""
+  end
   # <<< generated: job-registry
 end
 

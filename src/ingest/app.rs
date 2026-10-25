@@ -935,6 +935,18 @@ pub fn ingest_app_with_vfs<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResult
     let (worker_defaults, worker_warnings) = super::sidekiq_yml::read(vfs, dir);
     app.sidekiq_worker = worker_defaults;
     worker_warnings.into_iter().for_each(warn_sidekiq);
+    // Broadcasts between processes (see `App::cable_redis`). On
+    // :sidekiq, a production adapter other than redis keeps a job's
+    // broadcasts in the worker, as Rails does with `async`: say so.
+    let (cable_adapter, cable_redis, cable_warnings) = super::cable_yml::read(vfs, dir);
+    app.cable_redis = cable_redis;
+    cable_warnings.into_iter().for_each(warn_sidekiq);
+    if app.queue_adapter.as_deref() == Some("sidekiq") && app.cable_redis.is_none() {
+        warn_sidekiq(format!(
+            "broadcasts from jobs run by `sidekiq` workers stay in the worker process: config/cable.yml's production adapter is {}, not redis",
+            cable_adapter.map(|a| format!("`{a}`")).unwrap_or_else(|| "not set".to_string())
+        ));
+    }
     let app_config_path = dir.join("config/application.rb");
     if let Ok(source) = vfs.read(&app_config_path) {
         app.loaded_frameworks =
