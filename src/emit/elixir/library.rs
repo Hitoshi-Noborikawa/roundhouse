@@ -609,12 +609,12 @@ mod tests {
 
     #[test]
     fn a_load_once_method_s_ivars_are_process_wide_and_a_toggled_flag_s_are_not() {
-        let src = b"module Cache\n  def self.table\n    load unless @loaded == true\n    @table\n  end\n\n  def self.load\n    @table = { \"a\" => 1 }\n    @loaded = true\n  end\n\n  def self.render\n    @rendering = true\n    @frame = 1\n    @rendering = false\n  end\n\n  def self.rendering?\n    @rendering == true\n  end\n\n  def self.stamp\n    @memo = 1\n    @stamped = true\n  end\nend\n";
+        let src = b"module Cache\n  def self.table\n    load unless @loaded == true\n    @table\n  end\n\n  def self.load\n    @table = { \"a\" => 1 }\n    @loaded = true\n  end\n\n  def self.render\n    @rendering = true\n    @frame = 1\n    @rendering = false\n  end\n\n  def self.rendering?\n    @rendering == true\n  end\n\n  def self.stamp\n    @memo = 1\n    @stamped = true\n  end\n\n  def self.rules\n    load_rules unless @rules_loaded\n    @rules\n  end\n\n  def self.load_rules\n    @rules = [1]\n    @rules_loaded = true\n  end\nend\n";
         let classes = crate::ingest::ingest_library_classes(src, "cache.rb").expect("ingest");
         let names = load_once_ivars(&classes[0]);
         let mut names: Vec<&str> = names.iter().map(String::as_str).collect();
         names.sort();
-        assert_eq!(names, ["loaded", "table"]);
+        assert_eq!(names, ["loaded", "rules", "rules_loaded", "table"]);
     }
     use crate::ident::{Symbol, VarId};
     use crate::span::Span;
@@ -697,6 +697,18 @@ fn load_once_ivars(class: &LibraryClass) -> std::collections::HashSet<String> {
         {
             *guards += 1;
             return;
+        }
+        // `load unless @loaded`: the flag read bare, or negated, as the condition of a branch
+        if let ExprNode::If { cond, then_branch, else_branch } = &*e.node {
+            let is_flag = |x: &crate::expr::Expr| matches!(&*x.node, ExprNode::Ivar { name: n } if n.as_str() == name);
+            let bare = is_flag(cond)
+                || matches!(&*cond.node, ExprNode::Send { recv: Some(r), method, args, .. } if method.as_str() == "!" && args.is_empty() && is_flag(r));
+            if bare {
+                *guards += 1;
+                other_reads(then_branch, name, found, guards);
+                other_reads(else_branch, name, found, guards);
+                return;
+            }
         }
         if matches!(&*e.node, ExprNode::Ivar { name: n } if n.as_str() == name) {
             *found = true;
