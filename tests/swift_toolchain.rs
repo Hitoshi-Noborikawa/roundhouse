@@ -206,7 +206,7 @@ fn real_blog_rescue_modifier_runs() {
         .edit(
             "app/models/article.rb",
             "  validates :title, presence: true\n",
-            "  validates :title, presence: true\n\n  def self.checked(s)\n    raise ArgumentError, \"empty\" if s.to_s.empty?\n    s.to_s\n  end\n\n  def self.safe(s)\n    checked(s) rescue \"none\"\n  end\n\n  def self.lookup(s)\n    raise ArgumentError, \"empty\" if s.to_s.empty?\n    s.to_s == \"gone\" ? nil : s.to_s\n  end\n\n  def self.safe_lookup(s)\n    lookup(s) rescue \"fallback\"\n  end\n",
+            "  validates :title, presence: true\n\n  def self.checked(s)\n    raise ArgumentError, \"empty\" if s.to_s.empty?\n    s.to_s\n  end\n\n  def self.safe(s)\n    checked(s) rescue \"none\"\n  end\n\n  def self.lookup(s)\n    raise ArgumentError, \"empty\" if s.to_s.empty?\n    s.to_s == \"gone\" ? nil : s.to_s\n  end\n\n  def self.safe_lookup(s)\n    lookup(s) rescue \"fallback\"\n  end\n\n  def self.strict(s)\n    checked(s) rescue raise(TypeError, \"bad\")\n  end\n",
         )
         .emit(roundhouse::project::BuildTarget::Swift);
     assert!(errors.is_empty(), "{errors:?}");
@@ -220,6 +220,8 @@ final class RescueModifierTests: XCTestCase {
         XCTAssertNil(Article.safeLookup("gone"))
         XCTAssertEqual(Article.safeLookup("") as? String, "fallback")
         XCTAssertEqual(Article.safeLookup("a") as? String, "a")
+        XCTAssertEqual(try Article.strict("a") as? String, "a")
+        XCTAssertThrowsError(try Article.strict("")) { error in XCTAssertEqual((error as? TypeError)?.message, "bad") }
     }
 }
 "#).expect("write test");

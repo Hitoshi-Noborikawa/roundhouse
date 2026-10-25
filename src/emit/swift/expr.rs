@@ -1460,10 +1460,19 @@ fn emit_node(n: &ExprNode, e: &Expr) -> String {
         // Not reported when it throws: a Swift error is what `try?` catches, as Ruby's modifier catches a StandardError
         // Not `(try? e) ?? fallback`: a call that answers nil without throwing would take the fallback
         ExprNode::RescueModifier { expr, fallback } if body_throws(expr, &current_class()) => {
-            let e_s = emit_expr(expr);
-            let e_s = if e_s.starts_with("try ") { e_s } else { format!("try {e_s}") };
+            // Not `return` before a raise: Swift's `throw` is a statement, so a raising branch is the statement alone
+            let branch = |x: &Expr, try_it: bool| {
+                let s = emit_expr(x);
+                if is_raise_expr(x) {
+                    s
+                } else if try_it && !s.starts_with("try ") {
+                    format!("return try {s}")
+                } else {
+                    format!("return {s}")
+                }
+            };
             let try_kw = if body_throws(fallback, &current_class()) { "try " } else { "" };
-            format!("({try_kw}{{ do {{ return {e_s} }} catch {{ return {} }} }}())", emit_expr(fallback))
+            format!("({try_kw}{{ do {{ {} }} catch {{ {} }} }}())", branch(expr, true), branch(fallback, false))
         }
         // Not the bare expression: what it raises is a fatalError, which no Swift catch reaches
         ExprNode::RescueModifier { .. } => {
