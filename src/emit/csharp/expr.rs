@@ -2230,11 +2230,9 @@ fn emit_case_stmt(scrutinee: &Expr, arms: &[Arm]) -> String {
                 out.push_str(&format!("{kw} ({s} == {}) {{\n{body}\n}} ", emit_literal(value)));
             }
             other => {
-                let kw = if first { "if" } else { "else if" };
-                first = false;
-                out.push_str(&format!(
-                    "{kw} (false) {{ /* TODO pattern {other:?} */\n{body}\n}} "
-                ));
+                let stub = crate::emit::diagnostics::report_unsupported(arm.body.span, "csharp", "case pattern", format!("{other:?}").split([' ', '(', '{']).next().unwrap_or("").to_string());
+                // Not an arm that never matches: the Ruby arm would run where this one is skipped
+                return format!("{stub};");
             }
         }
     }
