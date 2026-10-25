@@ -1913,8 +1913,10 @@ run_users_phase() {
         taskset -p -c "$SERVER_CPUS" $$ > /dev/null
         step "users phase: start $lane on :$port pinned to $SERVER_CPUS ($(nproc) cpus)"
         local started=1
+        # ROUNDHOUSE_CABLE_STATS: the Ruby lanes' cable logs where each subscribe's
+        # time goes every 5 s (cable.rb's Cable::Stats); the fold adds it up per step.
         SECRET_KEY_BASE="$SPINEL_SECRET" LOG_OVERRIDE="$LOG_DIR/users-$lane.log" SHAPE_OVERRIDE="$LOG_DIR/users-shape-$lane.txt" \
-            start_lane "$lane" "$port" || started=0
+            ROUNDHOUSE_CABLE_STATS=5 start_lane "$lane" "$port" || started=0
         taskset -p -c "$all_cpus" $$ > /dev/null
         [[ -f "$LOG_DIR/users-shape-$lane.txt" ]] && sed 's/^/    /' "$LOG_DIR/users-shape-$lane.txt"
         if (( started == 0 )); then
@@ -1930,6 +1932,10 @@ run_users_phase() {
                   sleep 2
               done ) > "$mem" 2>/dev/null &
             local sampler=$!
+            # And each thread's CPU, to say which process and thread the cores went to.
+            taskset -c "$CLIENT_CPUS" ruby "$REPO_ROOT/scripts/campfire-users-threads.rb" "$SERVER_PID" 2 \
+                > "$OUT_DIR/users-threads-$lane.tsv" 2>/dev/null &
+            local thread_sampler=$!
             step "users phase: $lane, people $USERS_PEOPLE, a navigation every ${USERS_THINK}s and a post every ${USERS_POST}s per person"
             local rc=0
             taskset -c "$CLIENT_CPUS" "$loadgen" users --base "http://127.0.0.1:$port" --plan "$plan" \
@@ -1937,7 +1943,7 @@ run_users_phase() {
                 --step-secs "$USERS_STEP" --warmup-secs "$USERS_WARMUP" --gzip 1 \
                 --db "$db" --audit "$OUT_DIR/users-audit-$lane.jsonl" \
                 > "$OUT_DIR/users-$lane.json" 2> "$LOG_DIR/users-loadgen-$lane.log" || rc=$?
-            kill "$sampler" 2>/dev/null || true
+            kill "$sampler" "$thread_sampler" 2>/dev/null || true
             if (( rc != 0 )); then
                 fail "users phase: loadgen exited $rc on $lane (see $LOG_DIR/users-loadgen-$lane.log)"
             elif ruby -rjson -e 'exit JSON.parse(File.read(ARGV[0]))["valid"] ? 0 : 1' "$OUT_DIR/users-$lane.json"; then

@@ -146,6 +146,8 @@ module Cable
     # subscription is confirmed to the client.
     def stream_added(stream)
       id = nil
+      # Cable::Stats lives in cable.rb, which a hub can run without.
+      asked = Stats.now if defined?(Stats) && Stats::ON
       @lock.synchronize do
         id = (@next_id += 1)
         @acks[id] = false
@@ -158,6 +160,7 @@ module Cable
         end
         warn "[cable hub] subscribe to #{stream} not acknowledged" unless @acks.delete(id)
       end
+      Stats.record("hub", asked) if asked
       nil
     rescue SystemCallError, IOError => e
       warn "[cable hub] subscribe: #{e.class}: #{e.message}"

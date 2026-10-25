@@ -5,6 +5,9 @@
 # loadgen's PHASE lines).
 require "json"
 
+# Cable::Stats' bucket bounds in ms (runtime/spinel/scaffold/ruby_overlay/cable.rb).
+CABLE_BOUNDS = [1, 2, 5, 10, 20, 50, 100, 200, 500, 1000, 2000].freeze
+
 out, *lanes = ARGV
 fold = {}
 lanes.each do |lane|
@@ -15,6 +18,13 @@ lanes.each do |lane|
   phases = File.exist?(log) ? File.readlines(log).grep(/\APHASE /).map { |l| l.split.then { |p| [p[1..-2].join(" "), p[-1].to_i] } } : []
   mem = File.exist?(File.join(out, "users-memory-#{lane}.tsv")) ?
     File.readlines(File.join(out, "users-memory-#{lane}.tsv")).map { |l| l.split("\t").map(&:to_i) } : []
+  threads_tsv = File.join(out, "users-threads-#{lane}.tsv")
+  threads = File.exist?(threads_tsv) ?
+    File.readlines(threads_tsv, chomp: true).map { |l| t, pid, tid, ticks, process, thread = l.split("\t", 6); [t.to_i, pid.to_i, tid.to_i, ticks.to_i, process.to_s, thread.to_s] } : []
+  # Cable::Stats lines from the lane's own log: [unix ms, stage, bucket counts].
+  lane_log = File.join(out, "logs", "users-#{lane}.log")
+  cable = File.exist?(lane_log) ?
+    File.foreach(lane_log).grep(/\A\[cable stats\] /).map { |l| f = l.chomp.split(/[ \t]/); [f[2].to_i, f[4], f[5..].map(&:to_i)] } : []
   starts = phases.each_with_index.select { |(name, _), _| name.start_with?("step ") && !name.include?("warmup") }
   result["steps"].each_with_index do |step, i|
     start = starts[i] or next
@@ -28,6 +38,39 @@ lanes.each do |lane|
     timed = window.select { |r| r.length > 3 }
     if timed.length >= 2 && timed.last[0] > timed.first[0]
       step["server_cpu_cores"] = ((timed.last[3] - timed.first[3]) / 100.0 / ((timed.last[0] - timed.first[0]) / 1000.0)).round(2)
+    end
+    # A subscribe's stages: count, bucket-bound p50/p99 (ms; nil past the
+    # last bound) and how many took longer than the client's 500 ms re-send.
+    cwin = cable.select { |t, _, _| t >= from && t < to }
+    unless cwin.empty?
+      step["cable_subscribe_ms"] = cwin.group_by { |_, stage, _| stage }.to_h do |stage, rows|
+        sums = rows.map(&:last).transpose.map(&:sum)
+        n = sums.sum
+        at = ->(q) { i = 0; acc = 0; (acc += sums[i]; i += 1) while acc < q * n; CABLE_BOUNDS[i - 1] }
+        over = sums[(CABLE_BOUNDS.index(500) + 1)..].sum
+        [stage, { "n" => n, "p50_le" => at.(0.5), "p99_le" => at.(0.99), "over_500" => over }]
+      end
+    end
+    # The same cores by process and by thread (campfire-users-threads.rb).
+    # Digits are dropped from names so six workers, or four cable workers,
+    # add up to one row.
+    tsamples = threads.select { |r| r[0] >= from && r[0] < to }
+    unless tsamples.empty?
+      first_t, last_t = tsamples.map(&:first).minmax
+      secs = (last_t - first_t) / 1000.0
+      if secs > 0
+        by_process = Hash.new(0.0)
+        by_thread = Hash.new(0.0)
+        tsamples.group_by { |r| r[2] }.each_value do |rows|
+          a, b = rows.minmax_by(&:first)
+          used = (b[3] - a[3]) / 100.0 / secs
+          process = a[4].gsub(/\d+/, "N")
+          by_process[process] += used
+          by_thread["#{process} / #{a[5].gsub(/\d+/, "N")}"] += used
+        end
+        step["server_cpu_by_process"] = by_process.sort_by { |_, c| -c }.to_h.transform_values { |c| c.round(2) }
+        step["server_cpu_by_thread"] = by_thread.sort_by { |_, c| -c }.reject { |_, c| c < 0.01 }.to_h.transform_values { |c| c.round(2) }
+      end
     end
   end
   fold[lane] = result

@@ -70,6 +70,63 @@ module Cable
   PROTOCOLS = ["actioncable-v1-json"].freeze
   PING_INTERVAL = 3 # seconds — matches Action Cable's BEAT_INTERVAL
 
+  # Where a subscribe's time goes, for profiling under load. Off unless
+  # ROUNDHOUSE_CABLE_STATS names a period in seconds; then every period
+  # each worker writes one line per stage to stderr:
+  #
+  #   [cable stats] <unix ms> <pid> <stage> <count per bucket, tab-separated>
+  #
+  # with buckets bounded above by BOUNDS milliseconds (the last is
+  # unbounded), so scripts/campfire-users-fold.rb can add up any window.
+  # The stages of one subscribe, in order:
+  #
+  #   pool     queued for a Workers thread
+  #   app      the channel's `subscribed` (Db included)
+  #   reactor  queued for the reactor thread with the outcome
+  #   hub      waiting for the hub to acknowledge a stream (cable_hub.rb),
+  #            which holds the reactor thread
+  #   total    the command's arrival to the confirmation
+  module Stats
+    PERIOD = ENV["ROUNDHOUSE_CABLE_STATS"].to_f
+    ON = PERIOD > 0
+    BOUNDS = [1, 2, 5, 10, 20, 50, 100, 200, 500, 1000, 2000].freeze
+    LOCK = Mutex.new
+    @counts = Hash.new { |h, stage| h[stage] = Array.new(BOUNDS.size + 1, 0) }
+
+    def self.now
+      Process.clock_gettime(Process::CLOCK_MONOTONIC)
+    end
+
+    def self.record(stage, since)
+      ms = (now - since) * 1000
+      bucket = BOUNDS.index { |b| ms <= b } || BOUNDS.size
+      LOCK.synchronize { @counts[stage][bucket] += 1 }
+      nil
+    end
+
+    def self.report
+      counts = LOCK.synchronize { c = @counts; @counts = Hash.new { |h, stage| h[stage] = Array.new(BOUNDS.size + 1, 0) }; c }
+      stamp = Process.clock_gettime(Process::CLOCK_REALTIME, :millisecond)
+      counts.each { |stage, row| $stderr.puts "[cable stats] #{stamp} #{Process.pid} #{stage}\t#{row.join("\t")}" }
+      nil
+    end
+
+    # Per process: a forked worker starts its own reporter.
+    def self.ensure_reporting
+      return unless ON
+      return if @reporter_pid == Process.pid
+
+      @reporter_pid = Process.pid
+      Thread.new do
+        loop do
+          sleep PERIOD
+          report
+        end
+      end
+      nil
+    end
+  end
+
   # The single event loop. Owns the selector, the connection table and
   # the heartbeat deadline; serializes every mutation of both onto its
   # own thread via `post`.
@@ -139,6 +196,7 @@ module Cable
 
           @thread = Thread.new { run }
           @thread.name = "cable-reactor" if @thread.respond_to?(:name=)
+          Stats.ensure_reporting
         end
         nil
       end
@@ -770,11 +828,24 @@ module Cable
 
       @channels[identifier_json] = :pending
       conn = self
+      arrived = Stats.now if Stats::ON
       Workers.post do
+        if Stats::ON
+          Stats.record("pool", arrived)
+          started = Stats.now
+        end
         outcome = Db.with_connection do
           Dispatch.subscribe(klass, conn, identifier_json, identifier)
         end
-        Reactor.post { conn.subscribe_settled(identifier_json, outcome) }
+        if Stats::ON
+          Stats.record("app", started)
+          settling = Stats.now
+        end
+        Reactor.post do
+          Stats.record("reactor", settling) if Stats::ON
+          conn.subscribe_settled(identifier_json, outcome)
+          Stats.record("total", arrived) if Stats::ON
+        end
       end
     end
 
