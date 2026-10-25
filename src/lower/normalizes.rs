@@ -96,8 +96,22 @@ pub(crate) fn normalizations(model: &Model) -> IndexMap<Symbol, (Symbol, Expr, b
 
 /// `Model._normalize_<attr>(value)` for each normalized attribute that
 /// is one of the model's columns: `value.nil? ? nil : <body>`, or the
-/// body alone under `apply_to_nil: true`.
-pub(crate) fn push_normalize_methods(methods: &mut Vec<MethodDef>, model: &Model, columns: &HashMap<Symbol, Ty>) {
+/// body alone under `apply_to_nil: true`. With `cast` (the ruby family),
+/// a String or Integer column's value is first cast by its type
+/// (`ActiveRecord::Type::String#cast`), as Rails casts before it
+/// normalizes: assignment, a finder keyword and `normalize_value_for`
+/// all reach it through here.
+pub(crate) fn push_normalize_methods(methods: &mut Vec<MethodDef>, model: &Model, columns: &HashMap<Symbol, Ty>, cast: bool) {
+    let type_class = |ty: &Ty| match ty {
+        Ty::Str => Some("String"),
+        Ty::Int => Some("Integer"),
+        Ty::Union { variants } => variants.iter().find_map(|v| match v {
+            Ty::Str => Some("String"),
+            Ty::Int => Some("Integer"),
+            _ => None,
+        }),
+        _ => None,
+    };
     for (attr, (param, body, apply_to_nil)) in normalizations(model) {
         let Some(col_ty) = columns.get(&attr) else { continue };
         let name = normalizer_name(&attr);
@@ -105,11 +119,30 @@ pub(crate) fn push_normalize_methods(methods: &mut Vec<MethodDef>, model: &Model
             continue;
         }
         let value = Symbol::from("value");
-        let read = || synthetic(ExprNode::Var { id: VarId(0), name: value.clone() });
+        // The value the lambda sees, cast by the column's type as Rails
+        // casts it:
+        // - a String column's is `value.to_s` (inside the nil guard), which
+        //   keeps it typed String for the lowering of what the lambda calls
+        //   on it (`squish`);
+        // - an Integer column's is a local holding
+        //   `ActiveRecord::Type::Integer.new.cast(value)` (blank is nil).
+        let caster = if cast { type_class(col_ty) } else { None };
+        let input = if caster == Some("Integer") { Symbol::from("cast_value") } else { value.clone() };
+        let read_input = || synthetic(ExprNode::Var { id: VarId(0), name: input.clone() });
+        let lambda_input = || match caster {
+            Some("String") => synthetic(ExprNode::Send {
+                recv: Some(read_input()),
+                method: Symbol::from("to_s"),
+                args: vec![],
+                block: None,
+                parenthesized: false,
+            }),
+            _ => read_input(),
+        };
         let mut normalized = body.clone();
-        crate::lower::case_lambda::subst(&mut normalized, &param, &read());
+        crate::lower::case_lambda::subst(&mut normalized, &param, &lambda_input());
         let nil_check = synthetic(ExprNode::Send {
-            recv: Some(read()),
+            recv: Some(read_input()),
             method: Symbol::from("nil?"),
             args: vec![],
             block: None,
@@ -123,6 +156,36 @@ pub(crate) fn push_normalize_methods(methods: &mut Vec<MethodDef>, model: &Model
                 then_branch: synthetic(ExprNode::Lit { value: Literal::Nil }),
                 else_branch: normalized,
             })
+        };
+        let body = match caster {
+            Some(type_name) if type_name == "Integer" => {
+                let type_object = synthetic(ExprNode::Send {
+                    recv: Some(synthetic(ExprNode::Const {
+                        path: vec![Symbol::from("ActiveRecord"), Symbol::from("Type"), Symbol::from(type_name)],
+                    })),
+                    method: Symbol::from("new"),
+                    args: vec![],
+                    block: None,
+                    parenthesized: false,
+                });
+                let cast_call = synthetic(ExprNode::Send {
+                    recv: Some(type_object),
+                    method: Symbol::from("cast"),
+                    args: vec![synthetic(ExprNode::Var { id: VarId(0), name: value.clone() })],
+                    block: None,
+                    parenthesized: true,
+                });
+                synthetic(ExprNode::Seq {
+                    exprs: vec![
+                        synthetic(ExprNode::Assign {
+                            target: crate::expr::LValue::Var { id: VarId(0), name: input.clone() },
+                            value: cast_call,
+                        }),
+                        body,
+                    ],
+                })
+            }
+            _ => body,
         };
         methods.push(MethodDef {
             visibility: crate::dialect::MethodVisibility::Public,
@@ -181,11 +244,19 @@ fn call_normalizer(model: &ClassId, attr: &Symbol, value: Expr) -> Expr {
 /// would. Runs after every pass that synthesizes a `find_by`
 /// (`authenticate_by` expands into one).
 pub fn apply_normalizes_finder_lowering(app: &mut App) {
+    // Only the attributes `push_normalize_methods` writes a normalizer
+    // for: the model's columns. Another one (an `attr_accessor`) has no
+    // `_normalize_<attr>` to call.
+    let schema = &app.schema;
     let normalized: HashMap<ClassId, Vec<Symbol>> = app
         .models
         .iter()
         .filter_map(|m| {
-            let attrs: Vec<Symbol> = normalizations(m).into_keys().collect();
+            let table = schema.tables.get(&m.table.0);
+            let attrs: Vec<Symbol> = normalizations(m)
+                .into_keys()
+                .filter(|a| table.is_some_and(|t| t.columns.iter().any(|c| &c.name == a)))
+                .collect();
             (!attrs.is_empty()).then(|| (m.name.clone(), attrs))
         })
         .collect();
