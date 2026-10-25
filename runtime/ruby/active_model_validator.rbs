@@ -1,0 +1,8 @@
+module ActiveModel
+  class Validator
+    @options: Hash[Symbol, untyped]
+    def initialize: (?Hash[Symbol, untyped] options) -> void
+    def options: () -> Hash[Symbol, untyped]
+    def validate: (untyped record) -> nil
+  end
+end

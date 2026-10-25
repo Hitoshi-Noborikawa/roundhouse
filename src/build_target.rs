@@ -253,6 +253,14 @@ impl BuildTarget {
         matches!(self, BuildTarget::Ruby | BuildTarget::Jruby | BuildTarget::Spinel)
     }
 
+    /// Whether `validates_with` expands to a call of the validator from
+    /// the model's validation (`ingest::validates_with`), and validator
+    /// classes keep their `ActiveModel::Validator` base: the targets whose
+    /// runtime defines that base and whose emit is verified.
+    pub fn lowers_validates_with(self) -> bool {
+        matches!(self, BuildTarget::Ruby | BuildTarget::Jruby | BuildTarget::Spinel)
+    }
+
     pub fn stores_array_columns(self) -> bool {
         matches!(self, BuildTarget::Ruby | BuildTarget::Jruby | BuildTarget::Spinel)
     }

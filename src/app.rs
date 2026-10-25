@@ -611,6 +611,12 @@ pub struct App {
     /// Read by `lower::controller_to_library::params_wrapper`.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub wrap_parameters_by_default: bool,
+    /// The target's runtime defines `ActiveModel::Validator`
+    /// (`runtime/ruby/active_model_validator.rb`, the ruby family), so a
+    /// `validates_with` class keeps its base instead of being dropped as
+    /// an unported Rails subclass. Set by `session::analyze_and_lower_for`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub ports_active_model_validator: bool,
     /// Rubydex answers for `sources`, resolved while ingest finished.
     /// The analyzer resolves the sources itself when this is absent.
     #[serde(skip)]
@@ -1102,6 +1108,7 @@ impl App {
             controller_resolutions: HashMap::new(),
             sources: Vec::new(),
             wrap_parameters_by_default: false,
+            ports_active_model_validator: false,
             const_resolver: Default::default(),
             source_index_required: false,
             root: String::new(),
