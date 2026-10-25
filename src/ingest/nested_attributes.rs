@@ -266,10 +266,11 @@ fn humanize(name: &str) -> String {
 
 /// A child's errors added to its owner under the association, as Rails
 /// imports them: "Comments body can't be blank", key `comments.body`,
-/// each distinct message once.
+/// each distinct message once (`added`, the calling method's list of the
+/// messages it has added).
 fn copied_errors(name: &str, human: &str, skip_inverse: &str) -> String {
     format!(
-        "      child.errors.each do |error|\n        attribute = error.attribute.to_s\n{skip_inverse}        full = \"{human} \" + attribute.tr(\"_\", \" \") + \" \" + error.message\n        next if error_details.any? {{ |detail| detail.full_message == full }}\n        errors << full\n        error_details << ActiveRecord::ErrorDetail.new(\"{name}.\" + attribute, error.type.to_s, error.message, full, true, true)\n      end\n"
+        "      child.errors.each do |error|\n        attribute = error.attribute.to_s\n{skip_inverse}        full = \"{human} \" + attribute.tr(\"_\", \" \") + \" \" + error.message\n        next if added.include?(full)\n        added << full\n        errors << full\n        error_details << ActiveRecord::ErrorDetail.new(\"{name}.\" + attribute, error.type.to_s, error.message, full, true, true)\n      end\n"
     )
 }
 
@@ -283,7 +284,7 @@ fn copied_errors(name: &str, human: &str, skip_inverse: &str) -> String {
 pub(crate) fn autosave_source(name: &str, class: &str, human: &str, skip_inverse: &str) -> String {
     let copied = copied_errors(name, human, skip_inverse);
     format!(
-        "  def __autosave_{name}_valid\n    return unless {name}_loaded?\n    {name}.each do |entry|\n      next unless entry.is_a?({class})\n      child = entry\n      next unless child.changed?\n      next if child.valid?\n{copied}    end\n  end\n\n  validate :__autosave_{name}_valid\n\n  def __autosave_{name}_save\n    return unless {name}_loaded?\n    {name}.each do |child|\n      child.save! if child.changed?\n    end\n  end\n\n  after_save :__autosave_{name}_save\n\n"
+        "  def __autosave_{name}_valid\n    return unless {name}_loaded?\n    added = []\n    {name}.each do |entry|\n      next unless entry.is_a?({class})\n      child = entry\n      next unless child.changed?\n      next if child.valid?\n{copied}    end\n  end\n\n  validate :__autosave_{name}_valid\n\n  def __autosave_{name}_save\n    return unless {name}_loaded?\n    {name}.each do |child|\n      child.save! if child.changed?\n    end\n  end\n\n  after_save :__autosave_{name}_save\n\n"
     )
 }
 
@@ -367,7 +368,7 @@ fn source(target: &Target) -> String {
         .unwrap_or_default();
     let copied = copied_errors(name, &human, &skip_inverse);
     let validate = format!(
-        "  def __nested_{name}_valid\n    return if {ivar}.nil?\n    {ivar}.each do |entry|\n      next unless entry.is_a?({class})\n      child = entry\n      next if child.valid?\n{copied}    end\n  end\n\n  validate :__nested_{name}_valid\n\n"
+        "  def __nested_{name}_valid\n    return if {ivar}.nil?\n    added = []\n    {ivar}.each do |entry|\n      next unless entry.is_a?({class})\n      child = entry\n      next if child.valid?\n{copied}    end\n  end\n\n  validate :__nested_{name}_valid\n\n"
     );
     let validate = if *kind == Kind::HasMany { validate + &autosave_source(name, class, &human, &skip_inverse) } else { validate };
     let destroy_doomed = format!(
