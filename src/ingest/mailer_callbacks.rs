@@ -470,6 +470,32 @@ fn defined(app: &App, i: usize, parents: &HashMap<String, String>, mailers: &BTr
     out
 }
 
+/// The public actions a module `class_name` includes defines (a mailer
+/// concern, or a plain module), and the modules that one includes: Rails
+/// counts them in `action_methods`, and runs the chain for them.
+fn module_actions<'a>(app: &'a App, class_name: &str) -> Vec<(String, &'a crate::dialect::MethodDef)> {
+    let mut out: Vec<(String, &crate::dialect::MethodDef)> = Vec::new();
+    let Some(lc) = app.library_classes.iter().find(|c| c.name.0.as_str() == class_name) else { return out };
+    // Last included first, as Ruby's ancestors list them.
+    let mut modules: Vec<String> = lc.includes.iter().map(|id| id.0.as_str().to_string()).collect();
+    let mut seen: BTreeSet<String> = BTreeSet::new();
+    while let Some(module) = modules.pop() {
+        if !seen.insert(module.clone()) {
+            continue;
+        }
+        if let Some(m) = app.library_classes.iter().find(|c| c.is_module && c.name.0.as_str() == module) {
+            for a in actions(m) {
+                if !out.iter().any(|(n, _)| *n == a) {
+                    let d = m.methods.iter().find(|d| d.receiver == MethodReceiver::Instance && d.name.as_str() == a).expect("an action is a method");
+                    out.push((a, d));
+                }
+            }
+            modules.extend(m.includes.iter().map(|id| id.0.as_str().to_string()));
+        }
+    }
+    out
+}
+
 /// What [`generated_methods`] makes for a class: the methods, the class's
 /// own actions given a wrapper (whose bodies `expand` renames), and the
 /// actions it can't wrap, each reported.
@@ -610,17 +636,27 @@ fn generated_methods(
     // around the ancestor's body.
     let own_methods: BTreeSet<String> =
         lc.methods.iter().filter(|m| m.receiver == MethodReceiver::Instance).map(|m| m.name.as_str().to_string()).collect();
-    let mut targets: Vec<(String, &crate::dialect::MethodDef, bool)> = Vec::new();
+    // (action, its method, the class's own, its body is a module's)
+    let mut targets: Vec<(String, &crate::dialect::MethodDef, bool, bool)> = Vec::new();
     for action in actions(lc) {
         let m = lc
             .methods
             .iter()
             .find(|m| m.receiver == MethodReceiver::Instance && m.name.as_str() == action)
             .expect("an action is a method");
-        targets.push((action, m, true));
+        targets.push((action, m, true, false));
+    }
+    // An action a module the class includes defines: the wrapper is the
+    // class's own method, so it reaches the module's with `super`, and
+    // the body keeps its name. Ahead of an ancestor's action, as Ruby's
+    // ancestors order them.
+    for (action, m) in module_actions(app, lc.name.0.as_str()) {
+        if !own_methods.contains(&action) {
+            targets.push((action, m, false, true));
+        }
     }
     for action in &ancestors_wrapped {
-        if own_methods.contains(action) {
+        if own_methods.contains(action) || targets.iter().any(|(a, ..)| a == action) {
             continue;
         }
         let body = format!("{ACTION_PREFIX}{action}");
@@ -639,10 +675,21 @@ fn generated_methods(
             cur = parents.get(&p).filter(|q| mailers.contains(*q) && **q != p).cloned();
         }
         if let Some(m) = found {
-            targets.push((action.clone(), m, false));
+            targets.push((action.clone(), m, false, false));
         }
     }
-    for (action, m, is_own) in targets {
+    // An ancestor's module actions: the ancestor's wrapper reaches the
+    // body, and this one runs this class's chain around it.
+    let mut cur = parents.get(lc.name.0.as_str()).filter(|p| mailers.contains(*p)).cloned();
+    while let Some(p) = cur {
+        for (action, m) in module_actions(app, &p) {
+            if !own_methods.contains(&action) && !targets.iter().any(|(a, ..)| *a == action) {
+                targets.push((action, m, false, true));
+            }
+        }
+        cur = parents.get(&p).filter(|q| mailers.contains(*q) && **q != p).cloned();
+    }
+    for (action, m, is_own, via_module) in targets {
         let Some(forward) = wrapper_params(m) else {
             // Its callbacks don't run, and it isn't wrapped: the rest of
             // the class's actions still are.
@@ -666,11 +713,13 @@ fn generated_methods(
             resolved.push((c.kind, target, conds.join(" && ")));
         }
         let formals = forward.formals.clone();
-        let called = forward.call(&format!("self.{ACTION_PREFIX}{action}"));
+        let called = if via_module { forward.call("super") } else { forward.call(&format!("self.{ACTION_PREFIX}{action}")) };
         // The class side too, so an argument the caller leaves out stays
         // out (`mailer_class_side` would forward every formal, nil and
-        // all); it builds the mailer that processes the action.
-        if !forward.optional.is_empty() {
+        // all); it builds the mailer that processes the action. A
+        // module's action gets one always: `mailer_class_side` reads only
+        // the class's own methods.
+        if !forward.optional.is_empty() || via_module {
             text.push_str(&format!(
                 "  def self.{action}({formals})\n    {}\n  end\n\n",
                 forward.call(&format!("new.__processing.{action}"))

@@ -410,3 +410,51 @@ fn an_actions_default_is_evaluated_after_the_callbacks_on_spinel() {
     run.assert_passes();
     assert!(run.stdout.contains("late defaults passed"), "{}", run.stdout);
 }
+
+// Review of #1392 (4375794550, oracle `test_app/review6_oracle.rb`): a
+// public method of a module the mailer includes, a plain one or a
+// concern, is an action (`action_methods`) and runs the chain, on the
+// class side and through `with`. It ran without the chain through
+// `with`, and the class side had no such method.
+const GREETINGS: &str = "module Greetings\n  def from_module\n    CallbackLog.add(\"module action\")\n    mail(to: \"m@example.com\", subject: \"From module\", body: \"m\")\n  end\nend\n";
+const GREETINGS_CONCERN: &str = "module GreetingsConcern\n  extend ActiveSupport::Concern\n\n  def from_concern(name = \"you\")\n    CallbackLog.add(\"concern action \" + name)\n    mail(to: \"c@example.com\", subject: \"From concern\", body: \"c\")\n  end\nend\n";
+const MODULE_MAILER: &str = "class ModuleMailer < ApplicationMailer\n  include Greetings\n  include GreetingsConcern\n  before_action { CallbackLog.add(\"before\") }\nend\n";
+const MODULES: &str = "class Modules\n  def self.with(params)\n    ModuleMailer.with(params)\n  end\nend\n";
+const MODULE_SCRIPT: &str = r##"
+def check(label, got, want)
+  raise "#{label}: #{got.inspect} (want #{want.inspect})" unless got == want
+end
+CallbackLog.clear
+m = ModuleMailer.from_module.deliver_now
+check("a module's action, on the class", [m.subject, CallbackLog.entries], ["From module", ["base_before", "before", "module action", "stamp"]])
+CallbackLog.clear
+m = Modules.with(x: 1).from_concern("bo").deliver_now
+check("a concern's action, through with", [m.subject, CallbackLog.entries], ["From concern", ["base_before", "before", "concern action bo", "stamp"]])
+CallbackLog.clear
+ModuleMailer.from_concern.deliver_now
+check("its default, after the chain", CallbackLog.entries, ["base_before", "before", "concern action you", "stamp"])
+puts "module actions passed"
+"##;
+
+fn module_app() -> emit_and_run::Overlay {
+    app()
+        .write("app/mailers/concerns/greetings.rb", GREETINGS)
+        .write("app/mailers/concerns/greetings_concern.rb", GREETINGS_CONCERN)
+        .write("app/mailers/module_mailer.rb", MODULE_MAILER)
+        .write("app/models/modules.rb", MODULES)
+}
+
+#[test]
+fn a_modules_action_runs_the_chain_on_ruby() {
+    let run = module_app().run_ruby(MODULE_SCRIPT);
+    run.assert_passes();
+    assert!(run.stdout.contains("module actions passed"), "{}", run.stdout);
+}
+
+#[test]
+#[ignore = "requires the Spinel toolchain"]
+fn a_modules_action_runs_the_chain_on_spinel() {
+    let run = module_app().run_spinel_with_db(MODULE_SCRIPT);
+    run.assert_passes();
+    assert!(run.stdout.contains("module actions passed"), "{}", run.stdout);
+}
