@@ -961,6 +961,10 @@ pub(super) fn emit_expr(e: &Expr) -> String {
             let else_s = emit_expr(else_branch);
             format!("{then_s} if {cond_s} else {else_s}")
         }
+        // Not a walrus: the binding must come before the condition reads it, and `:=` lives in the condition
+        ExprNode::Let { name, value, body, .. } => {
+            format!("(lambda {}: {})({})", super::shared::py_ident(name.as_str()), emit_expr(body), emit_expr(value))
+        }
         ExprNode::BoolOp { op, left, right, .. } => {
             use crate::expr::BoolOpKind;
             let op_s = match op {
