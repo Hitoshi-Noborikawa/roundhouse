@@ -9853,16 +9853,15 @@ fn lift_read_framework_settings<V: Vfs + ?Sized>(vfs: &V, dir: &Path, app: &mut 
         for env in ["development", "production", "test"] {
             let file = dir.join(format!("config/environments/{env}.rb"));
             let Ok(bytes) = vfs.read(&file) else { continue };
-            if let Some(value) = assigned(&bytes, &file.display().to_string()) {
-                // Not the assignment alone: ActionMailer's railtie adds `protocol: "https"` (`||=`) where `force_ssl` is on.
-                let force_ssl = extract_framework_config_assignments(&bytes, &file.display().to_string())
+            // Not the assignment alone: ActionMailer's railtie adds `protocol: "https"` (`||=`) where `force_ssl` is on, whoever assigned the options.
+            let force_ssl = framework == "action_mailer"
+                && leaf == "default_url_options"
+                && extract_framework_config_assignments(&bytes, &file.display().to_string())
                     .into_iter()
                     .any(|(segments, value)| segments == ["force_ssl"] && value.trim() == "true");
-                let value = if framework == "action_mailer" && leaf == "default_url_options" && force_ssl {
-                    format!("{{ protocol: \"https\" }}.merge({value})")
-                } else {
-                    value
-                };
+            let value = assigned(&bytes, &file.display().to_string()).or_else(|| force_ssl.then(|| base.clone()).flatten());
+            if let Some(value) = value {
+                let value = if force_ssl { format!("{{ protocol: \"https\" }}.merge({value})") } else { value };
                 arms.push_str(&format!("when {env:?}\n  {value}\n"));
             }
         }
@@ -9876,6 +9875,9 @@ fn lift_read_framework_settings<V: Vfs + ?Sized>(vfs: &V, dir: &Path, app: &mut 
             format!("case Rails.env.to_s\n{arms}else\n  {fallback}\nend")
         };
         assignments.push((wanted.to_vec(), value));
+    }
+    if assignments.is_empty() {
+        return;
     }
     let rails_application = app.rails_application.get_or_insert_with(|| crate::dialect::LibraryClass {
         name: crate::ident::ClassId(crate::ident::Symbol::from("Rails::Application")),

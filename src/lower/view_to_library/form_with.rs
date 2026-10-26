@@ -966,10 +966,12 @@ fn classify_form_with_components(
     // name. Not only when the directory's pair is missing: users/show's
     // `form_with model: @mod_note` posts to `mod_notes_path` in Rails,
     // and the directory's `user_path` exists too.
+    // Then the analyzer's model for the view ivar (`@users` recorded as User where the binding's own type is a collection).
     let typed_class = match model.ty.as_ref().map(crate::ty::Ty::peel_nilable) {
         Some(crate::ty::Ty::Class { id, .. }) => Some(id.0.as_str().rsplit("::").next().unwrap_or_default().to_string()),
         _ => None,
-    };
+    }
+    .or_else(|| record_local_name(&model).and_then(|name| ctx.ivar_models.get(&name).cloned()));
     if let Some(name) = typed_class.clone().or_else(|| record_local_name(&model)) {
         let rec_singular = singularize(&snake_case(&name));
         let rec_plural = crate::naming::pluralize_snake(&rec_singular);

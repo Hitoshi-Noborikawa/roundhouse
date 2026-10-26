@@ -1227,7 +1227,7 @@ fn every_runtime_method_body_concretely_typed() {
     // reads a class's own `default_url_options`, a `Hash[Symbol, untyped]`
     // as Rails' is, for its host, port and protocol (+4 in
     // action_view/view_helpers_ext.rb, 880 -> 884).
-    // MEASURED 886 on 2026-10-27 (on 884): a condition Array can hold an
+    // MEASURED 886 on 2026-10-26 (on 884): a condition Array can hold an
     // `ActiveRecord::Bounds` element (`where(created_at: [nil, 7.days.ago..])`),
     // and the element read off the untyped Array reaches `bounds_predicate`
     // through it (+2 in active_record/relation.rb, 884 -> 886).

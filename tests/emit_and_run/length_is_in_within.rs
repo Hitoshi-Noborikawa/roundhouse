@@ -98,3 +98,27 @@ puts "integer length passed"
     run.assert_passes();
     assert!(run.stdout.contains("integer length passed"));
 }
+
+/// A Hash has `length`, its entry count, which Rails measures before
+/// falling back to text.
+#[test]
+fn a_hash_is_measured_by_its_entries() {
+    let run = emit_and_run::real_blog()
+        .edit(
+            "app/models/article.rb",
+            "  validates :title, presence: true\n",
+            "  validates :title, presence: true\n  attr_accessor :labels\n  validates :labels, length: { is: 1 }, allow_nil: true\n",
+        )
+        .run_ruby(
+            r#"one = Article.new(title: "T", body: "A sufficiently long body.")
+one.labels = { "x" => 1 }
+two = Article.new(title: "T", body: "A sufficiently long body.")
+two.labels = { "x" => 1, "y" => 2 }
+raise "one: #{one.errors.to_a.inspect}" unless one.valid?
+raise "two" if two.valid?
+puts "hash length passed"
+"#,
+        );
+    run.assert_passes();
+    assert!(run.stdout.contains("hash length passed"));
+}

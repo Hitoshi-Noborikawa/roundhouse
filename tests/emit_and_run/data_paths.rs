@@ -90,3 +90,33 @@ fn a_form_for_a_typed_record_posts_to_its_to_param() {
     let view = std::fs::read_to_string(emitted.join("app/views/articles/show.rb")).expect("show view");
     assert!(view.contains("article_path(featured.to_param)"), "{view}");
 }
+
+/// `force_ssl` in an environment that does not assign the mailer's
+/// options itself still adds the railtie's https to the value it
+/// inherits from application.rb.
+#[test]
+fn force_ssl_applies_to_an_inherited_mailer_setting() {
+    let (emitted, errors) = contract::overlay()
+        .edit(
+            "config/application.rb",
+            "    config.load_defaults 8.1\n",
+            "    config.load_defaults 8.1\n    config.action_mailer.default_url_options = { host: \"base.example\" }\n",
+        )
+        .edit(
+            "config/environments/production.rb",
+            "  config.action_mailer.default_url_options = { host: \"example.com\" }\n",
+            "",
+        )
+        .edit(
+            "config/environments/production.rb",
+            "  # config.force_ssl = true\n",
+            "  config.force_ssl = true\n",
+        )
+        .emit(roundhouse::project::BuildTarget::Ruby);
+    assert!(errors.is_empty(), "{errors:#?}");
+    let application = std::fs::read_to_string(emitted.join("config/application.rb")).expect("application.rb");
+    assert!(
+        application.contains("when \"production\"\n        { protocol: \"https\" }.merge({ host: \"base.example\" })"),
+        "{application}"
+    );
+}
