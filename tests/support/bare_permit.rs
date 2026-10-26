@@ -57,10 +57,17 @@ const VIEW: &str = r#"<% @pairs.each do |pair| %>
 <p id="log"><%= @who %>|<%= @stories %>|<%= @bogus %>|<%= @page %>|<%= @count %></p>
 "#;
 
+#[allow(dead_code)]
 pub const QUERY: &str = "/finds?q=rails&who=Alice&page=2&what%5Bstories%5D=1&what%5Bbogus%5D=x&extra=y";
 
+#[allow(dead_code)]
 pub fn overlay() -> emit_and_run::Overlay {
-    emit_and_run::real_blog()
+    apply(emit_and_run::real_blog())
+}
+
+/// Not a native build of its own: the Spinel lane serves it from params_helper_no_permit's.
+pub fn apply(overlay: emit_and_run::Overlay) -> emit_and_run::Overlay {
+    overlay
         .edit(
             "config/routes.rb",
             "  root \"articles#index\"\n",

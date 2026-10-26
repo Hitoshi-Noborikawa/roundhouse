@@ -14,10 +14,6 @@ const ARTICLE_METHODS: &str = r#"  validates :title, presence: true
     super(s.strip.downcase)
   end
 
-  def to_param
-    "a#{id}"
-  end
-
   def self.ordered_titles
     order([title: :desc]).map(&:title)
   end
@@ -52,14 +48,25 @@ raise "mailer host: #{Article.mailer_host.inspect}" unless Article.mailer_host =
 puts "data paths contract passed"
 "#;
 
-pub fn overlay() -> emit_and_run::Overlay {
-    emit_and_run::real_blog()
+/// The model half, which the Spinel lane compiles with lobsters_zero's contract.
+pub fn apply_models(overlay: emit_and_run::Overlay) -> emit_and_run::Overlay {
+    overlay
         .edit(
             "db/schema.rb",
             "    t.string \"title\"\n    t.text \"body\"\n",
             "    t.string \"title\"\n    t.text \"body\"\n    t.text \"settings\"\n    t.string \"slug\"\n",
         )
         .edit("app/models/article.rb", "  validates :title, presence: true\n", ARTICLE_METHODS)
+}
+
+#[allow(dead_code)]
+pub fn overlay() -> emit_and_run::Overlay {
+    apply_models(emit_and_run::real_blog())
+        .edit(
+            "app/models/article.rb",
+            "  def slug=(s)\n",
+            "  def to_param\n    \"a#{id}\"\n  end\n\n  def slug=(s)\n",
+        )
         .edit(
             "app/controllers/articles_controller.rb",
             "    @articles = Article.includes(:comments).order(created_at: :desc)\n",

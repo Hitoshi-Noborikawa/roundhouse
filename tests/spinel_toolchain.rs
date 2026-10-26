@@ -96,10 +96,6 @@ mod erb_template_contract;
 mod bare_permit_contract;
 #[path = "support/data_paths.rs"]
 mod data_paths_contract;
-#[path = "spinel_toolchain/data_paths.rs"]
-mod data_paths;
-#[path = "spinel_toolchain/bare_permit.rs"]
-mod bare_permit;
 #[path = "spinel_toolchain/erb_template.rs"]
 mod erb_template;
 #[path = "support/anonymous_keywords.rs"]
