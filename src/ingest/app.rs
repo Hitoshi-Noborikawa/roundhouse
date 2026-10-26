@@ -1651,6 +1651,13 @@ end
             for text in std::iter::once(&source).chain(draw_files.values().map(|(s, _)| s)) {
                 let parsed = ruby_prism::parse(text);
                 route_consts.import(&[parsed.node()], &route_inputs, &[]);
+                // Not only other files' constants: a route file may define the one its own `constraints` names (lobsters' DOMAINS_IDENTIFIER)
+                let top: Vec<ruby_prism::Node<'_>> = parsed
+                    .node()
+                    .as_program_node()
+                    .map(|program| program.statements().body().iter().collect())
+                    .unwrap_or_default();
+                route_consts.merge(super::model::ClassConsts::collect(&top, &routes_path.display().to_string()));
             }
             let routes = super::routes::with_route_constants(route_consts, || {
                 ingest_routes_with_engines(

@@ -2304,7 +2304,7 @@ impl ClassConsts {
     /// folded constants join this table's. A name both bodies write is
     /// refused by [`enum_constants::EnumConstants::owner_constant`]'s
     /// write count, whichever value this keeps.
-    fn merge(&mut self, other: ClassConsts) {
+    pub(super) fn merge(&mut self, other: ClassConsts) {
         self.scalars.extend(other.scalars);
         self.mappings.extend(other.mappings);
         self.labels.extend(other.labels);
