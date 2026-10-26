@@ -760,23 +760,36 @@ impl<'a> BodyTyper<'a> {
                 None
             }
             // Union receivers (typically `T | Nil` from RBS optionals or
-            // flow-sensitive ivar reads). Unwrap to the first concrete
-            // container variant and recurse — `(Hash[K,V] | Nil).each
-            // { |k, v| ... }` should yield `[K, V]` to the block, not
-            // give up because the union confused dispatch. Skip Nil/Var
-            // variants; they don't carry block-shape information.
+            // flow-sensitive ivar reads): each concrete variant the block
+            // runs on yields its own element — `(Hash[K,V] | Nil).each
+            // { |k, v| ... }` yields `[K, V]`. Skip Nil/Var variants; they
+            // don't carry block-shape information.
+            // Not the first variant alone: lobsters' search results are a
+            // Story or Comment relation or a hydrator yielding Comments,
+            // and the block runs on each.
             Ty::Union { variants } => {
+                let mut out: Option<Vec<Ty>> = None;
                 for v in variants {
                     if matches!(v, Ty::Nil | Ty::Var { .. }) {
                         continue;
                     }
-                    if let Some(params) =
-                        self.block_params_for(Some(v), method, class_object_receiver)
-                    {
-                        return Some(params);
-                    }
+                    let Some(params) = self.block_params_for(Some(v), method, class_object_receiver) else { continue };
+                    out = Some(match out {
+                        None => params,
+                        Some(prev) => {
+                            let len = prev.len().max(params.len());
+                            (0..len)
+                                .map(|i| match (prev.get(i), params.get(i)) {
+                                    (Some(a), Some(b)) if a == b => a.clone(),
+                                    (Some(a), Some(b)) => union_of(a.clone(), b.clone()),
+                                    (Some(a), None) | (None, Some(a)) => a.clone(),
+                                    (None, None) => Ty::Untyped,
+                                })
+                                .collect()
+                        }
+                    });
                 }
-                None
+                out
             }
             // RBS-declared `untyped` receiver: a method call like
             // `untyped.each { |x| ... }` passes through with the block

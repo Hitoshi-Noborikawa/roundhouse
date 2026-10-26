@@ -19814,6 +19814,8 @@ mod length_is_in_within;
 mod bigdecimal_clamp;
 #[path = "emit_and_run/partial_binop.rs"]
 mod partial_binop;
+#[path = "emit_and_run/union_block_params.rs"]
+mod union_block_params;
 
 /// `ActiveSupport::JSON.encode(value, escape: false)` — Rails' document
 /// without the HTML-entity escaping, which campfire's fragment keys can
