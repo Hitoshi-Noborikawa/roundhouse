@@ -286,11 +286,12 @@ struct Ctx {
 /// One enclosing resource.
 #[derive(Clone, Debug, PartialEq)]
 struct Nesting {
-    /// Helper-name segment (`user`, `account`); accumulates into the
-    /// prefix in declaration order.
+    /// Helper-name segment (`user`, `account`; `person` under `as:
+    /// :people`); accumulates into the prefix in declaration order and
+    /// names a child's `:<singular>_id`.
     singular: String,
-    /// Plural helper-name segment, the name as written (`users`,
-    /// `account`).
+    /// Plural helper-name segment: the `as:` name when given, else the
+    /// name as written (`users`, `account`).
     plural: String,
     /// Path segment: the name as written, or the resource's `path:`
     /// (`resources :users, path: "people"` nests at `/people/:user_id`).
@@ -712,9 +713,15 @@ fn collect_flat_routes(spec: &RouteSpec, out: &mut Vec<FlatRoute>, ctx: &Ctx) {
             let child_ctx = Ctx {
                 parents: {
                     let mut p = ctx.parents.clone();
+                    // A child reads the parent's HELPER names, so an
+                    // `as:` alias reaches it too: Rails 8.1.4 nests
+                    // `resources :users, as: :people { resources :notes }`
+                    // as `person_notes` at `/users/:person_id/notes`, and
+                    // names a member route `pin_person`. Only the path
+                    // segment stays `users`.
                     p.push(Nesting {
-                        singular: singular_low.clone(),
-                        plural: name.as_str().to_string(),
+                        singular: helper_singular.clone(),
+                        plural: helper_plural.clone(),
                         segment: segment.to_string(),
                         has_id: !*singular,
                         param: id_param.to_string(),
