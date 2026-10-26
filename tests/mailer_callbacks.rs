@@ -264,3 +264,17 @@ puts "fresh passed"
     run.assert_passes();
     assert!(run.stdout.contains("fresh passed"), "{}", run.stdout);
 }
+
+// A public method called on `Mailer.new` is a plain call, as in Rails: only
+// a mailer the class side or `with` built processes an action.
+#[test]
+fn an_action_called_on_a_new_mailer_is_a_plain_call_on_ruby() {
+    let run = app().write("app/mailers/direct_mailer.rb", DIRECT_MAILER).run_ruby(r##"
+CallbackLog.clear
+got = [DirectMailer.new.greeting, CallbackLog.entries]
+raise "Mailer.new.greeting: #{got.inspect}" unless got == ["Hello", ["greeting"]]
+puts "plain passed"
+"##);
+    run.assert_passes();
+    assert!(run.stdout.contains("plain passed"), "{}", run.stdout);
+}

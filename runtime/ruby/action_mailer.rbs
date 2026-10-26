@@ -59,6 +59,7 @@ module ActionMailer
     @_message: Message?
     @_action_name: String?
     @_headers: Hash[String, String]?
+    @_processing: bool?
 
     def self.default: (?Hash[Symbol, untyped]? opts) -> nil
     def self.deliveries: () -> Array[Message]
@@ -69,6 +70,7 @@ module ActionMailer
     def action_name: () -> String
     def __start_action: (String name) -> bool
     def __end_action: () -> nil
+    def __processing: () -> self
     def headers: (?Hash[String, String]? values) -> Headers
     def __headers: () -> Hash[String, String]
     def __add_header: (String name, String value) -> String

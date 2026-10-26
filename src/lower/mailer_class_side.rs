@@ -78,6 +78,7 @@ pub fn apply_mailer_class_side(app: &mut App) -> Vec<Diagnostic> {
             .filter(|m| m.receiver == crate::dialect::MethodReceiver::Class)
             .map(|m| m.name.as_str())
             .collect();
+        let chained = lc.methods.iter().any(|m| m.name.as_str().starts_with("__mailer_action_"));
         let mut wrappers: Vec<crate::dialect::MethodDef> = Vec::new();
         for m in &lc.methods {
             // ActionMailer's class-side proxy answers only the public
@@ -147,6 +148,17 @@ pub fn apply_mailer_class_side(app: &mut App) -> Vec<Diagnostic> {
                 },
             );
             new_call.ty = Some(Ty::Class { id: lc.name.clone(), args: vec![].into() });
+            // A mailer whose actions carry their callback chain
+            // (`ingest::mailer_callbacks`) runs it for a class-side call
+            // only: the wrapper marks the mailer it builds.
+            if chained {
+                let ty = new_call.ty.clone();
+                new_call = Expr::new(
+                    span,
+                    ExprNode::Send { recv: Some(new_call), method: Symbol::from("__processing"), args: vec![], block: None, parenthesized: false },
+                );
+                new_call.ty = ty;
+            }
             let mut body = Expr::new(
                 span,
                 ExprNode::Send {

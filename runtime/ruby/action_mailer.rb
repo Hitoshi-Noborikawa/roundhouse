@@ -219,8 +219,11 @@ module ActionMailer
     # Starts the action's chain, or answers false while another action
     # runs: a public method called from inside one is a plain call, as in
     # Rails, where only processing an action runs the callbacks.
+    #
+    # Only a mailer the class side or `with` built processes an action, as
+    # in Rails: `Mailer.new.action` is a plain call too.
     def __start_action(name)
-      return false unless @_action_name.nil?
+      return false unless @_processing && @_action_name.nil?
       @_action_name = name
       @_message = nil
       @_headers = {}
@@ -257,6 +260,13 @@ module ActionMailer
 
     def _with_params(params)
       @params = params
+      __processing
+    end
+
+    # Marks a mailer the class side (`Mailer.action(...)`) or `with` built:
+    # its actions run their chains.
+    def __processing
+      @_processing = true
       self
     end
   end
