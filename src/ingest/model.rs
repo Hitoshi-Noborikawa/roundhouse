@@ -3753,8 +3753,10 @@ fn parse_association(
                 }
                 // Rails reads `optional:` for its truth: a lambda or a
                 // Symbol is optional, whatever it would return. Only a
-                // `false` or `nil` literal keeps the association required.
+                // `false` or `nil` literal, parenthesized or not, keeps
+                // the association required.
                 "optional" => {
+                    let value = single_parenthesized(&value).unwrap_or(value);
                     optional = Some(bool_value(&value).unwrap_or_else(|| value.as_nil_node().is_none()))
                 }
                 // `touch: true` / `touch: :last_message_at`. A `false`
@@ -3788,6 +3790,24 @@ fn parse_association(
                         })
                         .and_then(|l| l.body())
                         .and_then(|b| ingest_expr(&b, file).ok());
+                }
+                // Options that change what Rails does and that nothing here
+                // models: reported rather than dropped silently.
+                "index_errors" | "counter_cache" | "validate" | "required" | "before_add" | "after_add"
+                | "before_remove" | "after_remove" | "ensuring_owner_was" => {
+                    let span = Span {
+                        file: super::sources::file_id(file),
+                        start: el.location().start_offset() as u32,
+                        end: el.location().end_offset() as u32,
+                    };
+                    let mut diagnostic = crate::diagnostic::Diagnostic::unsupported(
+                        span,
+                        None,
+                        format!("{method} :{name_str}, {key}:"),
+                        "this association option is not modelled and is ignored",
+                    );
+                    diagnostic.severity = crate::diagnostic::Severity::Warning;
+                    super::prism::push(diagnostic);
                 }
                 _ => {}
             }

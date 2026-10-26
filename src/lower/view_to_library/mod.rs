@@ -940,11 +940,46 @@ pub fn insert_params_stub(
     info.class_methods.insert(
         Symbol::from("provided"),
         fn_sig(
-            vec![(Symbol::from("sub"), hash), (Symbol::from("key"), Ty::Str)],
+            vec![(Symbol::from("sub"), hash.clone()), (Symbol::from("key"), Ty::Str)],
             Ty::Bool,
         ),
     );
-    for name in ["sub", "str", "provided"] {
+    // The scalar readers `from_raw` calls and the multiparameter record
+    // it keeps — Rails' cast on the Ruby family, pass-throughs on the
+    // other targets (each target's `params` runtime).
+    let strs = Ty::Array { elem: std::sync::Arc::new(Ty::Str) };
+    info.class_methods.insert(
+        Symbol::from("scalar_provided"),
+        fn_sig(vec![(Symbol::from("sub"), hash.clone()), (Symbol::from("key"), Ty::Str)], Ty::Bool),
+    );
+    info.class_methods.insert(
+        Symbol::from("scalar"),
+        fn_sig(vec![(Symbol::from("sub"), hash.clone()), (Symbol::from("key"), Ty::Str)], Ty::Str),
+    );
+    info.class_methods.insert(Symbol::from("no_fields"), fn_sig(vec![], strs.clone()));
+    info.class_methods.insert(
+        Symbol::from("multiparameter_fields"),
+        fn_sig(vec![(Symbol::from("sub"), hash.clone()), (Symbol::from("keys"), strs.clone())], strs.clone()),
+    );
+    info.class_methods.insert(
+        Symbol::from("multiparameter_unsupported"),
+        fn_sig(vec![(Symbol::from("sub"), hash), (Symbol::from("keys"), strs.clone())], Ty::Bool),
+    );
+    info.class_methods.insert(
+        Symbol::from("any_of"),
+        fn_sig(vec![(Symbol::from("list"), strs.clone()), (Symbol::from("names"), strs)], Ty::Bool),
+    );
+    for name in [
+        "sub",
+        "str",
+        "provided",
+        "scalar_provided",
+        "scalar",
+        "no_fields",
+        "multiparameter_fields",
+        "multiparameter_unsupported",
+        "any_of",
+    ] {
         info.class_method_kinds
             .insert(Symbol::from(name), crate::dialect::AccessorKind::Method);
     }

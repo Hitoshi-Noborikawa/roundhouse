@@ -88,7 +88,7 @@ fn finite_nested_delete_is_backed_by_the_same_filtered_value_map() {
     assert!(params.contains("Params.filtered_values(sub,"), "{params}");
     assert!(params.contains("def delete(key)"), "{params}");
     assert!(params.contains("removed = values.delete(key.to_s)"), "{params}");
-    assert!(params.contains("Params.provided("), "{params}");
+    assert!(params.contains("Params.scalar_provided("), "{params}");
     assert!(params.contains("def except(*keys)"), "{params}");
     assert!(params.contains("def compact"), "{params}");
     let controller = &files.iter().find(|f| f.path.to_string_lossy()
@@ -465,6 +465,65 @@ puts JSON.generate(rows)
     let expected: Vec<_> = recorded.as_array().unwrap().iter().map(|row|
         serde_json::json!([row[0], row[1], [row[2][0], row[2][2]]])).collect();
     assert_eq!(actual, serde_json::json!(expected));
+}
+
+#[test]
+fn multiparameter_parts_remain_in_the_map_and_drive_live_factory_projections() {
+    let run = overlay(PERMIT).run_ruby(r#"
+require "json"
+require_relative "app/controllers/items_controller"
+def snapshot(params)
+  item = Item.from_params(params)
+  item.save!
+  [params.to_h, Item.find(item.id).body, params.key?(:body), params.key?("body(1)")]
+end
+controller = ItemsController.new
+controller.params = {"item" => {"body(1)" => "first", "body(2i)" => "7"}}
+params = controller.send(:item_params)
+raise "missing multiparameter metadata" unless params.rh_multiparameter_fields == ["body"] && !params.rh_multiparameter_unsupported
+copied = params.except("body(1)")
+compacted = params.compact
+rows = [snapshot(params), snapshot(copied), snapshot(compacted)]
+rows << [params.delete("body(1)"), snapshot(params)]
+rows << [params.delete("body(2i)"), snapshot(params)]
+raise "stale multiparameter metadata" unless params.rh_multiparameter_fields.empty? && !params.rh_multiparameter_unsupported && !params.body_provided
+raise "copy metadata changed" unless compacted.rh_multiparameter_fields == ["body"]
+rows << snapshot(compacted)
+puts JSON.generate(rows)
+"#);
+    run.assert_passes();
+    assert_eq!(run.stdout.trim(), include_str!("params_vectors/multiparameter_delete.json").trim());
+}
+
+#[test]
+fn unsupported_multiparameter_parts_remain_refused_until_removed() {
+    let run = overlay(PERMIT).run_ruby(r#"
+require_relative "app/controllers/items_controller"
+{"body(1)" => "say \"hi\"", "body(1f)" => "1.5", "body(2)" => nil, "body(3)" => false}.each do |key, value|
+  controller = ItemsController.new
+  controller.params = {"item" => {key => value}}
+  params = controller.send(:item_params)
+  raise "part lost" unless params.key?(key) && params.to_h == {key => value}
+  raise "unsupported part accepted" unless params.rh_multiparameter_fields == ["body"] && params.rh_multiparameter_unsupported
+  begin
+    Item.from_params(params)
+    raise "model accepted unsupported part"
+  rescue RuntimeError => error
+    raise unless error.message.include?("not modeled")
+  end
+  copied = params.except(key)
+  raise "copy metadata stale" unless copied.rh_multiparameter_fields.empty? && !copied.rh_multiparameter_unsupported
+  Item.from_params(copied)
+  compacted = params.compact
+  raise "compact metadata stale" unless compacted.rh_multiparameter_unsupported == !value.nil?
+  raise "wrong part returned" unless params.delete(key) == value
+  raise "delete metadata stale" unless params.rh_multiparameter_fields.empty? && !params.rh_multiparameter_unsupported
+  Item.from_params(params)
+end
+puts "unsupported multiparameter parts remain guarded until removed"
+"#);
+    run.assert_passes();
+    assert_eq!(run.stdout.trim(), "unsupported multiparameter parts remain guarded until removed");
 }
 
 #[test]

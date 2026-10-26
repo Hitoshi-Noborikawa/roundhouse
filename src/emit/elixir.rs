@@ -295,6 +295,14 @@ pub fn emit_overlay_files(app: &App) -> Vec<EmittedFile> {
                         .to_string(),
                 );
             }
+            // And the multiparameter record `from_params` / `update_from_*`
+            // read (`lower::controller_to_library::params`).
+            for f in [
+                crate::lower::controller_to_library::params::multiparameter_fields_field(),
+                crate::lower::controller_to_library::params::multiparameter_unsupported_field(),
+            ] {
+                field_names.push(f.as_str().to_string());
+            }
             expr::register_field_names(&class_name, &field_names);
         }
         let (model_lcs, model_registry) =

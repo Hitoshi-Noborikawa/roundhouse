@@ -1,7 +1,7 @@
 //! `belongs_to :x, optional: <callable>` (activerecord 8.1.4, oracle
 //! `optional_proc.rb`). Rails reads `optional:` for its truth, not its
 //! result: a lambda (with or without the record), a Symbol, or any other
-//! value but `false` / `nil` makes the association optional, so no
+//! value but `false` / `nil` (parenthesized or not) makes the association optional, so no
 //! "must exist" is added, whatever the callable would return.
 //!
 //! The option was read only as a literal Boolean, so anything else fell
@@ -19,6 +19,8 @@ check("optional whatever the lambda answers", [Comment.new(commenter: "draft", b
 check("a Symbol is optional too", Note.new(commenter: "n", body: "b").valid?, true)
 held = Remark.new(commenter: "r", body: "b")
 check("optional: false stays required", [held.valid?, held.errors], [false, ["Article must exist"]])
+check("optional: (false) is false too", Draft.new(commenter: "d", body: "b").valid?, false)
+check("optional: (nil) is nil too", Sketch.new(commenter: "s", body: "b").valid?, false)
 puts "optional callable passed"
 "##;
 
@@ -32,6 +34,14 @@ fn app() -> emit_and_run::Overlay {
         .write(
             "app/models/remark.rb",
             "class Remark < ApplicationRecord\n  self.table_name = \"comments\"\n  belongs_to :article, optional: false\nend\n",
+        )
+        .write(
+            "app/models/draft.rb",
+            "class Draft < ApplicationRecord\n  self.table_name = \"comments\"\n  belongs_to :article, optional: (false)\nend\n",
+        )
+        .write(
+            "app/models/sketch.rb",
+            "class Sketch < ApplicationRecord\n  self.table_name = \"comments\"\n  belongs_to :article, optional: (nil)\nend\n",
         )
 }
 

@@ -203,6 +203,55 @@ puts [copied, store.inspect == size, store.read("default")["missing"], rejected_
     );
 }
 
+/// A model's own `cache_version` keys its fragment, as in Rails, whose
+/// `cache_key_with_version` is `"#{cache_key}-#{cache_version}"`.
+/// Campfire's `Message#cache_version` answers a `presentation_version`
+/// its SQLite triggers move whenever anything the fragment shows changes,
+/// so an edit from outside Rails that leaves the message's `updated_at`
+/// alone still re-renders it. The emit keyed every record by `updated_at`
+/// and served the old fragment after such an edit. Here the version is
+/// the title itself, and the foreign UPDATE leaves `updated_at` alone.
+#[test]
+fn a_models_cache_version_keys_its_fragment() {
+    contract::fragments_overlay()
+        .edit(
+            "app/models/article.rb",
+            "  validates :title, presence: true\n",
+            "  validates :title, presence: true\n\n  def cache_version\n    \"title-#{title}\"\n  end\n",
+        )
+        .write(
+            "test/controllers/fragments_controller_test.rb",
+            r#"require "test_helper"
+
+class FragmentsControllerTest < ActionDispatch::IntegrationTest
+  setup do
+    @article = Article.create!(title: "Original", body: "A sufficiently long article body.")
+    FragmentsController::STORE.clear
+    ActionController::Base.perform_caching = true
+  end
+
+  teardown do
+    ActionController::Base.perform_caching = false
+    FragmentsController::STORE.clear
+  end
+
+  test "an edit that moves cache_version but not updated_at re-renders" do
+    get "/fragments/#{@article.id}"
+    assert_includes response.body, "Original"
+    updated_at = ActiveRecord::Base.connection.select_value("SELECT updated_at FROM articles WHERE id = #{@article.id}")
+    ActiveRecord::Base.connection.execute("UPDATE articles SET title = 'Changed' WHERE id = #{@article.id}")
+    assert_equal updated_at, ActiveRecord::Base.connection.select_value("SELECT updated_at FROM articles WHERE id = #{@article.id}")
+    get "/fragments/#{@article.id}"
+    assert_includes response.body, "Changed"
+    assert_includes Article.find(@article.id).cache_key_with_version, "-title-Changed"
+  end
+end
+"#,
+        )
+        .run_test("test/controllers/fragments_controller_test.rb")
+        .assert_passes();
+}
+
 /// Rails' fragment caching through the controller, as campfire's
 /// `CachedResponses` overrides it: a view's `<% cache %>` is served only
 /// while `perform_caching`, under `combined_fragment_cache_key`, from

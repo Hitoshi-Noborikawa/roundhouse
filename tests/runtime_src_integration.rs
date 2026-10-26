@@ -1218,7 +1218,12 @@ fn every_runtime_method_body_concretely_typed() {
     // default hands back the plucked value as the row held it, whatever its
     // type; a model with a stored array column overrides it to decode
     // (+1 in active_record/connection.rb).
-    const CEILING: usize = 878;
+    // MEASURED 880 on 2026-10-25 (on 878): `ViewHelpers.tag_attr` renders a
+    // `tag.*` attribute whose value is whatever the template passes (nil
+    // omits it), so its `nil?` and `to_s` read that value untyped, as
+    // `h` does; one call so the value expression runs once (+2 in
+    // action_view/view_helpers.rb, 878 -> 880).
+    const CEILING: usize = 880;
     assert!(
         total_gradual <= CEILING,
         "{total_gradual} Ty::Untyped sites exceeds ceiling of {CEILING}"

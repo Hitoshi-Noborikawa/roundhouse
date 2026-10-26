@@ -245,6 +245,15 @@ pub(super) fn push_association_methods(
                 if crate::lower::default_scope::reader_replaces_scope(models, assoc) {
                     reroot_unscoping(&mut reader.body, target, foreign_key);
                 }
+                // An autosaving association (`ingest::autosave`) keeps what
+                // it loads, as Rails' association target does: the owner's
+                // validation and save reach the same child objects the app
+                // edited. Only the ruby family generates the marker.
+                if !through_relation
+                    && super::model_defines_instance_method(model, &Symbol::from(format!("__autosave_{}_save", name.as_str())))
+                {
+                    memoize_reader(&mut reader, name);
+                }
                 methods.push(reader);
                 methods.push(synth_preload_setter(owner, name, target));
                 // `<name>_loaded?` / `<name>_target`: the eager-load cache
@@ -714,6 +723,22 @@ fn reroot_unscoping(body: &mut Expr, target: &ClassId, foreign_key: &Symbol) {
         }
     }
     walk(body, target, foreign_key);
+}
+
+/// The reader's last statement (the query) becomes
+/// `@<name>_cache = <query>; @<name>_loaded = true; @<name>_cache`.
+fn memoize_reader(reader: &mut MethodDef, name: &Symbol) {
+    let ExprNode::Seq { exprs } = &mut *reader.body.node else { return };
+    let Some(query) = exprs.pop() else { return };
+    let assign = |target: Symbol, value: Expr| {
+        Expr::new(Span::synthetic(), ExprNode::Assign { target: LValue::Ivar { name: target }, value })
+    };
+    exprs.push(assign(cache_ivar(name), query));
+    exprs.push(assign(
+        loaded_ivar(name),
+        Expr::new(Span::synthetic(), ExprNode::Lit { value: Literal::Bool { value: true } }),
+    ));
+    exprs.push(Expr::new(Span::synthetic(), ExprNode::Ivar { name: cache_ivar(name) }));
 }
 
 fn synth_has_many_reader(

@@ -811,6 +811,17 @@ test lives in the runtime rather than in generated per-model code.
 text), and an integer key gets no `?` predicate, because Rails'
 `present?` on any Integer — `0` included — is unconditionally true, and a
 method that always answers the same thing is worse than an honest gap.
+Multiparameter keys are modeled in the params object, not the model:
+`Params.scalar` reads a permitted scalar from its own key or, winning as
+Rails assigns those last, from `multiparameter_cast`, the text of the
+parts Hash Rails gives a String attribute (`{1 => "x", 2 => 7, 3 =>
+nil}`). The params class carries `rh_multiparameter_fields` and
+`rh_multiparameter_unsupported`, and the model's `from_params` and
+`update_from_*` raise before assigning when the shape is unsupported or
+a field is not a String/Text column or the secure-password trio. The raise
+sits there because the create path has no other synthesized method between
+`new(params)` and the app's own `save`.
+
 The permit-list path is a separate, ledgered gap: `permit(:name,
 settings: {})` drops the nested key from the typed params class under
 the `params_nested_filter` warning, so a form's settings never reach

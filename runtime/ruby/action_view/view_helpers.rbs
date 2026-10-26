@@ -43,6 +43,7 @@ module ActionView
     def self.builder_text: (String s) -> String
     def self.builder_attr: (String s) -> String
   def self.h: (untyped value) -> String
+  def self.tag_attr: (String key, untyped value) -> String
     # Percent-encoding for a query-string value; ASCII-only (see the .rb).
     def self.url_encode: (String s) -> String
     def self.erb_url_encode: (String s) -> String

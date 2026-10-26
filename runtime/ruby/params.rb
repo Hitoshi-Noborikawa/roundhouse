@@ -195,6 +195,8 @@ module Params
           inner = value.fetch(field, "")
           return params unless inner.is_a?(Hash) || inner.is_a?(Array)
         end
+        # `permit` keeps a scalar's multiparameter keys (`title(1)`) too.
+        return params if Params.multiparameter_scalar_given(value, field)
         i = i + 1
       end
       i = 0
@@ -340,7 +342,7 @@ module Params
     !Params.nested(sub, key, allowed, mode).nil?
   end
 
-  # `hash` restricted to the `allowed` keys that hold a scalar.
+  # Permitted scalar keys, including matching multiparameter keys.
   def self.allowed_scalars(hash, allowed)
     out = {}
     i = 0
@@ -349,6 +351,10 @@ module Params
       if hash.key?(name)
         item = hash.fetch(name, nil)
         out[name] = item unless item.is_a?(Hash) || item.is_a?(Array)
+      end
+      Params.multiparameter_names(hash, name).each do |part|
+        item = hash.fetch(part, nil)
+        out[part] = item unless item.is_a?(Hash) || item.is_a?(Array)
       end
       i = i + 1
     end
@@ -375,5 +381,163 @@ module Params
       i = i + 1
     end
     true
+  end
+
+  # A permitted scalar as the generated `from_raw` reads it, with its
+  # MULTIPARAMETER keys. Rails' `permit(:k)` keeps `k(1)`, `k(2i)`,
+  # `k(3f)` — the parts `date_select` submits — and assignment rebuilds
+  # `k` from them: a Date for a date column, and for a String or Text
+  # attribute the text of the parts Hash (`name(1)=x` stores
+  # `{1 => "x"}`, Ruby 3.4's Hash#inspect). That text is reproduced here
+  # (`multiparameter_cast`) for parts that are plain text or `i`
+  # integers, so validations see and a save writes what Rails' would;
+  # the model refuses (raises) for any other column type, and every
+  # other shape is `multiparameter_unsupported`.
+  def self.scalar_provided(sub, key)
+    Params.provided(sub, key) || Params.multiparameter_cast(sub, key) != ""
+  end
+
+  # The multiparameter value wins, as Rails assigns those keys last.
+  def self.scalar(sub, key)
+    cast = Params.multiparameter_cast(sub, key)
+    return cast if cast != ""
+    Params.str(sub, key, "")
+  end
+
+  # An empty field list, typed: what a params object holds before
+  # `from_raw` reads a request.
+  def self.no_fields
+    out = [""]
+    out.pop
+    out
+  end
+
+  # Whether the request holds a scalar under one of `key`'s
+  # multiparameter keys — what `permit(:key)` keeps.
+  def self.multiparameter_scalar_given(sub, key)
+    given = false
+    Params.multiparameter_names(sub, key).each do |name|
+      inner = sub.fetch(name, "")
+      given = true unless inner.is_a?(Hash) || inner.is_a?(Array)
+    end
+    given
+  end
+
+  # Whether `list` holds any of `names`.
+  def self.any_of(list, names)
+    found = false
+    names.each do |name|
+      found = true if list.include?(name)
+    end
+    found
+  end
+
+  # The permitted `keys` the request sent multiparameter keys for.
+  def self.multiparameter_fields(sub, keys)
+    out = [""]
+    out.pop
+    keys.each do |key|
+      out << key if Params.multiparameter_names(sub, key).length > 0
+    end
+    out
+  end
+
+  # Whether any of `keys` has multiparameter keys whose value Rails
+  # builds in a way not reproduced: a non-String part, an `f` part, a
+  # part whose text Hash#inspect would escape, or only blank parts
+  # (Rails then assigns nil).
+  def self.multiparameter_unsupported(sub, keys)
+    unsupported = false
+    keys.each do |key|
+      names = Params.multiparameter_names(sub, key)
+      unsupported = true if names.length > 0 && Params.multiparameter_cast(sub, key) == ""
+    end
+    unsupported
+  end
+
+  # Rails' value for `key` from its multiparameter keys, as the text a
+  # String attribute casts it to — `{1 => "x", 2 => 7, 3 => nil}`, in
+  # first-seen position order, a repeated position keeping its first
+  # value — or "" when there are none or the shape is unsupported.
+  def self.multiparameter_cast(sub, key)
+    names = Params.multiparameter_names(sub, key)
+    return "" if names.length == 0
+    positions = [""]
+    positions.pop
+    rendered = [""]
+    rendered.pop
+    any_value = false
+    ok = true
+    names.each do |name|
+      inner = name[key.length + 1, name.length - key.length - 2]
+      suffix = inner[inner.length - 1, 1]
+      digits = inner
+      digits = inner[0, inner.length - 1] if suffix == "i" || suffix == "f"
+      ok = false if suffix == "f"
+      ok = false unless Params.provided(sub, name)
+      text = Params.str(sub, name, "")
+      part = "nil"
+      if text != ""
+        any_value = true
+        if suffix == "i"
+          ok = false unless Params.plain_integer(text)
+          part = text.to_i.to_s
+        else
+          ok = false unless Params.plain_text(text)
+          part = "\"" + text + "\""
+        end
+      end
+      unless positions.include?(digits)
+        positions << digits
+        rendered << digits + " => " + part
+      end
+    end
+    return "" unless ok && any_value
+    "{" + rendered.join(", ") + "}"
+  end
+
+  # The request's multiparameter keys for `key`: `key(N)`, `key(Ni)`,
+  # `key(Nf)` — Rails' `/\(\d+[if]?\)\z/` after `key` — in request
+  # order. N is read back through `to_i`, so a zero-padded position
+  # (`key(01)`) is not one.
+  def self.multiparameter_names(sub, key)
+    out = [""]
+    out.pop
+    sub.keys.each do |name|
+      out << name if Params.multiparameter_key(name, key)
+    end
+    out
+  end
+
+  def self.multiparameter_key(name, key)
+    return false unless name.length > key.length + 2
+    return false unless name.start_with?(key + "(") && name.end_with?(")")
+    position = name[key.length + 1, name.length - key.length - 2]
+    if position.end_with?("i") || position.end_with?("f")
+      position = position[0, position.length - 1]
+    end
+    position.length > 0 && position.to_i.to_s == position
+  end
+
+  # Text Hash#inspect writes between quotes unchanged: printable ASCII
+  # other than `"`, `\\` and `#`.
+  def self.plain_text(text)
+    i = 0
+    n = text.bytesize
+    plain = true
+    while i < n
+      b = text.getbyte(i)
+      plain = false if b < 32 || b > 126 || b == 34 || b == 92 || b == 35
+      i += 1
+    end
+    plain
+  end
+
+  # An optional `-` and digits, the text whose `to_i` is the number it
+  # spells.
+  def self.plain_integer(text)
+    digits = text
+    digits = text[1, text.length - 1] if text.start_with?("-")
+    digits.length > 0 && digits.to_i.to_s == digits
   end
 end

@@ -1696,6 +1696,7 @@ pub(super) fn push_from_params_method(
     );
 
     let mut stmts: Vec<Expr> = Vec::new();
+    stmts.push(multiparameter_guard(model, table, fields, &p, "creating"));
     stmts.push(Expr::new(
         Span::synthetic(),
         ExprNode::Assign {
@@ -4212,6 +4213,116 @@ fn column_union_ty(table: &Table) -> Ty {
 ///     (`record.update(title: "Renamed")` doesn't clobber body).
 ///
 /// Save, return Bool.
+/// `raise … if p.rh_multiparameter_unsupported ||
+/// Params.any_of(p.rh_multiparameter_fields, [<uncastable fields>])`,
+/// first, before anything is assigned.
+///
+/// A multiparameter key (`name(1)`) reaches the params object as Rails'
+/// own value for a String or Text attribute — the text of its parts
+/// Hash, `runtime/ruby/params.rb` — so validations see and a save writes
+/// what Rails' would. Any other attribute casts that Hash its own way (a
+/// date column builds a Date), and some shapes are not reproduced at
+/// all; for those the record is refused before it changes.
+fn multiparameter_guard(
+    model: &crate::dialect::Model,
+    table: &Table,
+    fields: &[Symbol],
+    p: &Symbol,
+    doing: &str,
+) -> Expr {
+    use crate::lower::controller_to_library::params::{
+        multiparameter_fields_field, multiparameter_unsupported_field,
+    };
+    let secure = crate::lower::secure_password::secure_password_attr(&model.body);
+    let castable = |field: &Symbol| {
+        if let Some(attr) = &secure {
+            let a = attr.as_str();
+            let f = field.as_str();
+            if f == a || f == format!("{a}_confirmation") || f == format!("{a}_challenge") {
+                return true;
+            }
+        }
+        table.columns.iter().any(|c| {
+            c.name == *field
+                && matches!(c.col_type, crate::schema::ColumnType::String { .. } | crate::schema::ColumnType::Text)
+        })
+    };
+    let read = |field: Symbol, ty: Ty| {
+        with_ty(
+            Expr::new(
+                Span::synthetic(),
+                ExprNode::Send {
+                    recv: Some(var_ref(p.clone())),
+                    method: field,
+                    args: Vec::new(),
+                    block: None,
+                    parenthesized: false,
+                },
+            ),
+            ty,
+        )
+    };
+    let mut cond = read(multiparameter_unsupported_field(), Ty::Bool);
+    let uncastable: Vec<Expr> = fields
+        .iter()
+        .filter(|f| !castable(f))
+        .map(|f| with_ty(lit_str(f.as_str().to_string()), Ty::Str))
+        .collect();
+    if !uncastable.is_empty() {
+        let strs = Ty::Array { elem: std::sync::Arc::new(Ty::Str) };
+        let any = with_ty(
+            Expr::new(
+                Span::synthetic(),
+                ExprNode::Send {
+                    recv: Some(Expr::new(Span::synthetic(), ExprNode::Const { path: vec![Symbol::from("Params")] })),
+                    method: Symbol::from("any_of"),
+                    args: vec![
+                        read(multiparameter_fields_field(), strs.clone()),
+                        with_ty(
+                            Expr::new(Span::synthetic(), ExprNode::Array { elements: uncastable, style: Default::default() }),
+                            strs,
+                        ),
+                    ],
+                    block: None,
+                    parenthesized: true,
+                },
+            ),
+            Ty::Bool,
+        );
+        cond = with_ty(
+            Expr::new(
+                Span::synthetic(),
+                ExprNode::BoolOp { op: crate::expr::BoolOpKind::Or, surface: Default::default(), left: cond, right: any },
+            ),
+            Ty::Bool,
+        );
+    }
+    Expr::new(
+        Span::synthetic(),
+        ExprNode::If { cond, then_branch: multiparameter_refusal(&model.name, doing), else_branch: nil_lit() },
+    )
+}
+
+/// `raise("…")` for a record built from a multiparameter key whose
+/// Rails value is not reproduced. A message raise (`RuntimeError`), the
+/// one form every target's emitter renders.
+fn multiparameter_refusal(owner: &ClassId, doing: &str) -> Expr {
+    let text = format!(
+        "{} {doing} from a multiparameter key (`attr(N)`) is not modeled for this attribute or value: roundhouse reproduces Rails' value only for a String or Text attribute whose parts are plain text or integers",
+        owner.0.as_str()
+    );
+    Expr::new(
+        Span::synthetic(),
+        ExprNode::Send {
+            recv: None,
+            method: Symbol::from("raise"),
+            args: vec![with_ty(lit_str(text), Ty::Str)],
+            block: None,
+            parenthesized: true,
+        },
+    )
+}
+
 fn synth_update_typed(
     model: &crate::dialect::Model,
     fields: &[Symbol],
@@ -4281,6 +4392,8 @@ fn synth_update_typed(
             },
         ));
     }
+
+    stmts.insert(0, multiparameter_guard(model, table, fields, &p, "updating"));
 
     stmts.push(Expr::new(
         Span::synthetic(),

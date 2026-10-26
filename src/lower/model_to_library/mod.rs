@@ -385,6 +385,12 @@ pub(crate) fn lower_models_inner_with_ruby_values(
                 Ty::Bool,
             );
         }
+        // The multiparameter record the model's guard reads.
+        register(
+            crate::lower::controller_to_library::params::multiparameter_fields_field(),
+            Ty::Array { elem: std::sync::Arc::new(Ty::Str) },
+        );
+        register(crate::lower::controller_to_library::params::multiparameter_unsupported_field(), Ty::Bool);
         info.class_methods.insert(
             Symbol::from("from_raw"),
             fn_sig(
@@ -926,6 +932,17 @@ fn report_unclaimed_unknowns(model: &Model, schema: &Schema) {
             && crate::lower::plain_text_attr::plain_text_attrs(model)
                 .iter()
                 .any(|(span, _)| *span == expr.span)
+        {
+            continue;
+        }
+        // `normalizes :attr, with: ->(v) { … }` over columns — claimed by
+        // `lower::normalizes` (the `_normalize_<attr>` class method the
+        // column writer and finders call). Another `with:`, or an
+        // attribute that isn't a column, stays unclaimed and warns.
+        if name == "normalizes"
+            && crate::lower::normalizes::lowers_call(expr, |attr| {
+                schema.tables.get(&model.table.0).is_some_and(|t| t.columns.iter().any(|c| c.name == *attr))
+            })
         {
             continue;
         }
