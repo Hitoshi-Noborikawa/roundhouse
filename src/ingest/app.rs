@@ -1287,8 +1287,43 @@ end
                 }
             }
             let mut assignments: Vec<(Vec<String>, String)> = Vec::new();
-            for (path, bytes) in sources {
-                assignments.extend(extract_config_assignments(&bytes, &path));
+            for (path, bytes) in &sources {
+                assignments.extend(extract_config_assignments(bytes, path));
+            }
+            // A framework setting the app itself reads back (lobsters'
+            // `Routes.default_url_options` is `Rails.application.config
+            // .action_mailer.default_url_options`) answers what the running
+            // environment's file assigned, over application.rb and the
+            // initializers. Only a READ setting is lifted: every other
+            // framework assignment configures machinery the emit replaces.
+            for (framework, leaf) in framework_config_reads(&app) {
+                let wanted = [framework.clone(), leaf.clone()];
+                let assigned = |bytes: &[u8], path: &str| {
+                    extract_framework_config_assignments(bytes, path)
+                        .into_iter()
+                        .filter(|(segments, _)| segments.as_slice() == wanted.as_slice())
+                        .last()
+                        .map(|(_, value)| value)
+                };
+                let base = sources.iter().filter_map(|(path, bytes)| assigned(bytes, path)).last();
+                let mut arms = String::new();
+                for env in ["development", "production", "test"] {
+                    let file = dir.join(format!("config/environments/{env}.rb"));
+                    let Ok(bytes) = vfs.read(&file) else { continue };
+                    if let Some(value) = assigned(&bytes, &file.display().to_string()) {
+                        arms.push_str(&format!("when {env:?}\n  {value}\n"));
+                    }
+                }
+                if arms.is_empty() && base.is_none() {
+                    continue;
+                }
+                let fallback = base.unwrap_or_else(|| "nil".to_string());
+                let value = if arms.is_empty() {
+                    fallback
+                } else {
+                    format!("case Rails.env.to_s\n{arms}else\n  {fallback}\nend")
+                };
+                assignments.push((wanted.to_vec(), value));
             }
             // ONCE PER PROCESS. An initializer runs at boot, so the
             // value an assignment writes is built one time and every
@@ -9802,18 +9837,60 @@ pub(super) enum TimeFormatSource {
 /// `x_vapid_private_key` cannot be split back into its segments — the
 /// leaf has an underscore of its own.
 pub(super) fn extract_config_assignments(source: &[u8], file: &str) -> Vec<(Vec<String>, String)> {
-    fn walk(stmts: Vec<ruby_prism::Node<'_>>, src: &str, out: &mut Vec<(Vec<String>, String)>) {
+    config_assignments(source, file, false)
+}
+
+/// [`extract_config_assignments`] with the framework subsections kept
+/// (`config.action_mailer.default_url_options = …`).
+fn extract_framework_config_assignments(source: &[u8], file: &str) -> Vec<(Vec<String>, String)> {
+    config_assignments(source, file, true)
+}
+
+/// Every `Rails.application.config.<framework>.<setting>` an app body reads.
+fn framework_config_reads(app: &App) -> std::collections::BTreeSet<(String, String)> {
+    use crate::expr::ExprNode;
+    fn is_config_root(e: &crate::expr::Expr) -> bool {
+        let ExprNode::Send { recv: Some(r), method, args, .. } = &*e.node else { return false };
+        if !args.is_empty() {
+            return false;
+        }
+        let rails = |e: &crate::expr::Expr| matches!(&*e.node, ExprNode::Const { path } if path.last().is_some_and(|p| p.as_str() == "Rails"));
+        match method.as_str() {
+            "config" => matches!(&*r.node, ExprNode::Send { recv: Some(rr), method, .. } if method.as_str() == "application" && rails(rr)),
+            "configuration" => rails(r),
+            _ => false,
+        }
+    }
+    fn visit(e: &crate::expr::Expr, out: &mut std::collections::BTreeSet<(String, String)>) {
+        if let ExprNode::Send { recv: Some(r), method: leaf, args, .. } = &*e.node
+            && args.is_empty()
+            && let ExprNode::Send { recv: Some(root), method: framework, args: fargs, .. } = &*r.node
+            && fargs.is_empty()
+            && FRAMEWORK_CONFIG_KEYS.contains(&framework.as_str())
+            && is_config_root(root)
+        {
+            out.insert((framework.as_str().to_string(), leaf.as_str().to_string()));
+        }
+        e.node.for_each_child(&mut |c| visit(c, out));
+    }
+    let mut out = std::collections::BTreeSet::new();
+    crate::lower::for_each_emit_body_ref(app, &mut |e| visit(e, &mut out));
+    out
+}
+
+fn config_assignments(source: &[u8], file: &str, framework: bool) -> Vec<(Vec<String>, String)> {
+    fn walk(stmts: Vec<ruby_prism::Node<'_>>, src: &str, framework: bool, out: &mut Vec<(Vec<String>, String)>) {
         for stmt in stmts {
             // Config lines sit at the top level of an initializer and
             // inside the Application class body; descend through both
             // rather than the whole expression tree, which is where
             // every other config reader in this file draws the line.
             if let Some(class) = stmt.as_class_node() {
-                walk(class.body().map(super::util::flatten_statements).unwrap_or_default(), src, out);
+                walk(class.body().map(super::util::flatten_statements).unwrap_or_default(), src, framework, out);
                 continue;
             }
             if let Some(module) = stmt.as_module_node() {
-                walk(module.body().map(super::util::flatten_statements).unwrap_or_default(), src, out);
+                walk(module.body().map(super::util::flatten_statements).unwrap_or_default(), src, framework, out);
                 continue;
             }
             // The third home, and the one Rails' own generator writes:
@@ -9827,7 +9904,7 @@ pub(super) fn extract_config_assignments(source: &[u8], file: &str) -> Vec<(Vec<
                         .and_then(|b| b.as_block_node())
                         .and_then(|b| b.body())
                     {
-                        walk(super::util::flatten_statements(body), src, out);
+                        walk(super::util::flatten_statements(body), src, framework, out);
                         continue;
                     }
                 }
@@ -9836,7 +9913,12 @@ pub(super) fn extract_config_assignments(source: &[u8], file: &str) -> Vec<(Vec<
             // `x.y = v` parses as a call named `y=`.
             let name = super::util::constant_id_str(&call.name()).to_string();
             let Some(base) = name.strip_suffix('=') else { continue };
-            let Some(prefix) = config_receiver_path(&call.receiver()) else {
+            let prefix = if framework {
+                call.receiver().as_ref().and_then(|r| config_path_of(r, 0))
+            } else {
+                config_receiver_path(&call.receiver())
+            };
+            let Some(prefix) = prefix else {
                 continue;
             };
             let Some(args) = call.arguments() else { continue };
@@ -9859,7 +9941,7 @@ pub(super) fn extract_config_assignments(source: &[u8], file: &str) -> Vec<(Vec<
         .as_program_node()
         .map(|p| p.statements().body().iter().collect::<Vec<_>>())
         .unwrap_or_default();
-    walk(stmts, &src, &mut out);
+    walk(stmts, &src, framework, &mut out);
     out
 }
 
