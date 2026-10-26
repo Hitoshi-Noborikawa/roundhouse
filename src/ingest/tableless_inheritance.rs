@@ -78,6 +78,70 @@ pub(super) fn inherit_tableless_parents(app: &mut App) {
     }
 }
 
+/// A model under an abstract parent model runs the parent's validations
+/// before its own (#1360; activerecord 8.1.4). `ModelBases` makes a
+/// class a model under an app model only when that parent is abstract
+/// (`self.abstract_class = true`, `ApplicationRecord`): a concrete
+/// parent means STI, and its subclass stays a library class.
+///
+/// Each model synthesizes one `validate` from its own body, so a
+/// subclass's covered only its declarations, and nothing reported the
+/// parent's as left out. The parent's `validate` / `validates` items, and
+/// its `validates_with` calls (expanded per class later), now start the
+/// subclass's body, a grandparent's first. Its methods aren't copied: the
+/// emitted subclass is still `< Parent`. A tableless parent is
+/// `inherit_tableless_parents`' own.
+pub(super) fn inherit_abstract_parent_validations(app: &mut App) {
+    let index: std::collections::HashMap<String, usize> =
+        app.models.iter().enumerate().map(|(i, m)| (m.name.0.as_str().to_string(), i)).collect();
+    let parent_of: Vec<Option<usize>> = app
+        .models
+        .iter()
+        .map(|m| {
+            resolve_parent(&index, m.name.0.as_str(), m.parent.as_ref()?.0.as_str())
+                .filter(|&p| !(app.models[p].parent.is_none() && is_tableless_parent(&app.models[p])))
+        })
+        .collect();
+    let depth = |mut i: usize| {
+        let mut d = 0;
+        while let Some(p) = parent_of[i] {
+            d += 1;
+            i = p;
+            if d > parent_of.len() {
+                break;
+            }
+        }
+        d
+    };
+    let mut order: Vec<usize> = (0..app.models.len()).filter(|&i| parent_of[i].is_some()).collect();
+    order.sort_by_key(|&i| depth(i));
+    for child in order {
+        let parent = parent_of[child].expect("filtered above");
+        let inherited: Vec<ModelBodyItem> = app.models[parent]
+            .body
+            .iter()
+            .filter(|item| inherited_validation(item))
+            .cloned()
+            .map(without_layout)
+            .collect();
+        if inherited.is_empty() {
+            continue;
+        }
+        let body = std::mem::take(&mut app.models[child].body);
+        app.models[child].body = inherited.into_iter().chain(body).collect();
+    }
+}
+
+fn inherited_validation(item: &ModelBodyItem) -> bool {
+    match item {
+        ModelBodyItem::Validation { .. } => true,
+        ModelBodyItem::Unknown { expr, .. } => {
+            matches!(&*expr.node, ExprNode::Send { recv: None, method, .. } if method.as_str() == "validates_with")
+        }
+        _ => false,
+    }
+}
+
 /// `parent` as written in `child`'s file, resolved the way Ruby's
 /// constant lookup walks the child's enclosing modules.
 fn resolve_parent(index: &std::collections::HashMap<String, usize>, child: &str, parent: &str) -> Option<usize> {

@@ -2326,6 +2326,7 @@ end
     // After the splice, so a concern's DSL on a tableless parent reaches
     // its subclasses too; before the macros, which read the result.
     super::tableless_inheritance::inherit_tableless_parents(&mut app);
+    super::tableless_inheritance::inherit_abstract_parent_validations(&mut app);
     super::acts_as_votable::expand_acts_as_votable(&mut app)?;
     // After the splice: `include Discard::Model` can arrive through a concern.
     super::discard::expand_discard_models(&mut app)?;
