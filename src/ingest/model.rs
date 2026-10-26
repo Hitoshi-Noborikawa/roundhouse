@@ -2388,8 +2388,8 @@ impl ClassConsts {
     /// leaves the whole constant unresolved.
     fn interpolated_regex(&self, node: &Node<'_>) -> Option<(String, String)> {
         let ir = node.as_interpolated_regular_expression_node()?;
-        if ir.is_once()
-            || ir.is_euc_jp()
+        // Not refused for `/o`: every part below folds to a constant, which evaluating once or each time reads the same
+        if ir.is_euc_jp()
             || ir.is_windows_31j()
             || ir.is_utf_8()
             || ir.is_ascii_8bit()
