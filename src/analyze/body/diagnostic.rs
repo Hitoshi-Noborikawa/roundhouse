@@ -60,8 +60,7 @@ pub(super) fn detect_diagnostic(expr: &mut Expr) {
         };
         let lhs_ty = r.ty.clone().unwrap_or(Ty::Nil);
         let rhs_ty = rhs.ty.clone().unwrap_or(Ty::Nil);
-        // Not an error where nil is the only miss: Ruby raises NoMethodError then, which the ruby family runs as written and a strict target checks (`lower::nil_operand`)
-        if incompatible && !crate::lower::nil_operand::nil_is_the_only_miss(method.as_str(), &lhs_ty, &rhs_ty) {
+        if incompatible {
             use crate::diagnostic::DiagnosticKind;
             expr.set_diagnostic(Some(DiagnosticKind::IncompatibleBinop {
                 op: method.clone(),

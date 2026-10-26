@@ -542,16 +542,9 @@ pub fn diagnose_helper_modules(app: &App) -> Vec<Diagnostic> {
             diagnose_expr(&method.body, &mut helper_out);
         }
     }
-    // Not errors: the ivar is the rendering view's, which the emitted helper reads as Rails does (only its type is unseeded);
-    // and nullable primitive arithmetic raises where Rails raises, as the library policy already holds.
-    // Only where the value, once not nil, takes the operation: `String? + Integer` fails whatever it holds.
+    // Not an error: the ivar is the rendering view's, which the emitted helper reads as Rails does (only its type is unseeded)
     for d in &mut helper_out {
-        let soft = match &d.kind {
-            DiagnosticKind::IvarUnresolved { .. } => true,
-            DiagnosticKind::IncompatibleBinop { op, lhs_ty, rhs_ty } => crate::lower::nil_operand::nil_is_the_only_miss(op.as_str(), lhs_ty, rhs_ty),
-            _ => false,
-        };
-        if soft {
+        if matches!(d.kind, DiagnosticKind::IvarUnresolved { .. }) {
             d.severity = crate::diagnostic::Severity::Warning;
         }
     }
@@ -787,12 +780,16 @@ fn diagnose_expr_in(expr: &Expr, out: &mut Vec<Diagnostic>, value_used: bool) {
             DiagnosticKind::Unsupported { construct, .. }
                 if construct.as_str() == crate::diagnostic::CONSTRUCTOR_KEYWORD_ARGUMENTS
         ) {
-            out.push(Diagnostic {
-                span: expr.span,
-                kind: kind.clone(),
-                severity: Diagnostic::default_severity(kind),
-                message,
-            });
+            let severity = match kind {
+                // Not an error where nil is the only miss: Ruby raises NoMethodError there, which the ruby family runs as written and a strict target checks (`lower::nil_operand`)
+                DiagnosticKind::IncompatibleBinop { op, lhs_ty, rhs_ty }
+                    if crate::lower::nil_operand::nil_is_the_only_miss(op.as_str(), lhs_ty, rhs_ty) =>
+                {
+                    crate::diagnostic::Severity::Warning
+                }
+                _ => Diagnostic::default_severity(kind),
+            };
+            out.push(Diagnostic { span: expr.span, kind: kind.clone(), severity, message });
         }
     }
 
