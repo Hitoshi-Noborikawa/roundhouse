@@ -10292,8 +10292,11 @@ pub(crate) fn extract_filter_parameters(source: &[u8]) -> Vec<FilterParametersLi
             (false, r)
         } else if let Some(r) = rest.strip_prefix('=').filter(|r| !r.starts_with('=')) {
             (true, r)
-        } else {
+        } else if filter_parameters_mutation(rest) {
             out.push(FilterParametersLine::Computed { replace: false });
+            continue;
+        } else {
+            // Not a write: an initializer that only reads the list (lobsters' lograge `ParameterFilter.new(…filter_parameters)`)
             continue;
         };
         // The shortest run of lines that parses as one operand. Blank
@@ -10329,6 +10332,18 @@ pub(crate) fn extract_filter_parameters(source: &[u8]) -> Vec<FilterParametersLi
         });
     }
     out
+}
+
+/// Whether what follows `config.filter_parameters` changes the list in
+/// place (`<<`, `.push(…)`, `.concat(…)`, a bang method) rather than reads it.
+fn filter_parameters_mutation(rest: &str) -> bool {
+    if rest.starts_with("<<") {
+        return true;
+    }
+    let Some(call) = rest.strip_prefix('.') else { return false };
+    let name: String = call.chars().take_while(|c| c.is_alphanumeric() || matches!(c, '_' | '!' | '?')).collect();
+    name.ends_with('!')
+        || matches!(name.as_str(), "push" | "append" | "concat" | "unshift" | "prepend" | "insert" | "replace" | "clear" | "delete" | "delete_at" | "delete_if" | "keep_if" | "pop" | "shift" | "fill")
 }
 
 /// The filters of an operand that is one `[...]`, `%i[...]` or `%w[...]`
@@ -11793,6 +11808,22 @@ mod importmap_json_tests {
         assert!(
             method.contains(&format!("{json:?}")),
             "CSP hashes this string; it has to be the importmap script body:\n{method}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod filter_parameters_tests {
+    use super::{extract_filter_parameters, FilterParametersLine};
+
+    #[test]
+    fn a_read_of_the_list_is_not_a_write() {
+        let src = b"filter = ActiveSupport::ParameterFilter.new(Rails.application.config.filter_parameters)\n";
+        assert_eq!(extract_filter_parameters(src), Vec::<FilterParametersLine>::new());
+        let src = b"Rails.application.config.filter_parameters << :token\nRails.application.config.filter_parameters.push(:otp)\n";
+        assert_eq!(
+            extract_filter_parameters(src),
+            vec![FilterParametersLine::Computed { replace: false }, FilterParametersLine::Computed { replace: false }]
         );
     }
 }
