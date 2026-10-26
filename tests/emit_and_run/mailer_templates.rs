@@ -51,10 +51,12 @@ fn an_unmodeled_mail_is_an_error() {
             "class OddMailer < ApplicationMailer\n  default reply_to: -> { \"r@example.com\" }\n\n  def blocked\n    mail(to: \"a@example.com\") do |format|\n      format.text\n    end\n  end\n\n  def missing\n    mail(to: \"a@example.com\")\n  end\n\n  def renamed\n    mail(to: \"a@example.com\", template_name: \"other\")\n  end\n\n  def given\n    mail(to: \"a@example.com\", body: \"plain\")\n  end\nend\n",
         )
         .emit(roundhouse::project::BuildTarget::Ruby);
-    for needle in ["`mail { |format| … }`", "no `odd_mailer/missing` template", "`template_name:`", "a `default` given a Proc"] {
+    // A Proc `default` is computed on the ruby family
+    // (`ingest::mailer_defaults`, tests/mailer_proc_default.rs).
+    for needle in ["`mail { |format| … }`", "no `odd_mailer/missing` template", "`template_name:`"] {
         assert!(errors.iter().any(|e| e.contains(needle)), "{needle}: {errors:#?}");
     }
-    assert_eq!(errors.len(), 4, "{errors:#?}");
+    assert_eq!(errors.len(), 3, "{errors:#?}");
 }
 
 /// No strict target carries the ActionMailer runtime: each mailer is
