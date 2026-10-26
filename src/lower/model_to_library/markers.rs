@@ -1855,7 +1855,11 @@ fn block_callback_on(arg: &Expr) -> Option<crate::dialect::CallbackOn> {
 /// them, changes the arity or the binding and is declined.
 pub(super) fn block_defaults_bindable(block: &Expr) -> bool {
     match &*block.node {
-        ExprNode::Lambda { params, rest_param, extra_params, .. } => {
+        ExprNode::Lambda { params, rest_param, extra_params, body, .. } => {
+            // Rails runs a one-parameter block with the record as both `self` and its argument
+            if let [record] = params.as_slice() {
+                return rest_param.is_none() && extra_params.is_empty() && !rebinds(body, record);
+            }
             if !params.is_empty() || rest_param.is_some() {
                 return false;
             }
@@ -1935,6 +1939,32 @@ pub(crate) fn block_callback_shape(
         _ => return None,
     };
     Some((callback, hook_name, on))
+}
+
+/// Whether a nested block or lambda binds `name` again.
+fn rebinds(expr: &Expr, name: &Symbol) -> bool {
+    if let ExprNode::Lambda { params, .. } = &*expr.node
+        && params.contains(name)
+    {
+        return true;
+    }
+    let mut found = false;
+    expr.node.for_each_child(&mut |c| found |= rebinds(c, name));
+    found
+}
+
+/// The body with each read of the record parameter as `self`.
+fn record_as_self(body: &Expr, record: &Symbol) -> Expr {
+    fn swap(e: &mut Expr, record: &Symbol) {
+        if matches!(&*e.node, ExprNode::Var { name, .. } if name == record) {
+            *e.node = ExprNode::SelfRef;
+            return;
+        }
+        e.node.for_each_child_mut(&mut |c| swap(c, record));
+    }
+    let mut out = body.clone();
+    swap(&mut out, record);
+    out
 }
 
 /// Does `expr` read no local but those in `bound`? (A nested lambda's
@@ -2054,8 +2084,16 @@ fn push_block_callback(methods: &mut Vec<MethodDef>, model: &Model, expr: &Expr)
             ExprNode::Send { method, .. } => method.as_str(),
             _ => return,
         };
-        let ExprNode::Lambda { body: lambda_body, extra_params, .. } = &*callback.node else {
+        let ExprNode::Lambda { body: lambda_body, extra_params, params, .. } = &*callback.node else {
             return;
+        };
+        let record_body;
+        let lambda_body = match params.as_slice() {
+            [record] => {
+                record_body = record_as_self(lambda_body, record);
+                &record_body
+            }
+            _ => lambda_body,
         };
         // `|key: 7, x = 1|` (see `block_defaults_bindable`): bind each
         // default as a local ahead of the body.
