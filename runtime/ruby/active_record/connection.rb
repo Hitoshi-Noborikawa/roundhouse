@@ -906,15 +906,23 @@ module ActiveRecord
               raise e
             end
             # The records' commit callbacks first, then the held jobs,
-            # as Rails enqueues after them. A job that fails to enqueue
-            # (a Sidekiq push to a down Redis) raises after both, so no
-            # callback is skipped or left to fire at a later COMMIT.
+            # as Rails enqueues after them. A callback that raises ends
+            # the COMMIT there, as in Rails' `commit_records`, whose raise
+            # comes before the transaction's own callbacks, where
+            # `after_all_transactions_commit` enqueues: the held jobs and
+            # any `after_commit` work not yet run are dropped, and the
+            # caller sees the callback's error. A job that fails to enqueue (a Sidekiq push to a down
+            # Redis) raises after the callbacks have all run, so none is
+            # skipped or left to fire at a later COMMIT.
             begin
               ActiveRecord::Base._commit_enlisted
               ActiveRecord::Base._run_after_commits_from(0)
-            ensure
-              ActiveRecord::TransactionHooks.committed
+            rescue Exception => e
+              ActiveRecord::Base._drop_after_commits_from(0)
+              ActiveRecord::TransactionHooks.rolled_back
+              raise e
             end
+            ActiveRecord::TransactionHooks.committed
           end
         end
       end
