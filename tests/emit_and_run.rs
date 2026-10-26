@@ -19818,6 +19818,8 @@ mod partial_binop;
 mod union_block_params;
 #[path = "emit_and_run/format_once.rs"]
 mod format_once;
+#[path = "emit_and_run/condition_lambda_record.rs"]
+mod condition_lambda_record;
 
 /// `ActiveSupport::JSON.encode(value, escape: false)` — Rails' document
 /// without the HTML-entity escaping, which campfire's fragment keys can

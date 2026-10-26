@@ -3272,6 +3272,11 @@ fn callback_condition(value: &ruby_prism::Node<'_>, file: &str) -> Option<Expr> 
         return callback_condition(&inner, file);
     }
     if let Some(lambda) = value.as_lambda_node() {
+        // Rails calls a one-parameter condition with the record, which the spliced guard reads as `self`
+        if let Some(record) = record_parameter(lambda.parameters()) {
+            let body = simple_condition_body_with(None, lambda.body(), Some(&record))?;
+            return record_as_self(ingest_expr(&body, file).ok()?, &record);
+        }
         let body = simple_condition_body(lambda.parameters(), lambda.body())?;
         return ingest_expr(&body, file).ok();
     }
@@ -3350,6 +3355,63 @@ fn symbol_operator_value(node: &ruby_prism::Node<'_>) -> Option<String> {
 fn simple_condition_body<'pr>(
     params: Option<ruby_prism::Node<'pr>>,
     body: Option<ruby_prism::Node<'pr>>,
+) -> Option<ruby_prism::Node<'pr>> {
+    simple_condition_body_with(params, body, None)
+}
+
+/// `->(record) { … }`: the lambda's one required parameter, when it has
+/// no other.
+fn record_parameter(params: Option<ruby_prism::Node<'_>>) -> Option<String> {
+    let bp = params?.as_block_parameters_node()?;
+    if bp.locals().iter().next().is_some() {
+        return None;
+    }
+    let pn = bp.parameters()?;
+    let requireds: Vec<_> = pn.requireds().iter().collect();
+    let [only] = requireds.as_slice() else { return None };
+    if pn.optionals().iter().next().is_some()
+        || pn.rest().is_some()
+        || pn.posts().iter().next().is_some()
+        || pn.keywords().iter().next().is_some()
+        || pn.keyword_rest().is_some()
+        || pn.block().is_some()
+    {
+        return None;
+    }
+    Some(constant_id_str(&only.as_required_parameter_node()?.name()).to_string())
+}
+
+/// The guard with each read of the record parameter as `self`; `None`
+/// when a nested block or lambda binds that name again.
+fn record_as_self(mut expr: Expr, record: &str) -> Option<Expr> {
+    fn rebinds(e: &Expr, record: &str) -> bool {
+        if let ExprNode::Lambda { params, .. } = &*e.node
+            && params.iter().any(|p| p.as_str() == record)
+        {
+            return true;
+        }
+        let mut found = false;
+        e.node.for_each_child(&mut |c| found |= rebinds(c, record));
+        found
+    }
+    fn swap(e: &mut Expr, record: &str) {
+        if matches!(&*e.node, ExprNode::Var { name, .. } if name.as_str() == record) {
+            *e.node = ExprNode::SelfRef;
+            return;
+        }
+        e.node.for_each_child_mut(&mut |c| swap(c, record));
+    }
+    if rebinds(&expr, record) {
+        return None;
+    }
+    swap(&mut expr, record);
+    Some(expr)
+}
+
+fn simple_condition_body_with<'pr>(
+    params: Option<ruby_prism::Node<'pr>>,
+    body: Option<ruby_prism::Node<'pr>>,
+    record: Option<&str>,
 ) -> Option<ruby_prism::Node<'pr>> {
     if let Some(p) = params {
         let bp = p.as_block_parameters_node()?;
@@ -3479,7 +3541,7 @@ fn simple_condition_body<'pr>(
             self.bad = true;
         }
     }
-    let mut v = Escapes { bad: false, bound: Vec::new() };
+    let mut v = Escapes { bad: false, bound: record.map(|r| vec![r.to_string()]).unwrap_or_default() };
     ruby_prism::Visit::visit(&mut v, &only);
     if v.bad { None } else { Some(only) }
 }

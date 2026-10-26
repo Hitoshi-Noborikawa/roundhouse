@@ -1538,16 +1538,29 @@ end
     );
 }
 
-/// An arity>0 lambda is not the zero-arity body shape
-/// `callback_condition` accepts (its parameter would be unbound once
-/// spliced into `def validate`), so it stays the reported gap it
-/// always was — distinct from the now-supported zero-arity form above.
+/// A one-parameter lambda is called with the record, so its parameter
+/// reads as `self` once spliced into `def validate`. Two parameters stay
+/// the reported gap.
 #[test]
-fn arity_one_lambda_condition_on_validates_stays_a_gap() {
-    let (model, warnings, gaps) = ingest_widget(
+fn arity_one_lambda_condition_on_validates_reads_the_record() {
+    let (model, warnings, _) = ingest_widget(
         r#"
 class Widget < ApplicationRecord
   validates :name, presence: true, if: ->(w) { w.live? }
+end
+"#,
+    );
+    assert!(warnings.is_empty(), "{warnings:?}");
+    let rules = validation_rules(&model);
+    let name = rules.iter().find(|v| v.attribute.as_str() == "name").expect("name rule");
+    assert!(
+        matches!(&name.if_cond, Some(e) if matches!(&*e.node, ExprNode::Send { recv: Some(r), method, .. } if method.as_str() == "live?" && matches!(&*r.node, ExprNode::SelfRef))),
+        "{:?}", name.if_cond
+    );
+    let (model, warnings, gaps) = ingest_widget(
+        r#"
+class Widget < ApplicationRecord
+  validates :name, presence: true, if: ->(w, x) { w.live? }
 end
 "#,
     );
@@ -1662,12 +1675,12 @@ class Widget < ApplicationRecord
   validates :stock, comparison: { less_than_or_equal_to: :max_stock }
   validates :price, numericality: { greater_than: 0, odd: true }
   validates :bounded, numericality: { equal_to: 1, other_than: 2 }
-  # An arity>0 lambda would splice an unbound parameter into `def
+  # A two-parameter lambda would splice an unbound parameter into `def
   # validate`; a String condition names a method Rails resolves at
   # runtime that this build does not model. Both stay the reported gap
-  # a zero-arity lambda/proc `if:`/`unless:` no longer is (see
-  # `validates_lambda_conditions.rs`).
-  validates :note, presence: true, if: ->(w) { w.live? }
+  # a zero- or one-parameter lambda/proc `if:`/`unless:` no longer is
+  # (see `validates_lambda_conditions.rs`).
+  validates :note, presence: true, if: ->(w, x) { w.live? }
   validates :color, presence: true, unless: "a string condition"
 end
 "#,
