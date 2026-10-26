@@ -173,3 +173,93 @@ fn an_explicit_formats_option_picks_that_layout() {
     .run_test(CONTROLLER_TEST)
     .assert_passes();
 }
+
+const CACHE_TEST: &str = "test/controllers/note_caches_controller_test.rb";
+
+/// The show page and the banner stream both render `render`, over notes
+/// that each `cache note` in their own format, with fragment caching on
+/// and one store behind the controller and the collection cache. The
+/// test warms the html fragments, then the stream's, then reads the
+/// page again: each format finds only its own markup, one fragment per
+/// element per format.
+fn cached_notes_app(render: &str) -> emit_and_run::Overlay {
+    banner_app(render, "Stream note", "Html note")
+        .write(
+            "app/views/articles/_note.html.erb",
+            "<% cache note do %><p id=\"note\">Html note</p><% end %>\n",
+        )
+        .write(
+            "app/views/articles/_note.turbo_stream.erb",
+            "<% cache note do %><p id=\"note\">Stream note</p><% end %>\n",
+        )
+        .edit(
+            "app/views/articles/show.html.erb",
+            "  <h1 class=\"font-bold text-4xl\"><%= @article.title %></h1>\n",
+            &format!("  <h1 class=\"font-bold text-4xl\"><%= @article.title %></h1>\n  {render}"),
+        )
+        .write(
+            CACHE_TEST,
+            r#"require "test_helper"
+
+class NoteCachesControllerTest < ActionDispatch::IntegrationTest
+  setup do
+    @article = articles(:one)
+    # Past the length a cached collection renders uncached (MAX_UNCACHED_COLLECTION_LENGTH).
+    8.times { |i| Article.create!(title: "More #{i}", body: "A sufficiently long article body.") }
+    @store = ActiveSupport::Cache::MemoryStore.new
+    @previous_cache_store = ActionController::Base.cache_store
+    @previous_collection_cache = ActionView::PartialRenderer.collection_cache
+    ActionController::Base.cache_store = @store
+    ActionView::PartialRenderer.collection_cache = @store
+    ActionController::Base.perform_caching = true
+  end
+
+  teardown do
+    ActionController::Base.perform_caching = false
+    ActionController::Base.cache_store = @previous_cache_store
+    ActionView::PartialRenderer.collection_cache = @previous_collection_cache
+  end
+
+  test "each format is served its own fragments" do
+    get article_url(@article)
+    assert_includes response.body, "Html note"
+    get banner_article_url(@article, format: :turbo_stream)
+    assert_includes response.body, "Stream note"
+    assert_not_includes response.body, "Html note"
+    get article_url(@article)
+    assert_includes response.body, "Html note"
+    assert_not_includes response.body, "Stream note"
+    assert_includes @store.inspect, "entries=#{2 * Article.count},"
+  end
+end
+"#,
+        )
+}
+
+/// A partial's `cache note` keys its fragment under its own variant, as
+/// Rails' digest path of that variant does.
+#[test]
+fn a_partials_cache_block_keeps_each_formats_fragment() {
+    cached_notes_app("<%= render partial: \"note\", collection: Article.all %>\n")
+        .run_test(CACHE_TEST)
+        .assert_passes();
+}
+
+/// A `cached: true` collection keys each element under the variant the
+/// render resolves, the same key the partial's own block files under.
+#[test]
+fn a_cached_collection_keeps_each_formats_fragments() {
+    cached_notes_app("<%= render partial: \"note\", collection: Article.all, cached: true %>\n")
+        .run_test(CACHE_TEST)
+        .assert_passes();
+}
+
+/// A callable `cached:` key goes under the same variant's name.
+#[test]
+fn a_keyed_cached_collection_keeps_each_formats_fragments() {
+    cached_notes_app(
+        "<%= render partial: \"note\", collection: Article.all, cached: ->(note) { note } %>\n",
+    )
+    .run_test(CACHE_TEST)
+    .assert_passes();
+}

@@ -777,6 +777,21 @@ pub fn view_output_stem(v: &crate::dialect::View) -> String {
     }
 }
 
+/// The template a fragment key names (`articles/_note`), format-qualified
+/// when it is not the html one: `_note.turbo_stream.erb` keys under
+/// `articles/_note.turbo_stream`. Rails names it by its digest path,
+/// `articles/_note:<digest>`, and the digest is the variant's own source,
+/// so the html and turbo_stream fragments of one record never meet.
+/// Without a digest (`walker::cache_key_parts`) the format is what keeps
+/// them apart. The html template keeps the bare path its keys always had.
+pub fn fragment_template_path(path: &str, format: &str) -> String {
+    if format == "html" {
+        path.to_string()
+    } else {
+        format!("{path}.{format}")
+    }
+}
+
 /// The lowered method name for a view, format-qualified when the view
 /// is not the html one: `messages/create.turbo_stream.erb` becomes
 /// `create_turbo_stream`, sitting BESIDE `create` rather than colliding

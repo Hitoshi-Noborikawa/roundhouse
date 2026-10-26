@@ -789,7 +789,7 @@ fn build_library_class(view: &View, lx: &ViewLowerCtx, type_body: bool) -> Libra
         multipart_partials: lx.multipart_partials.clone(),
         partial_extras: lx.partial_extras.clone(),
         strict_locals: lx.strict_locals.clone(),
-        view_name: view.name.as_str().to_string(),
+        view_name: crate::lower::view::fragment_template_path(view.name.as_str(), view.format.as_str()),
         ivar_models: std::rc::Rc::new(view_ivar_models(app, &view.name)),
         str_ivars: std::rc::Rc::new(view_str_ivars(app, &view.name)),
         ivar_locals: std::rc::Rc::new(ivar_locals),
@@ -4460,7 +4460,9 @@ pub(super) struct ViewCtx {
     /// can key on the SAME record — campfire's `_message` and a
     /// `_message` in a turbo-stream refresh both cache `[message,
     /// "presentation-v2"]` — so the site has to be in the key or one
-    /// would serve the other's markup.
+    /// would serve the other's markup. A non-html variant carries its
+    /// format (`messages/_message.turbo_stream`,
+    /// `fragment_template_path`) for the same reason.
     pub(super) view_name: String,
     pub(super) ivar_models:
         std::rc::Rc<std::collections::HashMap<String, String>>,

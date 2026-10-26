@@ -480,11 +480,19 @@ fn wrap_keyed_cached_collection(
     // partial's own `<% cache message do %>` uses (`ctx.view_name`,
     // `walker::record_cache_key`). Keyed by the render's spelling
     // (`messages/message`), a miss rendered the partial and its block
-    // filed a second copy under its own name that nothing read.
-    let template = match partial.rsplit_once('/') {
-        Some((dir, base)) => format!("{dir}/_{}", base.trim_start_matches('_')),
-        None => format!("{}/_{}", ctx.resource_dir, partial.trim_start_matches('_')),
-    };
+    // filed a second copy under its own name that nothing read. The
+    // variant the render resolves to names it, as the block's view
+    // does (`fragment_template_path`): html and turbo_stream renders of
+    // one collection would otherwise serve each other's markup.
+    let (module, stem) = super::partial_name_to_key(partial, &ctx.resource_dir);
+    let format = ctx.render_format(&module, &stem);
+    let template = crate::lower::view::fragment_template_path(
+        &match partial.rsplit_once('/') {
+            Some((dir, base)) => format!("{dir}/_{}", base.trim_start_matches('_')),
+            None => format!("{}/_{}", ctx.resource_dir, partial.trim_start_matches('_')),
+        },
+        format,
+    );
     let build_keys = send(
         Some(var_ref(coll.clone())),
         "each",
@@ -513,8 +521,6 @@ fn wrap_keyed_cached_collection(
     );
     // Rails' `render_collection.action_view` names the partial's template
     // file: an ERB one, in the format the render resolves it to.
-    let (module, stem) = super::partial_name_to_key(partial, &ctx.resource_dir);
-    let format = ctx.render_format(&module, &stem);
     let identifier = match partial.rsplit_once('/') {
         Some((dir, base)) => format!("app/views/{dir}/_{base}.{format}.erb"),
         None => format!("app/views/_{partial}.{format}.erb"),
