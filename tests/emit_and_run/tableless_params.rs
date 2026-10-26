@@ -175,3 +175,75 @@ raise preview.note.inspect unless preview.note == "PREVIEW"
 puts "distinct tableless permit lists passed"
 "#).assert_passes();
 }
+
+fn forms_with_source_factories() -> emit_and_run::Overlay {
+    forms()
+        .write(
+            "app/models/end_request.rb",
+            &END_REQUEST.replace(
+                "\nend\n",
+                r#"
+  def self.from_params(params)
+    request = new
+    request.pty_session_id = params.pty_session_id.to_i + 100
+    request.base = "canonical source"
+    request
+  end
+
+  def self.from_previews_end_request_params(params)
+    request = new
+    request.pty_session_id = params.pty_session_id.to_i + 200
+    request.base = "named source"
+    request
+  end
+end
+"#,
+            ),
+        )
+        .write(
+            "app/controllers/previews_controller.rb",
+            r#"class PreviewsController < ApplicationController
+  def create
+    form = EndRequest.new(preview_params)
+    render json: { id: form.pty_session_id }
+  end
+
+  private
+
+  def preview_params
+    params.expect(end_request: %i[pty_session_id base])
+  end
+end
+"#,
+        )
+}
+
+#[test]
+fn tableless_factory_preserves_a_source_from_params_method() {
+    forms_with_source_factories()
+        .run_ruby(
+            r#"
+params = EndRequestParams.from_raw({"end_request" => {"pty_session_id" => "12"}})
+request = EndRequest.from_params(params)
+raise request.pty_session_id.inspect unless request.pty_session_id == 112
+raise request.base.inspect unless request.base == "canonical source"
+puts "canonical source factory preserved"
+"#,
+        )
+        .assert_passes();
+}
+
+#[test]
+fn tableless_factory_preserves_a_source_named_factory_method() {
+    forms_with_source_factories()
+        .run_ruby(
+            r#"
+params = PreviewsEndRequestParams.from_raw({"end_request" => {"pty_session_id" => "21"}})
+request = EndRequest.from_previews_end_request_params(params)
+raise request.pty_session_id.inspect unless request.pty_session_id == 221
+raise request.base.inspect unless request.base == "named source"
+puts "named source factory preserved"
+"#,
+        )
+        .assert_passes();
+}

@@ -1455,10 +1455,16 @@ fn build_methods_with_finder_inputs(
     {
         let resource = Symbol::from(crate::naming::snake_case(model.name.0.as_str()));
         for spec in params_specs.for_resource(&resource) {
+            let factory = crate::lower::controller_to_library::params::model_from_params_name(spec);
+            if model.methods().any(|method| {
+                method.receiver == MethodReceiver::Class && method.name == factory
+            }) {
+                continue;
+            }
             let writable = writable_permit_fields(model, None, &spec.fields);
             self::schema::push_from_params_method(
                 &mut methods, model, &writable, None, &spec.class_id,
-                crate::lower::controller_to_library::params::model_from_params_name(spec),
+                factory,
             );
         }
     }
