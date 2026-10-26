@@ -3829,6 +3829,13 @@ fn bigdecimal_method(method: &Symbol, args: &[crate::expr::Expr]) -> Option<Ty> 
         ("<=>", [a]) if numeric(a) => Ty::Union { variants: vec![Ty::Int, Ty::Nil].into() },
         ("-@" | "+@" | "abs" | "to_d", []) => bigdecimal(),
         ("zero?" | "negative?" | "positive?", []) => Ty::Bool,
+        // Comparable's: `clamp` answers the receiver or the bound it fell past, which keeps that bound's own class
+        ("between?", [lo, hi]) if numeric(lo) && numeric(hi) => Ty::Bool,
+        ("clamp", [lo, hi]) if numeric(lo) && numeric(hi) => clamp_ty([lo, hi]),
+        ("clamp", [range]) => match &*range.node {
+            crate::expr::ExprNode::Range { begin: Some(lo), end: Some(hi), .. } if numeric(lo) && numeric(hi) => clamp_ty([lo, hi]),
+            _ => return None,
+        },
         ("to_f", []) => Ty::Float,
         ("to_i" | "to_int", []) => Ty::Int,
         ("to_s" | "inspect", []) => Ty::Str,
@@ -3841,6 +3848,13 @@ fn bigdecimal_method(method: &Symbol, args: &[crate::expr::Expr]) -> Option<Ty> 
             _ => return None,
         },
         _ => return None,
+    })
+}
+
+fn clamp_ty(bounds: [&crate::expr::Expr; 2]) -> Ty {
+    bounds.iter().fold(bigdecimal(), |acc, b| match b.ty.clone() {
+        Some(t) if !t.is_open() => super::union_of(acc, t),
+        _ => acc,
     })
 }
 

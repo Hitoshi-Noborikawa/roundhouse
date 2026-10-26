@@ -19810,6 +19810,8 @@ mod descendant_ivar;
 mod url_helpers_include;
 #[path = "emit_and_run/length_is_in_within.rs"]
 mod length_is_in_within;
+#[path = "emit_and_run/bigdecimal_clamp.rs"]
+mod bigdecimal_clamp;
 
 /// `ActiveSupport::JSON.encode(value, escape: false)` — Rails' document
 /// without the HTML-entity escaping, which campfire's fragment keys can
