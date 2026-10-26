@@ -40,6 +40,8 @@ mod string_truncate_native;
 mod array_excluding;
 #[path = "spinel_toolchain/array_excluding.rs"]
 mod array_excluding_native;
+#[path = "spinel_toolchain/lobsters_zero.rs"]
+mod lobsters_zero;
 #[path = "support/class_attribute.rs"]
 mod class_attribute;
 #[path = "support/class_configuration.rs"]
