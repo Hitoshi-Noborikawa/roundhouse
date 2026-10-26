@@ -218,3 +218,43 @@ fn a_rolled_back_owner_keeps_its_changes_and_its_held_child_on_spinel() {
     run.assert_passes();
     assert!(run.stdout.contains("has_many review3 passed"), "{}", run.stdout);
 }
+
+// Review of #1395 (4378322612, oracle `review4_oracle.rb`, which runs this
+// script): with no outer transaction, a save's commit callbacks run after
+// its after_* hooks. `save` always opens its own transaction, so the
+// write is enlisted and its commit callbacks wait for that COMMIT.
+const REVIEW4_METHODS: &str = "  has_many :comments, dependent: :destroy\n\n  after_create :log_create\n  after_update :log_update\n  after_save :log_save\n  after_commit :log_commit\n\n  def self.log\n    @log ||= []\n  end\n\n  def log_create\n    Article.log << \"after_create\"\n  end\n\n  def log_update\n    Article.log << \"after_update\"\n  end\n\n  def log_save\n    Article.log << \"after_save\"\n  end\n\n  def log_commit\n    Article.log << \"after_commit\"\n  end\n";
+
+const REVIEW4_SCRIPT: &str = r##"
+def check(label, got, want)
+  raise "#{label}: #{got.inspect} (want #{want.inspect})" unless got == want
+end
+body = "A body long enough to validate."
+Article.log.clear
+Article.create!(title: "t", body: body)
+check("create, no outer transaction: the commit callback after every after_* hook", Article.log, ["after_create", "after_save", "after_commit"])
+a = Article.first
+Article.log.clear
+a.update!(title: "u")
+check("update, no outer transaction", Article.log, ["after_update", "after_save", "after_commit"])
+puts "commit order passed"
+"##;
+
+fn review4_app() -> emit_and_run::Overlay {
+    emit_and_run::real_blog().edit("app/models/article.rb", "  has_many :comments, dependent: :destroy\n", REVIEW4_METHODS)
+}
+
+#[test]
+fn commit_callbacks_run_after_the_after_hooks_on_ruby() {
+    let run = review4_app().run_ruby(REVIEW4_SCRIPT);
+    run.assert_passes();
+    assert!(run.stdout.contains("commit order passed"), "{}", run.stdout);
+}
+
+#[test]
+#[ignore = "requires the Spinel toolchain"]
+fn commit_callbacks_run_after_the_after_hooks_on_spinel() {
+    let run = review4_app().run_spinel_with_db(REVIEW4_SCRIPT);
+    run.assert_passes();
+    assert!(run.stdout.contains("commit order passed"), "{}", run.stdout);
+}
