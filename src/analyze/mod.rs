@@ -3795,6 +3795,70 @@ impl Analyzer {
                 }
             }
         }
+        // ── Phase B″: re-type an ancestor's own methods against what its
+        // ── descendants write.
+        //
+        // A method on ApplicationController runs on every controller below
+        // it, so an ivar only a subclass's action writes (lobsters'
+        // `@requested_path`, read by an exception-notifier hook) is that
+        // subclass's type there, and nil wherever no action wrote it.
+        // Additive as Phase B′ is: the ancestor's own binding wins.
+        {
+            let descendant_env = descendant_ivar_env_of(app, &controller_ivar_env);
+            for controller in &mut app.controllers {
+                let Some(from_below) = descendant_env.get(&controller.name) else { continue };
+                if dirty.is_some_and(|d| !d.contains(&controller.name)) {
+                    continue;
+                }
+                let own_env = controller_ivar_env.get(&controller.name).cloned().unwrap_or_default();
+                let mut seed = own_env.clone();
+                let mut filled = false;
+                for (k, v) in from_below {
+                    if seed.get(k).is_none_or(|t| t.is_open()) {
+                        seed.insert(k.clone(), crate::analyze::body::union_of(v.clone(), Ty::Nil));
+                        filled = true;
+                    }
+                }
+                if !filled {
+                    continue;
+                }
+                let self_ty = Ty::Class { id: controller.name.clone(), args: vec![].into() };
+                let ctrl_name = controller.name.clone();
+                let class_constants =
+                    global_constants.with_own(extract_controller_const_assignments(&controller.body));
+                let spliced = app.concern_spliced_actions.get(&ctrl_name).cloned().unwrap_or_default();
+                for action in controller.actions_mut() {
+                    // Not a concern's copy: Phase B′ seeded that from the concern's includers
+                    if spliced.contains_key(&action.name) {
+                        continue;
+                    }
+                    let base_ctx = Ctx {
+                        self_ty: Some(self_ty.clone()),
+                        lexical_self: None,
+                        ivar_bindings: seed.clone(),
+                        local_bindings: HashMap::new(),
+                        class_objects: Default::default(),
+                        query_class_objects: Default::default(),
+                        constants: class_constants.clone(),
+                        annotate_self_dispatch: false,
+                        in_view: false, class_side: false, claimed_macro_template: false, instance_body: false, method_body: false, building_self: false, live_class_locals: Default::default(),
+                        view_name: None,
+                    };
+                    let inner_ctx = self.seed_action_params(
+                        &base_ctx,
+                        &ctrl_name,
+                        None,
+                        &action.name,
+                        &action.params,
+                        &action.kw_params,
+                        action.block_param.as_ref(),
+                        action.rest_param.as_ref(),
+                    );
+                    self.analyze_action_defaults(action, &inner_ctx, &ctrl_name, None);
+                    self.body_typer().analyze_expr(&mut action.body, &inner_ctx);
+                }
+            }
+        }
         // Library classes (non-model classes under app/models/): mirror
         // the per-model body typing pass on a smaller surface — no
         // schema attributes, no associations, just methods. Two-pass
@@ -9579,6 +9643,38 @@ fn concern_ivar_env_of(
                 }
             }
         }
+    out
+}
+
+/// controller → the union of every DESCENDANT controller's ivar
+/// environment (not its own), for the methods it defines and they inherit.
+fn descendant_ivar_env_of(
+    app: &App,
+    controller_ivar_env: &HashMap<ClassId, HashMap<Symbol, Ty>>,
+) -> HashMap<ClassId, HashMap<Symbol, Ty>> {
+    let parent_of: HashMap<&ClassId, &ClassId> =
+        app.controllers.iter().filter_map(|c| c.parent.as_ref().map(|p| (&c.name, p))).collect();
+    let mut out: HashMap<ClassId, HashMap<Symbol, Ty>> = HashMap::new();
+    for controller in &app.controllers {
+        let Some(env) = controller_ivar_env.get(&controller.name) else { continue };
+        let mut cursor = parent_of.get(&controller.name).copied();
+        for _ in 0..32 {
+            let Some(ancestor) = cursor else { break };
+            let entry = out.entry(ancestor.clone()).or_default();
+            for (k, v) in env {
+                if v.is_open() {
+                    continue;
+                }
+                let merged = match entry.remove(k) {
+                    Some(prev) if prev == *v => prev,
+                    Some(prev) => crate::analyze::body::union_of(prev, v.clone()),
+                    None => v.clone(),
+                };
+                entry.insert(k.clone(), merged);
+            }
+            cursor = parent_of.get(ancestor).copied();
+        }
+    }
     out
 }
 

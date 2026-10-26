@@ -1913,6 +1913,94 @@ fn report_ruby_only_sends(app: &App, target: BuildTarget) {
     crate::lower::for_each_emit_body_ref(app, &mut |expr| visit(expr, target, &kernel));
 }
 
+/// An ancestor controller's method reading an ivar only a descendant
+/// writes: analysis types it from the descendants (Phase B″), which the
+/// ruby family runs as written, but a strict target's ancestor has no
+/// such field to read.
+fn report_descendant_ivar_reads(app: &App, target: BuildTarget) {
+    if matches!(target, BuildTarget::Blog | BuildTarget::Ruby | BuildTarget::Jruby
+        | BuildTarget::Spinel | BuildTarget::Roda | BuildTarget::Futamura) {
+        return;
+    }
+    use crate::expr::{ExprNode, LValue};
+    fn writes(expr: &crate::expr::Expr, out: &mut std::collections::HashSet<String>) {
+        match &*expr.node {
+            ExprNode::Assign { target: LValue::Ivar { name }, .. } | ExprNode::OpAssign { target: LValue::Ivar { name }, .. } => {
+                out.insert(name.as_str().to_string());
+            }
+            ExprNode::MultiAssign { targets, .. } => {
+                for t in targets {
+                    if let LValue::Ivar { name } = t {
+                        out.insert(name.as_str().to_string());
+                    }
+                }
+            }
+            _ => {}
+        }
+        expr.node.for_each_child(&mut |child| writes(child, out));
+    }
+    let own: std::collections::HashMap<&crate::ident::ClassId, std::collections::HashSet<String>> = app
+        .controllers
+        .iter()
+        .map(|c| {
+            let mut out = std::collections::HashSet::new();
+            for action in c.actions() {
+                writes(&action.body, &mut out);
+            }
+            (&c.name, out)
+        })
+        .collect();
+    let parent_of: std::collections::HashMap<&crate::ident::ClassId, &crate::ident::ClassId> =
+        app.controllers.iter().filter_map(|c| c.parent.as_ref().map(|p| (&c.name, p))).collect();
+    let chain = |start: &crate::ident::ClassId| {
+        let mut out = vec![start.clone()];
+        let mut cursor = parent_of.get(start).copied();
+        while let Some(p) = cursor {
+            if out.contains(p) {
+                break;
+            }
+            out.push(p.clone());
+            cursor = parent_of.get(p).copied();
+        }
+        out
+    };
+    for controller in &app.controllers {
+        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for id in chain(&controller.name) {
+            if let Some(w) = own.get(&id) {
+                seen.extend(w.iter().cloned());
+            }
+        }
+        let below: std::collections::HashSet<&String> = app
+            .controllers
+            .iter()
+            .filter(|d| d.name != controller.name && chain(&d.name).contains(&controller.name))
+            .filter_map(|d| own.get(&d.name))
+            .flatten()
+            .filter(|name| !seen.contains(*name))
+            .collect();
+        if below.is_empty() {
+            continue;
+        }
+        fn reads(expr: &crate::expr::Expr, below: &std::collections::HashSet<&String>, target: BuildTarget) {
+            if let ExprNode::Ivar { name } = &*expr.node
+                && below.contains(&name.as_str().to_string())
+            {
+                crate::emit::diagnostics::report_unsupported(
+                    expr.span, target.as_str(), "ivar written only by a subclass",
+                    format!("@{} is set by a subclass's action; this target gives the ancestor no field to read it from", name.as_str()),
+                );
+            }
+            expr.node.for_each_child(&mut |child| reads(child, below, target));
+        }
+        let spliced = app.concern_spliced_actions.get(&controller.name);
+        // Not a concern's copy: its ivars are seeded from the concern's includers, which the analysis types separately
+        for action in controller.actions().filter(|a| !spliced.is_some_and(|m| m.contains_key(&a.name))) {
+            reads(&action.body, &below, target);
+        }
+    }
+}
+
 /// Not left to the runtime's raise: `scope_chain` needs the receiver's model to write the join's SQL.
 fn report_dynamic_association_joins(app: &App, target: BuildTarget) {
     if matches!(target, BuildTarget::Futamura) {
@@ -2389,6 +2477,7 @@ fn target_files_inner(
     report_native_ruby_syntax(app, target);
     report_self_bindings(app, target);
     report_ruby_only_sends(app, target);
+    report_descendant_ivar_reads(app, target);
     report_model_attribute_defaults(app, target);
     report_builtin_aliases(app, target);
     report_dynamic_association_joins(app, target);
