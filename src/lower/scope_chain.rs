@@ -1323,6 +1323,11 @@ pub struct AssocRegistry {
     /// can see them: no `through:`, no `as:`, no scope, no explicit
     /// `foreign_key:` on either side, and an `id` owner key.
     has_many_inverse: HashMap<(ClassId, Symbol), Symbol>,
+    /// (model, has_many name) pairs whose model holds what is built on or
+    /// pushed onto it (`ingest::has_many_hold`'s `__hold_<name>` /
+    /// `__push_<name>`, the ruby family): `build` hands its record there
+    /// and `<<` goes there.
+    has_many_held: HashSet<(ClassId, Symbol)>,
     /// `(model, association name)` -> what the controller's parent-ivar
     /// rewrite expands `@parent.<name>.build` / `.find` to (see
     /// [`Self::build_target`]). Every declaration has one, whatever its
@@ -1386,6 +1391,12 @@ pub enum AssocBuildTarget {
 }
 
 impl AssocRegistry {
+    /// Does some model hold what `<name>` builds or is pushed (see the
+    /// field)?
+    fn is_held_name(&self, name: &Symbol) -> bool {
+        self.has_many_held.iter().any(|(_, n)| n == name)
+    }
+
     /// The automatic-inverse `belongs_to` of `owner.<assoc>` (see the
     /// field). None for an owner the call site could not resolve.
     /// With no owner (the by-NAME rung), only when every model
@@ -1644,6 +1655,7 @@ impl AssocRegistry {
             has_many_owner_key,
             assoc_extension,
             has_many_inverse,
+            has_many_held,
             assoc_builds,
             model_parents: _,
             has_many_poly,
@@ -1658,6 +1670,7 @@ impl AssocRegistry {
         has_many_fk.remove(&key);
         has_many_unseedable.remove(&key);
         has_many_owner_key.remove(&key);
+        has_many_held.remove(&key);
         assoc_extension.remove(&key);
         has_many_inverse.remove(&key);
         assoc_builds.remove(&key);
@@ -1885,6 +1898,9 @@ pub fn build_assoc_registry(models: &[Model]) -> AssocRegistry {
                     let owner_key = a.owner_key();
                     if let Some(bt) = automatic_inverse(models, m, a) {
                         reg.has_many_inverse.insert((m.name.clone(), name.clone()), bt);
+                    }
+                    if m.methods().any(|d| d.name.as_str() == format!("__hold_{name}")) {
+                        reg.has_many_held.insert((m.name.clone(), name.clone()));
                     }
                     if owner_key.as_str() != "id" {
                         reg.has_many_owner_key
@@ -2390,9 +2406,11 @@ pub fn mentions_assoc_constructor(expr: &Expr, assocs: &AssocRegistry) -> bool {
             // cache. Turning those into a fresh `SELECT COUNT(*)` is an
             // N+1 on the benchmark app. Doing it right means teaching the
             // seed to reuse a loaded cache, which is its own commit.
-            if matches!(method.as_str(), "build" | "create" | "create!") {
+            // `<<` too, onto a has_many a model holds (`__push_<name>`).
+            if matches!(method.as_str(), "build" | "create" | "create!") || method.as_str() == "<<" {
                 if let ExprNode::Send { method: aname, args, .. } = &*r.node {
-                    if args.is_empty() && assocs.is_has_many_name(aname) {
+                    let named = if method.as_str() == "<<" { assocs.is_held_name(aname) } else { assocs.is_has_many_name(aname) };
+                    if args.is_empty() && named {
                         *found = true;
                         return;
                     }
@@ -2865,6 +2883,41 @@ impl Ctx<'_> {
             instance_self: self.instance_self.clone(),
             owner_objects: self.owner_objects,
             user_returns: self.user_returns,
+        }
+    }
+}
+
+/// The records `<<` adds when it's given an Array: an Array literal's
+/// elements, nested literals flattened, an Array of records as it is, and
+/// anything not typed as one record `[value].flatten`, which is the record
+/// alone or the Array's records. None for one record.
+fn pushed_records(arg: &Expr) -> Option<Expr> {
+    use crate::ty::Ty;
+    fn flat(e: &Expr, out: &mut Vec<Expr>) {
+        match &*e.node {
+            ExprNode::Array { elements, .. } => elements.iter().for_each(|x| flat(x, out)),
+            _ => out.push(e.clone()),
+        }
+    }
+    match (&*arg.node, arg.ty.as_ref()) {
+        (ExprNode::Array { style, .. }, _) => {
+            let mut elements = Vec::new();
+            flat(arg, &mut elements);
+            let elem = elements.first().and_then(|e| e.ty.clone());
+            let mut list = Expr::new(arg.span, ExprNode::Array { elements, style: style.clone() });
+            if let Some(elem) = elem {
+                list.ty = Some(Ty::Array { elem: elem.into() });
+            }
+            Some(list)
+        }
+        (_, Some(Ty::Class { .. })) => None,
+        (_, Some(Ty::Array { elem })) if matches!(&**elem, Ty::Class { .. }) => Some(arg.clone()),
+        _ => {
+            let wrapped = syn(arg.span, ExprNode::Array { elements: vec![arg.clone()], style: Default::default() });
+            Some(syn(
+                arg.span,
+                ExprNode::Send { recv: Some(wrapped), method: Symbol::from("flatten"), args: vec![], block: None, parenthesized: false },
+            ))
         }
     }
 }
@@ -4530,6 +4583,17 @@ fn rewrite_send(expr: &mut Expr, ctx: &Ctx, locals: &mut Locals) -> Option<Class
                         _ if matches!(method.as_str(), "build" | "create" | "create!") => {
                             assoc_owner_seed(ctx, aname, ir, span)
                         }
+                        // The same for `<<` onto a has_many the owner holds:
+                        // the push keeps the owner as its one receiver
+                        // (`Article.find(id).comments << c`).
+                        _ if method.as_str() == "<<"
+                            && args.len() == 1
+                            && assoc_read_target(ir, aname, ctx.assocs)
+                                .and_then(|(owner, _, _)| owner)
+                                .is_some_and(|m| ctx.assocs.has_many_held.contains(&(m, aname.clone()))) =>
+                        {
+                            assoc_owner_seed(ctx, aname, ir, span)
+                        }
                         _ => None,
                     };
                     // The owner model the association resolved through,
@@ -4565,6 +4629,22 @@ fn rewrite_send(expr: &mut Expr, ctx: &Ctx, locals: &mut Locals) -> Option<Class
                         // kwargs-hash arg shapes rewrite (none, or one
                         // kwargs hash — the corpus forms; Rails merges
                         // the FK over caller attrs, so it appends last).
+                        let held = owner_model
+                            .as_ref()
+                            .is_some_and(|m| ctx.assocs.has_many_held.contains(&(m.clone(), aname.clone())));
+                        // `<<` on a model that holds the association: its
+                        // generated `__push_<name>` holds the record on a
+                        // new owner, or sets the key and saves it.
+                        // An Array is each of its records (Rails'
+                        // `concat(records.flatten)`): `__push_all_<name>`.
+                        if held && method.as_str() == "<<" && args.len() == 1 {
+                            let (callee, arg) = match pushed_records(&args[0]) {
+                                Some(records) => (format!("__push_all_{aname}"), records),
+                                None => (format!("__push_{aname}"), args[0].clone()),
+                            };
+                            *expr = put(span, Some(ir.clone()), Symbol::from(callee), vec![arg], None, true);
+                            return None;
+                        }
                         let ctor = match method.as_str() {
                             "build" => Some("new"),
                             "create" => Some("create"),
@@ -4667,6 +4747,21 @@ fn rewrite_send(expr: &mut Expr, ctx: &Ctx, locals: &mut Locals) -> Option<Class
                                     block,
                                     true,
                                 );
+                                // A built record is the owner's to hold:
+                                // validated with it and saved after it.
+                                if held && ctor_name == "new" {
+                                    let ty = expr.ty.clone();
+                                    let built = std::mem::replace(expr, syn(span, ExprNode::Lit { value: Literal::Nil }));
+                                    *expr = put(
+                                        span,
+                                        Some(ir.clone()),
+                                        Symbol::from(format!("__hold_{aname}")),
+                                        vec![built],
+                                        None,
+                                        true,
+                                    );
+                                    expr.ty = ty;
+                                }
                                 return None;
                             }
                         }

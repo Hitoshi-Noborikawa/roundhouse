@@ -1624,8 +1624,10 @@ module ActiveRecord
           return false
         end
         fill_timestamps(true) if stamps_timestamps?
+        @__id_before_insert = @id
         self.id = _adapter_insert
         @persisted = true
+        _enlist_write(0)
         __track_saved_changes(was_new)
         after_create
       else
@@ -1635,12 +1637,37 @@ module ActiveRecord
         end
         fill_timestamps(false) if stamps_timestamps?
         _adapter_update
+        _enlist_write(1)
         __track_saved_changes(was_new)
         after_update
       end
       after_save
-      _save_committed(was_new)
       true
+    end
+
+    # The write is enlisted as soon as it's made, ahead of the after_*
+    # hooks, as Rails adds the record to the transaction before the
+    # save's callbacks: an exception one of them raises rolls the write
+    # back, and the record is put back too (`_rollback_enlisted`), a
+    # create a new record again. Its commit callbacks still wait for the
+    # COMMIT. `save` always runs inside a transaction (its own, at
+    # least), so the write is always enlisted here.
+    def _enlist_write(kind)
+      # The Dirty baseline before this transaction's first write of the
+      # record, which a rollback puts back: its changes are pending again,
+      # as Rails' `restore_transaction_record_state` leaves them.
+      unless @__rollback_saved
+        @__rollback_saved = true
+        @__rollback_baseline = @__last_saved_attributes
+      end
+      _enlist_or_run(kind)
+    end
+
+    # The transaction that enlisted the record ended: nothing to put back.
+    def _forget_rollback_state
+      @__rollback_saved = false
+      @__rollback_baseline = nil
+      nil
     end
 
     # `destroy` in a transaction too, for the same reason: a dependent
@@ -1800,6 +1827,8 @@ module ActiveRecord
     end
 
     def _run_commit_callbacks(kind)
+      # Committed: a later rollback has nothing of this one to put back.
+      _forget_rollback_state
       if kind == 2
         after_destroy_commit
       else
@@ -1869,15 +1898,20 @@ module ActiveRecord
       nil
     end
 
-    # The id a rolled-back create was given stays on the record (Rails
-    # puts back the pre-save nil): the unsaved sentinel differs by key
-    # type, and a later save inserts the row afresh either way.
+    # A rolled-back create gets back the id it had before the insert, as
+    # Rails puts back the pre-save nil, so it reads as unsaved again (its
+    # held associations among them).
     def _restore_after_rollback(kind)
       if kind == 0
         @persisted = false
+        @id = @__id_before_insert
       elsif kind == 2
         @persisted = true
         @destroyed = false
+      end
+      if @__rollback_saved
+        @__last_saved_attributes = @__rollback_baseline
+        _forget_rollback_state
       end
       nil
     end

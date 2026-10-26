@@ -241,6 +241,7 @@ pub(super) fn push_association_methods(
                     scope.as_ref(),
                     through_relation,
                     keeps_nil,
+                    model.methods().any(|m| m.name.as_str() == format!("__hold_{name}")),
                 );
                 if crate::lower::default_scope::reader_replaces_scope(models, assoc) {
                     reroot_unscoping(&mut reader.body, target, foreign_key);
@@ -751,6 +752,7 @@ fn synth_has_many_reader(
     scope: Option<&Expr>,
     through: bool,
     unsaved_guard: bool,
+    held: bool,
 ) -> MethodDef {
     // def comments; Comment.where(article_id: @id); end
     //
@@ -850,6 +852,25 @@ fn synth_has_many_reader(
         Span::synthetic(),
         ExprNode::Array { elements: vec![], style: crate::expr::ArrayStyle::Brackets },
     );
+    // A model that holds what is built on or pushed onto the association
+    // (`ingest::has_many_hold`) answers those records before its first
+    // save, as Rails' association target does.
+    let empty = if held {
+        let ivar = || Expr::new(Span::synthetic(), ExprNode::Ivar { name: Symbol::from(format!("__held_{name}")) });
+        Expr::new(
+            Span::synthetic(),
+            ExprNode::If {
+                cond: Expr::new(
+                    Span::synthetic(),
+                    ExprNode::Send { recv: Some(ivar()), method: Symbol::from("nil?"), args: vec![], block: None, parenthesized: false },
+                ),
+                then_branch: empty,
+                else_branch: ivar(),
+            },
+        )
+    } else {
+        empty
+    };
     let body = match (unsaved_guard && !through).then(|| unsaved_owner_guard(owner_key, empty)) {
         Some(unsaved) => seq(vec![guard, unsaved, lazy_query]),
         None => seq(vec![guard, lazy_query]),
