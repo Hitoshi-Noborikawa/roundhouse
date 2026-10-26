@@ -19804,6 +19804,8 @@ mod enum_cross_class_mapping;
 mod jbuilder_record_values;
 #[path = "emit_and_run/nil_operand.rs"]
 mod nil_operand;
+#[path = "emit_and_run/json_column_name.rs"]
+mod json_column_name;
 
 /// `ActiveSupport::JSON.encode(value, escape: false)` — Rails' document
 /// without the HTML-entity escaping, which campfire's fragment keys can

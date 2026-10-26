@@ -93,7 +93,7 @@ is an `integer` key, and a hash-valued `id: { type: :string, limit:
 32 }` keeps its type and limit. And the folds below
 apply (`timestamptz` renders `timestamp`). The IR preserves `json` and
 `jsonb` separately so PostgreSQL DDL keeps the source type. SQLite stores both
-as text, and both use the same Ruby `JsonColumn` encoding/decoding path; this
+as text, and both use the same Ruby `RoundhouseJsonColumn` encoding/decoding path; this
 does not add PostgreSQL runtime support.
 Roda's current Sequel schema mapping remains text-backed and records the
 original type in a comment rather than claiming native JSONB support.
@@ -207,7 +207,7 @@ Expressions remain verbatim, so PostgreSQL preserves the source JSON type's
 behavior. The default application ingest remains portable, and SQLite DDL
 validation rejects a schema imported in PostgreSQL mode. This adds no
 PostgreSQL model persistence and leaves the shared serialized-text
-`JsonColumn` model path unchanged.
+`RoundhouseJsonColumn` model path unchanged.
 
 Other PostgreSQL operators, casts to non-text types apart from the bounded
 text-to-int4 casts above, other functions,
