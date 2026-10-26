@@ -371,3 +371,42 @@ fn a_destructured_action_is_reported_alone() {
     let warnings = lowered_warnings(&files, BuildTarget::Ruby);
     assert!(warnings.iter().any(|w| w.contains("mailer action `pair`") && w.contains("gets no callback chain")), "{warnings:#?}");
 }
+
+// Review of #1383 (4374562533 / 4374569377, oracle
+// `test_app/review5_oracle.rb`): an action's default is evaluated in its
+// body, after the before callbacks, and only for an argument the caller
+// left out; an explicit nil is passed as given.
+const LATE_DEFAULT_MAILER: &str = "class LateDefaultMailer < ApplicationMailer\n  before_action { @who = params[:who] || \"nobody\" }\n\n  def welcome(name = @who, greeting = \"Hi\")\n    mail(to: \"a@example.com\", subject: greeting + \" \" + name.to_s, body: \"w\")\n  end\nend\n";
+const LATE_DEFAULTS: &str = "class LateDefaults\n  def self.with(params)\n    LateDefaultMailer.with(params)\n  end\nend\n";
+
+const LATE_DEFAULTS_SCRIPT: &str = r##"
+got = [
+  LateDefaults.with(who: "ann").welcome.deliver_now.subject,
+  LateDefaults.with(who: "ann").welcome("bo").deliver_now.subject,
+  LateDefaults.with(who: "ann").welcome("bo", "Yo").deliver_now.subject,
+  LateDefaults.with(who: "ann").welcome(nil).deliver_now.subject,
+]
+raise "late defaults: #{got.inspect}" unless got == ["Hi ann", "Hi bo", "Yo bo", "Hi "]
+puts "late defaults passed"
+"##;
+
+fn late_defaults_app() -> emit_and_run::Overlay {
+    app()
+        .write("app/mailers/late_default_mailer.rb", LATE_DEFAULT_MAILER)
+        .write("app/models/late_defaults.rb", LATE_DEFAULTS)
+}
+
+#[test]
+fn an_actions_default_is_evaluated_after_the_callbacks_on_ruby() {
+    let run = late_defaults_app().run_ruby(LATE_DEFAULTS_SCRIPT);
+    run.assert_passes();
+    assert!(run.stdout.contains("late defaults passed"), "{}", run.stdout);
+}
+
+#[test]
+#[ignore = "requires the Spinel toolchain"]
+fn an_actions_default_is_evaluated_after_the_callbacks_on_spinel() {
+    let run = late_defaults_app().run_spinel_with_db(LATE_DEFAULTS_SCRIPT);
+    run.assert_passes();
+    assert!(run.stdout.contains("late defaults passed"), "{}", run.stdout);
+}

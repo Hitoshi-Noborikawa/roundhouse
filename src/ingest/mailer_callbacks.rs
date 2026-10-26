@@ -334,7 +334,7 @@ pub(crate) fn expand(app: &mut App, target: &str) -> Vec<crate::diagnostic::Diag
                     gaps.push((
                         span,
                         format!("mailer action `{action}`"),
-                        "an action with keyword, rest, block or destructured parameters gets no callback chain".into(),
+                        "an action with keyword, rest, block or destructured parameters, or a required one after an optional one, gets no callback chain".into(),
                     ));
                 }
                 let lc = &mut app.library_classes[i];
@@ -479,11 +479,43 @@ struct Generated {
     unwrapped: Vec<(Span, String)>,
 }
 
-/// The parameter list of a wrapper for `m`, and the call that forwards
-/// to its body, or None for a keyword, rest, forwarding or block
-/// parameter. A default is the source's own text, evaluated by the
-/// wrapper as the action would.
-fn wrapper_params(app: &App, m: &crate::dialect::MethodDef) -> Option<(String, String)> {
+/// A wrapper's formals for `m`, and how it forwards to the body, or None
+/// for a keyword, rest, forwarding, block or destructured formal, or a
+/// required one after an optional one.
+///
+/// A default isn't the wrapper's to evaluate: Rails runs the callbacks and
+/// then the action with only the arguments its caller gave, so the body
+/// evaluates its defaults after them (`def welcome(user = @user)` beside a
+/// `before_action` setting `@user`). Each optional formal defaults to a
+/// marker that it was omitted, and the forward passes the given ones only;
+/// an explicit nil is still passed.
+struct Forward {
+    formals: String,
+    required: Vec<String>,
+    optional: Vec<String>,
+}
+
+impl Forward {
+    /// The call to `target` with the arguments the caller gave.
+    fn call(&self, target: &str) -> String {
+        let with = |n: usize| {
+            let args: Vec<&str> =
+                self.required.iter().map(String::as_str).chain(self.optional.iter().take(n).map(String::as_str)).collect();
+            format!("{target}({})", args.join(", "))
+        };
+        if self.optional.is_empty() {
+            return with(0);
+        }
+        let mut text = String::from("(");
+        for (i, name) in self.optional.iter().enumerate() {
+            text.push_str(&format!("{} __omitted_{name} then {} ", if i == 0 { "if" } else { "elsif" }, with(i)));
+        }
+        text.push_str(&format!("else {} end)", with(self.optional.len())));
+        text
+    }
+}
+
+fn wrapper_params(m: &crate::dialect::MethodDef) -> Option<Forward> {
     // A destructured or other formal ingest can't hold (`unsupported_formals`)
     // would be dropped from the wrapper's list.
     if m.block_param.is_some()
@@ -493,18 +525,25 @@ fn wrapper_params(app: &App, m: &crate::dialect::MethodDef) -> Option<(String, S
         return None;
     }
     let mut formals = Vec::new();
+    let mut required = Vec::new();
+    let mut optional: Vec<String> = Vec::new();
     for p in &m.params {
+        let name = p.name.as_str().to_string();
         match &p.default {
-            None => formals.push(p.name.as_str().to_string()),
-            Some(default) => {
-                let file = (default.span.file.0 as usize).checked_sub(1).and_then(|i| app.sources.get(i))?;
-                let text = file.text.get(default.span.start as usize..default.span.end as usize)?;
-                formals.push(format!("{} = {text}", p.name.as_str()));
+            None => {
+                if !optional.is_empty() {
+                    return None;
+                }
+                formals.push(name.clone());
+                required.push(name);
+            }
+            Some(_) => {
+                formals.push(format!("{name} = (__omitted_{name} = true; nil)"));
+                optional.push(name);
             }
         }
     }
-    let args = m.params.iter().map(|p| p.name.as_str().to_string()).collect::<Vec<_>>().join(", ");
-    Some((formals.join(", "), args))
+    Some(Forward { formals: formals.join(", "), required, optional })
 }
 
 fn generated_methods(
@@ -538,7 +577,7 @@ fn generated_methods(
             lc.methods
                 .iter()
                 .find(|m| m.receiver == MethodReceiver::Instance && m.name.as_str() == a)
-                .is_some_and(|m| wrapper_params(app, m).is_some())
+                .is_some_and(|m| wrapper_params(m).is_some())
         })
         .collect();
     // A name the generated methods take must not be the app's own (one an
@@ -604,7 +643,7 @@ fn generated_methods(
         }
     }
     for (action, m, is_own) in targets {
-        let Some((formals, args)) = wrapper_params(app, m) else {
+        let Some(forward) = wrapper_params(m) else {
             // Its callbacks don't run, and it isn't wrapped: the rest of
             // the class's actions still are.
             unwrapped.push((m.name_span, action.clone()));
@@ -626,13 +665,24 @@ fn generated_methods(
             }
             resolved.push((c.kind, target, conds.join(" && ")));
         }
-        let body = nested(&resolved, &format!("self.{ACTION_PREFIX}{action}({args})"));
+        let formals = forward.formals.clone();
+        let called = forward.call(&format!("self.{ACTION_PREFIX}{action}"));
+        // The class side too, so an argument the caller leaves out stays
+        // out (`mailer_class_side` would forward every formal, nil and
+        // all); it builds the mailer that processes the action.
+        if !forward.optional.is_empty() {
+            text.push_str(&format!(
+                "  def self.{action}({formals})\n    {}\n  end\n\n",
+                forward.call(&format!("new.__processing.{action}"))
+            ));
+        }
+        let body = nested(&resolved, &called);
         // Called from inside a running action, the method is a plain call.
         // The chain's state is cleared when it ends, however it ends, so
         // the next action on this mailer (two through one `with`) runs its
         // own chain on a fresh mail.
         text.push_str(&format!(
-            "  def {action}({formals})\n    return self.{ACTION_PREFIX}{action}({args}) unless self.__start_action(\"{action}\")\n    begin\n{body}      self.message\n    ensure\n      self.__end_action\n    end\n  end\n\n"
+            "  def {action}({formals})\n    return {called} unless self.__start_action(\"{action}\")\n    begin\n{body}      self.message\n    ensure\n      self.__end_action\n    end\n  end\n\n"
         ));
     }
     // This class's own block callbacks and lambda conditions.

@@ -108,6 +108,10 @@ pub fn emit_method(m: &MethodDef) -> String {
         // parameter list.
         if matches!(&*default.node, crate::expr::ExprNode::Raise { .. }) {
             format!("({src})")
+        } else if matches!(&*default.node, crate::expr::ExprNode::Seq { .. } | crate::expr::ExprNode::Assign { .. }) {
+            // `name = (marker = true; nil)`: the statements, or an
+            // assignment, stay one parenthesized expression.
+            format!("({})", src.lines().map(str::trim).filter(|l| !l.is_empty()).collect::<Vec<_>>().join("; "))
         } else {
             src
         }
