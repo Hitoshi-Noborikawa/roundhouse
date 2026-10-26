@@ -34,18 +34,28 @@ use crate::vfs::Vfs;
 const ERB: &str = "__roundhouse_erb__";
 
 /// The defaults `config/sidekiq.yml` gives, and a warning for each part
-/// of it that isn't read. Empty when the file is absent.
+/// of it that isn't read. Empty when the file is absent; a file that is
+/// there but can't be read is a warning.
 pub fn read<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> (SidekiqWorkerDefaults, Vec<String>) {
-    let Ok(bytes) = vfs.read(&dir.join("config/sidekiq.yml")) else { return Default::default() };
-    parse(&String::from_utf8_lossy(&bytes))
+    match vfs.read(&dir.join("config/sidekiq.yml")) {
+        Ok(bytes) => parse(&String::from_utf8_lossy(&bytes)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Default::default(),
+        Err(e) => (Default::default(), vec![format!("config/sidekiq.yml is not read: {e}")]),
+    }
 }
+
+/// The keys the worker reads (and `strict`, which it accepts).
+const WORKER_KEYS: [&str; 4] = ["concurrency", "timeout", "queues", "strict"];
 
 pub fn parse(text: &str) -> (SidekiqWorkerDefaults, Vec<String>) {
     let mut defaults = SidekiqWorkerDefaults::default();
     let mut warnings = Vec::new();
     let (text, logic) = mark_erb(text);
+    // Sidekiq runs the ERB before it reads the YAML, so a setting under
+    // `<% if ... %>` may not be there at all: none of the file is read.
     if logic {
-        warnings.push("config/sidekiq.yml has ERB that isn't an output tag (`<% ... %>`); it is not run".to_string());
+        warnings.push("config/sidekiq.yml has ERB that isn't an output tag (`<% ... %>`), so it is not read; give the worker's settings on its command line".to_string());
+        return (defaults, warnings);
     }
     let mut doc = match serde_yaml_ng::from_str::<Value>(&text) {
         Ok(doc) => doc,
@@ -65,7 +75,7 @@ pub fn parse(text: &str) -> (SidekiqWorkerDefaults, Vec<String>) {
         let Some(key) = key_name(&key) else { continue };
         if key == "production" {
             production = Some(value);
-        } else if matches!(value, Value::Mapping(_)) && key != "capsules" {
+        } else if matches!(value, Value::Mapping(_)) && key != "capsules" && !WORKER_KEYS.contains(&key.as_str()) {
             // Another environment's section.
         } else {
             entries.push((key, value));
@@ -135,6 +145,9 @@ fn queues(value: &Value) -> Option<Vec<(String, i64)>> {
                 out.push((name, weight));
             }
             Value::Sequence(pair) => {
+                if pair.len() > 2 {
+                    return None;
+                }
                 let name = match pair.first()? {
                     Value::String(s) => s.clone(),
                     _ => return None,
@@ -238,6 +251,22 @@ mod tests {
         for text in [":queues:\n  - \"my queue\"\n", ":queues:\n  - [\"a,b\", 2]\n", ":queues:\n  - [\"a b\", 2]\n"] {
             let (d, w) = parse(text);
             assert!(d.queues.is_empty(), "{text}: {:?}", d.queues);
+            assert_eq!(w.len(), 1, "{text}: {w:#?}");
+        }
+    }
+
+    #[test]
+    fn erb_logic_leaves_the_whole_file_unread() {
+        let (d, w) = parse(":concurrency: 5\n<% if ENV[\"FAST\"] %>\n:timeout: 1\n<% end %>\n");
+        assert_eq!(d, Default::default());
+        assert_eq!(w.len(), 1, "{w:#?}");
+    }
+
+    #[test]
+    fn a_worker_key_with_a_mapping_or_a_long_pair_warns() {
+        for text in [":queues:\n  critical: 2\n", ":queues:\n  - [default, 2, 3]\n", ":concurrency:\n  n: 5\n"] {
+            let (d, w) = parse(text);
+            assert_eq!(d, Default::default(), "{text}");
             assert_eq!(w.len(), 1, "{text}: {w:#?}");
         }
     }
