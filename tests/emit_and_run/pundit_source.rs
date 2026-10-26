@@ -35,7 +35,7 @@ puts "ok"
 }
 
 #[test]
-fn safe_constantize_is_a_closed_case_on_the_ruby_family_and_refused_elsewhere() {
+fn safe_constantize_is_by_name_on_the_interpreters_a_closed_case_on_spinel_and_refused_elsewhere() {
     let dir = std::env::temp_dir().join(format!("rh-constantize-targets-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     for (path, text) in [
@@ -71,14 +71,21 @@ fn safe_constantize_is_a_closed_case_on_the_ruby_family_and_refused_elsewhere() 
             .collect();
         (errors, files.unwrap_or_default())
     };
-    for target in [BuildTarget::Ruby, BuildTarget::Spinel] {
+    for target in [BuildTarget::Ruby, BuildTarget::Jruby, BuildTarget::Spinel] {
         let (errors, files) = emit(target);
         assert!(!errors.iter().any(|e| e.contains("safe_constantize")), "{target:?} refused the call:\n{}", errors.join("\n"));
         let text = |file: &str| files.iter().find(|(path, _)| path.ends_with(file)).map(|(_, text)| text.clone()).unwrap_or_default();
         let finder = text("finder.rb");
         assert!(finder.contains("RoundhouseConstants.safe_constantize("), "{target:?} did not route the call to the lookup:\n{finder}");
         let lookup = text("roundhouse_constants.rb");
-        assert!(lookup.contains("when \"PostPolicy\""), "{target:?} did not emit the closed case:\n{lookup}");
+        // The interpreters resolve the name themselves, as Active Support does (autoload): an
+        // arm naming the constant would make the lookup require every app file at load.
+        let expected = if target != BuildTarget::Spinel {
+            lookup.contains("::Object.const_get(name.delete_prefix(\"::\"))") && !lookup.contains("require_relative \"post_policy\"")
+        } else {
+            lookup.contains("when \"PostPolicy\"")
+        };
+        assert!(expected, "{target:?} did not emit the expected lookup:\n{lookup}");
     }
     for target in [BuildTarget::Typescript, BuildTarget::Rust, BuildTarget::Python] {
         let (errors, _) = emit(target);

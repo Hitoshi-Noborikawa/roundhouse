@@ -68,6 +68,8 @@ mod discard;
 mod callback_abort;
 #[path = "emit_and_run/pundit_source.rs"]
 mod pundit_source;
+#[path = "emit_and_run/constantize_by_name.rs"]
+mod constantize_by_name;
 #[path = "emit_and_run/ancestry_source.rs"]
 mod ancestry_source;
 #[path = "emit_and_run/acts_as_follower_source.rs"]

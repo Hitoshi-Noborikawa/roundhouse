@@ -24,7 +24,7 @@ pub fn lower_for_target(app: &App, target: BuildTarget) -> Option<App> {
         return None;
     }
     let runs = case_runs(target);
-    let lookup = runs.then(|| lookup_class(&app_constants(app)));
+    let lookup = runs.then(|| if resolves_by_name(target) { native_lookup_class() } else { lookup_class(&app_constants(app)) });
     let mut app = app.clone();
     let target_name = target.as_str();
     crate::lower::for_each_emit_body(&mut app, &mut |body| rewrite(body, runs, target_name));
@@ -113,6 +113,29 @@ fn rewrite(expr: &mut Expr, runs: bool, target: &str) {
         );
         refusal(span, &text)
     };
+}
+
+// The interpreters resolve a name themselves, through the tree's autoloads.
+fn resolves_by_name(target: BuildTarget) -> bool {
+    matches!(target, BuildTarget::Ruby | BuildTarget::Jruby)
+}
+
+// CRuby and JRuby: Active Support's own `constantize` / `safe_constantize`
+// (activesupport 8.1 `inflector/methods.rb`): `Object.const_get`, any constant
+// the process has, and `safe_constantize` answers nil only for a NameError
+// about the name asked for. The closed case below is for Spinel, which has no
+// `const_get` by name. On the interpreters its arms were constant references
+// the emitted file had to load first: in a large app the lookup required every
+// app file before the first `constantize`, so one in a class body re-entered
+// files mid-load, and a framework name
+// (`"ActiveSupport::HashWithIndifferentAccess".constantize`) was a NameError.
+fn native_lookup_class() -> Vec<crate::dialect::LibraryClass> {
+    let source = format!(
+        "class {LOOKUP}\n  def self.constantize(name)\n    ::Object.const_get(name.delete_prefix(\"::\"))\n  end\n\n  \
+         def self.safe_constantize(name)\n    constantize(name)\n  rescue NameError => e\n    \
+         raise if e.name && !(name.to_s.split(\"::\").include?(e.name.to_s) || e.name.to_s == name.to_s)\n    nil\n  end\nend\n"
+    );
+    crate::ingest::ingest_library_classes(source.as_bytes(), "<roundhouse constants>").expect("the constant lookup parses")
 }
 
 // One shared `case`: inlined at every call site, a large app's emit grew thirteenfold
