@@ -14,7 +14,18 @@
 # avoidable erasure.
 module ActiveRecord
   # Not an ivar on each class: Rails' class_attribute is inherited until a subclass sets its own, so the reader walks the superclass chain through this table
-  TIMESTAMP_SWITCHES = { "ActiveRecord::Base" => true }
+  module TimestampSwitches
+    @switches = { "ActiveRecord::Base" => true }
+
+    def self.store(name, value)
+      @switches[name] = value
+      value
+    end
+
+    def self.lookup(name)
+      @switches[name]
+    end
+  end
 
   # `raise ActiveRecord::Rollback` inside `transaction { }` rolls it back
   # quietly: the transaction rescues it and answers nil. Here beside
@@ -1045,14 +1056,13 @@ module ActiveRecord
     end
 
     def self.record_timestamps=(value)
-      TIMESTAMP_SWITCHES[name] = value
-      value
+      TimestampSwitches.store(name, value)
     end
 
     def self.record_timestamps
       klass = self
       while !klass.nil?
-        found = TIMESTAMP_SWITCHES[klass.name]
+        found = TimestampSwitches.lookup(klass.name)
         return found unless found.nil?
         klass = klass == ActiveRecord::Base ? nil : klass.superclass
       end

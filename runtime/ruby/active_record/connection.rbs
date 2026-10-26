@@ -2,7 +2,10 @@
 # Hash[String, untyped] by design — raw SQL's row shape (aliased
 # aggregates, computed columns) is genuinely dynamic; see connection.rb.
 module ActiveRecord
-  TIMESTAMP_SWITCHES: Hash[String, bool]
+  module TimestampSwitches
+    def self.store: (String name, bool value) -> bool
+    def self.lookup: (String name) -> bool?
+  end
 
   class Rollback < StandardError
   end
