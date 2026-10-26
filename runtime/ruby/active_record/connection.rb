@@ -1634,7 +1634,6 @@ module ActiveRecord
         after_update
       end
       after_save
-      _run_commit_callbacks(was_new ? 0 : 1) if Db._txn_depth == 0
       true
     end
 
@@ -1643,9 +1642,9 @@ module ActiveRecord
     # save's callbacks: an exception one of them raises rolls the write
     # back, and the record is put back too (`_rollback_enlisted`), a
     # create a new record again. Its commit callbacks still wait for the
-    # COMMIT.
+    # COMMIT. `save` always runs inside a transaction (its own, at
+    # least), so the write is always enlisted here.
     def _enlist_write(kind)
-      return nil if Db._txn_depth == 0
       # The Dirty baseline before this transaction's first write of the
       # record, which a rollback puts back: its changes are pending again,
       # as Rails' `restore_transaction_record_state` leaves them.
@@ -1653,8 +1652,7 @@ module ActiveRecord
         @__rollback_saved = true
         @__rollback_baseline = @__last_saved_attributes
       end
-      Db._txn_records << ActiveRecord::EnlistedRecord.new(self, kind)
-      nil
+      _enlist_or_run(kind)
     end
 
     # The transaction that enlisted the record ended: nothing to put back.
@@ -1821,6 +1819,8 @@ module ActiveRecord
     end
 
     def _run_commit_callbacks(kind)
+      # Committed: a later rollback has nothing of this one to put back.
+      _forget_rollback_state
       if kind == 2
         after_destroy_commit
       else
@@ -1873,7 +1873,6 @@ module ActiveRecord
           next if other.kind == 3
           kind = other.kind if other.kind == 2 || (other.kind == 0 && kind == 1)
         end
-        record._forget_rollback_state
         record._run_commit_callbacks(kind)
       end
       nil
