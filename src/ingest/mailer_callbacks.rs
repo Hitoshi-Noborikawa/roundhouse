@@ -93,7 +93,70 @@ impl Callback {
 /// generated bodies it declares.
 struct Parsed {
     callbacks: Vec<Callback>,
+    handlers: Vec<Handler>,
     consumed: Vec<usize>,
+}
+
+/// One `rescue_from` handler: the classes it takes, written as given, and
+/// what it calls, with the exception when it takes one.
+#[derive(Clone)]
+struct Handler {
+    classes: Vec<String>,
+    call: Call,
+    /// For a block handler, its parameter (the generated method's).
+    param: Option<String>,
+}
+
+const RESCUE_PREFIX: &str = "__mailer_rescue_";
+
+/// A `rescue_from Klass, …, with: :name` or `rescue_from(Klass) { |e| … }`.
+fn parse_rescue(call: &Expr, counter: &mut usize) -> Result<Handler, String> {
+    let ExprNode::Send { args, block, .. } = &*call.node else { unreachable!() };
+    let mut classes = Vec::new();
+    let mut with = None;
+    for arg in args {
+        match &*arg.node {
+            ExprNode::Const { path } => classes.push(path.iter().map(|s| s.as_str()).collect::<Vec<_>>().join("::")),
+            ExprNode::Hash { entries, .. } => {
+                for (k, v) in entries {
+                    match (&*k.node, &*v.node) {
+                        (ExprNode::Lit { value: Literal::Sym { value: key } }, ExprNode::Lit { value: Literal::Sym { value } })
+                            if key.as_str() == "with" =>
+                        {
+                            with = Some(value.as_str().to_string())
+                        }
+                        _ => return Err("a `rescue_from` option other than `with:` a Symbol".into()),
+                    }
+                }
+            }
+            _ => return Err("a `rescue_from` class that isn't a constant".into()),
+        }
+    }
+    if classes.is_empty() {
+        return Err("a `rescue_from` naming no class".into());
+    }
+    match (with, block) {
+        (Some(name), None) => Ok(Handler { classes, call: Call::Method(name), param: None }),
+        (None, Some(block)) => {
+            let ExprNode::Lambda { params, rest_param: None, extra_params, block_param: None, body, .. } = &*block.node
+            else {
+                return Err("a `rescue_from` block with other than one plain parameter".into());
+            };
+            if params.len() > 1 || !extra_params.is_empty() {
+                return Err("a `rescue_from` block with other than one plain parameter".into());
+            }
+            *counter += 1;
+            let name = format!("{RESCUE_PREFIX}{counter}");
+            // A block that takes no exception is still given one, unused.
+            let param = params.first().map(|p| p.as_str().to_string()).unwrap_or_else(|| "__exception".into());
+            Ok(Handler { classes, call: Call::Body(name, body.clone()), param: Some(param) })
+        }
+        _ => Err("a `rescue_from` with both or neither of a block and `with:`".into()),
+    }
+}
+
+fn is_rescue(call: &Expr) -> bool {
+    matches!(&*call.node, ExprNode::Send { recv: None, method, .. } if method.as_str() == "rescue_from")
 }
 
 /// The callback's kind, and whether it is a delivery callback.
@@ -175,6 +238,7 @@ fn callback_method(call: &Expr) -> Option<&str> {
 /// Does this unknown call declare (or merge into) a callback?
 fn declares_callbacks(call: &Expr) -> bool {
     callback_method(call).is_some()
+        || is_rescue(call)
         || with_options_calls(call).is_some_and(|(_, stmts)| stmts.iter().any(|(s, _)| callback_method(s).is_some()))
 }
 
@@ -259,9 +323,12 @@ fn parse_call(call: &Expr, outer: &[(Expr, Expr)], counter: &mut usize) -> Resul
 }
 
 fn parse_class(lc: &LibraryClass, counter: &mut usize) -> Result<Parsed, String> {
-    let mut parsed = Parsed { callbacks: Vec::new(), consumed: Vec::new() };
+    let mut parsed = Parsed { callbacks: Vec::new(), handlers: Vec::new(), consumed: Vec::new() };
     for (i, call) in lc.unknown_calls.iter().enumerate() {
-        if callback_method(call).is_some() {
+        if is_rescue(call) {
+            parsed.handlers.push(parse_rescue(call, counter)?);
+            parsed.consumed.push(i);
+        } else if callback_method(call).is_some() {
             parsed.callbacks.extend(parse_call(call, &[], counter)?);
             parsed.consumed.push(i);
         } else if let Some((outer, stmts)) = with_options_calls(call) {
@@ -316,7 +383,7 @@ pub(crate) fn expand(app: &mut App, target: &str) -> Vec<crate::diagnostic::Diag
     let mut wrapped: HashMap<String, BTreeSet<String>> = HashMap::new();
     // Every name the generated chains took.
     let mut generated: BTreeSet<String> = BTreeSet::new();
-    let mut chains: HashMap<String, Vec<Callback>> = HashMap::new();
+    let mut chains: HashMap<String, (Vec<Callback>, Vec<Handler>)> = HashMap::new();
     let mut refused: BTreeSet<String> = BTreeSet::new();
     let mut gaps: Vec<(Span, String, String)> = Vec::new();
     for i in order {
@@ -327,16 +394,17 @@ pub(crate) fn expand(app: &mut App, target: &str) -> Vec<crate::diagnostic::Diag
                 return Err("its parent mailer's callbacks aren't lowered".into());
             }
             let parsed = parse_class(&app.library_classes[i], &mut counter)?;
-            let mut chain = parent.as_ref().and_then(|p| chains.get(p)).cloned().unwrap_or_default();
+            let (mut chain, mut handlers) = parent.as_ref().and_then(|p| chains.get(p)).cloned().unwrap_or_default();
             chain.extend(parsed.callbacks.iter().cloned());
-            chains.insert(name.clone(), chain.clone());
+            handlers.extend(parsed.handlers.iter().cloned());
+            chains.insert(name.clone(), (chain.clone(), handlers.clone()));
             // A mailer with no callbacks still gets its actions' wrappers:
             // each action starts on a fresh mail, as Rails' fresh mailer
             // does, which two actions through one `with(...)` can tell.
-            if chain.is_empty() && actions(&app.library_classes[i]).is_empty() {
+            if chain.is_empty() && handlers.is_empty() && actions(&app.library_classes[i]).is_empty() {
                 return Ok(None);
             }
-            let made = generated_methods(app, i, &chain, &parsed, &parents, &mailers, &wrapped, &generated)?;
+            let made = generated_methods(app, i, &chain, &handlers, &parsed, &parents, &mailers, &wrapped, &generated)?;
             Ok(Some(made))
         })();
         match decided {
@@ -356,7 +424,13 @@ pub(crate) fn expand(app: &mut App, target: &str) -> Vec<crate::diagnostic::Diag
                     methods
                         .iter()
                         .map(|m| m.name.as_str().to_string())
-                        .filter(|n| n.starts_with(CALLBACK_PREFIX) || n.starts_with(CONDITION_PREFIX)),
+                        .filter(|n| {
+                            n.starts_with(CALLBACK_PREFIX)
+                                || n.starts_with(CONDITION_PREFIX)
+                                || n.starts_with(RESCUE_PREFIX)
+                                || n == "__deliver"
+                                || n == "__rescue"
+                        }),
                 );
                 for m in lc.methods.iter_mut() {
                     if m.receiver == MethodReceiver::Instance && actions.contains(&m.name.as_str().to_string()) {
@@ -403,20 +477,28 @@ pub(crate) fn expand(app: &mut App, target: &str) -> Vec<crate::diagnostic::Diag
 pub(crate) fn refuse(app: &mut App, target: &str) -> Vec<crate::diagnostic::Diagnostic> {
     let mailers = crate::lower::mailer_class_side::mailer_names(app);
     let mut gaps: Vec<(Span, String)> = Vec::new();
+    let mut rescues: Vec<(Span, String)> = Vec::new();
     for lc in &app.library_classes {
         if !mailers.contains(lc.name.0.as_str()) {
             continue;
         }
         for call in lc.unknown_calls.iter().filter(|c| declares_callbacks(c)) {
-            gaps.push((call.span, construct(call)));
+            if is_rescue(call) { &mut rescues } else { &mut gaps }.push((call.span, construct(call)));
         }
     }
-    super::app::validates_gap_diagnostics(
+    let mut out = super::app::validates_gap_diagnostics(
         app,
         target,
         gaps,
         "mailer callback not lowered: this target has no mailer callback chain, so the action runs without it",
-    )
+    );
+    out.extend(super::app::validates_gap_diagnostics(
+        app,
+        target,
+        rescues,
+        "mailer rescue_from not lowered: this target doesn't handle a mailer's exceptions, so they propagate",
+    ));
+    out
 }
 
 fn construct(call: &Expr) -> String {
@@ -584,10 +666,12 @@ fn wrapper_params(m: &crate::dialect::MethodDef) -> Option<Forward> {
     Some(Forward { formals: formals.join(", "), required, optional })
 }
 
+#[allow(clippy::too_many_arguments)]
 fn generated_methods(
     app: &App,
     i: usize,
     chain: &[Callback],
+    handlers: &[Handler],
     parsed: &Parsed,
     parents: &HashMap<String, String>,
     mailers: &BTreeSet<String>,
@@ -621,12 +705,18 @@ fn generated_methods(
     // A name the generated methods take must not be the app's own (one an
     // ancestor's chain generated is ours).
     if let Some(taken) = defined.iter().find(|n| {
-        (n.starts_with(ACTION_PREFIX) || n.starts_with(CALLBACK_PREFIX) || n.starts_with(CONDITION_PREFIX))
+        (n.starts_with(ACTION_PREFIX)
+            || n.starts_with(CALLBACK_PREFIX)
+            || n.starts_with(CONDITION_PREFIX)
+            || n.starts_with(RESCUE_PREFIX)
+            || n.as_str() == "__rescue"
+            || n.as_str() == "__deliver")
             && !generated.contains(*n)
     }) {
         return Err(format!("the class defines `{taken}`, a name the generated chain would take"));
     }
-    let mut generated_bodies: Vec<(String, Expr)> = Vec::new();
+    // Each generated private method: its name, its body, and its parameter.
+    let mut generated_bodies: Vec<(String, Expr, Option<String>)> = Vec::new();
     // Called on `self`: a bare name would read an action's formal of that
     // name instead (`def notify(stamp)` beside `after_action :stamp`).
     let callable = |call: &Call| -> Result<String, String> {
@@ -731,8 +821,36 @@ fn generated_methods(
         // The chain's state is cleared when it ends, however it ends, so
         // the next action on this mailer (two through one `with`) runs its
         // own chain on a fresh mail.
+        // With `rescue_from` handlers, an exception the chain raises is
+        // offered to them (`__rescue`); one they take leaves the null mail.
+        let body = if handlers.is_empty() {
+            body
+        } else {
+            format!("      begin\n{body}      rescue => __error\n        raise unless __rescue(__error)\n        return __null_mail\n      end\n")
+        };
         text.push_str(&format!(
             "  def {action}({formals})\n    return {called} unless self.__start_action(\"{action}\")\n    begin\n{body}      self.message || self.__null_mail\n    ensure\n      self.__end_action\n    end\n  end\n\n"
+        ));
+    }
+    // The handlers, last declared first (an ancestor's before this
+    // class's), each taking the exception when its class matches; with
+    // none, the exception's cause is tried, as `rescue_with_handler` does.
+    if !handlers.is_empty() {
+        let mut arms = String::new();
+        for h in handlers.iter().rev() {
+            let call = match &h.call {
+                Call::Body(name, _) => format!("{name}(__current)"),
+                Call::Method(name) if defined.contains(name) => match method_arity(app, i, parents, mailers, name) {
+                    Some(0) => name.clone(),
+                    Some(1) => format!("{name}(__current)"),
+                    _ => return Err(format!("the handler `{name}` takes other than one or no argument")),
+                },
+                Call::Method(name) => return Err(format!("the handler `{name}` is not a method the mailer defines")),
+            };
+            arms.push_str(&format!("      when {}\n        {call}\n        return true\n", h.classes.join(", ")));
+        }
+        text.push_str(&format!(
+            "  def __rescue(__exception)\n    __seen = []\n    __current = __exception\n    until __current.nil? || __seen.include?(__current)\n      case __current\n{arms}      end\n      __seen << __current\n      __current = __current.cause\n    end\n    false\n  end\n\n"
         ));
     }
     // The delivery callbacks run by `deliver_now` (`Message#deliver_now`
@@ -742,24 +860,32 @@ fn generated_methods(
     if !delivering.is_empty() {
         let resolved = resolve(&delivering, &callable)?;
         let body = nested(&resolved, "__delivered = __mail.__push", 6);
+        let rescue = if handlers.is_empty() { "" } else { "  rescue => __error\n    raise unless __rescue(__error)\n    nil\n" };
         text.push_str(&format!(
-            "  def __deliver(__mail)\n    __delivered = nil\n    catch(:abort) do\n{body}    end\n    __delivered\n  end\n\n"
+            "  def __deliver(__mail)\n    __delivered = nil\n    catch(:abort) do\n{body}    end\n    __delivered\n{rescue}  end\n\n"
         ));
     }
     // This class's own block callbacks and lambda conditions.
     for c in &parsed.callbacks {
         for call in std::iter::once(&c.target).chain(&c.ifs).chain(&c.unlesses) {
             if let Call::Body(name, body) = call
-                && !generated_bodies.iter().any(|(n, _)| n == name)
+                && !generated_bodies.iter().any(|(n, _, _)| n == name)
             {
-                generated_bodies.push((name.clone(), body.clone()));
+                generated_bodies.push((name.clone(), body.clone(), None));
             }
+        }
+    }
+    // This class's own block handlers.
+    for h in &parsed.handlers {
+        if let Call::Body(name, body) = &h.call {
+            generated_bodies.push((name.clone(), body.clone(), h.param.clone()));
         }
     }
     if !generated_bodies.is_empty() {
         text.push_str("  private\n\n");
-        for (name, _) in &generated_bodies {
-            text.push_str(&format!("  def {name}\n    nil\n  end\n\n"));
+        for (name, _, param) in &generated_bodies {
+            let params = param.as_ref().map(|p| format!("({p})")).unwrap_or_default();
+            text.push_str(&format!("  def {name}{params}\n    nil\n  end\n\n"));
         }
     }
     text.push_str("end\n");
@@ -770,12 +896,38 @@ fn generated_methods(
     }
     let mut methods: Vec<crate::dialect::MethodDef> = classes.into_iter().flat_map(|c| c.methods).collect();
     for m in methods.iter_mut() {
-        if let Some((_, body)) = generated_bodies.iter().find(|(n, _)| n == m.name.as_str()) {
+        if let Some((_, body, _)) = generated_bodies.iter().find(|(n, _, _)| n == m.name.as_str()) {
             m.body = body.clone();
         }
         m.enclosing_class = Some(lc.name.0.clone());
     }
     Ok(Generated { methods, own, unwrapped })
+}
+
+/// The number of parameters of the instance method `name` the class or
+/// a mailer ancestor defines.
+fn method_arity(
+    app: &App,
+    i: usize,
+    parents: &HashMap<String, String>,
+    mailers: &BTreeSet<String>,
+    name: &str,
+) -> Option<usize> {
+    let mut cur = Some(app.library_classes[i].name.0.as_str().to_string());
+    let mut guard = 0;
+    while let Some(class) = cur {
+        guard += 1;
+        if guard > 64 {
+            break;
+        }
+        if let Some(lc) = app.library_classes.iter().find(|c| c.name.0.as_str() == class)
+            && let Some(m) = lc.methods.iter().find(|m| m.receiver == MethodReceiver::Instance && m.name.as_str() == name)
+        {
+            return Some(m.params.len());
+        }
+        cur = parents.get(&class).filter(|p| mailers.contains(*p)).cloned();
+    }
+    None
 }
 
 /// Each callback's method and its conditions, as the chain calls them.
