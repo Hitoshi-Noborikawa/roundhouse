@@ -112,3 +112,51 @@ fn an_array_and_an_owner_expression_are_pushed_as_rails_does_on_spinel() {
     run.assert_passes();
     assert!(run.stdout.contains("has_many push review passed"), "{}", run.stdout);
 }
+
+// Review of #1395 (4375848689, oracle `review2_oracle.rb`): a held child
+// whose save raises while the owner saves it. Rails rolls the save back
+// and keeps both children held, so the owner's next save saves them all.
+// The held list was cleared before the saves, so the next save skipped
+// the children; and the owner stayed persisted after the rollback, its
+// write enlisted only once its after_save hooks had run.
+const FAILING_COMMENT: &str = "  validates :commenter, presence: true\n\n  after_save :explode\n\n  def self.armed\n    @armed\n  end\n\n  def self.armed=(name)\n    @armed = name\n  end\n\n  def explode\n    raise \"boom \" + commenter.to_s if Comment.armed == commenter\n  end\n";
+
+const RETRY_SCRIPT: &str = r##"
+def check(label, got, want)
+  raise "#{label}: #{got.inspect} (want #{want.inspect})" unless got == want
+end
+a = Article.new(title: "t", body: "A body long enough to validate.")
+a.add_built("ann", "hi")
+a.add_built("bo", "hi")
+Comment.armed = "bo"
+raised = begin
+  a.save
+  nil
+rescue => e
+  e.message
+end
+check("a child's save raises through the owner's", raised, "boom bo")
+check("the save is rolled back, and the owner is new again", [a.new_record?, Article.count, Comment.count], [true, 0, 0])
+Comment.armed = nil
+check("the next save saves every held child", [a.save, Comment.where(article_id: a.id).order(:id).pluck(:commenter)], [true, ["ann", "bo"]])
+puts "has_many retry passed"
+"##;
+
+fn retry_app() -> emit_and_run::Overlay {
+    app().edit("app/models/comment.rb", "  validates :commenter, presence: true\n", FAILING_COMMENT)
+}
+
+#[test]
+fn a_failed_child_save_keeps_the_held_children_on_ruby() {
+    let run = retry_app().run_ruby(RETRY_SCRIPT);
+    run.assert_passes();
+    assert!(run.stdout.contains("has_many retry passed"), "{}", run.stdout);
+}
+
+#[test]
+#[ignore = "requires the Spinel toolchain"]
+fn a_failed_child_save_keeps_the_held_children_on_spinel() {
+    let run = retry_app().run_spinel_with_db(RETRY_SCRIPT);
+    run.assert_passes();
+    assert!(run.stdout.contains("has_many retry passed"), "{}", run.stdout);
+}
