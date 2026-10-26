@@ -355,7 +355,7 @@ fn includes_active_model_validations(model: &Model) -> bool {
 /// `include ActiveModel::Model` in the class body. The narrower
 /// `ActiveModel::Validations` brings `valid?`/`errors` and no
 /// constructor, so the two are not interchangeable here.
-fn includes_active_model_model(model: &Model) -> bool {
+pub(super) fn includes_active_model_model(model: &Model) -> bool {
     includes_active_model(model, &["Model"])
 }
 

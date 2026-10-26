@@ -1676,7 +1676,7 @@ pub(super) fn push_from_params_method(
     methods: &mut Vec<MethodDef>,
     model: &crate::dialect::Model,
     fields: &[Symbol],
-    table: &Table,
+    table: Option<&Table>,
     params_class_id: &ClassId,
     name: Symbol,
 ) {
@@ -1696,7 +1696,9 @@ pub(super) fn push_from_params_method(
     );
 
     let mut stmts: Vec<Expr> = Vec::new();
-    stmts.push(multiparameter_guard(model, table, fields, &p, "creating"));
+    if let Some(table) = table {
+        stmts.push(multiparameter_guard(model, table, fields, &p, "creating"));
+    }
     stmts.push(Expr::new(
         Span::synthetic(),
         ExprNode::Assign {
@@ -1720,8 +1722,14 @@ pub(super) fn push_from_params_method(
             Span::synthetic(),
             ExprNode::Send {
                 recv: Some(var_ref(instance.clone())),
-                method: field_storage_setter(table, field),
-                args: vec![typed_param_value(model, table, field, p_field.clone())],
+                method: table.map_or_else(
+                    || Symbol::from(format!("{}=", field.as_str())),
+                    |table| field_storage_setter(table, field),
+                ),
+                args: vec![table.map_or_else(
+                    || typed_store_param_value(model, field, p_field.clone()),
+                    |table| typed_param_value(model, table, field, p_field.clone()),
+                )],
                 block: None,
                 parenthesized: false,
             },
