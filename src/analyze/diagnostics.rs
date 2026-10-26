@@ -450,7 +450,8 @@ pub fn diagnose_with_coverage(app: &App) -> (Vec<Diagnostic>, PreloadCoverage) {
     // distinct starts, they survive on their own again.
     // Not left a warning: a call only an initializer's top-level `def` answers is a NameError in the emitted app.
     for d in &mut out {
-        if let DiagnosticKind::UnresolvedType { name: Some(name), .. } = &d.kind
+        if let DiagnosticKind::UnresolvedType { expr_kind, name: Some(name) } = &d.kind
+            && expr_kind.as_str() == "method call"
             && app.initializer_defs.contains(name)
         {
             *d = Diagnostic::unsupported(

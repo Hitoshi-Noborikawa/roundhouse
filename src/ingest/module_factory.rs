@@ -99,6 +99,8 @@ pub(super) fn expand<'a, V: Vfs + ?Sized>(inner: &'a V, dir: &Path) -> FactoryVf
         return out;
     }
     let mut generated: HashMap<(String, Vec<String>), String> = HashMap::new();
+    // Not the camelized arguments alone: `[:a_b]` and `[:a, :b]` camelize alike, and `M[]` is `M`.
+    let mut used: HashSet<String> = factories.keys().cloned().collect();
     let mut by_file: HashMap<PathBuf, Vec<(usize, usize, String)>> = HashMap::new();
     for site in &sites {
         let factory = &factories[&site.factory];
@@ -106,7 +108,14 @@ pub(super) fn expand<'a, V: Vfs + ?Sized>(inner: &'a V, dir: &Path) -> FactoryVf
         let module = match generated.get(&key) {
             Some(name) => name.clone(),
             None => {
-                let name = specialized_name(&site.factory, &site.args);
+                let base = specialized_name(&site.factory, &site.args);
+                let mut name = base.clone();
+                let mut n = 2;
+                while used.contains(&name) {
+                    name = format!("{base}{n}");
+                    n += 1;
+                }
+                used.insert(name.clone());
                 let Some(source) = specialize(&name, factory, &site.args) else { continue };
                 let path = factory.file.with_file_name(format!("{}.rb", crate::naming::underscore(&name)));
                 out.files.insert(path, source.into_bytes());
@@ -238,6 +247,34 @@ impl<'pr> ruby_prism::Visit<'pr> for Reads<'_> {
     }
     fn visit_block_local_variable_node(&mut self, node: &ruby_prism::BlockLocalVariableNode<'pr>) {
         self.rebound |= self.params.contains(&name_of(&node.name()));
+    }
+    fn visit_local_variable_operator_write_node(&mut self, node: &ruby_prism::LocalVariableOperatorWriteNode<'pr>) {
+        self.rebound |= self.params.contains(&name_of(&node.name()));
+        ruby_prism::visit_local_variable_operator_write_node(self, node);
+    }
+    fn visit_local_variable_or_write_node(&mut self, node: &ruby_prism::LocalVariableOrWriteNode<'pr>) {
+        self.rebound |= self.params.contains(&name_of(&node.name()));
+        ruby_prism::visit_local_variable_or_write_node(self, node);
+    }
+    fn visit_local_variable_and_write_node(&mut self, node: &ruby_prism::LocalVariableAndWriteNode<'pr>) {
+        self.rebound |= self.params.contains(&name_of(&node.name()));
+        ruby_prism::visit_local_variable_and_write_node(self, node);
+    }
+    fn visit_rest_parameter_node(&mut self, node: &ruby_prism::RestParameterNode<'pr>) {
+        self.rebound |= node.name().is_some_and(|n| self.params.contains(&name_of(&n)));
+    }
+    fn visit_required_keyword_parameter_node(&mut self, node: &ruby_prism::RequiredKeywordParameterNode<'pr>) {
+        self.rebound |= self.params.contains(&name_of(&node.name()));
+    }
+    fn visit_optional_keyword_parameter_node(&mut self, node: &ruby_prism::OptionalKeywordParameterNode<'pr>) {
+        self.rebound |= self.params.contains(&name_of(&node.name()));
+        ruby_prism::visit_optional_keyword_parameter_node(self, node);
+    }
+    fn visit_keyword_rest_parameter_node(&mut self, node: &ruby_prism::KeywordRestParameterNode<'pr>) {
+        self.rebound |= node.name().is_some_and(|n| self.params.contains(&name_of(&n)));
+    }
+    fn visit_block_parameter_node(&mut self, node: &ruby_prism::BlockParameterNode<'pr>) {
+        self.rebound |= node.name().is_some_and(|n| self.params.contains(&name_of(&n)));
     }
 }
 

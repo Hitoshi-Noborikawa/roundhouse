@@ -330,7 +330,7 @@ module ActiveRecord
     def merge_seedable_scope(hash)
       own_lists
       hash.each do |key, val|
-        next if val.is_a?(Hash) || val.is_a?(Array) || val.is_a?(Relation) || val.is_a?(Range)
+        next if val.is_a?(Hash) || val.is_a?(Array) || val.is_a?(Relation) || val.is_a?(Range) || val.is_a?(Bounds)
         name = key.is_a?(Symbol) ? key.to_s : key.to_s
         next if name.include?(".")
         @scope_attributes = @scope_attributes.merge({ name.to_sym => val })
@@ -3005,7 +3005,7 @@ module ActiveRecord
         ids = val.map { |x| x.is_a?(Base) ? x._primary_key_value : x }
         if ids.empty?
           "1=0"
-        elsif ids.any? { |x| x.is_a?(Range) }
+        elsif ids.any? { |x| x.is_a?(Range) || x.is_a?(Bounds) }
           array_with_ranges_predicate(qcol, ids)
         else
           "#{qcol} IN (#{escape_list(ids)})"
@@ -3073,6 +3073,8 @@ module ActiveRecord
           has_nil = true
         elsif x.is_a?(Range)
           range_arms << range_predicate(qcol, x)
+        elsif x.is_a?(Bounds)
+          range_arms << bounds_predicate(qcol, x.lower, x.upper, x.exclusive?)
         else
           scalars << x
         end

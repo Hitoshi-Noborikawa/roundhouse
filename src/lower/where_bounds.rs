@@ -42,6 +42,13 @@ fn bounds_in_conditions(e: &mut Expr) {
             bounds_in_conditions(value);
         } else if let Some(bounds) = as_bounds(value) {
             *value = bounds;
+        } else if let ExprNode::Array { elements, .. } = &mut *value.node {
+            // `where(created_at: [nil, 7.days.ago..])`: each Range element is a bound of its own.
+            for element in elements.iter_mut() {
+                if let Some(bounds) = as_bounds(element) {
+                    *element = bounds;
+                }
+            }
         }
     }
 }

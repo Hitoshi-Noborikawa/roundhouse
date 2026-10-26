@@ -3275,10 +3275,10 @@ fn lower_action_body(
     // bindings. Splice nested Seqs into their parent so each
     // assignment is visible to subsequent siblings.
     let mut lowered = flatten_seqs(&with_routes);
-    crate::lower::params_permit::stringify_filtered_helper_reads(
-        &mut lowered,
-        &crate::lower::params_permit::filtered_permit_helpers(privs),
-    );
+    // Not only this class's own helpers: an inherited one (`params_privs`) answers the same String-keyed hash.
+    let mut filtered = crate::lower::params_permit::filtered_permit_helpers(privs);
+    filtered.extend(crate::lower::params_permit::filtered_permit_helpers(params_privs));
+    crate::lower::params_permit::stringify_filtered_helper_reads(&mut lowered, &filtered);
     if !defer_implicit_render {
         return (lowered, None);
     }

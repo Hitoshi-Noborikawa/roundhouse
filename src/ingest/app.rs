@@ -1299,41 +1299,6 @@ end
             for (path, bytes) in &sources {
                 assignments.extend(extract_config_assignments(bytes, path));
             }
-            // A framework setting the app itself reads back (lobsters'
-            // `Routes.default_url_options` is `Rails.application.config
-            // .action_mailer.default_url_options`) answers what the running
-            // environment's file assigned, over application.rb and the
-            // initializers. Only a READ setting is lifted: every other
-            // framework assignment configures machinery the emit replaces.
-            for (framework, leaf) in framework_config_reads(&app) {
-                let wanted = [framework.clone(), leaf.clone()];
-                let assigned = |bytes: &[u8], path: &str| {
-                    extract_framework_config_assignments(bytes, path)
-                        .into_iter()
-                        .filter(|(segments, _)| segments.as_slice() == wanted.as_slice())
-                        .last()
-                        .map(|(_, value)| value)
-                };
-                let base = sources.iter().filter_map(|(path, bytes)| assigned(bytes, path)).last();
-                let mut arms = String::new();
-                for env in ["development", "production", "test"] {
-                    let file = dir.join(format!("config/environments/{env}.rb"));
-                    let Ok(bytes) = vfs.read(&file) else { continue };
-                    if let Some(value) = assigned(&bytes, &file.display().to_string()) {
-                        arms.push_str(&format!("when {env:?}\n  {value}\n"));
-                    }
-                }
-                if arms.is_empty() && base.is_none() {
-                    continue;
-                }
-                let fallback = base.unwrap_or_else(|| "nil".to_string());
-                let value = if arms.is_empty() {
-                    fallback
-                } else {
-                    format!("case Rails.env.to_s\n{arms}else\n  {fallback}\nend")
-                };
-                assignments.push((wanted.to_vec(), value));
-            }
             // ONCE PER PROCESS. An initializer runs at boot, so the
             // value an assignment writes is built one time and every
             // read afterwards answers the same object. A reader that
@@ -2491,6 +2456,8 @@ end
     // reaches a stdlib method of known signature through `super` takes
     // that signature (campfire's `WebPush::Connections::Stages`).
     crate::lower::known_super_forwarding::restate(&mut app);
+    // After the controllers and views are in: their bodies read framework settings too.
+    lift_read_framework_settings(vfs, dir, &mut app);
     collect_binary_assets(vfs, dir, &mut app);
     let mut require_roots: Vec<PathBuf> = roots.iter().map(|root| dir.join(root)).collect();
     require_roots.extend(
@@ -9845,6 +9812,108 @@ pub(super) enum TimeFormatSource {
 /// (`config.x.vapid` read as a whole is an OrderedOptions in Rails), and
 /// `x_vapid_private_key` cannot be split back into its segments — the
 /// leaf has an underscore of its own.
+/// A framework setting the app itself reads back (lobsters'
+/// `Routes.default_url_options` is `Rails.application.config
+/// .action_mailer.default_url_options`) becomes a `Rails::Application`
+/// reader answering what the running environment's file assigned, over
+/// application.rb and the initializers. Only a READ setting is lifted:
+/// every other framework assignment configures machinery the emit replaces.
+fn lift_read_framework_settings<V: Vfs + ?Sized>(vfs: &V, dir: &Path, app: &mut App) {
+    let reads = framework_config_reads(app);
+    if reads.is_empty() {
+        return;
+    }
+    let mut sources: Vec<(String, Vec<u8>)> = Vec::new();
+    for path in [dir.join("config/application.rb")] {
+        if let Ok(bytes) = vfs.read(&path) {
+            sources.push((path.display().to_string(), bytes));
+        }
+    }
+    let init_dir = dir.join("config/initializers");
+    if vfs.is_dir(&init_dir) {
+        for entry in read_rb_files(vfs, &init_dir).unwrap_or_default() {
+            if let Ok(bytes) = vfs.read(&entry) {
+                sources.push((entry.display().to_string(), bytes));
+            }
+        }
+    }
+    let mut assignments: Vec<(Vec<String>, String)> = Vec::new();
+    for (framework, leaf) in reads {
+
+        let wanted = [framework.clone(), leaf.clone()];
+        let assigned = |bytes: &[u8], path: &str| {
+            extract_framework_config_assignments(bytes, path)
+                .into_iter()
+                .filter(|(segments, _)| segments.as_slice() == wanted.as_slice())
+                .last()
+                .map(|(_, value)| value)
+        };
+        let base = sources.iter().filter_map(|(path, bytes)| assigned(bytes, path)).last();
+        let mut arms = String::new();
+        for env in ["development", "production", "test"] {
+            let file = dir.join(format!("config/environments/{env}.rb"));
+            let Ok(bytes) = vfs.read(&file) else { continue };
+            if let Some(value) = assigned(&bytes, &file.display().to_string()) {
+                // Not the assignment alone: ActionMailer's railtie adds `protocol: "https"` (`||=`) where `force_ssl` is on.
+                let force_ssl = extract_framework_config_assignments(&bytes, &file.display().to_string())
+                    .into_iter()
+                    .any(|(segments, value)| segments == ["force_ssl"] && value.trim() == "true");
+                let value = if framework == "action_mailer" && leaf == "default_url_options" && force_ssl {
+                    format!("{{ protocol: \"https\" }}.merge({value})")
+                } else {
+                    value
+                };
+                arms.push_str(&format!("when {env:?}\n  {value}\n"));
+            }
+        }
+        if arms.is_empty() && base.is_none() {
+            continue;
+        }
+        let fallback = base.unwrap_or_else(|| "nil".to_string());
+        let value = if arms.is_empty() {
+            fallback
+        } else {
+            format!("case Rails.env.to_s\n{arms}else\n  {fallback}\nend")
+        };
+        assignments.push((wanted.to_vec(), value));
+    }
+    let rails_application = app.rails_application.get_or_insert_with(|| crate::dialect::LibraryClass {
+        name: crate::ident::ClassId(crate::ident::Symbol::from("Rails::Application")),
+        is_module: false,
+        parent: None,
+        parent_span: Default::default(),
+        includes: Vec::new(),
+        include_spans: Vec::new(),
+        methods: Vec::new(),
+        nullable_columns: Vec::new(),
+        origin: None,
+        constants: Vec::new(),
+        unknown_calls: Vec::new(),
+        class_ivar_initializers: Vec::new(),
+    });
+    let mut constants = String::new();
+    if !rails_application.constants.iter().any(|(name, _)| name.as_str() == "CONFIG_LOCK") {
+        constants.push_str("CONFIG_LOCK = Mutex.new\n");
+    }
+    for (segments, value) in &assignments {
+        let name = segments.join("_");
+        if rails_application.methods.iter().any(|m| m.name.as_str() == name) {
+            continue;
+        }
+        let slot = format!("{}_SLOT", name.to_uppercase());
+        if let Ok(mut synth) = crate::runtime_src::parse_methods(&format!(
+            "def {name}__build\n  {value}\nend\n\
+             def {name}\n  slot = {slot}\n  CONFIG_LOCK.synchronize do\n    slot.push({name}__build) if slot.empty?\n  end\n  slot[0]\nend\n"
+        )) {
+            rails_application.methods.append(&mut synth);
+            constants.push_str(&format!("{slot} = []\n"));
+        }
+    }
+    if let Ok(mut synth) = crate::runtime_src::parse_module_constant_exprs(&constants) {
+        rails_application.constants.append(&mut synth);
+    }
+}
+
 pub(super) fn extract_config_assignments(source: &[u8], file: &str) -> Vec<(Vec<String>, String)> {
     config_assignments(source, file, false)
 }

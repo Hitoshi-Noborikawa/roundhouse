@@ -2951,6 +2951,8 @@ impl Analyzer {
         // walks, and the one every emitted copy is cut from — was typed
         // with nothing.
         let mut controller_ivar_env: HashMap<ClassId, HashMap<Symbol, Ty>> = HashMap::new();
+        // Each action's Phase B seed, which Phase B″ adds descendants' writes to.
+        let mut action_seeds: HashMap<(ClassId, Symbol), HashMap<Symbol, Ty>> = HashMap::new();
 
         // Phase-B refinements, collected here and flushed into
         // `self.refined_action_bindings` after the loop — `self` is
@@ -3240,6 +3242,7 @@ impl Analyzer {
                         {
                             seed.insert(k, v);
                         }
+                        action_seeds.insert((ctrl_name.clone(), action.name.clone()), seed.clone());
                         if seed.is_empty() {
                             continue;
                         }
@@ -3814,17 +3817,6 @@ impl Analyzer {
                     continue;
                 }
                 let own_env = controller_ivar_env.get(&controller.name).cloned().unwrap_or_default();
-                let mut seed = own_env.clone();
-                let mut filled = false;
-                for (k, v) in from_below {
-                    if seed.get(k).is_none_or(|t| t.is_open()) {
-                        seed.insert(k.clone(), crate::analyze::body::union_of(v.clone(), Ty::Nil));
-                        filled = true;
-                    }
-                }
-                if !filled {
-                    continue;
-                }
                 let self_ty = Ty::Class { id: controller.name.clone(), args: vec![].into() };
                 let ctrl_name = controller.name.clone();
                 let class_constants =
@@ -3835,10 +3827,25 @@ impl Analyzer {
                     if spliced.contains_key(&action.name) {
                         continue;
                     }
+                    // Not the controller-wide seed alone: the action's own before_action overlay (a filter's Nil arm) stays.
+                    let mut seed = action_seeds
+                        .get(&(ctrl_name.clone(), action.name.clone()))
+                        .cloned()
+                        .unwrap_or_else(|| own_env.clone());
+                    let mut filled = false;
+                    for (k, v) in from_below {
+                        if seed.get(k).is_none_or(|t| t.is_open()) {
+                            seed.insert(k.clone(), crate::analyze::body::union_of(v.clone(), Ty::Nil));
+                            filled = true;
+                        }
+                    }
+                    if !filled {
+                        continue;
+                    }
                     let base_ctx = Ctx {
                         self_ty: Some(self_ty.clone()),
                         lexical_self: None,
-                        ivar_bindings: seed.clone(),
+                        ivar_bindings: seed,
                         local_bindings: HashMap::new(),
                         class_objects: Default::default(),
                         query_class_objects: Default::default(),

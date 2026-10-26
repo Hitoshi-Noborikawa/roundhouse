@@ -35,3 +35,58 @@ fn a_computed_dynamic_render_local_reaches_the_partial() {
         .run_test("test/controllers/banner_controller_test.rb")
         .assert_passes();
 }
+
+/// ActionMailer's railtie adds `protocol: "https"` to the mailer's
+/// `default_url_options` where `force_ssl` is on, so a class that builds
+/// URLs from that setting links over https in production.
+#[test]
+fn a_force_ssl_environment_adds_the_mailer_https_protocol() {
+    let (emitted, errors) = contract::overlay()
+        .edit(
+            "config/environments/production.rb",
+            "  # config.force_ssl = true\n",
+            "  config.force_ssl = true\n",
+        )
+        .emit(roundhouse::project::BuildTarget::Ruby);
+    assert!(errors.is_empty(), "{errors:#?}");
+    let application = std::fs::read_to_string(emitted.join("config/application.rb")).expect("application.rb");
+    assert!(
+        application.contains("when \"production\"\n        { protocol: \"https\" }.merge({ host: \"example.com\" })"),
+        "{application}"
+    );
+    assert!(application.contains("when \"development\"\n        { host: \"localhost\", port: 3000 }"), "{application}");
+}
+
+/// A framework setting only a controller reads is lifted too: the reads
+/// are collected after the controllers and views are ingested.
+#[test]
+fn a_framework_setting_a_controller_reads_is_lifted() {
+    let (emitted, errors) = super::emit_and_run::real_blog()
+        .edit(
+            "app/controllers/articles_controller.rb",
+            "    @articles = Article.includes(:comments).order(created_at: :desc)\n",
+            "    @articles = Article.includes(:comments).order(created_at: :desc)\n    @mailer_host = Rails.application.config.action_mailer.default_url_options[:host]\n",
+        )
+        .emit(roundhouse::project::BuildTarget::Ruby);
+    assert!(errors.is_empty(), "{errors:#?}");
+    let application = std::fs::read_to_string(emitted.join("config/application.rb")).expect("application.rb");
+    assert!(application.contains("def action_mailer_default_url_options"), "{application}");
+}
+
+/// `form_with model: @featured`, where `@featured` holds an Article whose
+/// model overrides `to_param`: the action's member is that `to_param`,
+/// read off the record's class rather than the local's name.
+#[test]
+fn a_form_for_a_typed_record_posts_to_its_to_param() {
+    let (emitted, errors) = contract::overlay()
+        .edit("app/controllers/articles_controller.rb", "  def show\n  end\n", "  def show\n    @featured = @article\n  end\n")
+        .edit(
+            "app/views/articles/show.html.erb",
+            "<% content_for :title, \"Showing article\" %>\n",
+            "<% content_for :title, \"Showing article\" %>\n<%= form_with model: @featured do |f| %><% end %>\n",
+        )
+        .emit(roundhouse::project::BuildTarget::Ruby);
+    assert!(errors.is_empty(), "{errors:#?}");
+    let view = std::fs::read_to_string(emitted.join("app/views/articles/show.rb")).expect("show view");
+    assert!(view.contains("article_path(featured.to_param)"), "{view}");
+}

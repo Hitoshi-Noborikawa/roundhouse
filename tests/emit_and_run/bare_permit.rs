@@ -31,3 +31,25 @@ fn a_bare_permit_runs_after_emission() {
         .run_test("test/controllers/finds_controller_test.rb")
         .assert_passes();
 }
+
+/// A subclass reading an inherited nested-permit helper by Symbol key
+/// reads its String-keyed storage too.
+#[test]
+fn an_inherited_filtered_helper_is_read_indifferently() {
+    let (emitted, errors) = super::emit_and_run::real_blog()
+        .edit(
+            "app/controllers/application_controller.rb",
+            "  stale_when_importmap_changes\n",
+            "  stale_when_importmap_changes\n\n  private\n\n  def log_params\n    params.permit(:who, what: %i[stories])\n  end\n",
+        )
+        .edit(
+            "app/controllers/articles_controller.rb",
+            "    @articles = Article.includes(:comments).order(created_at: :desc)\n",
+            "    @articles = Article.includes(:comments).order(created_at: :desc)\n    @who = log_params[:who]\n    @stories = log_params.dig(:what, :stories)\n",
+        )
+        .emit(roundhouse::project::BuildTarget::Ruby);
+    assert!(errors.is_empty(), "{errors:#?}");
+    let controller = std::fs::read_to_string(emitted.join("app/controllers/articles_controller.rb")).expect("controller");
+    assert!(controller.contains("log_params[\"who\"]"), "{controller}");
+    assert!(controller.contains("log_params.dig(\"what\", \"stories\")"), "{controller}");
+}

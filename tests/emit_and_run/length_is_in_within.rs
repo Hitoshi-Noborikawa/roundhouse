@@ -56,3 +56,45 @@ fn length_is_lowers_on_a_strict_target_without_errors() {
     let (_emitted, errors) = app().emit(roundhouse::project::BuildTarget::Rust);
     assert!(!errors.iter().any(|e| e.contains("length")), "{errors:#?}");
 }
+
+/// An empty exclusive range (`in: 0...0`) has no maximum, which Rails
+/// rejects when the model loads; it is a gap here, not a wrapped bound.
+#[test]
+fn an_empty_exclusive_length_range_is_a_gap() {
+    let (emitted, _errors) = emit_and_run::real_blog()
+        .edit(
+            "app/models/article.rb",
+            "  validates :title, presence: true\n",
+            "  validates :title, presence: true, length: { in: 0...0 }\n",
+        )
+        .emit(roundhouse::project::BuildTarget::Ruby);
+    let model = std::fs::read_to_string(emitted.join("app/models/article.rb")).expect("article.rb");
+    assert!(!model.contains("4294967295") && !model.contains("too long"), "{model}");
+}
+
+/// An Integer attribute has no `length`; Rails measures its text
+/// (`value.to_s.length`), so `42` is two long and `7` one.
+#[test]
+fn a_value_without_length_is_measured_by_its_text() {
+    let run = emit_and_run::real_blog()
+        .edit(
+            "db/schema.rb",
+            "    t.string \"title\"\n    t.text \"body\"\n",
+            "    t.string \"title\"\n    t.text \"body\"\n    t.integer \"rank\"\n",
+        )
+        .edit(
+            "app/models/article.rb",
+            "  validates :title, presence: true\n",
+            "  validates :title, presence: true\n  validates :rank, length: { is: 2 }\n",
+        )
+        .run_ruby(
+            r#"ok = Article.new(title: "T", body: "A sufficiently long body.", rank: 42)
+short = Article.new(title: "T", body: "A sufficiently long body.", rank: 7)
+raise "42: #{ok.valid?} #{ok.errors.to_a.inspect}" unless ok.valid?
+raise "7: #{short.errors.to_a.inspect}" if short.valid?
+puts "integer length passed"
+"#,
+        );
+    run.assert_passes();
+    assert!(run.stdout.contains("integer length passed"));
+}

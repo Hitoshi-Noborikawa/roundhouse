@@ -1533,7 +1533,8 @@ fn parse_length_rule(value: &ruby_prism::Node<'_>, file: &str, class_consts: &su
             },
             // Rails reads `in:`/`within:` as the minimum and maximum, with their messages
             "in" | "within" => match bound_range(&child, class_consts) {
-                Some(range) if range.begin >= 0.0 && range.end >= range.begin => {
+                // Not an empty exclusive range (`0...0`): its max is nil, which Rails rejects at load.
+                Some(range) if range.begin >= 0.0 && range.end >= range.begin && !(range.exclusive && range.end <= range.begin) => {
                     min = Some(range.begin as u32);
                     max = Some(if range.exclusive { range.end as u32 - 1 } else { range.end as u32 });
                 }

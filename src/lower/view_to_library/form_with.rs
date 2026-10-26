@@ -970,7 +970,7 @@ fn classify_form_with_components(
         Some(crate::ty::Ty::Class { id, .. }) => Some(id.0.as_str().rsplit("::").next().unwrap_or_default().to_string()),
         _ => None,
     };
-    if let Some(name) = typed_class.or_else(|| record_local_name(&model)) {
+    if let Some(name) = typed_class.clone().or_else(|| record_local_name(&model)) {
         let rec_singular = singularize(&snake_case(&name));
         let rec_plural = crate::naming::pluralize_snake(&rec_singular);
         let known = |n: &str| ctx.route_helper_names.contains(&format!("{n}_path"));
@@ -1021,7 +1021,10 @@ fn classify_form_with_components(
     // directory-derived and Rails-divergent (it renders only for
     // moderators, off-replay) — a pre-existing gap this pass leaves
     // as-was rather than turning into a compile stop.
-    let record_name: Option<String> = record_local_name(&model);
+    // The record's class when typed (`@author` holding a User), else its local's name.
+    let record_name: Option<String> = typed_class
+        .map(|class| singularize(&snake_case(&class)))
+        .or_else(|| record_local_name(&model));
     let slug_key = record_name.as_deref().unwrap_or(singular.as_str());
     let member_arg = if ctx.slug_models.contains(slug_key) {
         send(Some(model.clone()), "to_param", Vec::new(), None, false)

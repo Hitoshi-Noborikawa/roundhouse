@@ -3384,16 +3384,6 @@ fn record_parameter(params: Option<ruby_prism::Node<'_>>) -> Option<String> {
 /// The guard with each read of the record parameter as `self`; `None`
 /// when a nested block or lambda binds that name again.
 fn record_as_self(mut expr: Expr, record: &str) -> Option<Expr> {
-    fn rebinds(e: &Expr, record: &str) -> bool {
-        if let ExprNode::Lambda { params, .. } = &*e.node
-            && params.iter().any(|p| p.as_str() == record)
-        {
-            return true;
-        }
-        let mut found = false;
-        e.node.for_each_child(&mut |c| found |= rebinds(c, record));
-        found
-    }
     fn swap(e: &mut Expr, record: &str) {
         if matches!(&*e.node, ExprNode::Var { name, .. } if name.as_str() == record) {
             *e.node = ExprNode::SelfRef;
@@ -3401,7 +3391,7 @@ fn record_as_self(mut expr: Expr, record: &str) -> Option<Expr> {
         }
         e.node.for_each_child_mut(&mut |c| swap(c, record));
     }
-    if rebinds(&expr, record) {
+    if crate::lower::rebinds_local(&expr, record) {
         return None;
     }
     swap(&mut expr, record);

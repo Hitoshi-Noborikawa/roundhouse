@@ -1587,16 +1587,14 @@ fn inline_length_check(
     let len_expr = match attr_ty {
         Some(Ty::Str) | Some(Ty::Array { .. }) => length_send,
         _ => {
-            let zero_lit = Expr::new(
-                Span::synthetic(),
-                ExprNode::Lit { value: Literal::Int { value: 0 } },
-            );
+            // Not 0: Rails measures a value without `length` by its text (`value.to_s.length`), so `42` is two long.
+            let text_length = send(send(attr_ivar.clone(), "to_s", vec![]), "length", vec![]);
             let inner_else = Expr::new(
                 Span::synthetic(),
                 ExprNode::If {
                     cond: is_a_check(&attr_ivar, "Array"),
                     then_branch: length_send.clone(),
-                    else_branch: zero_lit,
+                    else_branch: text_length,
                 },
             );
             Expr::new(

@@ -1943,14 +1943,7 @@ pub(crate) fn block_callback_shape(
 
 /// Whether a nested block or lambda binds `name` again.
 fn rebinds(expr: &Expr, name: &Symbol) -> bool {
-    if let ExprNode::Lambda { params, .. } = &*expr.node
-        && params.contains(name)
-    {
-        return true;
-    }
-    let mut found = false;
-    expr.node.for_each_child(&mut |c| found |= rebinds(c, name));
-    found
+    crate::lower::rebinds_local(expr, name.as_str())
 }
 
 /// The body with each read of the record parameter as `self`.

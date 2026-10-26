@@ -57,3 +57,36 @@ fn an_included_module_factory_runs_its_callbacks() {
     run.assert_passes();
     assert!(run.stdout.contains("module factory passed"));
 }
+
+/// Argument lists that camelize alike (`[:title_body]`, `[:title, :body]`)
+/// each get a module of their own, and a factory that rebinds its
+/// parameter (`cols ||= …`) is not expanded: past the write, the
+/// argument list is no longer what the body reads.
+#[test]
+fn specialized_names_stay_distinct_and_a_rebound_parameter_declines() {
+    let (emitted, _errors) = emit_and_run::real_blog()
+        .write("app/models/copy_log.rb", FACTORY)
+        .write(
+            "app/models/tagged.rb",
+            "module Tagged\n  def self.[](*cols)\n    Module.new do\n      extend ActiveSupport::Concern\n\n      included do\n        cols ||= [:none]\n        define_method(:tag_cols) { cols }\n      end\n    end\n  end\nend\n",
+        )
+        .edit(
+            "app/models/article.rb",
+            "class Article < ApplicationRecord\n",
+            "class Article < ApplicationRecord\n  include CopyLog[:title, :body]\n  include Tagged[:title]\n",
+        )
+        .edit(
+            "app/models/comment.rb",
+            "class Comment < ApplicationRecord\n",
+            "class Comment < ApplicationRecord\n  include CopyLog[:title_body]\n",
+        )
+        .emit(roundhouse::project::BuildTarget::Ruby);
+    let article = std::fs::read_to_string(emitted.join("app/models/article.rb")).expect("article.rb");
+    let comment = std::fs::read_to_string(emitted.join("app/models/comment.rb")).expect("comment.rb");
+    let included = |source: &str| {
+        source.lines().find_map(|l| l.trim().strip_prefix("include CopyLog").map(|rest| format!("CopyLog{rest}")))
+    };
+    let (a, c) = (included(&article), included(&comment));
+    assert!(a.is_some() && c.is_some() && a != c, "{article}\n{comment}");
+    assert!(!article.contains("TaggedTitle"), "{article}");
+}
