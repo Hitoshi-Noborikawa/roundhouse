@@ -760,23 +760,36 @@ impl<'a> BodyTyper<'a> {
                 None
             }
             // Union receivers (typically `T | Nil` from RBS optionals or
-            // flow-sensitive ivar reads). Unwrap to the first concrete
-            // container variant and recurse — `(Hash[K,V] | Nil).each
-            // { |k, v| ... }` should yield `[K, V]` to the block, not
-            // give up because the union confused dispatch. Skip Nil/Var
-            // variants; they don't carry block-shape information.
+            // flow-sensitive ivar reads): each concrete variant the block
+            // runs on yields its own element — `(Hash[K,V] | Nil).each
+            // { |k, v| ... }` yields `[K, V]`. Skip Nil/Var variants; they
+            // don't carry block-shape information.
+            // Not the first variant alone: lobsters' search results are a
+            // Story or Comment relation or a hydrator yielding Comments,
+            // and the block runs on each.
             Ty::Union { variants } => {
+                let mut out: Option<Vec<Ty>> = None;
                 for v in variants {
                     if matches!(v, Ty::Nil | Ty::Var { .. }) {
                         continue;
                     }
-                    if let Some(params) =
-                        self.block_params_for(Some(v), method, class_object_receiver)
-                    {
-                        return Some(params);
-                    }
+                    let Some(params) = self.block_params_for(Some(v), method, class_object_receiver) else { continue };
+                    out = Some(match out {
+                        None => params,
+                        Some(prev) => {
+                            let len = prev.len().max(params.len());
+                            (0..len)
+                                .map(|i| match (prev.get(i), params.get(i)) {
+                                    (Some(a), Some(b)) if a == b => a.clone(),
+                                    (Some(a), Some(b)) => union_of(a.clone(), b.clone()),
+                                    (Some(a), None) | (None, Some(a)) => a.clone(),
+                                    (None, None) => Ty::Untyped,
+                                })
+                                .collect()
+                        }
+                    });
                 }
-                None
+                out
             }
             // RBS-declared `untyped` receiver: a method call like
             // `untyped.each { |x| ... }` passes through with the block
@@ -3829,6 +3842,13 @@ fn bigdecimal_method(method: &Symbol, args: &[crate::expr::Expr]) -> Option<Ty> 
         ("<=>", [a]) if numeric(a) => Ty::Union { variants: vec![Ty::Int, Ty::Nil].into() },
         ("-@" | "+@" | "abs" | "to_d", []) => bigdecimal(),
         ("zero?" | "negative?" | "positive?", []) => Ty::Bool,
+        // Comparable's: `clamp` answers the receiver or the bound it fell past, which keeps that bound's own class
+        ("between?", [lo, hi]) if numeric(lo) && numeric(hi) => Ty::Bool,
+        ("clamp", [lo, hi]) if numeric(lo) && numeric(hi) => clamp_ty([lo, hi]),
+        ("clamp", [range]) => match &*range.node {
+            crate::expr::ExprNode::Range { begin: Some(lo), end: Some(hi), .. } if numeric(lo) && numeric(hi) => clamp_ty([lo, hi]),
+            _ => return None,
+        },
         ("to_f", []) => Ty::Float,
         ("to_i" | "to_int", []) => Ty::Int,
         ("to_s" | "inspect", []) => Ty::Str,
@@ -3841,6 +3861,13 @@ fn bigdecimal_method(method: &Symbol, args: &[crate::expr::Expr]) -> Option<Ty> 
             _ => return None,
         },
         _ => return None,
+    })
+}
+
+fn clamp_ty(bounds: [&crate::expr::Expr; 2]) -> Ty {
+    bounds.iter().fold(bigdecimal(), |acc, b| match b.ty.clone() {
+        Some(t) if !t.is_open() => super::union_of(acc, t),
+        _ => acc,
     })
 }
 

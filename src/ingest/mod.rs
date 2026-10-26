@@ -47,6 +47,7 @@ pub mod app;
 mod concern_accessors;
 pub mod controller;
 mod data_factory;
+mod module_factory;
 mod define_method_loop;
 pub mod expr;
 pub mod fixture;

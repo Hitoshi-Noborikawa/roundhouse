@@ -180,6 +180,14 @@ mod stdlib_rnp_contract;
 mod stdlib_rnp;
 #[path = "support/erb_template.rs"]
 mod erb_template_contract;
+#[path = "support/bare_permit.rs"]
+mod bare_permit_contract;
+#[path = "support/data_paths.rs"]
+mod data_paths_contract;
+#[path = "emit_and_run/data_paths.rs"]
+mod data_paths;
+#[path = "emit_and_run/bare_permit.rs"]
+mod bare_permit;
 #[path = "emit_and_run/erb_template.rs"]
 mod erb_template;
 #[path = "support/representable_decorator.rs"]
@@ -19810,6 +19818,36 @@ mod enum_cross_class_mapping;
 mod jbuilder_record_values;
 #[path = "emit_and_run/nil_operand.rs"]
 mod nil_operand;
+#[path = "emit_and_run/descendant_ivar.rs"]
+mod descendant_ivar;
+#[path = "emit_and_run/initializer_top_level_def.rs"]
+mod initializer_top_level_def;
+#[path = "emit_and_run/unknown_gem_namespace.rs"]
+mod unknown_gem_namespace;
+#[path = "emit_and_run/record_rebinding.rs"]
+mod record_rebinding;
+#[path = "emit_and_run/url_helpers_include.rs"]
+mod url_helpers_include;
+#[path = "emit_and_run/length_is_in_within.rs"]
+mod length_is_in_within;
+#[path = "emit_and_run/bigdecimal_clamp.rs"]
+mod bigdecimal_clamp;
+#[path = "emit_and_run/partial_binop.rs"]
+mod partial_binop;
+#[path = "emit_and_run/union_block_params.rs"]
+mod union_block_params;
+#[path = "emit_and_run/format_once.rs"]
+mod format_once;
+#[path = "emit_and_run/condition_lambda_record.rs"]
+mod condition_lambda_record;
+#[path = "emit_and_run/where_time_range.rs"]
+mod where_time_range;
+#[path = "emit_and_run/route_record_to_param.rs"]
+mod route_record_to_param;
+#[path = "emit_and_run/module_factory.rs"]
+mod module_factory;
+#[path = "emit_and_run/spinel_unknown_gem.rs"]
+mod spinel_unknown_gem;
 
 /// `ActiveSupport::JSON.encode(value, escape: false)` — Rails' document
 /// without the HTML-entity escaping, which campfire's fragment keys can

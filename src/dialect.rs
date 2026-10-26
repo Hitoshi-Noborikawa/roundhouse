@@ -647,6 +647,9 @@ pub enum ValidationRule {
     Length {
         min: Option<u32>,
         max: Option<u32>,
+        /// `is:` — the one length Rails accepts (`wrong_length`).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        is: Option<u32>,
         /// `message:` override for the length failure text. Forced by
         /// the Sequel front-end (`validates_min_length 10, :body,
         /// message: "..."`); Rails' `length: { minimum: 10, message:

@@ -355,6 +355,12 @@ module Dom
     node
   end
 
+  # The text as the browser reads it (Rails compares Nokogiri's decoded
+  # text): `&lt;rails&gt;` in the source is `<rails>`.
+  def self.unescape(s)
+    s.gsub("&lt;", "<").gsub("&gt;", ">").gsub("&quot;", "\"").gsub("&#39;", "'").gsub("&amp;", "&")
+  end
+
   # The index of the `<` that opens the tag position `i` sits inside.
   def self.tag_start(root, i)
     j = i
@@ -2866,7 +2872,7 @@ module RequestDispatch
     content = content_or_opts.is_a?(Hash) ? nil : content_or_opts
     if content.is_a?(String)
       needle  = content
-      matched = nodes.any? { |n| Dom.text(n).include?(needle) }
+      matched = nodes.any? { |n| Dom.text(n).include?(needle) || Dom.unescape(Dom.text(n)).include?(needle) }
       raise "expected #{selector.inspect} containing #{content.inspect} in response body" unless matched
     elsif content.is_a?(Regexp)
       # Rails' `assert_select "h1", /Upgrade…/`: the equality test is a

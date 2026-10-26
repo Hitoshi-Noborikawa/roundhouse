@@ -430,6 +430,10 @@ pub struct App {
     /// kept mixin supplies.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub initializer_filters: Vec<InitializerFilter>,
+    /// The names a host initializer `def`s at its top level: methods on
+    /// Object, which the emitted app does not define.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub initializer_defs: Vec<crate::ident::Symbol>,
     /// `X.after_action(only: …) { response.set_header(k, v) }` from a
     /// `config/initializers/` file, bare or inside `ActiveSupport.on_load`:
     /// campfire marks the disk service's file responses cacheable this
@@ -1102,6 +1106,7 @@ impl App {
             rake_tasks_source: None,
             rake_task_gaps: Vec::new(),
             initializer_filters: Vec::new(),
+            initializer_defs: Vec::new(),
             initializer_response_headers: Vec::new(),
             collection_cache_store: None,
             app_requires: Vec::new(),

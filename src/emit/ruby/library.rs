@@ -4580,7 +4580,11 @@ fn rewrite_helper_calls(
         if let Some(stem) = method.as_str().strip_suffix("_url") {
             let path_name = Symbol::from(format!("{stem}_path"));
             if route_helpers.contains(&path_name) {
-                *expr = crate::lower::view_to_library::absolute_url_interp(stem, args.clone());
+                *expr = if own_methods.contains(&Symbol::from("default_url_options")) {
+                    url_for_own_options(stem, args.clone())
+                } else {
+                    crate::lower::view_to_library::absolute_url_interp(stem, args.clone())
+                };
                 return;
             }
         }
@@ -5004,6 +5008,29 @@ fn rewrite_layout_wrap(
 ///   * `port:` follows the host as `:N`. A literal port that is the
 ///     scheme's own (80 for http, 443 for https) or `nil` is left out,
 ///     as Rails' `build_host_url` leaves it out.
+/// `ActionView::ViewHelpers.url_for_options(RouteHelpers.<stem>_path(args), default_url_options)`:
+/// a bare `<x>_url` in a class that defines its own `default_url_options`.
+fn url_for_own_options(stem: &str, args: Vec<Expr>) -> Expr {
+    let synth = |node: ExprNode| Expr::new(crate::span::Span::synthetic(), node);
+    let path_call = synth(ExprNode::Send {
+        recv: Some(synth(ExprNode::Const { path: vec![Symbol::from("RouteHelpers")] })),
+        method: Symbol::from(format!("{stem}_path")),
+        args,
+        block: None,
+        parenthesized: true,
+    });
+    let options = synth(ExprNode::Send { recv: None, method: Symbol::from("default_url_options"), args: vec![], block: None, parenthesized: false });
+    let mut call = synth(ExprNode::Send {
+        recv: Some(synth(ExprNode::Const { path: vec![Symbol::from("ActionView"), Symbol::from("ViewHelpers")] })),
+        method: Symbol::from("url_for_options"),
+        args: vec![path_call, options],
+        block: None,
+        parenthesized: true,
+    });
+    call.ty = Some(crate::ty::Ty::Str);
+    call
+}
+
 pub(crate) fn rewrite_url_helpers_absolute(expr: &mut Expr) {
     expr.node.for_each_child_mut(&mut rewrite_url_helpers_absolute);
     let matches = matches!(
@@ -7182,10 +7209,11 @@ pub(crate) fn apply_dynamic_render_options_lowering(lcs: &mut [LibraryClass]) {
 
 fn rewrite_render_options_assign(expr: &mut Expr) {
     expr.node.for_each_child_mut(&mut |c| rewrite_render_options_assign(c));
-    let ExprNode::Assign { target: crate::expr::LValue::Ivar { .. }, value } = &mut *expr.node
+    let ExprNode::Assign { target: crate::expr::LValue::Ivar { name: ivar }, value } = &mut *expr.node
     else {
         return;
     };
+    let ivar = ivar.clone();
     let ExprNode::Hash { entries, .. } = &*value.node else {
         return;
     };
@@ -7195,6 +7223,7 @@ fn rewrite_render_options_assign(expr: &mut Expr) {
     // unrelated config hash like `@x = {partial: "y", scope: z}` app-wide —
     // `render @above` is the only consumer of this collapse.
     let mut partial_name: Option<String> = None;
+    let mut computed: Vec<(Symbol, Expr)> = Vec::new();
     for (k, v) in entries.iter() {
         let ExprNode::Lit { value: Literal::Sym { value: key } } = &*k.node else {
             return; // non-symbol key → not a render-options hash
@@ -7206,13 +7235,40 @@ fn rewrite_render_options_assign(expr: &mut Expr) {
                 }
                 _ => return, // dynamic partial name — leave the hash intact
             },
-            "locals" => {} // allowed; dropped in the collapse (ledgered)
+            "locals" => {
+                if let ExprNode::Hash { entries: locals, .. } = &*v.node {
+                    for (lk, lv) in locals {
+                        if let ExprNode::Lit { value: Literal::Sym { value: local } } = &*lk.node
+                            && !matches!(&*lv.node, ExprNode::Ivar { .. } | ExprNode::Lit { .. })
+                        {
+                            computed.push((local.clone(), lv.clone()));
+                        }
+                    }
+                }
+            }
             _ => return, // any foreign key → not a render-options hash
         }
     }
     if let Some(name) = partial_name {
         let span = value.span;
         *value = Expr::new(span, ExprNode::Lit { value: Literal::Str { value: name } });
+        if computed.is_empty() {
+            return;
+        }
+        // The view's dispatch arm reads each computed local back from this ivar (`dynamic_local_ivar`).
+        let mut stmts: Vec<Expr> = computed
+            .into_iter()
+            .map(|(local, value)| {
+                Expr::new(span, ExprNode::Assign {
+                    target: crate::expr::LValue::Ivar {
+                        name: crate::lower::view_to_library::dynamic_local_ivar(&ivar, &local),
+                    },
+                    value,
+                })
+            })
+            .collect();
+        stmts.push(expr.clone());
+        *expr = Expr::new(expr.span, ExprNode::Seq { exprs: stmts });
     }
 }
 

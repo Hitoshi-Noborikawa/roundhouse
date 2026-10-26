@@ -303,6 +303,7 @@ fn length_validation_emits_with_options_object() {
                 rules: vec![ValidationRule::Length {
                     min: Some(10),
                     max: None,
+                    is: None,
                     message: None,
                     allow_nil: None,
                 }],

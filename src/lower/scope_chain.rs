@@ -2739,6 +2739,7 @@ fn is_relation_expr(e: &Expr, ctx: &Ctx, locals: &Locals) -> bool {
             locals.rel.contains_key(name)
                 || ctx.scope_body.as_ref().is_some_and(|(_, rel)| rel == name)
         }
+        ExprNode::Ivar { name } => locals.rel.contains_key(&alias_key(name, true)),
         ExprNode::Send { method, recv: Some(r), args, block: None, .. } => {
             if let Some(m) = const_model(r, ctx.models) {
                 if ctx.scope_of(&m, method) {
@@ -3628,6 +3629,19 @@ fn lower_relation_args(
     ctx: &Ctx,
 ) -> Vec<Symbol> {
     let mut aliases: Vec<Symbol> = Vec::new();
+    // Not handed to the runtime as an Array: Rails flattens `order([a, b])` into `order(a, b)`, and the runtime's parts are the elements.
+    if matches!(method.as_str(), "order" | "reorder")
+        && args.iter().any(|a| matches!(&*a.node, ExprNode::Array { .. }))
+    {
+        let mut flat = Vec::with_capacity(args.len());
+        for arg in args.drain(..) {
+            match &*arg.node {
+                ExprNode::Array { elements, .. } => flat.extend(elements.iter().cloned()),
+                _ => flat.push(arg),
+            }
+        }
+        *args = flat;
+    }
     match method.as_str() {
         "joins" | "left_outer_joins" | "left_joins" => {
             let kind = if method.as_str() == "joins" { "INNER JOIN" } else { "LEFT OUTER JOIN" };
@@ -3976,13 +3990,19 @@ pub(crate) fn rewrite(expr: &mut Expr, ctx: &Ctx, locals: &mut Locals) -> Option
             let node = std::mem::replace(&mut *expr.node, ExprNode::Seq { exprs: vec![] });
             let ExprNode::Assign { target, mut value } = node else { unreachable!() };
             let m = rewrite(&mut value, ctx, locals);
-            if let crate::expr::LValue::Var { name, .. } = &target {
+            // Ivars too, under their `@` key: lobsters' moderations index
+            // narrows `@moderations` through a `case` and then `.joins(:moderator)`.
+            if let Some(key) = match &target {
+                crate::expr::LValue::Var { name, .. } => Some(alias_key(name, false)),
+                crate::expr::LValue::Ivar { name } => Some(alias_key(name, true)),
+                _ => None,
+            } {
                 match &m {
                     Some(model) => {
-                        locals.rel.insert(name.clone(), model.clone());
+                        locals.rel.insert(key, model.clone());
                     }
                     None => {
-                        locals.rel.remove(name);
+                        locals.rel.remove(&key);
                     }
                 }
             }
@@ -4980,6 +5000,7 @@ fn rewrite_send(expr: &mut Expr, ctx: &Ctx, locals: &mut Locals) -> Option<Class
             // (`@story.merged_comments` → Comment).
             let r_model = match &*r.node {
                 ExprNode::Var { name, .. } => locals.rel.get(name).cloned(),
+                ExprNode::Ivar { name } => locals.rel.get(&alias_key(name, true)).cloned(),
                 _ => rewrite(&mut r, ctx, locals),
             };
             let r_model = r_model.or_else(|| match &*r.node {

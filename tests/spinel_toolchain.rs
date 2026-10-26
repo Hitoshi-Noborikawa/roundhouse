@@ -40,6 +40,8 @@ mod string_truncate_native;
 mod array_excluding;
 #[path = "spinel_toolchain/array_excluding.rs"]
 mod array_excluding_native;
+#[path = "spinel_toolchain/lobsters_zero.rs"]
+mod lobsters_zero;
 #[path = "support/class_attribute.rs"]
 mod class_attribute;
 #[path = "support/class_configuration.rs"]
@@ -94,6 +96,10 @@ mod vary_accept_contract;
 mod vary_accept;
 #[path = "support/erb_template.rs"]
 mod erb_template_contract;
+#[path = "support/bare_permit.rs"]
+mod bare_permit_contract;
+#[path = "support/data_paths.rs"]
+mod data_paths_contract;
 #[path = "spinel_toolchain/erb_template.rs"]
 mod erb_template;
 #[path = "support/anonymous_keywords.rs"]
