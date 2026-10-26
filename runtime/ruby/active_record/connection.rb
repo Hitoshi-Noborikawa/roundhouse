@@ -13,7 +13,7 @@
 # columns), so a typed bag is the honest contract rather than an
 # avoidable erasure.
 module ActiveRecord
-  # Not an ivar on each class: Rails' class_attribute is inherited until a subclass sets its own, so the reader walks the superclass chain through this table
+  # Not an ivar on each class: Rails' class_attribute is inherited until a subclass sets its own, so the reader walks the ancestors through this table
   module TimestampSwitches
     @switches = { "ActiveRecord::Base" => true }
 
@@ -1060,11 +1060,10 @@ module ActiveRecord
     end
 
     def self.record_timestamps
-      klass = self
-      while !klass.nil?
+      # Not a `superclass` walk: Spinel then mistypes an unrelated `File.read(path)` whose path may be a Rails::AppPath
+      ancestors.each do |klass|
         found = TimestampSwitches.lookup(klass.name)
         return found unless found.nil?
-        klass = klass == ActiveRecord::Base ? nil : klass.superclass
       end
       true
     end
