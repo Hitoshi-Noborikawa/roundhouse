@@ -180,6 +180,10 @@ mod stdlib_rnp;
 mod erb_template_contract;
 #[path = "support/bare_permit.rs"]
 mod bare_permit_contract;
+#[path = "support/data_paths.rs"]
+mod data_paths_contract;
+#[path = "emit_and_run/data_paths.rs"]
+mod data_paths;
 #[path = "emit_and_run/bare_permit.rs"]
 mod bare_permit;
 #[path = "emit_and_run/erb_template.rs"]

@@ -94,6 +94,10 @@ mod vary_accept;
 mod erb_template_contract;
 #[path = "support/bare_permit.rs"]
 mod bare_permit_contract;
+#[path = "support/data_paths.rs"]
+mod data_paths_contract;
+#[path = "spinel_toolchain/data_paths.rs"]
+mod data_paths;
 #[path = "spinel_toolchain/bare_permit.rs"]
 mod bare_permit;
 #[path = "spinel_toolchain/erb_template.rs"]

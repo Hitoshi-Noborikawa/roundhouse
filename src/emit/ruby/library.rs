@@ -7209,10 +7209,11 @@ pub(crate) fn apply_dynamic_render_options_lowering(lcs: &mut [LibraryClass]) {
 
 fn rewrite_render_options_assign(expr: &mut Expr) {
     expr.node.for_each_child_mut(&mut |c| rewrite_render_options_assign(c));
-    let ExprNode::Assign { target: crate::expr::LValue::Ivar { .. }, value } = &mut *expr.node
+    let ExprNode::Assign { target: crate::expr::LValue::Ivar { name: ivar }, value } = &mut *expr.node
     else {
         return;
     };
+    let ivar = ivar.clone();
     let ExprNode::Hash { entries, .. } = &*value.node else {
         return;
     };
@@ -7222,6 +7223,7 @@ fn rewrite_render_options_assign(expr: &mut Expr) {
     // unrelated config hash like `@x = {partial: "y", scope: z}` app-wide —
     // `render @above` is the only consumer of this collapse.
     let mut partial_name: Option<String> = None;
+    let mut computed: Vec<(Symbol, Expr)> = Vec::new();
     for (k, v) in entries.iter() {
         let ExprNode::Lit { value: Literal::Sym { value: key } } = &*k.node else {
             return; // non-symbol key → not a render-options hash
@@ -7233,13 +7235,40 @@ fn rewrite_render_options_assign(expr: &mut Expr) {
                 }
                 _ => return, // dynamic partial name — leave the hash intact
             },
-            "locals" => {} // allowed; dropped in the collapse (ledgered)
+            "locals" => {
+                if let ExprNode::Hash { entries: locals, .. } = &*v.node {
+                    for (lk, lv) in locals {
+                        if let ExprNode::Lit { value: Literal::Sym { value: local } } = &*lk.node
+                            && !matches!(&*lv.node, ExprNode::Ivar { .. } | ExprNode::Lit { .. })
+                        {
+                            computed.push((local.clone(), lv.clone()));
+                        }
+                    }
+                }
+            }
             _ => return, // any foreign key → not a render-options hash
         }
     }
     if let Some(name) = partial_name {
         let span = value.span;
         *value = Expr::new(span, ExprNode::Lit { value: Literal::Str { value: name } });
+        if computed.is_empty() {
+            return;
+        }
+        // The view's dispatch arm reads each computed local back from this ivar (`dynamic_local_ivar`).
+        let mut stmts: Vec<Expr> = computed
+            .into_iter()
+            .map(|(local, value)| {
+                Expr::new(span, ExprNode::Assign {
+                    target: crate::expr::LValue::Ivar {
+                        name: crate::lower::view_to_library::dynamic_local_ivar(&ivar, &local),
+                    },
+                    value,
+                })
+            })
+            .collect();
+        stmts.push(expr.clone());
+        *expr = Expr::new(expr.span, ExprNode::Seq { exprs: stmts });
     }
 }
 

@@ -867,7 +867,7 @@ fn emit_url_arg(url: &Expr, ctx: &ViewCtx) -> Option<Expr> {
         // The local already holds the url — read it.
         ViewUrlArg::LocalUrl { name } => Some(var_ref(Symbol::from(name))),
         ViewUrlArg::PathHelper { name, args } => {
-            let route_args: Vec<Expr> = args.iter().map(|a| rewrite_path_arg(a, ctx)).collect();
+            let route_args = rewrite_path_args(name, args, ctx);
             Some(route_helpers_call(name, route_args))
         }
         ViewUrlArg::RecordRef { name } => {
@@ -886,9 +886,10 @@ fn emit_url_arg(url: &Expr, ctx: &ViewCtx) -> Option<Expr> {
                     }
                 }
             }
+            let param = if ctx.slug_models.contains(&singular) { "to_param" } else { "id" };
             let id_expr = send(
                 Some(var_ref(Symbol::from(name))),
-                "id",
+                param,
                 Vec::new(),
                 None,
                 false,
@@ -1037,7 +1038,21 @@ fn nested_element_parts(kind: &NestedUrlElement<'_>) -> (String, Expr) {
 /// shape) and the bareword `Send { recv: None, args: [], block: None }`
 /// shape Prism produces for partial-scope locals. Anything else
 /// passes through unchanged.
+/// [`rewrite_path_arg`] over a helper's arguments. A lone record handed
+/// to the member helper of a model that overrides `to_param` (lobsters'
+/// `user_path(user)`, a username) projects to that, as Rails renders it.
+pub(super) fn rewrite_path_args(helper: &str, args: &[Expr], ctx: &ViewCtx) -> Vec<Expr> {
+    let resource = helper.trim_end_matches("_path").trim_end_matches("_url");
+    let resource = resource.strip_prefix("edit_").unwrap_or(resource);
+    let param = if args.len() == 1 && ctx.slug_models.iter().any(|m| m == resource) { "to_param" } else { "id" };
+    args.iter().map(|a| project_path_arg(a, ctx, param)).collect()
+}
+
 pub(super) fn rewrite_path_arg(arg: &Expr, ctx: &ViewCtx) -> Expr {
+    project_path_arg(arg, ctx, "id")
+}
+
+fn project_path_arg(arg: &Expr, ctx: &ViewCtx, param: &str) -> Expr {
     let local_name = match &*arg.node {
         ExprNode::Var { name, .. } if ctx.is_local(name.as_str()) => Some(name.clone()),
         ExprNode::Send {
@@ -1050,13 +1065,11 @@ pub(super) fn rewrite_path_arg(arg: &Expr, ctx: &ViewCtx) -> Expr {
         _ => None,
     };
     match local_name {
-        Some(name) => send(
-            Some(var_ref(name)),
-            "id",
-            Vec::new(),
-            None,
-            false,
-        ),
+        Some(name) => {
+            // The record's own `to_param` whatever the helper (`edit_mod_domain_path(domain)` is a domain name).
+            let own = ctx.slug_models.iter().any(|m| *m == singularize(name.as_str()));
+            send(Some(var_ref(name)), if own { "to_param" } else { param }, Vec::new(), None, false)
+        }
         None => arg.clone(),
     }
 }

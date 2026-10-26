@@ -3357,7 +3357,7 @@ fn collect_ivar_str_assigns(
     >,
 ) {
     if let ExprNode::Assign { target: LValue::Ivar { name }, value } = &*e.node {
-        if let Some(entry) = partial_options_from_assign_value(value) {
+        if let Some(entry) = partial_options_from_assign_value(name, value) {
             let slot = acc
                 .entry((dir.to_string(), name.clone()))
                 .or_default()
@@ -3383,7 +3383,15 @@ fn collect_ivar_str_assigns(
 /// a dispatch arm can rebind (`{tag: @tag}` reads as the threaded `tag`
 /// local at the arm); any other value shape is dropped and that local
 /// falls to the partial's header default.
-fn partial_options_from_assign_value(value: &Expr) -> Option<DynPoolEntry> {
+/// The ivar a controller stores a computed `locals:` value in for the
+/// view to read (`@above = {partial: "newest_by_user", locals:
+/// {newest_by_user: by_user}}` stores `by_user` in `@above_newest_by_user`);
+/// `emit::ruby::library`'s collapse of the assignment writes it.
+pub(crate) fn dynamic_local_ivar(ivar: &Symbol, local: &Symbol) -> Symbol {
+    Symbol::from(format!("{}_{}", ivar.as_str(), local.as_str()))
+}
+
+fn partial_options_from_assign_value(ivar: &Symbol, value: &Expr) -> Option<DynPoolEntry> {
     match &*value.node {
         ExprNode::Lit { value: Literal::Str { value: s } } => {
             Some(DynPoolEntry { name: s.as_str().to_string(), locals: Vec::new() })
@@ -3419,11 +3427,13 @@ fn partial_options_from_assign_value(value: &Expr) -> Option<DynPoolEntry> {
                                         }
                                         _ => return None,
                                     };
-                                    matches!(
-                                        &*lv.node,
-                                        ExprNode::Ivar { .. } | ExprNode::Lit { .. }
-                                    )
-                                    .then(|| (lname, lv.clone()))
+                                    // Not dropped when computed (a local, a call): the controller keeps it in an ivar of its own.
+                                    let value = if matches!(&*lv.node, ExprNode::Ivar { .. } | ExprNode::Lit { .. }) {
+                                        lv.clone()
+                                    } else {
+                                        Expr::new(lv.span, ExprNode::Ivar { name: dynamic_local_ivar(ivar, &lname) })
+                                    };
+                                    Some((lname, value))
                                 })
                                 .collect::<Vec<_>>(),
                         ),
