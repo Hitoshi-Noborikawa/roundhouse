@@ -128,7 +128,7 @@ fn turning_a_model_s_stamping_off_leaves_its_saves_unstamped() {
 fn turning_a_model_s_stamping_off_is_reported_on_a_strict_target() {
     let (_emitted, errors) = quiet_stamping_app().emit(roundhouse::project::BuildTarget::Rust);
     let found: Vec<&String> = errors.iter().filter(|e| e.contains("ActiveRecord::Base.record_timestamps= not supported (rust)")).collect();
-    assert_eq!(found.len(), 1, "{errors:#?}");
+    assert_eq!(found.len(), 2, "the `= false` and the `= true` that restores it: {errors:#?}");
     let (_emitted, errors) = quiet_stamping_app().emit(roundhouse::project::BuildTarget::Ruby);
     assert!(!errors.iter().any(|e| e.contains("record_timestamps")), "{errors:#?}");
     let (_emitted, errors) = emit_and_run::real_blog()
