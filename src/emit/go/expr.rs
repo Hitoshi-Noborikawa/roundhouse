@@ -3823,9 +3823,15 @@ fn bind_let(ctx: &EmitCtx, name: &str, value: &Expr) -> String {
     let value_s = emit_expr_as_value(ctx, value);
     let column = nullable_field_go_ty(value).is_some()
         || matches!(&*value.node, ExprNode::Send { recv: Some(r), method, args, .. } if args.is_empty() && recv_column_is_nullable(r, method.as_str()));
-    // Not an index read: Go's `xs[i]` and `m[k]` answer the element type, never a nil
-    let plain_index = matches!(&*value.node, ExprNode::Send { method, recv: Some(r), .. }
-        if method.as_str() == "[]" && matches!(r.ty.as_ref(), Some(Ty::Array { .. } | Ty::Hash { .. })));
+    // Not an index read of a concrete element: Go's `xs[i]` and `m[k]` answer the element type, which only an interface{} element holds nil in
+    let plain_index = match &*value.node {
+        ExprNode::Send { method, recv: Some(r), .. } if method.as_str() == "[]" => match r.ty.as_ref() {
+            Some(Ty::Array { elem }) => super::ty::go_ty_stub(Some(elem)) != "interface{}",
+            Some(Ty::Hash { value, .. }) => super::ty::go_ty_stub(Some(value)) != "interface{}",
+            _ => false,
+        },
+        _ => false,
+    };
     ctx.declared.borrow_mut().insert(name_s.clone());
     let repr = match value.ty.as_ref() {
         _ if column => OptionalRepr::Pointer,
