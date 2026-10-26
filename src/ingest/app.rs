@@ -237,6 +237,13 @@ fn names_root_constant(text: &str, name: &str) -> bool {
     reads.found
 }
 
+/// Top-level namespaces the framework defines before any app file loads.
+pub(super) const FRAMEWORK_ROOTS: &[&str] = &[
+    "Rails", "ActiveRecord", "ActiveSupport", "ActiveModel", "ActiveJob",
+    "ActiveStorage", "ActionController", "ActionDispatch", "ActionView",
+    "ActionMailer", "ActionMailbox", "ActionCable", "ActionText", "Rack",
+];
+
 /// A module or class an initializer defines at the top level, kept
 /// when the app's own code names it and nothing else defines it.
 ///
@@ -259,11 +266,6 @@ fn keep_initializer_defined(
     sources: &[crate::span::SourceFile],
     candidates: Vec<LibraryClass>,
 ) {
-    const FRAMEWORK_ROOTS: &[&str] = &[
-        "Rails", "ActiveRecord", "ActiveSupport", "ActiveModel", "ActiveJob",
-        "ActiveStorage", "ActionController", "ActionDispatch", "ActionView",
-        "ActionMailer", "ActionMailbox", "ActionCable", "ActionText", "Rack",
-    ];
     const CORE: &[&str] = &[
         "Object", "BasicObject", "Kernel", "Module", "Class", "Comparable",
         "Enumerable", "Integer", "Float", "Numeric", "String", "Symbol",
