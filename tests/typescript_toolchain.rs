@@ -132,13 +132,27 @@ fn assert_tsc_passes(fixture: &str, scratch: &Path) {
     );
 }
 
+/// `Post.find(params[:id])`, the pre-Rails-8 spelling of `find(params.
+/// expect(:id))`. Analysis is clean, so the emitted project must compile:
+/// it read `this.params.get("id")` (the runtime's params is a Record, not
+/// a class with `get`) and then handed `find(id: number)` a `ParamValue`.
+/// The coercion is the TS emitter's: the Ruby family's casting finder takes
+/// the raw String (tests/primary_key_casting.rs).
 #[test]
 #[ignore]
-fn tiny_blog_tsc_passes() {
-    let fixture = Path::new("fixtures/tiny-blog");
-    let scratch = scratch_dir("tiny-blog");
-    generate_project(fixture, &scratch);
-    assert_tsc_passes("tiny-blog", &scratch);
+fn real_blog_find_by_params_index_tsc_passes() {
+    let (emitted, errors) = emit_and_run::real_blog()
+        .edit(
+            "app/controllers/articles_controller.rb",
+            "Article.find(params.expect(:id))",
+            "Article.find(params[:id])",
+        )
+        .emit(roundhouse::project::BuildTarget::Typescript);
+    assert!(errors.is_empty(), "{errors:?}");
+    let controller =
+        std::fs::read_to_string(emitted.join("app/controllers/articles_controller.ts")).expect("emitted controller");
+    assert!(!controller.contains("this.params.get("), "{controller}");
+    assert_tsc_passes("real-blog with params[:id]", &emitted);
 }
 
 /// Diagnostic test: emit transpiled_blog and dump tsc errors so we

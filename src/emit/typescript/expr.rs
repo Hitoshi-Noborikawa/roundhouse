@@ -2422,6 +2422,40 @@ fn js_send_inner(
             return js_expr(r);
         }
     }
+    // `Model.find(@params[k])`, the pre-Rails-8 spelling of `find(params.
+    // expect(:id))`: the TS finder takes a `number` and the read is a
+    // `ParamValue`, so it is coerced as the `expect` lowering's is,
+    // `Number(String(…))` — the TS counterpart of the Rust emitter's
+    // `.as_i64().unwrap()`. A non-numeric id is NaN and finds nothing; the
+    // Ruby family hands the raw String to its casting finder instead.
+    if method == "find" && args.len() == 1 && block.is_none() {
+        if let (Some(r), ExprNode::Send { recv: Some(pr), method: index, args: index_args, block: None, .. }) =
+            (recv, &*args[0].node)
+        {
+            if matches!(&*r.node, ExprNode::Const { .. })
+                && index.as_str() == "[]"
+                && index_args.len() == 1
+                && matches!(&*pr.node, ExprNode::Ivar { name } if name.as_str() == "params")
+            {
+                let send = |value: Expr, m: &str| {
+                    Expr::new(
+                        span,
+                        ExprNode::Send {
+                            recv: Some(value),
+                            method: Symbol::from(m),
+                            args: vec![],
+                            block: None,
+                            parenthesized: false,
+                        },
+                    )
+                };
+                // Through the general path below, which narrows the
+                // `Base` it returns to the model (`as Article`).
+                let coerced = send(send(args[0].clone(), "to_s"), "to_i");
+                return js_send_inner(span, recv, method, &[coerced], parenthesized, block);
+            }
+        }
+    }
     // Temporal reader intrinsic: `ActiveSupport.parse_db_time(s)` parses
     // stored ISO-8601 text into a native `Date` (nil-safe: `string | null`
     // → `Date | null`). Maps to the hand-written `RhDateTime.parse`
@@ -2595,14 +2629,11 @@ fn js_send_inner(
             if is_framework_class_recv(r) {
                 return Js::method_call(span, js_expr(r), "get", vec![js_expr(&args[0])]);
             }
-            // Legacy hardcode for `@params[:k]` — @params's ty isn't
-            // always recovered as Class (it can flow as Hash[Sym, Any]
-            // through the analyzer), so the ivar-name shortcut still
-            // pays for itself. Subsumed by the framework-class match
-            // above when the type is recovered.
-            if matches!(&*r.node, ExprNode::Ivar { name } if name.as_str() == "params") {
-                return Js::method_call(span, js_expr(r), "get", vec![js_expr(&args[0])]);
-            }
+            // `@params[k]` is bracket access: the controller's `params`
+            // is a `Record<string, ParamValue>` (action_controller_base),
+            // not a class with a `get`. An ivar-name shortcut that routed
+            // it to `.get` outlived the class it was written for, and made
+            // `Post.find(params[:id])` a tsc error.
         }
     }
     if method == "[]" {
