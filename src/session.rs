@@ -68,6 +68,7 @@ pub fn analyze_and_lower_for(app: &mut App, target: crate::build_target::BuildTa
         crate::ingest::mailer_defaults::expand(app);
         crate::ingest::has_many_hold::expand(app);
         let mut found = crate::ingest::each_validator::expand(app, target.as_str());
+        found.extend(crate::ingest::mailer_helpers::apply(app, target.as_str()));
         found.extend(crate::ingest::mailer_callbacks::expand(app, target.as_str()));
         found
     } else {
