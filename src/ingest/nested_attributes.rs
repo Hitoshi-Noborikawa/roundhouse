@@ -172,7 +172,7 @@ enum Kind {
     BelongsTo,
 }
 
-fn targets(model: &Model, names: &[Symbol], options: &Options, models: &[Model]) -> Option<Vec<Target>> {
+fn targets(model: &Model, names: &[Symbol], options: &Options, models: &[Model], sources: &[crate::span::SourceFile]) -> Option<Vec<Target>> {
     // A Symbol `reject_if:` names one of the model's own instance
     // methods; one it doesn't define (inherited, or from a concern not
     // spliced in) keeps the declaration a reported gap.
@@ -226,8 +226,27 @@ fn targets(model: &Model, names: &[Symbol], options: &Options, models: &[Model])
                         (Association::BelongsTo { name, polymorphic: true, .. }, Some(as_name)) if name == as_name => {
                             Some(name.as_str().to_string())
                         }
-                        (Association::BelongsTo { name, foreign_key: fk, polymorphic: false, .. }, None) if fk == foreign_key => {
-                            Some(name.as_str().to_string())
+                        // The owner's reflection decides, as `build` sets the
+                        // inverse from it: an `inverse_of:` name there, or
+                        // Rails' inference, which neither side's `foreign_key:`
+                        // nor `inverse_of: false` allows. The child's own
+                        // `inverse_of:` name doesn't. Without one, a child built
+                        // on a new owner is validated without its owner, so its
+                        // "must exist" stands.
+                        (Association::BelongsTo { name: inverse_name, foreign_key: fk, polymorphic: false, .. }, None) if fk == foreign_key => {
+                            let span_of = |m: &Model, n: &Symbol| m.spanned_associations().find(|(_, a)| a.name() == n).map(|(s, _)| s);
+                            let owner_span = span_of(model, name);
+                            let child_span = span_of(target_model, inverse_name);
+                            let option = |span: Option<crate::span::Span>, key: &str| span.and_then(|s| declared_value(sources, s, key));
+                            let owner_inverse = option(owner_span, "inverse_of");
+                            let child_inverse = option(child_span, "inverse_of");
+                            let has = |span: Option<crate::span::Span>, key: &str| option(span, key).is_some();
+                            let inferred = owner_inverse.is_none()
+                                && !has(owner_span, "foreign_key")
+                                && !has(child_span, "foreign_key")
+                                && child_inverse != Some(OptionValue::Off);
+                            let named = owner_inverse == Some(OptionValue::Name(inverse_name.as_str().to_string()));
+                            (inferred || named).then(|| inverse_name.as_str().to_string())
                         }
                         _ => None,
                     })
@@ -351,9 +370,16 @@ fn source(target: &Target) -> String {
     let decode = format!(
         "attrs = {{}}\n      entry.each {{ |key, value| attrs[key.to_sym] = value }}\n      destroy = {destroy}\n      {rejected}attrs.delete(:_destroy)\n      id = attrs.delete(:id)\n"
     );
+    // A child built on a saved owner has its key, as Rails' association
+    // build gives it (a belongs_to's key is the owner's own).
+    let set_key = if *kind == Kind::HasOne {
+        format!("          built.{foreign_key} = self.id unless new_record?\n")
+    } else {
+        String::new()
+    };
     let writer = if *kind == Kind::HasMany {
         format!(
-            "  def {name}_attributes=(attributes)\n    {ivar} = [] if {ivar}.nil?\n    {doomed} = [] if {doomed}.nil?\n    entries = attributes.is_a?(Hash) ? attributes.values : attributes\n    entries.each do |entry|\n      {decode}      if id.nil? || id.to_s.empty?\n{skip_inner}        {ivar} << {class}.new(attrs) unless destroy\n      else\n        existing = nil\n        {name}.each {{ |record| existing = record if record.id.to_s == id.to_s }}\n        {not_found} if existing.nil?\n{skip_inner}        if destroy\n          {doomed} << existing\n        else\n          attrs.each {{ |key, value| existing[key] = value }}\n          {ivar} << existing\n        end\n      end\n    end\n  end\n\n"
+            "  def {name}_attributes=(attributes)\n    {ivar} = [] if {ivar}.nil?\n    {doomed} = [] if {doomed}.nil?\n    entries = attributes.is_a?(Hash) ? attributes.values : attributes\n    entries.each do |entry|\n      {decode}      if id.nil? || id.to_s.empty?\n{skip_inner}        unless destroy\n          child = {class}.new(attrs)\n          child.{foreign_key} = self.id unless new_record?\n          {ivar} << child\n        end\n      else\n        existing = nil\n        {name}.each {{ |record| existing = record if record.id.to_s == id.to_s }}\n        {not_found} if existing.nil?\n{skip_inner}        if destroy\n          {doomed} << existing\n        else\n          attrs.each {{ |key, value| existing[key] = value }}\n          {ivar} << existing\n        end\n      end\n    end\n  end\n\n"
         )
     } else {
         // has_one: the record already there is replaced by the one built.
@@ -370,7 +396,7 @@ fn source(target: &Target) -> String {
         // pending is reset only once the entry is accepted, so an entry
         // that raises `RecordNotFound` changes nothing.
         format!(
-            "  def {name}_attributes=(attributes)\n    entry = attributes\n    built = {built}\n    {decode}    if id.nil? || id.to_s.empty?\n{skip_outer}      {ivar} = []\n      {doomed} = []\n      unless destroy\n        if built.nil?\n          built = {class}.new(attrs)\n          {built} = built\n{replace_old}        else\n          attrs.each {{ |key, value| built[key] = value }}\n        end\n      end\n      {ivar} << built unless built.nil?\n    else\n      {not_found} unless built.nil?\n      existing = {name}\n      {not_found} if existing.nil? || existing.id.to_s != id.to_s\n{skip_outer}      {ivar} = []\n      {doomed} = []\n      if destroy\n        {doomed} << existing\n      else\n        attrs.each {{ |key, value| existing[key] = value }}\n        {ivar} << existing\n      end\n    end\n  end\n\n"
+            "  def {name}_attributes=(attributes)\n    entry = attributes\n    built = {built}\n    {decode}    if id.nil? || id.to_s.empty?\n{skip_outer}      {ivar} = []\n      {doomed} = []\n      unless destroy\n        if built.nil?\n          built = {class}.new(attrs)\n{set_key}          {built} = built\n{replace_old}        else\n          attrs.each {{ |key, value| built[key] = value }}\n        end\n      end\n      {ivar} << built unless built.nil?\n    else\n      {not_found} unless built.nil?\n      existing = {name}\n      {not_found} if existing.nil? || existing.id.to_s != id.to_s\n{skip_outer}      {ivar} = []\n      {doomed} = []\n      if destroy\n        {doomed} << existing\n      else\n        attrs.each {{ |key, value| existing[key] = value }}\n        {ivar} << existing\n      end\n    end\n  end\n\n"
         )
     };
     let skip_inverse = inverse
@@ -452,7 +478,7 @@ pub(crate) fn expand(app: &mut App) {
         for (index, item) in model.body.iter().enumerate() {
             let ModelBodyItem::Unknown { expr, .. } = item else { continue };
             let Some((names, options)) = declaration(expr) else { continue };
-            let Some(targets) = targets(model, &names, &options, &snapshot) else { continue };
+            let Some(targets) = targets(model, &names, &options, &snapshot, &app.sources) else { continue };
             let src = format!(
                 "class {}\n{}end\n",
                 model.name.0.as_str().replace("::", "__"),
@@ -524,18 +550,60 @@ pub(crate) fn expand_autosave(app: &mut App) {
 
 /// Does the declaration at `span` pass `autosave: true`?
 fn declares_autosave(sources: &[crate::span::SourceFile], span: crate::span::Span) -> bool {
-    let Some(file) = (span.file.0 as usize).checked_sub(1).and_then(|i| sources.get(i)) else { return false };
-    let Some(text) = file.text.get(span.start as usize..span.end as usize) else { return false };
+    declared_option(sources, span, "autosave") == Some(true)
+}
+
+/// The declaration at `span`'s `key:` option: `Some(true)` for a `true`
+/// literal, `Some(false)` for any other value, `None` when it isn't given.
+fn declared_option(sources: &[crate::span::SourceFile], span: crate::span::Span, key: &str) -> Option<bool> {
+    let file = (span.file.0 as usize).checked_sub(1).and_then(|i| sources.get(i))?;
+    let text = file.text.get(span.start as usize..span.end as usize)?;
     let result = ruby_prism::parse(text.as_bytes());
     let root = result.node();
-    let Some(call) = root.as_program_node().and_then(|p| p.statements().body().iter().next()).and_then(|n| n.as_call_node()) else {
-        return false;
-    };
-    let Some(args) = call.arguments() else { return false };
-    args.arguments().iter().filter_map(|a| a.as_keyword_hash_node()).any(|hash| {
-        hash.elements().iter().filter_map(|e| e.as_assoc_node()).any(|assoc| {
-            assoc.key().as_symbol_node().is_some_and(|k| k.unescaped() == b"autosave")
-                && assoc.value().as_true_node().is_some()
+    let call = root.as_program_node().and_then(|p| p.statements().body().iter().next()).and_then(|n| n.as_call_node())?;
+    let args = call.arguments()?;
+    args.arguments().iter().filter_map(|a| a.as_keyword_hash_node()).find_map(|hash| {
+        hash.elements().iter().filter_map(|e| e.as_assoc_node()).find_map(|assoc| {
+            assoc
+                .key()
+                .as_symbol_node()
+                .is_some_and(|k| k.unescaped() == key.as_bytes())
+                .then(|| assoc.value().as_true_node().is_some())
+        })
+    })
+}
+
+/// A declaration option's value, as the inverse rule reads it.
+#[derive(Debug, PartialEq)]
+enum OptionValue {
+    /// A Symbol or String literal.
+    Name(String),
+    /// `false` or `nil`.
+    Off,
+    /// Anything else.
+    Other,
+}
+
+/// The declaration at `span`'s `key:` option, `None` when it isn't given.
+fn declared_value(sources: &[crate::span::SourceFile], span: crate::span::Span, key: &str) -> Option<OptionValue> {
+    let file = (span.file.0 as usize).checked_sub(1).and_then(|i| sources.get(i))?;
+    let text = file.text.get(span.start as usize..span.end as usize)?;
+    let result = ruby_prism::parse(text.as_bytes());
+    let root = result.node();
+    let call = root.as_program_node().and_then(|p| p.statements().body().iter().next()).and_then(|n| n.as_call_node())?;
+    let args = call.arguments()?;
+    args.arguments().iter().filter_map(|a| a.as_keyword_hash_node()).find_map(|hash| {
+        hash.elements().iter().filter_map(|e| e.as_assoc_node()).find_map(|assoc| {
+            assoc.key().as_symbol_node().is_some_and(|k| k.unescaped() == key.as_bytes()).then(|| {
+                let value = assoc.value();
+                if value.as_false_node().is_some() || value.as_nil_node().is_some() {
+                    OptionValue::Off
+                } else if let Some(name) = super::util::symbol_or_string_value(&value) {
+                    OptionValue::Name(name)
+                } else {
+                    OptionValue::Other
+                }
+            })
         })
     })
 }
