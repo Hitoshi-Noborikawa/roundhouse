@@ -72,6 +72,9 @@ enum Call {
 #[derive(Clone)]
 struct Callback {
     kind: Kind,
+    /// A delivery callback (`before_deliver`, …), run by `deliver_now`
+    /// rather than with the action.
+    deliver: bool,
     target: Call,
     only: Option<Vec<String>>,
     except: Option<Vec<String>>,
@@ -93,11 +96,15 @@ struct Parsed {
     consumed: Vec<usize>,
 }
 
-fn kind_of(method: &str) -> Option<Kind> {
+/// The callback's kind, and whether it is a delivery callback.
+fn kind_of(method: &str) -> Option<(Kind, bool)> {
     match method {
-        "before_action" => Some(Kind::Before),
-        "after_action" => Some(Kind::After),
-        "around_action" => Some(Kind::Around),
+        "before_action" => Some((Kind::Before, false)),
+        "after_action" => Some((Kind::After, false)),
+        "around_action" => Some((Kind::Around, false)),
+        "before_deliver" => Some((Kind::Before, true)),
+        "after_deliver" => Some((Kind::After, true)),
+        "around_deliver" => Some((Kind::Around, true)),
         _ => None,
     }
 }
@@ -200,7 +207,7 @@ fn condition(value: &Expr, counter: &mut usize) -> Result<Call, String> {
 /// under its own.
 fn parse_call(call: &Expr, outer: &[(Expr, Expr)], counter: &mut usize) -> Result<Vec<Callback>, String> {
     let ExprNode::Send { method, args, block, .. } = &*call.node else { unreachable!() };
-    let Some(kind) = kind_of(method.as_str()) else {
+    let Some((kind, deliver)) = kind_of(method.as_str()) else {
         return Err(format!("`{}` is not lowered", method.as_str()));
     };
     let mut targets: Vec<Call> = Vec::new();
@@ -240,9 +247,14 @@ fn parse_call(call: &Expr, outer: &[(Expr, Expr)], counter: &mut usize) -> Resul
             other => return Err(format!("the `{other}:` option")),
         }
     }
+    // Rails' delivery callbacks are plain ActiveSupport callbacks: no
+    // `only:` / `except:`.
+    if deliver && (only.is_some() || except.is_some()) {
+        return Err("`only:` / `except:` on a delivery callback".into());
+    }
     Ok(targets
         .into_iter()
-        .map(|target| Callback { kind, target, only: only.clone(), except: except.clone(), ifs: ifs.clone(), unlesses: unlesses.clone() })
+        .map(|target| Callback { kind, deliver, target, only: only.clone(), except: except.clone(), ifs: ifs.clone(), unlesses: unlesses.clone() })
         .collect())
 }
 
@@ -699,19 +711,8 @@ fn generated_methods(
         if is_own {
             own.push(action.clone());
         }
-        let applies: Vec<&Callback> = chain.iter().filter(|c| c.applies_to(&action)).collect();
-        let mut resolved = Vec::new();
-        for c in applies {
-            let target = callable(&c.target)?;
-            let mut conds = Vec::new();
-            for cond in &c.ifs {
-                conds.push(format!("({})", callable(cond)?));
-            }
-            for cond in &c.unlesses {
-                conds.push(format!("!({})", callable(cond)?));
-            }
-            resolved.push((c.kind, target, conds.join(" && ")));
-        }
+        let applies: Vec<&Callback> = chain.iter().filter(|c| !c.deliver && c.applies_to(&action)).collect();
+        let resolved = resolve(&applies, &callable)?;
         let formals = forward.formals.clone();
         let called = if via_module { forward.call("super") } else { forward.call(&format!("self.{ACTION_PREFIX}{action}")) };
         // The class side too, so an argument the caller leaves out stays
@@ -725,13 +726,24 @@ fn generated_methods(
                 forward.call(&format!("new.__processing.{action}"))
             ));
         }
-        let body = nested(&resolved, &called);
+        let body = nested(&resolved, &called, 6);
         // Called from inside a running action, the method is a plain call.
         // The chain's state is cleared when it ends, however it ends, so
         // the next action on this mailer (two through one `with`) runs its
         // own chain on a fresh mail.
         text.push_str(&format!(
-            "  def {action}({formals})\n    return {called} unless self.__start_action(\"{action}\")\n    begin\n{body}      self.message\n    ensure\n      self.__end_action\n    end\n  end\n\n"
+            "  def {action}({formals})\n    return {called} unless self.__start_action(\"{action}\")\n    begin\n{body}      self.message || self.__null_mail\n    ensure\n      self.__end_action\n    end\n  end\n\n"
+        ));
+    }
+    // The delivery callbacks run by `deliver_now` (`Message#deliver_now`
+    // asks the mailer that built the mail); a `throw :abort` in one stops
+    // the delivery, which answers nil.
+    let delivering: Vec<&Callback> = chain.iter().filter(|c| c.deliver).collect();
+    if !delivering.is_empty() {
+        let resolved = resolve(&delivering, &callable)?;
+        let body = nested(&resolved, "__delivered = __mail.__push", 6);
+        text.push_str(&format!(
+            "  def __deliver(__mail)\n    __delivered = nil\n    catch(:abort) do\n{body}    end\n    __delivered\n  end\n\n"
         ));
     }
     // This class's own block callbacks and lambda conditions.
@@ -766,8 +778,28 @@ fn generated_methods(
     Ok(Generated { methods, own, unwrapped })
 }
 
-/// The chain for one action, from `resolved[0]` inward to the action.
-fn nested(resolved: &[(Kind, String, String)], action: &str) -> String {
+/// Each callback's method and its conditions, as the chain calls them.
+fn resolve(
+    callbacks: &[&Callback],
+    callable: &dyn Fn(&Call) -> Result<String, String>,
+) -> Result<Vec<(Kind, String, String)>, String> {
+    let mut resolved = Vec::new();
+    for c in callbacks {
+        let target = callable(&c.target)?;
+        let mut conds = Vec::new();
+        for cond in &c.ifs {
+            conds.push(format!("({})", callable(cond)?));
+        }
+        for cond in &c.unlesses {
+            conds.push(format!("!({})", callable(cond)?));
+        }
+        resolved.push((c.kind, target, conds.join(" && ")));
+    }
+    Ok(resolved)
+}
+
+/// The chain, from `resolved[0]` inward to `action`, at `indent`.
+fn nested(resolved: &[(Kind, String, String)], action: &str, indent: usize) -> String {
     fn go(rest: &[(Kind, String, String)], action: &str, indent: usize) -> String {
         let pad = " ".repeat(indent);
         let Some(((kind, name, cond), rest)) = rest.split_first() else {
@@ -787,5 +819,5 @@ fn nested(resolved: &[(Kind, String, String)], action: &str) -> String {
             ),
         }
     }
-    go(resolved, action, 6)
+    go(resolved, action, indent)
 }

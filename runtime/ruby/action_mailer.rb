@@ -71,6 +71,8 @@ module ActionMailer
       @reply_to = Message.addresses(opts[:reply_to])
       @subject = opts[:subject]
       @headers = {}
+      @mailer = nil
+      @null = false
       @text_body = text_body
       @html_body = html_body
       given = opts[:body]
@@ -173,13 +175,33 @@ module ActionMailer
     # return the message so `X.notify(...).deliver_now` chains stay
     # value-shaped. `deliver_later` has no queue in a single-process
     # runtime; immediate collection is the honest equivalent.
+    #
+    # A mail a mailer built is delivered through it, which runs its
+    # delivery callbacks (`before_deliver`, …) around `__push`.
     def deliver_now
+      mailer = @mailer
+      mailer.nil? ? __push : mailer.__deliver(self)
+    end
+
+    def deliver_later
+      deliver_now
+    end
+
+    # Collects the mail; a null one (`NullMail`: an action that built no
+    # mail) is not collected and answers nil.
+    def __push
+      return nil if @null
       ActionMailer::Base.deliveries.push(self)
       self
     end
 
-    def deliver_later
-      ActionMailer::Base.deliveries.push(self)
+    def __link(mailer)
+      @mailer = mailer
+      self
+    end
+
+    def __nullify
+      @null = true
       self
     end
   end
@@ -200,7 +222,7 @@ module ActionMailer
     # The mail is kept as `message`, for the after callbacks; headers
     # given before it was built are added to it.
     def mail(opts, text_body = nil, html_body = nil)
-      built = Message.new(opts, text_body, html_body)
+      built = Message.new(opts, text_body, html_body).__link(self)
       __headers.each { |name, value| built.add_header(name, value) }
       @_message = built
       built
@@ -208,6 +230,20 @@ module ActionMailer
 
     def message
       @_message
+    end
+
+    # What an action that built no mail answers, as Rails' `NullMail`:
+    # delivering it runs the delivery callbacks and sends nothing.
+    def __null_mail
+      built = Message.new({}, nil, nil).__link(self).__nullify
+      @_message = built
+      built
+    end
+
+    # Delivers `mail`; a mailer with delivery callbacks overrides it
+    # (`ingest::mailer_callbacks`).
+    def __deliver(mail)
+      mail.__push
     end
 
     # The action this mailer runs, which the generated callback chain sets
