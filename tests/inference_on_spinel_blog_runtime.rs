@@ -481,7 +481,10 @@ fn untyped_subexpressions_baseline() {
     // a `where` Range's non-numeric ends for Spinel, and `column_predicate`
     // reads them; its parameters and readers are vars on this RBS-less
     // probe (+9 in relation.rb); the RBS-paired gate types them.
-    const CEILING: usize = 1101;
+    // MEASURED 1105 on 2026-10-27 (on 1101): the same Bounds element of a
+    // condition Array, read untyped where the predicate builds its SQL
+    // (+4 in active_record/relation.rb, 1101 -> 1105).
+    const CEILING: usize = 1105;
     assert!(
         existing_untyped <= CEILING && like_untyped <= LIKE_CEILING,
         "{} untyped sub-expressions on spinel-blog runtime — exceeds ledger: \
