@@ -113,7 +113,7 @@ pub(crate) fn expand(app: &mut App) {
             let n = name.as_str();
             let fk = foreign_key.as_str();
             let src = format!(
-                "class Generated\n  def __hold_{n}(record)\n    @__held_{n} = [] if @__held_{n}.nil?\n    @__held_{n} << record\n    record\n  end\n\n  def __push_{n}(record)\n    if new_record?\n{set_owner}{set_type}      __hold_{n}(record)\n    else\n      record.{fk} = id\n{set_type}      record.save\n    end\n    {n}\n  end\n\n  def __held_{n}_list\n    @__held_{n}.nil? ? [] : @__held_{n}\n  end\n\n  def __held_{n}_valid\n    return if @__held_{n}.nil?\n    invalid = false\n    __held_{n}_list.each do |child|\n      next if child.valid?\n{counts}    end\n    errors.add(:{n}, :invalid) if invalid\n  end\n\n  validate :__held_{n}_valid\n\n  def __held_{n}_save\n    return if @__held_{n}.nil?\n    children = __held_{n}_list\n    @__held_{n} = nil\n    children.each do |child|\n      child.{fk} = id\n      child.save!\n    end\n  end\n\n  after_save :__held_{n}_save\nend\n"
+                "class Generated\n  def __hold_{n}(record)\n    @__held_{n} = [] if @__held_{n}.nil?\n    @__held_{n} << record\n    record\n  end\n\n  def __push_{n}(record)\n    if new_record?\n{set_owner}{set_type}      __hold_{n}(record)\n    else\n      record.{fk} = id\n{set_type}      record.save\n    end\n    {n}\n  end\n\n  def __push_all_{n}(records)\n    records.each {{ |record| __push_{n}(record) }}\n    {n}\n  end\n\n  def __held_{n}_list\n    @__held_{n}.nil? ? [] : @__held_{n}\n  end\n\n  def __held_{n}_valid\n    return if @__held_{n}.nil?\n    invalid = false\n    __held_{n}_list.each do |child|\n      next if child.valid?\n{counts}    end\n    errors.add(:{n}, :invalid) if invalid\n  end\n\n  validate :__held_{n}_valid\n\n  def __held_{n}_save\n    return if @__held_{n}.nil?\n    children = __held_{n}_list\n    @__held_{n} = nil\n    children.each do |child|\n      child.{fk} = id\n      child.save!\n    end\n  end\n\n  after_save :__held_{n}_save\nend\n"
             );
             if let Some(items) = super::validates_with::ingest_source(&src, &model.name) {
                 inserts.push((index + 1, items));
@@ -145,6 +145,21 @@ pub(crate) fn expand(app: &mut App) {
         // on least, so the declared answer is the record's class only
         // where nothing better is known: none is, before analysis.
         table.insert(crate::ident::Symbol::from(format!("__push_{name}")), takes(record.clone()));
+        // `<<` with an Array adds each element (`concat(records.flatten)`).
+        table.insert(
+            crate::ident::Symbol::from(format!("__push_all_{name}")),
+            crate::ty::Ty::Fn {
+                params: vec![crate::ty::Param {
+                    name: crate::ident::Symbol::from("records"),
+                    ty: crate::ty::Ty::Array { elem: record.clone().into() }.into(),
+                    kind: crate::ty::ParamKind::Required,
+                }]
+                .into(),
+                block: None,
+                ret: record.clone().into(),
+                effects: Default::default(),
+            },
+        );
         table.insert(
             crate::ident::Symbol::from(format!("__held_{name}_list")),
             crate::ty::Ty::Fn {

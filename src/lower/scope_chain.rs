@@ -2887,6 +2887,41 @@ impl Ctx<'_> {
     }
 }
 
+/// The records `<<` adds when it's given an Array: an Array literal's
+/// elements, nested literals flattened, an Array of records as it is, and
+/// anything not typed as one record `[value].flatten`, which is the record
+/// alone or the Array's records. None for one record.
+fn pushed_records(arg: &Expr) -> Option<Expr> {
+    use crate::ty::Ty;
+    fn flat(e: &Expr, out: &mut Vec<Expr>) {
+        match &*e.node {
+            ExprNode::Array { elements, .. } => elements.iter().for_each(|x| flat(x, out)),
+            _ => out.push(e.clone()),
+        }
+    }
+    match (&*arg.node, arg.ty.as_ref()) {
+        (ExprNode::Array { style, .. }, _) => {
+            let mut elements = Vec::new();
+            flat(arg, &mut elements);
+            let elem = elements.first().and_then(|e| e.ty.clone());
+            let mut list = Expr::new(arg.span, ExprNode::Array { elements, style: style.clone() });
+            if let Some(elem) = elem {
+                list.ty = Some(Ty::Array { elem: elem.into() });
+            }
+            Some(list)
+        }
+        (_, Some(Ty::Class { .. })) => None,
+        (_, Some(Ty::Array { elem })) if matches!(&**elem, Ty::Class { .. }) => Some(arg.clone()),
+        _ => {
+            let wrapped = syn(arg.span, ExprNode::Array { elements: vec![arg.clone()], style: Default::default() });
+            Some(syn(
+                arg.span,
+                ExprNode::Send { recv: Some(wrapped), method: Symbol::from("flatten"), args: vec![], block: None, parenthesized: false },
+            ))
+        }
+    }
+}
+
 fn syn(span: crate::span::Span, node: ExprNode) -> Expr {
     Expr::new(span, node)
 }
@@ -4548,6 +4583,17 @@ fn rewrite_send(expr: &mut Expr, ctx: &Ctx, locals: &mut Locals) -> Option<Class
                         _ if matches!(method.as_str(), "build" | "create" | "create!") => {
                             assoc_owner_seed(ctx, aname, ir, span)
                         }
+                        // The same for `<<` onto a has_many the owner holds:
+                        // the push keeps the owner as its one receiver
+                        // (`Article.find(id).comments << c`).
+                        _ if method.as_str() == "<<"
+                            && args.len() == 1
+                            && assoc_read_target(ir, aname, ctx.assocs)
+                                .and_then(|(owner, _, _)| owner)
+                                .is_some_and(|m| ctx.assocs.has_many_held.contains(&(m, aname.clone()))) =>
+                        {
+                            assoc_owner_seed(ctx, aname, ir, span)
+                        }
                         _ => None,
                     };
                     // The owner model the association resolved through,
@@ -4589,15 +4635,14 @@ fn rewrite_send(expr: &mut Expr, ctx: &Ctx, locals: &mut Locals) -> Option<Class
                         // `<<` on a model that holds the association: its
                         // generated `__push_<name>` holds the record on a
                         // new owner, or sets the key and saves it.
+                        // An Array is each of its records (Rails'
+                        // `concat(records.flatten)`): `__push_all_<name>`.
                         if held && method.as_str() == "<<" && args.len() == 1 {
-                            *expr = put(
-                                span,
-                                Some(ir.clone()),
-                                Symbol::from(format!("__push_{aname}")),
-                                args.clone(),
-                                None,
-                                true,
-                            );
+                            let (callee, arg) = match pushed_records(&args[0]) {
+                                Some(records) => (format!("__push_all_{aname}"), records),
+                                None => (format!("__push_{aname}"), args[0].clone()),
+                            };
+                            *expr = put(span, Some(ir.clone()), Symbol::from(callee), vec![arg], None, true);
                             return None;
                         }
                         let ctor = match method.as_str() {

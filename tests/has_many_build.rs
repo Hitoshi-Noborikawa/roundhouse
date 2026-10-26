@@ -69,3 +69,46 @@ fn a_has_many_holds_what_is_built_or_pushed_on_spinel() {
     run.assert_passes();
     assert!(run.stdout.contains("has_many build passed"), "{}", run.stdout);
 }
+
+// Review of #1395 (4374761933, 4374761938; oracle `review_oracle.rb`):
+// `<<` with an Array adds each record, nested Arrays flattened, as Rails'
+// `concat(records.flatten)` does; and `<<` onto an owner an expression
+// answers (`Article.find(id).comments << c`) holds or saves as on a local.
+const MORE_METHODS: &str = "  has_many :comments, dependent: :destroy\n\n  def add_pushed(comment)\n    comments << comment\n  end\n\n  def add_pair(x, y)\n    comments << [x, [y]]\n  end\n\n  def add_named(names)\n    comments << names.map { |n| Comment.new(commenter: n, body: \"hi\") }\n  end\n\n  def push_onto(id, comment)\n    Article.find(id).comments << comment\n  end\n";
+
+const MORE_SCRIPT: &str = r##"
+def check(label, got, want)
+  raise "#{label}: #{got.inspect} (want #{want.inspect})" unless got == want
+end
+body = "A body long enough to validate."
+c = ->(who) { Comment.new(commenter: who, body: "hi") }
+a = Article.new(title: "t", body: body)
+a.add_pair(c.("ann"), c.("bo"))
+check("new owner: an Array, each held", a.comments.to_a.size, 2)
+check("new owner: an Array, saved with the owner", [a.save, Comment.where(article_id: a.id).order(:id).pluck(:commenter)], [true, ["ann", "bo"]])
+a.add_named(["cy", "di"])
+check("persisted owner: an Array of records, each saved", Comment.where(article_id: a.id).order(:id).pluck(:commenter), ["ann", "bo", "cy", "di"])
+pushed = c.("ed")
+Article.new(title: "t", body: body).push_onto(a.id, pushed)
+check("an owner an expression answers: << saves it", [pushed.persisted?, pushed.article_id == a.id], [true, true])
+puts "has_many push review passed"
+"##;
+
+fn more_app() -> emit_and_run::Overlay {
+    emit_and_run::real_blog().edit("app/models/article.rb", "  has_many :comments, dependent: :destroy\n", MORE_METHODS)
+}
+
+#[test]
+fn an_array_and_an_owner_expression_are_pushed_as_rails_does_on_ruby() {
+    let run = more_app().run_ruby(MORE_SCRIPT);
+    run.assert_passes();
+    assert!(run.stdout.contains("has_many push review passed"), "{}", run.stdout);
+}
+
+#[test]
+#[ignore = "requires the Spinel toolchain"]
+fn an_array_and_an_owner_expression_are_pushed_as_rails_does_on_spinel() {
+    let run = more_app().run_spinel_with_db(MORE_SCRIPT);
+    run.assert_passes();
+    assert!(run.stdout.contains("has_many push review passed"), "{}", run.stdout);
+}
