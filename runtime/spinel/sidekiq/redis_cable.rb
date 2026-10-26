@@ -12,7 +12,9 @@
 # are the bytes actioncable 8.1.3's Redis adapter publishes
 # (tests/redis_cable/rails.json), so a Rails process and this one can
 # share the channels. The connection follows SidekiqRedis's rules: opened
-# at the first publish, per pid, shared under LOCK, one reconnect.
+# at the first publish, per pid, shared under LOCK, one reconnect. The
+# subscriber's own state is under SUB_LOCK, so starting it never waits
+# on a publish.
 #
 # Subscribe: each web process holds one more connection in
 # `PSUBSCRIBE <channel_prefix>:*`, opened when its first socket connects
@@ -27,6 +29,7 @@ module RedisCable
   CONN = []
   CONN_PID = [0]
   LOCK = Mutex.new
+  SUB_LOCK = Mutex.new
   SUBSCRIBER_PID = [0]
   SUBSCRIBED = [false]
   PAUSE = [1.0]
@@ -48,9 +51,23 @@ module RedisCable
     prefix.length > 0 ? prefix + ":" + stream : stream
   end
 
+  # The prefix is matched literally: a `*`, `?`, `[`, `]` or `\\` in it
+  # is escaped, so PSUBSCRIBE takes no other app's channels.
   def self.pattern
     prefix = JobRegistry.cable_channel_prefix
-    prefix.length > 0 ? prefix + ":*" : "*"
+    prefix.length > 0 ? glob_escape(prefix) + ":*" : "*"
+  end
+
+  def self.glob_escape(text)
+    out = String.new
+    i = 0
+    while i < text.length
+      c = text[i]
+      out << "\\" if c == "*" || c == "?" || c == "[" || c == "]" || c == "\\"
+      out << c
+      i = i + 1
+    end
+    out
   end
 
   # The stream a published channel names, past the prefix.
@@ -120,7 +137,7 @@ module RedisCable
     return nil unless enabled?
     pid = Process.pid
     start = false
-    LOCK.synchronize do
+    SUB_LOCK.synchronize do
       if SUBSCRIBER_PID[0] != pid
         SUBSCRIBER_PID[0] = pid
         SUBSCRIBED[0] = false

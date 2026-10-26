@@ -938,15 +938,10 @@ pub fn ingest_app_with_vfs<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResult
     // Broadcasts between processes (see `App::cable_redis`). On
     // :sidekiq, a production adapter other than redis keeps a job's
     // broadcasts in the worker, as Rails does with `async`: say so.
+    // The warning for that waits for ApplicationJob's adapter, below.
     let (cable_adapter, cable_redis, cable_warnings) = super::cable_yml::read(vfs, dir);
     app.cable_redis = cable_redis;
     cable_warnings.into_iter().for_each(warn_sidekiq);
-    if app.queue_adapter.as_deref() == Some("sidekiq") && app.cable_redis.is_none() {
-        warn_sidekiq(format!(
-            "broadcasts from jobs run by `sidekiq` workers stay in the worker process: config/cable.yml's production adapter is {}, not redis",
-            cable_adapter.map(|a| format!("`{a}`")).unwrap_or_else(|| "not set".to_string())
-        ));
-    }
     let app_config_path = dir.join("config/application.rb");
     if let Ok(source) = vfs.read(&app_config_path) {
         app.loaded_frameworks =
@@ -2223,6 +2218,12 @@ end
     keep_initializer_defined(&mut app, dir, &sources, initializer_defined);
     // `self.queue_adapter =` on ApplicationJob (see `App::queue_adapter`).
     apply_application_job_queue_adapter(&mut app);
+    if app.queue_adapter.as_deref() == Some("sidekiq") && app.cable_redis.is_none() {
+        warn_sidekiq(format!(
+            "broadcasts from jobs run by `sidekiq` workers stay in the worker process: config/cable.yml's production adapter is {}, not redis",
+            cable_adapter.map(|a| format!("`{a}`")).unwrap_or_else(|| "not set".to_string())
+        ));
+    }
     super::propshaft::ingest(vfs, dir, &mut app)?;
     // The ledger of boot statements no recognizer above read. A warning
     // per statement, in the ingest diagnostic channel; no `App` field.
