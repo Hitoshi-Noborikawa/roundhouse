@@ -138,13 +138,17 @@ fn synthesized_lookup_helpers_have_typed_bodies() {
     let tree: HashMap<PathBuf, Vec<u8>> = files("    item_params.key?(key)", HELPER).into_iter()
         .map(|(path, source)| (path.into(), source.into_bytes())).collect();
     let app = ingest_app_from_tree(tree).expect("ingest");
-    let specs = roundhouse::lower::controller_to_library::params::collect_specs(&app.controllers);
-    let classes = roundhouse::lower::controller_to_library::params::synthesize_params_classes(&specs);
-    let params = classes.iter().find(|class| class.name.0.as_str() == "ItemParams").expect("params");
-    let helpers: Vec<_> = params.methods.iter().filter(|method|
-        matches!(method.name.as_str(), "__rh_values" | "__rh_param_value")).collect();
-    assert_eq!(helpers.len(), 2);
-    for helper in helpers { assert_typed(&helper.body); }
+    for ruby in [false, true] {
+        let mut specs = roundhouse::lower::controller_to_library::params::collect_specs(&app.controllers);
+        specs.carry_nested(ruby, false);
+        let classes = roundhouse::lower::controller_to_library::params::synthesize_params_classes(&specs);
+        let params = classes.iter().find(|class| class.name.0.as_str() == "ItemParams").expect("params");
+        let reader = if ruby { "__rh_values" } else { "__rh_scalar_values" };
+        let helpers: Vec<_> = params.methods.iter().filter(|method|
+            method.name.as_str() == reader || method.name.as_str() == "__rh_param_value").collect();
+        assert_eq!(helpers.len(), 2);
+        for helper in helpers { assert_typed(&helper.body); }
+    }
 }
 
 #[test]

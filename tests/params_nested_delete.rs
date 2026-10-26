@@ -536,7 +536,8 @@ fn generated_value_methods_have_fully_typed_bodies() {
     let tree = files(PERMIT).into_iter()
         .map(|(path, source)| (PathBuf::from(path), source.into_bytes())).collect();
     let app = ingest_app_from_tree(tree).expect("ingest");
-    let specs = roundhouse::lower::controller_to_library::params::collect_specs(&app.controllers);
+    let mut specs = roundhouse::lower::controller_to_library::params::collect_specs(&app.controllers);
+    specs.carry_nested(true, false);
     for class in roundhouse::lower::controller_to_library::params::synthesize_params_classes(&specs) {
         for method in class.methods {
             if method.name.as_str() != "from_raw" { assert_typed(&method.body); }
