@@ -15,7 +15,7 @@ fn a_bare_permit_runs_natively() {
 
     let full = server.get(contract::QUERY);
     assert_eq!(full.status, 200, "{}", full.body);
-    assert!(full.body.contains("<p id=\"q\">[rails]</p>"), "{}", full.body);
+    assert!(full.body.contains("<p id=\"q\">&lt;rails&gt;</p>"), "{}", full.body);
     assert!(full.body.contains("<p id=\"other\">one</p>"), "{}", full.body);
     assert!(full.body.contains("<p id=\"log\">Alice|1||2|0</p>"), "{}", full.body);
 

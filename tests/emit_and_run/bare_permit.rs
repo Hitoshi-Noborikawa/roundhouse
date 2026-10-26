@@ -6,7 +6,7 @@ class FindsControllerTest < ActionDispatch::IntegrationTest
   test "a bare permit keeps the listed keys and reads them indifferently" do
     get "/finds", params: { q: "rails", who: "Alice", page: "2", what: { stories: "1", bogus: "x" }, extra: "y" }
     assert_response :success
-    assert_select "p#q", "[rails]"
+    assert_select "p#q", "<rails>"
     assert_select "p#other", "one"
     assert_select "p#log", "Alice|1||2|1"
   end
@@ -14,7 +14,7 @@ class FindsControllerTest < ActionDispatch::IntegrationTest
   test "absent keys take the fallbacks" do
     get "/finds"
     assert_response :success
-    assert_select "p#q", "[]"
+    assert_select "p#q", "<>"
     assert_select "p#log", "(All)|||1|2"
   end
 end

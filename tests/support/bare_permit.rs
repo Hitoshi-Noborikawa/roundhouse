@@ -40,7 +40,7 @@ const FINDER: &str = r#"class Finder
   end
 
   def label(value)
-    "[#{value}]"
+    "<#{value}>"
   end
 end
 "#;
