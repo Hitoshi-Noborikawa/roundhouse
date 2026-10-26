@@ -92,6 +92,10 @@ mod vary_accept_contract;
 mod vary_accept;
 #[path = "support/erb_template.rs"]
 mod erb_template_contract;
+#[path = "support/bare_permit.rs"]
+mod bare_permit_contract;
+#[path = "spinel_toolchain/bare_permit.rs"]
+mod bare_permit;
 #[path = "spinel_toolchain/erb_template.rs"]
 mod erb_template;
 #[path = "support/anonymous_keywords.rs"]

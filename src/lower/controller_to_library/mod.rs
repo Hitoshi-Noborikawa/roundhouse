@@ -2922,6 +2922,8 @@ fn action_to_method(
             .and_then(|(resource, fields, nested)| params_specs.find(&resource, &fields, &nested));
         if let Some(spec) = spec {
             Ty::Class { id: spec.class_id.clone(), args: vec![].into() }
+        } else if crate::lower::params_permit::filtered_permit_helpers(std::slice::from_ref(a)).contains(&a.name) {
+            self::params::params_hash_ty()
         } else {
             // No recognized permit list: the `_params` suffix is a naming
             // convention, not a contract. A guard filter named
@@ -3128,7 +3130,11 @@ fn lower_action_body(
     // rewrite below sees the shape it expects.
     let body = &match inherited_params_spec {
         Some(spec) => self::params::lower_overriding_params_helper(body, spec),
-        None => body.clone(),
+        None => {
+            let mut copy = body.clone();
+            crate::lower::params_permit::rewrite_bare_permits(&mut copy);
+            copy
+        }
     };
     // BEFORE the render rewrite: `render formats: :svg` becomes the
     // internal `render :<action>, format: :svg` that pass already binds.
@@ -3268,7 +3274,11 @@ fn lower_action_body(
     // immediate-child Assigns; nested Seqs swallow their own
     // bindings. Splice nested Seqs into their parent so each
     // assignment is visible to subsequent siblings.
-    let lowered = flatten_seqs(&with_routes);
+    let mut lowered = flatten_seqs(&with_routes);
+    crate::lower::params_permit::stringify_filtered_helper_reads(
+        &mut lowered,
+        &crate::lower::params_permit::filtered_permit_helpers(privs),
+    );
     if !defer_implicit_render {
         return (lowered, None);
     }

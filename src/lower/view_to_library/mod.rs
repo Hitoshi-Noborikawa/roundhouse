@@ -3887,7 +3887,12 @@ pub(super) fn rewrite_ivars_to_locals(expr: &Expr, locals: &IvarLocals) -> Expr 
             op: *op,
             value: r(value),
         },
-        other => other.clone(),
+        // Not a verbatim clone: `case`/`when` arms (lobsters' search parse tree) read ivars too.
+        other => {
+            let mut node = other.clone();
+            node.for_each_child_mut(&mut |c| *c = r(c));
+            node
+        }
     };
     let mut out = Expr::new(expr.span, new_node);
     // `@article.class::STATES` stays a path (`expr::CONST_PATH`).

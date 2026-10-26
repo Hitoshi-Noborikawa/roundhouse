@@ -2721,6 +2721,7 @@ fn is_relation_expr(e: &Expr, ctx: &Ctx, locals: &Locals) -> bool {
             locals.rel.contains_key(name)
                 || ctx.scope_body.as_ref().is_some_and(|(_, rel)| rel == name)
         }
+        ExprNode::Ivar { name } => locals.rel.contains_key(&alias_key(name, true)),
         ExprNode::Send { method, recv: Some(r), args, block: None, .. } => {
             if let Some(m) = const_model(r, ctx.models) {
                 if ctx.scope_of(&m, method) {
@@ -3923,13 +3924,19 @@ pub(crate) fn rewrite(expr: &mut Expr, ctx: &Ctx, locals: &mut Locals) -> Option
             let node = std::mem::replace(&mut *expr.node, ExprNode::Seq { exprs: vec![] });
             let ExprNode::Assign { target, mut value } = node else { unreachable!() };
             let m = rewrite(&mut value, ctx, locals);
-            if let crate::expr::LValue::Var { name, .. } = &target {
+            // Ivars too, under their `@` key: lobsters' moderations index
+            // narrows `@moderations` through a `case` and then `.joins(:moderator)`.
+            if let Some(key) = match &target {
+                crate::expr::LValue::Var { name, .. } => Some(alias_key(name, false)),
+                crate::expr::LValue::Ivar { name } => Some(alias_key(name, true)),
+                _ => None,
+            } {
                 match &m {
                     Some(model) => {
-                        locals.rel.insert(name.clone(), model.clone());
+                        locals.rel.insert(key, model.clone());
                     }
                     None => {
-                        locals.rel.remove(name);
+                        locals.rel.remove(&key);
                     }
                 }
             }
@@ -4885,6 +4892,7 @@ fn rewrite_send(expr: &mut Expr, ctx: &Ctx, locals: &mut Locals) -> Option<Class
             // (`@story.merged_comments` → Comment).
             let r_model = match &*r.node {
                 ExprNode::Var { name, .. } => locals.rel.get(name).cloned(),
+                ExprNode::Ivar { name } => locals.rel.get(&alias_key(name, true)).cloned(),
                 _ => rewrite(&mut r, ctx, locals),
             };
             let r_model = r_model.or_else(|| match &*r.node {

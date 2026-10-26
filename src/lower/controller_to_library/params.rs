@@ -275,7 +275,7 @@ pub(crate) fn nested_signature(expr: &Expr) -> Vec<String> {
 /// (`k: [:a, :b]`; "any" under `permit`, "hash" under `expect`), that
 /// list wrapped once (`k: [[:a, :b]]`, "list"), or `k: {}` ("deep");
 /// and `k: []` ("scalars"), which `Params.scalar_list` reads.
-fn nested_candidates(expr: &Expr, controller: &ClassId) -> Vec<NestedKey> {
+pub(crate) fn nested_candidates(expr: &Expr, controller: &ClassId) -> Vec<NestedKey> {
     fn find_call(e: &Expr) -> Option<(&str, &[Expr])> {
         let ExprNode::Send { recv, method, args, .. } = &*e.node else { return None };
         if matches!(method.as_str(), "permit" | "expect") {
@@ -2447,7 +2447,7 @@ fn synth_scalar_lookup(spec: &ParamsSpec, method: &str) -> MethodDef {
     }
 }
 
-fn params_hash_ty() -> Ty {
+pub(crate) fn params_hash_ty() -> Ty {
     Ty::Hash { key: std::sync::Arc::new(Ty::Str), value: std::sync::Arc::new(param_value_ty()) }
 }
 

@@ -178,6 +178,10 @@ mod stdlib_rnp_contract;
 mod stdlib_rnp;
 #[path = "support/erb_template.rs"]
 mod erb_template_contract;
+#[path = "support/bare_permit.rs"]
+mod bare_permit_contract;
+#[path = "emit_and_run/bare_permit.rs"]
+mod bare_permit;
 #[path = "emit_and_run/erb_template.rs"]
 mod erb_template;
 #[path = "support/representable_decorator.rs"]
