@@ -180,7 +180,8 @@ pub(super) fn apply(app: &mut App, harvested: Vec<Harvested>) {
     for (_, i, h) in placed {
         app.models[i].body.extend(h.items);
         for key in h.guards {
-            app.validates_with_guards.insert(key, h.class.0.as_str().to_string());
+            let (file, start) = key;
+            app.validates_with_guards.push(crate::app::ValidatesWithGuard { file, start, class: h.class.0.as_str().to_string() });
         }
         if let Some(lc) = app.library_classes.iter_mut().find(|c| c.name == h.class) {
             lc.unknown_calls.retain(|call| !h.calls.contains(&(call.span.start, call.span.end)));

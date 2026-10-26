@@ -47,7 +47,7 @@ pub(crate) fn expand(app: &mut App) {
                     ExprNode::Send { recv: None, method, .. } if method.as_str() == "validates_with" => {
                         let text = source_text(&sources, expr.span);
                         // An STI subclass's, moved here: run for it only.
-                        let guard = guards.get(&(expr.span.file.0, expr.span.start)).map(|class| format!("if: -> {{ is_a?({class}) }}"));
+                        let guard = guards.iter().find(|g| (g.file, g.start) == (expr.span.file.0, expr.span.start)).map(|g| &g.class).map(|class| format!("if: -> {{ is_a?({class}) }}"));
                         text.and_then(|t| {
                             counter += 1;
                             let name = format!("__validates_with_{owner}_{counter}");

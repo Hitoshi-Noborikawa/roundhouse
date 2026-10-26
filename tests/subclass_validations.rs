@@ -137,3 +137,29 @@ fn a_tableless_chains_leaf_runs_each_validation_once_on_spinel() {
     assert!(run.stdout.contains("tableless chain passed"), "{}", run.stdout);
 }
 
+// Review 4381621327: an ingested App round-trips through JSON
+// (`ingested_app_is_self_consistent`), its STI `validates_with` guards
+// too. Keyed by a (file, offset) tuple, a non-empty map didn't serialize:
+// JSON keys are strings.
+#[test]
+fn an_apps_sti_validates_with_guards_round_trip() {
+    use std::collections::HashMap;
+    use std::path::PathBuf;
+    let schema = "ActiveRecord::Schema.define(version: 1) do\n  create_table :articles do |t|\n    t.string :title\n    t.text :body\n    t.string :type\n  end\nend\n";
+    let mut tree: HashMap<PathBuf, Vec<u8>> = HashMap::new();
+    for (path, source) in [
+        ("db/schema.rb", schema),
+        ("app/models/application_record.rb", "class ApplicationRecord < ActiveRecord::Base\n  primary_abstract_class\nend\n"),
+        ("app/models/titled_record.rb", TITLED_RECORD),
+        ("app/models/article.rb", "class Article < TitledRecord\n  validates :title, presence: true\nend\n"),
+        ("app/models/summary_validator.rb", SUMMARY_VALIDATOR),
+        ("app/models/feature.rb", FEATURE),
+    ] {
+        tree.insert(PathBuf::from(path), source.as_bytes().to_vec());
+    }
+    let app = roundhouse::ingest::ingest_app_from_tree(tree).expect("ingest");
+    assert_eq!(app.validates_with_guards.len(), 1, "{:?}", app.validates_with_guards);
+    let json = serde_json::to_string(&app).expect("serialize");
+    let back: roundhouse::App = serde_json::from_str(&json).expect("deserialize");
+    assert_eq!(back.validates_with_guards, app.validates_with_guards);
+}
