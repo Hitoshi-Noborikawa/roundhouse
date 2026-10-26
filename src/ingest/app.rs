@@ -2334,8 +2334,10 @@ end
     let hook_macros_called = super::class_macros::hook_macro_calls(&app);
     super::model_macros::expand_model_macros(&mut app, &sources)?;
     // After the concern-macro expansion: a concern's macros are that one's to expand or refuse.
-    super::class_macros::expand_class_macros(&mut app, &sources);
-    super::class_macros::drop_expanded_hook_macros(&mut app, &hook_macros_called, &sources);
+    // The sources do not change between the two: one word index serves both.
+    let mentions = super::class_macros::Mentions::new(&sources);
+    super::class_macros::expand_class_macros(&mut app, &sources, &mentions);
+    super::class_macros::drop_expanded_hook_macros(&mut app, &hook_macros_called, &mentions);
     super::model_callbacks::expand_model_callbacks(&mut app);
     // After the macros: an expanded `has_ancestry` is what writes the `extend`.
     super::extend_splice::splice_sole_extended_modules(&mut app);
