@@ -3553,6 +3553,7 @@ fn ingest_resources_route(
     let mut except: Vec<Symbol> = Vec::new();
     let mut as_name: Option<Symbol> = None;
     let mut controller: Option<String> = None;
+    let mut module: Option<String> = None;
     let mut param: Option<Symbol> = None;
     let mut path: Option<String> = None;
     let mut concern_names: Vec<String> = Vec::new();
@@ -3624,6 +3625,12 @@ fn ingest_resources_route(
                 // pointed five routes at `MessagesController`, which
                 // answers them with the human HTML flow.
                 "controller" => controller = rname(&value),
+                "module" => {
+                    module = Some(rname(&value).ok_or_else(|| IngestError::Unsupported {
+                        file: file.into(),
+                        message: format!("resources :{name_str} `module:` is not a literal string or symbol"),
+                    })?);
+                }
                 // `param: :task_id` renames the MEMBER SEGMENT: the
                 // path binds `:task_id` and the controller reads
                 // `params[:task_id]`. Dropped, the path bound `:id`
@@ -3726,7 +3733,7 @@ fn ingest_resources_route(
     // the member route it was meant to narrow (#857).
     merge_outer_constraints(&mut nested, &constraints);
 
-    Ok(RouteSpec::Resources {
+    let resource = RouteSpec::Resources {
         name,
         only,
         except,
@@ -3737,6 +3744,18 @@ fn ingest_resources_route(
         param,
         path,
         constraints,
+    };
+    Ok(match module {
+        Some(module) => RouteSpec::Scope {
+            path: None,
+            module: Some(module),
+            as_prefix: None,
+            defaults: IndexMap::new(),
+            nest: false,
+            suppress_helpers: false,
+            entries: vec![resource],
+        },
+        None => resource,
     })
 }
 
