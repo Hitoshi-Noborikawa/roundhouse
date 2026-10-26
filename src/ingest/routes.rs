@@ -1639,6 +1639,13 @@ fn read_param_regex_constraints<'a>(
             {
                 out.insert(Symbol::from(key), src);
             }
+            // `constraints host: Rails.configuration.app_host_constraint,
+            // protocol: "https://" do … end`: Rails matches a key that
+            // names no path segment against the request's own method of
+            // that name. A request constraint, as a guard object is: the
+            // block's routes are kept and the request is not checked
+            // (`constraints(SomeGuard.new)` stays unenforced the same way).
+            None if REQUEST_CONSTRAINT_KEYS.contains(&param.as_str()) => {}
             None => {
                 return Err(IngestError::Unsupported {
                     file: file.into(),
@@ -1651,6 +1658,11 @@ fn read_param_regex_constraints<'a>(
     }
     Ok(out)
 }
+
+/// The `constraints` keys Rails answers from the request rather than the
+/// path (`ActionDispatch::Request#host`, `#protocol`, …) when a value is
+/// not a literal.
+const REQUEST_CONSTRAINT_KEYS: &[&str] = &["host", "protocol", "subdomain", "domain", "port"];
 
 /// The param→regex-source map from a `constraints(...)` call's own
 /// arguments — the block-level counterpart of the route-level
