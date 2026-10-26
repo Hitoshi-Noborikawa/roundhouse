@@ -328,10 +328,12 @@ pub fn ingest_app_with_vfs<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResult
     let lock = vfs.read_to_string(&dir.join("Gemfile.lock")).ok().map(|text| crate::gems::Lockfile::parse(&text));
     let source_gems = super::source_gems::resolve(vfs, dir, lock.as_ref(), &extensions.source_gems)
         .map_err(|message| IngestError::Parse { file: dir.join("roundhouse.yml").display().to_string(), message })?;
-    let mount_vfs = super::source_gems::MountVfs { inner: vfs, gems: &source_gems };
+    // One walk of an unchanging tree: remember what each path answered.
+    let cached_vfs = crate::vfs::CachedVfs::new(vfs);
+    let mount_vfs = super::source_gems::MountVfs { inner: &cached_vfs, gems: &source_gems };
     let mut path_gems = path_gem_dirs(&mount_vfs, dir);
     path_gems.extend(source_gems.iter().map(|gem| gem.mount.clone()));
-    let source_vfs = PathGemVfs { inner: &mount_vfs, root: dir, dirs: &path_gems };
+    let source_vfs = PathGemVfs::new(&mount_vfs, dir, &path_gems);
     let vfs = &source_vfs;
     let engine_routes = engine_route_sources(vfs, dir, &path_gems);
     let additional_test_paths = additional_test_paths(dir, &config)?;
@@ -7746,14 +7748,42 @@ fn path_gem_dirs<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> Vec<PathBuf> {
 struct PathGemVfs<'a, V: Vfs + ?Sized> {
     inner: &'a V,
     root: &'a Path,
-    dirs: &'a [PathBuf],
+    /// The selected path-gem directories, sorted and deduplicated for
+    /// [`PathGemVfs::within_dirs`].
+    dirs: Vec<PathBuf>,
+    /// `linked` per path: the tree does not change during an ingest, and a
+    /// `require` is probed against every load path.
+    linked_paths: std::cell::RefCell<std::collections::HashMap<PathBuf, bool>>,
+}
+
+impl<'a, V: Vfs + ?Sized> PathGemVfs<'a, V> {
+    fn new(inner: &'a V, root: &'a Path, dirs: &[PathBuf]) -> Self {
+        let mut dirs = dirs.to_vec();
+        dirs.sort();
+        dirs.dedup();
+        Self { inner, root, dirs, linked_paths: Default::default() }
+    }
 }
 
 impl<V: Vfs + ?Sized> PathGemVfs<'_, V> {
+    /// Whether `path` is one of the selected path-gem directories or below one:
+    /// some prefix of it is in `dirs`, which is sorted.
+    fn within_dirs(&self, path: &Path) -> bool {
+        let mut prefix = PathBuf::new();
+        path.components().any(|component| {
+            prefix.push(component);
+            self.dirs.binary_search_by(|dir| dir.as_path().cmp(prefix.as_path())).is_ok()
+        })
+    }
+
     /// Apply the path-gem boundary to direct reads as well as directory walks.
     fn linked(&self, path: &Path) -> bool {
-        self.dirs.iter().any(|dir| path.starts_with(dir))
-            && path_has_symlink_component(self.inner, self.root, path)
+        if let Some(&known) = self.linked_paths.borrow().get(path) {
+            return known;
+        }
+        let linked = self.within_dirs(path) && path_has_symlink_component(self.inner, self.root, path);
+        self.linked_paths.borrow_mut().insert(path.to_path_buf(), linked);
+        linked
     }
 
     /// Treat excluded paths as absent, as directory discovery does.
@@ -7786,7 +7816,7 @@ impl<V: Vfs + ?Sized> Vfs for PathGemVfs<'_, V> {
     fn read_dir(&self, path: &Path) -> std::io::Result<Vec<PathBuf>> {
         self.check(path)?;
         let mut entries = self.inner.read_dir(path)?;
-        if self.dirs.iter().any(|dir| path.starts_with(dir)) {
+        if self.within_dirs(path) {
             entries.retain(|entry| !self.inner.is_symlink(entry));
         }
         Ok(entries)
@@ -11787,5 +11817,49 @@ mod importmap_json_tests {
             method.contains(&format!("{json:?}")),
             "CSP hashes this string; it has to be the importmap script body:\n{method}"
         );
+    }
+}
+
+#[cfg(test)]
+mod path_gem_vfs_tests {
+    use super::PathGemVfs;
+    use crate::vfs::MapVfs;
+    use std::path::{Path, PathBuf};
+
+    /// The binary search over the sorted directories answers what the scan
+    /// it replaced did: `path.starts_with(dir)` for some `dir`, whatever
+    /// order the directories were given in.
+    #[test]
+    fn within_dirs_agrees_with_a_prefix_scan() {
+        let vfs = MapVfs::new(Default::default());
+        let dirs: Vec<PathBuf> =
+            ["/app/vendor/zeta", "/app/engines/a", "/app/vendor/alpha", "/app/engines/a/inner", "/app/vendor/alpha"]
+                .iter()
+                .map(PathBuf::from)
+                .collect();
+        let linked = PathGemVfs::new(&vfs, Path::new("/app"), &dirs);
+        for path in [
+            "/app",
+            "/app/vendor",
+            "/app/vendor/alpha",
+            "/app/vendor/alpha/lib/x.rb",
+            "/app/vendor/alphabet/lib/x.rb",
+            "/app/vendor/zeta",
+            "/app/vendor/zeta/lib",
+            "/app/engines/a",
+            "/app/engines/a/inner/lib/y.rb",
+            "/app/engines/b/lib/y.rb",
+            "/app/engines",
+            "/other/vendor/alpha",
+            "relative/vendor/alpha",
+        ] {
+            let path = Path::new(path);
+            assert_eq!(
+                linked.within_dirs(path),
+                dirs.iter().any(|dir| path.starts_with(dir)),
+                "{}",
+                path.display()
+            );
+        }
     }
 }
