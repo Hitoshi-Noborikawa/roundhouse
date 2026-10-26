@@ -15,9 +15,9 @@
 //! its own declarations and shadow the parent's. This pass prepends the
 //! parent's declarations to the child's body instead: its
 //! `include ActiveModel::*`, `attribute` (unless the child redeclares the
-//! name), `attr_*`, validations and callbacks. Methods and aliases are
-//! not copied: the emitted child is still `< Parent`, so Ruby inherits
-//! them.
+//! name), `attr_*`, validations (`validates_with` too) and callbacks.
+//! Methods and aliases are not copied: the emitted child is still
+//! `< Parent`, so Ruby inherits them.
 
 use crate::dialect::{Model, ModelBodyItem};
 use crate::expr::{Expr, ExprNode};
@@ -186,6 +186,8 @@ fn inherited_item(item: &ModelBodyItem, own_attributes: &[Symbol]) -> bool {
             let ExprNode::Send { recv: None, method, args, .. } = &*expr.node else { return false };
             match method.as_str() {
                 "attr_accessor" | "attr_reader" | "attr_writer" => true,
+                // Expanded per class later, as the abstract-parent pass's.
+                "validates_with" => true,
                 "attribute" => attribute_name(args).is_some_and(|name| !own_attributes.contains(&name)),
                 _ => false,
             }

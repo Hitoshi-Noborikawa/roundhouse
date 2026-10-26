@@ -96,12 +96,15 @@ fn an_sti_subclass_runs_its_parents_validations_then_its_own_on_spinel() {
     assert!(run.stdout.contains("sti validations passed"), "{}", run.stdout);
 }
 
-// Review 4381621337 (oracle `tableless_chain_oracle.rb`, which runs these
-// classes and script under activemodel 8.1.4): a tableless chain three
-// deep, the leaf running each validation once. The middle class is
-// tableless by its parent, and the tableless pass had already copied its
-// validations down when the abstract-parent pass copied them again.
-const CHAIN_BASE: &str = "class ChainBaseForm\n  include ActiveModel::Model\n  include ActiveModel::Attributes\n\n  attribute :name, :string\n  validates :name, presence: true\nend\n";
+// Reviews 4381621337 and 4382931974 (oracle `tableless_chain_oracle.rb`,
+// which runs these classes and script under activemodel 8.1.4): a
+// tableless chain three deep, the leaf running each validation once. The
+// middle class is tableless by its parent, and the tableless pass had
+// already copied its validations down when the abstract-parent pass
+// copied them again. The root's `validates_with` runs on a child and a
+// grandchild: the tableless pass didn't copy it.
+const CHAIN_VALIDATOR: &str = "class ChainNameValidator < ActiveModel::Validator\n  def validate(record)\n    record.errors.add(:base, \"needs a longer name\") if record.name.to_s.length < 2\n  end\nend\n";
+const CHAIN_BASE: &str = "class ChainBaseForm\n  include ActiveModel::Model\n  include ActiveModel::Attributes\n\n  attribute :name, :string\n  validates :name, presence: true\n  validates_with ChainNameValidator\nend\n";
 const CHAIN_MIDDLE: &str = "class ChainMiddleForm < ChainBaseForm\n  attribute :code, :string\n  validates :code, presence: true\n  validate :code_not_reserved\n\n  def code_not_reserved\n    errors.add(:code, \"is reserved\") if code.nil? || code == \"admin\"\n  end\nend\n";
 const CHAIN_LEAF: &str = "class ChainLeafForm < ChainMiddleForm\nend\n";
 const CHAIN_SCRIPT: &str = r##"
@@ -109,14 +112,17 @@ def check(label, got, want)
   raise "#{label}: #{got.inspect} (want #{want.inspect})" unless got == want
 end
 messages = ->(record) { record.valid?; record.errors.respond_to?(:full_messages) ? record.errors.full_messages : record.errors }
-check("the root's and the middle class's validations, each once", messages.(ChainLeafForm.new), ["Name can't be blank", "Code can't be blank", "Code is reserved"])
-check("the middle class's, each once", messages.(ChainMiddleForm.new(name: "n", code: "admin")), ["Code is reserved"])
-check("a valid leaf", ChainLeafForm.new(name: "n", code: "c").valid?, true)
+check("the root's and the middle class's validations, each once", messages.(ChainLeafForm.new), ["Name can't be blank", "needs a longer name", "Code can't be blank", "Code is reserved"])
+check("the middle class's, each once", messages.(ChainMiddleForm.new(name: "nm", code: "admin")), ["Code is reserved"])
+check("the root's validates_with, on a child", messages.(ChainMiddleForm.new(name: "n", code: "c")), ["needs a longer name"])
+check("and on a grandchild", messages.(ChainLeafForm.new(name: "n", code: "c")), ["needs a longer name"])
+check("a valid leaf", ChainLeafForm.new(name: "nm", code: "c").valid?, true)
 puts "tableless chain passed"
 "##;
 
 fn chain_app() -> emit_and_run::Overlay {
     emit_and_run::real_blog()
+        .write("app/models/chain_name_validator.rb", CHAIN_VALIDATOR)
         .write("app/models/chain_base_form.rb", CHAIN_BASE)
         .write("app/models/chain_middle_form.rb", CHAIN_MIDDLE)
         .write("app/models/chain_leaf_form.rb", CHAIN_LEAF)
