@@ -177,3 +177,43 @@ fn super_and_an_override_of_the_gems_api_are_refused() {
         assert!(class.methods.iter().all(|m| m.name.as_str() != "as_json_str"), "lowered: {serializer}");
     }
 }
+
+/// A serializer named the same as another, nested in a third: Ruby
+/// resolves the name in the enclosing class first (`nesting_oracle.rb`),
+/// so `has_many … serializer: RoleSerializer` inside
+/// `REST::AccountSerializer` is its own nested `RoleSerializer`, not
+/// `REST::RoleSerializer`. The nested one is refused for that use, and the
+/// other, rendered by its full name, is lowered. Each run builds its own
+/// `HashSet`s, so a lookup that picked either by iteration order fails
+/// within the eight.
+#[test]
+fn a_serializer_name_resolves_in_its_enclosing_class_first() {
+    let account = "class REST::AccountSerializer < ActiveModel::Serializer\n  attributes :id\n  has_many :roles, serializer: RoleSerializer\n\n  class RoleSerializer < ActiveModel::Serializer\n    attributes :id\n  end\nend\n";
+    let role = "module REST\n  class RoleSerializer < ActiveModel::Serializer\n    attributes :id, :title\n  end\nend\n";
+    let controller = "class ArticlesController < ApplicationController\n  def show\n    render json: Article.find(params[:id]), serializer: REST::RoleSerializer\n  end\nend\n";
+    let refused_for_use = |gaps: &[IngestError], at: &str| {
+        gaps.iter().any(|g| {
+            matches!(g, IngestError::Unsupported { file, message }
+                if file.ends_with(at.split(' ').next().unwrap())
+                    && message.starts_with(at.split(' ').nth(1).unwrap())
+                    && message.contains("other than through `render json:`"))
+        })
+    };
+    for _ in 0..8 {
+        let mut files = tree(SERIALIZER, controller);
+        files.insert(PathBuf::from("app/serializers/rest/account_serializer.rb"), account.as_bytes().to_vec());
+        files.insert(PathBuf::from("app/serializers/rest/role_serializer.rb"), role.as_bytes().to_vec());
+        survey::activate();
+        let result = ingest_app_from_tree(files);
+        let gaps = survey::drain();
+        let app = result.expect("survey ingest recovers");
+        assert!(refused_for_use(&gaps, "account_serializer.rb 5:3:"), "the nested one isn't refused: {gaps:?}");
+        assert!(!refused_for_use(&gaps, "role_serializer.rb 2:3:"), "REST::RoleSerializer is refused: {gaps:?}");
+        let lowered = |name: &str| {
+            let class = app.library_classes.iter().find(|c| c.name.0.as_str() == name).expect(name);
+            class.methods.iter().any(|m| m.name.as_str() == "as_json_str")
+        };
+        assert!(lowered("REST::RoleSerializer"), "REST::RoleSerializer isn't lowered: {gaps:?}");
+        assert!(!lowered("REST::AccountSerializer::RoleSerializer"));
+    }
+}

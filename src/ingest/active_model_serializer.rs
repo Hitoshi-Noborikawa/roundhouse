@@ -104,12 +104,13 @@ pub(super) fn lower_active_model_serializers(app: &mut crate::App, sources: &[So
     // its declaration, naming the use: a gap in the using file would claim
     // that file's own findings.
     let mut used: HashMap<ClassId, String> = HashMap::new();
+    let known: HashSet<String> = app.library_classes.iter().map(|c| c.name.0.as_str().to_string()).collect();
     for source in sources {
         if !selected.iter().any(|id| source.text.contains(id.0.as_str().rsplit("::").next().unwrap_or(id.0.as_str()))) {
             continue;
         }
         let parsed = super::prism::parse_silent(source.text.as_bytes());
-        let mut uses = OtherUses { selected: &selected, found: HashMap::new() };
+        let mut uses = OtherUses { selected: &selected, known: &known, nesting: Vec::new(), found: HashMap::new() };
         ruby_prism::Visit::visit(&mut uses, &parsed.node());
         for (id, offset) in uses.found {
             let (line, _) = source.line_col(offset as u32);
@@ -570,39 +571,83 @@ impl<'pr> ruby_prism::Visit<'pr> for GemCalls<'_> {
 /// `SerializableResource.new(x, serializer: S)`).
 struct OtherUses<'a> {
     selected: &'a HashSet<ClassId>,
+    /// Every app class, for the lexical lookup: a nearer class of the
+    /// same name hides a selected one.
+    known: &'a HashSet<String>,
+    /// The full names of the classes and modules the visit is in, the
+    /// innermost last (Ruby's `Module.nesting`, reversed).
+    nesting: Vec<String>,
     found: HashMap<ClassId, usize>,
 }
 
 impl OtherUses<'_> {
-    /// The selected class a written constant path names: the full name,
-    /// or a suffix of one (`StatusSerializer` inside `module REST`).
-    fn named(&self, path: &[String]) -> Option<ClassId> {
+    /// The selected classes a written constant path names, resolved as
+    /// Ruby does (`nesting_oracle.rb`): in each enclosing class or module,
+    /// the innermost first, then at the top level. A name found nowhere
+    /// there (one an ancestor's constants would answer) counts as every
+    /// selected class it's a suffix of, so none is lowered while it may
+    /// still be used.
+    fn named(&self, path: &[String]) -> Vec<ClassId> {
         let written = path.join("::");
-        self.selected
-            .iter()
-            .find(|id| {
-                let full = id.0.as_str();
-                full == written || full.ends_with(&format!("::{written}"))
-            })
-            .cloned()
+        let candidates = self.nesting.iter().rev().map(|scope| format!("{scope}::{written}")).chain([written.clone()]);
+        for full in candidates {
+            if self.known.contains(&full) {
+                let id = ClassId(Symbol::from(full.as_str()));
+                return if self.selected.contains(&id) { vec![id] } else { Vec::new() };
+            }
+        }
+        let suffix = format!("::{written}");
+        let mut ids: Vec<ClassId> = self.selected.iter().filter(|id| id.0.as_str().ends_with(&suffix)).cloned().collect();
+        ids.sort_by(|a, b| a.0.as_str().cmp(b.0.as_str()));
+        ids
     }
 
     fn note(&mut self, node: &ruby_prism::Node<'_>) -> bool {
         let Some(path) = super::util::constant_path_of(node) else { return false };
-        let Some(id) = self.named(&path) else { return false };
-        self.found.entry(id).or_insert(node.location().start_offset());
+        let ids = self.named(&path);
+        if ids.is_empty() {
+            return false;
+        }
+        for id in ids {
+            self.found.entry(id).or_insert(node.location().start_offset());
+        }
+        true
+    }
+
+    /// Enters a class or module written as `name` from the current nesting.
+    fn enter(&mut self, name: Option<Vec<String>>) -> bool {
+        let Some(name) = name else { return false };
+        let full = match self.nesting.last() {
+            Some(outer) => format!("{outer}::{}", name.join("::")),
+            None => name.join("::"),
+        };
+        self.nesting.push(full);
         true
     }
 }
 
 impl<'pr> ruby_prism::Visit<'pr> for OtherUses<'_> {
     fn visit_class_node(&mut self, node: &ruby_prism::ClassNode<'pr>) {
-        // Its own declaration names it; its superclass and body are read.
+        // Its own declaration names it; its superclass (read outside the
+        // class) and body are read.
         if let Some(superclass) = node.superclass() {
             self.visit(&superclass);
         }
+        let entered = self.enter(super::util::constant_path_of(&node.constant_path()));
         if let Some(body) = node.body() {
             self.visit(&body);
+        }
+        if entered {
+            self.nesting.pop();
+        }
+    }
+    fn visit_module_node(&mut self, node: &ruby_prism::ModuleNode<'pr>) {
+        let entered = self.enter(super::util::constant_path_of(&node.constant_path()));
+        if let Some(body) = node.body() {
+            self.visit(&body);
+        }
+        if entered {
+            self.nesting.pop();
         }
     }
     fn visit_call_node(&mut self, node: &ruby_prism::CallNode<'pr>) {
@@ -619,7 +664,7 @@ impl<'pr> ruby_prism::Visit<'pr> for OtherUses<'_> {
                                 let Some(assoc) = el.as_assoc_node() else { continue };
                                 let key = super::util::symbol_value(&assoc.key());
                                 if matches!(key.as_deref(), Some("serializer" | "each_serializer"))
-                                    && super::util::constant_path_of(&assoc.value()).is_some_and(|p| self.named(&p).is_some())
+                                    && super::util::constant_path_of(&assoc.value()).is_some_and(|p| !self.named(&p).is_empty())
                                 {
                                     continue;
                                 }
