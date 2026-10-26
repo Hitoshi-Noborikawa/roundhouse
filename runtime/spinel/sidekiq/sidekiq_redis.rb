@@ -18,9 +18,11 @@
 #
 # One reconnect: on a connection error the connection is dropped, a new
 # one opened, and the push sent once more, as redis-client's
-# `reconnect_attempts: 1` does for Sidekiq. Like Sidekiq, that can
-# duplicate a job whose first LPUSH reached Redis before the socket
-# died. A command error is not retried.
+# `reconnect_attempts: 1` does for Sidekiq. That covers the first
+# connect too: a push that can't connect tries once more before it
+# raises, as redis-client's `ensure_connected` does. Like Sidekiq, the
+# retry can duplicate a job whose first LPUSH reached Redis before the
+# socket died. A command error is not retried.
 #
 # Connect and read timeouts, at redis-client's 1 s defaults that Sidekiq
 # runs with: a Redis that stops answering costs a request one second
@@ -36,12 +38,16 @@ module SidekiqRedis
   CONN_PID = [0]
   LOCK = Mutex.new
 
+  # `used` holds the connection the first attempt got, if it got one:
+  # a connect that fails leaves nothing to discard.
   def self.push(url, queue, json)
-    conn = acquire(url)
+    used = []
     begin
+      conn = acquire(url)
+      used.push(conn)
       LOCK.synchronize { send_push(conn, queue, json) }
     rescue Redis::BaseConnectionError
-      discard(conn)
+      discard(used[0]) if used.length > 0
       conn = acquire(url)
       LOCK.synchronize { send_push(conn, queue, json) }
     end
@@ -49,11 +55,13 @@ module SidekiqRedis
   end
 
   def self.schedule(url, at, json)
-    conn = acquire(url)
+    used = []
     begin
+      conn = acquire(url)
+      used.push(conn)
       LOCK.synchronize { conn.zadd("schedule", at, json) }
     rescue Redis::BaseConnectionError
-      discard(conn)
+      discard(used[0]) if used.length > 0
       conn = acquire(url)
       LOCK.synchronize { conn.zadd("schedule", at, json) }
     end
