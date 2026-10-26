@@ -27,6 +27,7 @@ pub(crate) mod validates_with;
 pub(crate) mod each_validator;
 pub(crate) mod mailer_callbacks;
 pub(crate) mod mailer_defaults;
+pub(crate) mod has_many_hold;
 pub(crate) mod class_attribute;
 mod class_configuration;
 mod dry_initializer;
