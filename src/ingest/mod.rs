@@ -96,6 +96,7 @@ pub mod sql_functions;
 pub mod structure_sql;
 pub mod survey;
 mod tableless_inheritance;
+mod sti_validations;
 mod with_options;
 pub(crate) mod nested_attributes;
 pub mod test;

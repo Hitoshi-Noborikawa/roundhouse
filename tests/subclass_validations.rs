@@ -1,4 +1,5 @@
-//! An abstract parent's validations (#1360, case 1).
+//! A subclass's parent's validations (#1360): under an abstract parent
+//! (case 1), and under a concrete one, the STI shape (case 2).
 //! activerecord 8.1.4 (oracle `oracle.rb`, which runs these same classes
 //! and script): a subclass record runs the parent's `validate`
 //! and `validates`, before its own.
@@ -47,4 +48,50 @@ fn a_subclass_runs_its_abstract_parents_validations_on_spinel() {
     let run = app().run_spinel_with_db(SCRIPT);
     run.assert_passes();
     assert!(run.stdout.contains("subclass validations passed"), "{}", run.stdout);
+}
+
+// Case 2 (oracle `sti_script.rb`): a subclass of a concrete model, Rails'
+// STI shape, runs its ancestors' validations and then its own
+// `validate`, `validates` and `validates_with`; one with none of its
+// own runs its parent's. Its declarations were dropped (reported), so only
+// the parent's ran.
+const SUMMARY_VALIDATOR: &str = "class SummaryValidator < ActiveModel::Validator\n  def validate(record)\n    record.errors.add(:base, \"needs a summary\") unless record.body.to_s.include?(\"summary\")\n  end\nend\n";
+const FEATURE: &str = "class Feature < Article\n  validate :title_not_lowercase\n  validates :title, length: { minimum: 3 }\n  validates_with SummaryValidator\n\n  def title_not_lowercase\n    errors.add(:title, \"is lowercase\") if title.to_s == title.to_s.downcase\n  end\nend\n";
+const NOTE: &str = "class Note < Article\nend\n";
+const STI_SCRIPT: &str = r##"
+def check(label, got, want)
+  raise "#{label}: #{got.inspect} (want #{want.inspect})" unless got == want
+end
+messages = ->(record) { record.valid?; record.errors.respond_to?(:full_messages) ? record.errors.full_messages : record.errors }
+body = "A body long enough to validate."
+check("an STI subclass: the ancestors' first, then its own validate, validates and validates_with",
+  messages.(Feature.new(title: "ab", body: "lorem ipsum dolor")),
+  ["Body is placeholder", "Title is lowercase", "Title is too short (minimum is 3 characters)", "needs a summary"])
+check("the parent's abstract parent too", messages.(Feature.new(title: "admin", body: "A summary that is long enough.")), ["Title is reserved", "Title is lowercase"])
+check("a valid subclass record", Feature.new(title: "Hello", body: "A summary that is long enough.").valid?, true)
+check("the parent doesn't run the subclass's", messages.(Article.new(title: "ab", body: body)), [])
+check("a subclass with no validations of its own", messages.(Note.new(title: "admin", body: body)), ["Title is reserved"])
+puts "sti validations passed"
+"##;
+
+fn sti_app() -> emit_and_run::Overlay {
+    app()
+        .write("app/models/summary_validator.rb", SUMMARY_VALIDATOR)
+        .write("app/models/feature.rb", FEATURE)
+        .write("app/models/note.rb", NOTE)
+}
+
+#[test]
+fn an_sti_subclass_runs_its_parents_validations_then_its_own_on_ruby() {
+    let run = sti_app().run_ruby(STI_SCRIPT);
+    run.assert_passes();
+    assert!(run.stdout.contains("sti validations passed"), "{}", run.stdout);
+}
+
+#[test]
+#[ignore = "requires the Spinel toolchain"]
+fn an_sti_subclass_runs_its_parents_validations_then_its_own_on_spinel() {
+    let run = sti_app().run_spinel_with_db(STI_SCRIPT);
+    run.assert_passes();
+    assert!(run.stdout.contains("sti validations passed"), "{}", run.stdout);
 }

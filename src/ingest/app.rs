@@ -513,6 +513,8 @@ pub fn ingest_app_with_vfs<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResult
     // and one file's AST cannot resolve that — the base is declared in
     // another file, possibly later.
     let mut model_bases = super::library_class::ModelBases::new();
+    // A model subclass's own validations, placed once every class is read.
+    let mut sti_validations = Vec::new();
     let mut base_pairs: Vec<(String, String)> = Vec::new();
     for root in &roots {
         let models_dir = dir.join(root).join("models");
@@ -628,6 +630,8 @@ pub fn ingest_app_with_vfs<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResult
                         unwrap_or_record(ingest_library_classes(&source, &path_str))?
                     {
                         app.library_classes.extend(classes);
+                        // After the file is registered, so the spans name it.
+                        sti_validations.extend(super::sti_validations::harvest(&source, &path_str));
                         // Concern modules (app/models/concerns/…) also
                         // carry `included do` declarations that belong
                         // to every includer: filters (controller-side)
@@ -2327,6 +2331,7 @@ end
     // its subclasses too; before the macros, which read the result.
     super::tableless_inheritance::inherit_tableless_parents(&mut app);
     super::tableless_inheritance::inherit_abstract_parent_validations(&mut app);
+    super::sti_validations::apply(&mut app, sti_validations);
     super::acts_as_votable::expand_acts_as_votable(&mut app)?;
     // After the splice: `include Discard::Model` can arrive through a concern.
     super::discard::expand_discard_models(&mut app)?;

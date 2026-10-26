@@ -579,6 +579,12 @@ pub struct App {
     /// this is the only record that an includer's reader `x` is replaced.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub concern_included_redefs: HashMap<ClassId, Vec<Symbol>>,
+    /// `validates_with` calls an STI subclass declares, moved onto its
+    /// model ancestor's body (`ingest::sti_validations`): the call's
+    /// (file, start offset) and the subclass, whose `is_a?` guards the
+    /// `validate` the call expands into.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub validates_with_guards: HashMap<(u32, u32), String>,
     /// Classes that were `ActiveSupport::CurrentAttributes` subclasses
     /// before `ingest::current_attributes` flattened them. Recorded
     /// because that pass CLEARS the parent — nothing downstream could
@@ -1119,6 +1125,7 @@ impl App {
             concern_model_items: HashMap::new(),
             concern_guarded_items: HashMap::new(),
             concern_included_redefs: HashMap::new(),
+            validates_with_guards: HashMap::new(),
             current_attribute_classes: Vec::new(),
             render_edges: HashMap::new(),
             view_feeders: HashMap::new(),
