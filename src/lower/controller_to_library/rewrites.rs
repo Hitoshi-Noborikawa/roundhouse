@@ -330,6 +330,10 @@ pub(super) fn rewrite_render_to_views(
                 }
                 ExprNode::Hash { entries, kwargs: true } => {
                     let mut name: Option<Symbol> = None;
+                    // `template:` / `action:` naming a value only the
+                    // running program knows (`render(template: template)`
+                    // with `template` a local).
+                    let mut dynamic_template: Option<Expr> = None;
                     // (expr, content_type-to-tag) — html carries None
                     // (text/html is the runtime default).
                     let mut body: Option<(Expr, Option<&str>)> = None;
@@ -345,7 +349,12 @@ pub(super) fn rewrite_render_to_views(
                             // own `allow_browser` fallback is `render
                             // template: "sessions/incompatible_browser"`
                             // in campfire. The slash is resolved below.
-                            "action" | "template" => name = render_target_symbol(v),
+                            "action" | "template" => {
+                                name = render_target_symbol(v);
+                                if name.is_none() {
+                                    dynamic_template = Some(v.clone());
+                                }
+                            }
                             // `render html:` / `render plain:` — a body
                             // expression, not a template name. Normalized
                             // below to the positional-body form the runtime
@@ -404,6 +413,37 @@ pub(super) fn rewrite_render_to_views(
                         // status: N, content_type: "text/plain")`. A
                         // `layout: false` entry is dropped (no layout is
                         // already the runtime default for a body render).
+                        // Views are compiled to one method each, found by
+                        // a name written in the source; one named at run
+                        // time has none to call. It raises what a render
+                        // of an unemitted template does, naming it.
+                        if let (None, Some(template)) = (&body, &dynamic_template) {
+                            let span = e.span;
+                            return Some(Expr::new(
+                                span,
+                                ExprNode::Raise {
+                                    value: Expr::new(
+                                        span,
+                                        ExprNode::Send {
+                                            recv: Some(typed_exception_const(&["ActionView", "MissingTemplate"], span)),
+                                            method: Symbol::from("new"),
+                                            args: vec![Expr::new(
+                                                span,
+                                                ExprNode::Send {
+                                                    recv: Some(template.clone()),
+                                                    method: Symbol::from("to_s"),
+                                                    args: Vec::new(),
+                                                    block: None,
+                                                    parenthesized: true,
+                                                },
+                                            )],
+                                            block: None,
+                                            parenthesized: true,
+                                        },
+                                    ),
+                                },
+                            ));
+                        }
                         let Some((body_expr, tagged_content_type)) = body else { return None };
                         rest.retain(|(k, v)| {
                             let is_layout_false = matches!(
