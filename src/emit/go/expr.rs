@@ -55,7 +55,7 @@ pub(super) struct EmitCtx {
     pub declared: Rc<RefCell<HashSet<String>>>,
     // Not a type per local: only a scalar-or-nil local differs, held as `interface{}` where a narrowed read needs its value back
     pub boxed_locals: Rc<RefCell<HashSet<String>>>,
-    // Not one representation for every nilable local: a column read is a pointer, and a String's nil is the empty string
+    // Not one representation for every nilable local: a column read is a pointer, and a String's nil (the empty string) or an index read holds no nil
     pub optional_locals: Rc<RefCell<HashMap<String, OptionalRepr>>>,
     /// True when the enclosing method's signature returns `void`
     /// (RBS `() -> void` lowers to `Ty::Fn { ret: Ty::Nil, ... }`).
@@ -119,7 +119,7 @@ pub(super) struct EmitCtx {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OptionalRepr {
     Pointer,
-    EmptyString,
+    Present,
 }
 
 impl EmitCtx {
@@ -1985,8 +1985,8 @@ pub(super) fn emit_send(
             if let ExprNode::Var { name, .. } = &*r.node {
                 match ctx.optional_locals.borrow().get(&super::library::sanitize(name.as_str())) {
                     Some(OptionalRepr::Pointer) => return format!("{recv_s} == nil"),
-                    // Not `== ""`: an empty String is not nil to Ruby, and this binding cannot tell the two apart
-                    Some(OptionalRepr::EmptyString) => return "false".to_string(),
+                    // Not `== ""`: an empty String is not nil to Ruby, and a String binding cannot tell the two apart
+                    Some(OptionalRepr::Present) => return "false".to_string(),
                     None => {}
                 }
             }
@@ -3823,19 +3823,21 @@ fn bind_let(ctx: &EmitCtx, name: &str, value: &Expr) -> String {
     let value_s = emit_expr_as_value(ctx, value);
     let column = nullable_field_go_ty(value).is_some()
         || matches!(&*value.node, ExprNode::Send { recv: Some(r), method, args, .. } if args.is_empty() && recv_column_is_nullable(r, method.as_str()));
-    let repr = match value.ty.as_ref() {
-        _ if column => Some(OptionalRepr::Pointer),
-        Some(t @ Ty::Union { .. }) if t.is_stringish() => Some(OptionalRepr::EmptyString),
-        Some(Ty::Union { .. }) => {
-            ctx.boxed_locals.borrow_mut().insert(name_s.clone());
-            None
-        }
-        _ => None,
-    };
-    if let Some(repr) = repr {
-        ctx.optional_locals.borrow_mut().insert(name_s.clone(), repr);
-    }
+    // Not an index read: Go's `xs[i]` and `m[k]` answer the element type, never a nil
+    let plain_index = matches!(&*value.node, ExprNode::Send { method, recv: Some(r), .. }
+        if method.as_str() == "[]" && matches!(r.ty.as_ref(), Some(Ty::Array { .. } | Ty::Hash { .. })));
     ctx.declared.borrow_mut().insert(name_s.clone());
+    let repr = match value.ty.as_ref() {
+        _ if column => OptionalRepr::Pointer,
+        Some(t @ Ty::Union { .. }) if t.is_stringish() || plain_index => OptionalRepr::Present,
+        // Not left to `:=` when untyped: the value is Go's interface{} then too, and a narrowed read asserts its scalar back
+        t if is_boxed_scalar(t) || matches!(t, Some(Ty::Untyped)) => {
+            ctx.boxed_locals.borrow_mut().insert(name_s.clone());
+            return format!("var {name_s} interface{{}} = {value_s}");
+        }
+        _ => return format!("{name_s} := {value_s}"),
+    };
+    ctx.optional_locals.borrow_mut().insert(name_s.clone(), repr);
     format!("{name_s} := {value_s}")
 }
 
