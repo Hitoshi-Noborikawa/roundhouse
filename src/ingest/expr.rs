@@ -14,6 +14,22 @@ use super::util::{
 };
 use super::{IngestError, IngestResult};
 
+thread_local! {
+    /// The name the enclosing library method bound its forwarded anonymous
+    /// `*` to (`forwarding::Formals::forwarded_rest_name`); a bare `*` in
+    /// its body reads it.
+    static ANONYMOUS_REST: std::cell::RefCell<Option<Symbol>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Run `f` with `name` as the bound anonymous rest of the def being
+/// ingested (`None` for a def that binds none: a nested `def` has its own).
+pub(super) fn with_anonymous_rest<T>(name: Option<Symbol>, f: impl FnOnce() -> T) -> T {
+    let saved = ANONYMOUS_REST.with(|slot| std::mem::replace(&mut *slot.borrow_mut(), name));
+    let out = f();
+    ANONYMOUS_REST.with(|slot| *slot.borrow_mut() = saved);
+    out
+}
+
 use crate::ingest::prism_api::PrismLocation;
 pub fn ingest_expr(node: &Node<'_>, file: &str) -> IngestResult<Expr> {
     // Survey-mode gate: when active, intercept Err returns and
@@ -2782,10 +2798,10 @@ fn ingest_expr_node(node: &Node<'_>, file: &str) -> IngestResult<Expr> {
             let s = n.as_splat_node().unwrap();
             let value = match s.expression() {
                 Some(e) => ingest_expr(&e, file)?,
-                None => Expr::new(
-                    Span::synthetic(),
-                    ExprNode::Lit { value: Literal::Nil },
-                ),
+                None => match ANONYMOUS_REST.with(|slot| slot.borrow().clone()) {
+                    Some(name) => Expr::new(span, ExprNode::Var { id: crate::ident::VarId(0), name }),
+                    None => Expr::new(Span::synthetic(), ExprNode::Lit { value: Literal::Nil }),
+                },
             };
             ExprNode::Splat { value }
         }

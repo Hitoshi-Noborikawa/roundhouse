@@ -3547,8 +3547,9 @@ pub(super) fn ingest_library_method_with_keywords(
                     if let Ok(s) = std::str::from_utf8(loc.as_slice()) {
                         params.push(Param::rest(Symbol::from(s)));
                     }
-                } else if let Some(name) = &formals.anonymous_rest_name {
-                    // An unforwarded `*`: see `forwarding`'s module doc.
+                } else if let Some(name) = formals.anonymous_rest_name.as_ref().or(formals.forwarded_rest_name.as_ref()) {
+                    // An anonymous `*`, forwarded or not: see `forwarding`'s
+                    // module doc.
                     params.push(Param::rest(name.clone()));
                 }
             }
@@ -3697,11 +3698,18 @@ pub(super) fn ingest_library_method_with_keywords(
         });
 
     let body = match def.body() {
-        Some(b) => ingest_expr(&b, file)?,
+        Some(b) => super::expr::with_anonymous_rest(formals.forwarded_rest_name.clone(), || {
+            ingest_expr(&b, file)
+        })?,
         None => Expr::new(Span::synthetic(), ExprNode::Seq { exprs: vec![] }),
     };
 
     params.extend(formals.anonymous.map(super::forwarding::AnonymousFormal::into_param));
+    // The forwarded `*` is a named rest now: nothing about it is refused.
+    let unsupported_formals = match formals.unsupported {
+        Some(crate::dialect::UnsupportedFormal::AnonymousRest) if formals.forwarded_rest_name.is_some() => None,
+        other => other,
+    };
 
     Ok(MethodDef {
         name_span: super::util::def_name_span(def, file),
@@ -3709,7 +3717,7 @@ pub(super) fn ingest_library_method_with_keywords(
         receiver,
         visibility: crate::dialect::MethodVisibility::Public,
         params,
-        unsupported_formals: formals.unsupported,
+        unsupported_formals,
         has_anonymous_block: formals.has_anonymous_block,
         body,
         signature: None,
