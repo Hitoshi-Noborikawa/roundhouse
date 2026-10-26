@@ -19802,6 +19802,8 @@ mod dynamic_where_forms;
 mod enum_cross_class_mapping;
 #[path = "emit_and_run/jbuilder_record_values.rs"]
 mod jbuilder_record_values;
+#[path = "emit_and_run/nil_operand.rs"]
+mod nil_operand;
 
 /// `ActiveSupport::JSON.encode(value, escape: false)` — Rails' document
 /// without the HTML-entity escaping, which campfire's fragment keys can
