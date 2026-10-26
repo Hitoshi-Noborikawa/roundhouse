@@ -188,3 +188,26 @@ fn an_action_called_from_a_running_action_runs_no_chain_on_ruby() {
     run.assert_passes();
     assert!(run.stdout.contains("direct passed"), "{}", run.stdout);
 }
+
+// Review of #1383 (oracle `test_app/review_oracle.rb`): the yielded
+// `with_options` form registers its calls, and two actions through one
+// `with` each run their own chain on a fresh mail.
+const REVIEW_MAILER: &str = "class ReviewMailer < ApplicationMailer\n  with_options only: :hello do |o|\n    o.before_action :note_hello\n  end\n  before_action :note_before\n\n  def hello\n    headers(\"X-Hello\" => \"1\")\n    mail(to: \"a@example.com\", subject: \"Hello\", body: \"h\")\n  end\n\n  def bye\n    mail(to: \"a@example.com\", subject: \"Bye\", body: \"b\")\n  end\n\n  private\n\n  def note_hello\n    CallbackLog.add(\"note_hello\")\n  end\n\n  def note_before\n    CallbackLog.add(\"before\")\n  end\nend\n";
+const REVIEWS: &str = "class Reviews\n  def self.with(params)\n    ReviewMailer.with(params)\n  end\nend\n";
+
+fn review_app() -> emit_and_run::Overlay {
+    app().write("app/mailers/review_mailer.rb", REVIEW_MAILER).write("app/models/reviews.rb", REVIEWS)
+}
+
+#[test]
+fn the_yielded_with_options_form_registers_its_calls_on_ruby() {
+    let run = review_app().run_ruby(r##"
+CallbackLog.clear
+ReviewMailer.hello.deliver_now
+got = CallbackLog.entries
+raise "yielded with_options: #{got.inspect}" unless got == ["base_before", "note_hello", "before", "stamp"]
+puts "yielded passed"
+"##);
+    run.assert_passes();
+    assert!(run.stdout.contains("yielded passed"), "{}", run.stdout);
+}

@@ -118,8 +118,10 @@ fn is_callback_macro(method: &str) -> bool {
         )
 }
 
-/// The calls in a `with_options` block, or None when it isn't one.
-fn with_options_calls(call: &Expr) -> Option<(&[(Expr, Expr)], Vec<&Expr>)> {
+/// The calls in a `with_options` block, or None when it isn't one. In the
+/// yielded form (`do |o| o.before_action :x end`) a call on the block's
+/// parameter is the class's own, as the option merger forwards it.
+fn with_options_calls(call: &Expr) -> Option<(&[(Expr, Expr)], Vec<Expr>)> {
     let ExprNode::Send { recv: None, method, args, block: Some(block), .. } = &*call.node else { return None };
     if method.as_str() != "with_options" {
         return None;
@@ -127,13 +129,27 @@ fn with_options_calls(call: &Expr) -> Option<(&[(Expr, Expr)], Vec<&Expr>)> {
     let [hash] = args.as_slice() else { return None };
     let ExprNode::Hash { entries, .. } = &*hash.node else { return None };
     let ExprNode::Lambda { params, body, .. } = &*block.node else { return None };
-    if !params.is_empty() {
-        return None;
-    }
+    let param = match params.as_slice() {
+        [] => None,
+        [param] => Some(param),
+        _ => return None,
+    };
     let stmts: Vec<&Expr> = match &*body.node {
         ExprNode::Seq { exprs } => exprs.iter().collect(),
         _ => vec![body],
     };
+    let stmts = stmts
+        .into_iter()
+        .map(|stmt| {
+            let mut stmt = stmt.clone();
+            if let (Some(param), ExprNode::Send { recv, .. }) = (param, &mut *stmt.node)
+                && recv.as_ref().is_some_and(|r| matches!(&*r.node, ExprNode::Var { name, .. } if name == param))
+            {
+                *recv = None;
+            }
+            stmt
+        })
+        .collect();
     Some((entries, stmts))
 }
 
@@ -238,7 +254,7 @@ fn parse_class(lc: &LibraryClass, counter: &mut usize) -> Result<Parsed, String>
             if !stmts.iter().all(|s| callback_method(s).is_some()) {
                 return Err("a `with_options` block with callbacks and other calls".into());
             }
-            for stmt in stmts {
+            for stmt in &stmts {
                 parsed.callbacks.extend(parse_call(stmt, outer, counter)?);
             }
             parsed.consumed.push(i);
@@ -507,6 +523,7 @@ fn generated_methods(
             resolved.push((c.kind, target, conds.join(" && ")));
         }
         let body = nested(&resolved, &format!("{ACTION_PREFIX}{action}({args})"));
+        // Called from inside a running action, the method is a plain call.
         // Called from inside a running action, the method is a plain call.
         text.push_str(&format!(
             "  def {action}({args})\n    return {ACTION_PREFIX}{action}({args}) unless __start_action(\"{action}\")\n{body}    message\n  end\n\n"
