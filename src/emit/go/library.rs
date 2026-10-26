@@ -1094,6 +1094,7 @@ fn emit_method(
         var_renames: std::collections::HashMap::new(),
         declared: std::rc::Rc::new(std::cell::RefCell::new(std::collections::HashSet::new())),
         boxed_locals: std::rc::Rc::new(std::cell::RefCell::new(std::collections::HashSet::new())),
+        optional_locals: std::rc::Rc::new(std::cell::RefCell::new(std::collections::HashMap::new())),
         void_method: returns_void,
         in_module_singleton: false,
         self_methods: Some(std::rc::Rc::clone(self_methods)),
@@ -1644,6 +1645,7 @@ fn emit_module_singleton_method(class_name: &str, m: &MethodDef) -> String {
         var_renames: std::collections::HashMap::new(),
         declared: std::rc::Rc::new(std::cell::RefCell::new(std::collections::HashSet::new())),
         boxed_locals: std::rc::Rc::new(std::cell::RefCell::new(std::collections::HashSet::new())),
+        optional_locals: std::rc::Rc::new(std::cell::RefCell::new(std::collections::HashMap::new())),
         void_method: returns_void,
         in_module_singleton: true,
         // Module-singleton has no instance methods; nothing to put

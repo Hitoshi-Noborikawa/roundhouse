@@ -55,6 +55,8 @@ pub(super) struct EmitCtx {
     pub declared: Rc<RefCell<HashSet<String>>>,
     // Not a type per local: only a scalar-or-nil local differs, held as `interface{}` where a narrowed read needs its value back
     pub boxed_locals: Rc<RefCell<HashSet<String>>>,
+    // Not one representation for every nilable local: a column read is a pointer, and a String's nil is the empty string
+    pub optional_locals: Rc<RefCell<HashMap<String, OptionalRepr>>>,
     /// True when the enclosing method's signature returns `void`
     /// (RBS `() -> void` lowers to `Ty::Fn { ret: Ty::Nil, ... }`).
     /// emit_return_at suppresses the implicit `return X` wrap when
@@ -114,6 +116,12 @@ pub(super) struct EmitCtx {
     pub current_pkg: &'static str,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OptionalRepr {
+    Pointer,
+    EmptyString,
+}
+
 impl EmitCtx {
     pub fn none() -> Self {
         Self {
@@ -122,6 +130,7 @@ impl EmitCtx {
             var_renames: HashMap::new(),
             declared: Rc::new(RefCell::new(HashSet::new())),
             boxed_locals: Rc::new(RefCell::new(HashSet::new())),
+            optional_locals: Rc::new(RefCell::new(HashMap::new())),
             void_method: false,
             in_module_singleton: false,
             self_methods: None,
@@ -212,6 +221,9 @@ pub(super) fn emit_expr(ctx: &EmitCtx, e: &Expr) -> String {
                 return renamed.clone();
             }
             let n = super::library::sanitize(name.as_str());
+            if ctx.optional_locals.borrow().get(&n) == Some(&OptionalRepr::Pointer) && e.ty.as_ref().is_some_and(|t| t.is_scalar()) {
+                return format!("(*{n})");
+            }
             match (ctx.boxed_locals.borrow().contains(&n), e.ty.as_ref()) {
                 (true, Some(Ty::Int)) => format!("{n}.(int64)"),
                 (true, Some(Ty::Float)) => format!("{n}.(float64)"),
@@ -590,6 +602,7 @@ pub(super) fn emit_expr(ctx: &EmitCtx, e: &Expr) -> String {
         {
             emit_ensure_only(ctx, body, en, e.ty.as_ref())
         }
+        ExprNode::Let { .. } => emit_expr_as_value(ctx, e),
         other => crate::emit::diagnostics::report_unsupported(e.span, "go2", other.kind_str(), ""),
     }
 }
@@ -1969,6 +1982,14 @@ pub(super) fn emit_send(
     if method == "nil?" && args.is_empty() {
         if let Some(r) = recv {
             let recv_s = emit_expr(ctx, r);
+            if let ExprNode::Var { name, .. } = &*r.node {
+                match ctx.optional_locals.borrow().get(&super::library::sanitize(name.as_str())) {
+                    Some(OptionalRepr::Pointer) => return format!("{recv_s} == nil"),
+                    // Not `== ""`: an empty String is not nil to Ruby, and this binding cannot tell the two apart
+                    Some(OptionalRepr::EmptyString) => return "false".to_string(),
+                    None => {}
+                }
+            }
             // A nullable COLUMN field is a real Go pointer, so the test
             // is `== nil` — NOT the empty-as-nil comparison the
             // go_ty_stub convention uses for framework `String?` slots.
@@ -3796,14 +3817,36 @@ pub(super) fn emit_return_body(ctx: &EmitCtx, e: &Expr) -> String {
     out
 }
 
+/// `name := value`, recording how the value holds its nil.
+fn bind_let(ctx: &EmitCtx, name: &str, value: &Expr) -> String {
+    let name_s = super::library::sanitize(name);
+    let value_s = emit_expr_as_value(ctx, value);
+    let column = nullable_field_go_ty(value).is_some()
+        || matches!(&*value.node, ExprNode::Send { recv: Some(r), method, args, .. } if args.is_empty() && recv_column_is_nullable(r, method.as_str()));
+    let repr = match value.ty.as_ref() {
+        _ if column => Some(OptionalRepr::Pointer),
+        Some(t @ Ty::Union { .. }) if t.is_stringish() => Some(OptionalRepr::EmptyString),
+        Some(Ty::Union { .. }) => {
+            ctx.boxed_locals.borrow_mut().insert(name_s.clone());
+            None
+        }
+        _ => None,
+    };
+    if let Some(repr) = repr {
+        ctx.optional_locals.borrow_mut().insert(name_s.clone(), repr);
+    }
+    ctx.declared.borrow_mut().insert(name_s.clone());
+    format!("{name_s} := {value_s}")
+}
+
 /// Emit `e` in expression position — wraps statement-shaped IR
 /// (If / Case) in an IIFE so it can stand in for a value (Send arg,
 /// Hash value, format arg, ...). Falls through to `emit_expr` for
 /// nodes that already produce expression-form Go. Matches the
 /// IIFE-wrap pattern the Assign emit applies for the same nodes.
 pub(super) fn emit_expr_as_value(ctx: &EmitCtx, e: &Expr) -> String {
-    if matches!(&*e.node, ExprNode::If { .. } | ExprNode::Case { .. }) {
-        let ty = branch_value_ty(e);
+    if matches!(&*e.node, ExprNode::If { .. } | ExprNode::Case { .. } | ExprNode::Let { .. }) {
+        let ty = if matches!(&*e.node, ExprNode::Let { .. }) { e.ty.clone() } else { branch_value_ty(e) };
         let ret_ty = super::ty::go_ty_stub(ty.as_ref());
         let mut inner = ctx.value_iife();
         // Not left unset: a nil branch of a String-or-nil value must answer "", which the coercion keyed on the type supplies
@@ -4032,6 +4075,11 @@ fn emit_return_at(ctx: &EmitCtx, e: &Expr, out: &mut String, depth: usize) {
             }
             indent(out, depth);
             out.push_str("}\n");
+        }
+        ExprNode::Let { name, value, body, .. } => {
+            indent(out, depth);
+            out.push_str(&format!("{}\n", bind_let(ctx, name.as_str(), value)));
+            emit_return_at(ctx, body, out, depth);
         }
         ExprNode::Seq { exprs } => {
             // All but the last are statements (effects-only); last is
