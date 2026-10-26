@@ -3576,6 +3576,19 @@ fn lower_relation_args(
     ctx: &Ctx,
 ) -> Vec<Symbol> {
     let mut aliases: Vec<Symbol> = Vec::new();
+    // Not handed to the runtime as an Array: Rails flattens `order([a, b])` into `order(a, b)`, and the runtime's parts are the elements.
+    if matches!(method.as_str(), "order" | "reorder")
+        && args.iter().any(|a| matches!(&*a.node, ExprNode::Array { .. }))
+    {
+        let mut flat = Vec::with_capacity(args.len());
+        for arg in args.drain(..) {
+            match &*arg.node {
+                ExprNode::Array { elements, .. } => flat.extend(elements.iter().cloned()),
+                _ => flat.push(arg),
+            }
+        }
+        *args = flat;
+    }
     match method.as_str() {
         "joins" | "left_outer_joins" | "left_joins" => {
             let kind = if method.as_str() == "joins" { "INNER JOIN" } else { "LEFT OUTER JOIN" };

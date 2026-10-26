@@ -2792,6 +2792,19 @@ fn synth_initialize(
             // `settings=`, the per-key cast-and-merge — through the
             // seam, over the `|| <default>` a NOT NULL column keeps.
             let given = lookup.clone();
+            // Not through the app's own `<col>=` for an absent key: Rails' constructor calls only the writers of the attributes it is given, and lobsters' `Domain#selector=` strips its argument.
+            if !column.is_json() && app_defines_writer(model, &col.name) {
+                let slot_ty = super::ty_of_column_slot(col);
+                let raw_default = if nullable { nil_lit() } else { default };
+                stmts.push(with_ty(Expr::new(Span::synthetic(), ExprNode::Assign {
+                    target: LValue::Ivar { name: col_storage_name(col) },
+                    value: with_ty(raw_default, slot_ty.clone()),
+                }), slot_ty.clone()));
+                stmts.push(given_value_assign(col, &attrs, Expr::new(Span::synthetic(), ExprNode::Cast {
+                    value: given, target_ty: slot_ty,
+                })));
+                continue;
+            }
             let json_assign = crate::lower::has_json::column_assign(
                 model,
                 &col.name,
@@ -4053,6 +4066,16 @@ fn seed_dynamic_scope(owner: &ClassId, table: &Table, columns: &[Symbol], attrs:
 }
 
 // Not a new shape: the same `attrs.key?` guarded write `synth_update_hash` emits, which every target already compiles.
+fn app_defines_writer(model: &Model, column: &Symbol) -> bool {
+    let writer = format!("{}=", column.as_str());
+    model.methods().any(|m| {
+        m.receiver == crate::dialect::MethodReceiver::Instance
+            && matches!(m.kind, crate::dialect::AccessorKind::Method)
+            && !m.name_span.is_synthetic()
+            && m.name.as_str() == writer
+    })
+}
+
 fn given_value_assign(col: &Column, attrs: &Symbol, value: Expr) -> Expr {
     let assign = Expr::new(
         Span::synthetic(),

@@ -2705,12 +2705,12 @@ module ActiveRecord
     # .scope_attributes)`). Ledgered in docs/pipeline/runtime.md.
 
     # `first_or_initialize` — the first matching row, or a new unsaved
-    # record when there is none. The caller assigns the remaining
-    # attributes before `save` (the write path this serves), so the built
-    # record starts blank rather than pre-filled from the where-conditions.
+    # record carrying the relation's equality conditions, as Rails builds
+    # it (`Domain.where(domain: name).first_or_initialize` is a Domain
+    # named `name`; lobsters saves it with the story that names it).
     def first_or_initialize
       record = first
-      record.nil? ? @model.new : record
+      record.nil? ? @model.new(scope_attributes) : record
     end
 
     # Rails' `find_or_create_by` — the first row matching `conditions`,

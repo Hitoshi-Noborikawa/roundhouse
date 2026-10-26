@@ -30,6 +30,10 @@ pub(super) fn push_validate_method(
 ) {
     let model_msgs = Messages(Some(model), None);
     let mut stmts: Vec<Expr> = Vec::new();
+    let store_attrs: std::collections::HashSet<Symbol> = crate::lower::typed_store::typed_store_decls(&model.body)
+        .into_iter()
+        .flat_map(|(_, attrs)| attrs.into_iter().map(|a| a.name))
+        .collect();
 
     // One pass in declaration order: Rails checks a `belongs_to` where it is declared, among the `validates`, so its error lists there.
     for item in &model.body {
@@ -119,6 +123,12 @@ pub(super) fn push_validate_method(
                             seq(produced)
                         };
                         produced = vec![with_condition_guard(body, &v.if_cond, &v.unless_cond)];
+                    }
+                    // Not the `@attr` slot a column has: a typed_store attribute lives in its store column, behind the reader Rails validates through.
+                    if store_attrs.contains(&v.attribute) {
+                        for check in &mut produced {
+                            read_through_reader(check, &v.attribute);
+                        }
                     }
                     for mut check in produced {
                         // Each expanded check attributes to its `validates` line.
@@ -966,6 +976,13 @@ fn with_condition_guard(body: Expr, if_cond: &Option<Expr>, unless_cond: &Option
 
 /// `@<attr>` — direct ivar read passed as the `value` positional arg
 /// to every validates_* helper.
+fn read_through_reader(expr: &mut Expr, attr: &Symbol) {
+    expr.node.for_each_child_mut(&mut |c| read_through_reader(c, attr));
+    if matches!(&*expr.node, ExprNode::Ivar { name } if name == attr) {
+        *expr.node = ExprNode::Send { recv: None, method: attr.clone(), args: vec![], block: None, parenthesized: false };
+    }
+}
+
 fn ivar(attr: &Symbol) -> Expr {
     Expr::new(Span::synthetic(), ExprNode::Ivar { name: attr.clone() })
 }
