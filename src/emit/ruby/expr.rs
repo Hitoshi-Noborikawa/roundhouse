@@ -1207,8 +1207,8 @@ fn recv_needs_parens(r: &Expr) -> bool {
 /// hash (`Hash[Symbol, _]`, e.g. a keyword-arg hash like
 /// `StoryRepository#@params`) has a different type and is left alone, as
 /// is any `untyped`/unknown receiver. A request's params value is
-/// String-keyed at run time whatever the key's static type, so it also
-/// matches (`is_indifferent_params`) and its keys are coerced in full.
+/// String-keyed when it holds a Hash, so it also matches. It can also
+/// hold an Array; its index reads coerce only String or Symbol keys.
 ///
 /// This is the type-directed emit hook (the `[]` analog of the shared
 /// `classify_add`/`_sub`/`_cmp` operator dispatch) where a future
@@ -1274,7 +1274,20 @@ fn emit_str_hash_access(recv: &Expr, method: &str, args: &[Expr]) -> Option<Stri
     let recv_s = emit_expr(recv);
     let indifferent = is_indifferent_params(recv);
     match method {
-        "[]" if args.len() == 1 => Some(format!("{recv_s}[{}]", coerce_str_key(&args[0], indifferent))),
+        "[]" if args.len() == 1 => {
+            let key = &args[0];
+            let param_value = matches!(recv.ty.as_ref(), Some(Ty::Class { id, .. })
+                if id.0.as_str() == crate::analyze::PARAM_VALUE);
+            let string_key = matches!(&*key.node,
+                ExprNode::Lit { value: Literal::Str { .. } | Literal::Sym { .. } })
+                || key.ty.as_ref().is_some_and(Ty::is_stringish);
+            let key_s = if param_value && !string_key {
+                format!("Params.nested_key({})", emit_arg(key))
+            } else {
+                coerce_str_key(key, indifferent)
+            };
+            Some(format!("{recv_s}[{key_s}]"))
+        }
         "[]=" if args.len() == 2 => Some(format!(
             "{recv_s}[{}] = {}",
             coerce_str_key(&args[0], indifferent),

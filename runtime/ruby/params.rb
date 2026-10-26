@@ -28,6 +28,38 @@
 # per-target FFI and this is pure logic over the union — so it belongs
 # in the transpiled runtime rather than in twelve hand-written copies.
 module Params
+  def self.filtered_values(sub, fields, children, modes)
+    filtered = Params.allowed_scalars(sub, fields)
+    children.each do |key, allowed|
+      mode = modes.fetch(key, "hash")
+      if mode == "scalars"
+        filtered[key] = sub.fetch(key, nil) if Params.scalar_list_provided(sub, key)
+      else
+        value = Params.nested(sub, key, allowed, mode)
+        filtered[key] = value unless value.nil?
+      end
+    end
+    filtered
+  end
+
+  def self.nested_key(key)
+    if key.is_a?(Symbol)
+      key.to_s
+    else
+      key
+    end
+  end
+
+  def self.nested_lookup(value, key)
+    if value.is_a?(Hash)
+      value.fetch(Params.nested_key(key), nil)
+    elsif value.is_a?(Array)
+      value[key]
+    else
+      raise(NoMethodError.new("the nested params value is not a Hash"))
+    end
+  end
+
   # The nested resource hash a controller's params arrive under
   # (`{"article" => {"title" => …}}`). Missing, or present but not a
   # hash, yields an empty hash — a caller reading fields off it then
@@ -310,7 +342,7 @@ module Params
     !Params.nested(sub, key, allowed, mode).nil?
   end
 
-  # `hash` restricted to the `allowed` keys that hold a scalar.
+  # Permitted scalar keys, including matching multiparameter keys.
   def self.allowed_scalars(hash, allowed)
     out = {}
     i = 0
@@ -319,6 +351,10 @@ module Params
       if hash.key?(name)
         item = hash.fetch(name, nil)
         out[name] = item unless item.is_a?(Hash) || item.is_a?(Array)
+      end
+      Params.multiparameter_names(hash, name).each do |part|
+        item = hash.fetch(part, nil)
+        out[part] = item unless item.is_a?(Hash) || item.is_a?(Array)
       end
       i = i + 1
     end

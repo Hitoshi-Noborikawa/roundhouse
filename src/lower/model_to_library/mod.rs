@@ -348,6 +348,11 @@ pub(crate) fn lower_models_inner_with_ruby_values(
     // `from_params` body's `p.<field>` Send dispatches to the
     // `<Resource>Params` attr_reader signature.
     for spec in params_specs.iter() {
+        if spec.value_map() {
+            classes.insert(spec.class_id.clone(),
+                crate::lower::controller_to_library::params::spec_class_info(spec));
+            continue;
+        }
         let class_id = spec.class_id.clone();
         let mut info = crate::analyze::ClassInfo::default();
         // MUST match what `build_params_class` actually synthesizes. A

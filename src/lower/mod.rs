@@ -352,6 +352,7 @@ const POST_ANALYZE_PASS_ORDER: &[(&str, &[&str])] = &[
     ("params_residue", &["bool_fold"]),
     // After the ledger, which reads the calls this rewrites; before the controller lowering turns `params` into `@params`.
     ("params_permit", &["params_residue"]),
+    ("params_value_reads", &["params_permit"]),
     // Before the fused rewrites, which key on the plain Hash type this pass leaves on an indifferent hash.
     ("indifferent_access", &[]),
     // Independent send rewrites: one fused tree walk in
@@ -849,6 +850,8 @@ pub fn apply_post_analyze_lowerings(
     ran!("params_residue");
     params_permit::apply_params_permit_lowering(app);
     ran!("params_permit");
+    controller_to_library::params::lower_value_reads(app);
+    ran!("params_value_reads");
     indifferent_access::apply_indifferent_access_lowering(app);
     ran!("indifferent_access");
     // Not fused: a local bound to `arel_table` is a whole-body fact, which a per-node rewrite cannot see
