@@ -3650,9 +3650,13 @@ pub(super) fn str_method(method: &Symbol) -> Ty {
         "chars" | "lines" | "split" | "scan" | "each_char" => Ty::Array { elem: std::sync::Arc::new(Ty::Str) },
         // `String#count(chars)` — how many of the given characters occur.
         "count" => Ty::Int,
-        // `String#ascii_only?` and ActiveSupport's `exclude?` (the
-        // negation of `include?`).
-        "ascii_only?" | "exclude?" => Ty::Bool,
+        // `String#ascii_only?`, `valid_encoding?` and
+        // `unicode_normalized?`, and ActiveSupport's `exclude?` (the
+        // negation of `include?`). A real String predicate must be known
+        // here: the inquiry fold reads an unknown one as a StringInquirer
+        // label, and `value.valid_encoding?` became
+        // `value == "valid_encoding"`.
+        "ascii_only?" | "valid_encoding?" | "unicode_normalized?" | "exclude?" => Ty::Bool,
         // `String#insert(index, str)` mutates and answers the receiver;
         // `to_str` is the implicit-conversion spelling of itself;
         // `encode` re-encodes; ActiveSupport's `first(n)` / `last(n)`
