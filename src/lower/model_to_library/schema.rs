@@ -1696,9 +1696,7 @@ pub(super) fn push_from_params_method(
     );
 
     let mut stmts: Vec<Expr> = Vec::new();
-    if let Some(table) = table {
-        stmts.push(multiparameter_guard(model, table, fields, &p, "creating"));
-    }
+    stmts.push(multiparameter_guard(model, table, fields, &p, "creating"));
     stmts.push(Expr::new(
         Span::synthetic(),
         ExprNode::Assign {
@@ -4225,15 +4223,17 @@ fn column_union_ty(table: &Table) -> Ty {
 /// Params.any_of(p.rh_multiparameter_fields, [<uncastable fields>])`,
 /// first, before anything is assigned.
 ///
-/// A multiparameter key (`name(1)`) reaches the params object as Rails'
-/// own value for a String or Text attribute — the text of its parts
-/// Hash, `runtime/ruby/params.rb` — so validations see and a save writes
-/// what Rails' would. Any other attribute casts that Hash its own way (a
-/// date column builds a Date), and some shapes are not reproduced at
-/// all; for those the record is refused before it changes.
+/// On a schema-backed model, a multiparameter key (`name(1)`) reaches
+/// the params object as Rails' own value for a String or Text attribute —
+/// the text of its parts Hash, `runtime/ruby/params.rb` — so validations
+/// and saves receive the same value as Rails. Other attributes cast that
+/// Hash their own way (a date column builds a Date), and some shapes are
+/// not reproduced at all; those records are refused before they change.
+/// A tableless ActiveModel form has no multiparameter assignment path to
+/// reproduce.
 fn multiparameter_guard(
     model: &crate::dialect::Model,
-    table: &Table,
+    table: Option<&Table>,
     fields: &[Symbol],
     p: &Symbol,
     doing: &str,
@@ -4243,6 +4243,7 @@ fn multiparameter_guard(
     };
     let secure = crate::lower::secure_password::secure_password_attr(&model.body);
     let castable = |field: &Symbol| {
+        let Some(table) = table else { return false };
         if let Some(attr) = &secure {
             let a = attr.as_str();
             let f = field.as_str();
@@ -4401,7 +4402,7 @@ fn synth_update_typed(
         ));
     }
 
-    stmts.insert(0, multiparameter_guard(model, table, fields, &p, "updating"));
+    stmts.insert(0, multiparameter_guard(model, Some(table), fields, &p, "updating"));
 
     stmts.push(Expr::new(
         Span::synthetic(),

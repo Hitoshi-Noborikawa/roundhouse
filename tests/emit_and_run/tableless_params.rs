@@ -247,3 +247,49 @@ puts "named source factory preserved"
         )
         .assert_passes();
 }
+
+#[test]
+fn tableless_factory_refuses_unconvertible_multiparameter_input_before_new() {
+    forms()
+        .run_ruby(
+            r#"
+def EndRequest.new
+  raise "constructor reached before refusal"
+end
+params = EndRequestParams.from_raw({"end_request" => {"pty_session_id(1i)" => "invalid"}})
+raise "unsupported flag missing" unless params.rh_multiparameter_unsupported
+begin
+  EndRequest.from_params(params)
+  raise "unsupported input accepted"
+rescue RuntimeError => error
+  raise error.message unless error.message.include?("multiparameter key")
+end
+puts "unconvertible tableless multiparameter input refused before construction"
+"#,
+        )
+        .assert_passes();
+}
+
+#[test]
+fn tableless_factory_refuses_multiparameter_parts_without_a_rails_assignment_path() {
+    forms()
+        .run_ruby(
+            r#"
+def EndRequest.new
+  raise "constructor reached before refusal"
+end
+[{"pty_session_id(1i)" => "12"}, {"base(1)" => "topic"}].each do |input|
+  params = EndRequestParams.from_raw({"end_request" => input})
+  raise "parts should convert" if params.rh_multiparameter_unsupported
+  begin
+    EndRequest.from_params(params)
+    raise "multiparameter input accepted"
+  rescue RuntimeError => error
+    raise error.message unless error.message.include?("multiparameter key")
+  end
+end
+puts "tableless multipart assignment refused before construction"
+"#,
+        )
+        .assert_passes();
+}
