@@ -1616,6 +1616,7 @@ module ActiveRecord
           return false
         end
         fill_timestamps(true) if stamps_timestamps?
+        @__id_before_insert = @id
         self.id = _adapter_insert
         @persisted = true
         _enlist_write(0)
@@ -1644,7 +1645,22 @@ module ActiveRecord
     # create a new record again. Its commit callbacks still wait for the
     # COMMIT.
     def _enlist_write(kind)
-      Db._txn_records << ActiveRecord::EnlistedRecord.new(self, kind) unless Db._txn_depth == 0
+      return nil if Db._txn_depth == 0
+      # The Dirty baseline before this transaction's first write of the
+      # record, which a rollback puts back: its changes are pending again,
+      # as Rails' `restore_transaction_record_state` leaves them.
+      unless @__rollback_saved
+        @__rollback_saved = true
+        @__rollback_baseline = @__last_saved_attributes
+      end
+      Db._txn_records << ActiveRecord::EnlistedRecord.new(self, kind)
+      nil
+    end
+
+    # The transaction that enlisted the record ended: nothing to put back.
+    def _forget_rollback_state
+      @__rollback_saved = false
+      @__rollback_baseline = nil
       nil
     end
 
@@ -1857,6 +1873,7 @@ module ActiveRecord
           next if other.kind == 3
           kind = other.kind if other.kind == 2 || (other.kind == 0 && kind == 1)
         end
+        record._forget_rollback_state
         record._run_commit_callbacks(kind)
       end
       nil
@@ -1874,15 +1891,20 @@ module ActiveRecord
       nil
     end
 
-    # The id a rolled-back create was given stays on the record (Rails
-    # puts back the pre-save nil): the unsaved sentinel differs by key
-    # type, and a later save inserts the row afresh either way.
+    # A rolled-back create gets back the id it had before the insert, as
+    # Rails puts back the pre-save nil, so it reads as unsaved again (its
+    # held associations among them).
     def _restore_after_rollback(kind)
       if kind == 0
         @persisted = false
+        @id = @__id_before_insert
       elsif kind == 2
         @persisted = true
         @destroyed = false
+      end
+      if @__rollback_saved
+        @__last_saved_attributes = @__rollback_baseline
+        _forget_rollback_state
       end
       nil
     end
