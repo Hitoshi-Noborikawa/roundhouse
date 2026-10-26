@@ -33,7 +33,7 @@ fn forms() -> emit_and_run::Overlay {
             &format!("class {class_name}\n  include ActiveModel::Model\n  include ActiveModel::Attributes\n\n  attribute :pty_session_id, :integer\n{attributes}  validates :pty_session_id, presence: true\nend\n"),
         );
     }
-    let mut routes = String::from("Rails.application.routes.draw do\n");
+    let mut routes = String::new();
     for (resource, class_name, fields) in [
         ("resume_request", "ResumeRequest", "pty_session_id"),
         (
@@ -57,8 +57,11 @@ fn forms() -> emit_and_run::Overlay {
             ));
         }
     }
-    routes.push_str("end\n");
-    app.write("config/routes.rb", &routes)
+    app.edit(
+        "config/routes.rb",
+        "Rails.application.routes.draw do\n",
+        &format!("Rails.application.routes.draw do\n{routes}"),
+    )
 }
 
 const FACTORIES: &str = r##"
