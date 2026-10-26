@@ -414,6 +414,12 @@ module SidekiqWorker
       return nil
     end
     log("INFO", label + " start")
+    # A job gets its own broadcast log, as `dispatch` gives a request
+    # and `ActiveJob.drain` gives a job run in process. A processor
+    # thread is never a request, so nothing else clears its log: every
+    # message a job broadcast stayed on it, rendered HTML and all
+    # (31 MB to 210 MB over 100,000 jobs whose model broadcasts).
+    Broadcasts.reset_log!
     # Whatever escapes the run (an envelope without `args`, a connection
     # error) fails the job, as Sidekiq's processor does, rather than
     # killing the processor thread (and, on Spinel, the process).

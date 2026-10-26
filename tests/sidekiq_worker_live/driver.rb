@@ -49,6 +49,14 @@ module Db
   end
 end
 
+# The worker clears the broadcast log (runtime/spinel/broadcasts.rb)
+# before each job; these jobs broadcast nothing.
+module Broadcasts
+  def self.reset_log!
+    nil
+  end
+end
+
 require_relative "active_job"
 require_relative "global_id_locator"
 require_relative "active_job_serialization"

@@ -47,6 +47,28 @@ module Db
   end
 end
 
+# The broadcast log a model's after-commit broadcasts append to
+# (runtime/spinel/broadcasts.rb). Every job below broadcasts once, and
+# counts it when the log it starts with isn't empty: the worker gives
+# each job a fresh log, or the log grows by one entry a job.
+module Broadcasts
+  LOG = [""]
+  STALE = [0]
+  SENT = [0]
+
+  def self.reset_log!
+    LOG.clear
+    nil
+  end
+
+  def self.job_broadcasts(job_class)
+    STALE[0] += 1 if LOG.length > 0
+    SENT[0] += 1
+    LOG.push(job_class)
+    nil
+  end
+end
+
 # The scripted Redis. SCRIPT holds "key<TAB>job" entries; a fetch takes
 # the first entry for the first key that has one, as BRPOP does.
 module SidekiqRedis
@@ -153,6 +175,7 @@ require_relative "sidekiq_worker"
 
 module JobRegistry
   def self.perform(job_class, args)
+    Broadcasts.job_broadcasts(job_class)
     if job_class == "BoomJob"
       raise ArgumentError, "boom \"" + ActiveJob::Arguments.str_at(args, 0) + "\"\nsecond line"
     elsif job_class == "SlowJob"
@@ -223,6 +246,8 @@ Process.kill("TERM", Process.pid)
 SidekiqWorker.supervise
 SidekiqWorker::THREADS.each { |t| t.join }
 check("all processors stopped", SidekiqWorker.running == 0, SidekiqWorker.running.to_s)
+check("each job starts with an empty broadcast log", Broadcasts::STALE[0] == 0 && Broadcasts::SENT[0] > 1,
+  Broadcasts::STALE[0].to_s + " of " + Broadcasts::SENT[0].to_s + " stale")
 SidekiqRedis.take_log.each { |line| puts line }
 
 # ---- shutdown with a job still running --------------------------------------
