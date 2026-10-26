@@ -545,26 +545,10 @@ pub fn diagnose_helper_modules(app: &App) -> Vec<Diagnostic> {
     // Not errors: the ivar is the rendering view's, which the emitted helper reads as Rails does (only its type is unseeded);
     // and nullable primitive arithmetic raises where Rails raises, as the library policy already holds.
     // Only where the value, once not nil, takes the operation: `String? + Integer` fails whatever it holds.
-    fn nil_is_the_only_miss(op: &str, lhs: &Ty, rhs: &Ty) -> bool {
-        let Ty::Union { variants } = lhs else { return false };
-        let numeric = |t: &Ty| matches!(t, Ty::Int | Ty::Float);
-        let present: Vec<&Ty> = variants.iter().filter(|v| !matches!(v, Ty::Nil)).collect();
-        variants.iter().any(|v| matches!(v, Ty::Nil))
-            && !present.is_empty()
-            && present.iter().all(|v| match v {
-                Ty::Int | Ty::Float => numeric(rhs) && matches!(op, "+" | "-" | "*" | "/" | "%" | "**" | "<" | ">" | "<=" | ">="),
-                Ty::Str => match op {
-                    "+" | "<" | ">" | "<=" | ">=" => matches!(rhs, Ty::Str),
-                    "*" => matches!(rhs, Ty::Int),
-                    _ => false,
-                },
-                _ => false,
-            })
-    }
     for d in &mut helper_out {
         let soft = match &d.kind {
             DiagnosticKind::IvarUnresolved { .. } => true,
-            DiagnosticKind::IncompatibleBinop { op, lhs_ty, rhs_ty } => nil_is_the_only_miss(op.as_str(), lhs_ty, rhs_ty),
+            DiagnosticKind::IncompatibleBinop { op, lhs_ty, rhs_ty } => crate::lower::nil_operand::nil_is_the_only_miss(op.as_str(), lhs_ty, rhs_ty),
             _ => false,
         };
         if soft {
