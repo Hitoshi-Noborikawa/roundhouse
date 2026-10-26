@@ -3695,12 +3695,14 @@ pub(super) fn str_method(method: &Symbol) -> Ty {
         // ActiveSupport String extensions. Pluralization/inflection
         // methods all return Str; comparison-style return Bool. Match
         // the surface of `ActiveSupport::Inflector` that real Rails
-        // code reaches for in views and helpers.
+        // code reaches for in views and helpers. `tableize` and
+        // `strip_heredoc` are not here: no runtime answers them, so
+        // they stay unknown and read as a `String extension` gap.
         "pluralize" | "singularize" | "camelize" | "camelcase"
         | "underscore" | "dasherize" | "titleize" | "titlecase"
         | "humanize" | "demodulize" | "deconstantize" | "classify"
-        | "tableize" | "foreign_key" | "parameterize" | "truncate"
-        | "squish" | "remove" | "indent" | "strip_heredoc"
+        | "foreign_key" | "parameterize" | "truncate"
+        | "squish" | "remove" | "indent"
         | "html_safe" | "to_query" | "to_param" => Ty::Str,
         "constantize" | "safe_constantize" => unknown(),
         // JSON encoding is provided by the Ruby runtime; the other
