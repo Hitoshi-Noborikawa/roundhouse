@@ -340,6 +340,30 @@ impl Ctx {
             .map(|n| format!("{}_", n.singular))
             .collect()
     }
+
+    /// Helper name of a member or collection route whose own name is
+    /// `action`: the action FIRST, then everything the enclosing scopes
+    /// put in front of the resource (namespace or `scope as:` prefix,
+    /// outer resources' singulars), then the innermost resource —
+    /// singular for a member route, plural for a collection one. Rails
+    /// 8.1 (`Scope#action_name`, checked with `bin/rails routes`):
+    ///
+    ///   namespace :admin { resources :widgets { collection { post :batch } } } → batch_admin_widgets
+    ///   resources :users { resources :notes { member { post :pin } } }        → pin_user_note
+    ///   namespace :admin { resources :rooms { get :recent, on: :collection, as: :fresh } } → fresh_admin_rooms
+    ///
+    /// None for a nested route (it reads parent-first) or outside any
+    /// resources block.
+    fn action_first_name(&self, action: &str, scope: ResourceScope) -> Option<String> {
+        let (innermost, outer) = self.parents.split_last()?;
+        let resource = match scope {
+            ResourceScope::Member => &innermost.singular,
+            ResourceScope::Collection => &innermost.plural,
+            ResourceScope::Nested => return None,
+        };
+        let outer: String = outer.iter().map(|n| format!("{}_", n.singular)).collect();
+        Some(format!("{action}_{}{outer}{resource}", self.name_prefix))
+    }
 }
 
 /// Route-helper name for a fully-static path: segments joined with `_`
@@ -413,21 +437,10 @@ fn collect_flat_routes(spec: &RouteSpec, out: &mut Vec<FlatRoute>, ctx: &Ctx) {
             // `requested_comments`. Member paths carry `:id` and so fall
             // through the static rule anyway, but both are decided here
             // to keep the scope rule in one place.
-            let scoped_name = match scope {
-                ResourceScope::Member | ResourceScope::Collection => {
-                    ctx.parent_pair().and_then(|(parent, parent_plural)| {
-                        static_path_name(path).map(|child| match scope {
-                            ResourceScope::Member => {
-                                format!("{}{child}_{parent}", ctx.name_prefix)
-                            }
-                            _ => format!("{}{child}_{parent_plural}", ctx.name_prefix),
-                        })
-                    })
-                }
-                // A bare verb in the resources block is a nested route;
-                // it keeps the parent-first order, decided below.
-                ResourceScope::Nested => None,
-            };
+            // A bare verb in the resources block is a nested route; it
+            // keeps the parent-first order, decided below.
+            let scoped_name =
+                static_path_name(path).and_then(|child| ctx.action_first_name(&child, *scope));
             let (derived_name, named) = match as_name.as_ref() {
                 // Where an explicit `as:` sits relative to the enclosing
                 // resource depends on the scope, and the two go OPPOSITE
@@ -445,18 +458,13 @@ fn collect_flat_routes(spec: &RouteSpec, out: &mut Vec<FlatRoute>, ctx: &Ctx) {
                 // `room_at_message` and `room_bot_messages`.
                 Some(s) => {
                     let s = s.as_str();
-                    let n = match (scope, ctx.parent_pair()) {
-                        (ResourceScope::Member, Some((parent, _))) => {
-                            format!("{}{s}_{parent}", ctx.name_prefix)
-                        }
-                        (ResourceScope::Collection, Some((_, plural))) => {
-                            format!("{}{s}_{plural}", ctx.name_prefix)
-                        }
-                        (ResourceScope::Nested, _) => {
+                    let n = match ctx.action_first_name(s, *scope) {
+                        Some(n) => n,
+                        None if *scope == ResourceScope::Nested => {
                             format!("{}{}{s}", ctx.name_prefix, ctx.parent_name_prefix())
                         }
                         // No enclosing resource — the name stands alone.
-                        _ => format!("{}{s}", ctx.name_prefix),
+                        None => format!("{}{s}", ctx.name_prefix),
                     };
                     (n, true)
                 }
