@@ -1,7 +1,8 @@
 # Reads what tests/sidekiq_worker_live/driver.rb left, through real
 # Sidekiq's API, as a Sidekiq process or its Web UI would. `flush`
 # empties the scratch database first; `check` prints one ok/FAIL line per
-# check.
+# check; `sizes` prints the default queue and the dead set, for the
+# shutdown test's worker processes.
 require "sidekiq"
 require "sidekiq/api"
 
@@ -11,6 +12,12 @@ Sidekiq.configure_client { |config| config.redis = { url: url } }
 if ARGV[0] == "flush"
   Sidekiq.redis { |conn| conn.call("FLUSHDB") }
   puts "flushed"
+  exit
+end
+
+if ARGV[0] == "sizes"
+  puts "default=#{Sidekiq::Queue.new("default").size} dead=#{Sidekiq::DeadSet.new.size} " \
+    "classes=#{Sidekiq::Queue.new("default").map(&:display_class).sort.join(",")}"
   exit
 end
 
