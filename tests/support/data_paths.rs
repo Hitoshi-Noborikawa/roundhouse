@@ -32,6 +32,7 @@ const BANNER: &str = r#"<%# locals: (banner_article:) -%>
 "#;
 
 pub const ASSERTIONS: &str = r#"
+Comment.delete_all
 Article.delete_all
 a = Article.new(title: "Hello", body: "A sufficiently long body.")
 raise "typed_store default validates: #{a.errors.to_a.inspect}" unless a.valid?
