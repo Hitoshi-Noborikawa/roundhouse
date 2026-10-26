@@ -10,7 +10,7 @@ const GADGET: &str = r#"class Gadget < ApplicationRecord
 end
 "#;
 
-const FACTORY: &str = r#"module CopyLog
+const FACTORY: &str = r##"module CopyLog
   def self.[](*cols)
     Module.new do
       extend ActiveSupport::Concern
@@ -27,7 +27,7 @@ const FACTORY: &str = r#"module CopyLog
     end
   end
 end
-"#;
+"##;
 
 const ARTICLE_METHODS: &str = "  validates :title, presence: true
 

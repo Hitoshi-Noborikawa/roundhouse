@@ -7,7 +7,7 @@ use super::emit_and_run;
 /// `after_create do |record| … end` reads the record as `self`, as Rails
 /// runs a one-parameter callback block. Both were dropped before: the
 /// factory refused, and the block form was "not lowered".
-pub const FACTORY: &str = r#"module CopyLog
+pub const FACTORY: &str = r##"module CopyLog
   def self.[](*cols)
     Module.new do
       extend ActiveSupport::Concern
@@ -24,7 +24,7 @@ pub const FACTORY: &str = r#"module CopyLog
     end
   end
 end
-"#;
+"##;
 
 pub fn app() -> emit_and_run::Overlay {
     emit_and_run::real_blog()
