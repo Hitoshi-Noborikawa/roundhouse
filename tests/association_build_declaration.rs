@@ -505,6 +505,32 @@ fn a_nested_find_by_through_an_ordering_scope_is_not_expanded() {
     assert!(controller.contains("Comment.find("), "{controller}");
 }
 
+/// The same ordering scope, but a `find_by` naming `id`: at most one row
+/// matches, so the order cannot change which is taken and the rewrite
+/// expands it as it expands `find`. The Roda front-end writes every
+/// `comments_dataset.with_pk(id)` this way, over a `one_to_many` that
+/// orders (fixtures/roda-blog).
+#[test]
+fn a_nested_find_by_id_through_an_ordering_scope_is_expanded() {
+    let (emitted, _errors) = emit_and_run::real_blog()
+        .edit(
+            "app/models/article.rb",
+            "  has_many :comments, dependent: :destroy",
+            "  has_many :comments, dependent: :destroy\n  has_many :remarks, -> { order(created_at: :desc) }, class_name: \"Comment\"",
+        )
+        .edit(
+            "app/controllers/comments_controller.rb",
+            "    @comment = @article.comments.find(params.expect(:id))",
+            "    @comment = @article.remarks.find_by(id: params.expect(:id))",
+        )
+        .emit(roundhouse::project::BuildTarget::Ruby);
+    let controller = std::fs::read_to_string(emitted.join("app/controllers/comments_controller.rb"))
+        .expect("emitted controller");
+    assert!(!controller.contains("@article.remarks.find_by("), "{controller}");
+    assert!(controller.contains("Comment.find_by("), "{controller}");
+    assert!(controller.contains("article_id: @article.id"), "{controller}");
+}
+
 /// `@story` of no analyzed type, while Story and Article both declare
 /// `comments`: the name says Story, as it does for the association seed,
 /// so the typed-params build expands under `story_id` rather than being
