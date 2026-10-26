@@ -223,7 +223,7 @@ fn shutdown_round(dir: &Path, url: &str, worker: &dyn Fn() -> Command) {
     ruby(dir, url, &["reader.rb", "flush"]);
     ruby(dir, url, &["rails_push.rb", "RecordJob:rails1"]);
 
-    let mut first = Worker::start(worker(), url, "5");
+    let mut first = Worker::start(worker(), url, "10");
     first.wait_for("ran rails1", 20);
     ruby(dir, url, &["rails_push.rb", "SlowJob:s1"]);
     first.wait_for("slow started s1", 20);
