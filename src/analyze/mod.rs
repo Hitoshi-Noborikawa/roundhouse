@@ -7557,6 +7557,9 @@ pub(crate) fn unify_param_ty(stored: Ty, observed: Ty) -> Ty {
     if !variants.iter().any(|v| !v.is_unknown() && !matches!(v, Ty::Nil)) {
         return Ty::Union { variants };
     }
+    if !variants.iter().any(|v| matches!(v, Ty::Untyped)) {
+        return Ty::Union { variants };
+    }
     let mut kept: Vec<Ty> = variants.into_iter().filter(|v| !matches!(v, Ty::Untyped)).collect();
     match kept.len() {
         1 => kept.pop().unwrap(),
