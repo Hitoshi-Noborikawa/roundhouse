@@ -190,6 +190,10 @@ mod stdlib_rnp;
 mod representable_decorator;
 #[path = "spinel_toolchain/representable.rs"]
 mod representable;
+#[path = "support/active_model_serializer.rs"]
+mod active_model_serializer_app;
+#[path = "spinel_toolchain/active_model_serializer.rs"]
+mod active_model_serializer;
 
 /// The native counterpart of the generic emitted-Ruby regression test.
 #[test]

@@ -194,6 +194,10 @@ mod erb_template;
 mod representable_decorator;
 #[path = "emit_and_run/representable.rs"]
 mod representable;
+#[path = "support/active_model_serializer.rs"]
+mod active_model_serializer_app;
+#[path = "emit_and_run/active_model_serializer.rs"]
+mod active_model_serializer;
 #[path = "emit_and_run/instance_extend.rs"]
 mod instance_extend;
 

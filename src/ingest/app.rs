@@ -2331,6 +2331,9 @@ end
     // Representable decorators: expanded into plain methods the same way;
     // survey mode ledgers an unsupported one and keeps going.
     super::representable::lower_representable_decorators(&mut app, &sources)?;
+    // ActiveModel::Serializer classes, the same way; their controllers'
+    // `render json: x, serializer: S` sites call the expansion.
+    super::active_model_serializer::lower_active_model_serializers(&mut app, &sources)?;
     // After it, not before: `Current`'s own `delegate` reads an
     // ATTRIBUTE's ivar, which that pass has the declarations for. What
     // reaches here is the general shape, whose target is a method.
