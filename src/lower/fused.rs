@@ -30,20 +30,23 @@ pub fn apply_fused_independent_rewrites(app: &mut App) {
     let skip_exclude = super::exclude_predicate::app_defines_exclude(app);
     let skip_in = super::in_predicate::app_defines_in(app);
     let skip_including = super::including::app_defines_including(app);
-    let skip_full_messages = super::errors_full_messages::app_defines_full_messages(app);
+    let fold = super::errors_full_messages::Fold::of(app);
 
-    super::for_each_hook_body(app, &mut |body| {
+    super::for_each_owned_hook_body(app, &mut |owner, body| {
+        let site = (owner, &fold);
         walk_postorder(body, &mut |e| {
-            rewrite_hook_node(e, skip_exclude, skip_in, skip_including, skip_full_messages);
+            rewrite_hook_node(e, skip_exclude, skip_in, skip_including, &site);
         });
     });
     for view in &mut app.views {
+        let site = (None, &fold);
         walk_postorder(&mut view.body, &mut |e| {
-            rewrite_view_node(e, skip_exclude, skip_in, skip_including, skip_full_messages);
+            rewrite_view_node(e, skip_exclude, skip_in, skip_including, &site);
         });
     }
     super::for_each_test_body(app, &mut |body| {
-        walk_postorder(body, &mut |e| rewrite_test_node(e, skip_full_messages));
+        let site = (None, &fold);
+        walk_postorder(body, &mut |e| rewrite_test_node(e, &site));
     });
 }
 
@@ -458,7 +461,7 @@ fn rewrite_hook_node(
     skip_exclude: bool,
     skip_in: bool,
     skip_including: bool,
-    skip_full_messages: bool,
+    full_messages: &super::errors_full_messages::Site<'_>,
 ) {
     super::pathname_ctor::rewrite_node(e);
     super::array_ordinal::rewrite_node(e);
@@ -493,9 +496,7 @@ fn rewrite_hook_node(
     super::arel_attribute::rewrite_node(e);
     super::attr_or_assign::rewrite_node(e);
     super::group_count::rewrite_node(e);
-    if !skip_full_messages {
-        super::errors_full_messages::rewrite_node(e);
-    }
+    super::errors_full_messages::rewrite_node(e, full_messages);
     super::each_with_index::rewrite_node(e);
     // Last: produces `ActiveSupport.*` / Range nodes no earlier fused
     // rewrite keys on. `where_range_split` still runs sequentially
@@ -508,7 +509,7 @@ fn rewrite_view_node(
     skip_exclude: bool,
     skip_in: bool,
     skip_including: bool,
-    skip_full_messages: bool,
+    full_messages: &super::errors_full_messages::Site<'_>,
 ) {
     super::pathname_ctor::rewrite_node(e);
     super::array_ordinal::rewrite_node(e);
@@ -538,14 +539,12 @@ fn rewrite_view_node(
     super::dirty_predicate_kwargs::rewrite_node(e);
     super::relation_select_block::rewrite_node(e);
     super::arel_attribute::rewrite_node(e);
-    if !skip_full_messages {
-        super::errors_full_messages::rewrite_node(e);
-    }
+    super::errors_full_messages::rewrite_node(e, full_messages);
     super::each_with_index::rewrite_node(e);
     super::time_calendar::rewrite_node(e);
 }
 
-fn rewrite_test_node(e: &mut Expr, skip_full_messages: bool) {
+fn rewrite_test_node(e: &mut Expr, full_messages: &super::errors_full_messages::Site<'_>) {
     super::save_without_validation::rewrite_node(e);
     super::preloader::rewrite_node(e);
     super::bigdecimal::rewrite_node(e);
@@ -553,9 +552,7 @@ fn rewrite_test_node(e: &mut Expr, skip_full_messages: bool) {
     super::enumerable_ext::rewrite_node(e);
     super::byte_size::rewrite_node(e);
     super::dirty_predicate_kwargs::rewrite_node(e);
-    if !skip_full_messages {
-        super::errors_full_messages::rewrite_node(e);
-    }
+    super::errors_full_messages::rewrite_node(e, full_messages);
 }
 
 fn rewrite_late_hook_node(e: &mut Expr) {
