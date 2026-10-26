@@ -260,6 +260,12 @@ fn collect_fields(class: &ruby_prism::ClassNode<'_>, source: &SourceFile) -> Ing
             if GENERATED.contains(&name) || name.starts_with("ams_") {
                 return Err(refuse(source, offset, &format!("`def {name}` would be replaced by the generated method")));
             }
+            // An override of the gem's own API (`def attributes(*) =
+            // super.merge(…)`): the lowering writes its own, and would
+            // ignore it.
+            if GEM_INSTANCE_METHODS.contains(&name) {
+                return Err(refuse(source, offset, &format!("`def {name}` overrides the gem's, outside the subset")));
+            }
             methods.insert(name.to_string());
         }
     }
@@ -268,7 +274,7 @@ fn collect_fields(class: &ruby_prism::ClassNode<'_>, source: &SourceFile) -> Ing
     // nothing to answer it once the class loses the gem's parent.
     // Read in the method bodies and the `attribute` blocks, not the
     // class-body DSL (`attributes :id` is the declaration).
-    let mut gem_calls = GemCalls { own: &methods, found: None };
+    let mut gem_calls = GemCalls { own: &methods, found: None, super_at: None };
     for stmt in &stmts {
         if let Some(def) = stmt.as_def_node() {
             if let Some(body) = def.body() {
@@ -277,6 +283,9 @@ fn collect_fields(class: &ruby_prism::ClassNode<'_>, source: &SourceFile) -> Ing
         } else if let Some(block) = stmt.as_call_node().and_then(|c| c.block()) {
             ruby_prism::Visit::visit(&mut gem_calls, &block);
         }
+    }
+    if let Some(offset) = gem_calls.super_at {
+        return Err(refuse(source, offset, "`super` reaches the gem's class, which the lowering removes"));
     }
     if let Some((name, offset)) = gem_calls.found {
         return Err(refuse(source, offset, &format!("`{name}` is the gem's (the serializer's scope or adapter API), outside the subset")));
@@ -529,6 +538,8 @@ const GEM_INSTANCE_METHODS: &[&str] = &[
 struct GemCalls<'a> {
     own: &'a HashSet<String>,
     found: Option<(String, usize)>,
+    /// The first `super`: the parent it reaches is the gem's.
+    super_at: Option<usize>,
 }
 
 impl<'pr> ruby_prism::Visit<'pr> for GemCalls<'_> {
@@ -542,6 +553,14 @@ impl<'pr> ruby_prism::Visit<'pr> for GemCalls<'_> {
             self.found = Some((name.to_string(), node.location().start_offset()));
         }
         ruby_prism::visit_call_node(self, node);
+    }
+    fn visit_super_node(&mut self, node: &ruby_prism::SuperNode<'pr>) {
+        self.super_at.get_or_insert(node.location().start_offset());
+        ruby_prism::visit_super_node(self, node);
+    }
+    fn visit_forwarding_super_node(&mut self, node: &ruby_prism::ForwardingSuperNode<'pr>) {
+        self.super_at.get_or_insert(node.location().start_offset());
+        ruby_prism::visit_forwarding_super_node(self, node);
     }
 }
 

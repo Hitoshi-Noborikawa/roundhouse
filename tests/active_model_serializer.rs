@@ -153,3 +153,27 @@ fn a_serializer_used_outside_a_render_is_refused() {
     let class = app.library_classes.iter().find(|c| c.name.0.as_str() == "ArticleSerializer").expect("class");
     assert!(class.methods.iter().all(|m| m.name.as_str() != "as_json_str"), "lowered");
 }
+
+/// `super` in a serializer reaches the gem's class, which the lowering
+/// removes, and an override of the gem's API (`def attributes(*) =
+/// super.merge(…)`) would be ignored by the generated writer
+/// (active_model_serializers 0.10.16, `super_oracle.rb`): both refused.
+#[test]
+fn super_and_an_override_of_the_gems_api_are_refused() {
+    for (serializer, needle) in [
+        ("class ArticleSerializer < ActiveModel::Serializer\n  attributes :id, :title\n\n  def title\n    super.upcase\n  end\nend\n", "`super` reaches the gem's class"),
+        ("class ArticleSerializer < ActiveModel::Serializer\n  attributes :id\n\n  def attributes(*args)\n    super.merge(extra: 1)\n  end\nend\n", "`def attributes` overrides the gem's"),
+        ("class ArticleSerializer < ActiveModel::Serializer\n  attribute(:x) { defined?(super) ? 1 : 2 }\nend\n", "`super` reaches the gem's class"),
+    ] {
+        survey::activate();
+        let result = ingest_app_from_tree(tree(serializer, CONTROLLER));
+        let gaps = survey::drain();
+        let app = result.expect("survey ingest recovers");
+        assert!(
+            gaps.iter().any(|g| matches!(g, IngestError::Unsupported { message, .. } if message.contains(needle))),
+            "{needle}: {gaps:?}"
+        );
+        let class = app.library_classes.iter().find(|c| c.name.0.as_str() == "ArticleSerializer").expect("class");
+        assert!(class.methods.iter().all(|m| m.name.as_str() != "as_json_str"), "lowered: {serializer}");
+    }
+}
