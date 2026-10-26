@@ -151,6 +151,7 @@ fn tiny_blog_round_trips() {
         library_classes: vec![],
         current_attribute_classes: vec![],
         initializer_filters: Vec::new(),
+        initializer_defs: Vec::new(),
         initializer_response_headers: Vec::new(),
         collection_cache_store: None,
         app_requires: Vec::new(),
