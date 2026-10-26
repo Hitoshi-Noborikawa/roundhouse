@@ -42,6 +42,8 @@ mod array_excluding;
 mod array_excluding_native;
 #[path = "spinel_toolchain/lobsters_zero.rs"]
 mod lobsters_zero;
+#[path = "spinel_toolchain/module_factory.rs"]
+mod module_factory;
 #[path = "support/class_attribute.rs"]
 mod class_attribute;
 #[path = "support/class_configuration.rs"]

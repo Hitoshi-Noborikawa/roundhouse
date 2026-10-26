@@ -332,7 +332,8 @@ pub fn ingest_app_with_vfs<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResult
     let mut path_gems = path_gem_dirs(&mount_vfs, dir);
     path_gems.extend(source_gems.iter().map(|gem| gem.mount.clone()));
     let source_vfs = PathGemVfs { inner: &mount_vfs, root: dir, dirs: &path_gems };
-    let vfs = &source_vfs;
+    let factory_vfs = super::module_factory::expand(&source_vfs, dir);
+    let vfs = &factory_vfs;
     let engine_routes = engine_route_sources(vfs, dir, &path_gems);
     let additional_test_paths = additional_test_paths(dir, &config)?;
     validate_additional_test_paths(vfs, dir, &additional_test_paths)?;
