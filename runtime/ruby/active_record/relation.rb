@@ -30,6 +30,21 @@ module ActiveRecord
   # stamping) survive to the render. A chain method answers a relation
   # without the receiver's cache (or, for `order`, a sorted copy of it),
   # and the receiver keeps its own.
+  # Not a Range: Spinel keeps a Range's bounds in integer slots, so a `where` value's non-numeric range (`7.days.ago..`) is lowered to these ends
+  class Bounds
+    attr_reader :lower, :upper
+
+    def initialize(lower, upper, exclusive)
+      @lower = lower
+      @upper = upper
+      @exclusive = exclusive
+    end
+
+    def exclusive?
+      @exclusive
+    end
+  end
+
   class Relation
     # `scoped` false is `Model.unscoped`: no default scope. Otherwise the
     # model's `default_scope { where(…) }` is added here, when the
@@ -2997,6 +3012,8 @@ module ActiveRecord
         end
       elsif val.is_a?(Range)
         range_predicate(qcol, val)
+      elsif val.is_a?(Bounds)
+        bounds_predicate(qcol, val.lower, val.upper, val.exclusive?)
       elsif val.nil?
         "#{qcol} IS NULL"
       elsif val.is_a?(Base)
@@ -3019,9 +3036,13 @@ module ActiveRecord
     # pair; `>= AND <=` is the same predicate and what the lowered
     # call sites already write. The bounds bind like a scalar's value.
     def range_predicate(qcol, range)
-      op = range.exclude_end? ? "<" : "<="
-      lo = range_bound_sql(range.begin)
-      hi = range_bound_sql(range.end)
+      bounds_predicate(qcol, range.begin, range.end, range.exclude_end?)
+    end
+
+    def bounds_predicate(qcol, lower, upper, exclusive)
+      op = exclusive ? "<" : "<="
+      lo = range_bound_sql(lower)
+      hi = range_bound_sql(upper)
       if lo.nil?
         return "1=1" if hi.nil?
         return "#{qcol} #{op} #{hi}"
