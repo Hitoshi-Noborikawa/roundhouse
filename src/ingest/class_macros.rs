@@ -41,7 +41,7 @@ use crate::span::{SourceFile, Span};
 use crate::ingest::prism_api::PrismLocation;
 const MAX_DEPTH: usize = 8;
 
-pub(crate) fn expand_class_macros(app: &mut App, sources: &[SourceFile]) {
+pub(crate) fn expand_class_macros(app: &mut App, sources: &[SourceFile], mention_counts: &Mentions<'_>) {
     let parents: HashMap<ClassId, ClassId> = app
         .models
         .iter()
@@ -80,7 +80,7 @@ pub(crate) fn expand_class_macros(app: &mut App, sources: &[SourceFile]) {
             })
         })
         .collect();
-    let frozen = frozen_readers(app, sources);
+    let frozen = frozen_readers(app, sources, mention_counts);
     let known: HashSet<String> = app
         .library_classes
         .iter()
@@ -331,7 +331,7 @@ pub(crate) fn expand_class_macros(app: &mut App, sources: &[SourceFile]) {
         // (`define_method(meth, …)` over a name known only when it runs) is what a target refuses.
         let spent: HashSet<Symbol> = expanded
             .iter()
-            .filter(|(name, calls)| !failed.contains(*name) && mentions(name.as_str(), sources) == **calls)
+            .filter(|(name, calls)| !failed.contains(*name) && mention_counts.count(name.as_str()) == **calls)
             .map(|(name, _)| name.clone())
             .collect();
         let lc = &mut app.library_classes[lc_index];
@@ -360,7 +360,7 @@ pub(crate) fn hook_macro_calls(app: &App) -> HashSet<Symbol> {
 }
 
 /// Not kept once expanded: analyzed on the gem's module, the macro's `has_many` and `include` are reported.
-pub(crate) fn drop_expanded_hook_macros(app: &mut App, expanded: &HashSet<Symbol>, sources: &[SourceFile]) {
+pub(crate) fn drop_expanded_hook_macros(app: &mut App, expanded: &HashSet<Symbol>, mention_counts: &Mentions<'_>) {
     if expanded.is_empty() {
         return;
     }
@@ -378,7 +378,7 @@ pub(crate) fn drop_expanded_hook_macros(app: &mut App, expanded: &HashSet<Symbol
         .library_classes
         .iter()
         .flat_map(|c| c.methods.iter().filter(|m| hooked(&c.name, m)))
-        .filter(|m| !expanded.contains(&m.name) && !implicitly_called(m.name.as_str()) && !mentioned(m.name.as_str(), sources))
+        .filter(|m| !expanded.contains(&m.name) && !implicitly_called(m.name.as_str()) && !mention_counts.mentioned(m.name.as_str()))
         .map(|m| m.name.clone())
         .collect();
     let mut called: HashSet<Symbol> = HashSet::new();
@@ -447,9 +447,9 @@ fn hook_macro_table(app: &App) -> HashMap<Symbol, MethodDef> {
 /// again: ancestry's `Ancestry.default_ancestry_format`. Its setter
 /// exists, so a call to it anywhere (or a `class_variable_set` naming
 /// the variable) keeps the reader a value known only when it runs.
-fn frozen_readers(app: &App, sources: &[SourceFile]) -> HashMap<(String, Symbol), Expr> {
+fn frozen_readers(app: &App, sources: &[SourceFile], mention_counts: &Mentions<'_>) -> HashMap<(String, Symbol), Expr> {
     let mut out = HashMap::new();
-    // Not computed up front: it scans every source per method, and most apps have no frozen reader to ask about.
+    // Not computed up front: it indexes every source, and most apps have no frozen reader to ask about.
     let dead: std::cell::OnceCell<Vec<(usize, usize, usize)>> = std::cell::OnceCell::new();
     for class in &app.library_classes {
         let initial: HashMap<&str, &Expr> = class
@@ -484,7 +484,7 @@ fn frozen_readers(app: &App, sources: &[SourceFile]) -> HashMap<(String, Symbol)
                     continue;
                 }
                 let setters: Vec<&str> = writers.iter().map(|w| w.name.as_str().trim_end_matches('=')).collect();
-                let dead = dead.get_or_init(|| uncalled_bodies(app, sources));
+                let dead = dead.get_or_init(|| uncalled_bodies(app, mention_counts));
                 if sources.iter().enumerate().any(|(i, source)| writes_through(&source.text, &setters, cvar.as_str(), &|at| dead.iter().any(|&(f, a, b)| f == i && a <= at && at < b))) {
                     continue;
                 }
@@ -519,10 +519,10 @@ fn extenders<'a>(app: &'a App, module: &LibraryClass) -> Vec<&'a str> {
 }
 
 // Not every write counts: one in a method nothing calls never runs (rolify's `use_dynamic_shortcuts`).
-fn uncalled_bodies(app: &App, sources: &[SourceFile]) -> Vec<(usize, usize, usize)> {
+fn uncalled_bodies(app: &App, mention_counts: &Mentions<'_>) -> Vec<(usize, usize, usize)> {
     let mut out = Vec::new();
     for class in &app.library_classes {
-        for m in class.methods.iter().filter(|m| !mentioned(m.name.as_str(), sources)) {
+        for m in class.methods.iter().filter(|m| !mention_counts.mentioned(m.name.as_str())) {
             // Not the body's own span: a multi-statement body is a synthetic Seq.
             let mut range: Option<(crate::span::FileId, u32, u32)> = None;
             visit(&m.body, &mut |e| {
@@ -555,12 +555,96 @@ fn implicitly_called(name: &str) -> bool {
     )
 }
 
-fn mentioned(name: &str, sources: &[SourceFile]) -> bool {
-    mentions(name, sources) > 0
+/// The sources' word counts, for the many "does anything call this method"
+/// questions: [`Mentions::count`] is [`mentions_scan`] answered from one
+/// pass over the text, built on the first ask. Each question scanned every
+/// source, once per method of every class (`uncalled_bodies`).
+pub(crate) struct Mentions<'a> {
+    sources: &'a [SourceFile],
+    words: std::cell::OnceCell<HashMap<&'a str, usize>>,
+    /// The names the index does not answer (operators), scanned once each.
+    scans: std::cell::RefCell<HashMap<String, usize>>,
+}
+
+impl<'a> Mentions<'a> {
+    pub(crate) fn new(sources: &'a [SourceFile]) -> Self {
+        Self { sources, words: std::cell::OnceCell::new(), scans: Default::default() }
+    }
+
+    fn mentioned(&self, name: &str) -> bool {
+        self.count(name) > 0
+    }
+
+    /// How many times the sources name `name` as a word, outside its `def`.
+    fn count(&self, name: &str) -> usize {
+        if !is_word_name(name) {
+            if let Some(&known) = self.scans.borrow().get(name) {
+                return known;
+            }
+            let count = mentions_scan(name, self.sources);
+            self.scans.borrow_mut().insert(name.to_string(), count);
+            return count;
+        }
+        let words = self.words.get_or_init(|| {
+            let mut words = HashMap::new();
+            for source in self.sources {
+                count_words(&source.text, &mut words);
+            }
+            words
+        });
+        words.get(name).copied().unwrap_or(0)
+    }
+}
+
+fn is_word_char(c: char) -> bool {
+    c.is_alphanumeric() || c == '_'
+}
+
+/// A name `Mentions` answers from the index: word characters, then at most
+/// one of `?`, `!`, `=`. Any other (an operator, `[]`, ``) is scanned.
+fn is_word_name(name: &str) -> bool {
+    let word = name.strip_suffix(['?', '!', '=']).unwrap_or(name);
+    !word.is_empty() && word.chars().all(is_word_char)
+}
+
+/// Add to `words` what [`mentions_scan`] counts in `text` for each word
+/// name: a maximal run of word characters not written after `def ` or
+/// `def self.`, counted under the run itself when no `?`, `!` or `=`
+/// follows it, and under the run plus that one character when what follows
+/// that is not a word character or one of the three.
+fn count_words<'a>(text: &'a str, words: &mut HashMap<&'a str, usize>) {
+    let bytes = text.as_bytes();
+    let mut chars = text.char_indices().peekable();
+    while let Some((start, c)) = chars.next() {
+        if !is_word_char(c) {
+            continue;
+        }
+        let mut end = start + c.len_utf8();
+        while let Some(&(at, next)) = chars.peek() {
+            if !is_word_char(next) {
+                break;
+            }
+            end = at + next.len_utf8();
+            chars.next();
+        }
+        let before = &text[..start];
+        if before.ends_with("def ") || before.ends_with("def self.") {
+            continue;
+        }
+        let suffix = bytes.get(end).copied().filter(|b| matches!(b, b'?' | b'!' | b'='));
+        if suffix.is_none() {
+            *words.entry(&text[start..end]).or_default() += 1;
+            continue;
+        }
+        let after = &text[end + 1..];
+        if !after.starts_with(|c: char| is_word_char(c) || matches!(c, '?' | '!' | '=')) {
+            *words.entry(&text[start..end + 1]).or_default() += 1;
+        }
+    }
 }
 
 /// How many times the sources name `name` as a word, outside its `def`.
-fn mentions(name: &str, sources: &[SourceFile]) -> usize {
+fn mentions_scan(name: &str, sources: &[SourceFile]) -> usize {
     sources
         .iter()
         .map(|source| {
@@ -1944,4 +2028,50 @@ fn valid_def_name(name: &Symbol) -> bool {
     let [node] = nodes.as_slice() else { return false };
     let Some(def) = node.as_def_node() else { return false };
     parsed.errors().next().is_none() && def.receiver().is_none() && def.name().as_slice() == name.as_str().as_bytes()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_word_index_counts_what_the_scan_counts() {
+        let texts = [
+            "def foo; end\ndef self.foo; end\nfoo\nfoo()\nx.foo = 1\nfoo=1\nfoo == 2\nfoo?\nfoo!\nfoo?!\nfoo??\n",
+            "foo? foo?\nfoo?=\nfoo!=\n a.foo?.bar foo!x foo?x\nundef foo\ndef  foo\nprivate def foo\n:foo :foo? :foo= :foo!\n",
+            "_foo foo_ foo9 9foo Foo FOO é_foo fooé éfoo é foo é\n\"foo\" 'foo' foo.bar foo::Baz Baz::foo ::foo\n",
+            "def\ndef \ndef self.\nself.foo\nfoo\nfoo=\n[]\n<=>\n== foo ==\n",
+            "a\naa\na a\naaa aa a?\na=a=\n?\n!\n=\n_\n__\n1\n12\n",
+            "",
+            "foo",
+            "foo?",
+            "foo=",
+        ];
+        let sources: Vec<SourceFile> =
+            texts.iter().enumerate().map(|(i, text)| SourceFile { path: format!("{i}.rb"), text: text.to_string() }).collect();
+        let names = [
+            "foo", "foo?", "foo!", "foo=", "foo??", "Foo", "FOO", "_foo", "foo_", "foo9", "9foo", "é_foo", "éfoo", "é", "bar", "baz",
+            "a", "aa", "a?", "a=", "_", "__", "1", "12", "def", "self", "[]", "<=>", "==", "?", "!", "=", "", "foo bar", "foo.bar",
+        ];
+        let mentions = Mentions::new(&sources);
+        for name in names {
+            assert_eq!(mentions.count(name), mentions_scan(name, &sources), "{name:?}");
+            assert_eq!(mentions.mentioned(name), mentions_scan(name, &sources) > 0, "{name:?}");
+        }
+        assert!(mentions.count("foo") > 0 && mentions.count("foo?") > 0 && mentions.count("a") > 0);
+    }
+
+    /// A name the word index does not answer (an operator) is scanned once, however often
+    /// it is asked: ingest asks `==` and `[]` per method, and scanning every source each time
+    /// held a large app's ingest on one thread for ten minutes.
+    #[test]
+    fn a_scanned_name_is_scanned_once() {
+        let sources = [SourceFile { path: "a.rb".to_string(), text: "a == b\nc[1]\n".to_string() }];
+        let mentions = Mentions::new(&sources);
+        for _ in 0..3 {
+            assert_eq!(mentions.count("=="), 1);
+            assert_eq!(mentions.count("[]"), 0);
+        }
+        assert_eq!(mentions.scans.borrow().len(), 2);
+    }
 }
