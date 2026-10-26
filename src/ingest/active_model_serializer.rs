@@ -74,10 +74,24 @@ struct Decl {
 }
 
 pub(super) fn lower_active_model_serializers(app: &mut crate::App, sources: &[SourceFile]) -> IngestResult<()> {
+    // A serializer another app class inherits from is a base, not one
+    // to render through: lowered, it would lose the gem's parent its
+    // subclasses still need (their `attributes`, `as_json`). It stays as
+    // it was, as they do.
+    let parents: Vec<String> = app
+        .library_classes
+        .iter()
+        .filter_map(|c| Some(c.parent.as_ref()?.0.as_str().trim_start_matches("::").to_string()))
+        .collect();
+    let is_base = |name: &str| {
+        let leaf = name.rsplit("::").next().unwrap_or(name);
+        parents.iter().any(|p| p == name || (!p.contains("::") && p == leaf))
+    };
     let selected: HashSet<ClassId> = app
         .library_classes
         .iter()
         .filter(|c| c.parent.as_ref().is_some_and(|p| p.0.as_str().trim_start_matches("::") == SERIALIZER))
+        .filter(|c| !is_base(c.name.0.as_str()))
         .map(|c| c.name.clone())
         .collect();
     if selected.is_empty() {

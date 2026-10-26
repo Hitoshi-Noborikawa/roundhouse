@@ -100,3 +100,22 @@ fn an_implicit_serializer_render_is_reported() {
     let (_, _, messages) = emitted(SERIALIZER, controller);
     assert!(messages.iter().any(|m| m.contains("through `ArticleSerializer`, found by its name")), "{messages:#?}");
 }
+
+/// A serializer another app serializer inherits from is a base: lowered,
+/// it would lose the gem parent its subclass still needs (`attributes`,
+/// `as_json`). It and its subclass stay as they were.
+#[test]
+fn a_serializer_base_stays_as_it_was() {
+    let mut tree = tree(
+        "class ArticleSerializer < ApplicationSerializer\n  attributes :id, :title\nend\n",
+        CONTROLLER,
+    );
+    tree.insert(
+        PathBuf::from("app/serializers/application_serializer.rb"),
+        b"class ApplicationSerializer < ActiveModel::Serializer\nend\n".to_vec(),
+    );
+    let app = ingest_app_from_tree(tree).expect("ingest");
+    let base = app.library_classes.iter().find(|c| c.name.0.as_str() == "ApplicationSerializer").expect("base");
+    assert_eq!(base.parent.as_ref().map(|p| p.0.as_str()), Some("ActiveModel::Serializer"));
+    assert!(base.methods.iter().all(|m| m.name.as_str() != "as_json_str"), "the base was lowered");
+}
