@@ -67,7 +67,10 @@ pub fn apply_mailer_templates(app: &mut App) -> Vec<Diagnostic> {
             if m.receiver != crate::dialect::MethodReceiver::Instance || m.name.as_str() == "initialize" {
                 continue;
             }
-            let action = m.name.as_str().to_string();
+            // An action with a callback chain keeps its body under a
+            // private name (`ingest::mailer_callbacks`); its templates are
+            // still the action's.
+            let action = crate::ingest::mailer_callbacks::action_of(m.name.as_str()).to_string();
             let template = format!("{dir}/{action}");
             let site = Site {
                 module: &module,

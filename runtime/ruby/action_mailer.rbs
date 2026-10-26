@@ -12,7 +12,17 @@ module ActionMailer
     def mime_type: () -> String
   end
 
+  class Header
+    @name: String
+    @value: String
+
+    def initialize: (String name, String value) -> void
+    def name: () -> String
+    def value: () -> String
+  end
+
   class Message
+    @headers: Hash[String, String]
     @to: Array[String]?
     @from: Array[String]?
     @cc: Array[String]?
@@ -31,6 +41,10 @@ module ActionMailer
     def bcc: () -> Array[String]?
     def reply_to: () -> Array[String]?
     def subject: () -> untyped
+    def headers: () -> Hash[String, String]
+    def add_header: (String name, String value) -> String
+    def []: (String name) -> Header?
+    def self.joined: (Array[String]? list) -> String?
     def body: () -> String
     def multipart?: () -> bool
     def text_part: () -> Part?
@@ -42,11 +56,31 @@ module ActionMailer
   class Base
     self.@deliveries: Array[Message]
     @params: Hash[Symbol, untyped]?
+    @_message: Message?
+    @_action_name: String?
+    @_headers: Hash[String, String]?
+    @_processing: bool?
 
     def self.default: (?Hash[Symbol, untyped]? opts) -> nil
     def self.deliveries: () -> Array[Message]
     def mail: (Hash[Symbol, untyped] opts, ?String? text_body, ?String? html_body) -> Message
     def params: () -> Hash[Symbol, untyped]
     def _with_params: (Hash[Symbol, untyped] params) -> self
+    def message: () -> Message?
+    def action_name: () -> String
+    def __start_action: (String name) -> bool
+    def __end_action: () -> nil
+    def __processing: () -> self
+    def headers: (?Hash[String, String]? values) -> Headers
+    def __headers: () -> Hash[String, String]
+    def __add_header: (String name, String value) -> String
+  end
+
+  class Headers
+    @mailer: Base
+
+    def initialize: (Base mailer) -> void
+    def []=: (String name, String value) -> String
+    def []: (String name) -> String?
   end
 end
