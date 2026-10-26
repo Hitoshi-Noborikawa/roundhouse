@@ -129,7 +129,7 @@ fn queues(value: &Value) -> Option<Vec<(String, i64)>> {
                     Some(w) => w.trim().parse::<i64>().ok()?,
                     None => 0,
                 };
-                if name.is_empty() {
+                if !queue_name(&name) {
                     return None;
                 }
                 out.push((name, weight));
@@ -143,12 +143,21 @@ fn queues(value: &Value) -> Option<Vec<(String, i64)>> {
                     None => 0,
                     Some(w) => w.as_i64()?,
                 };
+                if !queue_name(&name) {
+                    return None;
+                }
                 out.push((name, weight));
             }
             _ => return None,
         }
     }
     if out.is_empty() { None } else { Some(out) }
+}
+
+/// A name the worker's `-q name,weight` list can carry: no space and no
+/// comma, which would split it there.
+fn queue_name(name: &str) -> bool {
+    !name.is_empty() && !name.contains(|c: char| c.is_whitespace() || c == ',')
 }
 
 fn mentions_erb(value: &Value) -> bool {
@@ -222,6 +231,15 @@ mod tests {
         assert_eq!(w.len(), 2, "{w:#?}");
         assert!(w[0].contains(":concurrency") && w[0].contains("ERB"), "{w:#?}");
         assert!(w[1].contains(":max_retries"), "{w:#?}");
+    }
+
+    #[test]
+    fn a_queue_name_with_a_space_or_a_comma_is_not_read() {
+        for text in [":queues:\n  - \"my queue\"\n", ":queues:\n  - [\"a,b\", 2]\n", ":queues:\n  - [\"a b\", 2]\n"] {
+            let (d, w) = parse(text);
+            assert!(d.queues.is_empty(), "{text}: {:?}", d.queues);
+            assert_eq!(w.len(), 1, "{text}: {w:#?}");
+        }
     }
 
     #[test]
