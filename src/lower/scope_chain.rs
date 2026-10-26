@@ -16,6 +16,8 @@
 //! a `Model.where(...)` / `Model.all` chain-start (no scope) is seeded with
 //! `ActiveRecord::Relation.new(Model)` so it, too, is chainable.
 
+pub(crate) mod query_arguments;
+
 use std::collections::{HashMap, HashSet};
 
 use crate::dialect::{Association, Model, ModelBodyItem, Param};
@@ -3217,6 +3219,118 @@ fn seedable_assoc_read(ctx: &Ctx, value: &Expr, span: crate::span::Span) -> Opti
     resolved
 }
 
+#[allow(clippy::too_many_arguments)]
+fn build_association_seed(
+    span: crate::span::Span,
+    target: &ClassId,
+    fk: Symbol,
+    owner_id: Expr,
+    type_entry: Option<(Expr, Expr)>,
+    owner: &Expr,
+    name: &Symbol,
+    scope_attributes: bool,
+) -> Expr {
+    // An owner key other than `id` can be NULL, and
+    // `where(fk: nil)` would match the child rows
+    // whose fk is NULL. Rails never matches a nil
+    // owner key, so the seed excludes them.
+    let keyed_guard = !matches!(
+        &*owner_id.node,
+        ExprNode::Ivar { name } if name.as_str() == "id"
+    ) && !matches!(
+        &*owner_id.node,
+        ExprNode::Send { method, .. } if method.as_str() == "id"
+    );
+    let guard_sql = format!("{} IS NOT NULL", fk.as_str());
+    let fk_hash = syn(
+        span,
+        ExprNode::Hash {
+            entries: std::iter::once((
+                syn(
+                    span,
+                    ExprNode::Lit { value: Literal::Sym { value: fk } },
+                ),
+                owner_id,
+            ))
+            .chain(type_entry.clone())
+            .collect(),
+            kwargs: true,
+        },
+    );
+    let seed_method =
+        if scope_attributes { "where_scope" } else { "where" };
+    let mut seed = syn(
+        span,
+        ExprNode::Send {
+            recv: Some(relation_new(span, target)),
+            method: Symbol::from(seed_method),
+            args: vec![fk_hash],
+            block: None,
+            parenthesized: true,
+        },
+    );
+    if keyed_guard {
+        seed = syn(
+            span,
+            ExprNode::Send {
+                recv: Some(seed),
+                method: Symbol::from("where"),
+                args: vec![syn(
+                    span,
+                    ExprNode::Lit {
+                        value: Literal::Str { value: guard_sql },
+                    },
+                )],
+                block: None,
+                parenthesized: true,
+            },
+        );
+    }
+    // The seed REPLACES `<owner>.<assoc>`, and with
+    // it the reader's eager-load cache: a scope
+    // reached through a preloaded association
+    // (`message.boosts.ordered`, with `includes
+    // (boosts: :booster)` upstream) re-queried per
+    // record -- the room page's last N+1. So the
+    // relation is handed the cache too:
+    // `.preloaded(<owner>.<assoc>_target,
+    // <owner>.<assoc>_loaded?)` seeds its loaded
+    // memo when the association was loaded and is a
+    // no-op when it was not. An order-only scope
+    // then sorts the memo in memory (Relation#order);
+    // a filtering chain drops it and queries, as
+    // before. Not for the create-scope spelling,
+    // which builds a record rather than reading.
+    if !scope_attributes {
+        let owner_send = |m: String| {
+            syn(
+                span,
+                ExprNode::Send {
+                    recv: Some(owner.clone()),
+                    method: Symbol::from(m),
+                    args: vec![],
+                    block: None,
+                    parenthesized: false,
+                },
+            )
+        };
+        seed = syn(
+            span,
+            ExprNode::Send {
+                recv: Some(seed),
+                method: Symbol::from("preloaded"),
+                args: vec![
+                    owner_send(format!("{}_target", name.as_str())),
+                    owner_send(format!("{}_loaded?", name.as_str())),
+                ],
+                block: None,
+                parenthesized: true,
+            },
+        );
+    }
+    seed
+}
+
 fn assoc_owner_seed(
     ctx: &Ctx,
     aname: &Symbol,
@@ -4681,104 +4795,10 @@ fn rewrite_send(expr: &mut Expr, ctx: &Ctx, locals: &mut Locals) -> Option<Class
                         // the foreign key as `scope_attributes` too.
                         let assoc_cm = ctx.assoc_class_method_params(&target, &method);
                         if is_scope || is_chain || is_term || assoc_cm.is_some() {
-                            // An owner key other than `id` can be NULL, and
-                            // `where(fk: nil)` would match the child rows
-                            // whose fk is NULL. Rails never matches a nil
-                            // owner key, so the seed excludes them.
-                            let keyed_guard = !matches!(
-                                &*owner_id.node,
-                                ExprNode::Ivar { name } if name.as_str() == "id"
-                            ) && !matches!(
-                                &*owner_id.node,
-                                ExprNode::Send { method, .. } if method.as_str() == "id"
+                            let seed = build_association_seed(
+                                span, &target, fk, owner_id, type_entry.clone(), ir, aname,
+                                assoc_cm.is_some(),
                             );
-                            let guard_sql = format!("{} IS NOT NULL", fk.as_str());
-                            let fk_hash = syn(
-                                span,
-                                ExprNode::Hash {
-                                    entries: std::iter::once((
-                                        syn(
-                                            span,
-                                            ExprNode::Lit { value: Literal::Sym { value: fk } },
-                                        ),
-                                        owner_id,
-                                    ))
-                                    .chain(type_entry.clone())
-                                    .collect(),
-                                    kwargs: true,
-                                },
-                            );
-                            let seed_method =
-                                if assoc_cm.is_some() { "where_scope" } else { "where" };
-                            let mut seed = syn(
-                                span,
-                                ExprNode::Send {
-                                    recv: Some(relation_new(span, &target)),
-                                    method: Symbol::from(seed_method),
-                                    args: vec![fk_hash],
-                                    block: None,
-                                    parenthesized: true,
-                                },
-                            );
-                            if keyed_guard {
-                                seed = syn(
-                                    span,
-                                    ExprNode::Send {
-                                        recv: Some(seed),
-                                        method: Symbol::from("where"),
-                                        args: vec![syn(
-                                            span,
-                                            ExprNode::Lit {
-                                                value: Literal::Str { value: guard_sql },
-                                            },
-                                        )],
-                                        block: None,
-                                        parenthesized: true,
-                                    },
-                                );
-                            }
-                            // The seed REPLACES `<owner>.<assoc>`, and with
-                            // it the reader's eager-load cache: a scope
-                            // reached through a preloaded association
-                            // (`message.boosts.ordered`, with `includes
-                            // (boosts: :booster)` upstream) re-queried per
-                            // record -- the room page's last N+1. So the
-                            // relation is handed the cache too:
-                            // `.preloaded(<owner>.<assoc>_target,
-                            // <owner>.<assoc>_loaded?)` seeds its loaded
-                            // memo when the association was loaded and is a
-                            // no-op when it was not. An order-only scope
-                            // then sorts the memo in memory (Relation#order);
-                            // a filtering chain drops it and queries, as
-                            // before. Not for the create-scope spelling,
-                            // which builds a record rather than reading.
-                            if assoc_cm.is_none() {
-                                let owner_send = |m: String| {
-                                    syn(
-                                        span,
-                                        ExprNode::Send {
-                                            recv: Some(ir.clone()),
-                                            method: Symbol::from(m),
-                                            args: vec![],
-                                            block: None,
-                                            parenthesized: false,
-                                        },
-                                    )
-                                };
-                                seed = syn(
-                                    span,
-                                    ExprNode::Send {
-                                        recv: Some(seed),
-                                        method: Symbol::from("preloaded"),
-                                        args: vec![
-                                            owner_send(format!("{}_target", aname.as_str())),
-                                            owner_send(format!("{}_loaded?", aname.as_str())),
-                                        ],
-                                        block: None,
-                                        parenthesized: true,
-                                    },
-                                );
-                            }
                             if let Some(leading) = assoc_cm {
                                 let new_args = thread_rel(args, seed, Some(leading), span);
                                 *expr = put(
