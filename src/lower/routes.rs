@@ -1032,9 +1032,17 @@ fn nest_path(
         // `get "pages/:page"` is `/comments/:id/pages/:page` and even a
         // leading-slash `get "/comments/:id" => …` comes out as
         // `/comments/:id/comments/:id` (measured against Rails 8.1).
+        // A SINGULAR parent has no id, so neither do its member routes:
+        // `resource :profile { member { get :preview } }` is
+        // `/profile/preview` (Rails 8.1.4), like its own `show`.
         ResourceScope::Member => {
-            params.push(innermost.param.clone());
-            (format!("{prefix}{parent_plural}/:{}{path}", innermost.param), params)
+            let mut full = format!("{prefix}{parent_plural}");
+            if innermost.has_id {
+                full.push_str(&format!("/:{}", innermost.param));
+                params.push(innermost.param.clone());
+            }
+            full.push_str(path);
+            (full, params)
         }
         // `collection do get "search" end` → `/photos/search` (no id);
         // `get "/(:name)"` → `/photos(/:name)`, never a bare `/:name`.

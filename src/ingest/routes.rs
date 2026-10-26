@@ -3700,8 +3700,16 @@ fn ingest_resources_route(
 
     // A verb in the block with no `to:` (`member { get :download }`)
     // dispatches to the resource's controller: `controller:` when given,
-    // as Rails routes it, else the resource name.
-    let block_controller = controller.as_deref().unwrap_or(name_str.as_str()).to_string();
+    // as Rails routes it, else the resource name — pluralized for a
+    // singular `resource :profile`, whose routes all go to
+    // `ProfilesController` (Rails 8.1.4: `preview_profile GET
+    // /profile/preview profiles#preview`), as the lowering already does
+    // for the resource's own actions.
+    let block_controller = match controller.as_deref() {
+        Some(c) => c.to_string(),
+        None if singular => crate::naming::pluralize_snake(name_str.as_str()),
+        None => name_str.clone(),
+    };
     let mut nested = block_entries(call, file, Some(block_controller.as_str()), cx)?;
     if !concern_names.is_empty() {
         let none = eval::RVal::Hash(Vec::new());
