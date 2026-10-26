@@ -77,6 +77,14 @@ fn dynamic_resource_modules_are_reported() {
 
 #[test]
 fn rails_agrees_with_resource_module_routes() {
+    let available = Command::new("ruby")
+        .args(["-e", r#"gem "actionpack", "8.1.4"; require "action_controller""#])
+        .output()
+        .is_ok_and(|output| output.status.success());
+    if !available {
+        eprintln!("skipping: Ruby with actionpack 8.1.4 is not available");
+        return;
+    }
     let script = format!(
         r##"gem "actionpack", "8.1.4"
 require "action_controller"
