@@ -97,6 +97,7 @@ fail() { printf '\033[1;31m%s\033[0m\n' "$1"; exit 1; }
 SERVER_PID=""
 WORKER_PID=""
 REDIS_PORT=""
+REDIS_PID=""
 SOURCE_COPY=""
 cleanup() {
     # By PID, and only the one this script started.
@@ -108,8 +109,8 @@ cleanup() {
         kill "$WORKER_PID" 2>/dev/null || true
         wait "$WORKER_PID" 2>/dev/null || true
     fi
-    if [[ -n "$REDIS_PORT" ]]; then
-        redis-cli -p "$REDIS_PORT" shutdown nosave >/dev/null 2>&1 || true
+    if [[ -n "$REDIS_PID" ]] && kill -0 "$REDIS_PID" 2>/dev/null; then
+        kill "$REDIS_PID" 2>/dev/null || true
     fi
     if [[ -n "$SOURCE_COPY" ]]; then rm -rf "$SOURCE_COPY"; fi
     if [[ -n "$OUT" && $KEEP -eq 0 && -z "$REUSE" ]]; then rm -rf "$OUT"; fi
@@ -213,10 +214,18 @@ if [[ $SIDEKIQ -eq 1 ]]; then
     step "starting Redis on :$REDIS_PORT"
     redis-server --port "$REDIS_PORT" --save '' --appendonly no --daemonize yes \
         --pidfile "$OUT/cable-walk-redis.pid" --logfile "$OUT/cable-walk-redis.log"
+    # Ready when the server on the port is the one just started.
     for _ in $(seq 1 50); do
-        redis-cli -p "$REDIS_PORT" ping >/dev/null 2>&1 && break
+        if [[ -s "$OUT/cable-walk-redis.pid" ]]; then
+            REDIS_PID="$(cat "$OUT/cable-walk-redis.pid")"
+            if [[ "$(redis-cli -p "$REDIS_PORT" info server 2>/dev/null | tr -d '\r' | sed -n 's/^process_id://p')" == "$REDIS_PID" ]]; then
+                break
+            fi
+        fi
         sleep 0.1
     done
+    [[ -n "$REDIS_PID" && "$(redis-cli -p "$REDIS_PORT" info server 2>/dev/null | tr -d '\r' | sed -n 's/^process_id://p')" == "$REDIS_PID" ]] \
+        || fail "Redis never came up on :$REDIS_PORT (log: $OUT/cable-walk-redis.log)"
     export REDIS_URL="redis://127.0.0.1:$REDIS_PORT/0"
 fi
 
@@ -275,11 +284,17 @@ set -e
 if [[ $STATUS -eq 0 && $SIDEKIQ -eq 1 ]]; then
     step "the worker ran the jobs"
     worker_ran() { grep -q "class=$1 jid=[0-9a-f]* done" "$WORKER_LOG"; }
+    # Every job the worker started has ended (done or fail), not only an
+    # empty queue, which a job still running also leaves.
+    all_ended() {
+        [[ "$(grep -c " start$" "$WORKER_LOG")" == "$(grep -cE " (done|discarded|fail): " "$WORKER_LOG")" ]]
+    }
     for _ in $(seq 1 50); do
         worker_ran Room::PushMessageJob && worker_ran Message::BroadcastUnreadRoomJob \
-            && [[ "$(redis-cli -p "$REDIS_PORT" llen queue:default)" == "0" ]] && break
+            && [[ "$(redis-cli -p "$REDIS_PORT" llen queue:default)" == "0" ]] && all_ended && break
         sleep 0.2
     done
+    all_ended || { printf '  \033[31mFAIL\033[0m a job the worker started never ended (log: %s)\n' "$WORKER_LOG"; STATUS=1; }
     for job in Room::PushMessageJob Message::BroadcastUnreadRoomJob; do
         if worker_ran "$job"; then
             printf '  \033[32mok\033[0m   the worker ran %s\n' "$job"
