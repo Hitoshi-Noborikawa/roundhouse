@@ -448,6 +448,19 @@ pub fn diagnose_with_coverage(app: &App) -> (Vec<Diagnostic>, PreloadCoverage) {
     // walker emits the outer node before recursing, that's the longest,
     // outermost span. Self-correcting: once span preservation gives links
     // distinct starts, they survive on their own again.
+    // Not left a warning: a call only an initializer's top-level `def` answers is a NameError in the emitted app.
+    for d in &mut out {
+        if let DiagnosticKind::UnresolvedType { name: Some(name), .. } = &d.kind
+            && app.initializer_defs.contains(name)
+        {
+            *d = Diagnostic::unsupported(
+                d.span,
+                None,
+                "method an initializer defines at top level",
+                format!("`{}` is a method on Object only while the initializer has run, and the emitted app does not replay initializer code", name.as_str()),
+            );
+        }
+    }
     let mut seen = std::collections::HashSet::new();
     out.retain(|d| seen.insert((d.span.file, d.span.start, d.code(), d.message.clone())));
     // A template no request reaches (`ingest::unreachable_views`): its errors stay visible, as warnings.

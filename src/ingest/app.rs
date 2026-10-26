@@ -1491,6 +1491,7 @@ end
                 }
                 app.module_mixins.extend(mixins);
                 app.initializer_filters.extend(extract_initializer_filters(&bytes, &path_str));
+                app.initializer_defs.extend(extract_initializer_defs(&bytes, &path_str));
                 app.initializer_response_headers
                     .extend(extract_initializer_response_headers(&bytes, &path_str));
                 if let Some(store) = extract_collection_cache_store(&bytes, &path_str) {
@@ -9515,6 +9516,20 @@ pub(super) fn initializer_statements<'a>(program: &ruby_prism::ProgramNode<'a>) 
         }
     }
     stmts
+}
+
+/// `def name` at an initializer's top level (lobsters'
+/// `do_heinous_inline_partial_replacement`).
+pub(super) fn extract_initializer_defs(source: &[u8], file: &str) -> Vec<crate::ident::Symbol> {
+    let result = super::prism::parse(source, file);
+    let root = result.node();
+    let Some(program) = root.as_program_node() else { return Vec::new() };
+    initializer_statements(&program)
+        .iter()
+        .filter_map(|stmt| stmt.as_def_node())
+        .filter(|def| def.receiver().is_none())
+        .map(|def| crate::ident::Symbol::from(super::util::constant_id_str(&def.name())))
+        .collect()
 }
 
 /// `X.before_action :m[, only: :a | %i[a b]]` in a `config/initializers/`
