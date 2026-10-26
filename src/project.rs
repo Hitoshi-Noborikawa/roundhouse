@@ -4299,8 +4299,11 @@ fn apply_i18n_locales(files: &mut [(String, String)], app: &App) {
         false => format!(":{}", crate::emit::ruby::expr::ruby_str_literal(l)),
     };
     let available = catalog.locales().iter().map(|l| sym(l)).collect::<Vec<_>>().join(", ");
+    // `.freeze`: a literal Array of literals frozen in place is one shared
+    // object on CRuby 3.4+, and `I18n.locale` searches this list on every
+    // call (once per element of a cached collection's keys).
     let generated = format!(
-        "{HEAD}  def self.app_default_locale\n    {}\n  end\n\n  def self.app_available_locales\n    [{available}]\n  end\n{TAIL}",
+        "{HEAD}  def self.app_default_locale\n    {}\n  end\n\n  def self.app_available_locales\n    [{available}].freeze\n  end\n{TAIL}",
         sym(&catalog.locale)
     );
     for (path, content) in files.iter_mut() {

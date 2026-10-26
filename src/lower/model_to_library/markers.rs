@@ -1313,7 +1313,7 @@ pub(super) fn push_cache_key_methods(methods: &mut Vec<MethodDef>, model: &Model
     if methods.iter().any(|m| {
         m.name.as_str() == "cache_version" && m.receiver == MethodReceiver::Instance
     }) {
-        methods.push(str_method(model, "cache_key_with_version", versioned_by_cache_version(span)));
+        methods.push(str_method(model, "cache_key_with_version", versioned_by_cache_version(span, &table_name, persisted)));
         return;
     }
 
@@ -1401,7 +1401,12 @@ pub(super) fn push_cache_key_methods(methods: &mut Vec<MethodDef>, model: &Model
 ///
 ///   version = cache_version
 ///   version.nil? ? cache_key : "#{cache_key}-#{version}"
-fn versioned_by_cache_version(span: Span) -> Expr {
+///
+/// with the synthesized `cache_key` spelled out in the joined arm, as
+/// the `updated_at` path does: `persisted? ? "<table>/#{@id}-#{version}"
+/// : "<table>/new-#{version}"`, one String rather than the key's and
+/// then the joined one, for every element of a cached collection.
+fn versioned_by_cache_version(span: Span, table_name: &str, persisted: Expr) -> Expr {
     let version = Symbol::from("version");
     let call = |recv: Option<Expr>, method: &str| {
         Expr::new(
@@ -1423,15 +1428,26 @@ fn versioned_by_cache_version(span: Span) -> Expr {
             value: call(Some(Expr::new(span, ExprNode::SelfRef)), "cache_version"),
         },
     );
+    let interp = |parts: Vec<crate::expr::InterpPart>| {
+        with_ty(Expr::new(span, ExprNode::StringInterp { parts }), Ty::Str)
+    };
     let joined = with_ty(
         Expr::new(
             span,
-            ExprNode::StringInterp {
-                parts: vec![
-                    crate::expr::InterpPart::Expr { expr: call(None, "cache_key") },
+            ExprNode::If {
+                cond: persisted,
+                then_branch: interp(vec![
+                    crate::expr::InterpPart::Text { value: format!("{table_name}/") },
+                    crate::expr::InterpPart::Expr {
+                        expr: Expr::new(span, ExprNode::Ivar { name: Symbol::from("id") }),
+                    },
                     crate::expr::InterpPart::Text { value: "-".to_string() },
                     crate::expr::InterpPart::Expr { expr: read() },
-                ],
+                ]),
+                else_branch: interp(vec![
+                    crate::expr::InterpPart::Text { value: format!("{table_name}/new-") },
+                    crate::expr::InterpPart::Expr { expr: read() },
+                ]),
             },
         ),
         Ty::Str,
