@@ -217,3 +217,25 @@ fn a_serializer_name_resolves_in_its_enclosing_class_first() {
         assert!(!lowered("REST::AccountSerializer::RoleSerializer"));
     }
 }
+
+/// Review 4382086109: inside `module Api`, `render … serializer:
+/// ArticleSerializer` names `Api::ArticleSerializer` (Ruby's lexical
+/// lookup), but the render rewrite matches the written name to a lowered
+/// class's full name, so it leaves that render to the gem. The serializer
+/// is refused for that use, not lowered while the render still needs the
+/// gem's class.
+#[test]
+fn a_render_naming_a_serializer_by_a_shorter_name_refuses_it() {
+    let serializer = "module Api\n  class ArticleSerializer < ActiveModel::Serializer\n    attributes :id, :title\n  end\nend\n";
+    let controller = "module Api\n  class ArticlesController < ApplicationController\n    def show\n      render json: Article.find(params[:id]), serializer: ArticleSerializer\n    end\n  end\nend\n";
+    survey::activate();
+    let result = ingest_app_from_tree(tree(serializer, controller));
+    let gaps = survey::drain();
+    let app = result.expect("survey ingest recovers");
+    assert!(
+        gaps.iter().any(|g| matches!(g, IngestError::Unsupported { message, .. } if message.contains("used at app/controllers/articles_controller.rb:4 other than through `render json:`"))),
+        "{gaps:?}"
+    );
+    let class = app.library_classes.iter().find(|c| c.name.0.as_str() == "Api::ArticleSerializer").expect("class");
+    assert!(class.methods.iter().all(|m| m.name.as_str() != "as_json_str"), "lowered");
+}

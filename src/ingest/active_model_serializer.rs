@@ -614,6 +614,16 @@ impl OtherUses<'_> {
         true
     }
 
+    /// Whether a render's `serializer:` written as `path` is one
+    /// `rewrite_renders` takes: it matches the written name to a lowered
+    /// class's full name, so a short name that resolves through the
+    /// nesting (`ArticleSerializer` inside `module Api`) stays with the
+    /// gem's class and is a use like any other.
+    fn rewritten(&self, path: &[String]) -> bool {
+        let written = path.join("::");
+        matches!(self.named(path).as_slice(), [id] if id.0.as_str() == written)
+    }
+
     /// Enters a class or module written as `name` from the current nesting.
     fn enter(&mut self, name: Option<Vec<String>>) -> bool {
         let Some(name) = name else { return false };
@@ -651,9 +661,10 @@ impl<'pr> ruby_prism::Visit<'pr> for OtherUses<'_> {
         }
     }
     fn visit_call_node(&mut self, node: &ruby_prism::CallNode<'pr>) {
-        // `render json: x, serializer: S`: S is not another use. A render
-        // the rewrite takes calls the lowered class; one with another
-        // option is already the reported residue.
+        // `render json: x, serializer: S`, S written by its full name: not
+        // another use. A render the rewrite takes calls the lowered class;
+        // one with another option is already the reported residue. S
+        // written by a shorter name the rewrite doesn't match is a use.
         if node.receiver().is_none() && constant_id_str(&node.name()) == "render" {
             if let Some(args) = node.arguments() {
                 let list: Vec<_> = args.arguments().iter().collect();
@@ -664,7 +675,7 @@ impl<'pr> ruby_prism::Visit<'pr> for OtherUses<'_> {
                                 let Some(assoc) = el.as_assoc_node() else { continue };
                                 let key = super::util::symbol_value(&assoc.key());
                                 if matches!(key.as_deref(), Some("serializer" | "each_serializer"))
-                                    && super::util::constant_path_of(&assoc.value()).is_some_and(|p| !self.named(&p).is_empty())
+                                    && super::util::constant_path_of(&assoc.value()).is_some_and(|p| self.rewritten(&p))
                                 {
                                     continue;
                                 }
