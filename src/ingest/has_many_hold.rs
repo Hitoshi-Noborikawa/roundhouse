@@ -16,6 +16,7 @@
 //! def __push_tasks(record)        # a lowered `tasks << record`
 //! validate :__held_tasks_valid    # each held record valid, else `errors.add(:tasks, :invalid)`
 //! after_save :__held_tasks_save   # each held record saved, with the key
+//! after_save_commit :__held_tasks_committed  # the held list cleared once the save commits
 //! ```
 //!
 //! `lower::scope_chain` routes the calls there, and the reader's unsaved
@@ -112,8 +113,12 @@ pub(crate) fn expand(app: &mut App) {
                 .unwrap_or_default();
             let n = name.as_str();
             let fk = foreign_key.as_str();
+            // The model by name, not `self.class`: Spinel (fac2462a0) loses a
+            // local a block assigns when the block raises out of a
+            // `self.class` call (SPINEL-ISSUE.md in the #1395 notes).
+            let owner = model.name.0.as_str();
             let src = format!(
-                "class Generated\n  def __hold_{n}(record)\n    @__held_{n} = [] if @__held_{n}.nil?\n    @__held_{n} << record\n    record\n  end\n\n  def __push_{n}(record)\n    if new_record?\n{set_owner}{set_type}      __hold_{n}(record)\n    else\n      record.{fk} = id\n{set_type}      record.save\n    end\n    {n}\n  end\n\n  def __push_all_{n}(records)\n    records.each {{ |record| __push_{n}(record) }}\n    {n}\n  end\n\n  def __held_{n}_list\n    @__held_{n}.nil? ? [] : @__held_{n}\n  end\n\n  def __held_{n}_valid\n    return if @__held_{n}.nil?\n    invalid = false\n    __held_{n}_list.each do |child|\n      next if child.valid?\n{counts}    end\n    errors.add(:{n}, :invalid) if invalid\n  end\n\n  validate :__held_{n}_valid\n\n  def __held_{n}_save\n    return if @__held_{n}.nil? || @__held_{n}_saving\n    @__held_{n}_saving = true\n    begin\n      __held_{n}_list.each do |child|\n        child.{fk} = id\n        child.save!\n      end\n      @__held_{n} = nil\n    ensure\n      @__held_{n}_saving = false\n    end\n  end\n\n  after_save :__held_{n}_save\nend\n"
+                "class Generated\n  def __hold_{n}(record)\n    @__held_{n} = [] if @__held_{n}.nil?\n    @__held_{n} << record\n    record\n  end\n\n  def __push_{n}(record)\n    if new_record?\n{set_owner}{set_type}      __hold_{n}(record)\n      {n}\n    else\n      record.{fk} = id\n{set_type}      record.save ? {n} : nil\n    end\n  end\n\n  def __push_all_{n}(records)\n    if new_record?\n      records.each {{ |record| __push_{n}(record) }}\n      return {n}\n    end\n    pushed = true\n    {owner}.transaction do\n      records.each do |record|\n        next unless __push_{n}(record).nil?\n        pushed = false\n        raise ActiveRecord::Rollback\n      end\n    end\n    pushed ? {n} : nil\n  end\n\n  def __held_{n}_list\n    @__held_{n}.nil? ? [] : @__held_{n}\n  end\n\n  def __held_{n}_valid\n    return if @__held_{n}.nil?\n    invalid = false\n    __held_{n}_list.each do |child|\n      next if child.valid?\n{counts}    end\n    errors.add(:{n}, :invalid) if invalid\n  end\n\n  validate :__held_{n}_valid\n\n  def __held_{n}_save\n    return if @__held_{n}.nil? || @__held_{n}_saving\n    @__held_{n}_saving = true\n    begin\n      __held_{n}_list.each do |child|\n        child.{fk} = id\n        child.save!\n      end\n    ensure\n      @__held_{n}_saving = false\n    end\n  end\n\n  after_save :__held_{n}_save\n\n  def __held_{n}_committed\n    @__held_{n} = nil\n  end\n\n  after_save_commit :__held_{n}_committed\nend\n"
             );
             if let Some(items) = super::validates_with::ingest_source(&src, &model.name) {
                 inserts.push((index + 1, items));
@@ -143,8 +148,10 @@ pub(crate) fn expand(app: &mut App) {
         table.insert(crate::ident::Symbol::from(format!("__hold_{name}")), takes(record.clone()));
         // `<<` answers the association; the record is what callers chain
         // on least, so the declared answer is the record's class only
-        // where nothing better is known: none is, before analysis.
-        table.insert(crate::ident::Symbol::from(format!("__push_{name}")), takes(record.clone()));
+        // where nothing better is known: none is, before analysis. Nil
+        // when a persisted owner's save of it fails, as Rails' `<<` is.
+        let pushed = crate::ty::Ty::Union { variants: vec![record.clone(), crate::ty::Ty::Nil].into() };
+        table.insert(crate::ident::Symbol::from(format!("__push_{name}")), takes(pushed.clone()));
         // `<<` with an Array adds each element (`concat(records.flatten)`).
         table.insert(
             crate::ident::Symbol::from(format!("__push_all_{name}")),
@@ -156,7 +163,7 @@ pub(crate) fn expand(app: &mut App) {
                 }]
                 .into(),
                 block: None,
-                ret: record.clone().into(),
+                ret: pushed.into(),
                 effects: Default::default(),
             },
         );

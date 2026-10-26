@@ -160,3 +160,61 @@ fn a_failed_child_save_keeps_the_held_children_on_spinel() {
     run.assert_passes();
     assert!(run.stdout.contains("has_many retry passed"), "{}", run.stdout);
 }
+
+// Review of #1395 (4376777753, 4376777762; oracle `review3_oracle.rb`,
+// which runs this script): an owner after_save that raises after its held
+// child was saved rolls back, leaving the owner new with its changes
+// pending and the child held, and the next save saves it; `<<` onto a
+// persisted owner answers nil when the record isn't saved, and an Array
+// is all or nothing.
+const REVIEW3_METHODS: &str = "  has_many :comments, dependent: :destroy\n\n  after_save :explode\n\n  def self.armed\n    @armed\n  end\n\n  def self.armed=(value)\n    @armed = value\n  end\n\n  def explode\n    raise \"boom\" if Article.armed\n  end\n\n  def add_built(commenter, body)\n    comments.build(commenter: commenter, body: body)\n  end\n\n  def add_pushed(comment)\n    comments << comment\n  end\n";
+
+const REVIEW3_SCRIPT: &str = r##"
+def check(label, got, want)
+  raise "#{label}: #{got.inspect} (want #{want.inspect})" unless got == want
+end
+body = "A body long enough to validate."
+a = Article.new(title: "t", body: body)
+a.add_built("ann", "hi")
+Article.armed = true
+raised = begin
+  a.save
+  nil
+rescue => e
+  e.message
+end
+check("an owner after_save raises after its held child was saved", raised, "boom")
+check("rolled back: the owner is new, its changes pending again", [a.new_record?, Article.count, Comment.count, a.changed?, a.changes_to_save.key?("title")], [true, 0, 0, true, true])
+check("the child is still held", a.comments.to_a.size, 1)
+Article.armed = false
+check("the next save saves it", [a.save, Article.count, Comment.pluck(:commenter)], [true, 1, ["ann"]])
+o = Article.create!(title: "o", body: body)
+check("<< a valid record onto a persisted owner", o.add_pushed(Comment.new(commenter: "bo", body: "x")).nil?, false)
+bad = Comment.new(commenter: "", body: "x")
+check("<< an invalid one: nil, and it stays unsaved", [o.add_pushed(bad), bad.persisted?], [nil, false])
+c1 = Comment.new(commenter: "cy", body: "x")
+c2 = Comment.new(commenter: "", body: "x")
+c3 = Comment.new(commenter: "di", body: "x")
+check("<< [valid, invalid, valid]: nil, and none is saved", [o.add_pushed([c1, c2, c3]), c1.persisted?, c2.persisted?, c3.persisted?], [nil, false, false, false])
+check("the owner's rows", Comment.where(article_id: o.id).order(:id).pluck(:commenter), ["bo"])
+puts "has_many review3 passed"
+"##;
+
+fn review3_app() -> emit_and_run::Overlay {
+    emit_and_run::real_blog().edit("app/models/article.rb", "  has_many :comments, dependent: :destroy\n", REVIEW3_METHODS)
+}
+
+#[test]
+fn a_rolled_back_owner_keeps_its_changes_and_its_held_child_on_ruby() {
+    let run = review3_app().run_ruby(REVIEW3_SCRIPT);
+    run.assert_passes();
+    assert!(run.stdout.contains("has_many review3 passed"), "{}", run.stdout);
+}
+
+#[test]
+#[ignore = "requires the Spinel toolchain"]
+fn a_rolled_back_owner_keeps_its_changes_and_its_held_child_on_spinel() {
+    let run = review3_app().run_spinel_with_db(REVIEW3_SCRIPT);
+    run.assert_passes();
+    assert!(run.stdout.contains("has_many review3 passed"), "{}", run.stdout);
+}
