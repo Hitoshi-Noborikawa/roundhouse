@@ -30,7 +30,7 @@ fn a_union_receiver_s_block_sees_every_variant() {
     assert!(errors.is_empty(), "{errors:#?}");
     let run = app().run_ruby(r#"Article.delete_all
 a = Article.create!(title: "Hello", body: "A sufficiently long body.")
-a.comments.create!(commenter: "Ann", body: "Nice")
+Comment.create!(article: a, commenter: "Ann", body: "Nice")
 raise "articles: #{Article.labels(:articles).inspect}" unless Article.labels(:articles) == ["Hello"]
 raise "comments: #{Article.labels(:comments).inspect}" unless Article.labels(:comments) == ["Ann"]
 puts "union block passed"
