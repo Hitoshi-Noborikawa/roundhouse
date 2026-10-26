@@ -711,6 +711,12 @@ module Cable
       send_text(JSON.generate(value))
     end
 
+    def transmit(data)
+      text = JsonBuilder.escape_html_entities(JSON.generate(data))
+      Reactor.post { send_text(text) }
+      nil
+    end
+
     def on_readable
       loop do
         data = @socket.read_nonblock(4096, exception: false)
