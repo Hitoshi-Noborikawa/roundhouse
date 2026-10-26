@@ -917,14 +917,14 @@ module ActiveRecord
       was_new = new_record?
       if was_new
         before_create
-        fill_timestamps(true)
+        fill_timestamps(true) if stamps_timestamps?
         self.id = _adapter_insert
         @persisted = true
         __track_saved_changes(was_new)
         after_create
       else
         before_update
-        fill_timestamps(false)
+        fill_timestamps(false) if stamps_timestamps?
         _adapter_update
         __track_saved_changes(was_new)
         after_update
@@ -968,7 +968,7 @@ module ActiveRecord
     # so loading the message fixtures left the fixture users with unread
     # rooms Rails never gives them.
     def _insert_row
-      fill_timestamps(true)
+      fill_timestamps(true) if stamps_timestamps?
       self.id = _adapter_insert
       @persisted = true
       _note_hydrated
@@ -1344,6 +1344,11 @@ module ActiveRecord
     # `fill_timestamps({"creating" => true})` and fails to match the
     # method's `bool` param. Positional sidesteps that — TS/Crystal
     # accept either shape, Rust gets the simpler one.
+    # Not a check of the class switch: only the ruby family's connection.rb keeps one, and answers it there
+    def stamps_timestamps?
+      true
+    end
+
     def fill_timestamps(creating)
       cols = self.class.schema_columns
       now = ActiveSupport.db_now

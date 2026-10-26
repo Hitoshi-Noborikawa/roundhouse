@@ -1874,6 +1874,10 @@ fn report_ruby_only_sends(app: &App, target: BuildTarget) {
                 (_, "create_or_find_by!") if kernel.contains(&"create_or_find_by!") => Some("ActiveRecord::Relation#create_or_find_by!"),
                 // Not filtered by what the app defines: the model's own `_run_x_callbacks` is the generated chain, built on yield and catch.
                 (_, name) if name.starts_with("_run_") && name.ends_with("_callbacks") => Some("ActiveRecord::Base#run_callbacks"),
+                // Not only `= false`: the setter lives in connection.rb, which only the ruby family loads, so even `= true` calls nothing elsewhere
+                (Some(r), "record_timestamps=") if r.decisions & crate::expr::CLASS_OBJECT_VALUE != 0 => {
+                    Some("ActiveRecord::Base.record_timestamps=")
+                }
                 (Some(r), "[]") => match &*r.node {
                     ExprNode::Const { path } if path.len() == 1 && path[0].as_str() == "Array" => Some("Array[]"),
                     ExprNode::Const { path } if path.len() == 1 && path[0].as_str() == "Hash" => Some("Hash[]"),
@@ -1890,6 +1894,11 @@ fn report_ruby_only_sends(app: &App, target: BuildTarget) {
                 (Some(_), "with_object") if matches!(recv_ty, Some(Ty::Array { .. })) => Some("Enumerator#with_object"),
                 (Some(_), "include?") if matches!(recv_ty, Some(Ty::Class { id, .. })
                     if matches!(id.0.as_str(), "Class" | "Module")) => Some("Module#include?"),
+                // The uri library is the ruby family's and spinel's `packages/uri`; no strict runtime carries it.
+                (Some(_), "escape") if matches!(recv_ty, Some(Ty::Class { id, .. }) if id.0.as_str() == "URI::RFC2396_Parser") => Some("URI::RFC2396_Parser#escape"),
+                (Some(_), "unescape") if matches!(recv_ty, Some(Ty::Class { id, .. }) if id.0.as_str() == "URI::RFC2396_Parser") => Some("URI::RFC2396_Parser#unescape"),
+                (Some(_), "escape") if matches!(recv_ty, Some(Ty::Class { id, .. }) if id.0.as_str() == "URI::RFC3986_Parser") => Some("URI::RFC3986_Parser#escape"),
+                (Some(_), "unescape") if matches!(recv_ty, Some(Ty::Class { id, .. }) if id.0.as_str() == "URI::RFC3986_Parser") => Some("URI::RFC3986_Parser#unescape"),
                 _ => None,
             };
             if let Some(construct) = construct {
@@ -2295,6 +2304,14 @@ fn target_files_inner(
         Some(lowered) => {
             with_closed_constantize = lowered;
             &with_closed_constantize
+        }
+        None => app,
+    };
+    let with_nil_operands;
+    let app = match crate::lower::nil_operand::lower_for_target(app, target) {
+        Some(lowered) => {
+            with_nil_operands = lowered;
+            &with_nil_operands
         }
         None => app,
     };

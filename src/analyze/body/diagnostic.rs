@@ -58,10 +58,10 @@ pub(super) fn detect_diagnostic(expr: &mut Expr) {
             }
             _ => false,
         };
+        let lhs_ty = r.ty.clone().unwrap_or(Ty::Nil);
+        let rhs_ty = rhs.ty.clone().unwrap_or(Ty::Nil);
         if incompatible {
             use crate::diagnostic::DiagnosticKind;
-            let lhs_ty = r.ty.clone().unwrap_or(Ty::Nil);
-            let rhs_ty = rhs.ty.clone().unwrap_or(Ty::Nil);
             expr.set_diagnostic(Some(DiagnosticKind::IncompatibleBinop {
                 op: method.clone(),
                 lhs_ty,

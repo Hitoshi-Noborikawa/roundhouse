@@ -331,6 +331,7 @@ module ActiveRecord
     # `untyped` from `self[]=` otherwise. Declare `void` since
     # callers ignore the result.
     def fill_timestamps: (bool creating) -> void
+    def stamps_timestamps?: () -> bool
 
     def valid?: () -> bool
 

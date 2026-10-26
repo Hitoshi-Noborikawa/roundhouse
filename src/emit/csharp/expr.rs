@@ -34,6 +34,10 @@ use super::naming::{camel, pascal, pascal_of_camel, type_name};
 use super::ty::csharp_ty;
 
 thread_local! {
+    static LET_OPTIONALS: RefCell<HashSet<String>> = RefCell::new(HashSet::new());
+}
+
+thread_local! {
     /// Local names already declared in the current method body (so the
     /// first `Assign` emits a declaration and later ones a bare `=`).
     static DECLARED: RefCell<HashSet<String>> = RefCell::new(HashSet::new());
@@ -978,7 +982,22 @@ fn is_empty_branch(e: &Expr) -> bool {
 fn emit_node(n: &ExprNode, e: &Expr) -> String {
     match n {
         ExprNode::Lit { value } => emit_literal(value),
-        ExprNode::Var { name, .. } => nonnull_read(camel(name.as_str())),
+        ExprNode::Var { name, .. } => {
+            let n = camel(name.as_str());
+            match (LET_OPTIONALS.with(|l| l.borrow().contains(&n)), e.ty.as_ref()) {
+                (true, Some(crate::ty::Ty::Int | crate::ty::Ty::Float | crate::ty::Ty::Bool)) => format!("{n}.Value"),
+                (true, Some(t)) if t.is_scalar() => format!("{n}!"),
+                _ => nonnull_read(n),
+            }
+        }
+        // Not a declaration statement: the binding sits in value position, and `is var` always matches, so `default` is never the answer
+        ExprNode::Let { name, value, body, .. } => {
+            let n = camel(name.as_str());
+            if matches!(value.ty, Some(crate::ty::Ty::Union { .. })) {
+                LET_OPTIONALS.with(|l| l.borrow_mut().insert(n.clone()));
+            }
+            format!("({} is var {n} ? {} : default)", emit_expr(value), emit_expr(body))
+        }
         ExprNode::Ivar { name } => {
             let n = camel(name.as_str());
             if is_object_tl_field(&n) {
@@ -1267,7 +1286,9 @@ fn emit_if_expr(cond: &Expr, then_branch: &Expr, else_branch: &Expr) -> String {
     if then_s == "null" && let Some(t) = nullable(else_branch) {
         return format!("({c} ? null : ({t})({els}))");
     }
-    format!("({c} ? ({then_s}) : ({els}))")
+    // Not parenthesized: C# rejects a throw expression inside parentheses (CS8115)
+    let arm = |s: String| if s.starts_with("throw ") { s } else { format!("({s})") };
+    format!("({c} ? {} : {})", arm(then_s), arm(els))
 }
 
 /// `case` in value position → C# switch-expression. Arms are cast to

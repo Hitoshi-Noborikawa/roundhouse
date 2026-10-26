@@ -1018,6 +1018,7 @@ pub(super) fn emit_expr(e: &Expr) -> String {
             None => current_fold_acc().unwrap_or_else(|| "nil".to_string()),
         },
         ExprNode::Raise { value } => format!("raise {}", emit_expr(value)),
+        ExprNode::Let { name, value, body, .. } => format!("(\n{name} = {}\n{}\n)", emit_expr(value), emit_expr(body)),
         ExprNode::BeginRescue { body, rescues, else_branch: None, ensure: Some(en), .. } if rescues.is_empty() => {
             emit_ensure_only(e, body, en)
         }

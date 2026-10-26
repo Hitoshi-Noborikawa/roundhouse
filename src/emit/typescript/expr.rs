@@ -2064,6 +2064,14 @@ pub(super) fn js_expr(e: &Expr) -> Js {
             // statement and expression position.
             iife(e.span, vec![JsStmt::synth(JsStmtNode::Throw(js_expr(value)))])
         }
+        ExprNode::Let { name, value, body, .. } => {
+            let stmts = vec![
+                JsStmt::synth(JsStmtNode::VarDecl { kind: VarKind::Const, name: name.as_str().to_string(), ty: None, init: Some(js_expr(value)) }),
+                return_stmt(Some(js_expr(body))),
+            ];
+            // Not the plain arrow when it awaits: `await` is a syntax error outside an async function
+            if body_has_async_send(e) { async_iife_awaited(e.span, stmts) } else { iife(e.span, stmts) }
+        }
         ExprNode::OpAssign { target, op, value } => {
             // Desugar `target op= value` to the existing-IR shape and
             // recurse. TS has native compound assignment, but the

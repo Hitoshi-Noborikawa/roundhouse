@@ -109,6 +109,7 @@ thread_local! {
     /// Reassigned locals a terminal nil-guard proved non-nil (`emit_stmts`).
     /// Not in `NONNULL_PROPS`: an ivar of the same camelCased name was not proven.
     static NARROWED_LOCALS: RefCell<HashSet<String>> = RefCell::new(HashSet::new());
+    static LET_OPTIONALS: RefCell<HashSet<String>> = RefCell::new(HashSet::new());
     /// Closure-nesting depth — `next` is a closure `return` inside an
     /// iterator block, `continue` in a loop.
     static IN_LAMBDA: RefCell<usize> = const { RefCell::new(0) };
@@ -1156,6 +1157,10 @@ fn children(e: &Expr) -> Vec<&Expr> {
             v.push(right);
         }
         ExprNode::Return { value } | ExprNode::Raise { value } => v.push(value),
+        ExprNode::Let { value, body, .. } => {
+            v.push(value);
+            v.push(body);
+        }
         ExprNode::Lambda { body, .. } => v.push(body),
         // Not skipped: a literal's elements and an interpolation's parts are calls like any other
         ExprNode::Array { elements, .. } => v.extend(elements.iter()),
@@ -1310,6 +1315,7 @@ fn emit_node(n: &ExprNode, e: &Expr) -> String {
             let n = camel(name.as_str());
             if NONNULL_PROPS.with(|s| s.borrow().contains(&n))
                 || NARROWED_LOCALS.with(|s| s.borrow().contains(&n))
+                || (LET_OPTIONALS.with(|s| s.borrow().contains(&n)) && e.ty.as_ref().is_some_and(|t| t.is_scalar()))
             {
                 format!("{n}!")
             } else {
@@ -1480,6 +1486,13 @@ fn emit_node(n: &ExprNode, e: &Expr) -> String {
             if IN_TEST_CLASS.with(|f| *f.borrow()) { stub.replacen("fatalError(", "throw XCTSkip(", 1) } else { stub }
         }
         ExprNode::Yield { args } => format!("block({})", args.iter().map(emit_expr).collect::<Vec<_>>().join(", ")),
+        // Not an `if` expression: Swift allows one only as a whole statement's value, and this binding sits inside an expression
+        ExprNode::Let { body, .. } => {
+            let ret = e.ty.as_ref().map(super::ty::swift_ty).unwrap_or_else(|| "Any?".to_string());
+            let try_kw = if body_throws(e, &current_class()) { "try " } else { "" };
+            let ExprNode::Let { name, value, .. } = n else { unreachable!() };
+            format!("({try_kw}{{ () throws -> {ret} in\n{}\n{}\n}}())", indent(&bind_let(name.as_str(), value)), indent(&wrap_return(body)))
+        }
         // Not `rescue` too: a Swift raise is a fatalError or a typed throw, which a Ruby rescue clause does not map onto
         ExprNode::BeginRescue { body, rescues, else_branch: None, ensure: None, .. } if rescues.is_empty() => emit_expr(body),
         ExprNode::BeginRescue { body, rescues, else_branch: None, ensure: Some(en), .. } if rescues.is_empty() => {
@@ -2362,6 +2375,14 @@ fn branch_is_terminal(e: &Expr) -> bool {
 /// branches of a two-armed `If` (multi-statement Swift `if` branches
 /// aren't expressions either). Terminal/valueless statements pass
 /// through unprefixed.
+fn bind_let(name: &str, value: &Expr) -> String {
+    let n = camel(name);
+    if matches!(value.ty, Some(crate::ty::Ty::Union { .. })) {
+        LET_OPTIONALS.with(|s| s.borrow_mut().insert(n.clone()));
+    }
+    format!("let {n} = {}", emit_expr(value))
+}
+
 pub(super) fn wrap_return(e: &Expr) -> String {
     match &*e.node {
         ExprNode::BeginRescue { body, rescues, else_branch: None, ensure: None, .. } if rescues.is_empty() => wrap_return(body),
@@ -2373,6 +2394,7 @@ pub(super) fn wrap_return(e: &Expr) -> String {
         {
             emit_do_catch(&wrap_return(body), rescues, ensure.as_ref(), true)
         }
+        ExprNode::Let { name, value, body, .. } => format!("{}\n{}", bind_let(name.as_str(), value), wrap_return(body)),
         ExprNode::Seq { exprs } if !exprs.is_empty() => emit_stmts(exprs, true),
         ExprNode::Case { scrutinee, arms } => emit_case(scrutinee, arms, true),
         ExprNode::If { cond, then_branch, else_branch } if !is_empty_branch(else_branch) => {
@@ -3232,7 +3254,12 @@ fn emit_send(
             return format!("{try_kw}{rs}.{name}()");
         }
         if is_known_instance_method(r, method) {
-            return format!("{rs}.{}()", camel(method));
+            let name = camel(method);
+            let try_kw = match r.ty.as_ref().map(|t| t.peel_nilable()) {
+                Some(crate::ty::Ty::Class { id, .. }) if throws_lookup(&super::naming::type_name(id.0.as_str()), &name) => "try ",
+                _ => "",
+            };
+            return format!("{try_kw}{rs}.{name}()");
         }
         // A typed receiver reading a property the class (or an ancestor)
         // declares — including collapsed predicate readers
