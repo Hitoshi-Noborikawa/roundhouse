@@ -1358,6 +1358,16 @@ fn emit_expr_inner(e: &Expr) -> String {
         }
         // Not reported: the struct literal a constructor ends in already starts every field the parent's `initialize` would
         ExprNode::Super { .. } if current_emit_ctx().map(|c| c.in_constructor.get()).unwrap_or(false) => String::new(),
+        ExprNode::Let { name, value, body, .. } => {
+            let value_s = emit_expr(value);
+            let name_s = name.as_str().to_string();
+            if let Some(ty) = value.ty.clone() {
+                mark_local_var_ty(&name_s, ty);
+            }
+            declare_var(name_s.clone());
+            let body_s = emit_expr(body);
+            format!("{{ let {name_s} = {value_s}; {body_s} }}")
+        }
         ExprNode::BeginRescue { body, rescues, else_branch: None, ensure: Some(en), .. }
             if rescues.is_empty() && !contains_jump(body) =>
         {
