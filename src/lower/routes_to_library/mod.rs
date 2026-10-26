@@ -1303,10 +1303,18 @@ fn string_segment_demand(
 ) -> std::collections::HashMap<String, std::collections::HashSet<String>> {
     type Demand = std::collections::HashMap<String, std::collections::HashSet<String>>;
     let mut out: Demand = Default::default();
+    // A record whose model fills a segment with a String (its own `to_param`, a uuid key) is a String at that position too
+    let string_keyed: std::collections::HashSet<String> = app
+        .models
+        .iter()
+        .map(|m| m.name.0.as_str().to_string())
+        .filter(|name| named_model_overrides_to_param(&crate::naming::underscore(name), app))
+        .collect();
     let mut collect = |e: &Expr| {
         fn walk(
             e: &Expr,
             helpers: &std::collections::HashMap<String, (Vec<String>, usize)>,
+            string_keyed: &std::collections::HashSet<String>,
             out: &mut Demand,
         ) {
             if let ExprNode::Send { recv: None, method, args, .. } = &*e.node {
@@ -1324,15 +1332,16 @@ fn string_segment_demand(
                         .unwrap_or_else(|| method.as_str().to_string());
                     for (i, arg) in positional.iter().enumerate() {
                         let Some(seg) = segments.get(i) else { break };
-                        if matches!(arg.ty, Some(Ty::Str)) {
+                        let string_record = matches!(&arg.ty, Some(Ty::Class { id, .. }) if string_keyed.contains(id.0.as_str()));
+                        if matches!(arg.ty, Some(Ty::Str)) || string_record {
                             out.entry(helper.clone()).or_default().insert(seg.clone());
                         }
                     }
                 }
             }
-            e.node.for_each_child(&mut |c| walk(c, helpers, out));
+            e.node.for_each_child(&mut |c| walk(c, helpers, string_keyed, out));
         }
-        walk(e, helpers, &mut out);
+        walk(e, helpers, &string_keyed, &mut out);
     };
     for_each_route_call_site(app, &mut collect);
 

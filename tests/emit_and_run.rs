@@ -19822,6 +19822,8 @@ mod format_once;
 mod condition_lambda_record;
 #[path = "emit_and_run/where_time_range.rs"]
 mod where_time_range;
+#[path = "emit_and_run/route_record_to_param.rs"]
+mod route_record_to_param;
 
 /// `ActiveSupport::JSON.encode(value, escape: false)` — Rails' document
 /// without the HTML-entity escaping, which campfire's fragment keys can
