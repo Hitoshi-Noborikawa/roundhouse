@@ -132,6 +132,10 @@ fn turning_a_model_s_stamping_off_is_reported_on_a_strict_target() {
     let (_emitted, errors) = quiet_stamping_app().emit(roundhouse::project::BuildTarget::Ruby);
     assert!(!errors.iter().any(|e| e.contains("record_timestamps")), "{errors:#?}");
     let (_emitted, errors) = emit_and_run::real_blog()
+        .edit("app/models/article.rb", "class Article < ApplicationRecord\n", "class Article < ApplicationRecord\n  def self.stamp_again\n    Article.record_timestamps = true\n  end\n")
+        .emit(roundhouse::project::BuildTarget::Rust);
+    assert!(errors.iter().any(|e| e.contains("ActiveRecord::Base.record_timestamps= not supported (rust)")), "{errors:#?}");
+    let (_emitted, errors) = emit_and_run::real_blog()
         .write("app/models/stamp_settings.rb", "class StampSettings\n  attr_accessor :record_timestamps\n\n  def self.quiet\n    settings = StampSettings.new\n    settings.record_timestamps = false\n    settings\n  end\nend\n")
         .emit(roundhouse::project::BuildTarget::Rust);
     assert!(!errors.iter().any(|e| e.contains("record_timestamps")), "{errors:#?}");
