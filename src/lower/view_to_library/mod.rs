@@ -2062,7 +2062,7 @@ pub(crate) fn build_view_signature(
     for n in extra_params {
         sig_params.push(TyParam {
             name: crate::ident::Symbol::from(n.as_str()),
-            ty: Ty::Union { variants: vec![Ty::Str, Ty::Nil].into() }.into(),
+            ty: extra_param_ty(n).into(),
             kind: ParamKind::Optional,
         });
     }
@@ -3673,6 +3673,19 @@ pub(crate) fn record_arg_ty(dir: &str, is_layout: bool, known_models: &[String])
 /// Build a view method's `Ty::Fn` from its typed primary params (record
 /// arg and/or threaded ivars) followed by the nullable extra params
 /// (notice/alert/action_name/…).
+/// A trailing extra's type: nullable, and a String except for the request's
+/// path parameters (`ActionController::Base#path_parameters`), which the
+/// `url_for` options lowering recalls segments from.
+fn extra_param_ty(name: &str) -> crate::ty::Ty {
+    use crate::ty::Ty;
+    let value = if name == "path_parameters" {
+        Ty::Hash { key: Ty::Str.into(), value: Ty::Str.into() }
+    } else {
+        Ty::Str
+    };
+    Ty::Union { variants: vec![value, Ty::Nil].into() }
+}
+
 pub(crate) fn build_view_signature_from(
     typed: &[(String, crate::ty::Ty)],
     extra_params: &[String],
@@ -3692,7 +3705,7 @@ pub(crate) fn build_view_signature_from(
     for n in extra_params {
         sig_params.push(TyParam {
             name: crate::ident::Symbol::from(n.as_str()),
-            ty: Ty::Union { variants: vec![Ty::Str, Ty::Nil].into() }.into(),
+            ty: extra_param_ty(n).into(),
             kind: ParamKind::Optional,
         });
     }
