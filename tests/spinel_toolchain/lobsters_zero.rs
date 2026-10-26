@@ -10,6 +10,25 @@ const GADGET: &str = r#"class Gadget < ApplicationRecord
 end
 "#;
 
+const FACTORY: &str = r#"module CopyLog
+  def self.[](*cols)
+    Module.new do
+      extend ActiveSupport::Concern
+
+      included do
+        after_create do |record|
+          table_name = "#{record.class.table_name}_log"
+          column_list = cols.join(", ")
+          value_list = (["?"] * cols.length).join(", ")
+          values = cols.map { |c| record.public_send(c) }
+          ActiveRecord::Base.connection.exec_insert("INSERT INTO #{table_name} (rowid, #{column_list}) values (?, #{value_list})", nil, [record.id] + values)
+        end
+      end
+    end
+  end
+end
+"#;
+
 const ARTICLE_METHODS: &str = "  validates :title, presence: true
 
   def self.over?(counted)
@@ -83,6 +102,7 @@ raise "builder: #{LinkBuilder.new(a).url}" unless LinkBuilder.new(a).url == "htt
 old = Article.create!(title: "Old", body: "A sufficiently long body.")
 Article.backdate(old)
 raise "recent: #{Article.recent_titles.inspect}" unless Article.recent_titles == ["Hello"]
+raise "logged: #{Article.logged.inspect}" unless Article.logged == ["Hello", "Old"]
 puts "lobsters-zero contract passed"
 "#;
 
@@ -91,7 +111,8 @@ puts "lobsters-zero contract passed"
 /// validator's unread `with:`, a once-interpolated constant pattern, a
 /// one-parameter condition lambda, an operator some operand arm takes,
 /// a block over a union receiver, BigDecimal#clamp, a `where` over a
-/// Range of Times, and an included
+/// Range of Times, an included module factory whose concern's
+/// one-parameter `after_create` block reads the record, and an included
 /// route url_helpers surface with a class's own default_url_options.
 #[test]
 #[ignore = "requires the Spinel toolchain, run in its CI lane"]
@@ -100,10 +121,16 @@ fn lobsters_zero_constructs_run_natively() {
         .edit(
             "db/schema.rb",
             "  create_table \"comments\"",
-            "  create_table \"gadgets\", force: :cascade do |t|\n    t.string \"title\"\n    t.string \"code\"\n    t.string \"note\"\n    t.string \"tag\"\n    t.datetime \"created_at\", null: false\n    t.datetime \"updated_at\", null: false\n  end\n\n  create_table \"comments\"",
+            "  create_table \"articles_log\", id: false, force: :cascade do |t|\n    t.integer \"rowid\"\n    t.string \"title\"\n    t.text \"body\"\n  end\n\n  create_table \"gadgets\", force: :cascade do |t|\n    t.string \"title\"\n    t.string \"code\"\n    t.string \"note\"\n    t.string \"tag\"\n    t.datetime \"created_at\", null: false\n    t.datetime \"updated_at\", null: false\n  end\n\n  create_table \"comments\"",
         )
         .write("app/models/gadget.rb", GADGET)
         .edit("app/models/article.rb", "  validates :title, presence: true\n", ARTICLE_METHODS)
+        .write("app/models/copy_log.rb", FACTORY)
+        .edit(
+            "app/models/article.rb",
+            "class Article < ApplicationRecord\n",
+            "class Article < ApplicationRecord\n  include CopyLog[:title, :body]\n\n  def self.logged\n    ActiveRecord::Base.connection.select_all(\"SELECT rowid, title FROM articles_log ORDER BY rowid\").to_a.map { |r| r[\"title\"] }\n  end\n",
+        )
         .write("app/models/routes.rb", ROUTES)
         .write("app/models/link_builder.rb", LINK_BUILDER)
         .run_spinel_with_db(ASSERTIONS);

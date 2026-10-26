@@ -6,9 +6,10 @@ module ActiveRecord
   # `preloaded` and set-operator operands stay `untyped` for Spinel
   # integer-seed arrays.
   class Bounds
-    attr_reader lower: untyped
-    attr_reader upper: untyped
-    def initialize: (untyped lower, untyped upper, bool exclusive) -> void
+    type bound = Time | Date | String | Integer | Float | nil
+    def lower: () -> bound
+    def upper: () -> bound
+    def initialize: (bound lower, bound upper, bool exclusive) -> void
     def exclusive?: () -> bool
   end
 
