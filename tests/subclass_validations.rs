@@ -95,3 +95,45 @@ fn an_sti_subclass_runs_its_parents_validations_then_its_own_on_spinel() {
     run.assert_passes();
     assert!(run.stdout.contains("sti validations passed"), "{}", run.stdout);
 }
+
+// Review 4381621337 (oracle `tableless_chain_oracle.rb`, which runs these
+// classes and script under activemodel 8.1.4): a tableless chain three
+// deep, the leaf running each validation once. The middle class is
+// tableless by its parent, and the tableless pass had already copied its
+// validations down when the abstract-parent pass copied them again.
+const CHAIN_BASE: &str = "class ChainBaseForm\n  include ActiveModel::Model\n  include ActiveModel::Attributes\n\n  attribute :name, :string\n  validates :name, presence: true\nend\n";
+const CHAIN_MIDDLE: &str = "class ChainMiddleForm < ChainBaseForm\n  attribute :code, :string\n  validates :code, presence: true\n  validate :code_not_reserved\n\n  def code_not_reserved\n    errors.add(:code, \"is reserved\") if code.nil? || code == \"admin\"\n  end\nend\n";
+const CHAIN_LEAF: &str = "class ChainLeafForm < ChainMiddleForm\nend\n";
+const CHAIN_SCRIPT: &str = r##"
+def check(label, got, want)
+  raise "#{label}: #{got.inspect} (want #{want.inspect})" unless got == want
+end
+messages = ->(record) { record.valid?; record.errors.respond_to?(:full_messages) ? record.errors.full_messages : record.errors }
+check("the root's and the middle class's validations, each once", messages.(ChainLeafForm.new), ["Name can't be blank", "Code can't be blank", "Code is reserved"])
+check("the middle class's, each once", messages.(ChainMiddleForm.new(name: "n", code: "admin")), ["Code is reserved"])
+check("a valid leaf", ChainLeafForm.new(name: "n", code: "c").valid?, true)
+puts "tableless chain passed"
+"##;
+
+fn chain_app() -> emit_and_run::Overlay {
+    emit_and_run::real_blog()
+        .write("app/models/chain_base_form.rb", CHAIN_BASE)
+        .write("app/models/chain_middle_form.rb", CHAIN_MIDDLE)
+        .write("app/models/chain_leaf_form.rb", CHAIN_LEAF)
+}
+
+#[test]
+fn a_tableless_chains_leaf_runs_each_validation_once_on_ruby() {
+    let run = chain_app().run_ruby(CHAIN_SCRIPT);
+    run.assert_passes();
+    assert!(run.stdout.contains("tableless chain passed"), "{}", run.stdout);
+}
+
+#[test]
+#[ignore = "requires the Spinel toolchain"]
+fn a_tableless_chains_leaf_runs_each_validation_once_on_spinel() {
+    let run = chain_app().run_spinel_with_db(CHAIN_SCRIPT);
+    run.assert_passes();
+    assert!(run.stdout.contains("tableless chain passed"), "{}", run.stdout);
+}
+

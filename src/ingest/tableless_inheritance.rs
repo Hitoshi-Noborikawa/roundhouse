@@ -28,27 +28,8 @@ use crate::App;
 pub(super) fn inherit_tableless_parents(app: &mut App) {
     let index: std::collections::HashMap<String, usize> =
         app.models.iter().enumerate().map(|(i, m)| (m.name.0.as_str().to_string(), i)).collect();
-    let resolved: Vec<Option<usize>> = app
-        .models
-        .iter()
-        .map(|m| resolve_parent(&index, m.name.0.as_str(), m.parent.as_ref()?.0.as_str()))
-        .collect();
-    // Each child's tableless parent. A parent qualifies by its own body
-    // or, in the middle of a chain, by having a tableless parent itself;
-    // closed over until nothing changes, so file order doesn't matter.
-    let mut tableless: Vec<bool> = app.models.iter().map(|m| m.parent.is_none() && is_tableless_parent(m)).collect();
-    loop {
-        let mut added = false;
-        for (i, m) in app.models.iter().enumerate() {
-            if !tableless[i] && !defines_initialize(m) && resolved[i].is_some_and(|p| tableless[p]) {
-                tableless[i] = true;
-                added = true;
-            }
-        }
-        if !added {
-            break;
-        }
-    }
+    let resolved = resolved_parents(app, &index);
+    let tableless = tableless_flags(app, &resolved);
     let parent_of: Vec<Option<usize>> = resolved.iter().map(|p| p.filter(|&p| tableless[p])).collect();
     let depth = |mut i: usize| {
         let mut d = 0;
@@ -94,14 +75,11 @@ pub(super) fn inherit_tableless_parents(app: &mut App) {
 pub(super) fn inherit_abstract_parent_validations(app: &mut App) {
     let index: std::collections::HashMap<String, usize> =
         app.models.iter().enumerate().map(|(i, m)| (m.name.0.as_str().to_string(), i)).collect();
-    let parent_of: Vec<Option<usize>> = app
-        .models
-        .iter()
-        .map(|m| {
-            resolve_parent(&index, m.name.0.as_str(), m.parent.as_ref()?.0.as_str())
-                .filter(|&p| !(app.models[p].parent.is_none() && is_tableless_parent(&app.models[p])))
-        })
-        .collect();
+    let resolved = resolved_parents(app, &index);
+    // Every tableless parent, a chain's middle classes too: their
+    // validations are already copied down.
+    let tableless = tableless_flags(app, &resolved);
+    let parent_of: Vec<Option<usize>> = resolved.iter().map(|p| p.filter(|&p| !tableless[p])).collect();
     let depth = |mut i: usize| {
         let mut d = 0;
         while let Some(p) = parent_of[i] {
@@ -130,6 +108,31 @@ pub(super) fn inherit_abstract_parent_validations(app: &mut App) {
         let body = std::mem::take(&mut app.models[child].body);
         app.models[child].body = inherited.into_iter().chain(body).collect();
     }
+}
+
+/// Each model's parent among the app's models.
+fn resolved_parents(app: &App, index: &std::collections::HashMap<String, usize>) -> Vec<Option<usize>> {
+    app.models.iter().map(|m| resolve_parent(index, m.name.0.as_str(), m.parent.as_ref()?.0.as_str())).collect()
+}
+
+/// Which models are tableless parents. A parent qualifies by its own body
+/// or, in the middle of a chain, by having a tableless parent itself;
+/// closed over until nothing changes, so file order doesn't matter.
+fn tableless_flags(app: &App, resolved: &[Option<usize>]) -> Vec<bool> {
+    let mut tableless: Vec<bool> = app.models.iter().map(|m| m.parent.is_none() && is_tableless_parent(m)).collect();
+    loop {
+        let mut added = false;
+        for (i, m) in app.models.iter().enumerate() {
+            if !tableless[i] && !defines_initialize(m) && resolved[i].is_some_and(|p| tableless[p]) {
+                tableless[i] = true;
+                added = true;
+            }
+        }
+        if !added {
+            break;
+        }
+    }
+    tableless
 }
 
 fn inherited_validation(item: &ModelBodyItem) -> bool {
